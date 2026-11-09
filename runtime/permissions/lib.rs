@@ -1013,12 +1013,6 @@ impl<
       && !has_broker()
   }
 
-  /// Whether a path-scoped deny or ignore rule exists (a global one already
-  /// refuses the path as given).
-  fn has_denied_descriptors(&self) -> bool {
-    self.descriptors.has_any_denied_or_ignored()
-  }
-
   /// Returns true if no flag-set or prompt-set state has been recorded for
   /// this permission, i.e. it is effectively unused.
   ///
@@ -1846,6 +1840,7 @@ impl<'a> PathQueryDescriptor<'a> {
       cmp_path: self.cmp_path.clone(),
       requested: self.requested.clone(),
       is_windows_device_path: self.is_windows_device_path,
+      resolved: None,
     }
   }
 
@@ -1855,6 +1850,7 @@ impl<'a> PathQueryDescriptor<'a> {
       cmp_path: self.cmp_path,
       requested: self.requested,
       is_windows_device_path: self.is_windows_device_path,
+      resolved: None,
     }
   }
 
@@ -1912,7 +1908,7 @@ impl QueryDescriptor for ReadQueryDescriptor<'_> {
   }
 
   fn matches_allow(&self, other: &Self::AllowDesc) -> bool {
-    self.0.starts_with(&other.0)
+    other.0.covers_for_allow(&self.0)
   }
 
   fn matches_deny(&self, other: &Self::DenyDesc) -> bool {
@@ -1942,6 +1938,25 @@ pub struct PathDescriptor {
   /// Custom requested display name when differs from resolved.
   requested: Option<String>,
   is_windows_device_path: bool,
+  /// denext: where an allow scope leads once its symlinks are resolved, when
+  /// that differs from `path` (see [`ResolvedScope`]). Set only on the
+  /// `--allow-read` / `--allow-write` scopes the runtime parses from options
+  /// and on a worker's scopes; never compared by `PartialEq` / `Hash`.
+  resolved: Option<Box<ResolvedScope>>,
+}
+
+/// denext: the resolved location of an allow scope. An access is checked on
+/// the path it names and again on the path the kernel reaches (its symlinks
+/// resolved), so a scope that is itself reached through a symlink (macOS's
+/// `/tmp` -> `/private/tmp`, a temp directory under `/var` -> `/private/var`,
+/// a Windows junction, a project folder behind a link) must also cover its
+/// resolved location, or every access under it would be refused. Resolved
+/// once, when the scope is parsed: a link swapped after that is not followed
+/// again (see the TOCTOU note on `PermissionsContainer::check_resolved_path`).
+#[derive(Clone, Debug)]
+pub struct ResolvedScope {
+  path: PathBuf,
+  cmp_path: PathBuf,
 }
 
 impl PartialEq for PathDescriptor {
@@ -1990,6 +2005,7 @@ impl PathDescriptor {
       cmp_path,
       requested: display,
       is_windows_device_path,
+      resolved: None,
     }
   }
 
@@ -1999,6 +2015,41 @@ impl PathDescriptor {
 
   pub fn starts_with(&self, base: &PathQueryDescriptor) -> bool {
     self.cmp_path.starts_with(&base.cmp_path)
+  }
+
+  /// denext: whether `query` lies within this allow scope as written or
+  /// within the scope's resolved location ([`ResolvedScope`]).
+  fn covers_for_allow(&self, query: &PathQueryDescriptor) -> bool {
+    query.cmp_path.starts_with(&self.cmp_path)
+      || self
+        .resolved
+        .as_ref()
+        .is_some_and(|resolved| query.cmp_path.starts_with(&resolved.cmp_path))
+  }
+
+  /// denext: records where this allow scope leads once its symlinks are
+  /// resolved (see [`ResolvedScope`]); nothing when that is the scope itself.
+  pub fn with_resolved(mut self, resolved: Option<PathBuf>) -> Self {
+    self.resolved = resolved.and_then(|path| {
+      let query = PathQueryDescriptor::new_known_absolute(Cow::Owned(path));
+      (query.cmp_path != self.cmp_path).then(|| {
+        Box::new(ResolvedScope {
+          path: query.path.into_owned(),
+          cmp_path: query.cmp_path,
+        })
+      })
+    });
+    self
+  }
+
+  /// denext: the scope's resolved location as a query, when it has one.
+  fn resolved_query(&self) -> Option<PathQueryDescriptor<'static>> {
+    self.resolved.as_ref().map(|resolved| PathQueryDescriptor {
+      path: Cow::Owned(resolved.path.clone()),
+      cmp_path: resolved.cmp_path.clone(),
+      requested: None,
+      is_windows_device_path: false,
+    })
   }
 
   pub fn display_name(&self) -> Cow<'_, str> {
@@ -2123,7 +2174,7 @@ impl QueryDescriptor for WriteQueryDescriptor<'_> {
   }
 
   fn matches_allow(&self, other: &Self::AllowDesc) -> bool {
-    self.0.starts_with(&other.0)
+    other.0.covers_for_allow(&self.0)
   }
 
   fn matches_deny(&self, other: &Self::DenyDesc) -> bool {
@@ -3640,6 +3691,57 @@ impl<'a> SpecialFilePathQueryDescriptor<'a> {
   }
 }
 
+impl SpecialFilePathQueryDescriptor<'_> {
+  /// denext: where the allow scope `scope` lies once its symlinks are
+  /// resolved, through the same resolution an access gets
+  /// ([`canonicalize_path_maybe_not_exists_following_links`]); see
+  /// [`ResolvedScope`]. The directories above the scope are resolved (a
+  /// scope under macOS's `/tmp` or `/var`, a project behind a link, a
+  /// junction on the way). A scope that is itself a symlink names the link,
+  /// not its target: its target is granted only when the link is owned by
+  /// root (Unix), a system link such as macOS's `/tmp` -> `private/tmp` that
+  /// code running as the user cannot have planted or changed; a link the
+  /// user owns (`node_modules/x -> /elsewhere`) keeps its target out of the
+  /// scope. `None` for a device path, the Linux `/proc` and `/dev` trees
+  /// (whose magic links are never resolved for an access either), or a scope
+  /// that does not resolve.
+  pub fn resolve_allow_scope(
+    sys: &(
+       impl sys_traits::FsCanonicalize
+       + sys_traits::FsReadLink
+       + sys_traits::FsMetadata
+     ),
+    scope: &PathDescriptor,
+  ) -> Option<PathBuf> {
+    use sys_traits::FsMetadataValue;
+    if scope.is_windows_device_path || is_linux_special_path(&scope.path) {
+      return None;
+    }
+    let follow_final = match sys.fs_symlink_metadata(&scope.path) {
+      Ok(metadata) if metadata.file_type() == sys_traits::FileType::Symlink => {
+        cfg!(unix) && metadata.uid().is_ok_and(|uid| uid == 0)
+      }
+      _ => true,
+    };
+    if follow_final {
+      return canonicalize_path_maybe_not_exists_following_links(
+        sys,
+        &scope.path,
+      )
+      .ok();
+    }
+    let (Some(parent), Some(name)) =
+      (scope.path.parent(), scope.path.file_name())
+    else {
+      return None;
+    };
+    let mut resolved =
+      canonicalize_path_maybe_not_exists_following_links(sys, parent).ok()?;
+    push_name(&mut resolved, name);
+    Some(resolved)
+  }
+}
+
 /// On Linux, /proc and /dev contain magic links that we don't want to resolve.
 fn is_linux_special_path(path: &Path) -> bool {
   cfg!(target_os = "linux")
@@ -4839,7 +4941,10 @@ impl Permissions {
       clean_run_env: opts.clean_run_env.clone(),
       read: Permissions::new_unary_with_ignore(
         parse_maybe_vec(opts.allow_read.as_deref(), |item| {
-          parser.parse_read_descriptor(item)
+          parser.parse_read_descriptor(item).map(|desc| {
+            let resolved = parser.resolve_allow_scope(&desc.0);
+            ReadDescriptor(desc.0.with_resolved(resolved))
+          })
         })?,
         parse_maybe_vec(opts.deny_read.as_deref(), |item| {
           parser.parse_read_descriptor(item)
@@ -4851,7 +4956,10 @@ impl Permissions {
       ),
       write: Permissions::new_unary(
         parse_maybe_vec(opts.allow_write.as_deref(), |item| {
-          parser.parse_write_descriptor(item)
+          parser.parse_write_descriptor(item).map(|desc| {
+            let resolved = parser.resolve_allow_scope(&desc.0);
+            WriteDescriptor(desc.0.with_resolved(resolved))
+          })
         })?,
         deny_write,
         opts.prompt,
@@ -5233,20 +5341,55 @@ impl PermissionsContainer {
 
     // WARNING: When adding a permission here, ensure it is handled
     // in the worker_perms.all block above
+    // denext: a worker's read / write scope also covers its resolved
+    // location (see `ResolvedScope`), but only where the parent's own grants
+    // reach that location: a scope through a symlink that leads outside what
+    // the parent may access is not widened (the worker gets what the parent
+    // has there), so it can't be an escalation.
+    let parent_read = matches!(
+      child_permissions_arg.read,
+      ChildUnaryPermissionArg::GrantedList(_)
+    )
+    .then(|| inner.read.clone());
+    let parent_write = matches!(
+      child_permissions_arg.write,
+      ChildUnaryPermissionArg::GrantedList(_)
+    )
+    .then(|| inner.write.clone());
     worker_perms.read = inner.read.create_child_permissions(
       child_permissions_arg.read,
       |text| {
-        Ok::<_, PathResolveError>(Some(
-          self.descriptor_parser.parse_read_descriptor(text)?,
-        ))
+        let desc = self.descriptor_parser.parse_read_descriptor(text)?.0;
+        let resolved = self.descriptor_parser.resolve_allow_scope(&desc);
+        let desc = desc.with_resolved(resolved);
+        let desc = match (desc.resolved_query(), &parent_read) {
+          (Some(query), Some(parent))
+            if parent.query(Some(&query.clone().into_read()))
+              != PermissionState::Granted =>
+          {
+            desc.with_resolved(None)
+          }
+          _ => desc,
+        };
+        Ok::<_, PathResolveError>(Some(ReadDescriptor(desc)))
       },
     )?;
     worker_perms.write = inner.write.create_child_permissions(
       child_permissions_arg.write,
       |text| {
-        Ok::<_, PathResolveError>(Some(
-          self.descriptor_parser.parse_write_descriptor(text)?,
-        ))
+        let desc = self.descriptor_parser.parse_write_descriptor(text)?.0;
+        let resolved = self.descriptor_parser.resolve_allow_scope(&desc);
+        let desc = desc.with_resolved(resolved);
+        let desc = match (desc.resolved_query(), &parent_write) {
+          (Some(query), Some(parent))
+            if parent.query(Some(&query.clone().into_write()))
+              != PermissionState::Granted =>
+          {
+            desc.with_resolved(None)
+          }
+          _ => desc,
+        };
+        Ok::<_, PathResolveError>(Some(WriteDescriptor(desc)))
       },
     )?;
     worker_perms.import = inner.import.create_child_permissions(
@@ -5516,13 +5659,14 @@ impl PermissionsContainer {
       // `check_special_file` still fires when the caller-supplied path is
       // itself a kernel-magic location (e.g. `/proc/self/root/...`).
       // The kernel still follows the parent directories, so a symlinked
-      // directory can point into a deny scope: re-check the deny rules
-      // against the path with its parent resolved.
-      if self.has_denied_descriptors(access_kind)
+      // directory can point outside the allow scopes or into a deny scope:
+      // re-check the path with its parent resolved.
+      if self.needs_resolved_check(access_kind)
         && let Some(resolved) =
           self.descriptor_parser.resolve_no_follow_path(&path)?
       {
-        self.check_resolved_path_not_denied(
+        self.check_resolved_path(
+          &path.path,
           &resolved,
           access_kind,
           api_name,
@@ -5530,10 +5674,16 @@ impl PermissionsContainer {
       }
       SpecialFilePathQueryDescriptor::from_path_query_no_canonicalize(path)
     } else {
+      let given = self
+        .needs_resolved_check(access_kind)
+        .then(|| path.path.clone());
       let special_path =
         self.descriptor_parser.parse_special_file_descriptor(path)?;
-      if special_path.canonicalized {
-        self.check_resolved_path_not_denied(
+      if special_path.canonicalized
+        && let Some(given) = given
+      {
+        self.check_resolved_path(
+          &given,
           &special_path.path,
           access_kind,
           api_name,
@@ -5546,16 +5696,16 @@ impl PermissionsContainer {
 
   /// The no-follow write checks (`check_write_partial`, `check_write`) use the
   /// path as given, but the kernel follows its parent directories: re-check
-  /// the deny rules against the path with its parent resolved. `recursive`
-  /// also refuses a deny scope inside the resolved path, as `check_write`
-  /// does for the path as given.
+  /// the path with its parent resolved against the allow and deny scopes.
+  /// `recursive` also refuses a deny scope inside the resolved path, as
+  /// `check_write` does for the path as given.
   fn check_no_follow_write_resolved(
     &self,
     desc: &WriteQueryDescriptor<'_>,
     recursive: bool,
     api_name: &str,
   ) -> Result<(), PermissionCheckError> {
-    if !self.has_denied_descriptors(OpenAccessKind::WriteNoFollow) {
+    if !self.needs_resolved_check(OpenAccessKind::WriteNoFollow) {
       return Ok(());
     }
     let Some(resolved) =
@@ -5564,36 +5714,32 @@ impl PermissionsContainer {
       return Ok(());
     };
     if !recursive {
-      return self.check_resolved_path_not_denied(
+      return self.check_resolved_path(
+        &desc.0.path,
         &resolved,
         OpenAccessKind::WriteNoFollow,
         Some(api_name),
       );
     }
-    let resolved = self
-      .descriptor_parser
-      .parse_path_query(Cow::Owned(resolved))?
-      .into_write();
-    let mut inner = self.inner.lock();
-    if inner.write.query(Some(&resolved)) == PermissionState::Denied
-      || inner.write.is_partial_flag_denied(Some(&resolved))
-    {
-      inner.write.check(&resolved, Some(api_name))?;
+    if resolved == desc.0.path {
+      return Ok(());
     }
-    Ok(())
+    self.check_write_resolved(&resolved, api_name)
   }
 
-  /// The strict deny check for a path the kernel resolved (a symlink
-  /// followed to the place a change lands): refuses it when a `--deny-write`
-  /// scope covers it or lies inside it, as [`Self::check_write`] does for the
-  /// path as given. The allow scopes are checked on the path as given, so
-  /// they are not checked again here (denext, DENEXT.md 224).
-  pub fn check_write_resolved_not_denied(
+  /// The strict write check for a path the kernel resolved (a symlink
+  /// followed to the place a change lands): the resolved path must lie
+  /// within an `--allow-write` scope (or the scope's resolved location, see
+  /// [`ResolvedScope`]), and is refused when a `--deny-write` scope covers it
+  /// or lies inside it, as [`Self::check_write`] does for the path as given
+  /// (denext, DENEXT.md 224 for the deny half, 286 for the allow half). The
+  /// TOCTOU window of [`Self::check_resolved_path`] applies.
+  pub fn check_write_resolved(
     &self,
     resolved: &Path,
     api_name: &str,
   ) -> Result<(), PermissionCheckError> {
-    if !self.has_denied_descriptors(OpenAccessKind::Write) {
+    if self.inner.lock().write.is_allow_all() {
       return Ok(());
     }
     let resolved = self
@@ -5601,7 +5747,7 @@ impl PermissionsContainer {
       .parse_path_query(Cow::Borrowed(resolved))?
       .into_write();
     let mut inner = self.inner.lock();
-    if inner.write.query(Some(&resolved)) == PermissionState::Denied
+    if inner.write.query(Some(&resolved)) != PermissionState::Granted
       || inner.write.is_partial_flag_denied(Some(&resolved))
     {
       inner.write.check(&resolved, Some(api_name))?;
@@ -5609,43 +5755,66 @@ impl PermissionsContainer {
     Ok(())
   }
 
-  /// Whether any deny (or ignore) rule exists for the kinds of access
-  /// `access_kind` performs; without one, a resolved path cannot be denied.
-  fn has_denied_descriptors(&self, access_kind: OpenAccessKind) -> bool {
+  /// Whether an access of `access_kind` needs the re-check of its resolved
+  /// path: some kind of access it performs is not granted for every path
+  /// (a scoped allow, a deny or ignore rule, prompting or a broker).
+  fn needs_resolved_check(&self, access_kind: OpenAccessKind) -> bool {
     let inner = self.inner.lock();
-    (access_kind.is_read() && inner.read.has_denied_descriptors())
-      || (access_kind.is_write() && inner.write.has_denied_descriptors())
+    (access_kind.is_read() && !inner.read.is_allow_all())
+      || (access_kind.is_write() && !inner.write.is_allow_all())
   }
 
-  /// Re-checks the deny rules against a symlink-resolved path. The checks in
+  /// Re-checks an access against the path the kernel reaches: `resolved` is
+  /// `given` with its symlinks (Windows junctions and other reparse points
+  /// included) resolved, all of them for an access that follows the final
+  /// link, the parent's for a no-follow one. The checks in
   /// `check_open_with_requested` use the path as given, so without this a
-  /// symlink inside an allowed directory that points into a `--deny-read` /
-  /// `--deny-write` scope would reach the denied file. Only a deny that covers
-  /// the resolved path itself refuses the access, matching the partial-deny
-  /// semantics of those checks (a deny scope under a resolved directory does
-  /// not block a non-recursive operation on it).
-  fn check_resolved_path_not_denied(
+  /// symlink inside an allowed directory would reach a file outside every
+  /// `--allow-*` scope (`--allow-read=/safe` and `/safe/link -> /etc/passwd`)
+  /// or inside a `--deny-*` scope. The resolved path must be granted on its
+  /// own: by an allow scope as written, by the resolved location of one
+  /// ([`ResolvedScope`], which keeps `--allow-read=/tmp` working where `/tmp`
+  /// is a link to `/private/tmp`), or by the user at a prompt, which names
+  /// the resolved path. Only a deny that covers the resolved path itself
+  /// refuses the access, matching the partial-deny semantics of those checks
+  /// (a deny scope under a resolved directory does not block a non-recursive
+  /// operation on it). (denext, DENEXT.md 69 for the deny half, 286 for the
+  /// allow half.)
+  ///
+  /// TOCTOU: the check resolves the path, then the operation opens it by
+  /// name. A symlink swapped in between (by this program, another process,
+  /// or another user with write access to a directory on the path) is
+  /// followed by the kernel without a new check. Closing that window needs
+  /// the open itself to be confined (an fd-relative, `RESOLVE_BENEATH` style
+  /// walk, or a broker that opens and hands back the descriptor); that is a
+  /// later phase, not this check.
+  fn check_resolved_path(
     &self,
+    given: &Path,
     resolved: &Path,
     access_kind: OpenAccessKind,
     api_name: Option<&str>,
   ) -> Result<(), PermissionCheckError> {
+    if resolved == given {
+      // Nothing to resolve: the checks on the path as given cover it.
+      return Ok(());
+    }
     let resolved = self
       .descriptor_parser
       .parse_path_query(Cow::Owned(resolved.to_path_buf()))?;
     let mut inner = self.inner.lock();
-    if access_kind.is_read() {
+    if access_kind.is_read() && !inner.read.is_allow_all() {
       let desc = resolved.clone().into_read();
-      if inner.read.query(Some(&desc)) == PermissionState::Denied {
+      if inner.read.query(Some(&desc)) != PermissionState::Granted {
         inner
           .read
           .check_partial(&desc, api_name)
           .map_err(ignored_to_not_found)?;
       }
     }
-    if access_kind.is_write() {
+    if access_kind.is_write() && !inner.write.is_allow_all() {
       let desc = resolved.into_write();
-      if inner.write.query(Some(&desc)) == PermissionState::Denied {
+      if inner.write.query(Some(&desc)) != PermissionState::Granted {
         inner.write.check_partial(&desc, api_name)?;
       }
     }
@@ -7535,6 +7704,17 @@ pub trait PermissionDescriptorParser: Debug + Send + Sync {
     Ok(None)
   }
 
+  /// denext: where the allow scope `path` lies once its symlinks are
+  /// resolved (a missing tail kept as written, as for a query; a final link
+  /// the user owns kept as named, see
+  /// `SpecialFilePathQueryDescriptor::resolve_allow_scope`), recorded on the
+  /// scope so that the resolved-path check of an access under it holds (see
+  /// [`ResolvedScope`]). `None` when the parser does not resolve paths or
+  /// the scope does not resolve (a cycle, a device path).
+  fn resolve_allow_scope(&self, _path: &PathDescriptor) -> Option<PathBuf> {
+    None
+  }
+
   fn parse_net_query(
     &self,
     text: &str,
@@ -7589,6 +7769,7 @@ mod tests {
         cmp_path,
         requested: None,
         is_windows_device_path: false,
+        resolved: None,
       }
     }
   }
@@ -8266,6 +8447,351 @@ mod tests {
     assert!(!check(Some(&wide), "pkg", base.join("other/l")));
     assert!(!check(Some(&wide), "../other", pkg.join("o5")));
     let _ = std::fs::remove_dir_all(&base);
+  }
+
+  /// A scratch tree for the resolved-path tests: `base/safe` (the allow
+  /// scope) holding `file.txt`, `inner -> file.txt`, `link ->
+  /// ../outside/secret.txt`, `dirlink -> ../outside` and `dangling ->
+  /// ../outside/new.txt` (missing), `base/outside` holding `secret.txt` and
+  /// `dir/`, and `rootlink -> base` beside `base` (a root reached through a
+  /// symlink, as macOS's `/tmp` -> `/private/tmp`). Returns the canonical
+  /// `base` and `rootlink`.
+  #[cfg(unix)]
+  #[allow(clippy::disallowed_methods, reason = "a real directory tree")]
+  fn resolved_scope_tree(name: &str) -> (PathBuf, PathBuf) {
+    use sys_traits::EnvTempDir;
+    let parent = sys_traits::impls::RealSys
+      .env_temp_dir()
+      .unwrap()
+      .join(format!("deno_permissions_{name}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&parent);
+    std::fs::create_dir_all(parent.join("base/safe")).unwrap();
+    std::fs::create_dir_all(parent.join("base/outside/dir")).unwrap();
+    let parent = std::fs::canonicalize(&parent).unwrap();
+    let base = parent.join("base");
+    std::fs::write(base.join("safe/file.txt"), "ok").unwrap();
+    std::fs::write(base.join("outside/secret.txt"), "secret").unwrap();
+    let safe = base.join("safe");
+    std::os::unix::fs::symlink("file.txt", safe.join("inner")).unwrap();
+    std::os::unix::fs::symlink("../outside/secret.txt", safe.join("link"))
+      .unwrap();
+    std::os::unix::fs::symlink("../outside", safe.join("dirlink")).unwrap();
+    std::os::unix::fs::symlink("../outside/new.txt", safe.join("dangling"))
+      .unwrap();
+    std::os::unix::fs::symlink(&base, parent.join("rootlink")).unwrap();
+    (base, parent.join("rootlink"))
+  }
+
+  #[cfg(unix)]
+  fn resolved_scope_perms(
+    read: &[&Path],
+    write: &[&Path],
+  ) -> PermissionsContainer {
+    let to_strings = |paths: &[&Path]| {
+      Some(
+        paths
+          .iter()
+          .map(|path| path.display().to_string())
+          .collect::<Vec<_>>(),
+      )
+    };
+    let parser =
+      runtime_descriptor_parser::RuntimePermissionDescriptorParser::new(
+        sys_traits::impls::RealSys,
+      );
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_read: to_strings(read),
+        allow_write: to_strings(write),
+        prompt: false,
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    PermissionsContainer::new(Arc::new(parser), perms)
+  }
+
+  // denext (DENEXT.md 286): an allow scope holds on the path an access
+  // reaches, not only on the path it names. Before, only the deny scopes
+  // were re-checked on the resolved path, so a symlink inside an allowed
+  // directory reached any file.
+  #[cfg(unix)]
+  #[test]
+  #[allow(clippy::disallowed_methods, reason = "a real directory tree")]
+  fn test_allow_scope_checked_on_resolved_target() {
+    set_prompter(Box::new(TestPrompter));
+    let (base, _) = resolved_scope_tree("allow_resolved");
+    let safe = base.join("safe");
+    let perms = resolved_scope_perms(&[&safe], &[&safe]);
+    let open = |path: PathBuf, kind: OpenAccessKind| {
+      perms
+        .check_open(Cow::Owned(path), kind, Some("api"))
+        .is_ok()
+    };
+    use OpenAccessKind::*;
+
+    // within the scope, a link inside it included
+    assert!(open(safe.join("file.txt"), Read));
+    assert!(open(safe.join("inner"), Read));
+    assert!(open(safe.join("inner"), Write));
+    assert!(open(safe.join("new.txt"), Write));
+    // the link itself, not followed (lstat, readlink, unlink)
+    assert!(open(safe.join("link"), ReadNoFollow));
+    assert!(open(safe.join("link"), WriteNoFollow));
+    assert!(
+      perms
+        .check_write_partial(Cow::Owned(safe.join("link")), "api")
+        .is_ok()
+    );
+
+    // a link to a file outside the scope
+    assert!(!open(safe.join("link"), Read));
+    assert!(!open(safe.join("link"), Write));
+    assert!(!open(safe.join("link"), ReadWrite));
+    // through a linked directory: an existing and a missing final name
+    assert!(!open(safe.join("dirlink/secret.txt"), Read));
+    assert!(!open(safe.join("dirlink/secret.txt"), ReadNoFollow));
+    assert!(!open(safe.join("dirlink/new.txt"), Write));
+    assert!(!open(safe.join("dirlink/new.txt"), WriteNoFollow));
+    assert!(!open(safe.join("dirlink"), Read)); // readDir, realPath
+    // a dangling link: a write creates the file at the target
+    assert!(!open(safe.join("dangling"), Write));
+    // `..` is lexical in the path as given; after a linked directory the
+    // name still resolves through it
+    assert!(open(safe.join("dirlink/../file.txt"), Read));
+    assert!(!open(safe.join("dirlink/dir/../secret.txt"), Read));
+    // the no-follow write checks (remove, rename, recursive remove)
+    assert!(
+      perms
+        .check_write_partial(Cow::Owned(safe.join("dirlink/secret.txt")), "api")
+        .is_err()
+    );
+    assert!(
+      perms
+        .check_write(Cow::Owned(safe.join("dirlink/dir")), "api")
+        .is_err()
+    );
+    // the strict check on a path a change lands on (chmod, chown, cp)
+    assert!(
+      perms
+        .check_write_resolved(&safe.join("file.txt"), "api")
+        .is_ok()
+    );
+    assert!(
+      perms
+        .check_write_resolved(&base.join("outside/secret.txt"), "api")
+        .is_err()
+    );
+    // the error names the resolved path
+    let err = perms
+      .check_open(Cow::Owned(safe.join("link")), Read, Some("api"))
+      .unwrap_err()
+      .to_string();
+    assert!(err.contains("outside"), "{err}");
+
+    // the outside tree, once allowed, is reachable through the links
+    let wide = resolved_scope_perms(&[&safe, &base.join("outside")], &[&safe]);
+    assert!(
+      wide
+        .check_open(Cow::Owned(safe.join("link")), Read, Some("api"))
+        .is_ok()
+    );
+    assert!(
+      wide
+        .check_open(Cow::Owned(safe.join("dangling")), Write, Some("api"))
+        .is_err()
+    );
+    let _ = std::fs::remove_dir_all(base.parent().unwrap());
+  }
+
+  // denext (DENEXT.md 286): a scope written through a symlinked root (macOS's
+  // `/tmp`, a temp folder under `/var`, a project behind a link) also covers
+  // its resolved location, so the resolved-path check keeps legitimate
+  // accesses working; a link out of it is still refused.
+  #[cfg(unix)]
+  #[test]
+  #[allow(clippy::disallowed_methods, reason = "a real directory tree")]
+  fn test_allow_scope_under_a_symlinked_root() {
+    set_prompter(Box::new(TestPrompter));
+    let (base, rootlink) = resolved_scope_tree("allow_resolved_root");
+    let scope = rootlink.join("safe");
+    let perms = resolved_scope_perms(&[&scope], &[&scope]);
+    let open = |path: PathBuf, kind: OpenAccessKind| {
+      perms
+        .check_open(Cow::Owned(path), kind, Some("api"))
+        .is_ok()
+    };
+    use OpenAccessKind::*;
+    assert!(open(scope.join("file.txt"), Read));
+    assert!(open(scope.join("inner"), Read));
+    assert!(open(scope.join("new.txt"), Write));
+    assert!(open(scope.join("new.txt"), WriteNoFollow));
+    assert!(open(scope.clone(), Read));
+    // the same files by their resolved names
+    assert!(open(base.join("safe/file.txt"), Read));
+    assert!(open(base.join("safe/new.txt"), Write));
+    assert!(
+      perms
+        .check_write_resolved(&base.join("safe/file.txt"), "api")
+        .is_ok()
+    );
+    // still refused: links out of the scope, and the rest of the root
+    assert!(!open(scope.join("link"), Read));
+    assert!(!open(scope.join("dirlink/new.txt"), Write));
+    assert!(!open(base.join("outside/secret.txt"), Read));
+    assert!(!open(rootlink.join("outside/secret.txt"), Read));
+    let _ = std::fs::remove_dir_all(base.parent().unwrap());
+  }
+
+  // denext (DENEXT.md 286): a scope that is itself a link the user owns
+  // names the link, not its target; a root-owned system link (macOS's `/tmp`)
+  // grants its target.
+  #[cfg(unix)]
+  #[test]
+  #[allow(clippy::disallowed_methods, reason = "a real directory tree")]
+  fn test_allow_scope_that_is_a_link() {
+    set_prompter(Box::new(TestPrompter));
+    let (base, _) = resolved_scope_tree("allow_resolved_link_scope");
+    let safe = base.join("safe");
+    let perms = resolved_scope_perms(&[&safe.join("dirlink")], &[]);
+    let open = |path: PathBuf| {
+      perms
+        .check_open(Cow::Owned(path), OpenAccessKind::Read, Some("api"))
+        .is_ok()
+    };
+    assert!(!open(safe.join("dirlink/secret.txt")));
+    assert!(!open(base.join("outside/secret.txt")));
+    assert!(!open(safe.join("dirlink")));
+    let _ = std::fs::remove_dir_all(base.parent().unwrap());
+
+    #[cfg(target_os = "macos")]
+    {
+      let tmp = Path::new("/tmp");
+      assert!(std::fs::symlink_metadata(tmp).unwrap().is_symlink());
+      let perms = resolved_scope_perms(&[tmp], &[tmp]);
+      let name = format!("deno_permissions_tmp_scope_{}", std::process::id());
+      for kind in [OpenAccessKind::Read, OpenAccessKind::Write] {
+        assert!(
+          perms
+            .check_open(Cow::Owned(tmp.join(&name)), kind, Some("api"))
+            .is_ok()
+        );
+        assert!(
+          perms
+            .check_open(
+              Cow::Owned(Path::new("/private/tmp").join(&name)),
+              kind,
+              Some("api")
+            )
+            .is_ok()
+        );
+      }
+    }
+  }
+
+  // denext (DENEXT.md 286): a worker's scope covers its resolved location
+  // only where the parent's grants reach it.
+  #[cfg(unix)]
+  #[test]
+  #[allow(clippy::disallowed_methods, reason = "a real directory tree")]
+  fn test_worker_allow_scope_resolved_within_parent() {
+    set_prompter(Box::new(TestPrompter));
+    let (base, rootlink) = resolved_scope_tree("allow_resolved_worker");
+    let scope = rootlink.join("safe");
+    let parent = resolved_scope_perms(&[&scope], &[&scope]);
+    let child_arg = |paths: &[&Path]| ChildPermissionsArg {
+      read: ChildUnaryPermissionArg::GrantedList(
+        paths
+          .iter()
+          .map(|path| path.display().to_string())
+          .collect(),
+      ),
+      ..ChildPermissionsArg::none()
+    };
+    // a scope under the symlinked root: its resolved location comes along
+    let child = parent
+      .create_child_permissions(child_arg(&[&scope]))
+      .unwrap();
+    for path in [scope.join("file.txt"), base.join("safe/file.txt")] {
+      assert!(
+        child
+          .check_open(Cow::Owned(path), OpenAccessKind::Read, Some("api"))
+          .is_ok()
+      );
+    }
+    // a scope through a link out of the parent's grants: not widened
+    let child = parent
+      .create_child_permissions(child_arg(&[&scope.join("dirlink")]))
+      .unwrap();
+    for path in [
+      scope.join("dirlink/secret.txt"),
+      base.join("outside/secret.txt"),
+    ] {
+      assert!(
+        child
+          .check_open(Cow::Owned(path), OpenAccessKind::Read, Some("api"))
+          .is_err()
+      );
+    }
+    let _ = std::fs::remove_dir_all(base.parent().unwrap());
+  }
+
+  // denext (DENEXT.md 286): a Windows junction or directory symlink inside
+  // an allowed directory is resolved like a Unix symlink.
+  #[cfg(windows)]
+  #[test]
+  #[allow(clippy::disallowed_methods, reason = "a real directory tree")]
+  fn test_allow_scope_checked_through_a_junction() {
+    use sys_traits::EnvTempDir;
+    set_prompter(Box::new(TestPrompter));
+    let parent = sys_traits::impls::RealSys
+      .env_temp_dir()
+      .unwrap()
+      .join(format!("deno_permissions_junction_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&parent);
+    std::fs::create_dir_all(parent.join("safe")).unwrap();
+    std::fs::create_dir_all(parent.join("outside")).unwrap();
+    std::fs::write(parent.join("outside/secret.txt"), "secret").unwrap();
+    std::fs::write(parent.join("safe/file.txt"), "ok").unwrap();
+    let junction = parent.join("safe/junction");
+    let status = std::process::Command::new("cmd")
+      .args(["/C", "mklink", "/J"])
+      .arg(&junction)
+      .arg(parent.join("outside"))
+      .output()
+      .unwrap();
+    assert!(status.status.success(), "{status:?}");
+    let safe = parent.join("safe");
+    let parser =
+      runtime_descriptor_parser::RuntimePermissionDescriptorParser::new(
+        sys_traits::impls::RealSys,
+      );
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_read: Some(vec![safe.display().to_string()]),
+        allow_write: Some(vec![safe.display().to_string()]),
+        prompt: false,
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    let perms = PermissionsContainer::new(Arc::new(parser), perms);
+    let open = |path: PathBuf, kind: OpenAccessKind| {
+      perms
+        .check_open(Cow::Owned(path), kind, Some("api"))
+        .is_ok()
+    };
+    assert!(open(safe.join("file.txt"), OpenAccessKind::Read));
+    assert!(!open(junction.join("secret.txt"), OpenAccessKind::Read));
+    assert!(!open(junction.join("new.txt"), OpenAccessKind::Write));
+    assert!(!open(
+      junction.join("secret.txt"),
+      OpenAccessKind::WriteNoFollow
+    ));
+    let _ = std::fs::remove_dir(&junction);
+    let _ = std::fs::remove_dir_all(&parent);
   }
 
   #[test]

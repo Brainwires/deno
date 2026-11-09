@@ -2146,12 +2146,11 @@ where the changes are discussed.
     final symlink and report on its target, which revealed through a link
     whether a denied file exists, its resolved name or its metadata:
     `Deno.realPath` (and `node:fs` `realpath`), `Deno.chdir`, `node:fs` `exists`
-    / `existsSync` and `statfs` / `statfsSync`. Only a deny rule is applied to
-    the resolved path; an `--allow-*` scope is still matched against the path as
-    given, as in upstream Deno (creating a symlink needs full read and write
-    access). Spec: `permission/symlink_resolve_deny` (`--deny-write` with
-    `--allow-write` and with a scoped `--allow-write=allowed`, and
-    `--deny-read`).
+    / `existsSync` and `statfs` / `statfsSync`. Only a deny rule was applied to
+    the resolved path here; item 286 applies the `--allow-*` scopes to it too
+    (creating a symlink still needs full read and write access). Spec:
+    `permission/symlink_resolve_deny` (`--deny-write` with `--allow-write` and
+    with a scoped `--allow-write=allowed`, and `--deny-read`).
 
 70. **`fix(core)`: op buffers never borrow shared or resizable memory**
     (`libs/core/runtime/ops.rs`, `libs/ops/op2`, `libs/serde_v8`). Ports
@@ -11480,13 +11479,95 @@ where the changes are discussed.
        short flags repeated, an explicit deny still wins, and the fragments
        between the commas stay inaccessible).
 
+286. **`fix(permissions)`: allow scopes hold on the path an access reaches;
+     `Deno.permissions.names`; worker permissions are denied by default**
+     (`feat/permission-scope-hardening`; `runtime/permissions/lib.rs`,
+     `runtime/permissions/runtime_descriptor_parser.rs`,
+     `runtime/ops/fs_events.rs`, `ext/fs/ops.rs`, `ext/node/ops/fs.rs`,
+     `runtime/js/10_permissions.js`, `cli/tsc/dts/lib.deno.ns.d.ts`).
+     - **Allow scopes checked against the resolved target** (a behavior change).
+       Item 69 re-checked only the deny rules on the path the kernel reaches, so
+       with `--allow-read=/safe` a symlink `/safe/link ->
+       /etc/passwd`
+       read `/etc/passwd`, and with `--allow-write=/safe` a dangling
+       `/safe/new -> /elsewhere/x` or a linked directory created files outside
+       the scope. Every check that resolves a path (`check_open` for the
+       following and no-follow access kinds, the no-follow write checks of
+       remove / rename / mkdir / recursive remove, and the strict check of the
+       path a `chmod` / `chown` / `cp` lands on, renamed `check_write_resolved`)
+       now requires the resolved path to be granted as well: by an allow scope,
+       or at a prompt that names the resolved path. Following accesses resolve
+       every link (a missing final name is kept as written, a dangling link
+       followed to its target, so a write is checked where the file would be
+       created); no-follow accesses resolve the parent, as the kernel does.
+       Windows junctions and other reparse points resolve through the same
+       canonicalization. `..` stays lexical in the path as given, as before
+       (`safe/link/../x` is `safe/x`, and the operation uses that path).
+       `Deno.watchFs` checks a watched path as a following access, since the
+       watcher follows a watched link. This covers `Deno.open` / `readFile` /
+       `readDir` / `realPath` / `stat` / `watchFs` and the other `Deno` fs
+       calls, and the `node:fs` operations, which go through the same checks.
+       Reads that Node resolution makes inside npm packages keep their own rule.
+     - **Allow scopes are canonicalized.** So that legitimate accesses keep
+       working where a scope lies under a symlink (macOS's `/tmp` ->
+       `/private/tmp`, a temp folder under `/var`, a project folder behind a
+       link, a junction on the way), an `--allow-read` / `--allow-write` scope
+       also covers its resolved location, resolved once when the scope is
+       parsed. A scope that is itself a symlink names the link, not its target:
+       the target is covered only when the link is owned by root (Unix), a
+       system link such as `/tmp` that code running as the user cannot have
+       planted; a link the user owns (`node_modules/x ->
+       /elsewhere`)
+       keeps its target out of the scope, as
+       `npm/require_missing_paths_across_symlinks` already required for
+       `require()`. A worker's scope gets its resolved location only where the
+       parent's grants reach it, so a worker scope through a link out of the
+       parent's grants is not widened. A prompt grant covers only the path the
+       prompt named; when that path resolves elsewhere a second prompt names the
+       resolved path.
+     - **Not covered (TOCTOU).** The check resolves the path and the operation
+       then opens it by name: a link swapped between the two is followed without
+       a new check, as is a scope's link replaced after parsing. Closing that
+       window needs the open itself confined (an fd-relative, beneath-the-root
+       walk, or a broker that opens and hands back the descriptor); that is a
+       later phase.
+     - **`Deno.permissions.names`**: a frozen array of every permission name the
+       runtime knows (`read`, `write`, `net`, `net-connect`, `net-listen`,
+       `env`, `sys`, `run`, `ffi`, `import`), the same object on every read, so
+       code can build a complete permission set (a worker granted nothing, say)
+       that stays correct when a name is added. `Deno.PermissionName` gains the
+       `"import"` it was missing.
+     - **Worker permissions are denied by default.** When a `Worker` (or
+       `Deno.test` / `Deno.bench`) is given a `permissions` object, a name the
+       object leaves out is not granted: exactly as if it were `false`, never
+       inherited. `"inherit"` stays an explicit value, and a worker with no
+       `permissions` object still takes its parent's permissions. This is
+       upstream's behavior since denoland/deno#14024; it is now stated in the
+       types (`PermissionOptionsObject`) and pinned by tests over every name in
+       `Deno.permissions.names`. As before, a name that is not granted can still
+       be asked for at a prompt when the parent may prompt.
+     - Tests: `runtime/permissions/lib.rs`
+       `test_allow_scope_checked_on_resolved_target` (links to a file and a
+       directory outside the scope, dangling links, missing final names, `..`,
+       the no-follow and strict write checks, the error naming the resolved
+       path), `test_allow_scope_under_a_symlinked_root`,
+       `test_allow_scope_that_is_a_link` (and `/tmp` on macOS),
+       `test_worker_allow_scope_resolved_within_parent`,
+       `test_allow_scope_checked_through_a_junction` (Windows); spec
+       `permission/symlink_resolve_allow` (`Deno` and `node:fs` reads and writes
+       through links under scoped `--allow-read` / `--allow-write`, with the
+       targets also allowed, under a symlinked root, and a worker); unit
+       `permissionNames` (`tests/unit/permissions_test.ts`) and
+       `Worker permissions object denies every name it leaves out`
+       (`tests/unit/worker_test.ts`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262-264, 267-284) are what the prebuilt
-`libdenort` carries. The CLI-side parts (for example writing
+243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286) are what the
+prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.

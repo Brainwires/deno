@@ -27,6 +27,7 @@ pub trait RuntimePermissionDescriptorParserSys:
   crate::which::WhichSys
   + sys_traits::FsCanonicalize
   + sys_traits::FsReadLink
+  + sys_traits::FsMetadata
   + Send
   + Sync
 {
@@ -169,6 +170,10 @@ impl<TSys: RuntimePermissionDescriptorParserSys + std::fmt::Debug>
     SpecialFilePathQueryDescriptor::resolve_parent_for_no_follow(
       &self.sys, path,
     )
+  }
+
+  fn resolve_allow_scope(&self, path: &PathDescriptor) -> Option<PathBuf> {
+    SpecialFilePathQueryDescriptor::resolve_allow_scope(&self.sys, path)
   }
 
   fn parse_net_query(

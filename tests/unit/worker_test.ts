@@ -666,6 +666,48 @@ Deno.test("Worker permissions are not inherited with single specified permission
   worker.terminate();
 });
 
+async function workerPermissionStates(
+  permissions: Deno.PermissionOptions,
+): Promise<Record<string, string>> {
+  const worker = new Worker(
+    resolveWorker("permission_names_echo.js"),
+    { type: "module", deno: { permissions } },
+  );
+  const { promise, resolve } = Promise.withResolvers<Record<string, string>>();
+  worker.onmessage = (e) => resolve(e.data);
+  worker.postMessage(null);
+  try {
+    return await promise;
+  } finally {
+    worker.terminate();
+  }
+}
+
+Deno.test("Worker permissions object denies every name it leaves out", async function () {
+  // The parent (the unit test runner) has every permission; a name the
+  // object leaves out is not granted to the worker, whichever it is.
+  const notGranted = (states: Record<string, string>, except: string[]) => {
+    assertEquals(Object.keys(states), [...Deno.permissions.names]);
+    for (const [name, state] of Object.entries(states)) {
+      if (!except.includes(name)) {
+        assert(state !== "granted", `${name} is ${state}`);
+      }
+    }
+  };
+  notGranted(await workerPermissionStates({}), []);
+  const allFalse = Object.fromEntries(
+    Deno.permissions.names.map((name) => [name, false]),
+  );
+  notGranted(await workerPermissionStates(allFalse), []);
+  const readOnly = await workerPermissionStates({ read: true });
+  assertEquals(readOnly.read, "granted");
+  notGranted(readOnly, ["read"]);
+  // "inherit" stays an explicit value
+  const inheritEnv = await workerPermissionStates({ env: "inherit" });
+  assertEquals(inheritEnv.env, "granted");
+  notGranted(inheritEnv, ["env"]);
+});
+
 Deno.test("Worker with invalid permission arg", function () {
   assertThrows(
     () =>

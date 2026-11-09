@@ -1,0 +1,23 @@
+readTextFile file: ok
+readTextFile inner link: ok
+readDir scope: dangling,dirlink,file.txt,inner,link,rename.txt
+lstat link: true
+readLink link: ../outside/secret.txt
+readTextFile dirlink/..: ok
+readTextFile link: denied
+readTextFile under dirlink: denied
+readTextFile dirlink/dir/..: denied
+open link: denied
+stat link: denied
+lstat under dirlink: denied
+readDir dirlink: denied
+realPath link: denied
+realPath dangling: denied
+watchFs dirlink: denied
+node readFileSync link: denied
+node readFileSync under dirlink: denied
+node statSync link: denied
+node readdirSync dirlink: denied
+node realpathSync link: denied
+node existsSync link: denied
+node openSync link: denied
