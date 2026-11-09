@@ -2147,7 +2147,7 @@ where the changes are discussed.
     whether a denied file exists, its resolved name or its metadata:
     `Deno.realPath` (and `node:fs` `realpath`), `Deno.chdir`, `node:fs` `exists`
     / `existsSync` and `statfs` / `statfsSync`. Only a deny rule was applied to
-    the resolved path here; item 286 applies the `--allow-*` scopes to it too
+    the resolved path here; item 287 applies the `--allow-*` scopes to it too
     (creating a symlink still needs full read and write access). Spec:
     `permission/symlink_resolve_deny` (`--deny-write` with `--allow-write` and
     with a scoped `--allow-write=allowed`, and `--deny-read`).
@@ -11501,7 +11501,7 @@ where the changes are discussed.
      - Tests: the existing `node:sqlite`, KV, Cache API and `localStorage`
        suites, which exercise the SQLite this item replaces.
 
-286. **`fix(permissions)`: allow scopes hold on the path an access reaches;
+287. **`fix(permissions)`: allow scopes hold on the path an access reaches;
      `Deno.permissions.names`; worker permissions are denied by default**
      (`feat/permission-scope-hardening`; `runtime/permissions/lib.rs`,
      `runtime/permissions/runtime_descriptor_parser.rs`,
@@ -11583,7 +11583,7 @@ where the changes are discussed.
        `Worker permissions object denies every name it leaves out`
        (`tests/unit/worker_test.ts`).
 
-NNN. **`feat(install)`: native addons install in a plain package.json project**
+288. **`feat(install)`: native addons install in a plain package.json project**
      (`feat/node-native-installs`, CLI only;
      `cli/supply_chain/{builtin_exceptions,node_headers,jail,mod}.rs`,
      `cli/npm.rs`, `cli/factory.rs`). The lifecycle-script jail (items 83, 103)
@@ -11649,7 +11649,7 @@ NNN. **`feat(install)`: native addons install in a plain package.json project**
        `sqlite3@5.1.7` install failed before (`getaddrinfo EPERM github.com`)
        and now installs and loads.
 
-NNN. **`feat(ext/node)`: fetch takes Node's global proxy, and node:http's
+289. **`feat(ext/node)`: fetch takes Node's global proxy, and node:http's
 proxy, keep-alive, pipelining and header-limit gaps** (runtime;
 `ext/fetch/26_fetch.js`, `ext/fetch/lib.rs`, `ext/node/polyfills/_http_proxy.js`,
 `_http_client.js`, `_http_outgoing.ts`, `_http_server.js`, `_http_common.js`,
@@ -11710,7 +11710,7 @@ Tests: node_compat client-proxy (13 more), `parallel/test-http-header-overflow`,
 behind one ended while connecting, the proxied authority checks, the 431 via
 `socket.push()`); `libs/node_shim` `http_parser_flags_ride_along_in_node_options`.
 
-NNN. **`feat(node)`: `net.Socket({ fd })`, `server.listen({ fd })` and
+290. **`feat(node)`: `net.Socket({ fd })`, `server.listen({ fd })` and
      `tty.ReadStream(fd)` on descriptors the process owns; long unix socket
      paths on macOS** (runtime; `ext/node/ops/fd_adopt.rs`,
      `ext/node/ops/pipe_wrap.rs`, `ext/node/ops/tcp_wrap.rs`,
@@ -11749,7 +11749,7 @@ NNN. **`feat(node)`: `net.Socket({ fd })`, `server.listen({ fd })` and
        `node/pipe_open_fd` specs (isolate ownership, duplicate regular-file fd)
        are unchanged.
 
-NNN. **`feat(node:tls)`: real TLS session resumption, session tickets and
+291. **`feat(node:tls)`: real TLS session resumption, session tickets and
 `ciphers` over rustls** (`ext/node/ops/tls_session.rs`,
 `ext/node/ops/tls_wrap.rs`, `ext/node/polyfills/_tls_wrap.js`,
 `ext/node/polyfills/_tls_common.ts`). `node:tls` sessions were synthetic: the
@@ -11795,7 +11795,7 @@ separation and tamper checks, the server-name gate); unit_node
 `test-tls-ticket-12`, `test-tls-ticket-cluster`,
 `test-https-agent-session-reuse`, `test-https-agent-disable-session-reuse`.
 
-NNN. **`feat(ext/node)`: the legacy `node:crypto` ciphers, modes and brainpool
+292. **`feat(ext/node)`: the legacy `node:crypto` ciphers, modes and brainpool
      curves** (`feat/node-crypto-legacy`, runtime;
      `ext/node_crypto/{cipher_legacy,cipher,lib}.rs`,
      `ext/node_crypto/Cargo.toml`, `Cargo.toml`, `Cargo.lock`,
@@ -11847,7 +11847,7 @@ NNN. **`feat(ext/node)`: the legacy `node:crypto` ciphers, modes and brainpool
        as Node; the ciphers Node refuses stay unknown; brainpool ECDH keys,
        compressed points, `convertKey` and secrets equal Node's).
 
-NNN. **`feat(node)`: Node's `--cpu-prof`, `--heap-prof`, `--heapsnapshot-signal`
+293. **`feat(node)`: Node's `--cpu-prof`, `--heap-prof`, `--heapsnapshot-signal`
 and `--heapsnapshot-near-heap-limit` write their files; `v8` and `Worker`
 profiling APIs** (runtime and CLI; `runtime/cpu_profiler/{mod,heapprof}.rs`,
 `runtime/web_worker.rs`, `runtime/ops/worker_host.rs`, `runtime/js/99_main.js`,
@@ -11905,7 +11905,7 @@ name, `Deno.exit()`, `-dir` + `-name`, a worker's own profile) and
 `parallel/test-worker-{cpu,heap}-profile`, `parallel/test-worker-heap-snapshot`
 and `parallel/test-heapsnapshot-near-heap-limit-worker` are the targets.
 
-NNN. **`fix(ext/node)`: small Node API holes: `http2.constants`' status codes,
+294. **`fix(ext/node)`: small Node API holes: `http2.constants`' status codes,
      `DatabaseSync#enableLoadExtension`, `v8.isStringOneByteRepresentation`,
      `_http_client` / `_http_incoming`, `dns.resolve("")`**
      (`ext/node/polyfills/internal/http2/constants.ts`, `ext/node_sqlite`,
@@ -11936,7 +11936,7 @@ NNN. **`fix(ext/node)`: small Node API holes: `http2.constants`' status codes,
        classes as `node:http`), `dns_test.ts` (A, AAAA, MX, TXT and the
        promise API, no lookup made).
 
-NNN. **`feat(ext/node)`: the `process` long tail: `execve`, `setgroups` /
+295. **`feat(ext/node)`: the `process` long tail: `execve`, `setgroups` /
      `initgroups`, `finalization`, `performance.nodeTiming`, `process.versions`
      and an inspectable `process.env`** (`ext/node/ops/process.rs`,
      `ext/node/ops/perf_hooks.rs`, `ext/node/polyfills/process.ts`,
@@ -11990,7 +11990,7 @@ NNN. **`feat(ext/node)`: the `process` long tail: `execve`, `setgroups` /
        `sqlite_version()`; `inspect(process.env)` with and without permission),
        `perf_hooks_test.ts` (`nodeTiming` order, loop milestones, `toJSON`).
 
-NNN. **`feat(node)`: `node:sea` over a compiled program's embedded files, and
+296. **`feat(node)`: `node:sea` over a compiled program's embedded files, and
      `node`'s SEA / snapshot flags refuse** (`libs/node_shim/lib.rs`,
      `libs/node_shim/main.rs`, `cli/node_compat_shim.rs`,
      `ext/node/polyfills/sea.js`, `ext/node/ops/sea.rs`, `ext/fs/interface.rs`,
@@ -12028,7 +12028,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286) are what the
+243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-296) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
