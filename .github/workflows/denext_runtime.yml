@@ -146,6 +146,7 @@ jobs:
             Cargo.lock
             .github/denext-runtime/tag_gate.py
             .github/denext-runtime/engine_staleness.py
+            .github/denext-runtime/plan_matrix.py
           sparse-checkout-cone-mode: false
       - id: plan
         env:
@@ -161,6 +162,10 @@ jobs:
           # unset: GitHub's images. The matrix carries them as `runner`.
           RUNNER_MACOS_ARM: ${{ vars.RUNNER_MACOS_ARM }}
           RUNNER_MACOS_X64: ${{ vars.RUNNER_MACOS_X64 }}
+          # Where the jobs that launch the app run (`gui_runner`: package,
+          # e2e_fork); they need a GUI login session. See plan_matrix.py.
+          RUNNER_MACOS_ARM_GUI: ${{ vars.RUNNER_MACOS_ARM_GUI }}
+          RUNNER_MACOS_X64_GUI: ${{ vars.RUNNER_MACOS_X64_GUI }}
         run: |
           set -euo pipefail
           # The fork's own version (DENEXT.md "Versioning": 3.0.0-denext.N, ...),
@@ -252,38 +257,14 @@ jobs:
             version="$deno_version+ci.$RUN_NUMBER"
           fi
 
-          matrix=$(TARGETS="$TARGETS" python3 - <<'PY'
-          import json, os
-          all_targets = [
-              {"target": "aarch64-apple-darwin", "os": "macos-15"},
-              {"target": "x86_64-apple-darwin", "os": "macos-15-intel"},
-              {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-22.04"},
-              {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-22.04-arm"},
-              {"target": "x86_64-pc-windows-msvc", "os": "windows-2025"},
-              {"target": "aarch64-pc-windows-msvc", "os": "windows-11-arm"},
-          ]
-          # Each macOS target's runner: the repository variable (a label, or a
-          # JSON array), else the image. `os` stays the image name: it names
-          # the caches and the artifacts whatever runs the job.
+          # Each target's runners (`runner` for the build jobs, `gui_runner`
+          # for the jobs that launch the app). `os` stays the image name: it
+          # names the caches and the artifacts whatever runs the job.
           # The other legs stay on GitHub's images (pool gaps): Linux x64 sudo
           # apt-get / fallocate + swapon and the ubuntu-22.04 glibc floor; Windows
           # x64 a release build on the 1-slot 4 vCPU / 8 GB VM; the arm64 Linux
           # and Windows legs have no pool.
-          mac_runner = {"macos-15": os.environ.get("RUNNER_MACOS_ARM", ""),
-                        "macos-15-intel": os.environ.get("RUNNER_MACOS_X64", "")}
-          for t in all_targets:
-              r = mac_runner.get(t["os"], "").strip()
-              t["runner"] = json.loads(r) if r.startswith("[") else (r or t["os"])
-          want = [t.strip() for t in os.environ["TARGETS"].split(",") if t.strip()]
-          if want != ["all"]:
-              known = {t["target"] for t in all_targets}
-              unknown = [t for t in want if t not in known]
-              if unknown:
-                  raise SystemExit(f"unknown targets: {unknown}")
-              all_targets = [t for t in all_targets if t["target"] in want]
-          print(json.dumps(all_targets))
-          PY
-          )
+          matrix=$(TARGETS="$TARGETS" python3 -I .github/denext-runtime/plan_matrix.py)
           linux_matrix=$(MATRIX="$matrix" python3 -c 'import json, os; print(json.dumps([t for t in json.loads(os.environ["MATRIX"]) if "-linux-" in t["target"]]))')
           {
             echo "matrix=$matrix"
@@ -1528,10 +1509,12 @@ jobs:
     name: package / ${{ matrix.target }}
     needs: [setup, laufey, denort]
     if: ${{ always() && !inputs.cli_only && needs.setup.result == 'success' && (needs.laufey.result == 'success' || (needs.laufey.result == 'skipped' && inputs.reuse_laufey_run_id != '')) && (needs.denort.result == 'success' || (needs.denort.result == 'skipped' && inputs.reuse_denort_run_id != '')) }}
-    # matrix.runner: the self-hosted runner the repository variables name,
-    # else the image; the image on a fork's pull_request / pull_request_target (self-hosted never
-    # takes a fork's code).
-    runs-on: ${{ ((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && matrix.os) || matrix.runner || matrix.os }}
+    # matrix.gui_runner: this job launches the packaged app, so it needs a
+    # GUI login session (plan_matrix.py): the self-hosted runner the
+    # repository variables name for that, else the image; the image on a
+    # fork's pull_request / pull_request_target (self-hosted never takes a
+    # fork's code).
+    runs-on: ${{ ((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && matrix.os) || matrix.gui_runner || matrix.os }}
     timeout-minutes: 180
     permissions:
       contents: read
@@ -1868,10 +1851,12 @@ jobs:
     name: e2e (fork CLI) / ${{ matrix.target }}
     needs: [setup, package, cli]
     if: ${{ always() && !inputs.cli_only && needs.cli.result == 'success' && (needs.package.result == 'success' || needs.package.result == 'failure') }}
-    # matrix.runner: the self-hosted runner the repository variables name,
-    # else the image; the image on a fork's pull_request / pull_request_target (self-hosted never
-    # takes a fork's code).
-    runs-on: ${{ ((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && matrix.os) || matrix.runner || matrix.os }}
+    # matrix.gui_runner: this job launches the packaged app, so it needs a
+    # GUI login session (plan_matrix.py): the self-hosted runner the
+    # repository variables name for that, else the image; the image on a
+    # fork's pull_request / pull_request_target (self-hosted never takes a
+    # fork's code).
+    runs-on: ${{ ((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && matrix.os) || matrix.gui_runner || matrix.os }}
     timeout-minutes: 60
     permissions:
       contents: read

@@ -15,7 +15,7 @@
 #          (.github/denext-runtime/manifest_test.py, tag_gate_test.py,
 #          engine_staleness_test.py, audit_ignores_test.py,
 #          glibc_ceiling_test.py, self_binding_test.py, denort_pins_test.py,
-#          linux_needed_test.py, toolchain_info_test.py)
+#          linux_needed_test.py, toolchain_info_test.py, plan_matrix_test.py)
 #          and the bare-assertion guard over the release scripts
 #          (assert_guard.py and its test).
 # - cargo-audit: RustSec advisories against Cargo.lock; .cargo/audit.toml
@@ -162,6 +162,11 @@ jobs:
       - name: tag_gate_test.py
         if: runner.os == 'Linux'
         run: python3 -I .github/denext-runtime/tag_gate_test.py
+      # The release matrix and its runners (denext_runtime.yml's setup job):
+      # the jobs that launch the app need a GUI login session.
+      - name: plan_matrix_test.py
+        if: runner.os == 'Linux'
+        run: python3 -I .github/denext-runtime/plan_matrix_test.py
       # Every assertion in the release and test scripts names what it checked
       # (DENEXT.md item 141): no bare test / [ / grep -q statements.
       - name: assert_guard.py
