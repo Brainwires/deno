@@ -1,0 +1,4 @@
+worker readTextFile under dirlink: denied
+worker readTextFile outside: denied
+worker readTextFile file: allowed
+parent readTextFile under dirlink: denied

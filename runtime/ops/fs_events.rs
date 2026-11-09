@@ -538,6 +538,16 @@ fn op_fs_events_open(
       ignore_paths.push(normalize_watch_path(checked));
     }
     for path in paths {
+      // denext (DENEXT.md 286): the watcher follows a watched path that is
+      // a symlink and reports on its target, so the path is checked as an
+      // access that follows the final link (its target must be allowed);
+      // the path as given is still the one watched, so events keep the
+      // caller's spelling.
+      permissions_container.check_open(
+        Cow::Borrowed(Path::new(&path)),
+        deno_permissions::OpenAccessKind::Read,
+        Some("Deno.watchFs()"),
+      )?;
       let checked = permissions_container
         .check_open(
           Cow::Owned(PathBuf::from(path)),

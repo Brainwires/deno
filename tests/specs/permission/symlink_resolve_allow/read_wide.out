@@ -1,0 +1,23 @@
+readTextFile file: ok
+readTextFile inner link: ok
+readDir scope: dangling,dirlink,file.txt,inner,link,rename.txt
+lstat link: true
+readLink link: ../outside/secret.txt
+readTextFile dirlink/..: ok
+readTextFile link: SECRET
+readTextFile under dirlink: SECRET
+readTextFile dirlink/dir/..: SECRET
+open link: allowed
+stat link: allowed
+lstat under dirlink: allowed
+readDir dirlink: allowed
+realPath link: [WILDCARD]outside/secret.txt
+realPath dangling: error (NotFound)
+watchFs dirlink: allowed
+node readFileSync link: SECRET
+node readFileSync under dirlink: SECRET
+node statSync link: allowed
+node readdirSync dirlink: allowed
+node realpathSync link: [WILDCARD]outside/secret.txt
+node existsSync link: true
+node openSync link: allowed

@@ -489,9 +489,9 @@ pub async fn op_fs_chown_async(
 /// group- or world-writable parent lets another local user move it out and put
 /// another file in its place. So `chmod` / `chown` get the strict write check a
 /// recursive remove has (a deny scope inside the path refuses it) on the path
-/// as given, and its deny half on the path the change lands on. Times
-/// (`utime`) only touch the folder's own entry and keep the partial check
-/// (denext, DENEXT.md 224).
+/// as given, and the strict check on the path the change lands on (its allow
+/// scopes too). Times (`utime`) only touch the folder's own entry and keep
+/// the partial check (denext, DENEXT.md 224, 286).
 pub fn check_metadata_write(
   permissions: &deno_permissions::PermissionsContainer,
   requested: &Path,
@@ -500,7 +500,7 @@ pub fn check_metadata_write(
 ) -> Result<(), PermissionCheckError> {
   permissions.check_write(Cow::Borrowed(requested), api_name)?;
   if resolved != requested {
-    permissions.check_write_resolved_not_denied(resolved, api_name)?;
+    permissions.check_write_resolved(resolved, api_name)?;
   }
   Ok(())
 }
@@ -530,9 +530,9 @@ pub fn check_remove_link(
 /// path (the resolved path the open recorded; no follow, as `utime` checks it
 /// upstream). `owner_or_mode`: a mode or owner change on a folder that holds
 /// a `--deny-write` path decides who can reach or replace the denied path, so
-/// it also gets the deny half of the strict check, as [`check_metadata_write`]
-/// gives `chmod` / `chown` by path; times keep the partial check (denext,
-/// DENEXT.md 224, 225).
+/// it also gets the strict check on that path, as [`check_metadata_write`]
+/// gives `chmod` / `chown`; times keep the partial check (denext, DENEXT.md
+/// 224, 225, 286).
 pub fn check_fd_metadata_write(
   permissions: &deno_permissions::PermissionsContainer,
   file: &Rc<dyn deno_io::fs::File>,
@@ -546,7 +546,7 @@ pub fn check_fd_metadata_write(
       Some(api_name),
     )?;
     if owner_or_mode {
-      permissions.check_write_resolved_not_denied(path, api_name)?;
+      permissions.check_write_resolved(path, api_name)?;
     }
   }
   Ok(())

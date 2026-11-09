@@ -1,0 +1,87 @@
+{
+  "tempDir": true,
+  "tests": {
+    // a scoped --allow-read holds on the path an access reaches
+    "allow_read_scope": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write setup.ts",
+          "output": "setup done\n"
+        },
+        {
+          "args": "run --allow-read=safe read.ts",
+          "output": "read.out"
+        }
+      ]
+    },
+    // the link targets, once allowed, are reachable through the links
+    "allow_read_scope_and_target": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write setup.ts",
+          "output": "setup done\n"
+        },
+        {
+          "args": "run --allow-read=safe,outside read.ts",
+          "output": "read_wide.out"
+        }
+      ]
+    },
+    // a scope written through a symlinked root still covers what is under it
+    "allow_read_scope_under_symlinked_root": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write setup.ts",
+          "output": "setup done\n"
+        },
+        {
+          "args": "run --allow-read=rootlink/safe read.ts rootlink",
+          "output": "read.out"
+        }
+      ]
+    },
+    // a scoped --allow-write holds on the path a write lands on
+    "allow_write_scope": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write setup.ts",
+          "output": "setup done\n"
+        },
+        {
+          "args": "run --allow-read --allow-write=safe write.ts",
+          "output": "write.out"
+        }
+      ]
+    },
+    "allow_write_scope_under_symlinked_root": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write setup.ts",
+          "output": "setup done\n"
+        },
+        {
+          "args": "run --allow-read --allow-write=rootlink/safe write.ts rootlink",
+          "output": "write.out"
+        }
+      ]
+    },
+    "worker_scope": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write setup.ts",
+          "output": "setup done\n"
+        },
+        {
+          "args": "run --unstable-worker-options --allow-read=safe worker.ts",
+          "output": "worker.out"
+        }
+      ]
+    }
+  }
+}

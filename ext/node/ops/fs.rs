@@ -160,7 +160,7 @@ fn file_for_fd(
 /// `deno_fs::check_fd_metadata_write`): write permission on the file's path,
 /// and with `owner_or_mode` (a `fchmod` / `fchown` on a folder that holds a
 /// `--deny-write` path decides who can reach or replace the denied path) the
-/// deny half of the strict check, as for `chmod` / `chown` by path (denext,
+/// strict check, as for `chmod` / `chown` by path (denext,
 /// DENEXT.md 224, 225).
 fn check_fd_metadata_write(
   state: &OpState,
@@ -1891,10 +1891,8 @@ fn try_clone_dir_no_filter(
       if fs.exists_sync(&dest_path.as_checked_path()) {
         permissions
           .check_write(Cow::Borrowed(Path::new(dest)), "node:fs.cp")?;
-        permissions.check_write_resolved_not_denied(
-          &dest_path.as_checked_path(),
-          "node:fs.cp",
-        )?;
+        permissions
+          .check_write_resolved(&dest_path.as_checked_path(), "node:fs.cp")?;
         fs.remove_sync(&dest_path.as_checked_path(), true)
           .map_err(|err| {
             map_fs_error_to_node_fs_error(
@@ -2164,7 +2162,7 @@ fn check_cp_symlink(
   permissions.check_read_all(api_name)?;
   permissions.check_write(Cow::Borrowed(link_path), api_name)?;
   if let Some(resolved) = resolved {
-    permissions.check_write_resolved_not_denied(resolved, api_name)?;
+    permissions.check_write_resolved(resolved, api_name)?;
   }
   Ok(())
 }

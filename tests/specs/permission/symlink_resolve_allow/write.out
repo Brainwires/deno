@@ -1,0 +1,23 @@
+writeTextFile new: allowed
+writeTextFile inner link: allowed
+mkdir new: allowed
+remove new: allowed
+node writeFileSync new: allowed
+node unlinkSync new: allowed
+writeTextFile link: denied
+writeTextFile dangling: denied
+open create dangling: denied
+writeTextFile under dirlink: denied
+mkdir under dirlink: denied
+remove under dirlink: denied
+remove recursive under dirlink: denied
+rename into dirlink: denied
+copyFile into dirlink: denied
+chmod link: denied
+utime link: denied
+node writeFileSync under dirlink: denied
+node appendFileSync link: denied
+node rmSync under dirlink: denied
+node cpSync into dirlink: denied
+outside entries: dir,secret.txt
+secret: SECRET
