@@ -11480,6 +11480,72 @@ where the changes are discussed.
        short flags repeated, an explicit deny still wins, and the fragments
        between the commas stay inaccessible).
 
+NNN. **`feat(install)`: native addons install in a plain package.json project**
+     (`feat/node-native-installs`, CLI only;
+     `cli/supply_chain/{builtin_exceptions,node_headers,jail,mod}.rs`,
+     `cli/npm.rs`, `cli/factory.rs`). The lifecycle-script jail (items 83, 103)
+     gives an approved script no network unless the project lists the package
+     under `supplyChain.jailScripts.packages`, so in a project nobody set up for
+     it `deno install --allow-scripts` failed every package that fetches a
+     prebuilt binary at install (`prebuild-install`'s GitHub download:
+     `getaddrinfo EPERM github.com`) or builds one with node-gyp.
+     - **Built-in exceptions** (`builtin_exceptions.rs`, data only, mirrored
+       from denext's `jail-exceptions.ts`): `@prisma/engines`, `@sentry/cli`,
+       `@tensorflow/tfjs-node`, `better-sqlite3`, `canvas`, `chromedriver`,
+       `electron`, `ffmpeg-static`, `keytar`, `node-pty`, `node-sass`, `re2`,
+       `sharp` and `sqlite3` get the download hosts their scripts use (GitHub's
+       release hosts, `nodejs.org`, the package's CDN; never the whole network)
+       and the variables that point them at a mirror. `grpc`, `nodegit` and
+       `wrtc` have their declared `binary.host` reviewed, as if
+       `jailScripts.knownPackages` listed it. The project's own entry wins (a
+       host list, or `"net": false`), `jailScripts.net: true` still grants
+       everything, and `paranoid` applies none of them. Packages that need a
+       `write` grant (a browser cache under the home, `@prisma/client`'s output)
+       are left to the project.
+     - **Node's headers offline** (`node_headers.rs`): a script that builds with
+       node-gyp (a `binding.gyp`, or a script naming node-gyp, prebuild-install,
+       node-pre-gyp or cmake-js) gets `npm_config_nodedir` pointing at
+       `node-v26.5.1-headers.tar.gz` (the `process.version` the runtime reports;
+       a test ties the two), checked against the SHA-256 pinned in the source
+       and unpacked once into `<DENO_DIR>/node_headers/v26.5.1` (only regular
+       files and directories under the archive's own root; a marker written
+       last). The archive is read from beside the `deno` executable when a
+       release ships it there, else downloaded by the installer (outside the
+       jail) from `NODEJS_ORG_MIRROR` or nodejs.org. The pinned node-gyp
+       (`npm:node-gyp@13.1.0`, which a jailed script fetched from the registry
+       it can't reach) is installed the same way into `<DENO_DIR>/node_gyp` and
+       handed to the script as `DENO_NODE_GYP`. A project's own
+       `npm_config_nodedir` / `DENO_NODE_GYP` wins; Windows is left out
+       (node-gyp also needs `node.lib` there). When either can't be had,
+       node-gyp fetches them itself as before (`nodejs.org` is in the built-in
+       lists).
+     - **The package's own fix** when a jailed native script fails, after its
+       output: a NAN addon (depends on `nan`) is named as one that can't load
+       here even built; a built-in package gets its hosts and the exact line for
+       a mirror host; any other native package gets the line for its download
+       host. `better-sqlite3` also says that leaving its script unapproved works
+       (item 61).
+     - Not done: a build from source still stops at node-gyp's
+       `build/node_gyp_bins/python3` symlink, which the jail's symlink rule
+       refuses because its target (the system Python) lies outside the writable
+       roots; changing that rule is in the permission code, left to its own
+       change. Configure runs offline with the pinned headers.
+     - Tests: `builtin_exceptions.rs` (sorted, host lists only),
+       `node_headers.rs` (a matching archive unpacks, a wrong checksum or a path
+       outside the root is refused and leaves nothing, the mirror URL, which
+       packages count as node-gyp builds, an installed node-gyp is reused, the
+       pinned version is `deno_node::NODE_VERSION`), `jail.rs`
+       `builtin_exceptions` / `builtin_known_declared_hosts` /
+       `native_failure_hints`; spec `npm/supply_chain_jail`
+       `builtin_exception_hosts`: a plain package.json project installs a
+       fixture named `keytar` (vendored tarball) whose install script asks the
+       jail's proxy for tunnels; before, it had no network at all
+       (`github.com:
+       no network`), now GitHub is allowed and an unlisted
+       host refused, and the failure prints the hint. By hand: a real
+       `sqlite3@5.1.7` install failed before (`getaddrinfo EPERM github.com`)
+       and now installs and loads.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

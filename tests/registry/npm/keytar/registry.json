@@ -1,0 +1,24 @@
+{
+  "name": "keytar",
+  "dist-tags": {
+    "latest": "7.9.0"
+  },
+  "versions": {
+    "7.9.0": {
+      "name": "keytar",
+      "version": "7.9.0",
+      "main": "index.js",
+      "scripts": {
+        "install": "node probe.js"
+      },
+      "dist": {
+        "integrity": "sha512-TownoqqiTQixVlquz8hH7wAlgV+pshxpSzVlCig0llvZTKgZcLiZeNjcjsvXxkT42LBdOCK0baXFKEkPA3MTaQ==",
+        "shasum": "089e674af9cadc72bdd1f2e257027aeae39e46b2",
+        "tarball": "http://localhost:4260/keytar/keytar-7.9.0.tgz"
+      }
+    }
+  },
+  "time": {
+    "7.9.0": "2025-06-01T20:00:00.000Z"
+  }
+}

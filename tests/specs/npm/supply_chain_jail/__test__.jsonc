@@ -515,6 +515,27 @@
     },
     // where nothing can confine the script's other programs, paranoid
     // refuses to run it
+    // DENEXT.md item NNN: in a plain package.json project (no supplyChain
+    // entries), a package known to download a prebuilt binary at install
+    // (here a fixture named keytar) reaches GitHub's release hosts by
+    // default and nothing else; when its script fails, the installer says
+    // what the package needs
+    "builtin_exception_hosts": {
+      "if": "unix",
+      "steps": [
+        {
+          "cwd": "builtin",
+          "args": "install --allow-scripts=npm:keytar",
+          "output": "builtin.out",
+          "exitCode": 1
+        },
+        {
+          "cwd": "builtin",
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/keytar/results.txt').trim())",
+          "output": "github.com: allowed\nexample.com: denied\n"
+        }
+      ]
+    },
     "paranoid_refuses_without_os_sandbox": {
       "if": "windows",
       "cwd": "paranoid",

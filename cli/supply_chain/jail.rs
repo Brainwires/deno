@@ -53,6 +53,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
@@ -348,6 +349,9 @@ pub struct JailConfig {
   warned_netns: std::sync::atomic::AtomicBool,
   /// The packages whose refused declared hosts were reported.
   warned_declared: std::sync::Mutex<std::collections::BTreeSet<String>>,
+  /// Node's headers for a native build from source, handed to the script
+  /// as `npm_config_nodedir` (DENEXT.md item NNN).
+  node_headers: Option<Arc<super::node_headers::NodeHeaders>>,
 }
 
 /// How deep below a project directory secret files are looked for.
@@ -452,7 +456,17 @@ impl JailConfig {
       warned_net: Default::default(),
       warned_netns: Default::default(),
       warned_declared: Default::default(),
+      node_headers: None,
     }
+  }
+
+  /// Sets where Node's headers for node-gyp come from.
+  pub fn with_node_headers(
+    mut self,
+    node_headers: Option<Arc<super::node_headers::NodeHeaders>>,
+  ) -> Self {
+    self.node_headers = node_headers;
+    self
   }
 
   /// The project's own files with secrets (`.npmrc`, `.env*`, `.dev.vars`,
@@ -520,6 +534,81 @@ impl JailConfig {
     } else {
       "deno.json"
     }
+  }
+
+  /// What to do about a jailed script of a native package that failed
+  /// (DENEXT.md item NNN): the package's own fix, or `None` for a package
+  /// that builds and downloads nothing native.
+  pub fn native_failure_hint(
+    &self,
+    package_name: &str,
+    package_folder: &Path,
+    script: &str,
+  ) -> Option<String> {
+    let package_json =
+      std::fs::read_to_string(package_folder.join("package.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    let depends_on = |dep: &str| {
+      package_json.as_ref().is_some_and(|json| {
+        ["dependencies", "optionalDependencies"]
+          .iter()
+          .any(|key| json.get(key).and_then(|d| d.get(dep)).is_some())
+      })
+    };
+    let builtin = super::builtin_exceptions::builtin_exception(package_name);
+    if depends_on("nan") {
+      return Some(format!(
+        "npm:{package_name} is a NAN addon: it is built against Node's V8 C++ API, which this runtime doesn't provide (only Node-API), so it can't load here even when it builds. Use a Node-API package instead, or leave its install script unapproved if nothing loads it."
+      ));
+    }
+    let native = builtin.is_some()
+      || super::node_headers::needs_node_gyp(package_folder, script);
+    if !native {
+      return None;
+    }
+    let mut hint = String::new();
+    if self.paranoid {
+      hint.push_str(&format!(
+        "paranoid is on, so npm:{package_name}'s script gets no network and no built-in exception. "
+      ));
+    }
+    match builtin {
+      Some(builtin) => {
+        let hosts = builtin.host_list();
+        hint.push_str(&format!(
+          "npm:{package_name}'s script may reach {} (the built-in exception) to download its prebuilt binary",
+          hosts.join(", ")
+        ));
+        if builtin.node_gyp {
+          hint.push_str(", and otherwise builds it from source with node-gyp, which needs Python, make and a C++ compiler (Node's headers are provided)");
+        }
+        hint.push_str(&format!(
+          ". Behind a proxy or a mirror, add its host to the package's list: {}",
+          self.supply_chain_line(&format!(
+            "{{ \"jailScripts\": {{ \"packages\": {{ \"{package_name}\": {{ \"net\": [{}, \"<mirror host>\"] }} }} }} }}",
+            hosts
+              .iter()
+              .map(|h| format!("\"{h}\""))
+              .collect::<Vec<_>>()
+              .join(", ")
+          ))
+        ));
+        if package_name == "better-sqlite3" {
+          hint.push_str(". Leaving its install script unapproved works too: this runtime serves better-sqlite3 over its built-in SQLite");
+        }
+        hint.push('.');
+      }
+      None => {
+        hint.push_str(&format!(
+          "npm:{package_name} builds a native addon. A build from source needs Python, make and a C++ compiler (Node's headers are provided); if its script downloads a prebuilt binary, allow the host it downloads from: {}.",
+          self.supply_chain_line(&format!(
+            "{{ \"jailScripts\": {{ \"packages\": {{ \"{package_name}\": {{ \"net\": [\"<download host>\"] }} }} }} }}"
+          ))
+        ));
+      }
+    }
+    Some(hint)
   }
 }
 
@@ -819,9 +908,11 @@ fn declared_host_known(declared: &str, known: &[String]) -> bool {
 /// Network access of a package's scripts: the package's own `net` (a host
 /// list is the narrower grant and wins over `jailScripts.net`; `false` wins
 /// over both `jailScripts.net` and the declared hosts, DENEXT.md item 111),
-/// the config's, or the hosts the package declares for itself, each only
-/// when `jailScripts.knownPackages` lists it for the package (DENEXT.md item
-/// 124: a declaration is a request, not a grant), and none under paranoid.
+/// the config's, the built-in exception's hosts (DENEXT.md item NNN), or the
+/// hosts the package declares for itself, each only when
+/// `jailScripts.knownPackages` (or the built-in list of reviewed ones) lists
+/// it for the package (DENEXT.md item 124: a declaration is a request, not a
+/// grant), and none under paranoid.
 fn jail_net(
   config: &JailConfig,
   package: Option<&JailPackageConfig>,
@@ -845,15 +936,27 @@ fn jail_net(
   if config.paranoid {
     return plain(JailNet::None);
   }
-  let known = config
+  // a package known to download at install: its reviewed hosts, whatever it
+  // declares for itself
+  if let Some(builtin) =
+    super::builtin_exceptions::builtin_exception(package_name)
+  {
+    return plain(JailNet::Hosts(builtin.host_list()));
+  }
+  let mut known = config
     .known_packages
     .get(package_name)
-    .map(Vec::as_slice)
+    .cloned()
     .unwrap_or_default();
+  known.extend(
+    super::builtin_exceptions::builtin_known_hosts(package_name)
+      .iter()
+      .map(|h| h.to_string()),
+  );
   let (allowed, refused): (Vec<String>, Vec<String>) =
     declared_net_hosts(package_folder)
       .into_iter()
-      .partition(|host| declared_host_known(host, known));
+      .partition(|host| declared_host_known(host, &known));
   NetChoice {
     net: if allowed.is_empty() {
       JailNet::None
@@ -1543,13 +1646,18 @@ async fn run_in_dirs(
 
   // the environment
   let mut env: HashMap<OsString, OsString> = HashMap::new();
+  let builtin_env =
+    super::builtin_exceptions::builtin_exception(s.package_name)
+      .filter(|_| !config.paranoid)
+      .map(|e| e.env)
+      .unwrap_or_default();
   for (key, value) in s.env_vars {
     let name = key.to_string_lossy();
-    let passed = package.is_some_and(|p| {
-      p.env.iter().any(|n| {
-        n == name.as_ref() || (cfg!(windows) && n.eq_ignore_ascii_case(&name))
-      })
-    });
+    let same = |n: &str| {
+      n == name.as_ref() || (cfg!(windows) && n.eq_ignore_ascii_case(&name))
+    };
+    let passed = package.is_some_and(|p| p.env.iter().any(|n| same(n)))
+      || builtin_env.iter().any(|n| same(n));
     if passed || keep_env_var(&name, net == JailNet::All) {
       // a registry or proxy URL goes in without its credentials
       let value = if url_valued_env_var(&name) {
@@ -1562,6 +1670,32 @@ async fn run_in_dirs(
   }
   if let Some(address) = &proxy_address {
     set_proxy_env(&mut env, &format!("http://{address}"));
+  }
+  // a native build from source gets Node's headers offline, unless the
+  // project names its own (DENEXT.md item NNN)
+  if let Some(headers) = &config.node_headers
+    && super::node_headers::needs_node_gyp(s.package_folder, s.script)
+    && !env.keys().any(|k| {
+      k.to_string_lossy()
+        .eq_ignore_ascii_case("npm_config_nodedir")
+    })
+  {
+    let mirror = s
+      .env_vars
+      .get(std::ffi::OsStr::new("NODEJS_ORG_MIRROR"))
+      .map(|v| v.to_string_lossy().into_owned());
+    if let Some(dir) = headers.dir(mirror.as_deref()).await {
+      env.insert("npm_config_nodedir".into(), dir.into_os_string());
+    }
+    // the pinned node-gyp, installed outside the jail (the script can't
+    // reach the registry), unless the project names its own
+    if !s
+      .env_vars
+      .contains_key(std::ffi::OsStr::new("DENO_NODE_GYP"))
+      && let Some(entry) = headers.node_gyp().await
+    {
+      env.insert("DENO_NODE_GYP".into(), entry.into_os_string());
+    }
   }
   let mut set = |key: &str, value: &Path| {
     let key = if cfg!(windows) {
@@ -2218,6 +2352,164 @@ mod tests {
         dir.path()
       )),
       (JailNet::All, false)
+    );
+  }
+
+  // DENEXT.md item NNN: a package known to download at install gets its
+  // reviewed hosts by default; the project's own entry, `net: true` and
+  // paranoid still decide first
+  #[test]
+  fn builtin_exceptions() {
+    let dir = tempfile::tempdir().unwrap();
+    // canvas 2 declares its GitHub host; the built-in list replaces it
+    std::fs::write(
+      dir.path().join("package.json"),
+      r#"{ "binary": { "host": "https://declared.example.com/" } }"#,
+    )
+    .unwrap();
+    let github_and_headers = JailNet::Hosts(
+      [
+        "github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+        "nodejs.org",
+      ]
+      .map(String::from)
+      .to_vec(),
+    );
+    for name in ["better-sqlite3", "sharp", "sqlite3", "canvas", "re2"] {
+      assert_eq!(
+        jail_net(&config(false, false), None, name, dir.path()),
+        NetChoice {
+          net: github_and_headers.clone(),
+          declared: false,
+          refused_declared: Vec::new(),
+        },
+        "{name}"
+      );
+    }
+    // a package entry without `net` (only `env`) keeps the built-in hosts
+    assert_eq!(
+      net_of(jail_net(
+        &config(false, false),
+        Some(&JailPackageConfig::default()),
+        "sharp",
+        dir.path()
+      )),
+      (github_and_headers.clone(), false)
+    );
+    // the project's own list, `false`, `net: true` and paranoid come first
+    let own = JailPackageConfig {
+      net: Some(JailNetConfig::Hosts(vec!["mirror.example.com".into()])),
+      ..Default::default()
+    };
+    assert_eq!(
+      net_of(jail_net(
+        &config(false, false),
+        Some(&own),
+        "sharp",
+        dir.path()
+      )),
+      (JailNet::Hosts(vec!["mirror.example.com".into()]), false)
+    );
+    let none = JailPackageConfig {
+      net: Some(JailNetConfig::All(false)),
+      ..Default::default()
+    };
+    assert_eq!(
+      net_of(jail_net(
+        &config(false, false),
+        Some(&none),
+        "sharp",
+        dir.path()
+      )),
+      (JailNet::None, false)
+    );
+    assert_eq!(
+      net_of(jail_net(&config(true, false), None, "sharp", dir.path())),
+      (JailNet::All, false)
+    );
+    assert_eq!(
+      net_of(jail_net(&config(false, true), None, "sharp", dir.path())),
+      (JailNet::None, false)
+    );
+    // any other package: nothing new
+    assert_eq!(
+      jail_net(&config(false, false), None, "left-pad", dir.path()).net,
+      JailNet::None
+    );
+  }
+
+  // DENEXT.md item NNN: a reviewed declared host is honoured without a
+  // `knownPackages` entry
+  #[test]
+  fn builtin_known_declared_hosts() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+      dir.path().join("package.json"),
+      r#"{ "binary": { "host": "https://node-precompiled-binaries.grpc.io/" } }"#,
+    )
+    .unwrap();
+    assert_eq!(
+      jail_net(&config(false, false), None, "grpc", dir.path()),
+      NetChoice {
+        net: JailNet::Hosts(vec!["node-precompiled-binaries.grpc.io".into()]),
+        declared: true,
+        refused_declared: Vec::new(),
+      }
+    );
+    // the same declaration from another package is still refused
+    assert_eq!(
+      jail_net(&config(false, false), None, "grpc-fork", dir.path())
+        .refused_declared,
+      vec!["node-precompiled-binaries.grpc.io".to_string()]
+    );
+  }
+
+  #[test]
+  fn native_failure_hints() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(false, false).with_settings_in_package_json(true);
+    // NAN addon
+    std::fs::write(
+      dir.path().join("package.json"),
+      r#"{ "dependencies": { "nan": "^2.0.0" } }"#,
+    )
+    .unwrap();
+    let hint = config
+      .native_failure_hint("re2", dir.path(), "install-from-cache")
+      .unwrap();
+    assert!(hint.contains("is a NAN addon"), "{hint}");
+    // a built-in one: its hosts and the line for a mirror
+    std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+    let hint = config
+      .native_failure_hint(
+        "better-sqlite3",
+        dir.path(),
+        "prebuild-install || node-gyp rebuild",
+      )
+      .unwrap();
+    assert!(hint.contains("may reach github.com,"), "{hint}");
+    assert!(hint.contains("node-gyp"), "{hint}");
+    assert!(
+      hint.contains(
+        r#"add to package.json: "deno": { "supplyChain": { "jailScripts": { "packages": { "better-sqlite3": { "net": ["github.com", "#
+      ),
+      "{hint}"
+    );
+    assert!(hint.contains("built-in SQLite"), "{hint}");
+    // an unknown native package
+    std::fs::write(dir.path().join("binding.gyp"), "{}").unwrap();
+    let hint = config
+      .native_failure_hint("some-addon", dir.path(), "node-gyp rebuild")
+      .unwrap();
+    assert!(hint.contains("builds a native addon"), "{hint}");
+    assert!(hint.contains(r#""some-addon": { "net": ["<download host>"] }"#));
+    // nothing native
+    std::fs::remove_file(dir.path().join("binding.gyp")).unwrap();
+    assert_eq!(
+      config.native_failure_hint("left-pad", dir.path(), "node build.js"),
+      None
     );
   }
 
