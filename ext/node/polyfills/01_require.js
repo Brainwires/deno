@@ -105,7 +105,9 @@ const {
 } = primordials;
 
 const _httpAgent = core.createLazyLoader("node:_http_agent");
+const _httpClient = core.createLazyLoader("node:_http_client");
 const _httpCommon = core.createLazyLoader("node:_http_common");
+const _httpIncoming = core.createLazyLoader("node:_http_incoming");
 const _httpOutgoing = core.createLazyLoader("node:_http_outgoing");
 const _httpServer = core.createLazyLoader("node:_http_server");
 // Heavy stream class definitions. Lazified - only loaded if a script
@@ -375,7 +377,9 @@ const lazyNodeModules = {
   "internal/webstreams/util": () =>
     core.loadExtScript("ext:deno_node/internal/webstreams/util.js"),
   "_http_agent": () => _httpAgent().default,
+  "_http_client": () => _httpClient().default,
   "_http_common": () => _httpCommon().default,
+  "_http_incoming": () => _httpIncoming().default,
   "_http_outgoing": () => _httpOutgoing().default,
   "_http_server": () => _httpServer().default,
   "http": () => core.loadExtScript("ext:deno_node/http.ts"),

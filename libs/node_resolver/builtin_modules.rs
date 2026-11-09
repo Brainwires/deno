@@ -37,7 +37,9 @@ pub fn is_node_scheme_only_builtin(module_name: &str) -> bool {
 pub static DENO_SUPPORTED_BUILTIN_NODE_MODULES: &[&str] = &[
   // NOTE(bartlomieju): keep this list in sync with `ext/node/polyfills/01_require.js`
   "_http_agent",
+  "_http_client",
   "_http_common",
+  "_http_incoming",
   "_http_outgoing",
   "_http_server",
   "_stream_duplex",

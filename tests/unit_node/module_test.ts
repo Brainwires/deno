@@ -915,3 +915,17 @@ Deno.test("[node/module enableCompileCache] refuses an entry another key wrote",
     await Deno.remove(tempDir, { recursive: true });
   }
 });
+
+Deno.test("[node/module] _http_client and _http_incoming are built-ins", async () => {
+  const require = createRequire(import.meta.url);
+  assert(builtinModules.includes("_http_client"));
+  assert(builtinModules.includes("_http_incoming"));
+  assert(isBuiltin("_http_client"));
+  assert(isBuiltin("node:_http_incoming"));
+  const http = await import("node:http");
+  assertEquals(require("_http_client").ClientRequest, http.ClientRequest);
+  assertEquals(
+    require("node:_http_incoming").IncomingMessage,
+    http.IncomingMessage,
+  );
+});

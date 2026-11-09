@@ -49,6 +49,7 @@ const {
 } = primordials;
 const {
   op_v8_cached_data_version_tag,
+  op_v8_is_string_one_byte_representation,
   op_v8_get_heap_code_statistics,
   op_v8_get_heap_statistics,
   op_v8_get_wire_format_version,
@@ -121,6 +122,11 @@ const {
 
 function cachedDataVersionTag() {
   return op_v8_cached_data_version_tag();
+}
+
+function isStringOneByteRepresentation(content) {
+  validateString(content, "content");
+  return op_v8_is_string_one_byte_representation(content);
 }
 const heapCodeStatisticsBuffer = new Float64Array(4);
 
@@ -819,6 +825,7 @@ const promiseHooks = {
 
 return {
   cachedDataVersionTag,
+  isStringOneByteRepresentation,
   getHeapCodeStatistics,
   getHeapSnapshot,
   getHeapSpaceStatistics,

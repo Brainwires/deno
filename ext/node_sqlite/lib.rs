@@ -148,6 +148,16 @@ pub enum SqliteError {
   #[property("code" = self.code())]
   ActiveCallback,
   #[class(generic)]
+  #[error("extension loading is not allowed")]
+  #[property("code" = self.code())]
+  LoadExtensionNotAllowed,
+  #[class(generic)]
+  #[error(
+    "Cannot enable extension loading because it was disabled at database creation."
+  )]
+  #[property("code" = self.code())]
+  LoadExtensionDisabledAtCreation,
+  #[class(generic)]
   #[error(
     "Cannot raise the \"attach\" limit: ATTACH DATABASE is disabled without full permissions for the database path."
   )]
@@ -243,7 +253,9 @@ impl SqliteError {
       | Self::InUse
       | Self::AlreadyOpen
       | Self::StatementFinalized
-      | Self::ActiveCallback => ErrorCode::ERR_INVALID_STATE,
+      | Self::ActiveCallback
+      | Self::LoadExtensionNotAllowed
+      | Self::LoadExtensionDisabledAtCreation => ErrorCode::ERR_INVALID_STATE,
       Self::NumberTooLarge(_) => ErrorCode::ERR_OUT_OF_RANGE,
       Self::LoadExensionFailed(_) => ErrorCode::ERR_LOAD_SQLITE_EXTENSION,
       Self::AttachLimitDenied => ErrorCode::ERR_ACCESS_DENIED,

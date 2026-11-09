@@ -4,6 +4,7 @@ const mod = core.loadExtScript("ext:deno_node/v8.ts");
 
 export const {
   cachedDataVersionTag,
+  isStringOneByteRepresentation,
   getHeapCodeStatistics,
   getHeapSnapshot,
   getHeapSpaceStatistics,

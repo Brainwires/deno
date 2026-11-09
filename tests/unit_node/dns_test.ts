@@ -442,3 +442,31 @@ Deno.test({
     assert(!families.includes(6), `attempted families: ${families}`);
   },
 });
+
+// An empty name is ENODATA for every record type, as c-ares answers it
+// (upstream denoland/deno#36535): no lookup goes out with the search domains.
+Deno.test("[node/dns] resolve('') fails with ENODATA", async () => {
+  const cases: [string, (cb: (err: ErrnoException | null) => void) => void][] =
+    [
+      ["queryA", (cb) => dns.resolve("", cb)],
+      ["queryA", (cb) => dns.resolve4("", cb)],
+      ["queryAaaa", (cb) => dns.resolve6("", cb)],
+      ["queryMx", (cb) => dns.resolveMx("", cb)],
+      ["queryTxt", (cb) => dns.resolveTxt("", cb)],
+    ];
+  for (const [syscall, run] of cases) {
+    const err = await new Promise<ErrnoException | null>((resolve) =>
+      run(resolve)
+    );
+    assert(err, `${syscall}: expected an error`);
+    assertEquals(err.code, "ENODATA");
+    assertEquals(err.syscall, syscall);
+  }
+  // deno-lint-ignore no-explicit-any
+  const rejected: any = await dnsPromises.resolve("").then(
+    () => fail("dnsPromises.resolve('') resolved"),
+    (e) => e,
+  );
+  assertEquals(rejected.code, "ENODATA");
+  assertEquals(rejected.syscall, "queryA");
+});

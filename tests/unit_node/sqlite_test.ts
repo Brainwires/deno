@@ -2007,3 +2007,38 @@ Deno.test("SQLTagStore invalidated iterator does not reset a live one", () => {
   assertStrictEquals(second.next().value.text, "alice");
   assertStrictEquals(second.next().done, true);
 });
+
+Deno.test("[node/sqlite] enableLoadExtension", () => {
+  const closed = new DatabaseSync(":memory:", { allowExtension: false });
+  assertThrows(
+    // @ts-expect-error testing invalid input
+    () => closed.enableLoadExtension(),
+    TypeError,
+    'The "allow" argument must be a boolean.',
+  );
+  nodeAssert.throws(() => closed.enableLoadExtension(true), {
+    code: "ERR_INVALID_STATE",
+    message:
+      "Cannot enable extension loading because it was disabled at database creation.",
+  });
+  nodeAssert.throws(() => closed.loadExtension("nonexistent"), {
+    code: "ERR_INVALID_STATE",
+    message: "extension loading is not allowed",
+  });
+  // Turning it off is always allowed.
+  closed.enableLoadExtension(false);
+  closed.close();
+
+  const db = new DatabaseSync(":memory:", { allowExtension: true });
+  db.enableLoadExtension(false);
+  nodeAssert.throws(() => db.loadExtension("nonexistent"), {
+    code: "ERR_INVALID_STATE",
+    message: "extension loading is not allowed",
+  });
+  // Back on: the load reaches SQLite, which can't find the library.
+  db.enableLoadExtension(true);
+  nodeAssert.throws(() => db.loadExtension("nonexistent"), {
+    code: "ERR_LOAD_SQLITE_EXTENSION",
+  });
+  db.close();
+});

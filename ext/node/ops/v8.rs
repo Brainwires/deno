@@ -33,6 +33,16 @@ pub fn op_v8_cached_data_version_tag() -> u32 {
   v8::script_compiler::cached_data_version_tag()
 }
 
+/// `v8.isStringOneByteRepresentation(content)`: whether V8 stores the string
+/// as Latin-1 (one byte per character) rather than UTF-16. The caller has
+/// checked that `content` is a string.
+#[op2(fast)]
+pub fn op_v8_is_string_one_byte_representation(
+  content: v8::Local<v8::Value>,
+) -> bool {
+  v8::Local::<v8::String>::try_from(content).is_ok_and(|s| s.is_onebyte())
+}
+
 #[op2(fast)]
 pub fn op_v8_set_flags_from_string(#[string] flags: &str) {
   for flag in flags.split_ascii_whitespace() {

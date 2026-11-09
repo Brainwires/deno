@@ -660,6 +660,9 @@ pub struct DatabaseSync {
   // permissions for the database path. Used to stop the `limits.attach` setter
   // from raising the cap and bypassing the boundary.
   disable_attach: Rc<Cell<bool>>,
+  // `enableLoadExtension()`'s current setting: starts as `allowExtension`,
+  // and can only be turned back on when that was set.
+  load_extension_enabled: Cell<bool>,
 }
 
 struct CallbackDepthGuard {
@@ -959,11 +962,12 @@ impl DatabaseSync {
       statements: Rc::new(RefCell::new(Vec::new())),
       sessions: Rc::new(RefCell::new(Vec::new())),
       location,
-      options,
       ignore_next_sqlite_error: Rc::new(Cell::new(false)),
       authorizer_data: Rc::new(RefCell::new(None)),
       callback_depth: Rc::new(Cell::new(0)),
       disable_attach: Rc::new(Cell::new(disable_attach)),
+      load_extension_enabled: Cell::new(options.allow_extension),
+      options,
     })
   }
 
@@ -1593,6 +1597,38 @@ impl DatabaseSync {
     }
   }
 
+  // Enables or disables `loadExtension()` and the `load_extension()` SQL
+  // function. Loading can only be turned on when the database was opened with
+  // `allowExtension: true`, and turning it on needs the FFI permission, as
+  // opening with `allowExtension` does.
+  #[undefined]
+  fn enable_load_extension(
+    &self,
+    state: &mut OpState,
+    allow: v8::Local<v8::Value>,
+  ) -> Result<(), SqliteError> {
+    let Ok(allow) = v8::Local::<v8::Boolean>::try_from(allow) else {
+      return Err(
+        validators::Error::InvalidArgType(
+          "The \"allow\" argument must be a boolean.".into(),
+        )
+        .into(),
+      );
+    };
+    let allow = allow.is_true();
+    let db = self.conn.borrow();
+    let db = db.as_ref().ok_or(SqliteError::AlreadyClosed)?;
+    if allow && !self.options.allow_extension {
+      return Err(SqliteError::LoadExtensionDisabledAtCreation);
+    }
+    if allow {
+      state.borrow::<PermissionsContainer>().check_ffi_all()?;
+    }
+    set_db_config(db, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, allow);
+    self.load_extension_enabled.set(allow);
+    Ok(())
+  }
+
   // Loads a SQLite extension.
   //
   // This is a wrapper around `sqlite3_load_extension`. It requires FFI permission
@@ -1608,11 +1644,8 @@ impl DatabaseSync {
     let db = self.conn.borrow();
     let db = db.as_ref().ok_or(SqliteError::AlreadyClosed)?;
 
-    if !self.options.allow_extension {
-      return Err(SqliteError::LoadExensionFailed(
-        "Cannot load SQLite extensions when allowExtension is not enabled"
-          .to_string(),
-      ));
+    if !self.options.allow_extension || !self.load_extension_enabled.get() {
+      return Err(SqliteError::LoadExtensionNotAllowed);
     }
 
     state.borrow::<PermissionsContainer>().check_ffi_all()?;

@@ -11480,6 +11480,37 @@ where the changes are discussed.
        short flags repeated, an explicit deny still wins, and the fragments
        between the commas stay inaccessible).
 
+NNN. **`fix(ext/node)`: small Node API holes: `http2.constants`' status codes,
+     `DatabaseSync#enableLoadExtension`, `v8.isStringOneByteRepresentation`,
+     `_http_client` / `_http_incoming`, `dns.resolve("")`**
+     (`ext/node/polyfills/internal/http2/constants.ts`, `ext/node_sqlite`,
+     `ext/node/ops/v8.rs`, `ext/node/polyfills/v8.ts`,
+     `ext/node/polyfills/01_require.js`, `libs/node_resolver/builtin_modules.rs`,
+     `ext/node/polyfills/internal_binding/cares_wrap.ts`).
+     - `http2.constants` has all 63 `HTTP_STATUS_*` names (upstream
+       denoland/deno#36960); it had 10.
+     - `DatabaseSync#enableLoadExtension(allow)` turns `loadExtension()` and the
+       `load_extension()` SQL function on and off (upstream denoland/deno#30218).
+       Turning it on needs a database opened with `allowExtension: true`
+       (`ERR_INVALID_STATE`, "Cannot enable extension loading because it was
+       disabled at database creation.") and `--allow-ffi`, as opening with
+       `allowExtension` does; a non-boolean is `ERR_INVALID_ARG_TYPE`. While it
+       is off, `loadExtension()` fails with Node's `ERR_INVALID_STATE`
+       "extension loading is not allowed" (it was `ERR_LOAD_SQLITE_EXTENSION`
+       with another message).
+     - `v8.isStringOneByteRepresentation(content)`: V8's `String::IsOneByte`.
+     - `require("_http_client")` and `require("_http_incoming")` are built-ins
+       (both polyfills existed but weren't registered), the same
+       `ClientRequest` / `IncomingMessage` as `node:http`.
+     - `dns.resolve("")` and every `resolve*("")` fail with `ENODATA`, as
+       c-ares answers an empty name (upstream denoland/deno#36535); the system
+       resolver expanded "" with the search domains and returned an address.
+     - Tests: unit `http2_test.ts` (the 63 names and values), `sqlite_test.ts`
+       (`enableLoadExtension` validation, the creation rule, off and back on),
+       `v8_test.ts`, `module_test.ts` (`builtinModules`, `isBuiltin`, same
+       classes as `node:http`), `dns_test.ts` (A, AAAA, MX, TXT and the
+       promise API, no lookup made).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
