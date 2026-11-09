@@ -453,6 +453,7 @@ const lazyNodeModules = {
   "trace_events": () =>
     core.loadExtScript("ext:deno_node/trace_events.ts").default,
   "v8": () => core.loadExtScript("ext:deno_node/v8.ts"),
+  "sea": () => core.loadExtScript("ext:deno_node/sea.js"),
   "vfs": () => core.loadExtScript("ext:deno_node/vfs.js"),
   "wasi": () => core.loadExtScript("ext:deno_node/wasi.ts").default,
   "zlib/iter": () => core.loadExtScript("ext:deno_node/zlib/iter.js"),
@@ -493,6 +494,7 @@ function defineLazyNativeModule(name, loader) {
 // package of that name instead. Keep in sync with
 // `NODE_SCHEME_ONLY_BUILTIN_NODE_MODULES` in libs/node_resolver.
 const schemelessBlockList = new SafeSet([
+  "sea",
   "sqlite",
   "test",
   "test/reporters",

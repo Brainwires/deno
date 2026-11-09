@@ -196,7 +196,14 @@ pub fn maybe_rewrite_node_arg0(args: Vec<OsString>) -> Vec<OsString> {
           eprintln!("Errors: {}", errors.join(", "));
         }
       }
-      deno_runtime::exit(1);
+      // Node exits 9 on arguments it refuses.
+      deno_runtime::exit(
+        if node_shim::is_unsupported_build_flag_error(&errors) {
+          node_shim::UNSUPPORTED_BUILD_FLAG_EXIT_CODE
+        } else {
+          1
+        },
+      );
     }
   };
 

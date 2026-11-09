@@ -21,7 +21,11 @@ fn main() {
       } else if e.len() > 1 {
         eprintln!("Errors: {}", e.join(", "));
       }
-      process::exit(1);
+      process::exit(if node_shim::is_unsupported_build_flag_error(&e) {
+        node_shim::UNSUPPORTED_BUILD_FLAG_EXIT_CODE
+      } else {
+        1
+      });
     }
   };
 

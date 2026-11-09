@@ -25,7 +25,7 @@ impl IsBuiltInNodeModuleChecker for DenoIsBuiltInNodeModuleChecker {
 /// built-ins with the `node:` scheme: a bare `vfs` names a package. Keep in sync
 /// with `schemelessBlockList` in `ext/node/polyfills/01_require.js`.
 pub static NODE_SCHEME_ONLY_BUILTIN_NODE_MODULES: &[&str] =
-  &["sqlite", "test", "test/reporters", "vfs"];
+  &["sea", "sqlite", "test", "test/reporters", "vfs"];
 
 /// Whether `module_name` is a built-in only with the `node:` scheme, so a bare
 /// specifier of that name is not resolved to it.
@@ -84,6 +84,7 @@ pub static DENO_SUPPORTED_BUILTIN_NODE_MODULES: &[&str] = &[
   "readline",
   "readline/promises",
   "repl",
+  "sea",
   "sqlite",
   "stream",
   "stream/consumers",

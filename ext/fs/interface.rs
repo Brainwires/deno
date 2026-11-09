@@ -454,6 +454,17 @@ pub trait FileSystem: std::fmt::Debug + MaybeSend + MaybeSync {
     Ok(buf)
   }
 
+  /// The contents of `path` when it is a file this program carries embedded
+  /// (a `deno compile` binary's included files), read without any permission
+  /// check: they are the program's own. `None` when `path` is not one, so
+  /// nothing outside the embedded files is ever read through this.
+  fn read_embedded_file(
+    &self,
+    _path: &std::path::Path,
+  ) -> Option<FsResult<Cow<'static, [u8]>>> {
+    None
+  }
+
   fn is_file_sync(&self, path: &CheckedPath) -> bool {
     self.stat_sync(path).map(|m| m.is_file).unwrap_or(false)
   }

@@ -11565,6 +11565,39 @@ NNN. **`feat(ext/node)`: the `process` long tail: `execve`, `setgroups` /
        `sqlite_version()`; `inspect(process.env)` with and without permission),
        `perf_hooks_test.ts` (`nodeTiming` order, loop milestones, `toJSON`).
 
+NNN. **`feat(node)`: `node:sea` over a compiled program's embedded files, and
+     `node`'s SEA / snapshot flags refuse** (`libs/node_shim/lib.rs`,
+     `libs/node_shim/main.rs`, `cli/node_compat_shim.rs`,
+     `ext/node/polyfills/sea.js`, `ext/node/ops/sea.rs`, `ext/fs/interface.rs`,
+     `cli/rt/file_system.rs`, `ext/node/lib.rs`,
+     `ext/node/polyfills/01_require.js`, `libs/node_resolver/builtin_modules.rs`).
+     - `node --experimental-sea-config`, `--build-sea`, `--build-snapshot`,
+       `--build-snapshot-config` and `--snapshot-blob` are refused: the message
+       names the flag and points at `deno compile` (or `denext build
+       --compile`), and the `node` shim and a `child_process` spawn of Deno exit
+       9, Node's status for refused arguments. Before, the SEA config flag
+       started the REPL, `--build-sea` was handed to V8, and the snapshot flags
+       ran the script. A `deno task` falls back to a real `node`, as for any
+       flag the shim can't parse.
+     - `node:sea` (only with the `node:` scheme, as in Node): `isSea()` is true
+       in a `deno compile` program; `getAsset(key[, encoding])`,
+       `getRawAsset(key)` and `getAssetAsBlob(key[, options])` read the files it
+       carries, a key being a path relative to the main module's directory or
+       an absolute path in the program. They are read through the new
+       `FileSystem::read_embedded_file` (`None` outside the embedded files, so
+       nothing on disk is ever read, and no permission applies: they are the
+       program's own); a missing asset is
+       `ERR_SINGLE_EXECUTABLE_APPLICATION_ASSET_NOT_FOUND`, and outside a
+       compiled program every call but `isSea()` is
+       `ERR_NOT_IN_SINGLE_EXECUTABLE_APPLICATION`. `getAssetKeys()` is not
+       provided.
+     - Tests: `libs/node_shim` `sea_and_snapshot_flags_are_refused`; unit
+       `child_process_test.ts` (a spawn of Deno and a `node` symlink to it, each
+       flag: exit 9, nothing run); spec `compile/node_sea` (not compiled: false
+       and the error; compiled with `--include assets` and no `--allow-read`:
+       text, raw, copy, Blob, a missing key, `/etc/hosts` and a `..` escape not
+       read, a bad key); LSP `node:` completions list `node:sea`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
