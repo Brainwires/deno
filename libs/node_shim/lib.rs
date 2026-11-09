@@ -6548,7 +6548,14 @@ mod tests {
     ] {
       let errors = parse_args(args.clone()).expect_err(&format!("{args:?}"));
       assert!(is_unsupported_build_flag_error(&errors), "{errors:?}");
-      assert!(errors[0].starts_with(&args[0]), "{errors:?}");
+      // The refusal names one of the refused flags given (with both
+      // `--snapshot-blob` and `--build-snapshot`, the latter).
+      assert!(
+        args
+          .iter()
+          .any(|a| a.starts_with("--") && errors[0].starts_with(a.as_str())),
+        "{errors:?}"
+      );
       assert!(errors[0].contains("deno compile"), "{errors:?}");
     }
     // After the script they are the script's own arguments.

@@ -3,9 +3,9 @@ import {
   assert,
   assertEquals,
   AssertionError,
+  assertMatch,
   assertNotEquals,
   assertRejects,
-  assertStringIncludes,
   assertThrows,
 } from "./test_util.ts";
 import { assertType, IsExact } from "@std/testing/types";
@@ -95,9 +95,12 @@ Deno.test({
           1,
           new TextDecoder().decode(result.stderr),
         );
-        assertStringIncludes(
+        // Refused either by SQLite's no-follow open or, where the link
+        // resolves outside the allow scope, by the permission check (DENEXT.md
+        // item 287).
+        assertMatch(
           new TextDecoder().decode(result.stderr),
-          "unable to open database file",
+          /unable to open database file|NotCapable: Requires (read|write) access/,
         );
       };
 

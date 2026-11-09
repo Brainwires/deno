@@ -2106,21 +2106,17 @@ Deno.test({
 // Runs `code` as an ES module in a child Deno with `flags`; returns its exit
 // code and output.
 async function runNodeChild(code: string, flags: string[] = ["-A"]) {
-  const { code: status, stdout, stderr } = await new Deno.Command(
-    Deno.execPath(),
-    {
-      args: ["run", "--quiet", ...flags, "--ext=mjs", "-"],
-      stdin: "piped",
-      stdout: "piped",
-      stderr: "piped",
-      env: { NO_COLOR: "1" },
-    },
-  ).spawn().then(async (child) => {
-    const writer = child.stdin.getWriter();
-    await writer.write(new TextEncoder().encode(code));
-    await writer.close();
-    return await child.output();
-  });
+  const child = new Deno.Command(Deno.execPath(), {
+    args: ["run", "--quiet", ...flags, "--ext=mjs", "-"],
+    stdin: "piped",
+    stdout: "piped",
+    stderr: "piped",
+    env: { NO_COLOR: "1" },
+  }).spawn();
+  const writer = child.stdin.getWriter();
+  await writer.write(new TextEncoder().encode(code));
+  await writer.close();
+  const { code: status, stdout, stderr } = await child.output();
   const decoder = new TextDecoder();
   return {
     status,

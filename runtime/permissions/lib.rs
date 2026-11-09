@@ -8754,7 +8754,9 @@ mod tests {
     std::fs::create_dir_all(parent.join("outside")).unwrap();
     std::fs::write(parent.join("outside/secret.txt"), "secret").unwrap();
     std::fs::write(parent.join("safe/file.txt"), "ok").unwrap();
-    let junction = parent.join("safe/junction");
+    // Joined by component: `cmd`'s `mklink` would read a `/junction` in a
+    // forward-slash path as a switch.
+    let junction = parent.join("safe").join("junction");
     let status = std::process::Command::new("cmd")
       .args(["/C", "mklink", "/J"])
       .arg(&junction)

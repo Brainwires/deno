@@ -4965,7 +4965,7 @@ Deno.test("[node/http] a request queued behind one ended while connecting is sen
 Deno.test("[node/http] proxied request authority is validated and canonicalized", () => {
   const agent = new http.Agent({
     proxyEnv: { HTTP_PROXY: "http://localhost:1" },
-  });
+  } as ProxyAgentLike);
   try {
     const req = http.request({
       agent,

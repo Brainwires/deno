@@ -2355,13 +2355,17 @@ internals.__bootstrapNodeProcess = function (
     // script's first tick, as Node's `loopStart`. Unref'd, so it keeps
     // nothing alive.
     {
-      const webTimers = core.loadExtScript("ext:deno_web/02_timers.js");
-      const id = webTimers.setTimeout(() => {
+      // Called as plain functions: the timers check `this` (a method call
+      // on the module object is an illegal invocation).
+      const { setTimeout: webSetTimeout, unrefTimer } = core.loadExtScript(
+        "ext:deno_web/02_timers.js",
+      );
+      const id = webSetTimeout(() => {
         if (internals.__nodeTimingMarks.loopStart === -1) {
           internals.__nodeTimingMarks.loopStart = performance.now();
         }
       }, 0);
-      webTimers.unrefTimer(id);
+      unrefTimer(id);
     }
 
     // NOTE: we used to delete internals.__bootstrapNodeProcess here. Under
