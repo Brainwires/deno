@@ -325,6 +325,14 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
     let code: any;
     let ret: Awaited<ReturnType<typeof Deno.resolveDns>>;
 
+    // c-ares answers an empty name with ENODATA for every record type (and
+    // Node's error then names no hostname). The system resolver would
+    // instead expand "" with the search domains and answer for the first
+    // one, so `dns.resolve("")` returned an address.
+    if (query === "") {
+      return { code: "ENODATA", ret: [] };
+    }
+
     if (this.#servers !== null && this.#servers.length) {
       for (const server of new SafeArrayIterator(this.#servers)) {
         const ipAddr = server[0];

@@ -260,6 +260,13 @@ pub enum ProcessError {
   #[class(type)]
   #[error("Invalid {0} parameter")]
   InvalidParam(String),
+  #[class(inherit)]
+  #[error(transparent)]
+  Run(
+    #[from]
+    #[inherit]
+    deno_process::ProcessError,
+  ),
 }
 
 #[cfg(unix)]
@@ -483,6 +490,225 @@ pub fn op_node_process_setuid(
   _state: &mut OpState,
   _id: v8::Local<'_, v8::Value>,
 ) -> Result<(), ProcessError> {
+  Err(ProcessError::NotSupported)
+}
+
+/// `process.setgroups(groups)`: each entry a gid or a group name (the caller
+/// has checked the types). Behind `--allow-sys` (all of it: a scoped grant
+/// names no kind for this call).
+#[cfg(not(any(target_os = "android", target_os = "windows")))]
+#[op2(stack_trace)]
+pub fn op_node_process_setgroups<'a>(
+  scope: &mut v8::PinScope<'a, '_>,
+  state: &mut OpState,
+  groups: v8::Local<'a, v8::Array>,
+) -> Result<(), ProcessError> {
+  state.borrow::<PermissionsContainer>().check_sys_all()?;
+
+  let mut gids: Vec<libc::gid_t> = Vec::with_capacity(groups.length() as usize);
+  for i in 0..groups.length() {
+    let Some(value) = groups.get_index(scope, i) else {
+      return Err(ProcessError::InvalidParam("groups".to_string()));
+    };
+    let gid = match serialize_id(scope, value)? {
+      Id::Number(number) => number,
+      Id::Name(name) => get_group_id(&name)?.as_raw(),
+    };
+    gids.push(gid as libc::gid_t);
+  }
+
+  // SAFETY: `gids` holds `gids.len()` initialized gids for the whole call.
+  #[allow(clippy::unnecessary_cast, reason = "the count type differs by OS")]
+  let ret = unsafe { libc::setgroups(gids.len() as _, gids.as_ptr()) };
+  if ret != 0 {
+    return Err(std::io::Error::last_os_error().into());
+  }
+  Ok(())
+}
+
+#[cfg(any(target_os = "android", target_os = "windows"))]
+#[op2(stack_trace)]
+pub fn op_node_process_setgroups(
+  _scope: &mut v8::PinScope<'_, '_>,
+  _state: &mut OpState,
+  _groups: v8::Local<'_, v8::Array>,
+) -> Result<(), ProcessError> {
+  Err(ProcessError::NotSupported)
+}
+
+/// `process.initgroups(user, extraGroup)`: `user` a uid or a user name,
+/// `extraGroup` a gid or a group name. Behind `--allow-sys`, as
+/// [`op_node_process_setgroups`].
+#[cfg(not(any(target_os = "android", target_os = "windows")))]
+#[op2(stack_trace)]
+pub fn op_node_process_initgroups<'a>(
+  scope: &mut v8::PinScope<'a, '_>,
+  state: &mut OpState,
+  user: v8::Local<'a, v8::Value>,
+  extra_group: v8::Local<'a, v8::Value>,
+) -> Result<(), ProcessError> {
+  state.borrow::<PermissionsContainer>().check_sys_all()?;
+
+  // As Node: a uid is looked up for its name, a name is used as given.
+  let user = match serialize_id(scope, user)? {
+    Id::Number(uid) => match User::from_uid(Uid::from_raw(uid))? {
+      Some(user) => user.name,
+      None => {
+        return Err(ProcessError::UnknownCredential(
+          "User".to_string(),
+          uid.to_string(),
+        ));
+      }
+    },
+    Id::Name(name) => name,
+  };
+  let gid = match serialize_id(scope, extra_group)? {
+    Id::Number(number) => number,
+    Id::Name(name) => get_group_id(&name)?.as_raw(),
+  };
+  let user = std::ffi::CString::new(user)
+    .map_err(|_| ProcessError::InvalidParam("user".to_string()))?;
+
+  // SAFETY: `user` is a valid NUL-terminated C string for the whole call.
+  let ret = unsafe { libc::initgroups(user.as_ptr(), gid as _) };
+  if ret != 0 {
+    return Err(std::io::Error::last_os_error().into());
+  }
+  Ok(())
+}
+
+#[cfg(any(target_os = "android", target_os = "windows"))]
+#[op2(stack_trace)]
+pub fn op_node_process_initgroups(
+  _scope: &mut v8::PinScope<'_, '_>,
+  _state: &mut OpState,
+  _user: v8::Local<'_, v8::Value>,
+  _extra_group: v8::Local<'_, v8::Value>,
+) -> Result<(), ProcessError> {
+  Err(ProcessError::NotSupported)
+}
+
+/// `process.execve(file, args, env)`: replaces this process with `file`.
+///
+/// The program is resolved and checked exactly as `Deno.Command` checks it
+/// (`--allow-run` and its allow-list, the `LD_*` / `DYLD_*` rule, an embedded
+/// program's hash). `args` is the whole `argv`, `env` the whole environment
+/// as `[key, value, key, value, ...]`. Rust's buffered stdout / stderr are
+/// flushed and fds 0-2 are put back in blocking mode first, and `SIGPIPE`
+/// goes back to its default action, as the new program expects. Returns only
+/// when execve(2) failed: its errno, with the process left as it was.
+#[cfg(unix)]
+#[op2(stack_trace)]
+#[smi]
+pub fn op_node_process_execve(
+  state: &mut OpState,
+  #[string] file: String,
+  #[scoped] args: Vec<String>,
+  #[scoped] env: Vec<String>,
+) -> Result<i32, ProcessError> {
+  use std::ffi::CString;
+  use std::io::Write;
+  use std::os::unix::ffi::OsStrExt;
+
+  let invalid = |what: &str| ProcessError::InvalidParam(what.to_string());
+  let envs: Vec<(String, String)> = env
+    .chunks_exact(2)
+    .map(|kv| (kv[0].clone(), kv[1].clone()))
+    .collect();
+  // No fd is handed over: an embedded program's handle may take fd 3 up.
+  let run = deno_process::prepare_run(
+    state,
+    &file,
+    None,
+    &envs,
+    /* clear_env */ true,
+    "node:process.execve",
+    3,
+  )?;
+
+  let program = CString::new(run.program.as_os_str().as_bytes())
+    .map_err(|_| invalid("execPath"))?;
+  let argv = args
+    .into_iter()
+    .map(CString::new)
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|_| invalid("args"))?;
+  let envp = run
+    .envs
+    .iter()
+    .map(|(key, value)| {
+      let mut entry = key.as_bytes().to_vec();
+      entry.push(b'=');
+      entry.extend_from_slice(value.as_bytes());
+      CString::new(entry)
+    })
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|_| invalid("env"))?;
+  let mut argv_ptrs: Vec<*const libc::c_char> =
+    argv.iter().map(|arg| arg.as_ptr()).collect();
+  argv_ptrs.push(std::ptr::null());
+  let mut envp_ptrs: Vec<*const libc::c_char> =
+    envp.iter().map(|entry| entry.as_ptr()).collect();
+  envp_ptrs.push(std::ptr::null());
+
+  // Outside Linux the program runs by its path: refuse an embedded program
+  // that changed since it was checked (DENEXT.md item 232). On Linux it runs
+  // from the handle it was hashed through, which `run` keeps open until the
+  // exec.
+  #[cfg(not(target_os = "linux"))]
+  run.verify_after_spawn(|| {})?;
+  #[cfg(target_os = "linux")]
+  let _verified_handle = run;
+
+  let _ = std::io::stdout().flush();
+  let _ = std::io::stderr().flush();
+  let mut stdio_flags = [-1; 3];
+  for (fd, saved) in stdio_flags.iter_mut().enumerate() {
+    // SAFETY: fcntl on fds 0-2 only reads and sets their status flags.
+    unsafe {
+      let flags = libc::fcntl(fd as libc::c_int, libc::F_GETFL);
+      if flags >= 0 && flags & libc::O_NONBLOCK != 0 {
+        *saved = flags;
+        libc::fcntl(
+          fd as libc::c_int,
+          libc::F_SETFL,
+          flags & !libc::O_NONBLOCK,
+        );
+      }
+    }
+  }
+  // SAFETY: restores the default disposition of SIGPIPE; the previous one
+  // is put back if the exec fails.
+  let old_sigpipe = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+
+  // SAFETY: every pointer is a NUL-terminated C string kept alive above, and
+  // both arrays end with a null pointer.
+  unsafe {
+    libc::execve(program.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
+  }
+  let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+
+  // SAFETY: puts back what was changed above.
+  unsafe {
+    libc::signal(libc::SIGPIPE, old_sigpipe);
+    for (fd, saved) in stdio_flags.iter().enumerate() {
+      if *saved >= 0 {
+        libc::fcntl(fd as libc::c_int, libc::F_SETFL, *saved);
+      }
+    }
+  }
+  Ok(errno)
+}
+
+#[cfg(not(unix))]
+#[op2(stack_trace)]
+#[smi]
+pub fn op_node_process_execve(
+  _state: &mut OpState,
+  #[string] _file: String,
+  #[scoped] _args: Vec<String>,
+  #[scoped] _env: Vec<String>,
+) -> Result<i32, ProcessError> {
   Err(ProcessError::NotSupported)
 }
 

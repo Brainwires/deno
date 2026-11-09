@@ -105,7 +105,9 @@ const {
 } = primordials;
 
 const _httpAgent = core.createLazyLoader("node:_http_agent");
+const _httpClient = core.createLazyLoader("node:_http_client");
 const _httpCommon = core.createLazyLoader("node:_http_common");
+const _httpIncoming = core.createLazyLoader("node:_http_incoming");
 const _httpOutgoing = core.createLazyLoader("node:_http_outgoing");
 const _httpServer = core.createLazyLoader("node:_http_server");
 // Heavy stream class definitions. Lazified - only loaded if a script
@@ -375,7 +377,9 @@ const lazyNodeModules = {
   "internal/webstreams/util": () =>
     core.loadExtScript("ext:deno_node/internal/webstreams/util.js"),
   "_http_agent": () => _httpAgent().default,
+  "_http_client": () => _httpClient().default,
   "_http_common": () => _httpCommon().default,
+  "_http_incoming": () => _httpIncoming().default,
   "_http_outgoing": () => _httpOutgoing().default,
   "_http_server": () => _httpServer().default,
   "http": () => core.loadExtScript("ext:deno_node/http.ts"),
@@ -449,6 +453,7 @@ const lazyNodeModules = {
   "trace_events": () =>
     core.loadExtScript("ext:deno_node/trace_events.ts").default,
   "v8": () => core.loadExtScript("ext:deno_node/v8.ts"),
+  "sea": () => core.loadExtScript("ext:deno_node/sea.js"),
   "vfs": () => core.loadExtScript("ext:deno_node/vfs.js"),
   "wasi": () => core.loadExtScript("ext:deno_node/wasi.ts").default,
   "zlib/iter": () => core.loadExtScript("ext:deno_node/zlib/iter.js"),
@@ -489,6 +494,7 @@ function defineLazyNativeModule(name, loader) {
 // package of that name instead. Keep in sync with
 // `NODE_SCHEME_ONLY_BUILTIN_NODE_MODULES` in libs/node_resolver.
 const schemelessBlockList = new SafeSet([
+  "sea",
   "sqlite",
   "test",
   "test/reporters",

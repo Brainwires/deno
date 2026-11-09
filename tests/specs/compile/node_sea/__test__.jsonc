@@ -1,0 +1,34 @@
+{
+  // node:sea in a `deno compile` program: its assets are the files it
+  // carries, read without --allow-read, and nothing outside them.
+  "tempDir": true,
+  "tests": {
+    "not_compiled": {
+      "args": "run main.mjs",
+      "output": "run.out"
+    },
+    "compiled": {
+      "steps": [{
+        "if": "unix",
+        "args": "compile --include assets --output main main.mjs",
+        "output": "[WILDCARD]"
+      }, {
+        "if": "unix",
+        "commandName": "./main",
+        "args": [],
+        "output": "compiled.out",
+        "exitCode": 0
+      }, {
+        "if": "windows",
+        "args": "compile --include assets --output main.exe main.mjs",
+        "output": "[WILDCARD]"
+      }, {
+        "if": "windows",
+        "commandName": "./main.exe",
+        "args": [],
+        "output": "compiled.out",
+        "exitCode": 0
+      }]
+    }
+  }
+}

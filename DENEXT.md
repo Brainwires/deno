@@ -11905,6 +11905,124 @@ name, `Deno.exit()`, `-dir` + `-name`, a worker's own profile) and
 `parallel/test-worker-{cpu,heap}-profile`, `parallel/test-worker-heap-snapshot`
 and `parallel/test-heapsnapshot-near-heap-limit-worker` are the targets.
 
+NNN. **`fix(ext/node)`: small Node API holes: `http2.constants`' status codes,
+     `DatabaseSync#enableLoadExtension`, `v8.isStringOneByteRepresentation`,
+     `_http_client` / `_http_incoming`, `dns.resolve("")`**
+     (`ext/node/polyfills/internal/http2/constants.ts`, `ext/node_sqlite`,
+     `ext/node/ops/v8.rs`, `ext/node/polyfills/v8.ts`,
+     `ext/node/polyfills/01_require.js`, `libs/node_resolver/builtin_modules.rs`,
+     `ext/node/polyfills/internal_binding/cares_wrap.ts`).
+     - `http2.constants` has all 63 `HTTP_STATUS_*` names (upstream
+       denoland/deno#36960); it had 10.
+     - `DatabaseSync#enableLoadExtension(allow)` turns `loadExtension()` and the
+       `load_extension()` SQL function on and off (upstream denoland/deno#30218).
+       Turning it on needs a database opened with `allowExtension: true`
+       (`ERR_INVALID_STATE`, "Cannot enable extension loading because it was
+       disabled at database creation.") and `--allow-ffi`, as opening with
+       `allowExtension` does; a non-boolean is `ERR_INVALID_ARG_TYPE`. While it
+       is off, `loadExtension()` fails with Node's `ERR_INVALID_STATE`
+       "extension loading is not allowed" (it was `ERR_LOAD_SQLITE_EXTENSION`
+       with another message).
+     - `v8.isStringOneByteRepresentation(content)`: V8's `String::IsOneByte`.
+     - `require("_http_client")` and `require("_http_incoming")` are built-ins
+       (both polyfills existed but weren't registered), the same
+       `ClientRequest` / `IncomingMessage` as `node:http`.
+     - `dns.resolve("")` and every `resolve*("")` fail with `ENODATA`, as
+       c-ares answers an empty name (upstream denoland/deno#36535); the system
+       resolver expanded "" with the search domains and returned an address.
+     - Tests: unit `http2_test.ts` (the 63 names and values), `sqlite_test.ts`
+       (`enableLoadExtension` validation, the creation rule, off and back on),
+       `v8_test.ts`, `module_test.ts` (`builtinModules`, `isBuiltin`, same
+       classes as `node:http`), `dns_test.ts` (A, AAAA, MX, TXT and the
+       promise API, no lookup made).
+
+NNN. **`feat(ext/node)`: the `process` long tail: `execve`, `setgroups` /
+     `initgroups`, `finalization`, `performance.nodeTiming`, `process.versions`
+     and an inspectable `process.env`** (`ext/node/ops/process.rs`,
+     `ext/node/ops/perf_hooks.rs`, `ext/node/polyfills/process.ts`,
+     `ext/node/polyfills/_process/process.ts`, `ext/node/polyfills/perf_hooks.js`,
+     `ext/node/polyfills/internal/child_process.ts`, `libs/core/runtime/setup.rs`).
+     - `process.execve(file[, args[, env]])` replaces the process with execve(2)
+       on Unix. The program is resolved and checked exactly as `Deno.Command`
+       checks it (`deno_process::prepare_run`: `--allow-run` and its allow-list,
+       the `LD_*` / `DYLD_*` rule, an embedded program's hash from item 232, run
+       on Linux from the handle it was hashed through); when `file` is Deno
+       itself, the Node arguments are translated as `child_process.spawn`
+       translates them. Rust's stdout / stderr are flushed, fds 0-2 go back to
+       blocking mode and `SIGPIPE` to its default action first; a failed exec
+       puts them back and throws Node's error (`code`, `syscall: "execve"`,
+       positive `errno`, `path`). Validation matches Node's messages; Windows
+       throws `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM` and a worker
+       `ERR_WORKER_UNSUPPORTED_OPERATION`. `exit` listeners don't run.
+     - `process.setgroups(groups)` / `process.initgroups(user, extraGroup)`
+       (Unix but Android): ids or names, names resolved first
+       (`ERR_UNKNOWN_CREDENTIAL`), behind the whole `--allow-sys` (no scoped
+       sys kind names these calls).
+     - `process.finalization.register` / `registerBeforeExit` / `unregister`, as
+       Node's `lib/internal/process/finalization.js`: the callback gets
+       `(obj, event)` on `exit` / `beforeExit` for objects still alive, without
+       keeping them alive.
+     - `performance.nodeTiming` has Node's fields from the runtime's own
+       timestamps, on `performance.now()`'s clock: `nodeStart` (the process
+       start, recorded by a loader constructor), `v8Start` (when this process
+       finished initializing V8, `deno_core::v8_initialized_at`), `environment`
+       (this runtime's `node` extension state), `bootstrapComplete` (the Node
+       bootstrap), `loopStart` (the first timer turn after it) and `loopExit`
+       (the loop running out of work), -1 until they happen. Because
+       `performance.timeOrigin` is when this runtime instance started, not the
+       process, `nodeStart` and `v8Start` are negative. `idleTime` is 0 (not
+       measured) and there is no `uvMetricsInfo`.
+     - `process.versions` gains Node's keys `acorn`, `ada`, `amaro`, `merve`,
+       `nbytes`, `ncrypto`, `simdjson`, `simdutf`, `undici`, `uvwasi` and `zstd`.
+       What Deno bundles reports its real version (`sqlite` 3.53.2, the bundled
+       libsqlite3-sys build, was 3.53.1; `zstd` 1.5.7; `simdutf` 7.7.0, V8's);
+       the rest carry Node 26.5.1's, as `uv` and `ares` already did.
+     - `util.inspect(process.env)` and `console.log(process.env)` show the
+       variables (upstream denoland/deno#35449): inspecting a Proxy formats its
+       target, so they printed `{}`. A private inspect hook on the target prints
+       them; without the whole env permission it stays `{}` (no throw, no
+       prompt). The traps hide the hook.
+     - Tests: unit `process_test.ts` (`execve` re-running the script with
+       translated arguments and env, replacing with `/bin/sh`, the ENOENT error,
+       validation, refusal without `--allow-run`; `setgroups` / `initgroups`
+       validation and unknown names, refusal without `--allow-sys`;
+       `finalization` order and `unregister`; the versions and `sqlite` matching
+       `sqlite_version()`; `inspect(process.env)` with and without permission),
+       `perf_hooks_test.ts` (`nodeTiming` order, loop milestones, `toJSON`).
+
+NNN. **`feat(node)`: `node:sea` over a compiled program's embedded files, and
+     `node`'s SEA / snapshot flags refuse** (`libs/node_shim/lib.rs`,
+     `libs/node_shim/main.rs`, `cli/node_compat_shim.rs`,
+     `ext/node/polyfills/sea.js`, `ext/node/ops/sea.rs`, `ext/fs/interface.rs`,
+     `cli/rt/file_system.rs`, `ext/node/lib.rs`,
+     `ext/node/polyfills/01_require.js`, `libs/node_resolver/builtin_modules.rs`).
+     - `node --experimental-sea-config`, `--build-sea`, `--build-snapshot`,
+       `--build-snapshot-config` and `--snapshot-blob` are refused: the message
+       names the flag and points at `deno compile` (or `denext build
+       --compile`), and the `node` shim and a `child_process` spawn of Deno exit
+       9, Node's status for refused arguments. Before, the SEA config flag
+       started the REPL, `--build-sea` was handed to V8, and the snapshot flags
+       ran the script. A `deno task` falls back to a real `node`, as for any
+       flag the shim can't parse.
+     - `node:sea` (only with the `node:` scheme, as in Node): `isSea()` is true
+       in a `deno compile` program; `getAsset(key[, encoding])`,
+       `getRawAsset(key)` and `getAssetAsBlob(key[, options])` read the files it
+       carries, a key being a path relative to the main module's directory or
+       an absolute path in the program. They are read through the new
+       `FileSystem::read_embedded_file` (`None` outside the embedded files, so
+       nothing on disk is ever read, and no permission applies: they are the
+       program's own); a missing asset is
+       `ERR_SINGLE_EXECUTABLE_APPLICATION_ASSET_NOT_FOUND`, and outside a
+       compiled program every call but `isSea()` is
+       `ERR_NOT_IN_SINGLE_EXECUTABLE_APPLICATION`. `getAssetKeys()` is not
+       provided.
+     - Tests: `libs/node_shim` `sea_and_snapshot_flags_are_refused`; unit
+       `child_process_test.ts` (a spawn of Deno and a `node` symlink to it, each
+       flag: exit 9, nothing run); spec `compile/node_sea` (not compiled: false
+       and the error; compiled with `--include assets` and no `--allow-read`:
+       text, raw, copy, Blob, a missing key, `/etc/hosts` and a `..` escape not
+       read, a bad key); LSP `node:` completions list `node:sea`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

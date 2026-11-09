@@ -354,3 +354,38 @@ Deno.test("[perf_hooks]: node:http server entries are not retroactive", async ()
     );
   }
 });
+
+Deno.test("performance.nodeTiming has the runtime's milestones", async () => {
+  const { nodeTiming } = performance;
+  assertEquals(nodeTiming.name, "node");
+  assertEquals(nodeTiming.entryType, "node");
+  assertEquals(nodeTiming.startTime, 0);
+  assert(nodeTiming.duration >= performance.now() - 1);
+  // The process starts, then V8, then this runtime's Node environment, then
+  // the Node bootstrap completes.
+  assert(Number.isFinite(nodeTiming.nodeStart));
+  assert(nodeTiming.v8Start > nodeTiming.nodeStart);
+  assert(nodeTiming.environment > nodeTiming.v8Start);
+  assert(nodeTiming.bootstrapComplete > nodeTiming.environment);
+  // The values don't move.
+  const copy = { ...nodeTiming };
+  assertEquals(copy.nodeStart, nodeTiming.nodeStart);
+  assertEquals(copy.v8Start, nodeTiming.v8Start);
+  await new Promise((resolve) => setTimeout(resolve, 1));
+  assert(nodeTiming.loopStart >= nodeTiming.bootstrapComplete);
+  assertEquals(nodeTiming.loopExit, -1);
+  assertEquals(nodeTiming.idleTime, 0);
+  assertEquals(Object.keys(nodeTiming.toJSON()), [
+    "name",
+    "entryType",
+    "startTime",
+    "duration",
+    "nodeStart",
+    "v8Start",
+    "bootstrapComplete",
+    "environment",
+    "loopStart",
+    "loopExit",
+    "idleTime",
+  ]);
+});

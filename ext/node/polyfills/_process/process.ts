@@ -19,6 +19,7 @@ const {
   ReflectDefineProperty,
   ReflectHas,
   StringPrototypeSplit,
+  SymbolFor,
   TypeError,
   TypeErrorPrototype,
 } = primordials;
@@ -136,16 +137,31 @@ function denoEnvGet(name: string) {
 }
 
 const OBJECT_PROTO_PROP_NAMES = ObjectGetOwnPropertyNames(ObjectPrototype);
+
+// `process.env` is a Proxy, and inspecting a Proxy formats its target (an
+// empty object) without running the traps, so `util.inspect(process.env)` and
+// `console.log(process.env)` printed `{}` (upstream denoland/deno#35449).
+// The formatter's private hook on the target prints the variables instead, as
+// Node does; the traps keep the hook out of sight.
+const kPrivateCustomInspect = SymbolFor("Deno.privateCustomInspect");
+const envTarget = Object();
+envTarget[kPrivateCustomInspect] = function (inspect, inspectOptions) {
+  // Without the whole env permission it stays `{}`: inspecting an object that
+  // holds `process` must neither throw nor prompt.
+  const granted =
+    Deno.permissions.querySync({ name: "env" }).state === "granted";
+  return inspect(granted ? { ...Deno.env.toObject() } : {}, inspectOptions);
+};
 /**
  * https://nodejs.org/api/process.html#process_process_env
  * Requires env permissions
  */
 const env:
   & InstanceType<ObjectConstructor>
-  & Record<string | symbol, string> = new Proxy(Object(), {
+  & Record<string | symbol, string> = new Proxy(envTarget, {
     get: (target, prop) => {
       if (typeof prop === "symbol") {
-        return target[prop];
+        return prop === kPrivateCustomInspect ? undefined : target[prop];
       }
 
       const envValue = denoEnvGet(prop);
@@ -202,7 +218,7 @@ const env:
     },
     has: (target, prop) => {
       if (typeof prop === "symbol") {
-        return ReflectHas(target, prop);
+        return prop !== kPrivateCustomInspect && ReflectHas(target, prop);
       }
 
       return typeof denoEnvGet(prop) === "string";
@@ -276,11 +292,20 @@ const version = `v${nodeVersion}`;
  */
 const versions = {
   node: nodeVersion,
+  // Node's bundled helpers that Deno does not ship are reported with Node
+  // 26.5.1's versions, as `uv`, `ares` and `llhttp` are, so feature probes
+  // keyed on them don't misfire.
+  acorn: "8.17.0",
+  ada: "3.4.4",
+  amaro: "1.1.10",
   uv: "1.52.1",
   zlib: "1.3.1-e00f703",
   brotli: "1.2.0",
   ares: "1.34.6",
+  merve: "1.2.2",
   modules: "147",
+  nbytes: "0.1.4",
+  ncrypto: "0.0.1",
   nghttp2: "1.69.0",
   // `napi` reflects the N-API version Deno actually implements, not Node's.
   // It must match NAPI_VERSION in ext/napi/js_native_api.rs.
@@ -294,11 +319,19 @@ const versions = {
   openssl: "3.0.7+quic",
   cldr: "48.0",
   icu: "78.3",
+  simdjson: "4.6.4",
+  // The simdutf that V8 bundles (the same in Deno's V8 and Node's).
+  simdutf: "7.7.0",
   tz: "2026b",
+  undici: "8.9.0",
   unicode: "17.0",
+  uvwasi: "0.0.23",
   ngtcp2: "",
   nghttp3: "",
-  sqlite: "3.53.1",
+  // The SQLite that node:sqlite runs (the bundled libsqlite3-sys build).
+  sqlite: "3.53.2",
+  // The zstd that zlib's zstd streams run (the bundled zstd-sys build).
+  zstd: "1.5.7",
   // Will be filled when calling "__bootstrapNodeProcess()",
   deno: "",
   v8: "",

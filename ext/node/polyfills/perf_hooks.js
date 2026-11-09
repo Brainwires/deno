@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 (function () {
-const { core, primordials } = __bootstrap;
+const { core, internals, primordials } = __bootstrap;
 const {
   ArrayFrom,
   ArrayIsArray,
@@ -12,6 +12,7 @@ const {
   ArrayPrototypeSlice,
   ArrayPrototypeSplice,
   BigInt,
+  Float64Array,
   BigIntPrototypeToString,
   Error,
   FunctionPrototypeApply,
@@ -22,6 +23,7 @@ const {
   Number,
   NumberIsInteger,
   NumberMAX_SAFE_INTEGER,
+  ObjectDefineProperties,
   ObjectDefineProperty,
   ObjectFromEntries,
   ObjectPrototypeIsPrototypeOf,
@@ -38,7 +40,7 @@ const {
   PerformanceObserver: WebPerformanceObserver,
   PerformanceObserverEntryList,
 } = core.loadExtScript("ext:deno_web/15_performance.js");
-const { EldHistogram, BaseHistogram } = core.ops;
+const { EldHistogram, BaseHistogram, op_node_perf_milestones_ago } = core.ops;
 const { ERR_ILLEGAL_CONSTRUCTOR, ERR_INVALID_ARG_TYPE, ERR_OUT_OF_RANGE } = core
   .loadExtScript(
     "ext:deno_node/internal/errors.ts",
@@ -206,7 +208,127 @@ const eventLoopUtilization = () => {
 
 performance.eventLoopUtilization = eventLoopUtilization;
 
-performance.nodeTiming = {};
+// `performance.nodeTiming` (Node's PerformanceNodeTiming): the runtime's own
+// milestones on `performance.now()`'s clock. `performance.timeOrigin` is
+// when this runtime instance started, so `nodeStart` (the process start) and
+// `v8Start` come before it and are negative; `environment` is when this
+// runtime's Node environment was set up. `bootstrapComplete`, `loopStart`
+// and `loopExit` are -1 until they happen (recorded by node:process).
+let nodeMilestones = null;
+function getNodeMilestones() {
+  if (nodeMilestones === null) {
+    const ago = new Float64Array(3);
+    op_node_perf_milestones_ago(ago);
+    const now = performance.now();
+    nodeMilestones = [now - ago[0], now - ago[1], now - ago[2]];
+  }
+  return nodeMilestones;
+}
+
+function nodeTimingMark(name) {
+  return internals.__nodeTimingMarks?.[name] ?? -1;
+}
+
+class PerformanceNodeTiming {
+  constructor() {
+    ObjectDefineProperties(this, {
+      name: {
+        __proto__: null,
+        enumerable: true,
+        configurable: true,
+        value: "node",
+      },
+      entryType: {
+        __proto__: null,
+        enumerable: true,
+        configurable: true,
+        value: "node",
+      },
+      startTime: {
+        __proto__: null,
+        enumerable: true,
+        configurable: true,
+        value: 0,
+      },
+      duration: {
+        __proto__: null,
+        enumerable: true,
+        configurable: true,
+        get: () => performance.now(),
+      },
+      nodeStart: {
+        __proto__: null,
+        enumerable: true,
+        configurable: true,
+        get: () => getNodeMilestones()[0],
+      },
+      v8Start: {
+        __proto__: null,
+        enumerable: true,
+        configurable: true,
+        get: () => getNodeMilestones()[1],
+      },
+      environment: {
+        __proto__: null,
+        enumerable: true,
+        configurable: true,
+        get: () => getNodeMilestones()[2],
+      },
+      bootstrapComplete: {
+        __proto__: null,
+        enumerable: true,
+        configurable: true,
+        get: () => nodeTimingMark("bootstrapComplete"),
+      },
+      loopStart: {
+        __proto__: null,
+        enumerable: true,
+        configurable: true,
+        get: () => nodeTimingMark("loopStart"),
+      },
+      loopExit: {
+        __proto__: null,
+        enumerable: true,
+        configurable: true,
+        get: () => nodeTimingMark("loopExit"),
+      },
+      // The loop's idle time is not measured.
+      idleTime: {
+        __proto__: null,
+        enumerable: true,
+        configurable: true,
+        get: () => 0,
+      },
+    });
+  }
+
+  [customInspectSymbol](depth, options) {
+    if (depth < 0) return this;
+    const opts = {
+      ...options,
+      depth: options.depth == null ? null : options.depth - 1,
+    };
+    return `PerformanceNodeTiming ${inspect(this.toJSON(), opts)}`;
+  }
+
+  toJSON() {
+    return {
+      name: "node",
+      entryType: "node",
+      startTime: this.startTime,
+      duration: this.duration,
+      nodeStart: this.nodeStart,
+      v8Start: this.v8Start,
+      bootstrapComplete: this.bootstrapComplete,
+      environment: this.environment,
+      loopStart: this.loopStart,
+      loopExit: this.loopExit,
+      idleTime: this.idleTime,
+    };
+  }
+}
+
+performance.nodeTiming = new PerformanceNodeTiming();
 
 function recordTimerifyHistogram(histogram, start) {
   const durationNs = MathMax(1, MathRound((performance.now() - start) * 1e6));

@@ -24,12 +24,15 @@ import {
   op_inspector_port,
   op_node_load_env_file,
   op_node_process_constrained_memory,
+  op_node_process_execve,
+  op_node_process_initgroups,
   op_node_process_kill,
   op_node_process_resource_usage,
   op_node_process_set_title,
   op_node_process_setegid,
   op_node_process_seteuid,
   op_node_process_setgid,
+  op_node_process_setgroups,
   op_node_process_setuid,
   op_process_abort,
   op_stream_base_register_state,
@@ -51,7 +54,9 @@ const { onWarning } = core.loadExtScript(
 );
 const {
   parseFileMode,
+  validateArray,
   validateBoolean,
+  validateFunction,
   validateNumber,
   validateObject,
   validateString,
@@ -59,7 +64,9 @@ const {
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
 const {
   denoErrorToNodeError,
+  ERR_FEATURE_UNAVAILABLE_ON_PLATFORM,
   ERR_INVALID_ARG_TYPE,
+  ERR_INVALID_ARG_VALUE,
   ERR_INVALID_ARG_VALUE_RANGE,
   ERR_OUT_OF_RANGE,
   ERR_UNCAUGHT_EXCEPTION_CAPTURE_ALREADY_SET,
@@ -67,6 +74,7 @@ const {
   ERR_WORKER_UNSUPPORTED_OPERATION,
   errnoException,
   NodeTypeError,
+  uvException,
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
 const { getOptionValue } = core.loadExtScript(
   "ext:deno_node/internal/options.ts",
@@ -150,8 +158,11 @@ const lazyLoadUtil = core.createLazyLoader<typeof utilModule>(
 const {
   ArrayIsArray,
   ArrayPrototypeConcat,
+  ArrayPrototypeFilter,
   ArrayPrototypeFind,
+  ArrayPrototypeIndexOf,
   ArrayPrototypePush,
+  ArrayPrototypeSlice,
   ArrayPrototypeSplice,
   BigInt,
   Error,
@@ -182,10 +193,13 @@ const {
   ReflectHas,
   ReflectOwnKeys,
   SafeArrayIterator,
+  SafeFinalizationRegistry,
   SafeMap,
   SafeWeakMap,
+  SafeWeakRef,
   SafeWeakSet,
   String,
+  StringPrototypeIncludes,
   StringPrototypeStartsWith,
   SymbolFor,
   SymbolToStringTag,
@@ -692,15 +706,228 @@ if (!isWindows) {
   }
 }
 
+// `process.setgroups` / `process.initgroups` (Node's
+// lib/internal/bootstrap/switches/does_own_process_state.js): every id is a
+// uint32 or a name; names resolve before the call. Both need `--allow-sys`.
+let initgroups, setgroups;
+
+function validateId(id: unknown, name: string) {
+  if (typeof id === "number") {
+    validateUint32(id, name);
+  } else if (typeof id !== "string") {
+    throw new ERR_INVALID_ARG_TYPE(name, ["number", "string"], id);
+  }
+}
+
+if (!isWindows && !isAndroid) {
+  setgroups = function setgroups(groups: (number | string)[]) {
+    validateArray(groups, "groups");
+    for (let i = 0; i < groups.length; i++) {
+      validateId(groups[i], `groups[${i}]`);
+    }
+    try {
+      op_node_process_setgroups(groups);
+    } catch (err) {
+      throw denoErrorToNodeError(err as Error, { syscall: "setgroups" });
+    }
+  };
+
+  initgroups = function initgroups(
+    user: number | string,
+    extraGroup: number | string,
+  ) {
+    validateId(user, "user");
+    validateId(extraGroup, "extraGroup");
+    try {
+      op_node_process_initgroups(user, extraGroup);
+    } catch (err) {
+      throw denoErrorToNodeError(err as Error, { syscall: "initgroups" });
+    }
+  };
+}
+
+const lazyInternalChildProcess = core.createLazyLoader(
+  "ext:deno_node/internal/child_process.ts",
+);
+
+/**
+ * `process.execve(file[, args[, env]])`: replaces the process with `file`
+ * (execve(2)), after flushing stdio. Needs `--allow-run` for `file`, as
+ * spawning it would. When `file` is Deno itself, the Node arguments are
+ * translated as `child_process.spawn` translates them. Unix only; not in
+ * workers.
+ */
+function execve(
+  execPath: string,
+  args: string[] = [],
+  env?: Record<string, string>,
+) {
+  if (internals.__isWorkerThread) {
+    throw new ERR_WORKER_UNSUPPORTED_OPERATION("Calling process.execve");
+  }
+  if (isWindows) {
+    throw new ERR_FEATURE_UNAVAILABLE_ON_PLATFORM("process.execve");
+  }
+  validateString(execPath, "execPath");
+  validateArray(args, "args");
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (typeof arg !== "string" || StringPrototypeIncludes(arg, "\u0000")) {
+      throw new ERR_INVALID_ARG_VALUE(
+        `args[${i}]`,
+        arg,
+        "must be a string without null bytes",
+      );
+    }
+  }
+  let envObject: Record<string, string>;
+  if (env !== undefined) {
+    validateObject(env, "env");
+    envObject = { __proto__: null } as unknown as Record<string, string>;
+    const entries = ObjectEntries(env);
+    for (let i = 0; i < entries.length; i++) {
+      const { 0: key, 1: value } = entries[i];
+      if (
+        typeof key !== "string" || typeof value !== "string" ||
+        StringPrototypeIncludes(key, "\u0000") ||
+        StringPrototypeIncludes(value, "\u0000")
+      ) {
+        throw new ERR_INVALID_ARG_VALUE(
+          "env",
+          env,
+          "must be an object with string keys and values without null bytes",
+        );
+      }
+      envObject[key] = value;
+    }
+  } else {
+    envObject = Deno.env.toObject();
+  }
+
+  let argv = args;
+  if (args.length > 0) {
+    // As a spawn of the same program would run it: Deno given Node's flags.
+    const { 1: translated } = lazyInternalChildProcess().buildCommand(
+      execPath,
+      ArrayPrototypeSlice(args, 1),
+      envObject,
+    );
+    argv = [args[0], ...new SafeArrayIterator(translated)];
+  }
+  const envPairs: string[] = [];
+  const keys = ObjectKeys(envObject);
+  for (let i = 0; i < keys.length; i++) {
+    ArrayPrototypePush(envPairs, keys[i], String(envObject[keys[i]]));
+  }
+
+  // Returns only when execve(2) failed, with its errno.
+  const errno = op_node_process_execve(execPath, argv, envPairs);
+  const err = uvException({ errno: -errno, syscall: "execve", path: execPath });
+  err.errno = errno;
+  throw err;
+}
+
+/**
+ * `process.finalization` (Node's lib/internal/process/finalization.js): calls
+ * `fn(obj, event)` on `exit` (or `beforeExit`) for each registered object
+ * that is still alive, without keeping it alive.
+ */
+// Node's kValidateObjectAllowObjects: arrays and functions are objects too.
+const kValidateObjectAllowObjects = { allowArray: true, allowFunction: true };
+
+function createFinalization() {
+  let registry = null;
+  const refs = { __proto__: null, exit: [], beforeExit: [] };
+  const functions = {
+    __proto__: null,
+    exit: () => callRefsToFree("exit"),
+    beforeExit: () => callRefsToFree("beforeExit"),
+  };
+
+  function install(event: "exit" | "beforeExit") {
+    if (refs[event].length > 0) return;
+    process.on(event, functions[event]);
+  }
+
+  function uninstall(event: "exit" | "beforeExit") {
+    if (refs[event].length > 0) return;
+    process.removeListener(event, functions[event]);
+  }
+
+  function callRefsToFree(event: "exit" | "beforeExit") {
+    const list = refs[event];
+    refs[event] = [];
+    uninstall(event);
+    for (let i = 0; i < list.length; i++) {
+      const ref = list[i];
+      const obj = ref.deref();
+      if (obj !== undefined) {
+        ref.fn(obj, event);
+      }
+    }
+  }
+
+  function clear(ref) {
+    for (const event of new SafeArrayIterator(["exit", "beforeExit"])) {
+      const index = ArrayPrototypeIndexOf(refs[event], ref);
+      if (index !== -1) {
+        ArrayPrototypeSplice(refs[event], index, 1);
+        uninstall(event);
+      }
+    }
+  }
+
+  function _register(event: "exit" | "beforeExit", obj: object, fn) {
+    install(event);
+    const ref = new SafeWeakRef(obj);
+    ref.fn = fn;
+    registry ??= new SafeFinalizationRegistry(clear);
+    registry.register(obj, ref, obj);
+    ArrayPrototypePush(refs[event], ref);
+  }
+
+  function register(obj: object, fn: (obj: object, event: string) => void) {
+    validateObject(obj, "obj", kValidateObjectAllowObjects);
+    validateFunction(fn, "fn");
+    _register("exit", obj, fn);
+  }
+
+  function registerBeforeExit(
+    obj: object,
+    fn: (obj: object, event: string) => void,
+  ) {
+    validateObject(obj, "obj", kValidateObjectAllowObjects);
+    validateFunction(fn, "fn");
+    _register("beforeExit", obj, fn);
+  }
+
+  function unregister(obj: object) {
+    if (registry === null) return;
+    registry.unregister(obj);
+    for (const event of new SafeArrayIterator(["exit", "beforeExit"])) {
+      refs[event] = ArrayPrototypeFilter(refs[event], (ref) => {
+        const target = ref.deref();
+        return target !== undefined && target !== obj;
+      });
+      uninstall(event);
+    }
+  }
+
+  return { register, registerBeforeExit, unregister };
+}
+
 export {
+  execve,
   getegid,
   geteuid,
   getgid,
   getuid,
+  initgroups,
   report,
   setegid,
   seteuid,
   setgid,
+  setgroups,
   setuid,
 };
 
@@ -1506,6 +1733,16 @@ process.setgid = setgid;
 /** This method is removed on Windows */
 process.setuid = setuid;
 
+/** This method is removed on Windows */
+process.setgroups = setgroups;
+
+/** This method is removed on Windows */
+process.initgroups = initgroups;
+
+process.execve = execve;
+
+process.finalization = createFinalization();
+
 // `getBuiltinModule` is also a named export of node:process (Node 22+).
 // Resolve node:module lazily so node:process stays out of the eager snapshot.
 export function getBuiltinModule(id) {
@@ -1738,6 +1975,11 @@ function dispatchProcessBeforeExitEvent() {
 }
 
 function dispatchProcessExitEvent() {
+  // The event loop ran out of work: Node's `nodeTiming.loopExit`.
+  const marks = internals.__nodeTimingMarks;
+  if (marks !== undefined && marks.loopExit === -1) {
+    marks.loopExit = performance.now();
+  }
   if (!process._exiting) {
     process._exiting = true;
     process.emit("exit", process.exitCode || 0);
@@ -1874,6 +2116,12 @@ internals.__bootstrapNodeProcess = function (
       return;
     }
     internals.__nodeProcessBootstrapped = true;
+    // `performance.nodeTiming`'s loop milestones (see perf_hooks.js).
+    internals.__nodeTimingMarks = {
+      bootstrapComplete: -1,
+      loopStart: -1,
+      loopExit: -1,
+    };
     // Register the stream-wrap GothamState (used by net/tcp/pipe handles and
     // process._getActiveHandles). Previously this ran in 01_require.js's
     // `initialize`; under node-defer that no longer auto-runs, and the op
@@ -2068,6 +2316,7 @@ internals.__bootstrapNodeProcess = function (
         "setegid",
         "setgroups",
         "initgroups",
+        "execve",
       ];
       for (let i = 0; i < disabledFns.length; i++) {
         const fn = disabledFns[i];
@@ -2099,6 +2348,20 @@ internals.__bootstrapNodeProcess = function (
       // assertions in parallel/test-worker-unsupported-things.js.
       delete process._debugEnd;
       delete process._debugProcess;
+    }
+
+    internals.__nodeTimingMarks.bootstrapComplete = performance.now();
+    // The first timer to fire marks the event loop running: after the main
+    // script's first tick, as Node's `loopStart`. Unref'd, so it keeps
+    // nothing alive.
+    {
+      const webTimers = core.loadExtScript("ext:deno_web/02_timers.js");
+      const id = webTimers.setTimeout(() => {
+        if (internals.__nodeTimingMarks.loopStart === -1) {
+          internals.__nodeTimingMarks.loopStart = performance.now();
+        }
+      }, 0);
+      webTimers.unrefTimer(id);
     }
 
     // NOTE: we used to delete internals.__bootstrapNodeProcess here. Under

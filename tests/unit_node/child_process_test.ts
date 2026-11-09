@@ -1980,3 +1980,52 @@ Deno.test({
   CP.spawn(Deno.execPath(), args).on("exit", resolve);
   assertEquals(await promise, 9);
 });
+
+// Node's single-executable and snapshot builders have no Deno counterpart
+// but `deno compile`: a `node` given their flags refuses with exit 9 instead
+// of running the script or starting the REPL.
+Deno.test("node SEA / snapshot flags are refused", async () => {
+  const tmp = Deno.makeTempDirSync();
+  try {
+    const script = path.join(tmp, "entry.js");
+    Deno.writeTextFileSync(script, 'console.log("ran the script");');
+    const cases = [
+      ["--experimental-sea-config", "sea.json"],
+      ["--build-sea", "sea.json"],
+      ["--build-snapshot", script],
+      ["--snapshot-blob", "snap.blob", script],
+    ];
+    for (const args of cases) {
+      const child = CP.spawnSync(Deno.execPath(), args, {
+        cwd: tmp,
+        encoding: "utf8",
+        input: "",
+      });
+      assertEquals(child.status, 9, `${args}: ${child.stderr}`);
+      assertEquals(child.stdout, "", `${args}`);
+      assertStringIncludes(child.stderr, `${args[0]} is not supported`);
+      assertStringIncludes(child.stderr, "deno compile");
+    }
+
+    // A `node` that is Deno itself (the shim on PATH) refuses the same way.
+    if (Deno.build.os !== "windows") {
+      const node = path.join(tmp, "node");
+      Deno.symlinkSync(Deno.execPath(), node);
+      for (const args of cases) {
+        const out = await new Deno.Command(node, {
+          args,
+          cwd: tmp,
+          stdin: "null",
+          stdout: "piped",
+          stderr: "piped",
+        }).output();
+        const stderr = new TextDecoder().decode(out.stderr);
+        assertEquals(out.code, 9, `${args}: ${stderr}`);
+        assertEquals(new TextDecoder().decode(out.stdout), "", `${args}`);
+        assertStringIncludes(stderr, "deno compile");
+      }
+    }
+  } finally {
+    Deno.removeSync(tmp, { recursive: true });
+  }
+});

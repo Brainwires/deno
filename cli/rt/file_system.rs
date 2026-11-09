@@ -139,6 +139,25 @@ impl FileSystem for DenoRtSys {
     RealFs.cwd()
   }
 
+  // `node:sea`'s assets: the compiled program's embedded files, from the
+  // embedded data itself (also when they were extracted to disk).
+  fn read_embedded_file(
+    &self,
+    path: &Path,
+  ) -> Option<FsResult<Cow<'static, [u8]>>> {
+    let path = deno_path_util::normalize_path(Cow::Borrowed(path));
+    if !self.vfs.is_path_within(&path) {
+      return None;
+    }
+    Some(
+      self
+        .vfs
+        .file_entry(&path)
+        .and_then(|file| self.vfs.read_file_all(file))
+        .map_err(Into::into),
+    )
+  }
+
   fn tmp_dir(&self) -> FsResult<PathBuf> {
     RealFs.tmp_dir()
   }

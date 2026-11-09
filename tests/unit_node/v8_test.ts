@@ -312,3 +312,19 @@ Deno.test({
     });
   },
 });
+
+Deno.test({
+  name: "isStringOneByteRepresentation",
+  fn() {
+    assertEquals(v8.isStringOneByteRepresentation("plain ascii"), true);
+    assertEquals(v8.isStringOneByteRepresentation("café"), true);
+    assertEquals(v8.isStringOneByteRepresentation("中文"), false);
+    assertEquals(v8.isStringOneByteRepresentation("\u{1f600}"), false);
+    assertThrows(
+      // @ts-expect-error testing invalid input
+      () => v8.isStringOneByteRepresentation(1),
+      TypeError,
+      'The "content" argument must be of type string',
+    );
+  },
+});

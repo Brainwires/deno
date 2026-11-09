@@ -23,6 +23,7 @@ pub mod perf_hooks;
 pub mod pipe_wrap;
 pub mod process;
 pub mod require;
+pub mod sea;
 pub mod shell;
 pub mod stream_wrap;
 pub(crate) mod stream_wrap_state;

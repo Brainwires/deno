@@ -2102,3 +2102,282 @@ Deno.test({
   assertEquals(process.stderr.readable, false);
   assertEquals(process.stdout.writable, true);
 });
+
+// Runs `code` as an ES module in a child Deno with `flags`; returns its exit
+// code and output.
+async function runNodeChild(code: string, flags: string[] = ["-A"]) {
+  const { code: status, stdout, stderr } = await new Deno.Command(
+    Deno.execPath(),
+    {
+      args: ["run", "--quiet", ...flags, "--ext=mjs", "-"],
+      stdin: "piped",
+      stdout: "piped",
+      stderr: "piped",
+      env: { NO_COLOR: "1" },
+    },
+  ).spawn().then(async (child) => {
+    const writer = child.stdin.getWriter();
+    await writer.write(new TextEncoder().encode(code));
+    await writer.close();
+    return await child.output();
+  });
+  const decoder = new TextDecoder();
+  return {
+    status,
+    stdout: decoder.decode(stdout),
+    stderr: decoder.decode(stderr),
+  };
+}
+
+Deno.test("process.versions has Node's library keys", async () => {
+  for (
+    const key of [
+      "acorn",
+      "ada",
+      "amaro",
+      "ares",
+      "brotli",
+      "llhttp",
+      "merve",
+      "nbytes",
+      "ncrypto",
+      "nghttp2",
+      "simdjson",
+      "simdutf",
+      "sqlite",
+      "undici",
+      "uv",
+      "uvwasi",
+      "zlib",
+      "zstd",
+    ]
+  ) {
+    assertMatch(
+      process.versions[key as keyof typeof process.versions] as string,
+      /^\d+\.\d+\.\d+/,
+      key,
+    );
+  }
+  // The libraries Deno bundles report their real versions.
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(":memory:");
+  const { v } = db.prepare("SELECT sqlite_version() AS v").get() as {
+    v: string;
+  };
+  db.close();
+  assertEquals(process.versions.sqlite, v);
+});
+
+Deno.test("util.inspect(process.env) shows the variables (#35449)", async () => {
+  const { inspect } = await import("node:util");
+  process.env.DENO_INSPECT_ENV_PROBE = "probe-value";
+  try {
+    const shown = inspect(process.env);
+    assertMatch(shown, /DENO_INSPECT_ENV_PROBE: 'probe-value'/);
+    // The hook is not visible through the object.
+    const hook = Symbol.for("Deno.privateCustomInspect");
+    // deno-lint-ignore no-explicit-any
+    assertEquals((process.env as any)[hook], undefined);
+    assertFalse(hook in process.env);
+  } finally {
+    delete process.env.DENO_INSPECT_ENV_PROBE;
+  }
+  // Without the env permission it stays `{}` and doesn't throw.
+  const { status, stdout } = await runNodeChild(
+    `import process from "node:process";
+     import { inspect } from "node:util";
+     console.log(inspect(process.env));`,
+    [],
+  );
+  assertEquals(status, 0);
+  assertEquals(stdout.trim(), "{}");
+});
+
+Deno.test("process.finalization", async () => {
+  assertThrows(
+    // deno-lint-ignore no-explicit-any
+    () => (process as any).finalization.register(undefined, () => {}),
+    TypeError,
+    "must be of type object",
+  );
+  assertThrows(
+    // deno-lint-ignore no-explicit-any
+    () => (process as any).finalization.registerBeforeExit(undefined),
+    TypeError,
+    "must be of type object",
+  );
+  const { status, stdout } = await runNodeChild(`
+    import process from "node:process";
+    const kept = { name: "kept" };
+    const dropped = { name: "dropped" };
+    const early = { name: "early" };
+    process.finalization.register(kept, (obj, event) => {
+      console.log("exit", obj.name, event);
+    });
+    process.finalization.register(dropped, () => console.log("not called"));
+    process.finalization.unregister(dropped);
+    process.finalization.unregister(dropped);
+    process.finalization.registerBeforeExit(early, (obj, event) => {
+      console.log("beforeExit", obj.name, event);
+    });
+    process.on("exit", () => console.log("user exit", kept.name));
+  `);
+  assertEquals(status, 0);
+  assertEquals(
+    stdout,
+    "beforeExit early beforeExit\nexit kept exit\nuser exit kept\n",
+  );
+});
+
+Deno.test({
+  name: "process.setgroups / process.initgroups",
+  ignore: Deno.build.os === "windows",
+  fn() {
+    // deno-lint-ignore no-explicit-any
+    const p = process as any;
+    assertEquals(typeof p.setgroups, "function");
+    assertEquals(typeof p.initgroups, "function");
+    assertThrows(
+      () => p.setgroups(),
+      TypeError,
+      'The "groups" argument must be an instance of Array',
+    );
+    assertThrows(() => p.setgroups([1, -1]), RangeError);
+    assertThrows(
+      () => p.setgroups([{}]),
+      TypeError,
+      'The "groups[0]" argument must be one of type number or string',
+    );
+    try {
+      p.setgroups([1, "fhqwhgadshgnsdhjsdbkhsdabkfabkveyb"]);
+      fail("setgroups accepted an unknown group");
+    } catch (e) {
+      // deno-lint-ignore no-explicit-any
+      assertEquals((e as any).code, "ERR_UNKNOWN_CREDENTIAL");
+      assertMatch(
+        (e as Error).message,
+        /Group identifier does not exist: fhqwhgadshgnsdhjsdbkhsdabkfabkveyb/,
+      );
+    }
+    assertThrows(
+      () => p.initgroups(null),
+      TypeError,
+      'The "user" argument must be one of type number or string',
+    );
+    assertThrows(
+      () => p.initgroups("foo", null),
+      TypeError,
+      'The "extraGroup" argument must be one of type number or string',
+    );
+    try {
+      p.initgroups("nobody", "fhqwhgadshgnsdhjsdbkhsdabkfabkveyb");
+      fail("initgroups accepted an unknown group");
+    } catch (e) {
+      // deno-lint-ignore no-explicit-any
+      assertEquals((e as any).code, "ERR_UNKNOWN_CREDENTIAL");
+    }
+  },
+});
+
+Deno.test({
+  name: "process.setgroups needs --allow-sys",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const { status, stderr } = await runNodeChild(
+      `import process from "node:process"; process.setgroups([]);`,
+      ["--allow-env"],
+    );
+    assertEquals(status, 1);
+    assertMatch(stderr, /NotCapable|Requires sys access/);
+  },
+});
+
+Deno.test({
+  name: "process.execve replaces the process",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const tmp = Deno.makeTempDirSync();
+    try {
+      const script = path.join(tmp, "execve.mjs");
+      Deno.writeTextFileSync(
+        script,
+        `import process from "node:process";
+        import assert from "node:assert";
+        if (process.argv[2] === "replaced") {
+          assert.strictEqual(process.env.EXECVE_A, "FIRST");
+          console.log("replaced", process.argv.slice(2).join(" "));
+        } else {
+          process.on("exit", () => console.log("exit listener ran"));
+          process.stdout.write("before ");
+          process.execve(
+            process.execPath,
+            [process.execPath, ${JSON.stringify(script)}, "replaced", "x"],
+            { ...process.env, EXECVE_A: "FIRST" },
+          );
+          console.log("not reached");
+        }`,
+      );
+      const run = await new Deno.Command(Deno.execPath(), {
+        args: ["run", "--quiet", "-A", script],
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      const out = new TextDecoder().decode(run.stdout);
+      assertEquals(new TextDecoder().decode(run.stderr), "");
+      assertEquals(run.code, 0);
+      assertEquals(out, "before replaced replaced x\n");
+    } finally {
+      Deno.removeSync(tmp, { recursive: true });
+    }
+
+    // Another program, and the failure path.
+    const { status, stdout } = await runNodeChild(`
+      import process from "node:process";
+      try {
+        process.execve(process.execPath + "_non_existing", ["x"]);
+      } catch (e) {
+        console.log(e.code, e.syscall, e.errno > 0, e.path.endsWith("_non_existing"));
+      }
+      process.execve("/bin/sh", ["sh", "-c", "echo from sh $EXECVE_B"], { EXECVE_B: "b" });
+    `);
+    assertEquals(status, 0);
+    assertEquals(stdout, "ENOENT execve true true\nfrom sh b\n");
+  },
+});
+
+Deno.test({
+  name: "process.execve validates and needs --allow-run",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    // deno-lint-ignore no-explicit-any
+    const execve = (process as any).execve;
+    assertThrows(
+      () => execve(123),
+      TypeError,
+      'The "execPath" argument must be of type string',
+    );
+    assertThrows(
+      () => execve("/bin/sh", "123"),
+      TypeError,
+      'The "args" argument must be an instance of Array',
+    );
+    assertThrows(
+      () => execve("/bin/sh", ["a\u0000b"]),
+      TypeError,
+      "The argument 'args[0]' must be a string without null bytes",
+    );
+    assertThrows(
+      () => execve("/bin/sh", [], { abc: 123 }),
+      TypeError,
+      "The argument 'env' must be an object with string keys and values without null bytes",
+    );
+    const { status, stdout, stderr } = await runNodeChild(
+      `import process from "node:process";
+       process.execve("/bin/sh", ["sh", "-c", "echo ran"], {});`,
+      ["--allow-env"],
+    );
+    assertEquals(stdout, "");
+    assertEquals(status, 1);
+    assertMatch(stderr, /NotCapable|Requires run access/);
+  },
+});

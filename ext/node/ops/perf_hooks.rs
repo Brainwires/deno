@@ -430,3 +430,58 @@ impl BaseHistogram {
     self.exceeds.get()
   }
 }
+
+/// When the process started: recorded by a loader constructor, before `main`
+/// runs (or, where there is none, the first time it is asked for).
+static PROCESS_START: std::sync::OnceLock<std::time::Instant> =
+  std::sync::OnceLock::new();
+
+#[cfg(any(
+  target_os = "linux",
+  target_os = "android",
+  target_os = "macos",
+  windows
+))]
+#[used]
+#[cfg_attr(
+  any(target_os = "linux", target_os = "android"),
+  unsafe(link_section = ".init_array")
+)]
+#[cfg_attr(
+  target_os = "macos",
+  unsafe(link_section = "__DATA,__mod_init_func")
+)]
+#[cfg_attr(windows, unsafe(link_section = ".CRT$XCU"))]
+static PROCESS_START_INIT_FN: extern "C" fn() = {
+  extern "C" fn init() {
+    let _ = PROCESS_START.get_or_init(std::time::Instant::now);
+  }
+  init
+};
+
+/// When this runtime's `node` extension state was set up: the moment its
+/// Node environment exists (Node's `nodeTiming.environment`).
+pub struct NodeEnvironmentStart(pub std::time::Instant);
+
+/// Fills `out` with how many milliseconds ago the process started, V8 was
+/// initialized and this runtime's Node environment was set up, in that order
+/// (`performance.nodeTiming`'s `nodeStart`, `v8Start` and `environment`, which
+/// the caller turns into timestamps on `performance.now()`'s clock). A
+/// milestone this process never recorded is `NaN`.
+#[op2(fast)]
+pub fn op_node_perf_milestones_ago(
+  state: &mut deno_core::OpState,
+  #[buffer] out: &mut [f64],
+) {
+  if out.len() < 3 {
+    return;
+  }
+  let now = std::time::Instant::now();
+  let ago = |t: Option<std::time::Instant>| match t {
+    Some(t) => now.saturating_duration_since(t).as_secs_f64() * 1000.0,
+    None => f64::NAN,
+  };
+  out[0] = ago(Some(*PROCESS_START.get_or_init(std::time::Instant::now)));
+  out[1] = ago(deno_core::v8_initialized_at());
+  out[2] = ago(state.try_borrow::<NodeEnvironmentStart>().map(|s| s.0));
+}

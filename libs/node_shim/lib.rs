@@ -632,6 +632,7 @@ pub struct PerProcessOptions {
   pub print_v8_help: bool,
   pub print_version: bool,
   pub experimental_sea_config: String,
+  pub build_sea: String,
   pub run: String,
   pub icu_data_dir: String,
   pub openssl_config: String,
@@ -675,6 +676,7 @@ impl Default for PerProcessOptions {
       print_v8_help: false,
       print_version: false,
       experimental_sea_config: String::new(),
+      build_sea: String::new(),
       run: String::new(),
       icu_data_dir: String::new(),
       openssl_config: String::new(),
@@ -2225,6 +2227,13 @@ impl OptionsParser {
             false,
         );
     self.add_option(
+      "--build-sea",
+      "Build a single executable application from the configuration file",
+      OptionType::String,
+      OptionEnvvarSettings::DisallowedInEnvvar,
+      false,
+    );
+    self.add_option(
       "--run",
       "Run a script specified in package.json",
       OptionType::String,
@@ -2749,6 +2758,7 @@ impl OptionsParser {
       "--disable-proto" => options.disable_proto = value,
       "--snapshot-blob" => options.snapshot_blob = value,
       "--experimental-sea-config" => options.experimental_sea_config = value,
+      "--build-sea" => options.build_sea = value,
       "--run" => options.run = value,
       "--icu-data-dir" => options.icu_data_dir = value,
       "--openssl-config" => options.openssl_config = value,
@@ -3191,7 +3201,54 @@ pub fn parse_node_options_env_var(
 /// Main parsing function
 pub fn parse_args(args: Vec<String>) -> Result<ParseResult, Vec<String>> {
   let parser = OptionsParser::new();
-  parser.parse(args)
+  let result = parser.parse(args)?;
+  if let Some(message) = unsupported_build_flag(&result.options) {
+    return Err(vec![message]);
+  }
+  Ok(result)
+}
+
+/// Exit status of a `node` invocation [`parse_args`] refuses with
+/// [`unsupported_build_flag`]'s message: 9, Node's for invalid arguments.
+pub const UNSUPPORTED_BUILD_FLAG_EXIT_CODE: i32 = 9;
+
+/// What every refusal of a single-executable or snapshot flag ends with.
+const UNSUPPORTED_BUILD_FLAG_HINT: &str = "Build a single executable with `deno compile` (or `denext build --compile` in a denext app).";
+
+/// Node's single-executable (`--experimental-sea-config`, `--build-sea`) and
+/// startup-snapshot (`--build-snapshot`, `--build-snapshot-config`,
+/// `--snapshot-blob`) flags build or load artifacts Deno doesn't make: a
+/// single executable is `deno compile`'s job. They are refused rather than
+/// dropped, since dropping them ran the script (or started the REPL) instead
+/// of building anything.
+pub fn unsupported_build_flag(options: &PerProcessOptions) -> Option<String> {
+  let flag = if !options.experimental_sea_config.is_empty() {
+    "--experimental-sea-config"
+  } else if !options.build_sea.is_empty() {
+    "--build-sea"
+  } else if !options.per_isolate.build_snapshot_config.is_empty() {
+    "--build-snapshot-config"
+  } else if options.per_isolate.build_snapshot {
+    "--build-snapshot"
+  } else if !options.snapshot_blob.is_empty() {
+    "--snapshot-blob"
+  } else {
+    return None;
+  };
+  let what = if flag.contains("sea") {
+    "single executable applications"
+  } else {
+    "startup snapshots"
+  };
+  Some(format!(
+    "{flag} is not supported: Deno does not build Node.js {what}. {UNSUPPORTED_BUILD_FLAG_HINT}"
+  ))
+}
+
+/// Whether `errors` from [`parse_args`] are a refusal of a single-executable
+/// or snapshot flag, which exits with [`UNSUPPORTED_BUILD_FLAG_EXIT_CODE`].
+pub fn is_unsupported_build_flag_error(errors: &[String]) -> bool {
+  errors.len() == 1 && errors[0].ends_with(UNSUPPORTED_BUILD_FLAG_HINT)
 }
 
 /// Options for controlling translation behavior
@@ -6472,5 +6529,33 @@ mod tests {
       "{:?}",
       result.deno_args
     );
+  }
+
+  #[test]
+  fn sea_and_snapshot_flags_are_refused() {
+    for args in [
+      svec!["--experimental-sea-config", "sea.json"],
+      svec!["--build-sea", "sea.json"],
+      svec!["--build-snapshot", "entry.js"],
+      svec!["--build-snapshot-config", "snapshot.json"],
+      svec!["--snapshot-blob", "snap.blob", "entry.js"],
+      svec![
+        "--snapshot-blob",
+        "snap.blob",
+        "--build-snapshot",
+        "entry.js"
+      ],
+    ] {
+      let errors = parse_args(args.clone()).expect_err(&format!("{args:?}"));
+      assert!(is_unsupported_build_flag_error(&errors), "{errors:?}");
+      assert!(errors[0].starts_with(&args[0]), "{errors:?}");
+      assert!(errors[0].contains("deno compile"), "{errors:?}");
+    }
+    // After the script they are the script's own arguments.
+    let parsed = parse_args(svec!["app.js", "--build-snapshot"]).unwrap();
+    assert_eq!(parsed.remaining_args, svec!["app.js", "--build-snapshot"]);
+    // Other parse errors are not this refusal.
+    let errors = parse_args(svec!["--no-such-node-flag"]).unwrap_err();
+    assert!(!is_unsupported_build_flag_error(&errors), "{errors:?}");
   }
 }
