@@ -11795,6 +11795,58 @@ separation and tamper checks, the server-name gate); unit_node
 `test-tls-ticket-12`, `test-tls-ticket-cluster`,
 `test-https-agent-session-reuse`, `test-https-agent-disable-session-reuse`.
 
+NNN. **`feat(ext/node)`: the legacy `node:crypto` ciphers, modes and brainpool
+     curves** (`feat/node-crypto-legacy`, runtime;
+     `ext/node_crypto/{cipher_legacy,cipher,lib}.rs`,
+     `ext/node_crypto/Cargo.toml`, `Cargo.toml`, `Cargo.lock`,
+     `ext/node/polyfills/internal/crypto/{cipher,util}.ts`). `getCiphers()`
+     reported 21 names and `getCurves()` 5, against Node's 165 and 82, and
+     programs that use AES-192-CBC, CFB or OFB, 3DES in ECB, camellia or sm4
+     (ssh, PDF and smart-card libraries, legacy protocols) failed with
+     `ERR_CRYPTO_UNKNOWN_CIPHER`. `cipher_legacy.rs` adds, behind one encryptor
+     and one decryptor variant in `cipher.rs`:
+     - AES-128/192/256 in CFB (`-cfb`), CFB-8, CFB-1 and OFB; AES-192 CBC
+       (`aes192`) and GCM; AES CCM and OCB (and the `id-aes*-gcm` /
+       `id-aes*-ccm` names); AES-128 and AES-256 XTS; camellia-128/192/256 in
+       ECB, CBC, CTR, CFB, CFB-8, CFB-1 and OFB (`camellia128` ...); sm4 in ECB,
+       CBC, CTR, CFB and OFB (`sm4`, `sm4-cfb128`, `sm4-ofb128`); `des-ede3`
+       (ECB), `des-ede3-{cfb,cfb1,cfb8,ofb}`, `des-ede` and
+       `des-ede-{cbc,cfb,ofb}`, `des3`. RustCrypto crates (`cfb-mode`, `cfb8`,
+       `ofb`, `ccm`, `ocb3`, `xts-mode`, `camellia`, `sm4`, all on `cipher` 0.4
+       like `aes` 0.8); CFB-1, which no crate has, is the block cipher with a
+       one-bit shift register, checked against NIST SP 800-38A.
+     - Node's behaviour where it differs from a plain stream: CCM wants
+       `authTagLength` and, with AAD, `plaintextLength`, takes one `update()`
+       and, when the tag doesn't authenticate, returns nothing and throws from
+       `final()`; OCB wants `authTagLength`; XTS refuses a key whose halves are
+       equal (`ERR_OSSL_XTS_DUPLICATED_KEYS`) and treats each `update()` as one
+       data unit of at least one block (ciphertext stealing beyond it).
+       `setAuthTag()` hands the tag to the decryptor too
+       (`op_node_decipheriv_auth_tag` takes the tag, not its length), since CCM
+       needs it before the data.
+     - ECDH on `brainpoolP256r1` and `brainpoolP384r1` (`bp256` / `bp384`):
+       `createECDH`, `computeSecret`, `getPublicKey` in both formats,
+       `ECDH.convertKey`.
+     - `getCiphers()` lists the 94 names that work and `getCipherInfo()` answers
+       for each as Node 26 does; `getCurves()` adds the two brainpool curves.
+     - Not done: what Node 26 itself refuses under OpenSSL 3 (`des-cbc`, `bf-*`,
+       `cast5-*`, `rc4`, `rc2-*`) stays unknown. OCB's `update()` returns
+       nothing and `final()` the whole output (RustCrypto's OCB is one-shot; the
+       concatenated output is Node's), and OCB takes nonces of 6 to 15 bytes and
+       tags of 8, 12 or 16. `brainpoolP512r1` has no RustCrypto curve, and
+       brainpool keys work for ECDH only, not `generateKeyPair` /
+       `createPrivateKey`. ARIA, the `-cts` and `-siv` variants,
+       `aes-*-gcm-siv`, `sm4-gcm/ccm/xts` and the wrap-inverse names remain out.
+     - Tests: `cipher_legacy.rs` (NIST SP 800-38A CFB, CFB-8, CFB-1 and OFB
+       vectors and round trips; which names are served and which stay unknown);
+       `tests/unit_node/crypto/crypto_cipher_legacy_test.ts` against
+       `legacy_cipher_vectors.json`, written by real Node 26.13 with
+       `generate_legacy_vectors.cjs` (every new cipher encrypts to Node's
+       ciphertext and tag and decrypts back, in one call and in 5-byte chunks;
+       every `getCiphers()` name round-trips; CCM / OCB / XTS parameter errors
+       as Node; the ciphers Node refuses stay unknown; brainpool ECDH keys,
+       compressed points, `convertKey` and secrets equal Node's).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

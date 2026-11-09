@@ -638,7 +638,8 @@ enum Cipher {
   DesEde3Cbc(Box<cbc::Encryptor<des::TdesEde3>>),
   ChaCha20(Box<ChaCha20Cipher>),
   ChaCha20Poly1305(Box<ChaCha20Poly1305Cipher>),
-  // TODO(kt3k): add more algorithms Aes192Cbc, etc.
+  /// The rest (DENEXT.md item NNN): `cipher_legacy.rs`.
+  Legacy(Box<dyn crate::cipher_legacy::EncMode>),
 }
 
 enum Decipher {
@@ -655,7 +656,8 @@ enum Decipher {
   DesEde3Cbc(Box<cbc::Decryptor<des::TdesEde3>>),
   ChaCha20(Box<ChaCha20Cipher>),
   ChaCha20Poly1305(Box<ChaCha20Poly1305Cipher>, Option<usize>),
-  // TODO(kt3k): add more algorithms Aes192Cbc, Aes128GCM, etc.
+  /// The rest (DENEXT.md item NNN): `cipher_legacy.rs`.
+  Legacy(Box<dyn crate::cipher_legacy::DecMode>),
 }
 
 pub struct CipherContext {
@@ -700,8 +702,8 @@ impl CipherContext {
     self.cipher.borrow_mut().set_aad(aad);
   }
 
-  pub fn encrypt(&self, input: &[u8], output: &mut [u8]) {
-    self.cipher.borrow_mut().encrypt(input, output);
+  pub fn encrypt(&self, input: &[u8], output: &mut [u8]) -> bool {
+    self.cipher.borrow_mut().encrypt(input, output)
   }
 
   pub fn take_tag(self) -> Tag {
@@ -765,8 +767,16 @@ impl DecipherContext {
     self.decipher.borrow_mut().set_aad(aad);
   }
 
-  pub fn decrypt(&self, input: &[u8], output: &mut [u8]) {
-    self.decipher.borrow_mut().decrypt(input, output);
+  pub fn decrypt(&self, input: &[u8], output: &mut [u8]) -> bool {
+    self.decipher.borrow_mut().decrypt(input, output)
+  }
+
+  /// Keeps the authentication tag for a mode that needs it before the data
+  /// (CCM, OCB).
+  pub fn set_auth_tag(&self, tag: &[u8]) {
+    if let Decipher::Legacy(mode) = &mut *self.decipher.borrow_mut() {
+      mode.set_auth_tag(tag);
+    }
   }
 
   pub fn r#final(
@@ -982,7 +992,17 @@ impl Cipher {
           })?,
         ))
       }
-      _ => return Err(CipherError::UnknownCipher(algorithm_name.to_string())),
+      _ => match crate::cipher_legacy::new_encryptor(
+        algorithm_name,
+        key,
+        iv,
+        auth_tag_length,
+      ) {
+        Some(mode) => Legacy(mode?),
+        None => {
+          return Err(CipherError::UnknownCipher(algorithm_name.to_string()));
+        }
+      },
     })
   }
 
@@ -998,14 +1018,17 @@ impl Cipher {
       ChaCha20Poly1305(cipher) => {
         cipher.set_aad(aad);
       }
+      Legacy(mode) => mode.set_aad(aad),
       _ => {}
     }
   }
 
-  /// encrypt encrypts the data in the middle of the input.
-  fn encrypt(&mut self, input: &[u8], output: &mut [u8]) {
+  /// encrypt encrypts the data in the middle of the input. `false`: the
+  /// mode can't take this input now.
+  fn encrypt(&mut self, input: &[u8], output: &mut [u8]) -> bool {
     use Cipher::*;
     match self {
+      Legacy(mode) => return mode.update(input, output),
       Aes128Cbc(encryptor) => {
         assert!(input.len().is_multiple_of(16));
         for (input, output) in input.chunks(16).zip(output.chunks_mut(16)) {
@@ -1066,6 +1089,7 @@ impl Cipher {
         cipher.encrypt(input, output);
       }
     }
+    true
   }
 
   /// r#final encrypts the last block of the input data.
@@ -1157,6 +1181,7 @@ impl Cipher {
         Ok(None)
       }
       (Aes256Ctr(_) | Aes128Ctr(_) | Aes192Ctr(_) | ChaCha20(_), _) => Ok(None),
+      (Legacy(mode), _) => mode.finish(auto_pad, input, output),
       (ChaCha20Poly1305(cipher), _) => {
         let tag = cipher.compute_tag();
         Ok(Some(tag))
@@ -1198,6 +1223,7 @@ impl Cipher {
         let tag = cipher.compute_tag();
         Some(tag)
       }
+      Legacy(mode) => mode.take_tag(),
       _ => None,
     }
   }
@@ -1441,14 +1467,23 @@ impl Decipher {
           auth_tag_length,
         )
       }
-      _ => {
-        return Err(DecipherError::UnknownCipher(algorithm_name.to_string()));
-      }
+      _ => match crate::cipher_legacy::new_decryptor(
+        algorithm_name,
+        key,
+        iv,
+        auth_tag_length,
+      ) {
+        Some(mode) => Legacy(mode?),
+        None => {
+          return Err(DecipherError::UnknownCipher(algorithm_name.to_string()));
+        }
+      },
     })
   }
 
   fn validate_auth_tag(&self, length: usize) -> Result<(), DecipherError> {
     match self {
+      Decipher::Legacy(mode) => return mode.validate_auth_tag(length),
       Decipher::Aes128Gcm(_, Some(tag_len))
       | Decipher::Aes256Gcm(_, Some(tag_len))
         if *tag_len != length =>
@@ -1484,14 +1519,17 @@ impl Decipher {
       ChaCha20Poly1305(decipher, _) => {
         decipher.set_aad(aad);
       }
+      Legacy(mode) => mode.set_aad(aad),
       _ => {}
     }
   }
 
-  /// decrypt decrypts the data in the middle of the input.
-  fn decrypt(&mut self, input: &[u8], output: &mut [u8]) {
+  /// decrypt decrypts the data in the middle of the input. `false`: the
+  /// mode can't take this input now, or (CCM, OCB) it doesn't authenticate.
+  fn decrypt(&mut self, input: &[u8], output: &mut [u8]) -> bool {
     use Decipher::*;
     match self {
+      Legacy(mode) => return mode.update(input, output),
       Aes128Cbc(decryptor) => {
         assert!(input.len().is_multiple_of(16));
         for (input, output) in input.chunks(16).zip(output.chunks_mut(16)) {
@@ -1552,6 +1590,7 @@ impl Decipher {
         decipher.decrypt(input, output);
       }
     }
+    true
   }
 
   /// r#final decrypts the last block of the input data.
@@ -1573,12 +1612,14 @@ impl Decipher {
           | Aes128Gcm(..)
           | Aes256Gcm(..)
           | ChaCha20Poly1305(..)
+          | Legacy(..)
       )
     {
       return Ok(());
     }
 
     match (self, auto_pad) {
+      (Legacy(mode), _) => mode.finish(auto_pad, input, output, auth_tag),
       (Aes128Cbc(decryptor), true) => {
         assert_block_len!(input.len(), 16);
         let _ = (*decryptor)
