@@ -864,6 +864,12 @@ impl CliFactory {
       )
       .with_upstream_by_name(supply_chain.jail_upstream_by_name)
       .with_known_packages(supply_chain.jail_known_packages)
+      .with_node_headers(self.deno_dir().ok().map(|deno_dir| {
+        Arc::new(crate::supply_chain::node_headers::NodeHeaders::new(
+          &deno_dir.root,
+          self.http_client_provider().clone(),
+        ))
+      }))
       .with_settings_in_package_json(matches!(
         cli_options.workspace().supply_chain_settings_home(),
         deno_config::workspace::SupplyChainSettingsHome::PackageJson(_)

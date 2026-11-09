@@ -13,9 +13,11 @@
 //!   on, each failing closed.
 
 pub mod advisories;
+pub mod builtin_exceptions;
 pub mod downloads;
 pub mod jail;
 mod jail_proxy;
+pub mod node_headers;
 #[cfg(target_os = "linux")]
 mod sandbox_linux;
 #[cfg(target_os = "macos")]

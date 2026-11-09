@@ -1,0 +1,3 @@
+[WILDCARD]error: script 'install' in 'keytar@7.9.0' failed with exit code 1
+hint: npm:keytar's script may reach github.com, objects.githubusercontent.com, release-assets.githubusercontent.com, nodejs.org (the built-in exception) to download its prebuilt binary, and otherwise builds it from source with node-gyp, which needs Python, make and a C++ compiler (Node's headers are provided). Behind a proxy or a mirror, add its host to the package's list: add to package.json: "deno": { "supplyChain": { "jailScripts": { "packages": { "keytar": { "net": ["github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com", "nodejs.org", "<mirror host>"] } } } } }.
+[WILDCARD]

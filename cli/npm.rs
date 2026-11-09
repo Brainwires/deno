@@ -848,8 +848,19 @@ impl DenoTaskLifeCycleScriptsExecutor {
           let stdout = stdout.unwrap_or_default();
           let stderr = stderr.unwrap_or_default();
           if exit_code != 0 {
+            // a native package's own fix (DENEXT.md item NNN)
+            let hint = jail
+              .and_then(|jail| {
+                jail.native_failure_hint(
+                  package.id.nv.name.as_str(),
+                  package_folder,
+                  script,
+                )
+              })
+              .map(|hint| format!("\n{} {hint}", colors::cyan("hint:")))
+              .unwrap_or_default();
             log::warn!(
-              "error: script '{}' in '{}' failed with exit code {}{}{}",
+              "error: script '{}' in '{}' failed with exit code {}{}{}{}",
               script_name,
               package.id.nv,
               exit_code,
@@ -869,6 +880,7 @@ impl DenoTaskLifeCycleScriptsExecutor {
               } else {
                 String::new()
               },
+              hint,
             );
             failed = Some(&package.id.nv);
             // assume if earlier script fails, later ones will fail too
