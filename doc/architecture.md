@@ -50,9 +50,11 @@ Key files:
 - `runtime/worker.rs` — constructs the main worker: an isolate, the op set, and
   the bootstrap sequence.
 - `runtime/web_worker.rs` — the Web Worker variant.
-- `runtime/permissions/` — the permission model that gates every sensitive op
-  (read, write, net, env, run, ffi, sys). Permissions are checked in Rust at the
-  op boundary, never in JavaScript.
+- `runtime/permissions/` — the permission checks every sensitive op asks (read,
+  write, net, env, run, ffi, sys). Permissions are checked in Rust at the op
+  boundary, never in JavaScript. They are least-privilege guardrails, not a
+  sandbox: a subprocess, FFI or a native addon goes around them (see DENEXT.md,
+  "Permissions: least-privilege guardrails").
 
 ## The extension layer (`ext/*`)
 
