@@ -5942,19 +5942,36 @@ impl PermissionsContainer {
       return false;
     }
     let target_path = target_path.path.into_owned();
+    // denext (DENEXT.md item NNN): a target outside the roots passes only
+    // when it is an existing program the script may read (node-gyp links
+    // `build/node_gyp_bins/python3` to the system Python). The script can
+    // already run any program it can read, so a link to one adds no reach;
+    // writes through the link stay with the OS sandbox, which checks the
+    // resolved path, as for every link.
+    let target_ok = if within(&target_path) {
+      self
+        .check_open(
+          Cow::Borrowed(target_path.as_path()),
+          OpenAccessKind::ReadWrite,
+          Some(api_name),
+        )
+        .is_ok()
+    } else {
+      parser.is_executable_file(&target_path)
+        && self
+          .check_open(
+            Cow::Borrowed(target_path.as_path()),
+            OpenAccessKind::Read,
+            Some(api_name),
+          )
+          .is_ok()
+    };
     within(&link_path)
-      && within(&target_path)
+      && target_ok
       && self
         .check_open(
           Cow::Owned(link_path),
           OpenAccessKind::WriteNoFollow,
-          Some(api_name),
-        )
-        .is_ok()
-      && self
-        .check_open(
-          Cow::Owned(target_path),
-          OpenAccessKind::ReadWrite,
           Some(api_name),
         )
         .is_ok()
@@ -7715,6 +7732,14 @@ pub trait PermissionDescriptorParser: Debug + Send + Sync {
     None
   }
 
+  /// denext (DENEXT.md item NNN): whether `path`, already resolved, is an
+  /// existing regular file with an execute bit (a program), for the
+  /// lifecycle-script jail's symlink rule. `false` when the parser has no
+  /// file system access.
+  fn is_executable_file(&self, _path: &Path) -> bool {
+    false
+  }
+
   fn parse_net_query(
     &self,
     text: &str,
@@ -8446,6 +8471,42 @@ mod tests {
     let wide = vec![base.clone()];
     assert!(!check(Some(&wide), "pkg", base.join("other/l")));
     assert!(!check(Some(&wide), "../other", pkg.join("o5")));
+
+    // denext (DENEXT.md item NNN): a target outside the roots that is a
+    // readable program passes (node-gyp's `node_gyp_bins/python3`), named
+    // directly or through a link; a plain file, a directory, a missing
+    // path or a program under a deny-read path does not
+    use std::os::unix::fs::PermissionsExt;
+    let program = base.join("other/python3");
+    std::fs::write(&program, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+      .unwrap();
+    std::fs::write(base.join("other/data"), "x").unwrap();
+    std::fs::set_permissions(
+      base.join("other/data"),
+      std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    std::fs::write(base.join("other/secret"), "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(
+      base.join("other/secret"),
+      std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&program, base.join("python")).unwrap();
+    let program_text = program.display().to_string();
+    // refused without the jail's roots, as upstream
+    assert!(!check(None, &program_text, pkg.join("python3")));
+    assert!(check(Some(&roots), &program_text, pkg.join("python3")));
+    assert!(check(Some(&roots), "../other/python3", pkg.join("p2")));
+    assert!(check(Some(&roots), "../python", pkg.join("p3")));
+    assert!(check(Some(&roots), "out/other/python3", pkg.join("p4")));
+    assert!(!check(Some(&roots), "../other/data", pkg.join("p5")));
+    assert!(!check(Some(&roots), "../other", pkg.join("p6")));
+    assert!(!check(Some(&roots), "../other/missing", pkg.join("p7")));
+    assert!(!check(Some(&roots), "../other/secret", pkg.join("p8")));
+    // the link itself must still lie within the roots
+    assert!(!check(Some(&roots), &program_text, base.join("other/p9")));
     let _ = std::fs::remove_dir_all(&base);
   }
 

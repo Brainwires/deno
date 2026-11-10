@@ -15,8 +15,13 @@
 //! The archive is taken from beside the `deno` executable when a release ships
 //! it there, else downloaded from `NODEJS_ORG_MIRROR` (node-gyp's own mirror
 //! variable) or nodejs.org; either way only a file matching the pin is used.
-//! Windows is left out: node-gyp also needs `node.lib` there, which the
-//! headers archive doesn't carry.
+//! On Windows node-gyp also links the addon against `node.lib`, which the
+//! headers archive doesn't carry: the installer writes one beside the headers
+//! (`<nodedir>/Release/node.lib`, and `Debug`), an import library for
+//! `node.exe` naming exactly the Node-API symbols `deno.exe` exports
+//! (`deno_napi::WINDOWS_SYMBOL_EXPORTS_DEF`). node-gyp's addons load
+//! `node.exe` delay-loaded, and its `win_delay_load_hook` answers that import
+//! with the host executable, so they bind to `deno.exe` at run time.
 
 use std::io::Read;
 use std::path::Component;
@@ -241,9 +246,6 @@ impl NodeHeaders {
   /// The unpacked headers directory (`npm_config_nodedir`), or `None` when
   /// they can't be had here (node-gyp then downloads them itself).
   pub async fn dir(&self, mirror: Option<&str>) -> Option<PathBuf> {
-    if cfg!(windows) {
-      return None;
-    }
     self
       .dir
       .get_or_init(|| async {
@@ -264,6 +266,17 @@ impl NodeHeaders {
   }
 
   async fn resolve(&self, mirror: Option<&str>) -> Result<PathBuf, AnyError> {
+    let dest = self.resolve_headers(mirror).await?;
+    if cfg!(windows) {
+      write_node_libs(&dest, host_machine()?)?;
+    }
+    Ok(dest)
+  }
+
+  async fn resolve_headers(
+    &self,
+    mirror: Option<&str>,
+  ) -> Result<PathBuf, AnyError> {
     let version = NODE_HEADERS_VERSION;
     let dest = self.cache_root.join(format!("v{version}"));
     if is_complete(&dest, NODE_HEADERS_SHA256) {
@@ -292,6 +305,132 @@ impl NodeHeaders {
       .with_context(|| format!("downloading {url}"))?;
     unpack_verified(&bytes, version, NODE_HEADERS_SHA256, &dest)
   }
+}
+
+/// The symbol names a module definition (`.def`) exports.
+fn def_exports(def: &str) -> Vec<&str> {
+  def
+    .lines()
+    .map(str::trim)
+    .skip_while(|line| *line != "EXPORTS")
+    .skip(1)
+    .filter(|line| !line.is_empty() && !line.starts_with(';'))
+    .collect()
+}
+
+/// The machine `node.lib` is written for: this executable's, which is the
+/// `process.arch` node-gyp builds for.
+fn host_machine() -> Result<ar_archive_writer::MachineTypes, AnyError> {
+  use ar_archive_writer::MachineTypes;
+  match std::env::consts::ARCH {
+    "x86_64" => Ok(MachineTypes::AMD64),
+    "aarch64" => Ok(MachineTypes::ARM64),
+    arch => bail!("no node.lib for {arch}"),
+  }
+}
+
+/// An import library for `node.exe` naming every symbol `deno.exe` exports
+/// to Node-API addons, in the format `lib.exe /def:` writes.
+pub fn node_import_library(
+  machine: ar_archive_writer::MachineTypes,
+) -> Result<Vec<u8>, AnyError> {
+  let exports =
+    def_exports(deno_runtime::deno_napi::WINDOWS_SYMBOL_EXPORTS_DEF)
+      .into_iter()
+      .map(|name| ar_archive_writer::COFFShortExport {
+        name: name.to_string(),
+        ext_name: None,
+        symbol_name: None,
+        import_name: None,
+        export_as: None,
+        ordinal: 0,
+        noname: false,
+        data: false,
+        private: false,
+        constant: false,
+      })
+      .collect::<Vec<_>>();
+  if exports.is_empty() {
+    bail!("the Node-API symbol list is empty");
+  }
+  let mut out = std::io::Cursor::new(Vec::new());
+  ar_archive_writer::write_import_library(
+    &mut out,
+    "node.exe",
+    &exports,
+    machine,
+    false,
+    false,
+    &[],
+  )
+  .context("writing node.lib")?;
+  Ok(out.into_inner())
+}
+
+/// Writes `node.lib` where node-gyp looks for it when `npm_config_nodedir`
+/// names `dir`: `<dir>/$(Configuration)/node.lib`, for both configurations.
+/// A file already holding the same bytes is left alone.
+fn write_node_libs(
+  dir: &Path,
+  machine: ar_archive_writer::MachineTypes,
+) -> Result<(), AnyError> {
+  let lib = node_import_library(machine)?;
+  for configuration in ["Release", "Debug"] {
+    let path = dir.join(configuration).join("node.lib");
+    if std::fs::read(&path).is_ok_and(|existing| existing == lib) {
+      continue;
+    }
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    // written beside, then renamed: a concurrent build never links a
+    // half-written library
+    let tmp = path.with_extension(format!("lib.tmp-{}", std::process::id()));
+    std::fs::write(&tmp, &lib)?;
+    std::fs::rename(&tmp, &path)
+      .inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+      })
+      .with_context(|| format!("writing {}", path.display()))?;
+  }
+  Ok(())
+}
+
+/// The directory holding the `node-gyp` command a node-gyp build's own
+/// children find on `PATH` (DENEXT.md item NNN), written into `dir`: npm puts
+/// one on `PATH` for every lifecycle script, and node-gyp-build (`bcrypt`,
+/// and most addons that ship prebuilds) spawns `node-gyp` by name when no
+/// prebuild fits, where the script's shell's own `node-gyp` doesn't reach.
+/// It runs `DENO_NODE_GYP` (else the pinned node-gyp) on `deno`, as the
+/// shell's `node-gyp` does.
+pub fn write_node_gyp_shim(dir: &Path, deno: &Path) -> std::io::Result<()> {
+  std::fs::create_dir_all(dir)?;
+  let fd_var = deno_runtime::deno_process::NPM_RESOLUTION_STATE_FD_ENV_VAR_NAME;
+  let pkg_json_var = crate::task_runner::USE_PKG_JSON_HIDDEN_ENV_VAR_NAME;
+  let fallback = crate::task_runner::NODE_GYP_NPM_SPECIFIER;
+  let (name, text) = if cfg!(windows) {
+    (
+      "node-gyp.cmd",
+      format!(
+        "@echo off\r\nset \"{fd_var}=\"\r\nset \"{pkg_json_var}=\"\r\nif \"%DENO_NODE_GYP%\"==\"\" (\r\n  \"{deno}\" run -A --no-config --node-modules-dir=none {fallback} %*\r\n) else (\r\n  \"{deno}\" run -A --no-config --node-modules-dir=none \"%DENO_NODE_GYP%\" %*\r\n)\r\n",
+        deno = deno.display(),
+      ),
+    )
+  } else {
+    let deno = deno.to_string_lossy().replace('\'', "'\\''");
+    (
+      "node-gyp",
+      format!(
+        "#!/bin/sh\nunset {fd_var} {pkg_json_var}\nexec '{deno}' run -A --no-config --node-modules-dir=none \"${{DENO_NODE_GYP:-{fallback}}}\" \"$@\"\n"
+      ),
+    )
+  };
+  let path = dir.join(name);
+  std::fs::write(&path, text)?;
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+  }
+  Ok(())
 }
 
 /// Whether a package builds a native addon with node-gyp: it has a
@@ -408,6 +547,140 @@ mod tests {
     std::fs::write(&entry, "").unwrap();
     std::fs::write(root.join(".deno-node-gyp-installed"), version).unwrap();
     assert_eq!(headers.node_gyp().await, Some(entry));
+  }
+
+  // DENEXT.md item NNN: a node-gyp build's children find `node-gyp` on PATH
+  // (node-gyp-build spawns it by name), and it runs DENO_NODE_GYP on deno
+  #[cfg(unix)]
+  #[test]
+  fn node_gyp_shim_runs_the_pinned_node_gyp_on_deno() {
+    let dir = tempfile::tempdir().unwrap();
+    // a stand-in `deno` that prints its arguments and the variables the
+    // shim must clear
+    let fake = dir.path().join("it's deno");
+    std::fs::write(
+      &fake,
+      "#!/bin/sh\nprintf '%s|' \"$@\"\necho \"fd=${DENO_DONT_USE_INTERNAL_NODE_COMPAT_STATE_FD-unset}\"\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))
+      .unwrap();
+    let bin = dir.path().join("bin");
+    write_node_gyp_shim(&bin, &fake).unwrap();
+    let shim = bin.join("node-gyp");
+    let mode = std::fs::metadata(&shim).unwrap().permissions().mode();
+    assert_eq!(mode & 0o111, 0o111);
+    let run = |gyp: Option<&str>| {
+      let mut command = std::process::Command::new(&shim);
+      command
+        .args(["rebuild", "--release"])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("DENO_DONT_USE_INTERNAL_NODE_COMPAT_STATE_FD", "3");
+      if let Some(gyp) = gyp {
+        command.env("DENO_NODE_GYP", gyp);
+      }
+      String::from_utf8(command.output().unwrap().stdout).unwrap()
+    };
+    assert_eq!(
+      run(Some("/cache/node-gyp.js")),
+      "run|-A|--no-config|--node-modules-dir=none|/cache/node-gyp.js|rebuild|--release|fd=unset\n"
+    );
+    assert_eq!(
+      run(None),
+      format!(
+        "run|-A|--no-config|--node-modules-dir=none|{}|rebuild|--release|fd=unset\n",
+        crate::task_runner::NODE_GYP_NPM_SPECIFIER
+      )
+    );
+  }
+
+  /// The short import members of an import library: (machine, symbol,
+  /// DLL, import type, name type), read from the archive by hand.
+  fn short_imports(lib: &[u8]) -> Vec<(u16, String, String, u16, u16)> {
+    assert!(lib.starts_with(b"!<arch>\n"));
+    let mut out = Vec::new();
+    let mut at = 8;
+    while at + 60 <= lib.len() {
+      let header = &lib[at..at + 60];
+      assert_eq!(&header[58..60], b"`\n");
+      let size: usize = std::str::from_utf8(&header[48..58])
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+      let data = &lib[at + 60..at + 60 + size];
+      if data.len() > 20 && data[..4] == [0, 0, 0xff, 0xff] {
+        let u16_at = |i: usize| u16::from_le_bytes([data[i], data[i + 1]]);
+        let mut names = data[20..].split(|b| *b == 0);
+        let symbol = String::from_utf8(names.next().unwrap().to_vec()).unwrap();
+        let dll = String::from_utf8(names.next().unwrap().to_vec()).unwrap();
+        let kind = u16_at(18);
+        out.push((u16_at(6), symbol, dll, kind & 0x3, (kind >> 2) & 0x7));
+      }
+      at += 60 + size + (size & 1);
+    }
+    out
+  }
+
+  // DENEXT.md item NNN: Windows node-gyp links against `<nodedir>/
+  // $(Configuration)/node.lib`; the one written names every symbol deno.exe
+  // exports to addons, imported by name from node.exe (which node-gyp's
+  // delay-load hook answers with the host executable)
+  #[test]
+  fn node_lib_imports_every_napi_symbol_from_node_exe() {
+    use ar_archive_writer::MachineTypes;
+    let expected =
+      def_exports(deno_runtime::deno_napi::WINDOWS_SYMBOL_EXPORTS_DEF);
+    assert!(expected.contains(&"napi_create_function"));
+    assert!(expected.contains(&"napi_module_register"));
+    assert!(expected.contains(&"node_api_create_syntax_error"));
+    assert!(!expected.contains(&"EXPORTS"));
+    for (machine, number) in
+      [(MachineTypes::AMD64, 0x8664), (MachineTypes::ARM64, 0xaa64)]
+    {
+      let lib = node_import_library(machine).unwrap();
+      let imports = short_imports(&lib);
+      let mut symbols =
+        imports.iter().map(|i| i.1.as_str()).collect::<Vec<_>>();
+      symbols.sort_unstable();
+      let mut want = expected.clone();
+      want.sort_unstable();
+      assert_eq!(symbols, want);
+      for (m, symbol, dll, import_type, name_type) in &imports {
+        assert_eq!(*m, number, "{symbol}");
+        assert_eq!(dll, "node.exe", "{symbol}");
+        // IMPORT_OBJECT_CODE, IMPORT_OBJECT_NAME
+        assert_eq!((*import_type, *name_type), (0, 1), "{symbol}");
+      }
+      // the import descriptor the linker needs for the DLL
+      let text = String::from_utf8_lossy(&lib);
+      assert!(text.contains("__IMPORT_DESCRIPTOR_node"));
+      assert!(text.contains("__NULL_IMPORT_DESCRIPTOR"));
+      // deterministic: an unchanged library isn't rewritten
+      assert_eq!(node_import_library(machine).unwrap(), lib);
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    write_node_libs(dir.path(), MachineTypes::AMD64).unwrap();
+    let release = std::fs::read(dir.path().join("Release/node.lib")).unwrap();
+    let debug = std::fs::read(dir.path().join("Debug/node.lib")).unwrap();
+    assert_eq!(release, debug);
+    assert_eq!(release, node_import_library(MachineTypes::AMD64).unwrap());
+    // a stale library (another symbol list) is replaced
+    std::fs::write(dir.path().join("Release/node.lib"), b"old").unwrap();
+    write_node_libs(dir.path(), MachineTypes::AMD64).unwrap();
+    assert_eq!(
+      std::fs::read(dir.path().join("Release/node.lib")).unwrap(),
+      release
+    );
+    assert_eq!(
+      std::fs::read_dir(dir.path().join("Release"))
+        .unwrap()
+        .count(),
+      1
+    );
   }
 
   #[test]

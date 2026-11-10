@@ -11618,21 +11618,20 @@ where the changes are discussed.
        (`npm:node-gyp@13.1.0`, which a jailed script fetched from the registry
        it can't reach) is installed the same way into `<DENO_DIR>/node_gyp` and
        handed to the script as `DENO_NODE_GYP`. A project's own
-       `npm_config_nodedir` / `DENO_NODE_GYP` wins; Windows is left out
-       (node-gyp also needs `node.lib` there). When either can't be had,
-       node-gyp fetches them itself as before (`nodejs.org` is in the built-in
-       lists).
+       `npm_config_nodedir` / `DENO_NODE_GYP` wins; on Windows the installer
+       also writes the `node.lib` node-gyp links against (item NNN). When either
+       can't be had, node-gyp fetches them itself as before (`nodejs.org` is in
+       the built-in lists).
      - **The package's own fix** when a jailed native script fails, after its
        output: a NAN addon (depends on `nan`) is named as one that can't load
        here even built; a built-in package gets its hosts and the exact line for
        a mirror host; any other native package gets the line for its download
        host. `better-sqlite3` also says that leaving its script unapproved works
        (item 61).
-     - Not done: a build from source still stops at node-gyp's
-       `build/node_gyp_bins/python3` symlink, which the jail's symlink rule
-       refuses because its target (the system Python) lies outside the writable
-       roots; changing that rule is in the permission code, left to its own
-       change. Configure runs offline with the pinned headers.
+     - A build from source stopped at node-gyp's `build/node_gyp_bins/python3`
+       symlink, which the jail's symlink rule refused because its target (the
+       system Python) lies outside the writable roots: item NNN lets it through.
+       Configure runs offline with the pinned headers.
      - Tests: `builtin_exceptions.rs` (sorted, host lists only),
        `node_headers.rs` (a matching archive unpacks, a wrong checksum or a path
        outside the root is refused and leaves nothing, the mirror URL, which
@@ -12042,6 +12041,55 @@ where the changes are discussed.
        and the error; compiled with `--include assets` and no `--allow-read`:
        text, raw, copy, Blob, a missing key, `/etc/hosts` and a `..` escape not
        read, a bad key); LSP `node:` completions list `node:sea`.
+
+NNN. **`fix(install)`: native addons build from source in the lifecycle-script
+     jail** (`runtime/permissions/lib.rs`,
+     `runtime/permissions/runtime_descriptor_parser.rs`,
+     `cli/supply_chain/node_headers.rs`, `cli/supply_chain/jail.rs`,
+     `ext/napi/lib.rs`).
+     - The jail's symlink rule (item 129) also lets a link within the write
+       roots point at a program outside them: a target that resolves to an
+       existing regular file with an execute bit, which the clamp grants read
+       of. node-gyp links `build/node_gyp_bins/python3` to the system Python
+       before every build, and `fs.symlink` refused it (`NotCapable`, which
+       node-gyp doesn't take as the `EPERM` it skips), so every build from
+       source failed there. The script may already run any program it can read,
+       so the link adds no reach; reads and writes through it stay with the OS
+       sandbox (Seatbelt, Landlock), which checks the resolved path. A plain
+       file, a directory, a missing path or a program under a deny-read path is
+       still refused, and so is a link outside the roots. This is the only
+       change to the permission code.
+     - `node-gyp` on the build's `PATH`: npm puts one there for every lifecycle
+       script, and node-gyp-build (`bcrypt` and most addons that ship prebuilds)
+       spawns it by name when no prebuild fits, which failed with
+       `spawn node-gyp ENOENT`. A jailed script that builds with node-gyp gets
+       `node_modules/.deno/.jail/<package>/bin/node-gyp` after the dependencies'
+       bins (a node-gyp the project installs wins), running `DENO_NODE_GYP`
+       (else the pinned node-gyp) on this `deno`, as the script's own shell does
+       (`node-gyp.cmd` on Windows).
+     - Windows: `npm_config_nodedir` is now provided there too, with
+       `<nodedir>/Release/node.lib` and `Debug/node.lib` (where node-gyp looks
+       under a `nodedir`): an import library for `node.exe` naming exactly the
+       symbols `deno.exe` exports to addons
+       (`deno_napi::WINDOWS_SYMBOL_EXPORTS_DEF`, the module definition its own
+       link uses), in the format `lib.exe /def:` writes (`ar_archive_writer`,
+       rust-lang's import-library writer), for this executable's architecture
+       (x64, arm64), rewritten when it differs. node-gyp addons load `node.exe`
+       delay-loaded and its `win_delay_load_hook` answers it with the host
+       executable, so they bind to `deno.exe` at run time.
+     - Tests: `deno_permissions` `test_check_symlink_jail_roots` (a program
+       outside the roots, named directly, relatively and through a link;
+       refused: a plain file, a directory, a missing path, a deny-read program,
+       a link outside the roots, no jail roots); `node_headers.rs`
+       `node_gyp_shim_runs_the_pinned_node_gyp_on_deno` and
+       `node_lib_imports_every_napi_symbol_from_node_exe` (every exported
+       symbol, by name, from `node.exe`, x64 and arm64, the import descriptors,
+       both configurations, a stale library replaced). By hand on macOS arm64:
+       `sqlite3@5.1.7` with `npm_config_build_from_source=true` failed at the
+       symlink before and now builds, loads and queries; `bcrypt@6.0.0` built
+       from source failed with `spawn node-gyp ENOENT` and now builds and
+       hashes. The Windows `node.lib` has not been linked against on Windows
+       yet.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

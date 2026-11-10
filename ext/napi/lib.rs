@@ -1254,6 +1254,12 @@ fn classify_library_load_error(
   }
 }
 
+/// denext (DENEXT.md item NNN): the symbols `deno.exe` exports to Node-API
+/// addons on Windows (the module definition its link uses), from which the
+/// installer writes the `node.lib` node-gyp links an addon against.
+pub const WINDOWS_SYMBOL_EXPORTS_DEF: &str =
+  include_str!("generated_symbol_exports_list_windows.def");
+
 #[allow(clippy::print_stdout, reason = "cargo build script output")]
 pub fn print_linker_flags(name: &str) {
   let symbols_path =
