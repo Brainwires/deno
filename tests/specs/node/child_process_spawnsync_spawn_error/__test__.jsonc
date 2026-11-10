@@ -1,0 +1,9 @@
+{
+  "tests": {
+    "refused_spawn_is_the_result_error": {
+      "if": "unix",
+      "args": "run --allow-env --allow-run=true main.mjs",
+      "output": "main.out"
+    }
+  }
+}

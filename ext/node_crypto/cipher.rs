@@ -877,7 +877,8 @@ impl Cipher {
         }
         Aes256Ecb(Box::new(ecb::Encryptor::new(key.into())))
       }
-      "aes-128-gcm" => {
+      // OpenSSL's short name for the cipher (getCiphers() lists both)
+      "aes-128-gcm" | "id-aes128-gcm" => {
         if key.len() != aes::Aes128::key_size() {
           return Err(CipherError::InvalidKeyLength);
         }
@@ -896,7 +897,8 @@ impl Cipher {
 
         Aes128Gcm(Box::new(cipher), auth_tag_length)
       }
-      "aes-256-gcm" => {
+      // OpenSSL's short name for the cipher (getCiphers() lists both)
+      "aes-256-gcm" | "id-aes256-gcm" => {
         if key.len() != aes::Aes256::key_size() {
           return Err(CipherError::InvalidKeyLength);
         }
@@ -1313,7 +1315,7 @@ impl Decipher {
   ) -> Result<Self, DecipherError> {
     use Decipher::*;
     Ok(match algorithm_name {
-      "aes-128-cbc" => {
+      "aes128" | "aes-128-cbc" => {
         if key.len() != 16 {
           return Err(DecipherError::InvalidKeyLength);
         }
@@ -1349,7 +1351,8 @@ impl Decipher {
         }
         Aes256Ecb(Box::new(ecb::Decryptor::new(key.into())))
       }
-      "aes-128-gcm" => {
+      // OpenSSL's short name for the cipher (getCiphers() lists both)
+      "aes-128-gcm" | "id-aes128-gcm" => {
         if key.len() != aes::Aes128::key_size() {
           return Err(DecipherError::InvalidKeyLength);
         }
@@ -1368,7 +1371,8 @@ impl Decipher {
 
         Aes128Gcm(Box::new(decipher), auth_tag_length)
       }
-      "aes-256-gcm" => {
+      // OpenSSL's short name for the cipher (getCiphers() lists both)
+      "aes-256-gcm" | "id-aes256-gcm" => {
         if key.len() != aes::Aes256::key_size() {
           return Err(DecipherError::InvalidKeyLength);
         }

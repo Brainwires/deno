@@ -1,0 +1,2 @@
+error: NotCapable Requires --allow-run permissions to spawn subprocess with LD_PRELOAD environment variable. [WILDCARD]
+execFileSync: NotCapable Requires --allow-run permissions to spawn subprocess with LD_PRELOAD environment variable. [WILDCARD]

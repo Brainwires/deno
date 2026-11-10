@@ -206,6 +206,14 @@ function scopedCallbacks(parser: any) {
       },
     } as PropertyDescriptor);
   }
+  // The header-pair limit the native side checks a request against
+  // (ext/node/ops/llhttp/binding.rs check_header_pairs).
+  Object.defineProperty(callbacks, "maxHeaderPairs", {
+    __proto__: null,
+    get() {
+      return parser.maxHeaderPairs;
+    },
+  } as PropertyDescriptor);
   Object.defineProperty(callbacks, "__lastException", {
     __proto__: null,
     get() {

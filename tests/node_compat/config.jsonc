@@ -3586,7 +3586,10 @@
       "ignore": true,
       "reason": "Node.js snapshot/heap profiling features (--build-snapshot, --heap-prof, --heapsnapshot-near-heap-limit) are not implemented in Deno"
     },
-    "parallel/test-snapshot-child-process-sync.js": {},
+    "parallel/test-snapshot-child-process-sync.js": {
+      "ignore": true,
+      "reason": "node --build-snapshot is refused with a pointer to deno compile (Deno builds no Node.js startup snapshots); the test passed only while the flag was ignored"
+    },
     "parallel/test-snapshot-cjs-main.js": {
       "ignore": true,
       "reason": "Node.js snapshot/heap profiling features (--build-snapshot, --heap-prof, --heapsnapshot-near-heap-limit) are not implemented in Deno"
@@ -3599,7 +3602,10 @@
       "ignore": true,
       "reason": "Node.js snapshot/heap profiling features (--build-snapshot, --heap-prof, --heapsnapshot-near-heap-limit) are not implemented in Deno"
     },
-    "parallel/test-snapshot-cwd.js": {},
+    "parallel/test-snapshot-cwd.js": {
+      "ignore": true,
+      "reason": "node --build-snapshot is refused with a pointer to deno compile (Deno builds no Node.js startup snapshots); the test passed only while the flag was ignored"
+    },
     "parallel/test-snapshot-dns-lookup-localhost-promise.js": {
       "ignore": true,
       "reason": "Node.js snapshot/heap profiling features (--build-snapshot, --heap-prof, --heapsnapshot-near-heap-limit) are not implemented in Deno"

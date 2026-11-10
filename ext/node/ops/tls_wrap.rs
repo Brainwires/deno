@@ -1767,6 +1767,31 @@ impl TLSWrapInner {
         return;
       }
 
+      // Sessions rustls stored while processing this input become 'session'
+      // events. A resumed TLS 1.2 handshake keeps the offered session (as
+      // OpenSSL's client does), so the re-issued ticket is not reported.
+      // They go to JS before the handshake does: a TLS 1.2 session arrives
+      // with the handshake's last flight, and getSession() must return it
+      // in the 'secureConnect' listener, as in Node (JS holds the 'session'
+      // event until the server's identity was checked).
+      if let Some(link) = (*ptr).session_link.clone() {
+        let resumed_tls12 = (*ptr).tls_conn.as_ref().is_some_and(|conn| {
+          matches!(conn.handshake_kind(), Some(rustls::HandshakeKind::Resumed))
+            && conn.protocol_version() == Some(rustls::ProtocolVersion::TLSv1_2)
+        });
+        for issued in link.take_issued() {
+          if issued.tls12 && resumed_tls12 {
+            continue;
+          }
+          if let Some(ctx) = extract_emit_ctx(ptr) {
+            do_emit_new_session(&ctx, &issued.buffer);
+          }
+          if !(*ptr).alive.get() {
+            return;
+          }
+        }
+      }
+
       if result.handshake_done {
         (*ptr).established = true;
         if let Some(ctx) = extract_emit_ctx(ptr) {
@@ -1795,27 +1820,6 @@ impl TLSWrapInner {
             WriteCompletion::Sync,
           );
           (*ptr).underlying.shutdown();
-        }
-      }
-
-      // Sessions rustls stored while processing this input become 'session'
-      // events. A resumed TLS 1.2 handshake keeps the offered session (as
-      // OpenSSL's client does), so the re-issued ticket is not reported.
-      if let Some(link) = (*ptr).session_link.clone() {
-        let resumed_tls12 = (*ptr).tls_conn.as_ref().is_some_and(|conn| {
-          matches!(conn.handshake_kind(), Some(rustls::HandshakeKind::Resumed))
-            && conn.protocol_version() == Some(rustls::ProtocolVersion::TLSv1_2)
-        });
-        for issued in link.take_issued() {
-          if issued.tls12 && resumed_tls12 {
-            continue;
-          }
-          if let Some(ctx) = extract_emit_ctx(ptr) {
-            do_emit_new_session(&ctx, &issued.buffer);
-          }
-          if !(*ptr).alive.get() {
-            return;
-          }
         }
       }
 

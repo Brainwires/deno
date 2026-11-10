@@ -1636,6 +1636,14 @@ function onConnectSecure() {
     debug("client emit secureConnect. authorized:", this.authorized);
   }
 
+  // A TLS 1.3 server sends its tickets after the handshake, so a session can
+  // still be missing here. Node's getSession() then returns a session that
+  // can't resume; this one names no session the native layer keeps, so
+  // setSession() with it offers nothing.
+  if (!this._session && this.getProtocol() === "TLSv1.3") {
+    this._session = Buffer.from("deno-tls13-unresumable-session");
+  }
+
   this.secureConnecting = false;
   this.emit("secureConnect");
 

@@ -155,30 +155,6 @@ const cipherInfoTable: CipherInfoResult[] = [
     mode: "cbc",
   },
   {
-    name: "aes-128-gcm",
-    nid: 895,
-    blockSize: 1,
-    ivLength: 12,
-    keyLength: 16,
-    mode: "gcm",
-  },
-  {
-    name: "aes-192-gcm",
-    nid: 898,
-    blockSize: 1,
-    ivLength: 12,
-    keyLength: 24,
-    mode: "gcm",
-  },
-  {
-    name: "aes-256-gcm",
-    nid: 901,
-    blockSize: 1,
-    ivLength: 12,
-    keyLength: 32,
-    mode: "gcm",
-  },
-  {
     name: "des-ede3-cbc",
     nid: 44,
     blockSize: 8,
@@ -763,10 +739,14 @@ MapPrototypeSet(
 );
 for (
   const { 0: alias, 1: name } of new SafeArrayIterator([
+    // OpenSSL's short names for the CCM and GCM ciphers are the id-aes*
+    // ones; getCipherInfo() reports them for either spelling, as Node does.
     ["aes-128-ccm", "id-aes128-ccm"],
+    ["aes-128-gcm", "id-aes128-gcm"],
     ["aes-192-ccm", "id-aes192-ccm"],
     ["aes-192-gcm", "id-aes192-gcm"],
     ["aes-256-ccm", "id-aes256-ccm"],
+    ["aes-256-gcm", "id-aes256-gcm"],
     ["camellia128", "camellia-128-cbc"],
     ["camellia192", "camellia-192-cbc"],
     ["camellia256", "camellia-256-cbc"],

@@ -33,6 +33,21 @@ const plaintext = Buffer.from(
   "The quick brown fox jumps over the lazy dog, 51 bytes",
 );
 
+// The vectors name ciphers of every mode, AEAD ones too: one signature takes
+// an AEAD's options and has its methods.
+const createCipheriv = crypto.createCipheriv as unknown as (
+  name: string,
+  key: Buffer,
+  iv: Buffer | null,
+  options?: crypto.CipherGCMOptions,
+) => crypto.CipherGCM;
+const createDecipheriv = crypto.createDecipheriv as unknown as (
+  name: string,
+  key: Buffer,
+  iv: Buffer | null,
+  options?: crypto.CipherGCMOptions,
+) => crypto.DecipherGCM;
+
 function hex(s: string): Buffer {
   return Buffer.from(s, "hex");
 }
@@ -44,13 +59,13 @@ for (const v of vectors.ciphers) {
     const options = v.tag ? { authTagLength: 16 } : undefined;
     const aad = v.aad ? hex(v.aad) : undefined;
 
-    const cipher = crypto.createCipheriv(v.name, key, iv, options);
+    const cipher = createCipheriv(v.name, key, iv, options);
     if (aad) cipher.setAAD(aad, { plaintextLength: plaintext.length });
     const ct = Buffer.concat([cipher.update(plaintext), cipher.final()]);
     assertEquals(ct.toString("hex"), v.ct);
     if (v.tag) assertEquals(cipher.getAuthTag().toString("hex"), v.tag);
 
-    const decipher = crypto.createDecipheriv(v.name, key, iv, options);
+    const decipher = createDecipheriv(v.name, key, iv, options);
     if (v.tag) decipher.setAuthTag(hex(v.tag));
     if (aad) decipher.setAAD(aad, { plaintextLength: plaintext.length });
     const pt = Buffer.concat([decipher.update(hex(v.ct)), decipher.final()]);
@@ -64,7 +79,7 @@ Deno.test("[node/crypto] legacy ciphers stream in small chunks", () => {
     // update as one data unit
     if (v.name.endsWith("-ccm") || v.name.endsWith("-xts")) continue;
     const options = v.tag ? { authTagLength: 16 } : undefined;
-    const cipher = crypto.createCipheriv(
+    const cipher = createCipheriv(
       v.name,
       hex(v.key),
       v.iv ? hex(v.iv) : null,
@@ -96,7 +111,7 @@ Deno.test("[node/crypto] getCiphers() lists only ciphers that work", () => {
       ? Buffer.alloc(info.ivLength, 1)
       : null;
     const options = aead ? { authTagLength: 16 } : undefined;
-    const cipher = crypto.createCipheriv(
+    const cipher = createCipheriv(
       name,
       key(info.keyLength),
       iv,
@@ -105,7 +120,7 @@ Deno.test("[node/crypto] getCiphers() lists only ciphers that work", () => {
     // XTS: a data unit is at least one block
     const data = Buffer.alloc(32, 7);
     const ct = Buffer.concat([cipher.update(data), cipher.final()]);
-    const decipher = crypto.createDecipheriv(
+    const decipher = createDecipheriv(
       name,
       key(info.keyLength),
       iv,
@@ -133,12 +148,14 @@ Deno.test("[node/crypto] CCM and OCB parameters as in Node", () => {
     authTagLength: 16,
   });
   assertThrows(
+    // @ts-expect-error: CCM's missing plaintextLength is what is tested
     () => ccm.setAAD(Buffer.from("a")),
     TypeError,
     "options.plaintextLength required for CCM mode with AAD",
   );
   ccm.update("a");
   assertThrows(() => ccm.update("b"), Error, "unsupported state");
+  ccm.final();
 
   // a CCM tag that doesn't authenticate: no plaintext, and final() throws
   const decipher = crypto.createDecipheriv(
@@ -172,11 +189,9 @@ Deno.test("[node/crypto] XTS refuses duplicated keys and short units", () => {
     "xts duplicated keys",
   );
   const key = Buffer.concat([Buffer.alloc(16, 1), Buffer.alloc(16, 9)]);
-  assertThrows(
-    () => crypto.createCipheriv("aes-128-xts", key, iv).update(Buffer.alloc(8)),
-    Error,
-    "unsupported state",
-  );
+  const short = crypto.createCipheriv("aes-128-xts", key, iv);
+  assertThrows(() => short.update(Buffer.alloc(8)), Error, "unsupported state");
+  short.final();
   // Node: 20 bytes with ciphertext stealing
   const x = crypto.createCipheriv("aes-128-xts", key, iv);
   assertEquals(

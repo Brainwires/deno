@@ -2190,6 +2190,21 @@ function spawnSync(
   } catch (err) {
     if (ObjectPrototypeIsPrototypeOf(Deno.errors.NotFound.prototype, err)) {
       result.error = _createSpawnError("ENOENT", command, args, true);
+    } else if (
+      ObjectPrototypeIsPrototypeOf(Deno.errors.PermissionDenied.prototype, err)
+    ) {
+      result.error = _createSpawnError(
+        uid != null || gid != null ? "EPERM" : "EACCES",
+        command,
+        args,
+        true,
+      );
+    } else {
+      // Any other failure to start the child (a permission the process
+      // lacks, an invalid argument) is the result's error, as in Node.
+      // Dropping it left a result with no status, which execFileSync() and
+      // execSync() report as a bare "Command failed".
+      result.error = err;
     }
   }
   return result;

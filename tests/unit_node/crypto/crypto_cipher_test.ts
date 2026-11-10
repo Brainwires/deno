@@ -412,29 +412,20 @@ Deno.test({
     assertEquals(crypto.getCiphers().includes("aes-128-cbc"), true);
     assertEquals(crypto.getCiphers().includes("aes-256-ctr"), true);
 
-    const getZeroKey = (cipher: string) => {
-      if (cipher === "des-ede3-cbc") return zeros(24);
-      if (cipher === "chacha20" || cipher === "chacha20-poly1305") {
-        return zeros(32);
-      }
-      return zeros(+cipher.match(/\d+/)![0] / 8);
-    };
-    const getZeroIv = (cipher: string) => {
-      // ECB mode takes no IV; a non-empty IV is now rejected.
-      if (cipher.includes("ecb")) {
-        return zeros(0);
-      }
-      if (cipher.includes("gcm")) {
-        return zeros(12);
-      }
-      if (cipher === "chacha20-poly1305") return zeros(12);
-      if (cipher.includes("des")) return zeros(8);
-      return zeros(16);
-    };
-
     for (const cipher of crypto.getCiphers()) {
-      crypto.createCipheriv(cipher, getZeroKey(cipher), getZeroIv(cipher))
-        .final();
+      const info = crypto.getCipherInfo(cipher)!;
+      // CCM and OCB need an authTagLength, as in Node, and a nonce shorter
+      // than a block
+      const aead = info.mode === "ccm" || info.mode === "ocb";
+      const iv = aead ? zeros(12) : zeros(info.ivLength ?? 0);
+      // distinct bytes: XTS refuses a key whose halves are equal
+      const key = Uint8Array.from({ length: info.keyLength }, (_, i) => i);
+      crypto.createCipheriv(
+        cipher,
+        key,
+        iv,
+        aead ? { authTagLength: 16 } as crypto.CipherCCMOptions : undefined,
+      ).final();
     }
   },
 });

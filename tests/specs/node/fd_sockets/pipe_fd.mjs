@@ -5,21 +5,13 @@ import net from "node:net";
 import { execFileSync } from "node:child_process";
 
 const fifo = "./test.fifo";
-try {
-  execFileSync("mkfifo", [fifo], { stdio: ["ignore", "pipe", "pipe"] });
-} catch (err) {
-  // Name the cause: a bare "Command failed" (seen on CI only) says nothing.
-  console.log(
-    "mkfifo failed:",
-    JSON.stringify({
-      status: err.status,
-      signal: err.signal,
-      code: err.code,
-      stderr: String(err.stderr ?? ""),
-    }),
-  );
-  throw err;
-}
+// Only PATH: a test harness's library-path variables (LD_LIBRARY_PATH,
+// DYLD_FALLBACK_LIBRARY_PATH) in the child's environment need an unscoped
+// --allow-run.
+execFileSync("mkfifo", [fifo], {
+  env: { PATH: process.env.PATH },
+  stdio: ["ignore", "pipe", "pipe"],
+});
 const fd = fs.openSync(fifo, fs.constants.O_RDWR | fs.constants.O_NONBLOCK);
 const socket = new net.Socket({ fd, readable: true, writable: false });
 socket.setEncoding("utf8");
