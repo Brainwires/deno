@@ -34,7 +34,7 @@ struct PendingLoad {
 ///   so the Rust default loader knows which URL to actually fetch from.
 type LoadResult = (Option<String>, Option<String>, Option<String>);
 type LoadSender =
-  deno_core::futures::channel::oneshot::Sender<Result<LoadResult, String>>;
+  deno_core::futures::channel::oneshot::Sender<Result<LoadResult, HookError>>;
 
 /// Callback used to perform the default ESM resolution from JS hooks.
 /// Installed by the embedder so that the JS terminal `nextResolve` fallback
@@ -44,17 +44,37 @@ type LoadSender =
 pub type DefaultResolveCb =
   Rc<dyn Fn(&str, &str) -> Result<String, JsErrorBox>>;
 
-/// An error thrown by the resolve hook chain that carries a Node error code
-/// (`ERR_PACKAGE_PATH_NOT_EXPORTED`, `ERR_INVALID_ARG_VALUE`, ...), so the
-/// import's rejection has the same class and `code` as in Node.
-#[derive(Debug)]
-struct HookResolveError {
+/// An error thrown by a resolve or load hook chain that keeps its class and,
+/// when it has one, its Node error code (`ERR_PACKAGE_PATH_NOT_EXPORTED`,
+/// `ERR_UNKNOWN_MODULE_FORMAT`, ...), so the import's rejection has the same
+/// class and `code` as in Node.
+#[derive(Debug, Clone)]
+pub struct HookError {
   class: &'static str,
   message: String,
-  code: String,
+  code: Option<String>,
 }
 
-impl HookResolveError {
+impl HookError {
+  /// A hook error from the thrown value's `name`, `message` and `code`.
+  pub fn new(
+    name: Option<&str>,
+    message: String,
+    code: Option<String>,
+  ) -> Self {
+    let class = match name {
+      Some("TypeError") => deno_error::builtin_classes::TYPE_ERROR,
+      Some("RangeError") => deno_error::builtin_classes::RANGE_ERROR,
+      Some("SyntaxError") => deno_error::builtin_classes::SYNTAX_ERROR,
+      _ => deno_error::builtin_classes::GENERIC_ERROR,
+    };
+    Self {
+      class,
+      message,
+      code,
+    }
+  }
+
   fn from_result(
     scope: &mut v8::PinScope,
     result: v8::Local<v8::Object>,
@@ -69,29 +89,19 @@ impl HookResolveError {
     };
     let code = get("code")?;
     let message = get("message")?;
-    let class = match get("name").as_deref() {
-      Some("TypeError") => deno_error::builtin_classes::TYPE_ERROR,
-      Some("RangeError") => deno_error::builtin_classes::RANGE_ERROR,
-      Some("SyntaxError") => deno_error::builtin_classes::SYNTAX_ERROR,
-      _ => deno_error::builtin_classes::GENERIC_ERROR,
-    };
-    Some(Self {
-      class,
-      message,
-      code,
-    })
+    Some(Self::new(get("name").as_deref(), message, Some(code)))
   }
 }
 
-impl std::fmt::Display for HookResolveError {
+impl std::fmt::Display for HookError {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.write_str(&self.message)
   }
 }
 
-impl std::error::Error for HookResolveError {}
+impl std::error::Error for HookError {}
 
-impl deno_error::JsErrorClass for HookResolveError {
+impl deno_error::JsErrorClass for HookError {
   fn get_class(&self) -> std::borrow::Cow<'static, str> {
     std::borrow::Cow::Borrowed(self.class)
   }
@@ -101,12 +111,12 @@ impl deno_error::JsErrorClass for HookResolveError {
   }
 
   fn get_additional_properties(&self) -> deno_error::AdditionalProperties {
-    Box::new(std::iter::once((
-      std::borrow::Cow::Borrowed("code"),
-      deno_error::PropertyValue::String(std::borrow::Cow::Owned(
-        self.code.clone(),
-      )),
-    )))
+    Box::new(self.code.clone().into_iter().map(|code| {
+      (
+        std::borrow::Cow::Borrowed("code"),
+        deno_error::PropertyValue::String(std::borrow::Cow::Owned(code)),
+      )
+    }))
   }
 
   fn get_ref(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
@@ -231,7 +241,7 @@ impl LoaderHookRegistry {
       if let Some(error) = result.get(scope, error_key.into())
         && !error.is_null_or_undefined()
       {
-        if let Some(coded) = HookResolveError::from_result(scope, result) {
+        if let Some(coded) = HookError::from_result(scope, result) {
           return Err(JsErrorBox::from_err(coded));
         }
         let error = error
@@ -293,8 +303,9 @@ impl LoaderHookRegistry {
     url: String,
     format: String,
     import_attributes: HashMap<String, String>,
-  ) -> deno_core::futures::channel::oneshot::Receiver<Result<LoadResult, String>>
-  {
+  ) -> deno_core::futures::channel::oneshot::Receiver<
+    Result<LoadResult, HookError>,
+  > {
     // Dedup: if there's already a pending load for this URL, piggyback.
     if self.load_waiters.borrow().contains_key(&url) {
       let (sender, receiver) = deno_core::futures::channel::oneshot::channel();
@@ -397,10 +408,12 @@ pub fn op_module_hooks_respond_load(
   #[string] format: Option<String>,
   #[string] error: Option<String>,
   #[string] effective_url: Option<String>,
+  #[string] error_name: Option<String>,
+  #[string] error_code: Option<String>,
 ) {
   let registry = state.borrow::<LoaderHookRegistry>().clone();
-  let result: Result<LoadResult, String> = if let Some(err) = error {
-    Err(err)
+  let result: Result<LoadResult, HookError> = if let Some(err) = error {
+    Err(HookError::new(error_name.as_deref(), err, error_code))
   } else {
     Ok((source, format, effective_url))
   };

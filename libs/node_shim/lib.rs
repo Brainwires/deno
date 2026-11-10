@@ -3342,7 +3342,11 @@ pub fn wrap_eval_code(source_code: &str) -> String {
     process.getBuiltinModule("module").builtinModules
       .filter((m) => !/\/|crypto|process|_tls_common/.test(m))
       .forEach((m) => {{ globalThis[m] = process.getBuiltinModule(m); }}),
-    process.getBuiltinModule("vm").runInThisContext({}, {{ filename: "[eval]" }})
+    process.getBuiltinModule("vm").runInThisContext({}, {{
+      filename: "[eval]",
+      importModuleDynamically:
+        process.getBuiltinModule("vm").constants.USE_MAIN_CONTEXT_DEFAULT_LOADER,
+    }})
   )"#,
     json_escaped
   )
@@ -3810,12 +3814,15 @@ pub fn translate_to_deno_args(
     // `import` statement is a syntax error). `--ext` keeps it JavaScript
     // (`deno eval` defaults to TypeScript, whose emit drops an import binding
     // nothing uses, so a missing export would go unreported).
+    // With `--unstable-detect-cjs`, `js` / `ts` would take a string with no
+    // `import` for CommonJS, which has no file to load: the module
+    // extensions keep it an ES module.
     let input_is_module =
       matches!(env_opts.input_type.as_str(), "module" | "module-typescript");
     if env_opts.input_type == "module" {
-      deno_args.push("--ext=js".to_string());
+      deno_args.push("--ext=mjs".to_string());
     } else if env_opts.input_type == "module-typescript" {
-      deno_args.push("--ext=ts".to_string());
+      deno_args.push("--ext=mts".to_string());
     }
     let eval_code = if options.wrap_eval_code && !input_is_module {
       wrap_eval_code(raw_eval_code)
@@ -3854,6 +3861,8 @@ pub fn translate_to_deno_args(
       deno_args.push("--node-modules-dir=manual".to_string());
       deno_args.push("--no-config".to_string());
     }
+    // Node runs the `--require` / `--import` preloads before the check.
+    add_preload_flags(deno_args, env_opts, options);
     deno_args.push(data_url(include_str!("./check_syntax.js")));
     deno_args.push(parsed_args.remaining_args[0].clone());
     return result;
@@ -6069,7 +6078,7 @@ mod tests {
       translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
     assert_eq!(result.deno_args[0], "eval");
     assert!(
-      result.deno_args.iter().any(|arg| arg == "--ext=js"),
+      result.deno_args.iter().any(|arg| arg == "--ext=mjs"),
       "{:?}",
       result.deno_args
     );
@@ -6089,7 +6098,7 @@ mod tests {
     let result =
       translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
     assert!(
-      result.deno_args.iter().any(|arg| arg == "--ext=ts"),
+      result.deno_args.iter().any(|arg| arg == "--ext=mts"),
       "{:?}",
       result.deno_args
     );
@@ -6502,6 +6511,24 @@ mod tests {
     );
     assert!(args[5].starts_with("data:text/javascript,"), "{args:?}");
     assert_eq!(&args[6..], &svec!["app.js"], "{args:?}");
+  }
+
+  #[test]
+  fn check_runs_the_import_preloads_first() {
+    let parsed =
+      parse_args(svec!["--import", "./a.mjs", "--check", "app.js"]).unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    let args = result.deno_args;
+    let preload = args.iter().position(|a| a == "--preload=./a.mjs");
+    let check = args
+      .iter()
+      .position(|a| a.starts_with("data:text/javascript,"));
+    assert!(
+      matches!((preload, check), (Some(p), Some(c)) if p < c),
+      "{args:?}"
+    );
+    assert_eq!(args.last().map(String::as_str), Some("app.js"), "{args:?}");
   }
 
   #[test]

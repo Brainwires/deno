@@ -1698,7 +1698,7 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
                 Ok(source)
               }
             }
-            Err(err) => Err(JsErrorBox::generic(err)),
+            Err(err) => Err(JsErrorBox::from_err(err)),
           }
         }
         .boxed_local(),

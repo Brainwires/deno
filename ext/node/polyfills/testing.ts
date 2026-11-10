@@ -1037,17 +1037,18 @@ async function executeTestFiles(options, outerReport) {
   if (options.randomize === true && randomSeed == null) {
     randomSeed = MathFloor(MathRandom() * (0xFFFF_FFFF + 1));
   }
-  if (randomSeed != null) {
-    report("test:diagnostic", {
-      __proto__: null,
-      nesting: 0,
-      message: `Randomized test order seed: ${randomSeed}`,
-      level: "info",
-    });
-  }
   if (options.shard) {
     const { index, total } = options.shard;
     files = ArrayPrototypeFilter(files, (_, i) => i % total === index - 1);
+  }
+  if (randomSeed != null && isolation !== "none") {
+    // Each file is a subtest of the root, which dequeues its pending
+    // subtests with its own seeded generator: the files start in that order.
+    files = ArrayPrototypeSlice(files);
+    const random = createSeededGenerator(randomSeed);
+    for (let start = 0; start < files.length; start++) {
+      dequeueSubtest(files, start, random);
+    }
   }
   let globalTeardown;
   if (options.globalSetupPath) {
@@ -1168,6 +1169,15 @@ async function executeTestFiles(options, outerReport) {
     nesting: 0,
     count: counters.topLevel,
   });
+  if (randomSeed != null) {
+    // The root's diagnostics, ahead of the counts, as Node reports them.
+    report("test:diagnostic", {
+      __proto__: null,
+      nesting: 0,
+      message: `Randomized test order seed: ${randomSeed}`,
+      level: "info",
+    });
+  }
   for (
     const { 0: name, 1: value } of new SafeArrayIterator([
       ["tests", counters.tests],

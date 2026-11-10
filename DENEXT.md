@@ -12043,6 +12043,63 @@ where the changes are discussed.
        text, raw, copy, Blob, a missing key, `/etc/hosts` and a `..` escape not
        read, a bad key); LSP `node:` completions list `node:sea`.
 
+NNN. **`fix(node)`: module loader hooks and `node:test` long tail: thrown
+     values, hook errors' class and code, `import.meta` key order, a missing
+     main module, `--input-type=module` / `--check` with preloads, `node -e`
+     dynamic import, randomized file order** (`runtime/js/99_main.js`,
+     `runtime/fmt_errors.rs`, `cli/lib.rs`, `cli/module_loader.rs`,
+     `ext/node/ops/module_hooks.rs`, `ext/node/polyfills/01_require.js`,
+     `ext/node/polyfills/testing.ts`, `libs/core/runtime/bindings.rs`,
+     `libs/node_shim/lib.rs`).
+     - Node mode (`--unstable-node-errors`) prints an uncaught primitive as its
+       string value (`literal string`, `1` for `1n`) and an uncaught object or
+       function with `util.inspect` without colour; it printed Deno's quoted
+       form.
+     - A value a `module.register()` hooks module throws reaches the loading
+       thread as itself when it can be cloned, else as its inspected text (a
+       function, an object holding one); a plain object was revived as an
+       empty `Error`.
+     - An error a load hook throws keeps its class and `code` in the import's
+       rejection (the op takes the error's name and code); a load hook result
+       whose `format` is not one Node knows (or `text` / `bytes`) is
+       `ERR_UNKNOWN_MODULE_FORMAT`; a resolve hook's `url` that is not a URL
+       is `ERR_INVALID_RETURN_PROPERTY_VALUE` naming the hooks module.
+     - `register("pkg")` / `--experimental-loader pkg` for a package that
+       can't be found is `ERR_MODULE_NOT_FOUND` ("Cannot find package 'pkg'
+       imported from ..."), not a file next to the working directory; a
+       revived hook error with an `ERR_*` code, and in Node mode any runtime
+       error carrying one, prints `TypeError [ERR_X]: ...` as Node's own
+       errors do.
+     - `node missing.js` (any extension) prints Node's `MODULE_NOT_FOUND`
+       report ("Error: Cannot find module '/abs/missing.js'").
+     - `Reflect.ownKeys(import.meta)` is Node's order: `dirname`, `filename`,
+       `main`, `resolve`, `url`.
+     - `module.setSourceMapsSupport(enabled, { nodeModules, generatedCode })`
+       and `module.getSourceMapsSupport()` exist, with Node's validation (the
+       runtime maps stacks through source maps either way).
+     - Node shim: `--input-type=module` / `module-typescript` pass `--ext=mjs`
+       / `--ext=mts`, so a string with no `import` stays a module under
+       `--unstable-detect-cjs` (it was taken for CommonJS and failed with
+       "Cannot find module '$deno$eval.js'"); `--check` runs the `--require` /
+       `--import` preloads first; the wrapped `-e` script gets
+       `importModuleDynamically: USE_MAIN_CONTEXT_DEFAULT_LOADER`, so
+       `node -e 'import("x")'` works.
+     - `node --test --test-random-seed=N` with process isolation starts the
+       files in the order the root's seeded queue picks them (Node's), and the
+       "Randomized test order seed" diagnostic comes after the plan, ahead of
+       the counts.
+     - Tests: node_compat enables 24 (`es-module/test-esm-import-meta`,
+       `-loader-invalid-format`, `-loader-invalid-url`, `-loader-not-found`,
+       `-import-flag`, `-pkgname`, `test-loaders-unknown-builtin-module`, the
+       ten `module-hooks/test-async-loader-hooks-throw-*`,
+       `parallel/test-module-main-fail`, `-main-preserve-symlinks-fail`,
+       `-setsourcemapssupport`, `-subpath-import-long-path`,
+       `test-runner-import-no-scheme`,
+       `test-runner/test-output-randomize-output-cli` and `-cli-none`); unit
+       `fmt_errors` (`node_format_puts_an_err_code_in_the_name`,
+       `node_format_main_module_not_found`); `libs/node_shim`
+       (`check_runs_the_import_preloads_first`, the `--ext` assertions).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

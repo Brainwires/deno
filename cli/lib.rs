@@ -768,6 +768,19 @@ fn exit_for_error(error: AnyError, initial_cwd: Option<&std::path::Path>) -> ! {
   {
     exit_for_node_error(e);
   }
+  if deno_runtime::fmt_errors::node_error_format()
+    && let Some(text) =
+      deno_runtime::fmt_errors::format_main_module_not_found_node(
+        &format!("{error}"),
+        deno_runtime::deno_node::NODE_VERSION,
+      )
+  {
+    #[allow(clippy::print_stderr, reason = "Node's uncaught error report")]
+    {
+      eprint!("{text}");
+    }
+    deno_runtime::exit(1);
+  }
   let mut error_string = match js_error_downcast_ref(&error) {
     Some(e) => {
       let initial_cwd = initial_cwd
