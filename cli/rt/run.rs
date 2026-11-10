@@ -1040,7 +1040,7 @@ impl ModuleLoader for EmbeddedModuleLoader {
                 Ok(source)
               }
             }
-            Err(err) => Err(JsErrorBox::generic(err)),
+            Err(err) => Err(JsErrorBox::from_err(err)),
           }
         }
         .boxed_local(),
