@@ -4941,6 +4941,7 @@ function preEnableTraceEvents() {
   }
   try {
     traceEvents.createTracing({ categories }).enable();
+    traceEvents.markCliTracing();
   } catch {
     // Invalid categories must not block startup.
   }

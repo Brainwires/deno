@@ -7,6 +7,7 @@ const {
   ArrayPrototypePush,
   ArrayPrototypeConcat,
   ArrayPrototypeSlice,
+  StringPrototypeIndexOf,
   StringPrototypeSlice,
   StringPrototypeStartsWith,
 } = primordials;
@@ -151,7 +152,32 @@ function parseOption(options: Map<string, OptionValue>, arg: string) {
     case "--no-use-system-ca":
       options.set("--use-system-ca", { value: false });
       break;
+    // denext: the diagnostic report's switches, which the node shim passes
+    // in NODE_OPTIONS (see internal/process/report.ts).
+    case "--report-compact":
+    case "--report-exclude-env":
+    case "--report-exclude-network":
+    case "--report-on-fatalerror":
+    case "--report-on-signal":
+    case "--report-uncaught-exception":
+      options.set(arg, { value: true });
+      break;
     default:
+      if (StringPrototypeStartsWith(arg, "--report-")) {
+        const eq = StringPrototypeIndexOf(arg, "=");
+        if (eq !== -1) {
+          let name = StringPrototypeSlice(arg, 0, eq);
+          // Node's aliases: `--report-directory` is `--report-dir`.
+          if (name === "--report-directory") name = "--report-dir";
+          if (
+            name === "--report-dir" || name === "--report-filename" ||
+            name === "--report-signal"
+          ) {
+            options.set(name, { value: StringPrototypeSlice(arg, eq + 1) });
+            break;
+          }
+        }
+      }
       // denext: `--heapsnapshot-signal` and `--diagnostic-dir`, which the
       // node shim passes in NODE_OPTIONS (see process.ts).
       if (StringPrototypeStartsWith(arg, "--heapsnapshot-signal=")) {
@@ -165,6 +191,15 @@ function parseOption(options: Map<string, OptionValue>, arg: string) {
           value: StringPrototypeSlice(
             arg,
             "--heapsnapshot-near-heap-limit=".length,
+          ),
+        });
+        break;
+      }
+      if (StringPrototypeStartsWith(arg, "--trace-event-file-pattern=")) {
+        options.set("--trace-event-file-pattern", {
+          value: StringPrototypeSlice(
+            arg,
+            "--trace-event-file-pattern=".length,
           ),
         });
         break;

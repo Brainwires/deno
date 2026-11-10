@@ -309,7 +309,6 @@ const IGNORED_TEST_DIRS: &[&str] = &[
   "known_issues",
   "node-api",
   "overlapped-checker",
-  "report",
   "testpy",
   "tick-processor",
   "tools",
@@ -600,6 +599,11 @@ fn parse_flags(source: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
           }
           n if n.starts_with("--title=") => {
             node_options.push(flag.to_string());
+          }
+          // denext: the diagnostic report's options, which the node shim
+          // also passes in NODE_OPTIONS.
+          n if n.starts_with("--report-") => {
+            node_options.push(n.to_string());
           }
           // Inspector tests opt in to the inspector via `--inspect=PORT`
           // (commonly `--inspect=0` to pick a random port). Forward to

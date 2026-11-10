@@ -7,6 +7,7 @@
 const { core, primordials } = __bootstrap;
 const {
   Array,
+  ArrayPrototypeFilter,
   ArrayPrototypeIndexOf,
   ArrayPrototypePush,
   ArrayPrototypeSlice,
@@ -39,6 +40,7 @@ const {
   ObjectPrototypeToString,
   String,
   StringPrototypePadStart,
+  StringPrototypeStartsWith,
   Symbol,
   SymbolDispose,
   SymbolSpecies,
@@ -92,8 +94,9 @@ const {
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
 const lazyFs = core.createLazyLoader("node:fs");
 const lazyStream = core.createLazyLoader("node:stream");
+const lazyPath = core.createLazyLoader("node:path");
+const lazyProcess = core.createLazyLoader("node:process");
 
-const { notImplemented } = core.loadExtScript("ext:deno_node/_utils.ts");
 const { isArrayBufferView, isDataView } = core.loadExtScript(
   "ext:deno_node/internal/util/types.ts",
 );
@@ -211,11 +214,95 @@ function setFlagsFromString(flags: string) {
   validateString(flags, "flags");
   op_v8_set_flags_from_string(flags);
 }
+// denext: `NODE_V8_COVERAGE`, as Node's `profiler::StartProfilers`: precise
+// coverage (call counts, block granularity) on the isolate's own inspector
+// from the bootstrap on, written as `coverage-<pid>-<ms>-<threadId>.json`
+// (`{ result, timestamp }`) at exit and on each `v8.takeCoverage()`.
+let coverageSession = null;
+let coverageDirectory = "";
+let coverageCwd = undefined;
+
+// `cwd` resolves a relative directory as Node does at startup (the runtime
+// bootstrap passes it, before node:path and node:process are loaded).
+function startCoverage(directory, cwd) {
+  if (coverageSession !== null) return;
+  try {
+    const session = createSyncInspectorSession();
+    session.post("Profiler.enable");
+    session.post("Profiler.startPreciseCoverage", {
+      callCount: true,
+      detailed: true,
+    });
+    coverageSession = session;
+    coverageDirectory = cwd === undefined
+      ? lazyPath().resolve(directory)
+      : directory;
+    coverageCwd = cwd;
+  } catch {
+    // Without the inspector (or the `inspector` sys permission) there is no
+    // coverage, as in a Node build without the inspector.
+  }
+}
+
+function coverageThreadId() {
+  try {
+    return core.loadExtScript("ext:deno_node/worker_threads.ts").threadId ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+// A script of the program, not the runtime's own (`ext:`, `node:`, eval'd
+// code without a URL).
+function isUserScript(url) {
+  return url !== "" && !StringPrototypeStartsWith(url, "ext:") &&
+    !StringPrototypeStartsWith(url, "node:") &&
+    !StringPrototypeStartsWith(url, "[ext:");
+}
+
+function writeCoverage() {
+  if (coverageSession === null) return;
+  let taken;
+  try {
+    taken = coverageSession.post("Profiler.takePreciseCoverage");
+  } catch {
+    return;
+  }
+  const result = ArrayPrototypeFilter(
+    taken.result,
+    (script) => isUserScript(script.url),
+  );
+  const fs = lazyFs();
+  if (coverageCwd !== undefined) {
+    coverageDirectory = lazyPath().resolve(coverageCwd, coverageDirectory);
+    coverageCwd = undefined;
+  }
+  const filename =
+    `coverage-${lazyProcess().default.pid}-${DateNow()}-${coverageThreadId()}.json`;
+  try {
+    fs.mkdirSync(coverageDirectory, { recursive: true });
+    fs.writeFileSync(
+      lazyPath().join(coverageDirectory, filename),
+      JSONStringify({ result, timestamp: taken.timestamp }),
+    );
+  } catch {
+    // Node writes coverage on a best-effort basis too.
+  }
+}
+
 function stopCoverage() {
-  notImplemented("v8.stopCoverage");
+  if (coverageSession === null) return;
+  try {
+    coverageSession.post("Profiler.stopPreciseCoverage");
+    coverageSession.post("Profiler.disable");
+    coverageSession.disconnect();
+  } catch {
+    // Already gone.
+  }
+  coverageSession = null;
 }
 function takeCoverage() {
-  notImplemented("v8.takeCoverage");
+  writeCoverage();
 }
 
 let heapSnapshotCounter = 0;
@@ -1056,5 +1143,9 @@ return {
   startHeapProfileRaw,
   getHeapSnapshotBytes: () => op_v8_take_heap_snapshot(),
   defaultHeapSnapshotFilename,
+  // denext: `NODE_V8_COVERAGE`, started by the process bootstrap and
+  // written when the process exits.
+  startCoverage,
+  writeCoverage,
 };
 })();

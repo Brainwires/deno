@@ -899,7 +899,9 @@ class NodeWorker extends EventEmitter {
       env: env_,
       argv: argv_,
       execArgv: options?.execArgv ?? [],
-      name: this.#name,
+      // denext: the `name` option, which the worker reads back as
+      // `threadName` (`this.#name` is only set further down).
+      name: StringPrototypeTrim(options?.name ?? ""),
       isEval: !!options?.eval,
       isWorkerThread: true,
       hasStdin: !!options?.stdin,

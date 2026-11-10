@@ -3646,6 +3646,19 @@ pub fn translate_to_deno_args(
   if !opts.trace_event_categories.is_empty() {
     result.trace_event_categories = opts.trace_event_categories.clone();
   }
+  // denext: `--title` rides in NODE_OPTIONS, which the bootstrap reads to set
+  // `process.title`.
+  if !opts.title.is_empty() {
+    node_options.push(node_options_token(&format!("--title={}", opts.title)));
+  }
+  // denext: and its file pattern rides in NODE_OPTIONS, where node:trace_events
+  // reads it when it writes the trace file.
+  if opts.trace_event_file_pattern != "node_trace.${rotation}.log" {
+    node_options.push(node_options_token(&format!(
+      "--trace-event-file-pattern={}",
+      opts.trace_event_file_pattern
+    )));
+  }
   // denext: `--trace-sigint` rides along in NODE_OPTIONS, which the CLI reads
   // at startup (denoland/deno#32423). Also before the early returns.
   if opts.trace_sigint {
@@ -3674,6 +3687,10 @@ pub fn translate_to_deno_args(
       )));
     }
   }
+
+  // denext: the diagnostic report's options ride along in NODE_OPTIONS too:
+  // the bootstrap configures `process.report` from them.
+  add_report_node_options(node_options, opts);
 
   // Check for system CA usage
   if opts.use_system_ca || opts.use_openssl_ca {
@@ -4006,6 +4023,48 @@ pub fn translate_to_deno_args(
 /// token instead of adding flags (`--import`, `--require`) to the child's
 /// `NODE_OPTIONS`. The node:test polyfill's `quoteNodeOptionsToken` does the
 /// same.
+/// The `--report-*` options, as NODE_OPTIONS tokens.
+fn add_report_node_options(
+  node_options: &mut Vec<String>,
+  opts: &PerProcessOptions,
+) {
+  let per_isolate = &opts.per_isolate;
+  let per_env = &per_isolate.per_env;
+  for (on, flag) in [
+    (
+      per_isolate.report_uncaught_exception,
+      "--report-uncaught-exception",
+    ),
+    (per_isolate.report_on_signal, "--report-on-signal"),
+    (opts.report_on_fatalerror, "--report-on-fatalerror"),
+    (opts.report_compact, "--report-compact"),
+    (per_env.report_exclude_env, "--report-exclude-env"),
+    (per_env.report_exclude_network, "--report-exclude-network"),
+  ] {
+    if on {
+      node_options.push(flag.to_string());
+    }
+  }
+  if per_isolate.report_signal != "SIGUSR2" {
+    node_options.push(node_options_token(&format!(
+      "--report-signal={}",
+      per_isolate.report_signal
+    )));
+  }
+  if !opts.report_directory.is_empty() {
+    node_options.push(node_options_token(&format!(
+      "--report-dir={}",
+      opts.report_directory
+    )));
+  }
+  if !opts.report_filename.is_empty() {
+    node_options.push(node_options_token(&format!(
+      "--report-filename={}",
+      opts.report_filename
+    )));
+  }
+}
+
 fn node_options_token(token: &str) -> String {
   let mut out = String::with_capacity(token.len() + 2);
   out.push('"');
@@ -6028,6 +6087,57 @@ mod tests {
       svec![
         "\"--heapsnapshot-signal=SIGUSR2\"",
         "\"--diagnostic-dir=/tmp/diag\""
+      ],
+      "{:?}",
+      result.node_options
+    );
+  }
+
+  #[test]
+  fn test_title_and_trace_file_pattern_ride_in_node_options() {
+    let parsed = parse_args(svec![
+      "--title=bar",
+      "--trace-event-file-pattern",
+      "${pid}-${rotation}.log",
+      "-e",
+      "1"
+    ])
+    .unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    assert_eq!(
+      result.node_options,
+      svec![
+        "\"--title=bar\"",
+        "\"--trace-event-file-pattern=${pid}-${rotation}.log\""
+      ],
+      "{:?}",
+      result.node_options
+    );
+  }
+
+  #[test]
+  fn test_report_options_ride_in_node_options() {
+    let parsed = parse_args(svec![
+      "--report-uncaught-exception",
+      "--report-compact",
+      "--report-directory=/tmp/reports",
+      "--report-signal=SIGUSR1",
+      "-e",
+      "1"
+    ])
+    .unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    assert_eq!(
+      result.node_options,
+      // `--report-signal` implies `--report-on-signal`, as in Node.
+      svec![
+        "--report-uncaught-exception",
+        "--report-on-signal",
+        "--report-compact",
+        "\"--report-signal=SIGUSR1\"",
+        "\"--report-dir=/tmp/reports\""
       ],
       "{:?}",
       result.node_options
