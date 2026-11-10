@@ -1492,23 +1492,29 @@ async function createStreamSink(name, destination, cwd) {
 async function importFilesInOneProcess(files) {
   const process = lazyProcess().default;
   const { pathToFileURL } = process.getBuiltinModule("node:url");
-  for (const { 0: file, 1: absolute } of new SafeArrayIterator(files)) {
-    const before = tapTopEntries.length;
-    let failure;
-    let threw = false;
-    try {
-      await import(pathToFileURL(absolute).href);
-    } catch (err) {
-      threw = true;
-      failure = err;
+  const { promise, resolve: finishBootstrap } = PromiseWithResolvers();
+  tapBootstrapPromise = promise;
+  try {
+    for (const { 0: file, 1: absolute } of new SafeArrayIterator(files)) {
+      const before = tapTopEntries.length;
+      let failure;
+      let threw = false;
+      try {
+        await import(pathToFileURL(absolute).href);
+      } catch (err) {
+        threw = true;
+        failure = err;
+      }
+      if (threw) {
+        test(file, () => {
+          throw failure;
+        });
+      } else if (tapTopEntries.length === before) {
+        test(file, () => {});
+      }
     }
-    if (threw) {
-      test(file, () => {
-        throw failure;
-      });
-    } else if (tapTopEntries.length === before) {
-      test(file, () => {});
-    }
+  } finally {
+    finishBootstrap();
   }
 }
 
@@ -1721,6 +1727,11 @@ function shouldSkipByPattern(name) {
 // the describe body.
 const tapTopEntries = [];
 let tapRunScheduled = false;
+// Node's `root.harness.bootstrapPromise` under --test-isolation=none
+// (lib/internal/test_runner/runner.js): set before the first test file is
+// imported and settled after the last one, so the root starts dequeuing its
+// subtests only once every file's top-level tests are registered.
+let tapBootstrapPromise = null;
 // AsyncLocalStorage tracking the currently-active describe() so that test()
 // and describe() calls made inside an async describe body - even after
 // `await` boundaries - still register against the surrounding suite. The
@@ -3282,6 +3293,7 @@ function scheduleTapRun() {
 }
 
 async function runTapTop() {
+  if (tapBootstrapPromise !== null) await tapBootstrapPromise;
   const reporter = getRunReporter();
   const started = nowMs();
   const rerun = getRerunState();

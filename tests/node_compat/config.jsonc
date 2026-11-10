@@ -5466,10 +5466,7 @@
     },
     "system-ca/test-set-default-ca-certificates-system-combinations.js": {},
     "test-runner/test-output-randomize-output-cli.mjs": {},
-    "test-runner/test-output-randomize-output-cli-none.mjs": {
-      "ignore": true,
-      "reason": "the seeded order under --test-isolation=none depends on import timing: the root starts dequeuing before every file is imported (Node imports them all first)"
-    },
+    "test-runner/test-output-randomize-output-cli-none.mjs": {},
     "test-runner/test-output-arbitrary-output-colored.mjs": {},
     "test-runner/test-output-assertion-color-tty.mjs": {
       "expectedSkip": "needs colors; the runner sets NO_COLOR"
