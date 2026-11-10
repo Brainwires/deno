@@ -428,14 +428,11 @@ pub fn run(
   // Decrypt step 8: algorithm-name match is an `OperationError`
   // (`encrypt` uses `InvalidAccessError`; the JS shim modelled both).
   if params.canonical_name() != key.algorithm_name {
-    return Err(op_error(format!(
-      "Decryption algorithm \"{}\" does not match key algorithm",
-      params.canonical_name()
-    )));
+    return Err(op_error("Key algorithm mismatch".to_string()));
   }
   if !key.has_usage("decrypt") {
     return Err(invalid_access(
-      "The requested operation is not valid for the provided key".to_string(),
+      "Unable to use this key to decrypt".to_string(),
     ));
   }
 
@@ -457,7 +454,9 @@ pub fn run(
     }
     SubtleDecryptParams::AesCbc { iv } => {
       if iv.len() != 16 {
-        return Err(op_error("Counter must be 16 bytes".to_string()));
+        return Err(op_error(
+          "algorithm.iv must contain exactly 16 bytes".to_string(),
+        ));
       }
       let length = key.algorithm_length.ok_or_else(|| {
         op_error("AES-CBC key is missing 'length'".to_string())
@@ -495,7 +494,9 @@ pub fn run(
         None => 128u32,
         Some(t) if [32, 64, 96, 104, 112, 120, 128].contains(&t) => t,
         Some(t) => {
-          return Err(op_error(format!("Invalid tag length: {t}")));
+          return Err(op_error(format!(
+            "{t} is not a valid AES-GCM tag length"
+          )));
         }
       };
       if data.len() < (tag_length / 8) as usize {
@@ -529,7 +530,9 @@ pub fn run(
         None => 128u32,
         Some(t) if [64, 96, 128].contains(&t) => t,
         Some(t) => {
-          return Err(op_error(format!("Invalid tag length: {t}")));
+          return Err(op_error(format!(
+            "{t} is not a valid AES-OCB tag length"
+          )));
         }
       };
       if data.len() < (tag_length / 8) as usize {
@@ -572,9 +575,9 @@ pub fn run(
       if let Some(t) = tag_length
         && t != 128
       {
-        return Err(op_error(
-          "ChaCha20-Poly1305 tagLength must be 128".to_string(),
-        ));
+        return Err(op_error(format!(
+          "{t} is not a valid ChaCha20-Poly1305 tag length"
+        )));
       }
       if data.len() < 16 {
         return Err(op_error("The provided data is too small".to_string()));

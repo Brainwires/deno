@@ -559,9 +559,8 @@ fn run_xof(
   use sha3::digest::XofReader;
   use sha3::digest::core_api::CoreWrapper;
 
-  // Validate `outputLength` and `domainSeparation` per the JS body. The
-  // JS code threw `OperationError` DOMExceptions for these; the
-  // `InvalidXofParameters` variant maps to the same class.
+  // Validate `outputLength` and `domainSeparation`: `OperationError`
+  // DOMExceptions, worded as Node words them.
   let output_length = match &algorithm {
     SubtleDigestXof::CShake128 { output_length, .. }
     | SubtleDigestXof::CShake256 { output_length, .. }
@@ -571,8 +570,23 @@ fn run_xof(
     | SubtleDigestXof::Kt256 { output_length, .. }
     | SubtleDigestXof::KangarooTwelve { output_length, .. } => *output_length,
   };
+  // Node's wording names the params dictionary and the member.
+  let dict = match &algorithm {
+    SubtleDigestXof::CShake128 { .. } | SubtleDigestXof::CShake256 { .. } => {
+      "CShakeParams"
+    }
+    SubtleDigestXof::TurboShake128 { .. }
+    | SubtleDigestXof::TurboShake256 { .. } => "TurboShakeParams",
+    _ => "KangarooTwelveParams",
+  };
+  let invalid = |member: &str| {
+    CryptoError::Other(JsErrorBox::new(
+      "DOMExceptionOperationError",
+      format!("Invalid {dict} {member}"),
+    ))
+  };
   if !output_length.is_multiple_of(8) {
-    return Err(CryptoError::InvalidXofParameters);
+    return Err(invalid("outputLength"));
   }
   let is_turbo = matches!(
     algorithm,
@@ -586,7 +600,7 @@ fn run_xof(
       | SubtleDigestXof::KangarooTwelve { .. }
   );
   if (is_turbo || is_kangaroo) && output_length == 0 {
-    return Err(CryptoError::InvalidXofParameters);
+    return Err(invalid("outputLength"));
   }
   if let SubtleDigestXof::TurboShake128 {
     domain_separation, ..
@@ -597,7 +611,7 @@ fn run_xof(
     && let Some(d) = domain_separation
     && !(0x01..=0x7F).contains(d)
   {
-    return Err(CryptoError::InvalidXofParameters);
+    return Err(invalid("domainSeparation"));
   }
 
   let out_len = (output_length / 8) as usize;

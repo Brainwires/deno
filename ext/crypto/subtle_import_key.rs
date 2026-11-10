@@ -39,6 +39,7 @@ use deno_core::webidl::WebIdlConverter;
 use deno_core::webidl::WebIdlError;
 use deno_core::webidl::WebIdlErrorKind;
 use deno_error::JsErrorBox;
+use deno_error::JsErrorClass as _;
 
 use crate::CryptoError;
 use crate::crypto_key::CryptoKeyType;
@@ -227,6 +228,33 @@ impl ImportKeyData {
 
 /// Dispatcher entry point for `SubtleCrypto.importKey()`.
 pub fn run<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  format: KeyFormat,
+  algorithm: &ImportAlgorithm,
+  key_data: ImportKeyData,
+  extractable: bool,
+  usages: &[String],
+) -> Result<v8::Local<'s, v8::Object>, CryptoError> {
+  run_inner(scope, format, algorithm, key_data, extractable, usages).map_err(
+    |err| match err {
+      // A format the algorithm has no import for: Node's wording.
+      CryptoError::Other(ref e)
+        if e.get_class() == "DOMExceptionNotSupportedError"
+          && (e.get_message() == "Not implemented"
+            || e.get_message().starts_with("Unsupported key format for")) =>
+      {
+        not_supported(format!(
+          "Unable to import {} using {} format",
+          algorithm.name,
+          format.as_str()
+        ))
+      }
+      err => err,
+    },
+  )
+}
+
+fn run_inner<'s>(
   scope: &mut v8::PinScope<'s, '_>,
   format: KeyFormat,
   algorithm: &ImportAlgorithm,
@@ -722,14 +750,13 @@ fn import_key_ml_kem<'s>(
     }
     (KeyFormat::Pkcs8, ImportKeyData::Buffer(b)) => {
       check_usages_subset(usages, priv_usages)?;
-      let res =
-        crate::mlkem::import_pkcs8_native(&b).map_err(|e| match e {
-          crate::mlkem::MlKemError::UnsupportedPkcs8Format => not_supported(
-            "ML-KEM 'expandedKey' PKCS#8 format is not supported; only the seed form is supported"
-              .into(),
-          ),
-          _ => data_error("Invalid key data".into()),
-        })?;
+      let res = crate::mlkem::import_pkcs8_native(&b).map_err(|e| match e {
+        crate::mlkem::MlKemError::UnsupportedPkcs8Format => not_supported(
+          "Importing an ML-KEM PKCS#8 key without a seed is not supported"
+            .into(),
+        ),
+        _ => data_error("Invalid key data".into()),
+      })?;
       if res.variant != variant {
         return Err(data_error("Imported key algorithm does not match".into()));
       }
@@ -846,13 +873,14 @@ fn import_key_ml_dsa<'s>(
     }
     (KeyFormat::Pkcs8, ImportKeyData::Buffer(b)) => {
       check_usages_subset(usages, &["sign"])?;
-      let res = crate::mldsa::from_pkcs8_native(variant, &b).map_err(|e| match e {
-        crate::mldsa::MlDsaError::UnsupportedPkcs8Format => not_supported(
-          "ML-DSA 'expandedKey' PKCS#8 format is not supported; only the seed form is supported"
-            .into(),
-        ),
-        _ => data_error("Invalid key data".into()),
-      })?;
+      let res =
+        crate::mldsa::from_pkcs8_native(variant, &b).map_err(|e| match e {
+          crate::mldsa::MlDsaError::UnsupportedPkcs8Format => not_supported(
+            "Importing an ML-DSA PKCS#8 key without a seed is not supported"
+              .into(),
+          ),
+          _ => data_error("Invalid key data".into()),
+        })?;
       Ok(make_private(scope, res.seed, res.private_key))
     }
     (KeyFormat::Spki, ImportKeyData::Buffer(b)) => {

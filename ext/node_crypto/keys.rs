@@ -60,6 +60,8 @@ use spki::der::asn1::OctetStringRef;
 use x509_parser::error::X509Error;
 use x509_parser::x509;
 
+use super::brainpool;
+use super::brainpool::BrainpoolCurve;
 use super::dh;
 use super::dh::DiffieHellmanGroup;
 use super::digest::match_fixed_digest_with_oid;
@@ -67,6 +69,8 @@ use super::jwk_ec;
 use super::jwk_ec::JwkEcKey;
 use super::pkcs3;
 use super::pkcs3::DhParameter;
+use super::pqc;
+use super::pqc::PqcAlg;
 use super::primes::Prime;
 
 #[derive(Clone)]
@@ -96,6 +100,8 @@ pub enum AsymmetricPrivateKey {
   X448([u8; 56]),
   Ed448(ed448_goldilocks::SigningKey),
   Dh(DhPrivateKey),
+  /// ML-DSA / ML-KEM.
+  Pqc(pqc::PqcPrivateKey),
 }
 
 #[derive(Clone)]
@@ -153,6 +159,7 @@ pub enum EcPrivateKey {
   P384(p384::SecretKey),
   P521(p521::SecretKey),
   Secp256k1(k256::SecretKey),
+  Brainpool(brainpool::BrainpoolPrivateKey),
 }
 
 #[derive(Clone)]
@@ -172,6 +179,8 @@ pub enum AsymmetricPublicKey {
   X448([u8; 56]),
   Ed448(ed448_goldilocks::VerifyingKey),
   Dh(DhPublicKey),
+  /// ML-DSA / ML-KEM.
+  Pqc(pqc::PqcPublicKey),
 }
 
 #[derive(Clone)]
@@ -187,6 +196,7 @@ pub enum EcPublicKey {
   P384(p384::PublicKey),
   P521(p521::PublicKey),
   Secp256k1(k256::PublicKey),
+  Brainpool(brainpool::BrainpoolPublicKey),
 }
 
 #[derive(Clone)]
@@ -269,6 +279,9 @@ impl AsymmetricPrivateKey {
           params: dh_key.params.clone(),
         })
       }
+      AsymmetricPrivateKey::Pqc(key) => {
+        AsymmetricPublicKey::Pqc(key.to_public_key())
+      }
     }
   }
 }
@@ -293,6 +306,9 @@ impl EcPublicKey {
       EcPublicKey::P384(key) => Ok(jwk_ec::public_key_to_jwk(key)),
       EcPublicKey::P521(key) => Ok(jwk_ec::public_key_to_jwk(key)),
       EcPublicKey::Secp256k1(key) => Ok(jwk_ec::public_key_to_jwk(key)),
+      EcPublicKey::Brainpool(key) => Err(
+        AsymmetricPublicKeyJwkError::UnsupportedJwkEcCurve(key.curve.name()),
+      ),
     }
   }
 }
@@ -306,6 +322,9 @@ impl EcPrivateKey {
       EcPrivateKey::P384(key) => EcPublicKey::P384(key.public_key()),
       EcPrivateKey::P521(key) => EcPublicKey::P521(key.public_key()),
       EcPrivateKey::Secp256k1(key) => EcPublicKey::Secp256k1(key.public_key()),
+      EcPrivateKey::Brainpool(key) => {
+        EcPublicKey::Brainpool(key.to_public_key())
+      }
     }
   }
 
@@ -318,6 +337,9 @@ impl EcPrivateKey {
       EcPrivateKey::P384(key) => Ok(jwk_ec::secret_key_to_jwk(key)),
       EcPrivateKey::P521(key) => Ok(jwk_ec::secret_key_to_jwk(key)),
       EcPrivateKey::Secp256k1(key) => Ok(jwk_ec::secret_key_to_jwk(key)),
+      EcPrivateKey::Brainpool(key) => Err(
+        AsymmetricPrivateKeyJwkError::UnsupportedJwkEcCurve(key.curve.name()),
+      ),
     }
   }
 }
@@ -330,6 +352,7 @@ impl PartialEq for EcPublicKey {
       (EcPublicKey::P384(a), EcPublicKey::P384(b)) => a == b,
       (EcPublicKey::P521(a), EcPublicKey::P521(b)) => a == b,
       (EcPublicKey::Secp256k1(a), EcPublicKey::Secp256k1(b)) => a == b,
+      (EcPublicKey::Brainpool(a), EcPublicKey::Brainpool(b)) => a == b,
       _ => false,
     }
   }
@@ -343,6 +366,7 @@ impl PartialEq for EcPrivateKey {
       (EcPrivateKey::P384(a), EcPrivateKey::P384(b)) => a == b,
       (EcPrivateKey::P521(a), EcPrivateKey::P521(b)) => a == b,
       (EcPrivateKey::Secp256k1(a), EcPrivateKey::Secp256k1(b)) => a == b,
+      (EcPrivateKey::Brainpool(a), EcPrivateKey::Brainpool(b)) => a == b,
       _ => false,
     }
   }
@@ -392,6 +416,7 @@ impl PartialEq for AsymmetricPublicKey {
       (Self::X448(a), Self::X448(b)) => a == b,
       (Self::Ed448(a), Self::Ed448(b)) => a == b,
       (Self::Dh(a), Self::Dh(b)) => a == b,
+      (Self::Pqc(a), Self::Pqc(b)) => a == b,
       _ => false,
     }
   }
@@ -412,6 +437,7 @@ impl PartialEq for AsymmetricPrivateKey {
       (Self::X448(a), Self::X448(b)) => a == b,
       (Self::Ed448(a), Self::Ed448(b)) => a == b,
       (Self::Dh(a), Self::Dh(b)) => a == b,
+      (Self::Pqc(a), Self::Pqc(b)) => a == b,
       _ => false,
     }
   }
@@ -672,8 +698,6 @@ pub enum AsymmetricPrivateKeyError {
     #[inherit]
     RsaPssParamsParseError,
   ),
-  #[error("invalid encrypted PKCS#8 private key")]
-  InvalidEncryptedPkcs8PrivateKey,
   #[error("invalid PKCS#8 private key")]
   InvalidPkcs8PrivateKey,
   #[error("PKCS#1 private key does not support encryption with passphrase")]
@@ -712,6 +736,13 @@ pub enum AsymmetricPrivateKeyError {
     #[from]
     #[inherit]
     UnsupportedPrivateKeyOidError,
+  ),
+  #[class(inherit)]
+  #[error(transparent)]
+  Pqc(
+    #[from]
+    #[inherit]
+    pqc::PqcError,
   ),
 }
 
@@ -817,6 +848,13 @@ pub enum AsymmetricPublicKeyError {
   #[error("unsupported")]
   #[property("code" = "ERR_OSSL_EVP_DECODE_ERROR")]
   UnsupportedPrivateKeyOid,
+  #[class(inherit)]
+  #[error(transparent)]
+  Pqc(
+    #[from]
+    #[inherit]
+    pqc::PqcError,
+  ),
 }
 
 trait RsaPublicKeyExt: Sized {
@@ -952,7 +990,16 @@ fn ec_private_key_from_named_curve_and_sec1_der(
         .map_err(|_| AsymmetricPrivateKeyError::InvalidSec1PrivateKey)?;
       Ok(AsymmetricPrivateKey::Ec(EcPrivateKey::Secp256k1(key)))
     }
-    _ => Err(AsymmetricPrivateKeyError::UnsupportedEcNamedCurve),
+    oid => {
+      let curve = BrainpoolCurve::from_oid(&oid)
+        .ok_or(AsymmetricPrivateKeyError::UnsupportedEcNamedCurve)?;
+      let ec_key = sec1::EcPrivateKey::from_der(sec1_der)
+        .map_err(|_| AsymmetricPrivateKeyError::InvalidSec1PrivateKey)?;
+      let key =
+        brainpool::BrainpoolPrivateKey::from_scalar(curve, ec_key.private_key)
+          .ok_or(AsymmetricPrivateKeyError::InvalidSec1PrivateKey)?;
+      Ok(AsymmetricPrivateKey::Ec(EcPrivateKey::Brainpool(key)))
+    }
   }
 }
 
@@ -1050,6 +1097,13 @@ impl KeyObjectHandle {
               let (label, doc) = SecretDocument::from_pem(&normalized)
                 .map_err(|_| AsymmetricPrivateKeyError::InvalidPemPrivateKey)?;
               match label {
+                // Decrypting failed past the padding check (wrong
+                // passphrase, plaintext that is no PKCS#8 key).
+                EncryptedPrivateKeyInfo::PEM_LABEL => {
+                  return Err(
+                    AsymmetricPrivateKeyError::EncryptedPrivateKeyBadDecrypt,
+                  );
+                }
                 PrivateKeyInfo::PEM_LABEL => doc,
                 rsa::pkcs1::RsaPrivateKey::PEM_LABEL => {
                   SecretDocument::from_pkcs1_der(doc.as_bytes()).map_err(
@@ -1120,8 +1174,12 @@ impl KeyObjectHandle {
           if let Some(passphrase) = passphrase {
             if EncryptedPrivateKeyInfo::try_from(key).is_ok() {
               SecretDocument::from_pkcs8_encrypted_der(key, passphrase)
+                // The structure is an EncryptedPrivateKeyInfo, so a failure
+                // here is a wrong passphrase: a failed padding check, or
+                // (when the padding happens to look valid) plaintext that is
+                // no PKCS#8 key. Both are OpenSSL's bad decrypt, as for PEM.
                 .map_err(|_| {
-                  AsymmetricPrivateKeyError::InvalidEncryptedPkcs8PrivateKey
+                  AsymmetricPrivateKeyError::EncryptedPrivateKeyBadDecrypt
                 })?
             } else {
               // Node ignores the passphrase when the key isn't actually
@@ -1262,7 +1320,12 @@ impl KeyObjectHandle {
           params,
         })
       }
-      _ => return Err(UnsupportedPrivateKeyOidError.into()),
+      oid => match PqcAlg::from_oid(&oid)? {
+        Some(alg) => AsymmetricPrivateKey::Pqc(
+          pqc::PqcPrivateKey::from_pkcs8_inner(alg, pk_info.private_key)?,
+        ),
+        None => return Err(UnsupportedPrivateKeyOidError.into()),
+      },
     };
 
     Ok(KeyObjectHandle::AsymmetricPrivate(private_key))
@@ -1541,12 +1604,36 @@ impl KeyObjectHandle {
     }
   }
 
+  /// `format` is `raw-public`, `raw-private` or `raw-seed`. A private key
+  /// is returned for the private formats; `createPublicKey` derives the
+  /// public key from it.
   pub fn new_raw_asymmetric_key(
     key_type: &str,
     named_curve: Option<&str>,
     data: &[u8],
-    is_public: bool,
+    format: &str,
   ) -> Result<KeyObjectHandle, RawAsymmetricKeyError> {
+    let is_public = format == "raw-public";
+    if let Some(alg) = PqcAlg::from_name(key_type)
+      .map_err(|_| RawAsymmetricKeyError::UnsupportedKeyType(key_type.into()))?
+    {
+      return match format {
+        "raw-public" => pqc::PqcPublicKey::from_raw(alg, data)
+          .map(|k| {
+            KeyObjectHandle::AsymmetricPublic(AsymmetricPublicKey::Pqc(k))
+          })
+          .map_err(|_| RawAsymmetricKeyError::InvalidKey),
+        "raw-seed" => pqc::PqcPrivateKey::from_seed(alg, data)
+          .map(|k| {
+            KeyObjectHandle::AsymmetricPrivate(AsymmetricPrivateKey::Pqc(k))
+          })
+          .map_err(|_| RawAsymmetricKeyError::InvalidKey),
+        _ => Err(RawAsymmetricKeyError::UnsupportedFormat(format.into())),
+      };
+    }
+    if format == "raw-seed" {
+      return Err(RawAsymmetricKeyError::UnsupportedFormat(format.into()));
+    }
     if key_type != "ec" {
       let curve = match key_type {
         "ed25519" => "Ed25519",
@@ -1565,6 +1652,28 @@ impl KeyObjectHandle {
 
     let named_curve =
       named_curve.ok_or(RawAsymmetricKeyError::MissingNamedCurve)?;
+    if let Some(curve) = BrainpoolCurve::from_name(named_curve) {
+      return if is_public {
+        brainpool::BrainpoolPublicKey::from_sec1(curve, data)
+          .map(|k| {
+            KeyObjectHandle::AsymmetricPublic(AsymmetricPublicKey::Ec(
+              EcPublicKey::Brainpool(k),
+            ))
+          })
+          .ok_or(RawAsymmetricKeyError::InvalidKey)
+      } else {
+        if data.len() != curve.field_len() {
+          return Err(RawAsymmetricKeyError::InvalidKey);
+        }
+        brainpool::BrainpoolPrivateKey::from_scalar(curve, data)
+          .map(|k| {
+            KeyObjectHandle::AsymmetricPrivate(AsymmetricPrivateKey::Ec(
+              EcPrivateKey::Brainpool(k),
+            ))
+          })
+          .ok_or(RawAsymmetricKeyError::InvalidKey)
+      };
+    }
     if is_public {
       let key = match named_curve {
         "P-224" | "prime224v1" | "secp224r1" => EcPublicKey::P224(
@@ -1597,6 +1706,18 @@ impl KeyObjectHandle {
         key,
       )))
     } else {
+      // A raw private key is exactly the curve's scalar size (the curve
+      // crates would left-pad a shorter one, accepting another curve's key).
+      let scalar_len = match named_curve {
+        "P-224" | "prime224v1" | "secp224r1" => 28,
+        "P-256" | "prime256v1" | "secp256r1" | "secp256k1" => 32,
+        "P-384" | "prime384v1" | "secp384r1" => 48,
+        "P-521" | "secp521r1" => 66,
+        _ => data.len(),
+      };
+      if data.len() != scalar_len {
+        return Err(RawAsymmetricKeyError::InvalidKey);
+      }
       let key = match named_curve {
         "P-224" | "prime224v1" | "secp224r1" => EcPrivateKey::P224(
           p224::SecretKey::from_slice(data)
@@ -1786,7 +1907,14 @@ impl KeyObjectHandle {
             let public_key = k256::PublicKey::from_sec1_bytes(data)?;
             AsymmetricPublicKey::Ec(EcPublicKey::Secp256k1(public_key))
           }
-          _ => return Err(AsymmetricPublicKeyError::UnsupportedEcNamedCurve),
+          oid => {
+            let curve = BrainpoolCurve::from_oid(&oid)
+              .ok_or(AsymmetricPublicKeyError::UnsupportedEcNamedCurve)?;
+            let public_key =
+              brainpool::BrainpoolPublicKey::from_sec1(curve, data)
+                .ok_or(AsymmetricPublicKeyError::Ec(elliptic_curve::Error))?;
+            AsymmetricPublicKey::Ec(EcPublicKey::Brainpool(public_key))
+          }
         }
       }
       X25519_OID => {
@@ -1853,7 +1981,19 @@ impl KeyObjectHandle {
           params,
         })
       }
-      _ => return Err(AsymmetricPublicKeyError::UnsupportedPrivateKeyOid),
+      oid => match PqcAlg::from_oid(&oid)? {
+        Some(alg) => {
+          if spki.algorithm.parameters.is_some() {
+            return Err(AsymmetricPublicKeyError::UnsupportedPrivateKeyOid);
+          }
+          let data = spki
+            .subject_public_key
+            .as_bytes()
+            .ok_or(AsymmetricPublicKeyError::UnsupportedPrivateKeyOid)?;
+          AsymmetricPublicKey::Pqc(pqc::PqcPublicKey::from_raw(alg, data)?)
+        }
+        None => return Err(AsymmetricPublicKeyError::UnsupportedPrivateKeyOid),
+      },
     };
 
     Ok(KeyObjectHandle::AsymmetricPublic(public_key))
@@ -1863,14 +2003,19 @@ impl KeyObjectHandle {
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 #[class(type)]
 pub enum RawAsymmetricKeyError {
-  #[class("ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS")]
+  #[property("code" = "ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS")]
   #[error("raw key format is not supported for key type: {0}")]
   UnsupportedKeyType(String),
+  #[property("code" = "ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS")]
+  #[error("The selected key encoding {0} is not supported for this key type.")]
+  UnsupportedFormat(String),
   #[error("namedCurve is required for EC raw keys")]
   MissingNamedCurve,
-  #[error("unsupported EC named curve: {0}")]
+  #[property("code" = "ERR_CRYPTO_INVALID_CURVE")]
+  #[error("Invalid EC curve name")]
   UnsupportedNamedCurve(String),
-  #[error("invalid raw key")]
+  #[property("code" = "ERR_INVALID_ARG_VALUE")]
+  #[error("Invalid key data")]
   InvalidKey,
 }
 
@@ -2088,6 +2233,10 @@ pub enum AsymmetricPrivateKeyJwkError {
   #[error("Unsupported JWK EC curve: secp224r1.")]
   UnsupportedJwkEcCurveP224,
   #[class(generic)]
+  #[property("code" = "ERR_CRYPTO_JWK_UNSUPPORTED_CURVE")]
+  #[error("Unsupported JWK EC curve: {0}.")]
+  UnsupportedJwkEcCurve(&'static str),
+  #[class(generic)]
   #[property("code" = "ERR_CRYPTO_JWK_UNSUPPORTED_KEY_TYPE")]
   #[error("Unsupported JWK Key Type.")]
   JwkExportNotImplementedForKeyType,
@@ -2102,6 +2251,10 @@ pub enum AsymmetricPublicKeyJwkError {
   #[property("code" = "ERR_CRYPTO_JWK_UNSUPPORTED_CURVE")]
   #[error("Unsupported JWK EC curve: secp224r1.")]
   UnsupportedJwkEcCurveP224,
+  #[class(generic)]
+  #[property("code" = "ERR_CRYPTO_JWK_UNSUPPORTED_CURVE")]
+  #[error("Unsupported JWK EC curve: {0}.")]
+  UnsupportedJwkEcCurve(&'static str),
   #[class(generic)]
   #[property("code" = "ERR_CRYPTO_JWK_UNSUPPORTED_KEY_TYPE")]
   #[error("Unsupported JWK Key Type.")]
@@ -2192,6 +2345,7 @@ impl AsymmetricPublicKey {
         });
         Ok(jwk)
       }
+      AsymmetricPublicKey::Pqc(key) => Ok(key.to_jwk()),
       // RSA-PSS, DSA, X448 all map to "Unsupported JWK Key Type." in Node.js.
       _ => Err(AsymmetricPublicKeyJwkError::JwkExportNotImplementedForKeyType),
     }
@@ -2268,6 +2422,9 @@ impl AsymmetricPublicKey {
                 key.to_sec1_point(false).as_bytes().to_vec().into_boxed_slice(),
                 ID_SECP256K1_OID,
               ),
+              EcPublicKey::Brainpool(key) => {
+                (key.point.clone().into_boxed_slice(), key.curve.oid())
+              }
             };
 
             let spki = SubjectPublicKeyInfoRef {
@@ -2368,6 +2525,7 @@ impl AsymmetricPublicKey {
               .map_err(|_| AsymmetricPublicKeyDerError::InvalidDhPublicKey)?
               .into_boxed_slice()
           }
+          AsymmetricPublicKey::Pqc(key) => key.to_spki_der().into_boxed_slice(),
         };
         Ok(der)
       }
@@ -2507,6 +2665,7 @@ impl AsymmetricPrivateKey {
             "kty": "OKP",
         }))
       }
+      AsymmetricPrivateKey::Pqc(key) => Ok(key.to_jwk()),
       _ => Err(AsymmetricPrivateKeyJwkError::JwkExportNotImplementedForKeyType),
     }
   }
@@ -2531,6 +2690,9 @@ impl AsymmetricPrivateKey {
         _ => Err(AsymmetricPrivateKeyDerError::ExportingNonRsaPrivateKeyAsPkcs1Unsupported),
       },
       "sec1" => match self {
+        AsymmetricPrivateKey::Ec(EcPrivateKey::Brainpool(key)) => {
+          Ok(brainpool_sec1_der(key, true)?.into_boxed_slice())
+        }
         AsymmetricPrivateKey::Ec(key) => {
           let (sec1_der, curve_oid) = match key {
             EcPrivateKey::P224(key) => {
@@ -2548,6 +2710,7 @@ impl AsymmetricPrivateKey {
             EcPrivateKey::Secp256k1(key) => {
               (key.to_sec1_der(), ID_SECP256K1_OID)
             }
+            EcPrivateKey::Brainpool(_) => unreachable!("handled above"),
           };
           let sec1_der = sec1_der
             .map_err(|_| AsymmetricPrivateKeyDerError::InvalidEcPrivateKey)?;
@@ -2584,6 +2747,22 @@ impl AsymmetricPrivateKey {
               .map_err(|_| AsymmetricPrivateKeyDerError::InvalidDsaPrivateKey)?;
             document.to_bytes().to_vec().into_boxed_slice()
           }
+          AsymmetricPrivateKey::Ec(EcPrivateKey::Brainpool(key)) => {
+            let sec1 = brainpool_sec1_der(key, false)?;
+            let curve_oid = key.curve.oid();
+            let info = PrivateKeyInfo {
+              algorithm: rsa::pkcs8::AlgorithmIdentifierRef {
+                oid: EC_OID,
+                parameters: Some(asn1::AnyRef::from(&curve_oid)),
+              },
+              private_key: &sec1,
+              public_key: None,
+            };
+            info
+              .to_der()
+              .map_err(|_| AsymmetricPrivateKeyDerError::InvalidEcPrivateKey)?
+              .into_boxed_slice()
+          }
           AsymmetricPrivateKey::Ec(key) => {
             let document = match key {
               EcPrivateKey::P224(key) => key.to_pkcs8_der(),
@@ -2591,6 +2770,7 @@ impl AsymmetricPrivateKey {
               EcPrivateKey::P384(key) => key.to_pkcs8_der(),
               EcPrivateKey::P521(key) => key.to_pkcs8_der(),
               EcPrivateKey::Secp256k1(key) => key.to_pkcs8_der(),
+              EcPrivateKey::Brainpool(_) => unreachable!("handled above"),
             }
             .map_err(|_| AsymmetricPrivateKeyDerError::InvalidEcPrivateKey)?;
             document.to_bytes().to_vec().into_boxed_slice()
@@ -2699,6 +2879,7 @@ impl AsymmetricPrivateKey {
               .map_err(|_| AsymmetricPrivateKeyDerError::InvalidDhPrivateKey)?
               .into_boxed_slice()
           }
+          AsymmetricPrivateKey::Pqc(key) => key.to_pkcs8_der().into_boxed_slice(),
         };
 
         Ok(der)
@@ -2706,6 +2887,23 @@ impl AsymmetricPrivateKey {
       _ => Err(AsymmetricPrivateKeyDerError::UnsupportedKeyType(typ.to_string())),
     }
   }
+}
+
+/// SEC1 `ECPrivateKey` for a brainpool key, with the public key and, when
+/// `with_parameters`, the curve OID (as OpenSSL writes a `sec1` export; the
+/// PKCS#8 form carries the curve in its AlgorithmIdentifier instead).
+fn brainpool_sec1_der(
+  key: &brainpool::BrainpoolPrivateKey,
+  with_parameters: bool,
+) -> Result<Vec<u8>, AsymmetricPrivateKeyDerError> {
+  let ec_key = sec1::EcPrivateKey {
+    private_key: &key.d,
+    parameters: with_parameters.then(|| key.curve.oid().into()),
+    public_key: Some(&key.public),
+  };
+  ec_key
+    .to_der()
+    .map_err(|_| AsymmetricPrivateKeyDerError::InvalidEcPrivateKey)
 }
 
 #[op2]
@@ -2737,13 +2935,13 @@ pub fn op_node_create_raw_asymmetric_key(
   #[buffer] key: &[u8],
   #[string] key_type: &str,
   #[string] named_curve: Option<String>,
-  is_public: bool,
+  #[string] format: &str,
 ) -> Result<KeyObjectHandle, RawAsymmetricKeyError> {
   KeyObjectHandle::new_raw_asymmetric_key(
     key_type,
     named_curve.as_deref(),
     key,
-    is_public,
+    format,
   )
 }
 
@@ -2833,6 +3031,12 @@ pub fn op_node_get_asymmetric_key_type(
     }
     KeyObjectHandle::AsymmetricPrivate(AsymmetricPrivateKey::Dh(_))
     | KeyObjectHandle::AsymmetricPublic(AsymmetricPublicKey::Dh(_)) => Ok("dh"),
+    KeyObjectHandle::AsymmetricPrivate(AsymmetricPrivateKey::Pqc(key)) => {
+      Ok(key.alg.name())
+    }
+    KeyObjectHandle::AsymmetricPublic(AsymmetricPublicKey::Pqc(key)) => {
+      Ok(key.alg.name())
+    }
     KeyObjectHandle::Secret(_) => Err(JsErrorBox::type_error(
       "symmetric key is not an asymmetric key",
     )),
@@ -2870,6 +3074,7 @@ pub enum AsymmetricKeyDetails {
   X448,
   Ed448,
   Dh,
+  Pqc,
 }
 
 #[op2]
@@ -2925,6 +3130,7 @@ pub fn op_node_get_asymmetric_key_details(
           EcPrivateKey::P384(_) => "secp384r1",
           EcPrivateKey::P521(_) => "secp521r1",
           EcPrivateKey::Secp256k1(_) => "secp256k1",
+          EcPrivateKey::Brainpool(key) => key.curve.name(),
         };
         Ok(AsymmetricKeyDetails::Ec { named_curve })
       }
@@ -2933,6 +3139,7 @@ pub fn op_node_get_asymmetric_key_details(
       AsymmetricPrivateKey::X448(_) => Ok(AsymmetricKeyDetails::X448),
       AsymmetricPrivateKey::Ed448(_) => Ok(AsymmetricKeyDetails::Ed448),
       AsymmetricPrivateKey::Dh(_) => Ok(AsymmetricKeyDetails::Dh),
+      AsymmetricPrivateKey::Pqc(_) => Ok(AsymmetricKeyDetails::Pqc),
     },
     KeyObjectHandle::AsymmetricPublic(public_key) => match public_key {
       AsymmetricPublicKey::Rsa(key) => {
@@ -2982,6 +3189,7 @@ pub fn op_node_get_asymmetric_key_details(
           EcPublicKey::P384(_) => "secp384r1",
           EcPublicKey::P521(_) => "secp521r1",
           EcPublicKey::Secp256k1(_) => "secp256k1",
+          EcPublicKey::Brainpool(key) => key.curve.name(),
         };
         Ok(AsymmetricKeyDetails::Ec { named_curve })
       }
@@ -2990,6 +3198,7 @@ pub fn op_node_get_asymmetric_key_details(
       AsymmetricPublicKey::X448(_) => Ok(AsymmetricKeyDetails::X448),
       AsymmetricPublicKey::Ed448(_) => Ok(AsymmetricKeyDetails::Ed448),
       AsymmetricPublicKey::Dh(_) => Ok(AsymmetricKeyDetails::Dh),
+      AsymmetricPublicKey::Pqc(_) => Ok(AsymmetricKeyDetails::Pqc),
     },
     KeyObjectHandle::Secret(_) => Err(JsErrorBox::type_error(
       "symmetric key is not an asymmetric key",
@@ -3389,8 +3598,12 @@ fn ec_generate(named_curve: &str) -> Result<KeyObjectHandlePair, JsErrorBox> {
       let key = k256::SecretKey::generate();
       AsymmetricPrivateKey::Ec(EcPrivateKey::Secp256k1(key))
     }
-    _ => {
-      return Err(JsErrorBox::type_error("Invalid EC curve name"));
+    name => {
+      let curve = BrainpoolCurve::from_name(name)
+        .ok_or_else(|| JsErrorBox::type_error("Invalid EC curve name"))?;
+      let key = brainpool::BrainpoolPrivateKey::generate(curve)
+        .ok_or_else(|| JsErrorBox::generic("EC key generation failed"))?;
+      AsymmetricPrivateKey::Ec(EcPrivateKey::Brainpool(key))
     }
   };
   let public_key = private_key.to_public_key();
@@ -3413,6 +3626,63 @@ pub async fn op_node_generate_ec_key_async(
   spawn_blocking(move || ec_generate(&named_curve))
     .await
     .unwrap()
+}
+
+fn pqc_generate(key_type: &str) -> Result<KeyObjectHandlePair, JsErrorBox> {
+  let alg = PqcAlg::from_name(key_type)
+    .ok()
+    .flatten()
+    .ok_or_else(|| JsErrorBox::type_error("Unsupported key type"))?;
+  let private_key =
+    AsymmetricPrivateKey::Pqc(pqc::PqcPrivateKey::generate(alg));
+  let public_key = private_key.to_public_key();
+  Ok(KeyObjectHandlePair::new(private_key, public_key))
+}
+
+/// `generateKeyPair("ml-dsa-*" | "ml-kem-768" | "ml-kem-1024")`.
+#[op2]
+#[cppgc]
+pub fn op_node_generate_pqc_key(
+  #[string] key_type: &str,
+) -> Result<KeyObjectHandlePair, JsErrorBox> {
+  pqc_generate(key_type)
+}
+
+#[op2]
+#[cppgc]
+pub async fn op_node_generate_pqc_key_async(
+  #[string] key_type: String,
+) -> Result<KeyObjectHandlePair, JsErrorBox> {
+  spawn_blocking(move || pqc_generate(&key_type))
+    .await
+    .unwrap()
+}
+
+/// An `AKP` (ML-DSA / ML-KEM) JWK: `alg`, `pub` and, for a private key,
+/// `priv` (the seed).
+#[op2]
+#[cppgc]
+pub fn op_node_create_akp_jwk(
+  #[string] alg: &str,
+  #[string] public: Option<String>,
+  #[string] private: Option<String>,
+  is_public: bool,
+) -> Result<KeyObjectHandle, pqc::PqcError> {
+  Ok(
+    match pqc::import_jwk(
+      alg,
+      public.as_deref(),
+      private.as_deref(),
+      is_public,
+    )? {
+      pqc::PqcJwkKey::Private(key) => {
+        KeyObjectHandle::AsymmetricPrivate(AsymmetricPrivateKey::Pqc(key))
+      }
+      pqc::PqcJwkKey::Public(key) => {
+        KeyObjectHandle::AsymmetricPublic(AsymmetricPublicKey::Pqc(key))
+      }
+    },
+  )
 }
 
 fn x25519_generate() -> KeyObjectHandlePair {
@@ -3815,7 +4085,9 @@ fn export_public_key_raw(
       EcPublicKey::Secp256k1(key) => {
         key.to_sec1_point(compressed).as_bytes().to_vec()
       }
+      EcPublicKey::Brainpool(key) => key.to_sec1(compressed),
     },
+    AsymmetricPublicKey::Pqc(key) => key.public.clone(),
     AsymmetricPublicKey::X25519(key) => key.as_bytes().to_vec(),
     AsymmetricPublicKey::Ed25519(key) => key.to_bytes().to_vec(),
     AsymmetricPublicKey::X448(key) => key.to_vec(),
@@ -4120,6 +4392,7 @@ fn encrypt_pkcs8_private_key_pem(
   let pbkdf2_iters: u32 = 2048;
 
   let mut aes_iv = [0u8; 16];
+  let mut des_iv = [0u8; 8];
 
   let pbes2_params = match cipher_name {
     "aes-128-cbc" => {
@@ -4153,6 +4426,20 @@ fn encrypt_pkcs8_private_key_pem(
           "Unsupported cipher for PKCS#8 encryption: {cipher_name}"
         ))
       })?
+    }
+    "des-ede3-cbc" => {
+      thread_rng().fill_bytes(&mut des_iv);
+      let kdf = pbes2::Pbkdf2Params::hmac_with_sha256(pbkdf2_iters, &salt)
+        .map_err(|_| {
+          ExportPrivateKeyPemError::UnsupportedCipher(format!(
+            "Unsupported cipher for PKCS#8 encryption: {cipher_name}"
+          ))
+        })?
+        .into();
+      pbes2::Parameters {
+        kdf,
+        encryption: pbes2::EncryptionScheme::DesEde3Cbc { iv: &des_iv },
+      }
     }
     _ => {
       return Err(ExportPrivateKeyPemError::UnsupportedCipher(format!(
@@ -4375,6 +4662,19 @@ fn encrypt_private_key_pkcs8_der(
       pbes2::Parameters::pbkdf2_sha256_aes256cbc(ITERATIONS, &salt, &iv)
         .map_err(|_| ExportPrivateKeyDerError::EncryptionFailed)?
     }
+    "aes-192-cbc" | "des-ede3-cbc" => {
+      let kdf = pbes2::Pbkdf2Params::hmac_with_sha256(ITERATIONS, &salt)
+        .map_err(|_| ExportPrivateKeyDerError::EncryptionFailed)?
+        .into();
+      let encryption = if cipher_name == "aes-192-cbc" {
+        pbes2::EncryptionScheme::Aes192Cbc { iv: &iv }
+      } else {
+        pbes2::EncryptionScheme::DesEde3Cbc {
+          iv: iv[..8].try_into().expect("8 of the 16 IV bytes"),
+        }
+      };
+      pbes2::Parameters { kdf, encryption }
+    }
     _ => {
       return Err(ExportPrivateKeyDerError::UnsupportedCipher(format!(
         "Unsupported cipher for PKCS#8 DER encryption: {cipher_name}"
@@ -4429,8 +4729,17 @@ pub fn op_node_export_private_key_der(
 #[buffer]
 pub fn op_node_export_private_key_raw(
   #[cppgc] handle: &KeyObjectHandle,
+  #[string] format: &str,
 ) -> Result<Box<[u8]>, RawAsymmetricKeyError> {
-  handle.export_private_key_raw()
+  match (handle.as_private_key(), format) {
+    (Some(AsymmetricPrivateKey::Pqc(key)), "raw-seed") => {
+      Ok(key.seed.clone().into_boxed_slice())
+    }
+    (Some(AsymmetricPrivateKey::Pqc(_)), _) | (_, "raw-seed") => {
+      Err(RawAsymmetricKeyError::UnsupportedFormat(format.into()))
+    }
+    _ => handle.export_private_key_raw(),
+  }
 }
 
 fn export_private_key_raw(
@@ -4446,7 +4755,13 @@ fn export_private_key_raw(
       EcPrivateKey::P384(key) => key.to_bytes().to_vec(),
       EcPrivateKey::P521(key) => key.to_bytes().to_vec(),
       EcPrivateKey::Secp256k1(key) => key.to_bytes().to_vec(),
+      EcPrivateKey::Brainpool(key) => key.d.clone(),
     },
+    AsymmetricPrivateKey::Pqc(_) => {
+      return Err(RawAsymmetricKeyError::UnsupportedFormat(
+        "raw-private".to_string(),
+      ));
+    }
     AsymmetricPrivateKey::X25519(key) => key.to_bytes().to_vec(),
     AsymmetricPrivateKey::Ed25519(key) => key.to_bytes().to_vec(),
     AsymmetricPrivateKey::X448(key) => key.to_vec(),

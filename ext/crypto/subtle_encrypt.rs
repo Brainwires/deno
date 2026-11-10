@@ -483,14 +483,11 @@ pub fn run(
   data: Vec<u8>,
 ) -> Result<Vec<u8>, CryptoError> {
   if params.canonical_name() != key.algorithm_name {
-    return Err(invalid_access(format!(
-      "Encryption algorithm '{}' does not match key algorithm",
-      params.canonical_name()
-    )));
+    return Err(invalid_access("Key algorithm mismatch".to_string()));
   }
   if !key.has_usage("encrypt") {
     return Err(invalid_access(
-      "The requested operation is not valid for the provided key".to_string(),
+      "Unable to use this key to encrypt".to_string(),
     ));
   }
 
@@ -513,7 +510,7 @@ pub fn run(
     SubtleEncryptParams::AesCbc { iv } => {
       if iv.len() != 16 {
         return Err(op_error(
-          "Initialization vector must be 16 bytes".to_string(),
+          "algorithm.iv must contain exactly 16 bytes".to_string(),
         ));
       }
       let length = key.algorithm_length.ok_or_else(|| {
@@ -560,7 +557,9 @@ pub fn run(
         None => 128u32,
         Some(t) if [32, 64, 96, 104, 112, 120, 128].contains(&t) => t,
         Some(t) => {
-          return Err(op_error(format!("Invalid tag length: {t}")));
+          return Err(op_error(format!(
+            "{t} is not a valid AES-GCM tag length"
+          )));
         }
       };
       let iv_len = iv.len();
@@ -600,7 +599,9 @@ pub fn run(
         None => 128u32,
         Some(t) if [64, 96, 128].contains(&t) => t,
         Some(t) => {
-          return Err(op_error(format!("Invalid tag length: {t}")));
+          return Err(op_error(format!(
+            "{t} is not a valid AES-OCB tag length"
+          )));
         }
       };
       let key_length = key.algorithm_length.ok_or_else(|| {
@@ -642,9 +643,9 @@ pub fn run(
       if let Some(t) = tag_length
         && t != 128
       {
-        return Err(op_error(
-          "ChaCha20-Poly1305 tagLength must be 128".to_string(),
-        ));
+        return Err(op_error(format!(
+          "{t} is not a valid ChaCha20-Poly1305 tag length"
+        )));
       }
       encrypt::encrypt_chacha20_poly1305(&key.raw, &iv, additional_data, &data)
         .map_err(encrypt_error_to_crypto)

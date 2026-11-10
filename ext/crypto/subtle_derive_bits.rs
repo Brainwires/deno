@@ -644,7 +644,8 @@ fn truncate_to_length(
     return Ok(bytes);
   };
   if (bytes.len() * 8) < length as usize {
-    return Err(op_error("Invalid length".to_string()));
+    // Node's wording, for the shared secret being shorter than `length`.
+    return Err(op_error("derived bit length is too small".to_string()));
   }
   let n = length.div_ceil(8) as usize;
   Ok(bytes[..n].to_vec())

@@ -969,6 +969,14 @@
       "reason": "Expects the BoringSSL-specific ERR_OSSL_EVP_OPERATION_NOT_SUPPORTED_FOR_THIS_KEYTYPE error; Deno does not surface this error for the unsupported keytype/digest combination"
     },
     "parallel/test-crypto-authenticated-stream.js": {},
+    "parallel/test-crypto-boringssl-evp-list.js": {
+      "ignore": true,
+      "reason": "Deliberately unsupported: asserts getCiphers() lists every EVP cipher Node's BoringSSL build carries, including rc2-cbc, des-cbc and bf-*, which this runtime does not ship (Node 26 on OpenSSL 3 refuses them too)"
+    },
+    "parallel/test-crypto-authenticated.js": {
+      "ignore": true,
+      "reason": "Larger gap: AEAD option validation order and OpenSSL's wording across GCM / CCM / OCB / ChaCha20 (CCM IV length is checked after authTagLength here; Node checks the IV first), plus many FIPS / tag-length cases"
+    },
     "parallel/test-crypto-classes.js": {},
     "parallel/test-crypto-certificate.js": {},
     "parallel/test-crypto-cipheriv-decipheriv.js": {},
@@ -997,6 +1005,9 @@
       "ignore": true,
       "reason": "Node 26 BoringSSL branch expects createDiffieHellman with generator 0 to throw ERR_CRYPTO_OPERATION_FAILED; Deno's DH backend accepts it"
     },
+    "parallel/test-crypto-dep0203.js": {},
+    "parallel/test-crypto-dep0204.js": {},
+    "parallel/test-crypto-encap-decap.js": {},
     "parallel/test-crypto-domain.js": {},
     "parallel/test-crypto-domains.js": {},
     "parallel/test-crypto-ecdh-convert-key.js": {},
@@ -1005,21 +1016,45 @@
     "parallel/test-crypto-encoding-validation-error.js": {},
     "parallel/test-crypto-fips.js": {
       "ignore": true,
-      "reason": "Tests Node's FIPS mode (--enable-fips/--force-fips, OPENSSL_CONF, --openssl-config CLI flags) and uses internalBinding('crypto').testFipsCrypto via require('internal/test/binding'); FIPS is an OpenSSL-specific feature and Deno does not embed OpenSSL"
+      "reason": "Deliberately unsupported: FIPS mode is OpenSSL's (--enable-fips, --force-fips, OPENSSL_CONF, internal test bindings). Under the BoringSSL identity the runtime reports, the test only skips itself, which the runner would count as a pass"
     },
     "parallel/test-crypto-from-binary.js": {},
     "parallel/test-crypto-gcm-implicit-short-tag.js": {},
     "parallel/test-crypto-getcipherinfo.js": {},
+    "parallel/test-crypto-hash-stream-error.js": {
+      "ignore": true,
+      "reason": "Uses --expose-internals to swap the Hash handle for a fake (internal/crypto/util kHandle); the runtime's Hash keeps its native handle elsewhere"
+    },
     "parallel/test-crypto-hash-stream-pipe.js": {},
     "parallel/test-crypto-hash.js": {
-      "ignore": true,
-      "reason": "Flaky on CI (intermittently exits non-zero with no captured output) although it passes locally; the test's expectWarning/SHAKE handling races with async deprecation-warning delivery under CI concurrency"
+      "flaky": true,
+      "reason": "Passes locally on macOS; once flaky on CI (exited non-zero with no captured output), so it runs with retries"
     },
     "parallel/test-crypto-hkdf.js": {},
     "parallel/test-crypto-hmac.js": {},
+    "parallel/test-crypto-job-error-parity.js": {
+      "ignore": true,
+      "reason": "Larger gap: compares OpenSSL error decoration (code, library, reason) between sync and async jobs for every operation; most node:crypto errors here carry no OpenSSL library / reason"
+    },
     "parallel/test-crypto-keygen.js": {
       "ignore": true,
       "reason": "Node 26 BoringSSL branch expects a synchronous RangeError 'publicExponent is invalid' for invalid RSA publicExponent which Deno validates asynchronously in the op"
+    },
+    "parallel/test-crypto-keyobject-no-own-symbols.js": {
+      "ignore": true,
+      "reason": "Larger gap: KeyObject has own symbol properties (kKeyType, kHandle); Node keeps that state in private fields"
+    },
+    "parallel/test-crypto-keyobject-hidden-slots.js": {
+      "ignore": true,
+      "reason": "Larger gap: KeyObject state lives in symbol-keyed own properties that user code can overwrite (Node uses private fields)"
+    },
+    "parallel/test-crypto-keyobject-clone-transfer.js": {
+      "ignore": true,
+      "reason": "Larger gap: KeyObject keeps its handle and type in symbol-keyed own properties (kKeyType, kHandle), which Node keeps in private fields"
+    },
+    "parallel/test-crypto-keyobject-brand-check.js": {
+      "ignore": true,
+      "reason": "Larger gap: KeyObject getters are not brand-checked (Node uses private fields; this KeyObject keeps its handle and type under symbol-keyed own properties)"
     },
     "parallel/test-crypto-keygen-async-dsa.js": {
       "flaky": true,
@@ -1040,28 +1075,14 @@
     "parallel/test-crypto-keygen-dh-classic.js": {},
     "parallel/test-crypto-keygen-eddsa.js": {},
     "parallel/test-crypto-pbkdf2.js": {},
-    "parallel/test-crypto-pqc-key-objects-ml-dsa.js": {
-      "ignore": true,
-      "reason": "ML-DSA post-quantum keys are not supported by node:crypto createPublicKey/createPrivateKey (KeyObject layer)"
-    },
-    "parallel/test-crypto-pqc-key-objects-ml-kem.js": {
-      "ignore": true,
-      "reason": "ML-KEM post-quantum keys are not supported by node:crypto createPublicKey/createPrivateKey (KeyObject layer)"
-    },
+    "parallel/test-crypto-pqc-key-objects-ml-dsa.js": {},
+    "parallel/test-crypto-pqc-encrypted-pkcs8.js": {},
+    "parallel/test-crypto-pqc-key-objects-ml-kem.js": {},
     "parallel/test-crypto-pqc-key-objects-slh-dsa.js": {},
-    "parallel/test-crypto-pqc-keygen-ml-dsa.js": {
-      "ignore": true,
-      "reason": "node:crypto generateKeyPair does not support ML-DSA post-quantum key types"
-    },
-    "parallel/test-crypto-pqc-keygen-ml-kem.js": {
-      "ignore": true,
-      "reason": "node:crypto generateKeyPair does not support ML-KEM post-quantum key types"
-    },
+    "parallel/test-crypto-pqc-keygen-ml-dsa.js": {},
+    "parallel/test-crypto-pqc-keygen-ml-kem.js": {},
     "parallel/test-crypto-pqc-keygen-slh-dsa.js": {},
-    "parallel/test-crypto-pqc-sign-verify-ml-dsa.js": {
-      "ignore": true,
-      "reason": "node:crypto sign/verify does not support ML-DSA post-quantum keys"
-    },
+    "parallel/test-crypto-pqc-sign-verify-ml-dsa.js": {},
     "parallel/test-crypto-sign-verify.js": {},
     "parallel/test-crypto-keygen-empty-passphrase-no-error.js": {},
     "parallel/test-crypto-keygen-empty-passphrase-no-prompt.js": {},
@@ -1073,6 +1094,7 @@
     "parallel/test-crypto-keygen-no-rsassa-pss-params.js": {},
     "parallel/test-crypto-keygen-non-standard-public-exponent.js": {},
     "parallel/test-crypto-keygen-promisify.js": {},
+    "parallel/test-crypto-keygen-raw.js": {},
     "parallel/test-crypto-keygen-rfc8017-9-1.js": {},
     "parallel/test-crypto-keygen-rfc8017-a-2-3.js": {},
     "parallel/test-crypto-keygen-rsa-pss.js": {},
@@ -1083,9 +1105,10 @@
     },
     "parallel/test-crypto-scrypt.js": {},
     "parallel/test-crypto-key-objects-messageport.js": {},
+    "parallel/test-crypto-key-objects-raw.js": {},
     "parallel/test-crypto-key-objects-to-crypto-key.js": {
       "ignore": true,
-      "reason": "Uses ML-DSA (post-quantum) keygen + toCryptoKey, a new Node 26 algorithm not yet supported by Deno"
+      "reason": "Requires Node internals (kSupportedAlgorithms from internal/crypto/util with --expose-internals); the ML-DSA keys it builds are KeyObjects now"
     },
     "parallel/test-crypto-lazy-transform-writable.js": {},
     "parallel/test-crypto-negative-zero.js": {},
@@ -1101,15 +1124,18 @@
     "parallel/test-crypto-padding-aes256.js": {},
     "parallel/test-crypto-private-decrypt-gh32240.js": {},
     "parallel/test-crypto-psychic-signatures.js": {},
+    "parallel/test-crypto-publicDecrypt-fails-first-time.js": {
+      "ignore": true,
+      "reason": "Larger gap: exports a PKCS#8 key encrypted with aes-128-ecb, which the pkcs5 crate's PBES2 does not offer (CBC modes only)"
+    },
     // TODO(bartlomieju): requires encrypted PEM export (cipher+passphrase in privateKeyEncoding)
     // "parallel/test-crypto-publicDecrypt-fails-first-time.js": {},
     "parallel/test-crypto-random.js": {},
     "parallel/test-crypto-randomfillsync-regression.js": {},
     "parallel/test-crypto-randomuuid.js": {},
     "parallel/test-crypto-randomuuidv7.js": {
-      "darwin": false,
       "windows": false,
-      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+      "reason": "Passes on Linux and macOS (debug build); not verified on Windows"
     },
     "parallel/test-crypto-prime.js": {},
     "parallel/test-crypto-rsa-dsa.js": {
@@ -1124,10 +1150,8 @@
     "parallel/test-crypto-sec-level.js": {},
     "parallel/test-crypto-secret-keygen.js": {},
     "parallel/test-crypto-secure-heap.js": {
-      "darwin": false,
-      "linux": false,
-      "windows": false,
-      "reason": "Secure heap is OpenSSL specific, not in Deno"
+      "ignore": true,
+      "reason": "Deliberately unsupported: the secure heap is OpenSSL's. Under the BoringSSL identity the runtime reports, the test only skips itself, which the runner would count as a pass"
     },
     "parallel/test-crypto-stream.js": {},
     "parallel/test-crypto-subtle-cross-realm.js": {},
@@ -4584,6 +4608,30 @@
     "parallel/test-whatwg-webstreams-adapters-to-readablewritablepair.js": {},
     "parallel/test-webcrypto-sign-verify.js": {},
     "parallel/test-webcrypto-aead-decrypt-detached-buffer.js": {},
+    "parallel/test-webcrypto-cryptokey-no-own-symbols.js": {
+      "ignore": true,
+      "reason": "Larger gap: CryptoKey has own symbol properties ([[webidl.brand]], kKeyObject, host object)"
+    },
+    "parallel/test-webcrypto-cryptokey-hidden-slots.js": {
+      "ignore": true,
+      "reason": "Larger gap: CryptoKey.algorithm is a frozen object here; Node returns a fresh mutable copy each time"
+    },
+    "parallel/test-webcrypto-cryptokey-clone-transfer.js": {
+      "ignore": true,
+      "reason": "Larger gap: CryptoKey has own symbol properties ([[webidl.brand]], kKeyObject, host object) that Node does not expose"
+    },
+    "parallel/test-webcrypto-cryptokey-brand-check.js": {
+      "ignore": true,
+      "reason": "Larger gap: CryptoKey inspection and brand checks differ (the runtime's CryptoKey is a cppgc object with symbol-keyed slots)"
+    },
+    "parallel/test-webcrypto-crypto-job-mode.js": {
+      "ignore": true,
+      "reason": "Requires Node internals (require('internal/crypto/aes')) with --expose-internals"
+    },
+    "parallel/test-webcrypto-constructors.js": {
+      "ignore": true,
+      "reason": "Larger gap: SubtleCrypto.supports() and Node's ERR_INVALID_THIS brand checks on the WebCrypto constructors"
+    },
     "parallel/test-vm-property-definer-interception.js": {},
     "parallel/test-vm-module-dynamic-namespace.js": {},
     "parallel/test-vm-module-dynamic-import-promise.js": {},
@@ -4753,49 +4801,56 @@
     "parallel/test-weakref.js": {},
     "parallel/test-web-locks.js": {},
     "parallel/test-webcrypto-cryptokey-workers.js": {},
+    "parallel/test-webcrypto-deduplicate-usages.js": {
+      "ignore": true,
+      "reason": "Small gap, not done: CryptoKey.usages keeps Node's first-occurrence order after deduplication only for some algorithms"
+    },
     "parallel/test-webcrypto-derivebits-argon2.js": {},
     "parallel/test-webcrypto-derivebits.js": {},
+    "parallel/test-webcrypto-derivekey-ecdh.js": {
+      "ignore": true,
+      "reason": "Larger gap: deriveKey with an HMAC / AES target derives a different key length than Node"
+    },
+    "parallel/test-webcrypto-derivekey-cfrg.js": {
+      "ignore": true,
+      "reason": "Larger gap: Node's ERR_MISSING_OPTION codes for missing deriveKey members and length semantics differ"
+    },
     "parallel/test-webcrypto-derivebits-hkdf.js": {
       "ignore": true,
       "reason": "deriveBits length 0 now conforms to w3c/webcrypto#380 (covered by WPT); remaining failure asserts OpenSSL's 1024-byte HKDF 'info' limit, an OpenSSL implementation quirk (not a WebCrypto spec requirement) that Deno's ring-based HKDF does not impose"
     },
     "parallel/test-webcrypto-derivebits-cfrg.js": {
       "ignore": true,
-      "reason": "Deno throws OperationError 'Invalid length' when more bits are requested than the shared secret provides; Node expects its custom /derived bit length is too small/ wording"
+      "reason": "Medium gap: missing deriveBits members are TypeErrors without Node's ERR_MISSING_OPTION code; the 'derived bit length is too small' message is Node's now"
     },
     "parallel/test-webcrypto-derivebits-ecdh.js": {
       "ignore": true,
-      "reason": "Deno throws OperationError 'Invalid length' when more bits are requested than the shared secret provides; Node expects its custom /derived bit length is too small/ wording"
+      "reason": "Medium gap: deriveBits with a null length returns a different amount of the shared secret than Node; the 'derived bit length is too small' message is Node's now"
     },
     "parallel/test-webcrypto-derivekey.js": {
       "ignore": true,
       "reason": "Deno throws TypeError 'Invalid KMAC length: 0' where Node expects its /KmacImportParams.length cannot be 0/ wording"
     },
-    "parallel/test-webcrypto-digest-turboshake.js": {
+    "parallel/test-webcrypto-digest-turboshake.js": {},
+    "parallel/test-webcrypto-digest.js": {
       "ignore": true,
-      "reason": "Deno throws 'Invalid XOF parameters' where Node expects its 'Invalid TurboShakeParams outputLength' wording"
+      "reason": "Medium gap: an unrecognized algorithm name is a WebIDL TypeError here, Node's NotSupportedError 'Unrecognized algorithm name'"
     },
     "parallel/test-webcrypto-digest-turboshake-rfc.js": {},
     "parallel/test-webcrypto-encap-decap-ml-kem.js": {
       "ignore": true,
-      "reason": "node:crypto createPublicKey/createPrivateKey does not support ML-KEM post-quantum keys used to seed the test"
+      "reason": "Requires Node internals (getCryptoKeyHandle from internal/crypto/keys with --expose-internals); ML-KEM KeyObjects and WebCrypto encapsulation work"
     },
     "parallel/test-webcrypto-encrypt-decrypt-aes.js": {
       "ignore": true,
-      "reason": "Deno reports \"Encryption algorithm 'AES-OCB' does not match key algorithm\"; Node expects its generic /Key algorithm mismatch/ wording"
+      "reason": "Larger gap: AES-GCM takes only 12- and 16-byte IVs here (NotSupportedError); Node takes any length. The usage, algorithm-mismatch, IV and tag-length messages are Node's now"
     },
     "parallel/test-webcrypto-encrypt-decrypt-chacha20-poly1305.js": {
       "ignore": true,
-      "reason": "Deno's WebCrypto uses a generic operation-not-valid message instead of Node's per-operation 'Unable to use this key to encrypt/decrypt' wording"
+      "reason": "Medium gap: ChaCha20-Poly1305 JWK import errors use the runtime's wording (\"'k' property of JsonWebKey must be present\") where Node says Invalid keyData, and key-usage messages differ; the encrypt / decrypt and tag-length messages are Node's now"
     },
-    "parallel/test-webcrypto-encrypt-decrypt-rsa.js": {
-      "ignore": true,
-      "reason": "Expects Node's custom WebCrypto error message ('Unable to use this key to decrypt/encrypt'); Deno emits the spec-aligned 'The requested operation is not valid for the provided key'"
-    },
-    "parallel/test-webcrypto-encrypt-decrypt.js": {
-      "ignore": true,
-      "reason": "Deno's WebCrypto uses a generic operation-not-valid message instead of Node's per-operation 'Unable to use this key to encrypt/decrypt' wording"
-    },
+    "parallel/test-webcrypto-encrypt-decrypt-rsa.js": {},
+    "parallel/test-webcrypto-encrypt-decrypt.js": {},
     "parallel/test-webcrypto-export-import-cfrg.js": {
       "ignore": true,
       "reason": "Deno throws 'Invalid key data' where Node expects its /Invalid key type/ wording"
@@ -4806,41 +4861,67 @@
     },
     "parallel/test-webcrypto-export-import-ml-dsa.js": {
       "ignore": true,
-      "reason": "Deno WebCrypto returns a generic 'Unsupported key format' message instead of Node's 'Unable to import ... using raw format' for plain raw ML-DSA import"
+      "reason": "Medium gap: invalid ML-DSA key data is 'Invalid key data' here, Node's 'Invalid keyData', and more import-error wording follows; the raw-format and seedless PKCS#8 messages are Node's now"
     },
     "parallel/test-webcrypto-export-import-ml-kem.js": {
       "ignore": true,
-      "reason": "ML-KEM post-quantum WebCrypto import/export is not implemented in Deno"
+      "reason": "Medium gap: JWK key_ops validation (a duplicate operation is Node's DataError 'Duplicate key operation', a SyntaxError 'Invalid key usage' here) and more import-error wording"
     },
     "parallel/test-webcrypto-export-import-rsa.js": {
       "ignore": true,
       "reason": "Deno throws 'unsupported algorithm' where Node expects its /Invalid key type/ wording"
     },
+    "parallel/test-webcrypto-export-import.js": {
+      "ignore": true,
+      "reason": "Medium gap: HMAC generateKey / importKey length rules differ (Invalid HMAC key length)"
+    },
     "parallel/test-webcrypto-get-public-key.mjs": {
       "ignore": true,
       "reason": "Deno throws 'Key usage must be empty' where Node expects its /Unsupported key usage/ wording"
     },
+    "parallel/test-webcrypto-raw-format-aliases.js": {},
     "parallel/test-webcrypto-getRandomValues.js": {},
+    "parallel/test-webcrypto-internal-slots.mjs": {
+      "ignore": true,
+      "reason": "Larger gap: CryptoKey.algorithm is a frozen object here; Node returns a fresh mutable copy"
+    },
     "parallel/test-webcrypto-random.js": {},
     "parallel/test-webcrypto-keygen-kmac.js": {
       "ignore": true,
       "reason": "Tests SubtleCrypto generateKey for KMAC128 / KMAC256, a Node-specific WebCrypto extension that requires OpenSSL >= 3 (test gates on hasOpenSSL(3)); Deno's ext/crypto/ does not register KMAC as a recognised SubtleCrypto algorithm. Could be revisited if KMAC is added — a SHA-3-based KMAC is implementable via the sha3 / cshake Rust crates"
     },
+    "parallel/test-webcrypto-promise-prototype-pollution.mjs": {
+      "ignore": true,
+      "reason": "Requires Node internals (kSupportedAlgorithms from internal/crypto/util)"
+    },
+    "parallel/test-webcrypto-methods-not-async.js": {
+      "ignore": true,
+      "reason": "Larger gap: the SubtleCrypto methods are async functions here; Node's return promises from plain functions"
+    },
+    "parallel/test-webcrypto-keygen.js": {
+      "ignore": true,
+      "reason": "Medium gap: several generateKey failures are TypeErrors here where Node throws OperationError"
+    },
     "parallel/test-webcrypto-sign-verify-eddsa.js": {
       "ignore": true,
-      "reason": "Deno emits the spec-aligned 'The requested operation is not valid for the provided key'; Node expects its /Unable to use this key to verify/ wording"
+      "reason": "Larger gap: an Ed25519 verify that Node rejects (small-order / non-canonical points) verifies here; the usage messages are Node's now"
     },
+    "parallel/test-webcrypto-sign-verify-hmac.js": {
+      "ignore": true,
+      "reason": "Medium gap: missing HMAC members are TypeErrors without Node's ERR_MISSING_OPTION code"
+    },
+    "parallel/test-webcrypto-sign-verify-ecdsa.js": {},
     "parallel/test-webcrypto-sign-verify-kmac.js": {
       "ignore": true,
       "reason": "Deno emits the spec-aligned 'The requested operation is not valid for the provided key'; Node expects its /Unable to use this key to verify/ wording"
     },
     "parallel/test-webcrypto-sign-verify-rsa.js": {
       "ignore": true,
-      "reason": "Deno emits the spec-aligned 'The requested operation is not valid for the provided key'; Node expects its /Unable to use this key to verify/ wording"
+      "reason": "Medium gap: an RSA-PSS saltLength above the maximum is an Error here; Node throws an OperationError whose cause is ERR_OUT_OF_RANGE with the range in the message. The usage messages are Node's now"
     },
     "parallel/test-webcrypto-sign-verify-ml-dsa.js": {
       "ignore": true,
-      "reason": "node:crypto createPublicKey/createPrivateKey does not support ML-DSA keys used to seed the WebCrypto verify test"
+      "reason": "Larger gap: ML-DSA with a non-empty context, which aws-lc-rs does not take (NotSupportedError here)"
     },
     "parallel/test-webcrypto-util.js": {
       "ignore": true,
@@ -4856,7 +4937,7 @@
     },
     "parallel/test-webcrypto-wrap-unwrap.js": {
       "ignore": true,
-      "reason": "Deno throws 'Wrapping algorithm does not match key algorithm' where Node expects its 'Key algorithm mismatch' wording"
+      "reason": "Medium gap: wrapping with an algorithm that cannot wrap is an InvalidAccessError here, Node's NotSupportedError; 'Key algorithm mismatch' and the usage messages are Node's now"
     },
     "parallel/test-websocket.js": {},
     "parallel/test-webstorage-without-sqlite.js": {},

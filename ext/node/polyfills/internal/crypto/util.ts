@@ -92,6 +92,13 @@ const ellipticCurves: Array<EllipticCurve> = [
     publicKeySizeCompressed: 49,
     sharedSecretSize: 48,
   }, // RFC 5639 (DENEXT.md item 292)
+  {
+    name: "brainpoolP512r1",
+    privateKeySize: 64,
+    publicKeySize: 129,
+    publicKeySizeCompressed: 65,
+    sharedSecretSize: 64,
+  }, // RFC 5639, over AWS-LC
 ];
 
 // OpenSSL NID values and cipher metadata.
@@ -997,6 +1004,7 @@ const validateByteSource = hideStackFrames((val, name) => {
 const curveNames: readonly string[] = [
   "brainpoolP256r1",
   "brainpoolP384r1",
+  "brainpoolP512r1",
   "prime256v1",
   "secp224r1",
   "secp256k1",

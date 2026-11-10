@@ -543,7 +543,8 @@ Deno.test({
       "Cannot change encoding",
     );
 
-    decipher.final();
+    // As in Node, the failed final() finished the decipher.
+    assertThrows(() => decipher.final(), Error, "Invalid state");
   },
 });
 

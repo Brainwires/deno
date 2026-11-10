@@ -676,7 +676,7 @@ Deno.test(async function testEcdhDeriveBitsWithLongerLength() {
         512,
       ),
     DOMException,
-    "Invalid length",
+    "derived bit length is too small",
   );
 });
 

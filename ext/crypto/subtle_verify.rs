@@ -232,14 +232,11 @@ pub fn run(
   data: Vec<u8>,
 ) -> Result<bool, CryptoError> {
   if params.canonical_name() != key.algorithm_name {
-    return Err(invalid_access(format!(
-      "Verifying algorithm '{}' does not match key algorithm",
-      params.canonical_name()
-    )));
+    return Err(invalid_access("Key algorithm mismatch".to_string()));
   }
   if !key.has_usage("verify") {
     return Err(invalid_access(
-      "The requested operation is not valid for the provided key".to_string(),
+      "Unable to use this key to verify".to_string(),
     ));
   }
 
@@ -284,7 +281,7 @@ pub fn run(
       // ECDSA `verification failure due to bad hash name` WPT cases.
       let hash =
         crate::subtle_generate_key::sha_from_name(&hash).ok_or_else(|| {
-          not_supported(format!("Unrecognized hash algorithm: {hash}"))
+          not_supported("Unrecognized algorithm name".to_string())
         })?;
       if key.key_type != CryptoKeyType::Public {
         return Err(invalid_access("Key type not supported".to_string()));

@@ -1382,8 +1382,8 @@ pub fn op_node_x509_verify(
         _ => return Ok(false),
       };
 
-      // ecdsa 0.16 refused a prehash shorter than half the field (SHA-1
-      // with P-384); keep that, see `ecdsa_prehash_len_ok`.
+      // Any digest length is accepted, as OpenSSL does; see
+      // `ecdsa_prehash_len_ok`.
       use crate::sign::ecdsa_prehash_len_ok;
 
       match ec_key {

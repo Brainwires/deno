@@ -30,6 +30,7 @@ const {
   op_node_create_ec_jwk,
   op_node_create_ed_raw,
   op_node_create_raw_asymmetric_key,
+  op_node_create_akp_jwk,
   op_node_create_private_key,
   op_node_create_public_key,
   op_node_create_rsa_jwk,
@@ -86,6 +87,21 @@ const {
   isKeyObject,
   kKeyType,
 } = core.loadExtScript("ext:deno_node/internal/crypto/_keys.ts");
+
+const lazyProcess = core.createLazyLoader("node:process");
+let warnedCryptoKeyArgument = false;
+let warnedNonExtractableFrom = false;
+
+// DEP0203: a CryptoKey passed where node:crypto takes a key.
+function warnCryptoKeyArgument() {
+  if (warnedCryptoKeyArgument) return;
+  warnedCryptoKeyArgument = true;
+  lazyProcess().default.emitWarning(
+    "Passing a CryptoKey to node:crypto functions is deprecated.",
+    "DeprecationWarning",
+    "DEP0203",
+  );
+}
 const {
   validateObject,
   validateOneOf,
@@ -177,22 +193,15 @@ class KeyObject {
     if (!isCryptoKey(key)) {
       throw new ERR_INVALID_ARG_TYPE("key", "CryptoKey", key);
     }
-    const { type, data } = cryptoKeyExportNodeKeyMaterial(key);
-    if (type === "secret") {
-      const handle = op_node_create_secret_key(data);
-      return new SecretKeyObject(handle);
-    } else if (type === "public") {
-      const handle = op_node_create_public_key(data, "der", "spki");
-      return new PublicKeyObject(handle);
-    } else {
-      const handle = op_node_create_private_key(
-        data,
-        "der",
-        "pkcs8",
-        undefined,
+    if (!key.extractable && !warnedNonExtractableFrom) {
+      warnedNonExtractableFrom = true;
+      lazyProcess().default.emitWarning(
+        "Passing a non-extractable CryptoKey to KeyObject.from() is deprecated.",
+        "DeprecationWarning",
+        "DEP0204",
       );
-      return new PrivateKeyObject(handle);
     }
+    return keyObjectFromCryptoKey(key);
   }
 
   equals(otherKeyObject: KeyObject): boolean {
@@ -210,6 +219,20 @@ class KeyObject {
   export(_options?: unknown): string | Buffer | JsonWebKey {
     notImplemented("crypto.KeyObject.prototype.export");
   }
+}
+
+// The KeyObject for a CryptoKey, without KeyObject.from()'s DEP0204 warning
+// (the node:crypto functions that take a CryptoKey warn DEP0203 instead).
+function keyObjectFromCryptoKey(key: CryptoKey): KeyObject {
+  const { type, data } = cryptoKeyExportNodeKeyMaterial(key);
+  if (type === "secret") {
+    return new SecretKeyObject(op_node_create_secret_key(data));
+  } else if (type === "public") {
+    return new PublicKeyObject(op_node_create_public_key(data, "der", "spki"));
+  }
+  return new PrivateKeyObject(
+    op_node_create_private_key(data, "der", "pkcs8", undefined),
+  );
 }
 
 ObjectDefineProperties(KeyObject.prototype, {
@@ -250,9 +273,20 @@ function getKeyObjectHandleFromJwk(key, ctx) {
   validateOneOf(
     key.kty,
     "key.kty",
-    ["RSA", "EC", "OKP"],
+    ["RSA", "EC", "OKP", "AKP"],
   );
   const isPublic = ctx === kConsumePublic || ctx === kCreatePublic;
+
+  if (key.kty === "AKP") {
+    // ML-DSA / ML-KEM: `alg`, `pub` and, for a private key, `priv` (the
+    // seed). Rust validates each member and the pub / priv pairing.
+    return op_node_create_akp_jwk(
+      typeof key.alg === "string" ? key.alg : "",
+      typeof key.pub === "string" ? key.pub : null,
+      typeof key.priv === "string" ? key.priv : null,
+      isPublic,
+    );
+  }
 
   if (key.kty === "OKP") {
     validateJwkString(key.crv, "key.crv");
@@ -343,6 +377,24 @@ function isStringOrBuffer(val: unknown): boolean {
     Buffer.isBuffer(val);
 }
 
+// Key types `createPublicKey` / `createPrivateKey` import from the raw-*
+// formats, and the ones Node knows but refuses raw input for
+// (ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS). Any other name is
+// ERR_INVALID_ARG_VALUE; that includes ML-KEM-512, which BoringSSL lacks.
+const kRawKeyTypes = [
+  "ec",
+  "ed25519",
+  "x25519",
+  "ed448",
+  "x448",
+  "ml-dsa-44",
+  "ml-dsa-65",
+  "ml-dsa-87",
+  "ml-kem-768",
+  "ml-kem-1024",
+];
+const kRawIncompatibleKeyTypes = ["rsa", "rsa-pss", "dsa", "dh"];
+
 function prepareAsymmetricKey(
   key: any,
   ctx: number,
@@ -357,7 +409,7 @@ function prepareAsymmetricKey(
     return {
       // @ts-ignore __proto__ is magic
       __proto__: null,
-      handle: KeyObject.from(key)[kHandle],
+      handle: (warnCryptoKeyArgument(), keyObjectFromCryptoKey(key))[kHandle],
     };
   } else if (lazyCipher().isStringOrBuffer(key)) {
     return {
@@ -378,7 +430,8 @@ function prepareAsymmetricKey(
       return {
         // @ts-ignore __proto__ is magic
         __proto__: null,
-        handle: KeyObject.from(data)[kHandle],
+        handle:
+          (warnCryptoKeyArgument(), keyObjectFromCryptoKey(data))[kHandle],
       };
     } else if (format === "jwk") {
       if (typeof data !== "object" || data === null) {
@@ -390,7 +443,10 @@ function prepareAsymmetricKey(
         handle: getKeyObjectHandleFromJwk(data, ctx),
         format,
       };
-    } else if (format === "raw-public" || format === "raw-private") {
+    } else if (
+      format === "raw-public" || format === "raw-private" ||
+      format === "raw-seed"
+    ) {
       const isPrivateKeyInput = ctx === kConsumePrivate ||
         ctx === kCreatePrivate;
       if (isPrivateKeyInput && format === "raw-public") {
@@ -403,9 +459,20 @@ function prepareAsymmetricKey(
           data,
         );
       }
-      validateString(key.asymmetricKeyType, "key.asymmetricKeyType");
-      if (key.asymmetricKeyType === "ec") {
+      const asymmetricKeyType = key.asymmetricKeyType;
+      validateString(asymmetricKeyType, "key.asymmetricKeyType");
+      if (asymmetricKeyType === "ec") {
         validateString(key.namedCurve, "key.namedCurve");
+      }
+      if (
+        !ArrayPrototypeIncludes(kRawKeyTypes, asymmetricKeyType) &&
+        !ArrayPrototypeIncludes(kRawIncompatibleKeyTypes, asymmetricKeyType)
+      ) {
+        throw new ERR_INVALID_ARG_VALUE(
+          "key.asymmetricKeyType",
+          asymmetricKeyType,
+          "Unsupported key type",
+        );
       }
       const keyData = getArrayBufferOrView(data, "key");
       return {
@@ -413,9 +480,9 @@ function prepareAsymmetricKey(
         __proto__: null,
         handle: op_node_create_raw_asymmetric_key(
           keyData,
-          key.asymmetricKeyType,
+          asymmetricKeyType,
           key.namedCurve ?? null,
-          format === "raw-public",
+          format,
         ),
       };
     }
@@ -558,7 +625,7 @@ function parseKeyFormatAndType(
     };
   }
 
-  if (format === "raw-private") {
+  if (format === "raw-private" || format === "raw-seed") {
     if (isPublic === true) {
       throw new ERR_INVALID_ARG_VALUE(option("format", objName), format);
     }
@@ -604,6 +671,8 @@ function parseKeyFormat(
     return "raw-private";
   } else if (formatStr === "raw-public") {
     return "raw-public";
+  } else if (formatStr === "raw-seed") {
+    return "raw-seed";
   }
   throw new ERR_INVALID_ARG_VALUE(optionName, formatStr);
 }
@@ -761,10 +830,11 @@ function prepareSecretKey(
       }
       return key[kHandle];
     } else if (isCryptoKey(key)) {
+      warnCryptoKeyArgument();
       if (key.type !== "secret") {
         throw new ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE(key.type, "secret");
       }
-      return KeyObject.from(key)[kHandle];
+      return keyObjectFromCryptoKey(key)[kHandle];
     }
   }
   if (
@@ -1016,8 +1086,10 @@ class PrivateKeyObject extends AsymmetricKeyObject {
       }
       return { ...op_node_export_private_key_jwk(this[kHandle]) };
     }
-    if (options?.format === "raw-private") {
-      return Buffer.from(op_node_export_private_key_raw(this[kHandle]));
+    if (options?.format === "raw-private" || options?.format === "raw-seed") {
+      return Buffer.from(
+        op_node_export_private_key_raw(this[kHandle], options.format),
+      );
     }
     const {
       format,
@@ -1229,6 +1301,8 @@ return {
   prepareSecretKey,
   prepareAsymmetricKey,
   getKeyObjectHandle,
+  keyObjectFromCryptoKey,
+  warnCryptoKeyArgument,
   SecretKeyObject,
   PrivateKeyObject,
   PublicKeyObject,
