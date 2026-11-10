@@ -275,13 +275,13 @@ Deno.test(function runInAsyncScopeFiresBeforeAndAfter() {
   assertEquals(events, ["before", "fn", "after"]);
 });
 
-Deno.test(function clearImmediateEmitsDestroy() {
+Deno.test(async function clearImmediateEmitsDestroy() {
   let immediateAsyncId: number | undefined;
   const destroyed: number[] = [];
   const hook = createHook({
     init(asyncId, type) {
       if (type === "Immediate") {
-        immediateAsyncId = asyncId;
+        immediateAsyncId ??= asyncId;
       }
     },
     destroy(asyncId) {
@@ -294,6 +294,10 @@ Deno.test(function clearImmediateEmitsDestroy() {
     const immediate = setImmediate(() => {});
     assert(typeof immediateAsyncId === "number");
     clearImmediate(immediate);
+    // As in Node, `destroy` is queued: it runs on the next turn, before that
+    // turn's immediates.
+    assert(!destroyed.includes(immediateAsyncId!));
+    await new Promise((resolve) => setImmediate(resolve));
     assert(destroyed.includes(immediateAsyncId!));
   } finally {
     hook.disable();
