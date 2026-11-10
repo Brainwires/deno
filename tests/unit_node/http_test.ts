@@ -3019,10 +3019,20 @@ Deno.test("[node/http] async_hooks observes request execution resource", async (
   });
   const server = http.createServer((req, res) => {
     try {
-      assertEquals(executionAsyncResource(), req);
+      // As in Node: the handler runs as the connection's parser resource,
+      // an HTTPServerAsyncResource ("HTTPINCOMINGMESSAGE") for req's socket.
+      const resource = executionAsyncResource() as {
+        type?: string;
+        socket?: unknown;
+      };
+      assertEquals(resource.type, "HTTPINCOMINGMESSAGE");
+      assert(resource.socket === req.socket);
       res.end("ok");
       resolve();
     } catch (err) {
+      // End the response so a failed assertion fails the test instead of
+      // leaving the keep-alive connection (and server.close()) hanging.
+      res.end("failed");
       reject(err);
     }
   });
@@ -4454,9 +4464,11 @@ Deno.test(
             } as ProxyAgentLike),
           }),
         Error,
-        "Invalid URL",
+        // Node 26's authority check (DENEXT.md item 289) refuses it while the
+        // request is built: still before any bytes reach the proxy.
+        "options.path",
       );
-      assertEquals((err as { code?: string }).code, "ERR_INVALID_URL");
+      assertEquals((err as { code?: string }).code, "ERR_INVALID_ARG_VALUE");
     }
   },
 );

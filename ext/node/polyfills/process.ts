@@ -2359,21 +2359,28 @@ internals.__bootstrapNodeProcess = function (
     }
 
     internals.__nodeTimingMarks.bootstrapComplete = performance.now();
-    // The first timer to fire marks the event loop running: after the main
-    // script's first tick, as Node's `loopStart`. Unref'd, so it keeps
-    // nothing alive.
-    {
+    // `loopStart`: the event loop starting after the main script, as in Node.
+    // On the main thread the runtime calls this hook right after the main
+    // module ran (before its load event); a bootstrap timer there made the
+    // loop turn once more, running unref'd immediates. A worker, which has no
+    // such hook, marks it with its first (unref'd) timer.
+    const markLoopStart = () => {
+      if (internals.__nodeTimingMarks.loopStart === -1) {
+        internals.__nodeTimingMarks.loopStart = performance.now();
+      }
+    };
+    if (runningOnMainThread) {
+      // A deferred bootstrap (the first `node:` use) may come after the main
+      // module already ran: the loop has started.
+      if (internals.__mainModuleRan) markLoopStart();
+      else internals.__nodeLoopStart = markLoopStart;
+    } else {
       // Called as plain functions: the timers check `this` (a method call
       // on the module object is an illegal invocation).
       const { setTimeout: webSetTimeout, unrefTimer } = core.loadExtScript(
         "ext:deno_web/02_timers.js",
       );
-      const id = webSetTimeout(() => {
-        if (internals.__nodeTimingMarks.loopStart === -1) {
-          internals.__nodeTimingMarks.loopStart = performance.now();
-        }
-      }, 0);
-      unrefTimer(id);
+      unrefTimer(webSetTimeout(markLoopStart, 0));
     }
 
     // NOTE: we used to delete internals.__bootstrapNodeProcess here. Under

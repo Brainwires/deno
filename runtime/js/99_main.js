@@ -625,6 +625,10 @@ function processRejectionHandled(promise, reason) {
 }
 
 function dispatchLoadEvent() {
+  // denext: the main module ran and the event loop starts next, node:process's
+  // `performance.nodeTiming.loopStart` (DENEXT.md item 295).
+  internals.__mainModuleRan = true;
+  internals.__nodeLoopStart?.();
   globalThis_.dispatchEvent(new event.Event("load"));
 }
 

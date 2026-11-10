@@ -5,7 +5,21 @@ import net from "node:net";
 import { execFileSync } from "node:child_process";
 
 const fifo = "./test.fifo";
-execFileSync("mkfifo", [fifo]);
+try {
+  execFileSync("mkfifo", [fifo], { stdio: ["ignore", "pipe", "pipe"] });
+} catch (err) {
+  // Name the cause: a bare "Command failed" (seen on CI only) says nothing.
+  console.log(
+    "mkfifo failed:",
+    JSON.stringify({
+      status: err.status,
+      signal: err.signal,
+      code: err.code,
+      stderr: String(err.stderr ?? ""),
+    }),
+  );
+  throw err;
+}
 const fd = fs.openSync(fifo, fs.constants.O_RDWR | fs.constants.O_NONBLOCK);
 const socket = new net.Socket({ fd, readable: true, writable: false });
 socket.setEncoding("utf8");

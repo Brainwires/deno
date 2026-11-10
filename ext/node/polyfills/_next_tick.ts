@@ -14,7 +14,7 @@ const {
   emitBefore,
   emitDestroy,
   emitInit,
-  executionAsyncId,
+  getDefaultTriggerAsyncId,
   newAsyncId: nextAsyncId,
 } = core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
 
@@ -84,7 +84,10 @@ function nextTick<T extends Array<unknown>>(
   }
 
   const asyncId = nextAsyncId();
-  const triggerAsyncId = executionAsyncId();
+  // As Node: the trigger a defaultTriggerAsyncIdScope set (net.Server's
+  // 'listening' tick runs as triggered by its TCPSERVERWRAP), else the
+  // execution id.
+  const triggerAsyncId = getDefaultTriggerAsyncId();
   const tickObject = {
     asyncId,
     triggerAsyncId,

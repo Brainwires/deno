@@ -1986,9 +1986,11 @@ function checkServerIdentity(hostname, cert) {
 // Order matters. Mirrors ALL_CIPHER_SUITES from rustls/src/suites.rs but
 // using openssl cipher names instead.
 const DEFAULT_CIPHERS = ArrayPrototypeJoin([
-  // TLSv1.3 suites
-  "AES256-GCM-SHA384",
-  "AES128-GCM-SHA256",
+  // TLSv1.3 suites (by their TLS 1.3 names: `ciphers` is honoured, and
+  // OpenSSL's AES256-GCM-SHA384 / AES128-GCM-SHA256 are TLS 1.2 RSA suites,
+  // which left a default context offering TLS 1.3 with ChaCha20 only)
+  "TLS_AES_256_GCM_SHA384",
+  "TLS_AES_128_GCM_SHA256",
   "TLS_CHACHA20_POLY1305_SHA256",
   // TLSv1.2 suites
   "ECDHE-ECDSA-AES256-GCM-SHA384",
