@@ -1437,6 +1437,44 @@ Deno.test(async function killMultipleTimesNoError() {
   await timeout.promise;
 });
 
+// A forked child that writes to stderr and exits at once: its exit
+// disconnects the IPC channel, and the channel's EOF can be read in the same
+// turn, after that. Reading it must not disconnect a second time (that threw
+// ERR_IPC_DISCONNECTED, emitted as an 'error' on the child). Several children
+// at once make the two land together; before the fix about one exit in five
+// raised the error.
+Deno.test(async function forkExitAndChannelEofTogetherNoError() {
+  const file = await Deno.makeTempFile({ suffix: ".js" });
+  await Deno.writeTextFile(
+    file,
+    `console.error("x".repeat(100));\nDeno.exit(3);\n`,
+  );
+  const errors: string[] = [];
+  const codes: (number | null)[] = [];
+  const one = () =>
+    new Promise<void>((resolve) => {
+      const child = CP.fork(file, [], {
+        stdio: ["ignore", "ignore", "pipe", "ipc"],
+      });
+      child.on("error", (e) => errors.push(String(e)));
+      child.stderr!.on("data", () => {});
+      child.on("close", (code) => {
+        codes.push(code);
+        resolve();
+      });
+    });
+  try {
+    for (let round = 0; round < 6; round++) {
+      await Promise.all(Array.from({ length: 8 }, one));
+    }
+  } finally {
+    await Deno.remove(file);
+  }
+  assertEquals(errors, []);
+  assertEquals(codes.length, 48);
+  assert(codes.every((code) => code === 3), String(codes));
+});
+
 Deno.test({
   name: "[node/child_process] SIGSTOP and SIGCONT preserve child state",
   ignore: Deno.build.os === "windows",

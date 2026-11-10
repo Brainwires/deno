@@ -324,7 +324,7 @@ async fn bridge(
   // HTTP/1.1 client over it.
   let stream = connect_memory(DESKTOP_SERVE_NAME)?;
   let io = TokioIo::new(stream);
-  let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+  let (mut sender, conn) = bridge_client().handshake(io).await?;
   tokio::spawn(async move {
     let _ = conn.await;
   });
@@ -391,6 +391,27 @@ async fn bridge(
   }
 
   Ok(())
+}
+
+/// What one read of the memory connection may take: hyper's default maximum
+/// buffer (so a response head may be as large as before), well over the
+/// memory transport's own buffer, which bounds what a read can find.
+const BRIDGE_READ_BUF: usize = 8192 + 4096 * 100;
+
+/// The HTTP/1.1 client the bridge drives over the memory connection.
+///
+/// hyper's adaptive read buffer starts at 8 KiB, so a chunk the app wrote in
+/// one piece came out of a fresh connection as two body frames (the first
+/// read also holds the response head), and each frame is its own write to
+/// the webview. WebKit's byte-stream fetch source can hold a piece that
+/// arrives while the page isn't reading until the next one comes (WebKit bug
+/// 322545): the tail of the app's first chunk then reached the page only with
+/// its next write. Reading whatever the connection holds at once keeps one
+/// app write one webview write.
+fn bridge_client() -> hyper::client::conn::http1::Builder {
+  let mut builder = hyper::client::conn::http1::Builder::new();
+  builder.read_buf_exact_size(Some(BRIDGE_READ_BUF));
+  builder
 }
 
 /// Where a request body comes from (the webview's exchange; a fake in tests).
@@ -1433,6 +1454,56 @@ mod tests {
     // Not cancelled: the future's output.
     let live = FakeCancel(false.into());
     assert_eq!(until_cancelled(&live, async { 7 }).await, Some(7));
+  }
+
+  #[tokio::test]
+  async fn a_chunk_written_in_one_piece_is_one_body_frame() {
+    // The app's first chunk (8 KiB and a line) lands on the connection
+    // together with the response head, in one write. hyper's adaptive
+    // buffer read 8 KiB of it, so the bridge handed the webview the chunk in
+    // two writes, and WebKit could hold the tail until the app wrote again.
+    let line = format!("chunk 0 {}\n", "x".repeat(8192));
+    let (client, mut server) = tokio::io::duplex(64 * 1024);
+    let served = line.clone();
+    let server_task = tokio::spawn(async move {
+      let mut head = Vec::new();
+      let mut buf = [0u8; 1024];
+      while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+        let n = server.read(&mut buf).await.unwrap();
+        assert!(n > 0, "the request head never came");
+        head.extend_from_slice(&buf[..n]);
+      }
+      let mut response = b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n\
+        transfer-encoding: chunked\r\n\r\n"
+        .to_vec();
+      response.extend_from_slice(format!("{:x}\r\n", served.len()).as_bytes());
+      response.extend_from_slice(served.as_bytes());
+      response.extend_from_slice(b"\r\n");
+      server.write_all(&response).await.unwrap();
+      // The body stays open, as the app's stream does while it waits.
+      server
+    });
+
+    let (mut sender, conn) = bridge_client()
+      .handshake(TokioIo::new(client))
+      .await
+      .unwrap();
+    tokio::spawn(async move {
+      let _ = conn.await;
+    });
+    let request = hyper::Request::builder()
+      .uri("/stream")
+      .header(HOST, "app")
+      .body(Full::new(bytes::Bytes::new()))
+      .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    assert_eq!(response.status(), 200);
+    let mut body = response.into_body();
+    let frame = body.frame().await.unwrap().unwrap();
+    let data = frame.into_data().unwrap();
+    assert_eq!(data.len(), line.len());
+    assert_eq!(&data[..], line.as_bytes());
+    drop(server_task.await.unwrap());
   }
 
   #[tokio::test]

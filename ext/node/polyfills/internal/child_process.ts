@@ -2947,8 +2947,14 @@ function setupChannel(
         if (isInternal(msg)) {
           const cmd = internalCmdName(msg);
           if (cmd === "CLOSE") {
-            // Channel closed.
-            target.disconnect();
+            // Channel closed. The end of the channel can be read after the
+            // channel was already disconnected: the child's exit disconnects
+            // it (see the exit handler), and its EOF read may resolve in the
+            // same turn, after that. A second disconnect() would throw
+            // ERR_IPC_DISCONNECTED and surface as an 'error' on the child.
+            if (target.connected) {
+              target.disconnect();
+            }
             return;
           } else if (cmd === "HANDLE" && typeof rawFd === "number") {
             if (serialization === "json") {
