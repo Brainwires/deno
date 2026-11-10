@@ -12043,6 +12043,78 @@ where the changes are discussed.
        text, raw, copy, Blob, a missing key, `/etc/hosts` and a `..` escape not
        read, a bad key); LSP `node:` completions list `node:sea`.
 
+NNN. **`feat(ext/node)`: ML-DSA / ML-KEM `KeyObject`s, `crypto.encapsulate` /
+`decapsulate`, brainpoolP512r1 and brainpool keys; Node's WebCrypto wording**
+(`node18/crypto`, runtime;
+`ext/node_crypto/{pqc,kem,brainpool,
+     keys,sign,lib,x509,ec_golden_tests}.rs`,
+`ext/node_crypto/Cargo.toml`,
+`ext/crypto/{lib,digest,subtle_decrypt,subtle_derive_bits,subtle_encrypt,
+     subtle_export_key,subtle_import_key,subtle_sign,subtle_verify,
+     subtle_wrap_key}.rs`,
+`ext/node/polyfills/{crypto,crypto_esm}.ts`,
+`ext/node/polyfills/internal/crypto/{keys,keygen,sig,cipher,util}.ts`). -
+ML-DSA-44/65/87 and ML-KEM-768/1024 are `KeyObject` types: `createPrivateKey` /
+`createPublicKey` from PKCS#8 (the seed form, encrypted too), SPKI, the `AKP`
+JWK and the `raw-public` / `raw-seed` formats; `export()` to each of them;
+`generateKeyPair`; one-shot `sign(null, ...)` / `verify(null, ...)` for ML-DSA
+(a digest is `ERR_OSSL_EVP_COMMAND_NOT_SUPPORTED`). ML-DSA comes from aws-lc-rs
+and ML-KEM from `fips203` (key expansion) and aws-lc-rs (encapsulation), both
+already in the tree. The runtime reports
+`process.features.openssl_is_boringssl`, so this follows Node's BoringSSL build:
+private keys are kept as their seed and only the seed-only PKCS#8 form is read,
+and ML-KEM-512 is refused (`ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM`). -
+`crypto.encapsulate(key[, cb])` / `crypto.decapsulate(key, ct[, cb])`:
+ML-KEM-768/1024 and RSASVE (SP 800-56B) on `rsa` keys; a failed decapsulation is
+`ERR_CRYPTO_OPERATION_FAILED` "Decapsulation failed". DHKEM on EC / X25519 /
+X448 keys stays refused, as in Node on OpenSSL before 3.2 (the version the
+runtime reports). - brainpoolP512r1 joins brainpoolP256r1 / P384r1 for
+`createECDH` and `getCurves()`, and all three brainpool curves are `KeyObject`
+curves: `generateKeyPair("ec")`, PKCS#8 / SEC1 / SPKI and raw import and export,
+ECDSA `sign` / `verify` (DER and IEEE P1363) and `diffieHellman()`; JWK export
+is `ERR_CRYPTO_JWK_UNSUPPORTED_CURVE`, as in Node. They run on AWS-LC's built-in
+brainpool groups (`EC_group_brainpoolP*r1`, through `aws-lc-sys`); the
+RustCrypto brainpool code from item 292 stays for `createECDH` on P256r1 /
+P384r1. - ECDSA takes a digest shorter than half the field (P-384 with SHA-1,
+P-521 with SHA-256), as OpenSSL does, in `node:crypto` and WebCrypto; ecdsa 0.16
+refused those and the old rule had been kept. - Smaller Node parity fixes: the
+raw-* key formats (`raw-seed`, Node's error codes, an exact scalar size for raw
+EC private keys, raw formats in `generateKeyPair` encodings); PKCS#8 export with
+`aes-192-cbc` (DER) and `des-ede3-cbc` (pkcs8's `3des` feature, the `des` crate
+already in the tree); a wrong passphrase on an encrypted PKCS#8 key is always
+`bad decrypt`; a failed async `sign` / `verify` calls back with the error alone;
+`Decipheriv.final()` reports a failed authentication before an encoding change,
+and a later `final()` is an invalid state; `createCipheriv` takes a `CryptoKey`
+with DEP0203 and `KeyObject.from()` of a non-extractable key warns DEP0204; a
+raw-format error with no JS class (it threw `undefined`) has its code. -
+WebCrypto errors in Node's words: "Unable to use this key to <op>", "Key
+algorithm mismatch", "derived bit length is too small", "Unable to import <alg>
+using <format> format", "Invalid TurboShakeParams outputLength", AES / ChaCha20
+IV and tag-length messages, "Unrecognized algorithm name" for an unknown ECDSA
+hash, and Node's message for an ML-DSA / ML-KEM PKCS#8 key without a seed. - Not
+done: ML-KEM-512 and the expanded-only / seed+expanded PKCS#8 forms (BoringSSL
+refuses them too); an ML-DSA `context` (aws-lc-rs takes none); SLH-DSA
+`KeyObject`s (the suite's tests take Node's OpenSSL 3.0 path). - Tests:
+`pqc.rs`, `kem.rs` and `brainpool.rs` unit tests (seed round trips, sign /
+verify, encapsulate / decapsulate, RSASVE, brainpool ECDH and ECDSA, a
+brainpoolP512r1 key and secret written by Node 26); `ec_golden_tests.rs` (short
+digests now sign and verify);
+`tests/unit_node/crypto/crypto_pqc_brainpool_test.ts` against
+`pqc_brainpool_vectors.json`, written by Node 26.13 with
+`generate_pqc_brainpool_vectors.cjs` (brainpool keys, secrets and signatures on
+all three curves, ML-DSA / ML-KEM keys, signatures and a ciphertext, P-384 /
+SHA-1 and P-521 / SHA-256 signatures); `crypto_cipher_test.ts`;
+`tests/unit/webcrypto_test.ts`. - The crypto group goes from 108 to 125 of its
+183 tests on Linux and from 107 to 125 on macOS. Node tests enabled: 17
+(parallel/ test-crypto-dep0203, test-crypto-dep0204, test-crypto-encap-decap,
+test-crypto-hash (flaky), test-crypto-key-objects-raw, test-crypto-keygen-raw,
+test-crypto-pqc-encrypted-pkcs8, test-crypto-pqc-key-objects-ml-dsa,
+test-crypto-pqc-key-objects-ml-kem, test-crypto-pqc-keygen-ml-dsa,
+test-crypto-pqc-keygen-ml-kem, test-crypto-pqc-sign-verify-ml-dsa,
+test-webcrypto-digest-turboshake, test-webcrypto-encrypt-decrypt,
+test-webcrypto-encrypt-decrypt-rsa, test-webcrypto-raw-format-aliases,
+test-webcrypto-sign-verify-ecdsa; test-crypto-randomuuidv7 now on macOS too)
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

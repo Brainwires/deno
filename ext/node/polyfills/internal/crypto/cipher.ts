@@ -68,8 +68,10 @@ const {
   createPrivateKey,
   createPublicKey,
   getArrayBufferOrView,
+  keyObjectFromCryptoKey,
+  warnCryptoKeyArgument,
 } = core.loadExtScript("ext:deno_node/internal/crypto/keys.ts");
-const { isKeyObject } = core.loadExtScript(
+const { isCryptoKey, isKeyObject } = core.loadExtScript(
   "ext:deno_node/internal/crypto/_keys.ts",
 );
 const { kHandle } = core.loadExtScript(
@@ -246,6 +248,10 @@ function toU8(
   }
   if (isKeyObject(input)) {
     return op_node_export_secret_key(input[kHandle]);
+  }
+  if (isCryptoKey(input)) {
+    warnCryptoKeyArgument();
+    return op_node_export_secret_key(keyObjectFromCryptoKey(input)[kHandle]);
   }
   return typeof input === "string" ? encode(input) : input;
 }
@@ -686,11 +692,24 @@ Decipheriv.prototype.final = function (
     throw new ERR_CRYPTO_INVALID_STATE("final");
   }
 
-  _lazyInitDecipherDecoder(this, encoding);
+  // The decoder is set up only once the data is through: a failed
+  // authentication or padding check is reported before an encoding change,
+  // as in Node.
+  const decoder = () => {
+    try {
+      _lazyInitDecipherDecoder(this, encoding);
+    } catch (e) {
+      // The native context is spent; a later final() is an invalid state.
+      this._finalized = true;
+      throw e;
+    }
+    return this._decoder!;
+  };
 
   if (this._isAesWrap) {
+    const dec = encoding === "buffer" ? undefined : decoder();
     this._finalized = true;
-    return encoding === "buffer" ? Buffer.from([]) : this._decoder!.end();
+    return dec === undefined ? Buffer.from([]) : dec.end();
   }
 
   if (this._ocbChunks !== undefined) {
@@ -718,7 +737,7 @@ Decipheriv.prototype.final = function (
         "error:1C800064:Provider routines::bad decrypt",
       );
     }
-    return encoding === "buffer" ? output : this._decoder!.end(output);
+    return encoding === "buffer" ? output : decoder().end(output);
   }
 
   const bs = this._blockSize;
@@ -735,8 +754,9 @@ Decipheriv.prototype.final = function (
     !this._needsBlockCache ||
     TypedArrayPrototypeGetByteLength(this._cache.cache) === 0
   ) {
+    const dec = encoding === "buffer" ? undefined : decoder();
     this._finalized = true;
-    return encoding === "buffer" ? Buffer.from([]) : this._decoder!.end();
+    return dec === undefined ? Buffer.from([]) : dec.end();
   }
   if (TypedArrayPrototypeGetByteLength(this._cache.cache) != bs) {
     throw opensslError(
@@ -755,9 +775,10 @@ Decipheriv.prototype.final = function (
     }
     buf = buf.subarray(0, bs - padLen); // Padded in Pkcs7 mode
   }
+  const dec = encoding === "buffer" ? undefined : decoder();
   this._finalized = true;
-  if (encoding !== "buffer") {
-    return this._decoder!.end(buf);
+  if (dec !== undefined) {
+    return dec.end(buf);
   }
 
   return buf;

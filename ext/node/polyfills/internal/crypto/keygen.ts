@@ -56,6 +56,8 @@ const {
   op_node_generate_ec_key_async,
   op_node_generate_ed25519_key,
   op_node_generate_ed25519_key_async,
+  op_node_generate_pqc_key,
+  op_node_generate_pqc_key_async,
   op_node_generate_ed448_key,
   op_node_generate_ed448_key_async,
   op_node_generate_rsa_key,
@@ -223,6 +225,11 @@ function parseKeyFormat(
     return "der";
   } else if (formatStr === "jwk") {
     return "jwk";
+  } else if (
+    formatStr === "raw-public" || formatStr === "raw-private" ||
+    formatStr === "raw-seed"
+  ) {
+    return formatStr;
   }
   throw new ERR_INVALID_ARG_VALUE(optionName, formatStr);
 }
@@ -289,6 +296,35 @@ function parseKeyFormatAndType(
     option("format", objName),
   );
 
+  if (
+    format === "raw-public" || format === "raw-private" || format === "raw-seed"
+  ) {
+    if ((format === "raw-public") !== (isPublic !== false)) {
+      throw new ERR_INVALID_ARG_VALUE(option("format", objName), format);
+    }
+    if (
+      keyType === "rsa" || keyType === "rsa-pss" || keyType === "dsa" ||
+      keyType === "dh"
+    ) {
+      throw new ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(
+        format,
+        `can not be used for ${keyType} keys`,
+      );
+    }
+    const isPqc = typeof keyType === "string" &&
+      (keyType.startsWith("ml-dsa-") || keyType.startsWith("ml-kem-"));
+    if (
+      (format === "raw-private" && isPqc) ||
+      (format === "raw-seed" && !isPqc)
+    ) {
+      throw new ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(
+        format,
+        `can not be used for ${keyType} keys`,
+      );
+    }
+    return { format, type: typeStr };
+  }
+
   const isRequired = (!isInput || format === "der") && format !== "jwk";
   const type = parseKeyType(
     typeStr,
@@ -327,6 +363,16 @@ function parsePrivateKeyEncoding(
   const { format, type } = parseKeyFormatAndType(enc, keyType, false, objName);
 
   const { cipher, passphrase } = enc;
+
+  if (
+    (format === "raw-private" || format === "raw-seed") &&
+    (cipher !== undefined || passphrase !== undefined)
+  ) {
+    throw new ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(
+      format,
+      "does not support encryption",
+    );
+  }
 
   if (cipher != null) {
     if (typeof cipher !== "string") {
@@ -620,6 +666,16 @@ function createJob(mode, type, options) {
           g,
         );
       }
+    }
+    case "ml-dsa-44":
+    case "ml-dsa-65":
+    case "ml-dsa-87":
+    case "ml-kem-768":
+    case "ml-kem-1024": {
+      if (mode === kSync) {
+        return op_node_generate_pqc_key(type);
+      }
+      return op_node_generate_pqc_key_async(type);
     }
     default:
       // Fall through

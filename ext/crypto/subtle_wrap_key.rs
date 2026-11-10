@@ -132,14 +132,10 @@ pub fn run_wrap_key(
   wrap_params: WrapParams,
 ) -> Result<Vec<u8>, CryptoError> {
   if wrapping_algorithm_name != wrapping_key.algorithm_name {
-    return Err(invalid_access(
-      "Wrapping algorithm does not match key algorithm".into(),
-    ));
+    return Err(invalid_access("Key algorithm mismatch".into()));
   }
   if !wrapping_key.has_usage("wrapKey") {
-    return Err(invalid_access(
-      "The requested operation is not valid for the provided key".into(),
-    ));
+    return Err(invalid_access("Unable to use this key to wrapKey".into()));
   }
   if !key.extractable {
     return Err(invalid_access("Key is not extractable".into()));
@@ -193,14 +189,10 @@ pub fn run_unwrap_key<'s>(
   usages: Vec<String>,
 ) -> Result<v8::Local<'s, v8::Object>, CryptoError> {
   if unwrapping_algorithm_name != unwrapping_key.algorithm_name {
-    return Err(invalid_access(
-      "Unwrapping algorithm does not match key algorithm".into(),
-    ));
+    return Err(invalid_access("Key algorithm mismatch".into()));
   }
   if !unwrapping_key.has_usage("unwrapKey") {
-    return Err(invalid_access(
-      "The requested operation is not valid for the provided key".into(),
-    ));
+    return Err(invalid_access("Unable to use this key to unwrapKey".into()));
   }
   let plain_bytes = match unwrap_params {
     UnwrapParams::AesKw => aes_kw_unwrap(&unwrapping_key, &wrapped_bytes)?,

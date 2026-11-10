@@ -44,6 +44,7 @@ ed25519-dalek = { workspace = true, features = ["digest", "pkcs8", "rand_core", 
 ed448-goldilocks = { workspace = true }
 elliptic-curve.workspace = true
 faster-hex.workspace = true
+fips203 = { workspace = true, features = ["ml-kem-768", "ml-kem-1024"] }
 hkdf.workspace = true
 hmac.workspace = true
 k256.workspace = true
@@ -61,7 +62,7 @@ p256.workspace = true
 p384.workspace = true
 p521.workspace = true
 pbkdf2.workspace = true
-pkcs8 = { workspace = true, features = ["std", "pkcs5", "encryption", "pem"] }
+pkcs8 = { workspace = true, features = ["std", "pkcs5", "encryption", "pem", "3des"] }
 rand.workspace = true
 ripemd = { workspace = true, features = ["oid"] }
 rsa.workspace = true

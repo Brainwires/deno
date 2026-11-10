@@ -20,6 +20,7 @@ const {
   ReflectHas,
   StringFromCharCode,
   StringPrototypeIncludes,
+  StringPrototypeStartsWith,
   StringPrototypeToLowerCase,
   SymbolSpecies,
   TypeError,
@@ -39,9 +40,13 @@ const {
   op_node_sign,
   op_node_sign_ed25519,
   op_node_sign_ed448,
+  op_node_sign_pqc,
+  op_node_encapsulate,
+  op_node_decapsulate,
   op_node_verify,
   op_node_verify_ed25519,
   op_node_verify_ed448,
+  op_node_verify_pqc,
 } = core.ops;
 
 const {
@@ -366,6 +371,26 @@ function validateUnsupportedContext(key: any) {
   }
 }
 
+// ML-DSA signs the message itself (and ML-KEM does not sign); Node's
+// BoringSSL build refuses a digest for both.
+function isPqcKeyType(keyType: string): boolean {
+  return StringPrototypeStartsWith(keyType, "ml-dsa-") ||
+    StringPrototypeStartsWith(keyType, "ml-kem-");
+}
+
+function pqcDigestError(): Error {
+  const err = new Error(
+    "error:06000079:public key routines:OPENSSL_internal:COMMAND_NOT_SUPPORTED",
+  );
+  // @ts-ignore Node attaches the OpenSSL code
+  err.code = "ERR_OSSL_EVP_COMMAND_NOT_SUPPORTED";
+  return err;
+}
+
+function toBytes(data: ArrayBufferView | string): ArrayBufferView {
+  return typeof data === "string" ? Buffer.from(data) : data;
+}
+
 function signOneShot(
   algorithm: string | null | undefined,
   data: ArrayBufferView,
@@ -458,6 +483,11 @@ function signOneShot(
       }
       result = new FastBuffer(114);
       op_node_sign_ed448(handle, dataBytes, result);
+    } else if (isPqcKeyType(keyType)) {
+      if (algorithm != null) {
+        throw pqcDigestError();
+      }
+      result = Buffer.from(op_node_sign_pqc(handle, toBytes(dataBytes)));
     } else {
       let digest = algorithm;
       if (digest == null) {
@@ -490,7 +520,8 @@ function signOneShot(
     }
   } catch (err) {
     if (callback) {
-      setTimeout(() => callback(err, Buffer.alloc(0)));
+      // Node reports a failed job with the error alone.
+      setTimeout(() => callback(err));
     } else {
       throw err;
     }
@@ -613,6 +644,15 @@ function verifyOneShot(
         throw new TypeError("Context parameter is unsupported");
       }
       result = op_node_verify_ed448(handle, dataBytes, signatureBytes);
+    } else if (isPqcKeyType(keyType)) {
+      if (algorithm != null) {
+        throw pqcDigestError();
+      }
+      result = op_node_verify_pqc(
+        handle,
+        toBytes(dataBytes),
+        toBytes(signatureBytes),
+      );
     } else if (
       keyType === "x25519" || keyType === "x448" || keyType === "dh"
     ) {
@@ -649,14 +689,115 @@ function verifyOneShot(
     }
   } catch (err) {
     if (callback) {
-      setTimeout(() => callback(err, false));
+      setTimeout(() => callback(err));
     } else {
       throw err;
     }
   }
 }
 
+function publicHandleFor(key: any) {
+  const res = prepareAsymmetricKey(key, kConsumePublic);
+  if (ReflectHas(res, "handle")) {
+    return res.handle;
+  }
+  if (
+    isPrivateKeyType(res.type) ||
+    (res.type === undefined && isPrivateKeyPem(res.data))
+  ) {
+    return op_node_derive_public_key_from_private_key(
+      op_node_create_private_key(
+        res.data,
+        res.format,
+        res.type ?? "",
+        res.passphrase,
+      ),
+    );
+  }
+  return op_node_create_public_key(
+    res.data,
+    res.format,
+    res.type ?? "",
+    res.passphrase,
+  );
+}
+
+function privateHandleFor(key: any) {
+  const res = prepareAsymmetricKey(key, kConsumePrivate);
+  if (ReflectHas(res, "handle")) {
+    return res.handle;
+  }
+  return op_node_create_private_key(
+    res.data,
+    res.format,
+    res.type ?? "",
+    res.passphrase,
+  );
+}
+
+// Errors from the key preparation are thrown even with a callback, as Node
+// does; only the KEM operation itself reports through the callback.
+function encapsulate(
+  key: any,
+  callback?: (
+    err: Error | null,
+    result?: { sharedKey: Buffer; ciphertext: Buffer },
+  ) => void,
+) {
+  if (callback !== undefined) {
+    validateFunction(callback, "callback");
+  }
+  const handle = publicHandleFor(key);
+  let result;
+  try {
+    const out = op_node_encapsulate(handle);
+    result = {
+      sharedKey: Buffer.from(out.sharedKey),
+      ciphertext: Buffer.from(out.ciphertext),
+    };
+  } catch (err) {
+    if (callback === undefined) throw err;
+    setTimeout(() => callback(err as Error));
+    return;
+  }
+  if (callback === undefined) return result;
+  setTimeout(() => callback(null, result));
+}
+
+function decapsulate(
+  key: any,
+  ciphertext: any,
+  callback?: (err: Error | null, sharedKey?: Buffer) => void,
+) {
+  if (callback !== undefined) {
+    validateFunction(callback, "callback");
+  }
+  const handle = privateHandleFor(key);
+  if (!ArrayBufferIsView(ciphertext) && !isAnyArrayBuffer(ciphertext)) {
+    throw new ERR_INVALID_ARG_TYPE(
+      "ciphertext",
+      ["ArrayBuffer", "Buffer", "TypedArray", "DataView"],
+      ciphertext,
+    );
+  }
+  const bytes = isAnyArrayBuffer(ciphertext)
+    ? new Uint8Array(ciphertext)
+    : ciphertext;
+  let sharedKey;
+  try {
+    sharedKey = Buffer.from(op_node_decapsulate(handle, bytes));
+  } catch (err) {
+    if (callback === undefined) throw err;
+    setTimeout(() => callback(err as Error));
+    return;
+  }
+  if (callback === undefined) return sharedKey;
+  setTimeout(() => callback(null, sharedKey));
+}
+
 return {
+  encapsulate,
+  decapsulate,
   signOneShot,
   verifyOneShot,
   Sign,
@@ -664,6 +805,8 @@ return {
   SignImpl,
   VerifyImpl,
   default: {
+    encapsulate,
+    decapsulate,
     signOneShot,
     verifyOneShot,
     Sign,

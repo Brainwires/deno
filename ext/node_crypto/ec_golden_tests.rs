@@ -358,7 +358,7 @@ fn private_handle(v: &Vector) -> KeyObjectHandle {
     "ec",
     Some(v.curve),
     &hex(v.d_a),
-    false,
+    "raw-private",
   )
   .unwrap()
 }
@@ -511,7 +511,7 @@ fn ec_golden_import() {
         "ec",
         Some(v.curve),
         &hex(point),
-        true,
+        "raw-public",
       )
       .unwrap();
       assert!(from_raw == public, "{} raw point import", v.curve);
@@ -849,9 +849,8 @@ fn sample_digest(name: &str) -> Vec<u8> {
   }
 }
 
-/// Every digest with every curve: the same signatures, and the same
-/// refusals for a digest shorter than half the field (ecdsa 0.17 would
-/// accept those; the crate keeps refusing them).
+/// Every digest with every curve: the same signatures, and a digest shorter
+/// than half the field signs and verifies (randomized), as in OpenSSL.
 #[test]
 fn ec_golden_ecdsa_cross_hash() {
   for v in VECTORS {
@@ -865,15 +864,17 @@ fn ec_golden_ecdsa_cross_hash() {
       let signature = private.sign_prehashed(name, &digest, None, None, 1);
       match expected {
         Some((_, _, None)) => {
+          // A digest shorter than half the field: ecdsa 0.16 refused it;
+          // OpenSSL (and so Node) signs and verifies it, randomized here.
+          let signature = signature.unwrap();
           assert!(
-            matches!(
-              signature,
-              Err(crate::sign::KeyObjectHandlePrehashedSignAndVerifyError::FailedToSignDigest)
-            ),
-            "{} {name} must be refused",
+            public
+              .verify_prehashed(name, &digest, &signature, None, None, 1)
+              .unwrap(),
+            "{} {name} verify",
             v.curve
           );
-          // ...and a signature over it never verifies.
+          // ...and the vector's signature over another digest never does.
           assert!(
             !public
               .verify_prehashed(name, &digest, &hex(v.sig_p1363), None, None, 1)
@@ -906,7 +907,7 @@ fn ec_golden_rfc6979_p256_published_vector() {
     "ec",
     Some("prime256v1"),
     &hex("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721"),
-    false,
+    "raw-private",
   )
   .unwrap();
   let digest =

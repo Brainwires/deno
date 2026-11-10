@@ -217,9 +217,6 @@ pub enum CryptoError {
   #[class("DOMExceptionOperationError")]
   #[error("decryption error - integrity check failed")]
   DecryptionError,
-  #[class("DOMExceptionOperationError")]
-  #[error("Invalid XOF parameters")]
-  InvalidXofParameters,
   #[class("DOMExceptionQuotaExceededError")]
   #[error(
     "The ArrayBufferView's byte length ({0}) exceeds the number of bytes of entropy available via this API (65536)"
@@ -314,13 +311,14 @@ impl SignArg {
 /// Whether ECDSA accepts `prehash` for a curve whose field elements are
 /// `field_len` bytes. ecdsa 0.16 (elliptic-curve 0.13) refused a prehash
 /// shorter than half the field (P-384 with SHA-1 failed to sign and never
-/// verified); ecdsa 0.17 accepts any length. The old rule is kept so
-/// WebCrypto behaves exactly as before.
-fn ecdsa_prehash_len_ok(field_len: usize, prehash: &[u8]) -> bool {
-  prehash.len() >= field_len / 2
+/// verified). WebCrypto puts no such limit on ECDSA and other engines sign
+/// and verify those pairs, as ecdsa 0.17 does; only an empty prehash is
+/// refused.
+fn ecdsa_prehash_len_ok(_field_len: usize, prehash: &[u8]) -> bool {
+  !prehash.is_empty()
 }
 
-/// `sign_prehash`, refusing what ecdsa 0.16 refused (see
+/// `sign_prehash`, refusing an empty prehash (see
 /// [`ecdsa_prehash_len_ok`]).
 fn ecdsa_sign_prehash<K, S>(
   signing_key: &K,

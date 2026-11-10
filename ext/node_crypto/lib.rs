@@ -45,14 +45,17 @@ use rsa::pkcs8::DecodePublicKey;
 use rsa::traits::PublicKeyParts;
 
 pub mod argon2_kdf;
+pub mod brainpool;
 pub mod cipher;
 mod cipher_legacy;
 pub(crate) mod dh;
 pub mod digest;
 pub mod jwk_ec;
+pub mod kem;
 pub mod keys;
 pub(crate) mod md5_sha1;
 pub(crate) mod pkcs3;
+pub mod pqc;
 pub(crate) mod primes;
 pub mod sign;
 pub mod x509;
@@ -126,6 +129,13 @@ deno_core::extension!(
     keys::op_node_create_private_key,
     keys::op_node_create_ed_raw,
     keys::op_node_create_raw_asymmetric_key,
+    keys::op_node_create_akp_jwk,
+    kem::op_node_encapsulate,
+    kem::op_node_decapsulate,
+    kem::op_node_sign_pqc,
+    kem::op_node_verify_pqc,
+    keys::op_node_generate_pqc_key,
+    keys::op_node_generate_pqc_key_async,
     keys::op_node_create_rsa_jwk,
     keys::op_node_create_ec_jwk,
     keys::op_node_create_public_key,
@@ -1298,6 +1308,13 @@ pub(crate) fn ecdh_encode_pubkey(
 
       Ok(pubkey.to_sec1_point(compress).as_ref().to_vec().into())
     }
+    "brainpoolP512r1" => brainpool::convert_point(
+      brainpool::BrainpoolCurve::P512r1,
+      pubkey,
+      compress,
+    )
+    .map(Into::into)
+    .ok_or(EcdhEncodePubKey::InvalidPublicKey),
     "brainpoolP384r1" => {
       let pubkey = elliptic_curve::PublicKey::<bp384::BrainpoolP384r1>::from_sec1_point(
         &elliptic_curve::sec1::Sec1Point::<bp384::BrainpoolP384r1>::from_bytes(pubkey)
@@ -1382,6 +1399,16 @@ pub fn op_node_ecdh_generate_keys(
       let pubkey = privkey.public_key();
       pubbuf.copy_from_slice(pubkey.to_sec1_point(compress).as_ref());
       privbuf.copy_from_slice(privkey.to_nonzero_scalar().to_bytes().as_ref());
+
+      Ok(())
+    }
+    "brainpoolP512r1" => {
+      let privkey = brainpool::BrainpoolPrivateKey::generate(
+        brainpool::BrainpoolCurve::P512r1,
+      )
+      .ok_or_else(|| JsErrorBox::generic("key generation failed"))?;
+      pubbuf.copy_from_slice(&privkey.to_public_key().to_sec1(compress));
+      privbuf.copy_from_slice(&privkey.d);
 
       Ok(())
     }
@@ -1554,6 +1581,26 @@ pub(crate) fn ecdh_compute_secret(
       );
       secret.copy_from_slice(shared_secret.raw_secret_bytes());
     }
+    "brainpoolP512r1" => {
+      let curve = brainpool::BrainpoolCurve::P512r1;
+      let this_private_key =
+        brainpool::BrainpoolPrivateKey::from_scalar(curve, this_priv)
+          .ok_or(EcdhError::InvalidPrivateKey)?;
+      if brainpool::BrainpoolPublicKey::from_sec1(curve, their_pub).is_none() {
+        return Err(EcdhError::InvalidPublicKey);
+      }
+      if let Some(this_pub) = this_pub {
+        let stored = brainpool::BrainpoolPublicKey::from_sec1(curve, this_pub)
+          .ok_or(EcdhError::InvalidKeyPair)?;
+        if stored.point != this_private_key.public {
+          return Err(EcdhError::InvalidKeyPair);
+        }
+      }
+      let shared_secret = this_private_key
+        .diffie_hellman(their_pub)
+        .ok_or(EcdhError::InvalidPublicKey)?;
+      secret.copy_from_slice(&shared_secret);
+    }
     "brainpoolP384r1" => {
       let their_public_key =
         elliptic_curve::PublicKey::<bp384::BrainpoolP384r1>::from_sec1_bytes(
@@ -1678,6 +1725,14 @@ pub(crate) fn ecdh_compute_public_key(
       let public_key = this_private_key.public_key();
       pubkey.copy_from_slice(public_key.to_sec1_point(false).as_ref());
     }
+    "brainpoolP512r1" => {
+      let key = brainpool::BrainpoolPrivateKey::from_scalar(
+        brainpool::BrainpoolCurve::P512r1,
+        privkey,
+      )
+      .ok_or(EcdhError::InvalidPrivateKey)?;
+      pubkey.copy_from_slice(&key.public);
+    }
     "brainpoolP384r1" => {
       let this_private_key =
         elliptic_curve::SecretKey::<bp384::BrainpoolP384r1>::from_slice(
@@ -1725,6 +1780,11 @@ pub fn op_node_ecdh_validate_private_key(
       elliptic_curve::SecretKey::<bp256::BrainpoolP256r1>::from_slice(privkey)
         .is_ok()
     }
+    "brainpoolP512r1" => brainpool::BrainpoolPrivateKey::from_scalar(
+      brainpool::BrainpoolCurve::P512r1,
+      privkey,
+    )
+    .is_some(),
     "brainpoolP384r1" => {
       elliptic_curve::SecretKey::<bp384::BrainpoolP384r1>::from_slice(privkey)
         .is_ok()
@@ -1788,6 +1848,11 @@ pub fn op_node_ecdh_validate_public_key(
         );
       bool::from(pk.is_some())
     }
+    "brainpoolP512r1" => brainpool::BrainpoolPublicKey::from_sec1(
+      brainpool::BrainpoolCurve::P512r1,
+      pubkey,
+    )
+    .is_some(),
     "brainpoolP384r1" => {
       let Ok(point) =
         elliptic_curve::sec1::Sec1Point::<bp384::BrainpoolP384r1>::from_bytes(
@@ -2012,6 +2077,13 @@ pub fn op_node_diffie_hellman(
     .raw_secret_bytes()
     .to_vec()
     .into_boxed_slice(),
+    (
+      AsymmetricPrivateKey::Ec(EcPrivateKey::Brainpool(private)),
+      AsymmetricPublicKey::Ec(EcPublicKey::Brainpool(public)),
+    ) if private.curve == public.curve => private
+      .diffie_hellman(&public.point)
+      .ok_or(DiffieHellmanError::FailedDuringDerivation)?
+      .into_boxed_slice(),
     (AsymmetricPrivateKey::Ec(_), AsymmetricPublicKey::Ec(_)) => {
       // Both EC keys but on different curves.
       return Err(DiffieHellmanError::MismatchingDomainParameters);

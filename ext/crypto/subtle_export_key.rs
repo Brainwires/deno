@@ -55,6 +55,22 @@ pub enum KeyFormat {
   Jwk,
 }
 
+impl KeyFormat {
+  /// The spec's (and Node's) name for the format.
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Raw => "raw",
+      Self::RawSecret => "raw-secret",
+      Self::RawPublic => "raw-public",
+      Self::RawPrivate => "raw-private",
+      Self::RawSeed => "raw-seed",
+      Self::Spki => "spki",
+      Self::Pkcs8 => "pkcs8",
+      Self::Jwk => "jwk",
+    }
+  }
+}
+
 impl<'a> WebIdlConverter<'a> for KeyFormat {
   type Options = ();
 

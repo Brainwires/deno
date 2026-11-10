@@ -412,15 +412,10 @@ pub fn run(
   data: Vec<u8>,
 ) -> Result<Vec<u8>, CryptoError> {
   if params.canonical_name() != key.algorithm_name {
-    return Err(invalid_access(format!(
-      "Signing algorithm '{}' does not match key algorithm",
-      params.canonical_name()
-    )));
+    return Err(invalid_access("Key algorithm mismatch".to_string()));
   }
   if !key.has_usage("sign") {
-    return Err(invalid_access(
-      "The requested operation is not valid for the provided key".to_string(),
-    ));
+    return Err(invalid_access("Unable to use this key to sign".to_string()));
   }
 
   match params {
@@ -462,7 +457,7 @@ pub fn run(
       // ECDSA `bad hash name` WPT cases.
       let hash =
         crate::subtle_generate_key::sha_from_name(&hash).ok_or_else(|| {
-          not_supported(format!("Unrecognized hash algorithm: {hash}"))
+          not_supported("Unrecognized algorithm name".to_string())
         })?;
       if key.key_type != CryptoKeyType::Private {
         return Err(invalid_access("Key type not supported".to_string()));

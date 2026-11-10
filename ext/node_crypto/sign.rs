@@ -52,10 +52,11 @@ where
 /// Whether ECDSA accepts `prehash` for a curve whose field elements are
 /// `field_len` bytes. ecdsa 0.16 (elliptic-curve 0.13) refused a prehash
 /// shorter than half the field (so P-384 with SHA-1, or P-521 with SHA-256,
-/// failed to sign and never verified); ecdsa 0.17 accepts any length. The
-/// old rule is kept so signing and verification behave exactly as before.
-pub(crate) fn ecdsa_prehash_len_ok(field_len: usize, prehash: &[u8]) -> bool {
-  prehash.len() >= field_len / 2
+/// failed to sign and never verified). OpenSSL, and so Node, takes any
+/// digest length (FIPS 186-5 truncates or left-pads it), as ecdsa 0.17 does;
+/// only an empty prehash is refused.
+pub(crate) fn ecdsa_prehash_len_ok(_field_len: usize, prehash: &[u8]) -> bool {
+  !prehash.is_empty()
 }
 
 /// Field element size in bytes of an EC key's curve.
@@ -65,6 +66,7 @@ fn ec_field_len(key: &EcPublicKey) -> usize {
     EcPublicKey::P256(_) | EcPublicKey::Secp256k1(_) => 32,
     EcPublicKey::P384(_) => 48,
     EcPublicKey::P521(_) => 66,
+    EcPublicKey::Brainpool(key) => key.curve.field_len(),
   }
 }
 
@@ -75,6 +77,7 @@ fn ec_private_field_len(key: &EcPrivateKey) -> usize {
     EcPrivateKey::P256(_) | EcPrivateKey::Secp256k1(_) => 32,
     EcPrivateKey::P384(_) => 48,
     EcPrivateKey::P521(_) => 66,
+    EcPrivateKey::Brainpool(key) => key.curve.field_len(),
   }
 }
 
@@ -109,6 +112,13 @@ fn dsa_sig_from_p1363(bytes: &[u8], q_len: usize) -> Option<dsa::Signature> {
 pub enum KeyObjectHandlePrehashedSignAndVerifyError {
   #[error("invalid DSA signature encoding")]
   InvalidDsaSignatureEncoding,
+  /// ML-DSA / ML-KEM keys with a digest, as BoringSSL reports it.
+  #[class(generic)]
+  #[property("code" = "ERR_OSSL_EVP_COMMAND_NOT_SUPPORTED")]
+  #[error(
+    "error:06000079:public key routines:OPENSSL_internal:COMMAND_NOT_SUPPORTED"
+  )]
+  PqcDigestNotSupported,
   #[error("key is not a private key")]
   KeyIsNotPrivate,
   #[error("digest not allowed for RSA signature: {0}")]
@@ -518,6 +528,18 @@ impl KeyObjectHandle {
 
           dsa_signature(dsa_signature_encoding, signature)
         }
+        EcPrivateKey::Brainpool(key) => {
+          let der = key
+            .sign_digest(digest)
+            .ok_or(KeyObjectHandlePrehashedSignAndVerifyError::FailedToSignDigest)?;
+          match dsa_signature_encoding {
+            0 => Ok(der.into_boxed_slice()),
+            1 => crate::brainpool::der_signature_to_p1363(&der, key.curve.field_len())
+              .map(Vec::into_boxed_slice)
+              .ok_or(KeyObjectHandlePrehashedSignAndVerifyError::FailedToSignDigest),
+            _ => Err(KeyObjectHandlePrehashedSignAndVerifyError::InvalidDsaSignatureEncoding),
+          }
+        }
       },
       AsymmetricPrivateKey::X25519(_) | AsymmetricPrivateKey::X448(_) => {
         Err(KeyObjectHandlePrehashedSignAndVerifyError::X25519KeyCannotBeUsedForSigning)
@@ -525,6 +547,9 @@ impl KeyObjectHandle {
       AsymmetricPrivateKey::Ed25519(_) | AsymmetricPrivateKey::Ed448(_) => Err(KeyObjectHandlePrehashedSignAndVerifyError::Ed25519KeyCannotBeUsedForPrehashedSigning),
       AsymmetricPrivateKey::Dh(_) => {
         Err(KeyObjectHandlePrehashedSignAndVerifyError::DhKeyCannotBeUsedForSigning)
+      }
+      AsymmetricPrivateKey::Pqc(_) => {
+        Err(KeyObjectHandlePrehashedSignAndVerifyError::PqcDigestNotSupported)
       }
     }
   }
@@ -712,6 +737,20 @@ impl KeyObjectHandle {
           };
           Ok(verifying_key.verify_prehash(digest, &signature).is_ok())
         }
+        EcPublicKey::Brainpool(key) => {
+          let der = if dsa_signature_encoding == 0 {
+            signature.to_vec()
+          } else {
+            match crate::brainpool::p1363_signature_to_der(
+              signature,
+              key.curve.field_len(),
+            ) {
+              Some(der) => der,
+              None => return Ok(false),
+            }
+          };
+          Ok(key.verify_digest(digest, &der))
+        }
       },
       AsymmetricPublicKey::X25519(_) | AsymmetricPublicKey::X448(_) => {
         Err(KeyObjectHandlePrehashedSignAndVerifyError::X25519KeyCannotBeUsedForVerification)
@@ -719,6 +758,9 @@ impl KeyObjectHandle {
       AsymmetricPublicKey::Ed25519(_) | AsymmetricPublicKey::Ed448(_) => Err(KeyObjectHandlePrehashedSignAndVerifyError::Ed25519KeyCannotBeUsedForPrehashedVerification),
       AsymmetricPublicKey::Dh(_) => {
         Err(KeyObjectHandlePrehashedSignAndVerifyError::DhKeyCannotBeUsedForVerification)
+      }
+      AsymmetricPublicKey::Pqc(_) => {
+        Err(KeyObjectHandlePrehashedSignAndVerifyError::PqcDigestNotSupported)
       }
     }
   }
