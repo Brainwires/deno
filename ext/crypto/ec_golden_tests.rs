@@ -490,9 +490,9 @@ const CROSS_HASH: &[(EcNamedCurve, CryptoHash, Option<&str>)] = &[
   ),
 ];
 
-/// Every hash with every curve: the same signatures, and the same refusal
-/// of SHA-1 with P-384 (ecdsa 0.17 would accept it; the crate keeps
-/// refusing it).
+/// Every hash with every curve: the same signatures. SHA-1 with P-384, a
+/// digest shorter than half the field, signs and verifies as in OpenSSL (and
+/// so Node); that signature is randomized, so it is checked by verifying it.
 #[test]
 fn ec_golden_ecdsa_cross_hash() {
   let public = |v: &Vector| RawKeyData::Public(hex(v.pub_uncompressed).into());
@@ -508,7 +508,9 @@ fn ec_golden_ecdsa_cross_hash() {
         .find(|(curve, h, _)| *curve == v.curve && *h == hash);
       match expected {
         Some((_, _, None)) => {
-          assert!(sign(v, hash).is_err());
+          let signature = sign(v, hash).unwrap();
+          assert!(verify(v, &public(v), hash, &signature, b"sample"));
+          // Not the SHA-256 vector's signature: the digest really differs.
           assert!(!verify(v, &public(v), hash, &hex(v.sig_p1363), b"sample"));
         }
         Some((_, _, Some(expected))) => {

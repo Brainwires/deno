@@ -3149,6 +3149,9 @@ interface UvExceptionContext {
 }
 
 const kNotCapableMessage = new SafeRegExp(/^Requires (\w+) access to "(.*)"/);
+const kNotCapableRunEnvMessage = new SafeRegExp(
+  "^Requires --allow-run permissions to spawn subprocess with ",
+);
 const kNodePermissionScopes = {
   __proto__: null,
   read: "FileSystemRead",
@@ -3172,7 +3175,14 @@ function decorateNotCapableError(e: Error, ctx: UvExceptionContext) {
   // deno-lint-ignore no-explicit-any
   const ex: any = e;
   ex.code = "ERR_ACCESS_DENIED";
-  const permission = match ? kNodePermissionScopes[match[1]] : undefined;
+  // A spawn refused for its environment (`LD_*` / `DYLD_*` variables) reads
+  // "Requires --allow-run permissions to spawn subprocess with ...": still
+  // the run permission, Node's `ChildProcess`.
+  const permission = match
+    ? kNodePermissionScopes[match[1]]
+    : RegExpPrototypeTest(kNotCapableRunEnvMessage, e.message)
+    ? "ChildProcess"
+    : undefined;
   if (permission !== undefined) {
     ex.permission = permission;
   }

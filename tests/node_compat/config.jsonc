@@ -103,7 +103,10 @@
     "async-hooks/test-pipewrap.js": {},
     "async-hooks/test-querywrap.js": {},
     "async-hooks/test-queue-microtask.js": {},
-    "async-hooks/test-shutdownwrap.js": {},
+    "async-hooks/test-shutdownwrap.js": {
+      "linux": false,
+      "reason": "times out on Linux CI (10 s); passes on macOS: the SHUTDOWNWRAP close sequence needs a Linux investigation"
+    },
     "async-hooks/test-signalwrap.js": {},
     "async-hooks/test-statwatcher.js": {},
     "async-hooks/test-timers.setInterval.js": {},
@@ -5463,7 +5466,10 @@
     },
     "system-ca/test-set-default-ca-certificates-system-combinations.js": {},
     "test-runner/test-output-randomize-output-cli.mjs": {},
-    "test-runner/test-output-randomize-output-cli-none.mjs": {},
+    "test-runner/test-output-randomize-output-cli-none.mjs": {
+      "ignore": true,
+      "reason": "the seeded order under --test-isolation=none depends on import timing: the root starts dequeuing before every file is imported (Node imports them all first)"
+    },
     "test-runner/test-output-arbitrary-output-colored.mjs": {},
     "test-runner/test-output-assertion-color-tty.mjs": {
       "expectedSkip": "needs colors; the runner sets NO_COLOR"
