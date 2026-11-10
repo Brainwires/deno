@@ -105,22 +105,27 @@ function randomBytes(
 
     const process = lazyProcess().default;
     process.nextTick(() => {
-      emitBefore(asyncId);
+      emitBefore(asyncId, triggerAsyncId, resource);
       try {
-        if (err) {
-          cb(err);
-        } else {
-          cb(null, bytes);
+        try {
+          if (err) {
+            cb(err);
+          } else {
+            cb(null, bytes);
+          }
+        } catch (callbackErr) {
+          // If there's an active domain, emit error to it
+          if (process.domain && process.domain.listenerCount("error") > 0) {
+            process.domain.emit("error", callbackErr);
+          } else {
+            // As Node's MakeCallback: the uncaught exception is handled while
+            // the request is still the current resource; its `after` is
+            // emitted once that is done (process._fatalException).
+            throw callbackErr;
+          }
         }
-      } catch (callbackErr) {
-        // If there's an active domain, emit error to it
-        if (process.domain && process.domain.listenerCount("error") > 0) {
-          process.domain.emit("error", callbackErr);
-        } else {
-          throw callbackErr;
-        }
-      } finally {
         emitAfter(asyncId);
+      } finally {
         emitDestroy(asyncId);
       }
     });

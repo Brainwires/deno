@@ -23,9 +23,12 @@ const {
   ArrayPrototypeSplice,
   Error,
   ErrorCaptureStackTrace,
+  String,
   FunctionPrototypeApply,
+  ObjectDefineProperty,
   ObjectKeys,
   ObjectPrototypeHasOwnProperty,
+  StringPrototypeStartsWith,
   Symbol,
 } = primordials;
 const {
@@ -75,6 +78,7 @@ const active_hooks: ActiveHooks = {
   tmp_fields: null,
 };
 
+const lazyProcess = core.createLazyLoader("node:process");
 const registerDestroyHook = async_wrap.registerDestroyHook;
 const {
   async_hook_fields,
@@ -99,12 +103,23 @@ function triggerAsyncId(): number {
   return async_id_fields[UidFields.kTriggerAsyncId];
 }
 
-function pushAsyncContext(asyncId: number, triggerAsyncId: number) {
+// The resource of each entered callback, as Node's execution_async_resources
+// stack: executionAsyncResource() is the resource of executionAsyncId().
+const resourcesStack: unknown[] = [];
+let currentResource: unknown = undefined;
+
+function pushAsyncContext(
+  asyncId: number,
+  triggerAsyncId: number,
+  resource?: unknown,
+) {
   ArrayPrototypePush(
     asyncIdsStack,
     async_id_fields[UidFields.kExecutionAsyncId],
     async_id_fields[UidFields.kTriggerAsyncId],
   );
+  ArrayPrototypePush(resourcesStack, currentResource);
+  currentResource = resource;
   async_hook_fields[kStackLength] = asyncIdsStack.length / 2;
   async_id_fields[UidFields.kExecutionAsyncId] = asyncId;
   async_id_fields[UidFields.kTriggerAsyncId] = triggerAsyncId;
@@ -118,6 +133,7 @@ function popAsyncContext(): boolean {
   async_id_fields[UidFields.kExecutionAsyncId] = ArrayPrototypePop(
     asyncIdsStack,
   )!;
+  currentResource = ArrayPrototypePop(resourcesStack);
   async_hook_fields[kStackLength] = asyncIdsStack.length / 2;
   return asyncIdsStack.length > 0;
 }
@@ -133,6 +149,9 @@ const executionResourceVariable: any = new AsyncVariable();
 
 // deno-lint-ignore no-explicit-any
 function executionAsyncResource(): any {
+  if (currentResource !== undefined && asyncIdsStack.length > 0) {
+    return lookupPublicResource(currentResource);
+  }
   const r = executionResourceVariable.get();
   return r === undefined ? topLevelResource : r;
 }
@@ -228,16 +247,109 @@ function enterNativeCallback(
   return prior;
 }
 
+// `threw`: the callback threw. As after MakeCallback, the `after` hook then
+// waits for the uncaught exception to be handled (afterUncaughtException()),
+// so the handler still runs as the callback's resource (a domain's
+// uncaught-exception handler needs that).
 function exitNativeCallback(
   // deno-lint-ignore no-explicit-any
   prior: any,
   asyncId: number | undefined,
+  threw = false,
 ): void {
   try {
-    if (typeof asyncId === "number") emitAfter(asyncId);
+    if (typeof asyncId === "number" && !threw) emitAfter(asyncId);
   } finally {
     setAsyncContext(prior);
   }
+}
+
+// Node's ReqWrap: a request (a connect, a shutdown, a write, a DNS query) is
+// an async resource from the moment it is made, `oncomplete` runs between its
+// `before` / `after` hooks (MakeCallback), and it is destroyed after that.
+// Only while a hook is enabled: otherwise the request is left untouched, so
+// the common path pays one length check.
+// deno-lint-ignore no-explicit-any
+function initReqWrap(req: any, type: string, triggerAsyncId?: number): void {
+  if (active_hooks.array.length === 0) return;
+  // The JS-made requests carry no native AsyncWrap id.
+  const asyncId = newAsyncId();
+  const trigger = triggerAsyncId ?? getDefaultTriggerAsyncId();
+  emitInitNative(asyncId, type, trigger, req);
+  req[kReqWrapAsyncId] = asyncId;
+  let oncomplete = req.oncomplete;
+  // deno-lint-ignore no-explicit-any
+  const wrapped = function (this: unknown, ...args: any[]) {
+    const prior = enterNativeCallback(undefined, asyncId, trigger, req);
+    let threw = true;
+    try {
+      const ret = FunctionPrototypeApply(oncomplete, this, args);
+      threw = false;
+      return ret;
+    } finally {
+      exitNativeCallback(prior, asyncId, threw);
+      destroyReqWrap(req);
+    }
+  };
+  ObjectDefineProperty(req, "oncomplete", {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    get() {
+      return typeof oncomplete === "function" ? wrapped : oncomplete;
+    },
+    set(value) {
+      oncomplete = value;
+    },
+  });
+}
+
+const kReqWrapAsyncId = Symbol("kReqWrapAsyncId");
+
+// A request that finished without calling `oncomplete` (a synchronous
+// completion or failure) is destroyed without `before` / `after`.
+// deno-lint-ignore no-explicit-any
+function destroyReqWrap(req: any): void {
+  const asyncId = req[kReqWrapAsyncId];
+  if (asyncId === undefined) return;
+  req[kReqWrapAsyncId] = undefined;
+  emitDestroy(asyncId);
+}
+
+// As Node: an exception thrown by a hook callback is fatal. Its stack goes
+// to stderr and the process exits with code 1 (aborts under
+// --abort-on-uncaught-exception), without reaching 'uncaughtException'.
+function fatalError(e: unknown): never {
+  const process = lazyProcess().default;
+  // deno-lint-ignore no-explicit-any
+  const stack = (e as any)?.stack;
+  if (typeof stack === "string") {
+    process._rawDebug(stack);
+  } else {
+    const o = { message: String(e), stack: undefined };
+    ErrorCaptureStackTrace(o, fatalError);
+    process._rawDebug(o.stack);
+  }
+  if (
+    ArrayPrototypeIncludes(process.execArgv, "--abort-on-uncaught-exception")
+  ) {
+    process.abort();
+  }
+  process.exit(1);
+}
+
+function corruptedStack(actual: number, expected: number): never {
+  const process = lazyProcess().default;
+  process._rawDebug(
+    `Error: async hook stack has become corrupted (actual: ${actual}, ` +
+      `expected: ${expected})`,
+  );
+  if (
+    ArrayPrototypeIncludes(process.execArgv, "--abort-on-uncaught-exception")
+  ) {
+    process.abort();
+  }
+  process.exit(1);
 }
 
 // Calls `symbol`'s callback of every active hook (a hook created with
@@ -256,6 +368,8 @@ function emitHook(
       if (isPromiseHook && hook[kNoPromiseHook]) continue;
       if (typeof hook[symbol] === "function") hook[symbol](asyncId);
     }
+  } catch (e) {
+    fatalError(e);
   } finally {
     active_hooks.call_depth -= 1;
   }
@@ -271,7 +385,7 @@ function emitBefore(
   _resource?: unknown,
   isPromiseHook = false,
 ): void {
-  pushAsyncContext(asyncId, triggerAsyncId);
+  pushAsyncContext(asyncId, triggerAsyncId, _resource);
   if (!hasHooks(kBefore)) return;
   try {
     emitHook(before_symbol, asyncId, isPromiseHook);
@@ -283,6 +397,13 @@ function emitBefore(
 }
 
 function emitAfter(asyncId: number): void {
+  // As Node's popAsyncContext: leaving a callback that is not the current one
+  // means the stack no longer matches the callbacks, which Node treats as
+  // fatal while hooks are enabled (the main script runs as id 1).
+  const current = async_id_fields[UidFields.kExecutionAsyncId];
+  if (current !== asyncId && active_hooks.array.length > 0) {
+    corruptedStack(current, asyncId);
+  }
   try {
     if (hasHooks(kAfter)) emitHook(after_symbol, asyncId);
   } finally {
@@ -291,8 +412,46 @@ function emitAfter(asyncId: number): void {
   }
 }
 
+// As Node, `destroy` hooks never run synchronously: the ids are queued and
+// emitted from a native immediate (the start of the next check phase, before
+// the JS immediates), so a resource's `destroy` follows its `after` and the
+// rest of the callback that destroyed it.
+let destroyQueue: number[] = [];
+
+// Once an uncaught exception is handled, Node emits the `after` hooks of every
+// callback the throw unwound and empties the id stack.
+function afterUncaughtException(): void {
+  if (asyncIdsStack.length === 0) return;
+  if (hasHooks(kAfter)) {
+    do {
+      emitAfter(executionAsyncId());
+    } while (asyncIdsStack.length > 0);
+  } else {
+    while (popAsyncContext());
+  }
+}
+
+// The `after` hooks of a callback entered while no hook was enabled (so its
+// context was never pushed).
+function emitAfterHooks(asyncId: number): void {
+  if (hasHooks(kAfter)) emitHook(after_symbol, asyncId);
+}
+
 function emitDestroy(asyncId: number): void {
-  if (hasHooks(kDestroy)) emitHook(destroy_symbol, asyncId);
+  if (!hasHooks(kDestroy) || !(asyncId > 0)) return;
+  if (destroyQueue.length === 0) core.queueNativeImmediate(runDestroyQueue);
+  ArrayPrototypePush(destroyQueue, asyncId);
+}
+
+function runDestroyQueue(): void {
+  // Destroys queued by the destroy hooks themselves run in the next batch.
+  while (destroyQueue.length > 0) {
+    const ids = destroyQueue;
+    destroyQueue = [];
+    for (let i = 0; i < ids.length; i++) {
+      if (hasHooks(kDestroy)) emitHook(destroy_symbol, ids[i]);
+    }
+  }
 }
 const {
   kInit,
@@ -385,7 +544,7 @@ function emitInitNative(
       }
     }
   } catch (e) {
-    throw e;
+    fatalError(e);
   } finally {
     active_hooks.call_depth -= 1;
   }
@@ -471,7 +630,7 @@ const kInternalPromise = Symbol("kInternalPromise");
 
 // deno-lint-ignore no-explicit-any
 function promiseInitHook(promise: any, parent?: any) {
-  if (core.isCreatingInternalPromise() || promiseFromRuntime()) {
+  if (core.isCreatingInternalPromise() || promiseFromRuntimeOrPolyfill()) {
     promise[kInternalPromise] = true;
     return;
   }
@@ -557,6 +716,51 @@ function countCallSites(_error: unknown, callSites: unknown[]): number {
   return callSites.length;
 }
 
+// As promiseFromRuntime(), and also a promise the Node polyfills create for
+// themselves (an `ext:` frame outside core made it): a callback API implemented over op
+// promises (fs, dns, ...) must not report them, as Node's C++ requests make
+// none.
+function promiseFromRuntimeOrPolyfill(): boolean {
+  // deno-lint-ignore deno-internal/prefer-primordials -- the stack trace API's own settings
+  const prepare = Error.prepareStackTrace;
+  // deno-lint-ignore deno-internal/prefer-primordials -- as above
+  const limit = Error.stackTraceLimit;
+  // deno-lint-ignore deno-internal/prefer-primordials -- as above
+  Error.prepareStackTrace = creatorIsInternal;
+  // deno-lint-ignore deno-internal/prefer-primordials -- as above
+  Error.stackTraceLimit = 6;
+  try {
+    const holder: { stack?: unknown } = {};
+    ErrorCaptureStackTrace(holder);
+    return holder.stack === true;
+  } catch {
+    return false;
+  } finally {
+    // deno-lint-ignore deno-internal/prefer-primordials -- as above
+    Error.prepareStackTrace = prepare;
+    // deno-lint-ignore deno-internal/prefer-primordials -- as above
+    Error.stackTraceLimit = limit;
+  }
+}
+
+// deno-lint-ignore no-explicit-any
+function creatorIsInternal(_error: unknown, callSites: any[]): boolean {
+  // this function's caller, the hook, the dispatcher: a fourth frame is the
+  // code that made the promise
+  // (past builtins such as `Promise.prototype.then`, which have no file).
+  if (callSites.length < 4) return true;
+  for (let i = 3; i < callSites.length; i++) {
+    const fileName = callSites[i].getFileName();
+    if (typeof fileName === "string") {
+      // Not core's frames: they are the event loop running a promise job (a
+      // reaction to a user promise is the user's).
+      return StringPrototypeStartsWith(fileName, "ext:") &&
+        !StringPrototypeStartsWith(fileName, "ext:core/");
+    }
+  }
+  return false;
+}
+
 // deno-lint-ignore no-explicit-any
 function promiseResolveHook(promise: any) {
   if (promise[kInternalPromise]) return;
@@ -589,12 +793,35 @@ function disablePromiseHookIfNecessary() {
   }
 }
 
+// While a hook is enabled, a `queueMicrotask()` callback is a `Microtask`
+// resource, as Node's queueMicrotask (an AsyncResource with a manual destroy).
+function microtaskResource(callback: () => void): () => void {
+  const asyncId = newAsyncId();
+  const triggerAsyncId = getDefaultTriggerAsyncId();
+  const resource = { callback };
+  emitInitNative(asyncId, "Microtask", triggerAsyncId, resource);
+  return function runMicrotask() {
+    const prior = executionResourceVariable.enter(resource);
+    try {
+      emitBefore(asyncId, triggerAsyncId, resource);
+      callback();
+      // On a throw, `after` waits for the uncaught exception to be handled.
+      emitAfter(asyncId);
+    } finally {
+      emitDestroy(asyncId);
+      setAsyncContext(prior);
+    }
+  };
+}
+
 function enableHooks() {
   async_hook_fields[kCheck] += 1;
+  core.setMicrotaskResourceHook(microtaskResource);
 }
 
 function disableHooks() {
   async_hook_fields[kCheck] -= 1;
+  core.setMicrotaskResourceHook(null);
 
   wantPromiseHook = false;
 
@@ -801,6 +1028,11 @@ return {
   emitBefore,
   emitAfter,
   emitDestroy,
+  emitAfterHooks,
+  initReqWrap,
+  destroyReqWrap,
+  runDestroyQueue,
+  afterUncaughtException,
   getDefaultTriggerAsyncId,
   defaultTriggerAsyncIdScope,
   enabledHooksExist,

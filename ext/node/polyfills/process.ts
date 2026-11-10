@@ -1019,10 +1019,63 @@ const _signalListenerWrappers = new SafeWeakMap<
   Map<string, SignalListener>
 >();
 
+// Node's SIGNALWRAP: one signal handle per signal with listeners, made when
+// the first listener is added and closed when the last one is removed. Only
+// tracked while an async hook is enabled.
+const lazyAsyncHooks = () =>
+  core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
+const _signalWraps = new SafeMap<
+  string,
+  { asyncId: number; trigger: number }
+>();
+
+function _signalWrapAdded(event: string) {
+  if (_signalWraps.has(event)) return;
+  const hooks = lazyAsyncHooks();
+  if (!hooks.enabledHooksExist()) return;
+  const wrap = {
+    asyncId: hooks.newAsyncId(),
+    trigger: hooks.getDefaultTriggerAsyncId(),
+  };
+  _signalWraps.set(event, wrap);
+  hooks.emitInit(wrap.asyncId, "SIGNALWRAP", wrap.trigger, wrap);
+}
+
+// deno-lint-ignore no-explicit-any
+function _signalWrapRemoved(target: any, event: string) {
+  const wrap = _signalWraps.get(event);
+  if (wrap === undefined || target.listenerCount(event) > 0) return;
+  _signalWraps.delete(event);
+  lazyAsyncHooks().emitDestroy(wrap.asyncId);
+}
+
+function _runSignalListener(event: string, listener: SignalListener) {
+  const wrap = _signalWraps.get(event);
+  if (wrap === undefined) {
+    listener(event);
+    return;
+  }
+  const hooks = lazyAsyncHooks();
+  const prior = hooks.enterNativeCallback(
+    undefined,
+    wrap.asyncId,
+    wrap.trigger,
+    wrap,
+  );
+  let threw = true;
+  try {
+    listener(event);
+    threw = false;
+  } finally {
+    hooks.exitNativeCallback(prior, wrap.asyncId, threw);
+  }
+}
+
 function _wrapSignalListener(
   event: string,
   listener: SignalListener,
 ): SignalListener {
+  _signalWrapAdded(event);
   let wrappersByEvent = _signalListenerWrappers.get(listener);
   if (!wrappersByEvent) {
     wrappersByEvent = new SafeMap();
@@ -1030,7 +1083,7 @@ function _wrapSignalListener(
   }
   let wrapper = wrappersByEvent.get(event);
   if (!wrapper) {
-    wrapper = () => listener(event);
+    wrapper = () => _runSignalListener(event, listener);
     wrappersByEvent.set(event, wrapper);
   }
   return wrapper;
@@ -1133,6 +1186,7 @@ Process.prototype.off = function (
         event as Deno.Signal,
         unwrapped,
       );
+      _signalWrapRemoved(this, event);
     }
   } else {
     FunctionPrototypeCall(EventEmitter.prototype.off, this, event, listener);
@@ -1232,6 +1286,13 @@ Process.prototype.removeAllListeners = function (
   }
   if (typeof event === "string" && StringPrototypeStartsWith(event, "SIG")) {
     _removeAllSignalListeners(this, event);
+    const ret = FunctionPrototypeCall(
+      EventEmitter.prototype.removeAllListeners,
+      this,
+      event,
+    );
+    _signalWrapRemoved(this, event);
+    return ret;
   }
   return FunctionPrototypeCall(
     EventEmitter.prototype.removeAllListeners,
@@ -1249,13 +1310,20 @@ function _removeAllSignalListeners(
   if (events === undefined) return;
   const list = events[event];
   if (list === undefined) return;
+  // What was handed to Deno.addSignalListener is the listener's wrapper
+  // (_wrapSignalListener), made for the registered function: the `once()`
+  // wrapper itself when there is one.
   if (typeof list === "function") {
-    const actual = list.listener ?? list;
-    Deno.removeSignalListener(event as Deno.Signal, actual);
+    Deno.removeSignalListener(
+      event as Deno.Signal,
+      _unwrapSignalListener(event, list),
+    );
   } else {
     for (let i = 0; i < list.length; i++) {
-      const actual = list[i].listener ?? list[i];
-      Deno.removeSignalListener(event as Deno.Signal, actual);
+      Deno.removeSignalListener(
+        event as Deno.Signal,
+        _unwrapSignalListener(event, list[i]),
+      );
     }
   }
 }
@@ -1574,10 +1642,14 @@ process._fatalException = function (err: any, fromPromise?: boolean) {
   process.emit("uncaughtExceptionMonitor", err, origin);
   if (_uncaughtExceptionCaptureFn !== null) {
     _uncaughtExceptionCaptureFn(err);
+    core.loadExtScript("ext:deno_node/internal/async_hooks.ts")
+      .afterUncaughtException();
     return true;
   }
   if (process.listenerCount("uncaughtException") > 0) {
     process.emit("uncaughtException", err, origin);
+    core.loadExtScript("ext:deno_node/internal/async_hooks.ts")
+      .afterUncaughtException();
     return true;
   }
   // denext: `--report-uncaught-exception` writes a report for an exception
@@ -1985,6 +2057,10 @@ function processOnError(event: ErrorEvent) {
 }
 
 function dispatchProcessBeforeExitEvent() {
+  // The loop ran out of work: deliver the `destroy` hooks still queued, so
+  // they are seen before 'beforeExit' / 'exit'.
+  core.loadExtScript("ext:deno_node/internal/async_hooks.ts")
+    .runDestroyQueue();
   try {
     process.emit("beforeExit", process.exitCode || 0);
   } catch (_e) {

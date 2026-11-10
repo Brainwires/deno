@@ -388,6 +388,7 @@ const {
   StringPrototypeToString,
   SymbolAsyncIterator,
   SymbolDispose,
+  Symbol,
   SymbolFor,
   ArrayPrototypePush,
   TypedArrayPrototypeGetByteLength,
@@ -397,6 +398,8 @@ const {
   queueMicrotask,
 } = primordials;
 
+const lazyAsyncHooks = () =>
+  core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
 const { kCustomPromisifiedSymbol } = core.loadExtScript(
   "ext:deno_node/internal/util.mjs",
 );
@@ -1105,6 +1108,22 @@ function readFile(
   } else {
     cb = callback;
   }
+  // While a hook is enabled, a path is read as Node does it: open, fstat,
+  // read and close, each its own FSREQCALLBACK triggered by the previous one.
+  if (
+    typeof cb === "function" && typeof pathOrRid === "string" &&
+    vfsState.handlers === null && lazyAsyncHooks().enabledHooksExist()
+  ) {
+    const options = getOptions<FileOptions>(
+      optOrCallback,
+      readFileDefaultOptions,
+    );
+    validateReadFileBufferOption(options);
+    if (!options.signal) {
+      readFileAsRequests(pathOrRid, options, cb);
+      return;
+    }
+  }
   if (typeof cb === "function") cb = fsReqCallback(cb);
 
   const h = vfsState.handlers;
@@ -1152,6 +1171,72 @@ function readFile(
         ),
     );
   }
+}
+
+// fs.close() completes in a microtask; Node's close is a request that
+// completes on a later loop turn, after the previous request's `destroy`.
+function closeAsRequest(fd: number, callback: (err: Error | null) => void) {
+  const cb = fsReqCallback(callback);
+  lazyTimers().default.setImmediate(() => {
+    let error = null;
+    try {
+      op_node_fs_close(fd);
+    } catch (err) {
+      error = denoErrorToNodeError(err as Error, { syscall: "close" });
+    }
+    cb(error);
+  });
+}
+
+function readFileAsRequests(
+  path: string,
+  options: FileOptions,
+  callback: (err: any, data?: any) => void,
+) {
+  open(path, options.flag ?? "r", 0o666, (err, fd) => {
+    if (err) return callback(err);
+    fstat(fd, (err, stats) => {
+      if (err) return close(fd, () => callback(err));
+      const size = stats.isFile() ? stats.size : 0;
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      const finish = () => {
+        closeAsRequest(fd, (err) => {
+          if (err) return callback(err);
+          const data = new Uint8Array(total);
+          let offset = 0;
+          for (let i = 0; i < chunks.length; i++) {
+            TypedArrayPrototypeSet(data, chunks[i], offset);
+            offset += TypedArrayPrototypeGetByteLength(chunks[i]);
+          }
+          let result;
+          try {
+            result = readFileResult(data, options);
+          } catch (e) {
+            return callback(e);
+          }
+          callback(null, result);
+        });
+      };
+      const readMore = () => {
+        const buffer = Buffer.allocUnsafe(
+          size > 0 ? size - total : kReadFileUnknownBufferLength,
+        );
+        read(fd, buffer, 0, buffer.length, null, (err, bytesRead) => {
+          if (err) return close(fd, () => callback(err));
+          if (bytesRead === 0) return finish();
+          ArrayPrototypePush(
+            chunks,
+            TypedArrayPrototypeSubarray(buffer, 0, bytesRead),
+          );
+          total += bytesRead;
+          if (size > 0 && total >= size) return finish();
+          readMore();
+        });
+      };
+      readMore();
+    });
+  });
 }
 
 function readFilePromise(
@@ -4279,8 +4364,7 @@ function watch(
       if (ignoreMatcher !== null && ignoreMatcher(filename)) {
         return;
       }
-      fsWatcher.emit(
-        "change",
+      fsWatcher[kFSWatcherEmitChange](
         convertDenoFsEventToNodeFsEvent(val.kind),
         encodeWatchFilename(filename, encoding),
       );
@@ -4534,15 +4618,52 @@ class StatWatcher extends EventEmitter {
   // is called between polls so the process can exit while nothing is changing.
   #timer: Timeout | null = null;
 
+  // Node's STATWATCHER resource, reported while a hook is enabled.
+  #asyncId: number | undefined;
+  #triggerAsyncId = 0;
+
   constructor(bigint: boolean) {
     super();
     this.#bigint = bigint;
+  }
+  // A change is a native callback of the watcher (MakeCallback).
+  #emitChange(curr: unknown, prev: unknown) {
+    const asyncId = this.#asyncId;
+    if (asyncId === undefined) {
+      this.emit("change", curr, prev);
+      return;
+    }
+    const hooks = lazyAsyncHooks();
+    const prior = hooks.enterNativeCallback(
+      undefined,
+      asyncId,
+      this.#triggerAsyncId,
+      this,
+    );
+    let threw = true;
+    try {
+      this.emit("change", curr, prev);
+      threw = false;
+    } finally {
+      hooks.exitNativeCallback(prior, asyncId, threw);
+    }
   }
   [kFSStatWatcherStart](
     filename: string,
     persistent: boolean,
     interval: number,
   ) {
+    const hooks = lazyAsyncHooks();
+    if (hooks.enabledHooksExist()) {
+      this.#asyncId = hooks.newAsyncId();
+      this.#triggerAsyncId = hooks.getDefaultTriggerAsyncId();
+      hooks.emitInit(
+        this.#asyncId,
+        "STATWATCHER",
+        this.#triggerAsyncId,
+        this,
+      );
+    }
     if (persistent) {
       this.#refCount++;
     } else {
@@ -4557,7 +4678,7 @@ class StatWatcher extends EventEmitter {
 
       // libuv emits an initial "change" only when the first stat fails.
       if (prev === emptyStats || prev === emptyBigIntStats) {
-        this.emit("change", prev, prev);
+        this.#emitChange(prev, prev);
       }
 
       try {
@@ -4565,7 +4686,7 @@ class StatWatcher extends EventEmitter {
           await this.#sleep(interval);
           const curr = await statAsync(filename, bigint);
           if (statsChanged(prev, curr)) {
-            this.emit("change", curr, prev);
+            this.#emitChange(curr, prev);
             prev = curr;
           }
         }
@@ -4619,6 +4740,10 @@ class StatWatcher extends EventEmitter {
       return;
     }
     this.#abortController.abort();
+    if (this.#asyncId !== undefined) {
+      lazyAsyncHooks().emitDestroy(this.#asyncId);
+      this.#asyncId = undefined;
+    }
     // Match Node: stop fires asynchronously so listeners removed
     // synchronously after stop() are not called (see
     // StatWatcher.prototype.stop in lib/internal/fs/watchers.js).
@@ -4640,10 +4765,16 @@ class StatWatcher extends EventEmitter {
   }
 }
 
+const kFSWatcherEmitChange = Symbol("kFSWatcherEmitChange");
+
 class FSWatcher extends EventEmitter {
   #closer: () => void;
   #closed = false;
   #watcher: () => Deno.FsWatcher | undefined;
+
+  // Node's FSEVENTWRAP, reported while a hook is enabled.
+  #asyncId: number | undefined;
+  #triggerAsyncId = 0;
 
   constructor(
     closer: () => void,
@@ -4652,6 +4783,34 @@ class FSWatcher extends EventEmitter {
     super();
     this.#closer = closer;
     this.#watcher = getter;
+    const hooks = lazyAsyncHooks();
+    if (hooks.enabledHooksExist()) {
+      this.#asyncId = hooks.newAsyncId();
+      this.#triggerAsyncId = hooks.getDefaultTriggerAsyncId();
+      hooks.emitInit(this.#asyncId, "FSEVENTWRAP", this.#triggerAsyncId, this);
+    }
+  }
+  // A change is a native callback of the watcher handle (MakeCallback).
+  [kFSWatcherEmitChange](eventType: string, filename: unknown) {
+    const asyncId = this.#asyncId;
+    if (asyncId === undefined) {
+      this.emit("change", eventType, filename);
+      return;
+    }
+    const hooks = lazyAsyncHooks();
+    const prior = hooks.enterNativeCallback(
+      undefined,
+      asyncId,
+      this.#triggerAsyncId,
+      this,
+    );
+    let threw = true;
+    try {
+      this.emit("change", eventType, filename);
+      threw = false;
+    } finally {
+      hooks.exitNativeCallback(prior, asyncId, threw);
+    }
   }
   close() {
     if (this.#closed) {
@@ -4660,6 +4819,9 @@ class FSWatcher extends EventEmitter {
     this.#closed = true;
     this.emit("close");
     this.#closer();
+    if (this.#asyncId !== undefined) {
+      lazyAsyncHooks().emitDestroy(this.#asyncId);
+    }
   }
   ref() {
     this.#watcher()?.ref();

@@ -122,6 +122,8 @@ const lazyFsUtils = core.createLazyLoader(
   "ext:deno_node/internal/fs/utils.mjs",
 );
 const lazyProcess = core.createLazyLoader("node:process");
+const lazyAsyncHooks = () =>
+  core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
 const { StringPrototypeSlice } = core.loadExtScript(
   "ext:deno_node/internal/primordials.mjs",
 );
@@ -494,6 +496,19 @@ class ChildProcess extends EventEmitter {
         argv0: argv0 !== cmd ? argv0 : undefined,
       });
       this.pid = this.#process.pid;
+      // Node's PROCESSWRAP: the child's process handle, reported while a
+      // hook is enabled; 'exit' runs as it (the handle's onexit callback).
+      const asyncHooks = lazyAsyncHooks();
+      if (asyncHooks.enabledHooksExist()) {
+        this.#asyncId = asyncHooks.newAsyncId();
+        this.#triggerAsyncId = asyncHooks.getDefaultTriggerAsyncId();
+        asyncHooks.emitInit(
+          this.#asyncId,
+          "PROCESSWRAP",
+          this.#triggerAsyncId,
+          this,
+        );
+      }
 
       if (stdin === "pipe" && this.#process.stdinFd != null) {
         const pipe = new Pipe(socketType.SOCKET);
@@ -693,7 +708,7 @@ class ChildProcess extends EventEmitter {
         }
         PromisePrototypeThen(this.#spawned.promise, async () => {
           // The 'exit' and 'close' events must be emitted after the 'spawn' event.
-          this.emit("exit", this.exitCode, this.signalCode);
+          this.#emitExit();
           await this.#_waitForChildStreamsToClose();
           this.#closePipes();
           // The child is gone, so the IPC channel can never carry another
@@ -943,6 +958,34 @@ class ChildProcess extends EventEmitter {
       ArrayPrototypePush(promises, waitForReadableToClose(this.stderr));
     }
     await SafePromiseAll(promises);
+  }
+
+  #asyncId: number | undefined;
+  #triggerAsyncId = 0;
+
+  #emitExit() {
+    const asyncId = this.#asyncId;
+    if (asyncId === undefined) {
+      this.emit("exit", this.exitCode, this.signalCode);
+      return;
+    }
+    this.#asyncId = undefined;
+    const asyncHooks = lazyAsyncHooks();
+    const prior = asyncHooks.enterNativeCallback(
+      undefined,
+      asyncId,
+      this.#triggerAsyncId,
+      this,
+    );
+    let threw = true;
+    try {
+      this.emit("exit", this.exitCode, this.signalCode);
+      threw = false;
+    } finally {
+      asyncHooks.exitNativeCallback(prior, asyncId, threw);
+      // Node closes the process handle in its onexit.
+      asyncHooks.emitDestroy(asyncId);
+    }
   }
 
   #_handleError(err) {

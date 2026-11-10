@@ -72,6 +72,9 @@ const {
   AsyncWrap,
   providerType,
 } = core.loadExtScript("ext:deno_node/internal_binding/async_wrap.ts");
+const { initReqWrap } = core.loadExtScript(
+  "ext:deno_node/internal/async_hooks.ts",
+);
 const { ares_strerror } = core.loadExtScript(
   "ext:deno_node/internal_binding/ares.ts",
 );
@@ -120,6 +123,7 @@ class GetAddrInfoReqWrap extends AsyncWrap {
 
   constructor() {
     super(providerType.GETADDRINFOREQWRAP);
+    initReqWrap(this, "GETADDRINFOREQWRAP");
   }
 }
 
@@ -220,6 +224,7 @@ class GetNameInfoReqWrap extends AsyncWrap {
 
   constructor() {
     super(providerType.GETNAMEINFOREQWRAP);
+    initReqWrap(this, "GETNAMEINFOREQWRAP");
   }
 }
 
@@ -261,6 +266,7 @@ class QueryReqWrap extends AsyncWrap {
 
   constructor() {
     super(providerType.QUERYWRAP);
+    initReqWrap(this, "QUERYWRAP");
   }
 }
 

@@ -48,6 +48,8 @@ const {
   emitDestroy,
   emitInit,
   enterNativeCallback,
+  initReqWrap,
+  destroyReqWrap,
   executionAsyncId,
   exitNativeCallback,
   kAsyncContextFrame: kAsyncContext,
@@ -780,6 +782,7 @@ function _internalConnect(
   if (addressType === 6 || addressType === 4) {
     const req = new TCPConnectWrap();
     req.oncomplete = _afterConnect;
+    initReqWrap(req, "TCPCONNECTWRAP", socket[asyncIdSymbol]);
     req.address = address;
     req.port = port;
     req.localAddress = localAddress;
@@ -798,6 +801,7 @@ function _internalConnect(
   } else {
     const req = new PipeConnectWrap();
     req.oncomplete = _afterConnect;
+    initReqWrap(req, "PIPECONNECTWRAP", socket[asyncIdSymbol]);
     req.address = address;
 
     err = (socket._handle as Pipe).connect(req, address);
@@ -905,6 +909,7 @@ function _internalConnectMultiple(context, canceled?: boolean) {
     context,
     current,
   );
+  initReqWrap(req, "TCPCONNECTWRAP", self[asyncIdSymbol]);
   req.address = address;
   req.port = port;
   req.localAddress = localAddress;
@@ -2032,7 +2037,9 @@ Socket.prototype._final = function (cb) {
   req.oncomplete = _afterShutdown;
   req.handle = this._handle;
   req.callback = cb;
+  initReqWrap(req, "SHUTDOWNWRAP", this[asyncIdSymbol]);
   const err = this._handle.shutdown(req);
+  if (err !== 0) destroyReqWrap(req);
 
   if (err === 1 || err === codeMap.get("ENOTCONN")) {
     return cb();
@@ -2106,16 +2113,34 @@ Socket.prototype._destroy = function (exception, cb) {
     cb(exception);
     handle.close(() => {
       handle.onread = _noop;
-      if (this[asyncIdSymbol] > 0) {
-        emitDestroy(this[asyncIdSymbol]);
+      const asyncId = this[asyncIdSymbol];
+      if (asyncId > 0) {
+        emitDestroy(asyncId);
       }
 
       debug("emit close");
-      // Node's HandleWrap::OnClose runs in the handle's context.
-      _runInAsyncContext(
-        (handle as any)[kAsyncContext],
-        () => this.emit("close", isException),
-      );
+      // Node's HandleWrap::OnClose runs in the handle's context, as the
+      // handle's async resource when it was reported (MakeCallback).
+      if ((handle as any)[kInitEmitted] === asyncId && asyncId > 0) {
+        const prior = enterNativeCallback(
+          (handle as any)[kAsyncContext],
+          asyncId,
+          (handle as any)[kTriggerAsyncId],
+          handle,
+        );
+        let threw = true;
+        try {
+          this.emit("close", isException);
+          threw = false;
+        } finally {
+          exitNativeCallback(prior, asyncId, threw);
+        }
+      } else {
+        _runInAsyncContext(
+          (handle as any)[kAsyncContext],
+          () => this.emit("close", isException),
+        );
+      }
     });
   } else {
     cb(exception);
@@ -3151,7 +3176,14 @@ Server.prototype.close = function (cb?: (err?: Error) => void) {
   }
 
   if (this._handle) {
-    (this._handle as TCP).close();
+    const handle = this._handle as TCP;
+    const asyncId = this[asyncIdSymbol];
+    // The reported listening handle is destroyed once it has closed.
+    if ((handle as any)[kInitEmitted] === asyncId && asyncId > 0) {
+      handle.close(() => emitDestroy(asyncId));
+    } else {
+      handle.close();
+    }
     this._handle = null;
     unregisterActiveHandle(this);
   }

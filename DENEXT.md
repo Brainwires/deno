@@ -12213,6 +12213,49 @@ NNN. **`feat(node)`: a worker adopts a stream another isolate opened through
        `worker_pipe_fd_all` (`-A`, no abort) and `worker_pipe_fd_scoped`
        (scoped: `EPERM`).
 
+NNN. **`feat(ext/node)`: `async_hooks` resource graphs as Node reports them**
+(`libs/core/01_core.js`, `ext/os/40_signals.js`,
+`ext/node/polyfills/internal/async_hooks.ts`, `net.ts`, `dgram.ts`, `fs.ts`,
+`_fs/`, `internal/child_process.ts`, `internal/timers.mjs`,
+`internal/stream_base_commons.ts`, `internal_binding/cares_wrap.ts`,
+`process.ts`). Builds on the request-path work described in
+`doc/denext-async-hooks.md`. - `destroy` hooks are queued, as Node's
+`queueDestroyAsyncId`, and run from a native immediate: core gains
+`queueNativeImmediate()` (Node's unrefed `SetImmediate`: the start of the next
+check phase, before the JS immediates, never keeping the loop alive). The queue
+is also delivered when the loop runs dry, before 'beforeExit'.
+`internalBinding('async_wrap').queueDestroyAsyncId` exists. - New resources,
+each reported only while a hook is enabled: `TCPCONNECTWRAP` / `PIPECONNECTWRAP`
+(triggered by the socket), `SHUTDOWNWRAP`, `WRITEWRAP` (only for a write that
+did not finish at once), `GETADDRINFOREQWRAP`, `GETNAMEINFOREQWRAP`,
+`QUERYWRAP`, `UDPWRAP`, `UDPSENDWRAP`, `PROCESSWRAP` ('exit' runs as it),
+`SIGNALWRAP` (one per signal with listeners), `STATWATCHER`, `FSEVENTWRAP` and
+`Microtask` (`queueMicrotask()`). A request's `oncomplete` runs between its
+`before` / `after` and is then destroyed; the listening handle is destroyed when
+it closes, and a socket's close callback runs as its handle. - `fs.readFile()`
+with a hook enabled reads as Node does (open, fstat, read, close: four chained
+`FSREQCALLBACK`s); `fs.fstat()` and `fs.read()` callbacks are `FSREQCALLBACK`s.
+
+- `executionAsyncResource()` is the resource of `executionAsyncId()` (a stack
+  beside the id stack, as Node's `execution_async_resources`). - Promises
+  created by the runtime's own JS (an `ext:` frame outside core) are no
+  `PROMISE` resources: a callback API built on op promises reports none, as in
+  Node. - Errors as Node: a throw in a hook callback prints its stack and exits
+  with 1; leaving a callback that is not the current one prints "async hook
+  stack has become corrupted" and exits with 1; once an uncaught exception is
+  handled, the `after` hooks of the unwound callbacks run and the id stack is
+  emptied. A one-shot timer is destroyed even when its callback throws, and a
+  hook enabled inside a timer callback sees its `after` / `destroy`. -
+  `Deno.addSignalListener`: a listener loop stops when its resource is replaced
+  (removing the last listener and adding one inside a listener delivered later
+  signals twice), and a listener added during a delivery waits for the next
+  signal. - With no hook enabled the hot paths gain one comparison or length
+  check each (queueMicrotask, timer callbacks, fs reads, socket writes and
+  connects, immediates), plus one push / pop per entered callback. - Tests:
+  Node's `async-hooks/` suite and `parallel/test-async-hooks-*` /
+  `test-async-wrap-*` (the newly enabled tests are listed in
+  `tests/node_compat/config.jsonc`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

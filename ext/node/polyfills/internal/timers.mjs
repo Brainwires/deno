@@ -34,6 +34,7 @@ const {
 } = primordials;
 const {
   emitAfter,
+  emitAfterHooks,
   emitBefore,
   emitDestroy,
   emitInit,
@@ -228,14 +229,21 @@ Timeout.prototype[createTimer] = function () {
         // The Timeout is the callback's executionAsyncResource(), as in Node.
         enterAsyncResource(self);
         emitBefore(asyncId, triggerAsyncId, self);
-        const ret = invokeCallback();
-        // Only emit after/destroy on success. On error, the domain's
-        // uncaught exception handler manages the stack cleanup.
-        emitAfter(asyncId);
-        if (!self._repeat && !self._asyncDestroyed) {
-          self._asyncDestroyed = true;
-          emitDestroy(asyncId);
+        let ret;
+        try {
+          ret = invokeCallback();
+        } finally {
+          // As Node's listOnTimeout: a finished one-shot timer is destroyed
+          // even when its callback throws (the destroy hook is queued, so it
+          // still follows `after`).
+          if (!self._repeat && !self._asyncDestroyed) {
+            self._asyncDestroyed = true;
+            emitDestroy(asyncId);
+          }
         }
+        // On a throw, `after` is emitted once the uncaught exception is
+        // handled (process._fatalException), as in Node.
+        emitAfter(asyncId);
         return ret;
       } finally {
         setAsyncContext(oldContext);
@@ -246,7 +254,17 @@ Timeout.prototype[createTimer] = function () {
       const oldContext = getAsyncContext();
       try {
         setAsyncContext(asyncContext);
-        return invokeCallback();
+        const ret = invokeCallback();
+        // A hook enabled by the callback still sees its `after`, as in Node
+        // (whose timers always enter their scope).
+        if (enabledHooksExist()) {
+          emitAfterHooks(asyncId);
+          if (!self._repeat && !self._asyncDestroyed) {
+            self._asyncDestroyed = true;
+            emitDestroy(asyncId);
+          }
+        }
+        return ret;
       } finally {
         setAsyncContext(oldContext);
       }

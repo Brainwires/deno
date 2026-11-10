@@ -62,6 +62,14 @@ enum constants {
 const asyncHookFields = new Uint32Array(ObjectKeys(constants).length);
 
 // Increment the internal id counter and return the value.
+// Node's binding call behind `emitDestroy`: queues `asyncId` for the
+// `destroy` hooks.
+function queueDestroyAsyncId(asyncId: number) {
+  core.loadExtScript("ext:deno_node/internal/async_hooks.ts").emitDestroy(
+    asyncId,
+  );
+}
+
 function newAsyncId() {
   return op_node_new_async_id();
 }
@@ -133,6 +141,7 @@ return {
   AsyncWrap,
   registerDestroyHook,
   newAsyncId,
+  queueDestroyAsyncId,
   constants,
   UidFields,
   providerType,

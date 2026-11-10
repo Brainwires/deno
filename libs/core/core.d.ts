@@ -212,6 +212,10 @@ export namespace core {
 
   /** Drain the immediate queue, running all enqueued immediate callbacks. */
   function runImmediates(): void;
+  function queueNativeImmediate(callback: () => void): void;
+  function setMicrotaskResourceHook(
+    hook: ((callback: () => void) => () => void) | null,
+  ): void;
 
   /** The immediate queue (ImmediateList linked list). */
   const immediateQueue: {

@@ -26,8 +26,10 @@ const { core, primordials } = __bootstrap;
 const {
   asyncIdSymbol,
   captureAsyncContextFrame,
+  enabledHooksExist,
   enterNativeCallback,
   exitNativeCallback,
+  initReqWrap,
   kAsyncContextFrame,
   ownerSymbol,
   trigger_async_id_symbol: kTriggerAsyncId,
@@ -268,6 +270,11 @@ function afterWriteDispatched(
 ) {
   req.bytes = streamBaseState[kBytesWritten];
   req.async = !!streamBaseState[kLastWriteWasAsync];
+  // Node makes a WRITEWRAP only for a write that did not finish at once,
+  // triggered by the stream.
+  if (req.async && err === 0 && enabledHooksExist()) {
+    initReqWrap(req, "WRITEWRAP", req.handle[ownerSymbol]?.[asyncIdSymbol]);
+  }
 
   if (err !== 0) {
     return cb(errnoException(err, "write", req.error));
