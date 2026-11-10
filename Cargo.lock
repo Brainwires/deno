@@ -7559,6 +7559,7 @@ dependencies = [
  "deno_terminal",
  "file_test_runner",
  "jsonc-parser",
+ "node_shim",
  "regex",
  "serde",
  "serde_json",

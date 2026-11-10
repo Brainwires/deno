@@ -61,6 +61,7 @@ const {
   op_v8_get_wire_format_version,
   op_v8_new_deserializer,
   op_v8_new_serializer,
+  op_v8_force_gc,
   op_v8_number_of_heap_spaces,
   op_v8_read_double,
   op_v8_read_header,
@@ -1053,8 +1054,10 @@ function startHeapProfileRaw(options) {
   }
   const session = createSyncInspectorSession();
   try {
+    // The inspector's `HeapProfiler.collectGarbage` answers only after a
+    // later task has run the collection; collect here instead.
     if (options.forceGC) {
-      session.post("HeapProfiler.collectGarbage");
+      op_v8_force_gc();
     }
     session.post("HeapProfiler.startSampling", {
       samplingInterval: options.sampleInterval,

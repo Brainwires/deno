@@ -107,6 +107,15 @@ pub fn op_v8_get_heap_statistics(
   buffer[14] = stats.total_allocated_bytes() as f64;
 }
 
+/// denext: a full garbage collection, now: `v8.startHeapProfile({ forceGC })`.
+/// The inspector's `HeapProfiler.collectGarbage` runs the collection in a
+/// later task and answers then, so it can't come before the synchronous
+/// start of the sampling.
+#[op2(fast)]
+pub fn op_v8_force_gc(scope: &mut v8::PinScope<'_, '_>) {
+  scope.low_memory_notification();
+}
+
 #[op2(fast)]
 #[smi]
 pub fn op_v8_number_of_heap_spaces(scope: &mut v8::PinScope<'_, '_>) -> u32 {

@@ -2,7 +2,9 @@
   "$schema": "./schema.json",
   "tests": {
     "abort/test-addon-register-signal-handler.js": {},
-    "abort/test-addon-uv-handle-leak.js": {},
+    "abort/test-addon-uv-handle-leak.js": {
+      "expectedSkip": "needs a compiled test addon"
+    },
     "abort/test-zlib-invalid-internals-usage.js": {
       "ignore": true,
       "reason": "Tests Node.js internal C++ binding (internalBinding('zlib').Zlib) which is not implemented in Deno"
@@ -464,8 +466,12 @@
     "parallel/test-blob-createobjecturl.js": {},
     "parallel/test-blocklist.js": {},
     "parallel/test-btoa-atob.js": {},
-    "parallel/test-buffer-alloc-unsafe-is-initialized-with-zero-fill-flag.js": {},
-    "parallel/test-buffer-alloc-unsafe-is-uninitialized.js": {},
+    "parallel/test-buffer-alloc-unsafe-is-initialized-with-zero-fill-flag.js": {
+      "expectedSkip": "needs a debug build of Node"
+    },
+    "parallel/test-buffer-alloc-unsafe-is-uninitialized.js": {
+      "expectedSkip": "needs a debug build of Node"
+    },
     "parallel/test-buffer-alloc.js": {},
     "parallel/test-buffer-arraybuffer.js": {},
     "parallel/test-buffer-ascii.js": {},
@@ -611,7 +617,12 @@
     "parallel/test-child-process-net-reuseport.js": {},
     "parallel/test-child-process-no-deprecation.js": {},
     "parallel/test-child-process-promisified.js": {},
-    "parallel/test-child-process-prototype-tampering.mjs": {},
+    "parallel/test-child-process-prototype-tampering.mjs": {
+      "expectedSkip": {
+        "darwin": "Linux-only test",
+        "windows": "Linux-only test"
+      }
+    },
     "parallel/test-child-process-recv-handle.js": {
       "ignore": true,
       "reason": "Uses internal/child_process kChannelHandle with readStop/readStart which is not exposed in Deno"
@@ -662,7 +673,9 @@
     },
     "parallel/test-child-process-stdio-inherit.js": {},
     "parallel/test-child-process-stdio-merge-stdouts-into-cat.js": {},
-    "parallel/test-child-process-stdio-overlapped.js": {},
+    "parallel/test-child-process-stdio-overlapped.js": {
+      "expectedSkip": "needs Node's overlapped-checker test binary"
+    },
     // TODO(nathanwhit): disabled because super flaky on CI
     // "parallel/test-child-process-stdio-reuse-readable-stdio.js": {},
     "parallel/test-child-process-stdio-reuse-readable-stdio.js": {},
@@ -744,7 +757,12 @@
     "parallel/test-client-request-destroy.js": {},
     "parallel/test-cluster-advanced-serialization.js": { "windows": false },
     "parallel/test-cluster-basic.js": { "windows": false },
-    "parallel/test-cluster-bind-privileged-port.js": { "windows": false },
+    "parallel/test-cluster-bind-privileged-port.js": {
+      "expectedSkip": {
+        "darwin": "macOS lets any process bind a privileged port"
+      },
+      "windows": false
+    },
     "parallel/test-cluster-bind-twice.js": { "windows": false },
     "parallel/test-cluster-call-and-destroy.js": { "windows": false },
     "parallel/test-cluster-child-index-dgram.js": { "windows": false },
@@ -807,6 +825,9 @@
       "windows": false
     },
     "parallel/test-cluster-shared-handle-bind-privileged-port.js": {
+      "expectedSkip": {
+        "darwin": "macOS lets any process bind a privileged port"
+      },
       "windows": false
     },
     "parallel/test-cluster-shared-leak.js": { "windows": false },
@@ -922,7 +943,9 @@
     "parallel/test-console-table.js": {},
     "parallel/test-console-tty-colors.js": {},
     "parallel/test-console-with-frozen-intrinsics.js": {},
-    "parallel/test-coverage-with-inspector-disabled.js": {},
+    "parallel/test-coverage-with-inspector-disabled.js": {
+      "expectedSkip": "for a build without the inspector, which the runtime always has"
+    },
     "parallel/test-crypto-eddsa-variants.js": {},
     "parallel/test-crypto.js": {
       "ignore": true,
@@ -1477,7 +1500,9 @@
       "ignore": true,
       "reason": "Tests Node.js-specific CLI flags/options that are not supported in Deno"
     },
-    "parallel/test-dsa-fips-invalid-key.js": {},
+    "parallel/test-dsa-fips-invalid-key.js": {
+      "expectedSkip": "needs a FIPS build of OpenSSL"
+    },
     "parallel/test-env-newprotomethod-remove-unnecessary-prototypes.js": {},
     "parallel/test-err-name-deprecation.js": {},
     "parallel/test-error-aggregateTwoErrors.js": {},
@@ -1489,31 +1514,81 @@
     "parallel/test-errors-systemerror-stackTraceLimit-deleted.js": {},
     "parallel/test-errors-systemerror-stackTraceLimit-has-only-a-getter.js": {},
     "parallel/test-errors-systemerror-stackTraceLimit-not-writable.js": {},
-    "parallel/test-eslint-alphabetize-errors.js": {},
-    "parallel/test-eslint-alphabetize-primordials.js": {},
-    "parallel/test-eslint-async-iife-no-unused-result.js": {},
-    "parallel/test-eslint-avoid-prototype-pollution.js": {},
-    "parallel/test-eslint-crypto-check.js": {},
-    "parallel/test-eslint-documented-deprecation-codes.js": {},
-    "parallel/test-eslint-documented-errors.js": {},
-    "parallel/test-eslint-duplicate-requires.js": {},
-    "parallel/test-eslint-eslint-check.js": {},
-    "parallel/test-eslint-inspector-check.js": {},
-    "parallel/test-eslint-lowercase-name-for-primitive.js": {},
-    "parallel/test-eslint-must-call-assert.js": {},
-    "parallel/test-eslint-no-array-destructuring.js": {},
-    "parallel/test-eslint-no-unescaped-regexp-dot.js": {},
-    "parallel/test-eslint-non-ascii-character.js": {},
-    "parallel/test-eslint-prefer-assert-iferror.js": {},
-    "parallel/test-eslint-prefer-assert-methods.js": {},
-    "parallel/test-eslint-prefer-common-mustnotcall.js": {},
-    "parallel/test-eslint-prefer-common-mustsucceed.js": {},
-    "parallel/test-eslint-prefer-optional-chaining.js": {},
-    "parallel/test-eslint-prefer-primordials.js": {},
-    "parallel/test-eslint-prefer-proto.js": {},
-    "parallel/test-eslint-prefer-util-format-errors.js": {},
-    "parallel/test-eslint-require-common-first.js": {},
-    "parallel/test-eslint-required-modules.js": {},
+    "parallel/test-eslint-alphabetize-errors.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-alphabetize-primordials.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-async-iife-no-unused-result.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-avoid-prototype-pollution.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-crypto-check.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-documented-deprecation-codes.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-documented-errors.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-duplicate-requires.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-eslint-check.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-inspector-check.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-lowercase-name-for-primitive.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-must-call-assert.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-no-array-destructuring.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-no-unescaped-regexp-dot.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-non-ascii-character.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-prefer-assert-iferror.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-prefer-assert-methods.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-prefer-common-mustnotcall.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-prefer-common-mustsucceed.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-prefer-optional-chaining.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-prefer-primordials.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-prefer-proto.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-prefer-util-format-errors.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-require-common-first.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
+    "parallel/test-eslint-required-modules.js": {
+      "expectedSkip": "Node's own lint rules: needs Node's tools/eslint, which the suite doesn't vendor"
+    },
     // "parallel/test-esm-loader-hooks-inspect-brk.js": {},
     // "parallel/test-esm-loader-hooks-inspect-wait.js": {},
     "parallel/test-esm-loader-hooks-inspect-brk.js": {},
@@ -1711,7 +1786,12 @@
     "parallel/test-fs-link.js": {
       "flaky": true
     },
-    "parallel/test-fs-long-path.js": {},
+    "parallel/test-fs-long-path.js": {
+      "expectedSkip": {
+        "darwin": "Windows-only test",
+        "linux": "Windows-only test"
+      }
+    },
     "parallel/test-fs-make-callback.js": {},
     "parallel/test-fs-makeStatsCallback.js": {},
     "parallel/test-fs-mkdir-mode-mask.js": {},
@@ -1791,7 +1871,12 @@
     "parallel/test-fs-promisified.js": {},
     "parallel/test-fs-read-empty-buffer.js": {},
     "parallel/test-fs-read-file-assert-encoding.js": {},
-    "parallel/test-fs-read-file-sync-hostname.js": {},
+    "parallel/test-fs-read-file-sync-hostname.js": {
+      "expectedSkip": {
+        "darwin": "Linux-only test",
+        "windows": "Linux-only test"
+      }
+    },
     "parallel/test-fs-read-file-sync.js": {},
     "parallel/test-fs-read-offset-null.js": {},
     "parallel/test-fs-read-optional-params.js": {},
@@ -1818,7 +1903,12 @@
     "parallel/test-fs-read-zero-length.js": {},
     "parallel/test-fs-read.js": {},
     "parallel/test-fs-readdir-buffer.js": {},
-    "parallel/test-fs-readdir-pipe.js": {},
+    "parallel/test-fs-readdir-pipe.js": {
+      "expectedSkip": {
+        "darwin": "Windows-only test",
+        "linux": "Windows-only test"
+      }
+    },
     "parallel/test-fs-readdir-recursive.js": {},
     "parallel/test-fs-readdir-stack-overflow.js": {},
     "parallel/test-fs-readdir-types-symlinks.js": {},
@@ -1832,7 +1922,12 @@
     "parallel/test-fs-readfile-unlink.js": {},
     "parallel/test-fs-readfile-utf8-fast-path.js": {},
     "parallel/test-fs-readfile-zero-byte-liar.js": {},
-    "parallel/test-fs-readfilesync-enoent.js": {},
+    "parallel/test-fs-readfilesync-enoent.js": {
+      "expectedSkip": {
+        "darwin": "Windows-only test",
+        "linux": "Windows-only test"
+      }
+    },
     "parallel/test-fs-readfilesync-pipe-large.js": {},
     "parallel/test-fs-readlink-type-check.js": {},
     "parallel/test-fs-readSync-optional-params.js": {},
@@ -1912,8 +2007,18 @@
     "parallel/test-fs-watch-recursive-add-file-to-new-folder.js": {},
     "parallel/test-fs-watch-recursive-add-folder.js": {},
     "parallel/test-fs-watch-recursive-delete.js": {},
-    "parallel/test-fs-watch-recursive-linux-parallel-remove.js": {},
-    "parallel/test-fs-watch-recursive-prefix-sibling.js": {},
+    "parallel/test-fs-watch-recursive-linux-parallel-remove.js": {
+      "expectedSkip": {
+        "darwin": "Linux-only test",
+        "windows": "Linux-only test"
+      }
+    },
+    "parallel/test-fs-watch-recursive-prefix-sibling.js": {
+      "expectedSkip": {
+        "darwin": "covers the JS recursive watcher, which macOS and Windows don't use",
+        "windows": "covers the JS recursive watcher, which macOS and Windows don't use"
+      }
+    },
     "parallel/test-fs-watch-recursive-promise.js": {},
     "parallel/test-fs-watch-recursive-validate.js": {},
     "parallel/test-fs-watch-ref-unref.js": {},
@@ -1927,7 +2032,12 @@
     "parallel/test-fs-write-buffer.js": {},
     "parallel/test-fs-write-file-buffer.js": {},
     "parallel/test-fs-write-file-flush.js": {},
-    "parallel/test-fs-write-file-invalid-path.js": {},
+    "parallel/test-fs-write-file-invalid-path.js": {
+      "expectedSkip": {
+        "darwin": "Windows-only test",
+        "linux": "Windows-only test"
+      }
+    },
     "parallel/test-fs-write-file-typedarrays.js": {},
     "parallel/test-fs-write-file.js": {
       "flaky": true
@@ -1984,17 +2094,17 @@
       "ignore": true,
       "reason": "Node.js snapshot/heap profiling features (--build-snapshot, --heap-prof, --heapsnapshot-near-heap-limit) are not implemented in Deno"
     },
-    // "parallel/test-heap-prof-basic.js": {},
-    // "parallel/test-heap-prof-dir-absolute.js": {},
-    // "parallel/test-heap-prof-dir-name.js": {},
-    // "parallel/test-heap-prof-dir-relative.js": {},
-    // "parallel/test-heap-prof-exec-argv.js": {},
-    // "parallel/test-heap-prof-exit.js": {},
-    // "parallel/test-heap-prof-interval.js": {},
-    // "parallel/test-heap-prof-invalid-args.js": {},
-    // "parallel/test-heap-prof-loop-drained.js": {},
-    // "parallel/test-heap-prof-name.js": {},
-    // "parallel/test-heap-prof-sigint.js": {},
+    "parallel/test-heap-prof-basic.js": {},
+    "parallel/test-heap-prof-dir-absolute.js": {},
+    "parallel/test-heap-prof-dir-name.js": {},
+    "parallel/test-heap-prof-dir-relative.js": {},
+    "parallel/test-heap-prof-exec-argv.js": {},
+    "parallel/test-heap-prof-exit.js": {},
+    "parallel/test-heap-prof-interval.js": {},
+    "parallel/test-heap-prof-invalid-args.js": {},
+    "parallel/test-heap-prof-loop-drained.js": {},
+    "parallel/test-heap-prof-name.js": {},
+    "parallel/test-heap-prof-sigint.js": {},
     "parallel/test-http-1.0-keep-alive.js": {},
     "parallel/test-http-1.0.js": {},
     "parallel/test-http-abort-client.js": {},
@@ -2587,7 +2697,9 @@
     "parallel/test-http2-stream-destroy-event-order.js": {},
     "parallel/test-http2-stream-removelisteners-after-close.js": {},
     "parallel/test-http2-timeouts.js": {},
-    "parallel/test-http2-tls-disconnect.js": {},
+    "parallel/test-http2-tls-disconnect.js": {
+      "expectedSkip": "needs the h2load tool"
+    },
     "parallel/test-http2-too-large-headers.js": {},
     "parallel/test-http2-too-many-headers.js": {},
     "parallel/test-http2-too-many-settings.js": {},
@@ -2635,7 +2747,9 @@
       "windows": false,
       "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
     },
-    "parallel/test-https-foafssl.js": {},
+    "parallel/test-https-foafssl.js": {
+      "expectedSkip": "needs Node's openssl-cli test tool (common.opensslCli)"
+    },
     "parallel/test-https-host-headers.js": {},
     "parallel/test-https-hwm.js": {},
     "parallel/test-https-insecure-parse-per-stream.js": {},
@@ -2654,6 +2768,8 @@
     "parallel/test-https-server-options-server-response.js": {},
     "parallel/test-https-server-request-timeout.js": {},
     "parallel/test-https-session-reuse-different-servername.js": {},
+    "parallel/test-https-agent-session-reuse.js": {},
+    "parallel/test-https-agent-disable-session-reuse.js": {},
     "parallel/test-https-set-timeout-server.js": {},
     "parallel/test-https-simple.js": {},
     "parallel/test-https-socket-options.js": {},
@@ -2776,7 +2892,9 @@
     "parallel/test-inspector-vm-global-accessors-getter-sideeffect.js": {},
     "parallel/test-inspector-vm-global-accessors-sideeffects.js": {},
 
-    "parallel/test-inspector-workers-flat-list.js": {},
+    "parallel/test-inspector-workers-flat-list.js": {
+      "expectedSkip": "skips itself under Node too (no worker launches it)"
+    },
     "parallel/test-instanceof.js": {},
     "parallel/test-internal-assert.js": {
       "ignore": true,
@@ -2901,7 +3019,12 @@
     "parallel/test-module-parent-deprecation.js": {},
     "parallel/test-module-parent-setter-deprecation.js": {},
     "parallel/test-module-prototype-mutation.js": {},
-    "parallel/test-module-readonly.js": {},
+    "parallel/test-module-readonly.js": {
+      "expectedSkip": {
+        "darwin": "Windows-only test",
+        "linux": "Windows-only test"
+      }
+    },
     "parallel/test-module-relative-lookup.js": {},
     "parallel/test-module-stat.js": {},
     "parallel/test-module-strip-types.js": {},
@@ -3105,7 +3228,12 @@
     "parallel/test-path-relative.js": {},
     "parallel/test-path-resolve.js": {},
     "parallel/test-path-win32-exists.js": {},
-    "parallel/test-path-win32-normalize-device-names.js": {},
+    "parallel/test-path-win32-normalize-device-names.js": {
+      "expectedSkip": {
+        "darwin": "Windows-only test",
+        "linux": "Windows-only test"
+      }
+    },
     "parallel/test-path-zero-length-strings.js": {},
     "parallel/test-path.js": {},
     "parallel/test-perf-gc-crash.js": {},
@@ -3123,22 +3251,13 @@
       "ignore": true,
       "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
     },
-    "parallel/test-permission-allow-child-process-cli.js": {
-      "ignore": true,
-      "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
-    },
+    "parallel/test-permission-allow-child-process-cli.js": {},
     "parallel/test-permission-allow-inspector.js": {
       "ignore": true,
       "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
     },
-    "parallel/test-permission-allow-wasi-cli.js": {
-      "ignore": true,
-      "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
-    },
-    "parallel/test-permission-allow-worker-cli.js": {
-      "ignore": true,
-      "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
-    },
+    "parallel/test-permission-allow-wasi-cli.js": {},
+    "parallel/test-permission-allow-worker-cli.js": {},
     "parallel/test-permission-child-process-cli.js": {
       "ignore": true,
       "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
@@ -3156,10 +3275,8 @@
       "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
     },
     "parallel/test-permission-drop-not-enabled.js": {},
-    "parallel/test-permission-fs-absolute-path.js": {
-      "ignore": true,
-      "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
-    },
+    "parallel/test-permission-fs-absolute-path.js": {},
+    "parallel/test-permission-fs-filehandle-utimes.js": {},
     "parallel/test-permission-fs-internal-module-stat.js": {
       "ignore": true,
       "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
@@ -3172,10 +3289,7 @@
       "ignore": true,
       "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
     },
-    "parallel/test-permission-fs-relative-path.js": {
-      "ignore": true,
-      "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
-    },
+    "parallel/test-permission-fs-relative-path.js": {},
     "parallel/test-permission-fs-repeat-path.js": {
       "ignore": true,
       "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
@@ -3216,18 +3330,12 @@
       "ignore": true,
       "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
     },
-    "parallel/test-permission-fs-write-v8.js": {
-      "ignore": true,
-      "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
-    },
+    "parallel/test-permission-fs-write-v8.js": {},
     "parallel/test-permission-fs-write.js": {
       "ignore": true,
       "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
     },
-    "parallel/test-permission-has.js": {
-      "ignore": true,
-      "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
-    },
+    "parallel/test-permission-has.js": {},
     "parallel/test-permission-inspector-brk.js": {
       "ignore": true,
       "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
@@ -3236,10 +3344,7 @@
       "ignore": true,
       "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
     },
-    "parallel/test-permission-net-allowed.js": {
-      "ignore": true,
-      "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
-    },
+    "parallel/test-permission-net-allowed.js": {},
     "parallel/test-permission-net-dns.js": {
       "ignore": true,
       "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
@@ -3272,7 +3377,11 @@
       "ignore": true,
       "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
     },
-    "parallel/test-permission-net-websocket.js": {},
+    "parallel/test-permission-net-websocket.js": {
+      "exitCode": 1,
+      "output": "[WILDCARD]NotCapable: Requires net access to \"nodejs.org:80\"[WILDCARD]",
+      "reason": "Under --permission the network isn't granted, and Deno's WebSocket constructor throws the refusal instead of firing an error event"
+    },
     "parallel/test-permission-no-addons.js": {},
     "parallel/test-permission-processbinding.js": {
       "ignore": true,
@@ -3294,8 +3403,18 @@
       "ignore": true,
       "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
     },
-    "parallel/test-pipe-abstract-socket.js": {},
-    "parallel/test-pipe-abstract-socket-http.js": {},
+    "parallel/test-pipe-abstract-socket.js": {
+      "expectedSkip": {
+        "darwin": "abstract Unix sockets are Linux-only",
+        "windows": "abstract Unix sockets are Linux-only"
+      }
+    },
+    "parallel/test-pipe-abstract-socket-http.js": {
+      "expectedSkip": {
+        "darwin": "abstract Unix sockets are Linux-only",
+        "windows": "abstract Unix sockets are Linux-only"
+      }
+    },
     "parallel/test-pipe-address.js": {},
     "parallel/test-pipe-file-to-http.js": {},
     "parallel/test-pipe-head.js": {},
@@ -3333,7 +3452,9 @@
     "parallel/test-process-binding.js": {},
     "parallel/test-process-chdir-errormessage.js": {},
     "parallel/test-process-chdir.js": {},
-    "parallel/test-process-config.js": {},
+    "parallel/test-process-config.js": {
+      "expectedSkip": "reads Node's own config.gypi"
+    },
     "parallel/test-process-constants-noatime.js": {
       "darwin": false,
       "windows": false
@@ -3357,7 +3478,9 @@
     "parallel/test-process-exception-capture-should-abort-on-uncaught-setflagsfromstring.js": {},
     "parallel/test-process-exception-capture-should-abort-on-uncaught.js": {},
     "parallel/test-process-exception-capture.js": {},
-    "parallel/test-process-execve-no-args.js": {},
+    "parallel/test-process-execve-no-args.js": {
+      "expectedSkip": "needs Node's nop test binary"
+    },
     "parallel/test-process-execve-worker-threads.js": {},
     "parallel/test-process-exit-code-validation.js": {
       "flaky": true,
@@ -3375,7 +3498,9 @@
     "parallel/test-process-getactivehandles.js": {},
     "parallel/test-process-getactiverequests.js": {},
     "parallel/test-process-getactiveresources.js": {},
-    "parallel/test-process-getgroups.js": {},
+    "parallel/test-process-getgroups.js": {
+      "expectedSkip": { "darwin": "`id -G` is unreliable on macOS" }
+    },
     "parallel/test-process-hrtime-bigint.js": {},
     "parallel/test-process-hrtime.js": {},
     "parallel/test-process-kill-null.js": {},
@@ -3474,7 +3599,9 @@
     "parallel/test-repl-null.js": {},
     "parallel/test-repl-pretty-stack-custom-writer.js": {},
     "parallel/test-repl-preview-timeout.js": {},
-    "parallel/test-repl-preview-without-inspector.js": {},
+    "parallel/test-repl-preview-without-inspector.js": {
+      "expectedSkip": "for a build without the inspector, which the runtime always has"
+    },
     "parallel/test-repl-require-cache.js": {},
     "parallel/test-repl-reset-event.js": {},
     "parallel/test-repl-save-load-editor-mode.js": {},
@@ -3484,7 +3611,9 @@
     "parallel/test-repl-save-load-load-without-name.js": {},
     "parallel/test-repl-save-load-save-without-name.js": {},
     "parallel/test-repl-setprompt.js": {},
-    "parallel/test-repl-stdin-push-null.js": {},
+    "parallel/test-repl-stdin-push-null.js": {
+      "expectedSkip": "needs a TTY; the runner pipes the output"
+    },
     "parallel/test-repl-syntax-error-handling.js": {},
     "parallel/test-repl-syntax-error-stack.js": {},
     "parallel/test-repl-tab-complete-buffer.js": {},
@@ -3543,7 +3672,12 @@
     "parallel/test-require-invalid-main-no-exports.js": {},
     "parallel/test-require-invalid-package.js": {},
     "parallel/test-require-json.js": {},
-    "parallel/test-require-long-path.js": {},
+    "parallel/test-require-long-path.js": {
+      "expectedSkip": {
+        "darwin": "Windows-only test",
+        "linux": "Windows-only test"
+      }
+    },
     "parallel/test-require-node-prefix.js": {},
     "parallel/test-require-nul.js": {},
     "parallel/test-require-process.js": {},
@@ -4264,7 +4398,9 @@
     "parallel/test-timers.js": {},
     "parallel/test-tls-add-context.js": {},
     "parallel/test-tls-addca.js": {},
-    "parallel/test-tls-alert.js": {},
+    "parallel/test-tls-alert.js": {
+      "expectedSkip": "needs Node's openssl-cli test tool (common.opensslCli)"
+    },
     "parallel/test-tls-basic-validations.js": {},
     "parallel/test-tls-buffersize.js": {},
     "parallel/test-tls-ca-concat.js": {},
@@ -4284,7 +4420,9 @@
     },
     "parallel/test-tls-client-reject.js": {},
     "parallel/test-tls-client-reject-12.js": {},
-    "parallel/test-tls-client-renegotiation-limit.js": {},
+    "parallel/test-tls-client-renegotiation-limit.js": {
+      "expectedSkip": "needs Node's openssl-cli test tool (common.opensslCli)"
+    },
     "parallel/test-tls-client-resume.js": {},
     "parallel/test-tls-client-resume-12.js": {},
     "parallel/test-tls-clientcertengine-invalid-arg-type.js": {},
@@ -4310,9 +4448,15 @@
       "ignore": true,
       "reason": "Deno's rustls stack has no finite-field DHE ciphers and does not reject DHE-only cipher lists at secure-context creation like BoringSSL"
     },
-    "parallel/test-tls-ecdh-auto.js": {},
-    "parallel/test-tls-ecdh-multiple.js": {},
-    "parallel/test-tls-ecdh.js": {},
+    "parallel/test-tls-ecdh-auto.js": {
+      "expectedSkip": "needs Node's openssl-cli test tool (common.opensslCli)"
+    },
+    "parallel/test-tls-ecdh-multiple.js": {
+      "expectedSkip": "needs Node's openssl-cli test tool (common.opensslCli)"
+    },
+    "parallel/test-tls-ecdh.js": {
+      "expectedSkip": "needs Node's openssl-cli test tool (common.opensslCli)"
+    },
     "parallel/test-tls-econnreset.js": {},
     "parallel/test-tls-empty-sni-context.js": {
       "ignore": true,
@@ -4357,7 +4501,9 @@
     "parallel/test-tls-no-cert-required.js": {},
     "parallel/test-tls-no-rsa-key.js": {},
     "parallel/test-tls-no-sslv23.js": {},
-    "parallel/test-tls-no-sslv3.js": {},
+    "parallel/test-tls-no-sslv3.js": {
+      "expectedSkip": "needs Node's openssl-cli test tool (common.opensslCli)"
+    },
     "parallel/test-tls-off-thread-cert-loading-disabled.js": {},
     "parallel/test-tls-off-thread-cert-loading-system.js": {},
     "parallel/test-tls-off-thread-cert-loading.js": {},
@@ -4387,9 +4533,13 @@
     "parallel/test-tls-server-failed-handshake-emits-clienterror.js": {},
     "parallel/test-tls-server-parent-constructor-options.js": {},
     "parallel/test-tls-server-setkeycert.js": {},
-    "parallel/test-tls-server-verify.js": {},
+    "parallel/test-tls-server-verify.js": {
+      "expectedSkip": "needs Node's openssl-cli test tool (common.opensslCli)"
+    },
     "parallel/test-tls-secure-session.js": {},
-    "parallel/test-tls-session-cache.js": {},
+    "parallel/test-tls-session-cache.js": {
+      "expectedSkip": "needs Node's openssl-cli test tool (common.opensslCli)"
+    },
     "parallel/test-tls-session-timeout-errors.js": {},
     "parallel/test-tls-set-ciphers-error.js": {
       "ignore": true,
@@ -4418,6 +4568,9 @@
     "parallel/test-tls-timeout-server.js": {},
     "parallel/test-tls-timeout-server-2.js": {},
     "parallel/test-tls-ticket-invalid-arg.js": {},
+    "parallel/test-tls-ticket.js": {},
+    "parallel/test-tls-ticket-12.js": {},
+    "parallel/test-tls-ticket-cluster.js": { "windows": false },
     "parallel/test-tls-tlswrap-segfault-2.js": {},
     "parallel/test-tls-transport-destroy-after-own-gc.js": {},
     "parallel/test-tls-use-after-free-regression.js": {},
@@ -4500,7 +4653,9 @@
     "parallel/test-util-primordial-monkeypatching.js": {},
     "parallel/test-util-promisify-custom-names.mjs": {},
     "parallel/test-util-stripvtcontrolcharacters.js": {},
-    "parallel/test-util-styletext.js": {},
+    "parallel/test-util-styletext.js": {
+      "expectedSkip": "needs a TTY; the runner pipes the output"
+    },
     "parallel/test-util-text-decoder.js": {},
     "parallel/test-util-types-exists.js": {},
     "parallel/test-util-types.js": {
@@ -4518,6 +4673,8 @@
     "parallel/test-v8-collect-gc-profile-exit-before-stop.js": {},
     "parallel/test-v8-collect-gc-profile-in-worker.js": {},
     "parallel/test-v8-collect-gc-profile-using.js": {},
+    "parallel/test-v8-cpu-profile.js": {},
+    "parallel/test-v8-heap-profile.js": {},
     "parallel/test-v8-deserialize-buffer.js": {},
     "parallel/test-v8-flag-pool-size-0.js": {},
     "parallel/test-v8-getheapsnapshot-twice.js": {},
@@ -4764,6 +4921,8 @@
     // Deno follows the Web spec.
     "parallel/test-whatwg-writablestream-close.js": {},
     "parallel/test-worker-abort-on-uncaught-exception.js": {},
+    "parallel/test-worker-cpu-profile.js": {},
+    "parallel/test-worker-heap-profile.js": {},
     "parallel/test-worker-abort-on-uncaught-exception-terminate.js": {},
     // "parallel/test-worker-broadcastchannel-wpt.js": {},
     "parallel/test-worker-arraybuffer-zerofill.js": {},
@@ -5021,7 +5180,12 @@
     "pummel/test-crypto-dh-hash.js": {},
     "pummel/test-crypto-dh-keys.js": {},
     "pummel/test-dh-regr.js": {},
-    "pummel/test-fs-watch-system-limit.js": {},
+    "pummel/test-fs-watch-system-limit.js": {
+      "expectedSkip": {
+        "darwin": "Linux-only test",
+        "windows": "Linux-only test"
+      }
+    },
     "pummel/test-heapdump-dns.js": {
       "ignore": true,
       "reason": "Node.js snapshot/heap profiling features (--build-snapshot, --heap-prof, --heapsnapshot-near-heap-limit) are not implemented in Deno"
@@ -5095,28 +5259,17 @@
     },
     // TODO(bartlomieju): disabled during work on `node:inspector`, this test didn't actualy run before
     // "sequential/test-cluster-inspect-brk.js": {},
-    // TODO(bartlomieju): disabled during work on `node:inspector`, this test didn't actualy run before
-    // "sequential/test-cpu-prof-default.js": {},
-    // TODO(bartlomieju): disabled during work on `node:inspector`, this test didn't actualy run before
-    // "sequential/test-cpu-prof-dir-absolute.js": {},
-    // TODO(bartlomieju): disabled during work on `node:inspector`, this test didn't actualy run before
-    // "sequential/test-cpu-prof-dir-and-name.js": {},
-    // TODO(bartlomieju): disabled during work on `node:inspector`, this test didn't actualy run before
-    // "sequential/test-cpu-prof-dir-relative.js": {},
-    // TODO(bartlomieju): disabled during work on `node:inspector`, this test didn't actualy run before
-    // "sequential/test-cpu-prof-dir-worker.js": {},
-    // TODO(bartlomieju): disabled during work on `node:inspector`, this test didn't actualy run before
-    // "sequential/test-cpu-prof-drained.js": {},
-    // TODO(bartlomieju): disabled during work on `node:inspector`, this test didn't actualy run before
-    // "sequential/test-cpu-prof-exit.js": {},
-    // TODO(bartlomieju): disabled during work on `node:inspector`, this test didn't actualy run before
-    // "sequential/test-cpu-prof-invalid-options.js": {},
-    // TODO(bartlomieju): disabled during work on `node:inspector`, this test didn't actualy run before
-    // "sequential/test-cpu-prof-kill.js": {},
-    // TODO(bartlomieju): disabled during work on `node:inspector`, this test didn't actualy run before
-    // "sequential/test-cpu-prof-name.js": {},
-    // TODO(bartlomieju): disabled during work on `node:inspector`, this test didn't actualy run before
-    // "sequential/test-cpu-prof-worker-argv.js": {},
+    "sequential/test-cpu-prof-default.js": {},
+    "sequential/test-cpu-prof-dir-absolute.js": {},
+    "sequential/test-cpu-prof-dir-and-name.js": {},
+    "sequential/test-cpu-prof-dir-relative.js": {},
+    "sequential/test-cpu-prof-dir-worker.js": {},
+    "sequential/test-cpu-prof-drained.js": {},
+    "sequential/test-cpu-prof-exit.js": {},
+    "sequential/test-cpu-prof-invalid-options.js": {},
+    "sequential/test-cpu-prof-kill.js": {},
+    "sequential/test-cpu-prof-name.js": {},
+    "sequential/test-cpu-prof-worker-argv.js": {},
     "sequential/test-debug-prompt.js": {},
     "sequential/test-debugger-custom-port.js": {
       "ignore": true,
@@ -5196,7 +5349,9 @@
       "ignore": true,
       "reason": "PSK cipher suites are unsupported by Deno's rustls TLS backend"
     },
-    "sequential/test-tls-session-timeout.js": {},
+    "sequential/test-tls-session-timeout.js": {
+      "expectedSkip": "needs Node's openssl-cli test tool (common.opensslCli)"
+    },
     "sequential/test-vm-break-on-sigint.js": {},
     "sequential/test-vm-timeout-rethrow.js": {},
     "sequential/test-worker-fshandles-error-on-termination.js": {},
@@ -5229,10 +5384,16 @@
     "test-runner/test-output-randomize-output-cli.mjs": {},
     "test-runner/test-output-randomize-output-cli-none.mjs": {},
     "test-runner/test-output-arbitrary-output-colored.mjs": {},
-    "test-runner/test-output-assertion-color-tty.mjs": {},
+    "test-runner/test-output-assertion-color-tty.mjs": {
+      "expectedSkip": "needs colors; the runner sets NO_COLOR"
+    },
     "test-runner/test-output-async-test-scheduling.mjs": {},
-    "test-runner/test-output-coverage-width-80-color.mjs": {},
-    "test-runner/test-output-coverage-width-80-uncovered-lines-color.mjs": {},
+    "test-runner/test-output-coverage-width-80-color.mjs": {
+      "expectedSkip": "needs colors; the runner sets NO_COLOR"
+    },
+    "test-runner/test-output-coverage-width-80-uncovered-lines-color.mjs": {
+      "expectedSkip": "needs colors; the runner sets NO_COLOR"
+    },
     "test-runner/test-output-junit-reporter.mjs": {
       "exitCode": 1,
       "reason": "Runs without the previous missing test.expectFailure TypeError, but reporter snapshot output still differs from Node"
@@ -5379,6 +5540,10 @@
     "es-module/test-esm-json.mjs": {},
     "es-module/test-esm-loader-custom-condition.mjs": {},
     "es-module/test-esm-long-path-win.js": {
+      "expectedSkip": {
+        "darwin": "Windows-only test",
+        "linux": "Windows-only test"
+      },
       "windows": false,
       "reason": "Cannot find module"
     },
@@ -5577,6 +5742,10 @@
     "parallel/test-async-local-storage-http-parser-leak.js": {},
     "parallel/test-asyncresource-bind.js": {},
     "parallel/test-child-process-exec-any-shells-windows.js": {
+      "expectedSkip": {
+        "darwin": "Windows-only test",
+        "linux": "Windows-only test"
+      },
       "windows": false,
       "reason": "Command failed"
     },
@@ -5649,6 +5818,10 @@
     "parallel/test-cwd-enoent-preload.js": {},
     "parallel/test-cwd-enoent.js": {},
     "parallel/test-debug-process.js": {
+      "expectedSkip": {
+        "darwin": "Windows-only test",
+        "linux": "Windows-only test"
+      },
       "windows": false,
       "reason": "Expected values to be strictly equal"
     },
@@ -5701,10 +5874,16 @@
     "parallel/test-fastutf8stream-write.js": {},
     "parallel/test-file-write-stream.js": {},
     "parallel/test-file-write-stream4.js": {},
-    "parallel/test-fileurltopathbuffer.js": {},
+    "parallel/test-fileurltopathbuffer.js": {
+      "expectedSkip": { "darwin": "not run on macOS, as in Node" }
+    },
     "parallel/test-fs-read-position-validation.mjs": {},
     "parallel/test-fs-read-promises-position-validation.mjs": {},
     "parallel/test-fs-readdir-ucs2.js": {
+      "expectedSkip": {
+        "darwin": "Linux-only test",
+        "windows": "Linux-only test"
+      },
       "linux": false,
       "reason": "error: Uncaught (in promise) AssertionError: Expected values to be strictly deep"
     },
@@ -5719,6 +5898,10 @@
       "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node_compat round 4 changes; not verified on macOS or Windows"
     },
     "parallel/test-fs-realpath-on-substed-drive.js": {
+      "expectedSkip": {
+        "darwin": "Windows-only test",
+        "linux": "Windows-only test"
+      },
       "windows": false,
       "reason": "Expected values to be strictly equal"
     },
@@ -5771,7 +5954,12 @@
       "ignore": true,
       "reason": "keepAliveTimeout via socket.setTimeout doesn't fire on a consumed HTTP socket; test previously passed by accident because ConnectionsList headersTimeout incorrectly fired (fixed in #34356)"
     },
-    "parallel/test-http-localaddress.js": {},
+    "parallel/test-http-localaddress.js": {
+      "expectedSkip": {
+        "darwin": "binds 127.0.0.2, which only Linux routes without setup",
+        "windows": "binds 127.0.0.2, which only Linux routes without setup"
+      }
+    },
     "parallel/test-http-parser-timeout-reset.js": {},
     "parallel/test-http-pipeline-requests-connection-leak.js": {},
     "parallel/test-http-request-lookup-error-catchable.js": {},
@@ -5798,7 +5986,12 @@
     "parallel/test-http2-compat-client-upload-reject.js": {},
     "parallel/test-http2-compat-serverresponse-createpushresponse.js": {},
     "parallel/test-http2-compat-socket.js": {},
-    "parallel/test-http2-connect-options.js": {},
+    "parallel/test-http2-connect-options.js": {
+      "expectedSkip": {
+        "darwin": "binds 127.0.0.2, which only Linux routes without setup",
+        "windows": "binds 127.0.0.2, which only Linux routes without setup"
+      }
+    },
     "parallel/test-http2-connect-tls-with-delay.js": {},
     "parallel/test-http2-create-client-connect.js": {},
     "parallel/test-http2-dont-lose-data.js": {},
@@ -5829,7 +6022,12 @@
     "parallel/test-https-client-reject.js": {},
     "parallel/test-https-client-resume.js": {},
     "parallel/test-https-drain.js": {},
-    "parallel/test-https-localaddress.js": {},
+    "parallel/test-https-localaddress.js": {
+      "expectedSkip": {
+        "darwin": "binds 127.0.0.2, which only Linux routes without setup",
+        "windows": "binds 127.0.0.2, which only Linux routes without setup"
+      }
+    },
     "parallel/test-https-server-async-dispose.js": {},
     "parallel/test-https-server-close-destroy-timeout.js": {},
     "parallel/test-inspect-support-for-node_options.js": {},
@@ -5838,7 +6036,9 @@
       "windows": false,
       "reason": "times out"
     },
-    "parallel/test-inspector-has-inspector-false.js": {},
+    "parallel/test-inspector-has-inspector-false.js": {
+      "expectedSkip": "for a build without the inspector, which the runtime always has"
+    },
     "parallel/test-inspector-ip-detection.js": {},
     "parallel/test-inspector-network-arbitrary-data.js": {},
     "parallel/test-inspector-network-data-received.js": {},
@@ -5917,29 +6117,39 @@
       "reason": "Expected values to be strictly equal"
     },
     "parallel/test-process-execve-on-exit.js": {
-      "linux": false,
-      "darwin": false,
-      "reason": "process.execve is not a function"
+      "expectedSkip": {
+        "windows": "process.execve is not available on Windows"
+      }
     },
     "parallel/test-process-execve-permission-fail.js": {
-      "linux": false,
-      "darwin": false,
-      "reason": "ERR_ACCESS_DENIED"
+      "expectedSkip": {
+        "windows": "process.execve is not available on Windows"
+      }
     },
     "parallel/test-process-execve-permission-granted.js": {
-      "linux": false,
-      "darwin": false,
-      "reason": "process.execve is not a function"
+      "expectedSkip": {
+        "windows": "process.execve is not available on Windows"
+      }
     },
     "parallel/test-process-execve-socket.js": {
-      "linux": false,
-      "darwin": false,
-      "reason": "process.execve is not a function"
+      "expectedSkip": {
+        "windows": "process.execve is not available on Windows"
+      }
     },
     "parallel/test-process-execve.js": {
-      "linux": false,
-      "darwin": false,
-      "reason": "process.execve is not a function"
+      "expectedSkip": {
+        "windows": "process.execve is not available on Windows"
+      }
+    },
+    "parallel/test-process-execve-throws.js": {
+      "expectedSkip": {
+        "windows": "process.execve is not available on Windows"
+      }
+    },
+    "parallel/test-process-execve-validation.js": {
+      "expectedSkip": {
+        "windows": "process.execve is not available on Windows"
+      }
     },
     "parallel/test-process-getactiveresources-track-active-handles.js": {},
     "parallel/test-process-getactiveresources-track-active-requests.js": {},
@@ -6020,6 +6230,10 @@
     },
     "parallel/test-source-map-invalid-url.js": {},
     "parallel/test-spawn-cmd-named-pipe.js": {
+      "expectedSkip": {
+        "darwin": "Windows-only test",
+        "linux": "Windows-only test"
+      },
       "windows": false,
       "reason": "Expected values to be strictly equal"
     },
@@ -6030,6 +6244,10 @@
       "reason": "Expected values to be strictly equal"
     },
     "parallel/test-strace-openat-openssl.js": {
+      "expectedSkip": {
+        "darwin": "Linux-only test",
+        "windows": "Linux-only test"
+      },
       "linux": false,
       "reason": "error: Uncaught AssertionError: /opt/hostedtoolcache/deno/0.0.0-8ea25a3b12434ec8"
     },
@@ -6064,6 +6282,10 @@
     "parallel/test-tls-startcom-wosign-whitelist.js": {},
     "parallel/test-tls-starttls-server.js": {},
     "parallel/test-trace-events-net-abstract-socket.js": {
+      "expectedSkip": {
+        "darwin": "abstract Unix sockets are Linux-only",
+        "windows": "abstract Unix sockets are Linux-only"
+      },
       "linux": false,
       "reason": "expression evaluated to a falsy value"
     },
@@ -6588,10 +6810,18 @@
       "reason": "linux: [MESSAGE] script ready 19171; darwin: [MESSAGE] script ready 1733"
     },
     "parallel/test-windows-abort-exitcode.js": {
+      "expectedSkip": {
+        "darwin": "Windows-only test",
+        "linux": "Windows-only test"
+      },
       "windows": false,
       "reason": "Expected values to be strictly equal"
     },
     "parallel/test-windows-failed-heap-allocation.js": {
+      "expectedSkip": {
+        "darwin": "Windows-only test",
+        "linux": "Windows-only test"
+      },
       "windows": false,
       "reason": "error: Uncaught (in promise) AssertionError: Wrong exit code of undefined! Expec"
     },
@@ -6652,7 +6882,9 @@
       "darwin": false,
       "reason": "expression evaluated to a falsy value"
     },
-    "pummel/test-keep-alive.js": {},
+    "pummel/test-keep-alive.js": {
+      "expectedSkip": "needs the wrk tool"
+    },
     "pummel/test-net-many-clients.js": {},
     "pummel/test-net-pause.js": {},
     "pummel/test-net-pingpong-delay.js": {},
@@ -6671,37 +6903,99 @@
     },
     "pummel/test-vm-memleak.js": {},
     "pummel/test-watch-file.js": {},
-    "sea/test-build-sea-already-exists.js": {},
-    "sea/test-build-sea-config-not-found.js": {},
-    "sea/test-build-sea-custom-argv0.js": {},
-    "sea/test-build-sea-executable-field.js": {},
-    "sea/test-build-sea-invalid-assets.js": {},
-    "sea/test-build-sea-invalid-boolean-fields.js": {},
-    "sea/test-build-sea-invalid-exec-argv.js": {},
-    "sea/test-build-sea-invalid-executable.js": {},
-    "sea/test-build-sea-invalid-json.js": {},
-    "sea/test-build-sea-missing-main.js": {},
-    "sea/test-build-sea-missing-output.js": {},
-    "sea/test-build-sea.js": {},
-    "sea/test-single-executable-application-asset-keys-empty.js": {},
-    "sea/test-single-executable-application-asset-keys.js": {},
-    "sea/test-single-executable-application-assets-raw.js": {},
-    "sea/test-single-executable-application-assets.js": {},
-    "sea/test-single-executable-application-disable-experimental-sea-warning.js": {},
-    "sea/test-single-executable-application-empty.js": {},
-    "sea/test-single-executable-application-esm.js": {},
-    "sea/test-single-executable-application-exec-argv-empty.js": {},
-    "sea/test-single-executable-application-exec-argv-extension-cli.js": {},
-    "sea/test-single-executable-application-exec-argv-extension-env.js": {},
-    "sea/test-single-executable-application-exec-argv-extension-none.js": {},
-    "sea/test-single-executable-application-exec-argv.js": {},
-    "sea/test-single-executable-application-inspect-in-sea-flags.js": {},
-    "sea/test-single-executable-application-inspect.js": {},
-    "sea/test-single-executable-application-snapshot-and-code-cache.js": {},
-    "sea/test-single-executable-application-snapshot-worker.js": {},
-    "sea/test-single-executable-application-snapshot.js": {},
-    "sea/test-single-executable-application-use-code-cache.js": {},
-    "sea/test-single-executable-application.js": {},
+    "sea/test-build-sea-already-exists.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-build-sea-config-not-found.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-build-sea-custom-argv0.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-build-sea-executable-field.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-build-sea-invalid-assets.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-build-sea-invalid-boolean-fields.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-build-sea-invalid-exec-argv.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-build-sea-invalid-executable.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-build-sea-invalid-json.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-build-sea-missing-main.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-build-sea-missing-output.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-build-sea.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-single-executable-application-asset-keys-empty.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-single-executable-application-asset-keys.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-single-executable-application-assets-raw.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-single-executable-application-assets.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-single-executable-application-disable-experimental-sea-warning.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-single-executable-application-empty.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-single-executable-application-esm.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-single-executable-application-exec-argv-empty.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-single-executable-application-exec-argv-extension-cli.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-single-executable-application-exec-argv-extension-env.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-single-executable-application-exec-argv-extension-none.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-single-executable-application-exec-argv.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-single-executable-application-inspect-in-sea-flags.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-single-executable-application-inspect.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-single-executable-application-snapshot-and-code-cache.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-single-executable-application-snapshot-worker.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-single-executable-application-snapshot.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-single-executable-application-use-code-cache.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
+    "sea/test-single-executable-application.js": {
+      "expectedSkip": "Node's SEA build (LIEF, --build-sea) is refused by design: `deno compile` builds single executables"
+    },
     "sequential/test-child-process-emfile.js": {},
     "sequential/test-child-process-pass-fd.js": {
       "windows": false,

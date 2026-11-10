@@ -95,6 +95,21 @@
           "description": "Overrides the per-test timeout in milliseconds (default 10s, 20s on macOS). Use sparingly — only for tests that are legitimately slow, such as pummel tests that allocate multi-gigabyte buffers.",
           "minimum": 1
         },
+        "expectedSkip": {
+          "description": "The platforms where the test is expected to skip itself (Node's common.skip()) because the platform or this build lacks the feature by design, with the reason. A string applies to every platform. A test that skips itself is reported as skipped, never as passed; this only labels the skip.",
+          "oneOf": [
+            { "type": "string" },
+            {
+              "type": "object",
+              "properties": {
+                "windows": { "type": "string" },
+                "darwin": { "type": "string" },
+                "linux": { "type": "string" }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
         "extraDenoArgs": {
           "type": "array",
           "description": "Extra deno run/test CLI flags for this test only. Use sparingly — typically for security knobs like --unsafely-ignore-certificate-errors that one specific test requires.",

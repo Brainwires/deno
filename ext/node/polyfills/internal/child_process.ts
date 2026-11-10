@@ -1876,14 +1876,14 @@ function nodeCliParseErrorMessage(err) {
 }
 
 // The arguments of a child that does what Node does with arguments it can't
-// parse: prints `node: <message>` and exits with 9 (Node's
-// `kInvalidCommandLineArgument`).
-function invalidNodeArgsChild(message) {
+// parse: prints `<argv0>: <message>` (the program it was started as, here the
+// runtime's path) and exits with 9 (Node's `kInvalidCommandLineArgument`).
+function invalidNodeArgsChild(argv0, message) {
   return [
     "eval",
     "--no-config",
     `Deno.stderr.writeSync(new TextEncoder().encode(${
-      JSONStringify(`node: ${message}\n`)
+      JSONStringify(`${argv0}: ${message}\n`)
     }));Deno.exit(9);`,
   ];
 }
@@ -1920,6 +1920,26 @@ function resolveRunEntrypoint(denoArgs, cwd) {
   }
 }
 
+// denext: Node's permission-model flags in a NODE_OPTIONS value (the shim
+// puts them there under `--permission`), or null without `--permission`.
+const kNodePermissionOption = new SafeRegExp(
+  "^--(permission|experimental-permission|allow-(fs-read|fs-write|child-process|worker|wasi|addons|net|inspector|ffi))(=|$)",
+);
+function inheritedPermissionArgs(nodeOptions) {
+  if (typeof nodeOptions !== "string" || nodeOptions === "") return null;
+  const { splitNodeOptions } = core.loadExtScript(
+    "ext:deno_node/internal_binding/node_options.ts",
+  );
+  const flags = ArrayPrototypeFilter(
+    splitNodeOptions(nodeOptions),
+    (token) => RegExpPrototypeExec(kNodePermissionOption, token) !== null,
+  );
+  return ArrayPrototypeIncludes(flags, "--permission") ||
+      ArrayPrototypeIncludes(flags, "--experimental-permission")
+    ? flags
+    : null;
+}
+
 function buildCommand(
   file,
   args,
@@ -1944,15 +1964,30 @@ function buildCommand(
     } else if (ArrayPrototypeIncludes(args, "--no-use-env-proxy")) {
       env.NODE_USE_ENV_PROXY = "0";
     }
+    // A child of a process under Node's `--permission` inherits the model
+    // (its flags ride in NODE_OPTIONS), as Node's children do: the grants
+    // are mapped for it too, instead of `-A`.
+    const inherited = inheritedPermissionArgs(env.NODE_OPTIONS);
+    let translateArgs = args;
+    if (inherited !== null) {
+      translateArgs = [...new SafeArrayIterator(inherited)];
+      for (let i = 0; i < args.length; i++) {
+        ArrayPrototypePush(translateArgs, args[i]);
+      }
+    }
     let result;
     try {
-      result = op_node_translate_cli_args(args, scriptInNpmPackage, true);
+      result = op_node_translate_cli_args(
+        translateArgs,
+        scriptInNpmPackage,
+        true,
+      );
     } catch (err) {
       // Node's child exits with 9 on arguments it can't parse; so does this
       // one, rather than the spawn throwing.
       const message = nodeCliParseErrorMessage(err);
       if (message === null) throw err;
-      return [file, invalidNodeArgsChild(message), false];
+      return [file, invalidNodeArgsChild(file, message), false];
     }
     args = result.denoArgs;
     resolveRunEntrypoint(args, cwd);
