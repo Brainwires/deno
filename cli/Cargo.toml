@@ -103,6 +103,7 @@ node_shim.workspace = true
 v8.workspace = true
 
 anstream.workspace = true
+ar_archive_writer.workspace = true
 async-trait.workspace = true
 aws-lc-rs.workspace = true
 backhand.workspace = true

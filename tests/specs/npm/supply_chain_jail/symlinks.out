@@ -7,6 +7,8 @@ node: target outside (absolute): denied
 node: target outside (relative): denied
 node: link outside the package: denied
 node: target through a link, then ..: denied
+node: program outside (node_gyp_bins/python3 -> /bin/sh): allowed
+node: plain file outside (/etc/hosts): denied
 deno run -A: Deno.symlinkSync in own dir: allowed
 deno run -A: Deno.symlink in own dir: allowed
 deno run -A: Deno.symlinkSync to /: denied (NotCapable)

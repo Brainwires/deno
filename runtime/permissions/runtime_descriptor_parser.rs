@@ -176,6 +176,15 @@ impl<TSys: RuntimePermissionDescriptorParserSys + std::fmt::Debug>
     SpecialFilePathQueryDescriptor::resolve_allow_scope(&self.sys, path)
   }
 
+  #[cfg(unix)]
+  fn is_executable_file(&self, path: &Path) -> bool {
+    use sys_traits::FsMetadataValue;
+    self.sys.fs_metadata(path).is_ok_and(|meta| {
+      meta.file_type() == sys_traits::FileType::File
+        && meta.mode().is_ok_and(|mode| mode & 0o111 != 0)
+    })
+  }
+
   fn parse_net_query(
     &self,
     text: &str,

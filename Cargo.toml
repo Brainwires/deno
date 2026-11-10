@@ -196,6 +196,7 @@ deno_tunnel = "0.8.1"
 
 # widely used libraries
 anyhow = "1.0.57"
+ar_archive_writer = "0.5.3"
 arc-swap = "1.7"
 argon2 = { version = "0.6.0-rc.8", default-features = false, features = ["alloc"] }
 async-compression = "0.4"

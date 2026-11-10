@@ -1673,8 +1673,10 @@ async fn run_in_dirs(
   }
   // a native build from source gets Node's headers offline, unless the
   // project names its own (DENEXT.md item 288)
+  let node_gyp_build = config.node_headers.is_some()
+    && super::node_headers::needs_node_gyp(s.package_folder, s.script);
   if let Some(headers) = &config.node_headers
-    && super::node_headers::needs_node_gyp(s.package_folder, s.script)
+    && node_gyp_build
     && !env.keys().any(|k| {
       k.to_string_lossy()
         .eq_ignore_ascii_case("npm_config_nodedir")
@@ -1725,7 +1727,7 @@ async fn run_in_dirs(
     serde_json::to_string(&permissions)?.into(),
   );
 
-  let spec = ChildSpec {
+  let mut spec = ChildSpec {
     task_name: s.task_name.to_string(),
     script: s.script.to_string(),
     cwd: s.package_folder.to_path_buf(),
@@ -1747,6 +1749,20 @@ async fn run_in_dirs(
   let current_exe = std::env::current_exe()
     .and_then(|p| canonicalize_path(&p))
     .context("Failed to resolve the deno executable")?;
+  // `node-gyp` on PATH for the build's own children (node-gyp-build), after
+  // the dependencies' bins, so a node-gyp the project installs wins
+  // (DENEXT.md item NNN)
+  if node_gyp_build {
+    let bin = dirs.root.join("bin");
+    match super::node_headers::write_node_gyp_shim(&bin, &current_exe) {
+      Ok(()) => spec.node_modules_bin_dirs.push(bin),
+      Err(err) => {
+        log::debug!(
+          "jail-scripts: the node-gyp command couldn't be written: {err}"
+        )
+      }
+    }
+  }
 
   #[cfg(target_os = "macos")]
   let mut command = if os_sandbox {

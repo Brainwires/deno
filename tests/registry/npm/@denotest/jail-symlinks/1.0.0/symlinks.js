@@ -76,6 +76,19 @@ async function main() {
   // resolved by the kernel from there, not folded away
   attempt("target through a link, then ..", () =>
     fs.symlinkSync("shout/../escaped", path.join(__dirname, "out-dotdot")));
+  // node-gyp links build/node_gyp_bins/python3 to the system Python before
+  // every build: a program outside the folder may be a target (DENEXT.md
+  // item NNN), a plain file outside may not
+  fs.mkdirSync(path.join(__dirname, "build", "node_gyp_bins"), {
+    recursive: true,
+  });
+  attempt("program outside (node_gyp_bins/python3 -> /bin/sh)", () =>
+    fs.symlinkSync(
+      "/bin/sh",
+      path.join(__dirname, "build", "node_gyp_bins", "python3"),
+    ));
+  attempt("plain file outside (/etc/hosts)", () =>
+    fs.symlinkSync("/etc/hosts", path.join(__dirname, "hosts-link")));
   fs.writeFileSync(
     path.join(__dirname, "results.txt"),
     results.join("\n") + "\n",

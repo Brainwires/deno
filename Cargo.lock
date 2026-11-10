@@ -209,6 +209,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ar_archive_writer"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73cd58deff2140a0a8eae87e417bd01db68a33e148aa93d1e8cd837e55e312b6"
+dependencies = [
+ "object 0.39.1",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -561,7 +570,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "miniz_oxide 0.8.8",
- "object",
+ "object 0.36.3",
  "rustc-demangle",
  "windows-targets 0.52.6",
 ]
@@ -2142,6 +2151,7 @@ name = "deno"
 version = "3.0.0-denext.17"
 dependencies = [
  "anstream",
+ "ar_archive_writer",
  "async-trait",
  "aws-lc-rs",
  "backhand",
@@ -3075,7 +3085,7 @@ dependencies = [
  "libuv-sys-lite",
  "log",
  "napi_sym",
- "object",
+ "object 0.36.3",
  "thiserror 2.0.21",
  "windows-sys 0.59.0",
 ]
@@ -7094,7 +7104,7 @@ dependencies = [
  "image",
  "indexmap",
  "libc",
- "object",
+ "object 0.36.3",
  "sha2 0.10.8",
  "thiserror 1.0.69",
  "windows 0.58.0",
@@ -7849,6 +7859,15 @@ dependencies = [
  "crc32fast",
  "hashbrown 0.14.5",
  "indexmap",
+ "memchr",
+]
+
+[[package]]
+name = "object"
+version = "0.39.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e5a6c098c7a3b6547378093f5cc30bc54fd361ce711e05293a5cc589562739b"
+dependencies = [
  "memchr",
 ]
 
