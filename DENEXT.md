@@ -12044,103 +12044,130 @@ where the changes are discussed.
        read, a bad key); LSP `node:` completions list `node:sea`.
 
 NNN. **`test(node)`: an honest Node compatibility score: a test that skips
-itself is a skip, not a pass** (`tests/node_compat/mod.rs`,
-`tests/node_compat/config.jsonc`, `tests/node_compat/schema.json`,
-`tests/node_compat/README.md`). - Node's `common.skip(msg)` prints
-`1..0 # Skipped: <msg>` and exits 0, and the runner counted that as a pass. It
-now reads the line as Node's own runner (tools/test.py) does and reports the
-test as skipped, with the reason; CI never fails on a skip. A test run under
-`deno test` (one that imports `node:test`) has its pre-test output hidden by
-`--quiet`, so there a file that exited before any test ran
-(`0 passed | 0 failed` after Deno's "called `Deno.exit(0)` from outside any
-test" note) counts as skipped. - `expectedSkip` (a reason, or one per platform)
-marks a skip that is by design: a Windows- or Linux-only test, a test for
-another Node build (debug, FIPS, no inspector), a tool the suite doesn't build
-(Node's openssl-cli, nop and overlapped-checker binaries, h2load, wrk, its
-tools/eslint), a TTY or colors the runner doesn't give, and the `sea/` suite
-(Node's SEA build is refused by design, item 296). It only labels the skip in
-the report. - On macOS 203 enabled tests skip themselves (183 printing the line,
-20 under `deno test`): 115 by design and 88 for a missing feature: `node:ffi`
-(11), QUIC (8), Temporal (2), type stripping through Amaro (12), algorithms the
-TLS / crypto stack lacks (38), `process.config` not reporting the runtime's ICU
-(16), which hides `Intl` from the tests, and a multicast test the host's network
-filter stops (1).
+     itself is a skip, not a pass** (`tests/node_compat/mod.rs`,
+     `tests/node_compat/config.jsonc`, `tests/node_compat/schema.json`,
+     `tests/node_compat/README.md`).
+     - Node's `common.skip(msg)` prints `1..0 # Skipped: <msg>` and exits 0,
+       and the runner counted that as a pass. It now reads the line as Node's
+       own runner (tools/test.py) does and reports the test as skipped, with
+       the reason; CI never fails on a skip. A test run under `deno test` (one
+       that imports `node:test`) has its pre-test output hidden by `--quiet`,
+       so there a file that exited before any test ran (`0 passed | 0 failed`
+       after Deno's "called `Deno.exit(0)` from outside any test" note)
+       counts as skipped.
+     - `expectedSkip` (a reason, or one per platform) marks a skip that is by
+       design: a Windows- or Linux-only test, a test for another Node build
+       (debug, FIPS, no inspector), a tool the suite doesn't build (Node's
+       openssl-cli, nop and overlapped-checker binaries, h2load, wrk, its
+       tools/eslint), a TTY or colors the runner doesn't give, and the `sea/`
+       suite (Node's SEA build is refused by design, item 296). It only labels
+       the skip in the report.
+     - On macOS 203 enabled tests skip themselves (183 printing the line, 20
+       under `deno test`): 115 by design and 88 for a missing feature:
+       `node:ffi` (11), QUIC (8), Temporal (2), type stripping through Amaro
+       (12), algorithms the TLS / crypto stack lacks (38), `process.config`
+       not reporting the runtime's ICU (16), which hides `Intl` from the
+       tests, and a multicast test the host's network filter stops (1).
+     - Node tests enabled: none, because this item changes how the runner
+       counts a test that skips itself (a pass becomes a skip); it switches
+       no test on.
 
 NNN. **`feat(node)`: Node's permission model on Deno's permissions**
-(`libs/node_shim/lib.rs`, `ext/node/polyfills/process.ts`,
-`ext/node/polyfills/internal_binding/node_options.ts`,
-`ext/node/polyfills/internal/errors.ts`,
-`ext/node/polyfills/internal/child_process.ts`, `tests/node_compat/mod.rs`). -
-`node --permission` was parsed and dropped: the script ran with `-A`. The shim
-now maps the grants onto Deno's flags in place of `-A`: `--allow-fs-read` /
-`--allow-fs-write` -> `--allow-read` / `--allow-write` (`*` is every path, a
-trailing `/*` the folder, a comma escaped), `--allow-child-process` ->
-`--allow-run`, `--allow-net` -> `--allow-net` (now a boolean, as in Node 25+),
-`--allow-addons` / `--allow-ffi` -> `--allow-ffi`; environment variables and
-system information stay granted (`--allow-env`, `--allow-sys`), as Node's model
-doesn't cover them, and `--no-prompt` refuses the rest instead of asking.
-`--experimental-permission` is an alias; `--permission-audit` (report only)
-keeps `-A`. This applies to a script, `--test` and `--test --watch`. The flags
-ride in NODE_OPTIONS, so a `node` child (`spawn` / `fork` / `execve` of the
-runtime) inherits the model, as Node's children do: its grants are mapped the
-same way. - `process.permission.has(scope[, reference])` exists under
-`--permission` and asks Deno's permission state (the op behind
-`Deno.permissions.querySync`): `fs`, `fs.read`, `fs.write` (a path is checked as
-Deno checks it), `child`, `net`, `addon`. A refused `process.execve()` is Node's
-`ERR_ACCESS_DENIED` (`permission:
-       "ChildProcess"`, `resource`). - Not
-mapped: Deno has no permission for worker threads, WASI or the inspector, so
-`--allow-worker` / `--allow-wasi` / `--allow-inspector` only answer `has()`;
-`-e` / `-p` and the REPL keep all permissions (`deno eval` and `deno repl` take
-none); a Node prefix grant such as `/tmp/foo*` grants `/tmp/foo` only; a `node`
-started through a shell command string (`exec("node ...")`) doesn't inherit it;
-Deno checks a CommonJS `require()` of a local file against `--allow-read`, which
-Node doesn't; refusals keep Deno's message, with Node's `code`, `permission` and
-`resource`. - The node_compat runner gives a test whose `// Flags:` line has
-`--permission` the same mapping (`node_shim::node_permission_flags`). - Tests:
-`libs/node_shim` `test_permission_flags_map_to_deno_grants`,
-`test_permission_without_grants_grants_nothing_of_nodes`,
-`test_permission_boolean_grants`,
-`test_permission_audit_and_no_permission_keep_allow_all`,
-`test_permission_flags_reach_node_test_runner`,
-`test_node_fs_grant_to_deno_path`,
-`test_node_permission_flags_for_a_flags_line`; unit `child_process_test.ts` (the
-grants, `process.permission.has()`, a refused write in the script and in its
-`node` child); node_compat `test-permission-has`, `-allow-child-process-cli`,
-`-allow-wasi-cli`, `-allow-worker-cli`, `-fs-absolute-path`,
-`-fs-relative-path`, `-fs-filehandle-utimes`, `-fs-write-v8`, `-net-allowed` and
-`test-process-execve-permission-fail` enabled. `test-permission-net-websocket`
-(it passed under `-A`) is an expected failure: Deno's `WebSocket` constructor
-throws the refusal instead of firing `error`. The other `test-permission-*`
-tests need `process.permission.drop()`, Node's refusals for the network, child
-processes, workers, WASI and the inspector, and its diagnostics channel.
+     (`libs/node_shim/lib.rs`, `ext/node/polyfills/process.ts`,
+     `ext/node/polyfills/internal_binding/node_options.ts`,
+     `ext/node/polyfills/internal/errors.ts`,
+     `ext/node/polyfills/internal/child_process.ts`,
+     `tests/node_compat/mod.rs`).
+     - `node --permission` was parsed and dropped: the script ran with `-A`.
+       The shim now maps the grants onto Deno's flags in place of `-A`:
+       `--allow-fs-read` / `--allow-fs-write` -> `--allow-read` /
+       `--allow-write` (`*` is every path, a trailing `/*` the folder, a comma
+       escaped), `--allow-child-process` -> `--allow-run`, `--allow-net` ->
+       `--allow-net` (now a boolean, as in Node 25+), `--allow-addons` /
+       `--allow-ffi` -> `--allow-ffi`; environment variables and system
+       information stay granted (`--allow-env`, `--allow-sys`), as Node's
+       model doesn't cover them, and `--no-prompt` refuses the rest instead
+       of asking. `--experimental-permission` is an alias;
+       `--permission-audit` (report only) keeps `-A`. This applies to a
+       script, `--test` and `--test --watch`. The flags ride in NODE_OPTIONS,
+       so a `node` child (`spawn` / `fork` / `execve` of the runtime)
+       inherits the model, as Node's children do: its grants are mapped the
+       same way.
+     - `process.permission.has(scope[, reference])` exists under
+       `--permission` and asks Deno's permission state (the op behind
+       `Deno.permissions.querySync`): `fs`, `fs.read`, `fs.write` (a path is
+       checked as Deno checks it), `child`, `net`, `addon`. A refused
+       `process.execve()` is Node's `ERR_ACCESS_DENIED` (`permission:
+       "ChildProcess"`, `resource`).
+     - Not mapped: Deno has no permission for worker threads, WASI or the
+       inspector, so `--allow-worker` / `--allow-wasi` / `--allow-inspector`
+       only answer `has()`; `-e` / `-p` and the REPL keep all permissions
+       (`deno eval` and `deno repl` take none); a Node prefix grant such as
+       `/tmp/foo*` grants `/tmp/foo` only; a `node` started through a shell
+       command string (`exec("node ...")`) doesn't inherit it; Deno checks a
+       CommonJS `require()` of a local file against `--allow-read`, which
+       Node doesn't; refusals keep Deno's message, with Node's `code`,
+       `permission` and `resource`.
+     - The node_compat runner gives a test whose `// Flags:` line has
+       `--permission` the same mapping (`node_shim::node_permission_flags`).
+       `test-permission-net-websocket` (it passed under `-A`) is now an
+       expected failure: Deno's `WebSocket` constructor throws the refusal
+       instead of firing `error`. The other `test-permission-*` tests need
+       `process.permission.drop()`, Node's refusals for the network, child
+       processes, workers, WASI and the inspector, and its diagnostics
+       channel.
+     - Tests: `libs/node_shim` `test_permission_flags_map_to_deno_grants`,
+       `test_permission_without_grants_grants_nothing_of_nodes`,
+       `test_permission_boolean_grants`,
+       `test_permission_audit_and_no_permission_keep_allow_all`,
+       `test_permission_flags_reach_node_test_runner`,
+       `test_node_fs_grant_to_deno_path`,
+       `test_node_permission_flags_for_a_flags_line`; unit
+       `child_process_test.ts` (the grants, `process.permission.has()`, a
+       refused write in the script and in its `node` child).
+     - Node tests enabled: 10 (`parallel/test-permission-has`,
+       `test-permission-allow-child-process-cli`,
+       `test-permission-allow-wasi-cli`, `test-permission-allow-worker-cli`,
+       `test-permission-fs-absolute-path`, `test-permission-fs-relative-path`,
+       `test-permission-fs-filehandle-utimes`, `test-permission-fs-write-v8`,
+       `test-permission-net-allowed`, `test-process-execve-permission-fail`).
 
 NNN. **`fix(ext/node)`: the profiling and `process.execve` tests denext.17's
-features pass, switched on** (`ext/node/polyfills/worker_threads.ts`,
-`ext/node/polyfills/v8.ts`, `ext/node/ops/v8.rs`,
-`ext/node/polyfills/internal/child_process.ts`, `libs/node_shim/lib.rs`,
-`tests/node_compat/config.jsonc`). - `worker.startCpuProfile()` /
-`worker.startHeapProfile()` threw "cannot be lazy-loaded": `v8.ts` is a
-lazy-loaded script, loaded with `loadExtScript`, not `createLazyLoader`. -
-`v8.startHeapProfile({ forceGC: true })` threw "No inspector response to
-HeapProfiler.collectGarbage": the inspector answers that request from a later
-task. A new `op_v8_force_gc` runs a full collection first. - A spawn of the
-runtime with Node arguments it refuses prints `<argv0>: <message>` (the
-program's path), as Node does, not `node:`. - Node's parser reads an unsigned
-option as `strtoull` does: the leading digits, else 0, never an error
-(`--cpu-prof-interval crashme` alone is "must be used with --cpu-prof"). -
-node_compat enabled: `test-tls-ticket`, `-ticket-12`, `-ticket-cluster`,
-`test-https-agent-session-reuse`, `-disable-session-reuse` (item 291's session
-resumption, named there but never switched on); `test-process-execve`,
-`-on-exit`, `-permission-granted`, `-socket`, `-throws`, `-validation` (item
-295; the old reason was "process.execve is not a function");
-`sequential/test-cpu-prof-*` (11) and `parallel/test-heap-prof-*` (11),
-`test-v8-cpu-profile`, `test-v8-heap-profile`, `test-worker-cpu-profile`,
-`test-worker-heap-profile` (item 293). `test-performance-nodetiming` stays off:
-`nodeStart` is negative (item 295: `performance.timeOrigin` is the runtime
-instance's start, not the process's), and there is no `uvMetricsInfo`. - Tests:
-`libs/node_shim` `test_uinteger_option_parses_as_strtoull`; unit
-`child_process_test.ts` (the refusal's `<argv0>:` prefix).
+     features pass, switched on** (`ext/node/polyfills/worker_threads.ts`,
+     `ext/node/polyfills/v8.ts`, `ext/node/ops/v8.rs`,
+     `ext/node/polyfills/internal/child_process.ts`, `libs/node_shim/lib.rs`,
+     `tests/node_compat/config.jsonc`).
+     - `worker.startCpuProfile()` / `worker.startHeapProfile()` threw "cannot
+       be lazy-loaded": `v8.ts` is a lazy-loaded script, loaded with
+       `loadExtScript`, not `createLazyLoader`.
+     - `v8.startHeapProfile({ forceGC: true })` threw "No inspector response
+       to HeapProfiler.collectGarbage": the inspector answers that request
+       from a later task. A new `op_v8_force_gc` runs a full collection first.
+     - A spawn of the runtime with Node arguments it refuses prints
+       `<argv0>: <message>` (the program's path), as Node does, not `node:`.
+     - Node's parser reads an unsigned option as `strtoull` does: the leading
+       digits, else 0, never an error (`--cpu-prof-interval crashme` alone is
+       "must be used with --cpu-prof").
+     - The TLS ticket and session-reuse tests (item 291 names them but never
+       switched them on) and the `process.execve` ones (item 295; the old
+       reason was "process.execve is not a function") pass as they are.
+       `test-performance-nodetiming` stays off: `nodeStart` is negative (item
+       295: `performance.timeOrigin` is the runtime instance's start, not the
+       process's), and there is no `uvMetricsInfo`.
+     - Tests: `libs/node_shim` `test_uinteger_option_parses_as_strtoull`;
+       unit `child_process_test.ts` (the refusal's `<argv0>:` prefix).
+     - Node tests enabled: 37 (`parallel/test-tls-ticket`, `-ticket-12`,
+       `-ticket-cluster`, `test-https-agent-session-reuse`,
+       `test-https-agent-disable-session-reuse`, `test-process-execve`,
+       `-on-exit`, `-permission-granted`, `-socket`, `-throws`,
+       `-validation`; `sequential/test-cpu-prof-` `default`, `dir-absolute`,
+       `dir-and-name`, `dir-relative`, `dir-worker`, `drained`, `exit`,
+       `invalid-options`, `kill`, `name`, `worker-argv`;
+       `parallel/test-heap-prof-` `basic`, `dir-absolute`, `dir-name`,
+       `dir-relative`, `exec-argv`, `exit`, `interval`, `invalid-args`,
+       `loop-drained`, `name`, `sigint`; `test-v8-cpu-profile`,
+       `test-v8-heap-profile`, `test-worker-cpu-profile`,
+       `test-worker-heap-profile`).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
