@@ -4,10 +4,12 @@
 const { core, primordials } = __bootstrap;
 const { op_signal_bind, op_signal_poll, op_signal_unbind } = core.ops;
 const {
+  ArrayFrom,
   SafeSet,
   SafeSetIterator,
   SetPrototypeAdd,
   SetPrototypeDelete,
+  SetPrototypeHas,
   TypeError,
 } = primordials;
 
@@ -70,12 +72,20 @@ function removeSignalListener(signo, listener) {
 }
 
 async function loop(sigData) {
-  while (sigData.rid) {
-    if (await pollSignal(sigData.rid)) {
+  // Each loop serves the resource it was started for: removing the last
+  // listener and adding one again from inside a listener binds a new resource
+  // with its own loop, and this one must stop rather than poll that resource
+  // too (which would deliver every later signal twice).
+  const rid = sigData.rid;
+  while (sigData.rid === rid) {
+    if (await pollSignal(rid)) {
       return;
     }
-    for (const listener of new SafeSetIterator(sigData.listeners)) {
-      listener();
+    // The listeners at delivery: one added by a listener waits for the next
+    // signal, as with EventEmitter.
+    const listeners = ArrayFrom(new SafeSetIterator(sigData.listeners));
+    for (let i = 0; i < listeners.length; i++) {
+      if (SetPrototypeHas(sigData.listeners, listeners[i])) listeners[i]();
     }
   }
 }

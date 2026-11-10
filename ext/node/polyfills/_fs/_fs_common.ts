@@ -116,16 +116,26 @@ function fsReqCallback(cb) {
       triggerAsyncId,
       resource,
     );
+    let threw = true;
     try {
-      return ReflectApply(cb, undefined, args);
+      const ret = ReflectApply(cb, undefined, args);
+      threw = false;
+      return ret;
     } finally {
-      exitNativeCallback(prior, asyncId);
+      exitNativeCallback(prior, asyncId, threw);
       emitDestroy(asyncId);
     }
   };
 }
 
+// fsReqCallback() for a call site that keeps its own `this`: with no hook
+// enabled the callback is returned as is (no wrapper on the hot path).
+function maybeFsReqCallback(cb) {
+  return enabledHooksExist() ? fsReqCallback(cb) : cb;
+}
+
 return {
+  maybeFsReqCallback,
   isFileOptions,
   getValidatedEncoding,
   getEncoding,

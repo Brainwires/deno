@@ -210,7 +210,30 @@
     immediateQueue.remove(immediate);
   }
 
+  // Native immediates, as Node's Environment::SetImmediate with kUnrefed:
+  // callbacks the runtime itself queues (the async_hooks destroy queue). They
+  // run at the start of the next check phase, before the JS immediates, emit
+  // no async hooks, and occupy one unrefed immediate slot while pending, so
+  // they fire when other work drives an iteration but never keep the loop
+  // alive.
+  let nativeImmediates = [];
+
+  function queueNativeImmediate(callback) {
+    if (nativeImmediates.length === 0) immediateInfo[kImmCount]++;
+    ArrayPrototypePush(nativeImmediates, callback);
+  }
+
+  function runNativeImmediates() {
+    const callbacks = nativeImmediates;
+    nativeImmediates = [];
+    immediateInfo[kImmCount]--;
+    for (let i = 0; i < callbacks.length; i++) {
+      callbacks[i]();
+    }
+  }
+
   function runImmediates() {
+    if (nativeImmediates.length > 0) runNativeImmediates();
     const queue = outstandingQueue.head !== null
       ? outstandingQueue
       : immediateQueue;
@@ -584,10 +607,19 @@
     return nativeQueueMicrotask;
   }
 
+  // Set by ext/node while an async hook is enabled: turns a queued callback
+  // into a Node `Microtask` async resource. Null otherwise, so the common path
+  // costs one comparison.
+  let microtaskResourceHook = null;
+  function setMicrotaskResourceHook(hook) {
+    microtaskResourceHook = hook;
+  }
+
   function queueMicrotask(cb) {
     if (typeof cb != "function") {
       throw new TypeError("expected a function");
     }
+    if (microtaskResourceHook !== null) cb = microtaskResourceHook(cb);
     const enqueue = nativeQueueMicrotask ?? captureNativeQueueMicrotask();
     return enqueue(() => {
       try {
@@ -1143,6 +1175,8 @@
     queueImmediate,
     clearImmediate,
     runImmediates,
+    queueNativeImmediate,
+    setMicrotaskResourceHook,
     immediateQueue,
     getActiveImmediateCount() {
       return immediateInfo[kImmRefCount];

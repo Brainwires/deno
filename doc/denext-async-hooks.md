@@ -146,31 +146,50 @@ current.
 
 See the branch report for the numbers; recorded here once measured.
 
+## Resource graphs (the second step)
+
+The second step (DENEXT `NNN.`) made the rest of the graph match Node, still in
+JS. `destroy` hooks are queued and delivered from a native immediate
+(`Deno.core.queueNativeImmediate`, Node's unrefed `SetImmediate`); requests are
+`ReqWrap`s (`initReqWrap()`: `init` when made, `oncomplete` between `before` /
+`after`, then `destroy`): TCPCONNECTWRAP, PIPECONNECTWRAP, SHUTDOWNWRAP,
+WRITEWRAP, GETADDRINFOREQWRAP, GETNAMEINFOREQWRAP, QUERYWRAP, UDPSENDWRAP;
+handles UDPWRAP, PROCESSWRAP, SIGNALWRAP, STATWATCHER and FSEVENTWRAP;
+`queueMicrotask()` makes a `Microtask`; `fs.readFile()` is four chained
+FSREQCALLBACKs while a hook is enabled; `executionAsyncResource()` follows the
+id stack; promises made by the runtime's own JS are not reported; hook errors
+and a corrupted stack are fatal as in Node, and an uncaught exception's `after`
+hooks run once it is handled. Everything new is behind the enabled-hooks check.
+
 ## What is left (later steps)
 
-- **The PROMISE resources the polyfills create.** Callback APIs implemented over
-  promises (`fs`, `dns`, ...) still report their internal promises as PROMISE
-  resources, which Node never does; an FSREQCALLBACK now wraps the callback, but
-  the promise's own init / before stays in the graph. Hiding them means creating
-  those promises inside core's internal-promise scope
-  (`isCreatingInternalPromise()`), a change per call site or in core's op
-  promise machinery.
-- **Exact request counts.** Node's `readFile` is four FSREQCALLBACKs (open,
-  fstat, read, close); ours is one per user call. `test-graph.fsreq-readFile`
-  and `test-fsreqcallback-readFile` need the four.
-- **Write / shutdown / connect requests as resources** (WRITEWRAP, SHUTDOWNWRAP,
-  TCPCONNECTWRAP, GETADDRINFOREQWRAP, QUERYWRAP), PIPEWRAP / PROCESSWRAP for
-  child processes, STATWATCHER, FSEVENTWRAP, SIGNALWRAP, UDP, ZLIB, TLSWRAP.
-  Each is the same MakeCallback emulation at its own callback sites; the cleaner
-  long-term fix is in Rust: capture the frame in `AsyncWrap` and give the
-  libuv-compat layer one `make_callback` that sets the continuation data around
-  every JS call, so the per-site JS wrappers go away.
-- **Destroy timing.** Node queues `destroy` hooks and runs them after the
-  current callback; several tests (`test-enable-disable`, `test-immediate`,
-  `test-http-agent-handle-reuse-serial`) expect that order.
-- **`diagnostics_channel`**: `boundedChannel` and `Channel#withStoreScope` (Node
-  26), and the `undici:request:*` channels for global `fetch` that
-  OpenTelemetry's undici instrumentation and dd-trace subscribe to (that is an
-  `ext/fetch` change).
-- **`internal/async_context_frame`** is not exposed (`require('internal/...')`
-  is out of scope by design).
+The Node tests still failing, and why:
+
+- `test-tcpwrap`: the server's `close` comes from a 0 ms system timer (to avoid
+  EADDRINUSE on an immediate re-listen), so it fires after the accepted socket's
+  close callback instead of before it.
+- `test-writewrap`: a 2-byte `conn.write()` reports an asynchronous completion
+  from the native stream layer, where libuv's `uv_try_write` finishes it at once
+  (no WRITEWRAP in Node). A native change.
+- `test-graph.signal`: Node triggers the second SIGNALWRAP by a child's stdout
+  pipe, an artifact of how its signal delivery nests; ours is triggered by the
+  first SIGNALWRAP.
+- TLSWRAP (`test-tlswrap`, `test-graph.tls-write*`): the TLS socket is not
+  reported as its own resource between the TCP handle and its callbacks.
+- ZLIB (`test-zlib.zlib-binding.deflate`): `internalBinding('zlib').Zlib` is not
+  provided.
+- `test-destroy-not-blocked`: needs promise `destroy` on GC and Node's
+  16384-entry microtask flush of the destroy queue.
+- `test-emit-before-on-destroyed`: Node's main script runs inside a callback
+  scope whose close detects a dangling `before`; ours has none.
+- `test-callback-error` (case 3) needs `--abort-on-uncaught-exception`;
+  `test-async-wrap-providers` / `test-track-promises-false-check` need internal
+  bindings (`getPromiseHooks`, the full provider list);
+  `test-filehandle-no-reuse` needs FileHandle requests (FILEHANDLECLOSEREQ);
+  `test-unhandled-rejection-context` runs 'unhandledRejection' outside the
+  rejected promise's scope; `test-async-local-storage-errors` needs the ALS
+  store kept for the uncaught-exception capture callback;
+  `test-async-local-storage-gcable` needs `internal/async_context_frame`.
+- The long-term fix is still the Rust one: capture the frame in `AsyncWrap` and
+  give the libuv-compat layer one `make_callback`, so the per-site JS wrappers
+  go away.

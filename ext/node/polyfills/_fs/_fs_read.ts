@@ -28,6 +28,10 @@ const {
   kEmptyObject,
 } = core.loadExtScript("ext:deno_node/internal/util.mjs");
 const lazyProcess = core.createLazyLoader("node:process");
+// deno-lint-ignore no-explicit-any
+let fsCommon: any;
+const lazyFsCommon = () =>
+  fsCommon ??= core.loadExtScript("ext:deno_node/_fs/_fs_common.ts");
 
 const {
   BigInt,
@@ -126,6 +130,7 @@ export function read(
 
   validateBuffer(buffer);
   validateFunction(callback, "cb");
+  callback = lazyFsCommon().maybeFsReqCallback(callback);
 
   if (offset == null) {
     offset = 0;

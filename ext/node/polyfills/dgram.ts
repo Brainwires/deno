@@ -33,6 +33,7 @@ const {
   PromiseResolve,
   ReflectApply,
   SafeArrayIterator,
+  Symbol,
   SymbolAsyncDispose,
 } = primordials;
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
@@ -57,8 +58,14 @@ const { kStateSymbol, newHandle } = core.loadExtScript(
 const {
   asyncIdSymbol,
   defaultTriggerAsyncIdScope,
+  emitDestroy,
+  emitInit,
+  enabledHooksExist,
+  getDefaultTriggerAsyncId,
+  initReqWrap,
   ownerSymbol,
 } = core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
+const kUdpWrapReported = Symbol("kUdpWrapReported");
 const { SendWrap } = core.loadExtScript(
   "ext:deno_node/internal_binding/udp_wrap.ts",
 );
@@ -211,6 +218,16 @@ class Socket extends EventEmitter {
 
     this[asyncIdSymbol] = handle.getAsyncId();
     this.type = type;
+    // Node's UDPWRAP, reported while a hook is enabled.
+    if (enabledHooksExist()) {
+      handle[kUdpWrapReported] = true;
+      emitInit(
+        this[asyncIdSymbol],
+        "UDPWRAP",
+        getDefaultTriggerAsyncId(),
+        handle,
+      );
+    }
 
     if (typeof listener === "function") {
       this.on("message", listener);
@@ -563,7 +580,9 @@ class Socket extends EventEmitter {
 
     stopReceiving(this);
 
+    const reported = state.handle![kUdpWrapReported] === true;
     state.handle!.close(() => {
+      if (reported) emitDestroy(this[asyncIdSymbol]);
       // Deviates from the Node implementation to avoid leaking the timer ops at 'close' event
       defaultTriggerAsyncIdScope(
         this[asyncIdSymbol],
@@ -1641,6 +1660,7 @@ function doSend(
   if (callback) {
     req.callback = callback;
     req.oncomplete = afterSend;
+    initReqWrap(req, "UDPSENDWRAP", self[asyncIdSymbol]);
   }
 
   let err;

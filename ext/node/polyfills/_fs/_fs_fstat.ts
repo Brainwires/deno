@@ -17,6 +17,10 @@ const lazyStatUtils = core.createLazyLoader(
 const lazyFsUtils = core.createLazyLoader(
   "ext:deno_node/internal/fs/utils.mjs",
 );
+// deno-lint-ignore no-explicit-any
+let fsCommon: any;
+const lazyFsCommon = () =>
+  fsCommon ??= core.loadExtScript("ext:deno_node/_fs/_fs_common.ts");
 const { denoErrorToNodeError } = core.loadExtScript(
   "ext:deno_node/internal/errors.ts",
 );
@@ -61,15 +65,16 @@ function fstat(
     : { bigint: false };
 
   if (!callback) throw new Error("No callback function supplied");
+  const cb = lazyFsCommon().maybeFsReqCallback(callback);
 
   PromisePrototypeThen(
     op_node_fs_fstat(fd),
     (stat) =>
-      callback(
+      cb(
         null,
         lazyStatUtils().CFISBIS(nodeFsStatToFileInfo(stat), options.bigint),
       ),
-    (err) => callback(denoErrorToNodeError(err, { syscall: "fstat" })),
+    (err) => cb(denoErrorToNodeError(err, { syscall: "fstat" })),
   );
 }
 
