@@ -1424,12 +1424,26 @@ Deno.test({
 });
 
 Deno.test({
-  name: "process.report.writeReport unimplemented result",
+  name: "process.report.writeReport writes a report file",
   fn() {
     // The process.report is marked as possibly undefined in node 18 typings
     if (!process.report) throw "No process report";
 
-    assertEquals(process.report.writeReport(), "");
+    const dir = Deno.makeTempDirSync();
+    const previous = process.report.directory;
+    process.report.directory = dir;
+    try {
+      const name = process.report.writeReport();
+      assertMatch(name, /^report\.\d{8}\.\d{6}\.\d+\.\d+\.\d{3}\.json$/);
+      const written = JSON.parse(Deno.readTextFileSync(`${dir}/${name}`));
+      assertEquals(written.header.reportVersion, 5);
+      assertEquals(written.header.event, "JavaScript API");
+      assertEquals(written.header.trigger, "API");
+      assertEquals(written.header.filename, name);
+    } finally {
+      process.report.directory = previous;
+      Deno.removeSync(dir, { recursive: true });
+    }
   },
 });
 
@@ -1441,88 +1455,67 @@ Deno.test({
 
     // deno-lint-ignore no-explicit-any
     const result = process.report.getReport() as any;
+    const { header } = result;
 
-    // test and remove dynamic parts
-    assert(typeof result.header.filename === "string");
-    delete result.header.filename;
-    assert(typeof result.header.dumpEventTime === "object");
-    delete result.header.dumpEventTime;
-    assert(typeof result.header.dumpEventTimeStamp === "number");
-    delete result.header.dumpEventTimeStamp;
-    assert(typeof result.header.processId === "number");
-    delete result.header.processId;
-    assert(typeof result.header.cwd === "string");
-    delete result.header.cwd;
-    assert(typeof result.header.nodejsVersion === "string");
-    assert(result.header.nodejsVersion.startsWith("v"));
-    delete result.header.nodejsVersion;
-    assert(typeof result.header.arch === "string");
-    delete result.header.arch;
-    assert(typeof result.header.platform === "string");
-    delete result.header.platform;
-    assert(typeof result.header.componentVersions === "object");
-    delete result.header.componentVersions;
-    assert(typeof result.header.osName === "string");
-    delete result.header.osName;
-    assert(typeof result.header.osMachine === "string");
-    delete result.header.osMachine;
-    assert(Array.isArray(result.header.cpus));
-    delete result.header.cpus;
-    assert(typeof result.header.networkInterfaces === "object");
-    delete result.header.networkInterfaces;
-    assert(typeof result.header.host === "string");
-    delete result.header.host;
+    // Node's report format, version 5.
+    assertEquals(header.reportVersion, 5);
+    assertEquals(header.event, "JavaScript API");
+    assertEquals(header.trigger, "GetReport");
+    assertEquals(header.filename, null);
+    assertEquals(header.threadId, 0);
+    assertEquals(header.wordSize, 64);
+    assertEquals(header.processId, process.pid);
+    assertEquals(header.nodejsVersion, process.version);
+    assertEquals(header.release, process.release);
+    assert(header.nodejsVersion.startsWith("v"));
+    for (
+      const key of [
+        "dumpEventTime",
+        "dumpEventTimeStamp",
+        "cwd",
+        "arch",
+        "platform",
+        "osName",
+        "osRelease",
+        "osVersion",
+        "osMachine",
+        "host",
+      ]
+    ) {
+      assert(typeof header[key] === "string", `header.${key}`);
+    }
+    assert(Array.isArray(header.commandLine));
+    assert(Array.isArray(header.cpus));
+    assert(typeof header.componentVersions === "object");
+    assert(typeof header.networkInterfaces === "object");
 
     // glibc fields only exist on Linux+glibc builds; on musl Linux and
     // non-Linux platforms the keys must be absent so libc-flavor detection
     // works (denoland/deno#33948).
     const isGlibc = Deno.build.os === "linux" && Deno.build.env === "gnu";
     if (isGlibc) {
-      assertEquals(result.header.glibcVersionRuntime, "2.38");
-      assertEquals(result.header.glibcVersionCompiler, "2.38");
-      delete result.header.glibcVersionRuntime;
-      delete result.header.glibcVersionCompiler;
+      assertEquals(header.glibcVersionRuntime, "2.38");
+      assertEquals(header.glibcVersionCompiler, "2.38");
     } else {
       assert(
-        !("glibcVersionRuntime" in result.header),
+        !("glibcVersionRuntime" in header),
         "glibcVersionRuntime must not be present on non-glibc platforms",
       );
       assert(
-        !("glibcVersionCompiler" in result.header),
+        !("glibcVersionCompiler" in header),
         "glibcVersionCompiler must not be present on non-glibc platforms",
       );
     }
 
-    // test hardcoded part
-    assertEquals(result, {
-      header: {
-        reportVersion: 3,
-        event: "JavaScript API",
-        trigger: "GetReport",
-        threadId: 0,
-        commandLine: ["node"],
-        wordSize: 64,
-        release: {
-          name: "node",
-          headersUrl:
-            "https://nodejs.org/download/release/v21.2.0/node-v21.2.0-headers.tar.gz",
-          sourceUrl:
-            "https://nodejs.org/download/release/v21.2.0/node-v21.2.0.tar.gz",
-        },
-        osRelease: undefined,
-        osVersion: undefined,
-      },
-      javascriptStack: undefined,
-      javascriptHeap: undefined,
-      nativeStack: undefined,
-      resourceUsage: undefined,
-      uvthreadResourceUsage: undefined,
-      libuv: undefined,
-      workers: [],
-      environmentVariables: undefined,
-      userLimits: undefined,
-      sharedObjects: undefined,
-    });
+    // The sections: the runtime has no native stack walker, libuv handle list
+    // or worker subreports, so those are Node's empty values.
+    assert(typeof result.javascriptStack === "object");
+    assert(typeof result.javascriptHeap === "object");
+    assert(typeof result.resourceUsage === "object");
+    assertEquals(result.nativeStack, []);
+    assertEquals(result.libuv, []);
+    assertEquals(result.workers, []);
+    assert(Array.isArray(result.sharedObjects));
   },
 });
 
