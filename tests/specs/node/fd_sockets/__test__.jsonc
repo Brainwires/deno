@@ -11,6 +11,21 @@
       "args": "run --allow-read=. --allow-write=. --allow-env --allow-run=mkfifo pipe_fd.mjs",
       "output": "pipe_fd.out"
     },
+    "worker_pipe_fd": {
+      "if": "unix",
+      "args": "run --allow-read --allow-write --allow-env --allow-run=mkfifo worker_pipe_fd.mjs",
+      "output": "worker_pipe_fd.out"
+    },
+    "worker_pipe_fd_all": {
+      "if": "unix",
+      "args": "run -A worker_pipe_fd.mjs",
+      "output": "worker_pipe_fd.out"
+    },
+    "worker_pipe_fd_scoped": {
+      "if": "unix",
+      "args": "run --allow-read=. --allow-write=. --allow-env --allow-run=mkfifo worker_pipe_fd.mjs",
+      "output": "worker_pipe_fd_scoped.out"
+    },
     "pty_fd": {
       "if": "unix",
       "args": "run --allow-run --allow-read pty_fd.ts",

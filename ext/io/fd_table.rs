@@ -5,6 +5,8 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use crate::fs::File;
 
@@ -40,6 +42,25 @@ pub enum FdOwnership {
 /// to look up files and detect duplicate registrations.
 pub struct FdTable {
   entries: HashMap<i32, FdOwnership>,
+  /// denext: this table's key in [`TABLE_OWNED_FDS`].
+  id: u64,
+}
+
+static NEXT_TABLE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// denext: the TableOwned descriptors above stdio of every isolate's table
+/// (the main thread's and each worker's), by the owning table's id, so a
+/// libuv wrap in another isolate of the process can tell a descriptor one
+/// of them opened (and had permission to open) from an unknown one. An entry
+/// lives exactly as long as the owning table's entry: [`FdTable::remove`]
+/// and the table's drop take it out.
+static TABLE_OWNED_FDS: OnceLock<Mutex<HashMap<i32, u64>>> = OnceLock::new();
+
+fn table_owned_fds() -> std::sync::MutexGuard<'static, HashMap<i32, u64>> {
+  TABLE_OWNED_FDS
+    .get_or_init(Default::default)
+    .lock()
+    .unwrap_or_else(|e| e.into_inner())
 }
 
 static INTERNAL_FDS: OnceLock<Mutex<HashSet<i32>>> = OnceLock::new();
@@ -57,6 +78,7 @@ impl FdTable {
   pub fn new() -> Self {
     Self {
       entries: HashMap::new(),
+      id: NEXT_TABLE_ID.fetch_add(1, Ordering::Relaxed),
     }
   }
 
@@ -66,7 +88,26 @@ impl FdTable {
       return false;
     }
     self.entries.insert(fd, FdOwnership::TableOwned(file));
+    if fd > 2 {
+      table_owned_fds().insert(fd, self.id);
+    }
     true
+  }
+
+  /// denext: whether `fd` is a TableOwned descriptor of another isolate's
+  /// table (a worker's, or the main thread's from a worker).
+  pub fn is_table_owned_elsewhere(&self, fd: i32) -> bool {
+    !self.entries.contains_key(&fd)
+      && table_owned_fds()
+        .get(&fd)
+        .is_some_and(|owner| *owner != self.id)
+  }
+
+  fn forget_table_owned(&self, fd: i32) {
+    let mut fds = table_owned_fds();
+    if fds.get(&fd) == Some(&self.id) {
+      fds.remove(&fd);
+    }
   }
 
   /// Register an inherited extra stdio fd. Returns false if already registered.
@@ -117,7 +158,10 @@ impl FdTable {
   /// to close). For UvOwned, returns None (uv handle closes the fd).
   pub fn remove(&mut self, fd: i32) -> Option<Rc<dyn File>> {
     match self.entries.remove(&fd) {
-      Some(FdOwnership::TableOwned(file)) => Some(file),
+      Some(FdOwnership::TableOwned(file)) => {
+        self.forget_table_owned(fd);
+        Some(file)
+      }
       Some(FdOwnership::InheritedExtraStdio(file)) => Some(file),
       Some(FdOwnership::UvOwned) => None,
       Some(FdOwnership::Adoptable) => None,
@@ -197,6 +241,13 @@ impl Default for FdTable {
   }
 }
 
+impl Drop for FdTable {
+  fn drop(&mut self) {
+    let mut fds = table_owned_fds();
+    fds.retain(|_, owner| *owner != self.id);
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -229,6 +280,30 @@ mod tests {
     assert_eq!(fd_table.begin_uv_adopt(40, false), Some(true));
     fd_table.finish_uv_adopt(40, true);
     assert_eq!(fd_table.begin_uv_adopt(40, false), None);
+  }
+
+  #[test]
+  fn table_owned_fds_are_visible_to_other_tables_while_owned() {
+    // A number no other test registers.
+    let fd = 9_871;
+    let mut owner = FdTable::new();
+    let other = FdTable::new();
+    let file = || -> Rc<dyn File> {
+      Rc::new(crate::StdFileResourceInner::file(
+        std::fs::File::open(std::env::current_exe().unwrap()).unwrap(),
+        None,
+      ))
+    };
+    assert!(owner.register(fd, file()));
+    assert!(!owner.is_table_owned_elsewhere(fd));
+    assert!(other.is_table_owned_elsewhere(fd));
+    drop(owner.remove(fd));
+    assert!(!other.is_table_owned_elsewhere(fd));
+
+    assert!(owner.register(fd, file()));
+    assert!(other.is_table_owned_elsewhere(fd));
+    drop(owner);
+    assert!(!other.is_table_owned_elsewhere(fd));
   }
 
   #[test]

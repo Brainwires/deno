@@ -11,7 +11,11 @@
 //! - an fd this isolate opened through node:fs (`fs.openSync` on a FIFO, a
 //!   unix socket or a terminal), which it already had permission to open;
 //! - an fd the process inherited at startup (socket activation's fd 3, a
-//!   parent's pipe), claimed once process-wide.
+//!   parent's pipe), claimed once process-wide;
+//! - a FIFO, socket or terminal another isolate of the process (a worker,
+//!   or the main thread from a worker) opened through node:fs, when this
+//!   isolate holds unscoped read and write access (so it could have opened
+//!   it itself): the wrap gets a dup and the other isolate keeps its fd.
 //!
 //! Any other descriptor (one a native addon or another isolate created) is
 //! process-wide state, so it needs either every permission or an unscoped
@@ -33,6 +37,10 @@ enum Kind {
   /// entry is released once the open succeeds.
   #[cfg(unix)]
   TableOwned { original: i32 },
+  /// A node:fs fd of another isolate: the wrap gets a dup, which it owns;
+  /// the other isolate's entry stays as it is.
+  #[cfg(unix)]
+  OtherIsolate,
 }
 
 /// An adoption in progress: open `fd` with libuv, then call [`finish`].
@@ -64,6 +72,15 @@ fn has_process_wide_grant(state: &OpState, api_name: &str) -> bool {
     .check_has_all_permissions(Path::new(api_name))
     .is_ok()
     || matches!(permissions.query_ffi(None), Ok(PermissionState::Granted))
+}
+
+/// Whether the isolate holds unscoped read and write access, checked as
+/// creating a symlink is (`check_read_all` + `check_write_all`).
+#[cfg(unix)]
+fn has_unscoped_read_write(state: &OpState, api_name: &str) -> bool {
+  let permissions = state.borrow::<PermissionsContainer>();
+  permissions.check_read_all(api_name).is_ok()
+    && permissions.check_write_all(api_name).is_ok()
 }
 
 /// Decide whether a libuv stream wrap may adopt `fd`. On refusal returns the
@@ -116,6 +133,27 @@ pub(crate) fn begin(
     // Owned by another wrap (UvOwned) or by the runtime itself.
     return Err(uv_compat::UV_EEXIST);
   }
+  #[cfg(unix)]
+  if table.is_table_owned_elsewhere(fd) {
+    if !is_stream_fd(fd) {
+      return Err(uv_compat::UV_EEXIST);
+    }
+    if !has_process_wide_grant(state, api_name)
+      && !has_unscoped_read_write(state, api_name)
+    {
+      return Err(uv_compat::UV_EPERM);
+    }
+    // SAFETY: fcntl validates the descriptor; the dup is owned by the wrap
+    // once the open succeeds and closed by `finish` otherwise.
+    let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+    if dup < 0 {
+      return Err(uv_compat::UV_EBADF);
+    }
+    return Ok(FdAdoption {
+      fd: dup,
+      kind: Kind::OtherIsolate,
+    });
+  }
   if deno_io::claim_inherited_fd(fd) {
     return Ok(FdAdoption {
       fd,
@@ -163,6 +201,15 @@ pub(crate) fn finish(state: &mut OpState, adoption: FdAdoption, ret: i32) {
         // original number (or does so once an in-flight node:fs operation
         // lets go of it); the open file description lives on in the dup.
         drop(table.remove(original));
+        table.register_uv_owned(fd);
+      } else {
+        // SAFETY: the dup was created by `begin` and never handed out.
+        unsafe { libc::close(fd) };
+      }
+    }
+    #[cfg(unix)]
+    Kind::OtherIsolate => {
+      if ret == 0 {
         table.register_uv_owned(fd);
       } else {
         // SAFETY: the dup was created by `begin` and never handed out.
