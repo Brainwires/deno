@@ -36,6 +36,7 @@ import {
   op_node_process_setgroups,
   op_node_process_setuid,
   op_process_abort,
+  op_query_permission,
   op_stream_base_register_state,
 } from "ext:core/ops";
 
@@ -64,6 +65,7 @@ const {
   validateUint32,
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
 const {
+  accessDeniedOrError,
   denoErrorToNodeError,
   ERR_FEATURE_UNAVAILABLE_ON_PLATFORM,
   ERR_INVALID_ARG_TYPE,
@@ -204,6 +206,7 @@ const {
   StringPrototypeStartsWith,
   SymbolFor,
   SymbolToStringTag,
+  TypedArrayPrototypeGetSymbolToStringTag,
 } = primordials;
 
 export const argv: string[] = ["", ""];
@@ -828,8 +831,15 @@ function execve(
     ArrayPrototypePush(envPairs, keys[i], String(envObject[keys[i]]));
   }
 
-  // Returns only when execve(2) failed, with its errno.
-  const errno = op_node_process_execve(execPath, argv, envPairs);
+  // Returns only when execve(2) failed, with its errno. A refusal by
+  // `--allow-run` is Node's `ERR_ACCESS_DENIED` (`permission:
+  // "ChildProcess"`, `resource`: the program).
+  let errno;
+  try {
+    errno = op_node_process_execve(execPath, argv, envPairs);
+  } catch (e) {
+    throw accessDeniedOrError(e, { syscall: "execve", path: execPath });
+  }
   const err = uvException({ errno: -errno, syscall: "execve", path: execPath });
   err.errno = errno;
   throw err;
@@ -1888,6 +1898,78 @@ ObjectDefineProperty(process, SymbolToStringTag, {
   value: "process",
 });
 
+// denext: `process.permission` under Node's `--permission`. The node shim
+// maps Node's `--allow-fs-read` / `--allow-fs-write` / `--allow-child-process`
+// / `--allow-net` / `--allow-addons` onto Deno's flags, so `has()` asks Deno's
+// own permission state (the op behind `Deno.permissions.querySync`). Deno has
+// no separate worker, WASI or inspector permission: those answer what the
+// command line granted (the shim passes the flags in NODE_OPTIONS).
+function permissionGranted(desc: Record<string, string>): boolean {
+  try {
+    return op_query_permission(desc)?.state === "granted";
+  } catch {
+    return false;
+  }
+}
+
+function fsPermissionGranted(name: string, path: string | undefined) {
+  return permissionGranted(path === undefined ? { name } : { name, path });
+}
+
+function permissionHas(scope: string, reference?: unknown): boolean {
+  validateString(scope, "scope");
+  let ref: string | undefined;
+  if (reference != null) {
+    if (
+      TypedArrayPrototypeGetSymbolToStringTag(reference) === "Uint8Array"
+    ) {
+      ref = core.decode(reference as Uint8Array);
+    } else {
+      validateString(reference, "reference");
+      ref = reference as string;
+    }
+  }
+  switch (scope) {
+    case "fs":
+      return fsPermissionGranted("read", ref) &&
+        fsPermissionGranted("write", ref);
+    case "fs.read":
+      return fsPermissionGranted("read", ref);
+    case "fs.write":
+      return fsPermissionGranted("write", ref);
+    case "child":
+      return permissionGranted({ name: "run" });
+    case "net":
+      return permissionGranted({ name: "net" });
+    case "addon":
+      return permissionGranted({ name: "ffi" });
+    case "worker":
+      return !!getOptionValue("--allow-worker");
+    case "wasi":
+      return !!getOptionValue("--allow-wasi");
+    case "inspector":
+      return !!getOptionValue("--allow-inspector");
+    default:
+      return false;
+  }
+}
+
+function setupProcessPermission() {
+  if (
+    !getOptionValue("--permission") &&
+    !getOptionValue("--experimental-permission")
+  ) {
+    return;
+  }
+  ObjectDefineProperty(process, "permission", {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    writable: false,
+    value: ObjectFreeze({ __proto__: null, has: permissionHas }),
+  });
+}
+
 addReadOnlyProcessAlias("noDeprecation", "--no-deprecation");
 addReadOnlyProcessAlias("throwDeprecation", "--throw-deprecation");
 
@@ -2236,6 +2318,7 @@ internals.__bootstrapNodeProcess = function (
     if (title) {
       process.title = title;
     }
+    setupProcessPermission();
 
     if (getOptionValue("--warnings")) {
       process.on("warning", onWarning);

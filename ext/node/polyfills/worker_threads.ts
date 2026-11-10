@@ -223,7 +223,10 @@ function isWorkerControlMsg(data: unknown, kind: string): boolean {
     (data as { "type": unknown })["type"] === kind;
 }
 
-const lazyV8 = core.createLazyLoader("ext:deno_node/v8.ts");
+// v8.ts is a lazy-loaded script (`lazy_loaded_js`), not an ES module, so it
+// is loaded with `loadExtScript`: `createLazyLoader` threw "cannot be
+// lazy-loaded as it was not included in the binary".
+const lazyV8 = () => core.loadExtScript("ext:deno_node/v8.ts");
 
 // The thread's side: runs one request and returns its result.
 const workerCpuProfiles = new SafeMap();

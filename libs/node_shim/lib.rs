@@ -172,9 +172,12 @@ pub struct EnvironmentOptions {
   pub allow_fs_write: Vec<String>,
   pub allow_addons: bool,
   pub allow_child_process: bool,
-  pub allow_net: Vec<String>,
+  pub allow_net: bool,
   pub allow_wasi: bool,
   pub allow_worker_threads: bool,
+  pub allow_inspector: bool,
+  pub allow_ffi: bool,
+  pub permission_audit: bool,
   pub experimental_repl_await: bool,
   pub experimental_vm_modules: bool,
   pub async_context_frame: bool,
@@ -317,9 +320,12 @@ impl Default for EnvironmentOptions {
       allow_fs_write: Vec::new(),
       allow_addons: false,
       allow_child_process: false,
-      allow_net: Vec::new(),
+      allow_net: false,
       allow_wasi: false,
       allow_worker_threads: false,
+      allow_inspector: false,
+      allow_ffi: false,
+      permission_audit: false,
       experimental_repl_await: true,
       experimental_vm_modules: false,
       async_context_frame: true,
@@ -1120,7 +1126,7 @@ impl OptionsParser {
     self.add_option(
       "--allow-net",
       "allow use of network when any permissions are set",
-      OptionType::StringList,
+      OptionType::Boolean,
       OptionEnvvarSettings::AllowedInEnvvar,
       false,
     );
@@ -1138,6 +1144,28 @@ impl OptionsParser {
       OptionEnvvarSettings::AllowedInEnvvar,
       false,
     );
+    self.add_option(
+      "--allow-inspector",
+      "allow use of the inspector when any permissions are set",
+      OptionType::Boolean,
+      OptionEnvvarSettings::AllowedInEnvvar,
+      false,
+    );
+    self.add_option(
+      "--allow-ffi",
+      "allow use of FFI when any permissions are set",
+      OptionType::Boolean,
+      OptionEnvvarSettings::AllowedInEnvvar,
+      false,
+    );
+    self.add_option(
+      "--permission-audit",
+      "enable the permission system in audit mode",
+      OptionType::Boolean,
+      OptionEnvvarSettings::AllowedInEnvvar,
+      false,
+    );
+    self.add_alias("--experimental-permission", vec!["--permission"]);
     self.add_option(
       "--experimental-repl-await",
       "experimental await keyword support in REPL",
@@ -2333,14 +2361,20 @@ impl OptionsParser {
         }
       }
       OptionType::UInteger => {
-        if let Ok(val) = value.parse::<u64>() {
-          self.set_uinteger_field(options, name, val);
+        // denext: as Node's parser (`strtoull`): the leading digits, else 0,
+        // never an error. `--cpu-prof-interval crashme` alone is then
+        // "--cpu-prof-interval must be used with --cpu-prof", as in Node.
+        let digits = value
+          .trim_start()
+          .split(|c: char| !c.is_ascii_digit())
+          .next()
+          .unwrap_or("");
+        let val = digits.parse::<u64>().unwrap_or(if digits.is_empty() {
+          0
         } else {
-          errors.push(format!(
-            "Invalid unsigned integer value for {}: {}",
-            name, value
-          ));
-        }
+          u64::MAX
+        });
+        self.set_uinteger_field(options, name, val);
       }
       OptionType::String => {
         self.set_string_field(options, name, value.to_string());
@@ -2438,6 +2472,14 @@ impl OptionsParser {
       "--allow-wasi" => options.per_isolate.per_env.allow_wasi = value,
       "--allow-worker" => {
         options.per_isolate.per_env.allow_worker_threads = value
+      }
+      "--allow-net" => options.per_isolate.per_env.allow_net = value,
+      "--allow-inspector" => {
+        options.per_isolate.per_env.allow_inspector = value
+      }
+      "--allow-ffi" => options.per_isolate.per_env.allow_ffi = value,
+      "--permission-audit" => {
+        options.per_isolate.per_env.permission_audit = value
       }
       "--experimental-repl-await" => {
         options.per_isolate.per_env.experimental_repl_await = value
@@ -2787,7 +2829,6 @@ impl OptionsParser {
       "--allow-fs-write" => {
         options.per_isolate.per_env.allow_fs_write.push(value)
       }
-      "--allow-net" => options.per_isolate.per_env.allow_net.push(value),
       "--experimental-loader" => {
         options.per_isolate.per_env.userland_loaders.push(value)
       }
@@ -3879,7 +3920,7 @@ pub fn translate_to_deno_args(
       deno_args.push("node".to_string());
     }
     deno_args.push("run".to_string());
-    deno_args.push("-A".to_string());
+    push_permission_flags(deno_args, node_options, env_opts);
     if options.add_unstable_flags {
       deno_args.push("--unstable-node-errors".to_string());
       deno_args.push("--unstable-bare-node-builtins".to_string());
@@ -3911,7 +3952,7 @@ pub fn translate_to_deno_args(
       deno_args.push("node".to_string());
     }
     deno_args.push("test".to_string());
-    deno_args.push("-A".to_string());
+    push_permission_flags(deno_args, node_options, env_opts);
 
     if options.add_unstable_flags {
       deno_args.push("--unstable-node-errors".to_string());
@@ -3963,7 +4004,7 @@ pub fn translate_to_deno_args(
     deno_args.push("node".to_string());
   }
   deno_args.push("run".to_string());
-  deno_args.push("-A".to_string());
+  push_permission_flags(deno_args, node_options, env_opts);
 
   if options.add_unstable_flags {
     deno_args.push("--unstable-node-errors".to_string());
@@ -3999,6 +4040,129 @@ pub fn translate_to_deno_args(
   );
 
   result
+}
+
+/// denext: one Node `--allow-fs-read` / `--allow-fs-write` value as a Deno
+/// permission path: `*` is every path (`None`), a trailing `/*` (or `\*`)
+/// grants the folder, which in Deno covers everything under it, and a comma is
+/// doubled, Deno's escape in a flag's list.
+fn node_fs_grant_to_deno_path(value: &str) -> Option<String> {
+  if value == "*" {
+    return None;
+  }
+  let path = value
+    .strip_suffix("/*")
+    .or_else(|| value.strip_suffix("\\*"))
+    .map(|dir| if dir.is_empty() { "/" } else { dir })
+    // `/tmp/foo*`: Deno has no prefix match; grant the path without the `*`
+    // rather than its whole folder.
+    .unwrap_or_else(|| value.strip_suffix('*').unwrap_or(value));
+  Some(path.replace(',', ",,"))
+}
+
+/// denext: a list of Node fs grants as one Deno flag (`--allow-read` /
+/// `--allow-write`), or nothing when none was given.
+fn push_fs_grant(deno_args: &mut Vec<String>, flag: &str, values: &[String]) {
+  if values.is_empty() {
+    return;
+  }
+  let mut paths = Vec::with_capacity(values.len());
+  for value in values {
+    match node_fs_grant_to_deno_path(value) {
+      None => {
+        deno_args.push(flag.to_string());
+        return;
+      }
+      Some(path) if !path.is_empty() => paths.push(path),
+      Some(_) => {}
+    }
+  }
+  if !paths.is_empty() {
+    deno_args.push(format!("{flag}={}", paths.join(",")));
+  }
+}
+
+/// denext: Node's permission model on Deno's permission flags.
+///
+/// Without `--permission` the script gets `-A`: Node grants everything. So
+/// does `--permission-audit`, which only reports. Under `--permission`, an
+/// access whose flag isn't given is not granted:
+/// - `--allow-fs-read` / `--allow-fs-write` -> `--allow-read` / `--allow-write`
+///   (`*` is every path);
+/// - `--allow-child-process` -> `--allow-run`;
+/// - `--allow-net` -> `--allow-net`;
+/// - `--allow-addons` / `--allow-ffi` -> `--allow-ffi`;
+/// - environment variables and system information stay granted
+///   (`--allow-env`, `--allow-sys`), as Node's model doesn't cover them;
+/// - `--no-prompt`: what wasn't granted is refused, never asked for.
+///
+/// Deno has no permission for worker threads, WASI or the inspector, so
+/// `--allow-worker` / `--allow-wasi` / `--allow-inspector` can't be enforced:
+/// they only answer `process.permission.has()`. The flags ride along in
+/// NODE_OPTIONS, where the polyfill reads `--permission` and those three.
+fn push_permission_flags(
+  deno_args: &mut Vec<String>,
+  node_options: &mut Vec<String>,
+  env_opts: &EnvironmentOptions,
+) {
+  if !env_opts.permission {
+    deno_args.push("-A".to_string());
+    return;
+  }
+  push_fs_grant(deno_args, "--allow-read", &env_opts.allow_fs_read);
+  push_fs_grant(deno_args, "--allow-write", &env_opts.allow_fs_write);
+  if env_opts.allow_child_process {
+    deno_args.push("--allow-run".to_string());
+  }
+  if env_opts.allow_net {
+    deno_args.push("--allow-net".to_string());
+  }
+  if env_opts.allow_addons || env_opts.allow_ffi {
+    deno_args.push("--allow-ffi".to_string());
+  }
+  deno_args.push("--allow-env".to_string());
+  deno_args.push("--allow-sys".to_string());
+  // Node refuses what wasn't granted; it never asks.
+  deno_args.push("--no-prompt".to_string());
+
+  node_options.push("--permission".to_string());
+  for (granted, flag) in [
+    (env_opts.allow_child_process, "--allow-child-process"),
+    (env_opts.allow_net, "--allow-net"),
+    (env_opts.allow_addons, "--allow-addons"),
+    (env_opts.allow_ffi, "--allow-ffi"),
+    (env_opts.allow_worker_threads, "--allow-worker"),
+    (env_opts.allow_wasi, "--allow-wasi"),
+    (env_opts.allow_inspector, "--allow-inspector"),
+  ] {
+    if granted {
+      node_options.push(flag.to_string());
+    }
+  }
+  for value in &env_opts.allow_fs_read {
+    node_options.push(node_options_token(&format!("--allow-fs-read={value}")));
+  }
+  for value in &env_opts.allow_fs_write {
+    node_options.push(node_options_token(&format!("--allow-fs-write={value}")));
+  }
+}
+
+/// denext: the Deno permission flags and NODE_OPTIONS tokens Node's
+/// permission flags in `node_flags` map to (see [`push_permission_flags`]), or
+/// `None` without `--permission`. The node_compat runner reads a test's
+/// `// Flags:` line with it.
+pub fn node_permission_flags(
+  node_flags: &[String],
+) -> Option<(Vec<String>, Vec<String>)> {
+  let parsed = parse_args(node_flags.to_vec()).ok()?;
+  let env_opts = &parsed.options.per_isolate.per_env;
+  if !env_opts.permission {
+    return None;
+  }
+  let mut deno_args = Vec::new();
+  let mut node_options = Vec::new();
+  push_permission_flags(&mut deno_args, &mut node_options, env_opts);
+  Some((deno_args, node_options))
 }
 
 /// One `NODE_OPTIONS` token, quoted as Node's parser reads it: in `"…"`, with
@@ -5876,6 +6040,192 @@ mod tests {
       "foo.js"
     ]
   );
+
+  // denext: Node's permission model maps onto Deno's permission flags.
+  #[test]
+  fn test_permission_flags_map_to_deno_grants() {
+    let parsed = parse_args(svec![
+      "--permission",
+      "--allow-fs-read=*",
+      "--allow-fs-write=/tmp/out",
+      "--allow-fs-write=/var/data/*",
+      "foo.js"
+    ])
+    .unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    assert_eq!(
+      result.deno_args,
+      svec![
+        "run",
+        "--allow-read",
+        "--allow-write=/tmp/out,/var/data",
+        "--allow-env",
+        "--allow-sys",
+        "--no-prompt",
+        "--unstable-node-errors",
+        "--unstable-bare-node-builtins",
+        "--unstable-detect-cjs",
+        "--unstable-unsafe-proto",
+        "foo.js"
+      ]
+    );
+    assert_eq!(
+      result.node_options,
+      svec![
+        "--permission",
+        "\"--allow-fs-read=*\"",
+        "\"--allow-fs-write=/tmp/out\"",
+        "\"--allow-fs-write=/var/data/*\""
+      ]
+    );
+  }
+
+  #[test]
+  fn test_permission_without_grants_grants_nothing_of_nodes() {
+    let parsed = parse_args(svec!["--permission", "foo.js"]).unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    assert!(!result.deno_args.iter().any(|a| a == "-A"));
+    assert!(
+      !result
+        .deno_args
+        .iter()
+        .any(|a| a.starts_with("--allow-read")
+          || a.starts_with("--allow-write")
+          || a == "--allow-run"
+          || a == "--allow-net"
+          || a == "--allow-ffi")
+    );
+    assert_eq!(result.node_options, svec!["--permission"]);
+  }
+
+  #[test]
+  fn test_permission_boolean_grants() {
+    let parsed = parse_args(svec![
+      "--experimental-permission",
+      "--allow-child-process",
+      "--allow-net",
+      "--allow-addons",
+      "--allow-worker",
+      "--allow-wasi",
+      "--allow-inspector",
+      "--allow-fs-read=/a,b",
+      "foo.js"
+    ])
+    .unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    for flag in [
+      "--allow-read=/a,,b",
+      "--allow-run",
+      "--allow-net",
+      "--allow-ffi",
+      "--allow-env",
+      "--allow-sys",
+    ] {
+      assert!(
+        result.deno_args.iter().any(|a| a == flag),
+        "{flag} missing from {:?}",
+        result.deno_args
+      );
+    }
+    assert!(!result.deno_args.iter().any(|a| a == "-A"));
+    for flag in [
+      "--permission",
+      "--allow-child-process",
+      "--allow-net",
+      "--allow-addons",
+      "--allow-worker",
+      "--allow-wasi",
+      "--allow-inspector",
+    ] {
+      assert!(result.node_options.iter().any(|a| a == flag), "{flag}");
+    }
+  }
+
+  #[test]
+  fn test_permission_audit_and_no_permission_keep_allow_all() {
+    for args in [
+      svec!["--permission-audit", "--allow-fs-read=/a", "foo.js"],
+      svec!["--allow-fs-read=/a", "foo.js"],
+    ] {
+      let parsed = parse_args(args).unwrap();
+      let result =
+        translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+      assert_eq!(result.deno_args[1], "-A");
+      assert!(!result.node_options.iter().any(|a| a == "--permission"));
+    }
+  }
+
+  #[test]
+  fn test_permission_flags_reach_node_test_runner() {
+    let parsed =
+      parse_args(svec!["--permission", "--allow-fs-read=*", "--test"]).unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    assert_eq!(result.deno_args[0], "run");
+    assert_eq!(result.deno_args[1], "--allow-read");
+    assert!(!result.deno_args.iter().any(|a| a == "-A"));
+  }
+
+  #[test]
+  fn test_node_permission_flags_for_a_flags_line() {
+    assert_eq!(
+      node_permission_flags(&["--allow-fs-read=*".to_string()]),
+      None
+    );
+    let (deno_args, node_options) = node_permission_flags(&[
+      "--permission".to_string(),
+      "--allow-fs-read=*".to_string(),
+      "--allow-worker".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(
+      deno_args,
+      svec!["--allow-read", "--allow-env", "--allow-sys", "--no-prompt"]
+    );
+    assert_eq!(
+      node_options,
+      svec!["--permission", "--allow-worker", "\"--allow-fs-read=*\""]
+    );
+  }
+
+  #[test]
+  fn test_uinteger_option_parses_as_strtoull() {
+    let parsed =
+      parse_args(svec!["--cpu-prof-interval", "crashme", "x.js"]).unwrap_err();
+    assert_eq!(
+      parsed,
+      svec!["--cpu-prof-interval must be used with --cpu-prof"]
+    );
+    let parsed =
+      parse_args(svec!["--cpu-prof", "--cpu-prof-interval", "250us", "x.js"])
+        .unwrap();
+    assert_eq!(parsed.options.per_isolate.per_env.cpu_prof_interval, 250);
+  }
+
+  #[test]
+  fn test_node_fs_grant_to_deno_path() {
+    assert_eq!(node_fs_grant_to_deno_path("*"), None);
+    assert_eq!(
+      node_fs_grant_to_deno_path("/tmp/*").as_deref(),
+      Some("/tmp")
+    );
+    assert_eq!(node_fs_grant_to_deno_path("/*").as_deref(), Some("/"));
+    assert_eq!(
+      node_fs_grant_to_deno_path("C:\\data\\*").as_deref(),
+      Some("C:\\data")
+    );
+    assert_eq!(
+      node_fs_grant_to_deno_path("/tmp/foo*").as_deref(),
+      Some("/tmp/foo")
+    );
+    assert_eq!(
+      node_fs_grant_to_deno_path("./a,b").as_deref(),
+      Some("./a,,b")
+    );
+  }
 
   fn preload_sources(deno_args: &[String]) -> Vec<String> {
     deno_args

@@ -102,6 +102,44 @@ struct TestConfig {
   /// and copy multi-gigabyte buffers), never to paper over a hang.
   #[serde(rename = "timeoutMs")]
   timeout_ms: Option<u64>,
+  /// denext: the platforms where the test is expected to skip itself
+  /// (`common.skip()`) because the platform or this build lacks the feature
+  /// by design, with the reason. A bare string applies to every platform.
+  /// Only labels the skip in the report: a test that skips itself is never
+  /// counted as a pass, expected or not.
+  #[serde(rename = "expectedSkip")]
+  expected_skip: Option<ExpectedSkip>,
+}
+
+/// denext: `expectedSkip` in config.jsonc: one reason for every platform, or
+/// a reason per platform.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum ExpectedSkip {
+  All(String),
+  PerPlatform {
+    windows: Option<String>,
+    darwin: Option<String>,
+    linux: Option<String>,
+  },
+}
+
+impl ExpectedSkip {
+  fn reason_for_this_platform(&self) -> Option<&str> {
+    match self {
+      ExpectedSkip::All(reason) => Some(reason),
+      ExpectedSkip::PerPlatform {
+        windows,
+        darwin,
+        linux,
+      } => match std::env::consts::OS {
+        "windows" => windows.as_deref(),
+        "macos" => darwin.as_deref(),
+        "linux" => linux.as_deref(),
+        _ => None,
+      },
+    }
+  }
 }
 
 /// The full config.json structure
@@ -516,10 +554,45 @@ fn uses_node_test_module(source: &str) -> bool {
   source.contains("'node:test'") || source.contains("\"node:test\"")
 }
 
-fn parse_flags(source: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+/// Node's permission-model flags on a test's `// Flags:` line. denext: they
+/// map onto Deno's permission flags in place of `-A` (see
+/// `node_shim::node_permission_flags`).
+const NODE_PERMISSION_FLAGS: &[&str] = &[
+  "--permission",
+  "--experimental-permission",
+  "--permission-audit",
+  "--allow-fs-read",
+  "--allow-fs-write",
+  "--allow-child-process",
+  "--allow-worker",
+  "--allow-wasi",
+  "--allow-addons",
+  "--allow-net",
+  "--allow-inspector",
+  "--allow-ffi",
+];
+
+fn is_node_permission_flag(flag: &str) -> bool {
+  let name = flag.split('=').next().unwrap_or(flag);
+  NODE_PERMISSION_FLAGS.contains(&name)
+}
+
+/// The flags a test's `// Flags:` line asks for, sorted by where they go.
+#[derive(Default)]
+struct TestFlags {
+  v8_flags: Vec<String>,
+  node_options: Vec<String>,
+  deno_args: Vec<String>,
+  /// denext: Node permission-model flags (`--permission`, `--allow-fs-read=`,
+  /// ...), handed to `node_shim::node_permission_flags`.
+  permission_flags: Vec<String>,
+}
+
+fn parse_flags(source: &str) -> TestFlags {
   let mut v8_flags = Vec::new();
   let mut node_options = Vec::new();
   let mut deno_args = Vec::new();
+  let mut permission_flags = Vec::new();
 
   let re = Regex::new(r"^// Flags: (.+)$").unwrap();
   for line in source.lines() {
@@ -552,6 +625,10 @@ fn parse_flags(source: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
         } else {
           flag.to_string()
         };
+        if is_node_permission_flag(&normalized) {
+          permission_flags.push(flag.to_string());
+          continue;
+        }
         match normalized.as_str() {
           "--expose-externalize-string" => {
             v8_flags.push("--expose-externalize-string".to_string());
@@ -626,7 +703,12 @@ fn parse_flags(source: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
     }
   }
 
-  (v8_flags, node_options, deno_args)
+  TestFlags {
+    v8_flags,
+    node_options,
+    deno_args,
+    permission_flags,
+  }
 }
 
 fn truncate_output(output: &str, max_len: usize) -> String {
@@ -658,13 +740,28 @@ impl TestSetup {
 
     let source = full_test_path.read_to_string();
     let uses_node_test = uses_node_test_module(&source);
-    let (v8_flags, node_options, extra_deno_args) = parse_flags(&source);
+    let TestFlags {
+      v8_flags,
+      mut node_options,
+      deno_args: extra_deno_args,
+      permission_flags,
+    } = parse_flags(&source);
 
     let mut args: Vec<String> = if uses_node_test {
       TEST_ARGS.iter().map(|s| s.to_string()).collect()
     } else {
       RUN_ARGS.iter().map(|s| s.to_string()).collect()
     };
+    // denext: under Node's `--permission`, the test gets the Deno grants its
+    // flags map to instead of `-A`, and the flags in NODE_OPTIONS for
+    // `process.permission`, as the node shim launches such a script.
+    if let Some((permission_args, permission_options)) =
+      node_shim::node_permission_flags(&permission_flags)
+    {
+      args.retain(|arg| arg != "-A");
+      args.splice(1..1, permission_args);
+      node_options.extend(permission_options);
+    }
 
     if !v8_flags.is_empty() {
       args.push(format!("--v8-flags={}", v8_flags.join(",")));
@@ -823,6 +920,37 @@ impl TestSetup {
   }
 }
 
+/// denext: why a test that exited 0 skipped itself, if it did.
+///
+/// Node's `common.skip(msg)` prints `1..0 # Skipped: <msg>` and exits 0, and
+/// Node's own runner (tools/test.py) reports any test whose output carries
+/// that line as skipped, not passed. A test run under `deno test` (one that
+/// imports `node:test`) has its pre-test output hidden by `--quiet`, so the
+/// line never shows: there a file that exited before any test ran (`0 passed
+/// | 0 failed` after Deno's "called `Deno.exit(0)` from outside any test"
+/// note) skipped itself.
+fn self_skip_reason(output: &str, uses_node_test: bool) -> Option<String> {
+  static SKIP_LINE: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| {
+      Regex::new(r"(?m)^1\.\.0 # Skipped:[ \t]*(.*?)\r?$").unwrap()
+    });
+  if let Some(captures) = SKIP_LINE.captures(output) {
+    let message = captures.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+    return Some(if message.is_empty() {
+      "(no reason given)".to_string()
+    } else {
+      message.to_string()
+    });
+  }
+  if uses_node_test
+    && output.contains("called `Deno.exit(0)` from outside any test")
+    && output.contains("| 0 passed | 0 failed")
+  {
+    return Some("exited before any test ran".to_string());
+  }
+  None
+}
+
 fn make_collected_result(
   success: bool,
   output_text: &str,
@@ -920,6 +1048,33 @@ fn run_test(
       &data.test_path,
       results,
     );
+  }
+
+  // denext: a test that skipped itself is a skip, not a pass. CI never fails
+  // on one; `expectedSkip` marks the platforms where the skip is by design.
+  if success
+    && let Some(message) = self_skip_reason(&output_text, setup.uses_node_test)
+  {
+    let reason = match test_config
+      .and_then(|c| c.expected_skip.as_ref())
+      .and_then(|e| e.reason_for_this_platform())
+    {
+      Some(expected) => format!("expected skip ({expected}): {message}"),
+      None => format!("skipped itself: {message}"),
+    };
+    if *file_test_runner::NO_CAPTURE {
+      test_util::eprintln!("{}", debugging_command_text);
+    }
+    results.lock().unwrap().insert(
+      data.test_path.clone(),
+      CollectedResult {
+        passed: None,
+        error: None,
+        uses_node_test: setup.uses_node_test,
+        ignore_reason: Some(reason),
+      },
+    );
+    return TestResult::Ignored;
   }
 
   let collected = make_collected_result(

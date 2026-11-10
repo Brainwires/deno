@@ -106,6 +106,18 @@ function parseOption(options: Map<string, OptionValue>, arg: string) {
     case "--no-warnings":
       options.set("--warnings", { value: false });
       break;
+    // denext: Node's permission model. The node shim maps the grants onto
+    // Deno's flags and passes these along for `process.permission`.
+    case "--permission":
+    case "--experimental-permission":
+    case "--allow-worker":
+    case "--allow-wasi":
+    case "--allow-inspector":
+    case "--allow-child-process":
+    case "--allow-addons":
+    case "--allow-net":
+      options.set(arg, { value: true });
+      break;
     case "--pending-deprecation":
       options.set("--pending-deprecation", { value: true });
       break;

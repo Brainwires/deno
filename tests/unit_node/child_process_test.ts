@@ -2005,14 +2005,14 @@ Deno.test({
   name:
     "[child_process] a node invocation with arguments it can't parse exits with 9",
 }, async () => {
-  // Node's child exits with 9 (`node: <message>` on stderr) on a command line
-  // it can't parse; spawnSync() threw the node shim's parse error instead.
+  // Node's child exits with 9 (`<argv0>: <message>` on stderr) on a command
+  // line it can't parse; spawnSync() threw the node shim's parse error instead.
   const args = ["--experimental-test-tag-filter=", "main.js"];
   const sync = CP.spawnSync(Deno.execPath(), args);
   assertEquals(sync.status, 9);
   assertEquals(
     sync.stderr.toString(),
-    "node: --experimental-test-tag-filter= requires an argument\n",
+    `${Deno.execPath()}: --experimental-test-tag-filter= requires an argument\n`,
   );
   const { promise, resolve } = Promise.withResolvers<number | null>();
   CP.spawn(Deno.execPath(), args).on("exit", resolve);
@@ -2065,5 +2065,59 @@ Deno.test("node SEA / snapshot flags are refused", async () => {
     }
   } finally {
     Deno.removeSync(tmp, { recursive: true });
+  }
+});
+
+Deno.test({
+  name:
+    "[child_process] node --permission maps onto Deno's permissions, and a child inherits it",
+}, async () => {
+  // Node's `--permission` used to be dropped: the script ran with `-A`.
+  const dir = await Deno.makeTempDir();
+  try {
+    const script = path.join(dir, "main.cjs");
+    await Deno.writeTextFile(
+      script,
+      `const cp = require("child_process");
+const fs = require("fs");
+const path = require("path");
+const tryWrite = () => {
+  try {
+    fs.writeFileSync(path.join(__dirname, "out.txt"), "x");
+    return "written";
+  } catch (e) {
+    return e.code + " " + e.permission;
+  }
+};
+if (process.argv[2] === "child") {
+  console.log("child " + tryWrite());
+} else {
+  const has = process.permission.has;
+  console.log([has("fs.read"), has("fs.write"), has("child"), has("worker")].join());
+  console.log("parent " + tryWrite());
+  const r = cp.spawnSync(process.execPath, [__filename, "child"], { encoding: "utf8" });
+  console.log(r.stdout.trim());
+}
+`,
+    );
+    const out = CP.spawnSync(Deno.execPath(), [
+      "--permission",
+      "--allow-fs-read=*",
+      "--allow-child-process",
+      script,
+    ], { encoding: "utf8" });
+    assertEquals(out.stderr, "");
+    assertEquals(
+      out.stdout,
+      "true,false,true,false\n" +
+        "parent ERR_ACCESS_DENIED FileSystemWrite\n" +
+        "child ERR_ACCESS_DENIED FileSystemWrite\n",
+    );
+    assertEquals(
+      await Deno.stat(path.join(dir, "out.txt")).then(() => true, () => false),
+      false,
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
   }
 });

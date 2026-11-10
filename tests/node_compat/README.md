@@ -44,6 +44,18 @@ Each test entry can include the following optional configuration properties:
   `process.config.variables.node_shared_openssl=1` while other tests expect it
   absent).
 
+- **`expectedSkip`** (string, or an object of `windows` / `darwin` / `linux`
+  strings): The platforms where the test is expected to skip itself because the
+  platform or this build lacks the feature by design, with the reason. A string
+  applies to every platform.
+
+A test that skips itself is reported as skipped, never as passed: Node's
+`common.skip()` prints `1..0 # Skipped: <reason>` and exits 0, and the runner
+reads that line as Node's own runner does. A test run under `deno test` (one
+that imports `node:test`) has its pre-test output hidden by `--quiet`, so there
+a file that exits before any test ran counts as skipped. A skip never fails CI;
+`expectedSkip` only labels it in the report as by design.
+
 ### Examples
 
 ```jsonc

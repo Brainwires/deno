@@ -3153,6 +3153,7 @@ const kNodePermissionScopes = {
   __proto__: null,
   read: "FileSystemRead",
   write: "FileSystemWrite",
+  run: "ChildProcess",
 };
 
 /**
@@ -3188,6 +3189,14 @@ function decorateNotCapableError(e: Error, ctx: UvExceptionContext) {
     ex.dest = ctx.dest;
   }
   return ex;
+}
+
+/**
+ * denext: a permission refusal decorated as Node's `ERR_ACCESS_DENIED` (see
+ * `decorateNotCapableError`); any other error is returned unchanged.
+ */
+function accessDeniedOrError(e: Error, ctx: UvExceptionContext) {
+  return isNotCapableError(e) ? decorateNotCapableError(e, ctx) : e;
 }
 
 function denoErrorToNodeError(e: Error, ctx: UvExceptionContext) {
@@ -3759,6 +3768,7 @@ return {
   aggregateTwoErrors,
   codes,
   connResetException,
+  accessDeniedOrError,
   denoErrorToNodeError,
   denoErrorToNodeSystemError,
   denoWriteFileErrorToNodeError,
@@ -4070,6 +4080,7 @@ return {
     aggregateTwoErrors,
     codes,
     connResetException,
+    accessDeniedOrError,
     denoErrorToNodeError,
     denoErrorToNodeSystemError,
     dnsException,
