@@ -395,7 +395,7 @@ fn write_node_libs(
 }
 
 /// The directory holding the `node-gyp` command a node-gyp build's own
-/// children find on `PATH` (DENEXT.md item NNN), written into `dir`: npm puts
+/// children find on `PATH` (DENEXT.md item 297), written into `dir`: npm puts
 /// one on `PATH` for every lifecycle script, and node-gyp-build (`bcrypt`,
 /// and most addons that ship prebuilds) spawns `node-gyp` by name when no
 /// prebuild fits, where the script's shell's own `node-gyp` doesn't reach.
@@ -549,7 +549,7 @@ mod tests {
     assert_eq!(headers.node_gyp().await, Some(entry));
   }
 
-  // DENEXT.md item NNN: a node-gyp build's children find `node-gyp` on PATH
+  // DENEXT.md item 297: a node-gyp build's children find `node-gyp` on PATH
   // (node-gyp-build spawns it by name), and it runs DENO_NODE_GYP on deno
   #[cfg(unix)]
   #[test]
@@ -624,7 +624,7 @@ mod tests {
     out
   }
 
-  // DENEXT.md item NNN: Windows node-gyp links against `<nodedir>/
+  // DENEXT.md item 297: Windows node-gyp links against `<nodedir>/
   // $(Configuration)/node.lib`; the one written names every symbol deno.exe
   // exports to addons, imported by name from node.exe (which node-gyp's
   // delay-load hook answers with the host executable)

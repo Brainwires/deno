@@ -11619,7 +11619,7 @@ where the changes are discussed.
        it can't reach) is installed the same way into `<DENO_DIR>/node_gyp` and
        handed to the script as `DENO_NODE_GYP`. A project's own
        `npm_config_nodedir` / `DENO_NODE_GYP` wins; on Windows the installer
-       also writes the `node.lib` node-gyp links against (item NNN). When either
+       also writes the `node.lib` node-gyp links against (item 297). When either
        can't be had, node-gyp fetches them itself as before (`nodejs.org` is in
        the built-in lists).
      - **The package's own fix** when a jailed native script fails, after its
@@ -11630,7 +11630,7 @@ where the changes are discussed.
        (item 61).
      - A build from source stopped at node-gyp's `build/node_gyp_bins/python3`
        symlink, which the jail's symlink rule refused because its target (the
-       system Python) lies outside the writable roots: item NNN lets it through.
+       system Python) lies outside the writable roots: item 297 lets it through.
        Configure runs offline with the pinned headers.
      - Tests: `builtin_exceptions.rs` (sorted, host lists only),
        `node_headers.rs` (a matching archive unpacks, a wrong checksum or a path
@@ -12042,7 +12042,7 @@ where the changes are discussed.
        text, raw, copy, Blob, a missing key, `/etc/hosts` and a `..` escape not
        read, a bad key); LSP `node:` completions list `node:sea`.
 
-NNN. **`fix(install)`: native addons build from source in the lifecycle-script
+297. **`fix(install)`: native addons build from source in the lifecycle-script
      jail** (`runtime/permissions/lib.rs`,
      `runtime/permissions/runtime_descriptor_parser.rs`,
      `cli/supply_chain/node_headers.rs`, `cli/supply_chain/jail.rs`,
@@ -12091,21 +12091,22 @@ NNN. **`fix(install)`: native addons build from source in the lifecycle-script
        hashes. The Windows `node.lib` has not been linked against on Windows
        yet.
 
-NNN. **`feat(node)`: `process.report` writes Node's diagnostic report**
+298. **`feat(node)`: `process.report` writes Node's diagnostic report**
      (`ext/node/polyfills/internal/process/report.ts`, `ext/node/ops/report.rs`,
      `ext/node/polyfills/process.ts`,
      `ext/node/polyfills/internal_binding/node_options.ts`,
      `libs/node_shim/lib.rs`, `tests/node_compat/mod.rs`).
      - `getReport()` returns Node's report-version-5 document and
        `writeReport([file][, err])` writes it (`stdout`, `stderr`, or
-       `report.<date>.<time>.<pid>.<tid>.<seq>.json` in `process.report.directory`
-       / `--report-dir`, else the working directory; a missing directory prints
-       Node's "Failed to open Node.js report file" line). Before, `writeReport()`
-       returned `""` and wrote nothing, and `getReport()` had only a header.
+       `report.<date>.<time>.<pid>.<tid>.<seq>.json` in
+       `process.report.directory` / `--report-dir`, else the working directory;
+       a missing directory prints Node's "Failed to open Node.js report file"
+       line). Before, `writeReport()` returned `""` and wrote nothing, and
+       `getReport()` had only a header.
      - Sections: the header (from node:os / node:process: OS release and
        version, CPUs with flattened times, network interfaces unless
-       `excludeNetwork`), `javascriptStack` (an `ERR_SYNTHETIC` stack by default,
-       an error's own enumerable properties as `errorProperties`),
+       `excludeNetwork`), `javascriptStack` (an `ERR_SYNTHETIC` stack by
+       default, an error's own enumerable properties as `errorProperties`),
        `javascriptHeap` (V8's heap statistics and spaces), `resourceUsage`,
        `environmentVariables` (unless `excludeEnv`), and from the new
        `op_node_report_native_info` `userLimits` (getrlimit, not on Windows) and
@@ -12123,13 +12124,14 @@ NNN. **`feat(node)`: `process.report` writes Node's diagnostic report**
        out-of-memory error ends the process without running JavaScript.
      - The node_compat harness now collects the suite's `report/` directory and
        forwards a test's `--report-*` flags in NODE_OPTIONS.
-     - Tests: node_compat `report/test-report-{config,getreport,signal,
+     - Tests: node_compat
+       `report/test-report-{config,getreport,signal,
        uncaught-exception,uncaught-exception-compat,
        uncaught-exception-primitives,uncaught-exception-symbols,writereport,
        writereport-exclude-env,fatalerror-oomerror-not-set}`;
        `libs/node_shim` `test_report_options_ride_in_node_options`.
 
-NNN. **`feat(node)`: `NODE_V8_COVERAGE`, `v8.takeCoverage()` and
+299. **`feat(node)`: `NODE_V8_COVERAGE`, `v8.takeCoverage()` and
      `v8.stopCoverage()`** (`ext/node/polyfills/v8.ts`,
      `ext/node/polyfills/process.ts`, `runtime/js/99_main.js`). With
      `NODE_V8_COVERAGE` set, the main runtime's bootstrap starts precise
@@ -12142,11 +12144,11 @@ NNN. **`feat(node)`: `NODE_V8_COVERAGE`, `v8.takeCoverage()` and
      `v8.takeCoverage()` (which resets the counts). `v8.stopCoverage()` stops
      it, so nothing is written at exit. Without `NODE_V8_COVERAGE` both are
      no-ops, as in Node; before, both threw "not implemented". Without the
-     `inspector` sys permission no coverage is collected. Not covered: a
-     process a signal ends.
+     `inspector` sys permission no coverage is collected. Not covered: a process
+     a signal ends.
      - Tests: node_compat `test-v8-stop-coverage`, `test-v8-take-coverage-noop`.
 
-NNN. **`feat(node)`: trace event files from `--trace-event-categories` /
+300. **`feat(node)`: trace event files from `--trace-event-categories` /
      `--trace-events-enabled`** (`ext/node/polyfills/trace_events.ts`,
      `ext/node/polyfills/01_require.js`,
      `ext/node/polyfills/internal/console/constructor.mjs`,
@@ -12155,86 +12157,92 @@ NNN. **`feat(node)`: trace event files from `--trace-event-categories` /
      - Tracing requested on the command line always writes the trace file
        (Chrome trace format), with Node's `__metadata` events: the thread names
        (`JavaScriptMainThread`, `PlatformWorkerThread`,
-       `[worker <id>] <name or WorkerThread>`), `process_name` (the start
-       title and the current `process.title`), `version` and `node` (versions,
-       arch, platform, release). Before, the file appeared only once an event
-       was recorded.
+       `[worker <id>] <name or WorkerThread>`), `process_name` (the start title
+       and the current `process.title`), `version` and `node` (versions, arch,
+       platform, release). Before, the file appeared only once an event was
+       recorded.
      - `--trace-event-file-pattern` (`${pid}`, `${rotation}`) rides in
        NODE_OPTIONS, and so does `--title`, which was dropped before.
-     - Events of a category nobody enabled are dropped (they were all
-       recorded); `trace(..., data)` stores `args.data`, as Node's binding does;
+     - Events of a category nobody enabled are dropped (they were all recorded);
+       `trace(..., data)` stores `args.data`, as Node's binding does;
        `internalBinding('trace_events').isTraceCategoryEnabled` exists.
      - `node.console`: `console.count()` / `countReset()` are counter events and
-       `console.time()` / `timeLog()` / `timeEnd()` begin / instant / end
-       events (`count::<label>`, `time::<label>`).
+       `console.time()` / `timeLog()` / `timeEnd()` begin / instant / end events
+       (`count::<label>`, `time::<label>`).
      - A worker's `threadName` is its `name` option (it was always empty: the
        name was set after the worker's metadata was built).
      - Not produced: V8's own categories (`v8`), `node.perf`,
        `node.environment`, `node.bootstrap`, `node.fs.*`, `node.vm.script`,
        `node.promises.rejections`, `node.net` / `node.http` / `node.dns`, and
        the native async_hooks events; those categories write only the metadata.
-     - Tests: node_compat `test-trace-events-{binding,category-used,console,
+     - Tests: node_compat
+       `test-trace-events-{binding,category-used,console,
        file-pattern,metadata,none,process-exit,worker-metadata,
-       worker-metadata-with-name}`; `libs/node_shim`
+       worker-metadata-with-name}`;
+       `libs/node_shim`
        `test_title_and_trace_file_pattern_ride_in_node_options`.
 
-NNN. **`fix(node)`: a `net.Server` sent over IPC keeps listening in the
-     sender; an unsupported handle is `ERR_INVALID_HANDLE_TYPE`; a spawned
-     script's extensionless path resolves** (`ext/node/polyfills/internal/child_process.ts`).
+301. **`fix(node)`: a `net.Server` sent over IPC keeps listening in the sender;
+     an unsupported handle is `ERR_INVALID_HANDLE_TYPE`; a spawned script's
+     extensionless path resolves**
+     (`ext/node/polyfills/internal/child_process.ts`).
      - As Node's `handleConversion['net.Server']` has no `postSend`, the
        sender's server is no longer closed once the child acknowledges it;
-       connections go to whichever process accepts first until the sender
-       closes it. A net.Socket or net.Server whose handle is neither TCP nor a
-       pipe throws `ERR_INVALID_HANDLE_TYPE` instead of "not implemented"
-       (pipes, unix sockets, UDP sockets and servers already went through
-       SCM_RIGHTS on Unix; Windows still refuses).
+       connections go to whichever process accepts first until the sender closes
+       it. A net.Socket or net.Server whose handle is neither TCP nor a pipe
+       throws `ERR_INVALID_HANDLE_TYPE` instead of "not implemented" (pipes,
+       unix sockets, UDP sockets and servers already went through SCM_RIGHTS on
+       Unix; Windows still refuses).
      - `spawn(process.execPath, ["fixtures/interval"])` runs `interval.js`: the
        translated `deno run` entrypoint is resolved as `require.resolve` does
-       against the child's working directory when it is not a file there, as
-       the node shim does for `node` itself.
-     - Tests: node_compat `test-child-process-fork-net-server` (not on
-       Windows); spec `node/child_process_ipc_handle` `server_*` (the parent now
-       closes its own server before connecting).
+       against the child's working directory when it is not a file there, as the
+       node shim does for `node` itself.
+     - Tests: node_compat `test-child-process-fork-net-server` (not on Windows);
+       spec `node/child_process_ipc_handle` `server_*` (the parent now closes
+       its own server before connecting).
 
-NNN. **`feat(node)`: a worker adopts a stream another isolate opened through
+302. **`feat(node)`: a worker adopts a stream another isolate opened through
      node:fs** (`ext/io/fd_table.rs`, `ext/node/ops/fd_adopt.rs`). Every
      isolate's TableOwned descriptors above stdio are now also recorded
-     process-wide by table, so `net.Socket({ fd })` / `server.listen({ fd })`
-     in a worker can adopt a FIFO, socket or terminal the main thread (or
-     another worker) opened through node:fs, when the worker holds unscoped
-     read and write access (it could have opened it itself) or a process-wide
-     grant: the wrap gets a dup and the owner keeps its descriptor. Before, the
-     worker got `EPERM` without `-A`, and under `-A` adopted the raw number,
-     so both isolates owned it and the process aborted at exit ("IO Safety
-     violation: owned file descriptor already closed"). Stdio and descriptors
-     inherited at startup already worked in workers.
-     - Tests: `deno_io` `table_owned_fds_are_visible_to_other_tables_while_owned`;
-       spec `node/fd_sockets` `worker_pipe_fd` (unscoped read/write),
+     process-wide by table, so `net.Socket({ fd })` / `server.listen({ fd })` in
+     a worker can adopt a FIFO, socket or terminal the main thread (or another
+     worker) opened through node:fs, when the worker holds unscoped read and
+     write access (it could have opened it itself) or a process-wide grant: the
+     wrap gets a dup and the owner keeps its descriptor. Before, the worker got
+     `EPERM` without `-A`, and under `-A` adopted the raw number, so both
+     isolates owned it and the process aborted at exit ("IO Safety violation:
+     owned file descriptor already closed"). Stdio and descriptors inherited at
+     startup already worked in workers.
+     - Tests: `deno_io`
+       `table_owned_fds_are_visible_to_other_tables_while_owned`; spec
+       `node/fd_sockets` `worker_pipe_fd` (unscoped read/write),
        `worker_pipe_fd_all` (`-A`, no abort) and `worker_pipe_fd_scoped`
        (scoped: `EPERM`).
 
-NNN. **`feat(ext/node)`: `async_hooks` resource graphs as Node reports them**
-(`libs/core/01_core.js`, `ext/os/40_signals.js`,
-`ext/node/polyfills/internal/async_hooks.ts`, `net.ts`, `dgram.ts`, `fs.ts`,
-`_fs/`, `internal/child_process.ts`, `internal/timers.mjs`,
-`internal/stream_base_commons.ts`, `internal_binding/cares_wrap.ts`,
-`process.ts`). Builds on the request-path work described in
-`doc/denext-async-hooks.md`. - `destroy` hooks are queued, as Node's
-`queueDestroyAsyncId`, and run from a native immediate: core gains
-`queueNativeImmediate()` (Node's unrefed `SetImmediate`: the start of the next
-check phase, before the JS immediates, never keeping the loop alive). The queue
-is also delivered when the loop runs dry, before 'beforeExit'.
-`internalBinding('async_wrap').queueDestroyAsyncId` exists. - New resources,
-each reported only while a hook is enabled: `TCPCONNECTWRAP` / `PIPECONNECTWRAP`
-(triggered by the socket), `SHUTDOWNWRAP`, `WRITEWRAP` (only for a write that
-did not finish at once), `GETADDRINFOREQWRAP`, `GETNAMEINFOREQWRAP`,
-`QUERYWRAP`, `UDPWRAP`, `UDPSENDWRAP`, `PROCESSWRAP` ('exit' runs as it),
-`SIGNALWRAP` (one per signal with listeners), `STATWATCHER`, `FSEVENTWRAP` and
-`Microtask` (`queueMicrotask()`). A request's `oncomplete` runs between its
-`before` / `after` and is then destroyed; the listening handle is destroyed when
-it closes, and a socket's close callback runs as its handle. - `fs.readFile()`
-with a hook enabled reads as Node does (open, fstat, read, close: four chained
-`FSREQCALLBACK`s); `fs.fstat()` and `fs.read()` callbacks are `FSREQCALLBACK`s.
+303. **`feat(ext/node)`: `async_hooks` resource graphs as Node reports them**
+     (`libs/core/01_core.js`, `ext/os/40_signals.js`,
+     `ext/node/polyfills/internal/async_hooks.ts`, `net.ts`, `dgram.ts`,
+     `fs.ts`, `_fs/`, `internal/child_process.ts`, `internal/timers.mjs`,
+     `internal/stream_base_commons.ts`, `internal_binding/cares_wrap.ts`,
+     `process.ts`). Builds on the request-path work described in
+     `doc/denext-async-hooks.md`. - `destroy` hooks are queued, as Node's
+     `queueDestroyAsyncId`, and run from a native immediate: core gains
+     `queueNativeImmediate()` (Node's unrefed `SetImmediate`: the start of the
+     next check phase, before the JS immediates, never keeping the loop alive).
+     The queue is also delivered when the loop runs dry, before 'beforeExit'.
+     `internalBinding('async_wrap').queueDestroyAsyncId` exists. - New
+     resources, each reported only while a hook is enabled: `TCPCONNECTWRAP` /
+     `PIPECONNECTWRAP` (triggered by the socket), `SHUTDOWNWRAP`, `WRITEWRAP`
+     (only for a write that did not finish at once), `GETADDRINFOREQWRAP`,
+     `GETNAMEINFOREQWRAP`, `QUERYWRAP`, `UDPWRAP`, `UDPSENDWRAP`, `PROCESSWRAP`
+     ('exit' runs as it), `SIGNALWRAP` (one per signal with listeners),
+     `STATWATCHER`, `FSEVENTWRAP` and `Microtask` (`queueMicrotask()`). A
+     request's `oncomplete` runs between its `before` / `after` and is then
+     destroyed; the listening handle is destroyed when it closes, and a socket's
+     close callback runs as its handle. - `fs.readFile()` with a hook enabled
+     reads as Node does (open, fstat, read, close: four chained
+     `FSREQCALLBACK`s); `fs.fstat()` and `fs.read()` callbacks are
+     `FSREQCALLBACK`s.
 
 - `executionAsyncResource()` is the resource of `executionAsyncId()` (a stack
   beside the id stack, as Node's `execution_async_resources`). - Promises
@@ -12256,7 +12264,7 @@ with a hook enabled reads as Node does (open, fstat, read, close: four chained
   `test-async-wrap-*` (the newly enabled tests are listed in
   `tests/node_compat/config.jsonc`).
 
-NNN. **`fix(node)`: module loader hooks and `node:test` long tail: thrown
+304. **`fix(node)`: module loader hooks and `node:test` long tail: thrown
      values, hook errors' class and code, `import.meta` key order, a missing
      main module, `--input-type=module` / `--check` with preloads, `node -e`
      dynamic import, randomized file order** (`runtime/js/99_main.js`,
@@ -12270,28 +12278,27 @@ NNN. **`fix(node)`: module loader hooks and `node:test` long tail: thrown
        form.
      - A value a `module.register()` hooks module throws reaches the loading
        thread as itself when it can be cloned, else as its inspected text (a
-       function, an object holding one); a plain object was revived as an
-       empty `Error`.
+       function, an object holding one); a plain object was revived as an empty
+       `Error`.
      - An error a load hook throws keeps its class and `code` in the import's
        rejection (the op takes the error's name and code); a load hook result
        whose `format` is not one Node knows (or `text` / `bytes`) is
-       `ERR_UNKNOWN_MODULE_FORMAT`; a resolve hook's `url` that is not a URL
-       is `ERR_INVALID_RETURN_PROPERTY_VALUE` naming the hooks module.
-     - `register("pkg")` / `--experimental-loader pkg` for a package that
-       can't be found is `ERR_MODULE_NOT_FOUND` ("Cannot find package 'pkg'
-       imported from ..."), not a file next to the working directory; a
-       revived hook error with an `ERR_*` code, and in Node mode any runtime
-       error carrying one, prints `TypeError [ERR_X]: ...` as Node's own
-       errors do.
-     - `node missing.js` (any extension) prints Node's `MODULE_NOT_FOUND`
-       report ("Error: Cannot find module '/abs/missing.js'").
+       `ERR_UNKNOWN_MODULE_FORMAT`; a resolve hook's `url` that is not a URL is
+       `ERR_INVALID_RETURN_PROPERTY_VALUE` naming the hooks module.
+     - `register("pkg")` / `--experimental-loader pkg` for a package that can't
+       be found is `ERR_MODULE_NOT_FOUND` ("Cannot find package 'pkg' imported
+       from ..."), not a file next to the working directory; a revived hook
+       error with an `ERR_*` code, and in Node mode any runtime error carrying
+       one, prints `TypeError [ERR_X]: ...` as Node's own errors do.
+     - `node missing.js` (any extension) prints Node's `MODULE_NOT_FOUND` report
+       ("Error: Cannot find module '/abs/missing.js'").
      - `Reflect.ownKeys(import.meta)` is Node's order: `dirname`, `filename`,
        `main`, `resolve`, `url`.
      - `module.setSourceMapsSupport(enabled, { nodeModules, generatedCode })`
        and `module.getSourceMapsSupport()` exist, with Node's validation (the
        runtime maps stacks through source maps either way).
-     - Node shim: `--input-type=module` / `module-typescript` pass `--ext=mjs`
-       / `--ext=mts`, so a string with no `import` stays a module under
+     - Node shim: `--input-type=module` / `module-typescript` pass `--ext=mjs` /
+       `--ext=mts`, so a string with no `import` stays a module under
        `--unstable-detect-cjs` (it was taken for CommonJS and failed with
        "Cannot find module '$deno$eval.js'"); `--check` runs the `--require` /
        `--import` preloads first; the wrapped `-e` script gets
@@ -12313,18 +12320,18 @@ NNN. **`fix(node)`: module loader hooks and `node:test` long tail: thrown
        `node_format_main_module_not_found`); `libs/node_shim`
        (`check_runs_the_import_preloads_first`, the `--ext` assertions).
 
-NNN. **`test(node)`: an honest Node compatibility score: a test that skips
+305. **`test(node)`: an honest Node compatibility score: a test that skips
      itself is a skip, not a pass** (`tests/node_compat/mod.rs`,
      `tests/node_compat/config.jsonc`, `tests/node_compat/schema.json`,
      `tests/node_compat/README.md`).
-     - Node's `common.skip(msg)` prints `1..0 # Skipped: <msg>` and exits 0,
-       and the runner counted that as a pass. It now reads the line as Node's
-       own runner (tools/test.py) does and reports the test as skipped, with
-       the reason; CI never fails on a skip. A test run under `deno test` (one
-       that imports `node:test`) has its pre-test output hidden by `--quiet`,
-       so there a file that exited before any test ran (`0 passed | 0 failed`
-       after Deno's "called `Deno.exit(0)` from outside any test" note)
-       counts as skipped.
+     - Node's `common.skip(msg)` prints `1..0 # Skipped: <msg>` and exits 0, and
+       the runner counted that as a pass. It now reads the line as Node's own
+       runner (tools/test.py) does and reports the test as skipped, with the
+       reason; CI never fails on a skip. A test run under `deno test` (one that
+       imports `node:test`) has its pre-test output hidden by `--quiet`, so
+       there a file that exited before any test ran (`0 passed | 0 failed` after
+       Deno's "called `Deno.exit(0)` from outside any test" note) counts as
+       skipped.
      - `expectedSkip` (a reason, or one per platform) marks a skip that is by
        design: a Windows- or Linux-only test, a test for another Node build
        (debug, FIPS, no inspector), a tool the suite doesn't build (Node's
@@ -12335,39 +12342,38 @@ NNN. **`test(node)`: an honest Node compatibility score: a test that skips
      - On macOS 203 enabled tests skip themselves (183 printing the line, 20
        under `deno test`): 115 by design and 88 for a missing feature:
        `node:ffi` (11), QUIC (8), Temporal (2), type stripping through Amaro
-       (12), algorithms the TLS / crypto stack lacks (38), `process.config`
-       not reporting the runtime's ICU (16), which hides `Intl` from the
-       tests, and a multicast test the host's network filter stops (1).
-     - Node tests enabled: none, because this item changes how the runner
-       counts a test that skips itself (a pass becomes a skip); it switches
-       no test on.
+       (12), algorithms the TLS / crypto stack lacks (38), `process.config` not
+       reporting the runtime's ICU (16), which hides `Intl` from the tests, and
+       a multicast test the host's network filter stops (1).
+     - Node tests enabled: none, because this item changes how the runner counts
+       a test that skips itself (a pass becomes a skip); it switches no test on.
 
-NNN. **`feat(node)`: Node's permission model on Deno's permissions**
+306. **`feat(node)`: Node's permission model on Deno's permissions**
      (`libs/node_shim/lib.rs`, `ext/node/polyfills/process.ts`,
      `ext/node/polyfills/internal_binding/node_options.ts`,
      `ext/node/polyfills/internal/errors.ts`,
      `ext/node/polyfills/internal/child_process.ts`,
      `tests/node_compat/mod.rs`).
-     - `node --permission` was parsed and dropped: the script ran with `-A`.
-       The shim now maps the grants onto Deno's flags in place of `-A`:
+     - `node --permission` was parsed and dropped: the script ran with `-A`. The
+       shim now maps the grants onto Deno's flags in place of `-A`:
        `--allow-fs-read` / `--allow-fs-write` -> `--allow-read` /
        `--allow-write` (`*` is every path, a trailing `/*` the folder, a comma
        escaped), `--allow-child-process` -> `--allow-run`, `--allow-net` ->
        `--allow-net` (now a boolean, as in Node 25+), `--allow-addons` /
        `--allow-ffi` -> `--allow-ffi`; environment variables and system
-       information stay granted (`--allow-env`, `--allow-sys`), as Node's
-       model doesn't cover them, and `--no-prompt` refuses the rest instead
-       of asking. `--experimental-permission` is an alias;
-       `--permission-audit` (report only) keeps `-A`. This applies to a
-       script, `--test` and `--test --watch`. The flags ride in NODE_OPTIONS,
-       so a `node` child (`spawn` / `fork` / `execve` of the runtime)
-       inherits the model, as Node's children do: its grants are mapped the
-       same way.
-     - `process.permission.has(scope[, reference])` exists under
-       `--permission` and asks Deno's permission state (the op behind
+       information stay granted (`--allow-env`, `--allow-sys`), as Node's model
+       doesn't cover them, and `--no-prompt` refuses the rest instead of asking.
+       `--experimental-permission` is an alias; `--permission-audit` (report
+       only) keeps `-A`. This applies to a script, `--test` and
+       `--test --watch`. The flags ride in NODE_OPTIONS, so a `node` child
+       (`spawn` / `fork` / `execve` of the runtime) inherits the model, as
+       Node's children do: its grants are mapped the same way.
+     - `process.permission.has(scope[, reference])` exists under `--permission`
+       and asks Deno's permission state (the op behind
        `Deno.permissions.querySync`): `fs`, `fs.read`, `fs.write` (a path is
        checked as Deno checks it), `child`, `net`, `addon`. A refused
-       `process.execve()` is Node's `ERR_ACCESS_DENIED` (`permission:
+       `process.execve()` is Node's `ERR_ACCESS_DENIED`
+       (`permission:
        "ChildProcess"`, `resource`).
      - Not mapped: Deno has no permission for worker threads, WASI or the
        inspector, so `--allow-worker` / `--allow-wasi` / `--allow-inspector`
@@ -12375,17 +12381,16 @@ NNN. **`feat(node)`: Node's permission model on Deno's permissions**
        (`deno eval` and `deno repl` take none); a Node prefix grant such as
        `/tmp/foo*` grants `/tmp/foo` only; a `node` started through a shell
        command string (`exec("node ...")`) doesn't inherit it; Deno checks a
-       CommonJS `require()` of a local file against `--allow-read`, which
-       Node doesn't; refusals keep Deno's message, with Node's `code`,
-       `permission` and `resource`.
+       CommonJS `require()` of a local file against `--allow-read`, which Node
+       doesn't; refusals keep Deno's message, with Node's `code`, `permission`
+       and `resource`.
      - The node_compat runner gives a test whose `// Flags:` line has
        `--permission` the same mapping (`node_shim::node_permission_flags`).
-       `test-permission-net-websocket` (it passed under `-A`) is now an
-       expected failure: Deno's `WebSocket` constructor throws the refusal
-       instead of firing `error`. The other `test-permission-*` tests need
+       `test-permission-net-websocket` (it passed under `-A`) is now an expected
+       failure: Deno's `WebSocket` constructor throws the refusal instead of
+       firing `error`. The other `test-permission-*` tests need
        `process.permission.drop()`, Node's refusals for the network, child
-       processes, workers, WASI and the inspector, and its diagnostics
-       channel.
+       processes, workers, WASI and the inspector, and its diagnostics channel.
      - Tests: `libs/node_shim` `test_permission_flags_map_to_deno_grants`,
        `test_permission_without_grants_grants_nothing_of_nodes`,
        `test_permission_boolean_grants`,
@@ -12402,114 +12407,119 @@ NNN. **`feat(node)`: Node's permission model on Deno's permissions**
        `test-permission-fs-filehandle-utimes`, `test-permission-fs-write-v8`,
        `test-permission-net-allowed`, `test-process-execve-permission-fail`).
 
-NNN. **`fix(ext/node)`: the profiling and `process.execve` tests denext.17's
+307. **`fix(ext/node)`: the profiling and `process.execve` tests denext.17's
      features pass, switched on** (`ext/node/polyfills/worker_threads.ts`,
      `ext/node/polyfills/v8.ts`, `ext/node/ops/v8.rs`,
      `ext/node/polyfills/internal/child_process.ts`, `libs/node_shim/lib.rs`,
      `tests/node_compat/config.jsonc`).
-     - `worker.startCpuProfile()` / `worker.startHeapProfile()` threw "cannot
-       be lazy-loaded": `v8.ts` is a lazy-loaded script, loaded with
+     - `worker.startCpuProfile()` / `worker.startHeapProfile()` threw "cannot be
+       lazy-loaded": `v8.ts` is a lazy-loaded script, loaded with
        `loadExtScript`, not `createLazyLoader`.
-     - `v8.startHeapProfile({ forceGC: true })` threw "No inspector response
-       to HeapProfiler.collectGarbage": the inspector answers that request
-       from a later task. A new `op_v8_force_gc` runs a full collection first.
+     - `v8.startHeapProfile({ forceGC: true })` threw "No inspector response to
+       HeapProfiler.collectGarbage": the inspector answers that request from a
+       later task. A new `op_v8_force_gc` runs a full collection first.
      - A spawn of the runtime with Node arguments it refuses prints
        `<argv0>: <message>` (the program's path), as Node does, not `node:`.
      - Node's parser reads an unsigned option as `strtoull` does: the leading
        digits, else 0, never an error (`--cpu-prof-interval crashme` alone is
        "must be used with --cpu-prof").
      - The TLS ticket and session-reuse tests (item 291 names them but never
-       switched them on) and the `process.execve` ones (item 295; the old
-       reason was "process.execve is not a function") pass as they are.
+       switched them on) and the `process.execve` ones (item 295; the old reason
+       was "process.execve is not a function") pass as they are.
        `test-performance-nodetiming` stays off: `nodeStart` is negative (item
        295: `performance.timeOrigin` is the runtime instance's start, not the
        process's), and there is no `uvMetricsInfo`.
-     - Tests: `libs/node_shim` `test_uinteger_option_parses_as_strtoull`;
-       unit `child_process_test.ts` (the refusal's `<argv0>:` prefix).
+     - Tests: `libs/node_shim` `test_uinteger_option_parses_as_strtoull`; unit
+       `child_process_test.ts` (the refusal's `<argv0>:` prefix).
      - Node tests enabled: 37 (`parallel/test-tls-ticket`, `-ticket-12`,
        `-ticket-cluster`, `test-https-agent-session-reuse`,
        `test-https-agent-disable-session-reuse`, `test-process-execve`,
-       `-on-exit`, `-permission-granted`, `-socket`, `-throws`,
-       `-validation`; `sequential/test-cpu-prof-` `default`, `dir-absolute`,
-       `dir-and-name`, `dir-relative`, `dir-worker`, `drained`, `exit`,
-       `invalid-options`, `kill`, `name`, `worker-argv`;
-       `parallel/test-heap-prof-` `basic`, `dir-absolute`, `dir-name`,
-       `dir-relative`, `exec-argv`, `exit`, `interval`, `invalid-args`,
-       `loop-drained`, `name`, `sigint`; `test-v8-cpu-profile`,
-       `test-v8-heap-profile`, `test-worker-cpu-profile`,
+       `-on-exit`, `-permission-granted`, `-socket`, `-throws`, `-validation`;
+       `sequential/test-cpu-prof-` `default`, `dir-absolute`, `dir-and-name`,
+       `dir-relative`, `dir-worker`, `drained`, `exit`, `invalid-options`,
+       `kill`, `name`, `worker-argv`; `parallel/test-heap-prof-` `basic`,
+       `dir-absolute`, `dir-name`, `dir-relative`, `exec-argv`, `exit`,
+       `interval`, `invalid-args`, `loop-drained`, `name`, `sigint`;
+       `test-v8-cpu-profile`, `test-v8-heap-profile`, `test-worker-cpu-profile`,
        `test-worker-heap-profile`).
 
-NNN. **`feat(ext/node)`: ML-DSA / ML-KEM `KeyObject`s, `crypto.encapsulate` /
-`decapsulate`, brainpoolP512r1 and brainpool keys; Node's WebCrypto wording**
-(`node18/crypto`, runtime;
-`ext/node_crypto/{pqc,kem,brainpool,
+308. **`feat(ext/node)`: ML-DSA / ML-KEM `KeyObject`s, `crypto.encapsulate` /
+     `decapsulate`, brainpoolP512r1 and brainpool keys; Node's WebCrypto
+     wording** (`node18/crypto`, runtime;
+     `ext/node_crypto/{pqc,kem,brainpool,
      keys,sign,lib,x509,ec_golden_tests}.rs`,
-`ext/node_crypto/Cargo.toml`,
-`ext/crypto/{lib,digest,subtle_decrypt,subtle_derive_bits,subtle_encrypt,
+     `ext/node_crypto/Cargo.toml`,
+     `ext/crypto/{lib,digest,subtle_decrypt,subtle_derive_bits,subtle_encrypt,
      subtle_export_key,subtle_import_key,subtle_sign,subtle_verify,
      subtle_wrap_key}.rs`,
-`ext/node/polyfills/{crypto,crypto_esm}.ts`,
-`ext/node/polyfills/internal/crypto/{keys,keygen,sig,cipher,util}.ts`). -
-ML-DSA-44/65/87 and ML-KEM-768/1024 are `KeyObject` types: `createPrivateKey` /
-`createPublicKey` from PKCS#8 (the seed form, encrypted too), SPKI, the `AKP`
-JWK and the `raw-public` / `raw-seed` formats; `export()` to each of them;
-`generateKeyPair`; one-shot `sign(null, ...)` / `verify(null, ...)` for ML-DSA
-(a digest is `ERR_OSSL_EVP_COMMAND_NOT_SUPPORTED`). ML-DSA comes from aws-lc-rs
-and ML-KEM from `fips203` (key expansion) and aws-lc-rs (encapsulation), both
-already in the tree. The runtime reports
-`process.features.openssl_is_boringssl`, so this follows Node's BoringSSL build:
-private keys are kept as their seed and only the seed-only PKCS#8 form is read,
-and ML-KEM-512 is refused (`ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM`). -
-`crypto.encapsulate(key[, cb])` / `crypto.decapsulate(key, ct[, cb])`:
-ML-KEM-768/1024 and RSASVE (SP 800-56B) on `rsa` keys; a failed decapsulation is
-`ERR_CRYPTO_OPERATION_FAILED` "Decapsulation failed". DHKEM on EC / X25519 /
-X448 keys stays refused, as in Node on OpenSSL before 3.2 (the version the
-runtime reports). - brainpoolP512r1 joins brainpoolP256r1 / P384r1 for
-`createECDH` and `getCurves()`, and all three brainpool curves are `KeyObject`
-curves: `generateKeyPair("ec")`, PKCS#8 / SEC1 / SPKI and raw import and export,
-ECDSA `sign` / `verify` (DER and IEEE P1363) and `diffieHellman()`; JWK export
-is `ERR_CRYPTO_JWK_UNSUPPORTED_CURVE`, as in Node. They run on AWS-LC's built-in
-brainpool groups (`EC_group_brainpoolP*r1`, through `aws-lc-sys`); the
-RustCrypto brainpool code from item 292 stays for `createECDH` on P256r1 /
-P384r1. - ECDSA takes a digest shorter than half the field (P-384 with SHA-1,
-P-521 with SHA-256), as OpenSSL does, in `node:crypto` and WebCrypto; ecdsa 0.16
-refused those and the old rule had been kept. - Smaller Node parity fixes: the
-raw-* key formats (`raw-seed`, Node's error codes, an exact scalar size for raw
-EC private keys, raw formats in `generateKeyPair` encodings); PKCS#8 export with
-`aes-192-cbc` (DER) and `des-ede3-cbc` (pkcs8's `3des` feature, the `des` crate
-already in the tree); a wrong passphrase on an encrypted PKCS#8 key is always
-`bad decrypt`; a failed async `sign` / `verify` calls back with the error alone;
-`Decipheriv.final()` reports a failed authentication before an encoding change,
-and a later `final()` is an invalid state; `createCipheriv` takes a `CryptoKey`
-with DEP0203 and `KeyObject.from()` of a non-extractable key warns DEP0204; a
-raw-format error with no JS class (it threw `undefined`) has its code. -
-WebCrypto errors in Node's words: "Unable to use this key to <op>", "Key
-algorithm mismatch", "derived bit length is too small", "Unable to import <alg>
-using <format> format", "Invalid TurboShakeParams outputLength", AES / ChaCha20
-IV and tag-length messages, "Unrecognized algorithm name" for an unknown ECDSA
-hash, and Node's message for an ML-DSA / ML-KEM PKCS#8 key without a seed. - Not
-done: ML-KEM-512 and the expanded-only / seed+expanded PKCS#8 forms (BoringSSL
-refuses them too); an ML-DSA `context` (aws-lc-rs takes none); SLH-DSA
-`KeyObject`s (the suite's tests take Node's OpenSSL 3.0 path). - Tests:
-`pqc.rs`, `kem.rs` and `brainpool.rs` unit tests (seed round trips, sign /
-verify, encapsulate / decapsulate, RSASVE, brainpool ECDH and ECDSA, a
-brainpoolP512r1 key and secret written by Node 26); `ec_golden_tests.rs` (short
-digests now sign and verify);
-`tests/unit_node/crypto/crypto_pqc_brainpool_test.ts` against
-`pqc_brainpool_vectors.json`, written by Node 26.13 with
-`generate_pqc_brainpool_vectors.cjs` (brainpool keys, secrets and signatures on
-all three curves, ML-DSA / ML-KEM keys, signatures and a ciphertext, P-384 /
-SHA-1 and P-521 / SHA-256 signatures); `crypto_cipher_test.ts`;
-`tests/unit/webcrypto_test.ts`. - The crypto group goes from 108 to 125 of its
-183 tests on Linux and from 107 to 125 on macOS. Node tests enabled: 17
-(parallel/ test-crypto-dep0203, test-crypto-dep0204, test-crypto-encap-decap,
-test-crypto-hash (flaky), test-crypto-key-objects-raw, test-crypto-keygen-raw,
-test-crypto-pqc-encrypted-pkcs8, test-crypto-pqc-key-objects-ml-dsa,
-test-crypto-pqc-key-objects-ml-kem, test-crypto-pqc-keygen-ml-dsa,
-test-crypto-pqc-keygen-ml-kem, test-crypto-pqc-sign-verify-ml-dsa,
-test-webcrypto-digest-turboshake, test-webcrypto-encrypt-decrypt,
-test-webcrypto-encrypt-decrypt-rsa, test-webcrypto-raw-format-aliases,
-test-webcrypto-sign-verify-ecdsa; test-crypto-randomuuidv7 now on macOS too)
+     `ext/node/polyfills/{crypto,crypto_esm}.ts`,
+     `ext/node/polyfills/internal/crypto/{keys,keygen,sig,cipher,util}.ts`). -
+     ML-DSA-44/65/87 and ML-KEM-768/1024 are `KeyObject` types:
+     `createPrivateKey` / `createPublicKey` from PKCS#8 (the seed form,
+     encrypted too), SPKI, the `AKP` JWK and the `raw-public` / `raw-seed`
+     formats; `export()` to each of them; `generateKeyPair`; one-shot
+     `sign(null, ...)` / `verify(null, ...)` for ML-DSA (a digest is
+     `ERR_OSSL_EVP_COMMAND_NOT_SUPPORTED`). ML-DSA comes from aws-lc-rs and
+     ML-KEM from `fips203` (key expansion) and aws-lc-rs (encapsulation), both
+     already in the tree. The runtime reports
+     `process.features.openssl_is_boringssl`, so this follows Node's BoringSSL
+     build: private keys are kept as their seed and only the seed-only PKCS#8
+     form is read, and ML-KEM-512 is refused
+     (`ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM`). - `crypto.encapsulate(key[, cb])` /
+     `crypto.decapsulate(key, ct[, cb])`: ML-KEM-768/1024 and RSASVE (SP
+     800-56B) on `rsa` keys; a failed decapsulation is
+     `ERR_CRYPTO_OPERATION_FAILED` "Decapsulation failed". DHKEM on EC / X25519
+     / X448 keys stays refused, as in Node on OpenSSL before 3.2 (the version
+     the runtime reports). - brainpoolP512r1 joins brainpoolP256r1 / P384r1 for
+     `createECDH` and `getCurves()`, and all three brainpool curves are
+     `KeyObject` curves: `generateKeyPair("ec")`, PKCS#8 / SEC1 / SPKI and raw
+     import and export, ECDSA `sign` / `verify` (DER and IEEE P1363) and
+     `diffieHellman()`; JWK export is `ERR_CRYPTO_JWK_UNSUPPORTED_CURVE`, as in
+     Node. They run on AWS-LC's built-in brainpool groups
+     (`EC_group_brainpoolP*r1`, through `aws-lc-sys`); the RustCrypto brainpool
+     code from item 292 stays for `createECDH` on P256r1 / P384r1. - ECDSA takes
+     a digest shorter than half the field (P-384 with SHA-1, P-521 with
+     SHA-256), as OpenSSL does, in `node:crypto` and WebCrypto; ecdsa 0.16
+     refused those and the old rule had been kept. - Smaller Node parity fixes:
+     the raw-* key formats (`raw-seed`, Node's error codes, an exact scalar size
+     for raw EC private keys, raw formats in `generateKeyPair` encodings);
+     PKCS#8 export with `aes-192-cbc` (DER) and `des-ede3-cbc` (pkcs8's `3des`
+     feature, the `des` crate already in the tree); a wrong passphrase on an
+     encrypted PKCS#8 key is always `bad decrypt`; a failed async `sign` /
+     `verify` calls back with the error alone; `Decipheriv.final()` reports a
+     failed authentication before an encoding change, and a later `final()` is
+     an invalid state; `createCipheriv` takes a `CryptoKey` with DEP0203 and
+     `KeyObject.from()` of a non-extractable key warns DEP0204; a raw-format
+     error with no JS class (it threw `undefined`) has its code. - WebCrypto
+     errors in Node's words: "Unable to use this key to <op>", "Key algorithm
+     mismatch", "derived bit length is too small", "Unable to import <alg> using
+     <format> format", "Invalid TurboShakeParams outputLength", AES / ChaCha20
+     IV and tag-length messages, "Unrecognized algorithm name" for an unknown
+     ECDSA hash, and Node's message for an ML-DSA / ML-KEM PKCS#8 key without a
+     seed. - Not done: ML-KEM-512 and the expanded-only / seed+expanded PKCS#8
+     forms (BoringSSL refuses them too); an ML-DSA `context` (aws-lc-rs takes
+     none); SLH-DSA `KeyObject`s (the suite's tests take Node's OpenSSL 3.0
+     path). - Tests: `pqc.rs`, `kem.rs` and `brainpool.rs` unit tests (seed
+     round trips, sign / verify, encapsulate / decapsulate, RSASVE, brainpool
+     ECDH and ECDSA, a brainpoolP512r1 key and secret written by Node 26);
+     `ec_golden_tests.rs` (short digests now sign and verify);
+     `tests/unit_node/crypto/crypto_pqc_brainpool_test.ts` against
+     `pqc_brainpool_vectors.json`, written by Node 26.13 with
+     `generate_pqc_brainpool_vectors.cjs` (brainpool keys, secrets and
+     signatures on all three curves, ML-DSA / ML-KEM keys, signatures and a
+     ciphertext, P-384 / SHA-1 and P-521 / SHA-256 signatures);
+     `crypto_cipher_test.ts`; `tests/unit/webcrypto_test.ts`. - The crypto group
+     goes from 108 to 125 of its 183 tests on Linux and from 107 to 125 on
+     macOS. Node tests enabled: 17 (parallel/ test-crypto-dep0203,
+     test-crypto-dep0204, test-crypto-encap-decap, test-crypto-hash (flaky),
+     test-crypto-key-objects-raw, test-crypto-keygen-raw,
+     test-crypto-pqc-encrypted-pkcs8, test-crypto-pqc-key-objects-ml-dsa,
+     test-crypto-pqc-key-objects-ml-kem, test-crypto-pqc-keygen-ml-dsa,
+     test-crypto-pqc-keygen-ml-kem, test-crypto-pqc-sign-verify-ml-dsa,
+     test-webcrypto-digest-turboshake, test-webcrypto-encrypt-decrypt,
+     test-webcrypto-encrypt-decrypt-rsa, test-webcrypto-raw-format-aliases,
+     test-webcrypto-sign-verify-ecdsa; test-crypto-randomuuidv7 now on macOS
+     too)
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

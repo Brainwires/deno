@@ -458,7 +458,7 @@
     // both stay in the package's folder, as electron's postinstall does when
     // it unpacks an app bundle; a link or target outside it is still refused,
     // but for a target that is a program (node-gyp's
-    // `build/node_gyp_bins/python3` -> the system Python, DENEXT.md item NNN)
+    // `build/node_gyp_bins/python3` -> the system Python, DENEXT.md item 297)
     "symlinks_within_own_folder": {
       "if": "unix",
       "steps": [

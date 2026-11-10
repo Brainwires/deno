@@ -1751,7 +1751,7 @@ async fn run_in_dirs(
     .context("Failed to resolve the deno executable")?;
   // `node-gyp` on PATH for the build's own children (node-gyp-build), after
   // the dependencies' bins, so a node-gyp the project installs wins
-  // (DENEXT.md item NNN)
+  // (DENEXT.md item 297)
   if node_gyp_build {
     let bin = dirs.root.join("bin");
     match super::node_headers::write_node_gyp_shim(&bin, &current_exe) {

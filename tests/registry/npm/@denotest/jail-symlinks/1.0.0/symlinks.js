@@ -78,7 +78,7 @@ async function main() {
     fs.symlinkSync("shout/../escaped", path.join(__dirname, "out-dotdot")));
   // node-gyp links build/node_gyp_bins/python3 to the system Python before
   // every build: a program outside the folder may be a target (DENEXT.md
-  // item NNN), a plain file outside may not
+  // item 297), a plain file outside may not
   fs.mkdirSync(path.join(__dirname, "build", "node_gyp_bins"), {
     recursive: true,
   });

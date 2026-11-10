@@ -5942,7 +5942,7 @@ impl PermissionsContainer {
       return false;
     }
     let target_path = target_path.path.into_owned();
-    // denext (DENEXT.md item NNN): a target outside the roots passes only
+    // denext (DENEXT.md item 297): a target outside the roots passes only
     // when it is an existing program the script may read (node-gyp links
     // `build/node_gyp_bins/python3` to the system Python). The script can
     // already run any program it can read, so a link to one adds no reach;
@@ -7732,7 +7732,7 @@ pub trait PermissionDescriptorParser: Debug + Send + Sync {
     None
   }
 
-  /// denext (DENEXT.md item NNN): whether `path`, already resolved, is an
+  /// denext (DENEXT.md item 297): whether `path`, already resolved, is an
   /// existing regular file with an execute bit (a program), for the
   /// lifecycle-script jail's symlink rule. `false` when the parser has no
   /// file system access.
@@ -8472,7 +8472,7 @@ mod tests {
     assert!(!check(Some(&wide), "pkg", base.join("other/l")));
     assert!(!check(Some(&wide), "../other", pkg.join("o5")));
 
-    // denext (DENEXT.md item NNN): a target outside the roots that is a
+    // denext (DENEXT.md item 297): a target outside the roots that is a
     // readable program passes (node-gyp's `node_gyp_bins/python3`), named
     // directly or through a link; a plain file, a directory, a missing
     // path or a program under a deny-read path does not

@@ -1254,7 +1254,7 @@ fn classify_library_load_error(
   }
 }
 
-/// denext (DENEXT.md item NNN): the symbols `deno.exe` exports to Node-API
+/// denext (DENEXT.md item 297): the symbols `deno.exe` exports to Node-API
 /// addons on Windows (the module definition its link uses), from which the
 /// installer writes the `node.lib` node-gyp links an addon against.
 pub const WINDOWS_SYMBOL_EXPORTS_DEF: &str =
