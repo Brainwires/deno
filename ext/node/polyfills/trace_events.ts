@@ -1,12 +1,13 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 (function () {
-const { core, primordials } = __bootstrap;
+const { core, internals, primordials } = __bootstrap;
 const {
   ArrayFrom,
   ArrayIsArray,
   ArrayPrototypeJoin,
   ArrayPrototypePush,
+  ArrayPrototypePushApply,
   ArrayPrototypeSlice,
   ArrayPrototypeUnshift,
   JSONParse,
@@ -21,7 +22,10 @@ const {
   SafeSetIterator,
   StringFromCharCode,
   StringPrototypeEndsWith,
+  StringPrototypeReplaceAll,
+  StringPrototypeSplit,
   StringPrototypeStartsWith,
+  StringPrototypeTrim,
   Symbol,
   Uint8Array,
 } = primordials;
@@ -114,6 +118,9 @@ function incrementCategory(category) {
     asyncHooksRefcount++;
     if (asyncHooksRefcount === 1) installAsyncHooksTimerTracing();
   }
+  if (category === "node" || category === "node.console") {
+    installConsoleTracing();
+  }
 }
 
 function decrementCategory(category) {
@@ -199,11 +206,38 @@ function getEnabledCategories() {
   return ArrayPrototypeJoin(ArrayFrom(seen), ",");
 }
 
+// denext: tracing requested on the command line (`--trace-event-categories`,
+// `--trace-events-enabled`): the process then always writes its trace file,
+// with Node's `__metadata` events, even when no category produced an event.
+let cliTracing = false;
+function markCliTracing() {
+  cliTracing = true;
+  ensureExitHandlerInstalled();
+}
+
+// Whether an event of `category` (Node's comma-separated list, such as
+// `node,node.console`) is recorded: one of its names is enabled.
+function isTraceCategoryEnabled(category) {
+  if (typeof category !== "string") return false;
+  for (
+    const name of new SafeArrayIterator(StringPrototypeSplit(category, ","))
+  ) {
+    if ((categoryRefCounts.get(StringPrototypeTrim(name)) ?? 0) > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function nowMicros() {
   return MathTrunc(performance.now() * 1000);
 }
 
-function trace(phase, category, name, id, scope) {
+// Node's `internalBinding('trace_events').trace(phase, category, name, id,
+// data)`: an event of a category nobody enabled is dropped, and `data`
+// becomes `args.data`.
+function trace(phase, category, name, id, data) {
+  if (!isTraceCategoryEnabled(category)) return;
   const ph = StringFromCharCode(phase);
   const p = getProc();
   const event = {
@@ -217,8 +251,8 @@ function trace(phase, category, name, id, scope) {
   if (id !== undefined && id !== null) {
     event.id = "0x" + NumberPrototypeToString(Number(id), 16);
   }
-  if (scope !== undefined && scope !== null) {
-    event.args = { scope };
+  if (data !== undefined && data !== null) {
+    event.args = { data };
   } else {
     event.args = {};
   }
@@ -283,12 +317,24 @@ function writeMainTraceFile(pid) {
       // Best-effort cleanup.
     }
   }
-  if (allEvents.length === 0) return;
+  if (allEvents.length === 0 && !cliTracing) return;
+  if (cliTracing) {
+    ArrayPrototypePushApply(allEvents, mainMetadataEvents(pid));
+  }
+  // Node's `--trace-event-file-pattern`, `${pid}` and `${rotation}`
+  // substituted.
+  const pattern = traceFilePattern();
+  const fileFor = (rotation) =>
+    StringPrototypeReplaceAll(
+      StringPrototypeReplaceAll(pattern, "${rotation}", `${rotation}`),
+      "${pid}",
+      `${pid}`,
+    );
   let rotation = 1;
-  let filename = `node_trace.${rotation}.log`;
+  let filename = fileFor(rotation);
   while (existsSync(filename) && rotation < 1000) {
     rotation++;
-    filename = `node_trace.${rotation}.log`;
+    filename = fileFor(rotation);
   }
   try {
     fs.writeFileSync(filename, JSONStringify({ traceEvents: allEvents }));
@@ -298,16 +344,89 @@ function writeMainTraceFile(pid) {
 }
 
 function writeWorkerSliceFile(pid) {
-  if (recordedEvents.length === 0) return;
-  const filename = workerSliceFilename(pid, getThreadId());
+  if (recordedEvents.length === 0 && !cliTracing) return;
+  const tid = getThreadId();
+  const filename = workerSliceFilename(pid, tid);
+  const events = ArrayPrototypeSlice(recordedEvents);
+  if (cliTracing) {
+    const wt = getWorkerThreadsExports();
+    const name = wt?.threadName ?? wt?.default?.threadName;
+    ArrayPrototypePush(
+      events,
+      metadataEvent(pid, tid, "thread_name", {
+        name: `[worker ${tid}] ${name || "WorkerThread"}`,
+      }),
+    );
+  }
   try {
     getFs().writeFileSync(
       filename,
-      JSONStringify({ traceEvents: recordedEvents }),
+      JSONStringify({ traceEvents: events }),
     );
   } catch {
     // Best-effort exit-time write.
   }
+}
+
+function metadataEvent(pid, tid, name, args) {
+  return { pid, tid, ts: 0, ph: "M", cat: "__metadata", name, args };
+}
+
+function getOptionValue(name) {
+  try {
+    return core.loadExtScript("ext:deno_node/internal/options.ts")
+      .getOptionValue(name);
+  } catch {
+    return undefined;
+  }
+}
+
+function traceFilePattern() {
+  const pattern = getOptionValue("--trace-event-file-pattern");
+  return typeof pattern === "string" && pattern !== ""
+    ? pattern
+    : "node_trace.${rotation}.log";
+}
+
+// Node's `__metadata` events for the process: the thread names, the
+// process name (as started, and as `process.title` set it since), and the
+// versions.
+function mainMetadataEvents(pid) {
+  const p = getProc();
+  const tid = getThreadId();
+  const events = [
+    metadataEvent(pid, tid, "thread_name", { name: "JavaScriptMainThread" }),
+    metadataEvent(pid, tid + 1, "thread_name", {
+      name: "PlatformWorkerThread",
+    }),
+  ];
+  const startTitle = getOptionValue("--title") || "node";
+  ArrayPrototypePush(
+    events,
+    metadataEvent(pid, tid, "process_name", { name: startTitle }),
+  );
+  const title = p?.title;
+  if (typeof title === "string" && title !== startTitle) {
+    ArrayPrototypePush(
+      events,
+      metadataEvent(pid, tid, "process_name", { name: title }),
+    );
+  }
+  if (p) {
+    ArrayPrototypePush(
+      events,
+      metadataEvent(pid, tid, "version", { node: p.versions.node }),
+      metadataEvent(pid, tid, "node", {
+        process: {
+          versions: p.versions,
+          arch: p.arch,
+          platform: p.platform,
+          release: p.release,
+        },
+      }),
+    );
+  }
+  return events;
 }
 
 function existsSync(path) {
@@ -391,6 +510,61 @@ function installAsyncHooksTimerTracing() {
   }
 }
 
+// denext: Node's `node.console` events: `console.count()` /
+// `countReset()` as counter events (`C`, `args.data` the count) and
+// `console.time()` / `timeLog()` / `timeEnd()` as begin / instant / end
+// events, named `count::<label>` and `time::<label>`. The global console's
+// counters live in its native wrap, so the traced methods keep their own.
+// Installed once a category that covers them is enabled, and left in place
+// (the events are dropped while it isn't).
+const PHASE_COUNTER = 67; // 'C'
+const PHASE_INSTANT = 110; // 'n'
+const kConsoleCategory = "node,node.console";
+let consoleTracingInstalled = false;
+
+function installConsoleTracing() {
+  if (consoleTracingInstalled) return;
+  const target = globalThis.console;
+  if (target === undefined || target === null) return;
+  consoleTracingInstalled = true;
+  const counts = new SafeMap();
+  const timers = new SafeSet();
+  const wrap = (name, before) => {
+    const original = target[name];
+    if (typeof original !== "function") return;
+    target[name] = function (label = "default", ...args) {
+      before(`${label}`);
+      const callArgs = ArrayPrototypeSlice(args);
+      ArrayPrototypeUnshift(callArgs, label);
+      return ReflectApply(original, this, callArgs);
+    };
+  };
+  wrap("count", (label) => {
+    const count = (counts.get(label) ?? 0) + 1;
+    counts.set(label, count);
+    trace(PHASE_COUNTER, kConsoleCategory, `count::${label}`, 0, count);
+  });
+  wrap("countReset", (label) => {
+    if (!counts.has(label)) return;
+    counts.delete(label);
+    trace(PHASE_COUNTER, kConsoleCategory, `count::${label}`, 0, 0);
+  });
+  wrap("time", (label) => {
+    if (timers.has(label)) return;
+    timers.add(label);
+    trace(PHASE_NESTABLE_ASYNC_BEGIN, kConsoleCategory, `time::${label}`, 0);
+  });
+  wrap("timeLog", (label) => {
+    if (!timers.has(label)) return;
+    trace(PHASE_INSTANT, kConsoleCategory, `time::${label}`, 0);
+  });
+  wrap("timeEnd", (label) => {
+    if (!timers.has(label)) return;
+    timers.delete(label);
+    trace(PHASE_NESTABLE_ASYNC_END, kConsoleCategory, `time::${label}`, 0);
+  });
+}
+
 function uninstallAsyncHooksTimerTracing() {
   if (originalSetTimeout === null) return;
   globalThis.setTimeout = originalSetTimeout;
@@ -410,13 +584,18 @@ try {
   const binding = lazyBindingMod().getBinding("trace_events");
   if (binding && typeof binding === "object") {
     binding.getCategoryEnabledBuffer = getCategoryEnabledBuffer;
+    binding.isTraceCategoryEnabled = isTraceCategoryEnabled;
     binding.trace = trace;
   }
 } catch {
   // best-effort: binding registry may not be available in all contexts
 }
 
+// denext: node:console's `node.console` events (console.count / time).
+internals.nodeTraceEvent = trace;
+
 return {
+  markCliTracing,
   default: {
     createTracing,
     getEnabledCategories,

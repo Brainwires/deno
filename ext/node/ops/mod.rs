@@ -22,6 +22,7 @@ pub mod os;
 pub mod perf_hooks;
 pub mod pipe_wrap;
 pub mod process;
+pub mod report;
 pub mod require;
 pub mod sea;
 pub mod shell;

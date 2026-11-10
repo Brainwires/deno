@@ -17,6 +17,7 @@ import {
   op_current_thread_cpu_usage,
   op_env,
   op_fs_umask,
+  op_get_env_no_permission_check,
   op_getegid,
   op_geteuid,
   op_getgroups,
@@ -47,9 +48,10 @@ const { EventEmitter } = core.loadExtScript("ext:deno_node/_events.mjs");
 // not-yet-ready exports -> circular-require TDZs. `Module`/`getBuiltinModule`
 // are only used at call time, so load node:module lazily on first use.
 const lazyNodeModule = core.createLazyLoader("node:module");
-const { report } = core.loadExtScript(
-  "ext:deno_node/internal/process/report.ts",
-);
+const { initializeReport, report, reportUncaughtException } = core
+  .loadExtScript(
+    "ext:deno_node/internal/process/report.ts",
+  );
 const { onWarning } = core.loadExtScript(
   "ext:deno_node/internal/process/warning.ts",
 );
@@ -218,6 +220,16 @@ let ProcessExitCode: undefined | null | string | number;
 // script. Empty in a compiled program and under every other subcommand.
 export const execArgv: string[] = [];
 
+// denext: `NODE_V8_COVERAGE`'s coverage is written once the 'exit'
+// listeners ran, as Node writes it at exit.
+let coverageStarted = false;
+function writeCoverageAtExit() {
+  if (coverageStarted) {
+    coverageStarted = false;
+    core.loadExtScript("ext:deno_node/v8.ts").writeCoverage();
+  }
+}
+
 /** https://nodejs.org/api/process.html#process_process_exit_code */
 export const exit = (code?: number | string) => {
   if (code !== undefined) {
@@ -231,6 +243,7 @@ export const exit = (code?: number | string) => {
     // and thus the `unload` event will not be emitted to properly trigger "emit"
     // event on `process`.
     process.emit("exit", ProcessExitCode);
+    writeCoverageAtExit();
   }
 
   // Any valid thing `process.exitCode` set is already held in Deno.exitCode.
@@ -1567,6 +1580,12 @@ process._fatalException = function (err: any, fromPromise?: boolean) {
     process.emit("uncaughtException", err, origin);
     return true;
   }
+  // denext: `--report-uncaught-exception` writes a report for an exception
+  // nothing handled, as Node's `TriggerUncaughtException` does.
+  reportUncaughtException(err);
+  // The exception ends the process without an 'exit' event; Node still
+  // writes `NODE_V8_COVERAGE`'s coverage.
+  writeCoverageAtExit();
   return false;
 };
 
@@ -1991,6 +2010,7 @@ function dispatchProcessExitEvent() {
   if (!process._exiting) {
     process._exiting = true;
     process.emit("exit", process.exitCode || 0);
+    writeCoverageAtExit();
   }
 }
 
@@ -2073,7 +2093,8 @@ function synchronizeListeners() {
   if (
     uncaughtExceptionListenerCount > 0 ||
     uncaughtExceptionMonitorListenerCount > 0 ||
-    _uncaughtExceptionCaptureFn !== null
+    _uncaughtExceptionCaptureFn !== null ||
+    report.reportOnUncaughtException
   ) {
     globalThis.addEventListener("error", processOnError);
   } else {
@@ -2253,6 +2274,23 @@ internals.__bootstrapNodeProcess = function (
         core.loadExtScript("ext:deno_node/v8.ts")
           .setHeapSnapshotNearHeapLimit(limit);
       }
+    }
+    // denext: `NODE_V8_COVERAGE` collects precise coverage from here on and
+    // writes it at exit (see `writeCoverageAtExit`).
+    const coverageDirectory = op_get_env_no_permission_check(
+      "NODE_V8_COVERAGE",
+    );
+    if (coverageDirectory) {
+      core.loadExtScript("ext:deno_node/v8.ts").startCoverage(
+        coverageDirectory,
+      );
+      coverageStarted = true;
+    }
+
+    // denext: the `--report-*` options configure `process.report`.
+    initializeReport(getOptionValue, process, runningOnMainThread);
+    if (report.reportOnUncaughtException) {
+      synchronizeListeners();
     }
     const heapSnapshotSignal = getOptionValue("--heapsnapshot-signal");
     if (runningOnMainThread && heapSnapshotSignal) {

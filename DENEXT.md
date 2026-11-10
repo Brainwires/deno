@@ -12091,6 +12091,128 @@ NNN. **`fix(install)`: native addons build from source in the lifecycle-script
        hashes. The Windows `node.lib` has not been linked against on Windows
        yet.
 
+NNN. **`feat(node)`: `process.report` writes Node's diagnostic report**
+     (`ext/node/polyfills/internal/process/report.ts`, `ext/node/ops/report.rs`,
+     `ext/node/polyfills/process.ts`,
+     `ext/node/polyfills/internal_binding/node_options.ts`,
+     `libs/node_shim/lib.rs`, `tests/node_compat/mod.rs`).
+     - `getReport()` returns Node's report-version-5 document and
+       `writeReport([file][, err])` writes it (`stdout`, `stderr`, or
+       `report.<date>.<time>.<pid>.<tid>.<seq>.json` in `process.report.directory`
+       / `--report-dir`, else the working directory; a missing directory prints
+       Node's "Failed to open Node.js report file" line). Before, `writeReport()`
+       returned `""` and wrote nothing, and `getReport()` had only a header.
+     - Sections: the header (from node:os / node:process: OS release and
+       version, CPUs with flattened times, network interfaces unless
+       `excludeNetwork`), `javascriptStack` (an `ERR_SYNTHETIC` stack by default,
+       an error's own enumerable properties as `errorProperties`),
+       `javascriptHeap` (V8's heap statistics and spaces), `resourceUsage`,
+       `environmentVariables` (unless `excludeEnv`), and from the new
+       `op_node_report_native_info` `userLimits` (getrlimit, not on Windows) and
+       `sharedObjects` (dyld images on macOS, `dl_iterate_phdr` on Linux, empty
+       on Windows), gated on the `osRelease` sys permission like the header's OS
+       facts. `nativeStack`, `libuv` and `workers` are Node's empty arrays.
+     - The `process.report` settings validate as Node's do, and the
+       `--report-uncaught-exception`, `--report-on-signal`, `--report-signal`,
+       `--report-compact`, `--report-dir` / `--report-directory`,
+       `--report-filename`, `--report-exclude-env`, `--report-exclude-network`
+       and `--report-on-fatalerror` flags ride in NODE_OPTIONS from the node
+       shim. An exception nothing handled writes an `Exception` report; the
+       report signal (`SIGUSR2`) writes a `Signal` report on the main thread.
+       `--report-on-fatalerror` is accepted but writes nothing: a V8
+       out-of-memory error ends the process without running JavaScript.
+     - The node_compat harness now collects the suite's `report/` directory and
+       forwards a test's `--report-*` flags in NODE_OPTIONS.
+     - Tests: node_compat `report/test-report-{config,getreport,signal,
+       uncaught-exception,uncaught-exception-compat,
+       uncaught-exception-primitives,uncaught-exception-symbols,writereport,
+       writereport-exclude-env,fatalerror-oomerror-not-set}`;
+       `libs/node_shim` `test_report_options_ride_in_node_options`.
+
+NNN. **`feat(node)`: `NODE_V8_COVERAGE`, `v8.takeCoverage()` and
+     `v8.stopCoverage()`** (`ext/node/polyfills/v8.ts`,
+     `ext/node/polyfills/process.ts`, `runtime/js/99_main.js`). With
+     `NODE_V8_COVERAGE` set, the main runtime's bootstrap starts precise
+     coverage (call counts, block granularity) on the isolate's own inspector
+     before the program's first script compiles (a worker starts it in its
+     node:process bootstrap), and the program's scripts' coverage (not `ext:` /
+     `node:`) is written as `coverage-<pid>-<ms>-<threadId>.json`
+     (`{ result, timestamp }`, Node's format) once the 'exit' listeners ran,
+     when an uncaught exception ends the process, and on each
+     `v8.takeCoverage()` (which resets the counts). `v8.stopCoverage()` stops
+     it, so nothing is written at exit. Without `NODE_V8_COVERAGE` both are
+     no-ops, as in Node; before, both threw "not implemented". Without the
+     `inspector` sys permission no coverage is collected. Not covered: a
+     process a signal ends.
+     - Tests: node_compat `test-v8-stop-coverage`, `test-v8-take-coverage-noop`.
+
+NNN. **`feat(node)`: trace event files from `--trace-event-categories` /
+     `--trace-events-enabled`** (`ext/node/polyfills/trace_events.ts`,
+     `ext/node/polyfills/01_require.js`,
+     `ext/node/polyfills/internal/console/constructor.mjs`,
+     `ext/node/polyfills/internal_binding/node_options.ts`,
+     `ext/node/polyfills/worker_threads.ts`, `libs/node_shim/lib.rs`).
+     - Tracing requested on the command line always writes the trace file
+       (Chrome trace format), with Node's `__metadata` events: the thread names
+       (`JavaScriptMainThread`, `PlatformWorkerThread`,
+       `[worker <id>] <name or WorkerThread>`), `process_name` (the start
+       title and the current `process.title`), `version` and `node` (versions,
+       arch, platform, release). Before, the file appeared only once an event
+       was recorded.
+     - `--trace-event-file-pattern` (`${pid}`, `${rotation}`) rides in
+       NODE_OPTIONS, and so does `--title`, which was dropped before.
+     - Events of a category nobody enabled are dropped (they were all
+       recorded); `trace(..., data)` stores `args.data`, as Node's binding does;
+       `internalBinding('trace_events').isTraceCategoryEnabled` exists.
+     - `node.console`: `console.count()` / `countReset()` are counter events and
+       `console.time()` / `timeLog()` / `timeEnd()` begin / instant / end
+       events (`count::<label>`, `time::<label>`).
+     - A worker's `threadName` is its `name` option (it was always empty: the
+       name was set after the worker's metadata was built).
+     - Not produced: V8's own categories (`v8`), `node.perf`,
+       `node.environment`, `node.bootstrap`, `node.fs.*`, `node.vm.script`,
+       `node.promises.rejections`, `node.net` / `node.http` / `node.dns`, and
+       the native async_hooks events; those categories write only the metadata.
+     - Tests: node_compat `test-trace-events-{binding,category-used,console,
+       file-pattern,metadata,none,process-exit,worker-metadata,
+       worker-metadata-with-name}`; `libs/node_shim`
+       `test_title_and_trace_file_pattern_ride_in_node_options`.
+
+NNN. **`fix(node)`: a `net.Server` sent over IPC keeps listening in the
+     sender; an unsupported handle is `ERR_INVALID_HANDLE_TYPE`; a spawned
+     script's extensionless path resolves** (`ext/node/polyfills/internal/child_process.ts`).
+     - As Node's `handleConversion['net.Server']` has no `postSend`, the
+       sender's server is no longer closed once the child acknowledges it;
+       connections go to whichever process accepts first until the sender
+       closes it. A net.Socket or net.Server whose handle is neither TCP nor a
+       pipe throws `ERR_INVALID_HANDLE_TYPE` instead of "not implemented"
+       (pipes, unix sockets, UDP sockets and servers already went through
+       SCM_RIGHTS on Unix; Windows still refuses).
+     - `spawn(process.execPath, ["fixtures/interval"])` runs `interval.js`: the
+       translated `deno run` entrypoint is resolved as `require.resolve` does
+       against the child's working directory when it is not a file there, as
+       the node shim does for `node` itself.
+     - Tests: node_compat `test-child-process-fork-net-server` (not on
+       Windows); spec `node/child_process_ipc_handle` `server_*` (the parent now
+       closes its own server before connecting).
+
+NNN. **`feat(node)`: a worker adopts a stream another isolate opened through
+     node:fs** (`ext/io/fd_table.rs`, `ext/node/ops/fd_adopt.rs`). Every
+     isolate's TableOwned descriptors above stdio are now also recorded
+     process-wide by table, so `net.Socket({ fd })` / `server.listen({ fd })`
+     in a worker can adopt a FIFO, socket or terminal the main thread (or
+     another worker) opened through node:fs, when the worker holds unscoped
+     read and write access (it could have opened it itself) or a process-wide
+     grant: the wrap gets a dup and the owner keeps its descriptor. Before, the
+     worker got `EPERM` without `-A`, and under `-A` adopted the raw number,
+     so both isolates owned it and the process aborted at exit ("IO Safety
+     violation: owned file descriptor already closed"). Stdio and descriptors
+     inherited at startup already worked in workers.
+     - Tests: `deno_io` `table_owned_fds_are_visible_to_other_tables_while_owned`;
+       spec `node/fd_sockets` `worker_pipe_fd` (unscoped read/write),
+       `worker_pipe_fd_all` (`-A`, no abort) and `worker_pipe_fd_scoped`
+       (scoped: `EPERM`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

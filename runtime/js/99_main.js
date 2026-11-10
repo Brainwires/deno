@@ -1380,6 +1380,17 @@ function bootstrapMainRuntime(runtimeOptions, warmup = false) {
     // `Deno` with `Deno` namespace from "./deno.ts".
     ObjectDefineProperty(globalThis, "Deno", core.propReadOnly(finalDenoNs));
 
+    // denext: Node's `NODE_V8_COVERAGE` collects precise (block) coverage
+    // from before the program's first script compiles; node:process writes
+    // it at exit and on `v8.takeCoverage()`.
+    const nodeV8Coverage = op_get_env_no_permission_check("NODE_V8_COVERAGE");
+    if (nodeV8Coverage) {
+      core.loadExtScript("ext:deno_node/v8.ts").startCoverage(
+        nodeV8Coverage,
+        Deno.cwd(),
+      );
+    }
+
     const nodeBootstrapArgs = {
       usesLocalNodeModulesDir: hasNodeModulesDir,
       runningOnMainThread: true,

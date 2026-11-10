@@ -140,6 +140,9 @@ const { channel: createDiagnosticsChannel, tracingChannel } = core
 const childProcessChannel = createDiagnosticsChannel("child_process");
 const childProcessSpawnChannel = tracingChannel("child_process.spawn");
 const lazyDgram = core.createLazyLoader("node:dgram");
+const lazyFs = core.createLazyLoader("node:fs");
+const lazyPath = core.createLazyLoader("node:path");
+const lazyModule = core.createLazyLoader("node:module");
 const lazyDgramInternal = () =>
   core.loadExtScript("ext:deno_node/internal/dgram.ts");
 const lazyUdpWrap = () =>
@@ -427,6 +430,7 @@ class ChildProcess extends EventEmitter {
       command,
       ArrayPrototypeSlice(args, 1),
       env,
+      cwd,
     );
     const cmd = builtCommand[0];
     const cmdArgs = builtCommand[1];
@@ -1841,10 +1845,43 @@ function invalidNodeArgsChild(message) {
   ];
 }
 
+// denext: Node resolves the script it runs as `require.resolve` does, so a
+// child spawned with an extensionless path (`node fixtures/interval`, as
+// the node shim's `resolve_run_entrypoint` handles for `node` itself) runs
+// `interval.js`. For a translated `deno run` argv, the entrypoint (the first
+// argument after `run` that is no flag) is resolved against the child's
+// working directory when it isn't a file there.
+function resolveRunEntrypoint(denoArgs, cwd) {
+  if (denoArgs[0] !== "run") return;
+  let index = -1;
+  for (let i = 1; i < denoArgs.length; i++) {
+    if (!StringPrototypeStartsWith(denoArgs[i], "-")) {
+      index = i;
+      break;
+    }
+  }
+  if (index === -1) return;
+  const entrypoint = denoArgs[index];
+  // A URL (`data:`, `file:`, `npm:`, ...) is no path; a drive letter is.
+  if (RegExpPrototypeTest(/^[a-zA-Z][a-zA-Z0-9+.-]+:/, entrypoint)) return;
+  try {
+    const path = lazyPath();
+    const base = cwd ? path.resolve(cwd) : lazyProcess().default.cwd();
+    if (lazyFs().existsSync(path.resolve(base, entrypoint))) return;
+    const require = lazyModule().createRequire(path.join(base, "$file.js"));
+    denoArgs[index] = require.resolve(
+      path.isAbsolute(entrypoint) ? entrypoint : `./${entrypoint}`,
+    );
+  } catch {
+    // Left as it is: the child reports the missing module.
+  }
+}
+
 function buildCommand(
   file,
   args,
   env,
+  cwd,
 ) {
   let includeNpmProcessState = false;
   if (file === Deno.execPath() && !Deno.build.standalone) {
@@ -1875,6 +1912,7 @@ function buildCommand(
       return [file, invalidNodeArgsChild(message), false];
     }
     args = result.denoArgs;
+    resolveRunEntrypoint(args, cwd);
     includeNpmProcessState = result.needsNpmProcessState;
     if (result.caStores?.length) {
       env.DENO_TLS_CA_STORE = ArrayPrototypeJoin(result.caStores, ",");
@@ -2102,6 +2140,7 @@ function spawnSync(
     command,
     argsToProcess,
     env,
+    cwd,
   );
   command = builtCommand[0];
   args = builtCommand[1];
@@ -2459,8 +2498,10 @@ function getIpcHandleInfo(handle, options, target) {
     }
     const isTcp = ObjectPrototypeIsPrototypeOf(TCP.prototype, inner);
     const isPipe = ObjectPrototypeIsPrototypeOf(Pipe.prototype, inner);
+    // Node's IPC carries only libuv TCP, pipe and UDP handles (a TLS
+    // socket's or a JS stream's handle is refused by its stream layer).
     if (!isTcp && !isPipe) {
-      notImplemented("ChildProcess.send with non-TCP net.Socket handle");
+      throw new ERR_INVALID_HANDLE_TYPE();
     }
     const closeAfterSend = options.keepOpen !== true;
     const message = {
@@ -2501,7 +2542,7 @@ function getIpcHandleInfo(handle, options, target) {
     const isTcp = ObjectPrototypeIsPrototypeOf(TCP.prototype, inner);
     const isPipe = ObjectPrototypeIsPrototypeOf(Pipe.prototype, inner);
     if (!isTcp && !isPipe) {
-      notImplemented("ChildProcess.send with non-TCP net.Server handle");
+      throw new ERR_INVALID_HANDLE_TYPE();
     }
     return {
       rawFd: rawFdFromTcpHandle(inner),
@@ -2512,9 +2553,10 @@ function getIpcHandleInfo(handle, options, target) {
         nativeKind: isTcp ? "tcp" : "pipe",
         msg: undefined,
       },
-      // Match Node's handleConversion["net.Server"].postSend, which calls
-      // server.close() once the receiver acknowledges the transfer.
-      closeAfterSend: options.keepOpen !== true,
+      // denext: Node's handleConversion["net.Server"] has no postSend: the
+      // sender's server keeps listening on the shared socket (connections
+      // go to whichever process accepts first) until it closes it itself.
+      closeAfterSend: false,
       close() {
         handle.close();
       },
@@ -3129,7 +3171,7 @@ function setupChannel(
     // races against the socket being torn down -- e.g. cluster handing two
     // connections to a worker that immediately closes them. By then the
     // socket's `_handle` is null and getIpcHandleInfo would throw
-    // `notImplemented("ChildProcess.send with non-TCP net.Socket handle")`.
+    // `ERR_INVALID_HANDLE_TYPE`.
     // fdForIpc() dups the fd, so the captured copy survives the original
     // socket's destruction.
     let handleInfo = null;

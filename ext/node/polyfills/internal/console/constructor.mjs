@@ -2,7 +2,7 @@
 // Copyright Joyent and Node contributors. All rights reserved. MIT license.
 
 (function () {
-const { core, primordials } = __bootstrap;
+const { core, internals, primordials } = __bootstrap;
 const {
   op_get_env_no_permission_check,
   op_preview_entries,
@@ -54,8 +54,13 @@ const {
   WeakMapPrototypeSet,
 } = primordials;
 
-// Mock trace for now
-const trace = () => {};
+// denext: the `node.console` trace events go to node:trace_events once it
+// is loaded (it sets `internals.nodeTraceEvent`), which drops them unless
+// the category is enabled.
+const trace = (phase, category, name, id, data) => {
+  const fn = internals.nodeTraceEvent;
+  if (fn !== undefined) fn(phase, category, name, id, data);
+};
 const { channel: createDiagnosticsChannel } = core.loadExtScript(
   "ext:deno_node/diagnostics_channel.js",
 );
