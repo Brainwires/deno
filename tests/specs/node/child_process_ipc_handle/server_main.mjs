@@ -20,9 +20,9 @@ if (process.argv[3] === "child") {
         process.send({ done: true });
       });
     });
-    // Tell the parent we're listening on the inherited fd. By the time the
-    // parent receives this, NODE_HANDLE_ACK has already been processed so
-    // the parent's server has been closed (closeAfterSend semantics).
+    // Tell the parent we're listening on the inherited fd. As in Node, the
+    // parent's server keeps listening after the send; the parent closes it
+    // before connecting, so the connection reaches the child.
     process.send({ ready: true });
   });
   process.on("disconnect", () => process.exit(0));
@@ -58,6 +58,7 @@ if (process.argv[3] === "child") {
         process.exit(1);
       }
       if (msg && msg.ready) {
+        server.close();
         const client = net.connect(port, "127.0.0.1", () => {
           client.write("hello\n");
         });
