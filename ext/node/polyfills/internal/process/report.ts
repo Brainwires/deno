@@ -215,9 +215,12 @@ function resourceUsage(process, os) {
   const uptime = process.uptime();
   const percent = (n) => (uptime > 0 ? (n / uptime) * 100 : 0);
   const result = {
+    // deno-lint-ignore camelcase -- Node's report field name
     free_memory: os.freemem(),
+    // deno-lint-ignore camelcase -- Node's report field name
     total_memory: os.totalmem(),
     rss: process.memoryUsage.rss(),
+    // deno-lint-ignore camelcase -- Node's report field name
     available_memory: process.availableMemory(),
     userCpuSeconds: user,
     kernelCpuSeconds: kernel,
@@ -356,10 +359,10 @@ function triggerReport(event, trigger, file, err) {
     writeStderr("\nNode.js report completed\n");
     return filename;
   }
-  const path = lazyPath();
+  const { isAbsolute, join } = lazyPath();
   const directory = report.directory;
-  const fullPath = directory && !path.isAbsolute(filename)
-    ? path.join(directory, filename)
+  const fullPath = directory && !isAbsolute(filename)
+    ? join(directory, filename)
     : filename;
   const text = serialize(buildReport(event, trigger, filename, err));
   try {

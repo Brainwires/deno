@@ -1894,6 +1894,7 @@ function invalidNodeArgsChild(argv0, message) {
 // `interval.js`. For a translated `deno run` argv, the entrypoint (the first
 // argument after `run` that is no flag) is resolved against the child's
 // working directory when it isn't a file there.
+const kUrlSchemePrefix = new SafeRegExp("^[a-zA-Z][a-zA-Z0-9+.-]+:");
 function resolveRunEntrypoint(denoArgs, cwd) {
   if (denoArgs[0] !== "run") return;
   let index = -1;
@@ -1906,12 +1907,13 @@ function resolveRunEntrypoint(denoArgs, cwd) {
   if (index === -1) return;
   const entrypoint = denoArgs[index];
   // A URL (`data:`, `file:`, `npm:`, ...) is no path; a drive letter is.
-  if (RegExpPrototypeTest(/^[a-zA-Z][a-zA-Z0-9+.-]+:/, entrypoint)) return;
+  if (RegExpPrototypeTest(kUrlSchemePrefix, entrypoint)) return;
   try {
     const path = lazyPath();
+    const { join: pathJoin } = path;
     const base = cwd ? path.resolve(cwd) : lazyProcess().default.cwd();
     if (lazyFs().existsSync(path.resolve(base, entrypoint))) return;
-    const require = lazyModule().createRequire(path.join(base, "$file.js"));
+    const require = lazyModule().createRequire(pathJoin(base, "$file.js"));
     denoArgs[index] = require.resolve(
       path.isAbsolute(entrypoint) ? entrypoint : `./${entrypoint}`,
     );

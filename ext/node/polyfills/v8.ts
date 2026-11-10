@@ -282,8 +282,9 @@ function writeCoverage() {
     `coverage-${lazyProcess().default.pid}-${DateNow()}-${coverageThreadId()}.json`;
   try {
     fs.mkdirSync(coverageDirectory, { recursive: true });
+    const { join: pathJoin } = lazyPath();
     fs.writeFileSync(
-      lazyPath().join(coverageDirectory, filename),
+      pathJoin(coverageDirectory, filename),
       JSONStringify({ result, timestamp: taken.timestamp }),
     );
   } catch {
