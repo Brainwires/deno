@@ -721,12 +721,7 @@ class ChildProcess extends EventEmitter {
           command,
           ArrayPrototypeSlice(args, 1),
         );
-      } else if (
-        ObjectPrototypeIsPrototypeOf(
-          Deno.errors.PermissionDenied.prototype,
-          e,
-        )
-      ) {
+      } else if (isPermissionDeniedError(e)) {
         // Node distinguishes two failure modes that Deno collapses into
         // PermissionDenied:
         //   * setuid/setgid refused by the kernel -> EPERM, thrown sync,
@@ -2190,9 +2185,7 @@ function spawnSync(
   } catch (err) {
     if (ObjectPrototypeIsPrototypeOf(Deno.errors.NotFound.prototype, err)) {
       result.error = _createSpawnError("ENOENT", command, args, true);
-    } else if (
-      ObjectPrototypeIsPrototypeOf(Deno.errors.PermissionDenied.prototype, err)
-    ) {
+    } else if (isPermissionDeniedError(err)) {
       result.error = _createSpawnError(
         uid != null || gid != null ? "EPERM" : "EACCES",
         command,
@@ -2692,6 +2685,15 @@ function isInterruptedError(err) {
 
 function isBrokenPipeError(err) {
   return ObjectPrototypeIsPrototypeOf(Deno.errors.BrokenPipe.prototype, err);
+}
+
+// A refused start: the kernel's setuid/setgid refusal, or a permission the
+// process lacks.
+function isPermissionDeniedError(err) {
+  return ObjectPrototypeIsPrototypeOf(
+    Deno.errors.PermissionDenied.prototype,
+    err,
+  );
 }
 
 function setupChannel(
