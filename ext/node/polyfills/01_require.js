@@ -1048,6 +1048,21 @@ function executeEsmLoadHookChain(fileUrl, context) {
   return { result, effectiveUrl };
 }
 
+// The `format`s a load hook may return with a `source` (Node's, and the
+// `text` / `bytes` import attribute types).
+const kKnownLoadHookFormats = new SafeSet([
+  "addon",
+  "builtin",
+  "bytes",
+  "commonjs",
+  "commonjs-typescript",
+  "json",
+  "module",
+  "module-typescript",
+  "text",
+  "wasm",
+]);
+
 function _startEsmLoadLoop() {
   if (esmLoadLoopRunning) return;
   esmLoadLoopRunning = true;
@@ -1076,8 +1091,16 @@ function _startEsmLoadLoop() {
         if (result?.format === "builtin") {
           op_module_hooks_respond_load(id, null, "builtin", null, null);
         } else if (result !== null && result.source != null) {
-          const source = loadHookSourceToString(result.source);
           const format = result.format || null;
+          if (
+            format !== null && !SetPrototypeHas(kKnownLoadHookFormats, format)
+          ) {
+            throw new internalErrors.ERR_UNKNOWN_MODULE_FORMAT(
+              format,
+              fileUrl,
+            );
+          }
+          const source = loadHookSourceToString(result.source);
           op_module_hooks_respond_load(id, source, format, null, null);
         } else {
           // Fallthrough: tell Rust to use default loading. Pass the URL the
@@ -1087,7 +1110,25 @@ function _startEsmLoadLoop() {
           op_module_hooks_respond_load(id, null, null, null, effectiveUrl);
         }
       } catch (e) {
-        op_module_hooks_respond_load(id, null, null, String(e), null);
+        // The import rejects with the thrown error's class and `code`. The
+        // message keeps the error's name (`String(e)`): a failed static
+        // import is reported by its message alone.
+        const isError = e !== null && typeof e === "object";
+        let message;
+        try {
+          message = String(e);
+        } catch {
+          message = "load hook failed";
+        }
+        op_module_hooks_respond_load(
+          id,
+          null,
+          null,
+          message,
+          null,
+          isError && typeof e.name === "string" ? e.name : null,
+          isError && typeof e.code === "string" ? e.code : null,
+        );
       }
     }
   })();
@@ -4349,6 +4390,49 @@ export function findSourceMap(path) {
 Module.findSourceMap = findSourceMap;
 Module.SourceMap = SourceMap;
 
+// denext: the runtime maps stack traces through source maps itself; these
+// keep the settings Node's API reports.
+let sourceMapsSupport = {
+  __proto__: null,
+  enabled: true,
+  nodeModules: false,
+  generatedCode: false,
+};
+
+/**
+ * Node's `module.setSourceMapsSupport()`.
+ * @param {boolean} enabled
+ * @param {{ nodeModules?: boolean, generatedCode?: boolean }} [options]
+ */
+export function setSourceMapsSupport(enabled, options = { __proto__: null }) {
+  internalValidators.validateBoolean(enabled, "enabled");
+  internalValidators.validateObject(options, "options");
+  const { nodeModules = false, generatedCode = false } = options;
+  internalValidators.validateBoolean(nodeModules, "options.nodeModules");
+  internalValidators.validateBoolean(generatedCode, "options.generatedCode");
+  sourceMapsSupport = {
+    __proto__: null,
+    enabled,
+    nodeModules: enabled && nodeModules,
+    generatedCode: enabled && generatedCode,
+  };
+}
+
+/**
+ * Node's `module.getSourceMapsSupport()`.
+ * @returns {{ enabled: boolean, nodeModules: boolean, generatedCode: boolean }}
+ */
+export function getSourceMapsSupport() {
+  return {
+    enabled: sourceMapsSupport.enabled,
+    nodeModules: sourceMapsSupport.nodeModules,
+    generatedCode: sourceMapsSupport.generatedCode,
+  };
+}
+
+Module.setSourceMapsSupport = setSourceMapsSupport;
+Module.getSourceMapsSupport = getSourceMapsSupport;
+
 /**
  * @param {string} code
  * @param {{ mode?: "strip" | "transform", sourceMap?: boolean, sourceUrl?: string }} [options]
@@ -4456,7 +4540,10 @@ function send(msg, transferList) {
   Atomics.notify(lockView, 0);
 }
 function serializeError(e) {
-  if (e !== null && typeof e === "object") {
+  if (
+    e instanceof Error ||
+    (e !== null && typeof e === "object" && typeof e.stack === "string")
+  ) {
     return {
       isError: true,
       name: e.name,
@@ -4465,7 +4552,21 @@ function serializeError(e) {
       code: e.code,
     };
   }
-  if (typeof e === "symbol" || typeof e === "function") {
+  if (e !== null && typeof e === "object") {
+    // Another thrown object reaches the loading thread as itself when it can
+    // be cloned, else as its inspected text (Node reports the hooks
+    // thread's value the same way).
+    try {
+      structuredClone(e);
+      return { isError: false, value: e };
+    } catch {
+      return { isError: false, value: require("node:util").inspect(e) };
+    }
+  }
+  if (typeof e === "function") {
+    return { isError: false, value: require("node:util").inspect(e) };
+  }
+  if (typeof e === "symbol") {
     return { isError: false, value: String(e) };
   }
   return { isError: false, value: e };
@@ -4506,6 +4607,14 @@ function validateResult(entry, kind, result, nextCalled) {
       "ERR_INVALID_RETURN_PROPERTY_VALUE",
       'Expected a URL string to be returned for the "url" from the ' +
         hookName + " hook",
+    );
+  }
+  if (kind === "resolve" && !URL.canParse(result.url)) {
+    throw makeError(
+      TypeError,
+      "ERR_INVALID_RETURN_PROPERTY_VALUE",
+      'Expected a valid URL to be returned for the "url" from the ' +
+        hookName + " hook, but got " + JSON.stringify(result.url),
     );
   }
   if (kind === "load") {
@@ -4613,7 +4722,18 @@ function reviveAsyncHookError(serialized) {
       configurable: true,
     });
   }
-  if (serialized.stack !== undefined) err.stack = serialized.stack;
+  let stack = serialized.stack;
+  const name = serialized.name ?? "Error";
+  if (
+    typeof stack === "string" && typeof serialized.code === "string" &&
+    StringPrototypeStartsWith(serialized.code, "ERR_") &&
+    StringPrototypeStartsWith(stack, name + ": ")
+  ) {
+    // As Node's own errors with a code print: `TypeError [ERR_X]: ...`.
+    stack = name + " [" + serialized.code + "]" +
+      StringPrototypeSlice(stack, name.length);
+  }
+  if (stack !== undefined) err.stack = stack;
   if (serialized.code !== undefined) err.code = serialized.code;
   return err;
 }
@@ -4714,6 +4834,20 @@ function resolveRegisterSpecifier(specifier, parentURL) {
   try {
     return op_module_default_resolve(specifier, parent);
   } catch {
+    // A bare specifier names a package; one the resolver can't find is
+    // Node's ERR_MODULE_NOT_FOUND, not a path next to the parent.
+    if (
+      !URL.canParse(specifier) &&
+      !StringPrototypeStartsWith(specifier, "/") &&
+      !StringPrototypeStartsWith(specifier, "./") &&
+      !StringPrototypeStartsWith(specifier, "../") &&
+      specifier !== "." && specifier !== ".."
+    ) {
+      const base = StringPrototypeStartsWith(parent, "file:")
+        ? url.fileURLToPath(parent)
+        : parent;
+      throw new internalErrors.ERR_MODULE_NOT_FOUND(specifier, base);
+    }
     // Not resolvable by Deno's resolver (an ad-hoc scheme, or a relative
     // specifier against a non-file parent): resolve it as a URL.
     return new url.URL(specifier, parent).href;

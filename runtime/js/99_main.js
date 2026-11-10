@@ -56,6 +56,7 @@ const {
   queueMicrotask,
   ReflectApply,
   ReflectOwnKeys,
+  String,
   StringPrototypePadEnd,
   Symbol,
   SymbolDispose,
@@ -442,12 +443,26 @@ setNoColorFns(
   () => op_bootstrap_stderr_no_color(),
 );
 
+// denext: set at bootstrap when uncaught errors are reported in Node's format
+// (`--unstable-node-errors`).
+let nodeErrorFormat = false;
+
 function formatException(error) {
   if (
     isNativeError(error) ||
     ObjectPrototypeIsPrototypeOf(ErrorPrototype, error)
   ) {
     return null;
+  } else if (
+    nodeErrorFormat &&
+    (error === null ||
+      (typeof error !== "object" && typeof error !== "function"))
+  ) {
+    // Node prints a thrown primitive as its string value: a string without
+    // quotes, a bigint without the `n` suffix.
+    return `Uncaught ${String(error)}`;
+  } else if (nodeErrorFormat) {
+    return `Uncaught ${inspectArgs([error], { colors: false })}`;
   } else if (typeof error == "string") {
     return `Uncaught ${
       inspectArgs([quoteString(error, getDefaultInspectOptions())], {
@@ -1375,6 +1390,10 @@ function bootstrapMainRuntime(runtimeOptions, warmup = false) {
     if (!ArrayPrototypeIncludes(unstableFeatures, unstableIds.unsafeProto)) {
       disableProtoAccessor();
     }
+    nodeErrorFormat = ArrayPrototypeIncludes(
+      unstableFeatures,
+      unstableIds.nodeErrors,
+    );
 
     // Setup `Deno` global - we're actually overriding already existing global
     // `Deno` with `Deno` namespace from "./deno.ts".
@@ -1555,6 +1574,10 @@ function bootstrapWorkerRuntime(
     if (!ArrayPrototypeIncludes(unstableFeatures, unstableIds.unsafeProto)) {
       disableProtoAccessor();
     }
+    nodeErrorFormat = ArrayPrototypeIncludes(
+      unstableFeatures,
+      unstableIds.nodeErrors,
+    );
 
     // Setup `Deno` global - we're actually overriding already existing global
     // `Deno` with `Deno` namespace from "./deno.ts".

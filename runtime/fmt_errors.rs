@@ -796,12 +796,59 @@ pub fn format_js_error_node(
       (None, _) => js_error.exception_message.clone(),
     },
   };
+  let body = node_error_code_in_name(js_error, body);
   let body = node_stack_paths(&body, read_file);
 
   let header = node_error_source(js_error, in_promise, read_file)
     .map(|header| format!("{header}\n\n"))
     .unwrap_or_default();
   format!("{header}{body}{footer}")
+}
+
+/// denext: Node's report for a main module that does not exist (`node
+/// missing.js`), when `error_text` is the module loader's error for the root
+/// module itself: `Module not found "<file URL>".`, with no importing module
+/// after it. Node resolves the entry point with the CommonJS resolver, so the
+/// error is `MODULE_NOT_FOUND` whatever the extension.
+pub fn format_main_module_not_found_node(
+  error_text: &str,
+  node_version: &str,
+) -> Option<String> {
+  let url = error_text
+    .trim_end()
+    .strip_prefix("Module not found \"")?
+    .strip_suffix("\".")?;
+  if url.contains('"') || url.contains('\n') {
+    return None;
+  }
+  let url = Url::parse(url).ok()?;
+  let path = deno_path_util::url_to_file_path(&url).ok()?;
+  Some(format!(
+    "node:internal/modules/cjs/loader:1386\n  throw err;\n  ^\n\nError: Cannot find module '{}' {{\n  code: 'MODULE_NOT_FOUND',\n  requireStack: []\n}}\n\nNode.js v{node_version}\n",
+    path.display()
+  ))
+}
+
+/// The stack's first line as Node prints its own errors that carry an
+/// `ERR_*` code (`TypeError [ERR_MODULE_NOT_FOUND]: ...`), for an error the
+/// runtime raised with that code.
+fn node_error_code_in_name(js_error: &JsError, body: String) -> String {
+  let Some(name) = js_error.name.as_deref() else {
+    return body;
+  };
+  let Some(code) = js_error
+    .additional_properties
+    .iter()
+    .find(|(key, value)| key == "code" && value.starts_with("ERR_"))
+    .map(|(_, value)| value)
+  else {
+    return body;
+  };
+  let first_line = body.lines().next().unwrap_or_default();
+  if first_line != name && !first_line.starts_with(&format!("{name}: ")) {
+    return body;
+  }
+  format!("{name} [{code}]{}", &body[name.len()..])
 }
 
 /// `<location>:<line>\n<source line>\n<caret>` for the frame the error points
@@ -1077,6 +1124,62 @@ mod tests {
     assert_eq!(
       format_js_error_node(&error, "26.5.1", &files),
       "file:///app/main.js:1\nthrow new TypeError(\"boom\");\n^\n\nTypeError: boom\n    at file:///app/main.js:1:7\n\nNode.js v26.5.1\n"
+    );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn node_format_puts_an_err_code_in_the_name() {
+    let error = JsError {
+      additional_properties: vec![(
+        "code".to_string(),
+        "ERR_MODULE_NOT_FOUND".to_string(),
+      )],
+      ..node_error(
+        "Uncaught TypeError: boom",
+        Some("TypeError: boom\n    at file:///app/main.mjs:1:7"),
+        "file:///app/main.mjs",
+        1,
+        7,
+        Some("import \"./nope.mjs\";"),
+      )
+    };
+    assert_eq!(
+      format_js_error_node(&error, "26.5.1", &no_files),
+      "file:///app/main.mjs:1\nimport \"./nope.mjs\";\n      ^\n\nTypeError [ERR_MODULE_NOT_FOUND]: boom\n    at file:///app/main.mjs:1:7\n\nNode.js v26.5.1\n"
+    );
+    // A code that is not one of Node's `ERR_*` codes stays out of the name.
+    let error = JsError {
+      additional_properties: vec![("code".to_string(), "ENOENT".to_string())],
+      ..error
+    };
+    assert!(
+      format_js_error_node(&error, "26.5.1", &no_files)
+        .contains("\n\nTypeError: boom\n")
+    );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn node_format_main_module_not_found() {
+    assert_eq!(
+      format_main_module_not_found_node(
+        "Module not found \"file:///app/iDoNotExist.mjs\".",
+        "26.5.1"
+      )
+      .as_deref(),
+      Some(
+        "node:internal/modules/cjs/loader:1386\n  throw err;\n  ^\n\nError: Cannot find module '/app/iDoNotExist.mjs' {\n  code: 'MODULE_NOT_FOUND',\n  requireStack: []\n}\n\nNode.js v26.5.1\n"
+      )
+    );
+    // A static import of a missing module names its importer: not the main
+    // module.
+    assert_eq!(
+      format_main_module_not_found_node(
+        "Module not found \"file:///app/dep.mjs\".\n    at file:///app/main.mjs:1:8",
+        "26.5.1"
+      ),
+      None
     );
   }
 

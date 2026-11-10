@@ -1469,9 +1469,11 @@ pub extern "C" fn host_initialize_import_meta_object_callback(
     .get_type_by_module(&module_global)
     .expect("Module not found");
 
-  let url_key = URL.v8_string(scope).unwrap();
+  // denext: the keys in Node's order (`dirname`, `filename`, `main`,
+  // `resolve`, `url`), which `Reflect.ownKeys(import.meta)` reports.
+  maybe_add_import_meta_filename_dirname(scope, meta, &name);
+
   let url_val = v8::String::new(scope, &name).unwrap();
-  meta.create_data_property(scope, url_key.into(), url_val.into());
 
   let main_key = MAIN.v8_string(scope).unwrap();
   let main = module_map.is_main_module(&module_global);
@@ -1531,7 +1533,8 @@ pub extern "C" fn host_initialize_import_meta_object_callback(
   let resolve_key = RESOLVE.v8_string(scope).unwrap();
   meta.set(scope, resolve_key.into(), val.into());
 
-  maybe_add_import_meta_filename_dirname(scope, meta, &name);
+  let url_key = URL.v8_string(scope).unwrap();
+  meta.create_data_property(scope, url_key.into(), url_val.into());
 
   if name.starts_with("ext:") {
     if let Some(proto) = state.ext_import_meta_proto.borrow().clone() {
@@ -1570,8 +1573,6 @@ fn maybe_add_import_meta_filename_dirname<'s, 'i>(
   let Some(filename_val) = v8::String::new(scope, &escaped_filename) else {
     return;
   };
-  let filename_key = FILENAME.v8_string(scope).unwrap();
-  meta.create_data_property(scope, filename_key.into(), filename_val.into());
 
   let dir_path = file_path
     .parent()
@@ -1583,6 +1584,8 @@ fn maybe_add_import_meta_filename_dirname<'s, 'i>(
   };
   let dirname_key = DIRNAME.v8_string(scope).unwrap();
   meta.create_data_property(scope, dirname_key.into(), dirname_val.into());
+  let filename_key = FILENAME.v8_string(scope).unwrap();
+  meta.create_data_property(scope, filename_key.into(), filename_val.into());
 }
 
 fn import_meta_resolve(

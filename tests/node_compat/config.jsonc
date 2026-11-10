@@ -113,6 +113,13 @@
       "reason": "fetch() cannot reach the fixture through the proxy: rustls refuses the fixture's X.509 v1 certificate (UnsupportedCertVersion), and the fetch client's CONNECT request carries User-Agent where the test expects Node's exact header set"
     },
     "client-proxy/test-use-env-proxy-precedence.mjs": {},
+    "es-module/test-esm-import-flag.mjs": {},
+    "es-module/test-loaders-unknown-builtin-module.mjs": {},
+    "es-module/test-esm-pkgname.mjs": {},
+    "es-module/test-esm-loader-not-found.mjs": {},
+    "es-module/test-esm-loader-invalid-url.mjs": {},
+    "es-module/test-esm-loader-invalid-format.mjs": {},
+    "es-module/test-esm-import-meta.mjs": {},
     "es-module/test-cjs-legacyMainResolve.js": {
       "ignore": true,
       "reason": "Tests `node:internal/modules/esm/resolve.legacyMainResolve`, a private CJS resolver helper Deno does not expose"
@@ -365,6 +372,11 @@
     "module-hooks/test-module-hooks-resolve-short-circuit-required-middle.js": {},
     "module-hooks/test-module-hooks-resolve-short-circuit-required-start.js": {},
     "module-hooks/test-module-hooks-require-wasm.js": {},
+    "parallel/test-runner-import-no-scheme.js": {},
+    "parallel/test-module-subpath-import-long-path.js": {},
+    "parallel/test-module-setsourcemapssupport.js": {},
+    "parallel/test-module-main-preserve-symlinks-fail.js": {},
+    "parallel/test-module-main-fail.js": {},
     "parallel/test-abort-controller-any-timeout.js": {},
     "parallel/test-abortcontroller-internal.js": {
       "ignore": true,
@@ -5214,6 +5226,8 @@
       "reason": "Node.js system CA certificate handling is not implemented in Deno"
     },
     "system-ca/test-set-default-ca-certificates-system-combinations.js": {},
+    "test-runner/test-output-randomize-output-cli.mjs": {},
+    "test-runner/test-output-randomize-output-cli-none.mjs": {},
     "test-runner/test-output-arbitrary-output-colored.mjs": {},
     "test-runner/test-output-assertion-color-tty.mjs": {},
     "test-runner/test-output-async-test-scheduling.mjs": {},
@@ -5428,7 +5442,7 @@
     },
     "module-hooks/test-async-loader-hooks-called-with-register.mjs": {
       "ignore": true,
-      "reason": "The hooks see the `--eval` module's own URL (`$deno$eval.js`) as a `parentURL`, where Node's eval entry has none"
+      "reason": "The hooks see the `--eval` module's own URL (`$deno$eval.mjs`) as a `parentURL`, where Node's eval entry has none"
     },
     "module-hooks/test-async-loader-hooks-globalpreload-no-warning-with-initialize.mjs": {},
     "module-hooks/test-async-loader-hooks-globalpreload-warning.mjs": {
@@ -5525,51 +5539,21 @@
       "ignore": true,
       "reason": "Needs --enable-source-maps for a CommonJS module whose source a module.register() hook provides"
     },
-    "module-hooks/test-async-loader-hooks-throw-bigint.mjs": {
-      "ignore": true,
-      "reason": "Expects Node's report of a value thrown at a hooks module's top level (stderr shape and exit code)"
-    },
-    "module-hooks/test-async-loader-hooks-throw-boolean.mjs": {
-      "ignore": true,
-      "reason": "Expects Node's report of a value thrown at a hooks module's top level (stderr shape and exit code)"
-    },
-    "module-hooks/test-async-loader-hooks-throw-empty-object.mjs": {
-      "ignore": true,
-      "reason": "Expects Node's report of a value thrown at a hooks module's top level (stderr shape and exit code)"
-    },
-    "module-hooks/test-async-loader-hooks-throw-error.mjs": {
-      "ignore": true,
-      "reason": "Expects Node's report of a value thrown at a hooks module's top level (stderr shape and exit code)"
-    },
-    "module-hooks/test-async-loader-hooks-throw-function.mjs": {
-      "ignore": true,
-      "reason": "Expects Node's report of a value thrown at a hooks module's top level (stderr shape and exit code)"
-    },
-    "module-hooks/test-async-loader-hooks-throw-null.mjs": {
-      "ignore": true,
-      "reason": "Expects Node's report of a value thrown at a hooks module's top level (stderr shape and exit code)"
-    },
-    "module-hooks/test-async-loader-hooks-throw-number.mjs": {
-      "ignore": true,
-      "reason": "Expects Node's report of a value thrown at a hooks module's top level (stderr shape and exit code)"
-    },
-    "module-hooks/test-async-loader-hooks-throw-object.mjs": {
-      "ignore": true,
-      "reason": "Expects Node's report of a value thrown at a hooks module's top level (stderr shape and exit code)"
-    },
-    "module-hooks/test-async-loader-hooks-throw-string.mjs": {
-      "ignore": true,
-      "reason": "Expects Node's report of a value thrown at a hooks module's top level (stderr shape and exit code)"
-    },
+    "module-hooks/test-async-loader-hooks-throw-bigint.mjs": {},
+    "module-hooks/test-async-loader-hooks-throw-boolean.mjs": {},
+    "module-hooks/test-async-loader-hooks-throw-empty-object.mjs": {},
+    "module-hooks/test-async-loader-hooks-throw-error.mjs": {},
+    "module-hooks/test-async-loader-hooks-throw-function.mjs": {},
+    "module-hooks/test-async-loader-hooks-throw-null.mjs": {},
+    "module-hooks/test-async-loader-hooks-throw-number.mjs": {},
+    "module-hooks/test-async-loader-hooks-throw-object.mjs": {},
+    "module-hooks/test-async-loader-hooks-throw-string.mjs": {},
     "module-hooks/test-async-loader-hooks-throw-symbol.mjs": {
       "darwin": false,
       "windows": false,
       "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
     },
-    "module-hooks/test-async-loader-hooks-throw-undefined.mjs": {
-      "ignore": true,
-      "reason": "Expects Node's report of a value thrown at a hooks module's top level (stderr shape and exit code)"
-    },
+    "module-hooks/test-async-loader-hooks-throw-undefined.mjs": {},
     "module-hooks/test-async-loader-hooks-use-hooks-require-esm.mjs": {
       "ignore": true,
       "reason": "Needs --no-experimental-require-module"
