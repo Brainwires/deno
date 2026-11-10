@@ -57,7 +57,8 @@ function isAbsolutePath(path) {
 }
 
 function mainModuleDir() {
-  const main = pathFromURL(op_main_module());
+  // pathFromURL converts a URL object only (a string comes back as is).
+  const main = pathFromURL(new URL(op_main_module()));
   const cut = StringPrototypeLastIndexOf(main, isWindows ? "\\" : "/");
   return cut === -1 ? main : StringPrototypeSlice(main, 0, cut);
 }

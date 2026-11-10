@@ -330,7 +330,7 @@ const versions = {
   ngtcp2: "",
   nghttp3: "",
   // The SQLite that node:sqlite runs (the bundled libsqlite3-sys build).
-  sqlite: "3.53.2",
+  sqlite: "3.54.1",
   // The zstd that zlib's zstd streams run (the bundled zstd-sys build).
   zstd: "1.5.7",
   // Will be filled when calling "__bootstrapNodeProcess()",

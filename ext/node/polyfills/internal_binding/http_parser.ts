@@ -223,6 +223,18 @@ function callbacksFor(parser: any) {
   return parser[kAsyncId] === undefined ? parser : scopedCallbacks(parser);
 }
 
+// A freed or closed parser lets go of its resource (the request or response
+// it parsed for) and the captured context: a pooled parser kept them alive
+// until its next use, so requests were never collected
+// (sequential/test-gc-http-client*).
+function releaseResource(parser: any) {
+  parser[kResource] = undefined;
+  parser[kAsyncContextFrame] = undefined;
+  // The wrapped callbacks of its last use (some close over a socket).
+  const cache = parser[kCallbackCache];
+  if (cache !== undefined) cache.length = 0;
+}
+
 function destroyAsyncId(parser: any) {
   const asyncId = parser[kAsyncId];
   if (asyncId === undefined) return;
@@ -377,12 +389,14 @@ HTTPParser.prototype.resume = function (this: any) {
 
 HTTPParser.prototype.close = function (this: any) {
   destroyAsyncId(this);
+  releaseResource(this);
   this._native.close();
 };
 
 HTTPParser.prototype.free = function (this: any) {
   // Parser::Free emits the destroy hook (the parser goes back to the pool).
   destroyAsyncId(this);
+  releaseResource(this);
   this._native.free();
 };
 

@@ -3434,7 +3434,9 @@ impl TLSWrap {
   }
 
   /// Node's `TLSWrap::GetTLSTicket`: the session ticket of the current
-  /// client session, if the server issued one.
+  /// client session, if the server issued one. Named as in Node (the
+  /// default camelCase name would be `getTlsTicket`).
+  #[rename("getTLSTicket")]
   #[buffer]
   fn get_tls_ticket(&self) -> Option<Box<[u8]>> {
     let inner = unsafe { &*self.inner.as_ptr() };

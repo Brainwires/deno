@@ -747,9 +747,15 @@ if (!isWindows && !isAndroid) {
   };
 }
 
-const lazyInternalChildProcess = core.createLazyLoader(
-  "ext:deno_node/internal/child_process.ts",
-);
+// An ext script, not a lazy-loadable module: loaded on first use (only
+// process.execve() of Deno itself needs it).
+let internalChildProcess;
+function lazyInternalChildProcess() {
+  internalChildProcess ??= core.loadExtScript(
+    "ext:deno_node/internal/child_process.ts",
+  );
+  return internalChildProcess;
+}
 
 /**
  * `process.execve(file[, args[, env]])`: replaces the process with `file`

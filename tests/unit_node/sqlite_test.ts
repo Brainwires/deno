@@ -3,8 +3,8 @@ import sqlite, { backup, DatabaseSync } from "node:sqlite";
 import {
   assert,
   assertEquals,
+  assertMatch,
   assertStrictEquals,
-  assertStringIncludes,
   assertThrows,
 } from "@std/assert";
 import * as nodeAssert from "node:assert";
@@ -148,9 +148,12 @@ db.close();
           1,
           new TextDecoder().decode(result.stderr),
         );
-        assertStringIncludes(
+        // Refused either by SQLite's no-follow open or, where the link
+        // resolves outside the allow scope, by the permission check (DENEXT.md
+        // item 287).
+        assertMatch(
           new TextDecoder().decode(result.stderr),
-          "unable to open database file",
+          /unable to open database file|NotCapable: Requires (read|write) access/,
         );
       };
 
