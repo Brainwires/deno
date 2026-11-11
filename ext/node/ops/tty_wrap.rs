@@ -53,10 +53,10 @@ use crate::ops::handle_wrap::OwnedPtr;
 use crate::ops::handle_wrap::ProviderType;
 use crate::ops::stream_wrap::LibUvStreamWrap;
 
-/// Check whether `TTY(fd)` may wrap `fd`. Stdio, fds this isolate opened or
-/// the runtime registered, and fds the process inherited at startup are
-/// allowed like stdio (see `fd_adopt`); any other descriptor needs read and
-/// write access to everything.
+/// Check whether `TTY(fd)` may wrap `fd`. Stdio and fds this isolate opened
+/// or the runtime registered are allowed like stdio (see `fd_adopt`); any
+/// other descriptor, a terminal inherited at startup included, needs read
+/// and write access to everything.
 fn check_tty_fd_permission(
   state: &mut OpState,
   fd: i32,

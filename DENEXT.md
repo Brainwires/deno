@@ -11725,8 +11725,8 @@ where the changes are discussed.
      `ext/node/ops/tty_wrap.rs`, `ext/io/inherited_fds.rs`,
      `ext/io/fd_table.rs`, `libs/core/uv_compat/pipe.rs`, `cli/lib.rs`,
      `cli/rt/lib.rs`). A raw fd now opens as a pipe, TCP or TTY handle when it
-     already belongs to the process or to the isolate, gated like stdio with no
-     permission check: stdio, fds the runtime registered (inherited extra stdio,
+     already belongs to the process or to the isolate, gated like stdio (an inherited
+     descriptor needs the permission its kind implies, item 348): stdio, fds the runtime registered (inherited extra stdio,
      `createPipe()` ends, the IPC channel), a FIFO / socket / terminal this
      isolate opened through node:fs (`fs.openSync` on a FIFO used to fail with
      `EEXIST` even under `-A`; the wrap gets a dup and the node:fs entry is
@@ -11734,9 +11734,8 @@ where the changes are discussed.
      fds open at startup (with their device and inode, so a number the runtime
      later reuses never counts, and without `NODE_CHANNEL_FD` and the npm state
      fd); each is claimed once process-wide. Socket activation
-     (`listen({ fd: 3 })` from a service manager) now works with only
-     `--allow-net`, and an inherited pty works through `tty.ReadStream(fd)`
-     without `--allow-read` / `--allow-write`. Any other descriptor (one a
+     (`listen({ fd: 3 })` from a service manager) and an inherited pty through
+     `tty.ReadStream(fd)` now work, with the permissions item 348 requires. Any other descriptor (one a
      native addon or another isolate created) still needs every permission, or
      an unscoped `--allow-ffi` (which already reaches the whole process);
      `TTY(fd)` keeps its read-all + write-all alternative. A worker still cannot
@@ -11751,7 +11750,7 @@ where the changes are discussed.
        passes a listening socket as fd 3 to a child with only `--allow-net`;
        `pipe_fd`: a node:fs FIFO read through `net.Socket({ fd })` with scoped
        permissions; `pty_fd`: an inherited pty read through `tty.ReadStream(3)`
-       with no permissions; `long_unix_path` (macOS): a 150+ byte path under
+       with the permissions of item 348; `long_unix_path` (macOS): a 150+ byte path under
        `$TMPDIR` listens and connects; `windows_refuse`); `deno_io` unit tests
        for the inherited-fd identity check and fd listing. The
        `node/pipe_open_fd` specs (isolate ownership, duplicate regular-file fd)
@@ -13464,6 +13463,34 @@ where the changes are discussed.
        commands exit 100; `apt_install.sh` retries and exits 0.
      - User-facing note: none; CI only.
      - Node tests enabled: none, because this is CI only.
+
+348. **`fix(node)`: an inherited descriptor needs the permission its kind
+     implies** (runtime; `ext/node/ops/fd_adopt.rs`, `ext/node/ops/tty_wrap.rs`,
+     `ext/io/inherited_fds.rs`). Item 290 adopted a descriptor the process
+     inherited at start-up (`net.Socket({ fd })`, `server.listen({ fd })`,
+     `tty.ReadStream(fd)`) with no permission check in any isolate, so a worker
+     created without net could accept connections on a socket-activation
+     listener, read or write a parent's pipe or a terminal, and claim the fd
+     before the main thread. The kind is now checked in every isolate before
+     the fd is claimed: a TCP socket needs net for its address (listen for a
+     listening socket, connect to the peer for a connected one, as
+     `Deno.listen` / `Deno.connect`); a pipe, a unix-domain socket or a
+     terminal needs unscoped read and write (it has no address or path a grant
+     could be scoped to; the same rule already covered adopting another
+     isolate's FIFO and `TTY(fd)` on any other descriptor); every permission
+     or an unscoped `--allow-ffi` covers any fd. A refused isolate gets
+     `EPERM` and leaves the fd to one that may use it; regular files stay
+     refused. Item 290's notes are corrected: socket activation of a TCP
+     listener needs `--allow-net` for its address, and an inherited pty needs
+     `--allow-read --allow-write`.
+     - Tests: spec `node/fd_sockets` `inherited_fd_permissions` (a worker
+       without permissions is refused on an inherited listener and pipe while
+       the main thread adopts both; a main thread without net is refused on an
+       inherited listener; a pipe needs read and write; a regular file stays
+       refused), `pty_fd` (child with read and write) and
+       `pty_fd_no_permissions` (refused).
+     - Node tests enabled: none (a Deno permission gate; Node has no
+       per-worker permissions to test it against).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
