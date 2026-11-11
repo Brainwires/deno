@@ -13099,6 +13099,37 @@ where the changes are discussed.
        3.0.0-denext.19 does not exist as a release.
      - Node tests enabled: none, because this is a desktop host build fix.
 
+334. **`ci(denext)`: the release tag gate requires a green build of the pinned
+     laufey's native hosts on every target** (`d21/ci-gaps`; CI;
+     `.github/denext-runtime/tag_gate.py`, `tag_gate_test.py`,
+     `.github/workflows/denext_runtime.yml`). `denext tests` never compiles
+     laufey's C++ backend hosts (the `laufey` crate `denort_desktop` builds
+     leaves `backend-common/*.h` out), so the full run of the commit that
+     pinned laufey's will-navigate code was green on every Windows leg, and
+     the MSVC error of item 333 surfaced only in the tag build. The gate now
+     also requires, for the tagged commit:
+     - an earlier `denext runtime` run of exactly that commit (a branch push or
+       a dispatch, never the tag build's own run) with a passed
+       `laufey / <target>` job for each of the six release targets, each of
+       which checked out the pinned `LAUFEY_SHA`. The laufey checkout step is
+       now named `Check out laufey <sha>`, so the gate reads which laufey a job
+       built from its steps: a dispatch with another `laufey_ref`, a partial
+       `targets` list, `reuse_laufey_run_id` or `cli_only` never vouches. This
+       is the build job that failed, so it is the one required; laufey's own CI
+       is not, as its native e2e suite fails on Windows too often to gate on;
+     - `LAUFEY_SHA` equal to the laufey `rev` in `cli/rt_desktop/Cargo.toml`.
+
+     The refusal names the command to run (`gh workflow run
+     denext_runtime.yml --ref <branch> -f targets=all` from a branch whose head
+     is the commit) and says the rest of that run may be cancelled once every
+     laufey job passed. Tests: `tag_gate_test.py`'s `Laufey` cases (the failed
+     Windows x64 host of item 333 is refused, a partial or other-laufey
+     dispatch does not vouch, the pin must match the crate and the workflow)
+     and the script cases against a stand-in `gh`. Before this change the
+     gate passed that scenario (`full_run=11`, exit 0); now it refuses it.
+     - User-facing note: none; release engineering only.
+     - Node tests enabled: none, because this is CI only.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

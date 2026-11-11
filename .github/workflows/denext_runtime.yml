@@ -10,9 +10,10 @@
 # workflow with its scripts), by hand, and on a tag (path filters are not
 # evaluated for tags), which publishes only when a full `denext tests` run
 # (every OS leg, not a branch's Linux-only run) passed on the tagged commit,
-# no run of it failed, and it is on development-denext or rel/<version>
-# (.github/denext-runtime/tag_gate.py), and only from an annotated tag that
-# was never moved. See DENEXT.md.
+# no run of it failed, an earlier run of this workflow on it built the pinned
+# laufey's hosts green on every target, and it is on development-denext or
+# rel/<version> (.github/denext-runtime/tag_gate.py), and only from an
+# annotated tag that was never moved. See DENEXT.md.
 name: denext runtime
 
 on:
@@ -143,6 +144,7 @@ jobs:
             cli/Cargo.toml
             cli/lib/version.txt
             cli/lib/upstream_version.txt
+            cli/rt_desktop/Cargo.toml
             Cargo.lock
             .github/denext-runtime/tag_gate.py
             .github/denext-runtime/engine_staleness.py
@@ -240,9 +242,14 @@ jobs:
             # A release needs a green FULL `denext tests` run (lint, libs,
             # unit, specs on every OS leg, Windows arm64 included) of exactly
             # the tagged commit, no failed run or attempt of it at all (a
-            # re-run that passes does not clear one), and the commit on
-            # development-denext or rel/<version>. See tag_gate.py.
+            # re-run that passes does not clear one), the commit on
+            # development-denext or rel/<version>, LAUFEY_SHA equal to
+            # cli/rt_desktop/Cargo.toml's laufey rev, and an earlier
+            # `denext runtime` run of the commit (not this one) that built
+            # that laufey's native hosts green on every target (the
+            # `laufey / <target>` jobs). See tag_gate.py.
             if ! gate=$(REPO="$REPO" SHA="$SHA" VERSION="$version" \
+              LAUFEY_SHA="$LAUFEY_SHA" RUN_ID="$GITHUB_RUN_ID" \
               python3 -I .github/denext-runtime/tag_gate.py); then
               echo "$gate"
               echo "::error::the tag gate refused $SHA (see above)"
@@ -323,7 +330,11 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The step's name carries the commit: tag_gate.py reads it from the
+      # job's steps to know which laufey a green `laufey / <target>` job
+      # built (keep the "Check out laufey <sha>" form, LAUFEY_STEP).
+      - name: Check out laufey ${{ needs.setup.outputs.laufey_sha }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ env.LAUFEY_REPOSITORY }}
           ref: ${{ needs.setup.outputs.laufey_sha }}

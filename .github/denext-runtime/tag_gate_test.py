@@ -2,8 +2,11 @@
 """Tests for tag_gate.py, denext_runtime.yml's release gate: a commit is
 released only with a full green `denext tests` run (every OS leg, Windows
 arm64 included), no failed run or attempt, nothing still running, and only
-from development-denext or its release branch. The last cases run the script
-against a stand-in `gh` that answers from canned API responses.
+from development-denext or its release branch, and only when an earlier
+`denext runtime` run of the commit built the pinned laufey's native hosts
+green on every target, the pin matching cli/rt_desktop/Cargo.toml. The last
+cases run the script against a stand-in `gh` that answers from canned API
+responses.
 
 Usage: python3 -I .github/denext-runtime/tag_gate_test.py
 """
@@ -210,6 +213,129 @@ class Evaluate(unittest.TestCase):
         self.assertEqual(flag("3.0.0-denext.1"), "")
 
 
+LAUFEY = "50a2fcaf00d3656de1d88215dca5cf7f698979a1"
+OTHER_LAUFEY = "3dfcea49fc0000000000000000000000000000aa"
+MANIFEST = (
+    "[dependencies]\n"
+    f'laufey = {{ git = "https://github.com/Brainwires/laufey", rev = "{LAUFEY}" }}\n'
+)
+
+
+def laufey_job(target, conclusion="success", sha=LAUFEY):
+    return {
+        "name": f"laufey / {target}",
+        "conclusion": conclusion,
+        "steps": ["Set up job", f"{gate.LAUFEY_STEP} {sha}", "Build webview host"],
+    }
+
+
+def laufey_jobs(**overrides):
+    """A run's laufey jobs, every target green from LAUFEY unless overridden
+    (target -> job dict, or None to leave the job out)."""
+    out = []
+    for t in gate.LAUFEY_TARGETS:
+        job = overrides.get(t.replace("-", "_"), laufey_job(t))
+        if job is not None:
+            out.append(job)
+    return out
+
+
+class Laufey(unittest.TestCase):
+    def evaluate(self, table):
+        return gate.evaluate_laufey(
+            list(table), lambda run_id: table[run_id], LAUFEY, "o/r", "abc",
+            ["development-denext", "rel/3.0.0-denext.21"],
+        )
+
+    def test_targets_match_the_release_matrix(self):
+        spec = importlib.util.spec_from_file_location(
+            "plan_matrix", os.path.join(HERE, "plan_matrix.py")
+        )
+        plan = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(plan)
+        self.assertEqual(
+            sorted(gate.LAUFEY_TARGETS),
+            sorted(t["target"] for t in plan.ALL_TARGETS),
+        )
+
+    def test_a_run_that_built_every_target_vouches(self):
+        run_id, errors = self.evaluate({5: laufey_jobs()})
+        self.assertEqual((run_id, errors), (5, []))
+
+    def test_the_denext_19_failure_is_refused(self):
+        # Every `denext tests` leg was green, but laufey's Windows x64 host
+        # did not compile (MSVC C2589): no run vouches.
+        run_id, errors = self.evaluate(
+            {5: laufey_jobs(x86_64_pc_windows_msvc=laufey_job(
+                "x86_64-pc-windows-msvc", "failure"))}
+        )
+        self.assertIsNone(run_id)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("gh workflow run denext_runtime.yml -R o/r", errors[0])
+        self.assertIn("-f targets=all", errors[0])
+        self.assertIn("development-denext or rel/3.0.0-denext.21", errors[0])
+
+    def test_no_runtime_run_at_all_is_refused(self):
+        run_id, errors = self.evaluate({})
+        self.assertIsNone(run_id)
+        self.assertIn("built the pinned laufey", errors[0])
+
+    def test_a_partial_dispatch_does_not_vouch(self):
+        # A dispatch with targets=x86_64-pc-windows-msvc only (the .20 fix).
+        only = {t.replace("-", "_"): None for t in gate.LAUFEY_TARGETS
+                if t != "x86_64-pc-windows-msvc"}
+        run_id, errors = self.evaluate({5: laufey_jobs(**only)})
+        self.assertIsNone(run_id)
+        self.assertEqual(len(errors), 1)
+
+    def test_a_build_of_another_laufey_does_not_vouch(self):
+        # A dispatch with laufey_ref set to another commit.
+        other = {t.replace("-", "_"): laufey_job(t, sha=OTHER_LAUFEY)
+                 for t in gate.LAUFEY_TARGETS}
+        run_id, _ = self.evaluate({5: laufey_jobs(**other)})
+        self.assertIsNone(run_id)
+
+    def test_one_full_run_among_partial_ones_vouches(self):
+        only = {t.replace("-", "_"): None for t in gate.LAUFEY_TARGETS[1:]}
+        run_id, errors = self.evaluate({4: laufey_jobs(**only), 9: laufey_jobs()})
+        self.assertEqual((run_id, errors), (9, []))
+
+    def test_pin_matches_the_crate(self):
+        self.assertEqual(gate.pinned_rev(MANIFEST), LAUFEY)
+        self.assertEqual(gate.check_pin(LAUFEY, MANIFEST), [])
+
+    def test_pin_that_differs_from_the_crate_is_refused(self):
+        errors = gate.check_pin(OTHER_LAUFEY, MANIFEST)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("move both to the same commit", errors[0])
+
+    def test_a_missing_or_short_pin_is_refused(self):
+        self.assertEqual(len(gate.check_pin("", MANIFEST)), 1)
+        self.assertEqual(len(gate.check_pin("50a2fca", MANIFEST)), 1)
+        self.assertEqual(len(gate.check_pin(LAUFEY, "[dependencies]\n")), 1)
+
+    def test_the_real_manifest_names_a_pin(self):
+        root = os.path.dirname(os.path.dirname(HERE))
+        with open(os.path.join(root, gate.LAUFEY_MANIFEST)) as f:
+            self.assertIsNotNone(gate.pinned_rev(f.read()))
+
+    def test_the_workflow_pin_matches_the_crate(self):
+        root = os.path.dirname(os.path.dirname(HERE))
+        with open(os.path.join(root, ".github/workflows/denext_runtime.yml")) as f:
+            workflow = f.read()
+        with open(os.path.join(root, gate.LAUFEY_MANIFEST)) as f:
+            manifest = f.read()
+        import re
+        pin = re.search(r"^  LAUFEY_SHA: ([0-9a-f]{40})$", workflow, re.MULTILINE)
+        self.assertIsNotNone(pin, "no LAUFEY_SHA in denext_runtime.yml")
+        self.assertEqual(gate.check_pin(pin.group(1), manifest), [])
+        # The laufey checkout step's name is what the gate reads.
+        self.assertIn(
+            f"- name: {gate.LAUFEY_STEP} ${{{{ needs.setup.outputs.laufey_sha }}}}",
+            workflow,
+        )
+
+
 class Latest(unittest.TestCase):
     def test_newest_rc(self):
         self.assertFalse(
@@ -278,6 +404,8 @@ sys.exit(2)
 REPO = "Brainwires/deno"
 SHA = "abc123"
 RUNS = f"repos/{REPO}/actions/workflows/denext_tests.yml/runs?head_sha={SHA}&per_page=100"
+RUNTIME_RUNS = f"repos/{REPO}/actions/workflows/denext_runtime.yml/runs?head_sha={SHA}&per_page=100"
+OWN_RUN = "99"
 
 
 def jobs(*names):
@@ -285,8 +413,11 @@ def jobs(*names):
 
 
 class Script(unittest.TestCase):
-    def gate(self, answers):
+    def gate(self, answers, manifest=MANIFEST, laufey=LAUFEY):
         with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = os.path.join(tmp, "Cargo.toml")
+            with open(manifest_path, "w") as f:
+                f.write(manifest)
             gh = os.path.join(tmp, "gh")
             with open(gh, "w") as f:
                 f.write(FAKE_GH)
@@ -300,6 +431,9 @@ class Script(unittest.TestCase):
                 "REPO": REPO,
                 "SHA": SHA,
                 "VERSION": "3.0.0-rc.7",
+                "LAUFEY_SHA": laufey,
+                "LAUFEY_MANIFEST": manifest_path,
+                "RUN_ID": OWN_RUN,
             }
             return subprocess.run(
                 [sys.executable, "-I", GATE],
@@ -314,6 +448,11 @@ class Script(unittest.TestCase):
             f"repos/{REPO}/actions/runs/11/jobs?per_page=100": jobs(*gate.REQUIRED_LEGS),
             f"repos/{REPO}/compare/{SHA}...development-denext": "ahead\n",
             f"repos/{REPO}/compare/{SHA}...rel/3.0.0-rc.7": None,
+            # The tag build's own run (left out) and a green push run.
+            RUNTIME_RUNS: f"{OWN_RUN}\n21\n",
+            f"repos/{REPO}/actions/runs/21/jobs?per_page=100": "".join(
+                json.dumps(j) + "\n" for j in laufey_jobs()
+            ),
         }
 
     def test_passes(self):
@@ -384,6 +523,45 @@ class Script(unittest.TestCase):
         result = self.gate(answers)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("lacks: windows-11-arm", result.stdout)
+
+
+    def test_passes_names_the_laufey_run(self):
+        result = self.gate(self.base())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("laufey_run=21", result.stdout)
+
+    def test_refuses_when_laufey_failed_on_windows(self):
+        # 3.0.0-denext.19: the full `denext tests` run was green, the pinned
+        # laufey's Windows x64 host did not compile.
+        answers = self.base()
+        answers[f"repos/{REPO}/actions/runs/21/jobs?per_page=100"] = "".join(
+            json.dumps(j) + "\n"
+            for j in laufey_jobs(x86_64_pc_windows_msvc=laufey_job(
+                "x86_64-pc-windows-msvc", "failure"))
+        )
+        result = self.gate(answers)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("green for: x86_64-pc-windows-msvc", result.stdout)
+        self.assertIn(
+            f"::error::no denext runtime run of this commit built the pinned laufey ({LAUFEY})",
+            result.stdout,
+        )
+        self.assertIn(f"gh workflow run denext_runtime.yml -R {REPO} --ref <branch> -f targets=all", result.stdout)
+
+    def test_the_tag_builds_own_run_never_vouches(self):
+        answers = self.base()
+        answers[RUNTIME_RUNS] = f"{OWN_RUN}\n"
+        answers[f"repos/{REPO}/actions/runs/{OWN_RUN}/jobs?per_page=100"] = "".join(
+            json.dumps(j) + "\n" for j in laufey_jobs()
+        )
+        result = self.gate(answers)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("built the pinned laufey", result.stdout)
+
+    def test_refuses_a_pin_that_differs_from_the_crate(self):
+        result = self.gate(self.base(), laufey=OTHER_LAUFEY)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("move both to the same commit", result.stdout)
 
 
 if __name__ == "__main__":
