@@ -1723,12 +1723,17 @@ pub async fn op_fs_write_file_async(
   Ok(())
 }
 
+/// `max_len` (node:fs's readFile, whose limit is 2 GiB - 1): a regular file
+/// larger than it is not read, and the op returns `null`. The size comes from
+/// the opened file's own stat, as Node's readFile checks it, so a too-large
+/// file costs an open and an fstat instead of reading it whole.
 #[op2(stack_trace)]
 pub fn op_fs_read_file_sync(
   state: &mut OpState,
   #[string] path: &str,
   #[smi] flags: Option<i32>,
-) -> Result<Uint8Array, FsOpsError> {
+  #[smi] max_len: Option<i32>,
+) -> Result<Option<Uint8Array>, FsOpsError> {
   let path = Path::new(path);
   let options = if let Some(flags) = flags {
     OpenOptions::from(flags)
@@ -1745,21 +1750,35 @@ pub fn op_fs_read_file_sync(
       Some("Deno.readFileSync()"),
     )?;
 
+  if let Some(max_len) = max_len {
+    let file = fs
+      .open_sync(&path, options)
+      .context_path("readfile", &path)?;
+    let stat = file.clone().stat_sync().context_path("readfile", &path)?;
+    if stat.is_file && stat.size > max_len as u64 {
+      return Ok(None);
+    }
+    let buf = file.read_all_sync().context_path("readfile", &path)?;
+    return Ok(Some(buf.into_owned().into()));
+  }
+
   let buf = fs
     .read_file_sync(&path, options)
     .context_path("readfile", &path)?;
 
   // todo(https://github.com/denoland/deno/issues/27107): do not clone here
-  Ok(buf.into_owned().to_vec().into())
+  Ok(Some(buf.into_owned().to_vec().into()))
 }
 
+/// `max_len`: as in `op_fs_read_file_sync`.
 #[op2(stack_trace)]
 pub async fn op_fs_read_file_async(
   state: Rc<RefCell<OpState>>,
   #[string] path: String,
   #[smi] cancel_rid: Option<ResourceId>,
   #[smi] flags: Option<i32>,
-) -> Result<Uint8Array, FsOpsError> {
+  #[smi] max_len: Option<i32>,
+) -> Result<Option<Uint8Array>, FsOpsError> {
   let path = PathBuf::from(path);
   let options = if let Some(flags) = flags {
     OpenOptions::from(flags)
@@ -1781,7 +1800,19 @@ pub async fn op_fs_read_file_async(
     (state.borrow::<FileSystemRc>().clone(), cancel_handle, path)
   };
 
-  let fut = fs.read_file_async(path.as_owned(), options);
+  let fut = async {
+    match max_len {
+      Some(max_len) => {
+        let file = fs.open_async(path.as_owned(), options).await?;
+        let stat = file.clone().stat_async().await?;
+        if stat.is_file && stat.size > max_len as u64 {
+          return Ok::<_, FsError>(None);
+        }
+        Ok(Some(file.read_all_async().await?))
+      }
+      None => fs.read_file_async(path.as_owned(), options).await.map(Some),
+    }
+  };
 
   let buf = if let Some(cancel_handle) = cancel_handle {
     let res = fut.or_cancel(cancel_handle).await;
@@ -1798,7 +1829,7 @@ pub async fn op_fs_read_file_async(
   };
 
   // todo(https://github.com/denoland/deno/issues/27107): do not clone here
-  Ok(buf.into_owned().to_vec().into())
+  Ok(buf.map(|buf| buf.into_owned().to_vec().into()))
 }
 
 #[op2(stack_trace)]

@@ -8,6 +8,7 @@ import {
   assertEquals,
   assertMatch,
   assertRejects,
+  assertStringIncludes,
   assertThrows,
 } from "@std/assert";
 import { open, readFile as readFilePromise } from "node:fs/promises";
@@ -364,4 +365,40 @@ Deno.test("fs.promises.readFile(path, encoding) returns intact content for >512K
   } finally {
     await Deno.remove(tmpDir, { recursive: true });
   }
+});
+
+// Node checks a regular file's size before reading it, so one over 2 GiB is
+// refused at once. The file here is sparse; reading it whole took about a
+// second (and 2 GiB of memory) before the refusal. Off on Windows, where
+// truncating it writes 2 GiB to disk.
+Deno.test({
+  name: "[node/fs] readFile refuses a file over 2 GiB without reading it",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const dir = Deno.makeTempDirSync();
+    const file = path.join(dir, "too-large.txt");
+    try {
+      Deno.writeTextFileSync(file, "0");
+      Deno.truncateSync(file, 2 ** 31);
+      let start = performance.now();
+      const syncErr = assertThrows(() => readFileSync(file)) as Error & {
+        code?: string;
+      };
+      const syncMs = performance.now() - start;
+      assertEquals(syncErr.code, "ERR_FS_FILE_TOO_LARGE");
+      assertEquals(syncErr.name, "RangeError");
+      assertStringIncludes(syncErr.message, "(2147483648)");
+      start = performance.now();
+      const asyncErr = await new Promise<Error & { code?: string }>(
+        (resolve) => readFile(file, (err) => resolve(err!)),
+      );
+      const asyncMs = performance.now() - start;
+      assertEquals(asyncErr.code, "ERR_FS_FILE_TOO_LARGE");
+      assertStringIncludes(asyncErr.message, "(2147483648)");
+      assert(syncMs < 250, `readFileSync took ${syncMs} ms`);
+      assert(asyncMs < 250, `readFile took ${asyncMs} ms`);
+    } finally {
+      Deno.removeSync(dir, { recursive: true });
+    }
+  },
 });

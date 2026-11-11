@@ -923,13 +923,26 @@ function readFileIntoUserBuffer(
   return TypedArrayPrototypeSubarray(target, 0, size) as Buffer;
 }
 
+// Node refuses a regular file larger than `kIoMaxLength` (2 GiB - 1) before
+// reading it (`lib/fs.js`, `tryCreateBuffer` / `readFileAfterStat`). The read
+// ops take the same limit and answer `null` without reading such a file; the
+// size for the message is read again here.
+function readFileTooLarge(path: string): never {
+  let size = kIoMaxLength + 1;
+  try {
+    size = Deno.statSync(path).size;
+  } catch {
+    // The file changed or went away since: the limit is still what was hit.
+  }
+  throw new ERR_FS_FILE_TOO_LARGE(size);
+}
+
 function readFileResult(
   data: Uint8Array,
   options: { buffer?: unknown; encoding?: Encodings | null } | undefined,
 ): string | Buffer {
-  // Node refuses a file larger than `kIoMaxLength` (2 GiB - 1) before reading
-  // it (`lib/fs.js`, `tryCreateBuffer` / `readFileAfterStat`); the whole file
-  // is read here, so the check runs on its length.
+  // A file without a size (a pipe, a device) is read whole, so its length is
+  // checked here.
   const length = TypedArrayPrototypeGetByteLength(data);
   if (length > kIoMaxLength) {
     throw new ERR_FS_FILE_TOO_LARGE(length);
@@ -958,7 +971,7 @@ type ReadFilePath = string | URL | FileHandle | number;
 async function readFileAsync(
   path: string,
   options: FileOptions | undefined,
-): Promise<Uint8Array> {
+): Promise<Uint8Array | null> {
   let cancelRid: number | undefined;
   let abortHandler: (rid: number) => void;
   const flagsNumber = stringToFlags(options!.flag, "options.flag");
@@ -974,6 +987,7 @@ async function readFileAsync(
       path,
       cancelRid,
       flagsNumber,
+      kIoMaxLength,
     );
     return data;
   } finally {
@@ -1141,7 +1155,7 @@ function readFile(
   );
   validateReadFileBufferOption(options);
 
-  let p: Promise<Uint8Array>;
+  let p: Promise<Uint8Array | null>;
   if (typeof pathOrRid === "string") {
     p = readFileAsync(pathOrRid, options);
   } else {
@@ -1151,9 +1165,10 @@ function readFile(
   if (cb) {
     PromisePrototypeThen(
       p,
-      (data: Uint8Array) => {
+      (data: Uint8Array | null) => {
         let textOrBuffer;
         try {
+          if (data === null) readFileTooLarge(pathOrRid as string);
           textOrBuffer = readFileResult(data, options);
         } catch (err) {
           (cb as ReadFileBinaryCallback)(err as Error);
@@ -1280,10 +1295,11 @@ function readFileSync(
 
     const flagsNumber = stringToFlags(options?.flag, "options.flag");
     try {
-      data = op_fs_read_file_sync(path, flagsNumber);
+      data = op_fs_read_file_sync(path, flagsNumber, kIoMaxLength);
     } catch (err) {
       throw denoErrorToNodeError(err, { path, syscall: "open" });
     }
+    if (data === null) readFileTooLarge(path);
   }
   return readFileResult(data, options);
 }

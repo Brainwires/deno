@@ -13558,6 +13558,26 @@ where the changes are discussed.
        `parallel/test-webcrypto-digest-turboshake-rfc.js` stops timing out on
        Windows CI.
 
+353. **`fix(node)`: `fs.readFile` refuses a file over 2 GiB before reading it**
+     (runtime; `ext/fs/ops.rs`, `ext/node/polyfills/fs.ts`). Node's `readFile` /
+     `readFileSync` check a regular file's size (fstat) and throw
+     `ERR_FS_FILE_TOO_LARGE` for one over 2 GiB - 1 without reading it. Ours
+     read the whole file and checked the length afterwards: a 2 GiB file cost 2
+     GiB or more of memory and about a second before the refusal, much longer on
+     a machine short of memory. `op_fs_read_file_sync` / `op_fs_read_file_async`
+     take an optional size limit: with one, the op opens the file, stats it and
+     returns `null` for a regular file over the limit, else reads it from that
+     handle. node:fs passes 2 GiB - 1; `Deno.readFile` passes none and is
+     unchanged. A file without a size (a pipe, a device) is still read and its
+     length checked.
+     - User-facing note: `fs.readFile` / `fs.readFileSync` of a file over 2 GiB
+       now fail at once, without reading it.
+     - Tests: unit_node `_fs/_fs_readFile_test.ts` "readFile refuses a file over
+       2 GiB without reading it" (fails before: `readFileSync took 2024 ms`).
+     - Node tests enabled: none new; `parallel/test-fs-readfile.js` drops from
+       about 2 s to well under 1 s on a debug build and stops timing out on
+       slower CI machines.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -13565,10 +13585,10 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351) are what the prebuilt `libdenort` carries. The CLI-side parts (for
-example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
-launchers) are in the branch too, but a stock CLI does not run them; denext's
-own launcher provides that environment.
+350, 351, 353) are what the prebuilt `libdenort` carries. The CLI-side parts
+(for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged
+app's launchers) are in the branch too, but a stock CLI does not run them;
+denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
