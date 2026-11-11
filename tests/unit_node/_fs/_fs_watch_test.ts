@@ -210,11 +210,37 @@ Deno.test("[node/fs promises.watch] encodes the file name", async () => {
   const dir = Deno.makeTempDirSync();
   try {
     const iter = watchPromise(dir, { encoding: "hex" })[Symbol.asyncIterator]();
-    const first = iter.next();
+    const next = iter.next();
     await wait(100);
     Deno.writeTextFileSync(`${dir}/a`, "x");
-    const { value } = await first;
-    assertEquals(value?.filename, "61");
+    // macOS (FSEvents) may first report the watched directory itself, under
+    // its own name, as Node does there: wait for the file's event. Every name
+    // seen must be hex.
+    const names: string[] = [];
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`no event for "a"; saw ${names.join(", ")}`)),
+        10_000,
+      );
+    });
+    try {
+      for (
+        let r = await Promise.race([next, timedOut]);
+        !r.done;
+        r = await Promise.race([iter.next(), timedOut])
+      ) {
+        const name = String(r.value.filename);
+        names.push(name);
+        if (name === "61") break;
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+    assertEquals(names.at(-1), "61", `names seen: ${names.join(", ")}`);
+    const hex = Array.from(new TextEncoder().encode(dir.split(/[\\/]/).at(-1)!))
+      .map((b) => b.toString(16).padStart(2, "0")).join("");
+    for (const name of names.slice(0, -1)) assertEquals(name, hex);
     await iter.return?.(undefined);
   } finally {
     Deno.removeSync(dir, { recursive: true });
