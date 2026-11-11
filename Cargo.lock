@@ -12036,8 +12036,8 @@ dependencies = [
 
 [[package]]
 name = "v8"
-version = "156.0.0+denext.4"
-source = "git+https://github.com/Brainwires/rusty_v8?rev=3c8a725fde04c90ad09e1fe954fca40ecd12f442#3c8a725fde04c90ad09e1fe954fca40ecd12f442"
+version = "156.0.0+denext.5"
+source = "git+https://github.com/Brainwires/rusty_v8?rev=dcb0c6de6c6368845b4f3b8bb0fce4e595641bb6#dcb0c6de6c6368845b4f3b8bb0fce4e595641bb6"
 dependencies = [
  "bindgen 0.72.1",
  "bitflags 2.11.1",

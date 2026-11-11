@@ -13055,6 +13055,33 @@ where the changes are discussed.
      release scripts and workflow. Node tests enabled: none, because this is CI
      only
 
+332. **`chore(deps)`: V8 15.6.75.57 from Brainwires/rusty_v8
+     `v156.0.0-denext.5`** (`v8` crate `156.0.0+denext.5`; runtime and CI;
+     `Cargo.toml`, `Cargo.lock`, `.github/denext-runtime/rusty_v8.sha256`;
+     runtime 3.0.0-denext.19). V8 moves from 15.6.75.38 to 15.6.75.57, the head
+     of `branch-heads/15.6` (Chrome Extended Stable 156) on 2026-11-10, which
+     keeps the pin inside the engine staleness gate's 14-day patch-lag rule.
+     Nineteen [M156] security merges come in: in maglev (`afdae2c4a4`,
+     `5973dddf82`, `35c381facb`, `6d48417787`, `467188466b`, `dfe5a31fd8`,
+     `197b819859`), Wasm (`b269433434`, `c3b6d0db44`), the compilers
+     (`5efaafcabd`, `9318a91878`, `34ad0107f8`, `52dff94f2f`, `fceab3ac1c`),
+     inline caches (`3c1ccfb529`, `9eeab36fc5`), the interpreter (`9ba5fcd3c9`),
+     arm64 code generation (`ff4fec63d1`) and object modification during GC
+     (`58707c0ea5`, debug-only `DCHECK`s; release builds behave as before). The
+     crbug ids are in rusty_v8's `denext/release-notes/v156.0.0-denext.5.md`.
+     V8's `DEPS` and public headers did not change (only `v8-version.h`).
+     rusty_v8's embedder patches and the read-only heap guard of
+     `v156.0.0-denext.3` (item 218) are kept.
+     - `Cargo.toml`'s rev is `dcb0c6de`, the `crate` commit the release names.
+       `rusty_v8.sha256` holds the release's `SHA256SUMS`; all 12 files were
+       checked against it and against their build-provenance attestations
+       (`gh attestation verify -R Brainwires/rusty_v8`). The release run is
+       Brainwires/rusty_v8 run 42982841318.
+     - User-facing note: the runtime carries V8 15.6.75.57, with 19 V8 security
+       fixes from Chrome 156's branch.
+     - Node tests enabled: none, because this is the JavaScript engine's patch
+       level, not a Node API.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
