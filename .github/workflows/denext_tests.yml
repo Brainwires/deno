@@ -282,6 +282,9 @@ jobs:
       # unit_node + node_compat (2 shards) on the mac-arm pool, GitHub's
       # macos-15 for the overflow (pick_runner.py).
       node_suites: true
+      # Every job of the leg (the build too) overflows to the leg's GitHub image
+      # while the pool's slots are taken, instead of queueing behind the release build.
+      pick_all: true
       pick_runs_on: ${{ !(github.event_name == 'workflow_dispatch' && inputs.macos_runner == 'github') && vars.RUNNER_MACOS_ARM || '' }}
       pick_slots: ${{ vars.RUNNER_MACOS_ARM_SLOTS || '2' }}
 
@@ -340,6 +343,9 @@ jobs:
       # Plus unit_node + node_compat (2 shards): the mac-x64 pool's one slot,
       # GitHub's macos-15-intel for the overflow.
       node_suites: true
+      # Every job of the leg (the build too) overflows to the leg's GitHub image
+      # while the pool's slots are taken, instead of queueing behind the release build.
+      pick_all: true
       pick_runs_on: ${{ vars.RUNNER_MACOS_X64 }}
       pick_slots: ${{ vars.RUNNER_MACOS_X64_SLOTS || '1' }}
 
