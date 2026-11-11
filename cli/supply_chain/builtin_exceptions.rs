@@ -18,13 +18,22 @@
 //! write outside their own folder (`@prisma/client`) are not here: they need
 //! a `write` grant only the project can give.
 //!
+//! Every built-in host is pinned to port 443 ([`BUILTIN_PORT`]): the
+//! downloads are HTTPS, and a host name the jail lets a script reach is also
+//! a way out for what the script can read, so a built-in grant opens that
+//! host's HTTPS port and no other (no `CONNECT github.com:22`). A host the
+//! project lists itself keeps the meaning it gives it (`host` is any port).
+//!
 //! Data only, mirrored from denext's `src/build/jail-exceptions.ts`.
+
+/// The only port a built-in host grant opens.
+pub const BUILTIN_PORT: u16 = 443;
 
 /// GitHub release downloads: the release URL and the hosts it redirects to.
 const GITHUB: &[&str] = &[
-  "github.com",
-  "objects.githubusercontent.com",
-  "release-assets.githubusercontent.com",
+  "github.com:443",
+  "objects.githubusercontent.com:443",
+  "release-assets.githubusercontent.com:443",
 ];
 
 /// One package's built-in exception.
@@ -32,7 +41,7 @@ const GITHUB: &[&str] = &[
 pub struct BuiltinException {
   /// The npm package name.
   pub name: &'static str,
-  /// Hosts groups its scripts may reach (`host` or `host:port`).
+  /// Hosts groups its scripts may reach (`host:443`, see [`BUILTIN_PORT`]).
   pub hosts: &'static [&'static [&'static str]],
   /// Environment variables passed through to its scripts.
   pub env: &'static [&'static str],
@@ -58,7 +67,7 @@ impl BuiltinException {
 
 /// node-gyp's Node.js headers, for a build from source when the offline
 /// copy can't be had.
-const NODE_HEADERS: &[&str] = &["nodejs.org"];
+const NODE_HEADERS: &[&str] = &["nodejs.org:443"];
 
 const fn entry(
   name: &'static str,
@@ -78,7 +87,7 @@ const fn entry(
 pub const BUILTIN_EXCEPTIONS: &[BuiltinException] = &[
   entry(
     "@prisma/engines",
-    &[&["binaries.prisma.sh"]],
+    &[&["binaries.prisma.sh:443"]],
     &[
       "PRISMA_ENGINES_CHECKSUM_IGNORE_MISSING",
       "PRISMA_ENGINES_MIRROR",
@@ -90,7 +99,7 @@ pub const BUILTIN_EXCEPTIONS: &[BuiltinException] = &[
   ),
   entry(
     "@sentry/cli",
-    &[&["downloads.sentry-cdn.com"]],
+    &[&["downloads.sentry-cdn.com:443"]],
     &[
       "SENTRYCLI_CDNURL",
       "SENTRYCLI_SKIP_DOWNLOAD",
@@ -100,7 +109,7 @@ pub const BUILTIN_EXCEPTIONS: &[BuiltinException] = &[
   ),
   entry(
     "@tensorflow/tfjs-node",
-    &[&["storage.googleapis.com"], NODE_HEADERS],
+    &[&["storage.googleapis.com:443"], NODE_HEADERS],
     &[],
     true,
   ),
@@ -109,9 +118,9 @@ pub const BUILTIN_EXCEPTIONS: &[BuiltinException] = &[
   entry(
     "chromedriver",
     &[&[
-      "chromedriver.storage.googleapis.com",
-      "googlechromelabs.github.io",
-      "storage.googleapis.com",
+      "chromedriver.storage.googleapis.com:443",
+      "googlechromelabs.github.io:443",
+      "storage.googleapis.com:443",
     ]],
     &[
       "CHROMEDRIVER_CDNBINARIESURL",
@@ -173,12 +182,12 @@ pub const BUILTIN_KNOWN_PACKAGES: &[(&str, &[&str])] = &[
 
 /// Hosts a declared download host hands its downloads off to: a script
 /// allowed the declared host also gets these, as a download from it
-/// fails without them.
+/// fails without them. Built-in grants, so pinned to [`BUILTIN_PORT`].
 pub const DECLARED_HOST_REDIRECTS: &[(&str, &[&str])] = &[(
   "github.com",
   &[
-    "objects.githubusercontent.com",
-    "release-assets.githubusercontent.com",
+    "objects.githubusercontent.com:443",
+    "release-assets.githubusercontent.com:443",
   ],
 )];
 
@@ -202,6 +211,27 @@ pub fn builtin_exception(name: &str) -> Option<&'static BuiltinException> {
     .binary_search_by(|e| e.name.cmp(name))
     .ok()
     .map(|i| &BUILTIN_EXCEPTIONS[i])
+}
+
+/// The grant for a declared `host[:port]` that the built-in list of reviewed
+/// hosts (`hosts`, from [`builtin_known_hosts`]) covers: the host pinned to
+/// [`BUILTIN_PORT`], or `None` when the list doesn't name it or the
+/// declaration names another port.
+pub fn builtin_known_grant(declared: &str, hosts: &[&str]) -> Option<String> {
+  let (name, port) = match declared.rsplit_once(':') {
+    Some((name, port)) if !name.contains(':') => {
+      (name, Some(port.parse::<u16>().ok()?))
+    }
+    _ => (declared, None),
+  };
+  if port.is_some_and(|p| p != BUILTIN_PORT) {
+    return None;
+  }
+  let name = name.trim_end_matches('.');
+  hosts
+    .iter()
+    .any(|h| h.eq_ignore_ascii_case(name))
+    .then(|| format!("{}:{BUILTIN_PORT}", name.to_ascii_lowercase()))
 }
 
 /// The reviewed hosts a package may declare for itself.
@@ -239,6 +269,33 @@ mod tests {
       }
       assert_eq!(builtin_exception(e.name), Some(e));
     }
+  }
+
+  // a built-in grant reaches its download host's HTTPS port only
+  #[test]
+  fn builtin_hosts_are_pinned_to_443() {
+    for e in BUILTIN_EXCEPTIONS {
+      for host in e.host_list() {
+        assert!(host.ends_with(":443"), "{}: {host}", e.name);
+      }
+    }
+    for (_, hosts) in DECLARED_HOST_REDIRECTS {
+      for host in *hosts {
+        assert!(host.ends_with(":443"), "{host}");
+      }
+    }
+    let github = builtin_known_hosts("bcrypt");
+    assert_eq!(
+      builtin_known_grant("github.com", github).as_deref(),
+      Some("github.com:443")
+    );
+    assert_eq!(
+      builtin_known_grant("GitHub.com.:443", github).as_deref(),
+      Some("github.com:443")
+    );
+    assert_eq!(builtin_known_grant("github.com:22", github), None);
+    assert_eq!(builtin_known_grant("github.com:x", github), None);
+    assert_eq!(builtin_known_grant("example.com", github), None);
     assert_eq!(builtin_exception("left-pad"), None);
   }
 
@@ -248,10 +305,10 @@ mod tests {
     assert_eq!(
       e.host_list(),
       [
-        "github.com",
-        "objects.githubusercontent.com",
-        "release-assets.githubusercontent.com",
-        "nodejs.org"
+        "github.com:443",
+        "objects.githubusercontent.com:443",
+        "release-assets.githubusercontent.com:443",
+        "nodejs.org:443"
       ]
     );
     assert!(e.node_gyp);
@@ -272,8 +329,8 @@ mod tests {
       assert!(builtin_exception(name).is_none(), "{name}");
     }
     let redirects = [
-      "objects.githubusercontent.com",
-      "release-assets.githubusercontent.com",
+      "objects.githubusercontent.com:443",
+      "release-assets.githubusercontent.com:443",
     ];
     assert_eq!(declared_host_redirects("github.com"), redirects);
     assert_eq!(declared_host_redirects("GitHub.com.:443"), redirects);

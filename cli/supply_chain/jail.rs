@@ -943,22 +943,30 @@ fn jail_net(
   {
     return plain(JailNet::Hosts(builtin.host_list()));
   }
-  let mut known = config
+  let known = config
     .known_packages
     .get(package_name)
     .cloned()
     .unwrap_or_default();
-  known.extend(
-    super::builtin_exceptions::builtin_known_hosts(package_name)
-      .iter()
-      .map(|h| h.to_string()),
-  );
-  let (allowed, refused): (Vec<String>, Vec<String>) =
-    declared_net_hosts(package_folder)
-      .into_iter()
-      .partition(|host| declared_host_known(host, &known));
+  let builtin_known =
+    super::builtin_exceptions::builtin_known_hosts(package_name);
+  // a host the project's `knownPackages` covers is granted as declared; one
+  // only the built-in list covers, on port 443 alone (a built-in grant)
+  let mut allowed = Vec::new();
+  let mut refused = Vec::new();
+  for host in declared_net_hosts(package_folder) {
+    let grant = if declared_host_known(&host, &known) {
+      Some(host.clone())
+    } else {
+      super::builtin_exceptions::builtin_known_grant(&host, builtin_known)
+    };
+    match grant {
+      Some(grant) if !allowed.contains(&grant) => allowed.push(grant),
+      Some(_) => {}
+      None => refused.push(host),
+    }
+  }
   // an allowed declared host's redirect targets (GitHub's release assets)
-  let mut allowed = allowed;
   for host in allowed.clone() {
     for redirect in super::builtin_exceptions::declared_host_redirects(&host) {
       if !allowed.iter().any(|h| h == redirect) {
@@ -2277,9 +2285,9 @@ mod tests {
         jail_net(&config(false, false), None, name, dir.path()),
         NetChoice {
           net: JailNet::Hosts(vec![
-            "github.com".to_string(),
-            "objects.githubusercontent.com".to_string(),
-            "release-assets.githubusercontent.com".to_string(),
+            "github.com:443".to_string(),
+            "objects.githubusercontent.com:443".to_string(),
+            "release-assets.githubusercontent.com:443".to_string(),
           ]),
           declared: true,
           refused_declared: Vec::new(),
@@ -2436,10 +2444,10 @@ mod tests {
     .unwrap();
     let github_and_headers = JailNet::Hosts(
       [
-        "github.com",
-        "objects.githubusercontent.com",
-        "release-assets.githubusercontent.com",
-        "nodejs.org",
+        "github.com:443",
+        "objects.githubusercontent.com:443",
+        "release-assets.githubusercontent.com:443",
+        "nodejs.org:443",
       ]
       .map(String::from)
       .to_vec(),
@@ -2520,7 +2528,9 @@ mod tests {
     assert_eq!(
       jail_net(&config(false, false), None, "grpc", dir.path()),
       NetChoice {
-        net: JailNet::Hosts(vec!["node-precompiled-binaries.grpc.io".into()]),
+        net: JailNet::Hosts(vec![
+          "node-precompiled-binaries.grpc.io:443".into()
+        ]),
         declared: true,
         refused_declared: Vec::new(),
       }
@@ -2556,11 +2566,11 @@ mod tests {
         "prebuild-install || node-gyp rebuild",
       )
       .unwrap();
-    assert!(hint.contains("may reach github.com,"), "{hint}");
+    assert!(hint.contains("may reach github.com:443,"), "{hint}");
     assert!(hint.contains("node-gyp"), "{hint}");
     assert!(
       hint.contains(
-        r#"add to package.json: "deno": { "supplyChain": { "jailScripts": { "packages": { "better-sqlite3": { "net": ["github.com", "#
+        r#"add to package.json: "deno": { "supplyChain": { "jailScripts": { "packages": { "better-sqlite3": { "net": ["github.com:443", "#
       ),
       "{hint}"
     );
