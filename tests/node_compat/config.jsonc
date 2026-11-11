@@ -394,7 +394,12 @@
     "module-hooks/test-module-hooks-resolve-short-circuit-required-start.js": {},
     "module-hooks/test-module-hooks-require-wasm.js": {},
     "parallel/test-runner-import-no-scheme.js": {},
-    "parallel/test-module-subpath-import-long-path.js": {},
+    "parallel/test-module-subpath-import-long-path.js": {
+      "expectedSkip": {
+        "darwin": "Windows-only test (long paths)",
+        "linux": "Windows-only test (long paths)"
+      }
+    },
     "parallel/test-module-setsourcemapssupport.js": {},
     "parallel/test-module-main-preserve-symlinks-fail.js": {},
     "parallel/test-module-main-fail.js": {},
@@ -2807,7 +2812,10 @@
     "parallel/test-https-server-options-server-response.js": {},
     "parallel/test-https-server-request-timeout.js": {},
     "parallel/test-https-session-reuse-different-servername.js": {},
-    "parallel/test-https-agent-session-reuse.js": {},
+    "parallel/test-https-agent-session-reuse.js": {
+      "ignore": true,
+      "reason": "Not really run: process.features.openssl_is_boringssl is true, so the test returns early through common/boringssl.js's TLS 1.3 session-ticket substitute (one resumed connection) and never runs its own agent session-reuse assertions"
+    },
     "parallel/test-https-agent-disable-session-reuse.js": {},
     "parallel/test-https-set-timeout-server.js": {},
     "parallel/test-https-simple.js": {},
@@ -4593,9 +4601,15 @@
     "parallel/test-tls-timeout-server.js": {},
     "parallel/test-tls-timeout-server-2.js": {},
     "parallel/test-tls-ticket-invalid-arg.js": {},
-    "parallel/test-tls-ticket.js": {},
+    "parallel/test-tls-ticket.js": {
+      "ignore": true,
+      "reason": "Not really run: process.features.openssl_is_boringssl is true, so the test returns early through common/boringssl.js's TLS 1.3 session-ticket substitute (one resumed connection) and never runs its own ticket-key assertions"
+    },
     "parallel/test-tls-ticket-12.js": {},
-    "parallel/test-tls-ticket-cluster.js": { "windows": false },
+    "parallel/test-tls-ticket-cluster.js": {
+      "ignore": true,
+      "reason": "Not really run: process.features.openssl_is_boringssl is true, so the test returns early through common/boringssl.js's TLS 1.3 session-ticket substitute (one resumed connection) and never runs its own cluster ticket-sharing assertions"
+    },
     "parallel/test-tls-tlswrap-segfault-2.js": {},
     "parallel/test-tls-transport-destroy-after-own-gc.js": {},
     "parallel/test-tls-use-after-free-regression.js": {},
@@ -6007,7 +6021,7 @@
         "windows": "Linux-only test"
       },
       "linux": false,
-      "reason": "error: Uncaught (in promise) AssertionError: Expected values to be strictly deep"
+      "reason": "The file name is the raw UCS-2 bytes of an emoji, which are not valid UTF-8; readdir hands file names to JavaScript as UTF-8 strings, so the name is not returned byte for byte and its 'ucs2' re-encoding differs"
     },
     "parallel/test-fs-readfile-eof.js": {
       "linux": false,
@@ -6379,7 +6393,7 @@
         "windows": "Linux-only test"
       },
       "linux": false,
-      "reason": "error: Uncaught AssertionError: /opt/hostedtoolcache/deno/0.0.0-8ea25a3b12434ec8"
+      "reason": "Traces the files require('crypto') opens with strace and allows only OpenSSL's /etc/ssl/openssl.cnf; the runtime opens files of its own at startup (a path under its install directory), and has no OpenSSL configuration file to open"
     },
     "parallel/test-stream-readable-async-iterators.js": {},
     "parallel/test-temporal-with-zoneinfo.js": {},
@@ -6417,7 +6431,7 @@
         "windows": "abstract Unix sockets are Linux-only"
       },
       "linux": false,
-      "reason": "expression evaluated to a falsy value"
+      "reason": "Expects node.net.native connect trace events with path_type / pipe_path; the node.net categories are not produced (the trace file holds only the metadata events)"
     },
     "parallel/test-util-inspect-namespace.js": {},
     "parallel/test-util-sigint-watchdog.js": {},
