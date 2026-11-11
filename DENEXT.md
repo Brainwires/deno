@@ -13515,15 +13515,45 @@ where the changes are discussed.
        `npm/supply_chain_jail` `builtin_exception_hosts`.
      - Node tests enabled: none (installer jail, no Node API).
 
+350. **`fix(node)`: a child's Windows exit code is unsigned, as in Node**
+     (runtime; `ext/node/polyfills/internal/child_process.ts`). A Windows exit
+     code is a DWORD, and Node reports it unchanged (libuv passes it on as a
+     positive number), but `ChildProcess`'s `exitCode` / `'exit'` code and
+     `spawnSync`'s `status` carried it as a signed 32-bit integer: a child that
+     hit a breakpoint (V8's abort under `--abort-on-uncaught-exception`,
+     `0x80000003`) reported -2147483645 instead of 2147483651, and an `exit(-1)`
+     -1 instead of 4294967295. Negative codes on Windows are now read as
+     unsigned; POSIX is unchanged.
+     - User-facing note: on Windows, `node:child_process` reports exit codes at
+       or above `0x80000000` as the positive numbers Node reports.
+     - Tests: unit_node `child_process_test.ts` "exit code -1 is reported as
+       Node does" (Windows: 4294967295 from `spawn` and `spawnSync`; POSIX:
+       255).
+     - Node tests enabled:
+       `parallel/test-domain-no-error-handler-abort-on-uncaught-4.js`, `-5.js`
+       and `-6.js` pass on Windows (their `nodeProcessAborted` check expects
+       `0x80000003` there).
+
+351. **`fix(node)`: `v8.writeHeapSnapshot()`'s permission refusal names the
+     namespaced path** (runtime; `ext/node/polyfills/v8.ts`). Node checks the
+     write permission on the snapshot's namespaced path and reports that as the
+     `ERR_ACCESS_DENIED` error's `resource`: `\\?\C:\...` for a relative path on
+     Windows, the path as given elsewhere. The refusal carried the path as given
+     on every platform. It now carries `path.toNamespacedPath(filename)`.
+     - User-facing note: none beyond the matching `resource` on Windows.
+     - Tests: none new; the Node test below covers it.
+     - Node tests enabled: `parallel/test-permission-fs-write-v8.js` passes on
+       Windows (it already passed on Linux and macOS).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
-306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348)
-are what the prebuilt `libdenort` carries. The CLI-side parts (for example
-writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
+350, 351) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.
 

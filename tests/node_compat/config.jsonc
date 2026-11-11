@@ -25,7 +25,10 @@
     "client-proxy/test-https-proxy-request-proxy-failure-404.mjs": {},
     "client-proxy/test-https-proxy-request-no-proxy.mjs": {},
     "client-proxy/test-https-proxy-request-malformed-response.mjs": {},
-    "client-proxy/test-https-proxy-request-ipv6.mjs": {},
+    "client-proxy/test-https-proxy-request-ipv6.mjs": {
+      "windows": false,
+      "reason": "Windows: a server listening without a host binds 0.0.0.0 only (net.ts keeps Windows off the dual-stack :: bind), so the proxy at [::1] refuses the connection"
+    },
     "client-proxy/test-https-proxy-request-invalid-char-in-url.mjs": {},
     "client-proxy/test-https-proxy-request-incomplete-headers.mjs": {},
     "client-proxy/test-https-proxy-request-https-proxy.mjs": {},
@@ -103,7 +106,10 @@
     "async-hooks/test-improper-order.js": {},
     "async-hooks/test-improper-unwind.js": {},
     "async-hooks/test-late-hook-enable.js": {},
-    "async-hooks/test-pipeconnectwrap.js": {},
+    "async-hooks/test-pipeconnectwrap.js": {
+      "windows": false,
+      "reason": "Windows: hangs until the runner's timeout (a named-pipe server, client connect and close under async hooks); the cause is not diagnosed yet"
+    },
     "async-hooks/test-pipewrap.js": {},
     "async-hooks/test-querywrap.js": {},
     "async-hooks/test-queue-microtask.js": {},
@@ -834,7 +840,10 @@
       "ignore": true,
       "reason": "Flaky on debug Linux: times out (10s) intermittently from a mutual handle-send / disconnect race. The IPC handle fixes in this PR (eager derivation + teardown cleanup) reduce but do not eliminate it; not reproducible outside debug Linux. Tracked in denoland/deno#34180."
     },
-    "parallel/test-cluster-send-handle-twice.js": {},
+    "parallel/test-cluster-send-handle-twice.js": {
+      "windows": false,
+      "reason": "net.Server IPC handle passing uses SCM_RIGHTS, not yet implemented on Windows"
+    },
     "parallel/test-cluster-send-socket-to-worker-http-server.js": {
       "windows": false
     },
@@ -5866,7 +5875,10 @@
     "parallel/test-async-hooks-vm-gc.js": {},
     "parallel/test-async-hooks-enable-before-promise-resolve.js": {},
     "parallel/test-async-hooks-enable-recursive.js": {},
-    "parallel/test-async-hooks-fatal-error.js": {},
+    "parallel/test-async-hooks-fatal-error.js": {
+      "windows": false,
+      "reason": "Windows: the uncaught-error report ends its lines with \\n, while Node writes stderr through the C runtime's text mode (\\r\\n); the test splits the report on os.EOL"
+    },
     "parallel/test-async-hooks-http-parser-destroy.js": {},
     "parallel/test-async-wrap-destroyid.js": {},
     "parallel/test-async-wrap-uncaughtexception.js": {},

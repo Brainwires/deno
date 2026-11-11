@@ -1621,6 +1621,19 @@ Deno.test({
   },
 });
 
+// A Windows exit code is an unsigned DWORD, reported as is by Node (an
+// exit(-1) is 4294967295, a breakpoint 2147483651); POSIX keeps the low byte.
+Deno.test("[node/child_process] exit code -1 is reported as Node does", async () => {
+  const expected = Deno.build.os === "windows" ? 0xFFFFFFFF : 255;
+  const args = ["eval", "Deno.exit(-1)"];
+  const child = CP.spawn(Deno.execPath(), args, { stdio: "ignore" });
+  const exited = withTimeout<number | null>();
+  child.on("exit", (code) => exited.resolve(code));
+  assertEquals(await exited.promise, expected);
+  assertEquals(child.exitCode, expected);
+  assertEquals(CP.spawnSync(Deno.execPath(), args).status, expected);
+});
+
 // Make sure that you receive messages sent before a "message" event listener is set up
 Deno.test(async function bufferMessagesIfNoListener() {
   const code = `

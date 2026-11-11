@@ -360,7 +360,19 @@ function writeHeapSnapshot(
     validateObject(options, "options");
   }
   const data = op_v8_take_heap_snapshot();
-  lazyFs().writeFileSync(filename, data);
+  try {
+    lazyFs().writeFileSync(filename, data);
+  } catch (e) {
+    // Node checks the write permission on the namespaced path and reports
+    // that as the refusal's resource: `\\?\C:\...` on Windows, the path as
+    // given elsewhere.
+    // deno-lint-ignore no-explicit-any
+    const err = e as any;
+    if (err?.code === "ERR_ACCESS_DENIED") {
+      err.resource = lazyPath().toNamespacedPath(filename);
+    }
+    throw e;
+  }
   return filename;
 }
 

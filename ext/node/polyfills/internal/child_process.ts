@@ -704,7 +704,7 @@ class ChildProcess extends EventEmitter {
         if (this.signalCode) {
           this.exitCode = null;
         } else {
-          this.exitCode = status.code;
+          this.exitCode = nodeExitCode(status.code);
         }
         PromisePrototypeThen(this.#spawned.promise, async () => {
           // The 'exit' and 'close' events must be emitted after the 'spawn' event.
@@ -2262,7 +2262,7 @@ function spawnSync(
       maxBuffer,
     });
 
-    const status = output.signal ? null : output.code;
+    const status = output.signal ? null : nodeExitCode(output.code);
     let stdout = output.stdout ? Buffer.from(output.stdout) : null;
     let stderr = output.stderr ? Buffer.from(output.stderr) : null;
 
@@ -2550,6 +2550,15 @@ function getSocketListSend(child, server) {
     socketLists.set(server, socketList);
   }
   return socketList;
+}
+
+/**
+ * A child's exit code as Node reports it. A Windows exit code is an unsigned
+ * DWORD, which libuv hands to Node unchanged (`0x80000003` is 2147483651), but
+ * the status here carries it as a signed 32-bit integer.
+ */
+function nodeExitCode(code: number): number {
+  return isWindows && code < 0 ? code >>> 0 : code;
 }
 
 function rawFdFromTcpHandle(tcpHandle) {
