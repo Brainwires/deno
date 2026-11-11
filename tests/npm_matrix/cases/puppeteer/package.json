@@ -4,5 +4,18 @@
   "private": true,
   "dependencies": {
     "puppeteer": "^24"
+  },
+  "deno": {
+    "supplyChain": {
+      "jailScripts": {
+        "packages": {
+          "puppeteer": {
+            "net": ["storage.googleapis.com:443"],
+            "env": ["PUPPETEER_CACHE_DIR"],
+            "write": [".pcache"]
+          }
+        }
+      }
+    }
   }
 }

@@ -16,7 +16,11 @@ push that changes it.
 
 - `package.json`: its dependencies, pinned to exact versions so a change in the
   matrix's result is a change in Deno, not in the packages (transitive
-  dependencies still float).
+  dependencies still float). Approved install scripts run in the
+  lifecycle-script jail, so a package whose script needs more than the jail's
+  built-in exceptions give (puppeteer: its download host, its cache directory
+  and `PUPPETEER_CACHE_DIR`) gets it from the package.json's
+  `"deno": { "supplyChain": … }` object, as a user's project would.
 - the program, which prints `SMOKE_OK` when everything it checked worked.
 - `case.json` (not copied):
   - `run`: the shell command, run after `deno install`, with only `deno` on
