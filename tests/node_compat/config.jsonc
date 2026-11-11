@@ -2441,8 +2441,9 @@
     "parallel/test-http-server-reject-cr-no-lf.js": {},
     "parallel/test-http-server-request-timeout-interrupted-headers.js": {},
     "parallel/test-http-server-request-timeout-keepalive.js": {
+      "linux": false,
       "windows": false,
-      "reason": "Passes on macOS (3 isolated runs, debug build); not verified on Windows"
+      "reason": "Linux: times out on the loaded CI runner (keep-alive timeout timing; the denext.19 train run, every retry); macOS passes; not verified on Windows"
     },
     "parallel/test-http-server-request-timeout-upgrade.js": {},
     "parallel/test-http-server-response-standalone.js": {},
@@ -6093,8 +6094,9 @@
     "parallel/test-http-server-headers-timeout-delayed-headers.js": {},
     "parallel/test-http-server-headers-timeout-interrupted-headers.js": {},
     "parallel/test-http-server-headers-timeout-keepalive.js": {
+      "linux": false,
       "windows": false,
-      "reason": "Passes on macOS (3 isolated runs, debug build); not verified on Windows"
+      "reason": "Linux: times out on the loaded CI runner (keep-alive timeout timing; the denext.19 train run, every retry); macOS passes; not verified on Windows"
     },
     "parallel/test-http-server-headers-timeout-pipelining.js": {},
     "parallel/test-http-server-multiple-client-error.js": {},

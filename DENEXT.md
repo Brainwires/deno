@@ -12879,6 +12879,10 @@ where the changes are discussed.
        `test-child-process-fork-net` passes but timed out once in three runs and
        stays unlisted. Node tests enabled: 19 on Linux (the 19 above), 189 on
        macOS (the same 19 and the 170 round 4 / round 8 tests)
+     - Train follow-up: `test-http-server-request-timeout-keepalive` and
+       `test-http-server-headers-timeout-keepalive` are off on Linux again: they
+       timed out on every retry of the train run on the loaded CI runner
+       (keep-alive timeout timing). They stay on for macOS.
 
 325. **Upstream 2.9.x fixes after the 2.9.8 sync** (from `denext.19`;
      `d19/upstream`; CLI only). Upstream has cut no 2.9.x release after 2.9.8

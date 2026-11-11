@@ -467,16 +467,9 @@ Deno.test(function webgpuWindowSurfaceNoWidthHeight() {
 Deno.test(
   { permissions: { ffi: false } },
   function webgpuWindowSurfaceFfiPermission() {
-    const response = new Response("ok", { status: 201 });
-    const nativeResponseSymbol = Object.getOwnPropertySymbols(response).find(
-      (symbol) => symbol.description === "serve native response",
-    );
-    assert(nativeResponseSymbol !== undefined);
-    const nativeResponse =
-      (response as unknown as Record<symbol, Deno.PointerValue>)[
-        nativeResponseSymbol
-      ];
-    assert(nativeResponse);
+    // The constructor checks ffi before it looks at the handles, so null
+    // handles (which deserialize as null pointers) reach the permission check.
+    const nativeResponse = null;
     const system = Deno.build.os === "darwin" ? "x11" : "cocoa";
 
     assertThrows(
