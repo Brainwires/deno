@@ -12860,6 +12860,93 @@ don't crash watchers. `test-child-process-fork-net` passes but timed out once in
 three runs and stays unlisted. Node tests enabled: 19 on Linux (the 19 above),
 189 on macOS (the same 19 and the 170 round 4 / round 8 tests)
 
+NNN. **`fix(ext/node)`: a native connection or connect callback runs its ticks
+     before the next one, and its exception is uncaught** (`d19/misc`;
+     runtime; `libs/core/runtime/jsruntime.rs`, `ext/node/ops/stream_wrap.rs`,
+     `tcp_wrap.rs`, `pipe_wrap.rs`, `ext/node/polyfills/_http_server.js`).
+     `async-hooks/test-shutdownwrap` timed out on Linux since denext.18. On
+     Linux the server's accept and the client's connect land in one I/O batch
+     with the server first: the server's `connection` callback ended the socket
+     and queued a `process.nextTick`, then the client's `connect` callback ran
+     before that tick (macOS polls the client first, so it passed there). The
+     test's assertion in the `connect` callback then threw, and libuv's
+     `connect_cb` / `server_connection_cb` called the JS callback with no
+     `TryCatch`: the exception was left pending and dropped, the rest of
+     `afterConnect` never ran, the client never read the server's FIN, and the
+     server's `close()` waited forever. Two fixes, as Node's `MakeCallback` /
+     `InternalCallbackScope`:
+     - The TCP and pipe connection and connect callbacks go through
+       `make_native_callback`: a `TryCatch` around the call, an exception
+       reported as uncaught (`reportError`, so `uncaughtException` sees it, as
+       the stream `onread` callback already did), and, when it returns with no
+       JavaScript left on the stack, its `process.nextTick` callbacks and
+       microtasks run before the next native callback starts
+       (`JsRuntime::drain_ticks_after_native_callback`, the event loop's own
+       drain). Other libuv callbacks (reads, writes, shutdown) keep draining
+       once per I/O batch.
+     - Dropping exceptions hid a failure: `parallel/test-http-socket-encoding-
+       error` "passed" while its assertion threw. An HTTP server's socket now
+       refuses `setEncoding()` with `ERR_HTTP_SOCKET_ENCODING`, as in Node (the
+       parser reads its bytes).
+
+     Tests: spec `node/net_callback_tick_drain` (a `connection` and a `connect`
+     callback each followed by its own tick; a throw in either reaches
+     `uncaughtException`; all three fail on the base: "connect, connection,
+     connect tick, connection tick" and "exception was dropped"). Reproduced on
+     Linux x86_64 with the denext.18 release binary (the test hangs; the
+     `connect` callback's assertion throws before the tick). Node tests
+     enabled: 1 (async-hooks/test-shutdownwrap.js, now on Linux too)
+
+NNN. **`feat(cli)`: `--deterministic`** (`d19/misc`; CLI;
+     `libs/cli_parser/src/defs.rs`, `convert.rs`; upstream #35718 phase 2).
+     `--deterministic` is `--seed=1` (a fixed default seed; not 0, which V8
+     reads as no seed): the seeded RNGs of items 237 and 249, `TZ=UTC` and the
+     en-US default locale, whatever the host says. An explicit `--seed` wins in
+     either order. Every subcommand that takes `--seed` takes it (`run`, `test`,
+     `bench`, `eval`, `repl`, `serve`, `compile`, ...), and `deno compile`
+     records the seed as before. Phase 3, a virtual clock behind `Date.now()`,
+     `performance.now()`, `op_time_origin` and the timer queue, is not part of
+     this item: its semantics (a frozen or a stepped clock, what advances it
+     while a timer waits, what I/O deadlines see) are not settled upstream.
+
+     Tests: `tests_full.rs` `run_deterministic` (the seed, `--seed` winning in
+     either order, `test` / `bench` / `compile` / `eval`); spec
+     `run/deterministic` (`--deterministic` prints what `--seed=1` prints under
+     `TZ=Asia/Tokyo` and `de_DE.UTF-8`, and `--seed=100` wins; the base refuses
+     the flag: "unexpected argument '--deterministic'"). Node tests enabled:
+     none, because Node has no deterministic mode to test
+
+NNN. **`test(process)`: a program the app carries, between the check and the
+     exec, on macOS and Windows** (`d19/misc`; `ext/process/lib.rs`; item 232).
+     Item 232's unit tests checked the hash, the swap refused at the next spawn
+     and Windows' held handle on their own; the e2e area `sidecarint` (16
+     checks, all passing on macOS and Windows, webview and CEF, in the
+     denext.18 release run) swaps between launches. Two tests now cover the
+     window inside one spawn, through the op's own `create_command`,
+     `spawn_command` and `refuse_if_changed_since_check` (what `spawn_child`
+     runs):
+     - unix (the macOS leg; also run on Linux): a program swapped after the
+       check and before the exec is refused right after the spawn and its child
+       ended by `SIGKILL`; unchanged, the child runs. The swap still there is
+       refused (and removed) at the next spawn's check, and the one after
+       writes the packaged bytes again. With the compare disabled the test
+       fails ("a program swapped before the exec is refused").
+     - Windows: from the check to the exec the held handle keeps the program
+       from being replaced, written or removed, the spawn runs it, and it is
+       released once the spawn returned. Run by the train's CI only.
+
+     Node tests enabled: none, because this is a desktop runtime check with no
+     Node counterpart
+
+NNN. **`ci(denext)`: the release scripts' shellcheck findings**
+     (`d19/misc`; CI; `.github/denext-runtime/lib.sh`,
+     `runtime_refusal_smoke.sh`). The last findings item 236 left: `lib.sh`
+     names its shell for shellcheck, and the runtime refusal smoke lists what a
+     refused build left with a glob instead of `ls | grep` and no longer masks
+     `native_path`'s exit status in an `export`. `shellcheck -S style` and
+     `actionlint` report nothing on the release scripts and workflow. Node tests
+     enabled: none, because this is CI only
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

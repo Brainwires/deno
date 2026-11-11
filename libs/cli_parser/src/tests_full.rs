@@ -3337,6 +3337,43 @@ fn run_seed() {
 }
 
 #[test]
+fn run_deterministic() {
+  // `--deterministic` is `--seed=1`.
+  let r = flags_from_vec(svec!["deno", "run", "--deterministic", "script.ts"]);
+  assert_eq!(
+    r.unwrap(),
+    Flags {
+      subcommand: DenoSubcommand::Run(RunFlags::new_default(
+        "script.ts".to_string(),
+      )),
+      seed: Some(1_u64),
+      v8_flags: svec!["--random-seed=1"],
+      code_cache_enabled: true,
+      ..Flags::default()
+    }
+  );
+  // An explicit `--seed` wins, in either order.
+  for args in [
+    svec!["deno", "run", "--deterministic", "--seed=7", "script.ts"],
+    svec!["deno", "run", "--seed=7", "--deterministic", "script.ts"],
+  ] {
+    let flags = flags_from_vec(args).unwrap();
+    assert_eq!(flags.seed, Some(7));
+    assert_eq!(flags.v8_flags, svec!["--random-seed=7"]);
+  }
+  // `test`, `bench`, `eval` and `compile` take it too.
+  for sub in ["test", "bench", "compile"] {
+    let flags =
+      flags_from_vec(svec!["deno", sub, "--deterministic", "script.ts"])
+        .unwrap();
+    assert_eq!(flags.seed, Some(1), "{sub}");
+  }
+  let flags =
+    flags_from_vec(svec!["deno", "eval", "--deterministic", "1"]).unwrap();
+  assert_eq!(flags.seed, Some(1));
+}
+
+#[test]
 fn run_resource_limits() {
   let flags = flags_from_vec(svec![
     "deno",

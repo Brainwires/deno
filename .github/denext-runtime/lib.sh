@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared helpers for the denext runtime scripts. Source, don't execute.
 
 # An assertion that fails with a message naming what it checked, instead of

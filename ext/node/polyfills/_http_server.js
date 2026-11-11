@@ -85,6 +85,7 @@ const {
   connResetException,
   ERR_HTTP_HEADERS_SENT,
   ERR_HTTP_SOCKET_ASSIGNED,
+  ERR_HTTP_SOCKET_ENCODING,
   ERR_INVALID_ARG_TYPE,
   ERR_INVALID_ARG_VALUE,
   ERR_INVALID_CHAR,
@@ -727,6 +728,12 @@ function connectionListenerInternal(server, socket) {
   );
 
   socket._paused = false;
+  // As Node: the parser reads the socket's bytes, so its encoding is fixed.
+  socket.setEncoding = socketSetEncoding;
+}
+
+function socketSetEncoding() {
+  throw new ERR_HTTP_SOCKET_ENCODING();
 }
 
 function onParserMessageBegin(server, socket) {

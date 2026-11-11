@@ -358,6 +358,10 @@ pub static RUNTIME_MISC_ARGS: &[ArgDef] = &[
     .num_args(NumArgs::Exact(1))
     .value_parser(ValueParser::U64)
 .help("Set the random number generator seed"),
+  ArgDef::new("deterministic")
+    .long("deterministic")
+    .set_true()
+.help("Run deterministically: seed the random number generators (with 1, unless --seed\n  sets another seed) and pin the time zone to UTC and the locale to en-US"),
   ArgDef::new("enable-testing-features")
     .long("enable-testing-features-do-not-use")
     .long_aliases(&["enable-testing-features"])

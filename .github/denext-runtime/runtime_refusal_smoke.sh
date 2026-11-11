@@ -46,7 +46,7 @@ export HTTP_PROXY="$url" HTTPS_PROXY="$url" http_proxy="$url" https_proxy="$url"
 unset NO_PROXY no_proxy
 
 expect_refused() { # <asset prefix> <fix> <output> <args...>
-  local asset=$1 fix=$2 output=$3 err rc
+  local asset=$1 fix=$2 output=$3 err rc f left=()
   shift 3
   set +e
   err=$(cd "$work/app" && "$deno" "$@" -o "$output" main.ts 2>&1)
@@ -58,15 +58,19 @@ expect_refused() { # <asset prefix> <fix> <output> <args...>
     *"$asset-"*"Nothing was downloaded"*"$fix"*) echo "refused: $*" ;;
     *) echo "::error::$* failed, but not with the refusal naming $asset and $fix" >&2; exit 1 ;;
   esac
-  test -z "$(ls "$work/app" | grep -v '^main\.ts$' || true)" ||
-    { echo "::error::$* left output: $(ls "$work/app")" >&2; exit 1; }
+  for f in "$work/app"/*; do
+    if [ -e "$f" ] && [ "${f##*/}" != main.ts ]; then left+=("${f##*/}"); fi
+  done
+  test "${#left[@]}" = 0 ||
+    { echo "::error::$* left output: ${left[*]}" >&2; exit 1; }
   test ! -e "$DENO_DIR/dl" || { echo "::error::$* cached a download" >&2; exit 1; }
   test ! -e "$work/connections" || { echo "::error::$* opened a connection" >&2; exit 1; }
 }
 
 expect_refused denort-quickjs DENORT_BIN app1 compile --no-config --engine quickjs
 # LAUFEY_DEV_DIR: the base binary is the only thing left to refuse.
-export LAUFEY_DEV_DIR="$(native_path "$work/laufey")"
+LAUFEY_DEV_DIR="$(native_path "$work/laufey")"
+export LAUFEY_DEV_DIR
 expect_refused libdenort DENORT_DESKTOP_BIN app2 desktop --no-config --backend webview
 expect_refused libdenort-quickjs DENORT_DESKTOP_BIN app3 desktop --no-config --backend webview --engine quickjs
 echo "every upstream runtime is refused"

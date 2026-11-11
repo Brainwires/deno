@@ -1,0 +1,29 @@
+{
+  // `--deterministic` is `--seed=1` (upstream #35718 phase 2): seeded RNGs,
+  // the time zone pinned to UTC and the default locale to en-US. An explicit
+  // `--seed` wins over its default seed.
+  "tests": {
+    "deterministic": {
+      "envs": {
+        "TZ": "Asia/Tokyo",
+        "LC_ALL": "de_DE.UTF-8",
+        "LANG": "de_DE.UTF-8"
+      },
+      "args": "run --deterministic main.js",
+      "output": "seed1.out"
+    },
+    "same_as_seed_1": {
+      "envs": {
+        "TZ": "Asia/Tokyo",
+        "LC_ALL": "de_DE.UTF-8",
+        "LANG": "de_DE.UTF-8"
+      },
+      "args": "run --seed=1 main.js",
+      "output": "seed1.out"
+    },
+    "explicit_seed_wins": {
+      "args": "run --deterministic --seed=100 main.js",
+      "output": "seed100.out"
+    }
+  }
+}
