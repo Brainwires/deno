@@ -22,10 +22,16 @@ Prints the JSON list of targets on stdout. Each entry has:
   release failure. So x86_64-apple-darwin launches on GitHub's image unless
   RUNNER_MACOS_X64_GUI names a pool that has a GUI session. The arm64 GUI
   runner follows RUNNER_MACOS_ARM unless RUNNER_MACOS_ARM_GUI overrides it.
+- `laufey_runner`: where the laufey job builds the backend hosts. For
+  x86_64-unknown-linux-gnu this is the Ubuntu 22.04 Linux pool
+  (RUNNER_LINUX_X64_2204), whose image carries every package that job
+  installs, so it downloads none; the other targets stay on the image (the
+  macOS leg `brew install`s llvm, the Windows legs use Chocolatey, which the
+  pools' images lack, and Linux arm64 has no pool).
 
 Env: TARGETS ("all" or a comma-separated list of triples),
      RUNNER_MACOS_ARM, RUNNER_MACOS_X64, RUNNER_MACOS_ARM_GUI,
-     RUNNER_MACOS_X64_GUI (each optional).
+     RUNNER_MACOS_X64_GUI, RUNNER_LINUX_X64_2204 (each optional).
 """
 import json
 import os
@@ -63,11 +69,15 @@ def plan(env):
         # never RUNNER_MACOS_X64 here.
         "macos-15-intel": env.get("RUNNER_MACOS_X64_GUI", ""),
     }
+    laufey = {
+        "x86_64-unknown-linux-gnu": env.get("RUNNER_LINUX_X64_2204", ""),
+    }
     targets = []
     for t in ALL_TARGETS:
         t = dict(t)
         t["runner"] = _runner(build.get(t["os"], ""), t["os"])
         t["gui_runner"] = _runner(gui.get(t["os"], ""), t["os"])
+        t["laufey_runner"] = _runner(laufey.get(t["target"], ""), t["os"])
         targets.append(t)
     want = [t.strip() for t in env.get("TARGETS", "all").split(",") if t.strip()]
     if want != ["all"]:

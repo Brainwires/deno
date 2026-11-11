@@ -56,9 +56,9 @@ fi
 sudo=
 if [ "$(id -u)" != 0 ]; then sudo=sudo; fi
 
-export DEBIAN_FRONTEND=noninteractive
-$sudo apt-get update -qq
-$sudo apt-get install -y --no-install-recommends "clang-$LLVM_VERSION" "lld-$LLVM_VERSION"
+# Retries, timeouts and a fallback mirror; nothing fetched where the image
+# has them.
+bash "$here/apt_install.sh" "clang-$LLVM_VERSION" "lld-$LLVM_VERSION"
 cc="clang-$LLVM_VERSION"
 "$cc" --version | head -1
 "ld.lld-$LLVM_VERSION" --version
@@ -66,7 +66,7 @@ cc="clang-$LLVM_VERSION"
 tmp=${RUNNER_TEMP:-}
 if [ -z "$tmp" ]; then tmp=$(mktemp -d); fi
 archive="$tmp/sysroot-$arch.tar.xz"
-curl -fsSL --retry 3 -o "$archive" \
+curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 20 --max-time 600 -o "$archive" \
   "https://github.com/denoland/deno_sysroot_build/releases/download/$SYSROOT_RELEASE/sysroot-$arch.tar.xz"
 echo "$sysroot_sha256  $archive" | sha256sum -c -
 $sudo rm -rf /sysroot

@@ -16,13 +16,31 @@ A `denext-runtime-v*` tag publishes only when, for the tagged commit:
   it): it doesn't hold the release, and it vouches for nothing;
 - the commit is on development-denext or on the release branch
   rel/<version>: a fix/* commit that was dispatched but never merged is not
-  a release.
+  a release;
+- the pinned laufey's native backend hosts (webview and CEF, C++) built on
+  every release target: an earlier `denext runtime` run of exactly this
+  commit (a push or a dispatch, never the tag's own run) has a passed
+  `laufey / <target>` job for each of LAUFEY_TARGETS, and each of those jobs
+  checked out the pinned LAUFEY_SHA (its checkout step is named
+  `LAUFEY_STEP <sha>`). `denext tests` never compiles those hosts (the
+  `laufey` crate denort_desktop builds leaves backend-common/*.h out), so a
+  Windows-only C++ error in a new laufey pin reached the tag build of
+  3.0.0-denext.19 with every `denext tests` leg green. That build job is the
+  one that failed, so it is the one required; laufey's own CI is not, as its
+  native e2e suite fails on Windows too often to gate on;
+- LAUFEY_SHA (denext_runtime.yml) equals the `rev` of the laufey dependency
+  in LAUFEY_MANIFEST (cli/rt_desktop/Cargo.toml): the runtime is built with
+  the hosts the crate was compiled against.
 
 Usage: tag_gate.py
-Env:   REPO (owner/name), SHA (the tagged commit), VERSION (the fork's version)
-       and GH_TOKEN for the gh CLI.
-Prints the full run's id as `full_run=<id>` and exits 0, or prints every
-reason with an `::error::` prefix and exits 1.
+Env:   REPO (owner/name), SHA (the tagged commit), VERSION (the fork's version),
+       LAUFEY_SHA (the pin), RUN_ID (the tag build's own run, left out; empty
+       when the gate runs before tagging) and GH_TOKEN for the gh CLI.
+       LAUFEY_MANIFEST overrides the Cargo.toml path (relative to the
+       working directory, the repository root).
+Prints the full run's id as `full_run=<id>` and the laufey run's id as
+`laufey_run=<id>` and exits 0, or prints every reason with an `::error::`
+prefix and exits 1.
 
 Usage: tag_gate.py --prerelease-flag <version>
 Prints `--prerelease` when the GitHub release of <version> is marked a
@@ -42,6 +60,21 @@ import sys
 from datetime import datetime, timezone
 
 WORKFLOW = "denext_tests.yml"
+RUNTIME_WORKFLOW = "denext_runtime.yml"
+# Every release target's `laufey / <target>` job (plan_matrix.py's
+# ALL_TARGETS; tag_gate_test.py checks the two agree).
+LAUFEY_TARGETS = (
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+)
+# denext_runtime.yml's laufey checkout step is named this plus the commit it
+# checked out, so a job's step list says which laufey it built.
+LAUFEY_STEP = "Check out laufey"
+LAUFEY_MANIFEST = "cli/rt_desktop/Cargo.toml"
 REQUIRED_LEGS = (
     "macos-15",
     "windows-2022",
@@ -211,6 +244,78 @@ def evaluate(runs, legs_of, contained_in):
     return full_run, errors
 
 
+def pinned_rev(manifest):
+    """The `rev` of the laufey git dependency in Cargo.toml text, or None."""
+    m = re.search(
+        r'^laufey\s*=\s*\{[^}\n]*\brev\s*=\s*"([0-9a-f]{40})"',
+        manifest,
+        re.MULTILINE,
+    )
+    return m.group(1) if m else None
+
+
+def check_pin(laufey_sha, manifest):
+    """[errors]: LAUFEY_SHA must be a full commit and equal Cargo.toml's rev."""
+    if not re.fullmatch(r"[0-9a-f]{40}", laufey_sha or ""):
+        return [f"LAUFEY_SHA '{laufey_sha}' is not a full laufey commit SHA"]
+    rev = pinned_rev(manifest)
+    if rev is None:
+        return [f"no laufey = {{ ..., rev = \"<sha>\" }} line in {LAUFEY_MANIFEST}"]
+    if rev != laufey_sha:
+        return [
+            f"denext_runtime.yml pins LAUFEY_SHA {laufey_sha}, but"
+            f" {LAUFEY_MANIFEST} builds the laufey crate at {rev}: move both"
+            " to the same commit"
+        ]
+    return []
+
+
+def laufey_targets_built(jobs, laufey_sha):
+    """The LAUFEY_TARGETS a run's jobs built green from `laufey_sha`.
+
+    jobs: the run's jobs, each a dict with `name`, `conclusion` and `steps`
+    (the step names)."""
+    want = f"{LAUFEY_STEP} {laufey_sha}"
+    built = set()
+    for job in jobs:
+        name = job.get("name") or ""
+        if not name.startswith("laufey / ") or job.get("conclusion") != "success":
+            continue
+        if want not in (job.get("steps") or []):
+            continue
+        built.add(name[len("laufey / "):])
+    return [t for t in LAUFEY_TARGETS if t in built]
+
+
+def evaluate_laufey(runs, jobs_of, laufey_sha, repo, sha, branches):
+    """(laufey_run_id or None, [errors]).
+
+    runs: the ids of the `denext runtime` runs of the commit, the tag build's
+    own run left out. jobs_of: run id -> its jobs (see laufey_targets_built).
+    branches: where the commit may be dispatched from (for the message).
+    """
+    for run_id in sorted(runs):
+        built = laufey_targets_built(jobs_of(run_id), laufey_sha)
+        missing = [t for t in LAUFEY_TARGETS if t not in built]
+        if not missing:
+            return run_id, []
+        print(
+            f"denext runtime run {run_id} did not build laufey {laufey_sha}"
+            f" green for: {' '.join(missing)}"
+        )
+    return None, [
+        f"no denext runtime run of this commit built the pinned laufey"
+        f" ({laufey_sha}) green on every target ({', '.join(LAUFEY_TARGETS)})."
+        " 'denext tests' never compiles laufey's C++ backend hosts, so a"
+        " release needs that build first. Dispatch it from a branch whose head"
+        f" is {sha} ({' or '.join(branches)}): 'gh workflow run"
+        f" {RUNTIME_WORKFLOW} -R {repo} --ref <branch> -f targets=all' (leave"
+        " laufey_ref and reuse_laufey_run_id empty and cli_only off), wait"
+        " for every 'laufey / <target>' job to pass (the rest of that run"
+        " may be cancelled), then push the tag again on the same commit"
+    ]
+
+
 def gh_lines(args):
     out = subprocess.run(
         ["gh", "api", *args], check=True, capture_output=True, text=True
@@ -313,9 +418,47 @@ def gh_contains(repo, sha, branch):
     return result.returncode == 0 and result.stdout.strip() in CONTAINED
 
 
+def gh_runtime_runs(repo, sha, own_run):
+    """The ids of the commit's `denext runtime` runs, `own_run` left out."""
+    ids = gh_lines(
+        [
+            "--paginate",
+            f"repos/{repo}/actions/workflows/{RUNTIME_WORKFLOW}/runs"
+            f"?head_sha={sha}&per_page=100",
+            "--jq",
+            ".workflow_runs[] | .id",
+        ]
+    )
+    return [int(i) for i in ids if i.strip() != str(own_run or "").strip()]
+
+
+def gh_laufey_jobs(repo, run_id):
+    return [
+        json.loads(line)
+        for line in gh_lines(
+            [
+                "--paginate",
+                f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100",
+                "--jq",
+                '.jobs[] | select(.name | startswith("laufey / "))'
+                " | {name, conclusion, steps: [.steps[]?.name]}",
+            ]
+        )
+    ]
+
+
+def read_manifest(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
 def main():
     env = os.environ
     repo, sha, version = env["REPO"], env["SHA"], env["VERSION"]
+    laufey_sha = env.get("LAUFEY_SHA", "")
     runs = gh_runs(repo, sha)
     contained_in = {
         branch: gh_contains(repo, sha, branch)
@@ -324,12 +467,31 @@ def main():
     full_run, errors = evaluate(
         runs, lambda run_id: gh_legs(repo, run_id), contained_in
     )
+    pin_errors = check_pin(
+        laufey_sha, read_manifest(env.get("LAUFEY_MANIFEST", LAUFEY_MANIFEST))
+    )
+    errors += pin_errors
+    laufey_run = None
+    if not pin_errors:
+        laufey_run, laufey_errors = evaluate_laufey(
+            gh_runtime_runs(repo, sha, env.get("RUN_ID", "")),
+            lambda run_id: gh_laufey_jobs(repo, run_id),
+            laufey_sha,
+            repo,
+            sha,
+            release_branches(version),
+        )
+        errors += laufey_errors
     for error in errors:
         print(f"::error::{error}")
     if errors:
         return 1
     print(f"denext tests (full matrix, run {full_run}) passed for {sha}")
+    print(
+        f"laufey {laufey_sha} (run {laufey_run}) built on every target for {sha}"
+    )
     print(f"full_run={full_run}")
+    print(f"laufey_run={laufey_run}")
     return 0
 
 

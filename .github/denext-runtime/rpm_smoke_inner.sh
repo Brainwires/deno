@@ -10,7 +10,21 @@
 # Env: BACKEND ORIGIN
 set -euo pipefail
 : "${BACKEND:?}" "${ORIGIN:?}"
-dnf_install() { dnf install -y -q --setopt=install_weak_deps=False "$@"; }
+# A clean distro has to download: dnf's own retries and timeouts, and the
+# whole install retried with a backoff, so one mirror hiccup doesn't fail it.
+dnf_install() {
+  local delay=15 try
+  for try in 1 2 3 4; do
+    if timeout 1200 dnf install -y -q --setopt=install_weak_deps=False \
+      --setopt=retries=10 --setopt=timeout=60 --setopt=fastestmirror=True "$@"; then
+      return 0
+    fi
+    echo "::warning::dnf install: try $try of 4 failed; again in ${delay}s" >&2
+    sleep "$delay"
+    delay=$((delay * 2))
+  done
+  return 1
+}
 
 . /etc/os-release
 echo "--- $PRETTY_NAME, $(uname -m), $BACKEND"

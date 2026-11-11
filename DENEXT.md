@@ -13340,6 +13340,131 @@ where the changes are discussed.
      and the laufey hosts paragraph below cover items 297 to 342 and API 56.
      Node tests enabled: none, because this is documentation.
 
+344. **`ci(denext)`: the release tag gate requires a green build of the pinned
+     laufey's native hosts on every target** (`d21/ci-gaps`; CI;
+     `.github/denext-runtime/tag_gate.py`, `tag_gate_test.py`,
+     `.github/workflows/denext_runtime.yml`). `denext tests` never compiles
+     laufey's C++ backend hosts (the `laufey` crate `denort_desktop` builds
+     leaves `backend-common/*.h` out), so the full run of the commit that
+     pinned laufey's will-navigate code was green on every Windows leg, and
+     the MSVC error of item 333 surfaced only in the tag build. The gate now
+     also requires, for the tagged commit:
+     - an earlier `denext runtime` run of exactly that commit (a branch push or
+       a dispatch, never the tag build's own run) with a passed
+       `laufey / <target>` job for each of the six release targets, each of
+       which checked out the pinned `LAUFEY_SHA`. The laufey checkout step is
+       now named `Check out laufey <sha>`, so the gate reads which laufey a job
+       built from its steps: a dispatch with another `laufey_ref`, a partial
+       `targets` list, `reuse_laufey_run_id` or `cli_only` never vouches. This
+       is the build job that failed, so it is the one required; laufey's own CI
+       is not, as its native e2e suite fails on Windows too often to gate on;
+     - `LAUFEY_SHA` equal to the laufey `rev` in `cli/rt_desktop/Cargo.toml`.
+
+     The refusal names the command to run (`gh workflow run
+     denext_runtime.yml --ref <branch> -f targets=all` from a branch whose head
+     is the commit) and says the rest of that run may be cancelled once every
+     laufey job passed. Tests: `tag_gate_test.py`'s `Laufey` cases (the failed
+     Windows x64 host of item 333 is refused, a partial or other-laufey
+     dispatch does not vouch, the pin must match the crate and the workflow)
+     and the script cases against a stand-in `gh`. Before this change the
+     gate passed that scenario (`full_run=11`, exit 0); now it refuses it.
+     - User-facing note: none; release engineering only.
+     - Node tests enabled: none, because this is CI only.
+
+345. **`ci(denext)`: the test harness's own tests run in CI** (`d21/ci-gaps`;
+     CI; `.github/workflows/denext_tests_os.yml`). The lib tests of crate
+     `test_util` (`tests/util/lib`) ran in no CI job, so the tests behind items
+     316 and 319 (a timed-out command is killed with its process group,
+     including a grandchild that holds the output pipe; a flaky test's failure
+     output is the failed attempts') could rot unnoticed. `-p test_util` joins
+     the `Test libs` invocation (and its one-thread rerun and the macOS
+     LaunchServices run, which keep the same crate set) on every OS leg. Its 25
+     tests pass on macOS arm64 with the binary under a `target/` directory, as
+     in CI (`root_path()` looks for one; a target directory with another name
+     fails the two `builders` tests with `Option::unwrap()` on `None`). The
+     process-group tests are Unix-only (`#[cfg(all(test, unix))]`).
+     - User-facing note: none; CI only.
+     - Node tests enabled: none, because this is CI only.
+
+346. **`ci(denext)`: unit_node and node_compat run on macOS and Windows in CI**
+     (`d21/ci-gaps`; CI; `.github/workflows/denext_tests.yml`,
+     `denext_tests_os.yml`, `.github/denext-runtime/pick_runner.py`,
+     `pick_runner_test.py`, `.github/denext-tests/setup/action.yml`). Only the
+     Linux x64 leg ran them, so every node_compat entry enabled for macOS or
+     Windows in `tests/node_compat/config.jsonc` was checked on a workstation
+     only. Each macOS and Windows leg of a full run (`macos-15`,
+     `macos-15-intel`, `windows-2022`, `windows-11-arm`) now also runs
+     `unit_node` and `node_compat` in 2 shards against the leg's debug build
+     (a new `node_suites` input of `denext_tests_os.yml`; job names
+     `<leg> / test node_compat (1/2)` and so on, as on Linux).
+     - Where they run: our pool for the platform (`RUNNER_MACOS_ARM`,
+       `RUNNER_MACOS_X64`, `RUNNER_WINDOWS_X64`, `RUNNER_WINDOWS_ARM`) while it
+       has a free slot, else the leg's GitHub image. A `node-runner` job right
+       after the leg's build runs `pick_runner.py`: it counts the pool's
+       queued and running jobs in the repository (the leg's own node jobs, which
+       wait on it, left out; with `RUNNER_STATUS_TOKEN` also the organization's
+       busy runners) against its slots (`RUNNER_*_SLOTS`, by default mac-arm 2,
+       mac-x64 1, win-x64 1, win-arm64 2), gives the free slots to node_compat
+       (1/2), (2/2) and unit_node in that order and the rest to the image. On
+       any API failure every job keeps the pool; a fork's pull request always
+       gets the image; an unset variable means the image.
+     - The setup action: `libclang: 'false'` for these jobs (their test crates
+       need no bindgen), and on a Windows runner without rustup (the Windows x64
+       VM's image) it installs rustup-init from rustup's versioned archive,
+       pinned by SHA-256, with retries and a time bound.
+     - Tests: `pick_runner_test.py` (an idle pool, two slots, a busy pool, a
+       queued job, other pools' and finished jobs, this run's own waiting
+       jobs, another repository's busy runner, a fork PR, no variable, an API
+       failure, a malformed answer), run by the lint job; the matrix for each
+       leg was evaluated offline to the expected job lists.
+     - User-facing note: none; the macOS and Windows node_compat counts are
+       now checked in CI.
+     - Node tests enabled: none, because this runs the already enabled entries
+       on more OSes; it enables no new one.
+
+347. **`ci(denext)`: no package download can fail a CI job on one bad apt run;
+     the Linux jobs move to our Linux pool** (`d21/ci-gaps`; CI;
+     `.github/denext-runtime/apt_install.sh`, `apt_install_test.py`,
+     `pick_runner.py`, `plan_matrix.py`, `linux_sysroot.sh`,
+     `rpm_smoke_inner.sh`, `.github/denext-tests/setup/action.yml`,
+     `.github/workflows/denext_tests.yml`, `denext_tests_os.yml`,
+     `denext_runtime.yml`, `denext_npm_matrix.yml`). GitHub's Ubuntu images
+     failed `apt-get update` with DNS errors (exit 100), which failed the job.
+     - `apt_install.sh <package>...` replaces every inline `apt-get update` /
+       `install` (the setup action, the release workflow's laufey, denort,
+       denort bin, cli, package, e2e and rpm-smoke jobs, `linux_sysroot.sh`).
+       A package already installed is skipped, and with all present nothing is
+       fetched (our pool images carry them all). Otherwise apt runs with
+       `Acquire::Retries`, HTTP timeouts and a dpkg lock wait, each command
+       under `timeout`, up to four tries with a doubling backoff, and from the
+       third try the Ubuntu archive / security / ports sources point at a
+       fallback mirror (`archive.ubuntu.com`, then `mirrors.edge.kernel.org`).
+     - Homebrew (the laufey macOS leg) and Chocolatey (its Windows legs) get
+       the same: present formulas skipped, retries with a backoff, a time
+       bound; the WebView2 SDK and sysroot downloads retry every error with
+       timeouts; `dnf` in the clean Fedora container of the rpm smoke (which
+       must download) has its own retries and timeouts and is retried.
+     - Runners: the `ubuntu-22.04` test leg (build, libs, every test job) runs
+       on the Ubuntu 22.04 Linux pool (`RUNNER_LINUX_X64_2204`) while it has a
+       free slot and on GitHub's image for the overflow (`pick_runner.py`, now
+       also counting the Linux pools that share biscuits' slots,
+       `PICK_SHARED_LABELS`); the `lint / ubuntu-22.04` entry on that pool; the
+       laufey job's Linux x64 leg on that pool (`laufey_runner` in
+       `plan_matrix.py`); the npm matrix on the docker pool
+       (`RUNNER_LINUX_X64_DOCKER`). Each falls back to GitHub's image while its
+       variable is unset. The release build jobs (denort, cli: swap and a
+       release link that needs more memory than a pool container has) and the
+       Linux arm64 legs (no pool) stay on GitHub's images with the robust
+       install.
+     - Tests: `apt_install_test.py` (nothing fetched when installed, only the
+       missing packages, the retry and timeout options, a failed update
+       retried, the fallback mirrors on the third and fourth tries, giving up),
+       `pick_runner_test.py` (shared labels), `plan_matrix_test.py`
+       (`laufey_runner`). With one failed `apt-get update`, the old inline
+       commands exit 100; `apt_install.sh` retries and exits 0.
+     - User-facing note: none; CI only.
+     - Node tests enabled: none, because this is CI only.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

@@ -10,9 +10,10 @@
 # workflow with its scripts), by hand, and on a tag (path filters are not
 # evaluated for tags), which publishes only when a full `denext tests` run
 # (every OS leg, not a branch's Linux-only run) passed on the tagged commit,
-# no run of it failed, and it is on development-denext or rel/<version>
-# (.github/denext-runtime/tag_gate.py), and only from an annotated tag that
-# was never moved. See DENEXT.md.
+# no run of it failed, an earlier run of this workflow on it built the pinned
+# laufey's hosts green on every target, and it is on development-denext or
+# rel/<version> (.github/denext-runtime/tag_gate.py), and only from an
+# annotated tag that was never moved. See DENEXT.md.
 name: denext runtime
 
 on:
@@ -143,6 +144,7 @@ jobs:
             cli/Cargo.toml
             cli/lib/version.txt
             cli/lib/upstream_version.txt
+            cli/rt_desktop/Cargo.toml
             Cargo.lock
             .github/denext-runtime/tag_gate.py
             .github/denext-runtime/engine_staleness.py
@@ -166,6 +168,8 @@ jobs:
           # e2e_fork); they need a GUI login session. See plan_matrix.py.
           RUNNER_MACOS_ARM_GUI: ${{ vars.RUNNER_MACOS_ARM_GUI }}
           RUNNER_MACOS_X64_GUI: ${{ vars.RUNNER_MACOS_X64_GUI }}
+          # The laufey job's Linux x64 leg (`laufey_runner`).
+          RUNNER_LINUX_X64_2204: ${{ vars.RUNNER_LINUX_X64_2204 }}
         run: |
           set -euo pipefail
           # The fork's own version (DENEXT.md "Versioning": 3.0.0-denext.N, ...),
@@ -240,9 +244,14 @@ jobs:
             # A release needs a green FULL `denext tests` run (lint, libs,
             # unit, specs on every OS leg, Windows arm64 included) of exactly
             # the tagged commit, no failed run or attempt of it at all (a
-            # re-run that passes does not clear one), and the commit on
-            # development-denext or rel/<version>. See tag_gate.py.
+            # re-run that passes does not clear one), the commit on
+            # development-denext or rel/<version>, LAUFEY_SHA equal to
+            # cli/rt_desktop/Cargo.toml's laufey rev, and an earlier
+            # `denext runtime` run of the commit (not this one) that built
+            # that laufey's native hosts green on every target (the
+            # `laufey / <target>` jobs). See tag_gate.py.
             if ! gate=$(REPO="$REPO" SHA="$SHA" VERSION="$version" \
+              LAUFEY_SHA="$LAUFEY_SHA" RUN_ID="$GITHUB_RUN_ID" \
               python3 -I .github/denext-runtime/tag_gate.py); then
               echo "$gate"
               echo "::error::the tag gate refused $SHA (see above)"
@@ -311,9 +320,12 @@ jobs:
     name: laufey / ${{ matrix.target }}
     needs: setup
     if: ${{ !inputs.reuse_laufey_run_id && !inputs.cli_only }}
-    # Stays on GitHub's image: its macOS leg `brew install`s llvm and ninja,
-    # which the self-hosted images do not have.
-    runs-on: ${{ matrix.os }}
+    # matrix.laufey_runner (plan_matrix.py): the Ubuntu 22.04 Linux pool for
+    # x86_64-unknown-linux-gnu (RUNNER_LINUX_X64_2204; its image carries every
+    # package below, so nothing is fetched), GitHub's image for the rest: the
+    # macOS leg `brew install`s llvm and ninja and the Windows legs use
+    # Chocolatey, which the self-hosted images do not have.
+    runs-on: ${{ matrix.laufey_runner || matrix.os }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -323,7 +335,11 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The step's name carries the commit: tag_gate.py reads it from the
+      # job's steps to know which laufey a green `laufey / <target>` job
+      # built (keep the "Check out laufey <sha>" form, LAUFEY_STEP).
+      - name: Check out laufey ${{ needs.setup.outputs.laufey_sha }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ env.LAUFEY_REPOSITORY }}
           ref: ${{ needs.setup.outputs.laufey_sha }}
@@ -354,10 +370,10 @@ jobs:
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          # man-db triggers can take minutes on hosted runners.
-          sudo apt-get -qq remove --purge -y man-db >/dev/null 2>&1 || true
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build pkg-config \
+          # Retries, timeouts and a fallback mirror; nothing fetched where
+          # the image has the packages (apt_install.sh). Recommends kept, as
+          # before.
+          bash denext-ci/.github/denext-runtime/apt_install.sh --with-recommends cmake ninja-build pkg-config \
             libwebkit2gtk-4.1-dev libgtk-3-dev \
             libx11-dev libxi-dev libglib2.0-dev libnss3-dev libnspr4-dev \
             libatk1.0-dev libatk-bridge2.0-dev libcups2-dev libdrm-dev \
@@ -374,20 +390,47 @@ jobs:
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install llvm ninja
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+          HOMEBREW_NO_INSTALL_CLEANUP: '1'
+          HOMEBREW_NO_ANALYTICS: '1'
+        run: |
+          # What the image has already is not fetched again; the rest with
+          # retries, a backoff and a time bound (perl's alarm: macOS has no
+          # timeout(1)).
+          missing=()
+          for f in llvm ninja; do brew list --versions "$f" >/dev/null 2>&1 || missing+=("$f"); done
+          if [ "${#missing[@]}" -eq 0 ]; then echo "llvm and ninja are installed"; exit 0; fi
+          delay=15
+          for try in 1 2 3 4; do
+            if perl -e 'alarm shift; exec @ARGV' 1200 brew install "${missing[@]}"; then exit 0; fi
+            echo "::warning::brew install ${missing[*]}: try $try of 4 failed; again in ${delay}s"
+            sleep "$delay"; delay=$((delay * 2))
+          done
+          echo "::error::brew could not install ${missing[*]}"; exit 1
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         working-directory: laufey
         run: |
           # Pinned versions (the community packages carry their downloads' checksums).
-          choco install make --version=4.4.1 -y --no-progress
-          choco install ninja --version=1.13.2 -y --no-progress
+          # With retries, a backoff and choco's own time bound.
+          choco_install() {
+            local delay=15 try
+            for try in 1 2 3 4; do
+              if choco install "$@" -y --no-progress --execution-timeout 900; then return 0; fi
+              echo "::warning::choco install $1: try $try of 4 failed; again in ${delay}s"
+              sleep "$delay"; delay=$((delay * 2))
+            done
+            echo "::error::choco could not install $1"; return 1
+          }
+          choco_install make --version=4.4.1
+          choco_install ninja --version=1.13.2
           # The WebView2 SDK at a pinned version, checked against its
           # SHA-256 before use (nuget.org's flat container; the .nupkg is a zip).
           WV2_VERSION=1.0.4258.31
           WV2_SHA256=56f7f4b8bf9aee4b8efefbbdd4f67d5f74ebd1b100ed0806da71bf76af481aa9
-          curl -fsSL --retry 3 -o wv2.zip "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$WV2_VERSION/microsoft.web.webview2.$WV2_VERSION.nupkg"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 20 --max-time 600 -o wv2.zip "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$WV2_VERSION/microsoft.web.webview2.$WV2_VERSION.nupkg"
           echo "$WV2_SHA256  wv2.zip" | sha256sum -c -
           powershell -NoProfile -Command "Expand-Archive -Path wv2.zip -DestinationPath packages/Microsoft.Web.WebView2.$WV2_VERSION"
           rm wv2.zip
@@ -596,10 +639,9 @@ jobs:
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          # man-db triggers can take minutes on hosted runners.
-          sudo apt-get -qq remove --purge -y man-db >/dev/null 2>&1 || true
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libclang-dev cmake
+          # Retries, timeouts and a fallback mirror; nothing fetched where
+          # the image has the packages (apt_install.sh).
+          bash .github/denext-runtime/apt_install.sh libclang-dev cmake
 
       - name: libclang (Windows)
         if: runner.os == 'Windows'
@@ -894,10 +936,9 @@ jobs:
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          # man-db triggers can take minutes on hosted runners.
-          sudo apt-get -qq remove --purge -y man-db >/dev/null 2>&1 || true
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libclang-dev cmake
+          # Retries, timeouts and a fallback mirror; nothing fetched where
+          # the image has the packages (apt_install.sh).
+          bash .github/denext-runtime/apt_install.sh libclang-dev cmake
 
       - name: libclang (Windows)
         if: runner.os == 'Windows'
@@ -1155,10 +1196,9 @@ jobs:
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          # man-db triggers can take minutes on hosted runners.
-          sudo apt-get -qq remove --purge -y man-db >/dev/null 2>&1 || true
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libclang-dev cmake
+          # Retries, timeouts and a fallback mirror; nothing fetched where
+          # the image has the packages (apt_install.sh).
+          bash .github/denext-runtime/apt_install.sh libclang-dev cmake
 
       - name: libclang (Windows)
         if: runner.os == 'Windows'
@@ -1556,10 +1596,9 @@ jobs:
       - name: Install runtime dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          # man-db triggers can take minutes on hosted runners.
-          sudo apt-get -qq remove --purge -y man-db >/dev/null 2>&1 || true
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xvfb xauth dbus dbus-x11 \
+          # Retries, timeouts and a fallback mirror; nothing fetched where
+          # the image has the packages (apt_install.sh).
+          bash .github/denext-runtime/apt_install.sh xvfb xauth dbus dbus-x11 \
             libwebkit2gtk-4.1-0 libgtk-3-0 libnss3 libnspr4 libatk1.0-0 \
             libatk-bridge2.0-0 libcups2 libdrm2 libgbm1 libasound2 libpango-1.0-0 \
             libcairo2 libxcomposite1 libxdamage1 libxrandr2 libxkbcommon0 libxi6 \
@@ -1889,10 +1928,9 @@ jobs:
       - name: Install runtime dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          # man-db triggers can take minutes on hosted runners.
-          sudo apt-get -qq remove --purge -y man-db >/dev/null 2>&1 || true
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xvfb xauth dbus dbus-x11 \
+          # Retries, timeouts and a fallback mirror; nothing fetched where
+          # the image has the packages (apt_install.sh).
+          bash .github/denext-runtime/apt_install.sh xvfb xauth dbus dbus-x11 \
             libwebkit2gtk-4.1-0 libgtk-3-0 libnss3 libnspr4 libatk1.0-0 \
             libatk-bridge2.0-0 libcups2 libdrm2 libgbm1 libasound2 libpango-1.0-0 \
             libcairo2 libxcomposite1 libxdamage1 libxrandr2 libxkbcommon0 libxi6 \
@@ -1980,7 +2018,7 @@ jobs:
         with:
           deno-version: ${{ env.STOCK_DENO_VERSION }}
       - name: Install rpmbuild
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm file
+        run: bash .github/denext-runtime/apt_install.sh rpm file
       - name: Package and install (webview)
         env:
           BACKEND: webview
