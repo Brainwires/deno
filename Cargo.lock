@@ -2148,7 +2148,7 @@ dependencies = [
 
 [[package]]
 name = "deno"
-version = "3.0.0-denext.19"
+version = "3.0.0-denext.20"
 dependencies = [
  "anstream",
  "ar_archive_writer",
@@ -4070,7 +4070,7 @@ dependencies = [
 
 [[package]]
 name = "denort"
-version = "3.0.0-denext.19"
+version = "3.0.0-denext.20"
 dependencies = [
  "async-trait",
  "bincode",
@@ -6847,7 +6847,7 @@ dependencies = [
 [[package]]
 name = "laufey"
 version = "0.8.0"
-source = "git+https://github.com/Brainwires/laufey?rev=3dfcea49fc4396419ec5c02897e5fb396dd59b8a#3dfcea49fc4396419ec5c02897e5fb396dd59b8a"
+source = "git+https://github.com/Brainwires/laufey?rev=50a2fcaf00d3656de1d88215dca5cf7f698979a1#50a2fcaf00d3656de1d88215dca5cf7f698979a1"
 dependencies = [
  "bindgen 0.72.1",
  "tokio",

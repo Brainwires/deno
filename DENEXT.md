@@ -13082,6 +13082,23 @@ where the changes are discussed.
      - Node tests enabled: none, because this is the JavaScript engine's patch
        level, not a Node API.
 
+333. **`fix(desktop)`: laufey's new will-navigate and hit-region code builds
+     with MSVC; the version is 3.0.0-denext.20** (laufey `50a2fca`;
+     `cli/rt_desktop/Cargo.toml`, `Cargo.lock`,
+     `.github/workflows/denext_runtime.yml`, `cli/lib/version.txt`,
+     `cli/Cargo.toml`, `cli/rt/Cargo.toml`). The
+     `denext-runtime-v3.0.0-denext.19` tag build failed in
+     `laufey / x86_64-pc-windows-msvc`: `laufey_will_navigate.h` (item 327)
+     wrote `Clock::time_point::max()`, which `<windows.h>`'s `max` macro breaks
+     under MSVC (C2589). laufey now writes `(Clock::time_point::max)()`, and
+     `overlay.cc`'s new clamp uses `(std::max)` / `(std::min)`. Tags are never
+     moved or reused, so 3.0.0-denext.19 was never published, and this train
+     ships as 3.0.0-denext.20. Before the new tag, the release workflow was
+     dispatched for the Windows targets to prove the build.
+     - User-facing note: none beyond the train's other items; runtime
+       3.0.0-denext.19 does not exist as a release.
+     - Node tests enabled: none, because this is a desktop host build fix.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
