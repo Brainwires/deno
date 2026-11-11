@@ -1222,6 +1222,13 @@
         }
       }]
     },
+    "node": {
+      "description": "The Node.js major version the project targets. The Node.js APIs report it through `process.version`, `process.versions.node` and `process.release`; behavior stays the runtime's current Node.js version.",
+      "oneOf": [
+        { "type": "string", "enum": ["20", "22", "24", "26"] },
+        { "type": "integer", "enum": [20, 22, 24, 26] }
+      ]
+    },
     "nodeModulesDir": {
       "oneOf": [
         {

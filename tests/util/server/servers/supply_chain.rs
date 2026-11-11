@@ -6,11 +6,13 @@
 //! - OSV (`POST /v1/querybatch`): a version is malicious (an `MAL-` advisory)
 //!   when its package name contains `malicious` and the version starts with
 //!   `2.`; a name containing `vulnerable` gets a non-`MAL` advisory (which the
-//!   gate ignores); everything else is clean.
+//!   gate ignores); a name containing `paged-advisories` gets its advisories
+//!   over three pages (`next_page_token`), the `MAL-` one, for a `2.`
+//!   version, on the last; everything else is clean.
 //! - npm's downloads API (`GET /downloads/point/last-week/<name>`): a name
 //!   containing `unpopular` has 12 weekly downloads, `modest` 5000, one
-//!   containing `unknown-downloads` has no count (404); everything else
-//!   1000000.
+//!   containing `unknown-downloads` has no count (404), and `@denotest/chalkk`
+//!   (one edit from `chalk`) 7; everything else 1000000.
 //!
 //! Under `/down/` both answer 503 (an unreachable service).
 
@@ -82,6 +84,24 @@ async fn handler(
         if q["package"]["ecosystem"] != "npm" {
           return json!({});
         }
+        if name.contains("paged-advisories") {
+          let vuln =
+            |id: &str| json!({ "id": id, "modified": "2026-01-01T00:00:00Z" });
+          return match q["page_token"].as_str() {
+            None => json!({
+              "vulns": [vuln("GHSA-2222-2222-2222")],
+              "next_page_token": "page-2",
+            }),
+            Some("page-2") => json!({
+              "vulns": [vuln("GHSA-3333-3333-3333")],
+              "next_page_token": "page-3",
+            }),
+            Some(_) if version.starts_with("2.") => {
+              json!({ "vulns": [vuln("MAL-2026-0002")] })
+            }
+            Some(_) => json!({}),
+          };
+        }
         if name.contains("malicious") && version.starts_with("2.") {
           json!({ "vulns": [
             { "id": "GHSA-0000-0000-0000", "modified": "2026-01-01T00:00:00Z" },
@@ -115,6 +135,8 @@ async fn handler(
     }
     let downloads = if name.contains("unpopular") {
       12
+    } else if name == "@denotest/chalkk" {
+      7
     } else if name.contains("modest") {
       5000
     } else {

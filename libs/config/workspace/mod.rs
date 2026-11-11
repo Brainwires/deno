@@ -658,6 +658,12 @@ impl Workspace {
       .or_else(|| self.root_pkg_json()?.deno_condition.as_ref())
   }
 
+  /// denext: the project's `"node"` setting (the Node.js major it targets),
+  /// from the root deno.json.
+  pub fn node_version_setting(&self) -> Option<&serde_json::Value> {
+    self.root_deno_json().and_then(|c| c.json.node.as_ref())
+  }
+
   /// Returns the `patchedDependencies` configured in the workspace root
   /// `deno.json` and/or `package.json`, mapping a `<name>@<version>` to the
   /// absolute path of the unified diff to apply after the npm package is

@@ -1878,6 +1878,7 @@ pub async fn run_with_options(
     // denext (DENEXT.md item 189): a compiled program's flags are baked in;
     // `process.execArgv` stays empty, as upstream's.
     exec_argv: Vec::new(),
+    node_major: None,
     node_debug: std::env::var("NODE_DEBUG").ok(),
     node_cluster_unique_id: std::env::var("NODE_UNIQUE_ID").ok(),
     node_cluster_sched_policy: std::env::var("NODE_CLUSTER_SCHED_POLICY").ok(),

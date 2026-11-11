@@ -91,6 +91,19 @@ function createHttpClient(options) {
       proxy.transport = "http";
     }
   }
+  if (ObjectHasOwn(options, "userAgent")) {
+    const userAgent = options.userAgent;
+    delete options.userAgent;
+    if (userAgent === false || userAgent === null) {
+      options.omitUserAgent = true;
+    } else if (typeof userAgent === "string") {
+      options.userAgent = userAgent;
+    } else if (userAgent !== undefined) {
+      throw new TypeError(
+        "Invalid value for 'userAgent' option: expected a string, 'false' or 'null'",
+      );
+    }
+  }
   let cookieJar;
   let ownsCookieJar = false;
   if (options.cookieJar !== undefined && options.cookieJar !== false) {

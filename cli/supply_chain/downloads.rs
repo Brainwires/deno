@@ -113,6 +113,15 @@ fn confirm(question: &str) -> bool {
   read.is_ok() && matches!(line.trim(), "y" | "Y" | "yes" | "Yes" | "YES")
 }
 
+/// Why a package is being checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+  /// Named on the `deno add` command line.
+  Added,
+  /// A dependency the added packages bring in (DENEXT.md R11a).
+  Dependency,
+}
+
 /// Runs the gate over the npm packages `deno add` is about to add. An error
 /// refuses the add (nothing has been written yet).
 pub async fn check_added_packages(
@@ -123,49 +132,153 @@ pub async fn check_added_packages(
   packages: &[AddedNpmPackage],
   is_in_lockfile: impl Fn(&str) -> bool,
 ) -> Result<(), AnyError> {
+  let names = packages
+    .iter()
+    .filter(|p| !is_in_lockfile(&p.name))
+    .map(|p| p.name.clone())
+    .collect::<Vec<_>>();
+  check_names(
+    http_client_provider,
+    npmrc,
+    config,
+    options.allow_flag,
+    &names,
+    Origin::Added,
+  )
+  .await
+}
+
+/// What `deno add` arms for the install that follows it: the dependencies
+/// the install resolves get the same check (DENEXT.md R11a).
+#[derive(Debug, Clone, Default)]
+pub struct DependencyCheck {
+  /// Names not to check: those the lockfile already had, and the added
+  /// packages themselves (checked before anything was written).
+  pub known: std::collections::HashSet<String>,
+  /// `--allow-low-downloads`.
+  pub allow_flag: Option<Vec<String>>,
+}
+
+static DEPENDENCY_CHECK: std::sync::Mutex<Option<DependencyCheck>> =
+  std::sync::Mutex::new(None);
+
+/// Arms (or, with `None`, disarms) the check of the dependencies the next
+/// install resolves.
+pub fn set_dependency_check(check: Option<DependencyCheck>) {
+  *DEPENDENCY_CHECK.lock().unwrap_or_else(|e| e.into_inner()) = check;
+}
+
+/// Runs the armed dependency check over packages an install is about to
+/// install; a no-op when `deno add` armed none. Checked names are added to
+/// `known`, so a later resolution in the same install skips them.
+pub async fn check_dependencies(
+  http_client_provider: &HttpClientProvider,
+  npmrc: &ResolvedNpmRc,
+  names: impl IntoIterator<Item = String>,
+) -> Result<(), AnyError> {
+  let (names, allow_flag) = {
+    let mut guard = DEPENDENCY_CHECK.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(check) = guard.as_mut() else {
+      return Ok(());
+    };
+    let mut out = Vec::new();
+    for name in names {
+      if check.known.insert(name.clone()) {
+        out.push(name);
+      }
+    }
+    (out, check.allow_flag.clone())
+  };
+  if names.is_empty() {
+    return Ok(());
+  }
+  check_names(
+    http_client_provider,
+    npmrc,
+    &npmrc.supply_chain,
+    allow_flag.as_deref(),
+    &names,
+    Origin::Dependency,
+  )
+  .await
+}
+
+/// How many download counts are fetched at once.
+const CONCURRENT_REQUESTS: usize = 8;
+
+async fn check_names(
+  http_client_provider: &HttpClientProvider,
+  npmrc: &ResolvedNpmRc,
+  config: &SupplyChainConfig,
+  allow_flag: Option<&[String]>,
+  names: &[String],
+  origin: Origin,
+) -> Result<(), AnyError> {
+  use deno_core::futures::StreamExt;
+
   let mode = config.low_download_check;
   if config.low_download_threshold == 0 || mode == LowDownloadCheck::Off {
     return Ok(());
   }
-  let allow_all = options.allow_flag.is_some_and(|names| names.is_empty());
+  let allow_all = allow_flag.is_some_and(|names| names.is_empty());
   if allow_all && config.paranoid {
     bail!(
       "paranoid is on: --allow-low-downloads needs the packages it allows (--allow-low-downloads=<name>,...)"
     );
   }
+  if allow_all {
+    return Ok(());
+  }
   let threshold = config.low_download_threshold;
-  for package in packages {
-    let name = package.name.as_str();
-    if allow_all
-      || options
-        .allow_flag
-        .is_some_and(|names| names.iter().any(|n| n == name))
-      || config.is_allowed_unpopular(name)
-      || is_in_lockfile(name)
-      || !is_checked_registry(npmrc, name)
-    {
-      continue;
-    }
-    let count = match weekly_downloads(http_client_provider, name).await {
-      Ok(count) => count,
-      Err(err) => {
-        log::debug!("Could not get the download count of {name}: {err:#}");
-        None
+  let to_check = names
+    .iter()
+    .filter(|name| {
+      !allow_flag.is_some_and(|names| names.iter().any(|n| n == *name))
+        && !config.is_allowed_unpopular(name)
+        && is_checked_registry(npmrc, name)
+    })
+    .collect::<Vec<_>>();
+  let counts = deno_core::futures::stream::iter(to_check)
+    .map(|name| async move {
+      let count = match weekly_downloads(http_client_provider, name).await {
+        Ok(count) => count,
+        Err(err) => {
+          log::debug!("Could not get the download count of {name}: {err:#}");
+          None
+        }
+      };
+      (name, count)
+    })
+    .buffered(CONCURRENT_REQUESTS)
+    .collect::<Vec<_>>()
+    .await;
+  for (name, count) in counts {
+    let name = name.as_str();
+    let subject = match origin {
+      Origin::Added => format!("npm:{name}"),
+      Origin::Dependency => {
+        format!("npm:{name} (a dependency of the packages being added)")
       }
     };
     let reason = match count {
       Some(count) if count >= threshold => continue,
       Some(count) => {
         format!(
-          "npm:{name} has {count} weekly downloads (fewer than {threshold})"
+          "{subject} has {count} weekly downloads (fewer than {threshold})"
         )
       }
       None if mode == LowDownloadCheck::Required => format!(
-        "The weekly downloads of npm:{name} are unknown (low-download-check=required, or paranoid, refuses unknown counts)"
+        "The weekly downloads of {subject} are unknown (low-download-check=required, or paranoid, refuses unknown counts)"
       ),
       None => continue,
     };
-    let hint = "It may be a typosquat of a popular package: check the name.";
+    let hint = match super::popular_names::did_you_mean(name) {
+      Some(popular) => format!(
+        "It may be a typosquat of a popular package: did you mean npm:{popular}?"
+      ),
+      None => "It may be a typosquat of a popular package: check the name."
+        .to_string(),
+    };
     let allow = format!(
       "--allow-low-downloads=npm:{name}, or list it in allowed-unpopular-packages (.npmrc) or \"supplyChain\": {{ \"allowLowDownloads\": [\"{name}\"] }} (deno.json)"
     );
@@ -178,11 +291,20 @@ pub async fn check_added_packages(
     }
     if is_interactive() {
       log::warn!("{} {reason}. {hint}", colors::yellow("Warning"));
-      if confirm(&format!("Add npm:{name} anyway?")) {
+      let question = match origin {
+        Origin::Added => format!("Add npm:{name} anyway?"),
+        Origin::Dependency => format!("Install npm:{name} anyway?"),
+      };
+      if confirm(&question) {
         continue;
       }
       super::mark_gate_refused();
-      bail!("Did not add npm:{name}.");
+      match origin {
+        Origin::Added => bail!("Did not add npm:{name}."),
+        Origin::Dependency => {
+          bail!("Did not add the packages: they depend on npm:{name}.")
+        }
+      }
     }
     super::mark_gate_refused();
     bail!("{reason}. {hint}\nTo add it anyway, pass {allow}.");

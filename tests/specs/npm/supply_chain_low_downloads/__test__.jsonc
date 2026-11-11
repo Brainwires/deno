@@ -117,6 +117,40 @@
       "output": "refused_unknown.out",
       "exitCode": 1
     },
+    // R11a: a dependency the added package brings in is checked too: a
+    // warning by default, refused under prompt (deno.json put back), and
+    // allowed by name
+    "dependency_warns": {
+      "cwd": "add",
+      "args": "add npm:@denotest/with-rare-dep@1.0.0",
+      "output": "warned_dependency.out"
+    },
+    "dependency_refused_under_prompt": {
+      "steps": [
+        {
+          "cwd": "prompt",
+          "args": "add npm:@denotest/with-rare-dep@1.0.0",
+          "output": "refused_dependency.out",
+          "exitCode": 1
+        },
+        {
+          "cwd": "prompt",
+          "args": "eval console.log(Deno.readTextFileSync('deno.json').trim())",
+          "output": "{}\n"
+        }
+      ]
+    },
+    "dependency_allowed_by_name": {
+      "cwd": "prompt",
+      "args": "add --allow-low-downloads=npm:@denotest/unpopular-pkg npm:@denotest/with-rare-dep@1.0.0",
+      "output": "added_dependency.out"
+    },
+    // R11a: a name close to a widely used package is named with it
+    "did_you_mean": {
+      "cwd": "add",
+      "args": "add npm:@denotest/chalkk@1.0.0",
+      "output": "warned_did_you_mean.out"
+    },
     // a registry other than npmjs.org (here, the test registry without the
     // downloads API override) has no public counts: not checked
     "other_registry_not_checked": {

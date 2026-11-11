@@ -157,11 +157,44 @@ pub const BUILTIN_EXCEPTIONS: &[BuiltinException] = &[
 /// Download hosts packages declare for themselves (node-pre-gyp's
 /// `binary.host`) that are reviewed: honoured as if the project listed them
 /// under `jailScripts.knownPackages` (DENEXT.md item 124).
+///
+/// The GitHub-hosted ones (`binary.host` on github.com, which only their
+/// older versions declare: bcrypt 5, argon2 before 0.28) also get the hosts
+/// GitHub redirects a release download to ([`DECLARED_HOST_REDIRECTS`]).
 pub const BUILTIN_KNOWN_PACKAGES: &[(&str, &[&str])] = &[
+  ("@discordjs/opus", &["github.com"]),
+  ("argon2", &["github.com"]),
+  ("bcrypt", &["github.com"]),
   ("grpc", &["node-precompiled-binaries.grpc.io"]),
+  ("libxmljs", &["github.com"]),
   ("nodegit", &["axonodegit.s3.amazonaws.com"]),
   ("wrtc", &["node-webrtc.s3.amazonaws.com"]),
 ];
+
+/// Hosts a declared download host hands its downloads off to: a script
+/// allowed the declared host also gets these, as a download from it
+/// fails without them.
+pub const DECLARED_HOST_REDIRECTS: &[(&str, &[&str])] = &[(
+  "github.com",
+  &[
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+  ],
+)];
+
+/// The hosts a declared download host (`host`, any port) redirects to.
+pub fn declared_host_redirects(host: &str) -> &'static [&'static str] {
+  let name = match host.rsplit_once(':') {
+    Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => name,
+    _ => host,
+  };
+  let name = name.trim_end_matches('.');
+  DECLARED_HOST_REDIRECTS
+    .iter()
+    .find(|(h, _)| h.eq_ignore_ascii_case(name))
+    .map(|(_, hosts)| *hosts)
+    .unwrap_or_default()
+}
 
 /// The built-in exception of a package.
 pub fn builtin_exception(name: &str) -> Option<&'static BuiltinException> {
@@ -227,5 +260,23 @@ mod tests {
       ["node-precompiled-binaries.grpc.io"]
     );
     assert!(builtin_known_hosts("sharp").is_empty());
+  }
+
+  #[test]
+  fn known_packages_sorted_and_github_redirects() {
+    for pair in BUILTIN_KNOWN_PACKAGES.windows(2) {
+      assert!(pair[0].0 < pair[1].0, "{} / {}", pair[0].0, pair[1].0);
+    }
+    for name in ["@discordjs/opus", "argon2", "bcrypt", "libxmljs"] {
+      assert_eq!(builtin_known_hosts(name), ["github.com"], "{name}");
+      assert!(builtin_exception(name).is_none(), "{name}");
+    }
+    let redirects = [
+      "objects.githubusercontent.com",
+      "release-assets.githubusercontent.com",
+    ];
+    assert_eq!(declared_host_redirects("github.com"), redirects);
+    assert_eq!(declared_host_redirects("GitHub.com.:443"), redirects);
+    assert!(declared_host_redirects("example.com").is_empty());
   }
 }

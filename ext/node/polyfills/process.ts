@@ -14,6 +14,7 @@ const { format } = core.loadExtScript(
 );
 import {
   op_bootstrap_exec_argv,
+  op_bootstrap_node_version,
   op_current_thread_cpu_usage,
   op_env,
   op_fs_umask,
@@ -93,9 +94,14 @@ const {
   cwd,
   env,
   nextTick: _nextTick,
-  version,
+  version: defaultVersion,
   versions,
 } = core.loadExtScript("ext:deno_node/_process/process.ts");
+// denext: replaced in `__bootstrapNodeProcess` when the project chose a Node
+// major (`"node"` in deno.json); the `version` export is a live binding.
+let version = defaultVersion;
+// The chosen line's LTS codename, for `process.release.lts`.
+let releaseLts: string | undefined;
 const { _exiting } = core.loadExtScript("ext:deno_node/_process/exiting.ts");
 export { _nextTick as nextTick, chdir, cwd, env, version, versions };
 // Lazily load the stream/tty machinery. Static imports here would pin
@@ -1406,6 +1412,7 @@ ObjectDefineProperty(process, "release", {
   get() {
     return {
       name: "node",
+      ...(releaseLts === undefined ? {} : { lts: releaseLts }),
       sourceUrl:
         `https://nodejs.org/download/release/${version}/node-${version}.tar.gz`,
       headersUrl:
@@ -2328,6 +2335,14 @@ internals.__bootstrapNodeProcess = function (
       0,
       ...new SafeArrayIterator(op_bootstrap_exec_argv()),
     );
+    // denext: the Node major the project chose (`"node"` in deno.json).
+    const nodeVersion = op_bootstrap_node_version();
+    if (nodeVersion.length > 0) {
+      version = `v${nodeVersion[0]}`;
+      versions.node = nodeVersion[0];
+      process.version = version;
+      releaseLts = nodeVersion[1];
+    }
     argv[0] = Deno.execPath();
     argv[1] = mainModuleArgv();
     // Manually concatenate these arrays to avoid triggering the getter

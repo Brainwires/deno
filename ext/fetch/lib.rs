@@ -1176,6 +1176,13 @@ pub struct CreateHttpClientArgs {
   local_address: Option<String>,
   http2_max_header_list_size: Option<u32>,
   cookie_jar_rid: Option<u32>,
+  /// Replaces the default `User-Agent` this client adds when a request sets
+  /// none. Normalized by `createHttpClient()` from `userAgent: "<string>"`.
+  user_agent: Option<String>,
+  /// Set by `createHttpClient()` from `userAgent: false` (or `null`): the
+  /// client adds no `User-Agent` when a request sets none.
+  #[from_v8(default)]
+  omit_user_agent: bool,
 }
 
 #[op2(stack_trace)]
@@ -1255,7 +1262,17 @@ pub fn op_fetch_custom_client(
     .map(|cert| cert.into_bytes())
     .collect::<Vec<_>>();
 
-  let client = create_http_client(
+  let user_agent_override = if args.omit_user_agent {
+    Some(None)
+  } else if let Some(user_agent) = args.user_agent {
+    Some(Some(user_agent.parse::<HeaderValue>().map_err(|_| {
+      HttpClientCreateError::InvalidUserAgent(user_agent)
+    })?))
+  } else {
+    None
+  };
+
+  let mut client = create_http_client(
     &options.user_agent,
     CreateHttpClientOptions {
       root_cert_store: options
@@ -1289,6 +1306,9 @@ pub fn op_fetch_custom_client(
       connect_timeout: None,
     },
   )?;
+  if let Some(user_agent) = user_agent_override {
+    client.set_default_user_agent(user_agent);
+  }
 
   let rid = state.resource_table.add(HttpClientResource::new(
     client,
@@ -1545,7 +1565,7 @@ pub fn create_http_client(
   Ok(Client {
     inner: decompress,
     connector,
-    user_agent,
+    user_agent: Some(user_agent),
   })
 }
 
@@ -1558,7 +1578,8 @@ pub fn op_utf8_to_byte_string(#[string] input: String) -> ByteString {
 pub struct Client {
   inner: DecompressionService<FetchClient>,
   connector: Connector,
-  user_agent: HeaderValue,
+  /// The `User-Agent` added to a request that sets none; `None` adds none.
+  user_agent: Option<HeaderValue>,
 }
 
 type FetchClient = retry::Retry<
@@ -1873,12 +1894,20 @@ impl CommonRequest for http::request::Builder {
 }
 
 impl Client {
+  /// Replaces the `User-Agent` added to requests that set none (`None`
+  /// omits it). A `User-Agent` header the request sets itself still wins.
+  pub fn set_default_user_agent(&mut self, user_agent: Option<HeaderValue>) {
+    self.user_agent = user_agent;
+  }
+
   /// Injects common headers like User-Agent and Proxy-Authorization.
   pub fn inject_common_headers(&self, req: &mut impl CommonRequest) {
-    req
-      .headers_mut()
-      .entry(USER_AGENT)
-      .or_insert_with(|| self.user_agent.clone());
+    if let Some(user_agent) = &self.user_agent {
+      req
+        .headers_mut()
+        .entry(USER_AGENT)
+        .or_insert_with(|| user_agent.clone());
+    }
 
     if let Some(auth) = self.connector.proxies.http_forward_auth(req.uri()) {
       req.headers_mut().insert(PROXY_AUTHORIZATION, auth.clone());

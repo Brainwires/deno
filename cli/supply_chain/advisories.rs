@@ -44,11 +44,17 @@ const CACHE_TTL_ENV_VAR: &str = "DENO_OSV_CACHE_TTL";
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// OSV accepts up to 1000 queries per batch.
 const BATCH_SIZE: usize = 500;
+/// The most pages read for one version's advisories (1000 each) before the
+/// check gives up as if OSV were unreachable.
+const MAX_PAGES: usize = 50;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub struct OsvInstallGate {
   http_client_provider: Arc<HttpClientProvider>,
+  /// For the low-download check `deno add` arms over the dependencies an
+  /// install resolves (see [`super::downloads::set_dependency_check`]).
+  npmrc: Arc<deno_npmrc::ResolvedNpmRc>,
   mode: AdvisoryCheck,
   cache_path: Option<PathBuf>,
   /// `--cached-only`: no network
@@ -74,6 +80,10 @@ struct QueryBatchResponse {
 struct QueryResult {
   #[serde(default)]
   vulns: Vec<QueryVuln>,
+  /// Set when OSV has more advisories for the query than one page holds
+  /// (1000): the same query with this `page_token` gets the next page.
+  #[serde(default)]
+  next_page_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -106,12 +116,14 @@ fn cache_ttl() -> Duration {
 impl OsvInstallGate {
   pub fn new(
     http_client_provider: Arc<HttpClientProvider>,
+    npmrc: Arc<deno_npmrc::ResolvedNpmRc>,
     mode: AdvisoryCheck,
     cache_path: Option<PathBuf>,
     offline: bool,
   ) -> Self {
     Self {
       http_client_provider,
+      npmrc,
       mode,
       cache_path,
       offline,
@@ -157,7 +169,8 @@ impl OsvInstallGate {
     }
   }
 
-  /// Queries OSV for `packages`; returns the malicious ones.
+  /// Queries OSV for `packages`; returns the malicious ones. A version with
+  /// more advisories than one page holds is queried again, page by page.
   pub async fn query(
     &self,
     packages: &[PackageNv],
@@ -165,50 +178,85 @@ impl OsvInstallGate {
     let base = super::service_url_from_env(OSV_URL_ENV_VAR, OSV_DEFAULT_URL);
     let url = base.join("v1/querybatch")?;
     let client = self.http_client_provider.get_or_create()?;
-    let mut malicious = Vec::new();
-    for chunk in packages.chunks(BATCH_SIZE) {
-      let body = json!({
-        "queries": chunk.iter().map(|nv| json!({
-          "package": { "ecosystem": "npm", "name": nv.name.as_str() },
-          "version": nv.version.to_string(),
-        })).collect::<Vec<_>>(),
-      });
-      let request = client.post_json(url.clone(), &body)?;
-      let response = tokio::time::timeout(REQUEST_TIMEOUT, request.send())
-        .await
-        .map_err(|_| {
-          anyhow!("timed out after {}s", REQUEST_TIMEOUT.as_secs())
-        })??;
-      let status = response.status();
-      if !status.is_success() {
-        bail!("{url} answered {status}");
+    let mut advisories: Vec<Vec<String>> = vec![Vec::new(); packages.len()];
+    // (index into `packages`, page token) of the queries still to send
+    let mut pending: Vec<(usize, Option<String>)> =
+      (0..packages.len()).map(|i| (i, None)).collect();
+    let mut page = 0;
+    while !pending.is_empty() {
+      page += 1;
+      if page > MAX_PAGES {
+        bail!("{url} returned more than {MAX_PAGES} pages of advisories");
       }
-      let text = http_util::body_to_string(response).await?;
-      let response: QueryBatchResponse = serde_json::from_str(&text)
-        .map_err(|err| anyhow!("unexpected response from {url}: {err}"))?;
-      if response.results.len() != chunk.len() {
-        bail!(
-          "unexpected response from {url}: {} results for {} queries",
-          response.results.len(),
-          chunk.len()
-        );
-      }
-      for (nv, result) in chunk.iter().zip(response.results) {
-        let advisories = result
-          .vulns
-          .into_iter()
-          .map(|v| v.id)
-          .filter(|id| id.starts_with("MAL-"))
-          .collect::<Vec<_>>();
-        if !advisories.is_empty() {
-          malicious.push(MaliciousVersion {
-            nv: nv.clone(),
-            advisories,
-          });
+      let mut next = Vec::new();
+      for chunk in pending.chunks(BATCH_SIZE) {
+        let body = json!({
+          "queries": chunk.iter().map(|(i, token)| {
+            let nv = &packages[*i];
+            let mut query = json!({
+              "package": { "ecosystem": "npm", "name": nv.name.as_str() },
+              "version": nv.version.to_string(),
+            });
+            if let Some(token) = token {
+              query["page_token"] = json!(token);
+            }
+            query
+          }).collect::<Vec<_>>(),
+        });
+        let request = client.post_json(url.clone(), &body)?;
+        let response = tokio::time::timeout(REQUEST_TIMEOUT, request.send())
+          .await
+          .map_err(|_| {
+            anyhow!("timed out after {}s", REQUEST_TIMEOUT.as_secs())
+          })??;
+        let status = response.status();
+        if !status.is_success() {
+          bail!("{url} answered {status}");
+        }
+        let text = http_util::body_to_string(response).await?;
+        let response: QueryBatchResponse = serde_json::from_str(&text)
+          .map_err(|err| anyhow!("unexpected response from {url}: {err}"))?;
+        if response.results.len() != chunk.len() {
+          bail!(
+            "unexpected response from {url}: {} results for {} queries",
+            response.results.len(),
+            chunk.len()
+          );
+        }
+        for ((i, token), result) in chunk.iter().zip(response.results) {
+          advisories[*i].extend(
+            result
+              .vulns
+              .into_iter()
+              .map(|v| v.id)
+              .filter(|id| id.starts_with("MAL-")),
+          );
+          if let Some(next_token) =
+            result.next_page_token.filter(|t| !t.is_empty())
+          {
+            if token.as_deref() == Some(next_token.as_str()) {
+              bail!("unexpected response from {url}: a page repeats itself");
+            }
+            next.push((*i, Some(next_token)));
+          }
         }
       }
+      pending = next;
     }
-    Ok(malicious)
+    Ok(
+      packages
+        .iter()
+        .zip(advisories)
+        .filter(|(_, advisories)| !advisories.is_empty())
+        .map(|(nv, mut advisories)| {
+          advisories.dedup();
+          MaliciousVersion {
+            nv: nv.clone(),
+            advisories,
+          }
+        })
+        .collect(),
+    )
   }
 
   /// Checks `packages`: an error refuses the install.
@@ -300,9 +348,20 @@ impl NpmInstallGate for OsvInstallGate {
     &self,
     packages: Vec<PackageNv>,
   ) -> Result<(), JsErrorBox> {
+    let names = packages
+      .iter()
+      .map(|nv| nv.name.to_string())
+      .collect::<Vec<_>>();
     self
       .check(packages)
       .await
-      .map_err(|err| JsErrorBox::generic(format!("{err:#}")))
+      .map_err(|err| JsErrorBox::generic(format!("{err:#}")))?;
+    super::downloads::check_dependencies(
+      &self.http_client_provider,
+      &self.npmrc,
+      names,
+    )
+    .await
+    .map_err(|err| JsErrorBox::generic(format!("{err:#}")))
   }
 }

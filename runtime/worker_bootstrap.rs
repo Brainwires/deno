@@ -112,6 +112,9 @@ pub struct BootstrapOptions {
   /// a child process of this program should get (`deno run` / `deno serve`
   /// only; empty in a compiled program, as upstream's always is).
   pub exec_argv: Vec<String>,
+  /// denext: the Node.js major the project chose (`"node"` in deno.json),
+  /// reported by `process.version`; `None` reports the default.
+  pub node_major: Option<u32>,
   pub node_debug: Option<String>,
   pub node_cluster_unique_id: Option<String>,
   pub node_cluster_sched_policy: Option<String>,
@@ -160,6 +163,7 @@ impl Default for BootstrapOptions {
       has_node_modules_dir: false,
       argv0: None,
       exec_argv: Vec::new(),
+      node_major: None,
       node_debug: None,
       node_cluster_unique_id: None,
       node_cluster_sched_policy: None,

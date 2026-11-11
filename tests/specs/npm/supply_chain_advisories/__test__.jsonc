@@ -41,6 +41,18 @@
         }
       ]
     },
+    // R11a: an advisory past OSV's first page of results still refuses
+    "add_refuses_malicious_version_on_a_later_page": {
+      "cwd": "add",
+      "args": "add npm:@denotest/paged-advisories@2.0.0",
+      "output": "refused_paged.out",
+      "exitCode": 1
+    },
+    "add_allows_clean_version_with_paged_advisories": {
+      "cwd": "add",
+      "args": "add npm:@denotest/paged-advisories@1.0.0",
+      "output": "[WILDCARD]Add npm:@denotest/paged-advisories@1.0.0[WILDCARD]"
+    },
     "install_refuses_configured_version": {
       "cwd": "configured",
       "args": "install",

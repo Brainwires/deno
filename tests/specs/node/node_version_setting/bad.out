@@ -1,0 +1,1 @@
+error: Invalid "node" setting "18" in deno.json: expected a supported Node.js major version, one of "20", "22", "24", "26".

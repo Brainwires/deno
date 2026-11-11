@@ -72,6 +72,10 @@ const _serveFastHeaderKind = Symbol("serve fast header kind");
 const _serveFastContentType = Symbol("serve fast content type");
 const _serveFastConsumed = Symbol("serve fast consumed");
 const _serveNativeResponse = Symbol("serve native response");
+// Set while the response may be served through a native response that is
+// not created yet: `takeServeNativeResponse` creates it at serve time, so a
+// Response that is never served allocates none.
+const _serveNativePending = Symbol("serve native pending");
 const _lazyStaticBody = Symbol("lazy static body");
 const _lazyStaticContentType = Symbol("lazy static content type");
 
@@ -254,6 +258,7 @@ function initializeResponseBase(response, inner, guard) {
   response[_serveFastContentType] = null;
   response[_serveFastConsumed] = false;
   response[_serveNativeResponse] = null;
+  response[_serveNativePending] = false;
   response[_lazyStaticBody] = null;
   response[_lazyStaticContentType] = null;
 }
@@ -273,6 +278,7 @@ function dropServeFastStatic(response) {
 }
 
 function dropServeNativeResponse(response) {
+  response[_serveNativePending] = false;
   const native = response[_serveNativeResponse];
   if (native === null || native === undefined) return;
   response[_serveNativeResponse] = null;
@@ -327,28 +333,58 @@ function maybeSetServeFastStaticFromInner(response, body) {
   return false;
 }
 
-function maybeSetServeNativeFromInner(response) {
-  if (response[_response].status === 0) return;
-  if (response[_response].body === null) {
-    return;
-  }
-
+/**
+ * The static body a native response can carry, or `undefined`.
+ * @param {Response} response
+ */
+function serveNativeStaticBody(response) {
+  if (response[_response].status === 0) return undefined;
+  if (response[_response].body === null) return undefined;
   const body = response[_response].body.streamOrStatic?.body;
   if (
     typeof body !== "string" &&
     TypedArrayPrototypeGetSymbolToStringTag(body) !== "Uint8Array"
   ) {
-    return;
+    return undefined;
   }
+  return body;
+}
+
+function maybeSetServeNativeFromInner(response) {
+  const body = serveNativeStaticBody(response);
+  if (body === undefined) return;
   if (maybeSetServeFastStaticFromInner(response, body)) {
     return;
   }
+  // The native response is created at serve time (see
+  // `takeServeNativeResponse`), not here.
+  if (opHttpNewResponseNativeHeaders !== undefined) {
+    response[_serveNativePending] = true;
+  }
+}
+
+/**
+ * The response's native response for `Deno.serve`, created now when the
+ * Response is eligible and has none yet; `null` when it can't have one.
+ * @param {Response} response
+ */
+function takeServeNativeResponse(response) {
+  const native = response[_serveNativeResponse];
+  if (native !== null && native !== undefined) return native;
+  if (response[_serveNativePending] !== true) return null;
+  response[_serveNativePending] = false;
+  // The state as it is now: the same as at construction, unless the body
+  // was turned into a stream since, which a native response can't carry.
+  const headers = responseHeaderList(response);
+  const body = serveNativeStaticBody(response);
+  if (body === undefined) return null;
   setServeNativeFromHeaders(
     response,
     response[_response].status,
     body,
-    responseHeaderList(response),
+    headers,
   );
+  return response[_serveNativeResponse];
 }
 
 function materializeLazyStaticBody(response) {
@@ -1012,6 +1048,7 @@ return {
   dropServeNativeResponse,
   getInnerResponse,
   serveNativeResponseKey: _serveNativeResponse,
+  takeServeNativeResponse,
   serveFastBodyKey: _serveFastBody,
   serveFastConsumedKey: _serveFastConsumed,
   serveFastContentTypeKey: _serveFastContentType,

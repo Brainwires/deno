@@ -616,6 +616,40 @@ static RETAINED_NODE_IPC: std::sync::OnceLock<(
 /// teardown leaves the socket open (no write-side shutdown, which would end
 /// the channel for every duplicate). A no-op without a channel, and on
 /// Windows, where the restarted run still has none.
+/// denext: `"node"` in deno.json: a supported Node.js major, as a number or
+/// a string of digits.
+fn parse_node_major_setting(
+  value: &deno_core::serde_json::Value,
+) -> Result<u32, AnyError> {
+  let supported = deno_runtime::deno_node::SUPPORTED_NODE_MAJORS;
+  let major = match value {
+    deno_core::serde_json::Value::Number(n) => {
+      n.as_u64().and_then(|n| u32::try_from(n).ok())
+    }
+    deno_core::serde_json::Value::String(s)
+      if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) =>
+    {
+      s.parse::<u32>().ok()
+    }
+    _ => None,
+  };
+  match major {
+    Some(major) if supported.contains(&major) => Ok(major),
+    _ => {
+      let list = supported
+        .iter()
+        .map(|m| format!("\"{m}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+      bail!(
+        "Invalid \"node\" setting {} in deno.json: expected a supported Node.js major version, one of {}.",
+        value,
+        list
+      )
+    }
+  }
+}
+
 pub fn retain_node_ipc_for_watch(sys: &CliSys) -> Result<(), AnyError> {
   #[cfg(unix)]
   if let Some((fd, serialization)) = deno_lib::args::node_ipc_init(sys)? {
@@ -843,6 +877,16 @@ impl CliOptions {
       workspace.package_jsons().next().is_some(),
       workspace.deno_jsons().next().is_some(),
     )
+  }
+
+  /// denext: the Node.js major the project targets, from `"node"` in the root
+  /// deno.json (`"20"` or `20`); `None` when it sets none. A major the runtime
+  /// does not support is an error naming the supported ones.
+  pub fn node_major(&self) -> Result<Option<u32>, AnyError> {
+    match self.workspace().node_version_setting() {
+      None | Some(deno_core::serde_json::Value::Null) => Ok(None),
+      Some(value) => parse_node_major_setting(value).map(Some),
+    }
   }
 
   pub fn otel_config(&self) -> OtelConfig {
@@ -2451,6 +2495,27 @@ pub fn default_deno_condition_policy(
 
 #[cfg(test)]
 mod test {
+  #[test]
+  fn node_major_setting() {
+    use deno_core::serde_json::json;
+    assert_eq!(parse_node_major_setting(&json!("20")).unwrap(), 20);
+    assert_eq!(parse_node_major_setting(&json!(22)).unwrap(), 22);
+    assert_eq!(parse_node_major_setting(&json!("24")).unwrap(), 24);
+    assert_eq!(parse_node_major_setting(&json!("26")).unwrap(), 26);
+    for bad in [
+      json!("18"),
+      json!(19),
+      json!("20.1"),
+      json!("v20"),
+      json!(true),
+      json!(""),
+    ] {
+      let err = parse_node_major_setting(&bad).unwrap_err().to_string();
+      assert!(err.contains("Invalid \"node\" setting"), "{err}");
+      assert!(err.contains("\"20\", \"22\", \"24\", \"26\""), "{err}");
+    }
+  }
+
   use deno_config::deno_json::AllowDenyIgnorePermissionConfig;
   use deno_config::deno_json::AllowDenyPermissionConfig;
   use deno_config::deno_json::PermissionsObject;

@@ -957,6 +957,15 @@ fn jail_net(
     declared_net_hosts(package_folder)
       .into_iter()
       .partition(|host| declared_host_known(host, &known));
+  // an allowed declared host's redirect targets (GitHub's release assets)
+  let mut allowed = allowed;
+  for host in allowed.clone() {
+    for redirect in super::builtin_exceptions::declared_host_redirects(&host) {
+      if !allowed.iter().any(|h| h == redirect) {
+        allowed.push(redirect.to_string());
+      }
+    }
+  }
   NetChoice {
     net: if allowed.is_empty() {
       JailNet::None
@@ -2248,6 +2257,48 @@ mod tests {
     assert_eq!(
       net_of(jail_net(&config(false, true), None, "pkg", dir.path())),
       (JailNet::None, false)
+    );
+  }
+
+  // GitHub-hosted node-pre-gyp downloads of the built-in known packages
+  // (bcrypt 5, argon2 < 0.28, @discordjs/opus, libxmljs) reach github.com
+  // and the hosts it redirects release downloads to; an unknown package
+  // declaring the same host is still refused
+  #[test]
+  fn builtin_known_github_packages_get_redirect_hosts() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+      dir.path().join("package.json"),
+      r#"{ "binary": { "host": "https://github.com", "remote_path": "o/r/releases/download/v5.1.1" } }"#,
+    )
+    .unwrap();
+    for name in ["bcrypt", "argon2", "@discordjs/opus", "libxmljs"] {
+      assert_eq!(
+        jail_net(&config(false, false), None, name, dir.path()),
+        NetChoice {
+          net: JailNet::Hosts(vec![
+            "github.com".to_string(),
+            "objects.githubusercontent.com".to_string(),
+            "release-assets.githubusercontent.com".to_string(),
+          ]),
+          declared: true,
+          refused_declared: Vec::new(),
+        },
+        "{name}"
+      );
+    }
+    assert_eq!(
+      jail_net(&config(false, false), None, "pkg", dir.path()),
+      NetChoice {
+        net: JailNet::None,
+        declared: true,
+        refused_declared: vec!["github.com".to_string()],
+      }
+    );
+    // paranoid still grants nothing
+    assert_eq!(
+      jail_net(&config(false, true), None, "bcrypt", dir.path()).net,
+      JailNet::None
     );
   }
 
