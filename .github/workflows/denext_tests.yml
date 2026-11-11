@@ -347,6 +347,9 @@ jobs:
     name: ubuntu-22.04-arm
     if: ${{ github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) }}
     uses: ./.github/workflows/denext_tests_os.yml
+    permissions:
+      contents: read
+      actions: read # the called workflow's runner-pick jobs read the repository's jobs
     with:
       os: ubuntu-22.04-arm
       libs_only: true
