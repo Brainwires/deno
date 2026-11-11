@@ -477,7 +477,8 @@
     "parallel/test-async-hooks-stack-overflow-try-catch.js": {},
     "parallel/test-async-hooks-stack-overflow.js": {
       "darwin": false,
-      "reason": "macOS arm64: the recursion overflows inside some Promise executors, which rejects those promises. Node's PromiseRejectCallback runs JS and overflows too, so Node never tracks them; Deno's native reject callback records them, and they reach the uncaughtException handler again as unhandled rejections. Where the overflow lands depends on frame sizes: it fails every run on macOS arm64 (debug and stock release builds) and passes in the Linux legs"
+      "windows": false,
+      "reason": "macOS arm64 and Windows arm64: the recursion overflows inside some Promise executors, which rejects those promises. Node's PromiseRejectCallback runs JS and overflows too, so Node never tracks them; Deno's native reject callback records them, and they reach the uncaughtException handler again as unhandled rejections. Where the overflow lands depends on frame sizes: it fails every run on macOS arm64 (debug and stock release builds) and in the Windows arm64 CI leg, and passes in the Linux legs"
     },
     "parallel/test-async-hooks-top-level-clearimmediate.js": {},
     "parallel/test-async-hooks-worker-asyncfn-terminate-1.js": {},
