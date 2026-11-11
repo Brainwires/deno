@@ -748,6 +748,10 @@ pub async fn add(
 
   // denext: the npm supply-chain gates, before anything is written
   check_added_npm_packages(&cli_factory, &selected_packages).await?;
+  // denext (R11a): the dependencies the install below resolves get the
+  // low-download check too
+  let dependency_check =
+    dependency_low_download_check(&cli_factory, &selected_packages).await?;
 
   let kind = if add_flags.dev {
     DependencyKind::Dev
@@ -828,6 +832,7 @@ pub async fn add(
     }
   }
 
+  crate::supply_chain::downloads::set_dependency_check(dependency_check);
   let result = npm_install_after_modification(
     flags,
     Some(jsr_resolver),
@@ -837,6 +842,7 @@ pub async fn add(
     },
   )
   .await;
+  crate::supply_chain::downloads::set_dependency_check(None);
   if let Err(err) = result {
     if crate::supply_chain::gate_refused() {
       for (path, original) in originals {
@@ -904,6 +910,40 @@ async fn check_added_npm_packages(
   )
   .await?;
   cli_factory.osv_install_gate()?.check(npm_packages).await
+}
+
+/// What the install after `deno add` checks the dependencies it resolves
+/// against: every npm name the lockfile already has, and the added packages
+/// (checked above). `None` when no npm package is added.
+async fn dependency_low_download_check(
+  cli_factory: &CliFactory,
+  selected_packages: &[SelectedPackage],
+) -> Result<Option<crate::supply_chain::downloads::DependencyCheck>, AnyError> {
+  let mut known = selected_packages
+    .iter()
+    .filter_map(|p| p.package_name.strip_prefix("npm:"))
+    .map(|name| name.to_string())
+    .collect::<std::collections::HashSet<_>>();
+  if known.is_empty() {
+    return Ok(None);
+  }
+  if let Some(lockfile) = cli_factory.maybe_lockfile().await? {
+    for key in lockfile.lock().content.packages.npm.keys() {
+      // `name@version[_peer...]`, the name possibly scoped
+      let key = key.as_str();
+      let split = key[1.min(key.len())..].find('@').map(|i| i + 1);
+      if let Some(at) = split {
+        known.insert(key[..at].to_string());
+      }
+    }
+  }
+  Ok(Some(crate::supply_chain::downloads::DependencyCheck {
+    known,
+    allow_flag: cli_factory
+      .cli_options()?
+      .allow_low_downloads()
+      .map(|names| names.to_vec()),
+  }))
 }
 
 struct SelectedPackage {

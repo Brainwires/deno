@@ -52,6 +52,27 @@ pub use ops::vm::init_global_template;
 /// When bumping the emulated Node version, change it here only.
 pub const NODE_VERSION: &str = "26.5.1";
 
+/// denext: the Node.js majors a project may choose with `"node"` in its
+/// deno.json. The runtime reports the chosen major through `process.version`,
+/// `process.versions.node` and `process.release`; behaviour stays
+/// [`NODE_VERSION`]'s.
+pub const SUPPORTED_NODE_MAJORS: &[u32] = &[20, 22, 24, 26];
+
+/// denext: the version a project that chose Node `major` sees reported: the
+/// newest release of that line, and its LTS codename. `None` for a major the
+/// runtime does not support; the current major reports [`NODE_VERSION`].
+pub fn reported_node_version(
+  major: u32,
+) -> Option<(&'static str, Option<&'static str>)> {
+  match major {
+    20 => Some(("20.20.2", Some("Iron"))),
+    22 => Some(("22.23.4", Some("Jod"))),
+    24 => Some(("24.22.2", Some("Krypton"))),
+    26 => Some((NODE_VERSION, None)),
+    _ => None,
+  }
+}
+
 pub fn is_builtin_node_module(module_name: &str) -> bool {
   DenoIsBuiltInNodeModuleChecker.is_builtin_node_module(module_name)
 }

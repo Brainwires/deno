@@ -88,6 +88,7 @@ const {
   SERVE_FAST_HEADER_CONTENT_TYPE,
   SERVE_FAST_HEADER_DEFAULT_TEXT,
   SERVE_FAST_HEADER_NONE,
+  takeServeNativeResponse,
   toInnerResponse,
   wireHeaderList,
 } = core.loadExtScript("ext:deno_fetch/23_response.js");
@@ -823,10 +824,10 @@ function mapToCallback(context, callback, onError) {
       return;
     }
 
-    const nativeResponse = response[serveNativeResponseKey];
     if (trySetServeFastStaticResponse(req, response, innerRequest)) {
       return;
     }
+    const nativeResponse = takeServeNativeResponse(response);
     if (
       nativeResponse !== null && nativeResponse !== undefined &&
       op_http_set_response_native(req, nativeResponse)
@@ -992,7 +993,7 @@ function mapToNativeResponseCallback(context, callback, onError) {
       return undefined;
     }
 
-    const nativeResponse = response[serveNativeResponseKey];
+    const nativeResponse = takeServeNativeResponse(response);
     if (
       nativeResponse !== null && nativeResponse !== undefined &&
       op_http_set_response_native(req, nativeResponse)

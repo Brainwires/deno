@@ -1,0 +1,4 @@
+v26.[WILDCARD] true
+26.[WILDCARD]
+node undefined https://nodejs.org/download/release/v26.[WILDCARD].tar.gz
+worker true

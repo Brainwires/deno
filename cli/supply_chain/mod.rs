@@ -5,7 +5,8 @@
 //! - [`advisories`]: refuse versions listed as malicious (OSV `MAL-*`).
 //! - [`downloads`]: `deno add` of a package with very low weekly downloads
 //!   warns (or, with `low-download-check=prompt`, asks first): a typosquat
-//!   guard.
+//!   guard. The dependencies the added packages bring in get the same
+//!   check, and a name close to a widely used package is named with it.
 //! - [`jail`]: approved lifecycle scripts run confined; `jail_proxy` is the
 //!   allow-listing proxy a script with a host list reaches the network
 //!   through.
@@ -18,6 +19,7 @@ pub mod downloads;
 pub mod jail;
 mod jail_proxy;
 pub mod node_headers;
+mod popular_names;
 #[cfg(target_os = "linux")]
 mod sandbox_linux;
 #[cfg(target_os = "macos")]

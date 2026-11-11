@@ -299,6 +299,9 @@ pub struct LibMainWorkerOptions {
   /// denext (DENEXT.md item 189): `process.execArgv` (see
   /// `BootstrapOptions::exec_argv`); a worker gets its parent's, as in Node.
   pub exec_argv: Vec<String>,
+  /// denext: the Node.js major the project chose (see
+  /// `BootstrapOptions::node_major`); a worker gets its parent's.
+  pub node_major: Option<u32>,
   pub node_debug: Option<String>,
   pub node_cluster_unique_id: Option<String>,
   pub node_cluster_sched_policy: Option<String>,
@@ -524,6 +527,7 @@ impl<TSys: DenoLibSys> LibWorkerFactorySharedState<TSys> {
           has_node_modules_dir: shared.options.has_node_modules_dir,
           argv0: shared.options.argv0.clone(),
           exec_argv: shared.options.exec_argv.clone(),
+          node_major: shared.options.node_major,
           node_debug: shared.options.node_debug.clone(),
           node_cluster_unique_id: shared.options.node_cluster_unique_id.clone(),
           node_cluster_sched_policy: shared
@@ -789,6 +793,7 @@ impl<TSys: DenoLibSys> LibMainWorkerFactory<TSys> {
         has_node_modules_dir: shared.options.has_node_modules_dir,
         argv0: shared.options.argv0.clone(),
         exec_argv: shared.options.exec_argv.clone(),
+        node_major: shared.options.node_major,
         node_debug: shared.options.node_debug.clone(),
         node_cluster_unique_id: shared.options.node_cluster_unique_id.clone(),
         node_cluster_sched_policy: shared

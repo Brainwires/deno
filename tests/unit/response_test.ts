@@ -100,3 +100,55 @@ Deno.test(async function responseBodyUsed() {
   response.body;
   assert(response.bodyUsed);
 });
+
+// denext (M5f-3): a Response that `Deno.serve` could send natively creates
+// its native response only when it is served, so one that is never served
+// allocates none.
+function serveNativeSlot(response: Response): unknown {
+  const symbol = Object.getOwnPropertySymbols(response).find((s) =>
+    s.description === "serve native response"
+  );
+  assert(symbol !== undefined);
+  // deno-lint-ignore no-explicit-any
+  return (response as any)[symbol];
+}
+
+Deno.test(function responseNativeCreatedLazily() {
+  for (
+    const response of [
+      new Response("body", { status: 201, headers: { "x-a": "1" } }),
+      new Response(new Uint8Array([1, 2]), { status: 404 }),
+      Response.json({ a: 1 }, { status: 400 }),
+      Response.redirect("http://localhost/", 302),
+    ]
+  ) {
+    assertEquals(serveNativeSlot(response), null);
+  }
+});
+
+Deno.test(
+  { permissions: { net: true } },
+  async function responseNativeServedLazily() {
+    const started = Promise.withResolvers<number>();
+    const response = new Response("lazy", {
+      status: 201,
+      headers: { "x-lazy": "yes", "content-type": "text/x-lazy" },
+    });
+    const responses = [response, Response.json({ ok: 1 }, { status: 202 })];
+    let i = 0;
+    await using _server = Deno.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      onListen: ({ port }) => started.resolve(port),
+    }, () => responses[i++]);
+    const url = `http://127.0.0.1:${await started.promise}/`;
+    const res = await fetch(url);
+    assertEquals(res.status, 201);
+    assertEquals(res.headers.get("x-lazy"), "yes");
+    assertEquals(res.headers.get("content-type"), "text/x-lazy");
+    assertEquals(await res.text(), "lazy");
+    const res2 = await fetch(url);
+    assertEquals(res2.status, 202);
+    assertEquals(await res2.json(), { ok: 1 });
+  },
+);

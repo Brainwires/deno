@@ -1,0 +1,32 @@
+{
+  // denext: `"node"` in deno.json picks the Node.js major that
+  // `process.version`, `process.versions.node` and `process.release` report.
+  "tests": {
+    "major_20": {
+      "cwd": "v20",
+      "args": "run main.mjs",
+      "output": "v20.out"
+    },
+    "major_22_as_number": {
+      "cwd": "v22num",
+      "args": "run main.mjs",
+      "output": "v22.out"
+    },
+    "major_26_is_the_default": {
+      "cwd": "v26",
+      "args": "run main.mjs",
+      "output": "default.out"
+    },
+    "unset_is_the_default": {
+      "cwd": "none",
+      "args": "run main.mjs",
+      "output": "default.out"
+    },
+    "unsupported_major": {
+      "cwd": "bad",
+      "args": "run main.mjs",
+      "output": "bad.out",
+      "exitCode": 1
+    }
+  }
+}

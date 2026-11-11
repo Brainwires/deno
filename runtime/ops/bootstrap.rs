@@ -21,6 +21,7 @@ deno_core::extension!(
     op_bootstrap_stderr_no_color,
     op_bootstrap_unstable_args,
     op_bootstrap_exec_argv,
+    op_bootstrap_node_version,
     op_bootstrap_is_from_unconfigured_runtime,
     op_proto_set_attempted,
     op_proto_get_attempted,
@@ -119,6 +120,24 @@ pub fn op_bootstrap_unstable_args(state: &mut OpState) -> Vec<String> {
 #[op2]
 pub fn op_bootstrap_exec_argv(state: &mut OpState) -> Vec<String> {
   state.borrow::<BootstrapOptions>().exec_argv.clone()
+}
+
+/// denext: the Node.js version the project chose (`"node"` in deno.json) as
+/// `[version, ltsCodename?]`, or an empty list for the default.
+#[op2]
+#[serde]
+pub fn op_bootstrap_node_version(state: &mut OpState) -> Vec<String> {
+  let Some(major) = state.borrow::<BootstrapOptions>().node_major else {
+    return Vec::new();
+  };
+  let Some((version, lts)) = deno_node::reported_node_version(major) else {
+    return Vec::new();
+  };
+  let mut out = vec![version.to_string()];
+  if let Some(lts) = lts {
+    out.push(lts.to_string());
+  }
+  out
 }
 
 #[op2]

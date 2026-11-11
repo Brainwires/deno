@@ -1378,6 +1378,67 @@ Deno.test(
   },
 );
 
+Deno.test(
+  { permissions: { net: true } },
+  async function fetchCustomClientUserAgentOmitOrReplace() {
+    const started = Promise.withResolvers<number>();
+    await using _server = Deno.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      onListen: ({ port }) => started.resolve(port),
+    }, (request) =>
+      Response.json({
+        hasUserAgent: request.headers.has("user-agent"),
+        userAgent: request.headers.get("user-agent"),
+      }));
+    const url = `http://127.0.0.1:${await started.promise}/`;
+
+    // `userAgent: false` and `userAgent: null` send none.
+    for (const userAgent of [false, null] as const) {
+      using client = Deno.createHttpClient({ userAgent });
+      const body = await (await fetch(url, { client })).json();
+      assertEquals(body, { hasUserAgent: false, userAgent: null });
+      // An explicit header still wins.
+      const explicit = await (await fetch(url, {
+        client,
+        headers: { "user-agent": "explicit/1" },
+      })).json();
+      assertEquals(explicit.userAgent, "explicit/1");
+    }
+
+    // A string replaces the default; an explicit header still wins.
+    {
+      using client = Deno.createHttpClient({ userAgent: "custom-agent/2" });
+      const body = await (await fetch(url, { client })).json();
+      assertEquals(body.userAgent, "custom-agent/2");
+      const explicit = await (await fetch(url, {
+        client,
+        headers: { "user-agent": "explicit/1" },
+      })).json();
+      assertEquals(explicit.userAgent, "explicit/1");
+    }
+
+    // Leaving it out keeps the default.
+    {
+      using client = Deno.createHttpClient({});
+      const body = await (await fetch(url, { client })).json();
+      assertEquals(body.userAgent, `Deno/${Deno.version.deno}`);
+    }
+
+    assertThrows(
+      // deno-lint-ignore no-explicit-any
+      () => Deno.createHttpClient({ userAgent: 1 as any }),
+      TypeError,
+      "Invalid value for 'userAgent' option",
+    );
+    assertThrows(
+      () => Deno.createHttpClient({ userAgent: "bad\nagent" }),
+      Error,
+      "Illegal characters in User-Agent",
+    );
+  },
+);
+
 // Regression test for https://github.com/denoland/deno/issues/29347
 // `Deno.createHttpClient` used to scribble `caCerts` and `proxy.transport`
 // onto the caller's options object, so reusing a single options object

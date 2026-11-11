@@ -1,0 +1,4 @@
+[WILDCARD]Warning npm:@denotest/chalkk has 7 weekly downloads (fewer than 1000). It may be a typosquat of a popular package: did you mean npm:chalk?
+To silence this, pass --allow-low-downloads=npm:@denotest/chalkk, or list it in allowed-unpopular-packages (.npmrc) or "supplyChain": { "allowLowDownloads": ["@denotest/chalkk"] } (deno.json). To be asked first (and refused without a terminal), set low-download-check=prompt.
+Add npm:@denotest/chalkk@1.0.0
+[WILDCARD]

@@ -7041,6 +7041,15 @@ declare namespace Deno {
      *
      * If not set, the default value from the underlying HTTP library is used. */
     http2MaxHeaderListSize?: number;
+    /** The `User-Agent` this client adds to a request that sets none.
+     *
+     * A string replaces the default `Deno/<version>`; `false` (or `null`)
+     * sends no `User-Agent` at all. A `user-agent` header set on the request
+     * itself always wins. Some servers reject requests without a
+     * `User-Agent` (GitHub's API does, for example).
+     *
+     * @default {undefined} (the default `Deno/<version>`) */
+    userAgent?: string | false | null;
   }
 
   /**

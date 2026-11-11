@@ -2004,6 +2004,8 @@ pub struct ConfigFileJson {
   pub node_modules_dir: Option<Value>,
   pub node_modules_linker: Option<Value>,
   pub deno_condition: Option<Value>,
+  /// denext: the Node.js major the project targets (`"node": "20"`).
+  pub node: Option<Value>,
   pub jsr_deps_in_node_modules: Option<bool>,
   pub prefer_package_json: Option<bool>,
   pub vendor: Option<bool>,
