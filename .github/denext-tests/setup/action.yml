@@ -6,6 +6,10 @@ inputs:
   cache-key:
     description: Rust cache key for this job kind (lint, libs, build, test-*)
     required: true
+  libclang:
+    description: Find libclang on Windows (bindgen); 'false' for a job that builds nothing that needs it (the unit_node and node_compat test crates), so a pool image without VS's Clang component can run it
+    required: false
+    default: 'true'
 runs:
   using: composite
   steps:
@@ -48,7 +52,7 @@ runs:
         sudo apt-get install -y --no-install-recommends libclang-dev cmake protobuf-compiler
 
     - name: libclang (Windows)
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && inputs.libclang == 'true'
       shell: bash
       run: |
         set -euo pipefail
@@ -61,6 +65,35 @@ runs:
           fi
         done
         echo "::error::libclang.dll not found"; exit 1
+
+    # Every pool image carries rustup for its job user except the Windows x64
+    # VM's (its jobs install their own into the per-job profile): there, and
+    # on any Windows runner without it, rustup-init comes from rustup's
+    # versioned archive, checked against the SHA-256 pinned here, with retries
+    # and a bounded time. Bake rustup into that image to drop this download.
+    - name: rustup (Windows, when the image has none)
+      if: runner.os == 'Windows'
+      shell: bash
+      env:
+        RUSTUP_VERSION: 1.29.2
+        RUSTUP_INIT_SHA256_X64: 00f139da614dced87d3c3d4121c43eebdac3c1bf8a5ee86b9d80dfd71c8d70fd
+        RUSTUP_INIT_SHA256_ARM64: 58005a321c5dcb9c4457c0a13bb5d6a56a5793efaef429004edaa1db33019b59
+      run: |
+        set -euo pipefail
+        if command -v rustup >/dev/null 2>&1; then rustup --version; exit 0; fi
+        if [ "$RUNNER_ARCH" = ARM64 ]; then
+          triple=aarch64-pc-windows-msvc; want=$RUSTUP_INIT_SHA256_ARM64
+        else
+          triple=x86_64-pc-windows-msvc; want=$RUSTUP_INIT_SHA256_X64
+        fi
+        init="$RUNNER_TEMP/rustup-init.exe"
+        curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 20 --max-time 300 \
+          -o "$init" "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/$triple/rustup-init.exe" ||
+          { echo "::error::could not download rustup-init $RUSTUP_VERSION ($triple)"; exit 1; }
+        echo "$want  $init" | sha256sum -c - ||
+          { echo "::error::rustup-init.exe does not match its pinned SHA-256"; exit 1; }
+        "$init" -y --no-modify-path --profile minimal --default-toolchain none
+        echo "$USERPROFILE\\.cargo\\bin" >>"$GITHUB_PATH"
 
     - name: Rust toolchain
       shell: bash

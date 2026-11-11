@@ -13145,6 +13145,42 @@ where the changes are discussed.
      - User-facing note: none; CI only.
      - Node tests enabled: none, because this is CI only.
 
+336. **`ci(denext)`: unit_node and node_compat run on macOS and Windows in CI**
+     (`d21/ci-gaps`; CI; `.github/workflows/denext_tests.yml`,
+     `denext_tests_os.yml`, `.github/denext-runtime/pick_runner.py`,
+     `pick_runner_test.py`, `.github/denext-tests/setup/action.yml`). Only the
+     Linux x64 leg ran them, so every node_compat entry enabled for macOS or
+     Windows in `tests/node_compat/config.jsonc` was checked on a workstation
+     only. Each macOS and Windows leg of a full run (`macos-15`,
+     `macos-15-intel`, `windows-2022`, `windows-11-arm`) now also runs
+     `unit_node` and `node_compat` in 2 shards against the leg's debug build
+     (a new `node_suites` input of `denext_tests_os.yml`; job names
+     `<leg> / test node_compat (1/2)` and so on, as on Linux).
+     - Where they run: our pool for the platform (`RUNNER_MACOS_ARM`,
+       `RUNNER_MACOS_X64`, `RUNNER_WINDOWS_X64`, `RUNNER_WINDOWS_ARM`) while it
+       has a free slot, else the leg's GitHub image. A `node-runner` job right
+       after the leg's build runs `pick_runner.py`: it counts the pool's
+       queued and running jobs in the repository (the leg's own node jobs, which
+       wait on it, left out; with `RUNNER_STATUS_TOKEN` also the organization's
+       busy runners) against its slots (`RUNNER_*_SLOTS`, by default mac-arm 2,
+       mac-x64 1, win-x64 1, win-arm64 2), gives the free slots to node_compat
+       (1/2), (2/2) and unit_node in that order and the rest to the image. On
+       any API failure every job keeps the pool; a fork's pull request always
+       gets the image; an unset variable means the image.
+     - The setup action: `libclang: 'false'` for these jobs (their test crates
+       need no bindgen), and on a Windows runner without rustup (the Windows x64
+       VM's image) it installs rustup-init from rustup's versioned archive,
+       pinned by SHA-256, with retries and a time bound.
+     - Tests: `pick_runner_test.py` (an idle pool, two slots, a busy pool, a
+       queued job, other pools' and finished jobs, this run's own waiting
+       jobs, another repository's busy runner, a fork PR, no variable, an API
+       failure, a malformed answer), run by the lint job; the matrix for each
+       leg was evaluated offline to the expected job lists.
+     - User-facing note: none; the macOS and Windows node_compat counts are
+       now checked in CI.
+     - Node tests enabled: none, because this runs the already enabled entries
+       on more OSes; it enables no new one.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

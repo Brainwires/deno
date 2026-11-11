@@ -32,9 +32,17 @@
 #   - unit / specs: `cargo test -p unit_tests --test unit` and
 #            `cargo test -p specs_tests --test specs` (2 shards) against them;
 #            on Linux also `integration` (2 shards) and `unit_node`.
+#   - unit_node + node_compat (2 shards) on Linux x64 and on every macOS and
+#            Windows leg, so each OS's enabled node_compat entries
+#            (tests/node_compat/config.jsonc) are checked in CI. The macOS
+#            and Windows ones run on our pool for that platform while it has
+#            a free slot and on the leg's GitHub image otherwise
+#            (.github/denext-runtime/pick_runner.py, the leg's node-runner
+#            job).
 # - macOS x64 (macos-15-intel) and Linux arm64 (ubuntu-22.04-arm), two of the
-#   other release architectures: build + libs only; Windows arm64
-#   (windows-11-arm): build + libs + unit.
+#   other release architectures: build + libs only (macOS x64 also the node
+#   suites); Windows arm64 (windows-11-arm): build + libs + unit + the node
+#   suites.
 #
 # Scope (GitHub caps this account at 20 concurrent jobs, 5 of them macOS, and
 # agents push many fix/feat/ci branches): the full matrix above runs on a push
@@ -167,6 +175,11 @@ jobs:
       - name: plan_matrix_test.py
         if: runner.os == 'Linux'
         run: python3 -I .github/denext-runtime/plan_matrix_test.py
+      # The node suites' pool-or-overflow pick (denext_tests_os.yml's
+      # node-runner job).
+      - name: pick_runner_test.py
+        if: runner.os == 'Linux'
+        run: python3 -I .github/denext-runtime/pick_runner_test.py
       # Every assertion in the release and test scripts names what it checked
       # (DENEXT.md item 141): no bare test / [ / grep -q statements.
       - name: assert_guard.py
@@ -252,19 +265,35 @@ jobs:
     name: macos-15
     if: ${{ github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.macos) }}
     uses: ./.github/workflows/denext_tests_os.yml
+    permissions:
+      contents: read
+      actions: read # node-runner reads the pool's queued / running jobs
     with:
       os: macos-15
       # A dispatch with macos_runner=github runs the leg on GitHub's image instead of the pool.
       runs_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.macos_runner == 'github') && '"macos-15"' || (startsWith(vars.RUNNER_MACOS_ARM, '[') && vars.RUNNER_MACOS_ARM || format('"{0}"', vars.RUNNER_MACOS_ARM || 'macos-15')) }}
+      # unit_node + node_compat (2 shards) on the mac-arm pool, GitHub's
+      # macos-15 for the overflow (pick_runner.py).
+      node_suites: true
+      node_runs_on: ${{ !(github.event_name == 'workflow_dispatch' && inputs.macos_runner == 'github') && vars.RUNNER_MACOS_ARM || '' }}
+      node_slots: ${{ vars.RUNNER_MACOS_ARM_SLOTS || '2' }}
 
   windows:
     name: windows-2022
     if: ${{ github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.windows) }}
     # Stays on GitHub's image: a debug deno build + the suite on the 1-slot 4 vCPU / 8 GB
     # Windows VM, and the setup action writes the hosts file (the job account is no admin).
+    # Its unit_node and node_compat jobs (test crates only, against this build) take the
+    # win-x64 pool while its one slot is free, else windows-2022 (pick_runner.py).
     uses: ./.github/workflows/denext_tests_os.yml
+    permissions:
+      contents: read
+      actions: read # node-runner reads the pool's queued / running jobs
     with:
       os: windows-2022
+      node_suites: true
+      node_runs_on: ${{ vars.RUNNER_WINDOWS_X64 }}
+      node_slots: ${{ vars.RUNNER_WINDOWS_X64_SLOTS || '1' }}
 
   linux:
     name: ubuntu-22.04
@@ -280,10 +309,18 @@ jobs:
     name: macos-15-intel
     if: ${{ github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) }}
     uses: ./.github/workflows/denext_tests_os.yml
+    permissions:
+      contents: read
+      actions: read # node-runner reads the pool's queued / running jobs
     with:
       os: macos-15-intel
       runs_on: ${{ startsWith(vars.RUNNER_MACOS_X64, '[') && vars.RUNNER_MACOS_X64 || format('"{0}"', vars.RUNNER_MACOS_X64 || 'macos-15-intel') }}
       libs_only: true
+      # Plus unit_node + node_compat (2 shards): the mac-x64 pool's one slot,
+      # GitHub's macos-15-intel for the overflow.
+      node_suites: true
+      node_runs_on: ${{ vars.RUNNER_MACOS_X64 }}
+      node_slots: ${{ vars.RUNNER_MACOS_X64_SLOTS || '1' }}
 
   linux-arm64:
     name: ubuntu-22.04-arm
@@ -300,6 +337,15 @@ jobs:
     name: windows-11-arm
     if: ${{ github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) }}
     uses: ./.github/workflows/denext_tests_os.yml
+    permissions:
+      contents: read
+      actions: read # node-runner reads the pool's queued / running jobs
     with:
       os: windows-11-arm
       libs_and_unit: true
+      # Plus unit_node + node_compat (2 shards): the win-arm64 pool (the
+      # repository variable RUNNER_WINDOWS_ARM, two slots), GitHub's
+      # windows-11-arm for the overflow and while the variable is unset.
+      node_suites: true
+      node_runs_on: ${{ vars.RUNNER_WINDOWS_ARM }}
+      node_slots: ${{ vars.RUNNER_WINDOWS_ARM_SLOTS || '2' }}
