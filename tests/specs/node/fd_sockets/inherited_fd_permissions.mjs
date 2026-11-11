@@ -83,6 +83,8 @@ async function replyOnceListening(child, port, marker) {
   );
   server.close();
   const result = collect(child);
+  // The parent's end of a pipe the child never reads: a reset there is expected.
+  child.stdio[4].on("error", () => {});
   child.stdio[4].end("pipe payload\n");
   const reply = await replyOnceListening(child, port, "main listening");
   const { out, code } = await result;
@@ -119,6 +121,8 @@ for (const flags of [["--allow-read"], ["--allow-read", "--allow-write"]]) {
     "pipe",
   ]);
   const result = collect(child);
+  // A refused child exits without reading: on Linux the parent's end then sees ECONNRESET.
+  child.stdio[3].on("error", () => {});
   child.stdio[3].end("pipe payload\n");
   const { out, code } = await result;
   process.stdout.write(`${flags.join(" ")}: ${out}`);
