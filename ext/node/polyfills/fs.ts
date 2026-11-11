@@ -930,7 +930,7 @@ function readFileIntoUserBuffer(
 function readFileTooLarge(path: string): never {
   let size = kIoMaxLength + 1;
   try {
-    size = Deno.statSync(path).size;
+    size = statSync(path).size;
   } catch {
     // The file changed or went away since: the limit is still what was hit.
   }
