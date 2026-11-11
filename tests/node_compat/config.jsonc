@@ -107,10 +107,7 @@
     "async-hooks/test-pipewrap.js": {},
     "async-hooks/test-querywrap.js": {},
     "async-hooks/test-queue-microtask.js": {},
-    "async-hooks/test-shutdownwrap.js": {
-      "linux": false,
-      "reason": "times out on Linux CI (10 s); passes on macOS: the SHUTDOWNWRAP close sequence needs a Linux investigation"
-    },
+    "async-hooks/test-shutdownwrap.js": {},
     "async-hooks/test-signalwrap.js": {},
     "async-hooks/test-statwatcher.js": {},
     "async-hooks/test-timers.setInterval.js": {},

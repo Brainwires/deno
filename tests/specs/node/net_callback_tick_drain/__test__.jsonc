@@ -1,0 +1,16 @@
+{
+  "tests": {
+    "ticks_drain_between_callbacks": {
+      "args": "run --allow-net ticks.mjs",
+      "output": "ticks.out"
+    },
+    "connect_callback_throw_is_uncaught": {
+      "args": "run --allow-net connect_throw.mjs",
+      "output": "connect_throw.out"
+    },
+    "connection_callback_throw_is_uncaught": {
+      "args": "run --allow-net connection_throw.mjs",
+      "output": "connection_throw.out"
+    }
+  }
+}

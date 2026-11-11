@@ -875,6 +875,34 @@ pub(crate) fn call_fatal_exception(
   }
 }
 
+/// Calls a JS callback from a libuv callback the way Node's `MakeCallback`
+/// does: an exception it throws is reported as uncaught (instead of being
+/// left pending and dropped), and when it returns its `process.nextTick`
+/// callbacks and microtasks run before the next native callback starts.
+pub(crate) fn make_native_callback(
+  scope: &mut v8::PinScope,
+  func: v8::Local<v8::Function>,
+  recv: v8::Local<v8::Value>,
+  args: &[v8::Local<v8::Value>],
+) {
+  let caught_exception = {
+    v8::tc_scope!(tc, scope);
+    if func.call(tc, recv, args).is_some() {
+      deno_core::JsRuntime::drain_ticks_after_native_callback(tc);
+    }
+    if tc.has_caught() && !tc.has_terminated() {
+      let exc = tc.exception();
+      tc.reset();
+      exc
+    } else {
+      None
+    }
+  };
+  if let Some(exception) = caught_exception {
+    call_fatal_exception(scope, exception);
+  }
+}
+
 /// Free a buffer allocated by on_uv_alloc.
 pub(crate) fn free_uv_buf(buf: *const uv_buf_t) {
   // SAFETY: buf is a valid uv_buf_t from on_uv_alloc; base was allocated with alloc(len, 1).

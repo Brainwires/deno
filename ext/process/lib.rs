@@ -3216,7 +3216,175 @@ mod self_fork_tests {
         "the checked program's handle is still open"
       );
     }
+
+    // Between the check and the exec, per platform.
+    #[cfg(unix)]
+    a_program_swapped_between_the_check_and_the_exec_is_ended(dir.path());
+    #[cfg(windows)]
+    a_held_program_cannot_be_swapped_before_the_exec(dir.path());
     super::set_embedded_programs(Vec::new());
+  }
+
+  /// Registers `bytes` as the program the app carries at `path`.
+  fn register_program(path: &std::path::Path, bytes: &'static [u8]) {
+    use sha2::Digest;
+    super::set_embedded_programs(vec![super::EmbeddedProgram {
+      path: path.to_path_buf(),
+      sha256: sha2::Sha256::digest(bytes).into(),
+      read: Arc::new(move || Ok(bytes.to_vec())),
+    }]);
+  }
+
+  /// The command a `Deno.Command` spawn of `cmd` would run, through the op's
+  /// own checks (allow-all, so only the program's check applies).
+  fn checked_command(cmd: &std::path::Path) -> super::CreateCommand {
+    checked_command_result(cmd).unwrap()
+  }
+
+  fn checked_command_result(
+    cmd: &std::path::Path,
+  ) -> Result<super::CreateCommand, super::ProcessError> {
+    let mut state = OpState::new(None);
+    let parser =
+      RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys);
+    state.put(PermissionsContainer::new(
+      Arc::new(parser),
+      Permissions::allow_all(),
+    ));
+    let args: super::SpawnArgs =
+      deno_core::serde_json::from_value(deno_core::serde_json::json!({
+        "cmd": cmd.to_str().unwrap(),
+        "args": [],
+        "cwd": null,
+        // Windows programs want `SystemRoot` and the like.
+        "clearEnv": cfg!(unix),
+        "env": [],
+        "gid": null,
+        "uid": null,
+        "windowsRawArguments": false,
+        "ipc": null,
+        "serialization": null,
+        "stdin": "null",
+        "stdout": "null",
+        "stderr": "null",
+        "input": null,
+        "extraStdio": [],
+        "detached": false,
+        "needsNpmProcessState": false,
+        "argv0": null,
+      }))
+      .unwrap();
+    super::create_command(
+      &mut state,
+      args,
+      "Deno.Command().spawn()",
+      false,
+      false,
+    )
+  }
+
+  // The macOS leg of DENEXT.md item 232 (also run on Linux): outside Linux the
+  // spawn runs the program's path, so a program swapped after the check and
+  // before the exec is caught by the compare right after the spawn, which ends
+  // the child and refuses the spawn. A `#!` script runs its path on Linux too.
+  // The same two calls as `spawn_child`.
+  #[cfg(unix)]
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "the file the spawn checks is on the real file system"
+  )]
+  fn a_program_swapped_between_the_check_and_the_exec_is_ended(
+    dir: &std::path::Path,
+  ) {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::ExitStatusExt;
+    let program = dir.join("sleeper");
+    register_program(&program, b"#!/bin/sh\nexec /bin/sleep 30\n");
+    let rt = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
+    rt.block_on(async {
+      // Unchanged: the child runs.
+      let (command, _, _, _, verified) = checked_command(&program);
+      assert!(verified.is_some());
+      let (mut child, _) =
+        super::spawn_command(command, verified.as_ref()).unwrap();
+      assert!(
+        super::refuse_if_changed_since_check(verified, &mut child).is_ok()
+      );
+      assert!(child.try_wait().unwrap().is_none(), "the child runs");
+      child.start_kill().unwrap();
+      child.wait().await.unwrap();
+
+      // Swapped after the check: the spawn is refused and its child ended.
+      let (command, _, _, _, verified) = checked_command(&program);
+      assert!(verified.is_some());
+      let swap = dir.join("swap");
+      std::fs::write(&swap, b"#!/bin/sh\nexec /bin/sleep 31\n").unwrap();
+      std::fs::set_permissions(&swap, std::fs::Permissions::from_mode(0o700))
+        .unwrap();
+      std::fs::rename(&swap, &program).unwrap();
+      let (mut child, _) =
+        super::spawn_command(command, verified.as_ref()).unwrap();
+      let err = super::refuse_if_changed_since_check(verified, &mut child)
+        .expect_err("a program swapped before the exec is refused");
+      assert!(
+        err
+          .to_string()
+          .contains("it changed while it was being started"),
+        "{err}"
+      );
+      let status =
+        tokio::time::timeout(std::time::Duration::from_secs(10), child.wait())
+          .await
+          .expect("the child is ended")
+          .unwrap();
+      assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
+
+      // A change that stays is refused at the next spawn's check, which
+      // removes it; the one after writes the packaged bytes again.
+      assert!(checked_command_result(&program).is_err());
+      assert!(!program.exists());
+      let (_, _, _, _, verified) = checked_command(&program);
+      assert!(verified.is_some());
+      assert_eq!(
+        std::fs::read(&program).unwrap(),
+        b"#!/bin/sh\nexec /bin/sleep 30\n"
+      );
+    });
+  }
+
+  // The Windows leg of DENEXT.md item 232: the check holds the program open
+  // sharing read only, so from the check to the exec nothing can write,
+  // replace or remove it, and the spawn runs what was checked. The same two
+  // calls as `spawn_child`.
+  #[cfg(windows)]
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "the file the spawn checks is on the real file system"
+  )]
+  fn a_held_program_cannot_be_swapped_before_the_exec(dir: &std::path::Path) {
+    let program = dir.join("whoami.exe");
+    let bytes: &'static [u8] = std::fs::read(r"C:\Windows\System32\whoami.exe")
+      .unwrap()
+      .leak();
+    register_program(&program, bytes);
+    let (command, _, _, _, verified) = checked_command(&program);
+    assert!(verified.is_some());
+    let swap = dir.join("swap.exe");
+    std::fs::write(&swap, b"something else").unwrap();
+    assert!(std::fs::rename(&swap, &program).is_err());
+    assert!(std::fs::write(&program, b"something else").is_err());
+    assert!(std::fs::remove_file(&program).is_err());
+    let (mut child, _) =
+      super::spawn_command(command, verified.as_ref()).unwrap();
+    assert!(super::refuse_if_changed_since_check(verified, &mut child).is_ok());
+    let status = child.wait_blocking().unwrap();
+    assert!(status.success(), "{status:?}");
+    assert_eq!(std::fs::read(&program).unwrap(), bytes);
+    // Released once the spawn returned.
+    std::fs::rename(&swap, &program).unwrap();
   }
 
   // One test: the registrations are process-wide, and the checks before

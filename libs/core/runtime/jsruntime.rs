@@ -3663,6 +3663,45 @@ impl JsRuntime {
     Ok(())
   }
 
+  /// Closes a native callback the way Node's `InternalCallbackScope` does:
+  /// once a callback that native code started from the event loop (a libuv
+  /// connection or connect callback, say) returns with no JavaScript left on
+  /// the stack, its `process.nextTick` callbacks and microtasks run before
+  /// the next native callback starts. Without this, every callback of one I/O
+  /// batch runs first and their ticks only after all of them.
+  ///
+  /// Call it inside a `TryCatch`: an exception thrown while draining is left
+  /// pending in that scope. It does nothing while JavaScript is still on the
+  /// stack (a callback that native code ran synchronously from an op).
+  pub fn drain_ticks_after_native_callback(scope: &mut v8::PinScope) {
+    if v8::StackTrace::current_stack_trace(scope, 1)
+      .is_some_and(|trace| trace.get_frame_count() > 0)
+    {
+      return;
+    }
+    let context_state = JsRealm::state_from_scope(scope);
+    if !context_state.has_tick_scheduled()
+      && !context_state.has_rejection_to_warn()
+    {
+      scope.perform_microtask_checkpoint();
+      if !context_state.has_tick_scheduled()
+        && !context_state.has_rejection_to_warn()
+      {
+        return;
+      }
+    }
+    let drain_fn = {
+      let drain_cb =
+        context_state.js_drain_next_tick_and_macrotasks_cb.borrow();
+      let Some(drain_cb) = drain_cb.as_ref() else {
+        return;
+      };
+      v8::Local::new(scope, drain_cb)
+    };
+    let undefined: v8::Local<v8::Value> = v8::undefined(scope).into();
+    drain_fn.call(scope, undefined, &[]);
+  }
+
   /// Drain nextTick queue and macrotask queue (no op resolution).
   /// Used when ticks are pending but no async ops completed.
   ///

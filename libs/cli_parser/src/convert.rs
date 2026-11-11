@@ -885,10 +885,23 @@ fn v8_flags_arg_parse(result: &ParseResult, flags: &mut Flags) {
   }
 }
 
+/// The seed `--deterministic` uses when `--seed` does not set one. Not 0:
+/// V8 reads `--random-seed=0` as "no fixed seed".
+pub const DETERMINISTIC_DEFAULT_SEED: u64 = 1;
+
 fn seed_arg_parse(result: &ParseResult, flags: &mut Flags) {
-  if let Some(seed_str) = result.get_one("seed")
-    && let Ok(seed) = seed_str.parse::<u64>()
-  {
+  // `--deterministic` is `--seed` with a default seed (upstream #35718 phase
+  // 2): the seed also pins the time zone and the locale. An explicit `--seed`
+  // wins.
+  let seed = result
+    .get_one("seed")
+    .and_then(|seed_str| seed_str.parse::<u64>().ok())
+    .or_else(|| {
+      result
+        .get_bool("deterministic")
+        .then_some(DETERMINISTIC_DEFAULT_SEED)
+    });
+  if let Some(seed) = seed {
     flags.seed = Some(seed);
     flags.v8_flags.push(format!("--random-seed={seed}"));
   }

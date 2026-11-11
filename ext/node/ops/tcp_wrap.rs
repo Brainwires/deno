@@ -34,6 +34,7 @@ use crate::ops::handle_wrap::OwnedPtr;
 use crate::ops::handle_wrap::ProviderType;
 use crate::ops::stream_wrap::LibUvStreamWrap;
 use crate::ops::stream_wrap::clone_context_from_uv_loop;
+use crate::ops::stream_wrap::make_native_callback;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
@@ -113,7 +114,7 @@ pub(crate) unsafe extern "C" fn server_connection_cb(
     {
       let status_val: v8::Local<v8::Value> =
         v8::Integer::new(scope, status).into();
-      func.call(scope, this.into(), &[status_val]);
+      make_native_callback(scope, func, this.into(), &[status_val]);
     }
   });
 }
@@ -156,8 +157,9 @@ unsafe extern "C" fn connect_cb(req: *mut UvConnect, status: i32) {
         v8::Boolean::new(scope, status == 0).into();
       let writable: v8::Local<v8::Value> =
         v8::Boolean::new(scope, status == 0).into();
-      func.call(
+      make_native_callback(
         scope,
+        func,
         js_req.into(),
         &[status_val, this.into(), js_req.into(), readable, writable],
       );
