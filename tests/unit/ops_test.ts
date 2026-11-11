@@ -14,7 +14,7 @@
 // removeImportedOps() like upstream's own desktop ops.
 // Plus 9 for Vitest compatibility (`deno test`, item 23):
 // op_test_set_import_meta_proto and the eight op_vitest_* ops.
-const EXPECTED_OP_COUNT = 125;
+const EXPECTED_OP_COUNT = 128;
 // The main scope minus WORKER_EXCLUDED_OPS in 99_main.js: upstream strips the
 // two text-clipboard ops from workers, and the fork strips every new
 // main-scope-only desktop op (69) and the native classes that need the
