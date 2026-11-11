@@ -13492,6 +13492,27 @@ where the changes are discussed.
      - Node tests enabled: none (a Deno permission gate; Node has no
        per-worker permissions to test it against).
 
+349. **`fix(install)`: the jail's built-in host grants open port 443 only**
+     (CLI only; `cli/supply_chain/{builtin_exceptions,jail}.rs`). Item 288's
+     built-in exceptions (GitHub's release hosts, `storage.googleapis.com`,
+     `nodejs.org`, the packages' CDNs) and the hosts a declared GitHub download
+     host redirects to were granted by name, on every port, so an approved
+     script could tunnel to any port of those hosts through the jail's proxy
+     (`CONNECT github.com:22`). Every built-in host is now `host:443`: the
+     proxy refuses another port by CONNECT or forwarded `http://` request. A
+     declared download host that only the built-in list of reviewed hosts
+     approves is granted on port 443 alone (a declaration with another port is
+     refused). Hosts the project lists itself (`jailScripts.packages`,
+     `knownPackages`) keep their meaning: a bare host is any port. The failure
+     hint's mirror line carries the pinned hosts. Every host a script may
+     reach is also a way out for what it can read, so a built-in grant stays
+     as narrow as the download needs.
+     - Tests: `builtin_exceptions.rs` `builtin_hosts_are_pinned_to_443`,
+       `jail_proxy.rs` `builtin_hosts_only_on_443` (fails before:
+       `github.com 22` allowed), `jail.rs` expectations, spec
+       `npm/supply_chain_jail` `builtin_exception_hosts`.
+     - Node tests enabled: none (installer jail, no Node API).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

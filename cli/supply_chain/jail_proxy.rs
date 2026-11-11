@@ -1603,6 +1603,42 @@ mod tests {
     assert!(response.starts_with("HTTP/1.1 400 "), "{response}");
   }
 
+  // a built-in exception's hosts open their HTTPS port only: no other port,
+  // by CONNECT or forwarded, while a project's own `host` stays any port
+  #[tokio::test]
+  async fn builtin_hosts_only_on_443() {
+    use crate::supply_chain::builtin_exceptions::builtin_exception;
+    for name in ["better-sqlite3", "@tensorflow/tfjs-node", "chromedriver"] {
+      let hosts = builtin_exception(name).unwrap().host_list();
+      let allow = AllowList::parse(&hosts).unwrap();
+      for entry in &hosts {
+        let (name, _) = split_host_port(entry).unwrap();
+        assert!(allow.allows(&host(name), 443), "{entry}");
+        for port in [22, 80, 8443] {
+          assert!(!allow.allows(&host(name), port), "{entry} {port}");
+        }
+      }
+    }
+    let allow =
+      AllowList::parse(&builtin_exception("sharp").unwrap().host_list())
+        .unwrap();
+    let proxy = JailProxy::start(allow, Upstream::default()).await.unwrap();
+    for request in [
+      "CONNECT github.com:22 HTTP/1.1\r\nHost: github.com:22\r\n\r\n",
+      "CONNECT objects.githubusercontent.com:8443 HTTP/1.1\r\n\r\n",
+      "GET http://nodejs.org/x HTTP/1.1\r\nHost: nodejs.org\r\n\r\n",
+    ] {
+      let response = roundtrip(proxy.port(), request).await;
+      assert!(
+        response.starts_with("HTTP/1.1 403 "),
+        "{request}: {response}"
+      );
+    }
+    // the project's own `github.com` keeps meaning every port
+    let own = list(&["github.com"]);
+    assert!(own.allows(&host("github.com"), 22));
+  }
+
   #[tokio::test]
   async fn tunnels_allowed() {
     let (origin_port, origin) =
