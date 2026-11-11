@@ -405,12 +405,46 @@ fn kill_process(pid: u32) {
     unsafe {
       libc::kill(pid as i32, libc::SIGKILL);
     }
+    // denext: the command runs as the leader of its own process group (see
+    // `TestCommandBuilder::run`), so this also reaches a grandchild that
+    // `pkill -P` misses: one whose parent already exited (it was reparented)
+    // and that still holds the output pipe.
+    // SAFETY: a negative pid sends SIGKILL to the group the spawned command
+    // leads; ESRCH (the group is gone) is ignored.
+    unsafe {
+      libc::kill(-(pid as i32), libc::SIGKILL);
+    }
   }
   #[cfg(not(unix))]
   {
     let _ = std::process::Command::new("taskkill")
       .args(["/F", "/T", "/PID", &pid.to_string()])
       .output();
+  }
+}
+
+/// Joins a thread reading one of a test command's output pipes. Blocks until
+/// the pipe reports EOF, or, once the timeout watchdog has `fired` (it killed
+/// the command's process group), waits a few more seconds and then gives up
+/// with `None`: whatever still holds the pipe left the group (denext).
+fn join_pipe_reader(
+  handle: std::thread::JoinHandle<String>,
+  fired: &std::sync::atomic::AtomicBool,
+) -> Option<String> {
+  const AFTER_KILL: Duration = Duration::from_secs(5);
+  let mut killed_at: Option<Instant> = None;
+  loop {
+    if handle.is_finished() {
+      return Some(handle.join().unwrap());
+    }
+    if fired.load(std::sync::atomic::Ordering::SeqCst) {
+      let at = *killed_at.get_or_insert_with(Instant::now);
+      if at.elapsed() >= AFTER_KILL {
+        // The reader thread stays blocked on the pipe; it is detached.
+        return None;
+      }
+    }
+    std::thread::sleep(Duration::from_millis(20));
   }
 }
 
@@ -778,6 +812,15 @@ impl TestCommandBuilder {
       (Some(combined_reader), None)
     };
 
+    // denext: with a timeout, the command leads its own process group, so the
+    // watchdog can kill everything it started (see `kill_process`), not only
+    // the direct child.
+    #[cfg(unix)]
+    if self.timeout.is_some() {
+      use std::os::unix::process::CommandExt;
+      command.process_group(0);
+    }
+
     let mut process = command.spawn().expect("Failed spawning command");
 
     if let Some(input) = &self.stdin_text {
@@ -794,9 +837,16 @@ impl TestCommandBuilder {
     // Set up a watchdog thread that kills the process if it exceeds the timeout.
     // Uses a channel: dropping the sender signals the watchdog to stop. If
     // recv_timeout hits the deadline first, the process is killed.
+    // denext: the watchdog stays armed until the output pipes are drained, not
+    // only until the direct child exits: a grandchild that outlives it and
+    // holds a pipe would otherwise block the read forever (a 45 s spec that
+    // ran 79 minutes). `fired` lets the reads below give up once the kill has
+    // had time to land.
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let timeout_handle = self.timeout.map(|timeout| {
       let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<()>();
       let pid = process.id();
+      let fired = fired.clone();
       let handle =
         spawn_thread(move || match cancel_rx.recv_timeout(timeout) {
           Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -804,35 +854,51 @@ impl TestCommandBuilder {
           }
           Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             eprintln!(
-              "Test command timed out after {:?}, killing pid {}",
+              "Test command timed out after {:?}, killing pid {} and its process group",
               timeout, pid
             );
             kill_process(pid);
+            fired.store(true, std::sync::atomic::Ordering::SeqCst);
             true
           }
         });
       (cancel_tx, handle)
     });
 
-    let combined = combined_reader.map(|pipe| {
-      sanitize_output(read_pipe_to_string(pipe, self.show_output), &args)
-    });
+    let show_output = self.show_output;
+    let combined_handle = combined_reader
+      .map(|pipe| spawn_thread(move || read_pipe_to_string(pipe, show_output)));
 
     let status = process.wait().unwrap();
+    let combined = combined_handle
+      .map(|handle| join_pipe_reader(handle, &fired))
+      .map(|text| text.map(|text| sanitize_output(text, &args)));
+    let std_out_err = std_out_err_handle.map(|(stdout, stderr)| {
+      (
+        join_pipe_reader(stdout, &fired).map(|t| sanitize_output(t, &args)),
+        join_pipe_reader(stderr, &fired).map(|t| sanitize_output(t, &args)),
+      )
+    });
     // Drop the sender to cancel the watchdog, then check if it timed out
     if let Some((cancel_tx, handle)) = timeout_handle {
       drop(cancel_tx);
       let timed_out = handle.join().unwrap_or(true);
       if timed_out {
+        let pipe_held = combined.as_ref().is_some_and(|c| c.is_none())
+          || std_out_err
+            .as_ref()
+            .is_some_and(|(o, e)| o.is_none() || e.is_none());
+        if pipe_held {
+          panic!(
+            "Test command timed out, and a process outside its process group still holds its output pipe"
+          );
+        }
         panic!("Test command timed out");
       }
     }
-    let std_out_err = std_out_err_handle.map(|(stdout, stderr)| {
-      (
-        sanitize_output(stdout.join().unwrap(), &args),
-        sanitize_output(stderr.join().unwrap(), &args),
-      )
-    });
+    let combined = combined.map(|c| c.unwrap_or_default());
+    let std_out_err =
+      std_out_err.map(|(o, e)| (o.unwrap_or_default(), e.unwrap_or_default()));
     let exit_code = status.code();
     #[cfg(unix)]
     let signal = {
@@ -1418,5 +1484,53 @@ impl TestCommandOutput {
       .writeln(format!("output path {}", output_path));
     let expected_text = output_path.read_to_string();
     self.inner_assert_matches_text(actual, expected_text)
+  }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+  use super::*;
+
+  // denext: a timed-out command whose grandchild outlives it and holds the
+  // output pipe is killed with its whole process group and reported, instead
+  // of blocking the read forever (the `specs::task::signals` hang).
+  #[test]
+  fn timeout_kills_a_grandchild_that_holds_the_pipe() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let started = Instant::now();
+    spawn_thread(move || {
+      let result = std::panic::catch_unwind(|| {
+        TestCommandBuilder::new(TempDir::new())
+          .name("sh")
+          // The shell exits at once; its background `sleep` is reparented
+          // and keeps the combined output pipe open.
+          .args_vec(["-c", "sleep 120 & echo started"])
+          .timeout(Duration::from_secs(2))
+          .run();
+      });
+      let _ = tx.send(result);
+    });
+    let result = rx
+      .recv_timeout(Duration::from_secs(30))
+      .expect("the run hung on the pipe a grandchild holds");
+    let panic = result.expect_err("the run should report the timeout");
+    let message = panic
+      .downcast_ref::<&str>()
+      .map(|s| s.to_string())
+      .or_else(|| panic.downcast_ref::<String>().cloned())
+      .unwrap_or_default();
+    assert_eq!(message, "Test command timed out");
+    assert!(started.elapsed() < Duration::from_secs(30));
+  }
+
+  #[test]
+  fn timeout_does_not_fire_for_a_command_that_ends() {
+    let output = TestCommandBuilder::new(TempDir::new())
+      .name("sh")
+      .args_vec(["-c", "echo done"])
+      .timeout(Duration::from_secs(30))
+      .run();
+    output.assert_exit_code(0);
+    assert_eq!(output.combined_output(), "done\n");
   }
 }

@@ -1,1 +1,3 @@
-true PTY support on Windows is not available yet
+pid true
+saw the output true
+exit 0

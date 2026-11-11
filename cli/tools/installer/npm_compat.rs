@@ -827,7 +827,10 @@ fn read_import_map_file(
 /// (and subpath exports) to its local source files, so stock tooling resolves
 /// e.g. `@std/assert` and `@std/assert/equals` to `../assert/mod.ts` and
 /// `../assert/equals.ts` rather than a published copy. Paths are relative to
-/// the generated `.deno/tsconfig.json`.
+/// the generated `.deno/tsconfig.json`. The workspace root is a package too
+/// when its own `deno.json` has a `name` and `exports`, as Deno treats it
+/// (denext): a member importing it (`"@scope/root": "jsr:@scope/root@^1"`)
+/// gets the root's local sources, not the published types.
 fn workspace_member_paths(
   project_root: &Path,
   deno_json: &Value,
@@ -837,47 +840,61 @@ fn workspace_member_paths(
   else {
     return paths;
   };
+  add_package_export_paths(&mut paths, None, deno_json);
   let member_patterns: Vec<&str> =
     members.iter().filter_map(|m| m.as_str()).collect();
   for member_rel in expand_member_patterns(project_root, &member_patterns) {
-    let member_rel = member_rel.as_str();
-    let Some(member_json) = read_deno_json(&project_root.join(member_rel))
+    let Some(member_json) = read_deno_json(&project_root.join(&member_rel))
       .ok()
       .flatten()
     else {
       continue;
     };
-    let Some(name) = member_json.get("name").and_then(|n| n.as_str()) else {
-      continue;
-    };
-    let Some(exports) = member_json.get("exports") else {
-      continue;
-    };
-    let mut add = |sub: &str, file: &str| {
-      let file = file.trim_start_matches("./");
-      let target = format!("../{member_rel}/{file}");
-      let key = if sub == "." {
-        name.to_string()
-      } else {
-        format!("{name}/{}", sub.trim_start_matches("./"))
-      };
-      paths.insert(key, json!([target]));
-    };
-    match exports {
-      // `"exports": "./mod.ts"`
-      Value::String(file) => add(".", file),
-      // `"exports": { ".": "./mod.ts", "./x": "./x.ts" }`
-      Value::Object(map) => {
-        for (sub, target) in map {
-          if let Some(file) = target.as_str() {
-            add(sub, file);
-          }
-        }
-      }
-      _ => {}
-    }
+    add_package_export_paths(&mut paths, Some(&member_rel), &member_json);
   }
   paths
+}
+
+/// The `paths` entries of one workspace package: its `name` and each of its
+/// `exports`, mapped to the files under `member_rel` (the project root when
+/// `None`), relative to `.deno/`. A package with no name or exports adds none.
+fn add_package_export_paths(
+  paths: &mut serde_json::Map<String, Value>,
+  member_rel: Option<&str>,
+  package_json: &Value,
+) {
+  let Some(name) = package_json.get("name").and_then(|n| n.as_str()) else {
+    return;
+  };
+  let Some(exports) = package_json.get("exports") else {
+    return;
+  };
+  let mut add = |sub: &str, file: &str| {
+    let file = file.trim_start_matches("./");
+    let target = match member_rel {
+      Some(member_rel) => format!("../{member_rel}/{file}"),
+      None => format!("../{file}"),
+    };
+    let key = if sub == "." {
+      name.to_string()
+    } else {
+      format!("{name}/{}", sub.trim_start_matches("./"))
+    };
+    paths.insert(key, json!([target]));
+  };
+  match exports {
+    // `"exports": "./mod.ts"`
+    Value::String(file) => add(".", file),
+    // `"exports": { ".": "./mod.ts", "./x": "./x.ts" }`
+    Value::Object(map) => {
+      for (sub, target) in map {
+        if let Some(file) = target.as_str() {
+          add(sub, file);
+        }
+      }
+    }
+    _ => {}
+  }
 }
 
 /// The `imports` of each workspace member's `deno.json`, a relative target
@@ -2115,6 +2132,55 @@ mod tests {
     .unwrap();
     assert_eq!(imports.get("~/shared/"), Some(&json!("./../shared/")));
     assert_eq!(imports.get("x"), Some(&json!("npm:x@1")));
+  }
+
+  // denext: the workspace root with a `name` and `exports` is a package its
+  // members can import; its exports map to the root's own files, and a
+  // member's alias to its published version resolves to them.
+  #[test]
+  fn test_workspace_member_paths_include_the_root_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("packages/plugin")).unwrap();
+    std::fs::write(
+      root.join("packages/plugin/deno.json"),
+      r#"{ "name": "@scope/plugin", "exports": "./mod.ts",
+           "imports": { "@scope/root": "jsr:@scope/root@^4.15.0" } }"#,
+    )
+    .unwrap();
+    let root_json = json!({
+      "name": "@scope/root",
+      "exports": { ".": "./mod.ts", "./markdown": "./src/markdown.ts" },
+      "workspace": ["./packages/plugin"],
+    });
+    let mut paths = workspace_member_paths(root, &root_json);
+    assert_eq!(paths.get("@scope/root"), Some(&json!(["../mod.ts"])));
+    assert_eq!(
+      paths.get("@scope/root/markdown"),
+      Some(&json!(["../src/markdown.ts"]))
+    );
+    assert_eq!(
+      paths.get("@scope/plugin"),
+      Some(&json!(["../packages/plugin/mod.ts"]))
+    );
+    assert_eq!(paths.len(), 3);
+
+    let alias_targets = vec![(
+      "@scope/root".to_string(),
+      "jsr:@scope/root@^4.15.0".to_string(),
+    )];
+    add_member_alias_paths(&mut paths, &alias_targets);
+    assert_eq!(
+      paths.get("@scope/root/markdown"),
+      Some(&json!(["../src/markdown.ts"]))
+    );
+
+    // a root without a name (only a workspace) adds nothing of its own
+    let paths = workspace_member_paths(
+      root,
+      &json!({ "exports": "./mod.ts", "workspace": ["./packages/plugin"] }),
+    );
+    assert_eq!(paths.len(), 1);
   }
 
   #[test]

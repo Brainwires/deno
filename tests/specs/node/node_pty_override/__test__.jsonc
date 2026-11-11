@@ -6,8 +6,8 @@
   // Windows one that carries the addon loads it, as on Node
   // (`addon_present_loads_the_package`). The package here is a stand-in whose
   // own code would throw, as the real one's addon load does. Unix only: the
-  // shell these drive is `sh`. On Windows the runtime's pty is not available yet
-  // (DENEXT.md item 259): `windows_not_supported` checks that spawn says so.
+  // shell these drive is `sh`. On Windows a package without the addon runs on
+  // the runtime's ConPTY (DENEXT.md item 259): `windows_spawn`.
   "tempDir": true,
   "tests": {
     "addon_present_uses_the_runtime": {
@@ -61,7 +61,7 @@
       "output": "no_run.out",
       "exitCode": 1
     },
-    "windows_not_supported": {
+    "windows_spawn": {
       "if": "windows",
       "args": "run -A windows.cjs",
       "output": "windows.out"

@@ -337,6 +337,33 @@ fn init() -> Handle {
   Handle(handle)
 }
 
+/// How long the Windows console control handler holds a close (2), logoff (5)
+/// or shutdown (6) event that a listener `handled`, so the listener can finish
+/// (drain) before Windows ends the process, which it does once the handler
+/// returns (denext). Windows itself ends a process about 5 s after a close
+/// and 20 s after a logoff or shutdown, so the hold never extends that.
+/// `None` for Ctrl+C (0) and Ctrl+Break (1), which don't end the process when
+/// handled, and for an event no listener took over.
+#[cfg(any(windows, test))]
+fn console_ctrl_hold(
+  ctrl_type: u32,
+  handled: bool,
+) -> Option<std::time::Duration> {
+  const CTRL_CLOSE_EVENT: u32 = 2;
+  const CTRL_LOGOFF_EVENT: u32 = 5;
+  const CTRL_SHUTDOWN_EVENT: u32 = 6;
+  if !handled {
+    return None;
+  }
+  match ctrl_type {
+    CTRL_CLOSE_EVENT => Some(std::time::Duration::from_secs(5)),
+    CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
+      Some(std::time::Duration::from_secs(20))
+    }
+    _ => None,
+  }
+}
+
 #[cfg(windows)]
 fn init() -> Handle {
   unsafe extern "system" fn handle(ctrl_type: u32) -> i32 {
@@ -351,6 +378,14 @@ fn init() -> Handle {
     count_arrival(signal);
     count_delivery(signal);
     let handled = handle_signal(signal);
+    // denext: Windows ends the process as soon as the handler returns from a
+    // close, logoff or shutdown event. When a listener took the signal over
+    // (a server draining its requests on SIGHUP / SIGTERM), keep the handler
+    // here until the listener ends the process, at most as long as Windows
+    // waits anyway.
+    if let Some(hold) = console_ctrl_hold(ctrl_type, handled) {
+      std::thread::sleep(hold);
+    }
     handled as _
   }
 
@@ -669,6 +704,32 @@ async fn ctrl_c_inner(mut stream: SignalStream) -> std::io::Result<()> {
   match stream.recv().await {
     Some(_) => Ok(()),
     None => Err(std::io::Error::other("failed to receive SIGINT signal")),
+  }
+}
+
+#[cfg(test)]
+mod console_ctrl_tests {
+  use std::time::Duration;
+
+  use super::console_ctrl_hold;
+
+  // denext: a handled close / logoff / shutdown holds the Windows console
+  // handler (Windows ends the process when it returns) for the time Windows
+  // gives; Ctrl+C, Ctrl+Break and unhandled events return at once.
+  #[test]
+  fn holds_a_handled_close_logoff_or_shutdown() {
+    assert_eq!(console_ctrl_hold(2, true), Some(Duration::from_secs(5)));
+    assert_eq!(console_ctrl_hold(5, true), Some(Duration::from_secs(20)));
+    assert_eq!(console_ctrl_hold(6, true), Some(Duration::from_secs(20)));
+  }
+
+  #[test]
+  fn returns_at_once_otherwise() {
+    for ctrl_type in [0, 1, 2, 5, 6] {
+      assert_eq!(console_ctrl_hold(ctrl_type, false), None);
+    }
+    assert_eq!(console_ctrl_hold(0, true), None);
+    assert_eq!(console_ctrl_hold(1, true), None);
   }
 }
 

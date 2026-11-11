@@ -24,8 +24,14 @@ ignore = [
   # the Windows debug test binaries ("unresolved external symbol
   # __imp__wassert" from zlib-ng's SIMD objects, LNK1120), and node:zlib
   # (ext/node/ops/zlib) uses the raw zlib C API through libz-sys, so a
-  # flate2 backend switch cannot replace it. Remove this entry when libz-sys
-  # links on Windows, and before cc 1.6 enters Cargo.lock
+  # flate2 backend switch cannot replace it. 1.1.32 / 1.1.33 (2026-11) only
+  # move the bundled zlib (not compiled here) and still build zlib-ng with
+  # CMake: its newer `cmake_minimum_required(VERSION 3.14...3.31.0)` turns on
+  # policy CMP0091, so CMake picks the DLL C runtime (/MDd in a debug build)
+  # past the cmake crate's /MT flags, which a +crt-static link cannot resolve
+  # (the `__imp_` symbols). Remove this entry when libz-sys (or the cmake
+  # crate) sets CMAKE_MSVC_RUNTIME_LIBRARY for a static CRT, and before cc 1.6
+  # enters Cargo.lock
   # (.github/denext-runtime/audit_ignores.py fails the cargo-audit job when
   # it does).
   "RUSTSEC-2026-0418",

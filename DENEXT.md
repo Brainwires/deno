@@ -12644,6 +12644,109 @@ NNN. **`feat(npm)`: the supply-chain checks read OSV past its first page, check
      - Node tests enabled: none, because these are the package manager's
        checks, not a Node API.
 
+NNN. **`feat(pty)`: `Deno.openPty` on Windows (ConPTY)** (`d19/platform`,
+runtime; `ext/pty/{lib,windows}.rs`, `tests/unit/pty_test.ts`,
+`tests/specs/run/pty_redirected_stdio`, `tests/specs/node/node_pty_override`). -
+`Deno.openPty`, `Deno.Command` with `pty` and the `node-pty` shim's `spawn` run
+on Windows (10 1809 and later): `WINDOWS_CONPTY_ENABLED` and the `NotSupported`
+answer of item 259 are gone. - The cause of item 259's "ConPTY diagnosis" 1 is
+fixed: `UpdateProcThreadAttribute` got a pointer to a local copy of the `HPCON`
+as `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`'s value, and the attribute list keeps
+that pointer until `CreateProcessW` reads it, after the copy was gone; it now
+gets the handle itself (as Microsoft's sample passes it), which the
+`PseudoConsole` keeps alive. That stack slot is what left the child's output off
+the pipe (x64) or failed its start with `STATUS_DLL_INIT_FAILED` (arm64). - The
+dispose test no longer reads the child's output before it disposes (diagnosis
+2): its Windows child is `pause >nul`, which neither writes nor exits, and the
+dispose ends it. - Tests: on Windows the shell-agnostic `pty_test.ts` cases run
+(echo round trip, exit code, dispose, `readable` ending with the child, size
+checks, `--allow-run` denied, a missing program, a NUL argument, `Deno.Command`
+with `pty`), plus `ptyInputReachesTheChildOnWindows` (`set /p` reads what
+`writable` sends, after a resize), `ptyKillEndsTheChildOnWindows`
+(`TerminateProcess`, exit code 1, the output ends) and the batch-file argument
+test; `ptyIsNotSupportedOnWindows` is removed. The spec
+`run/pty_redirected_stdio` runs again, and `node/node_pty_override`'s
+`windows_spawn` spawns through node-pty (before: `windows_not_supported`).
+`windows.rs`' `pseudoconsole_attribute_value_is_the_handle`. These run on the
+train's Windows legs only (no Windows machine here; a cross `cargo check` for
+`x86_64-pc-windows-msvc` stops at C dependencies that need the Windows SDK). Not
+done: denext's `pty` desktop capability (denext repository). Node tests enabled:
+none, because node-pty is not part of Node's suite.
+
+NNN. **`fix(signals)`: on Windows, a console close, logoff or shutdown waits for
+the listener that took it** (`d19/platform`, runtime; `ext/signals/lib.rs`). -
+Windows ends a console process as soon as its control handler returns from
+`CTRL_CLOSE_EVENT`, `CTRL_LOGOFF_EVENT` or `CTRL_SHUTDOWN_EVENT`, and the
+handler returned at once, so a server's `SIGHUP` / `SIGTERM` listener (a drain)
+was cut off. When a listener took the signal over, the handler now stays until
+the listener ends the process, at most 5 s for a close and 20 s for a logoff or
+shutdown (what Windows gives a console process anyway). Ctrl+C and Ctrl+Break,
+which do not end the process when handled, and events no listener took return at
+once, as before. - Tests: `console_ctrl_tests` (the hold for each event, handled
+or not); the Windows handler itself runs on the train's Windows legs. Node tests
+enabled: none, because Node's suite has no console control event test.
+
+NNN. **`fix(task)`: `deno task` listens for every signal before it starts the
+task; the specs harness kills a timed-out command's whole process group**
+(`d19/platform`, runtime and tests; `cli/task_runner.rs`,
+`tests/util/lib/builders.rs`, `tests/specs/task/signals`). - `deno task`
+registered its signal forwarders in futures that first ran after the task's
+first child had been spawned, so a signal arriving in between got its default
+action in `deno task` itself (a `SIGTERM` ended it and orphaned the child; a
+default-ignored one such as `SIGWINCH` was never forwarded). The streams are now
+registered before the task runs, and Ctrl+C keeps one stream for the task's
+life. - `specs::task::signals` ran 79 minutes past its 45 s timeout in the
+denext.17 gate run: the spec's listener (a grandchild, `deno task`'s child) held
+the spec's output pipe after the sender's own 30 s timeout killed only
+`deno task`, and the harness read the pipe before waiting, so its watchdog's
+kill of the direct child never ended the read. Now a command with a timeout
+leads its own process group, the watchdog kills the group (a reparented
+grandchild too) and stays armed until the output pipes are drained, and a pipe
+something outside the group still holds is given up 5 s after the kill and
+reported. The spec's sender kills the listener too on its own timeout and says
+which signal it was waiting for. - Tests:
+`builders::tests::timeout_kills_a_grandchild_that_holds_the_pipe` (a
+backgrounded `sleep` that outlives its shell: reported in 2 s; before, the run
+blocked until the sleep ended) and
+`timeout_does_not_fire_for_a_command_that_ends`;
+`task_runner::test::signals_are_listened_to_before_the_task_runs` (a signal
+raised in the task's first poll is taken; before, `(false,
+     false)`). Node
+tests enabled: none, because `deno task` is not a Node feature.
+
+NNN. **`fix(check)`: the native type check resolves the workspace root's own
+package locally** (`d19/platform`, CLI; `cli/tools/installer/npm_compat.rs`). -
+A workspace root whose `deno.json` has a `name` and `exports` is a package its
+members can import, as Deno resolves it, but the generated `paths` mapped only
+the members' packages: a member importing the root
+(`"@scope/root": "jsr:@scope/root@^4"`) was checked against the root's published
+JSR types, and a subpath the root adds in the same change failed with TS2307
+(stock Deno 2.9.8 resolves it locally). The root's exports now join the member
+paths, so an alias to its published version maps to the local files too. -
+Tests: `test_workspace_member_paths_include_the_root_package`. Node tests
+enabled: none, because this is Deno's type check.
+
+NNN. **`test(core)`: `test_rebuild_async_stubs` skips when no `deno` is on
+`PATH`** (`d19/platform`; `libs/core/lib.rs`). - It printed that it was ignoring
+itself and then ran `deno` anyway, panicking on the spawn. It now returns there.
+Before:
+`called Result::unwrap() on an Err value: Os {
+     code: 2, kind: NotFound }`
+with `deno` off `PATH`; after: passes. Node tests enabled: none, because this is
+a `deno_core` unit test.
+
+NNN. **`test`: a flaky test's failed attempt prints its output on CI**
+(`d19/platform`; `tests/util/lib/test_runner.rs`). - A test marked flaky that
+failed and then passed on a retry logged only "was flaky on run N", so the cause
+of `worker_coverage2`'s, the watcher tests' and the inspector tests' flakes
+never reached a log (the denext.11 to denext.18 runs show the retries and
+nothing else). The failed attempt's captured output (each failed sub test's,
+named; its last 8 KiB) now follows that line. `worker_coverage2` did not fail in
+90 local runs (30 serial, 60 ten at a time), so its cause is left to the next
+logged flake rather than guessed. - Tests:
+`flaky_failure_output_is_the_failed_attempts`. Node tests enabled: none, because
+this is the test harness.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

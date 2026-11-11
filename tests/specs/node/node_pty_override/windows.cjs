@@ -1,10 +1,16 @@
-// Windows: the runtime's pty is not available there yet (DENEXT.md item
-// 259), so node-pty's spawn throws the runtime's NotSupported error.
+// Windows: node-pty's spawn runs on the runtime's ConPTY (DENEXT.md item
+// 259). The output is a console's rendering (VT sequences around the text),
+// so only the text is checked.
 const pty = require("node-pty");
 
-try {
-  pty.spawn("cmd.exe", ["/d", "/c", "echo hi"], {});
-  console.log("spawned");
-} catch (err) {
-  console.log(err instanceof Deno.errors.NotSupported, err.message);
-}
+const term = pty.spawn("cmd.exe", ["/d", "/c", "echo hi from conpty"], {
+  cols: 80,
+  rows: 24,
+});
+console.log("pid", term.pid > 0);
+let out = "";
+term.onData((data) => out += data);
+term.onExit(({ exitCode }) => {
+  console.log("saw the output", out.includes("hi from conpty"));
+  console.log("exit", exitCode);
+});

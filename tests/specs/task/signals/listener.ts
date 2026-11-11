@@ -13,4 +13,6 @@ setInterval(() => {
   // keep alive
 }, 1000);
 
-console.log("Ready");
+// The pid lets the sender kill this process too if the test times out: it
+// is `deno task`'s child, which a kill of `deno task` alone would orphan.
+console.log("Ready", Deno.pid);
