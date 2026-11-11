@@ -13130,6 +13130,21 @@ where the changes are discussed.
      - User-facing note: none; release engineering only.
      - Node tests enabled: none, because this is CI only.
 
+335. **`ci(denext)`: the test harness's own tests run in CI** (`d21/ci-gaps`;
+     CI; `.github/workflows/denext_tests_os.yml`). The lib tests of crate
+     `test_util` (`tests/util/lib`) ran in no CI job, so the tests behind items
+     316 and 319 (a timed-out command is killed with its process group,
+     including a grandchild that holds the output pipe; a flaky test's failure
+     output is the failed attempts') could rot unnoticed. `-p test_util` joins
+     the `Test libs` invocation (and its one-thread rerun and the macOS
+     LaunchServices run, which keep the same crate set) on every OS leg. Its 25
+     tests pass on macOS arm64 with the binary under a `target/` directory, as
+     in CI (`root_path()` looks for one; a target directory with another name
+     fails the two `builders` tests with `Option::unwrap()` on `None`). The
+     process-group tests are Unix-only (`#[cfg(all(test, unix))]`).
+     - User-facing note: none; CI only.
+     - Node tests enabled: none, because this is CI only.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
