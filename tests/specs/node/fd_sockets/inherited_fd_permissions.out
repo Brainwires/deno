@@ -1,0 +1,13 @@
+worker listen fd 3: EPERM
+worker socket fd 4: EPERM
+main read pipe: pipe payload
+main listening on fd 3
+parent got: hello from fd 3 | child exit 0
+child error EPERM
+parent got: (not listening) | no-net child exit 1
+--allow-read: refused: EPERM
+pipe child exit 0
+--allow-read --allow-write: read: pipe payload
+pipe child exit 0
+file: refused: ERR_INVALID_FD_TYPE
+file child exit 0

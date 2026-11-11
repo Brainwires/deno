@@ -1,11 +1,18 @@
 // The child inherits its terminal (a pty) as fd 3 from a shell, the way a
 // terminal library hands a pty to a program, and reads it with
-// `tty.ReadStream(3)` holding no permissions: an inherited fd is gated like
-// stdio.
+// `tty.ReadStream(3)`. An inherited terminal needs read and write access to
+// everything, as any other descriptor `TTY(fd)` wraps; the flags given to
+// this script are the child's.
 const child = new URL("./pty_fd_child.mjs", import.meta.url).pathname;
 const pty = Deno.openPty({
   cmd: "sh",
-  args: ["-c", 'exec "$0" run "$1" 3<>/dev/tty', Deno.execPath(), child],
+  args: [
+    "-c",
+    'exec "$0" run "$@" 3<>/dev/tty',
+    Deno.execPath(),
+    ...Deno.args,
+    child,
+  ],
   cols: 80,
   rows: 24,
   env: { NO_COLOR: "1" },

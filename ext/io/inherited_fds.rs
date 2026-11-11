@@ -7,7 +7,8 @@
 //! socket activation (`server.listen({ fd: 3 })`) or a pipe a parent passes
 //! on fd 3 are the common cases. Node adopts such fds with `net.Socket({ fd })`
 //! / `tty.ReadStream(fd)` / `server.listen({ fd })`, and so do the libuv
-//! wraps here, gated like stdio rather than by a read permission.
+//! wraps here, each isolate (a worker too) holding the permission the
+//! descriptor's kind implies (`ext/node/ops/fd_adopt.rs`).
 //!
 //! The set is captured once, at the very start of `main`, before the runtime
 //! opens any descriptor of its own. Each entry remembers the descriptor's

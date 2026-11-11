@@ -26,10 +26,20 @@
       "args": "run --allow-read=. --allow-write=. --allow-env --allow-run=mkfifo worker_pipe_fd.mjs",
       "output": "worker_pipe_fd_scoped.out"
     },
+    "inherited_fd_permissions": {
+      "if": "unix",
+      "args": "run -A inherited_fd_permissions.mjs",
+      "output": "inherited_fd_permissions.out"
+    },
     "pty_fd": {
       "if": "unix",
-      "args": "run --allow-run --allow-read pty_fd.ts",
+      "args": "run --allow-run --allow-read pty_fd.ts --allow-read --allow-write",
       "output": "pty_fd.out"
+    },
+    "pty_fd_no_permissions": {
+      "if": "unix",
+      "args": "run --allow-run --allow-read pty_fd.ts --no-prompt",
+      "output": "pty_fd_no_permissions.out"
     },
     "long_unix_path": {
       "if": "mac",
