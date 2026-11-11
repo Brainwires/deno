@@ -57,7 +57,7 @@ use denort::run::RunOptions;
 /// makes the failure mode obvious instead of "the desktop app silently won't
 /// launch".
 const _: () = assert!(
-  laufey::LAUFEY_API_VERSION == 55,
+  laufey::LAUFEY_API_VERSION == 56,
   "LAUFEY_API_VERSION mismatch: update this assert and the prebuilt backend release pin in cli/tools/desktop.rs when laufey bumps its API version",
 );
 
@@ -843,6 +843,16 @@ fn tray_event(
   }
 }
 
+/// The answer `op_desktop_answer_will_navigate` carries (0 the guard
+/// decides, 1 allow, 2 refuse; anything else the guard decides).
+fn will_navigate_answer(decision: u32) -> laufey::NavigationAnswer {
+  match decision {
+    1 => laufey::NavigationAnswer::Allow,
+    2 => laufey::NavigationAnswer::Refuse,
+    _ => laufey::NavigationAnswer::Default,
+  }
+}
+
 impl denort::desktop::DesktopApi for WefDesktopApi {
   fn create_window(
     &self,
@@ -1179,6 +1189,50 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
 
   fn quit_request_pending(&self) -> bool {
     laufey::quit_request_pending()
+  }
+
+  fn set_will_navigate(&self, enabled: bool) -> bool {
+    if !enabled {
+      laufey::clear_will_navigate_handler();
+      return true;
+    }
+    let tx = self.event_tx.clone();
+    // laufey API 56: each top-level navigation waits for the answer the
+    // window's "willnavigate" listeners give; one the event can't reach
+    // goes to the navigation guard at once.
+    laufey::set_will_navigate_handler(move |nav| {
+      let id = nav.id;
+      let sent =
+        tx.try_send(deno_runtime::ops::desktop::DesktopEvent::WillNavigate {
+          window_id: nav.window_id,
+          request_id: nav.id,
+          url: nav.url,
+          initiator: nav.initiator,
+          navigation_kind: nav.kind.as_str().to_string(),
+        });
+      if sent.is_err() {
+        laufey::answer_will_navigate(id, laufey::NavigationAnswer::Default);
+      }
+    })
+  }
+
+  fn answer_will_navigate(&self, request_id: u64, decision: u32) -> bool {
+    laufey::answer_will_navigate(request_id, will_navigate_answer(decision))
+  }
+
+  fn set_app_menu(&self, menu: Option<Vec<denort::desktop::MenuItem>>) -> bool {
+    match menu {
+      // Clicks reach Deno.desktop "menuclick" through the app-level
+      // handler (window id 0).
+      Some(menu) => {
+        let menu = menu
+          .into_iter()
+          .map(desktop_menu_item_to_laufey_menu_item)
+          .collect::<Vec<_>>();
+        laufey::set_app_menu(&menu, |_id: &str| {})
+      }
+      None => laufey::clear_app_menu(),
+    }
   }
 
   fn window_capabilities(
@@ -4317,6 +4371,15 @@ async fn run_desktop(
 #[cfg(test)]
 mod tests {
   use std::ffi::OsString;
+
+  #[test]
+  fn will_navigate_answers_map_to_laufey() {
+    use super::will_navigate_answer;
+    assert_eq!(will_navigate_answer(0), laufey::NavigationAnswer::Default);
+    assert_eq!(will_navigate_answer(1), laufey::NavigationAnswer::Allow);
+    assert_eq!(will_navigate_answer(2), laufey::NavigationAnswer::Refuse);
+    assert_eq!(will_navigate_answer(7), laufey::NavigationAnswer::Default);
+  }
 
   use deno_runtime::ops::desktop::PermissionState;
 

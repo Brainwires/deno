@@ -332,6 +332,20 @@ pub enum DesktopEvent {
   /// set the menu (`window_id`) is still open. `Deno.desktop` "menuclick".
   #[serde(rename_all = "camelCase")]
   ApplicationMenuClick { window_id: u32, id: String },
+  /// A top-level navigation of the window, reported before its navigation
+  /// guard decides (laufey API 56) and waiting for
+  /// `op_desktop_answer_will_navigate(request_id, …)`. `navigation_kind`:
+  /// `"link"`, `"script"`, `"redirect"`, `"window-open"` or `"other"` (the
+  /// event's `detail.kind`). The window's cancelable "willnavigate".
+  #[serde(rename_all = "camelCase")]
+  WillNavigate {
+    window_id: u32,
+    request_id: u64,
+    url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    initiator: Option<String>,
+    navigation_kind: String,
+  },
   #[serde(rename_all = "camelCase")]
   ContextMenuClick { window_id: u32, id: String },
   /// The context menu `showContextMenu` opened closed, after its click if
@@ -2594,6 +2608,28 @@ pub trait DesktopApi: Send + Sync + 'static {
     false
   }
 
+  /// Start (`true`) or stop reporting the windows' top-level navigations as
+  /// [`DesktopEvent::WillNavigate`] (laufey API 56). Reported only while a
+  /// window has a "willnavigate" listener: a backend that can't hold a
+  /// navigation cancels and restarts it to wait for the answer. `false` when
+  /// the backend has no such hook.
+  fn set_will_navigate(&self, _enabled: bool) -> bool {
+    false
+  }
+  /// Answer a reported navigation: 0 the navigation guard decides, 1 load
+  /// it in the window, 2 refuse it. `false` when it is not waiting.
+  fn answer_will_navigate(&self, _request_id: u64, _decision: u32) -> bool {
+    false
+  }
+  /// Set (`None`: remove) the app's own application menu, owned by no window
+  /// (laufey API 56): macOS shows it while the key window has no menu of its
+  /// own and with no window open. `false` where the OS has no app menu bar
+  /// (Windows, Linux), where `Deno.desktop.setApplicationMenu` sets it on
+  /// every window instead.
+  fn set_app_menu(&self, _menu: Option<Vec<MenuItem>>) -> bool {
+    false
+  }
+
   // --- Window state, constraints, screens and chrome (laufey API 38). The
   // defaults are a backend that can do none of it.
 
@@ -4731,6 +4767,43 @@ fn op_desktop_quit_request_pending(state: &mut OpState) -> bool {
     .is_some_and(|api| api.quit_request_pending())
 }
 
+/// Start or stop reporting top-level navigations ("willnavigate", laufey
+/// API 56); `false` when the backend can't.
+#[op2(fast)]
+fn op_desktop_set_will_navigate(state: &mut OpState, enabled: bool) -> bool {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .is_some_and(|api| api.set_will_navigate(enabled))
+}
+
+/// Answer a reported navigation (0 default, 1 allow, 2 refuse); `false` when
+/// it is not waiting.
+#[op2(fast)]
+fn op_desktop_answer_will_navigate(
+  state: &mut OpState,
+  #[number] request_id: u64,
+  #[smi] decision: u32,
+) -> bool {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .is_some_and(|api| api.answer_will_navigate(request_id, decision))
+}
+
+/// `Deno.desktop.setApplicationMenu(menu | null)`: the app's own menu
+/// (laufey API 56). `false` where the OS has no app menu bar.
+#[op2]
+fn op_desktop_set_app_menu(
+  state: &mut OpState,
+  #[serde] menu: Option<Vec<MenuItem>>,
+) -> Result<bool, JsErrorBox> {
+  reject_nul_in_menu(menu.as_deref().unwrap_or_default())?;
+  Ok(
+    state
+      .try_borrow::<Arc<dyn DesktopApi>>()
+      .is_some_and(|api| api.set_app_menu(menu)),
+  )
+}
+
 /// `Deno.desktop.quitOnLastWindowClosed = …`.
 #[op2(fast)]
 fn op_desktop_set_quit_on_last_window_closed(state: &mut OpState, quit: bool) {
@@ -6862,6 +6935,9 @@ deno_core::extension!(
     op_desktop_quit_request_pending,
     op_desktop_set_quit_on_last_window_closed,
     op_desktop_close_reply,
+    op_desktop_set_will_navigate,
+    op_desktop_answer_will_navigate,
+    op_desktop_set_app_menu,
   ],
   objects = [BrowserWindow, Dock, Tray, Notification],
 );
@@ -7298,6 +7374,40 @@ mod tests {
         "id": "file.quit",
       })
     );
+  }
+
+  #[test]
+  fn will_navigate_wire_shape() {
+    let v = serde_json::to_value(DesktopEvent::WillNavigate {
+      window_id: 2,
+      request_id: 9,
+      url: "https://example.com/".to_string(),
+      initiator: Some("myapp://app/".to_string()),
+      navigation_kind: "link".to_string(),
+    })
+    .unwrap();
+    assert_eq!(
+      v,
+      json!({
+        "kind": "willNavigate",
+        "windowId": 2,
+        "requestId": 9,
+        "url": "https://example.com/",
+        "initiator": "myapp://app/",
+        "navigationKind": "link",
+      })
+    );
+    // No initiator: the key is left out (the event's detail has none).
+    let v = serde_json::to_value(DesktopEvent::WillNavigate {
+      window_id: 2,
+      request_id: 10,
+      url: "myapp://app/next".to_string(),
+      initiator: None,
+      navigation_kind: "script".to_string(),
+    })
+    .unwrap();
+    assert!(v.get("initiator").is_none());
+    assert_eq!(v["kind"], "willNavigate");
   }
 
   #[test]
@@ -7848,6 +7958,16 @@ mod tests {
         id: "".into()
       }),
       "applicationMenuClick"
+    );
+    assert_eq!(
+      kind_of(DesktopEvent::WillNavigate {
+        window_id: 0,
+        request_id: 0,
+        url: "".into(),
+        initiator: None,
+        navigation_kind: "other".into(),
+      }),
+      "willNavigate"
     );
     assert_eq!(
       kind_of(DesktopEvent::ContextMenuClick {

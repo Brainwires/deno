@@ -96,6 +96,9 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_quit_request_pending,
     op_desktop_set_quit_on_last_window_closed,
     op_desktop_close_reply,
+    op_desktop_set_will_navigate,
+    op_desktop_answer_will_navigate,
+    op_desktop_set_app_menu,
   } = internals.core.ops;
   const BrowserWindowPrototype = BrowserWindow.prototype;
   Object.setPrototypeOf(BrowserWindowPrototype, EventTarget.prototype);
@@ -708,8 +711,91 @@ pub const DESKTOP_JS: &str = r#"
     const windowId = instance.windowId;
     windows.set(windowId, instance);
     applyWindowOptions(instance, args[0]);
+    // The app-wide menu where every window has its own menu bar (Windows,
+    // Linux: Deno.desktop.setApplicationMenu).
+    if (fannedAppMenu !== null) instance.setApplicationMenu(fannedAppMenu);
     return instance;
   };
+  // Deno.desktop.setApplicationMenu's menu where the OS has no app menu bar,
+  // set on every window open now and later; null when there is none (or the
+  // OS shows it itself).
+  let fannedAppMenu = null;
+  // "willnavigate" (laufey API 56): the listeners each window has. The
+  // runtime asks the backend to report navigations only while one exists,
+  // as a backend that can't hold a navigation cancels and restarts it.
+  const willNavigateListeners = new Map();
+  let willNavigateReporting = false;
+  function updateWillNavigateReporting() {
+    const want = willNavigateListeners.size > 0;
+    if (want === willNavigateReporting) return;
+    willNavigateReporting = want;
+    op_desktop_set_will_navigate(want);
+  }
+  function trackWillNavigate(win, listener, add) {
+    let set = willNavigateListeners.get(win);
+    if (add) {
+      if (set === undefined) {
+        set = new Set();
+        willNavigateListeners.set(win, set);
+      }
+      set.add(listener);
+    } else if (set !== undefined) {
+      set.delete(listener);
+      if (set.size === 0) willNavigateListeners.delete(win);
+    }
+    updateWillNavigateReporting();
+  }
+  {
+    const addListener = EventTarget.prototype.addEventListener;
+    const removeListener = EventTarget.prototype.removeEventListener;
+    Object.defineProperty(BrowserWindowPrototype, "addEventListener", {
+      value: function addEventListener(type, listener, options) {
+        addListener.call(this, type, listener, options);
+        if (listener != null && String(type) === "willnavigate") {
+          trackWillNavigate(this, listener, true);
+        }
+      },
+      writable: true,
+      configurable: true,
+      enumerable: false,
+    });
+    Object.defineProperty(BrowserWindowPrototype, "removeEventListener", {
+      value: function removeEventListener(type, listener, options) {
+        removeListener.call(this, type, listener, options);
+        if (listener != null && String(type) === "willnavigate") {
+          trackWillNavigate(this, listener, false);
+        }
+      },
+      writable: true,
+      configurable: true,
+      enumerable: false,
+    });
+  }
+  // Dispatches the cancelable "willnavigate" on the window about to navigate
+  // and answers the backend: preventDefault() refuses (2), detail.allow()
+  // loads it in the window (1), otherwise the navigation guard decides (0).
+  function dispatchWillNavigate(ev) {
+    const target = windows.get(ev.windowId);
+    let decision = 0;
+    if (target !== undefined && willNavigateListeners.has(target)) {
+      let allowed = false;
+      const detail = {
+        url: ev.url,
+        kind: ev.navigationKind,
+        allow() {
+          allowed = true;
+        },
+      };
+      if (ev.initiator != null) detail.initiator = ev.initiator;
+      const event = new CustomEvent("willnavigate", {
+        cancelable: true,
+        detail,
+      });
+      target.dispatchEvent(event);
+      decision = event.defaultPrevented ? 2 : allowed ? 1 : 0;
+    }
+    op_desktop_answer_will_navigate(ev.requestId, decision);
+  }
   // Options the native constructor doesn't apply (size limits, fullscreen,
   // chrome), applied right after the window exists.
   function applyWindowOptions(win, options) {
@@ -756,6 +842,9 @@ pub const DESKTOP_JS: &str = r#"
   internals.defineEventHandler(BrowserWindowPrototype, "menuclick");
   internals.defineEventHandler(BrowserWindowPrototype, "contextmenuclick");
   internals.defineEventHandler(BrowserWindowPrototype, "contextmenuclose");
+  // A top-level navigation about to happen, before the navigation guard
+  // (laufey API 56; Deno.desktop.navigationEvents).
+  internals.defineEventHandler(BrowserWindowPrototype, "willnavigate");
   internals.defineEventHandler(BrowserWindowPrototype, "maximize");
   internals.defineEventHandler(BrowserWindowPrototype, "unmaximize");
   internals.defineEventHandler(BrowserWindowPrototype, "minimize");
@@ -2276,6 +2365,49 @@ pub const DESKTOP_JS: &str = r#"
       configurable: true,
       enumerable: true,
     },
+    // The scheme bridge sets `x-deno-desktop-frame: main | sub` from the
+    // engine's own record of the requesting frame, after dropping a
+    // client's copies (laufey API 56).
+    marksFrames: {
+      value: true,
+      writable: false,
+      configurable: true,
+      enumerable: true,
+    },
+    // Each Deno.BrowserWindow fires a cancelable "willnavigate" before its
+    // navigation guard decides (laufey API 56).
+    navigationEvents: {
+      value: true,
+      writable: false,
+      configurable: true,
+      enumerable: true,
+    },
+    // The app's own application menu, owned by no window (laufey API 56):
+    // macOS shows it whenever the key window has no menu of its own and
+    // with every window closed. Where a menu bar belongs to its window
+    // (Windows, Linux) it is set on every window, open now or later. null
+    // removes it.
+    setApplicationMenu: {
+      value: function setApplicationMenu(menu) {
+        if (menu !== null && !Array.isArray(menu)) {
+          throw new TypeError(
+            "setApplicationMenu takes an array of menu items or null",
+          );
+        }
+        if (op_desktop_set_app_menu(menu)) {
+          fannedAppMenu = null;
+          return;
+        }
+        fannedAppMenu = menu;
+        for (const win of windows.values()) {
+          if (win.isClosed()) continue;
+          win.setApplicationMenu(menu ?? []);
+        }
+      },
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    },
   });
 
   // Screens, capabilities and the app's lifetime (laufey API 38).
@@ -3244,6 +3376,12 @@ pub const DESKTOP_JS: &str = r#"
             }));
             break;
           }
+          case "willNavigate": {
+            // laufey API 56: synchronous, so the answer follows the
+            // listeners at once.
+            dispatchWillNavigate(ev);
+            break;
+          }
           case "contextMenuClick": {
             const target = windows.get(ev.windowId);
             if (!target) break;
@@ -3573,6 +3711,12 @@ pub const DESKTOP_JS: &str = r#"
           case "windowClosed": {
             // Gone for good: forget what was kept per window (the
             // registry held every BrowserWindow ever created).
+            {
+              const closed = windows.get(ev.windowId);
+              if (closed !== undefined && willNavigateListeners.delete(closed)) {
+                updateWillNavigateReporting();
+              }
+            }
             windows.delete(ev.windowId);
             windowBindCallbacks.delete(ev.windowId);
             windowButtons.delete(ev.windowId);
@@ -4249,6 +4393,52 @@ mod tests {
     ] {
       assert!(DESKTOP_JS.contains(api), "{api}");
     }
+  }
+
+  #[test]
+  fn desktop_js_installs_will_navigate_frames_and_app_menu() {
+    // laufey API 56: the feature flags denext detects, published as
+    // read-only true.
+    assert!(DESKTOP_JS.contains("marksFrames: {\n      value: true,"));
+    assert!(DESKTOP_JS.contains("navigationEvents: {\n      value: true,"));
+    // The cancelable event, dispatched synchronously before the answer, with
+    // its detail; refused, allowed or left to the guard.
+    assert!(DESKTOP_JS.contains("case \"willNavigate\": {"));
+    assert!(DESKTOP_JS.contains(
+      "internals.defineEventHandler(BrowserWindowPrototype, \"willnavigate\")"
+    ));
+    let dispatch = DESKTOP_JS
+      .find("function dispatchWillNavigate(ev) {")
+      .unwrap();
+    let body = &DESKTOP_JS[dispatch..];
+    let event = body
+      .find("new CustomEvent(\"willnavigate\", {\n        cancelable: true,")
+      .unwrap();
+    let fire = body.find("target.dispatchEvent(event);").unwrap();
+    let answer = body
+      .find("op_desktop_answer_will_navigate(ev.requestId, decision);")
+      .unwrap();
+    assert!(event < fire && fire < answer);
+    assert!(
+      body.contains("decision = event.defaultPrevented ? 2 : allowed ? 1 : 0;")
+    );
+    assert!(body.contains("kind: ev.navigationKind,"));
+    assert!(
+      body
+        .contains("if (ev.initiator != null) detail.initiator = ev.initiator;")
+    );
+    // Reported only while a window listens.
+    assert!(
+      DESKTOP_JS.contains("const want = willNavigateListeners.size > 0;")
+    );
+    assert!(DESKTOP_JS.contains("op_desktop_set_will_navigate(want);"));
+    // The app's own menu, set on every window where the OS has no app menu
+    // bar, and on windows opened later.
+    assert!(DESKTOP_JS.contains("value: function setApplicationMenu(menu) {"));
+    assert!(DESKTOP_JS.contains("if (op_desktop_set_app_menu(menu)) {"));
+    assert!(DESKTOP_JS.contains(
+      "if (fannedAppMenu !== null) instance.setApplicationMenu(fannedAppMenu);"
+    ));
   }
 
   #[test]

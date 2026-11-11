@@ -232,6 +232,12 @@ const cases = {
   op_desktop_set_quit_on_last_window_closed: () =>
     ops.op_desktop_set_quit_on_last_window_closed(false),
   op_desktop_close_reply: () => ops.op_desktop_close_reply(1, true),
+  // Outside a desktop app: nothing is reported, answered or shown.
+  op_desktop_set_will_navigate: () => ops.op_desktop_set_will_navigate(true),
+  op_desktop_answer_will_navigate: () =>
+    ops.op_desktop_answer_will_navigate(1, 2),
+  op_desktop_set_app_menu: () =>
+    ops.op_desktop_set_app_menu([{ submenu: { label: "File", items: [] } }]),
   // The updater ops (desktop_update_ops_inert has the detail).
   op_desktop_app_update_info: () => ops.op_desktop_app_update_info().configured,
   op_desktop_app_update_check: () =>

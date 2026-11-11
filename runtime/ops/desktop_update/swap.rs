@@ -25,8 +25,13 @@
 //! `renameat2(RENAME_EXCHANGE)`), then move the previous app to `<name>.old`:
 //! there is no moment without an app at the install path. Where the file
 //! system cannot exchange (`EINVAL` / `ENOTSUP` / `ENOSYS`: FAT, exFAT, some
-//! network file systems) and on Windows, which has no directory exchange, it
-//! is two renames: install → `.old`, staged → install. A failed second rename
+//! network file systems), a single-file AppImage is kept at `.old` first (a
+//! hard link to the install, or a copy synced to disk where links fail) and
+//! the staged file is then renamed over the install, which replaces it
+//! atomically: the install path names an app throughout, and an interruption
+//! leaves the previous app installed. A directory there, and every install
+//! on Windows, which has no directory exchange, takes two renames: install →
+//! `.old`, staged → install. A failed second rename
 //! is undone (retried, and checked); a swap that cannot be undone in place
 //! is left `swapping` and recovered at once by the helper ([`rollback`]), as
 //! the next launch's watchdog would. The rollback exchanges `.old` back the
@@ -1284,6 +1289,21 @@ pub fn apply_swap_verified(
       }
       return Ok(());
     }
+    if cfg!(unix) && layout.kind == InstallKind::AppImage {
+      // A single file: the previous app is kept at `.old` first (a hard
+      // link, or a synced copy), then the staged file is renamed over the
+      // install, which replaces it in one atomic step. The install path
+      // names an app throughout; nothing needs undoing if the rename fails.
+      keep_previous_file(layout, hook, &old).map_err(|e| (e, true))?;
+      if let Err(e) =
+        step(hook, "staged->install", || staged.move_to(&layout.install))
+      {
+        // The previous app is still installed; `.old` is only its copy.
+        remove_install_copy(layout, &old);
+        return Err((e, true));
+      }
+      return Ok(());
+    }
     step(hook, "install->old", || rename_retry(&layout.install, &old))
       .map_err(|e| (e, true))?;
     if let Err(e) =
@@ -1331,6 +1351,65 @@ pub fn apply_swap_verified(
       )
     }
   }
+}
+
+/// The name a copy of the installed AppImage is written under before it is
+/// renamed to `.old` ([`keep_previous_file`]), so `.old` is either absent or
+/// a complete copy.
+fn old_copy_path(layout: &InstallLayout) -> PathBuf {
+  layout
+    .parent
+    .join(format!(".{}.denext-old-copy", layout.name))
+}
+
+/// Remove what an interrupted copy left at [`old_copy_path`]: a file or a
+/// symlink (never followed); anything else at that name is not ours.
+fn remove_copy_leftover(tmp: &Path) {
+  if std::fs::symlink_metadata(tmp).is_ok_and(|m| !m.file_type().is_dir()) {
+    let _ = std::fs::remove_file(tmp);
+  }
+}
+
+/// Flush `dir`'s entries (a link, a rename in it) to disk. Best effort: not
+/// every file system lets a directory be synced.
+fn sync_dir(dir: &Path) {
+  #[cfg(unix)]
+  if let Ok(d) = std::fs::File::open(dir) {
+    let _ = d.sync_all();
+  }
+  #[cfg(not(unix))]
+  let _ = dir;
+}
+
+/// Keep the installed AppImage at `.old` while it stays installed: a hard
+/// link to it, or, where the file system has no hard links (FAT, exFAT, the
+/// file systems that cannot exchange either), a copy written under
+/// [`old_copy_path`], synced and then renamed to `.old`. The directory is
+/// synced afterwards, so `.old` is on disk before the staged file replaces
+/// the install. An interruption leaves the previous app installed (the
+/// recovery sees the install unchanged and goes back to `staged`) and at most
+/// a complete `.old`, which the next apply removes as a leftover copy.
+fn keep_previous_file(
+  layout: &InstallLayout,
+  hook: FaultHook,
+  old: &Path,
+) -> std::io::Result<()> {
+  let install = &layout.install;
+  if step(hook, "link", || std::fs::hard_link(install, old)).is_err() {
+    let tmp = old_copy_path(layout);
+    remove_copy_leftover(&tmp);
+    let copied = step(hook, "copy", || {
+      std::fs::copy(install, &tmp)?;
+      std::fs::File::open(&tmp)?.sync_all()?;
+      rename_retry(&tmp, old)
+    });
+    if let Err(e) = copied {
+      remove_copy_leftover(&tmp);
+      return Err(e);
+    }
+  }
+  sync_dir(&layout.parent);
+  Ok(())
 }
 
 /// What the helper asks before a rollback puts a tree back at the install
@@ -4359,6 +4438,134 @@ mod tests {
     assert_eq!(rollback_and_clean(l, &mut s).unwrap(), None);
     assert_eq!(installed(l), "1.0.0");
     assert_eq!(read_state(l).unwrap().phase, Phase::Staged);
+  }
+
+  /// An AppImage install `App.AppImage` holding "1.0.0", and a staged one
+  /// holding "2.0.0".
+  #[cfg(unix)]
+  fn appimage_fixture() -> Fixture {
+    let tmp = tempfile::tempdir().unwrap();
+    let parent = std::fs::canonicalize(tmp.path()).unwrap();
+    let install = parent.join("App.AppImage");
+    std::fs::write(&install, "1.0.0").unwrap();
+    let layout = InstallLayout {
+      kind: InstallKind::AppImage,
+      install,
+      parent,
+      name: "App.AppImage".into(),
+      exe_rel: PathBuf::new(),
+    };
+    make_private_staging(&layout);
+    std::fs::create_dir_all(layout.extract_dir()).unwrap();
+    let staged = layout.extract_dir().join("App.AppImage");
+    std::fs::write(&staged, "2.0.0").unwrap();
+    let mut state = UpdateState::new(&layout);
+    state.staged_digest = Some(tree_digest(&staged).unwrap());
+    state.phase = Phase::Staged;
+    state.from = Some("1.0.0".into());
+    state.to = Some("2.0.0".into());
+    state.entry = Some("App.AppImage".into());
+    write_state(&layout, &state).unwrap();
+    Fixture { _tmp: tmp, layout }
+  }
+
+  /// Where the file system cannot exchange, an AppImage swap keeps the
+  /// previous app at `.old` (a hard link, else a synced copy) and renames the
+  /// staged file over the install: at no step is the install path empty.
+  #[cfg(unix)]
+  #[test]
+  fn appimage_swap_without_exchange_never_empties_the_install() {
+    use std::os::unix::fs::MetadataExt;
+    for link_fails in [false, true] {
+      let f = appimage_fixture();
+      let l = &f.layout;
+      let before = std::fs::metadata(&l.install).unwrap().ino();
+      let mut s = read_state(l).unwrap();
+      let empty_at = std::cell::RefCell::new(Vec::<String>::new());
+      let hook = |name: &str| -> std::io::Result<()> {
+        if std::fs::read_to_string(&l.install).is_err() {
+          empty_at.borrow_mut().push(name.to_string());
+        }
+        if name == "exchange" || (name == "link" && link_fails) {
+          return Err(std::io::Error::other("injected"));
+        }
+        Ok(())
+      };
+      apply_swap_with(l, &mut s, &hook).unwrap();
+      assert_eq!(
+        empty_at.borrow().as_slice(),
+        &[] as &[String],
+        "link_fails={link_fails}: the install path was empty"
+      );
+      assert_eq!(std::fs::read_to_string(&l.install).unwrap(), "2.0.0");
+      assert_eq!(std::fs::read_to_string(l.old_path()).unwrap(), "1.0.0");
+      let old_ino = std::fs::metadata(l.old_path()).unwrap().ino();
+      assert_eq!(old_ino == before, !link_fails, "link_fails={link_fails}");
+      assert!(!old_copy_path(l).exists());
+      assert_eq!(read_state(l).unwrap().phase, Phase::Swapped);
+      // `.old` is the previous app the rollback checks and puts back.
+      let mut s = read_state(l).unwrap();
+      rollback_and_clean(l, &mut s).unwrap();
+      assert_eq!(std::fs::read_to_string(&l.install).unwrap(), "1.0.0");
+      assert_eq!(read_state(l).unwrap().phase, Phase::Idle);
+    }
+  }
+
+  /// A step of that swap fails: the previous app stays installed, no `.old`
+  /// or partial copy is left, and the stage is kept for a retry.
+  #[cfg(unix)]
+  #[test]
+  fn appimage_swap_without_exchange_fails_in_place() {
+    for failing in ["copy", "staged->install"] {
+      let f = appimage_fixture();
+      let l = &f.layout;
+      let mut s = read_state(l).unwrap();
+      let hook = |name: &str| -> std::io::Result<()> {
+        if name == "exchange" || name == "link" || name == failing {
+          return Err(std::io::Error::other("injected"));
+        }
+        Ok(())
+      };
+      let e = apply_swap_with(l, &mut s, &hook).unwrap_err();
+      assert!(e.message.contains("was undone"), "{failing}: {}", e.message);
+      assert_eq!(std::fs::read_to_string(&l.install).unwrap(), "1.0.0");
+      assert!(!l.old_path().exists(), "{failing}");
+      assert!(!old_copy_path(l).exists(), "{failing}");
+      assert_eq!(read_state(l).unwrap().phase, Phase::Staged, "{failing}");
+      assert_eq!(
+        std::fs::read_to_string(l.extract_dir().join("App.AppImage")).unwrap(),
+        "2.0.0"
+      );
+    }
+  }
+
+  /// The helper killed after `.old` was linked, before the rename: the
+  /// previous app is installed, the recovery keeps the stage, and the next
+  /// apply removes the leftover `.old` and swaps.
+  #[cfg(unix)]
+  #[test]
+  fn appimage_swap_killed_after_the_link_recovers() {
+    let f = appimage_fixture();
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    s.phase = Phase::Swapping;
+    s.install_id = file_id(&l.install);
+    write_state(l, &s).unwrap();
+    std::fs::hard_link(&l.install, l.old_path()).unwrap();
+    let mut s = read_state(l).unwrap();
+    assert_eq!(rollback(l, &mut s).unwrap(), None);
+    assert_eq!(std::fs::read_to_string(&l.install).unwrap(), "1.0.0");
+    assert_eq!(read_state(l).unwrap().phase, Phase::Staged);
+    let mut s = read_state(l).unwrap();
+    let hook = |name: &str| -> std::io::Result<()> {
+      if name == "exchange" {
+        return Err(std::io::Error::other("injected"));
+      }
+      Ok(())
+    };
+    apply_swap_with(l, &mut s, &hook).unwrap();
+    assert_eq!(std::fs::read_to_string(&l.install).unwrap(), "2.0.0");
+    assert_eq!(std::fs::read_to_string(l.old_path()).unwrap(), "1.0.0");
   }
 
   /// What the helper checks about the tree a rollback puts back, as the
