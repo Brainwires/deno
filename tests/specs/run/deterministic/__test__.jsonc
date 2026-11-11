@@ -1,7 +1,9 @@
 {
-  // `--deterministic` is `--seed=1` (upstream #35718 phase 2): seeded RNGs,
-  // the time zone pinned to UTC and the default locale to en-US. An explicit
-  // `--seed` wins over its default seed.
+  // `--deterministic` is `--seed=1` (upstream #35718 phase 2) for
+  // `Math.random`, the time zone pinned to UTC and the default locale to
+  // en-US. An explicit `--seed` wins over its default seed. The cryptographic
+  // sources (`crypto.getRandomValues`, `crypto.randomUUID`, `node:crypto`)
+  // stay on the OS RNG under `--deterministic`; a bare `--seed` seeds them.
   "tests": {
     "deterministic": {
       "envs": {
@@ -24,6 +26,18 @@
     "explicit_seed_wins": {
       "args": "run --deterministic --seed=100 main.js",
       "output": "seed100.out"
+    },
+    "seed_seeds_crypto": {
+      "args": "run --seed=1 crypto.js",
+      "output": "crypto_seeded.out"
+    },
+    "deterministic_leaves_crypto_random": {
+      "args": "run --deterministic crypto.js",
+      "output": "crypto_random.out"
+    },
+    "deterministic_with_a_seed_leaves_crypto_random": {
+      "args": "run --deterministic --seed=1 crypto.js",
+      "output": "crypto_random.out"
     }
   }
 }

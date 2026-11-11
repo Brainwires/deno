@@ -3347,11 +3347,31 @@ fn run_deterministic() {
         "script.ts".to_string(),
       )),
       seed: Some(1_u64),
+      deterministic: true,
       v8_flags: svec!["--random-seed=1"],
       code_cache_enabled: true,
       ..Flags::default()
     }
   );
+  // The seed never reaches the cryptographic RNGs under `--deterministic`,
+  // even an explicit one; a bare `--seed` seeds them, as upstream's does.
+  let flags =
+    flags_from_vec(svec!["deno", "run", "--deterministic", "script.ts"])
+      .unwrap();
+  assert_eq!(flags.crypto_seed(), None);
+  let flags = flags_from_vec(svec![
+    "deno",
+    "run",
+    "--deterministic",
+    "--seed=7",
+    "script.ts"
+  ])
+  .unwrap();
+  assert_eq!(flags.crypto_seed(), None);
+  let flags =
+    flags_from_vec(svec!["deno", "run", "--seed=7", "script.ts"]).unwrap();
+  assert!(!flags.deterministic);
+  assert_eq!(flags.crypto_seed(), Some(7));
   // An explicit `--seed` wins, in either order.
   for args in [
     svec!["deno", "run", "--deterministic", "--seed=7", "script.ts"],

@@ -513,6 +513,9 @@ impl FlagsExt for Flags {
     if let Some(location) = &self.location {
       args.push(format!("--location={location}"));
     }
+    if self.deterministic {
+      args.push("--deterministic".to_string());
+    }
     if let Some(seed) = self.seed {
       args.push(format!("--seed={seed}"));
     }

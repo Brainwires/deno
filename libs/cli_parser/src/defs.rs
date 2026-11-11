@@ -361,7 +361,7 @@ pub static RUNTIME_MISC_ARGS: &[ArgDef] = &[
   ArgDef::new("deterministic")
     .long("deterministic")
     .set_true()
-.help("Run deterministically: seed the random number generators (with 1, unless --seed\n  sets another seed) and pin the time zone to UTC and the locale to en-US"),
+.help("Run deterministically: seed Math.random (with 1, unless --seed sets another seed)\n  and pin the time zone to UTC and the locale to en-US. crypto.getRandomValues,\n  crypto.randomUUID and node:crypto stay random"),
   ArgDef::new("enable-testing-features")
     .long("enable-testing-features-do-not-use")
     .long_aliases(&["enable-testing-features"])

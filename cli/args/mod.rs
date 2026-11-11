@@ -1658,6 +1658,17 @@ impl CliOptions {
     self.flags.seed
   }
 
+  /// `--deterministic` was given: the seed is not a cryptographic one.
+  pub fn deterministic(&self) -> bool {
+    self.flags.deterministic
+  }
+
+  /// The seed of the cryptographic RNGs (`Flags::crypto_seed`): `--seed`'s,
+  /// never `--deterministic`'s.
+  pub fn crypto_seed(&self) -> Option<u64> {
+    self.flags.crypto_seed()
+  }
+
   /// `--max-memory`: the main thread's JavaScript heap limit, in bytes.
   pub fn max_memory(&self) -> Option<u64> {
     self.flags.max_memory

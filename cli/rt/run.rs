@@ -1883,7 +1883,12 @@ pub async fn run_with_options(
     node_cluster_unique_id: std::env::var("NODE_UNIQUE_ID").ok(),
     node_cluster_sched_policy: std::env::var("NODE_CLUSTER_SCHED_POLICY").ok(),
     origin_data_folder_path,
-    seed: metadata.seed,
+    // `--deterministic` seeds only `Math.random` (V8's `--random-seed`).
+    seed: if metadata.deterministic {
+      None
+    } else {
+      metadata.seed
+    },
     unsafely_ignore_certificate_errors: metadata
       .unsafely_ignore_certificate_errors,
     node_ipc_init: deno_lib::args::node_ipc_init(&sys)?,
