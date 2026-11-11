@@ -76,6 +76,9 @@ op_desktop_answer_quit_request -> null
 op_desktop_quit_request_pending -> false
 op_desktop_set_quit_on_last_window_closed -> null
 op_desktop_close_reply -> null
+op_desktop_set_will_navigate -> false
+op_desktop_answer_will_navigate -> false
+op_desktop_set_app_menu -> false
 op_desktop_app_update_info -> false
 op_desktop_app_update_check throws Error: not_configured: full-app updates are only available in a packaged desktop app
 op_desktop_app_update_begin throws Error: not_configured: full-app updates are only available in a packaged desktop app
@@ -89,4 +92,4 @@ BrowserWindow throws NotSupported: BrowserWindow is only available in the main s
 Dock throws NotSupported: Dock is only available in the main scope of a desktop app
 Tray throws NotSupported: Tray is only available in the main scope of a desktop app
 Notification throws NotSupported: Notification is only available in the main scope of a desktop app
-91 exposed, 0 uncovered
+94 exposed, 0 uncovered

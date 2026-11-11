@@ -72,11 +72,14 @@ denort = { path = "../rt", default-features = false }
 # for media-capture apps, all on `development-denext`; runtime
 # 3.0.0-denext.14, API 54: native message dialogs, branch
 # `feat/message-dialog` until it lands; API 55: application-menu clicks for the
-# app, branch `feat/app-menu-event`, stacked on it, until it lands), pinned to a
+# app, branch `feat/app-menu-event`, stacked on it, until it lands; runtime
+# 3.0.0-denext.19, API 56: scheme request frames, will-navigate, the app's own
+# menu, Windows' privacy switches refusing capture, the macOS hit region's
+# cursor warps, branch `d19/desktop-runtime` until it lands), pinned to a
 # commit of the Brainwires/laufey fork.
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "f665989c1a66c9ab1949c86cf23f1326f819cccd" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "3dfcea49fc4396419ec5c02897e5fb396dd59b8a" }
 libsui.workspace = true
 
 bytes.workspace = true

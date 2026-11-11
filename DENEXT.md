@@ -12882,6 +12882,47 @@ previous app and the rollback puts it back),
 change. Node tests enabled: none, because the desktop updater has no Node
 counterpart.
 
+NNN. **`feat(desktop)`: laufey API 56: frame-marked bridge requests,
+`"willnavigate"`, the app's own menu; laufey at `d19/desktop-runtime`**
+(`cli/rt_desktop/scheme_bridge.rs`, `cli/rt_desktop/lib.rs`,
+`cli/rt_desktop/Cargo.toml`, `cli/rt/desktop.rs`, `runtime/ops/desktop.rs`,
+`runtime/js/99_main.js`, `cli/tsc/dts/lib.deno.desktop.d.ts`,
+`.github/workflows/denext_runtime.yml`). - Frames: the scheme bridge drops every
+`x-deno-desktop-frame` header a client sent and sets
+`x-deno-desktop-frame: main | sub` from the engine's own record of the
+requesting frame (laufey `scheme_request_frame`: CEF's `CefFrame`, WKWebView's
+frame info where its scheme task has one; none on WebView2 and WebKitGTK, which
+do not say). `Deno.desktop.marksFrames === true`. - Will-navigate: each
+`Deno.BrowserWindow` fires a cancelable `"willnavigate"` synchronously before
+its navigation guard decides, with `detail: { url, initiator?, kind, allow() }`
+(`kind`: `link`, `script`, `redirect`, `window-open`, `other`):
+`preventDefault()` refuses the navigation (nothing opens in the browser),
+`detail.allow()` loads it in the window, otherwise the guard decides. The
+runtime asks laufey to report navigations only while some window has a listener
+(`op_desktop_set_will_navigate`), as CEF and WebView2 cannot hold a navigation
+and cancel and restart it to wait; WKWebView and WebKitGTK hold it. The
+runtime's own navigation, back / forward, reloads, sub-frames and popups are not
+reported; an unanswered one goes to the guard after 10 s.
+`Deno.desktop.navigationEvents === true`. - The app's menu:
+`Deno.desktop.setApplicationMenu(menu | null)` sets an application menu owned by
+no window, so it can be updated after the main window closed: macOS shows it
+while the key window has no menu of its own and with no window open (laufey
+`set_app_menu`), and its clicks reach `Deno.desktop` `"menuclick"` with
+`windowId` 0; on Windows and Linux, which have no app menu bar, it is set on
+every window, open now or later. - laufey moves to `d19/desktop-runtime`
+`3dfcea4` (API 56; the compile-time assert moves to 56), which also brings
+`feat/windows-microphone` `7429689` (Windows' microphone and camera privacy
+switches refuse capture and are reported, instead of a capture that fails with
+`NotAllowedError`), the macOS hit region noticing cursor warps, the erroring CEF
+staleness gate and the downloads e2e fix. - Tests: `scheme_bridge`
+`the_frame_marker_comes_from_the_engine_only`, `desktop.rs`
+`will_navigate_wire_shape` and the event-kind list, `cli/rt/desktop.rs`
+`desktop_js_installs_will_navigate_frames_and_app_menu`, `lib.rs`
+`will_navigate_answers_map_to_laufey`, the inert-ops spec (three ops, 94
+exposed); laufey's `will_navigate_test.cc` and its capi tests. The train's
+desktop and window jobs run the real windows. Node tests enabled: none, because
+these are Deno Desktop APIs with no Node counterpart.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

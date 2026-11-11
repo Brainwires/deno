@@ -101,6 +101,11 @@
 //!   removing every copy the client sent. The request is still forwarded (an
 //!   identity provider's `form_post` callback is a legitimate cross-site
 //!   POST), with its own `Origin` / `Sec-Fetch-*` headers;
+//! * a request carries at most one [`FRAME_MARKER_HEADER`],
+//!   `x-deno-desktop-frame: main` or `sub`: the frame that made it, as the
+//!   engine recorded it (laufey API 56), set after removing every copy the
+//!   client sent; absent where the engine does not say (WebView2, WebKitGTK).
+//!   `Deno.desktop.marksFrames` is `true` on this runtime;
 //! * so an unmarked request either came from a document at the app origin or
 //!   carried neither header. Engines send `Origin` with every request whose
 //!   method is not `GET` / `HEAD` (and with every CORS request), so an
@@ -175,6 +180,14 @@ pub const RELAY_MARKER_HEADER: &str = "x-deno-desktop-relay";
 /// The request header the scheme bridge adds to a request a document of
 /// another origin made (see the module docs). Lower-case.
 pub const CROSS_ORIGIN_MARKER_HEADER: &str = "x-deno-desktop-cross-origin";
+
+/// The request header the scheme bridge sets to the frame that made the
+/// request, as the webview engine recorded it: `main` (the window's
+/// top-level document) or `sub` (a frame inside it), after removing every
+/// copy the client sent. Absent where the engine does not say (WebView2,
+/// WebKitGTK). `Deno.desktop.marksFrames` is `true` when this runtime does
+/// it. Lower-case.
+pub const FRAME_MARKER_HEADER: &str = "x-deno-desktop-frame";
 
 /// The largest request body the scheme handler forwards to `Deno.serve`; a
 /// larger one is answered with `413 Payload Too Large`. Matches denext's
@@ -344,6 +357,10 @@ async fn bridge(
   // A document of another origin made it (see the module docs).
   if is_cross_origin_request(headers, origin) {
     builder = builder.header(CROSS_ORIGIN_MARKER_HEADER, "1");
+  }
+  // The frame that made it, from the engine (laufey API 56).
+  if let Some(frame) = frame_marker(exchange.frame()) {
+    builder = builder.header(FRAME_MARKER_HEADER, frame);
   }
   let request = builder.body(Full::new(bytes::Bytes::from(body)))?;
 
@@ -686,6 +703,7 @@ fn should_skip_request_header(name: &str) -> bool {
     || is_hop_by_hop_header(name)
     || is_relay_marker(name)
     || name.trim().eq_ignore_ascii_case(CROSS_ORIGIN_MARKER_HEADER)
+    || name.trim().eq_ignore_ascii_case(FRAME_MARKER_HEADER)
     // The body is forwarded fully buffered (`Full`), and hyper sets the
     // length of what is actually sent. Forwarding the webview's own
     // `content-length` could contradict it (a body the backend read short,
@@ -717,6 +735,16 @@ fn is_cross_origin_request(
     }
     false
   })
+}
+
+/// The [`FRAME_MARKER_HEADER`] value for the frame the engine reports:
+/// `main`, `sub`, or none when it does not know.
+fn frame_marker(frame: laufey::SchemeFrame) -> Option<&'static str> {
+  match frame {
+    laufey::SchemeFrame::Main => Some("main"),
+    laufey::SchemeFrame::Sub => Some("sub"),
+    laufey::SchemeFrame::Unknown => None,
+  }
 }
 
 /// Whether a header name is [`RELAY_MARKER_HEADER`] (any case, surrounding
@@ -2276,5 +2304,24 @@ mod tests {
     ] {
       assert!(should_skip_request_header(name), "{name:?}");
     }
+  }
+
+  #[test]
+  fn the_frame_marker_comes_from_the_engine_only() {
+    // A client's own copies are dropped, whatever their spelling...
+    for name in [
+      "x-deno-desktop-frame",
+      "X-Deno-Desktop-Frame",
+      " X-DENO-DESKTOP-FRAME ",
+    ] {
+      assert!(should_skip_request_header(name), "{name:?}");
+    }
+    assert!(!should_skip_request_header("x-deno-desktop-frame-x"));
+    assert!(!should_skip_request_header("x-denext-desktop-frame"));
+    // ...and the bridge sets the engine's frame, or nothing.
+    assert_eq!(frame_marker(laufey::SchemeFrame::Main), Some("main"));
+    assert_eq!(frame_marker(laufey::SchemeFrame::Sub), Some("sub"));
+    assert_eq!(frame_marker(laufey::SchemeFrame::Unknown), None);
+    assert_eq!(FRAME_MARKER_HEADER, "x-deno-desktop-frame");
   }
 }

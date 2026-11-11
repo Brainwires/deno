@@ -865,6 +865,32 @@ declare namespace Deno {
      * closed: `detail.id` is the chosen item's id, or `null` when it was
      * dismissed. Fires after its `"contextmenuclick"`. */
     contextmenuclose: CustomEvent<{ id: string | null }>;
+    /** Cancelable: the window's top-level frame is about to navigate (a
+     * link, a script, a form, a server redirect), before the navigation
+     * guard decides whether it loads here, opens in the browser or is
+     * dropped. Dispatched synchronously; a listener decides before it
+     * returns. `preventDefault()` refuses it (nothing loads, nothing opens
+     * in the browser); `detail.allow()` loads it in the window although the
+     * guard would refuse it; otherwise the guard decides. Not fired for the
+     * runtime's own navigation, back / forward, reloads, sub-frames or
+     * popups. While any window listens, a backend that can't hold a
+     * navigation (CEF, WebView2) cancels it and starts it again once it may
+     * load, as a new history entry. See
+     * {@linkcode Deno.desktop.navigationEvents}. */
+    willnavigate: CustomEvent<WillNavigateDetail>;
+  }
+
+  /** Detail of a {@linkcode BrowserWindow} `"willnavigate"` event. */
+  interface WillNavigateDetail {
+    /** Where the window is going. */
+    url: string;
+    /** The URL of the document that started it, when the engine says. */
+    initiator?: string;
+    /** How it started. */
+    kind: "link" | "script" | "redirect" | "window-open" | "other";
+    /** Load it in the window, even where the navigation guard would refuse
+     * it. A `preventDefault()` wins. */
+    allow(): void;
   }
 
   type BrowserWindowEventHandlers = {
@@ -3431,6 +3457,26 @@ declare namespace Deno {
      * held, which includes one past its deadline: this can only refuse in time,
      * never hold the OS longer. */
     export function cancelQuit(): boolean;
+
+    /** `true`: the app server's requests through the scheme bridge carry
+     * `x-deno-desktop-frame: main` (the window's top-level page) or `sub` (a
+     * frame inside it), set from the engine's own record of the requesting
+     * frame after every copy the client sent is dropped. Absent where the
+     * engine doesn't say (WebView2, WebKitGTK). */
+    export const marksFrames: true;
+
+    /** `true`: each {@linkcode Deno.BrowserWindow} fires a cancelable
+     * `"willnavigate"` before its navigation guard decides. */
+    export const navigationEvents: true;
+
+    /** Set the app's own application menu, owned by no window, so it can be
+     * updated after every window closed (a tray app, one kept running).
+     * macOS shows it whenever the key window has no menu of its own
+     * ({@linkcode BrowserWindow.setApplicationMenu}) and while no window is
+     * open; its clicks fire {@linkcode onmenuclick} with `windowId` 0.
+     * Windows and Linux have no app menu bar: there it is set on every
+     * window, open now or opened later. `null` removes it. */
+    export function setApplicationMenu(menu: MenuItem[] | null): void;
 
     /** Whether the app quits when its last window closes (default `true`).
      * Creating a {@linkcode Deno.Tray} sets it to `false` unless the app set
