@@ -1191,7 +1191,7 @@
       hostDefinedOptions,
       params,
     ) => {
-      const [result, error] = op_compile_function(
+      const { 0: result, 1: error } = op_compile_function(
         source,
         specifier,
         hostDefinedOptions,

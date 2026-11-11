@@ -211,6 +211,8 @@ const {
   SafeWeakSet,
   String,
   StringPrototypeIncludes,
+  StringPrototypeIndexOf,
+  StringPrototypeSlice,
   StringPrototypeStartsWith,
   SymbolFor,
   SymbolToStringTag,
@@ -239,6 +241,23 @@ function writeCoverageAtExit() {
   }
 }
 
+function printTraceExit(code: unknown, stack: string | undefined) {
+  const prefix = internals.__isWorkerThread
+    ? `(node:${process.pid}, thread:${internals.__nodeThreadId ?? 0})`
+    : `(node:${process.pid})`;
+  let frames = "";
+  if (typeof stack === "string") {
+    const newline = StringPrototypeIndexOf(stack, "\n");
+    if (newline !== -1) frames = StringPrototypeSlice(stack, newline + 1);
+  }
+  core.print(
+    `${prefix} WARNING: Exited the environment with code ${
+      Number(code) || 0
+    }\n${frames}${frames === "" ? "" : "\n"}`,
+    true,
+  );
+}
+
 /** https://nodejs.org/api/process.html#process_process_exit_code */
 export const exit = (code?: number | string) => {
   if (code !== undefined) {
@@ -253,6 +272,15 @@ export const exit = (code?: number | string) => {
     // event on `process`.
     process.emit("exit", ProcessExitCode);
     writeCoverageAtExit();
+  }
+
+  // denext: `--trace-exit`, as Node's Environment::Exit: a warning and the
+  // stack of the process.exit() call (process.exit is its top frame, and
+  // `--stack-trace-limit` bounds it).
+  if (getOptionValue("--trace-exit")) {
+    const trace: { stack?: string } = {};
+    ErrorCaptureStackTrace(trace);
+    printTraceExit(ProcessExitCode, trace.stack);
   }
 
   // Any valid thing `process.exitCode` set is already held in Deno.exitCode.

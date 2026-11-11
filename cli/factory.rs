@@ -1732,6 +1732,18 @@ fn new_workspace_factory_options(
       .internal
       .root_node_modules_dir_override
       .clone(),
+    remote_entrypoint: matches!(
+      &flags.subcommand,
+      DenoSubcommand::Run(run_flags) if is_remote_entrypoint(&run_flags.script)
+    ),
     vendor: flags.vendor,
   }
+}
+
+/// denext: whether `deno run`'s script is a remote module (`jsr:`, `http:`,
+/// `https:`), whose npm imports don't come from the project's node_modules.
+fn is_remote_entrypoint(script: &str) -> bool {
+  script.starts_with("jsr:")
+    || script.starts_with("http://")
+    || script.starts_with("https://")
 }

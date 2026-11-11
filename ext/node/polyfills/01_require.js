@@ -1470,8 +1470,11 @@ function resolveExports(
   isImport,
 ) {
   // The implementation's behavior is meant to mirror resolution in ESM.
-  const [, name, expansion = ""] =
-    StringPrototypeMatch(request, EXPORTS_PATTERN) || [];
+  // Indexed, not destructured: a program may delete Array.prototype's
+  // iterator (test-require-delete-array-iterator).
+  const match = StringPrototypeMatch(request, EXPORTS_PATTERN);
+  const name = match?.[1];
+  const expansion = match?.[2] ?? "";
   if (!name) {
     return;
   }
@@ -1525,11 +1528,21 @@ Module._findPath = function (
     trailingSlash = RegExpPrototypeTest(TRAILING_SLASH_REGEX, request);
   }
 
+  // As Node: a relative request that leaves its directory ("../x") is still
+  // looked up when that directory no longer exists.
+  let insidePath = true;
+  if (
+    op_require_is_request_relative(request) &&
+    StringPrototypeStartsWith(path.normalize(request), "..")
+  ) {
+    insidePath = false;
+  }
+
   // For each path
   for (let i = 0; i < paths.length; i++) {
     // Don't search further if path doesn't exist
     const curPath = paths[i];
-    if (curPath && stat(curPath) < 1) continue;
+    if (insidePath && curPath && stat(curPath) < 1) continue;
 
     if (!absoluteRequest) {
       const exportsResolved = resolveExports(
@@ -2395,6 +2408,11 @@ ObjectDefineProperty(Module, "wrapper", {
   },
 });
 
+// The SyntaxError of a CommonJS module that declares a name the CommonJS
+// wrapper passes in (one of Node's retry-as-ESM cases).
+const CJS_WRAPPER_REDECLARATION =
+  /^Identifier '(?:module|exports|require|__filename|__dirname)' has already been declared$/;
+
 function isEsmSyntaxError(error) {
   return error instanceof SyntaxError && (
     StringPrototypeIncludes(
@@ -3024,11 +3042,11 @@ function wrapSafe(
   let err;
 
   if (patched) {
-    [f, err] = core.evalContext(
+    ({ 0: f, 1: err } = core.evalContext(
       Module.wrap(content),
       url.pathToFileURL(filename).toString(),
       [format !== "module"],
-    );
+    ));
   } else if (useCompileCache()) {
     const entry = compileCacheGetOrInsert(
       content,
@@ -3055,7 +3073,7 @@ function wrapSafe(
       err = { thrown };
     }
   } else {
-    [f, err] = core.compileFunction(
+    ({ 0: f, 1: err } = core.compileFunction(
       content,
       url.pathToFileURL(filename).toString(),
       [format !== "module"],
@@ -3066,7 +3084,7 @@ function wrapSafe(
         "__filename",
         "__dirname",
       ],
-    );
+    ));
   }
   if (err) {
     if (process.mainModule === cjsModuleInstance) {
@@ -3097,7 +3115,21 @@ Module.prototype._compile = function (
       format !== "commonjs" && err instanceof SyntaxError &&
       (op_require_can_parse_as_esm(content) || isEsmSyntaxError(err))
     ) {
-      return loadESMFromCJS(this, filename, content, useSourceImport);
+      // denext: a .js file that only fails as CommonJS because it declares
+      // one of the wrapper's names (`const require = ...`) has no ESM syntax
+      // for the module loader to detect, which would load it as CommonJS
+      // again (an empty, half-loaded module). Compile its source as the ES
+      // module Node retries it as.
+      const redeclaresWrapperName =
+        RegExpPrototypeExec(CJS_WRAPPER_REDECLARATION, err.message) !== null &&
+        (StringPrototypeEndsWith(filename, ".js") ||
+          StringPrototypeEndsWith(filename, ".cjs"));
+      return loadESMFromCJS(
+        this,
+        filename,
+        content,
+        useSourceImport || redeclaresWrapperName,
+      );
     }
     throw err;
   }
@@ -3148,9 +3180,21 @@ Module._extensions[".js"] = function (module, filename) {
   }
 };
 
-Module._extensions[".cjs"] = loadCjs;
-Module._extensions[".mjs"] = loadESMFromCJS;
-Module._extensions[".wasm"] = loadESMFromCJS;
+// denext: registered, but not enumerable: Node's Module._extensions lists
+// only ".js", ".json" and ".node", and those are the extensions a require()
+// without one probes for ("./x" never finds "x.mjs" or "x.cjs").
+function defineHiddenExtension(extension, loader) {
+  ObjectDefineProperty(Module._extensions, extension, {
+    __proto__: null,
+    value: loader,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+}
+defineHiddenExtension(".cjs", loadCjs);
+defineHiddenExtension(".mjs", loadESMFromCJS);
+defineHiddenExtension(".wasm", loadESMFromCJS);
 
 // better-sqlite3 is a nan addon (built against Node's V8 C++ ABI), which
 // Deno can't load. The package's entry modules resolve to an implementation
@@ -3437,6 +3481,75 @@ function _throwRequireAsyncModule(specifier, module) {
   );
 }
 
+// The CommonJS globals an ES module may reference by mistake.
+const CJS_GLOBAL_LIKE = [
+  "require",
+  "module",
+  "exports",
+  "__filename",
+  "__dirname",
+];
+
+// As Node's explainCommonJSGlobalLikeNotDefinedError
+// (lib/internal/modules/esm/module_job.js): a ReferenceError for a CommonJS
+// global in an ES module says it is an ES module, and why when a "type":
+// "module" package.json makes its .js file one.
+function explainCommonJSGlobalLikeNotDefinedError(e, filename) {
+  if (
+    e === null || typeof e !== "object" || e.name !== "ReferenceError" ||
+    typeof e.message !== "string"
+  ) {
+    return;
+  }
+  const message = e.message;
+  let isGlobalLike = false;
+  for (let i = 0; i < CJS_GLOBAL_LIKE.length; i++) {
+    if (message === `${CJS_GLOBAL_LIKE[i]} is not defined`) {
+      isGlobalLike = true;
+      break;
+    }
+  }
+  if (!isGlobalLike) return;
+  e.message += " in ES module scope";
+  if (StringPrototypeStartsWith(e.message, "require ")) {
+    e.message += ", you can use import instead";
+  }
+  if (StringPrototypeEndsWith(filename, ".js")) {
+    const pjsonPath = nearestPackageJsonPathWithType(filename, "module");
+    if (pjsonPath !== undefined) {
+      e.message +=
+        "\nThis file is being treated as an ES module because it has a " +
+        `'.js' file extension and '${pjsonPath}' contains ` +
+        '"type": "module". To treat it as a CommonJS script, rename it ' +
+        "to use the '.cjs' file extension.";
+    }
+  }
+}
+
+// The path of the nearest package.json (as nearestPackageJsonType walks), when
+// its "type" is `type`.
+function nearestPackageJsonPathWithType(filename, type) {
+  let currentPath = filename;
+  while (true) {
+    currentPath = pathDirname(currentPath);
+    if (!hasParentPath(currentPath)) return undefined;
+    if (
+      StringPrototypeEndsWith(currentPath, "/node_modules") ||
+      StringPrototypeEndsWith(currentPath, "\\node_modules")
+    ) {
+      return undefined;
+    }
+    const pjsonPath = pathResolve(currentPath, "package.json");
+    let pkg;
+    try {
+      pkg = op_require_read_package_scope(pjsonPath);
+    } catch {
+      // No read permission there: same as no package.json.
+    }
+    if (pkg) return pkg.type === type ? pjsonPath : undefined;
+  }
+}
+
 function loadESMFromCJS(module, filename, code, sourceFromHook = false) {
   const specifier = url.pathToFileURL(filename).toString();
   let namespace;
@@ -3454,6 +3567,7 @@ function loadESMFromCJS(module, filename, code, sourceFromHook = false) {
     ) {
       _throwRequireAsyncModule(specifier, module);
     }
+    explainCommonJSGlobalLikeNotDefinedError(e, filename);
     throw e;
   }
   if (ObjectHasOwn(namespace, "module.exports")) {

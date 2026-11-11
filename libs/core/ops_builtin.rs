@@ -592,12 +592,27 @@ fn op_is_terminal(state: &mut OpState, #[smi] rid: ResourceId) -> bool {
   }
 }
 
+/// denext: why a synchronous import failed: a value the module's parse,
+/// link or evaluation threw (rethrown to the `require()` caller as it is, as
+/// Node does), or any other error.
+enum ImportSyncError {
+  Throw(v8::Global<v8::Value>),
+  Core(CoreError),
+}
+
+impl From<CoreError> for ImportSyncError {
+  fn from(error: CoreError) -> Self {
+    ImportSyncError::Core(error)
+  }
+}
+
 async fn do_load_job<'s, 'i>(
   scope: &mut v8::PinScope<'s, 'i>,
   module_map_rc: Rc<ModuleMap>,
   specifier: &str,
   code: Option<String>,
-) -> Result<ModuleId, CoreError> {
+) -> Result<ModuleId, ImportSyncError> {
+  let mut thrown: Option<v8::Global<v8::Value>> = None;
   let root_id = RecursiveModuleLoad::side(
     specifier.to_string(),
     module_map_rc.clone(),
@@ -611,9 +626,23 @@ async fn do_load_job<'s, 'i>(
       source,
     } => load
       .register_and_recurse(scope, request, source)
-      .map_err(|e| e.into_error(scope, false, false)),
+      .map_err(|e| {
+        if let crate::modules::ModuleError::Exception(exception) = &e {
+          thrown = Some(exception.clone());
+        }
+        e.into_error(scope, false, false)
+      }),
   })
-  .await?;
+  .await;
+  let root_id = match root_id {
+    Ok(root_id) => root_id,
+    Err(error) => {
+      return Err(match thrown {
+        Some(exception) => ImportSyncError::Throw(exception),
+        None => ImportSyncError::Core(error),
+      });
+    }
+  };
 
   let module = module_map_rc
     .get_module(scope, root_id)
@@ -621,21 +650,18 @@ async fn do_load_job<'s, 'i>(
 
   match module.get_status() {
     v8::ModuleStatus::Uninstantiated => {
-      module_map_rc
-        .instantiate_module(scope, root_id)
-        .map_err(|e| {
-          let exception = v8::Local::new(scope, e);
-          exception_to_err(scope, exception, false, false)
-        })?;
+      if let Err(exception) = module_map_rc.instantiate_module(scope, root_id) {
+        return Err(ImportSyncError::Throw(exception));
+      }
     }
     v8::ModuleStatus::Instantiated => {
       // Already instantiated — caller (op_import_sync) will evaluate.
     }
     v8::ModuleStatus::Instantiating | v8::ModuleStatus::Evaluating => {
       return Err(
-        JsErrorBox::generic(format!(
+        CoreError::from(JsErrorBox::generic(format!(
           "Cannot require() ES Module {specifier} in a cycle."
-        ))
+        )))
         .into(),
       );
     }
@@ -643,15 +669,10 @@ async fn do_load_job<'s, 'i>(
       // OK
     }
     v8::ModuleStatus::Errored => {
-      return Err(
-        CoreErrorKind::Js(exception_to_err(
-          scope,
-          module.get_exception(),
-          false,
-          false,
-        ))
-        .into_box(),
-      );
+      return Err(ImportSyncError::Throw(v8::Global::new(
+        scope,
+        module.get_exception(),
+      )));
     }
   }
 
@@ -727,6 +748,18 @@ fn wrap_module<'s, 'i>(
   Some(wrapper_module)
 }
 
+/// denext: throws an errored module's exception value into `scope` and
+/// returns `undefined` for the op's return slot (V8 ignores it while an
+/// exception is pending).
+fn rethrow_module_exception<'s, 'i>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  module: v8::Local<'s, v8::Module>,
+) -> v8::Local<'s, v8::Value> {
+  let exception = module.get_exception();
+  scope.throw_exception(exception);
+  v8::undefined(scope).into()
+}
+
 #[op2(reentrant)]
 fn op_import_sync<'s, 'i>(
   scope: &mut v8::PinScope<'s, 'i>,
@@ -736,12 +769,20 @@ fn op_import_sync<'s, 'i>(
   let module_map_rc = JsRealm::module_map_from(scope);
 
   // no js execution within block_on
-  let module_id = futures::executor::block_on(do_load_job(
+  let module_id = match futures::executor::block_on(do_load_job(
     scope,
     module_map_rc.clone(),
     specifier,
     code,
-  ))?;
+  )) {
+    Ok(module_id) => module_id,
+    Err(ImportSyncError::Throw(exception)) => {
+      let exception = v8::Local::new(scope, exception);
+      scope.throw_exception(exception);
+      return Ok(v8::undefined(scope).into());
+    }
+    Err(ImportSyncError::Core(error)) => return Err(error),
+  };
 
   // Check for re-entrant require() cycle: if this module is already on
   // the op_import_sync call stack, it means CJS code required an ESM
@@ -789,21 +830,22 @@ fn op_import_sync<'s, 'i>(
         .push(module_id);
       let result = module_map_rc.mod_evaluate_sync(scope, module_id);
       module_map_rc.import_sync_eval_stack.borrow_mut().pop();
-      result?;
+      if let Err(err) = result {
+        // denext: an evaluation error is thrown to the require() caller as
+        // the value the module threw (its class, message and properties),
+        // as Node does, not as a new error carrying the formatted stack.
+        if module.get_status() == v8::ModuleStatus::Errored {
+          return Ok(rethrow_module_exception(scope, module));
+        }
+        return Err(err);
+      }
     }
     v8::ModuleStatus::Evaluated => {
       // OK
     }
     v8::ModuleStatus::Errored => {
-      return Err(
-        CoreErrorKind::Js(exception_to_err(
-          scope,
-          module.get_exception(),
-          false,
-          false,
-        ))
-        .into_box(),
-      );
+      // denext: a module that failed before throws the same value again.
+      return Ok(rethrow_module_exception(scope, module));
     }
   }
 
@@ -860,11 +902,17 @@ fn op_import_sync_with_source<'s, 'i>(
         .into_box()
     })?;
 
-  module_map_rc.mod_evaluate_sync(scope, module_id)?;
+  let result = module_map_rc.mod_evaluate_sync(scope, module_id);
 
   let module = module_map_rc
     .get_module(scope, module_id)
     .expect("Module must exist");
+  if let Err(err) = result {
+    if module.get_status() == v8::ModuleStatus::Errored {
+      return Ok(rethrow_module_exception(scope, module));
+    }
+    return Err(err);
+  }
 
   let namespace = module.get_module_namespace().cast::<v8::Object>();
 
