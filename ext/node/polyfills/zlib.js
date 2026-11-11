@@ -857,7 +857,9 @@ function brotliWriteDone() {}
 // the wrapper's per-write frame and argument array on every chunk.
 function setupHandleWriteState(handle, writeState) {
   const nativeReset = handle.reset;
-  if (typeof nativeReset === "function") defineGuardedReset(handle, nativeReset);
+  if (typeof nativeReset === "function") {
+    defineGuardedReset(handle, nativeReset);
+  }
   const nativeWrite = handle.write;
   const nativeWriteSync = handle.writeSync;
   handle[kNativeWrite] = nativeWrite;

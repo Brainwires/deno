@@ -12521,27 +12521,27 @@ where the changes are discussed.
      test-webcrypto-sign-verify-ecdsa; test-crypto-randomuuidv7 now on macOS
      too)
 
-NNN. **`feat(fetch)`: `Deno.createHttpClient({ userAgent })` omits or replaces
+309. **`feat(fetch)`: `Deno.createHttpClient({ userAgent })` omits or replaces
      the default `User-Agent`** (`ext/fetch/lib.rs`,
      `ext/fetch/22_http_client.js`, `cli/tsc/dts/lib.deno.ns.d.ts`).
-     - `fetch` adds `user-agent: Deno/<version>` to a request that sets none,
-       so a request could never go out without one. A client made with
-       `userAgent: "<string>"` adds that string instead; `userAgent: false`
-       (or `null`) adds none. A `user-agent` header set on the request still
-       wins, and a client made without the option keeps the default.
+     - `fetch` adds `user-agent: Deno/<version>` to a request that sets none, so
+       a request could never go out without one. A client made with
+       `userAgent: "<string>"` adds that string instead; `userAgent: false` (or
+       `null`) adds none. A `user-agent` header set on the request still wins,
+       and a client made without the option keeps the default.
      - An invalid string is the existing "Illegal characters in User-Agent"
-       error, and any other value a `TypeError`. The CONNECT request to a
-       proxy keeps the runtime's agent (`ext/fetch/proxy.rs` untouched).
-     - Tests: unit `fetch_test.ts` `fetchCustomClientUserAgentOmitOrReplace`
-       (no header with `false` / `null`, a replaced one, the explicit header
+       error, and any other value a `TypeError`. The CONNECT request to a proxy
+       keeps the runtime's agent (`ext/fetch/proxy.rs` untouched).
+     - Tests: unit `fetch_test.ts` `fetchCustomClientUserAgentOmitOrReplace` (no
+       header with `false` / `null`, a replaced one, the explicit header
        winning, the default kept, both errors).
      - User-facing note: `Deno.createHttpClient({ userAgent: false })` sends
-       requests with no `User-Agent`, and `userAgent: "my-agent/1"` replaces
-       the default; some servers (GitHub's API) refuse requests without one.
+       requests with no `User-Agent`, and `userAgent: "my-agent/1"` replaces the
+       default; some servers (GitHub's API) refuse requests without one.
      - Node tests enabled: none, because this is a Deno API (`fetch` clients),
        not a Node one.
 
-NNN. **`feat(node)`: `"node": "20"` in deno.json picks the Node.js major the
+310. **`feat(node)`: `"node": "20"` in deno.json picks the Node.js major the
      runtime reports (phase A)** (`ext/node/lib.rs`,
      `ext/node/polyfills/process.ts`, `runtime/ops/bootstrap.rs`,
      `runtime/worker_bootstrap.rs`, `cli/args/mod.rs`, `cli/factory.rs`,
@@ -12551,10 +12551,11 @@ NNN. **`feat(node)`: `"node": "20"` in deno.json picks the Node.js major the
        20, 22, 24 or 26 (Node 18 is end-of-life). `process.version`, the
        `version` export of `node:process`, `process.versions.node` and
        `process.release` (with the line's LTS codename as `lts`) report that
-       line's newest release (20.20.2 Iron, 22.23.4 Jod, 24.22.2 Krypton; 26
-       is the default, `deno_node::NODE_VERSION`). Workers report the same.
+       line's newest release (20.20.2 Iron, 22.23.4 Jod, 24.22.2 Krypton; 26 is
+       the default, `deno_node::NODE_VERSION`). Workers report the same.
        Behaviour stays the runtime's Node 26.
-     - Any other value stops `deno run` / `test` / `serve` with `Invalid "node"
+     - Any other value stops `deno run` / `test` / `serve` with
+       `Invalid "node"
        setting "18" in deno.json: expected a supported Node.js major version,
        one of "20", "22", "24", "26".`
      - The versions live in one table, `deno_node::reported_node_version`;
@@ -12568,41 +12569,40 @@ NNN. **`feat(node)`: `"node": "20"` in deno.json picks the Node.js major the
        deno.json, and packages that check `process.version` see that Node.js
        major.
      - Node tests enabled: none, because Node's suite tests the Node it ships
-       with (`process.version` is checked against 26 by its own tests); a
-       chosen major is a project setting the suite never sets.
+       with (`process.version` is checked against 26 by its own tests); a chosen
+       major is a project setting the suite never sets.
 
-NNN. **`feat(supply-chain)`: GitHub-hosted declared downloads of bcrypt 5,
+311. **`feat(supply-chain)`: GitHub-hosted declared downloads of bcrypt 5,
      argon2 before 0.28, `@discordjs/opus` and libxmljs reach the release
      assets** (`cli/supply_chain/builtin_exceptions.rs`,
      `cli/supply_chain/jail.rs`).
-     - These versions' node-pre-gyp `binary.host` is github.com, which
-       redirects a release download to `objects.githubusercontent.com` /
-       `release-assets.githubusercontent.com`; the jail allowed none of them,
-       so the install failed. They join the built-in known packages
-       (`github.com`), and a new data table, `DECLARED_HOST_REDIRECTS`, gives
-       an allowed declared github.com host its two redirect hosts. Only the
-       versions that declare `binary.host` are affected (bcrypt 6 and argon2
-       0.28+ ship their binaries). `paranoid` still grants nothing, and an
-       unknown package declaring github.com is still refused.
+     - These versions' node-pre-gyp `binary.host` is github.com, which redirects
+       a release download to `objects.githubusercontent.com` /
+       `release-assets.githubusercontent.com`; the jail allowed none of them, so
+       the install failed. They join the built-in known packages (`github.com`),
+       and a new data table, `DECLARED_HOST_REDIRECTS`, gives an allowed
+       declared github.com host its two redirect hosts. Only the versions that
+       declare `binary.host` are affected (bcrypt 6 and argon2 0.28+ ship their
+       binaries). `paranoid` still grants nothing, and an unknown package
+       declaring github.com is still refused.
      - Tests: `jail.rs` `builtin_known_github_packages_get_redirect_hosts`,
        `builtin_exceptions.rs` `known_packages_sorted_and_github_redirects`.
      - User-facing note: installing bcrypt 5, argon2 before 0.28,
        `@discordjs/opus` or libxmljs no longer fails in the script jail when
        their prebuilt binary is downloaded from GitHub.
-     - Node tests enabled: none, because this is the install-script jail, not
-       a Node API.
+     - Node tests enabled: none, because this is the install-script jail, not a
+       Node API.
 
-NNN. **`perf(fetch)`: `new Response()` creates its native response when it is
+312. **`perf(fetch)`: `new Response()` creates its native response when it is
      served (M5f-3)** (`ext/fetch/23_response.js`, `ext/http/00_serve.ts`).
-     - A Response `Deno.serve` can send natively (a string or `Uint8Array`
-       body with headers or a status the fast static path doesn't take)
-       allocated its native `DirectResponse` in the constructor, so a Response
-       built and never served (a cache, a test, a dropped branch) paid for it
-       and for its finalization-registry entry. The constructor now only marks
-       it eligible; `takeServeNativeResponse` creates it when the serve loop
-       reaches it, from the response as it is then. Reading `headers` still
-       cancels it, and a body turned into a stream since is served the regular
-       way.
+     - A Response `Deno.serve` can send natively (a string or `Uint8Array` body
+       with headers or a status the fast static path doesn't take) allocated its
+       native `DirectResponse` in the constructor, so a Response built and never
+       served (a cache, a test, a dropped branch) paid for it and for its
+       finalization-registry entry. The constructor now only marks it eligible;
+       `takeServeNativeResponse` creates it when the serve loop reaches it, from
+       the response as it is then. Reading `headers` still cancels it, and a
+       body turned into a stream since is served the regular way.
      - Tests: unit `response_test.ts` `responseNativeCreatedLazily` (no native
        response after construction) and `responseNativeServedLazily` (status,
        headers and body served correctly).
@@ -12611,24 +12611,24 @@ NNN. **`perf(fetch)`: `new Response()` creates its native response when it is
      - Node tests enabled: none, because this is the web `Response` and
        `Deno.serve`, not a Node API.
 
-NNN. **`feat(npm)`: the supply-chain checks read OSV past its first page, check
+313. **`feat(npm)`: the supply-chain checks read OSV past its first page, check
      the dependencies `deno add` brings in, and say "did you mean" (R11a)**
      (`cli/supply_chain/advisories.rs`, `cli/supply_chain/downloads.rs`,
      `cli/supply_chain/popular_names.rs`, `cli/tools/pm/mod.rs`,
      `cli/factory.rs`, `tests/util/server/servers/supply_chain.rs`).
-     - OSV returns at most 1000 advisories per query, with a
-       `next_page_token` for the rest; the advisory check (item 84) now asks
-       for each further page (up to 50, then it counts as OSV unreachable), so
-       a `MAL-` advisory on a later page still refuses the version.
+     - OSV returns at most 1000 advisories per query, with a `next_page_token`
+       for the rest; the advisory check (item 84) now asks for each further page
+       (up to 50, then it counts as OSV unreachable), so a `MAL-` advisory on a
+       later page still refuses the version.
      - The low-download check (item 85) also runs over the dependencies the
        install after `deno add` resolves that the lockfile didn't have before:
-       the same threshold, modes and allow-lists, the message naming the
-       package as "a dependency of the packages being added". Under `prompt`
-       without a terminal the add is refused and deno.json / package.json are
-       put back. Counts are fetched eight at a time.
-     - A low-download package whose name is one edit (two for longer names)
-       from a widely used package, or a scoped copy of one (`@x/chalkk`), is
-       named: "did you mean npm:chalk?". The names are a fixed offline list.
+       the same threshold, modes and allow-lists, the message naming the package
+       as "a dependency of the packages being added". Under `prompt` without a
+       terminal the add is refused and deno.json / package.json are put back.
+       Counts are fetched eight at a time.
+     - A low-download package whose name is one edit (two for longer names) from
+       a widely used package, or a scoped copy of one (`@x/chalkk`), is named:
+       "did you mean npm:chalk?". The names are a fixed offline list.
      - Tests: specs `npm/supply_chain_advisories`
        (`add_refuses_malicious_version_on_a_later_page`,
        `add_allows_clean_version_with_paged_advisories`) and
@@ -12638,530 +12638,516 @@ NNN. **`feat(npm)`: the supply-chain checks read OSV past its first page, check
        `@denotest/with-rare-dep` and `@denotest/chalkk` test packages;
        `popular_names.rs` unit tests.
      - User-facing note: `deno add` now also warns about rarely downloaded
-       packages among the dependencies it adds, suggests the popular package
-       a near-miss name may imitate, and the malicious-version check reads
-       every page of OSV's results.
-     - Node tests enabled: none, because these are the package manager's
-       checks, not a Node API.
+       packages among the dependencies it adds, suggests the popular package a
+       near-miss name may imitate, and the malicious-version check reads every
+       page of OSV's results.
+     - Node tests enabled: none, because these are the package manager's checks,
+       not a Node API.
 
-NNN. **`feat(pty)`: `Deno.openPty` on Windows (ConPTY)** (`d19/platform`,
-runtime; `ext/pty/{lib,windows}.rs`, `tests/unit/pty_test.ts`,
-`tests/specs/run/pty_redirected_stdio`, `tests/specs/node/node_pty_override`). -
-`Deno.openPty`, `Deno.Command` with `pty` and the `node-pty` shim's `spawn` run
-on Windows (10 1809 and later): `WINDOWS_CONPTY_ENABLED` and the `NotSupported`
-answer of item 259 are gone. - The cause of item 259's "ConPTY diagnosis" 1 is
-fixed: `UpdateProcThreadAttribute` got a pointer to a local copy of the `HPCON`
-as `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`'s value, and the attribute list keeps
-that pointer until `CreateProcessW` reads it, after the copy was gone; it now
-gets the handle itself (as Microsoft's sample passes it), which the
-`PseudoConsole` keeps alive. That stack slot is what left the child's output off
-the pipe (x64) or failed its start with `STATUS_DLL_INIT_FAILED` (arm64). - The
-dispose test no longer reads the child's output before it disposes (diagnosis
-2): its Windows child is `pause >nul`, which neither writes nor exits, and the
-dispose ends it. - Tests: on Windows the shell-agnostic `pty_test.ts` cases run
-(echo round trip, exit code, dispose, `readable` ending with the child, size
-checks, `--allow-run` denied, a missing program, a NUL argument, `Deno.Command`
-with `pty`), plus `ptyInputReachesTheChildOnWindows` (`set /p` reads what
-`writable` sends, after a resize), `ptyKillEndsTheChildOnWindows`
-(`TerminateProcess`, exit code 1, the output ends) and the batch-file argument
-test; `ptyIsNotSupportedOnWindows` is removed. The spec
-`run/pty_redirected_stdio` runs again, and `node/node_pty_override`'s
-`windows_spawn` spawns through node-pty (before: `windows_not_supported`).
-`windows.rs`' `pseudoconsole_attribute_value_is_the_handle`. These run on the
-train's Windows legs only (no Windows machine here; a cross `cargo check` for
-`x86_64-pc-windows-msvc` stops at C dependencies that need the Windows SDK). Not
-done: denext's `pty` desktop capability (denext repository). Node tests enabled:
-none, because node-pty is not part of Node's suite.
+314. **`feat(pty)`: `Deno.openPty` on Windows (ConPTY)** (`d19/platform`,
+     runtime; `ext/pty/{lib,windows}.rs`, `tests/unit/pty_test.ts`,
+     `tests/specs/run/pty_redirected_stdio`,
+     `tests/specs/node/node_pty_override`).
+     - `Deno.openPty`, `Deno.Command` with `pty` and the `node-pty` shim's
+       `spawn` run on Windows (10 1809 and later): `WINDOWS_CONPTY_ENABLED` and
+       the `NotSupported` answer of item 259 are gone.
+     - The cause of item 259's "ConPTY diagnosis" 1 is fixed:
+       `UpdateProcThreadAttribute` got a pointer to a local copy of the `HPCON`
+       as `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`'s value, and the attribute list
+       keeps that pointer until `CreateProcessW` reads it, after the copy was
+       gone; it now gets the handle itself (as Microsoft's sample passes it),
+       which the `PseudoConsole` keeps alive. That stack slot is what left the
+       child's output off the pipe (x64) or failed its start with
+       `STATUS_DLL_INIT_FAILED` (arm64).
+     - The dispose test no longer reads the child's output before it disposes
+       (diagnosis 2): its Windows child is `pause >nul`, which neither writes
+       nor exits, and the dispose ends it.
+     - Tests: on Windows the shell-agnostic `pty_test.ts` cases run (echo round
+       trip, exit code, dispose, `readable` ending with the child, size checks,
+       `--allow-run` denied, a missing program, a NUL argument, `Deno.Command`
+       with `pty`), plus `ptyInputReachesTheChildOnWindows` (`set /p` reads what
+       `writable` sends, after a resize), `ptyKillEndsTheChildOnWindows`
+       (`TerminateProcess`, exit code 1, the output ends) and the batch-file
+       argument test; `ptyIsNotSupportedOnWindows` is removed. The spec
+       `run/pty_redirected_stdio` runs again, and `node/node_pty_override`'s
+       `windows_spawn` spawns through node-pty (before:
+       `windows_not_supported`). `windows.rs`'
+       `pseudoconsole_attribute_value_is_the_handle`. These run on the train's
+       Windows legs only (no Windows machine here; a cross `cargo check` for
+       `x86_64-pc-windows-msvc` stops at C dependencies that need the Windows
+       SDK). Not done: denext's `pty` desktop capability (denext repository).
+       Node tests enabled: none, because node-pty is not part of Node's suite.
 
-NNN. **`fix(signals)`: on Windows, a console close, logoff or shutdown waits for
-the listener that took it** (`d19/platform`, runtime; `ext/signals/lib.rs`). -
-Windows ends a console process as soon as its control handler returns from
-`CTRL_CLOSE_EVENT`, `CTRL_LOGOFF_EVENT` or `CTRL_SHUTDOWN_EVENT`, and the
-handler returned at once, so a server's `SIGHUP` / `SIGTERM` listener (a drain)
-was cut off. When a listener took the signal over, the handler now stays until
-the listener ends the process, at most 5 s for a close and 20 s for a logoff or
-shutdown (what Windows gives a console process anyway). Ctrl+C and Ctrl+Break,
-which do not end the process when handled, and events no listener took return at
-once, as before. - Tests: `console_ctrl_tests` (the hold for each event, handled
-or not); the Windows handler itself runs on the train's Windows legs. Node tests
-enabled: none, because Node's suite has no console control event test.
+315. **`fix(signals)`: on Windows, a console close, logoff or shutdown waits for
+     the listener that took it** (`d19/platform`, runtime;
+     `ext/signals/lib.rs`).
+     - Windows ends a console process as soon as its control handler returns
+       from `CTRL_CLOSE_EVENT`, `CTRL_LOGOFF_EVENT` or `CTRL_SHUTDOWN_EVENT`,
+       and the handler returned at once, so a server's `SIGHUP` / `SIGTERM`
+       listener (a drain) was cut off. When a listener took the signal over, the
+       handler now stays until the listener ends the process, at most 5 s for a
+       close and 20 s for a logoff or shutdown (what Windows gives a console
+       process anyway). Ctrl+C and Ctrl+Break, which do not end the process when
+       handled, and events no listener took return at once, as before.
+     - Tests: `console_ctrl_tests` (the hold for each event, handled or not);
+       the Windows handler itself runs on the train's Windows legs. Node tests
+       enabled: none, because Node's suite has no console control event test.
 
-NNN. **`fix(task)`: `deno task` listens for every signal before it starts the
-task; the specs harness kills a timed-out command's whole process group**
-(`d19/platform`, runtime and tests; `cli/task_runner.rs`,
-`tests/util/lib/builders.rs`, `tests/specs/task/signals`). - `deno task`
-registered its signal forwarders in futures that first ran after the task's
-first child had been spawned, so a signal arriving in between got its default
-action in `deno task` itself (a `SIGTERM` ended it and orphaned the child; a
-default-ignored one such as `SIGWINCH` was never forwarded). The streams are now
-registered before the task runs, and Ctrl+C keeps one stream for the task's
-life. - `specs::task::signals` ran 79 minutes past its 45 s timeout in the
-denext.17 gate run: the spec's listener (a grandchild, `deno task`'s child) held
-the spec's output pipe after the sender's own 30 s timeout killed only
-`deno task`, and the harness read the pipe before waiting, so its watchdog's
-kill of the direct child never ended the read. Now a command with a timeout
-leads its own process group, the watchdog kills the group (a reparented
-grandchild too) and stays armed until the output pipes are drained, and a pipe
-something outside the group still holds is given up 5 s after the kill and
-reported. The spec's sender kills the listener too on its own timeout and says
-which signal it was waiting for. - Tests:
-`builders::tests::timeout_kills_a_grandchild_that_holds_the_pipe` (a
-backgrounded `sleep` that outlives its shell: reported in 2 s; before, the run
-blocked until the sleep ended) and
-`timeout_does_not_fire_for_a_command_that_ends`;
-`task_runner::test::signals_are_listened_to_before_the_task_runs` (a signal
-raised in the task's first poll is taken; before, `(false,
-     false)`). Node
-tests enabled: none, because `deno task` is not a Node feature.
+316. **`fix(task)`: `deno task` listens for every signal before it starts the
+     task; the specs harness kills a timed-out command's whole process group**
+     (`d19/platform`, runtime and tests; `cli/task_runner.rs`,
+     `tests/util/lib/builders.rs`, `tests/specs/task/signals`).
+     - `deno task` registered its signal forwarders in futures that first ran
+       after the task's first child had been spawned, so a signal arriving in
+       between got its default action in `deno task` itself (a `SIGTERM` ended
+       it and orphaned the child; a default-ignored one such as `SIGWINCH` was
+       never forwarded). The streams are now registered before the task runs,
+       and Ctrl+C keeps one stream for the task's life.
+     - `specs::task::signals` ran 79 minutes past its 45 s timeout in the
+       denext.17 gate run: the spec's listener (a grandchild, `deno task`'s
+       child) held the spec's output pipe after the sender's own 30 s timeout
+       killed only `deno task`, and the harness read the pipe before waiting, so
+       its watchdog's kill of the direct child never ended the read. Now a
+       command with a timeout leads its own process group, the watchdog kills
+       the group (a reparented grandchild too) and stays armed until the output
+       pipes are drained, and a pipe something outside the group still holds is
+       given up 5 s after the kill and reported. The spec's sender kills the
+       listener too on its own timeout and says which signal it was waiting for.
+     - Tests: `builders::tests::timeout_kills_a_grandchild_that_holds_the_pipe`
+       (a backgrounded `sleep` that outlives its shell: reported in 2 s; before,
+       the run blocked until the sleep ended) and
+       `timeout_does_not_fire_for_a_command_that_ends`;
+       `task_runner::test::signals_are_listened_to_before_the_task_runs` (a
+       signal raised in the task's first poll is taken; before,
+       `(false, false)`). Node tests enabled: none, because `deno task` is not a
+       Node feature.
 
-NNN. **`fix(check)`: the native type check resolves the workspace root's own
-package locally** (`d19/platform`, CLI; `cli/tools/installer/npm_compat.rs`). -
-A workspace root whose `deno.json` has a `name` and `exports` is a package its
-members can import, as Deno resolves it, but the generated `paths` mapped only
-the members' packages: a member importing the root
-(`"@scope/root": "jsr:@scope/root@^4"`) was checked against the root's published
-JSR types, and a subpath the root adds in the same change failed with TS2307
-(stock Deno 2.9.8 resolves it locally). The root's exports now join the member
-paths, so an alias to its published version maps to the local files too. -
-Tests: `test_workspace_member_paths_include_the_root_package`. Node tests
-enabled: none, because this is Deno's type check.
+317. **`fix(check)`: the native type check resolves the workspace root's own
+     package locally** (`d19/platform`, CLI;
+     `cli/tools/installer/npm_compat.rs`).
+     - A workspace root whose `deno.json` has a `name` and `exports` is a
+       package its members can import, as Deno resolves it, but the generated
+       `paths` mapped only the members' packages: a member importing the root
+       (`"@scope/root": "jsr:@scope/root@^4"`) was checked against the root's
+       published JSR types, and a subpath the root adds in the same change
+       failed with TS2307 (stock Deno 2.9.8 resolves it locally). The root's
+       exports now join the member paths, so an alias to its published version
+       maps to the local files too.
+     - Tests: `test_workspace_member_paths_include_the_root_package`. Node tests
+       enabled: none, because this is Deno's type check.
 
-NNN. **`test(core)`: `test_rebuild_async_stubs` skips when no `deno` is on
-`PATH`** (`d19/platform`; `libs/core/lib.rs`). - It printed that it was ignoring
-itself and then ran `deno` anyway, panicking on the spawn. It now returns there.
-Before:
-`called Result::unwrap() on an Err value: Os {
-     code: 2, kind: NotFound }`
-with `deno` off `PATH`; after: passes. Node tests enabled: none, because this is
-a `deno_core` unit test.
+318. **`test(core)`: `test_rebuild_async_stubs` skips when no `deno` is on
+     `PATH`** (`d19/platform`; `libs/core/lib.rs`).
+     - It printed that it was ignoring itself and then ran `deno` anyway,
+       panicking on the spawn. It now returns there. Before:
+       `called Result::unwrap() on an Err value: Os { code: 2, kind: NotFound }`
+       with `deno` off `PATH`; after: passes. Node tests enabled: none, because
+       this is a `deno_core` unit test.
 
-NNN. **`test`: a flaky test's failed attempt prints its output on CI**
-(`d19/platform`; `tests/util/lib/test_runner.rs`). - A test marked flaky that
-failed and then passed on a retry logged only "was flaky on run N", so the cause
-of `worker_coverage2`'s, the watcher tests' and the inspector tests' flakes
-never reached a log (the denext.11 to denext.18 runs show the retries and
-nothing else). The failed attempt's captured output (each failed sub test's,
-named; its last 8 KiB) now follows that line. `worker_coverage2` did not fail in
-90 local runs (30 serial, 60 ten at a time), so its cause is left to the next
-logged flake rather than guessed. - Tests:
-`flaky_failure_output_is_the_failed_attempts`. Node tests enabled: none, because
-this is the test harness.
+319. **`test`: a flaky test's failed attempt prints its output on CI**
+     (`d19/platform`; `tests/util/lib/test_runner.rs`).
+     - A test marked flaky that failed and then passed on a retry logged only
+       "was flaky on run N", so the cause of `worker_coverage2`'s, the watcher
+       tests' and the inspector tests' flakes never reached a log (the denext.11
+       to denext.18 runs show the retries and nothing else). The failed
+       attempt's captured output (each failed sub test's, named; its last 8 KiB)
+       now follows that line. `worker_coverage2` did not fail in 90 local runs
+       (30 serial, 60 ten at a time), so its cause is left to the next logged
+       flake rather than guessed.
+     - Tests: `flaky_failure_output_is_the_failed_attempts`. Node tests enabled:
+       none, because this is the test harness.
 
-NNN. **`fix(node)`: `require(esm)` throws the module's own error; Node's default
-extensions and relative lookups** (`libs/core/ops_builtin.rs`,
-`libs/core/01_core.js`, `ext/node/polyfills/01_require.js`). - A synchronous
-`require()` of an ES module that throws while it loads, links or evaluates (or
-failed earlier, from an `import()`) now throws the value the module threw, with
-its class, message and properties, as Node does. `op_import_sync` used to turn
-it into a new error whose message was the formatted stack
-(`message: 'Error: hello\n    at ...'`), so
-`assert.throws(..., { message: 'hello' })` and `err === thrown` failed. A
-top-level-await refusal and a `require()` cycle keep their own errors. - A
-ReferenceError for a CommonJS global in a required ES module says so, as Node's
-`explainCommonJSGlobalLikeNotDefinedError`: "exports is not defined in ES module
-scope", "require is not defined in ES module scope, you can use import instead",
-plus the `"type": "module"` explanation for a `.js` file. - A `.js` file that
-only fails as CommonJS because it declares a name the wrapper passes in
-(`const require = ...`) is compiled as the ES module Node retries it as; the
-module loader found no ESM syntax in it and loaded it as CommonJS again, so
-`require()` returned an empty, half-loaded module. - `.cjs`, `.mjs` and `.wasm`
-stay registered in `Module._extensions` but are not enumerable, as in Node
-(which lists `.js`, `.json` and `.node`), so `require('./x')` and a package's
-`index` no longer find `x.mjs` / `index.mjs`. - A relative request that leaves
-its directory (`require('../foo.cjs')`) is looked up even when that directory
-was deleted, as Node's `insidePath` rule. - The CommonJS loader no longer
-destructures arrays (a program may delete `Array.prototype[Symbol.iterator]`). -
-Not done: the other `require(esm)` cycle shapes (`ERR_REQUIRE_CYCLE_MODULE`,
-"Cannot import CommonJS Module ... in a cycle"), a syntax error's source line in
-the uncaught-error output (`test-require-module-errors`), the ReferenceError
-wording for `import()` (the module loader's path,
-`test-esm-undefined-cjs-global-like-variables`), and
-`--experimental-package-map` (9 tests). - Tests: the Node tests below (each
-failed before on the denext.19 base and passes after). Node tests enabled: 7
-(es-module/ test-require-module-error-catching,
-test-require-module-retry-import-errored-2,
-test-import-module-retry-require-errored, test-require-module-default-extension,
-test-require-module-implicit; parallel/ test-require-delete-array-iterator,
-test-require-enoent-dir)
+320. **`fix(node)`: `require(esm)` throws the module's own error; Node's default
+     extensions and relative lookups** (`libs/core/ops_builtin.rs`,
+     `libs/core/01_core.js`, `ext/node/polyfills/01_require.js`).
+     - A synchronous `require()` of an ES module that throws while it loads,
+       links or evaluates (or failed earlier, from an `import()`) now throws the
+       value the module threw, with its class, message and properties, as Node
+       does. `op_import_sync` used to turn it into a new error whose message was
+       the formatted stack (`message: 'Error: hello\n    at ...'`), so
+       `assert.throws(..., { message: 'hello' })` and `err === thrown` failed. A
+       top-level-await refusal and a `require()` cycle keep their own errors.
+     - A ReferenceError for a CommonJS global in a required ES module says so,
+       as Node's `explainCommonJSGlobalLikeNotDefinedError`: "exports is not
+       defined in ES module scope", "require is not defined in ES module scope,
+       you can use import instead", plus the `"type": "module"` explanation for
+       a `.js` file.
+     - A `.js` file that only fails as CommonJS because it declares a name the
+       wrapper passes in (`const require = ...`) is compiled as the ES module
+       Node retries it as; the module loader found no ESM syntax in it and
+       loaded it as CommonJS again, so `require()` returned an empty,
+       half-loaded module.
+     - `.cjs`, `.mjs` and `.wasm` stay registered in `Module._extensions` but
+       are not enumerable, as in Node (which lists `.js`, `.json` and `.node`),
+       so `require('./x')` and a package's `index` no longer find `x.mjs` /
+       `index.mjs`.
+     - A relative request that leaves its directory (`require('../foo.cjs')`) is
+       looked up even when that directory was deleted, as Node's `insidePath`
+       rule.
+     - The CommonJS loader no longer destructures arrays (a program may delete
+       `Array.prototype[Symbol.iterator]`).
+     - Not done: the other `require(esm)` cycle shapes
+       (`ERR_REQUIRE_CYCLE_MODULE`, "Cannot import CommonJS Module ... in a
+       cycle"), a syntax error's source line in the uncaught-error output
+       (`test-require-module-errors`), the ReferenceError wording for `import()`
+       (the module loader's path,
+       `test-esm-undefined-cjs-global-like-variables`), and
+       `--experimental-package-map` (9 tests).
+     - Tests: the Node tests below (each failed before on the denext.19 base and
+       passes after). Node tests enabled: 7 (es-module/
+       test-require-module-error-catching,
+       test-require-module-retry-import-errored-2,
+       test-import-module-retry-require-errored,
+       test-require-module-default-extension, test-require-module-implicit;
+       parallel/ test-require-delete-array-iterator, test-require-enoent-dir)
 
-NNN. **`feat(node)`: `--trace-exit`** (`libs/node_shim/lib.rs`,
-`ext/node/polyfills/process.ts`,
-`ext/node/polyfills/internal_binding/node_options.ts`,
-`ext/node/polyfills/worker_threads.ts`). - `node --trace-exit` was parsed and
-dropped. The node shim now passes it in `NODE_OPTIONS`, and `process.exit()`
-prints Node's `(node:<pid>) WARNING: Exited the
-     environment with code <n>`
-(`(node:<pid>, thread:<id>)` in a worker) and the stack of the call, with
-`process.exit` as its top frame and `--stack-trace-limit` bounding it, as Node's
-`Environment::Exit`. A natural exit prints nothing. - Tests: node_shim unit
-`test_trace_exit_rides_in_node_options`; the Node tests below (each failed
-before and passes after). Node tests enabled: 2 (parallel/ test-trace-exit,
-test-trace-exit-stack-limit)
+321. **`feat(node)`: `--trace-exit`** (`libs/node_shim/lib.rs`,
+     `ext/node/polyfills/process.ts`,
+     `ext/node/polyfills/internal_binding/node_options.ts`,
+     `ext/node/polyfills/worker_threads.ts`).
+     - `node --trace-exit` was parsed and dropped. The node shim now passes it
+       in `NODE_OPTIONS`, and `process.exit()` prints Node's
+       `(node:<pid>) WARNING: Exited the environment with code <n>`
+       (`(node:<pid>, thread:<id>)` in a worker) and the stack of the call, with
+       `process.exit` as its top frame and `--stack-trace-limit` bounding it, as
+       Node's `Environment::Exit`. A natural exit prints nothing.
+     - Tests: node_shim unit `test_trace_exit_rides_in_node_options`; the Node
+       tests below (each failed before and passes after). Node tests enabled: 2
+       (parallel/ test-trace-exit, test-trace-exit-stack-limit)
 
-NNN. **`fix(ext/node)`: zlib `flush(kind)` checks the kind; a reset during a
-write is refused** (`ext/node/polyfills/zlib.js`). - As Node 26
-(nodejs/node#63701): `stream.flush(kind)` with a kind outside the stream's flush
-range (zlib `Z_NO_FLUSH`..`Z_BLOCK`, Brotli `PROCESS`..`EMIT_METADATA`, zstd
-`e_continue`..`e_end`) is `ERR_OUT_OF_RANGE`, a non-number is
-`ERR_INVALID_ARG_TYPE`, and `undefined` / `NaN` is the stream's full flush;
-before, the kind went into the write unchecked. - `_handle.reset()` (and
-`stream.reset()`) while a write is in flight throws "Cannot reset zlib stream
-while a write is in progress", as Node's ZlibContext. A Brotli write's
-completion now runs from the same `nextTick` as zlib's instead of inside the
-native write, as in Node, where every write runs on the thread pool, so the
-write is still in progress when `write()` returns. - Tests: the Node tests
-below. Node tests enabled: 2 (parallel/ test-zlib-brotli-flush-invalid-kind,
-test-zlib-reset-during-write)
+322. **`fix(ext/node)`: zlib `flush(kind)` checks the kind; a reset during a
+     write is refused** (`ext/node/polyfills/zlib.js`).
+     - As Node 26 (nodejs/node#63701): `stream.flush(kind)` with a kind outside
+       the stream's flush range (zlib `Z_NO_FLUSH`..`Z_BLOCK`, Brotli
+       `PROCESS`..`EMIT_METADATA`, zstd `e_continue`..`e_end`) is
+       `ERR_OUT_OF_RANGE`, a non-number is `ERR_INVALID_ARG_TYPE`, and
+       `undefined` / `NaN` is the stream's full flush; before, the kind went
+       into the write unchecked.
+     - `_handle.reset()` (and `stream.reset()`) while a write is in flight
+       throws "Cannot reset zlib stream while a write is in progress", as Node's
+       ZlibContext. A Brotli write's completion now runs from the same
+       `nextTick` as zlib's instead of inside the native write, as in Node,
+       where every write runs on the thread pool, so the write is still in
+       progress when `write()` returns.
+     - Tests: the Node tests below. Node tests enabled: 2 (parallel/
+       test-zlib-brotli-flush-invalid-kind, test-zlib-reset-during-write)
 
-NNN. **`fix(cli)`: a remote program run inside a Node project resolves its own
-npm dependencies** (`libs/resolver/factory.rs`, `cli/factory.rs`,
-`cli/lsp/config.rs`). - `deno run jsr:...` (or an `http(s):` main module) from a
-directory with a `package.json` and no `nodeModulesDir` setting inferred the
-project's `"manual"` node_modules mode, so the remote program's npm imports were
-looked up in the project's `node_modules`, which does not carry them: "Could not
-find a matching package for 'npm:path-to-regexp@^6.3.0' in the node_modules
-directory". In a pnpm workspace that error also rewrote the root `package.json`
-from `pnpm-workspace.yaml` and asked to run again. Launchers had to pass
-`--node-modules-dir=none` for every such run. A remote main module now resolves
-its npm imports from the global cache unless `--node-modules-dir` or the
-workspace's config sets a mode; a local main module is unchanged. - Tests: spec
-`npm/byonm_remote_entrypoint` (a jsr main module with an npm dependency in an
-npm workspace; an explicit `--node-modules-dir=manual` still applies). Node
-tests enabled: none, because this is Deno's own resolution of a remote main
-module (jsr: / https:), which Node has no equivalent of and its suite does not
-test.
+323. **`fix(cli)`: a remote program run inside a Node project resolves its own
+     npm dependencies** (`libs/resolver/factory.rs`, `cli/factory.rs`,
+     `cli/lsp/config.rs`).
+     - `deno run jsr:...` (or an `http(s):` main module) from a directory with a
+       `package.json` and no `nodeModulesDir` setting inferred the project's
+       `"manual"` node_modules mode, so the remote program's npm imports were
+       looked up in the project's `node_modules`, which does not carry them:
+       "Could not find a matching package for 'npm:path-to-regexp@^6.3.0' in the
+       node_modules directory". In a pnpm workspace that error also rewrote the
+       root `package.json` from `pnpm-workspace.yaml` and asked to run again.
+       Launchers had to pass `--node-modules-dir=none` for every such run. A
+       remote main module now resolves its npm imports from the global cache
+       unless `--node-modules-dir` or the workspace's config sets a mode; a
+       local main module is unchanged.
+     - Tests: spec `npm/byonm_remote_entrypoint` (a jsr main module with an npm
+       dependency in an npm workspace; an explicit `--node-modules-dir=manual`
+       still applies). Node tests enabled: none, because this is Deno's own
+       resolution of a remote main module (jsr: / https:), which Node has no
+       equivalent of and its suite does not test.
 
-NNN. **`test(node)`: the round 8 tests checked on macOS, and Node tests that
-already passed** (`tests/node_compat/config.jsonc`). - 170 tests that rounds 4
-and 8 enabled on Linux only ("not verified on macOS or Windows") passed 3
-isolated runs out of 3 on macOS (debug build, on the denext.19 base and again
-with this branch), and now run on macOS too; Windows stays off for them,
-unverified. Thirteen other macOS-off tests also pass there but stay off: their
-reasons name a macOS CI flake or a different cause, which a local run does not
-settle. - 19 tests never listed that already pass (3 runs out of 3 on macOS,
-debug build; Linux is left to the train's CI) are enabled on Linux and macOS,
-Windows unverified: parallel/ test-fs-readfile,
-test-http-agent-reuse-drained-socket-only,
-test-http-server-headers-timeout-keepalive,
-test-http-server-request-timeout-keepalive, test-process-finalization.mjs,
-test-startup-large-pages, test-tls-cli-min-max-conflict,
-test-tls-session-reuse-different-servername, test-trace-events-vm,
-test-async-local-storage-run-scope, test-domain-abort-on-uncaught,
-test-emit-after-uncaught-exception, test-promise-unhandled-flag,
-test-tracing-no-crash, test-v8-string-is-one-byte-representation,
-test-worker-message-port-drain; v8-updates/ test-trace-gc-flag; sequential/
-test-diagnostic-dir-cpu-prof, test-diagnostic-dir-heap-prof. - The round 8
-follow-ups: the L2 (check-then-use) and L3 (an isolate-global mount) notes are
-in item 244 already. `test-fs-promises-watch` passes on macOS (above).
-`test-fs-watch-enoent` stays off: it wants `fs.watch()` of a missing path to
-throw synchronously, and the runtime deliberately reports it as an 'error' event
-(denoland/deno#34396, kept by `tests/unit_node/fs_test.ts`) so atomic-save races
-don't crash watchers. `test-child-process-fork-net` passes but timed out once in
-three runs and stays unlisted. Node tests enabled: 19 on Linux (the 19 above),
-189 on macOS (the same 19 and the 170 round 4 / round 8 tests)
+324. **`test(node)`: the round 8 tests checked on macOS, and Node tests that
+     already passed** (`tests/node_compat/config.jsonc`). - 170 tests that
+     rounds 4 and 8 enabled on Linux only ("not verified on macOS or Windows")
+     passed 3 isolated runs out of 3 on macOS (debug build, on the denext.19
+     base and again with this branch), and now run on macOS too; Windows stays
+     off for them, unverified. Thirteen other macOS-off tests also pass there
+     but stay off: their reasons name a macOS CI flake or a different cause,
+     which a local run does not settle. - 19 tests never listed that already
+     pass (3 runs out of 3 on macOS, debug build; Linux is left to the train's
+     CI) are enabled on Linux and macOS, Windows unverified: parallel/
+     test-fs-readfile, test-http-agent-reuse-drained-socket-only,
+     test-http-server-headers-timeout-keepalive,
+     test-http-server-request-timeout-keepalive, test-process-finalization.mjs,
+     test-startup-large-pages, test-tls-cli-min-max-conflict,
+     test-tls-session-reuse-different-servername, test-trace-events-vm,
+     test-async-local-storage-run-scope, test-domain-abort-on-uncaught,
+     test-emit-after-uncaught-exception, test-promise-unhandled-flag,
+     test-tracing-no-crash, test-v8-string-is-one-byte-representation,
+     test-worker-message-port-drain; v8-updates/ test-trace-gc-flag; sequential/
+     test-diagnostic-dir-cpu-prof, test-diagnostic-dir-heap-prof.
+     - The round 8 follow-ups: the L2 (check-then-use) and L3 (an isolate-global
+       mount) notes are in item 244 already. `test-fs-promises-watch` passes on
+       macOS (above). `test-fs-watch-enoent` stays off: it wants `fs.watch()` of
+       a missing path to throw synchronously, and the runtime deliberately
+       reports it as an 'error' event (denoland/deno#34396, kept by
+       `tests/unit_node/fs_test.ts`) so atomic-save races don't crash watchers.
+       `test-child-process-fork-net` passes but timed out once in three runs and
+       stays unlisted. Node tests enabled: 19 on Linux (the 19 above), 189 on
+       macOS (the same 19 and the 170 round 4 / round 8 tests) The runtime-side
+       parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62, 64-73, 75-77,
+       80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113, 118, 119,
+       126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
+       169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203,
+       206, 207, 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235,
+       237, 240, 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286,
+       287, 289-296) are what the prebuilt `libdenort` carries. The CLI-side
+       parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into
+       a packaged app's launchers) are in the branch too, but a stock CLI does
+       not run them; denext's own launcher provides that environment. The laufey
+       backend hosts are built from
+       [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
+       `development-denext` (formerly `denext/integration`; registered schemes,
+       app data dir, WebKitGTK scheme request bodies, launch config, open-url /
+       single instance, passkeys, the window API with littledivy/laufey#80 and
+       #81, drag and drop / file dialogs / rich clipboard, global shortcuts /
+       launch at login / DevTools control, menu accelerators / notifications,
+       UI-thread tasks / auth sessions / non-blocking WebKitGTK scheme bodies,
+       Windows bindgen fix, and API 43: auth session cancel, Local Network
+       Access for the registered custom-scheme origins on CEF, Windows menu and
+       file-dialog fixes, CEF file drops; then the 3.1.0 audits: scheme request
+       cancellation (`on_cancel` on every backend), no aborts on a NUL in a
+       string, the Linux window-destroy use-after-free, sync UI hops that can't
+       hang exit; and API 44, the 3.1.1 audit: each JS call's document origin,
+       the launch file's `bridgeOrigins`, scheme response write backpressure, a
+       packaged app loading only its own runtime and pinned launch keys,
+       WebKitGTK sub-frames kept off the bridge, a strict bridge JSON parser;
+       and every host runs the runtime's own helper and worker launches
+       (`run …`, `NODE_CHANNEL_FD`, `NEXT_PRIVATE_WORKER`) headless before its
+       single-instance check; and API 48, the navigation guard; then, for
+       runtime 3.0.0-rc.1, the CEF custom-scheme localStorage commit gate,
+       KWin's blur, the XCB clipboard and Linux passkeys through libwebauthn
+       (item 88); and, for runtime 3.0.0-denext.2, legacy Linux secure-store
+       items read over an encrypted Secret Service session (laufey 879ee0e) and
+       tokio 1.53.3 with laufey's own `.cargo/audit.toml`; and, for runtime
+       3.0.0-denext.6, API 50: overlay windows, tray events, the launch
+       activation policy and speech, item 183; and, for runtime 3.0.0-denext.7,
+       CEF 156, item 184, and the Linux Wayland overlay fixes, item 186; and,
+       for runtime 3.0.0-denext.8, API 51, hidden pages throttled instead of
+       frozen on macOS and `backgroundThrottling`, item 198; and the Windows
+       focus, tray role and window icon fixes, item 207; and API 52, the OS's
+       quits and layer-surface edge anchoring, items 221 and 222; and, for
+       runtime 3.0.0-denext.10, a Linux window first shown at its size and the
+       CEF shutdown, storage and print fixes, item 234, and API 53, microphone
+       and camera requests and the `mediaCapture` launch key, item 239; and, for
+       runtime 3.0.0-denext.11, screen capture refused on WebView2 and WebRTC on
+       WebKitGTK for media-capture apps, item 252; and, for runtime
+       3.0.0-denext.14, API 54, native message dialogs, item 277), at the commit
+       pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The
+       same commit is the `laufey` git dependency of `cli/rt_desktop/Cargo.toml`
+       (crate 0.8.0, API 54, CEF 156.0.15). laufey's `init_api` rejects any C
+       ABI version mismatch between the runtime and the host, so the `laufey`
+       crate libdenort links and the hosts are built from the **same** laufey
+       revision: the workflow patches whatever source `Cargo.lock` names for
+       `laufey` (crates.io, or a git rev of Brainwires/laufey) with a path to
+       that revision's `capi/`, records the `LAUFEY_API_VERSION` it compiled,
+       and the package job fails if it differs from the hosts'
+       `capi/include/laufey.h`. ## Permissions: least-privilege guardrails The
+       `--allow-*` / `--deny-*` permissions are **least-privilege guardrails**,
+       not a sandbox. They are checks inside Deno's own APIs
+       (`runtime/permissions/`, asked by each op before it acts); the operating
+       system knows nothing about them. Code that leaves those APIs leaves the
+       checks behind: a subprocess (`--allow-run`) runs with the user's full
+       rights, and FFI (`--allow-ffi`) and Node-API addons are native code in
+       the process that never asks. Kernel enforcement of the same grants
+       (Landlock on Linux, Seatbelt on macOS) is planned; until it ships, every
+       description of a permission in this fork means "least-privilege
+       guardrail". The lifecycle-script jail
+       ([npm supply-chain settings](#npm-supply-chain-settings)) is the one
+       place the OS already confines code, and it covers install scripts only.
+       ### Permission footguns - **`--allow-run` and `--allow-ffi` mean full
+       trust.** A program started with `--allow-run` is not bound by the
+       parent's flags; a shell, an interpreter or another `deno` can do
+       anything. A scoped `--allow-run=<prog>` narrows which programs start, not
+       what they do. FFI and Node-API addons are not checked at all once loaded.
+     - **Write access to config files is code execution.** `deno.json` (tasks,
+       import maps, permission sets), `package.json` scripts, `.npmrc`,
+       lockfiles, shell startup files, git hooks and git config, and any module
+       the next run imports.
+     - **`--allow-net` to localhost reaches local services and cloud metadata.**
+       A loopback or unscoped grant reaches every service listening on the
+       machine; an unscoped one also reaches the instance metadata endpoint. An
+       allowed host name connects to whatever address DNS returns for it.
+       `Deno.resolveDns()` checks the name servers, not the names looked up.
+       Block metadata and internal ranges at the network layer too, not only
+       with `--deny-net`.
+     - **`--allow-env` exposes secrets.** Unscoped, every module reads every
+       variable; a subprocess inherits the environment unless it is cleared.
+     - **`--allow-read` of the home directory exposes credentials** (`~/.ssh`,
+       `~/.aws`, `~/.config/gcloud`, `~/.kube`, `~/.docker/config.json`,
+       `~/.npmrc`, `~/.netrc`, shell history).
+     - **Symlinks and allow scopes**, as of `3.0.0-denext.13`: allow scopes are
+       matched against the path as written, so a symlink inside an allowed
+       folder that points outside it is followed (reads, writes, directory
+       links). Deny rules are checked against the resolved path, including
+       dangling links and linked parent directories. `Deno.symlink()` /
+       `node:fs` `symlink` need unscoped read and write, so scoped code can't
+       create a link, but an existing one (or one a subprocess, an archive or a
+       checkout creates) is followed. Allow scopes that resolve links are in
+       progress on a separate branch. ### Network permissions and proxies
+       Checked against `3.0.0-denext.13` with an environment HTTP proxy: -
+       **`fetch()` / `WebSocket`** (`ext/fetch/proxy.rs`, `ext/fetch/dns.rs`,
+       `ext/websocket/lib.rs`): `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and
+       `NO_PROXY` (either case) are snapshotted before user code runs
+       (`snapshot_proxy_env`), so `Deno.env.set()` later changes nothing. The
+       destination URL is checked (allow and deny) before any I/O, proxied or
+       not, and every redirect hop is checked again. The hop to an environment
+       HTTP/HTTPS proxy needs no `--allow-net` grant (operator configuration); a
+       SOCKS proxy host and an explicit `Deno.createHttpClient({ proxy })` do.
+       `NO_PROXY` hosts connect directly with the usual checks. A refusal inside
+       the connector surfaces as `TypeError: fetch failed` with the permission
+       error as `cause`. A proxied request may still look the destination name
+       up through the local resolver.
+     - **`node:http` / `node:https`** (`ext/node/polyfills/_http_proxy.js`,
+       `_http_client.js`): Node 24 rules, a proxy only with
+       `NODE_USE_ENV_PROXY=1` / `--use-env-proxy`,
+       `http.setGlobalProxyFromEnv()` or an agent's `proxyEnv`; the variables
+       are read on first use without `--allow-env` (not snapshotted). The target
+       is checked (`op_node_http_check_proxy_net`) and the proxy hop is a normal
+       `node:net` / `node:tls` connection, so both need `--allow-net`.
+     - **`Deno.connect` / `connectTls` / `node:net` / `node:tls`**: no proxy
+       support; direct connections with the usual checks.
+     - ## **npm clients with their own proxy agent** open a socket only to the proxy, so only the proxy is checked. A grant to a proxy host is a grant to everything that proxy can reach. ## npm supply-chain settings Items 83-86. Each `.npmrc` key also reads `npm_config_<key>` / `NPM_CONFIG_<KEY>` from the environment (`-` as `_`), and deno.json's `supplyChain` (the root deno.json only) mirrors them. Where several sources (the `.npmrc` files, the environment, deno.json) set a key, the stricter value wins; under `paranoid`, a weaker one is an error. | `.npmrc` key | deno.json `supplyChain` | Flag | Default | What | | ---------------------------- | ------------------------------------------------------------------ | -------------------------------------- | ------- |
+       | | `paranoid` | `paranoid` | | `false` | Every gate on and failing
+       closed (item 86). | | `jail-scripts` | `jailScripts`: `true` / `false`,
+       or `{ net, packages }` | `--jail-scripts` / `--no-jail-scripts` | `true`
+       | Approved dependencies' lifecycle scripts run confined (item 83; on by
+       default, item 103). `false` opts out, not under `paranoid`. | | |
+       `jailScripts.net` | | `false` | Network for every jailed script. | | |
+       `jailScripts.packages.<name>`: `{ env, write, net, executables }` | | | A
+       package's exceptions: environment variables passed through, extra
+       writable directories (relative to deno.json), network. | | |
+       `jailScripts.knownPackages.<name>`: `[host, ...]` | | | The download
+       hosts the package may declare for itself (`binary.host`); an undeclared
+       or unlisted one reaches nothing (item 124). | | `advisory-check` |
+       `advisoryCheck`: `"on"` / `"off"` / `"required"` | | `on` | Refuse
+       versions OSV lists as malicious; `required` also refuses when OSV can't
+       be reached (item 84). | | `low-download-check` | `lowDownloadCheck`:
+       `"off"` / `"warn"` / `"prompt"` / `"required"` | | `warn` | What
+       `deno add` does below the threshold: warn and add; ask in a terminal and
+       refuse without one; also refuse unknown counts (item 85). | |
+       `low-download-threshold` | `lowDownloadThreshold` | | `1000` | Weekly
+       downloads below which the low-download check applies; `0` turns it off
+       (item 85). | | `allowed-unpopular-packages` | `allowLowDownloads` |
+       `--allow-low-downloads[=<names>]` | | Names (or `@scope/*`, `prefix*`)
+       `deno add` adds whatever their counts; the flag without names allows all
+       (not under paranoid). | | `trust-policy` | | | `off` | `paranoid` sets
+       `no-downgrade`. | What each gate does by default, and under `paranoid`: |
+       Gate | Default | `paranoid` | | -------------------------- |
+       ------------------------------------------------ |
+       ------------------------------------------------------------- | |
+       Malicious versions (OSV) | On: refused; OSV unreachable warns and
+       installs | Refused; OSV unreachable refuses | | Low downloads
+       (`deno add`) | Warns with the count and how to allow it; adds | Asks in a
+       terminal, refuses without one and on unknown counts | | Lifecycle scripts
+       | Jailed (item 103); `jail-scripts=false` opts out | Jailed; not run
+       where the OS can't confine them | | Trust policy | `off` | `no-downgrade`
+       | The services: `https://api.osv.dev/v1/querybatch` (no account) and
+       `https://api.npmjs.org/downloads/point/last-week/<name>`, through Deno's
+       HTTP client (proxy settings and `--cert` apply). `DENO_OSV_URL` and
+       `DENO_NPM_DOWNLOADS_URL` name others (a mirror; the spec tests'
+       stand-ins); `DENO_OSV_CACHE_TTL` sets how many seconds a clean OSV result
+       is reused (86400). Inside a jailed script, `DENO_INTERNAL_LIFECYCLE_JAIL`
+       carries the permissions every `deno` clamps itself to; it is internal. ##
+       Release archives One archive per target and backend:
+       `deno-desktop-runtime-<version>-<target>-<backend>.tar.gz` (`<version>`:
+       the fork's own, `3.0.0-rc.1`; up to `denext.22` it was
+       `<deno version>-denext.<n>`) (`.zip` on Windows). Targets:
+       `aarch64-apple-darwin`, `x86_64-apple-darwin`,
+       `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+       `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc` (from `denext.21`).
+       Backends: `webview`, `cef`.
+       `text libdenort.dylib | libdenort.so | denort.dll    -> DENORT_DESKTOP_BIN laufey/                                         -> LAUFEY_DEV_DIR webview/build/laufey_webview.app              (macOS, webview) webview/build/laufey_webview[.exe]            (Linux / Windows, webview) cef/build/Release/laufey.app                  (macOS, cef) cef/build/Release/laufey[.exe], libcef.*, ... (Linux / Windows, cef) cef/build/Release/dictionaries/*.bdic         (Linux, cef: spellcheck, item 37) BUILD_INFO.json                                 deno + laufey SHAs, CEF version, run URL licenses/                                       deno, laufey (and CEF) licenses`
+       The `laufey/` paths are the build-tree paths the stock CLI searches under
+       `LAUFEY_DEV_DIR` (`cli/tools/desktop.rs`, `locate_dev_backend_binary` /
+       `locate_dev_app_bundle`). On Linux and Windows the CLI copies the whole
+       directory holding the backend binary into the packaged app, so those
+       directories hold only the backend's runtime files. Since `denext.15` each
+       release also has this fork's `deno` CLI (item 26), one zip per target
+       (every OS): `deno-cli-<version>-<target>.zip`, no wrapping directory:
+       ``text deno | deno.exe        the CLI; `Deno.version.deno` is `<version>` esbuild | esbuild.exe  the official esbuild 0.25.5 `deno bundle` uses esbuild.LICENSE        esbuild's MIT license typescript-check/      the native TypeScript 7.0.2 type checking runs (item 47; tsc | tsc.exe, lib.*.d.ts, LICENSE, NOTICE.txt, typescript.json) tsgolint/              the tsgolint 7.0.2004 `deno lint --type-aware` runs (item 106; tsgolint | tsgolint.exe, LICENSE, tsgolint.json) BUILD_INFO.json        deno version + SHA, run URL, esbuild, TypeScript and tsgolint sources + SHA-256 licenses/              the deno license``
+       Each release also has `SHA256SUMS` (every runtime, CLI and `denort`
+       archive; `deno compile` takes the `denort` it downloads only with the
+       SHA-256 compiled into the CLI, or else the one listed here, items 188
+       and 130) and `manifest.json` (target -> backend -> url, sha256, size; the
+       CLI archives under `cli.targets` -> target -> binary, url, sha256, size
+       and `esbuild: { version, sha256 }`,
+       `typescript_check: { version, sha256, tree_sha256 }` and
+       `typescript_lsp: { version, sha256, tree_sha256 }` (item 94) and
+       `tsgolint: { version, sha256, tree_sha256 }` (item 106); plus the deno
+       SHA, laufey SHA and CEF version). Every archive has a build provenance
+       attestation:
+       `sh gh attestation verify deno-desktop-runtime-<...>.tar.gz -R Brainwires/deno gh attestation verify deno-cli-<...>.zip -R Brainwires/deno`
+       The release binaries are signed before they are archived, so the SHA-256
+       pins cover the signed bytes (`sign_macos.sh`, `sign_windows.ps1`): on
+       macOS `deno` and `denort` with the Developer ID of Team `WT957SC7MJ`
+       (hardened runtime, `cli/entitlements.plist`) and `libdenort.dylib` with
+       the same identity, then notarized (a bare Mach-O cannot be stapled:
+       Gatekeeper checks the ticket online); on Windows `deno.exe`, `denort.exe`
+       and `denort.dll` with Authenticode (SHA-256, RFC 3161 timestamp). Without
+       the signing secrets (`APPLE_DEVELOPER_ID_CERT`,
+       `APPLE_DEVELOPER_ID_CERT_PASSWORD`, `APPLE_API_KEY`, `APPLE_API_KEY_ID`,
+       `APPLE_API_ISSUER`; `WINDOWS_CODESIGN_PFX`,
+       `WINDOWS_CODESIGN_PFX_PASSWORD`) each step warns and the binaries keep an
+       ad-hoc signature (macOS; arm64 macOS will not load unsigned code) or none
+       (Windows). An app is still signed with its author's identity when it is
+       packaged. `*-symbols-<version>-<target>.tar.gz` (with
+       `SYMBOLS.SHA256SUMS`) hold the debug info the release profile splits off
+       (`.dSYM` / `.dwp` / `.pdb`), for symbolicating a crash report; they are
+       not in `manifest.json`. The Linux `deno` and `denort` need glibc 2.27 or
+       newer: the `cli` job links them against upstream Deno's Ubuntu 18.04
+       sysroot (`linux_sysroot.sh`) and fails when one requires a newer `GLIBC_`
+       version than `GLIBC_CEILING`, which is only ever lowered (item 151);
+       `manifest.json` records it as `cli.glibc`. The Deno Desktop runtime's
+       `libdenort` and laufey hosts are still built on Ubuntu 22.04 (glibc
+       2.35), which WebKitGTK 4.1 needs anyway. ## Reproducing a build The
+       workflow is `.github/workflows/denext_runtime.yml` (helpers in
+       `.github/denext-runtime/`). Run it from the Actions tab
+       (`workflow_dispatch`, optional `targets` filter, `laufey_ref` override,
+       and `reuse_*_run_id` to reuse a previous run's libdenort or laufey
+       build), or push a `denext-runtime-v*` tag to publish. It also runs on a
+       push to `development-denext` (or a `rel/**` branch) that changes what the
+       runtime is built from: the `cli`, `runtime`, `ext` and `libs` crates, the
+       workspace manifests and toolchain (`Cargo.toml`, `Cargo.lock`,
+       `rust-toolchain.toml`, `.cargo/`), the laufey pin (`LAUFEY_SHA` in the
+       workflow, `cli/rt_desktop/Cargo.toml`), the workflow and
+       `.github/denext-runtime/`. A tag publishes only when the setup job's
+       gates pass: the tag is annotated, points at the commit being built, was
+       never pushed on another commit and has no release yet (tags and releases
+       are never moved or replaced: a failed tag build is fixed by the next
+       version); and (`tag_gate.py`) a full `denext tests` (`denext_tests.yml`)
+       run, every OS leg green (Windows arm64 included), passed on exactly the
+       tagged commit, no `denext tests` run of that commit failed in any attempt
+       (a green re-run does not clear a red one) or is still running, and the
+       commit is on `development-denext` or `rel/<version>`. A pre-release
+       version (`3.0.0-rc.N`) is published as a GitHub pre-release, never as the
+       repository's "Latest"; otherwise the release is "Latest" exactly when its
+       version is the newest. Per target it:
 
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-296) are
-what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
-`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
-in the branch too, but a stock CLI does not run them; denext's own launcher
-provides that environment.
-
-The laufey backend hosts are built from
-[Brainwires/laufey](https://github.com/Brainwires/laufey) branch
-`development-denext` (formerly `denext/integration`; registered schemes, app
-data dir, WebKitGTK scheme request bodies, launch config, open-url / single
-instance, passkeys, the window API with littledivy/laufey#80 and #81, drag and
-drop / file dialogs / rich clipboard, global shortcuts / launch at login /
-DevTools control, menu accelerators / notifications, UI-thread tasks / auth
-sessions / non-blocking WebKitGTK scheme bodies, Windows bindgen fix, and API
-43: auth session cancel, Local Network Access for the registered custom-scheme
-origins on CEF, Windows menu and file-dialog fixes, CEF file drops; then the
-3.1.0 audits: scheme request cancellation (`on_cancel` on every backend), no
-aborts on a NUL in a string, the Linux window-destroy use-after-free, sync UI
-hops that can't hang exit; and API 44, the 3.1.1 audit: each JS call's document
-origin, the launch file's `bridgeOrigins`, scheme response write backpressure, a
-packaged app loading only its own runtime and pinned launch keys, WebKitGTK
-sub-frames kept off the bridge, a strict bridge JSON parser; and every host runs
-the runtime's own helper and worker launches (`run …`, `NODE_CHANNEL_FD`,
-`NEXT_PRIVATE_WORKER`) headless before its single-instance check; and API 48,
-the navigation guard; then, for runtime 3.0.0-rc.1, the CEF custom-scheme
-localStorage commit gate, KWin's blur, the XCB clipboard and Linux passkeys
-through libwebauthn (item 88); and, for runtime 3.0.0-denext.2, legacy Linux
-secure-store items read over an encrypted Secret Service session (laufey
-879ee0e) and tokio 1.53.3 with laufey's own `.cargo/audit.toml`; and, for
-runtime 3.0.0-denext.6, API 50: overlay windows, tray events, the launch
-activation policy and speech, item 183; and, for runtime 3.0.0-denext.7, CEF
-156, item 184, and the Linux Wayland overlay fixes, item 186; and, for runtime
-3.0.0-denext.8, API 51, hidden pages throttled instead of frozen on macOS and
-`backgroundThrottling`, item 198; and the Windows focus, tray role and window
-icon fixes, item 207; and API 52, the OS's quits and layer-surface edge
-anchoring, items 221 and 222; and, for runtime 3.0.0-denext.10, a Linux window
-first shown at its size and the CEF shutdown, storage and print fixes, item 234,
-and API 53, microphone and camera requests and the `mediaCapture` launch key,
-item 239; and, for runtime 3.0.0-denext.11, screen capture refused on WebView2
-and WebRTC on WebKitGTK for media-capture apps, item 252; and, for runtime
-3.0.0-denext.14, API 54, native message dialogs, item 277), at the commit pinned
-by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The same commit is
-the `laufey` git dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 54,
-CEF 156.0.15).
-
-laufey's `init_api` rejects any C ABI version mismatch between the runtime and
-the host, so the `laufey` crate libdenort links and the hosts are built from the
-**same** laufey revision: the workflow patches whatever source `Cargo.lock`
-names for `laufey` (crates.io, or a git rev of Brainwires/laufey) with a path to
-that revision's `capi/`, records the `LAUFEY_API_VERSION` it compiled, and the
-package job fails if it differs from the hosts' `capi/include/laufey.h`.
-
-## Permissions: least-privilege guardrails
-
-The `--allow-*` / `--deny-*` permissions are **least-privilege guardrails**, not
-a sandbox. They are checks inside Deno's own APIs (`runtime/permissions/`, asked
-by each op before it acts); the operating system knows nothing about them. Code
-that leaves those APIs leaves the checks behind: a subprocess (`--allow-run`)
-runs with the user's full rights, and FFI (`--allow-ffi`) and Node-API addons
-are native code in the process that never asks. Kernel enforcement of the same
-grants (Landlock on Linux, Seatbelt on macOS) is planned; until it ships, every
-description of a permission in this fork means "least-privilege guardrail". The
-lifecycle-script jail ([npm supply-chain settings](#npm-supply-chain-settings))
-is the one place the OS already confines code, and it covers install scripts
-only.
-
-### Permission footguns
-
-- **`--allow-run` and `--allow-ffi` mean full trust.** A program started with
-  `--allow-run` is not bound by the parent's flags; a shell, an interpreter or
-  another `deno` can do anything. A scoped `--allow-run=<prog>` narrows which
-  programs start, not what they do. FFI and Node-API addons are not checked at
-  all once loaded.
-- **Write access to config files is code execution.** `deno.json` (tasks, import
-  maps, permission sets), `package.json` scripts, `.npmrc`, lockfiles, shell
-  startup files, git hooks and git config, and any module the next run imports.
-- **`--allow-net` to localhost reaches local services and cloud metadata.** A
-  loopback or unscoped grant reaches every service listening on the machine; an
-  unscoped one also reaches the instance metadata endpoint. An allowed host name
-  connects to whatever address DNS returns for it. `Deno.resolveDns()` checks
-  the name servers, not the names looked up. Block metadata and internal ranges
-  at the network layer too, not only with `--deny-net`.
-- **`--allow-env` exposes secrets.** Unscoped, every module reads every
-  variable; a subprocess inherits the environment unless it is cleared.
-- **`--allow-read` of the home directory exposes credentials** (`~/.ssh`,
-  `~/.aws`, `~/.config/gcloud`, `~/.kube`, `~/.docker/config.json`, `~/.npmrc`,
-  `~/.netrc`, shell history).
-- **Symlinks and allow scopes**, as of `3.0.0-denext.13`: allow scopes are
-  matched against the path as written, so a symlink inside an allowed folder
-  that points outside it is followed (reads, writes, directory links). Deny
-  rules are checked against the resolved path, including dangling links and
-  linked parent directories. `Deno.symlink()` / `node:fs` `symlink` need
-  unscoped read and write, so scoped code can't create a link, but an existing
-  one (or one a subprocess, an archive or a checkout creates) is followed. Allow
-  scopes that resolve links are in progress on a separate branch.
-
-### Network permissions and proxies
-
-Checked against `3.0.0-denext.13` with an environment HTTP proxy:
-
-- **`fetch()` / `WebSocket`** (`ext/fetch/proxy.rs`, `ext/fetch/dns.rs`,
-  `ext/websocket/lib.rs`): `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and
-  `NO_PROXY` (either case) are snapshotted before user code runs
-  (`snapshot_proxy_env`), so `Deno.env.set()` later changes nothing. The
-  destination URL is checked (allow and deny) before any I/O, proxied or not,
-  and every redirect hop is checked again. The hop to an environment HTTP/HTTPS
-  proxy needs no `--allow-net` grant (operator configuration); a SOCKS proxy
-  host and an explicit `Deno.createHttpClient({ proxy })` do. `NO_PROXY` hosts
-  connect directly with the usual checks. A refusal inside the connector
-  surfaces as `TypeError: fetch failed` with the permission error as `cause`. A
-  proxied request may still look the destination name up through the local
-  resolver.
-- **`node:http` / `node:https`** (`ext/node/polyfills/_http_proxy.js`,
-  `_http_client.js`): Node 24 rules, a proxy only with `NODE_USE_ENV_PROXY=1` /
-  `--use-env-proxy`, `http.setGlobalProxyFromEnv()` or an agent's `proxyEnv`;
-  the variables are read on first use without `--allow-env` (not snapshotted).
-  The target is checked (`op_node_http_check_proxy_net`) and the proxy hop is a
-  normal `node:net` / `node:tls` connection, so both need `--allow-net`.
-- **`Deno.connect` / `connectTls` / `node:net` / `node:tls`**: no proxy support;
-  direct connections with the usual checks.
-- **npm clients with their own proxy agent** open a socket only to the proxy, so
-  only the proxy is checked. A grant to a proxy host is a grant to everything
-  that proxy can reach.
-
-## npm supply-chain settings
-
-Items 83-86. Each `.npmrc` key also reads `npm_config_<key>` /
-`NPM_CONFIG_<KEY>` from the environment (`-` as `_`), and deno.json's
-`supplyChain` (the root deno.json only) mirrors them. Where several sources (the
-`.npmrc` files, the environment, deno.json) set a key, the stricter value wins;
-under `paranoid`, a weaker one is an error.
-
-| `.npmrc` key                 | deno.json `supplyChain`                                            | Flag                                   | Default | What                                                                                                                                    |
-| ---------------------------- | ------------------------------------------------------------------ | -------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `paranoid`                   | `paranoid`                                                         |                                        | `false` | Every gate on and failing closed (item 86).                                                                                             |
-| `jail-scripts`               | `jailScripts`: `true` / `false`, or `{ net, packages }`            | `--jail-scripts` / `--no-jail-scripts` | `true`  | Approved dependencies' lifecycle scripts run confined (item 83; on by default, item 103). `false` opts out, not under `paranoid`.       |
-|                              | `jailScripts.net`                                                  |                                        | `false` | Network for every jailed script.                                                                                                        |
-|                              | `jailScripts.packages.<name>`: `{ env, write, net, executables }`  |                                        |         | A package's exceptions: environment variables passed through, extra writable directories (relative to deno.json), network.              |
-|                              | `jailScripts.knownPackages.<name>`: `[host, ...]`                  |                                        |         | The download hosts the package may declare for itself (`binary.host`); an undeclared or unlisted one reaches nothing (item 124).        |
-| `advisory-check`             | `advisoryCheck`: `"on"` / `"off"` / `"required"`                   |                                        | `on`    | Refuse versions OSV lists as malicious; `required` also refuses when OSV can't be reached (item 84).                                    |
-| `low-download-check`         | `lowDownloadCheck`: `"off"` / `"warn"` / `"prompt"` / `"required"` |                                        | `warn`  | What `deno add` does below the threshold: warn and add; ask in a terminal and refuse without one; also refuse unknown counts (item 85). |
-| `low-download-threshold`     | `lowDownloadThreshold`                                             |                                        | `1000`  | Weekly downloads below which the low-download check applies; `0` turns it off (item 85).                                                |
-| `allowed-unpopular-packages` | `allowLowDownloads`                                                | `--allow-low-downloads[=<names>]`      |         | Names (or `@scope/*`, `prefix*`) `deno add` adds whatever their counts; the flag without names allows all (not under paranoid).         |
-| `trust-policy`               |                                                                    |                                        | `off`   | `paranoid` sets `no-downgrade`.                                                                                                         |
-
-What each gate does by default, and under `paranoid`:
-
-| Gate                       | Default                                          | `paranoid`                                                    |
-| -------------------------- | ------------------------------------------------ | ------------------------------------------------------------- |
-| Malicious versions (OSV)   | On: refused; OSV unreachable warns and installs  | Refused; OSV unreachable refuses                              |
-| Low downloads (`deno add`) | Warns with the count and how to allow it; adds   | Asks in a terminal, refuses without one and on unknown counts |
-| Lifecycle scripts          | Jailed (item 103); `jail-scripts=false` opts out | Jailed; not run where the OS can't confine them               |
-| Trust policy               | `off`                                            | `no-downgrade`                                                |
-
-The services: `https://api.osv.dev/v1/querybatch` (no account) and
-`https://api.npmjs.org/downloads/point/last-week/<name>`, through Deno's HTTP
-client (proxy settings and `--cert` apply). `DENO_OSV_URL` and
-`DENO_NPM_DOWNLOADS_URL` name others (a mirror; the spec tests' stand-ins);
-`DENO_OSV_CACHE_TTL` sets how many seconds a clean OSV result is reused (86400).
-Inside a jailed script, `DENO_INTERNAL_LIFECYCLE_JAIL` carries the permissions
-every `deno` clamps itself to; it is internal.
-
-## Release archives
-
-One archive per target and backend:
-`deno-desktop-runtime-<version>-<target>-<backend>.tar.gz` (`<version>`: the
-fork's own, `3.0.0-rc.1`; up to `denext.22` it was `<deno version>-denext.<n>`)
-(`.zip` on Windows). Targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`,
-`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
-`x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc` (from `denext.21`).
-Backends: `webview`, `cef`.
-
-```text
-libdenort.dylib | libdenort.so | denort.dll    -> DENORT_DESKTOP_BIN
-laufey/                                         -> LAUFEY_DEV_DIR
-  webview/build/laufey_webview.app              (macOS, webview)
-  webview/build/laufey_webview[.exe]            (Linux / Windows, webview)
-  cef/build/Release/laufey.app                  (macOS, cef)
-  cef/build/Release/laufey[.exe], libcef.*, ... (Linux / Windows, cef)
-  cef/build/Release/dictionaries/*.bdic         (Linux, cef: spellcheck, item 37)
-BUILD_INFO.json                                 deno + laufey SHAs, CEF version, run URL
-licenses/                                       deno, laufey (and CEF) licenses
-```
-
-The `laufey/` paths are the build-tree paths the stock CLI searches under
-`LAUFEY_DEV_DIR` (`cli/tools/desktop.rs`, `locate_dev_backend_binary` /
-`locate_dev_app_bundle`). On Linux and Windows the CLI copies the whole
-directory holding the backend binary into the packaged app, so those directories
-hold only the backend's runtime files.
-
-Since `denext.15` each release also has this fork's `deno` CLI (item 26), one
-zip per target (every OS): `deno-cli-<version>-<target>.zip`, no wrapping
-directory:
-
-```text
-deno | deno.exe        the CLI; `Deno.version.deno` is `<version>`
-esbuild | esbuild.exe  the official esbuild 0.25.5 `deno bundle` uses
-esbuild.LICENSE        esbuild's MIT license
-typescript-check/      the native TypeScript 7.0.2 type checking runs (item 47;
-                       tsc | tsc.exe, lib.*.d.ts, LICENSE, NOTICE.txt, typescript.json)
-tsgolint/              the tsgolint 7.0.2004 `deno lint --type-aware` runs (item 106;
-                       tsgolint | tsgolint.exe, LICENSE, tsgolint.json)
-BUILD_INFO.json        deno version + SHA, run URL, esbuild, TypeScript and tsgolint sources + SHA-256
-licenses/              the deno license
-```
-
-Each release also has `SHA256SUMS` (every runtime, CLI and `denort` archive;
-`deno compile` takes the `denort` it downloads only with the SHA-256 compiled
-into the CLI, or else the one listed here, items 188 and 130) and
-`manifest.json` (target -> backend -> url, sha256, size; the CLI archives under
-`cli.targets` -> target -> binary, url, sha256, size and
-`esbuild: { version, sha256 }`,
-`typescript_check: { version, sha256, tree_sha256 }` and
-`typescript_lsp: { version, sha256, tree_sha256 }` (item 94) and
-`tsgolint: { version, sha256, tree_sha256 }` (item 106); plus the deno SHA,
-laufey SHA and CEF version). Every archive has a build provenance attestation:
-
-```sh
-gh attestation verify deno-desktop-runtime-<...>.tar.gz -R Brainwires/deno
-gh attestation verify deno-cli-<...>.zip -R Brainwires/deno
-```
-
-The release binaries are signed before they are archived, so the SHA-256 pins
-cover the signed bytes (`sign_macos.sh`, `sign_windows.ps1`): on macOS `deno`
-and `denort` with the Developer ID of Team `WT957SC7MJ` (hardened runtime,
-`cli/entitlements.plist`) and `libdenort.dylib` with the same identity, then
-notarized (a bare Mach-O cannot be stapled: Gatekeeper checks the ticket
-online); on Windows `deno.exe`, `denort.exe` and `denort.dll` with Authenticode
-(SHA-256, RFC 3161 timestamp). Without the signing secrets
-(`APPLE_DEVELOPER_ID_CERT`, `APPLE_DEVELOPER_ID_CERT_PASSWORD`, `APPLE_API_KEY`,
-`APPLE_API_KEY_ID`, `APPLE_API_ISSUER`; `WINDOWS_CODESIGN_PFX`,
-`WINDOWS_CODESIGN_PFX_PASSWORD`) each step warns and the binaries keep an ad-hoc
-signature (macOS; arm64 macOS will not load unsigned code) or none (Windows). An
-app is still signed with its author's identity when it is packaged.
-
-`*-symbols-<version>-<target>.tar.gz` (with `SYMBOLS.SHA256SUMS`) hold the debug
-info the release profile splits off (`.dSYM` / `.dwp` / `.pdb`), for
-symbolicating a crash report; they are not in `manifest.json`.
-
-The Linux `deno` and `denort` need glibc 2.27 or newer: the `cli` job links them
-against upstream Deno's Ubuntu 18.04 sysroot (`linux_sysroot.sh`) and fails when
-one requires a newer `GLIBC_` version than `GLIBC_CEILING`, which is only ever
-lowered (item 151); `manifest.json` records it as `cli.glibc`. The Deno Desktop
-runtime's `libdenort` and laufey hosts are still built on Ubuntu 22.04 (glibc
-2.35), which WebKitGTK 4.1 needs anyway.
-
-## Reproducing a build
-
-The workflow is `.github/workflows/denext_runtime.yml` (helpers in
-`.github/denext-runtime/`). Run it from the Actions tab (`workflow_dispatch`,
-optional `targets` filter, `laufey_ref` override, and `reuse_*_run_id` to reuse
-a previous run's libdenort or laufey build), or push a `denext-runtime-v*` tag
-to publish. It also runs on a push to `development-denext` (or a `rel/**`
-branch) that changes what the runtime is built from: the `cli`, `runtime`, `ext`
-and `libs` crates, the workspace manifests and toolchain (`Cargo.toml`,
-`Cargo.lock`, `rust-toolchain.toml`, `.cargo/`), the laufey pin (`LAUFEY_SHA` in
-the workflow, `cli/rt_desktop/Cargo.toml`), the workflow and
-`.github/denext-runtime/`. A tag publishes only when the setup job's gates pass:
-the tag is annotated, points at the commit being built, was never pushed on
-another commit and has no release yet (tags and releases are never moved or
-replaced: a failed tag build is fixed by the next version); and (`tag_gate.py`)
-a full `denext tests` (`denext_tests.yml`) run, every OS leg green (Windows
-arm64 included), passed on exactly the tagged commit, no `denext tests` run of
-that commit failed in any attempt (a green re-run does not clear a red one) or
-is still running, and the commit is on `development-denext` or `rel/<version>`.
-A pre-release version (`3.0.0-rc.N`) is published as a GitHub pre-release, never
-as the repository's "Latest"; otherwise the release is "Latest" exactly when its
-version is the newest. Per target it:
-
-1. builds `libdenort` with `cargo build --release --locked -p denort_desktop`
-   after patching `laufey` (`cargo metadata` rewrites laufey's lockfile entry;
-   `lock_drift.py` then fails the job if any other package's name, version,
-   source, checksum or dependencies moved), with the release profile (fat LTO,
-   `codegen-units = 1`), on the runner of that target (Intel macOS on
-   `macos-15-intel`, Linux on `ubuntu-22.04` / `ubuntu-22.04-arm` so the glibc
-   baseline matches laufey's WebKitGTK 4.1 requirement of Ubuntu 22.04+);
-2. builds laufey's webview and CEF hosts with laufey's `make webview` /
-   `make cef` (the CEF minimal distribution is downloaded by the Makefile);
-3. assembles the archives, checks architectures and dynamic dependencies (`file`
-   / `lipo` / `otool -L` / `ldd`, and the import table of every Windows `.exe` /
-   `.dll` with `pe_deps.py`; any dependency that resolves nowhere fails it; on
-   Linux, a library `linux_needed.py` doesn't list fails it too, item 233),
-   packages a small `Deno.serve` app with the stock `deno desktop` 2.9.8 for
-   both backends, and launches it (Linux under Xvfb): the page, served from
-   `myapp://app`, POSTs back to `Deno.serve` and the app exits. A launch failure
-   fails the job;
-4. attests the archives and, on a pushed tag, publishes the release;
-5. in a parallel `cli` job, builds this fork's `deno` CLI with
-   `cargo build --release --locked --bin deno` and `DENEXT_VERSION` set to the
-   release version (`<version>+ci.<run>` for untagged runs), on Linux linked
-   against the glibc 2.27 sysroot and checked against `GLIBC_CEILING` (item
-   151), fetches and verifies esbuild with `fetch_esbuild.py`, packs both with
-   `assemble_cli.sh`, smoke-tests the unpacked archive with `cli_smoke.sh` and
-   attests it. The release needs every runtime archive and every CLI archive. A
-   dispatch with `cli_only: true` runs just this job and the manifest (no
-   laufey, libdenort or package jobs, and never a release): a dry run of the CLI
-   archives' layout.
+325. builds `libdenort` with `cargo build --release --locked -p denort_desktop`
+     after patching `laufey` (`cargo metadata` rewrites laufey's lockfile entry;
+     `lock_drift.py` then fails the job if any other package's name, version,
+     source, checksum or dependencies moved), with the release profile (fat LTO,
+     `codegen-units = 1`), on the runner of that target (Intel macOS on
+     `macos-15-intel`, Linux on `ubuntu-22.04` / `ubuntu-22.04-arm` so the glibc
+     baseline matches laufey's WebKitGTK 4.1 requirement of Ubuntu 22.04+);
+326. builds laufey's webview and CEF hosts with laufey's `make webview` /
+     `make cef` (the CEF minimal distribution is downloaded by the Makefile);
+327. assembles the archives, checks architectures and dynamic dependencies
+     (`file` / `lipo` / `otool -L` / `ldd`, and the import table of every
+     Windows `.exe` / `.dll` with `pe_deps.py`; any dependency that resolves
+     nowhere fails it; on Linux, a library `linux_needed.py` doesn't list fails
+     it too, item 233), packages a small `Deno.serve` app with the stock
+     `deno desktop` 2.9.8 for both backends, and launches it (Linux under Xvfb):
+     the page, served from `myapp://app`, POSTs back to `Deno.serve` and the app
+     exits. A launch failure fails the job;
+328. attests the archives and, on a pushed tag, publishes the release;
+329. in a parallel `cli` job, builds this fork's `deno` CLI with
+     `cargo build --release --locked --bin deno` and `DENEXT_VERSION` set to the
+     release version (`<version>+ci.<run>` for untagged runs), on Linux linked
+     against the glibc 2.27 sysroot and checked against `GLIBC_CEILING` (item
+     151), fetches and verifies esbuild with `fetch_esbuild.py`, packs both with
+     `assemble_cli.sh`, smoke-tests the unpacked archive with `cli_smoke.sh` and
+     attests it. The release needs every runtime archive and every CLI archive.
+     A dispatch with `cli_only: true` runs just this job and the manifest (no
+     laufey, libdenort or package jobs, and never a release): a dry run of the
+     CLI archives' layout.
 
 Locally, the equivalent is:
 
