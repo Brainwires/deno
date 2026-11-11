@@ -12522,113 +12522,127 @@ where the changes are discussed.
      too)
 
 NNN. **`feat(fetch)`: `Deno.createHttpClient({ userAgent })` omits or replaces
-the default `User-Agent`** (`ext/fetch/lib.rs`, `ext/fetch/22_http_client.js`,
-`cli/tsc/dts/lib.deno.ns.d.ts`). - `fetch` adds `user-agent: Deno/<version>` to
-a request that sets none, so a request could never go out without one. A client
-made with `userAgent: "<string>"` adds that string instead; `userAgent: false`
-(or `null`) adds none. A `user-agent` header set on the request still wins, and
-a client made without the option keeps the default. - An invalid string is the
-existing "Illegal characters in User-Agent" error, and any other value a
-`TypeError`. The CONNECT request to a proxy keeps the runtime's agent
-(`ext/fetch/proxy.rs` untouched). - Tests: unit `fetch_test.ts`
-`fetchCustomClientUserAgentOmitOrReplace` (no header with `false` / `null`, a
-replaced one, the explicit header winning, the default kept, both errors). -
-User-facing note: `Deno.createHttpClient({ userAgent: false })` sends requests
-with no `User-Agent`, and `userAgent: "my-agent/1"` replaces the default; some
-servers (GitHub's API) refuse requests without one. - Node tests enabled: none,
-because this is a Deno API (`fetch` clients), not a Node one.
+     the default `User-Agent`** (`ext/fetch/lib.rs`,
+     `ext/fetch/22_http_client.js`, `cli/tsc/dts/lib.deno.ns.d.ts`).
+     - `fetch` adds `user-agent: Deno/<version>` to a request that sets none,
+       so a request could never go out without one. A client made with
+       `userAgent: "<string>"` adds that string instead; `userAgent: false`
+       (or `null`) adds none. A `user-agent` header set on the request still
+       wins, and a client made without the option keeps the default.
+     - An invalid string is the existing "Illegal characters in User-Agent"
+       error, and any other value a `TypeError`. The CONNECT request to a
+       proxy keeps the runtime's agent (`ext/fetch/proxy.rs` untouched).
+     - Tests: unit `fetch_test.ts` `fetchCustomClientUserAgentOmitOrReplace`
+       (no header with `false` / `null`, a replaced one, the explicit header
+       winning, the default kept, both errors).
+     - User-facing note: `Deno.createHttpClient({ userAgent: false })` sends
+       requests with no `User-Agent`, and `userAgent: "my-agent/1"` replaces
+       the default; some servers (GitHub's API) refuse requests without one.
+     - Node tests enabled: none, because this is a Deno API (`fetch` clients),
+       not a Node one.
 
 NNN. **`feat(node)`: `"node": "20"` in deno.json picks the Node.js major the
-runtime reports (phase A)** (`ext/node/lib.rs`, `ext/node/polyfills/process.ts`,
-`runtime/ops/bootstrap.rs`, `runtime/worker_bootstrap.rs`, `cli/args/mod.rs`,
-`cli/factory.rs`, `cli/lib/worker.rs`, `cli/rt/run.rs`,
-`libs/config/deno_json/mod.rs`, `libs/config/workspace/mod.rs`,
-`cli/schemas/config-file.v1.json`). - The root deno.json's `"node"` (`"20"` or
-`20`) names a supported major: 20, 22, 24 or 26 (Node 18 is end-of-life).
-`process.version`, the `version` export of `node:process`,
-`process.versions.node` and `process.release` (with the line's LTS codename as
-`lts`) report that line's newest release (20.20.2 Iron, 22.23.4 Jod, 24.22.2
-Krypton; 26 is the default, `deno_node::NODE_VERSION`). Workers report the same.
-Behaviour stays the runtime's Node 26. - Any other value stops `deno run` /
-`test` / `serve` with
-`Invalid "node"
+     runtime reports (phase A)** (`ext/node/lib.rs`,
+     `ext/node/polyfills/process.ts`, `runtime/ops/bootstrap.rs`,
+     `runtime/worker_bootstrap.rs`, `cli/args/mod.rs`, `cli/factory.rs`,
+     `cli/lib/worker.rs`, `cli/rt/run.rs`, `libs/config/deno_json/mod.rs`,
+     `libs/config/workspace/mod.rs`, `cli/schemas/config-file.v1.json`).
+     - The root deno.json's `"node"` (`"20"` or `20`) names a supported major:
+       20, 22, 24 or 26 (Node 18 is end-of-life). `process.version`, the
+       `version` export of `node:process`, `process.versions.node` and
+       `process.release` (with the line's LTS codename as `lts`) report that
+       line's newest release (20.20.2 Iron, 22.23.4 Jod, 24.22.2 Krypton; 26
+       is the default, `deno_node::NODE_VERSION`). Workers report the same.
+       Behaviour stays the runtime's Node 26.
+     - Any other value stops `deno run` / `test` / `serve` with `Invalid "node"
        setting "18" in deno.json: expected a supported Node.js major version,
        one of "20", "22", "24", "26".`
-
-- The versions live in one table, `deno_node::reported_node_version`; behaviour
-  profiles per major and the real-Node opt-in are later phases. Not covered yet:
-  a `deno compile`d program reports the default (the setting isn't carried into
-  the binary), and `process.versions.modules` stays 26's ABI. - Tests: spec
-  `node/node_version_setting` (20, 22 as a number, 26, unset, 18 refused);
-  `cli/args` unit `node_major_setting`. - User-facing note: a project can set
-  `"node": "20"` (or 22, 24, 26) in deno.json, and packages that check
-  `process.version` see that Node.js major. - Node tests enabled: none, because
-  Node's suite tests the Node it ships with (`process.version` is checked
-  against 26 by its own tests); a chosen major is a project setting the suite
-  never sets.
+     - The versions live in one table, `deno_node::reported_node_version`;
+       behaviour profiles per major and the real-Node opt-in are later phases.
+       Not covered yet: a `deno compile`d program reports the default (the
+       setting isn't carried into the binary), and `process.versions.modules`
+       stays 26's ABI.
+     - Tests: spec `node/node_version_setting` (20, 22 as a number, 26, unset,
+       18 refused); `cli/args` unit `node_major_setting`.
+     - User-facing note: a project can set `"node": "20"` (or 22, 24, 26) in
+       deno.json, and packages that check `process.version` see that Node.js
+       major.
+     - Node tests enabled: none, because Node's suite tests the Node it ships
+       with (`process.version` is checked against 26 by its own tests); a
+       chosen major is a project setting the suite never sets.
 
 NNN. **`feat(supply-chain)`: GitHub-hosted declared downloads of bcrypt 5,
-argon2 before 0.28, `@discordjs/opus` and libxmljs reach the release assets**
-(`cli/supply_chain/builtin_exceptions.rs`, `cli/supply_chain/jail.rs`). - These
-versions' node-pre-gyp `binary.host` is github.com, which redirects a release
-download to `objects.githubusercontent.com` /
-`release-assets.githubusercontent.com`; the jail allowed none of them, so the
-install failed. They join the built-in known packages (`github.com`), and a new
-data table, `DECLARED_HOST_REDIRECTS`, gives an allowed declared github.com host
-its two redirect hosts. Only the versions that declare `binary.host` are
-affected (bcrypt 6 and argon2 0.28+ ship their binaries). `paranoid` still
-grants nothing, and an unknown package declaring github.com is still refused. -
-Tests: `jail.rs` `builtin_known_github_packages_get_redirect_hosts`,
-`builtin_exceptions.rs` `known_packages_sorted_and_github_redirects`. -
-User-facing note: installing bcrypt 5, argon2 before 0.28, `@discordjs/opus` or
-libxmljs no longer fails in the script jail when their prebuilt binary is
-downloaded from GitHub. - Node tests enabled: none, because this is the
-install-script jail, not a Node API.
+     argon2 before 0.28, `@discordjs/opus` and libxmljs reach the release
+     assets** (`cli/supply_chain/builtin_exceptions.rs`,
+     `cli/supply_chain/jail.rs`).
+     - These versions' node-pre-gyp `binary.host` is github.com, which
+       redirects a release download to `objects.githubusercontent.com` /
+       `release-assets.githubusercontent.com`; the jail allowed none of them,
+       so the install failed. They join the built-in known packages
+       (`github.com`), and a new data table, `DECLARED_HOST_REDIRECTS`, gives
+       an allowed declared github.com host its two redirect hosts. Only the
+       versions that declare `binary.host` are affected (bcrypt 6 and argon2
+       0.28+ ship their binaries). `paranoid` still grants nothing, and an
+       unknown package declaring github.com is still refused.
+     - Tests: `jail.rs` `builtin_known_github_packages_get_redirect_hosts`,
+       `builtin_exceptions.rs` `known_packages_sorted_and_github_redirects`.
+     - User-facing note: installing bcrypt 5, argon2 before 0.28,
+       `@discordjs/opus` or libxmljs no longer fails in the script jail when
+       their prebuilt binary is downloaded from GitHub.
+     - Node tests enabled: none, because this is the install-script jail, not
+       a Node API.
 
 NNN. **`perf(fetch)`: `new Response()` creates its native response when it is
-served (M5f-3)** (`ext/fetch/23_response.js`, `ext/http/00_serve.ts`). - A
-Response `Deno.serve` can send natively (a string or `Uint8Array` body with
-headers or a status the fast static path doesn't take) allocated its native
-`DirectResponse` in the constructor, so a Response built and never served (a
-cache, a test, a dropped branch) paid for it and for its finalization-registry
-entry. The constructor now only marks it eligible; `takeServeNativeResponse`
-creates it when the serve loop reaches it, from the response as it is then.
-Reading `headers` still cancels it, and a body turned into a stream since is
-served the regular way. - Tests: unit `response_test.ts`
-`responseNativeCreatedLazily` (no native response after construction) and
-`responseNativeServedLazily` (status, headers and body served correctly). -
-User-facing note: building a `Response` that is never served no longer allocates
-the native response `Deno.serve` uses. - Node tests enabled: none, because this
-is the web `Response` and `Deno.serve`, not a Node API.
+     served (M5f-3)** (`ext/fetch/23_response.js`, `ext/http/00_serve.ts`).
+     - A Response `Deno.serve` can send natively (a string or `Uint8Array`
+       body with headers or a status the fast static path doesn't take)
+       allocated its native `DirectResponse` in the constructor, so a Response
+       built and never served (a cache, a test, a dropped branch) paid for it
+       and for its finalization-registry entry. The constructor now only marks
+       it eligible; `takeServeNativeResponse` creates it when the serve loop
+       reaches it, from the response as it is then. Reading `headers` still
+       cancels it, and a body turned into a stream since is served the regular
+       way.
+     - Tests: unit `response_test.ts` `responseNativeCreatedLazily` (no native
+       response after construction) and `responseNativeServedLazily` (status,
+       headers and body served correctly).
+     - User-facing note: building a `Response` that is never served no longer
+       allocates the native response `Deno.serve` uses.
+     - Node tests enabled: none, because this is the web `Response` and
+       `Deno.serve`, not a Node API.
 
 NNN. **`feat(npm)`: the supply-chain checks read OSV past its first page, check
-the dependencies `deno add` brings in, and say "did you mean" (R11a)**
-(`cli/supply_chain/advisories.rs`, `cli/supply_chain/downloads.rs`,
-`cli/supply_chain/popular_names.rs`, `cli/tools/pm/mod.rs`, `cli/factory.rs`,
-`tests/util/server/servers/supply_chain.rs`). - OSV returns at most 1000
-advisories per query, with a `next_page_token` for the rest; the advisory check
-(item 84) now asks for each further page (up to 50, then it counts as OSV
-unreachable), so a `MAL-` advisory on a later page still refuses the version. -
-The low-download check (item 85) also runs over the dependencies the install
-after `deno add` resolves that the lockfile didn't have before: the same
-threshold, modes and allow-lists, the message naming the package as "a
-dependency of the packages being added". Under `prompt` without a terminal the
-add is refused and deno.json / package.json are put back. Counts are fetched
-eight at a time. - A low-download package whose name is one edit (two for longer
-names) from a widely used package, or a scoped copy of one (`@x/chalkk`), is
-named: "did you mean npm:chalk?". The names are a fixed offline list. - Tests:
-specs `npm/supply_chain_advisories`
-(`add_refuses_malicious_version_on_a_later_page`,
-`add_allows_clean_version_with_paged_advisories`) and
-`npm/supply_chain_low_downloads` (`dependency_warns`,
-`dependency_refused_under_prompt`, `dependency_allowed_by_name`,
-`did_you_mean`), with new `@denotest/paged-advisories`,
-`@denotest/with-rare-dep` and `@denotest/chalkk` test packages;
-`popular_names.rs` unit tests. - User-facing note: `deno add` now also warns
-about rarely downloaded packages among the dependencies it adds, suggests the
-popular package a near-miss name may imitate, and the malicious-version check
-reads every page of OSV's results. - Node tests enabled: none, because these are
-the package manager's checks, not a Node API.
+     the dependencies `deno add` brings in, and say "did you mean" (R11a)**
+     (`cli/supply_chain/advisories.rs`, `cli/supply_chain/downloads.rs`,
+     `cli/supply_chain/popular_names.rs`, `cli/tools/pm/mod.rs`,
+     `cli/factory.rs`, `tests/util/server/servers/supply_chain.rs`).
+     - OSV returns at most 1000 advisories per query, with a
+       `next_page_token` for the rest; the advisory check (item 84) now asks
+       for each further page (up to 50, then it counts as OSV unreachable), so
+       a `MAL-` advisory on a later page still refuses the version.
+     - The low-download check (item 85) also runs over the dependencies the
+       install after `deno add` resolves that the lockfile didn't have before:
+       the same threshold, modes and allow-lists, the message naming the
+       package as "a dependency of the packages being added". Under `prompt`
+       without a terminal the add is refused and deno.json / package.json are
+       put back. Counts are fetched eight at a time.
+     - A low-download package whose name is one edit (two for longer names)
+       from a widely used package, or a scoped copy of one (`@x/chalkk`), is
+       named: "did you mean npm:chalk?". The names are a fixed offline list.
+     - Tests: specs `npm/supply_chain_advisories`
+       (`add_refuses_malicious_version_on_a_later_page`,
+       `add_allows_clean_version_with_paged_advisories`) and
+       `npm/supply_chain_low_downloads` (`dependency_warns`,
+       `dependency_refused_under_prompt`, `dependency_allowed_by_name`,
+       `did_you_mean`), with new `@denotest/paged-advisories`,
+       `@denotest/with-rare-dep` and `@denotest/chalkk` test packages;
+       `popular_names.rs` unit tests.
+     - User-facing note: `deno add` now also warns about rarely downloaded
+       packages among the dependencies it adds, suggests the popular package
+       a near-miss name may imitate, and the malicious-version check reads
+       every page of OSV's results.
+     - Node tests enabled: none, because these are the package manager's
+       checks, not a Node API.
 
 NNN. **`feat(pty)`: `Deno.openPty` on Windows (ConPTY)** (`d19/platform`,
 runtime; `ext/pty/{lib,windows}.rs`, `tests/unit/pty_test.ts`,
