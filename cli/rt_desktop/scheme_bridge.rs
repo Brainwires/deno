@@ -86,7 +86,9 @@
 //!
 //! * a request carrying [`RELAY_MARKER_HEADER`] came through the loopback
 //!   relay. The relay removes every copy the client sent and adds exactly
-//!   one, `x-deno-desktop-relay: 1`, to every request it forwards;
+//!   one, `x-deno-desktop-relay: 1`, to every request it forwards; it drops
+//!   every [`FRAME_MARKER_HEADER`] and [`CROSS_ORIGIN_MARKER_HEADER`] the
+//!   client sent too, and sets neither;
 //! * a request without it came from the scheme handler: the webview loaded
 //!   it. The bridge removes the header, in any case, from every request the
 //!   webview delivers, and from every response it returns. That is NOT proof
@@ -1041,9 +1043,10 @@ where
 
 /// The request head the relay sends upstream: the client's request line with
 /// its target replaced by `target` (the path without the relay prefix, see
-/// [`relay_target`]) and headers, minus every [`RELAY_MARKER_HEADER`] the
-/// client sent and header lines without a colon, plus exactly one
-/// `x-deno-desktop-relay: 1`.
+/// [`relay_target`]) and headers, minus every marker header the client sent
+/// ([`RELAY_MARKER_HEADER`], [`FRAME_MARKER_HEADER`],
+/// [`CROSS_ORIGIN_MARKER_HEADER`]: only the runtime sets them) and header
+/// lines without a colon, plus exactly one `x-deno-desktop-relay: 1`.
 fn relay_request_head(head: &[u8], target: &[u8]) -> Vec<u8> {
   let mut out = Vec::with_capacity(head.len() + 32);
   let mut lines = head
@@ -1066,8 +1069,14 @@ fn relay_request_head(head: &[u8], target: &[u8]) -> Vec<u8> {
     let Some(colon) = line.iter().position(|&b| b == b':') else {
       continue;
     };
-    if trim_ascii(&line[..colon])
-      .eq_ignore_ascii_case(RELAY_MARKER_HEADER.as_bytes())
+    let name = trim_ascii(&line[..colon]);
+    if [
+      RELAY_MARKER_HEADER,
+      FRAME_MARKER_HEADER,
+      CROSS_ORIGIN_MARKER_HEADER,
+    ]
+    .iter()
+    .any(|marker| name.eq_ignore_ascii_case(marker.as_bytes()))
     {
       continue;
     }
@@ -1895,6 +1904,26 @@ mod tests {
       header_values(&out, RELAY_MARKER_HEADER.as_bytes()).count(),
       1
     );
+  }
+
+  #[test]
+  fn relay_drops_the_frame_and_cross_origin_markers_a_client_sent() {
+    // Only the runtime sets them: a relayed upgrade carries neither, in any
+    // case or spacing, whatever the client sent.
+    let head = upgrade_head(
+      "Origin: myapp://app\r\nX-Deno-Desktop-Frame: main\r\n\
+       x-deno-desktop-frame : sub\r\nX-DENO-DESKTOP-CROSS-ORIGIN: 0\r\n\
+       x-deno-desktop-cross-origin:1\r\n",
+    );
+    let out = relay_request_head(&head, b"/ws");
+    let lower = String::from_utf8_lossy(&out).to_ascii_lowercase();
+    assert!(!lower.contains(FRAME_MARKER_HEADER), "{lower}");
+    assert!(!lower.contains(CROSS_ORIGIN_MARKER_HEADER), "{lower}");
+    assert_eq!(
+      header_values(&out, RELAY_MARKER_HEADER.as_bytes()).count(),
+      1
+    );
+    assert_eq!(header_values(&out, b"origin").count(), 1);
   }
 
   #[test]
