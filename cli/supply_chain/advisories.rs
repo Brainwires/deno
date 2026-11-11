@@ -97,6 +97,14 @@ pub struct MaliciousVersion {
   pub advisories: Vec<String>,
 }
 
+/// What [`OsvInstallGate::query`] learned: the malicious versions found, and
+/// the error that cut the answer short, if one did. An error after some pages
+/// keeps the `MAL-` advisories already read.
+pub struct QueryOutcome {
+  pub malicious: Vec<MaliciousVersion>,
+  pub error: Option<AnyError>,
+}
+
 fn now_secs() -> u64 {
   SystemTime::now()
     .duration_since(UNIX_EPOCH)
@@ -170,15 +178,37 @@ impl OsvInstallGate {
   }
 
   /// Queries OSV for `packages`; returns the malicious ones. A version with
-  /// more advisories than one page holds is queried again, page by page.
-  pub async fn query(
+  /// more advisories than one page holds is queried again, page by page. When
+  /// a request fails partway (a later page, a later batch), the `MAL-`
+  /// advisories already read are returned with the error, never dropped.
+  pub async fn query(&self, packages: &[PackageNv]) -> QueryOutcome {
+    let mut advisories: Vec<Vec<String>> = vec![Vec::new(); packages.len()];
+    let error = self.query_into(packages, &mut advisories).await.err();
+    let malicious = packages
+      .iter()
+      .zip(advisories)
+      .filter(|(_, advisories)| !advisories.is_empty())
+      .map(|(nv, mut advisories)| {
+        advisories.dedup();
+        MaliciousVersion {
+          nv: nv.clone(),
+          advisories,
+        }
+      })
+      .collect();
+    QueryOutcome { malicious, error }
+  }
+
+  /// Reads OSV's answer for `packages` into `advisories` (the `MAL-` ids of
+  /// each, by index) as it arrives, so an error keeps what came before it.
+  async fn query_into(
     &self,
     packages: &[PackageNv],
-  ) -> Result<Vec<MaliciousVersion>, AnyError> {
+    advisories: &mut [Vec<String>],
+  ) -> Result<(), AnyError> {
     let base = super::service_url_from_env(OSV_URL_ENV_VAR, OSV_DEFAULT_URL);
     let url = base.join("v1/querybatch")?;
     let client = self.http_client_provider.get_or_create()?;
-    let mut advisories: Vec<Vec<String>> = vec![Vec::new(); packages.len()];
     // (index into `packages`, page token) of the queries still to send
     let mut pending: Vec<(usize, Option<String>)> =
       (0..packages.len()).map(|i| (i, None)).collect();
@@ -243,20 +273,7 @@ impl OsvInstallGate {
       }
       pending = next;
     }
-    Ok(
-      packages
-        .iter()
-        .zip(advisories)
-        .filter(|(_, advisories)| !advisories.is_empty())
-        .map(|(nv, mut advisories)| {
-          advisories.dedup();
-          MaliciousVersion {
-            nv: nv.clone(),
-            advisories,
-          }
-        })
-        .collect(),
-    )
+    Ok(())
   }
 
   /// Checks `packages`: an error refuses the install.
@@ -286,18 +303,33 @@ impl OsvInstallGate {
       log::debug!("Skipping the OSV check: --cached-only");
       return Ok(());
     }
-    let result = if self.offline {
-      Err(anyhow!("--cached-only does not allow network access"))
+    let outcome = if self.offline {
+      QueryOutcome {
+        malicious: Vec::new(),
+        error: Some(anyhow!("--cached-only does not allow network access")),
+      }
     } else {
       self.query(&to_query).await
     };
-    match result {
-      Ok(malicious) if malicious.is_empty() => {
+    match outcome {
+      QueryOutcome {
+        malicious,
+        error: None,
+      } if malicious.is_empty() => {
         self.write_cache(&to_query);
         Ok(())
       }
-      Ok(malicious) => {
+      // A malicious version refuses the install in every mode, whether or
+      // not OSV's answer was complete. A cut-short answer caches nothing:
+      // which of the rest are clean is not known.
+      QueryOutcome { malicious, error } if !malicious.is_empty() => {
         super::mark_gate_refused();
+        if let Some(err) = &error {
+          return Err(anyhow!(
+            "{}\n(OSV's answer was cut short ({err:#}), so other versions may be listed too.)",
+            format_malicious_error(&malicious)
+          ));
+        }
         let clean = to_query
           .into_iter()
           .filter(|nv| !malicious.iter().any(|m| &m.nv == nv))
@@ -305,7 +337,8 @@ impl OsvInstallGate {
         self.write_cache(&clean);
         Err(anyhow!(format_malicious_error(&malicious)))
       }
-      Err(err) => {
+      QueryOutcome { error, .. } => {
+        let err = error.unwrap_or_else(|| anyhow!("no answer"));
         if self.mode == AdvisoryCheck::Required {
           super::mark_gate_refused();
           bail!(

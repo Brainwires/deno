@@ -12,9 +12,15 @@
 //! - npm's downloads API (`GET /downloads/point/last-week/<name>`): a name
 //!   containing `unpopular` has 12 weekly downloads, `modest` 5000, one
 //!   containing `unknown-downloads` has no count (404), and `@denotest/chalkk`
-//!   (one edit from `chalk`) 7; everything else 1000000.
+//!   (one edit from `chalk`) 7; everything else 1000000. Several
+//!   comma-separated unscoped names get npm's bulk answer (an object of
+//!   counts by name, `null` for a name with no count).
 //!
-//! Under `/down/` both answer 503 (an unreachable service).
+//! Under `/down/` both answer 503 (an unreachable service). Under
+//! `/paging-fails/` OSV answers the first page with a `next_page_token` for
+//! every query, then 503 for any later page (an answer cut short partway).
+//! Under `/rate-limited/` the downloads API answers 429 with
+//! `Retry-After: 0`.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -64,7 +70,11 @@ fn json_response(
 async fn handler(
   req: Request<hyper::body::Incoming>,
 ) -> Result<Response<UnsyncBoxBody<Bytes, Infallible>>, anyhow::Error> {
-  let path = req.uri().path().to_string();
+  let mut path = req.uri().path().to_string();
+  let paging_fails = path.starts_with("/paging-fails/");
+  if paging_fails {
+    path = path["/paging-fails".len()..].to_string();
+  }
   if path.starts_with("/down/") {
     return Ok(
       Response::builder()
@@ -72,10 +82,25 @@ async fn handler(
         .body(empty_body())?,
     );
   }
+  if path.starts_with("/rate-limited/") {
+    return Ok(
+      Response::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .header("Retry-After", "0")
+        .body(empty_body())?,
+    );
+  }
   if path == "/v1/querybatch" && req.method() == hyper::Method::POST {
     let body = req.into_body().collect().await?.to_bytes();
     let body: serde_json::Value = serde_json::from_slice(&body)?;
     let queries = body["queries"].as_array().cloned().unwrap_or_default();
+    if paging_fails && queries.iter().any(|q| q["page_token"].is_string()) {
+      return Ok(
+        Response::builder()
+          .status(StatusCode::SERVICE_UNAVAILABLE)
+          .body(empty_body())?,
+      );
+    }
     let results = queries
       .iter()
       .map(|q| {
@@ -115,8 +140,37 @@ async fn handler(
           json!({})
         }
       })
+      .map(|mut result| {
+        if paging_fails {
+          result["next_page_token"] = json!("page-2");
+        }
+        result
+      })
       .collect::<Vec<_>>();
     return json_response(json!({ "results": results }));
+  }
+  if let Some(names) = path.strip_prefix("/downloads/point/last-week/")
+    && names.contains(',')
+  {
+    let point = |name: &str| {
+      let name = percent_encoding::percent_decode_str(name)
+        .decode_utf8_lossy()
+        .into_owned();
+      if name.starts_with('@') || name.contains("unknown-downloads") {
+        return (name, serde_json::Value::Null);
+      }
+      let downloads = weekly_downloads(&name);
+      (
+        name.clone(),
+        json!({ "downloads": downloads, "start": "2026-10-12",
+          "end": "2026-10-18", "package": name }),
+      )
+    };
+    let points = names
+      .split(',')
+      .map(point)
+      .collect::<serde_json::Map<_, _>>();
+    return json_response(serde_json::Value::Object(points));
   }
   if let Some(name) = path.strip_prefix("/downloads/point/last-week/") {
     let name = percent_encoding::percent_decode_str(name)
@@ -133,15 +187,7 @@ async fn handler(
           ))?,
       );
     }
-    let downloads = if name.contains("unpopular") {
-      12
-    } else if name == "@denotest/chalkk" {
-      7
-    } else if name.contains("modest") {
-      5000
-    } else {
-      1_000_000
-    };
+    let downloads = weekly_downloads(&name);
     return json_response(json!({
       "downloads": downloads,
       "start": "2026-10-12",
@@ -154,4 +200,16 @@ async fn handler(
       .status(StatusCode::NOT_FOUND)
       .body(empty_body())?,
   )
+}
+
+fn weekly_downloads(name: &str) -> u64 {
+  if name.contains("unpopular") {
+    12
+  } else if name == "@denotest/chalkk" {
+    7
+  } else if name.contains("modest") {
+    5000
+  } else {
+    1_000_000
+  }
 }

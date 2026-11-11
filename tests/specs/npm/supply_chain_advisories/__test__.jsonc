@@ -48,6 +48,32 @@
       "output": "refused_paged.out",
       "exitCode": 1
     },
+    // an answer cut short on a later page still refuses the `MAL-` advisory
+    // its earlier pages listed, in the default mode too
+    "add_refuses_malicious_version_when_a_later_page_fails": {
+      "steps": [
+        {
+          "cwd": "add",
+          "args": "add npm:@denotest/malicious-version@2.0.0",
+          "envs": { "DENO_OSV_URL": "http://localhost:4270/paging-fails/" },
+          "output": "refused_cut_short.out",
+          "exitCode": 1
+        },
+        {
+          "cwd": "add",
+          "args": "eval console.log(Deno.readTextFileSync('deno.json').trim())",
+          "output": "{}\n"
+        }
+      ]
+    },
+    // a cut-short answer with no `MAL-` advisory is an unreachable OSV: a
+    // warning, and the install goes on
+    "add_warns_when_a_later_page_fails_for_a_clean_version": {
+      "cwd": "add",
+      "args": "add npm:@denotest/malicious-version@1.0.0",
+      "envs": { "DENO_OSV_URL": "http://localhost:4270/paging-fails/" },
+      "output": "unreachable_warns.out"
+    },
     "add_allows_clean_version_with_paged_advisories": {
       "cwd": "add",
       "args": "add npm:@denotest/paged-advisories@1.0.0",
