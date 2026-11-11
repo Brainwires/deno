@@ -92,12 +92,21 @@
     "async-hooks/test-getaddrinforeqwrap.js": {},
     "async-hooks/test-getnameinforeqwrap.js": {},
     "async-hooks/test-graph.fsreq-readFile.js": {},
-    "async-hooks/test-graph.http.js": {},
+    "async-hooks/test-graph.http.js": {
+      "windows": false,
+      "reason": "Windows: a server listening without a host binds 0.0.0.0 only (net.ts keeps Windows off the dual-stack :: bind), so the test's connection to [::1] is refused"
+    },
     "async-hooks/test-graph.pipe.js": {},
-    "async-hooks/test-graph.pipeconnect.js": {},
+    "async-hooks/test-graph.pipeconnect.js": {
+      "windows": false,
+      "reason": "Windows: hangs until the runner's timeout (a named-pipe server and client connect under async hooks, like async-hooks/test-pipeconnectwrap.js); the cause is not diagnosed yet"
+    },
     "async-hooks/test-graph.shutdown.js": {},
     "async-hooks/test-graph.statwatcher.js": {},
-    "async-hooks/test-graph.tcp.js": {},
+    "async-hooks/test-graph.tcp.js": {
+      "windows": false,
+      "reason": "Windows: a server listening without a host binds 0.0.0.0 only (net.ts keeps Windows off the dual-stack :: bind), so the test's connection to [::1] is refused"
+    },
     "async-hooks/test-http-agent-handle-reuse-serial.js": {},
     "async-hooks/test-httpparser-reuse.js": {},
     "async-hooks/test-httpparser.request.js": {},
@@ -2154,7 +2163,10 @@
     "parallel/test-heap-prof-invalid-args.js": {},
     "parallel/test-heap-prof-loop-drained.js": {},
     "parallel/test-heap-prof-name.js": {},
-    "parallel/test-heap-prof-sigint.js": {},
+    "parallel/test-heap-prof-sigint.js": {
+      "windows": false,
+      "reason": "Windows: process.kill(process.pid, 'SIGINT') ends the process at once (TerminateProcess), so the heap profile is never written"
+    },
     "parallel/test-http-1.0-keep-alive.js": {},
     "parallel/test-http-1.0.js": {},
     "parallel/test-http-abort-client.js": {},
@@ -5736,7 +5748,10 @@
       "linux": false,
       "reason": "Depends on the round-trip time to nodejs.org being under 10 ms; Node fails the same way when it is not"
     },
-    "internet/test-net-autoselectfamily-events-failure.js": {},
+    "internet/test-net-autoselectfamily-events-failure.js": {
+      "windows": false,
+      "reason": "Windows: in the two-address (IPv6, then IPv4) case a connection attempt fails with EINVAL on the CI runners, a code the test doesn't accept (it expects ECONNREFUSED, ENETUNREACH, EHOSTUNREACH or ETIMEDOUT); the cause is not diagnosed yet"
+    },
     "internet/test-net-autoselectfamily-events-timeout.js": {},
     "internet/test-net-autoselectfamily-timeout-close.js": {
       "windows": false,

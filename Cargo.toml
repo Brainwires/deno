@@ -572,6 +572,14 @@ opt-level = 3
 [profile.dev.package.blake2]
 opt-level = 3
 
+# SHA-3 / SHAKE / cSHAKE / TurboSHAKE (WebCrypto, node:crypto): Node's
+# TurboSHAKE vectors hash 24 MB inputs, seconds each on `debug`
+[profile.dev.package.keccak]
+opt-level = 3
+
+[profile.dev.package.sha3]
+opt-level = 3
+
 [profile.release.package.async-compression]
 opt-level = 3
 [profile.release.package.base64-simd]

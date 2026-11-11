@@ -13545,6 +13545,19 @@ where the changes are discussed.
      - Node tests enabled: `parallel/test-permission-fs-write-v8.js` passes on
        Windows (it already passed on Linux and macOS).
 
+352. **`build`: `keccak` and `sha3` are optimized in debug builds** (CI only;
+     `Cargo.toml`). SHA-3, SHAKE, cSHAKE and TurboSHAKE (WebCrypto and
+     `node:crypto`) ran unoptimized in a `debug` build: one TurboSHAKE digest of
+     a 24 MB input took about a second, so Node's TurboSHAKE vectors ran past
+     the node_compat runner's 10 s timeout on slower CI machines. Both crates
+     now build at `opt-level = 3` in the dev profile, as `sha2`, `blake2` and
+     `argon2` already did. Release builds are unchanged.
+     - User-facing note: none; debug builds only.
+     - Tests: `parallel/test-webcrypto-digest-turboshake-rfc.js` (see below).
+     - Node tests enabled: none new;
+       `parallel/test-webcrypto-digest-turboshake-rfc.js` stops timing out on
+       Windows CI.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
