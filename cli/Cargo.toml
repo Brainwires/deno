@@ -2,7 +2,7 @@
 
 [package]
 name = "deno"
-version = "3.0.0-denext.18"
+version = "3.0.0-denext.19"
 authors.workspace = true
 default-run = "deno"
 edition.workspace = true
