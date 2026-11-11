@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-// denext fork (Brainwires/deno): 72 more than upstream's 44, the
+// denext fork (Brainwires/deno): 75 more than upstream's 44, the
 // `Deno.desktop` ops the fork adds to NOT_IMPORTED_OPS in 99_main.js (launch
 // targets and events, scheme registration, passkeys, the rich clipboard, drag
 // out, file dialogs, message boxes, shortcuts, launch at login, DevTools, menus, scheduled
@@ -8,7 +8,8 @@
 // window capabilities, tray capabilities, window levels, speech, platform
 // features, title bar
 // preferences, the secure store, the system stats, quit /
-// close, auth sessions, runOnMainThread, Deno.desktop.updater, and
+// close, auth sessions, runOnMainThread, Deno.desktop.updater, will-navigate,
+// the app-wide menu, and
 // op_desktop_alert_async, which the uncaught-error handler needs). The desktop JS that cli/rt evaluates
 // after bootstrap reaches them through `core.ops`, so they survive
 // removeImportedOps() like upstream's own desktop ops.
