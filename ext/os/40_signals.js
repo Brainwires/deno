@@ -2,9 +2,18 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
-const { op_signal_bind, op_signal_poll, op_signal_unbind } = core.ops;
+const {
+  op_signal_bind,
+  op_signal_dispatched,
+  op_signal_poll,
+  op_signal_unbind,
+} = core.ops;
 const {
   ArrayFrom,
+  ArrayPrototypePush,
+  PromisePrototypeThen,
+  PromiseReject,
+  SafePromiseAll,
   SafeSet,
   SafeSetIterator,
   SetPrototypeAdd,
@@ -78,16 +87,47 @@ async function loop(sigData) {
   // too (which would deliver every later signal twice).
   const rid = sigData.rid;
   while (sigData.rid === rid) {
-    if (await pollSignal(rid)) {
+    // How many deliveries the resource has had in all; 0 once it is closed.
+    const seen = await pollSignal(rid);
+    if (seen === 0) {
       return;
     }
     // The listeners at delivery: one added by a listener waits for the next
     // signal, as with EventEmitter.
     const listeners = ArrayFrom(new SafeSetIterator(sigData.listeners));
-    for (let i = 0; i < listeners.length; i++) {
-      if (SetPrototypeHas(sigData.listeners, listeners[i])) listeners[i]();
+    const pending = [];
+    try {
+      for (let i = 0; i < listeners.length; i++) {
+        if (SetPrototypeHas(sigData.listeners, listeners[i])) {
+          const result = listeners[i]();
+          if (core.isPromise(result)) {
+            ArrayPrototypePush(pending, settled(result));
+          }
+        }
+      }
+    } finally {
+      // denext: the delivery is finished once the listeners returned and the
+      // promises they returned settled (a drain): on Windows the console
+      // control handler holds a close, logoff or shutdown until then. The
+      // loop goes on meanwhile, so a second signal is delivered at once.
+      if (pending.length === 0) {
+        op_signal_dispatched(rid, seen);
+      } else {
+        PromisePrototypeThen(
+          SafePromiseAll(pending),
+          () => op_signal_dispatched(rid, seen),
+        );
+      }
     }
   }
+}
+
+// Settles when `promise` does. A rejection is rejected again, unhandled, so
+// it is reported as the listener's own unhandled rejection would have been.
+function settled(promise) {
+  return PromisePrototypeThen(promise, undefined, (reason) => {
+    PromiseReject(reason);
+  });
 }
 
 return { addSignalListener, removeSignalListener };
