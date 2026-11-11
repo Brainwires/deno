@@ -310,6 +310,7 @@ mod tests {
       {
         eprintln!("Ignoring test because we couldn't find deno: {e:?}");
       }
+      return;
     }
 
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

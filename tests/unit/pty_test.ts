@@ -2,11 +2,10 @@
 
 // `Deno.openPty` and `Deno.Command` with `pty` (DENEXT.md items 259 and
 // 260). Every test here fails on a build without the API (`Deno.openPty is
-// not a function`). On Windows the pty is not available yet (3.0.0-denext.11):
-// every spawn there throws `NotSupported` (`ptyIsNotSupportedOnWindows`), and
-// the tests that spawn are ignored.
-// TODO(denext): run the Windows cases again (the `isWindows` branches below
-// are kept for that) once the ConPTY work is finished (DENEXT.md item 259).
+// not a function`). On Windows the terminal is a ConPTY: its output is a
+// console's rendering (VT sequences around the text, lines ended as the
+// console draws them), so the Windows cases check the text only; the tests
+// that drive `sh`, `cat` or `stty` run on Unix only.
 
 import {
   assert,
@@ -21,6 +20,9 @@ const shell = isWindows ? "cmd.exe" : "sh";
 const shellArgs = (script: string) =>
   isWindows ? ["/d", "/c", script] : ["-c", script];
 const EOL = "\r\n";
+// What follows a line of the child's output: "\r\n" on a Unix terminal, not
+// asserted on a ConPTY.
+const LINE_END = isWindows ? "" : EOL;
 
 async function readAll(stream: ReadableStream<Uint8Array>): Promise<string> {
   let text = "";
@@ -68,7 +70,7 @@ async function write(pty: Deno.Pty, text: string) {
 }
 
 Deno.test(
-  { permissions: { run: true, read: true }, ignore: isWindows },
+  { permissions: { run: true, read: true } },
   async function ptyEchoRoundTrip() {
     const pty = Deno.openPty({
       cmd: shell,
@@ -79,7 +81,7 @@ Deno.test(
     assert(pty.pid > 0);
     const output = await readAll(pty.readable);
     // a terminal turns "\n" into "\r\n"
-    assertStringIncludes(output, `hello from pty${EOL}`);
+    assertStringIncludes(output, `hello from pty${LINE_END}`);
     const status = await pty.status;
     assertEquals(status.success, true);
     assertEquals(status.code, 0);
@@ -144,7 +146,7 @@ Deno.test(
 );
 
 Deno.test(
-  { permissions: { run: true, read: true }, ignore: isWindows },
+  { permissions: { run: true, read: true } },
   function ptyResizeRejectsBadSizes() {
     const pty = Deno.openPty({
       cmd: shell,
@@ -160,7 +162,7 @@ Deno.test(
 );
 
 Deno.test(
-  { permissions: { run: true, read: true }, ignore: isWindows },
+  { permissions: { run: true, read: true } },
   async function ptyExitCode() {
     const pty = Deno.openPty({
       cmd: shell,
@@ -293,23 +295,28 @@ Deno.test(
 );
 
 Deno.test(
-  { permissions: { run: true, read: true }, ignore: isWindows },
+  { permissions: { run: true, read: true } },
   async function ptyAsyncDispose() {
     let status: Deno.CommandStatus | undefined;
     {
+      // A child that neither writes nor exits: the dispose must not depend
+      // on its output (`pause` waits for a key that never comes).
       await using pty = Deno.openPty({
         cmd: shell,
-        args: shellArgs(isWindows ? "pause" : "exec sleep 30"),
+        args: shellArgs(isWindows ? "pause >nul" : "exec sleep 30"),
         cols: 80,
         rows: 24,
       });
       pty.status.then((s) => status = s);
-      if (isWindows) await readUntil(pty.readable, "Press");
     }
     // disposed: the child is gone and its status settled
     const settled = status;
     assert(settled !== undefined);
-    if (!isWindows) {
+    if (isWindows) {
+      // a kill on Windows is TerminateProcess with exit code 1
+      assertEquals(settled.code, 1);
+      assertEquals(settled.signal, null);
+    } else {
       assertEquals(settled.signal, "SIGHUP");
     }
     // the master is closed with it: the stream ends or errors, never hangs
@@ -318,7 +325,7 @@ Deno.test(
 );
 
 Deno.test(
-  { permissions: { run: true, read: true }, ignore: isWindows },
+  { permissions: { run: true, read: true } },
   async function ptyReadableEndsWhenTheChildExits() {
     const pty = Deno.openPty({
       cmd: shell,
@@ -335,7 +342,7 @@ Deno.test(
 );
 
 Deno.test(
-  { permissions: { run: false, read: true }, ignore: isWindows },
+  { permissions: { run: false, read: true } },
   function ptyRequiresRunPermission() {
     assertThrows(
       () =>
@@ -408,7 +415,7 @@ Deno.test(
 );
 
 Deno.test(
-  { permissions: { run: true, read: true }, ignore: isWindows },
+  { permissions: { run: true, read: true } },
   function ptyMissingProgram() {
     assertThrows(
       () =>
@@ -446,7 +453,7 @@ Deno.test(
 );
 
 Deno.test(
-  { permissions: { run: true, read: true }, ignore: isWindows },
+  { permissions: { run: true, read: true } },
   function ptyRefusesNulInArguments() {
     // a NUL would end a Windows command line there, dropping what follows
     assertThrows(
@@ -463,11 +470,8 @@ Deno.test(
   },
 );
 
-// TODO(denext): Windows-only, ignored while the pty is not available there;
-// turn it back on (`ignore: !isWindows`) with the ConPTY work (DENEXT.md item
-// 259).
 Deno.test(
-  { permissions: { run: true, read: true, write: true }, ignore: true },
+  { permissions: { run: true, read: true, write: true }, ignore: !isWindows },
   async function ptyBatchFileArgumentsCannotRunCommands() {
     // A `.bat` runs through cmd.exe: its arguments are escaped against cmd's
     // own parsing, as Deno.Command does it (BatBadBut), so a quote in one
@@ -492,29 +496,44 @@ Deno.test(
 
 Deno.test(
   { permissions: { run: true, read: true }, ignore: !isWindows },
-  function ptyIsNotSupportedOnWindows() {
-    // the ConPTY child's output never arrived and a dispose hung on CI, so
-    // Windows has no pty in 3.0.0-denext.11 (DENEXT.md item 259)
-    const message = "PTY support on Windows is not available yet";
+  async function ptyInputReachesTheChildOnWindows() {
+    // `set /p` reads a line from the console's input: what is written to
+    // `writable` (Enter is "\r"); a resize of the running console works too
+    const pty = Deno.openPty({
+      cmd: shell,
+      args: ["/d", "/v:on", "/c", "set /p line=&echo got:!line!"],
+      cols: 80,
+      rows: 24,
+    });
+    pty.resize(100, 50);
+    await write(pty, "hello\r");
+    const output = await readAll(pty.readable);
+    assertStringIncludes(output, "got:hello");
+    assertEquals((await pty.status).code, 0);
+  },
+);
+
+Deno.test(
+  { permissions: { run: true, read: true }, ignore: !isWindows },
+  async function ptyKillEndsTheChildOnWindows() {
+    // any signal is TerminateProcess (exit code 1), as Deno.kill on Windows;
+    // the output ends once the console is closed after the exit
+    const pty = Deno.openPty({
+      cmd: shell,
+      args: shellArgs("pause >nul"),
+      cols: 80,
+      rows: 24,
+    });
+    pty.kill("SIGTERM");
+    const status = await pty.status;
+    assertEquals(status.success, false);
+    assertEquals(status.code, 1);
+    assertEquals(status.signal, null);
+    await readAll(pty.readable);
     assertThrows(
-      () =>
-        Deno.openPty({
-          cmd: shell,
-          args: shellArgs("echo no"),
-          cols: 80,
-          rows: 24,
-        }),
-      Deno.errors.NotSupported,
-      message,
-    );
-    assertThrows(
-      () =>
-        new Deno.Command(shell, {
-          args: shellArgs("echo no"),
-          pty: { cols: 80, rows: 24 },
-        }).spawn(),
-      Deno.errors.NotSupported,
-      message,
+      () => pty.kill("SIGTERM"),
+      TypeError,
+      "already terminated",
     );
   },
 );
@@ -522,7 +541,7 @@ Deno.test(
 // `Deno.Command` with `pty` (item 260): thin sugar over the same spawn.
 
 Deno.test(
-  { permissions: { run: true, read: true }, ignore: isWindows },
+  { permissions: { run: true, read: true } },
   async function commandPtySpawnsOnATerminal() {
     const child = new Deno.Command(shell, {
       args: shellArgs(
@@ -532,7 +551,7 @@ Deno.test(
     }).spawn();
     assert(child.pid > 0);
     const output = await readAll(child.pty.readable);
-    assertStringIncludes(output, `from command${EOL}`);
+    assertStringIncludes(output, `from command${LINE_END}`);
     if (!isWindows) {
       assertMatch(output, /\/dev\/(pts\/\d+|tty[a-z0-9]+)/);
     }
@@ -613,7 +632,7 @@ Deno.test(
 );
 
 Deno.test(
-  { permissions: { run: false, read: true }, ignore: isWindows },
+  { permissions: { run: false, read: true } },
   function commandPtyRequiresRunPermission() {
     assertThrows(
       () =>

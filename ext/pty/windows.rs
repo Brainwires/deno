@@ -447,6 +447,13 @@ fn environment_block(envs: &[(OsString, OsString)]) -> io::Result<Vec<u16>> {
   Ok(block)
 }
 
+/// The `lpValue` `UpdateProcThreadAttribute` takes for
+/// `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`: the `HPCON` itself, as Microsoft's
+/// ConPTY sample passes it.
+fn attribute_value(hpc: Hpcon) -> *mut c_void {
+  hpc
+}
+
 /// A `PROC_THREAD_ATTRIBUTE_LIST` with the pseudoconsole attribute.
 struct AttributeList {
   buffer: Vec<u8>,
@@ -467,15 +474,18 @@ impl AttributeList {
     {
       return Err(io::Error::last_os_error());
     }
-    let mut hpc = hpc;
-    // SAFETY: the attribute's value is the handle itself, which lives as long
-    // as the console does.
+    // SAFETY: the attribute's value is the handle itself, not a pointer to
+    // it: the list keeps the value pointer as given, and `CreateProcessW`
+    // reads it later, so a pointer to a local here would name a stack slot
+    // this function has returned from (the child then attached to garbage:
+    // its output never arrived, or it failed with STATUS_DLL_INIT_FAILED).
+    // The handle lives in the `PseudoConsole` past `CreateProcessW` (denext).
     if unsafe {
       UpdateProcThreadAttribute(
         list,
         0,
         PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-        &mut hpc as *mut Hpcon as *mut c_void,
+        attribute_value(hpc),
         std::mem::size_of::<Hpcon>(),
         std::ptr::null_mut(),
         std::ptr::null_mut(),
@@ -798,6 +808,14 @@ impl Killer {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  // denext: the pseudoconsole attribute's value is the handle, never the
+  // address of a copy of it.
+  #[test]
+  fn pseudoconsole_attribute_value_is_the_handle() {
+    let hpc = 0x1234usize as Hpcon;
+    assert_eq!(attribute_value(hpc), hpc);
+  }
 
   #[test]
   fn pipe_names_are_not_predictable() {

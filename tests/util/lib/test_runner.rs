@@ -319,6 +319,9 @@ pub fn run_maybe_flaky_test(
         colors::gray(test_name),
         i,
       );
+      // denext: the failed attempt's output, so a flake's cause is in the
+      // log even when a retry passes (it was dropped before).
+      ::std::eprintln!("{}", flaky_failure_output(&result));
     }
     std::thread::sleep(Duration::from_millis(100));
   }
@@ -349,6 +352,45 @@ pub fn run_maybe_flaky_test(
 
   // surface result now
   action()
+}
+
+/// The most a flaky attempt's failure output adds to the log: its end, where
+/// the panic and the assertion are.
+const FLAKY_OUTPUT_LIMIT: usize = 8 * 1024;
+
+/// The captured output of a failed attempt (each failed sub test's, named),
+/// cut to its last `FLAKY_OUTPUT_LIMIT` bytes (denext).
+fn flaky_failure_output(result: &TestResult) -> String {
+  fn collect(result: &TestResult, prefix: &str, out: &mut Vec<u8>) {
+    match result {
+      TestResult::Failed { output, .. } => {
+        if !prefix.is_empty() {
+          out.extend_from_slice(format!("--- {prefix} ---\n").as_bytes());
+        }
+        out.extend_from_slice(output);
+      }
+      TestResult::SubTests { sub_tests, .. } => {
+        for sub in sub_tests {
+          let name = if prefix.is_empty() {
+            sub.name.clone()
+          } else {
+            format!("{prefix}::{}", sub.name)
+          };
+          collect(&sub.result, &name, out);
+        }
+      }
+      TestResult::Passed { .. } | TestResult::Ignored => {}
+    }
+  }
+  let mut out = Vec::new();
+  collect(result, "", &mut out);
+  let start = out.len().saturating_sub(FLAKY_OUTPUT_LIMIT);
+  let text = String::from_utf8_lossy(&out[start..]);
+  if start > 0 {
+    format!("[... {start} bytes cut]\n{text}")
+  } else {
+    text.into_owned()
+  }
 }
 
 fn run_with_parallelism(
@@ -896,6 +938,46 @@ impl<TData> file_test_runner::reporter::Reporter<TData> for PtyReporter {
 #[cfg(test)]
 mod test {
   use super::*;
+
+  // denext: a flaky attempt's failure output reaches the log.
+  #[test]
+  fn flaky_failure_output_is_the_failed_attempts() {
+    let failed = TestResult::Failed {
+      duration: None,
+      output: b"assertion failed: worker2.js".to_vec(),
+    };
+    assert_eq!(
+      flaky_failure_output(&failed),
+      "assertion failed: worker2.js"
+    );
+    let sub = TestResult::SubTests {
+      duration: None,
+      sub_tests: vec![
+        file_test_runner::SubTestResult {
+          name: "ok".to_string(),
+          result: TestResult::Passed { duration: None },
+        },
+        file_test_runner::SubTestResult {
+          name: "step".to_string(),
+          result: TestResult::Failed {
+            duration: None,
+            output: b"boom".to_vec(),
+          },
+        },
+      ],
+    };
+    assert_eq!(flaky_failure_output(&sub), "--- step ---\nboom");
+    let long = TestResult::Failed {
+      duration: None,
+      output: vec![b'x'; FLAKY_OUTPUT_LIMIT + 10],
+    };
+    let text = flaky_failure_output(&long);
+    assert!(text.starts_with("[... 10 bytes cut]\n"));
+    assert_eq!(
+      text.len() - "[... 10 bytes cut]\n".len(),
+      FLAKY_OUTPUT_LIMIT
+    );
+  }
 
   #[test]
   fn adding_a_test_does_not_move_the_others() {

@@ -758,13 +758,19 @@ pub async fn run_future_forwarding_signals<TOutput>(
   let _token_drop_guard = token.clone().drop_guard();
   let _drop_guard = kill_signal.clone().drop_guard();
 
+  // denext: every signal listener is registered here, before the task's
+  // future runs (and spawns its first child), not when the listener future is
+  // first polled: a signal arriving in between would otherwise hit its
+  // default action in `deno task` itself (SIGTERM ends it and orphans the
+  // child; a default-ignored signal such as SIGWINCH is never forwarded).
+  let ctrl_c = deno_signals::signal_stream(libc::SIGINT).ok();
   spawn_future_with_cancellation(
-    listen_ctrl_c(kill_signal.clone(), saved_terminal_mode),
+    listen_ctrl_c(ctrl_c, kill_signal.clone(), saved_terminal_mode),
     token.clone(),
   );
   #[cfg(unix)]
   spawn_future_with_cancellation(
-    listen_and_forward_all_signals(kill_signal),
+    forward_signals(listen_all_signals(), kill_signal),
     token,
   );
 
@@ -772,10 +778,16 @@ pub async fn run_future_forwarding_signals<TOutput>(
 }
 
 async fn listen_ctrl_c(
+  stream: Option<deno_signals::SignalStream>,
   kill_signal: KillSignal,
   saved_terminal_mode: crate::util::console::SavedTerminalMode,
 ) {
-  while let Ok(()) = deno_signals::ctrl_c().await {
+  let Some(mut stream) = stream else {
+    return;
+  };
+  // One stream for the task's life, so a Ctrl+C between two deliveries is
+  // not lost either.
+  while let Some(()) = stream.recv().await {
     // On windows, ctrl+c is sent to the process group, so the signal would
     // have already been sent to the child process. We still want to listen
     // for ctrl+c here to keep the process alive when receiving it, but no
@@ -793,32 +805,46 @@ async fn listen_ctrl_c(
   }
 }
 
+/// A registered stream for every signal `deno task` forwards (all it can
+/// listen to), each paired with its signal number.
 #[cfg(unix)]
-async fn listen_and_forward_all_signals(kill_signal: KillSignal) {
-  use deno_core::futures::FutureExt;
+fn listen_all_signals() -> Vec<(i32, deno_signals::SignalStream)> {
   use deno_signals::SIGNAL_NUMS;
 
-  // listen and forward every signal we support
-  let mut futures = Vec::with_capacity(SIGNAL_NUMS.len());
-  for signo in SIGNAL_NUMS.iter().copied() {
-    if signo == libc::SIGKILL || signo == libc::SIGSTOP {
-      continue; // skip, can't listen to these
-    }
+  SIGNAL_NUMS
+    .iter()
+    .copied()
+    // skip, can't listen to these
+    .filter(|signo| *signo != libc::SIGKILL && *signo != libc::SIGSTOP)
+    .filter_map(|signo| {
+      deno_signals::signal_stream(signo)
+        .ok()
+        .map(|stream| (signo, stream))
+    })
+    .collect()
+}
 
-    let kill_signal = kill_signal.clone();
-    futures.push(
+#[cfg(unix)]
+async fn forward_signals(
+  streams: Vec<(i32, deno_signals::SignalStream)>,
+  kill_signal: KillSignal,
+) {
+  use deno_core::futures::FutureExt;
+
+  // forward every signal we listen to
+  let futures = streams
+    .into_iter()
+    .map(|(signo, mut stream)| {
+      let kill_signal = kill_signal.clone();
       async move {
-        let Ok(mut stream) = deno_signals::signal_stream(signo) else {
-          return;
-        };
         let signal_kind: deno_task_shell::SignalKind = signo.into();
         while let Some(()) = stream.recv().await {
           kill_signal.send(signal_kind);
         }
       }
-      .boxed_local(),
-    )
-  }
+      .boxed_local()
+    })
+    .collect::<Vec<_>>();
   deno_core::futures::future::join_all(futures).await;
 }
 
@@ -853,6 +879,22 @@ mod test {
       env_vars,
       HashMap::from([("PATH".into(), "/example".into())])
     );
+  }
+
+  // denext: the forwarding listeners are registered before the task's future
+  // first runs, so a signal that arrives as the task starts is forwarded, not
+  // given its default action in `deno task` itself.
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn signals_are_listened_to_before_the_task_runs() {
+    let handled = run_future_forwarding_signals(KillSignal::default(), async {
+      (
+        deno_signals::raise(libc::SIGURG),
+        deno_signals::raise(libc::SIGINT),
+      )
+    })
+    .await;
+    assert_eq!(handled, (true, true));
   }
 
   #[test]
