@@ -33,9 +33,13 @@ permissions:
 # A newer push to the same branch supersedes its run. Never cancelled: a tag's
 # run, a run on `main`, and a dispatch (the event is part of the group, so a
 # push never cancels a dispatch).
+# A push to development-denext is never cancelled or replaced (DENEXT.md item
+# 354): its group carries the run id, so no later push or dispatch shares it,
+# and cancel-in-progress is off for it. GitHub shows a cancelled run as a red X
+# on the default branch, and a release fast-forwards that branch.
 concurrency:
-  group: denext-npm-matrix-${{ github.ref }}-${{ github.event_name }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/heads/main' }}
+  group: denext-npm-matrix-${{ github.ref }}-${{ github.event_name }}${{ (github.event_name == 'push' && github.ref == 'refs/heads/development-denext') && format('-{0}', github.run_id) || '' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/heads/main' && github.ref != 'refs/heads/development-denext' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -45,8 +49,60 @@ env:
   TOOLS_DENO_VERSION: 2.9.7
 
 jobs:
+  # The verified-SHA guard (.github/denext-runtime/guard_verified.py, DENEXT.md
+  # item 354). After a release, development-denext is fast-forwarded to the
+  # release commit, which already passed this workflow on its release branch
+  # or tag. On that push, when the commit has such a green run, every other
+  # job here is skipped and the run is green on this job alone (a run whose
+  # jobs were all skipped would not show as a passed check). Any other push,
+  # a dispatch, a pull request, or an API error: verified=false, a full run.
+  guard:
+    name: verified-SHA guard
+    # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-24.04 (always the image on a fork's pull_request / pull_request_target).
+    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && '"ubuntu-24.04"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-24.04'))) }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read # reads this workflow's runs of the commit
+    outputs:
+      verified: ${{ steps.check.outputs.verified || 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'push' && github.ref == 'refs/heads/development-denext'
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github/denext-runtime/guard_verified.py
+            .github/denext-runtime/tag_gate.py
+          sparse-checkout-cone-mode: false
+      - id: check
+        if: github.event_name == 'push' && github.ref == 'refs/heads/development-denext'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          # The script exits 0 and prints verified=false on any API error;
+          # if it fails anyway, the run goes ahead in full.
+          if ! out=$(python3 -I .github/denext-runtime/guard_verified.py denext_npm_matrix.yml); then
+            out="::warning::guard_verified.py failed: running in full"$'\n'"verified=false"
+          fi
+          printf '%s\n' "$out"
+          if [ "$(tail -n 1 <<<"$out")" = verified=true ]; then
+            echo "verified=true" >>"$GITHUB_OUTPUT"
+            echo "::notice::$(head -n 1 <<<"$out")"
+          else
+            echo "verified=false" >>"$GITHUB_OUTPUT"
+          fi
+
   matrix:
     name: npm matrix
+    needs: guard
+    if: ${{ needs.guard.outputs.verified != 'true' }}
     # The docker-enabled Linux pool RUNNER_LINUX_X64_DOCKER names (services.sh starts
     # its registries with Docker; the pool's per-job daemon serves them, and its
     # label is widened, so any branch is served), else GitHub's ubuntu-22.04.

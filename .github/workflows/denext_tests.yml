@@ -16,7 +16,7 @@
 #          engine_staleness_test.py, audit_ignores_test.py,
 #          glibc_ceiling_test.py, self_binding_test.py, denort_pins_test.py,
 #          linux_needed_test.py, toolchain_info_test.py, plan_matrix_test.py,
-#          pick_runner_test.py, apt_install_test.py)
+#          pick_runner_test.py, apt_install_test.py, guard_verified_test.py)
 #          and the bare-assertion guard over the release scripts
 #          (assert_guard.py and its test).
 # - cargo-audit: RustSec advisories against Cargo.lock; .cargo/audit.toml
@@ -110,9 +110,13 @@ permissions:
 # A newer push to the same branch or pull request supersedes its run. Never
 # cancelled: a tag's run, a run on `main`, and a dispatch (the event is part of
 # the group, so a push never cancels a dispatched full run either).
+# A push to development-denext is never cancelled or replaced (DENEXT.md item
+# 354): its group carries the run id, so no later push or dispatch shares it,
+# and cancel-in-progress is off for it. GitHub shows a cancelled run as a red X
+# on the default branch, and a release fast-forwards that branch.
 concurrency:
-  group: denext-tests-${{ github.ref }}-${{ github.event_name }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/heads/main' }}
+  group: denext-tests-${{ github.ref }}-${{ github.event_name }}${{ (github.event_name == 'push' && github.ref == 'refs/heads/development-denext') && format('-{0}', github.run_id) || '' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/heads/main' && github.ref != 'refs/heads/development-denext' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -124,8 +128,60 @@ env:
   TOOLS_DENO_VERSION: 2.9.7
 
 jobs:
+  # The verified-SHA guard (.github/denext-runtime/guard_verified.py, DENEXT.md
+  # item 354). After a release, development-denext is fast-forwarded to the
+  # release commit, which already passed this workflow on its release branch
+  # or tag. On that push, when the commit has such a green run, every other
+  # job here is skipped and the run is green on this job alone (a run whose
+  # jobs were all skipped would not show as a passed check). Any other push,
+  # a dispatch, a pull request, or an API error: verified=false, a full run.
+  guard:
+    name: verified-SHA guard
+    # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-24.04 (always the image on a fork's pull_request / pull_request_target).
+    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && '"ubuntu-24.04"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-24.04'))) }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read # reads this workflow's runs of the commit
+    outputs:
+      verified: ${{ steps.check.outputs.verified || 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'push' && github.ref == 'refs/heads/development-denext'
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github/denext-runtime/guard_verified.py
+            .github/denext-runtime/tag_gate.py
+          sparse-checkout-cone-mode: false
+      - id: check
+        if: github.event_name == 'push' && github.ref == 'refs/heads/development-denext'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          # The script exits 0 and prints verified=false on any API error;
+          # if it fails anyway, the run goes ahead in full.
+          if ! out=$(python3 -I .github/denext-runtime/guard_verified.py denext_tests.yml); then
+            out="::warning::guard_verified.py failed: running in full"$'\n'"verified=false"
+          fi
+          printf '%s\n' "$out"
+          if [ "$(tail -n 1 <<<"$out")" = verified=true ]; then
+            echo "verified=true" >>"$GITHUB_OUTPUT"
+            echo "::notice::$(head -n 1 <<<"$out")"
+          else
+            echo "verified=false" >>"$GITHUB_OUTPUT"
+          fi
+
   lint:
     name: lint / ${{ matrix.os }}
+    needs: guard
+    if: ${{ needs.guard.outputs.verified != 'true' }}
     # The macos-15 entry runs on the self-hosted arm64 runner RUNNER_MACOS_ARM names,
     # the ubuntu-22.04 one on the Ubuntu 22.04 Linux pool RUNNER_LINUX_X64_2204 names
     # (its image carries the setup action's packages); each on its GitHub image while
@@ -173,6 +229,10 @@ jobs:
       - name: tag_gate_test.py
         if: runner.os == 'Linux'
         run: python3 -I .github/denext-runtime/tag_gate_test.py
+      # The verified-SHA guard (each push-triggered workflow's guard job).
+      - name: guard_verified_test.py
+        if: runner.os == 'Linux'
+        run: python3 -I .github/denext-runtime/guard_verified_test.py
       # The release matrix and its runners (denext_runtime.yml's setup job):
       # the jobs that launch the app need a GUI login session.
       - name: plan_matrix_test.py
@@ -243,6 +303,8 @@ jobs:
   # unmaintained, unsound or yanked crates are printed but do not fail).
   cargo-audit:
     name: cargo audit
+    needs: guard
+    if: ${{ needs.guard.outputs.verified != 'true' }}
     # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-22.04 (always the image on a fork's pull_request / pull_request_target).
     runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && '"ubuntu-22.04"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-22.04'))) }}
     timeout-minutes: 30
@@ -270,7 +332,8 @@ jobs:
   # denext_tests_os.yml also refuses a self-hosted label on a fork's pull_request / pull_request_target.
   macos:
     name: macos-15
-    if: ${{ github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.macos) }}
+    needs: guard
+    if: ${{ needs.guard.outputs.verified != 'true' && (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.macos)) }}
     uses: ./.github/workflows/denext_tests_os.yml
     permissions:
       contents: read
@@ -290,7 +353,8 @@ jobs:
 
   windows:
     name: windows-2022
-    if: ${{ github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.windows) }}
+    needs: guard
+    if: ${{ needs.guard.outputs.verified != 'true' && (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.windows)) }}
     # Stays on GitHub's image: a debug deno build + the suite on the 1-slot 4 vCPU / 8 GB
     # Windows VM, and the setup action writes the hosts file (the job account is no admin).
     # Its unit_node and node_compat jobs (test crates only, against this build) take the
@@ -310,6 +374,8 @@ jobs:
 
   linux:
     name: ubuntu-22.04
+    needs: guard
+    if: ${{ needs.guard.outputs.verified != 'true' }}
     # Every job of the leg (build, libs, each test job) on the Ubuntu 22.04
     # Linux pool (RUNNER_LINUX_X64_2204, biscuits: the glibc floor of the
     # image, every package the setup action names baked in, so nothing is
@@ -331,7 +397,8 @@ jobs:
   # (the desktop, updater and config crates included). Full runs only.
   macos-x64:
     name: macos-15-intel
-    if: ${{ github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) }}
+    needs: guard
+    if: ${{ needs.guard.outputs.verified != 'true' && (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) }}
     uses: ./.github/workflows/denext_tests_os.yml
     permissions:
       contents: read
@@ -351,7 +418,8 @@ jobs:
 
   linux-arm64:
     name: ubuntu-22.04-arm
-    if: ${{ github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) }}
+    needs: guard
+    if: ${{ needs.guard.outputs.verified != 'true' && (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) }}
     uses: ./.github/workflows/denext_tests_os.yml
     permissions:
       contents: read
@@ -365,7 +433,8 @@ jobs:
   # suite. Full runs only; the tag gate requires it.
   windows-arm64:
     name: windows-11-arm
-    if: ${{ github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) }}
+    needs: guard
+    if: ${{ needs.guard.outputs.verified != 'true' && (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) }}
     uses: ./.github/workflows/denext_tests_os.yml
     permissions:
       contents: read

@@ -13578,6 +13578,41 @@ where the changes are discussed.
        about 2 s to well under 1 s on a debug build and stops timing out on
        slower CI machines.
 
+354. **`ci(denext)`: a push to `development-denext` of an already verified
+     commit is green, and never cancelled** (`train/denext21`; CI;
+     `.github/workflows/denext_tests.yml`, `denext_runtime.yml`,
+     `denext_npm_matrix.yml`, `.github/denext-runtime/guard_verified.py`,
+     `guard_verified_test.py`). After a release, `development-denext` is
+     fast-forwarded to the release commit, and that push started `denext tests`
+     and `denext runtime` again on a commit whose release dispatch, release
+     branch push and tag build had already passed. Those duplicate runs got
+     cancelled, and GitHub shows a cancelled run as a red X on the default
+     branch. Each workflow with a push trigger that matches `development-denext`
+     now starts with a `verified-SHA guard` job. On a push to that branch it
+     asks the API whether the same workflow already passed on exactly this
+     commit (`head_sha`) from another event or ref: for `denext tests`, a
+     `workflow_dispatch` on `rel/*` whose jobs show every OS leg of the tag gate
+     passed (a full run; the API does not return a dispatch's inputs); for
+     `denext runtime`, the `denext-runtime-v*` tag build, or a dispatch or push
+     on `rel/*` whose `laufey`, `denort`, `cli` and `package` jobs passed for
+     every target; for `denext npm matrix`, a push on `rel/*` (a push runs every
+     case). A commit with a failed run of the workflow is never verified. When
+     it is verified, every other job is skipped and the run is green on the
+     guard job, which reports the run that vouched; otherwise, and on any API
+     error, the run goes ahead in full, never to a false green. Every other
+     event and ref runs as before. The concurrency group of a push to
+     `development-denext` carries the run id and `cancel-in-progress` is off for
+     that ref, so no later push or dispatch cancels or replaces it. Release
+     step: after fast-forwarding `development-denext` to the release commit,
+     check that the branch's checks on the new head finish green (the guard
+     jobs, or full runs), and never cancel them.
+     - User-facing note: none; CI only.
+     - Tests: `guard_verified_test.py` (21 cases: verified by a full dispatch,
+       verified by a tag build, not verified, an API error or unreadable output
+       running in full, partial and red runs never vouching), run by the lint
+       job.
+     - Node tests enabled: none, because this is CI only.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -13855,9 +13890,13 @@ a full `denext tests` (`denext_tests.yml`) run, every OS leg green (Windows
 arm64 included), passed on exactly the tagged commit, no `denext tests` run of
 that commit failed in any attempt (a green re-run does not clear a red one) or
 is still running, and the commit is on `development-denext` or `rel/<version>`.
-A pre-release version (`3.0.0-rc.N`) is published as a GitHub pre-release, never
-as the repository's "Latest"; otherwise the release is "Latest" exactly when its
-version is the newest. Per target it:
+After the release, `development-denext` is fast-forwarded to the release commit:
+check that the branch's checks on the new head finish green (each workflow's
+`verified-SHA guard` skips a run whose commit already passed on its release
+branch or tag, item 354), and never cancel those runs. A pre-release version
+(`3.0.0-rc.N`) is published as a GitHub pre-release, never as the repository's
+"Latest"; otherwise the release is "Latest" exactly when its version is the
+newest. Per target it:
 
 1. builds `libdenort` with `cargo build --release --locked -p denort_desktop`
    after patching `laufey` (`cargo metadata` rewrites laufey's lockfile entry;

@@ -68,10 +68,14 @@ permissions:
   actions: read
 
 concurrency:
-  group: denext-runtime-${{ github.ref }}-${{ inputs.targets }}-${{ inputs.reuse_denort_run_id }}-${{ inputs.reuse_laufey_run_id }}
+  group: denext-runtime-${{ github.ref }}-${{ inputs.targets }}-${{ inputs.reuse_denort_run_id }}-${{ inputs.reuse_laufey_run_id }}${{ (github.event_name == 'push' && github.ref == 'refs/heads/development-denext') && format('-{0}', github.run_id) || '' }}
   # A newer push to the same branch (or a new dispatch with the same inputs)
   # supersedes a run. A tag's run publishes the release and is never cancelled.
-  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_type == 'branch') }}
+  # Nor is a push to development-denext (DENEXT.md item 354): its group carries
+  # the run id, so no later push or dispatch shares it, and cancel-in-progress
+  # is off for it. GitHub shows a cancelled run as a red X on the default
+  # branch, and a release fast-forwards that branch.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/development-denext' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_type == 'branch')) }}
 
 env:
   # laufey `development-denext` (the Brainwires/laufey fork's stable branch;
@@ -121,8 +125,60 @@ env:
   ENGINE_STALENESS_ENFORCE_CEF: tag
 
 jobs:
+  # The verified-SHA guard (.github/denext-runtime/guard_verified.py, DENEXT.md
+  # item 354). After a release, development-denext is fast-forwarded to the
+  # release commit, which already passed this workflow on its release branch
+  # or tag. On that push, when the commit has such a green run, every other
+  # job here is skipped and the run is green on this job alone (a run whose
+  # jobs were all skipped would not show as a passed check). Any other push,
+  # a dispatch, a pull request, or an API error: verified=false, a full run.
+  guard:
+    name: verified-SHA guard
+    # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-24.04 (always the image on a fork's pull_request / pull_request_target).
+    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && '"ubuntu-24.04"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-24.04'))) }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read # reads this workflow's runs of the commit
+    outputs:
+      verified: ${{ steps.check.outputs.verified || 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'push' && github.ref == 'refs/heads/development-denext'
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github/denext-runtime/guard_verified.py
+            .github/denext-runtime/tag_gate.py
+          sparse-checkout-cone-mode: false
+      - id: check
+        if: github.event_name == 'push' && github.ref == 'refs/heads/development-denext'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          # The script exits 0 and prints verified=false on any API error;
+          # if it fails anyway, the run goes ahead in full.
+          if ! out=$(python3 -I .github/denext-runtime/guard_verified.py denext_runtime.yml); then
+            out="::warning::guard_verified.py failed: running in full"$'\n'"verified=false"
+          fi
+          printf '%s\n' "$out"
+          if [ "$(tail -n 1 <<<"$out")" = verified=true ]; then
+            echo "verified=true" >>"$GITHUB_OUTPUT"
+            echo "::notice::$(head -n 1 <<<"$out")"
+          else
+            echo "verified=false" >>"$GITHUB_OUTPUT"
+          fi
+
   setup:
     name: setup
+    needs: guard
+    if: ${{ needs.guard.outputs.verified != 'true' }}
     # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-24.04 (always the image on a fork's pull_request / pull_request_target).
     runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && '"ubuntu-24.04"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-24.04'))) }}
     outputs:
@@ -292,6 +348,8 @@ jobs:
   # no runtime, display or build: which result belongs to which launch.
   e2e-harness:
     name: e2e harness
+    needs: guard
+    if: ${{ needs.guard.outputs.verified != 'true' }}
     # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-24.04 (always the image on a fork's pull_request / pull_request_target).
     runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && '"ubuntu-24.04"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-24.04'))) }}
     steps:
