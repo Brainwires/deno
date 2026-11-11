@@ -892,7 +892,9 @@ pub const DETERMINISTIC_DEFAULT_SEED: u64 = 1;
 fn seed_arg_parse(result: &ParseResult, flags: &mut Flags) {
   // `--deterministic` is `--seed` with a default seed (upstream #35718 phase
   // 2): the seed also pins the time zone and the locale. An explicit `--seed`
-  // wins.
+  // wins. Under `--deterministic` the seed never reaches the cryptographic
+  // RNGs (`Flags::crypto_seed`).
+  flags.deterministic = result.get_bool("deterministic");
   let seed = result
     .get_one("seed")
     .and_then(|seed_str| seed_str.parse::<u64>().ok())

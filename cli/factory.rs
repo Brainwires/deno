@@ -1447,7 +1447,9 @@ impl CliFactory {
       node_cluster_sched_policy: std::env::var("NODE_CLUSTER_SCHED_POLICY")
         .ok(),
       origin_data_folder_path: Some(self.deno_dir()?.origin_data_folder_path()),
-      seed: cli_options.seed(),
+      // The cryptographic RNGs' seed: `--deterministic` seeds only
+      // `Math.random` (through V8's `--random-seed`).
+      seed: cli_options.crypto_seed(),
       unsafely_ignore_certificate_errors: cli_options
         .unsafely_ignore_certificate_errors()
         .clone(),

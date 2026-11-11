@@ -874,8 +874,14 @@ declare namespace Deno {
      * guard would refuse it; otherwise the guard decides. Not fired for the
      * runtime's own navigation, back / forward, reloads, sub-frames or
      * popups. While any window listens, a backend that can't hold a
-     * navigation (CEF, WebView2) cancels it and starts it again once it may
-     * load, as a new history entry. See
+     * navigation (CEF, WebView2) cancels it and starts it again by URL once
+     * it may load, as a new history entry. Those backends never hold a
+     * non-GET navigation (a form POST): it is not reported, and the guard
+     * decides it at once, so it keeps its method and body. (Started again,
+     * it would carry its body on the window's own authority, whatever frame
+     * submitted it, and WebView2 can only start a GET.) WebView2 reports no
+     * method: a navigation whose request carries `Content-Type` or `Origin`
+     * is taken as non-GET. See
      * {@linkcode Deno.desktop.navigationEvents}. */
     willnavigate: CustomEvent<WillNavigateDetail>;
   }

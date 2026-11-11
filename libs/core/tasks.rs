@@ -61,7 +61,13 @@ impl V8TaskSpawnerFactory {
   /// Poll this set of tasks, returning a non-empty set of tasks if there have
   /// been any queued, or registering the waker if not.
   pub fn poll_inner(&self, cx: &mut Context) -> Poll<Vec<UnsendTask>> {
-    // Check the flag first -- if it's false we definitely have no tasks. AcqRel semantics ensure
+    // Register the waker before the flag is checked: a `spawn` on another thread that stores the
+    // flag and wakes after a failed check but before a later registration would find no waker,
+    // and its task would wait until something else polled the event loop (a lost wakeup).
+    // Registered first, any `spawn` that the check below misses wakes this waker.
+    self.waker.register(cx.waker());
+
+    // Check the flag -- if it's false we definitely have no tasks. AcqRel semantics ensure
     // that this read happens-before the vector read below, and that any writes happen-after the success
     // case.
     if self
@@ -69,7 +75,6 @@ impl V8TaskSpawnerFactory {
       .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
       .is_err()
     {
-      self.waker.register(cx.waker());
       return Poll::Pending;
     }
 
@@ -78,8 +83,7 @@ impl V8TaskSpawnerFactory {
     if tasks.is_empty() {
       // Unlikely race lost -- the task submission to the queue and flag are not atomic, so it's
       // possible we ended up with an extra poll here. This only shows up under Miri, but as it is
-      // possible we do need to handle it.
-      self.waker.register(cx.waker());
+      // possible we do need to handle it. The waker is already registered.
       return Poll::Pending;
     }
 
@@ -251,6 +255,69 @@ mod tests {
       local_set.await;
       _ = task.await;
     });
+  }
+
+  /// A `spawn` on another thread that lands between `poll_inner`'s check
+  /// and its waker registration must still wake the poller: a poll that
+  /// returned `Pending` while a task is queued has to have been woken. The
+  /// race window is a few instructions wide, so it is hit by many rounds of
+  /// a poll and a spawn started together (it lost wakeups before the waker
+  /// was registered first; `test_spawner_parallel` hung on it).
+  #[test]
+  #[cfg(not(miri))]
+  fn test_spawner_no_lost_wakeup() {
+    use std::sync::atomic::AtomicUsize;
+
+    use futures::task::ArcWake;
+
+    struct CountWakes(AtomicUsize);
+    impl ArcWake for CountWakes {
+      fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.0.fetch_add(1, Ordering::SeqCst);
+      }
+    }
+
+    const ROUNDS: usize = 300_000;
+    let factories: Vec<Arc<V8TaskSpawnerFactory>> =
+      (0..ROUNDS).map(|_| Default::default()).collect();
+    let spawners: Vec<V8CrossThreadTaskSpawner> = factories
+      .iter()
+      .map(|factory| factory.clone().new_cross_thread_spawner())
+      .collect();
+    let go = Arc::new(AtomicUsize::new(0));
+    let done = Arc::new(AtomicUsize::new(0));
+    let spawner = {
+      let (go, done) = (go.clone(), done.clone());
+      std::thread::spawn(move || {
+        for (round, spawner) in (1..=ROUNDS).zip(spawners) {
+          while go.load(Ordering::Acquire) != round {
+            std::hint::spin_loop();
+          }
+          spawner.spawn(|_| {});
+          done.store(round, Ordering::Release);
+        }
+      })
+    };
+    let mut lost = 0;
+    for round in 1..=ROUNDS {
+      let factory = &factories[round - 1];
+      let wakes = Arc::new(CountWakes(AtomicUsize::new(0)));
+      let waker = futures::task::waker(wakes.clone());
+      let mut cx = Context::from_waker(&waker);
+      go.store(round, Ordering::Release);
+      let pending = factory.poll_inner(&mut cx).is_pending();
+      while done.load(Ordering::Acquire) != round {
+        std::hint::spin_loop();
+      }
+      if pending
+        && factory.has_pending_tasks()
+        && wakes.0.load(Ordering::SeqCst) == 0
+      {
+        lost += 1;
+      }
+    }
+    spawner.join().unwrap();
+    assert_eq!(lost, 0, "{lost} of {ROUNDS} spawns never woke the poller");
   }
 
   // https://github.com/tokio-rs/tokio/issues/6155

@@ -1080,6 +1080,11 @@ pub struct Flags {
   pub no_npm: bool,
   pub reload: bool,
   pub seed: Option<u64>,
+  /// `--deterministic`: `seed` (1 unless `--seed` sets one) seeds only the
+  /// non-cryptographic sources (`Math.random`, V8's hash seed) and pins the
+  /// time zone and locale; Web Crypto and `node:crypto` stay on the OS RNG
+  /// ([`Flags::crypto_seed`]).
+  pub deterministic: bool,
   /// `--max-memory`: the main thread's JavaScript heap limit, in bytes.
   pub max_memory: Option<u64>,
   /// `--max-cpu-time`: the process CPU time budget, in seconds.
@@ -1184,6 +1189,14 @@ impl PermissionFlags {
   }
 }
 impl Flags {
+  /// The seed of the cryptographic random sources (`crypto.getRandomValues`,
+  /// `crypto.randomUUID`, `node:crypto`'s random functions): a bare `--seed`
+  /// seeds them, as upstream's does; `--deterministic` never does, so its
+  /// public default seed can't make tokens and keys predictable.
+  pub fn crypto_seed(&self) -> Option<u64> {
+    if self.deterministic { None } else { self.seed }
+  }
+
   /// Whether `--max-memory`, `--max-cpu-time` or `--max-time` was given.
   pub fn has_resource_limits(&self) -> bool {
     self.max_memory.is_some()

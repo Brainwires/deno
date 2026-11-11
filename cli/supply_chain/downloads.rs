@@ -9,10 +9,17 @@
 //! for confirmation and the add is refused without one, unless
 //! `--allow-low-downloads=<name>` or `allowed-unpopular-packages` names it.
 //!
-//! The count comes from `https://api.npmjs.org/downloads/point/last-week/`.
-//! Packages from another registry (a private one has no public counts) are
-//! not checked. An unknown count (the API can't be reached, or has no count
-//! for the name) lets the add through, unless `required` (or `paranoid`).
+//! The count comes from `https://api.npmjs.org/downloads/point/last-week/`:
+//! unscoped names in bulk (up to 128 comma-separated names a request, which
+//! the API answers with one count each), scoped names one at a time (the bulk
+//! form takes none). Packages from another registry (a private one has no
+//! public counts) are not checked. An unknown count (the API can't be
+//! reached, or has no count for the name) lets the add through, unless
+//! `required` (or `paranoid`). A rate-limited answer (429) is retried as its
+//! `Retry-After` allows, then counts as unknown, except that it never refuses
+//! the add, even under `required`: rate limiting says nothing about the
+//! package, and a large dependency tree would otherwise fail at random. The
+//! names it left unchecked are named in a warning.
 
 use std::io::IsTerminal;
 use std::io::Write;
@@ -38,10 +45,76 @@ pub const DOWNLOADS_URL_ENV_VAR: &str = "DENO_NPM_DOWNLOADS_URL";
 const DOWNLOADS_DEFAULT_URL: &str = "https://api.npmjs.org/";
 const NPMJS_REGISTRY_HOST: &str = "registry.npmjs.org";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// The most names one bulk request carries (npm's limit).
+const BULK_MAX_NAMES: usize = 128;
+/// How often a rate-limited (429) request is tried again.
+const RATE_LIMIT_RETRIES: u32 = 2;
+/// The longest `Retry-After` waited for; a longer one gives up at once.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(10);
+/// The wait when a 429 has no `Retry-After` in seconds.
+const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(1);
 
 #[derive(Deserialize)]
 struct PointResponse {
   downloads: Option<u64>,
+}
+
+/// What the downloads API told about one package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Count {
+  Known(u64),
+  /// No count: the API has none for the name, or could not be reached.
+  Unknown,
+  /// The API still answered 429 after the retries `Retry-After` allowed.
+  RateLimited,
+}
+
+/// The requests that fetch the counts of `names`: each scoped name alone (the
+/// bulk form takes none), the unscoped ones together, up to
+/// [`BULK_MAX_NAMES`] a request.
+fn plan_requests<'a>(names: &[&'a str]) -> Vec<Vec<&'a str>> {
+  let (scoped, unscoped): (Vec<&str>, Vec<&str>) =
+    names.iter().partition(|name| name.starts_with('@'));
+  let mut requests = unscoped
+    .chunks(BULK_MAX_NAMES)
+    .map(|chunk| chunk.to_vec())
+    .collect::<Vec<_>>();
+  requests.extend(scoped.into_iter().map(|name| vec![name]));
+  requests
+}
+
+/// How long to wait before retrying a 429 with this `Retry-After`; `None`
+/// when it asks for longer than [`MAX_RETRY_AFTER`].
+fn retry_after_delay(retry_after: Option<&str>) -> Option<Duration> {
+  let delay = retry_after
+    .and_then(|value| value.trim().parse::<u64>().ok())
+    .map(Duration::from_secs)
+    .unwrap_or(DEFAULT_RETRY_AFTER);
+  (delay <= MAX_RETRY_AFTER).then_some(delay)
+}
+
+/// Reads the counts of `names` (one request's) from the API's answer: a
+/// single name's point object, or, for several, an object of them by name
+/// (`null` for a name with no count).
+fn parse_counts(names: &[&str], text: &str) -> Result<Vec<Count>, AnyError> {
+  let count = |point: Option<PointResponse>| match point {
+    Some(PointResponse {
+      downloads: Some(downloads),
+    }) => Count::Known(downloads),
+    _ => Count::Unknown,
+  };
+  if names.len() == 1 {
+    let point: PointResponse = serde_json::from_str(text)?;
+    return Ok(vec![count(Some(point))]);
+  }
+  let mut points: std::collections::HashMap<String, Option<PointResponse>> =
+    serde_json::from_str(text)?;
+  Ok(
+    names
+      .iter()
+      .map(|name| count(points.remove(*name).flatten()))
+      .collect(),
+  )
 }
 
 /// What the gate needs from the command line.
@@ -66,34 +139,87 @@ fn is_checked_registry(npmrc: &ResolvedNpmRc, name: &str) -> bool {
     && url == &npmrc.default_config.registry_url
 }
 
+/// The API's answer to one request.
+enum Answer {
+  Body(String),
+  NotFound,
+  RateLimited,
+}
+
+async fn get_answer(
+  http_client_provider: &HttpClientProvider,
+  url: &deno_core::url::Url,
+) -> Result<Answer, AnyError> {
+  let client = http_client_provider.get_or_create()?;
+  let mut retries = 0;
+  loop {
+    let response =
+      tokio::time::timeout(REQUEST_TIMEOUT, client.get(url.clone())?.send())
+        .await
+        .map_err(|_| {
+          anyhow!("timed out after {}s", REQUEST_TIMEOUT.as_secs())
+        })??;
+    let status = response.status();
+    if status == http::StatusCode::TOO_MANY_REQUESTS {
+      let retry_after = response
+        .headers()
+        .get(http::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+      match retry_after_delay(retry_after.as_deref()) {
+        Some(delay) if retries < RATE_LIMIT_RETRIES => {
+          retries += 1;
+          tokio::time::sleep(delay).await;
+          continue;
+        }
+        _ => return Ok(Answer::RateLimited),
+      }
+    }
+    if status == http::StatusCode::NOT_FOUND {
+      // the API has no count for it (a brand-new name, or none at all)
+      return Ok(Answer::NotFound);
+    }
+    if !status.is_success() {
+      bail!("{url} answered {status}");
+    }
+    return Ok(Answer::Body(http_util::body_to_string(response).await?));
+  }
+}
+
+/// The weekly downloads of `names`, fetched in one request (see
+/// [`plan_requests`]).
 async fn weekly_downloads(
   http_client_provider: &HttpClientProvider,
-  name: &str,
-) -> Result<Option<u64>, AnyError> {
+  names: &[&str],
+) -> Vec<Count> {
   let base =
     super::service_url_from_env(DOWNLOADS_URL_ENV_VAR, DOWNLOADS_DEFAULT_URL);
   // a scoped name's `/` is encoded
-  let encoded = name.replace('/', "%2F");
-  let url = base.join(&format!("downloads/point/last-week/{encoded}"))?;
-  let client = http_client_provider.get_or_create()?;
-  let response =
-    tokio::time::timeout(REQUEST_TIMEOUT, client.get(url.clone())?.send())
-      .await
-      .map_err(|_| {
-        anyhow!("timed out after {}s", REQUEST_TIMEOUT.as_secs())
-      })??;
-  let status = response.status();
-  if status == http::StatusCode::NOT_FOUND {
-    // the API has no count for it (a brand-new name, or none at all)
-    return Ok(None);
-  }
-  if !status.is_success() {
-    bail!("{url} answered {status}");
-  }
-  let text = http_util::body_to_string(response).await?;
-  let response: PointResponse = serde_json::from_str(&text)
-    .map_err(|err| anyhow!("unexpected response from {url}: {err}"))?;
-  Ok(response.downloads)
+  let path = names
+    .iter()
+    .map(|name| name.replace('/', "%2F"))
+    .collect::<Vec<_>>()
+    .join(",");
+  let result = match base.join(&format!("downloads/point/last-week/{path}")) {
+    Ok(url) => {
+      get_answer(http_client_provider, &url)
+        .await
+        .and_then(|answer| match answer {
+          Answer::Body(text) => parse_counts(names, &text)
+            .map_err(|err| anyhow!("unexpected response from {url}: {err}")),
+          Answer::NotFound => Ok(vec![Count::Unknown; names.len()]),
+          Answer::RateLimited => Ok(vec![Count::RateLimited; names.len()]),
+        })
+    }
+    Err(err) => Err(err.into()),
+  };
+  result.unwrap_or_else(|err| {
+    log::debug!(
+      "Could not get the download counts of {}: {err:#}",
+      names.join(", ")
+    );
+    vec![Count::Unknown; names.len()]
+  })
 }
 
 fn is_interactive() -> bool {
@@ -238,22 +364,38 @@ async fn check_names(
         && is_checked_registry(npmrc, name)
     })
     .collect::<Vec<_>>();
-  let counts = deno_core::futures::stream::iter(to_check)
-    .map(|name| async move {
-      let count = match weekly_downloads(http_client_provider, name).await {
-        Ok(count) => count,
-        Err(err) => {
-          log::debug!("Could not get the download count of {name}: {err:#}");
-          None
-        }
-      };
-      (name, count)
+  let to_check = to_check
+    .iter()
+    .map(|name| name.as_str())
+    .collect::<Vec<_>>();
+  let counts = deno_core::futures::stream::iter(plan_requests(&to_check))
+    .map(|names| async move {
+      let counts = weekly_downloads(http_client_provider, &names).await;
+      names.into_iter().zip(counts).collect::<Vec<_>>()
     })
     .buffered(CONCURRENT_REQUESTS)
     .collect::<Vec<_>>()
-    .await;
+    .await
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+  let rate_limited = counts
+    .iter()
+    .filter(|(_, count)| *count == Count::RateLimited)
+    .map(|(name, _)| format!("npm:{name}"))
+    .collect::<Vec<_>>();
+  if !rate_limited.is_empty() {
+    let message = format!(
+      "The npm downloads API rate-limited the low-download check, so these were not checked: {}",
+      rate_limited.join(", ")
+    );
+    if mode == LowDownloadCheck::Warn {
+      log::debug!("{message}");
+    } else {
+      log::warn!("{} {message}.", colors::yellow("Warning"));
+    }
+  }
   for (name, count) in counts {
-    let name = name.as_str();
     let subject = match origin {
       Origin::Added => format!("npm:{name}"),
       Origin::Dependency => {
@@ -261,16 +403,18 @@ async fn check_names(
       }
     };
     let reason = match count {
-      Some(count) if count >= threshold => continue,
-      Some(count) => {
+      Count::Known(count) if count >= threshold => continue,
+      Count::Known(count) => {
         format!(
           "{subject} has {count} weekly downloads (fewer than {threshold})"
         )
       }
-      None if mode == LowDownloadCheck::Required => format!(
+      Count::Unknown if mode == LowDownloadCheck::Required => format!(
         "The weekly downloads of {subject} are unknown (low-download-check=required, or paranoid, refuses unknown counts)"
       ),
-      None => continue,
+      // Unknown otherwise; rate-limited in every mode (warned about above):
+      // rate limiting alone never refuses.
+      Count::Unknown | Count::RateLimited => continue,
     };
     let hint = match super::popular_names::did_you_mean(name) {
       Some(popular) => format!(
@@ -310,4 +454,60 @@ async fn check_names(
     bail!("{reason}. {hint}\nTo add it anyway, pass {allow}.");
   }
   Ok(())
+}
+
+#[cfg(test)]
+mod test {
+  use super::*;
+
+  #[test]
+  fn unscoped_names_go_in_bulk_and_scoped_names_alone() {
+    let names = ["a", "@s/b", "c", "@s/d"];
+    assert_eq!(
+      plan_requests(&names),
+      vec![vec!["a", "c"], vec!["@s/b"], vec!["@s/d"]]
+    );
+    let many = (0..300).map(|i| format!("p{i}")).collect::<Vec<_>>();
+    let many = many.iter().map(String::as_str).collect::<Vec<_>>();
+    let requests = plan_requests(&many);
+    assert_eq!(
+      requests.iter().map(Vec::len).collect::<Vec<_>>(),
+      vec![128, 128, 44]
+    );
+    assert_eq!(requests.concat(), many);
+    assert!(plan_requests(&[]).is_empty());
+  }
+
+  #[test]
+  fn bulk_and_single_answers_are_read() {
+    assert_eq!(
+      parse_counts(&["a"], r#"{"downloads":12,"package":"a"}"#).unwrap(),
+      vec![Count::Known(12)]
+    );
+    assert_eq!(
+      parse_counts(&["a"], r#"{"package":"a"}"#).unwrap(),
+      vec![Count::Unknown]
+    );
+    assert_eq!(
+      parse_counts(
+        &["a", "b", "c"],
+        r#"{"a":{"downloads":5000,"package":"a"},"b":null}"#
+      )
+      .unwrap(),
+      vec![Count::Known(5000), Count::Unknown, Count::Unknown]
+    );
+    assert!(parse_counts(&["a", "b"], "[]").is_err());
+  }
+
+  #[test]
+  fn retry_after_is_honoured_up_to_a_limit() {
+    assert_eq!(retry_after_delay(None), Some(DEFAULT_RETRY_AFTER));
+    assert_eq!(retry_after_delay(Some("0")), Some(Duration::ZERO));
+    assert_eq!(retry_after_delay(Some(" 3 ")), Some(Duration::from_secs(3)));
+    assert_eq!(
+      retry_after_delay(Some("Wed, 21 Oct 2026 07:28:00 GMT")),
+      Some(DEFAULT_RETRY_AFTER)
+    );
+    assert_eq!(retry_after_delay(Some("3600")), None);
+  }
 }

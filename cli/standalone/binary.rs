@@ -1199,6 +1199,7 @@ impl<'a> DenoCompileBinaryWriter<'a> {
     let metadata = Metadata {
       argv: compile_flags.args.clone(),
       seed: self.cli_options.seed(),
+      deterministic: self.cli_options.deterministic(),
       max_memory: self.cli_options.max_memory(),
       max_cpu_time: self.cli_options.max_cpu_time(),
       max_time: self.cli_options.max_time(),

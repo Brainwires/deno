@@ -337,10 +337,11 @@ fn init() -> Handle {
   Handle(handle)
 }
 
-/// How long the Windows console control handler holds a close (2), logoff (5)
-/// or shutdown (6) event that a listener `handled`, so the listener can finish
-/// (drain) before Windows ends the process, which it does once the handler
-/// returns (denext). Windows itself ends a process about 5 s after a close
+/// The longest the Windows console control handler holds a close (2), logoff
+/// (5) or shutdown (6) event that a listener `handled`, so the listener can
+/// finish (drain) before Windows ends the process, which it does once the
+/// handler returns (denext). The hold ends as soon as the listener has
+/// finished ([`wait_for_dispatches`]). Windows itself ends a process about 5 s after a close
 /// and 20 s after a logoff or shutdown, so the hold never extends that.
 /// `None` for Ctrl+C (0) and Ctrl+Break (1), which don't end the process when
 /// handled, and for an event no listener took over.
@@ -364,6 +365,67 @@ fn console_ctrl_hold(
   }
 }
 
+// denext: the deliveries of each signal handed to a listener that has not
+// finished with them yet (`dispatch_started` / `dispatch_finished`), so the
+// Windows console control handler can return as soon as the listener is done
+// instead of holding the event for the whole time Windows gives.
+type Dispatches = (Mutex<HashMap<i32, u64>>, std::sync::Condvar);
+static DISPATCHES: OnceLock<Dispatches> = OnceLock::new();
+
+fn dispatches() -> &'static Dispatches {
+  DISPATCHES.get_or_init(Default::default)
+}
+
+/// denext: a delivery of `signal` was handed to a listener (a JS signal
+/// listener, through its signal resource). Call it before the listener can
+/// see the delivery, so a waiter ([`wait_for_dispatches`]) that starts after
+/// the handlers ran always counts it.
+pub fn dispatch_started(signal: i32) {
+  let (counts, _) = dispatches();
+  *counts.lock().unwrap().entry(signal).or_default() += 1;
+}
+
+/// denext: a listener finished `count` deliveries of `signal` it was handed
+/// (its listeners returned, and the promises they returned settled), or its
+/// resource closed without dispatching them.
+pub fn dispatch_finished(signal: i32, count: u64) {
+  if count == 0 {
+    return;
+  }
+  let (counts, finished) = dispatches();
+  let mut counts = counts.lock().unwrap();
+  if let Some(outstanding) = counts.get_mut(&signal) {
+    *outstanding = outstanding.saturating_sub(count);
+    if *outstanding == 0 {
+      counts.remove(&signal);
+    }
+  }
+  finished.notify_all();
+}
+
+/// denext: waits until every delivery of `signal` handed to a listener has
+/// been finished, at most `timeout`. `true` when they were, `false` on the
+/// timeout.
+pub fn wait_for_dispatches(signal: i32, timeout: std::time::Duration) -> bool {
+  let (counts, finished) = dispatches();
+  let guard = counts.lock().unwrap();
+  let (_guard, result) = finished
+    .wait_timeout_while(guard, timeout, |counts| counts.contains_key(&signal))
+    .unwrap();
+  !result.timed_out()
+}
+
+/// denext: what the Windows console control handler does with a close,
+/// logoff or shutdown event a listener took (see [`console_ctrl_hold`]):
+/// waits for the listener to finish, at most the hold. Returns at once for
+/// any other event.
+#[cfg(any(windows, test))]
+fn hold_console_ctrl(signal: i32, ctrl_type: u32, handled: bool) {
+  if let Some(hold) = console_ctrl_hold(ctrl_type, handled) {
+    wait_for_dispatches(signal, hold);
+  }
+}
+
 #[cfg(windows)]
 fn init() -> Handle {
   unsafe extern "system" fn handle(ctrl_type: u32) -> i32 {
@@ -381,11 +443,9 @@ fn init() -> Handle {
     // denext: Windows ends the process as soon as the handler returns from a
     // close, logoff or shutdown event. When a listener took the signal over
     // (a server draining its requests on SIGHUP / SIGTERM), keep the handler
-    // here until the listener ends the process, at most as long as Windows
-    // waits anyway.
-    if let Some(hold) = console_ctrl_hold(ctrl_type, handled) {
-      std::thread::sleep(hold);
-    }
+    // here until the listener has finished (or ends the process), at most as
+    // long as Windows waits anyway.
+    hold_console_ctrl(signal, ctrl_type, handled);
     handled as _
   }
 
@@ -730,6 +790,59 @@ mod console_ctrl_tests {
     }
     assert_eq!(console_ctrl_hold(0, true), None);
     assert_eq!(console_ctrl_hold(1, true), None);
+  }
+
+  // denext: the hold ends once the listener has finished its delivery, not
+  // after the whole time Windows gives. Each test uses its own signal
+  // number, so they can run in parallel.
+  #[test]
+  fn the_hold_ends_when_the_listener_finishes() {
+    use std::time::Instant;
+    const SIGNAL: i32 = 61;
+    super::dispatch_started(SIGNAL);
+    let finisher = std::thread::spawn(|| {
+      std::thread::sleep(Duration::from_millis(100));
+      super::dispatch_finished(SIGNAL, 1);
+    });
+    let start = Instant::now();
+    // A close: held for at most 5 s.
+    super::hold_console_ctrl(SIGNAL, 2, true);
+    let held = start.elapsed();
+    finisher.join().unwrap();
+    assert!(held >= Duration::from_millis(90), "{held:?}");
+    assert!(
+      held < Duration::from_secs(3),
+      "held the whole window: {held:?}"
+    );
+  }
+
+  #[test]
+  fn a_finished_listener_is_not_waited_for() {
+    use std::time::Instant;
+    const SIGNAL: i32 = 62;
+    super::dispatch_started(SIGNAL);
+    super::dispatch_started(SIGNAL);
+    super::dispatch_finished(SIGNAL, 2);
+    let start = Instant::now();
+    super::hold_console_ctrl(SIGNAL, 2, true);
+    assert!(start.elapsed() < Duration::from_secs(1));
+    // Nothing handed out: no wait either.
+    assert!(super::wait_for_dispatches(63, Duration::from_secs(5)));
+  }
+
+  #[test]
+  fn an_unfinished_listener_is_waited_for_until_the_timeout() {
+    const SIGNAL: i32 = 64;
+    super::dispatch_started(SIGNAL);
+    assert!(!super::wait_for_dispatches(
+      SIGNAL,
+      Duration::from_millis(50)
+    ));
+    super::dispatch_finished(SIGNAL, 1);
+    assert!(super::wait_for_dispatches(
+      SIGNAL,
+      Duration::from_millis(50)
+    ));
   }
 }
 

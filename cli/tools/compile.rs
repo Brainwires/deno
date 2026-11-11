@@ -68,11 +68,29 @@ pub async fn compile(
   }
 }
 
+/// The warning `deno compile` prints when it records a seed in the program:
+/// every run of the binary, on every machine, repeats the seeded values.
+fn recorded_seed_warning(flags: &Flags) -> Option<String> {
+  let seed = flags.seed?;
+  Some(if flags.deterministic {
+    format!(
+      "the compiled program runs with --deterministic (seed {seed}): Math.random repeats the same values on every run and every machine. crypto.getRandomValues, crypto.randomUUID and node:crypto stay random."
+    )
+  } else {
+    format!(
+      "the compiled program runs with --seed={seed}: Math.random, crypto.getRandomValues, crypto.randomUUID and node:crypto's random functions repeat the same values on every run and every machine, so keys, tokens and IDs it makes are predictable. --deterministic leaves the cryptographic sources random."
+    )
+  })
+}
+
 async fn compile_inner(
   mut flags: Flags,
   mut compile_flags: CompileFlags,
   watcher_communicator: Option<Arc<WatcherCommunicator>>,
 ) -> Result<(), AnyError> {
+  if let Some(warning) = recorded_seed_warning(&flags) {
+    log::warn!("{} {}", colors::yellow("Warning"), warning);
+  }
   // Framework detection: when the source is a directory, detect the
   // framework and generate an entrypoint automatically.
   let source_dir = if compile_flags.source_file == "." {
@@ -1462,6 +1480,27 @@ mod test {
 
   fn strings(args: &[&str]) -> Vec<String> {
     args.iter().map(|s| s.to_string()).collect()
+  }
+
+  #[test]
+  fn compile_warns_when_it_records_a_seed() {
+    assert_eq!(recorded_seed_warning(&Flags::default()), None);
+    let seeded = Flags {
+      seed: Some(7),
+      ..Flags::default()
+    };
+    let warning = recorded_seed_warning(&seeded).unwrap();
+    assert!(warning.contains("--seed=7"), "{warning}");
+    assert!(warning.contains("crypto.getRandomValues"), "{warning}");
+    assert!(warning.contains("predictable"), "{warning}");
+    let deterministic = Flags {
+      seed: Some(1),
+      deterministic: true,
+      ..Flags::default()
+    };
+    let warning = recorded_seed_warning(&deterministic).unwrap();
+    assert!(warning.contains("--deterministic (seed 1)"), "{warning}");
+    assert!(warning.contains("stay random"), "{warning}");
   }
 
   #[test]

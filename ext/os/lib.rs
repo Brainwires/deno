@@ -194,6 +194,7 @@ deno_core::extension!(
     ops::signal::op_signal_bind,
     ops::signal::op_signal_unbind,
     ops::signal::op_signal_poll,
+    ops::signal::op_signal_dispatched,
   ],
   lazy_loaded_js = ["30_os.js", "40_signals.js"],
   options = {

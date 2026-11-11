@@ -1,0 +1,2 @@
+[WILDCARD]Warning The npm downloads API rate-limited the low-download check, so these were not checked: npm:@denotest/unpopular-pkg.
+[WILDCARD]Add npm:@denotest/unpopular-pkg@1.0.0[WILDCARD]

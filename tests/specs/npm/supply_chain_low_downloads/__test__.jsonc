@@ -111,6 +111,17 @@
       "envs": { "DENO_NPM_DOWNLOADS_URL": "http://localhost:4270/down/" },
       "output": "added_silently.out"
     },
+    // a rate-limited API (429, after the retries its Retry-After allows)
+    // leaves the count unknown, but never refuses, even under required: the
+    // add goes on with a warning naming what was not checked
+    "rate_limited_is_not_refused_under_required": {
+      "cwd": "required",
+      "args": "add npm:@denotest/unpopular-pkg@1.0.0",
+      "envs": {
+        "DENO_NPM_DOWNLOADS_URL": "http://localhost:4270/rate-limited/"
+      },
+      "output": "rate_limited.out"
+    },
     "required_refuses_unknown_count": {
       "cwd": "required",
       "args": "add npm:@denotest/unknown-downloads-pkg@1.0.0",

@@ -980,6 +980,9 @@ fn resolve_shim_data(
     executable_args.push(format!("--v8-flags={}", flags.v8_flags.join(",")));
   }
 
+  if flags.deterministic {
+    executable_args.push("--deterministic".to_string());
+  }
   if let Some(seed) = flags.seed {
     executable_args.push("--seed".to_string());
     executable_args.push(seed.to_string());

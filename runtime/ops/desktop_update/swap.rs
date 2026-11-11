@@ -1353,21 +1353,78 @@ pub fn apply_swap_verified(
   }
 }
 
-/// The name a copy of the installed AppImage is written under before it is
-/// renamed to `.old` ([`keep_previous_file`]), so `.old` is either absent or
-/// a complete copy.
-fn old_copy_path(layout: &InstallLayout) -> PathBuf {
-  layout
-    .parent
-    .join(format!(".{}.denext-old-copy", layout.name))
+/// What the name of a copy of the installed AppImage starts with: it is
+/// written under this prefix and a random suffix ([`new_old_copy_path`])
+/// before it is renamed to `.old` ([`keep_previous_file`]), so `.old` is
+/// either absent or a complete copy.
+fn old_copy_prefix(layout: &InstallLayout) -> String {
+  format!(".{}.denext-old-copy", layout.name)
 }
 
-/// Remove what an interrupted copy left at [`old_copy_path`]: a file or a
-/// symlink (never followed); anything else at that name is not ours.
+/// A fresh, unpredictable name for a copy, so nobody else who can write the
+/// install directory can plant something at it beforehand.
+fn new_old_copy_path(layout: &InstallLayout) -> PathBuf {
+  layout.parent.join(format!(
+    "{}-{}",
+    old_copy_prefix(layout),
+    uuid::Uuid::new_v4().simple()
+  ))
+}
+
+/// The leftovers of interrupted copies in the install directory: the names
+/// [`new_old_copy_path`] makes, and the fixed one earlier runtimes used.
+fn old_copy_leftovers(layout: &InstallLayout) -> Vec<PathBuf> {
+  let prefix = old_copy_prefix(layout);
+  let Ok(entries) = std::fs::read_dir(&layout.parent) else {
+    return Vec::new();
+  };
+  entries
+    .filter_map(|e| e.ok())
+    .filter(|e| {
+      let name = e.file_name();
+      let name = name.to_string_lossy();
+      *name == *prefix
+        || name
+          .strip_prefix(&prefix)
+          .is_some_and(|rest| rest.starts_with('-'))
+    })
+    .map(|e| e.path())
+    .collect()
+}
+
+/// Remove what interrupted copies left ([`old_copy_leftovers`]): a file or a
+/// symlink (never followed); anything else at such a name is not ours.
+fn remove_copy_leftovers(layout: &InstallLayout) {
+  for path in old_copy_leftovers(layout) {
+    remove_copy_leftover(&path);
+  }
+}
+
 fn remove_copy_leftover(tmp: &Path) {
   if std::fs::symlink_metadata(tmp).is_ok_and(|m| !m.file_type().is_dir()) {
     let _ = std::fs::remove_file(tmp);
   }
+}
+
+/// Copy `from` to a new file at `to`, created exclusively: nothing may exist
+/// at `to`, and a symlink there is never followed (`O_EXCL`, plus
+/// `O_NOFOLLOW` on unix), so the copy can only ever write a file it created.
+/// The copy is written through that handle, given `from`'s permissions and
+/// synced.
+fn copy_to_new_file(from: &Path, to: &Path) -> std::io::Result<()> {
+  let mut src = std::fs::File::open(from)?;
+  let permissions = src.metadata()?.permissions();
+  let mut opts = std::fs::OpenOptions::new();
+  opts.write(true).create_new(true);
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::OpenOptionsExt;
+    opts.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+  }
+  let mut dst = opts.open(to)?;
+  std::io::copy(&mut src, &mut dst)?;
+  dst.set_permissions(permissions)?;
+  dst.sync_all()
 }
 
 /// Flush `dir`'s entries (a link, a rename in it) to disk. Best effort: not
@@ -1383,8 +1440,9 @@ fn sync_dir(dir: &Path) {
 
 /// Keep the installed AppImage at `.old` while it stays installed: a hard
 /// link to it, or, where the file system has no hard links (FAT, exFAT, the
-/// file systems that cannot exchange either), a copy written under
-/// [`old_copy_path`], synced and then renamed to `.old`. The directory is
+/// file systems that cannot exchange either), a copy written to a new file
+/// under a random name ([`new_old_copy_path`], [`copy_to_new_file`]), synced
+/// and then renamed to `.old`. The directory is
 /// synced afterwards, so `.old` is on disk before the staged file replaces
 /// the install. An interruption leaves the previous app installed (the
 /// recovery sees the install unchanged and goes back to `staged`) and at most
@@ -1396,15 +1454,18 @@ fn keep_previous_file(
 ) -> std::io::Result<()> {
   let install = &layout.install;
   if step(hook, "link", || std::fs::hard_link(install, old)).is_err() {
-    let tmp = old_copy_path(layout);
-    remove_copy_leftover(&tmp);
+    remove_copy_leftovers(layout);
+    let tmp = new_old_copy_path(layout);
     let copied = step(hook, "copy", || {
-      std::fs::copy(install, &tmp)?;
-      std::fs::File::open(&tmp)?.sync_all()?;
+      copy_to_new_file(install, &tmp)?;
       rename_retry(&tmp, old)
     });
     if let Err(e) = copied {
-      remove_copy_leftover(&tmp);
+      // Only a file this copy created is removed: `create_new` refused
+      // anything that was already at the name.
+      if !matches!(e.kind(), std::io::ErrorKind::AlreadyExists) {
+        remove_copy_leftover(&tmp);
+      }
       return Err(e);
     }
   }
@@ -4501,7 +4562,7 @@ mod tests {
       assert_eq!(std::fs::read_to_string(l.old_path()).unwrap(), "1.0.0");
       let old_ino = std::fs::metadata(l.old_path()).unwrap().ino();
       assert_eq!(old_ino == before, !link_fails, "link_fails={link_fails}");
-      assert!(!old_copy_path(l).exists());
+      assert!(old_copy_leftovers(l).is_empty());
       assert_eq!(read_state(l).unwrap().phase, Phase::Swapped);
       // `.old` is the previous app the rollback checks and puts back.
       let mut s = read_state(l).unwrap();
@@ -4509,6 +4570,79 @@ mod tests {
       assert_eq!(std::fs::read_to_string(&l.install).unwrap(), "1.0.0");
       assert_eq!(read_state(l).unwrap().phase, Phase::Idle);
     }
+  }
+
+  /// The copy of the previous app is written to a new file under a random
+  /// name: a symlink someone else plants at a predictable name (the fixed
+  /// name earlier runtimes copied to) after the leftovers are removed is
+  /// never followed, and the file it points to is never written.
+  #[cfg(unix)]
+  #[test]
+  fn appimage_copy_never_follows_a_planted_symlink() {
+    let f = appimage_fixture();
+    let l = &f.layout;
+    let victim_dir = tempfile::tempdir().unwrap();
+    let victim = victim_dir.path().join("victim");
+    std::fs::write(&victim, "victim").unwrap();
+    // The fixed name earlier runtimes copied to.
+    let planted = l.parent.join(format!(".{}.denext-old-copy", l.name));
+    let mut s = read_state(l).unwrap();
+    let hook = |name: &str| -> std::io::Result<()> {
+      if name == "exchange" || name == "link" {
+        return Err(std::io::Error::other("injected"));
+      }
+      if name == "copy" {
+        // Planted between the leftover removal and the copy.
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+      }
+      Ok(())
+    };
+    apply_swap_with(l, &mut s, &hook).unwrap();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "victim");
+    assert_eq!(std::fs::read_to_string(&l.install).unwrap(), "2.0.0");
+    assert_eq!(std::fs::read_to_string(l.old_path()).unwrap(), "1.0.0");
+  }
+
+  /// The copy's name is unpredictable, and its file is created exclusively:
+  /// anything already at the name (a symlink, a file) is refused untouched.
+  #[cfg(unix)]
+  #[test]
+  fn appimage_copy_is_created_exclusively() {
+    let f = appimage_fixture();
+    let l = &f.layout;
+    assert_ne!(new_old_copy_path(l), new_old_copy_path(l));
+    let victim = l.parent.join("victim");
+    std::fs::write(&victim, "victim").unwrap();
+    let to = new_old_copy_path(l);
+    std::os::unix::fs::symlink(&victim, &to).unwrap();
+    let e = copy_to_new_file(&l.install, &to).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "victim");
+    let to = new_old_copy_path(l);
+    std::fs::write(&to, "theirs").unwrap();
+    let e = copy_to_new_file(&l.install, &to).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read_to_string(&to).unwrap(), "theirs");
+    // A fresh name: a copy with the install's bytes and mode.
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(
+      &l.install,
+      std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let to = new_old_copy_path(l);
+    copy_to_new_file(&l.install, &to).unwrap();
+    assert_eq!(std::fs::read_to_string(&to).unwrap(), "1.0.0");
+    let mode = std::fs::metadata(&to).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o755);
+    // Leftovers (the copies, a link at the fixed name earlier runtimes
+    // used) are removed without being followed.
+    let planted = l.parent.join(old_copy_prefix(l));
+    std::os::unix::fs::symlink(&victim, &planted).unwrap();
+    assert_eq!(old_copy_leftovers(l).len(), 4);
+    remove_copy_leftovers(l);
+    assert!(old_copy_leftovers(l).is_empty());
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "victim");
   }
 
   /// A step of that swap fails: the previous app stays installed, no `.old`
@@ -4530,7 +4664,7 @@ mod tests {
       assert!(e.message.contains("was undone"), "{failing}: {}", e.message);
       assert_eq!(std::fs::read_to_string(&l.install).unwrap(), "1.0.0");
       assert!(!l.old_path().exists(), "{failing}");
-      assert!(!old_copy_path(l).exists(), "{failing}");
+      assert!(old_copy_leftovers(l).is_empty(), "{failing}");
       assert_eq!(read_state(l).unwrap().phase, Phase::Staged, "{failing}");
       assert_eq!(
         std::fs::read_to_string(l.extract_dir().join("App.AppImage")).unwrap(),

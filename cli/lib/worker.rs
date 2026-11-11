@@ -307,6 +307,9 @@ pub struct LibMainWorkerOptions {
   pub node_cluster_sched_policy: Option<String>,
   pub otel_config: OtelConfig,
   pub origin_data_folder_path: Option<PathBuf>,
+  /// The seed of the cryptographic RNGs (`crypto.getRandomValues`,
+  /// `node:crypto`): a bare `--seed`'s, never `--deterministic`'s.
+  /// `Math.random` takes its seed from V8's `--random-seed`.
   pub seed: Option<u64>,
   pub unsafely_ignore_certificate_errors: Option<Vec<String>>,
   pub skip_op_registration: bool,

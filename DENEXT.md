@@ -11709,7 +11709,7 @@ where the changes are discussed.
      default client's environment proxy for fetch;
      `parallel/test-http-keep-alive-empty-line`.
 
-     Tests: node_compat client-proxy (13 more),
+     Tests: node_compat client-proxy (12 more),
      `parallel/test-http-header-overflow`, `-insecure-parser`,
      `-max-header-size`, `-max-headers-count-overflow`,
      `-outgoing-drain-writable-length`, `-pipeline-outgoing-destroy`,
@@ -12537,7 +12537,7 @@ where the changes are discussed.
        winning, the default kept, both errors).
      - User-facing note: `Deno.createHttpClient({ userAgent: false })` sends
        requests with no `User-Agent`, and `userAgent: "my-agent/1"` replaces the
-       default; some servers (GitHub's API) refuse requests without one.
+       default; some servers refuse requests without one.
      - Node tests enabled: none, because this is a Deno API (`fetch` clients),
        not a Node one.
 
@@ -12884,21 +12884,22 @@ where the changes are discussed.
        timed out on every retry of the train run on the loaded CI runner
        (keep-alive timeout timing). They stay on for macOS.
 
-325. **Upstream 2.9.x fixes after the 2.9.8 sync** (from `denext.19`;
-     `d19/upstream`; CLI only). Upstream has cut no 2.9.x release after 2.9.8
-     (`v2.9` is still at the 2.9.8 tag, which the fork already merged), so the
-     fixes come from denoland/deno `main` after the 2.9.8 cut (up to
-     `e7b39ebd55`, 2026-10-26), each cherry-picked with `-x`. Taken: `fix(cli)`,
-     `deno upgrade`'s usage lists the `lts` channel, which the upgrader already
-     accepts (denoland/deno#37051; `tests/specs/upgrade/invalid_version`).
-     Already in the fork before this item, so nothing to port: #37084
-     (`brotliDecompressSync` throws on invalid input), #37059 (rustls 0.23.46),
-     #37060 (quinn-proto 0.11.19) and #36908 (rand 0.9.3). Left out on purpose:
-     #37057 (a revert of native type-checking by default, a feature removal),
-     the `perf`, `feat`, `refactor` and `chore` commits of upstream's unreleased
-     series (#36909, #36940, #36907, #36895, #36938, #36627, #36963 and older),
-     and CI-only changes. Ported upstream PRs: #37051. Node tests enabled: none,
-     because the only port is a CLI usage-text fix.
+325. **Upstream 2.9.x fixes after the 2.9.8 sync** (from `denext.20`; the
+     denext.19 tag was never published; `d19/upstream`; CLI only). Upstream has
+     cut no 2.9.x release after 2.9.8 (`v2.9` is still at the 2.9.8 tag, which
+     the fork already merged), so the fixes come from denoland/deno `main` after
+     the 2.9.8 cut (up to `e7b39ebd55`, 2026-10-26), each cherry-picked with
+     `-x`. Taken: `fix(cli)`, `deno upgrade`'s usage lists the `lts` channel,
+     which the upgrader already accepts (denoland/deno#37051;
+     `tests/specs/upgrade/invalid_version`). Already in the fork before this
+     item, so nothing to port: #37084 (`brotliDecompressSync` throws on invalid
+     input), #37059 (rustls 0.23.46), #37060 (quinn-proto 0.11.19) and #36908
+     (rand 0.9.3). Left out on purpose: #37057 (a revert of native type-checking
+     by default, a feature removal), the `perf`, `feat`, `refactor` and `chore`
+     commits of upstream's unreleased series (#36909, #36940, #36907, #36895,
+     #36938, #36627, #36963 and older), and CI-only changes. Ported upstream
+     PRs: #37051. Node tests enabled: none, because the only port is a CLI
+     usage-text fix.
 
 326. **`fix(runtime)`: an AppImage update keeps an app at the install path where
      the file system cannot exchange** (`runtime/ops/desktop_update/swap.rs`).
@@ -12945,9 +12946,14 @@ where the changes are discussed.
        report navigations only while some window has a listener
        (`op_desktop_set_will_navigate`), as CEF and WebView2 cannot hold a
        navigation and cancel and restart it to wait; WKWebView and WebKitGTK
-       hold it. The runtime's own navigation, back / forward, reloads,
-       sub-frames and popups are not reported; an unanswered one goes to the
-       guard after 10 s. `Deno.desktop.navigationEvents === true`.
+       hold it. As shipped here, WebView2 restarted every reported navigation as
+       a GET of the URL, so a form POST lost its method and body while a
+       listener was installed, and CEF restarted a same-origin non-GET with its
+       body on the main frame's authority; from item 342 neither engine holds a
+       non-GET navigation (it is not reported, and the guard decides it). The
+       runtime's own navigation, back / forward, reloads, sub-frames and popups
+       are not reported; an unanswered one goes to the guard after 10 s.
+       `Deno.desktop.navigationEvents === true`.
      - The app's menu: `Deno.desktop.setApplicationMenu(menu | null)` sets an
        application menu owned by no window, so it can be updated after the main
        window closed: macOS shows it while the key window has no menu of its own
@@ -13058,7 +13064,7 @@ where the changes are discussed.
 332. **`chore(deps)`: V8 15.6.75.57 from Brainwires/rusty_v8
      `v156.0.0-denext.5`** (`v8` crate `156.0.0+denext.5`; runtime and CI;
      `Cargo.toml`, `Cargo.lock`, `.github/denext-runtime/rusty_v8.sha256`;
-     runtime 3.0.0-denext.19). V8 moves from 15.6.75.38 to 15.6.75.57, the head
+     runtime 3.0.0-denext.20). V8 moves from 15.6.75.38 to 15.6.75.57, the head
      of `branch-heads/15.6` (Chrome Extended Stable 156) on 2026-11-10, which
      keeps the pin inside the engine staleness gate's 14-day patch-lag rule.
      Nineteen [M156] security merges come in: in maglev (`afdae2c4a4`,
@@ -13099,12 +13105,248 @@ where the changes are discussed.
        3.0.0-denext.19 does not exist as a release.
      - Node tests enabled: none, because this is a desktop host build fix.
 
+334. **`fix(cli)`: `--deterministic` leaves the cryptographic random sources
+     random; `deno compile` warns when it records a seed** (`d21/audit-fixes`;
+     CLI and runtime; `libs/cli_parser/src/flags.rs`, `convert.rs`, `defs.rs`,
+     `cli/args/mod.rs`, `cli/args/flags.rs`, `cli/factory.rs`,
+     `cli/lib/worker.rs`, `cli/lib/standalone/binary.rs`,
+     `cli/standalone/binary.rs`, `cli/rt/run.rs`, `cli/tools/compile.rs`,
+     `cli/tools/installer/global.rs`). Item 329 made `--deterministic` the same
+     as `--seed=1`, and under a seed `crypto.getRandomValues`,
+     `crypto.randomUUID` and `node:crypto`'s `randomBytes`, `randomFill(Sync)`
+     and `randomInt` (item 237) draw from a seeded generator: with the public
+     default seed, session tokens, CSRF secrets and IDs repeated on every run
+     and every machine, and a binary compiled with `--deterministic` shipped
+     them.
+     - `--deterministic` now seeds only the non-cryptographic sources
+       (`Math.random`, through V8's `--random-seed`) and pins the time zone and
+       locale as before; the cryptographic sources stay on the OS generator,
+       also with an explicit `--seed` beside it (`Flags::crypto_seed`). A bare
+       `--seed` keeps upstream's behaviour and seeds them too. A compiled
+       program records whether it was built with `--deterministic`, and a child
+       process or an installed script gets `--deterministic` again.
+     - `deno compile` warns when it records a seed: under `--seed`, that every
+       run of the program repeats its `Math.random` and cryptographic values;
+       under `--deterministic`, that `Math.random` repeats and the cryptographic
+       sources stay random.
+     - Tests: `tests_full.rs` `run_deterministic` (`crypto_seed()` is none under
+       `--deterministic`, with or without `--seed`, and the seed under a bare
+       `--seed`); `compile.rs` `compile_warns_when_it_records_a_seed`; spec
+       `run/deterministic` (`crypto.js`: `--seed=1` draws the seeded
+       `getRandomValues` / `randomUUID` / `randomBytes` values, and
+       `--deterministic` (also with `--seed=1`) draws others while `Math.random`
+       keeps the seeded value; on the base `--deterministic` prints "seeded" for
+       all three).
+     - User-facing note: `--deterministic` no longer makes
+       `crypto.getRandomValues`, `crypto.randomUUID` or `node:crypto`'s random
+       functions repeat; only `Math.random`, the time zone and the locale are
+       pinned. Use `--seed` to seed the cryptographic sources as well.
+     - Node tests enabled: none, because Node has no seeded or deterministic
+       mode to test.
+
+335. **`fix(npm)`: an OSV answer cut short keeps the malicious versions its
+     earlier pages listed** (`d21/audit-fixes`; CLI;
+     `cli/supply_chain/advisories.rs`,
+     `tests/util/server/servers/supply_chain.rs`). Item 313 reads OSV's
+     advisories page by page. When a later page failed (a timeout, a non-2xx,
+     the 50-page cap, a repeated page token), the `MAL-` advisories already read
+     were dropped with the error, and under the default `advisory-check` the
+     install went on with a warning, where a `MAL-` advisory on the first page
+     had always refused it. `query` now returns what it found with the error: a
+     malicious version refuses the install in every mode, complete answer or not
+     (the message says the answer was cut short), and a cut-short answer caches
+     nothing as clean. An answer cut short with no `MAL-` advisory is an
+     unreachable OSV, as before.
+     - Tests: spec `npm/supply_chain_advisories`
+       `add_refuses_malicious_version_when_a_later_page_fails` (the stand-in OSV
+       under `/paging-fails/` answers the first page with a `next_page_token`
+       and 503 for the next; fails on the base, which warns and adds the
+       version) and `add_warns_when_a_later_page_fails_for_a_clean_version`.
+     - User-facing note: a malicious-version advisory OSV listed is never
+       ignored because a later page of OSV's answer failed.
+     - Node tests enabled: none, because the supply-chain gate has no Node
+       counterpart.
+
+336. **`fix(runtime)`: an AppImage update writes the copy of the previous app
+     under an unpredictable name, to a file it creates** (`d21/audit-fixes`;
+     runtime; `runtime/ops/desktop_update/swap.rs`). Where the file system has
+     no hard links, item 326 copied the installed AppImage to a fixed name
+     (`.<name>.denext-old-copy`) before renaming it to `.old`, with
+     `std::fs::copy`, which opens with `O_CREAT | O_TRUNC` and follows a
+     symlink: someone else who could write the install directory could plant a
+     link there after the leftover was removed and have the update write
+     AppImage bytes over a file the user owns. The copy now goes to
+     `.<name>.denext-old-copy-<random>`, created with `create_new` (`O_EXCL`)
+     and `O_NOFOLLOW`, written through that handle, given the install's mode,
+     synced and renamed to `.old`; a name already taken is refused untouched.
+     Leftovers of interrupted copies (the random names and the old fixed one)
+     are removed unfollowed before the next copy.
+     - Tests: `appimage_copy_never_follows_a_planted_symlink` (a link planted at
+       the fixed name between the leftover removal and the copy: the file it
+       points to keeps its bytes; fails on the base, which writes the previous
+       app into it), `appimage_copy_is_created_exclusively`; the item 326 tests
+       now look for leftovers by prefix.
+     - User-facing note: none beyond the fix; the update behaves as before.
+     - Node tests enabled: none, because the desktop updater has no Node
+       counterpart.
+
+337. **`fix(core)`: a task spawned from another thread always wakes the event
+     loop** (`d21/audit-fixes`; runtime; `libs/core/tasks.rs`).
+     `V8TaskSpawnerFactory::poll_inner` checked its `has_tasks` flag and only
+     then registered the waker. A cross-thread `spawn()` (push, set the flag,
+     wake) that ran between the two found no waker, and its task waited until
+     something else polled the event loop: an otherwise idle loop waiting only
+     on such a task (a threadsafe-function call from a native addon, a worker's
+     cross-thread spawn) could stall, and `test_spawner_parallel` hung on it.
+     The waker is now registered before the check (also covering the empty-queue
+     branch), so a spawn the check misses wakes it. Upstream code, unchanged
+     upstream.
+     - Tests: `test_spawner_no_lost_wakeup` (300 000 rounds of a poll and a
+       spawn on another thread started together; a poll that returned `Pending`
+       with a task queued must have been woken). On the base it found lost
+       wakeups in each of three runs (4 of 300 000 in one); with the fix none in
+       six.
+     - User-facing note: none beyond the fix.
+     - Node tests enabled: none, because this is the event loop's own
+       scheduling, which no Node test isolates.
+
+338. **`fix(npm)`: the low-download check asks npm for download counts in bulk
+     and is not refused by rate limiting** (`d21/audit-fixes`; CLI;
+     `cli/supply_chain/downloads.rs`,
+     `tests/util/server/servers/supply_chain.rs`). Item 313's dependency check
+     made one `downloads/point/last-week/<name>` request per new dependency, 8
+     at a time, and any non-2xx, a 429 included, was an unknown count, which
+     `low-download-check=required` (or `paranoid`) refuses: a large tree on a
+     rate-limited API failed `deno add`.
+     - Unscoped names go in npm's bulk form, up to 128 comma-separated names a
+       request (answered with one count each, `null` for none); scoped names,
+       which the bulk form does not take, go one at a time.
+     - A 429 is retried as its `Retry-After` (seconds) allows, at most twice and
+       never for more than 10 s at a time (1 s without a usable value). Still
+       rate-limited, the count is unknown, but rate limiting alone never
+       refuses, even under `required`: it says nothing about the package, and a
+       large tree would otherwise fail at random. Under `prompt` / `required` a
+       warning names the packages that were not checked; under `warn` it goes to
+       the debug log, as unknown counts already did.
+     - Tests: `downloads.rs` units (the request plan, the bulk and single
+       answers, `Retry-After`); spec `npm/supply_chain_low_downloads`
+       `rate_limited_is_not_refused_under_required` (the stand-in under
+       `/rate-limited/` answers 429 with `Retry-After: 0`; refused on the base
+       as an unknown count). The test registry's packages are all scoped, so the
+       bulk path is covered by the units.
+     - User-facing note: the low-download check sends far fewer requests for a
+       large dependency tree, and a rate-limited npm downloads API no longer
+       makes `low-download-check=required` refuse an add; the unchecked packages
+       are named in a warning.
+     - Node tests enabled: none, because the supply-chain gate has no Node
+       counterpart.
+
+339. **`fix(desktop)`: the WebSocket relay drops a client's frame and
+     cross-origin marker headers** (`d21/audit-fixes`; runtime;
+     `cli/rt_desktop/scheme_bridge.rs`). The relay removed only the relay marker
+     a client sent, so a local process holding the relay token could send
+     `x-deno-desktop-frame` or `x-deno-desktop-cross-origin` on an upgrade,
+     which only the runtime may set (item 327, the module's own contract). The
+     relay now drops both, in any case and spacing, and sets neither.
+     - Tests: `relay_drops_the_frame_and_cross_origin_markers_a_client_sent`
+       (fails on the base: the client's markers reach the app).
+     - User-facing note: none beyond the fix.
+     - Node tests enabled: none, because the desktop relay has no Node
+       counterpart.
+
+340. **`fix(signals)`: on Windows, a console close, logoff or shutdown is held
+     only until the listener has finished** (`d21/audit-fixes`; runtime;
+     `ext/signals/lib.rs`, `ext/os/ops/signal.rs`, `ext/os/lib.rs`,
+     `ext/os/40_signals.js`). Item 315 held a handled close for 5 s and a logoff
+     or shutdown for 20 s whatever the listener did, so a listener that only
+     logged delayed every console close by the whole hold. Each signal delivery
+     handed to a JavaScript listener is now counted, and finished once the
+     listeners returned and the promises they returned settled (a drain); the
+     console control handler waits for that, at most the same 5 s / 20 s, and
+     returns as soon as it happens (or the listener ends the process). The
+     listener loop goes on meanwhile, so a second signal is delivered at once,
+     and a listener's rejected promise is still reported as an unhandled
+     rejection. `op_signal_poll` resolves to the number of deliveries so far (0
+     once closed), and the new `op_signal_dispatched` reports them finished; a
+     closed signal resource finishes what it was handed.
+     - Tests: `console_ctrl_tests` `the_hold_ends_when_the_listener_finishes` (a
+       close held 100 ms, not 5 s; fails with the fixed sleep),
+       `a_finished_listener_is_not_waited_for`,
+       `an_unfinished_listener_is_waited_for_until_the_timeout`. A real console
+       control event is raised only on the train's Windows legs.
+     - User-facing note: on Windows, closing the console of a program whose
+       `SIGHUP` / `SIGTERM` listener has finished no longer waits out the whole
+       5 s (20 s at logoff or shutdown). A listener that drains should return a
+       promise that settles when the drain is done, or exit itself.
+     - Node tests enabled: none, because Node's suite has no console control
+       event test.
+
+341. **`test(node)`: honest node_compat entries** (`d21/audit-fixes`; tests;
+     `tests/node_compat/config.jsonc`).
+     - `parallel/test-https-agent-session-reuse.js`, `test-tls-ticket.js` and
+       `test-tls-ticket-cluster.js` are ignored, with the reason: with
+       `process.features.openssl_is_boringssl` true they return early through
+       `common/boringssl.js`'s TLS 1.3 session-ticket substitute and never run
+       their own assertions, so they were counted as passing without being run.
+       Items 291 and 307 cited them; resumption stays covered by
+       `test-tls-client-resume` and the other enabled resumption tests.
+     - `parallel/test-module-subpath-import-long-path.js` is a Windows-only test
+       (it skips itself elsewhere): `expectedSkip` on macOS and Linux.
+     - The Linux reasons of `test-fs-readdir-ucs2`, `test-strace-openat-openssl`
+       and `test-trace-events-net-abstract-socket` were pasted failure text (one
+       with a CI runner's path); they now say why each fails.
+     - Node tests enabled: none; three are switched off (counts per OS drop by
+       3, by 2 on Windows, where `test-tls-ticket-cluster` was already off).
+
+342. **`fix(desktop)`: will-navigate never holds a non-GET navigation on CEF and
+     WebView2, and the re-issue token is bound to the backend's own load; laufey
+     at `d21/audit-fixes` `e7b8048`** (`cli/rt_desktop/Cargo.toml`,
+     `Cargo.lock`, `.github/workflows/denext_runtime.yml`,
+     `cli/tsc/dts/lib.deno.desktop.d.ts`). CEF and WebView2 cannot hold a
+     navigation, so for `"willnavigate"` (item 327) they cancel it and start it
+     again once decided.
+     - CEF restarted a same-origin non-GET with `LoadRequest` from the main
+       frame, whatever frame really submitted it: a cross-origin sub-frame's
+       `target=_top` form POST could reach the app as a same-origin request.
+       WebView2 restarted every navigation as a GET of the URL, so a form POST
+       lost its method and body while a listener was installed. Neither engine
+       now holds a non-GET navigation: it is not reported, and the navigation
+       guard decides it at once, as with no listener, so it keeps its method,
+       body and initiator. WebView2 reports no method, so a navigation whose
+       request carries `Content-Type` or `Origin` is taken as non-GET (a GET
+       read so is merely left to the guard).
+     - The re-issue token matched any navigation of the window to the same URL
+       for 10 s and skipped both will-navigate and the guard. It is now spent by
+       the window's next navigation start, matching or not, and lets through
+       only a load the engine says the backend started (CEF's direct-load
+       transition; WebView2's API navigation: user-initiated, not a redirect, no
+       `Referer`).
+     - laufey moves to `d21/audit-fixes` `e7b8048` (API 56 unchanged). laufey's
+       `will_navigate_test` covers the token, the method rule and the header
+       rule; CEF's `app.cc` was syntax-checked against the CEF 156 headers on
+       macOS, and WebView2's code builds on the train's Windows legs (no `min` /
+       `max` used).
+     - User-facing note: with a `"willnavigate"` listener on CEF or WebView2,
+       form POSTs and other non-GET navigations keep their method and body and
+       are decided by the navigation guard without firing the event.
+     - Node tests enabled: none, because these are Deno Desktop APIs with no
+       Node counterpart.
+
+343. **`docs`: DENEXT.md corrections** (`d21/audit-fixes`; docs). Items 325 and
+     332 named denext.19 for work that ships in denext.20 (the denext.19 tag was
+     never published); item 309's user-facing note names no service; item 289
+     enabled 12 more client-proxy tests, not 13; item 327 says how CEF and
+     WebView2 restarted non-GET navigations as shipped; the runtime-side list
+     and the laufey hosts paragraph below cover items 297 to 342 and API 56.
+     Node tests enabled: none, because this is documentation.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-296) are
+243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
+306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342) are
 what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
@@ -13144,10 +13386,16 @@ first shown at its size and the CEF shutdown, storage and print fixes, item 234,
 and API 53, microphone and camera requests and the `mediaCapture` launch key,
 item 239; and, for runtime 3.0.0-denext.11, screen capture refused on WebView2
 and WebRTC on WebKitGTK for media-capture apps, item 252; and, for runtime
-3.0.0-denext.14, API 54, native message dialogs, item 277), at the commit pinned
-by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The same commit is
-the `laufey` git dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 54,
-CEF 156.0.15).
+3.0.0-denext.14, API 54, native message dialogs, item 277; and API 55,
+application-menu clicks with every window closed, item 282; and, for runtime
+3.0.0-denext.20, API 56, frame-marked scheme requests, will-navigate and the
+app's own menu, Windows' microphone and camera privacy switches and the macOS
+hit region noticing cursor warps, items 327 and 333; and, for runtime
+3.0.0-denext.21, CEF and WebView2 never holding a non-GET navigation for
+will-navigate and a re-issue token bound to the backend's own load, item 342),
+at the commit pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref`
+input). The same commit is the `laufey` git dependency of
+`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 56, CEF 156.0.15).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the

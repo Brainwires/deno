@@ -77,6 +77,9 @@ pub struct SerializedWorkspaceResolver {
 pub struct Metadata {
   pub argv: Vec<String>,
   pub seed: Option<u64>,
+  /// Compiled with `--deterministic`: `seed` is not the cryptographic RNGs'.
+  #[serde(default)]
+  pub deterministic: bool,
   pub code_cache_key: Option<u64>,
   pub permissions: PermissionsOptions,
   pub location: Option<Url>,
