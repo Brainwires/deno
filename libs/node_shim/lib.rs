@@ -4056,6 +4056,11 @@ pub fn translate_to_deno_args(
     node_options.push("--pending-deprecation".to_string());
   }
 
+  // denext: `--trace-exit`, which process.exit() reads from NODE_OPTIONS.
+  if env_opts.trace_exit {
+    node_options.push("--trace-exit".to_string());
+  }
+
   add_test_node_options(node_options, env_opts);
 
   // Add the script and remaining args
@@ -6427,6 +6432,14 @@ mod tests {
       "{:?}",
       result.deno_args
     );
+  }
+
+  #[test]
+  fn test_trace_exit_rides_in_node_options() {
+    let parsed = parse_args(svec!["--trace-exit", "script.js"]).unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    assert_eq!(result.node_options, svec!["--trace-exit"]);
   }
 
   #[test]

@@ -1653,6 +1653,8 @@ internals.__initWorkerThreads = (
     }
 
     threadId = workerId;
+    // denext: for process.exit()'s `--trace-exit` line (process.ts).
+    internals.__nodeThreadId = workerId;
     let isWorkerThread = false;
     if (maybeWorkerMetadata) {
       const { 0: metadata, 1: _ } = maybeWorkerMetadata;

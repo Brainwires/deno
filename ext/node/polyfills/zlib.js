@@ -267,6 +267,7 @@ const FLUSH_BOUND = [
 const FLUSH_BOUND_IDX_NORMAL = 0;
 const FLUSH_BOUND_IDX_BROTLI = 1;
 const FLUSH_BOUND_IDX_ZSTD = 2;
+const kFlushBoundIdx = Symbol("kFlushBoundIdx");
 
 // The base class for all Zlib-style streams.
 function ZlibBase(opts, mode, handle, { flush, finishFlush, fullFlush }) {
@@ -348,6 +349,8 @@ function ZlibBase(opts, mode, handle, { flush, finishFlush, fullFlush }) {
   this._outOffset = 0;
 
   this._chunkSize = chunkSize;
+  // denext: the flush kinds this stream takes, for flush(kind).
+  this[kFlushBoundIdx] = flushBoundIdx;
   this._defaultFlushFlag = flush;
   this._finishFlushFlag = finishFlush;
   this._defaultFullFlushFlag = fullFlush;
@@ -428,6 +431,19 @@ ZlibBase.prototype.flush = function (kind, callback) {
   if (typeof kind === "function" || (kind === undefined && !callback)) {
     callback = kind;
     kind = this._defaultFullFlushFlag;
+  } else {
+    // As Node (nodejs/node#63701): a kind outside the stream's flush range is
+    // ERR_OUT_OF_RANGE, a non-number ERR_INVALID_ARG_TYPE, and undefined / NaN
+    // the stream's full flush, rather than writing a flush chunk with an
+    // unknown kind.
+    const bound = FLUSH_BOUND[this[kFlushBoundIdx] ?? FLUSH_BOUND_IDX_NORMAL];
+    kind = checkRangesOrGetDefault(
+      kind,
+      "kind",
+      bound[0],
+      bound[1],
+      this._defaultFullFlushFlag,
+    );
   }
 
   if (this.writableFinished) {
@@ -807,6 +823,26 @@ function _close(engine) {
   engine._handle = null;
 }
 
+// As Node's ZlibContext: a reset while a write is in flight is refused.
+function defineGuardedReset(handle, nativeReset) {
+  ObjectDefineProperty(handle, "reset", {
+    __proto__: null,
+    value: function reset() {
+      if (this._callbackPending) {
+        throw new Error(
+          "Cannot reset zlib stream while a write is in progress",
+        );
+      }
+      return ReflectApply(nativeReset, this, []);
+    },
+    writable: true,
+    configurable: true,
+  });
+}
+
+// The Brotli engines' write callback: processChunk schedules processCallback.
+function brotliWriteDone() {}
+
 // The native write/writeSync ops take the write-state buffer (where the
 // post-write avail_out/avail_in values are stored) as a per-write argument
 // rather than caching a pointer to it, so that detaching the buffer is a
@@ -820,6 +856,8 @@ function _close(engine) {
 // methods (`handle[kNativeWrite]` / `handle[kNativeWriteSync]`) directly to skip
 // the wrapper's per-write frame and argument array on every chunk.
 function setupHandleWriteState(handle, writeState) {
+  const nativeReset = handle.reset;
+  if (typeof nativeReset === "function") defineGuardedReset(handle, nativeReset);
   const nativeWrite = handle.write;
   const nativeWriteSync = handle.writeSync;
   handle[kNativeWrite] = nativeWrite;
@@ -1116,9 +1154,12 @@ function Brotli(opts, mode) {
 
   this._writeState = new Uint32Array(2);
   setupHandleWriteState(handle, this._writeState);
+  // denext: the write's completion runs from processChunk's nextTick, as
+  // for zlib (Node runs every write on the thread pool), so the stream's
+  // write is still in progress after write() returns.
   const success = handle.init(
     brotliInitParamsArray,
-    processCallback,
+    brotliWriteDone,
   );
   if (!success) {
     throw new ERR_ZLIB_INITIALIZATION_FAILED("Initialization failed");

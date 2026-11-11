@@ -12521,6 +12521,119 @@ where the changes are discussed.
      test-webcrypto-sign-verify-ecdsa; test-crypto-randomuuidv7 now on macOS
      too)
 
+NNN. **`fix(node)`: `require(esm)` throws the module's own error; Node's default
+extensions and relative lookups** (`libs/core/ops_builtin.rs`,
+`libs/core/01_core.js`, `ext/node/polyfills/01_require.js`). - A synchronous
+`require()` of an ES module that throws while it loads, links or evaluates (or
+failed earlier, from an `import()`) now throws the value the module threw, with
+its class, message and properties, as Node does. `op_import_sync` used to turn
+it into a new error whose message was the formatted stack
+(`message: 'Error: hello\n    at ...'`), so
+`assert.throws(..., { message: 'hello' })` and `err === thrown` failed. A
+top-level-await refusal and a `require()` cycle keep their own errors. - A
+ReferenceError for a CommonJS global in a required ES module says so, as Node's
+`explainCommonJSGlobalLikeNotDefinedError`: "exports is not defined in ES module
+scope", "require is not defined in ES module scope, you can use import instead",
+plus the `"type": "module"` explanation for a `.js` file. - A `.js` file that
+only fails as CommonJS because it declares a name the wrapper passes in
+(`const require = ...`) is compiled as the ES module Node retries it as; the
+module loader found no ESM syntax in it and loaded it as CommonJS again, so
+`require()` returned an empty, half-loaded module. - `.cjs`, `.mjs` and `.wasm`
+stay registered in `Module._extensions` but are not enumerable, as in Node
+(which lists `.js`, `.json` and `.node`), so `require('./x')` and a package's
+`index` no longer find `x.mjs` / `index.mjs`. - A relative request that leaves
+its directory (`require('../foo.cjs')`) is looked up even when that directory
+was deleted, as Node's `insidePath` rule. - The CommonJS loader no longer
+destructures arrays (a program may delete `Array.prototype[Symbol.iterator]`). -
+Not done: the other `require(esm)` cycle shapes (`ERR_REQUIRE_CYCLE_MODULE`,
+"Cannot import CommonJS Module ... in a cycle"), a syntax error's source line in
+the uncaught-error output (`test-require-module-errors`), the ReferenceError
+wording for `import()` (the module loader's path,
+`test-esm-undefined-cjs-global-like-variables`), and
+`--experimental-package-map` (9 tests). - Tests: the Node tests below (each
+failed before on the denext.19 base and passes after). Node tests enabled: 7
+(es-module/ test-require-module-error-catching,
+test-require-module-retry-import-errored-2,
+test-import-module-retry-require-errored, test-require-module-default-extension,
+test-require-module-implicit; parallel/ test-require-delete-array-iterator,
+test-require-enoent-dir)
+
+NNN. **`feat(node)`: `--trace-exit`** (`libs/node_shim/lib.rs`,
+`ext/node/polyfills/process.ts`,
+`ext/node/polyfills/internal_binding/node_options.ts`,
+`ext/node/polyfills/worker_threads.ts`). - `node --trace-exit` was parsed and
+dropped. The node shim now passes it in `NODE_OPTIONS`, and `process.exit()`
+prints Node's `(node:<pid>) WARNING: Exited the
+     environment with code <n>`
+(`(node:<pid>, thread:<id>)` in a worker) and the stack of the call, with
+`process.exit` as its top frame and `--stack-trace-limit` bounding it, as Node's
+`Environment::Exit`. A natural exit prints nothing. - Tests: node_shim unit
+`test_trace_exit_rides_in_node_options`; the Node tests below (each failed
+before and passes after). Node tests enabled: 2 (parallel/ test-trace-exit,
+test-trace-exit-stack-limit)
+
+NNN. **`fix(ext/node)`: zlib `flush(kind)` checks the kind; a reset during a
+write is refused** (`ext/node/polyfills/zlib.js`). - As Node 26
+(nodejs/node#63701): `stream.flush(kind)` with a kind outside the stream's flush
+range (zlib `Z_NO_FLUSH`..`Z_BLOCK`, Brotli `PROCESS`..`EMIT_METADATA`, zstd
+`e_continue`..`e_end`) is `ERR_OUT_OF_RANGE`, a non-number is
+`ERR_INVALID_ARG_TYPE`, and `undefined` / `NaN` is the stream's full flush;
+before, the kind went into the write unchecked. - `_handle.reset()` (and
+`stream.reset()`) while a write is in flight throws "Cannot reset zlib stream
+while a write is in progress", as Node's ZlibContext. A Brotli write's
+completion now runs from the same `nextTick` as zlib's instead of inside the
+native write, as in Node, where every write runs on the thread pool, so the
+write is still in progress when `write()` returns. - Tests: the Node tests
+below. Node tests enabled: 2 (parallel/ test-zlib-brotli-flush-invalid-kind,
+test-zlib-reset-during-write)
+
+NNN. **`fix(cli)`: a remote program run inside a Node project resolves its own
+npm dependencies** (`libs/resolver/factory.rs`, `cli/factory.rs`,
+`cli/lsp/config.rs`). - `deno run jsr:...` (or an `http(s):` main module) from a
+directory with a `package.json` and no `nodeModulesDir` setting inferred the
+project's `"manual"` node_modules mode, so the remote program's npm imports were
+looked up in the project's `node_modules`, which does not carry them: "Could not
+find a matching package for 'npm:path-to-regexp@^6.3.0' in the node_modules
+directory". In a pnpm workspace that error also rewrote the root `package.json`
+from `pnpm-workspace.yaml` and asked to run again. Launchers had to pass
+`--node-modules-dir=none` for every such run. A remote main module now resolves
+its npm imports from the global cache unless `--node-modules-dir` or the
+workspace's config sets a mode; a local main module is unchanged. - Tests: spec
+`npm/byonm_remote_entrypoint` (a jsr main module with an npm dependency in an
+npm workspace; an explicit `--node-modules-dir=manual` still applies). Node
+tests enabled: none, because this is Deno's own resolution of a remote main
+module (jsr: / https:), which Node has no equivalent of and its suite does not
+test.
+
+NNN. **`test(node)`: the round 8 tests checked on macOS, and Node tests that
+already passed** (`tests/node_compat/config.jsonc`). - 170 tests that rounds 4
+and 8 enabled on Linux only ("not verified on macOS or Windows") passed 3
+isolated runs out of 3 on macOS (debug build, on the denext.19 base and again
+with this branch), and now run on macOS too; Windows stays off for them,
+unverified. Thirteen other macOS-off tests also pass there but stay off: their
+reasons name a macOS CI flake or a different cause, which a local run does not
+settle. - 19 tests never listed that already pass (3 runs out of 3 on macOS,
+debug build; Linux is left to the train's CI) are enabled on Linux and macOS,
+Windows unverified: parallel/ test-fs-readfile,
+test-http-agent-reuse-drained-socket-only,
+test-http-server-headers-timeout-keepalive,
+test-http-server-request-timeout-keepalive, test-process-finalization.mjs,
+test-startup-large-pages, test-tls-cli-min-max-conflict,
+test-tls-session-reuse-different-servername, test-trace-events-vm,
+test-async-local-storage-run-scope, test-domain-abort-on-uncaught,
+test-emit-after-uncaught-exception, test-promise-unhandled-flag,
+test-tracing-no-crash, test-v8-string-is-one-byte-representation,
+test-worker-message-port-drain; v8-updates/ test-trace-gc-flag; sequential/
+test-diagnostic-dir-cpu-prof, test-diagnostic-dir-heap-prof. - The round 8
+follow-ups: the L2 (check-then-use) and L3 (an isolate-global mount) notes are
+in item 244 already. `test-fs-promises-watch` passes on macOS (above).
+`test-fs-watch-enoent` stays off: it wants `fs.watch()` of a missing path to
+throw synchronously, and the runtime deliberately reports it as an 'error' event
+(denoland/deno#34396, kept by `tests/unit_node/fs_test.ts`) so atomic-save races
+don't crash watchers. `test-child-process-fork-net` passes but timed out once in
+three runs and stays unlisted. Node tests enabled: 19 on Linux (the 19 above),
+189 on macOS (the same 19 and the 170 round 4 / round 8 tests)
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

@@ -172,7 +172,12 @@ function parseOption(options: Map<string, OptionValue>, arg: string) {
     case "--report-on-fatalerror":
     case "--report-on-signal":
     case "--report-uncaught-exception":
+    // denext: process.exit()'s trace (see process.ts).
+    case "--trace-exit":
       options.set(arg, { value: true });
+      break;
+    case "--no-trace-exit":
+      options.set("--trace-exit", { value: false });
       break;
     default:
       if (StringPrototypeStartsWith(arg, "--report-")) {
