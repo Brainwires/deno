@@ -12860,6 +12860,22 @@ don't crash watchers. `test-child-process-fork-net` passes but timed out once in
 three runs and stays unlisted. Node tests enabled: 19 on Linux (the 19 above),
 189 on macOS (the same 19 and the 170 round 4 / round 8 tests)
 
+NNN. **Upstream 2.9.x fixes after the 2.9.8 sync** (from `denext.19`;
+`d19/upstream`; CLI only). Upstream has cut no 2.9.x release after 2.9.8 (`v2.9`
+is still at the 2.9.8 tag, which the fork already merged), so the fixes come
+from denoland/deno `main` after the 2.9.8 cut (up to `e7b39ebd55`, 2026-10-26),
+each cherry-picked with `-x`. Taken: `fix(cli)`, `deno upgrade`'s usage lists
+the `lts` channel, which the upgrader already accepts (denoland/deno#37051;
+`tests/specs/upgrade/invalid_version`). Already in the fork before this item, so
+nothing to port: #37084 (`brotliDecompressSync` throws on invalid input), #37059
+(rustls 0.23.46), #37060 (quinn-proto 0.11.19) and #36908 (rand 0.9.3). Left out
+on purpose: #37057 (a revert of native type-checking by default, a feature
+removal), the `perf`, `feat`, `refactor` and `chore` commits of upstream's
+unreleased series (#36909, #36940, #36907, #36895, #36938, #36627, #36963 and
+older), and CI-only changes. Ported upstream PRs: #37051.
+
+Node tests enabled: none, because the only port is a CLI usage-text fix.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
