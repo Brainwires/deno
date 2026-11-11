@@ -110,6 +110,25 @@ class Pick(unittest.TestCase):
         picks = pick.pick(env(), fake({7: [job("in_progress", "macos-15 / test libs")]}))
         self.assertEqual(picks["node_compat_0"], '"windows-2022"')
 
+    def test_shared_labels_take_the_same_slots(self):
+        # biscuits: a linux-x64 (24.04) job takes one of the slots the 22.04
+        # pool shares with it.
+        e = env(
+            PICK_RUNNER='["self-hosted","denext-linux-x64-2204"]',
+            PICK_IMAGE="ubuntu-22.04",
+            PICK_SLOTS="2",
+            PICK_SHARED_LABELS="denext-linux-x64 denext-linux-x64-docker",
+        )
+        busy = {3: [job("in_progress", labels=("self-hosted", "denext-linux-x64"))]}
+        picks = pick.pick(e, fake(busy))
+        self.assertEqual(
+            [picks[k] for k in KEYS.split()],
+            ['["self-hosted","denext-linux-x64-2204"]', '"ubuntu-22.04"', '"ubuntu-22.04"'],
+        )
+        # Without the shared labels that job would not count.
+        picks = pick.pick({**e, "PICK_SHARED_LABELS": ""}, fake(busy))
+        self.assertEqual(picks["node_compat_1"], '["self-hosted","denext-linux-x64-2204"]')
+
     def test_a_busy_runner_of_another_repository_counts(self):
         runners = {
             "runners": [

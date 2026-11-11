@@ -20,6 +20,9 @@ Prints one `<key>=<runs-on JSON>` line per job key. Environment:
   job takes PICK_IMAGE.
 - PICK_IMAGE: GitHub's image for the overflow (the leg's `os`).
 - PICK_SLOTS: how many jobs the pool runs at once (default 1).
+- PICK_SHARED_LABELS: other pools' labels (space separated) whose jobs take
+  the same slots: biscuits' linux-x64, linux-x64-2204 and linux-x64-docker
+  pools share one capacity.
 - PICK_FORK_PR: `true` on a fork's pull request: every job takes PICK_IMAGE
   (a self-hosted runner never takes a fork's code), with no API call.
 - PICK_OWN_SKIP: job-name fragments (`|` separated) of this run's own jobs
@@ -65,24 +68,31 @@ def parse_runner(value):
     return (json.dumps(labels, separators=(",", ":")), label) if label else (None, None)
 
 
+def _labels(label):
+    return {label} if isinstance(label, str) else set(label)
+
+
 def active_on(jobs, label, skip=()):
-    """How many of `jobs` hold (or will hold) a slot of the pool `label`."""
+    """How many of `jobs` hold (or will hold) a slot of the pool `label` (a
+    label, or the set of labels that share its slots)."""
+    want = _labels(label)
     return sum(
         1
         for j in jobs
         if j.get("status") in ACTIVE
-        and label in (j.get("labels") or [])
+        and want & set(j.get("labels") or [])
         and not any(s in (j.get("name") or "") for s in skip)
     )
 
 
 def busy_runners(runners, label):
+    want = _labels(label)
     return sum(
         1
         for r in runners
         if r.get("status") == "online"
         and r.get("busy")
-        and any(l.get("name") == label for l in r.get("labels") or [])
+        and any(l.get("name") in want for l in r.get("labels") or [])
     )
 
 
@@ -170,12 +180,13 @@ def pick(env, get=None, runner_get=None, warn=None):
     if not ours or env.get("PICK_FORK_PR") == "true":
         return allocate(keys, None, image, 0)
     skip = tuple(s for s in (env.get("PICK_OWN_SKIP") or "").split("|") if s)
+    labels = {label, *(env.get("PICK_SHARED_LABELS") or "").split()}
     try:
         busy = busy_slots(
             get,
             env.get("GITHUB_REPOSITORY", ""),
             env.get("GITHUB_RUN_ID", ""),
-            label,
+            labels,
             skip,
             runner_get,
         )

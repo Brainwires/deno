@@ -13181,6 +13181,49 @@ where the changes are discussed.
      - Node tests enabled: none, because this runs the already enabled entries
        on more OSes; it enables no new one.
 
+337. **`ci(denext)`: no package download can fail a CI job on one bad apt run;
+     the Linux jobs move to our Linux pool** (`d21/ci-gaps`; CI;
+     `.github/denext-runtime/apt_install.sh`, `apt_install_test.py`,
+     `pick_runner.py`, `plan_matrix.py`, `linux_sysroot.sh`,
+     `rpm_smoke_inner.sh`, `.github/denext-tests/setup/action.yml`,
+     `.github/workflows/denext_tests.yml`, `denext_tests_os.yml`,
+     `denext_runtime.yml`, `denext_npm_matrix.yml`). GitHub's Ubuntu images
+     failed `apt-get update` with DNS errors (exit 100), which failed the job.
+     - `apt_install.sh <package>...` replaces every inline `apt-get update` /
+       `install` (the setup action, the release workflow's laufey, denort,
+       denort bin, cli, package, e2e and rpm-smoke jobs, `linux_sysroot.sh`).
+       A package already installed is skipped, and with all present nothing is
+       fetched (our pool images carry them all). Otherwise apt runs with
+       `Acquire::Retries`, HTTP timeouts and a dpkg lock wait, each command
+       under `timeout`, up to four tries with a doubling backoff, and from the
+       third try the Ubuntu archive / security / ports sources point at a
+       fallback mirror (`archive.ubuntu.com`, then `mirrors.edge.kernel.org`).
+     - Homebrew (the laufey macOS leg) and Chocolatey (its Windows legs) get
+       the same: present formulas skipped, retries with a backoff, a time
+       bound; the WebView2 SDK and sysroot downloads retry every error with
+       timeouts; `dnf` in the clean Fedora container of the rpm smoke (which
+       must download) has its own retries and timeouts and is retried.
+     - Runners: the `ubuntu-22.04` test leg (build, libs, every test job) runs
+       on the Ubuntu 22.04 Linux pool (`RUNNER_LINUX_X64_2204`) while it has a
+       free slot and on GitHub's image for the overflow (`pick_runner.py`, now
+       also counting the Linux pools that share biscuits' slots,
+       `PICK_SHARED_LABELS`); the `lint / ubuntu-22.04` entry on that pool; the
+       laufey job's Linux x64 leg on that pool (`laufey_runner` in
+       `plan_matrix.py`); the npm matrix on the docker pool
+       (`RUNNER_LINUX_X64_DOCKER`). Each falls back to GitHub's image while its
+       variable is unset. The release build jobs (denort, cli: swap and a
+       release link that needs more memory than a pool container has) and the
+       Linux arm64 legs (no pool) stay on GitHub's images with the robust
+       install.
+     - Tests: `apt_install_test.py` (nothing fetched when installed, only the
+       missing packages, the retry and timeout options, a failed update
+       retried, the fallback mirrors on the third and fourth tries, giving up),
+       `pick_runner_test.py` (shared labels), `plan_matrix_test.py`
+       (`laufey_runner`). With one failed `apt-get update`, the old inline
+       commands exit 100; `apt_install.sh` retries and exits 0.
+     - User-facing note: none; CI only.
+     - Node tests enabled: none, because this is CI only.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

@@ -47,10 +47,10 @@ env:
 jobs:
   matrix:
     name: npm matrix
-    # Stays on GitHub's image: services.sh starts its registries with Docker (no Docker
-    # socket in the self-hosted Linux containers), and it pushes on denext/** branches
-    # the pools' vetting does not serve.
-    runs-on: ubuntu-22.04
+    # The docker-enabled Linux pool RUNNER_LINUX_X64_DOCKER names (services.sh starts
+    # its registries with Docker; the pool's per-job daemon serves them, and its
+    # label is widened, so any branch is served), else GitHub's ubuntu-22.04.
+    runs-on: ${{ fromJSON(startsWith(vars.RUNNER_LINUX_X64_DOCKER, '[') && vars.RUNNER_LINUX_X64_DOCKER || format('"{0}"', vars.RUNNER_LINUX_X64_DOCKER || 'ubuntu-22.04')) }}
     timeout-minutes: 300
     defaults:
       run:

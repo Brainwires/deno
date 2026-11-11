@@ -46,10 +46,9 @@ runs:
       if: runner.os == 'Linux'
       shell: bash
       run: |
-        # man-db triggers can take minutes on hosted runners.
-        sudo apt-get -qq remove --purge -y man-db >/dev/null 2>&1 || true
-        sudo apt-get update
-        sudo apt-get install -y --no-install-recommends libclang-dev cmake protobuf-compiler
+        # Retries, timeouts and a fallback mirror; nothing fetched where the
+        # image has the packages (our Linux pool images do).
+        bash .github/denext-runtime/apt_install.sh libclang-dev cmake protobuf-compiler
 
     - name: libclang (Windows)
       if: runner.os == 'Windows' && inputs.libclang == 'true'

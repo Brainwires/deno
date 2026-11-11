@@ -62,6 +62,35 @@ class Plan(unittest.TestCase):
             self.assertEqual(m[name]["runner"], m[name]["os"])
             self.assertEqual(m[name]["gui_runner"], m[name]["os"])
 
+    def test_linux_x64_builds_laufey_on_the_2204_pool(self):
+        env = {
+            "TARGETS": "all",
+            **POOLS,
+            "RUNNER_LINUX_X64_2204": '["self-hosted","denext-linux-x64-2204"]',
+        }
+        m = by_target(plan_matrix.plan(env))
+        self.assertEqual(
+            m["x86_64-unknown-linux-gnu"]["laufey_runner"],
+            ["self-hosted", "denext-linux-x64-2204"],
+        )
+        # Its release builds stay on the image (swap, the glibc floor).
+        self.assertEqual(m["x86_64-unknown-linux-gnu"]["runner"], "ubuntu-22.04")
+        for name, t in m.items():
+            if name != "x86_64-unknown-linux-gnu":
+                self.assertEqual(t["laufey_runner"], t["os"], name)
+
+    def test_laufey_without_the_variable_is_the_image(self):
+        m = by_target(plan_matrix.plan({"TARGETS": "all"}))
+        for t in m.values():
+            self.assertEqual(t["laufey_runner"], t["os"])
+
+    def test_the_laufey_job_uses_the_laufey_runner(self):
+        with open(WORKFLOW) as f:
+            text = f.read()
+        job = text.split("\n  laufey:\n", 1)[1].split("\n  denort:\n", 1)[0]
+        self.assertIn("runs-on: ${{ matrix.laufey_runner || matrix.os }}", job)
+        self.assertIn("RUNNER_LINUX_X64_2204: ${{ vars.RUNNER_LINUX_X64_2204 }}", text)
+
     def test_target_selection(self):
         m = plan_matrix.plan({"TARGETS": " x86_64-apple-darwin ,", **POOLS})
         self.assertEqual([t["target"] for t in m], ["x86_64-apple-darwin"])
