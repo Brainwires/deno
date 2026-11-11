@@ -5390,7 +5390,10 @@
     "sequential/test-cpu-prof-drained.js": {},
     "sequential/test-cpu-prof-exit.js": {},
     "sequential/test-cpu-prof-invalid-options.js": {},
-    "sequential/test-cpu-prof-kill.js": {},
+    "sequential/test-cpu-prof-kill.js": {
+      "windows": false,
+      "reason": "Windows: process.kill(process.pid) ends the process at once (TerminateProcess), so the CPU profile is never written"
+    },
     "sequential/test-cpu-prof-name.js": {},
     "sequential/test-cpu-prof-worker-argv.js": {},
     "sequential/test-debug-prompt.js": {},

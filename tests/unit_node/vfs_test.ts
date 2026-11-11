@@ -85,7 +85,8 @@ Deno.test("[node/vfs] virtual stats don't need sys permission", async () => {
     const require = createRequire(import.meta.url);
     const { createFileStats } = require("internal/vfs/stats");
     const st = createFileStats(1);
-    const expected = Deno.args[0] === "sys" ? process.getuid() : 0;
+    // process.getuid doesn't exist on Windows, where the uid is 0 either way.
+    const expected = Deno.args[0] === "sys" ? (process.getuid?.() ?? 0) : 0;
     console.log(st.uid === expected ? "ok" : "uid " + st.uid);
   `;
   const file = scriptFile(script);
@@ -163,6 +164,8 @@ Deno.test("[node/vfs] RealFSProvider doesn't write through a symlink out of its 
   Deno.symlinkSync(
     path.join(outside, "created.txt"),
     path.join(root, "dangling"),
+    // Windows needs the link's type when its target doesn't exist.
+    { type: "file" },
   );
   const vfs = create(new RealFSProvider(root));
   for (const target of ["/dirlink/new.txt", "/dangling"]) {
@@ -182,10 +185,13 @@ Deno.test("[node/vfs] RealFSProvider removes and renames a symlink, not its targ
   const root = Deno.realPathSync(Deno.makeTempDirSync());
   Deno.writeTextFileSync(path.join(root, "keep.txt"), "keep");
   Deno.mkdirSync(path.join(root, "dir"));
-  Deno.symlinkSync("../keep.txt", path.join(root, "dir", "link"));
-  Deno.symlinkSync("keep.txt", path.join(root, "link"));
-  Deno.symlinkSync("keep.txt", path.join(root, "link2"));
-  Deno.symlinkSync("missing.txt", path.join(root, "dangling"));
+  // Windows resolves a relative target against the working directory to pick
+  // the link's type, so these name it.
+  const file = { type: "file" } as const;
+  Deno.symlinkSync("../keep.txt", path.join(root, "dir", "link"), file);
+  Deno.symlinkSync("keep.txt", path.join(root, "link"), file);
+  Deno.symlinkSync("keep.txt", path.join(root, "link2"), file);
+  Deno.symlinkSync("missing.txt", path.join(root, "dangling"), file);
   const vfs = create(new RealFSProvider(root));
   vfs.renameSync("/link", "/renamed");
   assertEquals(Deno.readLinkSync(path.join(root, "renamed")), "keep.txt");
@@ -237,7 +243,8 @@ Deno.test("[node/vfs] RealFSProvider realpath of a link out of its root is EACCE
   );
   Deno.symlinkSync(outside, path.join(root, "dirlink"));
   Deno.mkdirSync(path.join(root, "sub"));
-  Deno.symlinkSync("sub", path.join(root, "in-link"));
+  // A relative target: Windows needs the link's type.
+  Deno.symlinkSync("sub", path.join(root, "in-link"), { type: "dir" });
   const vfs = create(new RealFSProvider(root));
   for (const target of ["/esc-link", "/dirlink"]) {
     const err = assertThrows(() =>

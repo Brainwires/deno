@@ -4552,7 +4552,14 @@ Deno.test(
 // before the reset is processed, so the error is discarded and the response is
 // delivered normally. Regression test for a spurious ECONNRESET emitted in the
 // window between the last body chunk and the response's "end".
-Deno.test("[node/http] RST right after a complete response is not an error", async () => {
+//
+// Off on Windows: Winsock drops the data still queued on a socket when a RST
+// arrives before the application reads it, so the client's first read fails
+// with WSAECONNRESET and never sees the response (the request fails with no
+// `res`). The runtime can't deliver bytes the OS discarded.
+Deno.test("[node/http] RST right after a complete response is not an error", {
+  ignore: Deno.build.os === "windows",
+}, async () => {
   const server = net.createServer((socket) => {
     socket.on("data", () => {
       socket.write(

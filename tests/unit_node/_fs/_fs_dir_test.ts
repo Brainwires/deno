@@ -2,6 +2,7 @@
 import { assert, assertEquals, fail } from "@std/assert";
 import { assertCallbackErrorUncaught } from "../_test_utils.ts";
 import { Dir as DirOrig, type Dirent } from "node:fs";
+import { join, relative, sep } from "node:path";
 
 // deno-lint-ignore no-explicit-any
 const Dir = DirOrig as any;
@@ -304,8 +305,10 @@ Deno.test({
       const names: string[] = [];
       let dirent: Dirent | null;
       while ((dirent = dir.readSync()) !== null) {
+        // parentPath uses the platform's separator, as in Node.
         names.push(
-          (dirent.parentPath + "/" + dirent.name).slice(testDir.length + 1),
+          relative(testDir, join(dirent.parentPath, dirent.name))
+            .replaceAll(sep, "/"),
         );
       }
       dir.closeSync();
