@@ -1,0 +1,18 @@
+{
+  // denext: a remote main module run inside a Node workspace (a package.json
+  // and no deno.json) resolves its own npm imports from the global cache, not
+  // from the project's node_modules, which does not carry them.
+  "tempDir": true,
+  "tests": {
+    "jsr_main_module": {
+      "args": "run --quiet jsr:@denotest/npm-add@1",
+      "output": "",
+      "exitCode": 0
+    },
+    "explicit_manual_mode_still_applies": {
+      "args": "run --quiet --node-modules-dir=manual jsr:@denotest/npm-add@1",
+      "output": "[WILDCARD]Could not find a matching package for 'npm:@denotest/add@1' in the node_modules directory.[WILDCARD]",
+      "exitCode": 1
+    }
+  }
+}

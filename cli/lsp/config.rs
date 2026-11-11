@@ -1308,6 +1308,7 @@ impl WorkspaceConfigData {
         import_npm_lockfile: false,
         npm_process_state: None,
         root_node_modules_dir_override: None,
+        remote_entrypoint: false,
         vendor: None,
       },
     );

@@ -227,6 +227,12 @@ pub struct WorkspaceFactoryOptions {
   pub npm_process_state: Option<NpmProcessStateOptions>,
   /// Override the path to the root node_modules directory.
   pub root_node_modules_dir_override: Option<PathBuf>,
+  /// denext: the program's main module is remote (`jsr:`, `http:`,
+  /// `https:`), so a package.json found from the current directory belongs to
+  /// the project it runs in, not to the program: unless a flag or the
+  /// workspace's config sets a mode, its npm imports use the global cache
+  /// instead of the project's `node_modules`.
+  pub remote_entrypoint: bool,
   pub vendor: Option<bool>,
 }
 
@@ -361,6 +367,12 @@ impl<TSys: WorkspaceFactorySys> WorkspaceFactory<TSys> {
     let workspace = &self.workspace_directory()?.workspace;
     if let Some(mode) = workspace.node_modules_dir()? {
       return Ok(mode);
+    }
+    // denext: a remote program run inside a Node project or workspace
+    // resolves its npm dependencies itself, from the global cache: the
+    // project's node_modules does not carry them.
+    if self.options.remote_entrypoint {
+      return Ok(NodeModulesDirMode::None);
     }
 
     let workspace = &self.workspace_directory()?.workspace;
