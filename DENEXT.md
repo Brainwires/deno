@@ -11725,17 +11725,18 @@ where the changes are discussed.
      `ext/node/ops/tty_wrap.rs`, `ext/io/inherited_fds.rs`,
      `ext/io/fd_table.rs`, `libs/core/uv_compat/pipe.rs`, `cli/lib.rs`,
      `cli/rt/lib.rs`). A raw fd now opens as a pipe, TCP or TTY handle when it
-     already belongs to the process or to the isolate, gated like stdio (an inherited
-     descriptor needs the permission its kind implies, item 348): stdio, fds the runtime registered (inherited extra stdio,
-     `createPipe()` ends, the IPC channel), a FIFO / socket / terminal this
-     isolate opened through node:fs (`fs.openSync` on a FIFO used to fail with
-     `EEXIST` even under `-A`; the wrap gets a dup and the node:fs entry is
-     released), and a descriptor inherited at process start. `main` records the
-     fds open at startup (with their device and inode, so a number the runtime
-     later reuses never counts, and without `NODE_CHANNEL_FD` and the npm state
-     fd); each is claimed once process-wide. Socket activation
-     (`listen({ fd: 3 })` from a service manager) and an inherited pty through
-     `tty.ReadStream(fd)` now work, with the permissions item 348 requires. Any other descriptor (one a
+     already belongs to the process or to the isolate, gated like stdio (an
+     inherited descriptor needs the permission its kind implies, item 348):
+     stdio, fds the runtime registered (inherited extra stdio, `createPipe()`
+     ends, the IPC channel), a FIFO / socket / terminal this isolate opened
+     through node:fs (`fs.openSync` on a FIFO used to fail with `EEXIST` even
+     under `-A`; the wrap gets a dup and the node:fs entry is released), and a
+     descriptor inherited at process start. `main` records the fds open at
+     startup (with their device and inode, so a number the runtime later reuses
+     never counts, and without `NODE_CHANNEL_FD` and the npm state fd); each is
+     claimed once process-wide. Socket activation (`listen({ fd: 3 })` from a
+     service manager) and an inherited pty through `tty.ReadStream(fd)` now
+     work, with the permissions item 348 requires. Any other descriptor (one a
      native addon or another isolate created) still needs every permission, or
      an unscoped `--allow-ffi` (which already reaches the whole process);
      `TTY(fd)` keeps its read-all + write-all alternative. A worker still cannot
@@ -11750,9 +11751,9 @@ where the changes are discussed.
        passes a listening socket as fd 3 to a child with only `--allow-net`;
        `pipe_fd`: a node:fs FIFO read through `net.Socket({ fd })` with scoped
        permissions; `pty_fd`: an inherited pty read through `tty.ReadStream(3)`
-       with the permissions of item 348; `long_unix_path` (macOS): a 150+ byte path under
-       `$TMPDIR` listens and connects; `windows_refuse`); `deno_io` unit tests
-       for the inherited-fd identity check and fd listing. The
+       with the permissions of item 348; `long_unix_path` (macOS): a 150+ byte
+       path under `$TMPDIR` listens and connects; `windows_refuse`); `deno_io`
+       unit tests for the inherited-fd identity check and fd listing. The
        `node/pipe_open_fd` specs (isolate ownership, duplicate regular-file fd)
        are unchanged.
 
@@ -13344,10 +13345,10 @@ where the changes are discussed.
      `.github/denext-runtime/tag_gate.py`, `tag_gate_test.py`,
      `.github/workflows/denext_runtime.yml`). `denext tests` never compiles
      laufey's C++ backend hosts (the `laufey` crate `denort_desktop` builds
-     leaves `backend-common/*.h` out), so the full run of the commit that
-     pinned laufey's will-navigate code was green on every Windows leg, and
-     the MSVC error of item 333 surfaced only in the tag build. The gate now
-     also requires, for the tagged commit:
+     leaves `backend-common/*.h` out), so the full run of the commit that pinned
+     laufey's will-navigate code was green on every Windows leg, and the MSVC
+     error of item 333 surfaced only in the tag build. The gate now also
+     requires, for the tagged commit:
      - an earlier `denext runtime` run of exactly that commit (a branch push or
        a dispatch, never the tag build's own run) with a passed
        `laufey / <target>` job for each of the six release targets, each of
@@ -13359,14 +13360,16 @@ where the changes are discussed.
        is not, as its native e2e suite fails on Windows too often to gate on;
      - `LAUFEY_SHA` equal to the laufey `rev` in `cli/rt_desktop/Cargo.toml`.
 
-     The refusal names the command to run (`gh workflow run
-     denext_runtime.yml --ref <branch> -f targets=all` from a branch whose head
-     is the commit) and says the rest of that run may be cancelled once every
-     laufey job passed. Tests: `tag_gate_test.py`'s `Laufey` cases (the failed
-     Windows x64 host of item 333 is refused, a partial or other-laufey
-     dispatch does not vouch, the pin must match the crate and the workflow)
-     and the script cases against a stand-in `gh`. Before this change the
-     gate passed that scenario (`full_run=11`, exit 0); now it refuses it.
+     The refusal names the command to run
+     (`gh workflow run
+     denext_runtime.yml --ref <branch> -f targets=all`
+     from a branch whose head is the commit) and says the rest of that run may
+     be cancelled once every laufey job passed. Tests: `tag_gate_test.py`'s
+     `Laufey` cases (the failed Windows x64 host of item 333 is refused, a
+     partial or other-laufey dispatch does not vouch, the pin must match the
+     crate and the workflow) and the script cases against a stand-in `gh`.
+     Before this change the gate passed that scenario (`full_run=11`, exit 0);
+     now it refuses it.
      - User-facing note: none; release engineering only.
      - Node tests enabled: none, because this is CI only.
 
@@ -13393,16 +13396,16 @@ where the changes are discussed.
      Windows in `tests/node_compat/config.jsonc` was checked on a workstation
      only. Each macOS and Windows leg of a full run (`macos-15`,
      `macos-15-intel`, `windows-2022`, `windows-11-arm`) now also runs
-     `unit_node` and `node_compat` in 2 shards against the leg's debug build
-     (a new `node_suites` input of `denext_tests_os.yml`; job names
+     `unit_node` and `node_compat` in 2 shards against the leg's debug build (a
+     new `node_suites` input of `denext_tests_os.yml`; job names
      `<leg> / test node_compat (1/2)` and so on, as on Linux).
      - Where they run: our pool for the platform (`RUNNER_MACOS_ARM`,
        `RUNNER_MACOS_X64`, `RUNNER_WINDOWS_X64`, `RUNNER_WINDOWS_ARM`) while it
        has a free slot, else the leg's GitHub image. A `node-runner` job right
-       after the leg's build runs `pick_runner.py`: it counts the pool's
-       queued and running jobs in the repository (the leg's own node jobs, which
-       wait on it, left out; with `RUNNER_STATUS_TOKEN` also the organization's
-       busy runners) against its slots (`RUNNER_*_SLOTS`, by default mac-arm 2,
+       after the leg's build runs `pick_runner.py`: it counts the pool's queued
+       and running jobs in the repository (the leg's own node jobs, which wait
+       on it, left out; with `RUNNER_STATUS_TOKEN` also the organization's busy
+       runners) against its slots (`RUNNER_*_SLOTS`, by default mac-arm 2,
        mac-x64 1, win-x64 1, win-arm64 2), gives the free slots to node_compat
        (1/2), (2/2) and unit_node in that order and the rest to the image. On
        any API failure every job keeps the pool; a fork's pull request always
@@ -13412,12 +13415,12 @@ where the changes are discussed.
        VM's image) it installs rustup-init from rustup's versioned archive,
        pinned by SHA-256, with retries and a time bound.
      - Tests: `pick_runner_test.py` (an idle pool, two slots, a busy pool, a
-       queued job, other pools' and finished jobs, this run's own waiting
-       jobs, another repository's busy runner, a fork PR, no variable, an API
-       failure, a malformed answer), run by the lint job; the matrix for each
-       leg was evaluated offline to the expected job lists.
-     - User-facing note: none; the macOS and Windows node_compat counts are
-       now checked in CI.
+       queued job, other pools' and finished jobs, this run's own waiting jobs,
+       another repository's busy runner, a fork PR, no variable, an API failure,
+       a malformed answer), run by the lint job; the matrix for each leg was
+       evaluated offline to the expected job lists.
+     - User-facing note: none; the macOS and Windows node_compat counts are now
+       checked in CI.
      - Node tests enabled: none, because this runs the already enabled entries
        on more OSes; it enables no new one.
 
@@ -13431,18 +13434,18 @@ where the changes are discussed.
      failed `apt-get update` with DNS errors (exit 100), which failed the job.
      - `apt_install.sh <package>...` replaces every inline `apt-get update` /
        `install` (the setup action, the release workflow's laufey, denort,
-       denort bin, cli, package, e2e and rpm-smoke jobs, `linux_sysroot.sh`).
-       A package already installed is skipped, and with all present nothing is
+       denort bin, cli, package, e2e and rpm-smoke jobs, `linux_sysroot.sh`). A
+       package already installed is skipped, and with all present nothing is
        fetched (our pool images carry them all). Otherwise apt runs with
        `Acquire::Retries`, HTTP timeouts and a dpkg lock wait, each command
        under `timeout`, up to four tries with a doubling backoff, and from the
        third try the Ubuntu archive / security / ports sources point at a
        fallback mirror (`archive.ubuntu.com`, then `mirrors.edge.kernel.org`).
-     - Homebrew (the laufey macOS leg) and Chocolatey (its Windows legs) get
-       the same: present formulas skipped, retries with a backoff, a time
-       bound; the WebView2 SDK and sysroot downloads retry every error with
-       timeouts; `dnf` in the clean Fedora container of the rpm smoke (which
-       must download) has its own retries and timeouts and is retried.
+     - Homebrew (the laufey macOS leg) and Chocolatey (its Windows legs) get the
+       same: present formulas skipped, retries with a backoff, a time bound; the
+       WebView2 SDK and sysroot downloads retry every error with timeouts; `dnf`
+       in the clean Fedora container of the rpm smoke (which must download) has
+       its own retries and timeouts and is retried.
      - Runners: the `ubuntu-22.04` test leg (build, libs, every test job) runs
        on the Ubuntu 22.04 Linux pool (`RUNNER_LINUX_X64_2204`) while it has a
        free slot and on GitHub's image for the overflow (`pick_runner.py`, now
@@ -13456,8 +13459,8 @@ where the changes are discussed.
        Linux arm64 legs (no pool) stay on GitHub's images with the robust
        install.
      - Tests: `apt_install_test.py` (nothing fetched when installed, only the
-       missing packages, the retry and timeout options, a failed update
-       retried, the fallback mirrors on the third and fourth tries, giving up),
+       missing packages, the retry and timeout options, a failed update retried,
+       the fallback mirrors on the third and fourth tries, giving up),
        `pick_runner_test.py` (shared labels), `plan_matrix_test.py`
        (`laufey_runner`). With one failed `apt-get update`, the old inline
        commands exit 100; `apt_install.sh` retries and exits 0.
@@ -13471,42 +13474,41 @@ where the changes are discussed.
      `tty.ReadStream(fd)`) with no permission check in any isolate, so a worker
      created without net could accept connections on a socket-activation
      listener, read or write a parent's pipe or a terminal, and claim the fd
-     before the main thread. The kind is now checked in every isolate before
-     the fd is claimed: a TCP socket needs net for its address (listen for a
-     listening socket, connect to the peer for a connected one, as
-     `Deno.listen` / `Deno.connect`); a pipe, a unix-domain socket or a
-     terminal needs unscoped read and write (it has no address or path a grant
-     could be scoped to; the same rule already covered adopting another
-     isolate's FIFO and `TTY(fd)` on any other descriptor); every permission
-     or an unscoped `--allow-ffi` covers any fd. A refused isolate gets
-     `EPERM` and leaves the fd to one that may use it; regular files stay
-     refused. Item 290's notes are corrected: socket activation of a TCP
-     listener needs `--allow-net` for its address, and an inherited pty needs
-     `--allow-read --allow-write`.
+     before the main thread. The kind is now checked in every isolate before the
+     fd is claimed: a TCP socket needs net for its address (listen for a
+     listening socket, connect to the peer for a connected one, as `Deno.listen`
+     / `Deno.connect`); a pipe, a unix-domain socket or a terminal needs
+     unscoped read and write (it has no address or path a grant could be scoped
+     to; the same rule already covered adopting another isolate's FIFO and
+     `TTY(fd)` on any other descriptor); every permission or an unscoped
+     `--allow-ffi` covers any fd. A refused isolate gets `EPERM` and leaves the
+     fd to one that may use it; regular files stay refused. Item 290's notes are
+     corrected: socket activation of a TCP listener needs `--allow-net` for its
+     address, and an inherited pty needs `--allow-read --allow-write`.
      - Tests: spec `node/fd_sockets` `inherited_fd_permissions` (a worker
        without permissions is refused on an inherited listener and pipe while
        the main thread adopts both; a main thread without net is refused on an
        inherited listener; a pipe needs read and write; a regular file stays
        refused), `pty_fd` (child with read and write) and
        `pty_fd_no_permissions` (refused).
-     - Node tests enabled: none (a Deno permission gate; Node has no
-       per-worker permissions to test it against).
+     - Node tests enabled: none (a Deno permission gate; Node has no per-worker
+       permissions to test it against).
 
-349. **`fix(install)`: the jail's built-in host grants open port 443 only**
-     (CLI only; `cli/supply_chain/{builtin_exceptions,jail}.rs`). Item 288's
-     built-in exceptions (GitHub's release hosts, `storage.googleapis.com`,
-     `nodejs.org`, the packages' CDNs) and the hosts a declared GitHub download
-     host redirects to were granted by name, on every port, so an approved
-     script could tunnel to any port of those hosts through the jail's proxy
-     (`CONNECT github.com:22`). Every built-in host is now `host:443`: the
-     proxy refuses another port by CONNECT or forwarded `http://` request. A
-     declared download host that only the built-in list of reviewed hosts
-     approves is granted on port 443 alone (a declaration with another port is
-     refused). Hosts the project lists itself (`jailScripts.packages`,
-     `knownPackages`) keep their meaning: a bare host is any port. The failure
-     hint's mirror line carries the pinned hosts. Every host a script may
-     reach is also a way out for what it can read, so a built-in grant stays
-     as narrow as the download needs.
+349. **`fix(install)`: the jail's built-in host grants open port 443 only** (CLI
+     only; `cli/supply_chain/{builtin_exceptions,jail}.rs`). Item 288's built-in
+     exceptions (GitHub's release hosts, `storage.googleapis.com`, `nodejs.org`,
+     the packages' CDNs) and the hosts a declared GitHub download host redirects
+     to were granted by name, on every port, so an approved script could tunnel
+     to any port of those hosts through the jail's proxy
+     (`CONNECT github.com:22`). Every built-in host is now `host:443`: the proxy
+     refuses another port by CONNECT or forwarded `http://` request. A declared
+     download host that only the built-in list of reviewed hosts approves is
+     granted on port 443 alone (a declaration with another port is refused).
+     Hosts the project lists itself (`jailScripts.packages`, `knownPackages`)
+     keep their meaning: a bare host is any port. The failure hint's mirror line
+     carries the pinned hosts. Every host a script may reach is also a way out
+     for what it can read, so a built-in grant stays as narrow as the download
+     needs.
      - Tests: `builtin_exceptions.rs` `builtin_hosts_are_pinned_to_443`,
        `jail_proxy.rs` `builtin_hosts_only_on_443` (fails before:
        `github.com 22` allowed), `jail.rs` expectations, spec
@@ -13519,11 +13521,11 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
-306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342) are
-what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
-`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
-in the branch too, but a stock CLI does not run them; denext's own launcher
-provides that environment.
+306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348)
+are what the prebuilt `libdenort` carries. The CLI-side parts (for example
+writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+launchers) are in the branch too, but a stock CLI does not run them; denext's
+own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
