@@ -43,6 +43,10 @@ on:
         description: 'Dry run of the CLI archives only: build, assemble (with esbuild), smoke-test and list them in manifest.json; no runtime, laufey or release'
         type: boolean
         default: false
+      release_version:
+        description: 'Release build: stamp the release version (no +ci.N) and use no build cache, so the denext-runtime-v<version> tag of this commit reuses these builds (tag_reuse.py)'
+        type: boolean
+        default: false
   push:
     branches:
       - 'rel/**'
@@ -68,7 +72,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: denext-runtime-${{ github.ref }}-${{ inputs.targets }}-${{ inputs.reuse_denort_run_id }}-${{ inputs.reuse_laufey_run_id }}${{ (github.event_name == 'push' && github.ref == 'refs/heads/development-denext') && format('-{0}', github.run_id) || '' }}
+  group: denext-runtime-${{ github.ref }}-${{ inputs.targets }}-${{ inputs.reuse_denort_run_id }}-${{ inputs.reuse_laufey_run_id }}-${{ inputs.release_version }}${{ (github.event_name == 'push' && github.ref == 'refs/heads/development-denext') && format('-{0}', github.run_id) || '' }}
   # A newer push to the same branch (or a new dispatch with the same inputs)
   # supersedes a run. A tag's run publishes the release and is never cancelled.
   # Nor is a push to development-denext (DENEXT.md item 354): its group carries
@@ -193,6 +197,13 @@ jobs:
       # The tag gate's verdict (tags only): the full run it accepted, for the
       # release notes.
       full_run: ${{ steps.plan.outputs.full_run }}
+      # The run whose builds this run takes instead of building them (empty:
+      # build here): a dispatch's reuse_*_run_id, or for a tag the earlier
+      # release build of the commit tag_reuse.py found.
+      reuse_laufey: ${{ steps.plan.outputs.reuse_laufey }}
+      reuse_denort: ${{ steps.plan.outputs.reuse_denort }}
+      reuse_denort_bin: ${{ steps.plan.outputs.reuse_denort_bin }}
+      reuse_cli: ${{ steps.plan.outputs.reuse_cli }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -206,6 +217,7 @@ jobs:
             .github/denext-runtime/engine_staleness.py
             .github/denext-runtime/plan_matrix.py
             .github/denext-runtime/pick_runner.py
+            .github/denext-runtime/tag_reuse.py
           sparse-checkout-cone-mode: false
       - id: plan
         env:
@@ -225,6 +237,10 @@ jobs:
           # e2e_fork); they need a GUI login session. See plan_matrix.py.
           RUNNER_MACOS_ARM_GUI: ${{ vars.RUNNER_MACOS_ARM_GUI }}
           RUNNER_MACOS_X64_GUI: ${{ vars.RUNNER_MACOS_X64_GUI }}
+          # 1: x86_64-apple-darwin's build jobs run on the arm64 pool with the
+          # x86_64 toolchain under Rosetta 2 (`rosetta`, plan_matrix.py);
+          # unset: the mac-x64 pool.
+          MACOS_X64_ON_ARM: ${{ vars.MACOS_X64_ON_ARM }}
           # The laufey job's Linux x64 leg (`laufey_runner`).
           RUNNER_LINUX_X64_2204: ${{ vars.RUNNER_LINUX_X64_2204 }}
           # The overflow (`runs_on`, plan_matrix.py): each pool's free slots
@@ -236,6 +252,13 @@ jobs:
           RUNNER_MACOS_ARM_SLOTS: ${{ vars.RUNNER_MACOS_ARM_SLOTS || '2' }}
           RUNNER_MACOS_X64_SLOTS: ${{ vars.RUNNER_MACOS_X64_SLOTS || '1' }}
           RUNNER_LINUX_X64_2204_SLOTS: ${{ vars.RUNNER_LINUX_X64_2204_SLOTS || '3' }}
+          # Tag reuse (tag_reuse.py): on unless this variable is 0 / false /
+          # off / no. RELEASE_VERSION: a dispatch that builds what a tag may
+          # reuse (the release version, no build cache).
+          TAG_REUSE: ${{ vars.DENEXT_RUNTIME_TAG_REUSE }}
+          RELEASE_VERSION: ${{ inputs.release_version && 'true' || '' }}
+          REUSE_LAUFEY_RUN_ID: ${{ inputs.reuse_laufey_run_id }}
+          REUSE_DENORT_RUN_ID: ${{ inputs.reuse_denort_run_id }}
           SKIP_JOBS: ${{ inputs.cli_only && 'laufey denort package e2e_fork' || format('{0} {1}', inputs.reuse_laufey_run_id && 'laufey' || '', inputs.reuse_denort_run_id && 'denort' || '') }}
         run: |
           set -euo pipefail
@@ -327,11 +350,50 @@ jobs:
             echo "$gate"
             sed -n 's/^full_run=//p' <<<"$gate" | sed 's/^/full_run=/' >>"$GITHUB_OUTPUT"
             TARGETS=all
+          elif [ "$RELEASE_VERSION" = true ]; then
+            # A release build (dispatch input release_version): the version
+            # the tag will publish, so its run can take these builds
+            # (tag_reuse.py). Only a tag's run publishes anything.
+            version=$deno_version
           else
             # Build metadata: the same precedence as the version it builds
             # toward, never mistaken for a release (DENEXT.md "Versioning").
             version="$deno_version+ci.$RUN_NUMBER"
           fi
+          # A tag and a release build use no build cache (the jobs' cache
+          # steps), which the plan marker records for tag_reuse.py.
+          cache=on
+          if [ "$REF_TYPE" = tag ] || [ "$RELEASE_VERSION" = true ]; then cache=off; fi
+
+          # The builds this run takes from an earlier run instead (empty:
+          # build here). A tag asks tag_reuse.py for the newest release build
+          # of the commit: same repository, commit, workflow blob, version,
+          # laufey and no cache; any doubt builds everything.
+          reuse_laufey=$REUSE_LAUFEY_RUN_ID
+          reuse_denort=$REUSE_DENORT_RUN_ID
+          reuse_denort_bin=
+          reuse_cli=
+          if [ "$REF_TYPE" = tag ]; then
+            case "$(tr '[:upper:]' '[:lower:]' <<<"${TAG_REUSE:-}" | tr -d '[:space:]')" in
+              0|false|off|no) echo "tag reuse: off (DENEXT_RUNTIME_TAG_REUSE)" ;;
+              *)
+                all=$(TARGETS=all python3 -I .github/denext-runtime/plan_matrix.py |
+                  python3 -c 'import json, sys; print(",".join(t["target"] for t in json.load(sys.stdin)))')
+                if ! reuse=$(REPO="$REPO" SHA="$SHA" RUN_ID="$GITHUB_RUN_ID" VERSION="$version" \
+                  LAUFEY_SHA="$laufey_sha" TARGETS="$all" python3 -I .github/denext-runtime/tag_reuse.py); then
+                  reuse="::warning::tag_reuse.py failed: building everything"
+                fi
+                echo "$reuse"
+                reuse_laufey=$(sed -n 's/^reuse_laufey=\([0-9]*\)$/\1/p' <<<"$reuse")
+                reuse_denort=$(sed -n 's/^reuse_denort=\([0-9]*\)$/\1/p' <<<"$reuse")
+                reuse_denort_bin=$(sed -n 's/^reuse_denort_bin=\([0-9]*\)$/\1/p' <<<"$reuse")
+                reuse_cli=$(sed -n 's/^reuse_cli=\([0-9]*\)$/\1/p' <<<"$reuse")
+                ;;
+            esac
+          fi
+          # A reused job holds no pool slot (plan_matrix.py SKIP_JOBS).
+          SKIP_JOBS="$SKIP_JOBS ${reuse_laufey:+laufey} ${reuse_denort:+denort} ${reuse_denort_bin:+denort_bin} ${reuse_cli:+cli}"
+          export SKIP_JOBS
 
           # Each target's runners (`runner` for the build jobs, `gui_runner`
           # for the jobs that launch the app) and this run's pick for each job
@@ -353,9 +415,25 @@ jobs:
             echo "laufey_sha=$laufey_sha"
             echo "cef_version=$cef_version"
             echo "laufey_api=$laufey_api"
+            echo "reuse_laufey=$reuse_laufey"
+            echo "reuse_denort=$reuse_denort"
+            echo "reuse_denort_bin=$reuse_denort_bin"
+            echo "reuse_cli=$reuse_cli"
+            # This run's plan marker artifact (tag_reuse.py plan_marker).
+            echo "plan_marker=plan-v1_version=${version}_laufey=${laufey_sha}_cache=${cache}"
           } >>"$GITHUB_OUTPUT"
           echo "version=$version deno=$deno_version upstream=$upstream_version laufey=$laufey_sha cef=$cef_version"
           echo "matrix=$matrix"
+          echo "reuse: laufey=${reuse_laufey:-build} denort=${reuse_denort:-build} denort_bin=${reuse_denort_bin:-build} cli=${reuse_cli:-build}"
+          printf '{"version":"%s","laufey_sha":"%s","cache":"%s","run_id":"%s"}\n' "$version" "$laufey_sha" "$cache" "$GITHUB_RUN_ID" >"$RUNNER_TEMP/plan.json"
+
+      # The plan marker: its name records what this run builds with, which a
+      # later tag run of the commit reads (tag_reuse.py) without downloading.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.plan.outputs.plan_marker }}
+          path: ${{ runner.temp }}/plan.json
+          retention-days: 30
 
   # The e2e runner's own logic (.github/denext-runtime/e2e/lib), which needs
   # no runtime, display or build: which result belongs to which launch.
@@ -390,7 +468,7 @@ jobs:
   laufey:
     name: laufey / ${{ matrix.target }}
     needs: setup
-    if: ${{ !inputs.reuse_laufey_run_id && !inputs.cli_only }}
+    if: ${{ !needs.setup.outputs.reuse_laufey && !inputs.cli_only }}
     # matrix.laufey_runner (plan_matrix.py): the Ubuntu 22.04 Linux pool for
     # x86_64-unknown-linux-gnu (RUNNER_LINUX_X64_2204; its image carries every
     # package below, so nothing is fetched), GitHub's image for the rest: the
@@ -512,7 +590,7 @@ jobs:
       # written must not reach a signed release (the production audit's P9).
       # A tag's build downloads CEF afresh and writes no cache.
       - name: Cache CEF
-        if: github.ref_type != 'tag'
+        if: github.ref_type != 'tag' && !inputs.release_version
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: laufey/vendor/cef
@@ -667,7 +745,7 @@ jobs:
   denort:
     name: denort / ${{ matrix.target }}
     needs: setup
-    if: ${{ !inputs.reuse_denort_run_id && !inputs.cli_only }}
+    if: ${{ !needs.setup.outputs.reuse_denort && !inputs.cli_only }}
     # matrix.runs_on.<job>: the self-hosted runner the repository variables
     # name (matrix.runner) while its pool has a free slot this job would not
     # wait for, else the image (the overflow, plan_matrix.py); the image on a
@@ -690,6 +768,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: '0'
+      TARGET: ${{ matrix.target }}
     steps:
       - name: Configure git
         run: |
@@ -758,6 +837,22 @@ jobs:
           # Name the host on Windows on Arm: an emulated x64 rustup would
           # otherwise install (and build with) an x86_64 toolchain.
           if [ "${{ matrix.target }}" = aarch64-pc-windows-msvc ]; then tc="$tc-${{ matrix.target }}"; fi
+          # x86_64-apple-darwin on the arm64 pool (plan_matrix.py `rosetta`):
+          # the x86_64 toolchain, so cargo, rustc and every build script run
+          # as x86_64 under Rosetta 2 and the build is a native x86_64 one.
+          # Not a cross build (`--target`): the snapshots are made in build
+          # scripts by the host's V8, and an arm64 V8's snapshot crashes the
+          # x86_64 binary on its first script (cli/build.rs refuses that).
+          # Below an x86_64 cargo the Command Line Tools' /usr/bin shims (cc,
+          # make, ar, xcrun) would start as x86_64 and fail to load libxcrun,
+          # which recent CLTs ship arm64 only: rosetta_tools.sh puts arm64
+          # wrappers for them first on PATH (the output stays x86_64) and
+          # has the cmake crate use Ninja instead of /usr/bin/make.
+          if [ "${{ matrix.rosetta }}" = true ]; then
+            tc="$tc-x86_64-apple-darwin"
+            bash .github/denext-runtime/rosetta_tools.sh "$RUNNER_TEMP/rosetta-tools" "$GITHUB_ENV"
+            echo "$RUNNER_TEMP/rosetta-tools" >>"$GITHUB_PATH"
+          fi
           rustup toolchain install "$tc" --profile minimal --no-self-update
           echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
 
@@ -774,7 +869,7 @@ jobs:
       # written must not reach a signed release (the production audit's P9).
       # A tag builds from a clean target/ and saves no cache.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        if: github.ref_type != 'tag'
+        if: github.ref_type != 'tag' && !inputs.release_version
         with:
           prefix-key: denext-denort-v1
           key: ${{ matrix.target }}-${{ matrix.os }}
@@ -868,6 +963,8 @@ jobs:
               codesign --force --sign - out/libdenort.dylib
               file out/libdenort.dylib
               lipo -info out/libdenort.dylib
+              test "$(lipo -archs out/libdenort.dylib)" = "$([ "${TARGET%%-*}" = aarch64 ] && echo arm64 || echo x86_64)" ||
+                { echo "::error::libdenort.dylib is $(lipo -archs out/libdenort.dylib), not $TARGET"; exit 1; }
               otool -L out/libdenort.dylib
               ;;
             *-linux-gnu)
@@ -954,6 +1051,7 @@ jobs:
   denort_bin:
     name: denort bin / ${{ matrix.target }}
     needs: setup
+    if: ${{ !needs.setup.outputs.reuse_denort_bin }}
     # matrix.runs_on.<job>: the self-hosted runner the repository variables
     # name (matrix.runner) while its pool has a free slot this job would not
     # wait for, else the image (the overflow, plan_matrix.py); the image on a
@@ -1057,6 +1155,22 @@ jobs:
           # Name the host on Windows on Arm: an emulated x64 rustup would
           # otherwise install (and build with) an x86_64 toolchain.
           if [ "${{ matrix.target }}" = aarch64-pc-windows-msvc ]; then tc="$tc-${{ matrix.target }}"; fi
+          # x86_64-apple-darwin on the arm64 pool (plan_matrix.py `rosetta`):
+          # the x86_64 toolchain, so cargo, rustc and every build script run
+          # as x86_64 under Rosetta 2 and the build is a native x86_64 one.
+          # Not a cross build (`--target`): the snapshots are made in build
+          # scripts by the host's V8, and an arm64 V8's snapshot crashes the
+          # x86_64 binary on its first script (cli/build.rs refuses that).
+          # Below an x86_64 cargo the Command Line Tools' /usr/bin shims (cc,
+          # make, ar, xcrun) would start as x86_64 and fail to load libxcrun,
+          # which recent CLTs ship arm64 only: rosetta_tools.sh puts arm64
+          # wrappers for them first on PATH (the output stays x86_64) and
+          # has the cmake crate use Ninja instead of /usr/bin/make.
+          if [ "${{ matrix.rosetta }}" = true ]; then
+            tc="$tc-x86_64-apple-darwin"
+            bash .github/denext-runtime/rosetta_tools.sh "$RUNNER_TEMP/rosetta-tools" "$GITHUB_ENV"
+            echo "$RUNNER_TEMP/rosetta-tools" >>"$GITHUB_PATH"
+          fi
           rustup toolchain install "$tc" --profile minimal --no-self-update
           echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
 
@@ -1073,7 +1187,7 @@ jobs:
       # written must not reach a signed release (the production audit's P9).
       # A tag builds from a clean target/ and saves no cache.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        if: github.ref_type != 'tag'
+        if: github.ref_type != 'tag' && !inputs.release_version
         with:
           prefix-key: denext-denort-bin-v1
           key: ${{ matrix.target }}-${{ matrix.os }}
@@ -1109,6 +1223,10 @@ jobs:
               b=target/release/denort
               file "$b"
               lipo -info "$b"
+              # One architecture, the target's (an x86_64 build on the arm64
+              # pool must not produce the host's).
+              test "$(lipo -archs "$b")" = "$([ "${TARGET%%-*}" = aarch64 ] && echo arm64 || echo x86_64)" ||
+                { echo "::error::$b is $(lipo -archs "$b"), not $TARGET"; exit 1; }
               otool -L "$b"
               # arm64 macOS refuses to run unsigned code. The arm64 linker
               # signs ad hoc; sign the x86_64 binary the same way.
@@ -1211,6 +1329,8 @@ jobs:
   cli:
     name: cli / ${{ matrix.target }}
     needs: [setup, denort_bin]
+    # always(): it builds on a reused denort bin (setup's reuse_denort_bin).
+    if: ${{ always() && needs.setup.result == 'success' && !needs.setup.outputs.reuse_cli && (needs.denort_bin.result == 'success' || (needs.denort_bin.result == 'skipped' && needs.setup.outputs.reuse_denort_bin != '')) }}
     # matrix.runs_on.<job>: the self-hosted runner the repository variables
     # name (matrix.runner) while its pool has a free slot this job would not
     # wait for, else the image (the overflow, plan_matrix.py); the image on a
@@ -1220,6 +1340,8 @@ jobs:
     timeout-minutes: 355
     permissions:
       contents: read
+      # Downloads a reused denort bin's archives from its run.
+      actions: read
       id-token: write
       attestations: write
     strategy:
@@ -1319,6 +1441,22 @@ jobs:
           # Name the host on Windows on Arm: an emulated x64 rustup would
           # otherwise install (and build with) an x86_64 toolchain.
           if [ "${{ matrix.target }}" = aarch64-pc-windows-msvc ]; then tc="$tc-${{ matrix.target }}"; fi
+          # x86_64-apple-darwin on the arm64 pool (plan_matrix.py `rosetta`):
+          # the x86_64 toolchain, so cargo, rustc and every build script run
+          # as x86_64 under Rosetta 2 and the build is a native x86_64 one.
+          # Not a cross build (`--target`): the snapshots are made in build
+          # scripts by the host's V8, and an arm64 V8's snapshot crashes the
+          # x86_64 binary on its first script (cli/build.rs refuses that).
+          # Below an x86_64 cargo the Command Line Tools' /usr/bin shims (cc,
+          # make, ar, xcrun) would start as x86_64 and fail to load libxcrun,
+          # which recent CLTs ship arm64 only: rosetta_tools.sh puts arm64
+          # wrappers for them first on PATH (the output stays x86_64) and
+          # has the cmake crate use Ninja instead of /usr/bin/make.
+          if [ "${{ matrix.rosetta }}" = true ]; then
+            tc="$tc-x86_64-apple-darwin"
+            bash .github/denext-runtime/rosetta_tools.sh "$RUNNER_TEMP/rosetta-tools" "$GITHUB_ENV"
+            echo "$RUNNER_TEMP/rosetta-tools" >>"$GITHUB_PATH"
+          fi
           rustup toolchain install "$tc" --profile minimal --no-self-update
           echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
 
@@ -1335,7 +1473,7 @@ jobs:
       # written must not reach a signed release (the production audit's P9).
       # A tag builds from a clean target/ and saves no cache.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        if: github.ref_type != 'tag'
+        if: github.ref_type != 'tag' && !inputs.release_version
         with:
           prefix-key: denext-cli-v2
           key: ${{ matrix.target }}-${{ matrix.os }}
@@ -1360,6 +1498,8 @@ jobs:
           pattern: denort-bin-*
           path: denort-dist
           merge-multiple: true
+          run-id: ${{ needs.setup.outputs.reuse_denort_bin || github.run_id }}
+          github-token: ${{ github.token }}
 
       - name: denort SHA-256s
         env:
@@ -1432,6 +1572,8 @@ jobs:
               for b in target/release/deno; do
                 file "$b"
                 lipo -info "$b"
+                test "$(lipo -archs "$b")" = "$([ "${TARGET%%-*}" = aarch64 ] && echo arm64 || echo x86_64)" ||
+                  { echo "::error::$b is $(lipo -archs "$b"), not $TARGET"; exit 1; }
                 otool -L "$b"
                 # arm64 macOS refuses to run unsigned code. The arm64 linker
                 # signs ad hoc; sign the x86_64 binary the same way.
@@ -1627,7 +1769,7 @@ jobs:
   package:
     name: package / ${{ matrix.target }}
     needs: [setup, laufey, denort]
-    if: ${{ always() && !inputs.cli_only && needs.setup.result == 'success' && (needs.laufey.result == 'success' || (needs.laufey.result == 'skipped' && inputs.reuse_laufey_run_id != '')) && (needs.denort.result == 'success' || (needs.denort.result == 'skipped' && inputs.reuse_denort_run_id != '')) }}
+    if: ${{ always() && !inputs.cli_only && needs.setup.result == 'success' && (needs.laufey.result == 'success' || (needs.laufey.result == 'skipped' && needs.setup.outputs.reuse_laufey != '')) && (needs.denort.result == 'success' || (needs.denort.result == 'skipped' && needs.setup.outputs.reuse_denort != '')) }}
     # matrix.gui_runner: this job launches the packaged app, so it needs a
     # GUI login session (plan_matrix.py): the self-hosted runner the
     # repository variables name for that while its pool has a free slot this
@@ -1663,14 +1805,14 @@ jobs:
         with:
           name: denort-${{ matrix.target }}
           path: dl/denort
-          run-id: ${{ inputs.reuse_denort_run_id || github.run_id }}
+          run-id: ${{ needs.setup.outputs.reuse_denort || github.run_id }}
           github-token: ${{ github.token }}
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: laufey-${{ matrix.target }}
           path: dl/laufey
-          run-id: ${{ inputs.reuse_laufey_run_id || github.run_id }}
+          run-id: ${{ needs.setup.outputs.reuse_laufey || github.run_id }}
           github-token: ${{ github.token }}
 
       - name: Install runtime dependencies (Linux)
@@ -1969,7 +2111,7 @@ jobs:
   e2e_fork:
     name: e2e (fork CLI) / ${{ matrix.target }}
     needs: [setup, package, cli]
-    if: ${{ always() && !inputs.cli_only && needs.cli.result == 'success' && (needs.package.result == 'success' || needs.package.result == 'failure') }}
+    if: ${{ always() && !inputs.cli_only && (needs.cli.result == 'success' || (needs.cli.result == 'skipped' && needs.setup.outputs.reuse_cli != '')) && (needs.package.result == 'success' || needs.package.result == 'failure') }}
     # matrix.gui_runner: this job launches the packaged app, so it needs a
     # GUI login session (plan_matrix.py): the self-hosted runner the
     # repository variables name for that while its pool has a free slot this
@@ -1980,6 +2122,8 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+      # Downloads a reused CLI from its run (setup's reuse_cli).
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -2005,6 +2149,8 @@ jobs:
         with:
           name: cli-${{ matrix.target }}
           path: cli-dist
+          run-id: ${{ needs.setup.outputs.reuse_cli || github.run_id }}
+          github-token: ${{ github.token }}
 
       - name: Install runtime dependencies (Linux)
         if: runner.os == 'Linux'
@@ -2118,11 +2264,15 @@ jobs:
     needs: [setup, package, cli, e2e_fork, rpm-smoke]
     # A `cli_only` dry run has no package or e2e_fork job: it still writes
     # (and uploads) the manifest, from the CLI archives alone.
-    if: ${{ always() && needs.cli.result == 'success' && ((needs.package.result == 'success' && needs.e2e_fork.result == 'success') || (inputs.cli_only && needs.package.result == 'skipped' && needs.e2e_fork.result == 'skipped')) && (needs.rpm-smoke.result == 'success' || needs.rpm-smoke.result == 'skipped') }}
+    if: ${{ always() && (needs.cli.result == 'success' || (needs.cli.result == 'skipped' && needs.setup.outputs.reuse_cli != '')) && ((needs.package.result == 'success' && needs.e2e_fork.result == 'success') || (inputs.cli_only && needs.package.result == 'skipped' && needs.e2e_fork.result == 'skipped')) && (needs.rpm-smoke.result == 'success' || needs.rpm-smoke.result == 'skipped') }}
     # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-24.04 (always the image on a fork's pull_request / pull_request_target).
     runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && '"ubuntu-24.04"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-24.04'))) }}
     permissions:
       contents: write
+      # Downloads reused builds from their run; attests what a tag publishes.
+      actions: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2141,6 +2291,8 @@ jobs:
           pattern: cli-*
           path: dist
           merge-multiple: true
+          run-id: ${{ needs.setup.outputs.reuse_cli || github.run_id }}
+          github-token: ${{ github.token }}
 
       # The debug info (collect_symbols.sh), released beside the archives but
       # not in manifest.json: denext never downloads it.
@@ -2150,6 +2302,34 @@ jobs:
           pattern: symbols-*
           path: symbols
           merge-multiple: true
+
+      # A reused build's debug info comes from the run that built it (setup's
+      # reuse_*; tag_reuse.py checked these artifacts are there).
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: needs.setup.outputs.reuse_denort != '' && (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch')
+        with:
+          # Not symbols-denort-bin-*: those are denort bin's.
+          pattern: symbols-denort-{aarch64,x86_64}-*
+          path: symbols
+          merge-multiple: true
+          run-id: ${{ needs.setup.outputs.reuse_denort }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: needs.setup.outputs.reuse_denort_bin != '' && (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch')
+        with:
+          pattern: symbols-denort-bin-*
+          path: symbols
+          merge-multiple: true
+          run-id: ${{ needs.setup.outputs.reuse_denort_bin }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: needs.setup.outputs.reuse_cli != '' && (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch')
+        with:
+          pattern: symbols-cli-*
+          path: symbols
+          merge-multiple: true
+          run-id: ${{ needs.setup.outputs.reuse_cli }}
+          github-token: ${{ github.token }}
 
       - name: SHA256SUMS + manifest.json
         env:
@@ -2195,6 +2375,18 @@ jobs:
           VERSION: ${{ needs.setup.outputs.version }}
           RELEASE: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v') && '--release' || '' }}
         run: python3 -I .github/denext-runtime/denort_pins.py check-cli "$VERSION" dist ${RELEASE:+"$RELEASE"}
+
+      # Provenance of exactly what the release publishes, from the tag's own
+      # run: the build jobs attested their files in the run that built them,
+      # which for a reused build (tag_reuse.py) is an earlier dispatch on
+      # another ref. The signatures are in the files (signed where built).
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v')
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            symbols/*.tar.gz
 
       - name: GitHub Release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v')

@@ -124,6 +124,65 @@ class Plan(unittest.TestCase):
             plan_matrix.plan({"TARGETS": "x86_64-apple-ios"})
 
 
+class Rosetta(unittest.TestCase):
+    """x86_64-apple-darwin built on the arm64 pool under Rosetta 2 (MACOS_X64_ON_ARM)."""
+
+    def plan(self, **env):
+        return by_target(plan_matrix.plan({"TARGETS": "all", **POOLS, **env}))
+
+    def test_off_by_default(self):
+        for t in self.plan().values():
+            self.assertFalse(t["rosetta"], t["target"])
+        self.assertEqual(self.plan()["x86_64-apple-darwin"]["runner"], X64)
+
+    def test_on_moves_the_build_jobs_to_the_arm_pool(self):
+        m = self.plan(MACOS_X64_ON_ARM="1", RUNNER_MACOS_ARM_SLOTS="4")
+        x64 = m["x86_64-apple-darwin"]
+        self.assertTrue(x64["rosetta"])
+        self.assertEqual(x64["runner"], ARM)
+        for job in ("denort", "denort_bin", "cli"):
+            self.assertEqual(x64["runs_on"][job], ARM, job)
+        # The jobs that launch the app stay native; the image names stay.
+        self.assertEqual(x64["os"], "macos-15-intel")
+        self.assertEqual(x64["gui_runner"], "macos-15-intel")
+        self.assertEqual(x64["runs_on"]["package"], "macos-15-intel")
+        self.assertEqual(x64["runs_on"]["e2e_fork"], "macos-15-intel")
+        for name, t in m.items():
+            if name != "x86_64-apple-darwin":
+                self.assertFalse(t["rosetta"], name)
+
+    def test_the_x64_legs_share_the_arm_slots(self):
+        # Two slots: arm64's chains come first (lower target index at equal
+        # depth and chain); the x64 legs that would wait overflow to their
+        # image (macos-15-intel), which builds them natively.
+        m = self.plan(MACOS_X64_ON_ARM="1", RUNNER_MACOS_ARM_SLOTS="2")
+        x64 = m["x86_64-apple-darwin"]
+        arm = m["aarch64-apple-darwin"]
+        self.assertEqual(arm["runs_on"]["denort"], ARM)
+        self.assertEqual(arm["runs_on"]["denort_bin"], ARM)
+        self.assertEqual(x64["runs_on"]["denort"], "macos-15-intel")
+        self.assertEqual(x64["runs_on"]["denort_bin"], "macos-15-intel")
+        self.assertEqual(x64["runs_on"]["cli"], "macos-15-intel")
+
+    def test_spellings(self):
+        for on in ("1", "true", "ON", " yes "):
+            self.assertTrue(self.plan(MACOS_X64_ON_ARM=on)["x86_64-apple-darwin"]["rosetta"], on)
+        for off in ("", "0", "false", "off", "maybe"):
+            self.assertFalse(self.plan(MACOS_X64_ON_ARM=off)["x86_64-apple-darwin"]["rosetta"], off)
+
+    def test_no_arm_pool_means_the_x64_pool(self):
+        env = {"TARGETS": "all", "RUNNER_MACOS_X64": POOLS["RUNNER_MACOS_X64"], "MACOS_X64_ON_ARM": "1"}
+        x64 = by_target(plan_matrix.plan(env))["x86_64-apple-darwin"]
+        self.assertFalse(x64["rosetta"])
+        self.assertEqual(x64["runner"], X64)
+
+    def test_a_bare_label(self):
+        env = {"TARGETS": "x86_64-apple-darwin", "RUNNER_MACOS_ARM": "mini", "MACOS_X64_ON_ARM": "1"}
+        (x64,) = plan_matrix.plan(env)
+        self.assertEqual(x64["runner"], "mini")
+        self.assertTrue(x64["rosetta"])
+
+
 class Overflow(unittest.TestCase):
     """The runs_on of each job: the pool while it has a slot, else the image."""
 
@@ -296,7 +355,7 @@ class Workflow(unittest.TestCase):
         setup = job_block(self.text, "setup")
         self.assertIn(".github/denext-runtime/plan_matrix.py", setup)
         self.assertIn("python3 -I .github/denext-runtime/plan_matrix.py", setup)
-        for var in ("RUNNER_MACOS_ARM_GUI", "RUNNER_MACOS_X64_GUI"):
+        for var in ("RUNNER_MACOS_ARM_GUI", "RUNNER_MACOS_X64_GUI", "MACOS_X64_ON_ARM"):
             self.assertIn(f"{var}: ${{{{ vars.{var} }}}}", setup)
 
     def test_jobs_that_launch_the_app_use_the_gui_runner(self):
@@ -304,6 +363,17 @@ class Workflow(unittest.TestCase):
             r = runs_on(job_block(self.text, job))
             self.assertIn("matrix.gui_runner", r, job)
             self.assertNotIn("matrix.runner ", r, job)
+
+    def test_rosetta_builds_use_the_x86_64_toolchain(self):
+        # Not --target: the snapshot build scripts must run an x86_64 V8.
+        for job in ("denort", "denort_bin", "cli"):
+            block = job_block(self.text, job)
+            self.assertIn('if [ "${{ matrix.rosetta }}" = true ]; then\n            tc="$tc-x86_64-apple-darwin"', block, job)
+            self.assertIn('bash .github/denext-runtime/rosetta_tools.sh "$RUNNER_TEMP/rosetta-tools" "$GITHUB_ENV"', block, job)
+            self.assertIn('echo "$RUNNER_TEMP/rosetta-tools" >>"$GITHUB_PATH"', block, job)
+            self.assertNotIn("CARGO_BUILD_TARGET", block, job)
+            self.assertNotIn("DENO_SKIP_CROSS_BUILD_CHECK", block, job)
+            self.assertIn("lipo -archs", block, job)
 
     def test_build_jobs_keep_the_build_runner(self):
         for job in ("denort", "denort_bin", "cli"):

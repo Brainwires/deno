@@ -28,6 +28,24 @@ Prints the JSON list of targets on stdout. Each entry has:
   installs, so it downloads none; the other targets stay on the image (the
   macOS leg `brew install`s llvm, the Windows legs use Chocolatey, which the
   pools' images lack, and Linux arm64 has no pool).
+- `rosetta`: x86_64-apple-darwin's build jobs (denort, denort bin, cli) run
+  on the arm64 pool with the x86_64 Rust toolchain: cargo, rustc and every
+  build script run as x86_64 under Rosetta 2, so the build is a native x86_64
+  build (target/release, the x86_64 prebuilt V8, Apple's ld, the SDK the
+  pool's image selects; signing is the same; rosetta_tools.sh runs the
+  Command Line Tools' shims as arm64 below the x86_64 cargo). Not a cross build (`--target`):
+  the snapshots are made in build scripts by the host's V8, and an arm64 V8's
+  snapshot crashes the x86_64 binary on its first script (a
+  ReadOnlyHeapObjectIterator fault; cli/build.rs refuses a cross build for
+  this). With MACOS_X64_ON_ARM=1 (the repository variable; or true / on /
+  yes) and RUNNER_MACOS_ARM set, its `runner` is the arm64 pool: the Mac
+  mini builds it far faster than the MacBook's 1-1.5 h a leg. The cli job's
+  smoke tests run the x86_64 binary there under Rosetta too, which the pool's
+  image has (ops provision-rosetta-guest.sh). `os` stays macos-15-intel (the
+  caches and artifacts are named after it; the overflow builds there,
+  natively), and `gui_runner` is unchanged: the jobs that launch the app
+  (package, e2e_fork) stay where they were. The x86_64 legs then take the
+  arm64 pool's slots like its own.
 - `runs_on`: {job: runs-on} for this run, each job's pool above or, for the
   overflow, the image (`os`). The jobs read it first (`matrix.runs_on.cli ||
   matrix.runner || matrix.os`).
@@ -58,7 +76,8 @@ only takes a job that would otherwise wait.
 
 Env: TARGETS ("all" or a comma-separated list of triples),
      RUNNER_MACOS_ARM, RUNNER_MACOS_X64, RUNNER_MACOS_ARM_GUI,
-     RUNNER_MACOS_X64_GUI, RUNNER_LINUX_X64_2204 (each optional),
+     RUNNER_MACOS_X64_GUI, RUNNER_LINUX_X64_2204, MACOS_X64_ON_ARM (each
+     optional),
      RUNNER_MACOS_ARM_SLOTS, RUNNER_MACOS_X64_SLOTS,
      RUNNER_LINUX_X64_2204_SLOTS (each optional, default 1),
      POOL_HEALTH (the organization variable DENEXT_POOL_HEALTH, optional),
@@ -203,6 +222,27 @@ def allocate(targets, env):
     return targets
 
 
+def x64_on_arm(env):
+    """Whether x86_64-apple-darwin builds on the arm64 pool under Rosetta 2
+    (`rosetta` in the module docstring): MACOS_X64_ON_ARM on and an arm64
+    pool."""
+    if not (env.get("RUNNER_MACOS_ARM") or "").strip():
+        return False
+    flag = (env.get("MACOS_X64_ON_ARM") or "").strip().lower()
+    return flag in ("1", "true", "on", "yes")
+
+
+def apply_rosetta(targets, env):
+    """Sets each target's `rosetta`; such a target's `runner` becomes the
+    arm64 pool. Before allocate(), so its legs take that pool's slots."""
+    on = x64_on_arm(env)
+    for t in targets:
+        t["rosetta"] = on and t["target"] == "x86_64-apple-darwin"
+        if t["rosetta"]:
+            t["runner"] = _runner(env.get("RUNNER_MACOS_ARM", ""), "macos-15")
+    return targets
+
+
 def plan(env):
     """The matrix for `env` (a mapping like os.environ)."""
     build = {
@@ -235,7 +275,7 @@ def plan(env):
         if unknown:
             raise SystemExit(f"unknown targets: {unknown}")
         targets = [t for t in targets if t["target"] in want]
-    return allocate(targets, env)
+    return allocate(apply_rosetta(targets, env), env)
 
 
 if __name__ == "__main__":
