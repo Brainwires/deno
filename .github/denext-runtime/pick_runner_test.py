@@ -83,6 +83,23 @@ class Pick(unittest.TestCase):
         self.assertEqual(picks["node_compat_1"], '"windows-2022"')
         self.assertEqual(picks["unit_node"], '"windows-2022"')
 
+    def test_image_keys_take_the_image_and_hold_no_slot(self):
+        picks = pick.pick(
+            env(PICK_IMAGE_KEYS="node_compat_0 node_compat_1"), fake({})
+        )
+        self.assertEqual(picks["node_compat_0"], '"windows-2022"')
+        self.assertEqual(picks["node_compat_1"], '"windows-2022"')
+        # The pool's one free slot goes to the next key, not to an image key.
+        self.assertEqual(picks["unit_node"], POOL)
+        self.assertEqual(list(picks), KEYS.split())
+
+    def test_image_keys_alone_never_ask_the_api(self):
+        def get(path):
+            raise AssertionError(f"no API call expected: {path}")
+
+        picks = pick.pick(env(PICK_IMAGE_KEYS=KEYS), get)
+        self.assertEqual(set(picks.values()), {'"windows-2022"'})
+
     def test_two_slots(self):
         picks = pick.pick(env(PICK_SLOTS="2"), fake({}))
         self.assertEqual(

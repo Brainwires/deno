@@ -276,6 +276,12 @@ jobs:
           PICK_FORK_PR: ${{ (startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) }}
           # This leg's own jobs that wait on this pick hold no slot yet.
           PICK_OWN_SKIP: ' / test '
+          # Node's network tests (UDP broadcast, IPv6 autoselectfamily, the
+          # internet/ suite) cannot pass on our Windows runner, whose job
+          # firewall isolates it from the LAN by design (broadcast and
+          # private ranges blocked): node_compat on a Windows leg always runs
+          # on GitHub's image, and the pool takes unit_node.
+          PICK_IMAGE_KEYS: ${{ startsWith(inputs.os, 'windows') && 'node_compat_0 node_compat_1' || '' }}
           # The runner fleet's watchdog publishes each pool's health here
           # (pick_runner.py).
           PICK_HEALTH: ${{ vars.DENEXT_POOL_HEALTH }}

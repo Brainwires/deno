@@ -35,6 +35,10 @@ Prints one `<key>=<runs-on JSON>` line per job key. Environment:
   ...}}, ...}. A pool whose `ok` is false gets no slot (every job takes
   PICK_IMAGE). A missing, unparsable or stale value (checked_at more than 30
   minutes old), or a pool it does not list, changes nothing.
+- PICK_IMAGE_KEYS (optional): keys that always take PICK_IMAGE, whatever the
+  pool's slots (a suite the pool's runners cannot pass by design, such as
+  Node's network tests on a runner whose firewall isolates it from the LAN).
+  They hold no slot.
 - RUNNER_STATUS_TOKEN (optional): a token that may list the organization's
   self-hosted runners. With it a runner of ours busy with another
   repository's job (denext's CI shares the pools) counts too.
@@ -227,6 +231,21 @@ def busy_slots(get, repo, run_id, label, skip, runner_get=None):
 
 
 def pick(env, get=None, runner_get=None, warn=None):
+    """PICK_IMAGE_KEYS' jobs take the image; the others are picked by
+    pick_pool."""
+    keys = (env.get("PICK_KEYS") or "").split()
+    image_only = set((env.get("PICK_IMAGE_KEYS") or "").split())
+    pooled = [k for k in keys if k not in image_only]
+    out = (
+        pick_pool({**env, "PICK_KEYS": " ".join(pooled)}, get, runner_get, warn)
+        if pooled
+        else {}
+    )
+    hosted = json.dumps(env.get("PICK_IMAGE") or "ubuntu-latest")
+    return {k: (hosted if k in image_only else out[k]) for k in keys}
+
+
+def pick_pool(env, get=None, runner_get=None, warn=None):
     keys = (env.get("PICK_KEYS") or "").split()
     image = env.get("PICK_IMAGE") or "ubuntu-latest"
     ours, label = parse_runner(env.get("PICK_RUNNER", ""))
