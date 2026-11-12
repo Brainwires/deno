@@ -68,24 +68,32 @@ MAX_PAGES = 10
 HEALTH_MAX_AGE = 30 * 60  # seconds: an older DENEXT_POOL_HEALTH is ignored
 
 
+def fresh_pools(value, now=None):
+    """DENEXT_POOL_HEALTH's `pools` map ({label: entry}) when `value` (schema
+    v1) parses and is fresh, else None (missing, unparsable or stale: the
+    pickers behave as without it). plan_matrix.py reads it too."""
+    try:
+        health = json.loads(value or "")
+    except ValueError:
+        return None
+    if not isinstance(health, dict):
+        return None
+    at = health.get("checked_at")
+    if isinstance(at, bool) or not isinstance(at, (int, float)):
+        return None
+    age = (time.time() if now is None else now) - at
+    if age > HEALTH_MAX_AGE or age < -300:
+        return None
+    pools = health.get("pools")
+    return pools if isinstance(pools, dict) else None
+
+
 def pool_unhealthy(value, label, now=None):
     """True only when `value` (DENEXT_POOL_HEALTH, schema v1) is fresh and its
     pools[label].ok is false. Anything else (missing, unparsable, stale, the
     label absent, ok true) is False: the picker behaves as without it."""
-    try:
-        health = json.loads(value or "")
-    except ValueError:
-        return False
-    if not isinstance(health, dict):
-        return False
-    at = health.get("checked_at")
-    if isinstance(at, bool) or not isinstance(at, (int, float)):
-        return False
-    age = (time.time() if now is None else now) - at
-    if age > HEALTH_MAX_AGE or age < -300:
-        return False
-    pools = health.get("pools")
-    pool = pools.get(label) if isinstance(pools, dict) else None
+    pools = fresh_pools(value, now)
+    pool = pools.get(label) if pools is not None else None
     return isinstance(pool, dict) and pool.get("ok") is False
 
 

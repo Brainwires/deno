@@ -205,6 +205,7 @@ jobs:
             .github/denext-runtime/tag_gate.py
             .github/denext-runtime/engine_staleness.py
             .github/denext-runtime/plan_matrix.py
+            .github/denext-runtime/pick_runner.py
           sparse-checkout-cone-mode: false
       - id: plan
         env:
@@ -226,6 +227,16 @@ jobs:
           RUNNER_MACOS_X64_GUI: ${{ vars.RUNNER_MACOS_X64_GUI }}
           # The laufey job's Linux x64 leg (`laufey_runner`).
           RUNNER_LINUX_X64_2204: ${{ vars.RUNNER_LINUX_X64_2204 }}
+          # The overflow (`runs_on`, plan_matrix.py): each pool's free slots
+          # from the fleet watchdog's DENEXT_POOL_HEALTH when fresh, else its
+          # slot count (the same defaults as denext_tests.yml's pick_slots);
+          # the jobs beyond them take the target's GitHub image. A job this
+          # run skips holds no slot.
+          POOL_HEALTH: ${{ vars.DENEXT_POOL_HEALTH }}
+          RUNNER_MACOS_ARM_SLOTS: ${{ vars.RUNNER_MACOS_ARM_SLOTS || '2' }}
+          RUNNER_MACOS_X64_SLOTS: ${{ vars.RUNNER_MACOS_X64_SLOTS || '1' }}
+          RUNNER_LINUX_X64_2204_SLOTS: ${{ vars.RUNNER_LINUX_X64_2204_SLOTS || '3' }}
+          SKIP_JOBS: ${{ inputs.cli_only && 'laufey denort package e2e_fork' || format('{0} {1}', inputs.reuse_laufey_run_id && 'laufey' || '', inputs.reuse_denort_run_id && 'denort' || '') }}
         run: |
           set -euo pipefail
           # The fork's own version (DENEXT.md "Versioning": 3.0.0-denext.N, ...),
@@ -323,8 +334,10 @@ jobs:
           fi
 
           # Each target's runners (`runner` for the build jobs, `gui_runner`
-          # for the jobs that launch the app). `os` stays the image name: it
-          # names the caches and the artifacts whatever runs the job.
+          # for the jobs that launch the app) and this run's pick for each job
+          # (`runs_on`: the pool while it has a slot, else the image). `os`
+          # stays the image name: it names the caches and the artifacts
+          # whatever runs the job.
           # The other legs stay on GitHub's images (pool gaps): Linux x64 sudo
           # apt-get / fallocate + swapon and the ubuntu-22.04 glibc floor; Windows
           # x64 a release build on the 1-slot 4 vCPU / 8 GB VM; the arm64 Linux
@@ -383,7 +396,9 @@ jobs:
     # package below, so nothing is fetched), GitHub's image for the rest: the
     # macOS leg `brew install`s llvm and ninja and the Windows legs use
     # Chocolatey, which the self-hosted images do not have.
-    runs-on: ${{ matrix.laufey_runner || matrix.os }}
+    # matrix.runs_on.laufey: the pool while it has a free slot, else the
+    # image (the overflow, plan_matrix.py).
+    runs-on: ${{ matrix.runs_on.laufey || matrix.laufey_runner || matrix.os }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -653,10 +668,12 @@ jobs:
     name: denort / ${{ matrix.target }}
     needs: setup
     if: ${{ !inputs.reuse_denort_run_id && !inputs.cli_only }}
-    # matrix.runner: the self-hosted runner the repository variables name,
-    # else the image; the image on a fork's pull_request / pull_request_target (self-hosted never
-    # takes a fork's code).
-    runs-on: ${{ ((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && matrix.os) || matrix.runner || matrix.os }}
+    # matrix.runs_on.<job>: the self-hosted runner the repository variables
+    # name (matrix.runner) while its pool has a free slot this job would not
+    # wait for, else the image (the overflow, plan_matrix.py); the image on a
+    # fork's pull_request / pull_request_target (self-hosted never takes a
+    # fork's code).
+    runs-on: ${{ ((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && matrix.os) || matrix.runs_on.denort || matrix.runner || matrix.os }}
     timeout-minutes: 355
     # Attests its debug symbol archive (DENEXT.md item 181).
     permissions:
@@ -937,10 +954,12 @@ jobs:
   denort_bin:
     name: denort bin / ${{ matrix.target }}
     needs: setup
-    # matrix.runner: the self-hosted runner the repository variables name,
-    # else the image; the image on a fork's pull_request / pull_request_target (self-hosted never
-    # takes a fork's code).
-    runs-on: ${{ ((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && matrix.os) || matrix.runner || matrix.os }}
+    # matrix.runs_on.<job>: the self-hosted runner the repository variables
+    # name (matrix.runner) while its pool has a free slot this job would not
+    # wait for, else the image (the overflow, plan_matrix.py); the image on a
+    # fork's pull_request / pull_request_target (self-hosted never takes a
+    # fork's code).
+    runs-on: ${{ ((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && matrix.os) || matrix.runs_on.denort_bin || matrix.runner || matrix.os }}
     timeout-minutes: 355
     permissions:
       contents: read
@@ -1192,10 +1211,12 @@ jobs:
   cli:
     name: cli / ${{ matrix.target }}
     needs: [setup, denort_bin]
-    # matrix.runner: the self-hosted runner the repository variables name,
-    # else the image; the image on a fork's pull_request / pull_request_target (self-hosted never
-    # takes a fork's code).
-    runs-on: ${{ ((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && matrix.os) || matrix.runner || matrix.os }}
+    # matrix.runs_on.<job>: the self-hosted runner the repository variables
+    # name (matrix.runner) while its pool has a free slot this job would not
+    # wait for, else the image (the overflow, plan_matrix.py); the image on a
+    # fork's pull_request / pull_request_target (self-hosted never takes a
+    # fork's code).
+    runs-on: ${{ ((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && matrix.os) || matrix.runs_on.cli || matrix.runner || matrix.os }}
     timeout-minutes: 355
     permissions:
       contents: read
@@ -1609,10 +1630,11 @@ jobs:
     if: ${{ always() && !inputs.cli_only && needs.setup.result == 'success' && (needs.laufey.result == 'success' || (needs.laufey.result == 'skipped' && inputs.reuse_laufey_run_id != '')) && (needs.denort.result == 'success' || (needs.denort.result == 'skipped' && inputs.reuse_denort_run_id != '')) }}
     # matrix.gui_runner: this job launches the packaged app, so it needs a
     # GUI login session (plan_matrix.py): the self-hosted runner the
-    # repository variables name for that, else the image; the image on a
-    # fork's pull_request / pull_request_target (self-hosted never takes a
-    # fork's code).
-    runs-on: ${{ ((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && matrix.os) || matrix.gui_runner || matrix.os }}
+    # repository variables name for that while its pool has a free slot this
+    # job would not wait for (matrix.runs_on.<job>, the overflow), else the
+    # image; the image on a fork's pull_request / pull_request_target
+    # (self-hosted never takes a fork's code).
+    runs-on: ${{ ((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && matrix.os) || matrix.runs_on.package || matrix.gui_runner || matrix.os }}
     timeout-minutes: 180
     permissions:
       contents: read
@@ -1950,10 +1972,11 @@ jobs:
     if: ${{ always() && !inputs.cli_only && needs.cli.result == 'success' && (needs.package.result == 'success' || needs.package.result == 'failure') }}
     # matrix.gui_runner: this job launches the packaged app, so it needs a
     # GUI login session (plan_matrix.py): the self-hosted runner the
-    # repository variables name for that, else the image; the image on a
-    # fork's pull_request / pull_request_target (self-hosted never takes a
-    # fork's code).
-    runs-on: ${{ ((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && matrix.os) || matrix.gui_runner || matrix.os }}
+    # repository variables name for that while its pool has a free slot this
+    # job would not wait for (matrix.runs_on.<job>, the overflow), else the
+    # image; the image on a fork's pull_request / pull_request_target
+    # (self-hosted never takes a fork's code).
+    runs-on: ${{ ((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && matrix.os) || matrix.runs_on.e2e_fork || matrix.gui_runner || matrix.os }}
     timeout-minutes: 60
     permissions:
       contents: read
