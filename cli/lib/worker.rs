@@ -585,10 +585,11 @@ impl<TSys: DenoLibSys> LibWorkerFactorySharedState<TSys> {
         ),
         wait_for_debugger_on_start: args.wait_for_debugger_on_start,
         wait_for_page_wait_for_debugger: args.wait_for_page_wait_for_debugger,
+        handle_parts: args.handle_parts,
       };
 
       let has_resource_limits = args.resource_limits.is_some();
-      let (mut worker, handle, bootstrap_options) =
+      let (mut worker, bootstrap_options) =
         WebWorker::from_options(services, options);
 
       // Store resolved resource limits in the worker's op state BEFORE
@@ -625,7 +626,7 @@ impl<TSys: DenoLibSys> LibWorkerFactorySharedState<TSys> {
         );
       }
 
-      (worker, handle)
+      worker
     })
   }
 }

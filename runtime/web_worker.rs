@@ -5,6 +5,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
@@ -259,40 +260,53 @@ impl WebWorkerInternalHandle {
   }
 }
 
-pub struct SendableWebWorkerHandle {
-  port: MessagePort,
-  receiver: mpsc::Receiver<WorkerControlEvent>,
-  termination_signal: Arc<AtomicBool>,
-  terminate_waker: Arc<AtomicWaker>,
-  isolate_handle: v8::IsolateHandle,
-}
+/// The worker's isolate handle, filled in by the worker thread once its
+/// isolate exists. The host builds a worker's handles before the worker thread
+/// has created its isolate (so `new Worker()` returns without waiting for it,
+/// as in Node), and reads the isolate handle through this slot.
+#[derive(Clone, Default)]
+struct IsolateHandleSlot(Arc<OnceLock<v8::IsolateHandle>>);
 
-impl From<SendableWebWorkerHandle> for WebWorkerHandle {
-  fn from(handle: SendableWebWorkerHandle) -> Self {
-    WebWorkerHandle {
-      receiver: Rc::new(RefCell::new(handle.receiver)),
-      port: Rc::new(handle.port),
-      termination_signal: handle.termination_signal,
-      terminate_waker: handle.terminate_waker,
-      isolate_handle: handle.isolate_handle,
+impl IsolateHandleSlot {
+  fn set(&self, handle: v8::IsolateHandle) {
+    // Set once, by the worker thread, right after its isolate is created.
+    let _ = self.0.set(handle);
+  }
+
+  fn terminate_execution(&self) {
+    // Before the isolate exists no JavaScript has run, so there is nothing to
+    // interrupt: the termination signal stops the worker once it polls.
+    if let Some(handle) = self.0.get() {
+      handle.terminate_execution();
     }
   }
 }
 
+/// The worker's side of the channels [`create_worker_handles`] creates on the
+/// host thread. `Send`, so it moves into the worker thread, where
+/// [`WebWorker::from_options`] turns it into the worker's internal handle.
+pub struct WebWorkerHandleParts {
+  sender: mpsc::Sender<WorkerControlEvent>,
+  port: MessagePort,
+  termination_signal: Arc<AtomicBool>,
+  has_terminated: Arc<AtomicBool>,
+  terminate_waker: Arc<AtomicWaker>,
+  isolate_handle: IsolateHandleSlot,
+}
+
 /// This is the handle to the web worker that the parent thread uses to
-/// communicate with the worker. It is created from a `SendableWebWorkerHandle`
-/// which is sent to the parent thread from the worker thread where it is
-/// created. The reason for this separation is that the handle first needs to be
-/// `Send` when transferring between threads, and then must be `Clone` when it
-/// has arrived on the parent thread. It can not be both at once without large
-/// amounts of Arc<Mutex> and other fun stuff.
+/// communicate with the worker. The parent creates it with
+/// [`create_worker_handles`] before it starts the worker thread, so creating a
+/// worker never waits for the worker's isolate to be built; only
+/// [`Self::terminate_execution`] needs the isolate, and it is a no-op until the
+/// worker thread has published its isolate handle.
 #[derive(Clone)]
 pub struct WebWorkerHandle {
   pub port: Rc<MessagePort>,
   receiver: Rc<RefCell<mpsc::Receiver<WorkerControlEvent>>>,
   termination_signal: Arc<AtomicBool>,
   terminate_waker: Arc<AtomicWaker>,
-  isolate_handle: v8::IsolateHandle,
+  isolate_handle: IsolateHandleSlot,
 }
 
 impl WebWorkerHandle {
@@ -312,7 +326,8 @@ impl WebWorkerHandle {
   /// synchronous callback (e.g. a busy loop) instead of only waking the event
   /// loop. It returns immediately and does not wait for the isolate to actually
   /// stop, so it narrows — but cannot fully close — any window in which the
-  /// worker is still executing.
+  /// worker is still executing. Before the worker thread has created its
+  /// isolate it does nothing (no JavaScript has run yet).
   pub fn terminate_execution(&self) {
     self.isolate_handle.terminate_execution();
   }
@@ -333,37 +348,56 @@ impl WebWorkerHandle {
   }
 }
 
-fn create_handles(
+/// Creates a worker's handles on the host thread, before the worker thread
+/// starts: the host's [`WebWorkerHandle`] and the worker's
+/// [`WebWorkerHandleParts`]. Messages the host posts before the worker is up
+/// wait in the channels.
+pub fn create_worker_handles() -> (WebWorkerHandle, WebWorkerHandleParts) {
+  let (parent_port, worker_port) = create_entangled_message_port();
+  let (ctrl_tx, ctrl_rx) = mpsc::channel::<WorkerControlEvent>(1);
+  let termination_signal = Arc::new(AtomicBool::new(false));
+  let terminate_waker = Arc::new(AtomicWaker::new());
+  let isolate_handle = IsolateHandleSlot::default();
+  let external_handle = WebWorkerHandle {
+    receiver: Rc::new(RefCell::new(ctrl_rx)),
+    port: Rc::new(worker_port),
+    termination_signal: termination_signal.clone(),
+    terminate_waker: terminate_waker.clone(),
+    isolate_handle: isolate_handle.clone(),
+  };
+  let parts = WebWorkerHandleParts {
+    sender: ctrl_tx,
+    port: parent_port,
+    termination_signal,
+    has_terminated: Arc::new(AtomicBool::new(false)),
+    terminate_waker,
+    isolate_handle,
+  };
+  (external_handle, parts)
+}
+
+/// Builds the worker's internal handle from the parts the host created, once
+/// the worker's isolate exists, and publishes the isolate handle to the host.
+fn create_internal_handle(
+  parts: WebWorkerHandleParts,
   isolate_handle: v8::IsolateHandle,
   name: String,
   worker_type: WorkerThreadType,
   maybe_main_module_blob: Option<(ModuleSpecifier, Arc<Blob>)>,
-) -> (WebWorkerInternalHandle, SendableWebWorkerHandle) {
-  let (parent_port, worker_port) = create_entangled_message_port();
-  let (ctrl_tx, ctrl_rx) = mpsc::channel::<WorkerControlEvent>(1);
-  let termination_signal = Arc::new(AtomicBool::new(false));
-  let has_terminated = Arc::new(AtomicBool::new(false));
-  let terminate_waker = Arc::new(AtomicWaker::new());
-  let internal_handle = WebWorkerInternalHandle {
+) -> WebWorkerInternalHandle {
+  parts.isolate_handle.set(isolate_handle.clone());
+  WebWorkerInternalHandle {
     name,
-    port: Rc::new(parent_port),
-    termination_signal: termination_signal.clone(),
-    has_terminated,
-    terminate_waker: terminate_waker.clone(),
-    isolate_handle: isolate_handle.clone(),
+    port: Rc::new(parts.port),
+    termination_signal: parts.termination_signal,
+    has_terminated: parts.has_terminated,
+    terminate_waker: parts.terminate_waker,
+    isolate_handle,
     cancel: CancelHandle::new_rc(),
-    sender: ctrl_tx,
+    sender: parts.sender,
     worker_type,
     maybe_main_module_blob,
-  };
-  let external_handle = SendableWebWorkerHandle {
-    receiver: ctrl_rx,
-    port: worker_port,
-    termination_signal,
-    terminate_waker,
-    isolate_handle,
-  };
-  (internal_handle, external_handle)
+  }
 }
 
 pub struct WebWorkerServiceOptions<
@@ -429,6 +463,9 @@ pub struct WebWorkerOptions {
   pub enable_stack_trace_arg_in_ops: bool,
   pub wait_for_debugger_on_start: bool,
   pub wait_for_page_wait_for_debugger: bool,
+  /// The worker's side of the handles the host created for it with
+  /// [`create_worker_handles`].
+  pub handle_parts: WebWorkerHandleParts,
 }
 
 /// This struct is an implementation of `Worker` Web API
@@ -483,11 +520,10 @@ impl WebWorker {
       TExtNodeSys,
     >,
     options: WebWorkerOptions,
-  ) -> (Self, SendableWebWorkerHandle) {
-    let (mut worker, handle, bootstrap_options) =
-      Self::from_options(services, options);
+  ) -> Self {
+    let (mut worker, bootstrap_options) = Self::from_options(services, options);
     worker.bootstrap(&bootstrap_options);
-    (worker, handle)
+    worker
   }
 
   pub fn from_options<
@@ -501,7 +537,7 @@ impl WebWorker {
       TExtNodeSys,
     >,
     mut options: WebWorkerOptions,
-  ) -> (Self, SendableWebWorkerHandle, BootstrapOptions) {
+  ) -> (Self, BootstrapOptions) {
     // Permissions: many ops depend on this
     let enable_testing_features = options.bootstrap.enable_testing_features;
 
@@ -724,9 +760,10 @@ impl WebWorker {
       }
     }
 
-    let (internal_handle, external_handle) = {
+    let internal_handle = {
       let handle = js_runtime.v8_isolate().thread_safe_handle();
-      let (internal_handle, external_handle) = create_handles(
+      let internal_handle = create_internal_handle(
+        options.handle_parts,
         handle,
         options.name.clone(),
         options.worker_type,
@@ -747,7 +784,7 @@ impl WebWorker {
       op_state.put(crate::ops::web_worker::WaitForWorkerDebuggerOnMessage(
         options.wait_for_page_wait_for_debugger,
       ));
-      (internal_handle, external_handle)
+      internal_handle
     };
 
     let bootstrap_fn_global = {
@@ -795,7 +832,6 @@ impl WebWorker {
         wait_for_page_wait_for_debugger: options
           .wait_for_page_wait_for_debugger,
       },
-      external_handle,
       options.bootstrap,
     )
   }

@@ -1543,3 +1543,36 @@ Deno.test("[node/worker_threads] postMessage of non-serializable value throws", 
     await worker.terminate();
   }
 });
+
+// `new Worker()` returns without waiting for the worker's isolate to be built,
+// as in Node. It used to block the creating thread for the whole isolate
+// creation and bootstrap, almost all the time a worker takes to come online
+// (about 100 ms each on Windows), so a thread keeping several workers cycling
+// serialized them all behind itself (Node's
+// parallel/test-worker-http2-stream-terminate.js timed out on Windows). Now
+// the constructor is a small part of that time, summed over a few workers.
+Deno.test("[node/worker_threads] new Worker() doesn't wait for the isolate", async () => {
+  // The first worker also pays this thread's one-time setup; leave it out.
+  const warmUp = new workerThreads.Worker("", { eval: true });
+  await once(warmUp, "online");
+  await warmUp.terminate();
+  let constructing = 0;
+  let toOnline = 0;
+  for (let i = 0; i < 5; i++) {
+    const start = performance.now();
+    const worker = new workerThreads.Worker(
+      "require('node:worker_threads').parentPort.postMessage('up');",
+      { eval: true },
+    );
+    constructing += performance.now() - start;
+    await once(worker, "online");
+    toOnline += performance.now() - start;
+    await worker.terminate();
+  }
+  assert(
+    constructing < toOnline / 2,
+    `new Worker() took ${constructing.toFixed(1)} ms of the ${
+      toOnline.toFixed(1)
+    } ms the workers took to come online`,
+  );
+});

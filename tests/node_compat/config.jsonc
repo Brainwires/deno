@@ -5086,10 +5086,7 @@
     "parallel/test-worker-exit-heapsnapshot.js": {},
     "parallel/test-worker-fs-stat-watcher.js": {},
     "parallel/test-worker-http2-generic-streams-terminate.js": {},
-    "parallel/test-worker-http2-stream-terminate.js": {
-      "windows": false,
-      "reason": "Windows: terminating a worker with an open http2 stream hangs until the 10 s timeout, on every Windows run (GitHub's windows-2022 and our runner); passes on Linux and macOS"
-    },
+    "parallel/test-worker-http2-stream-terminate.js": {},
     "parallel/test-worker-invalid-workerdata.js": {},
     "parallel/test-worker-load-file-with-extension-other-than-js.js": {},
     "parallel/test-worker-memory.js": {},

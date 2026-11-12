@@ -13771,6 +13771,37 @@ where the changes are discussed.
      - Node tests enabled: `parallel/test-child-process-send-utf8.js` on Windows
        again (off in 4e03209c4b).
 
+359. **`fix(workers)`: `new Worker()` doesn't wait for the worker's isolate**
+     (runtime; `runtime/ops/worker_host.rs`, `runtime/web_worker.rs`,
+     `cli/lib/worker.rs`). `op_create_worker` started the worker thread, then
+     blocked the creating thread until the worker had built its isolate,
+     bootstrapped, and sent back its handle. Node's constructor returns at once.
+     Isolate creation costs about 10 ms on macOS but 100 ms or more on Windows
+     (about 120 ms on a 2-core Windows 11 machine, 400 ms with busy workers
+     beside it), so a thread that keeps several workers cycling serialized all
+     of them behind itself: `parallel/test-worker-http2-stream-terminate.js` (6
+     chains of 6 workers) took about 13.5 s on Windows and timed out at 10 s on
+     every run, though terminating a worker was instant. The host now creates
+     the worker's channels, message port and termination signals itself
+     (`create_worker_handles()`) and hands the worker's side to the thread
+     (`WebWorkerHandleParts`, the new `CreateWebWorkerArgs::handle_parts` /
+     `WebWorkerOptions::handle_parts`); the worker publishes its isolate handle
+     once it exists. The only host call that needs the isolate,
+     `terminate_execution()` (used to stop a worker that holds a Web Lock), is a
+     no-op before then, when no JavaScript has run; `terminate()` sets the
+     termination signal, which the worker honours when it starts. Messages
+     posted before the worker is up wait in the channels, as before. A worker
+     thread that dies while being created now reports a close (exit code 0)
+     instead of failing the constructor. `CreateWebWorkerCb` returns the
+     `WebWorker` alone, and `SendableWebWorkerHandle` is gone.
+     - User-facing note: `new Worker()` no longer blocks the creating thread
+       while the worker starts (about 100 ms per worker on Windows).
+     - Tests: unit_node `worker_threads_test.ts` "new Worker() doesn't wait for
+       the isolate" (the constructor is under half the time 5 workers take to
+       come online; before the fix it was 242.5 of 243.6 ms on macOS).
+     - Node tests enabled: `parallel/test-worker-http2-stream-terminate.js` on
+       Windows again (off in 4e03209c4b).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -13778,7 +13809,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-358) are what the prebuilt `libdenort` carries. The CLI-side
+350, 351, 353, 355-359) are what the prebuilt `libdenort` carries. The CLI-side
 parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
 packaged app's launchers) are in the branch too, but a stock CLI does not run
 them; denext's own launcher provides that environment.

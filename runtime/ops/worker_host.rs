@@ -40,9 +40,9 @@ use tokio::sync::mpsc::unbounded_channel;
 
 use crate::ops::TestingFeaturesEnabled;
 use crate::tokio_util::create_and_run_current_thread;
-use crate::web_worker::SendableWebWorkerHandle;
 use crate::web_worker::WebWorker;
 use crate::web_worker::WebWorkerHandle;
+use crate::web_worker::WebWorkerHandleParts;
 use crate::web_worker::WorkerControlEvent;
 use crate::web_worker::WorkerId;
 use crate::web_worker::WorkerMetadata;
@@ -133,11 +133,13 @@ pub struct CreateWebWorkerArgs {
   pub maybe_cpu_prof_config: Option<crate::cpu_profiler::CpuProfilerConfig>,
   /// denext: a `worker_threads` Worker's own `--heap-prof`.
   pub maybe_heap_prof_config: Option<crate::cpu_profiler::HeapProfilerConfig>,
+  /// The worker's side of the handles the host created for it; see
+  /// [`crate::web_worker::create_worker_handles`].
+  pub handle_parts: WebWorkerHandleParts,
 }
 
-pub type CreateWebWorkerCb = dyn Fn(CreateWebWorkerArgs) -> (WebWorker, SendableWebWorkerHandle)
-  + Sync
-  + Send;
+pub type CreateWebWorkerCb =
+  dyn Fn(CreateWebWorkerArgs) -> WebWorker + Sync + Send;
 
 /// A holder for callback that is used to create a new
 /// WebWorker. It's a struct instead of a type alias
@@ -472,8 +474,15 @@ fn op_create_worker(
   };
   let worker_name = args_name.unwrap_or_default();
 
-  let (handle_sender, handle_receiver) =
-    std::sync::mpsc::sync_channel::<SendableWebWorkerHandle>(1);
+  // The host's handle exists before the worker thread starts, so creating a
+  // worker never waits for the worker's isolate to be built (Node's
+  // `new Worker()` doesn't either). Waiting made every `new Worker()` block
+  // the parent's thread for the whole isolate creation and bootstrap: on
+  // Windows, where that costs ~100 ms or more, a parent that keeps several
+  // workers cycling (test-worker-http2-stream-terminate) serialized them all
+  // behind it.
+  let (worker_handle, handle_parts) =
+    crate::web_worker::create_worker_handles();
 
   // Setup new thread. stackSizeMb from resourceLimits wins, matching Node.js
   // behavior; otherwise the isolate thread gets the default above rather than
@@ -513,32 +522,26 @@ fn op_create_worker(
     //  all action done upon it should be noops
     // - newly spawned thread exits
     let fut = async move {
-      let (worker, external_handle) =
-        (create_web_worker_cb.0)(CreateWebWorkerArgs {
-          name: worker_name,
-          worker_id,
-          parent_permissions,
-          permissions: worker_permissions,
-          main_module: module_specifier.clone(),
-          worker_type,
-          close_on_idle: args.close_on_idle,
-          maybe_worker_metadata,
-          maybe_main_module_blob,
-          resource_limits: args.resource_limits,
-          wait_for_debugger_on_start,
-          wait_for_page_wait_for_debugger,
-          maybe_cpu_prof_config,
-          maybe_heap_prof_config,
-        });
+      let worker = (create_web_worker_cb.0)(CreateWebWorkerArgs {
+        name: worker_name,
+        worker_id,
+        parent_permissions,
+        permissions: worker_permissions,
+        main_module: module_specifier.clone(),
+        worker_type,
+        close_on_idle: args.close_on_idle,
+        maybe_worker_metadata,
+        maybe_main_module_blob,
+        resource_limits: args.resource_limits,
+        wait_for_debugger_on_start,
+        wait_for_page_wait_for_debugger,
+        maybe_cpu_prof_config,
+        maybe_heap_prof_config,
+        handle_parts,
+      });
 
-      // Send thread safe handle from newly created worker to host thread
-      handle_sender.send(external_handle).unwrap();
-      drop(handle_sender);
-
-      // At this point the only method of communication with host
-      // is using `worker.internal_channels`.
-      //
-      // Host can already push messages and interact with worker.
+      // The only method of communication with the host is using
+      // `worker.internal_channels`, which the host could use from the start.
       run_web_worker(
         worker,
         module_specifier,
@@ -564,15 +567,8 @@ fn op_create_worker(
     }
   })?;
 
-  // Receive WebWorkerHandle from newly created worker
-  let worker_handle = handle_receiver.recv().map_err(|_| {
-    std::io::Error::other(
-      "Worker thread terminated unexpectedly before initialization completed",
-    )
-  })?;
-
   let worker_thread = WorkerThread {
-    worker_handle: worker_handle.into(),
+    worker_handle,
     worker_type: args.worker_type,
     cancel_handle: CancelHandle::new_rc(),
     cpu_thread_handle,
