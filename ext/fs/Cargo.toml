@@ -31,6 +31,7 @@ rand.workspace = true
 rayon.workspace = true
 same-file.workspace = true
 serde.workspace = true
+sys_traits.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

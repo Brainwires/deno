@@ -231,10 +231,7 @@
       "reason": "Passes on macOS (3 isolated runs, debug build); not verified on Windows"
     },
     "es-module/test-import-cjs-jitless.mjs": {},
-    "es-module/test-esm-windows.js": {
-      "windows": false,
-      "reason": "Windows Server 2022 (GitHub's windows-2022) still resolves con.mjs to the CON device, so writing the fixture fails with EISDIR; passes on Windows 11 (our runner). Needs fs to open reserved device names as files"
-    },
+    "es-module/test-esm-windows.js": {},
     "es-module/test-import-preload-require-cycle.js": {},
     "es-module/test-import-require-tla-twice.js": {},
     "es-module/test-loaders-hidden-from-users.js": {},

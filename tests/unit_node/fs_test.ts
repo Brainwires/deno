@@ -11,7 +11,7 @@ import {
 import { Buffer } from "node:buffer";
 import { join } from "node:path";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import {
   accessSync,
@@ -2375,4 +2375,39 @@ Deno.test("[node/fs] WriteStream.prototype.autoClose needs an instance", () => {
     TypeError,
     'Value of "this" must be of type WriteStream',
   );
+});
+
+// Files and directories named like a DOS device (`con.mjs`, `nul.txt`, `aux`)
+// are ordinary files to Node on every Windows version: its fs namespaces each
+// path (`\\?\C:\...`), which skips the Win32 parsing that turns them into the
+// device on Windows before 11 (where writing con.mjs failed with EISDIR).
+// Node's es-module/test-esm-windows.js imports such a module too.
+Deno.test("[node/fs] paths named like a DOS device are files", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "dos-device-"));
+  try {
+    const con = join(tmp, "con.mjs");
+    writeFileSync(con, 'export default "ok";');
+    assertEquals(readFileSync(con, "utf8"), 'export default "ok";');
+    assert(statSync(con).isFile());
+    assertEquals(
+      (await import(pathToFileURL(con).href)).default,
+      "ok",
+    );
+    unlinkSync(con);
+    assert(!existsSync(con));
+
+    await writeFile(join(tmp, "NUL.txt"), "nul");
+    assertEquals(readFileSync(join(tmp, "NUL.txt"), "utf8"), "nul");
+    await promises.unlink(join(tmp, "NUL.txt"));
+
+    const aux = join(tmp, "aux");
+    mkdirSync(aux);
+    assert(statSync(aux).isDirectory());
+    writeFileSync(join(aux, "com1.json"), "{}");
+    assertEquals(readFileSync(join(aux, "com1.json"), "utf8"), "{}");
+    rmSync(aux, { recursive: true });
+    assert(!existsSync(aux));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });

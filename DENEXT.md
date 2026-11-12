@@ -13706,6 +13706,42 @@ where the changes are discussed.
      - Node tests enabled: none; neither CEF nor `createImageBitmap()` is
        reached by Node's test suite.
 
+357. **`fix(fs)`: Windows paths that name a DOS device open as files, as in
+     Node** (runtime; `libs/vendor/sys_traits` (new), `Cargo.toml`,
+     `ext/fs/std_fs.rs`, `ext/fs/Cargo.toml`). Before Windows 11, Win32 path
+     parsing turns a path whose last component is a DOS device name (`CON`,
+     `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, with or without an
+     extension: `C:\dir\con.mjs`, `C:\dir\aux`) into that device, so on Windows
+     Server 2022 (GitHub's `windows-2022`) `fs.writeFile("con.mjs")` opened the
+     console and failed with `EISDIR` (its truncate got
+     `ERROR_INVALID_FUNCTION`), and importing or resolving such a module failed
+     the same way. Node passes every fs path through `path.toNamespacedPath()`
+     (`\\?\C:\dir\con.mjs`), which skips that parsing.
+     `sys_traits::impls::dos_device_safe_path` does the same, but only for a
+     path one of whose components is a device name (with `/` turned into `\`,
+     `.` / `..` resolved and a relative path resolved against the current
+     directory, as `toNamespacedPath` does); every other path reaches the OS
+     unchanged, and a `\\?\`, `\\.\` or `\??\` path (a deliberate `\\.\NUL`) is
+     never touched. It is applied to `deno_fs`'s `RealFs` (open, create, mkdir,
+     remove, rmdir, rename, link, copy, stat, lstat, exists, realpath, truncate,
+     utime, lutime, chmod, readlink: every `node:fs` and `Deno` file call) and
+     to `sys_traits`' `RealSys`, which the module loader, the npm / Node
+     resolvers and the CLI use (vendored at the 0.1.28 that `Cargo.lock` pinned,
+     as `libs/vendor/sys_traits`, through `[patch.crates-io]`; `read_dir` is
+     left alone, since it appends `\*` and its entries keep the caller's
+     spelling). Windows 11 already opens `C:\dir\con.mjs` as a file (the
+     Node test passed there); nothing changes off Windows.
+     - User-facing note: on Windows 10 and Windows Server, files and folders
+       named like a device (`con.mjs`, `nul.txt`, `aux\`) can be created, read,
+       imported and deleted, as in Node.
+     - Tests: `sys_traits` unit tests `impls::dos_device::tests` (7 tests:
+       device names, drive / UNC / relative / root-relative paths, `\\?\` and
+       `\\.\` paths left alone; they run on every OS); unit_node `fs_test.ts`
+       "paths named like a DOS device are files" (writes, reads, stats, imports
+       and deletes `con.mjs`, `NUL.txt` and a directory `aux`).
+     - Node tests enabled: `es-module/test-esm-windows.js` on Windows again (off
+       in 4e03209c4b; it failed on Windows Server 2022 only).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -13713,7 +13749,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355, 356) are what the prebuilt `libdenort` carries. The CLI-side
+350, 351, 353, 355-357) are what the prebuilt `libdenort` carries. The CLI-side
 parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
 packaged app's launchers) are in the branch too, but a stock CLI does not run
 them; denext's own launcher provides that environment.

@@ -90,6 +90,7 @@ exclude = [
   "tests/util/std/hash/_wasm",
   "tests/sqlite_extension",
   "libs/vendor/dprint-core",
+  "libs/vendor/sys_traits",
   "libs/vendor/tokio-postgres",
 ]
 
@@ -714,5 +715,9 @@ opt-level = 3
 # Remove when a denokv_sqlite release takes rusqlite 0.41.
 denokv_sqlite = { path = "libs/vendor/denokv_sqlite" }
 dprint-core = { path = "libs/vendor/dprint-core" }
+# sys_traits 0.1.28 (the version Cargo.lock pinned) with Windows paths that
+# name a DOS device (con.mjs, nul.txt, aux\) opened as files, as Node does
+# (DENEXT.md item 357).
+sys_traits = { path = "libs/vendor/sys_traits" }
 tokio-postgres = { path = "libs/vendor/tokio-postgres" }
 v8 = { git = "https://github.com/Brainwires/rusty_v8", rev = "dcb0c6de6c6368845b4f3b8bb0fce4e595641bb6" }

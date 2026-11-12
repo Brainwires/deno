@@ -31,6 +31,13 @@ use crate::interface::FsFileType;
 use crate::interface::FsReadDir;
 use crate::interface::FsReadDirRc;
 
+/// The path to hand the OS: a Windows path that names a DOS device
+/// (`C:\dir\con.mjs`) in its `\\?\` form, so it opens as a file, as in Node;
+/// any other path unchanged (DENEXT.md item 357).
+fn os_path(path: &Path) -> Cow<'_, Path> {
+  sys_traits::impls::dos_device_safe_path(path)
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct RealFs;
 
@@ -277,14 +284,14 @@ impl FileSystem for RealFs {
     oldpath: &CheckedPath,
     newpath: &CheckedPath,
   ) -> FsResult<()> {
-    fs::rename(oldpath, newpath).map_err(Into::into)
+    fs::rename(os_path(oldpath), os_path(newpath)).map_err(Into::into)
   }
   async fn rename_async(
     &self,
     oldpath: CheckedPathBuf,
     newpath: CheckedPathBuf,
   ) -> FsResult<()> {
-    spawn_blocking(move || fs::rename(oldpath, newpath))
+    spawn_blocking(move || fs::rename(os_path(&oldpath), os_path(&newpath)))
       .await?
       .map_err(Into::into)
   }
@@ -306,14 +313,14 @@ impl FileSystem for RealFs {
     oldpath: &CheckedPath,
     newpath: &CheckedPath,
   ) -> FsResult<()> {
-    fs::hard_link(oldpath, newpath).map_err(Into::into)
+    fs::hard_link(os_path(oldpath), os_path(newpath)).map_err(Into::into)
   }
   async fn link_async(
     &self,
     oldpath: CheckedPathBuf,
     newpath: CheckedPathBuf,
   ) -> FsResult<()> {
-    spawn_blocking(move || fs::hard_link(oldpath, newpath))
+    spawn_blocking(move || fs::hard_link(os_path(&oldpath), os_path(&newpath)))
       .await?
       .map_err(Into::into)
   }
@@ -336,19 +343,19 @@ impl FileSystem for RealFs {
   }
 
   fn read_link_sync(&self, path: &CheckedPath) -> FsResult<PathBuf> {
-    fs::read_link(path).map_err(Into::into)
+    fs::read_link(os_path(path)).map_err(Into::into)
   }
   async fn read_link_async(&self, path: CheckedPathBuf) -> FsResult<PathBuf> {
-    spawn_blocking(move || fs::read_link(path))
+    spawn_blocking(move || fs::read_link(os_path(&path)))
       .await?
       .map_err(Into::into)
   }
 
   fn rmdir_sync(&self, path: &CheckedPath) -> FsResult<()> {
-    fs::remove_dir(path).map_err(Into::into)
+    fs::remove_dir(os_path(path)).map_err(Into::into)
   }
   async fn rmdir_async(&self, path: CheckedPathBuf) -> FsResult<()> {
-    spawn_blocking(move || fs::remove_dir(path))
+    spawn_blocking(move || fs::remove_dir(os_path(&path)))
       .await?
       .map_err(Into::into)
   }
@@ -374,7 +381,7 @@ impl FileSystem for RealFs {
   ) -> FsResult<()> {
     let atime = filetime::FileTime::from_unix_time(atime_secs, atime_nanos);
     let mtime = filetime::FileTime::from_unix_time(mtime_secs, mtime_nanos);
-    filetime::set_file_times(path, atime, mtime).map_err(Into::into)
+    filetime::set_file_times(os_path(path), atime, mtime).map_err(Into::into)
   }
   async fn utime_async(
     &self,
@@ -387,7 +394,7 @@ impl FileSystem for RealFs {
     let atime = filetime::FileTime::from_unix_time(atime_secs, atime_nanos);
     let mtime = filetime::FileTime::from_unix_time(mtime_secs, mtime_nanos);
     spawn_blocking(move || {
-      filetime::set_file_times(path, atime, mtime).map_err(Into::into)
+      filetime::set_file_times(os_path(&path), atime, mtime).map_err(Into::into)
     })
     .await?
   }
@@ -402,7 +409,8 @@ impl FileSystem for RealFs {
   ) -> FsResult<()> {
     let atime = filetime::FileTime::from_unix_time(atime_secs, atime_nanos);
     let mtime = filetime::FileTime::from_unix_time(mtime_secs, mtime_nanos);
-    filetime::set_symlink_file_times(path, atime, mtime).map_err(Into::into)
+    filetime::set_symlink_file_times(os_path(path), atime, mtime)
+      .map_err(Into::into)
   }
 
   async fn lutime_async(
@@ -416,7 +424,8 @@ impl FileSystem for RealFs {
     let atime = filetime::FileTime::from_unix_time(atime_secs, atime_nanos);
     let mtime = filetime::FileTime::from_unix_time(mtime_secs, mtime_nanos);
     spawn_blocking(move || {
-      filetime::set_symlink_file_times(path, atime, mtime).map_err(Into::into)
+      filetime::set_symlink_file_times(os_path(&path), atime, mtime)
+        .map_err(Into::into)
     })
     .await?
   }
@@ -504,6 +513,7 @@ impl FileSystem for RealFs {
 }
 
 fn mkdir(path: &Path, recursive: bool, mode: Option<u32>) -> FsResult<()> {
+  let path = &*os_path(path);
   let mut builder = fs::DirBuilder::new();
   builder.recursive(recursive);
   #[cfg(unix)]
@@ -534,7 +544,7 @@ fn chmod(path: &Path, mode: i32) -> FsResult<()> {
   // so we have to resolve the symlink manually
   let resolved_path = realpath(path)?;
 
-  let wchar_path = resolved_path
+  let wchar_path = os_path(&resolved_path)
     .as_os_str()
     .encode_wide()
     .chain(std::iter::once(0))
@@ -614,6 +624,7 @@ fn lchown(_path: &Path, _uid: Option<u32>, _gid: Option<u32>) -> FsResult<()> {
 }
 
 fn remove(path: &Path, recursive: bool) -> FsResult<()> {
+  let path = &*os_path(path);
   // TODO: this is racy. This should open fds, and then `unlink` those.
   let metadata = fs::symlink_metadata(path)?;
 
@@ -648,6 +659,8 @@ fn remove(path: &Path, recursive: bool) -> FsResult<()> {
 }
 
 fn copy_file(from: &Path, to: &Path) -> FsResult<()> {
+  let from = &*os_path(from);
+  let to = &*os_path(to);
   // Guard against copying a file onto itself. Otherwise the destination is
   // opened with truncation (or unlinked) before the source is read, which
   // silently empties the file. Match `cp` behavior and error instead.
@@ -968,6 +981,8 @@ fn open_for_stat_windows(
 ) -> io::Result<fs::File> {
   use std::os::windows::fs::OpenOptionsExt;
 
+  let path = &*os_path(path);
+
   use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
   use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
 
@@ -1126,12 +1141,14 @@ fn exists(path: &Path) -> bool {
 
   #[cfg(windows)]
   {
-    fs::exists(path).unwrap_or(false)
+    fs::exists(os_path(path)).unwrap_or(false)
   }
 }
 
 fn realpath(path: &Path) -> FsResult<PathBuf> {
-  Ok(deno_path_util::strip_unc_prefix(path.canonicalize()?))
+  Ok(deno_path_util::strip_unc_prefix(
+    os_path(path).canonicalize()?,
+  ))
 }
 
 fn read_dir(path: &Path) -> FsResult<Vec<FsDirEntry>> {
@@ -1263,6 +1280,7 @@ fn symlink(
 }
 
 fn truncate(path: &Path, len: u64) -> FsResult<()> {
+  let path = &*os_path(path);
   let mut open_options = fs::OpenOptions::new();
   open_options.write(true);
   // The permission check for truncate is performed no-follow (against the
@@ -1325,7 +1343,7 @@ pub fn open_with_checked_path(
   // exist, then open for reading). Handle this by creating the file first
   // if needed, then opening for read only.
   if opts.create && !opts.write && !opts.append {
-    if !path.exists() {
+    if !os_path(path).exists() {
       let create_opts = OpenOptions {
         read: false,
         write: true,
@@ -1365,12 +1383,12 @@ fn open_path_with_options(
   path: &CheckedPath,
 ) -> io::Result<fs::File> {
   let std_opts = open_options_for_checked_path(opts, path);
-  match std_opts.open(path) {
+  match std_opts.open(os_path(path)) {
     Ok(file) => Ok(file),
     #[cfg(windows)]
     Err(err) if err.raw_os_error() == Some(ERROR_INVALID_FUNCTION) => {
       let fallback = open_options_for_checked_path_no_backup(opts, path);
-      fallback.open(path).map_err(|_| err)
+      fallback.open(os_path(path)).map_err(|_| err)
     }
     // A canonicalized path is opened with `O_NOFOLLOW` (see
     // `open_options_for_checked_path`). If the final component is still a
