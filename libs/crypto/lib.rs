@@ -6,5 +6,6 @@
 #![deny(clippy::unnecessary_wraps)]
 
 mod ffi;
+pub mod random;
 pub mod spki;
 pub mod x448;

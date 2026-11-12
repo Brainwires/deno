@@ -14,6 +14,7 @@ use deno_core::OpState;
 use deno_core::op2;
 use deno_core::v8;
 use deno_core::webidl::WebIdlInterfaceConverter;
+use deno_crypto_provider::random::fill_secure_random;
 use rand::Rng;
 use rand::rngs::StdRng;
 use rand::thread_rng;
@@ -150,8 +151,8 @@ impl Crypto {
       if let Some(seeded_rng) = maybe_seeded_rng {
         seeded_rng.fill(bytes);
       } else {
-        let mut rng = thread_rng();
-        rng.fill(bytes);
+        fill_secure_random(bytes)
+          .map_err(|_| CryptoError::RandomGenerationFailed)?;
       }
     }
     Ok(typed_array)
@@ -186,8 +187,8 @@ impl Crypto {
     if let Some(seeded_rng) = maybe_seeded_rng {
       seeded_rng.fill(&mut bytes);
     } else {
-      let mut rng = thread_rng();
-      rng.fill(&mut bytes);
+      fill_secure_random(&mut bytes)
+        .map_err(|_| CryptoError::RandomGenerationFailed)?;
     }
     let uuid = fast_uuid_v4_bytes(&mut bytes);
     v8::String::new_from_one_byte(scope, &uuid, v8::NewStringType::Normal)

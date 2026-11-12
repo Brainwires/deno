@@ -13613,6 +13613,47 @@ where the changes are discussed.
        job.
      - Node tests enabled: none, because this is CI only.
 
+355. **`perf(crypto)`: secure random bytes come from aws-lc, in one call**
+     (runtime; `libs/crypto/random.rs`, `ext/crypto/crypto.rs`,
+     `ext/crypto/lib.rs`, `ext/node_crypto/lib.rs`, `ext/node/ops/wasi.rs`,
+     `ext/node/polyfills/internal/crypto/_randomBytes.ts`, `_randomFill.mjs`).
+     `crypto.getRandomValues`, `crypto.randomUUID`, `node:crypto`'s
+     `randomBytes` / `randomFill` / `randomFillSync` and WASI's `random_get`
+     filled their buffers from `rand`'s `ThreadRng`, whose generic ChaCha12 code
+     a debug build compiles without optimizations: `randomBytes(1e8)` took about
+     4 s there (79 ms in a release build, about 15 ms in Node). They now share
+     `deno_crypto_provider::random::fill_secure_random`, which calls aws-lc's
+     `RAND_bytes` (`aws_lc_rs::rand::fill`), already the source of TLS and
+     WebCrypto key generation: a per-thread AES-256 CTR-DRBG (SP 800-90A) seeded
+     with OS entropy and CPU jitter entropy, reseeded every 4,096 requests and
+     after a fork (detected through `MADV_WIPEONFORK` on Linux and
+     `MAP_INHERIT_ZERO` on the BSDs; on macOS, which has neither, before every
+     request), with CPU random numbers mixed into each request where the CPU has
+     them (RDRAND / RNDR); a failure of the entropy source aborts inside aws-lc
+     rather than returning weak bytes. A failure the helper does see zeroes the
+     buffer and is an error: a WebCrypto `OperationError`, a Node
+     `ERR_CRYPTO_OPERATION_FAILED` (the async `randomFill` passes it to its
+     callback), WASI `EIO`. `randomBytes` fills the whole buffer with one
+     `op_node_fill_random` call instead of `getRandomValues` over 64 KiB slices:
+     the 65,536-byte cap is WebCrypto's, not Node's. Under `--seed` every one of
+     these still draws from the same seeded `StdRng`, unchanged, and the seeded
+     byte sequence of `randomBytes` is the same as before (filling one buffer
+     and filling consecutive 64 KiB slices of it consume the generator
+     identically).
+     - User-facing note: `randomBytes` and `getRandomValues` are much faster in
+       debug builds (`randomBytes(1e8)`: about 4 s to about 30 ms); in release
+       builds aws-lc's fill is about twice as fast as `ThreadRng`'s. Seeded
+       output is unchanged.
+     - Tests: unit_node `internal/_randomBytes_test.ts` "randomBytes fills a 100
+       MB buffer in under a second" (fails before: it took 4013 ms); spec
+       `run/seed_random_bytes` (`--seed=1` and `--seed=42`, the expected bytes
+       recorded from the build before this change); `deno_crypto_provider` unit
+       tests for the helper.
+     - Node tests enabled: none new; `parallel/test-crypto-random.js`,
+       `parallel/test-webcrypto-getRandomValues.js`,
+       `async-hooks/test-crypto-randomBytes.js` and
+       `wasi/test-wasi-getentropy.js` (which reaches `random_get`) still pass.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -13620,10 +13661,10 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353) are what the prebuilt `libdenort` carries. The CLI-side parts
-(for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged
-app's launchers) are in the branch too, but a stock CLI does not run them;
-denext's own launcher provides that environment.
+350, 351, 353, 355) are what the prebuilt `libdenort` carries. The CLI-side
+parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
+packaged app's launchers) are in the branch too, but a stock CLI does not run
+them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

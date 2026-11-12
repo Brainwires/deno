@@ -12,5 +12,6 @@ description = "Cryptography provider for Deno"
 path = "lib.rs"
 
 [dependencies]
+aws-lc-rs.workspace = true
 aws-lc-sys.workspace = true
 ed448-goldilocks.workspace = true

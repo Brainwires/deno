@@ -120,7 +120,7 @@ function randomFill(buf, offset, size, cb) {
       new Uint8Array(TypedArrayPrototypeGetBuffer(randomBuf), 0, size),
     );
     cb(null, buf);
-  });
+  }, (err) => cb(err));
 }
 
 function randomFillSync(buf, offset = 0, size) {

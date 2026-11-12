@@ -2,6 +2,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
+const { op_node_fill_random } = core.ops;
 const {
   Error,
   ErrorPrototype,
@@ -52,25 +53,12 @@ function assertSize(size: number): number {
   return size >>> 0;
 }
 
+// One op call fills the whole buffer: the 65,536-byte cap is WebCrypto's
+// (`getRandomValues`), not Node's. Under `--seed` the op draws from the same
+// seeded RNG as `getRandomValues`, so the byte sequence is unchanged.
 function generateRandomBytes(size: number) {
   const bytes = Buffer.allocUnsafeSlow(size);
-
-  //Work around for getRandomValues max generation
-  if (size > MAX_RANDOM_VALUES) {
-    for (
-      let generated = 0;
-      generated < size;
-      generated += MAX_RANDOM_VALUES
-    ) {
-      globalThis.crypto.getRandomValues(
-        // deno-lint-ignore deno-internal/prefer-primordials -- Buffer.prototype.slice (Node Buffer method, not TypedArray slice)
-        bytes.slice(generated, generated + MAX_RANDOM_VALUES),
-      );
-    }
-  } else {
-    globalThis.crypto.getRandomValues(bytes);
-  }
-
+  op_node_fill_random(bytes);
   return bytes;
 }
 

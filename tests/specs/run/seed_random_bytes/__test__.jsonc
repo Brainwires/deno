@@ -1,0 +1,16 @@
+{
+  // Under `--seed`, `randomBytes` and `crypto.getRandomValues` draw from the
+  // same seeded RNG, and a large `randomBytes` buffer is filled in one call.
+  // The expected bytes were recorded before that change, when `randomBytes`
+  // filled 64 KiB slices through `getRandomValues`: the sequence must not move.
+  "tests": {
+    "seed_1": {
+      "args": "run --seed=1 seed_random_bytes.mjs",
+      "output": "seed_1.out"
+    },
+    "seed_42": {
+      "args": "run --seed=42 seed_random_bytes.mjs",
+      "output": "seed_42.out"
+    }
+  }
+}

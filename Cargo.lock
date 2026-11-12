@@ -2624,6 +2624,7 @@ dependencies = [
 name = "deno_crypto_provider"
 version = "0.54.0"
 dependencies = [
+ "aws-lc-rs",
  "aws-lc-sys",
  "ed448-goldilocks",
 ]
@@ -3145,6 +3146,7 @@ dependencies = [
  "cc",
  "deno_ast",
  "deno_core",
+ "deno_crypto_provider",
  "deno_dotenv",
  "deno_error",
  "deno_fs",

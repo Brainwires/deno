@@ -24,6 +24,7 @@ brotli.workspace = true
 bytes.workspace = true
 deno_ast = { workspace = true, features = ["type_strip"] }
 deno_core.workspace = true
+deno_crypto_provider.workspace = true
 deno_dotenv.workspace = true
 deno_error.workspace = true
 deno_fs.workspace = true

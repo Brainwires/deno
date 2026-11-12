@@ -130,3 +130,18 @@ Deno.test("pseudoRandomBytes works", function () {
   assertThrows(() => pseudoRandomBytes(MAX_SIZE + 1));
   assertThrows(() => pseudoRandomBytes(-1));
 });
+
+// randomBytes fills the whole buffer in one call from the secure random
+// source. It used to fill 64 KiB slices from `rand`'s ChaCha generator, which
+// took about 4 s for 100 MB in a debug build (Node: about 15 ms).
+Deno.test("randomBytes fills a 100 MB buffer in under a second", function () {
+  const size = 1e8;
+  const start = performance.now();
+  const bytes = randomBytes(size);
+  const ms = performance.now() - start;
+  assertEquals(bytes.length, size);
+  // The first and last 64 KiB are filled (all zero: probability 2^-524288).
+  assert(bytes.subarray(0, MAX_RANDOM_VALUES).some((b) => b !== 0));
+  assert(bytes.subarray(size - MAX_RANDOM_VALUES).some((b) => b !== 0));
+  assert(ms < 1000, `randomBytes(1e8) took ${ms.toFixed(0)} ms`);
+});

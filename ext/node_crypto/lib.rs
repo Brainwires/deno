@@ -13,6 +13,7 @@ use deno_core::StringOrBuffer;
 use deno_core::convert::Uint8Array;
 use deno_core::op2;
 use deno_core::unsync::spawn_blocking;
+use deno_crypto_provider::random::fill_secure_random;
 use deno_error::JsErrorBox;
 use elliptic_curve::Generate as _;
 use elliptic_curve::sec1::ToSec1Point;
@@ -962,20 +963,36 @@ pub async fn op_node_pbkdf2_async(
 // (the one `crypto.getRandomValues` draws from). The `node:crypto` random
 // ops draw from it too, so `randomFillSync`, `randomFill` and `randomInt`
 // repeat run to run; without a seed they use the thread RNG as before.
+//
+// Unseeded, they fill the whole buffer from the secure random source in one
+// call (`deno_crypto_provider::random`), and a failure is an error, never a
+// partly filled buffer.
 #[op2(fast)]
-pub fn op_node_fill_random(state: &mut OpState, #[buffer] buf: &mut [u8]) {
+pub fn op_node_fill_random(
+  state: &mut OpState,
+  #[buffer] buf: &mut [u8],
+) -> Result<(), RandomFillError> {
   if let Some(seeded_rng) = state.try_borrow_mut::<StdRng>() {
     seeded_rng.fill(buf);
+    Ok(())
   } else {
-    rand::thread_rng().fill(buf);
+    fill_secure_random(buf).map_err(|_| RandomFillError::Failed)
   }
+}
+
+#[derive(Debug, thiserror::Error, deno_error::JsError)]
+pub enum RandomFillError {
+  #[class(generic)]
+  #[error("Random bytes generation failed")]
+  #[property("code" = "ERR_CRYPTO_OPERATION_FAILED")]
+  Failed,
 }
 
 #[op2]
 pub fn op_node_fill_random_async(
   state: &mut OpState,
   #[smi] len: i32,
-) -> impl Future<Output = Uint8Array> + use<> {
+) -> impl Future<Output = Result<Uint8Array, RandomFillError>> + use<> {
   // The seeded bytes are drawn when the call is made, not when the blocking
   // task runs, so the sequence follows the program's call order.
   let seeded = state.try_borrow_mut::<StdRng>().map(|seeded_rng| {
@@ -985,12 +1002,12 @@ pub fn op_node_fill_random_async(
   });
   async move {
     if let Some(buf) = seeded {
-      return buf.into();
+      return Ok(buf.into());
     }
     spawn_blocking(move || {
       let mut buf = vec![0u8; len as usize];
-      rand::thread_rng().fill(&mut buf[..]);
-      buf.into()
+      fill_secure_random(&mut buf[..]).map_err(|_| RandomFillError::Failed)?;
+      Ok(buf.into())
     })
     .await
     .unwrap()
