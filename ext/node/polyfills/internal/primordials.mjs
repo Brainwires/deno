@@ -27,6 +27,7 @@ const StringPrototypeReplace = (that, ...args) => that.replace(...args);
 const StringPrototypeSlice = (that, ...args) => that.slice(...args);
 const StringPrototypeSplit = (that, ...args) => that.split(...args);
 const StringPrototypeStartsWith = (that, ...args) => that.startsWith(...args);
+const StringPrototypeToLowerCase = (that) => that.toLowerCase();
 const StringPrototypeToUpperCase = (that) => that.toUpperCase();
 
 return {
@@ -54,6 +55,7 @@ return {
   StringPrototypeSlice,
   StringPrototypeSplit,
   StringPrototypeStartsWith,
+  StringPrototypeToLowerCase,
   StringPrototypeToUpperCase,
 };
 })();

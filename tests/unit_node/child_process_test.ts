@@ -1509,6 +1509,37 @@ Deno.test(async function forkLargeMessageThenExitArrivesWhole() {
   }
 });
 
+// While Deno's own `node` is on PATH for its children
+// (DENO_NODE_SHIM_ACTIVE), a shell command is checked for starting that
+// `node` on an npm script. On Windows the check lowercased the program name
+// with a primordial its module didn't export, so every shell exec there threw
+// a TypeError (`execSync("echo hi", { shell: true })` included).
+Deno.test(async function shellExecWithNodeShimActive() {
+  const file = await Deno.makeTempFile({ suffix: ".mjs" });
+  await Deno.writeTextFile(
+    file,
+    `import { exec, execSync } from "node:child_process";
+import process from "node:process";
+const sync = execSync("echo hi", { shell: true }).toString().trim();
+exec("echo there", (err, stdout) => {
+  if (err) throw err;
+  process.stdout.write(sync + " " + stdout.trim());
+});
+`,
+  );
+  try {
+    const { code, stdout, stderr } = await new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", file],
+      env: { DENO_NODE_SHIM_ACTIVE: "1" },
+    }).output();
+    const dec = new TextDecoder();
+    assertEquals(code, 0, dec.decode(stderr));
+    assertEquals(dec.decode(stdout), "hi there");
+  } finally {
+    await Deno.remove(file);
+  }
+});
+
 Deno.test({
   name: "[node/child_process] SIGSTOP and SIGCONT preserve child state",
   ignore: Deno.build.os === "windows",

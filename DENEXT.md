@@ -13729,8 +13729,8 @@ where the changes are discussed.
      resolvers and the CLI use (vendored at the 0.1.28 that `Cargo.lock` pinned,
      as `libs/vendor/sys_traits`, through `[patch.crates-io]`; `read_dir` is
      left alone, since it appends `\*` and its entries keep the caller's
-     spelling). Windows 11 already opens `C:\dir\con.mjs` as a file (the
-     Node test passed there); nothing changes off Windows.
+     spelling). Windows 11 already opens `C:\dir\con.mjs` as a file (the Node
+     test passed there); nothing changes off Windows.
      - User-facing note: on Windows 10 and Windows Server, files and folders
        named like a device (`con.mjs`, `nul.txt`, `aux\`) can be created, read,
        imported and deleted, as in Node.
@@ -13802,6 +13802,28 @@ where the changes are discussed.
      - Node tests enabled: `parallel/test-worker-http2-stream-terminate.js` on
        Windows again (off in 4e03209c4b).
 
+360. **`fix(child_process)`: shell execs work on Windows while Deno's `node` is
+     on PATH** (runtime; `ext/node/polyfills/internal/primordials.mjs`). Item
+     167's check for a shell command that starts the `node` Deno puts on PATH
+     (`DENO_NODE_SHIM_ACTIVE`) lowercases the program name on Windows with
+     `StringPrototypeToLowerCase`, which `internal/child_process.ts` imported
+     from `internal/primordials.mjs`, a module that doesn't export it. So with
+     the shim active, every shell exec on Windows (`execSync("...")`, `exec`,
+     `spawn` with `shell: true`) threw
+     `TypeError:
+     StringPrototypeToLowerCase is not a function` before
+     starting anything; since runtime 3.0.0-denext.10. `primordials.mjs` now
+     exports it. Every other name the polyfills import from that module was
+     checked against its exports (a one-off script); none other was missing.
+     - User-facing note: on Windows, `child_process` shell commands work again
+       in a process whose children get Deno as `node`.
+     - Tests: unit_node `child_process_test.ts` "shellExecWithNodeShimActive"
+       (`execSync` and `exec` with `shell: true` under
+       `DENO_NODE_SHIM_ACTIVE=1`; on Windows the 3.0.0-denext.21 debug build
+       threw the `TypeError`, the fixed build prints the output).
+     - Node tests enabled: none; Node's suite doesn't run with Deno's `node`
+       shim active.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -13809,7 +13831,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-359) are what the prebuilt `libdenort` carries. The CLI-side
+350, 351, 353, 355-360) are what the prebuilt `libdenort` carries. The CLI-side
 parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
 packaged app's launchers) are in the branch too, but a stock CLI does not run
 them; denext's own launcher provides that environment.
