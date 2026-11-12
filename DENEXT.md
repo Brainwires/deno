@@ -13660,9 +13660,14 @@ where the changes are discussed.
      - **CEF.** laufey moves from CEF 156.0.15+gcf671c0 (Chromium
        156.0.8078.80) to CEF 156.0.28+g57389f0 (Chromium 156.0.8078.88), the
        newest CEF stable build for all six platforms, for the 55 security fixes
-       of Chrome Extended Stable 156.0.8078.88. laufey `d21/cef-156-0-28`
-       c244b33 is pinned in `cli/rt_desktop/Cargo.toml`, `Cargo.lock` and
-       `LAUFEY_SHA`; no laufey code or API change (API 56). laufey's Makefile
+       of Chrome Extended Stable 156.0.8078.88. laufey `development-denext`
+       f88b6eb is pinned in `cli/rt_desktop/Cargo.toml`, `Cargo.lock` and
+       `LAUFEY_SHA`; no laufey API change (API 56). CEF 156.0.28 takes an
+       application keep-alive on the first `CefDoMessageLoopWork()` (CEF
+       a10dae340), so pumping CEF after `CefRunMessageLoop()` returned now
+       trips a shutdown CHECK: laufey's Windows and Linux hosts drain closed
+       windows and page renderers inside the loop before quitting it, and its
+       macOS host queues an auth session's start behind a cancel's dismissal. laufey's Makefile
        and `cef/flake.nix` pin each archive by the `.sha256` CEF publishes
        beside it on its build index; each was downloaded and hashed, and its
        SHA-1 matches the index. CEF changes no public header between the two
