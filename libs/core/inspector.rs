@@ -1165,7 +1165,17 @@ impl JsRuntimeInspector {
   }
 
   pub fn wait_for_runtime_run_if_waiting_for_debugger(&self) {
-    self.state.flags.borrow_mut().paused_on_start = true;
+    {
+      // As in `wait_for_session_and_break_on_next_statement`: when
+      // `arm_break_on_start` ran (a worker created to wait for the debugger
+      // arms it before its session reaches the frontend), a
+      // `Runtime.runIfWaitingForDebugger` handled while the worker
+      // bootstrapped already resumed it; don't block for another one.
+      let mut flags = self.state.flags.borrow_mut();
+      if !std::mem::take(&mut flags.break_on_start_armed) {
+        flags.paused_on_start = true;
+      }
+    }
     loop {
       if !self.state.flags.borrow().paused_on_start {
         break;

@@ -738,6 +738,15 @@ impl WebWorker {
 
     // The uv loop is auto-created and registered by JsRuntime::new_inner.
 
+    // A worker that waits for the debugger counts as paused on start from
+    // before its session reaches the frontend: its creator no longer waits
+    // for it to bootstrap, so the frontend can attach and send
+    // `Runtime.runIfWaitingForDebugger` while it still bootstraps, and the
+    // wait in `run_web_worker` must not block for a second one.
+    if options.wait_for_debugger_on_start {
+      js_runtime.inspector().arm_break_on_start();
+    }
+
     if let Some(main_session_tx) = services.main_inspector_session_tx.get() {
       let (main_proxy, worker_proxy) =
         deno_core::create_worker_inspector_session_pair(

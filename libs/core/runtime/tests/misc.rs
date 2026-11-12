@@ -512,6 +512,53 @@ async fn inspect_brk_frontend_attached_while_the_module_loads() {
   inspector.wait_for_session_and_break_on_next_statement();
 }
 
+/// A worker created to wait for the debugger (`Target.setAutoAttach` with
+/// `waitForDebuggerOnStart`) is armed before its session reaches the
+/// frontend. Its creator doesn't wait for it to bootstrap, so the frontend's
+/// `Runtime.runIfWaitingForDebugger` can be handled before the worker reaches
+/// its wait; the wait must not then block for another one (unit test
+/// inspector_worker_wait_for_debugger_on_start hung).
+#[tokio::test]
+async fn worker_resumed_before_it_waits_for_the_debugger() {
+  let runtime = JsRuntime::new(RuntimeOptions {
+    inspector: true,
+    ..Default::default()
+  });
+  let inspector = runtime.inspector();
+  inspector.arm_break_on_start();
+
+  let (to_frontend_tx, _to_frontend_rx) =
+    futures::channel::mpsc::unbounded::<InspectorMsg>();
+  let (from_frontend_tx, from_frontend_rx) =
+    futures::channel::mpsc::unbounded::<String>();
+  inspector
+    .get_session_sender()
+    .unbounded_send(InspectorSessionProxy {
+      channels: InspectorSessionChannels::Regular {
+        tx: to_frontend_tx,
+        rx: from_frontend_rx,
+      },
+      kind: InspectorSessionKind::NonBlocking {
+        wait_for_disconnect: false,
+      },
+    })
+    .unwrap();
+  let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+  from_frontend_tx
+    .unbounded_send(
+      json!({ "id": 1, "method": "Runtime.runIfWaitingForDebugger" })
+        .to_string(),
+    )
+    .unwrap();
+  // What the worker's bootstrap does before `run_web_worker` waits.
+  for _ in 0..4 {
+    inspector.poll_sessions_from_event_loop(&mut cx);
+  }
+  assert!(!inspector.is_paused_on_start());
+  // Returns at once instead of blocking for a second resume.
+  inspector.wait_for_runtime_run_if_waiting_for_debugger();
+}
+
 #[rstest]
 // https://github.com/denoland/deno/issues/29059
 #[case(0.9999999999999999)]

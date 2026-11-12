@@ -13773,16 +13773,17 @@ where the changes are discussed.
 
 359. **`fix(workers)`: `new Worker()` doesn't wait for the worker's isolate**
      (runtime; `runtime/ops/worker_host.rs`, `runtime/web_worker.rs`,
-     `cli/lib/worker.rs`). `op_create_worker` started the worker thread, then
-     blocked the creating thread until the worker had built its isolate,
-     bootstrapped, and sent back its handle. Node's constructor returns at once.
-     Isolate creation costs about 10 ms on macOS but 100 ms or more on Windows
-     (about 120 ms on a 2-core Windows 11 machine, 400 ms with busy workers
-     beside it), so a thread that keeps several workers cycling serialized all
-     of them behind itself: `parallel/test-worker-http2-stream-terminate.js` (6
-     chains of 6 workers) took about 13.5 s on Windows and timed out at 10 s on
-     every run, though terminating a worker was instant. The host now creates
-     the worker's channels, message port and termination signals itself
+     `cli/lib/worker.rs`, `libs/core/inspector.rs`). `op_create_worker` started
+     the worker thread, then blocked the creating thread until the worker had
+     built its isolate, bootstrapped, and sent back its handle. Node's
+     constructor returns at once. Isolate creation costs about 10 ms on macOS
+     but 100 ms or more on Windows (about 120 ms on a 2-core Windows 11 machine,
+     400 ms with busy workers beside it), so a thread that keeps several workers
+     cycling serialized all of them behind itself:
+     `parallel/test-worker-http2-stream-terminate.js` (6 chains of 6 workers)
+     took about 13.5 s on Windows and timed out at 10 s on every run, though
+     terminating a worker was instant. The host now creates the worker's
+     channels, message port and termination signals itself
      (`create_worker_handles()`) and hands the worker's side to the thread
      (`WebWorkerHandleParts`, the new `CreateWebWorkerArgs::handle_parts` /
      `WebWorkerOptions::handle_parts`); the worker publishes its isolate handle
@@ -13793,12 +13794,24 @@ where the changes are discussed.
      posted before the worker is up wait in the channels, as before. A worker
      thread that dies while being created now reports a close (exit code 0)
      instead of failing the constructor. `CreateWebWorkerCb` returns the
-     `WebWorker` alone, and `SendableWebWorkerHandle` is gone.
+     `WebWorker` alone, and `SendableWebWorkerHandle` is gone. A worker that
+     waits for the debugger (`Target.setAutoAttach` with
+     `waitForDebuggerOnStart`) can now reach the frontend, and get its
+     `Runtime.runIfWaitingForDebugger`, while it still bootstraps, before it
+     waits: `wait_for_runtime_run_if_waiting_for_debugger` reset the paused
+     state on entry and then blocked forever. The worker's inspector is now
+     armed (`arm_break_on_start`, as `--inspect-brk` does for the main runtime)
+     before its session is sent to the frontend, and the wait honours a resume
+     that came first.
      - User-facing note: `new Worker()` no longer blocks the creating thread
        while the worker starts (about 100 ms per worker on Windows).
      - Tests: unit_node `worker_threads_test.ts` "new Worker() doesn't wait for
        the isolate" (the constructor is under half the time 5 workers take to
-       come online; before the fix it was 242.5 of 243.6 ms on macOS).
+       come online; before the fix it was 242.5 of 243.6 ms on macOS);
+       `deno_core` unit test `worker_resumed_before_it_waits_for_the_debugger`
+       (hangs without the inspector change); unit `inspector_test.ts`
+       "inspector_worker_wait_for_debugger_on_start" (hung with the first
+       version of this change, on every OS).
      - Node tests enabled: `parallel/test-worker-http2-stream-terminate.js` on
        Windows again (off in 4e03209c4b).
 
@@ -13809,12 +13822,11 @@ where the changes are discussed.
      `StringPrototypeToLowerCase`, which `internal/child_process.ts` imported
      from `internal/primordials.mjs`, a module that doesn't export it. So with
      the shim active, every shell exec on Windows (`execSync("...")`, `exec`,
-     `spawn` with `shell: true`) threw
-     `TypeError:
-     StringPrototypeToLowerCase is not a function` before
-     starting anything; since runtime 3.0.0-denext.10. `primordials.mjs` now
-     exports it. Every other name the polyfills import from that module was
-     checked against its exports (a one-off script); none other was missing.
+     `spawn` with `shell: true`) threw a `TypeError`
+     (`StringPrototypeToLowerCase is not a function`) before starting anything;
+     since runtime 3.0.0-denext.10. `primordials.mjs` now exports it. Every
+     other name the polyfills import from that module was checked against its
+     exports (a one-off script); none other was missing.
      - User-facing note: on Windows, `child_process` shell commands work again
        in a process whose children get Deno as `node`.
      - Tests: unit_node `child_process_test.ts` "shellExecWithNodeShimActive"
