@@ -1,0 +1,40 @@
+# Runner canary: proves our Windows x64 pool (the MacBook VM and brain) runs
+# real jobs. Two parallel jobs on the pool's label, so both hosts get one when
+# free. Push-triggered on canary/** only (no other workflow matches that name).
+name: runner canary
+on:
+  push:
+    branches: ['canary/**']
+permissions:
+  contents: read
+jobs:
+  probe:
+    name: canary ${{ matrix.n }}
+    runs-on: [self-hosted, denext-windows-x64]
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2]
+    steps:
+      - name: Host
+        shell: pwsh
+        run: |
+          "runner: $env:RUNNER_NAME  host: $env:COMPUTERNAME  user: $env:USERNAME"
+          $c = Get-CimInstance Win32_Processor | Select-Object -First 1
+          "cpu: $($c.Name)  cores: $($c.NumberOfCores)  threads: $($c.NumberOfLogicalProcessors)"
+          "ram: {0:N1} GB" -f ((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
+          "session: $([System.Diagnostics.Process]::GetCurrentProcess().SessionId) (0 = no desktop)"
+      - name: Benchmark (CPU, single thread)
+        shell: pwsh
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $h = [System.Security.Cryptography.SHA256]::Create(); $b = [byte[]]::new(1MB)
+          for ($i = 0; $i -lt 400; $i++) { [void]$h.ComputeHash($b) }
+          "sha256 400 MB: $([int]$sw.Elapsed.TotalMilliseconds) ms"
+      - name: Network
+        shell: pwsh
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          (Invoke-WebRequest -UseBasicParsing https://api.github.com/rate_limit).StatusCode
+          "api.github.com: $([int]$sw.Elapsed.TotalMilliseconds) ms"
