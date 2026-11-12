@@ -13654,6 +13654,55 @@ where the changes are discussed.
        `async-hooks/test-crypto-randomBytes.js` and
        `wasi/test-wasi-getentropy.js` (which reaches `random_get`) still pass.
 
+356. **`chore(deps)`: CEF 156.0.28 and Little CMS 2.19** (runtime;
+     `cli/rt_desktop/Cargo.toml`, `Cargo.lock`, `denext_runtime.yml`,
+     `ext/image/image_ops.rs`, `.github/denext-runtime/fetch_dictionaries.py`).
+     - **CEF.** laufey moves from CEF 156.0.15+gcf671c0 (Chromium
+       156.0.8078.80) to CEF 156.0.28+g57389f0 (Chromium 156.0.8078.88), the
+       newest CEF stable build for all six platforms, for the 55 security fixes
+       of Chrome Extended Stable 156.0.8078.88. laufey `d21/cef-156-0-28`
+       c244b33 is pinned in `cli/rt_desktop/Cargo.toml`, `Cargo.lock` and
+       `LAUFEY_SHA`; no laufey code or API change (API 56). laufey's Makefile
+       and `cef/flake.nix` pin each archive by the `.sha256` CEF publishes
+       beside it on its build index; each was downloaded and hashed, and its
+       SHA-1 matches the index. CEF changes no public header between the two
+       builds. It now runs the command line hook before Chromium's
+       `BasicStartupComplete`, so item 184's de-elevation relaunch is redundant
+       but kept; `CefDoMessageLoopWork()` holds a keep-alive until
+       `CefShutdown()`, which the hosts' own loop exit doesn't rely on. Chromium
+       156.0.8078.88 keeps 156.0.8078.80's `chrome_main_delegate.cc`,
+       `spellcheck_common.cc` and `hunspell_dictionaries` commit, so the
+       bundled dictionaries and `fetch_dictionaries.py`'s hashes stand (only
+       its comments move).
+     - **Not yet fixed: CVE-2026-125350** (use-after-free in XML, exploited in
+       the wild, in CISA's KEV catalog). Chrome fixed it in 156.0.8078.96 and
+       157.0.8103.50; no CEF build carries it yet (every CEF 156 build is on
+       156.0.8078.88, and CEF 158 is beta). The next CEF build on Chromium
+       156.0.8078.96 or newer replaces this pin.
+     - **Little CMS.** `lcms2-sys` 4.0.5 → 4.0.7 (lockfile only; `lcms2` 6.1.0
+       asks for `^4.0.4`) moves the statically linked Little CMS from 2.16 to
+       2.19: CVE-2026-41254 / GHSA-4xp6-rcgg-m9qq (an integer overflow in
+       `CubeSize`, checked after the multiplication) and CVE-2026-42798 (an
+       integer overflow in the `.cube` parser). `createImageBitmap()` converts
+       every decoded PNG or JPEG's embedded ICC profile with Little CMS, so a
+       crafted image reached the first one; the `.cube` parser isn't reached.
+     - **Not taken:** `aws-lc-sys` 0.47.0 (a fork-detection ordering fix, no
+       advisory) needs `aws-lc-rs` 1.19.0 and a manifest change
+       (`aws-lc-rs` 1.18.2 and `deno_crypto_provider` ask for `^0.46.0`), so
+       it is not a lockfile-only bump.
+     - User-facing note: the CEF backend embeds Chromium 156.0.8078.88 with
+       its security fixes, but not yet the fix for the exploited
+       CVE-2026-125350; keep `desktop.app.allowedNavigationOrigins` minimal
+       until a CEF build carries it. `createImageBitmap()` on an untrusted
+       image no longer reaches Little CMS 2.16's `CubeSize` overflow.
+     - Tests: `deno_image` unit test
+       `test_little_cms_has_cube_size_overflow_fix` (fails before: Little CMS
+       2160; passes after: 2190); unit `image_bitmap_test.ts`; laufey's
+       headless CEF host tests on macOS arm64 and laufey's full CI on the
+       commit.
+     - Node tests enabled: none; neither CEF nor `createImageBitmap()` is
+       reached by Node's test suite.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -13661,7 +13710,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355) are what the prebuilt `libdenort` carries. The CLI-side
+350, 351, 353, 355, 356) are what the prebuilt `libdenort` carries. The CLI-side
 parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
 packaged app's launchers) are in the branch too, but a stock CLI does not run
 them; denext's own launcher provides that environment.
@@ -13706,10 +13755,11 @@ application-menu clicks with every window closed, item 282; and, for runtime
 app's own menu, Windows' microphone and camera privacy switches and the macOS
 hit region noticing cursor warps, items 327 and 333; and, for runtime
 3.0.0-denext.21, CEF and WebView2 never holding a non-GET navigation for
-will-navigate and a re-issue token bound to the backend's own load, item 342),
+will-navigate and a re-issue token bound to the backend's own load, item 342,
+and CEF 156.0.28, item 356),
 at the commit pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref`
 input). The same commit is the `laufey` git dependency of
-`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 56, CEF 156.0.15).
+`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 56, CEF 156.0.28).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the

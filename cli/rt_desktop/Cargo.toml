@@ -75,11 +75,12 @@ denort = { path = "../rt", default-features = false }
 # app, branch `feat/app-menu-event`, stacked on it, until it lands; runtime
 # 3.0.0-denext.20, API 56: scheme request frames, will-navigate, the app's own
 # menu, Windows' privacy switches refusing capture, the macOS hit region's
-# cursor warps, and the MSVC min/max fix, on laufey's development-denext), pinned to a
-# commit of the Brainwires/laufey fork.
+# cursor warps, and the MSVC min/max fix, on laufey's development-denext;
+# runtime 3.0.0-denext.21: CEF 156.0.28, branch `d21/cef-156-0-28` until it
+# lands), pinned to a commit of the Brainwires/laufey fork.
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "e7b8048efd57fee8aa7953b7c76218b53ebea5b2" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "c244b33ae7fcc957b4d60e9f804330f9184377ce" }
 libsui.workspace = true
 
 bytes.workspace = true

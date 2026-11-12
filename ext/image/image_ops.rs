@@ -594,6 +594,16 @@ mod tests {
 
   use super::*;
 
+  // createImageBitmap() converts an image's embedded ICC profile with the
+  // statically linked Little CMS. 2.19 is the first release whose CubeSize
+  // checks for overflow before multiplying (CVE-2026-41254), which a crafted
+  // profile's CLUT reaches.
+  #[test]
+  fn test_little_cms_has_cube_size_overflow_fix() {
+    let version = lcms2::version();
+    assert!(version >= 2190, "Little CMS {version} is older than 2.19");
+  }
+
   #[test]
   fn test_premultiply_alpha() {
     let rgba = Rgba::<u8>([255, 128, 0, 128]);
