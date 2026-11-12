@@ -17,7 +17,6 @@ use deno_core::webidl::WebIdlInterfaceConverter;
 use deno_crypto_provider::random::fill_secure_random;
 use rand::Rng;
 use rand::rngs::StdRng;
-use rand::thread_rng;
 
 use crate::CryptoError;
 use crate::fast_uuid_v4_bytes;
@@ -33,7 +32,8 @@ pub fn op_crypto_random_uuid_batch<'s>(
 ) -> Result<v8::Local<'s, v8::String>, CryptoError> {
   let mut entropy = [0u8; UUID_BYTES * UUID_BATCH_SIZE];
   let mut output = [0u8; UUID_STRING_BYTES * UUID_BATCH_SIZE];
-  thread_rng().fill(&mut entropy[..]);
+  fill_secure_random(&mut entropy[..])
+    .map_err(|_| CryptoError::RandomGenerationFailed)?;
 
   // Both lengths are exact multiples, so the remainders are empty.
   let (entropy_chunks, _) = entropy.as_chunks_mut::<UUID_BYTES>();
