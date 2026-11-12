@@ -231,7 +231,10 @@
       "reason": "Passes on macOS (3 isolated runs, debug build); not verified on Windows"
     },
     "es-module/test-import-cjs-jitless.mjs": {},
-    "es-module/test-esm-windows.js": {},
+    "es-module/test-esm-windows.js": {
+      "windows": false,
+      "reason": "Windows Server 2022 (GitHub's windows-2022) still resolves con.mjs to the CON device, so writing the fixture fails with EISDIR; passes on Windows 11 (our runner). Needs fs to open reserved device names as files"
+    },
     "es-module/test-import-preload-require-cycle.js": {},
     "es-module/test-import-require-tla-twice.js": {},
     "es-module/test-loaders-hidden-from-users.js": {},
@@ -682,7 +685,10 @@
       "reason": "net.Socket IPC handle passing uses SCM_RIGHTS, not yet implemented on Windows"
     },
     "parallel/test-child-process-send-type-error.js": {},
-    "parallel/test-child-process-send-utf8.js": {},
+    "parallel/test-child-process-send-utf8.js": {
+      "windows": false,
+      "reason": "Windows: the child's IPC read loop sometimes sees the stream closed (UnexpectedEof) before the large UTF-8 message is fully read; failed 3 of 3 on GitHub's windows-2022, passed on our Windows 11 runner. An IPC race to fix"
+    },
     "parallel/test-child-process-set-blocking.js": {},
     "parallel/test-child-process-silent.js": {},
     "parallel/test-child-process-spawn-args.mjs": {},
@@ -5086,7 +5092,10 @@
     "parallel/test-worker-exit-heapsnapshot.js": {},
     "parallel/test-worker-fs-stat-watcher.js": {},
     "parallel/test-worker-http2-generic-streams-terminate.js": {},
-    "parallel/test-worker-http2-stream-terminate.js": {},
+    "parallel/test-worker-http2-stream-terminate.js": {
+      "windows": false,
+      "reason": "Windows: terminating a worker with an open http2 stream hangs until the 10 s timeout, on every Windows run (GitHub's windows-2022 and our runner); passes on Linux and macOS"
+    },
     "parallel/test-worker-invalid-workerdata.js": {},
     "parallel/test-worker-load-file-with-extension-other-than-js.js": {},
     "parallel/test-worker-memory.js": {},
