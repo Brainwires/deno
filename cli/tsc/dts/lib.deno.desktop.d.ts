@@ -538,6 +538,10 @@ declare namespace Deno {
     fullscreen?: boolean;
     /** See {@linkcode BrowserWindow.setTitleBarStyle}. */
     titleBarStyle?: TitleBarStyle;
+    /** See {@linkcode BrowserWindow.setTitleVisibility}. */
+    titleVisibility?: TitleVisibility;
+    /** See {@linkcode BrowserWindow.setToolbarStyle}. */
+    toolbarStyle?: ToolbarStyle;
     /** See {@linkcode BrowserWindow.setWindowButtonPosition}. */
     trafficLightPosition?: WindowButtonPosition;
     /** See {@linkcode BrowserWindow.setVibrancy}. */
@@ -576,6 +580,21 @@ declare namespace Deno {
    * system buttons on top. `"hiddenInset"`: the same with the macOS traffic
    * lights inset. */
   export type TitleBarStyle = "default" | "hidden" | "hiddenInset";
+
+  /** `"hidden"`: the title bar draws no title text but keeps its buttons
+   * and drag area; the window's title still names it in the Dock / taskbar,
+   * the Window menu, Mission Control and alt-tab. */
+  export type TitleVisibility = "visible" | "hidden";
+
+  /** How an (empty) toolbar lays the macOS title bar out: `"unified"` one
+   * tall bar with the title left-aligned (Finder, Safari),
+   * `"unifiedCompact"` the same shorter, `"expanded"` the title on its own
+   * row; `"automatic"` no toolbar. */
+  export type ToolbarStyle =
+    | "automatic"
+    | "unified"
+    | "unifiedCompact"
+    | "expanded";
 
   /** Where the macOS traffic lights go: the close button's top-left corner,
    * in points from the window's top-left. */
@@ -1189,6 +1208,22 @@ declare namespace Deno {
     /** Change the title bar style. Returns `false` (and changes nothing)
      * where the backend can't: only macOS has title bar styles. */
     setTitleBarStyle(style: TitleBarStyle): boolean;
+    /** Hide (or show again) the title text while the native title bar, its
+     * buttons and its drag area stay. Returns `false` (and changes nothing)
+     * where unsupported (see `windowCapabilities().titleVisibility`): a
+     * frameless window, Linux under a window manager's decorations (only a
+     * title bar GTK draws itself can hide its title), the CEF backend on
+     * Linux. Under the `"hidden"` / `"hiddenInset"` title bar styles the
+     * title is never drawn; the choice applies again under `"default"`. */
+    setTitleVisibility(visibility: TitleVisibility): boolean;
+    /** Lay the macOS title bar out with an empty toolbar in this style
+     * (macOS 11+; `"automatic"` removes it). Under `"hiddenInset"` it sets
+     * the inset toolbar's style. Returns `false` (and changes nothing) under
+     * the `"hidden"` title bar style for anything but `"automatic"` (use
+     * `"hiddenInset"`), and where unsupported (other OSes; see
+     * `windowCapabilities().toolbarStyle`). While it is not `"automatic"`,
+     * `setTitleBarStyle("hidden")` returns `false`. */
+    setToolbarStyle(style: ToolbarStyle): boolean;
     /** Move the macOS traffic lights (Electron's `setWindowButtonPosition` /
      * `trafficLightPosition`); `null` puts them back. Kept across resizes
      * and fullscreen. Returns `false` where unsupported. */
@@ -2012,6 +2047,11 @@ declare namespace Deno {
       /** {@linkcode Deno.desktop.speech} speaks through the OS engine (the
        * engine may still be missing: Linux without speech-dispatcher). */
       textToSpeech: boolean;
+      /** {@linkcode BrowserWindow.setTitleVisibility} can hide the title
+       * (macOS, Windows, and Linux where GTK draws the title bars). */
+      titleVisibility: boolean;
+      /** {@linkcode BrowserWindow.setToolbarStyle} works (macOS 11+). */
+      toolbarStyle: boolean;
     }
 
     /** A voice of {@linkcode speech.voices}. */

@@ -1670,6 +1670,12 @@ pub struct WindowCapabilitiesInfo {
   /// `Deno.desktop.speech` speaks through the OS engine (laufey API 50); the
   /// engine itself may still be missing (Linux without speech-dispatcher).
   pub text_to_speech: bool,
+  /// `BrowserWindow.setTitleVisibility("hidden")` hides the title text and
+  /// keeps the native title bar (laufey API 57): macOS, Windows, and Linux
+  /// where GTK draws the title bars (client-side decorations).
+  pub title_visibility: bool,
+  /// `BrowserWindow.setToolbarStyle()` works (laufey API 57, macOS 11+).
+  pub toolbar_style: bool,
 }
 
 /// `Deno.Tray.capabilities()` (laufey API 50): which tray events and data
@@ -2653,6 +2659,15 @@ pub trait DesktopApi: Send + Sync + 'static {
   }
   /// 0 default, 1 hidden, 2 hidden inset.
   fn set_titlebar_style(&self, _window_id: u32, _style: i32) -> bool {
+    false
+  }
+  /// laufey `LAUFEY_TITLE_*`: 0 visible, 1 hidden (API 57).
+  fn set_title_visibility(&self, _window_id: u32, _visibility: i32) -> bool {
+    false
+  }
+  /// laufey `LAUFEY_TOOLBAR_STYLE_*`: 0 automatic, 1 unified, 2 unified
+  /// compact, 3 expanded (API 57, macOS 11+).
+  fn set_toolbar_style(&self, _window_id: u32, _style: i32) -> bool {
     false
   }
   fn set_traffic_light_position(
@@ -3743,6 +3758,18 @@ impl BrowserWindow {
   #[symbol("Deno_privateDesktopTitleBarStyle")]
   fn title_bar_style(&self, #[smi] style: i32) -> bool {
     self.api.set_titlebar_style(self.window_id, style)
+  }
+
+  #[fast]
+  #[symbol("Deno_privateDesktopTitleVisibility")]
+  fn title_visibility(&self, #[smi] visibility: i32) -> bool {
+    self.api.set_title_visibility(self.window_id, visibility)
+  }
+
+  #[fast]
+  #[symbol("Deno_privateDesktopToolbarStyle")]
+  fn toolbar_style(&self, #[smi] style: i32) -> bool {
+    self.api.set_toolbar_style(self.window_id, style)
   }
 
   #[fast]

@@ -252,6 +252,8 @@ await r.step("window API", async () => {
     "fileDialogFilesAndDirectories",
     "fileDialogModal",
     "messageDialogs",
+    "titleVisibility",
+    "toolbarStyle",
   ];
   r.check(
     "windowCapabilities() reports every key as a boolean",
@@ -483,6 +485,30 @@ await r.step("window API", async () => {
       chrome.vibrancy === caps.vibrancy && chrome.mica === caps.mica,
     { chrome, caps },
   );
+
+  // --- title visibility and toolbar style (laufey API 57) ---
+  const title = {
+    hidden: win.setTitleVisibility("hidden"),
+    visible: win.setTitleVisibility("visible"),
+    unified: win.setToolbarStyle("unified"),
+    hiddenRefused: !win.setTitleBarStyle("hidden"),
+    automatic: win.setToolbarStyle("automatic"),
+    defaultStyle: win.setTitleBarStyle("default"),
+  };
+  r.set("title", title);
+  r.check(
+    "title setters return what windowCapabilities() reports",
+    title.hidden === caps.titleVisibility &&
+      title.unified === caps.toolbarStyle,
+    { title, caps },
+  );
+  if (caps.toolbarStyle) {
+    r.check(
+      'setTitleBarStyle("hidden") is refused while a toolbar style is set',
+      title.hiddenRefused && title.automatic,
+      title,
+    );
+  }
 
   // --- a user close, canceled ---
   let canceled = 0;

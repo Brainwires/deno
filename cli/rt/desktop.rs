@@ -810,6 +810,12 @@ pub const DESKTOP_JS: &str = r#"
     if (options.titleBarStyle != null) {
       win.setTitleBarStyle(options.titleBarStyle);
     }
+    if (options.titleVisibility != null) {
+      win.setTitleVisibility(options.titleVisibility);
+    }
+    if (options.toolbarStyle != null) {
+      win.setToolbarStyle(options.toolbarStyle);
+    }
     if (options.trafficLightPosition != null) {
       win.setWindowButtonPosition(options.trafficLightPosition);
     }
@@ -866,6 +872,19 @@ pub const DESKTOP_JS: &str = r#"
   const privateBackdrop = Symbol.for("Deno_privateDesktopBackdrop");
   const privateScreenId = Symbol.for("Deno_privateDesktopScreenId");
   const TITLE_BAR_STYLES = { default: 0, hidden: 1, hiddenInset: 2 };
+  // laufey API 57: LAUFEY_TITLE_* and LAUFEY_TOOLBAR_STYLE_*.
+  const privateTitleVisibility = Symbol.for(
+    "Deno_privateDesktopTitleVisibility",
+  );
+  const privateToolbarStyle = Symbol.for("Deno_privateDesktopToolbarStyle");
+  const TITLE_VISIBILITIES = { __proto__: null, visible: 0, hidden: 1 };
+  const TOOLBAR_STYLES = {
+    __proto__: null,
+    automatic: 0,
+    unified: 1,
+    unifiedCompact: 2,
+    expanded: 3,
+  };
   const BACKGROUND_MATERIALS = {
     none: 0,
     mica: 1,
@@ -897,6 +916,26 @@ pub const DESKTOP_JS: &str = r#"
       throw new TypeError(`Unknown title bar style: ${style}`);
     }
     return this[privateTitleBarStyle](raw);
+  };
+  // Hide the title text, keeping the native title bar, its buttons and its
+  // drag area; the window's title still names it in the Dock / taskbar.
+  // False where this backend / OS can't (windowCapabilities().titleVisibility).
+  BrowserWindowPrototype.setTitleVisibility = function(visibility) {
+    const raw = TITLE_VISIBILITIES[String(visibility)];
+    if (raw === undefined) {
+      throw new TypeError(`Unknown title visibility: ${visibility}`);
+    }
+    return this[privateTitleVisibility](raw);
+  };
+  // macOS 11+: an empty toolbar in this style lays the title bar out. False
+  // where unsupported (windowCapabilities().toolbarStyle), and under the
+  // "hidden" title bar style for anything but "automatic".
+  BrowserWindowPrototype.setToolbarStyle = function(style) {
+    const raw = TOOLBAR_STYLES[String(style)];
+    if (raw === undefined) {
+      throw new TypeError(`Unknown toolbar style: ${style}`);
+    }
+    return this[privateToolbarStyle](raw);
   };
   BrowserWindowPrototype.setWindowButtonPosition = function(position) {
     if (position == null) return this[privateWindowButtonPosition](true, 0, 0);
@@ -4158,6 +4197,13 @@ mod tests {
       "cancelQuit:",
       "BrowserWindowPrototype.setTitleBarStyle",
       "BrowserWindowPrototype.setWindowButtonPosition",
+      // laufey API 57.
+      "BrowserWindowPrototype.setTitleVisibility",
+      "BrowserWindowPrototype.setToolbarStyle",
+      "win.setTitleVisibility(options.titleVisibility);",
+      "win.setToolbarStyle(options.toolbarStyle);",
+      "const TOOLBAR_STYLES = {",
+      "unifiedCompact: 2,",
       "BrowserWindowPrototype.setBackgroundMaterial",
       "BrowserWindowPrototype.setVibrancy",
       "BrowserWindowPrototype.getScreen",
