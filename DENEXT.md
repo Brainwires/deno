@@ -13742,6 +13742,35 @@ where the changes are discussed.
      - Node tests enabled: `es-module/test-esm-windows.js` on Windows again (off
        in 4e03209c4b; it failed on Windows Server 2022 only).
 
+358. **`fix(child_process)`: on Windows, an IPC message sent just before the
+     sender exits arrives whole** (runtime; `ext/io/bi_pipe.rs`,
+     `ext/process/ipc.rs`). tokio's named-pipe writes (mio) report a write done
+     as soon as the overlapped `WriteFile` is queued, and their flush is a
+     no-op. A message larger than the pipe's 64 KiB buffer is mostly still
+     queued when `process.send()`'s op resolves; a child that then exits (its
+     event loop empty) has the queued write cancelled by the process teardown,
+     and the parent reads part of the message and then the end of the stream:
+     `UnexpectedEof: ipc stream closed while reading message`, or no message at
+     all. `parallel/test-child-process-send-utf8.js` (an 800 KB message) failed
+     3 of 3 on Windows Server 2022, and every time on Windows 11 when the parent
+     was kept from reading for a second. libuv completes a pipe write only when
+     `WriteFile` does, and keeps the process alive until then. The IPC channel
+     now writes each message with `BiPipeWrite::write_all_completed`: on
+     Windows, overlapped `WriteFile` calls on a duplicate of the pipe handle, on
+     the blocking pool, each waited for with `GetOverlappedResult` (the event's
+     low bit set, so the completion stays off mio's completion port); the op
+     resolves once the bytes are in the pipe, and the pending op keeps the
+     process alive meanwhile. On Unix a socket write is complete when it
+     returns, so nothing changes there.
+     - User-facing note: on Windows, `process.send()` of a large message right
+       before a process exits no longer loses the message.
+     - Tests: unit_node `child_process_test.ts`
+       "forkLargeMessageThenExitArrivesWhole" (a child sends 400,000 `ß` and
+       exits while the parent keeps its thread busy for 1.5 s; the denext.18
+       binary lost the message 4 of 4 times on Windows 11).
+     - Node tests enabled: `parallel/test-child-process-send-utf8.js` on Windows
+       again (off in 4e03209c4b).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -13749,7 +13778,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-357) are what the prebuilt `libdenort` carries. The CLI-side
+350, 351, 353, 355-358) are what the prebuilt `libdenort` carries. The CLI-side
 parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
 packaged app's launchers) are in the branch too, but a stock CLI does not run
 them; denext's own launcher provides that environment.

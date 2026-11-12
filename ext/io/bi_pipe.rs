@@ -342,6 +342,10 @@ pub struct BiPipeWrite {
   #[cfg(windows)]
   #[pin]
   inner: tokio::io::WriteHalf<tokio::net::windows::named_pipe::NamedPipeClient>,
+  /// The pipe's handle, when this half was made from one (`BiPipe::from_raw`),
+  /// for [`BiPipeWrite::write_all_completed`].
+  #[cfg(windows)]
+  raw_handle: Option<usize>,
 }
 
 #[cfg(unix)]
@@ -365,6 +369,142 @@ impl BiPipeWrite {
       self.inner.keep_open_on_drop = true;
     }
   }
+}
+
+impl BiPipeWrite {
+  /// Writes all of `buf`, returning only once the OS has completed the write:
+  /// the bytes are in the pipe and survive this process exiting right after.
+  ///
+  /// On Unix a socket write is complete when `write` returns. On Windows,
+  /// tokio's named-pipe writes (mio) report a write done as soon as the
+  /// overlapped `WriteFile` is queued, and their flush is a no-op: a process
+  /// that exits right after a write larger than the pipe's buffer (a child's
+  /// `process.send()` just before it ends) has the queued write cancelled by
+  /// the process teardown, and the reader sees the stream end mid-message.
+  /// libuv completes a pipe write only when `WriteFile` does; this does too.
+  pub async fn write_all_completed(
+    &mut self,
+    buf: &[u8],
+  ) -> Result<(), std::io::Error> {
+    #[cfg(windows)]
+    if let Some(raw_handle) = self.raw_handle {
+      return write_all_completed_windows(raw_handle, buf).await;
+    }
+    tokio::io::AsyncWriteExt::write_all(self, buf).await
+  }
+}
+
+/// Writes `buf` to the pipe `raw_handle` with overlapped `WriteFile` calls on
+/// the blocking pool, waiting for each to complete.
+#[cfg(windows)]
+async fn write_all_completed_windows(
+  raw_handle: usize,
+  buf: &[u8],
+) -> Result<(), std::io::Error> {
+  use std::os::windows::io::FromRawHandle;
+  use std::os::windows::io::OwnedHandle;
+
+  use windows_sys::Win32::Foundation::DUPLICATE_SAME_ACCESS;
+  use windows_sys::Win32::Foundation::DuplicateHandle;
+  use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+  if buf.is_empty() {
+    return Ok(());
+  }
+  // A duplicate the blocking write owns, so the handle stays valid however
+  // long the write waits, even if this half is dropped meanwhile.
+  let mut duplicate = std::ptr::null_mut();
+  // SAFETY: `raw_handle` is the pipe handle this half owns and holds open for
+  // the duration of this call; `duplicate` is a valid out pointer.
+  let ok = unsafe {
+    let process = GetCurrentProcess();
+    DuplicateHandle(
+      process,
+      raw_handle as _,
+      process,
+      &mut duplicate,
+      0,
+      0,
+      DUPLICATE_SAME_ACCESS,
+    )
+  };
+  if ok == 0 {
+    return Err(std::io::Error::last_os_error());
+  }
+  // SAFETY: DuplicateHandle succeeded, so `duplicate` is a handle we own.
+  let handle = unsafe { OwnedHandle::from_raw_handle(duplicate as _) };
+  let buf = buf.to_vec();
+  tokio::task::spawn_blocking(move || write_all_overlapped(&handle, &buf))
+    .await
+    .map_err(std::io::Error::other)?
+}
+
+/// Blocking: writes all of `buf` to the overlapped pipe `handle`, one
+/// `WriteFile` at a time, waiting for each to complete.
+#[cfg(windows)]
+fn write_all_overlapped(
+  handle: &std::os::windows::io::OwnedHandle,
+  buf: &[u8],
+) -> Result<(), std::io::Error> {
+  use std::io;
+  use std::os::windows::io::AsRawHandle;
+  use std::os::windows::io::FromRawHandle;
+  use std::os::windows::io::OwnedHandle;
+
+  use windows_sys::Win32::Foundation::ERROR_IO_PENDING;
+  use windows_sys::Win32::Storage::FileSystem::WriteFile;
+  use windows_sys::Win32::System::IO::GetOverlappedResult;
+  use windows_sys::Win32::System::IO::OVERLAPPED;
+  use windows_sys::Win32::System::Threading::CreateEventW;
+
+  // SAFETY: creates an unnamed manual-reset event with default security.
+  let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+  if event.is_null() {
+    return Err(io::Error::last_os_error());
+  }
+  // SAFETY: CreateEventW succeeded, so `event` is a handle we own.
+  let event = unsafe { OwnedHandle::from_raw_handle(event as _) };
+  let pipe = handle.as_raw_handle();
+  let mut pos = 0;
+  while pos < buf.len() {
+    let chunk = &buf[pos..];
+    let len = u32::try_from(chunk.len()).unwrap_or(u32::MAX);
+    // SAFETY: OVERLAPPED is a plain C struct; all-zero is its initial state.
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    // The low bit set on the event keeps the completion off the I/O
+    // completion port mio associated the pipe with (documented for
+    // GetQueuedCompletionStatus): this write is ours, not mio's.
+    overlapped.hEvent = (event.as_raw_handle() as usize | 1) as _;
+    let mut written = 0u32;
+    // SAFETY: `chunk` and `overlapped` stay alive and unmoved until
+    // GetOverlappedResult below has waited for the write to complete.
+    let ok = unsafe {
+      WriteFile(
+        pipe as _,
+        chunk.as_ptr(),
+        len,
+        &mut written,
+        &mut overlapped,
+      )
+    };
+    if ok == 0 {
+      let err = io::Error::last_os_error();
+      if err.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
+        return Err(err);
+      }
+    }
+    // SAFETY: waits for the write started above, with its own OVERLAPPED.
+    let ok =
+      unsafe { GetOverlappedResult(pipe as _, &overlapped, &mut written, 1) };
+    if ok == 0 {
+      return Err(io::Error::last_os_error());
+    }
+    if written == 0 {
+      return Err(io::ErrorKind::WriteZero.into());
+    }
+    pos += written as usize;
+  }
+  Ok(())
 }
 
 #[cfg(unix)]
@@ -452,7 +592,10 @@ impl
       tokio::net::windows::named_pipe::NamedPipeClient,
     >,
   ) -> Self {
-    Self { inner: value }
+    Self {
+      inner: value,
+      raw_handle: None,
+    }
   }
 }
 
@@ -496,7 +639,13 @@ fn from_raw(
     )?
   };
   let (read, write) = tokio::io::split(pipe);
-  Ok((BiPipeRead { inner: read }, BiPipeWrite { inner: write }))
+  Ok((
+    BiPipeRead { inner: read },
+    BiPipeWrite {
+      inner: write,
+      raw_handle: Some(handle as usize),
+    },
+  ))
 }
 
 impl tokio::io::AsyncRead for BiPipeRead {

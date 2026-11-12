@@ -14,6 +14,7 @@ use deno_io::BiPipe;
 use deno_io::BiPipeRead;
 use deno_io::BiPipeWrite;
 use memchr::memchr;
+#[cfg(unix)]
 use tokio::io::AsyncWriteExt;
 
 /// Whether this process's own Node IPC channel (`NODE_CHANNEL_FD`) is shared:
@@ -147,7 +148,7 @@ async fn write_with_optional_fd(
     }
     return Ok(());
   }
-  write_half.write_all(msg).await?;
+  write_half.write_all_completed(msg).await?;
   Ok(())
 }
 

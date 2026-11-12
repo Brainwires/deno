@@ -1475,6 +1475,40 @@ Deno.test(async function forkExitAndChannelEofTogetherNoError() {
   assert(codes.every((code) => code === 3), String(codes));
 });
 
+// A forked child that sends a message much larger than the IPC pipe's buffer
+// and exits at once (Node's parallel/test-child-process-send-utf8.js). The
+// parent doesn't read until the child has had time to exit, so the child's
+// write can't finish before then. On Windows the write used to be reported
+// done while still queued, and the child's exit cancelled the rest: the parent
+// got no message (or UnexpectedEof). It must arrive whole.
+Deno.test(async function forkLargeMessageThenExitArrivesWhole() {
+  const file = await Deno.makeTempFile({ suffix: ".mjs" });
+  await Deno.writeTextFile(
+    file,
+    `import process from "node:process";\nprocess.send("ß".repeat(400_000));\n`,
+  );
+  try {
+    const message = withTimeout<string>(30_000);
+    const exited = withTimeout<number | null>(30_000);
+    const child = CP.fork(file, [], {
+      stdio: ["inherit", "inherit", "inherit", "ipc"],
+    });
+    child.on("message", (m) => message.resolve(m as string));
+    child.on("exit", (code) => exited.resolve(code));
+    // Keep this thread from reading the channel for a while.
+    const end = Date.now() + 1500;
+    while (Date.now() < end) {
+      // busy
+    }
+    const received = await message.promise;
+    assertEquals(received.length, 400_000);
+    assert(received === "ß".repeat(400_000), "the message arrived altered");
+    assertEquals(await exited.promise, 0);
+  } finally {
+    await Deno.remove(file);
+  }
+});
+
 Deno.test({
   name: "[node/child_process] SIGSTOP and SIGCONT preserve child state",
   ignore: Deno.build.os === "windows",
