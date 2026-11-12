@@ -13840,6 +13840,48 @@ where the changes are discussed.
      - Node tests enabled: none; Node's suite doesn't run with Deno's `node`
        shim active.
 
+361. **`ci(denext runtime)`: a release's legs overflow from a busy pool to
+     GitHub's image** (`ci/runtime-overflow`; CI;
+     `.github/denext-runtime/plan_matrix.py`, `plan_matrix_test.py`,
+     `pick_runner.py`, `.github/workflows/denext_runtime.yml`). Every leg of a
+     target went to its pool (`matrix.runner`), and the mac-x64 pool has one
+     slot, so a release ran denort, denort bin and cli for `x86_64-apple-darwin`
+     one after another on it (about 4 hours).
+     - The plan step now also picks each job's runner for the run
+       (`matrix.runs_on.<job>`, read before `runner` / `gui_runner` /
+       `laufey_runner`): the pool while it has a slot the job would not wait
+       for, else the target's GitHub image (`os`: `macos-15-intel`, `macos-15`,
+       `ubuntu-22.04`, and so on, the images fork pull requests get). Each pool
+       starts with its free slots: `DENEXT_POOL_HEALTH`'s `healthy_slots` (else
+       `slots`) minus the `busy` of its label and of the labels sharing its
+       capacity, when that value is fresh and lists the label; none when it
+       marks the pool not ok or paused; else `RUNNER_*_SLOTS` (mac-arm 2,
+       mac-x64 1, Linux 22.04 3, as in `denext_tests.yml`).
+     - The rule, in dependency order: a job whose `needs` held a slot of the
+       same pool takes it over (it starts as that job frees it, so it waits for
+       nothing); else it takes a free slot if one is left; else the image (on
+       the pool it would only queue). The jobs that start together after setup
+       (denort, denort bin, laufey) take the free slots longest chain first, so
+       a slot passes down a whole chain. On the 1-slot mac-x64 pool denort bin
+       and then cli stay on the pool while denort builds on `macos-15-intel` in
+       parallel (package and e2e launch on the image there anyway: no GUI
+       session); on mac-arm with 2 slots every leg stays. A job the run skips
+       (`cli_only`, `reuse_*_run_id`) holds no slot. Our runners first: only a
+       job that would wait goes to GitHub.
+     - Hosted images: these jobs already ran there for fork pull requests and
+       with the variables unset (the signing steps use a throwaway keychain and
+       the repository's secrets, the installs skip what is present), so no step
+       needed a guard.
+     - Tests: `plan_matrix_test.py` (one and two slots on each mac pool, zero
+       and garbage slot counts, the Linux pool, health with busy slots, with
+       `healthy_slots` and without, unhealthy and paused pools, stale or garbage
+       health, a pool health does not list, shared labels, skipped jobs, target
+       selection, a GUI pool of its own, an image named by a variable, the `-I`
+       import of `pick_runner.py`, each job's `runs-on` and the slot defaults
+       against `denext_tests.yml`), run by the lint job.
+     - User-facing note: none; CI only.
+     - Node tests enabled: none, because this is CI only.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
