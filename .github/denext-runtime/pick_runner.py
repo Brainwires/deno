@@ -29,6 +29,12 @@ Prints one `<key>=<runs-on JSON>` line per job key. Environment:
   that wait on this pick and so hold no slot yet (" / test node_compat").
 - GITHUB_TOKEN (`actions: read`), GITHUB_REPOSITORY, GITHUB_RUN_ID,
   GITHUB_API_URL.
+- PICK_HEALTH (optional): the organization variable DENEXT_POOL_HEALTH, which
+  the runner fleet's watchdog (ops/runners/watchdog.sh in denext-internal)
+  keeps: {"v": 1, "checked_at": <epoch>, "pools": {"<label>": {"ok": bool,
+  ...}}, ...}. A pool whose `ok` is false gets no slot (every job takes
+  PICK_IMAGE). A missing, unparsable or stale value (checked_at more than 30
+  minutes old), or a pool it does not list, changes nothing.
 - RUNNER_STATUS_TOKEN (optional): a token that may list the organization's
   self-hosted runners. With it a runner of ours busy with another
   repository's job (denext's CI shares the pools) counts too.
@@ -37,16 +43,46 @@ A slot is taken by any queued or running job, in this repository, that names
 the pool's label: the scheduler starts a just-in-time runner per queued job.
 On any failure (the API, a timeout, a malformed answer) every job takes the
 pool: the routing it had before this script.
+
+A re-run (GITHUB_RUN_ATTEMPT > 1) whose previous attempt had a job on the pool
+that was cancelled before any runner took it sends every job to PICK_IMAGE:
+the pool was unhealthy. That is how the runner fleet's watchdog
+(ops/runners/watchdog.sh in denext-internal) re-routes a job stuck on a dead
+pool: it cancels the run (never on a default branch) and re-runs this picker's
+job, which then overflows to GitHub. A failure of that check is ignored.
 """
 
 import json
 import os
 import sys
+import time
 import urllib.request
 
 ACTIVE = {"queued", "in_progress", "waiting", "pending", "requested"}
 TIMEOUT = 20  # seconds, per request
 MAX_PAGES = 10
+HEALTH_MAX_AGE = 30 * 60  # seconds: an older DENEXT_POOL_HEALTH is ignored
+
+
+def pool_unhealthy(value, label, now=None):
+    """True only when `value` (DENEXT_POOL_HEALTH, schema v1) is fresh and its
+    pools[label].ok is false. Anything else (missing, unparsable, stale, the
+    label absent, ok true) is False: the picker behaves as without it."""
+    try:
+        health = json.loads(value or "")
+    except ValueError:
+        return False
+    if not isinstance(health, dict):
+        return False
+    at = health.get("checked_at")
+    if isinstance(at, bool) or not isinstance(at, (int, float)):
+        return False
+    age = (time.time() if now is None else now) - at
+    if age > HEALTH_MAX_AGE or age < -300:
+        return False
+    pools = health.get("pools")
+    pool = pools.get(label) if isinstance(pools, dict) else None
+    return isinstance(pool, dict) and pool.get("ok") is False
 
 
 def parse_runner(value):
@@ -138,6 +174,27 @@ def list_all(get, path, key):
     return items
 
 
+def previous_attempt_stalled(get, repo, run_id, attempt, label):
+    """True on a re-run whose previous attempt had a job on the pool `label`
+    that ended cancelled with no runner (it never left the queue)."""
+    try:
+        n = int(attempt or "1")
+    except ValueError:
+        return False
+    if n <= 1:
+        return False
+    want = _labels(label)
+    jobs = list_all(
+        get, f"/repos/{repo}/actions/runs/{run_id}/attempts/{n - 1}/jobs", "jobs"
+    )
+    return any(
+        j.get("conclusion") == "cancelled"
+        and not j.get("runner_name")
+        and want & set(j.get("labels") or [])
+        for j in jobs
+    )
+
+
 def busy_slots(get, repo, run_id, label, skip, runner_get=None):
     """The pool's taken slots: this repository's active jobs that name its
     label (this run's own jobs that wait on the pick left out), and with
@@ -179,8 +236,33 @@ def pick(env, get=None, runner_get=None, warn=None):
         slots = 1
     if not ours or env.get("PICK_FORK_PR") == "true":
         return allocate(keys, None, image, 0)
+    if pool_unhealthy(env.get("PICK_HEALTH"), label):
+        if warn:
+            warn(
+                f"pick_runner: DENEXT_POOL_HEALTH marks {label} unhealthy;"
+                " every job takes the image"
+            )
+        return allocate(keys, ours, image, 0)
     skip = tuple(s for s in (env.get("PICK_OWN_SKIP") or "").split("|") if s)
     labels = {label, *(env.get("PICK_SHARED_LABELS") or "").split()}
+    try:
+        if previous_attempt_stalled(
+            get,
+            env.get("GITHUB_REPOSITORY", ""),
+            env.get("GITHUB_RUN_ID", ""),
+            env.get("GITHUB_RUN_ATTEMPT", "1"),
+            {label},
+        ):
+            if warn:
+                warn(
+                    "pick_runner: the previous attempt's job on the pool was cancelled"
+                    " before a runner took it (the pool was unhealthy); every job"
+                    " takes the image"
+                )
+            return allocate(keys, ours, image, 0)
+    except Exception as e:  # the check is advisory: fall through to the slot count
+        if warn:
+            warn(f"pick_runner: previous-attempt check failed: {e}; ignored")
     try:
         busy = busy_slots(
             get,

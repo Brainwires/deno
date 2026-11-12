@@ -89,6 +89,10 @@ jobs:
           PICK_SHARED_LABELS: ${{ inputs.pick_shared_labels }}
           PICK_FORK_PR: ${{ (startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) }}
           PICK_OWN_SKIP: ' / build debug'
+          # The runner fleet's watchdog publishes each pool's health here
+          # (pick_runner.py: a pool marked false overflows; a missing or
+          # stale value changes nothing).
+          PICK_HEALTH: ${{ vars.DENEXT_POOL_HEALTH }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 -I .github/denext-runtime/pick_runner.py >>"$GITHUB_OUTPUT" ||
@@ -272,6 +276,9 @@ jobs:
           PICK_FORK_PR: ${{ (startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) }}
           # This leg's own jobs that wait on this pick hold no slot yet.
           PICK_OWN_SKIP: ' / test '
+          # The runner fleet's watchdog publishes each pool's health here
+          # (pick_runner.py).
+          PICK_HEALTH: ${{ vars.DENEXT_POOL_HEALTH }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 -I .github/denext-runtime/pick_runner.py >>"$GITHUB_OUTPUT" ||

@@ -10,6 +10,7 @@ Usage: python3 -I .github/denext-runtime/pick_runner_test.py
 import importlib.util
 import json
 import os
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -40,6 +41,15 @@ def env(**kw):
 
 def job(status, name="x / test libs", labels=("self-hosted", LABEL)):
     return {"status": status, "name": name, "labels": list(labels)}
+
+
+def stalled(runner_name=None, labels=("self-hosted", LABEL)):
+    """A previous attempt's job: cancelled, taken by `runner_name` (None: never)."""
+    return {
+        "conclusion": "cancelled",
+        "runner_name": runner_name,
+        "labels": list(labels),
+    }
 
 
 def fake(runs):
@@ -161,6 +171,86 @@ class Pick(unittest.TestCase):
     def test_a_malformed_answer_keeps_the_pool(self):
         picks = pick.pick(env(), lambda path: {"unexpected": True})
         self.assertEqual(set(picks.values()), {POOL})
+
+    def test_a_rerun_after_a_stalled_attempt_overflows_everything(self):
+        def get(path):
+            if "/attempts/1/jobs" in path:
+                return {"jobs": [stalled()]}
+            return fake({})(path)
+
+        picks = pick.pick(env(GITHUB_RUN_ATTEMPT="2"), get)
+        self.assertEqual(set(picks.values()), {'"windows-2022"'})
+
+    def test_a_rerun_after_a_job_that_ran_keeps_the_pool(self):
+        def get(path):
+            if "/attempts/1/jobs" in path:
+                return {
+                    "jobs": [
+                        stalled(runner_name="denext-windows-x64-1-1"),
+                        stalled(labels=["windows-2022"]),
+                    ]
+                }
+            return fake({})(path)
+
+        picks = pick.pick(env(GITHUB_RUN_ATTEMPT="2"), get)
+        self.assertEqual(picks["node_compat_0"], POOL)
+
+    def test_a_first_attempt_never_asks_for_a_previous_one(self):
+        def get(path):
+            self.assertNotIn("/attempts/", path)
+            return fake({})(path)
+
+        picks = pick.pick(env(GITHUB_RUN_ATTEMPT="1"), get)
+        self.assertEqual(picks["node_compat_0"], POOL)
+
+    def test_a_failed_previous_attempt_check_is_ignored(self):
+        def get(path):
+            if "/attempts/" in path:
+                raise OSError("boom")
+            return fake({})(path)
+
+        warned = []
+        picks = pick.pick(env(GITHUB_RUN_ATTEMPT="3"), get, warn=warned.append)
+        self.assertEqual(picks["node_compat_0"], POOL)
+        self.assertTrue(any("previous-attempt check failed" in w for w in warned))
+
+    def health(self, healthy, age=60, **extra):
+        pools = {LABEL: {"ok": healthy, "reason": "", "busy": 0, "slots": 1}}
+        pools.update(extra)
+        at = int(time.time()) - age
+        return json.dumps({"v": 1, "checked_at": at, "pools": pools, "alerts": []})
+
+    def test_a_pool_marked_unhealthy_overflows_everything(self):
+        picks = pick.pick(env(PICK_HEALTH=self.health(False)), fake({}))
+        self.assertEqual(set(picks.values()), {'"windows-2022"'})
+
+    def test_a_pool_marked_healthy_keeps_its_slots(self):
+        picks = pick.pick(env(PICK_HEALTH=self.health(True)), fake({}))
+        self.assertEqual(picks["node_compat_0"], POOL)
+
+    def test_a_stale_health_value_changes_nothing(self):
+        picks = pick.pick(env(PICK_HEALTH=self.health(False, age=31 * 60)), fake({}))
+        self.assertEqual(picks["node_compat_0"], POOL)
+
+    def test_a_missing_or_broken_health_value_changes_nothing(self):
+        now = int(time.time())
+        bad = {"ok": False}
+        for value in (
+            "",
+            "not json",
+            "[]",
+            json.dumps({"pools": {LABEL: bad}}),
+            json.dumps({"checked_at": "x", "pools": {LABEL: bad}}),
+            json.dumps({"checked_at": now, "pools": [LABEL]}),
+            json.dumps({"checked_at": now, "pools": {LABEL: False}}),
+        ):
+            picks = pick.pick(env(PICK_HEALTH=value), fake({}))
+            self.assertEqual(picks["node_compat_0"], POOL, value)
+
+    def test_another_pool_marked_unhealthy_changes_nothing(self):
+        value = self.health(True, **{"denext-macos-x64": {"ok": False}})
+        picks = pick.pick(env(PICK_HEALTH=value), fake({}))
+        self.assertEqual(picks["node_compat_0"], POOL)
 
     def test_outputs_are_json(self):
         for value in pick.pick(env(PICK_SLOTS="3"), fake({})).values():
