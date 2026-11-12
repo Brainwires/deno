@@ -515,7 +515,7 @@ jobs:
           tc=$(sed -n 's/^channel = "\(.*\)"$/\1/p' denext-ci/rust-toolchain.toml)
           [[ "$tc" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
             { echo "::error::rust-toolchain.toml's channel '$tc' is not an exact Rust release (x.y.z)"; exit 1; }
-          rustup toolchain install "$tc" --profile minimal --no-self-update ${force_non_host:-}
+          rustup toolchain install "$tc" --profile minimal --no-self-update ${force_non_host:+"$force_non_host"}
           echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
 
       - name: Install dependencies (Linux)
@@ -855,7 +855,7 @@ jobs:
             bash .github/denext-runtime/rosetta_tools.sh "$RUNNER_TEMP/rosetta-tools" "$GITHUB_ENV"
             echo "$RUNNER_TEMP/rosetta-tools" >>"$GITHUB_PATH"
           fi
-          rustup toolchain install "$tc" --profile minimal --no-self-update ${force_non_host:-}
+          rustup toolchain install "$tc" --profile minimal --no-self-update ${force_non_host:+"$force_non_host"}
           echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
 
       # The `v8` crate is Brainwires/rusty_v8 (Cargo.toml's [patch.crates-io]):
@@ -1175,7 +1175,7 @@ jobs:
             bash .github/denext-runtime/rosetta_tools.sh "$RUNNER_TEMP/rosetta-tools" "$GITHUB_ENV"
             echo "$RUNNER_TEMP/rosetta-tools" >>"$GITHUB_PATH"
           fi
-          rustup toolchain install "$tc" --profile minimal --no-self-update ${force_non_host:-}
+          rustup toolchain install "$tc" --profile minimal --no-self-update ${force_non_host:+"$force_non_host"}
           echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
 
       # The `v8` crate is Brainwires/rusty_v8 (Cargo.toml's [patch.crates-io]):
@@ -1463,7 +1463,7 @@ jobs:
             bash .github/denext-runtime/rosetta_tools.sh "$RUNNER_TEMP/rosetta-tools" "$GITHUB_ENV"
             echo "$RUNNER_TEMP/rosetta-tools" >>"$GITHUB_PATH"
           fi
-          rustup toolchain install "$tc" --profile minimal --no-self-update ${force_non_host:-}
+          rustup toolchain install "$tc" --profile minimal --no-self-update ${force_non_host:+"$force_non_host"}
           echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
 
       # The `v8` crate is Brainwires/rusty_v8 (Cargo.toml's [patch.crates-io]):
