@@ -32,6 +32,39 @@ jobs:
           $h = [System.Security.Cryptography.SHA256]::Create(); $b = [byte[]]::new(1MB)
           for ($i = 0; $i -lt 400; $i++) { [void]$h.ComputeHash($b) }
           "sha256 400 MB: $([int]$sw.Elapsed.TotalMilliseconds) ms"
+      - name: Benchmark (small-file I/O)
+        shell: pwsh
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP "io"; New-Item -ItemType Directory -Force $d | Out-Null
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          for ($i = 0; $i -lt 5000; $i++) { [IO.File]::WriteAllText("$d\f$i.txt", "x" * 512) }
+          $w = $sw.ElapsedMilliseconds; $sw.Restart()
+          $n = 0; foreach ($f in [IO.Directory]::EnumerateFiles($d)) { $n += ([IO.File]::ReadAllText($f)).Length }
+          $r = $sw.ElapsedMilliseconds; $sw.Restart()
+          Remove-Item -Recurse -Force $d
+          "small files: write 5000 in $w ms, read in $r ms, delete in $($sw.ElapsedMilliseconds) ms"
+      - name: Benchmark (big-file I/O)
+        shell: pwsh
+        run: |
+          $f = Join-Path $env:RUNNER_TEMP "big.bin"; $b = [byte[]]::new(4MB)
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $s = [IO.File]::Create($f); for ($i = 0; $i -lt 256; $i++) { $s.Write($b, 0, $b.Length) }; $s.Flush($true); $s.Close()
+          $w = $sw.ElapsedMilliseconds; $sw.Restart()
+          [void][IO.File]::ReadAllBytes($f); $r = $sw.ElapsedMilliseconds; Remove-Item $f
+          "1 GB: write $w ms, read $r ms"
+      - name: Benchmark (process spawn)
+        shell: pwsh
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          for ($i = 0; $i -lt 200; $i++) { cmd.exe /c exit 0 }
+          "spawn cmd.exe x200: $($sw.ElapsedMilliseconds) ms"
+      - name: Benchmark (CPU, all threads)
+        shell: pwsh
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $jobs = 1..[Environment]::ProcessorCount | ForEach-Object { Start-ThreadJob { $h = [System.Security.Cryptography.SHA256]::Create(); $b = [byte[]]::new(1MB); for ($i = 0; $i -lt 200; $i++) { [void]$h.ComputeHash($b) } } }
+          $jobs | Wait-Job | Out-Null
+          "sha256 200 MB per thread x $([Environment]::ProcessorCount): $($sw.ElapsedMilliseconds) ms"
       - name: Network
         shell: pwsh
         run: |
