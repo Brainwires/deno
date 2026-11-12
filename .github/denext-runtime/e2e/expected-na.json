@@ -289,8 +289,7 @@
       "launch: a notification the user dismisses fires close"
     ],
     "origin": [
-      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1",
-      "launch: a stream the page stops reading is held back (backpressure), not drained"
+      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1"
     ],
     "passkeys": [
       "launch: a completed registration / authentication ceremony"
