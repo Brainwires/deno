@@ -269,6 +269,8 @@ pub fn clamp_permissions(
     options.allow_import = None;
     options.deny_import = Some(Vec::new());
   }
+  // denext: a lifecycle script never needs MIDI devices
+  options.allow_midi = None;
   // FFI only from the package's own folder (`-A` / `--allow-ffi` become
   // that; a path list keeps the entries inside it), never more
   options.allow_ffi = match options.allow_ffi.take() {

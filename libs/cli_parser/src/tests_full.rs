@@ -2540,6 +2540,41 @@ fn deny_sys() {
   );
 }
 
+// denext: a bare `--allow-midi` is `devices` only; `sysex` is explicit.
+#[test]
+fn allow_midi() {
+  let midi = |args: &[&str]| {
+    let mut argv = svec!["deno", "run"];
+    argv.extend(args.iter().map(|a| a.to_string()));
+    argv.push("script.ts".to_string());
+    flags_from_vec(argv)
+      .map(|f| (f.permissions.allow_midi, f.permissions.deny_midi))
+  };
+  assert_eq!(
+    midi(&["--allow-midi"]).unwrap(),
+    (Some(svec!["devices"]), None)
+  );
+  assert_eq!(
+    midi(&["--allow-midi=sysex"]).unwrap(),
+    (Some(svec!["sysex"]), None)
+  );
+  assert_eq!(
+    midi(&["--allow-midi=devices,sysex"]).unwrap(),
+    (Some(svec!["devices", "sysex"]), None)
+  );
+  assert_eq!(
+    midi(&["--allow-midi", "--deny-midi=sysex"]).unwrap(),
+    (Some(svec!["devices"]), Some(svec!["sysex"]))
+  );
+  assert_eq!(midi(&["--deny-midi"]).unwrap(), (None, Some(vec![])));
+  assert!(midi(&["--allow-midi=all"]).is_err());
+  assert!(midi(&["--deny-midi=foo"]).is_err());
+  assert!(midi(&["-A", "--allow-midi"]).is_err());
+  let flags =
+    flags_from_vec(svec!["deno", "run", "--allow-midi", "script.ts"]).unwrap();
+  assert!(flags.has_permission());
+}
+
 #[test]
 fn allow_sys_allowlist() {
   let r =

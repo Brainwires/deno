@@ -109,6 +109,7 @@ fn pretty_permission_name(name: &str) -> &str {
   match name {
     "net-connect" => "net connect",
     "net-listen" => "net listen",
+    "midi" => "MIDI",
     other => other,
   }
 }
@@ -4002,6 +4003,135 @@ impl DenyDescriptor for SysDescriptor {
   }
 }
 
+fn midi_kind(sysex: bool) -> MidiDescriptor {
+  if sysex {
+    MidiDescriptor::Sysex
+  } else {
+    MidiDescriptor::Devices
+  }
+}
+
+#[derive(Debug, thiserror::Error, deno_error::JsError)]
+pub enum MidiDescriptorParseError {
+  #[class(type)]
+  #[error(
+    "unknown midi access kind \"{0}\" (expected \"devices\" or \"sysex\")"
+  )]
+  InvalidKind(String),
+}
+
+/// denext: what `--allow-midi` grants (Web MIDI, `ext/midi`). `Devices` is
+/// access to MIDI ports (listing, opening, sending and receiving channel,
+/// system common and real-time messages); `Sysex` adds system exclusive
+/// messages, which can reprogram or reflash a device, so it is asked for
+/// separately, as browsers prompt for it separately. A `Sysex` grant covers
+/// `Devices`, and a `Devices` denial covers `Sysex`. A bare `--allow-midi` is
+/// `--allow-midi=devices` (the CLI layer writes it so), while `--allow-all`
+/// and a prompt's "allow all" grant both.
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug, PartialOrd, Ord)]
+pub enum MidiDescriptor {
+  Devices,
+  Sysex,
+}
+
+impl MidiDescriptor {
+  pub fn parse(kind: &str) -> Result<Self, MidiDescriptorParseError> {
+    match kind {
+      "devices" => Ok(Self::Devices),
+      "sysex" => Ok(Self::Sysex),
+      _ => Err(MidiDescriptorParseError::InvalidKind(kind.to_string())),
+    }
+  }
+
+  pub fn as_str(&self) -> &'static str {
+    match self {
+      Self::Devices => "devices",
+      Self::Sysex => "sysex",
+    }
+  }
+}
+
+impl QueryDescriptor for MidiDescriptor {
+  type AllowDesc = MidiDescriptor;
+  type DenyDesc = MidiDescriptor;
+
+  fn flag_name() -> &'static str {
+    "midi"
+  }
+
+  fn display_name(&self) -> Cow<'_, str> {
+    Cow::Borrowed(self.as_str())
+  }
+
+  fn from_allow(allow: &Self::AllowDesc) -> Self {
+    *allow
+  }
+
+  fn as_allow(&self) -> Option<Self::AllowDesc> {
+    Some(*self)
+  }
+
+  fn as_deny(&self) -> Self::DenyDesc {
+    *self
+  }
+
+  fn check_in_permission(
+    &self,
+    perm: &mut UnaryPermission<Self::AllowDesc>,
+    api_name: Option<&str>,
+  ) -> Result<(), PermissionDeniedError> {
+    audit_and_skip_check_if_is_permission_fully_granted!(
+      perm,
+      Self::flag_name(),
+      self.as_str()
+    );
+    perm.check_desc(Some(self), false, api_name)
+  }
+
+  /// A `sysex` grant also grants `devices`.
+  fn matches_allow(&self, other: &Self::AllowDesc) -> bool {
+    self == other || *other == MidiDescriptor::Sysex
+  }
+
+  /// A `devices` denial also denies `sysex`.
+  fn matches_deny(&self, other: &Self::DenyDesc) -> bool {
+    self == other || *other == MidiDescriptor::Devices
+  }
+
+  /// Revoking `devices` also revokes a `sysex` grant (which covers it).
+  fn revokes(&self, other: &Self::AllowDesc) -> bool {
+    self == other || *self == MidiDescriptor::Devices
+  }
+
+  fn stronger_than_deny(&self, other: &Self::DenyDesc) -> bool {
+    self.matches_deny(other)
+  }
+
+  /// A `sysex` denial leaves `devices` whole (not "partially denied").
+  fn overlaps_deny(&self, _other: &Self::DenyDesc) -> bool {
+    false
+  }
+}
+
+impl AllowDescriptor for MidiDescriptor {
+  type QueryDesc<'a> = MidiDescriptor;
+  type DenyDesc = MidiDescriptor;
+
+  fn cmp_allow(&self, other: &Self) -> Ordering {
+    self.cmp(other)
+  }
+
+  fn cmp_deny(&self, _other: &Self::DenyDesc) -> Ordering {
+    Ordering::Greater
+  }
+}
+
+impl DenyDescriptor for MidiDescriptor {
+  fn cmp_deny(&self, other: &Self) -> Ordering {
+    self.cmp(other)
+  }
+}
+
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct FfiQueryDescriptor<'a>(pub PathQueryDescriptor<'a>);
 
@@ -4564,6 +4694,33 @@ impl UnaryPermission<SysDescriptor> {
   }
 }
 
+impl UnaryPermission<MidiDescriptor> {
+  pub fn query(&self, kind: MidiDescriptor) -> PermissionState {
+    self.query_desc(Some(&kind), AllowPartial::TreatAsPartialGranted)
+  }
+
+  pub fn request(&mut self, kind: MidiDescriptor) -> PermissionState {
+    self.request_desc(Some(&kind))
+  }
+
+  pub fn revoke(&mut self, kind: MidiDescriptor) -> PermissionState {
+    self.revoke_desc(Some(&kind))
+  }
+
+  pub fn check(
+    &mut self,
+    kind: MidiDescriptor,
+    api_name: Option<&str>,
+  ) -> Result<(), PermissionDeniedError> {
+    audit_and_skip_check_if_is_permission_fully_granted!(
+      self,
+      MidiDescriptor::flag_name(),
+      kind.as_str()
+    );
+    self.check_desc(Some(&kind), false, api_name)
+  }
+}
+
 impl UnaryPermission<AllowRunDescriptor> {
   pub fn query(&self, cmd: Option<&RunQueryDescriptor>) -> PermissionState {
     self.query_desc(cmd, AllowPartial::TreatAsPartialGranted)
@@ -4682,6 +4839,8 @@ pub struct Permissions {
   pub run: UnaryPermission<AllowRunDescriptor>,
   pub ffi: UnaryPermission<FfiDescriptor>,
   pub import: UnaryPermission<ImportDescriptor>,
+  /// denext: Web MIDI (`--allow-midi[=devices,sysex]`).
+  pub midi: UnaryPermission<MidiDescriptor>,
   /// The direction-specific net model (`--{allow,deny}-net-{connect,listen}`)
   /// is in effect. Decided once, from the options the permissions were built
   /// with (a worker takes its parent's), so nothing the program does later
@@ -4729,6 +4888,7 @@ impl Permissions {
       && self.run.is_allow_all()
       && self.ffi.is_allow_all()
       && self.import.is_allow_all()
+      && self.midi.is_allow_all()
   }
 
   fn disable_prompting(&mut self) {
@@ -4740,6 +4900,7 @@ impl Permissions {
     self.run.prompt = false;
     self.ffi.prompt = false;
     self.import.prompt = false;
+    self.midi.prompt = false;
   }
 }
 
@@ -4767,6 +4928,15 @@ pub struct PermissionsOptions {
   pub deny_write: Option<Vec<String>>,
   pub allow_import: Option<Vec<String>>,
   pub deny_import: Option<Vec<String>>,
+  /// denext: `--allow-midi[=devices,sysex]` (Web MIDI). An empty list grants
+  /// both kinds (`--allow-all`); the CLI layer turns a bare `--allow-midi`
+  /// into `["devices"]`, so system exclusive messages always need an explicit
+  /// `sysex`.
+  #[serde(default)]
+  pub allow_midi: Option<Vec<String>>,
+  /// denext: `--deny-midi[=devices,sysex]`.
+  #[serde(default)]
+  pub deny_midi: Option<Vec<String>>,
   pub prompt: bool,
   /// denext: `--clean-run-env[=<VARS>]`. When `Some`, a spawned program
   /// inherits only a minimal environment (`PATH`, `HOME`, the locale, the
@@ -4784,6 +4954,8 @@ pub struct PermissionsOptions {
 pub enum PermissionsFromOptionsError {
   #[error("{0}")]
   PathResolve(#[from] PathResolveError),
+  #[error("{0}")]
+  MidiDescriptorParse(#[from] MidiDescriptorParseError),
   #[error("{0}")]
   SysDescriptorParse(#[from] SysDescriptorParseError),
   #[error("{0}")]
@@ -5037,6 +5209,11 @@ impl Permissions {
         })?,
         opts.prompt,
       ),
+      midi: Permissions::new_unary(
+        parse_maybe_vec(opts.allow_midi.as_deref(), MidiDescriptor::parse)?,
+        parse_maybe_vec(opts.deny_midi.as_deref(), MidiDescriptor::parse)?,
+        opts.prompt,
+      ),
     })
   }
 
@@ -5053,6 +5230,7 @@ impl Permissions {
       run: UnaryPermission::allow_all(),
       ffi: UnaryPermission::allow_all(),
       import: UnaryPermission::allow_all(),
+      midi: UnaryPermission::allow_all(),
       net_directional: false,
       clean_run_env: None,
     }
@@ -5080,6 +5258,7 @@ impl Permissions {
       run: Permissions::new_unary(None, None, prompt),
       ffi: Permissions::new_unary(None, None, prompt),
       import: Permissions::new_unary(None, None, prompt),
+      midi: Permissions::new_unary(None, None, prompt),
       net_directional: false,
       clean_run_env: None,
     }
@@ -5165,6 +5344,9 @@ pub enum ChildPermissionError {
   #[class("NotCapable")]
   #[error("Can't escalate parent thread permissions")]
   Escalation,
+  #[class(inherit)]
+  #[error("{0}")]
+  MidiDescriptorParse(#[from] MidiDescriptorParseError),
   #[class(inherit)]
   #[error("{0}")]
   PathResolve(#[from] PathResolveError),
@@ -5490,6 +5672,11 @@ impl PermissionsContainer {
         ))
       },
     )?;
+    worker_perms.midi = inner
+      .midi
+      .create_child_permissions(child_permissions_arg.midi, |text| {
+        MidiDescriptor::parse(text).map(Some)
+      })?;
 
     Ok(PermissionsContainer::new(
       self.descriptor_parser.clone(),
@@ -6104,6 +6291,48 @@ impl PermissionsContainer {
   pub fn check_sys_all(&self) -> Result<(), PermissionCheckError> {
     self.inner.lock().sys.check_all()?;
     Ok(())
+  }
+
+  /// denext: Web MIDI access (`navigator.requestMIDIAccess`), with system
+  /// exclusive messages when `sysex`. A refusal of `sysex` names
+  /// `--allow-midi=sysex`, since a bare `--allow-midi` doesn't grant it.
+  pub fn check_midi(
+    &self,
+    sysex: bool,
+    api_name: &str,
+  ) -> Result<(), PermissionCheckError> {
+    let result = self
+      .inner
+      .lock()
+      .midi
+      .check(midi_kind(sysex), Some(api_name));
+    result.map_err(|mut err| {
+      if sysex && err.custom_message.is_none() {
+        let hint = if is_standalone() {
+          "specify the required permissions during compilation using `deno compile --allow-midi=sysex`"
+        } else {
+          "run again with the --allow-midi=sysex flag"
+        };
+        err.custom_message = Some(format!("Requires {}, {hint}", err.access));
+      }
+      PermissionCheckError::from(err)
+    })
+  }
+
+  pub fn query_midi(&self, sysex: bool) -> PermissionState {
+    let inner = self.inner.lock();
+    if inner.midi.is_allow_all() {
+      return PermissionState::Granted;
+    }
+    inner.midi.query(midi_kind(sysex))
+  }
+
+  pub fn revoke_midi(&self, sysex: bool) -> PermissionState {
+    self.inner.lock().midi.revoke(midi_kind(sysex))
+  }
+
+  pub fn request_midi(&self, sysex: bool) -> PermissionState {
+    self.inner.lock().midi.request(midi_kind(sysex))
   }
 
   #[inline(always)]
@@ -7511,6 +7740,8 @@ pub struct ChildPermissionsArg {
   run: ChildUnaryPermissionArg,
   sys: ChildUnaryPermissionArg,
   write: ChildUnaryPermissionArg,
+  /// denext: Web MIDI; a list takes `"devices"` / `"sysex"`.
+  midi: ChildUnaryPermissionArg,
 }
 
 impl ChildPermissionsArg {
@@ -7524,6 +7755,7 @@ impl ChildPermissionsArg {
       run: ChildUnaryPermissionArg::Inherit,
       sys: ChildUnaryPermissionArg::Inherit,
       write: ChildUnaryPermissionArg::Inherit,
+      midi: ChildUnaryPermissionArg::Inherit,
     }
   }
 
@@ -7537,6 +7769,7 @@ impl ChildPermissionsArg {
       run: ChildUnaryPermissionArg::NotGranted,
       sys: ChildUnaryPermissionArg::NotGranted,
       write: ChildUnaryPermissionArg::NotGranted,
+      midi: ChildUnaryPermissionArg::NotGranted,
     }
   }
 }
@@ -7621,6 +7854,11 @@ impl<'de> Deserialize<'de> for ChildPermissionsArg {
             let arg = serde_json::from_value::<ChildUnaryPermissionArg>(value);
             child_permissions_arg.write = arg.map_err(|e| {
               de::Error::custom(format!("(deno.permissions.write) {e}"))
+            })?;
+          } else if key == "midi" {
+            let arg = serde_json::from_value::<ChildUnaryPermissionArg>(value);
+            child_permissions_arg.midi = arg.map_err(|e| {
+              de::Error::custom(format!("(deno.permissions.midi) {e}"))
             })?;
           } else {
             return Err(de::Error::custom("unknown permission name"));
@@ -10588,6 +10826,130 @@ mod tests {
     );
   }
 
+  // denext: Web MIDI. A `devices` grant never grants `sysex`; a `sysex`
+  // grant covers `devices`; a `devices` denial covers `sysex`.
+  #[test]
+  fn test_midi_permission() {
+    set_prompter(Box::new(TestPrompter));
+    let parser = TestPermissionDescriptorParser;
+    let from = |opts: PermissionsOptions| {
+      Permissions::from_options(&parser, &opts).unwrap()
+    };
+    use MidiDescriptor::Devices;
+    use MidiDescriptor::Sysex;
+
+    let devices = from(PermissionsOptions {
+      allow_midi: Some(svec!["devices"]),
+      ..Default::default()
+    });
+    assert_eq!(devices.midi.query(Devices), PermissionState::Granted);
+    assert_eq!(devices.midi.query(Sysex), PermissionState::Prompt);
+
+    let sysex = from(PermissionsOptions {
+      allow_midi: Some(svec!["sysex"]),
+      ..Default::default()
+    });
+    assert_eq!(sysex.midi.query(Devices), PermissionState::Granted);
+    assert_eq!(sysex.midi.query(Sysex), PermissionState::Granted);
+
+    // `--allow-all` (an empty list) grants both
+    let all = from(PermissionsOptions {
+      allow_midi: Some(vec![]),
+      ..Default::default()
+    });
+    assert!(all.midi.is_allow_all());
+    assert_eq!(all.midi.query(Sysex), PermissionState::Granted);
+
+    let deny_sysex = from(PermissionsOptions {
+      allow_midi: Some(vec![]),
+      deny_midi: Some(svec!["sysex"]),
+      ..Default::default()
+    });
+    assert_eq!(deny_sysex.midi.query(Devices), PermissionState::Granted);
+    assert_eq!(deny_sysex.midi.query(Sysex), PermissionState::Denied);
+
+    let deny_devices = from(PermissionsOptions {
+      allow_midi: Some(svec!["sysex"]),
+      deny_midi: Some(svec!["devices"]),
+      ..Default::default()
+    });
+    assert_eq!(deny_devices.midi.query(Devices), PermissionState::Denied);
+    assert_eq!(deny_devices.midi.query(Sysex), PermissionState::Denied);
+
+    let none = from(PermissionsOptions::default());
+    assert_eq!(none.midi.query(Devices), PermissionState::Prompt);
+
+    assert!(
+      Permissions::from_options(
+        &parser,
+        &PermissionsOptions {
+          allow_midi: Some(svec!["everything"]),
+          ..Default::default()
+        }
+      )
+      .is_err()
+    );
+
+    // revoking `devices` also drops a `sysex` grant; revoking `sysex` alone
+    // keeps `devices`
+    let mut perms = from(PermissionsOptions {
+      allow_midi: Some(svec!["sysex"]),
+      ..Default::default()
+    });
+    assert_eq!(perms.midi.revoke(Sysex), PermissionState::Prompt);
+    assert_eq!(perms.midi.query(Devices), PermissionState::Prompt);
+    let mut perms = from(PermissionsOptions {
+      allow_midi: Some(svec!["devices", "sysex"]),
+      ..Default::default()
+    });
+    assert_eq!(perms.midi.revoke(Sysex), PermissionState::Prompt);
+    assert_eq!(perms.midi.query(Devices), PermissionState::Granted);
+    assert_eq!(perms.midi.revoke(Devices), PermissionState::Prompt);
+
+    // prompts: a granted `devices` prompt doesn't grant `sysex`, and a
+    // denied `devices` prompt denies `sysex` too
+    #[rustfmt::skip]
+    {
+      let prompt_value = PERMISSION_PROMPT_STUB_VALUE_SETTER.lock();
+      let mut perms = Permissions::none_with_prompt();
+      prompt_value.set(true);
+      assert_eq!(perms.midi.request(Devices), PermissionState::Granted);
+      assert_eq!(perms.midi.query(Sysex), PermissionState::Prompt);
+      prompt_value.set(false);
+      assert!(perms.midi.check(Sysex, None).is_err());
+      assert_eq!(perms.midi.query(Devices), PermissionState::Granted);
+      let mut perms = Permissions::none_with_prompt();
+      prompt_value.set(false);
+      assert_eq!(perms.midi.request(Devices), PermissionState::Denied);
+      assert_eq!(perms.midi.query(Sysex), PermissionState::Denied);
+    };
+
+    // the refusal names the flag that grants it
+    let container = PermissionsContainer::new(
+      Arc::new(TestPermissionDescriptorParser),
+      Permissions::none_without_prompt(),
+    );
+    let err = container.check_midi(true, "navigator.requestMIDIAccess()");
+    assert!(
+      err
+        .unwrap_err()
+        .to_string()
+        .ends_with("--allow-midi=sysex flag"),
+    );
+    let err = container.check_midi(false, "navigator.requestMIDIAccess()");
+    assert!(err.unwrap_err().to_string().ends_with("--allow-midi flag"));
+    let container = PermissionsContainer::new(
+      Arc::new(TestPermissionDescriptorParser),
+      from(PermissionsOptions {
+        allow_midi: Some(svec!["devices"]),
+        ..Default::default()
+      }),
+    );
+    assert!(container.check_midi(false, "x").is_ok());
+    assert!(container.check_midi(true, "x").is_err());
+    assert_eq!(container.query_midi(true), PermissionState::Prompt);
+  }
+
   #[test]
   fn test_deserialize_child_permissions_arg() {
     set_prompter(Box::new(TestPrompter));
@@ -10602,6 +10964,7 @@ mod tests {
         run: ChildUnaryPermissionArg::Inherit,
         sys: ChildUnaryPermissionArg::Inherit,
         write: ChildUnaryPermissionArg::Inherit,
+        midi: ChildUnaryPermissionArg::Inherit,
       }
     );
     assert_eq!(
@@ -10615,6 +10978,7 @@ mod tests {
         run: ChildUnaryPermissionArg::NotGranted,
         sys: ChildUnaryPermissionArg::NotGranted,
         write: ChildUnaryPermissionArg::NotGranted,
+        midi: ChildUnaryPermissionArg::NotGranted,
       }
     );
     assert_eq!(
@@ -10649,6 +11013,7 @@ mod tests {
         "run": true,
         "sys": true,
         "write": true,
+        "midi": true,
       }))
       .unwrap(),
       ChildPermissionsArg {
@@ -10660,6 +11025,7 @@ mod tests {
         run: ChildUnaryPermissionArg::Granted,
         sys: ChildUnaryPermissionArg::Granted,
         write: ChildUnaryPermissionArg::Granted,
+        midi: ChildUnaryPermissionArg::Granted,
       }
     );
     assert_eq!(
@@ -10672,6 +11038,7 @@ mod tests {
         "run": false,
         "sys": false,
         "write": false,
+        "midi": false,
       }))
       .unwrap(),
       ChildPermissionsArg {
@@ -10683,6 +11050,7 @@ mod tests {
         run: ChildUnaryPermissionArg::NotGranted,
         sys: ChildUnaryPermissionArg::NotGranted,
         write: ChildUnaryPermissionArg::NotGranted,
+        midi: ChildUnaryPermissionArg::NotGranted,
       }
     );
     assert_eq!(
@@ -10695,6 +11063,7 @@ mod tests {
         "run": ["foo", "file:///bar/baz", "./qux"],
         "sys": ["hostname", "osRelease"],
         "write": ["foo", "file:///bar/baz"],
+        "midi": ["sysex"],
       }))
       .unwrap(),
       ChildPermissionsArg {
@@ -10722,6 +11091,7 @@ mod tests {
           "foo",
           "file:///bar/baz"
         ]),
+        midi: ChildUnaryPermissionArg::GrantedList(svec!["sysex"]),
       }
     );
   }

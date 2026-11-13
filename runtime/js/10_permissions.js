@@ -41,7 +41,7 @@ const illegalConstructorKey = Symbol("illegalConstructorKey");
 
 /**
  * Every permission name the runtime knows, frozen: `Deno.permissions.names`.
- * @type {ReadonlyArray<"read" | "write" | "net" | "net-connect" | "net-listen" | "env" | "sys" | "run" | "ffi" | "import">}
+ * @type {ReadonlyArray<"read" | "write" | "net" | "net-connect" | "net-listen" | "env" | "sys" | "run" | "ffi" | "import" | "midi">}
  */
 const permissionNames = ObjectFreeze([
   "read",
@@ -54,6 +54,7 @@ const permissionNames = ObjectFreeze([
   "run",
   "ffi",
   "import",
+  "midi",
 ]);
 
 /**
@@ -156,6 +157,9 @@ function cache(desc, rawStatus) {
     key += `-${desc.variable}&`;
   } else if (desc.name === "sys" && desc.kind) {
     key += `-${desc.kind}&`;
+  } else if (desc.name === "midi") {
+    // denext: `{ name: "midi", sysex: true }` is its own permission
+    key += desc.sysex ? "-sysex&" : "$";
   } else {
     key += "$";
   }
@@ -304,7 +308,7 @@ function serializePermissions(permissions) {
       }
     }
     for (
-      const key of new SafeArrayIterator(["env", "net", "sys"])
+      const key of new SafeArrayIterator(["env", "net", "sys", "midi"])
     ) {
       if (ArrayIsArray(permissions[key])) {
         serializedPermissions[key] = ArrayPrototypeSlice(permissions[key]);

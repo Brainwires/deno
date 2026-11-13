@@ -737,6 +737,17 @@ declare namespace Deno {
      * @default {false}
      */
     write?: "inherit" | boolean | Array<string | URL>;
+
+    /** Specifies if the `midi` permission (Web MIDI) should be requested or
+     * revoked. If set to `"inherit"`, the current `midi` permission will be
+     * inherited. If set to `true`, the global `midi` permission (system
+     * exclusive messages included) will be requested. If set to `false`, the
+     * `midi` permission will be revoked. If set to an array, the listed kinds
+     * (`"devices"`, `"sysex"`) will be requested.
+     *
+     * @default {false}
+     */
+    midi?: "inherit" | boolean | Array<"devices" | "sysex">;
   }
 
   /**
@@ -4574,7 +4585,8 @@ declare namespace Deno {
     | "env"
     | "sys"
     | "ffi"
-    | "import";
+    | "import"
+    | "midi";
 
   /** The current status of the permission:
    *
@@ -4765,6 +4777,20 @@ declare namespace Deno {
     host?: string;
   }
 
+  /** The permission descriptor for the `allow-midi` and `deny-midi`
+   * permissions, which control Web MIDI (`navigator.requestMIDIAccess()`).
+   * `{ name: "midi" }` is access to MIDI devices; `{ name: "midi", sysex: true }`
+   * adds system exclusive messages, which can reprogram a device and are
+   * granted only by `--allow-midi=sysex` (or `--allow-all`), never by a bare
+   * `--allow-midi`. The shape is the Permissions API's `MidiPermissionDescriptor`.
+   *
+   * @category Permissions */
+  export interface MidiPermissionDescriptor {
+    name: "midi";
+    /** Whether system exclusive messages are included. */
+    sysex?: boolean;
+  }
+
   /** Permission descriptors which define a permission and can be queried,
    * requested, or revoked.
    *
@@ -4783,7 +4809,8 @@ declare namespace Deno {
     | EnvPermissionDescriptor
     | SysPermissionDescriptor
     | FfiPermissionDescriptor
-    | ImportPermissionDescriptor;
+    | ImportPermissionDescriptor
+    | MidiPermissionDescriptor;
 
   /** The interface which defines what event types are supported by
    * {@linkcode PermissionStatus} instances.

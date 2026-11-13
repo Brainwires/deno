@@ -44,6 +44,11 @@ const lazyWebGPU = () =>
 function loadWebGPU() {
   return lazyWebGPU();
 }
+// denext: Web MIDI (`navigator.requestMIDIAccess`, ext/midi), loaded on
+// first use.
+let _midi;
+const lazyMidi = () =>
+  _midi ?? (_midi = core.loadExtScript("ext:deno_midi/01_midi.js"));
 
 /**
  * @param {string} arch
@@ -201,6 +206,16 @@ ObjectDefineProperties(Navigator.prototype, {
       return navigatorUAData;
     },
   },
+  requestMIDIAccess: {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: function requestMIDIAccess(options = undefined) {
+      webidl.assertBranded(this, NavigatorPrototype);
+      return lazyMidi().requestMIDIAccess(options);
+    },
+  },
 });
 const NavigatorPrototype = Navigator.prototype;
 
@@ -237,6 +252,26 @@ const mainRuntimeGlobalProperties = {
     set() {},
   },
   Storage: core.propNonEnumerableLazyLoaded((w) => w.Storage, lazyWebStorage),
+  MIDIAccess: core.propNonEnumerableLazyLoaded((m) => m.MIDIAccess, lazyMidi),
+  MIDIConnectionEvent: core.propNonEnumerableLazyLoaded(
+    (m) => m.MIDIConnectionEvent,
+    lazyMidi,
+  ),
+  MIDIInput: core.propNonEnumerableLazyLoaded((m) => m.MIDIInput, lazyMidi),
+  MIDIInputMap: core.propNonEnumerableLazyLoaded(
+    (m) => m.MIDIInputMap,
+    lazyMidi,
+  ),
+  MIDIMessageEvent: core.propNonEnumerableLazyLoaded(
+    (m) => m.MIDIMessageEvent,
+    lazyMidi,
+  ),
+  MIDIOutput: core.propNonEnumerableLazyLoaded((m) => m.MIDIOutput, lazyMidi),
+  MIDIOutputMap: core.propNonEnumerableLazyLoaded(
+    (m) => m.MIDIOutputMap,
+    lazyMidi,
+  ),
+  MIDIPort: core.propNonEnumerableLazyLoaded((m) => m.MIDIPort, lazyMidi),
 };
 
 export { mainRuntimeGlobalProperties, memoizeLazy };

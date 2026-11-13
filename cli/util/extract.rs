@@ -607,6 +607,7 @@ fn has_scoped_deny(permissions: &PermissionFlags) -> bool {
     &permissions.deny_run,
     &permissions.deny_sys,
     &permissions.deny_write,
+    &permissions.deny_midi,
   ]
   .into_iter()
   .any(|deny| matches!(deny, Some(list) if !list.is_empty()))
@@ -1316,6 +1317,7 @@ fn permissions_options_object(permissions: &PermissionFlags) -> ast::Expr {
     ("run", &permissions.allow_run, &permissions.deny_run),
     ("sys", &permissions.allow_sys, &permissions.deny_sys),
     ("write", &permissions.allow_write, &permissions.deny_write),
+    ("midi", &permissions.allow_midi, &permissions.deny_midi),
   ];
 
   let value = if permissions.allow_all

@@ -1,0 +1,38 @@
+{
+  "tests": {
+    // a bare --allow-midi grants devices, never system exclusive messages
+    "allow_midi_devices_only": {
+      "args": "run --allow-midi query.ts",
+      "output": "devices: granted\nsysex: prompt\n"
+    },
+    "allow_midi_sysex": {
+      "args": "run --allow-midi=sysex query.ts",
+      "output": "devices: granted\nsysex: granted\n"
+    },
+    "allow_all_grants_sysex": {
+      "args": "run -A query.ts",
+      "output": "devices: granted\nsysex: granted\n"
+    },
+    "deny_midi_sysex": {
+      "args": "run --allow-midi --deny-midi=sysex query.ts",
+      "output": "devices: granted\nsysex: denied\n"
+    },
+    "no_flag": {
+      "args": "run --no-prompt query.ts",
+      "output": "devices: prompt\nsysex: prompt\n"
+    },
+    "request_without_permission": {
+      "args": "run --no-prompt request.ts",
+      "output": "NotAllowedError: Requires MIDI access to \"devices\", run again with the --allow-midi flag\n"
+    },
+    "request_sysex_with_devices_only": {
+      "args": "run --no-prompt --allow-midi request_sysex.ts",
+      "output": "NotAllowedError: Requires MIDI access to \"sysex\", run again with the --allow-midi=sysex flag\n"
+    },
+    "unknown_kind": {
+      "args": "run --allow-midi=everything query.ts",
+      "exitCode": 1,
+      "output": "[WILDCARD]unknown --allow-midi value: 'everything'[WILDCARD]"
+    }
+  }
+}

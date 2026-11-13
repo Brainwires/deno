@@ -113,6 +113,12 @@ fn run_test(test: &CollectedTest) -> TestResult {
     deno = deno.arg("--unstable-kv");
   }
 
+  // denext: a virtual loopback pair for the Web MIDI round trip, where the
+  // OS has virtual ports (CoreMIDI, the ALSA sequencer)
+  if test.name.ends_with("::midi_test") {
+    deno = deno.env("DENO_MIDI_VIRTUAL_LOOPBACK", "Deno Loopback");
+  }
+
   if test.name.ends_with("::webgpu_test") {
     deno = deno.arg("--unstable-webgpu");
   }

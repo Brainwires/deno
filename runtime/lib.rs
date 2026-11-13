@@ -13,6 +13,7 @@ pub use deno_image;
 pub use deno_inspector_server;
 pub use deno_io;
 pub use deno_kv;
+pub use deno_midi;
 pub use deno_napi;
 pub use deno_net;
 pub use deno_node;

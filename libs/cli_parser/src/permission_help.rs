@@ -34,6 +34,8 @@ Docs: https://docs.deno.com/go/permissions
                                             --allow-run  |  --allow-run=\"whoami,ps\"
   --clean-run-env[=<VARIABLE_NAME>...]      Spawn programs with a minimal environment (PATH, HOME, LANG, LC_*, TERM, TMPDIR/TEMP/TMP, USER/USERNAME, and on Windows the system variables) plus the listed names (NAME or PREFIX*), not the whole environment. Variables passed in `env` are still set.
                                             --clean-run-env  |  --clean-run-env=\"GIT_DIR,MY_APP_*\"
+  --allow-midi[=devices,sysex]              Allow Web MIDI (navigator.requestMIDIAccess). A bare flag grants MIDI devices; system exclusive messages, which can reprogram a device, need sysex.
+                                            --allow-midi  |  --allow-midi=sysex
   --allow-ffi[=<PATH>...]                   (Unstable) Allow loading dynamic libraries. Optionally specify allowed directories or files.
                                             --allow-ffi  |  --allow-ffi=\"./libfoo.so\"
   --deny-read[=<PATH>...]                   Deny file system read access. Optionally specify denied paths.
@@ -54,6 +56,8 @@ Docs: https://docs.deno.com/go/permissions
                                             --deny-run  |  --deny-run=\"whoami,ps\"
   --deny-ffi[=<PATH>...]                    (Unstable) Deny loading dynamic libraries. Optionally specify denied directories or files.
                                             --deny-ffi  |  --deny-ffi=\"./libfoo.so\"
+  --deny-midi[=devices,sysex]               Deny Web MIDI. Optionally deny only system exclusive messages.
+                                            --deny-midi  |  --deny-midi=sysex
   --deny-import[=<IP_OR_HOSTNAME>...]       Deny importing from remote hosts. Optionally specify denied IP addresses and host names, with ports as necessary.
                                             --deny-import  |  --deny-import=\"example.com:443,github.com:443\"
   --ignore-env[=<VARIABLE_NAME>...]         Ignore access to environment variables returning `undefined`. Optionally specify ignored environment variables.

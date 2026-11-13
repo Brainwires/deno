@@ -13932,6 +13932,151 @@ where the changes are discussed.
        app calls each style setter with `constructor`, `toString`, `__proto__`
        and `hasOwnProperty` and expects the `Unknown …` `TypeError`.
      - Node tests enabled: none; no Node API changes.
+364. **`feat(midi)`: Web MIDI, `navigator.requestMIDIAccess()`, with
+     `--allow-midi`** (runtime and CLI; `feat/web-midi`; the new `ext/midi`
+     crate `deno_midi`, `runtime/permissions/lib.rs`,
+     `runtime/ops/permissions.rs`, `runtime/js/10_permissions.js`,
+     `runtime/js/98_global_scope_window.js`, `libs/cli_parser`, `cli/args`,
+     `cli/util/extract.rs`, `cli/supply_chain/jail.rs`,
+     `cli/tsc/dts/lib.deno.{ns,window}.d.ts`). The
+     [Web MIDI API](https://webaudio.github.io/web-midi-api/) for MIDI 1.0
+     devices, so a Deno program (or a Deno Desktop app's backend) can talk to
+     synthesizers, controllers and interfaces without an FFI binding:
+     `navigator.requestMIDIAccess({ sysex?, software? })` resolves to a
+     `MIDIAccess` (`inputs` / `outputs` maps, `sysexEnabled`, `statechange`);
+     `MIDIPort` (`id`, `manufacturer`, `name`, `type`, `version`, `state`,
+     `connection`, `open()`, `close()`, `statechange`), `MIDIInput`
+     (`midimessage`, a `MIDIMessageEvent` whose `data` is a `Uint8Array` and
+     whose `timeStamp` is the arrival time on `performance.now()`'s clock;
+     setting `onmidimessage` opens the port), `MIDIOutput`
+     (`send(data,
+     timestamp?)`, `clear()`) and `MIDIConnectionEvent`, all
+     window globals. The Web MIDI API has no MIDI 2.0 (UMP) and neither does
+     this; see below.
+     - **Backends.** CoreMIDI on macOS and WinMM on Windows through
+       [`midir`](https://crates.io/crates/midir) 0.11.1 (MIT, maintained,
+       released 2026-10), with the macOS port list read from CoreMIDI directly
+       (the `coremidi` crate midir is built on) for the manufacturer and driver
+       version midir doesn't expose. On Linux, the ALSA sequencer through
+       `libasound.so.2` opened with `dlopen` at the first `requestMIDIAccess()`
+       (`ext/midi/alsa.rs`), not midir's `alsa-sys`, which links it: a linked
+       libasound would make every `deno` need it to start and would fail the
+       release's dynamic-dependency check. No ALSA library, or no `/dev/snd/seq`
+       (no `snd-seq` module, a container), makes `requestMIDIAccess()` reject
+       with `NotSupportedError`; so do other platforms. JACK is not used (ALSA's
+       sequencer sees JACK's MIDI bridge, `a2jmidid`). Port ids: CoreMIDI's
+       unique ID (stable across sessions), WinMM's port id from midir, ALSA's
+       `client:port` address (stable while the device stays plugged in).
+       `software: false` (the default) leaves out software synthesizers (ALSA's
+       synthesizer ports, Windows' "Microsoft GS Wavetable Synth").
+     - **Framing** (`ext/midi/parser.rs`). Every byte an input delivers goes
+       through one parser per open port: running status is expanded, a real-time
+       byte (`0xF8`-`0xFF`) is delivered at once as its own message wherever it
+       arrives (inside a system exclusive message too), a system exclusive
+       message is collected from `0xF0` to `0xF7` across packets (at most 16
+       MiB) and dropped if another status byte cuts it short, and undefined
+       status bytes (`0xF4`, `0xF5`, `0xF9`, `0xFD`), a stray `0xF7` and
+       orphaned data bytes are dropped. Without `sysexEnabled` an input drops
+       system exclusive messages, as the spec says.
+     - **Sending.** `send()` validates first (`01_midi.js`): a `TypeError` for
+       empty data, a data byte where a status byte belongs (running status is
+       not accepted), an incomplete message, a status byte inside a message, an
+       undefined status byte, a system exclusive message without its end or with
+       a status byte inside it; real-time bytes may appear anywhere. A system
+       exclusive message without `sysexEnabled` is an `InvalidAccessError`, and
+       a disconnected port an `InvalidStateError`; a closed port is opened
+       implicitly. The bytes then go to the output's scheduler thread
+       (`lib.rs`), which sends them at `timestamp` (a `performance.now()` time;
+       0 or a past time is now), earliest first and in send order for equal
+       times, split into one message per OS call (WinMM takes one short or one
+       system exclusive message per call). `clear()` drops what hasn't been
+       sent; `close()` drops it too.
+     - **Hot-plug.** midir has no notifications and WinMM none at all, so each
+       `MIDIAccess` polls the OS port list every 500 ms on an unref'd timer (it
+       never keeps the process alive). A new port is added and fires
+       `statechange` on the access; one that goes away stays in its map as
+       `state: "disconnected"`, and if it was open its OS connection is closed
+       and `connection` becomes `"pending"`, reopened when the port (same id)
+       comes back. Every `state` / `connection` change fires `statechange` on
+       the port and on its access. `open()` on a disconnected port resolves with
+       `connection: "pending"`; an OS refusal (WinMM ports are exclusive)
+       rejects with `InvalidAccessError`.
+     - **Lifetime.** An open input waits for messages with a ref'd op, so it
+       keeps the process alive (as a listener does) until `close()`; an open
+       output and an unopened access don't.
+     - **Permissions: `--allow-midi[=devices,sysex]` /
+       `--deny-midi[=devices,sysex]`**, a new unary permission `midi` with two
+       kinds. A bare `--allow-midi` is `--allow-midi=devices`: listing, opening,
+       sending and receiving everything but system exclusive messages. `sysex`
+       must be named (`--allow-midi=sysex`, which covers `devices`), because
+       system exclusive messages can reprogram or reflash a device; this mirrors
+       the separate sysex prompt browsers show. `--allow-all`, the config's
+       `permissions.all` and a prompt's "allow all" answer grant both.
+       `--deny-midi` denies both; `--deny-midi=sysex` only system exclusive
+       messages, and a `devices` denial covers `sysex`. Checked once, by
+       `requestMIDIAccess()` (`devices`, or `sysex` when `{ sysex: true }`); a
+       refusal rejects with the spec's `NotAllowedError` (a `DOMException`, not
+       `Deno.errors.NotCapable`), whose message is the permission error's
+       (`Requires MIDI access to
+       "sysex", run again with the --allow-midi=sysex flag`).
+       The prompt reads `Deno requests MIDI access to "devices"` / `"sysex"`.
+       `Deno.permissions.query/request/revoke` take Web MIDI's descriptor,
+       `{ name: "midi", sysex?: boolean }` (`"midi"` is in
+       `Deno.permissions.names` and `PermissionName`); revoking `devices`
+       revokes a `sysex` grant too. Workers and `Deno.test` take
+       `permissions: { midi: "inherit" | boolean | ("devices" | "sysex")[] }`
+       (`true` needs the parent to hold both kinds); doc tests carry
+       `--allow-midi` from a shebang. `deno compile` bakes the flag like any
+       other (`PermissionsOptions.allow_midi` / `deny_midi`, serde-defaulted so
+       older metadata still reads); `deno install -g` takes it; `-A` with
+       `--allow-midi` is the usual conflict error; a lifecycle script in the
+       supply-chain jail never gets it. There is no `midi` key in `deno.json`'s
+       permission sets yet. A separate permission rather than a `--allow-sys`
+       kind or `--allow-ffi`: MIDI reaches hardware other programs share and,
+       with sysex, can change it, which neither of those describes, and browsers
+       gate it on its own.
+     - **Not implemented** (spec gaps): MIDI 2.0 (Universal MIDI Packets,
+       MIDI-CI, the 2.0 protocol): Web MIDI defines none; CoreMIDI
+       (`MIDIEventList`, macOS 11+), ALSA (UMP sequencer, kernel 6.5+ / alsa-lib
+       1.2.10+) and Windows MIDI Services have APIs for it, a future
+       `Deno`-namespace API rather than Web MIDI. `requestMIDIAccess` in workers
+       (the spec exposes it on `Window` only). Send timestamps are honored by
+       the runtime's scheduler thread (sub-millisecond on an idle machine), not
+       by the OS's own timestamped queues (CoreMIDI's packet timestamps, ALSA's
+       sequencer queues). Windows has no virtual ports (WinMM can't reach
+       Windows MIDI Services' loopback endpoints).
+     - User-facing note: `navigator.requestMIDIAccess()` and the `MIDI*` globals
+       are new; run with `--allow-midi` (`--allow-midi=sysex` for system
+       exclusive messages). `Deno.permissions.names` gains `"midi"`.
+     - Development switch: `DENO_MIDI_VIRTUAL_LOOPBACK=<name>` makes the
+       process's MIDI backend create a virtual port pair named `<name>` (a
+       CoreMIDI virtual source and destination; an ALSA sequencer port anyone
+       may read and write) whose output's messages come back on its input, for
+       tests on machines with no MIDI hardware. Not available on Windows (a
+       warning in the log; the backend still starts).
+     - Tests: `cargo test -p deno_midi` (the framing parser: running status,
+       split packets, sysex across packets, real-time inside messages, truncated
+       / oversized sysex, undefined bytes, splitting a send);
+       `deno_permissions`' `test_midi_permission` (`devices` never grants
+       `sysex`, `sysex` covers `devices`, a `devices` denial covers `sysex`,
+       revocation, prompts, the error naming `--allow-midi=sysex`) and the
+       child-permission deserialization test; `deno_cli_parser`'s `allow_midi`
+       (bare flag stored as `["devices"]`, lists, invalid kinds, the `-A`
+       conflict) and the help listing; `tests/specs/permission/midi` (queries
+       per flag, the two refusals, an unknown kind); `tests/unit/midi_test.ts`
+       (globals, illegal constructors, the event constructors, the send
+       validator on every rule, the permission queries, `NotAllowedError`
+       without the grant and for `sysex` under a `devices` grant, and, where the
+       loopback pair exists, a real round trip through the OS: channel messages,
+       a 1 KB system exclusive message, a real-time byte, timestamps, implicit
+       opens, `statechange`; scheduled sends arriving in timestamp order and not
+       early; `clear()`; a non-sysex access dropping system exclusive input and
+       refusing to send it). The harness sets `DENO_MIDI_VIRTUAL_LOOPBACK` for
+       that file. The round trip runs on macOS (CoreMIDI virtual endpoints) and
+       on a Linux machine with `/dev/snd/seq`; the CI's Linux containers have no
+       sequencer and Windows no virtual ports, so there those tests log why and
+       return.
+     - Node tests enabled: none; no Node API changes.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
@@ -13940,7 +14085,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363) are what the prebuilt `libdenort` carries. The
+350, 351, 353, 355-361, 363, 364) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.
@@ -14031,6 +14176,10 @@ only.
   at the network layer too, not only with `--deny-net`.
 - **`--allow-env` exposes secrets.** Unscoped, every module reads every
   variable; a subprocess inherits the environment unless it is cleared.
+- **`--allow-midi=sysex` can change hardware.** System exclusive messages can
+  reprogram or reflash a MIDI device, which is why a bare `--allow-midi` doesn't
+  grant them (item 364); grant `sysex` only to code you'd let update the
+  device's firmware.
 - **`--allow-read` of the home directory exposes credentials** (`~/.ssh`,
   `~/.aws`, `~/.config/gcloud`, `~/.kube`, `~/.docker/config.json`, `~/.npmrc`,
   `~/.netrc`, shell history).

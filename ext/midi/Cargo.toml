@@ -1,0 +1,33 @@
+# Copyright 2018-2026 the Deno authors. MIT license.
+
+[package]
+name = "deno_midi"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Web MIDI API (navigator.requestMIDIAccess) for the Deno runtime"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+deno_core.workspace = true
+deno_error.workspace = true
+deno_permissions.workspace = true
+deno_web.workspace = true
+log.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+midir.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+coremidi.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+libloading.workspace = true

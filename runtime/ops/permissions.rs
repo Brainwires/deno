@@ -24,6 +24,8 @@ pub struct PermissionArgs {
   variable: Option<String>,
   kind: Option<String>,
   command: Option<String>,
+  /// denext: `{ name: "midi", sysex: true }` (Web MIDI's descriptor).
+  sysex: Option<bool>,
 }
 
 #[derive(ToV8)]
@@ -83,6 +85,7 @@ pub fn op_query_permission(
     "run" => permissions.query_run(args.command.as_deref())?,
     "ffi" => permissions.query_ffi(args.path.as_deref())?,
     "import" => permissions.query_import(args.host.as_deref())?,
+    "midi" => permissions.query_midi(args.sysex.unwrap_or(false)),
     _ => return Err(PermissionError::InvalidPermissionName(args.name)),
   };
   Ok(PermissionStatus::from(perm))
@@ -105,6 +108,7 @@ pub fn op_revoke_permission(
     "run" => permissions.revoke_run(args.command.as_deref())?,
     "ffi" => permissions.revoke_ffi(args.path.as_deref())?,
     "import" => permissions.revoke_import(args.host.as_deref())?,
+    "midi" => permissions.revoke_midi(args.sysex.unwrap_or(false)),
     _ => return Err(PermissionError::InvalidPermissionName(args.name)),
   };
   Ok(PermissionStatus::from(perm))
@@ -127,6 +131,7 @@ pub fn op_request_permission(
     "run" => permissions.request_run(args.command.as_deref())?,
     "ffi" => permissions.request_ffi(args.path.as_deref())?,
     "import" => permissions.request_import(args.host.as_deref())?,
+    "midi" => permissions.request_midi(args.sysex.unwrap_or(false)),
     _ => return Err(PermissionError::InvalidPermissionName(args.name)),
   };
   Ok(PermissionStatus::from(perm))
