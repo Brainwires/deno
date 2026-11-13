@@ -119,12 +119,28 @@ pub fn delivery_count(signal: i32) -> u32 {
 static ARRIVAL_COUNTS: [AtomicU32; DELIVERY_COUNTS_LEN] =
   [const { AtomicU32::new(0) }; DELIVERY_COUNTS_LEN];
 
+// Test only: makes `count_arrival` take 100 ms, to show that the signal
+// thread never handles an arrival before it is counted.
+#[cfg(all(test, unix))]
+static SLOW_ARRIVAL_COUNT: std::sync::atomic::AtomicBool =
+  std::sync::atomic::AtomicBool::new(false);
+
 fn count_arrival(signal: i32) {
+  #[cfg(all(test, unix))]
+  if SLOW_ARRIVAL_COUNT.load(Ordering::Relaxed) {
+    // Spinning on the monotonic clock is async-signal-safe.
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_millis(100) {
+      std::hint::spin_loop();
+    }
+  }
   if let Some(count) = usize::try_from(signal)
     .ok()
     .and_then(|index| ARRIVAL_COUNTS.get(index))
   {
-    count.fetch_add(1, Ordering::Relaxed);
+    // Release, paired with `arrival_count`'s Acquire: the signal thread
+    // that the delivery wakes sees this arrival counted.
+    count.fetch_add(1, Ordering::Release);
   }
 }
 
@@ -140,7 +156,7 @@ pub fn arrival_count(signal: i32) -> u32 {
   usize::try_from(signal)
     .ok()
     .and_then(|index| ARRIVAL_COUNTS.get(index))
-    .map(|count| count.load(Ordering::Relaxed))
+    .map(|count| count.load(Ordering::Acquire))
     .unwrap_or(0)
 }
 
@@ -250,6 +266,25 @@ fn init() -> Handle {
   // This prevents user fd APIs such as `net.Socket({ fd })` from adopting
   // them and flipping them to non-blocking mode, which would make
   // signal-hook's reads fail with EAGAIN and panic. See #34054.
+  // denext: count each arrival in the signal handler itself (see
+  // `ARRIVAL_COUNTS`), so it is seen even while the signal thread below is
+  // blocked in a hook. Registered before `SignalDelivery` below: a signal's
+  // actions run in the order they were registered, so the arrival is
+  // counted before the delivery pipe wakes the signal thread. Counted after
+  // it, a hook could read the count before the increment and then take that
+  // increment for the signal arriving again: the signal flush gave up at
+  // once and the process ended before it wrote its CPU profile
+  // (`sequential/test-cpu-prof-kill.js`, now and then under load).
+  for signal in [SIGHUP, SIGTERM, SIGINT] {
+    // SAFETY: the action only does an atomic increment, which is
+    // async-signal-safe, and none of these signals is forbidden.
+    // Registering can't fail for these signals (they aren't forbidden); if
+    // it did, a hook would only miss a repeated signal and wait as before.
+    let _ = unsafe {
+      signal_hook::low_level::register(signal, move || count_arrival(signal))
+    };
+  }
+
   let (read, write) = UnixStream::pair().unwrap();
   deno_io::register_internal_fd(read.as_raw_fd());
   deno_io::register_internal_fd(write.as_raw_fd());
@@ -262,20 +297,6 @@ fn init() -> Handle {
   )
   .unwrap();
   let handle = signals.handle();
-
-  // denext: count each arrival in the signal handler itself (see
-  // `ARRIVAL_COUNTS`), so it is seen even while the signal thread below is
-  // blocked in a hook.
-  for signal in [SIGHUP, SIGTERM, SIGINT] {
-    // SAFETY: the action only does an atomic increment, which is
-    // async-signal-safe, and none of these signals is forbidden.
-    // Registering can't fail for these signals (they aren't forbidden, and
-    // `SignalDelivery` above already installed a handler for them); if it
-    // did, a hook would only miss a repeated signal and wait as before.
-    let _ = unsafe {
-      signal_hook::low_level::register(signal, move || count_arrival(signal))
-    };
-  }
 
   std::thread::spawn(move || {
     loop {
@@ -883,6 +904,34 @@ mod tests {
       assert!(Instant::now() < deadline, "timed out waiting for {what}");
       std::thread::sleep(Duration::from_millis(5));
     }
+  }
+
+  // A handler (and a hook before the default action) runs on the signal
+  // thread once the delivery wakes it; by then the arrival is counted, even
+  // when counting it is slow, so a hook comparing with the count later (the
+  // signal flush giving up on a second Ctrl+C) never takes a late increment
+  // for the signal arriving again.
+  #[test]
+  fn an_arrival_is_counted_before_its_delivery() {
+    let _serial = serial();
+    let signal = SIGTERM;
+    let (tx, rx) = std::sync::mpsc::channel();
+    // A listener that takes the signal over, so the test process survives.
+    let id = register(
+      signal,
+      true,
+      Box::new(move || {
+        let _ = tx.send(arrival_count(signal));
+      }),
+    )
+    .unwrap();
+    let arrived = arrival_count(signal);
+    SLOW_ARRIVAL_COUNT.store(true, Ordering::Relaxed);
+    kill_self(signal);
+    let seen = rx.recv_timeout(Duration::from_secs(5));
+    SLOW_ARRIVAL_COUNT.store(false, Ordering::Relaxed);
+    unregister(signal, id);
+    assert_eq!(seen.unwrap(), arrived + 1);
   }
 
   // The file watcher relies on this to tell an external `kill` from its own

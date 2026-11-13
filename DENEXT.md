@@ -14317,7 +14317,7 @@ where the changes are discussed.
        descriptor only from its compiled test addons (`test/addons`,
        `test/node-api`), which the node_compat runner doesn't build.
 
-372. **`test(node:child_process)`: a Deno child started with no permission flag
+371. **`test(node:child_process)`: a Deno child started with no permission flag
      gets `-A`, by design** (tests; no runtime change;
      `tests/specs/node/child_process_deno_child_all_permissions`). When
      node:child_process starts the Deno executable with no permission flag, with
@@ -14339,6 +14339,33 @@ where the changes are discussed.
        on 3.0.0-denext.23 too.
      - Node tests enabled: none; no Node API changes.
 
+372. **`fix(signals)`: a signal's arrival is counted before the signal thread
+     handles it, so the signal flush doesn't give up on its own signal**
+     (runtime; `ext/signals/lib.rs`). On Unix each SIGHUP / SIGTERM / SIGINT
+     arrival is counted in the signal handler (item 136's `arrival_count`), and
+     a hook that waits before the default action (the coverage and CPU profile
+     flush, `cli/util/signal_flush.rs`) stops waiting as soon as the count
+     moves, a second Ctrl+C. The counting action was registered after the
+     delivery pipe's, and a signal's actions run in registration order, so the
+     pipe could wake the signal thread before the arrival was counted: the hook
+     read the count without its own arrival, then saw the late increment as the
+     signal arriving again, gave up at once, and the default action ended the
+     process before the main thread wrote its profile.
+     `sequential/test-cpu-prof-kill.js` (`process.kill(process.pid, "SIGINT")`
+     under `--cpu-prof`) found no profile in 1 of 4 runs of the cpu-prof batch
+     on a loaded Linux machine. The counting action is now registered first, and
+     the count is published with Release and read with Acquire, so the signal
+     thread the delivery wakes always sees the arrival counted.
+     - User-facing note: a program that signals itself (or is sent SIGINT /
+       SIGTERM) under `--cpu-prof`, `--heap-prof` or `--coverage` no longer
+       ends, now and then, without writing the profile or coverage.
+     - Tests: `deno_signals`' `tests::an_arrival_is_counted_before_its_delivery`
+       (a SIGTERM listener reads `arrival_count` with counting slowed to 100 ms
+       by a test-only switch: it reads the arrival counted; with the old
+       registration order it read 0).
+     - Node tests enabled: none new; `sequential/test-cpu-prof-kill.js` was
+       already enabled and is the flake this removes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -14346,7 +14373,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-370) are what the prebuilt `libdenort`
+350, 351, 353, 355-361, 363-366, 368-370, 373) are what the prebuilt `libdenort`
 carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
