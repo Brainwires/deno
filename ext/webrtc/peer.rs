@@ -1936,7 +1936,8 @@ async fn add_server(peer: Rc<Peer>, spec: IceServerSpec) {
     resolved.iter().copied().find(|server| {
       spec.transport != ServerTransport::Udp
         || core.endpoints.iter().any(|e| {
-          e.bound.is_ipv4() == server.is_ipv4() && !e.bound.ip().is_loopback()
+          e.bound.is_ipv4() == server.is_ipv4()
+            && (!e.bound.ip().is_loopback() || server.ip().is_loopback())
         })
     })
   };
