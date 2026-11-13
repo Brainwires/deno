@@ -320,10 +320,12 @@ reqwest = { version = "=0.12.16", default-features = false, features = ["rustls-
 rpm = { version = "0.30.2", default-features = false, features = ["payload", "zstd-compression"] }
 rstest = "0"
 # WebRTC (ext/webrtc, DENEXT.md item 364): webrtc-rs's sans-I/O `rtc` stack
-# (ICE, DTLS, SCTP, data channels; MIT OR Apache-2.0) on its aws-lc-rs crypto
-# provider, the one Deno's rustls already uses. Pre-1.0 and not externally
-# audited.
-rtc = { version = "=0.21.1", default-features = false, features = ["crypto-aws-lc-rs"] }
+# (ICE, DTLS, SCTP, data channels; MIT OR Apache-2.0) as Brainwires/webrtc-rs-rtc
+# carries it: upstream `master` through 0fbcaa74 (after v0.21.1) merged into
+# our fork on its `sync/upstream-0.21` branch, pinned to an exact commit. On
+# the aws-lc-rs crypto provider, the one Deno's rustls already uses. Pre-1.0
+# and not externally audited.
+rtc = { git = "https://github.com/Brainwires/webrtc-rs-rtc", rev = "7f30445e6c4932a1ffddaf08944257c582496809", default-features = false, features = ["crypto-aws-lc-rs"] }
 rusqlite = { version = "0.41.1", features = ["unlock_notify", "bundled", "session", "modern_sqlite", "limits", "backup", "fallible_uint"] } # "modern_sqlite": need sqlite >= 3.49.0 for some db configs; "fallible_uint": ToSql for u64/usize (needed when crates like deno_cache are published/built standalone, not just feature-unified via denokv_sqlite)
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "std", "tls12", "aws_lc_rs"] }
 rustls-pemfile = "2"

@@ -13949,20 +13949,24 @@ where the changes are discussed.
      `RTCPeerConnectionIceErrorEvent`, `RTCDataChannelEvent`, `RTCError`,
      `RTCErrorEvent`, `RTCSctpTransport`, `RTCStatsReport`; loaded on first
      access (`01_webrtc.js` is a lazily loaded script).
-     - **Engine:** webrtc-rs's sans-I/O `rtc` `=0.21.1` (crates.io, MIT OR
-       Apache-2.0; ICE, DTLS 1.2, SCTP, DCEP, SDP, STUN/TURN clients) on its
-       `crypto-aws-lc-rs` provider, the aws-lc-rs Deno's rustls already uses (so
-       no ring-based DTLS crypto is added). Chosen over webrtc-rs's async
+     - **Engine:** webrtc-rs's sans-I/O `rtc` stack (MIT OR Apache-2.0; ICE,
+       DTLS 1.2, SCTP, DCEP, SDP, STUN/TURN clients) as
+       [Brainwires/webrtc-rs-rtc](https://github.com/Brainwires/webrtc-rs-rtc)
+       carries it: upstream `master` through `0fbcaa74` (after v0.21.1,
+       2026-11-12) merged into our fork on its `sync/upstream-0.21` branch, the
+       fork's own changes kept (its FORK.md lists them), pinned to commit
+       `7f30445e` (a `git` + `rev` dependency, as `v8` and `laufey` are). On its
+       `crypto-aws-lc-rs` provider, the aws-lc-rs Deno's rustls already uses, so
+       no ring-based DTLS crypto is added. Chosen over webrtc-rs's async
        `webrtc` crate (its own tokio tasks and sockets, out of reach of the
-       permission gate) and over libdatachannel (C++, CMake, MPL-2.0, a second
-       TLS stack); str0m is sans-I/O too but has no TURN client and no
-       W3C-shaped API. Brainwires/webrtc-rs-rtc (our fork, used by
-       ReachMyDevice) was the first pick, then set aside by the 2026-11-13
-       audit: 320 commits behind upstream, missing upstream's DTLS / ICE / H.264
-       crash fixes and its SCTP and data-channel fixes; its `sync/upstream-0.21`
-       branch (upstream 0.21 + the fork's extras) is the planned pin once
-       pushed. Pre-1.0 and not externally audited: DTLS, SRTP, SCTP and ICE
-       parsing are exposed to any peer that completes ICE.
+       permission gate), libdatachannel (C++, CMake, MPL-2.0, a second TLS
+       stack) and str0m (sans-I/O too, but no TURN client and no W3C-shaped
+       API). The fork's earlier `master` (`81bc7c6b`, what ReachMyDevice pins)
+       was the first pick and was set aside by the 2026-11-13 audit: 320 commits
+       behind upstream and missing upstream's DTLS, ICE and H.264 crash fixes
+       and its SCTP and data-channel fixes; this sync brings them in. Pre-1.0
+       and not externally audited: DTLS, SCTP and ICE parsing are exposed to any
+       peer that completes ICE.
      - **Driver** (`peer.rs`; the engine does no I/O and reads no clock): one
        UDP socket per address family per connection, bound to `0.0.0.0` / `[::]`
        when interfaces may be listed and the wildcard may be listened on (every
@@ -14045,17 +14049,14 @@ where the changes are discussed.
        sends it); the selected candidate pair can't be read from the stats (the
        candidate-pair entry names candidate ids the candidate entries prefix,
        and remote candidates have no entry), so the selected-pair filter learns
-       it from the engine's own traffic. Not worked around: a channel the peer
-       opens reports `maxRetransmits` / `maxPacketLifeTime` as `null`
-       (`RTCDataChannelInternal::accept` drops them; delivery is still partially
-       reliable), to fix in the fork's sync branch.
-     - **Dependency:** `rtc` 0.21.1 and its `rtc-*` crates (2026-10-11), with
+       it from the engine's own traffic.
+     - **Dependency:** the `rtc` crates from the pinned fork commit, with
        `sansio`, `rcgen` 0.14, `x509-parser` 0.16 / 0.18, `der-parser`,
        `asn1-rs`, `crc`, `crc32c` (0.6.8), `rkyv`, `pem` 3 / 4, `substring`,
-       `yasna`; the workspace's `aes` pin moves `=0.8.3` → `=0.8.4`
-       (rtc-crypto's minimum), and `bytes` 1.12.1, `log` 0.4.33 (the minimum rtc
-       takes; 0.4.35 is younger than the hold), `unicase` 2.10, `zeroize` 1.9.1.
-       Every new crate is at least 11 days old.
+       `yasna` from crates.io; the workspace's `aes` pin moves `=0.8.3` →
+       `=0.8.4` (rtc-crypto's minimum), and `bytes` 1.12.1, `log` 0.4.33 (the
+       minimum rtc takes; 0.4.35 is younger than the hold), `unicase` 2.10,
+       `zeroize` 1.9.1. Every new crates.io crate is at least 11 days old.
      - **Size:** BINARY_SIZE_PLACEHOLDER
      - User-facing note: Deno programs can be WebRTC data channel peers
        (`new RTCPeerConnection()`), of browsers and of each other, with STUN and

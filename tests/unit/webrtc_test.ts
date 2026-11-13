@@ -308,6 +308,7 @@ Deno.test("webrtcUnorderedUnreliableChannel", async () => {
   assertEquals(channel.ordered, false);
   assertEquals(channel.maxRetransmits, 0);
   assertEquals(remote.ordered, false);
+  assertEquals(remote.maxRetransmits, 0);
   const got = messages(remote, 50);
   for (let i = 0; i < 50; i++) channel.send(String(i));
   // Loopback loses nothing; arrival order is not asserted.

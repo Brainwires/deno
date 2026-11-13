@@ -264,11 +264,8 @@ async fn loopback_unordered_unreliable_channel() {
       _ => None,
     })
     .unwrap();
-  // `ordered` comes through DCEP. `maxRetransmits` should too (W3C), but
-  // rtc 0.21.1's accept path reports `None` for a channel the peer opened
-  // (RTCDataChannelInternal::accept); the delivery itself is partially
-  // reliable either way. Not asserted until the engine reports it.
-  assert!(!remote.0);
+  // Both come through DCEP's channel type and reliability parameter.
+  assert_eq!(remote, (false, Some(0)));
   for i in 0..50u32 {
     a.send(id, false, &i.to_be_bytes()).unwrap();
   }
