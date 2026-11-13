@@ -146,9 +146,11 @@ jobs:
     name: test libs
     needs: [build, test-runner]
     # test-runner is skipped on a leg that picks nothing: run regardless, but
-    # only after a passed build.
+    # only after a passed build. A Windows leg keeps libs on the image: its
+    # crates need bindgen's libclang, which the Windows pool hosts lack (VS's
+    # Clang component; run 43372954581 on brain).
     if: ${{ !cancelled() && needs.build.result == 'success' }}
-    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && format('"{0}"', inputs.os) || ((inputs.pick_all || (startsWith(inputs.os, 'windows') && inputs.pick_runs_on != '')) && (needs.test-runner.outputs.libs || inputs.pick_runs_on)) || inputs.runs_on || format('"{0}"', inputs.os)) }}
+    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && format('"{0}"', inputs.os) || (inputs.pick_all && (needs.test-runner.outputs.libs || inputs.pick_runs_on)) || inputs.runs_on || format('"{0}"', inputs.os)) }}
     timeout-minutes: 240
     defaults:
       run:
@@ -268,7 +270,7 @@ jobs:
         env:
           # Longest first (Linux x64, run 43019147950: libs 11 min,
           # integration 8-9, node_compat 8, specs 7-8, unit and unit_node 5).
-          PICK_KEYS: ${{ inputs.pick_all && 'libs integration_0 integration_1 node_compat_0 node_compat_1 specs_0 specs_1 unit_node unit' || (startsWith(inputs.os, 'windows') && 'unit_node libs specs_0 specs_1 unit node_compat_0 node_compat_1' || 'node_compat_0 node_compat_1 unit_node') }}
+          PICK_KEYS: ${{ inputs.pick_all && 'libs integration_0 integration_1 node_compat_0 node_compat_1 specs_0 specs_1 unit_node unit' || (startsWith(inputs.os, 'windows') && 'unit_node specs_0 specs_1 unit node_compat_0 node_compat_1' || 'node_compat_0 node_compat_1 unit_node') }}
           PICK_RUNNER: ${{ inputs.pick_runs_on }}
           PICK_IMAGE: ${{ inputs.os }}
           PICK_SLOTS: ${{ inputs.pick_slots }}
