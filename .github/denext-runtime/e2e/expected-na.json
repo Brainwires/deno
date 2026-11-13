@@ -384,8 +384,7 @@
       "launch: an application-menu accelerator fires its item"
     ],
     "origin": [
-      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1",
-      "launch: a stream the page stops reading is held back (backpressure), not drained"
+      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1"
     ],
     "passkeys": [
       "launch: a completed registration / authentication ceremony"
@@ -402,6 +401,9 @@
       "launch: share() shows the OS share sheet"
     ],
     "webview": [
+      "launch: a click and a scroll inside a web view reach its page",
+      "launch: a forwardKeys match reaches the view's key event, forwarded",
+      "launch: a key typed into a focused web view reaches its page",
       "launch: clicks and scrolls inside a web view never reach the host window",
       "launch: keys typed into a focused web view never reach the host window"
     ]
@@ -464,6 +466,9 @@
       "launch: share() shows the OS share sheet"
     ],
     "webview": [
+      "launch: a click and a scroll inside a web view reach its page",
+      "launch: a forwardKeys match reaches the view's key event, forwarded",
+      "launch: a key typed into a focused web view reaches its page",
       "launch: clicks and scrolls inside a web view never reach the host window",
       "launch: keys typed into a focused web view never reach the host window"
     ]

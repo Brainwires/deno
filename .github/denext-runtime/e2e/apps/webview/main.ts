@@ -25,6 +25,7 @@ import {
   activate,
   canPressKeys,
   clickAndScrollAt,
+  foregroundDiagnosis,
   macKeyWindow,
   pressKeys,
 } from "../_shared/input.ts";
@@ -709,16 +710,32 @@ async function runSupported() {
   // page's passwords); a forwardKeys match reaches only the view's "key"
   // event ---
   {
-    const cannotPress = await canPressKeys();
+    let cannotPress = await canPressKeys();
+    // Synthesized input goes to the foreground window. A Windows session
+    // that keeps the foreground on another process's window (GitHub's
+    // windows-11-arm image: WWAHost.exe) delivers none of it, so none of
+    // these checks can run there, as the menus area's keyboard checks
+    // (foregroundDiagnosis).
+    if (!cannotPress && Deno.build.os === "windows") {
+      const activated = await activate("E2E WebView Host");
+      if (!activated) {
+        const { refusal, evidence } = foregroundDiagnosis("E2E WebView Host");
+        r.set("foreground:webview-input", { activated, refusal, ...evidence });
+        if (refusal) cannotPress = `no foreground on this runner: ${refusal}`;
+      }
+    }
     if (cannotPress) {
-      r.na(
-        "keys typed into a focused web view never reach the host window",
-        cannotPress,
-      );
-      r.na(
-        "clicks and scrolls inside a web view never reach the host window",
-        cannotPress,
-      );
+      for (
+        const name of [
+          "keys typed into a focused web view never reach the host window",
+          "clicks and scrolls inside a web view never reach the host window",
+          "a click and a scroll inside a web view reach its page",
+          "a key typed into a focused web view reaches its page",
+          "a forwardKeys match reaches the view's key event, forwarded",
+        ]
+      ) {
+        r.na(name, cannotPress);
+      }
     } else {
       const typed = win.createWebView({
         url: URL_TYPE,
