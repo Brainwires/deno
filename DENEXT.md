@@ -13859,8 +13859,10 @@ where the changes are discussed.
      Both are `BrowserWindow` options too (`titleVisibility`, `toolbarStyle`),
      and `Deno.desktop.windowCapabilities()` reports `titleVisibility` /
      `toolbarStyle`. An unknown value is a `TypeError`. laufey moves to
-     `feat/native-title-options` `97e3f5e` (API 57) until it lands on
-     `development-denext`.
+     `development-denext` 2334497 (API 57), which also brings an accessory app's
+     window to the front on macOS when it is focused (it activates the app
+     ignoring other apps and orders the window front regardless, never changing
+     the activation policy), on both backends.
      - User-facing note: a desktop window can hide its title text and keep the
        native title bar, and a macOS window can take a unified, compact or
        expanded toolbar style.
@@ -13871,7 +13873,7 @@ where the changes are discussed.
        toolbar style); laufey's own `title_options_test.cc`, capi unit tests and
        native_e2e checks.
 
-361. **`ci(denext runtime)`: a release's legs overflow from a busy pool to
+362. **`ci(denext runtime)`: a release's legs overflow from a busy pool to
      GitHub's image** (`ci/runtime-overflow`; CI;
      `.github/denext-runtime/plan_matrix.py`, `plan_matrix_test.py`,
      `pick_runner.py`, `.github/workflows/denext_runtime.yml`). Every leg of a
@@ -13966,10 +13968,11 @@ app's own menu, Windows' microphone and camera privacy switches and the macOS
 hit region noticing cursor warps, items 327 and 333; and, for runtime
 3.0.0-denext.21, CEF and WebView2 never holding a non-GET navigation for
 will-navigate and a re-issue token bound to the backend's own load, item 342,
-and CEF 156.0.28, item 356; and API 57, title visibility and toolbar style, item
-361), at the commit pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref`
-input). The same commit is the `laufey` git dependency of
-`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 57, CEF 156.0.28).
+and CEF 156.0.28, item 356; and, for runtime 3.0.0-denext.22, API 57, title
+visibility and toolbar style and an accessory app's focused window brought to
+the front on macOS, item 361), at the commit pinned by `LAUFEY_SHA` in the
+workflow (or the `laufey_ref` input). The same commit is the `laufey` git
+dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 57, CEF 156.0.28).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the
