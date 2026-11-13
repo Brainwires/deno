@@ -186,6 +186,7 @@ async function loopback(
     access = await navigator.requestMIDIAccess(options);
   } catch (error) {
     if ((error as Error).name === "NotSupportedError") {
+      // deno-lint-ignore no-console
       console.log(`no MIDI on this machine: ${(error as Error).message}`);
       return null;
     }
@@ -201,6 +202,7 @@ async function loopback(
     );
     if (input && output) return { access, input, output };
     if (Date.now() > deadline) {
+      // deno-lint-ignore no-console
       console.log(`no virtual MIDI ports on ${Deno.build.os}`);
       return null;
     }
