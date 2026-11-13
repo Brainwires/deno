@@ -14043,9 +14043,10 @@ hit region noticing cursor warps, items 327 and 333; and, for runtime
 will-navigate and a re-issue token bound to the backend's own load, item 342,
 and CEF 156.0.28, item 356; and, for runtime 3.0.0-denext.22, API 57, title
 visibility and toolbar style and an accessory app's focused window brought to
-the front on macOS, item 361), at the commit pinned by `LAUFEY_SHA` in the
+the front on macOS, item 361; and API 58, child web views, item 364, on laufey
+branch `feat/embedded-webview` until it lands), at the commit pinned by `LAUFEY_SHA` in the
 workflow (or the `laufey_ref` input). The same commit is the `laufey` git
-dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 57, CEF 156.0.28).
+dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 58, CEF 156.0.28).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the
