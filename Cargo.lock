@@ -7147,7 +7147,7 @@ dependencies = [
 [[package]]
 name = "laufey"
 version = "0.8.0"
-source = "git+https://github.com/Brainwires/laufey?rev=4aea80fee7c668f0ff16d8c3fff1ae85b10b7c30#4aea80fee7c668f0ff16d8c3fff1ae85b10b7c30"
+source = "git+https://github.com/Brainwires/laufey?rev=90a3416c1d5409639aa802c2a89f7e05215ec364#90a3416c1d5409639aa802c2a89f7e05215ec364"
 dependencies = [
  "bindgen 0.72.1",
  "tokio",
