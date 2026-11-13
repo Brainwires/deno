@@ -1159,6 +1159,14 @@ pub struct PermissionFlags {
   pub no_prompt: bool,
   pub allow_import: Option<Vec<String>>,
   pub deny_import: Option<Vec<String>>,
+  /// denext: `--allow-midi[=devices,sysex]` (Web MIDI). A bare
+  /// `--allow-midi` is stored as `["devices"]`: system exclusive messages
+  /// need an explicit `sysex`.
+  #[serde(default)]
+  pub allow_midi: Option<Vec<String>>,
+  /// denext: `--deny-midi[=devices,sysex]`.
+  #[serde(default)]
+  pub deny_midi: Option<Vec<String>>,
 }
 
 impl PermissionFlags {
@@ -1186,6 +1194,8 @@ impl PermissionFlags {
       || self.deny_write.is_some()
       || self.allow_import.is_some()
       || self.deny_import.is_some()
+      || self.allow_midi.is_some()
+      || self.deny_midi.is_some()
   }
 }
 impl Flags {
@@ -1225,6 +1235,8 @@ impl Flags {
         || arg.starts_with("--deny-sys")
         || arg.starts_with("--allow-write")
         || arg.starts_with("--deny-write")
+        || arg.starts_with("--allow-midi")
+        || arg.starts_with("--deny-midi")
     })
   }
 }

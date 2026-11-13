@@ -1622,6 +1622,8 @@ fn permission_help_section_is_rendered() {
     "--deny-net-connect[=<IP_OR_HOSTNAME>...]",
     "--deny-net-listen[=<IP_OR_HOSTNAME>...]",
     "--clean-run-env[=<VARIABLE_NAME>...]",
+    "--allow-midi[=devices,sysex]",
+    "--deny-midi[=devices,sysex]",
   ] {
     assert!(run.contains(flag), "{flag}");
   }

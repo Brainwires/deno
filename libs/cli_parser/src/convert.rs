@@ -14,6 +14,7 @@ use std::num::NonZeroU8;
 use std::num::NonZeroU32;
 use std::num::NonZeroUsize;
 
+use deno_permissions::MidiDescriptor;
 use deno_permissions::SysDescriptor;
 use deno_semver::jsr::JsrDepPackageReq;
 use deno_semver::package::PackageKind;
@@ -620,6 +621,16 @@ fn permission_args_parse(
   path_perm_flag!("deny-ffi", flags.permissions.deny_ffi);
   perm_flag!("allow-import", flags.permissions.allow_import);
   perm_flag!("deny-import", flags.permissions.deny_import);
+  perm_flag!("allow-midi", flags.permissions.allow_midi);
+  perm_flag!("deny-midi", flags.permissions.deny_midi);
+  // denext: a bare `--allow-midi` grants MIDI devices but never system
+  // exclusive messages (which can reflash a device): those need `=sysex`.
+  // An empty list would mean "both" (what `--allow-all` grants).
+  if let Some(list) = &mut flags.permissions.allow_midi
+    && list.iter().all(|kind| kind.is_empty())
+  {
+    *list = vec!["devices".to_string()];
+  }
 
   if result.get_bool("allow-all") {
     flags.permissions.allow_all = true;
@@ -1423,6 +1434,23 @@ fn validate_permission_args(
     }
   }
 
+  // denext: MIDI kinds
+  for (flag, list) in [
+    ("--allow-midi", &flags.permissions.allow_midi),
+    ("--deny-midi", &flags.permissions.deny_midi),
+  ] {
+    for kind in list.iter().flatten() {
+      if !kind.is_empty() && MidiDescriptor::parse(kind).is_err() {
+        return Err(CliError::new(
+          CliErrorKind::InvalidValue,
+          format!(
+            "unknown {flag} value: '{kind}' (expected \"devices\" or \"sysex\")"
+          ),
+        ));
+      }
+    }
+  }
+
   // Validate reload values are valid URLs or specifier prefixes (npm:, jsr:)
   for url in &flags.cache_blocklist {
     if url.is_empty() || url.starts_with("./") || url.starts_with('/') {
@@ -1517,6 +1545,7 @@ fn validate_permission_args(
       ("--allow-sys", &flags.permissions.allow_sys),
       ("--allow-ffi", &flags.permissions.allow_ffi),
       ("--allow-import", &flags.permissions.allow_import),
+      ("--allow-midi", &flags.permissions.allow_midi),
     ];
 
     // Only check if this is not the REPL default (where allow_all is auto-set)
@@ -2585,6 +2614,8 @@ fn install_parse(
       "deny-sys",
       "allow-ffi",
       "deny-ffi",
+      "allow-midi",
+      "deny-midi",
     ];
     for flag in &perm_flags {
       if result.contains(flag) {

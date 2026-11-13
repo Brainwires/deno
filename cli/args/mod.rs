@@ -2369,6 +2369,16 @@ fn flags_to_permissions_options(
       config.and_then(|c| c.permissions.import.deny.as_ref()),
       &identity,
     ),
+    // denext: Web MIDI. `--allow-all` (or the config's `all`) grants both
+    // kinds; there is no `midi` key in deno.json's permission sets yet.
+    allow_midi: handle_allow(
+      flags.allow_all,
+      config.and_then(|c| c.permissions.all),
+      flags.allow_midi.as_ref(),
+      None,
+      &identity,
+    ),
+    deny_midi: handle_deny_or_ignore(flags.deny_midi.as_ref(), None, &identity),
     prompt: !resolve_no_prompt(flags),
     clean_run_env: flags.clean_run_env.clone(),
   };
@@ -2808,6 +2818,8 @@ mod test {
           ]),
           allow_import: Some(vec!["jsr.io".to_string()]),
           deny_import: Some(vec!["example.com".to_string()]),
+          allow_midi: None,
+          deny_midi: None,
           prompt: true,
           clean_run_env: None,
         }
@@ -2875,6 +2887,9 @@ mod test {
           ]),
           allow_import: Some(vec![]),
           deny_import: None,
+          // the config's `all` grants both MIDI kinds
+          allow_midi: Some(vec![]),
+          deny_midi: None,
           prompt: true,
           clean_run_env: None,
         }

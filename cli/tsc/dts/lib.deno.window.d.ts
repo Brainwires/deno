@@ -364,7 +364,284 @@ interface Navigator {
   readonly languages: string[];
   readonly platform: string;
   readonly userAgentData: NavigatorUAData;
+  /**
+   * Web MIDI: access to the system's MIDI 1.0 ports. Needs `--allow-midi`,
+   * and `--allow-midi=sysex` for `{ sysex: true }`; rejects with
+   * `NotAllowedError` without it, and with `NotSupportedError` where the OS
+   * has no MIDI service (on Linux: no ALSA library or sequencer).
+   *
+   * @category MIDI
+   */
+  requestMIDIAccess(options?: MIDIOptions): Promise<MIDIAccess>;
 }
+
+/**
+ * Options for {@linkcode Navigator.requestMIDIAccess}.
+ *
+ * @category MIDI
+ */
+interface MIDIOptions {
+  /** Ask for system exclusive messages too. Needs `--allow-midi=sysex`
+   * (a bare `--allow-midi` grants MIDI devices only). */
+  sysex?: boolean;
+  /** Include software synthesizers among the outputs. */
+  software?: boolean;
+}
+
+/**
+ * The ports of a {@linkcode MIDIAccess}, by id: a read-only map.
+ *
+ * @category MIDI
+ */
+interface MIDIInputMap extends ReadonlyMap<string, MIDIInput> {}
+
+/** @category MIDI */
+declare var MIDIInputMap: typeof globalThis extends
+  { document: any; MIDIInputMap: infer T } ? T : {
+  readonly prototype: MIDIInputMap;
+  new (): never;
+};
+
+/**
+ * The output ports of a {@linkcode MIDIAccess}, by id: a read-only map.
+ *
+ * @category MIDI
+ */
+interface MIDIOutputMap extends ReadonlyMap<string, MIDIOutput> {}
+
+/** @category MIDI */
+declare var MIDIOutputMap: typeof globalThis extends
+  { document: any; MIDIOutputMap: infer T } ? T : {
+  readonly prototype: MIDIOutputMap;
+  new (): never;
+};
+
+/** @category MIDI */
+interface MIDIAccessEventMap {
+  "statechange": MIDIConnectionEvent;
+}
+
+/**
+ * Access to the system's MIDI ports, from
+ * {@linkcode Navigator.requestMIDIAccess}. MIDI 1.0 (the Web MIDI API has no
+ * MIDI 2.0).
+ *
+ * @category MIDI
+ */
+interface MIDIAccess extends EventTarget {
+  /** The input ports. A port that goes away stays here as `"disconnected"`. */
+  readonly inputs: MIDIInputMap;
+  /** The output ports. */
+  readonly outputs: MIDIOutputMap;
+  /** Whether system exclusive messages may be sent and are received. */
+  readonly sysexEnabled: boolean;
+  /** Fires when a port is added, goes away or comes back, or is opened or
+   * closed. */
+  onstatechange: ((this: MIDIAccess, ev: MIDIConnectionEvent) => any) | null;
+  addEventListener<K extends keyof MIDIAccessEventMap>(
+    type: K,
+    listener: (this: MIDIAccess, ev: MIDIAccessEventMap[K]) => any,
+    options?: boolean | AddEventListenerOptions,
+  ): void;
+  addEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | AddEventListenerOptions,
+  ): void;
+  removeEventListener<K extends keyof MIDIAccessEventMap>(
+    type: K,
+    listener: (this: MIDIAccess, ev: MIDIAccessEventMap[K]) => any,
+    options?: boolean | EventListenerOptions,
+  ): void;
+  removeEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | EventListenerOptions,
+  ): void;
+}
+
+/** @category MIDI */
+declare var MIDIAccess: typeof globalThis extends
+  { document: any; MIDIAccess: infer T } ? T : {
+  readonly prototype: MIDIAccess;
+  new (): never;
+};
+
+/** @category MIDI */
+type MIDIPortType = "input" | "output";
+/** @category MIDI */
+type MIDIPortDeviceState = "connected" | "disconnected";
+/** @category MIDI */
+type MIDIPortConnectionState = "open" | "closed" | "pending";
+
+/** @category MIDI */
+interface MIDIPortEventMap {
+  "statechange": MIDIConnectionEvent;
+}
+
+/**
+ * A MIDI input or output port.
+ *
+ * @category MIDI
+ */
+interface MIDIPort extends EventTarget {
+  /** The port's id, stable across sessions as far as the OS allows. */
+  readonly id: string;
+  readonly manufacturer: string | null;
+  readonly name: string | null;
+  readonly type: MIDIPortType;
+  readonly version: string | null;
+  /** Whether the device is present. */
+  readonly state: MIDIPortDeviceState;
+  /** Whether the port is open; `"pending"` while an open port's device is
+   * away (it reopens when the device comes back). */
+  readonly connection: MIDIPortConnectionState;
+  onstatechange: ((this: MIDIPort, ev: MIDIConnectionEvent) => any) | null;
+  /** Opens the port. Rejects with `InvalidAccessError` when the OS refuses
+   * (another program holds it). */
+  open(): Promise<MIDIPort>;
+  close(): Promise<MIDIPort>;
+  addEventListener<K extends keyof MIDIPortEventMap>(
+    type: K,
+    listener: (this: MIDIPort, ev: MIDIPortEventMap[K]) => any,
+    options?: boolean | AddEventListenerOptions,
+  ): void;
+  addEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | AddEventListenerOptions,
+  ): void;
+  removeEventListener<K extends keyof MIDIPortEventMap>(
+    type: K,
+    listener: (this: MIDIPort, ev: MIDIPortEventMap[K]) => any,
+    options?: boolean | EventListenerOptions,
+  ): void;
+  removeEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | EventListenerOptions,
+  ): void;
+}
+
+/** @category MIDI */
+declare var MIDIPort: typeof globalThis extends
+  { document: any; MIDIPort: infer T } ? T : {
+  readonly prototype: MIDIPort;
+  new (): never;
+};
+
+/** @category MIDI */
+interface MIDIInputEventMap extends MIDIPortEventMap {
+  "midimessage": MIDIMessageEvent;
+}
+
+/**
+ * A MIDI input port. Setting `onmidimessage` opens it; an open input keeps
+ * the process alive until it is closed.
+ *
+ * @category MIDI
+ */
+interface MIDIInput extends MIDIPort {
+  /** One complete message per event: running status is expanded, and a
+   * real-time message arrives as its own event. */
+  onmidimessage: ((this: MIDIInput, ev: MIDIMessageEvent) => any) | null;
+  addEventListener<K extends keyof MIDIInputEventMap>(
+    type: K,
+    listener: (this: MIDIInput, ev: MIDIInputEventMap[K]) => any,
+    options?: boolean | AddEventListenerOptions,
+  ): void;
+  addEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | AddEventListenerOptions,
+  ): void;
+  removeEventListener<K extends keyof MIDIInputEventMap>(
+    type: K,
+    listener: (this: MIDIInput, ev: MIDIInputEventMap[K]) => any,
+    options?: boolean | EventListenerOptions,
+  ): void;
+  removeEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | EventListenerOptions,
+  ): void;
+}
+
+/** @category MIDI */
+declare var MIDIInput: typeof globalThis extends
+  { document: any; MIDIInput: infer T } ? T : {
+  readonly prototype: MIDIInput;
+  new (): never;
+};
+
+/**
+ * A MIDI output port.
+ *
+ * @category MIDI
+ */
+interface MIDIOutput extends MIDIPort {
+  /** Sends complete MIDI messages (each with its status byte), at
+   * `timestamp` on `performance.now()`'s clock, or at once when it is 0 or
+   * past. Throws `TypeError` for an invalid message, `InvalidAccessError` for
+   * a system exclusive message without `sysexEnabled`, and
+   * `InvalidStateError` when the port is disconnected. Opens a closed port. */
+  send(data: number[] | Uint8Array, timestamp?: number): void;
+  /** Drops the messages queued for later and not yet sent. */
+  clear(): void;
+}
+
+/** @category MIDI */
+declare var MIDIOutput: typeof globalThis extends
+  { document: any; MIDIOutput: infer T } ? T : {
+  readonly prototype: MIDIOutput;
+  new (): never;
+};
+
+/** @category MIDI */
+interface MIDIMessageEventInit extends EventInit {
+  data?: Uint8Array;
+}
+
+/**
+ * A message an input received. `timeStamp` is its arrival time on
+ * `performance.now()`'s clock.
+ *
+ * @category MIDI
+ */
+interface MIDIMessageEvent extends Event {
+  readonly data: Uint8Array | null;
+}
+
+/** @category MIDI */
+declare var MIDIMessageEvent: typeof globalThis extends
+  { document: any; MIDIMessageEvent: infer T } ? T : {
+  readonly prototype: MIDIMessageEvent;
+  new (type: string, eventInitDict?: MIDIMessageEventInit): MIDIMessageEvent;
+};
+
+/** @category MIDI */
+interface MIDIConnectionEventInit extends EventInit {
+  port?: MIDIPort;
+}
+
+/**
+ * A port's `state` or `connection` changed.
+ *
+ * @category MIDI
+ */
+interface MIDIConnectionEvent extends Event {
+  readonly port: MIDIPort | null;
+}
+
+/** @category MIDI */
+declare var MIDIConnectionEvent: typeof globalThis extends
+  { document: any; MIDIConnectionEvent: infer T } ? T : {
+  readonly prototype: MIDIConnectionEvent;
+  new (
+    type: string,
+    eventInitDict?: MIDIConnectionEventInit,
+  ): MIDIConnectionEvent;
+};
 
 /**
  * Constructor for `Navigator` objects.

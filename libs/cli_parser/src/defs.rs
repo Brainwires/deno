@@ -166,6 +166,21 @@ pub static PERMISSION_ARGS: &[ArgDef] = &[
     .require_equals()
     .value_delimiter(',')
 .hidden(),
+  // denext: Web MIDI (`devices`, `sysex`).
+  ArgDef::new("allow-midi")
+    .long("allow-midi")
+    .action(ArgAction::Append)
+    .num_args(NumArgs::ZeroOrMore)
+    .require_equals()
+    .value_delimiter(',')
+.hidden(),
+  ArgDef::new("deny-midi")
+    .long("deny-midi")
+    .action(ArgAction::Append)
+    .num_args(NumArgs::ZeroOrMore)
+    .require_equals()
+    .value_delimiter(',')
+.hidden(),
   ArgDef::new("allow-ffi")
     .long("allow-ffi")
     .action(ArgAction::Append)

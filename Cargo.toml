@@ -21,6 +21,7 @@ members = [
   "ext/image",
   "ext/io",
   "ext/kv",
+  "ext/midi",
   "ext/napi",
   "ext/napi/sym",
   "ext/net",
@@ -136,6 +137,7 @@ deno_http = { version = "0.258.0", path = "./ext/http" }
 deno_image = { version = "0.36.0", path = "./ext/image" }
 deno_io = { version = "0.170.0", path = "./ext/io" }
 deno_kv = { version = "0.168.0", path = "./ext/kv" }
+deno_midi = { version = "0.1.0", path = "./ext/midi" }
 deno_napi = { version = "0.191.0", path = "./ext/napi" }
 deno_net = { version = "0.252.0", path = "./ext/net" }
 deno_node = { version = "0.198.0", path = "./ext/node" }
@@ -485,8 +487,10 @@ libffi = "=5.1.0"
 memmap2 = "0.9"
 
 # napi
+coremidi = "0.9"
 libloading = "0.7"
 libuv-sys-lite = { version = "=1.48.4", features = ["dyn-symbols"] }
+midir = "=0.11.1"
 napi_sys = { version = "0.1.0", path = "./libs/napi_sys" }
 
 # geometry

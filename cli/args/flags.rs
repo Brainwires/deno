@@ -421,6 +421,21 @@ impl FlagsExt for Flags {
       _ => {}
     }
 
+    // denext: Web MIDI. The parser stores a bare `--allow-midi` as
+    // `["devices"]`, so a list round-trips exactly.
+    match &self.permissions.allow_midi {
+      Some(list) if list.is_empty() => {
+        args.push("--allow-midi=devices,sysex".to_string());
+      }
+      Some(list) => args.push(format!("--allow-midi={}", list.join(","))),
+      None => {}
+    }
+    match &self.permissions.deny_midi {
+      Some(list) if list.is_empty() => args.push("--deny-midi".to_string()),
+      Some(list) => args.push(format!("--deny-midi={}", list.join(","))),
+      None => {}
+    }
+
     args
   }
 

@@ -33,6 +33,7 @@ Deno.test(function permissionNames() {
     "run",
     "ffi",
     "import",
+    "midi",
   ]);
   assert(Object.isFrozen(names));
   assertThrows(() => {
