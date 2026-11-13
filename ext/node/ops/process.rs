@@ -287,11 +287,64 @@ fn kill(pid: i32, sig: i32) -> i32 {
 }
 
 #[cfg(not(unix))]
-fn kill(pid: i32, _sig: i32) -> i32 {
-  match deno_subprocess_windows::process_kill(pid, _sig) {
+fn kill(pid: i32, sig: i32) -> i32 {
+  if (pid == 0 || pid == std::process::id() as i32)
+    && terminate_self_after_flush(sig)
+  {
+    return 0;
+  }
+  match deno_subprocess_windows::process_kill(pid, sig) {
     Ok(_) => 0,
     Err(e) => e.as_uv_error(),
   }
+}
+
+/// denext: the process signalling itself on Windows, where it ends at once
+/// (`TerminateProcess`, exit code 1) for SIGINT, SIGTERM, SIGKILL and
+/// SIGQUIT, as in libuv. Node first runs its at-exit work when no JS
+/// listener has the signal (`node_process_methods.cc`'s `Kill` calls
+/// `RunAtExit` for a signal to its own pid that nothing handles), so
+/// `--cpu-prof` / `--heap-prof` profiles and coverage are written; on Unix
+/// the runtime does that work when the signal arrives
+/// (`register_before_default_action`). Here the arrival is emulated: the
+/// before-default hooks (registered for SIGINT on Windows: the console's
+/// Ctrl+C) and the exit hooks run, then the process ends. The hooks wait for
+/// the isolate threads to flush, and the calling thread is one of them, so
+/// when any hook is registered they run on another thread and this returns
+/// `true` (the process ends once they are done, as after a signal on Unix).
+/// Otherwise the exit hooks run here and `false` lets the caller end the
+/// process at once. A signal a JS listener has, or any other signal, is
+/// left to the caller as before (`false`).
+#[cfg(not(unix))]
+fn terminate_self_after_flush(sig: i32) -> bool {
+  const SIGQUIT: i32 = 3;
+  const SIGKILL: i32 = 9;
+  if !matches!(sig, deno_signals::SIGINT | deno_signals::SIGTERM)
+    && sig != SIGKILL
+    && sig != SIGQUIT
+  {
+    return false;
+  }
+  if deno_signals::has_listener(sig) {
+    return false;
+  }
+  if !deno_signals::has_before_default_action(deno_signals::SIGINT) {
+    deno_signals::run_exit();
+    return false;
+  }
+  std::thread::spawn(|| {
+    deno_signals::run_before_default_action(deno_signals::SIGINT);
+    deno_signals::run_exit();
+    // SAFETY: ends this process, as TerminateProcess on its own pseudo
+    // handle does; nothing is borrowed.
+    unsafe {
+      windows_sys::Win32::System::Threading::TerminateProcess(
+        windows_sys::Win32::System::Threading::GetCurrentProcess(),
+        1,
+      );
+    }
+  });
+  true
 }
 
 #[op2(fast, stack_trace)]
