@@ -21,7 +21,12 @@ import {
   titledWindow,
   waitFor,
 } from "../_shared/e2e.ts";
-import { activate, canPressKeys, pressKeys } from "../_shared/input.ts";
+import {
+  activate,
+  canPressKeys,
+  clickAndScrollAt,
+  pressKeys,
+} from "../_shared/input.ts";
 
 const r = new Report("webview");
 
@@ -88,7 +93,14 @@ const local = Deno.serve(
     }
     if (path === "/b") return html(page(TITLE_B));
     if (path === "/type") {
-      return html(page("E2E WebView Type", `<input id="t" autofocus>`));
+      return html(page(
+        "E2E WebView Type",
+        `<input id="t" autofocus>`,
+        `window.__got = { mousedown: 0, mouseup: 0, wheel: 0 };
+for (const t of ["mousedown", "mouseup", "wheel"]) {
+  addEventListener(t, () => window.__got[t]++, true);
+}`,
+      ));
     }
     if (path === "/probe") {
       const body = await req.json();
@@ -706,6 +718,10 @@ async function runSupported() {
         "keys typed into a focused web view never reach the host window",
         cannotPress,
       );
+      r.na(
+        "clicks and scrolls inside a web view never reach the host window",
+        cannotPress,
+      );
     } else {
       const typed = win.createWebView({
         url: URL_TYPE,
@@ -768,6 +784,39 @@ async function runSupported() {
           tlog.slice(before).filter((e) => e.type === "key"),
         );
       }
+
+      // Clicks and scrolls inside the view are its page's too.
+      const hostMouse: string[] = [];
+      const onHostMouse = (e: Event) => hostMouse.push(e.type);
+      for (const t of ["mousedown", "mouseup", "click", "wheel"]) {
+        win.addEventListener(t, onHostMouse);
+      }
+      const [ix, iy] = win.getInnerPosition();
+      await clickAndScrollAt(ix + 20 + 160, iy + 20 + 60, "E2E WebView Host");
+      await sleep(1000);
+      for (const t of ["mousedown", "mouseup", "click", "wheel"]) {
+        win.removeEventListener(t, onHostMouse);
+      }
+      const got = caps.evaluate
+        ? await typed.evaluate("window.__got").catch((e: unknown) =>
+          `error: ${describeError(e)}`
+        )
+        : null;
+      r.set("mouseIsolation", { hostMouse, got });
+      r.check(
+        "clicks and scrolls inside a web view never reach the host window",
+        hostMouse.length === 0,
+        { hostMouse },
+      );
+      if (caps.evaluate) {
+        r.check(
+          "a click and a scroll inside a web view reach its page",
+          typeof got === "object" && got !== null && got.mousedown >= 1 &&
+            got.mouseup >= 1 && got.wheel >= 1,
+          got,
+        );
+      }
+
       let typedClosed = false;
       typed.addEventListener("closed", () => typedClosed = true);
       typed.close();
