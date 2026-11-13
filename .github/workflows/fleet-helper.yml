@@ -1,10 +1,8 @@
 name: fleet helper
 
 # GitHub-hosted machines that join the self-hosted fleet as ONE ephemeral
-# organization runner each (labels: self-hosted + a pool label), take one
-# queued job from that pool, and exit. JIT configs (one-time) are minted on the
-# mini into the FLEET_HELPER_JIT_<n> secrets. Orphan branch: no other workflow
-# runs on its push.
+# organization runner each, take one queued job from that pool, and exit.
+# JIT configs (one-time) are minted on the mini into FLEET_HELPER_JIT_<n>.
 
 on:
   push:
@@ -13,21 +11,22 @@ on:
 permissions: {}
 
 jobs:
-  linux:
+  windows:
     strategy:
       fail-fast: false
       matrix:
-        n: [1]
-    runs-on: ubuntu-24.04
+        n: [4, 5]
+    runs-on: windows-2025
     timeout-minutes: 360
     steps:
-      - name: Join the fleet as one ephemeral denext-linux-x64 runner
+      - name: Join the fleet as one ephemeral denext-windows-x64 runner
+        shell: pwsh
         env:
-          JIT: ${{ matrix.n == 1 && secrets.FLEET_HELPER_JIT_1 || matrix.n == 2 && secrets.FLEET_HELPER_JIT_2 || secrets.FLEET_HELPER_JIT_3 }}
+          JIT: ${{ matrix.n == 4 && secrets.FLEET_HELPER_JIT_4 || secrets.FLEET_HELPER_JIT_5 }}
         run: |
-          test -n "$JIT"
-          mkdir -p "$RUNNER_TEMP/helper" && cd "$RUNNER_TEMP/helper"
-          v=2.338.2
-          curl -fsSL -o r.tgz "https://github.com/actions/runner/releases/download/v$v/actions-runner-linux-x64-$v.tar.gz"
-          tar xzf r.tgz
-          ./run.sh --jitconfig "$JIT"
+          if (-not $env:JIT) { throw "no JIT config" }
+          $d = Join-Path $env:RUNNER_TEMP "helper"; New-Item -ItemType Directory -Force $d | Out-Null; Set-Location $d
+          $v = "2.338.2"
+          Invoke-WebRequest -Uri "https://github.com/actions/runner/releases/download/v$v/actions-runner-win-x64-$v.zip" -OutFile r.zip
+          Expand-Archive r.zip -DestinationPath . -Force
+          ./run.cmd --jitconfig $env:JIT
