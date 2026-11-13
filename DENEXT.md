@@ -14292,21 +14292,23 @@ where the changes are discussed.
        changes kept (its FORK.md lists them), plus its peer-input hardening
        (`harden/peer-input`: the SRTCP authentication bypass, a source-address
        filter, SCTP loop and size caps, ICE role flips, DTLS reassembly and
-       keyless ChangeCipherSpec, TURN message integrity, and remote panics),
-       pinned to commit `17e1b305` (a `git` + `rev` dependency, as `v8` and
-       `laufey` are) until its `v0.21.1+brainwires.1` tag exists. CBC cipher
-       suites are off there by default; the driver sets none (GCM is
-       negotiated). On its `crypto-aws-lc-rs` provider, the aws-lc-rs Deno's
-       rustls already uses, so no ring-based DTLS crypto is added. Chosen over
-       webrtc-rs's async `webrtc` crate (its own tokio tasks and sockets, out of
-       reach of the permission gate), libdatachannel (C++, CMake, MPL-2.0, a
-       second TLS stack) and str0m (sans-I/O too, but no TURN client and no
-       W3C-shaped API). The fork's earlier `master` (`81bc7c6b`, what
-       ReachMyDevice pins) was the first pick and was set aside by the
-       2026-11-13 audit: 320 commits behind upstream and missing upstream's
-       DTLS, ICE and H.264 crash fixes and its SCTP and data-channel fixes; this
-       sync brings them in. Pre-1.0 and not externally audited: DTLS, SCTP and
-       ICE parsing are exposed to any peer that completes ICE.
+       keyless ChangeCipherSpec, TURN message integrity, and remote panics), and
+       its TURN response integrity, SCTP stream-id parity, caps (the
+       remote-candidate cap on every add path) and RTP header-extension bounds:
+       the release `v0.21.1+brainwires.1`, pinned by its commit `d9b3263c` (a
+       `git` + `rev` dependency, as `v8` and `laufey` are). CBC cipher suites
+       are off there by default; the driver sets none (GCM is negotiated). On
+       its `crypto-aws-lc-rs` provider, the aws-lc-rs Deno's rustls already
+       uses, so no ring-based DTLS crypto is added. Chosen over webrtc-rs's
+       async `webrtc` crate (its own tokio tasks and sockets, out of reach of
+       the permission gate), libdatachannel (C++, CMake, MPL-2.0, a second TLS
+       stack) and str0m (sans-I/O too, but no TURN client and no W3C-shaped
+       API). The fork's earlier `master` (`81bc7c6b`, what ReachMyDevice pins)
+       was the first pick and was set aside by the 2026-11-13 audit: 320 commits
+       behind upstream and missing upstream's DTLS, ICE and H.264 crash fixes
+       and its SCTP and data-channel fixes; this sync brings them in. Pre-1.0
+       and not externally audited: DTLS, SCTP and ICE parsing are exposed to any
+       peer that completes ICE.
      - **Driver** (`peer.rs`; the engine does no I/O and reads no clock): one
        UDP socket per address family per connection, bound to `0.0.0.0` / `[::]`
        when interfaces may be listed and the wildcard may be listened on (every
