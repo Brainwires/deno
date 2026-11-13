@@ -101,6 +101,11 @@ function macLibs() {
         parameters: ["pointer", "pointer"],
         result: "u8",
       },
+      msgRespondsTo: {
+        name: "objc_msgSend",
+        parameters: ["pointer", "pointer", "pointer"],
+        result: "u8",
+      },
       msgPerformOnMain: {
         name: "objc_msgSend",
         parameters: ["pointer", "pointer", "pointer", "pointer", "bool"],
@@ -494,6 +499,37 @@ export async function clickAndScrollAt(
  * (synthesized keys go to the foreground window, so a press made while
  * another window has it is lost); elsewhere true after the attempt. */
 export async function activate(title: string): Promise<boolean> {
+  if (OS === "darwin") {
+    // Posted key / mouse events go to the frontmost app: make this one
+    // frontmost and the window key (on the main thread, as AppKit needs).
+    const s = macLibs().objc.symbols;
+    const sel = (n: string) => s.sel_registerName(cstr(n));
+    const perform = sel(
+      "performSelectorOnMainThread:withObject:waitUntilDone:",
+    );
+    const app = s.msg(
+      s.objc_getClass(cstr("NSApplication")),
+      sel("sharedApplication"),
+    );
+    if (s.msgRespondsTo(app, sel("respondsToSelector:"), sel("activate"))) {
+      s.msgPerformOnMain(app, perform, sel("activate"), null, true);
+    } else {
+      // A non-nil object reads as YES for the BOOL argument.
+      s.msgPerformOnMain(
+        app,
+        perform,
+        sel("activateIgnoringOtherApps:"),
+        app,
+        true,
+      );
+    }
+    const w = macWindow(title);
+    if (w) {
+      s.msgPerformOnMain(w, perform, sel("makeKeyAndOrderFront:"), null, true);
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    return !!w && s.msgU8(w, sel("isKeyWindow")) !== 0;
+  }
   if (OS === "linux" && onSway()) {
     await run("swaymsg", [`${swayTitle(title)} focus`]).catch(() => {});
   } else if (OS === "linux") {
