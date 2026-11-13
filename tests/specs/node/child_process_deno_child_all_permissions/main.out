@@ -1,0 +1,4 @@
+node args: read=granted write=granted net=granted env=granted run=granted ffi=granted sys=granted
+deno args: read=granted write=granted net=granted env=granted run=granted ffi=granted sys=granted
+deno args with a flag: read=granted write=prompt net=prompt env=prompt run=prompt ffi=prompt sys=prompt
+fork: read=granted write=prompt net=prompt env=granted run=granted ffi=prompt sys=prompt

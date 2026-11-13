@@ -1,0 +1,22 @@
+// denext (DENEXT.md item 372): a Deno child that node:child_process starts
+// with Node's arguments and no Deno permission flags (`spawn(process.execPath,
+// ["child.js"])`, as a Node program starts `node child.js`) runs with `-A`.
+// That is intended: Node has no permission model for its children, and
+// starting the Deno executable already needs `--allow-run` for it, which is
+// full trust (the parent could run `deno run -A` itself). `fork()` passes
+// `process.execArgv`, so its child gets the parent's grants instead (item
+// 189), and a caller that passes a permission flag of its own gets exactly
+// what it asked for.
+{
+  "tempDir": true,
+  "tests": {
+    "granted_run": {
+      "args": "run --allow-run --allow-read --allow-env main.mjs",
+      "output": "main.out"
+    },
+    "no_run_permission": {
+      "args": "run --allow-read --allow-env main.mjs",
+      "output": "no_run.out"
+    }
+  }
+}

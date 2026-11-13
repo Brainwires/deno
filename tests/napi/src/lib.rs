@@ -27,6 +27,7 @@ pub mod env;
 pub mod error;
 pub mod exception;
 pub mod fatal;
+pub mod fd;
 pub mod finalizer;
 pub mod general;
 pub mod handle_scope;
@@ -206,6 +207,7 @@ unsafe extern "C" fn napi_register_module_v1(
   exception::init(env, exports);
   callback_scope::init(env, exports);
   fatal::init(env, exports);
+  fd::init(env, exports);
 
   cleanup_hook_async::init(env, exports);
 
