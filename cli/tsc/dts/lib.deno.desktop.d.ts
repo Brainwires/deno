@@ -1471,6 +1471,15 @@ declare namespace Deno {
     print: boolean;
     /** `clipboardRead` / `clipboardWrite` are honored. */
     clipboard: boolean;
+    /** The app menu's accelerators (⌘W, ⌘T, …) reach the menu before the
+     * view's page, as in a browser: the item fires and the page never sees
+     * the key. */
+    menuAccelerators: boolean;
+    /** A keydown the page didn't handle is reported as a `"key"` event
+     * (`forwarded: false`). */
+    unhandledKeys: boolean;
+    /** `forwardKeys` / {@linkcode WebView.setForwardKeys} work. */
+    forwardKeys: boolean;
   }
 
   /** Where a {@linkcode WebView} sits: CSS pixels relative to the top-left
@@ -1531,6 +1540,11 @@ declare namespace Deno {
     /** The page may write the clipboard (on a user gesture).
      * @default {true} */
     clipboardWrite?: boolean;
+    /** Accelerators (`"CmdOrCtrl+1"`, `"Meta+Shift+L"`: the syntax global
+     * shortcuts and menus take) whose keys go to the app as `"key"` events
+     * (`forwarded: true`) instead of the page; at most 64, each 1 to 64
+     * characters. The app menu's accelerators still win. */
+    forwardKeys?: string[];
   }
 
   /** A {@linkcode WebView}'s main-frame load state.
@@ -1655,6 +1669,21 @@ declare namespace Deno {
       isEditable: boolean;
       mediaType?: "image" | "video" | "audio" | "canvas" | "plugin";
     };
+    /** A key the app gets from the view (DOM `KeyboardEvent` names and
+     * values): `forwarded: true` for one of `forwardKeys` (the page never
+     * had it), `false` for a keydown the page didn't handle, reported after
+     * it (where `unhandledKeys`). */
+    key: {
+      type: "keydown";
+      key: string;
+      code: string;
+      altKey: boolean;
+      ctrlKey: boolean;
+      metaKey: boolean;
+      shiftKey: boolean;
+      repeat: boolean;
+      forwarded: boolean;
+    };
   }
 
   /** The events of a {@linkcode WebView}.
@@ -1765,6 +1794,10 @@ declare namespace Deno {
      * a packaged app needs `inspectable: true`), `unsupported`,
      * `closed`. */
     openDevTools(): void;
+    /** Replace the accelerators the view hands to the app as `"key"`
+     * events (see {@linkcode WebViewOptions.forwardKeys}). `false` where
+     * unsupported (`webViewCapabilities().forwardKeys`) or once closed. */
+    setForwardKeys(keys: string[]): boolean;
     /** Open the OS print dialog for the page. `false` where unsupported or
      * once closed. */
     print(): boolean;

@@ -1871,6 +1871,9 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       context_menu: c.context_menu(),
       print: c.print(),
       clipboard: c.clipboard(),
+      menu_accelerators: c.menu_accelerators(),
+      unhandled_keys: c.unhandled_keys(),
+      forward_keys: c.forward_keys(),
     }
   }
 
@@ -2022,6 +2025,10 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
 
   fn webview_print(&self, webview_id: u32) -> bool {
     laufey::WebView::from_id(webview_id).print()
+  }
+
+  fn webview_set_forward_keys(&self, webview_id: u32, keys: &[String]) -> bool {
+    laufey::WebView::from_id(webview_id).set_forward_keys(keys)
   }
 
   fn set_traffic_light_position(
@@ -2566,6 +2573,7 @@ fn laufey_webview_options(
     context_menu: options.context_menu,
     clipboard_read: options.clipboard_read,
     clipboard_write: options.clipboard_write,
+    forward_keys: options.forward_keys,
   }
 }
 
@@ -4943,6 +4951,7 @@ mod tests {
       (K::Closed, "closed"),
       (K::FindResult, "find-result"),
       (K::ContextMenu, "context-menu"),
+      (K::Key, "key"),
     ] {
       let ev = super::webview_desktop_event(laufey::WebViewEvent {
         web_view_id: 9,
@@ -4998,6 +5007,7 @@ mod tests {
       context_menu: Some("app".into()),
       clipboard_read: Some(true),
       clipboard_write: Some(false),
+      forward_keys: Some(vec!["CmdOrCtrl+1".into()]),
     });
     assert_eq!(o.url, "https://example.com/");
     assert_eq!(
@@ -5018,6 +5028,7 @@ mod tests {
     assert_eq!(o.context_menu.as_deref(), Some("app"));
     assert_eq!(o.clipboard_read, Some(true));
     assert_eq!(o.clipboard_write, Some(false));
+    assert_eq!(o.forward_keys, Some(vec!["CmdOrCtrl+1".to_string()]));
   }
 
   #[test]
