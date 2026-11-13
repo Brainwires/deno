@@ -57,6 +57,15 @@ function macLibs() {
       },
       CGEventSetFlags: { parameters: ["pointer", "u64"], result: "void" },
       CGEventPost: { parameters: ["u32", "pointer"], result: "void" },
+      CGEventCreateMouseEvent: {
+        parameters: ["pointer", "u32", { struct: ["f64", "f64"] }, "u32"],
+        result: "pointer",
+      },
+      // The non-variadic form (macOS 10.13+).
+      CGEventCreateScrollWheelEvent2: {
+        parameters: ["pointer", "u32", "u32", "i32", "i32", "i32"],
+        result: "pointer",
+      },
     } as const,
   );
   const cf = Deno.dlopen(
@@ -170,6 +179,11 @@ function winLibs() {
     {
       keybd_event: {
         parameters: ["u8", "u8", "u32", "usize"],
+        result: "void",
+      },
+      SetCursorPos: { parameters: ["i32", "i32"], result: "i32" },
+      mouse_event: {
+        parameters: ["u32", "u32", "u32", "u32", "usize"],
         result: "void",
       },
       FindWindowW: { parameters: ["pointer", "buffer"], result: "pointer" },
@@ -407,6 +421,71 @@ export async function pressKeys(keys: Key[]): Promise<void> {
     "key",
     "--clearmodifiers",
     keys.map((k) => XDO[k]).join("+"),
+  ]);
+}
+
+/** Click the left button, then scroll one notch down, at the screen point
+ * (`x`, `y`) in getInnerPosition()'s units (points on macOS, pixels on
+ * Windows and X11). `title` is the window's (sway places the pointer
+ * relative to it). Needs what canPressKeys() needs. */
+export async function clickAndScrollAt(
+  x: number,
+  y: number,
+  title: string,
+): Promise<void> {
+  if (OS === "darwin") {
+    const { cg, cf } = macLibs();
+    const point = new Uint8Array(new Float64Array([x, y]).buffer);
+    // kCGEventMouseMoved 5, LeftMouseDown 1, LeftMouseUp 2; button left 0.
+    for (const type of [5, 1, 2]) {
+      const ev = cg.symbols.CGEventCreateMouseEvent(null, type, point, 0);
+      cg.symbols.CGEventPost(0, ev);
+      cf.symbols.CFRelease(ev);
+      await new Promise((r) => setTimeout(r, 60));
+    }
+    // kCGScrollEventUnitLine 1, one wheel, one line down.
+    const wheel = cg.symbols.CGEventCreateScrollWheelEvent2(
+      null,
+      1,
+      1,
+      -1,
+      0,
+      0,
+    );
+    cg.symbols.CGEventPost(0, wheel);
+    cf.symbols.CFRelease(wheel);
+    return;
+  }
+  if (OS === "windows") {
+    const u = winLibs().symbols;
+    u.SetCursorPos(Math.round(x), Math.round(y));
+    await new Promise((r) => setTimeout(r, 60));
+    u.mouse_event(0x0002, /* LEFTDOWN */ 0, 0, 0, 0n);
+    u.mouse_event(0x0004, /* LEFTUP */ 0, 0, 0, 0n);
+    await new Promise((r) => setTimeout(r, 60));
+    // MOUSEEVENTF_WHEEL, -WHEEL_DELTA (two's complement in a DWORD).
+    u.mouse_event(0x0800, 0, 0, 0xffffff88, 0n);
+    return;
+  }
+  if (onSway()) {
+    const w = await swayWindow(title);
+    const rect = w?.rect ?? { x: 0, y: 0 };
+    await swayCursor(rect.x + x, rect.y + y);
+    await swayButton("press");
+    await swayButton("release");
+    await run("swaymsg", ["seat - cursor press button5"]);
+    await run("swaymsg", ["seat - cursor release button5"]);
+    return;
+  }
+  await run("xdotool", [
+    "mousemove",
+    "--sync",
+    String(Math.round(x)),
+    String(Math.round(y)),
+    "click",
+    "1",
+    "click",
+    "5",
   ]);
 }
 

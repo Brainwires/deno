@@ -402,6 +402,7 @@
       "launch: share() shows the OS share sheet"
     ],
     "webview": [
+      "launch: clicks and scrolls inside a web view never reach the host window",
       "launch: keys typed into a focused web view never reach the host window"
     ]
   },
@@ -463,6 +464,7 @@
       "launch: share() shows the OS share sheet"
     ],
     "webview": [
+      "launch: clicks and scrolls inside a web view never reach the host window",
       "launch: keys typed into a focused web view never reach the host window"
     ]
   },
