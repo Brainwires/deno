@@ -69,6 +69,8 @@ use rtc::ice::url::Url as IceUrl;
 use rtc::peer_connection::RTCPeerConnection;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
+use rtc::peer_connection::configuration::setting_engine::SctpMaxMessageSize;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCDataChannelEvent;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::message::RTCMessage;
@@ -1189,8 +1191,17 @@ impl Peer {
     guard: Rc<dyn NetGuard>,
   ) -> Result<Rc<Self>, WebRtcError> {
     let config = RTCConfigurationBuilder::new().build();
+    // Messages up to 256 KiB, as browsers take (the engine's own default is
+    // RFC 8841's 64 KiB); the connection's maxMessageSize is the smaller of
+    // this and the peer's.
+    let settings = SettingEngineBuilder::new()
+      .with_sctp_max_message_size(SctpMaxMessageSize::Bounded(
+        SctpMaxMessageSize::MAX_MESSAGE_SIZE,
+      ))
+      .build();
     let pc = RTCPeerConnectionBuilder::new()
       .with_configuration(config)
+      .with_setting_engine(settings)
       .build(Instant::now())
       .map_err(rtc_err)?;
     let (recv_tx, recv_rx) = mpsc::channel(RECV_QUEUE);

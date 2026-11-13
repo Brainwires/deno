@@ -289,6 +289,7 @@ Deno.test("webrtcBinaryKinds", async () => {
 Deno.test("webrtcLargeAndOrderedMessages", async () => {
   const { a, b, channel, remote } = await connectPair();
   const max = a.sctp!.maxMessageSize;
+  assertEquals(max, 262144);
   const big = new Uint8Array(max);
   for (let i = 0; i < big.length; i++) big[i] = i % 251;
   assertThrows(() => channel.send(new Uint8Array(max + 1)), TypeError);

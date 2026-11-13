@@ -222,7 +222,7 @@ async fn loopback_large_and_ordered_messages() {
   // then 200 small ones whose order must survive; one byte more is a
   // TypeError and is never buffered.
   let max = a.max_message_size().expect("SCTP is up") as usize;
-  assert!(max >= 65_536, "maxMessageSize {max}");
+  assert_eq!(max, 262_144, "both sides take 256 KiB messages");
   let big: Vec<u8> = (0..max as u32).map(|i| (i % 251) as u8).collect();
   let too_big = vec![0u8; max + 1];
   assert!(matches!(
