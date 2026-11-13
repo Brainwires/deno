@@ -400,6 +400,9 @@
     "window": [
       "launch: close() of a WebGPU window closes it (isClosed)",
       "launch: share() shows the OS share sheet"
+    ],
+    "webview": [
+      "launch: keys typed into a focused web view never reach the host window"
     ]
   },
   "aarch64-pc-windows-msvc/cef/default": {
@@ -458,6 +461,9 @@
     "window": [
       "launch: close() of a WebGPU window closes it (isClosed)",
       "launch: share() shows the OS share sheet"
+    ],
+    "webview": [
+      "launch: keys typed into a focused web view never reach the host window"
     ]
   },
   "x86_64-unknown-linux-gnu/webview/wayland-sway": {

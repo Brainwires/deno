@@ -21,6 +21,7 @@ import {
   titledWindow,
   waitFor,
 } from "../_shared/e2e.ts";
+import { activate, canPressKeys, pressKeys } from "../_shared/input.ts";
 
 const r = new Report("webview");
 
@@ -86,6 +87,9 @@ const local = Deno.serve(
       return html(page(TITLE_A, `<a id="to-b" href="/b">B</a>`, PROBE_SCRIPT));
     }
     if (path === "/b") return html(page(TITLE_B));
+    if (path === "/type") {
+      return html(page("E2E WebView Type", `<input id="t" autofocus>`));
+    }
     if (path === "/probe") {
       const body = await req.json();
       if (probe === null) probe = body;
@@ -97,6 +101,7 @@ const local = Deno.serve(
 const BASE = `http://127.0.0.1:${local.addr.port}`;
 const URL_A = `${BASE}/a`;
 const URL_B = `${BASE}/b`;
+const URL_TYPE = `${BASE}/type`;
 
 interface Logged {
   type: string;
@@ -688,6 +693,86 @@ async function runSupported() {
       isWebViewError(tooMany, "invalid") && isWebViewError(empty, "invalid"),
       [tooMany, empty].map((x) => x && describeError(x)),
     );
+  }
+
+  // --- keys typed into a focused web view are its page's: the host
+  // window's keyboard events never see them (they may be a third-party
+  // page's passwords); a forwardKeys match reaches only the view's "key"
+  // event ---
+  {
+    const cannotPress = await canPressKeys();
+    if (cannotPress) {
+      r.na(
+        "keys typed into a focused web view never reach the host window",
+        cannotPress,
+      );
+    } else {
+      const typed = win.createWebView({
+        url: URL_TYPE,
+        bounds: { x: 20, y: 20, width: 320, height: 120 },
+        forwardKeys: ["CmdOrCtrl+Shift+K"],
+      });
+      const tlog = record(typed);
+      await next(tlog, 0, "load", (d) => d.state === "complete");
+      const hostKeys: string[] = [];
+      const onHostKey = (e: Event) => {
+        // The runtime's KeyboardEvent (desktop global; plain deno check
+        // doesn't type it).
+        const k = e as Event & { key?: string };
+        hostKeys.push(`${k.type}:${k.key}`);
+      };
+      win.addEventListener("keydown", onHostKey);
+      win.addEventListener("keyup", onHostKey);
+      await activate("E2E WebView Host");
+      typed.focus();
+      if (caps.evaluate) {
+        await typed.evaluate("document.getElementById('t').focus(), true")
+          .catch(() => {});
+      }
+      await sleep(800);
+      await pressKeys(["K"]);
+      await sleep(800);
+      const value = caps.evaluate
+        ? await typed.evaluate("document.getElementById('t').value")
+          .catch((e: unknown) => `error: ${describeError(e)}`)
+        : null;
+      const before = tlog.length;
+      await pressKeys(["Primary", "Shift", "K"]);
+      const forwarded = caps.forwardKeys
+        ? await next(tlog, before, "key", (d) => d.forwarded === true, 5000)
+        : null;
+      await sleep(800);
+      win.removeEventListener("keydown", onHostKey);
+      win.removeEventListener("keyup", onHostKey);
+      r.set("keyIsolation", {
+        hostKeys,
+        value,
+        forwarded: forwarded?.detail ?? null,
+      });
+      r.check(
+        "keys typed into a focused web view never reach the host window",
+        hostKeys.length === 0,
+        { hostKeys },
+      );
+      if (caps.evaluate) {
+        r.check(
+          "a key typed into a focused web view reaches its page",
+          typeof value === "string" && value.toLowerCase() === "k",
+          value,
+        );
+      }
+      if (caps.forwardKeys) {
+        r.check(
+          "a forwardKeys match reaches the view's key event, forwarded",
+          forwarded !== null,
+          tlog.slice(before).filter((e) => e.type === "key"),
+        );
+      }
+      let typedClosed = false;
+      typed.addEventListener("closed", () => typedClosed = true);
+      typed.close();
+      await waitFor(() => typedClosed, 10000);
+    }
   }
 
   // --- contextMenu: "app" and the clipboard switches are accepted ---
