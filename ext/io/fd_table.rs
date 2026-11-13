@@ -44,6 +44,11 @@ pub struct FdTable {
   entries: HashMap<i32, FdOwnership>,
   /// denext: this table's key in [`TABLE_OWNED_FDS`].
   id: u64,
+  /// denext: inherited extra stdio fds this isolate's node:fs has closed.
+  /// node:fs never takes one of them back from the descriptors the process
+  /// inherited at start-up (`crate::adopt_inherited_fd_for_fs`), so a closed
+  /// fd stays `EBADF` to node:fs here, as after a close in Node.
+  released_inherited: HashSet<i32>,
 }
 
 static NEXT_TABLE_ID: AtomicU64 = AtomicU64::new(1);
@@ -79,6 +84,7 @@ impl FdTable {
     Self {
       entries: HashMap::new(),
       id: NEXT_TABLE_ID.fetch_add(1, Ordering::Relaxed),
+      released_inherited: HashSet::new(),
     }
   }
 
@@ -162,7 +168,10 @@ impl FdTable {
         self.forget_table_owned(fd);
         Some(file)
       }
-      Some(FdOwnership::InheritedExtraStdio(file)) => Some(file),
+      Some(FdOwnership::InheritedExtraStdio(file)) => {
+        self.released_inherited.insert(fd);
+        Some(file)
+      }
       Some(FdOwnership::UvOwned) => None,
       Some(FdOwnership::Adoptable) => None,
       None => None,
@@ -177,6 +186,12 @@ impl FdTable {
     INTERNAL_FDS
       .get()
       .is_some_and(|fds| fds.lock().unwrap().contains(&fd))
+  }
+
+  /// denext: whether this table's node:fs closed (or a libuv wrap took over)
+  /// the inherited extra stdio fd `fd`.
+  pub fn has_released_inherited(&self, fd: i32) -> bool {
+    self.released_inherited.contains(&fd)
   }
 
   /// Check if an fd is an inherited extra stdio descriptor.

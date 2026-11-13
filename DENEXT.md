@@ -13950,6 +13950,102 @@ where the changes are discussed.
        held for 100 ms, the spawn waits it out and the program runs).
      - Node tests enabled: none; no Node API changes.
 
+365. **`fix(node:fs)`: fd-based node:fs calls reach a descriptor the process
+     inherited** (runtime; `ext/node/ops/fs.rs`, `ext/io/lib.rs`,
+     `ext/io/fd_table.rs`, `ext/node/ops/fd_adopt.rs`). node:fs's fd calls
+     (`fstat`, `read`, `write`, `close`, `readFile(fd)` and the rest) looked the
+     fd up only in the isolate's own table, which holds what node:fs opened,
+     stdio and the fds a Deno parent announced in `DENO_EXTRA_STDIO_FDS`. A
+     descriptor from a parent that is not Deno (a pipe on fd 3, a file the
+     parent opened), and any inherited fd in a worker (only the main thread's
+     table gets the announced ones), was `EBADF`: `fs.fstatSync(3)` threw, and a
+     server that reads its start-up token from fd 3 (t3code under Qutty) came up
+     without it. Node's fs reaches every descriptor of the process. Now a
+     descriptor recorded at start-up (item 290's list, with its device and
+     inode, so a reused number never counts) is registered on its first node:fs
+     use, in that isolate's table, as an announced slot is: a close-on-exec dup,
+     so a later `net.Socket({ fd })` can still claim the original. It needs the
+     permission its kind implies, as adopting it with `net.Socket({ fd })` does
+     (item 348): every permission or an unscoped `--allow-ffi` covers any fd, a
+     TCP socket needs net for its address, and anything else (a pipe, a
+     terminal, a regular file: none has a path a grant could be scoped to)
+     unscoped read and write; a refused call throws the read or write permission
+     error (`NotCapable`, `ERR_ACCESS_DENIED` in node:fs), or `EPERM` for a TCP
+     socket. `fs.closeSync(fd)` ends node:fs's use of it in that isolate (later
+     calls there are `EBADF`); as for an announced slot, the original descriptor
+     stays open for a libuv wrap, where Node would close it. A libuv wrap that
+     takes a registered inherited fd (`net.Socket({ fd })` after node:fs used
+     it, here or with an announced slot) now claims it process-wide, as item
+     290's own path does, so no other isolate takes it as inherited too. Unix
+     only: on Windows the runtime records no inherited descriptors (a Deno child
+     doesn't register announced slots there either), so this is unchanged.
+     - User-facing note: `fs.fstatSync(3)`, `fs.readSync(3, …)` and the other fd
+       calls work on a descriptor a parent passed (as `stdio[3]` or an open fd),
+       whatever the parent, and in workers, with
+       `--allow-read
+       --allow-write` (or `-A`).
+     - Tests: unit_node `child_process_test.ts` "node:fs reads fd 3 from a
+       non-Deno parent" (a parent run through `env -u DENO_EXTRA_STDIO_FDS`
+       passes a pipe, then a file it opened: `fstatSync`, `fstat`, a worker's
+       `fstatSync`, `readSync` of the token, `EBADF` after `closeSync`; scoped
+       `--allow-read` is refused with `ERR_ACCESS_DENIED`). With the
+       3.0.0-denext.22 debug build the child printed `refused: EBADF` for the
+       pipe.
+     - Node tests enabled: none, because Node's suite never passes a child a
+       descriptor its own runtime didn't announce: every fd test there is a Node
+       parent and Node child, the case `DENO_EXTRA_STDIO_FDS` already covered
+       (`parallel/test-worker-cleanup-handles.js`, the one disabled test that
+       `fstatSync`s a raw fd, expects `EBADF` for a socket a worker opened,
+       which this leaves as it was).
+
+366. **`fix(node:process)`: a worker of a process without IPC has no IPC
+     members** (runtime; `ext/node/polyfills/process.ts`). In every worker,
+     reading `process.connected` or `process.channel` threw
+     `ERR_WORKER_UNSUPPORTED_OPERATION`, and `process.send` /
+     `process.disconnect` were throwing stubs. Node installs those only when the
+     worker sees `NODE_CHANNEL_FD` (`lib/internal/main/worker_thread.js`);
+     otherwise they are `undefined`, as on a main thread without IPC (checked
+     with Node 26: `undefined` on both). So code that checks for IPC
+     (`if (process.connected)`, `typeof process.send === "function"`) threw in a
+     worker: t3code's server in a denext module sidecar, which runs in a Worker.
+     The stubs now follow Node's rule (the variable read without a permission
+     check); with `NODE_CHANNEL_FD` set they are unchanged.
+     - User-facing note: in a worker, `process.connected` / `process.channel`
+       are `undefined` and `process.send` / `process.disconnect` absent unless
+       `NODE_CHANNEL_FD` is set, as in Node.
+     - Tests: unit_node `worker_threads_test.ts` "process IPC members in a
+       worker without IPC" (a web Worker, as a module sidecar runs in, and a
+       `node:worker_threads` Worker read `undefined` for all four; before the
+       fix, on the 3.0.0-denext.22 debug build,
+       `throws
+       ERR_WORKER_UNSUPPORTED_OPERATION` for `connected` and
+       `channel` and `function` for the other two).
+     - Node tests enabled: none new;
+       `parallel/test-worker-unsupported-things.js` (the `NODE_CHANNEL_FD` case)
+       stays enabled and passes. Node's suite has no test of a worker without
+       IPC reading these.
+
+367. **`test(workers)`: a worker's `location` is a configurable WorkerLocation,
+     a blob URL's included** (tests; `tests/unit/worker_test.ts`). No runtime
+     change. A worker has a WorkerLocation for its script URL, as in a browser;
+     Deno defines `globalThis.location` on the main thread only with
+     `--location`. A worker started from a `blob:` URL in a process without
+     `--location` has the blob's opaque origin: `location.href` is
+     `blob:null/<uuid>`, `location.origin` `"null"` and `location.pathname`
+     `null/<uuid>`, so a library joining `origin` and `pathname` builds
+     `nullnull/…`, which is what t3code's PostHog code did in a denext module
+     sidecar (denext starts every module sidecar from a `blob:` wrapper). That
+     is the web's answer for that URL, so the runtime keeps it; the property is
+     configurable on the worker's global, which lets the host replace it. The
+     fix belongs to denext: the sidecar wrapper sets `location` to `undefined`
+     before importing the module, as in Node and in a process sidecar's main
+     thread.
+     - Tests: unit `worker_test.ts` "worker location from a blob: URL is
+       configurable" (a `blob:` worker's `location` is a WorkerLocation with
+       protocol `blob:`, its property is configurable, and redefining it as
+       `undefined` makes `typeof location` `"undefined"`).
+     - Node tests enabled: none; no Node API changes (Node has no `location`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -13957,7 +14053,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363, 364) are what the prebuilt `libdenort` carries. The
+350, 351, 353, 355-361, 363-366) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.

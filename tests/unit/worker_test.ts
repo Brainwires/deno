@@ -736,6 +736,44 @@ Deno.test({
   },
 });
 
+// A worker started from a `blob:` URL gets the blob's WorkerLocation, as in a
+// browser. In a process without `--location` (these tests run with one) the
+// blob's origin is opaque: `location.origin` is "null" and
+// `location.pathname` starts with "null/", so a library joining the two gets
+// "nullnull/...". `location` is a configurable property of the worker's
+// global, so a host that runs other code in the worker (denext's module
+// sidecars) can replace it, for example with `undefined` as in Node, where
+// `typeof location === "undefined"` guards work.
+Deno.test({
+  name: "worker location from a blob: URL is configurable",
+  fn: async function () {
+    const src = `
+      const before = location instanceof WorkerLocation
+        ? location.protocol
+        : "not a WorkerLocation";
+      const desc = Object.getOwnPropertyDescriptor(globalThis, "location");
+      Object.defineProperty(globalThis, "location", {
+        value: undefined,
+        writable: true,
+        configurable: true,
+      });
+      postMessage(\`\${before} | \${desc.configurable} \${typeof location}\`);
+    `;
+    const url = URL.createObjectURL(
+      new Blob([src], { type: "text/javascript" }),
+    );
+    const w = new Worker(url, { type: "module" });
+    try {
+      const { promise, resolve } = Promise.withResolvers<string>();
+      w.onmessage = (e) => resolve(e.data);
+      assertEquals(await promise, "blob: | true undefined");
+    } finally {
+      w.terminate();
+      URL.revokeObjectURL(url);
+    }
+  },
+});
+
 Deno.test({
   name: "Worker with top-level-await",
   fn: async function () {

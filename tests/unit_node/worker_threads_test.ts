@@ -1576,3 +1576,59 @@ Deno.test("[node/worker_threads] new Worker() doesn't wait for the isolate", asy
     } ms the workers took to come online`,
   );
 });
+
+// A worker of a process without an IPC channel has no IPC members, as in
+// Node: `process.connected` and `process.channel` read `undefined` and
+// `process.send` / `process.disconnect` are absent. Reading
+// `process.connected` used to throw ERR_WORKER_UNSUPPORTED_OPERATION in every
+// worker, which broke code that checks for IPC (a denext module sidecar runs
+// in a web Worker). Node stubs them only when `NODE_CHANNEL_FD` is set
+// (parallel/test-worker-unsupported-things.js covers that case).
+Deno.test("[node/worker_threads] process IPC members in a worker without IPC", async () => {
+  const probe = `
+    import process from "node:process";
+    const read = (name) => {
+      try {
+        const value = process[name];
+        return value === undefined ? "undefined" : typeof value;
+      } catch (err) {
+        return "throws " + err.code;
+      }
+    };
+    const result = ["connected", "channel", "send", "disconnect"].map(read);
+    postMessage(result.join(" "));
+  `;
+  const expected = "undefined undefined undefined undefined";
+  // A web Worker, as a denext module sidecar runs in.
+  const url = `data:text/javascript,${encodeURIComponent(probe)}`;
+  const web = new Worker(url, { type: "module" });
+  try {
+    const { promise, resolve } = Promise.withResolvers<string>();
+    web.onmessage = (e) => resolve(e.data);
+    assertEquals(await promise, expected);
+  } finally {
+    web.terminate();
+  }
+  // A node:worker_threads Worker.
+  const worker = new workerThreads.Worker(
+    `const { parentPort } = require("node:worker_threads");
+     const read = (name) => {
+       try {
+         const value = process[name];
+         return value === undefined ? "undefined" : typeof value;
+       } catch (err) {
+         return "throws " + err.code;
+       }
+     };
+     parentPort.postMessage(
+       ["connected", "channel", "send", "disconnect"].map(read).join(" "),
+     );`,
+    { eval: true },
+  );
+  try {
+    const [message] = await once(worker, "message");
+    assertEquals(message, expected);
+  } finally {
+    await worker.terminate();
+  }
+});
