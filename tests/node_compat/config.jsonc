@@ -6955,7 +6955,10 @@
       "windows": false,
       "reason": "times out"
     },
-    "pummel/test-fs-read-file-sync-utf8-memory.js": {},
+    "pummel/test-fs-read-file-sync-utf8-memory.js": {
+      "timeoutMs": 30000,
+      "reason": "Stress test: 100,000 readFileSync calls, 0.5 s on Linux, 1.5 s on macOS arm64, 6.3 s on macOS Intel and 6.5 s on Windows x64 CI (denext tests run 43372954581); over the 10 s default on the Windows arm64 image, where every open is slower"
+    },
     "pummel/test-fs-watch-file-slow.js": {},
     "pummel/test-fs-watch-non-recursive.js": {},
     "pummel/test-heapsnapshot-near-heap-limit-bounded.js": {},
