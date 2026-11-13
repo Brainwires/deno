@@ -13953,20 +13953,25 @@ where the changes are discussed.
        DTLS 1.2, SCTP, DCEP, SDP, STUN/TURN clients) as
        [Brainwires/webrtc-rs-rtc](https://github.com/Brainwires/webrtc-rs-rtc)
        carries it: upstream `master` through `0fbcaa74` (after v0.21.1,
-       2026-11-12) merged into our fork on its `sync/upstream-0.21` branch, the
-       fork's own changes kept (its FORK.md lists them), pinned to commit
-       `7f30445e` (a `git` + `rev` dependency, as `v8` and `laufey` are). On its
-       `crypto-aws-lc-rs` provider, the aws-lc-rs Deno's rustls already uses, so
-       no ring-based DTLS crypto is added. Chosen over webrtc-rs's async
-       `webrtc` crate (its own tokio tasks and sockets, out of reach of the
-       permission gate), libdatachannel (C++, CMake, MPL-2.0, a second TLS
-       stack) and str0m (sans-I/O too, but no TURN client and no W3C-shaped
-       API). The fork's earlier `master` (`81bc7c6b`, what ReachMyDevice pins)
-       was the first pick and was set aside by the 2026-11-13 audit: 320 commits
-       behind upstream and missing upstream's DTLS, ICE and H.264 crash fixes
-       and its SCTP and data-channel fixes; this sync brings them in. Pre-1.0
-       and not externally audited: DTLS, SCTP and ICE parsing are exposed to any
-       peer that completes ICE.
+       2026-11-12) merged into our fork (`sync/upstream-0.21`), the fork's own
+       changes kept (its FORK.md lists them), plus its peer-input hardening
+       (`harden/peer-input`: the SRTCP authentication bypass, a source-address
+       filter, SCTP loop and size caps, ICE role flips, DTLS reassembly and
+       keyless ChangeCipherSpec, TURN message integrity, and remote panics),
+       pinned to commit `17e1b305` (a `git` + `rev` dependency, as `v8` and
+       `laufey` are) until its `v0.21.1+brainwires.1` tag exists. CBC cipher
+       suites are off there by default; the driver sets none (GCM is
+       negotiated). On its `crypto-aws-lc-rs` provider, the aws-lc-rs Deno's
+       rustls already uses, so no ring-based DTLS crypto is added. Chosen over
+       webrtc-rs's async `webrtc` crate (its own tokio tasks and sockets, out of
+       reach of the permission gate), libdatachannel (C++, CMake, MPL-2.0, a
+       second TLS stack) and str0m (sans-I/O too, but no TURN client and no
+       W3C-shaped API). The fork's earlier `master` (`81bc7c6b`, what
+       ReachMyDevice pins) was the first pick and was set aside by the
+       2026-11-13 audit: 320 commits behind upstream and missing upstream's
+       DTLS, ICE and H.264 crash fixes and its SCTP and data-channel fixes; this
+       sync brings them in. Pre-1.0 and not externally audited: DTLS, SCTP and
+       ICE parsing are exposed to any peer that completes ICE.
      - **Driver** (`peer.rs`; the engine does no I/O and reads no clock): one
        UDP socket per address family per connection, bound to `0.0.0.0` / `[::]`
        when interfaces may be listed and the wildcard may be listened on (every
@@ -14053,29 +14058,30 @@ where the changes are discussed.
        candidate-pair entry names candidate ids the candidate entries prefix,
        and remote candidates have no entry), so the selected-pair filter learns
        it from the engine's own traffic.
-     - **Dependency:** the `rtc` crates from the pinned fork commit, with
-       `sansio`, `rcgen` 0.14, `x509-parser` 0.16 / 0.18, `der-parser`,
-       `asn1-rs`, `crc`, `crc32c` (0.6.8), `rkyv`, `pem` 3 / 4, `substring`,
-       `yasna` from crates.io; the workspace's `aes` pin moves `=0.8.3` →
-       `=0.8.4` (rtc-crypto's minimum), and `bytes` 1.12.1, `log` 0.4.33 (the
-       minimum rtc takes; 0.4.35 is younger than the hold), `unicase` 2.10,
-       `zeroize` 1.9.1. Every new crates.io crate is at least 11 days old.
+     - **Dependency:** the `rtc` crates (`0.21.1+brainwires.1`) from the pinned
+       fork commit, with `sansio`, `rcgen` 0.14, `x509-parser` 0.16 / 0.18,
+       `der-parser`, `asn1-rs`, `crc`, `crc32c` (0.6.8), `rkyv`, `pem` 3 / 4,
+       `substring`, `yasna` from crates.io; the workspace's `aes` pin moves
+       `=0.8.3` → `=0.8.4` (rtc-crypto's minimum), and `bytes` 1.12.1, `log`
+       0.4.33 (the minimum rtc takes; 0.4.35 is younger than the hold),
+       `unicase` 2.10, `zeroize` 1.9.1. Every new crates.io crate is at least 11
+       days old.
      - **Size:** BINARY_SIZE_PLACEHOLDER
      - **Verified by hand** (biscuits, Linux x64; scripts not in the tree
        because they download npm packages and browsers): against headless Chrome
        stable, Playwright 1.63's Chromium and its WebKit (Safari's engine), each
        with Deno offering and with the browser offering, with the browsers'
-       default mDNS host candidates: a text, a 1000-byte and a 64 KiB / 256 KiB
-       binary message echoed back, then 100 messages in order; all six pass (one
-       Chromium browser-offers run of five hung once, not reproduced). TURN
-       through pion/turn v4.1.1's example servers on 127.0.0.1 with
-       `iceTransportPolicy: "relay"`: UDP, TCP and TLS (`turns:`, a CA given
-       with `--cert`; an untrusted certificate is an `icecandidateerror` naming
-       the TLS error; with `--unsafely-ignore-certificate-errors` it connects),
-       also under `DENO_WEBRTC_LOOPBACK_ONLY=1`. npm: `simple-peer` 9.11.1 (two
-       peers in one process, trickle, data both ways) and `peerjs` 1.5.4 against
-       a local `peer` 1.0.2 server both work on the globals unchanged. Firefox
-       was not tested (none on the test host).
+       default mDNS host candidates: a text, a 1000-byte and a 256 KiB binary
+       message (the negotiated maximum) echoed back, then 100 messages in order;
+       all six pass (one Chromium browser-offers run of five hung once, not
+       reproduced). TURN through pion/turn v4.1.1's example servers on 127.0.0.1
+       with `iceTransportPolicy: "relay"`: UDP, TCP and TLS (`turns:`, a CA
+       given with `--cert`; an untrusted certificate is an `icecandidateerror`
+       naming the TLS error; with `--unsafely-ignore-certificate-errors` it
+       connects), also under `DENO_WEBRTC_LOOPBACK_ONLY=1`. npm: `simple-peer`
+       9.11.1 (two peers in one process, trickle, data both ways) and `peerjs`
+       1.5.4 against a local `peer` 1.0.2 server both work on the globals
+       unchanged. Firefox was not tested (none on the test host).
      - User-facing note: Deno programs can be WebRTC data channel peers
        (`new RTCPeerConnection()`), of browsers and of each other, with STUN and
        TURN, under the net permission.

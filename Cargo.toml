@@ -322,10 +322,11 @@ rstest = "0"
 # WebRTC (ext/webrtc, DENEXT.md item 364): webrtc-rs's sans-I/O `rtc` stack
 # (ICE, DTLS, SCTP, data channels; MIT OR Apache-2.0) as Brainwires/webrtc-rs-rtc
 # carries it: upstream `master` through 0fbcaa74 (after v0.21.1) merged into
-# our fork on its `sync/upstream-0.21` branch, pinned to an exact commit. On
-# the aws-lc-rs crypto provider, the one Deno's rustls already uses. Pre-1.0
-# and not externally audited.
-rtc = { git = "https://github.com/Brainwires/webrtc-rs-rtc", rev = "7f30445e6c4932a1ffddaf08944257c582496809", default-features = false, features = ["crypto-aws-lc-rs"] }
+# our fork, plus the fork's peer-input hardening (`harden/peer-input`), pinned
+# to an exact commit until the `v0.21.1+brainwires.1` tag exists. On the
+# aws-lc-rs crypto provider, the one Deno's rustls already uses. Pre-1.0 and
+# not externally audited.
+rtc = { git = "https://github.com/Brainwires/webrtc-rs-rtc", rev = "17e1b305f4858e21b9bc57ffe43a056d62b2b816", default-features = false, features = ["crypto-aws-lc-rs"] }
 rusqlite = { version = "0.41.1", features = ["unlock_notify", "bundled", "session", "modern_sqlite", "limits", "backup", "fallible_uint"] } # "modern_sqlite": need sqlite >= 3.49.0 for some db configs; "fallible_uint": ToSql for u64/usize (needed when crates like deno_cache are published/built standalone, not just feature-unified via denokv_sqlite)
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "std", "tls12", "aws_lc_rs"] }
 rustls-pemfile = "2"
