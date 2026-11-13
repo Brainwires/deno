@@ -79,7 +79,7 @@ Deno.test("the committed expected-na.json is well formed", async () => {
   // sidecarint were missing from a copy of it).
   const runTs = await Deno.readTextFile(new URL("../run.ts", import.meta.url));
   const areas = new Set(
-    [...runTs.matchAll(/^  ([a-z0-9]+): \(\) => import\("\.\/areas\//gm)]
+    [...runTs.matchAll(/^ {2}([a-z0-9]+): \(\) => import\("\.\/areas\//gm)]
       .map((m) => m[1]),
   );
   if (!areas.has("window") || !areas.has("webview")) {
