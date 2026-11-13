@@ -6,7 +6,9 @@
 // `MIDIAccess` whose `inputs` / `outputs` maps hold this access's
 // `MIDIInput` / `MIDIOutput` objects. The OS side is in `lib.rs`; this module
 // keeps the port objects, their `state` / `connection`, the events, and
-// validates what `MIDIOutput.send()` is given.
+// validates what `MIDIOutput.send()` is given. The classes keep their state
+// in private fields, so a getter called on another object throws a
+// `TypeError` (the brand check).
 //
 // Hot-plug: each `MIDIAccess` polls the OS port list every 500 ms on an
 // unref'd timer (so it never keeps the process alive). A port that goes away
@@ -257,7 +259,6 @@ class MIDIMessageEvent extends Event {
   }
 
   get data() {
-    webidl.assertBranded(this, MIDIMessageEventPrototype);
     return this.#data;
   }
 
@@ -326,7 +327,6 @@ class MIDIConnectionEvent extends Event {
   }
 
   get port() {
-    webidl.assertBranded(this, MIDIConnectionEventPrototype);
     return this.#port;
   }
 
@@ -377,43 +377,35 @@ class MIDIPort extends EventTarget {
   }
 
   get id() {
-    webidl.assertBranded(this, MIDIPortPrototype);
     return this.#info.id;
   }
 
   get manufacturer() {
-    webidl.assertBranded(this, MIDIPortPrototype);
     return this.#info.manufacturer ?? null;
   }
 
   get name() {
-    webidl.assertBranded(this, MIDIPortPrototype);
     return this.#info.name ?? null;
   }
 
   get type() {
-    webidl.assertBranded(this, MIDIPortPrototype);
     return this.#info.type;
   }
 
   get version() {
-    webidl.assertBranded(this, MIDIPortPrototype);
     return this.#info.version ?? null;
   }
 
   get state() {
-    webidl.assertBranded(this, MIDIPortPrototype);
     return this.#state;
   }
 
   get connection() {
-    webidl.assertBranded(this, MIDIPortPrototype);
     return this.#connection;
   }
 
   open() {
     try {
-      webidl.assertBranded(this, MIDIPortPrototype);
       this[_open]();
       return PromiseResolve(this);
     } catch (error) {
@@ -423,7 +415,6 @@ class MIDIPort extends EventTarget {
 
   close() {
     try {
-      webidl.assertBranded(this, MIDIPortPrototype);
       if (this.#connection !== "closed") {
         this[_release]();
         this.#changed(this.#state, "closed");
@@ -579,7 +570,6 @@ class MIDIOutput extends MIDIPort {
   }
 
   send(data, timestamp = 0) {
-    webidl.assertBranded(this, MIDIOutputPrototype);
     const prefix = "Failed to execute 'send' on 'MIDIOutput'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     const bytes = toBytes(data, prefix);
@@ -609,14 +599,12 @@ class MIDIOutput extends MIDIPort {
   }
 
   clear() {
-    webidl.assertBranded(this, MIDIOutputPrototype);
     if (this[_rid] !== null) {
       op_midi_output_clear(this[_rid]);
     }
   }
 }
 webidl.configureInterface(MIDIOutput);
-const MIDIOutputPrototype = MIDIOutput.prototype;
 
 // ---- the maps --------------------------------------------------------------
 
@@ -708,17 +696,14 @@ class MIDIAccess extends EventTarget {
   }
 
   get inputs() {
-    webidl.assertBranded(this, MIDIAccessPrototype);
     return this.#inputs;
   }
 
   get outputs() {
-    webidl.assertBranded(this, MIDIAccessPrototype);
     return this.#outputs;
   }
 
   get sysexEnabled() {
-    webidl.assertBranded(this, MIDIAccessPrototype);
     return this.#sysex;
   }
 

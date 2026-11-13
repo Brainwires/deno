@@ -11,7 +11,6 @@
 import {
   assert,
   assertEquals,
-  assertInstanceOf,
   assertRejects,
   assertThrows,
 } from "./test_util.ts";
@@ -69,7 +68,7 @@ Deno.test(function midiGlobals() {
 Deno.test(function midiMessageEventConstructor() {
   const data = new Uint8Array([0x90, 60, 100]);
   const event = new MIDIMessageEvent("midimessage", { data });
-  assertInstanceOf(event, Event);
+  assert(event instanceof Event);
   assertEquals(event.type, "midimessage");
   assertEquals(event.data, data);
   assertEquals(new MIDIMessageEvent("midimessage").data, null);
