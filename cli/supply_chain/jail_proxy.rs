@@ -1892,7 +1892,7 @@ mod tests {
       resolve_target(&target("localhost"), 4545, false, true, &resolver)
         .await
         .unwrap()[0],
-      "127.0.0.1:4545".parse().unwrap()
+      "127.0.0.1:4545".parse::<std::net::SocketAddr>().unwrap()
     );
     // a name that doesn't resolve
     assert!(matches!(
