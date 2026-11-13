@@ -261,6 +261,8 @@ const cases = {
   op_desktop_webview_open_devtools: () =>
     ops.op_desktop_webview_open_devtools(1),
   op_desktop_webview_print: () => ops.op_desktop_webview_print(1),
+  op_desktop_webview_set_forward_keys: () =>
+    ops.op_desktop_webview_set_forward_keys(1, ["CmdOrCtrl+1"]),
   // The updater ops (desktop_update_ops_inert has the detail).
   op_desktop_app_update_info: () => ops.op_desktop_app_update_info().configured,
   op_desktop_app_update_check: () =>

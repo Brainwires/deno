@@ -115,6 +115,7 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_webview_stop_find,
     op_desktop_webview_open_devtools,
     op_desktop_webview_print,
+    op_desktop_webview_set_forward_keys,
   } = internals.core.ops;
   const BrowserWindowPrototype = BrowserWindow.prototype;
   Object.setPrototypeOf(BrowserWindowPrototype, EventTarget.prototype);
@@ -985,6 +986,22 @@ pub const DESKTOP_JS: &str = r#"
   const WEBVIEW_DOWNLOADS = ["deny", "ask", "browser"];
   const WEBVIEW_PERMISSIONS = ["deny", "ask"];
   const WEBVIEW_CONTEXT_MENUS = ["native", "app"];
+  // Accelerators ("CmdOrCtrl+1") the view hands to the app as "key" events
+  // instead of the page: at most 64, each 1 to 64 characters.
+  function webViewForwardKeys(keys, name) {
+    if (
+      !Array.isArray(keys) || keys.length > 64 ||
+      !keys.every((k) =>
+        typeof k === "string" && k.length > 0 && k.length <= 64 &&
+        !k.includes("\0")
+      )
+    ) {
+      throw webViewInvalid(
+        `${name} must be at most 64 non-empty strings of at most 64 characters`,
+      );
+    }
+    return [...keys];
+  }
   const WEBVIEW_PARTITION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
   function webViewError(code, message) {
     const error = new Error(message);
@@ -1092,6 +1109,12 @@ pub const DESKTOP_JS: &str = r#"
       "options.contextMenu",
     );
     if (contextMenu !== undefined) out.contextMenu = contextMenu;
+    if (options.forwardKeys !== undefined) {
+      out.forwardKeys = webViewForwardKeys(
+        options.forwardKeys,
+        "options.forwardKeys",
+      );
+    }
     for (const key of ["clipboardRead", "clipboardWrite"]) {
       if (options[key] === undefined) continue;
       if (typeof options[key] !== "boolean") {
@@ -1313,6 +1336,14 @@ pub const DESKTOP_JS: &str = r#"
       if (this.#closed) throw webViewError("closed", "the web view is closed");
       const outcome = op_desktop_webview_open_devtools(this.#id);
       if (!outcome.ok) throw webViewError(outcome.code, outcome.message);
+    }
+    // Replace the accelerators forwarded to the app ("key" events with
+    // forwarded: true; the app menu's accelerators still win). False where
+    // unsupported (webViewCapabilities().forwardKeys) and once closed.
+    setForwardKeys(keys) {
+      const checked = webViewForwardKeys(keys, "keys");
+      return !this.#closed &&
+        op_desktop_webview_set_forward_keys(this.#id, checked);
     }
     // The OS print dialog. False where unsupported and once closed.
     print() {
@@ -5032,6 +5063,8 @@ mod tests {
       "return !this.#closed && op_desktop_webview_stop_find(this.#id);",
       "const outcome = op_desktop_webview_open_devtools(this.#id);",
       "return !this.#closed && op_desktop_webview_print(this.#id);",
+      "op_desktop_webview_set_forward_keys(this.#id, checked);",
+      "out.forwardKeys = webViewForwardKeys(",
     ] {
       assert!(DESKTOP_JS.contains(method), "{method}");
     }

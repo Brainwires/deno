@@ -83,7 +83,7 @@ denort = { path = "../rt", default-features = false }
 # fork's development-denext.
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "972264fb6e45535d0dda0bd434b7439795568875" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "a964086d1f4d8aa74d7b65156b5f62bb2dc9b86b" }
 libsui.workspace = true
 
 bytes.workspace = true

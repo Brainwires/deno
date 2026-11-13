@@ -34,6 +34,9 @@ const EVENTS = [
   "console",
   "focus-change",
   "new-window",
+  "find-result",
+  "context-menu",
+  "key",
   "closed",
 ];
 const appOrigin = Deno.env.get("DENO_DESKTOP_APP_ORIGIN") ?? "app://localhost";
@@ -181,8 +184,23 @@ r.set("caps", caps);
 r.check(
   "webViewCapabilities() reports every key with its type",
   caps !== null && typeof caps === "object" &&
-    ["supported", "capture", "evaluate", "persistentPartitions"]
-      .concat("permissionPrompts")
+    [
+      "supported",
+      "capture",
+      "evaluate",
+      "persistentPartitions",
+      "permissionPrompts",
+      "zOrder",
+      "zoom",
+      "find",
+      "devTools",
+      "contextMenu",
+      "print",
+      "clipboard",
+      "menuAccelerators",
+      "unhandledKeys",
+      "forwardKeys",
+    ]
       .every((k) => typeof caps[k] === "boolean") &&
     (caps.engine === null || ENGINES.includes(caps.engine)) &&
     (caps.engine === null) === !caps.supported,
@@ -630,6 +648,47 @@ async function runSupported() {
   // OS print dialog, which waits for a person) ---
   r.set("print", caps.print ? "supported, not called" : "unsupported");
   r.check("print is a method", typeof view.print === "function");
+
+  // --- forwardKeys: accepted at create; setForwardKeys answers the
+  // capability ---
+  {
+    const e = await errorOf(async () => {
+      const keyed = win.createWebView({
+        url: URL_B,
+        bounds: tiny,
+        visible: false,
+        forwardKeys: ["CmdOrCtrl+1", "Meta+Shift+L"],
+      });
+      const set = keyed.setForwardKeys(["CmdOrCtrl+2"]);
+      r.check(
+        "setForwardKeys() returns webViewCapabilities().forwardKeys",
+        set === caps.forwardKeys,
+        { set, forwardKeys: caps.forwardKeys },
+      );
+      let keyedClosed = false;
+      keyed.addEventListener("closed", () => keyedClosed = true);
+      keyed.close();
+      await waitFor(() => keyedClosed, 10000);
+    });
+    r.check(
+      "createWebView() takes forwardKeys",
+      e === null,
+      e && describeError(e),
+    );
+    const tooMany = await errorOf(() =>
+      win.createWebView({
+        url: URL_B,
+        bounds: tiny,
+        forwardKeys: Array.from({ length: 65 }, () => "CmdOrCtrl+1"),
+      })
+    );
+    const empty = await errorOf(() => view.setForwardKeys([""]));
+    r.check(
+      "65 forwardKeys or an empty key: invalid",
+      isWebViewError(tooMany, "invalid") && isWebViewError(empty, "invalid"),
+      [tooMany, empty].map((x) => x && describeError(x)),
+    );
+  }
 
   // --- contextMenu: "app" and the clipboard switches are accepted ---
   {

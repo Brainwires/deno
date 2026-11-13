@@ -1726,6 +1726,14 @@ pub struct WebViewCapabilitiesInfo {
   pub print: bool,
   /// `clipboardRead` / `clipboardWrite` are honored.
   pub clipboard: bool,
+  /// The app menu's accelerators reach the menu before the view's page.
+  pub menu_accelerators: bool,
+  /// A keydown the page didn't handle is reported ("key", `forwarded:
+  /// false`).
+  pub unhandled_keys: bool,
+  /// `forwardKeys` / `setForwardKeys()` take keys from the page ("key",
+  /// `forwarded: true`).
+  pub forward_keys: bool,
 }
 
 /// A web view's place in its window: CSS pixels from the top-left of the
@@ -1763,6 +1771,9 @@ pub struct WebViewOptionsInfo {
   pub clipboard_read: Option<bool>,
   /// The page may write the clipboard on a user gesture (default true).
   pub clipboard_write: Option<bool>,
+  /// Accelerators (`"CmdOrCtrl+1"`) whose keys go to the app as "key"
+  /// events instead of the page ([`webview_forward_keys_valid`]).
+  pub forward_keys: Option<Vec<String>>,
 }
 
 /// The web view error codes (`WebViewError.code` in DESKTOP_JS).
@@ -1873,6 +1884,14 @@ pub fn validate_webview_options(
     &["native", "app"],
     "contextMenu must be \"native\" or \"app\"",
   )?;
+  if let Some(keys) = &options.forward_keys
+    && !webview_forward_keys_valid(keys)
+  {
+    return Err((
+      WEBVIEW_INVALID,
+      "forwardKeys must be at most 64 non-empty strings of at most 64 characters",
+    ));
+  }
   if let Some(ua) = &options.user_agent
     && ua.contains(['\0', '\r', '\n'])
   {
@@ -1965,6 +1984,21 @@ pub const WEBVIEW_COMMAND_STOP: u32 = 5;
 pub const WEBVIEW_COMMAND_FOCUS: u32 = 6;
 pub const WEBVIEW_COMMAND_RAISE: u32 = 7;
 pub const WEBVIEW_COMMAND_LOWER: u32 = 8;
+
+/// The most `forwardKeys` entries, and the longest one (bytes).
+pub const WEBVIEW_MAX_FORWARD_KEYS: usize = 64;
+pub const WEBVIEW_MAX_FORWARD_KEY_LEN: usize = 64;
+
+/// At most 64 accelerators, each a non-empty string of at most 64 bytes
+/// without a NUL (laufey checks the accelerator syntax itself).
+pub fn webview_forward_keys_valid(keys: &[String]) -> bool {
+  keys.len() <= WEBVIEW_MAX_FORWARD_KEYS
+    && keys.iter().all(|k| {
+      !k.is_empty()
+        && k.len() <= WEBVIEW_MAX_FORWARD_KEY_LEN
+        && !k.contains('\0')
+    })
+}
 
 /// The page zoom range `setZoom()` takes.
 pub const WEBVIEW_ZOOM_MIN: f64 = 0.25;
@@ -3102,6 +3136,15 @@ pub trait DesktopApi: Send + Sync + 'static {
   }
   /// Print the page with the OS print dialog.
   fn webview_print(&self, _webview_id: u32) -> bool {
+    false
+  }
+  /// Replace the accelerators the view forwards to the app ("key" events
+  /// with `forwarded: true`). False where unsupported or for an unknown id.
+  fn webview_set_forward_keys(
+    &self,
+    _webview_id: u32,
+    _keys: &[String],
+  ) -> bool {
     false
   }
   fn set_traffic_light_position(
@@ -5429,6 +5472,21 @@ fn op_desktop_webview_open_devtools(
   }
 }
 
+/// `WebView.setForwardKeys(keys)`: false for a list
+/// [`webview_forward_keys_valid`] refuses (DESKTOP_JS refuses it first), an
+/// unknown id or where unsupported.
+#[op2]
+fn op_desktop_webview_set_forward_keys(
+  state: &mut OpState,
+  #[smi] webview_id: u32,
+  #[serde] keys: Vec<String>,
+) -> bool {
+  webview_forward_keys_valid(&keys)
+    && state
+      .try_borrow::<Arc<dyn DesktopApi>>()
+      .is_some_and(|api| api.webview_set_forward_keys(webview_id, &keys))
+}
+
 /// `WebView.print()`: the OS print dialog; false where unsupported.
 #[op2(fast)]
 fn op_desktop_webview_print(
@@ -7725,6 +7783,7 @@ deno_core::extension!(
     op_desktop_webview_stop_find,
     op_desktop_webview_open_devtools,
     op_desktop_webview_print,
+    op_desktop_webview_set_forward_keys,
   ],
   objects = [BrowserWindow, Dock, Tray, Notification],
 );
@@ -10833,6 +10892,9 @@ mod tests {
         "contextMenu": false,
         "print": false,
         "clipboard": false,
+        "menuAccelerators": false,
+        "unhandledKeys": false,
+        "forwardKeys": false,
       })
     );
     let caps = WebViewCapabilitiesInfo {
@@ -10867,6 +10929,7 @@ mod tests {
       "contextMenu": "app",
       "clipboardRead": true,
       "clipboardWrite": false,
+      "forwardKeys": ["CmdOrCtrl+1", "Meta+Shift+L"],
     }))
     .unwrap();
     assert_eq!(
@@ -10884,6 +10947,10 @@ mod tests {
     assert_eq!(options.context_menu.as_deref(), Some("app"));
     assert_eq!(options.clipboard_read, Some(true));
     assert_eq!(options.clipboard_write, Some(false));
+    assert_eq!(
+      options.forward_keys.as_deref(),
+      Some(&["CmdOrCtrl+1".to_string(), "Meta+Shift+L".to_string()][..])
+    );
     let bare: WebViewOptionsInfo = serde_json::from_value(json!({
       "url": "http://127.0.0.1:8000/",
       "bounds": { "x": 0, "y": 0, "width": 0, "height": 0 },
@@ -11067,6 +11134,20 @@ mod tests {
       }),
       Some("invalid")
     );
+    // forwardKeys: at most 64 non-empty strings of at most 64 bytes.
+    let keys = |v: Vec<String>| {
+      code(WebViewOptionsInfo {
+        forward_keys: Some(v),
+        ..ok.clone()
+      })
+    };
+    assert_eq!(keys(vec![]), None);
+    assert_eq!(keys(vec!["CmdOrCtrl+1".into(); 64]), None);
+    assert_eq!(keys(vec!["x".repeat(64)]), None);
+    assert_eq!(keys(vec!["CmdOrCtrl+1".into(); 65]), Some("invalid"));
+    assert_eq!(keys(vec!["x".repeat(65)]), Some("invalid"));
+    assert_eq!(keys(vec![String::new()]), Some("invalid"));
+    assert_eq!(keys(vec!["a\0b".into()]), Some("invalid"));
     // The user agent goes into a header.
     assert_eq!(
       code(WebViewOptionsInfo {
