@@ -13915,6 +13915,24 @@ where the changes are discussed.
      - User-facing note: none; CI only.
      - Node tests enabled: none, because this is CI only.
 
+363. **`fix(desktop)`: an inherited key is an unknown style, not a lookup hit**
+     (runtime; `cli/rt/desktop.rs`, the window e2e app). DESKTOP_JS looked a
+     caller's string up in plain object tables (`TITLE_BAR_STYLES`,
+     `BACKGROUND_MATERIALS`, `VIBRANCY_MATERIALS`, `MESSAGE_BOX_TYPES`) and
+     refused it only when the result was `undefined`, so `"constructor"`,
+     `"toString"` or `"__proto__"` passed as an `Object.prototype` member and
+     reached the op instead of the `TypeError` (`Unknown title bar style: …`).
+     Every such table now has a null prototype (`__proto__: null`), as
+     `TITLE_VISIBILITIES`, `TOOLBAR_STYLES` and `FILE_DROP_EVENTS` already did.
+     - User-facing note: `setTitleBarStyle`, `setBackgroundMaterial`,
+       `setVibrancy` and `showMessageBox`'s `type` reject an inherited property
+       name with the same `TypeError` as any other unknown name.
+     - Tests: `desktop_js_lookup_tables_have_null_prototypes` (every upper-case
+       name table in DESKTOP_JS starts with `__proto__: null`); the window e2e
+       app calls each style setter with `constructor`, `toString`, `__proto__`
+       and `hasOwnProperty` and expects the `Unknown …` `TypeError`.
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -13922,10 +13940,10 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361) are what the prebuilt `libdenort` carries. The CLI-side
-parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
-packaged app's launchers) are in the branch too, but a stock CLI does not run
-them; denext's own launcher provides that environment.
+350, 351, 353, 355-361, 363) are what the prebuilt `libdenort` carries. The
+CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
+into a packaged app's launchers) are in the branch too, but a stock CLI does not
+run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

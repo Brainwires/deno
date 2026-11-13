@@ -871,7 +871,14 @@ pub const DESKTOP_JS: &str = r#"
   );
   const privateBackdrop = Symbol.for("Deno_privateDesktopBackdrop");
   const privateScreenId = Symbol.for("Deno_privateDesktopScreenId");
-  const TITLE_BAR_STYLES = { default: 0, hidden: 1, hiddenInset: 2 };
+  // Every name -> number table here has a null prototype, so an inherited key
+  // ("constructor", "toString", "__proto__") is unknown, not a function.
+  const TITLE_BAR_STYLES = {
+    __proto__: null,
+    default: 0,
+    hidden: 1,
+    hiddenInset: 2,
+  };
   // laufey API 57: LAUFEY_TITLE_* and LAUFEY_TOOLBAR_STYLE_*.
   const privateTitleVisibility = Symbol.for(
     "Deno_privateDesktopTitleVisibility",
@@ -886,6 +893,7 @@ pub const DESKTOP_JS: &str = r#"
     expanded: 3,
   };
   const BACKGROUND_MATERIALS = {
+    __proto__: null,
     none: 0,
     mica: 1,
     acrylic: 2,
@@ -894,6 +902,7 @@ pub const DESKTOP_JS: &str = r#"
   };
   // Electron's vibrancy names -> NSVisualEffectMaterial.
   const VIBRANCY_MATERIALS = {
+    __proto__: null,
     "titlebar": 3,
     "selection": 4,
     "menu": 5,
@@ -1761,6 +1770,7 @@ pub const DESKTOP_JS: &str = r#"
   // { response: cancelId ?? -1, cancelled: true }. With no window it is
   // app-modal, which works with no window open.
   const MESSAGE_BOX_TYPES = {
+    __proto__: null,
     none: "info",
     info: "info",
     question: "info",
@@ -4121,6 +4131,37 @@ mod tests {
   // cheaply exec it in a v8 isolate from here, but the asserts below
   // pin the regressions that motivated this whole fix: the "Deno.env
   // throws NotCapable and aborts the IIFE" bug from May 2026.
+
+  // A name -> value table DESKTOP_JS looks a caller's string up in must have a
+  // null prototype: with Object.prototype, "constructor" or "toString" would
+  // pass the `=== undefined` check as a function.
+  #[test]
+  fn desktop_js_lookup_tables_have_null_prototypes() {
+    let mut tables = 0;
+    for (start, _) in DESKTOP_JS.match_indices("const ") {
+      let rest = &DESKTOP_JS[start + "const ".len()..];
+      let Some((name, after)) = rest.split_once(" = {") else {
+        continue;
+      };
+      if name.is_empty()
+        || !name
+          .chars()
+          .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+      {
+        continue;
+      }
+      tables += 1;
+      let body = after.trim_start();
+      assert!(
+        body.starts_with("__proto__: null,"),
+        "{name} must start with `__proto__: null,`"
+      );
+    }
+    // TITLE_BAR_STYLES, TITLE_VISIBILITIES, TOOLBAR_STYLES,
+    // BACKGROUND_MATERIALS, VIBRANCY_MATERIALS, MESSAGE_BOX_TYPES,
+    // FILE_DROP_EVENTS.
+    assert!(tables >= 7, "found {tables} tables");
+  }
 
   #[test]
   fn desktop_js_window_api_is_wired() {

@@ -510,6 +510,34 @@ await r.step("window API", async () => {
     );
   }
 
+  // --- an inherited key is an unknown name, not a lookup hit ---
+  const inherited = ["constructor", "toString", "__proto__", "hasOwnProperty"];
+  const setters: Array<[string, (v: string) => unknown]> = [
+    ["setTitleBarStyle", (v) => win.setTitleBarStyle(v as never)],
+    ["setTitleVisibility", (v) => win.setTitleVisibility(v as never)],
+    ["setToolbarStyle", (v) => win.setToolbarStyle(v as never)],
+    ["setBackgroundMaterial", (v) => win.setBackgroundMaterial(v as never)],
+    ["setVibrancy", (v) => win.setVibrancy(v as never)],
+  ];
+  const notRefused: string[] = [];
+  for (const [name, set] of setters) {
+    for (const key of inherited) {
+      try {
+        set(key);
+        notRefused.push(`${name}(${key}): no throw`);
+      } catch (e) {
+        if (!(e instanceof TypeError) || !/^Unknown /.test(e.message)) {
+          notRefused.push(`${name}(${key}): ${e}`);
+        }
+      }
+    }
+  }
+  r.check(
+    "an inherited key (constructor, toString, ...) is an unknown style",
+    notRefused.length === 0,
+    { notRefused },
+  );
+
   // --- a user close, canceled ---
   let canceled = 0;
   const cancel = (e: Event) => {
