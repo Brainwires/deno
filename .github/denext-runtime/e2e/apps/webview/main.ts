@@ -96,10 +96,11 @@ const local = Deno.serve(
       return html(page(
         "E2E WebView Type",
         `<input id="t" autofocus>`,
-        `const got = { mousedown: 0, mouseup: 0, wheel: 0 };
-for (const t of ["mousedown", "mouseup", "wheel"]) {
-  addEventListener(t, () => {
+        `const got = { mousedown: 0, mouseup: 0, wheel: 0, mousemove: 0, at: null };
+for (const t of ["mousedown", "mouseup", "wheel", "mousemove"]) {
+  addEventListener(t, (e) => {
     got[t]++;
+    got.at = [e.clientX, e.clientY];
     document.documentElement.dataset.got = JSON.stringify(got);
   }, true);
 }`,
@@ -746,7 +747,21 @@ async function runSupported() {
       await activate("E2E WebView Host");
       await sleep(300);
       const [ix, iy] = win.getInnerPosition();
-      await clickAndScrollAt(ix + 20 + 160, iy + 20 + 60, "E2E WebView Host");
+      const [ox, oy] = win.getPosition();
+      // The point in the view (its bounds start at 20, 20 in the page).
+      const px = 20 + 160, py = 20 + 60;
+      r.set("pointerAt", { inner: [ix, iy], outer: [ox, oy], page: [px, py] });
+      // CEF's X window is the whole window: aim at it relative to its own
+      // corner (its screen positions need not match the X server's). The
+      // other engines take the screen point.
+      await clickAndScrollAt(
+        ix + px,
+        iy + py,
+        "E2E WebView Host",
+        caps.engine === "cef"
+          ? { x: ix - ox + px, y: iy - oy + py }
+          : undefined,
+      );
       await sleep(1000);
       for (const t of ["mousedown", "mouseup", "click", "wheel"]) {
         win.removeEventListener(t, onHostMouse);

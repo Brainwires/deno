@@ -437,6 +437,10 @@ export async function clickAndScrollAt(
   x: number,
   y: number,
   title: string,
+  // X11: the point relative to the window's own X window (its frame's
+  // top-left), so a backend whose screen positions don't match the X
+  // server's (CEF) is still hit.
+  inWindow?: { x: number; y: number },
 ): Promise<void> {
   if (OS === "darwin") {
     const { cg, cf } = macLibs();
@@ -480,6 +484,24 @@ export async function clickAndScrollAt(
     await swayButton("release");
     await run("swaymsg", ["seat - cursor press button5"]);
     await run("swaymsg", ["seat - cursor release button5"]);
+    return;
+  }
+  if (inWindow) {
+    await run("xdotool", [
+      "search",
+      "--name",
+      `^${title}$`,
+      "mousemove",
+      "--window",
+      "%1",
+      "--sync",
+      String(Math.round(inWindow.x)),
+      String(Math.round(inWindow.y)),
+      "click",
+      "1",
+      "click",
+      "5",
+    ]);
     return;
   }
   await run("xdotool", [
