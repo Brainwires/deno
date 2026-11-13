@@ -925,10 +925,12 @@ class RTCPeerConnection extends EventTarget {
     return enqueue(this, () => {
       const iceRestart = !!options?.iceRestart || !!this[_state].restartIce;
       this[_state].restartIce = false;
-      return new RTCSessionDescription({
+      // A plain RTCSessionDescriptionInit, as the spec has it (libraries
+      // such as simple-peer edit its `sdp` before setLocalDescription).
+      return {
         type: "offer",
         sdp: op_webrtc_pc_create_offer(this[_rid], iceRestart),
-      });
+      };
     });
   }
 
@@ -941,10 +943,10 @@ class RTCPeerConnection extends EventTarget {
           `Cannot create an answer in signaling state '${state}'`,
         );
       }
-      return new RTCSessionDescription({
+      return {
         type: "answer",
         sdp: op_webrtc_pc_create_answer(this[_rid]),
-      });
+      };
     });
   }
 

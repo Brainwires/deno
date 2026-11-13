@@ -240,7 +240,11 @@ Deno.test("webrtcNonTrickleOfferAnswer", async () => {
           if (!(e as RTCPeerConnectionIceEvent).candidate) resolve();
         });
       });
-  await a.setLocalDescription(await a.createOffer());
+  // createOffer / createAnswer resolve to plain, editable dictionaries.
+  const offer = await a.createOffer();
+  assertEquals(Object.getPrototypeOf(offer), Object.prototype);
+  offer.sdp = offer.sdp!;
+  await a.setLocalDescription(offer);
   await gathered(a);
   await b.setRemoteDescription(a.localDescription!);
   await b.setLocalDescription(await b.createAnswer());

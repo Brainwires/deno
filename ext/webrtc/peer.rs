@@ -296,6 +296,8 @@ struct Datagram {
   from: SocketAddr,
   stream: Option<usize>,
   data: BytesMut,
+  /// A TCP/TLS link to a TURN server ended (`stream` names it): why.
+  closed: Option<String>,
 }
 
 /// The connection's UDP socket for one address family.
@@ -1105,6 +1107,21 @@ impl Core {
       return;
     }
     let now = Instant::now();
+    if let (Some(index), Some(reason)) = (dg.stream, dg.closed.as_ref()) {
+      if let Some(server) = self.servers.get_mut(index) {
+        let (url, base) = (server.url.clone(), server.base);
+        server.binding = None;
+        server.allocate = None;
+        server.relay = None;
+        self.report_error(
+          &url,
+          Some(base),
+          ERROR_CODE_UNREACHABLE,
+          format!("The TURN connection ended: {reason}"),
+        );
+      }
+      return;
+    }
     if let Some(index) = dg.stream {
       if let Some(server) = self.servers.get_mut(index) {
         let protocol = server.protocol();
@@ -1797,6 +1814,7 @@ fn spawn_udp_reader(
               from,
               stream: None,
               data: BytesMut::from(&buf[..n]),
+              closed: None,
             };
             if let Err(mpsc::error::TrySendError::Closed(_)) = tx.try_send(dg) {
               break;
@@ -1815,7 +1833,8 @@ fn spawn_udp_reader(
   );
 }
 
-/// Reads RFC 6544 frames off a TURN server stream into the driver's queue.
+/// Reads RFC 6544 frames off a TURN server stream into the driver's queue;
+/// when the stream ends, tells the driver why.
 async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
   mut reader: R,
   local: SocketAddr,
@@ -1825,15 +1844,16 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
 ) {
   let mut buf: Vec<u8> = Vec::with_capacity(RECV_BUFFER_SIZE);
   let mut chunk = vec![0u8; RECV_BUFFER_SIZE];
-  loop {
+  let reason = 'read: loop {
     let n = match reader.read(&mut chunk).await {
-      Ok(0) | Err(_) => return,
+      Ok(0) => break 'read "the server closed the connection".to_string(),
+      Err(e) => break 'read e.to_string(),
       Ok(n) => n,
     };
     buf.extend_from_slice(&chunk[..n]);
     loop {
       match stream_frame_len(&buf) {
-        None => return,
+        None => break 'read "the server sent a malformed frame".to_string(),
         Some(0) => break,
         Some(len) => {
           let frame: Vec<u8> = buf.drain(..len).collect();
@@ -1842,6 +1862,7 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
             from: server,
             stream: Some(index),
             data: BytesMut::from(&frame[..]),
+            closed: None,
           };
           if tx.send(dg).await.is_err() {
             return;
@@ -1849,15 +1870,26 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
         }
       }
     }
-  }
+  };
+  let _ = tx
+    .send(Datagram {
+      local,
+      from: server,
+      stream: Some(index),
+      data: BytesMut::new(),
+      closed: Some(reason),
+    })
+    .await;
 }
 
 async fn write_stream<W: tokio::io::AsyncWrite + Unpin>(
   mut writer: W,
   mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
+  // A failed write also ends the read side, which reports it.
   while let Some(frame) = rx.recv().await {
     if writer.write_all(&frame).await.is_err() {
+      let _ = writer.shutdown().await;
       return;
     }
   }
@@ -1892,9 +1924,15 @@ async fn connect_stream(
         .map_err(|e| e.to_string())?;
       let conn = rustls::ClientConnection::new(config, name)
         .map_err(|e| e.to_string())?;
-      let stream =
+      let mut stream =
         rustls_tokio_stream::TlsStream::new_client_side(tcp, conn, None);
-      let (r, w) = tokio::io::split(stream);
+      // Handshake first, so a refused certificate is reported now rather
+      // than as a request timeout.
+      stream
+        .handshake()
+        .await
+        .map_err(|e| format!("TLS handshake with {} failed: {e}", spec.url))?;
+      let (r, w) = stream.into_split();
       deno_core::unsync::spawn(
         read_stream(r, local, server, index, recv_tx).or_cancel(cancel.clone()),
       );
