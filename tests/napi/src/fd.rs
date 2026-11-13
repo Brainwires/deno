@@ -12,9 +12,8 @@ use crate::napi_new_property;
 
 #[cfg(unix)]
 unsafe extern "C" {
-  fn pipe(fds: *mut i32) -> i32;
-  fn write(fd: i32, buf: *const u8, count: usize) -> isize;
-  fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+  fn pipe(fds: *mut std::ffi::c_int) -> std::ffi::c_int;
+  fn fcntl(fd: std::ffi::c_int, cmd: std::ffi::c_int, ...) -> std::ffi::c_int;
 }
 
 #[cfg(unix)]
@@ -49,9 +48,18 @@ extern "C" fn open_pipe(env: napi_env, info: napi_callback_info) -> napi_value {
       buf.len(),
       &mut len
     ));
-    let mut fds = [-1i32; 2];
+    let mut fds: [std::ffi::c_int; 2] = [-1; 2];
     assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
-    assert_eq!(unsafe { write(fds[1], buf.as_ptr(), len) }, len as isize);
+    {
+      use std::io::Write;
+      use std::os::fd::FromRawFd;
+      use std::os::fd::IntoRawFd;
+      // SAFETY: fds[1] is the pipe's write end, just created; the file is
+      // turned back into the raw descriptor below, never closed here.
+      let mut file = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+      file.write_all(&buf[..len]).unwrap();
+      let _ = file.into_raw_fd();
+    }
     assert_eq!(unsafe { fcntl(fds[0], F_SETFL, O_NONBLOCK) }, 0);
     assert_napi_ok!(napi_create_array_with_length(env, 2, &mut result));
     for (i, fd) in fds.iter().enumerate() {
