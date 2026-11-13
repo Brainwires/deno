@@ -13839,6 +13839,37 @@ where the changes are discussed.
        threw the `TypeError`, the fixed build prints the output).
      - Node tests enabled: none; Node's suite doesn't run with Deno's `node`
        shim active.
+361. **`feat(desktop)`: laufey API 57: native title visibility and toolbar
+     style** (runtime; `runtime/ops/desktop.rs`, `cli/rt_desktop/lib.rs`,
+     `cli/rt/desktop.rs`, `cli/tsc/dts/lib.deno.desktop.d.ts`,
+     `cli/rt_desktop/Cargo.toml`, `Cargo.lock`, `denext_runtime.yml`).
+     `BrowserWindow.setTitleVisibility("hidden" | "visible")` hides the title
+     text while the OS's title bar, its buttons and its drag area stay (the
+     window keeps its title for the Dock / taskbar, the Window menu, Mission
+     Control and alt-tab): `NSWindow.titleVisibility` on macOS,
+     `SetWindowThemeAttribute(WTNCA_NODRAWCAPTION | WTNCA_NODRAWICON)` on
+     Windows, and on Linux only a title bar GTK draws itself (client-side
+     decorations); under a window manager's decorations, on CEF for Linux and on
+     Winit it returns `false`.
+     `BrowserWindow.setToolbarStyle("automatic" |
+     "unified" | "unifiedCompact" | "expanded")`
+     lays the macOS 11+ title bar out with an empty `NSToolbar`; under the
+     `"hidden"` title bar style only `"automatic"` is accepted, and
+     `setTitleBarStyle("hidden")` returns `false` while a toolbar style is set.
+     Both are `BrowserWindow` options too (`titleVisibility`, `toolbarStyle`),
+     and `Deno.desktop.windowCapabilities()` reports `titleVisibility` /
+     `toolbarStyle`. An unknown value is a `TypeError`. laufey moves to
+     `feat/native-title-options` `97e3f5e` (API 57) until it lands on
+     `development-denext`.
+     - User-facing note: a desktop window can hide its title text and keep the
+       native title bar, and a macOS window can take a unified, compact or
+       expanded toolbar style.
+     - Tests: `cli/rt_desktop` `title_option_numbers_match_laufey` (the numbers
+       DESKTOP_JS passes against laufey's enums), the DESKTOP_JS contents test
+       (the setters and the options), the window e2e app (each setter answers
+       what `windowCapabilities()` reports; the `"hidden"` refusal under a
+       toolbar style); laufey's own `title_options_test.cc`, capi unit tests and
+       native_e2e checks.
 
 361. **`ci(denext runtime)`: a release's legs overflow from a busy pool to
      GitHub's image** (`ci/runtime-overflow`; CI;
@@ -13889,7 +13920,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-360) are what the prebuilt `libdenort` carries. The CLI-side
+350, 351, 353, 355-361) are what the prebuilt `libdenort` carries. The CLI-side
 parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
 packaged app's launchers) are in the branch too, but a stock CLI does not run
 them; denext's own launcher provides that environment.
@@ -13935,9 +13966,10 @@ app's own menu, Windows' microphone and camera privacy switches and the macOS
 hit region noticing cursor warps, items 327 and 333; and, for runtime
 3.0.0-denext.21, CEF and WebView2 never holding a non-GET navigation for
 will-navigate and a re-issue token bound to the backend's own load, item 342,
-and CEF 156.0.28, item 356), at the commit pinned by `LAUFEY_SHA` in the
-workflow (or the `laufey_ref` input). The same commit is the `laufey` git
-dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 56, CEF 156.0.28).
+and CEF 156.0.28, item 356; and API 57, title visibility and toolbar style, item
+361), at the commit pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref`
+input). The same commit is the `laufey` git dependency of
+`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 57, CEF 156.0.28).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the

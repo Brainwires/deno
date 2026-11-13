@@ -1280,6 +1280,9 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       // Every backend but Winit has the speech entry points; whether the
       // OS has an engine shows on the first utterance.
       text_to_speech: o.bits() != 0,
+      // Title visibility and toolbar style (laufey API 57).
+      title_visibility: c.title_hidden(),
+      toolbar_style: c.toolbar_style(),
     }
   }
 
@@ -1830,6 +1833,20 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     laufey::Window::from_id(window_id).set_titlebar_style(style)
   }
 
+  fn set_title_visibility(&self, window_id: u32, visibility: i32) -> bool {
+    let Some(visibility) = laufey_title_visibility(visibility) else {
+      return false;
+    };
+    laufey::Window::from_id(window_id).set_title_visibility(visibility)
+  }
+
+  fn set_toolbar_style(&self, window_id: u32, style: i32) -> bool {
+    let Some(style) = laufey_toolbar_style(style) else {
+      return false;
+    };
+    laufey::Window::from_id(window_id).set_toolbar_style(style)
+  }
+
   fn set_traffic_light_position(
     &self,
     window_id: u32,
@@ -2332,6 +2349,28 @@ fn screen_info(s: &laufey::Screen) -> deno_runtime::ops::desktop::ScreenInfo {
     scale_factor: s.scale_factor,
     is_primary: s.is_primary,
   }
+}
+
+/// laufey's `LAUFEY_TITLE_*` numbers (what DESKTOP_JS's TITLE_VISIBILITIES
+/// passes) to its `TitleVisibility`.
+fn laufey_title_visibility(visibility: i32) -> Option<laufey::TitleVisibility> {
+  Some(match visibility {
+    0 => laufey::TitleVisibility::Visible,
+    1 => laufey::TitleVisibility::Hidden,
+    _ => return None,
+  })
+}
+
+/// laufey's `LAUFEY_TOOLBAR_STYLE_*` numbers (what DESKTOP_JS's
+/// TOOLBAR_STYLES passes) to its `ToolbarStyle`.
+fn laufey_toolbar_style(style: i32) -> Option<laufey::ToolbarStyle> {
+  Some(match style {
+    0 => laufey::ToolbarStyle::Automatic,
+    1 => laufey::ToolbarStyle::Unified,
+    2 => laufey::ToolbarStyle::UnifiedCompact,
+    3 => laufey::ToolbarStyle::Expanded,
+    _ => return None,
+  })
 }
 
 /// laufey's `LAUFEY_BACKDROP_*` / `LAUFEY_VIBRANCY_*` numbers (what
@@ -4569,6 +4608,22 @@ mod tests {
     // not show a badge.
     assert_eq!(laufey_dock_badge(""), None);
     assert_eq!(laufey_dock_badge("7"), Some("7"));
+  }
+
+  #[test]
+  fn title_option_numbers_match_laufey() {
+    // DESKTOP_JS's TITLE_VISIBILITIES / TOOLBAR_STYLES numbers.
+    use laufey::TitleVisibility as V;
+    use laufey::ToolbarStyle as T;
+    assert_eq!(super::laufey_title_visibility(0), Some(V::Visible));
+    assert_eq!(super::laufey_title_visibility(1), Some(V::Hidden));
+    assert_eq!(super::laufey_title_visibility(2), None);
+    assert_eq!(super::laufey_toolbar_style(0), Some(T::Automatic));
+    assert_eq!(super::laufey_toolbar_style(1), Some(T::Unified));
+    assert_eq!(super::laufey_toolbar_style(2), Some(T::UnifiedCompact));
+    assert_eq!(super::laufey_toolbar_style(3), Some(T::Expanded));
+    assert_eq!(super::laufey_toolbar_style(4), None);
+    assert_eq!(super::laufey_toolbar_style(-1), None);
   }
 
   #[test]

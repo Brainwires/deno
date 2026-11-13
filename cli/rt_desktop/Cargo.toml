@@ -77,10 +77,12 @@ denort = { path = "../rt", default-features = false }
 # menu, Windows' privacy switches refusing capture, the macOS hit region's
 # cursor warps, and the MSVC min/max fix, on laufey's development-denext;
 # runtime 3.0.0-denext.21: CEF 156.0.28, branch `d21/cef-156-0-28` until it
-# lands), pinned to a commit of the Brainwires/laufey fork.
+# lands; API 57: title visibility and toolbar style, branch
+# `feat/native-title-options` until it lands), pinned to a commit of the
+# Brainwires/laufey fork.
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "0b042090cfc800db26e25bd0b25099fba32a0622" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "97e3f5ee3125f2a59b6ade0e669a0e5d58f700f8" }
 libsui.workspace = true
 
 bytes.workspace = true
