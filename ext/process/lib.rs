@@ -3325,10 +3325,28 @@ mod self_fork_tests {
     let (command, _, _, _, verified) = checked_command(&program);
     assert!(verified.is_some());
     // A write handle, as the forked child's copy: no exec while it is open.
+    // The check wrote the program read-only (0o500), so make it writable for
+    // the open and read-only again: the handle keeps its write access, and the
+    // spawn below meets the same file and mode the check left.
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
+      .unwrap();
     let writer = std::fs::OpenOptions::new()
       .write(true)
       .open(&program)
       .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o500))
+      .unwrap();
+    // Without the retry this spawn fails at once with ETXTBSY.
+    assert_eq!(
+      std::process::Command::new(&program)
+        .spawn()
+        .map(|_| ())
+        .unwrap_err()
+        .kind(),
+      std::io::ErrorKind::ExecutableFileBusy,
+      "a write handle held open makes the exec fail",
+    );
     let release = std::thread::spawn(move || {
       std::thread::sleep(std::time::Duration::from_millis(100));
       drop(writer);
