@@ -688,6 +688,27 @@ export function isForeground(title: string): boolean | null {
   return !!h && !!fg && Deno.UnsafePointer.equals(fg, h);
 }
 
+/** macOS: the key window's title and class (a child web view's overlay
+ * window has no title), for a failure report; null elsewhere or with no key
+ * window. */
+export function macKeyWindow(): { title: string; className: string } | null {
+  if (OS !== "darwin") return null;
+  const s = macLibs().objc.symbols;
+  const sel = (n: string) => s.sel_registerName(cstr(n));
+  const app = s.msg(
+    s.objc_getClass(cstr("NSApplication")),
+    sel("sharedApplication"),
+  );
+  const w = s.msg(app, sel("keyWindow"));
+  if (!w) return null;
+  const str = (p: Deno.PointerValue) => {
+    const c = p ? s.msg(p, sel("UTF8String")) : null;
+    return c ? Deno.UnsafePointerView.getCString(c) : "";
+  };
+  const cls = s.msg(w, sel("className"));
+  return { title: str(s.msg(w, sel("title"))), className: str(cls) };
+}
+
 /** macOS: the NSWindow titled `title`'s style mask and state, for a
  * failure report (null elsewhere, or when there is no such window). */
 export function macWindowState(title: string): Record<string, unknown> | null {
