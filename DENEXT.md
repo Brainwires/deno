@@ -14066,7 +14066,12 @@ where the changes are discussed.
        0.4.33 (the minimum rtc takes; 0.4.35 is younger than the hold),
        `unicase` 2.10, `zeroize` 1.9.1. Every new crates.io crate is at least 11
        days old.
-     - **Size:** BINARY_SIZE_PLACEHOLDER
+     - **Size:** not measured yet: compare the release's `deno-cli` archives
+       with the previous release's (a local release build was stopped to free
+       the build host for the train). The new code is the engine's `rtc*`
+       crates, X.509 / ASN.1 parsing for DTLS certificates (`rcgen`,
+       `x509-parser`, `der-parser`, `asn1-rs`), `rkyv` (rtc-dtls) and the
+       driver; no second TLS or crypto library.
      - **Verified by hand** (biscuits, Linux x64; scripts not in the tree
        because they download npm packages and browsers): against headless Chrome
        stable, Playwright 1.63's Chromium and its WebKit (Safari's engine), each
