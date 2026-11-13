@@ -29,7 +29,7 @@
 //!   sent to and is reported as an `icecandidateerror`.
 //! - **Selected-pair filter**: the engine doesn't check where a non-STUN
 //!   packet (DTLS, SCTP inside it, RTP) comes from, so only those from the
-//!   selected candidate pair reach it (see [`Core::from_selected`]); STUN is
+//!   selected candidate pair reach it (see [`Core::is_from_selected_pair`]); STUN is
 //!   authenticated by ICE itself.
 //! - **DTLS watchdog**: the engine logs and drops handshake errors, so a
 //!   connection whose ICE is up but whose DTLS hasn't connected within
@@ -341,9 +341,9 @@ impl ServerClient {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Gathering {
+enum GatherPhase {
   NotStarted,
-  Gathering,
+  Running,
   Complete,
 }
 
@@ -353,7 +353,7 @@ pub struct Core {
   options: PeerOptions,
   endpoints: Vec<UdpEndpoint>,
   servers: Vec<ServerClient>,
-  gathering: Gathering,
+  gathering: GatherPhase,
   /// ICE server URLs still being resolved / connected before their client
   /// exists.
   resolving: usize,
@@ -366,7 +366,7 @@ pub struct Core {
   /// The selected candidate pair as (local, remote): where the engine's
   /// last non-STUN datagram went.
   selected: Option<(SocketAddr, SocketAddr)>,
-  /// Remote addresses that sent STUN (see [`Core::from_selected`]).
+  /// Remote addresses that sent STUN (see [`Core::is_from_selected_pair`]).
   stun_peers: HashSet<SocketAddr>,
   /// ICE is connected or completed.
   ice_up: bool,
@@ -696,7 +696,7 @@ impl Core {
   /// from an address ICE has exchanged STUN with. The local side is compared
   /// by family and port (exactly for a relay): a wildcard socket's local
   /// address is the routed one.
-  fn from_selected(
+  fn is_from_selected_pair(
     &self,
     local: SocketAddr,
     from: SocketAddr,
@@ -903,7 +903,7 @@ impl Core {
       }
       if is_stun(&data) {
         self.saw_stun(from);
-      } else if !self.from_selected(relay, from, true) {
+      } else if !self.is_from_selected_pair(relay, from, true) {
         continue;
       }
       let _ = self.pc.handle_read(TaggedBytesMut {
@@ -1046,13 +1046,13 @@ impl Core {
 
   /// Ends gathering once every server answered or gave up.
   fn maybe_complete_gathering(&mut self) {
-    if self.gathering != Gathering::Gathering
+    if self.gathering != GatherPhase::Running
       || self.resolving > 0
       || self.servers.iter().any(ServerClient::pending)
     {
       return;
     }
-    self.gathering = Gathering::Complete;
+    self.gathering = GatherPhase::Complete;
     // An empty candidate is the engine's end-of-candidates: it sets the
     // gathering state to "complete" and emits the state change.
     let _ = self.pc.add_local_candidate(RTCIceCandidateInit::default());
@@ -1150,7 +1150,7 @@ impl Core {
     let local = self.local_for(endpoint, dg.from);
     if is_stun(&dg.data) {
       self.saw_stun(dg.from);
-    } else if !self.from_selected(local, dg.from, false) {
+    } else if !self.is_from_selected_pair(local, dg.from, false) {
       return;
     }
     let _ = self.pc.handle_read(TaggedBytesMut {
@@ -1183,7 +1183,7 @@ impl Peer {
         options,
         endpoints: Vec::new(),
         servers: Vec::new(),
-        gathering: Gathering::NotStarted,
+        gathering: GatherPhase::NotStarted,
         resolving: 0,
         srflx_seen: HashSet::new(),
         events: VecDeque::new(),
@@ -1650,10 +1650,10 @@ impl Peer {
   fn start_gathering(self: &Rc<Self>) {
     let specs = {
       let mut core = self.core.borrow_mut();
-      if core.gathering != Gathering::NotStarted {
+      if core.gathering != GatherPhase::NotStarted {
         return;
       }
-      core.gathering = Gathering::Gathering;
+      core.gathering = GatherPhase::Running;
       core.events.push_back(JsEvent::IceGatheringState {
         state: "gathering".to_string(),
       });
