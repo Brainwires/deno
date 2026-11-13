@@ -96,9 +96,12 @@ const local = Deno.serve(
       return html(page(
         "E2E WebView Type",
         `<input id="t" autofocus>`,
-        `window.__got = { mousedown: 0, mouseup: 0, wheel: 0 };
+        `const got = { mousedown: 0, mouseup: 0, wheel: 0 };
 for (const t of ["mousedown", "mouseup", "wheel"]) {
-  addEventListener(t, () => window.__got[t]++, true);
+  addEventListener(t, () => {
+    got[t]++;
+    document.documentElement.dataset.got = JSON.stringify(got);
+  }, true);
 }`,
       ));
     }
@@ -339,16 +342,18 @@ async function runSupported() {
   // --- navigate, back ---
   let mark = log.length;
   view.navigate(URL_B);
+  // The navigation's url events: the history edges may move a moment after
+  // the URL does, in a later url event (every change is reported).
   const urlB = await next(
     log,
     mark,
     "url",
-    (d) => String(d.url).startsWith(URL_B),
+    (d) => String(d.url).startsWith(URL_B) && d.canGoBack === true,
   );
   r.check(
     "navigate(B): a url event with canGoBack true",
-    urlB !== null && urlB.detail.canGoBack === true,
-    urlB?.detail,
+    urlB !== null,
+    log.slice(mark).filter((e) => e.type === "url").map((e) => e.detail),
   );
   await next(
     log,
@@ -362,12 +367,12 @@ async function runSupported() {
     log,
     mark,
     "url",
-    (d) => String(d.url).startsWith(URL_A),
+    (d) => String(d.url).startsWith(URL_A) && d.canGoForward === true,
   );
   r.check(
     "back(): a url event for page A, canGoForward true",
-    back !== null && back.detail.canGoForward === true,
-    back?.detail,
+    back !== null,
+    log.slice(mark).filter((e) => e.type === "url").map((e) => e.detail),
   );
   await next(
     log,
@@ -730,6 +735,44 @@ async function runSupported() {
       });
       const tlog = record(typed);
       await next(tlog, 0, "load", (d) => d.state === "complete");
+      // Clicks and scrolls inside the view are its page's too.
+      const hostMouse: string[] = [];
+      const onHostMouse = (e: Event) => hostMouse.push(e.type);
+      for (const t of ["mousedown", "mouseup", "click", "wheel"]) {
+        win.addEventListener(t, onHostMouse);
+      }
+      // Bring the app forward first: posted input goes to the frontmost
+      // app (macOS) / the focused window.
+      await activate("E2E WebView Host");
+      await sleep(300);
+      const [ix, iy] = win.getInnerPosition();
+      await clickAndScrollAt(ix + 20 + 160, iy + 20 + 60, "E2E WebView Host");
+      await sleep(1000);
+      for (const t of ["mousedown", "mouseup", "click", "wheel"]) {
+        win.removeEventListener(t, onHostMouse);
+      }
+      const got = caps.evaluate
+        ? await typed.evaluate(
+          "JSON.parse(document.documentElement.dataset.got || 'null')",
+        ).catch((e: unknown) => `error: ${describeError(e)}`)
+        : null;
+      r.set("mouseIsolation", { hostMouse, got });
+      r.check(
+        "clicks and scrolls inside a web view never reach the host window",
+        hostMouse.length === 0,
+        { hostMouse },
+      );
+      if (caps.evaluate) {
+        r.check(
+          "a click and a scroll inside a web view reach its page",
+          typeof got === "object" && got !== null && got.mousedown >= 1 &&
+            got.mouseup >= 1 && got.wheel >= 1,
+          got,
+        );
+      }
+
+      // Then keys: the click above gave the view the keyboard, as a user
+      // focuses it; focus() and the input's focus() make sure of it.
       const hostKeys: string[] = [];
       const onHostKey = (e: Event) => {
         // The runtime's KeyboardEvent (desktop global; plain deno check
@@ -737,8 +780,9 @@ async function runSupported() {
         const k = e as Event & { key?: string };
         hostKeys.push(`${k.type}:${k.key}`);
       };
-      win.addEventListener("keydown", onHostKey);
-      win.addEventListener("keyup", onHostKey);
+      // The listeners go on after activate(): on Windows it presses Alt and
+      // F24 to take the foreground, and those reach the host window, which
+      // has the focus then.
       await activate("E2E WebView Host");
       typed.focus();
       if (caps.evaluate) {
@@ -746,6 +790,14 @@ async function runSupported() {
           .catch(() => {});
       }
       await sleep(800);
+      const keyFocus = caps.evaluate
+        ? await typed.evaluate(
+          "({ hasFocus: document.hasFocus(), active: document.activeElement && document.activeElement.id })",
+        ).catch((e: unknown) => `error: ${describeError(e)}`)
+        : null;
+      r.set("keyFocus", keyFocus);
+      win.addEventListener("keydown", onHostKey);
+      win.addEventListener("keyup", onHostKey);
       await pressKeys(["K"]);
       await sleep(800);
       const value = caps.evaluate
@@ -782,38 +834,6 @@ async function runSupported() {
           "a forwardKeys match reaches the view's key event, forwarded",
           forwarded !== null,
           tlog.slice(before).filter((e) => e.type === "key"),
-        );
-      }
-
-      // Clicks and scrolls inside the view are its page's too.
-      const hostMouse: string[] = [];
-      const onHostMouse = (e: Event) => hostMouse.push(e.type);
-      for (const t of ["mousedown", "mouseup", "click", "wheel"]) {
-        win.addEventListener(t, onHostMouse);
-      }
-      const [ix, iy] = win.getInnerPosition();
-      await clickAndScrollAt(ix + 20 + 160, iy + 20 + 60, "E2E WebView Host");
-      await sleep(1000);
-      for (const t of ["mousedown", "mouseup", "click", "wheel"]) {
-        win.removeEventListener(t, onHostMouse);
-      }
-      const got = caps.evaluate
-        ? await typed.evaluate("window.__got").catch((e: unknown) =>
-          `error: ${describeError(e)}`
-        )
-        : null;
-      r.set("mouseIsolation", { hostMouse, got });
-      r.check(
-        "clicks and scrolls inside a web view never reach the host window",
-        hostMouse.length === 0,
-        { hostMouse },
-      );
-      if (caps.evaluate) {
-        r.check(
-          "a click and a scroll inside a web view reach its page",
-          typeof got === "object" && got !== null && got.mousedown >= 1 &&
-            got.mouseup >= 1 && got.wheel >= 1,
-          got,
         );
       }
 
