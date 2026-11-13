@@ -50,7 +50,13 @@ impl MidirBackend {
   }
 }
 
-struct MidirInput(#[allow(dead_code)] MidiInputConnection<()>);
+struct MidirInput(
+  #[allow(
+    dead_code,
+    reason = "held only to keep the input port open; dropping it closes it"
+  )]
+  MidiInputConnection<()>,
+);
 impl InputConnection for MidirInput {}
 
 struct MidirOutput(MidiOutputConnection);

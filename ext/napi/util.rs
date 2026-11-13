@@ -1,5 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-use libc::INT_MAX;
+// libc deprecates its INT_MAX for `c_int::MAX`.
+const INT_MAX: std::ffi::c_int = std::ffi::c_int::MAX;
 
 use crate::*;
 
