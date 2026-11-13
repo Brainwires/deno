@@ -1,0 +1,4 @@
+node args: NotCapable
+deno args: NotCapable
+deno args with a flag: NotCapable
+fork: NotCapable

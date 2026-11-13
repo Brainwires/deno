@@ -14317,6 +14317,28 @@ where the changes are discussed.
        descriptor only from its compiled test addons (`test/addons`,
        `test/node-api`), which the node_compat runner doesn't build.
 
+372. **`test(node:child_process)`: a Deno child started with no permission flag
+     gets `-A`, by design** (tests; no runtime change;
+     `tests/specs/node/child_process_deno_child_all_permissions`). When
+     node:child_process starts the Deno executable with no permission flag, with
+     Node's arguments (`spawn(process.execPath, ["child.js"])`, the
+     translation's `run -A`) or Deno's (`["run", "child.js"]`, which gets `-A`
+     inserted, upstream #35441), the child runs with every permission. That is
+     intended and stays: Node has no permission model for its children, and
+     starting the Deno executable already needs `--allow-run` for it, which is
+     full trust (the parent could run `deno run -A` itself; see "Permission
+     footguns"). A caller that passes a permission flag of its own gets exactly
+     that, and `fork()` (which passes `process.execArgv`) gets the parent's
+     grants (item 189). Without `--allow-run` every one of these is refused.
+     - Tests: spec `node/child_process_deno_child_all_permissions` (each child's
+       `Deno.permissions.querySync` states for read, write, net, env, run, ffi
+       and sys: all `granted` for Node's arguments and for `run child.js`, only
+       `read` for `run --allow-read child.js`, the parent's
+       `--allow-run --allow-read --allow-env` for `fork()`; and `NotCapable` for
+       all four without `--allow-run`). It pins existing behaviour, so it passes
+       on 3.0.0-denext.23 too.
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
