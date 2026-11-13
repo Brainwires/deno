@@ -2275,3 +2275,43 @@ if (process.argv[2] === "child") {
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+// denext: `--input-type` applies only to string input (`--eval`, `--print`,
+// stdin); a Node child given it with a script file fails with
+// ERR_INPUT_TYPE_NOT_ALLOWED and exit code 1, from the command line or from
+// NODE_OPTIONS (node_compat's es-module/test-esm-type-field-errors.js).
+Deno.test("[node/child_process] --input-type with a script file is ERR_INPUT_TYPE_NOT_ALLOWED", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const script = path.join(dir, "main.mjs");
+    await Deno.writeTextFile(script, 'console.log("ran");\n');
+    const fromEnv = CP.spawnSync(Deno.execPath(), [script], {
+      encoding: "utf8",
+      env: { ...process.env, NODE_OPTIONS: "--input-type=module" },
+    });
+    assertEquals(fromEnv.status, 1);
+    assertEquals(fromEnv.stdout, "");
+    assertStringIncludes(fromEnv.stderr, "ERR_INPUT_TYPE_NOT_ALLOWED");
+    const fromArgs = CP.spawnSync(
+      Deno.execPath(),
+      ["--input-type", "module", script],
+      { encoding: "utf8" },
+    );
+    assertEquals(fromArgs.status, 1);
+    assertStringIncludes(fromArgs.stderr, "ERR_INPUT_TYPE_NOT_ALLOWED");
+    // String input still takes it.
+    const evaled = CP.spawnSync(
+      Deno.execPath(),
+      ["--input-type=module", "-e", 'console.log("eval")'],
+      { encoding: "utf8" },
+    );
+    assertEquals(evaled.status, 0);
+    assertEquals(evaled.stdout, "eval\n");
+    // Without it the script runs.
+    const plain = CP.spawnSync(Deno.execPath(), [script], { encoding: "utf8" });
+    assertEquals(plain.status, 0);
+    assertEquals(plain.stdout, "ran\n");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
