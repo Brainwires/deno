@@ -74,23 +74,17 @@ Deno.test("a check that now runs is reported, only for areas that ran", () => {
 Deno.test("the committed expected-na.json is well formed", async () => {
   const file = new URL("../expected-na.json", import.meta.url);
   const data = JSON.parse(await Deno.readTextFile(file)) as NaBaseline;
-  const areas = new Set([
-    "origin",
-    "appid",
-    "deeplink",
-    "window",
-    "dnd",
-    "passkeys",
-    "sld",
-    "menus",
-    "asmt",
-    "update",
-    "keyring",
-    "keyringpersist",
-    "exit",
-    "wayland",
-    "quit",
-  ]);
+  // The areas run.ts registers (its AREAS map), so a new area is known here
+  // the moment it can run, and none drifts out of this list (webview,
+  // sidecarint were missing from a copy of it).
+  const runTs = await Deno.readTextFile(new URL("../run.ts", import.meta.url));
+  const areas = new Set(
+    [...runTs.matchAll(/^  ([a-z0-9]+): \(\) => import\("\.\/areas\//gm)]
+      .map((m) => m[1]),
+  );
+  if (!areas.has("window") || !areas.has("webview")) {
+    throw new Error(`run.ts's AREAS did not parse: ${[...areas].join(", ")}`);
+  }
   for (const [k, v] of Object.entries(data)) {
     if (k === "$comment") continue;
     if (
