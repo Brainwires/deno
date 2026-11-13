@@ -1,0 +1,11 @@
+// denext (DENEXT.md item 371): a process that signals itself with
+// `process.kill(process.pid, sig)` (SIGTERM, SIGINT, SIGKILL) and has no
+// listener for it ends, and with `--cpu-prof` it writes its profile first,
+// as Node's at-exit work does. On Windows the process used to end at once
+// (TerminateProcess), so no profile was written; a listener keeps Node's
+// Windows rule (the process still ends, nothing is flushed).
+{
+  "tempDir": true,
+  "args": "run -A main.mjs",
+  "output": "main.out"
+}

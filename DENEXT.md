@@ -14317,7 +14317,47 @@ where the changes are discussed.
        descriptor only from its compiled test addons (`test/addons`,
        `test/node-api`), which the node_compat runner doesn't build.
 
-371. **`test(node:child_process)`: a Deno child started with no permission flag
+371. **`fix(node:process)`: on Windows a process that signals itself writes its
+     profiles and coverage before it ends, as Node does** (runtime;
+     `ext/node/ops/process.rs`, `ext/signals/lib.rs`). On Windows
+     `process.kill(process.pid, sig)` for SIGINT, SIGTERM, SIGKILL or SIGQUIT
+     ends the process at once (`TerminateProcess`, exit code 1), as libuv's
+     `uv_kill` does. Node first runs its at-exit work when no JS listener has
+     the signal (`node_process_methods.cc`'s `Kill` calls `RunAtExit` for a
+     signal to its own pid), so `--cpu-prof` / `--heap-prof` profiles are
+     written; on Unix the runtime does the same work when the signal arrives
+     (the before-default-action hooks, `cli/util/signal_flush.rs`), but on
+     Windows nothing arrives, so the profile was never written
+     (`sequential/test-cpu-prof-kill.js` and `parallel/test-heap-prof-sigint.js`
+     were disabled on Windows for it). Now the arrival is emulated for a signal
+     to the process's own pid (or 0) with no JS listener: the before-default
+     hooks (registered for SIGINT on Windows, the console's Ctrl+C) and the exit
+     hooks (`run_exit`, as before a terminating signal on Unix) run, then the
+     process ends with exit code 1. The hooks wait for the isolate threads to
+     flush, and the calling thread is one of them, so when a hook is registered
+     they run on another thread and `process.kill` returns (`true`) first: the
+     main thread stops its program at its next turn, writes the profile, and the
+     process ends, as after a self-sent signal on Unix. With no hook (no
+     profiler, coverage or `--trace-sigint`) the exit hooks run and the process
+     ends inside the call, as before. A JS listener for the signal keeps Node's
+     Windows rule: the process ends at once and nothing is flushed. Signal 0 and
+     other pids are unchanged. New `deno_signals` functions: `has_listener`,
+     `has_before_default_action` and `run_before_default_action`.
+     - User-facing note: on Windows, `process.kill(process.pid)` (or `"SIGINT"`
+       / `"SIGKILL"`) under `--cpu-prof`, `--heap-prof` or `--coverage` writes
+       the profile or coverage before the process ends. With `--trace-sigint` it
+       also prints the stack, as a self-sent SIGINT does on Unix.
+     - Tests: spec `node/process_kill_self_flush` (a child under `--cpu-prof`
+       signals itself with SIGTERM and with SIGINT: it ends, by the signal on
+       Unix and with exit code 1 on Windows, and leaves one `.cpuprofile`; on
+       Windows a SIGINT listener: it ends and leaves none).
+     - Node tests enabled: none yet. `sequential/test-cpu-prof-kill.js` and
+       `parallel/test-heap-prof-sigint.js` are what this makes pass on Windows;
+       they stay `"windows": false` until a Windows run of this branch confirms
+       it (the change was built for Windows only as far as clippy: no Windows
+       binary was run).
+
+372. **`test(node:child_process)`: a Deno child started with no permission flag
      gets `-A`, by design** (tests; no runtime change;
      `tests/specs/node/child_process_deno_child_all_permissions`). When
      node:child_process starts the Deno executable with no permission flag, with
@@ -14339,7 +14379,7 @@ where the changes are discussed.
        on 3.0.0-denext.23 too.
      - Node tests enabled: none; no Node API changes.
 
-372. **`fix(signals)`: a signal's arrival is counted before the signal thread
+373. **`fix(signals)`: a signal's arrival is counted before the signal thread
      handles it, so the signal flush doesn't give up on its own signal**
      (runtime; `ext/signals/lib.rs`). On Unix each SIGHUP / SIGTERM / SIGINT
      arrival is counted in the signal handler (item 136's `arrival_count`), and
@@ -14373,7 +14413,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-370, 373) are what the prebuilt `libdenort`
+350, 351, 353, 355-361, 363-366, 368-371, 373) are what the prebuilt `libdenort`
 carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.

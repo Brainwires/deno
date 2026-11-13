@@ -643,6 +643,55 @@ pub fn register_before_default_action(
   Ok(id)
 }
 
+/// denext: whether a handler registered with [`register`] takes `signal`
+/// over (prevents its default action), as a JS signal listener does.
+pub fn has_listener(signal: i32) -> bool {
+  HANDLERS.get().is_some_and(|(_, handlers)| {
+    handlers
+      .lock()
+      .unwrap()
+      .get(&signal)
+      .is_some_and(|handlers| {
+        handlers
+          .iter()
+          .any(|(_, prevent_default, _)| *prevent_default)
+      })
+  })
+}
+
+/// denext: whether any hook added with [`register_before_default_action`]
+/// waits for `signal`'s default action.
+pub fn has_before_default_action(signal: i32) -> bool {
+  BEFORE_DEFAULT_ACTION.get().is_some_and(|hooks| {
+    hooks
+      .lock()
+      .unwrap()
+      .get(&signal)
+      .is_some_and(|hooks| !hooks.is_empty())
+  })
+}
+
+/// denext: runs the hooks added with [`register_before_default_action`] for
+/// `signal`, as its arrival would before the default action, on the calling
+/// thread (they may block while other threads finish their work). For a
+/// termination the runtime emulates itself instead of the OS: a process
+/// signalling itself on Windows (`process.kill(process.pid)`).
+pub fn run_before_default_action(signal: i32) {
+  let hooks: Vec<BeforeDefaultActionHook> = BEFORE_DEFAULT_ACTION
+    .get()
+    .and_then(|hooks| {
+      hooks
+        .lock()
+        .unwrap()
+        .get(&signal)
+        .map(|hooks| hooks.iter().map(|(_, f, _)| f.clone()).collect())
+    })
+    .unwrap_or_default();
+  for f in hooks {
+    f();
+  }
+}
+
 /// Removes a hook added with [`register_before_default_action`].
 pub fn unregister_before_default_action(signal: i32, id: u32) {
   let mut listen_id = None;
