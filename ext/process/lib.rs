@@ -1408,7 +1408,29 @@ fn spawn_command(
   // kill-on-drop, so the child can outlive the parent (matching Node.js
   // semantics for `child_process.unref()`).
 
-  let child = match command.spawn() {
+  let mut spawned = command.spawn();
+  // denext: a program the check just wrote from the app's embedded copy can
+  // be "text file busy" for a moment on Unix. A fork on another thread of this
+  // process between the temporary file's open and its close copies the write
+  // handle, and that child holds it until its own exec closes it
+  // (close-on-exec), so the kernel refuses to exec the file meanwhile. The
+  // handle goes away by itself within milliseconds: try again, bounded (about
+  // 1.5 s in all), instead of failing the spawn.
+  #[cfg(unix)]
+  if verified.is_some() {
+    let mut delay = std::time::Duration::from_millis(1);
+    for _ in 0..12 {
+      if !matches!(&spawned, Err(e)
+        if e.kind() == std::io::ErrorKind::ExecutableFileBusy)
+      {
+        break;
+      }
+      std::thread::sleep(delay);
+      delay = (delay * 2).min(std::time::Duration::from_millis(250));
+      spawned = command.spawn();
+    }
+  }
+  let child = match spawned {
     Ok(child) => child,
     Err(err) => {
       #[cfg(not(windows))]
@@ -3220,6 +3242,8 @@ mod self_fork_tests {
     // Between the check and the exec, per platform.
     #[cfg(unix)]
     a_program_swapped_between_the_check_and_the_exec_is_ended(dir.path());
+    #[cfg(target_os = "linux")]
+    a_program_busy_for_a_moment_is_spawned(dir.path());
     #[cfg(windows)]
     a_held_program_cannot_be_swapped_before_the_exec(dir.path());
     super::set_embedded_programs(Vec::new());
@@ -3281,6 +3305,41 @@ mod self_fork_tests {
       false,
       false,
     )
+  }
+
+  // A program written from its embedded copy is "text file busy" while any
+  // process holds a write handle to it: a fork on another thread that copied
+  // the handle while it was open (denext tests run 43386607716, Linux libs:
+  // ETXTBSY at the spawn). The spawn tries again until the handle is gone.
+  #[cfg(target_os = "linux")]
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "the file the spawn checks is on the real file system"
+  )]
+  fn a_program_busy_for_a_moment_is_spawned(dir: &std::path::Path) {
+    let program = dir.join("busy");
+    register_program(&program, b"#!/bin/sh\nexit 0\n");
+    let (command, _, _, _, verified) = checked_command(&program);
+    assert!(verified.is_some());
+    // A write handle, as the forked child's copy: no exec while it is open.
+    let writer = std::fs::OpenOptions::new()
+      .write(true)
+      .open(&program)
+      .unwrap();
+    let release = std::thread::spawn(move || {
+      std::thread::sleep(std::time::Duration::from_millis(100));
+      drop(writer);
+    });
+    let rt = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
+    rt.block_on(async {
+      let (mut child, _) =
+        super::spawn_command(command, verified.as_ref()).unwrap();
+      assert!(child.wait().await.unwrap().success());
+    });
+    release.join().unwrap();
   }
 
   // The macOS leg of DENEXT.md item 232 (also run on Linux): outside Linux the
