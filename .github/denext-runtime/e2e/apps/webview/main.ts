@@ -25,6 +25,7 @@ import {
   activate,
   canPressKeys,
   clickAndScrollAt,
+  macKeyWindow,
   pressKeys,
 } from "../_shared/input.ts";
 
@@ -794,7 +795,16 @@ async function runSupported() {
       // F24 to take the foreground, and those reach the host window, which
       // has the focus then.
       const keyBeforeTyping = await activate("E2E WebView Host");
+      const focusMark = tlog.length;
       typed.focus();
+      // The view reports the keyboard moving in before anything is typed.
+      const focusEvent = await next(
+        tlog,
+        focusMark,
+        "focus-change",
+        (d) => d.focused === true,
+        3000,
+      );
       if (caps.evaluate) {
         await typed.evaluate("document.getElementById('t').focus(), true")
           .catch(() => {});
@@ -805,7 +815,12 @@ async function runSupported() {
           "({ hasFocus: document.hasFocus(), active: document.activeElement && document.activeElement.id })",
         ).catch((e: unknown) => `error: ${describeError(e)}`)
         : null;
-      r.set("keyFocus", { page: keyFocus, hostKeyWindow: keyBeforeTyping });
+      r.set("keyFocus", {
+        page: keyFocus,
+        hostKeyWindowAfterActivate: keyBeforeTyping,
+        focusChange: focusEvent !== null,
+        keyWindowBeforeTyping: macKeyWindow(),
+      });
       win.addEventListener("keydown", onHostKey);
       win.addEventListener("keyup", onHostKey);
       await pressKeys(["K"]);
