@@ -1864,6 +1864,13 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       evaluate: c.evaluate(),
       persistent_partitions: c.persistent_partitions(),
       permission_prompts: c.permission_prompts(),
+      z_order: c.z_order(),
+      zoom: c.zoom(),
+      find: c.find(),
+      dev_tools: c.devtools(),
+      context_menu: c.context_menu(),
+      print: c.print(),
+      clipboard: c.clipboard(),
     }
   }
 
@@ -1923,6 +1930,8 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       }
       Some(WebViewCommand::Stop) => view.stop(),
       Some(WebViewCommand::Focus) => view.focus(),
+      Some(WebViewCommand::Raise) => view.raise(),
+      Some(WebViewCommand::Lower) => view.lower(),
       None => false,
     }
   }
@@ -1952,6 +1961,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     webview_id: u32,
     format: u32,
     quality: u8,
+    scale: Option<f64>,
   ) -> deno_runtime::ops::desktop::DesktopFuture<
     Result<Vec<u8>, (&'static str, String)>,
   > {
@@ -1964,6 +1974,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     laufey::WebView::from_id(webview_id).capture(
       format,
       quality.min(100),
+      scale,
       move |result| {
         let _ = tx.send(result.map_err(|f| (f.code, f.message)));
       },
@@ -1975,6 +1986,42 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
 
   fn webview_close(&self, webview_id: u32) -> bool {
     laufey::WebView::from_id(webview_id).close()
+  }
+
+  fn webview_set_z_order(&self, webview_id: u32, z_order: i32) -> bool {
+    laufey::WebView::from_id(webview_id).set_z_order(z_order)
+  }
+
+  fn webview_set_zoom(&self, webview_id: u32, factor: f64) -> bool {
+    laufey::WebView::from_id(webview_id).set_zoom(factor)
+  }
+
+  fn webview_zoom(&self, webview_id: u32) -> Option<f64> {
+    laufey::WebView::from_id(webview_id).zoom()
+  }
+
+  fn webview_find(
+    &self,
+    webview_id: u32,
+    text: &str,
+    forward: bool,
+    match_case: bool,
+  ) -> bool {
+    laufey::WebView::from_id(webview_id).find(text, forward, match_case)
+  }
+
+  fn webview_stop_find(&self, webview_id: u32) -> bool {
+    laufey::WebView::from_id(webview_id).stop_find()
+  }
+
+  fn webview_open_devtools(&self, webview_id: u32) -> Result<(), &'static str> {
+    laufey::WebView::from_id(webview_id)
+      .open_devtools()
+      .map_err(|e| e.code())
+  }
+
+  fn webview_print(&self, webview_id: u32) -> bool {
+    laufey::WebView::from_id(webview_id).print()
   }
 
   fn set_traffic_light_position(
@@ -2516,6 +2563,9 @@ fn laufey_webview_options(
     downloads: options.downloads,
     permissions: options.permissions,
     user_agent: options.user_agent,
+    context_menu: options.context_menu,
+    clipboard_read: options.clipboard_read,
+    clipboard_write: options.clipboard_write,
   }
 }
 
@@ -2550,6 +2600,8 @@ enum WebViewCommand {
   Reload { ignore_cache: bool },
   Stop,
   Focus,
+  Raise,
+  Lower,
 }
 
 fn webview_command(command: u32) -> Option<WebViewCommand> {
@@ -2565,6 +2617,8 @@ fn webview_command(command: u32) -> Option<WebViewCommand> {
     }
     d::WEBVIEW_COMMAND_STOP => WebViewCommand::Stop,
     d::WEBVIEW_COMMAND_FOCUS => WebViewCommand::Focus,
+    d::WEBVIEW_COMMAND_RAISE => WebViewCommand::Raise,
+    d::WEBVIEW_COMMAND_LOWER => WebViewCommand::Lower,
     _ => return None,
   })
 }
@@ -4853,8 +4907,10 @@ mod tests {
     assert_eq!(webview_command(4), Some(C::Reload { ignore_cache: true }));
     assert_eq!(webview_command(5), Some(C::Stop));
     assert_eq!(webview_command(6), Some(C::Focus));
+    assert_eq!(webview_command(7), Some(C::Raise));
+    assert_eq!(webview_command(8), Some(C::Lower));
     assert_eq!(webview_command(0), None);
-    assert_eq!(webview_command(7), None);
+    assert_eq!(webview_command(9), None);
   }
 
   #[test]
@@ -4885,6 +4941,8 @@ mod tests {
       (K::FocusChange, "focus-change"),
       (K::NewWindow, "new-window"),
       (K::Closed, "closed"),
+      (K::FindResult, "find-result"),
+      (K::ContextMenu, "context-menu"),
     ] {
       let ev = super::webview_desktop_event(laufey::WebViewEvent {
         web_view_id: 9,
@@ -4913,6 +4971,7 @@ mod tests {
       (E::Invalid, "invalid"),
       (E::Closed, "closed"),
       (E::Failed, "failed"),
+      (E::NotAllowed, "not_allowed"),
     ] {
       assert_eq!(error.code(), code);
     }
@@ -4936,6 +4995,9 @@ mod tests {
       downloads: Some("ask".into()),
       permissions: Some("ask".into()),
       user_agent: Some("UA".into()),
+      context_menu: Some("app".into()),
+      clipboard_read: Some(true),
+      clipboard_write: Some(false),
     });
     assert_eq!(o.url, "https://example.com/");
     assert_eq!(
@@ -4953,6 +5015,9 @@ mod tests {
     assert_eq!(o.downloads.as_deref(), Some("ask"));
     assert_eq!(o.permissions.as_deref(), Some("ask"));
     assert_eq!(o.user_agent.as_deref(), Some("UA"));
+    assert_eq!(o.context_menu.as_deref(), Some("app"));
+    assert_eq!(o.clipboard_read, Some(true));
+    assert_eq!(o.clipboard_write, Some(false));
   }
 
   #[test]

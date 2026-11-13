@@ -1712,6 +1712,20 @@ pub struct WebViewCapabilitiesInfo {
   pub persistent_partitions: bool,
   /// `permissions: "ask"` prompts (else it refuses like `"deny"`).
   pub permission_prompts: bool,
+  /// `raise()` / `lower()` / `setZOrder()` reorder the window's views.
+  pub z_order: bool,
+  /// `setZoom()` / `getZoom()`.
+  pub zoom: bool,
+  /// `find()` / `stopFind()` and the "find-result" event.
+  pub find: bool,
+  /// `openDevTools()`.
+  pub dev_tools: bool,
+  /// The "context-menu" event and `contextMenu: "app"`.
+  pub context_menu: bool,
+  /// `print()`.
+  pub print: bool,
+  /// `clipboardRead` / `clipboardWrite` are honored.
+  pub clipboard: bool,
 }
 
 /// A web view's place in its window: CSS pixels from the top-left of the
@@ -1742,6 +1756,13 @@ pub struct WebViewOptionsInfo {
   /// `"deny"` or `"ask"`.
   pub permissions: Option<String>,
   pub user_agent: Option<String>,
+  /// `"native"` (the engine's menu) or `"app"` (no engine menu; the
+  /// "context-menu" event fires in both).
+  pub context_menu: Option<String>,
+  /// The page may read the clipboard (default false).
+  pub clipboard_read: Option<bool>,
+  /// The page may write the clipboard on a user gesture (default true).
+  pub clipboard_write: Option<bool>,
 }
 
 /// The web view error codes (`WebViewError.code` in DESKTOP_JS).
@@ -1760,6 +1781,9 @@ pub fn webview_error_message(code: &str) -> &'static str {
     }
     "not_allowed_url" => "a web view loads only http: and https: URLs",
     "limit" => "this window holds as many web views as it can",
+    "not_allowed" => {
+      "DevTools are off for this app (not packaged with inspectable: true)"
+    }
     "no_window" | "closed" => "the window or web view is closed",
     "invalid" => "the web view options were refused",
     _ => "the web view engine failed",
@@ -1843,6 +1867,11 @@ pub fn validate_webview_options(
     &options.permissions,
     &["deny", "ask"],
     "permissions must be \"deny\" or \"ask\"",
+  )?;
+  one_of(
+    &options.context_menu,
+    &["native", "app"],
+    "contextMenu must be \"native\" or \"app\"",
   )?;
   if let Some(ua) = &options.user_agent
     && ua.contains(['\0', '\r', '\n'])
@@ -1934,6 +1963,30 @@ pub const WEBVIEW_COMMAND_RELOAD: u32 = 3;
 pub const WEBVIEW_COMMAND_RELOAD_IGNORE_CACHE: u32 = 4;
 pub const WEBVIEW_COMMAND_STOP: u32 = 5;
 pub const WEBVIEW_COMMAND_FOCUS: u32 = 6;
+pub const WEBVIEW_COMMAND_RAISE: u32 = 7;
+pub const WEBVIEW_COMMAND_LOWER: u32 = 8;
+
+/// The page zoom range `setZoom()` takes.
+pub const WEBVIEW_ZOOM_MIN: f64 = 0.25;
+pub const WEBVIEW_ZOOM_MAX: f64 = 5.0;
+/// The largest capture scale (output pixels per CSS pixel).
+pub const WEBVIEW_CAPTURE_MAX_SCALE: f64 = 4.0;
+
+/// A capture scale from `op_desktop_webview_capture`: 0 is device pixels
+/// (`Some(None)`), else finite in (0, 4] (`Some(Some(scale))`); anything else
+/// is refused (`None`).
+pub fn webview_capture_scale(scale: f64) -> Option<Option<f64>> {
+  if scale == 0.0 {
+    Some(None)
+  } else if scale.is_finite()
+    && scale > 0.0
+    && scale <= WEBVIEW_CAPTURE_MAX_SCALE
+  {
+    Some(Some(scale))
+  } else {
+    None
+  }
+}
 
 /// `Deno.Tray.capabilities()` (laufey API 50): which tray events and data
 /// this backend delivers on this OS / session.
@@ -2990,13 +3043,15 @@ pub trait DesktopApi: Send + Sync + 'static {
       ))
     })
   }
-  /// What the web view shows now: `format` 0 PNG, 1 JPEG (`quality` 0..100);
-  /// the image bytes, or the error code and message.
+  /// What the web view shows now: `format` 0 PNG, 1 JPEG (`quality` 0..100),
+  /// `scale` output pixels per CSS pixel (`None`: device pixels); the image
+  /// bytes, or the error code and message.
   fn webview_capture(
     &self,
     _webview_id: u32,
     _format: u32,
     _quality: u8,
+    _scale: Option<f64>,
   ) -> DesktopFuture<Result<Vec<u8>, (&'static str, String)>> {
     Box::pin(async {
       Err((
@@ -3008,6 +3063,45 @@ pub trait DesktopApi: Send + Sync + 'static {
   /// Close it (its "closed" event follows, maybe later). False for an
   /// unknown id.
   fn webview_close(&self, _webview_id: u32) -> bool {
+    false
+  }
+  /// Its place among the window's views (higher is above). False where
+  /// unsupported or for an unknown id.
+  fn webview_set_z_order(&self, _webview_id: u32, _z_order: i32) -> bool {
+    false
+  }
+  /// Page zoom, 0.25..5. False where unsupported or for an unknown id.
+  fn webview_set_zoom(&self, _webview_id: u32, _factor: f64) -> bool {
+    false
+  }
+  /// The page zoom; `None` for an unknown id or where unsupported.
+  fn webview_zoom(&self, _webview_id: u32) -> Option<f64> {
+    None
+  }
+  /// Highlight the next (`forward`) or previous match of `text`; a
+  /// "find-result" event reports the count.
+  fn webview_find(
+    &self,
+    _webview_id: u32,
+    _text: &str,
+    _forward: bool,
+    _match_case: bool,
+  ) -> bool {
+    false
+  }
+  fn webview_stop_find(&self, _webview_id: u32) -> bool {
+    false
+  }
+  /// Open the engine's DevTools for the view; the error code
+  /// ("not_allowed", "closed", "unsupported", …).
+  fn webview_open_devtools(
+    &self,
+    _webview_id: u32,
+  ) -> Result<(), &'static str> {
+    Err(WEBVIEW_UNSUPPORTED)
+  }
+  /// Print the page with the OS print dialog.
+  fn webview_print(&self, _webview_id: u32) -> bool {
     false
   }
   fn set_traffic_light_position(
@@ -5144,7 +5238,7 @@ fn op_desktop_webview_command(
   #[smi] webview_id: u32,
   #[smi] command: u32,
 ) -> bool {
-  (WEBVIEW_COMMAND_BACK..=WEBVIEW_COMMAND_FOCUS).contains(&command)
+  (WEBVIEW_COMMAND_BACK..=WEBVIEW_COMMAND_LOWER).contains(&command)
     && state
       .try_borrow::<Arc<dyn DesktopApi>>()
       .is_some_and(|api| api.webview_command(webview_id, command))
@@ -5189,7 +5283,8 @@ async fn op_desktop_webview_evaluate(
   }
 }
 
-/// `WebView.capture({ format, quality })`: `format` 0 PNG, 1 JPEG.
+/// `WebView.capture({ format, quality, scale })`: `format` 0 PNG, 1 JPEG;
+/// `scale` 0 for device pixels.
 #[op2]
 #[serde]
 async fn op_desktop_webview_capture(
@@ -5197,12 +5292,19 @@ async fn op_desktop_webview_capture(
   #[smi] webview_id: u32,
   #[smi] format: u32,
   #[smi] quality: u32,
+  scale: f64,
 ) -> WebViewCaptureOutcome {
   let refused = |code: &str, message: String| WebViewCaptureOutcome {
     ok: false,
     data: None,
     code: Some(code.to_string()),
     message: Some(message),
+  };
+  let Some(scale) = webview_capture_scale(scale) else {
+    return refused(
+      WEBVIEW_INVALID,
+      "scale must be a finite number above 0 and at most 4".to_string(),
+    );
   };
   if format > 1 || quality > 100 {
     return refused(
@@ -5216,7 +5318,10 @@ async fn op_desktop_webview_capture(
       webview_error_message(WEBVIEW_UNSUPPORTED).to_string(),
     );
   };
-  match api.webview_capture(webview_id, format, quality as u8).await {
+  match api
+    .webview_capture(webview_id, format, quality as u8, scale)
+    .await
+  {
     Ok(bytes) => WebViewCaptureOutcome {
       ok: true,
       data: Some(deno_core::ToJsBuffer::from(bytes)),
@@ -5236,6 +5341,103 @@ fn op_desktop_webview_close(
   state
     .try_borrow::<Arc<dyn DesktopApi>>()
     .is_some_and(|api| api.webview_close(webview_id))
+}
+
+/// `WebView.setZOrder(n)`.
+#[op2(fast)]
+fn op_desktop_webview_set_z_order(
+  state: &mut OpState,
+  #[smi] webview_id: u32,
+  #[smi] z_order: i32,
+) -> bool {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .is_some_and(|api| api.webview_set_z_order(webview_id, z_order))
+}
+
+/// `WebView.setZoom(factor)`: false outside 0.25..5 (DESKTOP_JS refuses
+/// that first) or where unsupported.
+#[op2(fast)]
+fn op_desktop_webview_set_zoom(
+  state: &mut OpState,
+  #[smi] webview_id: u32,
+  factor: f64,
+) -> bool {
+  (WEBVIEW_ZOOM_MIN..=WEBVIEW_ZOOM_MAX).contains(&factor)
+    && state
+      .try_borrow::<Arc<dyn DesktopApi>>()
+      .is_some_and(|api| api.webview_set_zoom(webview_id, factor))
+}
+
+/// `WebView.getZoom()`: the zoom, or 0 for an unknown id / where
+/// unsupported.
+#[op2(fast)]
+fn op_desktop_webview_get_zoom(
+  state: &mut OpState,
+  #[smi] webview_id: u32,
+) -> f64 {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .and_then(|api| api.webview_zoom(webview_id))
+    .unwrap_or(0.0)
+}
+
+/// `WebView.find(text, { forward, matchCase })`: false for empty text, a
+/// NUL, an unknown id or where unsupported.
+#[op2(fast)]
+fn op_desktop_webview_find(
+  state: &mut OpState,
+  #[smi] webview_id: u32,
+  #[string] text: &str,
+  forward: bool,
+  match_case: bool,
+) -> bool {
+  !text.is_empty()
+    && !text.contains('\0')
+    && state
+      .try_borrow::<Arc<dyn DesktopApi>>()
+      .is_some_and(|api| {
+        api.webview_find(webview_id, text, forward, match_case)
+      })
+}
+
+/// `WebView.stopFind()`.
+#[op2(fast)]
+fn op_desktop_webview_stop_find(
+  state: &mut OpState,
+  #[smi] webview_id: u32,
+) -> bool {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .is_some_and(|api| api.webview_stop_find(webview_id))
+}
+
+/// `WebView.openDevTools()`: the outcome (`not_allowed` when the app's
+/// DevTools are off, `closed`, `unsupported`).
+#[op2]
+#[serde]
+fn op_desktop_webview_open_devtools(
+  state: &mut OpState,
+  #[smi] webview_id: u32,
+) -> WebViewOutcome {
+  let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() else {
+    return WebViewOutcome::code(WEBVIEW_UNSUPPORTED);
+  };
+  match api.webview_open_devtools(webview_id) {
+    Ok(()) => WebViewOutcome::ok(),
+    Err(code) => WebViewOutcome::code(code),
+  }
+}
+
+/// `WebView.print()`: the OS print dialog; false where unsupported.
+#[op2(fast)]
+fn op_desktop_webview_print(
+  state: &mut OpState,
+  #[smi] webview_id: u32,
+) -> bool {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .is_some_and(|api| api.webview_print(webview_id))
 }
 
 /// `Deno.Tray.capabilities()` (laufey API 50).
@@ -7516,6 +7718,13 @@ deno_core::extension!(
     op_desktop_webview_evaluate,
     op_desktop_webview_capture,
     op_desktop_webview_close,
+    op_desktop_webview_set_z_order,
+    op_desktop_webview_set_zoom,
+    op_desktop_webview_get_zoom,
+    op_desktop_webview_find,
+    op_desktop_webview_stop_find,
+    op_desktop_webview_open_devtools,
+    op_desktop_webview_print,
   ],
   objects = [BrowserWindow, Dock, Tray, Notification],
 );
@@ -10617,6 +10826,13 @@ mod tests {
         "evaluate": false,
         "persistentPartitions": false,
         "permissionPrompts": false,
+        "zOrder": false,
+        "zoom": false,
+        "find": false,
+        "devTools": false,
+        "contextMenu": false,
+        "print": false,
+        "clipboard": false,
       })
     );
     let caps = WebViewCapabilitiesInfo {
@@ -10626,10 +10842,13 @@ mod tests {
       evaluate: true,
       persistent_partitions: true,
       permission_prompts: false,
+      dev_tools: true,
+      ..Default::default()
     };
     let v = serde_json::to_value(caps).unwrap();
     assert_eq!(v["engine"], "cef");
     assert_eq!(v["persistentPartitions"], true);
+    assert_eq!(v["devTools"], true);
   }
 
   #[test]
@@ -10645,6 +10864,9 @@ mod tests {
       "downloads": "ask",
       "permissions": "deny",
       "userAgent": "UA",
+      "contextMenu": "app",
+      "clipboardRead": true,
+      "clipboardWrite": false,
     }))
     .unwrap();
     assert_eq!(
@@ -10659,6 +10881,9 @@ mod tests {
     assert_eq!(options.allow_popups.as_deref(), Some("same-view"));
     assert_eq!(options.user_agent.as_deref(), Some("UA"));
     assert_eq!(options.visible, Some(false));
+    assert_eq!(options.context_menu.as_deref(), Some("app"));
+    assert_eq!(options.clipboard_read, Some(true));
+    assert_eq!(options.clipboard_write, Some(false));
     let bare: WebViewOptionsInfo = serde_json::from_value(json!({
       "url": "http://127.0.0.1:8000/",
       "bounds": { "x": 0, "y": 0, "width": 0, "height": 0 },
@@ -10825,6 +11050,23 @@ mod tests {
       Some("invalid")
     );
 
+    // The context menu mode.
+    for v in ["native", "app"] {
+      assert_eq!(
+        code(WebViewOptionsInfo {
+          context_menu: Some(v.into()),
+          ..ok.clone()
+        }),
+        None
+      );
+    }
+    assert_eq!(
+      code(WebViewOptionsInfo {
+        context_menu: Some("none".into()),
+        ..ok.clone()
+      }),
+      Some("invalid")
+    );
     // The user agent goes into a header.
     assert_eq!(
       code(WebViewOptionsInfo {
@@ -10886,6 +11128,7 @@ mod tests {
       "not_allowed_url",
       "limit",
       "invalid",
+      "not_allowed",
       "closed",
       "failed",
     ] {
@@ -10917,5 +11160,21 @@ mod tests {
     assert_eq!(super::WEBVIEW_COMMAND_RELOAD_IGNORE_CACHE, 4);
     assert_eq!(super::WEBVIEW_COMMAND_STOP, 5);
     assert_eq!(super::WEBVIEW_COMMAND_FOCUS, 6);
+    assert_eq!(super::WEBVIEW_COMMAND_RAISE, 7);
+    assert_eq!(super::WEBVIEW_COMMAND_LOWER, 8);
+  }
+
+  #[test]
+  fn webview_capture_scale_and_zoom_range() {
+    use super::webview_capture_scale;
+    assert_eq!(webview_capture_scale(0.0), Some(None));
+    assert_eq!(webview_capture_scale(1.0), Some(Some(1.0)));
+    assert_eq!(webview_capture_scale(0.5), Some(Some(0.5)));
+    assert_eq!(webview_capture_scale(4.0), Some(Some(4.0)));
+    for bad in [-1.0, 4.01, f64::NAN, f64::INFINITY] {
+      assert!(webview_capture_scale(bad).is_none(), "{bad}");
+    }
+    assert_eq!(super::WEBVIEW_ZOOM_MIN, 0.25);
+    assert_eq!(super::WEBVIEW_ZOOM_MAX, 5.0);
   }
 }

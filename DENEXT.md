@@ -13946,24 +13946,37 @@ where the changes are discussed.
      characters of `[A-Za-z0-9._:-]`, default `"webview:default"`; `"ephemeral"`
      / `"ephemeral:*"` in memory), `visible`, `allowPopups` (`"same-view"`,
      `"browser"`, `"deny"`), `downloads` (`"deny"`, `"ask"`, `"browser"`),
-     `permissions` (`"deny"`, `"ask"`), `userAgent`. Methods: `setBounds`,
+     `permissions` (`"deny"`, `"ask"`), `userAgent`, `contextMenu` (`"native"`,
+     or `"app"`: no engine menu), `clipboardRead` (default false),
+     `clipboardWrite` (default true, on a user gesture). Methods: `setBounds`,
      `setVisible`, `navigate`, `back`, `forward`, `reload({ ignoreCache })`,
-     `stop`, `focus`, `state()`, `capture({ format, quality })` (PNG / JPEG
-     bytes), `evaluate(script)` (an isolated world; the JSON result, awaited if
-     a promise) and `close()`. Events (`CustomEvent`s, the detail parsed from
-     laufey's JSON): `title`, `url`, `load`, `console`, `focus-change`,
-     `new-window`, and `closed`, exactly once and last, after `close()` or when
+     `stop`, `focus`, `state()`, `capture({ format, quality, scale })` (PNG /
+     JPEG bytes; `scale` output pixels per CSS pixel, above 0 and at most 4,
+     default the device pixels), `evaluate(script)` (an isolated world; the JSON
+     result, awaited if a promise) and `close()`; and, where
+     `webViewCapabilities()` says so, `raise()` / `lower()` / `setZOrder(n)` (a
+     new view starts on top; higher is above; `state().zOrder`),
+     `setZoom(0.25..5)` / `getZoom()`, `find(text, { forward, matchCase })` /
+     `stopFind()`, `openDevTools()` (code `not_allowed` unless the app's
+     DevTools are on) and `print()` (the OS print dialog); the boolean ones
+     answer `false` where unsupported. Events (`CustomEvent`s, the detail parsed
+     from laufey's JSON): `title`, `url`, `load`, `console`, `focus-change`,
+     `new-window`, `find-result` (`matches`, `activeMatch`), `context-menu`
+     (`x`, `y`, `linkUrl`, `imageUrl`, `selectionText`, `isEditable`,
+     `mediaType`), and `closed`, exactly once and last, after `close()` or when
      the window closes (a window's close closes its views). On a closed view
      `navigate` / `state` throw, `capture` / `evaluate` reject and the setters
      do nothing. Refusals are `WebViewError`s with a `code`: `unsupported` (no
      engine, or a laufey before API 58), `not_allowed_url`, `limit` (laufey's 32
      views per window), `closed`, `invalid` (bad options, checked in DESKTOP_JS
-     and again in the op), `failed`, and for `evaluate` `error` /
-     `not_serializable`. `Deno.desktop.webViewCapabilities()` reports
-     `supported`, `engine` (`"cef"`, `"wkwebview"`, `"webview2"`, `"webkitgtk"`
-     or `null`), `capture`, `evaluate`, `persistentPartitions` and
-     `permissionPrompts`. Plumbing: `DesktopApi` methods (default: unsupported),
-     the `Deno_privateDesktopCreateWebView` method on `BrowserWindow` and
+     and again in the op), `failed`, `not_allowed` (`openDevTools`), and for
+     `evaluate` `error` / `not_serializable`.
+     `Deno.desktop.webViewCapabilities()` reports `supported`, `engine`
+     (`"cef"`, `"wkwebview"`, `"webview2"`, `"webkitgtk"` or `null`), `capture`,
+     `evaluate`, `persistentPartitions`, `permissionPrompts`, `zOrder`, `zoom`,
+     `find`, `devTools`, `contextMenu`, `print` and `clipboard`. Plumbing:
+     `DesktopApi` methods (default: unsupported), the
+     `Deno_privateDesktopCreateWebView` method on `BrowserWindow` and
      `op_desktop_webview_*` ops keyed by the view's id (kept out of workers,
      except the capabilities), `DesktopEvent::WebView` (`webViewId`, `event`,
      `detail`) through the event queue (a view's `console` events are dropped
@@ -13984,8 +13997,11 @@ where the changes are discussed.
        app), `tests/unit/ops_test.ts` (the op counts), and the `webview` e2e
        area (capabilities, load / title / url / console events, navigate and
        back, `state()`, bounds and visibility, `evaluate`, `capture`, no
-       bindings in the view, the URL rules, invalid options, partitions that
-       don't share storage, the 33rd view refused, close and a window's close).
+       bindings in the view, stacking, capture timings and a `scale: 1`
+       snapshot's width, zoom, find, `openDevTools`' documented outcomes,
+       `print` present (never called: it opens a dialog), `contextMenu: "app"`,
+       the URL rules, invalid options, partitions that don't share storage, the
+       33rd view refused, close and a window's close).
      - Node tests enabled: none; no Node API changes.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
@@ -14044,9 +14060,10 @@ will-navigate and a re-issue token bound to the backend's own load, item 342,
 and CEF 156.0.28, item 356; and, for runtime 3.0.0-denext.22, API 57, title
 visibility and toolbar style and an accessory app's focused window brought to
 the front on macOS, item 361; and API 58, child web views, item 364, on laufey
-branch `feat/embedded-webview` until it lands), at the commit pinned by `LAUFEY_SHA` in the
-workflow (or the `laufey_ref` input). The same commit is the `laufey` git
-dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 58, CEF 156.0.28).
+branch `feat/embedded-webview` until it lands), at the commit pinned by
+`LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The same commit is the
+`laufey` git dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 58, CEF
+156.0.28).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the

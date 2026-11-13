@@ -108,6 +108,13 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_webview_evaluate,
     op_desktop_webview_capture,
     op_desktop_webview_close,
+    op_desktop_webview_set_z_order,
+    op_desktop_webview_set_zoom,
+    op_desktop_webview_get_zoom,
+    op_desktop_webview_find,
+    op_desktop_webview_stop_find,
+    op_desktop_webview_open_devtools,
+    op_desktop_webview_print,
   } = internals.core.ops;
   const BrowserWindowPrototype = BrowserWindow.prototype;
   Object.setPrototypeOf(BrowserWindowPrototype, EventTarget.prototype);
@@ -970,11 +977,14 @@ pub const DESKTOP_JS: &str = r#"
     reloadIgnoringCache: 4,
     stop: 5,
     focus: 6,
+    raise: 7,
+    lower: 8,
   };
   const WEBVIEW_CAPTURE_FORMATS = { __proto__: null, png: 0, jpeg: 1 };
   const WEBVIEW_POPUPS = ["deny", "same-view", "browser"];
   const WEBVIEW_DOWNLOADS = ["deny", "ask", "browser"];
   const WEBVIEW_PERMISSIONS = ["deny", "ask"];
+  const WEBVIEW_CONTEXT_MENUS = ["native", "app"];
   const WEBVIEW_PARTITION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
   function webViewError(code, message) {
     const error = new Error(message);
@@ -1076,6 +1086,19 @@ pub const DESKTOP_JS: &str = r#"
       "options.permissions",
     );
     if (permissions !== undefined) out.permissions = permissions;
+    const contextMenu = webViewChoice(
+      options.contextMenu,
+      WEBVIEW_CONTEXT_MENUS,
+      "options.contextMenu",
+    );
+    if (contextMenu !== undefined) out.contextMenu = contextMenu;
+    for (const key of ["clipboardRead", "clipboardWrite"]) {
+      if (options[key] === undefined) continue;
+      if (typeof options[key] !== "boolean") {
+        throw webViewInvalid(`options.${key} must be a boolean`);
+      }
+      out[key] = options[key];
+    }
     if (options.userAgent !== undefined) {
       if (
         typeof options.userAgent !== "string" ||
@@ -1196,11 +1219,20 @@ pub const DESKTOP_JS: &str = r#"
       ) {
         throw webViewInvalid("options.quality must be a number from 0 to 100");
       }
+      // Output pixels per CSS pixel; 0 (the default) is device pixels.
+      const scale = options?.scale ?? 0;
+      if (
+        typeof scale !== "number" || !Number.isFinite(scale) || scale < 0 ||
+        scale > 4 || (options?.scale !== undefined && scale === 0)
+      ) {
+        throw webViewInvalid("options.scale must be above 0 and at most 4");
+      }
       if (this.#closed) throw webViewError("closed", "the web view is closed");
       const outcome = await op_desktop_webview_capture(
         this.#id,
         raw,
         Math.round(quality),
+        scale,
       );
       if (!outcome.ok) throw webViewError(outcome.code, outcome.message);
       return outcome.data;
@@ -1213,6 +1245,78 @@ pub const DESKTOP_JS: &str = r#"
       const outcome = await op_desktop_webview_evaluate(this.#id, script);
       if (!outcome.ok) throw webViewError(outcome.code, outcome.message);
       return JSON.parse(outcome.value);
+    }
+    // Stacking among the window's views (laufey API 58): a new view starts
+    // on top; higher is above. False where unsupported
+    // (webViewCapabilities().zOrder) and once closed.
+    raise() {
+      return !this.#closed &&
+        op_desktop_webview_command(this.#id, WEBVIEW_COMMANDS.raise);
+    }
+    lower() {
+      return !this.#closed &&
+        op_desktop_webview_command(this.#id, WEBVIEW_COMMANDS.lower);
+    }
+    setZOrder(zOrder) {
+      if (
+        !Number.isInteger(zOrder) || zOrder < -2147483648 ||
+        zOrder > 2147483647
+      ) {
+        throw webViewInvalid("zOrder must be a 32-bit integer");
+      }
+      return !this.#closed && op_desktop_webview_set_z_order(this.#id, zOrder);
+    }
+    // Page zoom, 1 = 100%.
+    setZoom(factor) {
+      if (
+        typeof factor !== "number" || !Number.isFinite(factor) ||
+        factor < 0.25 || factor > 5
+      ) {
+        throw webViewInvalid("factor must be a number from 0.25 to 5");
+      }
+      return !this.#closed && op_desktop_webview_set_zoom(this.#id, factor);
+    }
+    getZoom() {
+      if (this.#closed) throw webViewError("closed", "the web view is closed");
+      const zoom = op_desktop_webview_get_zoom(this.#id);
+      if (zoom > 0) return zoom;
+      if (!op_desktop_webview_capabilities().zoom) {
+        throw webViewError("unsupported", "this engine has no page zoom");
+      }
+      throw webViewError("closed", "the web view is closed");
+    }
+    // Highlight the next match of `text` (the previous one with
+    // forward: false); "find-result" reports the count. Repeating the same
+    // text moves on.
+    find(text, options = undefined) {
+      if (
+        typeof text !== "string" || text.length === 0 || text.includes("\0")
+      ) {
+        throw webViewInvalid("text must be a non-empty string");
+      }
+      const forward = options?.forward ?? true;
+      const matchCase = options?.matchCase ?? false;
+      if (typeof forward !== "boolean" || typeof matchCase !== "boolean") {
+        throw webViewInvalid(
+          "options.forward and options.matchCase must be booleans",
+        );
+      }
+      return !this.#closed &&
+        op_desktop_webview_find(this.#id, text, forward, matchCase);
+    }
+    stopFind() {
+      return !this.#closed && op_desktop_webview_stop_find(this.#id);
+    }
+    // The engine's DevTools for the view, only where the app's own are on
+    // (a packaged app needs inspectable: true): else code "not_allowed".
+    openDevTools() {
+      if (this.#closed) throw webViewError("closed", "the web view is closed");
+      const outcome = op_desktop_webview_open_devtools(this.#id);
+      if (!outcome.ok) throw webViewError(outcome.code, outcome.message);
+    }
+    // The OS print dialog. False where unsupported and once closed.
+    print() {
+      return !this.#closed && op_desktop_webview_print(this.#id);
     }
     // Idempotent; "closed" fires once, when the backend reports it (at once
     // when it no longer knows the view).
@@ -4909,12 +5013,36 @@ mod tests {
       "reloadIgnoringCache: 4,",
       "stop: 5,",
       "focus: 6,",
+      "raise: 7,",
+      "lower: 8,",
     ] {
       assert!(commands.contains(entry), "{entry}");
     }
     assert!(DESKTOP_JS.contains(
       "const WEBVIEW_CAPTURE_FORMATS = { __proto__: null, png: 0, jpeg: 1 };"
     ));
+    // The stacking, zoom, find, DevTools and print additions; a closed view
+    // answers false.
+    for method in [
+      "op_desktop_webview_command(this.#id, WEBVIEW_COMMANDS.raise);",
+      "op_desktop_webview_command(this.#id, WEBVIEW_COMMANDS.lower);",
+      "return !this.#closed && op_desktop_webview_set_z_order(this.#id, zOrder);",
+      "return !this.#closed && op_desktop_webview_set_zoom(this.#id, factor);",
+      "op_desktop_webview_find(this.#id, text, forward, matchCase);",
+      "return !this.#closed && op_desktop_webview_stop_find(this.#id);",
+      "const outcome = op_desktop_webview_open_devtools(this.#id);",
+      "return !this.#closed && op_desktop_webview_print(this.#id);",
+    ] {
+      assert!(DESKTOP_JS.contains(method), "{method}");
+    }
+    assert!(
+      DESKTOP_JS
+        .contains("const WEBVIEW_CONTEXT_MENUS = [\"native\", \"app\"];")
+    );
+    assert!(DESKTOP_JS.contains(
+      "for (const key of [\"clipboardRead\", \"clipboardWrite\"]) {"
+    ));
+    assert!(DESKTOP_JS.contains("const scale = options?.scale ?? 0;"));
     // A closed view: navigate / state throw, capture / evaluate reject.
     assert!(
       DESKTOP_JS

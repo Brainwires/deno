@@ -79,7 +79,7 @@ op_desktop_close_reply -> null
 op_desktop_set_will_navigate -> false
 op_desktop_answer_will_navigate -> false
 op_desktop_set_app_menu -> false
-op_desktop_webview_capabilities -> {"supported":false,"engine":null,"capture":false,"evaluate":false,"persistentPartitions":false,"permissionPrompts":false}
+op_desktop_webview_capabilities -> {"supported":false,"engine":null,"capture":false,"evaluate":false,"persistentPartitions":false,"permissionPrompts":false,"zOrder":false,"zoom":false,"find":false,"devTools":false,"contextMenu":false,"print":false,"clipboard":false}
 op_desktop_webview_set_bounds -> false
 op_desktop_webview_set_visible -> false
 op_desktop_webview_navigate -> {"ok":false,"code":"unsupported","message":"embedded web views are not supported by this desktop backend"}
@@ -88,6 +88,13 @@ op_desktop_webview_state -> null
 op_desktop_webview_evaluate -> {"ok":false,"code":"unsupported","message":"embedded web views are not supported by this desktop backend"}
 op_desktop_webview_capture -> {"ok":false,"code":"unsupported","message":"embedded web views are not supported by this desktop backend"}
 op_desktop_webview_close -> false
+op_desktop_webview_set_z_order -> false
+op_desktop_webview_set_zoom -> false
+op_desktop_webview_get_zoom -> 0
+op_desktop_webview_find -> false
+op_desktop_webview_stop_find -> false
+op_desktop_webview_open_devtools -> {"ok":false,"code":"unsupported","message":"embedded web views are not supported by this desktop backend"}
+op_desktop_webview_print -> false
 op_desktop_app_update_info -> false
 op_desktop_app_update_check throws Error: not_configured: full-app updates are only available in a packaged desktop app
 op_desktop_app_update_begin throws Error: not_configured: full-app updates are only available in a packaged desktop app
@@ -101,4 +108,4 @@ BrowserWindow throws NotSupported: BrowserWindow is only available in the main s
 Dock throws NotSupported: Dock is only available in the main scope of a desktop app
 Tray throws NotSupported: Tray is only available in the main scope of a desktop app
 Notification throws NotSupported: Notification is only available in the main scope of a desktop app
-103 exposed, 0 uncovered
+110 exposed, 0 uncovered

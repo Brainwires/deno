@@ -1,9 +1,11 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 // e2e: embedded web views (laufey API 58): BrowserWindow.createWebView(),
 // Deno.WebView's methods and events, its isolation from the app (no bridge,
-// no bindings, its own storage partition), the URL rules, the per-window
-// limit and the close semantics. Where webViewCapabilities() reports no
-// engine, createWebView() is checked to refuse with "unsupported".
+// no bindings, its own storage partition), stacking, capture sizes and
+// timings, zoom, find, DevTools, print, the context menu option, the URL
+// rules, the per-window limit and the close semantics. Where
+// webViewCapabilities() reports no engine, createWebView() is checked to
+// refuse with "unsupported".
 
 // deno-lint-ignore-file no-explicit-any
 
@@ -129,6 +131,31 @@ async function next(
     return found !== null;
   }, ms);
   return found;
+}
+
+/** An image's pixel size from its PNG IHDR or its JPEG start-of-frame. */
+function imageSize(b: Uint8Array): { width: number; height: number } | null {
+  const u16 = (i: number) => (b[i] << 8) | b[i + 1];
+  if (b.length > 24 && b[0] === 0x89 && b[1] === 0x50) {
+    const data = new DataView(b.buffer, b.byteOffset, b.byteLength);
+    return { width: data.getUint32(16), height: data.getUint32(20) };
+  }
+  if (b.length > 4 && b[0] === 0xff && b[1] === 0xd8) {
+    let i = 2;
+    while (i + 9 < b.length) {
+      if (b[i] !== 0xff) return null;
+      const marker = b[i + 1];
+      // SOF0..SOF15, not DHT (C4), JPG (C8) or DAC (CC).
+      if (
+        marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 &&
+        marker !== 0xc8 && marker !== 0xcc
+      ) {
+        return { width: u16(i + 7), height: u16(i + 5) };
+      }
+      i += 2 + u16(i + 2);
+    }
+  }
+  return null;
 }
 
 const tiny = { x: 0, y: 0, width: 1, height: 1 };
@@ -430,6 +457,208 @@ async function runSupported() {
       "capture() without the capability rejects with a WebViewError",
       e?.name === "WebViewError",
       e && describeError(e),
+    );
+  }
+
+  // --- stacking (a new view starts on top; higher is above) ---
+  {
+    const before = view.state().zOrder;
+    const top = win.createWebView({
+      url: URL_B,
+      bounds: { x: 500, y: 300, width: 100, height: 100 },
+    });
+    if (caps.zOrder) {
+      const topZ = top.state().zOrder;
+      r.check(
+        "a new view's zOrder is above the previous view's",
+        typeof before === "number" && typeof topZ === "number" &&
+          topZ > before,
+        { before, topZ },
+      );
+      const raised = view.raise();
+      const afterRaise = [view.state().zOrder, top.state().zOrder];
+      const lowered = view.lower();
+      const afterLower = [view.state().zOrder, top.state().zOrder];
+      const set = view.setZOrder(5);
+      const afterSet = view.state().zOrder;
+      r.check(
+        "raise() / lower() / setZOrder() show in state().zOrder",
+        raised && afterRaise[0] > afterRaise[1] && lowered &&
+          afterLower[0] < afterLower[1] && set && afterSet === 5,
+        { raised, afterRaise, lowered, afterLower, set, afterSet },
+      );
+    } else {
+      const answers = [view.raise(), view.lower(), view.setZOrder(5)];
+      r.check(
+        "no zOrder capability: raise() / lower() / setZOrder() return false",
+        answers.every((a) => a === false),
+        answers,
+      );
+    }
+    const badZ = await errorOf(() => view.setZOrder(1.5));
+    r.check(
+      "setZOrder() with a non-integer: invalid",
+      isWebViewError(badZ, "invalid"),
+      badZ && describeError(badZ),
+    );
+    let topClosed = false;
+    top.addEventListener("closed", () => topClosed = true);
+    top.close();
+    await waitFor(() => topClosed, 10000);
+  }
+
+  // --- capture timings and a scale: 1 snapshot's size ---
+  if (caps.capture) {
+    const size = win.getSize();
+    win.setSize(1920, 1080);
+    await sleep(800);
+    const [w, h] = win.getSize();
+    const big = { x: 0, y: 0, width: w, height: h };
+    view.setBounds(big);
+    await sleep(800);
+    const timings: Record<string, unknown> = { bounds: big };
+    for (
+      const [name, options] of [
+        ["png device", { format: "png" }],
+        ["jpeg device", { format: "jpeg", quality: 80 }],
+        ["png scale 1", { format: "png", scale: 1 }],
+        ["jpeg scale 1", { format: "jpeg", quality: 80, scale: 1 }],
+      ] as const
+    ) {
+      const t0 = performance.now();
+      const failed = await errorOf(async () => {
+        const bytes: Uint8Array = await view.capture(options);
+        timings[name] = {
+          ms: Math.round(performance.now() - t0),
+          bytes: bytes.length,
+          size: imageSize(bytes),
+        };
+      });
+      if (failed) timings[name] = { error: describeError(failed) };
+    }
+    r.set("captureTimings", timings);
+    const jpeg1 = (timings["jpeg scale 1"] as any)?.size;
+    const png1 = (timings["png scale 1"] as any)?.size;
+    const slack = Math.max(2, big.width * 0.02);
+    r.check(
+      "capture({ scale: 1 }) is as wide as the view's bounds (JPEG SOF / PNG IHDR)",
+      jpeg1 != null && png1 != null &&
+        Math.abs(jpeg1.width - big.width) <= slack &&
+        Math.abs(png1.width - big.width) <= slack,
+      { bounds: big, jpeg1, png1 },
+    );
+    const badScale = await errorOf(view.capture({ scale: 5 }));
+    r.check(
+      "capture({ scale: 5 }): invalid",
+      isWebViewError(badScale, "invalid"),
+      badScale && describeError(badScale),
+    );
+    win.setSize(size[0], size[1]);
+    view.setBounds(moved);
+    await sleep(500);
+  }
+
+  // --- zoom ---
+  if (caps.zoom) {
+    const set = view.setZoom(1.5);
+    await sleep(300);
+    const got = view.getZoom();
+    const reset = view.setZoom(1);
+    r.check(
+      "setZoom(1.5) / getZoom() round trip",
+      set === true && Math.abs(got - 1.5) < 0.01 && reset === true,
+      { set, got, reset },
+    );
+  } else {
+    const set = view.setZoom(1.5);
+    const got = await errorOf(() => view.getZoom());
+    r.check(
+      "no zoom capability: setZoom() returns false, getZoom() throws unsupported",
+      set === false && isWebViewError(got, "unsupported"),
+      { set, got: got && describeError(got) },
+    );
+  }
+  const badZoom = await errorOf(() => view.setZoom(10));
+  r.check(
+    "setZoom(10): invalid",
+    isWebViewError(badZoom, "invalid"),
+    badZoom && describeError(badZoom),
+  );
+
+  // --- find (page A's heading holds "WebView") ---
+  if (caps.find) {
+    const findMark = log.length;
+    const started = view.find("WebView");
+    const found = await next(
+      log,
+      findMark,
+      "find-result",
+      (d) => d.matches >= 1,
+      10000,
+    );
+    r.check(
+      "find() on page A: a find-result with matches >= 1",
+      started === true && found !== null &&
+        typeof found.detail.activeMatch === "number",
+      { started, result: found?.detail },
+    );
+    r.check("stopFind() returns true", view.stopFind() === true);
+  } else {
+    r.check(
+      "no find capability: find() / stopFind() return false",
+      view.find("WebView") === false && view.stopFind() === false,
+    );
+  }
+  const badFind = await errorOf(() => view.find(""));
+  r.check(
+    'find(""): invalid',
+    isWebViewError(badFind, "invalid"),
+    badFind && describeError(badFind),
+  );
+
+  // --- DevTools: opened, or refused while the app's own are off ---
+  const devtools = await errorOf(() => view.openDevTools());
+  r.set("openDevTools", devtools ? describeError(devtools) : "opened");
+  r.check(
+    "openDevTools() opens or throws a documented code",
+    devtools === null || isWebViewError(devtools, "not_allowed") ||
+      (!caps.devTools && isWebViewError(devtools, "unsupported")),
+    devtools && describeError(devtools),
+  );
+
+  // --- print: never called here (where the engine has it, it opens the
+  // OS print dialog, which waits for a person) ---
+  r.set("print", caps.print ? "supported, not called" : "unsupported");
+  r.check("print is a method", typeof view.print === "function");
+
+  // --- contextMenu: "app" and the clipboard switches are accepted ---
+  {
+    const e = await errorOf(async () => {
+      const menu = win.createWebView({
+        url: URL_B,
+        bounds: tiny,
+        visible: false,
+        contextMenu: "app",
+        clipboardRead: false,
+        clipboardWrite: true,
+      });
+      let menuClosed = false;
+      menu.addEventListener("closed", () => menuClosed = true);
+      menu.close();
+      await waitFor(() => menuClosed, 10000);
+    });
+    r.check(
+      'createWebView() takes contextMenu: "app" and the clipboard switches',
+      e === null,
+      e && describeError(e),
+    );
+    const bad = await errorOf(() =>
+      win.createWebView({ url: URL_B, bounds: tiny, contextMenu: "none" })
+    );
+    r.check(
+      "createWebView() with a bad contextMenu throws invalid",
+      isWebViewError(bad, "invalid"),
+      bad && describeError(bad),
     );
   }
 

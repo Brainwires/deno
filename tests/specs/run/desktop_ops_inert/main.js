@@ -249,8 +249,18 @@ const cases = {
   op_desktop_webview_command: () => ops.op_desktop_webview_command(1, 1),
   op_desktop_webview_state: () => ops.op_desktop_webview_state(1),
   op_desktop_webview_evaluate: () => ops.op_desktop_webview_evaluate(1, "1+1"),
-  op_desktop_webview_capture: () => ops.op_desktop_webview_capture(1, 0, 90),
+  op_desktop_webview_capture: () => ops.op_desktop_webview_capture(1, 0, 90, 0),
   op_desktop_webview_close: () => ops.op_desktop_webview_close(1),
+  op_desktop_webview_set_z_order: () =>
+    ops.op_desktop_webview_set_z_order(1, 2),
+  op_desktop_webview_set_zoom: () => ops.op_desktop_webview_set_zoom(1, 1.5),
+  op_desktop_webview_get_zoom: () => ops.op_desktop_webview_get_zoom(1),
+  op_desktop_webview_find: () =>
+    ops.op_desktop_webview_find(1, "text", true, false),
+  op_desktop_webview_stop_find: () => ops.op_desktop_webview_stop_find(1),
+  op_desktop_webview_open_devtools: () =>
+    ops.op_desktop_webview_open_devtools(1),
+  op_desktop_webview_print: () => ops.op_desktop_webview_print(1),
   // The updater ops (desktop_update_ops_inert has the detail).
   op_desktop_app_update_info: () => ops.op_desktop_app_update_info().configured,
   op_desktop_app_update_check: () =>

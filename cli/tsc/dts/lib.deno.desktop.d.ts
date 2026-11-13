@@ -1456,6 +1456,21 @@ declare namespace Deno {
     /** `permissions: "ask"` shows a prompt (else it refuses like
      * `"deny"`). */
     permissionPrompts: boolean;
+    /** {@linkcode WebView.raise}, {@linkcode WebView.lower} and
+     * {@linkcode WebView.setZOrder} reorder a window's views. */
+    zOrder: boolean;
+    /** {@linkcode WebView.setZoom} / {@linkcode WebView.getZoom}. */
+    zoom: boolean;
+    /** {@linkcode WebView.find} and the `"find-result"` event. */
+    find: boolean;
+    /** {@linkcode WebView.openDevTools}. */
+    devTools: boolean;
+    /** The `"context-menu"` event and `contextMenu: "app"`. */
+    contextMenu: boolean;
+    /** {@linkcode WebView.print}. */
+    print: boolean;
+    /** `clipboardRead` / `clipboardWrite` are honored. */
+    clipboard: boolean;
   }
 
   /** Where a {@linkcode WebView} sits: CSS pixels relative to the top-left
@@ -1507,6 +1522,15 @@ declare namespace Deno {
     permissions?: "deny" | "ask";
     /** Replaces the engine's user agent string for this view. */
     userAgent?: string;
+    /** `"native"`: the engine's own context menu; `"app"`: none, so the
+     * app draws its own from the `"context-menu"` event (which fires in
+     * both modes). @default {"native"} */
+    contextMenu?: "native" | "app";
+    /** The page may read the clipboard. @default {false} */
+    clipboardRead?: boolean;
+    /** The page may write the clipboard (on a user gesture).
+     * @default {true} */
+    clipboardWrite?: boolean;
   }
 
   /** A {@linkcode WebView}'s main-frame load state.
@@ -1534,6 +1558,9 @@ declare namespace Deno {
     canGoForward: boolean;
     visible: boolean;
     bounds: WebViewBounds;
+    /** Its place among the window's views: higher is above, equal ones
+     * keep their creation order. */
+    zOrder: number;
   }
 
   /** The `code` of a {@linkcode WebViewError}.
@@ -1549,7 +1576,8 @@ declare namespace Deno {
     | "invalid"
     | "failed"
     | "error"
-    | "not_serializable";
+    | "not_serializable"
+    | "not_allowed";
 
   /** How the {@linkcode WebView} methods and
    * {@linkcode BrowserWindow.createWebView} throw or reject.
@@ -1572,6 +1600,8 @@ declare namespace Deno {
      *   its error's).
      * - `not_serializable`: the evaluated script's value can't be JSON (a
      *   function, a cycle, a DOM node).
+     * - `not_allowed`: {@linkcode WebView.openDevTools} where the app's
+     *   DevTools are off (a packaged app without `inspectable: true`).
      */
     code: WebViewErrorCode;
   }
@@ -1611,6 +1641,20 @@ declare namespace Deno {
     /** Exactly once, last: after {@linkcode WebView.close} or when the
      * window closes. */
     closed: Record<string, never>;
+    /** After {@linkcode WebView.find}: the match count and the highlighted
+     * one (1-based; 0 when none). */
+    "find-result": { matches: number; activeMatch: number };
+    /** A context-menu request in the view, in both `contextMenu` modes;
+     * `x` / `y` in CSS pixels from the view's top-left. */
+    "context-menu": {
+      x: number;
+      y: number;
+      linkUrl?: string;
+      imageUrl?: string;
+      selectionText?: string;
+      isEditable: boolean;
+      mediaType?: "image" | "video" | "audio" | "canvas" | "plugin";
+    };
   }
 
   /** The events of a {@linkcode WebView}.
@@ -1673,11 +1717,14 @@ declare namespace Deno {
     /** The view's URL, title, load state, history and place. Throws a
      * {@linkcode WebViewError} with code `closed` once closed. */
     state(): WebViewState;
-    /** What the view shows now, at device pixels: PNG bytes, or JPEG at
-     * `quality` (0 to 100, default 90). Rejects with a
-     * {@linkcode WebViewError} (`closed`, `unsupported`, `failed`). */
+    /** What the view shows now: PNG bytes, or JPEG at `quality` (0 to 100,
+     * default 90), at `scale` output pixels per CSS pixel (above 0, at
+     * most 4; default the device pixels). `{ format: "jpeg", scale: 1 }` is
+     * the cheap snapshot to show in place of the view while HTML covers
+     * it. Rejects with a {@linkcode WebViewError} (`closed`,
+     * `unsupported`, `failed`, `invalid`). */
     capture(
-      options?: { format?: "png" | "jpeg"; quality?: number },
+      options?: { format?: "png" | "jpeg"; quality?: number; scale?: number },
     ): Promise<Uint8Array>;
     /** Run `script` as a classic script in an isolated world of the page
      * (it shares the DOM, not the page's globals) and resolve with its
@@ -1686,6 +1733,41 @@ declare namespace Deno {
      * `error` (it threw or rejected), `not_serializable`, `closed`,
      * `unsupported`. */
     evaluate(script: string): Promise<unknown>;
+    /** Put the view above the window's other views. `false` where
+     * unsupported (`webViewCapabilities().zOrder`) or once closed. */
+    raise(): boolean;
+    /** Put the view below the window's other views. `false` where
+     * unsupported or once closed. */
+    lower(): boolean;
+    /** Set its place among the window's views (a 32-bit integer; higher is
+     * above, equal ones keep their creation order; a new view starts on
+     * top). `false` where unsupported or once closed. */
+    setZOrder(zOrder: number): boolean;
+    /** Page zoom (1 is 100%, 0.25 to 5). `false` where unsupported or once
+     * closed. */
+    setZoom(factor: number): boolean;
+    /** The page zoom. Throws a {@linkcode WebViewError}: `closed`,
+     * `unsupported`. */
+    getZoom(): number;
+    /** Highlight the next match of `text` (the previous one with
+     * `forward: false`; repeating the same text moves on); a
+     * `"find-result"` event reports the count. `false` where unsupported
+     * or once closed. */
+    find(
+      text: string,
+      options?: { forward?: boolean; matchCase?: boolean },
+    ): boolean;
+    /** Clear the find highlight. `false` where unsupported or once
+     * closed. */
+    stopFind(): boolean;
+    /** Open the engine's DevTools for the view. Throws a
+     * {@linkcode WebViewError}: `not_allowed` (the app's DevTools are off:
+     * a packaged app needs `inspectable: true`), `unsupported`,
+     * `closed`. */
+    openDevTools(): void;
+    /** Open the OS print dialog for the page. `false` where unsupported or
+     * once closed. */
+    print(): boolean;
     /** Close the view: `"closed"` fires once. Idempotent. */
     close(): void;
 
