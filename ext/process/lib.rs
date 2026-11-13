@@ -1408,7 +1408,10 @@ fn spawn_command(
   // kill-on-drop, so the child can outlive the parent (matching Node.js
   // semantics for `child_process.unref()`).
 
+  #[cfg(unix)]
   let mut spawned = command.spawn();
+  #[cfg(not(unix))]
+  let spawned = command.spawn();
   // denext: a program the check just wrote from the app's embedded copy can
   // be "text file busy" for a moment on Unix. A fork on another thread of this
   // process between the temporary file's open and its close copies the write
