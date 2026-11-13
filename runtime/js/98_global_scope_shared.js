@@ -115,6 +115,11 @@ const loadWebSocketStream = core.createLazyLoader(
 const loadWebTransport = core.createLazyLoader(
   "ext:deno_web/webtransport.js",
 );
+// WebRTC (ext/webrtc, DENEXT.md item 370): loaded on first access.
+let _webrtcMod;
+const loadWebRtc = () =>
+  _webrtcMod ??
+    (_webrtcMod = core.loadExtScript("ext:deno_webrtc/01_webrtc.js"));
 let _htmlRewriterMod;
 const loadHTMLRewriter = () =>
   _htmlRewriterMod ??
@@ -251,6 +256,50 @@ const windowOrWorkerGlobalScope = {
     loadUrlPattern,
   ),
   URLSearchParams: core.propNonEnumerable(url.URLSearchParams),
+  RTCDataChannel: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCDataChannel,
+    loadWebRtc,
+  ),
+  RTCDataChannelEvent: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCDataChannelEvent,
+    loadWebRtc,
+  ),
+  RTCError: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCError,
+    loadWebRtc,
+  ),
+  RTCErrorEvent: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCErrorEvent,
+    loadWebRtc,
+  ),
+  RTCIceCandidate: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCIceCandidate,
+    loadWebRtc,
+  ),
+  RTCPeerConnection: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCPeerConnection,
+    loadWebRtc,
+  ),
+  RTCPeerConnectionIceErrorEvent: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCPeerConnectionIceErrorEvent,
+    loadWebRtc,
+  ),
+  RTCPeerConnectionIceEvent: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCPeerConnectionIceEvent,
+    loadWebRtc,
+  ),
+  RTCSctpTransport: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCSctpTransport,
+    loadWebRtc,
+  ),
+  RTCSessionDescription: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCSessionDescription,
+    loadWebRtc,
+  ),
+  RTCStatsReport: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCStatsReport,
+    loadWebRtc,
+  ),
   WebSocket: core.propNonEnumerableLazyLoaded(
     (ws) => ws.WebSocket,
     loadWebSocket,

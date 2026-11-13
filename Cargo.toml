@@ -37,6 +37,7 @@ members = [
   "ext/web",
   "ext/webgpu",
   "ext/webidl",
+  "ext/webrtc",
   "ext/websocket",
   "ext/webstorage",
   "libs/cache_dir",
@@ -153,6 +154,7 @@ deno_tls = { version = "0.247.0", path = "./ext/tls" }
 deno_web = { version = "0.291.0", path = "./ext/web" }
 deno_webgpu = { version = "0.227.0", path = "./ext/webgpu" }
 deno_webidl = { version = "0.260.0", path = "./ext/webidl" }
+deno_webrtc = { version = "0.1.0", path = "./ext/webrtc" }
 deno_websocket = { version = "0.265.0", path = "./ext/websocket" }
 deno_webstorage = { version = "0.255.0", path = "./ext/webstorage" }
 denort_helper = { version = "0.58.0", path = "./ext/rt_helper" }
@@ -319,6 +321,14 @@ reqwest = { version = "=0.12.16", default-features = false, features = ["rustls-
 # already depends on `zstd`, and modern RPM tooling reads zstd payloads.
 rpm = { version = "0.30.2", default-features = false, features = ["payload", "zstd-compression"] }
 rstest = "0"
+# WebRTC (ext/webrtc, DENEXT.md item 370): webrtc-rs's sans-I/O `rtc` stack
+# (ICE, DTLS, SCTP, data channels; MIT OR Apache-2.0) as Brainwires/webrtc-rs-rtc
+# carries it: upstream `master` through 0fbcaa74 (after v0.21.1) merged into
+# our fork, plus the fork's peer-input hardening (`harden/peer-input`), pinned
+# to an exact commit until the `v0.21.1+brainwires.1` tag exists. On the
+# aws-lc-rs crypto provider, the one Deno's rustls already uses. Pre-1.0 and
+# not externally audited.
+rtc = { git = "https://github.com/Brainwires/webrtc-rs-rtc", rev = "17e1b305f4858e21b9bc57ffe43a056d62b2b816", default-features = false, features = ["crypto-aws-lc-rs"] }
 rusqlite = { version = "0.41.1", features = ["unlock_notify", "bundled", "session", "modern_sqlite", "limits", "backup", "fallible_uint"] } # "modern_sqlite": need sqlite >= 3.49.0 for some db configs; "fallible_uint": ToSql for u64/usize (needed when crates like deno_cache are published/built standalone, not just feature-unified via denokv_sqlite)
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "std", "tls12", "aws_lc_rs"] }
 rustls-pemfile = "2"
@@ -422,7 +432,7 @@ zstd = "=0.14.3"
 
 # crypto
 aead-gcm-stream = "0.4"
-aes = "=0.8.3"
+aes = "=0.8.4"
 aes-gcm = "0.10"
 aes-kw = "0.2.1"
 base64ct = { version = "1.8.3", features = ["alloc"] }

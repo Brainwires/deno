@@ -114,6 +114,10 @@ pub fn init(options: InitLoggingOptions) {
   // in the cli logger
   .filter_module("deno::lsp::performance", log::LevelFilter::Debug)
   .filter_module("rustls", log::LevelFilter::Off)
+  // WebRTC's engine (the `rtc` and `rtc_*` crates) logs every state change
+  // at INFO and drops errors it can't return as WARN; ext/webrtc reports
+  // what matters as RTCPeerConnection events instead (DENEXT.md item 370).
+  .filter_module("rtc", log::LevelFilter::Off)
   // swc_ecma_codegen's `srcmap!` macro emits error-level spans only on debug
   // build:
   // https://github.com/swc-project/swc/blob/74d6478be1eb8cdf1df096c360c159db64b64d8a/crates/swc_ecma_codegen/src/macros.rs#L112

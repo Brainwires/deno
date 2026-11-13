@@ -12,6 +12,7 @@
 /// <reference lib="deno.canvas" />
 /// <reference lib="deno.fetch" />
 /// <reference lib="deno.websocket" />
+/// <reference lib="deno.webrtc" />
 /// <reference lib="deno.crypto" />
 /// <reference lib="deno.ns" />
 /// <reference lib="deno.broadcast_channel" />

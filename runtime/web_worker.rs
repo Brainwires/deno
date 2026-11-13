@@ -648,6 +648,7 @@ impl WebWorker {
       deno_sql::deno_sql::init(),
       deno_pty::deno_pty::init(),
       deno_midi::deno_midi::init(),
+      deno_webrtc::deno_webrtc::init(),
       deno_node::deno_node::init::<
         TInNpmPackageChecker,
         TNpmPackageFolderResolver,

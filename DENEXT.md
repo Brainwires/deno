@@ -14268,6 +14268,178 @@ where the changes are discussed.
        return.
      - Node tests enabled: none; no Node API changes.
 
+370. **`feat(ext/webrtc)`: WebRTC data channels as globals** (`feat/webrtc`, CLI
+     and runtime; `ext/webrtc`, `runtime/js/98_global_scope_shared.js`,
+     `runtime/{Cargo.toml,lib.rs,snapshot,snapshot_info,worker,web_worker}.rs`,
+     `cli/tsc/dts/lib.deno_webrtc.d.ts`,
+     `cli/tsc/dts/lib.deno.shared_globals.d.ts`, `cli/{build.rs,tsc/mod.rs}`,
+     `cli/lib/util/logger.rs`, `cli/tools/test/fmt.rs`,
+     `tests/unit/{webrtc_test.ts,mod.rs}`, `tools/jsdoc_checker.js`,
+     `Cargo.toml`, `Cargo.lock`, `denext_tests_os.yml`). A Deno program can be a
+     WebRTC peer of browsers and of other programs, for data channels: the use
+     asked for is a local peer for browser P2P apps (pooling devices for
+     in-browser inference over data channels). Globals, as in browsers (always
+     on, no flag): `RTCPeerConnection`, `RTCDataChannel`,
+     `RTCSessionDescription`, `RTCIceCandidate`, `RTCPeerConnectionIceEvent`,
+     `RTCPeerConnectionIceErrorEvent`, `RTCDataChannelEvent`, `RTCError`,
+     `RTCErrorEvent`, `RTCSctpTransport`, `RTCStatsReport`; loaded on first
+     access (`01_webrtc.js` is a lazily loaded script).
+     - **Engine:** webrtc-rs's sans-I/O `rtc` stack (MIT OR Apache-2.0; ICE,
+       DTLS 1.2, SCTP, DCEP, SDP, STUN/TURN clients) as
+       [Brainwires/webrtc-rs-rtc](https://github.com/Brainwires/webrtc-rs-rtc)
+       carries it: upstream `master` through `0fbcaa74` (after v0.21.1,
+       2026-11-12) merged into our fork (`sync/upstream-0.21`), the fork's own
+       changes kept (its FORK.md lists them), plus its peer-input hardening
+       (`harden/peer-input`: the SRTCP authentication bypass, a source-address
+       filter, SCTP loop and size caps, ICE role flips, DTLS reassembly and
+       keyless ChangeCipherSpec, TURN message integrity, and remote panics),
+       pinned to commit `17e1b305` (a `git` + `rev` dependency, as `v8` and
+       `laufey` are) until its `v0.21.1+brainwires.1` tag exists. CBC cipher
+       suites are off there by default; the driver sets none (GCM is
+       negotiated). On its `crypto-aws-lc-rs` provider, the aws-lc-rs Deno's
+       rustls already uses, so no ring-based DTLS crypto is added. Chosen over
+       webrtc-rs's async `webrtc` crate (its own tokio tasks and sockets, out of
+       reach of the permission gate), libdatachannel (C++, CMake, MPL-2.0, a
+       second TLS stack) and str0m (sans-I/O too, but no TURN client and no
+       W3C-shaped API). The fork's earlier `master` (`81bc7c6b`, what
+       ReachMyDevice pins) was the first pick and was set aside by the
+       2026-11-13 audit: 320 commits behind upstream and missing upstream's
+       DTLS, ICE and H.264 crash fixes and its SCTP and data-channel fixes; this
+       sync brings them in. Pre-1.0 and not externally audited: DTLS, SCTP and
+       ICE parsing are exposed to any peer that completes ICE.
+     - **Driver** (`peer.rs`; the engine does no I/O and reads no clock): one
+       UDP socket per address family per connection, bound to `0.0.0.0` / `[::]`
+       when interfaces may be listed and the wildcard may be listened on (every
+       interface address is a host candidate on that port), else `127.0.0.1`.
+       The engine matches a datagram to a candidate by its exact local address,
+       which a wildcard socket doesn't report, so the local address of a
+       datagram from a peer is the one the OS routes to that peer from (a
+       connected probe socket, cached per peer IP). One sans-I/O STUN/TURN
+       client per ICE server URL: on the UDP socket, or on its own TCP or TLS
+       connection for `?transport=tcp` and `turns:` (RFC 6544 framing; TLS is
+       the runtime's client configuration: root store, `--cert`,
+       `--unsafely-ignore-certificate-errors`); srflx from a STUN binding, relay
+       from a TURN allocation (TCP/TLS TURN servers give relay only), each
+       relayed peer's permission requested on first use. A driver task moves
+       datagrams between the sockets, the clients and the engine, fires
+       `poll_timeout`, and queues events that JavaScript takes in batches
+       (`op_webrtc_pc_next_events`). Received messages reach V8 without a copy.
+     - **Guards the engine doesn't have:** the net permission gate (below); a
+       selected-pair filter (the engine accepts DTLS from any address, so a
+       non-STUN packet reaches it only from the pair its own last non-STUN
+       datagram went out on, and before it has sent one, only while ICE is
+       connected and only from an address that exchanged STUN); a DTLS watchdog
+       (the engine logs and drops handshake errors: ICE connected for 15 s
+       without DTLS is reported as `failed`); a panic boundary (`catch_unwind`
+       around every engine call: the connection reports `failed` and closes;
+       inert under the release profile's `panic = "abort"`); the engine's `rtc`
+       / `rtc_*` log targets are off (`cli/lib/util/logger.rs`), its outcomes
+       are events instead.
+     - **Permissions** (least-privilege guardrails, like every net API): the
+       constructor checks each ICE server's host and port (`--allow-net` /
+       `--allow-net-connect`, `NotCapable`), and the address it resolves to;
+       every datagram is sent only to an address the net permission allows,
+       checked once per address per connection; a remote candidate
+       (`addIceCandidate`, or a line of `setRemoteDescription`'s SDP) whose
+       address is refused rejects the call; a peer-reflexive address refused at
+       first send is never sent to and is reported as an `icecandidateerror`
+       (701, the permission error as `errorText`); a wildcard socket needs the
+       listen permission for `0.0.0.0` / `::` (`--allow-net` /
+       `--allow-net-listen`), and the interface addresses need
+       `--allow-sys=networkInterfaces` (what `Deno.networkInterfaces()` needs:
+       host candidates disclose them); without either, the connection gathers on
+       `127.0.0.1` only and says so in an `icecandidateerror`. Limits: inbound
+       datagrams from any address reach the engine's ICE (it authenticates STUN
+       with the ICE credentials before anything else flows); a TURN server
+       reaches every peer it relays to; mDNS `.local` candidates are skipped (no
+       mDNS resolution: a browser peer is reached as peer-reflexive once its
+       checks arrive).
+     - **`DENO_WEBRTC_LOOPBACK_ONLY=1`:** gather on `127.0.0.1` alone, never
+       binding the wildcard (machines whose firewall asks about every
+       non-loopback listener; the unit tests set it).
+     - **API coverage:** `RTCPeerConnection`: `createOffer` (`iceRestart`),
+       `createAnswer`, `setLocalDescription` (implicit form included),
+       `setRemoteDescription`, `addIceCandidate` (end-of-candidates, `null`),
+       the operations chain, `localDescription` / `remoteDescription` (with
+       gathered candidates) and the current / pending variants,
+       `signalingState`, `iceGatheringState`, `iceConnectionState`,
+       `connectionState`, `canTrickleIceCandidates`, `sctp` (`maxMessageSize`,
+       `state`), `createDataChannel`, `getStats` (webrtc-stats dictionaries),
+       `getConfiguration` / `setConfiguration`, `restartIce`, `close`, events
+       `negotiationneeded`, `icecandidate` (`null` at the end),
+       `icecandidateerror`, `signalingstatechange`, `iceconnectionstatechange`,
+       `icegatheringstatechange`, `connectionstatechange`, `datachannel`;
+       `iceServers` (STUN, TURN over UDP / TCP / TLS with credentials),
+       `iceTransportPolicy`. `RTCDataChannel`: `label`, `ordered`,
+       `maxPacketLifeTime`, `maxRetransmits`, `protocol`, `negotiated`, `id`,
+       `readyState`, `bufferedAmount` (exact: bytes SCTP hasn't released),
+       `bufferedAmountLowThreshold`, `binaryType`, `send` (string,
+       `ArrayBuffer`, typed array, `DataView`, `Blob` in call order; over
+       `maxMessageSize` a `TypeError`; not open an `InvalidStateError`),
+       `close`, events `open`, `message`, `bufferedamountlow`, `error`,
+       `closing`, `close`. `createOffer` / `createAnswer` resolve to plain,
+       editable `RTCSessionDescriptionInit` dictionaries (simple-peer edits the
+       offer's SDP). Data channel messages up to 256 KiB, as browsers negotiate
+       (the engine's default is RFC 8841's 64 KiB). Not implemented: media
+       (`addTrack`, `addTransceiver`, `getSenders` … return empty / throw
+       `NotSupportedError`; phase 2), `certificates` and `generateCertificate`
+       (`NotSupportedError`), `peerIdentity`, `RTCDtlsTransport` /
+       `RTCIceTransport` objects, legacy callback signatures, TCP ICE candidates
+       (skipped), mDNS candidate obfuscation for the local side (host candidates
+       are literal addresses, which is why they need the sys permission).
+     - **Engine gaps worked around:** a negotiated channel created on a live
+       association opens at once with no open event from the engine (the ext
+       sends it); the selected candidate pair can't be read from the stats (the
+       candidate-pair entry names candidate ids the candidate entries prefix,
+       and remote candidates have no entry), so the selected-pair filter learns
+       it from the engine's own traffic.
+     - **Dependency:** the `rtc` crates (`0.21.1+brainwires.1`) from the pinned
+       fork commit, with `sansio`, `rcgen` 0.14, `x509-parser` 0.16 / 0.18,
+       `der-parser`, `asn1-rs`, `crc`, `crc32c` (0.6.8), `rkyv`, `pem` 3 / 4,
+       `substring`, `yasna` from crates.io; the workspace's `aes` pin moves
+       `=0.8.3` → `=0.8.4` (rtc-crypto's minimum), and `bytes` 1.12.1, `log`
+       0.4.33 (the minimum rtc takes; 0.4.35 is younger than the hold),
+       `unicase` 2.10, `zeroize` 1.9.1. Every new crates.io crate is at least 11
+       days old.
+     - **Size:** not measured yet: compare the release's `deno-cli` archives
+       with the previous release's (a local release build was stopped to free
+       the build host for the train). The new code is the engine's `rtc*`
+       crates, X.509 / ASN.1 parsing for DTLS certificates (`rcgen`,
+       `x509-parser`, `der-parser`, `asn1-rs`), `rkyv` (rtc-dtls) and the
+       driver; no second TLS or crypto library.
+     - **Verified by hand** (biscuits, Linux x64; scripts not in the tree
+       because they download npm packages and browsers): against headless Chrome
+       stable, Playwright 1.63's Chromium and its WebKit (Safari's engine), each
+       with Deno offering and with the browser offering, with the browsers'
+       default mDNS host candidates: a text, a 1000-byte and a 256 KiB binary
+       message (the negotiated maximum) echoed back, then 100 messages in order;
+       all six pass (one Chromium browser-offers run of five hung once, not
+       reproduced). TURN through pion/turn v4.1.1's example servers on 127.0.0.1
+       with `iceTransportPolicy: "relay"`: UDP, TCP and TLS (`turns:`, a CA
+       given with `--cert`; an untrusted certificate is an `icecandidateerror`
+       naming the TLS error; with `--unsafely-ignore-certificate-errors` it
+       connects), also under `DENO_WEBRTC_LOOPBACK_ONLY=1`. npm: `simple-peer`
+       9.11.1 (two peers in one process, trickle, data both ways) and `peerjs`
+       1.5.4 against a local `peer` 1.0.2 server both work on the globals
+       unchanged. Firefox was not tested (none on the test host).
+     - User-facing note: Deno programs can be WebRTC data channel peers
+       (`new RTCPeerConnection()`), of browsers and of each other, with STUN and
+       TURN, under the net permission.
+     - Tests: `ext/webrtc` lib tests (two peers on loopback, no V8: both
+       directions, a `maxMessageSize` message then 200 ordered ones and one byte
+       over refused, an unordered `maxRetransmits: 0` channel, `bufferedAmount`
+       draining to 0 with `bufferedamountlow`, close ending the event stream and
+       refusing sends, a refused remote candidate, mDNS and TCP candidates
+       skipped, candidate and ICE URL parsing, RFC 6544 frames);
+       `tests/unit/webrtc_test.ts` (19: the globals, constructors and
+       validation, trickle and non-trickle offer/answer, every binary kind incl.
+       `Blob` order and `binaryType = "blob"`, large and ordered messages,
+       unordered, negotiated, `bufferedAmount`, channel close, connection close
+       closing channels, `getStats`, least privilege (`net: ["127.0.0.1"]`,
+       `sys: false`), an ICE server and a remote candidate refused by the net
+       permission).
+     - Node tests enabled: none; `node:` has no WebRTC API.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -14275,7 +14447,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368, 369) are what the prebuilt `libdenort`
+350, 351, 353, 355-361, 363-366, 368-370) are what the prebuilt `libdenort`
 carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.

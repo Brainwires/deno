@@ -53,6 +53,7 @@ pub fn get_extensions_in_snapshot() -> Vec<Extension> {
     deno_sql::deno_sql::init(),
     deno_pty::deno_pty::init(),
     deno_midi::deno_midi::init(),
+    deno_webrtc::deno_webrtc::init(),
     deno_node::deno_node::init::<
       DenoInNpmPackageChecker,
       NpmResolver<sys_traits::impls::RealSys>,
