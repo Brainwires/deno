@@ -105,6 +105,12 @@ fn run_test(test: &CollectedTest) -> TestResult {
     deno = deno.arg("--unstable-cron");
   }
 
+  // WebRTC peers gather on loopback only: no wildcard listener for a
+  // desktop firewall to ask about (both peers are on this machine).
+  if test.name.ends_with("::webrtc_test") {
+    deno = deno.env("DENO_WEBRTC_LOOPBACK_ONLY", "1");
+  }
+
   if test.name.ends_with("::html_rewriter_test") {
     deno = deno.arg("--unstable-html-rewriter");
   }

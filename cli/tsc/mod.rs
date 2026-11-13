@@ -67,6 +67,7 @@ pub fn get_types_declaration_file_text() -> String {
     "deno.fetch",
     "deno.webgpu",
     "deno.websocket",
+    "deno.webrtc",
     "deno.webstorage",
     "deno.canvas",
     "deno.crypto",
@@ -221,6 +222,7 @@ pub static LAZILY_LOADED_STATIC_ASSETS: Lazy<
     maybe_compressed_lib!("lib.deno.web.d.ts", "lib.deno_web.d.ts"),
     maybe_compressed_lib!("lib.deno.fetch.d.ts", "lib.deno_fetch.d.ts"),
     maybe_compressed_lib!("lib.deno.websocket.d.ts", "lib.deno_websocket.d.ts"),
+    maybe_compressed_lib!("lib.deno.webrtc.d.ts", "lib.deno_webrtc.d.ts"),
     maybe_compressed_lib!(
       "lib.deno.webstorage.d.ts",
       "lib.deno_webstorage.d.ts"

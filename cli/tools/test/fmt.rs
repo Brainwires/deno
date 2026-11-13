@@ -459,6 +459,7 @@ pub const OP_DETAILS: phf::Map<&'static str, [&'static str; 2]> = phf_map! {
   "op_webgpu_buffer_get_map_async" => ["map a WebGPU buffer", "awaiting the result of a `GPUBuffer#mapAsync` call"],
   "op_webgpu_request_adapter" => ["request a WebGPU adapter", "awaiting the result of a `navigator.gpu.requestAdapter` call"],
   "op_webgpu_request_device" => ["request a WebGPU device", "awaiting the result of a `GPUAdapter#requestDevice` call"],
+  "op_webrtc_pc_next_events" => ["receive events for an RTCPeerConnection", "calling `RTCPeerConnection#close`"],
   "op_ws_close" => ["close a WebSocket", "awaiting until the `close` event is emitted on a `WebSocket`, or the `WebSocketStream#closed` promise resolves"],
   "op_ws_create" => ["create a WebSocket", "awaiting until the `open` event is emitted on a `WebSocket`, or the result of a `WebSocketStream#connection` promise"],
   "op_ws_next_event" => ["receive the next message on a WebSocket", "closing a `WebSocket` or `WebSocketStream`"],

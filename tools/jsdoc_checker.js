@@ -10,6 +10,7 @@ const libs = [
   join(ROOT_PATH, "cli/tsc/dts/lib.deno_web.d.ts"),
   join(ROOT_PATH, "cli/tsc/dts/lib.deno_fetch.d.ts"),
   join(ROOT_PATH, "cli/tsc/dts/lib.deno_websocket.d.ts"),
+  join(ROOT_PATH, "cli/tsc/dts/lib.deno_webrtc.d.ts"),
   join(ROOT_PATH, "cli/tsc/dts/lib.deno_webstorage.d.ts"),
   join(ROOT_PATH, "cli/tsc/dts/lib.deno_canvas.d.ts"),
   join(ROOT_PATH, "cli/tsc/dts/lib.deno_crypto.d.ts"),
