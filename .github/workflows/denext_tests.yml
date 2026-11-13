@@ -16,7 +16,8 @@
 #          engine_staleness_test.py, audit_ignores_test.py,
 #          glibc_ceiling_test.py, self_binding_test.py, denort_pins_test.py,
 #          linux_needed_test.py, toolchain_info_test.py, plan_matrix_test.py,
-#          pick_runner_test.py, apt_install_test.py, guard_verified_test.py)
+#          pick_runner_test.py, apt_install_test.py, guard_verified_test.py,
+#          setup_cache_test.py)
 #          and the bare-assertion guard over the release scripts
 #          (assert_guard.py and its test).
 # - cargo-audit: RustSec advisories against Cargo.lock; .cargo/audit.toml
@@ -247,6 +248,11 @@ jobs:
       - name: apt_install_test.py
         if: runner.os == 'Linux'
         run: python3 -I .github/denext-runtime/apt_install_test.py
+      # The test jobs' Rust cache saves only from GitHub's images and bounds
+      # its restore (.github/denext-tests/setup/action.yml).
+      - name: setup_cache_test.py
+        if: runner.os == 'Linux'
+        run: python3 -I .github/denext-runtime/setup_cache_test.py
       # Every assertion in the release and test scripts names what it checked
       # (DENEXT.md item 141): no bare test / [ / grep -q statements.
       - name: assert_guard.py

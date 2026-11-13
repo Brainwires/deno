@@ -129,11 +129,22 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}
       run: bash .github/denext-runtime/install_ld64.sh
 
+    # Saved only from GitHub's images. A self-hosted pool's upload to GitHub's
+    # cache service is bounded by its own uplink: the Windows x64 VM sent a
+    # 520 MB test-unit_node cache at 0.1 MB/s for an hour in the job's post
+    # step (runs 43268549282, 43372954581), long after its tests passed, and
+    # the post step of a composite action takes no timeout-minutes. A pool
+    # still restores what an image run saved, and a restore gives up after
+    # SEGMENT_DOWNLOAD_TIMEOUT_MINS (the job then builds without it).
+    # setup_cache_test.py checks both.
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      env:
+        SEGMENT_DOWNLOAD_TIMEOUT_MINS: '5'
       with:
         prefix-key: denext-tests-v1
         key: ${{ inputs.cache-key }}
         cache-on-failure: true
+        save-if: ${{ runner.environment == 'github-hosted' }}
 
     # The cache restores the v8 build-script fingerprint but not
     # target/debug/gn_out, where the script puts the library, so the verified
