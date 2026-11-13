@@ -27,7 +27,41 @@ if (isGrpc) {
   };
 }
 
+// With OTEL_TEST_COLLAPSE_REPEATED_EXPORTS=1, a metrics export identical to
+// the one before it (timestamps and the non-deterministic v8js metrics aside)
+// is dropped. A periodic export repeats the previous one exactly when nothing
+// changed in between, so a slow host that fits in an extra tick before exit
+// yields the same output; the periodic export and the one at exit still differ
+// (observable instruments are observed only in the periodic one), so both
+// must still arrive.
+const collapseRepeatedExports =
+  Deno.env.get("OTEL_TEST_COLLAPSE_REPEATED_EXPORTS") === "1";
+let lastMetricsExport;
+
+function metricsExportKey(metrics) {
+  return JSON.stringify(
+    metrics
+      .filter((m) => !m.name.startsWith("v8js"))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    (key, value) =>
+      key === "timeUnixNano" || key === "startTimeUnixNano" ? undefined : value,
+  );
+}
+
 function collectData(body) {
+  const exportMetrics = [];
+  body.resourceMetrics?.forEach((rMetrics) => {
+    rMetrics.scopeMetrics.forEach((sMetrics) => {
+      exportMetrics.push(...sMetrics.metrics);
+    });
+  });
+  if (exportMetrics.length > 0) {
+    const key = metricsExportKey([...exportMetrics]);
+    if (!collapseRepeatedExports || key !== lastMetricsExport) {
+      data.metrics.push(...exportMetrics);
+    }
+    lastMetricsExport = key;
+  }
   body.resourceLogs?.forEach((rLogs) => {
     rLogs.scopeLogs.forEach((sLogs) => {
       data.logs.push(...sLogs.logRecords);
@@ -36,11 +70,6 @@ function collectData(body) {
   body.resourceSpans?.forEach((rSpans) => {
     rSpans.scopeSpans.forEach((sSpans) => {
       data.spans.push(...sSpans.spans);
-    });
-  });
-  body.resourceMetrics?.forEach((rMetrics) => {
-    rMetrics.scopeMetrics.forEach((sMetrics) => {
-      data.metrics.push(...sMetrics.metrics);
     });
   });
 }

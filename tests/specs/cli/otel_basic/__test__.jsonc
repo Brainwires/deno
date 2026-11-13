@@ -25,8 +25,11 @@
       "output": "uncaught.out"
     },
     "metric": {
+      // The observable instruments need a periodic export before exit; a slow
+      // host can fit a second, identical one in (main.ts collapses it).
       "envs": {
-        "OTEL_METRIC_EXPORT_INTERVAL": "1000"
+        "OTEL_METRIC_EXPORT_INTERVAL": "1000",
+        "OTEL_TEST_COLLAPSE_REPEATED_EXPORTS": "1"
       },
       "args": "run -A main.ts metric.ts",
       "output": "metric.out"
@@ -43,8 +46,10 @@
       "output": "fetch.out"
     },
     "http_metric": {
+      // One export, at exit: a 1 s interval also exported once mid-run on a
+      // host where the program takes over a second (a doubled output).
       "envs": {
-        "OTEL_METRIC_EXPORT_INTERVAL": "1000"
+        "OTEL_METRIC_EXPORT_INTERVAL": "60000"
       },
       "args": "run -A main.ts http_metric.ts",
       "output": "http_metric.out"
@@ -58,8 +63,10 @@
       "output": "http_traceparent_header_case.out"
     },
     "node_http_metric": {
+      // One export, at exit: a 1 s interval also exported once mid-run on a
+      // host where the program takes over a second (a doubled output).
       "envs": {
-        "OTEL_METRIC_EXPORT_INTERVAL": "1000",
+        "OTEL_METRIC_EXPORT_INTERVAL": "60000",
         "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative"
       },
       "args": "run -A main.ts node_http_metric.ts",
@@ -168,9 +175,12 @@
       "output": "basic.out"
     },
     "metric_grpc": {
+      // The observable instruments need a periodic export before exit; a slow
+      // host can fit a second, identical one in (main.ts collapses it).
       "envs": {
         "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
-        "OTEL_METRIC_EXPORT_INTERVAL": "1000"
+        "OTEL_METRIC_EXPORT_INTERVAL": "1000",
+        "OTEL_TEST_COLLAPSE_REPEATED_EXPORTS": "1"
       },
       "args": "run -A -q main.ts metric.ts",
       "output": "metric.out"
