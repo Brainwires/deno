@@ -8,9 +8,12 @@ import process from "node:process";
 const module = {};
 process.dlopen(module, Deno.args[0], 0);
 const [readFd] = module.exports.openPipe("scoped");
+let line;
 try {
   fs.fstatSync(readFd);
-  console.log("not refused");
+  line = "not refused";
 } catch (e) {
-  console.log("refused", e.name, e.message);
+  line = `refused ${e.name} ${e.message}`;
 }
+// deno-lint-ignore no-console
+console.log(line);
