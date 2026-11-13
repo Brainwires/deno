@@ -1224,6 +1224,13 @@ declare namespace Deno {
      * `windowCapabilities().toolbarStyle`). While it is not `"automatic"`,
      * `setTitleBarStyle("hidden")` returns `false`. */
     setToolbarStyle(style: ToolbarStyle): boolean;
+    /** Show an http(s) page in a native child view of this window, above
+     * its page at `options.bounds` (see {@linkcode WebView}). Throws a
+     * {@linkcode WebViewError}: `unsupported` (no engine here, see
+     * {@linkcode Deno.desktop.webViewCapabilities}), `not_allowed_url`,
+     * `limit` (32 views in one window), `closed` (the window is closed),
+     * `invalid` (bad options), `failed`. */
+    createWebView(options: WebViewOptions): WebView;
     /** Move the macOS traffic lights (Electron's `setWindowButtonPosition` /
      * `trafficLightPosition`); `null` puts them back. Kept across resizes
      * and fullscreen. Returns `false` where unsupported. */
@@ -1419,6 +1426,372 @@ declare namespace Deno {
 
   /** App-level dock / taskbar singleton. */
   export const dock: Dock;
+
+  /** The engine behind {@linkcode WebView}s: Chromium (CEF), WKWebView
+   * (macOS), WebView2 (Windows) or WebKitGTK (Linux).
+   *
+   * @category Desktop
+   * @experimental
+   */
+  export type WebViewEngine = "cef" | "wkwebview" | "webview2" | "webkitgtk";
+
+  /** What {@linkcode Deno.desktop.webViewCapabilities} reports.
+   *
+   * @category Desktop
+   * @experimental
+   */
+  export interface WebViewCapabilities {
+    /** {@linkcode BrowserWindow.createWebView} works here (else it throws a
+     * {@linkcode WebViewError} with code `"unsupported"`). */
+    supported: boolean;
+    /** The engine that draws the views; `null` when unsupported. */
+    engine: WebViewEngine | null;
+    /** {@linkcode WebView.capture} works. */
+    capture: boolean;
+    /** {@linkcode WebView.evaluate} works. */
+    evaluate: boolean;
+    /** A partition other than `"ephemeral"` / `"ephemeral:*"` is kept on
+     * disk across launches (else every partition is in memory). */
+    persistentPartitions: boolean;
+    /** `permissions: "ask"` shows a prompt (else it refuses like
+     * `"deny"`). */
+    permissionPrompts: boolean;
+    /** {@linkcode WebView.raise}, {@linkcode WebView.lower} and
+     * {@linkcode WebView.setZOrder} reorder a window's views. */
+    zOrder: boolean;
+    /** {@linkcode WebView.setZoom} / {@linkcode WebView.getZoom}. */
+    zoom: boolean;
+    /** {@linkcode WebView.find} and the `"find-result"` event. */
+    find: boolean;
+    /** {@linkcode WebView.openDevTools}. */
+    devTools: boolean;
+    /** The `"context-menu"` event and `contextMenu: "app"`. */
+    contextMenu: boolean;
+    /** {@linkcode WebView.print}. */
+    print: boolean;
+    /** `clipboardRead` / `clipboardWrite` are honored. */
+    clipboard: boolean;
+  }
+
+  /** Where a {@linkcode WebView} sits: CSS pixels relative to the top-left
+   * of its window's page viewport.
+   *
+   * @category Desktop
+   * @experimental
+   */
+  export interface WebViewBounds {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }
+
+  /** Options of {@linkcode BrowserWindow.createWebView}.
+   *
+   * @category Desktop
+   * @experimental
+   */
+  export interface WebViewOptions {
+    /** The page to load: an `http:` or `https:` URL (anything else throws
+     * code `"not_allowed_url"`). */
+    url: string;
+    /** Where the view sits in the window. */
+    bounds: WebViewBounds;
+    /** The storage (cookies, local storage, cache) the view uses, never
+     * the app's own: 1 to 64 characters of `[A-Za-z0-9._:-]`, the first
+     * alphanumeric. Views with the same partition share it. `"ephemeral"`
+     * or `"ephemeral:<name>"` is kept in memory and gone when the app
+     * exits; any other name is kept on disk where
+     * {@linkcode WebViewCapabilities.persistentPartitions} says so.
+     * @default {"webview:default"} */
+    partition?: string;
+    /** @default {true} */
+    visible?: boolean;
+    /** What `window.open` and `target="_blank"` links do: `"same-view"`
+     * loads the URL in this view, `"browser"` opens an http(s) URL in the
+     * system browser, `"deny"` opens nothing and fires `"new-window"`.
+     * Other schemes never open. @default {"same-view"} */
+    allowPopups?: "deny" | "same-view" | "browser";
+    /** `"deny"` cancels downloads, `"ask"` shows the save panel,
+     * `"browser"` hands the URL to the system browser.
+     * @default {"deny"} */
+    downloads?: "deny" | "ask" | "browser";
+    /** Camera, microphone, geolocation, notifications and the like:
+     * `"deny"` refuses without a prompt, `"ask"` prompts naming the origin.
+     * @default {"deny"} */
+    permissions?: "deny" | "ask";
+    /** Replaces the engine's user agent string for this view. */
+    userAgent?: string;
+    /** `"native"`: the engine's own context menu; `"app"`: none, so the
+     * app draws its own from the `"context-menu"` event (which fires in
+     * both modes). @default {"native"} */
+    contextMenu?: "native" | "app";
+    /** The page may read the clipboard. @default {false} */
+    clipboardRead?: boolean;
+    /** The page may write the clipboard (on a user gesture).
+     * @default {true} */
+    clipboardWrite?: boolean;
+  }
+
+  /** A {@linkcode WebView}'s main-frame load state.
+   *
+   * @category Desktop
+   * @experimental
+   */
+  export type WebViewLoadState =
+    | "loading"
+    | "interactive"
+    | "complete"
+    | "failed";
+
+  /** What {@linkcode WebView.state} returns.
+   *
+   * @category Desktop
+   * @experimental
+   */
+  export interface WebViewState {
+    url: string;
+    title: string;
+    /** The last load state (`"complete"` before the first navigation). */
+    load: WebViewLoadState;
+    canGoBack: boolean;
+    canGoForward: boolean;
+    visible: boolean;
+    bounds: WebViewBounds;
+    /** Its place among the window's views: higher is above, equal ones
+     * keep their creation order. */
+    zOrder: number;
+  }
+
+  /** The `code` of a {@linkcode WebViewError}.
+   *
+   * @category Desktop
+   * @experimental
+   */
+  export type WebViewErrorCode =
+    | "unsupported"
+    | "not_allowed_url"
+    | "limit"
+    | "closed"
+    | "invalid"
+    | "failed"
+    | "error"
+    | "not_serializable"
+    | "not_allowed";
+
+  /** How the {@linkcode WebView} methods and
+   * {@linkcode BrowserWindow.createWebView} throw or reject.
+   *
+   * @category Desktop
+   * @experimental
+   */
+  export interface WebViewError extends Error {
+    name: "WebViewError";
+    /**
+     * - `unsupported`: no web view engine here (see
+     *   {@linkcode Deno.desktop.webViewCapabilities}), or the operation
+     *   isn't (`capture`, `evaluate`).
+     * - `not_allowed_url`: not an `http:` / `https:` URL.
+     * - `limit`: the window holds as many views as it can (32).
+     * - `closed`: the view, or its window, is closed.
+     * - `invalid`: a bad argument (the message says which).
+     * - `failed`: the engine failed.
+     * - `error`: the evaluated script threw or rejected (the message is
+     *   its error's).
+     * - `not_serializable`: the evaluated script's value can't be JSON (a
+     *   function, a cycle, a DOM node).
+     * - `not_allowed`: {@linkcode WebView.openDevTools} where the app's
+     *   DevTools are off (a packaged app without `inspectable: true`).
+     */
+    code: WebViewErrorCode;
+  }
+
+  /** The `detail` of each {@linkcode WebView} event.
+   *
+   * @category Desktop
+   * @experimental
+   */
+  export interface WebViewEventDetailMap {
+    title: { title: string };
+    /** Each committed main-frame URL change, same-document ones included. */
+    url: { url: string; canGoBack: boolean; canGoForward: boolean };
+    /** `"loading"` when a main-frame navigation starts, `"interactive"`
+     * when its document commits, `"complete"` when it finishes, `"failed"`
+     * (with `error`) when it fails; a stopped or replaced navigation ends
+     * with no `"failed"`. */
+    load: {
+      state: WebViewLoadState;
+      url: string;
+      error?: {
+        code: "network" | "dns" | "tls" | "blocked" | "aborted" | "failed";
+        message: string;
+      };
+    };
+    console: {
+      level: "log" | "info" | "warn" | "error" | "debug";
+      message: string;
+      source?: string;
+      line?: number;
+    };
+    /** The native view gained or lost keyboard focus. */
+    "focus-change": { focused: boolean };
+    /** A popup the view didn't open (`allowPopups: "deny"` only):
+     * `"popup"` when window features were given, else `"tab"`. */
+    "new-window": { url: string; disposition: "popup" | "tab" };
+    /** Exactly once, last: after {@linkcode WebView.close} or when the
+     * window closes. */
+    closed: Record<string, never>;
+    /** After {@linkcode WebView.find}: the match count and the highlighted
+     * one (1-based; 0 when none). */
+    "find-result": { matches: number; activeMatch: number };
+    /** A context-menu request in the view, in both `contextMenu` modes;
+     * `x` / `y` in CSS pixels from the view's top-left. */
+    "context-menu": {
+      x: number;
+      y: number;
+      linkUrl?: string;
+      imageUrl?: string;
+      selectionText?: string;
+      isEditable: boolean;
+      mediaType?: "image" | "video" | "audio" | "canvas" | "plugin";
+    };
+  }
+
+  /** The events of a {@linkcode WebView}.
+   *
+   * @category Desktop
+   * @experimental
+   */
+  export type WebViewEventMap = {
+    [K in keyof WebViewEventDetailMap]: CustomEvent<WebViewEventDetailMap[K]>;
+  };
+
+  /** A web page shown in a native child view of a window, above the
+   * window's own page (it draws over all of the page's HTML). Made with
+   * {@linkcode BrowserWindow.createWebView}; not constructible.
+   *
+   * The view is isolated from the app: it never gets the desktop bridge
+   * (no bindings), the app's storage or the window's navigation guard, and
+   * it navigates only to `http:` / `https:` pages. It closes with its
+   * window; a reload or navigation of the window's page leaves it open.
+   *
+   * ```ts
+   * const view = win.createWebView({
+   *   url: "https://example.com/",
+   *   bounds: { x: 0, y: 40, width: 800, height: 560 },
+   * });
+   * view.addEventListener("title", (e) => win.setTitle(e.detail.title));
+   * const title = await view.evaluate("document.title");
+   * ```
+   *
+   * @category Desktop
+   * @experimental
+   */
+  export class WebView extends EventTarget {
+    private constructor();
+    /** The runtime's id for the view. */
+    readonly id: number;
+    /** The window it is in. */
+    readonly window: BrowserWindow<any>;
+    /** True once {@linkcode WebView.close} was called or `"closed"` fired. */
+    readonly closed: boolean;
+    /** Move / resize the view. No-op once closed. */
+    setBounds(bounds: WebViewBounds): void;
+    /** Show or hide the view. No-op once closed. */
+    setVisible(visible: boolean): void;
+    /** Load `url` (an `http:` or `https:` URL). Throws a
+     * {@linkcode WebViewError}: `not_allowed_url`, `closed`. */
+    navigate(url: string): void;
+    /** Go back in the view's history. No-op once closed. */
+    back(): void;
+    /** Go forward in the view's history. No-op once closed. */
+    forward(): void;
+    /** Reload the page (`ignoreCache`: bypass the cache). No-op once
+     * closed. */
+    reload(options?: { ignoreCache?: boolean }): void;
+    /** Stop loading. No-op once closed. */
+    stop(): void;
+    /** Move keyboard focus into the view (`"focus-change"` reports when it
+     * leaves). No-op once closed. */
+    focus(): void;
+    /** The view's URL, title, load state, history and place. Throws a
+     * {@linkcode WebViewError} with code `closed` once closed. */
+    state(): WebViewState;
+    /** What the view shows now: PNG bytes, or JPEG at `quality` (0 to 100,
+     * default 90), at `scale` output pixels per CSS pixel (above 0, at
+     * most 4; default the device pixels). `{ format: "jpeg", scale: 1 }` is
+     * the cheap snapshot to show in place of the view while HTML covers
+     * it. Rejects with a {@linkcode WebViewError} (`closed`,
+     * `unsupported`, `failed`, `invalid`). */
+    capture(
+      options?: { format?: "png" | "jpeg"; quality?: number; scale?: number },
+    ): Promise<Uint8Array>;
+    /** Run `script` as a classic script in an isolated world of the page
+     * (it shares the DOM, not the page's globals) and resolve with its
+     * completion value, awaited if it is a promise, through JSON
+     * (`undefined` is `null`). Rejects with a {@linkcode WebViewError}:
+     * `error` (it threw or rejected), `not_serializable`, `closed`,
+     * `unsupported`. */
+    evaluate(script: string): Promise<unknown>;
+    /** Put the view above the window's other views. `false` where
+     * unsupported (`webViewCapabilities().zOrder`) or once closed. */
+    raise(): boolean;
+    /** Put the view below the window's other views. `false` where
+     * unsupported or once closed. */
+    lower(): boolean;
+    /** Set its place among the window's views (a 32-bit integer; higher is
+     * above, equal ones keep their creation order; a new view starts on
+     * top). `false` where unsupported or once closed. */
+    setZOrder(zOrder: number): boolean;
+    /** Page zoom (1 is 100%, 0.25 to 5). `false` where unsupported or once
+     * closed. */
+    setZoom(factor: number): boolean;
+    /** The page zoom. Throws a {@linkcode WebViewError}: `closed`,
+     * `unsupported`. */
+    getZoom(): number;
+    /** Highlight the next match of `text` (the previous one with
+     * `forward: false`; repeating the same text moves on); a
+     * `"find-result"` event reports the count. `false` where unsupported
+     * or once closed. */
+    find(
+      text: string,
+      options?: { forward?: boolean; matchCase?: boolean },
+    ): boolean;
+    /** Clear the find highlight. `false` where unsupported or once
+     * closed. */
+    stopFind(): boolean;
+    /** Open the engine's DevTools for the view. Throws a
+     * {@linkcode WebViewError}: `not_allowed` (the app's DevTools are off:
+     * a packaged app needs `inspectable: true`), `unsupported`,
+     * `closed`. */
+    openDevTools(): void;
+    /** Open the OS print dialog for the page. `false` where unsupported or
+     * once closed. */
+    print(): boolean;
+    /** Close the view: `"closed"` fires once. Idempotent. */
+    close(): void;
+
+    addEventListener<K extends keyof WebViewEventMap>(
+      type: K,
+      listener: (this: WebView, ev: WebViewEventMap[K]) => any,
+      options?: boolean | AddEventListenerOptions,
+    ): void;
+    addEventListener(
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: boolean | AddEventListenerOptions,
+    ): void;
+    removeEventListener<K extends keyof WebViewEventMap>(
+      type: K,
+      listener: (this: WebView, ev: WebViewEventMap[K]) => any,
+      options?: boolean | EventListenerOptions,
+    ): void;
+    removeEventListener(
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: boolean | EventListenerOptions,
+    ): void;
+  }
 
   /** The tray icon's bounding rectangle in screen coordinates, in the same
    * top-left-origin space as {@linkcode BrowserWindow.setPosition}. Use it to
@@ -3455,6 +3828,9 @@ declare namespace Deno {
     export function getPrimaryScreen(): Screen | null;
     /** What window features this backend supports on this OS. */
     export function windowCapabilities(): WindowCapabilities;
+    /** Whether {@linkcode BrowserWindow.createWebView} works here, the
+     * engine, and what its {@linkcode WebView}s can do. */
+    export function webViewCapabilities(): WebViewCapabilities;
     /** What this session provides: the tray host, the Secret Service, the
      * notification server, the session type, the xdg-desktop-portal
      * versions and the cookie store. Resolves to `null` outside a desktop

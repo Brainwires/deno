@@ -238,6 +238,29 @@ const cases = {
     ops.op_desktop_answer_will_navigate(1, 2),
   op_desktop_set_app_menu: () =>
     ops.op_desktop_set_app_menu([{ submenu: { label: "File", items: [] } }]),
+  // Embedded web views (laufey API 58): no view exists, nothing loads.
+  op_desktop_webview_capabilities: () => ops.op_desktop_webview_capabilities(),
+  op_desktop_webview_set_bounds: () =>
+    ops.op_desktop_webview_set_bounds(1, 0, 0, 10, 10),
+  op_desktop_webview_set_visible: () =>
+    ops.op_desktop_webview_set_visible(1, true),
+  op_desktop_webview_navigate: () =>
+    ops.op_desktop_webview_navigate(1, "https://example.com/"),
+  op_desktop_webview_command: () => ops.op_desktop_webview_command(1, 1),
+  op_desktop_webview_state: () => ops.op_desktop_webview_state(1),
+  op_desktop_webview_evaluate: () => ops.op_desktop_webview_evaluate(1, "1+1"),
+  op_desktop_webview_capture: () => ops.op_desktop_webview_capture(1, 0, 90, 0),
+  op_desktop_webview_close: () => ops.op_desktop_webview_close(1),
+  op_desktop_webview_set_z_order: () =>
+    ops.op_desktop_webview_set_z_order(1, 2),
+  op_desktop_webview_set_zoom: () => ops.op_desktop_webview_set_zoom(1, 1.5),
+  op_desktop_webview_get_zoom: () => ops.op_desktop_webview_get_zoom(1),
+  op_desktop_webview_find: () =>
+    ops.op_desktop_webview_find(1, "text", true, false),
+  op_desktop_webview_stop_find: () => ops.op_desktop_webview_stop_find(1),
+  op_desktop_webview_open_devtools: () =>
+    ops.op_desktop_webview_open_devtools(1),
+  op_desktop_webview_print: () => ops.op_desktop_webview_print(1),
   // The updater ops (desktop_update_ops_inert has the detail).
   op_desktop_app_update_info: () => ops.op_desktop_app_update_info().configured,
   op_desktop_app_update_check: () =>

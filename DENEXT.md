@@ -14046,6 +14046,77 @@ where the changes are discussed.
        `undefined` makes `typeof location` `"undefined"`).
      - Node tests enabled: none; no Node API changes (Node has no `location`).
 
+368. **`feat(desktop)`: laufey API 58: embedded web views** (runtime;
+     `runtime/ops/desktop.rs`, `runtime/js/99_main.js`, `cli/rt_desktop/lib.rs`,
+     `cli/rt/desktop.rs`, `cli/tsc/dts/lib.deno.desktop.d.ts`, the webview e2e
+     area). `BrowserWindow.prototype.createWebView(options)` shows an `http:` /
+     `https:` page in a native child view of the window, above its page at
+     `options.bounds` (CSS pixels from the top-left of the page viewport), and
+     returns a `Deno.WebView` (an `EventTarget`, not constructible from user
+     code). The view never gets the desktop bridge (no bindings, no app-scheme
+     handler), the app's storage or the window's navigation guard; its
+     navigations go to `http:` / `https:` only. Options: `partition` (1 to 64
+     characters of `[A-Za-z0-9._:-]`, default `"webview:default"`; `"ephemeral"`
+     / `"ephemeral:*"` in memory), `visible`, `allowPopups` (`"same-view"`,
+     `"browser"`, `"deny"`), `downloads` (`"deny"`, `"ask"`, `"browser"`),
+     `permissions` (`"deny"`, `"ask"`), `userAgent`, `contextMenu` (`"native"`,
+     or `"app"`: no engine menu), `clipboardRead` (default false),
+     `clipboardWrite` (default true, on a user gesture). Methods: `setBounds`,
+     `setVisible`, `navigate`, `back`, `forward`, `reload({ ignoreCache })`,
+     `stop`, `focus`, `state()`, `capture({ format, quality, scale })` (PNG /
+     JPEG bytes; `scale` output pixels per CSS pixel, above 0 and at most 4,
+     default the device pixels), `evaluate(script)` (an isolated world; the JSON
+     result, awaited if a promise) and `close()`; and, where
+     `webViewCapabilities()` says so, `raise()` / `lower()` / `setZOrder(n)` (a
+     new view starts on top; higher is above; `state().zOrder`),
+     `setZoom(0.25..5)` / `getZoom()`, `find(text, { forward, matchCase })` /
+     `stopFind()`, `openDevTools()` (code `not_allowed` unless the app's
+     DevTools are on) and `print()` (the OS print dialog); the boolean ones
+     answer `false` where unsupported. Events (`CustomEvent`s, the detail parsed
+     from laufey's JSON): `title`, `url`, `load`, `console`, `focus-change`,
+     `new-window`, `find-result` (`matches`, `activeMatch`), `context-menu`
+     (`x`, `y`, `linkUrl`, `imageUrl`, `selectionText`, `isEditable`,
+     `mediaType`), and `closed`, exactly once and last, after `close()` or when
+     the window closes (a window's close closes its views). On a closed view
+     `navigate` / `state` throw, `capture` / `evaluate` reject and the setters
+     do nothing. Refusals are `WebViewError`s with a `code`: `unsupported` (no
+     engine, or a laufey before API 58), `not_allowed_url`, `limit` (laufey's 32
+     views per window), `closed`, `invalid` (bad options, checked in DESKTOP_JS
+     and again in the op), `failed`, `not_allowed` (`openDevTools`), and for
+     `evaluate` `error` / `not_serializable`.
+     `Deno.desktop.webViewCapabilities()` reports `supported`, `engine`
+     (`"cef"`, `"wkwebview"`, `"webview2"`, `"webkitgtk"` or `null`), `capture`,
+     `evaluate`, `persistentPartitions`, `permissionPrompts`, `zOrder`, `zoom`,
+     `find`, `devTools`, `contextMenu`, `print` and `clipboard`. Plumbing:
+     `DesktopApi` methods (default: unsupported), the
+     `Deno_privateDesktopCreateWebView` method on `BrowserWindow` and
+     `op_desktop_webview_*` ops keyed by the view's id (kept out of workers,
+     except the capabilities), `DesktopEvent::WebView` (`webViewId`, `event`,
+     `detail`) through the event queue (a view's `console` events are dropped
+     like pointer motion when the queue is full, as a remote page can log
+     without bound), over laufey's `create_webview` / `WebView` API.
+     - User-facing note: a desktop window can embed a remote web page in a
+       native view with its own storage and no access to the app, and drive it
+       (navigate, evaluate, capture) from the app.
+     - Tests: `runtime/ops/desktop.rs` (the event's wire shape and kind, the
+       lossy console events, the capabilities and outcome shapes, the options'
+       parsing and every validation rule), `cli/rt_desktop`
+       `webview_command_numbers_match_laufey`,
+       `webview_capture_format_numbers_match_laufey`,
+       `webview_events_and_errors_pass_through`,
+       `webview_options_reach_laufey_unchanged`, DESKTOP_JS's
+       `desktop_js_installs_web_views` and contents list,
+       `tests/specs/run/desktop_ops_inert` (the new ops inert outside a desktop
+       app), `tests/unit/ops_test.ts` (the op counts), and the `webview` e2e
+       area (capabilities, load / title / url / console events, navigate and
+       back, `state()`, bounds and visibility, `evaluate`, `capture`, no
+       bindings in the view, stacking, capture timings and a `scale: 1`
+       snapshot's width, zoom, find, `openDevTools`' documented outcomes,
+       `print` present (never called: it opens a dialog), `contextMenu: "app"`,
+       the URL rules, invalid options, partitions that don't share storage, the
+       33rd view refused, close and a window's close).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -14053,7 +14124,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366) are what the prebuilt `libdenort` carries. The
+350, 351, 353, 355-361, 363-366, 368) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.
@@ -14101,9 +14172,11 @@ hit region noticing cursor warps, items 327 and 333; and, for runtime
 will-navigate and a re-issue token bound to the backend's own load, item 342,
 and CEF 156.0.28, item 356; and, for runtime 3.0.0-denext.22, API 57, title
 visibility and toolbar style and an accessory app's focused window brought to
-the front on macOS, item 361), at the commit pinned by `LAUFEY_SHA` in the
-workflow (or the `laufey_ref` input). The same commit is the `laufey` git
-dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 57, CEF 156.0.28).
+the front on macOS, item 361; and API 58, child web views, item 368, on laufey
+branch `feat/embedded-webview` until it lands), at the commit pinned by
+`LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The same commit is the
+`laufey` git dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 58, CEF
+156.0.28).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the
