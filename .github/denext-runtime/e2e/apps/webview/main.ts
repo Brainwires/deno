@@ -657,16 +657,6 @@ async function runSupported() {
     badFind && describeError(badFind),
   );
 
-  // --- DevTools: opened, or refused while the app's own are off ---
-  const devtools = await errorOf(() => view.openDevTools());
-  r.set("openDevTools", devtools ? describeError(devtools) : "opened");
-  r.check(
-    "openDevTools() opens or throws a documented code",
-    devtools === null || isWebViewError(devtools, "not_allowed") ||
-      (!caps.devTools && isWebViewError(devtools, "unsupported")),
-    devtools && describeError(devtools),
-  );
-
   // --- print: never called here (where the engine has it, it opens the
   // OS print dialog, which waits for a person) ---
   r.set("print", caps.print ? "supported, not called" : "unsupported");
@@ -744,13 +734,18 @@ async function runSupported() {
       }
       // Bring the app forward first: posted input goes to the frontmost
       // app (macOS) / the focused window.
-      await activate("E2E WebView Host");
+      const keyBeforeClick = await activate("E2E WebView Host");
       await sleep(300);
       const [ix, iy] = win.getInnerPosition();
       const [ox, oy] = win.getPosition();
       // The point in the view (its bounds start at 20, 20 in the page).
       const px = 20 + 160, py = 20 + 60;
-      r.set("pointerAt", { inner: [ix, iy], outer: [ox, oy], page: [px, py] });
+      r.set("pointerAt", {
+        inner: [ix, iy],
+        outer: [ox, oy],
+        page: [px, py],
+        hostKeyWindow: keyBeforeClick,
+      });
       // CEF's X window is the whole window: aim at it relative to its own
       // corner (its screen positions need not match the X server's). The
       // other engines take the screen point.
@@ -798,7 +793,7 @@ async function runSupported() {
       // The listeners go on after activate(): on Windows it presses Alt and
       // F24 to take the foreground, and those reach the host window, which
       // has the focus then.
-      await activate("E2E WebView Host");
+      const keyBeforeTyping = await activate("E2E WebView Host");
       typed.focus();
       if (caps.evaluate) {
         await typed.evaluate("document.getElementById('t').focus(), true")
@@ -810,7 +805,7 @@ async function runSupported() {
           "({ hasFocus: document.hasFocus(), active: document.activeElement && document.activeElement.id })",
         ).catch((e: unknown) => `error: ${describeError(e)}`)
         : null;
-      r.set("keyFocus", keyFocus);
+      r.set("keyFocus", { page: keyFocus, hostKeyWindow: keyBeforeTyping });
       win.addEventListener("keydown", onHostKey);
       win.addEventListener("keyup", onHostKey);
       await pressKeys(["K"]);
@@ -982,6 +977,18 @@ async function runSupported() {
     "closing them fires closed on each",
     extraClosed === extra.length,
     { extraClosed, of: extra.length },
+  );
+
+  // --- DevTools: opened, or refused while the app's own are off. Last
+  // before closing: an opened DevTools window comes in front of the host
+  // and takes the keyboard, so the input checks above run before it ---
+  const devtools = await errorOf(() => view.openDevTools());
+  r.set("openDevTools", devtools ? describeError(devtools) : "opened");
+  r.check(
+    "openDevTools() opens or throws a documented code",
+    devtools === null || isWebViewError(devtools, "not_allowed") ||
+      (!caps.devTools && isWebViewError(devtools, "unsupported")),
+    devtools && describeError(devtools),
   );
 
   // --- close ---
