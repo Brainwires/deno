@@ -14037,13 +14037,16 @@ where the changes are discussed.
        `ArrayBuffer`, typed array, `DataView`, `Blob` in call order; over
        `maxMessageSize` a `TypeError`; not open an `InvalidStateError`),
        `close`, events `open`, `message`, `bufferedamountlow`, `error`,
-       `closing`, `close`. Not implemented: media (`addTrack`, `addTransceiver`,
-       `getSenders` … return empty / throw `NotSupportedError`; phase 2),
-       `certificates` and `generateCertificate` (`NotSupportedError`),
-       `peerIdentity`, `RTCDtlsTransport` / `RTCIceTransport` objects, legacy
-       callback signatures, TCP ICE candidates (skipped), mDNS candidate
-       obfuscation for the local side (host candidates are literal addresses,
-       which is why they need the sys permission).
+       `closing`, `close`. `createOffer` / `createAnswer` resolve to plain,
+       editable `RTCSessionDescriptionInit` dictionaries (simple-peer edits the
+       offer's SDP). Data channel messages up to 256 KiB, as browsers negotiate
+       (the engine's default is RFC 8841's 64 KiB). Not implemented: media
+       (`addTrack`, `addTransceiver`, `getSenders` … return empty / throw
+       `NotSupportedError`; phase 2), `certificates` and `generateCertificate`
+       (`NotSupportedError`), `peerIdentity`, `RTCDtlsTransport` /
+       `RTCIceTransport` objects, legacy callback signatures, TCP ICE candidates
+       (skipped), mDNS candidate obfuscation for the local side (host candidates
+       are literal addresses, which is why they need the sys permission).
      - **Engine gaps worked around:** a negotiated channel created on a live
        association opens at once with no open event from the engine (the ext
        sends it); the selected candidate pair can't be read from the stats (the
@@ -14058,6 +14061,21 @@ where the changes are discussed.
        minimum rtc takes; 0.4.35 is younger than the hold), `unicase` 2.10,
        `zeroize` 1.9.1. Every new crates.io crate is at least 11 days old.
      - **Size:** BINARY_SIZE_PLACEHOLDER
+     - **Verified by hand** (biscuits, Linux x64; scripts not in the tree
+       because they download npm packages and browsers): against headless Chrome
+       stable, Playwright 1.63's Chromium and its WebKit (Safari's engine), each
+       with Deno offering and with the browser offering, with the browsers'
+       default mDNS host candidates: a text, a 1000-byte and a 64 KiB / 256 KiB
+       binary message echoed back, then 100 messages in order; all six pass (one
+       Chromium browser-offers run of five hung once, not reproduced). TURN
+       through pion/turn v4.1.1's example servers on 127.0.0.1 with
+       `iceTransportPolicy: "relay"`: UDP, TCP and TLS (`turns:`, a CA given
+       with `--cert`; an untrusted certificate is an `icecandidateerror` naming
+       the TLS error; with `--unsafely-ignore-certificate-errors` it connects),
+       also under `DENO_WEBRTC_LOOPBACK_ONLY=1`. npm: `simple-peer` 9.11.1 (two
+       peers in one process, trickle, data both ways) and `peerjs` 1.5.4 against
+       a local `peer` 1.0.2 server both work on the globals unchanged. Firefox
+       was not tested (none on the test host).
      - User-facing note: Deno programs can be WebRTC data channel peers
        (`new RTCPeerConnection()`), of browsers and of each other, with STUN and
        TURN, under the net permission.
