@@ -1969,7 +1969,7 @@
     );
   }
 
-  // Whether translated Deno args run a script file (`run … <file>`), not stdin.
+  // Whether translated Deno args run a script file (`run ... <file>`), not stdin.
   function runsScriptFile(denoArgs) {
     if (denoArgs[0] !== "run") return false;
     for (let i = 1; i < denoArgs.length; i++) {
