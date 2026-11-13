@@ -57,7 +57,7 @@ use denort::run::RunOptions;
 /// makes the failure mode obvious instead of "the desktop app silently won't
 /// launch".
 const _: () = assert!(
-  laufey::LAUFEY_API_VERSION == 57,
+  laufey::LAUFEY_API_VERSION == 58,
   "LAUFEY_API_VERSION mismatch: update this assert and the prebuilt backend release pin in cli/tools/desktop.rs when laufey bumps its API version",
 );
 
@@ -1847,6 +1847,136 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     laufey::Window::from_id(window_id).set_toolbar_style(style)
   }
 
+  // --- Embedded web views (laufey API 58) ---
+
+  fn webview_capabilities(
+    &self,
+  ) -> deno_runtime::ops::desktop::WebViewCapabilitiesInfo {
+    let c = laufey::webview_capabilities();
+    deno_runtime::ops::desktop::WebViewCapabilitiesInfo {
+      supported: c.supported(),
+      engine: if c.supported() {
+        c.engine().map(|e| e.name())
+      } else {
+        None
+      },
+      capture: c.capture(),
+      evaluate: c.evaluate(),
+      persistent_partitions: c.persistent_partitions(),
+      permission_prompts: c.permission_prompts(),
+    }
+  }
+
+  fn create_webview(
+    &self,
+    window_id: u32,
+    options: deno_runtime::ops::desktop::WebViewOptionsInfo,
+  ) -> Result<u32, &'static str> {
+    // The backend keeps the handler until the view's "closed" event, which
+    // may never come before the runtime is gone: it holds the queue weakly
+    // (as a binding's handler does), and never blocks the thread it is
+    // called on (try_send).
+    let tx = self.event_tx.downgrade();
+    laufey::create_webview(
+      window_id,
+      &laufey_webview_options(options),
+      move |event: laufey::WebViewEvent| {
+        if let Some(tx) = tx.upgrade() {
+          let _ = tx.try_send(webview_desktop_event(event));
+        }
+      },
+    )
+    .map(|view| view.id())
+    .map_err(|e| e.code())
+  }
+
+  fn webview_set_bounds(
+    &self,
+    webview_id: u32,
+    bounds: deno_runtime::ops::desktop::WebViewBoundsInfo,
+  ) -> bool {
+    laufey::WebView::from_id(webview_id)
+      .set_bounds(laufey_webview_bounds(bounds))
+  }
+
+  fn webview_set_visible(&self, webview_id: u32, visible: bool) -> bool {
+    laufey::WebView::from_id(webview_id).set_visible(visible)
+  }
+
+  fn webview_navigate(
+    &self,
+    webview_id: u32,
+    url: &str,
+  ) -> Result<(), &'static str> {
+    laufey::WebView::from_id(webview_id)
+      .navigate(url)
+      .map_err(|e| e.code())
+  }
+
+  fn webview_command(&self, webview_id: u32, command: u32) -> bool {
+    let view = laufey::WebView::from_id(webview_id);
+    match webview_command(command) {
+      Some(WebViewCommand::Back) => view.back(),
+      Some(WebViewCommand::Forward) => view.forward(),
+      Some(WebViewCommand::Reload { ignore_cache }) => {
+        view.reload(ignore_cache)
+      }
+      Some(WebViewCommand::Stop) => view.stop(),
+      Some(WebViewCommand::Focus) => view.focus(),
+      None => false,
+    }
+  }
+
+  fn webview_state(&self, webview_id: u32) -> Option<String> {
+    laufey::WebView::from_id(webview_id).state()
+  }
+
+  fn webview_evaluate(
+    &self,
+    webview_id: u32,
+    script: String,
+  ) -> deno_runtime::ops::desktop::DesktopFuture<
+    Result<String, (&'static str, String)>,
+  > {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    laufey::WebView::from_id(webview_id).evaluate(&script, move |result| {
+      let _ = tx.send(result.map_err(|f| (f.code, f.message)));
+    });
+    Box::pin(async move {
+      rx.await.unwrap_or_else(|_| Err(webview_request_dropped()))
+    })
+  }
+
+  fn webview_capture(
+    &self,
+    webview_id: u32,
+    format: u32,
+    quality: u8,
+  ) -> deno_runtime::ops::desktop::DesktopFuture<
+    Result<Vec<u8>, (&'static str, String)>,
+  > {
+    let Some(format) = laufey_capture_format(format) else {
+      return Box::pin(async {
+        Err(("invalid", "format must be png or jpeg".to_string()))
+      });
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    laufey::WebView::from_id(webview_id).capture(
+      format,
+      quality.min(100),
+      move |result| {
+        let _ = tx.send(result.map_err(|f| (f.code, f.message)));
+      },
+    );
+    Box::pin(async move {
+      rx.await.unwrap_or_else(|_| Err(webview_request_dropped()))
+    })
+  }
+
+  fn webview_close(&self, webview_id: u32) -> bool {
+    laufey::WebView::from_id(webview_id).close()
+  }
+
   fn set_traffic_light_position(
     &self,
     window_id: u32,
@@ -2371,6 +2501,87 @@ fn laufey_toolbar_style(style: i32) -> Option<laufey::ToolbarStyle> {
     3 => laufey::ToolbarStyle::Expanded,
     _ => return None,
   })
+}
+
+/// A web view's options, as laufey takes them (validated by the op).
+fn laufey_webview_options(
+  options: deno_runtime::ops::desktop::WebViewOptionsInfo,
+) -> laufey::WebViewOptions {
+  laufey::WebViewOptions {
+    url: options.url,
+    bounds: laufey_webview_bounds(options.bounds),
+    partition: options.partition,
+    visible: options.visible,
+    allow_popups: options.allow_popups,
+    downloads: options.downloads,
+    permissions: options.permissions,
+    user_agent: options.user_agent,
+  }
+}
+
+fn laufey_webview_bounds(
+  b: deno_runtime::ops::desktop::WebViewBoundsInfo,
+) -> laufey::WebViewBounds {
+  laufey::WebViewBounds {
+    x: b.x,
+    y: b.y,
+    width: b.width,
+    height: b.height,
+  }
+}
+
+/// A laufey web view event as the runtime's: the event name DESKTOP_JS
+/// dispatches on the `Deno.WebView` and its detail JSON, passed through.
+fn webview_desktop_event(
+  event: laufey::WebViewEvent,
+) -> deno_runtime::ops::desktop::DesktopEvent {
+  deno_runtime::ops::desktop::DesktopEvent::WebView {
+    web_view_id: event.web_view_id,
+    event: event.kind.name().to_string(),
+    detail: event.detail_json,
+  }
+}
+
+/// What `op_desktop_webview_command` asks (`LAUFEY_WEBVIEW_COMMAND_*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebViewCommand {
+  Back,
+  Forward,
+  Reload { ignore_cache: bool },
+  Stop,
+  Focus,
+}
+
+fn webview_command(command: u32) -> Option<WebViewCommand> {
+  use deno_runtime::ops::desktop as d;
+  Some(match command {
+    d::WEBVIEW_COMMAND_BACK => WebViewCommand::Back,
+    d::WEBVIEW_COMMAND_FORWARD => WebViewCommand::Forward,
+    d::WEBVIEW_COMMAND_RELOAD => WebViewCommand::Reload {
+      ignore_cache: false,
+    },
+    d::WEBVIEW_COMMAND_RELOAD_IGNORE_CACHE => {
+      WebViewCommand::Reload { ignore_cache: true }
+    }
+    d::WEBVIEW_COMMAND_STOP => WebViewCommand::Stop,
+    d::WEBVIEW_COMMAND_FOCUS => WebViewCommand::Focus,
+    _ => return None,
+  })
+}
+
+/// `LAUFEY_WEBVIEW_CAPTURE_*` (what DESKTOP_JS passes) to laufey's
+/// `CaptureFormat`.
+fn laufey_capture_format(format: u32) -> Option<laufey::CaptureFormat> {
+  Some(match format {
+    0 => laufey::CaptureFormat::Png,
+    1 => laufey::CaptureFormat::Jpeg,
+    _ => return None,
+  })
+}
+
+/// An evaluate / capture whose callback laufey dropped without calling it.
+fn webview_request_dropped() -> (&'static str, String) {
+  ("failed", "the backend dropped the request".to_string())
 }
 
 /// laufey's `LAUFEY_BACKDROP_*` / `LAUFEY_VIBRANCY_*` numbers (what
@@ -4624,6 +4835,124 @@ mod tests {
     assert_eq!(super::laufey_toolbar_style(3), Some(T::Expanded));
     assert_eq!(super::laufey_toolbar_style(4), None);
     assert_eq!(super::laufey_toolbar_style(-1), None);
+  }
+
+  #[test]
+  fn webview_command_numbers_match_laufey() {
+    // LAUFEY_WEBVIEW_COMMAND_*: DESKTOP_JS's WEBVIEW_COMMANDS.
+    use super::WebViewCommand as C;
+    use super::webview_command;
+    assert_eq!(webview_command(1), Some(C::Back));
+    assert_eq!(webview_command(2), Some(C::Forward));
+    assert_eq!(
+      webview_command(3),
+      Some(C::Reload {
+        ignore_cache: false
+      })
+    );
+    assert_eq!(webview_command(4), Some(C::Reload { ignore_cache: true }));
+    assert_eq!(webview_command(5), Some(C::Stop));
+    assert_eq!(webview_command(6), Some(C::Focus));
+    assert_eq!(webview_command(0), None);
+    assert_eq!(webview_command(7), None);
+  }
+
+  #[test]
+  fn webview_capture_format_numbers_match_laufey() {
+    // LAUFEY_WEBVIEW_CAPTURE_*: DESKTOP_JS passes 0 for png, 1 for jpeg.
+    assert!(matches!(
+      super::laufey_capture_format(0),
+      Some(laufey::CaptureFormat::Png)
+    ));
+    assert!(matches!(
+      super::laufey_capture_format(1),
+      Some(laufey::CaptureFormat::Jpeg)
+    ));
+    assert!(super::laufey_capture_format(2).is_none());
+  }
+
+  #[test]
+  fn webview_events_and_errors_pass_through() {
+    // The event names DESKTOP_JS dispatches and the codes its WebViewError
+    // carries are laufey's own.
+    use deno_runtime::ops::desktop::DesktopEvent;
+    use laufey::WebViewEventKind as K;
+    for (kind, name) in [
+      (K::Title, "title"),
+      (K::Url, "url"),
+      (K::Load, "load"),
+      (K::Console, "console"),
+      (K::FocusChange, "focus-change"),
+      (K::NewWindow, "new-window"),
+      (K::Closed, "closed"),
+    ] {
+      let ev = super::webview_desktop_event(laufey::WebViewEvent {
+        web_view_id: 9,
+        kind,
+        detail_json: "{\"x\":1}".to_string(),
+      });
+      match ev {
+        DesktopEvent::WebView {
+          web_view_id,
+          event,
+          detail,
+        } => {
+          assert_eq!(web_view_id, 9);
+          assert_eq!(event, name);
+          assert_eq!(detail, "{\"x\":1}");
+        }
+        _ => panic!("not a web view event"),
+      }
+    }
+    use laufey::WebViewError as E;
+    for (error, code) in [
+      (E::Unsupported, "unsupported"),
+      (E::NotAllowedUrl, "not_allowed_url"),
+      (E::Limit, "limit"),
+      (E::NoWindow, "no_window"),
+      (E::Invalid, "invalid"),
+      (E::Closed, "closed"),
+      (E::Failed, "failed"),
+    ] {
+      assert_eq!(error.code(), code);
+    }
+  }
+
+  #[test]
+  fn webview_options_reach_laufey_unchanged() {
+    use deno_runtime::ops::desktop::WebViewBoundsInfo;
+    use deno_runtime::ops::desktop::WebViewOptionsInfo;
+    let o = super::laufey_webview_options(WebViewOptionsInfo {
+      url: "https://example.com/".into(),
+      bounds: WebViewBoundsInfo {
+        x: 1.0,
+        y: 2.0,
+        width: 3.0,
+        height: 4.0,
+      },
+      partition: Some("ephemeral:t".into()),
+      visible: Some(false),
+      allow_popups: Some("deny".into()),
+      downloads: Some("ask".into()),
+      permissions: Some("ask".into()),
+      user_agent: Some("UA".into()),
+    });
+    assert_eq!(o.url, "https://example.com/");
+    assert_eq!(
+      o.bounds,
+      laufey::WebViewBounds {
+        x: 1.0,
+        y: 2.0,
+        width: 3.0,
+        height: 4.0
+      }
+    );
+    assert_eq!(o.partition.as_deref(), Some("ephemeral:t"));
+    assert_eq!(o.visible, Some(false));
+    assert_eq!(o.allow_popups.as_deref(), Some("deny"));
+    assert_eq!(o.downloads.as_deref(), Some("ask"));
+    assert_eq!(o.permissions.as_deref(), Some("ask"));
+    assert_eq!(o.user_agent.as_deref(), Some("UA"));
   }
 
   #[test]

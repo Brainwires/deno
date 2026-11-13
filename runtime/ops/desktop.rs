@@ -571,6 +571,16 @@ pub enum DesktopEvent {
   NotificationClose { notification_id: u32 },
   #[serde(rename_all = "camelCase")]
   NotificationError { notification_id: u32 },
+  /// An event of an embedded web view (laufey API 58): `event` is "title",
+  /// "url", "load", "console", "focus-change", "new-window" or "closed"
+  /// (the last one for the id), `detail` its JSON text, which DESKTOP_JS
+  /// parses into the `CustomEvent`'s detail on the `Deno.WebView`.
+  #[serde(rename_all = "camelCase")]
+  WebView {
+    web_view_id: u32,
+    event: String,
+    detail: String,
+  },
 }
 
 /// How many events may wait in the desktop event queue before the ones that
@@ -620,6 +630,11 @@ impl DesktopEvent {
   fn delivery(&self) -> EventDelivery {
     match self {
       DesktopEvent::MouseMove { .. } | DesktopEvent::Wheel { .. } => {
+        EventDelivery::Lossy
+      }
+      // A web view shows a remote page, which can log as fast as it likes:
+      // its console messages must not grow the queue without bound.
+      DesktopEvent::WebView { event, .. } if event == "console" => {
         EventDelivery::Lossy
       }
       DesktopEvent::BindCall { .. } => EventDelivery::Refusable,
@@ -1678,6 +1693,248 @@ pub struct WindowCapabilitiesInfo {
   pub toolbar_style: bool,
 }
 
+/// `Deno.desktop.webViewCapabilities()` (laufey API 58): whether windows can
+/// hold embedded web views here, and what they can do.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebViewCapabilitiesInfo {
+  /// `BrowserWindow.createWebView()` works.
+  pub supported: bool,
+  /// `"cef"`, `"wkwebview"`, `"webview2"` or `"webkitgtk"`; `None` (null)
+  /// when unsupported.
+  pub engine: Option<&'static str>,
+  /// `WebView.capture()` works.
+  pub capture: bool,
+  /// `WebView.evaluate()` works.
+  pub evaluate: bool,
+  /// A partition that is not `"ephemeral"` / `"ephemeral:*"` is kept on
+  /// disk (else every partition lives in memory).
+  pub persistent_partitions: bool,
+  /// `permissions: "ask"` prompts (else it refuses like `"deny"`).
+  pub permission_prompts: bool,
+}
+
+/// A web view's place in its window: CSS pixels from the top-left of the
+/// window's page viewport.
+#[derive(
+  Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize,
+)]
+pub struct WebViewBoundsInfo {
+  pub x: f64,
+  pub y: f64,
+  pub width: f64,
+  pub height: f64,
+}
+
+/// `BrowserWindow.createWebView(options)` (laufey API 58), as DESKTOP_JS
+/// passes it (validated again by [`validate_webview_options`]).
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebViewOptionsInfo {
+  pub url: String,
+  pub bounds: WebViewBoundsInfo,
+  pub partition: Option<String>,
+  pub visible: Option<bool>,
+  /// `"deny"`, `"same-view"` or `"browser"`.
+  pub allow_popups: Option<String>,
+  /// `"deny"`, `"ask"` or `"browser"`.
+  pub downloads: Option<String>,
+  /// `"deny"` or `"ask"`.
+  pub permissions: Option<String>,
+  pub user_agent: Option<String>,
+}
+
+/// The web view error codes (`WebViewError.code` in DESKTOP_JS).
+pub const WEBVIEW_UNSUPPORTED: &str = "unsupported";
+pub const WEBVIEW_NOT_ALLOWED_URL: &str = "not_allowed_url";
+pub const WEBVIEW_INVALID: &str = "invalid";
+pub const WEBVIEW_CLOSED: &str = "closed";
+pub const WEBVIEW_FAILED: &str = "failed";
+
+/// The message a web view error `code` from the backend carries (the codes
+/// of laufey's `WebViewError`).
+pub fn webview_error_message(code: &str) -> &'static str {
+  match code {
+    "unsupported" => {
+      "embedded web views are not supported by this desktop backend"
+    }
+    "not_allowed_url" => "a web view loads only http: and https: URLs",
+    "limit" => "this window holds as many web views as it can",
+    "no_window" | "closed" => "the window or web view is closed",
+    "invalid" => "the web view options were refused",
+    _ => "the web view engine failed",
+  }
+}
+
+/// Whether a web view may load `url` (create / navigate): `http:` and
+/// `https:` only, and nothing laufey's C strings can't carry.
+pub fn webview_url_allowed(url: &str) -> bool {
+  if url.contains('\0') {
+    return false;
+  }
+  match deno_core::url::Url::parse(url) {
+    Ok(parsed) => matches!(parsed.scheme(), "http" | "https"),
+    Err(_) => false,
+  }
+}
+
+/// Whether `name` is a web view partition name: 1 to 64 characters of
+/// `[A-Za-z0-9._:-]`, the first alphanumeric.
+pub fn webview_partition_valid(name: &str) -> bool {
+  let bytes = name.as_bytes();
+  !bytes.is_empty()
+    && bytes.len() <= 64
+    && bytes[0].is_ascii_alphanumeric()
+    && bytes.iter().all(|b| {
+      b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-')
+    })
+}
+
+/// Finite bounds with a size that is not negative.
+pub fn webview_bounds_valid(b: &WebViewBoundsInfo) -> bool {
+  [b.x, b.y, b.width, b.height].iter().all(|v| v.is_finite())
+    && b.width >= 0.0
+    && b.height >= 0.0
+}
+
+/// Checks what DESKTOP_JS already checked, for a caller that reaches the op
+/// through `core.ops`: the error code (`invalid`, `not_allowed_url`) and its
+/// message.
+pub fn validate_webview_options(
+  options: &WebViewOptionsInfo,
+) -> Result<(), (&'static str, &'static str)> {
+  fn one_of(
+    value: &Option<String>,
+    allowed: &[&str],
+    message: &'static str,
+  ) -> Result<(), (&'static str, &'static str)> {
+    match value {
+      Some(v) if !allowed.contains(&v.as_str()) => {
+        Err((WEBVIEW_INVALID, message))
+      }
+      _ => Ok(()),
+    }
+  }
+  if !webview_bounds_valid(&options.bounds) {
+    return Err((
+      WEBVIEW_INVALID,
+      "bounds must be finite numbers with a width and height of 0 or more",
+    ));
+  }
+  if let Some(partition) = &options.partition
+    && !webview_partition_valid(partition)
+  {
+    return Err((
+      WEBVIEW_INVALID,
+      "partition must be 1 to 64 characters of [A-Za-z0-9._:-], the first alphanumeric",
+    ));
+  }
+  one_of(
+    &options.allow_popups,
+    &["deny", "same-view", "browser"],
+    "allowPopups must be \"deny\", \"same-view\" or \"browser\"",
+  )?;
+  one_of(
+    &options.downloads,
+    &["deny", "ask", "browser"],
+    "downloads must be \"deny\", \"ask\" or \"browser\"",
+  )?;
+  one_of(
+    &options.permissions,
+    &["deny", "ask"],
+    "permissions must be \"deny\" or \"ask\"",
+  )?;
+  if let Some(ua) = &options.user_agent
+    && ua.contains(['\0', '\r', '\n'])
+  {
+    return Err((
+      WEBVIEW_INVALID,
+      "userAgent must not contain NUL, CR or LF characters",
+    ));
+  }
+  if !webview_url_allowed(&options.url) {
+    return Err((
+      WEBVIEW_NOT_ALLOWED_URL,
+      webview_error_message(WEBVIEW_NOT_ALLOWED_URL),
+    ));
+  }
+  Ok(())
+}
+
+/// What the web view ops answer with: `{ ok: true, id? }` or
+/// `{ ok: false, code, message }`, which DESKTOP_JS turns into a
+/// `WebViewError` (never an exception from the op).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebViewOutcome {
+  pub ok: bool,
+  /// The new web view's id (`createWebView`).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub id: Option<u32>,
+  /// `evaluate`: the result as JSON text.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub value: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub code: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub message: Option<String>,
+}
+
+impl WebViewOutcome {
+  pub fn ok() -> Self {
+    Self {
+      ok: true,
+      id: None,
+      value: None,
+      code: None,
+      message: None,
+    }
+  }
+
+  pub fn error(code: &str, message: impl Into<String>) -> Self {
+    Self {
+      ok: false,
+      id: None,
+      value: None,
+      code: Some(code.to_string()),
+      message: Some(message.into()),
+    }
+  }
+
+  /// A backend error code, with its [`webview_error_message`]. laufey's
+  /// `no_window` (the window is gone) is the public `closed`.
+  pub fn code(code: &str) -> Self {
+    let public = if code == "no_window" {
+      WEBVIEW_CLOSED
+    } else {
+      code
+    };
+    Self::error(public, webview_error_message(code))
+  }
+}
+
+/// What `WebView.capture()`'s op answers with: `{ ok: true, data }` (the
+/// image bytes) or `{ ok: false, code, message }`.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebViewCaptureOutcome {
+  pub ok: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub data: Option<deno_core::ToJsBuffer>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub code: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub message: Option<String>,
+}
+
+/// `LAUFEY_WEBVIEW_COMMAND_*`: what `op_desktop_webview_command` takes.
+pub const WEBVIEW_COMMAND_BACK: u32 = 1;
+pub const WEBVIEW_COMMAND_FORWARD: u32 = 2;
+pub const WEBVIEW_COMMAND_RELOAD: u32 = 3;
+pub const WEBVIEW_COMMAND_RELOAD_IGNORE_CACHE: u32 = 4;
+pub const WEBVIEW_COMMAND_STOP: u32 = 5;
+pub const WEBVIEW_COMMAND_FOCUS: u32 = 6;
+
 /// `Deno.Tray.capabilities()` (laufey API 50): which tray events and data
 /// this backend delivers on this OS / session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
@@ -2668,6 +2925,89 @@ pub trait DesktopApi: Send + Sync + 'static {
   /// laufey `LAUFEY_TOOLBAR_STYLE_*`: 0 automatic, 1 unified, 2 unified
   /// compact, 3 expanded (API 57, macOS 11+).
   fn set_toolbar_style(&self, _window_id: u32, _style: i32) -> bool {
+    false
+  }
+
+  // --- Embedded web views (laufey API 58). The defaults are a backend
+  // without them: `createWebView` refuses with "unsupported", so no web view
+  // id ever exists for the rest.
+
+  fn webview_capabilities(&self) -> WebViewCapabilitiesInfo {
+    WebViewCapabilitiesInfo::default()
+  }
+  /// Create a web view in `window_id`; its events go to the event queue as
+  /// [`DesktopEvent::WebView`], `"closed"` last. The id (> 0), or the error
+  /// code: "unsupported", "not_allowed_url", "limit", "no_window",
+  /// "invalid", "closed", "failed".
+  fn create_webview(
+    &self,
+    _window_id: u32,
+    _options: WebViewOptionsInfo,
+  ) -> Result<u32, &'static str> {
+    Err(WEBVIEW_UNSUPPORTED)
+  }
+  /// False for an unknown or closed id.
+  fn webview_set_bounds(
+    &self,
+    _webview_id: u32,
+    _bounds: WebViewBoundsInfo,
+  ) -> bool {
+    false
+  }
+  fn webview_set_visible(&self, _webview_id: u32, _visible: bool) -> bool {
+    false
+  }
+  /// The error code: "not_allowed_url", "closed", "invalid", "failed".
+  fn webview_navigate(
+    &self,
+    _webview_id: u32,
+    _url: &str,
+  ) -> Result<(), &'static str> {
+    Err(WEBVIEW_UNSUPPORTED)
+  }
+  /// `WEBVIEW_COMMAND_*`: back, forward, reload, reload ignoring the cache,
+  /// stop, focus. False for an unknown id or command.
+  fn webview_command(&self, _webview_id: u32, _command: u32) -> bool {
+    false
+  }
+  /// The web view's state as JSON (`WebView.state()`), `None` for an
+  /// unknown id.
+  fn webview_state(&self, _webview_id: u32) -> Option<String> {
+    None
+  }
+  /// Run `script` in the page's isolated world: the result as JSON text, or
+  /// the error code ("error", "not_serializable", "closed", "failed", …) and
+  /// message. Resolves exactly once.
+  fn webview_evaluate(
+    &self,
+    _webview_id: u32,
+    _script: String,
+  ) -> DesktopFuture<Result<String, (&'static str, String)>> {
+    Box::pin(async {
+      Err((
+        WEBVIEW_UNSUPPORTED,
+        webview_error_message(WEBVIEW_UNSUPPORTED).to_string(),
+      ))
+    })
+  }
+  /// What the web view shows now: `format` 0 PNG, 1 JPEG (`quality` 0..100);
+  /// the image bytes, or the error code and message.
+  fn webview_capture(
+    &self,
+    _webview_id: u32,
+    _format: u32,
+    _quality: u8,
+  ) -> DesktopFuture<Result<Vec<u8>, (&'static str, String)>> {
+    Box::pin(async {
+      Err((
+        WEBVIEW_UNSUPPORTED,
+        webview_error_message(WEBVIEW_UNSUPPORTED).to_string(),
+      ))
+    })
+  }
+  /// Close it (its "closed" event follows, maybe later). False for an
+  /// unknown id.
+  fn webview_close(&self, _webview_id: u32) -> bool {
     false
   }
   fn set_traffic_light_position(
@@ -3772,6 +4112,18 @@ impl BrowserWindow {
     self.api.set_toolbar_style(self.window_id, style)
   }
 
+  /// `BrowserWindow.createWebView(options)` (laufey API 58): the outcome,
+  /// never an exception for a refusal (DESKTOP_JS throws the
+  /// `WebViewError`).
+  #[serde]
+  #[symbol("Deno_privateDesktopCreateWebView")]
+  fn create_web_view(
+    &self,
+    #[serde] options: WebViewOptionsInfo,
+  ) -> WebViewOutcome {
+    create_webview_outcome(self.api.as_ref(), self.window_id, options)
+  }
+
   #[fast]
   #[symbol("Deno_privateDesktopWindowButtonPosition")]
   fn window_button_position(
@@ -4694,6 +5046,196 @@ fn op_desktop_window_capabilities(
     .try_borrow::<Arc<dyn DesktopApi>>()
     .map(|api| api.window_capabilities())
     .unwrap_or_default()
+}
+
+/// `BrowserWindow.createWebView()`'s work: validate, then ask the backend.
+fn create_webview_outcome(
+  api: &dyn DesktopApi,
+  window_id: u32,
+  options: WebViewOptionsInfo,
+) -> WebViewOutcome {
+  if let Err((code, message)) = validate_webview_options(&options) {
+    return WebViewOutcome::error(code, message);
+  }
+  if api.is_closed(window_id) {
+    return WebViewOutcome::error(WEBVIEW_CLOSED, "the window is closed");
+  }
+  match api.create_webview(window_id, options) {
+    Ok(id) => WebViewOutcome {
+      id: Some(id),
+      ..WebViewOutcome::ok()
+    },
+    Err(code) => WebViewOutcome::code(code),
+  }
+}
+
+/// `Deno.desktop.webViewCapabilities()` (laufey API 58).
+#[op2]
+#[serde]
+fn op_desktop_webview_capabilities(
+  state: &mut OpState,
+) -> WebViewCapabilitiesInfo {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .map(|api| api.webview_capabilities())
+    .unwrap_or_default()
+}
+
+/// `WebView.setBounds()`: false for an unknown id or bounds that aren't
+/// finite (DESKTOP_JS refuses those first).
+#[op2(fast)]
+fn op_desktop_webview_set_bounds(
+  state: &mut OpState,
+  #[smi] webview_id: u32,
+  x: f64,
+  y: f64,
+  width: f64,
+  height: f64,
+) -> bool {
+  let bounds = WebViewBoundsInfo {
+    x,
+    y,
+    width,
+    height,
+  };
+  webview_bounds_valid(&bounds)
+    && state
+      .try_borrow::<Arc<dyn DesktopApi>>()
+      .is_some_and(|api| api.webview_set_bounds(webview_id, bounds))
+}
+
+/// `WebView.setVisible()`.
+#[op2(fast)]
+fn op_desktop_webview_set_visible(
+  state: &mut OpState,
+  #[smi] webview_id: u32,
+  visible: bool,
+) -> bool {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .is_some_and(|api| api.webview_set_visible(webview_id, visible))
+}
+
+/// `WebView.navigate(url)`: the outcome (`not_allowed_url`, `closed`, …).
+#[op2]
+#[serde]
+fn op_desktop_webview_navigate(
+  state: &mut OpState,
+  #[smi] webview_id: u32,
+  #[string] url: &str,
+) -> WebViewOutcome {
+  if !webview_url_allowed(url) {
+    return WebViewOutcome::code(WEBVIEW_NOT_ALLOWED_URL);
+  }
+  let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() else {
+    return WebViewOutcome::code(WEBVIEW_UNSUPPORTED);
+  };
+  match api.webview_navigate(webview_id, url) {
+    Ok(()) => WebViewOutcome::ok(),
+    Err(code) => WebViewOutcome::code(code),
+  }
+}
+
+/// `WebView.back()` / `forward()` / `reload()` / `stop()` / `focus()`
+/// (`WEBVIEW_COMMAND_*`).
+#[op2(fast)]
+fn op_desktop_webview_command(
+  state: &mut OpState,
+  #[smi] webview_id: u32,
+  #[smi] command: u32,
+) -> bool {
+  (WEBVIEW_COMMAND_BACK..=WEBVIEW_COMMAND_FOCUS).contains(&command)
+    && state
+      .try_borrow::<Arc<dyn DesktopApi>>()
+      .is_some_and(|api| api.webview_command(webview_id, command))
+}
+
+/// `WebView.state()`: its JSON, or null for an unknown id.
+#[op2]
+#[string]
+fn op_desktop_webview_state(
+  state: &mut OpState,
+  #[smi] webview_id: u32,
+) -> Option<String> {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .and_then(|api| api.webview_state(webview_id))
+}
+
+/// `WebView.evaluate(script)`: `{ ok, value }` (the result's JSON text) or
+/// the error outcome (`error`, `not_serializable`, `closed`, …).
+#[op2]
+#[serde]
+async fn op_desktop_webview_evaluate(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  #[smi] webview_id: u32,
+  #[string] script: String,
+) -> WebViewOutcome {
+  if script.contains('\0') {
+    return WebViewOutcome::error(
+      WEBVIEW_INVALID,
+      "the script must not contain a NUL character",
+    );
+  }
+  let Some(api) = desktop_api(&state) else {
+    return WebViewOutcome::code(WEBVIEW_UNSUPPORTED);
+  };
+  match api.webview_evaluate(webview_id, script).await {
+    Ok(json) => WebViewOutcome {
+      value: Some(json),
+      ..WebViewOutcome::ok()
+    },
+    Err((code, message)) => WebViewOutcome::error(code, message),
+  }
+}
+
+/// `WebView.capture({ format, quality })`: `format` 0 PNG, 1 JPEG.
+#[op2]
+#[serde]
+async fn op_desktop_webview_capture(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  #[smi] webview_id: u32,
+  #[smi] format: u32,
+  #[smi] quality: u32,
+) -> WebViewCaptureOutcome {
+  let refused = |code: &str, message: String| WebViewCaptureOutcome {
+    ok: false,
+    data: None,
+    code: Some(code.to_string()),
+    message: Some(message),
+  };
+  if format > 1 || quality > 100 {
+    return refused(
+      WEBVIEW_INVALID,
+      "format must be png or jpeg, quality 0 to 100".to_string(),
+    );
+  }
+  let Some(api) = desktop_api(&state) else {
+    return refused(
+      WEBVIEW_UNSUPPORTED,
+      webview_error_message(WEBVIEW_UNSUPPORTED).to_string(),
+    );
+  };
+  match api.webview_capture(webview_id, format, quality as u8).await {
+    Ok(bytes) => WebViewCaptureOutcome {
+      ok: true,
+      data: Some(deno_core::ToJsBuffer::from(bytes)),
+      code: None,
+      message: None,
+    },
+    Err((code, message)) => refused(code, message),
+  }
+}
+
+/// `WebView.close()`: false for an unknown id.
+#[op2(fast)]
+fn op_desktop_webview_close(
+  state: &mut OpState,
+  #[smi] webview_id: u32,
+) -> bool {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .is_some_and(|api| api.webview_close(webview_id))
 }
 
 /// `Deno.Tray.capabilities()` (laufey API 50).
@@ -6965,6 +7507,15 @@ deno_core::extension!(
     op_desktop_set_will_navigate,
     op_desktop_answer_will_navigate,
     op_desktop_set_app_menu,
+    op_desktop_webview_capabilities,
+    op_desktop_webview_set_bounds,
+    op_desktop_webview_set_visible,
+    op_desktop_webview_navigate,
+    op_desktop_webview_command,
+    op_desktop_webview_state,
+    op_desktop_webview_evaluate,
+    op_desktop_webview_capture,
+    op_desktop_webview_close,
   ],
   objects = [BrowserWindow, Dock, Tray, Notification],
 );
@@ -7985,6 +8536,14 @@ mod tests {
         id: "".into()
       }),
       "applicationMenuClick"
+    );
+    assert_eq!(
+      kind_of(DesktopEvent::WebView {
+        web_view_id: 0,
+        event: "closed".into(),
+        detail: "{}".into(),
+      }),
+      "webView"
     );
     assert_eq!(
       kind_of(DesktopEvent::WillNavigate {
@@ -9998,5 +10557,365 @@ mod tests {
       .expect("woken")
       .unwrap();
     assert!(matches!(got, Some(DesktopEvent::PageLoad { window_id: 7 })));
+  }
+
+  #[test]
+  fn webview_event_wire_shape() {
+    use super::DesktopEvent;
+    let v = serde_json::to_value(DesktopEvent::WebView {
+      web_view_id: 4,
+      event: "focus-change".to_string(),
+      detail: r#"{"focused":true}"#.to_string(),
+    })
+    .unwrap();
+    // DESKTOP_JS switches on "webView" and parses `detail` itself.
+    assert_eq!(
+      v,
+      json!({
+        "kind": "webView",
+        "webViewId": 4,
+        "event": "focus-change",
+        "detail": "{\"focused\":true}",
+      })
+    );
+  }
+
+  #[test]
+  fn webview_console_events_are_lossy_the_rest_always_delivered() {
+    use super::DesktopEvent;
+    use super::EventDelivery;
+    let ev = |event: &str| DesktopEvent::WebView {
+      web_view_id: 1,
+      event: event.to_string(),
+      detail: "{}".to_string(),
+    };
+    assert_eq!(ev("console").delivery(), EventDelivery::Lossy);
+    for event in [
+      "title",
+      "url",
+      "load",
+      "focus-change",
+      "new-window",
+      "closed",
+    ] {
+      assert_eq!(ev(event).delivery(), EventDelivery::Always, "{event}");
+    }
+    // Two web view events never coalesce.
+    let mut first = ev("load");
+    assert!(first.coalesce(ev("load")).is_some());
+  }
+
+  #[test]
+  fn webview_capabilities_wire_shape() {
+    use super::WebViewCapabilitiesInfo;
+    assert_eq!(
+      serde_json::to_value(WebViewCapabilitiesInfo::default()).unwrap(),
+      json!({
+        "supported": false,
+        "engine": null,
+        "capture": false,
+        "evaluate": false,
+        "persistentPartitions": false,
+        "permissionPrompts": false,
+      })
+    );
+    let caps = WebViewCapabilitiesInfo {
+      supported: true,
+      engine: Some("cef"),
+      capture: true,
+      evaluate: true,
+      persistent_partitions: true,
+      permission_prompts: false,
+    };
+    let v = serde_json::to_value(caps).unwrap();
+    assert_eq!(v["engine"], "cef");
+    assert_eq!(v["persistentPartitions"], true);
+  }
+
+  #[test]
+  fn webview_options_parse_camel_case() {
+    use super::WebViewBoundsInfo;
+    use super::WebViewOptionsInfo;
+    let options: WebViewOptionsInfo = serde_json::from_value(json!({
+      "url": "https://example.com/",
+      "bounds": { "x": 1, "y": 2.5, "width": 300, "height": 200 },
+      "partition": "ephemeral:t",
+      "visible": false,
+      "allowPopups": "same-view",
+      "downloads": "ask",
+      "permissions": "deny",
+      "userAgent": "UA",
+    }))
+    .unwrap();
+    assert_eq!(
+      options.bounds,
+      WebViewBoundsInfo {
+        x: 1.0,
+        y: 2.5,
+        width: 300.0,
+        height: 200.0
+      }
+    );
+    assert_eq!(options.allow_popups.as_deref(), Some("same-view"));
+    assert_eq!(options.user_agent.as_deref(), Some("UA"));
+    assert_eq!(options.visible, Some(false));
+    let bare: WebViewOptionsInfo = serde_json::from_value(json!({
+      "url": "http://127.0.0.1:8000/",
+      "bounds": { "x": 0, "y": 0, "width": 0, "height": 0 },
+    }))
+    .unwrap();
+    assert!(bare.partition.is_none() && bare.visible.is_none());
+  }
+
+  #[test]
+  fn webview_options_validation() {
+    use super::WebViewBoundsInfo;
+    use super::WebViewOptionsInfo;
+    use super::validate_webview_options;
+    let ok = WebViewOptionsInfo {
+      url: "https://example.com/a?b#c".into(),
+      bounds: WebViewBoundsInfo {
+        x: -10.0,
+        y: 5.5,
+        width: 100.0,
+        height: 0.0,
+      },
+      ..Default::default()
+    };
+    assert_eq!(validate_webview_options(&ok), Ok(()));
+    let code =
+      |o: WebViewOptionsInfo| validate_webview_options(&o).err().map(|e| e.0);
+
+    // URLs: http(s) only.
+    for url in [
+      "http://127.0.0.1:1234/",
+      "HTTPS://EXAMPLE.COM/",
+      "https://example.com/",
+    ] {
+      assert_eq!(
+        code(WebViewOptionsInfo {
+          url: url.into(),
+          ..ok.clone()
+        }),
+        None,
+        "{url}"
+      );
+    }
+    for url in [
+      "file:///etc/hosts",
+      "javascript:1",
+      "data:text/html,x",
+      "about:blank",
+      "app://localhost/",
+      "ftp://example.com/",
+      "not a url",
+      "",
+      "https://example.com/\0",
+    ] {
+      assert_eq!(
+        code(WebViewOptionsInfo {
+          url: url.into(),
+          ..ok.clone()
+        }),
+        Some("not_allowed_url"),
+        "{url}"
+      );
+    }
+
+    // Bounds: finite, no negative size.
+    for b in [
+      (f64::NAN, 0.0, 1.0, 1.0),
+      (0.0, f64::INFINITY, 1.0, 1.0),
+      (0.0, 0.0, -1.0, 1.0),
+      (0.0, 0.0, 1.0, -0.5),
+    ] {
+      let bounds = WebViewBoundsInfo {
+        x: b.0,
+        y: b.1,
+        width: b.2,
+        height: b.3,
+      };
+      assert_eq!(
+        code(WebViewOptionsInfo {
+          bounds,
+          ..ok.clone()
+        }),
+        Some("invalid")
+      );
+    }
+
+    // Partitions.
+    for p in [
+      "webview:default",
+      "ephemeral",
+      "ephemeral:t",
+      "a",
+      "A.b_c-d:e",
+      &"x".repeat(64),
+    ] {
+      assert_eq!(
+        code(WebViewOptionsInfo {
+          partition: Some(p.into()),
+          ..ok.clone()
+        }),
+        None,
+        "{p}"
+      );
+    }
+    for p in ["", ":a", "-a", ".a", "a b", "a/b", "é", &"x".repeat(65)] {
+      assert_eq!(
+        code(WebViewOptionsInfo {
+          partition: Some(p.into()),
+          ..ok.clone()
+        }),
+        Some("invalid"),
+        "{p}"
+      );
+    }
+
+    // Enums.
+    for v in ["deny", "same-view", "browser"] {
+      assert_eq!(
+        code(WebViewOptionsInfo {
+          allow_popups: Some(v.into()),
+          ..ok.clone()
+        }),
+        None
+      );
+    }
+    for v in ["ask", "allow", ""] {
+      assert_eq!(
+        code(WebViewOptionsInfo {
+          allow_popups: Some(v.into()),
+          ..ok.clone()
+        }),
+        Some("invalid")
+      );
+    }
+    for v in ["deny", "ask", "browser"] {
+      assert_eq!(
+        code(WebViewOptionsInfo {
+          downloads: Some(v.into()),
+          ..ok.clone()
+        }),
+        None
+      );
+    }
+    assert_eq!(
+      code(WebViewOptionsInfo {
+        downloads: Some("allow".into()),
+        ..ok.clone()
+      }),
+      Some("invalid")
+    );
+    for v in ["deny", "ask"] {
+      assert_eq!(
+        code(WebViewOptionsInfo {
+          permissions: Some(v.into()),
+          ..ok.clone()
+        }),
+        None
+      );
+    }
+    assert_eq!(
+      code(WebViewOptionsInfo {
+        permissions: Some("browser".into()),
+        ..ok.clone()
+      }),
+      Some("invalid")
+    );
+
+    // The user agent goes into a header.
+    assert_eq!(
+      code(WebViewOptionsInfo {
+        user_agent: Some("Mozilla/5.0 X".into()),
+        ..ok.clone()
+      }),
+      None
+    );
+    for ua in ["a\0b", "a\rb", "a\nb"] {
+      assert_eq!(
+        code(WebViewOptionsInfo {
+          user_agent: Some(ua.into()),
+          ..ok.clone()
+        }),
+        Some("invalid")
+      );
+    }
+    // Invalid options are refused before the URL is looked at.
+    assert_eq!(
+      code(WebViewOptionsInfo {
+        url: "file:///x".into(),
+        downloads: Some("x".into()),
+        ..ok.clone()
+      }),
+      Some("invalid")
+    );
+  }
+
+  #[test]
+  fn webview_outcome_wire_shape() {
+    use super::WebViewOutcome;
+    assert_eq!(
+      serde_json::to_value(WebViewOutcome::ok()).unwrap(),
+      json!({ "ok": true })
+    );
+    assert_eq!(
+      serde_json::to_value(WebViewOutcome {
+        id: Some(3),
+        ..WebViewOutcome::ok()
+      })
+      .unwrap(),
+      json!({ "ok": true, "id": 3 })
+    );
+    assert_eq!(
+      serde_json::to_value(WebViewOutcome {
+        value: Some("{\"a\":1}".into()),
+        ..WebViewOutcome::ok()
+      })
+      .unwrap(),
+      json!({ "ok": true, "value": "{\"a\":1}" })
+    );
+    assert_eq!(
+      serde_json::to_value(WebViewOutcome::error("error", "x")).unwrap(),
+      json!({ "ok": false, "code": "error", "message": "x" })
+    );
+    // Every backend code carries a message.
+    for code in [
+      "unsupported",
+      "not_allowed_url",
+      "limit",
+      "invalid",
+      "closed",
+      "failed",
+    ] {
+      let v = serde_json::to_value(WebViewOutcome::code(code)).unwrap();
+      assert_eq!(v["code"], code);
+      assert!(!v["message"].as_str().unwrap().is_empty());
+    }
+    // The window is gone: the public code is "closed".
+    let v = serde_json::to_value(WebViewOutcome::code("no_window")).unwrap();
+    assert_eq!(v["code"], "closed");
+    let refused = super::WebViewCaptureOutcome {
+      ok: false,
+      data: None,
+      code: Some("closed".into()),
+      message: Some("gone".into()),
+    };
+    assert_eq!(
+      serde_json::to_value(refused).unwrap(),
+      json!({ "ok": false, "code": "closed", "message": "gone" })
+    );
+  }
+
+  #[test]
+  fn webview_command_numbers_match_laufey() {
+    // LAUFEY_WEBVIEW_COMMAND_*; DESKTOP_JS's WEBVIEW_COMMANDS.
+    assert_eq!(super::WEBVIEW_COMMAND_BACK, 1);
+    assert_eq!(super::WEBVIEW_COMMAND_FORWARD, 2);
+    assert_eq!(super::WEBVIEW_COMMAND_RELOAD, 3);
+    assert_eq!(super::WEBVIEW_COMMAND_RELOAD_IGNORE_CACHE, 4);
+    assert_eq!(super::WEBVIEW_COMMAND_STOP, 5);
+    assert_eq!(super::WEBVIEW_COMMAND_FOCUS, 6);
   }
 }

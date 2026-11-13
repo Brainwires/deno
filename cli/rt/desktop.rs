@@ -99,6 +99,15 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_set_will_navigate,
     op_desktop_answer_will_navigate,
     op_desktop_set_app_menu,
+    op_desktop_webview_capabilities,
+    op_desktop_webview_set_bounds,
+    op_desktop_webview_set_visible,
+    op_desktop_webview_navigate,
+    op_desktop_webview_command,
+    op_desktop_webview_state,
+    op_desktop_webview_evaluate,
+    op_desktop_webview_capture,
+    op_desktop_webview_close,
   } = internals.core.ops;
   const BrowserWindowPrototype = BrowserWindow.prototype;
   Object.setPrototypeOf(BrowserWindowPrototype, EventTarget.prototype);
@@ -945,6 +954,294 @@ pub const DESKTOP_JS: &str = r#"
       throw new TypeError(`Unknown toolbar style: ${style}`);
     }
     return this[privateToolbarStyle](raw);
+  };
+  // Embedded web views (laufey API 58): a native child view of one window,
+  // above its page at `bounds` (CSS pixels from the top-left of the page
+  // viewport), showing an http(s) page with none of the app's bridge,
+  // storage or navigation guard. Refusals are WebViewErrors with a `code`.
+  const privateCreateWebView = Symbol.for("Deno_privateDesktopCreateWebView");
+  const webViewToken = Symbol("WebView");
+  // LAUFEY_WEBVIEW_COMMAND_* and LAUFEY_WEBVIEW_CAPTURE_*.
+  const WEBVIEW_COMMANDS = {
+    __proto__: null,
+    back: 1,
+    forward: 2,
+    reload: 3,
+    reloadIgnoringCache: 4,
+    stop: 5,
+    focus: 6,
+  };
+  const WEBVIEW_CAPTURE_FORMATS = { __proto__: null, png: 0, jpeg: 1 };
+  const WEBVIEW_POPUPS = ["deny", "same-view", "browser"];
+  const WEBVIEW_DOWNLOADS = ["deny", "ask", "browser"];
+  const WEBVIEW_PERMISSIONS = ["deny", "ask"];
+  const WEBVIEW_PARTITION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+  function webViewError(code, message) {
+    const error = new Error(message);
+    error.name = "WebViewError";
+    error.code = code;
+    return error;
+  }
+  function webViewInvalid(message) {
+    return webViewError("invalid", message);
+  }
+  // http: and https: only (create and navigate).
+  function webViewUrl(url, name) {
+    if (typeof url !== "string") {
+      throw webViewInvalid(`${name} must be a string`);
+    }
+    let protocol = "";
+    try {
+      protocol = new URL(url).protocol;
+    } catch {
+      // Not a URL: refused like any other scheme.
+    }
+    if (protocol !== "http:" && protocol !== "https:") {
+      throw webViewError(
+        "not_allowed_url",
+        `${name} must be an http: or https: URL`,
+      );
+    }
+    return url;
+  }
+  function webViewBounds(bounds, name) {
+    if (bounds === null || typeof bounds !== "object") {
+      throw webViewInvalid(`${name} must be an object { x, y, width, height }`);
+    }
+    const out = {};
+    for (const key of ["x", "y", "width", "height"]) {
+      const value = bounds[key];
+      if (typeof value !== "number" || !Number.isFinite(value)) {
+        throw webViewInvalid(`${name}.${key} must be a finite number`);
+      }
+      out[key] = value;
+    }
+    if (out.width < 0 || out.height < 0) {
+      throw webViewInvalid(
+        `${name}.width and ${name}.height must be 0 or more`,
+      );
+    }
+    return out;
+  }
+  function webViewChoice(value, allowed, name) {
+    if (value === undefined) return undefined;
+    if (typeof value !== "string" || !allowed.includes(value)) {
+      throw webViewInvalid(
+        `${name} must be ${allowed.map((v) => JSON.stringify(v)).join(", ")}`,
+      );
+    }
+    return value;
+  }
+  // The options createWebView passes on: only the known keys, each checked.
+  function webViewOptions(options) {
+    if (options === null || typeof options !== "object") {
+      throw webViewInvalid("options must be an object");
+    }
+    const out = {
+      url: undefined,
+      bounds: webViewBounds(options.bounds, "options.bounds"),
+    };
+    if (options.partition !== undefined) {
+      if (
+        typeof options.partition !== "string" ||
+        !WEBVIEW_PARTITION.test(options.partition)
+      ) {
+        throw webViewInvalid(
+          "options.partition must be 1 to 64 characters of [A-Za-z0-9._:-], the first alphanumeric",
+        );
+      }
+      out.partition = options.partition;
+    }
+    if (options.visible !== undefined) {
+      if (typeof options.visible !== "boolean") {
+        throw webViewInvalid("options.visible must be a boolean");
+      }
+      out.visible = options.visible;
+    }
+    const allowPopups = webViewChoice(
+      options.allowPopups,
+      WEBVIEW_POPUPS,
+      "options.allowPopups",
+    );
+    if (allowPopups !== undefined) out.allowPopups = allowPopups;
+    const downloads = webViewChoice(
+      options.downloads,
+      WEBVIEW_DOWNLOADS,
+      "options.downloads",
+    );
+    if (downloads !== undefined) out.downloads = downloads;
+    const permissions = webViewChoice(
+      options.permissions,
+      WEBVIEW_PERMISSIONS,
+      "options.permissions",
+    );
+    if (permissions !== undefined) out.permissions = permissions;
+    if (options.userAgent !== undefined) {
+      if (
+        typeof options.userAgent !== "string" ||
+        /[\0\r\n]/.test(options.userAgent)
+      ) {
+        throw webViewInvalid(
+          "options.userAgent must be a string without NUL, CR or LF",
+        );
+      }
+      out.userAgent = options.userAgent;
+    }
+    out.url = webViewUrl(options.url, "options.url");
+    return out;
+  }
+  // Every web view not yet closed, by id; a view leaves it with its
+  // "closed" event (or its window's close).
+  const webViews = new Map();
+  let markWebViewClosed;
+  let webViewWindowId;
+  class WebView extends EventTarget {
+    #id;
+    #window;
+    #windowId;
+    #closed = false;
+    constructor(token, id, window) {
+      if (token !== webViewToken) {
+        throw new TypeError(
+          "Illegal constructor: use BrowserWindow.createWebView()",
+        );
+      }
+      super();
+      this.#id = id;
+      this.#window = window;
+      this.#windowId = window.windowId;
+    }
+    static {
+      markWebViewClosed = (view) => {
+        view.#closed = true;
+      };
+      webViewWindowId = (view) => view.#windowId;
+    }
+    get id() {
+      return this.#id;
+    }
+    get window() {
+      return this.#window;
+    }
+    get closed() {
+      return this.#closed;
+    }
+    setBounds(bounds) {
+      const b = webViewBounds(bounds, "bounds");
+      if (this.#closed) return;
+      op_desktop_webview_set_bounds(this.#id, b.x, b.y, b.width, b.height);
+    }
+    setVisible(visible) {
+      if (typeof visible !== "boolean") {
+        throw webViewInvalid("visible must be a boolean");
+      }
+      if (this.#closed) return;
+      op_desktop_webview_set_visible(this.#id, visible);
+    }
+    navigate(url) {
+      if (this.#closed) throw webViewError("closed", "the web view is closed");
+      webViewUrl(url, "url");
+      const outcome = op_desktop_webview_navigate(this.#id, url);
+      if (!outcome.ok) throw webViewError(outcome.code, outcome.message);
+    }
+    back() {
+      if (!this.#closed) {
+        op_desktop_webview_command(this.#id, WEBVIEW_COMMANDS.back);
+      }
+    }
+    forward() {
+      if (!this.#closed) {
+        op_desktop_webview_command(this.#id, WEBVIEW_COMMANDS.forward);
+      }
+    }
+    reload(options = undefined) {
+      const ignoreCache = options?.ignoreCache ?? false;
+      if (typeof ignoreCache !== "boolean") {
+        throw webViewInvalid("options.ignoreCache must be a boolean");
+      }
+      if (this.#closed) return;
+      op_desktop_webview_command(
+        this.#id,
+        ignoreCache
+          ? WEBVIEW_COMMANDS.reloadIgnoringCache
+          : WEBVIEW_COMMANDS.reload,
+      );
+    }
+    stop() {
+      if (!this.#closed) {
+        op_desktop_webview_command(this.#id, WEBVIEW_COMMANDS.stop);
+      }
+    }
+    focus() {
+      if (!this.#closed) {
+        op_desktop_webview_command(this.#id, WEBVIEW_COMMANDS.focus);
+      }
+    }
+    state() {
+      if (this.#closed) throw webViewError("closed", "the web view is closed");
+      const json = op_desktop_webview_state(this.#id);
+      if (json == null) throw webViewError("closed", "the web view is closed");
+      return JSON.parse(json);
+    }
+    async capture(options = undefined) {
+      const format = options?.format ?? "png";
+      const raw = WEBVIEW_CAPTURE_FORMATS[String(format)];
+      if (typeof format !== "string" || raw === undefined) {
+        throw webViewInvalid('options.format must be "png" or "jpeg"');
+      }
+      const quality = options?.quality ?? 90;
+      if (
+        typeof quality !== "number" || !Number.isFinite(quality) ||
+        quality < 0 || quality > 100
+      ) {
+        throw webViewInvalid("options.quality must be a number from 0 to 100");
+      }
+      if (this.#closed) throw webViewError("closed", "the web view is closed");
+      const outcome = await op_desktop_webview_capture(
+        this.#id,
+        raw,
+        Math.round(quality),
+      );
+      if (!outcome.ok) throw webViewError(outcome.code, outcome.message);
+      return outcome.data;
+    }
+    async evaluate(script) {
+      if (typeof script !== "string") {
+        throw webViewInvalid("script must be a string");
+      }
+      if (this.#closed) throw webViewError("closed", "the web view is closed");
+      const outcome = await op_desktop_webview_evaluate(this.#id, script);
+      if (!outcome.ok) throw webViewError(outcome.code, outcome.message);
+      return JSON.parse(outcome.value);
+    }
+    // Idempotent; "closed" fires once, when the backend reports it (at once
+    // when it no longer knows the view).
+    close() {
+      if (this.#closed) return;
+      this.#closed = true;
+      if (!op_desktop_webview_close(this.#id)) {
+        queueMicrotask(() => finishWebView(this));
+      }
+    }
+  }
+  // The view is gone: it leaves the registry and fires "closed", once.
+  function finishWebView(view) {
+    if (webViews.get(view.id) !== view) return;
+    webViews.delete(view.id);
+    markWebViewClosed(view);
+    view.dispatchEvent(new CustomEvent("closed", { detail: {} }));
+  }
+  Deno.WebView = WebView;
+  BrowserWindowPrototype.createWebView = function createWebView(options) {
+    const checked = webViewOptions(options);
+    if (this.isClosed()) {
+      throw webViewError("closed", "the window is closed");
+    }
+    const outcome = this[privateCreateWebView](checked);
+    if (!outcome.ok) throw webViewError(outcome.code, outcome.message);
+    const view = new WebView(webViewToken, outcome.id, this);
+    webViews.set(outcome.id, view);
+    return view;
   };
   BrowserWindowPrototype.setWindowButtonPosition = function(position) {
     if (position == null) return this[privateWindowButtonPosition](true, 0, 0);
@@ -2532,6 +2829,17 @@ pub const DESKTOP_JS: &str = r#"
       configurable: true,
       enumerable: true,
     },
+    // Embedded web views (laufey API 58): whether
+    // BrowserWindow.createWebView() works here, the engine, and what its
+    // views can do. A fresh object per call.
+    webViewCapabilities: {
+      value: function webViewCapabilities() {
+        return op_desktop_webview_capabilities();
+      },
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    },
     // Text to speech through the OS engine (laufey API 50):
     // AVSpeechSynthesizer, SAPI, speech-dispatcher. speak() resolves when
     // the utterance ends (also when stop() or a later speak() cut it off)
@@ -3769,6 +4077,31 @@ pub const DESKTOP_JS: &str = r#"
             windows.delete(ev.windowId);
             windowBindCallbacks.delete(ev.windowId);
             windowButtons.delete(ev.windowId);
+            // Its web views close with it: each fires "closed" once (a
+            // later report of the backend's finds it gone).
+            for (const view of [...webViews.values()]) {
+              if (webViewWindowId(view) !== ev.windowId) continue;
+              op_desktop_webview_close(view.id);
+              finishWebView(view);
+            }
+            break;
+          }
+          case "webView": {
+            // laufey API 58: an event of an embedded web view, its detail
+            // the backend's JSON; "closed" is the last one.
+            const view = webViews.get(ev.webViewId);
+            if (view === undefined) break;
+            if (ev.event === "closed") {
+              finishWebView(view);
+              break;
+            }
+            let detail = {};
+            try {
+              detail = JSON.parse(ev.detail);
+            } catch {
+              // A malformed detail still reaches the listeners.
+            }
+            view.dispatchEvent(new CustomEvent(ev.event, { detail }));
             break;
           }
           case "notificationClose": {
@@ -4245,6 +4578,13 @@ mod tests {
       "win.setToolbarStyle(options.toolbarStyle);",
       "const TOOLBAR_STYLES = {",
       "unifiedCompact: 2,",
+      // laufey API 58: embedded web views.
+      "BrowserWindowPrototype.createWebView = function createWebView(options) {",
+      "const outcome = this[privateCreateWebView](checked);",
+      "class WebView extends EventTarget {",
+      "Deno.WebView = WebView;",
+      "webViewCapabilities: {",
+      "return op_desktop_webview_capabilities();",
       "BrowserWindowPrototype.setBackgroundMaterial",
       "BrowserWindowPrototype.setVibrancy",
       "BrowserWindowPrototype.getScreen",
@@ -4526,6 +4866,89 @@ mod tests {
     assert!(DESKTOP_JS.contains(
       "if (fannedAppMenu !== null) instance.setApplicationMenu(fannedAppMenu);"
     ));
+  }
+
+  #[test]
+  fn desktop_js_installs_web_views() {
+    // laufey API 58. Refusals are WebViewErrors with a code.
+    assert!(DESKTOP_JS.contains("error.name = \"WebViewError\";"));
+    assert!(DESKTOP_JS.contains("error.code = code;"));
+    // Not constructible from user code: the private token.
+    assert!(DESKTOP_JS.contains("const webViewToken = Symbol(\"WebView\");"));
+    assert!(DESKTOP_JS.contains("if (token !== webViewToken) {"));
+    // Options are checked before the op, the URL last (http(s) only).
+    assert!(DESKTOP_JS.contains("const checked = webViewOptions(options);"));
+    assert!(
+      DESKTOP_JS
+        .contains("if (protocol !== \"http:\" && protocol !== \"https:\") {")
+    );
+    assert!(DESKTOP_JS.contains(
+      "const WEBVIEW_PARTITION = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;"
+    ));
+    assert!(DESKTOP_JS.contains(
+      "const WEBVIEW_POPUPS = [\"deny\", \"same-view\", \"browser\"];"
+    ));
+    assert!(
+      DESKTOP_JS.contains(
+        "const WEBVIEW_DOWNLOADS = [\"deny\", \"ask\", \"browser\"];"
+      )
+    );
+    assert!(
+      DESKTOP_JS.contains("const WEBVIEW_PERMISSIONS = [\"deny\", \"ask\"];")
+    );
+    // LAUFEY_WEBVIEW_COMMAND_* / LAUFEY_WEBVIEW_CAPTURE_*.
+    let commands = DESKTOP_JS
+      .split("const WEBVIEW_COMMANDS = {")
+      .nth(1)
+      .expect("WEBVIEW_COMMANDS");
+    let commands = &commands[..commands.find("};").unwrap()];
+    for entry in [
+      "back: 1,",
+      "forward: 2,",
+      "reload: 3,",
+      "reloadIgnoringCache: 4,",
+      "stop: 5,",
+      "focus: 6,",
+    ] {
+      assert!(commands.contains(entry), "{entry}");
+    }
+    assert!(DESKTOP_JS.contains(
+      "const WEBVIEW_CAPTURE_FORMATS = { __proto__: null, png: 0, jpeg: 1 };"
+    ));
+    // A closed view: navigate / state throw, capture / evaluate reject.
+    assert!(
+      DESKTOP_JS
+        .matches("if (this.#closed) throw webViewError(\"closed\", \"the web view is closed\");")
+        .count()
+        >= 4
+    );
+    // Events: the detail is parsed, "closed" ends the view once.
+    let case = DESKTOP_JS
+      .split("case \"webView\": {")
+      .nth(1)
+      .expect("a webView case");
+    assert!(case.contains("const view = webViews.get(ev.webViewId);"));
+    assert!(case.contains(
+      "if (ev.event === \"closed\") {\n              finishWebView(view);"
+    ));
+    assert!(case.contains("detail = JSON.parse(ev.detail);"));
+    assert!(
+      case
+        .contains("view.dispatchEvent(new CustomEvent(ev.event, { detail }));")
+    );
+    let finish = DESKTOP_JS
+      .split("function finishWebView(view) {")
+      .nth(1)
+      .expect("finishWebView");
+    let finish = &finish[..finish.find("\n  }").unwrap()];
+    assert!(finish.contains("if (webViews.get(view.id) !== view) return;"));
+    assert!(finish.contains("webViews.delete(view.id);"));
+    assert!(finish.contains("new CustomEvent(\"closed\", { detail: {} })"));
+    // A window's close closes its views.
+    let closed = DESKTOP_JS.split("case \"windowClosed\": {").nth(1).unwrap();
+    let closed = &closed[..closed.find("case \"webView\": {").unwrap()];
+    assert!(closed.contains("op_desktop_webview_close(view.id);"));
+    assert!(closed.contains("finishWebView(view);"));
   }
 
   #[test]

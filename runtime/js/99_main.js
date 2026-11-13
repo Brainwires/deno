@@ -846,6 +846,15 @@ const NOT_IMPORTED_OPS = [
   "op_desktop_set_will_navigate",
   "op_desktop_answer_will_navigate",
   "op_desktop_set_app_menu",
+  "op_desktop_webview_capabilities",
+  "op_desktop_webview_set_bounds",
+  "op_desktop_webview_set_visible",
+  "op_desktop_webview_navigate",
+  "op_desktop_webview_command",
+  "op_desktop_webview_state",
+  "op_desktop_webview_evaluate",
+  "op_desktop_webview_capture",
+  "op_desktop_webview_close",
   // Deno.desktop.updater (full-app self-update)
   "op_desktop_app_update_info",
   "op_desktop_app_update_check",
@@ -896,7 +905,9 @@ const NOT_IMPORTED_OPS = [
 // desktop backend, which only the main scope has: constructing one in a
 // worker would only throw. The tray capabilities and window level ops serve
 // those classes alone, and speech is the main scope's Deno.desktop.speech: a
-// worker must not talk over the app.
+// worker must not talk over the app. The web view ops drive the views a
+// window's createWebView() made (evaluate runs script in a remote page,
+// capture reads what it shows), which are the main scope's alone too.
 const WORKER_EXCLUDED_OPS = [
   "BrowserWindow",
   "Dock",
@@ -976,6 +987,14 @@ const WORKER_EXCLUDED_OPS = [
   "op_desktop_speak",
   "op_desktop_stop_speaking",
   "op_desktop_speech_voices",
+  "op_desktop_webview_set_bounds",
+  "op_desktop_webview_set_visible",
+  "op_desktop_webview_navigate",
+  "op_desktop_webview_command",
+  "op_desktop_webview_state",
+  "op_desktop_webview_evaluate",
+  "op_desktop_webview_capture",
+  "op_desktop_webview_close",
 ];
 
 function removeImportedOps(isWorker = false) {

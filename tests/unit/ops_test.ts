@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-// denext fork (Brainwires/deno): 75 more than upstream's 44, the
+// denext fork (Brainwires/deno): 84 more than upstream's 44, the
 // `Deno.desktop` ops the fork adds to NOT_IMPORTED_OPS in 99_main.js (launch
 // targets and events, scheme registration, passkeys, the rich clipboard, drag
 // out, file dialogs, message boxes, shortcuts, launch at login, DevTools, menus, scheduled
@@ -9,20 +9,21 @@
 // features, title bar
 // preferences, the secure store, the system stats, quit /
 // close, auth sessions, runOnMainThread, Deno.desktop.updater, will-navigate,
-// the app-wide menu, and
+// the app-wide menu, embedded web views, and
 // op_desktop_alert_async, which the uncaught-error handler needs). The desktop JS that cli/rt evaluates
 // after bootstrap reaches them through `core.ops`, so they survive
 // removeImportedOps() like upstream's own desktop ops.
 // Plus 9 for Vitest compatibility (`deno test`, item 23):
 // op_test_set_import_meta_proto and the eight op_vitest_* ops.
-const EXPECTED_OP_COUNT = 128;
+const EXPECTED_OP_COUNT = 137;
 // The main scope minus WORKER_EXCLUDED_OPS in 99_main.js: upstream strips the
 // two text-clipboard ops from workers, and the fork strips every new
-// main-scope-only desktop op (69) and the native classes that need the
+// main-scope-only desktop op (77) and the native classes that need the
 // desktop backend (BrowserWindow, Dock, Tray, Notification), leaving
 // upstream's 20 minus those 4, plus op_desktop_screens,
-// op_desktop_window_capabilities (both read-only) and op_desktop_alert_async.
-const EXPECTED_WORKER_OP_COUNT = 19;
+// op_desktop_window_capabilities, op_desktop_webview_capabilities (all
+// read-only) and op_desktop_alert_async.
+const EXPECTED_WORKER_OP_COUNT = 20;
 
 function getExposedOpNames(): string[] {
   // @ts-ignore TS doesn't allow to index with symbol
