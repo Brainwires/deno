@@ -14262,6 +14262,61 @@ where the changes are discussed.
        return.
      - Node tests enabled: none; no Node API changes.
 
+370. **`fix(node:fs)`: node:fs reaches a descriptor a native addon opened, in
+     the main thread and in workers** (runtime; `fix/node-compat-d23`;
+     `ext/node/ops/fs.rs`, `ext/io/lib.rs`, `ext/node/ops/fd_adopt.rs`).
+     node:fs's fd calls (`fstat`, `read`, `write`, `close`, `readFile(fd)` and
+     the rest) reached only the descriptors the isolate's own table holds (what
+     its node:fs opened, stdio, announced slots) and, from item 365, the ones
+     the process inherited at start-up. A descriptor opened later inside the
+     process by native code was `EBADF`: node-pty's own `pty.node`
+     (`native.fork`) returns its pty master as a number, and
+     `fs.readSync(term.fd, …)` / `fs.fstatSync(term.fd)` threw, in the main
+     thread and in a Worker alike (checked on 3.0.0-denext.13 with node-pty
+     1.2.0-beta.15's `prebuilds/linux-x64/pty.node`), so a program that does the
+     master's I/O itself (Qutty running t3code's backend in a Worker) could not
+     read the terminal. Node's fs works on the raw number. Now a descriptor this
+     isolate doesn't track, that is open and that the process didn't inherit (an
+     inherited one keeps item 365's rules), is reached for each call through its
+     own close-on-exec dup, which shares the open file description (offset,
+     flags) and is closed when the call lets go of it; nothing is registered, so
+     every call sees the descriptor as it is now and a reused number is never
+     stale. `fs.closeSync(fd)` closes the descriptor itself, as Node's does. It
+     needs what adopting such a descriptor with `net.Socket({ fd })` needs (item
+     348): every permission or an unscoped `--allow-ffi`, which loading the
+     addon that opened it already took: it is process-wide state no read, write
+     or net grant can be scoped to. A refusal is the `--allow-ffi` permission
+     error (`NotCapable`, with code `ERR_ACCESS_DENIED` in node:fs, as item
+     365's). Unix only: on Windows a node:fs fd is a CRT descriptor of the
+     isolate's own, and an addon's handle has none, so this is unchanged there.
+     - Workers and addons: node-pty's `pty.node` (`native.fork`, its exit
+       callback from the addon's thread), the test addon and `node:sqlite`'s
+       `DatabaseSync` load and run in `node:worker_threads` Workers and web
+       Workers, and 30 rounds of a Worker terminated with a live pty child and
+       an open database neither crash nor grow the parent's RSS (checked with
+       node-pty 1.2.0-beta.15 on 3.0.0-denext.13 and on this branch). Each
+       `process.dlopen` already gets its own Node-API env per isolate (its
+       instance data, cleanup hooks, reference finalizers, wrap keys), module
+       registration is per thread (`MODULE_TO_REGISTER`, set by the library's
+       constructor on the loading thread) with the process-wide table only
+       remembering which register function a path has, so no other state needed
+       to move.
+     - User-facing note: `fs.readSync(fd, …)`, `fs.fstatSync(fd)`,
+       `fs.closeSync(fd)` and the other fd calls work on a descriptor a native
+       addon handed back (node-pty's `native.fork(...).fd`), in Workers too,
+       with `-A` or an unscoped `--allow-ffi`.
+     - Tests: napi `fd_test.js` (the test addon's new `openPipe`, a pipe it
+       creates with a non-blocking read end: `fstatSync` is a FIFO, `readSync`
+       reads the text, a second read is `EAGAIN`, and after `closeSync` of the
+       write end the read end reads EOF, which only a close of the real
+       descriptor gives; the same in a `node:worker_threads` Worker and a web
+       Worker, each terminated after; under `--allow-ffi=<the addon>` alone the
+       `fstatSync` is refused with `NotCapable`). With the 3.0.0-denext.23 debug
+       build all four failed with `EBADF`.
+     - Node tests enabled: none, because Node's suite reaches an addon's
+       descriptor only from its compiled test addons (`test/addons`,
+       `test/node-api`), which the node_compat runner doesn't build.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -14269,10 +14324,10 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368, 369) are what the prebuilt `libdenort` carries. The
-CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
-into a packaged app's launchers) are in the branch too, but a stock CLI does not
-run them; denext's own launcher provides that environment.
+350, 351, 353, 355-361, 363-366, 368-370) are what the prebuilt `libdenort`
+carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
+`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
+stock CLI does not run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

@@ -75,7 +75,7 @@ fn is_stream_fd(fd: i32) -> bool {
 }
 
 /// Whether the isolate holds a grant that covers the whole process.
-fn has_process_wide_grant(state: &OpState, api_name: &str) -> bool {
+pub(crate) fn has_process_wide_grant(state: &OpState, api_name: &str) -> bool {
   let permissions = state.borrow::<PermissionsContainer>();
   permissions
     .check_has_all_permissions(Path::new(api_name))

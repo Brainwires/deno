@@ -297,6 +297,28 @@ pub fn adopt_inherited_fd_for_fs(
     .then_some(file)
 }
 
+/// denext: a node:fs view of `fd`, a descriptor of the process that no table
+/// tracks and that the process didn't inherit (one a native addon opened,
+/// such as node-pty's pty master), for a single node:fs call: a close-on-exec
+/// dup sharing the open file description (its offset and flags), closed when
+/// the call lets go of it. Nothing is registered, so every call sees the
+/// descriptor as it is now, as in Node, whose fs works on the raw number.
+/// `None` when `fd` is not open. The caller checks permissions first.
+#[cfg(unix)]
+pub fn process_fd_for_fs(fd: i32) -> Option<Rc<dyn fs::File>> {
+  if fd < 3 {
+    return None;
+  }
+  // SAFETY: fcntl validates the descriptor; the dup is owned by the file.
+  let dup_fd = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+  if dup_fd == -1 {
+    return None;
+  }
+  // SAFETY: dup_fd is a fresh descriptor owned by the returned file.
+  let file = unsafe { StdFile::from_raw_fd(dup_fd) };
+  Some(Rc::new(StdFileResourceInner::file(file, None)))
+}
+
 #[cfg(windows)]
 fn stdio_fd(fd: i32) -> StdFile {
   let std_handle = match fd {

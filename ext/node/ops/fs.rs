@@ -160,7 +160,47 @@ fn file_for_fd(
   if let Some(file) = adopt_inherited_fd(state, fd)? {
     return Ok(file);
   }
+  #[cfg(unix)]
+  if let Some(file) = process_fd(state, fd)? {
+    return Ok(file);
+  }
   Err(ebadf())
+}
+
+/// denext: whether `fd` is a descriptor of the process that node:fs here
+/// neither tracks nor reaches as an inherited one: one a native addon opened
+/// (node-pty's pty master), or another isolate's. Only checks the tables and
+/// that the descriptor is open; [`process_fd`] checks the permission.
+#[cfg(unix)]
+fn is_untracked_process_fd(state: &OpState, fd: i32) -> bool {
+  let table = state.borrow::<deno_io::FdTable>();
+  fd >= 3
+    && !table.contains(fd)
+    && !deno_io::is_inherited_fd(fd)
+    // SAFETY: F_GETFD only inspects the descriptor.
+    && unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1
+}
+
+/// denext: reach a descriptor of the process that node:fs doesn't track (see
+/// [`is_untracked_process_fd`]), as Node's fs reaches every descriptor. Such
+/// a descriptor is process-wide state no grant can be scoped to, so it needs
+/// what adopting it with `net.Socket({ fd })` needs (`fd_adopt.rs`): every
+/// permission or an unscoped `--allow-ffi`, which loading the addon that
+/// opened it already took. Each call gets its own dup (nothing registered),
+/// so the call sees the descriptor as it is now.
+#[cfg(unix)]
+fn process_fd(
+  state: &mut OpState,
+  fd: i32,
+) -> Result<Option<Rc<dyn deno_io::fs::File>>, FsError> {
+  const API_NAME: &str = "node:fs (process fd)";
+  if !is_untracked_process_fd(state, fd) {
+    return Ok(None);
+  }
+  if !crate::ops::fd_adopt::has_process_wide_grant(state, API_NAME) {
+    state.borrow::<PermissionsContainer>().check_ffi_all()?;
+  }
+  Ok(deno_io::process_fd_for_fs(fd))
 }
 
 /// denext: register `fd` for node:fs when it is a descriptor the process
@@ -1026,6 +1066,18 @@ pub fn op_node_fs_close(state: &mut OpState, fd: i32) -> Result<(), FsError> {
   let file = match removed {
     Some(file) => file,
     None => {
+      // A descriptor of the process node:fs doesn't track (denext; one a
+      // native addon opened): close it, as Node's `fs.closeSync` does.
+      #[cfg(unix)]
+      if is_untracked_process_fd(state, fd) {
+        process_fd(state, fd)?;
+        // SAFETY: the descriptor is open (checked above) and no table owns
+        // it; closing it is what the caller asked for.
+        if unsafe { libc::close(fd) } != 0 {
+          return Err(FsError::Io(std::io::Error::last_os_error()));
+        }
+        return Ok(());
+      }
       // An inherited descriptor node:fs hasn't used yet (denext): register
       // it, so the close ends node:fs's use of it as after any other.
       file_for_fd(state, fd)?;
