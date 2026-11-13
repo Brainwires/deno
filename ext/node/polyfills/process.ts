@@ -2556,8 +2556,6 @@ internals.__bootstrapNodeProcess = function (
       const disabledFns = [
         "abort",
         "chdir",
-        "send",
-        "disconnect",
         "setuid",
         "seteuid",
         "setgid",
@@ -2577,20 +2575,38 @@ internals.__bootstrapNodeProcess = function (
         process[fn] = stub;
       }
 
-      ObjectDefineProperty(process, "channel", {
-        __proto__: null,
-        get() {
-          throw new ERR_WORKER_UNSUPPORTED_OPERATION("process.channel");
-        },
-        configurable: true,
-      });
-      ObjectDefineProperty(process, "connected", {
-        __proto__: null,
-        get() {
-          throw new ERR_WORKER_UNSUPPORTED_OPERATION("process.connected");
-        },
-        configurable: true,
-      });
+      // The IPC members are stubbed only when the process looks like it has
+      // an IPC channel (`NODE_CHANNEL_FD` set), as Node's
+      // lib/internal/main/worker_thread.js does. Otherwise they stay
+      // undefined, as in a main thread without IPC: `process.connected` /
+      // `process.channel` read `undefined` and `process.send` is absent, so
+      // code that checks for IPC (`if (process.connected)`,
+      // `typeof process.send === "function"`) works in a worker (denext).
+      if (op_get_env_no_permission_check("NODE_CHANNEL_FD")) {
+        const ipcFns = ["send", "disconnect"];
+        for (let i = 0; i < ipcFns.length; i++) {
+          const fn = ipcFns[i];
+          const stub = function () {
+            throw new ERR_WORKER_UNSUPPORTED_OPERATION(`process.${fn}()`);
+          };
+          stub.disabled = true;
+          process[fn] = stub;
+        }
+        ObjectDefineProperty(process, "channel", {
+          __proto__: null,
+          get() {
+            throw new ERR_WORKER_UNSUPPORTED_OPERATION("process.channel");
+          },
+          configurable: true,
+        });
+        ObjectDefineProperty(process, "connected", {
+          __proto__: null,
+          get() {
+            throw new ERR_WORKER_UNSUPPORTED_OPERATION("process.connected");
+          },
+          configurable: true,
+        });
+      }
 
       // Inspector control APIs are main-thread-only in Node; matches the
       // assertions in parallel/test-worker-unsupported-things.js.

@@ -96,7 +96,11 @@ fn has_unscoped_read_write(state: &OpState, api_name: &str) -> bool {
 /// at startup (see the module docs). Checked before the fd is claimed, so a
 /// refused isolate never takes it from one that may use it.
 #[cfg(unix)]
-fn may_adopt_inherited(state: &OpState, fd: i32, api_name: &str) -> bool {
+pub(crate) fn may_adopt_inherited(
+  state: &OpState,
+  fd: i32,
+  api_name: &str,
+) -> bool {
   use std::os::fd::FromRawFd;
   if has_process_wide_grant(state, api_name) {
     return true;
@@ -255,6 +259,12 @@ pub(crate) fn finish(state: &mut OpState, adoption: FdAdoption, ret: i32) {
     } => {
       if ret == 0 {
         table.finish_uv_adopt(fd, replace_registration);
+        // An inherited descriptor node:fs registered here (an announced
+        // slot, or one taken on its first node:fs use): the wrap owns it
+        // now, so no other isolate may take it as inherited.
+        if replace_registration {
+          deno_io::claim_inherited_fd(fd);
+        }
       }
     }
     Kind::Inherited => {

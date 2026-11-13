@@ -144,16 +144,59 @@ fn ebadf() -> FsError {
   ))
 }
 
-/// Get the File trait object for an OS file descriptor from FdTable.
+/// Get the File trait object for an OS file descriptor from FdTable. A
+/// descriptor the process inherited at start-up that this isolate doesn't
+/// track yet (a non-Deno parent's fd 3, or any inherited fd in a worker) is
+/// registered on first use, as Node's fs reaches every descriptor of the
+/// process (denext).
 fn file_for_fd(
-  state: &OpState,
+  state: &mut OpState,
   fd: i32,
 ) -> Result<Rc<dyn deno_io::fs::File>, FsError> {
-  state
-    .borrow::<deno_io::FdTable>()
-    .get(fd)
-    .cloned()
-    .ok_or_else(ebadf)
+  if let Some(file) = state.borrow::<deno_io::FdTable>().get(fd) {
+    return Ok(file.clone());
+  }
+  #[cfg(unix)]
+  if let Some(file) = adopt_inherited_fd(state, fd)? {
+    return Ok(file);
+  }
+  Err(ebadf())
+}
+
+/// denext: register `fd` for node:fs when it is a descriptor the process
+/// inherited at start-up. It needs the permission its kind implies, as
+/// adopting it with `net.Socket({ fd })` does (`fd_adopt.rs`): every
+/// permission or an unscoped `--allow-ffi` covers any fd, a TCP socket needs
+/// net for its address, anything else (a pipe, a terminal, a regular file:
+/// none has a path a grant could be scoped to) unscoped read and write.
+#[cfg(unix)]
+fn adopt_inherited_fd(
+  state: &mut OpState,
+  fd: i32,
+) -> Result<Option<Rc<dyn deno_io::fs::File>>, FsError> {
+  const API_NAME: &str = "node:fs (inherited fd)";
+  {
+    let table = state.borrow::<deno_io::FdTable>();
+    if fd < 3
+      || table.contains(fd)
+      || table.has_released_inherited(fd)
+      || !deno_io::is_inherited_fd(fd)
+    {
+      return Ok(None);
+    }
+  }
+  if !crate::ops::fd_adopt::may_adopt_inherited(state, fd, API_NAME) {
+    // Name the grant that is missing; a TCP socket refused for its
+    // address gets EPERM, as `net.Socket({ fd })` does.
+    let permissions = state.borrow::<PermissionsContainer>();
+    permissions.check_read_all(API_NAME)?;
+    permissions.check_write_all(API_NAME)?;
+    return Err(FsError::Io(std::io::Error::from_raw_os_error(libc::EPERM)));
+  }
+  Ok(deno_io::adopt_inherited_fd_for_fs(
+    state.borrow_mut::<deno_io::FdTable>(),
+    fd,
+  ))
 }
 
 /// The checks `Deno.FsFile`'s `chmod` / `chown` / `utime` make (see
@@ -979,10 +1022,19 @@ pub fn op_node_fd_set_blocking(_fd: i32, _blocking: bool) -> i32 {
 pub fn op_node_fs_close(state: &mut OpState, fd: i32) -> Result<(), FsError> {
   // FdTable.remove() drops the Rc<dyn File> and cancels the cancel handle,
   // which will abort any in-flight async reads on this fd.
-  let file = state
-    .borrow_mut::<deno_io::FdTable>()
-    .remove(fd)
-    .ok_or_else(ebadf)?;
+  let removed = state.borrow_mut::<deno_io::FdTable>().remove(fd);
+  let file = match removed {
+    Some(file) => file,
+    None => {
+      // An inherited descriptor node:fs hasn't used yet (denext): register
+      // it, so the close ends node:fs's use of it as after any other.
+      file_for_fd(state, fd)?;
+      state
+        .borrow_mut::<deno_io::FdTable>()
+        .remove(fd)
+        .ok_or_else(ebadf)?
+    }
+  };
 
   // For stdio fds (0/1/2), also remove the corresponding resource table
   // entry so that Deno.stdin/stdout/stderr see the fd as closed and
@@ -1055,7 +1107,7 @@ pub async fn op_node_fs_read_deferred(
   #[buffer] buf: JsBuffer,
   #[bigint] position: i64,
 ) -> Result<u32, FsError> {
-  let file = file_for_fd(&state.borrow(), fd)?;
+  let file = file_for_fd(&mut state.borrow_mut(), fd)?;
   if position >= 0 {
     let view = deno_core::BufMutView::from(buf);
     let (nread, _) = file.read_at_async(view, position as u64).await?;
@@ -1122,7 +1174,7 @@ pub async fn op_node_fs_write_deferred(
   #[buffer] buf: JsBuffer,
   #[number] position: i64,
 ) -> Result<usize, FsError> {
-  let file = file_for_fd(&state.borrow(), fd)?;
+  let file = file_for_fd(&mut state.borrow_mut(), fd)?;
   write_with_position(file, &buf, position)
 }
 
@@ -1158,7 +1210,7 @@ pub async fn op_node_fs_seek(
   #[number] offset: i64,
   #[smi] whence: i32,
 ) -> Result<u64, FsError> {
-  let file = file_for_fd(&state.borrow(), fd)?;
+  let file = file_for_fd(&mut state.borrow_mut(), fd)?;
   let seek_from = match whence {
     0 => std::io::SeekFrom::Start(offset as u64),
     1 => std::io::SeekFrom::Current(offset),
@@ -1245,7 +1297,7 @@ pub async fn op_node_fs_fstat(
   state: Rc<RefCell<OpState>>,
   fd: i32,
 ) -> Result<NodeFsStat, FsError> {
-  let file = file_for_fd(&state.borrow(), fd)?;
+  let file = file_for_fd(&mut state.borrow_mut(), fd)?;
   let stat = file.stat_async().await?;
   Ok(NodeFsStat::from(stat))
 }
@@ -1267,7 +1319,7 @@ pub async fn op_node_fs_ftruncate(
   fd: i32,
   #[number] len: u64,
 ) -> Result<(), FsError> {
-  let file = file_for_fd(&state.borrow(), fd)?;
+  let file = file_for_fd(&mut state.borrow_mut(), fd)?;
   file.truncate_async(len).await?;
   Ok(())
 }
@@ -1287,7 +1339,7 @@ pub async fn op_node_fs_fsync(
   state: Rc<RefCell<OpState>>,
   fd: i32,
 ) -> Result<(), FsError> {
-  let file = file_for_fd(&state.borrow(), fd)?;
+  let file = file_for_fd(&mut state.borrow_mut(), fd)?;
   file.sync_async().await?;
   Ok(())
 }
@@ -1307,7 +1359,7 @@ pub async fn op_node_fs_fdatasync(
   state: Rc<RefCell<OpState>>,
   fd: i32,
 ) -> Result<(), FsError> {
-  let file = file_for_fd(&state.borrow(), fd)?;
+  let file = file_for_fd(&mut state.borrow_mut(), fd)?;
   file.datasync_async().await?;
   Ok(())
 }
@@ -1337,8 +1389,8 @@ pub async fn op_node_fs_futimes(
   #[smi] mtime_nanos: u32,
 ) -> Result<(), FsError> {
   let file = {
-    let state = state.borrow();
-    let file = file_for_fd(&state, fd)?;
+    let mut state = state.borrow_mut();
+    let file = file_for_fd(&mut state, fd)?;
     check_fd_metadata_write(&state, &file, false, "node:fs.futimes()")?;
     file
   };
@@ -1367,8 +1419,8 @@ pub async fn op_node_fs_fchmod(
   #[smi] mode: u32,
 ) -> Result<(), FsError> {
   let file = {
-    let state = state.borrow();
-    let file = file_for_fd(&state, fd)?;
+    let mut state = state.borrow_mut();
+    let file = file_for_fd(&mut state, fd)?;
     check_fd_metadata_write(&state, &file, true, "node:fs.fchmod()")?;
     file
   };
@@ -1397,8 +1449,8 @@ pub async fn op_node_fs_fchown(
   #[smi] gid: u32,
 ) -> Result<(), FsError> {
   let file = {
-    let state = state.borrow();
-    let file = file_for_fd(&state, fd)?;
+    let mut state = state.borrow_mut();
+    let file = file_for_fd(&mut state, fd)?;
     check_fd_metadata_write(&state, &file, true, "node:fs.fchown()")?;
     file
   };
@@ -1423,7 +1475,7 @@ pub async fn op_node_fs_read_file(
   state: Rc<RefCell<OpState>>,
   fd: i32,
 ) -> Result<Vec<u8>, FsError> {
-  let file = file_for_fd(&state.borrow(), fd)?;
+  let file = file_for_fd(&mut state.borrow_mut(), fd)?;
   let buf = file.read_all_async().await?;
   Ok(buf.to_vec())
 }

@@ -265,6 +265,38 @@ fn register_inherited_extra_stdio_fds(fd_table: &mut FdTable) {
   }
 }
 
+/// denext: give node:fs (`fs.fstatSync(3)`, `fs.readSync(3, …)`,
+/// `fs.closeSync(3)`) a descriptor the process inherited at start-up (see
+/// [`inherited_fds`]) that no Deno parent announced in
+/// [`DENO_EXTRA_STDIO_FDS_ENV_VAR`]: a fd 3 from a parent that is not Deno,
+/// or from any parent in a worker (only the main thread's table gets the
+/// announced ones). Node's fs reaches every descriptor of the process; here
+/// the descriptor is registered in `fd_table` like an announced slot (a
+/// close-on-exec dup, so a later `net.Socket({ fd })` can still claim the
+/// original). Returns `None` when `fd` is not (or no longer) the inherited
+/// descriptor, this table already tracks it or node:fs here closed it, or
+/// the dup fails. The caller checks permissions first.
+#[cfg(unix)]
+pub fn adopt_inherited_fd_for_fs(
+  fd_table: &mut FdTable,
+  fd: i32,
+) -> Option<Rc<dyn fs::File>> {
+  if fd < 3
+    || fd_table.contains(fd)
+    || fd_table.has_released_inherited(fd)
+    || !is_inherited_fd(fd)
+  {
+    return None;
+  }
+  let file: Rc<dyn fs::File> = Rc::new(StdFileResourceInner::file(
+    inherited_extra_stdio_fd(fd)?,
+    None,
+  ));
+  fd_table
+    .register_inherited_extra_stdio(fd, file.clone())
+    .then_some(file)
+}
+
 #[cfg(windows)]
 fn stdio_fd(fd: i32) -> StdFile {
   let std_handle = match fd {

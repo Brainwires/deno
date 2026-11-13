@@ -4,6 +4,8 @@ import CP from "node:child_process";
 import net from "node:net";
 import { Buffer } from "node:buffer";
 import { createRequire } from "node:module";
+import { once } from "node:events";
+import * as fs from "node:fs";
 import {
   assert,
   assertEquals,
@@ -666,6 +668,80 @@ Deno.test({
       cmdFinished.resolve();
     });
     await cmdFinished.promise;
+  },
+});
+
+// A descriptor a parent that is not Deno passes on fd 3 (a pipe, or a file it
+// opened) is reachable through node:fs's fd APIs, as in Node. node:fs used to
+// know only the fds a Deno parent announced, so `fs.fstatSync(3)` threw EBADF
+// and a server reading its start-up token from fd 3 came up without it. It
+// needs the permission adopting the fd with `net.Socket({ fd })` needs:
+// unscoped read and write for a pipe or a file.
+Deno.test({
+  name: "[node/child_process spawn] node:fs reads fd 3 from a non-Deno parent",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const script = path.join(
+      path.dirname(path.fromFileUrl(import.meta.url)),
+      "testdata",
+      "child_process_inherited_fd3_fs.mjs",
+    );
+    const run = async (
+      flags: string[],
+      fd3: "pipe" | number,
+    ) => {
+      const cp = spawn("env", [
+        "-u",
+        "DENO_EXTRA_STDIO_FDS",
+        Deno.execPath(),
+        "run",
+        ...flags,
+        script,
+      ], { stdio: ["ignore", "pipe", "pipe", fd3] });
+      let stdout = "";
+      let stderr = "";
+      cp.stdout?.on("data", (d) => stdout += d);
+      cp.stderr?.on("data", (d) => stderr += d);
+      const extra = cp.stdio[3];
+      if (extra) {
+        // A refused child exits without reading: a reset is expected there.
+        extra.on("error", () => {});
+        // deno-lint-ignore no-explicit-any
+        (extra as any).end("token-123\n");
+      }
+      const [code] = await once(cp, "close");
+      assertEquals(code, 0, stderr);
+      return stdout.trim().split("\n");
+    };
+
+    const flags = ["--allow-read", "--allow-write"];
+    assertEquals(await run(flags, "pipe"), [
+      "fstatSync: stream",
+      "fstat: stream",
+      "worker fstatSync: ok",
+      "readSync: token-123",
+      "fstatSync after close: EBADF",
+    ]);
+
+    const file = Deno.makeTempFileSync();
+    Deno.writeTextFileSync(file, "token-from-file\n");
+    const fd = fs.openSync(file, "r");
+    try {
+      assertEquals(await run(["-A"], fd), [
+        "fstatSync: file",
+        "fstat: file",
+        "worker fstatSync: ok",
+        "readSync: token-from-file",
+        "fstatSync after close: EBADF",
+      ]);
+    } finally {
+      fs.closeSync(fd);
+      Deno.removeSync(file);
+    }
+
+    // Scoped read access does not cover a descriptor with no path.
+    const [refused] = await run([`--allow-read=${script}`], "pipe");
+    assertEquals(refused, "refused: ERR_ACCESS_DENIED");
   },
 });
 
