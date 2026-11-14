@@ -441,3 +441,92 @@ fn ice_server_urls() {
       .unwrap();
   assert_eq!((tls.transport, tls.port), (ServerTransport::Tls, 5349));
 }
+
+#[test]
+fn shared_port_stun_routing_info() {
+  // A binding request with USERNAME "srv1:cli1": routed by "srv1".
+  let mut msg = vec![0x00, 0x01, 0x00, 0x10, 0x21, 0x12, 0xa4, 0x42];
+  msg.extend_from_slice(&[7u8; 12]);
+  msg.extend_from_slice(&[0x00, 0x06, 0x00, 0x09]);
+  msg.extend_from_slice(b"srv1:cli1\0\0\0");
+  let (typ, tid, ufrag) = crate::net::stun_info_for_tests(&msg).unwrap();
+  assert_eq!(typ, 0x0001);
+  assert_eq!(tid, [7u8; 12]);
+  assert_eq!(ufrag.as_deref(), Some("srv1"));
+  // A success response: routed by transaction id, no ufrag.
+  let mut resp = msg[..20].to_vec();
+  resp[0..4].copy_from_slice(&[0x01, 0x01, 0x00, 0x00]);
+  let (typ, _, ufrag) = crate::net::stun_info_for_tests(&resp).unwrap();
+  assert_eq!(typ & 0x0110, 0x0100);
+  assert_eq!(ufrag, None);
+  // Not STUN (DTLS, RTP): nothing.
+  assert!(crate::net::stun_info_for_tests(&[22, 254, 253, 0]).is_none());
+  // A truncated attribute is refused, not read past the end.
+  let mut bad = msg.clone();
+  bad[2..4].copy_from_slice(&[0x00, 0x40]);
+  assert!(crate::net::stun_info_for_tests(&bad).is_none());
+}
+
+#[test]
+fn network_options() {
+  use crate::net::NetworkArg;
+  use crate::net::NetworkOptions;
+  let opts = NetworkOptions::parse(NetworkArg {
+    public_addresses: vec![
+      "203.0.113.7/10.0.0.5".into(),
+      "198.51.100.2/10.0.0.6".into(),
+    ],
+    ..Default::default()
+  })
+  .unwrap();
+  assert_eq!(
+    opts.public_for("10.0.0.6".parse().unwrap()),
+    Some("198.51.100.2".parse().unwrap())
+  );
+  assert_eq!(opts.public_for("10.0.0.9".parse().unwrap()), None);
+  // One public address stands for every private one of its family.
+  let one = NetworkOptions::parse(NetworkArg {
+    public_addresses: vec!["203.0.113.7".into()],
+    ..Default::default()
+  })
+  .unwrap();
+  assert_eq!(
+    one.public_for("10.1.2.3".parse().unwrap()),
+    Some("203.0.113.7".parse().unwrap())
+  );
+  assert_eq!(one.public_for("::1".parse().unwrap()), None);
+  // Several unpaired public addresses are ambiguous.
+  assert!(
+    NetworkOptions::parse(NetworkArg {
+      public_addresses: vec!["203.0.113.7".into(), "203.0.113.8".into()],
+      ..Default::default()
+    })
+    .is_err()
+  );
+  assert!(
+    NetworkOptions::parse(NetworkArg {
+      bind_addresses: Some(vec!["nope".into()]),
+      ..Default::default()
+    })
+    .is_err()
+  );
+}
+
+#[test]
+fn port_range_binds_inside_it() {
+  let ip: IpAddr = "127.0.0.1".parse().unwrap();
+  let rt = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .unwrap();
+  rt.block_on(async {
+    let a = crate::net::bind_in_range(ip, (47300, 47301)).unwrap();
+    let b = crate::net::bind_in_range(ip, (47300, 47301)).unwrap();
+    let pa = a.local_addr().unwrap().port();
+    let pb = b.local_addr().unwrap().port();
+    assert!((47300..=47301).contains(&pa) && (47300..=47301).contains(&pb));
+    assert_ne!(pa, pb);
+    // The range is full.
+    assert!(crate::net::bind_in_range(ip, (47300, 47301)).is_err());
+  });
+}

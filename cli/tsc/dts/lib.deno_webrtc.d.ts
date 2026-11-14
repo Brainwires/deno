@@ -170,6 +170,12 @@ interface RTCConfiguration {
   rtcpMuxPolicy?: RTCRtcpMuxPolicy;
   iceCandidatePoolSize?: number;
   certificates?: RTCCertificate[];
+  /**
+   * Deno's extension: the server-side network settings (fixed or shared
+   * ports, 1:1 NAT, ICE-lite, …) from `Deno.webrtc.createNetwork()`. Not a
+   * standard member.
+   */
+  denoNetwork?: Deno.webrtc.Network;
 }
 
 /**
@@ -1334,14 +1340,15 @@ declare var RTCPeerConnection: {
 
 /**
  * Deno's WebRTC extension: what a server needs that the standard doesn't
- * have.
+ * have (encoded media, RTP, certificates, network settings).
  *
  * @category WebRTC
  */
 declare namespace Deno {
   /**
    * Deno's WebRTC extension: sending already-encoded media and RTP,
-   * reading received RTP, and keeping a DTLS certificate.
+   * reading received RTP, keeping a DTLS certificate, and the server-side
+   * network settings (`createNetwork`).
    *
    * @category WebRTC
    */
@@ -1401,6 +1408,85 @@ declare namespace Deno {
        */
       writeRtp(packet: BufferSource): number;
     }
+
+    /**
+     * Options for `createNetwork()`.
+     *
+     * @category WebRTC
+     */
+    export interface NetworkOptions {
+      /**
+       * One UDP port for every connection on the network (0: one the OS
+       * picks). Datagrams are routed to a connection by the ICE username
+       * fragment of the first STUN request from an address. TURN over UDP
+       * isn't available on a shared port (TCP / TLS TURN is).
+       */
+      port?: number;
+      /** Each connection binds its own UDP port from this range. */
+      portRange?: { min: number; max: number };
+      /**
+       * The addresses to bind (a wildcard stands for every interface
+       * address). Default: the wildcard with `--allow-sys=networkInterfaces`
+       * and the listen permission for it, else `127.0.0.1`.
+       */
+      bindAddresses?: string[];
+      /** Only these network interfaces' addresses (by name). */
+      interfaces?: string[];
+      /** Also offer `127.0.0.1` when binding the wildcard (default true). */
+      includeLoopback?: boolean;
+      /**
+       * 1:1 NAT: the public address to advertise (`"203.0.113.7"`, or
+       * `"public/private"` pairs when there are several).
+       */
+      publicAddresses?: string[];
+      /**
+       * `"host"` (the default) advertises the public address in place of the
+       * private one; `"srflx"` adds it as a server-reflexive candidate.
+       */
+      publicAddressCandidate?: "host" | "srflx";
+      /** ICE-lite: only answer connectivity checks (a server on a public IP). */
+      iceLite?: boolean;
+      /** ICE timers, in milliseconds. */
+      iceTimeouts?: {
+        disconnected?: number;
+        failed?: number;
+        keepAlive?: number;
+      };
+      /** The largest data channel message this side accepts, in bytes. */
+      maxMessageSize?: number;
+    }
+
+    /**
+     * Server-side network settings shared by the connections that name it
+     * in `RTCConfiguration.denoNetwork`. Closing it closes them.
+     *
+     * @category WebRTC
+     */
+    export class Network implements Disposable {
+      private constructor();
+      /** A `port` network's bound addresses (`"ip:port"`), else `[]`. */
+      readonly localAddresses: string[];
+      close(): void;
+      [Symbol.dispose](): void;
+    }
+
+    /**
+     * Creates a `Network`. A `port` network binds its sockets now (each bind
+     * needs the listen permission for its address).
+     *
+     * @example
+     * ```ts
+     * const network = Deno.webrtc.createNetwork({
+     *   port: 50000,
+     *   publicAddresses: ["203.0.113.7"],
+     *   iceLite: true,
+     * });
+     * const pc = new RTCPeerConnection({ denoNetwork: network });
+     * ```
+     *
+     * @category WebRTC
+     */
+    export function createNetwork(options?: NetworkOptions): Network;
 
     /**
      * Reads the RTP packets a receiver gets (header included), one chunk

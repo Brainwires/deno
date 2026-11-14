@@ -35,6 +35,9 @@ const {
   op_webrtc_pc_set_local_description,
   op_webrtc_pc_set_remote_description,
   op_webrtc_generate_certificate,
+  op_webrtc_network_addresses,
+  op_webrtc_network_close,
+  op_webrtc_network_create,
   op_webrtc_pc_add_transceiver,
   op_webrtc_pc_attach_track,
   op_webrtc_pc_selected_pair,
@@ -122,6 +125,7 @@ const {
   StringPrototypeReplace,
   StringPrototypeToUpperCase,
   SafeFinalizationRegistry,
+  SymbolDispose,
 } = primordials;
 
 const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
@@ -2167,7 +2171,21 @@ function convertConfiguration(configuration, prefix) {
       }
     }
   }
-  const network = null;
+  const network = config.denoNetwork ?? null;
+  if (
+    network !== null &&
+    !ObjectPrototypeIsPrototypeOf(RtcNetworkPrototype, network)
+  ) {
+    throw new TypeError(
+      `${prefix}: 'denoNetwork' must be a Deno.webrtc.Network`,
+    );
+  }
+  if (network !== null && network[_state].closed) {
+    throw new DOMException(
+      `${prefix}: the Deno.webrtc.Network is closed`,
+      "InvalidStateError",
+    );
+  }
   return {
     iceServers: convertIceServers(config.iceServers),
     iceTransportPolicy,
@@ -3778,9 +3796,133 @@ function importCertificate(pem) {
   return new RTCCertificate(illegalConstructorKey, info);
 }
 
+// --- Deno.webrtc.Network -----------------------------------------------------
+
+function convertNetworkOptions(options) {
+  const o = options ?? { __proto__: null };
+  const prefix = "Deno.webrtc.createNetwork";
+  const out = {
+    port: null,
+    portRange: null,
+    bindAddresses: null,
+    interfaces: null,
+    includeLoopback: true,
+    publicAddresses: [],
+    publicAddressCandidate: "host",
+    iceLite: false,
+    iceTimeouts: null,
+    maxMessageSize: null,
+  };
+  if (o.port !== undefined) {
+    out.port = webidl.converters["unsigned short"](o.port, prefix, "port", {
+      enforceRange: true,
+    });
+  }
+  if (o.portRange !== undefined) {
+    const min = webidl.converters["unsigned short"](
+      o.portRange?.min,
+      prefix,
+      "portRange.min",
+      { enforceRange: true },
+    );
+    const max = webidl.converters["unsigned short"](
+      o.portRange?.max,
+      prefix,
+      "portRange.max",
+      { enforceRange: true },
+    );
+    if (min === 0 || min > max) {
+      throw new RangeError(`${prefix}: portRange needs 0 < min <= max`);
+    }
+    out.portRange = { min, max };
+  }
+  if (out.port !== null && out.portRange !== null) {
+    throw new TypeError(`${prefix}: port and portRange are exclusive`);
+  }
+  const strings = (v, name) => {
+    if (v === undefined) return null;
+    if (v === null || typeof v[SymbolIterator] !== "function") {
+      throw new TypeError(`${prefix}: '${name}' must be a sequence of strings`);
+    }
+    return ArrayPrototypeMap(ArrayFrom(v), String);
+  };
+  out.bindAddresses = strings(o.bindAddresses, "bindAddresses");
+  out.interfaces = strings(o.interfaces, "interfaces");
+  out.publicAddresses = strings(o.publicAddresses, "publicAddresses") ?? [];
+  if (o.includeLoopback !== undefined) {
+    out.includeLoopback = !!o.includeLoopback;
+  }
+  if (o.publicAddressCandidate !== undefined) {
+    const t = String(o.publicAddressCandidate);
+    if (t !== "host" && t !== "srflx") {
+      throw new TypeError(
+        `${prefix}: publicAddressCandidate is 'host' or 'srflx'`,
+      );
+    }
+    out.publicAddressCandidate = t;
+  }
+  out.iceLite = !!o.iceLite;
+  if (o.iceTimeouts !== undefined) {
+    const t = o.iceTimeouts ?? {};
+    const ms = (v) =>
+      v === undefined ? null : webidl.converters["unsigned long"](v);
+    out.iceTimeouts = {
+      disconnected: ms(t.disconnected),
+      failed: ms(t.failed),
+      keepAlive: ms(t.keepAlive),
+    };
+  }
+  if (o.maxMessageSize !== undefined) {
+    out.maxMessageSize = webidl.converters["unsigned long"](o.maxMessageSize);
+  }
+  return out;
+}
+
+class RtcNetwork {
+  constructor(key = undefined, rid = undefined, options = undefined) {
+    if (key !== illegalConstructorKey) {
+      webidl.illegalConstructor();
+    }
+    this[_rid] = rid;
+    this[_state] = { options, closed: false, connections: new SafeSet() };
+    this[webidl.brand] = webidl.brand;
+  }
+
+  /** The shared UDP port's local addresses (`port` networks), else []. */
+  get localAddresses() {
+    webidl.assertBranded(this, RtcNetworkPrototype);
+    if (this[_state].closed) return [];
+    return op_webrtc_network_addresses(this[_rid]);
+  }
+
+  /** Closes the network's shared sockets and every connection using it. */
+  close() {
+    webidl.assertBranded(this, RtcNetworkPrototype);
+    const state = this[_state];
+    if (state.closed) return;
+    state.closed = true;
+    SetPrototypeForEach(state.connections, (pc) => pc.close());
+    op_webrtc_network_close(this[_rid]);
+  }
+
+  [SymbolDispose]() {
+    this.close();
+  }
+}
+webidl.configureInterface(RtcNetwork);
+const RtcNetworkPrototype = RtcNetwork.prototype;
+
+function createNetwork(options = undefined) {
+  const converted = convertNetworkOptions(options);
+  const rid = op_webrtc_network_create(converted);
+  return new RtcNetwork(illegalConstructorKey, rid, converted);
+}
+
 const webrtcNs = ObjectFreeze({
   __proto__: null,
   EncodedMediaTrack,
+  Network: RtcNetwork,
+  createNetwork,
   readRtp,
   requestKeyFrame,
   exportCertificate,

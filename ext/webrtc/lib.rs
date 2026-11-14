@@ -42,6 +42,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 mod media;
+mod net;
 mod peer;
 
 pub use peer::IceServerSpec;
@@ -95,6 +96,9 @@ deno_core::extension!(
     op_webrtc_receiver_request_key_frame,
     op_webrtc_pc_selected_pair,
     op_webrtc_pc_set_ice_servers,
+    op_webrtc_network_create,
+    op_webrtc_network_addresses,
+    op_webrtc_network_close,
   ],
   lazy_loaded_js = ["01_webrtc.js"],
 );
@@ -199,6 +203,9 @@ struct ConfigArg {
   /// `RTCCertificate` ids (the certificate store's).
   #[serde(default)]
   certificates: Vec<u32>,
+  /// `RTCConfiguration.denoNetwork`: a `Deno.webrtc.Network` resource.
+  #[serde(default)]
+  network: Option<ResourceId>,
 }
 
 /// Parses and permission-checks `RTCConfiguration.iceServers`.
@@ -245,6 +252,17 @@ fn op_webrtc_pc_create(
     Some("max-compat") => RTCBundlePolicy::MaxCompat,
     _ => RTCBundlePolicy::Balanced,
   };
+  let network = match config.network {
+    Some(rid) => {
+      Some(state.resource_table.get::<NetworkResource>(rid)?.0.clone())
+    }
+    None => None,
+  };
+  if network.as_ref().is_some_and(|n| n.is_closed()) {
+    return Err(WebRtcError::InvalidState(
+      "The Deno.webrtc.Network is closed".to_string(),
+    ));
+  }
   let guard = Rc::new(PermissionsGuard(RefCell::new(permissions)));
   let peer = Peer::new(
     PeerOptions {
@@ -253,6 +271,7 @@ fn op_webrtc_pc_create(
       tls,
       certificates,
       bundle_policy,
+      network,
     },
     guard,
   )?;
@@ -947,6 +966,61 @@ fn op_webrtc_pc_selected_pair(
       .selected_pair()
       .map(|(l, r)| (l.to_string(), r.to_string())),
   )
+}
+
+// --- Deno.webrtc.Network ---------------------------------------------------
+
+struct NetworkResource(Rc<net::Network>);
+
+impl Resource for NetworkResource {
+  fn name(&self) -> std::borrow::Cow<'_, str> {
+    "rtcNetwork".into()
+  }
+
+  fn close(self: Rc<Self>) {
+    self.0.close();
+  }
+}
+
+/// `Deno.webrtc.createNetwork(options)`. A `port` network binds its shared
+/// sockets now (each bind needs the listen permission for its address).
+#[op2(stack_trace)]
+#[smi]
+fn op_webrtc_network_create(
+  state: &mut OpState,
+  #[serde] arg: net::NetworkArg,
+) -> Result<ResourceId, WebRtcError> {
+  let options = net::NetworkOptions::parse(arg)?;
+  let permissions = state.borrow::<PermissionsContainer>().clone();
+  let guard = PermissionsGuard(RefCell::new(permissions));
+  let network = net::Network::new(options, &guard)?;
+  Ok(state.resource_table.add(NetworkResource(network)))
+}
+
+#[op2]
+#[serde]
+fn op_webrtc_network_addresses(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+) -> Result<Vec<String>, WebRtcError> {
+  Ok(
+    state
+      .resource_table
+      .get::<NetworkResource>(rid)?
+      .0
+      .addresses(),
+  )
+}
+
+#[op2(fast)]
+fn op_webrtc_network_close(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+) -> Result<(), WebRtcError> {
+  if let Ok(resource) = state.resource_table.take::<NetworkResource>(rid) {
+    resource.0.close();
+  }
+  Ok(())
 }
 
 #[cfg(test)]

@@ -1090,3 +1090,176 @@ Deno.test("webrtcRollbackRemovesRemoteTransceivers", async () => {
   a.close();
   b.close();
 });
+
+// --- Deno.webrtc.Network (server-side network settings) --------------------
+
+function candidatesOf(pc: RTCPeerConnection) {
+  return pc.localDescription!.sdp.split("\r\n").filter((l) =>
+    l.startsWith("a=candidate:")
+  ).map((l) => new RTCIceCandidate({ candidate: l.slice(2), sdpMid: "0" }));
+}
+
+async function connectWith(
+  serverConfig: RTCConfiguration,
+  init: RTCDataChannelInit = {},
+) {
+  // The client offers, the server (on the network) answers.
+  const client = new RTCPeerConnection();
+  const server = new RTCPeerConnection(serverConfig);
+  const channel = client.createDataChannel("net", init);
+  const remote = once<RTCDataChannelEvent>(server, "datachannel");
+  const opened = once(channel, "open");
+  await negotiate(client, server);
+  await opened;
+  const serverChannel = (await remote).channel;
+  if (serverChannel.readyState !== "open") await once(serverChannel, "open");
+  return { client, server, channel, serverChannel };
+}
+
+Deno.test("webrtcNetworkValidation", () => {
+  assertThrows(
+    () => Deno.webrtc.createNetwork({ port: 0, portRange: { min: 1, max: 2 } }),
+    TypeError,
+  );
+  assertThrows(
+    () => Deno.webrtc.createNetwork({ portRange: { min: 10, max: 5 } }),
+    RangeError,
+  );
+  assertThrows(
+    () => Deno.webrtc.createNetwork({ publicAddresses: ["not an ip"] }),
+    TypeError,
+  );
+  assertThrows(
+    () =>
+      Deno.webrtc.createNetwork({
+        publicAddresses: ["203.0.113.7", "203.0.113.8"],
+      }),
+    TypeError,
+  );
+  assertThrows(
+    () =>
+      new RTCPeerConnection({
+        denoNetwork: {} as Deno.webrtc.Network,
+      }),
+    TypeError,
+  );
+  const net = Deno.webrtc.createNetwork();
+  const pc = new RTCPeerConnection({ denoNetwork: net });
+  assertEquals(pc.getConfiguration().denoNetwork, net);
+  const other = Deno.webrtc.createNetwork();
+  const err = assertThrows(
+    () => pc.setConfiguration({ denoNetwork: other }),
+    DOMException,
+  );
+  assertEquals((err as DOMException).name, "InvalidModificationError");
+  pc.close();
+  other.close();
+  net.close();
+  const closed = assertThrows(
+    () => new RTCPeerConnection({ denoNetwork: net }),
+    DOMException,
+  );
+  assertEquals((closed as DOMException).name, "InvalidStateError");
+});
+
+Deno.test("webrtcNetworkSharedPort", async () => {
+  // port 0: one shared socket on a port the OS picks.
+  using net = Deno.webrtc.createNetwork({ port: 0 });
+  const [address] = net.localAddresses;
+  const port = Number(address.slice(address.lastIndexOf(":") + 1));
+  assert(port > 0, address);
+  const one = await connectWith({ denoNetwork: net });
+  const two = await connectWith({ denoNetwork: net });
+  // Both server connections gather on the one port.
+  for (const pc of [one.server, two.server]) {
+    const ports = candidatesOf(pc).map((c) => c.port);
+    assert(ports.length > 0);
+    assert(ports.every((p) => p === port), `${ports} vs ${port}`);
+  }
+  // Each pair's traffic reaches its own connection.
+  const toOne = messages(one.serverChannel, 1);
+  const toTwo = messages(two.serverChannel, 1);
+  one.channel.send("for one");
+  two.channel.send("for two");
+  assertEquals(await toOne, ["for one"]);
+  assertEquals(await toTwo, ["for two"]);
+  const back = messages(two.channel, 1);
+  two.serverChannel.send("from two");
+  assertEquals(await back, ["from two"]);
+  for (const p of [one, two]) {
+    p.client.close();
+    p.server.close();
+  }
+});
+
+Deno.test("webrtcNetworkPortRange", async () => {
+  using net = Deno.webrtc.createNetwork({
+    portRange: { min: 47200, max: 47220 },
+  });
+  const { client, server } = await connectWith({ denoNetwork: net });
+  const ports = candidatesOf(server).map((c) => c.port!);
+  assert(ports.length > 0);
+  assert(ports.every((p) => p >= 47200 && p <= 47220), `${ports}`);
+  client.close();
+  server.close();
+});
+
+Deno.test("webrtcNetworkPublicAddressSrflx", async () => {
+  using net = Deno.webrtc.createNetwork({
+    publicAddresses: ["203.0.113.7"],
+    publicAddressCandidate: "srflx",
+  });
+  const { client, server } = await connectWith({ denoNetwork: net });
+  const candidates = candidatesOf(server);
+  const srflx = candidates.find((c) => c.type === "srflx")!;
+  assertEquals(srflx.address, "203.0.113.7");
+  assertEquals(srflx.relatedAddress, "127.0.0.1");
+  assert(
+    candidates.some((c) => c.type === "host" && c.address === "127.0.0.1"),
+  );
+  client.close();
+  server.close();
+});
+
+Deno.test("webrtcNetworkPublicAddressHost", async () => {
+  using net = Deno.webrtc.createNetwork({
+    publicAddresses: ["203.0.113.7/127.0.0.1"],
+  });
+  // The public address replaces the private one; the connection still
+  // completes (the client is reached peer-reflexively, and what arrives on
+  // the private address is the public candidate's).
+  const { client, server, channel, serverChannel } = await connectWith({
+    denoNetwork: net,
+  });
+  const hosts = candidatesOf(server).filter((c) => c.type === "host");
+  assert(hosts.length > 0);
+  assert(hosts.every((c) => c.address === "203.0.113.7"), `${hosts}`);
+  const got = messages(serverChannel, 1);
+  channel.send("through nat");
+  assertEquals(await got, ["through nat"]);
+  client.close();
+  server.close();
+});
+
+Deno.test("webrtcNetworkIceLite", async () => {
+  using net = Deno.webrtc.createNetwork({ iceLite: true });
+  const { client, server, channel, serverChannel } = await connectWith({
+    denoNetwork: net,
+  });
+  assert(server.localDescription!.sdp.includes("a=ice-lite"));
+  const got = messages(serverChannel, 1);
+  channel.send("lite");
+  assertEquals(await got, ["lite"]);
+  client.close();
+  server.close();
+});
+
+Deno.test("webrtcNetworkMaxMessageSize", async () => {
+  using net = Deno.webrtc.createNetwork({ maxMessageSize: 4096 });
+  const { client, server, channel } = await connectWith({ denoNetwork: net });
+  // The server advertises 4096; the client may send no more.
+  assertEquals(client.sctp!.maxMessageSize, 4096);
+  assertThrows(() => channel.send(new Uint8Array(4097)), TypeError);
+  client.close();
+  server.close();
+});

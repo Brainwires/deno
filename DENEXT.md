@@ -14482,6 +14482,46 @@ where the changes are discussed.
        `Deno.webrtc.requestKeyFrame(receiver)` sends a PLI.
        `Deno.webrtc.exportCertificate(cert)` / `importCertificate(pem)` keep a
        DTLS fingerprint across restarts (the PEM holds the private key).
+       `Deno.webrtc.createNetwork(options)` (`net.rs`) returns a
+       `Deno.webrtc.Network` that connections name in the non-standard
+       `RTCConfiguration.denoNetwork` (kept by `getConfiguration()`, refused by
+       `setConfiguration()` when changed; closing the network closes them;
+       `Symbol.dispose`): `port` (one UDP port for every connection on it, 0 for
+       one the OS picks; bound by `createNetwork`, so a taken port or a refused
+       listen permission is its error; a remote address belongs to the
+       connection whose local ICE ufrag its first STUN request's USERNAME names,
+       STUN server responses are routed by transaction id, anything else from an
+       unknown address is dropped; TURN over UDP isn't available there, TCP /
+       TLS TURN is), `portRange` (each connection's own socket on a port from
+       the range, tried from a random start), `bindAddresses` (the wildcard
+       stands for every interface address), `interfaces` (by name),
+       `includeLoopback`, `publicAddresses` (1:1 NAT: `"public"` or
+       `"public/private"` pairs; `publicAddressCandidate:
+       "host"`
+       advertises the public address in place of the private one and treats what
+       arrives on the private one as the public candidate's, `"srflx"` adds a
+       server-reflexive candidate beside the host one), `iceLite`, `iceTimeouts`
+       (`disconnected`, `failed`, `keepAlive`, ms) and `maxMessageSize`.
+       `localAddresses` lists a `port` network's bound addresses. Permissions as
+       for a connection: each bind needs the listen permission for its address,
+       the interface addresses `--allow-sys=networkInterfaces`, every datagram
+       the connect permission for its destination; `DENO_WEBRTC_LOOPBACK_ONLY=1`
+       still binds `127.0.0.1` alone (with the network's port or range).
+     - **jeff-hykin/deno-webrtc's capabilities in denext:** the browser API →
+       the globals; fixed ports / port range / one shared UDP port / 1:1 NAT /
+       bind addresses / interfaces / loopback / ICE-lite / ICE timers / message
+       size → `Deno.webrtc.Network` options (its `udpMux` object is a `port`
+       network); sending encoded frames (`RtpTrack.writeSample`) and RTP
+       (`writeRtp`) → `EncodedMediaTrack.writeFrame` / `writeRtp`, which fan out
+       to every connection the track is on (its RtpTrack is one connection per
+       track); `onkeyframerequest` → the same event; a remote track's `rtp`
+       events → `Deno.webrtc.readRtp(receiver)`, a stream;
+       `RTCCertificate.toPEM` / `fromPEM` → `Deno.webrtc.exportCertificate` /
+       `importCertificate`; `generateCertificate` (it has ECDSA and Ed25519,
+       denext ECDSA and RSA, the standard's two); `installGlobals` → always
+       globals. Not carried over: `setLogLevel` (the engine's log targets stay
+       off; its outcomes are events), passive ICE-TCP (`tcpPort`; TCP candidates
+       are skipped here) and mDNS resolution and hiding (`mdns`).
      - **Engine gaps worked around:** a negotiated channel created on a live
        association opens at once with no open event from the engine (the ext
        sends it); the selected candidate pair can't be read from the stats (the
@@ -14569,7 +14609,15 @@ where the changes are discussed.
        reuse of a used sender, `stop()` through the next answer),
        `webrtcSenderParameters`, `webrtcReplaceTrack`, `webrtcLegacyCallbacks`,
        `webrtcTransportsAndSelectedPair`, `webrtcSetConfigurationRules`,
-       `webrtcRollbackRemovesRemoteTransceivers`.
+       `webrtcRollbackRemovesRemoteTransceivers`; and for `Deno.webrtc.Network`:
+       `webrtcNetworkValidation`, `webrtcNetworkSharedPort` (two connections on
+       one port, each pair's messages reaching its own),
+       `webrtcNetworkPortRange`, `webrtcNetworkPublicAddressSrflx`,
+       `webrtcNetworkPublicAddressHost` (the public address replaces the private
+       one and the connection completes), `webrtcNetworkIceLite` (`a=ice-lite`,
+       connects), `webrtcNetworkMaxMessageSize`; `ext/webrtc` lib tests
+       `shared_port_stun_routing_info`, `network_options`,
+       `port_range_binds_inside_it`.
      - WPT (`webrtc/`, 259 test files, 2111 subtests, run on biscuits in a
        Python 3.11 container with the WPT hosts, `DENO_WEBRTC_LOOPBACK_ONLY=1`;
        not in the tree's expectations, so CI doesn't run them): before
