@@ -18,6 +18,13 @@
 //! - one sans-I/O STUN/TURN client per ICE server URL: over the UDP socket,
 //!   or over its own TCP or TLS connection for `?transport=tcp` and `turns:`
 //!   (RFC 6544 framing: STUN messages and padded ChannelData on the stream);
+//! - on a `tcpPort` network (net.rs), ICE over TCP (RFC 6544): passive host
+//!   candidates on the network's listeners and an active one (port 9) per
+//!   host address; a check to a remote passive candidate dials it, and each
+//!   connection, accepted or dialled, carries RFC 4571 frames;
+//! - mDNS (`.local` host candidates): one multicast socket on port 5353,
+//!   opened when a remote `.local` candidate needs resolving or, on an
+//!   `mdns: true` network, when the connection publishes its own;
 //! - a driver task that moves datagrams between the sockets, those clients
 //!   and the engine, fires the timers and queues the engine's events for
 //!   JavaScript.
@@ -64,9 +71,13 @@ use deno_core::ToJsBuffer;
 use rtc::data_channel::RTCDataChannelId;
 use rtc::data_channel::RTCDataChannelInit;
 use rtc::data_channel::RTCDataChannelState;
+use rtc::ice::mdns::MulticastDnsMode;
+use rtc::ice::tcp_type::TcpType;
 use rtc::ice::url::ProtoType;
 use rtc::ice::url::SchemeType;
 use rtc::ice::url::Url as IceUrl;
+use rtc::mdns::MDNS_DEST_ADDR;
+use rtc::mdns::MDNS_PORT;
 use rtc::peer_connection::RTCPeerConnection;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::certificate::RTCCertificate;
@@ -92,6 +103,8 @@ use rtc::shared::TransportContext;
 use rtc::shared::TransportProtocol;
 use rtc::shared::error::Error as RtcError;
 use rtc::shared::marshal::Marshal;
+use rtc::shared::tcp_framing::TcpFrameDecoder;
+use rtc::shared::tcp_framing::try_frame_packet;
 use rtc::statistics::StatsSelector;
 use rtc::statistics::report::RTCStatsReportEntry;
 use rtc::stun::message::TransactionId;
@@ -107,6 +120,7 @@ use tokio::sync::mpsc;
 
 use crate::WebRtcError;
 use crate::media::MediaState;
+use crate::net::MdnsMode;
 use crate::net::Network;
 use crate::net::NetworkOptions;
 
@@ -133,6 +147,20 @@ const MAX_STUN_PEERS: usize = 256;
 /// The largest frame read from a TCP/TLS TURN connection (a STUN message or
 /// a ChannelData frame: 4 + 65535 bytes, padded).
 const MAX_STREAM_FRAME: usize = 4 + 65536;
+/// The port an active ICE-TCP candidate is signalled with (RFC 6544 §4.5):
+/// it connects out and never listens.
+const ACTIVE_TCP_PORT: u16 = 9;
+/// ICE-TCP connections (accepted and dialled) one peer connection keeps.
+const MAX_TCP_LINKS: usize = 32;
+/// Frames queued for one ICE-TCP connection's writer; a full queue drops
+/// new ones, as a full UDP socket buffer would (ICE and DTLS retransmit).
+const TCP_WRITE_QUEUE: usize = 256;
+/// Frames held for a remote passive candidate while it is being dialled.
+const MAX_DIAL_QUEUE: usize = 8;
+/// How long dialling a remote passive candidate may take.
+const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long an mDNS query for a remote `.local` candidate is retried.
+const MDNS_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The net permission gate. Production code wraps the runtime's
 /// `PermissionsContainer` (lib.rs); tests use their own guards.
@@ -320,9 +348,29 @@ pub(crate) struct Datagram {
   pub(crate) local: SocketAddr,
   pub(crate) from: SocketAddr,
   pub(crate) stream: Option<usize>,
+  /// Which kind of socket it came from.
+  pub(crate) via: Via,
   pub(crate) data: BytesMut,
   /// A TCP/TLS link to a TURN server ended (`stream` names it): why.
   pub(crate) closed: Option<String>,
+}
+
+/// Where a [`Datagram`] came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Via {
+  /// A UDP socket, or a TURN server's stream (`Datagram::stream`).
+  Socket,
+  /// The ICE-TCP connection with this id.
+  IceTcp(u64),
+  /// The mDNS socket.
+  Mdns,
+}
+
+/// One ICE-TCP connection, accepted on a passive candidate or dialled from
+/// an active one.
+struct TcpLink {
+  id: u64,
+  writer: mpsc::Sender<Vec<u8>>,
 }
 
 /// The connection's UDP socket for one address family.
@@ -416,6 +464,21 @@ pub struct Core {
   checking_held: bool,
   /// The connection itself, for a shared-port network's routes.
   this: Weak<Peer>,
+  /// ICE-TCP connections by remote address.
+  tcp_links: HashMap<SocketAddr, TcpLink>,
+  /// Remote passive candidates being dialled, with the frames waiting for
+  /// the connection.
+  tcp_dialing: HashMap<SocketAddr, Vec<Vec<u8>>>,
+  next_tcp_link: u64,
+  /// The selected pair is an ICE-TCP one.
+  selected_tcp: bool,
+  /// What this connection does with `.local` candidates (`Off` when mDNS
+  /// can't be used here: loopback only, or a permission refused).
+  mdns_mode: MdnsMode,
+  /// The mDNS socket, once opened.
+  mdns_socket: Option<Rc<UdpSocket>>,
+  /// Opening the mDNS socket failed (reported once).
+  mdns_failed: bool,
 }
 
 pub struct Peer {
@@ -454,31 +517,152 @@ pub fn candidate_address(candidate: &str) -> Option<(String, String, u16)> {
 }
 
 /// What to do with a remote candidate before the engine sees it.
+#[derive(Debug, PartialEq, Eq)]
 pub enum RemoteCandidate {
   /// A UDP candidate with a literal address: check it, then add it.
   Udp(SocketAddr),
+  /// A passive (or simultaneous-open) TCP candidate with a literal address,
+  /// on a connection doing ICE over TCP: check it, then add it.
+  Tcp(SocketAddr),
+  /// An mDNS `.local` host candidate, on a connection that resolves them:
+  /// the engine resolves it, and the address it resolves to is checked
+  /// against the net permission before anything is sent there.
+  Mdns,
   /// Skipped and reported as accepted, as a browser does with a candidate it
-  /// cannot use: TCP candidates (this agent does UDP only) and mDNS `.local`
-  /// names (no mDNS resolution; such a peer is still reached as a
-  /// peer-reflexive candidate once its checks arrive).
+  /// cannot use: TCP candidates without ICE over TCP (a `tcpPort` network),
+  /// active TCP candidates (they have no port; the peer is reached on our
+  /// passive candidate), and `.local` names when mDNS is off (such a peer
+  /// is still reached as a peer-reflexive candidate once its checks arrive).
   Ignore,
 }
 
+/// The `tcptype` of a candidate attribute value, if it has one.
+fn candidate_tcp_type(candidate: &str) -> Option<TcpType> {
+  let mut fields = candidate.split_ascii_whitespace();
+  while let Some(field) = fields.next() {
+    if field.eq_ignore_ascii_case("tcptype") {
+      return fields
+        .next()
+        .map(|t| TcpType::from(t.to_ascii_lowercase().as_str()));
+    }
+  }
+  None
+}
+
+/// Classifies a remote candidate for a connection that does (`tcp`) or
+/// doesn't do ICE over TCP, and does (`mdns`) or doesn't resolve `.local`
+/// names.
 pub fn classify_remote_candidate(
   candidate: &str,
+  tcp: bool,
+  mdns: bool,
 ) -> Result<RemoteCandidate, WebRtcError> {
   let Some((transport, address, port)) = candidate_address(candidate) else {
     return Err(WebRtcError::Operation(format!(
       "Invalid ICE candidate '{candidate}'"
     )));
   };
-  if transport != "udp" {
+  let is_tcp = match transport.as_str() {
+    "udp" => false,
+    "tcp" if tcp => true,
+    _ => return Ok(RemoteCandidate::Ignore),
+  };
+  if is_tcp
+    && !matches!(
+      candidate_tcp_type(candidate),
+      Some(TcpType::Passive | TcpType::SimultaneousOpen)
+    )
+  {
     return Ok(RemoteCandidate::Ignore);
   }
   match address.trim_matches(['[', ']']).parse::<IpAddr>() {
+    Ok(ip) if is_tcp => Ok(RemoteCandidate::Tcp(SocketAddr::new(ip, port))),
     Ok(ip) => Ok(RemoteCandidate::Udp(SocketAddr::new(ip, port))),
+    Err(_) if mdns && is_mdns_name(&address) => Ok(RemoteCandidate::Mdns),
     Err(_) => Ok(RemoteCandidate::Ignore),
   }
+}
+
+/// A host candidate's `<name>.local` address (RFC 6762 names; WebRTC's are
+/// `<uuid>.local`).
+fn is_mdns_name(address: &str) -> bool {
+  let lower = address.to_ascii_lowercase();
+  let Some(label) = lower.strip_suffix(".local") else {
+    return false;
+  };
+  !label.is_empty()
+    && label.len() <= 63
+    && label
+      .bytes()
+      .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// Whether this connection can use mDNS at all: never with
+/// `DENO_WEBRTC_LOOPBACK_ONLY=1`, and only with the permissions the socket
+/// needs (listening on the wildcard address, sending to the mDNS group) and
+/// interface enumeration, without which the connection is on loopback and
+/// can't reach a LAN address anyway.
+fn mdns_permitted(guard: &dyn NetGuard) -> Result<(), String> {
+  if loopback_only() {
+    return Err("DENO_WEBRTC_LOOPBACK_ONLY=1".to_string());
+  }
+  guard.interfaces()?;
+  guard.listen(IpAddr::V4(Ipv4Addr::UNSPECIFIED))?;
+  guard.connect(MDNS_DEST_ADDR)
+}
+
+/// The mDNS socket: port 5353 on every IPv4 interface, shared with the
+/// host's own responder (address reuse), in the mDNS group.
+fn bind_mdns(hosts: &[IpAddr]) -> std::io::Result<UdpSocket> {
+  let socket = socket2::Socket::new(
+    socket2::Domain::IPV4,
+    socket2::Type::DGRAM,
+    Some(socket2::Protocol::UDP),
+  )?;
+  socket.set_reuse_address(true)?;
+  #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
+  socket.set_reuse_port(true)?;
+  socket.set_nonblocking(true)?;
+  socket.set_multicast_ttl_v4(255)?;
+  socket.set_multicast_loop_v4(true)?;
+  socket
+    .bind(&SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), MDNS_PORT).into())?;
+  let group = rtc::mdns::MDNS_MULTICAST_IPV4;
+  let mut joined = false;
+  for ip in hosts {
+    if let IpAddr::V4(iface) = ip
+      && !iface.is_loopback()
+      && socket.join_multicast_v4(&group, iface).is_ok()
+    {
+      joined = true;
+    }
+  }
+  if !joined {
+    socket.join_multicast_v4(&group, &Ipv4Addr::UNSPECIFIED)?;
+  }
+  UdpSocket::from_std(socket.into())
+}
+
+/// Hides the base address a server-reflexive or relay candidate names
+/// (`raddr` / `rport`) when the host candidates are published under mDNS
+/// names, as browsers do: it is the host address the name stands for.
+pub(crate) fn redact_related_address(candidate: &str) -> String {
+  let mut out = Vec::new();
+  let mut fields = candidate.split(' ');
+  while let Some(field) = fields.next() {
+    out.push(field.to_string());
+    let hidden = match field {
+      "raddr" => fields
+        .next()
+        .map(|addr| if addr.contains(':') { "::" } else { "0.0.0.0" }),
+      "rport" => fields.next().map(|_| "0"),
+      _ => None,
+    };
+    if let Some(value) = hidden {
+      out.push(value.to_string());
+    }
+  }
+  out.join(" ")
 }
 
 /// `DENO_WEBRTC_LOOPBACK_ONLY=1`: gather on `127.0.0.1` alone, never binding
@@ -580,6 +764,23 @@ fn base_config(addr: SocketAddr) -> CandidateConfig {
     component: 1,
     ..Default::default()
   }
+}
+
+/// An ICE-TCP host candidate's line.
+fn tcp_host_line(
+  addr: SocketAddr,
+  tcp_type: TcpType,
+) -> Result<String, WebRtcError> {
+  candidate_line(
+    CandidateHostConfig {
+      base_config: CandidateConfig {
+        network: "tcp".to_owned(),
+        ..base_config(addr)
+      },
+      tcp_type,
+    }
+    .new_candidate_host(),
+  )
 }
 
 /// The length of the first complete RFC 6544 frame in `buf` (a STUN message
@@ -751,6 +952,7 @@ impl Core {
     relayed: bool,
   ) -> bool {
     match self.selected {
+      Some(_) if self.selected_tcp => false,
       Some((l, r)) => {
         r == from
           && if relayed {
@@ -772,6 +974,209 @@ impl Core {
     }
   }
 
+  /// ICE over TCP (a `tcpPort` network): a passive candidate on each of the
+  /// network's listeners per host address, and an active one (port 9) per
+  /// host address, which dials the peer's passive candidates.
+  fn gather_tcp(&mut self, opts: &NetworkOptions, gather_names: bool) {
+    let Some(net) = self.options.network.clone().filter(|n| n.has_tcp()) else {
+      return;
+    };
+    let mut lines: Vec<(SocketAddr, TcpType)> = Vec::new();
+    let mut active: Vec<IpAddr> = Vec::new();
+    for endpoint in &net.tcp {
+      for ip in published_hosts(&endpoint.hosts, gather_names) {
+        // 1:1 NAT: the public address in place of the private one (host
+        // mode), as for UDP; in srflx mode the host address itself.
+        let advertised = match opts.public_for(ip) {
+          Some(public) if !opts.public_srflx => public,
+          _ => ip,
+        };
+        let passive = SocketAddr::new(advertised, endpoint.bound.port());
+        if !lines.contains(&(passive, TcpType::Passive)) {
+          lines.push((passive, TcpType::Passive));
+        }
+        if !active.contains(&advertised) {
+          active.push(advertised);
+        }
+      }
+    }
+    for ip in active {
+      lines.push((SocketAddr::new(ip, ACTIVE_TCP_PORT), TcpType::Active));
+    }
+    for (addr, tcp_type) in lines {
+      if let Err(e) = tcp_host_line(addr, tcp_type)
+        .and_then(|line| self.add_local(line, None))
+      {
+        self.report_error(
+          "",
+          Some(addr),
+          ERROR_CODE_UNREACHABLE,
+          e.to_string(),
+        );
+      }
+    }
+  }
+
+  /// Sends an ICE-TCP frame: on the connection to `to`, or, from an active
+  /// candidate, by dialling `to` (a remote passive candidate) first. A
+  /// passive candidate only answers on connections it accepted.
+  fn send_tcp(&mut self, local: SocketAddr, to: SocketAddr, data: &[u8]) {
+    let Some(frame) = try_frame_packet(data) else {
+      return;
+    };
+    if let Some(link) = self.tcp_links.get(&to) {
+      if link.writer.try_send(frame).is_err() {
+        log::debug!("webrtc: ICE-TCP queue to {to} is full");
+      }
+      return;
+    }
+    if local.port() != ACTIVE_TCP_PORT {
+      return;
+    }
+    if let Some(queue) = self.tcp_dialing.get_mut(&to) {
+      if queue.len() < MAX_DIAL_QUEUE {
+        queue.push(frame);
+      }
+      return;
+    }
+    if self.tcp_links.len() + self.tcp_dialing.len() >= MAX_TCP_LINKS {
+      return;
+    }
+    self.tcp_dialing.insert(to, vec![frame]);
+    let bind = self.tcp_bind_ip(local.ip());
+    if let Some(peer) = self.this.upgrade() {
+      let cancel = peer.cancel.clone();
+      let weak = self.this.clone();
+      deno_core::unsync::spawn(
+        async move {
+          let stream =
+            tokio::time::timeout(TCP_CONNECT_TIMEOUT, connect_tcp(bind, to))
+              .await;
+          let Some(peer) = weak.upgrade() else {
+            return;
+          };
+          match stream {
+            Ok(Ok(stream)) => {
+              peer.attach_tcp(stream, to, TcpFrameDecoder::new(), None)
+            }
+            Ok(Err(e)) => {
+              log::debug!("webrtc: ICE-TCP connect to {to}: {e}");
+              peer.core.borrow_mut().tcp_dialing.remove(&to);
+            }
+            Err(_) => {
+              log::debug!("webrtc: ICE-TCP connect to {to} timed out");
+              peer.core.borrow_mut().tcp_dialing.remove(&to);
+            }
+          }
+        }
+        .or_cancel(cancel),
+      );
+    }
+  }
+
+  /// The local address an outbound ICE-TCP connection binds for an active
+  /// candidate on `ip`: that host address itself (a public one in 1:1 NAT
+  /// host mode stands for its private address), or none (the OS picks).
+  fn tcp_bind_ip(&self, ip: IpAddr) -> Option<IpAddr> {
+    let net = self.options.network.as_ref()?;
+    let hosts: Vec<IpAddr> = net
+      .tcp
+      .iter()
+      .flat_map(|e| e.hosts.iter().copied())
+      .collect();
+    if hosts.contains(&ip) {
+      return Some(ip);
+    }
+    net
+      .options
+      .private_for(ip, &hosts)
+      .filter(|private| hosts.contains(private))
+  }
+
+  /// The local address the engine knows an ICE-TCP connection's local
+  /// address by: in 1:1 NAT host mode the public address stands for the
+  /// private one, as for UDP.
+  fn tcp_local(&self, local: SocketAddr) -> SocketAddr {
+    match self.options.network.as_ref().map(|n| &n.options) {
+      Some(net) if !net.public_srflx => SocketAddr::new(
+        net.public_for(local.ip()).unwrap_or(local.ip()),
+        local.port(),
+      ),
+      _ => local,
+    }
+  }
+
+  /// Opens the mDNS socket once (on first need): `false` when it can't be.
+  fn open_mdns(&mut self) -> bool {
+    if self.mdns_socket.is_some() {
+      return true;
+    }
+    if self.mdns_failed || self.mdns_mode == MdnsMode::Off {
+      return false;
+    }
+    let hosts = if self.endpoints.is_empty() {
+      interface_addresses(
+        self
+          .options
+          .network
+          .as_ref()
+          .and_then(|n| n.options.interfaces.as_deref()),
+      )
+    } else {
+      self
+        .endpoints
+        .iter()
+        .flat_map(|e| e.hosts.clone())
+        .collect()
+    };
+    let socket = match bind_mdns(&hosts) {
+      Ok(socket) => Rc::new(socket),
+      Err(e) => {
+        self.mdns_failed = true;
+        self.report_error(
+          "",
+          None,
+          ERROR_CODE_UNREACHABLE,
+          format!("mDNS is unavailable: {e}"),
+        );
+        return false;
+      }
+    };
+    if let Some(peer) = self.this.upgrade() {
+      spawn_udp_reader_via(
+        socket.clone(),
+        SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), MDNS_PORT),
+        self.recv_tx.clone(),
+        peer.cancel.clone(),
+        Via::Mdns,
+      );
+    }
+    self.mdns_socket = Some(socket);
+    true
+  }
+
+  /// Whether a remote `.local` candidate can be resolved here (opening the
+  /// mDNS socket if it isn't yet).
+  fn resolves_mdns(&mut self) -> bool {
+    self.mdns_mode != MdnsMode::Off && self.open_mdns()
+  }
+
+  /// Whether this connection does ICE over TCP (a `tcpPort` network).
+  fn ice_tcp(&self) -> bool {
+    self.options.network.as_ref().is_some_and(|n| n.has_tcp())
+  }
+
+  /// A candidate line as JavaScript sees it: with the host candidates
+  /// published under mDNS names, the base address a server-reflexive or
+  /// relay candidate names is hidden too.
+  fn public_candidate(&self, line: String) -> String {
+    if self.mdns_mode == MdnsMode::Gather && line.contains(" raddr ") {
+      redact_related_address(&line)
+    } else {
+      line
+    }
+  }
+
   /// Sends what the engine wants sent, through the socket or a TURN relay.
   fn flush_engine_writes(&mut self, guard: &dyn NetGuard) -> bool {
     let mut progressed = false;
@@ -779,11 +1184,26 @@ impl Core {
       progressed = true;
       let local = msg.transport.local_addr;
       let to = msg.transport.peer_addr;
+      // mDNS queries and answers (permitted when the socket was opened).
+      if to == MDNS_DEST_ADDR {
+        if let Some(socket) = &self.mdns_socket
+          && let Err(e) = socket.try_send_to(&msg.message, to)
+        {
+          log::debug!("webrtc: mDNS send: {e}");
+        }
+        continue;
+      }
       if !self.permit(guard, to) {
         continue;
       }
+      let tcp = msg.transport.transport_protocol == TransportProtocol::TCP;
       if !is_stun(&msg.message) {
         self.selected = Some((local, to));
+        self.selected_tcp = tcp;
+      }
+      if tcp {
+        self.send_tcp(local, to, &msg.message);
+        continue;
       }
       if let Some(server) =
         self.servers.iter_mut().find(|s| s.relay == Some(local))
@@ -1003,8 +1423,9 @@ impl Core {
             mid = Some(self.first_mid().unwrap_or_else(|| "0".to_string()));
           }
           let ufrag = self.local_ufrag();
+          let candidate = self.public_candidate(init.candidate);
           self.events.push_back(JsEvent::IceCandidate {
-            candidate: init.candidate,
+            candidate,
             sdp_mid: mid.clone(),
             sdp_m_line_index: Some(0),
             username_fragment: ufrag,
@@ -1209,6 +1630,60 @@ impl Core {
       return;
     }
     let now = Instant::now();
+    match dg.via {
+      Via::Socket => {}
+      Via::Mdns => {
+        // Only what a responder sends from its mDNS port; the engine takes
+        // answers only from the mDNS socket (local port 5353).
+        if dg.from.port() == MDNS_PORT {
+          let _ = self.pc.handle_read(TaggedBytesMut {
+            now,
+            transport: TransportContext {
+              local_addr: dg.local,
+              peer_addr: dg.from,
+              ecn: None,
+              transport_protocol: TransportProtocol::UDP,
+            },
+            message: dg.data,
+          });
+        }
+        return;
+      }
+      Via::IceTcp(id) => {
+        if dg.closed.is_some() {
+          if self.tcp_links.get(&dg.from).is_some_and(|l| l.id == id) {
+            self.tcp_links.remove(&dg.from);
+          }
+          return;
+        }
+        if !self.tcp_links.get(&dg.from).is_some_and(|l| l.id == id) {
+          return;
+        }
+        if is_stun(&dg.data) {
+          self.saw_stun(dg.from);
+        } else {
+          let from_selected = match self.selected {
+            Some((_, r)) => self.selected_tcp && r == dg.from,
+            None => self.ice_up && self.stun_peers.contains(&dg.from),
+          };
+          if !from_selected {
+            return;
+          }
+        }
+        let local = self.tcp_local(dg.local);
+        let _ = self.pc.handle_read(TaggedBytesMut {
+          now,
+          transport: TransportContext {
+            local_addr: local,
+            peer_addr: dg.from,
+            ecn: None,
+            transport_protocol: TransportProtocol::TCP,
+          },
+          message: dg.data,
+        });
+        return;
+      }
+    }
     if let (Some(index), Some(reason)) = (dg.stream, dg.closed.as_ref()) {
       if let Some(server) = self.servers.get_mut(index) {
         let (url, base) = (server.url.clone(), server.base);
@@ -1312,6 +1787,52 @@ impl Peer {
         settings = settings.with_ice_timeouts(disconnected, failed, keep_alive);
       }
     }
+    // mDNS: what the network asks for (resolving the peer's `.local`
+    // candidates by default, as browsers do), when it can be used here.
+    let mut mdns_note = None;
+    let mdns_mode = match net.map(|n| n.mdns).unwrap_or_default() {
+      MdnsMode::Off => MdnsMode::Off,
+      wanted => match mdns_permitted(&*guard) {
+        Ok(()) => wanted,
+        Err(why) => {
+          if wanted == MdnsMode::Gather {
+            mdns_note = Some(format!(
+              "Host candidates are not published under mDNS names: {why}"
+            ));
+          }
+          MdnsMode::Off
+        }
+      },
+    };
+    // Publishing names nobody could resolve would hide the host candidates
+    // for nothing: the socket is opened first, and a failure keeps them
+    // literal.
+    let mut mdns_socket = None;
+    let mdns_mode = if mdns_mode == MdnsMode::Gather {
+      match bind_mdns(&interface_addresses(
+        net.and_then(|n| n.interfaces.as_deref()),
+      )) {
+        Ok(socket) => {
+          mdns_socket = Some(Rc::new(socket));
+          MdnsMode::Gather
+        }
+        Err(e) => {
+          mdns_note = Some(format!(
+            "Host candidates are not published under mDNS names: {e}"
+          ));
+          MdnsMode::Resolve
+        }
+      }
+    } else {
+      mdns_mode
+    };
+    settings = settings
+      .with_multicast_dns_mode(match mdns_mode {
+        MdnsMode::Off => MulticastDnsMode::Disabled,
+        MdnsMode::Resolve => MulticastDnsMode::QueryOnly,
+        MdnsMode::Gather => MulticastDnsMode::QueryAndGather,
+      })
+      .with_multicast_dns_timeout(Some(MDNS_QUERY_TIMEOUT));
     let settings = settings.build();
     let pc = RTCPeerConnectionBuilder::new()
       .with_configuration(config)
@@ -1321,7 +1842,17 @@ impl Peer {
       .build(Instant::now())
       .map_err(rtc_err)?;
     let (recv_tx, recv_rx) = mpsc::channel(RECV_QUEUE);
-    Ok(Rc::new_cyclic(|this| Self {
+    let mut events = VecDeque::new();
+    if let Some(note) = mdns_note {
+      events.push_back(JsEvent::IceCandidateError {
+        address: None,
+        port: None,
+        url: String::new(),
+        error_code: ERROR_CODE_UNREACHABLE,
+        error_text: note,
+      });
+    }
+    let peer = Rc::new_cyclic(|this| Self {
       core: RefCell::new(Core {
         pc,
         options,
@@ -1330,7 +1861,7 @@ impl Peer {
         gathering: GatherPhase::NotStarted,
         resolving: 0,
         srflx_seen: HashSet::new(),
-        events: VecDeque::new(),
+        events,
         allowed: HashSet::new(),
         refused: HashSet::new(),
         routes: HashMap::new(),
@@ -1347,6 +1878,13 @@ impl Peer {
         remote_known: false,
         checking_held: false,
         this: this.clone(),
+        tcp_links: HashMap::new(),
+        tcp_dialing: HashMap::new(),
+        next_tcp_link: 0,
+        selected_tcp: false,
+        mdns_mode,
+        mdns_socket: mdns_socket.clone(),
+        mdns_failed: false,
       }),
       guard,
       wake: Notify::new(),
@@ -1354,7 +1892,17 @@ impl Peer {
       cancel: CancelHandle::new_rc(),
       closed: Cell::new(false),
       driver_started: Cell::new(false),
-    }))
+    });
+    if let Some(socket) = mdns_socket {
+      spawn_udp_reader_via(
+        socket,
+        SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), MDNS_PORT),
+        peer.core.borrow().recv_tx.clone(),
+        peer.cancel.clone(),
+        Via::Mdns,
+      );
+    }
+    Ok(peer)
   }
 
   pub fn is_closed(&self) -> bool {
@@ -1475,6 +2023,11 @@ impl Peer {
     self.core.borrow().selected
   }
 
+  /// Whether the selected pair is an ICE-TCP one.
+  pub fn selected_is_tcp(&self) -> bool {
+    self.core.borrow().selected_tcp
+  }
+
   pub fn create_answer(&self) -> Result<String, WebRtcError> {
     self.guarded(|core| Ok(core.pc.create_answer(None).map_err(rtc_err)?.sdp))
   }
@@ -1544,7 +2097,11 @@ impl Peer {
   /// checks to this connection (registered again after an ICE restart).
   fn register_on_shared_port(&self) {
     let core = self.core.borrow();
-    if let Some(net) = core.options.network.as_ref().filter(|n| n.is_shared())
+    if let Some(net) = core
+      .options
+      .network
+      .as_ref()
+      .filter(|n| n.routes_by_ufrag())
       && let Some(ufrag) = core.local_ufrag()
     {
       net.register_ufrag(ufrag, &core.this);
@@ -1571,13 +2128,25 @@ impl Peer {
   ) -> Result<(), WebRtcError> {
     let mut kept = String::with_capacity(sdp.len());
     let mut checked = Vec::new();
+    let mut named = false;
+    let (tcp, mut mdns) = {
+      let core = self.core.borrow();
+      (core.ice_tcp(), core.mdns_mode != MdnsMode::Off)
+    };
     for line in sdp.split_inclusive('\n') {
       if let Some(value) = line.trim_end().strip_prefix("a=candidate:") {
-        match classify_remote_candidate(value)? {
+        match classify_remote_candidate(value, tcp, mdns)? {
           RemoteCandidate::Ignore => continue,
-          RemoteCandidate::Udp(addr) => {
+          RemoteCandidate::Udp(addr) | RemoteCandidate::Tcp(addr) => {
             self.guard.connect(addr).map_err(WebRtcError::Permission)?;
             checked.push(addr);
+          }
+          RemoteCandidate::Mdns => {
+            if !self.core.borrow_mut().resolves_mdns() {
+              mdns = false;
+              continue;
+            }
+            named = true;
           }
         }
       }
@@ -1605,6 +2174,9 @@ impl Peer {
       for addr in checked {
         core.mark_allowed(addr);
       }
+      if named {
+        core.remote_known = true;
+      }
       Ok(())
     })?;
     self.ensure_driver();
@@ -1623,11 +2195,23 @@ impl Peer {
       // End-of-candidates: nothing to do for a UDP-only agent.
       return Ok(());
     }
-    let addr = match classify_remote_candidate(&candidate)? {
-      RemoteCandidate::Ignore => return Ok(()),
-      RemoteCandidate::Udp(addr) => addr,
+    let (tcp, mdns) = {
+      let core = self.core.borrow();
+      (core.ice_tcp(), core.mdns_mode != MdnsMode::Off)
     };
-    self.guard.connect(addr).map_err(WebRtcError::Permission)?;
+    let addr = match classify_remote_candidate(&candidate, tcp, mdns)? {
+      RemoteCandidate::Ignore => return Ok(()),
+      RemoteCandidate::Mdns => {
+        if !self.core.borrow_mut().resolves_mdns() {
+          return Ok(());
+        }
+        None
+      }
+      RemoteCandidate::Udp(addr) | RemoteCandidate::Tcp(addr) => Some(addr),
+    };
+    if let Some(addr) = addr {
+      self.guard.connect(addr).map_err(WebRtcError::Permission)?;
+    }
     self.guarded(|core| {
       core
         .pc
@@ -1639,7 +2223,10 @@ impl Peer {
           url: None,
         })
         .map_err(rtc_err)?;
-      core.mark_allowed(addr);
+      match addr {
+        Some(addr) => core.mark_allowed(addr),
+        None => core.remote_known = true,
+      }
       Ok(())
     })?;
     self.poke();
@@ -1773,12 +2360,25 @@ impl Peer {
   }
 
   pub fn local_description(&self) -> Option<(String, String)> {
-    self
-      .core
-      .borrow()
-      .pc
-      .local_description()
-      .map(|d| (d.sdp_type.to_string(), d.sdp))
+    let core = self.core.borrow();
+    core.pc.local_description().map(|d| {
+      let sdp = if core.mdns_mode == MdnsMode::Gather {
+        d.sdp
+          .split_inclusive('\n')
+          .map(|line| match line.strip_prefix("a=candidate:") {
+            Some(_) if line.contains(" raddr ") => {
+              let end = line.len() - line.trim_end().len();
+              let (body, tail) = line.split_at(line.len() - end);
+              redact_related_address(body) + tail
+            }
+            _ => line.to_string(),
+          })
+          .collect()
+      } else {
+        d.sdp
+      };
+      (d.sdp_type.to_string(), sdp)
+    })
   }
 
   pub fn remote_description(&self) -> Option<(String, String)> {
@@ -1911,6 +2511,9 @@ impl Peer {
     if let Ok(mut core) = self.core.try_borrow_mut() {
       core.servers.clear();
       core.endpoints.clear();
+      core.tcp_links.clear();
+      core.tcp_dialing.clear();
+      core.mdns_socket = None;
       if let Some(net) = core.options.network.take() {
         net.forget(self);
       }
@@ -1918,6 +2521,61 @@ impl Peer {
     self.cancel.cancel();
     self.wake.notify_one();
     self.events_ready.notify_one();
+  }
+
+  /// An ICE-TCP stream the network accepted for this connection (its first
+  /// frame, a binding request, named our ufrag).
+  pub(crate) fn adopt_tcp(
+    self: &Rc<Self>,
+    stream: tokio::net::TcpStream,
+    remote: SocketAddr,
+    decoder: TcpFrameDecoder,
+    first: Vec<u8>,
+  ) {
+    self.attach_tcp(stream, remote, decoder, Some(first));
+  }
+
+  /// Starts an ICE-TCP connection's reader and writer and makes it the one
+  /// frames to `remote` go out on (with what waited while it was dialled).
+  fn attach_tcp(
+    self: &Rc<Self>,
+    stream: tokio::net::TcpStream,
+    remote: SocketAddr,
+    decoder: TcpFrameDecoder,
+    first: Option<Vec<u8>>,
+  ) {
+    if self.closed.get() {
+      return;
+    }
+    let Ok(local) = stream.local_addr() else {
+      return;
+    };
+    let mut core = self.core.borrow_mut();
+    let queued = core.tcp_dialing.remove(&remote).unwrap_or_default();
+    if core.tcp_links.len() >= MAX_TCP_LINKS
+      && !core.tcp_links.contains_key(&remote)
+    {
+      return;
+    }
+    core.next_tcp_link += 1;
+    let id = core.next_tcp_link;
+    let (writer, rx) = mpsc::channel(TCP_WRITE_QUEUE);
+    for frame in queued {
+      let _ = writer.try_send(frame);
+    }
+    core.tcp_links.insert(remote, TcpLink { id, writer });
+    let recv_tx = core.recv_tx.clone();
+    drop(core);
+    let (r, w) = stream.into_split();
+    deno_core::unsync::spawn(
+      read_ice_tcp(r, local, remote, id, decoder, first, recv_tx)
+        .or_cancel(self.cancel.clone()),
+    );
+    deno_core::unsync::spawn(
+      write_ice_tcp(w, rx).or_cancel(self.cancel.clone()),
+    );
+    self.ensure_driver();
+    self.poke();
   }
 
   fn ensure_driver(self: &Rc<Self>) {
@@ -1998,6 +2656,7 @@ impl Peer {
       }
 
       let mut advertised: HashSet<SocketAddr> = HashSet::new();
+      let gather_names = core.mdns_mode == MdnsMode::Gather;
       for (socket, bound, hosts, own_reader) in planned {
         if own_reader {
           spawn_udp_reader(
@@ -2008,7 +2667,7 @@ impl Peer {
           );
         }
         if !core.options.relay_only {
-          for ip in &hosts {
+          for ip in &published_hosts(&hosts, gather_names) {
             let private = SocketAddr::new(*ip, bound.port());
             let public = opts
               .public_for(*ip)
@@ -2064,6 +2723,9 @@ impl Peer {
           hosts,
         });
       }
+      if !core.options.relay_only {
+        core.gather_tcp(&opts, gather_names);
+      }
       core.resolving = core.options.ice_servers.len();
       core.options.ice_servers.clone()
     };
@@ -2078,11 +2740,118 @@ impl Peer {
   }
 }
 
+/// The host addresses candidates are gathered on: all of them, except that a
+/// connection publishing mDNS names leaves out loopback when it has another
+/// address (a name for 127.0.0.1 would send a LAN peer to itself).
+fn published_hosts(hosts: &[IpAddr], gather_names: bool) -> Vec<IpAddr> {
+  if gather_names && hosts.iter().any(|ip| !ip.is_loopback()) {
+    hosts
+      .iter()
+      .copied()
+      .filter(|ip| !ip.is_loopback())
+      .collect()
+  } else {
+    hosts.to_vec()
+  }
+}
+
+/// Dials a remote passive ICE-TCP candidate, from `bind` when given.
+async fn connect_tcp(
+  bind: Option<IpAddr>,
+  to: SocketAddr,
+) -> std::io::Result<tokio::net::TcpStream> {
+  let socket = if to.is_ipv4() {
+    tokio::net::TcpSocket::new_v4()?
+  } else {
+    tokio::net::TcpSocket::new_v6()?
+  };
+  if let Some(ip) = bind.filter(|ip| ip.is_ipv4() == to.is_ipv4()) {
+    socket.bind(SocketAddr::new(ip, 0))?;
+  }
+  let stream = socket.connect(to).await?;
+  let _ = stream.set_nodelay(true);
+  Ok(stream)
+}
+
+/// Reads RFC 4571 frames off an ICE-TCP connection into the driver's queue
+/// (waiting when it is full: a stream pushes back instead of dropping), then
+/// tells the driver the connection ended.
+async fn read_ice_tcp<R: tokio::io::AsyncRead + Unpin>(
+  mut reader: R,
+  local: SocketAddr,
+  remote: SocketAddr,
+  id: u64,
+  mut decoder: TcpFrameDecoder,
+  first: Option<Vec<u8>>,
+  tx: mpsc::Sender<Datagram>,
+) {
+  let datagram = |data: BytesMut, closed: Option<String>| Datagram {
+    local,
+    from: remote,
+    stream: None,
+    via: Via::IceTcp(id),
+    data,
+    closed,
+  };
+  if let Some(frame) = first
+    && tx
+      .send(datagram(BytesMut::from(&frame[..]), None))
+      .await
+      .is_err()
+  {
+    return;
+  }
+  let mut chunk = vec![0u8; RECV_BUFFER_SIZE];
+  let reason = 'read: loop {
+    while let Some(frame) = decoder.next_packet() {
+      if tx
+        .send(datagram(BytesMut::from(&frame[..]), None))
+        .await
+        .is_err()
+      {
+        return;
+      }
+    }
+    let n = match reader.read(&mut chunk).await {
+      Ok(0) => break 'read "the peer closed the connection".to_string(),
+      Err(e) => break 'read e.to_string(),
+      Ok(n) => n,
+    };
+    if decoder.push(&chunk[..n]).is_err() {
+      break 'read "the peer sent more than it framed".to_string();
+    }
+  };
+  let _ = tx.send(datagram(BytesMut::new(), Some(reason))).await;
+}
+
+/// Writes queued RFC 4571 frames to an ICE-TCP connection.
+async fn write_ice_tcp<W: tokio::io::AsyncWrite + Unpin>(
+  mut writer: W,
+  mut rx: mpsc::Receiver<Vec<u8>>,
+) {
+  while let Some(frame) = rx.recv().await {
+    if writer.write_all(&frame).await.is_err() {
+      let _ = writer.shutdown().await;
+      return;
+    }
+  }
+}
+
 fn spawn_udp_reader(
   socket: Rc<UdpSocket>,
   local: SocketAddr,
   tx: mpsc::Sender<Datagram>,
   cancel: Rc<CancelHandle>,
+) {
+  spawn_udp_reader_via(socket, local, tx, cancel, Via::Socket);
+}
+
+fn spawn_udp_reader_via(
+  socket: Rc<UdpSocket>,
+  local: SocketAddr,
+  tx: mpsc::Sender<Datagram>,
+  cancel: Rc<CancelHandle>,
+  via: Via,
 ) {
   deno_core::unsync::spawn(
     async move {
@@ -2094,6 +2863,7 @@ fn spawn_udp_reader(
               local,
               from,
               stream: None,
+              via,
               data: BytesMut::from(&buf[..n]),
               closed: None,
             };
@@ -2142,6 +2912,7 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
             local,
             from: server,
             stream: Some(index),
+            via: Via::Socket,
             data: BytesMut::from(&frame[..]),
             closed: None,
           };
@@ -2157,6 +2928,7 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
       local,
       from: server,
       stream: Some(index),
+      via: Via::Socket,
       data: BytesMut::new(),
       closed: Some(reason),
     })
@@ -2455,5 +3227,14 @@ pub(crate) fn frame_len_for_tests(buf: &[u8]) -> Option<usize> {
 impl Peer {
   pub(crate) fn selected_for_tests(&self) -> Option<(SocketAddr, SocketAddr)> {
     self.core.borrow().selected
+  }
+
+  pub(crate) fn selected_is_tcp_for_tests(&self) -> bool {
+    let core = self.core.borrow();
+    core.selected.is_some() && core.selected_tcp
+  }
+
+  pub(crate) fn mdns_open_for_tests(&self) -> bool {
+    self.core.borrow().mdns_socket.is_some()
   }
 }

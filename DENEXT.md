@@ -14270,9 +14270,9 @@ where the changes are discussed.
 
 370. **`feat(ext/webrtc)`: WebRTC as globals: data channels, media transceivers,
      certificates and transports, plus the `Deno.webrtc` server extension**
-     (`feat/webrtc`, then `feat/webrtc-parity`; CLI and runtime; `ext/webrtc`
-     (`media.rs` new), `runtime/js/98_global_scope_shared.js`,
-     `runtime/js/90_deno_ns.js`,
+     (`feat/webrtc`, then `feat/webrtc-parity` and `feat/webrtc-gaps`; CLI and
+     runtime; `ext/webrtc` (`media.rs` new),
+     `runtime/js/98_global_scope_shared.js`, `runtime/js/90_deno_ns.js`,
      `runtime/{Cargo.toml,lib.rs,snapshot,snapshot_info,worker,web_worker}.rs`,
      `cli/tsc/dts/lib.deno_webrtc.d.ts`,
      `cli/tsc/dts/lib.deno.shared_globals.d.ts`, `cli/{build.rs,tsc/mod.rs}`,
@@ -14312,20 +14312,23 @@ where the changes are discussed.
        keyless ChangeCipherSpec, TURN message integrity, and remote panics), and
        its TURN response integrity, SCTP stream-id parity, caps (the
        remote-candidate cap on every add path) and RTP header-extension bounds:
-       the release `v0.21.1+brainwires.1`, pinned by its commit `d9b3263c` (a
-       `git` + `rev` dependency, as `v8` and `laufey` are). CBC cipher suites
-       are off there by default; the driver sets none (GCM is negotiated). On
-       its `crypto-aws-lc-rs` provider, the aws-lc-rs Deno's rustls already
-       uses, so no ring-based DTLS crypto is added. Chosen over webrtc-rs's
-       async `webrtc` crate (its own tokio tasks and sockets, out of reach of
-       the permission gate), libdatachannel (C++, CMake, MPL-2.0, a second TLS
-       stack) and str0m (sans-I/O too, but no TURN client and no W3C-shaped
-       API). The fork's earlier `master` (`81bc7c6b`, what ReachMyDevice pins)
-       was the first pick and was set aside by the 2026-11-13 audit: 320 commits
-       behind upstream and missing upstream's DTLS, ICE and H.264 crash fixes
-       and its SCTP and data-channel fixes; this sync brings them in. Pre-1.0
-       and not externally audited: DTLS, SCTP and ICE parsing are exposed to any
-       peer that completes ICE.
+       the release `v0.21.1+brainwires.1`; from `feat/webrtc-gaps`
+       `v0.21.1+brainwires.2` (ICE-TCP between `rtc` peers in both role
+       assignments, per-address mDNS names with IPv6, inbound PLI / FIR
+       delivered to the application, bounded RFC 4571 decoding), pinned by its
+       commit `dddbef43` (a `git` + `rev` dependency, as `v8` and `laufey` are).
+       CBC cipher suites are off there by default; the driver sets none (GCM is
+       negotiated). On its `crypto-aws-lc-rs` provider, the aws-lc-rs Deno's
+       rustls already uses, so no ring-based DTLS crypto is added. Chosen over
+       webrtc-rs's async `webrtc` crate (its own tokio tasks and sockets, out of
+       reach of the permission gate), libdatachannel (C++, CMake, MPL-2.0, a
+       second TLS stack) and str0m (sans-I/O too, but no TURN client and no
+       W3C-shaped API). The fork's earlier `master` (`81bc7c6b`, what
+       ReachMyDevice pins) was the first pick and was set aside by the
+       2026-11-13 audit: 320 commits behind upstream and missing upstream's
+       DTLS, ICE and H.264 crash fixes and its SCTP and data-channel fixes; this
+       sync brings them in. Pre-1.0 and not externally audited: DTLS, SCTP and
+       ICE parsing are exposed to any peer that completes ICE.
      - **Driver** (`peer.rs`; the engine does no I/O and reads no clock): one
        UDP socket per address family per connection, bound to `0.0.0.0` / `[::]`
        when interfaces may be listed and the wildcard may be listened on (every
@@ -14343,6 +14346,19 @@ where the changes are discussed.
        datagrams between the sockets, the clients and the engine, fires
        `poll_timeout`, and queues events that JavaScript takes in batches
        (`op_webrtc_pc_next_events`). Received messages reach V8 without a copy.
+       From `feat/webrtc-gaps`, on a `tcpPort` network (below), ICE over TCP
+       (RFC 6544): passive host candidates on the network's listeners, an active
+       one (port 9) per host address, a connection dialled the first time the
+       engine sends a check to a remote passive candidate (bound to the
+       candidate's address; up to 8 frames wait for it, 5 s to connect), and
+       every connection, accepted or dialled, carrying RFC 4571 frames (the
+       fork's bounded `TcpFrameDecoder`; a reader waits when the driver's queue
+       is full, a writer drops past 256 queued frames); at most 32 per
+       connection. mDNS: one multicast socket on port 5353 (address reuse,
+       shared with the host's responder, the group joined on each IPv4
+       interface), opened the first time a remote `.local` candidate needs
+       resolving, or at construction when the connection publishes names; the
+       engine resolves (queries ask A and AAAA, 10 s each) and answers.
      - **Guards the engine doesn't have:** the net permission gate (below); a
        selected-pair filter (the engine accepts DTLS from any address, so a
        non-STUN packet reaches it only from the pair its own last non-STUN
@@ -14352,8 +14368,11 @@ where the changes are discussed.
        without DTLS is reported as `failed`); a panic boundary (`catch_unwind`
        around every engine call: the connection reports `failed` and closes;
        inert under the release profile's `panic = "abort"`); the engine's `rtc`
-       / `rtc_*` log targets are off (`cli/lib/util/logger.rs`), its outcomes
-       are events instead.
+       / `rtc_*` log targets are off by default (`cli/lib/util/logger.rs`), its
+       outcomes are events instead; from `feat/webrtc-gaps`
+       `Deno.webrtc.setLogLevel(level)` (`off`, `error`, `warn`, `info`,
+       `debug`, `trace`; process-wide) shows them on stderr as
+       `LEVEL RS - target:line - message`, bypassing `DENO_LOG`.
      - **Permissions** (least-privilege guardrails, like every net API): the
        constructor checks each ICE server's host and port (`--allow-net` /
        `--allow-net-connect`, `NotCapable`), and the address it resolves to;
@@ -14362,17 +14381,25 @@ where the changes are discussed.
        (`addIceCandidate`, or a line of `setRemoteDescription`'s SDP) whose
        address is refused rejects the call; a peer-reflexive address refused at
        first send is never sent to and is reported as an `icecandidateerror`
-       (701, the permission error as `errorText`); a wildcard socket needs the
-       listen permission for `0.0.0.0` / `::` (`--allow-net` /
-       `--allow-net-listen`), and the interface addresses need
-       `--allow-sys=networkInterfaces` (what `Deno.networkInterfaces()` needs:
-       host candidates disclose them); without either, the connection gathers on
-       `127.0.0.1` only and says so in an `icecandidateerror`. Limits: inbound
-       datagrams from any address reach the engine's ICE (it authenticates STUN
-       with the ICE credentials before anything else flows); a TURN server
-       reaches every peer it relays to; mDNS `.local` candidates are skipped (no
-       mDNS resolution: a browser peer is reached as peer-reflexive once its
-       checks arrive).
+       (701, the permission error as `errorText`), and so is an mDNS-resolved
+       address (checked at first send like a peer-reflexive one); a TCP
+       listener's bind needs the listen permission for its address, a dialled
+       connection the connect permission for the remote passive candidate
+       (checked before dialling); mDNS needs `--allow-sys=networkInterfaces`,
+       the listen permission for `0.0.0.0` and the connect permission for
+       `224.0.0.251:5353` (without them, or under `DENO_WEBRTC_LOOPBACK_ONLY=1`,
+       `.local` candidates are skipped as before and a `mdns: true` network says
+       why in an `icecandidateerror`); a wildcard socket needs the listen
+       permission for `0.0.0.0` / `::` (`--allow-net` / `--allow-net-listen`),
+       and the interface addresses need `--allow-sys=networkInterfaces` (what
+       `Deno.networkInterfaces()` needs: host candidates disclose them); without
+       either, the connection gathers on `127.0.0.1` only and says so in an
+       `icecandidateerror`. Limits: inbound datagrams from any address reach the
+       engine's ICE (it authenticates STUN with the ICE credentials before
+       anything else flows); a TURN server reaches every peer it relays to; an
+       ICE-TCP listener accepts from any address, but a stream whose first RFC
+       4571 frame (2 KiB at most, within 10 s) isn't a binding request naming a
+       connection's ufrag is closed, and at most 64 wait at once per network.
      - **`DENO_WEBRTC_LOOPBACK_ONLY=1`:** gather on `127.0.0.1` alone, never
        binding the wildcard (machines whose firewall asks about every
        non-loopback listener; the unit tests set it).
@@ -14495,11 +14522,12 @@ where the changes are discussed.
        `setLocalDescription()`'s promise, which browsers order the other way.
        Not implemented: `getRemoteCertificates()` (empty), `peerIdentity`,
        encoded transforms (`RTCRtpScriptTransform`), the receiver's `audioLevel`
-       (needs the RFC 6464 extension, not negotiated), TCP ICE candidates
-       (skipped), mDNS: neither resolving a peer's `.local` candidates (the peer
-       is reached as peer-reflexive once its checks arrive) nor hiding the local
-       host candidates (literal addresses, which is why they need the sys
-       permission).
+       (needs the RFC 6464 extension, not negotiated). From `feat/webrtc-gaps` a
+       peer's `.local` candidates are resolved (they were skipped) and TCP
+       candidates are used on a `tcpPort` network (skipped elsewhere, as
+       before); the local host candidates are published under mDNS names only on
+       an `mdns: true` network (browsers do it by default; here they stay
+       literal unless asked, which is why they need the sys permission).
      - **`Deno.webrtc` (`feat/webrtc-parity`):** what a server needs and the
        standard doesn't have.
        `new Deno.webrtc.EncodedMediaTrack({ kind,
@@ -14537,7 +14565,19 @@ where the changes are discussed.
        advertises the public address in place of the private one and treats what
        arrives on the private one as the public candidate's, `"srflx"` adds a
        server-reflexive candidate beside the host one), `iceLite`, `iceTimeouts`
-       (`disconnected`, `failed`, `keepAlive`, ms) and `maxMessageSize`.
+       (`disconnected`, `failed`, `keepAlive`, ms) and `maxMessageSize`. From
+       `feat/webrtc-gaps`: `tcpPort` (ICE over TCP, RFC 6544: one TCP listener
+       per bind address, 0 for a port the OS picks, bound by `createNetwork`;
+       each connection on the network offers a passive candidate on it and an
+       active one per host address, which dials the peer's passive candidates;
+       an accepted stream belongs to the connection its first frame's USERNAME
+       names, as on a shared UDP port; in 1:1 NAT host mode the public address
+       stands in, as for UDP) and `mdns` (`true`: each host address published
+       under its own `<uuid>.local` name, IPv4 and IPv6, loopback left out when
+       there is another address, and the `raddr` / `rport` of server-reflexive
+       and relay candidates hidden as `0.0.0.0` / `0`, as browsers do; `false`:
+       no names and no resolving; unset: resolving only, the default for every
+       connection). `Network.tcpAddresses` lists the TCP listeners.
        `localAddresses` lists a `port` network's bound addresses. Permissions as
        for a connection: each bind needs the listen permission for its address,
        the interface addresses `--allow-sys=networkInterfaces`, every datagram
@@ -14555,9 +14595,11 @@ where the changes are discussed.
        `RTCCertificate.toPEM` / `fromPEM` → `Deno.webrtc.exportCertificate` /
        `importCertificate`; `generateCertificate` (it has ECDSA and Ed25519,
        denext ECDSA and RSA, the standard's two); `installGlobals` → always
-       globals. Not carried over: `setLogLevel` (the engine's log targets stay
-       off; its outcomes are events), passive ICE-TCP (`tcpPort`; TCP candidates
-       are skipped here) and mDNS resolution and hiding (`mdns`).
+       globals. From `feat/webrtc-gaps` the rest: `setLogLevel` →
+       `Deno.webrtc.setLogLevel`, `tcpPort` (passive ICE-TCP) → the network's
+       `tcpPort`, which adds active candidates too, so the peer's passive ones
+       are reached, and `mdns` → the network's `mdns` (with resolution on by
+       default, as browsers have it).
      - **Engine gaps worked around:** a negotiated channel created on a live
        association opens at once with no open event from the engine (the ext
        sends it); the selected candidate pair can't be read from the stats (the
@@ -14567,21 +14609,24 @@ where the changes are discussed.
        interceptor chain's terminus ends every inbound RTCP packet no
        interceptor vouches for, PLI and FIR included, so an application never
        sees a key-frame request; a `KeyFrameRequests` interceptor of the ext's
-       (`Slot::Custom(14_000)`, application-ward of the defaults) marks them
-       `DeliverToApplication`. The engine names transceivers by index, which its
-       rollback shifts (it removes the ones the rolled-back remote offer
-       created): each gets a stable key, and the ones the rollback removes are
-       computed the way the engine picks them. The engine's codec lists are
-       internal, so `getCapabilities()` reads the offer of a throwaway
-       connection. Its synchronization sources stay empty, so the ext records
-       SSRCs and CSRCs as packets arrive. Its transceivers have an optional
-       sender (a recvonly one has none): each W3C transceiver is created
-       sendrecv with one encoding, then given its direction, so every one has a
-       sender and a receiver; what a sender with a `null` track is written is
-       dropped.
+       (`Slot::Custom(14_000)`, application-ward of the defaults) marked them
+       `DeliverToApplication`. From `feat/webrtc-gaps` the fork does it
+       (`KeyFrameRequestInterceptor` at `Slot::KeyFrameRequests`, part of
+       `register_default_interceptors`) and the ext's interceptor is gone. The
+       engine names transceivers by index, which its rollback shifts (it removes
+       the ones the rolled-back remote offer created): each gets a stable key,
+       and the ones the rollback removes are computed the way the engine picks
+       them. The engine's codec lists are internal, so `getCapabilities()` reads
+       the offer of a throwaway connection. Its synchronization sources stay
+       empty, so the ext records SSRCs and CSRCs as packets arrive. Its
+       transceivers have an optional sender (a recvonly one has none): each W3C
+       transceiver is created sendrecv with one encoding, then given its
+       direction, so every one has a sender and a receiver; what a sender with a
+       `null` track is written is dropped.
      - **Dependency:** `aws-lc-rs` (the workspace's, already linked through
        rustls) directly, for RSA certificate keys (`feat/webrtc-parity`); the
-       `rtc` crates (`0.21.1+brainwires.1`) from the pinned fork commit, with
+       `rtc` crates (`0.21.1+brainwires.1`; `0.21.1+brainwires.2` from
+       `feat/webrtc-gaps`, no new dependency) from the pinned fork commit, with
        `sansio`, `rcgen` 0.14, `x509-parser` 0.16 / 0.18, `der-parser`,
        `asn1-rs`, `crc`, `crc32c` (0.6.8), `rkyv`, `pem` 3 / 4, `substring`,
        `yasna` from crates.io; the workspace's `aes` pin moves `=0.8.3` →
@@ -14614,25 +14659,29 @@ where the changes are discussed.
        TURN, under the net permission: data channels, and media sent as encoded
        frames or RTP (`Deno.webrtc.EncodedMediaTrack`) and received as RTP
        (`Deno.webrtc.readRtp`), with transceivers, certificates and transports
-       as the standard has them.
+       as the standard has them; ICE over TCP on a
+       `Deno.webrtc.createNetwork({ tcpPort })` network, peers' `.local` mDNS
+       candidates resolved (and the host candidates published as mDNS names with
+       `mdns: true`), and the engine's log with `Deno.webrtc.setLogLevel()`.
      - Tests: `ext/webrtc` lib tests (two peers on loopback, no V8: both
        directions, a `maxMessageSize` message then 200 ordered ones and one byte
        over refused, an unordered `maxRetransmits: 0` channel, `bufferedAmount`
        draining to 0 with `bufferedamountlow`, close ending the event stream and
        refusing sends, a refused remote candidate, mDNS and TCP candidates
-       skipped, candidate and ICE URL parsing, RFC 6544 frames);
-       `tests/unit/webrtc_test.ts` (19: the globals, constructors and
-       validation, trickle and non-trickle offer/answer, every binary kind incl.
-       `Blob` order and `binaryType = "blob"`, large and ordered messages,
-       unordered, negotiated, `bufferedAmount`, channel close, connection close
-       closing channels, `getStats`, least privilege (`net: ["127.0.0.1"]`,
-       `sys: false`), an ICE server and a remote candidate refused by the net
-       permission). From `feat/webrtc-parity` (each fails on the build before
-       it: the API is missing or throws `NotSupportedError`), 30 more:
-       `webrtcMediaGlobals`, `webrtcGenerateCertificate` (ECDSA, RSA, `expires`,
-       refused algorithms), `webrtcCertificatesConfiguration` (the SDP
-       fingerprint is the certificate's; an ECDSA and an RSA peer complete DTLS;
-       expired / changed certificates refused), `webrtcCertificateExportImport`,
+       skipped (without a `tcpPort` network or the mDNS permissions), candidate
+       and ICE URL parsing, RFC 6544 frames); `tests/unit/webrtc_test.ts` (19:
+       the globals, constructors and validation, trickle and non-trickle
+       offer/answer, every binary kind incl. `Blob` order and
+       `binaryType = "blob"`, large and ordered messages, unordered, negotiated,
+       `bufferedAmount`, channel close, connection close closing channels,
+       `getStats`, least privilege (`net: ["127.0.0.1"]`, `sys: false`), an ICE
+       server and a remote candidate refused by the net permission). From
+       `feat/webrtc-parity` (each fails on the build before it: the API is
+       missing or throws `NotSupportedError`), 30 more: `webrtcMediaGlobals`,
+       `webrtcGenerateCertificate` (ECDSA, RSA, `expires`, refused algorithms),
+       `webrtcCertificatesConfiguration` (the SDP fingerprint is the
+       certificate's; an ECDSA and an RSA peer complete DTLS; expired / changed
+       certificates refused), `webrtcCertificateExportImport`,
        `webrtcAddTransceiver` (validation, directions, sender / receiver
        defaults, the offer's m-lines), `webrtcNegotiationNeededOnce`,
        `webrtcCapabilities`, `webrtcSetCodecPreferences` (the preferred codec
@@ -14662,7 +14711,33 @@ where the changes are discussed.
        `webrtcNetworkIceLite` (`a=ice-lite`, connects),
        `webrtcNetworkMaxMessageSize`; `ext/webrtc` lib tests
        `shared_port_stun_routing_info`, `network_options`,
-       `port_range_binds_inside_it`.
+       `port_range_binds_inside_it`. From `feat/webrtc-gaps` (each fails on the
+       build before it: the option, getter or function is missing, or the
+       candidates are skipped): `webrtcNetworkIceTcp` (two `tcpPort` networks,
+       UDP candidates left out of both descriptions: passive and active
+       candidates on the listener's port and 9, a text and a 60 000-byte
+       message, both selected-pair candidates `tcp`),
+       `webrtcNetworkIceTcpOptions`, `webrtcNetworkMdnsOption` (under
+       `DENO_WEBRTC_LOOPBACK_ONLY=1` `mdns:
+       true` stays literal and says
+       why; `mdns: false` skips `.local`), `webrtcSetLogLevel` (a `TypeError`
+       for an unknown level; a subprocess's stderr carries engine records at
+       `trace` and none by default); `webrtcRtpAndKeyFrameRequests` now passes
+       through the fork's interceptor. `ext/webrtc` lib tests
+       `ice_tcp_offerer_listens_answerer_dials`,
+       `ice_tcp_offerer_dials_answerer_listens` (each role on each side, the
+       selected pair TCP), `ice_tcp_listener_closes_streams_that_are_not_ice` (a
+       non-STUN first frame, an unknown ufrag, an oversized frame),
+       `ice_tcp_needs_a_tcp_network`, `remote_candidate_classes`,
+       `related_addresses_are_redacted`, `mdns_is_off_without_its_permissions`,
+       and `mdns_host_candidates_resolve_between_peers` (`#[ignore]`d: it binds
+       `0.0.0.0:5353` and uses IPv4 multicast; the `webrtc-mdns` job of
+       `.github/workflows/denext_tests_os.yml` runs it with `--ignored` on our
+       Linux pool only, never on a fork's pull request, and it passed on
+       biscuits); `cli/lib/util/logger.rs`
+       `engine_records_follow_the_webrtc_log_level`. The fork's own tests
+       (`tests/ice_tcp_rtc2rtc.rs`, agent, mDNS, interceptor, framing, demuxer)
+       and its `agent_mdns_and_tcp` fuzz target are listed in its CHANGELOG.
      - WPT (`webrtc/`, 259 test files, 2111 subtests, run on biscuits in a
        Python 3.11 container with the WPT hosts, `DENO_WEBRTC_LOOPBACK_ONLY=1`;
        not in the tree's expectations, so CI doesn't run them): before
@@ -14672,12 +14747,16 @@ where the changes are discussed.
        1291 of 2110 (61.2%) and 38 files fully (`RTCConfiguration-certificates`,
        `-iceCandidatePoolSize`, `-iceTransportPolicy`,
        `RTCPeerConnection-SLD-SRD-timing`, the data channel files that passed
-       before, among them). Most of what still fails needs what Deno doesn't
-       have: the tests' media helper draws to an `HTMLCanvasElement` or calls
-       `getUserMedia`, and 33 files touch `document`. Two
-       `RTCDataChannel-bufferedAmount` subtests that check for 0 right after the
-       peer got the message pass or fail with the SACK's timing (the
-       acknowledged-bytes semantics above).
+       before, among them); with `feat/webrtc-gaps` 1292 of 2110 (61.2%) and 38
+       files fully, the same files as before: the one subtest more is
+       `RTCDataChannel-bufferedAmount`'s SACK-timed check (below); WPT gives
+       every connection the default configuration, so `tcpPort`, `mdns` (off
+       under `DENO_WEBRTC_LOOPBACK_ONLY=1` anyway) and `setLogLevel` are outside
+       it. Most of what still fails needs what Deno doesn't have: the tests'
+       media helper draws to an `HTMLCanvasElement` or calls `getUserMedia`, and
+       33 files touch `document`. Two `RTCDataChannel-bufferedAmount` subtests
+       that check for 0 right after the peer got the message pass or fail with
+       the SACK's timing (the acknowledged-bytes semantics above).
      - Node tests enabled: none; `node:` has no WebRTC API.
 
 371. **`fix(node:fs)`: node:fs reaches a descriptor a native addon opened, in

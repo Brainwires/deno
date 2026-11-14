@@ -26,6 +26,8 @@ use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use deno_core::OpState;
 use deno_core::Resource;
@@ -53,6 +55,57 @@ pub use peer::PeerOptions;
 pub use peer::ServerTransport;
 
 const API_NAME: &str = "RTCPeerConnection";
+
+/// How verbose the engine's log is (`Deno.webrtc.setLogLevel`), as a
+/// `log::LevelFilter` (0 = off, the default). Process-wide, like the log.
+static ENGINE_LOG_LEVEL: AtomicUsize = AtomicUsize::new(0);
+
+const LOG_LEVELS: [log::LevelFilter; 6] = [
+  log::LevelFilter::Off,
+  log::LevelFilter::Error,
+  log::LevelFilter::Warn,
+  log::LevelFilter::Info,
+  log::LevelFilter::Debug,
+  log::LevelFilter::Trace,
+];
+
+/// Whether a log record comes from the WebRTC engine (the `rtc` and `rtc_*`
+/// crates), whose records `Deno.webrtc.setLogLevel` governs.
+pub fn is_engine_log_target(target: &str) -> bool {
+  target == "rtc" || target.starts_with("rtc::") || target.starts_with("rtc_")
+}
+
+/// The engine's log level (`Deno.webrtc.setLogLevel`; off by default: its
+/// outcomes are `RTCPeerConnection` events). The runtime's logger shows
+/// engine records at or above it, and no others.
+pub fn engine_log_level() -> log::LevelFilter {
+  LOG_LEVELS
+    .get(ENGINE_LOG_LEVEL.load(Ordering::Relaxed))
+    .copied()
+    .unwrap_or(log::LevelFilter::Off)
+}
+
+/// Sets the engine's log level by name: `off`, `error`, `warn`, `info`,
+/// `debug` or `trace`.
+pub fn set_engine_log_level(name: &str) -> Result<(), WebRtcError> {
+  let Some(index) = LOG_LEVELS
+    .iter()
+    .position(|l| l.as_str().eq_ignore_ascii_case(name))
+  else {
+    return Err(WebRtcError::Type(format!(
+      "'{name}' is not a log level: use 'off', 'error', 'warn', 'info', \
+       'debug' or 'trace'"
+    )));
+  };
+  ENGINE_LOG_LEVEL.store(index, Ordering::Relaxed);
+  // The `log` macros skip records above the global maximum before asking
+  // the logger, so it has to admit the engine's level (it is never lowered
+  // here: other targets may need it).
+  if LOG_LEVELS[index] > log::max_level() {
+    log::set_max_level(LOG_LEVELS[index]);
+  }
+  Ok(())
+}
 
 deno_core::extension!(
   deno_webrtc,
@@ -99,7 +152,9 @@ deno_core::extension!(
     op_webrtc_pc_set_ice_servers,
     op_webrtc_network_create,
     op_webrtc_network_addresses,
+    op_webrtc_network_tcp_addresses,
     op_webrtc_network_close,
+    op_webrtc_set_log_level,
   ],
   lazy_loaded_js = ["01_webrtc.js"],
 );
@@ -974,11 +1029,13 @@ fn op_webrtc_pc_set_ice_servers(
 fn op_webrtc_pc_selected_pair(
   state: &mut OpState,
   #[smi] rid: ResourceId,
-) -> Result<Option<(String, String)>, WebRtcError> {
+) -> Result<Option<(String, String, &'static str)>, WebRtcError> {
+  let peer = peer(state, rid)?;
+  let protocol = if peer.selected_is_tcp() { "tcp" } else { "udp" };
   Ok(
-    peer(state, rid)?
+    peer
       .selected_pair()
-      .map(|(l, r)| (l.to_string(), r.to_string())),
+      .map(|(l, r)| (l.to_string(), r.to_string(), protocol)),
   )
 }
 
@@ -1024,6 +1081,27 @@ fn op_webrtc_network_addresses(
       .0
       .addresses(),
   )
+}
+
+#[op2]
+#[serde]
+fn op_webrtc_network_tcp_addresses(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+) -> Result<Vec<String>, WebRtcError> {
+  Ok(
+    state
+      .resource_table
+      .get::<NetworkResource>(rid)?
+      .0
+      .tcp_addresses(),
+  )
+}
+
+/// `Deno.webrtc.setLogLevel(level)`.
+#[op2(fast)]
+fn op_webrtc_set_log_level(#[string] level: &str) -> Result<(), WebRtcError> {
+  set_engine_log_level(level)
 }
 
 #[op2(fast)]

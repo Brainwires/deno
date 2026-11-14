@@ -232,6 +232,41 @@ jobs:
         # in, and the build is reused); the filter selects the one test.
         run: cargo test --locked --lib -p deno -p denort -p node_shim -p bsdiff_helper -p deno_lib -p denort_desktop -p deno_snapshots -p deno_bundle_runtime -p deno_cache -p deno_canvas -p deno_cron -p deno_crypto -p deno_fetch -p deno_ffi -p deno_fs -p deno_http -p deno_image -p deno_io -p deno_kv -p deno_napi -p napi_sym -p deno_net -p deno_node -p deno_node_crypto -p deno_node_sqlite -p deno_sql -p deno_pty -p denort_helper -p deno_signals -p deno_telemetry -p deno_url -p deno_web -p deno_webgpu -p deno_webidl -p deno_webrtc -p deno_websocket -p deno_webstorage -p deno_cache_dir -p deno_cli_parser -p deno_config -p deno_crypto_provider -p deno_v8 -p deno_dotenv -p eszip -p deno_http_h1 -p deno_inspector_server -p deno_lockfile -p deno_maybe_sync -p napi_sys -p node_resolver -p deno_npm -p deno_npm_cache -p deno_npm_installer -p deno_npmrc -p deno_package_json -p deno_print -p deno_resolver -p deno_runtime -p deno_features -p deno_permissions -p deno_subprocess_windows -p deno_os -p deno_process -p deno_html_rewriter -p deno_tls -p test_util -- --ignored --exact scheme_registration::tests::macos_register_bundle_with_launch_services
 
+  # WebRTC mDNS end to end (DENEXT.md item 370): two connections on this
+  # host's LAN address, one publishing its host candidates under `.local`
+  # names and the other resolving them over IPv4 multicast on port 5353. The
+  # test is `#[ignore]`d because it binds 0.0.0.0:5353 and sends to the mDNS
+  # group, which a developer's machine (macOS asks about local network access)
+  # shouldn't do in a plain `cargo test`; this job runs it with `--ignored`.
+  # The Linux x64 leg only, on our pool alone (its throwaway containers have
+  # an interface with multicast): never the GitHub image, where multicast is
+  # untested, and never a fork's pull request (a self-hosted runner never takes
+  # untrusted code). It builds just the crate's lib tests, beside the leg.
+  webrtc-mdns:
+    name: webrtc mdns (ignored test, Linux pool)
+    if: ${{ inputs.os == 'ubuntu-22.04' && !(startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) }}
+    runs-on: [self-hosted, denext-linux-x64]
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Configure git
+        run: git config --global core.symlinks true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          submodules: false
+      - uses: ./.github/denext-tests/setup
+        with:
+          cache-key: webrtc-mdns
+      # deno_v8 in the same invocation: on its own Cargo doesn't unify its
+      # `v8` feature in (see `Test libs`).
+      - name: mDNS host candidates resolve between peers
+        run: >-
+          cargo test --locked --lib -p deno_webrtc -p deno_v8 --
+          --ignored --exact tests::mdns_host_candidates_resolve_between_peers
+
   # Where the leg's picked jobs run: on a node_suites leg (macOS, Windows) its
   # unit_node and node_compat jobs, on a pick_all leg (Linux x64) libs and
   # every test job. Our pool (pick_runs_on) while it has a free slot, else the

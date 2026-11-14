@@ -16,17 +16,10 @@
 //! JavaScript uses instead.
 
 use std::collections::HashMap;
-use std::collections::VecDeque;
 use std::time::Instant;
 
 use bytes::Bytes;
-use rtc::interceptor::Attribute;
-use rtc::interceptor::Interceptor;
-use rtc::interceptor::Packet as InterceptorPacket;
 use rtc::interceptor::Registry;
-use rtc::interceptor::Slot;
-use rtc::interceptor::StreamInfo;
-use rtc::interceptor::TaggedPacket;
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
@@ -82,67 +75,14 @@ pub fn media_stack() -> Result<(MediaEngine, Registry), WebRtcError> {
       )
       .map_err(crate::peer::rtc_err)?;
   }
+  // The defaults include the fork's key-frame request interceptor, which
+  // delivers inbound PLI and FIR to the application (here, an
+  // `EncodedMediaTrack`'s `keyframerequest`): upstream ends them at the
+  // chain's terminus.
   let registry =
     register_default_interceptors(Registry::new(), &mut media_engine)
-      .map_err(crate::peer::rtc_err)?
-      .with(
-        Slot::Custom(KEY_FRAME_REQUESTS_SLOT),
-        KeyFrameRequests::default(),
-      );
+      .map_err(crate::peer::rtc_err)?;
   Ok((media_engine, registry))
-}
-
-/// Application-ward of every default interceptor (the jitter buffer is at
-/// 13 000).
-const KEY_FRAME_REQUESTS_SLOT: usize = 14_000;
-
-/// Lets inbound key-frame requests (RTCP PLI and FIR) past the chain's
-/// terminus, which ends every RTCP packet no interceptor vouches for: a
-/// program feeding an `EncodedMediaTrack` is the encoder that has to act on
-/// them (its `keyframerequest` event).
-#[derive(Default)]
-struct KeyFrameRequests {
-  reads: VecDeque<TaggedPacket>,
-  writes: VecDeque<TaggedPacket>,
-}
-
-impl Protocol<TaggedPacket, TaggedPacket, ()> for KeyFrameRequests {
-  type Rout = TaggedPacket;
-  type Wout = TaggedPacket;
-  type Eout = ();
-  type Error = rtc::shared::error::Error;
-  type Time = Instant;
-
-  fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
-    if let InterceptorPacket::Rtcp(packets) = &msg.message.packet
-      && wants_key_frame(packets)
-      && !msg.message.has(&Attribute::DeliverToApplication)
-    {
-      msg.message.attributes.push(Attribute::DeliverToApplication);
-    }
-    self.reads.push_back(msg);
-    Ok(())
-  }
-
-  fn poll_read(&mut self) -> Option<TaggedPacket> {
-    self.reads.pop_front()
-  }
-
-  fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
-    self.writes.push_back(msg);
-    Ok(())
-  }
-
-  fn poll_write(&mut self) -> Option<TaggedPacket> {
-    self.writes.pop_front()
-  }
-}
-
-impl Interceptor for KeyFrameRequests {
-  fn bind_local_stream(&mut self, _info: &StreamInfo) {}
-  fn unbind_local_stream(&mut self, _info: &StreamInfo) {}
-  fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
-  fn unbind_remote_stream(&mut self, _info: &StreamInfo) {}
 }
 
 pub fn parse_kind(kind: &str) -> Result<RtpCodecKind, WebRtcError> {

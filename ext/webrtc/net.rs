@@ -18,6 +18,18 @@
 //!   `includeLoopback`).
 //! - **1:1 NAT** (`publicAddresses`): the public address is advertised in
 //!   place of the private one (`host`) or beside it (`srflx`).
+//! - **ICE over TCP** (`tcpPort`, RFC 6544): one TCP listener per bind
+//!   address, shared by the network's connections. Each connection
+//!   advertises a passive host candidate on it and an active one (port 9) per
+//!   host address, which dials a remote passive candidate. An accepted
+//!   stream belongs to the connection its first frame (RFC 4571), a STUN
+//!   binding request, names by its local ufrag, as on a shared UDP port; a
+//!   stream that sends no such frame within [`TCP_FIRST_FRAME_TIMEOUT`] is
+//!   closed, and at most [`MAX_PENDING_TCP`] wait at once.
+//! - **mDNS** (`mdns`): `true` publishes the host candidates under
+//!   `<uuid>.local` names (and resolves the peer's), `false` neither
+//!   publishes nor resolves; without it a connection resolves the peer's
+//!   `.local` candidates, as browsers do.
 //! - **ICE-lite**, the ICE timers and the data channel message size.
 //!
 //! Every bind needs the listen permission for its address, and listing
@@ -38,17 +50,30 @@ use std::time::Duration;
 use bytes::BytesMut;
 use deno_core::CancelFuture;
 use deno_core::CancelHandle;
+use rtc::shared::tcp_framing::TcpFrameDecoder;
 use serde::Deserialize;
+use tokio::io::AsyncReadExt;
+use tokio::net::TcpListener;
+use tokio::net::TcpStream;
 use tokio::net::UdpSocket;
 
 use crate::WebRtcError;
 use crate::peer::Datagram;
 use crate::peer::NetGuard;
 use crate::peer::Peer;
+use crate::peer::Via;
 
 /// The most remote addresses (and STUN transactions) a shared port
 /// remembers; a flood of spoofed sources can't grow the maps without limit.
 const MAX_ROUTES: usize = 65536;
+/// Accepted ICE-TCP streams still waiting for their first frame, per
+/// network; more are closed at once.
+pub const MAX_PENDING_TCP: usize = 64;
+/// How long an accepted ICE-TCP stream has to send its first frame.
+pub const TCP_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+/// The most an accepted ICE-TCP stream may send before its first frame is
+/// complete.
+const MAX_FIRST_FRAME: usize = 2048;
 
 #[derive(Deserialize, Default, Clone, Copy, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -81,6 +106,8 @@ pub struct NetworkArg {
   pub ice_lite: bool,
   pub ice_timeouts: Option<IceTimeoutsArg>,
   pub max_message_size: Option<u32>,
+  pub tcp_port: Option<u16>,
+  pub mdns: Option<bool>,
 }
 
 fn yes() -> bool {
@@ -110,6 +137,23 @@ pub struct NetworkOptions {
   pub ice_timeouts:
     Option<(Option<Duration>, Option<Duration>, Option<Duration>)>,
   pub max_message_size: Option<u32>,
+  /// `tcpPort`: ICE over TCP on a listener on this port (0: one the OS
+  /// picks).
+  pub tcp_port: Option<u16>,
+  pub mdns: MdnsMode,
+}
+
+/// What a connection does with mDNS `.local` host candidates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MdnsMode {
+  /// Neither publishes nor resolves (`mdns: false`).
+  Off,
+  /// Resolves the peer's (the default, as browsers do).
+  #[default]
+  Resolve,
+  /// Publishes its own host candidates under `.local` names and resolves the
+  /// peer's (`mdns: true`).
+  Gather,
 }
 
 fn parse_ip(s: &str, what: &str) -> Result<IpAddr, WebRtcError> {
@@ -162,6 +206,12 @@ impl NetworkOptions {
         .ice_timeouts
         .map(|t| (ms(t.disconnected), ms(t.failed), ms(t.keep_alive))),
       max_message_size: arg.max_message_size,
+      tcp_port: arg.tcp_port,
+      mdns: match arg.mdns {
+        None => MdnsMode::Resolve,
+        Some(false) => MdnsMode::Off,
+        Some(true) => MdnsMode::Gather,
+      },
     })
   }
 
@@ -206,10 +256,22 @@ pub struct SharedEndpoint {
   pub hosts: Vec<IpAddr>,
 }
 
+/// One of an ICE-TCP network's listeners.
+#[derive(Clone, Debug)]
+pub struct TcpEndpoint {
+  pub bound: SocketAddr,
+  pub hosts: Vec<IpAddr>,
+}
+
 pub struct Network {
   pub options: NetworkOptions,
   /// `port` networks: the sockets every connection shares.
   pub shared: Vec<SharedEndpoint>,
+  /// `tcpPort` networks: the listeners every connection's passive
+  /// candidates are on.
+  pub tcp: Vec<TcpEndpoint>,
+  /// Accepted streams still waiting for their first frame.
+  pending_tcp: Cell<usize>,
   by_ufrag: RefCell<HashMap<String, Weak<Peer>>>,
   by_remote: RefCell<HashMap<SocketAddr, Weak<Peer>>>,
   by_transaction: RefCell<HashMap<[u8; 12], Weak<Peer>>>,
@@ -219,7 +281,9 @@ pub struct Network {
 
 /// The STUN message type, transaction id and (for a binding request) the
 /// local ufrag its USERNAME names, if `data` is a STUN message.
-fn stun_info(data: &[u8]) -> Option<(u16, [u8; 12], Option<String>)> {
+pub(crate) fn stun_info(
+  data: &[u8],
+) -> Option<(u16, [u8; 12], Option<String>)> {
   if data.len() < 20 || data[0] >= 4 || data[4..8] != [0x21, 0x12, 0xa4, 0x42] {
     return None;
   }
@@ -272,7 +336,20 @@ impl Network {
         });
       }
     }
+    let mut listeners = Vec::new();
+    if let Some(port) = options.tcp_port {
+      for (bind, hosts) in bind_plan(&options, guard)?.0 {
+        let addr = SocketAddr::new(bind, port);
+        let listener = bind_tcp(addr).map_err(|e| {
+          WebRtcError::Operation(format!("Could not listen on TCP {addr}: {e}"))
+        })?;
+        let bound = listener.local_addr().map_err(crate::peer::rtc_err)?;
+        listeners.push((listener, TcpEndpoint { bound, hosts }));
+      }
+    }
     let network = Rc::new(Self {
+      tcp: listeners.iter().map(|(_, e)| e.clone()).collect(),
+      pending_tcp: Cell::new(0),
       options,
       shared,
       by_ufrag: RefCell::new(HashMap::new()),
@@ -284,7 +361,30 @@ impl Network {
     for endpoint in &network.shared {
       spawn_shared_reader(Rc::downgrade(&network), endpoint.clone());
     }
+    for (listener, _) in listeners {
+      spawn_tcp_acceptor(Rc::downgrade(&network), listener);
+    }
     Ok(network)
+  }
+
+  /// A `tcpPort` network: its connections do ICE over TCP.
+  pub fn has_tcp(&self) -> bool {
+    !self.tcp.is_empty()
+  }
+
+  /// Whether connections route by their local ufrag here (a shared UDP port
+  /// or TCP listeners).
+  pub fn routes_by_ufrag(&self) -> bool {
+    self.is_shared() || self.has_tcp()
+  }
+
+  pub fn tcp_addresses(&self) -> Vec<String> {
+    self.tcp.iter().map(|e| e.bound.to_string()).collect()
+  }
+
+  /// The connection whose local ufrag a binding request names.
+  fn peer_for_ufrag(&self, ufrag: &str) -> Option<Rc<Peer>> {
+    self.by_ufrag.borrow().get(ufrag).and_then(Weak::upgrade)
   }
 
   pub fn is_shared(&self) -> bool {
@@ -399,6 +499,7 @@ fn spawn_shared_reader(network: Weak<Network>, endpoint: SharedEndpoint) {
               local: endpoint.bound,
               from,
               stream: None,
+              via: Via::Socket,
               data: BytesMut::from(&buf[..n]),
               closed: None,
             });
@@ -412,6 +513,111 @@ fn spawn_shared_reader(network: Weak<Network>, endpoint: SharedEndpoint) {
     }
     .or_cancel(cancel),
   );
+}
+
+/// Binds a TCP listener (an IPv6 one IPv6-only, so the two families stay
+/// apart).
+pub(crate) fn bind_tcp(addr: SocketAddr) -> std::io::Result<TcpListener> {
+  let domain = if addr.is_ipv4() {
+    socket2::Domain::IPV4
+  } else {
+    socket2::Domain::IPV6
+  };
+  let socket = socket2::Socket::new(
+    domain,
+    socket2::Type::STREAM,
+    Some(socket2::Protocol::TCP),
+  )?;
+  if addr.is_ipv6() {
+    socket.set_only_v6(true)?;
+  }
+  #[cfg(not(windows))]
+  socket.set_reuse_address(true)?;
+  socket.set_nonblocking(true)?;
+  socket.bind(&addr.into())?;
+  socket.listen(128)?;
+  TcpListener::from_std(socket.into())
+}
+
+fn spawn_tcp_acceptor(network: Weak<Network>, listener: TcpListener) {
+  let Some(cancel) = network.upgrade().map(|n| n.cancel.clone()) else {
+    return;
+  };
+  deno_core::unsync::spawn(
+    async move {
+      loop {
+        let (stream, from) = match listener.accept().await {
+          Ok(accepted) => accepted,
+          Err(e) => {
+            log::debug!("webrtc: ICE-TCP accept: {e}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            continue;
+          }
+        };
+        let Some(net) = network.upgrade() else {
+          break;
+        };
+        if net.pending_tcp.get() >= MAX_PENDING_TCP {
+          continue;
+        }
+        net.pending_tcp.set(net.pending_tcp.get() + 1);
+        let weak = network.clone();
+        deno_core::unsync::spawn(
+          async move {
+            let routed = tokio::time::timeout(
+              TCP_FIRST_FRAME_TIMEOUT,
+              first_frame(stream),
+            )
+            .await;
+            let Some(net) = weak.upgrade() else {
+              return;
+            };
+            net.pending_tcp.set(net.pending_tcp.get().saturating_sub(1));
+            let Ok(Some((stream, decoder, frame, ufrag))) = routed else {
+              return;
+            };
+            if let Some(peer) = net.peer_for_ufrag(&ufrag) {
+              peer.adopt_tcp(stream, from, decoder, frame);
+            }
+          }
+          .or_cancel(net.cancel.clone()),
+        );
+      }
+    }
+    .or_cancel(cancel),
+  );
+}
+
+/// Reads an accepted stream up to its first RFC 4571 frame, which must be a
+/// STUN binding request naming a local ufrag; returns the stream, what else
+/// was read, the frame and the ufrag.
+async fn first_frame(
+  mut stream: TcpStream,
+) -> Option<(TcpStream, TcpFrameDecoder, Vec<u8>, String)> {
+  let _ = stream.set_nodelay(true);
+  let mut decoder = TcpFrameDecoder::new();
+  let mut chunk = [0u8; 2048];
+  // A binding request is a few hundred bytes: a stream that sends more
+  // before its first frame completes isn't ICE.
+  let mut read = 0usize;
+  loop {
+    if let Some(frame) = decoder.next_packet() {
+      let (typ, _, ufrag) = stun_info(&frame)?;
+      if typ != 0x0001 {
+        return None;
+      }
+      return Some((stream, decoder, frame, ufrag?));
+    }
+    if read >= MAX_FIRST_FRAME {
+      return None;
+    }
+    let n = stream.read(&mut chunk).await.ok()?;
+    if n == 0 {
+      return None;
+    }
+    read += n;
+    decoder.push(&chunk[..n]).ok()?;
+  }
 }
 
 /// The addresses a connection (or a shared port) binds, each with the host

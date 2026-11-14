@@ -1526,6 +1526,26 @@ declare namespace Deno {
       };
       /** The largest data channel message this side accepts, in bytes. */
       maxMessageSize?: number;
+      /**
+       * ICE over TCP (RFC 6544): a TCP listener on this port (0: one the OS
+       * picks) for every connection on the network. Each connection offers
+       * a passive TCP host candidate on it and an active one, which connects
+       * to the peer's passive candidates; a peer's active candidates connect
+       * to the listener. The listener is bound by `createNetwork` (the
+       * listen permission for each address).
+       */
+      tcpPort?: number;
+      /**
+       * mDNS host candidates. `true` publishes each host candidate under a
+       * `<uuid>.local` name instead of its address, as browsers do (and
+       * hides the base address of server-reflexive and relay candidates);
+       * `false` neither publishes names nor resolves the peer's. By default
+       * a connection resolves the peer's `.local` candidates and publishes
+       * its own addresses. mDNS needs `--allow-sys=networkInterfaces`, the
+       * listen permission for `0.0.0.0` and the connect permission for
+       * `224.0.0.251:5353`, and is off under `DENO_WEBRTC_LOOPBACK_ONLY=1`.
+       */
+      mdns?: boolean;
     }
 
     /**
@@ -1538,6 +1558,8 @@ declare namespace Deno {
       private constructor();
       /** A `port` network's bound addresses (`"ip:port"`), else `[]`. */
       readonly localAddresses: string[];
+      /** A `tcpPort` network's TCP listeners (`"ip:port"`), else `[]`. */
+      readonly tcpAddresses: string[];
       close(): void;
       [Symbol.dispose](): void;
     }
@@ -1595,5 +1617,23 @@ declare namespace Deno {
      * @category WebRTC
      */
     export function importCertificate(pem: string): RTCCertificate;
+
+    /**
+     * How much the WebRTC engine (ICE, DTLS, SCTP, RTP) logs to stderr,
+     * each line prefixed with its level and source: `"off"` (the default:
+     * what matters arrives as `RTCPeerConnection` events), `"error"`,
+     * `"warn"`, `"info"`, `"debug"` or `"trace"`. It applies to the whole
+     * process. Any other value is a `TypeError`.
+     *
+     * @example
+     * ```ts
+     * Deno.webrtc.setLogLevel("debug");
+     * ```
+     *
+     * @category WebRTC
+     */
+    export function setLogLevel(
+      level: "off" | "error" | "warn" | "info" | "debug" | "trace",
+    ): void;
   }
 }
