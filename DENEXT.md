@@ -14916,6 +14916,141 @@ where the changes are discussed.
        a debug build's V8 refuses about 2500 levels itself, before the debug
        analysis stack (8 MiB) runs out, so a debug spec can't show it.
 
+378. **`fix(ext/http)`: `info.completed` rejects when an HTTP/1.1 streamed
+     response doesn't reach its end** (runtime; `ext/http/http_next.rs`). Closes
+     denoland/deno#37110, a regression from 2.8.3's raw HTTP/1.1 server
+     (denoland/deno#34446): when the client went away mid-stream, or the body
+     source errored, `Deno.serve`'s `info.completed` resolved, so a failed
+     response read as delivered (2.8.2 rejected it with `Interrupted`, and
+     HTTP/2 still does). The future behind it
+     (`RawHttpRecord::response_body_finished`) counted a missing response body
+     as a delivered one, but the stream writer takes the body out of the record
+     before writing it, so every finish, failed or not, left it missing. The
+     record now has a `response_body_complete` flag, set only by
+     `finish_response_body(true)` (the body written to its end) and never
+     cleared, so the cancel guard's later `finish_response_body(false)` can't
+     undo it; the future resolves to that flag. A HEAD response to a streamed
+     body is finished as complete once its head is written (it has no body),
+     which is what the old check gave it. The fix is ours; the regression tests
+     are adapted from denoland/deno#37111 (kairosci), whose flag for failures
+     would have rejected those HEAD responses.
+     - User-facing note: on HTTP/1.1, `info.completed` rejects with
+       `Interrupted` (and `Request.signal` aborts) when the client disconnects
+       while a streamed response is still open, or when the response body's
+       stream errors, as on HTTP/2 and before 2.8.3.
+     - Tests: `serve_test.ts`'s
+       `httpServerCompletedRejectsWhenClientDisconnectsMidStream` and
+       `httpServerCompletedRejectsWhenStreamSourceErrors` (both resolved before
+       the fix), `httpServerCompletedResolvesForDeliveredStream` and
+       `httpServerCompletedResolvesForHeadWithStreamBody` (passed before, and
+       still do).
+
+379. **`fix(ext/websocket)`: `close()` gives up on a peer that never answers the
+     close frame** (runtime; `ext/websocket/01_websocket.js`). Closes
+     denoland/deno#27924. `close()` sends the close frame and moves the socket
+     to CLOSING, then waited for the peer's close frame with no bound: a peer
+     that never answers (websocat in the issue, a wedged server, a broken proxy)
+     left the socket CLOSING forever, `close` never fired, and whatever the app
+     freed in `onclose` leaked, on the server side (`socket.close()` on a
+     `Deno.upgradeWebSocket` socket) and on the client side alike. RFC 6455
+     section 7.1.1 lets an endpoint drop the connection when the closing
+     handshake doesn't complete, and browsers bound the wait. Ported from
+     denoland/deno#37089 (Nikolay Bryskin): `close()` arms a 5 s timer; if the
+     socket is still CLOSING when it fires, it becomes CLOSED, a `close` event
+     with `wasClean: false` and code 1006 is dispatched and the resource is
+     closed; the event loop ignores what the dropped resource yields afterwards,
+     so `close` fires once. On top of the pull request, the timer is cancelled
+     on every other way out of CLOSING (the peer's close frame, as the pull
+     request had, plus a read error, the server's read-after-close path and a
+     failed close), so it never holds the event loop open for 5 s after the
+     socket has closed.
+     - User-facing note: a WebSocket whose peer doesn't answer `close()` within
+       5 seconds closes anyway, with a `close` event (code 1006,
+       `wasClean: false`).
+     - Tests: `websocket_test.ts`'s
+       `close() ends when the peer never answers
+       the close frame` (from
+       the pull request: a client against a raw TCP server that never answers)
+       and
+       `server close() ends when the client
+       never answers the close frame`
+       (new: the issue's server side, a `Deno.serve` socket against a raw TCP
+       client); both hung before the fix.
+
+380. **`fix(node:http2)`: bytes handed to a session while nghttp2 is parsing are
+     queued, not parsed in a nested `mem_recv`** (runtime;
+     `ext/node/ops/http2/session.rs`). For denoland/deno#36788 (the process dies
+     inside nghttp2, `find_stream_on_goaway_func`'s
+     `stream->closed_next == NULL` assertion or a silent segfault, when a GOAWAY
+     closes a long-idle `node:http2` session). `nghttp2_session_mem_recv` is not
+     reentrant: it keeps its inbound frame state and, while it handles a GOAWAY,
+     the list of streams to close (threaded through `stream->closed_next`) live
+     for the whole call. The session's `receive` op is reentrant, and JS that
+     nghttp2 calls (a stream's `data` listener, a session `goaway` listener, the
+     stream-close callback) can hand it more bytes, through the JS socket pump
+     (`socketOnData`) whenever the socket emits `data` synchronously. Those
+     bytes were parsed in a second `mem_recv` nested inside the first: frames
+     out of order, and over a GOAWAY, a second close walk over a list the outer
+     walk still holds. Ported from denoland/deno#36808 (Bret Patterson):
+     `receive_data` sets `is_receiving` around `mem_recv`; a nested call queues
+     its bytes (`pending_recv`) and returns, and the outer call parses the queue
+     after each `mem_recv` unwinds, so bytes are parsed once, in arrival order.
+     A debug-build tripwire (`enter_mem_recv` / `exit_mem_recv`) asserts that a
+     session's `mem_recv` is never entered twice. The pull request counted the
+     depth per thread, which fired on an enabled Node test
+     (`parallel/test-http2-client-proxy-over-http2.js`: one session's callback
+     feeds another session tunnelled over its stream, which is legal, since
+     nghttp2's non-reentrancy is per session), so the depth is a field of the
+     session here. The issue's own reproduction (grpc-js against a `node:http2`
+     server, a GOAWAY after 250 s idle) did not crash on an x86_64 Linux host
+     with this fork's build or with stock Deno 2.9.6 (it is reported only in
+     containers), so the regression test drives the nested path directly.
+     - User-facing note: a `node:http2` session that receives data from inside
+       one of its own callbacks (a synchronous duplex as its socket, a `data` or
+       `goaway` listener that feeds it) processes it in order instead of
+       corrupting nghttp2's state.
+     - Tests: `http2_test.ts`'s
+       `[node/http2 client] bytes received inside a
+       callback are queued`
+       (new: a `data` listener hands the session a DATA frame with END_STREAM
+       while nghttp2 is still inside the chunk carrying the frames before it;
+       the stream read `ac` before the fix, `abc` now); `deno_node`'s
+       `enter_mem_recv_rejects_reentry`, `enter_mem_recv_allows_the_outer_call`
+       and `enter_and_exit_balance_over_many_cycles` (from the pull request,
+       made per session) and `another_session_may_enter_mem_recv` (new).
+     - Node tests enabled: none, because Node's sessions read from a native
+       stream and never feed nghttp2 from inside a callback, so no Node test
+       exercises the nested path; the 9 `test-http2-*` files still disabled in
+       `tests/node_compat/config.jsonc` fail for other reasons.
+
+381. **`fix(ext/fetch)`: an HTTP/2 request the server refused is retried until
+     it accepts it, with a growing delay** (runtime; `ext/fetch/lib.rs`). For
+     denoland/deno#21789 (concurrent HTTP/2 `fetch` calls fail with
+     `refused stream before processing any application logic`). The issue's
+     case, every stream sent before the server's SETTINGS
+     (MAX_CONCURRENT_STREAMS) arrive and the ones over the limit refused, is
+     already retried (denoland/deno#27417), but only once: a server that refused
+     the retry too (still at its limit, overloaded, a slot not yet freed) failed
+     the request with the issue's error. REFUSED_STREAM, like a stream above a
+     graceful GOAWAY's last stream id, is the server's own statement that it did
+     not process the request (RFC 9113 section 8.7), so resending is safe
+     however often it happens. `FetchRetry` now counts retries (`Retried(n)`)
+     and `classify_retry` tells the two kinds apart: those unprocessed requests
+     are resent up to 5 times, the first at once (a stream refused before
+     SETTINGS fits once they're in) and then after 250 ms, 500 ms, 1 s and 2 s,
+     as Go's HTTP/2 transport backs off; a transport failure on a pooled
+     connection, only an inference that the request wasn't processed, keeps its
+     single immediate retry. A request with a streaming body still can't be
+     resent.
+     - User-facing note: concurrent HTTP/2 requests to a server that refuses
+       streams while it is at its concurrency limit now succeed once it accepts
+       them, instead of failing on the second refusal.
+     - Tests: `fetch_test.ts`'s `fetchH2RetriesStreamsRefusedBeforeSettings`
+       (new: the issue's case against a raw h2c server that holds its SETTINGS
+       back and refuses 18 of 20 streams; it passed before the fix too) and
+       `fetchH2RetriesAStreamRefusedMoreThanOnce` (new: every request refused
+       three times; it failed with the issue's error before the fix).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -14923,7 +15058,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376, 377) are what the prebuilt
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

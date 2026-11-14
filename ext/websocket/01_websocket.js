@@ -162,6 +162,15 @@ const _sendQueue = Symbol("[[sendQueue]]");
 const _queueSend = Symbol("[[queueSend]]");
 const _cancelHandle = Symbol("[[cancelHandle]]");
 
+// How long `close()` waits for the peer to answer the close frame. RFC 6455
+// section 7.1.1 lets an endpoint drop the connection when the closing handshake
+// does not complete; without a bound, a peer that never answers leaves the
+// socket CLOSING forever and "close" never fires (denoland/deno#27924; ported
+// from denoland/deno#37089 by Nikolay Bryskin).
+const CLOSE_HANDSHAKE_TIMEOUT_MS = 5_000;
+const _closeHandshakeTimeout = Symbol("[[closeHandshakeTimeout]]");
+const _clearCloseHandshakeTimeout = Symbol("[[clearCloseHandshakeTimeout]]");
+
 const _idleTimeoutDuration = Symbol("[[idleTimeout]]");
 const _idleTimeoutTimeout = Symbol("[[idleTimeoutTimeout]]");
 const _serverHandleIdleTimeout = Symbol("[[serverHandleIdleTimeout]]");
@@ -726,6 +735,23 @@ class WebSocket extends EventTarget {
       this[_readyState] = CLOSING;
     } else if (this[_readyState] === OPEN) {
       this[_readyState] = CLOSING;
+      this[_closeHandshakeTimeout] = core.createSystemTimer(
+        () => {
+          this[_closeHandshakeTimeout] = undefined;
+          if (this[_readyState] !== CLOSING) return;
+          this[_readyState] = CLOSED;
+
+          emitWebSocketClosed(this);
+          const closeEv = new CloseEvent("close", {
+            wasClean: false,
+            code: 1006,
+          });
+          this.dispatchEvent(closeEv);
+          core.tryClose(this[_rid]);
+        },
+        CLOSE_HANDSHAKE_TIMEOUT_MS,
+        true,
+      );
 
       PromisePrototypeCatch(
         op_ws_close(
@@ -734,7 +760,9 @@ class WebSocket extends EventTarget {
           reason,
         ),
         (err) => {
+          if (this[_readyState] === CLOSED) return;
           this[_readyState] = CLOSED;
+          this[_clearCloseHandshakeTimeout]();
 
           const errorEv = new ErrorEvent("error", {
             error: err,
@@ -755,12 +783,15 @@ class WebSocket extends EventTarget {
     const rid = this[_rid];
     while (this[_readyState] !== CLOSED) {
       const kind = await op_ws_next_event(rid);
+      // The closing handshake timed out and the socket was already closed.
+      if (this[_readyState] === CLOSED) break;
       /* close the connection if read was cancelled, and we didn't get a close frame */
       if (
         (this[_readyState] == CLOSING) &&
         kind <= 3 && this[_role] !== CLIENT
       ) {
         this[_readyState] = CLOSED;
+        this[_clearCloseHandshakeTimeout]();
 
         emitWebSocketClosed(this);
         const event = new CloseEvent("close");
@@ -821,6 +852,7 @@ class WebSocket extends EventTarget {
         case 3: {
           /* error */
           this[_readyState] = CLOSED;
+          this[_clearCloseHandshakeTimeout]();
 
           const message = op_ws_get_error(rid);
           emitWebSocketFrameError(this, message);
@@ -846,6 +878,7 @@ class WebSocket extends EventTarget {
           if (this[_idleTimeoutTimeout]) {
             core.cancelTimer(this[_idleTimeoutTimeout]);
           }
+          this[_clearCloseHandshakeTimeout]();
 
           if (prevState === OPEN) {
             try {
@@ -870,6 +903,16 @@ class WebSocket extends EventTarget {
           break;
         }
       }
+    }
+  }
+
+  // The socket left CLOSING some other way (the peer's close frame, an error,
+  // a failed close): the closing-handshake timer must not keep the event loop
+  // alive or fire afterwards.
+  [_clearCloseHandshakeTimeout]() {
+    if (this[_closeHandshakeTimeout]) {
+      core.cancelTimer(this[_closeHandshakeTimeout]);
+      this[_closeHandshakeTimeout] = undefined;
     }
   }
 

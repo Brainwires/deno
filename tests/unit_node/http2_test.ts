@@ -10,6 +10,7 @@ import fs from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import * as net from "node:net";
+import { Duplex } from "node:stream";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { curlRequest } from "../unit/test_util.ts";
 import { createRequire } from "node:module";
@@ -1374,4 +1375,77 @@ Deno.test("[node/http2] constants has every HTTP_STATUS_* code", () => {
   );
   assertEquals(actual, expected);
   assertEquals(Object.keys(actual).length, 63);
+});
+
+// https://github.com/denoland/deno/issues/36788: nghttp2's mem_recv is not
+// reentrant, and JS it calls into (here a stream's 'data' listener) can hand
+// the session more bytes. They are queued and parsed after the frames still in
+// the outer chunk, in arrival order, instead of in a nested mem_recv that left
+// the outer call's state (the GOAWAY close list in the issue) corrupted.
+Deno.test("[node/http2 client] bytes received inside a callback are queued", async () => {
+  const frame = (
+    type: number,
+    flags: number,
+    id: number,
+    payload: number[],
+  ) => {
+    const b = new Uint8Array(9 + payload.length);
+    b[2] = payload.length;
+    b[3] = type;
+    b[4] = flags;
+    new DataView(b.buffer).setUint32(5, id);
+    b.set(payload, 9);
+    return b;
+  };
+  const data = (text: string, flags = 0) =>
+    frame(0, flags, 1, [...new TextEncoder().encode(text)]);
+
+  let written = new Uint8Array(0);
+  const headersSent = Promise.withResolvers<void>();
+  const socket = new Duplex({
+    read() {},
+    write(chunk, _encoding, callback) {
+      const merged = new Uint8Array(written.length + chunk.length);
+      merged.set(written);
+      merged.set(chunk, written.length);
+      written = merged;
+      // After the 24-byte preface, look for the request's HEADERS frame.
+      let i = 24;
+      while (i + 9 <= written.length) {
+        if (written[i + 3] === 1) headersSent.resolve();
+        i += 9 + ((written[i] << 16) | (written[i + 1] << 8) | written[i + 2]);
+      }
+      callback();
+    },
+  });
+  const client = http2.connect("http://localhost", {
+    createConnection: () => socket,
+  });
+  client.on("error", () => {});
+  const req = client.request({ ":path": "/" });
+  req.on("error", () => {});
+  const chunks: string[] = [];
+  req.on("data", (chunk) => {
+    chunks.push(String(chunk));
+    if (chunks.length === 1) {
+      // nghttp2 is still inside the chunk that carried "a" and "b".
+      socket.push(data("c", 0x1 /* END_STREAM */));
+    }
+  });
+  const ended = Promise.withResolvers<void>();
+  req.on("end", () => ended.resolve());
+  req.on("close", () => ended.resolve());
+
+  await headersSent.promise;
+  const response = new Promise((resolve) => req.on("response", resolve));
+  socket.push(Buffer.concat([
+    frame(4, 0, 0, []), // SETTINGS
+    frame(1, 0x4, 1, [0x88]), // HEADERS :status 200, END_HEADERS
+  ]));
+  await response;
+  socket.push(Buffer.concat([data("a"), data("b")]));
+  await ended.promise;
+
+  assertEquals(chunks.join(""), "abc");
+  client.destroy();
 });

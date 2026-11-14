@@ -881,6 +881,99 @@ Deno.test("Close connection", async () => {
   conn.close();
 });
 
+// https://github.com/denoland/deno/issues/27924
+Deno.test(
+  "close() ends when the peer never answers the close frame",
+  async () => {
+    // A server that completes the upgrade and then never sends another frame, so the
+    // client's closing handshake can only end by timing out.
+    const listener = Deno.listen({ hostname: "127.0.0.1", port: 0 });
+    const accepted = (async () => {
+      const conn = await listener.accept();
+      const buf = new Uint8Array(4096);
+      const n = await conn.read(buf);
+      const request = new TextDecoder().decode(buf.subarray(0, n!));
+      const key = request.match(/Sec-WebSocket-Key: (.*)\r\n/i)![1].trim();
+      const digest = await crypto.subtle.digest(
+        "SHA-1",
+        new TextEncoder().encode(key + "258EAFA5-E914-47A5-95CA-C5AB0DC85B11"),
+      );
+      const accept = btoa(String.fromCharCode(...new Uint8Array(digest)));
+      await conn.write(
+        new TextEncoder().encode(
+          "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n" +
+            `Connection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
+        ),
+      );
+      return conn;
+    })();
+
+    const { port } = listener.addr as Deno.NetAddr;
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    const closed = Promise.withResolvers<CloseEvent>();
+    ws.onopen = () => ws.close();
+    ws.onclose = (e) => closed.resolve(e);
+
+    const event = await closed.promise;
+    assertEquals(event.code, 1006);
+    assertEquals(event.wasClean, false);
+    assertEquals(ws.readyState, WebSocket.CLOSED);
+
+    (await accepted).close();
+    listener.close();
+  },
+);
+
+// https://github.com/denoland/deno/issues/27924: the server side of the same
+// hang. A server socket that calls `close()` on a client that never answers the
+// close frame (websocat in the issue) still ends with a "close" event.
+Deno.test(
+  "server close() ends when the client never answers the close frame",
+  async () => {
+    const ac = new AbortController();
+    const listening = Promise.withResolvers<number>();
+    const closed = Promise.withResolvers<CloseEvent>();
+    const server = Deno.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      signal: ac.signal,
+      onListen: ({ port }) => listening.resolve(port),
+      handler: (req) => {
+        const { socket, response } = Deno.upgradeWebSocket(req);
+        socket.onopen = () => socket.close();
+        socket.onclose = (e) => closed.resolve(e);
+        return response;
+      },
+    });
+    const port = await listening.promise;
+
+    // A client that completes the upgrade and then never sends another frame.
+    const conn = await Deno.connect({ hostname: "127.0.0.1", port });
+    await conn.write(
+      new TextEncoder().encode(
+        "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n" +
+          "Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n" +
+          "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+      ),
+    );
+    const head = new Uint8Array(4096);
+    const n = await conn.read(head);
+    assert(
+      new TextDecoder().decode(head.subarray(0, n!)).startsWith(
+        "HTTP/1.1 101",
+      ),
+    );
+
+    const event = await closed.promise;
+    assertEquals(event.code, 1006);
+    assertEquals(event.wasClean, false);
+
+    conn.close();
+    ac.abort();
+    await server.finished;
+  },
+);
+
 Deno.test("send to a closed socket", async () => {
   const { promise, resolve } = Promise.withResolvers<void>();
   const ws = new WebSocket("ws://localhost:4242");

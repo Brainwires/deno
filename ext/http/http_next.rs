@@ -1181,6 +1181,10 @@ struct RawHttpRecordInner {
   response_ready: bool,
   response_ready_waker: Option<std::task::Waker>,
   response_body_finished: bool,
+  /// Set once the response body was written to its end. Never cleared: a
+  /// later `finish_response_body(false)` (the cancel guard's disarm) must not
+  /// turn a delivered response into a failed one.
+  response_body_complete: bool,
   response_body_waker: Option<std::task::Waker>,
   otel_info: Option<OtelInfo>,
   automatic_compression: bool,
@@ -1241,6 +1245,7 @@ impl RawHttpRecord {
       response_ready: false,
       response_ready_waker: None,
       response_body_finished: false,
+      response_body_complete: false,
       response_body_waker: None,
       otel_info,
       automatic_compression: options.automatic_compression,
@@ -1471,6 +1476,7 @@ impl RawHttpRecord {
     if complete {
       inner.response_body =
         Some(RawResponseBody::Flat(FlatResponseBody::Empty));
+      inner.response_body_complete = true;
     }
     inner.response_body_finished = true;
     if let Some(waker) = inner.response_body_waker.take() {
@@ -1525,10 +1531,12 @@ impl RawHttpRecord {
       ) -> Poll<Self::Output> {
         let mut inner = self.0.0.borrow_mut();
         if inner.response_body_finished {
-          return Poll::Ready(matches!(
-            inner.response_body,
-            Some(RawResponseBody::Flat(FlatResponseBody::Empty)) | None
-          ));
+          // Only a body written to its end counts as delivered. The writer
+          // takes the body out of the record, so an absent body says nothing
+          // about success: a peer that went away mid-stream, a body source
+          // that errored or a cancelled request all leave it `None`
+          // (denoland/deno#37110).
+          return Poll::Ready(inner.response_body_complete);
         }
         inner.response_body_waker = Some(cx.waker().clone());
         Poll::Pending
@@ -4250,7 +4258,8 @@ where
       .await
       .inspect_err(|_| abort_raw_response_body(&mut body))?;
     abort_raw_response_body(&mut body);
-    finish.finish(false);
+    // A HEAD response has no body: it is delivered once its head is written.
+    finish.finish(true);
     return Ok(());
   }
   let response_head = h1::ResponseHead {
@@ -4406,7 +4415,8 @@ where
     .await
     .inspect_err(|_| abort_raw_response_body(&mut body))?;
     abort_raw_response_body(&mut body);
-    finish.finish(false);
+    // A HEAD response has no body: it is delivered once its head is written.
+    finish.finish(true);
     return Ok(());
   }
   let response_head = h1::ResponseHead {

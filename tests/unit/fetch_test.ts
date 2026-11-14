@@ -3014,3 +3014,174 @@ Deno.test(
     assertEquals(await resp3.text(), "Not found");
   },
 );
+
+// A minimal HTTP/2 (prior knowledge, h2c) server for the REFUSED_STREAM tests
+// (https://github.com/denoland/deno/issues/21789). `onHeaders` decides each
+// request stream's fate from the number of HEADERS frames seen so far:
+// "serve" answers 200, "refuse" sends RST_STREAM(REFUSED_STREAM). With
+// `holdSettings`, the server's SETTINGS wait until it returns false, and carry
+// MAX_CONCURRENT_STREAMS = the number of held streams it serves.
+type H2Fate = "serve" | "refuse";
+function serveRawH2(
+  onHeaders: (streamId: number, seen: number) => H2Fate,
+  options: { holdSettings?: (seen: number) => boolean } = {},
+) {
+  const frame = (
+    type: number,
+    flags: number,
+    id: number,
+    payload = new Uint8Array(0),
+  ) => {
+    const b = new Uint8Array(9 + payload.length);
+    b[0] = payload.length >> 16;
+    b[1] = (payload.length >> 8) & 0xff;
+    b[2] = payload.length & 0xff;
+    b[3] = type;
+    b[4] = flags;
+    new DataView(b.buffer).setUint32(5, id);
+    b.set(payload, 9);
+    return b;
+  };
+  const u32 = (n: number) => {
+    const p = new Uint8Array(4);
+    new DataView(p.buffer).setUint32(0, n);
+    return p;
+  };
+  const stats = { refused: 0, served: 0 };
+  const listener = Deno.listen({ hostname: "127.0.0.1", port: 0 });
+  const conns: Deno.Conn[] = [];
+  const done = (async () => {
+    for await (const conn of listener) {
+      conns.push(conn);
+      (async () => {
+        let buf = new Uint8Array(0);
+        let prefaceSeen = false;
+        let settingsSent = !options.holdSettings;
+        let seen = 0;
+        const held: number[] = [];
+        const write = (b: Uint8Array) => conn.write(b);
+        if (settingsSent) await write(frame(4, 0, 0));
+        const act = async (id: number, fate: H2Fate) => {
+          if (fate === "serve") {
+            // :status 200 (static table index 8), END_HEADERS | END_STREAM
+            await write(frame(1, 0x4 | 0x1, id, new Uint8Array([0x88])));
+            stats.served++;
+          } else {
+            await write(frame(3, 0, id, u32(0x7)));
+            stats.refused++;
+          }
+        };
+        const chunk = new Uint8Array(65536);
+        while (true) {
+          const n = await conn.read(chunk).catch(() => null);
+          if (n === null) break;
+          const merged = new Uint8Array(buf.length + n);
+          merged.set(buf);
+          merged.set(chunk.subarray(0, n), buf.length);
+          buf = merged;
+          if (!prefaceSeen) {
+            if (buf.length < 24) continue;
+            buf = buf.subarray(24);
+            prefaceSeen = true;
+          }
+          while (buf.length >= 9) {
+            const len = (buf[0] << 16) | (buf[1] << 8) | buf[2];
+            if (buf.length < 9 + len) break;
+            const type = buf[3];
+            const flags = buf[4];
+            const id = new DataView(buf.buffer, buf.byteOffset).getUint32(5) &
+              0x7fffffff;
+            buf = buf.subarray(9 + len);
+            // SETTINGS ACK for the client's SETTINGS.
+            if (type === 4 && !(flags & 1)) await write(frame(4, 1, 0));
+            if (type !== 1) continue;
+            seen++;
+            if (!settingsSent) {
+              held.push(id);
+              if (options.holdSettings!(seen)) continue;
+              settingsSent = true;
+              // SETTINGS_MAX_CONCURRENT_STREAMS from the test's verdicts.
+              const verdicts = held.splice(0).map((sid, i) => ({
+                sid,
+                fate: onHeaders(sid, i + 1),
+              }));
+              const limit = verdicts.filter((v) => v.fate === "serve").length;
+              await write(
+                frame(4, 0, 0, new Uint8Array([0, 3, ...u32(limit)])),
+              );
+              for (const v of verdicts) await act(v.sid, v.fate);
+              continue;
+            }
+            await act(id, onHeaders(id, seen));
+          }
+        }
+      })();
+    }
+  })();
+  return {
+    port: (listener.addr as Deno.NetAddr).port,
+    stats,
+    async close() {
+      listener.close();
+      for (const conn of conns) {
+        try {
+          conn.close();
+        } catch {
+          // already closed by the client
+        }
+      }
+      await done;
+    },
+  };
+}
+
+Deno.test(
+  { permissions: { net: true } },
+  async function fetchH2RetriesStreamsRefusedBeforeSettings() {
+    // The issue's case: every request is on the wire before the server's
+    // SETTINGS (MAX_CONCURRENT_STREAMS = 2) arrive, and the server refuses
+    // the streams over its limit.
+    const N = 20;
+    const server = serveRawH2(
+      (_id, seen) => seen <= 2 || seen > N ? "serve" : "refuse",
+      { holdSettings: (seen) => seen < N },
+    );
+    const client = Deno.createHttpClient({ http1: false, http2: true });
+    const statuses = await Promise.all(
+      Array.from({ length: N }, async () => {
+        const res = await fetch(`http://127.0.0.1:${server.port}/`, { client });
+        await res.body?.cancel();
+        return res.status;
+      }),
+    );
+    assertEquals(statuses, Array(N).fill(200));
+    assertEquals(server.stats.refused, N - 2);
+    client.close();
+    await server.close();
+  },
+);
+
+Deno.test(
+  { permissions: { net: true } },
+  async function fetchH2RetriesAStreamRefusedMoreThanOnce() {
+    // A server that keeps refusing (overloaded, or its streams not yet freed)
+    // turns the first retry away too: the request still goes through once it
+    // accepts streams again.
+    const N = 4;
+    const server = serveRawH2((_id, seen) =>
+      seen <= 3 * N ? "refuse" : "serve"
+    );
+    const client = Deno.createHttpClient({ http1: false, http2: true });
+    const statuses = await Promise.all(
+      Array.from({ length: N }, async () => {
+        const res = await fetch(`http://127.0.0.1:${server.port}/`, { client });
+        await res.body?.cancel();
+        return res.status;
+      }),
+    );
+    assertEquals(statuses, Array(N).fill(200));
+    assertEquals(server.stats.refused, 3 * N);
+    client.close();
+    await server.close();
+  },
+);
