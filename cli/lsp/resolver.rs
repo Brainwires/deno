@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use dashmap::DashMap;
 use deno_ast::MediaType;
@@ -148,7 +149,10 @@ pub struct LspScopedResolver {
   pkg_json_resolver: Arc<CliPackageJsonResolver>,
   redirect_resolver: Option<Arc<RedirectResolver>>,
   dep_info: Arc<Mutex<Arc<ScopeDepInfo>>>,
-  configured_dep_resolutions: Arc<ConfiguredDepResolutions>,
+  /// Built on first use (see [`Self::configured_dep_resolutions`]) and shared
+  /// with this scope's snapshots, so a scope nothing asks about never
+  /// resolves its configured dependencies (denoland/deno#36668).
+  configured_dep_resolutions: Arc<OnceLock<Arc<ConfiguredDepResolutions>>>,
   config_data: Option<Arc<ConfigData>>,
   /// denext: the built-in `vitest` / `@jest/globals` types (see
   /// `tools::test::vitest::lsp_type_overrides`).
@@ -221,16 +225,6 @@ impl LspScopedResolver {
       cache.for_specifier(config_data.map(|d| d.scope.as_ref())),
       config_data.and_then(|d| d.lockfile.clone()),
     )));
-    let configured_dep_resolutions = (|| {
-      let npm_pkg_req_resolver = npm_pkg_req_resolver.as_ref()?;
-      Some(Arc::new(ConfiguredDepResolutions::new(
-        workspace_resolver.clone(),
-        config_data.and_then(|d| d.maybe_pkg_json().map(|p| p.as_ref())),
-        npm_pkg_req_resolver,
-        &pkg_json_resolver,
-      )))
-    })()
-    .unwrap_or_default();
     Self {
       resolver: cli_resolver,
       workspace_resolver,
@@ -246,7 +240,7 @@ impl LspScopedResolver {
       pkg_json_resolver,
       redirect_resolver,
       dep_info: Default::default(),
-      configured_dep_resolutions,
+      configured_dep_resolutions: Default::default(),
       config_data: config_data.cloned(),
       specifier_overrides,
     }
@@ -261,7 +255,7 @@ impl LspScopedResolver {
     factory
       .services
       .npm_resolution
-      .set_snapshot(self.npm_resolution.snapshot());
+      .set_snapshot_rc(self.npm_resolution.snapshot_rc());
     let npm_resolver = self.npm_resolver.as_ref();
     if let Some(npm_resolver) = &npm_resolver {
       factory.set_npm_resolver(CliNpmResolver::<CliSys>::new::<CliSys>(
@@ -331,6 +325,30 @@ impl LspScopedResolver {
       configured_dep_resolutions: self.configured_dep_resolutions.clone(),
       config_data: self.config_data.clone(),
       specifier_overrides: self.specifier_overrides.clone(),
+    })
+  }
+
+  /// The resolutions of this scope's configured dependencies (import map and
+  /// package.json), built the first time something needs them. Every
+  /// workspace member is a scope and each would otherwise resolve every
+  /// configured npm dependency and all of its export subpaths at
+  /// configuration time, whether or not a request ever touches that scope
+  /// (denoland/deno#36668, #36662).
+  fn configured_dep_resolutions(&self) -> &ConfiguredDepResolutions {
+    self.configured_dep_resolutions.get_or_init(|| {
+      let Some(npm_pkg_req_resolver) = self.npm_pkg_req_resolver.as_ref()
+      else {
+        return Default::default();
+      };
+      Arc::new(ConfiguredDepResolutions::new(
+        self.workspace_resolver.clone(),
+        self
+          .config_data
+          .as_ref()
+          .and_then(|d| d.maybe_pkg_json().map(|p| p.as_ref())),
+        npm_pkg_req_resolver,
+        &self.pkg_json_resolver,
+      ))
     })
   }
 
@@ -416,6 +434,44 @@ impl LspScopedResolver {
   }
 
   pub fn configured_auto_import_roots(&self) -> Vec<ModuleSpecifier> {
+    let mut roots = self.configured_import_map_auto_import_roots();
+    if let Some(package_json) =
+      self.config_data.as_ref().and_then(|d| d.maybe_pkg_json())
+      && let Some(dependencies) = package_json.dependencies.as_ref()
+    {
+      for name in dependencies.keys() {
+        if let Ok(specifier) = ModuleSpecifier::parse(&format!("npm:{name}")) {
+          roots.insert(specifier);
+        }
+      }
+    }
+    roots.extend(
+      self
+        .configured_dep_resolutions()
+        .deps_by_resolution
+        .keys()
+        .cloned(),
+    );
+    roots.into_iter().collect()
+  }
+
+  /// The JSR roots of [`Self::configured_auto_import_roots`]: `jsr:`
+  /// specifiers and URLs under the JSR registry. Those only come from the
+  /// import map (the package.json and resolved npm roots are `npm:` and
+  /// `file:` URLs), so this never resolves the configured npm dependencies
+  /// (denoland/deno#36668).
+  pub fn configured_jsr_auto_import_roots(&self) -> Vec<ModuleSpecifier> {
+    let jsr_url = crate::args::jsr_url().as_str();
+    self
+      .configured_import_map_auto_import_roots()
+      .into_iter()
+      .filter(|s| s.scheme() == "jsr" || s.as_str().starts_with(jsr_url))
+      .collect()
+  }
+
+  fn configured_import_map_auto_import_roots(
+    &self,
+  ) -> IndexSet<ModuleSpecifier> {
     let mut roots = IndexSet::new();
     if let Some(import_map) = self.workspace_resolver.maybe_import_map() {
       for entry in import_map.imports().entries().chain(
@@ -459,24 +515,7 @@ impl LspScopedResolver {
         }
       }
     }
-    if let Some(package_json) =
-      self.config_data.as_ref().and_then(|d| d.maybe_pkg_json())
-      && let Some(dependencies) = package_json.dependencies.as_ref()
-    {
-      for name in dependencies.keys() {
-        if let Ok(specifier) = ModuleSpecifier::parse(&format!("npm:{name}")) {
-          roots.insert(specifier);
-        }
-      }
-    }
-    roots.extend(
-      self
-        .configured_dep_resolutions
-        .deps_by_resolution
-        .keys()
-        .cloned(),
-    );
-    roots.into_iter().collect()
+    roots
   }
 
   pub fn jsr_lookup_bare_specifier_for_workspace_file(
@@ -530,7 +569,7 @@ impl LspScopedResolver {
     referrer: &Url,
   ) -> Option<String> {
     self
-      .configured_dep_resolutions
+      .configured_dep_resolutions()
       .dep_key_from_resolution(specifier, referrer)
   }
 
@@ -804,6 +843,44 @@ struct ConfiguredDepResolutions {
   deps_by_resolution: IndexMap<ModuleSpecifier, (String, ConfiguredDepKind)>,
 }
 
+/// The npm resolutions made while building one [`ConfiguredDepResolutions`],
+/// by request, referrer and kind. A workspace's import map repeats every
+/// member's entries in each member's scope (and a bare `pkg` entry comes with
+/// its `pkg/` twin), so the same package, export subpaths and all, was
+/// resolved once per entry, each time resolving and canonicalizing its
+/// package folder again (denoland/deno#36662).
+#[derive(Default)]
+struct ConfiguredDepResolveCache(
+  HashMap<(String, Url, NodeResolutionKind), Option<Url>>,
+);
+
+impl ConfiguredDepResolveCache {
+  fn resolve(
+    &mut self,
+    npm_pkg_req_resolver: &CliNpmReqResolver,
+    req_ref: &NpmPackageReqReference,
+    referrer: &Url,
+    kind: NodeResolutionKind,
+  ) -> Option<Url> {
+    self
+      .0
+      .entry((req_ref.to_string(), referrer.clone(), kind))
+      .or_insert_with(|| {
+        npm_pkg_req_resolver
+          .resolve_req_reference(
+            req_ref,
+            referrer,
+            // todo(dsherret): this is wrong because it doesn't consider CJS referrers
+            ResolutionMode::Import,
+            kind,
+          )
+          .ok()
+          .and_then(|u| u.into_url().ok())
+      })
+      .clone()
+  }
+}
+
 impl ConfiguredDepResolutions {
   fn new(
     workspace_resolver: Arc<WorkspaceResolver<CliSys>>,
@@ -812,13 +889,15 @@ impl ConfiguredDepResolutions {
     pkg_json_resolver: &CliPackageJsonResolver,
   ) -> Self {
     let mut result = Self::default();
+    let mut cache = ConfiguredDepResolveCache::default();
     let insert_export_resolutions =
       |key_prefix: &str,
        dep_req_str: &str,
        dep_package_json: &PackageJson,
        referrer,
        dep_kind: &ConfiguredDepKind,
-       result: &mut Self| {
+       result: &mut Self,
+       cache: &mut ConfiguredDepResolveCache| {
         let export_keys = dep_package_json
           .exports
           .as_ref()
@@ -840,19 +919,9 @@ impl ConfiguredDepResolutions {
           };
           for kind in [NodeResolutionKind::Types, NodeResolutionKind::Execution]
           {
-            let Some(url_or_path) = npm_pkg_req_resolver
-              .resolve_req_reference(
-                &req_ref,
-                referrer,
-                // todo(dsherret): this is wrong because it doesn't consider CJS referrers
-                ResolutionMode::Import,
-                kind,
-              )
-              .ok()
+            let Some(file_url) =
+              cache.resolve(npm_pkg_req_resolver, &req_ref, referrer, kind)
             else {
-              continue;
-            };
-            let Some(file_url) = url_or_path.into_url().ok() else {
               continue;
             };
             result.deps_by_resolution.insert(
@@ -881,16 +950,8 @@ impl ConfiguredDepResolutions {
         };
         let mut dep_package_json = None;
         for kind in [NodeResolutionKind::Types, NodeResolutionKind::Execution] {
-          let Some(file_url) = npm_pkg_req_resolver
-            .resolve_req_reference(
-              &req_ref,
-              referrer,
-              // todo(dsherret): this is wrong because it doesn't consider CJS referrers
-              ResolutionMode::Import,
-              kind,
-            )
-            .ok()
-            .and_then(|u| u.into_url().ok())
+          let Some(file_url) =
+            cache.resolve(npm_pkg_req_resolver, &req_ref, referrer, kind)
           else {
             continue;
           };
@@ -924,6 +985,7 @@ impl ConfiguredDepResolutions {
             referrer,
             &dep_kind,
             &mut result,
+            &mut cache,
           );
         }
       }
@@ -941,16 +1003,9 @@ impl ConfiguredDepResolutions {
         };
         let mut dep_package_json = None;
         for kind in [NodeResolutionKind::Types, NodeResolutionKind::Execution] {
-          let Ok(req) = npm_pkg_req_resolver.resolve_req_reference(
-            &req_ref,
-            &referrer,
-            // todo(dsherret): this is wrong because it doesn't consider CJS referrers
-            ResolutionMode::Import,
-            kind,
-          ) else {
-            continue;
-          };
-          let Some(file_url) = req.into_url().ok() else {
+          let Some(file_url) =
+            cache.resolve(npm_pkg_req_resolver, &req_ref, &referrer, kind)
+          else {
             continue;
           };
           if dep_package_json.is_none() {
@@ -971,6 +1026,7 @@ impl ConfiguredDepResolutions {
             &referrer,
             &ConfiguredDepKind::PackageJson,
             &mut result,
+            &mut cache,
           );
         }
       }

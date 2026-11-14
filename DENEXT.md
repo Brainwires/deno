@@ -15051,6 +15051,126 @@ where the changes are discussed.
        `fetchH2RetriesAStreamRefusedMoreThanOnce` (new: every request refused
        three times; it failed with the issue's error before the fix).
 
+382. **`perf(lsp)`: a workspace's configured npm dependencies are resolved when
+     a request needs them, each once** (CLI; upstream denoland/deno#36662;
+     `cli/lsp/resolver.rs`, `cli/lsp/tsc.rs`). Every workspace member is a
+     resolver scope, and each scope resolved its configured npm dependencies
+     (import map and package.json: the package for both resolution kinds, then
+     every non-wildcard `exports` subpath for both) when the configuration
+     loaded, used or not. The workspace import map repeats every member's
+     entries in each member's scope, and a bare `pkg` entry comes with its
+     `pkg/` twin, so each resolution was made once per entry, and each one
+     resolved and canonicalized the package folder again. Upstream's repro (a
+     two-member workspace, both importing `npm:jose@5.10.0`, 30 export keys)
+     resolved jose's folder 744 times before the server was ready (3 scopes ×
+     4 entries × (2 + 30 × 2)), with `nodeModulesDir` `"auto"` or `"none"`
+     alike; on the reporter's monorepo 296,037 times. Now a scope builds them
+     the first time something asks (`prepare_cache`, auto-import aliasing of a
+     `node_modules` file, the import mapper), shared with that scope's request
+     snapshots, and a build makes each (request, referrer, kind) resolution
+     once. `op_script_names`, which forced every scope with compiler options
+     to build them just to keep their JSR roots, now asks for the import map's
+     JSR roots only: the resolved npm roots are `file:` URLs and were always
+     dropped there. Results are unchanged (same entries, same insertion
+     order). This is the reporter's defect 3 (`ConfiguredDepResolutions` held
+     in a `OnceLock`) completed, and the redundancy behind defect 4 removed
+     instead of skipped: their `DENO_LSP_SKIP_EXPORT_RESOLUTIONS` gate turned
+     the export resolutions off and is not taken.
+     - Evidence (upstream's repro, rebuilt by hand; debug builds on Linux x64,
+       `DENO_LOG=debug` lines `Resolved package folder`): 746 before, 744 of
+       them before "Server ready.", now 188 in all and none before it (126
+       with `nodeModulesDir: "none"`); its timings are within noise. A
+       40-member workspace (one `packages/*` glob, each member importing jose
+       and holding a 1,000-directory `.venv`), three interleaved runs on a
+       loaded 8-core machine: 203,362 folder resolutions, 203,360 of them
+       before "Server ready.", now 188; `initialized` to "Server ready." 21.2
+       / 23.6 / 25.8 s, now 1.09 / 1.13 / 0.94 s (with item 383's glob
+       pruning); `documentSymbol` and `definition` unchanged (3.4 to 4.0 s,
+       135 to 206 ms).
+     - Tests: integration
+       `lsp::lsp_workspace_configured_npm_deps_resolve_lazily_once`
+       (two members importing `npm:@denotest/file-dts-dmts-dcts@1.0.0`, `.`
+       and three subpaths, installed into `node_modules`: no package-folder
+       resolution before "Server ready."; after opening a module and caching
+       from a member, each scope reached has resolved its configured
+       dependencies once each, at most 28 folder resolutions (one scope
+       resolving them per entry makes 32); on 3.0.0-denext.22 it made 96
+       before the server was ready: 3 scopes × 4 entries × (2 + 3 × 2)).
+     - Node tests enabled: none; no Node API changes.
+
+383. **`perf(lsp)`: workspace member globs don't walk member trees, and
+     requests share the npm resolution snapshot** (CLI; upstream
+     denoland/deno#36668; `libs/config/glob/mod.rs`,
+     `libs/config/glob/collector.rs`, `libs/resolver/npm/managed/resolution.rs`,
+     `cli/lsp/resolver.rs`). The reporter measured six defects and published
+     a patch for each as a diagnostic. Evaluated against this fork:
+     - Defect 1, taken (rederived): expanding member globs
+       (`packages/*/deno.json`, from deno.json `workspace` and package.json
+       `workspaces`) descended every matched member's whole tree, `.venv` and
+       build output included, pruning only `node_modules`, `.git` and the
+       vendor folder. The file collector now skips a directory no include
+       entry can match under (`FilePatterns::can_match_under_dir`, on the
+       existing `GlobPattern::can_match_under`, which `split_by_base` already
+       relies on): globs match with a literal separator and a literal leading
+       dot, so `*` can't reach below its segment; `**` and anything outside a
+       pattern's base stay candidates; negated entries add nothing; an
+       explicit path keeps its ancestors and descendants. This applies to
+       every collector walk with an include set (fmt, lint, test, bench, doc,
+       tsconfig roots), with the same files found.
+     - Defect 3 (lazy dependency resolutions) and the redundancy behind defect
+       4: item 382.
+     - Defect 6, taken: `NpmResolutionCell` holds its snapshot in a
+       `MaybeArc` (`snapshot_rc` / `set_snapshot_rc`; a cell only ever
+       replaces its snapshot whole), and the language server's per-request
+       resolver copy shares it instead of deep-cloning every scope's package
+       graph for every request. Seeding each scope with the whole lockfile
+       (the other half of defect 6) is unchanged.
+     - Defect 2, not taken: honouring `.gitignore` while collecting tsconfig
+       `include` roots drops roots a project includes on purpose, such as
+       Next.js's `.next/types/**/*.ts` (gitignored, listed in every Next
+       tsconfig).
+     - Defect 4's gate, not taken: it skips the export resolutions rather than
+       removing their repetition (item 382 removes it).
+     - Defect 5, not taken: making deno.json `workspace` bound membership
+       changes a tested contract (deno.json and package.json members are
+       unioned on purpose), as the reporter notes.
+     - Evidence: the 40-member workspace of item 382 opened 45,080
+       directories (44,994 inside members' `.venv`) through one
+       `documentSymbol`, now 960 (`strace -e openat`, `O_DIRECTORY`); the 874
+       `.venv` opens left are `walk_workspace`, which stops at 1,000 entries.
+     - Tests: `deno_config`'s
+       `glob::collector::test::member_globs_do_not_walk_member_trees`
+       (members from `packages/*/deno.json`, `apps/**/deno.json`, an explicit
+       path and a negated member: the same five found, and no read of a
+       member's `src`, `.venv` or `dist`; on 3.0.0-denext.22 it read all of
+       them), `deno_resolver`'s
+       `npm::managed::resolution::test::cells_share_a_snapshot_until_one_replaces_it`.
+     - Node tests enabled: none; no Node API changes.
+
+384. **`fix(desktop)`: every packaged Windows app has an app id, so WebView2
+     keeps its data in the per-user app data folder** (CLI; upstream
+     denoland/deno#36768; `cli/tools/desktop.rs`). An `.msi` installs per
+     machine under Program Files, and WebView2's default user data folder is
+     `<exe>.WebView2` beside the executable, which the user can't write there:
+     `CreateCoreWebView2EnvironmentWithOptions` fails with `E_ACCESSDENIED`
+     and the window stays white. This fork already gives laufey the app id
+     (deno.json `desktop.app.identifier`, else `com.deno.desktop.<name>`) in
+     the packaged `laufey-launch.json`, and laufey then puts the folder in
+     `%LOCALAPPDATA%\<id>\WebView2`. An app
+     whose name sanitizes to nothing (all non-ASCII, or all punctuation) got
+     no id, and laufey kept the folder beside the exe. Such an app now gets
+     `com.deno.desktop.app-<12 hex digits of the name's SHA-256>`, stable
+     across builds and distinct per name; the same id goes to the `.msi`'s
+     deep-link registrations. No laufey change.
+     - User-facing note: a Windows desktop app installed by its `.msi` under
+       Program Files opens its window whatever its name; web data lives in
+       `%LOCALAPPDATA%\<app id>\WebView2`.
+     - Tests:
+       `tools::desktop::tests::windows_app_id_always_names_a_per_user_data_folder`
+       (names `___`, `ノート`, `メモ帳`, ` `, `""`: a valid reverse-DNS id,
+       stable, distinct per name; on 3.0.0-denext.22 `___` had none).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

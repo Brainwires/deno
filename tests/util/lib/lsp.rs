@@ -946,6 +946,10 @@ impl LspClient {
           return;
         }
         found_lines.push(line);
+        // Read what is already waiting without pausing: with `log_debug()`
+        // the server writes hundreds of lines, which a pause per line would
+        // take longer than the timeout to get through.
+        continue;
       }
       std::thread::sleep(Duration::from_millis(20));
     }
