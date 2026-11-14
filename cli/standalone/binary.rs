@@ -1009,7 +1009,11 @@ impl<'a> DenoCompileBinaryWriter<'a> {
       // this for everything except extensionless files (`MediaType::Unknown`),
       // which may be real modules (an npm `"main"` with no extension — see
       // test-module-main-extension-lookup); those are disambiguated by content
-      // below rather than skipped outright.
+      // below rather than skipped outright. Declaration files never run, so
+      // the runtime never asks for their exports: since an npm `.d.ts` counts
+      // as CJS by its package.json alone (#35166), analyzing them parsed every
+      // generated declaration in `node_modules`, and a deeply nested one
+      // overflowed the stack (denoland/deno#36746).
       if !matches!(
         media_type,
         MediaType::JavaScript
@@ -1020,9 +1024,6 @@ impl<'a> DenoCompileBinaryWriter<'a> {
           | MediaType::Mts
           | MediaType::Cts
           | MediaType::Tsx
-          | MediaType::Dts
-          | MediaType::Dmts
-          | MediaType::Dcts
           | MediaType::Unknown
       ) {
         continue;

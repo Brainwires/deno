@@ -14824,6 +14824,98 @@ where the changes are discussed.
      - Node tests enabled: none new; `sequential/test-cpu-prof-kill.js` was
        already enabled and is the flake this removes.
 
+375. **`fix(cli)`: SQLite's first-time initialization runs once, before the
+     cache databases open in parallel** (port of Ende's fix for
+     denoland/deno#37045, theende/ende ddc7a450c8, MIT; CLI only;
+     `cli/cache/cache_db.rs`). Each on-disk cache database opens its
+     connection on its own blocking thread at startup, so two threads could
+     enter `sqlite3_initialize()` together. The bundled SQLite's
+     `sqlite3MutexInit()` publishes `xMutexAlloc` after a barrier, but a thread
+     that sees it set reads `xMutexInit` with no barrier, so on arm64 it could
+     call a stale NULL pointer: an intermittent SIGSEGV about 20 ms after
+     startup on Apple Silicon (Quarto saw about 1 in tens of thousands of
+     launches). `CacheDB::from_path` now finishes the process-wide init on the
+     calling thread (a `std::sync::Once` around an in-memory open) before it
+     starts the eager-init thread, and the connection open does the same for
+     in-memory caches.
+     - User-facing note: an occasional crash at startup on macOS arm64 (pc 0,
+       `EXC_BAD_ACCESS` on a tokio worker) is gone.
+     - Tests: `cache::cache_db::tests::from_path_initializes_sqlite_before_spawning`
+       (in a fresh process, with the runtime's only blocking thread parked so
+       the eager-init task can't run, `sqlite3_config` answers `SQLITE_MISUSE`
+       once `from_path` returns: SQLite is initialized; without the fix it
+       answers `SQLITE_OK`, every time). Ende's version checked the same thing
+       without parking the thread, so it could pass without the fix.
+
+376. **`fix(node:fs)`: `existsSync()` / `exists()` answer `false` for a special
+     path the grants don't reach, instead of throwing** (denoland/deno#37062;
+     runtime; `runtime/permissions/lib.rs`, `ext/node/ops/fs.rs`). A path
+     under `/proc`, `/dev` or `/sys` (on macOS `/dev`, on Windows a device
+     path) needs `--allow-all` (`/proc/*/environ` the whole env permission)
+     even when `--allow-read` grants it, and `node:fs.existsSync()` passed that
+     refusal on as `NotCapable`. Vite 8 probes
+     `/proc/sys/fs/binfmt_misc/WSLInterop` at startup, so `vite build` under
+     scoped permissions failed. Node's `existsSync()` never throws, and the
+     program can't open the path either way, so now it is `false`.
+     `PermissionsContainer::check_exists` runs `check_open`'s read check
+     unchanged (allow and deny scopes, the resolved-path check, a prompt) and
+     reports only the special-file refusal as absent: a path outside the
+     read grant or in a deny scope still throws. `fs.exists()` gets the same
+     answer instead of an unhandled rejection.
+     - User-facing note: `vite build` (Vite 8) runs under `--allow-read`
+       without `--allow-all`. `existsSync("/proc/self/cgroup")` is `false`
+       there, though the file exists; with `-A` it is `true`.
+     - Tests: spec `node/fs_exists_special_paths` (`existsSync` and `exists`
+       under `--allow-read`: `false` for a missing `/dev` device, `true` for
+       `/dev/null`, and on Linux `false` for the issue's WSL probe and
+       `/proc/self/cgroup`, `true` for the latter under `-A`; `NotCapable` still
+       for a deny-scoped file and for one outside `--allow-read=`); unit
+       `check_exists_absorbs_only_the_special_file_refusal` in
+       `deno_permissions`.
+     - Node tests enabled: none; Node's suite runs with `-A`, where no special
+       path is refused.
+
+377. **`fix(compile)`: a deeply nested npm file no longer aborts `deno compile`
+     (or `deno run`) with a stack overflow** (denoland/deno#36746; runtime and
+     CLI; `libs/resolver/cjs/analyzer/mod.rs`, `cli/standalone/binary.rs`,
+     `runtime/tokio_util.rs`). `deno compile` runs CJS export analysis over
+     every embedded npm file, on the runtime's blocking-pool threads (2 MiB).
+     swc's parser and the analysis recurse once per nesting level, at 2 to
+     4 KiB a level (500 nested arrays fit in 2 MiB, 1000 don't), so 1000
+     nested array literals (or calls, objects,
+     ternaries, a long `a + b + …` or member chain, a nested generic) killed
+     the process: `thread 'tokio-runtime-worker' has overflowed its stack`. A
+     `deno run` that imports such a CJS module from ESM aborted the same way.
+     The depth limit is the same as 2.8.3's; 2.9.0 made it bite in two ways,
+     both measured with stock 2.8.3 and 2.9.0 on Linux: #35166 counts an npm
+     `.d.ts` as CJS from its package.json alone, so compile started parsing
+     every generated declaration file (2.8.3 skipped them when the package had
+     an `import` condition), and `deno desktop` (#33441) gave the blocking
+     pool an explicit 2 MiB stack in release builds, so the `RUST_MIN_STACK`
+     workaround stopped working. Now:
+     - the analysis (parse, analysis and drop of the AST) runs on its own
+       stack segment (`stacker::grow`, made per analysis and released after
+       it): 64 MiB on unix, 16 000 to 32 000 levels in a release build, where only
+       the pages it touches are committed; 16 MiB on Windows, where the segment
+       is a fiber whose whole stack is committed up front. V8 runs deeper
+       still (40 000 nested arrays through `require`), so a module beyond
+       that still aborts, as every module past 1000 levels did;
+     - compile skips declaration files (`.d.ts`, `.d.mts`, `.d.cts`): they
+       never run, so the runtime never asks for their exports;
+     - a release build no longer sets the blocking pool's stack size, so
+       `RUST_MIN_STACK` raises it again, as in 2.8.3 (debug builds keep 8 MiB).
+     - User-facing note: `deno compile` of a project whose `node_modules` holds
+       a deeply nested file, or a deeply nested generated `.d.ts`, completes.
+     - Tests: spec `compile/deeply_nested_npm_files` (an npm package whose
+       program-imported module is shallow, with a CJS file nothing imports
+       nested 5000 arrays deep and a `.d.ts` with a generic nested 200 000
+       deep: `deno compile` builds and the binary runs; on the base, a debug
+       build aborts with the overflow with both files and with the `.d.ts`
+       alone). Measured by hand, not as a test: a release 3.0.0-denext.13
+       aborts `deno run` that imports a CJS module 1000 arrays deep from ESM;
+       a debug build's V8 refuses about 2500 levels itself, before the debug
+       analysis stack (8 MiB) runs out, so a debug spec can't show it.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -14831,7 +14923,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374) are what the prebuilt
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376, 377) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

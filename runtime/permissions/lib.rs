@@ -5389,6 +5389,13 @@ pub enum PermissionCheckError {
   Io(std::io::Error),
 }
 
+/// What `check_open_grants` leaves to its caller: nothing when every
+/// permission is granted, else the special-file check of the path.
+enum OpenGrants<'a> {
+  AllGranted(CheckedPath<'a>),
+  Special(SpecialFilePathQueryDescriptor<'a>),
+}
+
 fn ignored_to_not_found(err: PermissionDeniedError) -> PermissionCheckError {
   #[cfg(target_arch = "wasm32")]
   fn not_found() -> std::io::Error {
@@ -5774,6 +5781,36 @@ impl PermissionsContainer {
     self.check_open_with_requested(path, access_kind, Some(display), api_name)
   }
 
+  /// `node:fs.existsSync()` / `node:fs.exists()`: as `check_open()` for a
+  /// read, except that a special file the grants don't reach (`/proc`,
+  /// `/dev`, `/sys`, Windows device paths, which need `--allow-all` or the
+  /// whole env permission) is `Ok(None)` instead of an error, so the caller
+  /// answers `false` as Node does. Every other refusal (a path outside the
+  /// read grants, a deny scope, a refused prompt) is still an error.
+  /// See https://github.com/denoland/deno/issues/37062.
+  #[must_use = "the resolved return value to mitigate time-of-check to time-of-use issues"]
+  pub fn check_exists<'a>(
+    &self,
+    path: Cow<'a, Path>,
+    api_name: Option<&str>,
+  ) -> Result<Option<CheckedPath<'a>>, PermissionCheckError> {
+    let special_path = match self.check_open_grants(
+      path,
+      OpenAccessKind::Read,
+      None,
+      api_name,
+    )? {
+      OpenGrants::AllGranted(path) => return Ok(Some(path)),
+      OpenGrants::Special(special_path) => special_path,
+    };
+    match self.check_special_file(special_path, OpenAccessKind::Read, api_name)
+    {
+      Ok(path) => Ok(Some(path)),
+      Err(PermissionCheckError::PermissionDenied(_)) => Ok(None),
+      Err(err) => Err(err),
+    }
+  }
+
   #[inline(always)]
   fn check_open_with_requested<'a>(
     &self,
@@ -5782,18 +5819,42 @@ impl PermissionsContainer {
     blind_requested: Option<&str>,
     api_name: Option<&str>,
   ) -> Result<CheckedPath<'a>, PermissionCheckError> {
+    match self.check_open_grants(
+      path,
+      access_kind,
+      blind_requested,
+      api_name,
+    )? {
+      OpenGrants::AllGranted(path) => Ok(path),
+      OpenGrants::Special(special_path) => {
+        self.check_special_file(special_path, access_kind, api_name)
+      }
+    }
+  }
+
+  /// The grant half of `check_open()`: the read / write allow and deny
+  /// scopes, for the path as given and as resolved. The special-file check
+  /// on the returned descriptor is the caller's.
+  #[inline(always)]
+  fn check_open_grants<'a>(
+    &self,
+    path: Cow<'a, Path>,
+    access_kind: OpenAccessKind,
+    blind_requested: Option<&str>,
+    api_name: Option<&str>,
+  ) -> Result<OpenGrants<'a>, PermissionCheckError> {
     let path = {
       let mut inner = self.inner.lock();
       if inner.all_granted() {
         write_audit(ReadQueryDescriptor::flag_name(), &path);
         write_audit(WriteQueryDescriptor::flag_name(), &path);
-        return Ok(CheckedPath {
+        return Ok(OpenGrants::AllGranted(CheckedPath {
           path: PathWithRequested {
             path,
             requested: None,
           },
           canonicalized: false,
-        });
+        }));
       }
       let should_check_read =
         access_kind.is_read() && !inner.read.is_allow_all();
@@ -5878,7 +5939,7 @@ impl PermissionsContainer {
       }
       special_path
     };
-    self.check_special_file(special_path, access_kind, api_name)
+    Ok(OpenGrants::Special(special_path))
   }
 
   /// The no-follow write checks (`check_write_partial`, `check_write`) use the
@@ -13837,6 +13898,68 @@ mod tests {
     // so NTFS) keeps them apart from `I` and `S`.
     assert_ne!(windows_fold_char('\u{131}'), 'I');
     assert_ne!(windows_fold_char('\u{17F}'), 'S');
+  }
+
+  /// `check_exists` (node:fs.existsSync) reports a special file the grants
+  /// don't reach as absent, and still refuses a path outside the grants or in
+  /// a deny scope (denoland/deno#37062).
+  #[test]
+  #[cfg(unix)]
+  fn check_exists_absorbs_only_the_special_file_refusal() {
+    set_prompter(Box::new(TestPrompter));
+    let parser = TestPermissionDescriptorParser;
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_read: Some(svec!["/"]),
+        deny_read: Some(svec!["/denied"]),
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    let perms = PermissionsContainer::new(Arc::new(parser), perms);
+    let exists = |path: &str| {
+      perms
+        .check_exists(Cow::Owned(PathBuf::from(path)), Some("api"))
+        .map(|checked| checked.is_some())
+    };
+    // /dev needs --allow-all on every unix.
+    assert!(!exists("/dev/denext-no-such-device").unwrap());
+    // check_open refuses the same path.
+    assert!(
+      perms
+        .check_open(
+          Cow::Borrowed(Path::new("/dev/denext-no-such-device")),
+          OpenAccessKind::Read,
+          Some("api"),
+        )
+        .is_err()
+    );
+    assert!(exists("/dev/null").unwrap());
+    assert!(exists("/home/file.txt").unwrap());
+    assert!(exists("/denied/file.txt").is_err());
+
+    let parser = TestPermissionDescriptorParser;
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_read: Some(svec!["/allowed"]),
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    let perms = PermissionsContainer::new(Arc::new(parser), perms);
+    assert!(
+      perms
+        .check_exists(Cow::Borrowed(Path::new("/elsewhere")), Some("api"))
+        .is_err()
+    );
+    assert!(
+      perms
+        .check_exists(Cow::Borrowed(Path::new("/allowed/x")), Some("api"))
+        .unwrap()
+        .is_some()
+    );
   }
 
   /// A stream name reaches the file's own scope: a denied file's default

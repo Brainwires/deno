@@ -412,13 +412,15 @@ pub fn op_node_fs_exists_sync(
   state: &mut OpState,
   #[string] path: &str,
 ) -> Result<bool, deno_permissions::PermissionCheckError> {
-  let path_or_err = state.borrow_mut::<PermissionsContainer>().check_open(
-    Cow::Borrowed(Path::new(path)),
-    OpenAccessKind::Read,
-    Some("node:fs.existsSync()"),
-  );
+  // A special file the grants don't reach (`/proc`, `/dev`, …) doesn't
+  // exist as far as the program can tell: `false`, as Node never throws
+  // here (denoland/deno#37062).
+  let path_or_err = state
+    .borrow_mut::<PermissionsContainer>()
+    .check_exists(Cow::Borrowed(Path::new(path)), Some("node:fs.existsSync()"));
   match path_or_err {
-    Ok(path) => {
+    Ok(None) => Ok(false),
+    Ok(Some(path)) => {
       let fs = state.borrow::<FileSystemRc>();
       Ok(fs.exists_sync(&path))
     }
@@ -434,16 +436,16 @@ pub async fn op_node_fs_exists(
 ) -> Result<bool, FsError> {
   let (fs, path_or_err) = {
     let mut state = state.borrow_mut();
-    let path_or_err = state.borrow_mut::<PermissionsContainer>().check_open(
-      Cow::Owned(PathBuf::from(path)),
-      OpenAccessKind::Read,
-      Some("node:fs.exists()"),
-    );
+    // See op_node_fs_exists_sync: an unreachable special file is `false`.
+    let path_or_err = state
+      .borrow_mut::<PermissionsContainer>()
+      .check_exists(Cow::Owned(PathBuf::from(path)), Some("node:fs.exists()"));
     (state.borrow::<FileSystemRc>().clone(), path_or_err)
   };
 
   match path_or_err {
-    Ok(path) => Ok(fs.exists_async(path.into_owned()).await?),
+    Ok(None) => Ok(false),
+    Ok(Some(path)) => Ok(fs.exists_async(path.into_owned()).await?),
     Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
     Err(err) => Err(FsError::Permission(err)),
   }

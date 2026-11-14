@@ -198,6 +198,26 @@ fn should_skip_cjs_analysis(media_type: MediaType, source: &str) -> bool {
   is_definitely_non_script || (media_type == MediaType::Unknown && looks_binary)
 }
 
+/// The stack CJS export analysis runs on. swc's parser and the analysis
+/// visitors recurse once per nesting level of the source, 2 to 4 KiB a
+/// level in a release build (2 MiB holds 500 nested arrays but not 1000), so
+/// a module V8 runs fine overflowed the 2 MiB blocking-pool thread and
+/// aborted the process: `deno compile` analyzes every embedded npm file, so
+/// one deep file anywhere in `node_modules` killed it (denoland/deno#36746).
+/// The analysis runs on its own stack segment instead, made for each
+/// analysis and released after it: 64 MiB (16 000 to 32 000 levels) on unix,
+/// where only the pages it touches are committed; 16 MiB on Windows, where
+/// the segment is a fiber whose whole stack is committed up front.
+#[cfg(all(feature = "sync", not(windows)))]
+const ANALYSIS_STACK_SIZE: usize = 64 * 1024 * 1024;
+#[cfg(all(feature = "sync", windows))]
+const ANALYSIS_STACK_SIZE: usize = 16 * 1024 * 1024;
+
+#[cfg(feature = "sync")]
+fn run_on_analysis_stack<R>(f: impl FnOnce() -> R) -> R {
+  stacker::grow(ANALYSIS_STACK_SIZE, f)
+}
+
 pub struct DenoCjsCodeAnalyzer<TSys: DenoCjsCodeAnalyzerSys> {
   cache: NodeAnalysisCacheRc,
   cjs_tracker: CjsTrackerRc<DenoInNpmPackageChecker, TSys>,
@@ -288,7 +308,9 @@ impl<TSys: DenoCjsCodeAnalyzerSys> DenoCjsCodeAnalyzer<TSys> {
 
       #[cfg(feature = "sync")]
       {
-        crate::rt::spawn_blocking(analyze).await.unwrap()?
+        crate::rt::spawn_blocking(move || run_on_analysis_stack(analyze))
+          .await
+          .unwrap()?
       }
       #[cfg(not(feature = "sync"))]
       analyze()?
@@ -377,7 +399,9 @@ impl<TSys: DenoCjsCodeAnalyzerSys> CjsCodeAnalyzer
       Ok(parsed.analyze_member_export_props())
     };
     #[cfg(feature = "sync")]
-    let map = crate::rt::spawn_blocking(analyze).await.unwrap()?;
+    let map = crate::rt::spawn_blocking(move || run_on_analysis_stack(analyze))
+      .await
+      .unwrap()?;
     #[cfg(not(feature = "sync"))]
     let map = analyze()?;
 

@@ -140,6 +140,22 @@ enum ConnectionState {
   Error(Arc<AnyError>),
 }
 
+/// The bundled SQLite's first-time initialization (`sqlite3_initialize` ->
+/// `sqlite3MutexInit`) is unsafe to enter from two threads at once: on
+/// weak-memory architectures (arm64) a thread that observes `xMutexAlloc`
+/// already set skips the vtable copy but may read a stale NULL `xMutexInit`
+/// and call through it. Run the first initialization serially here before
+/// the eager-init threads open their connections in parallel.
+/// See https://github.com/denoland/deno/issues/37045 (fix ported from Ende,
+/// theende/ende ddc7a450c8, MIT).
+fn ensure_sqlite_initialized() {
+  static SQLITE_INIT: std::sync::Once = std::sync::Once::new();
+  SQLITE_INIT.call_once(|| {
+    // Opening any connection drives `sqlite3_initialize()` to completion.
+    drop(Connection::open_in_memory());
+  });
+}
+
 /// A cache database that eagerly initializes itself off-thread, preventing initialization operations
 /// from blocking the main thread.
 #[derive(Debug, Clone)]
@@ -209,6 +225,9 @@ impl CacheDB {
       version,
     };
 
+    // Finish the process-wide SQLite init on this thread so the eager
+    // init threads below never race it.
+    ensure_sqlite_initialized();
     new.spawn_eager_init_thread();
     new
   }
@@ -254,6 +273,8 @@ impl CacheDB {
     &self,
     path: Option<&Path>,
   ) -> Result<Connection, rusqlite::Error> {
+    // In-memory caches skip from_path(), so guard the open itself too.
+    ensure_sqlite_initialized();
     match path {
       // This should never fail unless something is very wrong
       None => Connection::open_in_memory(),
@@ -760,6 +781,66 @@ mod tests {
       Ok(row.get::<_, String>(0).unwrap())
     })
     .expect_err("Should have failed");
+  }
+
+  /// Regression test for https://github.com/denoland/deno/issues/37045:
+  /// `from_path()` must finish SQLite's first-time init on the calling
+  /// thread, so its eager-init thread never races another one into it.
+  /// SQLite initializes once per process, so the check runs in a fresh
+  /// process (this test binary, re-run on this test alone). There, the
+  /// runtime's only blocking thread is parked until the check is done, so
+  /// the eager-init task can't initialize SQLite first: without the fix the
+  /// check deterministically finds SQLite uninitialized.
+  #[test]
+  fn from_path_initializes_sqlite_before_spawning() {
+    const CHILD_ENV: &str = "DENO_TEST_SQLITE_INIT_CHILD";
+    if std::env::var_os(CHILD_ENV).is_none() {
+      let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+          "--exact",
+          "cache::cache_db::tests::from_path_initializes_sqlite_before_spawning",
+          "--test-threads=1",
+        ])
+        .env(CHILD_ENV, "1")
+        .output()
+        .unwrap();
+      let stdout = String::from_utf8_lossy(&output.stdout);
+      assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{}{}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+      );
+      return;
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+      .max_blocking_threads(1)
+      .build()
+      .unwrap();
+    rt.block_on(async {
+      let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+      let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+      let parked = spawn_blocking(move || {
+        ready_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+      });
+      ready_rx.recv().unwrap();
+
+      let temp_dir = TempDir::new();
+      let path = temp_dir.path().join("db").to_path_buf();
+      let db = CacheDB::from_path(&TEST_DB, path, "1.0");
+      // SAFETY: sqlite3_config() only reads its arguments, and no other
+      // thread can touch SQLite while the blocking thread is parked. It
+      // fails with SQLITE_MISUSE once SQLite is initialized.
+      let rc = unsafe {
+        rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MULTITHREAD)
+      };
+      release_tx.send(()).unwrap();
+      parked.await.unwrap();
+      db.ensure_connected().unwrap();
+      assert_eq!(rc, rusqlite::ffi::SQLITE_MISUSE);
+    });
   }
 
   #[test]

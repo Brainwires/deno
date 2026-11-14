@@ -1,0 +1,16 @@
+{
+  // A deeply nested file anywhere in an embedded npm package aborted
+  // `deno compile` with a stack overflow (denoland/deno#36746).
+  "tempDir": true,
+  "steps": [{
+    "args": "run -A gen.ts",
+    "output": ""
+  }, {
+    "args": "compile --no-check --allow-read --output binary main.ts",
+    "output": "[WILDCARD]"
+  }, {
+    "commandName": "./binary",
+    "args": [],
+    "output": "1\n"
+  }]
+}

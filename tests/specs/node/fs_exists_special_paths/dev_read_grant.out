@@ -1,0 +1,3 @@
+/dev/denext-no-such-device: existsSync false, exists false
+/dev/null: existsSync true, exists true
+/does/not/exist: existsSync false, exists false

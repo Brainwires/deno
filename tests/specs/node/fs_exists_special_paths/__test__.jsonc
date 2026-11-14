@@ -1,0 +1,31 @@
+{
+  "tests": {
+    // /dev needs --allow-all on every unix: an unreachable device is absent.
+    "dev_read_grant": {
+      "if": "unix",
+      "args": "run --no-prompt --allow-read main.mjs /dev/denext-no-such-device /dev/null /does/not/exist",
+      "output": "dev_read_grant.out"
+    },
+    // The issue's paths: Vite 8's WSL probe and a /proc file that exists.
+    "proc_read_grant": {
+      "if": "linux",
+      "args": "run --no-prompt --allow-read main.mjs /proc/sys/fs/binfmt_misc/WSLInterop /run/WSL /proc/self/cgroup /does/not/exist",
+      "output": "proc_read_grant.out"
+    },
+    "proc_allow_all": {
+      "if": "linux",
+      "args": "run -A main.mjs /proc/self/cgroup /does/not/exist",
+      "output": "proc_allow_all.out"
+    },
+    // Only the special-file refusal is absorbed: a deny scope still throws.
+    "deny_scope_still_throws": {
+      "args": "run --no-prompt --allow-read --deny-read=denied.txt main.mjs --sync-only denied.txt",
+      "output": "deny_scope_still_throws.out"
+    },
+    // So does a path outside the read grant.
+    "no_grant_still_throws": {
+      "args": "run --no-prompt --allow-read=main.mjs main.mjs --sync-only denied.txt",
+      "output": "no_grant_still_throws.out"
+    }
+  }
+}
