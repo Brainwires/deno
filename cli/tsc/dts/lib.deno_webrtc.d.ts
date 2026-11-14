@@ -578,9 +578,19 @@ interface RTCIceParameters {
  * @category WebRTC
  */
 interface RTCIceCandidatePair {
-  local?: RTCIceCandidate;
-  remote?: RTCIceCandidate;
+  readonly local: RTCIceCandidate;
+  readonly remote: RTCIceCandidate;
 }
+
+/**
+ * The selected candidate pair (not constructible).
+ *
+ * @category WebRTC
+ */
+declare var RTCIceCandidatePair: {
+  readonly prototype: RTCIceCandidatePair;
+  new (): never;
+};
 
 /**
  * The connection's DTLS transport (one, bundled), shared by every sender,
@@ -607,12 +617,69 @@ declare var RTCDtlsTransport: {
 };
 
 /**
+ * The init dictionary of an `RTCDTMFToneChangeEvent`.
+ *
+ * @category WebRTC
+ */
+interface RTCDTMFToneChangeEventInit extends EventInit {
+  tone?: string;
+}
+
+/**
+ * An `RTCDTMFSender`'s `tonechange` event: the tone starting to play, or ""
+ * when the buffer is empty.
+ *
+ * @category WebRTC
+ */
+interface RTCDTMFToneChangeEvent extends Event {
+  readonly tone: string;
+}
+
+/**
+ * An `RTCDTMFSender`'s `tonechange` event.
+ *
+ * @category WebRTC
+ */
+declare var RTCDTMFToneChangeEvent: {
+  readonly prototype: RTCDTMFToneChangeEvent;
+  new (
+    type: string,
+    eventInitDict?: RTCDTMFToneChangeEventInit,
+  ): RTCDTMFToneChangeEvent;
+};
+
+/**
+ * Sends DTMF tones (RFC 4733 telephone events) on an audio sender.
+ *
+ * @category WebRTC
+ */
+interface RTCDTMFSender extends EventTarget {
+  readonly canInsertDTMF: boolean;
+  readonly toneBuffer: string;
+  ontonechange:
+    | ((this: RTCDTMFSender, ev: RTCDTMFToneChangeEvent) => any)
+    | null;
+  insertDTMF(tones: string, duration?: number, interToneGap?: number): void;
+}
+
+/**
+ * Sends DTMF tones on an audio sender (not constructible).
+ *
+ * @category WebRTC
+ */
+declare var RTCDTMFSender: {
+  readonly prototype: RTCDTMFSender;
+  new (): never;
+};
+
+/**
  * Sends one track's media to the peer.
  *
  * @category WebRTC
  */
 interface RTCRtpSender {
-  readonly dtmf: null;
+  /** The DTMF sender of an audio sender (RFC 4733 events); null for video. */
+  readonly dtmf: RTCDTMFSender | null;
   readonly track: MediaStreamTrack | null;
   readonly transport: RTCDtlsTransport | null;
   getParameters(): RTCRtpSendParameters;
@@ -775,7 +842,10 @@ interface RTCIceCandidateInit {
  *
  * @category WebRTC
  */
-interface RTCLocalIceCandidateInit extends RTCIceCandidateInit {}
+interface RTCLocalIceCandidateInit extends RTCIceCandidateInit {
+  relayProtocol?: "tcp" | "tls" | "udp" | null;
+  url?: string | null;
+}
 
 /**
  * Options for `createDataChannel()`. `maxPacketLifeTime` and
@@ -832,6 +902,8 @@ interface RTCIceCandidate {
   readonly protocol: RTCIceProtocol | null;
   readonly relatedAddress: string | null;
   readonly relatedPort: number | null;
+  readonly relayProtocol: "tcp" | "tls" | "udp" | null;
+  readonly url: string | null;
   readonly sdpMLineIndex: number | null;
   readonly sdpMid: string | null;
   readonly tcpType: RTCIceTcpCandidateType | null;

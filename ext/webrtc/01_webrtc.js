@@ -48,6 +48,7 @@ const {
   op_webrtc_receiver_request_key_frame,
   op_webrtc_receiver_sources,
   op_webrtc_sender_parameters,
+  op_webrtc_sender_send_dtmf,
   op_webrtc_sender_set_paused,
   op_webrtc_sender_set_streams,
   op_webrtc_sender_write_frame,
@@ -110,6 +111,9 @@ const {
   DateNow,
   JSONStringify,
   MathFloor,
+  MathMax,
+  MathMin,
+  StringPrototypeCharCodeAt,
   MathRandom,
   RangeError,
   RegExpPrototypeTest,
@@ -163,6 +167,17 @@ function invalidState(message) {
   return new DOMException(message, "InvalidStateError");
 }
 
+// A promise-returning operation rejects (rather than throws) on a wrong
+// `this`, as Web IDL has it: the error, or null when branded.
+function brandError(self, prototype) {
+  try {
+    webidl.assertBranded(self, prototype);
+    return null;
+  } catch (error) {
+    return error;
+  }
+}
+
 // --- RTCSessionDescription -------------------------------------------------
 
 const SDP_TYPES = ["offer", "pranswer", "answer", "rollback"];
@@ -209,12 +224,34 @@ function descriptionFrom(pair) {
     : new RTCSessionDescription({ type: pair[0], sdp: pair[1] });
 }
 
+// The same RTCSessionDescription object while the description (its type
+// and SDP, gathered candidates included) doesn't change.
+function cachedDescription(pc, which, pair) {
+  if (pair === null || pair === undefined) return null;
+  const cache = pc[_state].descriptions;
+  const held = cache[which];
+  if (held !== null && held.type === pair[0] && held.sdp === pair[1]) {
+    return held;
+  }
+  const description = descriptionFrom(pair);
+  cache[which] = description;
+  return description;
+}
+
 // --- RTCIceCandidate -------------------------------------------------------
 
-// `candidate:<foundation> <component> <protocol> <priority> <address> <port>
-// typ <type> [raddr <a>] [rport <p>] [tcptype <t>] ...` (RFC 8839).
-function parseCandidate(line) {
-  const out = {
+// `candidate:<foundation> <component> <transport> <priority> <address>
+// <port> typ <type> [raddr <a> rport <p>] [tcptype <t>] ...` (RFC 8839
+// section 5.1). A string that doesn't parse leaves every derived attribute
+// null.
+const ICE_CHARS = new SafeRegExp("^[A-Za-z0-9+/]{1,32}$");
+const DIGITS_3 = new SafeRegExp("^[0-9]{1,3}$");
+const DIGITS_5 = new SafeRegExp("^[0-9]{1,5}$");
+const DIGITS_10 = new SafeRegExp("^[0-9]{1,10}$");
+const SPACES = new SafeRegExp("[ \t]+");
+
+function nullCandidate() {
+  return {
     foundation: null,
     component: null,
     priority: null,
@@ -226,26 +263,81 @@ function parseCandidate(line) {
     relatedAddress: null,
     relatedPort: null,
   };
+}
+
+function parseCandidate(line) {
   let value = StringPrototypeTrim(line);
   if (StringPrototypeStartsWith(value, "a=")) {
     value = StringPrototypeSlice(value, 2);
   }
-  if (StringPrototypeStartsWith(value, "candidate:")) {
-    value = StringPrototypeSlice(value, 10);
+  if (!StringPrototypeStartsWith(value, "candidate:")) return nullCandidate();
+  value = StringPrototypeSlice(value, 10);
+  const f = StringPrototypeSplit(value, SPACES);
+  if (f.length < 8) return nullCandidate();
+  const foundation = f[0];
+  const address = f[4];
+  if (
+    !RegExpPrototypeTest(ICE_CHARS, foundation) ||
+    !RegExpPrototypeTest(DIGITS_3, f[1]) ||
+    !RegExpPrototypeTest(DIGITS_10, f[3]) ||
+    !RegExpPrototypeTest(DIGITS_5, f[5]) ||
+    address === "" ||
+    StringPrototypeToLowerCase(f[6]) !== "typ"
+  ) {
+    return nullCandidate();
   }
-  const f = StringPrototypeSplit(value, " ");
-  if (f.length < 8) return out;
-  out.foundation = f[0];
-  out.component = f[1] === "1" ? "rtp" : f[1] === "2" ? "rtcp" : null;
-  out.protocol = StringPrototypeToLowerCase(f[2]);
-  out.priority = NumberParseInt(f[3], 10);
-  out.address = f[4];
-  out.port = NumberParseInt(f[5], 10);
-  out.type = f[7];
+  const component = NumberParseInt(f[1], 10);
+  const priority = NumberParseInt(f[3], 10);
+  const port = NumberParseInt(f[5], 10);
+  if (
+    component < 1 || component > 256 || priority < 1 ||
+    priority > 2147483647 || port > 65535
+  ) {
+    return nullCandidate();
+  }
+  const out = {
+    foundation,
+    component: component === 1 ? "rtp" : component === 2 ? "rtcp" : null,
+    priority,
+    address,
+    protocol: null,
+    port,
+    type: null,
+    tcpType: null,
+    relatedAddress: null,
+    relatedPort: null,
+  };
+  const protocol = StringPrototypeToLowerCase(f[2]);
+  if (protocol === "udp" || protocol === "tcp") out.protocol = protocol;
+  const type = StringPrototypeToLowerCase(f[7]);
+  if (ArrayPrototypeIncludes(["host", "srflx", "prflx", "relay"], type)) {
+    out.type = type;
+  }
+  let hasRaddr = false;
+  let hasRport = false;
   for (let i = 8; i + 1 < f.length; i += 2) {
-    if (f[i] === "raddr") out.relatedAddress = f[i + 1];
-    else if (f[i] === "rport") out.relatedPort = NumberParseInt(f[i + 1], 10);
-    else if (f[i] === "tcptype") out.tcpType = f[i + 1];
+    const key = StringPrototypeToLowerCase(f[i]);
+    if (key === "raddr") {
+      hasRaddr = true;
+      out.relatedAddress = f[i + 1];
+    } else if (key === "rport") {
+      if (!RegExpPrototypeTest(DIGITS_5, f[i + 1])) return nullCandidate();
+      const rport = NumberParseInt(f[i + 1], 10);
+      if (rport > 65535) return nullCandidate();
+      hasRport = true;
+      out.relatedPort = rport;
+    } else if (key === "tcptype") {
+      const tcpType = StringPrototypeToLowerCase(f[i + 1]);
+      if (ArrayPrototypeIncludes(["active", "passive", "so"], tcpType)) {
+        out.tcpType = tcpType;
+      }
+    }
+  }
+  if (hasRaddr !== hasRport) return nullCandidate();
+  if (
+    (type === "srflx" || type === "prflx" || type === "relay") && !hasRaddr
+  ) {
+    return nullCandidate();
   }
   return out;
 }
@@ -253,6 +345,8 @@ function parseCandidate(line) {
 class RTCIceCandidate {
   #init;
   #parsed;
+  #relayProtocol;
+  #url;
 
   constructor(candidateInitDict = undefined) {
     const init = candidateInitDict ?? { __proto__: null };
@@ -277,6 +371,16 @@ class RTCIceCandidate {
         : String(init.usernameFragment);
     this.#init = { candidate, sdpMid, sdpMLineIndex, usernameFragment };
     this.#parsed = parseCandidate(candidate);
+    const relayProtocol = init.relayProtocol ?? null;
+    this.#relayProtocol = ArrayPrototypeIncludes(
+        ["udp", "tcp", "tls"],
+        relayProtocol,
+      )
+      ? relayProtocol
+      : null;
+    this.#url = init.url === undefined || init.url === null
+      ? null
+      : String(init.url);
     this[webidl.brand] = webidl.brand;
   }
 
@@ -325,6 +429,12 @@ class RTCIceCandidate {
   }
   get relatedPort() {
     return this.#parsed.relatedPort;
+  }
+  get relayProtocol() {
+    return this.#relayProtocol;
+  }
+  get url() {
+    return this.#url;
   }
 
   toJSON() {
@@ -453,6 +563,7 @@ class RTCError extends DOMException {
     return this.#init.httpRequestStatusCode;
   }
 }
+webidl.configureInterface(RTCError);
 
 class RTCErrorEvent extends Event {
   #error;
@@ -516,6 +627,9 @@ webidl.configureInterface(RTCStatsReport);
 
 // --- RTCSctpTransport ------------------------------------------------------
 
+// What this side's SCTP sends at most (the engine's bound, as browsers).
+const LOCAL_MAX_MESSAGE_SIZE = 262144;
+
 class RTCSctpTransport extends EventTarget {
   constructor(key = undefined, pc = undefined) {
     if (key !== illegalConstructorKey) {
@@ -526,19 +640,27 @@ class RTCSctpTransport extends EventTarget {
   }
 
   get state() {
-    return this[_pc][_state].connectionState === "closed"
-      ? "closed"
-      : "connected";
+    const pc = this[_pc][_state];
+    if (pc.closed || pc.connectionState === "closed") return "closed";
+    return pc.connectionState === "connected" ? "connected" : "connecting";
   }
 
+  // The remote description's a=max-message-size (65536 when absent, no
+  // limit when 0), capped by what this side can send.
   get maxMessageSize() {
     const pc = this[_pc];
-    if (pc[_state].closed) return 0;
-    return op_webrtc_pc_max_message_size(pc[_rid]) || 65536;
+    if (!pc[_state].closed) {
+      const engine = op_webrtc_pc_max_message_size(pc[_rid]);
+      if (engine > 0) return engine;
+    }
+    const remote = pc[_state].remoteMaxMessageSize ?? 65536;
+    return remote === 0
+      ? LOCAL_MAX_MESSAGE_SIZE
+      : MathMin(remote, LOCAL_MAX_MESSAGE_SIZE);
   }
 
   get maxChannels() {
-    return 65535;
+    return this.state === "connected" ? 65535 : null;
   }
 
   get transport() {
@@ -565,6 +687,9 @@ class RTCDataChannel extends EventTarget {
       binaryType: "arraybuffer",
       lowThreshold: 0,
       lastBuffered: 0,
+      // Bytes accepted by send() but still waiting behind a Blob read: they
+      // count in bufferedAmount from the call on.
+      queuedBytes: 0,
       // Sends waiting for a Blob ahead of them to be read.
       queue: [],
       reading: false,
@@ -613,7 +738,7 @@ class RTCDataChannel extends EventTarget {
         this[_channel],
       );
     }
-    return this[_state].lastBuffered;
+    return this[_state].lastBuffered + this[_state].queuedBytes;
   }
   get bufferedAmountLowThreshold() {
     webidl.assertBranded(this, RTCDataChannelPrototype);
@@ -656,6 +781,7 @@ class RTCDataChannel extends EventTarget {
     if (ObjectPrototypeIsPrototypeOf(BlobPrototype, data)) {
       // A Blob is read first; later sends wait behind it so the order on the
       // wire is the order of the calls.
+      state.queuedBytes += data.size;
       ArrayPrototypePush(state.queue, data);
       drainQueue(this);
       return;
@@ -684,6 +810,7 @@ class RTCDataChannel extends EventTarget {
       bytes = core.encode(String(data));
     }
     if (state.queue.length > 0) {
+      state.queuedBytes += TypedArrayPrototypeGetByteLength(bytes);
       ArrayPrototypePush(state.queue, { text, bytes });
       return;
     }
@@ -744,6 +871,7 @@ function drainQueue(channel) {
       state.reading = true;
       PromisePrototypeThen(head.arrayBuffer(), (buffer) => {
         ArrayPrototypeShift(state.queue);
+        state.queuedBytes = MathMax(0, state.queuedBytes - head.size);
         state.reading = false;
         if (state.readyState === "open") {
           try {
@@ -757,11 +885,16 @@ function drainQueue(channel) {
       }, (error) => {
         state.reading = false;
         state.queue = [];
+        state.queuedBytes = 0;
         failChannel(channel, error);
       });
       return;
     }
     ArrayPrototypeShift(state.queue);
+    state.queuedBytes = MathMax(
+      0,
+      state.queuedBytes - TypedArrayPrototypeGetByteLength(head.bytes),
+    );
     try {
       sendNow(channel, head.text, head.bytes);
     } catch (error) {
@@ -1263,6 +1396,31 @@ defineEventHandler(RTCIceTransport.prototype, "selectedcandidatepairchange");
 webidl.configureInterface(RTCIceTransport);
 const RTCIceTransportPrototype = RTCIceTransport.prototype;
 
+class RTCIceCandidatePair {
+  #local;
+  #remote;
+
+  constructor(key = undefined, local = undefined, remote = undefined) {
+    if (key !== illegalConstructorKey) {
+      webidl.illegalConstructor();
+    }
+    this.#local = local;
+    this.#remote = remote;
+    this[webidl.brand] = webidl.brand;
+  }
+
+  get local() {
+    webidl.assertBranded(this, RTCIceCandidatePairPrototype);
+    return this.#local;
+  }
+  get remote() {
+    webidl.assertBranded(this, RTCIceCandidatePairPrototype);
+    return this.#remote;
+  }
+}
+webidl.configureInterface(RTCIceCandidatePair);
+const RTCIceCandidatePairPrototype = RTCIceCandidatePair.prototype;
+
 function iceParameters(description) {
   if (description === null) return null;
   let usernameFragment = null;
@@ -1316,7 +1474,9 @@ const RTCDtlsTransportPrototype = RTCDtlsTransport.prototype;
 function dtlsTransportOf(pc) {
   const state = pc[_state];
   if (
-    state.lastLocalType === undefined && state.lastRemoteType === undefined
+    state.closed
+      ? state.lastLocal == null && state.lastRemote == null
+      : pc.localDescription === null && pc.remoteDescription === null
   ) {
     return null;
   }
@@ -1333,6 +1493,15 @@ function setTransportStates(pc, silent = false) {
   const notify = (target) => {
     if (!silent) fire(target, new Event("statechange"));
   };
+  const sctp = pc[_state].sctp;
+  if (sctp !== null && sctp !== undefined) {
+    const now = sctp.state;
+    if (sctp[_transportState] !== now) {
+      const first = sctp[_transportState] === undefined;
+      sctp[_transportState] = now;
+      if (!first) notify(sctp);
+    }
+  }
   const dtls = pc[_state].dtls;
   if (dtls === undefined || dtls === null) return;
   const s = pc[_state];
@@ -1386,10 +1555,11 @@ function selectedPair(pc) {
       sdpMLineIndex: 0,
     });
   };
-  return {
-    local: find(state.localCandidates, pair[0]) ?? synth(pair[0]),
-    remote: find(state.remoteCandidates, pair[1]) ?? synth(pair[1]),
-  };
+  return new RTCIceCandidatePair(
+    illegalConstructorKey,
+    find(state.localCandidates, pair[0]) ?? synth(pair[0]),
+    find(state.remoteCandidates, pair[1]) ?? synth(pair[1]),
+  );
 }
 
 // --- RTCRtpSender / RTCRtpReceiver / RTCRtpTransceiver ---------------------
@@ -1419,20 +1589,23 @@ function capabilities(kind, sender) {
   };
 }
 
+// getStats(): resolves in a later microtask (it is not on the operations
+// chain, and never settles synchronously); after close(), the stats the
+// connection had when it closed.
 function statsFor(pc, key, sender) {
-  if (pc[_state].closed) {
-    return PromiseReject(invalidState("RTCPeerConnection is closed"));
-  }
+  const state = pc[_state];
+  let entries;
   try {
-    return PromiseResolve(
-      new RTCStatsReport(
-        illegalConstructorKey,
-        op_webrtc_pc_get_stats(pc[_rid], key ?? 0, key !== null, sender),
-      ),
-    );
+    entries = state.closed
+      ? (key === null ? state.lastStats ?? [] : [])
+      : op_webrtc_pc_get_stats(pc[_rid], key ?? 0, key !== null, sender);
   } catch (error) {
     return PromiseReject(error);
   }
+  return PromisePrototypeThen(
+    PromiseResolve(),
+    () => new RTCStatsReport(illegalConstructorKey, entries),
+  );
 }
 
 // What a sender is fed from: the track's source, while the track is live and
@@ -1475,7 +1648,9 @@ class RTCRtpSender {
   }
   get dtmf() {
     webidl.assertBranded(this, RTCRtpSenderPrototype);
-    return null;
+    if (this[_transceiver][_state].kind !== "audio") return null;
+    this[_state].dtmf ??= new RTCDTMFSender(illegalConstructorKey, this);
+    return this[_state].dtmf;
   }
 
   static getCapabilities(kind) {
@@ -1677,6 +1852,170 @@ function setSenderTrack(sender, track) {
       track === null || !(state.encodings[0]?.active ?? true),
     );
   }
+}
+
+// --- RTCDTMFSender ------------------------------------------------------------
+
+const DTMF_TONES = "0123456789ABCD#*,";
+
+class RTCDTMFToneChangeEvent extends Event {
+  #tone;
+
+  constructor(type, eventInitDict = undefined) {
+    super(type, eventInitDict);
+    this.#tone = eventInitDict?.tone === undefined
+      ? ""
+      : String(eventInitDict.tone);
+  }
+
+  get tone() {
+    return this.#tone;
+  }
+}
+webidl.configureInterface(RTCDTMFToneChangeEvent);
+
+// RFC 4733 events go out on the negotiated telephone-event payload type, in
+// the sender's SSRC (`media.rs`).
+class RTCDTMFSender extends EventTarget {
+  constructor(key = undefined, sender = undefined) {
+    if (key !== illegalConstructorKey) {
+      webidl.illegalConstructor();
+    }
+    super();
+    this[_state] = { sender, toneBuffer: "", playing: false };
+    this[webidl.brand] = webidl.brand;
+  }
+
+  get toneBuffer() {
+    webidl.assertBranded(this, RTCDTMFSenderPrototype);
+    return this[_state].toneBuffer;
+  }
+
+  get canInsertDTMF() {
+    webidl.assertBranded(this, RTCDTMFSenderPrototype);
+    return canInsertDTMF(this[_state].sender);
+  }
+
+  insertDTMF(tones, duration = 100, interToneGap = 70) {
+    webidl.assertBranded(this, RTCDTMFSenderPrototype);
+    webidl.requiredArguments(
+      arguments.length,
+      1,
+      "Failed to execute 'insertDTMF' on 'RTCDTMFSender'",
+    );
+    const sender = this[_state].sender;
+    const t = sender[_transceiver][_state];
+    if (t.stopping || t.stopped || sender[_pc][_state].closed) {
+      throw invalidState("insertDTMF: the transceiver is stopped");
+    }
+    if (
+      t.currentDirection === "recvonly" || t.currentDirection === "inactive"
+    ) {
+      throw invalidState(
+        `insertDTMF: the transceiver's direction is '${t.currentDirection}'`,
+      );
+    }
+    const buffer = StringPrototypeToUpperCase(String(tones));
+    for (let i = 0; i < buffer.length; ++i) {
+      if (!StringPrototypeIncludes(DTMF_TONES, buffer[i])) {
+        throw new DOMException(
+          `insertDTMF: '${buffer[i]}' is not a DTMF tone`,
+          "InvalidCharacterError",
+        );
+      }
+    }
+    const state = this[_state];
+    state.toneBuffer = buffer;
+    state.duration = MathMin(
+      MathMax(webidl.converters["unsigned long"](duration), 40),
+      6000,
+    );
+    state.gap = MathMax(webidl.converters["unsigned long"](interToneGap), 30);
+    if (!state.playing && buffer !== "") {
+      state.playing = true;
+      dtmfLater(this, 0);
+    }
+  }
+}
+defineEventHandler(RTCDTMFSender.prototype, "tonechange");
+webidl.configureInterface(RTCDTMFSender);
+const RTCDTMFSenderPrototype = RTCDTMFSender.prototype;
+
+function canInsertDTMF(sender) {
+  const t = sender[_transceiver][_state];
+  const pc = sender[_pc];
+  if (
+    pc[_state].closed || t.stopping || t.stopped ||
+    sender[_state].track === null
+  ) {
+    return false;
+  }
+  if (t.currentDirection !== "sendrecv" && t.currentDirection !== "sendonly") {
+    return false;
+  }
+  try {
+    const params = op_webrtc_sender_parameters(
+      pc[_rid],
+      sender[_transceiver][_key],
+    );
+    return ArrayPrototypeSome(
+      params?.codecs ?? [],
+      (c) => StringPrototypeToLowerCase(c.mimeType) === "audio/telephone-event",
+    );
+  } catch {
+    return false;
+  }
+}
+
+function dtmfLater(dtmf, delay) {
+  const pc = dtmf[_state].sender[_pc];
+  const timers = pc[_state].timers;
+  const timer = setTimeout(() => {
+    SetPrototypeDelete(timers, timer);
+    dtmfPlayout(dtmf);
+  }, delay);
+  SetPrototypeAdd(timers, timer);
+}
+
+// The spec's DTMF playout task: one tone per run, `tonechange` for each,
+// and an empty `tonechange` when the buffer runs out.
+function dtmfPlayout(dtmf) {
+  const state = dtmf[_state];
+  const sender = state.sender;
+  const pc = sender[_pc];
+  const t = sender[_transceiver][_state];
+  if (pc[_state].closed || t.stopping || t.stopped) {
+    state.playing = false;
+    return;
+  }
+  if (state.toneBuffer === "") {
+    state.playing = false;
+    fire(dtmf, new RTCDTMFToneChangeEvent("tonechange", { tone: "" }));
+    return;
+  }
+  const tone = state.toneBuffer[0];
+  state.toneBuffer = StringPrototypeSlice(state.toneBuffer, 1);
+  fire(dtmf, new RTCDTMFToneChangeEvent("tonechange", { tone }));
+  if (tone === ",") {
+    dtmfLater(dtmf, 2000);
+    return;
+  }
+  const event = tone === "*"
+    ? 10
+    : tone === "#"
+    ? 11
+    : tone >= "A"
+    ? 12 + (StringPrototypeCharCodeAt(tone, 0) - 65)
+    : StringPrototypeCharCodeAt(tone, 0) - 48;
+  if (!pc[_state].closed) {
+    op_webrtc_sender_send_dtmf(
+      pc[_rid],
+      sender[_transceiver][_key],
+      event,
+      state.duration,
+    );
+  }
+  dtmfLater(dtmf, state.duration + state.gap);
 }
 
 class RTCRtpReceiver {
@@ -2072,7 +2411,7 @@ function removeRemoteTrack(transceiver) {
 // --- RTCPeerConnection -----------------------------------------------------
 
 function convertIceServers(servers) {
-  if (servers === undefined || servers === null) return [];
+  if (servers === undefined) return [];
   if (
     !ArrayIsArray(servers) && typeof servers?.[SymbolIterator] !== "function"
   ) {
@@ -2098,6 +2437,22 @@ function convertIceServers(servers) {
       throw new TypeError(
         "Failed to construct 'RTCPeerConnection': 'urls' is required in RTCIceServer",
       );
+    }
+    if (urls.length === 0) {
+      throw new DOMException(
+        "Failed to construct 'RTCPeerConnection': an RTCIceServer's 'urls' is empty",
+        "SyntaxError",
+      );
+    }
+    for (let j = 0; j < urls.length; ++j) {
+      if (StringPrototypeIncludes(urls[j], "#")) {
+        throw new DOMException(
+          `Failed to construct 'RTCPeerConnection': '${
+            urls[j]
+          }' has a fragment`,
+          "SyntaxError",
+        );
+      }
     }
     ArrayPrototypePush(out, {
       urls,
@@ -2272,6 +2627,7 @@ class RTCPeerConnection extends EventTarget {
       lastLocalType: undefined,
       lastRemoteType: undefined,
       negotiationQueued: false,
+      descriptions: { local: null, remote: null },
       // getParameters() transaction timers, cleared by close().
       timers: new SafeSet(),
       // Operations chain: createOffer / createAnswer / set*Description /
@@ -2308,33 +2664,40 @@ class RTCPeerConnection extends EventTarget {
   get localDescription() {
     webidl.assertBranded(this, RTCPeerConnectionPrototype);
     if (this[_state].closed) return this[_state].lastLocal ?? null;
-    return descriptionFrom(op_webrtc_pc_descriptions(this[_rid]).local);
+    return cachedDescription(
+      this,
+      "local",
+      op_webrtc_pc_descriptions(this[_rid]).local,
+    );
   }
   get remoteDescription() {
     webidl.assertBranded(this, RTCPeerConnectionPrototype);
     if (this[_state].closed) return this[_state].lastRemote ?? null;
-    return descriptionFrom(op_webrtc_pc_descriptions(this[_rid]).remote);
+    return cachedDescription(
+      this,
+      "remote",
+      op_webrtc_pc_descriptions(this[_rid]).remote,
+    );
   }
   get currentLocalDescription() {
+    webidl.assertBranded(this, RTCPeerConnectionPrototype);
     return this.signalingState === "stable" ? this.localDescription : null;
   }
   get pendingLocalDescription() {
+    webidl.assertBranded(this, RTCPeerConnectionPrototype);
     return this.signalingState === "stable" ? null : this.localDescription;
   }
   get currentRemoteDescription() {
+    webidl.assertBranded(this, RTCPeerConnectionPrototype);
     return this.signalingState === "stable" ? this.remoteDescription : null;
   }
   get pendingRemoteDescription() {
+    webidl.assertBranded(this, RTCPeerConnectionPrototype);
     return this.signalingState === "stable" ? null : this.remoteDescription;
   }
   get sctp() {
     webidl.assertBranded(this, RTCPeerConnectionPrototype);
-    const state = this[_state];
-    if (state.closed || state.connectionState !== "connected") {
-      return state.sctp;
-    }
-    state.sctp ??= new RTCSctpTransport(illegalConstructorKey, this);
-    return state.sctp;
+    return this[_state].sctp;
   }
 
   createOffer(
@@ -2342,7 +2705,8 @@ class RTCPeerConnection extends EventTarget {
     failure = undefined,
     legacyOptions = undefined,
   ) {
-    webidl.assertBranded(this, RTCPeerConnectionPrototype);
+    const branded = brandError(this, RTCPeerConnectionPrototype);
+    if (branded !== null) return PromiseReject(branded);
     if (typeof options === "function") {
       return legacy(this.createOffer(legacyOptions), options, failure);
     }
@@ -2386,7 +2750,8 @@ class RTCPeerConnection extends EventTarget {
   }
 
   createAnswer(options = undefined, failure = undefined) {
-    webidl.assertBranded(this, RTCPeerConnectionPrototype);
+    const branded = brandError(this, RTCPeerConnectionPrototype);
+    if (branded !== null) return PromiseReject(branded);
     if (typeof options === "function") {
       return legacy(this.createAnswer(), options, failure);
     }
@@ -2409,7 +2774,8 @@ class RTCPeerConnection extends EventTarget {
     success = undefined,
     failure = undefined,
   ) {
-    webidl.assertBranded(this, RTCPeerConnectionPrototype);
+    const branded = brandError(this, RTCPeerConnectionPrototype);
+    if (branded !== null) return PromiseReject(branded);
     if (typeof success === "function") {
       return legacy(this.setLocalDescription(description), success, failure);
     }
@@ -2464,6 +2830,7 @@ class RTCPeerConnection extends EventTarget {
       activate(this);
       syncTransceivers(this, { remote: false, type });
       setSignalingState(this, nextSignalingState(signaling, true, type));
+      updateSctpTransport(this, type);
       setTransportStates(this);
     });
   }
@@ -2473,7 +2840,8 @@ class RTCPeerConnection extends EventTarget {
     success = undefined,
     failure = undefined,
   ) {
-    webidl.assertBranded(this, RTCPeerConnectionPrototype);
+    const branded = brandError(this, RTCPeerConnectionPrototype);
+    if (branded !== null) return PromiseReject(branded);
     if (typeof success === "function") {
       return legacy(this.setRemoteDescription(description), success, failure);
     }
@@ -2515,8 +2883,14 @@ class RTCPeerConnection extends EventTarget {
           "InvalidAccessError",
         );
       }
+      if (type !== "rollback") {
+        requireRtcpMux(sdp);
+      }
       op_webrtc_pc_set_remote_description(this[_rid], type, sdp);
       const state = this[_state];
+      if (type !== "rollback") {
+        state.remoteMaxMessageSize = maxMessageSizeOf(sdp);
+      }
       if (type !== "rollback") {
         state.lastRemoteType = type;
         if (type === "offer") state.offerer = false;
@@ -2525,6 +2899,7 @@ class RTCPeerConnection extends EventTarget {
       const now = this[_state].signalingState;
       setSignalingState(this, nextSignalingState(now, false, type));
       syncTransceivers(this, { remote: true, type });
+      updateSctpTransport(this, type);
       setTransportStates(this);
     });
   }
@@ -2534,7 +2909,8 @@ class RTCPeerConnection extends EventTarget {
     success = undefined,
     failure = undefined,
   ) {
-    webidl.assertBranded(this, RTCPeerConnectionPrototype);
+    const branded = brandError(this, RTCPeerConnectionPrototype);
+    if (branded !== null) return PromiseReject(branded);
     if (typeof success === "function") {
       return legacy(this.addIceCandidate(candidate), success, failure);
     }
@@ -2631,14 +3007,14 @@ class RTCPeerConnection extends EventTarget {
           "",
           "",
           {
-            clamp: true,
+            enforceRange: true,
           },
         ),
       maxRetransmits:
         dict.maxRetransmits === undefined || dict.maxRetransmits === null
           ? null
           : webidl.converters["unsigned short"](dict.maxRetransmits, "", "", {
-            clamp: true,
+            enforceRange: true,
           }),
       protocol: dict.protocol === undefined ? "" : String(dict.protocol),
       negotiated: !!dict.negotiated,
@@ -2687,7 +3063,7 @@ class RTCPeerConnection extends EventTarget {
     const channel = new RTCDataChannel(illegalConstructorKey, this, {
       ...init,
       channel: created.channel,
-      id: created.id ?? init.id,
+      id: created.id ?? (init.negotiated ? init.id : null),
     });
     MapPrototypeSet(this[_channels], created.channel, channel);
     // A negotiated channel opens with the connection, without DCEP; its
@@ -2696,10 +3072,8 @@ class RTCPeerConnection extends EventTarget {
   }
 
   getStats(selector = null) {
-    webidl.assertBranded(this, RTCPeerConnectionPrototype);
-    if (this[_state].closed) {
-      return PromiseReject(invalidState("RTCPeerConnection is closed"));
-    }
+    const branded = brandError(this, RTCPeerConnectionPrototype);
+    if (branded !== null) return PromiseReject(branded);
     if (selector !== null && selector !== undefined) {
       if (
         !ObjectPrototypeIsPrototypeOf(MediaStreamTrackPrototype, selector)
@@ -2816,6 +3190,9 @@ class RTCPeerConnection extends EventTarget {
     webidl.assertBranded(this, RTCPeerConnectionPrototype);
     if (this[_state].closed) return;
     this[_state].restartIce = true;
+    // Before the first negotiation there is nothing to restart: the first
+    // offer has fresh credentials anyway.
+    if (this.currentLocalDescription === null) return;
     queueNegotiationNeeded(this);
   }
 
@@ -2890,9 +3267,11 @@ class RTCPeerConnection extends EventTarget {
       }, streamIds);
       const codec = track[_source]?.codec ?? null;
       if (codec !== null) {
-        op_webrtc_transceiver_set_codec_preferences(this[_rid], reuse[_key], [
-          codec,
-        ]);
+        op_webrtc_transceiver_set_codec_preferences(
+          this[_rid],
+          reuse[_key],
+          trackPreferences(codec),
+        );
       }
       const sender = reuse[_state].sender;
       sender[_state].streams = streamIds;
@@ -3022,6 +3401,11 @@ class RTCPeerConnection extends EventTarget {
     } catch {
       // The resource is already gone.
     }
+    try {
+      state.lastStats = op_webrtc_pc_get_stats(this[_rid], 0, false, false);
+    } catch {
+      state.lastStats = [];
+    }
     state.closed = true;
     state.active = false;
     SetPrototypeForEach(state.timers, (timer) => clearTimeout(timer));
@@ -3120,6 +3504,55 @@ defineEventHandler(RTCPeerConnection.prototype, "track");
 webidl.configureInterface(RTCPeerConnection);
 const RTCPeerConnectionPrototype = RTCPeerConnection.prototype;
 
+// An m=application section in both descriptions after an answer: the
+// connection has an SCTP transport (null again after a rollback to no
+// negotiated one).
+function updateSctpTransport(pc, type) {
+  const state = pc[_state];
+  if (type !== "answer" && type !== "pranswer" && type !== "rollback") return;
+  const local = pc.localDescription;
+  const remote = pc.remoteDescription;
+  const has = (d) =>
+    d !== null && StringPrototypeIncludes(d.sdp, "\nm=application ");
+  if (has(local) && has(remote) && state.sctp === null) {
+    state.sctp = new RTCSctpTransport(illegalConstructorKey, pc);
+    state.sctp[_transportState] = state.sctp.state;
+  } else if (type === "rollback" && pc.currentRemoteDescription === null) {
+    state.sctp = null;
+  }
+}
+
+function maxMessageSizeOf(sdp) {
+  const lines = StringPrototypeSplit(sdp, "\n");
+  for (let i = 0; i < lines.length; ++i) {
+    const line = StringPrototypeTrim(lines[i]);
+    if (StringPrototypeStartsWith(line, "a=max-message-size:")) {
+      const n = NumberParseInt(StringPrototypeSlice(line, 19), 10);
+      if (n >= 0) return n;
+    }
+  }
+  return null;
+}
+
+// rtcpMuxPolicy "require": a remote description whose audio or video
+// sections don't all multiplex RTCP is an InvalidAccessError.
+function requireRtcpMux(sdp) {
+  const sections = StringPrototypeSplit(sdp, "\nm=");
+  for (let i = 1; i < sections.length; ++i) {
+    const section = sections[i];
+    const header = StringPrototypeSplit(section, "\n")[0];
+    const fields = StringPrototypeSplit(StringPrototypeTrim(header), " ");
+    if (fields[0] !== "audio" && fields[0] !== "video") continue;
+    if (fields[1] === "0") continue;
+    if (!StringPrototypeIncludes(section, "a=rtcp-mux")) {
+      throw new DOMException(
+        "setRemoteDescription: rtcpMuxPolicy is 'require', but a media section doesn't multiplex RTCP",
+        "InvalidAccessError",
+      );
+    }
+  }
+}
+
 function midsOf(sdp) {
   const mids = [];
   let inMedia = false;
@@ -3136,6 +3569,35 @@ function midsOf(sdp) {
   }
   if (inMedia) ArrayPrototypePush(mids, null);
   return mids;
+}
+
+// An EncodedMediaTrack's codec, and for audio the telephone-event formats
+// RTCDTMFSender needs (media.rs `track_preferences`).
+function trackPreferences(codec) {
+  const out = [codec];
+  if (
+    StringPrototypeStartsWith(
+      StringPrototypeToLowerCase(codec.mimeType),
+      "audio/",
+    )
+  ) {
+    ArrayPrototypePush(
+      out,
+      {
+        mimeType: "audio/telephone-event",
+        clockRate: 48000,
+        channels: null,
+        sdpFmtpLine: "0-15",
+      },
+      {
+        mimeType: "audio/telephone-event",
+        clockRate: 8000,
+        channels: null,
+        sdpFmtpLine: "0-15",
+      },
+    );
+  }
+  return out;
 }
 
 function addTransceiverInner(pc, trackOrKind, init) {
@@ -3936,10 +4398,13 @@ return {
   RTCCertificate,
   RTCDataChannel,
   RTCDataChannelEvent,
+  RTCDTMFSender,
+  RTCDTMFToneChangeEvent,
   RTCDtlsTransport,
   RTCError,
   RTCErrorEvent,
   RTCIceCandidate,
+  RTCIceCandidatePair,
   RTCIceTransport,
   RTCPeerConnection,
   RTCPeerConnectionIceErrorEvent,

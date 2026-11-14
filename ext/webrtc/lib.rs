@@ -94,6 +94,7 @@ deno_core::extension!(
     op_webrtc_sender_write_frame,
     op_webrtc_receiver_read_rtp,
     op_webrtc_receiver_request_key_frame,
+    op_webrtc_sender_send_dtmf,
     op_webrtc_pc_selected_pair,
     op_webrtc_pc_set_ice_servers,
     op_webrtc_network_create,
@@ -919,6 +920,19 @@ fn op_webrtc_receiver_read_rtp(
     }
     Ok(())
   })
+}
+
+/// `RTCDTMFSender`: one telephone event.
+#[op2(fast)]
+fn op_webrtc_sender_send_dtmf(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+  key: u32,
+  event: u32,
+  duration_ms: u32,
+) -> Result<bool, WebRtcError> {
+  peer(state, rid)?
+    .media(|core| core.send_dtmf(key, event.min(15) as u8, duration_ms))
 }
 
 #[op2(fast)]

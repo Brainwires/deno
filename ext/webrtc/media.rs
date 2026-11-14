@@ -62,6 +62,26 @@ pub fn media_stack() -> Result<(MediaEngine, Registry), WebRtcError> {
   media_engine
     .register_default_codecs()
     .map_err(crate::peer::rtc_err)?;
+  // RFC 4733 telephone events, for RTCDTMFSender (the engine registers
+  // none): at Opus' clock and at 8 kHz, on payload types the default video
+  // codecs don't use (they share the bundle).
+  for (payload_type, clock_rate) in [(110, 48000), (113, 8000)] {
+    media_engine
+      .register_codec(
+        RTCRtpCodecParameters {
+          rtp_codec: RTCRtpCodec {
+            mime_type: "audio/telephone-event".to_string(),
+            clock_rate,
+            channels: 0,
+            sdp_fmtp_line: "0-15".to_string(),
+            rtcp_feedback: vec![],
+          },
+          payload_type,
+        },
+        RtpCodecKind::Audio,
+      )
+      .map_err(crate::peer::rtc_err)?;
+  }
   let registry =
     register_default_interceptors(Registry::new(), &mut media_engine)
       .map_err(crate::peer::rtc_err)?
@@ -175,10 +195,17 @@ pub struct CodecArg {
 
 impl CodecArg {
   fn from_codec(codec: &RTCRtpCodec) -> Self {
+    let audio = codec.mime_type.to_ascii_lowercase().starts_with("audio/");
     Self {
       mime_type: codec.mime_type.clone(),
       clock_rate: codec.clock_rate,
-      channels: (codec.channels > 0).then_some(codec.channels),
+      // An audio codec without a channel count is mono (RFC 4566's
+      // default for the rtpmap encoding parameters).
+      channels: if codec.channels > 0 {
+        Some(codec.channels)
+      } else {
+        audio.then_some(1)
+      },
       sdp_fmtp_line: (!codec.sdp_fmtp_line.is_empty())
         .then(|| codec.sdp_fmtp_line.clone()),
     }
@@ -262,7 +289,10 @@ pub fn capabilities_from_sdp(kind: &str, sdp: &str) -> Capabilities {
       let mut parts = rest.split('/');
       let name = parts.next().unwrap_or_default();
       let clock_rate = parts.next().and_then(|c| c.parse().ok()).unwrap_or(0);
-      let channels = parts.next().and_then(|c| c.parse().ok());
+      let channels = parts
+        .next()
+        .and_then(|c| c.parse().ok())
+        .or((kind == "audio").then_some(1));
       codecs.push((
         pt.to_string(),
         CodecArg {
@@ -420,6 +450,24 @@ pub fn sections(sdp: &str) -> HashMap<String, RemoteSection> {
   out
 }
 
+/// The codec preferences an `EncodedMediaTrack` gives its transceiver: its
+/// codec, then (for audio) the telephone-event formats `RTCDTMFSender`
+/// needs, which a preference list would otherwise leave out.
+pub fn track_preferences(codec: &CodecArg) -> Vec<CodecArg> {
+  let mut out = vec![codec.clone()];
+  if codec.mime_type.to_ascii_lowercase().starts_with("audio/") {
+    for clock_rate in [48000, 8000] {
+      out.push(CodecArg {
+        mime_type: "audio/telephone-event".to_string(),
+        clock_rate,
+        channels: None,
+        sdp_fmtp_line: Some("0-15".to_string()),
+      });
+    }
+  }
+  out
+}
+
 /// What a sender's frames are cut into RTP packets with, per SSRC.
 pub struct SenderPacketizer {
   ssrc: u32,
@@ -469,6 +517,8 @@ pub struct MediaState {
   pub packetizers: HashMap<u32, SenderPacketizer>,
   /// Keys whose receiver delivered its first packet (`unmute` was sent).
   pub flowing: std::collections::HashSet<u32>,
+  /// RFC 4733 state per sender: the next sequence number and timestamp.
+  pub dtmf: HashMap<u32, (u16, u32)>,
   /// The SSRCs and CSRCs each receiver got packets from, for
   /// `getSynchronizationSources()` / `getContributingSources()`.
   pub sources: HashMap<u32, Vec<Source>>,
@@ -692,7 +742,7 @@ impl Core {
     }
     if let Some(codec) = &arg.codec {
       let _ =
-        self.set_codec_preferences_inner(index, std::slice::from_ref(codec));
+        self.set_codec_preferences_inner(index, &track_preferences(codec));
     }
     if direction != RTCRtpTransceiverDirection::Sendrecv
       && let Some(mut t) = self.pc.rtp_transceiver(index)
@@ -1056,6 +1106,98 @@ impl Core {
     for packet in packets {
       sent |= sender.write_rtp(now, packet).is_ok();
     }
+    Ok(sent)
+  }
+
+  /// `RTCDTMFSender`: one RFC 4733 event (0-9 → 0-9, `*` 10, `#` 11, A-D
+  /// 12-15) lasting `duration_ms`: a start packet (marker set) and the end
+  /// packet three times, on the negotiated telephone-event payload type at
+  /// the clock of the sender's audio codec. Returns whether it went out.
+  pub(crate) fn send_dtmf(
+    &mut self,
+    key: u32,
+    event: u8,
+    duration_ms: u32,
+  ) -> Result<bool, WebRtcError> {
+    let index = self.index_of(key)?;
+    let Some(mut sender) = self.pc.rtp_sender(index.into()) else {
+      return Ok(false);
+    };
+    let Some(ssrc) = sender.track().ssrcs().next() else {
+      return Ok(false);
+    };
+    let params = sender.get_parameters().clone();
+    let codecs = &params.rtp_parameters.codecs;
+    let primary_rate = codecs
+      .iter()
+      .find(|c| {
+        let m = c.rtp_codec.mime_type.to_ascii_lowercase();
+        !m.ends_with("/telephone-event")
+          && !m.ends_with("/cn")
+          && !m.ends_with("/red")
+          && !m.ends_with("/rtx")
+      })
+      .map(|c| c.rtp_codec.clock_rate);
+    let events: Vec<&RTCRtpCodecParameters> = codecs
+      .iter()
+      .filter(|c| {
+        c.rtp_codec
+          .mime_type
+          .eq_ignore_ascii_case("audio/telephone-event")
+      })
+      .collect();
+    let Some(codec) = events
+      .iter()
+      .find(|c| Some(c.rtp_codec.clock_rate) == primary_rate)
+      .or_else(|| events.first())
+    else {
+      return Ok(false);
+    };
+    let (payload_type, clock_rate) =
+      (codec.payload_type, codec.rtp_codec.clock_rate);
+    let entry = self.media.dtmf.entry(key).or_insert_with(|| {
+      let mut seed = [0u8; 6];
+      let _ = aws_lc_rs::rand::fill(&mut seed);
+      (
+        u16::from_le_bytes([seed[0], seed[1]]),
+        u32::from_le_bytes([seed[2], seed[3], seed[4], seed[5]]),
+      )
+    });
+    let (mut seq, timestamp) = *entry;
+    let samples = (u64::from(duration_ms) * u64::from(clock_rate) / 1000)
+      .min(u64::from(u16::MAX)) as u16;
+    let now = Instant::now();
+    let packet = |seq: u16, end: bool, marker: bool, duration: u16| {
+      let flags = if end { 0x80 } else { 0x00 } | 10; // volume -10 dBm0
+      let d = duration.to_be_bytes();
+      rtc::rtp::packet::Packet {
+        header: rtc::rtp::Header {
+          version: 2,
+          marker,
+          payload_type,
+          sequence_number: seq,
+          timestamp,
+          ssrc,
+          ..Default::default()
+        },
+        payload: Bytes::copy_from_slice(&[event, flags, d[0], d[1]]),
+      }
+    };
+    let mut sent = false;
+    let Some(mut sender) = self.pc.rtp_sender(index.into()) else {
+      return Ok(false);
+    };
+    sent |= sender.write_rtp(now, packet(seq, false, true, 0)).is_ok();
+    for _ in 0..3 {
+      seq = seq.wrapping_add(1);
+      sent |= sender
+        .write_rtp(now, packet(seq, true, false, samples))
+        .is_ok();
+    }
+    *self.media.dtmf.get_mut(&key).unwrap() = (
+      seq.wrapping_add(1),
+      timestamp.wrapping_add(u32::from(samples)),
+    );
     Ok(sent)
   }
 

@@ -14391,15 +14391,19 @@ where the changes are discussed.
        `iceServers` (STUN, TURN over UDP / TCP / TLS with credentials),
        `iceTransportPolicy`. `RTCDataChannel`: `label`, `ordered`,
        `maxPacketLifeTime`, `maxRetransmits`, `protocol`, `negotiated`, `id`,
-       `readyState`, `bufferedAmount` (exact: bytes SCTP hasn't released),
-       `bufferedAmountLowThreshold`, `binaryType`, `send` (string,
-       `ArrayBuffer`, typed array, `DataView`, `Blob` in call order; over
-       `maxMessageSize` a `TypeError`; not open an `InvalidStateError`),
-       `close`, events `open`, `message`, `bufferedamountlow`, `error`,
-       `closing`, `close`. `createOffer` / `createAnswer` resolve to plain,
-       editable `RTCSessionDescriptionInit` dictionaries (simple-peer edits the
-       offer's SDP). Data channel messages up to 256 KiB, as browsers negotiate
-       (the engine's default is RFC 8841's 64 KiB).
+       `readyState`, `bufferedAmount` (exact: bytes SCTP hasn't released; from
+       `feat/webrtc-parity` a `Blob` being read, and what waits behind it, count
+       from the `send()` call; browsers count until the bytes are handed to the
+       network, so WPT's "0 once the peer has the message" checks fail here
+       until the acknowledgement arrives), `bufferedAmountLowThreshold`,
+       `binaryType`, `send` (string, `ArrayBuffer`, typed array, `DataView`,
+       `Blob` in call order; over `maxMessageSize` a `TypeError`; not open an
+       `InvalidStateError`), `close`, events `open`, `message`,
+       `bufferedamountlow`, `error`, `closing`, `close`. `createOffer` /
+       `createAnswer` resolve to plain, editable `RTCSessionDescriptionInit`
+       dictionaries (simple-peer edits the offer's SDP). Data channel messages
+       up to 256 KiB, as browsers negotiate (the engine's default is RFC 8841's
+       64 KiB).
      - **Media (`feat/webrtc-parity`; `media.rs`):** the engine's RTP stack
        (SRTP, RTCP sender / receiver reports, NACK and RTX, TWCC feedback,
        simulcast header extensions) with every codec browsers negotiate (Opus,
@@ -14456,13 +14460,45 @@ where the changes are discussed.
        which the next ICE restart gathers from (`iceCandidatePoolSize` is
        range-checked and can't change after `setLocalDescription`);
        `negotiationneeded` fires once for the changes of one task, only while
-       stable. Not implemented: `RTCDTMFSender` (`sender.dtmf` is `null`),
-       `getRemoteCertificates()` (empty), `peerIdentity`, encoded transforms
-       (`RTCRtpScriptTransform`), the receiver's `audioLevel` (needs the RFC
-       6464 extension, not negotiated), TCP ICE candidates (skipped), mDNS:
-       neither resolving a peer's `.local` candidates (the peer is reached as
-       peer-reflexive once its checks arrive) nor hiding the local host
-       candidates (literal addresses, which is why they need the sys
+       stable. `RTCDTMFSender` on audio senders (`insertDTMF` with the spec's
+       tone set, duration and gap bounds and `InvalidCharacterError` /
+       `InvalidStateError`, `toneBuffer`, `canInsertDTMF` once telephone-event
+       is negotiated, `tonechange` per tone and an empty one at the end; each
+       tone is an RFC 4733 event on the negotiated telephone-event payload type:
+       a start packet and three end packets; telephone-event at 48 kHz and 8 kHz
+       is registered on payload types 110 and 113, which the default video
+       codecs don't use, and an `EncodedMediaTrack`'s codec preference keeps it)
+       and `RTCDTMFToneChangeEvent`; `RTCIceCandidatePair`
+       (`getSelectedCandidatePair()`); strict candidate-attribute parsing (a
+       string that doesn't parse leaves every derived attribute null, as WPT has
+       it) and `relayProtocol` / `url`; `sctp` from the answer that negotiates
+       `m=application` (state `connecting` until connected, `statechange`), its
+       `maxMessageSize` from the remote `a=max-message-size` before SCTP is up;
+       `rtcpMuxPolicy: "require"` enforced on remote descriptions
+       (`InvalidAccessError`); ICE server URLs: an empty `urls` or a fragment is
+       a `SyntaxError`, `iceServers:
+       null` a `TypeError`;
+       `[EnforceRange]` on `maxPacketLifeTime` / `maxRetransmits`; a
+       non-negotiated channel's `id` is null until SCTP picks it;
+       `localDescription` / `remoteDescription` return the same object while
+       unchanged; promise-returning methods reject (not throw) on a wrong
+       `this`; `getStats()` settles asynchronously and still resolves after
+       `close()` (with the connection's last stats); `restartIce()` before the
+       first negotiation fires no `negotiationneeded`; setting an offer or
+       answer other than the last one created is an `InvalidModificationError`;
+       ICE stays `new` until a remote candidate is known (signalled, or a check
+       arrived), as `checking` requires one (the engine enters it at once). The
+       operations chain's promises settle in microtasks, not in a queued task as
+       the spec has it, so code awaiting one hasn't relinquished the event loop
+       (WPT's transaction-id checks that need that fail): settled in a task,
+       they let the driver's events (`icecandidate`) overtake
+       `setLocalDescription()`'s promise, which browsers order the other way.
+       Not implemented: `getRemoteCertificates()` (empty), `peerIdentity`,
+       encoded transforms (`RTCRtpScriptTransform`), the receiver's `audioLevel`
+       (needs the RFC 6464 extension, not negotiated), TCP ICE candidates
+       (skipped), mDNS: neither resolving a peer's `.local` candidates (the peer
+       is reached as peer-reflexive once its checks arrive) nor hiding the local
+       host candidates (literal addresses, which is why they need the sys
        permission).
      - **`Deno.webrtc` (`feat/webrtc-parity`):** what a server needs and the
        standard doesn't have.
@@ -14592,7 +14628,7 @@ where the changes are discussed.
        closing channels, `getStats`, least privilege (`net: ["127.0.0.1"]`,
        `sys: false`), an ICE server and a remote candidate refused by the net
        permission). From `feat/webrtc-parity` (each fails on the build before
-       it: the API is missing or throws `NotSupportedError`), 19 more:
+       it: the API is missing or throws `NotSupportedError`), 30 more:
        `webrtcMediaGlobals`, `webrtcGenerateCertificate` (ECDSA, RSA, `expires`,
        refused algorithms), `webrtcCertificatesConfiguration` (the SDP
        fingerprint is the certificate's; an ECDSA and an RSA peer complete DTLS;
@@ -14609,26 +14645,39 @@ where the changes are discussed.
        reuse of a used sender, `stop()` through the next answer),
        `webrtcSenderParameters`, `webrtcReplaceTrack`, `webrtcLegacyCallbacks`,
        `webrtcTransportsAndSelectedPair`, `webrtcSetConfigurationRules`,
-       `webrtcRollbackRemovesRemoteTransceivers`; and for `Deno.webrtc.Network`:
-       `webrtcNetworkValidation`, `webrtcNetworkSharedPort` (two connections on
-       one port, each pair's messages reaching its own),
-       `webrtcNetworkPortRange`, `webrtcNetworkPublicAddressSrflx`,
-       `webrtcNetworkPublicAddressHost` (the public address replaces the private
-       one and the connection completes), `webrtcNetworkIceLite` (`a=ice-lite`,
-       connects), `webrtcNetworkMaxMessageSize`; `ext/webrtc` lib tests
+       `webrtcRollbackRemovesRemoteTransceivers`, `webrtcSpecDetails` (strict
+       candidate parsing, `relayProtocol` / `url`, `[EnforceRange]`, ICE server
+       URL errors, a non-negotiated channel's `id`, audio `channels`, a rejected
+       promise on a wrong `this`, `restartIce()` before negotiation,
+       `rtcpMuxPolicy`, ICE `new` without a remote candidate, description
+       identity, `sctp` from the answer), `webrtcDtmf` (`canInsertDTMF`, invalid
+       tones, the RFC 4733 event on the wire, `tonechange` order),
+       `webrtcBufferedAmountCountsQueuedBlobs`, `webrtcSctpStateChange` (`sctp`
+       exists from the answer and fires `statechange` when it connects); and for
+       `Deno.webrtc.Network`: `webrtcNetworkValidation`,
+       `webrtcNetworkSharedPort` (two connections on one port, each pair's
+       messages reaching its own), `webrtcNetworkPortRange`,
+       `webrtcNetworkPublicAddressSrflx`, `webrtcNetworkPublicAddressHost` (the
+       public address replaces the private one and the connection completes),
+       `webrtcNetworkIceLite` (`a=ice-lite`, connects),
+       `webrtcNetworkMaxMessageSize`; `ext/webrtc` lib tests
        `shared_port_stun_routing_info`, `network_options`,
        `port_range_binds_inside_it`.
      - WPT (`webrtc/`, 259 test files, 2111 subtests, run on biscuits in a
        Python 3.11 container with the WPT hosts, `DENO_WEBRTC_LOOPBACK_ONLY=1`;
        not in the tree's expectations, so CI doesn't run them): before
        `feat/webrtc-parity` 627 subtests pass (29.7%) and 13 files fully; with
-       its standard surface 1048 of 2110 (49.7%) and 33 files fully
-       (`RTCConfiguration-certificates`, `-iceCandidatePoolSize`,
-       `-iceTransportPolicy`, `RTCPeerConnection-SLD-SRD-timing`, the data
-       channel files that passed before, among them). Most of what still fails
-       needs what Deno doesn't have: the tests' media helper draws to an
-       `HTMLCanvasElement` or calls `getUserMedia`, and 33 files touch
-       `document`.
+       its media, certificates and transports 1048 of 2110 (49.7%) and 33 files
+       fully; with all of it (the spec details, DTMF and the pair interface too)
+       1291 of 2110 (61.2%) and 38 files fully (`RTCConfiguration-certificates`,
+       `-iceCandidatePoolSize`, `-iceTransportPolicy`,
+       `RTCPeerConnection-SLD-SRD-timing`, the data channel files that passed
+       before, among them). Most of what still fails needs what Deno doesn't
+       have: the tests' media helper draws to an `HTMLCanvasElement` or calls
+       `getUserMedia`, and 33 files touch `document`. Two
+       `RTCDataChannel-bufferedAmount` subtests that check for 0 right after the
+       peer got the message pass or fail with the SACK's timing (the
+       acknowledged-bytes semantics above).
      - Node tests enabled: none; `node:` has no WebRTC API.
 
 371. **`fix(node:fs)`: node:fs reaches a descriptor a native addon opened, in

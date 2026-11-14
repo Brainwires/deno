@@ -296,6 +296,18 @@ const windowOrWorkerGlobalScope = {
     (webrtc) => webrtc.RTCTrackEvent,
     loadWebRtc,
   ),
+  RTCDTMFSender: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCDTMFSender,
+    loadWebRtc,
+  ),
+  RTCDTMFToneChangeEvent: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCDTMFToneChangeEvent,
+    loadWebRtc,
+  ),
+  RTCIceCandidatePair: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCIceCandidatePair,
+    loadWebRtc,
+  ),
   RTCDataChannel: core.propNonEnumerableLazyLoaded(
     (webrtc) => webrtc.RTCDataChannel,
     loadWebRtc,

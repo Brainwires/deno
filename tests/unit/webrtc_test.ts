@@ -198,7 +198,8 @@ Deno.test("webrtcClosedConnectionRejects", async () => {
   pc.close(); // idempotent
   await assertRejects(() => pc.createOffer(), DOMException);
   await assertRejects(() => pc.setLocalDescription(), DOMException);
-  await assertRejects(() => pc.getStats(), DOMException);
+  // getStats() still resolves after close(), as the spec now has it.
+  assert((await pc.getStats()) instanceof RTCStatsReport);
 });
 
 Deno.test("webrtcLoopbackBothWays", async () => {
@@ -954,9 +955,16 @@ Deno.test("webrtcSenderParameters", async () => {
   params.encodings[0].maxBitrate = 500_000;
   await t.sender.setParameters(params);
   assertEquals(t.sender.getParameters().encodings[0].maxBitrate, 500_000);
-  // A stale transaction id or a changed read-only member is refused.
+  // A stale transaction id (from an earlier task) or a changed read-only
+  // member is refused.
   const p2 = t.sender.getParameters();
-  t.sender.getParameters();
+  await new Promise((r) => setTimeout(r, 0));
+  // No getParameters() in this task: InvalidStateError.
+  const expired = await assertRejects(() => t.sender.setParameters(p2));
+  assertEquals((expired as DOMException).name, "InvalidStateError");
+  // Another transaction's id: InvalidModificationError.
+  const current = t.sender.getParameters();
+  assert(current.transactionId !== p2.transactionId);
   const stale = await assertRejects(() => t.sender.setParameters(p2));
   assertEquals((stale as DOMException).name, "InvalidModificationError");
   const p3 = t.sender.getParameters();
@@ -1262,4 +1270,190 @@ Deno.test("webrtcNetworkMaxMessageSize", async () => {
   assertThrows(() => channel.send(new Uint8Array(4097)), TypeError);
   client.close();
   server.close();
+});
+
+Deno.test("webrtcSpecDetails", async () => {
+  // Candidate strings parse strictly: a bad field leaves every derived
+  // attribute null; relayProtocol and url come from the init dictionary.
+  const bad = new RTCIceCandidate({
+    candidate: "candidate:1 x udp 2113937151 192.0.2.1 5000 typ host",
+    sdpMid: "0",
+  });
+  assertEquals([bad.foundation, bad.port, bad.type], [null, null, null]);
+  const relay = new RTCIceCandidate({
+    candidate:
+      "candidate:1 1 UDP 100 192.0.2.1 5000 typ RELAY raddr 0.0.0.0 rport 0",
+    sdpMid: "0",
+    relayProtocol: "tls",
+    url: "turns:turn.example.org",
+  } as RTCIceCandidateInit);
+  assertEquals([relay.protocol, relay.type], ["udp", "relay"]);
+  // deno-lint-ignore no-explicit-any
+  assertEquals((relay as any).relayProtocol, "tls");
+  // deno-lint-ignore no-explicit-any
+  assertEquals((relay as any).url, "turns:turn.example.org");
+  const noRport = new RTCIceCandidate({
+    candidate: "candidate:1 1 udp 100 192.0.2.1 5000 typ srflx raddr 0.0.0.0",
+    sdpMid: "0",
+  });
+  assertEquals(noRport.foundation, null);
+
+  // [EnforceRange] on the data channel integers; ICE server URLs.
+  const pc = new RTCPeerConnection();
+  assertThrows(
+    () => pc.createDataChannel("x", { maxRetransmits: -1 }),
+    TypeError,
+  );
+  assertThrows(
+    () => new RTCPeerConnection({ iceServers: null as unknown as [] }),
+    TypeError,
+  );
+  for (const urls of [[], "stun:stun.example.org#frag"]) {
+    const e = assertThrows(
+      () => new RTCPeerConnection({ iceServers: [{ urls }] }),
+      DOMException,
+    );
+    assertEquals((e as DOMException).name, "SyntaxError");
+  }
+  // A non-negotiated channel's id waits for SCTP, whatever `id` says.
+  assertEquals(pc.createDataChannel("y", { id: 42 }).id, null);
+  // Audio codecs say how many channels they have.
+  const pcmu = RTCRtpSender.getCapabilities("audio")!.codecs.find((c) =>
+    c.mimeType.toLowerCase() === "audio/pcmu"
+  )!;
+  assertEquals(pcmu.channels, 1);
+  // A promise-returning method rejects on a wrong `this`.
+  const p = (RTCPeerConnection.prototype.createOffer as () => Promise<unknown>)
+    .call({});
+  assert(p instanceof Promise);
+  await assertRejects(() => p, TypeError);
+  // restartIce() before the first negotiation fires nothing.
+  let needed = 0;
+  pc.onnegotiationneeded = () => needed++;
+  pc.restartIce();
+  await new Promise((r) => setTimeout(r, 20));
+  assertEquals(needed, 0);
+  pc.close();
+
+  // rtcpMuxPolicy "require": a media section without a=rtcp-mux.
+  const a = new RTCPeerConnection();
+  a.addTransceiver("audio");
+  const offer = await a.createOffer();
+  const b = new RTCPeerConnection();
+  const noMux = offer.sdp!.replace(/a=rtcp-mux\r\n/g, "");
+  const mux = await assertRejects(() =>
+    b.setRemoteDescription({ type: "offer", sdp: noMux })
+  );
+  assertEquals((mux as DOMException).name, "InvalidAccessError");
+
+  // ICE stays "new" while no remote candidate is known.
+  const noCandidates = offer.sdp!.replace(/a=candidate:[^\r\n]*\r\n/g, "");
+  await b.setRemoteDescription({ type: "offer", sdp: noCandidates });
+  await b.setLocalDescription();
+  await new Promise((r) => setTimeout(r, 300));
+  assertEquals(b.iceConnectionState, "new");
+  // The same RTCSessionDescription object while it doesn't change.
+  assert(b.remoteDescription === b.remoteDescription);
+  a.close();
+  b.close();
+
+  // sctp exists once an answer negotiates m=application, before it connects.
+  const c = new RTCPeerConnection();
+  const d = new RTCPeerConnection();
+  c.createDataChannel("s");
+  assertEquals(c.sctp, null);
+  await c.setLocalDescription();
+  await d.setRemoteDescription(c.localDescription!);
+  await d.setLocalDescription();
+  assert(d.sctp instanceof RTCSctpTransport);
+  await c.setRemoteDescription(d.localDescription!);
+  assert(c.sctp instanceof RTCSctpTransport);
+  assert(c.sctp!.maxMessageSize > 0);
+  c.close();
+  d.close();
+});
+
+Deno.test("webrtcDtmf", async () => {
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  const track = new Deno.webrtc.EncodedMediaTrack({
+    kind: "audio",
+    mimeType: "audio/opus",
+  });
+  const sender = a.addTrack(track);
+  assertEquals(a.addTransceiver("video").sender.dtmf, null);
+  const dtmf = sender.dtmf!;
+  assert(dtmf instanceof RTCDTMFSender);
+  assertEquals(dtmf.canInsertDTMF, false); // not negotiated yet
+  const gotTrack = once<RTCTrackEvent>(b, "track");
+  await negotiate(a, b);
+  const { receiver } = await gotTrack;
+  await connected(a);
+  assertEquals(dtmf.canInsertDTMF, true);
+  const err = assertThrows(() => dtmf.insertDTMF("1x"), DOMException);
+  assertEquals((err as DOMException).name, "InvalidCharacterError");
+  const pt =
+    receiver.getParameters().codecs.find((c) =>
+      c.mimeType.toLowerCase() === "audio/telephone-event" &&
+      c.clockRate === 48000
+    )!.payloadType;
+  const reader = Deno.webrtc.readRtp(receiver).getReader();
+  const tones: string[] = [];
+  const done = new Promise<void>((resolve) => {
+    dtmf.ontonechange = (e) => {
+      tones.push(e.tone);
+      if (e.tone === "") resolve();
+    };
+  });
+  dtmf.insertDTMF("1#", 40, 30);
+  assertEquals(dtmf.toneBuffer, "1#");
+  // The first telephone event on the wire: event 1, not yet ended.
+  let first: Uint8Array | undefined;
+  while (!first) {
+    const { value } = await reader.read();
+    if ((value![1] & 0x7f) === pt) first = value;
+  }
+  assertEquals(first[12], 1);
+  assertEquals(first[13] & 0x80, 0);
+  await done;
+  assertEquals(tones, ["1", "#", ""]);
+  await reader.cancel();
+  a.close();
+  b.close();
+});
+
+Deno.test("webrtcBufferedAmountCountsQueuedBlobs", async () => {
+  const { a, b, channel, remote } = await connectPair();
+  const got = messages(remote, 2);
+  // A Blob (and what waits behind it) counts from the send() call on.
+  channel.send(new Blob([new Uint8Array(5)]));
+  assertEquals(channel.bufferedAmount, 5);
+  channel.send("abc");
+  assertEquals(channel.bufferedAmount, 8);
+  assertEquals((await got).length, 2);
+  a.close();
+  b.close();
+});
+
+Deno.test("webrtcSctpStateChange", async () => {
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  a.createDataChannel("t");
+  // sctp exists from the answer and announces "connected".
+  const toB = trickle(a, b);
+  const toA = trickle(b, a);
+  await a.setLocalDescription();
+  await b.setRemoteDescription(a.localDescription!);
+  toB();
+  await b.setLocalDescription();
+  await a.setRemoteDescription(b.localDescription!);
+  toA();
+  const sctp = a.sctp!;
+  if (sctp.state !== "connected") {
+    assertEquals(sctp.state, "connecting");
+    await once(sctp, "statechange");
+  }
+  assertEquals(sctp.state, "connected");
+  a.close();
+  b.close();
 });

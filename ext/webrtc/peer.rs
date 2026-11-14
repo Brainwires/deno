@@ -409,6 +409,11 @@ pub struct Core {
   pub(crate) media: MediaState,
   /// `setConfiguration` changed the ICE servers since they were gathered.
   servers_changed: bool,
+  /// A remote candidate is known (signalled, or a check arrived): until
+  /// then ICE stays `new`, as the spec's `checking` needs one.
+  remote_known: bool,
+  /// The engine went `checking` before that: reported once one is.
+  checking_held: bool,
   /// The connection itself, for a shared-port network's routes.
   this: Weak<Peer>,
 }
@@ -694,6 +699,7 @@ impl Core {
   /// `setRemoteDescription`, which reject when it is refused).
   pub(crate) fn mark_allowed(&mut self, addr: SocketAddr) {
     self.allowed.insert(addr);
+    self.remote_known = true;
   }
 
   /// The UDP socket a datagram from `local` (a host candidate address or a
@@ -760,6 +766,7 @@ impl Core {
   /// Remembers a remote address that sent STUN (bounded: a flood of
   /// spoofed sources can't grow it without limit).
   fn saw_stun(&mut self, from: SocketAddr) {
+    self.remote_known = true;
     if self.stun_peers.len() < MAX_STUN_PEERS {
       self.stun_peers.insert(from);
     }
@@ -969,6 +976,14 @@ impl Core {
 
   /// Moves the engine's events and received messages to the JS queue.
   pub(crate) fn collect_events(&mut self, now: Instant) {
+    if self.checking_held && self.remote_known {
+      self.checking_held = false;
+      if !self.failed {
+        self.events.push_back(JsEvent::IceConnectionState {
+          state: "checking".to_string(),
+        });
+      }
+    }
     let mut mid = None::<String>;
     while let Some(event) = self.pc.poll_event() {
       match event {
@@ -1012,6 +1027,11 @@ impl Core {
         }
         RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(s) => {
           let state = s.to_string();
+          if state == "checking" && !self.remote_known {
+            self.checking_held = true;
+            continue;
+          }
+          self.checking_held = false;
           if state == "connected" || state == "completed" {
             self.ice_up = true;
             if !self.dtls_connected && self.ice_up_at.is_none() {
@@ -1324,6 +1344,8 @@ impl Peer {
         recv_rx: Some(recv_rx),
         media: MediaState::default(),
         servers_changed: false,
+        remote_known: false,
+        checking_held: false,
         this: this.clone(),
       }),
       guard,
@@ -1490,7 +1512,15 @@ impl Peer {
       core
         .pc
         .set_local_description(Instant::now(), desc)
-        .map_err(rtc_err)?;
+        .map_err(|e| {
+          // JSEP: an offer or answer other than the last one created.
+          let text = e.to_string();
+          if text.contains("does not match") {
+            WebRtcError::InvalidModification(text)
+          } else {
+            rtc_err(text)
+          }
+        })?;
       if kind == "rollback" {
         core.after_rollback(victims);
       } else {
@@ -2338,7 +2368,8 @@ async fn add_server(peer: Rc<Peer>, spec: IceServerSpec) {
   };
   {
     let mut core = peer.core.borrow_mut();
-    core.mark_allowed(server);
+    // A server, not a remote candidate (ICE stays `new` without one).
+    core.allowed.insert(server);
     let now = Instant::now();
     let mut entry = ServerClient {
       url: spec.url.clone(),
