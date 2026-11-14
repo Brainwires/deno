@@ -1,0 +1,4 @@
+/proc/sys/fs/binfmt_misc/WSLInterop: existsSync false, exists false
+/run/WSL: existsSync false, exists false
+/proc/self/cgroup: existsSync false, exists false
+/does/not/exist: existsSync false, exists false

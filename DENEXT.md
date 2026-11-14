@@ -14609,6 +14609,34 @@ where the changes are discussed.
        answers `SQLITE_OK`, every time). Ende's version checked the same thing
        without parking the thread, so it could pass without the fix.
 
+376. **`fix(node:fs)`: `existsSync()` / `exists()` answer `false` for a special
+     path the grants don't reach, instead of throwing** (denoland/deno#37062;
+     runtime; `runtime/permissions/lib.rs`, `ext/node/ops/fs.rs`). A path
+     under `/proc`, `/dev` or `/sys` (on macOS `/dev`, on Windows a device
+     path) needs `--allow-all` (`/proc/*/environ` the whole env permission)
+     even when `--allow-read` grants it, and `node:fs.existsSync()` passed that
+     refusal on as `NotCapable`. Vite 8 probes
+     `/proc/sys/fs/binfmt_misc/WSLInterop` at startup, so `vite build` under
+     scoped permissions failed. Node's `existsSync()` never throws, and the
+     program can't open the path either way, so now it is `false`.
+     `PermissionsContainer::check_exists` runs `check_open`'s read check
+     unchanged (allow and deny scopes, the resolved-path check, a prompt) and
+     reports only the special-file refusal as absent: a path outside the
+     read grant or in a deny scope still throws. `fs.exists()` gets the same
+     answer instead of an unhandled rejection.
+     - User-facing note: `vite build` (Vite 8) runs under `--allow-read`
+       without `--allow-all`. `existsSync("/proc/self/cgroup")` is `false`
+       there, though the file exists; with `-A` it is `true`.
+     - Tests: spec `node/fs_exists_special_paths` (`existsSync` and `exists`
+       under `--allow-read`: `false` for a missing `/dev` device, `true` for
+       `/dev/null`, and on Linux `false` for the issue's WSL probe and
+       `/proc/self/cgroup`, `true` for the latter under `-A`; `NotCapable` still
+       for a deny-scoped file and for one outside `--allow-read=`); unit
+       `check_exists_absorbs_only_the_special_file_refusal` in
+       `deno_permissions`.
+     - Node tests enabled: none; Node's suite runs with `-A`, where no special
+       path is refused.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -14616,7 +14644,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374) are what the prebuilt
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

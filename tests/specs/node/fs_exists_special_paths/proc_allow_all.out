@@ -1,0 +1,2 @@
+/proc/self/cgroup: existsSync true, exists true
+/does/not/exist: existsSync false, exists false
