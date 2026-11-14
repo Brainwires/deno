@@ -52,6 +52,7 @@ use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
+use std::rc::Weak;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -68,11 +69,14 @@ use rtc::ice::url::SchemeType;
 use rtc::ice::url::Url as IceUrl;
 use rtc::peer_connection::RTCPeerConnection;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
+use rtc::peer_connection::certificate::RTCCertificate;
+use rtc::peer_connection::configuration::RTCBundlePolicy;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::setting_engine::SctpMaxMessageSize;
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCDataChannelEvent;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
+use rtc::peer_connection::event::RTCTrackEvent;
 use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::transport::CandidateConfig;
@@ -87,6 +91,7 @@ use rtc::shared::TaggedBytesMut;
 use rtc::shared::TransportContext;
 use rtc::shared::TransportProtocol;
 use rtc::shared::error::Error as RtcError;
+use rtc::shared::marshal::Marshal;
 use rtc::statistics::StatsSelector;
 use rtc::statistics::report::RTCStatsReportEntry;
 use rtc::stun::message::TransactionId;
@@ -101,6 +106,9 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc;
 
 use crate::WebRtcError;
+use crate::media::MediaState;
+use crate::net::Network;
+use crate::net::NetworkOptions;
 
 /// The largest UDP payload read from a socket. ICE, DTLS and SCTP packets
 /// stay under the path MTU; this leaves room for jumbo frames.
@@ -205,6 +213,12 @@ pub struct PeerOptions {
   /// For `turns:` servers: the runtime's TLS client configuration (its root
   /// store, `--unsafely-ignore-certificate-errors`).
   pub tls: Option<Arc<rustls::ClientConfig>>,
+  /// `RTCConfiguration.certificates` (one is generated when empty).
+  pub certificates: Vec<RTCCertificate>,
+  /// `RTCConfiguration.bundlePolicy`.
+  pub bundle_policy: RTCBundlePolicy,
+  /// `RTCConfiguration.denoNetwork` (net.rs).
+  pub network: Option<Rc<Network>>,
 }
 
 /// An event for JavaScript, delivered in batches by
@@ -266,6 +280,15 @@ pub enum JsEvent {
     text: bool,
     data: Payload,
   },
+  /// A receiver's first RTP packet: its track unmutes.
+  #[serde(rename = "trackunmute")]
+  TrackUnmute { transceiver: u32 },
+  /// An RTP packet for a `Deno.webrtc.readRtp()` reader (header included).
+  #[serde(rename = "rtp")]
+  Rtp { transceiver: u32, data: Payload },
+  /// The remote receiver asked a sender for a key frame (PLI / FIR).
+  #[serde(rename = "keyframerequest")]
+  KeyFrameRequest { transceiver: u32 },
 }
 
 /// A received message's bytes, handed to V8 without a copy (as a
@@ -293,13 +316,13 @@ impl Serialize for Payload {
 
 /// A datagram one of the readers received. `stream` is the index of the
 /// server client whose TCP/TLS connection carried it.
-struct Datagram {
-  local: SocketAddr,
-  from: SocketAddr,
-  stream: Option<usize>,
-  data: BytesMut,
+pub(crate) struct Datagram {
+  pub(crate) local: SocketAddr,
+  pub(crate) from: SocketAddr,
+  pub(crate) stream: Option<usize>,
+  pub(crate) data: BytesMut,
   /// A TCP/TLS link to a TURN server ended (`stream` names it): why.
-  closed: Option<String>,
+  pub(crate) closed: Option<String>,
 }
 
 /// The connection's UDP socket for one address family.
@@ -382,6 +405,17 @@ pub struct Core {
   failed: bool,
   recv_tx: mpsc::Sender<Datagram>,
   recv_rx: Option<mpsc::Receiver<Datagram>>,
+  /// Transceivers, senders and receivers (media.rs).
+  pub(crate) media: MediaState,
+  /// `setConfiguration` changed the ICE servers since they were gathered.
+  servers_changed: bool,
+  /// A remote candidate is known (signalled, or a check arrived): until
+  /// then ICE stays `new`, as the spec's `checking` needs one.
+  remote_known: bool,
+  /// The engine went `checking` before that: reported once one is.
+  checking_held: bool,
+  /// The connection itself, for a shared-port network's routes.
+  this: Weak<Peer>,
 }
 
 pub struct Peer {
@@ -396,7 +430,7 @@ pub struct Peer {
   driver_started: Cell<bool>,
 }
 
-fn rtc_err(e: impl std::fmt::Display) -> WebRtcError {
+pub(crate) fn rtc_err(e: impl std::fmt::Display) -> WebRtcError {
   WebRtcError::Operation(e.to_string())
 }
 
@@ -451,17 +485,21 @@ pub fn classify_remote_candidate(
 /// the wildcard address (test machines whose firewall asks about every
 /// non-loopback listener; two peers on one machine still connect). Read by
 /// the runtime like its other `DENO_*` switches, without `--allow-env`.
-fn loopback_only() -> bool {
+pub(crate) fn loopback_only() -> bool {
   std::env::var_os("DENO_WEBRTC_LOOPBACK_ONLY").is_some_and(|v| v == "1")
 }
 
-/// The machine's usable interface addresses (no loopback, no link-local).
-fn interface_addresses() -> Vec<IpAddr> {
+/// The machine's usable interface addresses (no loopback, no link-local),
+/// of the named interfaces only when `names` is given.
+pub(crate) fn interface_addresses(names: Option<&[String]>) -> Vec<IpAddr> {
   let Ok(ifaces) = netif::up() else {
     return Vec::new();
   };
   let mut out = Vec::new();
   for iface in ifaces {
+    if names.is_some_and(|names| !names.iter().any(|n| n == iface.name())) {
+      continue;
+    }
     let ip = *iface.address();
     let usable = match ip {
       IpAddr::V4(v4) => {
@@ -485,7 +523,7 @@ fn interface_addresses() -> Vec<IpAddr> {
 
 /// Binds a UDP socket (an IPv6 one IPv6-only, so the two families stay
 /// apart).
-fn bind_udp(addr: SocketAddr) -> std::io::Result<UdpSocket> {
+pub(crate) fn bind_udp(addr: SocketAddr) -> std::io::Result<UdpSocket> {
   let domain = if addr.is_ipv4() {
     socket2::Domain::IPV4
   } else {
@@ -661,6 +699,7 @@ impl Core {
   /// `setRemoteDescription`, which reject when it is refused).
   pub(crate) fn mark_allowed(&mut self, addr: SocketAddr) {
     self.allowed.insert(addr);
+    self.remote_known = true;
   }
 
   /// The UDP socket a datagram from `local` (a host candidate address or a
@@ -678,17 +717,22 @@ impl Core {
   /// The local address a datagram on `endpoint` from `from` arrived on.
   fn local_for(&mut self, endpoint: usize, from: SocketAddr) -> SocketAddr {
     let e = &self.endpoints[endpoint];
-    if !e.bound.ip().is_unspecified() {
-      return e.bound;
-    }
-    let port = e.bound.port();
-    let hosts = e.hosts.clone();
-    let ip = *self.routes.entry(from.ip()).or_insert_with(|| {
-      route_to(from.ip())
-        .filter(|ip| hosts.contains(ip))
-        .or_else(|| hosts.first().copied())
-        .unwrap_or(from.ip())
-    });
+    let (port, hosts) = (e.bound.port(), e.hosts.clone());
+    let ip = if !e.bound.ip().is_unspecified() {
+      e.bound.ip()
+    } else {
+      *self.routes.entry(from.ip()).or_insert_with(|| {
+        route_to(from.ip())
+          .filter(|ip| hosts.contains(ip))
+          .or_else(|| hosts.first().copied())
+          .unwrap_or(from.ip())
+      })
+    };
+    // 1:1 NAT in host mode: the host candidate is the public address.
+    let ip = match self.options.network.as_ref().map(|n| &n.options) {
+      Some(net) if !net.public_srflx => net.public_for(ip).unwrap_or(ip),
+      _ => ip,
+    };
     SocketAddr::new(ip, port)
   }
 
@@ -722,6 +766,7 @@ impl Core {
   /// Remembers a remote address that sent STUN (bounded: a flood of
   /// spoofed sources can't grow it without limit).
   fn saw_stun(&mut self, from: SocketAddr) {
+    self.remote_known = true;
     if self.stun_peers.len() < MAX_STUN_PEERS {
       self.stun_peers.insert(from);
     }
@@ -781,6 +826,11 @@ impl Core {
             let _ = writer.send(tx.message.to_vec());
           }
           ServerLink::Udp => {
+            if let Some(net) =
+              self.options.network.as_ref().filter(|n| n.is_shared())
+            {
+              net.register_transaction(&tx.message, &self.this);
+            }
             if let Some(e) = self.endpoints.iter().find(|e| {
               e.bound.port() == tx.transport.local_addr.port()
                 && e.bound.is_ipv4() == tx.transport.local_addr.is_ipv4()
@@ -926,6 +976,14 @@ impl Core {
 
   /// Moves the engine's events and received messages to the JS queue.
   pub(crate) fn collect_events(&mut self, now: Instant) {
+    if self.checking_held && self.remote_known {
+      self.checking_held = false;
+      if !self.failed {
+        self.events.push_back(JsEvent::IceConnectionState {
+          state: "checking".to_string(),
+        });
+      }
+    }
     let mut mid = None::<String>;
     while let Some(event) = self.pc.poll_event() {
       match event {
@@ -969,6 +1027,11 @@ impl Core {
         }
         RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(s) => {
           let state = s.to_string();
+          if state == "checking" && !self.remote_known {
+            self.checking_held = true;
+            continue;
+          }
+          self.checking_held = false;
           if state == "connected" || state == "completed" {
             self.ice_up = true;
             if !self.dtls_connected && self.ice_up_at.is_none() {
@@ -1034,16 +1097,53 @@ impl Core {
           };
           self.events.push_back(event);
         }
+        RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnOpen(init)) => {
+          let index: usize = init.receiver_id.into();
+          if let Some(key) = self.key_for_receiver_index(index) {
+            self.media.track_keys.insert(init.track_id.clone(), key);
+          }
+        }
         _ => {}
       }
     }
     while let Some(message) = self.pc.poll_read() {
-      if let RTCMessage::DataChannelMessage(handle, message) = message.message {
-        self.events.push_back(JsEvent::DataChannelMessage {
-          channel: handle as u32,
-          text: message.is_string,
-          data: Payload::new(message.data.to_vec()),
-        });
+      match message.message {
+        RTCMessage::DataChannelMessage(handle, message) => {
+          self.events.push_back(JsEvent::DataChannelMessage {
+            channel: handle as u32,
+            text: message.is_string,
+            data: Payload::new(message.data.to_vec()),
+          });
+        }
+        RTCMessage::RtpPacket(track_id, packet) => {
+          let Some(key) = self.key_for_track(&track_id) else {
+            continue;
+          };
+          if self.media.flowing.insert(key) {
+            self
+              .events
+              .push_back(JsEvent::TrackUnmute { transceiver: key });
+          }
+          self.media.saw_rtp(key, &packet.header);
+          if self.media.reading.contains(&key)
+            && let Ok(bytes) = packet.marshal()
+          {
+            self.events.push_back(JsEvent::Rtp {
+              transceiver: key,
+              data: Payload::new(bytes.to_vec()),
+            });
+          }
+        }
+        RTCMessage::RtcpPacket(track_id, packets) => {
+          if crate::media::wants_key_frame(&packets)
+            && let Some(key) = self.key_for_track(&track_id)
+          {
+            self
+              .events
+              .push_back(JsEvent::KeyFrameRequest { transceiver: key });
+          }
+        }
+        _ => {}
       }
     }
   }
@@ -1190,22 +1290,38 @@ impl Peer {
     options: PeerOptions,
     guard: Rc<dyn NetGuard>,
   ) -> Result<Rc<Self>, WebRtcError> {
-    let config = RTCConfigurationBuilder::new().build();
+    let config = RTCConfigurationBuilder::new()
+      .with_certificates(options.certificates.clone())
+      .with_bundle_policy(options.bundle_policy)
+      .build();
+    let (media_engine, registry) = crate::media::media_stack()?;
     // Messages up to 256 KiB, as browsers take (the engine's own default is
     // RFC 8841's 64 KiB); the connection's maxMessageSize is the smaller of
     // this and the peer's.
-    let settings = SettingEngineBuilder::new()
-      .with_sctp_max_message_size(SctpMaxMessageSize::Bounded(
-        SctpMaxMessageSize::MAX_MESSAGE_SIZE,
-      ))
-      .build();
+    let net = options.network.as_ref().map(|n| &n.options);
+    let mut settings = SettingEngineBuilder::new().with_sctp_max_message_size(
+      SctpMaxMessageSize::Bounded(
+        net
+          .and_then(|n| n.max_message_size)
+          .unwrap_or(SctpMaxMessageSize::MAX_MESSAGE_SIZE),
+      ),
+    );
+    if let Some(net) = net {
+      settings = settings.with_lite(net.ice_lite);
+      if let Some((disconnected, failed, keep_alive)) = net.ice_timeouts {
+        settings = settings.with_ice_timeouts(disconnected, failed, keep_alive);
+      }
+    }
+    let settings = settings.build();
     let pc = RTCPeerConnectionBuilder::new()
       .with_configuration(config)
       .with_setting_engine(settings)
+      .with_media_engine(media_engine)
+      .with_interceptor_registry(registry)
       .build(Instant::now())
       .map_err(rtc_err)?;
     let (recv_tx, recv_rx) = mpsc::channel(RECV_QUEUE);
-    Ok(Rc::new(Self {
+    Ok(Rc::new_cyclic(|this| Self {
       core: RefCell::new(Core {
         pc,
         options,
@@ -1226,6 +1342,11 @@ impl Peer {
         failed: false,
         recv_tx,
         recv_rx: Some(recv_rx),
+        media: MediaState::default(),
+        servers_changed: false,
+        remote_known: false,
+        checking_held: false,
+        this: this.clone(),
       }),
       guard,
       wake: Notify::new(),
@@ -1295,13 +1416,63 @@ impl Peer {
     }
   }
 
-  pub fn create_offer(&self, ice_restart: bool) -> Result<String, WebRtcError> {
-    self.guarded(|core| {
+  pub fn create_offer(
+    self: &Rc<Self>,
+    ice_restart: bool,
+  ) -> Result<String, WebRtcError> {
+    let sdp = self.guarded(|core| {
       if ice_restart {
         core.pc.restart_ice();
       }
       Ok(core.pc.create_offer(None).map_err(rtc_err)?.sdp)
-    })
+    })?;
+    // `setConfiguration`'s ICE servers are gathered from on the restart.
+    if ice_restart {
+      let specs = {
+        let mut core = self.core.borrow_mut();
+        if core.servers_changed && core.gathering != GatherPhase::NotStarted {
+          core.servers_changed = false;
+          core.servers.clear();
+          core.resolving += core.options.ice_servers.len();
+          core.options.ice_servers.clone()
+        } else {
+          Vec::new()
+        }
+      };
+      for spec in specs {
+        let peer = self.clone();
+        let cancel = self.cancel.clone();
+        deno_core::unsync::spawn(async move {
+          let _ = add_server(peer, spec).or_cancel(cancel).await;
+        });
+      }
+    }
+    Ok(sdp)
+  }
+
+  /// `setConfiguration`: the ICE servers and policy the next gathering
+  /// (an ICE restart) uses.
+  pub fn set_ice_servers(
+    &self,
+    specs: Vec<IceServerSpec>,
+    relay_only: bool,
+    tls: Option<Arc<rustls::ClientConfig>>,
+  ) {
+    let mut core = self.core.borrow_mut();
+    let urls =
+      |s: &[IceServerSpec]| s.iter().map(|s| s.url.clone()).collect::<Vec<_>>();
+    if urls(&specs) != urls(&core.options.ice_servers) {
+      core.servers_changed = true;
+    }
+    core.options.ice_servers = specs;
+    core.options.relay_only = relay_only;
+    if tls.is_some() {
+      core.options.tls = tls;
+    }
+  }
+
+  pub fn selected_pair(&self) -> Option<(SocketAddr, SocketAddr)> {
+    self.core.borrow().selected
   }
 
   pub fn create_answer(&self) -> Result<String, WebRtcError> {
@@ -1333,17 +1504,61 @@ impl Peer {
   ) -> Result<(), WebRtcError> {
     let desc = Self::description(kind, sdp)?;
     self.guarded(|core| {
+      let victims = if kind == "rollback" {
+        core.rollback_victims()
+      } else {
+        Vec::new()
+      };
       core
         .pc
         .set_local_description(Instant::now(), desc)
-        .map_err(rtc_err)
+        .map_err(|e| {
+          // JSEP: an offer or answer other than the last one created.
+          let text = e.to_string();
+          if text.contains("does not match") {
+            WebRtcError::InvalidModification(text)
+          } else {
+            rtc_err(text)
+          }
+        })?;
+      if kind == "rollback" {
+        core.after_rollback(victims);
+      } else {
+        core.sync_transceiver_keys(false);
+        if kind == "answer" {
+          core.negotiation_settled();
+        }
+      }
+      Ok(())
     })?;
     if kind != "rollback" {
       self.start_gathering();
+      self.register_on_shared_port();
     }
     self.ensure_driver();
     self.poke();
     Ok(())
+  }
+
+  /// On a shared-port network, the local ufrag routes the remote peer's
+  /// checks to this connection (registered again after an ICE restart).
+  fn register_on_shared_port(&self) {
+    let core = self.core.borrow();
+    if let Some(net) = core.options.network.as_ref().filter(|n| n.is_shared())
+      && let Some(ufrag) = core.local_ufrag()
+    {
+      net.register_ufrag(ufrag, &core.this);
+    }
+  }
+
+  /// A datagram a shared-port network routed to this connection.
+  pub(crate) fn deliver(&self, dg: Datagram) {
+    if self.closed.get() {
+      return;
+    }
+    if let Ok(core) = self.core.try_borrow() {
+      let _ = core.recv_tx.try_send(dg);
+    }
   }
 
   /// Checks every candidate the remote description carries and hands the
@@ -1370,10 +1585,23 @@ impl Peer {
     }
     let desc = Self::description(kind, kept)?;
     self.guarded(|core| {
+      let victims = if kind == "rollback" {
+        core.rollback_victims()
+      } else {
+        Vec::new()
+      };
       core
         .pc
         .set_remote_description(Instant::now(), desc)
         .map_err(rtc_err)?;
+      if kind == "rollback" {
+        core.after_rollback(victims);
+      } else {
+        core.sync_transceiver_keys(kind == "offer");
+        if kind == "answer" {
+          core.negotiation_settled();
+        }
+      }
       for addr in checked {
         core.mark_allowed(addr);
       }
@@ -1562,9 +1790,28 @@ impl Peer {
       .map(|d| (d.sdp_type.to_string(), d.sdp.clone()))
   }
 
-  pub fn stats(&self) -> Result<Vec<serde_json::Value>, WebRtcError> {
+  /// `getStats()`; `selector` is a transceiver key and whether its sender
+  /// (else its receiver) is the selector.
+  pub fn stats(
+    &self,
+    selector: Option<(u32, bool)>,
+  ) -> Result<Vec<serde_json::Value>, WebRtcError> {
     self.guarded(|core| {
-      let report = core.pc.get_stats(Instant::now(), StatsSelector::None);
+      let selector = match selector {
+        None => StatsSelector::None,
+        Some((key, sender)) => {
+          let Some(index) = core.media.keys.iter().position(|k| *k == key)
+          else {
+            return Ok(Vec::new());
+          };
+          if sender {
+            StatsSelector::Sender(index.into())
+          } else {
+            StatsSelector::Receiver(index.into())
+          }
+        }
+      };
+      let report = core.pc.get_stats(Instant::now(), selector);
       use RTCStatsReportEntry as E;
       Ok(
         report
@@ -1593,6 +1840,18 @@ impl Peer {
           .collect(),
       )
     })
+  }
+
+  /// Runs a media operation on the engine (media.rs), then lets the driver
+  /// flush what it produced.
+  pub fn media<T>(
+    &self,
+    f: impl FnOnce(&mut Core) -> Result<T, WebRtcError>,
+  ) -> Result<T, WebRtcError> {
+    let out = self.guarded(f)?;
+    self.events_ready.notify_one();
+    self.poke();
+    Ok(out)
   }
 
   /// `close()`: stops the engine, the sockets and the driver. Idempotent.
@@ -1652,6 +1911,9 @@ impl Peer {
     if let Ok(mut core) = self.core.try_borrow_mut() {
       core.servers.clear();
       core.endpoints.clear();
+      if let Some(net) = core.options.network.take() {
+        net.forget(self);
+      }
     }
     self.cancel.cancel();
     self.wake.notify_one();
@@ -1686,105 +1948,113 @@ impl Peer {
         state: "gathering".to_string(),
       });
 
-      let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
-      // (bind address, host candidate addresses)
-      let mut plan: Vec<(IpAddr, Vec<IpAddr>)> = Vec::new();
-      let interfaces = if loopback_only() {
-        None
-      } else {
-        match self.guard.interfaces() {
-          Ok(()) => Some(interface_addresses()),
-          Err(message) => {
-            core.report_error(
-              "",
-              None,
-              ERROR_CODE_UNREACHABLE,
-              format!("Only loopback host candidates were gathered: {message}"),
-            );
-            None
+      // (socket, bound address, host candidate addresses, own reader)
+      let mut planned: Vec<(Rc<UdpSocket>, SocketAddr, Vec<IpAddr>, bool)> =
+        Vec::new();
+      let net = core.options.network.clone();
+      let defaults = NetworkOptions {
+        include_loopback: true,
+        ..Default::default()
+      };
+      let opts = net.as_ref().map(|n| n.options.clone()).unwrap_or(defaults);
+      match net.as_ref().filter(|n| n.is_shared()) {
+        Some(net) => {
+          for e in &net.shared {
+            planned.push((e.socket.clone(), e.bound, e.hosts.clone(), false));
           }
         }
-      };
-      match interfaces {
-        Some(ifaces) => {
-          let v4: Vec<IpAddr> = std::iter::once(loopback)
-            .chain(ifaces.iter().copied().filter(IpAddr::is_ipv4))
-            .collect();
-          let v6: Vec<IpAddr> =
-            ifaces.iter().copied().filter(IpAddr::is_ipv6).collect();
-          let any4 = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
-          match self.guard.listen(any4) {
-            Ok(()) => plan.push((any4, v4)),
-            Err(message) => {
-              core.report_error(
-                "",
-                None,
-                ERROR_CODE_UNREACHABLE,
-                format!(
-                  "Only loopback host candidates were gathered: {message}"
-                ),
-              );
-              plan.push((loopback, vec![loopback]));
+        None => match crate::net::bind_plan(&opts, &*self.guard) {
+          Ok((plan, notes)) => {
+            for note in notes {
+              core.report_error("", None, ERROR_CODE_UNREACHABLE, note);
+            }
+            for (bind, hosts) in plan {
+              let socket = match opts.port_range {
+                Some(range) => crate::net::bind_in_range(bind, range),
+                None => bind_udp(SocketAddr::new(bind, 0)),
+              };
+              let socket = match socket {
+                Ok(s) => Rc::new(s),
+                Err(e) => {
+                  core.report_error(
+                    "",
+                    Some(SocketAddr::new(bind, 0)),
+                    ERROR_CODE_UNREACHABLE,
+                    e.to_string(),
+                  );
+                  continue;
+                }
+              };
+              let Ok(bound) = socket.local_addr() else {
+                continue;
+              };
+              planned.push((socket, bound, hosts, true));
             }
           }
-          let any6 = IpAddr::V6(Ipv6Addr::UNSPECIFIED);
-          if !v6.is_empty() && self.guard.listen(any6).is_ok() {
-            plan.push((any6, v6));
+          Err(e) => {
+            core.report_error("", None, ERROR_CODE_UNREACHABLE, e.to_string())
           }
-        }
-        None => plan.push((loopback, vec![loopback])),
+        },
       }
 
-      for (bind, hosts) in plan {
-        if !bind.is_unspecified()
-          && let Err(message) = self.guard.listen(bind)
-        {
-          core.report_error(
-            "",
-            Some(SocketAddr::new(bind, 0)),
-            ERROR_CODE_UNREACHABLE,
-            message,
+      let mut advertised: HashSet<SocketAddr> = HashSet::new();
+      for (socket, bound, hosts, own_reader) in planned {
+        if own_reader {
+          spawn_udp_reader(
+            socket.clone(),
+            bound,
+            core.recv_tx.clone(),
+            self.cancel.clone(),
           );
-          continue;
         }
-        let socket = match bind_udp(SocketAddr::new(bind, 0)) {
-          Ok(s) => Rc::new(s),
-          Err(e) => {
-            core.report_error(
-              "",
-              Some(SocketAddr::new(bind, 0)),
-              ERROR_CODE_UNREACHABLE,
-              e.to_string(),
-            );
-            continue;
-          }
-        };
-        let Ok(bound) = socket.local_addr() else {
-          continue;
-        };
-        spawn_udp_reader(
-          socket.clone(),
-          bound,
-          core.recv_tx.clone(),
-          self.cancel.clone(),
-        );
         if !core.options.relay_only {
           for ip in &hosts {
-            let addr = SocketAddr::new(*ip, bound.port());
-            let line = candidate_line(
-              CandidateHostConfig {
-                base_config: base_config(addr),
-                ..Default::default()
-              }
-              .new_candidate_host(),
-            );
-            if let Err(e) = line.and_then(|line| core.add_local(line, None)) {
-              core.report_error(
-                "",
-                Some(addr),
-                ERROR_CODE_UNREACHABLE,
-                e.to_string(),
+            let private = SocketAddr::new(*ip, bound.port());
+            let public = opts
+              .public_for(*ip)
+              .map(|p| SocketAddr::new(p, bound.port()));
+            let (host, srflx) = match public {
+              Some(p) if opts.public_srflx => (private, Some(p)),
+              Some(p) => (p, None),
+              None => (private, None),
+            };
+            if advertised.insert(host) {
+              let line = candidate_line(
+                CandidateHostConfig {
+                  base_config: base_config(host),
+                  ..Default::default()
+                }
+                .new_candidate_host(),
               );
+              if let Err(e) = line.and_then(|line| core.add_local(line, None)) {
+                core.report_error(
+                  "",
+                  Some(host),
+                  ERROR_CODE_UNREACHABLE,
+                  e.to_string(),
+                );
+              }
+            }
+            if let Some(srflx) = srflx
+              && advertised.insert(srflx)
+            {
+              let line = candidate_line(
+                CandidateServerReflexiveConfig {
+                  base_config: base_config(srflx),
+                  rel_addr: private.ip().to_string(),
+                  rel_port: private.port(),
+                  url: None,
+                }
+                .new_candidate_server_reflexive(),
+              );
+              if let Err(e) = line.and_then(|line| core.add_local(line, None)) {
+                core.report_error(
+                  "",
+                  Some(srflx),
+                  ERROR_CODE_UNREACHABLE,
+                  e.to_string(),
+                );
+              }
             }
           }
         }
@@ -2007,6 +2277,24 @@ async fn add_server(peer: Rc<Peer>, spec: IceServerSpec) {
     finish(&peer, Some(message));
     return;
   }
+  let shared = peer
+    .core
+    .borrow()
+    .options
+    .network
+    .as_ref()
+    .is_some_and(|n| n.is_shared());
+  if shared && spec.turn && spec.transport == ServerTransport::Udp {
+    finish(
+      &peer,
+      Some(
+        "TURN over UDP isn't available on a shared-port Deno.webrtc.Network \
+         (use ?transport=tcp or turns:)"
+          .to_string(),
+      ),
+    );
+    return;
+  }
   let index = peer.core.borrow().servers.len();
   let (link, base) = match spec.transport {
     ServerTransport::Udp => {
@@ -2080,7 +2368,8 @@ async fn add_server(peer: Rc<Peer>, spec: IceServerSpec) {
   };
   {
     let mut core = peer.core.borrow_mut();
-    core.mark_allowed(server);
+    // A server, not a remote candidate (ICE stays `new` without one).
+    core.allowed.insert(server);
     let now = Instant::now();
     let mut entry = ServerClient {
       url: spec.url.clone(),

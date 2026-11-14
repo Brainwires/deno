@@ -76,6 +76,10 @@ const lazySql = () =>
 let _pty;
 const lazyPty = () =>
   _pty ?? (_pty = core.loadExtScript("ext:deno_pty/01_pty.js"));
+// `Deno.webrtc` (ext/webrtc's server extension): loaded on first access.
+let _webrtc;
+const lazyWebRtc = () =>
+  _webrtc ?? (_webrtc = core.loadExtScript("ext:deno_webrtc/01_webrtc.js"));
 let _telemetry;
 const lazyTelemetry = () =>
   _telemetry ??
@@ -299,6 +303,9 @@ const denoNs = {
   },
   get openPty() {
     return lazyPty().openPty;
+  },
+  get webrtc() {
+    return lazyWebRtc().webrtcNs;
   },
 };
 
