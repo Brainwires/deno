@@ -14906,20 +14906,20 @@ where the changes are discussed.
 375. **`fix(cli)`: SQLite's first-time initialization runs once, before the
      cache databases open in parallel** (port of Ende's fix for
      denoland/deno#37045, theende/ende ddc7a450c8, MIT; CLI only;
-     `cli/cache/cache_db.rs`). Each on-disk cache database opens its
-     connection on its own blocking thread at startup, so two threads could
-     enter `sqlite3_initialize()` together. The bundled SQLite's
-     `sqlite3MutexInit()` publishes `xMutexAlloc` after a barrier, but a thread
-     that sees it set reads `xMutexInit` with no barrier, so on arm64 it could
-     call a stale NULL pointer: an intermittent SIGSEGV about 20 ms after
-     startup on Apple Silicon (Quarto saw about 1 in tens of thousands of
-     launches). `CacheDB::from_path` now finishes the process-wide init on the
-     calling thread (a `std::sync::Once` around an in-memory open) before it
-     starts the eager-init thread, and the connection open does the same for
-     in-memory caches.
+     `cli/cache/cache_db.rs`). Each on-disk cache database opens its connection
+     on its own blocking thread at startup, so two threads could enter
+     `sqlite3_initialize()` together. The bundled SQLite's `sqlite3MutexInit()`
+     publishes `xMutexAlloc` after a barrier, but a thread that sees it set
+     reads `xMutexInit` with no barrier, so on arm64 it could call a stale NULL
+     pointer: an intermittent SIGSEGV about 20 ms after startup on Apple Silicon
+     (Quarto saw about 1 in tens of thousands of launches). `CacheDB::from_path`
+     now finishes the process-wide init on the calling thread (a
+     `std::sync::Once` around an in-memory open) before it starts the eager-init
+     thread, and the connection open does the same for in-memory caches.
      - User-facing note: an occasional crash at startup on macOS arm64 (pc 0,
        `EXC_BAD_ACCESS` on a tokio worker) is gone.
-     - Tests: `cache::cache_db::tests::from_path_initializes_sqlite_before_spawning`
+     - Tests:
+       `cache::cache_db::tests::from_path_initializes_sqlite_before_spawning`
        (in a fresh process, with the runtime's only blocking thread parked so
        the eager-init task can't run, `sqlite3_config` answers `SQLITE_MISUSE`
        once `from_path` returns: SQLite is initialized; without the fix it
@@ -14928,22 +14928,21 @@ where the changes are discussed.
 
 376. **`fix(node:fs)`: `existsSync()` / `exists()` answer `false` for a special
      path the grants don't reach, instead of throwing** (denoland/deno#37062;
-     runtime; `runtime/permissions/lib.rs`, `ext/node/ops/fs.rs`). A path
-     under `/proc`, `/dev` or `/sys` (on macOS `/dev`, on Windows a device
-     path) needs `--allow-all` (`/proc/*/environ` the whole env permission)
-     even when `--allow-read` grants it, and `node:fs.existsSync()` passed that
-     refusal on as `NotCapable`. Vite 8 probes
-     `/proc/sys/fs/binfmt_misc/WSLInterop` at startup, so `vite build` under
-     scoped permissions failed. Node's `existsSync()` never throws, and the
-     program can't open the path either way, so now it is `false`.
-     `PermissionsContainer::check_exists` runs `check_open`'s read check
-     unchanged (allow and deny scopes, the resolved-path check, a prompt) and
-     reports only the special-file refusal as absent: a path outside the
-     read grant or in a deny scope still throws. `fs.exists()` gets the same
-     answer instead of an unhandled rejection.
-     - User-facing note: `vite build` (Vite 8) runs under `--allow-read`
-       without `--allow-all`. `existsSync("/proc/self/cgroup")` is `false`
-       there, though the file exists; with `-A` it is `true`.
+     runtime; `runtime/permissions/lib.rs`, `ext/node/ops/fs.rs`). A path under
+     `/proc`, `/dev` or `/sys` (on macOS `/dev`, on Windows a device path) needs
+     `--allow-all` (`/proc/*/environ` the whole env permission) even when
+     `--allow-read` grants it, and `node:fs.existsSync()` passed that refusal on
+     as `NotCapable`. Vite 8 probes `/proc/sys/fs/binfmt_misc/WSLInterop` at
+     startup, so `vite build` under scoped permissions failed. Node's
+     `existsSync()` never throws, and the program can't open the path either
+     way, so now it is `false`. `PermissionsContainer::check_exists` runs
+     `check_open`'s read check unchanged (allow and deny scopes, the
+     resolved-path check, a prompt) and reports only the special-file refusal as
+     absent: a path outside the read grant or in a deny scope still throws.
+     `fs.exists()` gets the same answer instead of an unhandled rejection.
+     - User-facing note: `vite build` (Vite 8) runs under `--allow-read` without
+       `--allow-all`. `existsSync("/proc/self/cgroup")` is `false` there, though
+       the file exists; with `-A` it is `true`.
      - Tests: spec `node/fs_exists_special_paths` (`existsSync` and `exists`
        under `--allow-read`: `false` for a missing `/dev` device, `true` for
        `/dev/null`, and on Linux `false` for the issue's WSL probe and
@@ -14959,41 +14958,41 @@ where the changes are discussed.
      CLI; `libs/resolver/cjs/analyzer/mod.rs`, `cli/standalone/binary.rs`,
      `runtime/tokio_util.rs`). `deno compile` runs CJS export analysis over
      every embedded npm file, on the runtime's blocking-pool threads (2 MiB).
-     swc's parser and the analysis recurse once per nesting level, at 2 to
-     4 KiB a level (500 nested arrays fit in 2 MiB, 1000 don't), so 1000
-     nested array literals (or calls, objects,
-     ternaries, a long `a + b + …` or member chain, a nested generic) killed
-     the process: `thread 'tokio-runtime-worker' has overflowed its stack`. A
-     `deno run` that imports such a CJS module from ESM aborted the same way.
-     The depth limit is the same as 2.8.3's; 2.9.0 made it bite in two ways,
-     both measured with stock 2.8.3 and 2.9.0 on Linux: #35166 counts an npm
-     `.d.ts` as CJS from its package.json alone, so compile started parsing
-     every generated declaration file (2.8.3 skipped them when the package had
-     an `import` condition), and `deno desktop` (#33441) gave the blocking
-     pool an explicit 2 MiB stack in release builds, so the `RUST_MIN_STACK`
-     workaround stopped working. Now:
-     - the analysis (parse, analysis and drop of the AST) runs on its own
-       stack segment (`stacker::grow`, made per analysis and released after
-       it): 64 MiB on unix, 16 000 to 32 000 levels in a release build, where only
-       the pages it touches are committed; 16 MiB on Windows, where the segment
-       is a fiber whose whole stack is committed up front. V8 runs deeper
-       still (40 000 nested arrays through `require`), so a module beyond
-       that still aborts, as every module past 1000 levels did;
-     - compile skips declaration files (`.d.ts`, `.d.mts`, `.d.cts`): they
-       never run, so the runtime never asks for their exports;
+     swc's parser and the analysis recurse once per nesting level, at 2 to 4 KiB
+     a level (500 nested arrays fit in 2 MiB, 1000 don't), so 1000 nested array
+     literals (or calls, objects, ternaries, a long `a + b + …` or member chain,
+     a nested generic) killed the process:
+     `thread 'tokio-runtime-worker' has overflowed its stack`. A `deno run` that
+     imports such a CJS module from ESM aborted the same way. The depth limit is
+     the same as 2.8.3's; 2.9.0 made it bite in two ways, both measured with
+     stock 2.8.3 and 2.9.0 on Linux: #35166 counts an npm `.d.ts` as CJS from
+     its package.json alone, so compile started parsing every generated
+     declaration file (2.8.3 skipped them when the package had an `import`
+     condition), and `deno desktop` (#33441) gave the blocking pool an explicit
+     2 MiB stack in release builds, so the `RUST_MIN_STACK` workaround stopped
+     working. Now:
+     - the analysis (parse, analysis and drop of the AST) runs on its own stack
+       segment (`stacker::grow`, made per analysis and released after it): 64
+       MiB on unix, 16 000 to 32 000 levels in a release build, where only the
+       pages it touches are committed; 16 MiB on Windows, where the segment is a
+       fiber whose whole stack is committed up front. V8 runs deeper still (40
+       000 nested arrays through `require`), so a module beyond that still
+       aborts, as every module past 1000 levels did;
+     - compile skips declaration files (`.d.ts`, `.d.mts`, `.d.cts`): they never
+       run, so the runtime never asks for their exports;
      - a release build no longer sets the blocking pool's stack size, so
        `RUST_MIN_STACK` raises it again, as in 2.8.3 (debug builds keep 8 MiB).
      - User-facing note: `deno compile` of a project whose `node_modules` holds
        a deeply nested file, or a deeply nested generated `.d.ts`, completes.
      - Tests: spec `compile/deeply_nested_npm_files` (an npm package whose
        program-imported module is shallow, with a CJS file nothing imports
-       nested 5000 arrays deep and a `.d.ts` with a generic nested 200 000
-       deep: `deno compile` builds and the binary runs; on the base, a debug
-       build aborts with the overflow with both files and with the `.d.ts`
-       alone). Measured by hand, not as a test: a release 3.0.0-denext.13
-       aborts `deno run` that imports a CJS module 1000 arrays deep from ESM;
-       a debug build's V8 refuses about 2500 levels itself, before the debug
-       analysis stack (8 MiB) runs out, so a debug spec can't show it.
+       nested 5000 arrays deep and a `.d.ts` with a generic nested 200 000 deep:
+       `deno compile` builds and the binary runs; on the base, a debug build
+       aborts with the overflow with both files and with the `.d.ts` alone).
+       Measured by hand, not as a test: a release 3.0.0-denext.13 aborts
+       `deno run` that imports a CJS module 1000 arrays deep from ESM; a debug
+       build's V8 refuses about 2500 levels itself, before the debug analysis
+       stack (8 MiB) runs out, so a debug spec can't show it.
 
 378. **`fix(ext/http)`: `info.completed` rejects when an HTTP/1.1 streamed
      response doesn't reach its end** (runtime; `ext/http/http_next.rs`). Closes
@@ -15141,69 +15140,68 @@ where the changes are discussed.
      `pkg/` twin, so each resolution was made once per entry, and each one
      resolved and canonicalized the package folder again. Upstream's repro (a
      two-member workspace, both importing `npm:jose@5.10.0`, 30 export keys)
-     resolved jose's folder 744 times before the server was ready (3 scopes ×
-     4 entries × (2 + 30 × 2)), with `nodeModulesDir` `"auto"` or `"none"`
-     alike; on the reporter's monorepo 296,037 times. Now a scope builds them
-     the first time something asks (`prepare_cache`, auto-import aliasing of a
+     resolved jose's folder 744 times before the server was ready (3 scopes × 4
+     entries × (2 + 30 × 2)), with `nodeModulesDir` `"auto"` or `"none"` alike;
+     on the reporter's monorepo 296,037 times. Now a scope builds them the first
+     time something asks (`prepare_cache`, auto-import aliasing of a
      `node_modules` file, the import mapper), shared with that scope's request
      snapshots, and a build makes each (request, referrer, kind) resolution
-     once. `op_script_names`, which forced every scope with compiler options
-     to build them just to keep their JSR roots, now asks for the import map's
-     JSR roots only: the resolved npm roots are `file:` URLs and were always
-     dropped there. Results are unchanged (same entries, same insertion
-     order). This is the reporter's defect 3 (`ConfiguredDepResolutions` held
-     in a `OnceLock`) completed, and the redundancy behind defect 4 removed
-     instead of skipped: their `DENO_LSP_SKIP_EXPORT_RESOLUTIONS` gate turned
-     the export resolutions off and is not taken.
+     once. `op_script_names`, which forced every scope with compiler options to
+     build them just to keep their JSR roots, now asks for the import map's JSR
+     roots only: the resolved npm roots are `file:` URLs and were always dropped
+     there. Results are unchanged (same entries, same insertion order). This is
+     the reporter's defect 3 (`ConfiguredDepResolutions` held in a `OnceLock`)
+     completed, and the redundancy behind defect 4 removed instead of skipped:
+     their `DENO_LSP_SKIP_EXPORT_RESOLUTIONS` gate turned the export resolutions
+     off and is not taken.
      - Evidence (upstream's repro, rebuilt by hand; debug builds on Linux x64,
        `DENO_LOG=debug` lines `Resolved package folder`): 746 before, 744 of
-       them before "Server ready.", now 188 in all and none before it (126
-       with `nodeModulesDir: "none"`); its timings are within noise. A
-       40-member workspace (one `packages/*` glob, each member importing jose
-       and holding a 1,000-directory `.venv`), three interleaved runs on a
-       loaded 8-core machine: 203,362 folder resolutions, 203,360 of them
-       before "Server ready.", now 188; `initialized` to "Server ready." 21.2
-       / 23.6 / 25.8 s, now 1.09 / 1.13 / 0.94 s (with item 383's glob
-       pruning); `documentSymbol` and `definition` unchanged (3.4 to 4.0 s,
-       135 to 206 ms).
+       them before "Server ready.", now 188 in all and none before it (126 with
+       `nodeModulesDir: "none"`); its timings are within noise. A 40-member
+       workspace (one `packages/*` glob, each member importing jose and holding
+       a 1,000-directory `.venv`), three interleaved runs on a loaded 8-core
+       machine: 203,362 folder resolutions, 203,360 of them before "Server
+       ready.", now 188; `initialized` to "Server ready." 21.2 / 23.6 / 25.8 s,
+       now 1.09 / 1.13 / 0.94 s (with item 383's glob pruning); `documentSymbol`
+       and `definition` unchanged (3.4 to 4.0 s, 135 to 206 ms).
      - Tests: integration
-       `lsp::lsp_workspace_configured_npm_deps_resolve_lazily_once`
-       (two members importing `npm:@denotest/file-dts-dmts-dcts@1.0.0`, `.`
-       and three subpaths, installed into `node_modules`: no package-folder
-       resolution before "Server ready."; after opening a module and caching
-       from a member, each scope reached has resolved its configured
-       dependencies once each, at most 28 folder resolutions (one scope
-       resolving them per entry makes 32); on 3.0.0-denext.22 it made 96
-       before the server was ready: 3 scopes × 4 entries × (2 + 3 × 2)).
+       `lsp::lsp_workspace_configured_npm_deps_resolve_lazily_once` (two members
+       importing `npm:@denotest/file-dts-dmts-dcts@1.0.0`, `.` and three
+       subpaths, installed into `node_modules`: no package-folder resolution
+       before "Server ready."; after opening a module and caching from a member,
+       each scope reached has resolved its configured dependencies once each, at
+       most 28 folder resolutions (one scope resolving them per entry makes 32);
+       on 3.0.0-denext.22 it made 96 before the server was ready: 3 scopes × 4
+       entries × (2 + 3 × 2)).
      - Node tests enabled: none; no Node API changes.
 
-383. **`perf(lsp)`: workspace member globs don't walk member trees, and
-     requests share the npm resolution snapshot** (CLI; upstream
-     denoland/deno#36668; `libs/config/glob/mod.rs`,
-     `libs/config/glob/collector.rs`, `libs/resolver/npm/managed/resolution.rs`,
-     `cli/lsp/resolver.rs`). The reporter measured six defects and published
-     a patch for each as a diagnostic. Evaluated against this fork:
+383. **`perf(lsp)`: workspace member globs don't walk member trees, and requests
+     share the npm resolution snapshot** (CLI; upstream denoland/deno#36668;
+     `libs/config/glob/mod.rs`, `libs/config/glob/collector.rs`,
+     `libs/resolver/npm/managed/resolution.rs`, `cli/lsp/resolver.rs`). The
+     reporter measured six defects and published a patch for each as a
+     diagnostic. Evaluated against this fork:
      - Defect 1, taken (rederived): expanding member globs
        (`packages/*/deno.json`, from deno.json `workspace` and package.json
        `workspaces`) descended every matched member's whole tree, `.venv` and
-       build output included, pruning only `node_modules`, `.git` and the
-       vendor folder. The file collector now skips a directory no include
-       entry can match under (`FilePatterns::can_match_under_dir`, on the
-       existing `GlobPattern::can_match_under`, which `split_by_base` already
-       relies on): globs match with a literal separator and a literal leading
-       dot, so `*` can't reach below its segment; `**` and anything outside a
-       pattern's base stay candidates; negated entries add nothing; an
-       explicit path keeps its ancestors and descendants. This applies to
-       every collector walk with an include set (fmt, lint, test, bench, doc,
-       tsconfig roots), with the same files found.
+       build output included, pruning only `node_modules`, `.git` and the vendor
+       folder. The file collector now skips a directory no include entry can
+       match under (`FilePatterns::can_match_under_dir`, on the existing
+       `GlobPattern::can_match_under`, which `split_by_base` already relies on):
+       globs match with a literal separator and a literal leading dot, so `*`
+       can't reach below its segment; `**` and anything outside a pattern's base
+       stay candidates; negated entries add nothing; an explicit path keeps its
+       ancestors and descendants. This applies to every collector walk with an
+       include set (fmt, lint, test, bench, doc, tsconfig roots), with the same
+       files found.
      - Defect 3 (lazy dependency resolutions) and the redundancy behind defect
        4: item 382.
-     - Defect 6, taken: `NpmResolutionCell` holds its snapshot in a
-       `MaybeArc` (`snapshot_rc` / `set_snapshot_rc`; a cell only ever
-       replaces its snapshot whole), and the language server's per-request
-       resolver copy shares it instead of deep-cloning every scope's package
-       graph for every request. Seeding each scope with the whole lockfile
-       (the other half of defect 6) is unchanged.
+     - Defect 6, taken: `NpmResolutionCell` holds its snapshot in a `MaybeArc`
+       (`snapshot_rc` / `set_snapshot_rc`; a cell only ever replaces its
+       snapshot whole), and the language server's per-request resolver copy
+       shares it instead of deep-cloning every scope's package graph for every
+       request. Seeding each scope with the whole lockfile (the other half of
+       defect 6) is unchanged.
      - Defect 2, not taken: honouring `.gitignore` while collecting tsconfig
        `include` roots drops roots a project includes on purpose, such as
        Next.js's `.next/types/**/*.ts` (gitignored, listed in every Next
@@ -15211,18 +15209,18 @@ where the changes are discussed.
      - Defect 4's gate, not taken: it skips the export resolutions rather than
        removing their repetition (item 382 removes it).
      - Defect 5, not taken: making deno.json `workspace` bound membership
-       changes a tested contract (deno.json and package.json members are
-       unioned on purpose), as the reporter notes.
-     - Evidence: the 40-member workspace of item 382 opened 45,080
-       directories (44,994 inside members' `.venv`) through one
-       `documentSymbol`, now 960 (`strace -e openat`, `O_DIRECTORY`); the 874
-       `.venv` opens left are `walk_workspace`, which stops at 1,000 entries.
+       changes a tested contract (deno.json and package.json members are unioned
+       on purpose), as the reporter notes.
+     - Evidence: the 40-member workspace of item 382 opened 45,080 directories
+       (44,994 inside members' `.venv`) through one `documentSymbol`, now 960
+       (`strace -e openat`, `O_DIRECTORY`); the 874 `.venv` opens left are
+       `walk_workspace`, which stops at 1,000 entries.
      - Tests: `deno_config`'s
-       `glob::collector::test::member_globs_do_not_walk_member_trees`
-       (members from `packages/*/deno.json`, `apps/**/deno.json`, an explicit
-       path and a negated member: the same five found, and no read of a
-       member's `src`, `.venv` or `dist`; on 3.0.0-denext.22 it read all of
-       them), `deno_resolver`'s
+       `glob::collector::test::member_globs_do_not_walk_member_trees` (members
+       from `packages/*/deno.json`, `apps/**/deno.json`, an explicit path and a
+       negated member: the same five found, and no read of a member's `src`,
+       `.venv` or `dist`; on 3.0.0-denext.22 it read all of them),
+       `deno_resolver`'s
        `npm::managed::resolution::test::cells_share_a_snapshot_until_one_replaces_it`.
      - Node tests enabled: none; no Node API changes.
 
@@ -15231,39 +15229,38 @@ where the changes are discussed.
      denoland/deno#36768; `cli/tools/desktop.rs`). An `.msi` installs per
      machine under Program Files, and WebView2's default user data folder is
      `<exe>.WebView2` beside the executable, which the user can't write there:
-     `CreateCoreWebView2EnvironmentWithOptions` fails with `E_ACCESSDENIED`
-     and the window stays white. This fork already gives laufey the app id
-     (deno.json `desktop.app.identifier`, else `com.deno.desktop.<name>`) in
-     the packaged `laufey-launch.json`, and laufey then puts the folder in
-     `%LOCALAPPDATA%\<id>\WebView2`. An app
-     whose name sanitizes to nothing (all non-ASCII, or all punctuation) got
-     no id, and laufey kept the folder beside the exe. Such an app now gets
-     `com.deno.desktop.app-<12 hex digits of the name's SHA-256>`, stable
-     across builds and distinct per name; the same id goes to the `.msi`'s
-     deep-link registrations. No laufey change.
+     `CreateCoreWebView2EnvironmentWithOptions` fails with `E_ACCESSDENIED` and
+     the window stays white. This fork already gives laufey the app id
+     (deno.json `desktop.app.identifier`, else `com.deno.desktop.<name>`) in the
+     packaged `laufey-launch.json`, and laufey then puts the folder in
+     `%LOCALAPPDATA%\<id>\WebView2`. An app whose name sanitizes to nothing (all
+     non-ASCII, or all punctuation) got no id, and laufey kept the folder beside
+     the exe. Such an app now gets
+     `com.deno.desktop.app-<12 hex digits of the name's SHA-256>`, stable across
+     builds and distinct per name; the same id goes to the `.msi`'s deep-link
+     registrations. No laufey change.
      - User-facing note: a Windows desktop app installed by its `.msi` under
        Program Files opens its window whatever its name; web data lives in
        `%LOCALAPPDATA%\<app id>\WebView2`.
      - Tests:
        `tools::desktop::tests::windows_app_id_always_names_a_per_user_data_folder`
-       (names `___`, `ノート`, `メモ帳`, ` `, `""`: a valid reverse-DNS id,
+       (names `___`, `ノート`, `メモ帳`, ``, `""`: a valid reverse-DNS id,
        stable, distinct per name; on 3.0.0-denext.22 `___` had none).
      - Node tests enabled: none; no Node API changes.
 
-385. **`fix(cli)`: a path permission written back out keeps its commas
-     escaped** (port of Ende's addition to its fix for denoland/deno#37114,
-     theende/ende fd82be49cd, MIT; CLI only;
-     `cli/args/flags.rs`). `deno install` (the global shim), `deno x` and
-     `process.execArgv` (item 189, which `child_process.fork()` passes to a
-     child Deno) hand the started program the command's permission flags by
-     writing them back out. Since item 285 a doubled comma escapes a comma in
-     a path again (`--allow-read=a,,b` is the path `a,b`), but `join_paths`
-     wrote the path as it was, so the program read `a,b` as the two paths `a`
-     and `b`. `join_paths` now doubles each comma, and `--ignore-read` goes
-     through it too.
-     - User-facing note: `deno install`, `deno x` and a forked child Deno keep
-       a path permission that contains a comma as one path (3.0.0-denext.14
-       to 3.0.0-denext.22 split it; earlier releases refused the flag).
+385. **`fix(cli)`: a path permission written back out keeps its commas escaped**
+     (port of Ende's addition to its fix for denoland/deno#37114, theende/ende
+     fd82be49cd, MIT; CLI only; `cli/args/flags.rs`). `deno install` (the global
+     shim), `deno x` and `process.execArgv` (item 189, which
+     `child_process.fork()` passes to a child Deno) hand the started program the
+     command's permission flags by writing them back out. Since item 285 a
+     doubled comma escapes a comma in a path again (`--allow-read=a,,b` is the
+     path `a,b`), but `join_paths` wrote the path as it was, so the program read
+     `a,b` as the two paths `a` and `b`. `join_paths` now doubles each comma,
+     and `--ignore-read` goes through it too.
+     - User-facing note: `deno install`, `deno x` and a forked child Deno keep a
+       path permission that contains a comma as one path (3.0.0-denext.14 to
+       3.0.0-denext.22 split it; earlier releases refused the flag).
      - Tests: `args::flags::tests::to_permission_args_escapes_commas_in_paths`
        (every path flag with a doubled comma, re-serialized and parsed again:
        the same permissions, `--allow-read=a,,b,c` written back as is).
@@ -15275,8 +15272,8 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381) are what the prebuilt
-`libdenort` carries. The CLI-side parts (for example writing
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381) are what the
+prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.
