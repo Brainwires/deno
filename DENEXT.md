@@ -14586,6 +14586,29 @@ where the changes are discussed.
      - Node tests enabled: none new; `sequential/test-cpu-prof-kill.js` was
        already enabled and is the flake this removes.
 
+375. **`fix(cli)`: SQLite's first-time initialization runs once, before the
+     cache databases open in parallel** (port of Ende's fix for
+     denoland/deno#37045, theende/ende ddc7a450c8, MIT; CLI only;
+     `cli/cache/cache_db.rs`). Each on-disk cache database opens its
+     connection on its own blocking thread at startup, so two threads could
+     enter `sqlite3_initialize()` together. The bundled SQLite's
+     `sqlite3MutexInit()` publishes `xMutexAlloc` after a barrier, but a thread
+     that sees it set reads `xMutexInit` with no barrier, so on arm64 it could
+     call a stale NULL pointer: an intermittent SIGSEGV about 20 ms after
+     startup on Apple Silicon (Quarto saw about 1 in tens of thousands of
+     launches). `CacheDB::from_path` now finishes the process-wide init on the
+     calling thread (a `std::sync::Once` around an in-memory open) before it
+     starts the eager-init thread, and the connection open does the same for
+     in-memory caches.
+     - User-facing note: an occasional crash at startup on macOS arm64 (pc 0,
+       `EXC_BAD_ACCESS` on a tokio worker) is gone.
+     - Tests: `cache::cache_db::tests::from_path_initializes_sqlite_before_spawning`
+       (in a fresh process, with the runtime's only blocking thread parked so
+       the eager-init task can't run, `sqlite3_config` answers `SQLITE_MISUSE`
+       once `from_path` returns: SQLite is initialized; without the fix it
+       answers `SQLITE_OK`, every time). Ende's version checked the same thing
+       without parking the thread, so it could pass without the fix.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
