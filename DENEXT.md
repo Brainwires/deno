@@ -14971,13 +14971,20 @@ where the changes are discussed.
      condition), and `deno desktop` (#33441) gave the blocking pool an explicit
      2 MiB stack in release builds, so the `RUST_MIN_STACK` workaround stopped
      working. Now:
-     - the analysis (parse, analysis and drop of the AST) runs on its own stack
-       segment (`stacker::grow`, made per analysis and released after it): 64
-       MiB on unix, 16 000 to 32 000 levels in a release build, where only the
-       pages it touches are committed; 16 MiB on Windows, where the segment is a
-       fiber whose whole stack is committed up front. V8 runs deeper still (40
-       000 nested arrays through `require`), so a module beyond that still
-       aborts, as every module past 1000 levels did;
+     - the analysis (parse, analysis and drop of the AST) runs on a few
+       long-lived threads (up to the CPU count, at most 8, started on first use)
+       with a 256 MiB stack, reserved rather than committed on every OS: at
+       least 64 000 levels in a release build, more than V8 runs (40 000 nested
+       arrays through `require`), and about 20 000 in a debug build, whose
+       frames take 11 to 13 KiB a level. Handing a job to them costs about 5 µs
+       more than the blocking-pool hop it replaces (18.6 µs against 13.2 µs per
+       round trip, Linux x64). A first version switched stacks on the
+       blocking-pool thread with `stacker::grow` (64 MiB, 16 MiB on Windows);
+       the train's debug runs showed it too small (5000 levels need about 65
+       MiB: a SIGBUS on macOS arm64, an access violation on Windows), and on
+       Windows stacker's fiber left the fiber's stack bounds as the thread's, so
+       swc's own `stacker::maybe_grow` on that tokio thread later panicked
+       ("attempt to subtract with overflow") in unrelated CJS analyses;
      - compile skips declaration files (`.d.ts`, `.d.mts`, `.d.cts`): they never
        run, so the runtime never asks for their exports;
      - a release build no longer sets the blocking pool's stack size, so

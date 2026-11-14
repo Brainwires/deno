@@ -198,24 +198,92 @@ fn should_skip_cjs_analysis(media_type: MediaType, source: &str) -> bool {
   is_definitely_non_script || (media_type == MediaType::Unknown && looks_binary)
 }
 
-/// The stack CJS export analysis runs on. swc's parser and the analysis
-/// visitors recurse once per nesting level of the source, 2 to 4 KiB a
-/// level in a release build (2 MiB holds 500 nested arrays but not 1000), so
-/// a module V8 runs fine overflowed the 2 MiB blocking-pool thread and
-/// aborted the process: `deno compile` analyzes every embedded npm file, so
-/// one deep file anywhere in `node_modules` killed it (denoland/deno#36746).
-/// The analysis runs on its own stack segment instead, made for each
-/// analysis and released after it: 64 MiB (16 000 to 32 000 levels) on unix,
-/// where only the pages it touches are committed; 16 MiB on Windows, where
-/// the segment is a fiber whose whole stack is committed up front.
-#[cfg(all(feature = "sync", not(windows)))]
-const ANALYSIS_STACK_SIZE: usize = 64 * 1024 * 1024;
-#[cfg(all(feature = "sync", windows))]
-const ANALYSIS_STACK_SIZE: usize = 16 * 1024 * 1024;
-
+/// The threads CJS export analysis runs on. swc's parser and the analysis
+/// visitors recurse once per nesting level of the source: 2 to 4 KiB a level
+/// in a release build, 11 to 13 KiB in a debug build. A module V8 runs fine
+/// overflowed the 2 MiB blocking-pool thread and aborted the process: `deno
+/// compile` analyzes every embedded npm file, so one deep file anywhere in
+/// `node_modules` killed it (denoland/deno#36746).
+///
+/// The analysis runs on a few long-lived threads with a 256 MiB stack
+/// instead: at least 64 000 levels in a release build (V8 itself runs
+/// 40 000 nested arrays) and about 20 000 in a debug build. The stack is
+/// reserved, not committed: only the pages an analysis touches are backed by
+/// memory, on every OS (`std::thread` passes Windows'
+/// `STACK_SIZE_PARAM_IS_A_RESERVATION`).
+///
+/// These are real threads, not a stack switched to on the blocking-pool
+/// thread: `stacker::grow` there made the analysis's stack bounds the
+/// thread's own for stacker's later checks on Windows (its fiber records
+/// the thread's limit from inside the fiber the first time), so swc's
+/// `stacker::maybe_grow` on that tokio thread computed its remaining stack
+/// against a freed fiber and panicked ("attempt to subtract with overflow").
 #[cfg(feature = "sync")]
-fn run_on_analysis_stack<R>(f: impl FnOnce() -> R) -> R {
-  stacker::grow(ANALYSIS_STACK_SIZE, f)
+mod analysis_threads {
+  use std::sync::Mutex;
+  use std::sync::OnceLock;
+  use std::sync::mpsc;
+
+  const STACK_SIZE: usize = 256 * 1024 * 1024;
+  const MAX_THREADS: usize = 8;
+
+  type Job = Box<dyn FnOnce() + Send>;
+
+  static POOL: OnceLock<Option<mpsc::Sender<Job>>> = OnceLock::new();
+
+  fn start() -> Option<mpsc::Sender<Job>> {
+    let (tx, rx) = mpsc::channel::<Job>();
+    #[allow(clippy::disallowed_types, reason = "shared by std threads")]
+    let rx = std::sync::Arc::new(Mutex::new(rx));
+    let count = std::thread::available_parallelism()
+      .map(|n| n.get())
+      .unwrap_or(1)
+      .clamp(1, MAX_THREADS);
+    let mut started = 0;
+    for i in 0..count {
+      let rx = rx.clone();
+      let spawned = std::thread::Builder::new()
+        .name(format!("cjs-analysis-{i}"))
+        .stack_size(STACK_SIZE)
+        .spawn(move || {
+          loop {
+            let job = rx.lock().unwrap().recv();
+            match job {
+              Ok(job) => job(),
+              Err(_) => return,
+            }
+          }
+        });
+      if spawned.is_ok() {
+        started += 1;
+      }
+    }
+    (started > 0).then_some(tx)
+  }
+
+  /// Runs `f` on an analysis thread and resolves to its result (a panic in
+  /// `f` resumes here). When no analysis thread could be started, `f` runs
+  /// on the blocking pool, as before.
+  pub async fn run<R: Send + 'static>(
+    f: impl FnOnce() -> R + Send + 'static,
+  ) -> R {
+    let (result_tx, result_rx) = futures::channel::oneshot::channel();
+    let job: Job = Box::new(move || {
+      let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+      let _ = result_tx.send(result);
+    });
+    let unsent = match POOL.get_or_init(start) {
+      Some(tx) => tx.send(job).err().map(|err| err.0),
+      None => Some(job),
+    };
+    if let Some(job) = unsent {
+      crate::rt::spawn_blocking(job).await.unwrap();
+    }
+    match result_rx.await.expect("the analysis job ran") {
+      Ok(result) => result,
+      Err(panic) => std::panic::resume_unwind(panic),
+    }
+  }
 }
 
 pub struct DenoCjsCodeAnalyzer<TSys: DenoCjsCodeAnalyzerSys> {
@@ -308,9 +376,7 @@ impl<TSys: DenoCjsCodeAnalyzerSys> DenoCjsCodeAnalyzer<TSys> {
 
       #[cfg(feature = "sync")]
       {
-        crate::rt::spawn_blocking(move || run_on_analysis_stack(analyze))
-          .await
-          .unwrap()?
+        analysis_threads::run(analyze).await?
       }
       #[cfg(not(feature = "sync"))]
       analyze()?
@@ -399,9 +465,7 @@ impl<TSys: DenoCjsCodeAnalyzerSys> CjsCodeAnalyzer
       Ok(parsed.analyze_member_export_props())
     };
     #[cfg(feature = "sync")]
-    let map = crate::rt::spawn_blocking(move || run_on_analysis_stack(analyze))
-      .await
-      .unwrap()?;
+    let map = analysis_threads::run(analyze).await?;
     #[cfg(not(feature = "sync"))]
     let map = analyze()?;
 
