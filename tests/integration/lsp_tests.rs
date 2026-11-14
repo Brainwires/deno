@@ -9732,6 +9732,100 @@ fn lsp_npm_completions_auto_import_and_quick_fix_no_import_map() {
   client.shutdown();
 }
 
+// denoland/deno#36662, #36668: every workspace member is a resolver scope,
+// and each one resolved every configured npm dependency (and each of its
+// export subpaths, for both resolution kinds) at configuration time, once per
+// import map entry: the workspace import map repeats each member's entries in
+// every scope, and a bare `pkg` entry comes with its `pkg/` twin. Nothing is
+// resolved at configuration time now, and the first request that needs a
+// scope's configured dependencies resolves each one once.
+#[test(timeout = 300)]
+fn lsp_workspace_configured_npm_deps_resolve_lazily_once() {
+  let context = TestContextBuilder::new()
+    .use_http_server()
+    .use_temp_cwd()
+    .add_npm_env_vars()
+    .build();
+  let temp_dir = context.temp_dir();
+  temp_dir.write(
+    "deno.json",
+    json!({ "workspace": ["./a", "./b"], "nodeModulesDir": "auto" })
+      .to_string(),
+  );
+  for member in ["a", "b"] {
+    temp_dir.write(
+      format!("{member}/deno.json"),
+      json!({
+        "name": format!("@repro/{member}"),
+        "version": "0.0.1",
+        "exports": "./mod.ts",
+        "imports": {
+          "pkg": "npm:@denotest/file-dts-dmts-dcts@1.0.0",
+        },
+      })
+      .to_string(),
+    );
+    temp_dir.write(
+      format!("{member}/mod.ts"),
+      "import * as pkg from \"pkg\";\nexport const c = pkg;\n",
+    );
+  }
+  temp_dir.write(
+    "main.ts",
+    "import { c as a } from \"./a/mod.ts\";\nimport { c as b } from \"./b/mod.ts\";\nexport const both = [a, b];\n",
+  );
+  context
+    .new_command()
+    .args("install")
+    .run()
+    .skip_output_check();
+
+  let pkg_folder_line =
+    "Resolved package folder of @denotest/file-dts-dmts-dcts@1.0.0";
+  let mut client = context.new_lsp_command().log_debug().build();
+  client.initialize_default();
+  // The configuration tree (one scope per member, plus the root) is loaded
+  // before the server reports itself ready.
+  let mut at_config_load = 0;
+  client.wait_until_stderr_line(|line| {
+    if line.contains(pkg_folder_line) {
+      at_config_load += 1;
+    }
+    line.contains("Server ready.")
+  });
+  assert_eq!(at_config_load, 0);
+
+  // Opening a module and caching from a member make the scopes they reach
+  // resolve their configured dependencies: per scope the package and its
+  // three export subpaths, each for both resolution kinds, once (8), not once
+  // per import map entry (4 x 8). Three scopes at most, plus the graph's own
+  // resolutions. Caching ends by refreshing the configuration tree.
+  let main_uri = url_to_uri(&temp_dir.url().join("main.ts").unwrap()).unwrap();
+  client.did_open(json!({
+    "textDocument": {
+      "uri": main_uri,
+      "languageId": "typescript",
+      "version": 1,
+      "text": temp_dir.read_to_string("main.ts"),
+    },
+  }));
+  client.cache_specifier(
+    url_to_uri(&temp_dir.url().join("a/mod.ts").unwrap()).unwrap(),
+  );
+  let mut after_requests = 0;
+  client.wait_until_stderr_line(|line| {
+    if line.contains(pkg_folder_line) {
+      after_requests += 1;
+    }
+    line.contains("Refreshing configuration tree (post_cache)")
+  });
+  assert!(
+    (1..=3 * 8 + 4).contains(&after_requests),
+    "{after_requests} package folder resolutions"
+  );
+  client.shutdown();
+}
+
 #[test(timeout = 300)]
 fn lsp_npm_auto_import_and_quick_fix_byonm() {
   let context = TestContextBuilder::new()

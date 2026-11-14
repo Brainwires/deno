@@ -14586,6 +14586,53 @@ where the changes are discussed.
      - Node tests enabled: none new; `sequential/test-cpu-prof-kill.js` was
        already enabled and is the flake this removes.
 
+375. **`perf(lsp)`: a workspace's configured npm dependencies are resolved when
+     a request needs them, each once** (CLI; upstream denoland/deno#36662;
+     `cli/lsp/resolver.rs`, `cli/lsp/tsc.rs`). Every workspace member is a
+     resolver scope, and each scope resolved its configured npm dependencies
+     (import map and package.json: the package for both resolution kinds, then
+     every non-wildcard `exports` subpath for both) when the configuration
+     loaded, used or not. The workspace import map repeats every member's
+     entries in each member's scope, and a bare `pkg` entry comes with its
+     `pkg/` twin, so each resolution was made once per entry, and each one
+     resolved and canonicalized the package folder again. Upstream's repro (a
+     two-member workspace, both importing `npm:jose@5.10.0`, 30 export keys)
+     resolved jose's folder 744 times before the server was ready (3 scopes ×
+     4 entries × (2 + 30 × 2)), with `nodeModulesDir` `"auto"` or `"none"`
+     alike; on the reporter's monorepo 296,037 times. Now a scope builds them
+     the first time something asks (`prepare_cache`, auto-import aliasing of a
+     `node_modules` file, the import mapper), shared with that scope's request
+     snapshots, and a build makes each (request, referrer, kind) resolution
+     once. `op_script_names`, which forced every scope with compiler options
+     to build them just to keep their JSR roots, now asks for the import map's
+     JSR roots only: the resolved npm roots are `file:` URLs and were always
+     dropped there. Results are unchanged (same entries, same insertion
+     order). This is the reporter's defect 3 (`ConfiguredDepResolutions` held
+     in a `OnceLock`) completed, and the redundancy behind defect 4 removed
+     instead of skipped: their `DENO_LSP_SKIP_EXPORT_RESOLUTIONS` gate turned
+     the export resolutions off and is not taken.
+     - Evidence (upstream's repro, rebuilt by hand; debug builds on Linux x64,
+       `DENO_LOG=debug` lines `Resolved package folder`): 746 before, 744 of
+       them before "Server ready.", now 188 in all and none before it (126
+       with `nodeModulesDir: "none"`); its timings are within noise. A
+       40-member workspace (one `packages/*` glob, each member importing jose
+       and holding a 1,000-directory `.venv`), three interleaved runs on a
+       loaded 8-core machine: 203,362 folder resolutions, 203,360 of them
+       before "Server ready.", now 188; `initialized` to "Server ready." 21.2
+       / 23.6 / 25.8 s, now 1.09 / 1.13 / 0.94 s (with item 376's glob
+       pruning); `documentSymbol` and `definition` unchanged (3.4 to 4.0 s,
+       135 to 206 ms).
+     - Tests: integration
+       `lsp::lsp_workspace_configured_npm_deps_resolve_lazily_once`
+       (two members importing `npm:@denotest/file-dts-dmts-dcts@1.0.0`, `.`
+       and three subpaths, installed into `node_modules`: no package-folder
+       resolution before "Server ready."; after opening a module and caching
+       from a member, each scope reached has resolved its configured
+       dependencies once each, at most 28 folder resolutions (one scope
+       resolving them per entry makes 32); on 3.0.0-denext.22 it made 96
+       before the server was ready: 3 scopes × 4 entries × (2 + 3 × 2)).
+     - Node tests enabled: none; no Node API changes.
+
 377. **`fix(desktop)`: every packaged Windows app has an app id, so WebView2
      keeps its data in the per-user app data folder** (CLI; upstream
      denoland/deno#36768; `cli/tools/desktop.rs`). An `.msi` installs per

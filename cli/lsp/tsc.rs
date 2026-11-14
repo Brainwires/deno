@@ -5618,12 +5618,10 @@ fn op_script_names(state: &mut OpState) -> ScriptNames {
       .state_snapshot
       .resolver
       .get_scoped_resolver(scope.as_deref());
-    for specifier in scoped_resolver.configured_auto_import_roots() {
-      if specifier.scheme() != "jsr"
-        && !specifier.as_str().starts_with(jsr_url().as_str())
-      {
-        continue;
-      }
+    // Only the JSR roots are scripts; asking for just those keeps this from
+    // resolving every scope's configured npm dependencies, which nothing here
+    // uses (denoland/deno#36668).
+    for specifier in scoped_resolver.configured_jsr_auto_import_roots() {
       let referrer = compiler_options_data
         .workspace_dir_or_source_url
         .as_deref()
