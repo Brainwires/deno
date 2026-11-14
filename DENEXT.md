@@ -15250,6 +15250,24 @@ where the changes are discussed.
        stable, distinct per name; on 3.0.0-denext.22 `___` had none).
      - Node tests enabled: none; no Node API changes.
 
+385. **`fix(cli)`: a path permission written back out keeps its commas
+     escaped** (port of Ende's addition to its fix for denoland/deno#37114,
+     theende/ende fd82be49cd, MIT; CLI only;
+     `cli/args/flags.rs`). `deno install` (the global shim), `deno x` and
+     `process.execArgv` (item 189, which `child_process.fork()` passes to a
+     child Deno) hand the started program the command's permission flags by
+     writing them back out. Since item 285 a doubled comma escapes a comma in
+     a path again (`--allow-read=a,,b` is the path `a,b`), but `join_paths`
+     wrote the path as it was, so the program read `a,b` as the two paths `a`
+     and `b`. `join_paths` now doubles each comma, and `--ignore-read` goes
+     through it too.
+     - User-facing note: `deno install`, `deno x` and a forked child Deno keep
+       a path permission that contains a comma as one path (3.0.0-denext.14
+       to 3.0.0-denext.22 split it; earlier releases refused the flag).
+     - Tests: `args::flags::tests::to_permission_args_escapes_commas_in_paths`
+       (every path flag with a doubled comma, re-serialized and parsed again:
+       the same permissions, `--allow-read=a,,b,c` written back as is).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

@@ -56,10 +56,15 @@ pub static UPGRADE_USAGE: &str = cstr!(
   <bold>deno upgrade</> <p(245)>pr 12345</>"
 );
 
+/// Join paths for a path permission flag, doubling each comma in a path so
+/// the parser reads it back as one path (`a,b` is written `a,,b`). Without
+/// it `deno install`, `deno x` and `process.execArgv` handed the started
+/// program the path `a,b` as the two paths `a` and `b`. Ported from Ende
+/// (theende/ende fd82be49cd, MIT).
 fn join_paths(allowlist: &[String], d: &str) -> String {
   allowlist
     .iter()
-    .map(|path| path.to_string())
+    .map(|path| path.replace(',', ",,"))
     .collect::<Vec<String>>()
     .join(d)
 }
@@ -327,7 +332,7 @@ impl FlagsExt for Flags {
         args.push("--ignore-read".to_string());
       }
       Some(ignorelist) => {
-        let s = format!("--ignore-read={}", ignorelist.join(","));
+        let s = format!("--ignore-read={}", join_paths(ignorelist, ","));
         args.push(s);
       }
       _ => {}
@@ -1266,6 +1271,37 @@ mod tests {
         "{args:?}"
       );
     }
+  }
+
+  /// `deno install`, `deno x` and `process.execArgv` re-serialize the
+  /// permission flags, so a path containing a comma must be escaped again,
+  /// or it reparses as two paths (ported from Ende, theende/ende fd82be49cd).
+  #[test]
+  fn to_permission_args_escapes_commas_in_paths() {
+    let flags = flags_from_vec(svec![
+      "deno",
+      "run",
+      "--allow-read=a,,b,c",
+      "--deny-read=d,,e",
+      "--ignore-read=f,,g",
+      "--allow-write=h,,i",
+      "--deny-write=j,,k",
+      "--allow-ffi=l,,m",
+      "--deny-ffi=n,,o",
+      "script.ts"
+    ])
+    .unwrap();
+    assert_eq!(flags.permissions.allow_read, Some(svec!["a,b", "c"]));
+    let mut args = svec!["deno", "run"];
+    args.extend(flags.to_permission_args().into_iter().map(OsString::from));
+    args.push("script.ts".into());
+    let reparsed = flags_from_vec(args).unwrap();
+    assert_eq!(reparsed.permissions, flags.permissions);
+    assert!(
+      flags
+        .to_permission_args()
+        .contains(&"--allow-read=a,,b,c".to_string())
+    );
   }
 
   #[test]
