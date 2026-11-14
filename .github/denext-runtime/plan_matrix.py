@@ -45,7 +45,14 @@ Prints the JSON list of targets on stdout. Each entry has:
   caches and artifacts are named after it; the overflow builds there,
   natively), and `gui_runner` is unchanged: the jobs that launch the app
   (package, e2e_fork) stay where they were. The x86_64 legs then take the
-  arm64 pool's slots like its own.
+  arm64 pool's slots like its own, and when that pool is full they fall back
+  to the mac-x64 pool (`runner_fallback`, RUNNER_MACOS_X64) while it has a
+  free slot, before the image: the MacBook builds them natively, as the
+  image would (rosetta_tools.sh writes no wrappers on an Intel Mac). In run
+  43519114893 every x86_64 leg went to macos-15-intel while the mac-x64
+  pool sat idle.
+- `runner_fallback` (a rosetta target only, when RUNNER_MACOS_X64 names a
+  pool): the second pool its build jobs try before the image.
 - `runs_on`: {job: runs-on} for this run, each job's pool above or, for the
   overflow, the image (`os`). The jobs read it first (`matrix.runs_on.cli ||
   matrix.runner || matrix.os`).
@@ -60,11 +67,12 @@ value is fresh and lists the label; none when it marks the pool not ok or
 paused; else the slot count variable (RUNNER_*_SLOTS, default 1). Then, the
 jobs in dependency order:
 
-- a job whose `needs` (same target) held a slot of its pool takes that slot
-  over: it starts the moment that job ends and frees it, so it waits for
-  nothing;
-- else it takes a free slot, if one is left;
-- else the image: on the pool it would only wait for a slot.
+- a job whose `needs` (same target) held a slot of its pool (or of its
+  `runner_fallback` pool) takes that slot over: it starts the moment that job
+  ends and frees it, so it waits for nothing;
+- else it takes a free slot of its pool, if one is left;
+- else a free slot of its `runner_fallback` pool, if it has one;
+- else the image: on a pool it would only wait for a slot.
 
 The jobs that start together (after setup) take the free slots first those
 with the longest chain of later jobs on the same pool (denort bin, whose cli
@@ -201,22 +209,33 @@ def allocate(targets, env):
     free = {}
     held = {}  # (target index, job): the leg holds a slot not yet passed on
     for _, _, ti, _, t, k, label in legs:
-        pool = label[k]
-        on_pool = False
-        if pool is not None:
+        # The pools this leg may run on, in order: (label, runs-on).
+        candidates = []
+        if label[k] is not None:
+            candidates.append((label[k], t[field[k]]))
+        fallback = t.get("runner_fallback") if field[k] == "runner" else None
+        if fallback is not None:
+            fl = _label(fallback)
+            if fl is not None and fl != label[k]:
+                candidates.append((fl, fallback))
+        chosen = None
+        for pool, runner in candidates:
             heir = next((n for n in needs[k] if held.get((ti, n)) == pool), None)
             if heir is not None:
                 del held[(ti, heir)]
-                on_pool = True
-            else:
+                chosen = (pool, runner)
+                break
+        if chosen is None:
+            for pool, runner in candidates:
                 if pool not in free:
                     free[pool] = free_slots(pool, env, pools)
                 if free[pool] > 0:
                     free[pool] -= 1
-                    on_pool = True
-        if on_pool:
-            held[(ti, k)] = pool
-        t["runs_on"][k] = t[field[k]] if on_pool else t["os"]
+                    chosen = (pool, runner)
+                    break
+        if chosen is not None:
+            held[(ti, k)] = chosen[0]
+        t["runs_on"][k] = chosen[1] if chosen is not None else t["os"]
     for t in targets:
         t["runs_on"] = {k: t["runs_on"][k] for k, _, _ in jobs}
     return targets
@@ -234,12 +253,17 @@ def x64_on_arm(env):
 
 def apply_rosetta(targets, env):
     """Sets each target's `rosetta`; such a target's `runner` becomes the
-    arm64 pool. Before allocate(), so its legs take that pool's slots."""
+    arm64 pool, and its `runner_fallback` the mac-x64 pool when
+    RUNNER_MACOS_X64 names one. Before allocate(), so its legs take those
+    pools' slots."""
     on = x64_on_arm(env)
     for t in targets:
         t["rosetta"] = on and t["target"] == "x86_64-apple-darwin"
         if t["rosetta"]:
+            native = t["runner"]
             t["runner"] = _runner(env.get("RUNNER_MACOS_ARM", ""), "macos-15")
+            if _label(native) is not None:
+                t["runner_fallback"] = native
     return targets
 
 

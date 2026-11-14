@@ -153,9 +153,12 @@ class Rosetta(unittest.TestCase):
 
     def test_the_x64_legs_share_the_arm_slots(self):
         # Two slots: arm64's chains come first (lower target index at equal
-        # depth and chain); the x64 legs that would wait overflow to their
-        # image (macos-15-intel), which builds them natively.
-        m = self.plan(MACOS_X64_ON_ARM="1", RUNNER_MACOS_ARM_SLOTS="2")
+        # depth and chain); with no mac-x64 slot the x64 legs that would wait
+        # overflow to their image (macos-15-intel), which builds them
+        # natively.
+        m = self.plan(
+            MACOS_X64_ON_ARM="1", RUNNER_MACOS_ARM_SLOTS="2", RUNNER_MACOS_X64_SLOTS="0"
+        )
         x64 = m["x86_64-apple-darwin"]
         arm = m["aarch64-apple-darwin"]
         self.assertEqual(arm["runs_on"]["denort"], ARM)
@@ -163,6 +166,66 @@ class Rosetta(unittest.TestCase):
         self.assertEqual(x64["runs_on"]["denort"], "macos-15-intel")
         self.assertEqual(x64["runs_on"]["denort_bin"], "macos-15-intel")
         self.assertEqual(x64["runs_on"]["cli"], "macos-15-intel")
+
+    def test_arm_full_falls_back_to_the_free_x64_pool(self):
+        # Run 43519114893: the mac-arm pool full, the mac-x64 pool (one slot)
+        # idle, and every x86_64 build leg went to macos-15-intel. The x64
+        # pool's slot now takes denort bin and passes it to cli; denort,
+        # which would only wait for it, takes the image.
+        m = self.plan(MACOS_X64_ON_ARM="1", RUNNER_MACOS_ARM_SLOTS="2")
+        x64 = m["x86_64-apple-darwin"]
+        self.assertTrue(x64["rosetta"])
+        self.assertEqual(x64["runner"], ARM)
+        self.assertEqual(x64["runner_fallback"], X64)
+        self.assertEqual(x64["runs_on"]["denort_bin"], X64)
+        self.assertEqual(x64["runs_on"]["cli"], X64)
+        self.assertEqual(x64["runs_on"]["denort"], "macos-15-intel")
+        arm = m["aarch64-apple-darwin"]
+        self.assertEqual(arm["runs_on"]["denort"], ARM)
+        self.assertEqual(arm["runs_on"]["denort_bin"], ARM)
+
+    def test_arm_full_by_health_and_x64_free_by_health(self):
+        h = health({
+            "denext-macos-arm64": entry(slots=2, busy=2, healthy_slots=2),
+            "denext-macos-x64": entry(slots=1, busy=0, healthy_slots=1),
+        })
+        x64 = self.plan(MACOS_X64_ON_ARM="1", POOL_HEALTH=h)["x86_64-apple-darwin"]
+        self.assertEqual(x64["runs_on"]["denort_bin"], X64)
+        self.assertEqual(x64["runs_on"]["cli"], X64)
+        self.assertEqual(x64["runs_on"]["denort"], "macos-15-intel")
+
+    def test_both_pools_full_is_the_image(self):
+        h = health({
+            "denext-macos-arm64": entry(slots=2, busy=2, healthy_slots=2),
+            "denext-macos-x64": entry(slots=1, busy=1, healthy_slots=1),
+        })
+        x64 = self.plan(MACOS_X64_ON_ARM="1", POOL_HEALTH=h)["x86_64-apple-darwin"]
+        self.assertEqual(on_pool(x64), [])
+
+    def test_arm_free_keeps_the_arm_pool_first(self):
+        m = self.plan(MACOS_X64_ON_ARM="1", RUNNER_MACOS_ARM_SLOTS="4")
+        x64 = m["x86_64-apple-darwin"]
+        for job in ("denort", "denort_bin", "cli"):
+            self.assertEqual(x64["runs_on"][job], ARM, job)
+
+    def test_an_x64_gui_pool_takes_the_launch_jobs(self):
+        # RUNNER_MACOS_X64_GUI naming the mac-x64 pool: package and e2e_fork
+        # run there while it has a slot (denort, on the image, holds none).
+        m = self.plan(
+            MACOS_X64_ON_ARM="1",
+            RUNNER_MACOS_ARM_SLOTS="4",
+            RUNNER_MACOS_X64_GUI=POOLS["RUNNER_MACOS_X64"],
+        )
+        x64 = m["x86_64-apple-darwin"]
+        self.assertEqual(x64["runs_on"]["package"], X64)
+        self.assertEqual(x64["runs_on"]["e2e_fork"], X64)
+
+    def test_no_x64_pool_means_no_fallback(self):
+        env = {"TARGETS": "all", "RUNNER_MACOS_ARM": POOLS["RUNNER_MACOS_ARM"],
+               "MACOS_X64_ON_ARM": "1", "RUNNER_MACOS_ARM_SLOTS": "2"}
+        x64 = by_target(plan_matrix.plan(env))["x86_64-apple-darwin"]
+        self.assertNotIn("runner_fallback", x64)
+        self.assertEqual(on_pool(x64), [])
 
     def test_spellings(self):
         for on in ("1", "true", "ON", " yes "):
