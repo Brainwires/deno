@@ -4692,6 +4692,147 @@ Deno.test(
   },
 );
 
+// `info.completed` settles from what reached the client, not from the body
+// writer ending: https://github.com/denoland/deno/issues/37110 (HTTP/1.1
+// streamed responses resolved it when the client went away mid-stream or the
+// body source errored). Tests adapted from denoland/deno#37111 (kairosci).
+function completedOutcome(info: Deno.ServeHandlerInfo): Promise<string> {
+  return info.completed.then(
+    () => "resolved",
+    (e) => `rejected ${e.name}`,
+  );
+}
+
+Deno.test(
+  { permissions: { net: true } },
+  async function httpServerCompletedRejectsWhenClientDisconnectsMidStream() {
+    const outcome = Promise.withResolvers<string>();
+    const cancelled = Promise.withResolvers<void>();
+    const { finished, abort } = await makeServer((_req, info) => {
+      outcome.resolve(completedOutcome(info));
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("first chunk\n"));
+          },
+          cancel() {
+            cancelled.resolve();
+          },
+        }),
+      );
+    });
+    const conn = await Deno.connect({ port: servePort });
+    await conn.write(
+      new TextEncoder().encode("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+    );
+    // Read the head and the first chunk, then go away while the body is open.
+    await conn.read(new Uint8Array(1024));
+    conn.close();
+
+    assertEquals(await outcome.promise, "rejected Interrupted");
+    await cancelled.promise;
+    abort();
+    await finished;
+  },
+);
+
+Deno.test(
+  { permissions: { net: true } },
+  async function httpServerCompletedRejectsWhenStreamSourceErrors() {
+    const outcome = Promise.withResolvers<string>();
+    const ac = new AbortController();
+    const listening = Promise.withResolvers<void>();
+    const server = Deno.serve({
+      port: servePort,
+      signal: ac.signal,
+      onListen: onListen(listening.resolve),
+      // The body error is reported here once the head is committed.
+      onError: () => new Response(null, { status: 500 }),
+      handler: (_req, info) => {
+        outcome.resolve(completedOutcome(info));
+        let n = 0;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              n++;
+              if (n <= 2) {
+                controller.enqueue(new TextEncoder().encode(`chunk ${n}\n`));
+              } else {
+                controller.error(new Error("source failed"));
+              }
+            },
+          }),
+        );
+      },
+    });
+    await listening.promise;
+    const conn = await Deno.connect({ port: servePort });
+    await conn.write(
+      new TextEncoder().encode("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+    );
+    const buf = new Uint8Array(4096);
+    // The server ends the connection after the failed body.
+    while ((await conn.read(buf).catch(() => null)) !== null) {
+      // drain
+    }
+    conn.close();
+
+    assertEquals(await outcome.promise, "rejected Interrupted");
+    ac.abort();
+    await server.finished;
+  },
+);
+
+Deno.test(
+  { permissions: { net: true } },
+  async function httpServerCompletedResolvesForDeliveredStream() {
+    const outcome = Promise.withResolvers<string>();
+    const { finished, abort } = await makeServer((_req, info) => {
+      outcome.resolve(completedOutcome(info));
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("a"));
+            controller.enqueue(new TextEncoder().encode("b"));
+            controller.close();
+          },
+        }),
+      );
+    });
+    const res = await fetch(`http://localhost:${servePort}/`);
+    assertEquals(await res.text(), "ab");
+    assertEquals(await outcome.promise, "resolved");
+    abort();
+    await finished;
+  },
+);
+
+Deno.test(
+  { permissions: { net: true } },
+  async function httpServerCompletedResolvesForHeadWithStreamBody() {
+    const outcome = Promise.withResolvers<string>();
+    // A HEAD response is delivered once its head is written.
+    const { finished, abort } = await makeServer((_req, info) => {
+      outcome.resolve(completedOutcome(info));
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("not sent"));
+          },
+        }),
+      );
+    });
+    const res = await fetch(`http://localhost:${servePort}/`, {
+      method: "HEAD",
+    });
+    assertEquals(res.status, 200);
+    await res.body?.cancel();
+    assertEquals(await outcome.promise, "resolved");
+    abort();
+    await finished;
+  },
+);
+
 // Regression test for https://github.com/denoland/deno/issues/23537
 Deno.test(
   { permissions: { read: true, net: true } },

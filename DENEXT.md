@@ -14586,6 +14586,35 @@ where the changes are discussed.
      - Node tests enabled: none new; `sequential/test-cpu-prof-kill.js` was
        already enabled and is the flake this removes.
 
+375. **`fix(ext/http)`: `info.completed` rejects when an HTTP/1.1 streamed
+     response doesn't reach its end** (runtime; `ext/http/http_next.rs`). Closes
+     denoland/deno#37110, a regression from 2.8.3's raw HTTP/1.1 server
+     (denoland/deno#34446): when the client went away mid-stream, or the body
+     source errored, `Deno.serve`'s `info.completed` resolved, so a failed
+     response read as delivered (2.8.2 rejected it with `Interrupted`, and
+     HTTP/2 still does). The future behind it
+     (`RawHttpRecord::response_body_finished`) counted a missing response body
+     as a delivered one, but the stream writer takes the body out of the record
+     before writing it, so every finish, failed or not, left it missing. The
+     record now has a `response_body_complete` flag, set only by
+     `finish_response_body(true)` (the body written to its end) and never
+     cleared, so the cancel guard's later `finish_response_body(false)` can't
+     undo it; the future resolves to that flag. A HEAD response to a streamed
+     body is finished as complete once its head is written (it has no body),
+     which is what the old check gave it. The fix is ours; the regression tests
+     are adapted from denoland/deno#37111 (kairosci), whose flag for failures
+     would have rejected those HEAD responses.
+     - User-facing note: on HTTP/1.1, `info.completed` rejects with
+       `Interrupted` (and `Request.signal` aborts) when the client disconnects
+       while a streamed response is still open, or when the response body's
+       stream errors, as on HTTP/2 and before 2.8.3.
+     - Tests: `serve_test.ts`'s
+       `httpServerCompletedRejectsWhenClientDisconnectsMidStream` and
+       `httpServerCompletedRejectsWhenStreamSourceErrors` (both resolved before
+       the fix), `httpServerCompletedResolvesForDeliveredStream` and
+       `httpServerCompletedResolvesForHeadWithStreamBody` (passed before, and
+       still do).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -14593,7 +14622,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374) are what the prebuilt
+350, 351, 353, 355-361, 363-366, 368-371, 373-375) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
