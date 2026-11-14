@@ -14647,6 +14647,52 @@ where the changes are discussed.
        (new: the issue's server side, a `Deno.serve` socket against a raw TCP
        client); both hung before the fix.
 
+377. **`fix(node:http2)`: bytes handed to a session while nghttp2 is parsing are
+     queued, not parsed in a nested `mem_recv`** (runtime;
+     `ext/node/ops/http2/session.rs`). For denoland/deno#36788 (the process dies
+     inside nghttp2, `find_stream_on_goaway_func`'s
+     `stream->closed_next == NULL` assertion or a silent segfault, when a GOAWAY
+     closes a long-idle `node:http2` session). `nghttp2_session_mem_recv` is not
+     reentrant: it keeps its inbound frame state and, while it handles a GOAWAY,
+     the list of streams to close (threaded through `stream->closed_next`) live
+     for the whole call. The session's `receive` op is reentrant, and JS that
+     nghttp2 calls (a stream's `data` listener, a session `goaway` listener, the
+     stream-close callback) can hand it more bytes, through the JS socket pump
+     (`socketOnData`) whenever the socket emits `data` synchronously. Those
+     bytes were parsed in a second `mem_recv` nested inside the first: frames
+     out of order, and over a GOAWAY, a second close walk over a list the outer
+     walk still holds. Ported from denoland/deno#36808 (Bret Patterson):
+     `receive_data` sets `is_receiving` around `mem_recv`; a nested call queues
+     its bytes (`pending_recv`) and returns, and the outer call parses the queue
+     after each `mem_recv` unwinds, so bytes are parsed once, in arrival order.
+     A debug-build tripwire (`enter_mem_recv` / `exit_mem_recv`) asserts that a
+     session's `mem_recv` is never entered twice. The pull request counted the
+     depth per thread, which fired on an enabled Node test
+     (`parallel/test-http2-client-proxy-over-http2.js`: one session's callback
+     feeds another session tunnelled over its stream, which is legal, since
+     nghttp2's non-reentrancy is per session), so the depth is a field of the
+     session here. The issue's own reproduction (grpc-js against a `node:http2`
+     server, a GOAWAY after 250 s idle) did not crash on an x86_64 Linux host
+     with this fork's build or with stock Deno 2.9.6 (it is reported only in
+     containers), so the regression test drives the nested path directly.
+     - User-facing note: a `node:http2` session that receives data from inside
+       one of its own callbacks (a synchronous duplex as its socket, a `data` or
+       `goaway` listener that feeds it) processes it in order instead of
+       corrupting nghttp2's state.
+     - Tests: `http2_test.ts`'s
+       `[node/http2 client] bytes received inside a
+       callback are queued`
+       (new: a `data` listener hands the session a DATA frame with END_STREAM
+       while nghttp2 is still inside the chunk carrying the frames before it;
+       the stream read `ac` before the fix, `abc` now); `deno_node`'s
+       `enter_mem_recv_rejects_reentry`, `enter_mem_recv_allows_the_outer_call`
+       and `enter_and_exit_balance_over_many_cycles` (from the pull request,
+       made per session) and `another_session_may_enter_mem_recv` (new).
+     - Node tests enabled: none, because Node's sessions read from a native
+       stream and never feed nghttp2 from inside a callback, so no Node test
+       exercises the nested path; the 9 `test-http2-*` files still disabled in
+       `tests/node_compat/config.jsonc` fail for other reasons.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -14654,7 +14700,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373-376) are what the prebuilt
+350, 351, 353, 355-361, 363-366, 368-371, 373-377) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

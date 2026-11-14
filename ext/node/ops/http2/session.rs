@@ -52,6 +52,36 @@ thread_local! {
     const { UnsafeCell::new([0; SETTINGS_LEN]) };
 }
 
+/// Panics if a `mem_recv` call is already live on this session.
+///
+/// `depth` is the session's own nesting depth of `nghttp2_session_mem_recv`,
+/// tracked at the FFI call site because a nested `receive_data` is legitimate
+/// (it queues) and only the second `mem_recv` itself is forbidden. It is per
+/// session, not per thread: nghttp2's non-reentrancy is per session, and one
+/// session's callback may legitimately feed another (HTTP/2 tunnelled over an
+/// HTTP/2 stream, `test-http2-client-proxy-over-http2.js`).
+///
+/// A function rather than an inline block at the call site so the tests
+/// below can reach it: the real call site is inside a `#[op2]`-generated
+/// `extern "C"` frame, where a panic becomes `panic_cannot_unwind`.
+fn enter_mem_recv(depth: &Cell<u32>) {
+  debug_assert_eq!(
+    depth.get(),
+    0,
+    "nghttp2_session_mem_recv re-entered while an outer call is still on the stack"
+  );
+  depth.set(depth.get() + 1);
+}
+
+/// Release the entry recorded by [`enter_mem_recv`].
+fn exit_mem_recv(depth: &Cell<u32>) {
+  debug_assert!(
+    depth.get() > 0,
+    "exit_mem_recv called without a matching enter_mem_recv"
+  );
+  depth.set(depth.get() - 1);
+}
+
 #[derive(ToV8)]
 pub struct JSHttp2State<'a> {
   session_state: v8::Local<'a, v8::Value>,
@@ -2046,6 +2076,19 @@ pub struct Session {
   /// mem_send can close/free streams that mem_recv still references
   /// (double-free). Like Node.js's is_sending() guard.
   pub is_sending: bool,
+  /// True while `receive_data` is inside `nghttp2_session_mem_recv`.
+  ///
+  /// `mem_recv` is not reentrant: it keeps the inbound frame state machine
+  /// and, during GOAWAY processing, the `stream->closed_next` close list
+  /// live for the whole call. `receive` is a `#[reentrant]` op and JS
+  /// reached through `on_stream_close_callback` can hand us more bytes, so
+  /// nested bytes are queued rather than parsed.
+  pub is_receiving: bool,
+  /// Inbound bytes queued while `is_receiving` was set.
+  pub pending_recv: VecDeque<bytes::Bytes>,
+  /// This session's `nghttp2_session_mem_recv` nesting depth, for the
+  /// debug-build tripwire ([`enter_mem_recv`]).
+  pub mem_recv_depth: Cell<u32>,
   /// Set when destroy() is called while is_sending is true. The TCP
   /// handle close is deferred until send_pending_data can run, allowing
   /// GOAWAY to be sent before the connection closes.
@@ -2716,29 +2759,71 @@ impl Session {
     if self.session.is_null() {
       return;
     }
-    // Block re-entrant send_pending_data calls from JS callbacks during
-    // mem_recv. A single mem_recv can process multiple frames (e.g.
-    // END_STREAM + RST_STREAM). If a callback from frame N triggers
-    // mem_send which closes/frees a stream, frame N+1 (RST_STREAM for
-    // the same stream) would crash with a double-free. Matches Node.js
-    // behavior where sends are deferred until after mem_recv completes.
-    self.is_sending = true;
-    // SAFETY: self.session is valid; data slice pointer and length are valid
-    let ret = unsafe {
-      ffi::nghttp2_session_mem_recv(
-        self.session,
-        data.as_ptr() as _,
-        data.len(),
-      )
-    };
-    self.is_sending = false;
-    if (ret as i64) < 0 {
+
+    // `mem_recv` is not reentrant, and JS reached from it can hand us more
+    // bytes. Queue them and let the loop below drain them once the live
+    // `mem_recv` has unwound.
+    if self.is_receiving {
+      self
+        .pending_recv
+        .push_back(bytes::Bytes::copy_from_slice(data));
+      return;
+    }
+
+    self.is_receiving = true;
+    self
+      .pending_recv
+      .push_back(bytes::Bytes::copy_from_slice(data));
+
+    let mut fatal: Option<i32> = None;
+    while let Some(buf) = self.pending_recv.pop_front() {
+      // `send_pending_data` from the previous iteration can run JS that
+      // tears the session down.
+      if self.session.is_null() {
+        break;
+      }
+      // Block re-entrant send_pending_data calls from JS callbacks during
+      // mem_recv. A single mem_recv can process multiple frames (e.g.
+      // END_STREAM + RST_STREAM). If a callback from frame N triggers
+      // mem_send which closes/frees a stream, frame N+1 (RST_STREAM for
+      // the same stream) would crash with a double-free. Matches Node.js
+      // behavior where sends are deferred until after mem_recv completes.
+      self.is_sending = true;
+      enter_mem_recv(&self.mem_recv_depth);
+      // SAFETY: self.session is valid (checked above); `buf` owns
+      // `buf.len()` readable bytes for the duration of the call.
+      let ret = unsafe {
+        ffi::nghttp2_session_mem_recv(
+          self.session,
+          buf.as_ptr() as _,
+          buf.len(),
+        )
+      };
+      exit_mem_recv(&self.mem_recv_depth);
+      self.is_sending = false;
+
+      if (ret as i64) < 0 {
+        fatal = Some(ret as i32);
+        break;
+      }
+      self.send_pending_data();
+    }
+
+    // Cleared before returning to JS so a receive from the error path is
+    // not left queued behind one that has already finished.
+    self.is_receiving = false;
+
+    // The success path flushed inside the loop; this covers the faulted
+    // path, keeping the original "emit the error, then flush" ordering.
+    if let Some(errno) = fatal {
+      // The session is unusable, so anything still buffered is dropped.
+      self.pending_recv.clear();
       // nghttp2 reported a fatal error processing the inbound frames.
       // Mirrors Node.js HTTP2Session::OnStreamRead: hand the error to JS
       // via onSessionInternalError so it can destroy the session.
-      self.emit_session_internal_error(ret as i32);
+      self.emit_session_internal_error(errno);
+      self.send_pending_data();
     }
-    self.send_pending_data();
   }
 
   /// Invoke `onSessionInternalError(integerCode, customErrorCode)` on the
@@ -2916,6 +3001,9 @@ impl Http2Session {
       graceful_close_initiated: false,
       stream: None,
       is_sending: false,
+      is_receiving: false,
+      pending_recv: VecDeque::new(),
+      mem_recv_depth: Cell::new(0),
       pending_destroy: false,
       draining_outgoing: false,
       pending_rst_streams: Vec::new(),
@@ -3756,4 +3844,82 @@ pub fn op_http2_error_string(code: i32) -> String {
   unsafe { std::ffi::CStr::from_ptr(p) }
     .to_string_lossy()
     .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// The tripwire rejects a second entry while an outer `mem_recv` is live.
+  /// It is a `debug_assert`, so without debug assertions there is nothing to
+  /// prove.
+  #[cfg(debug_assertions)]
+  #[test]
+  fn enter_mem_recv_rejects_reentry() {
+    let depth = Cell::new(0);
+
+    // Silence the expected panic so the run output stays readable.
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+
+    enter_mem_recv(&depth);
+    let nested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      enter_mem_recv(&depth)
+    }));
+
+    std::panic::set_hook(previous_hook);
+    exit_mem_recv(&depth);
+
+    assert!(
+      nested.is_err(),
+      "enter_mem_recv must panic when a call is already live on this session"
+    );
+    assert_eq!(
+      depth.get(),
+      0,
+      "depth must be back at 0 after the outer call"
+    );
+  }
+
+  #[test]
+  fn enter_mem_recv_allows_the_outer_call() {
+    let depth = Cell::new(0);
+    let outer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      enter_mem_recv(&depth)
+    }));
+
+    assert!(outer.is_ok(), "the first entry must not trip the wire");
+    assert_eq!(depth.get(), 1);
+
+    exit_mem_recv(&depth);
+    assert_eq!(depth.get(), 0);
+  }
+
+  /// One session's live `mem_recv` doesn't stop another session's: a
+  /// callback of one may feed another (HTTP/2 over an HTTP/2 stream).
+  #[test]
+  fn another_session_may_enter_mem_recv() {
+    let outer = Cell::new(0);
+    let inner = Cell::new(0);
+    enter_mem_recv(&outer);
+    let nested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      enter_mem_recv(&inner)
+    }));
+    assert!(nested.is_ok(), "a different session's depth is independent");
+    exit_mem_recv(&inner);
+    exit_mem_recv(&outer);
+    assert_eq!((outer.get(), inner.get()), (0, 0));
+  }
+
+  /// Enter and exit must balance exactly, so a long-lived session cannot
+  /// drift the counter and mask a later violation.
+  #[test]
+  fn enter_and_exit_balance_over_many_cycles() {
+    let depth = Cell::new(0);
+    for _ in 0..1000 {
+      enter_mem_recv(&depth);
+      exit_mem_recv(&depth);
+    }
+    assert_eq!(depth.get(), 0);
+  }
 }
