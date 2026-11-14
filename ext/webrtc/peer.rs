@@ -68,11 +68,14 @@ use rtc::ice::url::SchemeType;
 use rtc::ice::url::Url as IceUrl;
 use rtc::peer_connection::RTCPeerConnection;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
+use rtc::peer_connection::certificate::RTCCertificate;
+use rtc::peer_connection::configuration::RTCBundlePolicy;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::setting_engine::SctpMaxMessageSize;
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCDataChannelEvent;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
+use rtc::peer_connection::event::RTCTrackEvent;
 use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::transport::CandidateConfig;
@@ -87,6 +90,7 @@ use rtc::shared::TaggedBytesMut;
 use rtc::shared::TransportContext;
 use rtc::shared::TransportProtocol;
 use rtc::shared::error::Error as RtcError;
+use rtc::shared::marshal::Marshal;
 use rtc::statistics::StatsSelector;
 use rtc::statistics::report::RTCStatsReportEntry;
 use rtc::stun::message::TransactionId;
@@ -101,6 +105,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc;
 
 use crate::WebRtcError;
+use crate::media::MediaState;
 
 /// The largest UDP payload read from a socket. ICE, DTLS and SCTP packets
 /// stay under the path MTU; this leaves room for jumbo frames.
@@ -205,6 +210,10 @@ pub struct PeerOptions {
   /// For `turns:` servers: the runtime's TLS client configuration (its root
   /// store, `--unsafely-ignore-certificate-errors`).
   pub tls: Option<Arc<rustls::ClientConfig>>,
+  /// `RTCConfiguration.certificates` (one is generated when empty).
+  pub certificates: Vec<RTCCertificate>,
+  /// `RTCConfiguration.bundlePolicy`.
+  pub bundle_policy: RTCBundlePolicy,
 }
 
 /// An event for JavaScript, delivered in batches by
@@ -266,6 +275,15 @@ pub enum JsEvent {
     text: bool,
     data: Payload,
   },
+  /// A receiver's first RTP packet: its track unmutes.
+  #[serde(rename = "trackunmute")]
+  TrackUnmute { transceiver: u32 },
+  /// An RTP packet for a `Deno.webrtc.readRtp()` reader (header included).
+  #[serde(rename = "rtp")]
+  Rtp { transceiver: u32, data: Payload },
+  /// The remote receiver asked a sender for a key frame (PLI / FIR).
+  #[serde(rename = "keyframerequest")]
+  KeyFrameRequest { transceiver: u32 },
 }
 
 /// A received message's bytes, handed to V8 without a copy (as a
@@ -382,6 +400,10 @@ pub struct Core {
   failed: bool,
   recv_tx: mpsc::Sender<Datagram>,
   recv_rx: Option<mpsc::Receiver<Datagram>>,
+  /// Transceivers, senders and receivers (media.rs).
+  pub(crate) media: MediaState,
+  /// `setConfiguration` changed the ICE servers since they were gathered.
+  servers_changed: bool,
 }
 
 pub struct Peer {
@@ -396,7 +418,7 @@ pub struct Peer {
   driver_started: Cell<bool>,
 }
 
-fn rtc_err(e: impl std::fmt::Display) -> WebRtcError {
+pub(crate) fn rtc_err(e: impl std::fmt::Display) -> WebRtcError {
   WebRtcError::Operation(e.to_string())
 }
 
@@ -1034,16 +1056,53 @@ impl Core {
           };
           self.events.push_back(event);
         }
+        RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnOpen(init)) => {
+          let index: usize = init.receiver_id.into();
+          if let Some(key) = self.key_for_receiver_index(index) {
+            self.media.track_keys.insert(init.track_id.clone(), key);
+          }
+        }
         _ => {}
       }
     }
     while let Some(message) = self.pc.poll_read() {
-      if let RTCMessage::DataChannelMessage(handle, message) = message.message {
-        self.events.push_back(JsEvent::DataChannelMessage {
-          channel: handle as u32,
-          text: message.is_string,
-          data: Payload::new(message.data.to_vec()),
-        });
+      match message.message {
+        RTCMessage::DataChannelMessage(handle, message) => {
+          self.events.push_back(JsEvent::DataChannelMessage {
+            channel: handle as u32,
+            text: message.is_string,
+            data: Payload::new(message.data.to_vec()),
+          });
+        }
+        RTCMessage::RtpPacket(track_id, packet) => {
+          let Some(key) = self.key_for_track(&track_id) else {
+            continue;
+          };
+          if self.media.flowing.insert(key) {
+            self
+              .events
+              .push_back(JsEvent::TrackUnmute { transceiver: key });
+          }
+          self.media.saw_rtp(key, &packet.header);
+          if self.media.reading.contains(&key)
+            && let Ok(bytes) = packet.marshal()
+          {
+            self.events.push_back(JsEvent::Rtp {
+              transceiver: key,
+              data: Payload::new(bytes.to_vec()),
+            });
+          }
+        }
+        RTCMessage::RtcpPacket(track_id, packets) => {
+          if crate::media::wants_key_frame(&packets)
+            && let Some(key) = self.key_for_track(&track_id)
+          {
+            self
+              .events
+              .push_back(JsEvent::KeyFrameRequest { transceiver: key });
+          }
+        }
+        _ => {}
       }
     }
   }
@@ -1190,7 +1249,11 @@ impl Peer {
     options: PeerOptions,
     guard: Rc<dyn NetGuard>,
   ) -> Result<Rc<Self>, WebRtcError> {
-    let config = RTCConfigurationBuilder::new().build();
+    let config = RTCConfigurationBuilder::new()
+      .with_certificates(options.certificates.clone())
+      .with_bundle_policy(options.bundle_policy)
+      .build();
+    let (media_engine, registry) = crate::media::media_stack()?;
     // Messages up to 256 KiB, as browsers take (the engine's own default is
     // RFC 8841's 64 KiB); the connection's maxMessageSize is the smaller of
     // this and the peer's.
@@ -1202,6 +1265,8 @@ impl Peer {
     let pc = RTCPeerConnectionBuilder::new()
       .with_configuration(config)
       .with_setting_engine(settings)
+      .with_media_engine(media_engine)
+      .with_interceptor_registry(registry)
       .build(Instant::now())
       .map_err(rtc_err)?;
     let (recv_tx, recv_rx) = mpsc::channel(RECV_QUEUE);
@@ -1226,6 +1291,8 @@ impl Peer {
         failed: false,
         recv_tx,
         recv_rx: Some(recv_rx),
+        media: MediaState::default(),
+        servers_changed: false,
       }),
       guard,
       wake: Notify::new(),
@@ -1295,13 +1362,63 @@ impl Peer {
     }
   }
 
-  pub fn create_offer(&self, ice_restart: bool) -> Result<String, WebRtcError> {
-    self.guarded(|core| {
+  pub fn create_offer(
+    self: &Rc<Self>,
+    ice_restart: bool,
+  ) -> Result<String, WebRtcError> {
+    let sdp = self.guarded(|core| {
       if ice_restart {
         core.pc.restart_ice();
       }
       Ok(core.pc.create_offer(None).map_err(rtc_err)?.sdp)
-    })
+    })?;
+    // `setConfiguration`'s ICE servers are gathered from on the restart.
+    if ice_restart {
+      let specs = {
+        let mut core = self.core.borrow_mut();
+        if core.servers_changed && core.gathering != GatherPhase::NotStarted {
+          core.servers_changed = false;
+          core.servers.clear();
+          core.resolving += core.options.ice_servers.len();
+          core.options.ice_servers.clone()
+        } else {
+          Vec::new()
+        }
+      };
+      for spec in specs {
+        let peer = self.clone();
+        let cancel = self.cancel.clone();
+        deno_core::unsync::spawn(async move {
+          let _ = add_server(peer, spec).or_cancel(cancel).await;
+        });
+      }
+    }
+    Ok(sdp)
+  }
+
+  /// `setConfiguration`: the ICE servers and policy the next gathering
+  /// (an ICE restart) uses.
+  pub fn set_ice_servers(
+    &self,
+    specs: Vec<IceServerSpec>,
+    relay_only: bool,
+    tls: Option<Arc<rustls::ClientConfig>>,
+  ) {
+    let mut core = self.core.borrow_mut();
+    let urls =
+      |s: &[IceServerSpec]| s.iter().map(|s| s.url.clone()).collect::<Vec<_>>();
+    if urls(&specs) != urls(&core.options.ice_servers) {
+      core.servers_changed = true;
+    }
+    core.options.ice_servers = specs;
+    core.options.relay_only = relay_only;
+    if tls.is_some() {
+      core.options.tls = tls;
+    }
+  }
+
+  pub fn selected_pair(&self) -> Option<(SocketAddr, SocketAddr)> {
+    self.core.borrow().selected
   }
 
   pub fn create_answer(&self) -> Result<String, WebRtcError> {
@@ -1333,10 +1450,24 @@ impl Peer {
   ) -> Result<(), WebRtcError> {
     let desc = Self::description(kind, sdp)?;
     self.guarded(|core| {
+      let victims = if kind == "rollback" {
+        core.rollback_victims()
+      } else {
+        Vec::new()
+      };
       core
         .pc
         .set_local_description(Instant::now(), desc)
-        .map_err(rtc_err)
+        .map_err(rtc_err)?;
+      if kind == "rollback" {
+        core.after_rollback(victims);
+      } else {
+        core.sync_transceiver_keys(false);
+        if kind == "answer" {
+          core.negotiation_settled();
+        }
+      }
+      Ok(())
     })?;
     if kind != "rollback" {
       self.start_gathering();
@@ -1370,10 +1501,23 @@ impl Peer {
     }
     let desc = Self::description(kind, kept)?;
     self.guarded(|core| {
+      let victims = if kind == "rollback" {
+        core.rollback_victims()
+      } else {
+        Vec::new()
+      };
       core
         .pc
         .set_remote_description(Instant::now(), desc)
         .map_err(rtc_err)?;
+      if kind == "rollback" {
+        core.after_rollback(victims);
+      } else {
+        core.sync_transceiver_keys(kind == "offer");
+        if kind == "answer" {
+          core.negotiation_settled();
+        }
+      }
       for addr in checked {
         core.mark_allowed(addr);
       }
@@ -1562,9 +1706,28 @@ impl Peer {
       .map(|d| (d.sdp_type.to_string(), d.sdp.clone()))
   }
 
-  pub fn stats(&self) -> Result<Vec<serde_json::Value>, WebRtcError> {
+  /// `getStats()`; `selector` is a transceiver key and whether its sender
+  /// (else its receiver) is the selector.
+  pub fn stats(
+    &self,
+    selector: Option<(u32, bool)>,
+  ) -> Result<Vec<serde_json::Value>, WebRtcError> {
     self.guarded(|core| {
-      let report = core.pc.get_stats(Instant::now(), StatsSelector::None);
+      let selector = match selector {
+        None => StatsSelector::None,
+        Some((key, sender)) => {
+          let Some(index) = core.media.keys.iter().position(|k| *k == key)
+          else {
+            return Ok(Vec::new());
+          };
+          if sender {
+            StatsSelector::Sender(index.into())
+          } else {
+            StatsSelector::Receiver(index.into())
+          }
+        }
+      };
+      let report = core.pc.get_stats(Instant::now(), selector);
       use RTCStatsReportEntry as E;
       Ok(
         report
@@ -1593,6 +1756,18 @@ impl Peer {
           .collect(),
       )
     })
+  }
+
+  /// Runs a media operation on the engine (media.rs), then lets the driver
+  /// flush what it produced.
+  pub fn media<T>(
+    &self,
+    f: impl FnOnce(&mut Core) -> Result<T, WebRtcError>,
+  ) -> Result<T, WebRtcError> {
+    let out = self.guarded(f)?;
+    self.events_ready.notify_one();
+    self.poke();
+    Ok(out)
   }
 
   /// `close()`: stops the engine, the sockets and the driver. Idempotent.

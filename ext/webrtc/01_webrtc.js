@@ -1,12 +1,12 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-// WebRTC data channels (DENEXT.md item 370): `RTCPeerConnection`,
-// `RTCDataChannel`, `RTCSessionDescription`, `RTCIceCandidate`, their events
-// and `RTCStatsReport`, as globals. The ops are in `lib.rs` and the engine
-// around them in `peer.rs`; this module is the W3C surface: argument
-// handling, the state attributes, the event pump and the data channel
-// objects. Media (tracks, transceivers) is not implemented: `addTrack` and
-// `addTransceiver` throw `NotSupportedError`.
+// WebRTC (DENEXT.md item 370): `RTCPeerConnection`, `RTCDataChannel`,
+// `RTCRtpTransceiver` / `RTCRtpSender` / `RTCRtpReceiver`, `MediaStream`,
+// `MediaStreamTrack`, `RTCCertificate`, the transports, their events and
+// `RTCStatsReport`, as globals, and the `Deno.webrtc` server extension. The
+// ops are in `lib.rs`, the engine around them in `peer.rs` and `media.rs`;
+// this module is the W3C surface: argument handling, the state attributes,
+// the event pump, the data channel and media objects.
 
 /// <reference path="../../core/internal.d.ts" />
 
@@ -14,6 +14,10 @@
 const { core, primordials } = __bootstrap;
 const { isDataView } = core;
 const {
+  op_webrtc_capabilities,
+  op_webrtc_certificate_drop,
+  op_webrtc_certificate_from_pem,
+  op_webrtc_certificate_to_pem,
   op_webrtc_dc_buffered_amount,
   op_webrtc_dc_close,
   op_webrtc_dc_send,
@@ -30,6 +34,24 @@ const {
   op_webrtc_pc_next_events,
   op_webrtc_pc_set_local_description,
   op_webrtc_pc_set_remote_description,
+  op_webrtc_generate_certificate,
+  op_webrtc_pc_add_transceiver,
+  op_webrtc_pc_attach_track,
+  op_webrtc_pc_selected_pair,
+  op_webrtc_pc_set_ice_servers,
+  op_webrtc_pc_transceivers,
+  op_webrtc_receiver_parameters,
+  op_webrtc_receiver_read_rtp,
+  op_webrtc_receiver_request_key_frame,
+  op_webrtc_receiver_sources,
+  op_webrtc_sender_parameters,
+  op_webrtc_sender_set_paused,
+  op_webrtc_sender_set_streams,
+  op_webrtc_sender_write_frame,
+  op_webrtc_sender_write_rtp,
+  op_webrtc_transceiver_set_codec_preferences,
+  op_webrtc_transceiver_set_direction,
+  op_webrtc_transceiver_stop,
 } = core.ops;
 const {
   ArrayBufferIsView,
@@ -75,10 +97,37 @@ const {
   TypedArrayPrototypeGetByteOffset,
   TypedArrayPrototypeSlice,
   Uint8Array,
+  ArrayPrototypeEvery,
+  ArrayPrototypeFilter,
+  ArrayPrototypeFind,
+  ArrayPrototypeIndexOf,
+  ArrayPrototypeSlice,
+  ArrayPrototypeSome,
+  ArrayPrototypeSplice,
+  DateNow,
+  JSONStringify,
+  MathFloor,
+  MathRandom,
+  RangeError,
+  RegExpPrototypeTest,
+  SafeRegExp,
+  SafeSet,
+  SetPrototypeAdd,
+  SetPrototypeDelete,
+  SetPrototypeForEach,
+  SetPrototypeHas,
+  StringPrototypeEndsWith,
+  StringPrototypeIncludes,
+  StringPrototypeLastIndexOf,
+  StringPrototypeReplace,
+  StringPrototypeToUpperCase,
+  SafeFinalizationRegistry,
 } = primordials;
 
 const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
-const { DOMException } = core.loadExtScript("ext:deno_web/01_dom_exception.js");
+const { DOMException } = core.loadExtScript(
+  "ext:deno_web/01_dom_exception.js",
+);
 const {
   defineEventHandler,
   Event,
@@ -88,6 +137,10 @@ const {
   setIsTrusted,
 } = core.loadExtScript("ext:deno_web/02_event.js");
 const { Blob, BlobPrototype } = core.loadExtScript("ext:deno_web/09_file.js");
+const { clearTimeout, setTimeout } = core.loadExtScript(
+  "ext:deno_web/02_timers.js",
+);
+const streams = core.loadExtScript("ext:deno_web/06_streams.js");
 
 const _rid = Symbol("[[rid]]");
 const _state = Symbol("[[state]]");
@@ -485,7 +538,7 @@ class RTCSctpTransport extends EventTarget {
   }
 
   get transport() {
-    return null;
+    return dtlsTransportOf(this[_pc]);
   }
 }
 defineEventHandler(RTCSctpTransport.prototype, "statechange");
@@ -740,6 +793,1278 @@ function toBinary(channel, data) {
   return TypedArrayPrototypeGetBuffer(TypedArrayPrototypeSlice(data));
 }
 
+// --- Media: tracks and streams ---------------------------------------------
+//
+// There is no capture device in Deno. A remote track (a receiver's) carries
+// what the peer sends, readable as RTP packets through `Deno.webrtc.readRtp`;
+// a local track is a `Deno.webrtc.EncodedMediaTrack`, which the program feeds
+// encoded frames or RTP packets. Both are MediaStreamTracks, so addTrack,
+// addTransceiver, replaceTrack, MediaStream and the events work as in a
+// browser.
+
+const _source = Symbol("[[source]]");
+const _receiver = Symbol("[[receiver]]");
+const _trackState = Symbol("[[trackState]]");
+
+// A version 4 UUID for track, stream and transaction ids (unique, not
+// secret: they appear in the SDP).
+function uuid() {
+  const hex = "0123456789abcdef";
+  let out = "";
+  for (let i = 0; i < 36; ++i) {
+    if (i === 8 || i === 13 || i === 18 || i === 23) {
+      out += "-";
+    } else if (i === 14) {
+      out += "4";
+    } else if (i === 19) {
+      out += hex[8 + MathFloor(MathRandom() * 4)];
+    } else {
+      out += hex[MathFloor(MathRandom() * 16)];
+    }
+  }
+  return out;
+}
+
+class MediaStreamTrack extends EventTarget {
+  constructor(key = undefined, init = undefined) {
+    if (key !== illegalConstructorKey) {
+      webidl.illegalConstructor();
+    }
+    super();
+    this[_trackState] = {
+      kind: init.kind,
+      id: init.id ?? uuid(),
+      label: init.label ?? "",
+      enabled: true,
+      muted: init.muted ?? false,
+      readyState: "live",
+      contentHint: "",
+    };
+    // A local track's source (what clones share); null for a remote track.
+    this[_source] = init.source ?? null;
+    // A remote track's receiver.
+    this[_receiver] = init.receiver ?? null;
+    if (this[_source] !== null) {
+      SetPrototypeAdd(this[_source].tracks, this);
+    }
+    this[webidl.brand] = webidl.brand;
+  }
+
+  get kind() {
+    webidl.assertBranded(this, MediaStreamTrackPrototype);
+    return this[_trackState].kind;
+  }
+  get id() {
+    webidl.assertBranded(this, MediaStreamTrackPrototype);
+    return this[_trackState].id;
+  }
+  get label() {
+    webidl.assertBranded(this, MediaStreamTrackPrototype);
+    return this[_trackState].label;
+  }
+  get enabled() {
+    webidl.assertBranded(this, MediaStreamTrackPrototype);
+    return this[_trackState].enabled;
+  }
+  set enabled(value) {
+    webidl.assertBranded(this, MediaStreamTrackPrototype);
+    this[_trackState].enabled = !!value;
+  }
+  get muted() {
+    webidl.assertBranded(this, MediaStreamTrackPrototype);
+    return this[_trackState].muted;
+  }
+  get readyState() {
+    webidl.assertBranded(this, MediaStreamTrackPrototype);
+    return this[_trackState].readyState;
+  }
+  get contentHint() {
+    webidl.assertBranded(this, MediaStreamTrackPrototype);
+    return this[_trackState].contentHint;
+  }
+  set contentHint(value) {
+    webidl.assertBranded(this, MediaStreamTrackPrototype);
+    const hint = String(value);
+    const allowed = this[_trackState].kind === "audio"
+      ? ["", "speech", "speech-recognition", "music"]
+      : ["", "motion", "detail", "text"];
+    if (ArrayPrototypeIncludes(allowed, hint)) {
+      this[_trackState].contentHint = hint;
+    }
+  }
+
+  clone() {
+    webidl.assertBranded(this, MediaStreamTrackPrototype);
+    const state = this[_trackState];
+    const track =
+      new (this[_source] !== null && this[_source].ctor
+        ? this[_source].ctor
+        : MediaStreamTrack)(illegalConstructorKey, {
+        kind: state.kind,
+        label: state.label,
+        muted: state.muted,
+        source: this[_source],
+        receiver: this[_receiver],
+      });
+    track[_trackState].enabled = state.enabled;
+    track[_trackState].contentHint = state.contentHint;
+    if (state.readyState === "ended") track[_trackState].readyState = "ended";
+    if (this[_receiver] !== null) {
+      ArrayPrototypePush(this[_receiver][_state].clones, track);
+    }
+    return track;
+  }
+
+  stop() {
+    webidl.assertBranded(this, MediaStreamTrackPrototype);
+    const state = this[_trackState];
+    if (state.readyState === "ended") return;
+    // No `ended` event: stop() is the application's own doing.
+    state.readyState = "ended";
+    if (this[_source] !== null) {
+      SetPrototypeDelete(this[_source].tracks, this);
+    }
+  }
+
+  getCapabilities() {
+    webidl.assertBranded(this, MediaStreamTrackPrototype);
+    return {};
+  }
+  getConstraints() {
+    webidl.assertBranded(this, MediaStreamTrackPrototype);
+    return {};
+  }
+  getSettings() {
+    webidl.assertBranded(this, MediaStreamTrackPrototype);
+    return { deviceId: "", groupId: "" };
+  }
+  applyConstraints(_constraints = undefined) {
+    webidl.assertBranded(this, MediaStreamTrackPrototype);
+    return PromiseResolve();
+  }
+
+  [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
+    return `${this.constructor.name} ${
+      inspect({
+        kind: this.kind,
+        id: this.id,
+        label: this.label,
+        enabled: this.enabled,
+        muted: this.muted,
+        readyState: this.readyState,
+      }, inspectOptions)
+    }`;
+  }
+}
+defineEventHandler(MediaStreamTrack.prototype, "mute");
+defineEventHandler(MediaStreamTrack.prototype, "unmute");
+defineEventHandler(MediaStreamTrack.prototype, "ended");
+webidl.configureInterface(MediaStreamTrack);
+const MediaStreamTrackPrototype = MediaStreamTrack.prototype;
+
+function setMuted(track, muted) {
+  const state = track[_trackState];
+  if (state.readyState === "ended" || state.muted === muted) return;
+  state.muted = muted;
+  fire(track, new Event(muted ? "mute" : "unmute"));
+}
+
+function endTrack(track) {
+  const state = track[_trackState];
+  if (state.readyState === "ended") return;
+  state.readyState = "ended";
+  fire(track, new Event("ended"));
+}
+
+class MediaStreamTrackEvent extends Event {
+  #track;
+
+  constructor(type, eventInitDict = undefined) {
+    super(type, eventInitDict);
+    if (
+      !ObjectPrototypeIsPrototypeOf(
+        MediaStreamTrackPrototype,
+        eventInitDict?.track,
+      )
+    ) {
+      throw new TypeError(
+        "Failed to construct 'MediaStreamTrackEvent': 'track' is required",
+      );
+    }
+    this.#track = eventInitDict.track;
+  }
+
+  get track() {
+    return this.#track;
+  }
+}
+webidl.configureInterface(MediaStreamTrackEvent);
+
+const _tracks = Symbol("[[tracks]]");
+
+class MediaStream extends EventTarget {
+  #id;
+
+  constructor(streamOrTracks = undefined) {
+    super();
+    this.#id = uuid();
+    this[_tracks] = [];
+    this[webidl.brand] = webidl.brand;
+    if (streamOrTracks === illegalConstructorKey) {
+      // A remote stream: its id comes from the remote description.
+      this.#id = arguments[1];
+      return;
+    }
+    let tracks = [];
+    if (ObjectPrototypeIsPrototypeOf(MediaStreamPrototype, streamOrTracks)) {
+      tracks = streamOrTracks.getTracks();
+    } else if (streamOrTracks !== undefined) {
+      if (
+        streamOrTracks === null ||
+        typeof streamOrTracks[SymbolIterator] !== "function"
+      ) {
+        throw new TypeError(
+          "Failed to construct 'MediaStream': expected a MediaStream or a sequence of MediaStreamTrack",
+        );
+      }
+      tracks = ArrayFrom(streamOrTracks);
+    }
+    for (let i = 0; i < tracks.length; ++i) {
+      if (
+        !ObjectPrototypeIsPrototypeOf(MediaStreamTrackPrototype, tracks[i])
+      ) {
+        throw new TypeError(
+          "Failed to construct 'MediaStream': not a MediaStreamTrack",
+        );
+      }
+      if (!ArrayPrototypeIncludes(this[_tracks], tracks[i])) {
+        ArrayPrototypePush(this[_tracks], tracks[i]);
+      }
+    }
+  }
+
+  get id() {
+    webidl.assertBranded(this, MediaStreamPrototype);
+    return this.#id;
+  }
+  get active() {
+    webidl.assertBranded(this, MediaStreamPrototype);
+    return ArrayPrototypeSome(
+      this[_tracks],
+      (t) => t[_trackState].readyState !== "ended",
+    );
+  }
+  getTracks() {
+    webidl.assertBranded(this, MediaStreamPrototype);
+    return ArrayPrototypeSlice(this[_tracks]);
+  }
+  getAudioTracks() {
+    webidl.assertBranded(this, MediaStreamPrototype);
+    return ArrayPrototypeFilter(
+      this[_tracks],
+      (t) => t[_trackState].kind === "audio",
+    );
+  }
+  getVideoTracks() {
+    webidl.assertBranded(this, MediaStreamPrototype);
+    return ArrayPrototypeFilter(
+      this[_tracks],
+      (t) => t[_trackState].kind === "video",
+    );
+  }
+  getTrackById(trackId) {
+    webidl.assertBranded(this, MediaStreamPrototype);
+    const id = String(trackId);
+    return ArrayPrototypeFind(
+      this[_tracks],
+      (t) => t[_trackState].id === id,
+    ) ??
+      null;
+  }
+  addTrack(track) {
+    webidl.assertBranded(this, MediaStreamPrototype);
+    if (!ObjectPrototypeIsPrototypeOf(MediaStreamTrackPrototype, track)) {
+      throw new TypeError(
+        "Failed to execute 'addTrack' on 'MediaStream': not a MediaStreamTrack",
+      );
+    }
+    if (!ArrayPrototypeIncludes(this[_tracks], track)) {
+      ArrayPrototypePush(this[_tracks], track);
+    }
+  }
+  removeTrack(track) {
+    webidl.assertBranded(this, MediaStreamPrototype);
+    if (!ObjectPrototypeIsPrototypeOf(MediaStreamTrackPrototype, track)) {
+      throw new TypeError(
+        "Failed to execute 'removeTrack' on 'MediaStream': not a MediaStreamTrack",
+      );
+    }
+    const i = ArrayPrototypeIndexOf(this[_tracks], track);
+    if (i !== -1) ArrayPrototypeSplice(this[_tracks], i, 1);
+  }
+  clone() {
+    webidl.assertBranded(this, MediaStreamPrototype);
+    return new MediaStream(
+      ArrayPrototypeMap(this[_tracks], (t) => t.clone()),
+    );
+  }
+}
+defineEventHandler(MediaStream.prototype, "addtrack");
+defineEventHandler(MediaStream.prototype, "removetrack");
+webidl.configureInterface(MediaStream);
+const MediaStreamPrototype = MediaStream.prototype;
+
+// Remote changes to a stream fire addtrack / removetrack.
+function streamAddRemote(stream, track) {
+  if (ArrayPrototypeIncludes(stream[_tracks], track)) return;
+  ArrayPrototypePush(stream[_tracks], track);
+  fire(stream, new MediaStreamTrackEvent("addtrack", { track }));
+}
+
+function streamRemoveRemote(stream, track) {
+  const i = ArrayPrototypeIndexOf(stream[_tracks], track);
+  if (i === -1) return;
+  ArrayPrototypeSplice(stream[_tracks], i, 1);
+  fire(stream, new MediaStreamTrackEvent("removetrack", { track }));
+}
+
+// --- RTCCertificate --------------------------------------------------------
+
+const _certRid = Symbol("[[certRid]]");
+const certificateRegistry = new SafeFinalizationRegistry((id) =>
+  op_webrtc_certificate_drop(id)
+);
+
+class RTCCertificate {
+  #expires;
+  #fingerprints;
+
+  constructor(key = undefined, info = undefined) {
+    if (key !== illegalConstructorKey) {
+      webidl.illegalConstructor();
+    }
+    this[_certRid] = info.id;
+    // The key goes with the object (a connection keeps its own copy).
+    certificateRegistry.register(this, info.id);
+    this.#expires = info.expires;
+    this.#fingerprints = info.fingerprints;
+    this[webidl.brand] = webidl.brand;
+  }
+
+  get expires() {
+    webidl.assertBranded(this, RTCCertificatePrototype);
+    return this.#expires;
+  }
+
+  getFingerprints() {
+    webidl.assertBranded(this, RTCCertificatePrototype);
+    return ArrayPrototypeMap(this.#fingerprints, (f) => ({
+      algorithm: f.algorithm,
+      value: f.value,
+    }));
+  }
+}
+webidl.configureInterface(RTCCertificate);
+const RTCCertificatePrototype = RTCCertificate.prototype;
+
+// WebCrypto's AlgorithmIdentifier as generateCertificate takes it.
+function normalizeKeygen(keygenAlgorithm) {
+  if (typeof keygenAlgorithm === "string") {
+    keygenAlgorithm = { name: keygenAlgorithm };
+  }
+  if (keygenAlgorithm === null || typeof keygenAlgorithm !== "object") {
+    throw new TypeError("generateCertificate: an algorithm is required");
+  }
+  const name = String(keygenAlgorithm.name ?? "");
+  const upper = StringPrototypeToUpperCase(name);
+  const hash = keygenAlgorithm.hash;
+  const out = {
+    name,
+    namedCurve: keygenAlgorithm.namedCurve === undefined
+      ? null
+      : String(keygenAlgorithm.namedCurve),
+    modulusLength: keygenAlgorithm.modulusLength === undefined
+      ? null
+      : webidl.converters["unsigned long"](keygenAlgorithm.modulusLength),
+    publicExponent: keygenAlgorithm.publicExponent === undefined
+      ? null
+      : ArrayFrom(keygenAlgorithm.publicExponent),
+    hash: hash === undefined
+      ? null
+      : typeof hash === "string"
+      ? hash
+      : String(hash?.name ?? ""),
+  };
+  if (upper !== "ECDSA" && upper !== "RSASSA-PKCS1-V1_5") {
+    throw new DOMException(
+      `'${name}' is not a supported certificate algorithm`,
+      "NotSupportedError",
+    );
+  }
+  return out;
+}
+
+// --- RTCDtlsTransport / RTCIceTransport -------------------------------------
+
+const _transportState = Symbol("[[transportState]]");
+
+class RTCIceTransport extends EventTarget {
+  constructor(key = undefined, pc = undefined) {
+    if (key !== illegalConstructorKey) {
+      webidl.illegalConstructor();
+    }
+    super();
+    this[_pc] = pc;
+    this[_transportState] = { state: "new", gatheringState: "new" };
+    this[webidl.brand] = webidl.brand;
+  }
+
+  get role() {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    const pc = this[_pc];
+    const local = pc[_state].lastLocalType;
+    if (local === undefined) return "unknown";
+    // The offerer is controlling (an ICE-lite peer never is, but that is
+    // only the server extension's case and it answers).
+    return pc[_state].offerer ? "controlling" : "controlled";
+  }
+  get component() {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    return "rtp";
+  }
+  get state() {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    return this[_transportState].state;
+  }
+  get gatheringState() {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    return this[_transportState].gatheringState;
+  }
+  getSelectedCandidatePair() {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    return selectedPair(this[_pc]);
+  }
+  getLocalParameters() {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    return iceParameters(this[_pc].localDescription);
+  }
+  getRemoteParameters() {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    return iceParameters(this[_pc].remoteDescription);
+  }
+}
+defineEventHandler(RTCIceTransport.prototype, "statechange");
+defineEventHandler(RTCIceTransport.prototype, "gatheringstatechange");
+defineEventHandler(RTCIceTransport.prototype, "selectedcandidatepairchange");
+webidl.configureInterface(RTCIceTransport);
+const RTCIceTransportPrototype = RTCIceTransport.prototype;
+
+function iceParameters(description) {
+  if (description === null) return null;
+  let usernameFragment = null;
+  let password = null;
+  const lines = StringPrototypeSplit(description.sdp, "\n");
+  for (let i = 0; i < lines.length; ++i) {
+    const line = StringPrototypeTrim(lines[i]);
+    if (StringPrototypeStartsWith(line, "a=ice-ufrag:")) {
+      usernameFragment ??= StringPrototypeSlice(line, 12);
+    } else if (StringPrototypeStartsWith(line, "a=ice-pwd:")) {
+      password ??= StringPrototypeSlice(line, 10);
+    }
+  }
+  if (usernameFragment === null) return null;
+  return { usernameFragment, password };
+}
+
+class RTCDtlsTransport extends EventTarget {
+  constructor(key = undefined, pc = undefined) {
+    if (key !== illegalConstructorKey) {
+      webidl.illegalConstructor();
+    }
+    super();
+    this[_pc] = pc;
+    this[_transportState] = {
+      state: "new",
+      ice: new RTCIceTransport(illegalConstructorKey, pc),
+    };
+    this[webidl.brand] = webidl.brand;
+  }
+
+  get iceTransport() {
+    webidl.assertBranded(this, RTCDtlsTransportPrototype);
+    return this[_transportState].ice;
+  }
+  get state() {
+    webidl.assertBranded(this, RTCDtlsTransportPrototype);
+    return this[_transportState].state;
+  }
+  getRemoteCertificates() {
+    webidl.assertBranded(this, RTCDtlsTransportPrototype);
+    return [];
+  }
+}
+defineEventHandler(RTCDtlsTransport.prototype, "statechange");
+defineEventHandler(RTCDtlsTransport.prototype, "error");
+webidl.configureInterface(RTCDtlsTransport);
+const RTCDtlsTransportPrototype = RTCDtlsTransport.prototype;
+
+// The connection's one (bundled) DTLS transport, from its first description.
+function dtlsTransportOf(pc) {
+  const state = pc[_state];
+  if (
+    state.lastLocalType === undefined && state.lastRemoteType === undefined
+  ) {
+    return null;
+  }
+  if (state.dtls === null || state.dtls === undefined) {
+    state.dtls = new RTCDtlsTransport(illegalConstructorKey, pc);
+    // Created late (on first access): take the current states without
+    // events.
+    setTransportStates(pc, true);
+  }
+  return state.dtls;
+}
+
+function setTransportStates(pc, silent = false) {
+  const notify = (target) => {
+    if (!silent) fire(target, new Event("statechange"));
+  };
+  const dtls = pc[_state].dtls;
+  if (dtls === undefined || dtls === null) return;
+  const s = pc[_state];
+  const ice = dtls[_transportState].ice;
+  const iceState = s.closed ? "closed" : s.iceConnectionState;
+  if (ice[_transportState].state !== iceState) {
+    ice[_transportState].state = iceState;
+    notify(ice);
+  }
+  const gathering = s.iceGatheringState;
+  if (ice[_transportState].gatheringState !== gathering) {
+    ice[_transportState].gatheringState = gathering;
+    if (!silent) fire(ice, new Event("gatheringstatechange"));
+  }
+  let dtlsState = dtls[_transportState].state;
+  if (s.closed || s.connectionState === "closed") dtlsState = "closed";
+  else if (s.connectionState === "failed") dtlsState = "failed";
+  else if (s.connectionState === "connected") dtlsState = "connected";
+  else if (s.connectionState === "connecting") dtlsState = "connecting";
+  if (dtls[_transportState].state !== dtlsState) {
+    dtls[_transportState].state = dtlsState;
+    notify(dtls);
+  }
+}
+
+// The selected pair as RTCIceCandidates, from the candidates this side
+// signalled and received (matched by address); null before ICE connects.
+function selectedPair(pc) {
+  const state = pc[_state];
+  if (state.closed) return null;
+  const pair = op_webrtc_pc_selected_pair(pc[_rid]);
+  if (pair === null) return null;
+  const find = (list, addr) => {
+    for (let i = 0; i < list.length; ++i) {
+      const c = list[i];
+      if (`${c.address}:${c.port}` === addr) return c;
+    }
+    return null;
+  };
+  const synth = (addr) => {
+    const sep = StringPrototypeLastIndexOf(addr, ":");
+    const host = StringPrototypeReplace(
+      StringPrototypeReplace(StringPrototypeSlice(addr, 0, sep), "[", ""),
+      "]",
+      "",
+    );
+    return new RTCIceCandidate({
+      candidate: `candidate:0 1 udp 0 ${host} ${
+        StringPrototypeSlice(addr, sep + 1)
+      } typ prflx`,
+      sdpMLineIndex: 0,
+    });
+  };
+  return {
+    local: find(state.localCandidates, pair[0]) ?? synth(pair[0]),
+    remote: find(state.remoteCandidates, pair[1]) ?? synth(pair[1]),
+  };
+}
+
+// --- RTCRtpSender / RTCRtpReceiver / RTCRtpTransceiver ---------------------
+
+const _key = Symbol("[[key]]");
+const _transceiver = Symbol("[[transceiver]]");
+
+const capabilitiesCache = new SafeMap();
+
+function capabilities(kind, sender) {
+  const k = `${sender ? "s" : "r"}:${kind}`;
+  if (!MapPrototypeHas(capabilitiesCache, k)) {
+    MapPrototypeSet(
+      capabilitiesCache,
+      k,
+      op_webrtc_capabilities(String(kind), sender),
+    );
+  }
+  const caps = MapPrototypeGet(capabilitiesCache, k);
+  if (caps === null) return null;
+  return {
+    codecs: ArrayPrototypeMap(caps.codecs, (c) => ({ ...c })),
+    headerExtensions: ArrayPrototypeMap(
+      caps.headerExtensions,
+      (h) => ({ ...h }),
+    ),
+  };
+}
+
+function statsFor(pc, key, sender) {
+  if (pc[_state].closed) {
+    return PromiseReject(invalidState("RTCPeerConnection is closed"));
+  }
+  try {
+    return PromiseResolve(
+      new RTCStatsReport(
+        illegalConstructorKey,
+        op_webrtc_pc_get_stats(pc[_rid], key ?? 0, key !== null, sender),
+      ),
+    );
+  } catch (error) {
+    return PromiseReject(error);
+  }
+}
+
+// What a sender is fed from: the track's source, while the track is live and
+// enabled (a disabled track sends nothing, as a muted one in a browser sends
+// silence / black).
+function updateSenderSource(sender, previous, next) {
+  if (previous !== null && previous[_source] !== null) {
+    SetPrototypeDelete(previous[_source].senders, sender);
+  }
+  if (next !== null && next[_source] !== null) {
+    SetPrototypeAdd(next[_source].senders, sender);
+  }
+}
+
+class RTCRtpSender {
+  constructor(key = undefined, pc = undefined, transceiver = undefined) {
+    if (key !== illegalConstructorKey) {
+      webidl.illegalConstructor();
+    }
+    this[_pc] = pc;
+    this[_transceiver] = transceiver;
+    this[_state] = {
+      track: null,
+      // Ever had a track (addTrack doesn't reuse such a transceiver).
+      used: false,
+      streams: [],
+      lastParameters: null,
+      encodings: [],
+    };
+    this[webidl.brand] = webidl.brand;
+  }
+
+  get track() {
+    webidl.assertBranded(this, RTCRtpSenderPrototype);
+    return this[_state].track;
+  }
+  get transport() {
+    webidl.assertBranded(this, RTCRtpSenderPrototype);
+    return dtlsTransportOf(this[_pc]);
+  }
+  get dtmf() {
+    webidl.assertBranded(this, RTCRtpSenderPrototype);
+    return null;
+  }
+
+  static getCapabilities(kind) {
+    webidl.requiredArguments(
+      arguments.length,
+      1,
+      "Failed to execute 'getCapabilities' on 'RTCRtpSender'",
+    );
+    return capabilities(kind, true);
+  }
+
+  getParameters() {
+    webidl.assertBranded(this, RTCRtpSenderPrototype);
+    const pc = this[_pc];
+    const transceiver = this[_transceiver];
+    let negotiated = { codecs: [], headerExtensions: [], encodings: [] };
+    if (!pc[_state].closed) {
+      try {
+        negotiated = op_webrtc_sender_parameters(
+          pc[_rid],
+          transceiver[_key],
+        ) ?? negotiated;
+      } catch {
+        // The transceiver is gone.
+      }
+    }
+    const state = this[_state];
+    const kind = transceiver[_state].kind;
+    const encodings = ArrayPrototypeMap(state.encodings, (e) => {
+      const out = { active: e.active };
+      if (e.rid !== undefined) out.rid = e.rid;
+      if (e.maxBitrate !== undefined) out.maxBitrate = e.maxBitrate;
+      if (e.maxFramerate !== undefined) out.maxFramerate = e.maxFramerate;
+      if (kind === "video") {
+        out.scaleResolutionDownBy = e.scaleResolutionDownBy ?? 1;
+      }
+      out.priority = e.priority ?? "low";
+      out.networkPriority = e.networkPriority ?? "low";
+      return out;
+    });
+    const hasNegotiated = transceiver[_state].currentDirection !== null;
+    const params = {
+      transactionId: uuid(),
+      encodings,
+      headerExtensions: hasNegotiated
+        ? ArrayPrototypeMap(negotiated.headerExtensions, (h) => ({ ...h }))
+        : [],
+      rtcp: { cname: pc[_state].cname, reducedSize: false },
+      codecs: hasNegotiated
+        ? ArrayPrototypeMap(negotiated.codecs, (c) => ({ ...c }))
+        : [],
+    };
+    state.lastParameters = {
+      transactionId: params.transactionId,
+      snapshot: JSONStringify({
+        e: ArrayPrototypeMap(params.encodings, (e) => e.rid ?? null),
+        h: params.headerExtensions,
+        r: params.rtcp,
+        c: params.codecs,
+      }),
+    };
+    // The transaction id is valid until the current task ends.
+    const timers = pc[_state].timers;
+    const timer = setTimeout(() => {
+      SetPrototypeDelete(timers, timer);
+      if (state.lastParameters?.transactionId === params.transactionId) {
+        state.lastParameters = null;
+      }
+    }, 0);
+    SetPrototypeAdd(timers, timer);
+    return params;
+  }
+
+  setParameters(parameters, _setParameterOptions = undefined) {
+    webidl.assertBranded(this, RTCRtpSenderPrototype);
+    const transceiver = this[_transceiver];
+    const state = this[_state];
+    try {
+      if (transceiver[_state].stopping || transceiver[_state].stopped) {
+        throw invalidState("The transceiver is stopped");
+      }
+      if (parameters === null || typeof parameters !== "object") {
+        throw new TypeError("setParameters: parameters are required");
+      }
+      const last = state.lastParameters;
+      if (last === null) {
+        throw invalidState("getParameters() must be called first");
+      }
+      if (String(parameters.transactionId) !== last.transactionId) {
+        throw new DOMException(
+          "The transactionId doesn't match the last getParameters()",
+          "InvalidModificationError",
+        );
+      }
+      const encodings = ArrayFrom(parameters.encodings ?? []);
+      const snapshot = JSONStringify({
+        e: ArrayPrototypeMap(encodings, (e) => e?.rid ?? null),
+        h: ArrayFrom(parameters.headerExtensions ?? []),
+        r: parameters.rtcp ?? {},
+        c: ArrayFrom(parameters.codecs ?? []),
+      });
+      if (
+        encodings.length !== state.encodings.length ||
+        snapshot !== last.snapshot
+      ) {
+        throw new DOMException(
+          "Read-only parameters changed",
+          "InvalidModificationError",
+        );
+      }
+      const next = validateEncodings(
+        encodings,
+        transceiver[_state].kind,
+        "setParameters",
+        true,
+      );
+      state.lastParameters = null;
+      state.encodings = next;
+      const pc = this[_pc];
+      if (!pc[_state].closed) {
+        op_webrtc_sender_set_paused(
+          pc[_rid],
+          transceiver[_key],
+          state.track === null || !next[0]?.active,
+        );
+      }
+      return PromiseResolve();
+    } catch (error) {
+      return PromiseReject(error);
+    }
+  }
+
+  replaceTrack(withTrack) {
+    webidl.assertBranded(this, RTCRtpSenderPrototype);
+    const pc = this[_pc];
+    const transceiver = this[_transceiver];
+    if (
+      withTrack !== null &&
+      !ObjectPrototypeIsPrototypeOf(MediaStreamTrackPrototype, withTrack)
+    ) {
+      return PromiseReject(
+        new TypeError("replaceTrack: not a MediaStreamTrack or null"),
+      );
+    }
+    if (withTrack !== null && withTrack.kind !== transceiver[_state].kind) {
+      return PromiseReject(
+        new TypeError(
+          `replaceTrack: a ${withTrack.kind} track on a ${
+            transceiver[_state].kind
+          } sender`,
+        ),
+      );
+    }
+    return enqueue(pc, () => {
+      if (transceiver[_state].stopping || transceiver[_state].stopped) {
+        throw invalidState("The transceiver is stopped");
+      }
+      setSenderTrack(this, withTrack);
+    });
+  }
+
+  setStreams(...streams) {
+    webidl.assertBranded(this, RTCRtpSenderPrototype);
+    const pc = this[_pc];
+    if (pc[_state].closed) throw invalidState("RTCPeerConnection is closed");
+    for (let i = 0; i < streams.length; ++i) {
+      if (!ObjectPrototypeIsPrototypeOf(MediaStreamPrototype, streams[i])) {
+        throw new TypeError("setStreams: not a MediaStream");
+      }
+    }
+    this[_state].streams = ArrayPrototypeMap(streams, (s) => s.id);
+    op_webrtc_sender_set_streams(
+      pc[_rid],
+      this[_transceiver][_key],
+      this[_state].streams,
+    );
+    queueNegotiationNeeded(pc);
+  }
+
+  getStats() {
+    webidl.assertBranded(this, RTCRtpSenderPrototype);
+    return statsFor(this[_pc], this[_transceiver][_key], true);
+  }
+}
+webidl.configureInterface(RTCRtpSender);
+const RTCRtpSenderPrototype = RTCRtpSender.prototype;
+
+function setSenderTrack(sender, track) {
+  const state = sender[_state];
+  const previous = state.track;
+  state.track = track;
+  if (track !== null) state.used = true;
+  updateSenderSource(sender, previous, track);
+  const pc = sender[_pc];
+  if (!pc[_state].closed) {
+    op_webrtc_sender_set_paused(
+      pc[_rid],
+      sender[_transceiver][_key],
+      track === null || !(state.encodings[0]?.active ?? true),
+    );
+  }
+}
+
+class RTCRtpReceiver {
+  constructor(key = undefined, pc = undefined, transceiver = undefined) {
+    if (key !== illegalConstructorKey) {
+      webidl.illegalConstructor();
+    }
+    this[_pc] = pc;
+    this[_transceiver] = transceiver;
+    this[_state] = {
+      track: null,
+      clones: [],
+      jitterBufferTarget: null,
+      // [[AssociatedRemoteMediaStreams]]
+      streams: [],
+      receiving: false,
+    };
+    this[_state].track = new MediaStreamTrack(illegalConstructorKey, {
+      kind: transceiver[_state].kind,
+      label: `remote ${transceiver[_state].kind}`,
+      muted: true,
+      receiver: this,
+    });
+    this[webidl.brand] = webidl.brand;
+  }
+
+  get track() {
+    webidl.assertBranded(this, RTCRtpReceiverPrototype);
+    return this[_state].track;
+  }
+  get transport() {
+    webidl.assertBranded(this, RTCRtpReceiverPrototype);
+    return dtlsTransportOf(this[_pc]);
+  }
+  get jitterBufferTarget() {
+    webidl.assertBranded(this, RTCRtpReceiverPrototype);
+    return this[_state].jitterBufferTarget;
+  }
+  set jitterBufferTarget(value) {
+    webidl.assertBranded(this, RTCRtpReceiverPrototype);
+    if (value === null) {
+      this[_state].jitterBufferTarget = null;
+      return;
+    }
+    const target = webidl.converters["double"](value);
+    if (target < 0 || target > 4000) {
+      throw new RangeError("jitterBufferTarget must be between 0 and 4000");
+    }
+    this[_state].jitterBufferTarget = target;
+  }
+
+  static getCapabilities(kind) {
+    webidl.requiredArguments(
+      arguments.length,
+      1,
+      "Failed to execute 'getCapabilities' on 'RTCRtpReceiver'",
+    );
+    return capabilities(kind, false);
+  }
+
+  getParameters() {
+    webidl.assertBranded(this, RTCRtpReceiverPrototype);
+    const pc = this[_pc];
+    const transceiver = this[_transceiver];
+    let negotiated = { codecs: [], headerExtensions: [] };
+    if (!pc[_state].closed && transceiver[_state].currentDirection !== null) {
+      try {
+        negotiated = op_webrtc_receiver_parameters(
+          pc[_rid],
+          transceiver[_key],
+        ) ?? negotiated;
+      } catch {
+        // The transceiver is gone.
+      }
+    }
+    return {
+      headerExtensions: ArrayPrototypeMap(
+        negotiated.headerExtensions,
+        (h) => ({ ...h }),
+      ),
+      rtcp: { reducedSize: false },
+      codecs: ArrayPrototypeMap(negotiated.codecs, (c) => ({ ...c })),
+    };
+  }
+
+  getContributingSources() {
+    webidl.assertBranded(this, RTCRtpReceiverPrototype);
+    return receiverSources(this, true);
+  }
+
+  getSynchronizationSources() {
+    webidl.assertBranded(this, RTCRtpReceiverPrototype);
+    return receiverSources(this, false);
+  }
+
+  getStats() {
+    webidl.assertBranded(this, RTCRtpReceiverPrototype);
+    return statsFor(this[_pc], this[_transceiver][_key], false);
+  }
+}
+webidl.configureInterface(RTCRtpReceiver);
+const RTCRtpReceiverPrototype = RTCRtpReceiver.prototype;
+
+function receiverSources(receiver, contributing) {
+  const pc = receiver[_pc];
+  if (pc[_state].closed) return [];
+  try {
+    const kind = receiver[_transceiver][_state].kind;
+    return ArrayPrototypeMap(
+      op_webrtc_receiver_sources(
+        pc[_rid],
+        receiver[_transceiver][_key],
+        contributing,
+      ),
+      (s) => {
+        const out = {
+          timestamp: s.timestamp,
+          source: s.source,
+          rtpTimestamp: s.rtpTimestamp,
+        };
+        // No audio level: that needs the RFC 6464 header extension, which
+        // isn't negotiated.
+        if (kind === "audio" && s.audioLevel !== undefined) {
+          out.audioLevel = s.audioLevel;
+        }
+        return out;
+      },
+    );
+  } catch {
+    return [];
+  }
+}
+
+const DIRECTIONS = ["sendrecv", "sendonly", "recvonly", "inactive"];
+
+class RTCRtpTransceiver {
+  constructor(key = undefined, pc = undefined, init = undefined) {
+    if (key !== illegalConstructorKey) {
+      webidl.illegalConstructor();
+    }
+    this[_pc] = pc;
+    this[_key] = init.key;
+    this[_state] = {
+      kind: init.kind,
+      mid: init.mid ?? null,
+      direction: init.direction ?? "sendrecv",
+      currentDirection: null,
+      stopping: false,
+      stopped: false,
+    };
+    this[_state].sender = new RTCRtpSender(illegalConstructorKey, pc, this);
+    this[_state].receiver = new RTCRtpReceiver(
+      illegalConstructorKey,
+      pc,
+      this,
+    );
+    this[webidl.brand] = webidl.brand;
+  }
+
+  get mid() {
+    webidl.assertBranded(this, RTCRtpTransceiverPrototype);
+    return this[_state].mid;
+  }
+  get sender() {
+    webidl.assertBranded(this, RTCRtpTransceiverPrototype);
+    return this[_state].sender;
+  }
+  get receiver() {
+    webidl.assertBranded(this, RTCRtpTransceiverPrototype);
+    return this[_state].receiver;
+  }
+  get direction() {
+    webidl.assertBranded(this, RTCRtpTransceiverPrototype);
+    const state = this[_state];
+    return state.stopping || state.stopped ? "stopped" : state.direction;
+  }
+  set direction(value) {
+    webidl.assertBranded(this, RTCRtpTransceiverPrototype);
+    const direction = String(value);
+    if (!ArrayPrototypeIncludes(DIRECTIONS, direction)) {
+      throw new TypeError(
+        `'${direction}' is not a valid value for 'direction'`,
+      );
+    }
+    const pc = this[_pc];
+    const state = this[_state];
+    if (pc[_state].closed) throw invalidState("RTCPeerConnection is closed");
+    if (state.stopping || state.stopped) {
+      throw invalidState("The transceiver is stopped");
+    }
+    if (state.direction === direction) return;
+    state.direction = direction;
+    op_webrtc_transceiver_set_direction(pc[_rid], this[_key], direction);
+    queueNegotiationNeeded(pc);
+  }
+  get currentDirection() {
+    webidl.assertBranded(this, RTCRtpTransceiverPrototype);
+    const state = this[_state];
+    return state.stopped ? "stopped" : state.currentDirection;
+  }
+
+  stop() {
+    webidl.assertBranded(this, RTCRtpTransceiverPrototype);
+    const pc = this[_pc];
+    if (pc[_state].closed) throw invalidState("RTCPeerConnection is closed");
+    const state = this[_state];
+    if (state.stopping || state.stopped) return;
+    stopSending(this);
+    state.stopping = true;
+    op_webrtc_transceiver_stop(pc[_rid], this[_key]);
+    queueNegotiationNeeded(pc);
+  }
+
+  setCodecPreferences(codecs) {
+    webidl.assertBranded(this, RTCRtpTransceiverPrototype);
+    const pc = this[_pc];
+    const list = codecs === undefined || codecs === null
+      ? []
+      : ArrayFrom(codecs);
+    if (list.length > 0) {
+      const kind = this[_state].kind;
+      const send = capabilities(kind, true)?.codecs ?? [];
+      const recv = capabilities(kind, false)?.codecs ?? [];
+      const known = (c) => {
+        const match = (k) =>
+          StringPrototypeToLowerCase(k.mimeType) ===
+            StringPrototypeToLowerCase(String(c.mimeType)) &&
+          k.clockRate === c.clockRate &&
+          (k.channels ?? null) === (c.channels ?? null) &&
+          (k.sdpFmtpLine ?? null) === (c.sdpFmtpLine ?? null);
+        return ArrayPrototypeSome(recv, match) ||
+          ArrayPrototypeSome(send, match);
+      };
+      for (let i = 0; i < list.length; ++i) {
+        const c = list[i];
+        if (c === null || typeof c !== "object" || !known(c)) {
+          throw new DOMException(
+            `setCodecPreferences: ${c?.mimeType} is not a supported codec`,
+            "InvalidModificationError",
+          );
+        }
+      }
+      // Only repair formats (RTX, RED, FEC) isn't a usable preference.
+      const onlyRepair = ArrayPrototypeEvery(list, (c) => {
+        const m = StringPrototypeToLowerCase(String(c.mimeType));
+        return StringPrototypeEndsWith(m, "/rtx") ||
+          StringPrototypeEndsWith(m, "/red") ||
+          StringPrototypeIncludes(m, "fec");
+      });
+      if (onlyRepair) {
+        throw new DOMException(
+          "setCodecPreferences: only repair codecs",
+          "InvalidModificationError",
+        );
+      }
+    }
+    if (pc[_state].closed) return;
+    op_webrtc_transceiver_set_codec_preferences(
+      pc[_rid],
+      this[_key],
+      ArrayPrototypeMap(list, (c) => ({
+        mimeType: String(c.mimeType),
+        clockRate: c.clockRate,
+        channels: c.channels ?? null,
+        sdpFmtpLine: c.sdpFmtpLine ?? null,
+      })),
+    );
+  }
+}
+webidl.configureInterface(RTCRtpTransceiver);
+const RTCRtpTransceiverPrototype = RTCRtpTransceiver.prototype;
+
+function stopSending(transceiver) {
+  const sender = transceiver[_state].sender;
+  updateSenderSource(sender, sender[_state].track, null);
+  const receiver = transceiver[_state].receiver;
+  removeRemoteTrack(transceiver);
+  closeReaders(receiver);
+  endTrack(receiver[_state].track);
+  for (let i = 0; i < receiver[_state].clones.length; ++i) {
+    endTrack(receiver[_state].clones[i]);
+  }
+}
+
+class RTCTrackEvent extends Event {
+  #init;
+
+  constructor(type, eventInitDict = undefined) {
+    super(type, eventInitDict);
+    const init = eventInitDict ?? { __proto__: null };
+    if (
+      !ObjectPrototypeIsPrototypeOf(RTCRtpReceiverPrototype, init.receiver) ||
+      !ObjectPrototypeIsPrototypeOf(MediaStreamTrackPrototype, init.track) ||
+      !ObjectPrototypeIsPrototypeOf(
+        RTCRtpTransceiverPrototype,
+        init.transceiver,
+      )
+    ) {
+      throw new TypeError(
+        "Failed to construct 'RTCTrackEvent': receiver, track and transceiver are required",
+      );
+    }
+    this.#init = {
+      receiver: init.receiver,
+      track: init.track,
+      streams: ObjectFreeze(ArrayFrom(init.streams ?? [])),
+      transceiver: init.transceiver,
+    };
+  }
+
+  get receiver() {
+    return this.#init.receiver;
+  }
+  get track() {
+    return this.#init.track;
+  }
+  get streams() {
+    return this.#init.streams;
+  }
+  get transceiver() {
+    return this.#init.transceiver;
+  }
+}
+webidl.configureInterface(RTCTrackEvent);
+
+// sendEncodings / setParameters encodings, validated as the spec says.
+function validateEncodings(list, kind, method, keepRid) {
+  const out = [];
+  const rids = new SafeSet();
+  for (let i = 0; i < list.length; ++i) {
+    const e = list[i];
+    if (e === null || typeof e !== "object") {
+      throw new TypeError(`${method}: an encoding must be an object`);
+    }
+    const enc = { active: e.active === undefined ? true : !!e.active };
+    if (e.rid !== undefined) {
+      const rid = String(e.rid);
+      if (
+        rid.length === 0 || rid.length > 255 ||
+        !RegExpPrototypeTest(RID_RE, rid)
+      ) {
+        throw new TypeError(`${method}: '${rid}' is not a valid rid`);
+      }
+      if (SetPrototypeHas(rids, rid)) {
+        throw new TypeError(`${method}: the rid '${rid}' is repeated`);
+      }
+      SetPrototypeAdd(rids, rid);
+      enc.rid = rid;
+    } else if (list.length > 1 && !keepRid) {
+      throw new TypeError(`${method}: every encoding of several needs a rid`);
+    }
+    if (e.maxBitrate !== undefined) {
+      enc.maxBitrate = webidl.converters["unsigned long"](e.maxBitrate);
+    }
+    if (e.maxFramerate !== undefined) {
+      const f = webidl.converters["double"](e.maxFramerate);
+      if (f < 0) throw new RangeError(`${method}: maxFramerate below 0`);
+      enc.maxFramerate = f;
+    }
+    if (e.scaleResolutionDownBy !== undefined && kind === "video") {
+      const s = webidl.converters["double"](e.scaleResolutionDownBy);
+      if (s < 1) {
+        throw new RangeError(`${method}: scaleResolutionDownBy below 1`);
+      }
+      enc.scaleResolutionDownBy = s;
+    } else if (kind === "video" && !keepRid) {
+      enc.scaleResolutionDownBy = 2 ** (list.length - 1 - i);
+    }
+    if (e.priority !== undefined) enc.priority = String(e.priority);
+    if (e.networkPriority !== undefined) {
+      enc.networkPriority = String(e.networkPriority);
+    }
+    ArrayPrototypePush(out, enc);
+  }
+  return out;
+}
+const RID_RE = new SafeRegExp("^[A-Za-z0-9]+$");
+
+// The process of removing a remote track (the remote side stopped sending).
+function removeRemoteTrack(transceiver) {
+  const receiver = transceiver[_state].receiver;
+  const rstate = receiver[_state];
+  if (!rstate.receiving) return;
+  rstate.receiving = false;
+  const streams = rstate.streams;
+  rstate.streams = [];
+  for (let i = 0; i < streams.length; ++i) {
+    streamRemoveRemote(streams[i], rstate.track);
+  }
+  setMuted(rstate.track, true);
+}
+
 // --- RTCPeerConnection -----------------------------------------------------
 
 function convertIceServers(servers) {
@@ -783,14 +2108,17 @@ function convertIceServers(servers) {
   return out;
 }
 
-function convertConfiguration(configuration) {
+function convertConfiguration(configuration, prefix) {
   const config = configuration ?? { __proto__: null };
+  if (typeof config !== "object") {
+    throw new TypeError(`${prefix}: the configuration must be an object`);
+  }
   const iceTransportPolicy = config.iceTransportPolicy === undefined
     ? "all"
     : String(config.iceTransportPolicy);
   if (iceTransportPolicy !== "all" && iceTransportPolicy !== "relay") {
     throw new TypeError(
-      `Failed to construct 'RTCPeerConnection': '${iceTransportPolicy}' is not a valid value for 'iceTransportPolicy'`,
+      `${prefix}: '${iceTransportPolicy}' is not a valid value for 'iceTransportPolicy'`,
     );
   }
   const bundlePolicy = config.bundlePolicy === undefined
@@ -803,7 +2131,7 @@ function convertConfiguration(configuration) {
     )
   ) {
     throw new TypeError(
-      `Failed to construct 'RTCPeerConnection': '${bundlePolicy}' is not a valid value for 'bundlePolicy'`,
+      `${prefix}: '${bundlePolicy}' is not a valid value for 'bundlePolicy'`,
     );
   }
   const rtcpMuxPolicy = config.rtcpMuxPolicy === undefined
@@ -811,21 +2139,43 @@ function convertConfiguration(configuration) {
     : String(config.rtcpMuxPolicy);
   if (rtcpMuxPolicy !== "require") {
     throw new TypeError(
-      `Failed to construct 'RTCPeerConnection': '${rtcpMuxPolicy}' is not a valid value for 'rtcpMuxPolicy'`,
+      `${prefix}: '${rtcpMuxPolicy}' is not a valid value for 'rtcpMuxPolicy'`,
     );
   }
-  if (config.certificates !== undefined && config.certificates.length > 0) {
-    throw new DOMException(
-      "RTCConfiguration.certificates is not supported",
-      "NotSupportedError",
-    );
+  const iceCandidatePoolSize = config.iceCandidatePoolSize === undefined
+    ? 0
+    : webidl.converters["octet"](config.iceCandidatePoolSize, prefix, "", {
+      enforceRange: true,
+    });
+  let certificates = [];
+  if (config.certificates !== undefined) {
+    if (
+      config.certificates === null ||
+      typeof config.certificates[SymbolIterator] !== "function"
+    ) {
+      throw new TypeError(`${prefix}: 'certificates' must be a sequence`);
+    }
+    certificates = ArrayFrom(config.certificates);
+    for (let i = 0; i < certificates.length; ++i) {
+      if (
+        !ObjectPrototypeIsPrototypeOf(
+          RTCCertificatePrototype,
+          certificates[i],
+        )
+      ) {
+        throw new TypeError(`${prefix}: not an RTCCertificate`);
+      }
+    }
   }
+  const network = null;
   return {
     iceServers: convertIceServers(config.iceServers),
     iceTransportPolicy,
     bundlePolicy,
     rtcpMuxPolicy,
-    iceCandidatePoolSize: config.iceCandidatePoolSize ?? 0,
+    iceCandidatePoolSize,
+    certificates,
+    network,
   };
 }
 
@@ -842,13 +2192,46 @@ function nextSignalingState(_current, local, type) {
   return "stable";
 }
 
+// The legacy callback forms (successCallback, failureCallback): the promise
+// form runs and settles the callbacks; the returned promise resolves to
+// undefined.
+function legacy(promise, success, failure) {
+  return PromisePrototypeThen(
+    promise,
+    (value) => {
+      FunctionPrototypeCall(success, undefined, value);
+    },
+    (error) => {
+      if (typeof failure === "function") {
+        FunctionPrototypeCall(failure, undefined, error);
+      }
+    },
+  );
+}
+
 class RTCPeerConnection extends EventTarget {
   constructor(configuration = undefined) {
     super();
-    const config = convertConfiguration(configuration);
+    const prefix = "Failed to construct 'RTCPeerConnection'";
+    const config = convertConfiguration(configuration, prefix);
+    const now = DateNow();
+    for (let i = 0; i < config.certificates.length; ++i) {
+      if (config.certificates[i].expires <= now) {
+        throw new DOMException(
+          `${prefix}: an RTCCertificate has expired`,
+          "InvalidAccessError",
+        );
+      }
+    }
     this[_rid] = op_webrtc_pc_create({
       iceServers: config.iceServers,
       iceTransportPolicy: config.iceTransportPolicy,
+      bundlePolicy: config.bundlePolicy,
+      certificates: ArrayPrototypeMap(
+        config.certificates,
+        (c) => c[_certRid],
+      ),
+      network: config.network === null ? null : config.network[_rid],
     });
     this[_channels] = new SafeMap();
     this[_state] = {
@@ -860,10 +2243,26 @@ class RTCPeerConnection extends EventTarget {
       iceConnectionState: "new",
       connectionState: "new",
       sctp: null,
+      dtls: null,
+      transceivers: [],
+      // Remote MediaStreams by id.
+      streams: new SafeMap(),
+      localCandidates: [],
+      remoteCandidates: [],
+      cname: uuid(),
+      offerer: false,
+      lastLocalType: undefined,
+      lastRemoteType: undefined,
+      negotiationQueued: false,
+      // getParameters() transaction timers, cleared by close().
+      timers: new SafeSet(),
       // Operations chain: createOffer / createAnswer / set*Description /
       // addIceCandidate run in call order, as the spec's operations chain.
       chain: PromiseResolve(),
     };
+    if (config.network !== null) {
+      SetPrototypeAdd(config.network[_state].connections, this);
+    }
     this[webidl.brand] = webidl.brand;
     pump(this);
   }
@@ -920,11 +2319,45 @@ class RTCPeerConnection extends EventTarget {
     return state.sctp;
   }
 
-  createOffer(options = undefined) {
+  createOffer(
+    options = undefined,
+    failure = undefined,
+    legacyOptions = undefined,
+  ) {
     webidl.assertBranded(this, RTCPeerConnectionPrototype);
+    if (typeof options === "function") {
+      return legacy(this.createOffer(legacyOptions), options, failure);
+    }
     return enqueue(this, () => {
-      const iceRestart = !!options?.iceRestart || !!this[_state].restartIce;
-      this[_state].restartIce = false;
+      const state = this[_state];
+      const iceRestart = !!options?.iceRestart || !!state.restartIce;
+      state.restartIce = false;
+      // Legacy offerToReceiveAudio / offerToReceiveVideo: a recvonly
+      // transceiver of that kind when there is none to receive on.
+      const kinds = ["audio", "video"];
+      for (let k = 0; k < kinds.length; ++k) {
+        const kind = kinds[k];
+        const key = kind === "audio"
+          ? "offerToReceiveAudio"
+          : "offerToReceiveVideo";
+        if (options?.[key] === undefined) continue;
+        const want = !!options[key];
+        const existing = ArrayPrototypeFilter(
+          state.transceivers,
+          (t) => t[_state].kind === kind && !t[_state].stopped,
+        );
+        if (want && existing.length === 0) {
+          this.addTransceiver(kind, { direction: "recvonly" });
+        } else if (!want) {
+          for (let i = 0; i < existing.length; ++i) {
+            const t = existing[i];
+            if (t[_state].direction === "sendrecv") t.direction = "sendonly";
+            else if (t[_state].direction === "recvonly") {
+              t.direction = "inactive";
+            }
+          }
+        }
+      }
       // A plain RTCSessionDescriptionInit, as the spec has it (libraries
       // such as simple-peer edit its `sdp` before setLocalDescription).
       return {
@@ -934,8 +2367,11 @@ class RTCPeerConnection extends EventTarget {
     });
   }
 
-  createAnswer(_options = undefined) {
+  createAnswer(options = undefined, failure = undefined) {
     webidl.assertBranded(this, RTCPeerConnectionPrototype);
+    if (typeof options === "function") {
+      return legacy(this.createAnswer(), options, failure);
+    }
     return enqueue(this, () => {
       const state = this[_state].signalingState;
       if (state !== "have-remote-offer" && state !== "have-local-pranswer") {
@@ -950,8 +2386,15 @@ class RTCPeerConnection extends EventTarget {
     });
   }
 
-  setLocalDescription(description = undefined) {
+  setLocalDescription(
+    description = undefined,
+    success = undefined,
+    failure = undefined,
+  ) {
     webidl.assertBranded(this, RTCPeerConnectionPrototype);
+    if (typeof success === "function") {
+      return legacy(this.setLocalDescription(description), success, failure);
+    }
     return enqueue(this, () => {
       let type = description?.type;
       let sdp = description?.sdp;
@@ -966,19 +2409,56 @@ class RTCPeerConnection extends EventTarget {
       if (!ArrayPrototypeIncludes(SDP_TYPES, type)) {
         throw new TypeError(`'${type}' is not a valid RTCSdpType`);
       }
+      if (type === "rollback" && signaling === "stable") {
+        throw invalidState(
+          "Nothing to roll back in signaling state 'stable'",
+        );
+      }
+      if (
+        (type === "answer" || type === "pranswer") &&
+        signaling !== "have-remote-offer" &&
+        signaling !== "have-local-pranswer"
+      ) {
+        throw invalidState(
+          `Cannot set a local ${type} in signaling state '${signaling}'`,
+        );
+      }
+      if (
+        type === "offer" && signaling !== "stable" &&
+        signaling !== "have-local-offer"
+      ) {
+        throw invalidState(
+          `Cannot set a local offer in signaling state '${signaling}'`,
+        );
+      }
       if (type !== "rollback" && (sdp === undefined || sdp === "")) {
         sdp = type === "offer"
           ? op_webrtc_pc_create_offer(this[_rid], false)
           : op_webrtc_pc_create_answer(this[_rid]);
       }
       op_webrtc_pc_set_local_description(this[_rid], type, sdp ?? "");
+      const state = this[_state];
+      if (type !== "rollback") {
+        state.lastLocalType = type;
+        if (type === "offer") state.offerer = true;
+        else if (type === "answer") state.offerer = false;
+      }
       activate(this);
+      syncTransceivers(this, { remote: false, type });
       setSignalingState(this, nextSignalingState(signaling, true, type));
+      setTransportStates(this);
     });
   }
 
-  setRemoteDescription(description) {
+  setRemoteDescription(
+    description = undefined,
+    success = undefined,
+    failure = undefined,
+  ) {
     webidl.assertBranded(this, RTCPeerConnectionPrototype);
+    if (typeof success === "function") {
+      return legacy(this.setRemoteDescription(description), success, failure);
+    }
     return enqueue(this, () => {
       if (description === undefined || description === null) {
         throw new TypeError(
@@ -990,18 +2470,68 @@ class RTCPeerConnection extends EventTarget {
         throw new TypeError(`'${type}' is not a valid RTCSdpType`);
       }
       const signaling = this[_state].signalingState;
-      op_webrtc_pc_set_remote_description(
-        this[_rid],
-        type,
-        description.sdp === undefined ? "" : String(description.sdp),
-      );
+      if (type === "rollback" && signaling === "stable") {
+        throw invalidState(
+          "Nothing to roll back in signaling state 'stable'",
+        );
+      }
+      if (
+        (type === "answer" || type === "pranswer") &&
+        signaling !== "have-local-offer" &&
+        signaling !== "have-remote-pranswer"
+      ) {
+        throw invalidState(
+          `Cannot set a remote ${type} in signaling state '${signaling}'`,
+        );
+      }
+      if (type === "offer" && signaling === "have-local-offer") {
+        // Implicit rollback (perfect negotiation's polite peer).
+        op_webrtc_pc_set_local_description(this[_rid], "rollback", "");
+        syncTransceivers(this, { remote: false, type: "rollback" });
+        setSignalingState(this, "stable");
+      }
+      const sdp = description.sdp === undefined ? "" : String(description.sdp);
+      if (type !== "rollback" && StringPrototypeTrim(sdp) === "") {
+        throw new DOMException(
+          "setRemoteDescription: the description has no SDP",
+          "InvalidAccessError",
+        );
+      }
+      op_webrtc_pc_set_remote_description(this[_rid], type, sdp);
+      const state = this[_state];
+      if (type !== "rollback") {
+        state.lastRemoteType = type;
+        if (type === "offer") state.offerer = false;
+      }
       activate(this);
-      setSignalingState(this, nextSignalingState(signaling, false, type));
+      const now = this[_state].signalingState;
+      setSignalingState(this, nextSignalingState(now, false, type));
+      syncTransceivers(this, { remote: true, type });
+      setTransportStates(this);
     });
   }
 
-  addIceCandidate(candidate = undefined) {
+  addIceCandidate(
+    candidate = undefined,
+    success = undefined,
+    failure = undefined,
+  ) {
     webidl.assertBranded(this, RTCPeerConnectionPrototype);
+    if (typeof success === "function") {
+      return legacy(this.addIceCandidate(candidate), success, failure);
+    }
+    if (
+      candidate !== undefined && candidate !== null &&
+      candidate.candidate !== undefined && candidate.candidate !== "" &&
+      (candidate.sdpMid ?? null) === null &&
+      (candidate.sdpMLineIndex ?? null) === null
+    ) {
+      return PromiseReject(
+        new TypeError(
+          "Failed to execute 'addIceCandidate': sdpMid and sdpMLineIndex are both null",
+        ),
+      );
+    }
     return enqueue(this, () => {
       if (candidate === undefined || candidate === null) return;
       const line = candidate.candidate === undefined
@@ -1009,22 +2539,55 @@ class RTCPeerConnection extends EventTarget {
         : String(candidate.candidate);
       const sdpMid = candidate.sdpMid ?? null;
       const sdpMLineIndex = candidate.sdpMLineIndex ?? null;
-      if (line !== "" && sdpMid === null && sdpMLineIndex === null) {
-        throw new TypeError(
-          "Failed to execute 'addIceCandidate': sdpMid and sdpMLineIndex are both null",
-        );
-      }
       if (this.remoteDescription === null) {
         throw invalidState(
           "addIceCandidate needs a remote description first",
         );
       }
+      if (sdpMid !== null) {
+        const mids = midsOf(this.remoteDescription.sdp);
+        if (!ArrayPrototypeIncludes(mids, String(sdpMid))) {
+          throw new DOMException(
+            `addIceCandidate: no media section with mid '${sdpMid}'`,
+            "OperationError",
+          );
+        }
+      } else if (sdpMLineIndex !== null) {
+        const count = midsOf(this.remoteDescription.sdp).length;
+        if (sdpMLineIndex >= count) {
+          throw new DOMException(
+            `addIceCandidate: no media section ${sdpMLineIndex}`,
+            "OperationError",
+          );
+        }
+      }
+      const ufrag = candidate.usernameFragment ?? null;
+      if (ufrag !== null) {
+        const remote = iceParameters(this.remoteDescription);
+        if (remote !== null && remote.usernameFragment !== ufrag) {
+          throw new DOMException(
+            "addIceCandidate: the usernameFragment is not the remote description's",
+            "OperationError",
+          );
+        }
+      }
       op_webrtc_pc_add_ice_candidate(this[_rid], {
         candidate: line,
         sdpMid: sdpMid === null ? null : String(sdpMid),
         sdpMLineIndex,
-        usernameFragment: candidate.usernameFragment ?? null,
+        usernameFragment: ufrag,
       });
+      if (line !== "") {
+        ArrayPrototypePush(
+          this[_state].remoteCandidates,
+          new RTCIceCandidate({
+            candidate: line,
+            sdpMid: sdpMid === null ? null : String(sdpMid),
+            sdpMLineIndex,
+            usernameFragment: ufrag,
+          }),
+        );
+      }
     });
   }
 
@@ -1045,9 +2608,14 @@ class RTCPeerConnection extends EventTarget {
       maxPacketLifeTime: dict.maxPacketLifeTime === undefined ||
           dict.maxPacketLifeTime === null
         ? null
-        : webidl.converters["unsigned short"](dict.maxPacketLifeTime, "", "", {
-          clamp: true,
-        }),
+        : webidl.converters["unsigned short"](
+          dict.maxPacketLifeTime,
+          "",
+          "",
+          {
+            clamp: true,
+          },
+        ),
       maxRetransmits:
         dict.maxRetransmits === undefined || dict.maxRetransmits === null
           ? null
@@ -1082,6 +2650,13 @@ class RTCPeerConnection extends EventTarget {
         "Failed to execute 'createDataChannel': label too long",
       );
     }
+    if (
+      TypedArrayPrototypeGetByteLength(core.encode(init.protocol)) > 65535
+    ) {
+      throw new TypeError(
+        "Failed to execute 'createDataChannel': protocol too long",
+      );
+    }
     const created = op_webrtc_pc_create_data_channel(this[_rid], {
       label: init.label,
       ordered: init.ordered,
@@ -1102,52 +2677,120 @@ class RTCPeerConnection extends EventTarget {
     return channel;
   }
 
-  getStats(_selector = undefined) {
+  getStats(selector = null) {
     webidl.assertBranded(this, RTCPeerConnectionPrototype);
     if (this[_state].closed) {
       return PromiseReject(invalidState("RTCPeerConnection is closed"));
     }
-    try {
-      const entries = op_webrtc_pc_get_stats(this[_rid]);
-      return PromiseResolve(
-        new RTCStatsReport(illegalConstructorKey, entries),
-      );
-    } catch (error) {
-      return PromiseReject(error);
+    if (selector !== null && selector !== undefined) {
+      if (
+        !ObjectPrototypeIsPrototypeOf(MediaStreamTrackPrototype, selector)
+      ) {
+        return PromiseReject(
+          new TypeError("getStats: the selector must be a MediaStreamTrack"),
+        );
+      }
+      const matches = [];
+      const transceivers = this[_state].transceivers;
+      for (let i = 0; i < transceivers.length; ++i) {
+        const t = transceivers[i];
+        if (t[_state].sender[_state].track === selector) {
+          ArrayPrototypePush(matches, [t, true]);
+        }
+        if (t[_state].receiver[_state].track === selector) {
+          ArrayPrototypePush(matches, [t, false]);
+        }
+      }
+      if (matches.length !== 1) {
+        return PromiseReject(
+          new DOMException(
+            "getStats: the track is not sent or received by exactly one sender or receiver",
+            "InvalidAccessError",
+          ),
+        );
+      }
+      return statsFor(this, matches[0][0][_key], matches[0][1]);
     }
+    return statsFor(this, null, false);
   }
 
   getConfiguration() {
     webidl.assertBranded(this, RTCPeerConnectionPrototype);
     const config = this[_state].config;
-    return {
-      iceServers: ArrayPrototypeMap(config.iceServers, (s) => ({ ...s })),
+    const out = {
+      iceServers: ArrayPrototypeMap(config.iceServers, (s) => {
+        const server = { urls: ArrayPrototypeSlice(s.urls) };
+        if (s.username !== undefined) server.username = s.username;
+        if (s.credential !== undefined) server.credential = s.credential;
+        return server;
+      }),
       iceTransportPolicy: config.iceTransportPolicy,
       bundlePolicy: config.bundlePolicy,
       rtcpMuxPolicy: config.rtcpMuxPolicy,
       iceCandidatePoolSize: config.iceCandidatePoolSize,
-      certificates: [],
+      certificates: ArrayPrototypeSlice(config.certificates),
     };
+    if (config.network !== null) out.denoNetwork = config.network;
+    return out;
   }
 
   setConfiguration(configuration = undefined) {
     webidl.assertBranded(this, RTCPeerConnectionPrototype);
+    const prefix =
+      "Failed to execute 'setConfiguration' on 'RTCPeerConnection'";
     if (this[_state].closed) {
       throw invalidState("RTCPeerConnection is closed");
     }
-    const config = convertConfiguration(configuration);
+    const config = convertConfiguration(configuration, prefix);
     const current = this[_state].config;
     if (
       config.bundlePolicy !== current.bundlePolicy ||
       config.rtcpMuxPolicy !== current.rtcpMuxPolicy
     ) {
       throw new DOMException(
-        "bundlePolicy and rtcpMuxPolicy can't change",
+        `${prefix}: bundlePolicy and rtcpMuxPolicy can't change`,
         "InvalidModificationError",
       );
     }
-    // The ICE servers and policy apply to the next gathering, which this
-    // implementation starts once per connection: a change is recorded only.
+    const sameCerts = config.certificates.length === 0 ||
+      (config.certificates.length === current.certificates.length &&
+        ArrayPrototypeEvery(
+          config.certificates,
+          (c, i) => c === current.certificates[i],
+        ));
+    if (!sameCerts) {
+      throw new DOMException(
+        `${prefix}: certificates can't change`,
+        "InvalidModificationError",
+      );
+    }
+    if (
+      config.network !== current.network &&
+      configuration?.denoNetwork !== undefined
+    ) {
+      throw new DOMException(
+        `${prefix}: denoNetwork can't change`,
+        "InvalidModificationError",
+      );
+    }
+    if (
+      config.iceCandidatePoolSize !== current.iceCandidatePoolSize &&
+      this.localDescription !== null
+    ) {
+      throw new DOMException(
+        `${prefix}: iceCandidatePoolSize can't change after setLocalDescription`,
+        "InvalidModificationError",
+      );
+    }
+    // Validates the ICE server URLs (SyntaxError / InvalidAccessError) and
+    // the net permission for them; they apply to the next gathering (an
+    // ICE restart).
+    op_webrtc_pc_set_ice_servers(this[_rid], {
+      iceServers: config.iceServers,
+      iceTransportPolicy: config.iceTransportPolicy,
+    });
+    config.certificates = current.certificates;
+    config.network = current.network;
     this[_state].config = config;
   }
 
@@ -1155,35 +2798,199 @@ class RTCPeerConnection extends EventTarget {
     webidl.assertBranded(this, RTCPeerConnectionPrototype);
     if (this[_state].closed) return;
     this[_state].restartIce = true;
-    fire(this, new Event("negotiationneeded"));
+    queueNegotiationNeeded(this);
   }
 
   getSenders() {
-    return [];
+    webidl.assertBranded(this, RTCPeerConnectionPrototype);
+    return ArrayPrototypeMap(
+      ArrayPrototypeFilter(
+        this[_state].transceivers,
+        (t) => !t[_state].stopped,
+      ),
+      (t) => t[_state].sender,
+    );
   }
   getReceivers() {
-    return [];
+    webidl.assertBranded(this, RTCPeerConnectionPrototype);
+    return ArrayPrototypeMap(
+      ArrayPrototypeFilter(
+        this[_state].transceivers,
+        (t) => !t[_state].stopped,
+      ),
+      (t) => t[_state].receiver,
+    );
   }
   getTransceivers() {
-    return [];
+    webidl.assertBranded(this, RTCPeerConnectionPrototype);
+    return ArrayPrototypeSlice(this[_state].transceivers);
   }
-  addTrack() {
-    throw new DOMException(
-      "Media tracks are not supported by Deno's RTCPeerConnection (data channels only)",
-      "NotSupportedError",
+
+  addTrack(track, ...streams) {
+    webidl.assertBranded(this, RTCPeerConnectionPrototype);
+    webidl.requiredArguments(
+      arguments.length,
+      1,
+      "Failed to execute 'addTrack' on 'RTCPeerConnection'",
     );
+    if (!ObjectPrototypeIsPrototypeOf(MediaStreamTrackPrototype, track)) {
+      throw new TypeError(
+        "Failed to execute 'addTrack' on 'RTCPeerConnection': not a MediaStreamTrack",
+      );
+    }
+    for (let i = 0; i < streams.length; ++i) {
+      if (!ObjectPrototypeIsPrototypeOf(MediaStreamPrototype, streams[i])) {
+        throw new TypeError(
+          "Failed to execute 'addTrack' on 'RTCPeerConnection': not a MediaStream",
+        );
+      }
+    }
+    const state = this[_state];
+    if (state.closed) throw invalidState("RTCPeerConnection is closed");
+    const transceivers = state.transceivers;
+    for (let i = 0; i < transceivers.length; ++i) {
+      if (transceivers[i][_state].sender[_state].track === track) {
+        throw new DOMException(
+          "addTrack: the track already has a sender on this connection",
+          "InvalidAccessError",
+        );
+      }
+    }
+    const streamIds = ArrayPrototypeMap(streams, (s) => s.id);
+    // Reuse a transceiver of the same kind whose sender never had a track.
+    const reuse = ArrayPrototypeFind(
+      transceivers,
+      (t) =>
+        t[_state].kind === track.kind && !t[_state].stopping &&
+        !t[_state].stopped && t[_state].sender[_state].track === null &&
+        !t[_state].sender[_state].used,
+    );
+    if (reuse !== undefined) {
+      op_webrtc_pc_attach_track(this[_rid], reuse[_key], {
+        id: track.id,
+        label: track.label,
+      }, streamIds);
+      const codec = track[_source]?.codec ?? null;
+      if (codec !== null) {
+        op_webrtc_transceiver_set_codec_preferences(this[_rid], reuse[_key], [
+          codec,
+        ]);
+      }
+      const sender = reuse[_state].sender;
+      sender[_state].streams = streamIds;
+      setSenderTrack(sender, track);
+      const d = reuse[_state].direction;
+      reuse[_state].direction = d === "recvonly"
+        ? "sendrecv"
+        : d === "inactive"
+        ? "sendonly"
+        : d;
+      queueNegotiationNeeded(this);
+      return sender;
+    }
+    const transceiver = addTransceiverInner(this, track, {
+      direction: "sendrecv",
+      streams,
+    });
+    return transceiver[_state].sender;
   }
-  removeTrack() {
-    throw new DOMException(
-      "Media tracks are not supported by Deno's RTCPeerConnection (data channels only)",
-      "NotSupportedError",
+
+  removeTrack(sender) {
+    webidl.assertBranded(this, RTCPeerConnectionPrototype);
+    webidl.requiredArguments(
+      arguments.length,
+      1,
+      "Failed to execute 'removeTrack' on 'RTCPeerConnection'",
     );
+    if (!ObjectPrototypeIsPrototypeOf(RTCRtpSenderPrototype, sender)) {
+      throw new TypeError(
+        "Failed to execute 'removeTrack' on 'RTCPeerConnection': not an RTCRtpSender",
+      );
+    }
+    if (this[_state].closed) {
+      throw invalidState("RTCPeerConnection is closed");
+    }
+    if (sender[_pc] !== this) {
+      throw new DOMException(
+        "removeTrack: the sender belongs to another connection",
+        "InvalidAccessError",
+      );
+    }
+    const transceiver = sender[_transceiver];
+    if (transceiver[_state].stopped || sender[_state].track === null) return;
+    setSenderTrack(sender, null);
+    const d = transceiver[_state].direction;
+    const next = d === "sendrecv"
+      ? "recvonly"
+      : d === "sendonly"
+      ? "inactive"
+      : d;
+    if (next !== d) {
+      transceiver[_state].direction = next;
+      op_webrtc_transceiver_set_direction(
+        this[_rid],
+        transceiver[_key],
+        next,
+      );
+    }
+    queueNegotiationNeeded(this);
   }
-  addTransceiver() {
-    throw new DOMException(
-      "Media tracks are not supported by Deno's RTCPeerConnection (data channels only)",
-      "NotSupportedError",
+
+  addTransceiver(trackOrKind, init = undefined) {
+    webidl.assertBranded(this, RTCPeerConnectionPrototype);
+    webidl.requiredArguments(
+      arguments.length,
+      1,
+      "Failed to execute 'addTransceiver' on 'RTCPeerConnection'",
     );
+    let track = null;
+    if (typeof trackOrKind === "string") {
+      if (trackOrKind !== "audio" && trackOrKind !== "video") {
+        throw new TypeError(
+          `Failed to execute 'addTransceiver': '${trackOrKind}' is not a valid media kind`,
+        );
+      }
+    } else if (
+      ObjectPrototypeIsPrototypeOf(MediaStreamTrackPrototype, trackOrKind)
+    ) {
+      track = trackOrKind;
+    } else {
+      throw new TypeError(
+        "Failed to execute 'addTransceiver': expected a MediaStreamTrack or 'audio' / 'video'",
+      );
+    }
+    const dict = init ?? { __proto__: null };
+    const direction = dict.direction === undefined
+      ? "sendrecv"
+      : String(dict.direction);
+    if (!ArrayPrototypeIncludes(DIRECTIONS, direction)) {
+      throw new TypeError(
+        `Failed to execute 'addTransceiver': '${direction}' is not a valid direction`,
+      );
+    }
+    const streams = dict.streams === undefined ? [] : ArrayFrom(dict.streams);
+    for (let i = 0; i < streams.length; ++i) {
+      if (!ObjectPrototypeIsPrototypeOf(MediaStreamPrototype, streams[i])) {
+        throw new TypeError(
+          "Failed to execute 'addTransceiver': not a MediaStream",
+        );
+      }
+    }
+    const kind = track === null ? trackOrKind : track.kind;
+    const sendEncodings = validateEncodings(
+      dict.sendEncodings === undefined ? [] : ArrayFrom(dict.sendEncodings),
+      kind,
+      "addTransceiver",
+      false,
+    );
+    if (this[_state].closed) {
+      throw invalidState("RTCPeerConnection is closed");
+    }
+    return addTransceiverInner(this, track ?? kind, {
+      direction,
+      streams,
+      sendEncodings,
+    });
   }
 
   close() {
@@ -1199,10 +3006,34 @@ class RTCPeerConnection extends EventTarget {
     }
     state.closed = true;
     state.active = false;
+    SetPrototypeForEach(state.timers, (timer) => clearTimeout(timer));
+    state.timers = new SafeSet();
     state.signalingState = "closed";
     state.iceConnectionState = "closed";
     state.connectionState = "closed";
     op_webrtc_pc_close(this[_rid]);
+    if (state.config.network !== null) {
+      SetPrototypeDelete(state.config.network[_state].connections, this);
+    }
+    // Every transceiver stops; receiver tracks end without an event, as
+    // close() is the application's own doing.
+    for (let i = 0; i < state.transceivers.length; ++i) {
+      const t = state.transceivers[i];
+      const sender = t[_state].sender;
+      updateSenderSource(sender, sender[_state].track, null);
+      t[_state].stopped = true;
+      t[_state].stopping = false;
+      t[_state].currentDirection = null;
+      const receiver = t[_state].receiver;
+      receiver[_state].track[_trackState].readyState = "ended";
+      receiver[_state].receiving = false;
+      closeReaders(receiver);
+    }
+    // The transports report closed (no events after close()).
+    if (state.dtls !== null) {
+      state.dtls[_transportState].state = "closed";
+      state.dtls[_transportState].ice[_transportState].state = "closed";
+    }
     // Every channel is closed at once; like browsers, each still reports
     // `close` (in a later task, after close() returns).
     const channels = [];
@@ -1222,12 +3053,29 @@ class RTCPeerConnection extends EventTarget {
     }
   }
 
-  static generateCertificate(_keygenAlgorithm) {
-    return PromiseReject(
-      new DOMException(
-        "RTCPeerConnection.generateCertificate is not supported",
-        "NotSupportedError",
-      ),
+  static generateCertificate(keygenAlgorithm) {
+    let alg;
+    try {
+      webidl.requiredArguments(
+        arguments.length,
+        1,
+        "Failed to execute 'generateCertificate' on 'RTCPeerConnection'",
+      );
+      alg = normalizeKeygen(keygenAlgorithm);
+    } catch (error) {
+      return PromiseReject(error);
+    }
+    // `expires` (ms from now) is the spec's extension of the algorithm
+    // dictionary; 30 days by default, as browsers do.
+    let expires = 30 * 24 * 3600 * 1000;
+    if (keygenAlgorithm?.expires !== undefined) {
+      expires = webidl.converters["unsigned long long"](
+        keygenAlgorithm.expires,
+      );
+    }
+    return PromisePrototypeThen(
+      op_webrtc_generate_certificate(alg, expires),
+      (info) => new RTCCertificate(illegalConstructorKey, info),
     );
   }
 
@@ -1253,6 +3101,191 @@ defineEventHandler(RTCPeerConnection.prototype, "datachannel");
 defineEventHandler(RTCPeerConnection.prototype, "track");
 webidl.configureInterface(RTCPeerConnection);
 const RTCPeerConnectionPrototype = RTCPeerConnection.prototype;
+
+function midsOf(sdp) {
+  const mids = [];
+  let inMedia = false;
+  const lines = StringPrototypeSplit(sdp, "\n");
+  for (let i = 0; i < lines.length; ++i) {
+    const line = StringPrototypeTrim(lines[i]);
+    if (StringPrototypeStartsWith(line, "m=")) {
+      if (inMedia) ArrayPrototypePush(mids, null);
+      inMedia = true;
+    } else if (inMedia && StringPrototypeStartsWith(line, "a=mid:")) {
+      ArrayPrototypePush(mids, StringPrototypeSlice(line, 6));
+      inMedia = false;
+    }
+  }
+  if (inMedia) ArrayPrototypePush(mids, null);
+  return mids;
+}
+
+function addTransceiverInner(pc, trackOrKind, init) {
+  const track = typeof trackOrKind === "string" ? null : trackOrKind;
+  const kind = track === null ? trackOrKind : track.kind;
+  const streamIds = ArrayPrototypeMap(init.streams ?? [], (s) => s.id);
+  const key = op_webrtc_pc_add_transceiver(pc[_rid], {
+    kind,
+    track: track === null ? null : { id: track.id, label: track.label },
+    direction: init.direction,
+    streams: streamIds,
+    sendEncodings: ArrayPrototypeMap(init.sendEncodings ?? [], (e) => ({
+      rid: e.rid ?? null,
+      active: e.active,
+    })),
+    codec: track?.[_source]?.codec ?? null,
+  });
+  const transceiver = new RTCRtpTransceiver(illegalConstructorKey, pc, {
+    key,
+    kind,
+    direction: init.direction,
+  });
+  const sender = transceiver[_state].sender;
+  sender[_state].streams = streamIds;
+  sender[_state].encodings = init.sendEncodings?.length > 0
+    ? init.sendEncodings
+    : [
+      kind === "video"
+        ? { active: true, scaleResolutionDownBy: 1 }
+        : { active: true },
+    ];
+  if (track !== null) setSenderTrack(sender, track);
+  ArrayPrototypePush(pc[_state].transceivers, transceiver);
+  syncTransceivers(pc, null);
+  queueNegotiationNeeded(pc);
+  return transceiver;
+}
+
+// Reconciles the transceivers with the engine's after an operation: new
+// ones (a remote offer's), mids, current directions, ones a rollback
+// removed; after a remote description, the remote tracks (track events,
+// stream membership, mute) as the spec's "process the addition / removal of
+// a remote track".
+function syncTransceivers(pc, phase) {
+  const state = pc[_state];
+  if (state.closed) return;
+  const infos = op_webrtc_pc_transceivers(pc[_rid]);
+  const known = new SafeMap();
+  for (let i = 0; i < state.transceivers.length; ++i) {
+    const t = state.transceivers[i];
+    MapPrototypeSet(known, t[_key], t);
+  }
+  const next = [];
+  const settled = phase !== null &&
+    (phase.type === "answer" || phase.type === "rollback");
+  const trackEvents = [];
+  for (let i = 0; i < infos.length; ++i) {
+    const info = infos[i];
+    let t = MapPrototypeGet(known, info.key);
+    if (t === undefined) {
+      if (info.kind !== "audio" && info.kind !== "video") continue;
+      t = new RTCRtpTransceiver(illegalConstructorKey, pc, {
+        key: info.key,
+        kind: info.kind,
+        mid: info.mid,
+        direction: info.direction ?? "recvonly",
+      });
+      t[_state].sender[_state].encodings = info.kind === "video"
+        ? [{ active: true, scaleResolutionDownBy: 1 }]
+        : [{ active: true }];
+    }
+    const ts = t[_state];
+    if (phase !== null && phase.type === "rollback" && info.mid === null) {
+      ts.mid = null;
+    } else if (info.mid !== null) {
+      ts.mid = info.mid;
+    }
+    if (phase !== null) {
+      ts.currentDirection = info.currentDirection ?? ts.currentDirection;
+      if (info.currentDirection === null && settled && info.mid === null) {
+        ts.currentDirection = null;
+      }
+    }
+    const remote = info.remote;
+    if (settled && phase.type === "answer") {
+      if (ts.stopping || (remote !== null && remote.rejected)) {
+        if (!ts.stopped) {
+          stopSending(t);
+          ts.stopping = false;
+          ts.stopped = true;
+        }
+      }
+    }
+    if (
+      phase !== null && phase.remote && phase.type !== "rollback" &&
+      remote !== null && !ts.stopped && !ts.stopping
+    ) {
+      const remoteSends = !remote.rejected &&
+        (remote.direction === "sendrecv" || remote.direction === "sendonly");
+      const receptive = ts.direction === "sendrecv" ||
+        ts.direction === "recvonly";
+      const receiver = ts.receiver;
+      if (remoteSends && receptive) {
+        const streams = ArrayPrototypeMap(remote.streams, (id) => {
+          let stream = MapPrototypeGet(state.streams, id);
+          if (stream === undefined) {
+            stream = new MediaStream(illegalConstructorKey, id);
+            MapPrototypeSet(state.streams, id, stream);
+          }
+          return stream;
+        });
+        const rstate = receiver[_state];
+        const track = rstate.track;
+        const old = rstate.streams;
+        for (let j = 0; j < old.length; ++j) {
+          if (!ArrayPrototypeIncludes(streams, old[j])) {
+            streamRemoveRemote(old[j], track);
+          }
+        }
+        for (let j = 0; j < streams.length; ++j) {
+          if (!ArrayPrototypeIncludes(old, streams[j])) {
+            streamAddRemote(streams[j], track);
+          }
+        }
+        rstate.streams = streams;
+        if (!rstate.receiving) {
+          rstate.receiving = true;
+          ArrayPrototypePush(trackEvents, [t, streams]);
+        }
+      } else if (receiver[_state].receiving && !remoteSends) {
+        removeRemoteTrack(t);
+      }
+    }
+    if (!(settled && ts.stopped && phase.type === "answer")) {
+      ArrayPrototypePush(next, t);
+    }
+  }
+  state.transceivers = next;
+  for (let i = 0; i < trackEvents.length; ++i) {
+    const { 0: t, 1: streams } = trackEvents[i];
+    const receiver = t[_state].receiver;
+    fire(
+      pc,
+      new RTCTrackEvent("track", {
+        receiver,
+        track: receiver[_state].track,
+        streams,
+        transceiver: t,
+      }),
+    );
+  }
+}
+
+// Fires `negotiationneeded` once for any number of changes in one task, and
+// only while signaling is stable (a change during negotiation is picked up
+// when it returns to stable, by the engine's own flag).
+function queueNegotiationNeeded(pc) {
+  const state = pc[_state];
+  if (state.closed || state.negotiationQueued) return;
+  state.negotiationQueued = true;
+  // After the operations chain is empty, in a later microtask than the
+  // change (changes in the same task coalesce).
+  PromisePrototypeThen(PromisePrototypeThen(state.chain, () => {}), () => {
+    state.negotiationQueued = false;
+    if (state.closed || state.signalingState !== "stable") return;
+    fire(pc, new Event("negotiationneeded"));
+  });
+}
 
 // Runs `fn` on the operations chain; its result (or throw) settles the
 // returned promise. A closed connection rejects with InvalidStateError.
@@ -1321,6 +3354,10 @@ function channelFor(pc, event) {
   return MapPrototypeGet(pc[_channels], event.channel);
 }
 
+function transceiverFor(pc, key) {
+  return ArrayPrototypeFind(pc[_state].transceivers, (t) => t[_key] === key);
+}
+
 function dispatchEngineEvent(pc, event) {
   const state = pc[_state];
   switch (event.type) {
@@ -1331,6 +3368,7 @@ function dispatchEngineEvent(pc, event) {
         sdpMLineIndex: event.sdpMLineIndex,
         usernameFragment: event.usernameFragment,
       });
+      ArrayPrototypePush(state.localCandidates, candidate);
       fire(
         pc,
         new RTCPeerConnectionIceEvent("icecandidate", {
@@ -1358,6 +3396,7 @@ function dispatchEngineEvent(pc, event) {
     case "icegatheringstatechange":
       if (state.iceGatheringState === event.state) break;
       state.iceGatheringState = event.state;
+      setTransportStates(pc);
       fire(pc, new Event("icegatheringstatechange"));
       if (event.state === "complete") {
         // End of candidates: an icecandidate event with a null candidate.
@@ -1370,21 +3409,44 @@ function dispatchEngineEvent(pc, event) {
     case "iceconnectionstatechange":
       if (state.iceConnectionState === event.state) break;
       state.iceConnectionState = event.state;
+      setTransportStates(pc);
       fire(pc, new Event("iceconnectionstatechange"));
       break;
     case "connectionstatechange":
       if (state.connectionState === event.state) break;
       state.connectionState = event.state;
+      setTransportStates(pc);
       fire(pc, new Event("connectionstatechange"));
       if (event.state === "failed" || event.state === "closed") {
         deactivate(pc);
       }
       break;
     case "negotiationneeded":
-      if (state.signalingState === "stable") {
-        fire(pc, new Event("negotiationneeded"));
+      queueNegotiationNeeded(pc);
+      break;
+    case "trackunmute": {
+      const t = transceiverFor(pc, event.transceiver);
+      if (t === undefined) break;
+      const receiver = t[_state].receiver;
+      setMuted(receiver[_state].track, false);
+      for (let i = 0; i < receiver[_state].clones.length; ++i) {
+        setMuted(receiver[_state].clones[i], false);
       }
       break;
+    }
+    case "rtp": {
+      const t = transceiverFor(pc, event.transceiver);
+      if (t === undefined) break;
+      deliverRtp(t[_state].receiver, event.data);
+      break;
+    }
+    case "keyframerequest": {
+      const t = transceiverFor(pc, event.transceiver);
+      const track = t?.[_state].sender[_state].track;
+      if (track === null || track === undefined) break;
+      fire(track, new Event("keyframerequest"));
+      break;
+    }
     case "dcopen": {
       let channel = channelFor(pc, event);
       if (channel === undefined) {
@@ -1464,17 +3526,289 @@ function dispatchEngineEvent(pc, event) {
   }
 }
 
+// --- Deno.webrtc: the server-side extension ---------------------------------
+//
+// What a server needs and the standard doesn't have. Media: there is no
+// capture device or codec here, so a local track is an EncodedMediaTrack the
+// program feeds already-encoded frames or finished RTP packets, and a remote
+// track's packets are read with readRtp(). Networking: a Network
+// (createNetwork) fixes ports, shares one UDP port between connections,
+// advertises 1:1 NAT addresses and runs ICE-lite; a connection uses one with
+// the non-standard `RTCConfiguration.denoNetwork` member. Certificates:
+// exportCertificate / importCertificate keep a DTLS fingerprint across
+// restarts.
+
+const MIME_KINDS = { __proto__: null, audio: "audio/", video: "video/" };
+
+// Default clock rates and channels of the codecs browsers negotiate.
+function defaultCodec(kind, init) {
+  const mimeType = String(init.mimeType ?? "");
+  const lower = StringPrototypeToLowerCase(mimeType);
+  if (!StringPrototypeStartsWith(lower, MIME_KINDS[kind])) {
+    throw new TypeError(
+      `EncodedMediaTrack: '${mimeType}' is not a ${kind} codec`,
+    );
+  }
+  const known = {
+    __proto__: null,
+    "audio/opus": [48000, 2, "minptime=10;useinbandfec=1"],
+    "audio/g722": [8000, 0, null],
+    "audio/pcmu": [8000, 0, null],
+    "audio/pcma": [8000, 0, null],
+    "video/vp8": [90000, 0, null],
+    "video/vp9": [90000, 0, "profile-id=0"],
+    "video/h264": [
+      90000,
+      0,
+      "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+    ],
+    "video/h265": [90000, 0, null],
+    "video/av1": [90000, 0, null],
+  };
+  const d = known[lower] ?? [kind === "audio" ? 48000 : 90000, 0, null];
+  return {
+    mimeType,
+    clockRate: init.clockRate === undefined
+      ? d[0]
+      : webidl.converters["unsigned long"](init.clockRate),
+    channels: init.channels === undefined
+      ? (d[1] === 0 ? null : d[1])
+      : webidl.converters["unsigned short"](init.channels),
+    sdpFmtpLine: init.sdpFmtpLine === undefined
+      ? d[2]
+      : String(init.sdpFmtpLine),
+  };
+}
+
+function bytesOf(data, method) {
+  if (ArrayBufferIsView(data)) {
+    return isDataView(data)
+      ? new Uint8Array(
+        DataViewPrototypeGetBuffer(data),
+        DataViewPrototypeGetByteOffset(data),
+        DataViewPrototypeGetByteLength(data),
+      )
+      : new Uint8Array(
+        TypedArrayPrototypeGetBuffer(data),
+        TypedArrayPrototypeGetByteOffset(data),
+        TypedArrayPrototypeGetByteLength(data),
+      );
+  }
+  if (core.isAnyArrayBuffer(data)) return new Uint8Array(data);
+  throw new TypeError(`${method}: expected a BufferSource`);
+}
+
+// A sender currently fed by `source`: its track is one of the source's,
+// live and enabled, its connection open and its transceiver sending.
+function eachFedSender(source, fn) {
+  let n = 0;
+  SetPrototypeForEach(source.senders, (sender) => {
+    const track = sender[_state].track;
+    const pc = sender[_pc];
+    const t = sender[_transceiver][_state];
+    if (
+      track === null || track[_trackState].readyState !== "live" ||
+      !track[_trackState].enabled || pc[_state].closed || t.stopped ||
+      t.stopping || (t.direction !== "sendrecv" && t.direction !== "sendonly")
+    ) {
+      return;
+    }
+    if (fn(pc, sender[_transceiver][_key])) n++;
+  });
+  return n;
+}
+
+class EncodedMediaTrack extends MediaStreamTrack {
+  constructor(init = undefined, cloneInit = undefined) {
+    if (init === illegalConstructorKey) {
+      super(illegalConstructorKey, cloneInit);
+      return;
+    }
+    if (init === null || typeof init !== "object") {
+      throw new TypeError(
+        "Failed to construct 'EncodedMediaTrack': an init dictionary is required",
+      );
+    }
+    const kind = String(init.kind);
+    if (kind !== "audio" && kind !== "video") {
+      throw new TypeError(
+        `Failed to construct 'EncodedMediaTrack': '${kind}' is not a valid media kind`,
+      );
+    }
+    const source = {
+      tracks: new SafeSet(),
+      senders: new SafeSet(),
+      codec: defaultCodec(kind, init),
+      ctor: EncodedMediaTrack,
+    };
+    super(illegalConstructorKey, {
+      kind,
+      id: init.id === undefined ? undefined : String(init.id),
+      label: init.label === undefined ? "" : String(init.label),
+      source,
+    });
+  }
+
+  get codec() {
+    webidl.assertBranded(this, MediaStreamTrackPrototype);
+    return { ...this[_source].codec };
+  }
+
+  /** Sends one encoded frame on every connection this track is sent on,
+   * cut into RTP packets for the negotiated codec. Returns how many senders
+   * took it (0 before negotiation, or when stopped / disabled). */
+  writeFrame(data, options = undefined) {
+    webidl.assertBranded(this, MediaStreamTrackPrototype);
+    const bytes = bytesOf(data, "writeFrame");
+    const duration = options?.duration === undefined
+      ? (this[_trackState].kind === "audio" ? 20 : 1000 / 30)
+      : webidl.converters["double"](options.duration);
+    if (!(duration >= 0)) {
+      throw new RangeError("writeFrame: duration must be 0 or more");
+    }
+    if (this[_trackState].readyState !== "live") return 0;
+    return eachFedSender(
+      this[_source],
+      (pc, key) => op_webrtc_sender_write_frame(pc[_rid], key, bytes, duration),
+    );
+  }
+
+  /** Sends one finished RTP packet (header included) on every connection
+   * this track is sent on; its SSRC becomes each sender's, and an unknown
+   * payload type the negotiated one. */
+  writeRtp(packet) {
+    webidl.assertBranded(this, MediaStreamTrackPrototype);
+    const bytes = bytesOf(packet, "writeRtp");
+    if (this[_trackState].readyState !== "live") return 0;
+    return eachFedSender(
+      this[_source],
+      (pc, key) => op_webrtc_sender_write_rtp(pc[_rid], key, bytes),
+    );
+  }
+}
+defineEventHandler(EncodedMediaTrack.prototype, "keyframerequest");
+
+// readRtp(receiver): the receiver's RTP packets as a stream. Real-time
+// media doesn't wait: a packet that arrives while the stream's queue is
+// full (`highWaterMark` packets, 256 by default) is dropped.
+const _readers = Symbol("[[readers]]");
+
+function readRtp(receiver, options = undefined) {
+  if (!ObjectPrototypeIsPrototypeOf(RTCRtpReceiverPrototype, receiver)) {
+    throw new TypeError("readRtp: expected an RTCRtpReceiver");
+  }
+  const highWaterMark = options?.highWaterMark === undefined
+    ? 256
+    : webidl.converters["unsigned long"](options.highWaterMark);
+  const pc = receiver[_pc];
+  receiver[_readers] ??= new SafeSet();
+  const readers = receiver[_readers];
+  let controller;
+  const sync = () => {
+    if (pc[_state].closed) return;
+    op_webrtc_receiver_read_rtp(
+      pc[_rid],
+      receiver[_transceiver][_key],
+      readers.size > 0,
+    );
+  };
+  return new streams.ReadableStream({
+    start(c) {
+      controller = c;
+      if (pc[_state].closed) {
+        c.close();
+        return;
+      }
+      SetPrototypeAdd(readers, c);
+      sync();
+    },
+    cancel() {
+      SetPrototypeDelete(readers, controller);
+      sync();
+    },
+  }, { highWaterMark, size: () => 1 });
+}
+
+function deliverRtp(receiver, data) {
+  const readers = receiver[_readers];
+  if (readers === undefined) return;
+  let first = true;
+  SetPrototypeForEach(readers, (c) => {
+    if (c.desiredSize <= 0) return;
+    // Every reader gets its own copy but the first.
+    c.enqueue(first ? data : TypedArrayPrototypeSlice(data));
+    first = false;
+  });
+}
+
+function closeReaders(receiver) {
+  const readers = receiver[_readers];
+  if (readers === undefined) return;
+  SetPrototypeForEach(readers, (c) => {
+    try {
+      c.close();
+    } catch {
+      // Already closed.
+    }
+  });
+  receiver[_readers] = undefined;
+}
+
+function requestKeyFrame(receiver) {
+  if (!ObjectPrototypeIsPrototypeOf(RTCRtpReceiverPrototype, receiver)) {
+    throw new TypeError("requestKeyFrame: expected an RTCRtpReceiver");
+  }
+  const pc = receiver[_pc];
+  if (pc[_state].closed) return false;
+  return op_webrtc_receiver_request_key_frame(
+    pc[_rid],
+    receiver[_transceiver][_key],
+  );
+}
+
+function exportCertificate(certificate) {
+  if (!ObjectPrototypeIsPrototypeOf(RTCCertificatePrototype, certificate)) {
+    throw new TypeError("exportCertificate: expected an RTCCertificate");
+  }
+  return op_webrtc_certificate_to_pem(certificate[_certRid]);
+}
+
+function importCertificate(pem) {
+  const info = op_webrtc_certificate_from_pem(String(pem));
+  return new RTCCertificate(illegalConstructorKey, info);
+}
+
+const webrtcNs = ObjectFreeze({
+  __proto__: null,
+  EncodedMediaTrack,
+  readRtp,
+  requestKeyFrame,
+  exportCertificate,
+  importCertificate,
+});
+
 return {
+  MediaStream,
+  MediaStreamTrack,
+  MediaStreamTrackEvent,
+  RTCCertificate,
   RTCDataChannel,
   RTCDataChannelEvent,
+  RTCDtlsTransport,
   RTCError,
   RTCErrorEvent,
   RTCIceCandidate,
+  RTCIceTransport,
   RTCPeerConnection,
   RTCPeerConnectionIceErrorEvent,
   RTCPeerConnectionIceEvent,
+  RTCRtpReceiver,
+  RTCRtpSender,
+  RTCRtpTransceiver,
   RTCSctpTransport,
   RTCSessionDescription,
   RTCStatsReport,
+  RTCTrackEvent,
+  webrtcNs,
 };
 })();

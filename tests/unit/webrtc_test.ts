@@ -458,3 +458,635 @@ Deno.test(
     c.close();
   },
 );
+
+// --- Standard surface beyond data channels (certificates, media, transports)
+
+async function negotiate(a: RTCPeerConnection, b: RTCPeerConnection) {
+  const toB = trickle(a, b);
+  const toA = trickle(b, a);
+  await a.setLocalDescription();
+  await b.setRemoteDescription(a.localDescription!);
+  toB();
+  await b.setLocalDescription();
+  await a.setRemoteDescription(b.localDescription!);
+  toA();
+}
+
+function connected(pc: RTCPeerConnection) {
+  return pc.connectionState === "connected"
+    ? Promise.resolve()
+    : new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`still ${pc.connectionState}`)),
+        20_000,
+      );
+      pc.addEventListener("connectionstatechange", () => {
+        if (pc.connectionState === "connected") {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+    });
+}
+
+/** The next `count` RTP packets of a receiver, header included. */
+async function rtpPackets(receiver: RTCRtpReceiver, count: number) {
+  const reader = Deno.webrtc.readRtp(receiver).getReader();
+  const got: Uint8Array[] = [];
+  const timer = setTimeout(() => reader.cancel(), 20_000);
+  while (got.length < count) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    got.push(value);
+  }
+  clearTimeout(timer);
+  await reader.cancel();
+  return got;
+}
+
+Deno.test("webrtcMediaGlobals", () => {
+  for (
+    const name of [
+      "MediaStream",
+      "MediaStreamTrack",
+      "MediaStreamTrackEvent",
+      "RTCCertificate",
+      "RTCDtlsTransport",
+      "RTCIceTransport",
+      "RTCRtpReceiver",
+      "RTCRtpSender",
+      "RTCRtpTransceiver",
+      "RTCTrackEvent",
+    ]
+  ) {
+    assertEquals(
+      typeof (globalThis as Record<string, unknown>)[name],
+      "function",
+    );
+  }
+  // deno-lint-ignore no-explicit-any
+  assertThrows(() => new (MediaStreamTrack as any)(), TypeError);
+  // deno-lint-ignore no-explicit-any
+  assertThrows(() => new (RTCRtpSender as any)(), TypeError);
+  assertEquals(typeof Deno.webrtc.EncodedMediaTrack, "function");
+});
+
+Deno.test("webrtcGenerateCertificate", async () => {
+  const ecdsa = await RTCPeerConnection.generateCertificate(
+    {
+      name: "ECDSA",
+      namedCurve: "P-256",
+    } as AlgorithmIdentifier & RTCCertificateKeygenAlgorithm,
+  );
+  assert(ecdsa instanceof RTCCertificate);
+  const thirtyDays = 30 * 24 * 3600 * 1000;
+  assert(Math.abs(ecdsa.expires - (Date.now() + thirtyDays)) < 60_000);
+  const [fp] = ecdsa.getFingerprints();
+  assertEquals(fp.algorithm, "sha-256");
+  assert(/^([0-9a-f]{2}:){31}[0-9a-f]{2}$/.test(fp.value!));
+
+  const rsa = await RTCPeerConnection.generateCertificate({
+    name: "RSASSA-PKCS1-v1_5",
+    modulusLength: 2048,
+    publicExponent: new Uint8Array([1, 0, 1]),
+    hash: "SHA-256",
+    expires: 1000,
+  });
+  assert(rsa.expires <= Date.now() + 1000);
+  await assertRejects(
+    () =>
+      RTCPeerConnection.generateCertificate({
+        name: "ECDSA",
+        namedCurve: "P-521",
+      }),
+    DOMException,
+  );
+  await assertRejects(
+    () => RTCPeerConnection.generateCertificate({ name: "AES-GCM" }),
+    DOMException,
+  );
+});
+
+Deno.test("webrtcCertificatesConfiguration", async () => {
+  const cert = await RTCPeerConnection.generateCertificate({
+    name: "ECDSA",
+    namedCurve: "P-256",
+  });
+  const rsa = await RTCPeerConnection.generateCertificate({
+    name: "RSASSA-PKCS1-v1_5",
+    modulusLength: 2048,
+    publicExponent: new Uint8Array([1, 0, 1]),
+    hash: "SHA-256",
+  });
+  const a = new RTCPeerConnection({ certificates: [cert] });
+  const b = new RTCPeerConnection({ certificates: [rsa] });
+  assertEquals(a.getConfiguration().certificates, [cert]);
+  // The local description's fingerprint is the given certificate's.
+  const channel = a.createDataChannel("c");
+  await negotiate(a, b);
+  const fp = cert.getFingerprints()[0].value!.toUpperCase();
+  assert(a.localDescription!.sdp.toUpperCase().includes(fp));
+  const rsaFp = rsa.getFingerprints()[0].value!.toUpperCase();
+  assert(b.localDescription!.sdp.toUpperCase().includes(rsaFp));
+  // An ECDSA and an RSA peer complete DTLS.
+  await once(channel, "open");
+  // A connection's certificates can't change.
+  const other = await RTCPeerConnection.generateCertificate({
+    name: "ECDSA",
+    namedCurve: "P-256",
+  });
+  const err = assertThrows(
+    () => a.setConfiguration({ certificates: [other] }),
+    DOMException,
+  );
+  assertEquals((err as DOMException).name, "InvalidModificationError");
+  a.close();
+  b.close();
+
+  const expired = await RTCPeerConnection.generateCertificate({
+    name: "ECDSA",
+    namedCurve: "P-256",
+    expires: 0,
+  });
+  const e = assertThrows(
+    () => new RTCPeerConnection({ certificates: [expired] }),
+    DOMException,
+  );
+  assertEquals((e as DOMException).name, "InvalidAccessError");
+});
+
+Deno.test("webrtcCertificateExportImport", async () => {
+  const cert = await RTCPeerConnection.generateCertificate({
+    name: "ECDSA",
+    namedCurve: "P-256",
+  });
+  const pem = Deno.webrtc.exportCertificate(cert);
+  assert(pem.includes("-----BEGIN CERTIFICATE-----"));
+  const back = Deno.webrtc.importCertificate(pem);
+  assertEquals(back.getFingerprints(), cert.getFingerprints());
+  assertEquals(
+    Math.floor(back.expires / 1000),
+    Math.floor(cert.expires / 1000),
+  );
+  assertThrows(() => Deno.webrtc.importCertificate("nope"), DOMException);
+});
+
+Deno.test("webrtcAddTransceiver", async () => {
+  const pc = new RTCPeerConnection();
+  assertThrows(
+    () => pc.addTransceiver("text" as "audio"),
+    TypeError,
+  );
+  assertThrows(
+    () =>
+      pc.addTransceiver("audio", {
+        direction: "upwards" as RTCRtpTransceiverDirection,
+      }),
+    TypeError,
+  );
+  assertThrows(
+    () =>
+      pc.addTransceiver("video", {
+        sendEncodings: [{ scaleResolutionDownBy: 0.5 }],
+      }),
+    RangeError,
+  );
+  assertThrows(
+    () =>
+      pc.addTransceiver("video", {
+        sendEncodings: [{ rid: "a" }, { rid: "a" }],
+      }),
+    TypeError,
+  );
+  const audio = pc.addTransceiver("audio");
+  const video = pc.addTransceiver("video", { direction: "recvonly" });
+  assertEquals(pc.getTransceivers(), [audio, video]);
+  assertEquals(audio.direction, "sendrecv");
+  assertEquals(video.direction, "recvonly");
+  assertEquals(audio.currentDirection, null);
+  assertEquals(audio.mid, null);
+  assertEquals(audio.sender.track, null);
+  assertEquals(audio.receiver.track.kind, "audio");
+  assertEquals(audio.receiver.track.muted, true);
+  assertEquals(audio.receiver.track.readyState, "live");
+  assertEquals(pc.getSenders(), [audio.sender, video.sender]);
+  assertEquals(pc.getReceivers(), [audio.receiver, video.receiver]);
+  const offer = await pc.createOffer();
+  assert(offer.sdp!.includes("m=audio"));
+  assert(offer.sdp!.includes("m=video"));
+  assert(offer.sdp!.includes("a=recvonly"));
+  await pc.setLocalDescription(offer);
+  assertEquals(audio.mid !== null, true);
+  // direction can change; "stopped" is not settable.
+  video.direction = "inactive";
+  assertEquals(video.direction, "inactive");
+  assertThrows(() => {
+    video.direction = "stopped";
+  }, TypeError);
+  pc.close();
+});
+
+Deno.test("webrtcNegotiationNeededOnce", async () => {
+  const pc = new RTCPeerConnection();
+  let count = 0;
+  pc.onnegotiationneeded = () => count++;
+  pc.addTransceiver("audio");
+  pc.addTransceiver("video");
+  await new Promise((r) => setTimeout(r, 50));
+  assertEquals(count, 1);
+  pc.close();
+});
+
+Deno.test("webrtcCapabilities", () => {
+  const video = RTCRtpSender.getCapabilities("video")!;
+  const mimes = video.codecs.map((c) => c.mimeType.toLowerCase());
+  for (const m of ["video/vp8", "video/vp9", "video/h264", "video/av1"]) {
+    assert(mimes.includes(m), `${m} in ${mimes}`);
+  }
+  assert(video.codecs.every((c) => c.clockRate === 90000));
+  const audio = RTCRtpReceiver.getCapabilities("audio")!;
+  const opus = audio.codecs.find((c) =>
+    c.mimeType.toLowerCase() === "audio/opus"
+  )!;
+  assertEquals(opus.clockRate, 48000);
+  assertEquals(opus.channels, 2);
+  assertEquals(RTCRtpSender.getCapabilities("text"), null);
+  assert(Array.isArray(video.headerExtensions));
+});
+
+Deno.test("webrtcSetCodecPreferences", async () => {
+  const pc = new RTCPeerConnection();
+  const t = pc.addTransceiver("video");
+  const err = assertThrows(
+    () => t.setCodecPreferences([{ mimeType: "video/nope", clockRate: 90000 }]),
+    DOMException,
+  );
+  assertEquals((err as DOMException).name, "InvalidModificationError");
+  const vp9 = RTCRtpReceiver.getCapabilities("video")!.codecs.filter((c) =>
+    c.mimeType.toLowerCase() === "video/vp9"
+  );
+  t.setCodecPreferences(vp9);
+  const offer = await pc.createOffer();
+  const mline = offer.sdp!.split("\r\n").find((l) => l.startsWith("m=video"))!;
+  const pts = mline.split(" ").slice(3);
+  const rtpmap = (pt: string) =>
+    offer.sdp!.split("\r\n").find((l) => l.startsWith(`a=rtpmap:${pt} `));
+  assert(rtpmap(pts[0])!.toLowerCase().includes("vp9"), mline);
+  t.setCodecPreferences([]);
+  pc.close();
+});
+
+Deno.test("webrtcEncodedMediaTrack", () => {
+  const track = new Deno.webrtc.EncodedMediaTrack({
+    kind: "video",
+    mimeType: "video/VP8",
+    label: "camera",
+  });
+  assert(track instanceof MediaStreamTrack);
+  assertEquals(track.kind, "video");
+  assertEquals(track.label, "camera");
+  assertEquals(track.readyState, "live");
+  assertEquals(track.codec.clockRate, 90000);
+  assertThrows(
+    () =>
+      new Deno.webrtc.EncodedMediaTrack({
+        kind: "audio",
+        mimeType: "video/VP8",
+      }),
+    TypeError,
+  );
+  // Not sent anywhere yet.
+  assertEquals(track.writeFrame(new Uint8Array(10)), 0);
+  const clone = track.clone();
+  assert(clone instanceof Deno.webrtc.EncodedMediaTrack);
+  assert(clone.id !== track.id);
+  track.stop();
+  assertEquals(track.readyState, "ended");
+  assertEquals(clone.readyState, "live");
+});
+
+Deno.test("webrtcMediaStream", () => {
+  const t1 = new Deno.webrtc.EncodedMediaTrack({
+    kind: "audio",
+    mimeType: "audio/opus",
+  });
+  const t2 = new Deno.webrtc.EncodedMediaTrack({
+    kind: "video",
+    mimeType: "video/VP8",
+  });
+  const s = new MediaStream([t1]);
+  assert(s.id.length > 0);
+  s.addTrack(t2);
+  s.addTrack(t2);
+  assertEquals(s.getTracks(), [t1, t2]);
+  assertEquals(s.getAudioTracks(), [t1]);
+  assertEquals(s.getVideoTracks(), [t2]);
+  assertEquals(s.getTrackById(t2.id), t2);
+  assertEquals(s.active, true);
+  s.removeTrack(t1);
+  assertEquals(s.getTracks(), [t2]);
+  assertEquals(new MediaStream(s).getTracks(), [t2]);
+  t2.stop();
+  assertEquals(s.active, false);
+});
+
+Deno.test("webrtcVideoFramesEndToEnd", async () => {
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  const track = new Deno.webrtc.EncodedMediaTrack({
+    kind: "video",
+    mimeType: "video/VP8",
+  });
+  const stream = new MediaStream([track]);
+  const sender = a.addTrack(track, stream);
+  assertEquals(sender.track, track);
+  const gotTrack = once<RTCTrackEvent>(b, "track");
+  await negotiate(a, b);
+  const ev = await gotTrack;
+  assertEquals(ev.track.kind, "video");
+  assertEquals(ev.streams.length, 1);
+  assertEquals(ev.streams[0].id, stream.id);
+  assertEquals(ev.transceiver.receiver, ev.receiver);
+  assertEquals(ev.transceiver.currentDirection, "recvonly");
+  assertEquals(a.getTransceivers()[0].currentDirection, "sendonly");
+  await connected(a);
+  await connected(b);
+  assertEquals(sender.transport!.state, "connected");
+  assertEquals(sender.transport, a.sctp?.transport ?? sender.transport);
+
+  const unmuted = once(ev.track, "unmute");
+  const packets = rtpPackets(ev.receiver, 3);
+  // A VP8 key frame is opaque to the packetizer: any bytes go.
+  const frame = new Uint8Array(3000).map((_, i) => i & 0xff);
+  const interval = setInterval(
+    () => track.writeFrame(frame, { duration: 33 }),
+    30,
+  );
+  try {
+    const got = await packets;
+    await unmuted;
+    assertEquals(ev.track.muted, false);
+    // RTP version 2, the negotiated VP8 payload type.
+    const params = ev.receiver.getParameters();
+    const vp8 = params.codecs.find((c) =>
+      c.mimeType.toLowerCase() === "video/vp8"
+    )!;
+    for (const p of got) {
+      assertEquals(p[0] >> 6, 2);
+      assertEquals(p[1] & 0x7f, vp8.payloadType);
+    }
+  } finally {
+    clearInterval(interval);
+  }
+  const outbound = [...(await a.getStats(track)).values()].filter((s) =>
+    s.type === "outbound-rtp"
+  );
+  assertEquals(outbound.length, 1);
+  assert(outbound[0].packetsSent > 0);
+  const inbound = [...(await ev.receiver.getStats()).values()].filter((s) =>
+    s.type === "inbound-rtp"
+  );
+  assertEquals(inbound.length, 1);
+  assert(ev.receiver.getSynchronizationSources().length > 0);
+  a.close();
+  b.close();
+});
+
+Deno.test("webrtcRtpAndKeyFrameRequests", async () => {
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  const track = new Deno.webrtc.EncodedMediaTrack({
+    kind: "audio",
+    mimeType: "audio/opus",
+  });
+  a.addTransceiver(track, { direction: "sendonly" });
+  const gotTrack = once<RTCTrackEvent>(b, "track");
+  await negotiate(a, b);
+  const { receiver } = await gotTrack;
+  await connected(a);
+  // A finished RTP packet: SSRC and payload type are replaced by the
+  // sender's.
+  const packet = new Uint8Array(12 + 4);
+  packet[0] = 0x80;
+  packet[1] = 99;
+  packet.set([1, 2, 3, 4], 12);
+  const packets = rtpPackets(receiver, 2);
+  let seq = 0;
+  const interval = setInterval(() => {
+    packet[2] = 0;
+    packet[3] = seq++;
+    track.writeRtp(packet);
+  }, 20);
+  try {
+    const got = await packets;
+    assertEquals([...got[0].subarray(12)], [1, 2, 3, 4]);
+  } finally {
+    clearInterval(interval);
+  }
+  // The receiver asks the sender for a key frame.
+  const asked = once(track, "keyframerequest");
+  assert(Deno.webrtc.requestKeyFrame(receiver));
+  await asked;
+  a.close();
+  b.close();
+});
+
+Deno.test("webrtcRemoveTrackAndStop", async () => {
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  const track = new Deno.webrtc.EncodedMediaTrack({
+    kind: "audio",
+    mimeType: "audio/opus",
+  });
+  const sender = a.addTrack(track, new MediaStream([track]));
+  const gotTrack = once<RTCTrackEvent>(b, "track");
+  await negotiate(a, b);
+  const remote = await gotTrack;
+  const [remoteStream] = remote.streams;
+  assertEquals(remoteStream.getTracks(), [remote.track]);
+  // removeTrack: the sender drops its track and stops sending; the remote
+  // side removes the track from its stream.
+  a.removeTrack(sender);
+  assertEquals(sender.track, null);
+  assertEquals(a.getTransceivers()[0].direction, "recvonly");
+  const removed = once<MediaStreamTrackEvent>(remoteStream, "removetrack");
+  await negotiate(a, b);
+  assertEquals((await removed).track, remote.track);
+  assertEquals(remoteStream.getTracks(), []);
+  // addTrack doesn't reuse a transceiver whose sender has had a track.
+  const again = a.addTrack(track);
+  assert(again !== sender);
+  assertEquals(a.getTransceivers().length, 2);
+  // stop(): stopping until negotiated, then stopped and gone.
+  const t = a.getTransceivers()[0];
+  // Both sides recvonly: the answer made it inactive.
+  assertEquals(t.currentDirection, "inactive");
+  t.stop();
+  assertEquals(t.direction, "stopped");
+  assertEquals(t.currentDirection, "inactive");
+  await negotiate(a, b);
+  assertEquals(t.currentDirection, "stopped");
+  assertEquals(t.receiver.track.readyState, "ended");
+  assert(!a.getTransceivers().includes(t));
+  // Invalid uses.
+  assertThrows(() => a.addTrack(track), DOMException);
+  const other = new RTCPeerConnection();
+  assertThrows(() => other.removeTrack(again), DOMException);
+  other.close();
+  a.close();
+  b.close();
+});
+
+Deno.test("webrtcSenderParameters", async () => {
+  const pc = new RTCPeerConnection();
+  const t = pc.addTransceiver("video", {
+    sendEncodings: [{ rid: "hi" }, { rid: "lo", scaleResolutionDownBy: 2 }],
+  });
+  await assertRejects(
+    () => t.sender.setParameters({} as RTCRtpSendParameters),
+    DOMException,
+  );
+  const params = t.sender.getParameters();
+  assertEquals(params.encodings.map((e) => e.rid), ["hi", "lo"]);
+  assertEquals(params.encodings[1].scaleResolutionDownBy, 2);
+  assertEquals(typeof params.transactionId, "string");
+  assertEquals(params.rtcp.reducedSize, false);
+  params.encodings[0].maxBitrate = 500_000;
+  await t.sender.setParameters(params);
+  assertEquals(t.sender.getParameters().encodings[0].maxBitrate, 500_000);
+  // A stale transaction id or a changed read-only member is refused.
+  const p2 = t.sender.getParameters();
+  t.sender.getParameters();
+  const stale = await assertRejects(() => t.sender.setParameters(p2));
+  assertEquals((stale as DOMException).name, "InvalidModificationError");
+  const p3 = t.sender.getParameters();
+  p3.encodings.pop();
+  const shrunk = await assertRejects(() => t.sender.setParameters(p3));
+  assertEquals((shrunk as DOMException).name, "InvalidModificationError");
+  const p4 = t.sender.getParameters();
+  p4.encodings[0].scaleResolutionDownBy = 0.5;
+  await assertRejects(() => t.sender.setParameters(p4), RangeError);
+  pc.close();
+});
+
+Deno.test("webrtcReplaceTrack", async () => {
+  const pc = new RTCPeerConnection();
+  const t = pc.addTransceiver("audio");
+  const audio = new Deno.webrtc.EncodedMediaTrack({
+    kind: "audio",
+    mimeType: "audio/opus",
+  });
+  const video = new Deno.webrtc.EncodedMediaTrack({
+    kind: "video",
+    mimeType: "video/VP8",
+  });
+  await t.sender.replaceTrack(audio);
+  assertEquals(t.sender.track, audio);
+  await assertRejects(() => t.sender.replaceTrack(video), TypeError);
+  await t.sender.replaceTrack(null);
+  assertEquals(t.sender.track, null);
+  pc.close();
+});
+
+Deno.test("webrtcLegacyCallbacks", async () => {
+  const a = new RTCPeerConnection();
+  a.createDataChannel("x");
+  const offer = await new Promise<RTCSessionDescriptionInit>(
+    (resolve, reject) => {
+      const p = a.createOffer(resolve, reject);
+      assert(p instanceof Promise);
+    },
+  );
+  assertEquals(offer.type, "offer");
+  await new Promise<void>((resolve, reject) =>
+    a.setLocalDescription(offer, resolve, reject)
+  );
+  assertEquals(a.signalingState, "have-local-offer");
+  const failed = await new Promise<DOMException>((resolve) =>
+    a.addIceCandidate(
+      { candidate: "candidate:1 1 udp 1 127.0.0.1 9 typ host", sdpMid: "nope" },
+      () => resolve(new DOMException("resolved")),
+      resolve,
+    )
+  );
+  assert(failed instanceof DOMException);
+  a.close();
+});
+
+Deno.test("webrtcTransportsAndSelectedPair", async () => {
+  const { a, b } = await connectPair();
+  const dtls = a.sctp!.transport!;
+  assert(dtls instanceof RTCDtlsTransport);
+  assertEquals(dtls.state, "connected");
+  const ice = dtls.iceTransport;
+  assert(ice instanceof RTCIceTransport);
+  assertEquals(ice.component, "rtp");
+  assertEquals(ice.role, "controlling");
+  assertEquals(b.sctp!.transport!.iceTransport.role, "controlled");
+  assert(["connected", "completed"].includes(ice.state));
+  assertEquals(ice.gatheringState, "complete");
+  const local = ice.getLocalParameters()!;
+  assert(
+    a.localDescription!.sdp.includes(`a=ice-ufrag:${local.usernameFragment}`),
+  );
+  assertEquals(
+    ice.getRemoteParameters()!.usernameFragment,
+    b.sctp!.transport!.iceTransport.getLocalParameters()!.usernameFragment,
+  );
+  const pair = ice.getSelectedCandidatePair()!;
+  assertEquals(pair.local!.address, "127.0.0.1");
+  assertEquals(pair.remote!.address, "127.0.0.1");
+  b.close();
+  a.close();
+  // close() fires no events; the transports report closed.
+  assertEquals(dtls.state, "closed");
+  assertEquals(ice.state, "closed");
+});
+
+Deno.test("webrtcSetConfigurationRules", () => {
+  const pc = new RTCPeerConnection({ bundlePolicy: "max-bundle" });
+  const err = assertThrows(
+    () => pc.setConfiguration({ bundlePolicy: "balanced" }),
+    DOMException,
+  );
+  assertEquals((err as DOMException).name, "InvalidModificationError");
+  assertThrows(
+    () =>
+      pc.setConfiguration({
+        bundlePolicy: "max-bundle",
+        iceCandidatePoolSize: 256,
+      }),
+    TypeError,
+  );
+  assertThrows(
+    () =>
+      pc.setConfiguration({
+        bundlePolicy: "max-bundle",
+        iceServers: [{ urls: "bogus:x" }],
+      }),
+    DOMException,
+  );
+  pc.setConfiguration({
+    bundlePolicy: "max-bundle",
+    iceServers: [{ urls: "stun:stun.example.org" }],
+  });
+  assertEquals(pc.getConfiguration().iceServers![0].urls, [
+    "stun:stun.example.org",
+  ]);
+  pc.close();
+});
+
+Deno.test("webrtcRollbackRemovesRemoteTransceivers", async () => {
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  a.addTransceiver("audio");
+  await a.setLocalDescription();
+  await b.setRemoteDescription(a.localDescription!);
+  assertEquals(b.getTransceivers().length, 1);
+  assertEquals(b.getTransceivers()[0].direction, "recvonly");
+  await b.setRemoteDescription({ type: "rollback" });
+  assertEquals(b.getTransceivers().length, 0);
+  assertEquals(b.signalingState, "stable");
+  a.close();
+  b.close();
+});

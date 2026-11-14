@@ -256,6 +256,46 @@ const windowOrWorkerGlobalScope = {
     loadUrlPattern,
   ),
   URLSearchParams: core.propNonEnumerable(url.URLSearchParams),
+  MediaStream: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.MediaStream,
+    loadWebRtc,
+  ),
+  MediaStreamTrack: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.MediaStreamTrack,
+    loadWebRtc,
+  ),
+  MediaStreamTrackEvent: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.MediaStreamTrackEvent,
+    loadWebRtc,
+  ),
+  RTCCertificate: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCCertificate,
+    loadWebRtc,
+  ),
+  RTCDtlsTransport: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCDtlsTransport,
+    loadWebRtc,
+  ),
+  RTCIceTransport: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCIceTransport,
+    loadWebRtc,
+  ),
+  RTCRtpReceiver: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCRtpReceiver,
+    loadWebRtc,
+  ),
+  RTCRtpSender: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCRtpSender,
+    loadWebRtc,
+  ),
+  RTCRtpTransceiver: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCRtpTransceiver,
+    loadWebRtc,
+  ),
+  RTCTrackEvent: core.propNonEnumerableLazyLoaded(
+    (webrtc) => webrtc.RTCTrackEvent,
+    loadWebRtc,
+  ),
   RTCDataChannel: core.propNonEnumerableLazyLoaded(
     (webrtc) => webrtc.RTCDataChannel,
     loadWebRtc,

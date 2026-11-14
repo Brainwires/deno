@@ -4163,6 +4163,7 @@ dependencies = [
 name = "deno_webrtc"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "bytes",
  "deno_core",
  "deno_error",

@@ -14,6 +14,7 @@ description = "WebRTC (RTCPeerConnection, RTCDataChannel) for the Deno runtime"
 path = "lib.rs"
 
 [dependencies]
+aws-lc-rs.workspace = true
 bytes.workspace = true
 deno_core.workspace = true
 deno_error.workspace = true

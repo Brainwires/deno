@@ -71,7 +71,7 @@ async fn wait_for(
   .await;
   if result.is_err() {
     let stats: Vec<_> = peer
-      .stats()
+      .stats(None)
       .unwrap_or_default()
       .into_iter()
       .filter(|s| {
@@ -202,7 +202,7 @@ async fn loopback_data_channel_both_ways() {
   wait_for(&a, &mut ea, connected).await;
   wait_for(&b, &mut eb, connected).await;
 
-  let stats = a.stats().unwrap();
+  let stats = a.stats(None).unwrap();
   assert!(
     stats
       .iter()

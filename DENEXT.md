@@ -14268,8 +14268,11 @@ where the changes are discussed.
        return.
      - Node tests enabled: none; no Node API changes.
 
-370. **`feat(ext/webrtc)`: WebRTC data channels as globals** (`feat/webrtc`, CLI
-     and runtime; `ext/webrtc`, `runtime/js/98_global_scope_shared.js`,
+370. **`feat(ext/webrtc)`: WebRTC as globals: data channels, media transceivers,
+     certificates and transports, plus the `Deno.webrtc` server extension**
+     (`feat/webrtc`, then `feat/webrtc-parity`; CLI and runtime; `ext/webrtc`
+     (`media.rs` new), `runtime/js/98_global_scope_shared.js`,
+     `runtime/js/90_deno_ns.js`,
      `runtime/{Cargo.toml,lib.rs,snapshot,snapshot_info,worker,web_worker}.rs`,
      `cli/tsc/dts/lib.deno_webrtc.d.ts`,
      `cli/tsc/dts/lib.deno.shared_globals.d.ts`, `cli/{build.rs,tsc/mod.rs}`,
@@ -14282,8 +14285,22 @@ where the changes are discussed.
      on, no flag): `RTCPeerConnection`, `RTCDataChannel`,
      `RTCSessionDescription`, `RTCIceCandidate`, `RTCPeerConnectionIceEvent`,
      `RTCPeerConnectionIceErrorEvent`, `RTCDataChannelEvent`, `RTCError`,
-     `RTCErrorEvent`, `RTCSctpTransport`, `RTCStatsReport`; loaded on first
-     access (`01_webrtc.js` is a lazily loaded script).
+     `RTCErrorEvent`, `RTCSctpTransport`, `RTCStatsReport`, and from
+     `feat/webrtc-parity` `RTCRtpTransceiver`, `RTCRtpSender`, `RTCRtpReceiver`,
+     `RTCTrackEvent`, `MediaStream`, `MediaStreamTrack`,
+     `MediaStreamTrackEvent`, `RTCCertificate`, `RTCDtlsTransport`,
+     `RTCIceTransport`; loaded on first access (`01_webrtc.js` is a lazily
+     loaded script; `Deno.webrtc` loads the same script).
+     - **Parity (`feat/webrtc-parity`):** feature parity with the W3C standard
+       as far as a runtime without capture devices or codecs can have it,
+       measured with WPT `webrtc/`, and with the capabilities of the userland
+       jeff-hykin/deno-webrtc (Apache-2.0 / MIT, an FFI binding of webrtc-rs;
+       read for its feature list only, none of its API or code is used).
+       Standard capabilities are on the standard objects; the server-side ones
+       the standard lacks are a denext extension under `Deno.webrtc` (below), so
+       no standard object grows a non-standard member except
+       `RTCConfiguration.denoNetwork`, named so it can't collide with a future
+       standard member (as `fetch()`'s `client` takes a `Deno.HttpClient`).
      - **Engine:** webrtc-rs's sans-I/O `rtc` stack (MIT OR Apache-2.0; ICE,
        DTLS 1.2, SCTP, DCEP, SDP, STUN/TURN clients) as
        [Brainwires/webrtc-rs-rtc](https://github.com/Brainwires/webrtc-rs-rtc)
@@ -14382,27 +14399,119 @@ where the changes are discussed.
        `closing`, `close`. `createOffer` / `createAnswer` resolve to plain,
        editable `RTCSessionDescriptionInit` dictionaries (simple-peer edits the
        offer's SDP). Data channel messages up to 256 KiB, as browsers negotiate
-       (the engine's default is RFC 8841's 64 KiB). Not implemented: media
-       (`addTrack`, `addTransceiver`, `getSenders` … return empty / throw
-       `NotSupportedError`; phase 2), `certificates` and `generateCertificate`
-       (`NotSupportedError`), `peerIdentity`, `RTCDtlsTransport` /
-       `RTCIceTransport` objects, legacy callback signatures, TCP ICE candidates
-       (skipped), mDNS candidate obfuscation for the local side (host candidates
-       are literal addresses, which is why they need the sys permission).
+       (the engine's default is RFC 8841's 64 KiB).
+     - **Media (`feat/webrtc-parity`; `media.rs`):** the engine's RTP stack
+       (SRTP, RTCP sender / receiver reports, NACK and RTX, TWCC feedback,
+       simulcast header extensions) with every codec browsers negotiate (Opus,
+       G.722, PCMU, PCMA, VP8, VP9, H.264, AV1, H.265, RTX, RED, FEC).
+       `addTransceiver(kind | track, { direction, streams, sendEncodings })`
+       (kind, direction and encoding validation: rid syntax and uniqueness,
+       `scaleResolutionDownBy` below 1 and `maxFramerate` below 0 are a
+       `RangeError`), `addTrack(track, ...streams)` (reusing a transceiver whose
+       sender never had a track, else a new sendrecv one; `InvalidAccessError`
+       for a track already sent), `removeTrack`, `getTransceivers` /
+       `getSenders` / `getReceivers`; `RTCRtpTransceiver` (`mid`, `direction`
+       get / set with negotiation-needed, `currentDirection`, `stop()`: stopping
+       until the next answer, then stopped and gone from `getTransceivers()`,
+       `setCodecPreferences` with the spec's `InvalidModificationError`s);
+       `RTCRtpSender` (`track`, `transport`, `getParameters` / `setParameters`
+       with the transaction id and read-only checks, `replaceTrack` (kind check,
+       no renegotiation), `setStreams`, `getStats`, static `getCapabilities`);
+       `RTCRtpReceiver` (`track`, created muted with the transceiver,
+       `transport`, `jitterBufferTarget`, `getParameters`,
+       `getSynchronizationSources` / `getContributingSources` (the last 10 s of
+       SSRCs and CSRCs, newest first), `getStats`, static `getCapabilities`);
+       the `track` event with its streams, and remote stream membership
+       (`addtrack` / `removetrack`, `mute` / `unmute` on the remote track) as
+       the spec's processing of remote track addition and removal;
+       `getStats(track)`. `MediaStream` (constructible: tracks, `getTrackById`,
+       `active`, `clone`) and `MediaStreamTrack` (`kind`, `id`, `label`,
+       `enabled`, `muted`, `readyState`, `contentHint`, `clone`, `stop`,
+       events). There is no capture device: a local track is a
+       `Deno.webrtc.EncodedMediaTrack` (below) and a remote track carries what
+       the peer sends as RTP.
+     - **Certificates (`feat/webrtc-parity`):**
+       `RTCPeerConnection.generateCertificate()` makes ECDSA P-256 or
+       RSASSA-PKCS1-v1_5 (2048 / 3072 / 4096 bits, exponent 65537, SHA-256)
+       certificates (`expires`, 30 days by default, `getFingerprints()`);
+       `RTCConfiguration.certificates` uses them (the local description's
+       fingerprint is theirs; an expired one is an `InvalidAccessError`, a
+       change in `setConfiguration` an `InvalidModificationError`). The key
+       lives in a per-isolate store freed when its `RTCCertificate` is garbage
+       collected (a connection keeps its own copy). RSA keys are generated with
+       aws-lc-rs (the engine generates only ECDSA and Ed25519) and imported
+       through the engine's provider.
+     - **Transports and the rest (`feat/webrtc-parity`):** one bundled
+       `RTCDtlsTransport` (`state`, `iceTransport`, `statechange`) shared by
+       every sender, receiver and `sctp.transport`, from the first description;
+       `RTCIceTransport` (`role`, `component`, `state`, `gatheringState`,
+       `getLocalParameters` / `getRemoteParameters`, `getSelectedCandidatePair`,
+       events); the legacy callback forms of `createOffer` / `createAnswer` /
+       `setLocalDescription` / `setRemoteDescription` / `addIceCandidate`, and
+       `offerToReceiveAudio` / `offerToReceiveVideo`; signaling-state checks for
+       each description (an implicit rollback when a remote offer meets a local
+       one); `addIceCandidate` checks the `sdpMid` / `sdpMLineIndex` /
+       `usernameFragment` against the remote description (`OperationError`);
+       `setConfiguration` validates and keeps the new ICE servers and policy,
+       which the next ICE restart gathers from (`iceCandidatePoolSize` is
+       range-checked and can't change after `setLocalDescription`);
+       `negotiationneeded` fires once for the changes of one task, only while
+       stable. Not implemented: `RTCDTMFSender` (`sender.dtmf` is `null`),
+       `getRemoteCertificates()` (empty), `peerIdentity`, encoded transforms
+       (`RTCRtpScriptTransform`), the receiver's `audioLevel` (needs the RFC
+       6464 extension, not negotiated), TCP ICE candidates (skipped), mDNS:
+       neither resolving a peer's `.local` candidates (the peer is reached as
+       peer-reflexive once its checks arrive) nor hiding the local host
+       candidates (literal addresses, which is why they need the sys
+       permission).
+     - **`Deno.webrtc` (`feat/webrtc-parity`):** what a server needs and the
+       standard doesn't have.
+       `new Deno.webrtc.EncodedMediaTrack({ kind,
+       mimeType, clockRate?, channels?, sdpFmtpLine? })`
+       is a `MediaStreamTrack` the program feeds:
+       `writeFrame(data, { duration })` cuts one encoded frame into RTP for the
+       negotiated codec (Opus, G.722, PCMU, PCMA, VP8, VP9, H.264, H.265, AV1
+       payloaders), `writeRtp(packet)` sends a finished packet (its SSRC becomes
+       the sender's, an unknown payload type the negotiated one); both go to
+       every connection the track (or a clone) is sent on, once negotiated, and
+       return how many senders took it; its codec becomes the transceiver's
+       preferred one; `keyframerequest` fires on an inbound PLI or FIR.
+       `Deno.webrtc.readRtp(receiver)` is a `ReadableStream` of the receiver's
+       RTP packets (header included; a packet arriving while `highWaterMark`,
+       256, are queued is dropped, as real-time media doesn't wait);
+       `Deno.webrtc.requestKeyFrame(receiver)` sends a PLI.
+       `Deno.webrtc.exportCertificate(cert)` / `importCertificate(pem)` keep a
+       DTLS fingerprint across restarts (the PEM holds the private key).
      - **Engine gaps worked around:** a negotiated channel created on a live
        association opens at once with no open event from the engine (the ext
        sends it); the selected candidate pair can't be read from the stats (the
        candidate-pair entry names candidate ids the candidate entries prefix,
        and remote candidates have no entry), so the selected-pair filter learns
-       it from the engine's own traffic.
-     - **Dependency:** the `rtc` crates (`0.21.1+brainwires.1`) from the pinned
-       fork commit, with `sansio`, `rcgen` 0.14, `x509-parser` 0.16 / 0.18,
-       `der-parser`, `asn1-rs`, `crc`, `crc32c` (0.6.8), `rkyv`, `pem` 3 / 4,
-       `substring`, `yasna` from crates.io; the workspace's `aes` pin moves
-       `=0.8.3` → `=0.8.4` (rtc-crypto's minimum), and `bytes` 1.12.1, `log`
-       0.4.33 (the minimum rtc takes; 0.4.35 is younger than the hold),
-       `unicase` 2.10, `zeroize` 1.9.1. Every new crates.io crate is at least 11
-       days old.
+       it from the engine's own traffic. From `feat/webrtc-parity`: the
+       interceptor chain's terminus ends every inbound RTCP packet no
+       interceptor vouches for, PLI and FIR included, so an application never
+       sees a key-frame request; a `KeyFrameRequests` interceptor of the ext's
+       (`Slot::Custom(14_000)`, application-ward of the defaults) marks them
+       `DeliverToApplication`. The engine names transceivers by index, which its
+       rollback shifts (it removes the ones the rolled-back remote offer
+       created): each gets a stable key, and the ones the rollback removes are
+       computed the way the engine picks them. The engine's codec lists are
+       internal, so `getCapabilities()` reads the offer of a throwaway
+       connection. Its synchronization sources stay empty, so the ext records
+       SSRCs and CSRCs as packets arrive. Its transceivers have an optional
+       sender (a recvonly one has none): each W3C transceiver is created
+       sendrecv with one encoding, then given its direction, so every one has a
+       sender and a receiver; what a sender with a `null` track is written is
+       dropped.
+     - **Dependency:** `aws-lc-rs` (the workspace's, already linked through
+       rustls) directly, for RSA certificate keys (`feat/webrtc-parity`); the
+       `rtc` crates (`0.21.1+brainwires.1`) from the pinned fork commit, with
+       `sansio`, `rcgen` 0.14, `x509-parser` 0.16 / 0.18, `der-parser`,
+       `asn1-rs`, `crc`, `crc32c` (0.6.8), `rkyv`, `pem` 3 / 4, `substring`,
+       `yasna` from crates.io; the workspace's `aes` pin moves `=0.8.3` →
+       `=0.8.4` (rtc-crypto's minimum), and `bytes` 1.12.1, `log` 0.4.33 (the
+       minimum rtc takes; 0.4.35 is younger than the hold), `unicase` 2.10,
+       `zeroize` 1.9.1. Every new crates.io crate is at least 11 days old.
      - **Size:** not measured yet: compare the release's `deno-cli` archives
        with the previous release's (a local release build was stopped to free
        the build host for the train). The new code is the engine's `rtc*`
@@ -14424,9 +14533,12 @@ where the changes are discussed.
        9.11.1 (two peers in one process, trickle, data both ways) and `peerjs`
        1.5.4 against a local `peer` 1.0.2 server both work on the globals
        unchanged. Firefox was not tested (none on the test host).
-     - User-facing note: Deno programs can be WebRTC data channel peers
-       (`new RTCPeerConnection()`), of browsers and of each other, with STUN and
-       TURN, under the net permission.
+     - User-facing note: Deno programs can be WebRTC peers
+       (`new RTCPeerConnection()`) of browsers and of each other, with STUN and
+       TURN, under the net permission: data channels, and media sent as encoded
+       frames or RTP (`Deno.webrtc.EncodedMediaTrack`) and received as RTP
+       (`Deno.webrtc.readRtp`), with transceivers, certificates and transports
+       as the standard has them.
      - Tests: `ext/webrtc` lib tests (two peers on loopback, no V8: both
        directions, a `maxMessageSize` message then 200 ordered ones and one byte
        over refused, an unordered `maxRetransmits: 0` channel, `bufferedAmount`
@@ -14439,7 +14551,36 @@ where the changes are discussed.
        unordered, negotiated, `bufferedAmount`, channel close, connection close
        closing channels, `getStats`, least privilege (`net: ["127.0.0.1"]`,
        `sys: false`), an ICE server and a remote candidate refused by the net
-       permission).
+       permission). From `feat/webrtc-parity` (each fails on the build before
+       it: the API is missing or throws `NotSupportedError`), 19 more:
+       `webrtcMediaGlobals`, `webrtcGenerateCertificate` (ECDSA, RSA, `expires`,
+       refused algorithms), `webrtcCertificatesConfiguration` (the SDP
+       fingerprint is the certificate's; an ECDSA and an RSA peer complete DTLS;
+       expired / changed certificates refused), `webrtcCertificateExportImport`,
+       `webrtcAddTransceiver` (validation, directions, sender / receiver
+       defaults, the offer's m-lines), `webrtcNegotiationNeededOnce`,
+       `webrtcCapabilities`, `webrtcSetCodecPreferences` (the preferred codec
+       leads the m-line), `webrtcEncodedMediaTrack`, `webrtcMediaStream`,
+       `webrtcVideoFramesEndToEnd` (VP8 frames packetized, the `track` event
+       with its stream, `unmute`, the negotiated payload type,
+       `currentDirection`, outbound / inbound stats, synchronization sources),
+       `webrtcRtpAndKeyFrameRequests` (raw Opus RTP, a PLI reaching the sender's
+       `keyframerequest`), `webrtcRemoveTrackAndStop` (remote `removetrack`, no
+       reuse of a used sender, `stop()` through the next answer),
+       `webrtcSenderParameters`, `webrtcReplaceTrack`, `webrtcLegacyCallbacks`,
+       `webrtcTransportsAndSelectedPair`, `webrtcSetConfigurationRules`,
+       `webrtcRollbackRemovesRemoteTransceivers`.
+     - WPT (`webrtc/`, 259 test files, 2111 subtests, run on biscuits in a
+       Python 3.11 container with the WPT hosts, `DENO_WEBRTC_LOOPBACK_ONLY=1`;
+       not in the tree's expectations, so CI doesn't run them): before
+       `feat/webrtc-parity` 627 subtests pass (29.7%) and 13 files fully; with
+       its standard surface 1048 of 2110 (49.7%) and 33 files fully
+       (`RTCConfiguration-certificates`, `-iceCandidatePoolSize`,
+       `-iceTransportPolicy`, `RTCPeerConnection-SLD-SRD-timing`, the data
+       channel files that passed before, among them). Most of what still fails
+       needs what Deno doesn't have: the tests' media helper draws to an
+       `HTMLCanvasElement` or calls `getUserMedia`, and 33 files touch
+       `document`.
      - Node tests enabled: none; `node:` has no WebRTC API.
 
 371. **`fix(node:fs)`: node:fs reaches a descriptor a native addon opened, in
