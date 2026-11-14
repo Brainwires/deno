@@ -14586,6 +14586,30 @@ where the changes are discussed.
      - Node tests enabled: none new; `sequential/test-cpu-prof-kill.js` was
        already enabled and is the flake this removes.
 
+377. **`fix(desktop)`: every packaged Windows app has an app id, so WebView2
+     keeps its data in the per-user app data folder** (CLI; upstream
+     denoland/deno#36768; `cli/tools/desktop.rs`). An `.msi` installs per
+     machine under Program Files, and WebView2's default user data folder is
+     `<exe>.WebView2` beside the executable, which the user can't write there:
+     `CreateCoreWebView2EnvironmentWithOptions` fails with `E_ACCESSDENIED`
+     and the window stays white. This fork already gives laufey the app id
+     (deno.json `desktop.app.identifier`, else `com.deno.desktop.<name>`) in
+     the packaged `laufey-launch.json`, and laufey then puts the folder in
+     `%LOCALAPPDATA%\<id>\WebView2`. An app
+     whose name sanitizes to nothing (all non-ASCII, or all punctuation) got
+     no id, and laufey kept the folder beside the exe. Such an app now gets
+     `com.deno.desktop.app-<12 hex digits of the name's SHA-256>`, stable
+     across builds and distinct per name; the same id goes to the `.msi`'s
+     deep-link registrations. No laufey change.
+     - User-facing note: a Windows desktop app installed by its `.msi` under
+       Program Files opens its window whatever its name; web data lives in
+       `%LOCALAPPDATA%\<app id>\WebView2`.
+     - Tests:
+       `tools::desktop::tests::windows_app_id_always_names_a_per_user_data_folder`
+       (names `___`, `ノート`, `メモ帳`, ` `, `""`: a valid reverse-DNS id,
+       stable, distinct per name; on 3.0.0-denext.22 `___` had none).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

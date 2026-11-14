@@ -1989,7 +1989,9 @@ async fn package_windows_app_dir(
   // next to it.
   write_laufey_launch_config(
     &app_dir,
-    windows_app_id(desktop_flags.identifier.as_deref(), &app_name).as_deref(),
+    Some(
+      windows_app_id(desktop_flags.identifier.as_deref(), &app_name).as_str(),
+    ),
     cef_custom_scheme(
       crate::standalone::binary::resolve_desktop_app_origin(cli_options)?
         .as_deref(),
@@ -4481,12 +4483,30 @@ fn linux_deep_link_mime_types(schemes: &[String]) -> Option<String> {
 /// [`LAUFEY_LAUNCH_CONFIG_FILE`]: the configured identifier, else the same
 /// id a dev run on Windows uses (see [`hmr_app_id`]), so web storage is per
 /// app and the single-instance lock has an id to key on.
-fn windows_app_id(identifier: Option<&str>, app_name: &str) -> Option<String> {
+///
+/// Never absent: laufey puts the WebView2 user data folder in
+/// `%LOCALAPPDATA%\<id>\WebView2` only when it has an id, and otherwise keeps
+/// WebView2's default `<exe>.WebView2` beside the executable, which a
+/// per-machine `.msi` install under Program Files can't write
+/// (denoland/deno#36768). A name that sanitizes to nothing (all non-ASCII,
+/// all punctuation) gets `com.deno.desktop.app-<hash of the name>`, stable
+/// across builds and distinct per name (a dev run of such an app, from its
+/// writable cache folder, still has none: see [`hmr_app_id`]).
+fn windows_app_id(identifier: Option<&str>, app_name: &str) -> String {
   let id = match identifier {
-    Some(id) => id.to_string(),
-    None => derived_desktop_id(app_name)?,
+    Some(id) => Some(id.to_string()),
+    None => derived_desktop_id(app_name),
   };
-  deno_lib::standalone::app_id::is_laufey_app_id(&id).then_some(id)
+  match id {
+    Some(id) if deno_lib::standalone::app_id::is_laufey_app_id(&id) => id,
+    _ => {
+      let digest = sha2::Sha256::digest(app_name.as_bytes());
+      format!(
+        "com.deno.desktop.app-{}",
+        faster_hex::hex_string(&digest[..6])
+      )
+    }
+  }
 }
 
 /// The scheme a CEF host must be told about at launch for the app to run at
@@ -6781,7 +6801,9 @@ fn create_windows_msi(
     Some((launcher_key, _)) => Some(msi_scheme_rows(
       &schemes,
       &identifier,
-      windows_app_id(desktop_flags.identifier.as_deref(), &app_name).as_deref(),
+      Some(
+        windows_app_id(desktop_flags.identifier.as_deref(), &app_name).as_str(),
+      ),
       launcher_key,
     )),
     None => {
@@ -11622,11 +11644,41 @@ def456  other.zip
   #[test]
   fn windows_app_id_is_configured_or_derived() {
     assert_eq!(
-      windows_app_id(Some("com.acme.notes"), "Notes").as_deref(),
-      Some("com.acme.notes")
+      windows_app_id(Some("com.acme.notes"), "Notes"),
+      "com.acme.notes"
     );
-    assert_eq!(windows_app_id(None, "My App"), derived_desktop_id("My App"));
-    assert_eq!(windows_app_id(None, "___"), None);
+    assert_eq!(
+      Some(windows_app_id(None, "My App")),
+      derived_desktop_id("My App")
+    );
+  }
+
+  // denoland/deno#36768: without an app id laufey keeps WebView2's default
+  // user data folder, `<exe>.WebView2` beside the executable, which an
+  // `.msi` install under Program Files can't write (E_ACCESSDENIED, a white
+  // window). Every packaged Windows app therefore gets an id, so its web data
+  // goes to `%LOCALAPPDATA%\<id>\WebView2`, even when the app name sanitizes
+  // to nothing.
+  #[test]
+  fn windows_app_id_always_names_a_per_user_data_folder() {
+    for name in ["___", "ノート", "メモ帳", " ", ""] {
+      let id = windows_app_id(None, name);
+      assert!(
+        deno_lib::standalone::app_id::validate_app_identifier(&id).is_ok(),
+        "{name:?} -> {id:?}"
+      );
+      assert!(
+        id.starts_with("com.deno.desktop.app-"),
+        "{name:?} -> {id:?}"
+      );
+      // Stable across builds, so an update keeps the same web data.
+      assert_eq!(id, windows_app_id(None, name));
+    }
+    // Two such apps don't share one profile.
+    assert_ne!(
+      windows_app_id(None, "ノート"),
+      windows_app_id(None, "メモ帳")
+    );
   }
 
   #[test]
