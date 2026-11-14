@@ -23,6 +23,7 @@ sync = [
   "node_resolver/sync",
   "deno_config/sync",
   "deno_cache_dir/sync",
+  "dep:stacker",
 ]
 
 [dependencies]
@@ -63,6 +64,7 @@ phf = { workspace = true, features = ["macros"] }
 rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+stacker = { workspace = true, optional = true }
 sys_traits.workspace = true
 thiserror.workspace = true
 twox-hash.workspace = true

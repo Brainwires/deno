@@ -26,7 +26,19 @@ pub fn create_basic_runtime() -> tokio::runtime::Runtime {
   let (event_interval, global_queue_interval, max_io_events_per_tick) =
     tokio_configuration();
 
-  tokio::runtime::Builder::new_current_thread()
+  let mut builder = tokio::runtime::Builder::new_current_thread();
+  // Stack size for the blocking pool only — this is a current_thread
+  // runtime, so JS/V8 always runs on the thread that calls `block_on`, not
+  // on a pool thread. In debug builds, blocking tasks (like swc
+  // parsing/emitting via spawn_blocking) can overflow the default 2MB thread
+  // stack due to unoptimized stack frames, so give them 8MB there. A release
+  // build sets none: the threads get std's default (2 MiB), which
+  // `RUST_MIN_STACK` raises, as it did before 2.9.0 (an explicit size here
+  // made that workaround a no-op: denoland/deno#36746).
+  if cfg!(debug_assertions) {
+    builder.thread_stack_size(8 * 1024 * 1024);
+  }
+  builder
     .enable_io()
     .enable_time()
     .event_interval(tokio_env("DENO_TOKIO_EVENT_INTERVAL", event_interval))
@@ -38,16 +50,6 @@ pub fn create_basic_runtime() -> tokio::runtime::Runtime {
       "DENO_TOKIO_MAX_IO_EVENTS_PER_TICK",
       max_io_events_per_tick,
     ))
-    // Stack size for the blocking pool only — this is a current_thread
-    // runtime, so JS/V8 always runs on the thread that calls `block_on`, not
-    // on a pool thread. In debug builds, blocking tasks (like swc
-    // parsing/emitting via spawn_blocking) can overflow the default 2MB thread
-    // stack due to unoptimized stack frames, so give them 8MB there.
-    .thread_stack_size(if cfg!(debug_assertions) {
-      8 * 1024 * 1024
-    } else {
-      2 * 1024 * 1024
-    })
     // This limits the number of threads for blocking operations (like for
     // synchronous fs ops) or CPU bound tasks like when we run dprint in
     // parallel for deno fmt.
