@@ -178,11 +178,36 @@ class Evaluate(unittest.TestCase):
     def test_release_branches(self):
         self.assertEqual(
             gate.release_branches("3.0.0-rc.7"),
-            ["development-denext", "rel/3.0.0-rc.7"],
+            [
+                "development-denext",
+                "rel/3.0.0-rc.7",
+                "train/3.0.0-rc.7",
+                "train/rc7",
+            ],
         )
         self.assertEqual(
             gate.release_branches("3.0.0-denext.1"),
-            ["development-denext", "rel/3.0.0-denext.1"],
+            [
+                "development-denext",
+                "rel/3.0.0-denext.1",
+                "train/3.0.0-denext.1",
+                "train/denext1",
+            ],
+        )
+
+    def test_train_branches(self):
+        # 3.0.0-denext.22 was assembled and dispatched on train/denext22.
+        self.assertIn("train/denext22", gate.release_branches("3.0.0-denext.22"))
+        self.assertIn("train/rc6", gate.release_branches("3.0.0-rc.6+ci.2"))
+        self.assertEqual(gate.train_branches("3.0.0"), ["train/3.0.0"])
+
+    def test_a_commit_only_on_its_train_branch_is_a_release(self):
+        on_train = {
+            b: b == "train/denext23"
+            for b in gate.release_branches("3.0.0-denext.23")
+        }
+        self.assertEqual(
+            gate.evaluate([run(5)], legs({5: ALL_LEGS}), on_train), (5, [])
         )
 
     def test_only_a_release_candidate_is_a_prerelease(self):
@@ -448,6 +473,8 @@ class Script(unittest.TestCase):
             f"repos/{REPO}/actions/runs/11/jobs?per_page=100": jobs(*gate.REQUIRED_LEGS),
             f"repos/{REPO}/compare/{SHA}...development-denext": "ahead\n",
             f"repos/{REPO}/compare/{SHA}...rel/3.0.0-rc.7": None,
+            f"repos/{REPO}/compare/{SHA}...train/3.0.0-rc.7": None,
+            f"repos/{REPO}/compare/{SHA}...train/rc7": None,
             # The tag build's own run (left out) and a green push run.
             RUNTIME_RUNS: f"{OWN_RUN}\n21\n",
             f"repos/{REPO}/actions/runs/21/jobs?per_page=100": "".join(
@@ -459,6 +486,21 @@ class Script(unittest.TestCase):
         result = self.gate(self.base())
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("full_run=11", result.stdout)
+
+    def test_passes_on_the_train_branch_alone(self):
+        answers = self.base()
+        answers[f"repos/{REPO}/compare/{SHA}...development-denext"] = None
+        answers[f"repos/{REPO}/compare/{SHA}...train/3.0.0-rc.7"] = None
+        answers[f"repos/{REPO}/compare/{SHA}...train/rc7"] = "identical\n"
+        result = self.gate(answers)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_refuses_a_commit_on_no_release_or_train_branch(self):
+        answers = self.base()
+        answers[f"repos/{REPO}/compare/{SHA}...development-denext"] = None
+        result = self.gate(answers)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("train/rc7", result.stdout)
 
     def test_refuses_a_rerun_after_a_failure(self):
         answers = self.base()

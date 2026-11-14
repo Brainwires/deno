@@ -14,9 +14,10 @@ A `denext-runtime-v*` tag publishes only when, for the tagged commit:
   A run GitHub left queued with no jobs for over STUCK_AFTER seconds never
   started (one sat queued for days, and neither cancel nor delete removed
   it): it doesn't hold the release, and it vouches for nothing;
-- the commit is on development-denext or on the release branch
-  rel/<version>: a fix/* commit that was dispatched but never merged is not
-  a release;
+- the commit is on development-denext, on the release branch rel/<version>
+  or on its train branch (train/<version>, or train/<prerelease without
+  dots>: train/denext22 for 3.0.0-denext.22, train/rc6 for 3.0.0-rc.6): a
+  fix/* commit that was dispatched but never merged is not a release;
 - the pinned laufey's native backend hosts (webview and CEF, C++) built on
   every release target: an earlier `denext runtime` run of exactly this
   commit (a push or a dispatch, never the tag's own run) has a passed
@@ -119,8 +120,19 @@ def is_stuck(status, job_count, created_at, now):
 CONTAINED = ("ahead", "identical")
 
 
+def train_branches(version):
+    """The train branches a release of `version` may be assembled on:
+    `train/<version>`, and `train/<prerelease without dots>` (train/denext22
+    for 3.0.0-denext.22, train/rc6 for 3.0.0-rc.6)."""
+    branches = [f"train/{version}"]
+    pre = version.split("+", 1)[0].partition("-")[2]
+    if pre:
+        branches.append(f"train/{pre.replace('.', '')}")
+    return branches
+
+
 def release_branches(version):
-    return ["development-denext", f"rel/{version}"]
+    return ["development-denext", f"rel/{version}"] + train_branches(version)
 
 
 def is_prerelease(version):
@@ -239,7 +251,7 @@ def evaluate(runs, legs_of, contained_in):
             "the commit is on none of "
             + ", ".join(contained_in)
             + ": land it (fast-forward development-denext, or push the"
-            " release branch) before tagging"
+            " release or train branch) before tagging"
         )
     return full_run, errors
 

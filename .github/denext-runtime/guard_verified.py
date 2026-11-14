@@ -13,15 +13,18 @@ A commit counts as verified only by a completed, successful run of the SAME
 workflow on the SAME commit (`head_sha`), another run than this one, from
 another event or ref, that covered everything this run would:
 
-- denext_tests.yml: a `workflow_dispatch` on `rel/*` whose jobs show every OS
+A release branch is `rel/*` or a train branch `train/*` (the release runs
+are dispatched from either: 3.0.0-denext.22 ran on `train/denext22`).
+
+- denext_tests.yml: a `workflow_dispatch` on a release branch whose jobs show every OS
   leg of tag_gate.py's REQUIRED_LEGS passed (a full=true run; the API does
   not return a dispatch's inputs, so its legs are the proof).
 - denext_runtime.yml: the `denext-runtime-v*` tag build (it built, tested and
-  published every target), or a `workflow_dispatch` or push on `rel/*` whose
+  published every target), or a `workflow_dispatch` or push on a release branch whose
   `laufey / `, `denort / `, `cli / ` and `package / ` jobs passed for every
   target in tag_gate.py's LAUFEY_TARGETS (not a cli_only, reuse or
   targets-filtered run).
-- denext_npm_matrix.yml: a push on `rel/*` (a push runs every case; a
+- denext_npm_matrix.yml: a push on a release branch (a push runs every case; a
   dispatch may narrow them with `only`, which the API does not return).
 
 And never when any run of this workflow on the commit failed, timed out or
@@ -59,6 +62,8 @@ RUNTIME = "denext_runtime.yml"
 NPM_MATRIX = "denext_npm_matrix.yml"
 WORKFLOWS = (TESTS, RUNTIME, NPM_MATRIX)
 RUNTIME_TAG_PREFIX = "denext-runtime-v"
+# The branches whose runs vouch for a commit: release and train branches.
+RELEASE_BRANCH_PREFIXES = ("rel/", "train/")
 # The per-target jobs a full `denext runtime` run passes for every target.
 RUNTIME_JOBS = ("laufey", "denort", "cli", "package")
 
@@ -93,6 +98,12 @@ def full_runtime_run(jobs):
     )
 
 
+def is_release_branch(branch):
+    """Whether a run's branch is a release (`rel/*`) or train (`train/*`)
+    branch."""
+    return branch.startswith(RELEASE_BRANCH_PREFIXES)
+
+
 def vouches(workflow, run, jobs_of):
     """Whether one other successful run of the commit verifies it."""
     event = run.get("event")
@@ -100,7 +111,7 @@ def vouches(workflow, run, jobs_of):
     if workflow == TESTS:
         return (
             event == "workflow_dispatch"
-            and branch.startswith("rel/")
+            and is_release_branch(branch)
             and full_tests_run(jobs_of(run["id"]))
         )
     if workflow == RUNTIME:
@@ -108,11 +119,11 @@ def vouches(workflow, run, jobs_of):
             return True
         return (
             event in ("workflow_dispatch", "push")
-            and branch.startswith("rel/")
+            and is_release_branch(branch)
             and full_runtime_run(jobs_of(run["id"]))
         )
     if workflow == NPM_MATRIX:
-        return event == "push" and branch.startswith("rel/")
+        return event == "push" and is_release_branch(branch)
     raise ValueError(f"unknown workflow {workflow}")
 
 

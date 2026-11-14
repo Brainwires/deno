@@ -120,6 +120,50 @@ class Decide(unittest.TestCase):
         ok, _ = guard.decide(guard.RUNTIME, SHA, OWN, runs, table({8: partial}))
         self.assertFalse(ok)
 
+    def test_verified_by_a_full_dispatch_on_a_train_branch(self):
+        # 3.0.0-denext.22 ran on train/denext22: its development-denext push
+        # re-ran everything in full and held the tag for 1h45m.
+        runs = [
+            run(OWN, "push", "development-denext", None, "in_progress"),
+            run(43519114893, "workflow_dispatch", "train/denext22"),
+        ]
+        ok, reason = guard.decide(
+            guard.TESTS, SHA, OWN, runs, table({43519114893: full_tests_jobs()})
+        )
+        self.assertTrue(ok, reason)
+        self.assertIn("43519114893", reason)
+
+    def test_runtime_verified_by_a_full_train_dispatch(self):
+        runs = [run(6, "workflow_dispatch", "train/denext22")]
+        ok, _ = guard.decide(
+            guard.RUNTIME, SHA, OWN, runs, table({6: full_runtime_jobs()})
+        )
+        self.assertTrue(ok)
+
+    def test_npm_matrix_verified_by_a_train_push(self):
+        runs = [run(12, "push", "train/denext22")]
+        ok, _ = guard.decide(guard.NPM_MATRIX, SHA, OWN, runs, table({}))
+        self.assertTrue(ok)
+
+    def test_a_partial_train_dispatch_does_not_verify(self):
+        runs = [run(7, "workflow_dispatch", "train/denext22")]
+        ok, _ = guard.decide(
+            guard.TESTS,
+            SHA,
+            OWN,
+            runs,
+            table({7: jobs(["ubuntu-22.04 / test libs", "lint / ubuntu-22.04"])}),
+        )
+        self.assertFalse(ok)
+
+    def test_a_branch_merely_named_like_a_train_does_not_verify(self):
+        for branch in ("trains/x", "fix/train/x", "feat/train-x"):
+            runs = [run(9, "workflow_dispatch", branch)]
+            ok, _ = guard.decide(
+                guard.TESTS, SHA, OWN, runs, table({9: full_tests_jobs()})
+            )
+            self.assertFalse(ok, branch)
+
     def test_a_dispatch_from_a_fix_branch_does_not_verify(self):
         runs = [run(9, "workflow_dispatch", "fix/something")]
         ok, _ = guard.decide(guard.TESTS, SHA, OWN, runs, table({9: full_tests_jobs()}))
