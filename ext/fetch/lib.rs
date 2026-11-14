@@ -12,7 +12,6 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp::min;
 use std::convert::From;
-use std::future;
 use std::future::Future;
 use std::net::IpAddr;
 use std::path::Path;
@@ -2277,7 +2276,7 @@ where
       // used, conservatively suppressing a legitimate retry — but it would
       // also fail to mark a connection used before a second stream starts,
       // which is the more common case. Most h2 transport failures are decided
-      // by the `h2::Error` branch in `is_error_retryable` before provenance is
+      // by the `h2::Error` branch in `classify_retry` before provenance is
       // consulted, so the exposed window is narrow. Closing it properly needs
       // a checkout-time snapshot distinguishing "this connection was created
       // for me" from "created for a concurrent sibling", which the current
@@ -2348,9 +2347,29 @@ impl CheckoutTracker {
 #[derive(Clone, Debug)]
 struct FetchRetry;
 
-/// Marker extension that a request has been retried once.
+/// Extension counting the retries a request has already had.
 #[derive(Clone, Debug)]
-struct Retried;
+struct Retried(u32);
+
+/// How many times a request the server never processed (REFUSED_STREAM, or
+/// above a graceful GOAWAY's last stream id) is resent. The server says so
+/// itself (RFC 9113 section 8.7), so resending is safe however often it
+/// happens; a server that keeps refusing is waited out with a growing delay,
+/// as Go's HTTP/2 transport does (denoland/deno#21789). A transport failure on
+/// a pooled connection is only an inference that the request was not
+/// processed, and keeps its single retry.
+const MAX_UNPROCESSED_RETRIES: u32 = 5;
+
+/// The delay before retry number `retries + 1` of an unprocessed request: the
+/// first is immediate (a stream refused before the server's SETTINGS arrived
+/// fits once they have), then 250 ms, doubling.
+fn unprocessed_retry_delay(retries: u32) -> std::time::Duration {
+  if retries == 0 {
+    std::time::Duration::ZERO
+  } else {
+    std::time::Duration::from_millis(250 << (retries - 1).min(4))
+  }
+}
 
 impl<ResBody, E>
   retry::Policy<http::Request<ReqBody>, http::Response<ResBody>, E>
@@ -2358,18 +2377,14 @@ impl<ResBody, E>
 where
   E: std::error::Error + 'static,
 {
-  /// Don't delay retries.
-  type Future = future::Ready<()>;
+  type Future = Pin<Box<tokio::time::Sleep>>;
 
   fn retry(
     &mut self,
     req: &mut http::Request<ReqBody>,
     result: &mut Result<http::Response<ResBody>, E>,
   ) -> Option<Self::Future> {
-    if req.extensions().get::<Retried>().is_some() {
-      // only retry once
-      return None;
-    }
+    let retries = req.extensions().get::<Retried>().map_or(0, |r| r.0);
 
     match result {
       Ok(..) => {
@@ -2386,12 +2401,17 @@ where
         } else {
           ConnectionKind::Fresh
         };
-        if is_error_retryable(&*err, connection_kind) {
-          req.extensions_mut().insert(Retried);
-          Some(future::ready(()))
-        } else {
-          None
-        }
+        let delay = match classify_retry(&*err, connection_kind) {
+          Some(RetryKind::Unprocessed) if retries < MAX_UNPROCESSED_RETRIES => {
+            unprocessed_retry_delay(retries)
+          }
+          Some(RetryKind::StaleConnection) if retries == 0 => {
+            std::time::Duration::ZERO
+          }
+          _ => return None,
+        };
+        req.extensions_mut().insert(Retried(retries + 1));
+        Some(Box::pin(tokio::time::sleep(delay)))
       }
     }
   }
@@ -2424,16 +2444,26 @@ enum ConnectionKind {
   Fresh,
 }
 
+/// Why a failed attempt may be resent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetryKind {
+  /// The server said it did not process the request.
+  Unprocessed,
+  /// A pooled connection turned out to be dead before the request reached
+  /// the server.
+  StaleConnection,
+}
+
 /// `connection_kind` tells whether the failed attempt was sent on a connection
 /// that had already served a request. Transport-level failures are only safe to
 /// retry on [`ConnectionKind::Pooled`] connections: the same failure on a
 /// [`ConnectionKind::Fresh`] one means the server accepted the request and may
 /// well have processed it, so resending would duplicate a non-idempotent
 /// request.
-fn is_error_retryable(
+fn classify_retry(
   err: &(dyn std::error::Error + 'static),
   connection_kind: ConnectionKind,
-) -> bool {
+) -> Option<RetryKind> {
   // Note: hyper doesn't promise it will always be this h2 version. Keep up to date.
   if let Some(err) = find_source::<h2::Error>(err) {
     // They sent us a graceful shutdown, try with a new connection!
@@ -2441,7 +2471,7 @@ fn is_error_retryable(
       && err.is_remote()
       && err.reason() == Some(h2::Reason::NO_ERROR)
     {
-      return true;
+      return Some(RetryKind::Unprocessed);
     }
 
     // REFUSED_STREAM was sent from the server, which is safe to retry.
@@ -2450,7 +2480,7 @@ fn is_error_retryable(
       && err.is_remote()
       && err.reason() == Some(h2::Reason::REFUSED_STREAM)
     {
-      return true;
+      return Some(RetryKind::Unprocessed);
     }
   }
 
@@ -2458,7 +2488,7 @@ fn is_error_retryable(
   // the request and then died halfway through by the fact that the connection
   // came out of the pool.
   if connection_kind == ConnectionKind::Fresh {
-    return false;
+    return None;
   }
 
   // HTTP/1.1: The connection was closed before the message completed.
@@ -2468,7 +2498,7 @@ fn is_error_retryable(
   if let Some(err) = find_source::<hyper::Error>(err)
     && err.is_incomplete_message()
   {
-    return true;
+    return Some(RetryKind::StaleConnection);
   }
 
   // Connection reset/aborted by the server before we could send the request.
@@ -2482,10 +2512,10 @@ fn is_error_retryable(
         | std::io::ErrorKind::ConnectionAborted
     )
   {
-    return true;
+    return Some(RetryKind::StaleConnection);
   }
 
-  false
+  None
 }
 
 fn find_source<'a, E: std::error::Error + 'static>(

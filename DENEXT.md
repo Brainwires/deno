@@ -14693,6 +14693,34 @@ where the changes are discussed.
        exercises the nested path; the 9 `test-http2-*` files still disabled in
        `tests/node_compat/config.jsonc` fail for other reasons.
 
+378. **`fix(ext/fetch)`: an HTTP/2 request the server refused is retried until
+     it accepts it, with a growing delay** (runtime; `ext/fetch/lib.rs`). For
+     denoland/deno#21789 (concurrent HTTP/2 `fetch` calls fail with
+     `refused stream before processing any application logic`). The issue's
+     case, every stream sent before the server's SETTINGS
+     (MAX_CONCURRENT_STREAMS) arrive and the ones over the limit refused, is
+     already retried (denoland/deno#27417), but only once: a server that refused
+     the retry too (still at its limit, overloaded, a slot not yet freed) failed
+     the request with the issue's error. REFUSED_STREAM, like a stream above a
+     graceful GOAWAY's last stream id, is the server's own statement that it did
+     not process the request (RFC 9113 section 8.7), so resending is safe
+     however often it happens. `FetchRetry` now counts retries (`Retried(n)`)
+     and `classify_retry` tells the two kinds apart: those unprocessed requests
+     are resent up to 5 times, the first at once (a stream refused before
+     SETTINGS fits once they're in) and then after 250 ms, 500 ms, 1 s and 2 s,
+     as Go's HTTP/2 transport backs off; a transport failure on a pooled
+     connection, only an inference that the request wasn't processed, keeps its
+     single immediate retry. A request with a streaming body still can't be
+     resent.
+     - User-facing note: concurrent HTTP/2 requests to a server that refuses
+       streams while it is at its concurrency limit now succeed once it accepts
+       them, instead of failing on the second refusal.
+     - Tests: `fetch_test.ts`'s `fetchH2RetriesStreamsRefusedBeforeSettings`
+       (new: the issue's case against a raw h2c server that holds its SETTINGS
+       back and refuses 18 of 20 streams; it passed before the fix too) and
+       `fetchH2RetriesAStreamRefusedMoreThanOnce` (new: every request refused
+       three times; it failed with the issue's error before the fix).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -14700,7 +14728,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373-377) are what the prebuilt
+350, 351, 353, 355-361, 363-366, 368-371, 373-378) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
