@@ -14615,6 +14615,38 @@ where the changes are discussed.
        `httpServerCompletedResolvesForHeadWithStreamBody` (passed before, and
        still do).
 
+376. **`fix(ext/websocket)`: `close()` gives up on a peer that never answers the
+     close frame** (runtime; `ext/websocket/01_websocket.js`). Closes
+     denoland/deno#27924. `close()` sends the close frame and moves the socket
+     to CLOSING, then waited for the peer's close frame with no bound: a peer
+     that never answers (websocat in the issue, a wedged server, a broken proxy)
+     left the socket CLOSING forever, `close` never fired, and whatever the app
+     freed in `onclose` leaked, on the server side (`socket.close()` on a
+     `Deno.upgradeWebSocket` socket) and on the client side alike. RFC 6455
+     section 7.1.1 lets an endpoint drop the connection when the closing
+     handshake doesn't complete, and browsers bound the wait. Ported from
+     denoland/deno#37089 (Nikolay Bryskin): `close()` arms a 5 s timer; if the
+     socket is still CLOSING when it fires, it becomes CLOSED, a `close` event
+     with `wasClean: false` and code 1006 is dispatched and the resource is
+     closed; the event loop ignores what the dropped resource yields afterwards,
+     so `close` fires once. On top of the pull request, the timer is cancelled
+     on every other way out of CLOSING (the peer's close frame, as the pull
+     request had, plus a read error, the server's read-after-close path and a
+     failed close), so it never holds the event loop open for 5 s after the
+     socket has closed.
+     - User-facing note: a WebSocket whose peer doesn't answer `close()` within
+       5 seconds closes anyway, with a `close` event (code 1006,
+       `wasClean: false`).
+     - Tests: `websocket_test.ts`'s
+       `close() ends when the peer never answers
+       the close frame` (from
+       the pull request: a client against a raw TCP server that never answers)
+       and
+       `server close() ends when the client
+       never answers the close frame`
+       (new: the issue's server side, a `Deno.serve` socket against a raw TCP
+       client); both hung before the fix.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -14622,7 +14654,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373-375) are what the prebuilt
+350, 351, 353, 355-361, 363-366, 368-371, 373-376) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
