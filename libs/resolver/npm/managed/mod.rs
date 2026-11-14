@@ -31,6 +31,7 @@ use self::global::GlobalNpmPackageResolverSys;
 use self::local::LocalNpmPackageResolver;
 pub use self::resolution::NpmResolutionCell;
 pub use self::resolution::NpmResolutionCellRc;
+pub use self::resolution::NpmResolutionSnapshotRc;
 use crate::NpmCacheDirRc;
 use crate::npmrc::ResolvedNpmRcRc;
 

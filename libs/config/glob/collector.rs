@@ -150,8 +150,13 @@ impl<TFilter: Fn(WalkEntry) -> bool> FileCollector<TFilter> {
           } else if metadata.file_type().is_dir() {
             // allow the user to opt out of ignoring by explicitly specifying the dir
             let opt_out_ignore = specified_path == path;
-            let should_ignore_dir =
-              !opt_out_ignore && self.is_ignored_dir(&path);
+            // Don't descend into a directory no include pattern can match
+            // under: expanding workspace members (`packages/*/deno.json`)
+            // otherwise walked every member's whole tree, `.venv` and build
+            // output included (denoland/deno#36668).
+            let should_ignore_dir = !opt_out_ignore
+              && (self.is_ignored_dir(&path)
+                || !file_patterns.can_match_under_dir(&path));
             if !should_ignore_dir && visited_paths.insert(path.clone()) {
               pending_dirs.push_back(path);
             }
@@ -219,6 +224,10 @@ impl<TFilter: Fn(WalkEntry) -> bool> FileCollector<TFilter> {
 
 #[cfg(test)]
 mod test {
+  use sys_traits::BaseFsMetadata;
+  use sys_traits::BaseFsRead;
+  use sys_traits::BaseFsReadDir;
+  use sys_traits::FsCanonicalize;
   use sys_traits::FsCreateDirAll;
   use sys_traits::FsWrite;
   use sys_traits::impls::RealSys;
@@ -366,5 +375,122 @@ mod test {
       .collect::<Vec<_>>();
     file_names.sort();
     assert_eq!(file_names, expected);
+  }
+
+  /// A sys that records every directory the collector reads.
+  struct ReadDirLog {
+    read: std::cell::RefCell<Vec<PathBuf>>,
+  }
+
+  impl BaseFsRead for ReadDirLog {
+    fn base_fs_read(&self, path: &Path) -> std::io::Result<Cow<'static, [u8]>> {
+      RealSys.base_fs_read(path)
+    }
+  }
+
+  impl BaseFsMetadata for ReadDirLog {
+    type Metadata = <RealSys as BaseFsMetadata>::Metadata;
+
+    fn base_fs_metadata(&self, path: &Path) -> std::io::Result<Self::Metadata> {
+      RealSys.base_fs_metadata(path)
+    }
+
+    fn base_fs_symlink_metadata(
+      &self,
+      path: &Path,
+    ) -> std::io::Result<Self::Metadata> {
+      RealSys.base_fs_symlink_metadata(path)
+    }
+  }
+
+  impl BaseFsReadDir for ReadDirLog {
+    type ReadDirEntry = <RealSys as BaseFsReadDir>::ReadDirEntry;
+
+    fn base_fs_read_dir(
+      &self,
+      path: &Path,
+    ) -> std::io::Result<
+      Box<dyn Iterator<Item = std::io::Result<Self::ReadDirEntry>>>,
+    > {
+      self.read.borrow_mut().push(path.to_path_buf());
+      RealSys.base_fs_read_dir(path)
+    }
+  }
+
+  // denoland/deno#36668: expanding workspace member globs
+  // (`packages/*/deno.json`) walked every matched member's whole tree. A
+  // directory no include pattern can match under is not read, and the
+  // members found are the same: nested `**` globs, negated members and
+  // explicit member paths included.
+  #[test]
+  fn member_globs_do_not_walk_member_trees() {
+    let t = tempfile::tempdir().unwrap();
+    let root = RealSys.fs_canonicalize(t.path()).unwrap();
+    create_files(&root.join("packages/alpha"), &["deno.json"]);
+    create_files(&root.join("packages/alpha/src/deep"), &["x.ts"]);
+    create_files(&root.join("packages/alpha/.venv/lib/site"), &["y.py"]);
+    create_files(&root.join("packages/beta"), &["deno.json"]);
+    create_files(&root.join("packages/beta/dist/a/b"), &["c.js"]);
+    create_files(&root.join("packages/gamma"), &["README.md"]);
+    create_files(&root.join("packages/skip"), &["deno.json"]);
+    create_files(&root.join("apps/web/sub"), &["deno.json"]);
+    create_files(&root.join("apps/web/sub/inner"), &["deno.json"]);
+    create_files(&root.join("tools/cli"), &["deno.json"]);
+    create_files(&root.join("tools/cli/lib"), &["z.ts"]);
+    create_files(&root.join("unrelated/tree"), &["deno.json"]);
+
+    let include = [
+      "packages/*/deno.json",
+      "apps/**/deno.json",
+      "tools/cli/deno.json",
+      "!packages/skip/deno.json",
+    ]
+    .into_iter()
+    .map(|p| PathOrPattern::from_relative(&root, p).unwrap())
+    .collect();
+    let file_patterns = FilePatterns {
+      base: root.clone(),
+      include: Some(PathOrPatternSet::new(include)),
+      exclude: Default::default(),
+    };
+    let sys = ReadDirLog {
+      read: Default::default(),
+    };
+    let mut found = FileCollector::new(|_| true)
+      .ignore_git_folder()
+      .ignore_node_modules()
+      .collect_file_patterns(&sys, &file_patterns)
+      .into_iter()
+      .map(|p| {
+        p.strip_prefix(&root)
+          .unwrap()
+          .to_string_lossy()
+          .replace('\\', "/")
+      })
+      .collect::<Vec<_>>();
+    found.sort();
+    assert_eq!(
+      found,
+      [
+        "apps/web/sub/deno.json",
+        "apps/web/sub/inner/deno.json",
+        "packages/alpha/deno.json",
+        "packages/beta/deno.json",
+        "tools/cli/deno.json",
+      ]
+    );
+    let read = sys.read.into_inner();
+    for dir in [
+      "packages/alpha/src",
+      "packages/alpha/.venv",
+      "packages/beta/dist",
+      "tools/cli/lib",
+      "unrelated",
+    ] {
+      assert!(
+        !read.iter().any(|r| r.starts_with(root.join(dir))),
+        "read {dir}: {read:?}"
+      );
+    }
   }
 }

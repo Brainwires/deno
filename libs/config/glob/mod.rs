@@ -78,6 +78,15 @@ impl FilePatterns {
     self.matches_path_detail(&path, PathKind::File) // use file matching behavior
   }
 
+  /// Whether the include set can match a path under `dir` (always, without
+  /// one), so a walk can skip directories nothing it looks for is in.
+  pub(crate) fn can_match_under_dir(&self, dir: &Path) -> bool {
+    match &self.include {
+      Some(include) => include.can_match_under_dir(dir),
+      None => true,
+    }
+  }
+
   pub fn matches_path(&self, path: &Path, path_kind: PathKind) -> bool {
     self.matches_path_detail(path, path_kind) != FilePatternsMatch::Excluded
   }
@@ -461,6 +470,11 @@ impl PathOrPatternSet {
     PathOrPatternsMatch::NotMatched
   }
 
+  /// Whether any entry can include a path under `dir`.
+  pub(crate) fn can_match_under_dir(&self, dir: &Path) -> bool {
+    self.0.iter().any(|p| p.can_match_under_dir(dir))
+  }
+
   pub fn base_paths(&self) -> Vec<PathBuf> {
     let mut result = Vec::with_capacity(self.0.len());
     for element in &self.0 {
@@ -595,6 +609,18 @@ impl PathOrPattern {
       PathOrPattern::Path(p) | PathOrPattern::NegatedPath(p) => Some(p.clone()),
       PathOrPattern::RemoteUrl(_) => None,
       PathOrPattern::Pattern(p) => Some(p.base_path()),
+    }
+  }
+
+  /// Whether this entry can include a path under `dir`. Negated entries and
+  /// remote URLs never include anything.
+  pub(crate) fn can_match_under_dir(&self, dir: &Path) -> bool {
+    match self {
+      PathOrPattern::Path(p) => p.starts_with(dir) || dir.starts_with(p),
+      PathOrPattern::NegatedPath(_) | PathOrPattern::RemoteUrl(_) => false,
+      PathOrPattern::Pattern(p) => {
+        !p.is_negated() && p.can_match_under_dir(dir)
+      }
     }
   }
 
@@ -757,6 +783,20 @@ impl GlobPattern {
 
   pub fn is_negated(&self) -> bool {
     self.is_negated
+  }
+
+  /// [`Self::can_match_under`] for an absolute directory: `false` only when
+  /// no path under `dir` can match this pattern. A directory outside the
+  /// pattern's base (or one the base is under only by a different spelling)
+  /// stays a candidate.
+  pub(crate) fn can_match_under_dir(&self, dir: &Path) -> bool {
+    if self.base_path.as_os_str().is_empty() {
+      return true;
+    }
+    match dir.strip_prefix(&self.base_path) {
+      Ok(relative_base) => self.can_match_under(relative_base),
+      Err(_) => true,
+    }
   }
 
   fn as_negated(&self) -> GlobPattern {

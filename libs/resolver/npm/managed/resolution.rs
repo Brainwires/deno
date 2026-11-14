@@ -19,12 +19,20 @@ use parking_lot::RwLock;
 #[allow(clippy::disallowed_types, reason = "definition")]
 pub type NpmResolutionCellRc = deno_maybe_sync::MaybeArc<NpmResolutionCell>;
 
+/// A shared, immutable resolution snapshot. A cell only ever replaces its
+/// snapshot whole, so cells can hold the same one (the language server gives
+/// every request a copy of each scope's resolver, which deep-cloned the whole
+/// package graph per scope per request: denoland/deno#36668).
+#[allow(clippy::disallowed_types, reason = "definition")]
+pub type NpmResolutionSnapshotRc =
+  deno_maybe_sync::MaybeArc<NpmResolutionSnapshot>;
+
 /// Handles updating and storing npm resolution in memory.
 ///
 /// This does not interact with the file system.
 #[derive(Default)]
 pub struct NpmResolutionCell {
-  snapshot: RwLock<NpmResolutionSnapshot>,
+  snapshot: RwLock<NpmResolutionSnapshotRc>,
   is_pending: deno_unsync::sync::AtomicFlag,
 }
 
@@ -48,7 +56,7 @@ impl NpmResolutionCell {
 
   pub fn new(initial_snapshot: NpmResolutionSnapshot) -> Self {
     Self {
-      snapshot: RwLock::new(initial_snapshot),
+      snapshot: RwLock::new(NpmResolutionSnapshotRc::new(initial_snapshot)),
       is_pending: AtomicFlag::lowered(),
     }
   }
@@ -169,6 +177,11 @@ impl NpmResolutionCell {
   }
 
   pub fn snapshot(&self) -> NpmResolutionSnapshot {
+    (**self.snapshot.read()).clone()
+  }
+
+  /// The current snapshot, shared rather than copied.
+  pub fn snapshot_rc(&self) -> NpmResolutionSnapshotRc {
     self.snapshot.read().clone()
   }
 
@@ -193,6 +206,11 @@ impl NpmResolutionCell {
   }
 
   pub fn set_snapshot(&self, snapshot: NpmResolutionSnapshot) {
+    *self.snapshot.write() = NpmResolutionSnapshotRc::new(snapshot);
+  }
+
+  /// Use `snapshot` (shared with whoever else holds it) as this cell's.
+  pub fn set_snapshot_rc(&self, snapshot: NpmResolutionSnapshotRc) {
     *self.snapshot.write() = snapshot;
   }
 
@@ -211,5 +229,27 @@ impl NpmResolutionCell {
 
   pub fn mark_not_pending(&self) {
     self.is_pending.lower();
+  }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_types, reason = "compares shared snapshots")]
+mod test {
+  use deno_maybe_sync::MaybeArc;
+
+  use super::*;
+
+  #[test]
+  fn cells_share_a_snapshot_until_one_replaces_it() {
+    let a = NpmResolutionCell::default();
+    let b = NpmResolutionCell::default();
+    let shared = a.snapshot_rc();
+    b.set_snapshot_rc(shared.clone());
+    // Handing a snapshot to another cell does not copy it.
+    assert!(MaybeArc::ptr_eq(&a.snapshot_rc(), &b.snapshot_rc()));
+    // Replacing one cell's snapshot leaves the other's as it was.
+    a.set_snapshot(NpmResolutionSnapshot::new(Default::default()));
+    assert!(!MaybeArc::ptr_eq(&a.snapshot_rc(), &b.snapshot_rc()));
+    assert!(MaybeArc::ptr_eq(&b.snapshot_rc(), &shared));
   }
 }

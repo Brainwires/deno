@@ -255,7 +255,7 @@ impl LspScopedResolver {
     factory
       .services
       .npm_resolution
-      .set_snapshot(self.npm_resolution.snapshot());
+      .set_snapshot_rc(self.npm_resolution.snapshot_rc());
     let npm_resolver = self.npm_resolver.as_ref();
     if let Some(npm_resolver) = &npm_resolver {
       factory.set_npm_resolver(CliNpmResolver::<CliSys>::new::<CliSys>(

@@ -14633,6 +14633,55 @@ where the changes are discussed.
        before the server was ready: 3 scopes × 4 entries × (2 + 3 × 2)).
      - Node tests enabled: none; no Node API changes.
 
+376. **`perf(lsp)`: workspace member globs don't walk member trees, and
+     requests share the npm resolution snapshot** (CLI; upstream
+     denoland/deno#36668; `libs/config/glob/mod.rs`,
+     `libs/config/glob/collector.rs`, `libs/resolver/npm/managed/resolution.rs`,
+     `cli/lsp/resolver.rs`). The reporter measured six defects and published
+     a patch for each as a diagnostic. Evaluated against this fork:
+     - Defect 1, taken (rederived): expanding member globs
+       (`packages/*/deno.json`, from deno.json `workspace` and package.json
+       `workspaces`) descended every matched member's whole tree, `.venv` and
+       build output included, pruning only `node_modules`, `.git` and the
+       vendor folder. The file collector now skips a directory no include
+       entry can match under (`FilePatterns::can_match_under_dir`, on the
+       existing `GlobPattern::can_match_under`, which `split_by_base` already
+       relies on): globs match with a literal separator and a literal leading
+       dot, so `*` can't reach below its segment; `**` and anything outside a
+       pattern's base stay candidates; negated entries add nothing; an
+       explicit path keeps its ancestors and descendants. This applies to
+       every collector walk with an include set (fmt, lint, test, bench, doc,
+       tsconfig roots), with the same files found.
+     - Defect 3 (lazy dependency resolutions) and the redundancy behind defect
+       4: item 375.
+     - Defect 6, taken: `NpmResolutionCell` holds its snapshot in a
+       `MaybeArc` (`snapshot_rc` / `set_snapshot_rc`; a cell only ever
+       replaces its snapshot whole), and the language server's per-request
+       resolver copy shares it instead of deep-cloning every scope's package
+       graph for every request. Seeding each scope with the whole lockfile
+       (the other half of defect 6) is unchanged.
+     - Defect 2, not taken: honouring `.gitignore` while collecting tsconfig
+       `include` roots drops roots a project includes on purpose, such as
+       Next.js's `.next/types/**/*.ts` (gitignored, listed in every Next
+       tsconfig).
+     - Defect 4's gate, not taken: it skips the export resolutions rather than
+       removing their repetition (item 375 removes it).
+     - Defect 5, not taken: making deno.json `workspace` bound membership
+       changes a tested contract (deno.json and package.json members are
+       unioned on purpose), as the reporter notes.
+     - Evidence: the 40-member workspace of item 375 opened 45,080
+       directories (44,994 inside members' `.venv`) through one
+       `documentSymbol`, now 960 (`strace -e openat`, `O_DIRECTORY`); the 874
+       `.venv` opens left are `walk_workspace`, which stops at 1,000 entries.
+     - Tests: `deno_config`'s
+       `glob::collector::test::member_globs_do_not_walk_member_trees`
+       (members from `packages/*/deno.json`, `apps/**/deno.json`, an explicit
+       path and a negated member: the same five found, and no read of a
+       member's `src`, `.venv` or `dist`; on 3.0.0-denext.22 it read all of
+       them), `deno_resolver`'s
+       `npm::managed::resolution::test::cells_share_a_snapshot_until_one_replaces_it`.
+     - Node tests enabled: none; no Node API changes.
+
 377. **`fix(desktop)`: every packaged Windows app has an app id, so WebView2
      keeps its data in the per-user app data folder** (CLI; upstream
      denoland/deno#36768; `cli/tools/desktop.rs`). An `.msi` installs per
