@@ -1457,3 +1457,160 @@ Deno.test("webrtcSctpStateChange", async () => {
   a.close();
   b.close();
 });
+
+// --- ICE over TCP, mDNS, the engine's log (Deno.webrtc) ---------------------
+
+function waitGathered(pc: RTCPeerConnection): Promise<void> {
+  return pc.iceGatheringState === "complete"
+    ? Promise.resolve()
+    : once(pc, "icegatheringstatechange").then(() => waitGathered(pc));
+}
+
+/** The description without the candidate lines `drop` matches. */
+function withoutCandidates(
+  desc: RTCSessionDescription,
+  drop: (line: string) => boolean,
+): RTCSessionDescriptionInit {
+  const sdp = desc.sdp.split("\r\n").filter((l) =>
+    !(l.startsWith("a=candidate:") && drop(l))
+  ).join("\r\n");
+  return { type: desc.type, sdp };
+}
+
+const isUdpCandidate = (l: string) => l.split(" ")[2]?.toLowerCase() === "udp";
+
+Deno.test("webrtcNetworkIceTcp", async () => {
+  // Two connections, each on a tcpPort network, with every UDP candidate
+  // left out of both descriptions: they connect over TCP (RFC 6544), one
+  // listening and the other dialling.
+  using netA = Deno.webrtc.createNetwork({ tcpPort: 0 });
+  using netB = Deno.webrtc.createNetwork({ tcpPort: 0 });
+  const [listener] = netA.tcpAddresses;
+  const port = Number(listener.slice(listener.lastIndexOf(":") + 1));
+  assert(port > 0, listener);
+  assertEquals(netA.localAddresses, []);
+
+  const a = new RTCPeerConnection({ denoNetwork: netA });
+  const b = new RTCPeerConnection({ denoNetwork: netB });
+  const channel = a.createDataChannel("tcp");
+  const remote = once<RTCDataChannelEvent>(b, "datachannel");
+  const opened = once(channel, "open");
+  await a.setLocalDescription();
+  await waitGathered(a);
+  const offered = candidatesOf(a);
+  assert(
+    offered.some((c) =>
+      c.protocol === "tcp" && c.tcpType === "passive" && c.port === port
+    ),
+    a.localDescription!.sdp,
+  );
+  assert(
+    offered.some((c) =>
+      c.protocol === "tcp" && c.tcpType === "active" && c.port === 9
+    ),
+    a.localDescription!.sdp,
+  );
+  await b.setRemoteDescription(
+    withoutCandidates(a.localDescription!, isUdpCandidate),
+  );
+  await b.setLocalDescription();
+  await waitGathered(b);
+  await a.setRemoteDescription(
+    withoutCandidates(b.localDescription!, isUdpCandidate),
+  );
+  await opened;
+  const remoteChannel = (await remote).channel;
+  if (remoteChannel.readyState !== "open") await once(remoteChannel, "open");
+
+  const toB = messages(remoteChannel, 2);
+  channel.send("over tcp");
+  channel.send(new Uint8Array(60_000).fill(7));
+  const got = await toB;
+  assertEquals(got[0], "over tcp");
+  assertEquals((got[1] as ArrayBuffer).byteLength, 60_000);
+  const back = messages(channel, 1);
+  remoteChannel.send("back");
+  assertEquals(await back, ["back"]);
+
+  for (const pc of [a, b]) {
+    const pair = pc.sctp!.transport!.iceTransport.getSelectedCandidatePair()!;
+    assertEquals(pair.local!.protocol, "tcp");
+    assertEquals(pair.remote!.protocol, "tcp");
+  }
+  a.close();
+  b.close();
+});
+
+Deno.test("webrtcNetworkIceTcpOptions", () => {
+  assertThrows(
+    () => Deno.webrtc.createNetwork({ tcpPort: 70_000 }),
+    TypeError,
+  );
+  assertThrows(() => Deno.webrtc.createNetwork({ tcpPort: -1 }), TypeError);
+  // Without tcpPort there are no TCP listeners or candidates.
+  using net = Deno.webrtc.createNetwork();
+  assertEquals(net.tcpAddresses, []);
+});
+
+Deno.test("webrtcNetworkMdnsOption", async () => {
+  // The unit tests run with DENO_WEBRTC_LOOPBACK_ONLY=1, where mDNS is off:
+  // `mdns: true` then keeps the host candidates literal and says why.
+  using net = Deno.webrtc.createNetwork({ mdns: true });
+  const pc = new RTCPeerConnection({ denoNetwork: net });
+  const note = once<RTCPeerConnectionIceErrorEvent>(pc, "icecandidateerror");
+  pc.createDataChannel("x");
+  await pc.setLocalDescription();
+  assert((await note).errorText.includes("mDNS"));
+  await waitGathered(pc);
+  const hosts = candidatesOf(pc).filter((c) => c.type === "host");
+  assert(hosts.length > 0);
+  assert(hosts.every((c) => c.address === "127.0.0.1"));
+  pc.close();
+  // `mdns: false`: a peer's `.local` candidates are accepted and skipped.
+  using off = Deno.webrtc.createNetwork({ mdns: false });
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection({ denoNetwork: off });
+  a.createDataChannel("y");
+  await a.setLocalDescription();
+  await b.setRemoteDescription(a.localDescription!);
+  await b.addIceCandidate({
+    candidate:
+      "candidate:2 1 udp 2130706431 0a1b2c3d-0000-4000-8000-000000000001.local 9999 typ host",
+    sdpMid: "0",
+  });
+  a.close();
+  b.close();
+});
+
+Deno.test("webrtcSetLogLevel", { permissions: { run: true } }, async () => {
+  assertThrows(() => Deno.webrtc.setLogLevel("loud" as "off"), TypeError);
+  // The engine's records reach stderr at the level set, and not by default.
+  const run = async (level: string | null) => {
+    const code = `
+      ${level ? `Deno.webrtc.setLogLevel(${JSON.stringify(level)});` : ""}
+      const a = new RTCPeerConnection();
+      const b = new RTCPeerConnection();
+      a.createDataChannel("log");
+      await a.setLocalDescription();
+      await b.setRemoteDescription(a.localDescription);
+      await b.setLocalDescription();
+      await a.setRemoteDescription(b.localDescription);
+      await new Promise((r) => setTimeout(r, 500));
+      a.close();
+      b.close();
+      Deno.webrtc.setLogLevel("off");
+    `;
+    const { stderr, success } = await new Deno.Command(Deno.execPath(), {
+      args: ["eval", code],
+      env: { DENO_WEBRTC_LOOPBACK_ONLY: "1", NO_COLOR: "1" },
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    assert(success, new TextDecoder().decode(stderr));
+    return new TextDecoder().decode(stderr);
+  };
+  const quiet = await run(null);
+  assert(!quiet.includes(" RS - rtc"), quiet);
+  const verbose = await run("trace");
+  assert(/^(TRACE|DEBUG|INFO) RS - rtc/m.test(verbose), verbose);
+});

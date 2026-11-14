@@ -38,6 +38,7 @@ const {
   op_webrtc_network_addresses,
   op_webrtc_network_close,
   op_webrtc_network_create,
+  op_webrtc_network_tcp_addresses,
   op_webrtc_pc_add_transceiver,
   op_webrtc_pc_attach_track,
   op_webrtc_pc_selected_pair,
@@ -53,6 +54,7 @@ const {
   op_webrtc_sender_set_streams,
   op_webrtc_sender_write_frame,
   op_webrtc_sender_write_rtp,
+  op_webrtc_set_log_level,
   op_webrtc_transceiver_set_codec_preferences,
   op_webrtc_transceiver_set_direction,
   op_webrtc_transceiver_stop,
@@ -1534,10 +1536,14 @@ function selectedPair(pc) {
   if (state.closed) return null;
   const pair = op_webrtc_pc_selected_pair(pc[_rid]);
   if (pair === null) return null;
+  const protocol = pair[2];
   const find = (list, addr) => {
     for (let i = 0; i < list.length; ++i) {
       const c = list[i];
-      if (`${c.address}:${c.port}` === addr) return c;
+      const host = StringPrototypeIncludes(c.address ?? "", ":")
+        ? `[${c.address}]`
+        : c.address;
+      if (`${host}:${c.port}` === addr && c.protocol === protocol) return c;
     }
     return null;
   };
@@ -1549,9 +1555,13 @@ function selectedPair(pc) {
       "",
     );
     return new RTCIceCandidate({
-      candidate: `candidate:0 1 udp 0 ${host} ${
+      // A candidate the strict parser accepts (priority 1 or more, and a
+      // related address, which a peer-reflexive one must carry).
+      candidate: `candidate:0 1 ${protocol} 1 ${host} ${
         StringPrototypeSlice(addr, sep + 1)
-      } typ prflx`,
+      } typ prflx raddr 0.0.0.0 rport 0${
+        protocol === "tcp" ? " tcptype active" : ""
+      }`,
       sdpMLineIndex: 0,
     });
   };
@@ -4013,7 +4023,8 @@ function dispatchEngineEvent(pc, event) {
 // program feeds already-encoded frames or finished RTP packets, and a remote
 // track's packets are read with readRtp(). Networking: a Network
 // (createNetwork) fixes ports, shares one UDP port between connections,
-// advertises 1:1 NAT addresses and runs ICE-lite; a connection uses one with
+// advertises 1:1 NAT addresses, does ICE over TCP (tcpPort), publishes host
+// candidates under mDNS names (mdns) and runs ICE-lite; a connection uses one with
 // the non-standard `RTCConfiguration.denoNetwork` member. Certificates:
 // exportCertificate / importCertificate keep a DTLS fingerprint across
 // restarts.
@@ -4274,6 +4285,8 @@ function convertNetworkOptions(options) {
     iceLite: false,
     iceTimeouts: null,
     maxMessageSize: null,
+    tcpPort: null,
+    mdns: null,
   };
   if (o.port !== undefined) {
     out.port = webidl.converters["unsigned short"](o.port, prefix, "port", {
@@ -4337,6 +4350,17 @@ function convertNetworkOptions(options) {
   if (o.maxMessageSize !== undefined) {
     out.maxMessageSize = webidl.converters["unsigned long"](o.maxMessageSize);
   }
+  if (o.tcpPort !== undefined) {
+    out.tcpPort = webidl.converters["unsigned short"](
+      o.tcpPort,
+      prefix,
+      "tcpPort",
+      { enforceRange: true },
+    );
+  }
+  if (o.mdns !== undefined) {
+    out.mdns = !!o.mdns;
+  }
   return out;
 }
 
@@ -4355,6 +4379,13 @@ class RtcNetwork {
     webidl.assertBranded(this, RtcNetworkPrototype);
     if (this[_state].closed) return [];
     return op_webrtc_network_addresses(this[_rid]);
+  }
+
+  /** The TCP listeners' local addresses (`tcpPort` networks), else []. */
+  get tcpAddresses() {
+    webidl.assertBranded(this, RtcNetworkPrototype);
+    if (this[_state].closed) return [];
+    return op_webrtc_network_tcp_addresses(this[_rid]);
   }
 
   /** Closes the network's shared sockets and every connection using it. */
@@ -4380,6 +4411,15 @@ function createNetwork(options = undefined) {
   return new RtcNetwork(illegalConstructorKey, rid, converted);
 }
 
+// How much the WebRTC engine logs to stderr: "off" (the default; its
+// outcomes are RTCPeerConnection events), "error", "warn", "info", "debug"
+// or "trace". Process-wide.
+function setLogLevel(level) {
+  op_webrtc_set_log_level(
+    webidl.converters.DOMString(level, "Deno.webrtc.setLogLevel", "Argument 1"),
+  );
+}
+
 const webrtcNs = ObjectFreeze({
   __proto__: null,
   EncodedMediaTrack,
@@ -4389,6 +4429,7 @@ const webrtcNs = ObjectFreeze({
   requestKeyFrame,
   exportCertificate,
   importCertificate,
+  setLogLevel,
 });
 
 return {

@@ -9,6 +9,7 @@ use arc_swap::ArcSwap;
 use deno_runtime::deno_telemetry;
 use deno_runtime::deno_telemetry::OtelConfig;
 use deno_runtime::deno_telemetry::OtelConsoleConfig;
+use deno_runtime::deno_webrtc;
 
 struct CliLoggerInner {
   otel_console_config: OtelConsoleConfig,
@@ -56,21 +57,58 @@ fn is_quieted(level: log::Level) -> bool {
   level > log::Level::Error && QUIET_DEPTH.with(|depth| depth.get() > 0)
 }
 
+/// The WebRTC engine's records (the `rtc` and `rtc_*` crates) are shown at
+/// the level `Deno.webrtc.setLogLevel` sets (off by default; ext/webrtc
+/// reports what matters as `RTCPeerConnection` events, DENEXT.md item 370),
+/// whatever `DENO_LOG` says, each prefixed with its level and source.
+fn engine_enabled(metadata: &log::Metadata) -> bool {
+  metadata.level() <= deno_webrtc::engine_log_level()
+}
+
+fn write_engine_record(record: &log::Record) {
+  let mut target = record.target().to_string();
+  if let Some(line_no) = record.line() {
+    target.push(':');
+    target.push_str(&line_no.to_string());
+  }
+  let _ = writeln!(
+    std::io::stderr().lock(),
+    "{} RS - {} - {}",
+    record.level(),
+    target,
+    record.args()
+  );
+}
+
 impl log::Log for CliLogger {
   fn enabled(&self, metadata: &log::Metadata) -> bool {
-    !is_quieted(metadata.level()) && self.inner.load().logger.enabled(metadata)
+    if is_quieted(metadata.level()) {
+      return false;
+    }
+    if deno_webrtc::is_engine_log_target(metadata.target()) {
+      return engine_enabled(metadata);
+    }
+    self.inner.load().logger.enabled(metadata)
   }
 
   fn log(&self, record: &log::Record) {
     if self.enabled(record.metadata()) {
       (self.on_log_start)();
 
-      match self.inner.load().otel_console_config {
-        OtelConsoleConfig::Ignore => {
+      let engine = deno_webrtc::is_engine_log_target(record.target());
+      let write = |record: &log::Record| {
+        if engine {
+          write_engine_record(record);
+        } else {
           self.inner.load().logger.log(record);
         }
+      };
+      match self.inner.load().otel_console_config {
+        OtelConsoleConfig::Ignore => {
+          write(record);
+        }
         OtelConsoleConfig::Capture => {
-          self.inner.load().logger.log(record);
+          write(record);
           deno_telemetry::handle_log(record);
         }
         OtelConsoleConfig::Replace => {
@@ -115,9 +153,9 @@ pub fn init(options: InitLoggingOptions) {
   .filter_module("deno::lsp::performance", log::LevelFilter::Debug)
   .filter_module("rustls", log::LevelFilter::Off)
   // WebRTC's engine (the `rtc` and `rtc_*` crates) logs every state change
-  // at INFO and drops errors it can't return as WARN; ext/webrtc reports
-  // what matters as RTCPeerConnection events instead (DENEXT.md item 370).
-  .filter_module("rtc", log::LevelFilter::Off)
+  // at INFO and drops errors it can't return as WARN: its records bypass
+  // this filter and follow `Deno.webrtc.setLogLevel` (off by default; see
+  // `engine_enabled`).
   // swc_ecma_codegen's `srcmap!` macro emits error-level spans only on debug
   // build:
   // https://github.com/swc-project/swc/blob/74d6478be1eb8cdf1df096c360c159db64b64d8a/crates/swc_ecma_codegen/src/macros.rs#L112
@@ -191,6 +229,34 @@ pub fn init(options: InitLoggingOptions) {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn engine_records_follow_the_webrtc_log_level() {
+    let record = |target: &'static str, level| {
+      log::Metadata::builder().target(target).level(level).build()
+    };
+    assert!(deno_webrtc::is_engine_log_target("rtc_ice::agent"));
+    assert!(deno_webrtc::is_engine_log_target("rtc::peer_connection"));
+    assert!(!deno_webrtc::is_engine_log_target("rtcp_like"));
+    assert!(!deno_webrtc::is_engine_log_target("deno_webrtc::peer"));
+    // Off by default.
+    assert!(!engine_enabled(&record(
+      "rtc_ice::agent",
+      log::Level::Error
+    )));
+    deno_webrtc::set_engine_log_level("debug").unwrap();
+    assert!(engine_enabled(&record("rtc_ice::agent", log::Level::Debug)));
+    assert!(!engine_enabled(&record(
+      "rtc_ice::agent",
+      log::Level::Trace
+    )));
+    deno_webrtc::set_engine_log_level("off").unwrap();
+    assert!(!engine_enabled(&record(
+      "rtc_ice::agent",
+      log::Level::Error
+    )));
+    assert!(deno_webrtc::set_engine_log_level("loud").is_err());
+  }
 
   #[test]
   fn quiet_below_error_is_per_thread_and_nests() {
