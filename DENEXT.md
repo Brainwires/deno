@@ -15297,12 +15297,12 @@ where the changes are discussed.
      before reading), `Deno.serve`'s HTTP/1.1 path still read the request body
      to its end before closing, so an early refusal cost the whole upload and a
      body that never ended held the connection forever. The server now
-     half-closes the socket and discards what the client still sends for at
-     most 500 ms, then closes: the client reads the response instead of a reset
-     (RFC 9112 section 9.6), and the upload stops.
+     half-closes the socket and discards what the client still sends for at most
+     500 ms, then closes: the client reads the response instead of a reset (RFC
+     9112 section 9.6), and the upload stops.
      - User-facing note: `Deno.serve` answering an HTTP/1.1 upload early (for
-       example with `413`) closes the connection within half a second instead
-       of receiving the rest of the body.
+       example with `413`) closes the connection within half a second instead of
+       receiving the rest of the body.
      - Tests: `serve_test.ts`'s
        `httpServerClosesConnectionAfterEarlyResponseWithoutDrainingBody` and
        `httpServerEarlyResponseEndsWithEofWhileClientUploads` (both fail on
@@ -15322,12 +15322,12 @@ where the changes are discussed.
      connection after the response, and the head writer leaves out its own
      header when the application's is there. Merged around this fork's
      memory-transport target check (`claims_foreign_memory_scheme`).
-     - User-facing note: a `Deno.serve` handler that returns
-       `Connection: close` gets the connection closed after its response, with
-       one `connection` header on the wire.
-     - Tests: `serve_test.ts`'s `httpServerResponseConnectionClose` (sync,
-       async and streamed responses, with no, a small and a large request body;
-       fails on 3.0.0-denext.22).
+     - User-facing note: a `Deno.serve` handler that returns `Connection: close`
+       gets the connection closed after its response, with one `connection`
+       header on the wire.
+     - Tests: `serve_test.ts`'s `httpServerResponseConnectionClose` (sync, async
+       and streamed responses, with no, a small and a large request body; fails
+       on 3.0.0-denext.22).
      - Node tests enabled: none; no Node API changes.
 
 389. **`fix(ext/fetch)`: aborting a fetch still cancels its body after the
@@ -15336,18 +15336,18 @@ where the changes are discussed.
      `ext/fetch/26_fetch.js`). The body is cancelled by an abort algorithm on
      the request's dependent signal, and the caller's signal reaches that
      dependent only through a `WeakRef`. Once the `Response` was collected while
-     a reader of its body was still alive, nothing held the dependent signal:
-     it was collected too, `controller.abort()` reached nothing, and
+     a reader of its body was still alive, nothing held the dependent signal: it
+     was collected too, `controller.abort()` reached nothing, and
      `reader.read()` stayed pending forever. The response body stream (and a
      blob URL fetch's body) now holds the request's signal, so the signal lives
      as long as the body and both are collected together. Item 72 did not carry
-     #36989 because its earlier commits made a long-lived source signal hold
-     its dependents strongly (a retention leak); its last commit reverted those
+     #36989 because its earlier commits made a long-lived source signal hold its
+     dependents strongly (a retention leak); its last commit reverted those
      `ext/web` changes, and only this `ext/fetch` part is taken, which adds no
      reference from the caller's signal.
-     - User-facing note: `controller.abort()` rejects a pending
-       `reader.read()` on a fetch body even when the `Response` object itself
-       is no longer referenced.
+     - User-facing note: `controller.abort()` rejects a pending `reader.read()`
+       on a fetch body even when the `Response` object itself is no longer
+       referenced.
      - Tests: the `run::fetch_abort_body_after_gc` spec (abort with and without
        a GC first; a cancelled body is still collected while its signal lives;
        the GC case stays pending on 3.0.0-denext.22).
@@ -15431,33 +15431,34 @@ where the changes are discussed.
      - Tests: `deno_core`'s
        `modules::tests::test_dynamic_import_waits_for_statically_evaluating_tla_graph`
        (the module and its async dependency each imported while the static
-       evaluation waits; then a cached import returns the same namespace and
-       the module ran once).
+       evaluation waits; then a cached import returns the same namespace and the
+       module ran once).
      - Node tests enabled: none; no Node API changes.
 
 394. **`fix`: a `.env` or `.npmrc` file that starts with a UTF-8 BOM keeps its
-     first entry** (port of theende/ende 9f6ed291b1, MIT, plus the `.npmrc`
-     part of denoland/deno#37012 that Ende did not carry; upstream
+     first entry** (port of theende/ende 9f6ed291b1, MIT, plus the `.npmrc` part
+     of denoland/deno#37012 that Ende did not carry; upstream
      denoland/deno#36701; `libs/dotenv/lib.rs`, `libs/npmrc/ini.rs`). An editor
      that saves a `.env` file with a byte order mark (Notepad, several Windows
      tools) made the BOM part of the first key, so `--env-file` (and the env
-     file `deno compile` embeds) set `﻿FOO` instead of `FOO`; `.npmrc`'s
-     ini parser had the same bug. One leading BOM is now stripped where file
-     content enters each parser; a second BOM, or one inside a value, is
-     content and stays. Not carried: the pull request's
-     `process.loadEnvFile()` hunk, which its own second commit notes differs
-     from Node (Node keeps the BOM there); `node:util.parseEnv()` takes a
-     string and keeps the BOM, as in Node, and a test now says so.
+     file `deno compile` embeds) set `﻿FOO` instead of `FOO`; `.npmrc`'s ini
+     parser had the same bug. One leading BOM is now stripped where file content
+     enters each parser; a second BOM, or one inside a value, is content and
+     stays. Not carried: the pull request's `process.loadEnvFile()` hunk, which
+     its own second commit notes differs from Node (Node keeps the BOM there);
+     `node:util.parseEnv()` takes a string and keeps the BOM, as in Node, and a
+     test now says so.
      - User-facing note: `--env-file` and `.npmrc` read a file saved with a
        UTF-8 BOM correctly.
      - Tests: the `run::env_file::bom` spec (the first variable is `undefined`
        on 3.0.0-denext.22); `deno_dotenv`'s `file_content_strips_leading_bom`
        and `file_content_strips_only_one_leading_bom`; `deno_npmrc`'s
        `ini::test::strips_leading_bom` and `strips_only_one_leading_bom`;
-       `unit_node/util_test.ts`'s `[util] parseEnv() keeps a leading BOM like
+       `unit_node/util_test.ts`'s
+       `[util] parseEnv() keeps a leading BOM like
        Node`.
-     - Node tests enabled: none; `process.loadEnvFile()` and
-       `util.parseEnv()` are unchanged.
+     - Node tests enabled: none; `process.loadEnvFile()` and `util.parseEnv()`
+       are unchanged.
 
 395. **`fix(run,serve)`: a symlinked entrypoint loads from the file it points
      to** (port of theende/ende 1e4756cca2 and f5b06e0999, MIT, from
@@ -15465,14 +15466,14 @@ where the changes are discussed.
      `deno run bin/tool`, where `bin/tool` is a symlink to `../src/tool.js`,
      loaded the entrypoint under the symlink's URL, so its relative imports
      resolved against `bin/` and failed with "Module not found": a script
-     symlinked into a bin directory (a shebang script on `PATH`, an npm
-     `.bin` link) could not import its siblings. `deno serve` had the same bug.
-     A local file entrypoint now resolves to its real path first, as Node does
-     for its main module (`--preserve-symlinks-main` off); this fork's
-     directory entry (`deno run <dir>`) and Node binary main fallback then run
-     on the resolved URL, as before.
-     - User-facing note: `deno run` and `deno serve` of a symlink import
-       modules relative to the symlink's target; `import.meta.url` and
+     symlinked into a bin directory (a shebang script on `PATH`, an npm `.bin`
+     link) could not import its siblings. `deno serve` had the same bug. A local
+     file entrypoint now resolves to its real path first, as Node does for its
+     main module (`--preserve-symlinks-main` off); this fork's directory entry
+     (`deno run <dir>`) and Node binary main fallback then run on the resolved
+     URL, as before.
+     - User-facing note: `deno run` and `deno serve` of a symlink import modules
+       relative to the symlink's target; `import.meta.url` and
        `import.meta.filename` name the target.
      - Tests: the `run::symlinked_entrypoint` and `serve::symlinked_entrypoint`
        specs (Unix; "Module not found" on 3.0.0-denext.22).
@@ -15480,24 +15481,24 @@ where the changes are discussed.
 
 396. **`fix(compile)`: an `--exclude` entry matches however the walk spells the
      path** (port of theende/ende a4d5ccb090, MIT, from denoland/deno#35818;
-     part of upstream denoland/deno#35817; `cli/tools/compile.rs`).
-     `--exclude` and `compile.exclude` entries (also used by `deno desktop`)
-     were resolved with a bare `initial_cwd().join(p)`, but exclusion is an
-     equality check against the paths the VFS builder visits (canonical) and
-     the include walker visits (normalized, symlinks kept). A `../`-relative
-     entry, or a working directory behind a symlink such as `/tmp` or `/var`
-     on macOS, never matched, and the excluded files were embedded. Each entry
-     now stands for its joined, canonical and normalized forms at both sites.
-     The VFS builder already consults exclusions while it embeds a local
-     `node_modules` directory, so an excluded path in there is left out too.
-     Not covered (the rest of #35817): `--exclude-unused-npm` still prunes
-     only the global-cache snapshot, not a local `node_modules` directory.
-     - User-facing note: `deno compile --exclude ../folder/x` and excludes
-       under a symlinked working directory leave those files out.
+     part of upstream denoland/deno#35817; `cli/tools/compile.rs`). `--exclude`
+     and `compile.exclude` entries (also used by `deno desktop`) were resolved
+     with a bare `initial_cwd().join(p)`, but exclusion is an equality check
+     against the paths the VFS builder visits (canonical) and the include walker
+     visits (normalized, symlinks kept). A `../`-relative entry, or a working
+     directory behind a symlink such as `/tmp` or `/var` on macOS, never
+     matched, and the excluded files were embedded. Each entry now stands for
+     its joined, canonical and normalized forms at both sites. The VFS builder
+     already consults exclusions while it embeds a local `node_modules`
+     directory, so an excluded path in there is left out too. Not covered (the
+     rest of #35817): `--exclude-unused-npm` still prunes only the global-cache
+     snapshot, not a local `node_modules` directory.
+     - User-facing note: `deno compile --exclude ../folder/x` and excludes under
+       a symlinked working directory leave those files out.
      - Tests: the `compile::exclude_relative_parent` spec (`a.txt` and
        `sub_folder` are embedded on 3.0.0-denext.22) and
-       `compile::exclude_symlinked_include` (Unix; a `..`-relative entry
-       reached through a symlinked directory).
+       `compile::exclude_symlinked_include` (Unix; a `..`-relative entry reached
+       through a symlinked directory).
      - Node tests enabled: none; no Node API changes.
 
 397. **`fix(ext/fs)`: `Deno.utime` sets the times of a read-only file on
@@ -15506,17 +15507,16 @@ where the changes are discussed.
      `Deno.utimeSync` and `node:fs`'s `utimes` / `utimesSync` failed with
      "Access is denied" on Windows for a file with the read-only attribute (Git
      objects, for example): `filetime::set_file_times` opens the path with
-     `GENERIC_WRITE`, and setting file times only needs
-     `FILE_WRITE_ATTRIBUTES`. The path is now opened with that right (and
-     `FILE_FLAG_BACKUP_SEMANTICS`, so a directory opens too) and the times are
-     set on the handle; other platforms keep `filetime::set_file_times`. The
-     path still goes through this fork's DOS-device-safe form (item 357).
+     `GENERIC_WRITE`, and setting file times only needs `FILE_WRITE_ATTRIBUTES`.
+     The path is now opened with that right (and `FILE_FLAG_BACKUP_SEMANTICS`,
+     so a directory opens too) and the times are set on the handle; other
+     platforms keep `filetime::set_file_times`. The path still goes through this
+     fork's DOS-device-safe form (item 357).
      - User-facing note: on Windows, `Deno.utime` and `fs.utimes` work on
        read-only files, as in Node.
-     - Tests: `utime_test.ts`'s `utime updates read-only files on Windows`
-       and, from the pull request's `node:fs` commit that Ende dropped,
-       `unit_node/_fs/_fs_utimes_test.ts`'s read-only case (both Windows
-       only).
+     - Tests: `utime_test.ts`'s `utime updates read-only files on Windows` and,
+       from the pull request's `node:fs` commit that Ende dropped,
+       `unit_node/_fs/_fs_utimes_test.ts`'s read-only case (both Windows only).
      - Node tests enabled: none known; `node:fs` reaches the same op.
 
 398. **`fix(ext/net,ext/fetch)`: `*.localhost` names resolve to the loopback
@@ -15527,20 +15527,21 @@ where the changes are discussed.
      `localhost`. Deno passed these names to the system resolver, and glibc
      without nss-myhostname (common in containers) sends them to DNS, so
      `fetch("http://app.localhost:3000")` failed with "Name or service not
-     known". A subdomain of `localhost` (any case, with or without the
-     trailing dot) is now resolved as `localhost` in the fetch resolver (fetch,
+     known". A subdomain of `localhost` (any case, with or without the trailing
+     dot) is now resolved as `localhost` in the fetch resolver (fetch,
      WebSocket, every resolver kind), in `ext/net` (`Deno.connect`,
      `connectTls`, `listen`, QUIC) and in the import address check, so the
-     resolved-address deny checks see the loopback address the connection
-     uses. Permissions still name the host as written (`--allow-net=
+     resolved-address deny checks see the loopback address the connection uses.
+     Permissions still name the host as written
+     (`--allow-net=
      app.localhost`).
-     - User-facing note: `app.localhost` and other `*.localhost` names reach
-       the loopback address on every system, as in browsers.
+     - User-facing note: `app.localhost` and other `*.localhost` names reach the
+       loopback address on every system, as in browsers.
      - Tests: `deno_permissions`' `tests::localhost_subdomains`, `deno_net`'s
        `resolve_addr::tests::localhost_subdomain_resolves_as_localhost` and
        `deno_fetch`'s `dns::tests::localhost_subdomain_resolves_as_localhost`
-       (the resolver is asked for `localhost`, so they hold on macOS too,
-       whose resolver already knows these names).
+       (the resolver is asked for `localhost`, so they hold on macOS too, whose
+       resolver already knows these names).
      - Node tests enabled: none; `node:net` and `node:dns` keep their own
        lookups.
 
@@ -15550,38 +15551,40 @@ where the changes are discussed.
      denoland/deno#37116; `cli/tools/upgrade.rs`). `deno upgrade` unpacked the
      new binary into the system temp directory and ran it there (`check_exe`)
      before replacing the current executable; with `/tmp` mounted `noexec`, a
-     common hardening setup, that failed with "Permission denied". The
-     directory is now created next to the output executable, as
-     `.deno-upgrade-XXXXXX` (it has to be writable for the upgrade anyway, and
-     it keeps the new binary on the destination's file system), with the
-     system temp directory as the fallback when that can't be created; the
-     regular, `--pr` and `--branch` paths all do this. A denext release build
-     still refuses `deno upgrade` (see Versioning), so this reaches only
-     builds without `DENEXT_VERSION` (tests, local builds).
+     common hardening setup, that failed with "Permission denied". The directory
+     is now created next to the output executable, as `.deno-upgrade-XXXXXX` (it
+     has to be writable for the upgrade anyway, and it keeps the new binary on
+     the destination's file system), with the system temp directory as the
+     fallback when that can't be created; the regular, `--pr` and `--branch`
+     paths all do this. A denext release build still refuses `deno upgrade` (see
+     Versioning), so this reaches only builds without `DENEXT_VERSION` (tests,
+     local builds).
      - User-facing note: in a non-release build, `deno upgrade` works with a
        `noexec` `/tmp`.
-     - Tests: `tools::upgrade::test::upgrade_temp_dir_is_created_next_to_output_exe`,
+     - Tests:
+       `tools::upgrade::test::upgrade_temp_dir_is_created_next_to_output_exe`,
        `upgrade_temp_dir_falls_back_when_output_dir_is_missing` and the
-       integration test `upgrade::upgrade_from_pr_or_branch_skips_system_temp_dir`
-       (a fake `gh` on `PATH`, `TMPDIR` pointing at a missing directory).
+       integration test
+       `upgrade::upgrade_from_pr_or_branch_skips_system_temp_dir` (a fake `gh`
+       on `PATH`, `TMPDIR` pointing at a missing directory).
      - Node tests enabled: none; no Node API changes.
 
 400. **`fix(desktop)`: on Windows, `deno desktop --hmr` / `--inspect` ends the
      laufey backend's and the dev server's process trees with the dev run**
      (port of theende/ende 5281e37b84, MIT, from denoland/deno#36947; upstream
-     denoland/deno#36500; `cli/util/job_object.rs`, `cli/tools/desktop.rs`;
-     CLI only, no laufey change). The dev run spawned the laufey backend with
+     denoland/deno#36500; `cli/util/job_object.rs`, `cli/tools/desktop.rs`; CLI
+     only, no laufey change). The dev run spawned the laufey backend with
      `kill_on_drop`, which kills only the backend itself: its helpers (CEF's
      renderer and GPU processes, WebView2's `msedgewebview2.exe`) kept running
-     after the run ended, so `laufey_webview.exe` had to be force-closed
-     before the next run, and nothing was killed when `deno` itself was
-     killed. The backend now goes in a job object with
-     `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, which closes when the dev run ends
-     or `deno` dies however it dies; the handle isn't inheritable and the job
-     allows no breakaway. A framework's HMR dev server goes in its own job
-     right after it is spawned (the part of the pull request Ende dropped,
-     with Ende's job type), so the server a package manager starts ends too.
-     A job that can't be set up is a warning, not an error.
+     after the run ended, so `laufey_webview.exe` had to be force-closed before
+     the next run, and nothing was killed when `deno` itself was killed. The
+     backend now goes in a job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`,
+     which closes when the dev run ends or `deno` dies however it dies; the
+     handle isn't inheritable and the job allows no breakaway. A framework's HMR
+     dev server goes in its own job right after it is spawned (the part of the
+     pull request Ende dropped, with Ende's job type), so the server a package
+     manager starts ends too. A job that can't be set up is a warning, not an
+     error.
      - User-facing note: on Windows, stopping `deno desktop --hmr` (or killing
        `deno`) ends `laufey_webview.exe`, its WebView2 / CEF helpers and the
        framework dev server.
@@ -15592,9 +15595,9 @@ where the changes are discussed.
 401. **`fix(desktop)`: the WebGPU surface of a raw-backend window is created on
      the UI thread on macOS** (port of theende/ende e8573036f3, MIT, from
      denoland/deno#36756; upstream denoland/deno#36738;
-     `runtime/ops/desktop.rs`, `cli/rt_desktop/lib.rs`). On macOS a raw
-     (winit) backend window's `BrowserWindow.getNativeWindow()` panicked with
-     "can only access NSView on the main thread": wgpu's Metal surface
+     `runtime/ops/desktop.rs`, `cli/rt_desktop/lib.rs`). On macOS a raw (winit)
+     backend window's `BrowserWindow.getNativeWindow()` panicked with "can only
+     access NSView on the main thread": wgpu's Metal surface
      (`raw-window-metal`) reads the window's `NSView`, and desktop ops run on
      the runtime thread. Surface creation now hops to the UI thread through a
      new `DesktopApi::run_on_ui_thread` (inline by default), which libdenort
@@ -15602,11 +15605,10 @@ where the changes are discussed.
      laufey already has littledivy/laufey#79's UI-thread calls, so Ende's own
      `post_ui_task` trampoline isn't needed). The window handles are still
      fetched on the runtime thread (laufey's winit backend makes that caller
-     wait for the UI thread), only the create call hops, a panic in it is
-     caught there and becomes an error, and `present()` stays on the runtime
-     thread. Not carried: Ende's c0fbcfff50, whose error text says CEF windows
-     have no native handle; this fork's CEF host returns Win32 and AppKit
-     handles.
+     wait for the UI thread), only the create call hops, a panic in it is caught
+     there and becomes an error, and `present()` stays on the runtime thread.
+     Not carried: Ende's c0fbcfff50, whose error text says CEF windows have no
+     native handle; this fork's CEF host returns Win32 and AppKit handles.
      - User-facing note: `getNativeWindow()` on a macOS raw-backend window
        returns a surface instead of crashing the app.
      - Tests: none automated; it needs a raw-backend window on macOS (a GUI
@@ -15616,36 +15618,36 @@ where the changes are discussed.
 402. **`fix(desktop)`: packaging a raw-backend app for macOS wraps
      `laufey_winit` in an app bundle** (port of theende/ende fd548017ac, MIT,
      from denoland/deno#36637; upstream denoland/deno#36594;
-     `cli/tools/desktop.rs`; CLI only). The raw backend (`laufey_winit`)
-     ships as a bare binary, not a `.app`, so `deno desktop --backend raw`
-     for a macOS target failed with "could not find 'raw' .app bundle inside
-     …". The first lookup now wraps the binary in a minimal
-     `laufey_winit.app` (only `CFBundleExecutable`; packaging writes its own
-     `Info.plist`), assembled in a sibling temporary directory of the shared
-     backend cache and renamed into place, so a concurrent `deno desktop`
-     never sees half a bundle and reuses a finished one; I/O errors are
-     reported instead of "not found". The packaged runtime is named
-     `laufey_winit.dylib` for the raw backend, as for CEF: laufey_winit loads
-     `<executable>.dylib` beside itself, and its only `libruntime.dylib`
-     lookup is relative to the working directory (`/` under LaunchServices),
-     so the app packaged with only the first change could not start.
+     `cli/tools/desktop.rs`; CLI only). The raw backend (`laufey_winit`) ships
+     as a bare binary, not a `.app`, so `deno desktop --backend raw` for a macOS
+     target failed with "could not find 'raw' .app bundle inside …". The first
+     lookup now wraps the binary in a minimal `laufey_winit.app` (only
+     `CFBundleExecutable`; packaging writes its own `Info.plist`), assembled in
+     a sibling temporary directory of the shared backend cache and renamed into
+     place, so a concurrent `deno desktop` never sees half a bundle and reuses a
+     finished one; I/O errors are reported instead of "not found". The packaged
+     runtime is named `laufey_winit.dylib` for the raw backend, as for CEF:
+     laufey_winit loads `<executable>.dylib` beside itself, and its only
+     `libruntime.dylib` lookup is relative to the working directory (`/` under
+     LaunchServices), so the app packaged with only the first change could not
+     start.
      - User-facing note: `deno desktop --backend raw` packages and launches on
        macOS.
      - Tests: `tools::desktop::tests`' bundle creation, reuse, missing-binary
-       and error cases, and `macos_runtime_dylib_name_is_backend_specific`'s
-       raw case.
+       and error cases, and `macos_runtime_dylib_name_is_backend_specific`'s raw
+       case.
      - Node tests enabled: none; no Node API changes.
 
 403. **`fix(core)`: an out-of-range source map line doesn't overflow** (port of
      theende/ende b26fef6640, MIT, from denoland/deno#37068; upstream
-     denoland/deno#37044; `libs/core/source_map.rs`). `apply_source_map` added
-     1 to the token's source line and column. A malformed map (a negative
-     cumulative line) decodes to `u32::MAX`, and so do source-less segments
-     with sourcemap 9.3 and later: that panicked while formatting a stack trace
-     in a debug build and gave a wrong line in a release build. A location
-     that would overflow is now left as it was.
-     - User-facing note: a stack trace through a module with a malformed
-       source map keeps the generated location instead of a bogus line.
+     denoland/deno#37044; `libs/core/source_map.rs`). `apply_source_map` added 1
+     to the token's source line and column. A malformed map (a negative
+     cumulative line) decodes to `u32::MAX`, and so do source-less segments with
+     sourcemap 9.3 and later: that panicked while formatting a stack trace in a
+     debug build and gave a wrong line in a release build. A location that would
+     overflow is now left as it was.
+     - User-facing note: a stack trace through a module with a malformed source
+       map keeps the generated location instead of a bogus line.
      - Tests: `deno_core`'s
        `source_map::tests::test_apply_source_map_out_of_range_src_line` (a map
        whose `AADA` mapping moves the line to -1; panics on overflow before).
@@ -15654,40 +15656,38 @@ where the changes are discussed.
 404. **`fix(ext/web)`: closing or aborting a WebTransport stream finishes or
      resets it and releases it** (port of theende/ende c9ca6ac732, MIT, from
      denoland/deno#36827; upstream denoland/deno#36822; `ext/net/03_quic.js`,
-     `ext/net/quic.rs`, `ext/web/06_streams.js`, `ext/web/webtransport.js`).
-     A WebTransport stream's `close()` sent no QUIC FIN and `abort()` no
-     `RESET_STREAM`, and the streams' QUIC resources were released only when
-     the garbage collector got to them, so a session stalled once 100 streams
-     (the peer's stream limit) were open. The WebTransport wrappers now take
+     `ext/net/quic.rs`, `ext/web/06_streams.js`, `ext/web/webtransport.js`). A
+     WebTransport stream's `close()` sent no QUIC FIN and `abort()` no
+     `RESET_STREAM`, and the streams' QUIC resources were released only when the
+     garbage collector got to them, so a session stalled once 100 streams (the
+     peer's stream limit) were open. The WebTransport wrappers now take
      ownership of the QUIC resources from the resource-backed streams
      (`transferResourceStreamOwnership`): `close()` finishes the stream,
-     `abort(reason)` resets it with the mapped WebTransport error code, and
-     both release the resource at once. A resource-backed writable stream
-     gains an awaited `onShutdown` hook for that, and ownership is tracked on
-     the stream's backing so it is released exactly once.
-     - User-facing note: WebTransport streams end with FIN / `RESET_STREAM`
-       when closed or aborted, and a session can open more than 100 streams
-       over its life.
-     - Tests: the `run::webtransport` spec's new cases (FIN on close, reset
-       code on abort, many sequential streams; it hangs on
-       3.0.0-denext.22).
+     `abort(reason)` resets it with the mapped WebTransport error code, and both
+     release the resource at once. A resource-backed writable stream gains an
+     awaited `onShutdown` hook for that, and ownership is tracked on the
+     stream's backing so it is released exactly once.
+     - User-facing note: WebTransport streams end with FIN / `RESET_STREAM` when
+       closed or aborted, and a session can open more than 100 streams over its
+       life.
+     - Tests: the `run::webtransport` spec's new cases (FIN on close, reset code
+       on abort, many sequential streams; it hangs on 3.0.0-denext.22).
      - Node tests enabled: none; no Node API changes.
 
-405. **`fix(cache)`: `deno cache --frozen` accepts its own lockfile for a
-     remote module served in a non-UTF-8 charset** (port of theende/ende
-     18c1ab8e3f, MIT, from denoland/deno#37014; upstream denoland/deno#37003;
+405. **`fix(cache)`: `deno cache --frozen` accepts its own lockfile for a remote
+     module served in a non-UTF-8 charset** (port of theende/ende 18c1ab8e3f,
+     MIT, from denoland/deno#37014; upstream denoland/deno#37003;
      `libs/cache_dir/cache.rs`, `libs/cache_dir/file_fetcher/mod.rs`,
-     `libs/cache_dir/global/mod.rs`). `deno_graph` writes a remote lockfile
-     hash over the charset-decoded source text, and the HTTP cache checked it
-     against the raw response bytes: for a module served as Latin-1 (or with a
-     BOM) the two differ, so `deno cache --frozen` rejected the lockfile it
-     had just written. The cache now accepts either the raw bytes' hash or the
-     hash of the bytes `deno_graph` hashes (same media types, charset and BOM
-     rules). Ende accepts both forms because the same check verifies JSR
-     manifest checksums, which are over the raw bytes; a raw match is the old
-     check, and the decoded text is what runs. In this fork the download path
-     verifies before it writes the cache (unchanged); only the comparison
-     changes.
+     `libs/cache_dir/global/mod.rs`). `deno_graph` writes a remote lockfile hash
+     over the charset-decoded source text, and the HTTP cache checked it against
+     the raw response bytes: for a module served as Latin-1 (or with a BOM) the
+     two differ, so `deno cache --frozen` rejected the lockfile it had just
+     written. The cache now accepts either the raw bytes' hash or the hash of
+     the bytes `deno_graph` hashes (same media types, charset and BOM rules).
+     Ende accepts both forms because the same check verifies JSR manifest
+     checksums, which are over the raw bytes; a raw match is the old check, and
+     the decoded text is what runs. In this fork the download path verifies
+     before it writes the cache (unchanged); only the comparison changes.
      - User-facing note: a remote module served with a Latin-1 (or other
        non-UTF-8) charset passes `--frozen` and lockfile checks.
      - Tests: the `cache::latin1_lock_integrity` spec; `deno_cache_dir`'s
@@ -15699,17 +15699,19 @@ where the changes are discussed.
 406. **`fix(coverage)`: a file whose coverage doesn't match its source is
      skipped with a warning, not a panic** (port of theende/ende c4f1778f09,
      MIT, from denoland/deno#37033; upstream denoland/deno#37007;
-     `cli/tools/coverage/mod.rs`). `deno coverage` (and `deno test
-     --coverage`) panicked with "a UTF-16 offset within the source has a byte
-     offset" when a V8 range reached past the end of the source it was read
-     against. V8 only reports ranges that fit the source it ran, so the data
-     is stale: the file changed after coverage was collected. A range inside a
-     surrogate pair would also panic when the source is sliced. Every range is
-     now checked once before the report is built; if one doesn't fit the
-     runtime source (past its end, reversed, or off a character boundary) the
-     file is skipped with a warning, as a deleted source already was. The
-     runtime source is the emit V8 ran, including the Vitest transform's emit
-     this fork's coverage picks, so the check holds for those modules too.
+     `cli/tools/coverage/mod.rs`). `deno coverage` (and
+     `deno test
+     --coverage`) panicked with "a UTF-16 offset within the
+     source has a byte offset" when a V8 range reached past the end of the
+     source it was read against. V8 only reports ranges that fit the source it
+     ran, so the data is stale: the file changed after coverage was collected. A
+     range inside a surrogate pair would also panic when the source is sliced.
+     Every range is now checked once before the report is built; if one doesn't
+     fit the runtime source (past its end, reversed, or off a character
+     boundary) the file is skipped with a warning, as a deleted source already
+     was. The runtime source is the emit V8 ran, including the Vitest
+     transform's emit this fork's coverage picks, so the check holds for those
+     modules too.
      - User-facing note: `deno coverage` over data from an older version of a
        file warns "doesn't match its source … Skipping." and reports the rest.
      - Tests: the `coverage::stale_source_file` spec (panics on
@@ -15721,12 +15723,12 @@ where the changes are discussed.
      later chunk** (port of theende/ende 3819a3a44f, MIT, from
      denoland/deno#37091; upstream denoland/deno#37090;
      `ext/web/08_text_encoding.js`). In streaming mode an all-ASCII chunk is
-     decoded without creating the streaming decoder, so the decoder created
-     for a later chunk still treated a leading U+FEFF as a byte order mark and
-     dropped it. The Encoding standard sets "BOM seen" on the first item of
-     the stream, whatever it is, so only a U+FEFF at the very start is a BOM.
-     The decoder now remembers that ASCII was decoded and keeps the U+FEFF
-     until the stream ends (`TextDecoderStream` too).
+     decoded without creating the streaming decoder, so the decoder created for
+     a later chunk still treated a leading U+FEFF as a byte order mark and
+     dropped it. The Encoding standard sets "BOM seen" on the first item of the
+     stream, whatever it is, so only a U+FEFF at the very start is a BOM. The
+     decoder now remembers that ASCII was decoded and keeps the U+FEFF until the
+     stream ends (`TextDecoderStream` too).
      - User-facing note: `decode("a", { stream: true })` followed by a chunk
        starting with U+FEFF keeps the U+FEFF.
      - Tests: `text_encoding_test.ts`'s `textDecoderStreamingBOMAfterASCII`,
@@ -15735,16 +15737,17 @@ where the changes are discussed.
      - Node tests enabled: none; no Node API changes.
 
 408. **`fix(ext/web)`: `URL.parse` works unbound and returns a plain `URL`**
-     (port of theende/ende 67b5975fae, MIT, from denoland/deno#37109;
-     upstream denoland/deno#37104; `ext/web/00_url.js`). `URL.parse` built its
-     result with `new this(...)`, so a detached call (`const { parse } = URL;
-     parse(u)`, or `[...].map(URL.parse)`) threw, and a subclass's
-     `Sub.parse()` constructed the subclass. It now always constructs `URL`,
-     as the URL standard's static method does.
-     - User-facing note: `const parse = URL.parse; parse("https://a")`
-       returns a `URL`.
-     - Tests: `url_test.ts`'s `urlParseUnbound` and
-       `urlParseSubclassReturnsUrl` (both fail on 3.0.0-denext.22).
+     (port of theende/ende 67b5975fae, MIT, from denoland/deno#37109; upstream
+     denoland/deno#37104; `ext/web/00_url.js`). `URL.parse` built its result
+     with `new this(...)`, so a detached call
+     (`const { parse } = URL;
+     parse(u)`, or `[...].map(URL.parse)`) threw,
+     and a subclass's `Sub.parse()` constructed the subclass. It now always
+     constructs `URL`, as the URL standard's static method does.
+     - User-facing note: `const parse = URL.parse; parse("https://a")` returns a
+       `URL`.
+     - Tests: `url_test.ts`'s `urlParseUnbound` and `urlParseSubclassReturnsUrl`
+       (both fail on 3.0.0-denext.22).
      - Node tests enabled: none; no Node API changes.
 
 409. **`fix(ext/web)`: `URLSearchParams` rejects a non-object iterator result**
@@ -15755,8 +15758,8 @@ where the changes are discussed.
      accepted (one whose prototype exposes `done` ended the iteration). Web
      IDL's sequence conversion uses `IteratorNext`, which throws a `TypeError`
      for a result that is not an Object before reading `done`; the constructor
-     now does too. A function is an Object and stays accepted (Ende's
-     correction of the pull request, with a test).
+     now does too. A function is an Object and stays accepted (Ende's correction
+     of the pull request, with a test).
      - User-facing note: an iterable whose `next()` returns a primitive makes
        `new URLSearchParams(it)` throw a `TypeError`.
      - Tests: `url_search_params_test.ts`'s
@@ -15765,15 +15768,14 @@ where the changes are discussed.
      - Node tests enabled: none; no Node API changes.
 
 410. **`fix(ext/web)`: `console.table` right-aligns by `Number()`'s rules**
-     (port of theende/ende 4b8839152c, MIT, from denoland/deno#36814;
-     upstream denoland/deno#36813; `ext/web/console/table.rs`).
-     `console.table` right-aligns a column when every value coerces to an
-     integer, but its coercion did not match `Number()`: it accepted signed
-     radix literals such as `"-0x1"` (`Number()` gives `NaN`) and returned
-     `NaN` for radix literals that don't fit in a `u128` (`Number()` gives a
-     finite integer). Radix prefixes are now recognized only without a sign,
-     the digits accumulate in an `f64`, and a value that overflows to
-     `Infinity` is not an integer.
+     (port of theende/ende 4b8839152c, MIT, from denoland/deno#36814; upstream
+     denoland/deno#36813; `ext/web/console/table.rs`). `console.table`
+     right-aligns a column when every value coerces to an integer, but its
+     coercion did not match `Number()`: it accepted signed radix literals such
+     as `"-0x1"` (`Number()` gives `NaN`) and returned `NaN` for radix literals
+     that don't fit in a `u128` (`Number()` gives a finite integer). Radix
+     prefixes are now recognized only without a sign, the digits accumulate in
+     an `f64`, and a value that overflows to `Infinity` is not an integer.
      - User-facing note: `console.table` aligns columns of `"-0x1"` and very
        long hex strings as `Number()` would read them.
      - Tests: `deno_web`'s `console::table` tests
@@ -15787,58 +15789,61 @@ where the changes are discussed.
      `ext/web/13_message_port.js`, `libs/core/ops_builtin_v8.rs`).
      `structuredClone(value, { transfer })` (and `postMessage` with a transfer
      list) detached the transferred `ArrayBuffer`s before checking whether
-     serialization succeeded, so a throwing getter or an uncloneable value
-     left the caller's buffers detached; entries that aren't transferable
-     were rejected only after serializing (getters ran first and their errors
-     replaced the `DataCloneError`), and duplicate entries were not rejected
-     at all. As `StructuredSerializeWithTransfer` requires, duplicate and
+     serialization succeeded, so a throwing getter or an uncloneable value left
+     the caller's buffers detached; entries that aren't transferable were
+     rejected only after serializing (getters ran first and their errors
+     replaced the `DataCloneError`), and duplicate entries were not rejected at
+     all. As `StructuredSerializeWithTransfer` requires, duplicate and
      non-transferable entries are now rejected first, then the value is
      serialized, and the buffers are detached only once that succeeded; on
-     failure they stay attached and their backing stores leave the store
-     again. `op_serialize` also checks every buffer before registering any
-     (Ende's addition), so a non-detachable entry (a `WebAssembly.Memory`
-     buffer) doesn't strand the entries before it in the store.
+     failure they stay attached and their backing stores leave the store again.
+     `op_serialize` also checks every buffer before registering any (Ende's
+     addition), so a non-detachable entry (a `WebAssembly.Memory` buffer)
+     doesn't strand the entries before it in the store.
      - User-facing note: a `structuredClone` that throws leaves its transfer
        list's buffers usable; a duplicate entry throws `DataCloneError`.
-     - Tests: `structured_clone_test.ts`'s `structuredClone validates the
-       transfer list before serializing` and `structuredClone doesn't transfer
-       buffers when it throws` (both fail on 3.0.0-denext.22). Ende's
-       neighbouring `CryptoKey` clone tests belong to a change not carried
-       here and are left out.
-     - Node tests enabled: none known; `node:worker_threads` messages go
-       through the same serializer (`v8.serialize` has its own).
+     - Tests: `structured_clone_test.ts`'s
+       `structuredClone validates the
+       transfer list before serializing`
+       and `structuredClone doesn't transfer
+       buffers when it throws`
+       (both fail on 3.0.0-denext.22). Ende's neighbouring `CryptoKey` clone
+       tests belong to a change not carried here and are left out.
+     - Node tests enabled: none known; `node:worker_threads` messages go through
+       the same serializer (`v8.serialize` has its own).
 
 412. **`fix(runtime)`: the `self` getter rejects a receiver that isn't the
      global object** (port of theende/ende 9cf776df86, MIT; upstream
      denoland/deno#37119; `runtime/js/98_global_scope_*.js`). The getter of
      `self` returned the global object for any receiver, so calling it on an
-     ordinary object or a number didn't throw. Like any Web IDL attribute
-     getter (and as in browsers), it now uses the global object for a nullish
-     receiver and throws `TypeError: Illegal invocation` for any other; one
-     descriptor serves the window and the worker scope. Not carried: Ende's
-     follow-up 9227921c14, which does the same for `navigator`, `crypto`,
-     `localStorage`, `sessionStorage`, `caches`, `location` and `closed`:
-     Node defines `crypto` and `navigator` with no receiver check, and code
-     that reads globals through a receiver-forwarding `Proxy` of `globalThis`
-     (some test environments do) would start throwing. Node has no `self`.
-     - User-facing note: `Object.getOwnPropertyDescriptor(globalThis,
-       "self").get.call({})` throws, as in browsers.
+     ordinary object or a number didn't throw. Like any Web IDL attribute getter
+     (and as in browsers), it now uses the global object for a nullish receiver
+     and throws `TypeError: Illegal invocation` for any other; one descriptor
+     serves the window and the worker scope. Not carried: Ende's follow-up
+     9227921c14, which does the same for `navigator`, `crypto`, `localStorage`,
+     `sessionStorage`, `caches`, `location` and `closed`: Node defines `crypto`
+     and `navigator` with no receiver check, and code that reads globals through
+     a receiver-forwarding `Proxy` of `globalThis` (some test environments do)
+     would start throwing. Node has no `self`.
+     - User-facing note:
+       `Object.getOwnPropertyDescriptor(globalThis,
+       "self").get.call({})`
+       throws, as in browsers.
      - Tests: `globals_test.ts`'s `selfGetterChecksReceiver` and
        `selfGetterChecksReceiverInWorker` (both fail on 3.0.0-denext.22).
      - Node tests enabled: none; no Node API changes.
 
-413. **`fix(repl)`: multi-line input with a regex literal waits for its
-     closing brace** (port of theende/ende e7f5534bec, MIT, from
-     denoland/deno#36914; upstream denoland/deno#22328;
-     `cli/tools/repl/editor.rs`). Typing a function whose body contains a
-     regex literal, such as `input.replace(/a/, "b")`, submitted it before its
-     closing brace: once the lexer-based validator guessed that a `/` started
-     a regex, it reported the input as complete. When a regex may be present,
-     the input is now parsed and the REPL asks for more only when parsing
-     reaches the end of the input; any other syntax error is still left to
-     evaluation.
-     - User-facing note: the REPL keeps reading a multi-line function that
-       uses a regex until it is complete.
+413. **`fix(repl)`: multi-line input with a regex literal waits for its closing
+     brace** (port of theende/ende e7f5534bec, MIT, from denoland/deno#36914;
+     upstream denoland/deno#22328; `cli/tools/repl/editor.rs`). Typing a
+     function whose body contains a regex literal, such as
+     `input.replace(/a/, "b")`, submitted it before its closing brace: once the
+     lexer-based validator guessed that a `/` started a regex, it reported the
+     input as complete. When a regex may be present, the input is now parsed and
+     the REPL asks for more only when parsing reaches the end of the input; any
+     other syntax error is still left to evaluation.
+     - User-facing note: the REPL keeps reading a multi-line function that uses
+       a regex until it is complete.
      - Tests: the integration test `repl::pty_multiline_regex`.
      - Node tests enabled: none; no Node API changes.
 
@@ -15918,11 +15923,12 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415, 416) are what the
-prebuilt `libdenort` carries. The CLI-side parts (for example writing
-`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
-in the branch too, but a stock CLI does not run them; denext's own launcher
-provides that environment.
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
+390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412,
+415, 416) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+launchers) are in the branch too, but a stock CLI does not run them; denext's
+own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
