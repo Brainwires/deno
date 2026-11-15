@@ -15256,15 +15256,17 @@ where the changes are discussed.
      - Node tests enabled: none; no Node API changes.
 
 385. **`fix(cli)`: a path permission written back out keeps its commas escaped**
-     (port of Ende's addition to its fix for denoland/deno#37114, theende/ende
-     fd82be49cd, MIT; CLI only; `cli/args/flags.rs`). `deno install` (the global
-     shim), `deno x` and `process.execArgv` (item 189, which
-     `child_process.fork()` passes to a child Deno) hand the started program the
-     command's permission flags by writing them back out. Since item 285 a
-     doubled comma escapes a comma in a path again (`--allow-read=a,,b` is the
-     path `a,b`), but `join_paths` wrote the path as it was, so the program read
-     `a,b` as the two paths `a` and `b`. `join_paths` now doubles each comma,
-     and `--ignore-read` goes through it too.
+     (GHSA-rrm7-v26j-c8vm; port of Ende's addition to its fix for
+     denoland/deno#37114, theende/ende fd82be49cd, MIT; CLI only;
+     `cli/args/flags.rs`). `deno install` (the global shim), `deno x` and
+     `process.execArgv` (item 189, which `child_process.fork()` passes to a
+     child Deno) hand the started program the command's permission flags by
+     writing them back out. Since item 285 a doubled comma escapes a comma in a
+     path again (`--allow-read=a,,b` is the path `a,b`), but `join_paths` wrote
+     the path as it was, so the program read `a,b` as the two paths `a` and `b`:
+     an allow flag granted paths the user never named, and a deny flag stopped
+     denying the path it named. `join_paths` now doubles each comma, and
+     `--ignore-read` goes through it too.
      - User-facing note: `deno install`, `deno x` and a forked child Deno keep a
        path permission that contains a comma as one path (3.0.0-denext.14 to
        3.0.0-denext.22 split it; earlier releases refused the flag).
