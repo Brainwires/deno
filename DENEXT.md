@@ -15764,6 +15764,23 @@ where the changes are discussed.
        3.0.0-denext.22) and `urlSearchParamsAcceptsFunctionIteratorResult`.
      - Node tests enabled: none; no Node API changes.
 
+410. **`fix(ext/web)`: `console.table` right-aligns by `Number()`'s rules**
+     (port of theende/ende 4b8839152c, MIT, from denoland/deno#36814;
+     upstream denoland/deno#36813; `ext/web/console/table.rs`).
+     `console.table` right-aligns a column when every value coerces to an
+     integer, but its coercion did not match `Number()`: it accepted signed
+     radix literals such as `"-0x1"` (`Number()` gives `NaN`) and returned
+     `NaN` for radix literals that don't fit in a `u128` (`Number()` gives a
+     finite integer). Radix prefixes are now recognized only without a sign,
+     the digits accumulate in an `f64`, and a value that overflows to
+     `Infinity` is not an integer.
+     - User-facing note: `console.table` aligns columns of `"-0x1"` and very
+       long hex strings as `Number()` would read them.
+     - Tests: `deno_web`'s `console::table` tests
+       `integer_like_matches_number_radix_signs` and
+       `integer_like_accepts_large_finite_radix_numbers`.
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -15771,7 +15788,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409) are what the
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
