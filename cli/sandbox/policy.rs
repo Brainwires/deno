@@ -1039,7 +1039,7 @@ pub enum DenyEnforcement {
 pub struct DenyRule {
   pub path: PathBuf,
   /// From `--ignore-read` (the kernel can't fake `NotFound`).
-  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub ignore: bool,
   pub enforcement: DenyEnforcement,
 }
