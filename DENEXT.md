@@ -15808,6 +15808,25 @@ where the changes are discussed.
      - Node tests enabled: none known; `node:worker_threads` messages go
        through the same serializer (`v8.serialize` has its own).
 
+412. **`fix(runtime)`: the `self` getter rejects a receiver that isn't the
+     global object** (port of theende/ende 9cf776df86, MIT; upstream
+     denoland/deno#37119; `runtime/js/98_global_scope_*.js`). The getter of
+     `self` returned the global object for any receiver, so calling it on an
+     ordinary object or a number didn't throw. Like any Web IDL attribute
+     getter (and as in browsers), it now uses the global object for a nullish
+     receiver and throws `TypeError: Illegal invocation` for any other; one
+     descriptor serves the window and the worker scope. Not carried: Ende's
+     follow-up 9227921c14, which does the same for `navigator`, `crypto`,
+     `localStorage`, `sessionStorage`, `caches`, `location` and `closed`:
+     Node defines `crypto` and `navigator` with no receiver check, and code
+     that reads globals through a receiver-forwarding `Proxy` of `globalThis`
+     (some test environments do) would start throwing. Node has no `self`.
+     - User-facing note: `Object.getOwnPropertyDescriptor(globalThis,
+       "self").get.call({})` throws, as in browsers.
+     - Tests: `globals_test.ts`'s `selfGetterChecksReceiver` and
+       `selfGetterChecksReceiverInWorker` (both fail on 3.0.0-denext.22).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -15815,7 +15834,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411) are what the
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
