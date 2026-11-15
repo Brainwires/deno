@@ -1,8 +1,8 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-//! The OS confinement of a jailed lifecycle script on macOS: the script's
-//! process tree runs under `sandbox-exec` (Seatbelt) with a deny-by-default
-//! profile (DENEXT.md item 124) that allows only what a script, a shell, a
+//! The Seatbelt (SBPL) profile of a jailed lifecycle script on macOS, run
+//! under `sandbox-exec` by [`crate::macos`]: the script's process tree gets a
+//! deny-by-default profile (DENEXT.md item 124) that allows only what a script, a shell, a
 //! compiler or a download needs: reading files (minus the credential files),
 //! writing beneath the jail's roots, forking and running programs, signals
 //! within the sandbox, `sysctl` reads (minus the process table, which holds
@@ -17,43 +17,17 @@
 //!
 //! The network: none (not even Unix sockets; a Docker socket runs anything),
 //! the whole of it, or only the script's allow-listing proxy
-//! (`localhost:<port>`, `jail_proxy`) with no DNS; without the whole network
+//! (`localhost:<port>`, `crate::proxy`) with no DNS; without the whole network
 //! a script can't listen for connections either. Seatbelt checks the resolved
 //! path, so a symlink in a writable root can't lead outside it.
+//!
+//! Generating the text is pure string building, so it builds and is tested
+//! on every platform; only running it needs macOS.
 
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 
-use super::jail::OsNet;
-
-pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-
-/// Whether `sandbox-exec` works here (it is missing on some systems, and
-/// refuses to run inside another sandbox).
-pub fn available() -> Result<(), String> {
-  static AVAILABLE: OnceLock<Result<(), String>> = OnceLock::new();
-  AVAILABLE
-    .get_or_init(|| {
-      if !Path::new(SANDBOX_EXEC).exists() {
-        return Err(format!("{SANDBOX_EXEC} was not found"));
-      }
-      match std::process::Command::new(SANDBOX_EXEC)
-        .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-      {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(format!(
-          "{SANDBOX_EXEC} does not work here ({status}; is this already sandboxed?)"
-        )),
-        Err(err) => Err(format!("{SANDBOX_EXEC} failed to start: {err}")),
-      }
-    })
-    .clone()
-}
+use crate::OsNet;
 
 fn quote(path: &Path) -> String {
   let text = path.to_string_lossy();

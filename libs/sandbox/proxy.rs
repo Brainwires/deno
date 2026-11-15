@@ -5,7 +5,7 @@
 //! script, started by the jail host (the unsandboxed `deno install`).
 //!
 //! The OS sandbox lets the script's process tree connect only to this proxy's
-//! port (`sandbox_macos`, `sandbox_linux`), and its environment points every
+//! port (`crate::seatbelt`, `crate::linux`), and its environment points every
 //! HTTP client at it (`HTTP_PROXY`, `HTTPS_PROXY`, `npm_config_proxy`, ...).
 //! The proxy takes `CONNECT host:port` (HTTPS and any other TCP tunnel) and
 //! absolute-URI `http://` requests (plain HTTP forwarding), checks the target
@@ -53,13 +53,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
-use deno_core::futures::future::BoxFuture;
-use deno_core::url::Host;
-use deno_core::url::Url;
+use futures::future::BoxFuture;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
+use url::Host;
+use url::Url;
 
 /// The longest request head the proxy reads.
 const MAX_HEAD: usize = 64 * 1024;
@@ -1601,42 +1601,6 @@ mod tests {
     let response =
       roundtrip(proxy.port(), "GET /relative HTTP/1.1\r\n\r\n").await;
     assert!(response.starts_with("HTTP/1.1 400 "), "{response}");
-  }
-
-  // a built-in exception's hosts open their HTTPS port only: no other port,
-  // by CONNECT or forwarded, while a project's own `host` stays any port
-  #[tokio::test]
-  async fn builtin_hosts_only_on_443() {
-    use crate::supply_chain::builtin_exceptions::builtin_exception;
-    for name in ["better-sqlite3", "@tensorflow/tfjs-node", "chromedriver"] {
-      let hosts = builtin_exception(name).unwrap().host_list();
-      let allow = AllowList::parse(&hosts).unwrap();
-      for entry in &hosts {
-        let (name, _) = split_host_port(entry).unwrap();
-        assert!(allow.allows(&host(name), 443), "{entry}");
-        for port in [22, 80, 8443] {
-          assert!(!allow.allows(&host(name), port), "{entry} {port}");
-        }
-      }
-    }
-    let allow =
-      AllowList::parse(&builtin_exception("sharp").unwrap().host_list())
-        .unwrap();
-    let proxy = JailProxy::start(allow, Upstream::default()).await.unwrap();
-    for request in [
-      "CONNECT github.com:22 HTTP/1.1\r\nHost: github.com:22\r\n\r\n",
-      "CONNECT objects.githubusercontent.com:8443 HTTP/1.1\r\n\r\n",
-      "GET http://nodejs.org/x HTTP/1.1\r\nHost: nodejs.org\r\n\r\n",
-    ] {
-      let response = roundtrip(proxy.port(), request).await;
-      assert!(
-        response.starts_with("HTTP/1.1 403 "),
-        "{request}: {response}"
-      );
-    }
-    // the project's own `github.com` keeps meaning every port
-    let own = list(&["github.com"]);
-    assert!(own.allows(&host("github.com"), 22));
   }
 
   #[tokio::test]

@@ -20,7 +20,8 @@
 //!   `.npmrc` / `.env*` / `.dev.vars` / `.netrc` / `.pypirc` /
 //!   `.git-credentials` at any depth, ...); no network unless the config
 //!   allows it; no Unix sockets. Landlock + seccomp on Linux
-//!   (`sandbox_linux`), Seatbelt on macOS (`sandbox_macos`). Since item 111 a
+//!   (`sandbox_linux`, the seccomp rules from [`seccomp_spec`]), Seatbelt on
+//!   macOS (`sandbox_macos`), both in the `deno_sandbox` crate. Since item 111 a
 //!   script writes only beneath its own package's folder (not the rest of
 //!   node_modules), and one that may reach only some hosts reaches them
 //!   through an allow-listing proxy (`jail_proxy`), the only address the OS
@@ -138,12 +139,67 @@ pub fn jail_symlink_roots(jail: &JailPermissions) -> Option<&[PathBuf]> {
 }
 
 /// What the OS sandbox lets a jailed script's processes connect to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OsNet {
-  Denied,
-  Open,
-  /// Only the allow-listing proxy on this loopback port.
-  ProxyOnly(u16),
+pub use deno_sandbox::OsNet;
+
+/// The seccomp program of a jailed script's processes (DENEXT.md items 111
+/// and 124): `io_uring_setup` fails (io_uring opens sockets and does I/O
+/// past the syscall filter), `ioctl(TIOCSTI)` / `ioctl(TIOCLINUX)` fail with
+/// EPERM (they type into a terminal), one more socket operation fails with
+/// EACCES unless the network is open, through the proxy the TCP Fast Open
+/// sends fail (`MSG_FASTOPEN` connects a socket without `connect(2)`, past
+/// Landlock), and `socket(2)` creates netlink sockets, plus IPv4 / IPv6
+/// ones when the network is open (TCP streams only through the proxy).
+#[cfg(target_os = "linux")]
+pub fn seccomp_spec(net: OsNet) -> deno_sandbox::SeccompSpec {
+  use deno_sandbox::seccomp::InetSockets;
+  use deno_sandbox::seccomp::MSG_FASTOPEN;
+  use deno_sandbox::seccomp::NR_IO_URING_SETUP;
+  use deno_sandbox::seccomp::NR_IOCTL;
+  use deno_sandbox::seccomp::NR_LISTEN;
+  use deno_sandbox::seccomp::NR_SENDMMSG;
+  use deno_sandbox::seccomp::NR_SENDMSG;
+  use deno_sandbox::seccomp::NR_SENDTO;
+  use deno_sandbox::seccomp::SyscallRule;
+  use deno_sandbox::seccomp::TIOCLINUX;
+  use deno_sandbox::seccomp::TIOCSTI;
+
+  let mut spec = deno_sandbox::SeccompSpec::new()
+    .rule(SyscallRule::Deny {
+      nr: NR_IO_URING_SETUP,
+      errno: libc::ENOSYS,
+    })
+    // the ioctl request is argument 1
+    .rule(SyscallRule::DenyArgIn {
+      nr: NR_IOCTL,
+      arg: 1,
+      values: vec![TIOCSTI, TIOCLINUX],
+      errno: libc::EPERM,
+    });
+  if !matches!(net, OsNet::Open) {
+    // refused without the whole network. The proxy's socket in a
+    // namespace is set up before this filter is installed (NetnsHandoff
+    // runs first).
+    spec = spec.rule(SyscallRule::Deny {
+      nr: NR_LISTEN,
+      errno: libc::EACCES,
+    });
+  }
+  if matches!(net, OsNet::ProxyOnly(_)) {
+    // the flags: argument 3 of sendto / sendmmsg, 2 of sendmsg
+    for (nr, arg) in [(NR_SENDTO, 3), (NR_SENDMMSG, 3), (NR_SENDMSG, 2)] {
+      spec = spec.rule(SyscallRule::DenyArgBits {
+        nr,
+        arg,
+        mask: MSG_FASTOPEN,
+        errno: libc::EOPNOTSUPP,
+      });
+    }
+  }
+  spec.inet_sockets(match net {
+    OsNet::Denied => InetSockets::Denied,
+    OsNet::Open => InetSockets::Any,
+    OsNet::ProxyOnly(_) => InetSockets::TcpStream,
+  })
 }
 
 /// The jail of the current process, when it runs inside a jailed script.
@@ -1830,7 +1886,11 @@ async fn run_in_dirs(
     let ruleset =
       super::sandbox_linux::build_ruleset(&write, &deny_read, proxy_port)
         .context("Failed to set up the Landlock sandbox")?;
-    super::sandbox_linux::apply_to_command(&mut command, &ruleset, os_net);
+    super::sandbox_linux::apply_to_command(
+      &mut command,
+      &ruleset,
+      &seccomp_spec(os_net),
+    );
     Some(ruleset)
   } else {
     None

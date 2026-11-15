@@ -2,7 +2,8 @@
 
 //! The OS confinement of a jailed lifecycle script on Linux, applied to the
 //! script's process between `fork` and `exec` and inherited by everything it
-//! starts:
+//! starts (the jail, `cli/supply_chain/jail.rs`, decides the policy; the
+//! seccomp rules below are the [`SeccompSpec`] it builds):
 //!
 //! - Landlock: writes only beneath the jail's roots; reads everywhere but the
 //!   credential files (by allowing every path that isn't one, since Landlock
@@ -15,7 +16,7 @@
 //!   (which can open sockets without `socket(2)`). `no_new_privs` keeps
 //!   setuid programs from gaining privileges.
 //! - A script that may reach only some hosts (DENEXT.md item 111) goes
-//!   through its allow-listing proxy (`jail_proxy`): Landlock ABI 4+
+//!   through its allow-listing proxy (`crate::proxy`): Landlock ABI 4+
 //!   (Linux 6.7+) allows TCP `connect` only to the proxy's port and no
 //!   `bind` (no listening for connections from outside), and seccomp
 //!   allows only TCP sockets (no UDP, so no DNS or other datagrams; no SCTP
@@ -41,6 +42,11 @@
 //!   ended and reaped with the script's process group
 //!   ([`end_adopted_strays`]).
 
+#![allow(
+  clippy::disallowed_methods,
+  reason = "Landlock rules and namespaces act on the real file system and /proc, never a virtual one"
+)]
+
 use std::ffi::CString;
 use std::io;
 use std::os::fd::AsRawFd;
@@ -51,7 +57,9 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use super::jail::OsNet;
+use crate::seccomp::SeccompSpec;
+use crate::seccomp::SockFilter;
+use crate::seccomp::SockFprog;
 
 /// Makes this process a child subreaper, once: orphaned descendants of a
 /// jailed script are re-parented here rather than to init, so they can be
@@ -617,7 +625,7 @@ fn add_read_rules(
     if is_symlink {
       // a rule follows the link: allow it only when where it leads is
       // neither denied nor holds a denied path
-      let Ok(target) = crate::util::fs::canonicalize_path(&path) else {
+      let Ok(target) = std::fs::canonicalize(&path) else {
         continue;
       };
       if deny
@@ -725,193 +733,17 @@ pub fn build_ruleset(
   Ok(ruleset)
 }
 
-// seccomp
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct SockFilter {
-  code: u16,
-  jt: u8,
-  jf: u8,
-  k: u32,
-}
-
-#[repr(C)]
-struct SockFprog {
-  len: u16,
-  filter: *const SockFilter,
-}
-
-const BPF_LD_W_ABS: u16 = 0x20;
-const BPF_ALU_AND_K: u16 = 0x54;
-const BPF_JEQ_K: u16 = 0x15;
-const BPF_JGE_K: u16 = 0x35;
-const BPF_RET_K: u16 = 0x06;
-const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
-const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
-const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
-const SECCOMP_DATA_NR: u32 = 0;
-const SECCOMP_DATA_ARCH: u32 = 4;
-const SECCOMP_DATA_ARG0: u32 = 16;
-/// The low 32 bits of argument `n` (little-endian).
-const fn seccomp_arg(n: u32) -> u32 {
-  SECCOMP_DATA_ARG0 + 8 * n
-}
-const SOCK_TYPE_MASK: u32 = 0xf;
-const SOCK_STREAM: u32 = 1;
-const IPPROTO_TCP: u32 = 6;
-const MSG_FASTOPEN: u32 = 0x2000_0000;
-const AF_NETLINK: u32 = 16;
-const AF_INET: u32 = 2;
-const AF_INET6: u32 = 10;
-const NR_IO_URING_SETUP: u32 = 425;
-/// `ioctl` requests that type into a terminal (asm-generic, the same on
-/// x86_64 and aarch64).
-const TIOCSTI: u32 = 0x5412;
-const TIOCLINUX: u32 = 0x541C;
-
-#[cfg(target_arch = "x86_64")]
-const AUDIT_ARCH: u32 = 0xC000_003E;
-#[cfg(target_arch = "x86_64")]
-const NR_IOCTL: u32 = 16;
-#[cfg(target_arch = "x86_64")]
-const NR_SOCKET: u32 = 41;
-#[cfg(target_arch = "x86_64")]
-const NR_SENDTO: u32 = 44;
-#[cfg(target_arch = "x86_64")]
-const NR_SENDMSG: u32 = 46;
-#[cfg(target_arch = "x86_64")]
-const NR_SENDMMSG: u32 = 307;
-#[cfg(target_arch = "x86_64")]
-const NR_LISTEN: u32 = 50;
-#[cfg(target_arch = "aarch64")]
-const AUDIT_ARCH: u32 = 0xC000_00B7;
-#[cfg(target_arch = "aarch64")]
-const NR_IOCTL: u32 = 29;
-#[cfg(target_arch = "aarch64")]
-const NR_SOCKET: u32 = 198;
-#[cfg(target_arch = "aarch64")]
-const NR_SENDTO: u32 = 206;
-#[cfg(target_arch = "aarch64")]
-const NR_SENDMSG: u32 = 211;
-#[cfg(target_arch = "aarch64")]
-const NR_SENDMMSG: u32 = 269;
-#[cfg(target_arch = "aarch64")]
-const NR_LISTEN: u32 = 201;
-
-const fn stmt(code: u16, k: u32) -> SockFilter {
-  SockFilter {
-    code,
-    jt: 0,
-    jf: 0,
-    k,
-  }
-}
-
-const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> SockFilter {
-  SockFilter { code, jt, jf, k }
-}
-
-/// The seccomp program: `socket(2)` only for netlink, and for IPv4/IPv6 when
-/// the network is open (TCP only, and no Fast Open sends, when it goes
-/// through the proxy); one more socket operation fails with EACCES unless
-/// the network is open; `io_uring_setup` fails; `ioctl(TIOCSTI)` and
-/// `ioctl(TIOCLINUX)` fail with EPERM; another architecture's syscalls
-/// (x32, the 32-bit compat ABI) kill the process.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub fn seccomp_program(net: OsNet) -> Vec<u8> {
-  let errno = |e: i32| SECCOMP_RET_ERRNO | (e as u32 & 0xffff);
-  let mut f = vec![
-    stmt(BPF_LD_W_ABS, SECCOMP_DATA_ARCH),
-    jump(BPF_JEQ_K, AUDIT_ARCH, 1, 0),
-    stmt(BPF_RET_K, SECCOMP_RET_KILL_PROCESS),
-    stmt(BPF_LD_W_ABS, SECCOMP_DATA_NR),
-  ];
-  if cfg!(target_arch = "x86_64") {
-    // x32 syscalls carry bit 30
-    f.push(jump(BPF_JGE_K, 0x4000_0000, 0, 1));
-    f.push(stmt(BPF_RET_K, SECCOMP_RET_KILL_PROCESS));
-  }
-  f.push(jump(BPF_JEQ_K, NR_IO_URING_SETUP, 0, 1));
-  f.push(stmt(BPF_RET_K, errno(libc::ENOSYS)));
-  // ioctl (request: argument 1) with TIOCSTI or TIOCLINUX: EPERM; any other
-  // ioctl goes on with the syscall number reloaded
-  f.push(jump(BPF_JEQ_K, NR_IOCTL, 0, 5));
-  f.push(stmt(BPF_LD_W_ABS, seccomp_arg(1)));
-  f.push(jump(BPF_JEQ_K, TIOCSTI, 1, 0));
-  f.push(jump(BPF_JEQ_K, TIOCLINUX, 0, 1));
-  f.push(stmt(BPF_RET_K, errno(libc::EPERM)));
-  f.push(stmt(BPF_LD_W_ABS, SECCOMP_DATA_NR));
-  if !matches!(net, OsNet::Open) {
-    // refused without the whole network. The proxy's socket in a
-    // namespace is set up before this filter is installed (NetnsHandoff
-    // runs first).
-    f.push(jump(BPF_JEQ_K, NR_LISTEN, 0, 1));
-    f.push(stmt(BPF_RET_K, errno(libc::EACCES)));
-  }
-  if matches!(net, OsNet::ProxyOnly(_)) {
-    // sendto / sendmmsg (flags: argument 3) and sendmsg (argument 2) with
-    // MSG_FASTOPEN connect a TCP socket without connect(2), past Landlock
-    for (nr, flags_arg) in [(NR_SENDTO, 3), (NR_SENDMMSG, 3), (NR_SENDMSG, 2)] {
-      f.push(jump(BPF_JEQ_K, nr, 0, 5));
-      f.push(stmt(BPF_LD_W_ABS, seccomp_arg(flags_arg)));
-      f.push(stmt(BPF_ALU_AND_K, MSG_FASTOPEN));
-      f.push(jump(BPF_JEQ_K, 0, 0, 1));
-      f.push(stmt(BPF_RET_K, SECCOMP_RET_ALLOW));
-      f.push(stmt(BPF_RET_K, errno(libc::EOPNOTSUPP)));
-    }
-  }
-  f.push(jump(BPF_JEQ_K, NR_SOCKET, 1, 0));
-  f.push(stmt(BPF_RET_K, SECCOMP_RET_ALLOW));
-  // socket(domain, type, protocol): the low 32 bits of each argument
-  f.push(stmt(BPF_LD_W_ABS, seccomp_arg(0)));
-  f.push(jump(BPF_JEQ_K, AF_NETLINK, 0, 1));
-  f.push(stmt(BPF_RET_K, SECCOMP_RET_ALLOW));
-  match net {
-    OsNet::Denied => {}
-    OsNet::Open => {
-      f.push(jump(BPF_JEQ_K, AF_INET, 1, 0));
-      f.push(jump(BPF_JEQ_K, AF_INET6, 0, 1));
-      f.push(stmt(BPF_RET_K, SECCOMP_RET_ALLOW));
-    }
-    OsNet::ProxyOnly(_) => {
-      // IPv4/IPv6 stream sockets with protocol 0 or TCP; everything else
-      // jumps to the EACCES below
-      f.push(jump(BPF_JEQ_K, AF_INET, 1, 0));
-      f.push(jump(BPF_JEQ_K, AF_INET6, 0, 7));
-      f.push(stmt(BPF_LD_W_ABS, seccomp_arg(1)));
-      f.push(stmt(BPF_ALU_AND_K, SOCK_TYPE_MASK));
-      f.push(jump(BPF_JEQ_K, SOCK_STREAM, 0, 4));
-      f.push(stmt(BPF_LD_W_ABS, seccomp_arg(2)));
-      f.push(jump(BPF_JEQ_K, 0, 1, 0));
-      f.push(jump(BPF_JEQ_K, IPPROTO_TCP, 0, 1));
-      f.push(stmt(BPF_RET_K, SECCOMP_RET_ALLOW));
-    }
-  }
-  f.push(stmt(BPF_RET_K, errno(libc::EACCES)));
-  let mut bytes = Vec::with_capacity(f.len() * 8);
-  for ins in f {
-    bytes.extend_from_slice(&ins.code.to_ne_bytes());
-    bytes.push(ins.jt);
-    bytes.push(ins.jf);
-    bytes.extend_from_slice(&ins.k.to_ne_bytes());
-  }
-  bytes
-}
-
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-pub fn seccomp_program(_net: OsNet) -> Vec<u8> {
-  Vec::new()
-}
-
 /// Applies the confinement to `command`'s process before it starts the
-/// program. `ruleset` must stay open until the command has been spawned.
+/// program: `no_new_privs`, the Landlock ruleset, then the seccomp program
+/// `seccomp` assembles. `ruleset` must stay open until the command has been
+/// spawned.
 pub fn apply_to_command(
   command: &mut tokio::process::Command,
   ruleset: &OwnedFd,
-  net: OsNet,
+  seccomp: &SeccompSpec,
 ) {
   let ruleset_fd = ruleset.as_raw_fd();
-  let program = seccomp_program(net);
+  let program = seccomp.program();
   // SAFETY: only async-signal-safe syscalls run between fork and exec, on
   // memory allocated before the fork
   unsafe {
@@ -940,285 +772,5 @@ pub fn apply_to_command(
       }
       Ok(())
     });
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn seccomp_program_is_whole_instructions() {
-    for net in [OsNet::Denied, OsNet::Open, OsNet::ProxyOnly(1)] {
-      let p = seccomp_program(net);
-      assert_eq!(p.len() % 8, 0);
-      if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
-        assert!(p.len() / 8 > 8);
-      }
-    }
-  }
-
-  /// Runs a seccomp program on one syscall: the instructions it emits are
-  /// loads of `seccomp_data` words, AND, JEQ / JGE and RET.
-  #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-  fn run_filter(program: &[u8], nr: u32, args: [u32; 6]) -> u32 {
-    let ins = program
-      .chunks(8)
-      .map(|c| SockFilter {
-        code: u16::from_ne_bytes([c[0], c[1]]),
-        jt: c[2],
-        jf: c[3],
-        k: u32::from_ne_bytes([c[4], c[5], c[6], c[7]]),
-      })
-      .collect::<Vec<_>>();
-    let word = |offset: u32| match offset {
-      SECCOMP_DATA_NR => nr,
-      SECCOMP_DATA_ARCH => AUDIT_ARCH,
-      o if o >= SECCOMP_DATA_ARG0
-        && (o - SECCOMP_DATA_ARG0).is_multiple_of(8) =>
-      {
-        args[((o - SECCOMP_DATA_ARG0) / 8) as usize]
-      }
-      o => panic!("an unexpected load at {o}"),
-    };
-    let mut acc = 0u32;
-    let mut pc = 0usize;
-    loop {
-      let i = ins[pc];
-      pc += 1;
-      match i.code {
-        BPF_LD_W_ABS => acc = word(i.k),
-        BPF_ALU_AND_K => acc &= i.k,
-        BPF_JEQ_K | BPF_JGE_K => {
-          let taken = if i.code == BPF_JEQ_K {
-            acc == i.k
-          } else {
-            acc >= i.k
-          };
-          let offset = if taken { i.jt } else { i.jf };
-          pc += usize::from(offset);
-        }
-        BPF_RET_K => return i.k,
-        code => panic!("an unexpected instruction {code:#x}"),
-      }
-    }
-  }
-
-  // DENEXT.md item 111: through the proxy, TCP sockets only and no Fast
-  // Open sends
-  #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-  #[test]
-  fn seccomp_program_semantics() {
-    let eacces = SECCOMP_RET_ERRNO | libc::EACCES as u32;
-    let fastopen = SECCOMP_RET_ERRNO | libc::EOPNOTSUPP as u32;
-    let allow = SECCOMP_RET_ALLOW;
-    let socket = |net: OsNet, domain: u32, ty: u32, proto: u32| {
-      run_filter(
-        &seccomp_program(net),
-        NR_SOCKET,
-        [domain, ty, proto, 0, 0, 0],
-      )
-    };
-    let unix = libc::AF_UNIX as u32;
-    let dgram = libc::SOCK_DGRAM as u32;
-    let stream_flags =
-      SOCK_STREAM | libc::SOCK_CLOEXEC as u32 | libc::SOCK_NONBLOCK as u32;
-    let proxy = OsNet::ProxyOnly(1234);
-    for net in [OsNet::Denied, OsNet::Open, proxy] {
-      assert_eq!(socket(net, unix, SOCK_STREAM, 0), eacces, "{net:?}");
-      assert_eq!(socket(net, AF_NETLINK, dgram, 0), allow, "{net:?}");
-      // other syscalls pass
-      assert_eq!(run_filter(&seccomp_program(net), 0, [0; 6]), allow);
-      assert_eq!(
-        run_filter(&seccomp_program(net), NR_IO_URING_SETUP, [0; 6]),
-        SECCOMP_RET_ERRNO | libc::ENOSYS as u32
-      );
-    }
-    assert_eq!(socket(OsNet::Denied, AF_INET, SOCK_STREAM, 0), eacces);
-    assert_eq!(socket(OsNet::Open, AF_INET6, dgram, 0), allow);
-    assert_eq!(socket(proxy, AF_INET, SOCK_STREAM, 0), allow);
-    assert_eq!(socket(proxy, AF_INET6, stream_flags, IPPROTO_TCP), allow);
-    assert_eq!(socket(proxy, AF_INET, dgram, 0), eacces);
-    assert_eq!(socket(proxy, AF_INET6, dgram, 17), eacces);
-    // SCTP and MPTCP streams: not covered by Landlock's port rules
-    assert_eq!(socket(proxy, AF_INET, SOCK_STREAM, 132), eacces);
-    assert_eq!(socket(proxy, AF_INET, SOCK_STREAM, 262), eacces);
-    assert_eq!(socket(proxy, libc::AF_PACKET as u32, 3, 0), eacces);
-    let program = seccomp_program(proxy);
-    let msg_fastopen = MSG_FASTOPEN | libc::MSG_NOSIGNAL as u32;
-    assert_eq!(run_filter(&program, NR_SENDTO, [3, 0, 10, 0, 0, 0]), allow);
-    assert_eq!(
-      run_filter(&program, NR_SENDTO, [3, 0, 10, msg_fastopen, 0, 0]),
-      fastopen
-    );
-    assert_eq!(
-      run_filter(&program, NR_SENDMMSG, [3, 0, 1, msg_fastopen, 0, 0]),
-      fastopen
-    );
-    assert_eq!(
-      run_filter(&program, NR_SENDMSG, [3, 0, msg_fastopen, 0, 0, 0]),
-      fastopen
-    );
-    assert_eq!(run_filter(&program, NR_SENDMSG, [3, 0, 0, 0, 0, 0]), allow);
-    // refused without the whole network, allowed with it
-    assert_eq!(run_filter(&program, NR_LISTEN, [3, 1, 0, 0, 0, 0]), eacces);
-    assert_eq!(
-      run_filter(
-        &seccomp_program(OsNet::Denied),
-        NR_LISTEN,
-        [3, 1, 0, 0, 0, 0]
-      ),
-      eacces
-    );
-    assert_eq!(
-      run_filter(&seccomp_program(OsNet::Open), NR_LISTEN, [3, 1, 0, 0, 0, 0]),
-      allow
-    );
-    // the open network keeps Fast Open
-    assert_eq!(
-      run_filter(
-        &seccomp_program(OsNet::Open),
-        NR_SENDTO,
-        [3, 0, 10, msg_fastopen, 0, 0]
-      ),
-      allow
-    );
-  }
-
-  /// Confines a forked child as a proxy-held script is (Landlock with the
-  /// proxy port, then the seccomp program) and reports what the filtered
-  /// socket operation returns there, after a `bind` or without one: 0, or
-  /// the errno.
-  #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-  fn socket_op_in_confined_child(bind_first: bool) -> i32 {
-    let dir = tempfile::tempdir().unwrap();
-    let ruleset =
-      build_ruleset(&[dir.path().to_path_buf()], &[], Some(45_678)).unwrap();
-    let program = seccomp_program(OsNet::ProxyOnly(45_678));
-    let ruleset_fd = ruleset.as_raw_fd();
-    // SAFETY: the child makes only async-signal-safe syscalls on memory
-    // allocated before the fork, then exits with the outcome
-    let pid = unsafe { libc::fork() };
-    assert!(pid >= 0);
-    if pid == 0 {
-      // SAFETY: as above; every path ends in _exit
-      unsafe {
-        let fail = |step: i32| -> ! { libc::_exit(100 + step) };
-        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-          fail(1);
-        }
-        if libc::syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0u32) != 0 {
-          fail(2);
-        }
-        let prog = SockFprog {
-          len: (program.len() / 8) as u16,
-          filter: program.as_ptr() as *const SockFilter,
-        };
-        if libc::prctl(
-          libc::PR_SET_SECCOMP,
-          libc::SECCOMP_MODE_FILTER,
-          &prog as *const SockFprog,
-          0,
-          0,
-        ) != 0
-        {
-          fail(3);
-        }
-        let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
-        if fd < 0 {
-          fail(4);
-        }
-        if bind_first {
-          let addr = libc::sockaddr_in {
-            sin_family: libc::AF_INET as libc::sa_family_t,
-            sin_port: 0,
-            sin_addr: libc::in_addr {
-              s_addr: u32::from(std::net::Ipv4Addr::LOCALHOST).to_be(),
-            },
-            sin_zero: [0; 8],
-          };
-          if libc::bind(
-            fd,
-            &addr as *const libc::sockaddr_in as *const libc::sockaddr,
-            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
-          ) != 0
-          {
-            libc::_exit(*libc::__errno_location());
-          }
-        }
-        let res = libc::listen(fd, 1);
-        libc::_exit(if res == 0 {
-          0
-        } else {
-          *libc::__errno_location()
-        });
-      }
-    }
-    let mut status = 0;
-    // SAFETY: the child just forked
-    unsafe { libc::waitpid(pid, &mut status, 0) };
-    assert!(libc::WIFEXITED(status));
-    let code = libc::WEXITSTATUS(status);
-    assert!(
-      code < 100,
-      "the child failed to confine itself at step {}",
-      code - 100
-    );
-    code
-  }
-
-  // A proxy-held script: the filtered socket operation is refused with a
-  // `bind` first and without one.
-  #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-  #[test]
-  fn proxy_held_script_socket_filter() {
-    if !can_confine_to_port() {
-      eprintln!("skipped: no Landlock ABI 4 here");
-      return;
-    }
-    assert_eq!(
-      socket_op_in_confined_child(true),
-      libc::EACCES,
-      "after bind"
-    );
-    assert_eq!(
-      socket_op_in_confined_child(false),
-      libc::EACCES,
-      "without bind"
-    );
-  }
-
-  // DENEXT.md item 124 (H2): typing into a terminal is refused, other
-  // ioctls and the syscalls after the check still get their own answers
-  #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-  #[test]
-  fn seccomp_refuses_tiocsti() {
-    let eperm = SECCOMP_RET_ERRNO | libc::EPERM as u32;
-    let eacces = SECCOMP_RET_ERRNO | libc::EACCES as u32;
-    for net in [OsNet::Denied, OsNet::Open, OsNet::ProxyOnly(1)] {
-      let program = seccomp_program(net);
-      assert_eq!(
-        run_filter(&program, NR_IOCTL, [0, TIOCSTI, 0, 0, 0, 0]),
-        eperm
-      );
-      assert_eq!(
-        run_filter(&program, NR_IOCTL, [5, TIOCLINUX, 0, 0, 0, 0]),
-        eperm
-      );
-      // TIOCGWINSZ, FIONBIO: fine
-      assert_eq!(
-        run_filter(&program, NR_IOCTL, [0, 0x5413, 0, 0, 0, 0]),
-        SECCOMP_RET_ALLOW
-      );
-      assert_eq!(
-        run_filter(&program, NR_IOCTL, [0, 0x5421, 0, 0, 0, 0]),
-        SECCOMP_RET_ALLOW
-      );
-      // the check doesn't disturb what follows it
-      assert_eq!(
-        run_filter(&program, NR_SOCKET, [libc::AF_UNIX as u32, 1, 0, 0, 0, 0]),
-        eacces
-      );
-    }
   }
 }

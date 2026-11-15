@@ -15964,23 +15964,86 @@ where the changes are discussed.
        go through this client.
 
 419. **`fix(supply-chain)`: the Linux script jail's socket filter refuses one
-     more socket operation** (CLI only; `cli/supply_chain/sandbox_linux.rs`,
-     `cli/supply_chain/jail.rs`). A lifecycle script held to a host list (item
-     111), or given no network, now gets EACCES from one more socket operation
-     in the jail's seccomp filter. A script whose network is fully open
-     (`net: true`) is unchanged, and the proxy's socket in a script's own
-     network namespace is set up before the filter is installed. The
-     no-network-namespace warning now says that such a script shares this host's
-     network.
+     more socket operation** (CLI only; `cli/supply_chain/jail.rs`,
+     `libs/sandbox/seccomp.rs`, `cli/supply_chain/jail_os_tests.rs`; first
+     written against `cli/supply_chain/sandbox_linux.rs`, which item 420 moves).
+     A lifecycle script held to a host list (item 111), or given no network, now
+     gets EACCES from one more socket operation in the jail's seccomp filter. A
+     script whose network is fully open (`net: true`) is unchanged, and the
+     proxy's socket in a script's own network namespace is set up before the
+     filter is installed. The no-network-namespace warning now says that such a
+     script shares this host's network.
      - User-facing note: on Linux, a lifecycle script with a host list or no
        network has one more socket operation refused with EACCES.
-     - Tests: `supply_chain::sandbox_linux::tests::seccomp_program_semantics`
+     - Tests: `supply_chain::jail_os_tests::linux::seccomp_program_semantics`
        (refused under a host list and with no network, allowed with the open
        network);
-       `supply_chain::sandbox_linux::tests::proxy_held_script_socket_filter` (a
+       `supply_chain::jail_os_tests::linux::proxy_held_script_socket_filter` (a
        forked child confined as a proxy-held script gets EACCES with a `bind`
        first and without one; skipped without Landlock ABI 4).
      - Node tests enabled: none; no Node API changes.
+
+420. **`refactor(sandbox)`: the lifecycle jail's OS enforcers are a library
+     crate, `deno_sandbox`** (CLI only; `libs/sandbox/`,
+     `cli/supply_chain/jail.rs`, `cli/supply_chain/mod.rs`,
+     `cli/supply_chain/jail_os_tests.rs`,
+     `.github/workflows/denext_tests_os.yml`). No behaviour change. The first
+     step of kernel-enforced permissions: the Landlock ruleset builder, the user
+     and network namespace handoff and the subreaper (`linux.rs`, formerly
+     `cli/supply_chain/sandbox_linux.rs`), the Seatbelt profile generator
+     (`seatbelt.rs`, from `sandbox_macos.rs`; string building only, so it builds
+     and is tested on every platform), `sandbox-exec` (`macos.rs`) and the
+     allow-listing proxy (`proxy.rs`, from `jail_proxy.rs`, behind the crate's
+     `proxy` feature so a binary that only confines itself doesn't carry its
+     HTTP stack) move out of the `deno` binary crate, which `denort` can't
+     depend on. The jail stays the policy producer: the hand-assembled
+     `seccomp_program(OsNet)` becomes a `SeccompSpec` builder (per-syscall rules
+     in order, `Deny` / `DenyArgIn` / `DenyArgBits`, then the `socket(2)` family
+     filter), and `jail::seccomp_spec(OsNet)` lists the jail's rules on it.
+     `OsNet` moves to the crate (re-exported by `jail`). The proxy's test of the
+     built-in exceptions' hosts moves to the jail's tests (the list is the
+     jail's), and the `Test libs` steps run `deno_sandbox`'s tests.
+     - Tests:
+       `supply_chain::jail_os_tests::linux::jail_seccomp_program_golden_bytes`
+       (the program for `Denied`, `Open` and `ProxyOnly` is byte for byte what
+       the jail emitted before the move, on x86_64 and aarch64; the goldens were
+       produced by the code before it, and `Denied` / `ProxyOnly` carry item
+       419's rule), `supply_chain::jail_os_tests::jail_seatbelt_profile_golden`
+       (the profile text for four jail inputs, every platform), the jail's
+       seccomp semantics tests (moved unchanged), and `deno_sandbox`'s
+       `seccomp::tests` (each rule kind, the socket filter, the arch check),
+       `seatbelt::tests` and `proxy::tests` (moved unchanged).
+
+421. **`feat(permissions)`: race-safe opens that hand back descriptors (a
+     library; nothing uses it yet)** (runtime;
+     `runtime/permissions/checked_open.rs`,
+     `runtime/permissions/benches/checked_open.rs`). No behaviour change. A
+     permission check resolves a path and the operation opens the path again, so
+     a symlink swapped in between is followed unchecked (the TOCTOU note on
+     `check_resolved_path`). `deno_permissions::checked_open` makes the open the
+     check, on Unix: `open_checked(scope, path, options)` returns a
+     `CheckedFile` (an open descriptor) and `parent_checked(scope, path)` a
+     `CheckedParent` (the open directory and the last component's name) whose
+     `mkdir`, `remove_file`, `remove_dir`, `rename_to`, `symlink`, `open` and
+     `symlink_metadata` use the `*at` syscalls. An `OpenScope` holds the allow
+     roots (each opened once and kept) and the denies. Linux uses `openat2` with
+     `RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS` (and `RESOLVE_NO_SYMLINKS` for
+     paths that may hold no link) when no deny touches the root, and falls back
+     to the walk when the kernel lacks it or refuses a link; everywhere else
+     each component is opened with `O_NOFOLLOW` from the previous one's
+     descriptor, a link is read and its target checked as a new path (40 links
+     at most). After the open the descriptor's own path (`/proc/self/fd`,
+     `F_GETPATH`) is checked against the denies; one that can't be read back
+     counts as denied, and a file the call created is removed again.
+     - Tests: `checked_open::tests` (symlink-swap races at each step of the walk
+       for open, the last component, create, mkdir, unlink, rename and readdir,
+       both strategies on Linux: each refuses or acts on the checked object;
+       denies inside the root by name, through links and by a rename after the
+       walk; link loops; links between two roots; the name operations).
+       Benchmark (Linux 6.8, x86_64, a file five directories down): `File::open`
+       3.6 µs, `canonicalize` then `File::open` (today's scoped check and open)
+       13.9 µs, `open_checked` with `openat2` 4.9 µs, with the walk 15.9 µs,
+       with a deny inside the root 22.5 µs.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

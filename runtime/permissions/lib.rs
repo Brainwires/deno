@@ -34,6 +34,8 @@ use serde::de;
 use url::Url;
 
 pub mod broker;
+#[cfg(unix)]
+pub mod checked_open;
 mod ipc_pipe;
 pub mod prompter;
 mod runtime_descriptor_parser;
