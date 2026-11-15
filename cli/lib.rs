@@ -18,6 +18,7 @@ mod npm_shim;
 mod ops;
 mod registry;
 mod resolver;
+mod sandbox;
 mod standalone;
 mod supply_chain;
 mod task_runner;
@@ -1088,6 +1089,10 @@ async fn resolve_flags_and_init(
   if flags.watch.is_some() {
     WatchEnvTracker::snapshot();
   }
+
+  // denext: the kernel sandbox's break-glass variable is read before any
+  // env file is loaded, so a project's env file can't set it (item 420)
+  deno_lib::kernel_sandbox::snapshot_env_override();
 
   if let Some(files) = &flags.env_file {
     let cwd = match &flags.initial_cwd {

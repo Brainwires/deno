@@ -1,0 +1,18 @@
+{
+[WILDCARD]
+  "kernelSandbox": {
+    "preview": true,
+    "mode": "auto",
+    "source": "default",
+    "effective": "off",
+    "wouldApply": "warn",
+    "reason": "auto applies nothing yet (the kernel sandbox is an opt-in preview)",
+    "enforced": false,
+    "enforcerBuilt": false,
+    "osSandbox": "[WILDLINE]",
+[WILDCARD]
+    "warnings": [
+      "kernel sandbox: no enforcer is built into this runtime yet; --kernel-sandbox=enforce and broker refuse to start"[WILDCARD]
+    ]
+  }
+}

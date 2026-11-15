@@ -15274,6 +15274,93 @@ where the changes are discussed.
        (every path flag with a doubled comma, re-serialized and parsed again:
        the same permissions, `--allow-read=a,,b,c` written back as is).
 
+386. **`feat(permissions)`: the kernel sandbox, an opt-in preview:
+     `--kernel-sandbox`, `--kernel-sandbox-report`, deno.json
+     `permissions.kernelSandbox`, `deno compile --kernel-sandbox` and
+     `deno info --json` `kernelSandbox`** (CLI and runtime; denext-only;
+     `cli/sandbox/`, `cli/lib/kernel_sandbox.rs`,
+     `cli/lib/standalone/binary.rs`, `cli/rt/run.rs`,
+     `libs/config/deno_json/permissions.rs`, `libs/cli_parser`,
+     `runtime/permissions/prompter.rs`). The first part of kernel enforcement of
+     the `--allow-*` / `--deny-*` grants (Landlock and seccomp on Linux,
+     Seatbelt on macOS): the policy model and the mode decision. Nothing is
+     enforced yet, and nothing changes for a run that doesn't ask for it.
+     - `--kernel-sandbox=off|warn|auto|enforce|broker` on every command that
+       takes permission flags (`run`, `eval`, `serve`, `test`, `bench`, `repl`,
+       `compile`, a global `install`). `auto` is the default and applies nothing
+       in this release line; `warn` prints one line saying how many rules only
+       Deno's checks would hold; `enforce` and `broker` refuse to start, listing
+       the rules the OS can't hold here (no enforcer is built in yet). `off`
+       turns the kernel layer off. The flag is written back out by
+       `deno install`, `deno x` and `process.execArgv` (item 385's path).
+     - `--kernel-sandbox-report` prints the requested and applying mode, what
+       `auto` would choose, the machine's mechanisms, the compiled policy (read,
+       write, their denies, exec, code loading, network, Unix sockets, sys, env,
+       the implicit set by need) with its hash, and every gap, then runs the
+       program. A gap is fail-open (the OS allows more than Deno; marked `!`,
+       refused by `enforce`), fail-closed (the OS allows less) or documented
+       (outside what the kernel layer promises: `env`, `sys`, metadata, exec
+       under a scoped `--allow-run`).
+     - deno.json `"permissions": { "kernelSandbox": "warn" }`: a reserved key
+       beside the permission sets, the project's mode below the flag; a
+       workspace member's own value wins. Any other value is a config error.
+     - `DENO_KERNEL_SANDBOX=off|warn` lowers the mode of a CLI run without
+       editing it; it never raises it, is read before `--env-file` is loaded (an
+       env file can't set it), and any other value is ignored with a warning. A
+       compiled program ignores it.
+     - `deno compile --kernel-sandbox=<mode>` (else deno.json's) is stored in
+       the binary (`Metadata::kernel_sandbox`); the program ignores flags and
+       the variable for it. `enforce` and `broker` are refused at compile time
+       while no enforcer is built in; a binary baked with `warn` prints the warn
+       line at startup.
+     - The mode rules (`deno_lib::kernel_sandbox::kernel_sandbox_mode`, shared
+       with `denort`): a compiled program's baked mode, else the flag, else the
+       variable, else deno.json, else `auto`; `off` for subcommands that run no
+       user code, for `-A` with no deny rule, for a desktop development build;
+       `--watch`, hot module replacement, `denext dev` (`DENEXT_DEV_TOKEN`) and
+       an upstream permission broker make the set not fixed (`auto` off, `warn`
+       kept, `enforce` / `broker` an error); a prompt that can happen (prompting
+       on, stdin and stderr terminals: the same test as the prompter,
+       `prompt_terminals_available`) keeps `auto` off. On a fixed set `auto`
+       records what it would choose (`wouldApply`): `enforce` where the author
+       fixed the permissions (a compiled program, or `auto` written in the flag
+       or deno.json), `warn` where only the missing terminal or `--no-prompt`
+       fixes them. `AUTO_APPLIES` turns that on; it is `false`.
+     - The policy model (`cli/sandbox/policy.rs`, plans' review applied):
+       host-scoped network is a broker (Mode B) feature on Linux, ports only for
+       addresses and `localhost`; a Unix socket needs an explicit `unix:<path>`
+       grant (or `-A` with denies) before AF_UNIX opens on Linux; a read deny
+       inside a read allow on Linux is held by expansion only when no grant
+       writes the folders, by overmounting where user namespaces exist, else
+       reported as Deno-only; a write deny inside an allow is the broker's on
+       Linux and exact on macOS. The capability table (per OS, per Landlock ABI)
+       is data, and the policy hash is SHA-256 over its JSON.
+     - User-facing note: `--kernel-sandbox`, `--kernel-sandbox-report`,
+       `permissions.kernelSandbox` and `DENO_KERNEL_SANDBOX` exist as a preview;
+       nothing is enforced, and `enforce` / `broker` refuse to start.
+       `deno info --json` has a `kernelSandbox` object (mode, source,
+       `effective`, `wouldApply`, the machine's mechanisms and features).
+     - Tests: `deno_lib`'s
+       `kernel_sandbox::tests::{mode_matrix,
+       precedence_flag_env_config, env_can_only_lower,
+       enforce_refuses_an_unfixed_set, compiled_check, deny_only_is_reported,
+       allow_all_and_denies, parses_every_value_and_rejects_others}`;
+       the CLI's
+       `sandbox::policy::tests::{fs_rows, net_rows, unix_rows,
+       run_and_ffi_rows, sys_and_env_rows, metadata_and_windows_rows,
+       implicit_set_follows_the_grant, inspector_port_is_bindable,
+       capability_table, no_enforcer_is_one_fatal_gap, serde_round_trip,
+       policy_hash_is_stable}`
+       and
+       `args::flags::tests::to_permission_args_keeps_the_kernel_sandbox_mode`;
+       `deno_config`'s
+       `deno_json::permissions::test::{kernel_sandbox_key,
+       kernel_sandbox_member_wins}`;
+       `deno_cli_parser`'s `tests_full::kernel_sandbox_flags`; spec
+       `kernel_sandbox` (report, warn, enforce and broker refusing, config, env,
+       info, compile) and the updated `info::json`, `info::json_location`.
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

@@ -1257,10 +1257,28 @@ impl CliFactory {
       .root_permissions_container
       .get_or_try_init(|| {
         let desc_parser = self.permission_desc_parser()?.clone();
-        let permissions = Permissions::from_options(
-          desc_parser.as_ref(),
-          &self.cli_options()?.permissions_options()?,
-        )?;
+        let cli_options = self.cli_options()?;
+        let options = cli_options.permissions_options()?;
+        // denext: the kernel sandbox's mode, report and preview checks
+        // (DENEXT.md item 420); nothing is enforced yet
+        if crate::sandbox::run_kind(cli_options.sub_command())
+          != deno_lib::kernel_sandbox::RunKind::NotARuntime
+        {
+          let deno_dir = self.deno_dir().ok().map(|d| d.root.clone());
+          let node_modules = self
+            .node_modules_dir_path()
+            .ok()
+            .flatten()
+            .map(|p| p.to_path_buf());
+          crate::sandbox::check_run(
+            cli_options,
+            &options,
+            deno_dir,
+            node_modules,
+          )?;
+        }
+        let permissions =
+          Permissions::from_options(desc_parser.as_ref(), &options)?;
 
         Ok(PermissionsContainer::new(desc_parser, permissions))
       })

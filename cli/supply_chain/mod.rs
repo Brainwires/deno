@@ -21,9 +21,9 @@ mod jail_proxy;
 pub mod node_headers;
 mod popular_names;
 #[cfg(target_os = "linux")]
-mod sandbox_linux;
+pub(crate) mod sandbox_linux;
 #[cfg(target_os = "macos")]
-mod sandbox_macos;
+pub(crate) mod sandbox_macos;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;

@@ -10,5 +10,8 @@
   "webCacheStorage": [WILDCARD]location_data[WILDCARD]web_cache",
   "lifecycleJail": {
 [WILDCARD]
+  },
+  "kernelSandbox": {
+[WILDCARD]
   }
 }

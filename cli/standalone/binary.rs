@@ -1204,6 +1204,7 @@ impl<'a> DenoCompileBinaryWriter<'a> {
       max_memory: self.cli_options.max_memory(),
       max_cpu_time: self.cli_options.max_cpu_time(),
       max_time: self.cli_options.max_time(),
+      kernel_sandbox: crate::sandbox::compile_mode(self.cli_options)?,
       code_cache_key,
       location: self.cli_options.location_flag().clone(),
       permissions: self.cli_options.permissions_options()?,

@@ -475,6 +475,16 @@ fn get_stdin_metadata() -> std::io::Result<std::fs::Metadata> {
   }
 }
 
+/// Whether [`TtyPrompter`] can ask: stdin and stderr are both terminals.
+/// denext: the kernel sandbox's mode selection (`deno_lib::kernel_sandbox`)
+/// calls this same function to decide whether a run's permission set is
+/// fixed, so the two can't drift.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn prompt_terminals_available() -> bool {
+  use std::io::IsTerminal;
+  std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Default)]
 pub struct TtyPrompter;
@@ -499,7 +509,7 @@ impl PermissionPrompter for TtyPrompter {
     // 10kB of permission prompting should be enough for anyone
     const MAX_PERMISSION_PROMPT_LENGTH: usize = 10 * 1024;
 
-    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+    if !prompt_terminals_available() {
       return PromptResponse::Deny;
     };
 

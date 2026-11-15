@@ -1152,6 +1152,14 @@ pub struct PermissionFlags {
   /// by `has_permission`.
   #[serde(default)]
   pub clean_run_env: Option<Vec<String>>,
+  /// denext: `--kernel-sandbox=off|warn|auto|enforce|broker`. Not a grant,
+  /// so it is not counted by `has_permission` (DENEXT.md item 420).
+  #[serde(default)]
+  pub kernel_sandbox: Option<String>,
+  /// denext: `--kernel-sandbox-report`: print the kernel sandbox mode and
+  /// policy at startup. Not a grant.
+  #[serde(default)]
+  pub kernel_sandbox_report: bool,
   pub allow_sys: Option<Vec<String>>,
   pub deny_sys: Option<Vec<String>>,
   pub allow_write: Option<Vec<String>>,

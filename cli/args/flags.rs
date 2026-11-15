@@ -195,6 +195,12 @@ impl FlagsExt for Flags {
   fn to_permission_args(&self) -> Vec<String> {
     let mut args = vec![];
 
+    // denext: an installed tool, `deno x` and a forked child keep the kernel
+    // sandbox mode asked for (DENEXT.md item 420)
+    if let Some(mode) = &self.permissions.kernel_sandbox {
+      args.push(format!("--kernel-sandbox={mode}"));
+    }
+
     if self.permissions.allow_all {
       args.push("--allow-all".to_string());
       return args;
@@ -1302,6 +1308,31 @@ mod tests {
         .to_permission_args()
         .contains(&"--allow-read=a,,b,c".to_string())
     );
+  }
+
+  /// denext (DENEXT.md item 420): the kernel sandbox mode is written back
+  /// out, with `-A` too; the report switch is a one-run diagnostic and isn't.
+  #[test]
+  fn to_permission_args_keeps_the_kernel_sandbox_mode() {
+    for extra in [None, Some("-A"), Some("--allow-read=a")] {
+      let mut argv = svec![
+        "deno",
+        "run",
+        "--kernel-sandbox=warn",
+        "--kernel-sandbox-report"
+      ];
+      argv.extend(extra.map(OsString::from));
+      argv.push("script.ts".into());
+      let flags = flags_from_vec(argv).unwrap();
+      let args = flags.to_permission_args();
+      assert!(
+        args.contains(&"--kernel-sandbox=warn".to_string()),
+        "{args:?}"
+      );
+      assert!(!args.iter().any(|a| a == "--kernel-sandbox-report"));
+    }
+    let flags = flags_from_vec(svec!["deno", "run", "script.ts"]).unwrap();
+    assert!(flags.to_permission_args().is_empty());
   }
 
   #[test]
