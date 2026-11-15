@@ -7,6 +7,11 @@
       "if": "unix",
       "args": "run -A --quiet corpus.ts",
       "output": "[WILDCARD]kernel-sandbox corpus: [WILDCARD]\ncorpus: ok [WILDCARD]"
+    },
+    // Who refused a probe: our sandbox (held) or the host (host).
+    "classify_unit": {
+      "args": "test --quiet --no-check=remote classify_test.ts",
+      "output": "[WILDCARD]ok | 7 passed | 0 failed[WILDCARD]"
     }
   }
 }
