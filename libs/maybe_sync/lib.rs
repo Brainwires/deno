@@ -84,7 +84,10 @@ mod inner {
       self.0.borrow_mut().remove_entry(key)
     }
 
-    #[allow(clippy::len_without_is_empty)]
+    #[allow(
+      clippy::len_without_is_empty,
+      reason = "mirrors the subset of DashMap's API its callers use, which has no is_empty"
+    )]
     pub fn len(&self) -> usize {
       self.0.borrow().len()
     }

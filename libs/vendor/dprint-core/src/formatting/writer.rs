@@ -287,7 +287,7 @@ impl<'a> Writer<'a> {
   }
 
   #[cfg(debug_assertions)]
-  fn items_cloned(&self) -> Vec<WriteItem> {
+  fn items_cloned(&self) -> Vec<WriteItem<'_>> {
     let mut items = Vec::new();
     let mut current_item = self.state.items;
     while let Some(item) = current_item {

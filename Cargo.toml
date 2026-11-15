@@ -544,7 +544,6 @@ lto = true
 opt-level = 'z' # Optimize for size
 split-debuginfo = "packed"
 debug = "line-tables-only"
-panic = "abort"
 
 [profile.bench.package.deno_npm]
 opt-level = 3
@@ -708,8 +707,9 @@ opt-level = 3
 # dprint-core 0.67.4 with dprint/dprint#1137 (the `deno fmt` OOM of
 # denoland/deno#26713; DENEXT.md). The fix shipped in dprint-core 0.68, but
 # dprint-plugin-typescript / -markdown still depend on 0.67, so the published
-# 0.67.4 is vendored with that one-file change. Drop this once those plugins are
-# on the 0.68+ line and bump them instead.
+# 0.67.4 is vendored with that one-file change, plus `WriteItem<'_>` spelled out
+# in `Writer::items_cloned` (rustc's `mismatched_lifetime_syntaxes` warning).
+# Drop this once those plugins are on the 0.68+ line and bump them instead.
 #
 # tokio-postgres 0.7.18 with one addition, `RowStream::columns()`: an unnamed
 # statement (`query_typed_raw`, used by Deno.SQL's `prepare: false` and its
