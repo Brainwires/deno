@@ -15589,6 +15589,30 @@ where the changes are discussed.
        (Windows only).
      - Node tests enabled: none; no Node API changes.
 
+401. **`fix(desktop)`: the WebGPU surface of a raw-backend window is created on
+     the UI thread on macOS** (port of theende/ende e8573036f3, MIT, from
+     denoland/deno#36756; upstream denoland/deno#36738;
+     `runtime/ops/desktop.rs`, `cli/rt_desktop/lib.rs`). On macOS a raw
+     (winit) backend window's `BrowserWindow.getNativeWindow()` panicked with
+     "can only access NSView on the main thread": wgpu's Metal surface
+     (`raw-window-metal`) reads the window's `NSView`, and desktop ops run on
+     the runtime thread. Surface creation now hops to the UI thread through a
+     new `DesktopApi::run_on_ui_thread` (inline by default), which libdenort
+     implements on macOS with laufey's `try_run_on_ui_thread` (this fork's
+     laufey already has littledivy/laufey#79's UI-thread calls, so Ende's own
+     `post_ui_task` trampoline isn't needed). The window handles are still
+     fetched on the runtime thread (laufey's winit backend makes that caller
+     wait for the UI thread), only the create call hops, a panic in it is
+     caught there and becomes an error, and `present()` stays on the runtime
+     thread. Not carried: Ende's c0fbcfff50, whose error text says CEF windows
+     have no native handle; this fork's CEF host returns Win32 and AppKit
+     handles.
+     - User-facing note: `getNativeWindow()` on a macOS raw-backend window
+       returns a surface instead of crashing the app.
+     - Tests: none automated; it needs a raw-backend window on macOS (a GUI
+       session), and no test double of `DesktopApi` exists.
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -15596,7 +15620,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397, 398) are what the
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397, 398, 401) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
