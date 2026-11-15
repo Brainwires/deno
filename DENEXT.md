@@ -15673,6 +15673,29 @@ where the changes are discussed.
        3.0.0-denext.22).
      - Node tests enabled: none; no Node API changes.
 
+405. **`fix(cache)`: `deno cache --frozen` accepts its own lockfile for a
+     remote module served in a non-UTF-8 charset** (port of theende/ende
+     18c1ab8e3f, MIT, from denoland/deno#37014; upstream denoland/deno#37003;
+     `libs/cache_dir/cache.rs`, `libs/cache_dir/file_fetcher/mod.rs`,
+     `libs/cache_dir/global/mod.rs`). `deno_graph` writes a remote lockfile
+     hash over the charset-decoded source text, and the HTTP cache checked it
+     against the raw response bytes: for a module served as Latin-1 (or with a
+     BOM) the two differ, so `deno cache --frozen` rejected the lockfile it
+     had just written. The cache now accepts either the raw bytes' hash or the
+     hash of the bytes `deno_graph` hashes (same media types, charset and BOM
+     rules). Ende accepts both forms because the same check verifies JSR
+     manifest checksums, which are over the raw bytes; a raw match is the old
+     check, and the decoded text is what runs. In this fork the download path
+     verifies before it writes the cache (unchanged); only the comparison
+     changes.
+     - User-facing note: a remote module served with a Latin-1 (or other
+       non-UTF-8) charset passes `--frozen` and lockfile checks.
+     - Tests: the `cache::latin1_lock_integrity` spec; `deno_cache_dir`'s
+       `cache::tests::remote_lock_checksum_matches_decoded_latin1`,
+       `remote_lock_checksum_utf8_unchanged` and
+       `remote_checksum_accepts_raw_bytes_hash`.
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
