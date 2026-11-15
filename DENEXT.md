@@ -15696,6 +15696,27 @@ where the changes are discussed.
        `remote_checksum_accepts_raw_bytes_hash`.
      - Node tests enabled: none; no Node API changes.
 
+406. **`fix(coverage)`: a file whose coverage doesn't match its source is
+     skipped with a warning, not a panic** (port of theende/ende c4f1778f09,
+     MIT, from denoland/deno#37033; upstream denoland/deno#37007;
+     `cli/tools/coverage/mod.rs`). `deno coverage` (and `deno test
+     --coverage`) panicked with "a UTF-16 offset within the source has a byte
+     offset" when a V8 range reached past the end of the source it was read
+     against. V8 only reports ranges that fit the source it ran, so the data
+     is stale: the file changed after coverage was collected. A range inside a
+     surrogate pair would also panic when the source is sliced. Every range is
+     now checked once before the report is built; if one doesn't fit the
+     runtime source (past its end, reversed, or off a character boundary) the
+     file is skipped with a warning, as a deleted source already was. The
+     runtime source is the emit V8 ran, including the Vitest transform's emit
+     this fork's coverage picks, so the check holds for those modules too.
+     - User-facing note: `deno coverage` over data from an older version of a
+       file warns "doesn't match its source … Skipping." and reports the rest.
+     - Tests: the `coverage::stale_source_file` spec (panics on
+       3.0.0-denext.22); `tools::coverage::tests::ranges_*` (in range, past the
+       end and wrapping, reversed, inside a surrogate pair).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
