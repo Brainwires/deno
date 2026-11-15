@@ -15471,12 +15471,19 @@ where the changes are discussed.
      file entrypoint now resolves to its real path first, as Node does for its
      main module (`--preserve-symlinks-main` off); this fork's directory entry
      (`deno run <dir>`) and Node binary main fallback then run on the resolved
-     URL, as before.
+     URL, as before. A main module reached through a link now runs exactly as
+     naming its target does: the main module needs no read grant, so
+     `deno run --deny-read=outside lib/mod.cjs` (`lib` a link to `outside`)
+     runs, as `deno run --deny-read=outside outside/mod.cjs` already did; it was
+     refused before only because the CommonJS loader read the link's real path
+     (item 176's spec now says so, and `require()` through links is still
+     refused there).
      - User-facing note: `deno run` and `deno serve` of a symlink import modules
        relative to the symlink's target; `import.meta.url` and
        `import.meta.filename` name the target.
      - Tests: the `run::symlinked_entrypoint` and `serve::symlinked_entrypoint`
-       specs (Unix; "Module not found" on 3.0.0-denext.22).
+       specs (Unix; "Module not found" on 3.0.0-denext.22) and
+       `npm::byonm_require_link_escape`'s main-module steps.
      - Node tests enabled: none; no Node API changes.
 
 396. **`fix(compile)`: an `--exclude` entry matches however the walk spells the

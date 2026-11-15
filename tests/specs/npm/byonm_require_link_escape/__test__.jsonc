@@ -42,13 +42,18 @@
       "output": "relative: NotCapable\nabsolute: NotCapable\n"
     },
     {
-      // The main module through a link (lib -> outside) is in the module
-      // graph under its spelling, but that does not carry it past
-      // --deny-read on its real path (as on stock Deno).
+      // The main module through a link (lib -> outside) resolves to its real
+      // path (DENEXT.md item 395), so it runs exactly as naming
+      // outside/mod.cjs does: the main module needs no read grant, and
+      // --deny-read=outside refuses both or neither.
       "if": "unix",
       "args": "run --deny-read=outside lib/mod.cjs",
-      "output": "[WILDCARD]Requires read access to \"[WILDCARD]mod.cjs\"[WILDCARD]",
-      "exitCode": 1
+      "output": "outside/mod.cjs ran\n"
+    },
+    {
+      "if": "unix",
+      "args": "run --deny-read=outside outside/mod.cjs",
+      "output": "outside/mod.cjs ran\n"
     }
   ]
 }
