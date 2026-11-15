@@ -15842,6 +15842,23 @@ where the changes are discussed.
      - Tests: the integration test `repl::pty_multiline_regex`.
      - Node tests enabled: none; no Node API changes.
 
+414. **`fix(cli)`: `RUST_BACKTRACE=1` no longer prints the CLI's Rust frames
+     after an ordinary error** (port of theende/ende 4850e5c327, MIT, from
+     denoland/deno#36851; upstream denoland/deno#36832; `cli/lib.rs`). With
+     `RUST_BACKTRACE=1`, anyhow captures a backtrace for every error and its
+     `Debug` output appends it, so an ordinary failure such as
+     `error: Test
+     failed` printed a stack of the CLI's own frames that says
+     nothing about the failure. `exit_for_error` keeps the `Debug` layout (with
+     its "Caused by:" chain) and drops only the captured backtrace suffix.
+     Panics still print their backtrace.
+     - User-facing note: a failing `deno test` under `RUST_BACKTRACE=1` prints
+       the test failure without a Rust stack trace.
+     - Tests: the integration test
+       `test::test_failure_does_not_print_rust_backtrace` (3.0.0-denext.22
+       prints "Stack backtrace:").
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
