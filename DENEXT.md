@@ -15747,6 +15747,23 @@ where the changes are discussed.
        `urlParseSubclassReturnsUrl` (both fail on 3.0.0-denext.22).
      - Node tests enabled: none; no Node API changes.
 
+409. **`fix(ext/web)`: `URLSearchParams` rejects a non-object iterator result**
+     (port of theende/ende 8f6bb29889, MIT, from denoland/deno#37124; upstream
+     denoland/deno#37117; `ext/web/00_url.js`). Building its pairs from an
+     iterable, the constructor called `next()` and read `res.done`, checking
+     only for `null` and `undefined`, so a primitive iterator result was
+     accepted (one whose prototype exposes `done` ended the iteration). Web
+     IDL's sequence conversion uses `IteratorNext`, which throws a `TypeError`
+     for a result that is not an Object before reading `done`; the constructor
+     now does too. A function is an Object and stays accepted (Ende's
+     correction of the pull request, with a test).
+     - User-facing note: an iterable whose `next()` returns a primitive makes
+       `new URLSearchParams(it)` throw a `TypeError`.
+     - Tests: `url_search_params_test.ts`'s
+       `urlSearchParamsRejectsNonObjectIteratorResult` (fails on
+       3.0.0-denext.22) and `urlSearchParamsAcceptsFunctionIteratorResult`.
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -15754,7 +15771,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408) are what the
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
