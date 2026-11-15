@@ -15435,6 +15435,30 @@ where the changes are discussed.
        the module ran once).
      - Node tests enabled: none; no Node API changes.
 
+394. **`fix`: a `.env` or `.npmrc` file that starts with a UTF-8 BOM keeps its
+     first entry** (port of theende/ende 9f6ed291b1, MIT, plus the `.npmrc`
+     part of denoland/deno#37012 that Ende did not carry; upstream
+     denoland/deno#36701; `libs/dotenv/lib.rs`, `libs/npmrc/ini.rs`). An editor
+     that saves a `.env` file with a byte order mark (Notepad, several Windows
+     tools) made the BOM part of the first key, so `--env-file` (and the env
+     file `deno compile` embeds) set `﻿FOO` instead of `FOO`; `.npmrc`'s
+     ini parser had the same bug. One leading BOM is now stripped where file
+     content enters each parser; a second BOM, or one inside a value, is
+     content and stays. Not carried: the pull request's
+     `process.loadEnvFile()` hunk, which its own second commit notes differs
+     from Node (Node keeps the BOM there); `node:util.parseEnv()` takes a
+     string and keeps the BOM, as in Node, and a test now says so.
+     - User-facing note: `--env-file` and `.npmrc` read a file saved with a
+       UTF-8 BOM correctly.
+     - Tests: the `run::env_file::bom` spec (the first variable is `undefined`
+       on 3.0.0-denext.22); `deno_dotenv`'s `file_content_strips_leading_bom`
+       and `file_content_strips_only_one_leading_bom`; `deno_npmrc`'s
+       `ini::test::strips_leading_bom` and `strips_only_one_leading_bom`;
+       `unit_node/util_test.ts`'s `[util] parseEnv() keeps a leading BOM like
+       Node`.
+     - Node tests enabled: none; `process.loadEnvFile()` and
+       `util.parseEnv()` are unchanged.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -15442,7 +15466,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393) are what the
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
