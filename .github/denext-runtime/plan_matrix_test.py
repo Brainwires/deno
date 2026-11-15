@@ -475,8 +475,10 @@ class PoolFree(unittest.TestCase):
 
 
 class MacosCap(unittest.TestCase):
-    """At most MACOS_CAP (default 3) macOS jobs go to GitHub's images; past
-    it a macOS job waits for its pool (as the shared picker's macos-cap)."""
+    """At most MACOS_CAP (default 3) macOS jobs OVERFLOW to GitHub's images (a
+    leg with a pool that had no free slot); past it a macOS job waits for a
+    pool that is merely busy (as the shared picker's macos-cap). Pool-less
+    legs take the image and never count; a blocked pool is never waited on."""
 
     FULL = json.dumps({"denext-macos-arm64": 0, "denext-macos-x64": 0})
 
@@ -494,21 +496,21 @@ class MacosCap(unittest.TestCase):
     def test_default_cap_is_three(self):
         m = self.plan(POOL_FREE=self.FULL)
         arm, x64 = m["aarch64-apple-darwin"], m["x86_64-apple-darwin"]
-        # The first three that would overflow go to GitHub: arm64's denort and
-        # denort bin, and x86_64's laufey (no pool: always the image).
+        # The first three overflows go to GitHub: arm64's denort and denort
+        # bin, and x86_64's denort bin (the longest chain first).
         self.assertEqual(arm["runs_on"]["denort"], "macos-15")
         self.assertEqual(arm["runs_on"]["denort_bin"], "macos-15")
-        self.assertEqual(x64["runs_on"]["laufey"], "macos-15-intel")
-        # The rest wait for their pool.
+        self.assertEqual(x64["runs_on"]["denort_bin"], "macos-15-intel")
+        # The rest wait for their (merely busy) pool.
         self.assertEqual(on_pool(arm), ["cli", "e2e_fork", "package"])
-        self.assertEqual(on_pool(x64), ["cli", "denort", "denort_bin"])
-        # Never forced onto a pool: the arm64 laufey leg (no pool) and
-        # x86_64's package and e2e_fork (no GUI session on mac-x64); they
-        # count toward the cap all the same.
+        self.assertEqual(on_pool(x64), ["cli", "denort"])
+        # Pool-less legs take the image and do not count: both laufey legs
+        # and x86_64's package and e2e_fork (no GUI session on mac-x64).
         self.assertEqual(arm["runs_on"]["laufey"], "macos-15")
+        self.assertEqual(x64["runs_on"]["laufey"], "macos-15-intel")
         self.assertEqual(x64["runs_on"]["package"], "macos-15-intel")
         self.assertEqual(x64["runs_on"]["e2e_fork"], "macos-15-intel")
-        self.assertEqual(self.hosted(m), 6)
+        self.assertEqual(self.hosted(m), 7)  # 3 overflows + 4 pool-less
 
     def test_garbage_cap_is_three(self):
         want = self.plan(POOL_FREE=self.FULL)
@@ -549,10 +551,52 @@ class MacosCap(unittest.TestCase):
             "RUNNER_MACOS_X64": POOLS["RUNNER_MACOS_X64"], **env}))
         self.assertEqual(on_pool(m["x86_64-unknown-linux-gnu"]), [])
         x64 = m["x86_64-apple-darwin"]
-        # One macOS leg on GitHub (x86_64's laufey, first in order), then the
-        # build legs wait for mac-x64.
+        # x86_64's laufey has no pool (the image, not counted); one overflow
+        # (denort bin), then denort and cli wait for mac-x64.
         self.assertEqual(x64["runs_on"]["laufey"], "macos-15-intel")
-        self.assertEqual(on_pool(x64), ["cli", "denort", "denort_bin"])
+        self.assertEqual(x64["runs_on"]["denort_bin"], "macos-15-intel")
+        self.assertEqual(on_pool(x64), ["cli", "denort"])
+
+    def test_run_43756144777_busy_mac_x64_two_x86_legs_go_to_github(self):
+        # denext.24 runtime run 43756144777: RUNNER_MACOS_ARM names an image (the
+        # arm64 legs are pool-less), mac-x64 is busy 1/1 with another run's jobs
+        # queued on it (the picker's free: 0). Before the fix the three pool-less
+        # arm64 legs spent the cap and both x86_64 denort legs were forced onto
+        # mac-x64; now both take GitHub's image.
+        m = by_target(plan_matrix.plan({
+            "TARGETS": "all", "RUNNER_MACOS_ARM": "macos-latest",
+            "RUNNER_MACOS_X64": POOLS["RUNNER_MACOS_X64"],
+            "POOL_FREE": json.dumps({"denext-macos-x64": 0}), "MACOS_CAP": "3"}))
+        x64 = m["x86_64-apple-darwin"]
+        self.assertEqual(x64["runs_on"]["denort"], "macos-15-intel")
+        self.assertEqual(x64["runs_on"]["denort_bin"], "macos-15-intel")
+        self.assertEqual(on_pool(m["aarch64-apple-darwin"]), [])
+
+    def test_pool_less_legs_never_spend_the_cap(self):
+        m = by_target(plan_matrix.plan({
+            "TARGETS": "all", "RUNNER_MACOS_ARM": "macos-latest",
+            "RUNNER_MACOS_X64": POOLS["RUNNER_MACOS_X64"],
+            "POOL_FREE": json.dumps({"denext-macos-x64": 0}), "MACOS_CAP": "2"}))
+        x64 = m["x86_64-apple-darwin"]
+        # the two overflows the cap allows are x86_64's own build legs
+        self.assertEqual(x64["runs_on"]["denort_bin"], "macos-15-intel")
+        self.assertEqual(x64["runs_on"]["denort"], "macos-15-intel")
+        self.assertEqual(on_pool(x64), ["cli"])
+
+    def test_a_blocked_pool_is_never_waited_on(self):
+        # attempt 2 of that run: mac-x64 stalled in attempt 1 (POOL_BLOCKED).
+        for cap in ("0", "3"):
+            m = by_target(plan_matrix.plan({
+                "TARGETS": "all", "RUNNER_MACOS_ARM": POOLS["RUNNER_MACOS_ARM"],
+                "RUNNER_MACOS_X64": POOLS["RUNNER_MACOS_X64"],
+                "POOL_FREE": json.dumps({"denext-macos-arm64": 0, "denext-macos-x64": 0}),
+                "POOL_BLOCKED": json.dumps(["denext-macos-x64"]), "MACOS_CAP": cap}))
+            self.assertEqual(on_pool(m["x86_64-apple-darwin"]), [], cap)
+
+    def test_garbage_blocked_is_ignored(self):
+        want = self.plan(POOL_FREE=self.FULL)
+        for v in ("x", "{}", "[1]"):
+            self.assertEqual(self.plan(POOL_FREE=self.FULL, POOL_BLOCKED=v), want, v)
 
 
 def job_block(text, job):
@@ -615,6 +659,7 @@ class Workflow(unittest.TestCase):
         setup = job_block(self.text, "setup")
         self.assertNotIn("pick_runner", setup)
         self.assertIn("POOL_FREE: ${{ steps.pools.outputs.free }}", setup)
+        self.assertIn("POOL_BLOCKED: ${{ steps.pools.outputs.blocked }}", setup)
         self.assertIn("MACOS_CAP: '3'", setup)
         self.assertIn("POOL_HEALTH: ${{ vars.DENEXT_POOL_HEALTH }}", setup)
         self.assertIn("SKIP_JOBS:", setup)
