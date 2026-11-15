@@ -471,20 +471,18 @@ pub fn check_compiled(
   Ok(resolution)
 }
 
-/// `DENO_KERNEL_SANDBOX`, read once. Call [`snapshot_env_override`] before
-/// any `--env-file` is loaded so an env file can't set it.
+/// `DENO_KERNEL_SANDBOX` as the CLI read it at startup.
 static ENV_OVERRIDE: OnceLock<Option<String>> = OnceLock::new();
 
-/// Reads `DENO_KERNEL_SANDBOX` now, before `--env-file` loading. Later calls
-/// return the first reading.
-pub fn snapshot_env_override() {
-  ENV_OVERRIDE.get_or_init(|| std::env::var(KERNEL_SANDBOX_ENV_VAR).ok());
+/// Records `DENO_KERNEL_SANDBOX`, read by the CLI before any `--env-file` is
+/// loaded so an env file can't set it. Later calls keep the first value.
+pub fn snapshot_env_override(value: Option<String>) {
+  let _ = ENV_OVERRIDE.set(value);
 }
 
 /// The break-glass override: `Ok(None)` when unset, `Ok(Some(off|warn))`, or
 /// the raw value when it is anything else (the caller warns and ignores it).
 pub fn env_override() -> Result<Option<KernelSandboxMode>, String> {
-  snapshot_env_override();
   match ENV_OVERRIDE.get().and_then(|v| v.as_deref()) {
     None | Some("") => Ok(None),
     Some("off") => Ok(Some(KernelSandboxMode::Off)),
