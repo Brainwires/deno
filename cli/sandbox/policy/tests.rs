@@ -7,6 +7,7 @@
 use std::path::Path;
 use std::path::PathBuf;
 
+use deno_core::serde_json;
 use deno_lib::kernel_sandbox::KernelSandboxMode;
 use deno_runtime::deno_permissions::PermissionsOptions;
 use pretty_assertions::assert_eq;

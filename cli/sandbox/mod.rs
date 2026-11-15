@@ -22,6 +22,7 @@ use std::sync::Once;
 
 use deno_core::anyhow::bail;
 use deno_core::error::AnyError;
+use deno_core::serde_json;
 use deno_lib::kernel_sandbox::AutoPlan;
 use deno_lib::kernel_sandbox::KERNEL_SANDBOX_ENV_VAR;
 use deno_lib::kernel_sandbox::KernelSandboxMode;

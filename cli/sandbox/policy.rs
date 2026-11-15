@@ -31,6 +31,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use deno_lib::kernel_sandbox::KernelSandboxMode;
+use deno_core::serde_json;
 use deno_path_util::normalize_path;
 use deno_runtime::deno_permissions::Host;
 use deno_runtime::deno_permissions::NetDescriptor;
@@ -1447,6 +1448,10 @@ impl<'a> Compiler<'a> {
         None,
       );
     }
+    let os = self.os();
+    let shape = self.shape;
+    let deny_only = self.deny_only;
+    let implicit = self.implicit_set().clone();
     let mut gaps = self.gaps;
     gaps.sort_by(|a, b| {
       (a.class, &a.rule, &a.detail).cmp(&(b.class, &b.rule, &b.detail))
@@ -1455,9 +1460,9 @@ impl<'a> Compiler<'a> {
     CompiledPolicy {
       policy: KernelPolicy {
         format: POLICY_FORMAT,
-        os: self.os(),
-        shape: self.shape,
-        deny_only: self.deny_only,
+        os,
+        shape,
+        deny_only,
         fs: FsRules {
           read,
           write,
@@ -1474,7 +1479,7 @@ impl<'a> Compiler<'a> {
         syscalls,
       },
       gaps,
-      implicit: self.implicit_set().clone(),
+      implicit,
     }
   }
 
