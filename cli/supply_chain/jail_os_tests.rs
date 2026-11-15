@@ -473,6 +473,7 @@ mod linux {
   // `bind` first and without one.
   #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
   #[test]
+  #[allow(clippy::print_stderr, reason = "test code: a skip note")]
   fn proxy_held_script_socket_filter() {
     if !super::super::sandbox_linux::can_confine_to_port() {
       eprintln!("skipped: no Landlock ABI 4 here");
