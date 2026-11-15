@@ -3079,7 +3079,8 @@ fn kernel_sandbox_flags() {
   assert_eq!(flags.permissions.kernel_sandbox, None);
   assert!(!flags.permissions.kernel_sandbox_report);
   for mode in ["off", "warn", "auto", "enforce", "broker"] {
-    for sub in ["run", "serve", "test", "bench", "eval", "compile"] {
+    // (`eval` implies `-A` and takes no permission flags)
+    for sub in ["run", "serve", "test", "bench", "compile"] {
       let arg = format!("--kernel-sandbox={mode}");
       let flags = flags_from_vec(svec!["deno", sub, arg, "script.ts"]).unwrap();
       assert_eq!(

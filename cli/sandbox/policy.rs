@@ -30,8 +30,8 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
 
-use deno_lib::kernel_sandbox::KernelSandboxMode;
 use deno_core::serde_json;
+use deno_lib::kernel_sandbox::KernelSandboxMode;
 use deno_path_util::normalize_path;
 use deno_runtime::deno_permissions::Host;
 use deno_runtime::deno_permissions::NetDescriptor;
