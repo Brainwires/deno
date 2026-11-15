@@ -15636,6 +15636,21 @@ where the changes are discussed.
        raw case.
      - Node tests enabled: none; no Node API changes.
 
+403. **`fix(core)`: an out-of-range source map line doesn't overflow** (port of
+     theende/ende b26fef6640, MIT, from denoland/deno#37068; upstream
+     denoland/deno#37044; `libs/core/source_map.rs`). `apply_source_map` added
+     1 to the token's source line and column. A malformed map (a negative
+     cumulative line) decodes to `u32::MAX`, and so do source-less segments
+     with sourcemap 9.3 and later: that panicked while formatting a stack trace
+     in a debug build and gave a wrong line in a release build. A location
+     that would overflow is now left as it was.
+     - User-facing note: a stack trace through a module with a malformed
+       source map keeps the generated location instead of a bogus line.
+     - Tests: `deno_core`'s
+       `source_map::tests::test_apply_source_map_out_of_range_src_line` (a map
+       whose `AADA` mapping moves the line to -1; panics on overflow before).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -15643,7 +15658,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397, 398, 401) are what the
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397, 398, 401, 403) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
