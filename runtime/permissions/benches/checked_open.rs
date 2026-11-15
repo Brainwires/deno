@@ -2,6 +2,7 @@
 
 //! The cost of a race-safe open against a plain one: a file five
 //! directories below an allowed root, opened by `File::open`, by
+//! `canonicalize` + `File::open` (today's scoped check, then the op), by
 //! `open_checked` (`openat2` on Linux), by `open_checked` with the component
 //! walk, and with a deny inside the root (the walk plus the post-open check).
 //! Root descriptors are cached by the scope, as in a running program.
@@ -36,6 +37,14 @@ fn bench(c: &mut criterion::Criterion) {
   let mut group = c.benchmark_group("open");
   group.bench_function("std_file_open", |b| {
     b.iter(|| std::fs::File::open(&file).unwrap())
+  });
+  // what a scoped grant costs today: the check resolves the path
+  // (`check_resolved_path`), then the op opens it by name
+  group.bench_function("std_canonicalize_then_open", |b| {
+    b.iter(|| {
+      let resolved = std::fs::canonicalize(&file).unwrap();
+      std::fs::File::open(resolved).unwrap()
+    })
   });
   group.bench_function("open_checked", |b| {
     b.iter(|| open_checked(&scoped, &file, &read).unwrap())

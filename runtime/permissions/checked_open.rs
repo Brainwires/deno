@@ -158,6 +158,7 @@ impl OpenScope {
 
   /// Whether a deny lies beneath `root` or covers it (then `openat2`
   /// can't hold it and the walk does).
+  #[cfg(target_os = "linux")]
   fn deny_touches(&self, root: &Path) -> bool {
     self
       .deny
@@ -1124,9 +1125,12 @@ enum RaceStage {
 }
 
 #[cfg(test)]
+type RaceHook = Box<dyn FnMut(RaceStage)>;
+
+#[cfg(test)]
 thread_local! {
-  static RACE_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(RaceStage)>>> =
-    std::cell::RefCell::new(None);
+  static RACE_HOOK: std::cell::RefCell<Option<RaceHook>> =
+    const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
