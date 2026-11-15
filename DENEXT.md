@@ -15519,6 +15519,31 @@ where the changes are discussed.
        only).
      - Node tests enabled: none known; `node:fs` reaches the same op.
 
+398. **`fix(ext/net,ext/fetch)`: `*.localhost` names resolve to the loopback
+     address** (port of theende/ende 0dd9c6c417, MIT; upstream
+     denoland/deno#36868; `ext/fetch/dns.rs`, `ext/net/resolve_addr.rs`,
+     `runtime/permissions/lib.rs`). RFC 6761 section 6.3 reserves the names
+     under `.localhost` for loopback, and browsers resolve `app.localhost` like
+     `localhost`. Deno passed these names to the system resolver, and glibc
+     without nss-myhostname (common in containers) sends them to DNS, so
+     `fetch("http://app.localhost:3000")` failed with "Name or service not
+     known". A subdomain of `localhost` (any case, with or without the
+     trailing dot) is now resolved as `localhost` in the fetch resolver (fetch,
+     WebSocket, every resolver kind), in `ext/net` (`Deno.connect`,
+     `connectTls`, `listen`, QUIC) and in the import address check, so the
+     resolved-address deny checks see the loopback address the connection
+     uses. Permissions still name the host as written (`--allow-net=
+     app.localhost`).
+     - User-facing note: `app.localhost` and other `*.localhost` names reach
+       the loopback address on every system, as in browsers.
+     - Tests: `deno_permissions`' `tests::localhost_subdomains`, `deno_net`'s
+       `resolve_addr::tests::localhost_subdomain_resolves_as_localhost` and
+       `deno_fetch`'s `dns::tests::localhost_subdomain_resolves_as_localhost`
+       (the resolver is asked for `localhost`, so they hold on macOS too,
+       whose resolver already knows these names).
+     - Node tests enabled: none; `node:net` and `node:dns` keep their own
+       lookups.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -15526,7 +15551,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397) are what the
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397, 398) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

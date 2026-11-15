@@ -6838,7 +6838,12 @@ impl PermissionsContainer {
     if let Some(ips) = self.resolved_import_hosts.lock().get(&key) {
       return ips.clone();
     }
-    let ips = std::net::ToSocketAddrs::to_socket_addrs(&(host, port))
+    let lookup_host = if is_localhost_subdomain(host) {
+      "localhost"
+    } else {
+      host
+    };
+    let ips = std::net::ToSocketAddrs::to_socket_addrs(&(lookup_host, port))
       .map(|addrs| addrs.map(|addr| addr.ip()).collect::<Vec<_>>())
       .unwrap_or_default();
     self.resolved_import_hosts.lock().insert(key, ips.clone());
@@ -8058,6 +8063,17 @@ pub fn mark_standalone() {
 
 pub fn is_standalone() -> bool {
   IS_STANDALONE.is_raised()
+}
+
+/// Whether `host` is a subdomain of `localhost`, such as `app.localhost`.
+///
+/// RFC 6761 section 6.3 reserves these names for the loopback address, and
+/// browsers resolve them like `localhost`. Not every system resolver does
+/// (glibc without nss-myhostname sends them to DNS), so Deno resolves
+/// `localhost` in their place.
+pub fn is_localhost_subdomain(host: &str) -> bool {
+  let name = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
+  name.len() > ".localhost".len() && name.ends_with(".localhost")
 }
 
 #[cfg(test)]
@@ -15939,5 +15955,27 @@ mod tests {
         .check_net_listen(&("0.0.0.0", Some(8080)), "api()")
         .is_ok()
     );
+  }
+
+  #[test]
+  fn localhost_subdomains() {
+    for host in [
+      "app.localhost",
+      "a.b.localhost",
+      "App.LocalHost",
+      "x.localhost.",
+    ] {
+      assert!(is_localhost_subdomain(host), "{host}");
+    }
+    for host in [
+      "localhost",
+      "localhost.",
+      ".localhost",
+      "localhost.com",
+      "notlocalhost",
+      "example.com",
+    ] {
+      assert!(!is_localhost_subdomain(host), "{host}");
+    }
   }
 }
