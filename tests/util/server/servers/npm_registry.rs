@@ -550,63 +550,163 @@ async fn download_npm_registry_file(
 
 const PREBUILT_URL: &str = "https://raw.githubusercontent.com/denoland/deno_third_party/d074edee0f4199f8226e1f87b88ccb7956d94454/prebuilt/";
 
-async fn ensure_esbuild_prebuilt() -> Result<(), anyhow::Error> {
-  let bin_name = match (std::env::consts::ARCH, std::env::consts::OS) {
-    ("x86_64", "linux" | "macos" | "apple") => "esbuild-x64",
-    ("aarch64", "linux" | "macos" | "apple") => "esbuild-aarch64",
-    ("x86_64", "windows") => "esbuild-x64.exe",
-    ("aarch64", "windows") => "esbuild-aarch64.exe",
-    _ => return Err(anyhow::anyhow!("unsupported platform")),
-  };
+/// The prebuilt esbuild for this platform: its folder under
+/// `third_party/prebuilt` (and `PREBUILT_URL`), its file name and the
+/// SHA-256 of that file at `PREBUILT_URL`'s commit.
+fn esbuild_prebuilt_info(
+  arch: &str,
+  os: &str,
+) -> Option<(&'static str, &'static str, &'static str)> {
+  Some(match (os, arch) {
+    ("linux", "x86_64") => (
+      "linux64",
+      "esbuild-x64",
+      "3331e0b23c99d93d9a39e436a4838de40ca1c95ac3bcbd9874ba169d8545b634",
+    ),
+    ("linux", "aarch64") => (
+      "linux64",
+      "esbuild-aarch64",
+      "d6d656d9326ce1c55c01f73604a3cffda35c63cce60016e9ed795ac91cd1e67d",
+    ),
+    ("macos" | "apple", "x86_64") => (
+      "mac",
+      "esbuild-x64",
+      "e7b2a105f88836f1e080a76180e5cd8e59d1c22f6575d63f5a77a104954c427e",
+    ),
+    ("macos" | "apple", "aarch64") => (
+      "mac",
+      "esbuild-aarch64",
+      "58d144357454bca840167171380785b133b1e5e682d0c51afa8c80158bfd3f8a",
+    ),
+    ("windows", "x86_64") => (
+      "win",
+      "esbuild-x64.exe",
+      "889543031385fb79a28b09a5611a3a03f913beb5a608c7de29390c13f1030994",
+    ),
+    ("windows", "aarch64") => (
+      "win",
+      "esbuild-aarch64.exe",
+      "34dd62536675871311e6e0d2bf9917f5671f3ecee695205dc4eaf649947348e7",
+    ),
+    _ => return None,
+  })
+}
 
-  let folder = match std::env::consts::OS {
-    "linux" => "linux64",
-    "windows" => "win",
-    "macos" | "apple" => "mac",
-    _ => return Err(anyhow::anyhow!("unsupported platform")),
+fn sha256_hex(bytes: &[u8]) -> String {
+  sha2::Sha256::digest(bytes)
+    .iter()
+    .map(|b| format!("{b:02x}"))
+    .collect()
+}
+
+/// Whether `bytes` are the pinned binary; the error names the file, the
+/// expected and the actual digest and size.
+fn verify_esbuild_prebuilt(
+  what: &str,
+  bytes: &[u8],
+  expected_sha256: &str,
+) -> Result<(), anyhow::Error> {
+  let actual = sha256_hex(bytes);
+  if actual == expected_sha256 {
+    Ok(())
+  } else {
+    Err(anyhow::anyhow!(
+      "{what}: SHA-256 {actual} ({} bytes), expected {expected_sha256}",
+      bytes.len()
+    ))
+  }
+}
+
+/// The prebuilt esbuild the `@esbuild/*` test packages are packed from
+/// (`npm::create_esbuild_package`). Every npm server future calls this at
+/// startup, all at once: the work runs once per process, the download must
+/// answer 200 and match the pinned SHA-256 (a file already on disk that
+/// doesn't match is downloaded again), and the binary reaches its path only
+/// by renaming a complete, verified temporary file.
+async fn ensure_esbuild_prebuilt() -> Result<(), anyhow::Error> {
+  static PREBUILT: tokio::sync::OnceCell<()> =
+    tokio::sync::OnceCell::const_new();
+  PREBUILT
+    .get_or_try_init(download_esbuild_prebuilt)
+    .await
+    .map(|_| ())
+}
+
+async fn download_esbuild_prebuilt() -> Result<(), anyhow::Error> {
+  let Some((folder, bin_name, sha256)) =
+    esbuild_prebuilt_info(std::env::consts::ARCH, std::env::consts::OS)
+  else {
+    return Err(anyhow::anyhow!("unsupported platform"));
   };
-  let esbuild_prebuilt = root_path()
+  let esbuild_prebuilt: PathBuf = root_path()
     .join("third_party/prebuilt")
     .join(folder)
-    .join(bin_name);
-  if esbuild_prebuilt.exists() {
-    return Ok(());
+    .join(bin_name)
+    .to_path_buf();
+  if let Ok(existing) = tokio::fs::read(&esbuild_prebuilt).await {
+    match verify_esbuild_prebuilt(
+      &esbuild_prebuilt.display().to_string(),
+      &existing,
+      sha256,
+    ) {
+      Ok(()) => return Ok(()),
+      Err(err) => eprintln!("{err:#}; downloading it again"),
+    }
   }
   let url = format!("{PREBUILT_URL}{folder}/{bin_name}");
   let mut attempt = 0;
   let bytes = loop {
     attempt += 1;
     let err = match download_url(&url).await {
-      Ok(bytes) => break bytes,
+      Ok(bytes) => match verify_esbuild_prebuilt(&url, &bytes, sha256) {
+        Ok(()) => break bytes,
+        Err(err) => err,
+      },
       Err(e) => e,
     };
     if attempt >= 3 {
       return Err(anyhow::anyhow!(
-        "failed to download {url} after 3 attempts: {err}"
+        "failed to download {url} after 3 attempts: {err:#}"
       ));
     }
     eprintln!(
-      "failed to download {url} (attempt {attempt}/3): {err}, retrying..."
+      "failed to download {url} (attempt {attempt}/3): {err:#}, retrying..."
     );
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
   };
 
-  tokio::fs::create_dir_all(esbuild_prebuilt.parent()).await?;
-  tokio::fs::write(&esbuild_prebuilt, bytes).await?;
-
+  let dir = esbuild_prebuilt.parent().unwrap();
+  tokio::fs::create_dir_all(dir).await?;
+  // a temporary file beside it, then a rename: no reader (another server
+  // task, or a second test_server in the same checkout) sees a partial file
+  let tmp_path = dir.join(format!(".{bin_name}.{}.tmp", std::process::id()));
+  tokio::fs::write(&tmp_path, &bytes).await?;
   #[cfg(unix)]
   {
     use std::os::unix::fs::PermissionsExt;
-    let mut perms = tokio::fs::metadata(&esbuild_prebuilt).await?.permissions();
-    perms.set_mode(0o755); // rwxr-xr-x
-    tokio::fs::set_permissions(&esbuild_prebuilt, perms).await?;
+    tokio::fs::set_permissions(
+      &tmp_path,
+      std::fs::Permissions::from_mode(0o755), // rwxr-xr-x
+    )
+    .await?;
   }
-
+  if let Err(err) = tokio::fs::rename(&tmp_path, &esbuild_prebuilt).await {
+    let _ = tokio::fs::remove_file(&tmp_path).await;
+    return Err(anyhow::anyhow!(
+      "failed to move {} into place at {}: {err}",
+      tmp_path.display(),
+      esbuild_prebuilt.display()
+    ));
+  }
   Ok(())
 }
 
 async fn download_url(url: &str) -> Result<bytes::Bytes, anyhow::Error> {
   let response = reqwest::get(url).await?;
+  let status = response.status();
+  if !status.is_success() {
+    return Err(anyhow::anyhow!("{url} answered {status}"));
+  }
   Ok(response.bytes().await?)
 }
 
@@ -719,4 +819,39 @@ fn get_advisory_for_with_vuln3() -> serde_json::Value {
     "cves": ["CVE-2025-0003"],
     "cwe": ["CWE-79"]
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn esbuild_prebuilt_is_pinned_for_every_release_platform() {
+    for (os, arch) in [
+      ("linux", "x86_64"),
+      ("linux", "aarch64"),
+      ("macos", "x86_64"),
+      ("macos", "aarch64"),
+      ("windows", "x86_64"),
+      ("windows", "aarch64"),
+    ] {
+      let (_, _, sha256) = esbuild_prebuilt_info(arch, os).unwrap();
+      assert_eq!(sha256.len(), 64, "{os} {arch}");
+      assert!(sha256.bytes().all(|b| b.is_ascii_hexdigit()), "{os} {arch}");
+    }
+    assert!(esbuild_prebuilt_info("riscv64", "linux").is_none());
+  }
+
+  #[test]
+  fn esbuild_prebuilt_mismatch_names_both_digests() {
+    let good = sha256_hex(b"esbuild");
+    assert!(verify_esbuild_prebuilt("x", b"esbuild", &good).is_ok());
+    let err = verify_esbuild_prebuilt("the-url", b"esbuil", &good)
+      .unwrap_err()
+      .to_string();
+    assert!(err.contains("the-url"), "{err}");
+    assert!(err.contains(&good), "{err}");
+    assert!(err.contains(&sha256_hex(b"esbuil")), "{err}");
+    assert!(err.contains("6 bytes"), "{err}");
+  }
 }
