@@ -15781,6 +15781,33 @@ where the changes are discussed.
        `integer_like_accepts_large_finite_radix_numbers`.
      - Node tests enabled: none; no Node API changes.
 
+411. **`fix(ext/web)`: `structuredClone` checks the transfer list first and
+     detaches buffers only on success** (port of theende/ende dc60cbbea7, MIT,
+     from denoland/deno#37122; upstream denoland/deno#37105;
+     `ext/web/13_message_port.js`, `libs/core/ops_builtin_v8.rs`).
+     `structuredClone(value, { transfer })` (and `postMessage` with a transfer
+     list) detached the transferred `ArrayBuffer`s before checking whether
+     serialization succeeded, so a throwing getter or an uncloneable value
+     left the caller's buffers detached; entries that aren't transferable
+     were rejected only after serializing (getters ran first and their errors
+     replaced the `DataCloneError`), and duplicate entries were not rejected
+     at all. As `StructuredSerializeWithTransfer` requires, duplicate and
+     non-transferable entries are now rejected first, then the value is
+     serialized, and the buffers are detached only once that succeeded; on
+     failure they stay attached and their backing stores leave the store
+     again. `op_serialize` also checks every buffer before registering any
+     (Ende's addition), so a non-detachable entry (a `WebAssembly.Memory`
+     buffer) doesn't strand the entries before it in the store.
+     - User-facing note: a `structuredClone` that throws leaves its transfer
+       list's buffers usable; a duplicate entry throws `DataCloneError`.
+     - Tests: `structured_clone_test.ts`'s `structuredClone validates the
+       transfer list before serializing` and `structuredClone doesn't transfer
+       buffers when it throws` (both fail on 3.0.0-denext.22). Ende's
+       neighbouring `CryptoKey` clone tests belong to a change not carried
+       here and are left out.
+     - Node tests enabled: none known; `node:worker_threads` messages go
+       through the same serializer (`v8.serialize` has its own).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -15788,7 +15815,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410) are what the
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
