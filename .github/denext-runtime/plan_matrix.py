@@ -77,12 +77,18 @@ variable (RUNNER_*_SLOTS, default 1). Then, the jobs in dependency order:
 - else it takes a free slot of its pool, if one is left;
 - else a free slot of its `runner_fallback` pool, if it has one;
 - else the image: on a pool it would only wait for a slot;
-- except a macOS job once MACOS_CAP (default 3) macOS jobs of this run went to
-  GitHub's images (GitHub runs about 5 macOS jobs at once for the whole org,
-  as the shared picker's macos-cap): it takes its pool and waits there. A
-  macOS job with no pool to wait on (x86_64-apple-darwin's package and
-  e2e_fork, which need a GUI session the mac-x64 pool lacks, and the macOS
-  laufey legs) stays on the image and counts toward the cap.
+- except a macOS job once MACOS_CAP (default 3) macOS jobs of this run
+  OVERFLOWED to GitHub's images (GitHub runs about 5 macOS jobs at once for
+  the whole org, as the shared picker's macos-cap): it waits on its first
+  pool that is merely busy. Only overflow counts: a leg with a pool that had
+  no free slot. A macOS job with no pool at all (the arm64 legs while
+  RUNNER_MACOS_ARM names an image, x86_64-apple-darwin's package and
+  e2e_fork, which need a GUI session the mac-x64 pool lacks, the macOS
+  laufey legs) takes the image and does not count. It never waits on a pool
+  the shared picker reports blocked (POOL_BLOCKED: unhealthy, paused,
+  unlisted, or stalled in the previous attempt): such a leg takes the image.
+  (denext.24 run 43756144777: three pool-less arm64 legs spent the cap, and
+  both x86_64 denort legs were then forced onto the busy, stalled mac-x64.)
 
 The jobs that start together (after setup) take the free slots first those
 with the longest chain of later jobs on the same pool (denort bin, whose cli
@@ -200,6 +206,16 @@ def picked_free(env):
     return value if isinstance(value, dict) else None
 
 
+def picked_blocked(env):
+    """POOL_BLOCKED (the shared picker's `blocked` output: labels that take no
+    job) as a set; empty when missing or unparsable."""
+    try:
+        value = json.loads(env.get("POOL_BLOCKED") or "[]")
+    except ValueError:
+        return set()
+    return {l for l in value if isinstance(l, str)} if isinstance(value, list) else set()
+
+
 def macos_cap(env):
     try:
         return max(0, int(env.get("MACOS_CAP") or DEFAULT_MACOS_CAP))
@@ -262,6 +278,7 @@ def allocate(targets, env):
     pools = fresh_pools(env.get("POOL_HEALTH"))
     picked = picked_free(env)
     cap = macos_cap(env)
+    blocked = picked_blocked(env)
     hosted_macos = 0
     jobs = [j for j in JOBS if j[0] not in skip]
     needs = {k: [n for n in ns if n not in skip] for k, _, ns in jobs}
@@ -310,10 +327,12 @@ def allocate(targets, env):
                     free[pool] -= 1
                     chosen = (pool, runner)
                     break
-        if chosen is None and t["os"].startswith("macos"):
-            if candidates and hosted_macos >= cap:
-                # GitHub's macOS share is spent: wait for the leg's own pool.
-                chosen = candidates[0]
+        if chosen is None and t["os"].startswith("macos") and candidates:
+            # an overflow (the leg had a pool, no slot). Past the cap, wait on a
+            # pool that is merely busy; never on a blocked one.
+            waitable = [c for c in candidates if c[0] not in blocked]
+            if hosted_macos >= cap and waitable:
+                chosen = waitable[0]
             else:
                 hosted_macos += 1
         if chosen is not None:
