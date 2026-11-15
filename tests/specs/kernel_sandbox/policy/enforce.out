@@ -1,0 +1,3 @@
+error: --kernel-sandbox=enforce refuses to start: the OS can't hold these rules here:
+[WILDCARD]  - --kernel-sandbox: no kernel enforcer for [WILDLINE] is built into this runtime yet: every rule is held by Deno's checks only
+Use --kernel-sandbox=warn to run with Deno's checks only, or --kernel-sandbox-report for the whole policy.

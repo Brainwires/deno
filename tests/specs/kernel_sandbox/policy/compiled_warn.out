@@ -1,0 +1,2 @@
+Warning kernel sandbox (warn, preview): nothing is refused; no kernel enforcer is built into this runtime, so every rule is held by Deno's checks only.
+hello

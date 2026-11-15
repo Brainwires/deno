@@ -215,19 +215,49 @@ impl PermissionsObject {
   }
 }
 
+/// denext: the reserved `kernelSandbox` key of deno.json `permissions` (not
+/// a permission set): the project's kernel-sandbox mode for every run, below
+/// `--kernel-sandbox` (DENEXT.md item 420).
+pub const KERNEL_SANDBOX_KEY: &str = "kernelSandbox";
+
+/// The values `permissions.kernelSandbox` accepts.
+pub const KERNEL_SANDBOX_CONFIG_VALUES: &[&str] =
+  &["off", "warn", "auto", "enforce", "broker"];
+
 #[derive(Clone, Debug, Default)]
 pub struct PermissionsConfig {
   pub sets: IndexMap<String, PermissionsObjectWithBase>,
+  /// denext: `permissions.kernelSandbox`, one of
+  /// [`KERNEL_SANDBOX_CONFIG_VALUES`] (checked when parsed).
+  pub kernel_sandbox: Option<String>,
 }
 
 impl PermissionsConfig {
   pub fn parse(
-    value: serde_json::Value,
+    mut value: serde_json::Value,
     base: &Url,
   ) -> Result<Self, serde_json::Error> {
+    let kernel_sandbox = match value
+      .as_object_mut()
+      .and_then(|map| map.remove(KERNEL_SANDBOX_KEY))
+    {
+      None => None,
+      Some(serde_json::Value::String(mode))
+        if KERNEL_SANDBOX_CONFIG_VALUES.contains(&mode.as_str()) =>
+      {
+        Some(mode)
+      }
+      Some(other) => {
+        return Err(<serde_json::Error as serde::de::Error>::custom(format!(
+          "invalid value {other} for \"permissions.{KERNEL_SANDBOX_KEY}\": expected one of \"{}\"",
+          KERNEL_SANDBOX_CONFIG_VALUES.join("\", \"")
+        )));
+      }
+    };
     let sets: IndexMap<String, PermissionsObject> =
       serde_json::from_value(value)?;
     Ok(Self {
+      kernel_sandbox,
       sets: sets
         .into_iter()
         .map(|(k, permissions)| {
@@ -255,6 +285,8 @@ impl PermissionsConfig {
 
   pub fn merge(self, member: Self) -> Self {
     let mut sets = self.sets;
+    // a member's own mode wins, as its sets do
+    let kernel_sandbox = member.kernel_sandbox.or(self.kernel_sandbox);
 
     for (key, value) in member.sets {
       // When the same key exists in the root and the member, we overwrite
@@ -265,7 +297,10 @@ impl PermissionsConfig {
       sets.insert(key, value);
     }
 
-    Self { sets }
+    Self {
+      sets,
+      kernel_sandbox,
+    }
   }
 }
 
@@ -275,6 +310,62 @@ mod test {
   use serde_json::json;
 
   use super::*;
+
+  #[test]
+  fn kernel_sandbox_key() {
+    let base = Url::parse("file:///project/deno.json").unwrap();
+    let config = PermissionsConfig::parse(
+      json!({ "kernelSandbox": "warn", "default": { "read": true } }),
+      &base,
+    )
+    .unwrap();
+    assert_eq!(config.kernel_sandbox.as_deref(), Some("warn"));
+    // the reserved key is not a permission set
+    assert_eq!(config.sets.keys().collect::<Vec<_>>(), vec!["default"]);
+    for value in KERNEL_SANDBOX_CONFIG_VALUES {
+      let config =
+        PermissionsConfig::parse(json!({ "kernelSandbox": value }), &base)
+          .unwrap();
+      assert_eq!(config.kernel_sandbox.as_deref(), Some(*value));
+    }
+    for bad in [json!("on"), json!(true), json!(["warn"])] {
+      let err =
+        PermissionsConfig::parse(json!({ "kernelSandbox": bad }), &base)
+          .unwrap_err();
+      assert!(
+        err.to_string().contains("permissions.kernelSandbox"),
+        "{err}"
+      );
+    }
+    assert_eq!(
+      PermissionsConfig::parse(json!({}), &base)
+        .unwrap()
+        .kernel_sandbox,
+      None
+    );
+  }
+
+  #[test]
+  fn kernel_sandbox_member_wins() {
+    let base = Url::parse("file:///project/deno.json").unwrap();
+    let root =
+      PermissionsConfig::parse(json!({ "kernelSandbox": "enforce" }), &base)
+        .unwrap();
+    let member =
+      PermissionsConfig::parse(json!({ "kernelSandbox": "warn" }), &base)
+        .unwrap();
+    assert_eq!(
+      root.clone().merge(member).kernel_sandbox.as_deref(),
+      Some("warn")
+    );
+    assert_eq!(
+      root
+        .merge(PermissionsConfig::default())
+        .kernel_sandbox
+        .as_deref(),
+      Some("enforce")
+    );
+  }
 
   #[test]
   fn deserialize() {

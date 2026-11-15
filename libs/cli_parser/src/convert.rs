@@ -615,6 +615,12 @@ fn permission_args_parse(
   perm_flag!("allow-run", flags.permissions.allow_run);
   perm_flag!("deny-run", flags.permissions.deny_run);
   perm_flag!("clean-run-env", flags.permissions.clean_run_env);
+  if let Some(mode) = result.get_one("kernel-sandbox") {
+    flags.permissions.kernel_sandbox = Some(mode.to_string());
+  }
+  if result.get_bool("kernel-sandbox-report") {
+    flags.permissions.kernel_sandbox_report = true;
+  }
   perm_flag!("allow-sys", flags.permissions.allow_sys);
   perm_flag!("deny-sys", flags.permissions.deny_sys);
   path_perm_flag!("allow-ffi", flags.permissions.allow_ffi);
@@ -2610,6 +2616,8 @@ fn install_parse(
       "allow-run",
       "deny-run",
       "clean-run-env",
+      "kernel-sandbox",
+      "kernel-sandbox-report",
       "allow-sys",
       "deny-sys",
       "allow-ffi",

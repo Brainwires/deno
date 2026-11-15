@@ -287,7 +287,7 @@ impl<'a> Writer<'a> {
   }
 
   #[cfg(debug_assertions)]
-  fn items_cloned(&self) -> Vec<WriteItem> {
+  fn items_cloned(&self) -> Vec<WriteItem<'_>> {
     let mut items = Vec::new();
     let mut current_item = self.state.items;
     while let Some(item) = current_item {
@@ -385,7 +385,7 @@ mod test {
     writer.write(string_container);
   }
 
-  fn create_writer(bump: &BumpAllocator) -> Writer {
+  fn create_writer(bump: &BumpAllocator) -> Writer<'_> {
     Writer::new(
       bump,
       WriterOptions {

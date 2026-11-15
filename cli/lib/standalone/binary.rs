@@ -175,6 +175,13 @@ pub struct Metadata {
   /// `--max-time` at compile time, in seconds.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub max_time: Option<u64>,
+  /// denext: `deno compile --kernel-sandbox` (else deno.json
+  /// `permissions.kernelSandbox`): the program's kernel-sandbox mode, its
+  /// author's choice. The runtime ignores `DENO_KERNEL_SANDBOX` and any flag
+  /// for it. `None` (absent, or a binary from a CLI that predates the field)
+  /// is `auto` (DENEXT.md item 420).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub kernel_sandbox: Option<crate::kernel_sandbox::KernelSandboxMode>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]

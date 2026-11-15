@@ -1,0 +1,1 @@
+error: invalid value 'strict' for '--kernel-sandbox': possible values: off, warn, auto, enforce, broker

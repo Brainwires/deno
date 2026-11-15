@@ -1,0 +1,12 @@
+{
+[WILDCARD]
+  "kernelSandbox": {
+    "preview": true,
+    "mode": "warn",
+    "source": "config",
+    "effective": "warn",
+    "wouldApply": "off",
+    "reason": "as requested",
+[WILDCARD]
+  }
+}

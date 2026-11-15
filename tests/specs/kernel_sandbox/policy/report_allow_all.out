@@ -1,0 +1,15 @@
+kernel sandbox (preview): auto (default); applies: off; would apply: off
+  why: --allow-all with no deny rule leaves nothing to narrow
+  permission set: fixed (no prompt can widen it)
+  machine: [WILDLINE]
+  policy [WILDLINE]
+    read:       all
+    deny read:  none
+    write:      all
+    deny write: none
+    exec:       any readable program (children inherit these rules)
+    load code:  all
+    net:        open
+    unix:       [WILDLINE]
+[WILDCARD]
+hello

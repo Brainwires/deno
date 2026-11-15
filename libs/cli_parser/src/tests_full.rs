@@ -3071,6 +3071,61 @@ fn cache_multiple() {
   );
 }
 
+// denext: `--kernel-sandbox` and `--kernel-sandbox-report` (DENEXT.md item
+// 420).
+#[test]
+fn kernel_sandbox_flags() {
+  let flags = flags_from_vec(svec!["deno", "run", "script.ts"]).unwrap();
+  assert_eq!(flags.permissions.kernel_sandbox, None);
+  assert!(!flags.permissions.kernel_sandbox_report);
+  for mode in ["off", "warn", "auto", "enforce", "broker"] {
+    // (`eval` implies `-A` and takes no permission flags)
+    for sub in ["run", "serve", "test", "bench", "compile"] {
+      let arg = format!("--kernel-sandbox={mode}");
+      let flags = flags_from_vec(svec!["deno", sub, arg, "script.ts"]).unwrap();
+      assert_eq!(
+        flags.permissions.kernel_sandbox.as_deref(),
+        Some(mode),
+        "{sub}"
+      );
+      // not a grant
+      assert!(!flags.permissions.has_permission(), "{sub}");
+    }
+  }
+  let flags = flags_from_vec(svec![
+    "deno",
+    "run",
+    "--kernel-sandbox-report",
+    "--kernel-sandbox=warn",
+    "script.ts"
+  ])
+  .unwrap();
+  assert!(flags.permissions.kernel_sandbox_report);
+  assert!(!flags.permissions.has_permission());
+  // an unknown mode, and a mode without `=`
+  let err = flags_from_vec(svec![
+    "deno",
+    "run",
+    "--kernel-sandbox=strict",
+    "script.ts"
+  ])
+  .unwrap_err();
+  assert!(
+    err
+      .to_string()
+      .contains("possible values: off, warn, auto, enforce, broker"),
+    "{err}"
+  );
+  assert!(
+    flags_from_vec(svec!["deno", "run", "--kernel-sandbox", "script.ts"])
+      .is_err()
+  );
+  // only for a global install
+  assert!(
+    flags_from_vec(svec!["deno", "install", "--kernel-sandbox=warn"]).is_err()
+  );
+}
+
 // denext: `--clean-run-env`.
 #[test]
 fn clean_run_env_flag() {

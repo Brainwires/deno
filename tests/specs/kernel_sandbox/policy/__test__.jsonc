@@ -1,0 +1,104 @@
+// denext (DENEXT.md item 420): the kernel sandbox, an opt-in preview. `auto`
+// (the default) applies nothing; `warn` reports; `enforce` / `broker` refuse
+// to start while no enforcer is built in. `--kernel-sandbox-report` prints
+// the mode, the policy and its gaps, then runs the program.
+{
+  "tempDir": true,
+  "tests": {
+    "default_runs_unchanged": {
+      "args": "run main.ts",
+      "output": "hello.out"
+    },
+    "report": {
+      "args": "run --kernel-sandbox-report --allow-read=. main.ts",
+      "output": "report.out"
+    },
+    "report_allow_all": {
+      "args": "run -A --kernel-sandbox-report main.ts",
+      "output": "report_allow_all.out"
+    },
+    "report_explicit_auto": {
+      "args": "run --kernel-sandbox=auto --kernel-sandbox-report main.ts",
+      "output": "report_explicit_auto.out"
+    },
+    "warn": {
+      "args": "run --kernel-sandbox=warn main.ts",
+      "output": "warn.out"
+    },
+    "off": {
+      "args": "run --kernel-sandbox=off --kernel-sandbox-report main.ts",
+      "output": "report_off.out"
+    },
+    "enforce_refuses": {
+      "args": "run --kernel-sandbox=enforce main.ts",
+      "output": "enforce.out",
+      "exitCode": 1
+    },
+    "broker_refuses": {
+      "args": "run --kernel-sandbox=broker main.ts",
+      "output": "broker.out",
+      "exitCode": 1
+    },
+    "invalid_value": {
+      "args": "run --kernel-sandbox=strict main.ts",
+      "output": "invalid_value.out",
+      "exitCode": 1
+    },
+    "config": {
+      "cwd": "config",
+      "args": "run main.ts",
+      "output": "warn.out"
+    },
+    "flag_beats_config": {
+      "cwd": "config",
+      "args": "run --kernel-sandbox=off main.ts",
+      "output": "hello.out"
+    },
+    "env_lowers_config": {
+      "cwd": "config",
+      "envs": { "DENO_KERNEL_SANDBOX": "off" },
+      "args": "run main.ts",
+      "output": "hello.out"
+    },
+    "env_never_raises": {
+      "envs": { "DENO_KERNEL_SANDBOX": "enforce" },
+      "args": "run main.ts",
+      "output": "env_ignored.out"
+    },
+    "config_invalid": {
+      "cwd": "config_invalid",
+      "args": "run main.ts",
+      "output": "config_invalid.out",
+      "exitCode": 1
+    },
+    "info_json_default": {
+      "args": "info --json",
+      "output": "info_default.out"
+    },
+    "info_json_config": {
+      "cwd": "config",
+      "args": "info --json",
+      "output": "info_config.out"
+    },
+    "compile_refuses_enforce": {
+      "args": "compile --kernel-sandbox=enforce --output out main.ts",
+      "output": "compile_enforce.out",
+      "exitCode": 1
+    },
+    "compile_bakes_warn": {
+      "steps": [
+        {
+          "args": "compile --kernel-sandbox=warn --output out main.ts",
+          "output": "[WILDCARD]"
+        },
+        {
+          // the binary's mode is its author's: the variable is ignored
+          "envs": { "DENO_KERNEL_SANDBOX": "off" },
+          "commandName": "./out",
+          "args": [],
+          "output": "compiled_warn.out"
+        }
+      ]
+    }
+  }
+}

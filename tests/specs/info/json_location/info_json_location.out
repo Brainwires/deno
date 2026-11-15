@@ -11,5 +11,8 @@
   "lifecycleJail": {
 [WILDCARD]
   },
+  "kernelSandbox": {
+[WILDCARD]
+  },
   "localStorage": "[WILDCARD]location_data[WILDCARD]local_storage"
 }

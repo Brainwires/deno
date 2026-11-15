@@ -64,6 +64,11 @@ Docs: https://docs.deno.com/go/permissions
                                             --ignore-env  |  --ignore-env=\"PORT,HOME,PATH\"
   --ignore-read[=<PATH>...]                 Ignore file system read access with a `NotFound` error. Optionally specify ignored paths.
                                             --ignore-read  |  --ignore-read=\"/etc,/var/log.txt\"
+  --kernel-sandbox=<MODE>                   (Preview) Kernel sandbox mode: off, warn, auto (default), enforce or broker. Holds native code (FFI, Node-API addons) and subprocesses to the granted permissions with the OS (Landlock and seccomp on Linux, Seatbelt on macOS) once the permission set is fixed. Not yet enforced by this runtime: enforce and broker refuse to start.
+                                            --kernel-sandbox=warn  |  --kernel-sandbox=off
+  --kernel-sandbox-report                   (Preview) Print the kernel sandbox mode, the policy it would apply and the rules the OS can't hold, then run.
+  DENO_KERNEL_SANDBOX                       Environmental variable to lower the kernel sandbox mode without editing the command (off or warn only; ignored by compiled programs and when set by --env-file).
+                                            DENO_KERNEL_SANDBOX=off deno run main.ts
   DENO_TRACE_PERMISSIONS                    Environmental variable to enable stack traces in permission prompts.
                                             DENO_TRACE_PERMISSIONS=1 deno run main.ts
   DENO_AUDIT_PERMISSIONS                    Environmental variable to audit all permissions accesses. Set to a file path for JSONL output, or \"otel\" to emit as OpenTelemetry log events via the configured OTel exporter.

@@ -268,6 +268,9 @@ fn print_cache_info(
       // denext: what the OS confines npm lifecycle scripts here (DENEXT.md
       // item 124; denext's doctor reads it)
       "lifecycleJail": crate::supply_chain::jail::confinement(),
+      // denext: the kernel sandbox here, an opt-in preview (DENEXT.md item
+      // 420; denext's doctor reads it)
+      "kernelSandbox": crate::sandbox::info(factory.cli_options()?),
     });
 
     if location.is_some() {

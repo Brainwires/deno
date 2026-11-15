@@ -1514,6 +1514,13 @@
     "permissions": {
       "type": "object",
       "description": "Named permission sets that can be selected with -P/--permission-set or referenced in \"test\", \"bench\", or \"compile\" permissions. A special name \"default\" is used when -P is passed without a value.",
+      "properties": {
+        "kernelSandbox": {
+          "type": "string",
+          "enum": ["off", "warn", "auto", "enforce", "broker"],
+          "description": "The kernel sandbox mode for every run in this project (preview; --kernel-sandbox overrides it). \"auto\" (the default) applies what the OS can hold once the permission set is fixed; \"warn\" only reports; \"enforce\" refuses to start when a rule can't be held by the OS; \"broker\" adds a supervising process for the rules only it can hold; \"off\" disables the kernel layer. Not a permission set."
+        }
+      },
       "additionalProperties": { "$ref": "#/$defs/permissionSet" }
     },
     "patch": {

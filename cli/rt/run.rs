@@ -1752,6 +1752,13 @@ pub async fn run_with_options(
   // `DESKTOP_LOOPBACK_HOSTS` for why it is not port-scoped). Granting them up
   // front avoids forcing every `deno desktop` user to remember `-A`.
   let has_desktop = op_state_init.is_some();
+  // denext (DENEXT.md item 420): the baked kernel-sandbox mode; an opt-in
+  // preview, nothing is enforced yet
+  deno_lib::kernel_sandbox::check_compiled(
+    metadata.kernel_sandbox,
+    metadata.desktop_dev,
+    &metadata.permissions,
+  )?;
   let permissions = {
     let mut permissions = metadata.permissions;
     // grant read access to the vfs

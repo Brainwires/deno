@@ -21,6 +21,10 @@ const SUPPORTED_OS: &[&str] = &[
   "aarch64-apple-darwin",
 ];
 
+/// Values of `--kernel-sandbox` (denext, DENEXT.md item 420).
+const KERNEL_SANDBOX_MODES: &[&str] =
+  &["off", "warn", "auto", "enforce", "broker"];
+
 // ============================================================
 // Shared arg groups
 // ============================================================
@@ -142,6 +146,19 @@ pub static PERMISSION_ARGS: &[ArgDef] = &[
     .num_args(NumArgs::ZeroOrMore)
     .require_equals()
     .value_delimiter(',')
+.hidden(),
+  // denext: the kernel sandbox mode (DENEXT.md item 420).
+  ArgDef::new("kernel-sandbox")
+    .long("kernel-sandbox")
+    .action(ArgAction::Set)
+    .num_args(NumArgs::Exact(1))
+    .require_equals()
+    .value_parser(ValueParser::Choices(KERNEL_SANDBOX_MODES))
+.hidden(),
+  // denext: print the kernel sandbox policy at startup.
+  ArgDef::new("kernel-sandbox-report")
+    .long("kernel-sandbox-report")
+    .set_true()
 .hidden(),
   // denext: spawn programs with a minimal environment.
   ArgDef::new("clean-run-env")
