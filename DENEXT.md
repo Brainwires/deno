@@ -15353,6 +15353,25 @@ where the changes are discussed.
        the GC case stays pending on 3.0.0-denext.22).
      - Node tests enabled: none; no Node API changes.
 
+390. **`perf(ext/web)`: a short read from a resource stream hands out only the
+     bytes read, not its 64 KiB buffer** (port of theende/ende 5f7467eba0, MIT,
+     from denoland/deno#37092; upstream denoland/deno#37063;
+     `ext/web/06_streams.js`). Resource-backed byte streams (fetch bodies,
+     files, sockets, child process pipes) read into a 64 KiB auto-allocated
+     buffer, and a short read gave a default reader a view over the whole
+     buffer. A consumer that keeps the chunks of a body sent in small pieces
+     pinned 64 KiB per chunk: 263 MiB for a 4 MiB body in 1 KB chunks. With a
+     default reader, a short read now enqueues a copy of the bytes read (the
+     stream spec's enqueue path for a pending auto-allocated pull-into); a full
+     read, and every read of a BYOB reader, still hands over the buffer itself.
+     - User-facing note: keeping the chunks of a fetch, file or socket stream
+       costs their size, not 64 KiB each.
+     - Tests: `resource_streams_test.ts`'s `resourceStreamCompactFileChunks_*`,
+       `resourceStreamCompactFetchChunks`, `resourceStreamCompactSocketChunks`
+       and `resourceStreamPreservesBYOBBuffer` (the compacting cases fail on
+       3.0.0-denext.22).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -15360,7 +15379,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389) are what the
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
