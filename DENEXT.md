@@ -16133,6 +16133,30 @@ where the changes are discussed.
        `info::json_location`.
      - Node tests enabled: none; no Node API changes.
 
+423. **`fix(tests)`: the npm test registry's prebuilt esbuild is pinned by
+     SHA-256 and renamed into place** (tests; no runtime change;
+     `tests/util/server/servers/npm_registry.rs`). The test server packs its
+     `@esbuild/*` packages from a prebuilt esbuild it downloads from
+     deno_third_party at startup. That download took any HTTP status as the
+     binary, ran in every npm server task at once, wrote the file in place, and
+     a file already on disk was used as it was. Now it runs once per process,
+     needs a 200 and the pinned SHA-256 of the platform's file (six release
+     platforms; a mismatch names the URL or path, both digests and the size),
+     and the verified bytes reach their path by renaming a temporary file; a
+     file on disk that doesn't match is downloaded again. It came out of an
+     esbuild 0.25.5 that died on SIGSEGV after its version handshake in
+     `integration::watcher::bundle_watch_html_entry` on one GitHub
+     `ubuntu-22.04` runner (HTML mode only, no Go traceback); the pin rules out
+     a damaged download as its cause from here on.
+     - Tests:
+       `npm_registry::tests::{esbuild_prebuilt_is_pinned_for_every_release_platform,
+       esbuild_prebuilt_mismatch_names_both_digests}`
+       (`cargo test -p test_server
+       --bin test_server`); the bundle watch
+       tests 30 times with the file deleted first, and once with an 11-byte file
+       in its place (named, downloaded again, tests pass).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
