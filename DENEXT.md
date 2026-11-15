@@ -15372,6 +15372,26 @@ where the changes are discussed.
        3.0.0-denext.22).
      - Node tests enabled: none; no Node API changes.
 
+391. **`fix(cache)`: a cached 404 doesn't hide a module from a request with an
+     auth token** (port of theende/ende c8b2be453f, MIT, from
+     denoland/deno#37019; upstream denoland/deno#37018;
+     `libs/cache_dir/file_fetcher/mod.rs`). A remote 404 is cached for 15
+     minutes, and authenticated requests already skip writing that entry,
+     because private hosts answer 404 to anonymous requests. The read path
+     served the cached 404 to any request, though: one run without
+     `DENO_AUTH_TOKENS` (or before the token was set) hid a private module from
+     every later run that had the token, until the entry expired or `--reload`
+     was given. A request that carries credentials (a `DENO_AUTH_TOKENS` entry
+     for the host, or an explicit auth header) now skips a cached 404 and asks
+     the server; the fetch path and the ensure-cached path both do.
+     - User-facing note: setting `DENO_AUTH_TOKENS` after a failed anonymous
+       import works at once instead of after 15 minutes or `--reload`.
+     - Tests: `deno_cache_dir`'s
+       `file_fetcher_test::test_authenticated_fetch_bypasses_cached_not_found`
+       (an anonymous 404, then the same URL with a token: the second request
+       reaches the server).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
