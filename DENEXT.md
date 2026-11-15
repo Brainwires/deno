@@ -15402,9 +15402,8 @@ where the changes are discussed.
      code that checks for 1006 to reconnect never fired. Sockets from
      `Deno.upgradeWebSocket` had the same bug. Every such path now dispatches
      `CloseEvent("close", { code: 1006 })`; item 379's closing-handshake timeout
-     already did. Ende's test helper for a hand-written server is taken without
-     its `Sec-WebSocket-Accept` tests (theende/ende b5fa3bd397, not carried
-     here).
+     already did. Ende's test helper for a hand-written server came with it; its
+     `Sec-WebSocket-Accept` tests are item 418's.
      - User-facing note: a WebSocket that fails or drops gets a `close` event
        with code 1006 (`wasClean: false`), client and server side.
      - Tests: `websocket_test.ts`'s `invalid server`, `connect & abort` and
@@ -15929,6 +15928,39 @@ where the changes are discussed.
        the report" on 3.0.0-denext.22).
      - Node tests enabled: none; no Node API changes.
 
+418. **`fix(ext/websocket)`: a WebSocket client fails the connection on a wrong
+     or missing `Sec-WebSocket-Accept`** (port of theende/ende b5fa3bd397, MIT;
+     no upstream issue; `ext/websocket/lib.rs`). RFC 6455 section 4.1 requires
+     the client to fail the connection when the server's `Sec-WebSocket-Accept`
+     is missing or isn't base64(SHA-1(key +
+     `258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)). fastwebsockets' handshake client
+     checks the status, `Upgrade` and `Connection` but not this, so
+     `new WebSocket()` opened against a server that never read the key: a plain
+     HTTP server or proxy that answers 101 blindly, or a cache replaying another
+     client's handshake. The client could then exchange frames with something
+     that never agreed to the WebSocket protocol, which the key / accept
+     exchange exists to prevent (a cross-protocol confusion the RFC's section
+     10.3 describes). The HTTP/1.1 handshake now keeps the key it sent and
+     compares the accept value; a mismatch drops the upgraded connection, and
+     the socket fires `error` and a `close` with code 1006 instead of `open`.
+     HTTP/2 (RFC 8441) has no accept header and is unchanged.
+     `Deno.upgradeWebSocket` (the server side) is not affected.
+     - User-facing note: `new WebSocket(url)` refuses a server whose 101
+       response lacks the right `Sec-WebSocket-Accept` (the error names the
+       header).
+     - Tests: `websocket_test.ts`'s
+       `websocket fails on a wrong
+       Sec-WebSocket-Accept` and
+       `websocket fails without Sec-WebSocket-Accept` (both open, then hang, on
+       3.0.0-denext.22); `deno_websocket`'s
+       `tests::sec_websocket_accept_matches_rfc_6455_example`. Two existing
+       tests computed their accept value with a misspelled GUID and now use the
+       right one (`websocketNonAsciiProtocolHeader`,
+       `close() ends when the
+       peer never answers the close frame`).
+     - Node tests enabled: none; `node:http` upgrades and the `ws` package don't
+       go through this client.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -15937,8 +15969,8 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
-390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412,
-415, 416) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
+416, 418) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.

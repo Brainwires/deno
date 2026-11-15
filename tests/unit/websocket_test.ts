@@ -5,6 +5,7 @@
 import {
   assert,
   assertEquals,
+  assertStringIncludes,
   assertThrows,
   delay,
   fail,
@@ -906,7 +907,7 @@ Deno.test(
       const key = request.match(/Sec-WebSocket-Key: (.*)\r\n/i)![1].trim();
       const digest = await crypto.subtle.digest(
         "SHA-1",
-        new TextEncoder().encode(key + "258EAFA5-E914-47A5-95CA-C5AB0DC85B11"),
+        new TextEncoder().encode(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"),
       );
       const accept = btoa(String.fromCharCode(...new Uint8Array(digest)));
       await conn.write(
@@ -1034,6 +1035,35 @@ async function connectWithAcceptLine(
   listener.close();
   return { opened, error, event };
 }
+
+// RFC 6455 section 4.1: the client must fail the connection if the
+// Sec-WebSocket-Accept header is missing or isn't
+// base64(SHA-1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")).
+Deno.test("websocket fails on a wrong Sec-WebSocket-Accept", async () => {
+  const result = await connectWithAcceptLine(async (key) => {
+    // The accept value for a different key.
+    const digest = await crypto.subtle.digest(
+      "SHA-1",
+      new TextEncoder().encode(
+        key + "x258EAFA5-E914-47DA-95CA-C5AB0DC85B11",
+      ),
+    );
+    const accept = btoa(String.fromCharCode(...new Uint8Array(digest)));
+    return `Sec-WebSocket-Accept: ${accept}\r\n`;
+  });
+  assertEquals(result.opened, false);
+  assertStringIncludes(result.error!, "Sec-WebSocket-Accept");
+  assertEquals(result.event.code, 1006);
+  assertEquals(result.event.wasClean, false);
+});
+
+Deno.test("websocket fails without Sec-WebSocket-Accept", async () => {
+  const result = await connectWithAcceptLine(() => Promise.resolve(""));
+  assertEquals(result.opened, false);
+  assertStringIncludes(result.error!, "Sec-WebSocket-Accept");
+  assertEquals(result.event.code, 1006);
+  assertEquals(result.event.wasClean, false);
+});
 
 Deno.test("websocket reports 1006 when the server drops the connection", async () => {
   const result = await connectWithAcceptLine(async (key) => {
@@ -1165,7 +1195,7 @@ Deno.test(
       // Compute accept key
       const hash = await crypto.subtle.digest(
         "SHA-1",
-        new TextEncoder().encode(key + "258EAFA5-E914-47DA-95CA-5AB5DF85B1E3"),
+        new TextEncoder().encode(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"),
       );
       const accept = btoa(
         String.fromCharCode(...new Uint8Array(hash)),
