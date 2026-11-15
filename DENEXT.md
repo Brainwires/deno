@@ -15478,6 +15478,28 @@ where the changes are discussed.
        specs (Unix; "Module not found" on 3.0.0-denext.22).
      - Node tests enabled: none; no Node API changes.
 
+396. **`fix(compile)`: an `--exclude` entry matches however the walk spells the
+     path** (port of theende/ende a4d5ccb090, MIT, from denoland/deno#35818;
+     part of upstream denoland/deno#35817; `cli/tools/compile.rs`).
+     `--exclude` and `compile.exclude` entries (also used by `deno desktop`)
+     were resolved with a bare `initial_cwd().join(p)`, but exclusion is an
+     equality check against the paths the VFS builder visits (canonical) and
+     the include walker visits (normalized, symlinks kept). A `../`-relative
+     entry, or a working directory behind a symlink such as `/tmp` or `/var`
+     on macOS, never matched, and the excluded files were embedded. Each entry
+     now stands for its joined, canonical and normalized forms at both sites.
+     The VFS builder already consults exclusions while it embeds a local
+     `node_modules` directory, so an excluded path in there is left out too.
+     Not covered (the rest of #35817): `--exclude-unused-npm` still prunes
+     only the global-cache snapshot, not a local `node_modules` directory.
+     - User-facing note: `deno compile --exclude ../folder/x` and excludes
+       under a symlinked working directory leave those files out.
+     - Tests: the `compile::exclude_relative_parent` spec (`a.txt` and
+       `sub_folder` are embedded on 3.0.0-denext.22) and
+       `compile::exclude_symlinked_include` (Unix; a `..`-relative entry
+       reached through a symlinked directory).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
