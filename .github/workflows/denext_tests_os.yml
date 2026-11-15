@@ -68,7 +68,7 @@ jobs:
       hosted: ${{ steps.pick.outputs.hosted }}
     steps:
       - id: pick
-        uses: Brainwires/.github/actions/pick-runners@2f0959e7d75f85d8e3f5a0789d563b615a43d526 # pick-runners
+        uses: Brainwires/.github/actions/pick-runners@68d8c0c773592f5b99ed5e9b1ca009f0a1690e40 # pick-runners
         with:
           jobs: ${{ format('{0} {1}', (inputs.pick_all && inputs.pick_pool != '') && format('build={0}@{1}', inputs.pick_pool, inputs.os) || '', inputs.os == 'ubuntu-22.04' && 'mdns=linux-x64!' || '') }}
           vars: ${{ toJSON(vars) }}
@@ -304,11 +304,19 @@ jobs:
             if [ "$PICK_ALL" = true ] && [ "$suites" = true ]; then keys+=(unit); fi
           fi
           jobs=""
-          for k in ${keys[@]+"${keys[@]}"}; do jobs="$jobs $k=$POOL@$OS"; done
+          # The long specs shards (70 min on win-x64, 80-85 on win-x64-brain, an i3)
+          # ask for the fast Windows host only: windows-x64-fast is the label
+          # only win-x64's runners carry; when that host is busy they take the
+          # image, never brain.
+          for k in ${keys[@]+"${keys[@]}"}; do
+            p=$POOL
+            if [ "$POOL" = windows-x64 ] && [[ "$k" == specs_* ]]; then p=windows-x64-fast; fi
+            jobs="$jobs $k=$p@$OS"
+          done
           echo "jobs=${jobs# }" >>"$GITHUB_OUTPUT"
           echo "jobs: ${jobs# }"
       - id: pick
-        uses: Brainwires/.github/actions/pick-runners@2f0959e7d75f85d8e3f5a0789d563b615a43d526 # pick-runners
+        uses: Brainwires/.github/actions/pick-runners@68d8c0c773592f5b99ed5e9b1ca009f0a1690e40 # pick-runners
         with:
           jobs: ${{ steps.keys.outputs.jobs }}
           vars: ${{ toJSON(vars) }}
