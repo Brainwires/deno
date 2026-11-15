@@ -15500,6 +15500,25 @@ where the changes are discussed.
        reached through a symlinked directory).
      - Node tests enabled: none; no Node API changes.
 
+397. **`fix(ext/fs)`: `Deno.utime` sets the times of a read-only file on
+     Windows** (port of theende/ende e66faabb2d, MIT, from denoland/deno#37078;
+     upstream denoland/deno#36997; `ext/fs/std_fs.rs`). `Deno.utime`,
+     `Deno.utimeSync` and `node:fs`'s `utimes` / `utimesSync` failed with
+     "Access is denied" on Windows for a file with the read-only attribute (Git
+     objects, for example): `filetime::set_file_times` opens the path with
+     `GENERIC_WRITE`, and setting file times only needs
+     `FILE_WRITE_ATTRIBUTES`. The path is now opened with that right (and
+     `FILE_FLAG_BACKUP_SEMANTICS`, so a directory opens too) and the times are
+     set on the handle; other platforms keep `filetime::set_file_times`. The
+     path still goes through this fork's DOS-device-safe form (item 357).
+     - User-facing note: on Windows, `Deno.utime` and `fs.utimes` work on
+       read-only files, as in Node.
+     - Tests: `utime_test.ts`'s `utime updates read-only files on Windows`
+       and, from the pull request's `node:fs` commit that Ende dropped,
+       `unit_node/_fs/_fs_utimes_test.ts`'s read-only case (both Windows
+       only).
+     - Node tests enabled: none known; `node:fs` reaches the same op.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -15507,7 +15526,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394) are what the
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
