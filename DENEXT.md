@@ -15468,16 +15468,22 @@ where the changes are discussed.
      resolved against `bin/` and failed with "Module not found": a script
      symlinked into a bin directory (a shebang script on `PATH`, an npm `.bin`
      link) could not import its siblings. `deno serve` had the same bug. A local
-     file entrypoint now resolves to its real path first, as Node does for its
-     main module (`--preserve-symlinks-main` off); this fork's directory entry
-     (`deno run <dir>`) and Node binary main fallback then run on the resolved
-     URL, as before. A main module reached through a link now runs exactly as
-     naming its target does: the main module needs no read grant, so
-     `deno run --deny-read=outside lib/mod.cjs` (`lib` a link to `outside`)
-     runs, as `deno run --deny-read=outside outside/mod.cjs` already did; it was
-     refused before only because the CommonJS loader read the link's real path
-     (item 176's spec now says so, and `require()` through links is still
-     refused there).
+     file entrypoint reached through a symlink or junction (the file or a
+     directory on its path) now resolves to its real path first, as Node does
+     for its main module (`--preserve-symlinks-main` off). Unlike Ende and the
+     pull request, a path with no link keeps its spelling: canonicalizing it
+     would also expand a Windows 8.3 short name (`RUNNER~1`), and
+     `deno clean
+     -e` then removed the emit `deno run` had just written
+     under the long name (`clean::entrypoint::jsr_http` on Windows). This fork's
+     directory entry (`deno run <dir>`) and Node binary main fallback then run
+     on the resolved URL, as before. A main module reached through a link now
+     runs exactly as naming its target does: the main module needs no read
+     grant, so `deno run --deny-read=outside lib/mod.cjs` (`lib` a link to
+     `outside`) runs, as `deno run --deny-read=outside outside/mod.cjs` already
+     did; it was refused before only because the CommonJS loader read the link's
+     real path (item 176's spec now says so, and `require()` through links is
+     still refused there).
      - User-facing note: `deno run` and `deno serve` of a symlink import modules
        relative to the symlink's target; `import.meta.url` and
        `import.meta.filename` name the target.
