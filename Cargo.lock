@@ -2369,6 +2369,7 @@ dependencies = [
  "deno_print",
  "deno_resolver",
  "deno_runtime",
+ "deno_sandbox",
  "deno_semver",
  "deno_signals",
  "deno_snapshots",
@@ -3690,6 +3691,7 @@ version = "0.119.0"
 dependencies = [
  "capacity_builder",
  "chrono",
+ "criterion",
  "deno_error",
  "deno_path_util",
  "deno_terminal",
@@ -3706,6 +3708,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sys_traits",
+ "tempfile",
  "thiserror 2.0.21",
  "unicode-normalization",
  "url",
@@ -3897,6 +3900,20 @@ dependencies = [
  "url",
  "uuid",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "deno_sandbox"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "futures",
+ "libc",
+ "log",
+ "percent-encoding",
+ "rand 0.8.6",
+ "tokio",
+ "url",
 ]
 
 [[package]]
