@@ -15309,6 +15309,27 @@ where the changes are discussed.
        3.0.0-denext.22).
      - Node tests enabled: none; no Node API changes.
 
+388. **`fix(ext/http)`: an application's `Connection: close` closes the HTTP/1.1
+     connection, and is written once** (port of theende/ende 1031318dec, MIT,
+     from denoland/deno#37067; upstream denoland/deno#37050;
+     `ext/http/http_next.rs`, `libs/http_h1/write.rs`). `Deno.serve`'s raw
+     HTTP/1.1 server ignored a `Connection: close` header the handler set on its
+     `Response`: on a keep-alive connection it sent the header and kept the
+     connection open anyway, and on a connection it was already closing it
+     appended its own `connection: close`, so the response carried two. Every
+     response path (direct, flat, streamed, with or without a request body) now
+     checks the response's `Connection` tokens for `close` and ends the
+     connection after the response, and the head writer leaves out its own
+     header when the application's is there. Merged around this fork's
+     memory-transport target check (`claims_foreign_memory_scheme`).
+     - User-facing note: a `Deno.serve` handler that returns
+       `Connection: close` gets the connection closed after its response, with
+       one `connection` header on the wire.
+     - Tests: `serve_test.ts`'s `httpServerResponseConnectionClose` (sync,
+       async and streamed responses, with no, a small and a large request body;
+       fails on 3.0.0-denext.22).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -15316,7 +15337,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387) are what the
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
