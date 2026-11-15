@@ -708,7 +708,8 @@ opt-level = 3
 # denoland/deno#26713; DENEXT.md). The fix shipped in dprint-core 0.68, but
 # dprint-plugin-typescript / -markdown still depend on 0.67, so the published
 # 0.67.4 is vendored with that one-file change, plus `WriteItem<'_>` spelled out
-# in `Writer::items_cloned` (rustc's `mismatched_lifetime_syntaxes` warning).
+# in `Writer::items_cloned` and `Writer<'_>` in a test helper (rustc's
+# `mismatched_lifetime_syntaxes` warning).
 # Drop this once those plugins are on the 0.68+ line and bump them instead.
 #
 # tokio-postgres 0.7.18 with one addition, `RowStream::columns()`: an unnamed
