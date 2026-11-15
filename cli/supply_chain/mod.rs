@@ -9,7 +9,9 @@
 //!   check, and a name close to a widely used package is named with it.
 //! - [`jail`]: approved lifecycle scripts run confined; `jail_proxy` is the
 //!   allow-listing proxy a script with a host list reaches the network
-//!   through.
+//!   through. The jail decides the policy; the OS enforcers (`sandbox_linux`,
+//!   `sandbox_macos`) and the proxy live in the `deno_sandbox` crate, which
+//!   `denort` can use too.
 //! - `paranoid` (resolved in `deno_npmrc::resolve_supply_chain`): all of them
 //!   on, each failing closed.
 
@@ -17,16 +19,19 @@ pub mod advisories;
 pub mod builtin_exceptions;
 pub mod downloads;
 pub mod jail;
-mod jail_proxy;
+#[cfg(test)]
+mod jail_os_tests;
 pub mod node_headers;
 mod popular_names;
-#[cfg(target_os = "linux")]
-mod sandbox_linux;
-#[cfg(target_os = "macos")]
-mod sandbox_macos;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+
+#[cfg(target_os = "linux")]
+use deno_sandbox::linux as sandbox_linux;
+#[cfg(target_os = "macos")]
+use deno_sandbox::macos as sandbox_macos;
+use deno_sandbox::proxy as jail_proxy;
 
 static GATE_REFUSED: AtomicBool = AtomicBool::new(false);
 

@@ -1,0 +1,30 @@
+# Copyright 2018-2026 the Deno authors. MIT license.
+
+[package]
+name = "deno_sandbox"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OS confinement for Deno: Landlock and seccomp on Linux, Seatbelt on macOS, and an allow-listing proxy"
+
+[lib]
+path = "lib.rs"
+
+[features]
+# the allow-listing HTTP proxy (an HTTP stack of its own): a binary that only
+# confines itself doesn't carry it
+proxy = ["dep:base64", "dep:futures", "dep:percent-encoding", "dep:url"]
+
+[dependencies]
+base64 = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+log.workspace = true
+percent-encoding = { workspace = true, optional = true }
+tokio.workspace = true
+url = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+rand.workspace = true
