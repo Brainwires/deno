@@ -1536,10 +1536,9 @@ impl<'a> Compiler<'a> {
 
   fn read_scope(&mut self) -> PathScope {
     let write_grant = self.opts().allow_write.clone();
-    let writable = match &write_grant {
-      None => None,
-      Some(_) => Some(self.scope_without_implicit(&write_grant)),
-    };
+    let writable = write_grant
+      .as_ref()
+      .map(|_| self.scope_without_implicit(&write_grant));
     self.scope(
       &self.opts().allow_read.clone(),
       &[

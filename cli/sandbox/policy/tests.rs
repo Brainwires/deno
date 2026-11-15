@@ -126,7 +126,7 @@ fn has_gap(
     .any(|g| g.class == class && g.resolution == resolution)
 }
 
-fn gap<'a>(c: &'a CompiledPolicy, class: GapClass) -> &'a PolicyGap {
+fn gap(c: &CompiledPolicy, class: GapClass) -> &PolicyGap {
   c.gaps
     .iter()
     .find(|g| g.class == class)
