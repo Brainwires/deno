@@ -15827,6 +15827,21 @@ where the changes are discussed.
        `selfGetterChecksReceiverInWorker` (both fail on 3.0.0-denext.22).
      - Node tests enabled: none; no Node API changes.
 
+413. **`fix(repl)`: multi-line input with a regex literal waits for its
+     closing brace** (port of theende/ende e7f5534bec, MIT, from
+     denoland/deno#36914; upstream denoland/deno#22328;
+     `cli/tools/repl/editor.rs`). Typing a function whose body contains a
+     regex literal, such as `input.replace(/a/, "b")`, submitted it before its
+     closing brace: once the lexer-based validator guessed that a `/` started
+     a regex, it reported the input as complete. When a regex may be present,
+     the input is now parsed and the REPL asks for more only when parsing
+     reaches the end of the input; any other syntax error is still left to
+     evaluation.
+     - User-facing note: the REPL keeps reading a multi-line function that
+       uses a regex until it is complete.
+     - Tests: the integration test `repl::pty_multiline_regex`.
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
