@@ -15414,6 +15414,27 @@ where the changes are discussed.
        (code 0 on 3.0.0-denext.22).
      - Node tests enabled: none; no Node API changes.
 
+393. **`fix(core)`: `import()` of a module still running its top-level await
+     waits for it** (port of theende/ende c362cc70f0, MIT, from
+     denoland/deno#37098; upstream denoland/deno#37097;
+     `libs/core/modules/map/dynamic.rs`). V8 reports `Evaluated` for a module
+     whose asynchronous evaluation is still pending. `load_dynamic_import`'s
+     fast path for an already loaded module checked only
+     `pending_dyn_mod_evaluations`, which holds evaluations a dynamic import
+     started, not the main module's static evaluation or an async dependency of
+     it: `import()` of such a module resolved at once, with its exports still in
+     the temporal dead zone. An async graph now skips the fast path and waits on
+     the module's evaluation promise; a synchronous graph keeps it.
+     - User-facing note: `await import(x)` of a module whose top-level `await`
+       hasn't finished (for example one the main module is still evaluating)
+       resolves after it finishes, with initialized exports.
+     - Tests: `deno_core`'s
+       `modules::tests::test_dynamic_import_waits_for_statically_evaluating_tla_graph`
+       (the module and its async dependency each imported while the static
+       evaluation waits; then a cached import returns the same namespace and
+       the module ran once).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -15421,7 +15442,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392) are what the
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
