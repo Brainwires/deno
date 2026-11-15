@@ -15289,6 +15289,26 @@ where the changes are discussed.
        space- and tab-padded values trimmed; fails on 3.0.0-denext.22).
      - Node tests enabled: none; no Node API changes.
 
+387. **`fix(ext/http)`: an HTTP/1.1 response that closes the connection no
+     longer reads the unread request body first** (port of theende/ende
+     9bf8ef05d2, MIT, from denoland/deno#37086; upstream denoland/deno#37049;
+     `ext/http/http_next.rs`). When a response could not keep the connection
+     alive (an early `413`, a `Connection: close`, a handler that answered
+     before reading), `Deno.serve`'s HTTP/1.1 path still read the request body
+     to its end before closing, so an early refusal cost the whole upload and a
+     body that never ended held the connection forever. The server now
+     half-closes the socket and discards what the client still sends for at
+     most 500 ms, then closes: the client reads the response instead of a reset
+     (RFC 9112 section 9.6), and the upload stops.
+     - User-facing note: `Deno.serve` answering an HTTP/1.1 upload early (for
+       example with `413`) closes the connection within half a second instead
+       of receiving the rest of the body.
+     - Tests: `serve_test.ts`'s
+       `httpServerClosesConnectionAfterEarlyResponseWithoutDrainingBody` and
+       `httpServerEarlyResponseEndsWithEofWhileClientUploads` (both fail on
+       3.0.0-denext.22).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -15296,7 +15316,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386) are what the
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
