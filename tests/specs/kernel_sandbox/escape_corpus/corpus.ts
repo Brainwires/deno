@@ -25,6 +25,7 @@
 // outer sandbox) or a probe is wrong. Later phases add expectations derived
 // from probes.ts's matrix targets.
 
+import { classify, parse, type Result } from "./classify.ts";
 import { CELLS, PROBES, type Vector, VECTORS } from "./probes.ts";
 
 const args = Object.fromEntries(
@@ -114,7 +115,7 @@ Deno.copyFileSync(`${here}host.ts`, `${work}/host.ts`);
 Deno.writeTextFileSync(`${work}/benign`, "benign\n");
 Deno.writeTextFileSync(`${out}/secret`, "TOP-SECRET outside the grant\n");
 Deno.writeTextFileSync(`${out}/secret2`, "TOP-SECRET inherited fd\n");
-for (const v of vectors) {
+for (const v of [...vectors, "baseline"]) {
   for (const f of ["victim", "unlink", "ren", "mv"]) {
     Deno.writeTextFileSync(`${out}/${f}-${v}`, "outside\n");
   }
@@ -140,6 +141,39 @@ const cfg = `out=${out};work=${work};${listeners}`;
 Deno.writeTextFileSync(
   `${work}/cfg.json`,
   JSON.stringify({ cfg, probes: PROBES.map((p) => p.id) }),
+);
+
+// 3b. The baseline: every probe once, UNCONFINED (the bare executable, started
+// here), under whatever the host itself enforces (a container's seccomp
+// profile, a prohibit route, an outer sandbox, Yama). A confined refusal
+// counts as "held" only when the baseline was not refused (classify.ts).
+const baseline = new Map<string, Result>();
+for (const p of PROBES) {
+  const o = new Deno.Command(`${work}/probe`, {
+    args: [p.id, `${cfg};vec=baseline`],
+    env: { CORPUS_SECRET_ENV: "TOP-SECRET env" }, // as the confined runs get it
+    stdout: "piped",
+    stderr: "null",
+  }).outputSync();
+  const line = new TextDecoder().decode(o.stdout).trim();
+  if (line) baseline.set(p.id, parse(line));
+}
+const hostRefused = [...baseline].filter(([, r]) =>
+  r.state === "held" || r.state === "host"
+).map(([id]) => id);
+let seccomp = "";
+try {
+  const st = Deno.readTextFileSync("/proc/self/status");
+  seccomp = ["Seccomp", "Seccomp_filters"].map((k) =>
+    `${k}=${new RegExp(`^${k}:\\s*(\\d+)`, "m").exec(st)?.[1] ?? "?"}`
+  ).join(" ");
+} catch {
+  // not Linux
+}
+console.log(
+  `baseline (no Deno sandbox${seccomp ? `; ${seccomp}` : ""}): host refuses ${
+    hostRefused.join(" ") || "nothing"
+  }`,
 );
 
 // 4. The confined host, once per vector.
@@ -186,9 +220,9 @@ for (const vector of vectors) {
   for (const line of new TextDecoder().decode(o.stdout).split("\n")) {
     if (!line.startsWith("{")) continue;
     const r = JSON.parse(line) as { vector: string; id: string; out: string };
-    const [state, ...rest] = r.out.split(" ");
+    const { state, detail } = classify(parse(r.out), baseline.get(r.id));
     const cell = PROBES.find((p) => p.id === r.id)!.cell;
-    rows.push({ vector, id: r.id, state, detail: rest.join(" "), cell });
+    rows.push({ vector, id: r.id, state, detail, cell });
     seen.add(r.id);
   }
   for (const p of PROBES) {

@@ -46,6 +46,13 @@ Needs a C compiler (`cc`, or `$CC`). Unix only for now.
 | `n/a`   | not applicable here (platform, missing target, kernel without the feature)                            |
 | `crash` | the host process died before reporting this probe                                                     |
 
+Before the confined runs, `corpus.ts` runs every probe once unconfined (the bare
+executable, under whatever the host itself enforces: a container's seccomp
+profile, a prohibit route, an outer sandbox, Yama). A confined refusal is `held`
+only when that baseline was not refused; otherwise it is `host` (`classify.ts`,
+tested by `classify_test.ts`). The first output line lists what the host refuses
+on its own.
+
 A network probe that was permitted but got no answer (timeout, unreachable) is
 `open`: the matrix is about what the sandbox allows, not what the network
 delivers.
