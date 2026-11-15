@@ -781,6 +781,8 @@ const NR_SENDTO: u32 = 44;
 const NR_SENDMSG: u32 = 46;
 #[cfg(target_arch = "x86_64")]
 const NR_SENDMMSG: u32 = 307;
+#[cfg(target_arch = "x86_64")]
+const NR_LISTEN: u32 = 50;
 #[cfg(target_arch = "aarch64")]
 const AUDIT_ARCH: u32 = 0xC000_00B7;
 #[cfg(target_arch = "aarch64")]
@@ -793,6 +795,8 @@ const NR_SENDTO: u32 = 206;
 const NR_SENDMSG: u32 = 211;
 #[cfg(target_arch = "aarch64")]
 const NR_SENDMMSG: u32 = 269;
+#[cfg(target_arch = "aarch64")]
+const NR_LISTEN: u32 = 201;
 
 const fn stmt(code: u16, k: u32) -> SockFilter {
   SockFilter {
@@ -809,7 +813,8 @@ const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> SockFilter {
 
 /// The seccomp program: `socket(2)` only for netlink, and for IPv4/IPv6 when
 /// the network is open (TCP only, and no Fast Open sends, when it goes
-/// through the proxy); `io_uring_setup` fails; `ioctl(TIOCSTI)` and
+/// through the proxy); one more socket operation fails with EACCES unless
+/// the network is open; `io_uring_setup` fails; `ioctl(TIOCSTI)` and
 /// `ioctl(TIOCLINUX)` fail with EPERM; another architecture's syscalls
 /// (x32, the 32-bit compat ABI) kill the process.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -836,6 +841,13 @@ pub fn seccomp_program(net: OsNet) -> Vec<u8> {
   f.push(jump(BPF_JEQ_K, TIOCLINUX, 0, 1));
   f.push(stmt(BPF_RET_K, errno(libc::EPERM)));
   f.push(stmt(BPF_LD_W_ABS, SECCOMP_DATA_NR));
+  if !matches!(net, OsNet::Open) {
+    // refused without the whole network. The proxy's socket in a
+    // namespace is set up before this filter is installed (NetnsHandoff
+    // runs first).
+    f.push(jump(BPF_JEQ_K, NR_LISTEN, 0, 1));
+    f.push(stmt(BPF_RET_K, errno(libc::EACCES)));
+  }
   if matches!(net, OsNet::ProxyOnly(_)) {
     // sendto / sendmmsg (flags: argument 3) and sendmsg (argument 2) with
     // MSG_FASTOPEN connect a TCP socket without connect(2), past Landlock
@@ -1048,6 +1060,20 @@ mod tests {
       fastopen
     );
     assert_eq!(run_filter(&program, NR_SENDMSG, [3, 0, 0, 0, 0, 0]), allow);
+    // refused without the whole network, allowed with it
+    assert_eq!(run_filter(&program, NR_LISTEN, [3, 1, 0, 0, 0, 0]), eacces);
+    assert_eq!(
+      run_filter(
+        &seccomp_program(OsNet::Denied),
+        NR_LISTEN,
+        [3, 1, 0, 0, 0, 0]
+      ),
+      eacces
+    );
+    assert_eq!(
+      run_filter(&seccomp_program(OsNet::Open), NR_LISTEN, [3, 1, 0, 0, 0, 0]),
+      allow
+    );
     // the open network keeps Fast Open
     assert_eq!(
       run_filter(
@@ -1056,6 +1082,109 @@ mod tests {
         [3, 0, 10, msg_fastopen, 0, 0]
       ),
       allow
+    );
+  }
+
+  /// Confines a forked child as a proxy-held script is (Landlock with the
+  /// proxy port, then the seccomp program) and reports what the filtered
+  /// socket operation returns there, after a `bind` or without one: 0, or
+  /// the errno.
+  #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+  fn socket_op_in_confined_child(bind_first: bool) -> i32 {
+    let dir = tempfile::tempdir().unwrap();
+    let ruleset =
+      build_ruleset(&[dir.path().to_path_buf()], &[], Some(45_678)).unwrap();
+    let program = seccomp_program(OsNet::ProxyOnly(45_678));
+    let ruleset_fd = ruleset.as_raw_fd();
+    // SAFETY: the child makes only async-signal-safe syscalls on memory
+    // allocated before the fork, then exits with the outcome
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0);
+    if pid == 0 {
+      // SAFETY: as above; every path ends in _exit
+      unsafe {
+        let fail = |step: i32| -> ! { libc::_exit(100 + step) };
+        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+          fail(1);
+        }
+        if libc::syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0u32) != 0 {
+          fail(2);
+        }
+        let prog = SockFprog {
+          len: (program.len() / 8) as u16,
+          filter: program.as_ptr() as *const SockFilter,
+        };
+        if libc::prctl(
+          libc::PR_SET_SECCOMP,
+          libc::SECCOMP_MODE_FILTER,
+          &prog as *const SockFprog,
+          0,
+          0,
+        ) != 0
+        {
+          fail(3);
+        }
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+        if fd < 0 {
+          fail(4);
+        }
+        if bind_first {
+          let addr = libc::sockaddr_in {
+            sin_family: libc::AF_INET as libc::sa_family_t,
+            sin_port: 0,
+            sin_addr: libc::in_addr {
+              s_addr: u32::from(std::net::Ipv4Addr::LOCALHOST).to_be(),
+            },
+            sin_zero: [0; 8],
+          };
+          if libc::bind(
+            fd,
+            &addr as *const libc::sockaddr_in as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+          ) != 0
+          {
+            libc::_exit(*libc::__errno_location());
+          }
+        }
+        let res = libc::listen(fd, 1);
+        libc::_exit(if res == 0 {
+          0
+        } else {
+          *libc::__errno_location()
+        });
+      }
+    }
+    let mut status = 0;
+    // SAFETY: the child just forked
+    unsafe { libc::waitpid(pid, &mut status, 0) };
+    assert!(libc::WIFEXITED(status));
+    let code = libc::WEXITSTATUS(status);
+    assert!(
+      code < 100,
+      "the child failed to confine itself at step {}",
+      code - 100
+    );
+    code
+  }
+
+  // A proxy-held script: the filtered socket operation is refused with a
+  // `bind` first and without one.
+  #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+  #[test]
+  fn proxy_held_script_socket_filter() {
+    if !can_confine_to_port() {
+      eprintln!("skipped: no Landlock ABI 4 here");
+      return;
+    }
+    assert_eq!(
+      socket_op_in_confined_child(true),
+      libc::EACCES,
+      "after bind"
+    );
+    assert_eq!(
+      socket_op_in_confined_child(false),
+      libc::EACCES,
+      "without bind"
     );
   }
 

@@ -706,7 +706,7 @@ fn unconfined_warning(reason: &str) -> String {
 #[cfg(target_os = "linux")]
 fn no_netns_warning(reason: &str) -> String {
   format!(
-    "jail-scripts: lifecycle scripts can't get a network namespace of their own here ({reason}); a script held to a host list is held to its proxy's port number, which another machine could answer on."
+    "jail-scripts: lifecycle scripts can't get a network namespace of their own here ({reason}); a script held to a host list shares this host's network: it may connect only to its proxy's port number, which another machine could answer on."
   )
 }
 

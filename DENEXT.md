@@ -15963,6 +15963,25 @@ where the changes are discussed.
      - Node tests enabled: none; `node:http` upgrades and the `ws` package don't
        go through this client.
 
+419. **`fix(supply-chain)`: the Linux script jail's socket filter refuses one
+     more socket operation** (CLI only; `cli/supply_chain/sandbox_linux.rs`,
+     `cli/supply_chain/jail.rs`). A lifecycle script held to a host list (item
+     111), or given no network, now gets EACCES from one more socket operation
+     in the jail's seccomp filter. A script whose network is fully open
+     (`net: true`) is unchanged, and the proxy's socket in a script's own
+     network namespace is set up before the filter is installed. The
+     no-network-namespace warning now says that such a script shares this host's
+     network.
+     - User-facing note: on Linux, a lifecycle script with a host list or no
+       network has one more socket operation refused with EACCES.
+     - Tests: `supply_chain::sandbox_linux::tests::seccomp_program_semantics`
+       (refused under a host list and with no network, allowed with the open
+       network);
+       `supply_chain::sandbox_linux::tests::proxy_held_script_socket_filter` (a
+       forked child confined as a proxy-held script gets EACCES with a `bind`
+       first and without one; skipped without Landlock ABI 4).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
