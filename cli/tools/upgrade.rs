@@ -728,11 +728,18 @@ fn upgrade_from_pr(
     );
   }
 
-  // Try each run to find one with our artifact
-  let temp_dir =
-    tempfile::TempDir::new().context("failed to create temporary directory")?;
+  let current_exe_path = std::env::current_exe()
+    .context("failed to get the path of the current executable")?;
+  let output_exe_path = if let Some(output) = &upgrade_flags.output {
+    Cow::Owned(PathBuf::from(output))
+  } else {
+    Cow::Borrowed(&current_exe_path)
+  };
+
+  let temp_dir = create_upgrade_temp_dir(&output_exe_path)?;
   let download_dir = temp_dir.path();
 
+  // Try each run to find one with our artifact
   let mut downloaded = false;
   for run_id in &all_run_ids {
     // Try release build first, then debug
@@ -812,14 +819,6 @@ fn upgrade_from_pr(
     return Ok(());
   }
 
-  let current_exe_path = std::env::current_exe()
-    .context("failed to get the path of the current executable")?;
-  let output_exe_path = if let Some(output) = &upgrade_flags.output {
-    Cow::Owned(PathBuf::from(output))
-  } else {
-    Cow::Borrowed(&current_exe_path)
-  };
-
   #[cfg(windows)]
   kill_running_deno_lsp_processes();
 
@@ -839,6 +838,28 @@ fn upgrade_from_pr(
 
   drop(temp_dir);
   Ok(())
+}
+
+/// Creates the directory that the new executable is unpacked into and run from
+/// by `check_exe`.
+///
+/// The directory is created next to `output_exe_path` when possible. That
+/// directory has to be writable for the upgrade anyway, and keeping the new
+/// executable on the same file system lets `replace_exe` rename it into place.
+/// The system temporary directory is only a fallback, because it is often
+/// mounted `noexec`, which makes running the new executable fail with
+/// "Permission denied".
+fn create_upgrade_temp_dir(
+  output_exe_path: &Path,
+) -> Result<tempfile::TempDir, AnyError> {
+  if let Some(parent) = output_exe_path.parent()
+    && let Ok(temp_dir) = tempfile::Builder::new()
+      .prefix(".deno-upgrade-")
+      .tempdir_in(parent)
+  {
+    return Ok(temp_dir);
+  }
+  tempfile::TempDir::new().context("failed to create temporary directory")
 }
 
 fn upgrade_from_branch(
@@ -900,8 +921,15 @@ fn upgrade_from_branch(
     );
   }
 
-  let temp_dir =
-    tempfile::TempDir::new().context("failed to create temporary directory")?;
+  let current_exe_path = std::env::current_exe()
+    .context("failed to get the path of the current executable")?;
+  let output_exe_path = if let Some(output) = &upgrade_flags.output {
+    Cow::Owned(PathBuf::from(output))
+  } else {
+    Cow::Borrowed(&current_exe_path)
+  };
+
+  let temp_dir = create_upgrade_temp_dir(&output_exe_path)?;
   let download_dir = temp_dir.path();
 
   let mut downloaded = false;
@@ -969,14 +997,6 @@ fn upgrade_from_branch(
     drop(temp_dir);
     return Ok(());
   }
-
-  let current_exe_path = std::env::current_exe()
-    .context("failed to get the path of the current executable")?;
-  let output_exe_path = if let Some(output) = &upgrade_flags.output {
-    Cow::Owned(PathBuf::from(output))
-  } else {
-    Cow::Borrowed(&current_exe_path)
-  };
 
   #[cfg(windows)]
   kill_running_deno_lsp_processes();
@@ -1091,8 +1111,7 @@ pub async fn upgrade(
     None
   };
 
-  let temp_dir =
-    tempfile::TempDir::new().context("failed to create temporary directory")?;
+  let temp_dir = create_upgrade_temp_dir(output_exe_path)?;
 
   let new_exe_path = if let Some(delta_binary) = maybe_delta_binary {
     // Delta upgrade succeeded -- write the patched binary directly
@@ -3595,5 +3614,29 @@ mod test {
       url_step2.to_string().contains("/download/v2.7.12/"),
       "step 2 should fetch from v2.7.12 release"
     );
+  }
+
+  #[test]
+  fn upgrade_temp_dir_is_created_next_to_output_exe() {
+    let output_dir = tempfile::TempDir::new().unwrap();
+    let output_exe_path = output_dir.path().join("deno");
+    let temp_dir = create_upgrade_temp_dir(&output_exe_path).unwrap();
+    assert_eq!(temp_dir.path().parent(), Some(output_dir.path()));
+    let path = temp_dir.path().to_path_buf();
+    drop(temp_dir);
+    assert!(!path.exists());
+  }
+
+  #[test]
+  fn upgrade_temp_dir_falls_back_when_output_dir_is_missing() {
+    let output_dir = tempfile::TempDir::new().unwrap();
+    let output_exe_path = output_dir.path().join("missing").join("deno");
+    let temp_dir = create_upgrade_temp_dir(&output_exe_path).unwrap();
+    assert!(
+      !temp_dir
+        .path()
+        .starts_with(output_dir.path().join("missing"))
+    );
+    assert!(temp_dir.path().is_dir());
   }
 }

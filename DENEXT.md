@@ -15544,6 +15544,28 @@ where the changes are discussed.
      - Node tests enabled: none; `node:net` and `node:dns` keep their own
        lookups.
 
+399. **`fix(upgrade)`: `deno upgrade` unpacks and checks the new binary next to
+     the output, not in a `noexec` temp directory** (port of theende/ende
+     58d6d605a9 and 86f0f9f9a9, MIT, from denoland/deno#37120; upstream
+     denoland/deno#37116; `cli/tools/upgrade.rs`). `deno upgrade` unpacked the
+     new binary into the system temp directory and ran it there (`check_exe`)
+     before replacing the current executable; with `/tmp` mounted `noexec`, a
+     common hardening setup, that failed with "Permission denied". The
+     directory is now created next to the output executable, as
+     `.deno-upgrade-XXXXXX` (it has to be writable for the upgrade anyway, and
+     it keeps the new binary on the destination's file system), with the
+     system temp directory as the fallback when that can't be created; the
+     regular, `--pr` and `--branch` paths all do this. A denext release build
+     still refuses `deno upgrade` (see Versioning), so this reaches only
+     builds without `DENEXT_VERSION` (tests, local builds).
+     - User-facing note: in a non-release build, `deno upgrade` works with a
+       `noexec` `/tmp`.
+     - Tests: `tools::upgrade::test::upgrade_temp_dir_is_created_next_to_output_exe`,
+       `upgrade_temp_dir_falls_back_when_output_dir_is_missing` and the
+       integration test `upgrade::upgrade_from_pr_or_branch_skips_system_temp_dir`
+       (a fake `gh` on `PATH`, `TMPDIR` pointing at a missing directory).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
