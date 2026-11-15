@@ -15651,6 +15651,28 @@ where the changes are discussed.
        whose `AADA` mapping moves the line to -1; panics on overflow before).
      - Node tests enabled: none; no Node API changes.
 
+404. **`fix(ext/web)`: closing or aborting a WebTransport stream finishes or
+     resets it and releases it** (port of theende/ende c9ca6ac732, MIT, from
+     denoland/deno#36827; upstream denoland/deno#36822; `ext/net/03_quic.js`,
+     `ext/net/quic.rs`, `ext/web/06_streams.js`, `ext/web/webtransport.js`).
+     A WebTransport stream's `close()` sent no QUIC FIN and `abort()` no
+     `RESET_STREAM`, and the streams' QUIC resources were released only when
+     the garbage collector got to them, so a session stalled once 100 streams
+     (the peer's stream limit) were open. The WebTransport wrappers now take
+     ownership of the QUIC resources from the resource-backed streams
+     (`transferResourceStreamOwnership`): `close()` finishes the stream,
+     `abort(reason)` resets it with the mapped WebTransport error code, and
+     both release the resource at once. A resource-backed writable stream
+     gains an awaited `onShutdown` hook for that, and ownership is tracked on
+     the stream's backing so it is released exactly once.
+     - User-facing note: WebTransport streams end with FIN / `RESET_STREAM`
+       when closed or aborted, and a session can open more than 100 streams
+       over its life.
+     - Tests: the `run::webtransport` spec's new cases (FIN on close, reset
+       code on abort, many sequential streams; it hangs on
+       3.0.0-denext.22).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -15658,7 +15680,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397, 398, 401, 403) are what the
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397, 398, 401, 403, 404) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
