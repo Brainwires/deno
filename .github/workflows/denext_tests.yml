@@ -16,8 +16,7 @@
 #          engine_staleness_test.py, audit_ignores_test.py,
 #          glibc_ceiling_test.py, self_binding_test.py, denort_pins_test.py,
 #          linux_needed_test.py, toolchain_info_test.py, plan_matrix_test.py,
-#          pick_runner_test.py, apt_install_test.py, guard_verified_test.py,
-#          setup_cache_test.py)
+#          apt_install_test.py, guard_verified_test.py, setup_cache_test.py)
 #          and the bare-assertion guard over the release scripts
 #          (assert_guard.py and its test).
 # - cargo-audit: RustSec advisories against Cargo.lock; .cargo/audit.toml
@@ -38,9 +37,16 @@
 #            Windows leg, so each OS's enabled node_compat entries
 #            (tests/node_compat/config.jsonc) are checked in CI. The macOS
 #            and Windows ones run on our pool for that platform while it has
-#            a free slot and on the leg's GitHub image otherwise
-#            (.github/denext-runtime/pick_runner.py, the leg's test-runner
-#            job).
+#            a free slot and on the leg's GitHub image otherwise (the shared
+#            Brainwires/.github/actions/pick-runners action, the leg's
+#            test-runner job).
+#
+# Runners: our self-hosted pools are the first choice, never the only one.
+# Each job that may run on them is listed in a picker job (`pick runners`
+# here and in each leg, `pick build runners` for a leg's build) that runs the
+# shared pick-runners action: the job takes our pool while it has a free slot
+# and its GitHub image at once otherwise (DENEXT_POOL_HEALTH and the queued
+# jobs decide; a fork's pull request always takes the image).
 # - macOS x64 (macos-15-intel) and Linux arm64 (ubuntu-22.04-arm), two of the
 #   other release architectures: build + libs only (macOS x64 also the node
 #   suites); Windows arm64 (windows-11-arm): build + libs + unit + the node
@@ -129,6 +135,32 @@ env:
   TOOLS_DENO_VERSION: 2.9.7
 
 jobs:
+  # Where this workflow's own jobs run (guard, lint, cargo audit): our pools
+  # while they have a free slot, else GitHub's images (the shared
+  # pick-runners action). The OS legs pick their jobs themselves
+  # (denext_tests_os.yml). Never fails the run: on any error every job takes
+  # its image (each runs-on's `||`).
+  runners:
+    name: pick runners
+    # GitHub's image: the pick must not wait in the queue it shortens.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read # the repository's queued / running jobs
+    outputs:
+      plan: ${{ steps.pick.outputs.plan }}
+      hosted: ${{ steps.pick.outputs.hosted }}
+    steps:
+      - id: pick
+        uses: Brainwires/.github/actions/pick-runners@2e093cef9ee71f64a75ea1c47aa2f923119050fa # pick-runners
+        with:
+          # guard first (it runs first); cargo audit starts in guard's slot
+          # when guard ends (it needs guard). lint's macos-15 entry only on a
+          # run whose matrix has it; its windows-2022 entry stays on the image
+          # (the 8 GB VM).
+          jobs: ${{ format('guard=linux-x64@ubuntu-24.04 audit=~guard lint_linux=linux-x64-2204@ubuntu-22.04{0}', (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.macos)) && ' lint_macos=macos-arm64@macos-15' || '') }}
+          vars: ${{ toJSON(vars) }}
+
   # The verified-SHA guard (.github/denext-runtime/guard_verified.py, DENEXT.md
   # item 354). After a release, development-denext is fast-forwarded to the
   # release commit, which already passed this workflow on its release branch
@@ -138,8 +170,10 @@ jobs:
   # a dispatch, a pull request, or an API error: verified=false, a full run.
   guard:
     name: verified-SHA guard
-    # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-24.04 (always the image on a fork's pull_request / pull_request_target).
-    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && '"ubuntu-24.04"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-24.04'))) }}
+    needs: runners
+    if: ${{ !cancelled() }}
+    # Our linux-x64 pool while it has a free slot, else ubuntu-24.04 (runners).
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').guard || 'ubuntu-24.04' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -181,14 +215,13 @@ jobs:
 
   lint:
     name: lint / ${{ matrix.os }}
-    needs: guard
-    if: ${{ needs.guard.outputs.verified != 'true' }}
-    # The macos-15 entry runs on the self-hosted arm64 runner RUNNER_MACOS_ARM names,
-    # the ubuntu-22.04 one on the Ubuntu 22.04 Linux pool RUNNER_LINUX_X64_2204 names
-    # (its image carries the setup action's packages); each on its GitHub image while
-    # the variable is unset, and always on a fork's pull_request / pull_request_target.
-    # The windows-2022 entry stays on the image (the 8 GB VM).
-    runs-on: ${{ fromJSON(((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) || matrix.os == 'windows-2022') && format('"{0}"', matrix.os) || (matrix.os == 'macos-15' && (startsWith(vars.RUNNER_MACOS_ARM, '[') && vars.RUNNER_MACOS_ARM || format('"{0}"', vars.RUNNER_MACOS_ARM || 'macos-15'))) || (startsWith(vars.RUNNER_LINUX_X64_2204, '[') && vars.RUNNER_LINUX_X64_2204 || format('"{0}"', vars.RUNNER_LINUX_X64_2204 || 'ubuntu-22.04'))) }}
+    needs: [runners, guard]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && needs.guard.outputs.verified != 'true' }}
+    # The macos-15 entry on our macos-arm64 pool, the ubuntu-22.04 one on the
+    # Ubuntu 22.04 Linux pool (its image carries the setup action's packages),
+    # each while it has a free slot, else its GitHub image (runners). The
+    # windows-2022 entry stays on the image (the 8 GB VM).
+    runs-on: ${{ matrix.os != 'windows-2022' && fromJSON(needs.runners.outputs.plan || '{}')[matrix.os == 'macos-15' && 'lint_macos' || 'lint_linux'] || matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -239,11 +272,6 @@ jobs:
       - name: plan_matrix_test.py
         if: runner.os == 'Linux'
         run: python3 -I .github/denext-runtime/plan_matrix_test.py
-      # The node suites' pool-or-overflow pick (denext_tests_os.yml's
-      # test-runner job).
-      - name: pick_runner_test.py
-        if: runner.os == 'Linux'
-        run: python3 -I .github/denext-runtime/pick_runner_test.py
       # The robust apt install every Linux job uses (apt_install.sh).
       - name: apt_install_test.py
         if: runner.os == 'Linux'
@@ -309,10 +337,11 @@ jobs:
   # unmaintained, unsound or yanked crates are printed but do not fail).
   cargo-audit:
     name: cargo audit
-    needs: guard
-    if: ${{ needs.guard.outputs.verified != 'true' }}
-    # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-22.04 (always the image on a fork's pull_request / pull_request_target).
-    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && '"ubuntu-22.04"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-22.04'))) }}
+    needs: [runners, guard]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && needs.guard.outputs.verified != 'true' }}
+    # In guard's runner once guard ends (runners: our linux-x64 pool, or
+    # ubuntu-24.04 when guard overflowed), else ubuntu-22.04.
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').audit || 'ubuntu-22.04' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -329,13 +358,14 @@ jobs:
       - name: cargo audit
         run: cargo audit --file Cargo.lock
 
-  # The two macOS legs run on the runner the repository variables
-  # RUNNER_MACOS_ARM / RUNNER_MACOS_X64 name — a bare label
-  # (denext-macos-arm64) or a JSON array (["self-hosted","denext-macos-arm64"])
-  # — and on GitHub's macos-15 / macos-15-intel while a variable is unset.
-  # The leg names (the `name:` below) are what tag_gate.py's REQUIRED_LEGS
-  # match, so they stay the GitHub image names whatever runs them.
-  # denext_tests_os.yml also refuses a self-hosted label on a fork's pull_request / pull_request_target.
+  # Each leg passes its pool (`pick_pool`, a pick-runners pool name) and the
+  # leg picks every job's runner itself: that pool while it has a free slot,
+  # the leg's GitHub image (`os`) otherwise, at once (denext_tests_os.yml).
+  # The pool's repository variable (RUNNER_MACOS_ARM, ...) still switches it
+  # on: unset, the leg runs on its image. The leg names (the `name:` below)
+  # are what tag_gate.py's REQUIRED_LEGS match, so they stay the GitHub image
+  # names whatever runs them. A fork's pull_request / pull_request_target
+  # always takes the images.
   macos:
     name: macos-15
     needs: guard
@@ -343,19 +373,17 @@ jobs:
     uses: ./.github/workflows/denext_tests_os.yml
     permissions:
       contents: read
-      actions: read # test-runner reads the pool's queued / running jobs
+      actions: read # the leg's pickers read the repository's queued / running jobs
     with:
       os: macos-15
-      # A dispatch with macos_runner=github runs the leg on GitHub's image instead of the pool.
-      runs_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.macos_runner == 'github') && '"macos-15"' || (startsWith(vars.RUNNER_MACOS_ARM, '[') && vars.RUNNER_MACOS_ARM || format('"{0}"', vars.RUNNER_MACOS_ARM || 'macos-15')) }}
-      # unit_node + node_compat (2 shards) on the mac-arm pool, GitHub's
-      # macos-15 for the overflow (pick_runner.py).
+      # unit_node + node_compat (2 shards) too.
       node_suites: true
-      # Every job of the leg (the build too) overflows to the leg's GitHub image
-      # while the pool's slots are taken, instead of queueing behind the release build.
+      # Every job of the leg (the build too) on the mac-arm pool while it has
+      # a free slot, else GitHub's macos-15, instead of queueing behind the
+      # release build. A dispatch with macos_runner=github runs the whole leg
+      # on GitHub's image.
       pick_all: true
-      pick_runs_on: ${{ !(github.event_name == 'workflow_dispatch' && inputs.macos_runner == 'github') && vars.RUNNER_MACOS_ARM || '' }}
-      pick_slots: ${{ vars.RUNNER_MACOS_ARM_SLOTS || '2' }}
+      pick_pool: ${{ !(github.event_name == 'workflow_dispatch' && inputs.macos_runner == 'github') && 'macos-arm64' || '' }}
 
   windows:
     name: windows-2022
@@ -363,20 +391,20 @@ jobs:
     if: ${{ needs.guard.outputs.verified != 'true' && (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.windows)) }}
     # Stays on GitHub's image: a debug deno build + the suite on the 1-slot 4 vCPU / 8 GB
     # Windows VM, and the setup action writes the hosts file (the job account is no admin).
-    # Its unit_node and node_compat jobs (test crates only, against this build) take the
-    # win-x64 pool while its one slot is free, else windows-2022 (pick_runner.py).
+    # Its unit_node, unit and specs jobs (against this build) take the win-x64 pool while it
+    # has a free slot, else windows-2022; node_compat stays on the image (see
+    # denext_tests_os.yml's test-runner).
     uses: ./.github/workflows/denext_tests_os.yml
     permissions:
       contents: read
-      actions: read # test-runner reads the pool's queued / running jobs
+      actions: read # the leg's pickers read the repository's queued / running jobs
     with:
       os: windows-2022
       node_suites: true
       # The Windows pools are not widened (ops/runners/allowlist.json): they
       # serve only push / dispatch runs of these refs, and a job they refuse
-      # closes the pool. Any other run keeps the image.
-      pick_runs_on: ${{ ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'development-denext' || github.ref_name == 'development' || github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'rel/') || startsWith(github.ref_name, 'train/') || startsWith(github.ref_name, 'fix/') || startsWith(github.ref_name, 'feat/'))) && vars.RUNNER_WINDOWS_X64 || '' }}
-      pick_slots: ${{ vars.RUNNER_WINDOWS_X64_SLOTS || '1' }}
+      # closes the pool. Any other run keeps the image (no pool).
+      pick_pool: ${{ ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'development-denext' || github.ref_name == 'development' || github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'rel/') || startsWith(github.ref_name, 'train/') || startsWith(github.ref_name, 'fix/') || startsWith(github.ref_name, 'feat/'))) && 'windows-x64' || '' }}
 
   linux:
     name: ubuntu-22.04
@@ -386,18 +414,16 @@ jobs:
     # Linux pool (RUNNER_LINUX_X64_2204, biscuits: the glibc floor of the
     # image, every package the setup action names baked in, so nothing is
     # fetched) while it has a free slot, GitHub's ubuntu-22.04 for the
-    # overflow (pick_runner.py; biscuits' Linux pools share one capacity).
-    # The variable unset: GitHub's image, as before.
+    # overflow (the pick-runners action; biscuits' Linux pools share one
+    # capacity). The variable unset: GitHub's image, as before.
     uses: ./.github/workflows/denext_tests_os.yml
     permissions:
       contents: read
-      actions: read # build-runner and test-runner read the pool's queued / running jobs
+      actions: read # the leg's pickers read the repository's queued / running jobs
     with:
       os: ubuntu-22.04
       pick_all: true
-      pick_runs_on: ${{ vars.RUNNER_LINUX_X64_2204 }}
-      pick_slots: ${{ vars.RUNNER_LINUX_X64_2204_SLOTS || '3' }}
-      pick_shared_labels: denext-linux-x64 denext-linux-x64-docker
+      pick_pool: linux-x64-2204
 
   # The other two release architectures: the debug build and the lib tests
   # (the desktop, updater and config crates included). Full runs only.
@@ -408,19 +434,17 @@ jobs:
     uses: ./.github/workflows/denext_tests_os.yml
     permissions:
       contents: read
-      actions: read # test-runner reads the pool's queued / running jobs
+      actions: read # the leg's pickers read the repository's queued / running jobs
     with:
       os: macos-15-intel
-      runs_on: ${{ startsWith(vars.RUNNER_MACOS_X64, '[') && vars.RUNNER_MACOS_X64 || format('"{0}"', vars.RUNNER_MACOS_X64 || 'macos-15-intel') }}
       libs_only: true
-      # Plus unit_node + node_compat (2 shards): the mac-x64 pool's one slot,
-      # GitHub's macos-15-intel for the overflow.
+      # Plus unit_node + node_compat (2 shards).
       node_suites: true
-      # Every job of the leg (the build too) overflows to the leg's GitHub image
-      # while the pool's slots are taken, instead of queueing behind the release build.
+      # Every job of the leg (the build too) on the mac-x64 pool while it has
+      # a free slot, else GitHub's macos-15-intel, instead of queueing behind
+      # the release build.
       pick_all: true
-      pick_runs_on: ${{ vars.RUNNER_MACOS_X64 }}
-      pick_slots: ${{ vars.RUNNER_MACOS_X64_SLOTS || '1' }}
+      pick_pool: macos-x64
 
   linux-arm64:
     name: ubuntu-22.04-arm
@@ -444,16 +468,15 @@ jobs:
     uses: ./.github/workflows/denext_tests_os.yml
     permissions:
       contents: read
-      actions: read # test-runner reads the pool's queued / running jobs
+      actions: read # the leg's pickers read the repository's queued / running jobs
     with:
       os: windows-11-arm
       libs_and_unit: true
-      # Plus unit_node + node_compat (2 shards): the win-arm64 pool (the
-      # repository variable RUNNER_WINDOWS_ARM, two slots), GitHub's
-      # windows-11-arm for the overflow and while the variable is unset.
+      # Plus unit_node + node_compat (2 shards): unit_node on the win-arm64
+      # pool (RUNNER_WINDOWS_ARM) while it has a free slot, else
+      # windows-11-arm; node_compat on the image (see denext_tests_os.yml).
       node_suites: true
       # The Windows pools are not widened (ops/runners/allowlist.json): they
       # serve only push / dispatch runs of these refs, and a job they refuse
-      # closes the pool. Any other run keeps the image.
-      pick_runs_on: ${{ ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'development-denext' || github.ref_name == 'development' || github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'rel/') || startsWith(github.ref_name, 'train/') || startsWith(github.ref_name, 'fix/') || startsWith(github.ref_name, 'feat/'))) && vars.RUNNER_WINDOWS_ARM || '' }}
-      pick_slots: ${{ vars.RUNNER_WINDOWS_ARM_SLOTS || '2' }}
+      # closes the pool. Any other run keeps the image (no pool).
+      pick_pool: ${{ ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'development-denext' || github.ref_name == 'development' || github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'rel/') || startsWith(github.ref_name, 'train/') || startsWith(github.ref_name, 'fix/') || startsWith(github.ref_name, 'feat/'))) && 'windows-arm64' || '' }}
