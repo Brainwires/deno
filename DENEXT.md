@@ -15894,6 +15894,23 @@ where the changes are discussed.
        `…123456700`).
      - Node tests enabled: none known; `node:fs`'s utimes reaches the same code.
 
+417. **`fix(coverage)`: `--include` and `--exclude` match paths with spaces or
+     non-ASCII characters** (port of theende/ende 5031f1437c, MIT, from
+     denoland/deno#37128; upstream denoland/deno#37127;
+     `cli/tools/coverage/mod.rs`). `deno coverage --include` / `--exclude`
+     matched each pattern against the script URL, which is percent-encoded, so a
+     file whose path has a space or a non-ASCII character could only be matched
+     by writing the escapes into the pattern. A pattern now matches if it
+     matches the URL or the URL with its escapes decoded, so every pattern that
+     matched before still does. Merged after this fork's exclusion of npm
+     packages from coverage reports.
+     - User-facing note: `deno coverage --include="my dir"` matches files under
+       `my dir/`.
+     - Tests: the `coverage::filter_non_ascii_path` spec (a directory named
+       `wt 🦆`, matched as written and as escapes; "No covered files included in
+       the report" on 3.0.0-denext.22).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
