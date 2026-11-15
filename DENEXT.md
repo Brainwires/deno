@@ -15392,6 +15392,28 @@ where the changes are discussed.
        reaches the server).
      - Node tests enabled: none; no Node API changes.
 
+392. **`fix(ext/websocket)`: an abnormal closure reports close code 1006, not
+     0** (port of theende/ende ebdc255d75, MIT; upstream denoland/deno#37147;
+     `ext/websocket/01_websocket.js`). When a `WebSocket` failed to connect
+     (connection refused, a bad handshake, `close()` while connecting) or its
+     connection dropped without a close frame (TCP closed, an invalid frame, a
+     failed close), the `close` event had `code: 0`. The WebSockets standard
+     gives such a closure code 1006 and `wasClean: false`, as browsers do, so
+     code that checks for 1006 to reconnect never fired. Sockets from
+     `Deno.upgradeWebSocket` had the same bug. Every such path now dispatches
+     `CloseEvent("close", { code: 1006 })`; item 379's closing-handshake timeout
+     already did. Ende's test helper for a hand-written server is taken without
+     its `Sec-WebSocket-Accept` tests (theende/ende b5fa3bd397, not carried
+     here).
+     - User-facing note: a WebSocket that fails or drops gets a `close` event
+       with code 1006 (`wasClean: false`), client and server side.
+     - Tests: `websocket_test.ts`'s `invalid server`, `connect & abort` and
+       `websocket close ongoing handshake` now check the code, plus
+       `websocket reports 1006 when the server drops the connection` and
+       `upgraded websocket reports 1006 when the client drops the connection`
+       (code 0 on 3.0.0-denext.22).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -15399,7 +15421,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390) are what the
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
