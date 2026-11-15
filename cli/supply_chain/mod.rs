@@ -28,9 +28,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 #[cfg(target_os = "linux")]
-use deno_sandbox::linux as sandbox_linux;
+pub(crate) use deno_sandbox::linux as sandbox_linux;
 #[cfg(target_os = "macos")]
-use deno_sandbox::macos as sandbox_macos;
+pub(crate) use deno_sandbox::macos as sandbox_macos;
 use deno_sandbox::proxy as jail_proxy;
 
 static GATE_REFUSED: AtomicBool = AtomicBool::new(false);
