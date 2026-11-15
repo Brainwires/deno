@@ -15734,6 +15734,19 @@ where the changes are discussed.
        `textDecoderStreamBOMAfterASCII` (all fail on 3.0.0-denext.22).
      - Node tests enabled: none; no Node API changes.
 
+408. **`fix(ext/web)`: `URL.parse` works unbound and returns a plain `URL`**
+     (port of theende/ende 67b5975fae, MIT, from denoland/deno#37109;
+     upstream denoland/deno#37104; `ext/web/00_url.js`). `URL.parse` built its
+     result with `new this(...)`, so a detached call (`const { parse } = URL;
+     parse(u)`, or `[...].map(URL.parse)`) threw, and a subclass's
+     `Sub.parse()` constructed the subclass. It now always constructs `URL`,
+     as the URL standard's static method does.
+     - User-facing note: `const parse = URL.parse; parse("https://a")`
+       returns a `URL`.
+     - Tests: `url_test.ts`'s `urlParseUnbound` and
+       `urlParseSubclassReturnsUrl` (both fail on 3.0.0-denext.22).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -15741,7 +15754,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397, 398, 401, 403, 404, 407) are what the
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389, 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
