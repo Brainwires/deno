@@ -300,8 +300,18 @@ fn op_webrtc_pc_create(
     None
   };
   let mut certificates = Vec::new();
+  let now = std::time::SystemTime::now();
   for id in &config.certificates {
-    certificates.push(certificate(state, *id)?);
+    let cert = certificate(state, *id)?;
+    // The constructor checks `expires` against `Date.now()` first; a
+    // certificate that expired since, by this clock, is the same
+    // InvalidAccessError, never the engine's OperationError.
+    if cert.expires <= now {
+      return Err(WebRtcError::InvalidAccess(
+        "an RTCCertificate has expired".to_string(),
+      ));
+    }
+    certificates.push(cert);
   }
   let bundle_policy = match config.bundle_policy.as_deref() {
     Some("max-bundle") => RTCBundlePolicy::MaxBundle,
@@ -688,7 +698,7 @@ fn certificate_info(
 /// dictionaries, as `generateCertificate` takes them).
 fn generate_certificate(
   alg: &KeygenArg,
-  expires_ms: f64,
+  expires_at_ms: f64,
 ) -> Result<RTCCertificate, WebRtcError> {
   use rtc::crypto::SignatureScheme;
   let provider = rtc::crypto::default_provider()
@@ -763,10 +773,19 @@ fn generate_certificate(
       .map_err(|e| WebRtcError::Operation(e.to_string()))?;
   // W3C `expires`: the certificate stops being usable for new connections
   // then (the X.509 validity is the engine's; DTLS peers check fingerprints,
-  // not validity).
-  let expires_ms = expires_ms.clamp(0.0, 365.0 * 24.0 * 3600.0 * 1000.0);
-  cert.expires = std::time::SystemTime::now()
-    + std::time::Duration::from_millis(expires_ms as u64);
+  // not validity). `expires_at_ms` is a time on the JS clock (`Date.now()`
+  // plus the `expires` the page asked for): the attribute, the constructor's
+  // expiry check and the page all read that clock, which on Windows can lag
+  // the system clock by a few milliseconds, so the instant is kept as given
+  // (at most a year ahead) instead of being re-based on `SystemTime::now()`.
+  let max_ms = std::time::SystemTime::now()
+    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+    .map(|d| d.as_millis() as f64)
+    .unwrap_or(0.0)
+    + 365.0 * 24.0 * 3600.0 * 1000.0;
+  let expires_at_ms = expires_at_ms.clamp(0.0, max_ms);
+  cert.expires = std::time::SystemTime::UNIX_EPOCH
+    + std::time::Duration::from_millis(expires_at_ms as u64);
   Ok(cert)
 }
 
@@ -775,12 +794,13 @@ fn generate_certificate(
 async fn op_webrtc_generate_certificate(
   state: Rc<RefCell<OpState>>,
   #[serde] alg: KeygenArg,
-  expires_ms: f64,
+  expires_at_ms: f64,
 ) -> Result<CertificateInfo, WebRtcError> {
-  let cert =
-    tokio::task::spawn_blocking(move || generate_certificate(&alg, expires_ms))
-      .await
-      .map_err(|e| WebRtcError::Operation(e.to_string()))??;
+  let cert = tokio::task::spawn_blocking(move || {
+    generate_certificate(&alg, expires_at_ms)
+  })
+  .await
+  .map_err(|e| WebRtcError::Operation(e.to_string()))??;
   certificate_info(&mut state.borrow_mut(), cert)
 }
 

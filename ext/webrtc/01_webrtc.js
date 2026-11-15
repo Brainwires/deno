@@ -3485,8 +3485,9 @@ class RTCPeerConnection extends EventTarget {
         keygenAlgorithm.expires,
       );
     }
+    // The expiry instant on the JS clock (see generate_certificate).
     return PromisePrototypeThen(
-      op_webrtc_generate_certificate(alg, expires),
+      op_webrtc_generate_certificate(alg, DateNow() + expires),
       (info) => new RTCCertificate(illegalConstructorKey, info),
     );
   }

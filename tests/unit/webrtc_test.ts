@@ -546,6 +546,9 @@ Deno.test("webrtcGenerateCertificate", async () => {
   assertEquals(fp.algorithm, "sha-256");
   assert(/^([0-9a-f]{2}:){31}[0-9a-f]{2}$/.test(fp.value!));
 
+  // `expires` counts from the call, on the clock Date.now() reads (on
+  // Windows the system clock can run a few milliseconds ahead of it).
+  const before = Date.now();
   const rsa = await RTCPeerConnection.generateCertificate({
     name: "RSASSA-PKCS1-v1_5",
     modulusLength: 2048,
@@ -553,7 +556,11 @@ Deno.test("webrtcGenerateCertificate", async () => {
     hash: "SHA-256",
     expires: 1000,
   });
-  assert(rsa.expires <= Date.now() + 1000);
+  assert(rsa.expires >= before + 1000, `${rsa.expires} < ${before + 1000}`);
+  assert(
+    rsa.expires <= Date.now() + 1000,
+    `${rsa.expires} > ${Date.now() + 1000}`,
+  );
   await assertRejects(
     () =>
       RTCPeerConnection.generateCertificate({
