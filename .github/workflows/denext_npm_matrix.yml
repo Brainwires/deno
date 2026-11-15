@@ -49,6 +49,26 @@ env:
   TOOLS_DENO_VERSION: 2.9.7
 
 jobs:
+  # Where guard and the matrix run: our pools while they have a free slot,
+  # else GitHub's images at once (the shared pick-runners action). Never fails
+  # the run: on any error every job takes its image (each runs-on's `||`).
+  runners:
+    name: pick runners
+    # GitHub's image: the pick must not wait in the queue it shortens.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read # the repository's queued / running jobs
+    outputs:
+      plan: ${{ steps.pick.outputs.plan }}
+      hosted: ${{ steps.pick.outputs.hosted }}
+    steps:
+      - id: pick
+        uses: Brainwires/.github/actions/pick-runners@415ef1f9941d798b5760bf69f908be88789371a2 # pick-runners
+        with:
+          jobs: guard=linux-x64@ubuntu-24.04 matrix=linux-x64-docker@ubuntu-22.04
+          vars: ${{ toJSON(vars) }}
+
   # The verified-SHA guard (.github/denext-runtime/guard_verified.py, DENEXT.md
   # item 354). After a release, development-denext is fast-forwarded to the
   # release commit, which already passed this workflow on its release branch
@@ -58,8 +78,10 @@ jobs:
   # a dispatch, a pull request, or an API error: verified=false, a full run.
   guard:
     name: verified-SHA guard
-    # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-24.04 (always the image on a fork's pull_request / pull_request_target).
-    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && '"ubuntu-24.04"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-24.04'))) }}
+    needs: runners
+    if: ${{ !cancelled() }}
+    # Our linux-x64 pool while it has a free slot, else ubuntu-24.04 (runners).
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').guard || 'ubuntu-24.04' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -101,12 +123,13 @@ jobs:
 
   matrix:
     name: npm matrix
-    needs: guard
-    if: ${{ needs.guard.outputs.verified != 'true' }}
-    # The docker-enabled Linux pool RUNNER_LINUX_X64_DOCKER names (services.sh starts
+    needs: [runners, guard]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && needs.guard.outputs.verified != 'true' }}
+    # The docker-enabled Linux pool (RUNNER_LINUX_X64_DOCKER; services.sh starts
     # its registries with Docker; the pool's per-job daemon serves them, and its
-    # label is widened, so any branch is served), else GitHub's ubuntu-22.04.
-    runs-on: ${{ fromJSON(startsWith(vars.RUNNER_LINUX_X64_DOCKER, '[') && vars.RUNNER_LINUX_X64_DOCKER || format('"{0}"', vars.RUNNER_LINUX_X64_DOCKER || 'ubuntu-22.04')) }}
+    # label is widened, so any branch is served) while it has a free slot, else
+    # GitHub's ubuntu-22.04 (runners).
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').matrix || 'ubuntu-22.04' }}
     timeout-minutes: 300
     defaults:
       run:

@@ -9,10 +9,6 @@ on:
         description: The runner image (macos-15, macos-15-intel, windows-2022, windows-11-arm, ubuntu-22.04, ubuntu-22.04-arm); names the leg, its artifacts and its matrix whatever runs it
         type: string
         required: true
-      runs_on:
-        description: 'What to run on, as JSON: a label ("denext-macos-arm64") or an array (["self-hosted","denext-macos-arm64"]); empty means the os image. Ignored on a pull_request: a self-hosted runner never takes untrusted code'
-        type: string
-        default: ''
       libs_only:
         description: Build and run the lib tests only (the extra architecture legs)
         type: boolean
@@ -22,23 +18,15 @@ on:
         type: boolean
         default: false
       node_suites:
-        description: Also run unit_node and node_compat (2 shards) on this leg, which the Linux x64 leg always runs; on the pool pick_runs_on names while it has a free slot, else on the os image (pick_runner.py)
+        description: Also run unit_node and node_compat (2 shards) on this leg, which the Linux x64 leg always runs; on the pool pick_pool names while it has a free slot, else on the os image (the shared pick-runners action)
         type: boolean
         default: false
       pick_all:
         description: Pick a runner for EVERY job of the leg (build, libs and each test job), not only the node_suites ones; the pool takes them while it has free slots, the os image the overflow (the Linux x64 leg)
         type: boolean
         default: false
-      pick_runs_on:
-        description: 'The pool the picked jobs prefer, as JSON: a label or an array (the RUNNER_* variable); empty means the os image (or runs_on)'
-        type: string
-        default: ''
-      pick_slots:
-        description: How many jobs that pool runs at once (pick_runner.py's PICK_SLOTS)
-        type: string
-        default: '1'
-      pick_shared_labels:
-        description: Other pools' labels that share the pool's slots (biscuits' Linux pools share one capacity), space separated
+      pick_pool:
+        description: 'The pool the picked jobs prefer, as a pick-runners pool name (macos-arm64, macos-x64, windows-x64, windows-arm64, linux-x64-2204): each picked job runs there while it has a free slot, else on the os image. The action reads the pool''s RUNNER_* variable and DENEXT_POOL_HEALTH. Empty: every job on the os image'
         type: string
         default: ''
 
@@ -53,57 +41,44 @@ env:
   RUST_LIB_BACKTRACE: '0'
   TOOLS_DENO_VERSION: 2.9.7
 
-# runs-on on every job: inputs.runs_on (the caller's repository variable), or
-# the os image when it is empty — and ALWAYS the os image on a fork's
-# pull_request and on every other pull_request* event (pull_request_target, …;
-# github.event_name / github.event are the caller's), so a self-hosted runner
-# never takes a fork's code; a same-repo pull_request runs on it.
+# Every job's runner comes from the shared picker
+# (Brainwires/.github/actions/pick-runners, pinned below): our pool
+# (pick_pool) while it has a free slot, else the os image at once, so our
+# runners speed a leg up and never hold it back. A job the picker does not list,
+# a skipped or failed picker job, and every job of a fork's pull_request (or of
+# any other pull_request* event: github.event_name / github.event are the
+# caller's) take the os image; the action never puts a fork's code on our
+# runners. The only job pinned to our hardware is webrtc-mdns (see there).
 jobs:
-  # A pick_all leg's build: our pool while it has a free slot, else the os
-  # image (.github/denext-runtime/pick_runner.py). Never fails the leg: on any
-  # error the build keeps the pool, and an empty output means the pool too.
+  # The leg's build (a pick_all leg) and, on the Linux x64 leg, webrtc-mdns:
+  # picked before the build starts. Never fails the leg: on any error the
+  # build takes the os image (the action's own fallback, or the `||` below).
+  # The fleet watchdog's re-route finds it by its name (`<leg> / pick build
+  # runners`, " / pick ... runners" with "build" for a stuck build job).
   build-runner:
-    name: pick the build runner
-    if: ${{ inputs.pick_all && inputs.pick_runs_on != '' }}
-    # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-24.04 (always the image on a fork's pull_request / pull_request_target).
-    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && '"ubuntu-24.04"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-24.04'))) }}
+    name: pick build runners
+    if: ${{ (inputs.pick_all && inputs.pick_pool != '') || inputs.os == 'ubuntu-22.04' }}
+    # GitHub's image: the pick must not wait in the queue it shortens.
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       actions: read # the repository's queued / running jobs
-      contents: read
     outputs:
-      build: ${{ steps.pick.outputs.build }}
+      plan: ${{ steps.pick.outputs.plan }}
+      hosted: ${{ steps.pick.outputs.hosted }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: pick
+        uses: Brainwires/.github/actions/pick-runners@415ef1f9941d798b5760bf69f908be88789371a2 # pick-runners
         with:
-          persist-credentials: false
-          sparse-checkout: .github/denext-runtime/pick_runner.py
-          sparse-checkout-cone-mode: false
-      - name: Pick
-        id: pick
-        env:
-          PICK_KEYS: build
-          PICK_RUNNER: ${{ inputs.pick_runs_on }}
-          PICK_IMAGE: ${{ inputs.os }}
-          PICK_SLOTS: ${{ inputs.pick_slots }}
-          PICK_SHARED_LABELS: ${{ inputs.pick_shared_labels }}
-          PICK_FORK_PR: ${{ (startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) }}
-          PICK_OWN_SKIP: ' / build debug'
-          # The runner fleet's watchdog publishes each pool's health here
-          # (pick_runner.py: a pool marked false overflows; a missing or
-          # stale value changes nothing).
-          PICK_HEALTH: ${{ vars.DENEXT_POOL_HEALTH }}
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          python3 -I .github/denext-runtime/pick_runner.py >>"$GITHUB_OUTPUT" ||
-            echo "::warning::the runner pick failed: the build takes the pool (pick_runs_on)"
+          jobs: ${{ format('{0} {1}', (inputs.pick_all && inputs.pick_pool != '') && format('build={0}@{1}', inputs.pick_pool, inputs.os) || '', inputs.os == 'ubuntu-22.04' && 'mdns=linux-x64!' || '') }}
+          vars: ${{ toJSON(vars) }}
 
   build:
     name: build debug
     needs: build-runner
-    # build-runner is skipped on a leg without pick_all: run regardless.
+    # build-runner is skipped on a leg that picks nothing: run regardless.
     if: ${{ !cancelled() }}
-    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && format('"{0}"', inputs.os) || (inputs.pick_all && (needs.build-runner.outputs.build || inputs.pick_runs_on)) || inputs.runs_on || format('"{0}"', inputs.os)) }}
+    runs-on: ${{ fromJSON(needs.build-runner.outputs.plan || '{}').build || inputs.os }}
     timeout-minutes: 240
     defaults:
       run:
@@ -150,7 +125,8 @@ jobs:
     # crates need bindgen's libclang, which the Windows pool hosts lack (VS's
     # Clang component; run 43372954581 on brain).
     if: ${{ !cancelled() && needs.build.result == 'success' }}
-    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && format('"{0}"', inputs.os) || (inputs.pick_all && (needs.test-runner.outputs.libs || inputs.pick_runs_on)) || inputs.runs_on || format('"{0}"', inputs.os)) }}
+    # Picked on a pick_all leg only (test-runner lists `libs` there).
+    runs-on: ${{ fromJSON(needs.test-runner.outputs.plan || '{}').libs || inputs.os }}
     timeout-minutes: 240
     defaults:
       run:
@@ -242,10 +218,13 @@ jobs:
   # an interface with multicast): never the GitHub image, where multicast is
   # untested, and never a fork's pull request (a self-hosted runner never takes
   # untrusted code). It builds just the crate's lib tests, beside the leg.
+  # Pinned to our linux-x64 pool through build-runner (`mdns=linux-x64!`), so
+  # its slot counts against the build's pick on the same hosts.
   webrtc-mdns:
     name: webrtc mdns (ignored test, Linux pool)
-    if: ${{ inputs.os == 'ubuntu-22.04' && !(startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) }}
-    runs-on: [self-hosted, denext-linux-x64]
+    needs: build-runner
+    if: ${{ !cancelled() && inputs.os == 'ubuntu-22.04' && !(startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) }}
+    runs-on: ${{ fromJSON(needs.build-runner.outputs.plan || '{}').mdns || fromJSON('["self-hosted","denext-linux-x64"]') }}
     timeout-minutes: 90
     defaults:
       run:
@@ -268,64 +247,79 @@ jobs:
           --ignored --exact tests::mdns_host_candidates_resolve_between_peers
 
   # Where the leg's picked jobs run: on a node_suites leg (macOS, Windows) its
-  # unit_node and node_compat jobs, on a pick_all leg (Linux x64) libs and
-  # every test job. Our pool (pick_runs_on) while it has a free slot, else the
-  # leg's GitHub image (.github/denext-runtime/pick_runner.py), longest jobs
-  # first. After the build, so the pick sees the pool as those jobs queue. It
-  # never fails the leg: on any error the jobs keep the pool, and an empty
-  # output means the pool too.
+  # unit_node and node_compat jobs (and on Windows x64 unit and specs), on a
+  # pick_all leg (Linux x64, macOS) libs and every test job. Our pool
+  # (pick_pool) while it has a free slot, else the leg's GitHub image (the
+  # shared pick-runners action), longest jobs first. After the build, so the
+  # pick sees the pool as those jobs queue. It never fails the leg: on any
+  # error, or with this job skipped, the jobs take the os image. The fleet
+  # watchdog's re-route re-runs it (`<leg> / pick runners`) for a job stuck on
+  # an unhealthy pool, and the action then overflows that pool's jobs.
   test-runner:
-    name: pick test runners
+    name: pick runners
     needs: build
-    if: ${{ !cancelled() && (inputs.node_suites || inputs.pick_all) && inputs.pick_runs_on != '' && needs.build.result == 'success' }}
-    # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-24.04 (always the image on a fork's pull_request / pull_request_target).
-    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && '"ubuntu-24.04"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-24.04'))) }}
+    if: ${{ !cancelled() && (inputs.node_suites || inputs.pick_all) && inputs.pick_pool != '' && needs.build.result == 'success' }}
+    # GitHub's image: the pick must not wait in the queue it shortens.
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       actions: read # the repository's queued / running jobs
-      contents: read
     outputs:
-      libs: ${{ steps.pick.outputs.libs }}
-      unit: ${{ steps.pick.outputs.unit }}
-      specs_0: ${{ steps.pick.outputs.specs_0 }}
-      specs_1: ${{ steps.pick.outputs.specs_1 }}
-      integration_0: ${{ steps.pick.outputs.integration_0 }}
-      integration_1: ${{ steps.pick.outputs.integration_1 }}
-      node_compat_0: ${{ steps.pick.outputs.node_compat_0 }}
-      node_compat_1: ${{ steps.pick.outputs.node_compat_1 }}
-      unit_node: ${{ steps.pick.outputs.unit_node }}
+      plan: ${{ steps.pick.outputs.plan }}
+      hosted: ${{ steps.pick.outputs.hosted }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          sparse-checkout: .github/denext-runtime/pick_runner.py
-          sparse-checkout-cone-mode: false
-      - name: Pick
-        id: pick
+      - name: The leg's picked jobs
+        id: keys
         env:
-          # Longest first (Linux x64, run 43019147950: libs 11 min,
-          # integration 8-9, node_compat 8, specs 7-8, unit and unit_node 5).
-          PICK_KEYS: ${{ inputs.pick_all && 'libs integration_0 integration_1 node_compat_0 node_compat_1 specs_0 specs_1 unit_node unit' || (startsWith(inputs.os, 'windows') && 'unit_node specs_0 specs_1 unit node_compat_0 node_compat_1' || 'node_compat_0 node_compat_1 unit_node') }}
-          PICK_RUNNER: ${{ inputs.pick_runs_on }}
-          PICK_IMAGE: ${{ inputs.os }}
-          PICK_SLOTS: ${{ inputs.pick_slots }}
-          PICK_SHARED_LABELS: ${{ inputs.pick_shared_labels }}
-          PICK_FORK_PR: ${{ (startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) }}
-          # This leg's own jobs that wait on this pick hold no slot yet.
-          PICK_OWN_SKIP: ' / test '
-          # Node's network tests (UDP broadcast, IPv6 autoselectfamily, the
-          # internet/ suite) cannot pass on our Windows runner, whose job
-          # firewall isolates it from the LAN by design (broadcast and
-          # private ranges blocked): node_compat on a Windows leg always runs
-          # on GitHub's image, and the pool takes unit_node.
-          PICK_IMAGE_KEYS: ${{ startsWith(inputs.os, 'windows') && 'node_compat_0 node_compat_1' || '' }}
-          # The runner fleet's watchdog publishes each pool's health here
-          # (pick_runner.py).
-          PICK_HEALTH: ${{ vars.DENEXT_POOL_HEALTH }}
-          GITHUB_TOKEN: ${{ github.token }}
+          OS: ${{ inputs.os }}
+          POOL: ${{ inputs.pick_pool }}
+          PICK_ALL: ${{ inputs.pick_all }}
+          NODE_SUITES: ${{ inputs.node_suites }}
+          LIBS_ONLY: ${{ inputs.libs_only }}
+          LIBS_AND_UNIT: ${{ inputs.libs_and_unit }}
         run: |
-          python3 -I .github/denext-runtime/pick_runner.py >>"$GITHUB_OUTPUT" ||
-            echo "::warning::the runner pick failed: the picked jobs take the pool (pick_runs_on)"
+          set -euo pipefail
+          # The `pick` keys of the test matrix below (and libs) this leg runs,
+          # longest first (Linux x64, run 43019147950: libs 11 min,
+          # integration 8-9, node_compat 8, specs 7-8, unit and unit_node 5).
+          # Node's network tests (UDP broadcast, IPv6 autoselectfamily, the
+          # internet/ suite) cannot pass on our Windows runners, whose job
+          # firewall isolates them from the LAN by design (broadcast and
+          # private ranges blocked): node_compat on a Windows leg is never
+          # listed, so it runs on GitHub's image; the pool takes unit_node
+          # first.
+          suites=false
+          if [ "$LIBS_ONLY" != true ] && [ "$LIBS_AND_UNIT" != true ]; then suites=true; fi
+          keys=()
+          if [ "$OS" = ubuntu-22.04 ]; then
+            keys=(libs integration_0 integration_1 node_compat_0 node_compat_1 specs_0 specs_1 unit_node unit)
+          elif [[ "$OS" == windows* ]]; then
+            if [ "$NODE_SUITES" = true ]; then keys+=(unit_node); fi
+            if [ "$suites" = true ]; then keys+=(specs_0 specs_1 unit); fi
+          else
+            if [ "$PICK_ALL" = true ]; then keys+=(libs); fi
+            if [ "$NODE_SUITES" = true ]; then keys+=(node_compat_0 node_compat_1); fi
+            if [ "$PICK_ALL" = true ] && [ "$suites" = true ]; then keys+=(specs_0 specs_1); fi
+            if [ "$NODE_SUITES" = true ]; then keys+=(unit_node); fi
+            if [ "$PICK_ALL" = true ] && [ "$suites" = true ]; then keys+=(unit); fi
+          fi
+          jobs=""
+          # The long specs shards (70 min on win-x64, 80-85 on win-x64-brain, an i3)
+          # ask for the fast Windows host only: windows-x64-fast is the label
+          # only win-x64's runners carry; when that host is busy they take the
+          # image, never brain.
+          for k in ${keys[@]+"${keys[@]}"}; do
+            p=$POOL
+            if [ "$POOL" = windows-x64 ] && [[ "$k" == specs_* ]]; then p=windows-x64-fast; fi
+            jobs="$jobs $k=$p@$OS"
+          done
+          echo "jobs=${jobs# }" >>"$GITHUB_OUTPUT"
+          echo "jobs: ${jobs# }"
+      - id: pick
+        uses: Brainwires/.github/actions/pick-runners@415ef1f9941d798b5760bf69f908be88789371a2 # pick-runners
+        with:
+          jobs: ${{ steps.keys.outputs.jobs }}
+          vars: ${{ toJSON(vars) }}
 
   # unit and specs on every OS; on Linux also upstream's integration and
   # unit_node suites (the fork changes ext/os, ext/http, ext/net and
@@ -334,19 +328,20 @@ jobs:
   # (macOS, Windows) adds unit_node and node_compat (2 shards) too, so every
   # OS's enabled node_compat entries are checked in CI, not only on a
   # workstation. An entry with `pick` runs where test-runner picked for it
-  # (a node_suites entry, or every Linux x64 entry on its pick_all leg).
+  # when test-runner lists that key, else (and every entry without `pick`)
+  # on the os image.
   test:
     name: test ${{ matrix.suite }}${{ matrix.shard_label }}
     needs: [build, test-runner]
     # test-runner is skipped on a leg that picks nothing: run regardless, but
     # only after a passed build.
     if: ${{ !cancelled() && needs.build.result == 'success' && (!inputs.libs_only || inputs.node_suites) }}
-    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && format('"{0}"', inputs.os) || (matrix.pick && (needs.test-runner.outputs[matrix.pick] || inputs.pick_runs_on)) || inputs.runs_on || format('"{0}"', inputs.os)) }}
+    runs-on: ${{ matrix.pick && fromJSON(needs.test-runner.outputs.plan || '{}')[matrix.pick] || inputs.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.os == 'ubuntu-22.04' && '[{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":"","pick":"unit"},{"suite":"specs","package":"specs_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"specs_0"},{"suite":"specs","package":"specs_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"specs_1"},{"suite":"integration","package":"integration_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"integration_0"},{"suite":"integration","package":"integration_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"integration_1"},{"suite":"unit_node","package":"unit_node_tests","shard":"","shard_total":"","shard_label":"","pick":"unit_node"},{"suite":"node_compat","package":"node_compat_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"node_compat_0"},{"suite":"node_compat","package":"node_compat_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"node_compat_1"}]' || format('[{0}{1}{2}]', inputs.libs_and_unit && '{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":""}' || (!inputs.libs_only && (startsWith(inputs.os, 'windows') && '{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":"","pick":"unit"},{"suite":"specs","package":"specs_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"specs_0"},{"suite":"specs","package":"specs_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"specs_1"}' || '{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":""},{"suite":"specs","package":"specs_tests","shard":"0","shard_total":"2","shard_label":" (1/2)"},{"suite":"specs","package":"specs_tests","shard":"1","shard_total":"2","shard_label":" (2/2)"}') || ''), ((inputs.libs_and_unit || !inputs.libs_only) && inputs.node_suites) && ',' || '', inputs.node_suites && '{"suite":"node_compat","package":"node_compat_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"node_compat_0"},{"suite":"node_compat","package":"node_compat_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"node_compat_1"},{"suite":"unit_node","package":"unit_node_tests","shard":"","shard_total":"","shard_label":"","pick":"unit_node"}' || '')) }}
+        include: ${{ fromJSON(inputs.os == 'ubuntu-22.04' && '[{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":"","pick":"unit"},{"suite":"specs","package":"specs_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"specs_0"},{"suite":"specs","package":"specs_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"specs_1"},{"suite":"integration","package":"integration_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"integration_0"},{"suite":"integration","package":"integration_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"integration_1"},{"suite":"unit_node","package":"unit_node_tests","shard":"","shard_total":"","shard_label":"","pick":"unit_node"},{"suite":"node_compat","package":"node_compat_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"node_compat_0"},{"suite":"node_compat","package":"node_compat_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"node_compat_1"}]' || format('[{0}{1}{2}]', inputs.libs_and_unit && '{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":""}' || (!inputs.libs_only && '{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":"","pick":"unit"},{"suite":"specs","package":"specs_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"specs_0"},{"suite":"specs","package":"specs_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"specs_1"}' || ''), ((inputs.libs_and_unit || !inputs.libs_only) && inputs.node_suites) && ',' || '', inputs.node_suites && '{"suite":"node_compat","package":"node_compat_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"node_compat_0"},{"suite":"node_compat","package":"node_compat_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"node_compat_1"},{"suite":"unit_node","package":"unit_node_tests","shard":"","shard_total":"","shard_label":"","pick":"unit_node"}' || '')) }}
     defaults:
       run:
         shell: bash

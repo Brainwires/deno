@@ -61,18 +61,28 @@ The overflow. A pool has few slots (the mac-x64 pool one), and a target's legs
 on it queue behind each other: denort and denort bin start together after
 setup, cli after denort bin, so a release ran denort, denort bin and cli one
 after another on the Intel Mac (about 4 hours). Each pool starts with its free
-slots: DENEXT_POOL_HEALTH's `healthy_slots` (else `slots`) minus the `busy` of
-its label and of the labels that share its capacity (SHARED_LABELS), when the
-value is fresh and lists the label; none when it marks the pool not ok or
-paused; else the slot count variable (RUNNER_*_SLOTS, default 1). Then, the
-jobs in dependency order:
+slots: POOL_FREE[label] when POOL_FREE parses and lists the label (the shared
+picker's `free` output, Brainwires/.github/actions/pick-runners, which the
+setup job runs just before this: healthy slots minus the taken ones, the
+queued jobs of the repository's other runs included, 0 for a pool marked not
+ok or paused or one a re-run found stuck); else DENEXT_POOL_HEALTH's
+`healthy_slots` (else `slots`) minus the `busy` of its label and of the labels
+that share its capacity (SHARED_LABELS), when the value is fresh and lists the
+label; none when it marks the pool not ok or paused; else the slot count
+variable (RUNNER_*_SLOTS, default 1). Then, the jobs in dependency order:
 
 - a job whose `needs` (same target) held a slot of its pool (or of its
   `runner_fallback` pool) takes that slot over: it starts the moment that job
   ends and frees it, so it waits for nothing;
 - else it takes a free slot of its pool, if one is left;
 - else a free slot of its `runner_fallback` pool, if it has one;
-- else the image: on a pool it would only wait for a slot.
+- else the image: on a pool it would only wait for a slot;
+- except a macOS job once MACOS_CAP (default 3) macOS jobs of this run went to
+  GitHub's images (GitHub runs about 5 macOS jobs at once for the whole org,
+  as the shared picker's macos-cap): it takes its pool and waits there. A
+  macOS job with no pool to wait on (x86_64-apple-darwin's package and
+  e2e_fork, which need a GUI session the mac-x64 pool lacks, and the macOS
+  laufey legs) stays on the image and counts toward the cap.
 
 The jobs that start together (after setup) take the free slots first those
 with the longest chain of later jobs on the same pool (denort bin, whose cli
@@ -88,15 +98,19 @@ Env: TARGETS ("all" or a comma-separated list of triples),
      optional),
      RUNNER_MACOS_ARM_SLOTS, RUNNER_MACOS_X64_SLOTS,
      RUNNER_LINUX_X64_2204_SLOTS (each optional, default 1),
+     POOL_FREE (the shared picker's `free` output: {label: free slots},
+     optional),
      POOL_HEALTH (the organization variable DENEXT_POOL_HEALTH, optional),
+     MACOS_CAP (the most macOS jobs sent to GitHub's images, default 3),
      SKIP_JOBS (space-separated job keys this run skips, optional).
 """
 import json
 import os
 import sys
+import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pick_runner import fresh_pools, parse_runner  # noqa: E402
+HEALTH_MAX_AGE = 30 * 60  # seconds: an older DENEXT_POOL_HEALTH is ignored
+DEFAULT_MACOS_CAP = 3
 
 ALL_TARGETS = [
     {"target": "aarch64-apple-darwin", "os": "macos-15"},
@@ -137,6 +151,62 @@ SHARED_LABELS = {
 IMAGES = {t["os"] for t in ALL_TARGETS}
 
 
+def fresh_pools(value, now=None):
+    """DENEXT_POOL_HEALTH's `pools` map ({label: entry}) when `value` (schema
+    v1) parses and is fresh, else None (missing, unparsable or stale: the
+    plan behaves as without it)."""
+    try:
+        health = json.loads(value or "")
+    except ValueError:
+        return None
+    if not isinstance(health, dict):
+        return None
+    at = health.get("checked_at")
+    if isinstance(at, bool) or not isinstance(at, (int, float)):
+        return None
+    age = (time.time() if now is None else now) - at
+    if age > HEALTH_MAX_AGE or age < -300:
+        return None
+    pools = health.get("pools")
+    return pools if isinstance(pools, dict) else None
+
+
+def parse_runner(value):
+    """(runs-on JSON, the label that identifies the pool), or (None, None)."""
+    v = (value or "").strip()
+    if not v:
+        return None, None
+    if not v.startswith("["):
+        return json.dumps(v), v
+    try:
+        labels = json.loads(v)
+    except ValueError:
+        return None, None
+    if not isinstance(labels, list) or not all(
+        isinstance(l, str) and l for l in labels
+    ):
+        return None, None
+    label = next((l for l in labels if l != "self-hosted"), None)
+    return (json.dumps(labels, separators=(",", ":")), label) if label else (None, None)
+
+
+def picked_free(env):
+    """POOL_FREE ({label: free slots}, the shared picker's `free` output) when
+    it parses as an object, else None."""
+    try:
+        value = json.loads(env.get("POOL_FREE") or "")
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def macos_cap(env):
+    try:
+        return max(0, int(env.get("MACOS_CAP") or DEFAULT_MACOS_CAP))
+    except ValueError:
+        return DEFAULT_MACOS_CAP
+
+
 def _runner(value, image):
     value = (value or "").strip()
     if value.startswith("["):
@@ -157,8 +227,12 @@ def _int(value):
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def free_slots(label, env, pools):
-    """The slots of the pool `label` this run may take (see the docstring)."""
+def free_slots(label, env, pools, picked=None):
+    """The slots of the pool `label` this run may take (see the docstring):
+    `picked` (POOL_FREE) first, then `pools` (DENEXT_POOL_HEALTH), then the
+    slot count variable."""
+    if picked is not None and _int(picked.get(label)) is not None:
+        return max(0, picked[label])
     entry = pools.get(label) if pools is not None else None
     if isinstance(entry, dict):
         if entry.get("ok") is False or entry.get("paused") is True:
@@ -186,6 +260,9 @@ def allocate(targets, env):
     """Sets each target's `runs_on` (see the docstring)."""
     skip = set((env.get("SKIP_JOBS") or "").split())
     pools = fresh_pools(env.get("POOL_HEALTH"))
+    picked = picked_free(env)
+    cap = macos_cap(env)
+    hosted_macos = 0
     jobs = [j for j in JOBS if j[0] not in skip]
     needs = {k: [n for n in ns if n not in skip] for k, _, ns in jobs}
     field = {k: f for k, f, _ in jobs}
@@ -228,11 +305,17 @@ def allocate(targets, env):
         if chosen is None:
             for pool, runner in candidates:
                 if pool not in free:
-                    free[pool] = free_slots(pool, env, pools)
+                    free[pool] = free_slots(pool, env, pools, picked)
                 if free[pool] > 0:
                     free[pool] -= 1
                     chosen = (pool, runner)
                     break
+        if chosen is None and t["os"].startswith("macos"):
+            if candidates and hosted_macos >= cap:
+                # GitHub's macOS share is spent: wait for the leg's own pool.
+                chosen = candidates[0]
+            else:
+                hosted_macos += 1
         if chosen is not None:
             held[(ti, k)] = chosen[0]
         t["runs_on"][k] = chosen[1] if chosen is not None else t["os"]

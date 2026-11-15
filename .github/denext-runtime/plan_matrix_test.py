@@ -20,6 +20,8 @@ WORKFLOW = os.path.join(HERE, "..", "workflows", "denext_runtime.yml")
 POOLS = {
     "RUNNER_MACOS_ARM": '["self-hosted","denext-macos-arm64"]',
     "RUNNER_MACOS_X64": '["self-hosted","denext-macos-x64"]',
+    # The slot tests leave the macOS cap out of the way (MacosCap tests it).
+    "MACOS_CAP": "99",
 }
 # POOLS, ARM and X64 must name the same pools.
 
@@ -222,7 +224,7 @@ class Rosetta(unittest.TestCase):
 
     def test_no_x64_pool_means_no_fallback(self):
         env = {"TARGETS": "all", "RUNNER_MACOS_ARM": POOLS["RUNNER_MACOS_ARM"],
-               "MACOS_X64_ON_ARM": "1", "RUNNER_MACOS_ARM_SLOTS": "2"}
+               "MACOS_X64_ON_ARM": "1", "RUNNER_MACOS_ARM_SLOTS": "2", "MACOS_CAP": "99"}
         x64 = by_target(plan_matrix.plan(env))["x86_64-apple-darwin"]
         self.assertNotIn("runner_fallback", x64)
         self.assertEqual(on_pool(x64), [])
@@ -384,13 +386,173 @@ class Overflow(unittest.TestCase):
 
     def test_runs_isolated(self):
         # The plan step runs it with -I, which leaves the script's directory
-        # off sys.path: the pick_runner import must still resolve.
+        # off sys.path: it must need no sibling module.
         out = subprocess.run(
             [sys.executable, "-I", os.path.join(HERE, "plan_matrix.py")],
             env={"TARGETS": "x86_64-apple-darwin", **POOLS},
             capture_output=True, text=True, check=True,
         ).stdout
         self.assertEqual(json.loads(out)[0]["runs_on"]["cli"], X64)
+
+
+class PoolFree(unittest.TestCase):
+    """POOL_FREE (the shared picker's `free` output) before the health and
+    the slot variables."""
+
+    def plan(self, **env):
+        return by_target(plan_matrix.plan({"TARGETS": "all", **POOLS, **env}))
+
+    def test_pool_free_drives_allocation(self):
+        # Two free slots: denort and denort bin both start on the pool,
+        # whatever the slot variable says.
+        x64 = self.plan(
+            POOL_FREE=json.dumps({"denext-macos-x64": 2}), RUNNER_MACOS_X64_SLOTS="1"
+        )["x86_64-apple-darwin"]
+        self.assertEqual(on_pool(x64), ["cli", "denort", "denort_bin"])
+
+    def test_no_free_slot_overflows(self):
+        for n in (0, -1):
+            x64 = self.plan(POOL_FREE=json.dumps({"denext-macos-x64": n}))["x86_64-apple-darwin"]
+            self.assertEqual(on_pool(x64), [], n)
+
+    def test_pool_free_wins_over_the_health(self):
+        h = health({"denext-macos-x64": entry(slots=1, busy=1, healthy_slots=1)})
+        x64 = self.plan(
+            POOL_HEALTH=h, POOL_FREE=json.dumps({"denext-macos-x64": 1})
+        )["x86_64-apple-darwin"]
+        self.assertEqual(on_pool(x64), ["cli", "denort_bin"])
+        h = health({"denext-macos-x64": entry(slots=3, busy=0, healthy_slots=3)})
+        x64 = self.plan(
+            POOL_HEALTH=h, POOL_FREE=json.dumps({"denext-macos-x64": 0})
+        )["x86_64-apple-darwin"]
+        self.assertEqual(on_pool(x64), [])
+
+    def test_unparsable_or_unlisted_falls_back(self):
+        # The slot variable then counts (RUNNER_MACOS_X64_SLOTS unset: 1).
+        for v in ("", "not json", "[]", "3", json.dumps({"denext-linux-x64": 0}),
+                  json.dumps({"denext-macos-x64": "0"}), json.dumps({"denext-macos-x64": True})):
+            x64 = self.plan(POOL_FREE=v)["x86_64-apple-darwin"]
+            self.assertEqual(on_pool(x64), ["cli", "denort_bin"], v)
+
+    def test_unlisted_label_uses_the_health(self):
+        h = health({"denext-macos-x64": entry(slots=1, busy=1, healthy_slots=1)})
+        x64 = self.plan(
+            POOL_HEALTH=h, POOL_FREE=json.dumps({"denext-macos-arm64": 2})
+        )["x86_64-apple-darwin"]
+        self.assertEqual(on_pool(x64), [])
+
+    def test_arm_full_and_x64_free_sends_the_x64_builds_to_mac_x64(self):
+        m = self.plan(
+            MACOS_X64_ON_ARM="1",
+            POOL_FREE=json.dumps({"denext-macos-arm64": 0, "denext-macos-x64": 2}),
+        )
+        x64 = m["x86_64-apple-darwin"]
+        self.assertTrue(x64["rosetta"])
+        for job in ("denort", "denort_bin", "cli"):
+            self.assertEqual(x64["runs_on"][job], X64, job)
+        # Then GitHub: the jobs that launch the app (no GUI on mac-x64).
+        self.assertEqual(x64["runs_on"]["package"], "macos-15-intel")
+        arm = m["aarch64-apple-darwin"]
+        self.assertEqual(arm["runs_on"]["denort"], "macos-15")
+        self.assertEqual(arm["runs_on"]["denort_bin"], "macos-15")
+
+    def test_arm_full_and_one_x64_slot(self):
+        m = self.plan(
+            MACOS_X64_ON_ARM="1",
+            POOL_FREE=json.dumps({"denext-macos-arm64": 0, "denext-macos-x64": 1}),
+        )
+        x64 = m["x86_64-apple-darwin"]
+        self.assertEqual(x64["runs_on"]["denort_bin"], X64)
+        self.assertEqual(x64["runs_on"]["cli"], X64)
+        self.assertEqual(x64["runs_on"]["denort"], "macos-15-intel")
+
+    def test_laufey_by_pool_free(self):
+        env = {"RUNNER_LINUX_X64_2204": json.dumps(L2204)}
+        lx = self.plan(POOL_FREE=json.dumps({"denext-linux-x64-2204": 0}), **env)
+        self.assertEqual(on_pool(lx["x86_64-unknown-linux-gnu"]), [])
+        lx = self.plan(POOL_FREE=json.dumps({"denext-linux-x64-2204": 1}), **env)
+        self.assertEqual(on_pool(lx["x86_64-unknown-linux-gnu"]), ["laufey"])
+
+
+class MacosCap(unittest.TestCase):
+    """At most MACOS_CAP (default 3) macOS jobs go to GitHub's images; past
+    it a macOS job waits for its pool (as the shared picker's macos-cap)."""
+
+    FULL = json.dumps({"denext-macos-arm64": 0, "denext-macos-x64": 0})
+
+    def plan(self, **env):
+        base = {k: v for k, v in POOLS.items() if k != "MACOS_CAP"}
+        return by_target(plan_matrix.plan({"TARGETS": "all", **base, **env}))
+
+    @staticmethod
+    def hosted(m):
+        return sum(
+            1 for t in m.values() if t["os"].startswith("macos")
+            for r in t["runs_on"].values() if r == t["os"]
+        )
+
+    def test_default_cap_is_three(self):
+        m = self.plan(POOL_FREE=self.FULL)
+        arm, x64 = m["aarch64-apple-darwin"], m["x86_64-apple-darwin"]
+        # The first three that would overflow go to GitHub: arm64's denort and
+        # denort bin, and x86_64's laufey (no pool: always the image).
+        self.assertEqual(arm["runs_on"]["denort"], "macos-15")
+        self.assertEqual(arm["runs_on"]["denort_bin"], "macos-15")
+        self.assertEqual(x64["runs_on"]["laufey"], "macos-15-intel")
+        # The rest wait for their pool.
+        self.assertEqual(on_pool(arm), ["cli", "e2e_fork", "package"])
+        self.assertEqual(on_pool(x64), ["cli", "denort", "denort_bin"])
+        # Never forced onto a pool: the arm64 laufey leg (no pool) and
+        # x86_64's package and e2e_fork (no GUI session on mac-x64); they
+        # count toward the cap all the same.
+        self.assertEqual(arm["runs_on"]["laufey"], "macos-15")
+        self.assertEqual(x64["runs_on"]["package"], "macos-15-intel")
+        self.assertEqual(x64["runs_on"]["e2e_fork"], "macos-15-intel")
+        self.assertEqual(self.hosted(m), 6)
+
+    def test_garbage_cap_is_three(self):
+        want = self.plan(POOL_FREE=self.FULL)
+        for v in ("x", "", "-"):
+            self.assertEqual(self.plan(POOL_FREE=self.FULL, MACOS_CAP=v), want, v)
+
+    def test_cap_zero_waits_for_every_pool(self):
+        m = self.plan(POOL_FREE=self.FULL, MACOS_CAP="0")
+        self.assertEqual(on_pool(m["aarch64-apple-darwin"]),
+                         ["cli", "denort", "denort_bin", "e2e_fork", "package"])
+        x64 = m["x86_64-apple-darwin"]
+        self.assertEqual(on_pool(x64), ["cli", "denort", "denort_bin"])
+        self.assertEqual(x64["runs_on"]["package"], "macos-15-intel")
+        self.assertEqual(x64["runs_on"]["e2e_fork"], "macos-15-intel")
+
+    def test_a_high_cap_overflows_everything(self):
+        m = self.plan(POOL_FREE=self.FULL, MACOS_CAP="99")
+        for name in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
+            self.assertEqual(on_pool(m[name]), [], name)
+
+    def test_free_slots_come_first(self):
+        free = json.dumps({"denext-macos-arm64": 2, "denext-macos-x64": 2})
+        self.assertEqual(
+            self.plan(POOL_FREE=free, MACOS_CAP="0"), self.plan(POOL_FREE=free, MACOS_CAP="99")
+        )
+
+    def test_no_pool_means_the_image_whatever_the_cap(self):
+        m = by_target(plan_matrix.plan({"TARGETS": "all", "MACOS_CAP": "0"}))
+        for t in m.values():
+            self.assertEqual(set(t["runs_on"].values()), {t["os"]}, t["target"])
+
+    def test_other_targets_never_count(self):
+        # Linux laufey overflowing does not spend the macOS share.
+        env = {"RUNNER_LINUX_X64_2204": json.dumps(L2204), "MACOS_CAP": "1",
+               "POOL_FREE": json.dumps({"denext-linux-x64-2204": 0, "denext-macos-x64": 0})}
+        m = by_target(plan_matrix.plan({
+            "TARGETS": "x86_64-unknown-linux-gnu,x86_64-apple-darwin",
+            "RUNNER_MACOS_X64": POOLS["RUNNER_MACOS_X64"], **env}))
+        self.assertEqual(on_pool(m["x86_64-unknown-linux-gnu"]), [])
+        x64 = m["x86_64-apple-darwin"]
+        # One macOS leg on GitHub (x86_64's laufey, first in order), then the
+        # build legs wait for mac-x64.
+        self.assertEqual(x64["runs_on"]["laufey"], "macos-15-intel")
+        self.assertEqual(on_pool(x64), ["cli", "denort", "denort_bin"])
 
 
 def job_block(text, job):
@@ -451,23 +613,48 @@ class Workflow(unittest.TestCase):
 
     def test_the_plan_step_passes_the_overflow_inputs(self):
         setup = job_block(self.text, "setup")
-        self.assertIn(".github/denext-runtime/pick_runner.py", setup)
+        self.assertNotIn("pick_runner", setup)
+        self.assertIn("POOL_FREE: ${{ steps.pools.outputs.free }}", setup)
+        self.assertIn("MACOS_CAP: '3'", setup)
         self.assertIn("POOL_HEALTH: ${{ vars.DENEXT_POOL_HEALTH }}", setup)
         self.assertIn("SKIP_JOBS:", setup)
         for _, slots_var in plan_matrix.SLOT_VARS:
             self.assertIn(f"{slots_var}: ${{{{ vars.{slots_var} ||", setup)
 
-    def test_slot_defaults_match_the_tests_workflow(self):
-        # The same pools and defaults as denext_tests.yml's pick_slots.
-        with open(os.path.join(HERE, "..", "workflows", "denext_tests.yml"), encoding="utf-8") as f:
-            tests = f.read()
+    def test_the_pick_covers_every_pool_plan_matrix_uses(self):
+        # The setup job's pick-runners step lists each pool of SLOT_VARS, so
+        # its `free` output (POOL_FREE) has every label plan_matrix asks for.
         setup = job_block(self.text, "setup")
-        for _, slots_var in plan_matrix.SLOT_VARS:
-            want = re.search(rf"vars\.{slots_var} \|\| '(\d+)'", tests).group(1)
-            got = re.search(rf"vars\.{slots_var} \|\| '(\d+)'", setup).group(1)
-            self.assertEqual(got, want, slots_var)
-        shared = re.search(r"pick_shared_labels: (.*)$", tests, re.M).group(1).split()
-        self.assertEqual(sorted(plan_matrix.SHARED_LABELS["denext-linux-x64-2204"]), sorted(shared))
+        step = setup.split("      - id: pools\n", 1)[1].split("      - id: plan\n", 1)[0]
+        self.assertRegex(
+            step, r"uses: Brainwires/\.github/actions/pick-runners@[0-9a-f]{40} # pick-runners"
+        )
+        self.assertIn("vars: ${{ toJSON(vars) }}", step)
+        pools = re.search(r"jobs: (.*)$", step, re.M).group(1).split()
+        names = sorted(e.split("=", 1)[1] for e in pools)
+        want = {
+            "RUNNER_MACOS_ARM": "macos-arm64",
+            "RUNNER_MACOS_X64": "macos-x64",
+            "RUNNER_LINUX_X64_2204": "linux-x64-2204",
+        }
+        self.assertEqual(names, sorted(want[var] for var, _ in plan_matrix.SLOT_VARS))
+        # Before the plan step reads it.
+        self.assertLess(setup.index("- id: pools"), setup.index("- id: plan"))
+
+    def test_the_linux_jobs_take_the_picker(self):
+        runners = job_block(self.text, "runners")
+        self.assertIn("    name: pick runners\n", runners)
+        self.assertIn("    runs-on: ubuntu-latest\n", runners)
+        for job, key in (("guard", "guard"), ("setup", "setup"),
+                         ("e2e-harness", "harness"), ("publish", "publish")):
+            block = job_block(self.text, job)
+            self.assertIn(
+                f"runs-on: ${{{{ fromJSON(needs.runners.outputs.plan || '{{}}').{key} || 'ubuntu-24.04' }}}}",
+                block, job,
+            )
+            self.assertRegex(block, r"needs: (runners|\[runners, )", job)
+            self.assertIn(f" {key}=", " " + re.search(r"jobs: (.*)$", runners, re.M).group(1), job)
+        self.assertIsNone(re.search(r"vars\.RUNNER_LINUX_X64(?![_A-Z0-9])", self.text))
 
 
 if __name__ == "__main__":

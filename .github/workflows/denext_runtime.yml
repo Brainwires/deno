@@ -129,6 +129,32 @@ env:
   ENGINE_STALENESS_ENFORCE_CEF: tag
 
 jobs:
+  # Where the workflow's Linux jobs that do not come from the release matrix
+  # run (guard, setup, e2e harness, publish): our linux-x64 pool while it has a
+  # free slot, else ubuntu-24.04 at once (the shared pick-runners action). The
+  # matrix jobs take setup's plan (plan_matrix.py), which reads the same
+  # action's free slots. Never fails the run: on any error every job takes its
+  # image (each runs-on's `||`).
+  runners:
+    name: pick runners
+    # GitHub's image: the pick must not wait in the queue it shortens.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read # the repository's queued / running jobs
+    outputs:
+      plan: ${{ steps.pick.outputs.plan }}
+      hosted: ${{ steps.pick.outputs.hosted }}
+    steps:
+      - id: pick
+        uses: Brainwires/.github/actions/pick-runners@415ef1f9941d798b5760bf69f908be88789371a2 # pick-runners
+        with:
+          # setup starts in guard's slot when guard ends (it needs guard);
+          # publish, hours later, follows guard's choice too rather than
+          # holding a slot of this pick.
+          jobs: guard=linux-x64@ubuntu-24.04 setup=~guard harness=linux-x64@ubuntu-24.04 publish=~guard
+          vars: ${{ toJSON(vars) }}
+
   # The verified-SHA guard (.github/denext-runtime/guard_verified.py, DENEXT.md
   # item 354). After a release, development-denext is fast-forwarded to the
   # release commit, which already passed this workflow on its release branch
@@ -138,8 +164,10 @@ jobs:
   # a dispatch, a pull request, or an API error: verified=false, a full run.
   guard:
     name: verified-SHA guard
-    # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-24.04 (always the image on a fork's pull_request / pull_request_target).
-    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && '"ubuntu-24.04"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-24.04'))) }}
+    needs: runners
+    if: ${{ !cancelled() }}
+    # Our linux-x64 pool while it has a free slot, else ubuntu-24.04 (runners).
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').guard || 'ubuntu-24.04' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -181,10 +209,10 @@ jobs:
 
   setup:
     name: setup
-    needs: guard
-    if: ${{ needs.guard.outputs.verified != 'true' }}
-    # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-24.04 (always the image on a fork's pull_request / pull_request_target).
-    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && '"ubuntu-24.04"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-24.04'))) }}
+    needs: [runners, guard]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && needs.guard.outputs.verified != 'true' }}
+    # Our linux-x64 pool while it has a free slot, else ubuntu-24.04 (runners).
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').setup || 'ubuntu-24.04' }}
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       linux_matrix: ${{ steps.plan.outputs.linux_matrix }}
@@ -216,9 +244,18 @@ jobs:
             .github/denext-runtime/tag_gate.py
             .github/denext-runtime/engine_staleness.py
             .github/denext-runtime/plan_matrix.py
-            .github/denext-runtime/pick_runner.py
             .github/denext-runtime/tag_reuse.py
           sparse-checkout-cone-mode: false
+      # Each pool the release matrix may use: its free slots right now, by
+      # the shared picker's rule (healthy slots minus the taken ones, the
+      # queued jobs of the repository's other runs included; 0 for a pool
+      # marked not ok or paused, or one a re-run found stuck). plan_matrix.py
+      # allocates them itself (POOL_FREE); the plan of these keys is unused.
+      - id: pools
+        uses: Brainwires/.github/actions/pick-runners@415ef1f9941d798b5760bf69f908be88789371a2 # pick-runners
+        with:
+          jobs: arm=macos-arm64 x64=macos-x64 l2204=linux-x64-2204
+          vars: ${{ toJSON(vars) }}
       - id: plan
         env:
           GH_TOKEN: ${{ github.token }}
@@ -244,10 +281,14 @@ jobs:
           # The laufey job's Linux x64 leg (`laufey_runner`).
           RUNNER_LINUX_X64_2204: ${{ vars.RUNNER_LINUX_X64_2204 }}
           # The overflow (`runs_on`, plan_matrix.py): each pool's free slots
-          # from the fleet watchdog's DENEXT_POOL_HEALTH when fresh, else its
-          # slot count (the same defaults as denext_tests.yml's pick_slots);
-          # the jobs beyond them take the target's GitHub image. A job this
-          # run skips holds no slot.
+          # from the pick above (POOL_FREE), else the fleet watchdog's
+          # DENEXT_POOL_HEALTH when fresh, else its slot count; the jobs
+          # beyond them take the target's GitHub image, except that past
+          # MACOS_CAP macOS jobs on GitHub's images (the shared picker's
+          # macos-cap) a macOS job waits for its pool. A job this run skips
+          # holds no slot.
+          POOL_FREE: ${{ steps.pools.outputs.free }}
+          MACOS_CAP: '3'
           POOL_HEALTH: ${{ vars.DENEXT_POOL_HEALTH }}
           RUNNER_MACOS_ARM_SLOTS: ${{ vars.RUNNER_MACOS_ARM_SLOTS || '2' }}
           RUNNER_MACOS_X64_SLOTS: ${{ vars.RUNNER_MACOS_X64_SLOTS || '1' }}
@@ -439,10 +480,10 @@ jobs:
   # no runtime, display or build: which result belongs to which launch.
   e2e-harness:
     name: e2e harness
-    needs: guard
-    if: ${{ needs.guard.outputs.verified != 'true' }}
-    # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-24.04 (always the image on a fork's pull_request / pull_request_target).
-    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && '"ubuntu-24.04"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-24.04'))) }}
+    needs: [runners, guard]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && needs.guard.outputs.verified != 'true' }}
+    # Our linux-x64 pool while it has a free slot, else ubuntu-24.04 (runners).
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').harness || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2267,12 +2308,12 @@ jobs:
 
   publish:
     name: publish
-    needs: [setup, package, cli, e2e_fork, rpm-smoke]
+    needs: [runners, setup, package, cli, e2e_fork, rpm-smoke]
     # A `cli_only` dry run has no package or e2e_fork job: it still writes
     # (and uploads) the manifest, from the CLI archives alone.
     if: ${{ always() && (needs.cli.result == 'success' || (needs.cli.result == 'skipped' && needs.setup.outputs.reuse_cli != '')) && ((needs.package.result == 'success' && needs.e2e_fork.result == 'success') || (inputs.cli_only && needs.package.result == 'skipped' && needs.e2e_fork.result == 'skipped')) && (needs.rpm-smoke.result == 'success' || needs.rpm-smoke.result == 'skipped') }}
-    # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-24.04 (always the image on a fork's pull_request / pull_request_target).
-    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && '"ubuntu-24.04"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-24.04'))) }}
+    # Our linux-x64 pool while it has a free slot, else ubuntu-24.04 (runners).
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').publish || 'ubuntu-24.04' }}
     permissions:
       contents: write
       # Downloads reused builds from their run; attests what a tag publishes.
