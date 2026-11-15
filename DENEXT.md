@@ -15613,6 +15613,29 @@ where the changes are discussed.
        session), and no test double of `DesktopApi` exists.
      - Node tests enabled: none; no Node API changes.
 
+402. **`fix(desktop)`: packaging a raw-backend app for macOS wraps
+     `laufey_winit` in an app bundle** (port of theende/ende fd548017ac, MIT,
+     from denoland/deno#36637; upstream denoland/deno#36594;
+     `cli/tools/desktop.rs`; CLI only). The raw backend (`laufey_winit`)
+     ships as a bare binary, not a `.app`, so `deno desktop --backend raw`
+     for a macOS target failed with "could not find 'raw' .app bundle inside
+     …". The first lookup now wraps the binary in a minimal
+     `laufey_winit.app` (only `CFBundleExecutable`; packaging writes its own
+     `Info.plist`), assembled in a sibling temporary directory of the shared
+     backend cache and renamed into place, so a concurrent `deno desktop`
+     never sees half a bundle and reuses a finished one; I/O errors are
+     reported instead of "not found". The packaged runtime is named
+     `laufey_winit.dylib` for the raw backend, as for CEF: laufey_winit loads
+     `<executable>.dylib` beside itself, and its only `libruntime.dylib`
+     lookup is relative to the working directory (`/` under LaunchServices),
+     so the app packaged with only the first change could not start.
+     - User-facing note: `deno desktop --backend raw` packages and launches on
+       macOS.
+     - Tests: `tools::desktop::tests`' bundle creation, reuse, missing-binary
+       and error cases, and `macos_runtime_dylib_name_is_backend_specific`'s
+       raw case.
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
