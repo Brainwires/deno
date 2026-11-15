@@ -1,0 +1,12 @@
+{
+  // The kernel-sandbox escape corpus (README.md). Without kernel enforcement
+  // every probe must come back open (or n/a / host-blocked): the corpus runs,
+  // and it says so. Needs a C compiler (`cc`).
+  "tests": {
+    "corpus_runs_all_open": {
+      "if": "unix",
+      "args": "run -A --quiet corpus.ts",
+      "output": "[WILDCARD]kernel-sandbox corpus: [WILDCARD]\ncorpus: ok [WILDCARD]"
+    }
+  }
+}
