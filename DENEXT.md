@@ -15459,6 +15459,25 @@ where the changes are discussed.
      - Node tests enabled: none; `process.loadEnvFile()` and
        `util.parseEnv()` are unchanged.
 
+395. **`fix(run,serve)`: a symlinked entrypoint loads from the file it points
+     to** (port of theende/ende 1e4756cca2 and f5b06e0999, MIT, from
+     denoland/deno#36957; upstream denoland/deno#35545; `cli/args/mod.rs`).
+     `deno run bin/tool`, where `bin/tool` is a symlink to `../src/tool.js`,
+     loaded the entrypoint under the symlink's URL, so its relative imports
+     resolved against `bin/` and failed with "Module not found": a script
+     symlinked into a bin directory (a shebang script on `PATH`, an npm
+     `.bin` link) could not import its siblings. `deno serve` had the same bug.
+     A local file entrypoint now resolves to its real path first, as Node does
+     for its main module (`--preserve-symlinks-main` off); this fork's
+     directory entry (`deno run <dir>`) and Node binary main fallback then run
+     on the resolved URL, as before.
+     - User-facing note: `deno run` and `deno serve` of a symlink import
+       modules relative to the symlink's target; `import.meta.url` and
+       `import.meta.filename` name the target.
+     - Tests: the `run::symlinked_entrypoint` and `serve::symlinked_entrypoint`
+       specs (Unix; "Module not found" on 3.0.0-denext.22).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
