@@ -15566,6 +15566,29 @@ where the changes are discussed.
        (a fake `gh` on `PATH`, `TMPDIR` pointing at a missing directory).
      - Node tests enabled: none; no Node API changes.
 
+400. **`fix(desktop)`: on Windows, `deno desktop --hmr` / `--inspect` ends the
+     laufey backend's and the dev server's process trees with the dev run**
+     (port of theende/ende 5281e37b84, MIT, from denoland/deno#36947; upstream
+     denoland/deno#36500; `cli/util/job_object.rs`, `cli/tools/desktop.rs`;
+     CLI only, no laufey change). The dev run spawned the laufey backend with
+     `kill_on_drop`, which kills only the backend itself: its helpers (CEF's
+     renderer and GPU processes, WebView2's `msedgewebview2.exe`) kept running
+     after the run ended, so `laufey_webview.exe` had to be force-closed
+     before the next run, and nothing was killed when `deno` itself was
+     killed. The backend now goes in a job object with
+     `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, which closes when the dev run ends
+     or `deno` dies however it dies; the handle isn't inheritable and the job
+     allows no breakaway. A framework's HMR dev server goes in its own job
+     right after it is spawned (the part of the pull request Ende dropped,
+     with Ende's job type), so the server a package manager starts ends too.
+     A job that can't be set up is a warning, not an error.
+     - User-facing note: on Windows, stopping `deno desktop --hmr` (or killing
+       `deno`) ends `laufey_webview.exe`, its WebView2 / CEF helpers and the
+       framework dev server.
+     - Tests: `util::job_object::tests::dropping_the_job_kills_the_child`
+       (Windows only).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

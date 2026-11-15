@@ -1338,12 +1338,19 @@ fn parse_dev_server_url(line: &str) -> Option<String> {
     .map(|m| m.as_str().to_owned())
 }
 
+/// A framework dev server's kill-on-close job on Windows (see
+/// `crate::util::job_object`); empty elsewhere. Dropping it ends the tree.
+struct DevServerJob {
+  #[cfg(windows)]
+  _job: Option<crate::util::job_object::KillOnCloseJob>,
+}
+
 /// Spawns a framework HMR dev server
 async fn spawn_framework_dev_server(
   name: &str,
   cmd_args: &[String],
   cwd: &Path,
-) -> Result<(String, tokio::process::Child), AnyError> {
+) -> Result<(String, tokio::process::Child, DevServerJob), AnyError> {
   use tokio::io::AsyncBufReadExt;
   use tokio::io::BufReader;
 
@@ -1356,6 +1363,20 @@ async fn spawn_framework_dev_server(
     .with_context(|| {
       format!("failed to spawn HMR dev server: {:?}", cmd_args)
     })?;
+  // `kill_on_drop` only reaches the dev server itself, often a package
+  // manager whose child is the real server. On Windows the whole tree goes in
+  // a kill-on-close job right away, before it starts its own children.
+  let job = DevServerJob {
+    #[cfg(windows)]
+    _job: crate::util::job_object::KillOnCloseJob::assign(&child)
+      .inspect_err(|e| {
+        log::warn!(
+          "Could not put the {name} dev server in a job object, so its child \
+           processes may outlive it: {e}"
+        )
+      })
+      .ok(),
+  };
 
   let stdout = child.stdout.take().ok_or_else(|| {
     deno_core::anyhow::anyhow!("failed to capture HMR dev server stdout")
@@ -1390,7 +1411,7 @@ async fn spawn_framework_dev_server(
     }
   });
 
-  Ok((url, child))
+  Ok((url, child, job))
 }
 
 /// Launch the desktop app with HMR enabled after compilation.
@@ -1563,7 +1584,7 @@ async fn run_desktop_hmr(
     && let Some(fw) = framework
     && let Some(dev_cmd) = &fw.hmr_command
   {
-    let (dev_url, child) =
+    let (dev_url, child, job) =
       spawn_framework_dev_server(fw.name, dev_cmd, &source_abs).await?;
     log::info!(
       "{} {} HMR dev server at {}",
@@ -1572,7 +1593,7 @@ async fn run_desktop_hmr(
       dev_url,
     );
     cmd.env("DENO_DESKTOP_DEV_URL", &dev_url);
-    Some(child)
+    Some((child, job))
   } else {
     None
   };
@@ -1710,6 +1731,18 @@ async fn run_desktop_hmr(
           laufey_backend.display()
         )
       })?;
+    // `kill_on_drop` only reaches the backend itself. On Windows its helper
+    // processes (CEF renderers, WebView2) go in a kill-on-close job, which
+    // ends them when this block ends or when this process dies.
+    #[cfg(windows)]
+    let _job = crate::util::job_object::KillOnCloseJob::assign(&child)
+      .inspect_err(|e| {
+        log::warn!(
+          "Could not put the LAUFEY backend in a job object, so its helper \
+           processes may outlive it: {e}"
+        )
+      })
+      .ok();
     child
       .wait()
       .await
