@@ -3571,6 +3571,72 @@ Deno.test(
   },
 );
 
+// https://github.com/denoland/deno/issues/37050
+Deno.test(
+  { permissions: { net: true } },
+  async function httpServerResponseConnectionClose(t) {
+    for (const bodySize of [0, 5, 4096]) {
+      for (const mode of ["sync", "async", "stream"]) {
+        await t.step(`${mode}, request body ${bodySize}`, async () => {
+          const requests: string[] = [];
+          const ac = new AbortController();
+          const handler = (request: Request) => {
+            requests.push(new URL(request.url).pathname);
+            const response = () =>
+              new Response(mode === "stream" ? stream("ok") : "ok", {
+                headers: { connection: "keep-alive, ClOsE" },
+              });
+            // Exercise direct responses, consumed streaming request bodies,
+            // and streaming responses through the shared connection.
+            if (mode === "async") return request.text().then(response);
+            return response();
+          };
+          await using server = Deno.serve({
+            handler,
+            hostname: "127.0.0.1",
+            port: 0,
+            signal: ac.signal,
+            onListen() {},
+            onError: createOnErrorCb(ac),
+          });
+          using conn = await Deno.connect({
+            hostname: "127.0.0.1",
+            port: server.addr.port,
+          });
+          const body = "x".repeat(bodySize);
+          await writeAll(
+            conn,
+            new TextEncoder().encode(
+              `POST /first HTTP/1.1\r\nHost: localhost\r\nContent-Length: ${bodySize}\r\n\r\n${body}` +
+                "GET /second HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            ),
+          );
+          let response = "";
+          try {
+            const buffer = new Uint8Array(1024);
+            while (true) {
+              const n = await conn.read(buffer);
+              if (n === null) break;
+              response += new TextDecoder().decode(buffer.subarray(0, n));
+            }
+          } catch (error) {
+            if (!(error instanceof Deno.errors.ConnectionReset)) throw error;
+          } finally {
+            ac.abort();
+            await server.finished;
+          }
+          assertEquals(requests, ["/first"]);
+          assertEquals(response.split("HTTP/1.1 200 OK").length - 1, 1);
+          assertEquals(response.match(/^connection:.*$/gim), [
+            "connection: keep-alive, ClOsE",
+          ]);
+          assertStringIncludes(response, "ok");
+        });
+      }
+    }
+  },
+);
+
 Deno.test(
   { permissions: { net: true } },
   async function httpServerPostWithInvalidPrefixContentLength() {
@@ -3679,6 +3745,128 @@ Deno.test(
 
     ac.abort();
     await server.finished;
+  },
+);
+
+Deno.test(
+  { permissions: { net: true } },
+  async function httpServerClosesConnectionAfterEarlyResponseWithoutDrainingBody() {
+    const listeningDeferred = Promise.withResolvers<void>();
+    const ac = new AbortController();
+
+    await using server = Deno.serve({
+      handler: () => new Response("too large", { status: 413 }),
+      port: servePort,
+      signal: ac.signal,
+      onListen: onListen(listeningDeferred.resolve),
+      onError: createOnErrorCb(ac),
+    });
+
+    await listeningDeferred.promise;
+    const conn = await Deno.connect({ port: servePort });
+    const encoder = new TextEncoder();
+    await writeAll(
+      conn,
+      encoder.encode(
+        "POST / HTTP/1.1\r\nHost: example.domain\r\nContent-Length: 67108864\r\n\r\nx",
+      ),
+    );
+
+    const decoder = new TextDecoder();
+    let response = "";
+    const readToClose = (async () => {
+      const buf = new Uint8Array(1024);
+      while (true) {
+        const read = await conn.read(buf);
+        if (read === null) return;
+        response += decoder.decode(buf.subarray(0, read));
+      }
+    })();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const closed = await Promise.race([
+      readToClose.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), 1_000);
+      }),
+    ]);
+    clearTimeout(timer);
+
+    conn.close();
+    ac.abort();
+    await server.finished;
+
+    assertEquals(closed, true, "server kept draining an unread request body");
+    assertStringIncludes(response, "HTTP/1.1 413 Payload Too Large");
+    assertStringIncludes(response.toLowerCase(), "connection: close");
+  },
+);
+
+// Closing a socket that still holds unread request body bytes resets the
+// connection, which can destroy the response before the client reads it. The
+// server half-closes and lingers instead, so the client sees a clean EOF.
+Deno.test(
+  { permissions: { net: true } },
+  async function httpServerEarlyResponseEndsWithEofWhileClientUploads() {
+    const listeningDeferred = Promise.withResolvers<void>();
+    const ac = new AbortController();
+
+    await using server = Deno.serve({
+      handler: () => new Response("too large", { status: 413 }),
+      port: servePort,
+      signal: ac.signal,
+      onListen: onListen(listeningDeferred.resolve),
+      onError: createOnErrorCb(ac),
+    });
+
+    await listeningDeferred.promise;
+    const conn = await Deno.connect({ port: servePort });
+    const encoder = new TextEncoder();
+    // Keep uploading until the response arrives, so the server's receive
+    // buffer holds unread body bytes when it closes the connection.
+    let responded = false;
+    const upload = (async () => {
+      await writeAll(
+        conn,
+        encoder.encode(
+          "POST / HTTP/1.1\r\nHost: example.domain\r\nContent-Length: 67108864\r\n\r\n",
+        ),
+      );
+      const chunk = new Uint8Array(64 * 1024);
+      while (!responded) await conn.write(chunk);
+    })().catch(() => {});
+
+    const decoder = new TextDecoder();
+    let response = "";
+    const readToEnd = (async () => {
+      const buf = new Uint8Array(1024);
+      try {
+        while (true) {
+          const read = await conn.read(buf);
+          if (read === null) return "eof";
+          response += decoder.decode(buf.subarray(0, read));
+          responded = true;
+        }
+      } catch (error) {
+        return String(error);
+      }
+    })();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const end = await Promise.race([
+      readToEnd,
+      new Promise<string>((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), 5_000);
+      }),
+    ]);
+    clearTimeout(timer);
+
+    responded = true;
+    conn.close();
+    await upload;
+    ac.abort();
+    await server.finished;
+
+    assertEquals(end, "eof");
+    assertStringIncludes(response, "HTTP/1.1 413 Payload Too Large");
   },
 );
 

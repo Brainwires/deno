@@ -1207,15 +1207,21 @@ function readableStreamForRid(
   onClose,
 ) {
   const stream = cfn ? cfn(_brand) : new ReadableStream(_brand);
-  stream[_resourceBacking] = { rid, autoClose };
+  const owner = {
+    __proto__: null,
+    active: autoClose,
+    onClose,
+  };
+  stream[_resourceBacking] = { rid, autoClose, owner };
 
   const tryClose = () => {
-    if (!autoClose) return;
+    if (!owner.active) return;
+    owner.active = false;
     RESOURCE_REGISTRY.unregister(stream);
     core.tryClose(rid);
-    if (onClose !== undefined) {
-      const callback = onClose;
-      onClose = undefined;
+    if (owner.onClose !== undefined) {
+      const callback = owner.onClose;
+      owner.onClose = undefined;
       callback();
     }
   };
@@ -1253,6 +1259,12 @@ function readableStreamForRid(
           tryClose();
           controller.close();
           controller.byobRequest.respond(0);
+        } else if (
+          readableStreamHasDefaultReader(stream) &&
+          bytesRead < TypedArrayPrototypeGetByteLength(v)
+        ) {
+          // Do not retain the unused part of an auto-allocated buffer.
+          controller.enqueue(TypedArrayPrototypeSlice(v, 0, bytesRead));
         } else {
           controller.byobRequest.respond(bytesRead);
         }
@@ -1314,6 +1326,11 @@ function readableStreamForRidUnrefable(rid, constructor = ReadableStream) {
           core.tryClose(rid);
           controller.close();
           controller.byobRequest.respond(0);
+        } else if (
+          readableStreamHasDefaultReader(stream) &&
+          bytesRead < TypedArrayPrototypeGetByteLength(v)
+        ) {
+          controller.enqueue(TypedArrayPrototypeSlice(v, 0, bytesRead));
         } else {
           controller.byobRequest.respond(bytesRead);
         }
@@ -1363,6 +1380,17 @@ function readableStreamForRidUnrefableUnref(stream) {
 
 function getReadableStreamResourceBacking(stream) {
   return stream[_resourceBacking];
+}
+
+function transferResourceStreamOwnership(stream) {
+  const backing = stream[_resourceBacking];
+  if (backing === undefined || !backing.owner?.active) {
+    throw new TypeError("The stream does not own a transferable resource");
+  }
+  backing.owner.active = false;
+  backing.autoClose = false;
+  RESOURCE_REGISTRY.unregister(stream);
+  return backing.owner.onClose;
 }
 
 function getReadableStreamResourceBackingUnrefable(stream) {
@@ -1485,16 +1513,23 @@ async function readableStreamCollectIntoUint8Array(stream) {
  */
 function writableStreamForRid(rid, autoClose = true, cfn, options) {
   const stream = cfn ? cfn(_brand) : new WritableStream(_brand);
-  stream[_resourceBacking] = { rid, autoClose };
+  const owner = {
+    __proto__: null,
+    active: autoClose,
+    onClose: options?.onClose,
+  };
+  stream[_resourceBacking] = { rid, autoClose, owner };
   let onClose = options?.onClose;
 
   const tryClose = () => {
-    if (!autoClose) return;
+    if (!owner.active) return;
+    owner.active = false;
     RESOURCE_REGISTRY.unregister(stream);
     core.tryClose(rid);
     if (onClose !== undefined) {
       const callback = onClose;
       onClose = undefined;
+      owner.onClose = undefined;
       callback();
     }
   };
@@ -1563,11 +1598,23 @@ function writableStreamForRid(rid, autoClose = true, cfn, options) {
       } catch {
         // ignore errors on flush during close
       }
-      tryClose();
+      try {
+        if (options?.onShutdown !== undefined) {
+          await options.onShutdown();
+        }
+      } finally {
+        tryClose();
+      }
     },
-    abort() {
+    async abort(reason) {
       bufferOffset = 0;
-      tryClose();
+      try {
+        if (options?.onAbort !== undefined) {
+          await options.onAbort(reason);
+        }
+      } finally {
+        tryClose();
+      }
     },
   };
 
@@ -8567,6 +8614,7 @@ return {
   getReadableStreamResourceBacking,
   getReadableStreamStoredError,
   getWritableStreamResourceBacking,
+  transferResourceStreamOwnership,
   isReadableByteStreamController,
   isReadableStream,
   isReadableStreamBYOBReader,

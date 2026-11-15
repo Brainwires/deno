@@ -1044,10 +1044,7 @@ impl CliOptions {
               deno_path_util::resolve_path(&specifier, self.initial_cwd())?
             } else {
               let default_resolve = || {
-                let url = resolve_url_or_path_normalized(
-                  &run_flags.script,
-                  self.initial_cwd(),
-                )?;
+                let url = self.resolve_entrypoint_path(&run_flags.script)?;
                 // `deno run .` / `deno run <dir>`: the directory's entry,
                 // as `node <dir>` finds it
                 if url.scheme() == "file"
@@ -1083,13 +1080,7 @@ impl CliOptions {
             .resolve_main_module_with_resolver_if_bare(
               &run_flags.script,
               resolver,
-              || {
-                resolve_url_or_path_normalized(
-                  &run_flags.script,
-                  self.initial_cwd(),
-                )
-                .map_err(|e| e.into())
-              },
+              || self.resolve_entrypoint_path(&run_flags.script),
             )?,
           _ => {
             bail!("No main module.")
@@ -1098,6 +1089,29 @@ impl CliOptions {
       })
       .as_ref()
       .map_err(|err| deno_core::anyhow::anyhow!("{}", err))
+  }
+
+  /// Resolves the `run` / `serve` entrypoint `script`. A local file reached
+  /// through a symlink (the file itself or a directory on its path) is
+  /// resolved to its real path, so its relative imports resolve next to the
+  /// file it points to, as Node does for its main module. A path without a
+  /// link keeps its spelling: canonicalizing it would also expand a Windows
+  /// 8.3 short name (`RUNNER~1`), and the emit cache and `deno clean -e`
+  /// key a module by the spelling the other commands use.
+  fn resolve_entrypoint_path(
+    &self,
+    script: &str,
+  ) -> Result<ModuleSpecifier, AnyError> {
+    let mut url = resolve_url_or_path_normalized(script, self.initial_cwd())?;
+    if url.scheme() == "file"
+      && let Ok(path) = url.to_file_path()
+      && path_goes_through_symlink(&path)
+      && let Ok(real_path) = canonicalize_path(&path)
+      && real_path != path
+    {
+      url = deno_path_util::url_from_file_path(&real_path)?;
+    }
+    Ok(url)
   }
 
   pub fn resolve_main_module(&self) -> Result<&ModuleSpecifier, AnyError> {
@@ -1962,6 +1976,15 @@ impl CliOptions {
       NpmCachingStrategy::Eager
     }
   }
+}
+
+/// Whether `path` or one of the directories on it is a symbolic link (or, on
+/// Windows, a junction, which `symlink_metadata` reports as a link too).
+fn path_goes_through_symlink(path: &Path) -> bool {
+  path.ancestors().any(|ancestor| {
+    std::fs::symlink_metadata(ancestor)
+      .is_ok_and(|metadata| metadata.file_type().is_symlink())
+  })
 }
 
 /// The file `node <dir>` runs for a directory (Node's `Module._findPath`):

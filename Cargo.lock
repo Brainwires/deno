@@ -4186,6 +4186,7 @@ dependencies = [
 name = "deno_websocket"
 version = "0.265.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "deno_core",
  "deno_error",
@@ -4200,6 +4201,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "once_cell",
+ "sha1",
  "thiserror 2.0.21",
  "tokio",
 ]

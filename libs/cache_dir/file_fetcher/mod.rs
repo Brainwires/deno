@@ -598,7 +598,7 @@ impl<TBlobStore: BlobStore, TSys: FileFetcherSys, THttpClient: HttpClient>
 
     let mut url = Cow::Borrowed(url);
     for _ in 0..=redirect_limit {
-      match self.fetch_cached_no_follow(&url, None) {
+      match self.fetch_cached_no_follow(&url, None, false) {
         Ok(Some(FileOrRedirect::File(file))) => {
           return Ok(Some(file));
         }
@@ -708,6 +708,7 @@ impl<TBlobStore: BlobStore, TSys: FileFetcherSys, THttpClient: HttpClient>
     &self,
     url: &Url,
     maybe_checksum: Option<Checksum<'_>>,
+    is_authenticated: bool,
   ) -> Result<Option<FileOrRedirect>, FetchCachedNoFollowError> {
     debug!("FileFetcher::fetch_cached_no_follow - specifier: {}", url);
 
@@ -729,6 +730,11 @@ impl<TBlobStore: BlobStore, TSys: FileFetcherSys, THttpClient: HttpClient>
     if let Some(headers) = &maybe_headers
       && headers.contains_key(NOT_FOUND_CACHE_HEADER)
     {
+      // A negative response from an anonymous request must not hide a
+      // resource that the current credentials can access.
+      if is_authenticated {
+        return Ok(None);
+      }
       let download_time = self
         .http_cache
         .read_download_time(&cache_key)
@@ -854,10 +860,15 @@ impl<TBlobStore: BlobStore, TSys: FileFetcherSys, THttpClient: HttpClient>
     maybe_auth: Option<(header::HeaderName, header::HeaderValue)>,
   ) -> Result<TStrategy::ReturnValue, FetchNoFollowError> {
     debug!("FileFetcher::fetch_remote_no_follow - specifier: {}", url);
+    let is_authenticated =
+      maybe_auth.is_some() || self.auth_tokens.get(url).is_some();
 
     if self.should_use_cache(url, cache_setting)
-      && let Some(value) =
-        strategy.handle_fetch_cached_no_follow(url, maybe_checksum)?
+      && let Some(value) = strategy.handle_fetch_cached_no_follow(
+        url,
+        maybe_checksum,
+        is_authenticated,
+      )?
     {
       return Ok(value);
     }
@@ -946,8 +957,9 @@ impl<TBlobStore: BlobStore, TSys: FileFetcherSys, THttpClient: HttpClient>
       }
       SendRequestResponse::Code(bytes, headers) => {
         if let Some(checksum) = &maybe_checksum {
+          let content_type = headers.get("content-type").map(|s| s.as_str());
           checksum
-            .check(url, &bytes)
+            .check_remote(url, content_type, &bytes)
             .map_err(|err| FetchNoFollowErrorKind::ChecksumIntegrity(*err))?;
         }
         self.http_cache.set(url, headers.clone(), &bytes).map_err(
@@ -1213,6 +1225,7 @@ trait FetchOrEnsureCacheStrategy {
     &self,
     url: &Url,
     maybe_checksum: Option<Checksum<'_>>,
+    is_authenticated: bool,
   ) -> Result<Option<Self::ReturnValue>, FetchCachedNoFollowError>;
 
   async fn handle_fetch_remote_no_follow_no_cache(
@@ -1271,8 +1284,11 @@ impl<TBlobStore: BlobStore, TSys: FileFetcherSys, THttpClient: HttpClient>
     &self,
     url: &Url,
     maybe_checksum: Option<Checksum<'_>>,
+    is_authenticated: bool,
   ) -> Result<Option<FileOrRedirect>, FetchCachedNoFollowError> {
-    self.0.fetch_cached_no_follow(url, maybe_checksum)
+    self
+      .0
+      .fetch_cached_no_follow(url, maybe_checksum, is_authenticated)
   }
 
   async fn handle_fetch_remote_no_follow_no_cache(
@@ -1340,6 +1356,7 @@ impl<TBlobStore: BlobStore, TSys: FileFetcherSys, THttpClient: HttpClient>
     &self,
     url: &Url,
     _maybe_checksum: Option<Checksum<'_>>,
+    is_authenticated: bool,
   ) -> Result<Option<CachedOrRedirect>, FetchCachedNoFollowError> {
     // We don't take into account the checksum here because we assume
     // the bytes were verified when initially downloading the data
@@ -1365,6 +1382,9 @@ impl<TBlobStore: BlobStore, TSys: FileFetcherSys, THttpClient: HttpClient>
       return Ok(None);
     };
     if headers.contains_key(NOT_FOUND_CACHE_HEADER) {
+      if is_authenticated {
+        return Ok(None);
+      }
       let download_time = self
         .0
         .http_cache

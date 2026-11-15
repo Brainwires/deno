@@ -159,7 +159,10 @@ class URLSearchParams {
         while (true) {
           // deno-lint-ignore deno-internal/prefer-primordials
           const res = iter.next();
-          if (res == null) {
+          if (
+            res === null ||
+            (typeof res !== "object" && typeof res !== "function")
+          ) {
             const err = new TypeError(
               "Each query pair must be an iterable [name, value] tuple",
             );
@@ -763,7 +766,7 @@ class URL {
     }
     // If initialized with webidl.createBranded, private properties are not be accessible,
     // so it is passed through the constructor
-    const self = new this(skipInit);
+    const self = new URL(skipInit);
     self[webidl.brand] = webidl.brand;
     self.#serialization = getSerialization(status, url, base);
     self.#updateComponents();

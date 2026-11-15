@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 import { core, primordials } from "ext:core/mod.js";
-const { SafeArrayIterator } = primordials;
+const { SafeArrayIterator, TypeError } = primordials;
 
 const event = core.loadExtScript("ext:deno_web/02_event.js");
 const loadBase64 = () => core.loadExtScript("ext:deno_web/05_base64.js");
@@ -126,6 +126,16 @@ const loadHTMLRewriter = () =>
     (_htmlRewriterMod = core.loadExtScript(
       "ext:deno_html_rewriter/01_html_rewriter.js",
     ));
+
+// `self` of Window and WorkerGlobalScope. Like any Web IDL attribute getter,
+// it uses the global object for a nullish receiver and rejects a receiver that
+// isn't the global object.
+const selfDescriptor = core.propGetterOnly(function () {
+  if (this !== undefined && this !== null && this !== globalThis) {
+    throw new TypeError("Illegal invocation");
+  }
+  return globalThis;
+});
 
 // https://developer.mozilla.org/en-US/docs/Web/API/WindowOrWorkerGlobalScope
 const windowOrWorkerGlobalScope = {
@@ -694,4 +704,8 @@ unstableForWindowOrWorkerGlobalScope[unstableIds.rawImports] = {
   ),
 };
 
-export { unstableForWindowOrWorkerGlobalScope, windowOrWorkerGlobalScope };
+export {
+  selfDescriptor,
+  unstableForWindowOrWorkerGlobalScope,
+  windowOrWorkerGlobalScope,
+};

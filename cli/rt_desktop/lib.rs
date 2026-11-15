@@ -2126,6 +2126,16 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     );
   }
 
+  /// macOS only: AppKit lets only the main thread touch an `NSView`, which
+  /// wgpu does to create a Metal surface (denoland/deno#36738). Other
+  /// platforms run `f` inline, as the default does.
+  #[cfg(target_os = "macos")]
+  fn run_on_ui_thread(&self, f: Box<dyn FnOnce() + Send>) {
+    if let Err(e) = laufey::try_run_on_ui_thread(f) {
+      log::warn!("could not run a task on the UI thread: {e}");
+    }
+  }
+
   fn get_raw_window_handle(
     &self,
     window_id: u32,
