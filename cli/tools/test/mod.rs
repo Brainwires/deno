@@ -2508,6 +2508,9 @@ pub async fn run_tests(
 
   let worker_factory =
     Arc::new(factory.create_cli_main_worker_factory().await?);
+  // denext: a kernel-sandbox plan `deno test` can't apply refuses here,
+  // before anything is type-checked or reported
+  crate::sandbox::enforce::guard_user_code()?;
   let mut vitest = if workspace_test_options.vitest_compat {
     Some(
       vitest::VitestCompat::setup(

@@ -363,6 +363,30 @@ pub fn check_run(
   Ok(resolution)
 }
 
+/// Refuses to start `what`, a program this process would run directly
+/// rather than through `deno run` (`deno x` of a package's native
+/// executable), when the kernel sandbox would enforce for a run with these
+/// flags and deno.json: nothing would confine it, and a mode that fails
+/// closed never runs code unconfined.
+pub fn refuse_unconfined_program(
+  cli_options: &CliOptions,
+  what: &str,
+) -> Result<(), AnyError> {
+  let options = cli_options.permissions_options()?;
+  let inputs = ModeInputs {
+    kind: Some(RunKind::Run),
+    ..mode_inputs(cli_options, &options)?
+  };
+  let resolution = kernel_sandbox_mode(&inputs)?;
+  if resolution.mode.fails_closed() {
+    bail!(
+      "--kernel-sandbox={} refuses to start {what}: it would run directly, outside any kernel sandbox",
+      resolution.mode
+    );
+  }
+  Ok(())
+}
+
 fn source_name(source: ModeSource) -> &'static str {
   match source {
     ModeSource::Default => "default",

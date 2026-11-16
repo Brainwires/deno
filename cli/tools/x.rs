@@ -348,6 +348,12 @@ pub(crate) fn run_bin_value(
           path_buf.set_extension("");
         }
       }
+      // denext: a native executable runs directly, outside the kernel
+      // sandbox a `deno run` child would apply
+      crate::sandbox::refuse_unconfined_program(
+        factory.cli_options()?,
+        &format!("the native executable {}", path_buf.display()),
+      )?;
       let permissions = factory.root_permissions_container()?;
       permissions.check_run(
         &deno_runtime::deno_permissions::RunQueryDescriptor::Path(

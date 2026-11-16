@@ -202,8 +202,34 @@
     "test_refused": {
       "if": "kernelSandboxEnforce",
       "args": "test --kernel-sandbox=enforce main.ts",
-      "output": "unsupported.out",
+      "output": "test_refused.out",
       "exitCode": 1
+    },
+    // eval runs with every permission and takes no --kernel-sandbox
+    "eval_flag_refused": {
+      "args": "eval --kernel-sandbox=enforce console.log(1)",
+      "output": "eval_flag.out",
+      "exitCode": 1
+    },
+    "eval_report_flag_refused": {
+      "args": "eval --kernel-sandbox-report console.log(1)",
+      "output": "eval_flag.out",
+      "exitCode": 1
+    },
+    // deno.json's enforce: eval with a deny refuses, never runs unconfined
+    "eval_deny_under_config_refused": {
+      "if": "kernelSandboxEnforce",
+      "cwd": "eval_config",
+      "args": "eval --deny-read=/etc console.log(1)",
+      "output": "eval_deny.out",
+      "exitCode": 1
+    },
+    // ... and without a deny it runs as -A does (the sandbox stays off)
+    "eval_no_deny_under_config_runs": {
+      "if": "unix",
+      "cwd": "eval_config",
+      "args": "eval console.log(1)",
+      "output": "1\n"
     }
   }
 }

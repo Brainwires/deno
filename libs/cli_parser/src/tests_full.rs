@@ -3124,6 +3124,34 @@ fn kernel_sandbox_flags() {
   assert!(
     flags_from_vec(svec!["deno", "install", "--kernel-sandbox=warn"]).is_err()
   );
+  // never for eval, which runs with every permission
+  for arg in ["--kernel-sandbox=enforce", "--kernel-sandbox-report"] {
+    let err = flags_from_vec(svec!["deno", "eval", arg, "1"]).unwrap_err();
+    assert!(err.to_string().contains("deno eval doesn't take"), "{err}");
+  }
+}
+
+// denext: `deno eval` keeps every allow but applies its deny and ignore
+// flags
+#[test]
+fn eval_applies_denies() {
+  let flags = flags_from_vec(svec![
+    "deno",
+    "eval",
+    "--deny-read=/etc",
+    "--deny-net=10.0.0.1",
+    "--ignore-env=SECRET",
+    "1"
+  ])
+  .unwrap();
+  assert!(flags.permissions.allow_all);
+  assert_eq!(flags.permissions.deny_read, Some(svec!["/etc"]));
+  assert_eq!(flags.permissions.deny_net, Some(svec!["10.0.0.1"]));
+  assert_eq!(flags.permissions.ignore_env, Some(svec!["SECRET"]));
+  assert_eq!(flags.permissions.allow_read, None);
+  let flags = flags_from_vec(svec!["deno", "eval", "1"]).unwrap();
+  assert!(flags.permissions.allow_all);
+  assert_eq!(flags.permissions.deny_read, None);
 }
 
 // denext: `--clean-run-env`.

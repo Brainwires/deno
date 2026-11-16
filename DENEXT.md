@@ -16213,11 +16213,14 @@ where the changes are discussed.
        of the compared policy so a re-executed image must find the same set.
        Never `.npmrc` (it can hold registry credentials): a process confined at
        startup treats an unreadable one as absent, as a jailed lifecycle script
-       does, so a project that needs a custom registry from it fails closed. It
-       says so once on stderr, and `--kernel-sandbox-report` names each such
-       file on a `skipped:` line (run once without enforce to cache the
-       packages, or grant the file with `--allow-read` to accept the exposure).
-       The report prints once, from the image before the re-exec.
+       does (decided from the plan it applied or, for a child of a confined
+       process, the kernel's own report: no-new-privileges with a seccomp filter
+       on Linux, a Seatbelt sandbox on macOS; never from the environment), so a
+       project that needs a custom registry from it fails closed. It says so
+       once on stderr, and `--kernel-sandbox-report` names each such file on a
+       `skipped:` line (run once without enforce to cache the packages, or grant
+       the file with `--allow-read` to accept the exposure). The report prints
+       once, from the image before the re-exec.
      - Linux: exec, then restrict. The first image re-executes `/proc/self/exe`
        (same argv, so the PID, signals and `$!` are unchanged) with the plan in
        a sealed memfd (`F_SEAL_SEAL|SHRINK|GROW|WRITE`, the descriptor in
@@ -16292,11 +16295,17 @@ where the changes are discussed.
        can't be scoped); macOS reads `~/.CFUserTextEncoding`; the capability
        table no longer claims macOS `MapExecutable` (code loads from the read
        scope there, with a documented gap for a scoped `--allow-ffi`).
-     - Not covered yet (refused, never run unconfined): `deno test`, `bench`,
-       `eval` with a deny rule (`eval` grants everything by default, so
+     - Not covered yet (refused, never run unconfined): `deno test` (refused
+       before anything is type-checked), `bench`, `eval` with a deny rule under
+       deno.json's `enforce` (`eval` grants everything, so without a deny
        `enforce` is off there, as under `-A`), the REPL and Jupyter under
-       `enforce` (no graph-first apply there), compiled programs
-       (`deno compile --kernel-sandbox=enforce` stays refused).
+       `enforce` (no graph-first apply there), a package's native executable
+       through `deno x` (it would run directly; a JavaScript bin runs through
+       `deno run` with the mode), compiled programs
+       (`deno compile --kernel-sandbox=enforce` stays refused). `deno eval`
+       takes no `--kernel-sandbox` / `--kernel-sandbox-report` (a parse error),
+       and applies the deny and ignore flags it is given, which it accepted and
+       ignored before (as upstream does).
      - macOS: the working directory itself is listable (a `literal` rule:
        `getcwd` opens `.`, which spawning a child needs), nothing beneath it;
        under `--allow-run` so is `/` (dyld in every new process lists it and
@@ -16350,7 +16359,10 @@ where the changes are discussed.
        the re-exec, nothing outside the write scope changing, an inexpressible
        rule refused, stdin refused on Linux, `deno
        test` refused,
-       `info --json`), the updated `kernel_sandbox::policy`, and
+       `info --json`, eval's flag refused, eval with a deny under deno.json's
+       `enforce` refused and without one running), spec `eval/deny_flags`,
+       `deno_cli_parser`'s `eval_applies_denies`, the updated
+       `kernel_sandbox::policy`, and
        `kernel_sandbox::escape_corpus::corpus_enforce` (the escape corpus under
        `--expect=enforce`: files, no network and no run; the whole network; a
        run list).

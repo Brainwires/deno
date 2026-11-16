@@ -1776,6 +1776,7 @@ fn eval_parse(result: &ParseResult, flags: &mut Flags) -> Result<(), CliError> {
   runtime_args_parse(result, flags, false, true)?;
   // eval implies allow all permissions
   flags.permissions.allow_all = true;
+  eval_denies_parse(result, flags)?;
 
   ext_arg_parse(result, flags);
   cpu_prof_parse(result, flags);
@@ -1787,6 +1788,41 @@ fn eval_parse(result: &ParseResult, flags: &mut Flags) -> Result<(), CliError> {
     .unwrap_or_default();
 
   flags.subcommand = DenoSubcommand::Eval(EvalFlags { print, code });
+  Ok(())
+}
+
+/// denext: `deno eval` grants every permission, but the deny and ignore
+/// flags it accepts apply (they took no effect before), as under
+/// `deno run -A --deny-…`. It takes no `--kernel-sandbox`: it has no path
+/// that applies the sandbox before the code runs, so a mode that fails
+/// closed couldn't be kept; with a deny, deno.json's `enforce` refuses it.
+fn eval_denies_parse(
+  result: &ParseResult,
+  flags: &mut Flags,
+) -> Result<(), CliError> {
+  let mut parsed = Flags::default();
+  permission_args_parse(result, &mut parsed)?;
+  let parsed = parsed.permissions;
+  if parsed.kernel_sandbox.is_some() || parsed.kernel_sandbox_report {
+    return Err(CliError::new(
+      CliErrorKind::InvalidValue,
+      "deno eval doesn't take --kernel-sandbox or --kernel-sandbox-report: it runs with every permission. Save the code to a file and use deno run with the grants it needs",
+    ));
+  }
+  let p = &mut flags.permissions;
+  p.deny_read = parsed.deny_read;
+  p.ignore_read = parsed.ignore_read;
+  p.deny_write = parsed.deny_write;
+  p.deny_net = parsed.deny_net;
+  p.deny_net_connect = parsed.deny_net_connect;
+  p.deny_net_listen = parsed.deny_net_listen;
+  p.deny_env = parsed.deny_env;
+  p.ignore_env = parsed.ignore_env;
+  p.deny_run = parsed.deny_run;
+  p.deny_sys = parsed.deny_sys;
+  p.deny_ffi = parsed.deny_ffi;
+  p.deny_import = parsed.deny_import;
+  p.deny_midi = parsed.deny_midi;
   Ok(())
 }
 

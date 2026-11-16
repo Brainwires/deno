@@ -1,0 +1,1 @@
+error: --kernel-sandbox=enforce is not supported for this command yet: it can't apply the sandbox before user code runs, so it refuses to start

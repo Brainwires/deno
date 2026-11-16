@@ -1,0 +1,23 @@
+// denext: deno eval keeps every allow but applies the deny and ignore flags
+// it is given
+{
+  "tempDir": true,
+  "tests": {
+    "deny_read_applies": {
+      "steps": [
+        {
+          "args": "eval Deno.writeTextFileSync('secret.txt','x')",
+          "output": ""
+        },
+        {
+          "args": "eval --deny-read=secret.txt try{Deno.readTextFileSync('secret.txt');console.log('read')}catch(e){console.log(e.name)}",
+          "output": "NotCapable\n"
+        },
+        {
+          "args": "eval console.log(Deno.readTextFileSync('secret.txt'))",
+          "output": "x\n"
+        }
+      ]
+    }
+  }
+}
