@@ -356,6 +356,8 @@ static_assertions = "1"
 strum = { version = "0.27.1", features = ["derive"] }
 strum_macros = "0.27.1"
 sys_traits = "0.1.28"
+# The version hickory-resolver reads macOS's DNS configuration with.
+system-configuration = "0.7.0"
 tar = "=0.4.46"
 tempfile = "3.4.0"
 termcolor = "1.1.3"
@@ -386,7 +388,7 @@ webpki-roots = "1.0.10"
 which = { version = "8.0.0", default-features = false }
 yoke = { version = "0.7.4", features = ["derive"] }
 zeromq = "0.6"
-zip = { version = "9.0.4", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2"] }
 
 opentelemetry = "0.32.0"
 opentelemetry-http = "0.32.0"
