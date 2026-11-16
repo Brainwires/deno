@@ -27,6 +27,7 @@
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::HomeReadPolicy;
 use crate::OsNet;
 
 fn quote(path: &Path) -> String {
@@ -68,10 +69,26 @@ const MACH_DENY: &[&str] = &[
   "com.apple.dnssd.service",
 ];
 
+/// The read operations a home policy refuses: a file's contents (and a
+/// directory's listing) and its extended attributes.
+const HOME_READ_OPS: &str = "file-read-data file-read-xattr";
+
 /// The Seatbelt profile.
 pub fn profile(
   write_roots: &[PathBuf],
   deny_read: &[PathBuf],
+  net: OsNet,
+) -> String {
+  profile_with_home_read(write_roots, deny_read, None, net)
+}
+
+/// The Seatbelt profile, with no file contents (nor directory listings)
+/// under the home directory but the paths `home_read` allows, when given
+/// (DENEXT.md item 437). Without it, the same text as [`profile`].
+pub fn profile_with_home_read(
+  write_roots: &[PathBuf],
+  deny_read: &[PathBuf],
+  home_read: Option<&HomeReadPolicy>,
   net: OsNet,
 ) -> String {
   let mut p = String::from("(version 1)\n(deny default)\n");
@@ -79,12 +96,39 @@ pub fn profile(
   // write (and hard-link, which needs the source inside too) beneath the
   // roots and to the null devices; ioctl everything but the terminals
   p.push_str("(allow file-read*)\n");
-  p.push_str("(deny file-read* ");
-  p.push_str(TTY_FILTERS);
-  for path in deny_read {
-    p.push_str(&format!(" (subpath {})", quote(path)));
+  // with a home policy, no file contents (nor extended attributes, which
+  // carry such things as a download's origin) under the home directories but
+  // the allowed paths, refused as if missing: a tool that looks for an
+  // optional file in a parent directory goes on as it would without one.
+  // Metadata stays readable: a program resolving a path (`realpath`) stats
+  // every directory on the way, as Landlock allows on Linux.
+  if let Some(home_read) = home_read
+    && !home_read.homes.is_empty()
+  {
+    p.push_str(&format!("(deny {HOME_READ_OPS} (with errno ENOENT)"));
+    for home in &home_read.homes {
+      p.push_str(&format!(" (subpath {})", quote(home)));
+    }
+    p.push_str(")\n");
+    if !home_read.allowed.is_empty() {
+      p.push_str(&format!("(allow {HOME_READ_OPS}"));
+      for path in &home_read.allowed {
+        p.push_str(&format!(" (subpath {})", quote(path)));
+      }
+      p.push_str(")\n");
+    }
   }
-  p.push_str(")\n");
+  let mut denied = String::from(TTY_FILTERS);
+  for path in deny_read {
+    denied.push_str(&format!(" (subpath {})", quote(path)));
+  }
+  p.push_str(&format!("(deny file-read* {denied})\n"));
+  // a rule for one operation outranks a `file-read*` one whatever the
+  // order: the denied paths inside an allowed path need a deny of the same
+  // operations of their own, after the allow
+  if home_read.is_some() {
+    p.push_str(&format!("(deny {HOME_READ_OPS} {denied})\n"));
+  }
   p.push_str("(allow file-write*");
   for root in write_roots {
     p.push_str(&format!(" (subpath {})", quote(root)));
@@ -161,6 +205,288 @@ pub fn profile(
   p
 }
 
+// ---------------------------------------------------------------------------
+// The cli profile (`--kernel-sandbox=enforce`, macOS Mode A)
+// ---------------------------------------------------------------------------
+
+use crate::plan::MacosPlan;
+use crate::plan::NetPlan;
+use crate::plan::Ports;
+use crate::plan::SbFilter;
+use crate::plan::SbScope;
+use crate::plan::SbUnix;
+
+fn quote_str(text: &str) -> String {
+  format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn filter_text(f: &SbFilter) -> String {
+  match f {
+    SbFilter::Subpath(p) => format!("(subpath {})", quote_str(p)),
+    SbFilter::Literal(p) => format!("(literal {})", quote_str(p)),
+    SbFilter::Regex(r) => format!("(regex #\"{}\")", r.replace('"', "\\\"")),
+  }
+}
+
+fn filters_text(filters: &[SbFilter]) -> String {
+  filters
+    .iter()
+    .map(filter_text)
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+/// `(allow <op>)` for every path, `(allow <op> <filters>)` for a scope, or
+/// nothing for an empty one.
+fn allow_scope(p: &mut String, op: &str, scope: &SbScope) {
+  match scope {
+    SbScope::All => p.push_str(&format!("(allow {op})\n")),
+    SbScope::Filters { filters } if !filters.is_empty() => {
+      p.push_str(&format!("(allow {op} {})\n", filters_text(filters)));
+    }
+    SbScope::Filters { .. } => {}
+  }
+}
+
+/// The library paths dyld maps code from (and the shared cache), whatever
+/// the grant: without them nothing starts.
+const SYSTEM_CODE: &[&str] = &[
+  "/usr/lib",
+  "/System",
+  "/Library/Apple",
+  "/System/Volumes/Preboot/Cryptexes",
+  "/private/var/db/dyld",
+];
+
+/// The mach services the runtime needs whatever the grant: the user
+/// database, temp directories, logging, notifications, preferences
+/// (CoreFoundation, read-only).
+const CLI_MACH_ALLOW: &[&str] = &[
+  "com.apple.system.opendirectoryd.libinfo",
+  "com.apple.system.opendirectoryd.membership",
+  "com.apple.bsd.dirhelper",
+  "com.apple.system.logger",
+  "com.apple.logd",
+  "com.apple.system.notification_center",
+  "com.apple.cfprefsd.daemon",
+  "com.apple.cfprefsd.agent",
+];
+
+/// The cli Seatbelt profile for `plan`: deny by default; file metadata
+/// readable everywhere (path resolution needs it on every ancestor; a file's
+/// existence and size are visible, which the gaps document); the read and write scopes; then the exact denies;
+/// then the re-allows the denies must not swallow (the last matching rule
+/// wins). Code maps only from the load scope, the runtime and the system
+/// libraries. No LaunchServices, AppleEvents or launchd job submission.
+pub fn cli_profile(plan: &MacosPlan) -> String {
+  let mut p = String::from("(version 1)\n(deny default)\n");
+  // files: allows
+  p.push_str("(allow file-read-metadata)\n");
+  allow_scope(&mut p, "file-read*", &plan.read);
+  allow_scope(&mut p, "file-write*", &plan.write);
+  // then the denies
+  if !plan.deny_read.is_empty() {
+    p.push_str(&format!(
+      "(deny file-read* {})\n",
+      filters_text(&plan.deny_read)
+    ));
+  }
+  if !plan.deny_write.is_empty() {
+    p.push_str(&format!(
+      "(deny file-write* {})\n",
+      filters_text(&plan.deny_write)
+    ));
+  }
+  // then the re-allows
+  if !plan.reallow_read.is_empty() {
+    p.push_str(&format!(
+      "(allow file-read* {})\n",
+      filters_text(&plan.reallow_read)
+    ));
+  }
+  if !plan.reallow_write.is_empty() {
+    p.push_str(&format!(
+      "(allow file-write* {})\n",
+      filters_text(&plan.reallow_write)
+    ));
+  }
+  // the terminals: every one refused but those the plan names (the
+  // controlling terminal, the standard streams' own), never ioctl-able
+  for op in ["file-read*", "file-write*"] {
+    p.push_str(&format!("(deny {op} {TTY_FILTERS})\n"));
+  }
+  if !plan.ttys.is_empty() {
+    let literals = plan
+      .ttys
+      .iter()
+      .map(|t| format!("(literal {})", quote_str(t)))
+      .collect::<Vec<_>>()
+      .join(" ");
+    for op in ["file-read*", "file-write*"] {
+      p.push_str(&format!("(allow {op} {literals})\n"));
+    }
+  }
+  p.push_str("(allow file-ioctl)\n");
+  p.push_str(&format!("(deny file-ioctl {TTY_FILTERS})\n"));
+  // code
+  let mut map: Vec<SbFilter> = SYSTEM_CODE
+    .iter()
+    .map(|s| SbFilter::Subpath(s.to_string()))
+    .collect();
+  match &plan.map_exec {
+    SbScope::All => p.push_str("(allow file-map-executable)\n"),
+    SbScope::Filters { filters } => {
+      map.extend(filters.iter().cloned());
+      p.push_str(&format!(
+        "(allow file-map-executable {})\n",
+        filters_text(&map)
+      ));
+    }
+  }
+  // processes
+  p.push_str("(allow process-fork)\n");
+  if plan.exec {
+    p.push_str("(allow process-exec)\n");
+  } else {
+    p.push_str("(deny process-exec)\n");
+  }
+  p.push_str("(allow signal (target same-sandbox))\n");
+  p.push_str("(allow process-info* (target same-sandbox))\n");
+  p.push_str("(allow sysctl-read)\n");
+  if !plan.denied_sysctls.is_empty() {
+    let names = plan
+      .denied_sysctls
+      .iter()
+      .map(|n| match n.strip_suffix('*') {
+        Some(prefix) => format!("(sysctl-name-prefix {})", quote_str(prefix)),
+        None => format!("(sysctl-name {})", quote_str(n)),
+      })
+      .collect::<Vec<_>>()
+      .join(" ");
+    p.push_str(&format!("(deny sysctl-read {names})\n"));
+  }
+  p.push_str("(allow ipc-posix-sem)\n(allow ipc-posix-shm*)\n");
+  // mach services
+  let net_on = !matches!(plan.net, NetPlan::Denied);
+  let reads = !plan.read.is_empty();
+  let mut mach: Vec<&str> = CLI_MACH_ALLOW.to_vec();
+  if net_on {
+    mach.push("com.apple.dnssd.service");
+  }
+  if plan.system_ca {
+    mach.extend([
+      "com.apple.trustd",
+      "com.apple.trustd.agent",
+      "com.apple.SecurityServer",
+    ]);
+  }
+  if reads {
+    mach.push("com.apple.FSEvents");
+  }
+  p.push_str("(allow mach-lookup");
+  for name in &mach {
+    p.push_str(&format!(" (global-name \"{name}\")"));
+  }
+  p.push_str(")\n");
+  let refused: Vec<&&str> =
+    MACH_DENY.iter().filter(|n| !mach.contains(n)).collect();
+  p.push_str("(deny mach-lookup");
+  for name in refused {
+    p.push_str(&format!(" (global-name \"{name}\")"));
+  }
+  p.push_str(")\n");
+  p.push_str("(deny lsopen)\n(deny appleevent-send)\n(deny job-creation)\n");
+  // the network
+  let resolver = "(allow network-outbound (remote unix-socket (path-literal \"/private/var/run/mDNSResponder\")))\n";
+  match &plan.net {
+    NetPlan::Denied => p.push_str("(deny network*)\n"),
+    NetPlan::Open => {
+      p.push_str("(allow network*)\n");
+      p.push_str("(deny network-outbound (remote unix-socket))\n");
+      p.push_str(resolver);
+    }
+    NetPlan::Ports { connect, bind } => {
+      p.push_str("(deny network*)\n");
+      match connect {
+        Ports::Any => p.push_str("(allow network-outbound (remote ip))\n"),
+        Ports::List { ports } => {
+          for port in ports {
+            p.push_str(&format!(
+              "(allow network-outbound (remote ip \"*:{port}\"))\n"
+            ));
+          }
+        }
+      }
+      match bind {
+        Ports::Any => {
+          p.push_str("(allow network-bind (local ip))\n");
+          p.push_str("(allow network-inbound (local ip))\n");
+        }
+        Ports::List { ports } => {
+          for port in ports {
+            p.push_str(&format!(
+              "(allow network-bind (local ip \"*:{port}\"))\n"
+            ));
+            p.push_str(&format!(
+              "(allow network-inbound (local ip \"*:{port}\"))\n"
+            ));
+          }
+        }
+      }
+      // names resolve through the system resolver (a documented residual)
+      p.push_str(resolver);
+    }
+  }
+  match &plan.unix {
+    SbUnix::Denied => {}
+    SbUnix::Open => {
+      p.push_str("(allow network-outbound (remote unix-socket))\n");
+    }
+    SbUnix::Filters { filters } => {
+      for f in filters {
+        let path = match f {
+          SbFilter::Literal(path) => {
+            format!("(path-literal {})", quote_str(path))
+          }
+          SbFilter::Subpath(path) => format!(
+            "(path-regex #\"^{}(/|$)\")",
+            regex_escape(path).replace('"', "\\\"")
+          ),
+          SbFilter::Regex(r) => {
+            format!("(path-regex #\"{}\")", r.replace('"', "\\\""))
+          }
+        };
+        p.push_str(&format!(
+          "(allow network-outbound (remote unix-socket {path}))\n"
+        ));
+      }
+    }
+  }
+  p
+}
+
+/// `profile` letting the process run exactly the program at `exe` (the
+/// `sandbox-exec` fallback execs the runtime under the profile); appended,
+/// so it wins over an earlier `(deny process-exec)`.
+pub fn with_self_exec(profile: &str, exe: &str) -> String {
+  format!(
+    "{profile}(allow process-exec (literal {}))\n",
+    quote_str(exe)
+  )
+}
+
+/// `text` with every regular-expression metacharacter escaped.
+pub fn regex_escape(text: &str) -> String {
+  let mut out = String::with_capacity(text.len());
+  for c in text.chars() {
+    if "\\.+*?()|[]{}^$".contains(c) {
+      out.push('\\');
+    }
+    out.push(c);
+  }
+  out
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -234,6 +560,144 @@ mod tests {
     assert!(allow < deny);
   }
 
+  // DENEXT.md item 437: with a home policy, no file contents nor extended
+  // attributes under the home directories but the allowed paths, refused as
+  // missing, and the read deny after both
+  #[test]
+  fn profile_home_read_policy() {
+    let home = HomeReadPolicy {
+      homes: vec![PathBuf::from("/Users/u"), PathBuf::from("/private/tmp/h")],
+      allowed: vec![
+        PathBuf::from("/Users/u/proj"),
+        PathBuf::from("/Users/u/.nvm"),
+      ],
+    };
+    let write = [PathBuf::from("/Users/u/proj/node_modules/pkg")];
+    let deny = [
+      PathBuf::from("/Users/u/.ssh"),
+      PathBuf::from("/Users/u/proj/.env"),
+    ];
+    let p = profile_with_home_read(
+      &write,
+      &deny,
+      Some(&home),
+      OsNet::ProxyOnly(4321),
+    );
+    let deny_home = p
+      .find(
+        "(deny file-read-data file-read-xattr (with errno ENOENT) (subpath \"/Users/u\") (subpath \"/private/tmp/h\"))",
+      )
+      .expect(&p);
+    let allow = p
+      .find("(allow file-read-data file-read-xattr (subpath \"/Users/u/proj\") (subpath \"/Users/u/.nvm\"))")
+      .expect(&p);
+    let deny_secrets = p
+      .find("(deny file-read-data file-read-xattr (literal \"/dev/tty\")")
+      .expect(&p);
+    assert!(p[deny_secrets..].contains("(subpath \"/Users/u/proj/.env\"))"));
+    let read_all = p.find("(allow file-read*)").unwrap();
+    assert!(
+      read_all < deny_home && deny_home < allow && allow < deny_secrets,
+      "{p}"
+    );
+    // no rule for one operation alone: contents and attributes together
+    for line in p.lines().filter(|l| l.contains("file-read-data")) {
+      assert!(line.contains("file-read-data file-read-xattr"), "{line}");
+    }
+    // without the policy, no home rule, and the text of `profile`
+    let p = profile_with_home_read(&write, &deny, None, OsNet::Open);
+    assert!(!p.contains("file-read-data"), "{p}");
+    assert!(!p.contains("errno"), "{p}");
+    assert_eq!(p, profile(&write, &deny, OsNet::Open));
+    // an empty allow list adds no empty rule
+    let p = profile_with_home_read(
+      &[],
+      &[],
+      Some(&HomeReadPolicy {
+        homes: vec![PathBuf::from("/Users/u")],
+        allowed: vec![],
+      }),
+      OsNet::Open,
+    );
+    assert!(!p.contains("(allow file-read-data"), "{p}");
+  }
+
+  // the home policy as Seatbelt runs it: a file outside the allowed paths is
+  // refused as missing and its extended attributes can't be read, while the
+  // allowed path reads and a denied file inside it is refused
+  #[cfg(target_os = "macos")]
+  #[allow(clippy::disallowed_methods, reason = "test fixtures on disk")]
+  #[test]
+  fn profile_home_read_policy_runs() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::process::Command;
+
+    // nothing to run where sandbox-exec can't (already sandboxed)
+    if crate::macos::available().is_err() {
+      return;
+    }
+    let root = std::env::temp_dir()
+      .join(format!("deno_sandbox_home_read_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("home/proj")).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let home = root.join("home");
+    let proj = home.join("proj");
+    let set_xattr = |path: &Path| {
+      let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+      // SAFETY: valid C strings and a buffer of the given length
+      let res = unsafe {
+        libc::setxattr(
+          c_path.as_ptr(),
+          c"com.denext.test".as_ptr(),
+          b"hello".as_ptr() as *const libc::c_void,
+          5,
+          0,
+          0,
+        )
+      };
+      assert_eq!(res, 0, "{}", std::io::Error::last_os_error());
+    };
+    for file in [home.join("notes"), proj.join("a"), proj.join("secret")] {
+      std::fs::write(&file, "x").unwrap();
+      set_xattr(&file);
+    }
+    let profile = profile_with_home_read(
+      &[],
+      &[proj.join("secret")],
+      Some(&HomeReadPolicy {
+        homes: vec![home.clone()],
+        allowed: vec![proj.clone()],
+      }),
+      OsNet::Denied,
+    );
+    let run = |program: &str, arg: &str, path: &Path| {
+      let mut cmd = Command::new("/usr/bin/sandbox-exec");
+      cmd.args(["-p", &profile, program]);
+      if !arg.is_empty() {
+        cmd.arg(arg);
+      }
+      let out = cmd.arg(path).output().unwrap();
+      (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+      )
+    };
+    let (ok, _, err) = run("/bin/cat", "", &home.join("notes"));
+    assert!(!ok && err.contains("No such file or directory"), "{err}");
+    let (ok, out, _) = run("/bin/cat", "", &proj.join("a"));
+    assert!(ok && out == "x", "{out}");
+    let (ok, _, err) = run("/bin/cat", "", &proj.join("secret"));
+    assert!(!ok && err.contains("Operation not permitted"), "{err}");
+    // `ls -l@` prints each attribute's size, -1 when it can't be read
+    let (_, out, _) = run("/bin/ls", "-l@", &home.join("notes"));
+    assert!(out.contains("com.denext.test\t-1"), "{out}");
+    let (_, out, _) = run("/bin/ls", "-l@", &proj.join("a"));
+    assert!(out.contains("com.denext.test\t5"), "{out}");
+    std::fs::remove_dir_all(&root).unwrap();
+  }
+
   // DENEXT.md item 111: only the proxy's port, no DNS
   #[test]
   fn profile_proxy_only() {
@@ -254,5 +718,152 @@ mod tests {
     assert!(!p.contains(
       "(allow mach-lookup (global-name \"com.apple.dnssd.service\"))"
     ));
+  }
+
+  fn cli_plan() -> MacosPlan {
+    MacosPlan {
+      read: SbScope::Filters {
+        filters: vec![SbFilter::Subpath("/w".into())],
+      },
+      write: SbScope::Filters {
+        filters: vec![SbFilter::Subpath("/w/out".into())],
+      },
+      deny_read: vec![SbFilter::Subpath("/w/.env".into())],
+      deny_write: vec![SbFilter::Literal("/w/out/keep".into())],
+      reallow_read: vec![SbFilter::Literal("/w/.env/deno.json".into())],
+      reallow_write: vec![],
+      map_exec: SbScope::Filters {
+        filters: vec![SbFilter::Literal("/w/lib.dylib".into())],
+      },
+      exec: false,
+      net: NetPlan::Denied,
+      unix: SbUnix::Denied,
+      denied_sysctls: vec!["kern.proc*".into(), "vm.loadavg".into()],
+      system_ca: false,
+      ttys: vec![],
+    }
+  }
+
+  // deny by default, allows, then denies, then re-allows (the
+  // last matching rule wins); no LaunchServices, AppleEvents or launchd
+  #[test]
+  fn cli_profile_order_and_refusals() {
+    let p = cli_profile(&cli_plan());
+    assert!(p.starts_with("(version 1)\n(deny default)\n"), "{p}");
+    assert!(!p.contains("(allow default)"));
+    let pos = |rule: &str| {
+      p.find(rule)
+        .unwrap_or_else(|| panic!("missing {rule}\n{p}"))
+    };
+    let allow_read = pos("(allow file-read* (subpath \"/w\"))");
+    let allow_write = pos("(allow file-write* (subpath \"/w/out\"))");
+    let deny_read = pos("(deny file-read* (subpath \"/w/.env\"))");
+    let deny_write = pos("(deny file-write* (literal \"/w/out/keep\"))");
+    let reallow = pos("(allow file-read* (literal \"/w/.env/deno.json\"))");
+    assert!(allow_read < deny_read && allow_write < deny_write);
+    assert!(deny_read < reallow && deny_write < reallow);
+    for rule in [
+      "(allow file-read-metadata)",
+      "(deny lsopen)",
+      "(deny appleevent-send)",
+      "(deny job-creation)",
+      "(deny process-exec)",
+      "(deny network*)",
+      "(deny sysctl-read (sysctl-name-prefix \"kern.proc\") (sysctl-name \"vm.loadavg\"))",
+      "(deny file-ioctl (literal \"/dev/tty\")",
+      "(deny file-read* (literal \"/dev/tty\")",
+      "(allow ipc-posix-shm*)",
+      "(allow signal (target same-sandbox))",
+    ] {
+      pos(rule);
+    }
+    // code maps from the load scope and the system only
+    let map = p
+      .lines()
+      .find(|l| l.starts_with("(allow file-map-executable"))
+      .unwrap();
+    assert!(map.contains("(literal \"/w/lib.dylib\")"), "{map}");
+    assert!(map.contains("(subpath \"/usr/lib\")"), "{map}");
+    assert!(!map.contains("\"/w\")"), "{map}");
+    // no network: no resolver; no system trust store: no trustd
+    assert!(!p.contains("mDNSResponder"));
+    let mach_allow = p
+      .lines()
+      .find(|l| l.starts_with("(allow mach-lookup"))
+      .unwrap();
+    assert!(!mach_allow.contains("dnssd"), "{mach_allow}");
+    assert!(!mach_allow.contains("trustd"), "{mach_allow}");
+    assert!(mach_allow.contains("com.apple.FSEvents"), "{mach_allow}");
+    // the services refused by name stay refused, after the allow list
+    let allow = pos("(allow mach-lookup");
+    let deny = pos("(deny mach-lookup");
+    assert!(allow < deny);
+    assert!(p[deny..].contains("com.apple.coreservices.launchservicesd"));
+  }
+
+  #[test]
+  fn cli_profile_network_and_trust() {
+    let mut plan = cli_plan();
+    plan.exec = true;
+    plan.system_ca = true;
+    plan.ttys = vec!["/dev/tty".into(), "/dev/ttys004".into()];
+    plan.net = NetPlan::Ports {
+      connect: Ports::List {
+        ports: vec![443, 5432],
+      },
+      bind: Ports::List { ports: vec![8000] },
+    };
+    plan.unix = SbUnix::Filters {
+      filters: vec![
+        SbFilter::Literal("/run/a.sock".into()),
+        SbFilter::Subpath("/w/socks".into()),
+      ],
+    };
+    let p = cli_profile(&plan);
+    for rule in [
+      "(allow process-exec)",
+      "(allow network-outbound (remote ip \"*:443\"))",
+      "(allow network-outbound (remote ip \"*:5432\"))",
+      "(allow network-bind (local ip \"*:8000\"))",
+      "(allow network-inbound (local ip \"*:8000\"))",
+      "mDNSResponder",
+      "(global-name \"com.apple.dnssd.service\")",
+      "(global-name \"com.apple.trustd.agent\")",
+      "(global-name \"com.apple.SecurityServer\")",
+      "(allow network-outbound (remote unix-socket (path-literal \"/run/a.sock\")))",
+      "(allow network-outbound (remote unix-socket (path-regex #\"^/w/socks(/|$)\")))",
+      "(allow file-read* (literal \"/dev/tty\") (literal \"/dev/ttys004\"))",
+      "(allow file-write* (literal \"/dev/tty\") (literal \"/dev/ttys004\"))",
+    ] {
+      assert!(p.contains(rule), "missing {rule}\n{p}");
+    }
+    // only the named terminals: every other one is refused before them
+    let deny = p.find("(deny file-read* (literal \"/dev/tty\")").unwrap();
+    let allow = p
+      .find("(allow file-read* (literal \"/dev/tty\") (literal")
+      .unwrap();
+    assert!(deny < allow, "{p}");
+    assert!(!p.contains("(allow file-read* (literal \"/dev/tty\") (regex"));
+    // trust services allowed are not also refused by name
+    let deny = &p[p.find("(deny mach-lookup").unwrap()..];
+    let deny = deny.lines().next().unwrap();
+    assert!(!deny.contains("trustd"), "{deny}");
+    assert!(!p.contains("(allow network*)"));
+    plan.net = NetPlan::Open;
+    plan.unix = SbUnix::Denied;
+    let p = cli_profile(&plan);
+    let open = p.find("(allow network*)").unwrap();
+    let no_unix = p
+      .find("(deny network-outbound (remote unix-socket))")
+      .unwrap();
+    assert!(open < no_unix);
+    assert_eq!(regex_escape("/a.b(c)"), "/a\\.b\\(c\\)");
+    // the fallback's own exec, after the deny it overrides
+    let p = with_self_exec(&cli_profile(&cli_plan()), "/opt/deno");
+    let deny = p.find("(deny process-exec)").unwrap();
+    let own = p
+      .find("(allow process-exec (literal \"/opt/deno\"))")
+      .unwrap();
+    assert!(deny < own, "{p}");
   }
 }

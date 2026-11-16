@@ -515,6 +515,118 @@
         }
       ]
     },
+    // DENEXT.md item 437: a script with network (here a host list) reads
+    // nothing in the user's home directory but its project, its package and
+    // the like: not a credential file, a shell history, a sibling project
+    // (nor through a link in the project) or a listing of the home directory
+    // itself; a version pin in the home directory stays readable. Seatbelt
+    // refuses as if the file were missing; Landlock can only refuse it
+    "home_reads_with_network": {
+      "if": "mac",
+      "steps": [
+        {
+          "cwd": "home_read",
+          "args": "run -A setup.js",
+          "output": ""
+        },
+        {
+          "cwd": "home_read/home/proj_net",
+          "args": "install --allow-scripts=npm:@denotest/jail-home-read",
+          "envs": {
+            "HOME": "$PWD/..",
+            "JAIL_REAL_HOME": "$PWD/..",
+            "JAIL_PROJECT": "proj_net"
+          },
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "home_read/home/proj_net",
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-home-read/results.txt').trim())",
+          "output": "home_reads_net_mac.out"
+        }
+      ]
+    },
+    "home_reads_with_network_linux": {
+      "if": "linux",
+      "steps": [
+        {
+          "cwd": "home_read",
+          "args": "run -A setup.js",
+          "output": ""
+        },
+        {
+          "cwd": "home_read/home/proj_net",
+          "args": "install --allow-scripts=npm:@denotest/jail-home-read",
+          "envs": {
+            "HOME": "$PWD/..",
+            "JAIL_REAL_HOME": "$PWD/..",
+            "JAIL_PROJECT": "proj_net"
+          },
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "home_read/home/proj_net",
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-home-read/results.txt').trim())",
+          "output": "home_reads_net_linux.out"
+        }
+      ]
+    },
+    // ... while one without network still reads the home directory, but the
+    // credential files (the list now has deploy tokens and shell histories)
+    "home_reads_offline": {
+      "if": "mac",
+      "steps": [
+        {
+          "cwd": "home_read",
+          "args": "run -A setup.js",
+          "output": ""
+        },
+        {
+          "cwd": "home_read/home/proj_offline",
+          "args": "install --allow-scripts=npm:@denotest/jail-home-read",
+          "envs": {
+            "HOME": "$PWD/..",
+            "JAIL_REAL_HOME": "$PWD/..",
+            "JAIL_PROJECT": "proj_offline"
+          },
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "home_read/home/proj_offline",
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-home-read/results.txt').trim())",
+          "output": "home_reads_offline_mac.out"
+        }
+      ]
+    },
+    // on Linux, Landlock gives a directory that holds a denied path no
+    // listing right (the read walk allows its entries one by one), so the
+    // fixture home, which holds the credential files, can't be listed even
+    // without network
+    "home_reads_offline_linux": {
+      "if": "linux",
+      "steps": [
+        {
+          "cwd": "home_read",
+          "args": "run -A setup.js",
+          "output": ""
+        },
+        {
+          "cwd": "home_read/home/proj_offline",
+          "args": "install --allow-scripts=npm:@denotest/jail-home-read",
+          "envs": {
+            "HOME": "$PWD/..",
+            "JAIL_REAL_HOME": "$PWD/..",
+            "JAIL_PROJECT": "proj_offline"
+          },
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "home_read/home/proj_offline",
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-home-read/results.txt').trim())",
+          "output": "home_reads_offline_linux.out"
+        }
+      ]
+    },
     // where nothing can confine the script's other programs, paranoid
     // refuses to run it
     // DENEXT.md item 288: in a plain package.json project (no supplyChain

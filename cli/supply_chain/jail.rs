@@ -138,6 +138,9 @@ pub fn jail_symlink_roots(jail: &JailPermissions) -> Option<&[PathBuf]> {
     .then_some(jail.write.as_slice())
 }
 
+/// What a jailed script with network may read under the user's real home
+/// directory (DENEXT.md item 437).
+pub use deno_sandbox::HomeReadPolicy;
 /// What the OS sandbox lets a jailed script's processes connect to.
 pub use deno_sandbox::OsNet;
 
@@ -151,8 +154,37 @@ pub use deno_sandbox::OsNet;
 /// sends fail (`MSG_FASTOPEN` connects a socket without `connect(2)`, past
 /// Landlock), and `socket(2)` creates netlink sockets, plus IPv4 / IPv6
 /// ones when the network is open (TCP streams only through the proxy).
+/// Netlink is `NETLINK_ROUTE` only (`getifaddrs`); the other families list
+/// every socket on the host (`NETLINK_SOCK_DIAG`) or reach kernel code a
+/// script has no use for. `socketpair(2)` makes stream and seqpacket pairs
+/// but no datagram pair, whose sockets could `sendto` any datagram socket on
+/// the host. `ptrace`, `process_vm_readv` / `process_vm_writev` and
+/// `pidfd_getfd` fail with EPERM: Landlock already confines them to the
+/// script's own processes, and a script has no use for them. Naming another
+/// process as a descriptor's SIGIO owner (`fcntl` `F_SETOWN` /
+/// `F_SETOWN_EX`, `ioctl` `FIOSETOWN` / `SIOCSPGRP`) fails with EPERM, as
+/// do the inode-flag `ioctl`s (`FS_IOC_SETFLAGS`, `FS_IOC_FSSETXATTR`),
+/// which change a file's attributes through a read-only descriptor. The
+/// signals themselves, and the other metadata changes, go to the jail's
+/// supervisor (`deno_sandbox::notify`).
 #[cfg(target_os = "linux")]
 pub fn seccomp_spec(net: OsNet) -> deno_sandbox::SeccompSpec {
+  seccomp_spec_for(net, u32::MAX)
+}
+
+/// [`seccomp_spec`] for a kernel with Landlock ABI `landlock_abi`: before
+/// ABI 3 (Linux 6.2) Landlock can't refuse truncation, and `open(2)` with
+/// `O_TRUNC` and a read-only access mode truncates whatever the user may
+/// write, so it fails with EPERM there, and `openat2(2)`, whose flags the
+/// filter can't see, with ENOSYS (libc falls back to `openat`). `truncate`
+/// goes to the supervisor there.
+#[cfg(target_os = "linux")]
+pub fn seccomp_spec_for(
+  net: OsNet,
+  landlock_abi: u32,
+) -> deno_sandbox::SeccompSpec {
+  use deno_sandbox::seccomp::AF_NETLINK;
+  use deno_sandbox::seccomp::ArgTest;
   use deno_sandbox::seccomp::InetSockets;
   use deno_sandbox::seccomp::MSG_FASTOPEN;
   use deno_sandbox::seccomp::NR_IO_URING_SETUP;
@@ -161,6 +193,8 @@ pub fn seccomp_spec(net: OsNet) -> deno_sandbox::SeccompSpec {
   use deno_sandbox::seccomp::NR_SENDMMSG;
   use deno_sandbox::seccomp::NR_SENDMSG;
   use deno_sandbox::seccomp::NR_SENDTO;
+  use deno_sandbox::seccomp::NR_SOCKET;
+  use deno_sandbox::seccomp::SOCK_TYPE_MASK;
   use deno_sandbox::seccomp::SyscallRule;
   use deno_sandbox::seccomp::TIOCLINUX;
   use deno_sandbox::seccomp::TIOCSTI;
@@ -200,12 +234,124 @@ pub fn seccomp_spec(net: OsNet) -> deno_sandbox::SeccompSpec {
       });
     }
   }
+  // netlink: NETLINK_ROUTE (0) only
+  spec = spec.rule(SyscallRule::DenyArgsAll {
+    nr: NR_SOCKET,
+    tests: vec![
+      ArgTest {
+        arg: 0,
+        mask: u32::MAX,
+        value: AF_NETLINK,
+        equal: true,
+      },
+      ArgTest {
+        arg: 2,
+        mask: u32::MAX,
+        value: libc::NETLINK_ROUTE as u32,
+        equal: false,
+      },
+    ],
+    errno: libc::EACCES,
+  });
+  // no datagram socket pair (the type's low bits, past SOCK_CLOEXEC /
+  // SOCK_NONBLOCK)
+  spec = spec.rule(SyscallRule::DenyArgsAll {
+    nr: libc::SYS_socketpair as u32,
+    tests: vec![ArgTest {
+      arg: 1,
+      mask: SOCK_TYPE_MASK,
+      value: libc::SOCK_DGRAM as u32,
+      equal: true,
+    }],
+    errno: libc::EACCES,
+  });
+  for nr in [
+    libc::SYS_ptrace,
+    libc::SYS_process_vm_readv,
+    libc::SYS_process_vm_writev,
+    libc::SYS_pidfd_getfd,
+  ] {
+    spec = spec.rule(SyscallRule::Deny {
+      nr: nr as u32,
+      errno: libc::EPERM,
+    });
+  }
+  // a descriptor's SIGIO owner: another process to signal
+  spec = spec
+    .rule(SyscallRule::DenyArgIn {
+      nr: libc::SYS_fcntl as u32,
+      arg: 1,
+      values: vec![libc::F_SETOWN as u32, F_SETOWN_EX],
+      errno: libc::EPERM,
+    })
+    .rule(SyscallRule::DenyArgIn {
+      nr: NR_IOCTL,
+      arg: 1,
+      values: vec![
+        FIOSETOWN,
+        SIOCSPGRP,
+        FS_IOC_SETFLAGS,
+        FS_IOC32_SETFLAGS,
+        FS_IOC_FSSETXATTR,
+      ],
+      errno: libc::EPERM,
+    });
+  if landlock_abi < 3 {
+    let read_only_trunc =
+      |nr: libc::c_long, flags_arg: u32| SyscallRule::DenyArgsAll {
+        nr: nr as u32,
+        tests: vec![
+          ArgTest {
+            arg: flags_arg,
+            mask: libc::O_ACCMODE as u32,
+            value: libc::O_RDONLY as u32,
+            equal: true,
+          },
+          ArgTest {
+            arg: flags_arg,
+            mask: libc::O_TRUNC as u32,
+            value: libc::O_TRUNC as u32,
+            equal: true,
+          },
+        ],
+        errno: libc::EPERM,
+      };
+    #[cfg(target_arch = "x86_64")]
+    {
+      spec = spec.rule(read_only_trunc(libc::SYS_open, 1));
+    }
+    spec =
+      spec
+        .rule(read_only_trunc(libc::SYS_openat, 2))
+        .rule(SyscallRule::Deny {
+          nr: NR_OPENAT2,
+          errno: libc::ENOSYS,
+        });
+  }
   spec.inet_sockets(match net {
     OsNet::Denied => InetSockets::Denied,
     OsNet::Open => InetSockets::Any,
     OsNet::ProxyOnly(_) => InetSockets::TcpStream,
   })
 }
+
+/// `fcntl`'s `F_SETOWN_EX` (not in every libc crate).
+#[cfg(target_os = "linux")]
+const F_SETOWN_EX: u32 = 15;
+/// `ioctl` requests that name a SIGIO owner, or set inode flags.
+#[cfg(target_os = "linux")]
+const FIOSETOWN: u32 = 0x8901;
+#[cfg(target_os = "linux")]
+const SIOCSPGRP: u32 = 0x8902;
+#[cfg(target_os = "linux")]
+const FS_IOC_SETFLAGS: u32 = 0x4008_6602;
+#[cfg(target_os = "linux")]
+const FS_IOC32_SETFLAGS: u32 = 0x4004_6602;
+#[cfg(target_os = "linux")]
+const FS_IOC_FSSETXATTR: u32 = 0x401c_6620;
+/// The same on every architecture.
+#[cfg(target_os = "linux")]
+const NR_OPENAT2: u32 = 437;
 
 /// The jail of the current process, when it runs inside a jailed script.
 pub fn jail_from_env() -> Option<JailPermissions> {
@@ -214,6 +360,13 @@ pub fn jail_from_env() -> Option<JailPermissions> {
     .get_or_init(|| {
       #[allow(clippy::disallowed_methods, reason = "process-wide setting")]
       let value = std::env::var(JAIL_ENV_VAR).ok()?;
+      // every process this one starts gets the jail as read here, whatever
+      // environment its caller passes (a `node:child_process` spawn with
+      // `env: {}`, or a value set later through `Deno.env`)
+      deno_runtime::deno_process::pin_child_env_var(
+        JAIL_ENV_VAR.into(),
+        value.clone().into(),
+      );
       match serde_json::from_str(&value) {
         Ok(jail) => Some(jail),
         // unreadable: the narrowest jail rather than none
@@ -256,9 +409,53 @@ fn path_within(path: &Path, roots: &[PathBuf]) -> bool {
   roots.iter().any(|root| path.starts_with(root))
 }
 
+/// Where `path` really is: its longest existing prefix canonicalized (a
+/// symlink in it, and a `..` after one, resolved as the OS resolves them),
+/// and the rest appended. A path that doesn't exist yet beneath a symlink
+/// (`/tmp/new` on macOS, where `/tmp` leads to `/private/tmp`) then resolves
+/// to the real location the OS sandbox and Deno's own checks see, as an
+/// existing one does. A `..` in the part that doesn't exist is folded and
+/// the result resolved again (what it lands on may exist, or be a link), so
+/// `../../etc/x` can't pass as beneath a root.
+fn resolve_existing_prefix(path: &Path) -> PathBuf {
+  fn resolve(path: &Path, again: bool) -> PathBuf {
+    let mut prefix = path;
+    let mut rest = Vec::new();
+    let real = loop {
+      if let Ok(real) = canonicalize_path(prefix) {
+        break real;
+      }
+      match prefix.components().next_back() {
+        Some(last) if prefix.parent().is_some() => {
+          rest.push(last.as_os_str().to_os_string());
+          prefix = prefix.parent().unwrap();
+        }
+        // nothing of it exists, not even a root: as written
+        _ => {
+          return deno_path_util::normalize_path(std::borrow::Cow::Borrowed(
+            path,
+          ))
+          .into_owned();
+        }
+      }
+    };
+    let joined = rest.iter().rev().fold(real, |acc, part| acc.join(part));
+    if again && rest.iter().any(|part| part == "..") {
+      let folded =
+        deno_path_util::normalize_path(std::borrow::Cow::Borrowed(&joined))
+          .into_owned();
+      // the folded path has no `..` left: one more pass settles it
+      return resolve(&folded, false);
+    }
+    deno_path_util::normalize_path(std::borrow::Cow::Borrowed(&joined))
+      .into_owned()
+  }
+  resolve(path, true)
+}
+
 /// Keeps the entries of a permission path list that lie within `roots`:
-/// each resolved against `cwd`, canonicalized when it exists, else
-/// normalized (`..` folded) so `../../etc/x` can't pass as beneath a root.
+/// each resolved against `cwd` and through its existing prefix
+/// ([`resolve_existing_prefix`]).
 fn clamp_path_list(
   list: Vec<String>,
   roots: &[PathBuf],
@@ -267,12 +464,7 @@ fn clamp_path_list(
   list
     .into_iter()
     .filter(|entry| {
-      let path = cwd.join(entry);
-      let path = canonicalize_path(&path).unwrap_or_else(|_| {
-        deno_path_util::normalize_path(std::borrow::Cow::Borrowed(&path))
-          .into_owned()
-      });
-      path_within(&path, roots)
+      path_within(&resolve_existing_prefix(&cwd.join(entry)), roots)
     })
     .collect()
 }
@@ -400,6 +592,9 @@ pub struct JailConfig {
   /// for, the first time a script is jailed.
   project_dirs: Vec<PathBuf>,
   npmrc_path: Option<PathBuf>,
+  /// The installer's DENO_DIR: a script with network may still read it
+  /// (DENEXT.md item 437).
+  deno_dir: Option<PathBuf>,
   project_secret_files: OnceLock<Vec<PathBuf>>,
   outside_links: OnceLock<Vec<PathBuf>>,
   warned: std::sync::atomic::AtomicBool,
@@ -513,6 +708,7 @@ impl JailConfig {
       settings_in_package_json: false,
       project_dirs: project_dirs.to_vec(),
       npmrc_path: npmrc_path.map(Path::to_path_buf),
+      deno_dir: None,
       project_secret_files: Default::default(),
       outside_links: Default::default(),
       warned: Default::default(),
@@ -562,6 +758,12 @@ impl JailConfig {
   /// Sets `upstream_by_name`.
   pub fn with_upstream_by_name(mut self, upstream_by_name: bool) -> Self {
     self.upstream_by_name = upstream_by_name;
+    self
+  }
+
+  /// Sets the installer's DENO_DIR (`deno_dir`).
+  pub fn with_deno_dir(mut self, deno_dir: PathBuf) -> Self {
+    self.deno_dir = Some(deno_dir);
     self
   }
 
@@ -743,6 +945,11 @@ pub fn confinement() -> Confinement {
     {
       warnings.push(no_netns_warning(reason));
     }
+    if sandbox.is_ok()
+      && let Err(reason) = super::sandbox_linux::private_shm_available()
+    {
+      warnings.push(no_shm_warning(&reason));
+    }
     Some(netns.is_ok())
   };
   #[cfg(not(target_os = "linux"))]
@@ -760,6 +967,21 @@ pub fn confinement() -> Confinement {
 fn unconfined_warning(reason: &str) -> String {
   format!(
     "jail-scripts: the OS can't confine lifecycle scripts here ({reason}). They still get a scrubbed environment, a temporary HOME and a clamped Deno, but any other program they start (a shell, a compiler, curl) can read and write anything and reach any host."
+  )
+}
+
+/// One `/dev/shm` warning per process.
+#[cfg(target_os = "linux")]
+static NO_SHM_WARNED: std::sync::atomic::AtomicBool =
+  std::sync::atomic::AtomicBool::new(false);
+
+/// The one-line warning for Linux where a script can't get a private
+/// `/dev/shm`: it gets none (the host's holds every same-user process's
+/// shared memory and semaphores).
+#[cfg(target_os = "linux")]
+fn no_shm_warning(reason: &str) -> String {
+  format!(
+    "jail-scripts: lifecycle scripts can't get a private /dev/shm here ({reason}), so they get no /dev/shm at all: POSIX shared memory and named semaphores (shm_open, sem_open, Python's multiprocessing locks) fail in them."
   )
 }
 
@@ -798,7 +1020,10 @@ fn choose_os_net(
 fn os_sandbox() -> Result<(), String> {
   #[cfg(target_os = "linux")]
   {
-    super::sandbox_linux::landlock_abi().map(|_| ())
+    linux_sandbox(
+      super::sandbox_linux::landlock_abi(),
+      !seccomp_spec(OsNet::Denied).program().is_empty(),
+    )
   }
   #[cfg(target_os = "macos")]
   {
@@ -813,45 +1038,496 @@ fn os_sandbox() -> Result<(), String> {
   }
 }
 
-/// Credential files under the user's real home directory.
-fn credential_paths() -> Vec<PathBuf> {
-  const IN_HOME: &[&str] = &[
-    ".ssh",
-    ".aws",
-    ".azure",
-    ".gnupg",
-    ".kube",
-    ".docker",
-    ".npmrc",
-    ".yarnrc",
-    ".yarnrc.yml",
-    ".netrc",
-    ".git-credentials",
-    ".pgpass",
-    ".pypirc",
-    ".gem/credentials",
-    ".cargo/credentials",
-    ".cargo/credentials.toml",
-    ".config/gcloud",
-    ".config/gh",
-    ".config/hub",
-    ".config/op",
-    ".config/git/credentials",
-    ".local/share/keyrings",
-    ".password-store",
-    ".terraform.d/credentials.tfrc.json",
-    ".deno/auth",
-    "Library/Keychains",
-    "Library/Application Support/gh",
-  ];
-  let Some(home) = home_dir() else {
-    return Vec::new();
-  };
-  IN_HOME
+/// The Linux sandbox is Landlock and the jail's seccomp program together:
+/// on an architecture the seccomp assembler doesn't know the program is
+/// empty, and Landlock alone would leave Unix sockets and `io_uring` open,
+/// so there is no OS sandbox there (the script is refused under `paranoid`,
+/// and warned about otherwise) rather than half of one.
+#[cfg(target_os = "linux")]
+fn linux_sandbox(
+  landlock: Result<u32, String>,
+  seccomp: bool,
+) -> Result<(), String> {
+  landlock?;
+  if !seccomp {
+    return Err(format!(
+      "the jail's seccomp filter isn't built for {}",
+      std::env::consts::ARCH
+    ));
+  }
+  Ok(())
+}
+
+/// The write roots and read denies as a Seatbelt profile can name them: its
+/// paths are text, so a path that isn't UTF-8 has no exact spelling there. A
+/// write root that isn't is left out (an allow that can't be written grants
+/// nothing); a deny that isn't is replaced by its nearest ancestor that is
+/// (a deny that can't be written must not deny nothing).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn seatbelt_paths(
+  write: &[PathBuf],
+  deny_read: &[PathBuf],
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+  let write = write
     .iter()
-    .map(|p| home.join(p))
-    .filter_map(|p| canonicalize_path(&p).ok())
+    .filter(|p| p.to_str().is_some())
+    .cloned()
+    .collect();
+  let mut deny = Vec::with_capacity(deny_read.len());
+  for path in deny_read {
+    let named = path
+      .ancestors()
+      .find(|p| p.to_str().is_some())
+      .unwrap_or(Path::new("/"))
+      .to_path_buf();
+    if !deny.contains(&named) {
+      deny.push(named);
+    }
+  }
+  (write, deny)
+}
+
+/// The syscalls the jail's supervisor answers on a kernel with Landlock ABI
+/// `abi`: signals and metadata changes always, `truncate` before ABI 3.
+#[cfg(target_os = "linux")]
+pub(crate) fn supervised_syscalls(abi: u32) -> Vec<u32> {
+  use deno_sandbox::notify;
+  let mut syscalls = notify::signal_syscalls();
+  syscalls.extend(notify::metadata_syscalls());
+  if abi < 3 {
+    syscalls.push(notify::nr::TRUNCATE);
+  }
+  syscalls
+}
+
+/// The paths the Linux OS layer refuses to read: the jail's list plus `/dev`,
+/// whose few devices a script uses Landlock allows by name. Deno's own clamp keeps the jail's list: its `/dev/null` and
+/// `/dev/stdin` stay readable to a jailed `deno`.
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_os_deny_read(deny_read: &[PathBuf]) -> Vec<PathBuf> {
+  let mut paths = deny_read.to_vec();
+  paths.push(PathBuf::from("/dev"));
+  paths
+}
+
+/// Credential files under the user's real home directories
+/// ([`real_homes`]).
+fn credential_paths() -> Vec<PathBuf> {
+  let mut paths = Vec::new();
+  for home in real_homes() {
+    for path in CREDENTIAL_PATHS_IN_HOME
+      .iter()
+      .filter_map(|p| canonicalize_path(&home.join(p)).ok())
+    {
+      if !paths.contains(&path) {
+        paths.push(path);
+      }
+    }
+  }
+  paths
+}
+
+/// The credential files and directories [`credential_paths`] hides, relative
+/// to the home directory.
+const CREDENTIAL_PATHS_IN_HOME: &[&str] = &[
+  ".ssh",
+  ".aws",
+  ".azure",
+  ".gnupg",
+  ".kube",
+  ".docker",
+  ".npmrc",
+  ".yarnrc",
+  ".yarnrc.yml",
+  ".netrc",
+  ".git-credentials",
+  ".pgpass",
+  ".pypirc",
+  ".gem/credentials",
+  ".cargo/credentials",
+  ".cargo/credentials.toml",
+  ".config/gcloud",
+  ".config/gh",
+  ".config/hub",
+  ".config/op",
+  ".config/git/credentials",
+  ".local/share/keyrings",
+  ".password-store",
+  ".terraform.d/credentials.tfrc.json",
+  ".deno/auth",
+  "Library/Keychains",
+  "Library/Application Support/gh",
+  // deploy and hosting CLIs' tokens (DENEXT.md item 437)
+  ".fly",
+  ".config/configstore",
+  ".vercel",
+  ".supabase",
+  ".appstoreconnect",
+  "private_keys",
+  // shell histories (commands typed with secrets in them)
+  ".zsh_history",
+  ".bash_history",
+  ".local/share/fish/fish_history",
+  // browser profiles (cookies, saved logins)
+  ".mozilla",
+  "Library/Application Support/Firefox",
+  "Library/Application Support/Google/Chrome",
+  ".config/google-chrome",
+  ".config/chromium",
+];
+
+/// Toolchain directories in the home directory a networked script may still
+/// read, when they exist: compilers and version managers a build script
+/// runs (their credential files are on the credential list).
+const TOOLCHAIN_HOMES: &[&str] = &[
+  ".rustup",
+  // not all of `.cargo`: its `config.toml` can hold registry tokens
+  ".cargo/bin",
+  ".cargo/registry",
+  ".cargo/git",
+  ".nvm",
+  ".volta",
+  ".fnm",
+  ".asdf",
+  ".pyenv",
+  ".rbenv",
+  ".bun",
+  ".deno/bin",
+  ".local/share/mise",
+  ".local/share/fnm",
+  ".local/share/pnpm",
+  "Library/pnpm",
+];
+
+/// The paths under the home directories a networked script may read: its
+/// writable roots, the project and its node_modules, the package, the parts
+/// of the installer's DENO_DIR it needs and the running deno, the toolchain
+/// homes ([`TOOLCHAIN_HOMES`]), and the toolchains on its PATH: each PATH
+/// directory in a home directory, and the prefix above a `bin` or `shims`
+/// one deeper in it (`~/.nvm/versions/node/<v>`), or just its `lib` for one
+/// directly in a home directory (`~/.npm-global/lib` for
+/// `~/.npm-global/bin`, whose commands link there; not all of `~/.local` for
+/// `~/.local/bin`). Each candidate is resolved (links followed) before it is
+/// checked; one that is a home directory or holds one is dropped (a project
+/// at `~` itself would make the whole home directory readable).
+fn home_read_allowed(
+  homes: &[PathBuf],
+  roots: impl IntoIterator<Item = PathBuf>,
+  path_var: Option<&std::ffi::OsStr>,
+) -> Vec<PathBuf> {
+  let canonical =
+    |p: &Path| canonicalize_path(p).unwrap_or_else(|_| p.to_path_buf());
+  let mut candidates: Vec<PathBuf> = roots.into_iter().collect();
+  for home in homes {
+    candidates.extend(
+      TOOLCHAIN_HOMES
+        .iter()
+        .map(|dir| home.join(dir))
+        .filter(|dir| dir.exists()),
+    );
+  }
+  if let Some(path_var) = path_var {
+    for dir in std::env::split_paths(path_var) {
+      if !dir.is_absolute() {
+        continue;
+      }
+      let dir = canonical(&dir);
+      if dir
+        .file_name()
+        .is_some_and(|name| name == "bin" || name == "shims")
+        && let Some(prefix) = dir.parent()
+      {
+        if prefix
+          .parent()
+          .is_some_and(|p| homes.iter().any(|h| h == p))
+        {
+          let lib = prefix.join("lib");
+          if lib.is_dir() {
+            candidates.push(lib);
+          }
+        } else {
+          candidates.push(prefix.to_path_buf());
+        }
+      }
+      candidates.push(dir);
+    }
+  }
+  let mut allowed = Vec::new();
+  for path in candidates {
+    let path = canonical(&path);
+    if homes.iter().any(|home| path.starts_with(home))
+      && !homes.iter().any(|home| home.starts_with(&path))
+      && !allowed.contains(&path)
+    {
+      allowed.push(path);
+    }
+  }
+  allowed.sort();
+  allowed
+}
+
+/// The files a tool looks for in each directory above the one it runs in
+/// (config discovery, version-manager pins). In a home directory or between
+/// it and a project they stay readable, so such a tool finds them, or goes
+/// on as if they were missing, rather than failing on a refused read.
+const DISCOVERY_FILES: &[&str] = &[
+  "package.json",
+  "deno.json",
+  "deno.jsonc",
+  "tsconfig.json",
+  "jsconfig.json",
+  "bunfig.toml",
+  "pnpm-workspace.yaml",
+  "lerna.json",
+  "nx.json",
+  "turbo.json",
+  ".nvmrc",
+  ".node-version",
+  ".tool-versions",
+  ".python-version",
+  ".ruby-version",
+];
+
+/// The [`DISCOVERY_FILES`] in each directory from above `dirs` up to the
+/// home directory that holds them, the home directory included. Only
+/// regular files: a link there could lead anywhere in the home directory.
+fn discovery_files(homes: &[PathBuf], dirs: &[PathBuf]) -> Vec<PathBuf> {
+  let mut out = Vec::new();
+  for dir in dirs {
+    let Some(home) = homes
+      .iter()
+      .filter(|home| dir.starts_with(home))
+      .max_by_key(|home| home.components().count())
+    else {
+      continue;
+    };
+    for ancestor in dir.ancestors().skip(1) {
+      if !ancestor.starts_with(home) {
+        break;
+      }
+      for name in DISCOVERY_FILES {
+        let file = ancestor.join(name);
+        if std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file())
+          && !out.contains(&file)
+        {
+          out.push(file);
+        }
+      }
+    }
+  }
+  out
+}
+
+/// Where the package managers keep globally installed packages and their
+/// commands, as their own configuration says (the installer's environment,
+/// `~/.npmrc`, pnpm's `rc`, `~/.yarnrc`, `~/.bunfig.toml`), and the user
+/// site of Python (which node-gyp runs). A command on the PATH links into
+/// these: a script that runs one needs to read them.
+fn package_manager_dirs(
+  homes: &[PathBuf],
+  path_var: Option<&std::ffi::OsStr>,
+  env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+) -> Vec<PathBuf> {
+  let env_path = |name: &str| {
+    env(name)
+      .or_else(|| env(&name.to_ascii_lowercase()))
+      .filter(|v| !v.is_empty())
+      .map(PathBuf::from)
+  };
+  // npm's global packages are in `<prefix>/lib/node_modules` (Unix) or
+  // `<prefix>/node_modules` (Windows), their commands in `<prefix>/bin`
+  fn npm_prefix(prefix: PathBuf, out: &mut Vec<PathBuf>) {
+    out.push(prefix.join("lib"));
+    out.push(prefix.join("bin"));
+    if cfg!(windows) {
+      out.push(prefix.join("node_modules"));
+    }
+  }
+  let mut out = Vec::new();
+  if let Some(prefix) = env_path("NPM_CONFIG_PREFIX") {
+    npm_prefix(prefix, &mut out);
+  }
+  for name in ["NPM_CONFIG_GLOBAL_DIR", "NPM_CONFIG_GLOBAL_BIN_DIR"] {
+    out.extend(env_path(name));
+  }
+  for name in ["PNPM_HOME", "BUN_INSTALL", "BUN_INSTALL_GLOBAL_DIR"] {
+    out.extend(env_path(name));
+  }
+  out.extend(env_path("BUN_INSTALL_BIN"));
+  out.extend(env_path("YARN_GLOBAL_FOLDER"));
+  if let Some(prefix) = env_path("YARN_PREFIX") {
+    out.push(prefix.join("bin"));
+  }
+  // npm's default prefix: the directory above the `node` it runs with (each
+  // `node` on the PATH: a shim earlier on it may stand in for the first)
+  if let Some(path_var) = path_var {
+    #[allow(clippy::disallowed_methods, reason = "this executable")]
+    let exe = std::env::current_exe()
+      .ok()
+      .and_then(|p| canonicalize_path(&p).ok());
+    for dir in std::env::split_paths(path_var) {
+      let node = dir.join(if cfg!(windows) { "node.exe" } else { "node" });
+      let Ok(node) = canonicalize_path(&node) else {
+        continue;
+      };
+      // the jail's own `node` is this deno
+      if Some(&node) == exe.as_ref() {
+        continue;
+      }
+      if let Some(prefix) = dir.parent() {
+        npm_prefix(prefix.to_path_buf(), &mut out);
+      }
+    }
+  }
+  let xdg_config = env_path("XDG_CONFIG_HOME");
+  for home in homes {
+    let expand = |value: &str| expand_config_path(value, home, env);
+    let npmrc =
+      env_path("NPM_CONFIG_USERCONFIG").unwrap_or_else(|| home.join(".npmrc"));
+    let pnpm_rcs = [
+      xdg_config
+        .clone()
+        .unwrap_or_else(|| home.join(".config"))
+        .join("pnpm/rc"),
+      home.join("Library/Preferences/pnpm/rc"),
+    ];
+    for (file, ini) in std::iter::once((npmrc, true))
+      .chain(pnpm_rcs.into_iter().map(|rc| (rc, true)))
+      .chain([(home.join(".yarnrc"), false)])
+    {
+      let Ok(text) = std::fs::read_to_string(&file) else {
+        continue;
+      };
+      for (key, value) in config_entries(&text, ini) {
+        let Some(path) = expand(&value) else {
+          continue;
+        };
+        match key.as_str() {
+          "prefix" => npm_prefix(path, &mut out),
+          "global-dir" | "global-bin-dir" | "global-folder" => out.push(path),
+          _ => {}
+        }
+      }
+    }
+    for bunfig in [
+      xdg_config.clone().map(|dir| dir.join(".bunfig.toml")),
+      Some(home.join(".bunfig.toml")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+      let Ok(text) = std::fs::read_to_string(&bunfig) else {
+        continue;
+      };
+      let mut section = String::new();
+      for line in text.lines().map(str::trim) {
+        if let Some(name) = line.strip_prefix('[') {
+          section = name.trim_end_matches(']').trim().to_string();
+          continue;
+        }
+        if section != "install" {
+          continue;
+        }
+        if let Some((key, value)) = line.split_once('=')
+          && matches!(key.trim(), "globalDir" | "globalBinDir")
+          && let Some(path) = expand(unquote(value.trim()))
+        {
+          out.push(path);
+        }
+      }
+    }
+    // yarn 1's default global folder: `$XDG_DATA_HOME/yarn/global`, else
+    // `~/.config/yarn/global`
+    out.push(
+      env_path("XDG_DATA_HOME")
+        .map(|dir| dir.join("yarn"))
+        .unwrap_or_else(|| home.join(".config/yarn"))
+        .join("global"),
+    );
+    // Python's user site: `<user base>/lib/python<v>` (`~/.local` by
+    // default), and on macOS `~/Library/Python/<v>`
+    let user_base = env_path("PYTHONUSERBASE").unwrap_or_else(|| {
+      if cfg!(target_os = "macos") {
+        home.join("Library/Python")
+      } else {
+        home.join(".local")
+      }
+    });
+    if cfg!(target_os = "macos") && env_path("PYTHONUSERBASE").is_none() {
+      out.push(user_base);
+    } else if let Ok(entries) = std::fs::read_dir(user_base.join("lib")) {
+      out.extend(
+        entries
+          .flatten()
+          .filter(|e| e.file_name().to_string_lossy().starts_with("python"))
+          .map(|e| e.path()),
+      );
+    }
+  }
+  out.retain(|path| path.is_absolute() && path.exists());
+  out
+}
+
+/// The `key = value` entries of an npm-style ini file (`ini`), or of a yarn
+/// 1 `.yarnrc` (`key "value"` or `key value`), comments and sections
+/// skipped.
+fn config_entries(text: &str, ini: bool) -> Vec<(String, String)> {
+  text
+    .lines()
+    .map(str::trim)
+    .filter(|line| {
+      !line.is_empty()
+        && !line.starts_with('#')
+        && !line.starts_with(';')
+        && !line.starts_with('[')
+    })
+    .filter_map(|line| {
+      let (key, value) = if ini {
+        line.split_once('=')?
+      } else {
+        line.split_once(char::is_whitespace)?
+      };
+      Some((key.trim().to_string(), unquote(value.trim()).to_string()))
+    })
     .collect()
+}
+
+fn unquote(value: &str) -> &str {
+  let value = value.trim();
+  value
+    .strip_prefix('"')
+    .and_then(|v| v.strip_suffix('"'))
+    .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+    .unwrap_or(value)
+}
+
+/// A path from a package manager's configuration: `~/` is `home`, and
+/// `${NAME}` (npm's syntax) an environment variable; `None` when a variable
+/// is unset or the result isn't absolute.
+fn expand_config_path(
+  value: &str,
+  home: &Path,
+  env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+  let mut text = String::new();
+  let mut rest = value;
+  while let Some(start) = rest.find("${") {
+    let end = rest[start..].find('}')? + start;
+    text.push_str(&rest[..start]);
+    let name = &rest[start + 2..end];
+    if name == "HOME" {
+      text.push_str(home.to_str()?);
+    } else {
+      text.push_str(env(name)?.to_str()?);
+    }
+    rest = &rest[end + 1..];
+  }
+  text.push_str(rest);
+  let path = match text.strip_prefix("~/") {
+    Some(rest) => home.join(rest),
+    None => PathBuf::from(text),
+  };
+  path.is_absolute().then_some(path)
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -862,6 +1538,72 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
   };
   home.filter(|h| !h.is_empty()).map(PathBuf::from)
+}
+
+/// The user's real home directories, for what a script may read: the
+/// account's own (from the user database, which no environment variable
+/// moves), and `$HOME` (`USERPROFILE` on Windows) when it names another
+/// absolute directory. Neither is ever `/`.
+fn real_homes() -> Vec<PathBuf> {
+  real_homes_from(account_home(), home_dir())
+}
+
+fn real_homes_from(
+  account: Option<PathBuf>,
+  home_var: Option<PathBuf>,
+) -> Vec<PathBuf> {
+  let mut homes: Vec<PathBuf> = account.into_iter().collect();
+  if let Some(home) = home_var
+    && home.is_absolute()
+    && home.parent().is_some()
+    && !homes.contains(&home)
+  {
+    homes.push(home);
+  }
+  homes
+}
+
+/// The home directory of the account this process runs as, from the user
+/// database (`getpwuid_r`).
+#[cfg(unix)]
+fn account_home() -> Option<PathBuf> {
+  use std::os::unix::ffi::OsStrExt;
+  // SAFETY: getuid has no failure case
+  let uid = unsafe { libc::getuid() };
+  let mut buf = vec![0u8; 1024];
+  loop {
+    // SAFETY: a plain C struct, filled in by getpwuid_r
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: valid pointers to a passwd struct and a buffer of the given
+    // length, which outlive the call
+    let rc = unsafe {
+      libc::getpwuid_r(
+        uid,
+        &mut pwd,
+        buf.as_mut_ptr() as *mut libc::c_char,
+        buf.len(),
+        &mut result,
+      )
+    };
+    if rc == libc::ERANGE && buf.len() < 1 << 20 {
+      buf.resize(buf.len() * 2, 0);
+      continue;
+    }
+    if rc != 0 || result.is_null() || pwd.pw_dir.is_null() {
+      return None;
+    }
+    // SAFETY: a NUL-terminated string in `buf`, which is still alive
+    let dir = unsafe { std::ffi::CStr::from_ptr(pwd.pw_dir) };
+    let dir = PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes()));
+    return (dir.is_absolute() && dir.parent().is_some()).then_some(dir);
+  }
+}
+
+/// No user database here: `USERPROFILE` alone ([`real_homes`]).
+#[cfg(not(unix))]
+fn account_home() -> Option<PathBuf> {
+  None
 }
 
 /// Symlinks in node_modules that lead outside the writable roots (workspace
@@ -1547,8 +2289,7 @@ async fn run_in_dirs(
   os_sandbox: bool,
 ) -> Result<TaskResult, AnyError> {
   let package = config.packages.get(s.package_name);
-  let canonical =
-    |p: &Path| canonicalize_path(p).unwrap_or_else(|_| p.to_path_buf());
+  let canonical = |p: &Path| resolve_existing_prefix(p);
 
   // writable roots: the package's own folder, not the rest of node_modules
   // (DENEXT.md item 111), so one package's script can't rewrite another's
@@ -1694,14 +2435,78 @@ async fn run_in_dirs(
 
   let mut deny_read = credential_paths();
   deny_read.extend(config.project_secret_files().iter().cloned());
+  // links in node_modules that lead outside it (workspace members, `file:`
+  // dependencies)
+  let outside = config.outside_links.get_or_init(|| {
+    let root = canonical(s.root_node_modules);
+    outside_links(&root, std::slice::from_ref(&root))
+  });
+  // with any network, the rest of the real home directories too, but what
+  // the script needs (DENEXT.md item 437): the OS sandbox holds it
+  // (Seatbelt, Landlock); a `deno` the script starts keeps the credential
+  // paths above
+  let homes: Vec<PathBuf> = real_homes()
+    .iter()
+    .map(|home| canonical(home))
+    .filter(|home| home.parent().is_some())
+    .fold(Vec::new(), |mut homes, home| {
+      if !homes.contains(&home) {
+        homes.push(home);
+      }
+      homes
+    });
+  let home_read = (os_sandbox && os_net != OsNet::Denied && !homes.is_empty())
+    .then(|| {
+      // the running deno itself, not the rest of its directory
+      #[allow(clippy::disallowed_methods, reason = "spawning this executable")]
+      let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| canonicalize_path(&p).ok());
+      let path_var = s
+        .env_vars
+        .iter()
+        .find(|(k, _)| {
+          if cfg!(windows) {
+            k.to_string_lossy().eq_ignore_ascii_case("PATH")
+          } else {
+            k.as_os_str() == "PATH"
+          }
+        })
+        .map(|(_, v)| v.clone());
+      let project = config
+        .project_dirs
+        .iter()
+        .map(|dir| canonical(dir))
+        .chain([canonical(s.init_cwd)])
+        .collect::<Vec<_>>();
+      let roots = write
+        .iter()
+        .cloned()
+        .chain(project.iter().cloned())
+        .chain([
+          s.root_node_modules.to_path_buf(),
+          s.package_folder.to_path_buf(),
+        ])
+        // of DENO_DIR, the npm cache and the node headers, not the other
+        // programs' data (`location_data`) or the REPL history
+        .chain(
+          config
+            .deno_dir
+            .iter()
+            .flat_map(|dir| [dir.join("npm"), dir.join("node_headers")]),
+        )
+        .chain(exe)
+        .chain(outside.iter().cloned())
+        .chain(discovery_files(&homes, &project))
+        .chain(package_manager_dirs(&homes, path_var.as_deref(), &|name| {
+          std::env::var_os(name)
+        }));
+      let allowed = home_read_allowed(&homes, roots, path_var.as_deref());
+      HomeReadPolicy { homes, allowed }
+    });
   // links in node_modules that lead outside it, where a package's own
   // `write` paths don't reach
-  let deny_write = config
-    .outside_links
-    .get_or_init(|| {
-      let root = canonical(s.root_node_modules);
-      outside_links(&root, std::slice::from_ref(&root))
-    })
+  let deny_write = outside
     .iter()
     .filter(|target| !path_within(target, &write))
     .cloned()
@@ -1848,9 +2653,15 @@ async fn run_in_dirs(
   let mut command = if os_sandbox {
     let mut command =
       tokio::process::Command::new(super::sandbox_macos::SANDBOX_EXEC);
+    let (seatbelt_write, seatbelt_deny) = seatbelt_paths(&write, &deny_read);
     command
       .arg("-p")
-      .arg(super::sandbox_macos::profile(&write, &deny_read, os_net));
+      .arg(deno_sandbox::seatbelt::profile_with_home_read(
+        &seatbelt_write,
+        &seatbelt_deny,
+        home_read.as_ref(),
+        os_net,
+      ));
     command.arg(&current_exe);
     command
   } else {
@@ -1883,25 +2694,61 @@ async fn run_in_dirs(
     None => None,
   };
   #[cfg(target_os = "linux")]
+  let private_shm =
+    os_sandbox && super::sandbox_linux::private_shm_available().is_ok();
+  #[cfg(target_os = "linux")]
   let _ruleset = if os_sandbox {
     let proxy_port = match os_net {
       OsNet::ProxyOnly(port) => Some(port),
       _ => None,
     };
-    let ruleset =
-      super::sandbox_linux::build_ruleset(&write, &deny_read, proxy_port)
-        .context("Failed to set up the Landlock sandbox")?;
+    // never the host's /dev/shm (every same-user process's shared memory
+    // and semaphores): a private one where namespaces allow, else none
+    let ruleset = super::sandbox_linux::build_ruleset_opts(
+      &write,
+      &linux_os_deny_read(&deny_read),
+      home_read.as_ref(),
+      proxy_port,
+      false,
+    )
+    .context("Failed to set up the Landlock sandbox")?;
+    if private_shm {
+      super::sandbox_linux::PrivateShm::new(true, netns)
+        .context("Failed to set up the jail's /dev/shm")?
+        .apply_to_command(&mut command, &ruleset);
+    } else if !NO_SHM_WARNED.swap(true, std::sync::atomic::Ordering::SeqCst)
+      && let Err(reason) = super::sandbox_linux::private_shm_available()
+    {
+      log::warn!("{} {}", colors::yellow("Warning"), no_shm_warning(&reason));
+    }
+    let abi = super::sandbox_linux::landlock_abi().unwrap_or(1);
     super::sandbox_linux::apply_to_command(
       &mut command,
       &ruleset,
-      &seccomp_spec(os_net),
+      &seccomp_spec_for(os_net, abi),
     );
     Some(ruleset)
   } else {
     None
   };
+  // what Landlock doesn't confine on every kernel (signals, metadata
+  // changes, truncation before ABI 3) goes to the supervisor; its filter is
+  // installed after the jail's own
+  #[cfg(target_os = "linux")]
+  let notify_handoff = if os_sandbox {
+    let abi = super::sandbox_linux::landlock_abi().unwrap_or(1);
+    let handoff = deno_sandbox::notify::NotifyHandoff::new()
+      .context("Failed to set up the jail's supervisor")?;
+    handoff.apply_to_command(
+      &mut command,
+      deno_sandbox::notify::notify_program(&supervised_syscalls(abi)),
+    );
+    Some(handoff)
+  } else {
+    None
+  };
   #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-  let _ = os_net;
+  let _ = (os_net, &home_read);
   // the installer's children before the script: what it adopts later as a
   // child subreaper and doesn't recognize is a stray of the script
   #[cfg(target_os = "linux")]
@@ -1931,6 +2778,26 @@ async fn run_in_dirs(
       .context("Failed to start the jail's network proxy")?,
     );
   }
+  #[cfg(target_os = "linux")]
+  let supervisor = match (notify_handoff, child_pid) {
+    (Some(handoff), Some(pid)) => {
+      let listener = tokio::task::spawn_blocking(move || handoff.receive())
+        .await
+        .map_err(std::io::Error::other)
+        .and_then(|r| r)
+        .context("The jailed script's supervisor wasn't set up")?;
+      let roots = write.clone();
+      let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+      let thread_stop = stop.clone();
+      let thread = std::thread::spawn(move || {
+        deno_sandbox::notify::Supervisor::new(roots, pid)
+          .with_private_shm(private_shm)
+          .serve(listener, &thread_stop)
+      });
+      Some((stop, thread))
+    }
+    _ => None,
+  };
 
   let spec = serde_json::to_vec(&spec)?;
   if let Some(mut stdin) = child.stdin.take() {
@@ -1966,6 +2833,12 @@ async fn run_in_dirs(
   #[cfg(target_os = "linux")]
   if let Some(before) = children_before {
     super::sandbox_linux::end_adopted_strays(&before);
+  }
+  // nothing under the filter is left: the supervisor ends
+  #[cfg(target_os = "linux")]
+  if let Some((stop, thread)) = supervisor {
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = tokio::task::spawn_blocking(move || thread.join()).await;
   }
   #[cfg(not(unix))]
   let _ = child_pid;
@@ -2202,6 +3075,275 @@ mod tests {
   /// A config with no package entries.
   fn config(net: bool, paranoid: bool) -> JailConfig {
     JailConfig::new(paranoid, net, BTreeMap::new(), &[], None)
+  }
+
+  // DENEXT.md item 437: what a networked script may read under the home
+  // directory
+  #[test]
+  #[allow(clippy::disallowed_methods, reason = "test fixtures on disk")]
+  fn home_read_allowed_keeps_the_needed_paths_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = canonicalize_path(tmp.path()).unwrap();
+    for dir in [
+      "proj/node_modules",
+      ".nvm/versions/node/v1/bin",
+      "bin",
+      ".local/bin",
+      ".rustup",
+    ] {
+      std::fs::create_dir_all(home.join(dir)).unwrap();
+    }
+    let path_var = std::env::join_paths([
+      home.join(".nvm/versions/node/v1/bin"),
+      home.join("bin"),
+      home.join(".local/bin"),
+      PathBuf::from("/usr/bin"),
+      PathBuf::from("relative/bin"),
+    ])
+    .unwrap();
+    let allowed = home_read_allowed(
+      std::slice::from_ref(&home),
+      [
+        home.join("proj"),
+        home.join("proj/node_modules"),
+        home.join("proj"),
+        // the home directory itself and what holds it: never
+        home.clone(),
+        home.parent().unwrap().to_path_buf(),
+        // outside it: nothing to allow
+        PathBuf::from("/opt/x"),
+      ],
+      Some(&path_var),
+    );
+    // `~/bin` and `~/.local/bin` themselves, not what holds them; the
+    // toolchain homes that exist (`.nvm`, `.rustup`; not `.cargo`)
+    let mut expected = vec![
+      home.join(".local/bin"),
+      home.join(".nvm"),
+      home.join(".nvm/versions/node/v1"),
+      home.join(".nvm/versions/node/v1/bin"),
+      home.join(".rustup"),
+      home.join("bin"),
+      home.join("proj"),
+      home.join("proj/node_modules"),
+    ];
+    expected.sort();
+    assert_eq!(allowed, expected);
+  }
+
+  // a prefix directly in a home directory gives its `lib` (where its
+  // commands link), not the rest of it; of `.cargo`, only the commands and
+  // the crate caches; candidates are resolved before the check, and in two
+  // home directories one inside the other, what holds the inner one is
+  // never allowed
+  #[allow(clippy::disallowed_methods, reason = "test fixtures on disk")]
+  #[cfg(unix)]
+  #[test]
+  fn home_read_allowed_prefix_lib_and_cargo_parts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = canonicalize_path(tmp.path()).unwrap();
+    for dir in [
+      ".npm-global/bin",
+      ".npm-global/lib/node_modules",
+      ".npm-global/etc",
+      ".cargo/bin",
+      ".cargo/registry",
+      "inner/home/proj",
+      "sibling",
+    ] {
+      std::fs::create_dir_all(home.join(dir)).unwrap();
+    }
+    std::fs::write(home.join(".cargo/config.toml"), "token").unwrap();
+    std::os::unix::fs::symlink(home.join("sibling"), home.join("proj_link"))
+      .unwrap();
+    let inner = home.join("inner/home");
+    let path_var =
+      std::env::join_paths([home.join(".npm-global/bin")]).unwrap();
+    let allowed = home_read_allowed(
+      &[home.clone(), inner.clone()],
+      [
+        inner.join("proj"),
+        home.join("inner"),
+        // resolved first: the link's target is what is allowed
+        home.join("proj_link"),
+      ],
+      Some(&path_var),
+    );
+    let mut expected = vec![
+      home.join(".cargo/bin"),
+      home.join(".cargo/registry"),
+      home.join(".npm-global/bin"),
+      home.join(".npm-global/lib"),
+      inner.join("proj"),
+      home.join("sibling"),
+    ];
+    expected.sort();
+    assert_eq!(allowed, expected);
+  }
+
+  // the package managers' global folders come from their own configuration
+  #[allow(clippy::disallowed_methods, reason = "test fixtures on disk")]
+  #[cfg(unix)]
+  #[test]
+  fn package_manager_dirs_follow_their_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = canonicalize_path(tmp.path()).unwrap();
+    for dir in [
+      ".npm-packages/lib/node_modules",
+      ".npm-packages/bin",
+      "pnpm-global",
+      "pnpm-home",
+      "yarn-global",
+      "bun-global",
+      ".config/pnpm",
+      ".local/lib/python3.12/site-packages",
+      "n/bin",
+      "n/lib/node_modules",
+    ] {
+      std::fs::create_dir_all(home.join(dir)).unwrap();
+    }
+    std::fs::write(
+      home.join(".npmrc"),
+      "; comment\n//registry.example/:_authToken=x\nprefix = ~/.npm-packages\n",
+    )
+    .unwrap();
+    std::fs::write(
+      home.join(".config/pnpm/rc"),
+      "global-dir=${HOME}/pnpm-global\n",
+    )
+    .unwrap();
+    std::fs::write(
+      home.join(".yarnrc"),
+      format!("global-folder \"{}\"\n", home.join("yarn-global").display()),
+    )
+    .unwrap();
+    std::fs::write(
+      home.join(".bunfig.toml"),
+      "[run]\nglobalDir = \"~/no\"\n[install]\nglobalDir = \"~/bun-global\"\n",
+    )
+    .unwrap();
+    std::fs::write(home.join("n/bin/node"), "").unwrap();
+    let pnpm_home = home.join("pnpm-home").into_os_string();
+    let env =
+      move |name: &str| (name == "PNPM_HOME").then(|| pnpm_home.clone());
+    let path_var = std::env::join_paths([home.join("n/bin")]).unwrap();
+    let dirs =
+      package_manager_dirs(std::slice::from_ref(&home), Some(&path_var), &env);
+    let mut expected = vec![
+      home.join(".npm-packages/lib"),
+      home.join(".npm-packages/bin"),
+      home.join("pnpm-global"),
+      home.join("pnpm-home"),
+      home.join("yarn-global"),
+      home.join("bun-global"),
+      home.join("n/lib"),
+      home.join("n/bin"),
+    ];
+    if !cfg!(target_os = "macos") {
+      expected.push(home.join(".local/lib/python3.12"));
+    }
+    for dir in &expected {
+      assert!(dirs.contains(dir), "{dir:?} not in {dirs:?}");
+    }
+    assert!(!dirs.contains(&home.join("no")), "{dirs:?}");
+    assert!(!dirs.contains(&home), "{dirs:?}");
+  }
+
+  // the files config discovery looks for above a project stay readable up
+  // to the home directory, a link among them not
+  #[allow(clippy::disallowed_methods, reason = "test fixtures on disk")]
+  #[cfg(unix)]
+  #[test]
+  fn discovery_files_between_the_project_and_home() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = canonicalize_path(tmp.path()).unwrap();
+    let home = root.join("home");
+    let project = home.join("code/app");
+    std::fs::create_dir_all(&project).unwrap();
+    for file in [
+      root.join("package.json"),
+      home.join("package.json"),
+      home.join("code/deno.json"),
+      home.join("notes.txt"),
+      project.join("package.json"),
+    ] {
+      std::fs::write(file, "{}").unwrap();
+    }
+    std::os::unix::fs::symlink(home.join("notes.txt"), home.join(".nvmrc"))
+      .unwrap();
+    let mut files = discovery_files(std::slice::from_ref(&home), &[project]);
+    files.sort();
+    assert_eq!(
+      files,
+      vec![home.join("code/deno.json"), home.join("package.json")]
+    );
+  }
+
+  // the account's home directory counts whatever `$HOME` says; `$HOME`
+  // counts too when it is another directory, never when it is `/`
+  #[test]
+  fn real_homes_do_not_depend_on_the_home_variable() {
+    let account = PathBuf::from("/home/u");
+    assert_eq!(
+      real_homes_from(Some(account.clone()), None),
+      vec![account.clone()]
+    );
+    assert_eq!(
+      real_homes_from(Some(account.clone()), Some(PathBuf::from("/"))),
+      vec![account.clone()]
+    );
+    assert_eq!(
+      real_homes_from(Some(account.clone()), Some(PathBuf::from("rel"))),
+      vec![account.clone()]
+    );
+    assert_eq!(
+      real_homes_from(Some(account.clone()), Some(account.clone())),
+      vec![account.clone()]
+    );
+    assert_eq!(
+      real_homes_from(Some(account.clone()), Some(PathBuf::from("/tmp/h"))),
+      vec![account, PathBuf::from("/tmp/h")]
+    );
+    assert!(real_homes_from(None, Some(PathBuf::from("/"))).is_empty());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn account_home_is_from_the_user_database() {
+    // an account without an entry in the user database (some containers)
+    // has none; one that has an entry never gets `/` or a relative path
+    if let Some(home) = account_home() {
+      assert!(home.is_absolute() && home.parent().is_some(), "{home:?}");
+    }
+  }
+
+  #[test]
+  fn credential_paths_name_the_deploy_tokens_and_histories() {
+    for name in [
+      ".fly",
+      ".config/configstore",
+      ".vercel",
+      ".supabase",
+      ".appstoreconnect",
+      "private_keys",
+      ".zsh_history",
+      ".bash_history",
+      ".local/share/fish/fish_history",
+      ".mozilla",
+      "Library/Application Support/Firefox",
+      "Library/Application Support/Google/Chrome",
+      ".config/google-chrome",
+      ".config/chromium",
+      ".netrc",
+      ".git-credentials",
+      ".docker",
+      ".npmrc",
+    ] {
+      assert!(
+        CREDENTIAL_PATHS_IN_HOME.contains(&name),
+        "{name} is not a credential path"
+      );
+    }
   }
 
   /// The parts of a [`NetChoice`] the older tests compare.
@@ -2818,6 +3960,85 @@ mod tests {
     };
     clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
     assert_eq!(options.allow_write, Some(vec!["out/../build".to_string()]));
+  }
+
+  // a Seatbelt profile's paths are text: a deny that isn't UTF-8 denies its
+  // nearest UTF-8 ancestor, a write root that isn't is left out, and UTF-8
+  // paths pass unchanged
+  #[cfg(unix)]
+  #[test]
+  fn seatbelt_paths_never_lossy() {
+    use std::os::unix::ffi::OsStrExt;
+    let raw = |bytes: &[u8]| PathBuf::from(std::ffi::OsStr::from_bytes(bytes));
+    let (write, deny) = seatbelt_paths(
+      &[raw(b"/nm/pkg"), raw(b"/nm/\xffbad")],
+      &[
+        raw(b"/home/u/.ssh"),
+        raw(b"/p/sec\xfe/.env"),
+        raw(b"/p/other\xfd"),
+        raw(b"/q\xff/a/b"),
+      ],
+    );
+    assert_eq!(write, vec![raw(b"/nm/pkg")]);
+    assert_eq!(deny, vec![raw(b"/home/u/.ssh"), raw(b"/p"), raw(b"/")]);
+    let profile = deno_sandbox::seatbelt::profile(&write, &deny, OsNet::Denied);
+    assert!(!profile.contains('\u{fffd}'), "{profile}");
+    assert!(profile.contains("(subpath \"/p\")"), "{profile}");
+  }
+
+  // a path that doesn't exist yet beneath a symlinked directory resolves
+  // through the link, as the OS sandbox and Deno's checks see it: a grant
+  // to it is kept, and one that leads out of the roots through a link is
+  // not
+  #[cfg(unix)]
+  #[test]
+  fn clamp_resolves_a_new_path_through_a_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = canonicalize_path(dir.path()).unwrap();
+    let root = real.join("root");
+    let outside = real.join("outside");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let link = real.join("link");
+    std::os::unix::fs::symlink(&root, &link).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("out")).unwrap();
+    assert_eq!(
+      resolve_existing_prefix(&link.join("new/deeper")),
+      root.join("new/deeper")
+    );
+    assert_eq!(
+      resolve_existing_prefix(&link.join("a/../b")),
+      root.join("b")
+    );
+    // an existing link followed by `..`: the OS's answer (the link's
+    // target's parent), not the lexical one
+    assert_eq!(
+      resolve_existing_prefix(&root.join("out/../x")),
+      real.join("x")
+    );
+    // a `..` after a part that doesn't exist yet lands on the link
+    assert_eq!(
+      resolve_existing_prefix(&root.join("new/../out/y")),
+      outside.join("y")
+    );
+    let jail = JailPermissions {
+      write: vec![root.clone()],
+      ..Default::default()
+    };
+    let new_under_link = link.join("new").to_string_lossy().into_owned();
+    let out_through_link = root.join("out/new").to_string_lossy().into_owned();
+    let out_after_dotdot =
+      root.join("gone/../out/z").to_string_lossy().into_owned();
+    let mut options = PermissionsOptions {
+      allow_write: Some(vec![
+        new_under_link.clone(),
+        out_through_link,
+        out_after_dotdot,
+      ]),
+      ..Default::default()
+    };
+    clamp_permissions(&mut options, &jail, &real);
+    assert_eq!(options.allow_write, Some(vec![new_under_link]));
   }
 
   #[tokio::test]

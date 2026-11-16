@@ -1,0 +1,10 @@
+fly config: denied
+shell history: denied
+sibling .env: read
+sibling notes: read
+sibling notes through a link: read
+sibling notes error: none
+home listing: read
+home .nvmrc: read
+project deno.json: read
+own package.json: read

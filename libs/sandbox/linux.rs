@@ -59,6 +59,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use crate::HomeReadPolicy;
 use crate::seccomp::SeccompSpec;
 use crate::seccomp::SockFilter;
 use crate::seccomp::SockFprog;
@@ -373,7 +374,7 @@ fn bind_loopback(port: u16) -> io::Result<libc::c_int> {
 }
 
 /// Sends a descriptor over a Unix socket (`SCM_RIGHTS`); async-signal-safe.
-fn send_fd(sock: libc::c_int, fd: libc::c_int) -> io::Result<()> {
+pub(crate) fn send_fd(sock: libc::c_int, fd: libc::c_int) -> io::Result<()> {
   let mut byte = [1u8];
   let mut iov = libc::iovec {
     iov_base: byte.as_mut_ptr() as *mut libc::c_void,
@@ -409,7 +410,7 @@ fn send_fd(sock: libc::c_int, fd: libc::c_int) -> io::Result<()> {
 
 /// Receives one descriptor over a Unix socket (`SCM_RIGHTS`), waiting at
 /// most a few seconds.
-fn recv_fd(sock: &OwnedFd) -> io::Result<OwnedFd> {
+pub(crate) fn recv_fd(sock: &OwnedFd) -> io::Result<OwnedFd> {
   let mut poll = libc::pollfd {
     fd: sock.as_raw_fd(),
     events: libc::POLLIN,
@@ -469,34 +470,34 @@ fn recv_fd(sock: &OwnedFd) -> io::Result<OwnedFd> {
 }
 
 // the same numbers on every architecture since Linux 5.13
-const SYS_LANDLOCK_CREATE_RULESET: libc::c_long = 444;
-const SYS_LANDLOCK_ADD_RULE: libc::c_long = 445;
-const SYS_LANDLOCK_RESTRICT_SELF: libc::c_long = 446;
+pub(crate) const SYS_LANDLOCK_CREATE_RULESET: libc::c_long = 444;
+pub(crate) const SYS_LANDLOCK_ADD_RULE: libc::c_long = 445;
+pub(crate) const SYS_LANDLOCK_RESTRICT_SELF: libc::c_long = 446;
 const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
-const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
-const LANDLOCK_RULE_NET_PORT: u32 = 2;
-const ACCESS_NET_BIND_TCP: u64 = 1 << 0;
-const ACCESS_NET_CONNECT_TCP: u64 = 1 << 1;
+pub(crate) const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
+pub(crate) const LANDLOCK_RULE_NET_PORT: u32 = 2;
+pub(crate) const ACCESS_NET_BIND_TCP: u64 = 1 << 0;
+pub(crate) const ACCESS_NET_CONNECT_TCP: u64 = 1 << 1;
 /// The first ABI with network rules (Linux 6.7).
 pub const LANDLOCK_NET_ABI: u32 = 4;
 
-const ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
-const ACCESS_FS_READ_FILE: u64 = 1 << 2;
-const ACCESS_FS_READ_DIR: u64 = 1 << 3;
-const ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
-const ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
-const ACCESS_FS_MAKE_CHAR: u64 = 1 << 6;
-const ACCESS_FS_MAKE_DIR: u64 = 1 << 7;
-const ACCESS_FS_MAKE_REG: u64 = 1 << 8;
-const ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
-const ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
-const ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
-const ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
-const ACCESS_FS_REFER: u64 = 1 << 13;
-const ACCESS_FS_TRUNCATE: u64 = 1 << 14;
+pub(crate) const ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
+pub(crate) const ACCESS_FS_READ_FILE: u64 = 1 << 2;
+pub(crate) const ACCESS_FS_READ_DIR: u64 = 1 << 3;
+pub(crate) const ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
+pub(crate) const ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
+pub(crate) const ACCESS_FS_MAKE_CHAR: u64 = 1 << 6;
+pub(crate) const ACCESS_FS_MAKE_DIR: u64 = 1 << 7;
+pub(crate) const ACCESS_FS_MAKE_REG: u64 = 1 << 8;
+pub(crate) const ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
+pub(crate) const ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
+pub(crate) const ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
+pub(crate) const ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
+pub(crate) const ACCESS_FS_REFER: u64 = 1 << 13;
+pub(crate) const ACCESS_FS_TRUNCATE: u64 = 1 << 14;
 
 /// The rights that apply to a file (not a directory) in a rule.
-const FILE_RIGHTS: u64 = 1 // execute
+pub(crate) const FILE_RIGHTS: u64 = 1 // execute
   | ACCESS_FS_WRITE_FILE
   | ACCESS_FS_READ_FILE
   | ACCESS_FS_TRUNCATE;
@@ -509,15 +510,15 @@ struct RulesetAttr {
 }
 
 #[repr(C, packed)]
-struct NetPortAttr {
-  allowed_access: u64,
-  port: u64,
+pub(crate) struct NetPortAttr {
+  pub(crate) allowed_access: u64,
+  pub(crate) port: u64,
 }
 
 #[repr(C, packed)]
-struct PathBeneathAttr {
-  allowed_access: u64,
-  parent_fd: i32,
+pub(crate) struct PathBeneathAttr {
+  pub(crate) allowed_access: u64,
+  pub(crate) parent_fd: i32,
 }
 
 /// The Landlock ABI version the kernel supports, or why there is none.
@@ -603,20 +604,53 @@ fn add_rule(ruleset: &OwnedFd, path: &Path, access: u64) -> io::Result<()> {
   Ok(())
 }
 
+/// How many directory levels below `/` the read walk goes toward a denied
+/// path; a denied path deeper than that leaves its enclosing directory
+/// unreadable.
+const READ_WALK_MAX_DEPTH: usize = 32;
+
+/// How many levels below `/` a read walk root is (the depth the walk starts
+/// at: its limit counts from `/`, whatever the root).
+fn root_depth(root: &Path) -> usize {
+  root.components().count().saturating_sub(1)
+}
+
 /// Allows reading everything but `deny` (canonical paths): every directory
 /// entry on the way down to a denied path is allowed but that one.
 fn add_read_rules(
   ruleset: &OwnedFd,
   dir: &Path,
   deny: &[PathBuf],
+  home_read: Option<&HomeReadPolicy>,
   depth: usize,
 ) -> io::Result<()> {
   let rights = ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR;
+  walk_read_rules(dir, deny, home_read, depth, &mut |path| {
+    add_rule(ruleset, path, rights)
+  })
+}
+
+/// The read walk of [`add_read_rules`], calling `allow` for each path to
+/// allow. Past [`READ_WALK_MAX_DEPTH`] a directory that holds a denied path
+/// is not allowed at all: it fails closed rather than allowing the denied
+/// path with it. A symlink's rule follows the link, so one is allowed only
+/// when where it resolves to is neither denied, nor holds a denied path,
+/// nor is kept out by `home_read`.
+fn walk_read_rules(
+  dir: &Path,
+  deny: &[PathBuf],
+  home_read: Option<&HomeReadPolicy>,
+  depth: usize,
+  allow: &mut dyn FnMut(&Path) -> io::Result<()>,
+) -> io::Result<()> {
   if deny.iter().any(|d| d == dir) {
     return Ok(());
   }
-  if !deny.iter().any(|d| d.starts_with(dir)) || depth > 32 {
-    return add_rule(ruleset, dir, rights);
+  if !deny.iter().any(|d| d.starts_with(dir)) {
+    return allow(dir);
+  }
+  if depth > READ_WALK_MAX_DEPTH {
+    return Ok(());
   }
   let Ok(entries) = std::fs::read_dir(dir) else {
     return Ok(());
@@ -633,12 +667,13 @@ fn add_read_rules(
       if deny
         .iter()
         .any(|d| target.starts_with(d) || d.starts_with(&target))
+        || home_read.is_some_and(|h| h.keeps_out(&target))
       {
         continue;
       }
-      add_rule(ruleset, &path, rights)?;
+      allow(&path)?;
     } else {
-      add_read_rules(ruleset, &path, deny, depth + 1)?;
+      walk_read_rules(&path, deny, home_read, depth + 1, allow)?;
     }
   }
   Ok(())
@@ -658,10 +693,60 @@ pub fn build_ruleset(
   deny_read: &[PathBuf],
   proxy_port: Option<u16>,
 ) -> io::Result<OwnedFd> {
+  build_ruleset_opts(write_roots, deny_read, None, proxy_port, true)
+}
+
+/// Where the read rules start, each with the paths left out beneath it:
+/// everything but `deny_read` (and, with a home policy, the home directories),
+/// then each path the policy allows in the home directory but `deny_read`
+/// (DENEXT.md item 437). Landlock rules only add access, so a path allowed
+/// under the home directory is a rule of its own, and the denied paths
+/// within it stay out of it.
+fn read_rule_roots(
+  deny_read: &[PathBuf],
+  home_read: Option<&HomeReadPolicy>,
+) -> Vec<(PathBuf, Vec<PathBuf>)> {
+  let mut outer = deny_read.to_vec();
+  let mut roots = Vec::new();
+  if let Some(home_read) = home_read {
+    outer.extend(home_read.homes.iter().cloned());
+    for allowed in &home_read.allowed {
+      if deny_read.iter().any(|d| allowed.starts_with(d)) {
+        continue;
+      }
+      roots.push((allowed.clone(), deny_read.to_vec()));
+    }
+  }
+  roots.insert(0, (PathBuf::from("/"), outer));
+  roots
+}
+
+/// [`build_ruleset`], with no reads under the home directory but the paths
+/// `home_read` allows, when given (DENEXT.md item 437).
+pub fn build_ruleset_with_home_read(
+  write_roots: &[PathBuf],
+  deny_read: &[PathBuf],
+  home_read: Option<&HomeReadPolicy>,
+  proxy_port: Option<u16>,
+) -> io::Result<OwnedFd> {
+  build_ruleset_opts(write_roots, deny_read, home_read, proxy_port, true)
+}
+
+/// [`build_ruleset_with_home_read`], with the host's `/dev/shm` granted only
+/// when `host_shm` is set: a producer that gives the process a private one
+/// ([`PrivateShm`]), or none at all, leaves it out, since every same-user
+/// process's POSIX shared memory and semaphores live there.
+pub fn build_ruleset_opts(
+  write_roots: &[PathBuf],
+  deny_read: &[PathBuf],
+  home_read: Option<&HomeReadPolicy>,
+  proxy_port: Option<u16>,
+  host_shm: bool,
+) -> io::Result<OwnedFd> {
   let abi = landlock_abi().map_err(io::Error::other)?;
   let proxy_port = proxy_port.filter(|_| abi >= LANDLOCK_NET_ABI);
   let write = write_rights(abi);
-  let read = if deny_read.is_empty() {
+  let read = if deny_read.is_empty() && home_read.is_none() {
     0
   } else {
     ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR
@@ -700,6 +785,8 @@ pub fn build_ruleset(
   }
   // not /dev/tty: output goes through the pipes, and a terminal is what
   // TIOCSTI types into (DENEXT.md item 124)
+  // read too: a producer may deny reading the rest of /dev (the terminals,
+  // audio and video capture, raw USB)
   for dev in [
     "/dev/null",
     "/dev/zero",
@@ -707,11 +794,15 @@ pub fn build_ruleset(
     "/dev/random",
     "/dev/urandom",
   ] {
-    add_rule(&ruleset, Path::new(dev), write & FILE_RIGHTS)?;
+    add_rule(&ruleset, Path::new(dev), (write | read) & FILE_RIGHTS)?;
   }
-  add_rule(&ruleset, Path::new("/dev/shm"), write)?;
+  if host_shm {
+    add_rule(&ruleset, Path::new("/dev/shm"), write | read)?;
+  }
   if read != 0 {
-    add_read_rules(&ruleset, Path::new("/"), deny_read, 0)?;
+    for (root, deny) in read_rule_roots(deny_read, home_read) {
+      add_read_rules(&ruleset, &root, &deny, home_read, root_depth(&root))?;
+    }
   }
   if let Some(port) = proxy_port {
     let attr = NetPortAttr {
@@ -774,5 +865,335 @@ pub fn apply_to_command(
       }
       Ok(())
     });
+  }
+}
+
+const MOUNT_SHM_DATA: &[u8] = b"mode=1777\0";
+
+/// Gives the process a mount namespace of its own (and a user namespace,
+/// unless it already has one) and a fresh tmpfs on `/dev/shm`: what it
+/// creates there no other process sees, and the host's segments are out of
+/// its sight. Async-signal-safe (between fork and exec).
+fn enter_private_shm(
+  in_userns: bool,
+  uid_map: &str,
+  gid_map: &str,
+) -> io::Result<()> {
+  let flags = if in_userns {
+    libc::CLONE_NEWNS
+  } else {
+    libc::CLONE_NEWUSER | libc::CLONE_NEWNS
+  };
+  // SAFETY: plain syscalls on NUL-terminated literals
+  unsafe {
+    if libc::unshare(flags) != 0 {
+      return Err(io::Error::last_os_error());
+    }
+    if !in_userns {
+      write_proc_file(b"/proc/self/setgroups\0", b"deny")?;
+      write_proc_file(b"/proc/self/uid_map\0", uid_map.as_bytes())?;
+      write_proc_file(b"/proc/self/gid_map\0", gid_map.as_bytes())?;
+    }
+    // nothing mounted here propagates back to the host
+    if libc::mount(
+      std::ptr::null(),
+      c"/".as_ptr(),
+      std::ptr::null(),
+      libc::MS_REC | libc::MS_PRIVATE,
+      std::ptr::null(),
+    ) != 0
+    {
+      return Err(io::Error::last_os_error());
+    }
+    if libc::mount(
+      c"tmpfs".as_ptr(),
+      c"/dev/shm".as_ptr(),
+      c"tmpfs".as_ptr(),
+      libc::MS_NOSUID | libc::MS_NODEV,
+      MOUNT_SHM_DATA.as_ptr() as *const libc::c_void,
+    ) != 0
+    {
+      return Err(io::Error::last_os_error());
+    }
+  }
+  Ok(())
+}
+
+/// Whether this process can give a child a private `/dev/shm` (a user and
+/// mount namespace of its own, and a tmpfs mount there), or why not.
+pub fn private_shm_available() -> Result<(), String> {
+  static AVAILABLE: OnceLock<Result<(), String>> = OnceLock::new();
+  AVAILABLE
+    .get_or_init(|| {
+      // SAFETY: getuid / getgid have no failure mode
+      let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+      let uid_map = format!("{uid} {uid} 1\n");
+      let gid_map = format!("{gid} {gid} 1\n");
+      // tried in a child, so this process keeps its namespaces
+      // SAFETY: fork; the child makes only async-signal-safe calls
+      let pid = unsafe { libc::fork() };
+      if pid < 0 {
+        return Err(format!("fork failed: {}", io::Error::last_os_error()));
+      }
+      if pid == 0 {
+        let code = match enter_private_shm(false, &uid_map, &gid_map) {
+          Ok(()) => 0,
+          Err(err) => err.raw_os_error().unwrap_or(libc::EPERM),
+        };
+        // SAFETY: the child ends here
+        unsafe { libc::_exit(code) };
+      }
+      let mut status = 0;
+      // SAFETY: waiting for the child just forked
+      unsafe { libc::waitpid(pid, &mut status, 0) };
+      if !libc::WIFEXITED(status) {
+        return Err("the namespace probe died".into());
+      }
+      match libc::WEXITSTATUS(status) {
+        0 => Ok(()),
+        errno => Err(format!(
+          "a user and mount namespace with a tmpfs failed: {}",
+          io::Error::from_raw_os_error(errno)
+        )),
+      }
+    })
+    .clone()
+}
+
+/// A private tmpfs on `/dev/shm` for a confined command (see
+/// [`private_shm_available`]), granted in its Landlock ruleset: a rule is
+/// tied to the directory's inode, so the new mount's root gets its own rule,
+/// added from the child before the ruleset is enforced. Use it with a
+/// ruleset from [`build_ruleset_opts`] without the host's `/dev/shm`.
+pub struct PrivateShm {
+  rights: u64,
+  in_userns: bool,
+}
+
+impl PrivateShm {
+  /// `reads_handled`: the ruleset handles reads (it was built with a
+  /// non-empty deny list); `in_userns`: the command's process already
+  /// enters a user namespace of its own first ([`NetnsHandoff`]).
+  pub fn new(reads_handled: bool, in_userns: bool) -> io::Result<Self> {
+    let abi = landlock_abi().map_err(io::Error::other)?;
+    let mut rights = write_rights(abi);
+    if reads_handled {
+      rights |= ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR;
+    }
+    Ok(Self { rights, in_userns })
+  }
+
+  /// Adds the mount to the command's `pre_exec`: after a [`NetnsHandoff`]'s,
+  /// before [`apply_to_command`]'s (which enforces the ruleset; Landlock
+  /// refuses mounts after that).
+  pub fn apply_to_command(
+    &self,
+    command: &mut tokio::process::Command,
+    ruleset: &OwnedFd,
+  ) {
+    let ruleset_fd = ruleset.as_raw_fd();
+    let rights = self.rights;
+    let in_userns = self.in_userns;
+    // SAFETY: getuid / getgid have no failure mode
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    let uid_map = format!("{uid} {uid} 1\n");
+    let gid_map = format!("{gid} {gid} 1\n");
+    // SAFETY: only async-signal-safe syscalls run between fork and exec, on
+    // memory allocated before the fork
+    unsafe {
+      command.pre_exec(move || {
+        enter_private_shm(in_userns, &uid_map, &gid_map)?;
+        let fd =
+          libc::open(c"/dev/shm".as_ptr(), libc::O_PATH | libc::O_CLOEXEC);
+        if fd < 0 {
+          return Err(io::Error::last_os_error());
+        }
+        let attr = PathBeneathAttr {
+          allowed_access: rights,
+          parent_fd: fd,
+        };
+        let res = libc::syscall(
+          SYS_LANDLOCK_ADD_RULE,
+          ruleset_fd,
+          LANDLOCK_RULE_PATH_BENEATH,
+          &attr as *const PathBeneathAttr,
+          0u32,
+        );
+        let err = io::Error::last_os_error();
+        libc::close(fd);
+        if res != 0 {
+          return Err(err);
+        }
+        Ok(())
+      });
+    }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// A fresh, canonical scratch directory for one test.
+  fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir()
+      .join(format!("deno_sandbox_{name}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::canonicalize(&dir).unwrap()
+  }
+
+  /// The paths the read walk allows from `root`, with `root` counted at
+  /// its real depth below `/` (as the ruleset builder starts it).
+  fn allowed(root: &Path, deny: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let depth = root_depth(root);
+    walk_read_rules(root, deny, None, depth, &mut |p| {
+      out.push(p.to_path_buf());
+      Ok(())
+    })
+    .unwrap();
+    out
+  }
+
+  #[test]
+  fn read_walk_allows_siblings_not_the_denied_path() {
+    let root = scratch("read_walk_siblings");
+    std::fs::create_dir_all(root.join("a/b")).unwrap();
+    std::fs::write(root.join("a/b/secret"), "x").unwrap();
+    std::fs::write(root.join("a/b/other"), "x").unwrap();
+    std::fs::write(root.join("a/sibling"), "x").unwrap();
+    let deny = vec![root.join("a/b/secret")];
+    let allowed = allowed(&root, &deny);
+    assert!(allowed.contains(&root.join("a/b/other")));
+    assert!(allowed.contains(&root.join("a/sibling")));
+    assert!(allowed.iter().all(|p| !deny[0].starts_with(p)));
+    std::fs::remove_dir_all(&root).unwrap();
+  }
+
+  #[test]
+  fn read_walk_fails_closed_past_its_depth_limit() {
+    let root = scratch("read_walk_depth");
+    // a denied file further below `/` than the walk goes
+    let levels = READ_WALK_MAX_DEPTH + 4 - (root.components().count() - 1);
+    let mut deep = root.clone();
+    for _ in 0..levels {
+      deep.push("d");
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    let secret = deep.join("secret");
+    std::fs::write(&secret, "x").unwrap();
+    std::fs::write(deep.join("other"), "x").unwrap();
+    assert!(secret.components().count() - 1 > READ_WALK_MAX_DEPTH + 1);
+    let deny = vec![secret.clone()];
+    let allowed = allowed(&root, &deny);
+    // nothing allowed holds the denied file, at any depth
+    assert!(
+      allowed.iter().all(|p| !secret.starts_with(p)),
+      "{allowed:?}"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+  }
+
+  // every read walk root starts at its own depth below `/`, so the depth
+  // limit means the same for a home root as for `/`
+  #[test]
+  fn read_walk_roots_start_at_their_depth() {
+    assert_eq!(root_depth(Path::new("/")), 0);
+    assert_eq!(root_depth(Path::new("/home/u/proj")), 3);
+    let deny = vec![PathBuf::from("/home/u/.ssh")];
+    let home = HomeReadPolicy {
+      homes: vec![PathBuf::from("/home/u")],
+      allowed: vec![PathBuf::from("/home/u/proj")],
+    };
+    let depths: Vec<usize> = read_rule_roots(&deny, Some(&home))
+      .iter()
+      .map(|(root, _)| root_depth(root))
+      .collect();
+    assert_eq!(depths, vec![0, 3]);
+  }
+
+  // a symlink in an allowed home path is followed only where it resolves to
+  // a path the home policy allows, or outside the home directory
+  #[test]
+  fn read_walk_follows_links_only_where_the_home_policy_allows() {
+    let root = scratch("read_walk_home_links");
+    let home = root.join("home");
+    let proj = home.join("proj");
+    std::fs::create_dir_all(proj.join("src")).unwrap();
+    std::fs::create_dir_all(home.join("sibling")).unwrap();
+    std::fs::create_dir_all(home.join("tools")).unwrap();
+    std::fs::create_dir_all(root.join("elsewhere")).unwrap();
+    std::fs::write(proj.join(".env"), "x").unwrap();
+    std::os::unix::fs::symlink(home.join("sibling"), proj.join("to_sibling"))
+      .unwrap();
+    std::os::unix::fs::symlink(&home, proj.join("to_home")).unwrap();
+    std::os::unix::fs::symlink(home.join("tools"), proj.join("to_tools"))
+      .unwrap();
+    std::os::unix::fs::symlink(root.join("elsewhere"), proj.join("to_else"))
+      .unwrap();
+    let policy = HomeReadPolicy {
+      homes: vec![home.clone()],
+      allowed: vec![proj.clone(), home.join("tools")],
+    };
+    // a denied file inside the allowed root is what makes the walk run
+    let deny = vec![proj.join(".env")];
+    let mut out = Vec::new();
+    let depth = proj.components().count() - 1;
+    walk_read_rules(&proj, &deny, Some(&policy), depth, &mut |p| {
+      out.push(p.to_path_buf());
+      Ok(())
+    })
+    .unwrap();
+    assert!(out.contains(&proj.join("src")), "{out:?}");
+    assert!(out.contains(&proj.join("to_tools")), "{out:?}");
+    assert!(out.contains(&proj.join("to_else")), "{out:?}");
+    assert!(!out.contains(&proj.join("to_sibling")), "{out:?}");
+    assert!(!out.contains(&proj.join("to_home")), "{out:?}");
+    assert!(!out.contains(&proj.join(".env")), "{out:?}");
+    std::fs::remove_dir_all(&root).unwrap();
+  }
+
+  // DENEXT.md item 437: with a home policy the home directory is left out of
+  // the rule from "/", and each allowed path in it is a rule of its own that
+  // still leaves the denied paths out
+  #[test]
+  fn read_rule_roots_leave_the_home_directory_out() {
+    let deny = vec![
+      PathBuf::from("/home/u/.ssh"),
+      PathBuf::from("/home/u/proj/.env"),
+    ];
+    assert_eq!(
+      read_rule_roots(&deny, None),
+      vec![(PathBuf::from("/"), deny.clone())]
+    );
+    let home = HomeReadPolicy {
+      homes: vec![PathBuf::from("/home/u")],
+      allowed: vec![
+        PathBuf::from("/home/u/proj"),
+        PathBuf::from("/home/u/.ssh/inside"),
+      ],
+    };
+    let mut outer = deny.clone();
+    outer.push(PathBuf::from("/home/u"));
+    // every home directory of the policy is left out
+    let two = HomeReadPolicy {
+      homes: vec![PathBuf::from("/home/u"), PathBuf::from("/tmp/h")],
+      allowed: vec![],
+    };
+    let mut outer_two = outer.clone();
+    outer_two.push(PathBuf::from("/tmp/h"));
+    assert_eq!(
+      read_rule_roots(&deny, Some(&two)),
+      vec![(PathBuf::from("/"), outer_two)]
+    );
+    assert_eq!(
+      read_rule_roots(&deny, Some(&home)),
+      vec![
+        (PathBuf::from("/"), outer),
+        // a path inside a denied path gets no rule
+        (PathBuf::from("/home/u/proj"), deny.clone()),
+      ]
+    );
   }
 }

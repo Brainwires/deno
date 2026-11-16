@@ -1,0 +1,12 @@
+{
+  "supplyChain": {
+    "jailScripts": {
+      "packages": {
+        "npm:@denotest/jail-home-read": {
+          "net": ["example.test"],
+          "env": ["JAIL_REAL_HOME", "JAIL_PROJECT"]
+        }
+      }
+    }
+  }
+}

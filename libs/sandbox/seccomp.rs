@@ -11,9 +11,13 @@
 //!    process;
 //! 2. the rules, in the order they were added; each one either answers its
 //!    syscall or leaves it to the rules after it;
-//! 3. `socket(2)`: netlink always passes, IPv4 / IPv6 as [`InetSockets`]
-//!    says, every other family fails with `EACCES`; every other syscall is
-//!    allowed.
+//! 3. `socket(2)`: netlink as [`NetlinkSockets`] says (by default every
+//!    protocol), Unix and vsock sockets only when asked for, IPv4 / IPv6 as
+//!    [`InetSockets`] says, every other family fails with the socket errno
+//!    (`EACCES` by default); every other syscall is allowed.
+//!
+//! A spec with the defaults emits the program the lifecycle jail has always
+//! installed (its golden bytes are tested in the jail).
 //!
 //! The instructions emitted are loads of `seccomp_data` words, AND, JEQ / JGE
 //! and RET; [`run_filter`] interprets exactly those, for tests.
@@ -48,6 +52,10 @@ pub const SECCOMP_DATA_ARG0: u32 = 16;
 pub const fn seccomp_arg(n: u32) -> u32 {
   SECCOMP_DATA_ARG0 + 8 * n
 }
+/// The high 32 bits of argument `n` (little-endian).
+pub const fn seccomp_arg_hi(n: u32) -> u32 {
+  SECCOMP_DATA_ARG0 + 8 * n + 4
+}
 pub const SOCK_TYPE_MASK: u32 = 0xf;
 pub const SOCK_STREAM: u32 = 1;
 pub const IPPROTO_TCP: u32 = 6;
@@ -55,6 +63,9 @@ pub const MSG_FASTOPEN: u32 = 0x2000_0000;
 pub const AF_NETLINK: u32 = 16;
 pub const AF_INET: u32 = 2;
 pub const AF_INET6: u32 = 10;
+pub const AF_UNIX: u32 = 1;
+pub const AF_VSOCK: u32 = 40;
+pub const NETLINK_ROUTE: u32 = 0;
 pub const NR_IO_URING_SETUP: u32 = 425;
 /// `ioctl` requests that type into a terminal (asm-generic, the same on
 /// x86_64 and aarch64).
@@ -131,6 +142,46 @@ pub enum SyscallRule {
     mask: u32,
     errno: i32,
   },
+  /// `nr` fails with `errno` when argument `arg` (all 64 bits) is not zero
+  /// (a path pointer: `utimensat(fd, NULL, ...)` is the descriptor form);
+  /// zero goes on to the next rule.
+  DenyArgNonZero { nr: u32, arg: u32, errno: i32 },
+  /// `nr` fails with `errno` when the low 32 bits of argument `arg`, masked
+  /// with `mask`, equal `value` (open flags: `O_RDONLY | O_TRUNC`); anything
+  /// else goes on to the next rule.
+  DenyArgMasked {
+    nr: u32,
+    arg: u32,
+    mask: u32,
+    value: u32,
+    errno: i32,
+  },
+  /// `nr` fails with `errno` unless the low 32 bits of argument `arg` equal
+  /// `value` (a signal's target: this process only); `value` goes on to the
+  /// next rule.
+  DenyArgNotEq {
+    nr: u32,
+    arg: u32,
+    value: u32,
+    errno: i32,
+  },
+  /// `nr` fails with `errno` when every one of `tests` (1 to 8 of them)
+  /// holds; otherwise it goes on to the next rule.
+  DenyArgsAll {
+    nr: u32,
+    tests: Vec<ArgTest>,
+    errno: i32,
+  },
+}
+
+/// One test of a [`SyscallRule::DenyArgsAll`]: the low 32 bits of argument
+/// `arg`, ANDed with `mask`, equal `value` (or, with `equal: false`, don't).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArgTest {
+  pub arg: u32,
+  pub mask: u32,
+  pub value: u32,
+  pub equal: bool,
 }
 
 /// Which IPv4 / IPv6 sockets `socket(2)` creates.
@@ -144,13 +195,28 @@ pub enum InetSockets {
   TcpStream,
 }
 
+/// Which netlink sockets `socket(2)` creates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetlinkSockets {
+  /// Every protocol (the jail's default).
+  Any,
+  /// `NETLINK_ROUTE` only (`getifaddrs`, `AI_ADDRCONFIG`).
+  RouteOnly,
+  /// None.
+  Denied,
+}
+
 /// A seccomp program to assemble: the rules in order, then the `socket(2)`
-/// filter. With no rules and [`InetSockets::Denied`], everything is allowed
-/// but `socket(2)` outside netlink (and another architecture's syscalls).
+/// filter. With no rules and the defaults, everything is allowed but
+/// `socket(2)` outside netlink (and another architecture's syscalls).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeccompSpec {
   rules: Vec<SyscallRule>,
   inet: InetSockets,
+  netlink: NetlinkSockets,
+  unix: bool,
+  vsock: bool,
+  socket_errno: i32,
 }
 
 impl Default for SeccompSpec {
@@ -164,7 +230,35 @@ impl SeccompSpec {
     Self {
       rules: Vec::new(),
       inet: InetSockets::Denied,
+      netlink: NetlinkSockets::Any,
+      unix: false,
+      vsock: false,
+      socket_errno: libc::EACCES,
     }
+  }
+
+  /// Sets which netlink sockets pass the `socket(2)` filter.
+  pub fn netlink_sockets(mut self, netlink: NetlinkSockets) -> Self {
+    self.netlink = netlink;
+    self
+  }
+
+  /// Lets `socket(AF_UNIX)` pass.
+  pub fn unix_sockets(mut self, allow: bool) -> Self {
+    self.unix = allow;
+    self
+  }
+
+  /// Lets `socket(AF_VSOCK)` pass.
+  pub fn vsock_sockets(mut self, allow: bool) -> Self {
+    self.vsock = allow;
+    self
+  }
+
+  /// The errno of a refused `socket(2)`.
+  pub fn socket_errno(mut self, errno: i32) -> Self {
+    self.socket_errno = errno;
+    self
   }
 
   /// Adds a rule after the ones already added.
@@ -210,8 +304,32 @@ impl SeccompSpec {
     f.push(stmt(BPF_RET_K, SECCOMP_RET_ALLOW));
     // socket(domain, type, protocol): the low 32 bits of each argument
     f.push(stmt(BPF_LD_W_ABS, seccomp_arg(0)));
-    f.push(jump(BPF_JEQ_K, AF_NETLINK, 0, 1));
-    f.push(stmt(BPF_RET_K, SECCOMP_RET_ALLOW));
+    let refuse = errno(self.socket_errno);
+    match self.netlink {
+      NetlinkSockets::Any => {
+        f.push(jump(BPF_JEQ_K, AF_NETLINK, 0, 1));
+        f.push(stmt(BPF_RET_K, SECCOMP_RET_ALLOW));
+      }
+      NetlinkSockets::RouteOnly => {
+        // the protocol is argument 2; any other netlink protocol is refused
+        // here (the accumulator no longer holds the family)
+        f.push(jump(BPF_JEQ_K, AF_NETLINK, 0, 4));
+        f.push(stmt(BPF_LD_W_ABS, seccomp_arg(2)));
+        f.push(jump(BPF_JEQ_K, NETLINK_ROUTE, 0, 1));
+        f.push(stmt(BPF_RET_K, SECCOMP_RET_ALLOW));
+        f.push(stmt(BPF_RET_K, refuse));
+      }
+      // falls through to the refusal at the end
+      NetlinkSockets::Denied => {}
+    }
+    if self.unix {
+      f.push(jump(BPF_JEQ_K, AF_UNIX, 0, 1));
+      f.push(stmt(BPF_RET_K, SECCOMP_RET_ALLOW));
+    }
+    if self.vsock {
+      f.push(jump(BPF_JEQ_K, AF_VSOCK, 0, 1));
+      f.push(stmt(BPF_RET_K, SECCOMP_RET_ALLOW));
+    }
     match self.inet {
       InetSockets::Denied => {}
       InetSockets::Any => {
@@ -233,7 +351,7 @@ impl SeccompSpec {
         f.push(stmt(BPF_RET_K, SECCOMP_RET_ALLOW));
       }
     }
-    f.push(stmt(BPF_RET_K, errno(libc::EACCES)));
+    f.push(stmt(BPF_RET_K, refuse));
     let mut bytes = Vec::with_capacity(f.len() * 8);
     for ins in f {
       bytes.extend_from_slice(&ins.code.to_ne_bytes());
@@ -298,6 +416,71 @@ fn emit_rule(f: &mut Vec<SockFilter>, rule: &SyscallRule) {
       f.push(stmt(BPF_RET_K, SECCOMP_RET_ALLOW));
       f.push(stmt(BPF_RET_K, errno(*e)));
     }
+    SyscallRule::DenyArgNonZero { nr, arg, errno: e } => {
+      f.push(jump(BPF_JEQ_K, *nr, 0, 6));
+      f.push(stmt(BPF_LD_W_ABS, seccomp_arg(*arg)));
+      // low word set: refused
+      f.push(jump(BPF_JEQ_K, 0, 0, 2));
+      f.push(stmt(BPF_LD_W_ABS, seccomp_arg_hi(*arg)));
+      // high word clear too: on to the next rule
+      f.push(jump(BPF_JEQ_K, 0, 1, 0));
+      f.push(stmt(BPF_RET_K, errno(*e)));
+      f.push(stmt(BPF_LD_W_ABS, SECCOMP_DATA_NR));
+    }
+    SyscallRule::DenyArgMasked {
+      nr,
+      arg,
+      mask,
+      value,
+      errno: e,
+    } => {
+      f.push(jump(BPF_JEQ_K, *nr, 0, 5));
+      f.push(stmt(BPF_LD_W_ABS, seccomp_arg(*arg)));
+      f.push(stmt(BPF_ALU_AND_K, *mask));
+      f.push(jump(BPF_JEQ_K, *value, 0, 1));
+      f.push(stmt(BPF_RET_K, errno(*e)));
+      f.push(stmt(BPF_LD_W_ABS, SECCOMP_DATA_NR));
+    }
+    SyscallRule::DenyArgNotEq {
+      nr,
+      arg,
+      value,
+      errno: e,
+    } => {
+      f.push(jump(BPF_JEQ_K, *nr, 0, 4));
+      f.push(stmt(BPF_LD_W_ABS, seccomp_arg(*arg)));
+      // equal: over the return, to the reload
+      f.push(jump(BPF_JEQ_K, *value, 1, 0));
+      f.push(stmt(BPF_RET_K, errno(*e)));
+      f.push(stmt(BPF_LD_W_ABS, SECCOMP_DATA_NR));
+    }
+    SyscallRule::DenyArgsAll {
+      nr,
+      tests,
+      errno: e,
+    } => {
+      assert!(
+        !tests.is_empty() && tests.len() <= 8,
+        "a DenyArgsAll rule takes 1 to 8 tests"
+      );
+      let n = tests.len();
+      // another syscall: past the tests, the return and the reload
+      f.push(jump(BPF_JEQ_K, *nr, 0, (3 * n + 2) as u8));
+      for (i, test) in tests.iter().enumerate() {
+        f.push(stmt(BPF_LD_W_ABS, seccomp_arg(test.arg)));
+        f.push(stmt(BPF_ALU_AND_K, test.mask));
+        // a failed test jumps to the reload, past the remaining tests and
+        // the return
+        let fail = (3 * (n - i) - 2) as u8;
+        if test.equal {
+          f.push(jump(BPF_JEQ_K, test.value, 0, fail));
+        } else {
+          f.push(jump(BPF_JEQ_K, test.value, fail, 0));
+        }
+      }
+      f.push(stmt(BPF_RET_K, errno(*e)));
+      f.push(stmt(BPF_LD_W_ABS, SECCOMP_DATA_NR));
+    }
   }
 }
 
@@ -308,6 +491,12 @@ fn emit_rule(f: &mut Vec<SockFilter>, rule: &SyscallRule) {
 /// general BPF interpreter.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn run_filter(program: &[u8], nr: u32, args: [u32; 6]) -> u32 {
+  run_filter64(program, nr, args.map(u64::from))
+}
+
+/// [`run_filter`] with the full 64-bit arguments.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub fn run_filter64(program: &[u8], nr: u32, args: [u64; 6]) -> u32 {
   let ins = program
     .chunks(8)
     .map(|c| SockFilter {
@@ -321,9 +510,14 @@ pub fn run_filter(program: &[u8], nr: u32, args: [u32; 6]) -> u32 {
     SECCOMP_DATA_NR => nr,
     SECCOMP_DATA_ARCH => AUDIT_ARCH,
     o if o >= SECCOMP_DATA_ARG0
-      && (o - SECCOMP_DATA_ARG0).is_multiple_of(8) =>
+      && (o - SECCOMP_DATA_ARG0).is_multiple_of(4) =>
     {
-      args[((o - SECCOMP_DATA_ARG0) / 8) as usize]
+      let i = ((o - SECCOMP_DATA_ARG0) / 8) as usize;
+      if (o - SECCOMP_DATA_ARG0).is_multiple_of(8) {
+        args[i] as u32
+      } else {
+        (args[i] >> 32) as u32
+      }
     }
     o => panic!("an unexpected load at {o}"),
   };
@@ -448,6 +642,90 @@ mod tests {
     assert_eq!(run_filter(&p, 13, [0, 0, 0, 0x10, 0, 0]), ALLOW);
   }
 
+  // every test must hold; one failing, at any position, leaves the syscall
+  // to the rules after it with the number reloaded; "not equal" tests too
+  #[test]
+  fn deny_args_all_rule() {
+    for equal in [true, false] {
+      for n in 1..=6u32 {
+        // argument i, its low byte, against 10 + i
+        let tests = (0..n)
+          .map(|i| ArgTest {
+            arg: i,
+            mask: 0xff,
+            value: 10 + i,
+            equal,
+          })
+          .collect::<Vec<_>>();
+        let p = SeccompSpec::new()
+          .rule(SyscallRule::DenyArgsAll {
+            nr: 14,
+            tests,
+            errno: libc::EPERM,
+          })
+          .rule(SyscallRule::Deny {
+            nr: 14,
+            errno: libc::ENOSYS,
+          })
+          .program();
+        // every test holds (the mask drops the high bits)
+        let mut held = [0u32; 6];
+        for i in 0..n as usize {
+          held[i] = if equal {
+            0x100 | (10 + i as u32)
+          } else {
+            0x100
+          };
+        }
+        assert_eq!(run_filter(&p, 14, held), eno(libc::EPERM), "{n}");
+        for j in 0..n as usize {
+          let mut failed = held;
+          failed[j] = if equal { 0 } else { 10 + j as u32 };
+          assert_eq!(
+            run_filter(&p, 14, failed),
+            eno(libc::ENOSYS),
+            "{equal} {n} {j}"
+          );
+        }
+        assert_eq!(run_filter(&p, 15, held), ALLOW, "{n}");
+      }
+    }
+  }
+
+  // a test of two arguments, as the jail's netlink rule uses it: the family
+  // equal and the protocol not
+  #[test]
+  fn deny_args_all_two_arguments() {
+    let p = SeccompSpec::new()
+      .rule(SyscallRule::DenyArgsAll {
+        nr: NR_SOCKET,
+        tests: vec![
+          ArgTest {
+            arg: 0,
+            mask: u32::MAX,
+            value: AF_NETLINK,
+            equal: true,
+          },
+          ArgTest {
+            arg: 2,
+            mask: u32::MAX,
+            value: 0,
+            equal: false,
+          },
+        ],
+        errno: libc::EACCES,
+      })
+      .program();
+    let socket =
+      |a: [u32; 3]| run_filter(&p, NR_SOCKET, [a[0], a[1], a[2], 0, 0, 0]);
+    assert_eq!(socket([AF_NETLINK, 3, 0]), ALLOW);
+    assert_eq!(socket([AF_NETLINK, 3, 4]), eno(libc::EACCES));
+    assert_eq!(socket([AF_NETLINK, 3, 12]), eno(libc::EACCES));
+    // the rule is about netlink only; the family filter answers the rest
+    assert_eq!(socket([AF_INET, SOCK_STREAM, 6]), eno(libc::EACCES));
+    assert_eq!(socket([libc::AF_UNIX as u32, 1, 4]), eno(libc::EACCES));
+  }
+
   #[test]
   fn inet_sockets() {
     let socket = |inet, domain, ty, proto| {
@@ -486,6 +764,99 @@ mod tests {
       assert_eq!(socket(inet, libc::AF_UNIX as u32, SOCK_STREAM, 0), eacces);
       assert_eq!(socket(inet, AF_NETLINK, dgram, 0), ALLOW);
     }
+  }
+
+  // the descriptor form (a null path) passes on, any non-null pointer is
+  // refused, including one whose low word is zero
+  #[test]
+  fn deny_arg_non_zero_rule() {
+    let p = SeccompSpec::new()
+      .rule(SyscallRule::DenyArgNonZero {
+        nr: 20,
+        arg: 1,
+        errno: libc::EPERM,
+      })
+      .rule(SyscallRule::Deny {
+        nr: 20,
+        errno: libc::EBADF,
+      })
+      .program();
+    assert_eq!(run_filter64(&p, 20, [3, 0, 0, 0, 0, 0]), eno(libc::EBADF));
+    assert_eq!(
+      run_filter64(&p, 20, [3, 0x1000, 0, 0, 0, 0]),
+      eno(libc::EPERM)
+    );
+    assert_eq!(
+      run_filter64(&p, 20, [3, 0x7f00_0000_0000, 0, 0, 0, 0]),
+      eno(libc::EPERM)
+    );
+    assert_eq!(run_filter64(&p, 21, [3, 0x1000, 0, 0, 0, 0]), ALLOW);
+  }
+
+  #[test]
+  fn deny_arg_masked_rule() {
+    let p = SeccompSpec::new()
+      .rule(SyscallRule::DenyArgMasked {
+        nr: 30,
+        arg: 2,
+        mask: 0x203,
+        value: 0x200,
+        errno: libc::EPERM,
+      })
+      .rule(SyscallRule::Deny {
+        nr: 30,
+        errno: libc::EBADF,
+      })
+      .program();
+    // O_RDONLY | O_TRUNC (plus unrelated bits): refused
+    assert_eq!(
+      run_filter(&p, 30, [0, 0, 0x8200, 0, 0, 0]),
+      eno(libc::EPERM)
+    );
+    // O_WRONLY | O_TRUNC, O_RDONLY: on to the next rule
+    assert_eq!(run_filter(&p, 30, [0, 0, 0x201, 0, 0, 0]), eno(libc::EBADF));
+    assert_eq!(run_filter(&p, 30, [0, 0, 0, 0, 0, 0]), eno(libc::EBADF));
+    assert_eq!(run_filter(&p, 31, [0, 0, 0x200, 0, 0, 0]), ALLOW);
+  }
+
+  #[test]
+  fn socket_knobs() {
+    let socket = |spec: &SeccompSpec, domain, ty, proto| {
+      run_filter(&spec.program(), NR_SOCKET, [domain, ty, proto, 0, 0, 0])
+    };
+    let raw = libc::SOCK_RAW as u32;
+    let eperm = eno(libc::EPERM);
+    let route_only = SeccompSpec::new()
+      .netlink_sockets(NetlinkSockets::RouteOnly)
+      .socket_errno(libc::EPERM);
+    assert_eq!(socket(&route_only, AF_NETLINK, raw, NETLINK_ROUTE), ALLOW);
+    assert_eq!(socket(&route_only, AF_NETLINK, raw, 15), eperm);
+    assert_eq!(socket(&route_only, AF_UNIX, SOCK_STREAM, 0), eperm);
+    assert_eq!(socket(&route_only, AF_INET, SOCK_STREAM, 0), eperm);
+    let denied = SeccompSpec::new()
+      .netlink_sockets(NetlinkSockets::Denied)
+      .inet_sockets(InetSockets::Any)
+      .socket_errno(libc::EPERM);
+    assert_eq!(socket(&denied, AF_NETLINK, raw, NETLINK_ROUTE), eperm);
+    assert_eq!(socket(&denied, AF_INET6, SOCK_STREAM, 0), ALLOW);
+    let unix = SeccompSpec::new().unix_sockets(true).vsock_sockets(true);
+    assert_eq!(socket(&unix, AF_UNIX, SOCK_STREAM, 0), ALLOW);
+    assert_eq!(socket(&unix, AF_VSOCK, SOCK_STREAM, 0), ALLOW);
+    assert_eq!(socket(&unix, AF_INET, SOCK_STREAM, 0), eno(libc::EACCES));
+  }
+
+  // the defaults emit the program the jail has always installed: the knobs
+  // add nothing unless set
+  #[test]
+  fn default_knobs_add_nothing() {
+    let base = SeccompSpec::new().inet_sockets(InetSockets::TcpStream);
+    let explicit = base
+      .clone()
+      .netlink_sockets(NetlinkSockets::Any)
+      .unix_sockets(false)
+      .vsock_sockets(false)
+      .socket_errno(libc::EACCES);
+    assert_eq!(base.program(), explicit.program());
   }
 
   // another architecture's syscalls kill the process
