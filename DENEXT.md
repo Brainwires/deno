@@ -16966,6 +16966,29 @@ where the changes are discussed.
        checks (`blur: 9`, the `blur()` call).
      - Node tests enabled: none; no Node API changes.
 
+447. **`chore(deps)`: V8 15.6.75.63 from Brainwires/rusty_v8
+     `v156.0.0-denext.6`** (`v8` crate `156.0.0+denext.6`; runtime and CI;
+     `Cargo.toml`, `Cargo.lock`, `.github/denext-runtime/rusty_v8.sha256`;
+     runtime 3.0.0-denext.25). V8 moves from 15.6.75.57 to 15.6.75.63, the head
+     of `branch-heads/15.6` (Chrome Extended Stable 156) on 2026-11-16, which
+     keeps the pin inside the engine staleness gate's 14-day patch-lag rule.
+     Four [M156] merges come in: turboshaft (`913311524c`), inline caches
+     (`95b829dd78`), the parser (`fc84cf914b`) and objects (`7fd7b396c0`);
+     `af144bc8d4` and its revert `a62636bc52` cancel out. The crbug ids are in
+     rusty_v8's `denext/release-notes/v156.0.0-denext.6.md`. V8's `DEPS` and
+     public headers did not change (only `v8-version.h`). rusty_v8's embedder
+     patches and the read-only heap guard of `v156.0.0-denext.3` (item 218) are
+     kept.
+     - `Cargo.toml`'s rev is `f72a5f53`, the `crate` commit the release names.
+       `rusty_v8.sha256` holds the release's `SHA256SUMS`; all 12 files were
+       checked against it and against their build-provenance attestations
+       (`gh attestation verify -R Brainwires/rusty_v8`). The release run is
+       Brainwires/rusty_v8 run 43938858319.
+     - User-facing note: the runtime carries V8 15.6.75.63, with four V8 fixes
+       from Chrome 156's branch.
+     - Node tests enabled: none, because this is the JavaScript engine's patch
+       level, not a Node API.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -16975,8 +16998,8 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
-416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446) are what
-the prebuilt `libdenort` carries. The CLI-side parts (for example writing
+416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447) are
+what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.
