@@ -985,6 +985,31 @@ fn no_shm_warning(reason: &str) -> String {
   )
 }
 
+/// Whether a script's output names POSIX shared memory or a named
+/// semaphore, so its failure may come from having no `/dev/shm`.
+#[cfg(target_os = "linux")]
+fn mentions_shared_memory(output: &[u8]) -> bool {
+  const MARKERS: &[&[u8]] = &[
+    b"/dev/shm",
+    b"shm_open",
+    b"sem_open",
+    b"SemLock",
+    b"semaphore",
+  ];
+  MARKERS
+    .iter()
+    .any(|m| output.windows(m.len()).any(|w| w == *m))
+}
+
+/// The warning a failing script gets on Linux where it had no `/dev/shm`
+/// and its output names shared memory or a semaphore.
+#[cfg(target_os = "linux")]
+fn no_shm_hint(reason: &str) -> String {
+  format!(
+    "jail-scripts: this host gives lifecycle scripts no /dev/shm ({reason}); a script that uses POSIX shared memory or named semaphores (shm_open, sem_open, Python's multiprocessing locks) fails without it."
+  )
+}
+
 /// The one-line warning for Linux without an unprivileged network namespace.
 #[cfg(target_os = "linux")]
 fn no_netns_warning(reason: &str) -> String {
@@ -2722,7 +2747,11 @@ async fn run_in_dirs(
     } else if !NO_SHM_WARNED.swap(true, std::sync::atomic::Ordering::SeqCst)
       && let Err(reason) = super::sandbox_linux::private_shm_available()
     {
-      log::warn!("{} {}", colors::yellow("Warning"), no_shm_warning(&reason));
+      // no /dev/shm only narrows what a script can do, and hosts that
+      // restrict unprivileged user namespaces (Ubuntu 23.10+) are common: a
+      // script that fails naming shared memory gets a warning instead
+      // (`no_shm_hint`)
+      log::debug!("{}", no_shm_warning(&reason));
     }
     let abi = super::sandbox_linux::landlock_abi().unwrap_or(1);
     super::sandbox_linux::apply_to_command(
@@ -2849,6 +2878,15 @@ async fn run_in_dirs(
   let mut stderr = read_err.await.unwrap_or_default();
   let mut exit_code = status.code().unwrap_or(1);
   drop(proxy);
+  #[cfg(target_os = "linux")]
+  if exit_code != 0
+    && os_sandbox
+    && !private_shm
+    && (mentions_shared_memory(&stdout) || mentions_shared_memory(&stderr))
+    && let Err(reason) = super::sandbox_linux::private_shm_available()
+  {
+    log::warn!("{} {}", colors::yellow("Warning"), no_shm_hint(&reason));
+  }
   refuse_new_executables(s, package, started, &mut stderr, &mut exit_code);
   Ok(TaskResult {
     exit_code,
@@ -3318,6 +3356,40 @@ mod tests {
     if let Some(home) = account_home() {
       assert!(home.is_absolute() && home.parent().is_some(), "{home:?}");
     }
+  }
+
+  // a failing script is warned about the missing /dev/shm only when its
+  // output names shared memory or a semaphore
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn mentions_shared_memory_only_for_its_markers() {
+    for hit in [
+      &b"OSError: [Errno 2] No such file or directory: '/dev/shm/x'"[..],
+      b"shm_open failed",
+      b"_multiprocessing.SemLock(",
+      b"sem_open: Permission denied",
+    ] {
+      assert!(
+        mentions_shared_memory(hit),
+        "{}",
+        String::from_utf8_lossy(hit)
+      );
+    }
+    assert!(!mentions_shared_memory(b"npm_config_user_agent: deno"));
+    assert!(!mentions_shared_memory(b""));
+  }
+
+  // the warning names the missing /dev/shm and why
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn no_shm_hint_names_dev_shm_and_the_reason() {
+    let hint = no_shm_hint("a user and mount namespace failed");
+    assert!(!hint.contains('\n'), "one line: {hint:?}");
+    assert!(hint.contains("no /dev/shm"), "{hint}");
+    assert!(
+      hint.contains("(a user and mount namespace failed)"),
+      "{hint}"
+    );
   }
 
   #[test]

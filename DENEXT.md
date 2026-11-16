@@ -16815,12 +16815,21 @@ where the changes are discussed.
      `/dev/random`, `/dev/urandom`; `/dev/stdin` and `/dev/fd/N` stay usable).
      Where unprivileged user namespaces are available the script gets a mount
      namespace with a fresh tmpfs on `/dev/shm` (`linux::PrivateShm`), so
-     `shm_open` / `sem_open` keep working; elsewhere it gets no `/dev/shm`, and
-     the install warns once (also in `deno info --json`'s
-     `lifecycleJail.warnings`).
+     `shm_open` / `sem_open` keep working. Where they aren't (hosts whose
+     AppArmor restricts unprivileged user namespaces, Ubuntu 23.10 and later by
+     default) it gets no `/dev/shm`: `deno info --json`'s
+     `lifecycleJail.warnings` says so, a script that fails there with output
+     naming shared memory or a semaphore gets a warning naming it, and an
+     install otherwise logs it at debug level only.
+     - User-facing note: on Ubuntu 23.10 and later (and other hosts that
+       restrict unprivileged user namespaces), lifecycle scripts get no
+       `/dev/shm`; a script that needs POSIX shared memory or named semaphores
+       fails there, with a warning that names it.
      - Tests:
        `supply_chain::jail_os_tests::linux::{jailed_script_cannot_read_a_terminal,
-       jailed_script_gets_a_private_dev_shm}`.
+       jailed_script_gets_a_private_dev_shm}`;
+       `jail.rs`'s `mentions_shared_memory_only_for_its_markers` and
+       `no_shm_hint_names_dev_shm_and_the_reason`.
      - Node tests enabled: none; no Node API changes.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
