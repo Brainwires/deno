@@ -1415,7 +1415,7 @@ impl KernelPolicy {
           g.is_fatal_under_enforce() && g.exact_with == Some(ExactWith::Broker)
         }));
     if needs_broker {
-      let mode_a_rules: Vec<String> = compiled
+      let mut rules: Vec<String> = compiled
         .gaps
         .iter()
         .filter(|g| {
@@ -1423,17 +1423,23 @@ impl KernelPolicy {
         })
         .map(|g| g.rule.clone())
         .collect();
+      let host_net = matches!(compiled.policy.net, NetPolicy::Broker { .. });
+      if host_net {
+        rules.push(net_rule(options));
+      }
+      rules.sort();
+      rules.dedup();
       let mut mode_b =
         Compiler::new(options, implicit, ctx, Shape::ModeB).run();
-      if !BROKER_BUILT && !mode_a_rules.is_empty() {
-        // say which rules made the broker necessary
+      if !BROKER_BUILT && !rules.is_empty() {
+        // say which rules made the broker necessary, and what they are
+        let needs = broker_needs(host_net, rules.len());
         for gap in &mut mode_b.gaps {
           if gap.class == GapClass::Enforcer && gap.rule == BROKER_RULE {
-            let mut rules = mode_a_rules.clone();
-            rules.sort();
-            rules.dedup();
-            gap.detail =
-              format!("{} (needed for: {})", gap.detail, rules.join("; "));
+            gap.detail = format!(
+              "{BROKER_NOT_BUILT}: {needs} would be held by Deno's checks only (needed for: {})",
+              rules.join("; ")
+            );
           }
         }
       }
@@ -1456,6 +1462,42 @@ fn net_allowed(options: &PermissionsOptions) -> bool {
 
 /// The rule a "broker not built" gap names.
 const BROKER_RULE: &str = "--kernel-sandbox (broker)";
+
+/// The broker gap's opening words.
+const BROKER_NOT_BUILT: &str =
+  "the supervising broker (Mode B) is not built into this runtime yet";
+
+/// What the broker gap says would be held by Deno's checks only: the
+/// host-scoped network when that is the one rule that needs the broker,
+/// else the rules it lists.
+fn broker_needs(host_net: bool, rules: usize) -> &'static str {
+  if host_net && rules == 1 {
+    "host-scoped network"
+  } else {
+    "these rules"
+  }
+}
+
+/// The network grant as written, for a gap's rule list.
+fn net_rule(options: &PermissionsOptions) -> String {
+  let mut parts = Vec::new();
+  for (flag, list) in [
+    ("--allow-net", &options.allow_net),
+    ("--allow-net-connect", &options.allow_net_connect),
+    ("--allow-net-listen", &options.allow_net_listen),
+  ] {
+    match list {
+      Some(list) if list.is_empty() => parts.push(flag.to_string()),
+      Some(list) => parts.push(format!("{flag}={}", list.join(","))),
+      None => {}
+    }
+  }
+  if parts.is_empty() {
+    "no --allow-net".to_string()
+  } else {
+    parts.join(" ")
+  }
+}
 
 pub use deno_lib::kernel_sandbox::options_allow_all;
 pub use deno_lib::kernel_sandbox::options_have_deny;
@@ -1804,7 +1846,7 @@ impl<'a> Compiler<'a> {
         GapClass::Enforcer,
         BROKER_RULE,
         format!(
-          "the supervising broker (Mode B) is not built into this runtime yet: {needs} would be held by Deno's checks only"
+          "{BROKER_NOT_BUILT}: {needs} would be held by Deno's checks only"
         ),
         GapResolution::FailOpen,
         None,

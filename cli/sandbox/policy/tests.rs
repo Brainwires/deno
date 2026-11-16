@@ -1534,6 +1534,43 @@ fn broker_not_built_names_the_rules() {
     "{:#?}",
     c.gaps
   );
+  // a host name and a write deny inside a write allow: both are named, and
+  // the gap doesn't call the write deny host-scoped network
+  let c = compile(
+    &PermissionsOptions {
+      allow_write: s(&["/out"]),
+      deny_write: s(&["/out/keep"]),
+      allow_net: s(&["example.com:443"]),
+      ..Default::default()
+    },
+    linux(Some(6)),
+    KernelSandboxMode::Enforce,
+  );
+  let fatal: Vec<_> = c.fatal_gaps().collect();
+  assert_eq!(fatal.len(), 1, "{fatal:#?}");
+  let detail = &fatal[0].detail;
+  assert!(detail.contains("these rules would be held"), "{detail}");
+  assert!(detail.contains("--deny-write=/out/keep"), "{detail}");
+  assert!(detail.contains("--allow-net=example.com:443"), "{detail}");
+  assert!(!detail.contains("host-scoped"), "{detail}");
+  // the host name alone names itself
+  let c = compile(
+    &PermissionsOptions {
+      allow_net: s(&["example.com:443"]),
+      ..Default::default()
+    },
+    linux(Some(6)),
+    KernelSandboxMode::Enforce,
+  );
+  let fatal: Vec<_> = c.fatal_gaps().collect();
+  assert_eq!(fatal.len(), 1, "{fatal:#?}");
+  assert!(
+    fatal[0].detail.contains(
+      "host-scoped network would be held by Deno's checks only (needed for: --allow-net=example.com:443)"
+    ),
+    "{}",
+    fatal[0].detail
+  );
 }
 
 // the files an --allow-sys name reads are in the read scope only when it
