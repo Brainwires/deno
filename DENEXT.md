@@ -16177,6 +16177,650 @@ where the changes are discussed.
        in its place (named, downloaded again, tests pass).
      - Node tests enabled: none; no Node API changes.
 
+424. **`fix(sandbox)`: hardening in the Linux script jail's read walk** (CLI
+     only; `libs/sandbox/linux.rs`). The walk that builds the jail's Landlock
+     read rules is a function of its own (`walk_read_rules`), and at its depth
+     limit it leaves a directory that holds a denied path unreadable, so the
+     limit can only narrow what a script reads. Each walk root counts its own
+     depth below `/`.
+     - Tests: `linux::tests::read_walk_allows_siblings_not_the_denied_path`,
+       `linux::tests::read_walk_fails_closed_past_its_depth_limit`,
+       `linux::tests::read_walk_roots_start_at_their_depth`;
+       `supply_chain::jail_os_tests::linux::jail_seccomp_program_golden_bytes`
+       unchanged.
+     - Node tests enabled: none; no Node API changes.
+
+425. **`feat(permissions)`: `--kernel-sandbox=enforce` applies the policy on
+     Linux and macOS (Mode A)** (CLI and runtime; denext-only; opt-in; `auto`
+     unchanged; denext 5.0 flips the default;
+     `libs/sandbox/{plan,enforce_linux,
+     seccomp,seatbelt,macos}.rs`,
+     `cli/sandbox/{enforce,mod,policy}.rs`, `cli/lib.rs`,
+     `cli/tools/run/mod.rs`, `cli/tools/serve.rs`, `cli/worker.rs`,
+     `libs/core/error.rs`, `runtime/permissions/kernel_sandbox_state.rs`,
+     `ext/process/lib.rs`). Item 422's policy is now held by the kernel when the
+     run asks for it with `--kernel-sandbox=enforce` (or deno.json
+     `permissions.kernelSandbox`): native code (FFI, Node-API addons) and
+     children are held to the same file, network and exec rules as Deno's own
+     APIs. A rule the OS can't hold exactly still refuses to start, naming it.
+     - The plan: the CLI translates the compiled policy into the enforcers'
+       `EnforcePlan` (Landlock rules, the seccomp switches, the Seatbelt
+       profile's inputs) and adds no decision of its own. The program's static
+       graph is loaded first (remote modules cached), and its local module files
+       stay readable (Deno loads its own modules without a read grant), as do
+       the config files discovery read (every deno.json / package.json of the
+       workspace, an ancestor folder's too, the import map, the lockfile), part
+       of the compared policy so a re-executed image must find the same set.
+       Never `.npmrc` (it can hold registry credentials): a process confined at
+       startup treats an unreadable one as absent, as a jailed lifecycle script
+       does, so a project that needs a custom registry from it fails closed. It
+       says so once on stderr, and `--kernel-sandbox-report` names each such
+       file on a `skipped:` line (run once without enforce to cache the
+       packages, or grant the file with `--allow-read` to accept the exposure).
+       The report prints once, from the image before the re-exec.
+     - Linux: exec, then restrict. The first image re-executes `/proc/self/exe`
+       (same argv, so the PID, signals and `$!` are unchanged) with the plan in
+       a sealed memfd (`F_SEAL_SEAL|SHRINK|GROW|WRITE`, the descriptor in
+       `DENO_INTERNAL_KERNEL_PLAN_FD`); the new image applies it first thing in
+       `main`, while it has one thread: `no_new_privs`, the Landlock ruleset
+       (per ABI: `REFER` from 2, `TRUNCATE` from 3, TCP ports from 4,
+       `IOCTL_DEV` from 5, signal and abstract-socket scopes from 6) and one
+       seccomp program (no second stage, no `TSYNC`). It then reads remote
+       modules from the cache only. The hand-over can only narrow: a variable
+       without a sealed memfd, or a plan that doesn't parse, ends the process;
+       the applied plan must equal the one the new image compiles and
+       `/proc/self/status` must show `NoNewPrivs` and `Seccomp: 2`, and each
+       handed-over module file must be a module of the new image's own graph. A
+       read deny inside a read allow is held by expansion: the plan names each
+       expanded folder and its denies (compared), and the entries the first
+       image walked (the new one can no longer list the folder) are checked to
+       lie strictly beneath a folder and clear of every deny, then applied with
+       `openat2(RESOLVE_NO_SYMLINKS)`; a symlink gets no rule (a rule follows
+       the link, so it would grant wherever the link leads), and the walk stops
+       at 20,000 entries or 64 levels with a refusal to start. Every descriptor
+       the first image opened is close-on-exec; those it inherited stay. Without
+       an unscoped `--allow-env`, the environment is scrubbed to `--allow-env`'s
+       names plus a short runtime list (`PATH`, `HOME`, `TMPDIR`, `DENO_DIR`,
+       the locale, `TZ`, the proxy variables, `NO_COLOR`, `TERM`), and children
+       inherit only that. A program read from stdin is refused (it can't be read
+       twice).
+     - seccomp (one filter; a kill only for another architecture's syscalls):
+       namespace creation, `io_uring` and a list of kernel interfaces a program
+       doesn't need are refused, never the memory and synchronization calls V8
+       uses; process creation follows `--allow-run`, listening a bind grant
+       (item 419's rule), and the socket families the network grants; changes to
+       file metadata by path are refused (the descriptor forms work), and where
+       Landlock can't hold a scoped write's truncation the calls that could are
+       refused, so that gap is fail-closed. `SeccompSpec` gains the knobs
+       additively; the jail's program is byte for byte the same.
+     - macOS: `sandbox_init` in-process (resolved with `dlsym`), else a re-exec
+       under `sandbox-exec -p` with the plan in an unlinked file (the same
+       comparison, measured with `sandbox_check`). Already inside another
+       Seatbelt profile: refuses to start. The cli profile is deny-default: file
+       metadata readable everywhere (a file's existence and size are visible,
+       documented), the read and write scopes, then the exact denies (canonical,
+       on-disk case; a path that doesn't exist yet on a case-insensitive volume
+       is a case-folded regex; one that can't be written exactly is a fail-open
+       gap), then the re-allows; code loads from the read scope plus the system
+       libraries, not the `--allow-ffi` paths alone (a library outside them
+       still loaded under a profile that mapped them alone, macOS 26.6: a
+       documented gap, as on Linux); `(deny process-exec)` without
+       `--allow-run`; no LaunchServices, AppleEvents or launchd job submission;
+       the resolver socket only with network, `trustd` only with
+       `DENO_TLS_CA_STORE=system`, FSEvents only with a read scope.
+     - Errors: a `PermissionDenied` from a Deno op while the kernel sandbox
+       enforces ends in
+       `(refused by the kernel sandbox; see
+       --kernel-sandbox-report)`
+       (Linux: `EPERM`, or `EACCES` where the file's mode allows the access or
+       no path is named; macOS: `EPERM`), through one hook in `deno_core`'s
+       error conversion; a child that exits non-zero prints one hint line per
+       run.
+     - The model (item 422's, changed with its tests): `enforcerBuilt` is true
+       on Linux x86_64 / aarch64 and macOS; the broker isn't built
+       (`BROKER_BUILT`), so a policy that needs Mode B carries a fail-open gap
+       naming the rules that needed it, and `broker` still refuses; the
+       overmount isn't built (`OVERMOUNT_BUILT`), so user namespaces change
+       nothing; an IP-literal / `localhost` port list on Linux ABI 4+ and a name
+       with a port on macOS are held by port with the coarsening documented
+       (they were fail-open); signals before ABI 6 are documented (the matrix's
+       Deno-only cell); under enforce on Linux a fail-closed gap says chmod /
+       utime by path are refused inside the write scope too; the `--allow-sys`
+       names `systemMemoryInfo`, `loadavg`, `osUptime` and `osRelease` add their
+       `/proc` file to the read scope, and `processes` / an unscoped
+       `--allow-env` are fail-closed gaps (other processes' `/proc` entries
+       can't be scoped); macOS reads `~/.CFUserTextEncoding`; the capability
+       table no longer claims macOS `MapExecutable` (code loads from the read
+       scope there, with a documented gap for a scoped `--allow-ffi`).
+     - Not covered yet (refused, never run unconfined): `deno test`, `bench`,
+       `eval` with a deny rule (`eval` grants everything by default, so
+       `enforce` is off there, as under `-A`), the REPL and Jupyter under
+       `enforce` (no graph-first apply there), compiled programs
+       (`deno compile --kernel-sandbox=enforce` stays refused).
+     - macOS: the working directory itself is listable (a `literal` rule:
+       `getcwd` opens `.`, which spawning a child needs), nothing beneath it;
+       under `--allow-run` so is `/` (dyld in every new process lists it and
+       aborts when refused: measured, every child died with SIGABRT). Both are
+       listings only, the folder's names, never a file's contents; the report
+       prints them on a `list only:` line. The `sandbox-exec` fallback's profile
+       lets it exec exactly the runtime's own binary (a `literal` on its
+       canonical path), which then runs under the profile; where the fallback is
+       used without `--allow-run` that is the documented gap
+       `--kernel-sandbox=enforce (sandbox-exec fallback)` (native code can start
+       the runtime again, under the same profile; Seatbelt has no one-shot
+       allowance to consume).
+     - User-facing note: `--kernel-sandbox=enforce` now confines `deno run` and
+       `deno serve` on Linux (Landlock ABI 1+) and macOS;
+       `deno info
+       --json` reports `enforcerBuilt: true` there. Under
+       `enforce`: on Linux the environment is scrubbed (grant a variable a child
+       needs with `--allow-env=NAME`) and chmod / utime by path fail inside the
+       write scope too; `.npmrc` is not read (a custom registry or token from it
+       is ignored); remote modules come from the cache only; a host-scoped
+       `--allow-net` refuses to start on Linux and is held by port on macOS; a
+       scoped `--allow-ffi` is a documented gap; and a deno.json
+       `"kernelSandbox": "enforce"` makes `deno test`, `bench` and the REPL
+       refuse, so prefer the flag on the start task.
+     - Tests: `deno_sandbox`'s
+       `enforce_linux::tests::{plan_round_trip_and_refusals,
+       handled_per_abi, seccomp_program_for_enforce, seccomp_program_switches,
+       sealed_memfd_hand_over}`,
+       `plan::tests::expanded_entries_are_checked_against_their_roots`,
+       `seccomp::tests::{deny_arg_non_zero_rule, deny_arg_masked_rule,
+       socket_knobs, default_knobs_add_nothing}`
+       and
+       `seatbelt::tests::{cli_profile_order_and_refusals,
+       cli_profile_network_and_trust}`;
+       the CLI's
+       `sandbox::enforce::tests::{expansion_allows_all_but_the_denied_path,
+       expansion_refuses_past_its_bounds, deny_filters_never_miss,
+       quoted_paths, note_only_while_enforcing}`,
+       `deno_core`'s
+       `error::tests::permission_denied_message_unchanged_without_the_note_hook`
+       and
+       `sandbox::policy::tests::{broker_not_built_names_the_rules,
+       sys_names_grant_their_proc_files}`
+       with the updated rows; spec `kernel_sandbox::enforce` (native reads,
+       writes and chmod outside the grant refused, `-A` and the default
+       unaffected, a read deny inside an allow, a child inheriting the rules
+       with its hint, a native connect to a port not granted, a library outside
+       the read scope, the project's config in an ancestor folder outside the
+       read grant, the macOS fallback's gap in the report, an `.npmrc` outside
+       the grant skipped and named (Linux), the note, the PID and signals across
+       the re-exec, nothing outside the write scope changing, an inexpressible
+       rule refused, stdin refused on Linux, `deno
+       test` refused,
+       `info --json`), the updated `kernel_sandbox::policy`, and
+       `kernel_sandbox::escape_corpus::corpus_enforce` (the escape corpus under
+       `--expect=enforce`: files, no network and no run; the whole network; a
+       run list).
+     - Node tests enabled: none; no Node API changes.
+
+426. **`fix(ext/net)`: a link-local name server with a zone (`fe80::1%en0`) no
+     longer breaks DNS** (no upstream issue; `ext/net/dns_conf.rs`,
+     `ext/net/ops.rs`). A network that hands out a link-local IPv6 resolver
+     lists it with its interface: `nameserver fe80::bc74:eaff:fe3d:c964%en0` in
+     `/etc/resolv.conf`, the same string in macOS's System Configuration.
+     hickory keeps a name server as an `IpAddr`, which has no zone. Its macOS
+     reader failed the whole configuration on such an entry, so
+     `Deno.resolveDns` threw "failed to parse nameserver address: invalid IP
+     address syntax", `node:dns.getServers()` was `[]` and every `node:dns`
+     lookup was `queryA UNKNOWN`; its resolv.conf reader (Linux) kept the
+     address and dropped the zone, so a query to it had no interface to leave
+     by. Node (c-ares) accepts the zone. The zone is now read (a number is the
+     scope id, a name goes through `if_nametoindex`) and the resolver's sockets
+     send to that name server with its scope id; on macOS an entry that doesn't
+     parse is skipped with a log line instead of dropping every name server.
+     `node:dns.getServers()` lists the address without its zone. An interface
+     the machine doesn't have leaves the address unscoped, as before on Linux.
+     - User-facing note: `Deno.resolveDns()` and `node:dns` work on a network
+       whose first name server is a zoned link-local address.
+     - Tests: `deno_net`'s `dns_conf::tests` (a resolv.conf fixture with a
+       scoped name server first, System Configuration entries with a scoped one
+       and one that doesn't parse, interface-name zones, the scope id put on the
+       name server's socket address).
+     - Node tests enabled: none; no Node test sets a zoned system name server.
+
+427. **`fix(lockfile)`: a package name whose first character takes more than one
+     byte no longer panics `deno add`** (no upstream issue;
+     `libs/lockfile/lib.rs`, `libs/lockfile/printer.rs`,
+     `libs/lockfile/transforms.rs`, `cli/tools/pm/list.rs`,
+     `cli/tools/pm/why.rs`). The lockfile splits an npm id (`name@version`) at
+     the first `@` after the name's first character, so a scoped name's leading
+     `@` is skipped, by slicing `value[1..]`. An id or a bare dependency name
+     that starts with a character of more than one byte (`ñ@1.0.0`, a dependency
+     `ü`) panicked on a byte index inside that character while reading the
+     lockfile, which `deno add`, `deno install` and every run with a lockfile
+     do; printing and the v3 to v4 transform did the same, and so did
+     `deno list` / `deno why` on their keys and on the query (`deno why ""`
+     too). The split now starts after the first character's UTF-8 length; every
+     id that split before splits the same way.
+     - Tests: `deno_lockfile`'s `npm_ids_starting_with_a_multibyte_character` (a
+       v5 lockfile read and printed, and a v3 one transformed).
+     - Node tests enabled: none; no Node API changes.
+
+428. **`fix(cli)`: `--seed=0` (and `--deterministic --seed=0`) seeds
+     `Math.random`** (no upstream issue; `libs/cli_parser/src/convert.rs`).
+     `--seed=<n>` passes V8 `--random-seed=<n>`, and V8 reads `--random-seed=0`
+     as "no fixed seed", so under seed 0 `Math.random` changed on every run.
+     Seed 0 now reaches V8 as 2147483647 (i32::MAX, the largest value V8's int
+     flag holds, so it repeats the sequence `--seed=2147483647` gives); every
+     other seed reaches V8 unchanged, and the seed the cryptographic RNGs of a
+     bare `--seed` take stays 0. A compiled program records the mapped V8 flag.
+     - User-facing note: `--seed=0` repeats `Math.random` like any other seed.
+     - Tests: `deno_cli_parser`'s `run_seed_zero`.
+     - Node tests enabled: none; no Node API changes.
+
+429. **`fix(ext/node)`: `--trace-exit` with a throwing `Error.prepareStackTrace`
+     still exits** (no upstream issue; `ext/node/polyfills/process.ts`).
+     `--trace-exit` read the stack of the `process.exit()` call through
+     `.stack`, which calls the app's `Error.prepareStackTrace`; one that threw
+     made `process.exit()` throw that error instead of printing the warning and
+     exiting with the code. Node prints the stack natively, never through the
+     hook. The hook is now set aside while the stack is formatted (and put
+     back), so the frames are the default ones; a hook that can't be set aside
+     (a non-configurable accessor) or any other throw leaves the warning without
+     frames, and the exit goes ahead.
+     - Tests: the `node::trace_exit_prepare_stack_trace` spec (warning, frames
+       and exit code 3; on 3.0.0-denext.24 the hook's error and exit code 1).
+     - Node tests enabled: none; `test-trace-exit.js` and
+       `test-trace-exit-stack-limit.js` are on already and set no hook.
+
+430. **`fix(permissions)`: `--deny-net` applies to the destination host when a
+     request goes through a proxy** (runtime; `ext/fetch/dns.rs`,
+     `ext/fetch/proxy.rs`, `ext/node/ops/http.rs`,
+     `runtime/permissions/lib.rs`). A request sent through an HTTP proxy
+     connects only to the proxy, which resolves the destination and connects on
+     its own. The rule now, for every client that takes a proxy (`fetch()`,
+     `WebSocket`, `node:http` / `node:https` with `NODE_USE_ENV_PROXY`,
+     `--use-env-proxy`, `http.setGlobalProxyFromEnv()` or an agent's `proxyEnv`,
+     `fetch()` on Node's global proxy, plain requests and `CONNECT` tunnels
+     alike):
+     - The destination is checked by name (allow and deny) before anything is
+       sent, as before, and again on every redirect hop.
+     - When a deny rule written as an address or subnet could apply to the
+       destination's port (`--deny-net=10.0.0.5`, `--deny-net=10.0.0.0/8`,
+       `--deny-net=127.0.0.1:8080`), the destination name is resolved locally
+       and every address is compared with those rules; a name that doesn't
+       resolve locally (one only the proxy's resolver knows) is refused. With no
+       such rule nothing is resolved, so a proxied name doesn't reach the local
+       resolver (`PermissionsContainer::has_net_connect_ip_deny_rules`,
+       `check_net_connect_unresolved`, `check_import_unresolved` for module
+       loads through a proxy). `node:http` does the same lookup (synchronously,
+       in the `ClientRequest` constructor, only under such a rule).
+     - The hop to an environment proxy (`HTTP_PROXY` / `HTTPS_PROXY` /
+       `ALL_PROXY`) still needs no `--allow-net` grant (operator configuration)
+       for `fetch()` / `WebSocket`, but a name-form deny on the proxy host
+       (`--deny-net=proxy.internal`) stops it (`check_net_connect_deny_only`). A
+       `Deno.createHttpClient({ proxy })` host and a SOCKS proxy are checked
+       like any destination, and `node:http`'s hop to its proxy is a `node:net`
+       connection that needs `--allow-net`, both as before.
+     - A `NO_PROXY` host goes direct and gets the direct connection's checks.
+     - What a client-side check can't cover: the proxy repeats the lookup, so an
+       answer that differs between the local resolver and the proxy's
+       (split-horizon DNS, rebinding between the two lookups) is not caught.
+       Address deny rules are a hard boundary only for direct connections.
+     - User-facing note: with an address `--deny-net` rule covering the port, a
+       proxied request to a name that resolves only at the proxy now fails
+       (`Requires net access to "<name>:<port>", which fetch() could not
+       resolve locally ...`),
+       and so does `node:http(s)` through an environment proxy for a destination
+       that resolves to a denied address.
+     - Tests: spec `permission/proxy_deny_net` (fetch and node:http through an
+       environment proxy: an unresolvable name under an address and a subnet
+       rule, a resolvable alias, a name-form deny on the proxy host, controls
+       for a rule on another port and name-only rules) and
+       `permission/proxy_deny_net_paths` (each proxied path above, a redirect
+       hop, `NO_PROXY` for fetch and node:http, a denied `createHttpClient`
+       proxy host, and two controls); `deno_fetch`'s
+       `test_http_proxy_unresolvable_destination_fails_closed_under_ip_deny` and
+       `test_http_proxy_host_denied_by_name`; `deno_permissions`'
+       `test_net_connect_unresolved_fails_closed_under_ip_deny_rules` and
+       `test_net_connect_deny_only_by_name`.
+     - Node tests enabled: none; Node has no permission model.
+
+431. **`feat(permissions)`: permission broker protocol v2, the broker opens the
+     file and hands the descriptor back** (runtime; Unix;
+     `runtime/permissions/broker.rs`, `runtime/permissions/ipc_pipe.rs`,
+     `ext/fs/std_fs.rs`). A `DENO_PERMISSION_BROKER_PATH` broker answered yes /
+     no and Deno then opened the path itself, so the path could be swapped (a
+     symlink to another file) between the decision and the open. A broker can
+     now open the file and pass the descriptor over the socket. Protocol v1 is
+     unchanged on the wire; a v1 broker never sees anything new.
+     - Negotiation: a broker that puts `"v":2` in its first response speaks v2
+       for the rest of the connection; without it the connection stays v1.
+     - The `open` request, sent after the permission check whenever a file is
+       opened by path (`Deno.open` / `openSync`, `readFile` / `readTextFile`,
+       `writeFile`, node:fs' opens: everything through the file system's
+       `open_with_checked_path`):
+       `{"v":2,"pid":N,"id":N,"datetime":"...","permission":"open","value":"/absolute/path","open":{"read":true,"write":false,"create":false,"createNew":false,"truncate":false,"append":false,"mode":null,"customFlags":null}}`.
+       Answers: `{"id":N,"result":"allow","fd":true}` with exactly one
+       descriptor as `SCM_RIGHTS` ancillary data, which Deno uses instead of
+       opening the path; `{"id":N,"result":"allow"}`, Deno opens the path
+       itself; `{"id":N,"result":"deny","reason":"..."}`, the open fails with
+       `PermissionDenied`. The broker is expected to open with `O_NOFOLLOW` /
+       `openat2(RESOLVE_BENEATH)` style flags.
+     - A received descriptor is refused (the open fails, the connection stays)
+       unless it is not a socket, a symlink or (Linux) an `O_PATH` descriptor,
+       is a directory only for a read without write or create, has the requested
+       access mode (`fcntl(F_GETFL)`: `O_RDONLY` / `O_WRONLY` / `O_RDWR`,
+       `O_APPEND` for an append), and is open on the requested path with its
+       parent directory resolved (`/proc/self/fd/N` on Linux, `F_GETPATH` on
+       macOS, the last component without case on macOS; other systems can't read
+       it back and refuse). A file renamed or unlinked after the broker opened
+       it no longer matches.
+     - Framing, both versions: responses are read with `recvmsg` (descriptors
+       close-on-exec); a line is at most 64 KiB, must be the only thing sent for
+       its request, and carries a descriptor only with `"fd":true` (exactly
+       one). Anything else is a malformed frame: the connection is closed and
+       Deno exits with code 87, as for any broker failure. A v1 response used to
+       be read with a fresh `BufReader` per request, which dropped any bytes
+       after the line; those are now an error.
+     - Windows: the client stays v1 (a broker's `"v":2` is ignored, no `open`
+       request is sent), so the window between decision and open remains there;
+       handing a handle over needs the broker to `DuplicateHandle` into this
+       process, which is not implemented.
+     - User-facing note: a permission broker can return opened descriptors
+       (protocol v2, Unix), which closes the check-then-open race for file
+       opens; v1 brokers work unchanged.
+     - Tests: `deno_permissions`'
+       `broker::tests::{v1_requests_are_unchanged_and_never_open, v2_is_declared_by_the_first_answer_only, v2_open_hands_back_the_brokers_descriptor, v2_allow_without_fd_and_deny, v2_refuses_a_descriptor_for_another_file, v2_refuses_the_wrong_access_mode, v2_refuses_a_directory_for_writing_and_a_socket, v2_descriptor_matches_after_decision, v2_descriptor_matches_before_open, malformed_frames_are_protocol_errors, a_closed_connection_is_an_error}`;
+       integration `run::test_permission_broker_v2` (a fake v2 broker: reads and
+       a write through its descriptors, a refused open, another file's
+       descriptor and a file swapped for a symlink after the broker opened it
+       all refused); the v1 `run::test_permission_broker` unchanged.
+     - Node tests enabled: none; no Node API changes.
+
+432. **`feat(permissions)`: Linux `/proc` and `/sys` files take the flags they
+     really need instead of `--allow-all`** (runtime; Linux;
+     `runtime/permissions/lib.rs`, `cli/tsc/dts/lib.deno.ns.d.ts`).
+     `check_special_file` made every `/proc`, `/sys` and `/dev` path outside a
+     short safe list need `--allow-all`, even with `--allow-read=/proc`, which
+     pushed ordinary programs to `-A`. Reading these now takes the read grant on
+     the path plus an `--allow-sys` name (`linux_special_read_sys_kind`):
+     - system information, the data the matching APIs already gate:
+       `/proc/cpuinfo`, `/proc/stat` and `/sys/devices/system/cpu/**` → `cpus`;
+       `/proc/meminfo` → `systemMemoryInfo`; `/proc/loadavg` → `loadavg`;
+       `/proc/uptime` → `osUptime`; `/proc/version` → `osRelease`; cgroup limit
+       and usage files (`/sys/fs/cgroup/**` files ending in `.max` or
+       `.current`) → `systemMemoryInfo` (`memory.*`), `cpus` (`cpu.*`,
+       `cpuset.*`), `processes` (`pids.*`);
+     - this process (`/proc/self`, `/proc/thread-self`, `/proc/<own pid>`, and
+       `task/<tid>/` under the first and the last): `status`, `stat`, `statm`,
+       `maps`, `cgroup`, `limits` → `--allow-sys=processInfo` (a new name);
+     - any process's read-only listing: `/proc` itself (`readDir`) and
+       `/proc/<pid>/{stat,status,cmdline,comm}` (also under `task/<tid>/`) →
+       `--allow-sys=processes` (a new name). A number is this process only when
+       it is the caller's own pid, which can't be reused while the process
+       lives; a thread id of this process counts as another process. Unchanged:
+       `environ` needs all of `--allow-env`, `/proc/pressure/*` the read grant,
+       `/dev/{null,zero,random,urandom}` and a pipe's `/proc/self/fd/N` nothing
+       more; and everything else, the control surfaces among it (`mem`, `root`,
+       `cwd`, `exe`, `fd/*`, `map_files`, another process's `maps` / `limits`,
+       any write under `/proc` or `/sys`, `/proc/sys`, `/proc/*/oom_score_adj`,
+       `/proc/*/attr`, devices), needs `--allow-all`. The `/proc` and `/sys`
+       trees are not canonicalized: `..` is removed by name before the check and
+       the path is opened as written, so `/proc/self/../1/mem` is checked and
+       opened as `/proc/1/mem`; a path that still holds `..` matches no class. A
+       class also holds only when the path with its links resolved is in the
+       same class: `/sys/devices/system/cpu/cpu0/node0` is a link to
+       `/sys/devices/system/node/node0` (and `cpuN/subsystem`, `firmware_node`,
+       `driver` lead elsewhere in sysfs), so those need `--allow-all`, while
+       `/proc/self` and `/proc/thread-self` resolve to `/proc/<own pid>` and
+       `/proc/<own pid>/task/<tid>` and stay `processInfo`; a path that can't be
+       resolved is in no class. The open follows the written path again, which
+       reaches the same file: procfs and sysfs links are made by the kernel
+       only, no class names a per-process link, and the pid that differs between
+       the two walks is this process's own (not reusable while it lives) or a
+       listing file that is `processes` for any process. The change only adds
+       ways in: a program with `-A` passes as before, and nothing that needed
+       less needs more. `processInfo` and `processes` are accepted by
+       `--allow-sys` / `--deny-sys`, deno.json permission sets and
+       `Deno.permissions.query({ name: "sys", kind })` (and the
+       `SysPermissionDescriptor` type).
+     - User-facing note: on Linux, `--allow-read --allow-sys=cpus` reads
+       `/proc/cpuinfo`, `--allow-sys=processInfo` this process's
+       `/proc/self/status`, `--allow-sys=processes` the process list, without
+       `-A`. This applies to every Linux run; there is nothing to turn on.
+     - Tests: `deno_permissions`' `tests::linux_special_read_sys_kinds` (every
+       class, the control surfaces, `task/<tid>`, `thread-self`, unnormalized
+       paths), `tests::linux_special_read_sys_kind_follows_links` (links into
+       and out of a class) and `tests::check_open_proc_sys_classes` (Linux: each
+       class refused with read alone, which needed `-A` before, granted by its
+       name and by unscoped `--allow-sys`, refused by `--deny-sys` and for a
+       write; the control surfaces refused with every sys name, through `..`,
+       `task/<tid>` and `thread-self`; `/proc/thread-self/status` with
+       `processInfo`; the host's `cpu0` links out of `/sys/devices/system/cpu`,
+       `cpu0/node0/meminfo` among them, refused with `cpus`); spec
+       `permission/proc_sys_classes` (read alone, with the names, unscoped,
+       denied names, a deno.json permission set, `Deno.permissions.query`).
+
+433. **`fix(desktop)`: hardening in the desktop update ops** (runtime and CLI;
+     `runtime/ops/desktop.rs`, `cli/rt/desktop.rs`, `cli/rt_desktop/lib.rs`,
+     `runtime/js/99_main.js`, `cli/standalone/binary.rs`,
+     `cli/lib/standalone/binary.rs`, `libs/config/deno_json/mod.rs`,
+     `cli/schemas/config-file.v1.json`, `cli/tsc/dts/lib.deno.desktop.d.ts`).
+     `Deno.autoUpdate` (the legacy in-place patch of the runtime library,
+     separate from `Deno.desktop.updater`) is held to the app's permissions and
+     to a key baked into the app: applying a patch needs `--allow-ffi` and write
+     access to the runtime library; `latest.json` must be signed with the key in
+     deno.json's new `desktop.release.publicKey` (Ed25519, base64, baked in at
+     compile time), and the patch's SHA-256 comes from the signed payload; the
+     next launch takes a staged update only when it matches the record the apply
+     wrote in the user's state directory.
+     - User-facing note: an app that uses `Deno.autoUpdate` sets
+       `desktop.release.publicKey`, signs `latest.json`, gives each patch entry
+       a `sha256`, and is compiled with `--allow-ffi` and write access to its
+       install directory.
+     - Tests: `runtime/ops/desktop.rs`'s
+       `apply_patch_needs_ffi_and_write_and_a_baked_key`,
+       `apply_patch_checks_the_manifest` and
+       `a_staged_update_matches_only_its_record`; `cli/rt_desktop/lib.rs`'s
+       `pending_update_without_its_record_is_discarded`; `cli/rt/desktop.rs`'s
+       `auto_update_js_hides_its_ops_and_passes_the_signed_manifest`;
+       `cli/standalone/binary.rs`'s
+       `release_public_key_comes_from_a_valid_config_only`; specs
+       `run/desktop_auto_update_patch` and `run/desktop_ops_inert`;
+       `tests/unit/ops_test.ts`.
+     - Node tests enabled: none; no Node API changes.
+
+434. **`fix(ext/process, permissions)`: hardening in self-fork authorization**
+     (runtime; `ext/process/lib.rs`, `runtime/permissions/lib.rs`). A packaged
+     desktop app forks its own executable for its workers (`child_process.fork`,
+     a sidecar's `spawnSelf`) without the run permission. That exemption now
+     follows the caller's own run permission
+     (`PermissionsContainer::may_authorize_self_fork`): the program and a worker
+     that inherits run keep it; a worker given its own run permission, code
+     after a run revoke, and a `--deny-run` covering the executable go through
+     the ordinary run check. An authorized fork runs the resolved executable.
+     - User-facing note: in a packaged desktop app, a worker given its own run
+       permission, or code running after a run revoke, needs `--allow-run` for
+       the app's executable to `fork()` it.
+     - Tests: `deno_permissions`'s
+       `self_fork_authorization_follows_the_run_permission` and
+       `test_create_child_permissions`; `deno_process`'s
+       `self_fork_env_goes_only_to_this_executable`.
+     - Node tests enabled: none; `child_process.fork` outside a packaged app has
+       no self-fork exemption.
+
+435. **`fix(npm)`: BYONM module reads honour `--deny-read`** (runtime and CLI;
+     `cli/lib/npm/permission_checker.rs`, `cli/module_loader.rs`,
+     `runtime/permissions/lib.rs`). In a bring-your-own-node_modules project
+     (`nodeModulesDir: "manual"`), a module read inside `node_modules` stays
+     exempt from the `--allow-read` scopes, as upstream has it, but not from the
+     deny scopes: `require()`, JSON modules and `import()` of such a file check
+     its real path and its spelling against them
+     (`PermissionsContainer::check_read_not_denied`,
+     `NpmRegistryReadPermissionChecker::ensure_module_not_denied`).
+     - User-facing note: in a BYONM project, `--deny-read` covers files under
+       `node_modules` loaded by `require()` or `import()`.
+     - Tests: spec `npm/byonm_require_link_escape` (new steps under
+       `--deny-read`).
+     - Node tests enabled: none; Node has no read permissions.
+
+436. **`fix(permissions)`: deny scopes cover every name of a path, and file
+     watchers report only readable paths** (runtime;
+     `runtime/permissions/lib.rs`,
+     `runtime/permissions/runtime_descriptor_parser.rs`,
+     `runtime/ops/fs_events.rs`).
+     - **Deny scopes:** each `--deny-read`, `--deny-write`, `--ignore-read` and
+       `--deny-ffi` scope records its resolved location when it is parsed
+       (`SpecialFilePathQueryDescriptor::resolve_deny_scope`), and the deny
+       matching holds on the scope as written or on that location: a scope
+       written through a symlinked directory (macOS's `/tmp`) also covers its
+       real location, and a deny scope that is a symlink covers its target.
+       Scopes are resolved once, before program code runs.
+     - **Watchers:** every path a `Deno.watchFs` event or error reports (and so
+       `node:fs.watch`) is checked against the read permission without prompting
+       (`PermissionsContainer::query_read_reachable`); unreadable paths are
+       dropped, and an event with none left is not delivered. While reads are
+       limited, a recursive watch doesn't walk into symlinked directories
+       (`follows_symlinks`); with every read granted and none denied it does, as
+       before.
+     - **Limits:** a deny scope covers names, not files: another hard link to a
+       denied file is outside it. The package.json and BYONM module checks
+       resolve a path and the loader then reads it by name, as every path-based
+       check does (`check_resolved_path`).
+     - User-facing note: a deny or ignore scope written through a link also
+       covers its real location; a deny scope that is a link covers its target;
+       watchers don't report changes inside deny or ignore scopes.
+     - Tests: specs `permission/deny_scope_alias` and
+       `permission/watch_fs_deny_scope`; `deno_permissions`'s
+       `test_deny_scope_written_through_a_link`,
+       `test_deny_scope_that_is_a_link` and
+       `test_deny_scope_written_through_a_junction` (Windows); `fs_events`'s
+       `follows_symlinks_only_without_read_limits` and
+       `watcher_errors_leave_out_paths_the_runtime_may_not_read`.
+     - Node tests enabled: none; Node has no read permissions.
+
+437. **`fix(supply-chain)`: the lifecycle-script jail's home-directory reads**
+     (CLI only; `cli/supply_chain/jail.rs`, `cli/factory.rs`,
+     `libs/sandbox/lib.rs`, `libs/sandbox/seatbelt.rs`,
+     `libs/sandbox/linux.rs`). A jailed lifecycle script with network reads only
+     what it needs under the user's home directories
+     (`deno_sandbox::HomeReadPolicy`): its project, package and `node_modules`,
+     the parts of DENO_DIR it uses, the running `deno`, the toolchain homes and
+     the package managers' own folders as their configuration names them,
+     Python's user site, the config files tools look for above the project, and
+     the toolchains on its PATH. The credential list grew (deploy-tool tokens,
+     shell histories, browser profiles).
+     - User-facing note: a lifecycle script with network reads only its project,
+       its package, the package managers' and toolchains' own directories and
+       the config files above its project under the home directory; a build that
+       reads something else there needs it in its project or on its PATH. On
+       macOS a refused file there reads as missing; on Linux it is a permission
+       error.
+     - Tests: `jail.rs`'s `home_read_allowed_keeps_the_needed_paths_only`,
+       `home_read_allowed_prefix_lib_and_cargo_parts`,
+       `package_manager_dirs_follow_their_config`,
+       `discovery_files_between_the_project_and_home`,
+       `real_homes_do_not_depend_on_the_home_variable`,
+       `account_home_is_from_the_user_database` and
+       `credential_paths_name_the_deploy_tokens_and_histories`; `deno_sandbox`'s
+       `seatbelt::tests::profile_home_read_policy` (and `_runs` on macOS),
+       `tests::home_read_policy_keeps_out_the_rest_of_each_home`,
+       `linux::tests::read_walk_follows_links_only_where_the_home_policy_allows`
+       and `linux::tests::read_rule_roots_leave_the_home_directory_out`; specs
+       `npm/supply_chain_jail`'s `home_reads_with_network` (and `_linux`) and
+       `home_reads_offline` (and `_linux`).
+     - Node tests enabled: none; no Node API changes.
+
+438. **`fix(compile)`: embedded node_modules reads follow the read permissions**
+     (runtime; `cli/rt/run.rs`). In a compiled program, `require()` skips the
+     read check only for a file the binary embeds; any other file under the
+     embedded root goes through the npm read checker.
+     - User-facing note: in a self-extracting compiled binary, `require()` of a
+       file under the extraction directory that the binary didn't ship is held
+       to the read permissions.
+     - Tests: spec `compile/self_extracting/require_deny_read`.
+     - Node tests enabled: none; no Node API changes.
+
+439. **`fix(resolver)`: package.json reads honour deny rules** (runtime and CLI;
+     `libs/node_resolver/package_json.rs`, `libs/node_resolver/lib.rs`,
+     `cli/lib/npm/permission_checker.rs`, `cli/factory.rs`, `cli/rt/run.rs`,
+     `runtime/permissions/lib.rs`). Module resolution reads package.json files
+     without the allow check, as before; a package.json that a read deny covers
+     (by its path as named or the path it resolves to) is now treated as missing
+     (`PackageJsonReadFilter`, `DenyReadPackageJsonFilter`). With no read deny
+     nothing is checked. A file that doesn't exist costs one `realpath`;
+     verdicts are cached per resolved path until the denies change.
+     - User-facing note: a package.json under a `--deny-read` scope no longer
+       affects module resolution.
+     - Tests: `node_resolver`'s
+       `package_json::tests::read_filter_hides_package_json`; spec
+       `npm/package_json_deny_link`.
+     - Node tests enabled: none; Node has no read permissions.
+
+440. **`fix(supply-chain)`: hardening in the Linux script jail's seccomp rules**
+     (CLI only; `libs/sandbox/seccomp.rs`, `cli/supply_chain/jail.rs`,
+     `cli/supply_chain/jail_os_tests.rs`). The jail's seccomp program is
+     narrower for sockets and process access. `SeccompSpec` gains one rule kind,
+     `DenyArgsAll` (up to eight masked argument tests, each "equal" or "not
+     equal"). On an architecture the assembler doesn't know, the jail reports no
+     OS sandbox rather than Landlock alone.
+     - Tests: `deno_sandbox`'s
+       `seccomp::tests::{deny_args_all_rule, deny_args_all_two_arguments}`; the
+       jail's
+       `supply_chain::jail_os_tests::linux::{seccomp_program_socket_and_process_rules,
+       confined_script_socket_and_process_rules}`;
+       `jail_seccomp_program_golden_bytes` regenerated.
+     - Node tests enabled: none; no Node API changes.
+
+441. **`fix(supply-chain)`: the jail's path grants resolve like the checks they
+     feed, and a jailed `deno`'s children keep the jail** (CLI and runtime;
+     `cli/supply_chain/jail.rs`, `ext/process/lib.rs`).
+     - A grant to a path that doesn't exist yet beneath a symlink (`/tmp/x` on
+       macOS) now resolves its longest existing prefix, so the write it grants
+       works; a grant that leads out of the roots through a link is dropped.
+     - The Seatbelt profile names only paths it can spell exactly (a write root
+       that isn't UTF-8 is left out, a read deny is widened to its nearest UTF-8
+       ancestor).
+     - The CLI pins the jail variable read at startup into `deno_process`
+       (`pin_child_env_var`), so every child of a jailed `deno` keeps it,
+       whatever environment it was given.
+     - Tests:
+       `supply_chain::jail::tests::{clamp_resolves_a_new_path_through_a_symlink,
+       seatbelt_paths_never_lossy}`,
+       `deno_process`'s `tests::pinned_child_env_wins`, and on macOS
+       `supply_chain::jail_os_tests::jail_seatbelt_deny_holds_in_any_case`.
+     - Node tests enabled: none; no Node API changes.
+
+442. **`fix(supply-chain)`: hardening in the Linux script jail's process and
+     file-metadata rules** (CLI only; `libs/sandbox/notify.rs` (new),
+     `libs/sandbox/lib.rs`, `libs/sandbox/linux.rs`, `cli/supply_chain/jail.rs`,
+     `cli/supply_chain/jail_os_tests.rs`). A second seccomp filter hands the
+     calls Landlock doesn't confine on every kernel to a supervisor thread in
+     the installer (`deno_sandbox::notify`, seccomp user notification), which
+     allows them only within the script's own processes and write roots. A
+     request the supervisor can't decide is refused.
+     - Tests: `deno_sandbox`'s
+       `notify::tests::{notify_program_routes_only_the_listed_syscalls,
+       the_lists_have_no_placeholder, proc_stat_of_self}`;
+       the jail's
+       `supply_chain::jail_os_tests::linux::{seccomp_program_supervised_rules,
+       jailed_script_metadata_stays_in_its_roots,
+       jailed_script_xattrs_stay_in_its_roots,
+       jailed_script_signals_only_its_own_processes,
+       supervisor_file_size_rules}`;
+       `jail_seccomp_program_golden_bytes` regenerated.
+     - Node tests enabled: none; no Node API changes.
+
+443. **`fix(supply-chain)`: a Linux jailed script gets its own `/dev/shm` and
+     only the devices it uses** (CLI only; `libs/sandbox/linux.rs`,
+     `libs/sandbox/notify.rs`, `cli/supply_chain/jail.rs`,
+     `cli/supply_chain/jail_os_tests.rs`). The OS layer allows reading the
+     devices a script uses by name (`/dev/null`, `/dev/zero`, `/dev/full`,
+     `/dev/random`, `/dev/urandom`; `/dev/stdin` and `/dev/fd/N` stay usable).
+     Where unprivileged user namespaces are available the script gets a mount
+     namespace with a fresh tmpfs on `/dev/shm` (`linux::PrivateShm`), so
+     `shm_open` / `sem_open` keep working; elsewhere it gets no `/dev/shm`, and
+     the install warns once (also in `deno info --json`'s
+     `lifecycleJail.warnings`).
+     - Tests:
+       `supply_chain::jail_os_tests::linux::{jailed_script_cannot_read_a_terminal,
+       jailed_script_gets_a_private_dev_shm}`.
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -16186,10 +16830,11 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
-416, 418, 422) are what the prebuilt `libdenort` carries. The CLI-side parts
-(for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged
-app's launchers) are in the branch too, but a stock CLI does not run them;
-denext's own launcher provides that environment.
+416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441) are what the
+prebuilt `libdenort` carries. The CLI-side parts (for example writing
+`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
+in the branch too, but a stock CLI does not run them; denext's own launcher
+provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
@@ -16296,7 +16941,7 @@ only.
 
 ### Network permissions and proxies
 
-Checked against `3.0.0-denext.13` with an environment HTTP proxy:
+Checked with an environment HTTP proxy (item 430):
 
 - **`fetch()` / `WebSocket`** (`ext/fetch/proxy.rs`, `ext/fetch/dns.rs`,
   `ext/websocket/lib.rs`): `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and
@@ -16307,15 +16952,19 @@ Checked against `3.0.0-denext.13` with an environment HTTP proxy:
   proxy needs no `--allow-net` grant (operator configuration); a SOCKS proxy
   host and an explicit `Deno.createHttpClient({ proxy })` do. `NO_PROXY` hosts
   connect directly with the usual checks. A refusal inside the connector
-  surfaces as `TypeError: fetch failed` with the permission error as `cause`. A
-  proxied request may still look the destination name up through the local
-  resolver.
+  surfaces as `TypeError: fetch failed` with the permission error as `cause`.
+  Deny rules written as addresses apply to the addresses the destination name
+  resolves to: under such a rule for the port the name is resolved locally, and
+  one that doesn't resolve locally is refused; without one nothing is resolved
+  (item 430). A name-form deny on the proxy host stops the hop to it.
 - **`node:http` / `node:https`** (`ext/node/polyfills/_http_proxy.js`,
   `_http_client.js`): Node 24 rules, a proxy only with `NODE_USE_ENV_PROXY=1` /
   `--use-env-proxy`, `http.setGlobalProxyFromEnv()` or an agent's `proxyEnv`;
   the variables are read on first use without `--allow-env` (not snapshotted).
-  The target is checked (`op_node_http_check_proxy_net`) and the proxy hop is a
-  normal `node:net` / `node:tls` connection, so both need `--allow-net`.
+  The target is checked (`op_node_http_check_proxy_net`, by name and, under an
+  address deny rule for its port, by its resolved addresses, as for `fetch()`)
+  and the proxy hop is a normal `node:net` / `node:tls` connection, so both need
+  `--allow-net`.
 - **`Deno.connect` / `connectTls` / `node:net` / `node:tls`**: no proxy support;
   direct connections with the usual checks.
 - **npm clients with their own proxy agent** open a socket only to the proxy, so
