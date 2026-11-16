@@ -358,6 +358,9 @@ mod tests {
 
   // a hand-over's expanded entries can only be entries of the expanded
   // folders it compares, never a denied path, its folder, or anything else
+  // (Unix only: the entries are the Linux enforcer's, on POSIX paths, and a
+  // drive-less /p isn't absolute on Windows)
+  #[cfg(unix)]
   #[test]
   fn expanded_entries_are_checked_against_their_roots() {
     let roots = vec![ExpandRoot {
