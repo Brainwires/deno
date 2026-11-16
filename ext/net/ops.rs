@@ -44,6 +44,7 @@ use hickory_resolver::net::runtime::DnsUdpSocket;
 use hickory_resolver::net::runtime::RuntimeProvider;
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::net::runtime::TokioTime;
+#[cfg(not(target_vendor = "apple"))]
 use hickory_resolver::system_conf;
 use quinn::rustls;
 use serde::Deserialize;
@@ -1206,15 +1207,37 @@ impl From<DNSProtocol> for hickory_resolver::config::ProtocolConfig {
   }
 }
 
-#[cfg(any(target_os = "android", target_os = "windows", target_os = "macos"))]
-fn read_system_dns_conf() -> Result<(ResolverConfig, ResolverOpts), NetError> {
+/// The system DNS configuration, and its name servers with an IPv6 zone
+/// (`fe80::1%en0`; see [`crate::dns_conf`]).
+type SystemDnsConf = (ResolverConfig, ResolverOpts, crate::dns_conf::Scopes);
+
+#[cfg(any(target_os = "android", target_os = "windows"))]
+fn read_system_dns_conf() -> Result<SystemDnsConf, NetError> {
   system_conf::read_system_conf()
+    .map(|(config, opts)| (config, opts, Vec::new()))
     .map_err(|e| hickory_resolver::net::NetError::Proto(e).into())
 }
 
+// macOS: hickory's reader failed the whole configuration on a zoned name
+// server; this one keeps it and skips an entry that doesn't parse.
+#[cfg(target_vendor = "apple")]
+fn read_system_dns_conf() -> Result<SystemDnsConf, NetError> {
+  crate::dns_conf::read_apple_system_conf()
+    .map_err(|e| hickory_resolver::net::NetError::Proto(e).into())
+}
+
+// hickory's resolv.conf reader keeps a zoned name server's address but drops
+// its zone; the zones are read from the same file. A direct read, as
+// hickory's own: the host's resolver configuration, not a file the program
+// names.
 #[cfg(all(unix, not(any(target_os = "android", target_vendor = "apple"))))]
-fn read_system_dns_conf() -> Result<(ResolverConfig, ResolverOpts), NetError> {
-  system_conf::read_system_conf().map_err(Into::into)
+#[allow(clippy::disallowed_methods, reason = "the system resolv.conf")]
+fn read_system_dns_conf() -> Result<SystemDnsConf, NetError> {
+  let (config, opts) = system_conf::read_system_conf()?;
+  let scopes = std::fs::read_to_string("/etc/resolv.conf")
+    .map(|text| crate::dns_conf::scopes_from_resolv_conf(&text))
+    .unwrap_or_default();
+  Ok((config, opts, scopes))
 }
 
 /// A hickory [`RuntimeProvider`] that hands out UDP sockets which are
@@ -1385,7 +1408,7 @@ pub async fn op_dns_resolve(
     .and_then(|o| o.name_server.as_ref())
     .is_some();
 
-  let (config, mut opts) = if let Some(name_server) =
+  let (config, mut opts, scopes) = if let Some(name_server) =
     options.as_ref().and_then(|o| o.name_server.as_ref())
   {
     let ns_config = NameServerConfig::new(
@@ -1397,14 +1420,18 @@ pub async fn op_dns_resolve(
         c
       }],
     );
-    (ResolverConfig::from_parts(None, vec![], vec![ns_config]), {
-      let mut opts = ResolverOpts::default();
-      // hickory enables EDNS by default; only send an EDNS OPT record when
-      // the caller explicitly asks for it (matches the previous behavior and
-      // keeps queries compatible with servers that don't speak EDNS).
-      opts.edns0 = use_edns;
-      opts
-    })
+    (
+      ResolverConfig::from_parts(None, vec![], vec![ns_config]),
+      {
+        let mut opts = ResolverOpts::default();
+        // hickory enables EDNS by default; only send an EDNS OPT record when
+        // the caller explicitly asks for it (matches the previous behavior
+        // and keeps queries compatible with servers that don't speak EDNS).
+        opts.edns0 = use_edns;
+        opts
+      },
+      Vec::new(),
+    )
   } else {
     read_system_dns_conf()?
   };
@@ -1446,6 +1473,18 @@ pub async fn op_dns_resolve(
     resolve_lookup(
       &state,
       ConnectedUdpRuntimeProvider::default(),
+      config,
+      opts,
+      name,
+      record_type,
+      cancel_rid,
+    )
+    .await?
+  } else if !scopes.is_empty() {
+    // A zoned name server: its packets go out through its interface.
+    resolve_lookup(
+      &state,
+      crate::dns_conf::ScopedRuntimeProvider::new(scopes),
       config,
       opts,
       name,
@@ -1529,8 +1568,13 @@ pub fn op_net_get_system_dns_servers(
   state
     .borrow_mut::<PermissionsContainer>()
     .check_sys("networkInterfaces", "node:dns.getServers()")?;
-  let (config, _opts) = system_conf::read_system_conf()
-    .unwrap_or_else(|_| (ResolverConfig::default(), ResolverOpts::default()));
+  let (config, _opts, _scopes) = read_system_dns_conf().unwrap_or_else(|_| {
+    (
+      ResolverConfig::default(),
+      ResolverOpts::default(),
+      Vec::new(),
+    )
+  });
   let servers =
     dedup_name_servers(config.name_servers().iter().flat_map(|ns| {
       ns.connections.iter().map(|c| (ns.ip.to_string(), c.port))

@@ -235,7 +235,11 @@ pub fn print_v5_content(content: &LockfileContent) -> String {
       if value.is_empty() {
         return None;
       }
-      let at_index = value[1..].find('@').map(|i| i + 1)?;
+      // The `@` after the name's first character (a scoped name starts
+      // with one), found from a char boundary: a first character of more
+      // than one byte panicked the slice `value[1..]`.
+      let first = value.chars().next()?.len_utf8();
+      let at_index = value[first..].find('@').map(|i| i + first)?;
       let name = &value[..at_index];
       let version = &value[at_index + 1..];
       Some((name, version))

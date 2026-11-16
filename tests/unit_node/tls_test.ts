@@ -391,7 +391,7 @@ Deno.test("tls.connect mid-read tcp->tls upgrade", async () => {
   const { promise, resolve } = Promise.withResolvers<void>();
   const ctl = new AbortController();
   const serve = Deno.serve({
-    port: 8443,
+    port: 0,
     key,
     cert,
     signal: ctl.signal,
@@ -401,7 +401,7 @@ Deno.test("tls.connect mid-read tcp->tls upgrade", async () => {
 
   const conn = tls.connect({
     host: "localhost",
-    port: 8443,
+    port: serve.addr.port,
     secureContext: {
       ca: rootCaCert,
       // deno-lint-ignore no-explicit-any
@@ -427,7 +427,7 @@ Deno.test(
     const { promise, resolve } = Promise.withResolvers<void>();
     const ctl = new AbortController();
     const serve = Deno.serve({
-      port: 8444,
+      port: 0,
       key,
       cert,
       signal: ctl.signal,
@@ -437,7 +437,7 @@ Deno.test(
 
     const socket = net.connect({
       host: "localhost",
-      port: 8444,
+      port: serve.addr.port,
     });
     socket.on("connect", () => {
       socket.on("data", () => {});
@@ -447,7 +447,7 @@ Deno.test(
 
       const conn = tls.connect({
         host: "localhost",
-        port: 8444,
+        port: serve.addr.port,
         socket,
         secureContext: {
           ca: rootCaCert,

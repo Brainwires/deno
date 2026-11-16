@@ -3427,6 +3427,23 @@ fn run_seed() {
 }
 
 #[test]
+fn run_seed_zero() {
+  // V8 reads `--random-seed=0` as unseeded: seed 0 reaches it as i32::MAX,
+  // with and without `--deterministic`.
+  for args in [
+    svec!["deno", "run", "--seed=0", "script.ts"],
+    svec!["deno", "run", "--deterministic", "--seed=0", "script.ts"],
+  ] {
+    let flags = flags_from_vec(args).unwrap();
+    assert_eq!(flags.seed, Some(0));
+    assert_eq!(flags.v8_flags, svec!["--random-seed=2147483647"]);
+  }
+  let flags =
+    flags_from_vec(svec!["deno", "run", "--seed=1", "script.ts"]).unwrap();
+  assert_eq!(flags.v8_flags, svec!["--random-seed=1"]);
+}
+
+#[test]
 fn run_deterministic() {
   // `--deterministic` is `--seed=1`.
   let r = flags_from_vec(svec!["deno", "run", "--deterministic", "script.ts"]);

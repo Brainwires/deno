@@ -1,5 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
+pub mod dns_conf;
 pub mod happy_eyeballs;
 pub mod io;
 pub mod memory;

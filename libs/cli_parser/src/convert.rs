@@ -906,6 +906,24 @@ fn v8_flags_arg_parse(result: &ParseResult, flags: &mut Flags) {
 /// V8 reads `--random-seed=0` as "no fixed seed".
 pub const DETERMINISTIC_DEFAULT_SEED: u64 = 1;
 
+/// What V8 gets as `--random-seed` for `--seed=0`. V8 reads
+/// `--random-seed=0` as "no fixed seed", so `Math.random` changed on every
+/// run under `--seed=0` (or `--deterministic --seed=0`). Seed 0 seeds V8 with
+/// this value instead (i32::MAX, the largest seed V8's int flag holds, so it
+/// is also what `--seed=2147483647` gives). Every other seed reaches V8
+/// unchanged, and `Flags::seed` stays 0 (the cryptographic RNGs of a bare
+/// `--seed` take 0 as it is).
+pub const V8_RANDOM_SEED_FOR_ZERO: u64 = 2147483647;
+
+/// V8's `--random-seed` value for `seed` ([`V8_RANDOM_SEED_FOR_ZERO`]).
+pub fn v8_random_seed(seed: u64) -> u64 {
+  if seed == 0 {
+    V8_RANDOM_SEED_FOR_ZERO
+  } else {
+    seed
+  }
+}
+
 fn seed_arg_parse(result: &ParseResult, flags: &mut Flags) {
   // `--deterministic` is `--seed` with a default seed (upstream #35718 phase
   // 2): the seed also pins the time zone and the locale. An explicit `--seed`
@@ -922,7 +940,9 @@ fn seed_arg_parse(result: &ParseResult, flags: &mut Flags) {
     });
   if let Some(seed) = seed {
     flags.seed = Some(seed);
-    flags.v8_flags.push(format!("--random-seed={seed}"));
+    flags
+      .v8_flags
+      .push(format!("--random-seed={}", v8_random_seed(seed)));
   }
 }
 

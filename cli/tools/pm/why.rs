@@ -18,6 +18,15 @@ use crate::factory::CliFactory;
 
 const MAX_PATHS_PER_VERSION: usize = 15;
 
+/// Where the `@` before a lockfile key's version is: the first one after the
+/// name's first character (a scoped name starts with `@`). Found from a char
+/// boundary, so a key or query whose first character takes more than one byte
+/// (or an empty one) doesn't panic.
+fn version_at(s: &str) -> Option<usize> {
+  let first = s.chars().next()?.len_utf8();
+  s[first..].find('@').map(|p| p + first)
+}
+
 /// Strip the peer-dependency suffix from an npm lockfile key.
 /// The peer suffix `_` only appears after the version, so we find the `@`
 /// version separator first, then look for `_` only in the version portion.
@@ -25,7 +34,7 @@ const MAX_PATHS_PER_VERSION: usize = 15;
 ///       "is_odd@3.0.1"                  → "is_odd@3.0.1"
 fn strip_peer_suffix(key: &str) -> &str {
   // Find the @ that separates name from version (skip leading @ for scoped pkgs)
-  let Some(at_pos) = key[1..].find('@').map(|p| p + 1) else {
+  let Some(at_pos) = version_at(key) else {
     return key;
   };
   // Look for _ only after the version separator
@@ -38,7 +47,7 @@ fn strip_peer_suffix(key: &str) -> &str {
 
 /// Split `name@version` into `(name, version)`.
 fn split_name_version(s: &str) -> Option<(&str, &str)> {
-  let at_pos = s[1..].find('@').map(|p| p + 1)?;
+  let at_pos = version_at(s)?;
   Some((&s[..at_pos], &s[at_pos + 1..]))
 }
 
@@ -103,8 +112,7 @@ pub async fn why(
       (None, query.as_str())
     };
   let (query_name, query_version) =
-    if let Some(at_pos) = name_and_version[1..].find('@') {
-      let at_pos = at_pos + 1;
+    if let Some(at_pos) = version_at(name_and_version) {
       (
         &name_and_version[..at_pos],
         Some(name_and_version[at_pos + 1..].to_string()),

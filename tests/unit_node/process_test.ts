@@ -52,10 +52,17 @@ const processWithActiveResources = process as typeof process & {
   _getActiveRequests(): unknown[];
 };
 
+// The name of this process's effective or real group `gid`, through `id`,
+// which looks it up as getgrgid does (NSS on Linux, DirectoryServices on
+// macOS, where most groups are not in /etc/group), not by a grep of
+// /etc/group.
 function getGroupNameFromSystem(gid: number): string {
-  const stdout = execSync(`grep ":${gid}:" /etc/group`).toString();
-  const groupInfo = stdout.trim().split(":")[0];
-  return groupInfo;
+  for (const flags of ["-g", "-g -r"]) {
+    if (Number(execSync(`id ${flags}`).toString().trim()) === gid) {
+      return execSync(`id ${flags} -n`).toString().trim();
+    }
+  }
+  throw new Error(`${gid} is neither this process's effective nor real gid`);
 }
 
 function getUserNameFromSystem(uid: number): string {

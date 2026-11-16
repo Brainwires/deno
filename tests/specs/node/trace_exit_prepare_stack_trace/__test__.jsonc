@@ -1,0 +1,13 @@
+{
+  // `--trace-exit` prints the process.exit() stack without the app's
+  // Error.prepareStackTrace (as Node): one that throws no longer makes
+  // process.exit() throw instead of exiting.
+  "tests": {
+    "throwing_prepare_stack_trace": {
+      "args": "run -A main.mjs",
+      "envs": { "NODE_OPTIONS": "--trace-exit" },
+      "output": "main.out",
+      "exitCode": 3
+    }
+  }
+}

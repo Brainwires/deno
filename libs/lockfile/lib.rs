@@ -378,7 +378,11 @@ impl LockfileContent {
       if value.is_empty() {
         return None;
       }
-      let at_index = value[1..].find('@').map(|i| i + 1)?;
+      // The `@` after the name's first character (a scoped name starts
+      // with one), found from a char boundary: a first character of more
+      // than one byte panicked the slice `value[1..]`.
+      let first = value.chars().next()?.len_utf8();
+      let at_index = value[first..].find('@').map(|i| i + first)?;
       let name = &value[..at_index];
       let version = &value[at_index + 1..];
       Some((name, version))
@@ -1481,6 +1485,47 @@ mod tests {
       content: LOCKFILE_JSON,
       overwrite,
     })
+  }
+
+  #[test]
+  fn npm_ids_starting_with_a_multibyte_character() {
+    // A name whose first character takes more than one byte (a key, and a
+    // bare dependency name resolved through the keys) panicked the slice
+    // that skips the first character when looking for the version's `@`.
+    let content = r#"{
+  "version": "5",
+  "npm": {
+    "ñ@1.0.0": { "integrity": "sha512-a", "dependencies": ["ü"] },
+    "ü@2.0.0": { "integrity": "sha512-b" }
+  }
+}"#;
+    let lockfile = new_lockfile(NewLockfileOptions {
+      file_path: PathBuf::from("/foo"),
+      content,
+      overwrite: false,
+    })
+    .unwrap();
+    let npm = &lockfile.content.packages.npm;
+    assert_eq!(npm["ñ@1.0.0"].dependencies["ü"].as_str(), "ü@2.0.0");
+    // The printer splits the same ids.
+    let text = lockfile.as_json_string();
+    assert!(text.contains("\"ñ@1.0.0\""), "{text}");
+
+    // A v3 lockfile goes through the v3 -> v4 transform's split too: it may
+    // fail later (the test provider knows no such package), not panic.
+    let v3 = r#"{
+  "version": "3",
+  "packages": {
+    "npm": {
+      "ñ@1.0.0": { "integrity": "sha512-a", "dependencies": {} }
+    }
+  }
+}"#;
+    let _ = new_lockfile(NewLockfileOptions {
+      file_path: PathBuf::from("/foo"),
+      content: v3,
+      overwrite: false,
+    });
   }
 
   #[test]

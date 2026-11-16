@@ -60,7 +60,10 @@ fn extract_nv_from_id(value: &str) -> Option<(&str, &str)> {
   if value.is_empty() {
     return None;
   }
-  let at_index = value[1..].find('@')? + 1;
+  // From a char boundary (a first character of more than one byte panicked
+  // `value[1..]`); the same split for every other key.
+  let first = value.chars().next()?.len_utf8();
+  let at_index = value[first..].find('@')? + first;
   let name = &value[..at_index];
   let version = &value[at_index + 1..];
   Some((name, version))

@@ -193,6 +193,7 @@ const {
   ObjectDefineProperty,
   ObjectEntries,
   ObjectFreeze,
+  ObjectGetOwnPropertyDescriptor,
   ObjectKeys,
   ObjectPrototypeIsPrototypeOf,
   Proxy,
@@ -241,6 +242,52 @@ function writeCoverageAtExit() {
   }
 }
 
+/**
+ * The stack of the process.exit() call for `--trace-exit`. Node prints it
+ * natively, never through the app's `Error.prepareStackTrace`; here reading
+ * `.stack` would call it (deno_core's callback looks it up on
+ * `globalThis.Error`), so one that threw made process.exit() throw instead of
+ * exiting. It is set aside while the stack is formatted (when it can be: a
+ * non-configurable accessor stays), and any throw leaves the warning without
+ * frames.
+ */
+function traceExitStack(): string | undefined {
+  let ctor: object | undefined;
+  let saved: PropertyDescriptor | undefined;
+  let setAside = false;
+  try {
+    ctor = globalThis.Error;
+    saved = ObjectGetOwnPropertyDescriptor(ctor, "prepareStackTrace");
+    if (saved !== undefined && (saved.configurable || saved.writable)) {
+      ObjectDefineProperty(ctor, "prepareStackTrace", {
+        __proto__: null,
+        value: undefined,
+      });
+      setAside = true;
+    }
+  } catch {
+    // Formatted with whatever is there.
+  }
+  try {
+    const trace: { stack?: unknown } = {};
+    // From the process.exit() frame on, as when it captured the stack
+    // itself: this frame would take one of `Error.stackTraceLimit`'s.
+    ErrorCaptureStackTrace(trace, traceExitStack);
+    const stack = trace.stack;
+    return typeof stack === "string" ? stack : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    if (setAside) {
+      try {
+        ObjectDefineProperty(ctor!, "prepareStackTrace", saved!);
+      } catch {
+        // It stays set aside; the process is exiting.
+      }
+    }
+  }
+}
+
 function printTraceExit(code: unknown, stack: string | undefined) {
   const prefix = internals.__isWorkerThread
     ? `(node:${process.pid}, thread:${internals.__nodeThreadId ?? 0})`
@@ -278,9 +325,7 @@ export const exit = (code?: number | string) => {
   // stack of the process.exit() call (process.exit is its top frame, and
   // `--stack-trace-limit` bounds it).
   if (getOptionValue("--trace-exit")) {
-    const trace: { stack?: string } = {};
-    ErrorCaptureStackTrace(trace);
-    printTraceExit(ProcessExitCode, trace.stack);
+    printTraceExit(ProcessExitCode, traceExitStack());
   }
 
   // Any valid thing `process.exitCode` set is already held in Deno.exitCode.

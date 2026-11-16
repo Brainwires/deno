@@ -28,10 +28,19 @@ use crate::npm::NpmFetchResolver;
 /// `@std/async@1.2.0` (jsr).
 type PkgId = (PackageKind, String);
 
+/// Where the `@` before a lockfile key's version is: the first one after the
+/// name's first character (a scoped name starts with `@`). Found from a char
+/// boundary, so a key or query whose first character takes more than one byte
+/// (or an empty one) doesn't panic.
+fn version_at(s: &str) -> Option<usize> {
+  let first = s.chars().next()?.len_utf8();
+  s[first..].find('@').map(|p| p + first)
+}
+
 /// Strip the peer-dependency suffix from an npm lockfile key, e.g.
 /// `react-dom@18.2.0_react@18.2.0` becomes `react-dom@18.2.0`.
 fn strip_peer_suffix(key: &str) -> &str {
-  let Some(at_pos) = key[1..].find('@').map(|p| p + 1) else {
+  let Some(at_pos) = version_at(key) else {
     return key;
   };
   if let Some(underscore_pos) = key[at_pos + 1..].find('_') {
@@ -43,7 +52,7 @@ fn strip_peer_suffix(key: &str) -> &str {
 
 /// Split a `name@version` lockfile key into `(name, version)`.
 fn split_name_version(s: &str) -> (&str, &str) {
-  match s[1..].find('@').map(|p| p + 1) {
+  match version_at(s) {
     Some(at_pos) => (&s[..at_pos], &s[at_pos + 1..]),
     None => (s, ""),
   }

@@ -40,5 +40,8 @@ x509-parser.workspace = true
 [target.'cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))'.dependencies]
 tokio-vsock.workspace = true
 
+[target.'cfg(target_vendor = "apple")'.dependencies]
+system-configuration.workspace = true
+
 [dev-dependencies]
 sys_traits = { workspace = true, features = ["real", "libc"] }
