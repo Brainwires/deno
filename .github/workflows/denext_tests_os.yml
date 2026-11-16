@@ -68,7 +68,7 @@ jobs:
       hosted: ${{ steps.pick.outputs.hosted }}
     steps:
       - id: pick
-        uses: Brainwires/.github/actions/pick-runners@ce332445600fff5a1bcae034582f7a74f307abc4 # pick-runners
+        uses: Brainwires/.github/actions/pick-runners@0285478f4ade2850db7708170074bf11c0e95545 # pick-runners
         with:
           # The arm64 debug build needs more memory than the linux-arm64
           # pool's containers hold (+16g): it takes the image instead.
@@ -318,7 +318,7 @@ jobs:
           echo "jobs=${jobs# }" >>"$GITHUB_OUTPUT"
           echo "jobs: ${jobs# }"
       - id: pick
-        uses: Brainwires/.github/actions/pick-runners@ce332445600fff5a1bcae034582f7a74f307abc4 # pick-runners
+        uses: Brainwires/.github/actions/pick-runners@0285478f4ade2850db7708170074bf11c0e95545 # pick-runners
         with:
           jobs: ${{ steps.keys.outputs.jobs }}
           vars: ${{ toJSON(vars) }}
