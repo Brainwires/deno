@@ -13468,7 +13468,10 @@ where the changes are discussed.
      - Node tests enabled: none, because this is CI only.
 
 348. **`fix(node)`: an inherited descriptor needs the permission its kind
-     implies** (runtime; `ext/node/ops/fd_adopt.rs`, `ext/node/ops/tty_wrap.rs`,
+     implies**
+     ([GHSA-86q9-9phx-4mcr](https://github.com/Brainwires/deno/security/advisories/GHSA-86q9-9phx-4mcr),
+     affects `denext.17` through `denext.20`, fixed in `denext.21`; runtime;
+     `ext/node/ops/fd_adopt.rs`, `ext/node/ops/tty_wrap.rs`,
      `ext/io/inherited_fds.rs`). Item 290 adopted a descriptor the process
      inherited at start-up (`net.Socket({ fd })`, `server.listen({ fd })`,
      `tty.ReadStream(fd)`) with no permission check in any isolate, so a worker
@@ -13494,8 +13497,10 @@ where the changes are discussed.
      - Node tests enabled: none (a Deno permission gate; Node has no per-worker
        permissions to test it against).
 
-349. **`fix(install)`: the jail's built-in host grants open port 443 only** (CLI
-     only; `cli/supply_chain/{builtin_exceptions,jail}.rs`). Item 288's built-in
+349. **`fix(install)`: the jail's built-in host grants open port 443 only**
+     ([GHSA-889w-pmwp-xf7p](https://github.com/Brainwires/deno/security/advisories/GHSA-889w-pmwp-xf7p),
+     affects `denext.17` through `denext.20`, fixed in `denext.21`; CLI only;
+     `cli/supply_chain/{builtin_exceptions,jail}.rs`). Item 288's built-in
      exceptions (GitHub's release hosts, `storage.googleapis.com`, `nodejs.org`,
      the packages' CDNs) and the hosts a declared GitHub download host redirects
      to were granted by name, on every port, so an approved script could tunnel
