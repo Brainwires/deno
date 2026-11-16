@@ -3322,9 +3322,24 @@ mod tests {
 
   // the account's home directory counts whatever `$HOME` says; `$HOME`
   // counts too when it is another directory, never when it is `/`
+  /// An absolute path on this platform: `/a/b`, or `C:/a/b` on Windows
+  /// (where `/a/b` has no drive, so it isn't absolute).
+  fn abs(path: &str) -> PathBuf {
+    if cfg!(windows) {
+      PathBuf::from(format!("C:{path}"))
+    } else {
+      PathBuf::from(path)
+    }
+  }
+
+  /// [`abs`] as the string a permission list holds.
+  fn abs_s(path: &str) -> String {
+    abs(path).to_string_lossy().into_owned()
+  }
+
   #[test]
   fn real_homes_do_not_depend_on_the_home_variable() {
-    let account = PathBuf::from("/home/u");
+    let account = abs("/home/u");
     assert_eq!(
       real_homes_from(Some(account.clone()), None),
       vec![account.clone()]
@@ -3342,8 +3357,8 @@ mod tests {
       vec![account.clone()]
     );
     assert_eq!(
-      real_homes_from(Some(account.clone()), Some(PathBuf::from("/tmp/h"))),
-      vec![account, PathBuf::from("/tmp/h")]
+      real_homes_from(Some(account.clone()), Some(abs("/tmp/h"))),
+      vec![account, abs("/tmp/h")]
     );
     assert!(real_homes_from(None, Some(PathBuf::from("/"))).is_empty());
   }
@@ -4022,18 +4037,18 @@ mod tests {
   #[test]
   fn clamp_folds_dotdot() {
     let jail = JailPermissions {
-      write: vec![PathBuf::from("/nm/pkg")],
+      write: vec![abs("/nm/pkg")],
       ..Default::default()
     };
     let mut options = PermissionsOptions {
       allow_write: Some(vec![
         "../../etc/does-not-exist".to_string(),
-        "/nm/pkg/../other/x".to_string(),
+        abs_s("/nm/pkg/../other/x"),
         "out/../build".to_string(),
       ]),
       ..Default::default()
     };
-    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
+    clamp_permissions(&mut options, &jail, &abs("/nm/pkg"));
     assert_eq!(options.allow_write, Some(vec!["out/../build".to_string()]));
   }
 
@@ -4379,9 +4394,9 @@ mod tests {
   #[test]
   fn clamp() {
     let jail = JailPermissions {
-      write: vec![PathBuf::from("/nm")],
-      deny_write: vec![PathBuf::from("/ws/member")],
-      deny_read: vec![PathBuf::from("/home/u/.ssh")],
+      write: vec![abs("/nm")],
+      deny_write: vec![abs("/ws/member")],
+      deny_read: vec![abs("/home/u/.ssh")],
       net: JailNet::None,
       proxy: None,
       ffi: vec![],
@@ -4395,28 +4410,28 @@ mod tests {
       prompt: true,
       ..Default::default()
     };
-    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
-    assert_eq!(options.allow_write, Some(vec!["/nm".to_string()]));
+    clamp_permissions(&mut options, &jail, &abs("/nm/pkg"));
+    assert_eq!(options.allow_write, Some(vec![abs_s("/nm")]));
     assert_eq!(options.allow_net, None);
     assert_eq!(options.allow_ffi, None);
     assert_eq!(options.allow_read, Some(vec![]));
-    assert_eq!(options.deny_write, Some(vec!["/ws/member".to_string()]));
-    assert_eq!(options.deny_read, Some(vec!["/home/u/.ssh".to_string()]));
+    assert_eq!(options.deny_write, Some(vec![abs_s("/ws/member")]));
+    assert_eq!(options.deny_read, Some(vec![abs_s("/home/u/.ssh")]));
     assert_eq!(options.deny_import, Some(vec![]));
     assert!(!options.prompt);
 
     // a write list outside the roots is dropped, never widened to "all"
     let mut options = PermissionsOptions {
-      allow_write: Some(vec!["/etc".to_string()]),
+      allow_write: Some(vec![abs_s("/etc")]),
       ..Default::default()
     };
-    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
+    clamp_permissions(&mut options, &jail, &abs("/nm/pkg"));
     assert_eq!(options.allow_write, None);
     let mut options = PermissionsOptions {
-      allow_write: Some(vec!["out".to_string(), "/etc".to_string()]),
+      allow_write: Some(vec!["out".to_string(), abs_s("/etc")]),
       ..Default::default()
     };
-    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
+    clamp_permissions(&mut options, &jail, &abs("/nm/pkg"));
     assert_eq!(options.allow_write, Some(vec!["out".to_string()]));
 
     let jail = JailPermissions {
@@ -4427,7 +4442,7 @@ mod tests {
       allow_net: Some(vec![]),
       ..Default::default()
     };
-    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
+    clamp_permissions(&mut options, &jail, &abs("/nm/pkg"));
     assert_eq!(options.allow_net, Some(vec!["example.com".to_string()]));
     assert_eq!(options.deny_import, None);
 
@@ -4441,7 +4456,7 @@ mod tests {
         allow_net: Some(list),
         ..Default::default()
       };
-      clamp_permissions(&mut options, &proxied, Path::new("/nm/pkg"));
+      clamp_permissions(&mut options, &proxied, &abs("/nm/pkg"));
       assert_eq!(
         options.allow_net,
         Some(vec!["example.com".to_string(), "127.0.0.1:9".to_string()])
@@ -4451,7 +4466,7 @@ mod tests {
       allow_net: Some(vec!["evil.com".to_string()]),
       ..Default::default()
     };
-    clamp_permissions(&mut options, &proxied, Path::new("/nm/pkg"));
+    clamp_permissions(&mut options, &proxied, &abs("/nm/pkg"));
     assert_eq!(options.allow_net, None);
 
     // the direction-specific grants are clamped like `allow_net`
@@ -4463,7 +4478,7 @@ mod tests {
       ]),
       ..Default::default()
     };
-    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
+    clamp_permissions(&mut options, &jail, &abs("/nm/pkg"));
     assert_eq!(
       options.allow_net_connect,
       Some(vec!["example.com".to_string()])
@@ -4481,7 +4496,7 @@ mod tests {
       allow_net_listen: Some(vec![]),
       ..Default::default()
     };
-    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
+    clamp_permissions(&mut options, &jail, &abs("/nm/pkg"));
     assert_eq!(options.allow_net_connect, None);
     assert_eq!(options.allow_net_listen, None);
   }
@@ -4489,8 +4504,8 @@ mod tests {
   #[test]
   fn clamp_ffi_to_package_folder() {
     let jail = JailPermissions {
-      write: vec![PathBuf::from("/nm/pkg")],
-      ffi: vec![PathBuf::from("/nm/pkg")],
+      write: vec![abs("/nm/pkg")],
+      ffi: vec![abs("/nm/pkg")],
       ..Default::default()
     };
     // `-A` (the node shim's) loads native addons from the package only
@@ -4498,48 +4513,48 @@ mod tests {
       allow_ffi: Some(vec![]),
       ..Default::default()
     };
-    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
-    assert_eq!(options.allow_ffi, Some(vec!["/nm/pkg".to_string()]));
+    clamp_permissions(&mut options, &jail, &abs("/nm/pkg"));
+    assert_eq!(options.allow_ffi, Some(vec![abs_s("/nm/pkg")]));
     // a path list keeps what lies inside it, never widened to "all"
     let mut options = PermissionsOptions {
       allow_ffi: Some(vec![
         "prebuilds/addon.node".to_string(),
-        "/usr/lib/libc.so".to_string(),
+        abs_s("/usr/lib/libc.so"),
       ]),
       ..Default::default()
     };
-    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
+    clamp_permissions(&mut options, &jail, &abs("/nm/pkg"));
     assert_eq!(
       options.allow_ffi,
       Some(vec!["prebuilds/addon.node".to_string()])
     );
     let mut options = PermissionsOptions {
-      allow_ffi: Some(vec!["/usr/lib/libc.so".to_string()]),
+      allow_ffi: Some(vec![abs_s("/usr/lib/libc.so")]),
       ..Default::default()
     };
-    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
+    clamp_permissions(&mut options, &jail, &abs("/nm/pkg"));
     assert_eq!(options.allow_ffi, None);
     // `..` can't climb out of the package
     let mut options = PermissionsOptions {
       allow_ffi: Some(vec!["prebuilds/../../other/addon.node".to_string()]),
       ..Default::default()
     };
-    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
+    clamp_permissions(&mut options, &jail, &abs("/nm/pkg"));
     assert_eq!(options.allow_ffi, None);
     // not asked for, not granted
     let mut options = PermissionsOptions::default();
-    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
+    clamp_permissions(&mut options, &jail, &abs("/nm/pkg"));
     assert_eq!(options.allow_ffi, None);
     // no FFI roots (no OS sandbox): `-A` gets no native code
     let unconfined = JailPermissions {
-      write: vec![PathBuf::from("/nm/pkg")],
+      write: vec![abs("/nm/pkg")],
       ..Default::default()
     };
     let mut options = PermissionsOptions {
       allow_ffi: Some(vec![]),
       ..Default::default()
     };
-    clamp_permissions(&mut options, &unconfined, Path::new("/nm/pkg"));
+    clamp_permissions(&mut options, &unconfined, &abs("/nm/pkg"));
     assert_eq!(options.allow_ffi, None);
   }
 
