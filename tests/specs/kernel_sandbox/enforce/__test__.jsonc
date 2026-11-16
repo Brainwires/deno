@@ -1,0 +1,208 @@
+// denext (DENEXT.md item 425): --kernel-sandbox=enforce applies the policy
+// (Mode A: Landlock + one seccomp program on Linux, exec-then-restrict;
+// Seatbelt in-process on macOS). Every probe is native code (FFI into libc,
+// a child), which only the kernel holds; Deno's own checks never see it.
+{
+  "tempDir": true,
+  "tests": {
+    // the program and its static imports load without a read grant
+    "runs_with_no_grant": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet --kernel-sandbox=enforce main.ts",
+      "output": "hello\n"
+    },
+    // P3 (a): native reads and writes outside the grant are refused
+    "native_files": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet --kernel-sandbox=enforce --allow-ffi --allow-read=inside --allow-write=inside files.ts",
+      "output": "files.out"
+    },
+    // P3 (e): -A changes nothing (the kernel sandbox stays off)
+    "allow_all_unaffected": {
+      "if": "unix",
+      "args": "run --quiet -A --kernel-sandbox=enforce files.ts",
+      "output": "files_allow_all.out"
+    },
+    // P3 (f): without an explicit mode nothing applies (a prompt run, or
+    // any run, is unchanged)
+    "default_unaffected": {
+      "if": "unix",
+      "args": "run --quiet --allow-ffi --allow-read=inside --allow-write=inside files.ts",
+      "output": "files_allow_all.out"
+    },
+    // the project's deno.json / package.json sit in an ancestor folder
+    // outside --allow-read: discovery reads them again in Linux's
+    // re-executed image (the compared policy holds exactly that set), and
+    // the import map they declare works
+    "config_in_ancestor_folder": {
+      "if": "kernelSandboxEnforce",
+      "cwd": "ancestor/sub",
+      "args": "run --quiet --kernel-sandbox=enforce --allow-read=. main.ts",
+      "output": "hello from greet\n"
+    },
+    // an .npmrc the read grant doesn't cover is never readable under
+    // enforce (it may hold registry tokens): the report names it, and the
+    // re-executed image says once that it treats it as absent
+    "npmrc_skipped": {
+      "if": "kernelSandboxEnforce",
+      "cwd": "npmrc",
+      "args": "run --kernel-sandbox=enforce --kernel-sandbox-report --allow-read=sub main.ts",
+      "output": "npmrc_skipped.out"
+    },
+    // P3 (d): a read deny inside a read allow holds against native code
+    // (Linux: by expansion; a symlink in the expanded folder leading outside
+    // it is refused too)
+    "deny_inside_allow": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        { "args": "run --quiet -A setup_link.ts", "output": "" },
+        {
+          "args": "run --quiet --kernel-sandbox=enforce --allow-ffi --allow-read=inside --deny-read=inside/secret.txt deny.ts",
+          "output": "deny.out"
+        }
+      ]
+    },
+    // a read deny named through another path than its allow (a symlink)
+    // holds against native code
+    "deny_through_another_name": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        { "args": "run --quiet -A setup_alias.ts", "output": "" },
+        {
+          "args": "run --quiet --kernel-sandbox=enforce --allow-ffi --allow-read=alias --deny-read=inside/secret.txt deny_alias.ts alias",
+          "output": "deny_alias.out"
+        }
+      ]
+    },
+    // an allow inside a read deny is left out of the kernel's scope (the
+    // deny wins, as in Deno's checks), whichever name the allow uses
+    "allow_inside_deny": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        { "args": "run --quiet -A setup_alias.ts", "output": "" },
+        {
+          "args": "run --quiet --kernel-sandbox=enforce --allow-ffi --allow-read=inside/sub,alias/sub --deny-read=inside deny_alias.ts carve",
+          "output": "allow_in_deny.out"
+        }
+      ]
+    },
+    // a module of the program inside a read deny is not made readable to
+    // the kernel: enforce refuses, naming it
+    "module_inside_deny_refused": {
+      "if": "kernelSandboxEnforce",
+      "cwd": "modules",
+      "args": "run --quiet --kernel-sandbox=enforce --deny-read=hidden main.ts",
+      "output": "denied_module.out",
+      "exitCode": 1
+    },
+    // P3 (b): an --allow-run child inherits the rules; a failing child
+    // gets one hint line
+    "child_inherits": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet --kernel-sandbox=enforce --allow-run=cat --allow-read=inside child.ts",
+      "output": "child.out"
+    },
+    // P3 (c): native code connects only to the granted port (Linux: needs
+    // Landlock ABI 4, else enforce refuses to start)
+    "native_connect": {
+      "if": "kernelSandboxNetPorts",
+      "args": "run --quiet --kernel-sandbox=enforce --allow-ffi --allow-net=127.0.0.1:4545 net.ts",
+      "output": "net.out"
+    },
+    // P3 (g) as the model holds it: native code loads libraries only from
+    // the read scope (macOS doesn't hold loading to the --allow-ffi paths
+    // alone: a documented gap)
+    "dylib_outside_read_scope": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        { "args": "run --quiet -A setup_dylib.ts", "output": "" },
+        {
+          "args": "run --quiet --kernel-sandbox=enforce --allow-read=lib --allow-ffi dylib.ts",
+          "output": "dylib.out"
+        }
+      ]
+    },
+    // nothing the runtime opened read-write before the sandbox applied (the
+    // caches) is left writable to native code in the confined process
+    "no_writable_descriptors": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        { "args": "run --quiet -A setup_fds.ts", "output": "" },
+        {
+          "args": "run --quiet --kernel-sandbox=enforce --allow-read=lib --allow-ffi fds.ts",
+          "output": "writable files: 0\n"
+        }
+      ]
+    },
+    // the note on a Deno op the kernel refused (Linux: chmod by path)
+    "note_linux": {
+      "if": "kernelSandboxEnforceLinux",
+      "args": "run --quiet --kernel-sandbox=enforce --allow-read=inside --allow-write=inside annotate.ts",
+      "output": "note.out"
+    },
+    // the note on a Deno op the kernel refused (macOS: a terminal that isn't
+    // one of the standard streams', which Deno's check allows here)
+    "note_macos": {
+      "if": "kernelSandboxEnforceMac",
+      "args": "run --quiet --kernel-sandbox=enforce --allow-write annotate.ts",
+      "output": "note.out"
+    },
+    // P4: the PID is unchanged across the re-exec, signals are delivered
+    "pid_and_signals": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet -A pid_outer.ts",
+      "output": "pid.out"
+    },
+    // P4: nothing outside the write scope changes, on every Landlock ABI
+    "outside_unchanged": {
+      "if": "unix",
+      "args": "run --quiet -A integrity_outer.ts",
+      "output": "outside unchanged: true[WILDCARD]"
+    },
+    // a rule the OS can't hold: enforce refuses, naming it (Linux: a write
+    // deny inside a write allow needs the broker)
+    "inexpressible_refused": {
+      "if": "kernelSandboxEnforceLinux",
+      "args": "run --kernel-sandbox=enforce --allow-write=inside --deny-write=inside/a.txt main.ts",
+      "output": "inexpressible.out",
+      "exitCode": 1
+    },
+    // macOS: where the sandbox-exec fallback would run (forced here), the
+    // report names its self-exec gap, and the listing-only entries
+    "fallback_gap_reported_macos": {
+      "if": "mac",
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_EXEC": "1" },
+      "args": "run --quiet --kernel-sandbox-report --kernel-sandbox=warn main.ts",
+      "output": "fallback_gap.out"
+    },
+    // the same rule is exact on macOS
+    "write_deny_exact_macos": {
+      "if": "kernelSandboxEnforceMac",
+      "args": "run --quiet --kernel-sandbox=enforce --allow-write=inside --deny-write=inside/a.txt main.ts",
+      "output": "hello\n"
+    },
+    // a program read from stdin can't survive the re-exec
+    "stdin_refused": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --kernel-sandbox=enforce -",
+      "input": "console.log('hello')",
+      "output": "stdin.out",
+      "exitCode": 1
+    },
+    // deno info --json says the enforcer is built (enforced: whether such
+    // a run is enforced; auto applies nothing)
+    "info_enforcer_built": {
+      "if": "kernelSandboxEnforce",
+      "args": "info --json",
+      "output": "info.out"
+    },
+    // commands that can't apply the sandbox before user code refuse (deno
+    // eval grants everything by default, so enforce is off there, as for -A)
+    "test_refused": {
+      "if": "kernelSandboxEnforce",
+      "args": "test --kernel-sandbox=enforce main.ts",
+      "output": "unsupported.out",
+      "exitCode": 1
+    }
+  }
+}

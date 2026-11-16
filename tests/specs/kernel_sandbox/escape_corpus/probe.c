@@ -219,7 +219,13 @@ static int fs_hardlink(const char *cfg, const char *vec, res_t *r) {
   snprintf(n, sizeof n, "hl-%s", vec);
   path_of(cfg, "work", n, dst, sizeof dst);
   unlink(dst);
-  if (link(src, dst) != 0) return refused(r, "link outside/secret into work/", errno);
+  if (link(src, dst) != 0) {
+    // EXDEV is how Landlock refuses a link that would gain rights (its REFER
+    // answer); outside and work share a file system, so the baseline (no
+    // sandbox) links fine and classify.ts tells the two apart
+    if (errno == EXDEV) return put(r, HELD, "link outside/secret into work/: EXDEV (refused)");
+    return refused(r, "link outside/secret into work/", errno);
+  }
   if (read_file(dst, b, sizeof b) < 0) return refused(r, "read through the new hard link", errno);
   return put(r, OPEN, "linked a file from outside into the scope and read it");
 }
@@ -240,7 +246,12 @@ static int fs_rename_into(const char *cfg, const char *vec, res_t *r) {
   snprintf(n, sizeof n, "mv-%s", vec);
   path_of(cfg, "out", n, a, sizeof a);
   path_of(cfg, "work", n, b, sizeof b);
-  if (rename(a, b) != 0) return refused(r, "rename outside/ -> work/", errno);
+  if (rename(a, b) != 0) {
+    // EXDEV: Landlock's refusal of a cross-directory rename (every one
+    // before ABI 2; one that would gain rights after); see fs_hardlink
+    if (errno == EXDEV) return put(r, HELD, "rename outside/ -> work/: EXDEV (refused)");
+    return refused(r, "rename outside/ -> work/", errno);
+  }
   if (read_file(b, buf, sizeof buf) < 0) return refused(r, "read the moved file", errno);
   return put(r, OPEN, "moved a file from outside into the scope and read it");
 }
@@ -475,7 +486,9 @@ static int sys_io_uring(const char *cfg, res_t *r) {
     return put(r, OPEN, "io_uring_setup succeeded");
   }
   int e = errno, dis = read_sysctl_int("/proc/sys/kernel/io_uring_disabled");
-  if (e == ENOSYS) return put(r, NA, "io_uring not in this kernel (ENOSYS)");
+  // ENOSYS: this kernel lacks it, or a filter answers so (the kernel
+  // sandbox's choice: callers fall back); the baseline tells them apart
+  if (e == ENOSYS) return put(r, HELD, "io_uring_setup: ENOSYS");
   if ((e == EPERM || e == EACCES) && dis > 0) return put(r, HOST, "io_uring_setup: %s (io_uring_disabled=%d)", strerror(e), dis);
   return refused(r, "io_uring_setup", e);
 #else
@@ -501,7 +514,10 @@ static int sys_clone3(const char *cfg, res_t *r) {
 #ifdef __linux__
   int rc = run_in_child(do_clone3);
   if (rc == 0) return put(r, OPEN, "clone3 succeeded (its flags are beyond seccomp's reach)");
-  if (rc == ENOSYS) return put(r, NA, "clone3 not available (ENOSYS)");
+  // ENOSYS: no clone3 in this kernel, or a filter answers so (glibc falls
+  // back to clone, whose flags seccomp can see); the baseline tells them
+  // apart
+  if (rc == ENOSYS) return put(r, HELD, "clone3: ENOSYS (glibc falls back to clone)");
   return refused(r, "clone3", rc);
 #else
   return put(r, NA, "linux only");

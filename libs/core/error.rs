@@ -445,7 +445,7 @@ fn build_js_error_class_exception<'s, 'i>(
   class: &str,
   prototype: Option<v8::Local<'s, v8::Value>>,
 ) -> v8::Local<'s, v8::Value> {
-  let message = v8::String::new(scope, &error.get_message()).unwrap();
+  let message = v8::String::new(scope, &js_message(error)).unwrap();
   let exception = v8::Exception::error(scope, message);
 
   // `v8::Exception::error` always produces an object, but be defensive.
@@ -538,6 +538,46 @@ fn js_class_and_message_to_exception<'s, 'i>(
   v8::Exception::type_error(scope, message)
 }
 
+/// denext: a hook that may append a note to the message of a
+/// `PermissionDenied` error (the CLI's kernel sandbox says when a refusal is
+/// probably its own). Given the error's OS errno, if any, and its message.
+pub type PermissionDeniedNote =
+  fn(errno: Option<i32>, message: &str) -> Option<&'static str>;
+
+static PERMISSION_DENIED_NOTE: std::sync::OnceLock<PermissionDeniedNote> =
+  std::sync::OnceLock::new();
+
+/// Installs the [`PermissionDeniedNote`] hook (once; later calls do nothing).
+pub fn set_permission_denied_note(note: PermissionDeniedNote) {
+  let _ = PERMISSION_DENIED_NOTE.set(note);
+}
+
+/// The OS errno of the first `std::io::Error` in `error`'s chain.
+fn raw_os_error(error: &dyn JsErrorClass) -> Option<i32> {
+  let mut next: Option<&(dyn Error + 'static)> = Some(error.get_ref());
+  while let Some(err) = next {
+    if let Some(code) = err
+      .downcast_ref::<std::io::Error>()
+      .and_then(|e| e.raw_os_error())
+    {
+      return Some(code);
+    }
+    next = err.source();
+  }
+  None
+}
+
+fn js_message(error: &dyn JsErrorClass) -> Cow<'static, str> {
+  let message = error.get_message();
+  if let Some(note) = PERMISSION_DENIED_NOTE.get()
+    && error.get_class() == "PermissionDenied"
+    && let Some(suffix) = note(raw_os_error(error), &message)
+  {
+    return Cow::Owned(format!("{message}{suffix}"));
+  }
+  message
+}
+
 pub fn to_v8_error<'s, 'i>(
   scope: &mut v8::PinScope<'s, 'i>,
   error: &dyn JsErrorClass,
@@ -552,7 +592,7 @@ pub fn to_v8_error<'s, 'i>(
   let cb = v8::Local::new(tc_scope, &cb);
   let this = v8::undefined(tc_scope).into();
   let class = v8::String::new(tc_scope, &error.get_class()).unwrap();
-  let message = v8::String::new(tc_scope, &error.get_message()).unwrap();
+  let message = v8::String::new(tc_scope, &js_message(error)).unwrap();
   let mut args = vec![class.into(), message.into()];
 
   let additional_properties = error
@@ -2742,6 +2782,21 @@ pub fn throw_invalid_this_error_one_byte<'s, 'i>(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  // denext: the permission-denied note hook changes nothing unless the CLI
+  // installs it (it does only under --kernel-sandbox=enforce, and the hook
+  // itself answers only while enforcing); no test here installs it
+  #[test]
+  fn permission_denied_message_unchanged_without_the_note_hook() {
+    assert!(super::PERMISSION_DENIED_NOTE.get().is_none());
+    let err = std::io::Error::new(
+      std::io::ErrorKind::PermissionDenied,
+      "Permission denied (os error 13): open '/x'",
+    );
+    assert_eq!(super::js_message(&err), err.get_message());
+    let other = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+    assert_eq!(super::js_message(&other), other.get_message());
+  }
 
   #[cfg(not(miri))]
   #[tokio::test]

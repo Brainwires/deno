@@ -8,6 +8,14 @@
       "args": "run -A --quiet corpus.ts",
       "output": "[WILDCARD]kernel-sandbox corpus: [WILDCARD]\ncorpus: ok [WILDCARD]"
     },
+    // --kernel-sandbox=enforce: every kernel cell held, the network none /
+    // all and exec decided by the configuration, the rest as documented
+    // (expect.ts). Skipped, saying why, where no enforcer or Landlock exists.
+    "corpus_enforce": {
+      "if": "unix",
+      "args": "run -A --quiet corpus.ts --expect=enforce",
+      "output": "[WILDCARD]kernel-sandbox corpus: [WILDCARD]\ncorpus: ok [WILDCARD]"
+    },
     // Who refused a probe: our sandbox (held) or the host (host).
     "classify_unit": {
       "args": "test --quiet --no-check=remote classify_test.ts",

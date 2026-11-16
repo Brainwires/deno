@@ -1,0 +1,1 @@
+error: --kernel-sandbox=enforce can't run a program read from stdin yet (the sandbox re-executes the process); save it to a file

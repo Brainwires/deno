@@ -1,7 +1,7 @@
 kernel sandbox (preview): auto (default); applies: off; would apply: warn
   why: auto applies nothing yet (the kernel sandbox is an opt-in preview)
   permission set: fixed (no prompt can widen it)
-  machine: [WILDLINE]enforcer built: no
+  machine: [WILDLINE]enforcer built: [WILDLINE]
   policy [WILDLINE] (mode A, self-confined)
     read:       [WILDLINE] + implicit set ([WILDLINE])
     deny read:  none
@@ -14,7 +14,6 @@ kernel sandbox (preview): auto (default); applies: off; would apply: warn
     sys:        narrows [WILDLINE]
     env:        not scrubbed
     implicit:   [WILDLINE]
-  gaps: [WILDLINE] ([WILDLINE] refused by enforce, marked !)
+[WILDCARD]  gaps: [WILDLINE] ([WILDLINE] refused by enforce, marked !)
 [WILDCARD]
-  ! enforcer [fail-open] --kernel-sandbox: no kernel enforcer for [WILDLINE] is built into this runtime yet: every rule is held by Deno's checks only
 hello

@@ -1,0 +1,1550 @@
+// Copyright 2018-2026 the Deno authors. MIT license.
+
+//! Kernel enforcement of a process's own grant on Linux (Mode A,
+//! `--kernel-sandbox=enforce`): exec, then restrict.
+//!
+//! The first image resolves the grant and the plan ([`crate::plan`]), loads
+//! the module graph, and re-executes itself (`/proc/self/exe`, same argv, so
+//! the PID is unchanged) with the plan in a sealed memfd ([`reexec`]). The new
+//! image calls [`take_inherited_plan`] and [`apply_self`] first thing in
+//! `main`, while it has one thread: `no_new_privs`, the Landlock ruleset
+//! (`landlock_restrict_self`), and one complete seccomp program. No second
+//! filter stage, no `TSYNC`, and the deno binary needs no execute right.
+//!
+//! The hand-over can only narrow: whatever plan arrives is applied (the
+//! kernel stacks domains, so a plan can never undo one already in force), a
+//! plan that is malformed or not sealed is refused (the caller exits), and
+//! the CLI later requires the applied plan to equal the one it compiles
+//! itself, measured as well ([`status_confined`]), before it skips its own
+//! re-exec.
+
+#![allow(
+  clippy::disallowed_methods,
+  reason = "Landlock rules and the hand-over act on the real file system and /proc"
+)]
+
+use std::ffi::CString;
+use std::ffi::OsString;
+use std::io;
+use std::os::fd::AsRawFd;
+use std::os::fd::FromRawFd;
+use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
+use std::sync::OnceLock;
+
+use crate::linux::ACCESS_FS_MAKE_BLOCK;
+use crate::linux::ACCESS_FS_MAKE_CHAR;
+use crate::linux::ACCESS_FS_MAKE_DIR;
+use crate::linux::ACCESS_FS_MAKE_FIFO;
+use crate::linux::ACCESS_FS_MAKE_REG;
+use crate::linux::ACCESS_FS_MAKE_SOCK;
+use crate::linux::ACCESS_FS_MAKE_SYM;
+use crate::linux::ACCESS_FS_READ_DIR;
+use crate::linux::ACCESS_FS_READ_FILE;
+use crate::linux::ACCESS_FS_REFER;
+use crate::linux::ACCESS_FS_REMOVE_DIR;
+use crate::linux::ACCESS_FS_REMOVE_FILE;
+use crate::linux::ACCESS_FS_TRUNCATE;
+use crate::linux::ACCESS_FS_WRITE_FILE;
+use crate::linux::ACCESS_NET_BIND_TCP;
+use crate::linux::ACCESS_NET_CONNECT_TCP;
+use crate::linux::LANDLOCK_NET_ABI;
+use crate::linux::LANDLOCK_RULE_NET_PORT;
+use crate::linux::LANDLOCK_RULE_PATH_BENEATH;
+use crate::linux::NetPortAttr;
+use crate::linux::PathBeneathAttr;
+use crate::linux::SYS_LANDLOCK_ADD_RULE;
+use crate::linux::SYS_LANDLOCK_CREATE_RULESET;
+use crate::linux::SYS_LANDLOCK_RESTRICT_SELF;
+use crate::linux::landlock_abi;
+use crate::plan::EnforcePlan;
+use crate::plan::LinuxPlan;
+use crate::plan::MAX_PLAN_BYTES;
+use crate::plan::NetPlan;
+use crate::plan::PLAN_FD_ENV_VAR;
+use crate::plan::Ports;
+use crate::plan::SeccompPlan;
+use crate::seccomp::InetSockets;
+use crate::seccomp::NetlinkSockets;
+use crate::seccomp::SeccompSpec;
+use crate::seccomp::SockFilter;
+use crate::seccomp::SockFprog;
+use crate::seccomp::SyscallRule;
+
+const ACCESS_FS_EXECUTE: u64 = 1 << 0;
+const ACCESS_FS_IOCTL_DEV: u64 = 1 << 15;
+const SCOPE_ABSTRACT_UNIX_SOCKET: u64 = 1 << 0;
+const SCOPE_SIGNAL: u64 = 1 << 1;
+/// The first ABI with `TRUNCATE`, `IOCTL_DEV` and scopes.
+const TRUNCATE_ABI: u32 = 3;
+const IOCTL_DEV_ABI: u32 = 5;
+const SCOPE_ABI: u32 = 6;
+const REFER_ABI: u32 = 2;
+
+/// Rights that apply to a file (not a directory) in a rule.
+const FILE_RIGHTS: u64 = ACCESS_FS_EXECUTE
+  | ACCESS_FS_WRITE_FILE
+  | ACCESS_FS_READ_FILE
+  | ACCESS_FS_TRUNCATE
+  | ACCESS_FS_IOCTL_DEV;
+
+const READ_RIGHTS: u64 = ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR;
+
+#[repr(C)]
+struct RulesetAttr {
+  handled_access_fs: u64,
+  /// ABI 4+
+  handled_access_net: u64,
+  /// ABI 6+
+  scoped: u64,
+}
+
+/// The write rights Landlock knows at `abi` (REFER from 2, TRUNCATE from 3,
+/// IOCTL_DEV from 5).
+pub fn write_rights(abi: u32) -> u64 {
+  let mut rights = ACCESS_FS_WRITE_FILE
+    | ACCESS_FS_REMOVE_DIR
+    | ACCESS_FS_REMOVE_FILE
+    | ACCESS_FS_MAKE_CHAR
+    | ACCESS_FS_MAKE_DIR
+    | ACCESS_FS_MAKE_REG
+    | ACCESS_FS_MAKE_SOCK
+    | ACCESS_FS_MAKE_FIFO
+    | ACCESS_FS_MAKE_BLOCK
+    | ACCESS_FS_MAKE_SYM;
+  if abi >= REFER_ABI {
+    rights |= ACCESS_FS_REFER;
+  }
+  if abi >= TRUNCATE_ABI {
+    rights |= ACCESS_FS_TRUNCATE;
+  }
+  if abi >= IOCTL_DEV_ABI {
+    rights |= ACCESS_FS_IOCTL_DEV;
+  }
+  rights
+}
+
+/// The ruleset attribute for `plan` at `abi`: (fs, net, scoped), or why the
+/// kernel can't hold the plan.
+fn handled(plan: &LinuxPlan, abi: u32) -> Result<(u64, u64, u64), String> {
+  let mut fs = 0;
+  if plan.handled.read {
+    fs |= READ_RIGHTS;
+  }
+  if plan.handled.write {
+    fs |= write_rights(abi);
+  }
+  if plan.handled.exec {
+    fs |= ACCESS_FS_EXECUTE;
+  }
+  let net = match &plan.net {
+    NetPlan::Open => 0,
+    // seccomp refuses the IP families; Landlock adds "no port" where it can
+    NetPlan::Denied if abi >= LANDLOCK_NET_ABI => {
+      ACCESS_NET_BIND_TCP | ACCESS_NET_CONNECT_TCP
+    }
+    NetPlan::Denied => 0,
+    NetPlan::Ports { connect, bind } => {
+      if abi < LANDLOCK_NET_ABI {
+        return Err(format!(
+          "TCP port rules need Landlock ABI {LANDLOCK_NET_ABI}; this kernel has {abi}"
+        ));
+      }
+      let mut net = 0;
+      if matches!(connect, Ports::List { .. }) {
+        net |= ACCESS_NET_CONNECT_TCP;
+      }
+      if matches!(bind, Ports::List { .. }) {
+        net |= ACCESS_NET_BIND_TCP;
+      }
+      net
+    }
+  };
+  let mut scoped = 0;
+  if plan.scope_signal {
+    scoped |= SCOPE_SIGNAL;
+  }
+  if plan.scope_abstract_unix {
+    scoped |= SCOPE_ABSTRACT_UNIX_SOCKET;
+  }
+  if scoped != 0 && abi < SCOPE_ABI {
+    return Err(format!(
+      "Landlock scopes need ABI {SCOPE_ABI}; this kernel has {abi}"
+    ));
+  }
+  Ok((fs, net, scoped))
+}
+
+fn add_path_rule(
+  ruleset: &OwnedFd,
+  path: &Path,
+  rights: u64,
+) -> Result<(), String> {
+  let c_path = CString::new(path.as_os_str().as_bytes())
+    .map_err(|_| format!("{}: a path with a NUL", path.display()))?;
+  // SAFETY: a valid C string
+  let fd =
+    unsafe { libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+  if fd < 0 {
+    // gone or unreachable: nothing to allow (an allow that misses fails
+    // closed)
+    return Ok(());
+  }
+  // SAFETY: just opened
+  let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+  // the object the rule attaches to, not whatever the path names now
+  // SAFETY: a zeroed stat is a valid out parameter
+  let mut st: libc::stat = unsafe { std::mem::zeroed() };
+  // SAFETY: a valid descriptor and out parameter
+  if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
+    return Ok(());
+  }
+  let is_dir = st.st_mode & libc::S_IFMT == libc::S_IFDIR;
+  let allowed_access = if is_dir { rights } else { rights & FILE_RIGHTS };
+  if allowed_access == 0 {
+    return Ok(());
+  }
+  let attr = PathBeneathAttr {
+    allowed_access,
+    parent_fd: fd.as_raw_fd(),
+  };
+  // SAFETY: a valid ruleset fd and attribute
+  let res = unsafe {
+    libc::syscall(
+      SYS_LANDLOCK_ADD_RULE,
+      ruleset.as_raw_fd(),
+      LANDLOCK_RULE_PATH_BENEATH,
+      &attr as *const PathBeneathAttr,
+      0u32,
+    )
+  };
+  if res != 0 {
+    return Err(format!(
+      "landlock_add_rule {}: {}",
+      path.display(),
+      io::Error::last_os_error()
+    ));
+  }
+  Ok(())
+}
+
+/// A read rule on a regular file only (a module file): anything else at
+/// that path gets nothing.
+fn add_file_read_rule(ruleset: &OwnedFd, path: &Path) -> Result<(), String> {
+  let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
+    return Ok(());
+  };
+  // SAFETY: a valid C string
+  let fd =
+    unsafe { libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+  if fd < 0 {
+    return Ok(());
+  }
+  // SAFETY: just opened
+  let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+  // SAFETY: a zeroed stat is a valid out parameter
+  let mut st: libc::stat = unsafe { std::mem::zeroed() };
+  // SAFETY: a valid descriptor and out parameter
+  if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0
+    || st.st_mode & libc::S_IFMT != libc::S_IFREG
+  {
+    return Ok(());
+  }
+  let attr = PathBeneathAttr {
+    allowed_access: ACCESS_FS_READ_FILE,
+    parent_fd: fd.as_raw_fd(),
+  };
+  // SAFETY: a valid ruleset fd and attribute
+  let res = unsafe {
+    libc::syscall(
+      SYS_LANDLOCK_ADD_RULE,
+      ruleset.as_raw_fd(),
+      LANDLOCK_RULE_PATH_BENEATH,
+      &attr as *const PathBeneathAttr,
+      0u32,
+    )
+  };
+  if res != 0 {
+    return Err(format!(
+      "landlock_add_rule {}: {}",
+      path.display(),
+      io::Error::last_os_error()
+    ));
+  }
+  Ok(())
+}
+
+/// `struct open_how` for `openat2(2)`.
+#[repr(C)]
+struct OpenHow {
+  flags: u64,
+  mode: u64,
+  resolve: u64,
+}
+const SYS_OPENAT2: libc::c_long = 437;
+const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+
+/// Opens `path` as an `O_PATH` descriptor with no symlink anywhere in its
+/// resolution; the raw result (a descriptor or -1 with errno set).
+fn open_no_symlinks(path: &std::ffi::CStr) -> libc::c_long {
+  let how = OpenHow {
+    flags: (libc::O_PATH | libc::O_CLOEXEC) as u64,
+    mode: 0,
+    resolve: RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS,
+  };
+  // SAFETY: a valid path and open_how of the size given
+  unsafe {
+    libc::syscall(
+      SYS_OPENAT2,
+      libc::AT_FDCWD,
+      path.as_ptr(),
+      &how as *const OpenHow,
+      std::mem::size_of::<OpenHow>(),
+    )
+  }
+}
+
+/// Whether `openat2` with `errno` means the call itself is unavailable (an
+/// older kernel, or an outer seccomp profile refusing it), not the path.
+fn openat2_unavailable(errno: Option<i32>) -> bool {
+  matches!(errno, Some(libc::ENOSYS) | Some(libc::EPERM))
+}
+
+/// Whether `openat2` works here (the read expansion applies its rules with
+/// it): `Err` says why not, and the expansion can't be applied.
+pub fn openat2_available() -> Result<(), String> {
+  let fd = open_no_symlinks(c"/");
+  if fd < 0 {
+    let err = io::Error::last_os_error();
+    if openat2_unavailable(err.raw_os_error()) {
+      return Err(format!(
+        "openat2 is refused here ({err}): an older kernel, or a container's seccomp profile"
+      ));
+    }
+    return Ok(());
+  }
+  // SAFETY: just opened
+  drop(unsafe { OwnedFd::from_raw_fd(fd as i32) });
+  Ok(())
+}
+
+/// A read rule on an expanded entry, opened with no symlink anywhere in its
+/// resolution (`openat2` with `RESOLVE_NO_SYMLINKS`): a link inside an
+/// expanded folder can't carry the rule to its target. An entry that can't
+/// be opened so gets nothing (fails closed); `openat2` itself refused is an
+/// error (every expanded rule would be missing).
+fn add_expanded_rule(
+  ruleset: &OwnedFd,
+  path: &Path,
+  rights: u64,
+) -> Result<(), String> {
+  let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
+    return Ok(());
+  };
+  let fd = open_no_symlinks(&c_path);
+  if fd < 0 {
+    let err = io::Error::last_os_error();
+    if openat2_unavailable(err.raw_os_error()) {
+      return Err(format!(
+        "the read expansion can't be applied: openat2 is refused here ({err})"
+      ));
+    }
+    return Ok(());
+  }
+  // SAFETY: just opened
+  let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+  // SAFETY: a zeroed stat is a valid out parameter
+  let mut st: libc::stat = unsafe { std::mem::zeroed() };
+  // SAFETY: a valid descriptor and out parameter
+  if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
+    return Ok(());
+  }
+  let allowed_access = match st.st_mode & libc::S_IFMT {
+    libc::S_IFDIR => rights,
+    libc::S_IFLNK => return Ok(()),
+    _ => rights & FILE_RIGHTS,
+  };
+  if allowed_access == 0 {
+    return Ok(());
+  }
+  let attr = PathBeneathAttr {
+    allowed_access,
+    parent_fd: fd.as_raw_fd(),
+  };
+  // SAFETY: a valid ruleset fd and attribute
+  let res = unsafe {
+    libc::syscall(
+      SYS_LANDLOCK_ADD_RULE,
+      ruleset.as_raw_fd(),
+      LANDLOCK_RULE_PATH_BENEATH,
+      &attr as *const PathBeneathAttr,
+      0u32,
+    )
+  };
+  if res != 0 {
+    return Err(format!(
+      "landlock_add_rule {}: {}",
+      path.display(),
+      io::Error::last_os_error()
+    ));
+  }
+  Ok(())
+}
+
+fn add_port_rule(
+  ruleset: &OwnedFd,
+  access: u64,
+  port: u16,
+) -> Result<(), String> {
+  let attr = NetPortAttr {
+    allowed_access: access,
+    port: u64::from(port),
+  };
+  // SAFETY: a valid ruleset fd and attribute
+  let res = unsafe {
+    libc::syscall(
+      SYS_LANDLOCK_ADD_RULE,
+      ruleset.as_raw_fd(),
+      LANDLOCK_RULE_NET_PORT,
+      &attr as *const NetPortAttr,
+      0u32,
+    )
+  };
+  if res != 0 {
+    return Err(format!(
+      "landlock_add_rule port {port}: {}",
+      io::Error::last_os_error()
+    ));
+  }
+  Ok(())
+}
+
+/// Builds the Landlock ruleset for `plan` at `abi`, plus a read rule on
+/// each regular file in `module_files` and on each `expanded` entry (no
+/// symlinks in its resolution); `None` when the plan handles nothing
+/// Landlock holds.
+pub fn build_ruleset(
+  plan: &LinuxPlan,
+  abi: u32,
+  module_files: &[std::path::PathBuf],
+  expanded: &[std::path::PathBuf],
+) -> Result<Option<OwnedFd>, String> {
+  let (fs, net, scoped) = handled(plan, abi)?;
+  if fs == 0 && net == 0 && scoped == 0 {
+    return Ok(None);
+  }
+  let attr = RulesetAttr {
+    handled_access_fs: fs,
+    handled_access_net: net,
+    scoped,
+  };
+  // an older kernel refuses a larger attribute with fields it doesn't know
+  let size = if abi >= SCOPE_ABI {
+    std::mem::size_of::<RulesetAttr>()
+  } else if abi >= LANDLOCK_NET_ABI {
+    2 * std::mem::size_of::<u64>()
+  } else {
+    std::mem::size_of::<u64>()
+  };
+  // SAFETY: a valid attribute of at least the given size
+  let fd = unsafe {
+    libc::syscall(
+      SYS_LANDLOCK_CREATE_RULESET,
+      &attr as *const RulesetAttr,
+      size,
+      0u32,
+    )
+  };
+  if fd < 0 {
+    return Err(format!(
+      "landlock_create_ruleset: {}",
+      io::Error::last_os_error()
+    ));
+  }
+  // SAFETY: just created
+  let ruleset = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+  for rule in &plan.rules {
+    let mut rights = 0;
+    if rule.read {
+      rights |= READ_RIGHTS;
+    }
+    if rule.write {
+      rights |= write_rights(abi);
+    }
+    // a rule may only name handled rights
+    add_path_rule(&ruleset, &rule.path, rights & fs)?;
+  }
+  if fs & ACCESS_FS_READ_FILE != 0 {
+    for file in module_files {
+      add_file_read_rule(&ruleset, file)?;
+    }
+    for entry in expanded {
+      add_expanded_rule(&ruleset, entry, READ_RIGHTS & fs)?;
+    }
+  }
+  if let NetPlan::Ports { connect, bind } = &plan.net {
+    for (access, ports) in [
+      (ACCESS_NET_CONNECT_TCP, connect),
+      (ACCESS_NET_BIND_TCP, bind),
+    ] {
+      if let Ports::List { ports } = ports {
+        for port in ports {
+          add_port_rule(&ruleset, access, *port)?;
+        }
+      }
+    }
+  }
+  Ok(Some(ruleset))
+}
+
+/// Syscall numbers the program names, per architecture.
+#[cfg(target_arch = "x86_64")]
+mod nr {
+  pub const CLONE: u32 = 56;
+  pub const UNSHARE: u32 = 272;
+  pub const SETNS: u32 = 308;
+  pub const EXECVE: u32 = 59;
+  pub const EXECVEAT: u32 = 322;
+  pub const IO_URING_ENTER: u32 = 426;
+  pub const IO_URING_REGISTER: u32 = 427;
+  /// The attack-surface list.
+  pub const SURFACE: &[u32] = &[
+    321, // bpf
+    298, // perf_event_open
+    323, // userfaultfd
+    250, // keyctl
+    248, // add_key
+    249, // request_key
+    101, // ptrace
+    310, // process_vm_readv
+    311, // process_vm_writev
+    312, // kcmp
+    165, // mount
+    166, // umount2
+    155, // pivot_root
+    428, // open_tree
+    429, // move_mount
+    430, // fsopen
+    431, // fsconfig
+    432, // fsmount
+    433, // fspick
+    442, // mount_setattr
+    246, // kexec_load
+    320, // kexec_file_load
+    175, // init_module
+    313, // finit_module
+    176, // delete_module
+    304, // open_by_handle_at
+    163, // acct
+    167, // swapon
+    168, // swapoff
+  ];
+  /// The path forms of metadata writes.
+  pub const PATH_METADATA: &[u32] = &[
+    90,  // chmod
+    268, // fchmodat
+    452, // fchmodat2
+    92,  // chown
+    94,  // lchown
+    260, // fchownat
+    132, // utime
+    235, // utimes
+    261, // futimesat
+    188, // setxattr
+    189, // lsetxattr
+    197, // removexattr
+    198, // lremovexattr
+    463, // setxattrat
+    466, // removexattrat
+  ];
+  pub const UTIMENSAT: u32 = 280;
+  pub const TRUNCATE: u32 = 76;
+  /// `(nr, flags argument)` of the open calls.
+  pub const OPENS: &[(u32, u32)] = &[(2, 1), (257, 2)];
+  pub const OPENAT2: u32 = 437;
+  /// The signal senders whose first argument is the target process.
+  pub const SIGNAL_TO_PID: &[u32] = &[
+    62,  // kill
+    234, // tgkill
+    129, // rt_sigqueueinfo
+    297, // rt_tgsigqueueinfo
+  ];
+  pub const TKILL: u32 = 200;
+}
+
+#[cfg(target_arch = "aarch64")]
+mod nr {
+  pub const CLONE: u32 = 220;
+  pub const UNSHARE: u32 = 97;
+  pub const SETNS: u32 = 268;
+  pub const EXECVE: u32 = 221;
+  pub const EXECVEAT: u32 = 281;
+  pub const IO_URING_ENTER: u32 = 426;
+  pub const IO_URING_REGISTER: u32 = 427;
+  pub const SURFACE: &[u32] = &[
+    280, // bpf
+    241, // perf_event_open
+    282, // userfaultfd
+    219, // keyctl
+    217, // add_key
+    218, // request_key
+    117, // ptrace
+    270, // process_vm_readv
+    271, // process_vm_writev
+    272, // kcmp
+    40,  // mount
+    39,  // umount2
+    41,  // pivot_root
+    428, // open_tree
+    429, // move_mount
+    430, // fsopen
+    431, // fsconfig
+    432, // fsmount
+    433, // fspick
+    442, // mount_setattr
+    104, // kexec_load
+    294, // kexec_file_load
+    105, // init_module
+    273, // finit_module
+    106, // delete_module
+    265, // open_by_handle_at
+    89,  // acct
+    224, // swapon
+    225, // swapoff
+  ];
+  pub const PATH_METADATA: &[u32] = &[
+    53,  // fchmodat
+    452, // fchmodat2
+    54,  // fchownat
+    5,   // setxattr
+    6,   // lsetxattr
+    14,  // removexattr
+    15,  // lremovexattr
+    463, // setxattrat
+    466, // removexattrat
+  ];
+  pub const UTIMENSAT: u32 = 88;
+  pub const TRUNCATE: u32 = 45;
+  pub const OPENS: &[(u32, u32)] = &[(56, 2)];
+  pub const OPENAT2: u32 = 437;
+  pub const SIGNAL_TO_PID: &[u32] = &[
+    129, // kill
+    131, // tgkill
+    138, // rt_sigqueueinfo
+    240, // rt_tgsigqueueinfo
+  ];
+  pub const TKILL: u32 = 130;
+}
+
+/// `pidfd_send_signal` (the same number on both architectures).
+const NR_PIDFD_SEND_SIGNAL: u32 = 424;
+
+/// `CLONE_NEW*` flags as `clone(2)` takes them (its low byte is the exit
+/// signal, so `CLONE_NEWTIME` can't be passed there).
+pub const CLONE_NAMESPACE_FLAGS: u32 = 0x0002_0000 // NEWNS
+  | 0x0200_0000 // NEWCGROUP
+  | 0x0400_0000 // NEWUTS
+  | 0x0800_0000 // NEWIPC
+  | 0x1000_0000 // NEWUSER
+  | 0x2000_0000 // NEWPID
+  | 0x4000_0000; // NEWNET
+/// `unshare(2)` also takes `CLONE_NEWTIME`.
+pub const UNSHARE_NAMESPACE_FLAGS: u32 = CLONE_NAMESPACE_FLAGS | 0x80;
+
+/// The seccomp program for a plan: one complete filter, `EPERM` / `ENOSYS`
+/// answers (catchable errors in JS), never a kill but for another
+/// architecture's syscalls (the frame).
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub fn seccomp_spec(seccomp: &SeccompPlan, net: &NetPlan) -> SeccompSpec {
+  use crate::seccomp::MSG_FASTOPEN;
+  use crate::seccomp::NR_IO_URING_SETUP;
+  use crate::seccomp::NR_IOCTL;
+  use crate::seccomp::NR_LISTEN;
+  use crate::seccomp::NR_SENDMMSG;
+  use crate::seccomp::NR_SENDMSG;
+  use crate::seccomp::NR_SENDTO;
+  use crate::seccomp::TIOCLINUX;
+  use crate::seccomp::TIOCSTI;
+  const NR_CLONE3: u32 = 435;
+  let eperm = libc::EPERM;
+  let mut spec = SeccompSpec::new()
+    // the ioctl request is argument 1: typing into a terminal
+    .rule(SyscallRule::DenyArgIn {
+      nr: NR_IOCTL,
+      arg: 1,
+      values: vec![TIOCSTI, TIOCLINUX],
+      errno: eperm,
+    });
+  if seccomp.refuse_io_uring {
+    // ENOSYS: callers fall back to plain syscalls
+    for nr in [NR_IO_URING_SETUP, nr::IO_URING_ENTER, nr::IO_URING_REGISTER] {
+      spec = spec.rule(SyscallRule::Deny {
+        nr,
+        errno: libc::ENOSYS,
+      });
+    }
+  }
+  if seccomp.clone3_enosys {
+    spec = spec.rule(SyscallRule::Deny {
+      nr: NR_CLONE3,
+      errno: libc::ENOSYS,
+    });
+  }
+  if seccomp.attack_surface {
+    // the flags are argument 0 of both; anything else passes
+    spec = spec
+      .rule(SyscallRule::DenyArgBits {
+        nr: nr::CLONE,
+        arg: 0,
+        mask: CLONE_NAMESPACE_FLAGS,
+        errno: eperm,
+      })
+      .rule(SyscallRule::DenyArgBits {
+        nr: nr::UNSHARE,
+        arg: 0,
+        mask: UNSHARE_NAMESPACE_FLAGS,
+        errno: eperm,
+      })
+      .rule(SyscallRule::Deny {
+        nr: nr::SETNS,
+        errno: eperm,
+      });
+    for nr in nr::SURFACE {
+      spec = spec.rule(SyscallRule::Deny {
+        nr: *nr,
+        errno: eperm,
+      });
+    }
+  }
+  if seccomp.refuse_exec {
+    for nr in [nr::EXECVE, nr::EXECVEAT] {
+      spec = spec.rule(SyscallRule::Deny { nr, errno: eperm });
+    }
+  }
+  if seccomp.signal_self {
+    // this process only (the PID is the first image's: the re-exec keeps
+    // it); a thread id can't be told apart from another process's, and a
+    // pidfd only names a child, which nothing here may start
+    let own = std::process::id();
+    for nr in nr::SIGNAL_TO_PID {
+      spec = spec.rule(SyscallRule::DenyArgNotEq {
+        nr: *nr,
+        arg: 0,
+        value: own,
+        errno: eperm,
+      });
+    }
+    spec = spec
+      .rule(SyscallRule::Deny {
+        nr: nr::TKILL,
+        errno: eperm,
+      })
+      .rule(SyscallRule::Deny {
+        nr: NR_PIDFD_SEND_SIGNAL,
+        errno: libc::ENOSYS,
+      });
+  }
+  if seccomp.refuse_listen {
+    // listen(2) on an unbound socket binds an ephemeral port by itself,
+    // past Landlock's BIND_TCP (the jail's item 419 rule)
+    spec = spec.rule(SyscallRule::Deny {
+      nr: NR_LISTEN,
+      errno: eperm,
+    });
+  }
+  if seccomp.refuse_path_metadata {
+    for nr in nr::PATH_METADATA {
+      spec = spec.rule(SyscallRule::Deny {
+        nr: *nr,
+        errno: eperm,
+      });
+    }
+    // utimensat(fd, NULL, ...) is futimens: the descriptor form passes
+    spec = spec.rule(SyscallRule::DenyArgNonZero {
+      nr: nr::UTIMENSAT,
+      arg: 1,
+      errno: eperm,
+    });
+  }
+  if seccomp.refuse_path_truncate {
+    spec = spec.rule(SyscallRule::Deny {
+      nr: nr::TRUNCATE,
+      errno: eperm,
+    });
+    // O_ACCMODE | O_TRUNC == O_TRUNC: a read-only open that truncates
+    for (nr, arg) in nr::OPENS {
+      spec = spec.rule(SyscallRule::DenyArgMasked {
+        nr: *nr,
+        arg: *arg,
+        mask: 0o3 | libc::O_TRUNC as u32,
+        value: libc::O_TRUNC as u32,
+        errno: eperm,
+      });
+    }
+    spec = spec.rule(SyscallRule::Deny {
+      nr: nr::OPENAT2,
+      errno: libc::ENOSYS,
+    });
+  }
+  let inet = match net {
+    NetPlan::Denied => InetSockets::Denied,
+    NetPlan::Open => InetSockets::Any,
+    NetPlan::Ports { .. } => {
+      // TCP Fast Open connects without connect(2)
+      for (nr, arg) in [(NR_SENDTO, 3), (NR_SENDMMSG, 3), (NR_SENDMSG, 2)] {
+        spec = spec.rule(SyscallRule::DenyArgBits {
+          nr,
+          arg,
+          mask: MSG_FASTOPEN,
+          errno: libc::EOPNOTSUPP,
+        });
+      }
+      InetSockets::TcpStream
+    }
+  };
+  spec
+    .inet_sockets(inet)
+    .netlink_sockets(if seccomp.netlink_route {
+      NetlinkSockets::RouteOnly
+    } else {
+      NetlinkSockets::Denied
+    })
+    .unix_sockets(seccomp.unix_sockets)
+    .vsock_sockets(seccomp.vsock)
+    .socket_errno(eperm)
+}
+
+/// Whether this process can install a seccomp filter (an outer profile, a
+/// container's included, may refuse it), or why not: tried in a forked
+/// child, which installs an allow-everything program and exits with the
+/// errno.
+pub fn seccomp_available() -> Result<(), String> {
+  static AVAILABLE: OnceLock<Result<(), String>> = OnceLock::new();
+  AVAILABLE
+    .get_or_init(|| {
+      // RET ALLOW: a program that changes nothing
+      let program = [SockFilter {
+        code: crate::seccomp::BPF_RET_K,
+        jt: 0,
+        jf: 0,
+        k: crate::seccomp::SECCOMP_RET_ALLOW,
+      }];
+      let prog = SockFprog {
+        len: 1,
+        filter: program.as_ptr(),
+      };
+      // SAFETY: fork; the child runs only prctl and _exit
+      let pid = unsafe { libc::fork() };
+      if pid < 0 {
+        return Err(format!("fork failed: {}", io::Error::last_os_error()));
+      }
+      if pid == 0 {
+        // SAFETY: plain prctl calls on the child's only thread, then _exit
+        unsafe {
+          let code = if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+            || libc::prctl(
+              libc::PR_SET_SECCOMP,
+              libc::SECCOMP_MODE_FILTER,
+              &prog as *const SockFprog,
+              0,
+              0,
+            ) != 0
+          {
+            *libc::__errno_location()
+          } else {
+            0
+          };
+          libc::_exit(code);
+        }
+      }
+      let mut status = 0;
+      // SAFETY: waiting for the child just forked
+      unsafe { libc::waitpid(pid, &mut status, 0) };
+      if !libc::WIFEXITED(status) {
+        return Err("the seccomp probe died".into());
+      }
+      match libc::WEXITSTATUS(status) {
+        0 => Ok(()),
+        errno => Err(format!(
+          "a seccomp filter can't be installed here: {} (a container's or an outer sandbox's seccomp profile)",
+          io::Error::from_raw_os_error(errno)
+        )),
+      }
+    })
+    .clone()
+}
+
+/// The number of threads this process has.
+fn thread_count() -> usize {
+  std::fs::read_dir("/proc/self/task")
+    .map(|d| d.count())
+    .unwrap_or(usize::MAX)
+}
+
+/// The plan applied to this process at startup, if any.
+static APPLIED: OnceLock<EnforcePlan> = OnceLock::new();
+
+pub fn applied_plan() -> Option<&'static EnforcePlan> {
+  APPLIED.get()
+}
+
+/// Applies `plan` to this process: `no_new_privs`, the Landlock ruleset,
+/// then the seccomp program, and checks the probe. Must run while the
+/// process has one thread (the top of `main` in the re-executed image):
+/// without `TSYNC` other threads would stay unconfined, so more than one
+/// thread is an error, not a partial confinement.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub fn apply_self(plan: &EnforcePlan) -> Result<(), String> {
+  let Some(linux) = &plan.linux else {
+    return Err("the plan has no Linux part".to_string());
+  };
+  // the expanded entries must belong to the plan's own expansions
+  plan.check_expanded()?;
+  let threads = thread_count();
+  if threads != 1 {
+    return Err(format!(
+      "the process has {threads} threads; the sandbox must apply while it has one"
+    ));
+  }
+  let (fs, net, scoped) = (
+    linux.handled.read || linux.handled.write || linux.handled.exec,
+    !matches!(linux.net, NetPlan::Open | NetPlan::Denied),
+    linux.scope_signal || linux.scope_abstract_unix,
+  );
+  let ruleset = match landlock_abi() {
+    Ok(abi) => build_ruleset(linux, abi, &plan.module_files, &plan.expanded)?,
+    Err(err) if fs || net || scoped => return Err(err),
+    Err(_) => None,
+  };
+  let program = seccomp_spec(&linux.seccomp, &linux.net).program();
+  // SAFETY: plain prctl/syscalls on this (only) thread
+  unsafe {
+    if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+      return Err(format!("no_new_privs: {}", io::Error::last_os_error()));
+    }
+    if let Some(ruleset) = &ruleset
+      && libc::syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset.as_raw_fd(), 0u32)
+        != 0
+    {
+      return Err(format!(
+        "landlock_restrict_self: {}",
+        io::Error::last_os_error()
+      ));
+    }
+    let prog = SockFprog {
+      len: (program.len() / 8) as u16,
+      filter: program.as_ptr() as *const SockFilter,
+    };
+    if libc::prctl(
+      libc::PR_SET_SECCOMP,
+      libc::SECCOMP_MODE_FILTER,
+      &prog as *const SockFprog,
+      0,
+      0,
+    ) != 0
+    {
+      return Err(format!("seccomp: {}", io::Error::last_os_error()));
+    }
+  }
+  drop(ruleset);
+  if let Some(probe) = &plan.probe
+    && std::fs::File::open(probe).is_ok()
+  {
+    return Err(format!(
+      "{} still opens with the sandbox applied: it doesn't hold here",
+      probe.display()
+    ));
+  }
+  let _ = APPLIED.set(plan.clone());
+  Ok(())
+}
+
+/// Whether `/proc/self/status` shows `no_new_privs` and a seccomp filter:
+/// the measured half of "this process is confined" (the other half is the
+/// plan [`apply_self`] recorded, and its probe).
+pub fn status_confined() -> bool {
+  let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+    return false;
+  };
+  let field = |name: &str| {
+    status
+      .lines()
+      .find_map(|l| l.strip_prefix(name))
+      .map(|v| v.trim().to_string())
+  };
+  field("NoNewPrivs:").as_deref() == Some("1")
+    && field("Seccomp:").as_deref() == Some("2")
+}
+
+const REQUIRED_SEALS: libc::c_int = libc::F_SEAL_SEAL
+  | libc::F_SEAL_SHRINK
+  | libc::F_SEAL_GROW
+  | libc::F_SEAL_WRITE;
+
+/// Writes `bytes` to a new memfd and seals it (no more writes, no resize, no
+/// more seals). The descriptor is not close-on-exec: it is the one the new
+/// image inherits.
+pub fn seal_plan(bytes: &[u8]) -> io::Result<OwnedFd> {
+  let name = c"deno-kernel-plan";
+  // SAFETY: a valid name; MFD_ALLOW_SEALING, no MFD_CLOEXEC on purpose
+  let fd =
+    unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_ALLOW_SEALING) };
+  if fd < 0 {
+    return Err(io::Error::last_os_error());
+  }
+  // SAFETY: just created
+  let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+  let mut written = 0;
+  while written < bytes.len() {
+    // SAFETY: a valid descriptor and buffer
+    let n = unsafe {
+      libc::write(
+        fd.as_raw_fd(),
+        bytes[written..].as_ptr() as *const libc::c_void,
+        bytes.len() - written,
+      )
+    };
+    if n < 0 {
+      let err = io::Error::last_os_error();
+      if err.kind() == io::ErrorKind::Interrupted {
+        continue;
+      }
+      return Err(err);
+    }
+    written += n as usize;
+  }
+  // SAFETY: a valid descriptor
+  if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, REQUIRED_SEALS) }
+    != 0
+  {
+    return Err(io::Error::last_os_error());
+  }
+  Ok(fd)
+}
+
+/// Reads a plan from an inherited sealed memfd and closes it. Anything
+/// short of a sealed memfd of a sane size is an error.
+pub fn read_sealed(fd: OwnedFd) -> Result<Vec<u8>, String> {
+  // SAFETY: a valid descriptor
+  let seals = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GET_SEALS) };
+  if seals < 0 {
+    return Err(format!(
+      "the plan descriptor is not a memfd: {}",
+      io::Error::last_os_error()
+    ));
+  }
+  if seals & REQUIRED_SEALS != REQUIRED_SEALS {
+    return Err(format!("the plan memfd is not sealed (seals {seals:#x})"));
+  }
+  // SAFETY: a zeroed stat is a valid out parameter
+  let mut st: libc::stat = unsafe { std::mem::zeroed() };
+  // SAFETY: a valid descriptor and out parameter
+  if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
+    return Err(format!("fstat: {}", io::Error::last_os_error()));
+  }
+  let size = st.st_size as usize;
+  if size == 0 || size > MAX_PLAN_BYTES {
+    return Err(format!("the plan memfd has {size} bytes"));
+  }
+  let mut buf = vec![0u8; size];
+  let mut read = 0;
+  while read < size {
+    // SAFETY: a valid descriptor and buffer
+    let n = unsafe {
+      libc::pread(
+        fd.as_raw_fd(),
+        buf[read..].as_mut_ptr() as *mut libc::c_void,
+        size - read,
+        read as libc::off_t,
+      )
+    };
+    if n < 0 {
+      let err = io::Error::last_os_error();
+      if err.kind() == io::ErrorKind::Interrupted {
+        continue;
+      }
+      return Err(format!("reading the plan: {err}"));
+    }
+    if n == 0 {
+      return Err("the plan memfd ended early".to_string());
+    }
+    read += n as usize;
+  }
+  drop(fd);
+  Ok(buf)
+}
+
+/// The plan handed over by the image before this one, if the variable is
+/// set: read from its sealed memfd (closed afterwards) and parsed, the
+/// variable removed. Call first thing in `main`, while the process has one
+/// thread. `Err`: the caller refuses to start (the variable without a valid
+/// sealed plan is never ignored).
+pub fn take_inherited_plan() -> Result<Option<EnforcePlan>, String> {
+  let Some(value) = std::env::var_os(PLAN_FD_ENV_VAR) else {
+    return Ok(None);
+  };
+  // SAFETY: called while the process has one thread
+  unsafe { std::env::remove_var(PLAN_FD_ENV_VAR) };
+  let fd: i32 = value
+    .to_str()
+    .and_then(|v| v.parse().ok())
+    .filter(|fd| *fd > 2)
+    .ok_or_else(|| {
+      format!("{PLAN_FD_ENV_VAR}={value:?} is not a descriptor")
+    })?;
+  // SAFETY: a descriptor number checked to be open below
+  if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+    return Err(format!("{PLAN_FD_ENV_VAR}: descriptor {fd} is not open"));
+  }
+  // SAFETY: an open descriptor this process now owns
+  let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+  let bytes = read_sealed(fd)?;
+  EnforcePlan::from_bytes(&bytes).map(Some)
+}
+
+/// The descriptors open in this process (fd 3 and up).
+fn open_fds() -> Vec<i32> {
+  std::fs::read_dir("/proc/self/fd")
+    .map(|d| {
+      d.flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|fd| *fd > 2)
+        .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Re-executes this program (`/proc/self/exe`, the same argv, so the PID is
+/// unchanged) with `plan` in a sealed memfd and `env` as its environment.
+/// Every descriptor but stdio, those `keep` names (the ones the process
+/// inherited) and the memfd is made close-on-exec first. Returns only on
+/// failure.
+pub fn reexec(
+  plan: &EnforcePlan,
+  env: Vec<(OsString, OsString)>,
+  keep: impl Fn(i32) -> bool,
+) -> io::Error {
+  let memfd = match seal_plan(&plan.to_bytes()) {
+    Ok(fd) => fd,
+    Err(err) => return err,
+  };
+  let memfd_raw = memfd.as_raw_fd();
+  for fd in open_fds() {
+    if fd == memfd_raw || keep(fd) {
+      continue;
+    }
+    // SAFETY: setting a flag on a descriptor this process holds; a stale
+    // number (the directory listing's own) just fails
+    unsafe {
+      let flags = libc::fcntl(fd, libc::F_GETFD);
+      if flags >= 0 {
+        libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+      }
+    }
+  }
+  let to_c = |s: &[u8]| CString::new(s).ok();
+  let argv: Option<Vec<CString>> =
+    std::env::args_os().map(|a| to_c(a.as_bytes())).collect();
+  let mut envp: Vec<CString> = env
+    .iter()
+    .filter(|(k, _)| k != PLAN_FD_ENV_VAR)
+    .filter_map(|(k, v)| {
+      let mut kv = k.as_bytes().to_vec();
+      kv.push(b'=');
+      kv.extend_from_slice(v.as_bytes());
+      to_c(&kv)
+    })
+    .collect();
+  envp.push(
+    CString::new(format!("{PLAN_FD_ENV_VAR}={memfd_raw}"))
+      .expect("no NUL in a number"),
+  );
+  let Some(argv) = argv else {
+    return io::Error::other("an argument holds a NUL byte");
+  };
+  let mut argv_p: Vec<*const libc::c_char> =
+    argv.iter().map(|a| a.as_ptr()).collect();
+  argv_p.push(std::ptr::null());
+  let mut envp_p: Vec<*const libc::c_char> =
+    envp.iter().map(|e| e.as_ptr()).collect();
+  envp_p.push(std::ptr::null());
+  // SAFETY: NUL-terminated arrays of valid C strings that outlive the call
+  unsafe {
+    libc::execve(c"/proc/self/exe".as_ptr(), argv_p.as_ptr(), envp_p.as_ptr());
+  }
+  let err = io::Error::last_os_error();
+  drop(memfd);
+  err
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::plan::FsRule;
+  use crate::plan::Handled;
+  use crate::plan::PLAN_FORMAT;
+  use crate::seccomp::AF_INET;
+  use crate::seccomp::AF_NETLINK;
+  use crate::seccomp::AF_UNIX;
+  use crate::seccomp::NETLINK_ROUTE;
+  use crate::seccomp::NR_LISTEN;
+  use crate::seccomp::NR_SOCKET;
+  use crate::seccomp::SECCOMP_RET_ALLOW;
+  use crate::seccomp::SOCK_STREAM;
+  use crate::seccomp::run_filter;
+  use crate::seccomp::run_filter64;
+
+  fn eno(e: i32) -> u32 {
+    crate::seccomp::SECCOMP_RET_ERRNO | e as u32
+  }
+
+  fn linux(seccomp: SeccompPlan, net: NetPlan) -> LinuxPlan {
+    LinuxPlan {
+      handled: Handled {
+        read: true,
+        write: true,
+        exec: true,
+      },
+      rules: vec![FsRule {
+        path: "/tmp".into(),
+        read: true,
+        write: true,
+      }],
+      expand: Vec::new(),
+      net,
+      scope_signal: false,
+      scope_abstract_unix: false,
+      seccomp,
+    }
+  }
+
+  fn full() -> SeccompPlan {
+    SeccompPlan {
+      attack_surface: true,
+      clone3_enosys: true,
+      refuse_exec: true,
+      refuse_listen: true,
+      refuse_io_uring: true,
+      refuse_path_metadata: true,
+      refuse_path_truncate: true,
+      signal_self: true,
+      unix_sockets: false,
+      netlink_route: false,
+      vsock: false,
+    }
+  }
+
+  #[test]
+  fn plan_round_trip_and_refusals() {
+    let plan = EnforcePlan {
+      format: PLAN_FORMAT,
+      linux: Some(linux(full(), NetPlan::Denied)),
+      macos: None,
+      env_keep: Some(vec!["PATH".into(), "LC_*".into()]),
+      probe: Some("/".into()),
+      module_files: vec!["/w/main.ts".into()],
+      expanded: Vec::new(),
+      config_env: vec![("JSR_URL".into(), "https://jsr.test/".into())],
+    };
+    assert_eq!(plan.without_measured_lists().module_files.len(), 0);
+    let bytes = plan.to_bytes();
+    assert_eq!(EnforcePlan::from_bytes(&bytes).unwrap(), plan);
+    assert!(plan.keeps_env("PATH"));
+    assert!(plan.keeps_env("LC_ALL"));
+    assert!(!plan.keeps_env("SECRET"));
+    // malformed, another format, unknown fields: refused
+    assert!(EnforcePlan::from_bytes(b"{").is_err());
+    let other = String::from_utf8(bytes.clone())
+      .unwrap()
+      .replace("\"format\":1", "\"format\":2");
+    assert!(EnforcePlan::from_bytes(other.as_bytes()).is_err());
+    let extra =
+      String::from_utf8(bytes)
+        .unwrap()
+        .replacen('{', "{\"widen\":true,", 1);
+    assert!(EnforcePlan::from_bytes(extra.as_bytes()).is_err());
+  }
+
+  #[test]
+  fn handled_per_abi() {
+    let p = linux(full(), NetPlan::Denied);
+    // no net handling before ABI 4 (seccomp holds "none"), scopes refused
+    let (fs, net, scoped) = handled(&p, 1).unwrap();
+    assert_eq!(net, 0);
+    assert_eq!(scoped, 0);
+    assert_eq!(fs & ACCESS_FS_REFER, 0);
+    assert_eq!(fs & ACCESS_FS_TRUNCATE, 0);
+    let (fs, net, _) = handled(&p, 6).unwrap();
+    assert_ne!(fs & ACCESS_FS_REFER, 0);
+    assert_ne!(fs & ACCESS_FS_TRUNCATE, 0);
+    assert_ne!(fs & ACCESS_FS_IOCTL_DEV, 0);
+    assert_ne!(fs & ACCESS_FS_EXECUTE, 0);
+    assert_eq!(net, ACCESS_NET_BIND_TCP | ACCESS_NET_CONNECT_TCP);
+    let ports = linux(
+      full(),
+      NetPlan::Ports {
+        connect: Ports::List { ports: vec![443] },
+        bind: Ports::Any,
+      },
+    );
+    assert!(handled(&ports, 3).is_err());
+    assert_eq!(handled(&ports, 4).unwrap().1, ACCESS_NET_CONNECT_TCP);
+    let mut scoped = linux(full(), NetPlan::Open);
+    scoped.scope_signal = true;
+    assert!(handled(&scoped, 5).is_err());
+    assert_eq!(handled(&scoped, 6).unwrap().2, SCOPE_SIGNAL);
+  }
+
+  #[test]
+  fn seccomp_program_for_enforce() {
+    let p = seccomp_spec(&full(), &NetPlan::Denied).program();
+    let eperm = eno(libc::EPERM);
+    assert_eq!(run_filter(&p, 435, [0; 6]), eno(libc::ENOSYS));
+    // clone: threads pass, a new user namespace doesn't
+    assert_eq!(
+      run_filter(&p, nr::CLONE, [0x003d_0f00, 0, 0, 0, 0, 0]),
+      SECCOMP_RET_ALLOW
+    );
+    assert_eq!(
+      run_filter(&p, nr::CLONE, [0x1000_0011, 0, 0, 0, 0, 0]),
+      eperm
+    );
+    assert_eq!(run_filter(&p, nr::UNSHARE, [0x80, 0, 0, 0, 0, 0]), eperm);
+    assert_eq!(
+      run_filter(&p, nr::UNSHARE, [0x200, 0, 0, 0, 0, 0]),
+      SECCOMP_RET_ALLOW
+    );
+    for n in nr::SURFACE {
+      assert_eq!(run_filter(&p, *n, [0; 6]), eperm, "syscall {n}");
+    }
+    assert_eq!(run_filter(&p, nr::EXECVE, [0; 6]), eperm);
+    assert_eq!(run_filter(&p, nr::EXECVEAT, [0; 6]), eperm);
+    assert_eq!(run_filter(&p, NR_LISTEN, [0; 6]), eperm);
+    for n in nr::PATH_METADATA {
+      assert_eq!(run_filter(&p, *n, [0; 6]), eperm, "syscall {n}");
+    }
+    assert_eq!(
+      run_filter64(&p, nr::UTIMENSAT, [3, 0, 0, 0, 0, 0]),
+      SECCOMP_RET_ALLOW
+    );
+    // before Landlock's TRUNCATE: truncate(2), read-only truncating opens,
+    // openat2
+    assert_eq!(run_filter(&p, nr::TRUNCATE, [0; 6]), eperm);
+    for (n, arg) in nr::OPENS {
+      let mut args = [0u32; 6];
+      args[*arg as usize] = libc::O_TRUNC as u32;
+      assert_eq!(run_filter(&p, *n, args), eperm, "open {n}");
+      args[*arg as usize] = libc::O_TRUNC as u32 | 1;
+      assert_eq!(run_filter(&p, *n, args), SECCOMP_RET_ALLOW, "open {n}");
+    }
+    assert_eq!(run_filter(&p, nr::OPENAT2, [0; 6]), eno(libc::ENOSYS));
+    assert_eq!(
+      run_filter64(&p, nr::UTIMENSAT, [3, 0x5555_0000, 0, 0, 0, 0]),
+      eperm
+    );
+    // signals: this process only
+    let own = std::process::id();
+    for n in nr::SIGNAL_TO_PID {
+      assert_eq!(
+        run_filter(&p, *n, [own, 15, 0, 0, 0, 0]),
+        SECCOMP_RET_ALLOW,
+        "syscall {n}"
+      );
+      for other in [own + 1, 0, u32::MAX, 1] {
+        assert_eq!(
+          run_filter(&p, *n, [other, 15, 0, 0, 0, 0]),
+          eperm,
+          "syscall {n} to {other}"
+        );
+      }
+    }
+    assert_eq!(run_filter(&p, nr::TKILL, [own, 15, 0, 0, 0, 0]), eperm);
+    assert_eq!(
+      run_filter(&p, NR_PIDFD_SEND_SIGNAL, [3, 15, 0, 0, 0, 0]),
+      eno(libc::ENOSYS)
+    );
+    // sockets: none of IP, Unix or netlink; socketpair isn't socket(2)
+    for domain in [AF_INET, AF_UNIX, AF_NETLINK] {
+      assert_eq!(
+        run_filter(&p, NR_SOCKET, [domain, SOCK_STREAM, 0, 0, 0, 0]),
+        eperm
+      );
+    }
+    // never V8's memory syscalls (mmap, mprotect, madvise, futex, membarrier)
+    #[cfg(target_arch = "x86_64")]
+    let memory = [9u32, 10, 28, 202, 324, 329, 330];
+    #[cfg(target_arch = "aarch64")]
+    let memory = [222u32, 226, 233, 98, 283, 288, 289];
+    for n in memory {
+      assert_eq!(run_filter(&p, n, [0; 6]), SECCOMP_RET_ALLOW, "syscall {n}");
+    }
+  }
+
+  #[test]
+  fn seccomp_program_switches() {
+    let none = SeccompPlan::default();
+    let p = seccomp_spec(&none, &NetPlan::Open).program();
+    assert_eq!(run_filter(&p, nr::EXECVE, [0; 6]), SECCOMP_RET_ALLOW);
+    assert_eq!(run_filter(&p, NR_LISTEN, [0; 6]), SECCOMP_RET_ALLOW);
+    assert_eq!(run_filter(&p, 435, [0; 6]), SECCOMP_RET_ALLOW);
+    assert_eq!(
+      run_filter(&p, NR_SOCKET, [AF_INET, SOCK_STREAM, 0, 0, 0, 0]),
+      SECCOMP_RET_ALLOW
+    );
+    assert_eq!(
+      run_filter(&p, nr::SIGNAL_TO_PID[0], [1, 9, 0, 0, 0, 0]),
+      SECCOMP_RET_ALLOW
+    );
+    let route = SeccompPlan {
+      netlink_route: true,
+      unix_sockets: true,
+      ..Default::default()
+    };
+    let p = seccomp_spec(
+      &route,
+      &NetPlan::Ports {
+        connect: Ports::List { ports: vec![443] },
+        bind: Ports::List { ports: vec![] },
+      },
+    )
+    .program();
+    let raw = libc::SOCK_RAW as u32;
+    assert_eq!(
+      run_filter(&p, NR_SOCKET, [AF_NETLINK, raw, NETLINK_ROUTE, 0, 0, 0]),
+      SECCOMP_RET_ALLOW
+    );
+    assert_eq!(
+      run_filter(&p, NR_SOCKET, [AF_NETLINK, raw, 15, 0, 0, 0]),
+      eno(libc::EPERM)
+    );
+    assert_eq!(
+      run_filter(&p, NR_SOCKET, [AF_UNIX, SOCK_STREAM, 0, 0, 0, 0]),
+      SECCOMP_RET_ALLOW
+    );
+    assert_eq!(
+      run_filter(
+        &p,
+        NR_SOCKET,
+        [AF_INET, libc::SOCK_DGRAM as u32, 0, 0, 0, 0]
+      ),
+      eno(libc::EPERM)
+    );
+  }
+
+  // the probe installs a filter in a child only: this process is unchanged
+  #[test]
+  fn seccomp_probe_leaves_the_process_alone() {
+    let before = std::fs::read_to_string("/proc/self/status").unwrap();
+    let field = |s: &str| {
+      s.lines()
+        .find(|l| l.starts_with("Seccomp:"))
+        .map(|l| l.to_string())
+    };
+    let result = seccomp_available();
+    let after = std::fs::read_to_string("/proc/self/status").unwrap();
+    assert_eq!(field(&before), field(&after));
+    // a process already under a filter that refuses seccomp(2) / prctl's
+    // filter mode would be told so; one that isn't can install it
+    if field(&before).as_deref() == Some("Seccomp:\t0") {
+      assert_eq!(result, Ok(()));
+    }
+  }
+
+  // openat2 refused by an outer seccomp profile is told apart from a path
+  // that can't be opened (which only leaves its rule out)
+  #[test]
+  fn refused_openat2_is_reported() {
+    assert!(openat2_unavailable(Some(libc::ENOSYS)));
+    assert!(openat2_unavailable(Some(libc::EPERM)));
+    assert!(!openat2_unavailable(Some(libc::ENOENT)));
+    assert!(!openat2_unavailable(Some(libc::ELOOP)));
+    assert!(!openat2_unavailable(Some(libc::EACCES)));
+    // measured in a child under a filter refusing openat2 with EPERM (an
+    // outer profile); the program is built before the fork
+    let program = SeccompSpec::new()
+      .unix_sockets(true)
+      .inet_sockets(InetSockets::Any)
+      .rule(SyscallRule::Deny {
+        nr: SYS_OPENAT2 as u32,
+        errno: libc::EPERM,
+      })
+      .program();
+    let prog = SockFprog {
+      len: (program.len() / 8) as u16,
+      filter: program.as_ptr() as *const SockFilter,
+    };
+    // SAFETY: fork; the child runs only prctl, the raw syscall and _exit
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0);
+    if pid == 0 {
+      // SAFETY: the child's only thread, then _exit
+      unsafe {
+        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+          || libc::prctl(
+            libc::PR_SET_SECCOMP,
+            libc::SECCOMP_MODE_FILTER,
+            &prog as *const SockFprog,
+            0,
+            0,
+          ) != 0
+        {
+          libc::_exit(2);
+        }
+        let fd = open_no_symlinks(c"/");
+        let refused =
+          fd < 0 && openat2_unavailable(Some(*libc::__errno_location()));
+        libc::_exit(if refused { 0 } else { 1 });
+      }
+    }
+    let mut status = 0;
+    // SAFETY: waiting for the child just forked
+    unsafe { libc::waitpid(pid, &mut status, 0) };
+    assert!(libc::WIFEXITED(status));
+    match libc::WEXITSTATUS(status) {
+      // a host that can't install a filter can't measure this
+      2 => {}
+      code => assert_eq!(code, 0, "openat2 under the refusing filter"),
+    }
+    // unfiltered, it works (kernels from 5.6)
+    assert_eq!(openat2_available(), Ok(()));
+  }
+
+  #[test]
+  fn sealed_memfd_hand_over() {
+    let plan = EnforcePlan {
+      format: PLAN_FORMAT,
+      linux: Some(linux(full(), NetPlan::Open)),
+      macos: None,
+      env_keep: None,
+      probe: None,
+      module_files: Vec::new(),
+      expanded: Vec::new(),
+      config_env: Vec::new(),
+    };
+    let fd = seal_plan(&plan.to_bytes()).unwrap();
+    // sealed: no more writes
+    // SAFETY: a valid descriptor and buffer
+    let n =
+      unsafe { libc::write(fd.as_raw_fd(), b"x".as_ptr() as *const _, 1) };
+    assert_eq!(n, -1);
+    let bytes = read_sealed(fd).unwrap();
+    assert_eq!(EnforcePlan::from_bytes(&bytes).unwrap(), plan);
+    // an unsealed memfd or a plain file is refused
+    // SAFETY: a valid name
+    let raw =
+      unsafe { libc::memfd_create(c"x".as_ptr(), libc::MFD_ALLOW_SEALING) };
+    // SAFETY: just created
+    let unsealed = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: a valid descriptor and buffer
+    unsafe { libc::write(unsealed.as_raw_fd(), b"{}".as_ptr() as *const _, 2) };
+    assert!(read_sealed(unsealed).unwrap_err().contains("not sealed"));
+    let file = std::fs::File::open("/proc/self/status").unwrap();
+    assert!(
+      read_sealed(file.into())
+        .unwrap_err()
+        .contains("not a memfd")
+    );
+  }
+}

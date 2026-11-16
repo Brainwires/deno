@@ -131,6 +131,19 @@ pub fn discover_npmrc_from_home<TSys: EnvVar + EnvHomeDir + FsRead>(
   discover_npmrc(sys, None, None)
 }
 
+/// denext: says once per process that the kernel sandbox kept an `.npmrc`
+/// out of reach, so it was treated as absent.
+fn note_kernel_skipped_npmrc(path: &std::path::Path) {
+  static NOTED: std::sync::Once = std::sync::Once::new();
+  NOTED.call_once(|| {
+    log::warn!(
+      "Warning kernel sandbox: {} isn't readable under --kernel-sandbox=enforce, so it is treated as absent (it may hold registry tokens): a custom registry or token from it is unavailable. Run once without --kernel-sandbox=enforce to cache the packages, or grant it with --allow-read={} if you accept the exposure.",
+      path.display(),
+      path.display()
+    );
+  });
+}
+
 fn discover_npmrc<TSys: EnvVar + EnvHomeDir + FsRead>(
   sys: &TSys,
   maybe_package_json_path: Option<PathBuf>,
@@ -147,11 +160,21 @@ fn discover_npmrc<TSys: EnvVar + EnvHomeDir + FsRead>(
       Ok(source) => Some(source),
       Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
       // denext: a jailed npm lifecycle script can't read the project's
-      // .npmrc (it may hold credentials); its deno runs without it
+      // .npmrc (it may hold credentials); its deno runs without it. The
+      // same for a process the kernel sandbox confined at startup, whose
+      // policy never makes .npmrc readable (it only narrows: an unreadable
+      // file counts as absent)
       Err(err)
         if err.kind() == std::io::ErrorKind::PermissionDenied
           && sys.env_var("DENO_INTERNAL_LIFECYCLE_JAIL").is_ok() =>
       {
+        None
+      }
+      Err(err)
+        if err.kind() == std::io::ErrorKind::PermissionDenied
+          && sys.env_var("DENO_INTERNAL_KERNEL_CONFINED").is_ok() =>
+      {
+        note_kernel_skipped_npmrc(&path);
         None
       }
       Err(err) => return Err(NpmRcLoadError { path, source: err }),

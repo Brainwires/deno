@@ -935,6 +935,10 @@ pub(crate) fn boot_phase(label: &str) {
 }
 
 pub fn main() {
+  // denext: the kernel sandbox handed over by the image before this one
+  // (`--kernel-sandbox=enforce` re-executes itself on Linux) is applied
+  // first, while the process has one thread (DENEXT.md item 425)
+  sandbox::enforce::startup();
   // Before anything opens a descriptor: fds 3+ open now were inherited and
   // belong to the process like stdio (socket activation, a parent's pipe).
   deno_runtime::deno_io::capture_inherited_fds(&[
@@ -1100,6 +1104,11 @@ async fn resolve_flags_and_init(
       }
       Err(err) => exit_for_error(AnyError::from(err), initial_cwd.as_deref()),
     };
+  // denext: a process confined by the kernel sandbox at startup reads
+  // remote modules from the cache only (its first image fetched the graph)
+  if sandbox::enforce::confined_at_startup() {
+    flags.cached_only = true;
+  }
   // denext: a jailed npm lifecycle script can't install or fetch packages
   if let Err(err) = supply_chain::jail::check_subcommand(&flags) {
     exit_for_error(err, initial_cwd.as_deref());

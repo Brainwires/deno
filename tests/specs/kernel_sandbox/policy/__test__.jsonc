@@ -1,7 +1,8 @@
-// denext (DENEXT.md item 420): the kernel sandbox, an opt-in preview. `auto`
-// (the default) applies nothing; `warn` reports; `enforce` / `broker` refuse
-// to start while no enforcer is built in. `--kernel-sandbox-report` prints
-// the mode, the policy and its gaps, then runs the program.
+// denext (DENEXT.md items 422, 425): the kernel sandbox, an opt-in preview.
+// `auto` (the default) applies nothing; `warn` reports; `enforce` applies the
+// policy on Linux and macOS (../enforce) and refuses to start elsewhere;
+// `broker` refuses to start (Mode B isn't built yet). `--kernel-sandbox-report`
+// prints the mode, the policy and its gaps, then runs the program.
 {
   "tempDir": true,
   "tests": {
@@ -29,7 +30,9 @@
       "args": "run --kernel-sandbox=off --kernel-sandbox-report main.ts",
       "output": "report_off.out"
     },
+    // no Mode A enforcer on Windows
     "enforce_refuses": {
+      "if": "windows",
       "args": "run --kernel-sandbox=enforce main.ts",
       "output": "enforce.out",
       "exitCode": 1

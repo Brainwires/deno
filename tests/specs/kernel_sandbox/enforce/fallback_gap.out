@@ -1,0 +1,2 @@
+[WILDCARD]    list only:  [WILDCARD](the folders' names, never what is beneath them)
+[WILDCARD]run [documented] --kernel-sandbox=enforce (sandbox-exec fallback): [WILDCARD]hello

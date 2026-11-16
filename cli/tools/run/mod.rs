@@ -218,6 +218,14 @@ pub async fn run_script(
 
   crate::boot_phase("after resolve main_module");
 
+  // denext: --kernel-sandbox=enforce applies here, once the graph is loaded
+  // and before any user code (a native npm bin included) runs
+  {
+    let mut roots = vec![main_module.clone()];
+    roots.extend(preload_modules.iter().cloned());
+    crate::sandbox::enforce::apply_pending(&factory, &roots).await?;
+  }
+
   if let Some(exit_code) =
     try_run_npm_bin_executable(&factory, &flags, main_module).await?
   {
@@ -259,6 +267,17 @@ pub async fn run_from_stdin(
   let preload_modules = cli_options.preload_modules()?;
   let require_modules = cli_options.require_modules()?;
 
+  // denext: the kernel sandbox re-executes the process (Linux, macOS), and
+  // a program read from stdin can't be read twice
+  factory.root_permissions_container()?;
+  if cfg!(any(target_os = "linux", target_os = "macos"))
+    && crate::sandbox::enforce::is_pending()
+  {
+    deno_core::anyhow::bail!(
+      "--kernel-sandbox=enforce can't run a program read from stdin yet (the sandbox re-executes the process); save it to a file"
+    );
+  }
+
   maybe_npm_install(&factory).await?;
 
   let file_fetcher = factory.file_fetcher()?;
@@ -276,6 +295,11 @@ pub async fn run_from_stdin(
     source: source.into(),
     loaded_from: deno_cache_dir::file_fetcher::LoadedFrom::Local,
   });
+  {
+    let mut roots = vec![main_module.clone()];
+    roots.extend(preload_modules.iter().cloned());
+    crate::sandbox::enforce::apply_pending(&factory, &roots).await?;
+  }
 
   let mut worker = worker_factory
     .create_main_worker_with_unconfigured_runtime(

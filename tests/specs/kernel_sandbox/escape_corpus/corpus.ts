@@ -26,6 +26,7 @@
 // from probes.ts's matrix targets.
 
 import { classify, parse, type Result } from "./classify.ts";
+import { type Column, columnFor, expectEnforce } from "./expect.ts";
 import { CELLS, PROBES, type Vector, VECTORS } from "./probes.ts";
 
 const args = Object.fromEntries(
@@ -44,6 +45,32 @@ const vectors =
   (args.vectors ? args.vectors.split(",") : [...VECTORS]) as Vector[];
 const isMac = Deno.build.os === "darwin";
 const cc = Deno.env.get("CC") ?? "cc";
+if (!["today", "enforce"].includes(expect)) {
+  console.error(`corpus: unknown --expect=${expect} (today, enforce)`);
+  Deno.exit(2);
+}
+// --expect=enforce: the platform column this machine is (macOS, or Linux by
+// its Landlock ABI); without a kernel enforcer here there is nothing to hold
+let column: Column | undefined;
+if (expect === "enforce") {
+  const info = JSON.parse(
+    new TextDecoder().decode(
+      new Deno.Command(Deno.execPath(), { args: ["info", "--json"] })
+        .outputSync().stdout,
+    ),
+  ).kernelSandbox;
+  const why = !info?.enforcerBuilt
+    ? "no kernel enforcer for this OS"
+    : Deno.build.os === "linux" && info.landlockAbi == null
+    ? "no Landlock on this kernel"
+    : undefined;
+  if (why) {
+    console.log(`kernel-sandbox corpus: skipped: ${why}`);
+    console.log(`corpus: ok (--expect=enforce skipped: ${why})`);
+    Deno.exit(0);
+  }
+  column = columnFor(Deno.build.os, info.landlockAbi);
+}
 
 function sh(cmd: string, argv: string[]) {
   const o = new Deno.Command(cmd, {
@@ -176,19 +203,31 @@ console.log(
   }`,
 );
 
-// 4. The confined host, once per vector.
-const grant = [
-  "run",
-  "--quiet",
-  "--no-prompt",
+// 4. The confined host, once per vector and configuration.
+//    --expect=today: the grant above. --expect=enforce: the configurations
+//    the kernel sandbox can hold under --kernel-sandbox=enforce (a name in
+//    --allow-net needs the broker): files (read/write/ffi=<work>, no network,
+//    no run), the whole network, and a run list (the child vector).
+const files = [
   `--allow-read=${work}`,
   `--allow-write=${work}`,
   `--allow-ffi=${work}`,
-  `--allow-run=${work}/probe`,
-  `--allow-net=example.com:${grantedPort}`,
-  "--node-modules-dir=manual",
 ];
+const configs: Record<string, string[]> = expect === "enforce"
+  ? {
+    files: [...files],
+    "net-all": [...files, "--allow-net"],
+    run: [...files, `--allow-run=${work}/probe`],
+  }
+  : {
+    today: [
+      ...files,
+      `--allow-run=${work}/probe`,
+      `--allow-net=example.com:${grantedPort}`,
+    ],
+  };
 type Row = {
+  config: string;
   vector: string;
   id: string;
   state: string;
@@ -196,47 +235,58 @@ type Row = {
   cell: string;
 };
 const rows: Row[] = [];
-for (const vector of vectors) {
-  const o = new Deno.Command("/bin/sh", {
-    // fd 3: opened by the launcher before the run, inherited by the host.
-    args: [
-      "-c",
-      'exec "$0" "$@" 3<"$CORPUS_FD3"',
-      Deno.execPath(),
-      ...grant,
-      `${work}/host.ts`,
-      vector,
-    ],
-    cwd: work,
-    env: {
-      CORPUS_FD3: `${out}/secret2`,
-      CORPUS_SECRET_ENV: "TOP-SECRET env",
-      NO_COLOR: "1",
-    },
-    stdout: "piped",
-    stderr: "piped",
-  }).outputSync();
-  const seen = new Set<string>();
-  for (const line of new TextDecoder().decode(o.stdout).split("\n")) {
-    if (!line.startsWith("{")) continue;
-    const r = JSON.parse(line) as { vector: string; id: string; out: string };
-    const { state, detail } = classify(parse(r.out), baseline.get(r.id));
-    const cell = PROBES.find((p) => p.id === r.id)!.cell;
-    rows.push({ vector, id: r.id, state, detail, cell });
-    seen.add(r.id);
-  }
-  for (const p of PROBES) {
-    if (!seen.has(p.id)) {
-      const err =
-        new TextDecoder().decode(o.stderr).trim().split("\n").slice(-1)[0] ??
-          "";
-      rows.push({
+for (const [config, flags] of Object.entries(configs)) {
+  const grant = [
+    "run",
+    "--quiet",
+    "--no-prompt",
+    ...(expect === "enforce" ? ["--kernel-sandbox=enforce"] : []),
+    ...flags,
+    "--node-modules-dir=manual",
+  ];
+  for (const vector of vectors) {
+    const o = new Deno.Command("/bin/sh", {
+      // fd 3: opened by the launcher before the run, inherited by the host.
+      args: [
+        "-c",
+        'exec "$0" "$@" 3<"$CORPUS_FD3"',
+        Deno.execPath(),
+        ...grant,
+        `${work}/host.ts`,
         vector,
-        id: p.id,
-        state: "crash",
-        detail: `host exited ${o.code} before this probe: ${err}`,
-        cell: p.cell,
-      });
+      ],
+      cwd: work,
+      env: {
+        CORPUS_FD3: `${out}/secret2`,
+        CORPUS_SECRET_ENV: "TOP-SECRET env",
+        NO_COLOR: "1",
+      },
+      stdout: "piped",
+      stderr: "piped",
+    }).outputSync();
+    const seen = new Set<string>();
+    for (const line of new TextDecoder().decode(o.stdout).split("\n")) {
+      if (!line.startsWith("{")) continue;
+      const r = JSON.parse(line) as { vector: string; id: string; out: string };
+      const { state, detail } = classify(parse(r.out), baseline.get(r.id));
+      const cell = PROBES.find((p) => p.id === r.id)!.cell;
+      rows.push({ config, vector, id: r.id, state, detail, cell });
+      seen.add(r.id);
+    }
+    for (const p of PROBES) {
+      if (!seen.has(p.id)) {
+        const err =
+          new TextDecoder().decode(o.stderr).trim().split("\n").slice(-1)[0] ??
+            "";
+        rows.push({
+          config,
+          vector,
+          id: p.id,
+          state: "crash",
+          detail: `host exited ${o.code} before this probe: ${err}`,
+          cell: p.cell,
+        });
+      }
     }
   }
 }
@@ -247,16 +297,21 @@ await server.status;
 const allowedToday = new Set(["open", "n/a", "host"]);
 const counts: Record<string, number> = {};
 for (const r of rows) counts[r.state] = (counts[r.state] ?? 0) + 1;
+const expected = (r: Row): Set<string> =>
+  expect === "enforce"
+    ? expectEnforce(r.cell, column!, r.config, r.vector)
+    : allowedToday;
 for (const r of rows) {
+  const ok = expected(r).has(r.state);
   console.log(
-    `${r.state.padEnd(5)} ${r.vector.padEnd(5)} ${
+    `${r.state.padEnd(5)} ${r.config.padEnd(7)} ${r.vector.padEnd(5)} ${
       r.id.padEnd(26)
-    } [${r.cell}] ${r.detail}`,
+    } [${r.cell}]${
+      ok ? "" : ` UNEXPECTED (wants ${[...expected(r)].join("|")})`
+    } ${r.detail}`,
   );
 }
-const bad = expect === "today"
-  ? rows.filter((r) => !allowedToday.has(r.state))
-  : [];
+const bad = rows.filter((r) => !expected(r).has(r.state));
 const summary = Object.entries(counts).sort().map(([k, v]) => `${v} ${k}`).join(
   ", ",
 );
@@ -276,12 +331,16 @@ if (args.json) {
 if (!args.dir) Deno.removeSync(dir, { recursive: true });
 if (bad.length) {
   console.log(
-    `corpus: FAIL (--expect=${expect}): ${bad.length} checks not open: ${
-      bad.map((r) => `${r.vector}/${r.id}`).join(" ")
+    `corpus: FAIL (--expect=${expect}${
+      column ? `, ${column}` : ""
+    }): ${bad.length} checks not as expected: ${
+      bad.map((r) => `${r.config}/${r.vector}/${r.id}=${r.state}`).join(" ")
     }`,
   );
   Deno.exit(1);
 }
 console.log(
-  `corpus: ok (--expect=${expect}: nothing held, as expected without kernel enforcement)`,
+  expect === "enforce"
+    ? `corpus: ok (--expect=enforce, ${column}: every kernel cell held, every other cell as its column documents)`
+    : `corpus: ok (--expect=${expect}: nothing held, as expected without kernel enforcement)`,
 );

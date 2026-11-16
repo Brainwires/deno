@@ -693,6 +693,8 @@ impl CliMainWorkerFactory {
     stdio: deno_runtime::deno_io::Stdio,
     unconfigured_runtime: Option<deno_runtime::UnconfiguredRuntime>,
   ) -> Result<CliMainWorker, CreateCustomWorkerError> {
+    // denext: no user code while a kernel-sandbox plan waits to be applied
+    crate::sandbox::enforce::guard_user_code()?;
     let main_module_npm_ref =
       NpmPackageReqReference::from_specifier(&main_module).ok();
     let mut npm_reqs = Vec::new();

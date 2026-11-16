@@ -43,6 +43,16 @@ use sha2::Digest;
 /// Bumped whenever the serialized shape changes (part of the policy hash).
 pub const POLICY_FORMAT: u32 = 1;
 
+/// Whether this runtime has the supervising broker (Mode B). Not yet: a
+/// policy that needs it carries a fail-open gap, so `enforce` refuses to
+/// start rather than apply rules nothing holds.
+pub const BROKER_BUILT: bool = false;
+
+/// Whether this runtime overmounts denied paths in a user + mount namespace
+/// (the exact Linux read deny). Not yet: the model falls back to expansion
+/// or a Deno-only rule.
+pub const OVERMOUNT_BUILT: bool = false;
+
 // ---------------------------------------------------------------------------
 // The machine: OS, mechanisms and the per-OS / per-ABI capability table
 // ---------------------------------------------------------------------------
@@ -290,7 +300,6 @@ pub static CAPABILITY_TABLE: &[CapabilityRow] = {
       "the last matching rule wins",
     ),
     row(Macos, Seatbelt, 0, MetadataRead, "file-read-metadata"),
-    row(Macos, Seatbelt, 0, MapExecutable, "file-map-executable"),
     row(
       Macos,
       Seatbelt,
@@ -341,8 +350,8 @@ pub struct Capabilities {
   pub seatbelt: bool,
   pub job_object: bool,
   pub low_integrity: bool,
-  /// Whether this runtime has an enforcer for `os`. `false` everywhere in
-  /// this runtime (rollout stage R1).
+  /// Whether this runtime has an enforcer for `os` (Mode A: Linux on x86_64
+  /// and aarch64, macOS).
   pub enforcer_built: bool,
 }
 
@@ -560,6 +569,11 @@ pub enum ImplicitNeed {
   ChildrenBaseline,
   /// The inspector's listening port.
   Inspector,
+  /// System information an `--allow-sys` name grants (`/proc` files).
+  SysInfo,
+  /// The working directory itself, listed but not read beneath (macOS:
+  /// `getcwd` opens `.`, which spawning a child needs).
+  WorkingDir,
 }
 
 impl ImplicitNeed {
@@ -579,6 +593,8 @@ impl ImplicitNeed {
       Self::NodeModules => "node_modules",
       Self::ChildrenBaseline => "children baseline",
       Self::Inspector => "inspector",
+      Self::SysInfo => "sys info",
+      Self::WorkingDir => "working directory",
     }
   }
 
@@ -610,6 +626,8 @@ pub enum ImplicitAccess {
   /// Read, and load as executable code (dyld / dlopen).
   ReadMap,
   ReadWrite,
+  /// The directory itself (its entries' names), nothing beneath it.
+  ListDir,
 }
 
 #[derive(
@@ -712,8 +730,9 @@ static IMPLICIT_ROWS: &[ImplicitRow] = {
     r!(Linux, "/dev/shm", Devices, ReadWrite, Always),
     r!(Linux, "/dev/fd", Devices, Read, Always),
     // Linux: the terminal, only when the parent has one
+    // (the standard streams' own terminals come from the context, never
+    // every pseudo-terminal)
     r!(Linux, "/dev/tty", Terminal, ReadWrite, TtyParent),
-    r!(Linux, "/dev/pts", Terminal, ReadWrite, TtyParent),
     // Linux: the children baseline (review F8): programs and their data
     r!(Linux, "/usr", ChildrenBaseline, ReadMap, RunGranted),
     r!(Linux, "/bin", ChildrenBaseline, ReadMap, RunGranted),
@@ -753,8 +772,13 @@ static IMPLICIT_ROWS: &[ImplicitRow] = {
     r!(Macos, "/dev/urandom", Devices, Read, Always),
     r!(Macos, "/dev/dtracehelper", Devices, ReadWrite, Always),
     r!(Macos, "/dev/fd", Devices, Read, Always),
+    // libc's automounter probe at startup (E3: harmless, a denial only logs)
+    r!(Macos, "/dev/autofs_nowait", Devices, Read, Always),
     r!(Macos, "/dev/tty", Terminal, ReadWrite, TtyParent),
     // macOS: the children baseline
+    // dyld in every new process lists `/` and aborts when refused (measured
+    // on macOS 26): the folder itself, nothing beneath it
+    r!(Macos, "/", ChildrenBaseline, ListDir, RunGranted),
     r!(Macos, "/usr", ChildrenBaseline, ReadMap, RunGranted),
     r!(Macos, "/bin", ChildrenBaseline, ReadMap, RunGranted),
     r!(Macos, "/sbin", ChildrenBaseline, ReadMap, RunGranted),
@@ -776,6 +800,33 @@ static IMPLICIT_ROWS: &[ImplicitRow] = {
     ),
   ]
 };
+
+/// The `/proc` files each `--allow-sys` name reads on Linux. The process's
+/// own `/proc/self` (`processInfo`) is in the implicit set already (the
+/// runtime reads it), as are `/proc/cpuinfo`, `/proc/stat`, the cgroup
+/// limits and `/sys/devices/system/cpu` (V8 and tokio size themselves from
+/// them). Other processes' entries (`processes`) can't be scoped: a gap.
+const SYS_FILES: &[(&str, &str)] = &[
+  ("systemMemoryInfo", "/proc/meminfo"),
+  ("loadavg", "/proc/loadavg"),
+  ("osUptime", "/proc/uptime"),
+  ("osRelease", "/proc/version"),
+];
+
+/// The `--allow-sys` names an unscoped `--allow-sys` doesn't include: only
+/// naming them grants them (other processes' and this process's own
+/// `/proc` entries).
+const SYS_NAMED_ONLY: &[&str] = &["processInfo", "processes"];
+
+/// Whether `--allow-sys` grants `name` (unscoped grants every name but the
+/// named-only ones).
+fn sys_granted(options: &PermissionsOptions, name: &str) -> bool {
+  match &options.allow_sys {
+    None => false,
+    Some(list) if list.is_empty() => !SYS_NAMED_ONLY.contains(&name),
+    Some(list) => list.iter().any(|n| n == name),
+  }
+}
 
 /// The DENO_DIR folders a confined run reads (never writes: caches must not
 /// become a privilege ladder, plan §5.1).
@@ -871,6 +922,33 @@ impl ImplicitSet {
     for file in &ctx.config_files {
       add(file, ImplicitNeed::ProjectConfig, ImplicitAccess::Read);
     }
+    // the standard streams' own terminals (reopened through /dev/stdin and
+    // friends), not every terminal of the user
+    for tty in &ctx.ttys {
+      add(tty, ImplicitNeed::Terminal, ImplicitAccess::ReadWrite);
+    }
+    // the files each `--allow-sys` name reads (Linux), and nothing for a
+    // name not granted
+    if ctx.caps.os == TargetOs::Linux {
+      for (name, file) in SYS_FILES {
+        if sys_granted(options, name) {
+          add(Path::new(file), ImplicitNeed::SysInfo, ImplicitAccess::Read);
+        }
+      }
+    }
+    if ctx.caps.os == TargetOs::Macos {
+      add(&ctx.cwd, ImplicitNeed::WorkingDir, ImplicitAccess::ListDir);
+    }
+    if ctx.caps.os == TargetOs::Macos
+      && let Some(home) = &ctx.home
+    {
+      // CoreFoundation reads it at startup (harmless; a denial only logs)
+      add(
+        &home.join(".CFUserTextEncoding"),
+        ImplicitNeed::LocaleTime,
+        ImplicitAccess::Read,
+      );
+    }
     if let Some(node_modules) = &ctx.node_modules {
       add(
         node_modules,
@@ -905,6 +983,9 @@ pub struct Context {
   pub inspector_port: Option<u16>,
   /// stdin is a terminal (the `/dev/tty` rule, plan §3).
   pub tty_parent: bool,
+  /// The terminals the standard streams are (`ttyname` of fds 0 to 2): the
+  /// only pseudo-terminals the policy names.
+  pub ttys: Vec<PathBuf>,
   /// A compiled program: no remote imports, no DENO_DIR caches.
   pub compiled: bool,
 }
@@ -926,6 +1007,7 @@ impl Context {
       node_modules: None,
       inspector_port: None,
       tty_parent: false,
+      ttys: Vec::new(),
       compiled: false,
     }
   }
@@ -992,7 +1074,9 @@ impl PathScope {
     matches!(self, Self::All)
   }
 
-  fn grant_covers(&self, path: &Path) -> bool {
+  /// Whether a path lies in what the user granted (implicit entries not
+  /// counted).
+  pub fn grant_covers(&self, path: &Path) -> bool {
     match self {
       Self::All => true,
       Self::Paths { paths } => paths
@@ -1000,6 +1084,85 @@ impl PathScope {
         .any(|r| r.implicit.is_none() && path.starts_with(&r.path)),
     }
   }
+}
+
+/// The existing part of `path` resolved (symlinks, `..`, the on-disk
+/// spelling), and the rest: the components that don't exist yet. `decided`
+/// is false when resolution stopped at something other than a missing
+/// component (a folder that can't be searched, a symlink loop): the rest
+/// may then still hold a link, and what the path names can't be told.
+pub struct ResolvedPrefix {
+  pub existing: PathBuf,
+  pub rest: PathBuf,
+  pub decided: bool,
+}
+
+impl ResolvedPrefix {
+  pub fn full(&self) -> PathBuf {
+    if self.rest.as_os_str().is_empty() {
+      self.existing.clone()
+    } else {
+      self.existing.join(&self.rest)
+    }
+  }
+}
+
+/// Resolves the existing part of `path` ([`ResolvedPrefix`]).
+#[allow(
+  clippy::disallowed_methods,
+  reason = "the kernel resolves the real file system's links, never a virtual one"
+)]
+pub fn resolve_prefix(path: &Path) -> ResolvedPrefix {
+  let mut existing = path.to_path_buf();
+  let mut rest = Vec::new();
+  let mut decided = true;
+  loop {
+    match std::fs::canonicalize(&existing) {
+      Ok(canonical) => {
+        let mut tail = PathBuf::new();
+        for part in rest.iter().rev() {
+          tail.push(part);
+        }
+        return ResolvedPrefix {
+          existing: canonical,
+          rest: tail,
+          decided,
+        };
+      }
+      Err(err) => {
+        if !matches!(
+          err.kind(),
+          std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+        ) {
+          decided = false;
+        }
+      }
+    }
+    match (existing.file_name(), existing.parent()) {
+      (Some(name), Some(parent)) => {
+        rest.push(name.to_os_string());
+        existing = parent.to_path_buf();
+      }
+      _ => {
+        return ResolvedPrefix {
+          existing: path.to_path_buf(),
+          rest: PathBuf::new(),
+          decided: false,
+        };
+      }
+    }
+  }
+}
+
+/// Whether a path lies in a scope, deciding on resolved paths as well as
+/// the spelling (an allow and a deny may name one object through different
+/// paths: a symlink, `/tmp` and `/private/tmp`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+  Inside,
+  Outside,
+  /// The path's resolution stopped early: it can't be told.
+  Undecided,
 }
 
 /// How a deny rule is held.
@@ -1166,8 +1329,17 @@ pub struct SyscallPolicy {
   /// The path forms of chmod / chown / utime / xattr refused (review F5;
   /// `enforce` only).
   pub refuse_path_metadata: bool,
+  /// Truncation Landlock can't hold before ABI 3 refused by seccomp:
+  /// `truncate(2)` by path, read-only truncating opens, `openat2` (`enforce`
+  /// only).
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub refuse_path_truncate: bool,
   /// `AF_VSOCK` allowed (a `vsock:` grant).
   pub vsock: bool,
+  /// Signals reach this process only (seccomp, where Landlock can't scope
+  /// them and no child may start).
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub signal_self: bool,
 }
 
 /// The compiled kernel policy: what each mechanism would apply.
@@ -1183,7 +1355,8 @@ pub struct KernelPolicy {
   pub net: NetPolicy,
   pub unix: UnixPolicy,
   pub sys: SysNarrowing,
-  /// `Some`: the environment a re-exec'd image keeps (Linux, `enforce`).
+  /// `Some`: the environment a re-exec'd image keeps (Linux and macOS,
+  /// `enforce`).
   pub env_scrub: Option<Vec<String>>,
   pub scopes: Scopes,
   pub syscalls: SyscallPolicy,
@@ -1242,7 +1415,29 @@ impl KernelPolicy {
           g.is_fatal_under_enforce() && g.exact_with == Some(ExactWith::Broker)
         }));
     if needs_broker {
-      Compiler::new(options, implicit, ctx, Shape::ModeB).run()
+      let mode_a_rules: Vec<String> = compiled
+        .gaps
+        .iter()
+        .filter(|g| {
+          g.is_fatal_under_enforce() && g.exact_with == Some(ExactWith::Broker)
+        })
+        .map(|g| g.rule.clone())
+        .collect();
+      let mut mode_b =
+        Compiler::new(options, implicit, ctx, Shape::ModeB).run();
+      if !BROKER_BUILT && !mode_a_rules.is_empty() {
+        // say which rules made the broker necessary
+        for gap in &mut mode_b.gaps {
+          if gap.class == GapClass::Enforcer && gap.rule == BROKER_RULE {
+            let mut rules = mode_a_rules.clone();
+            rules.sort();
+            rules.dedup();
+            gap.detail =
+              format!("{} (needed for: {})", gap.detail, rules.join("; "));
+          }
+        }
+      }
+      mode_b
     } else {
       compiled
     }
@@ -1258,6 +1453,9 @@ fn net_allowed(options: &PermissionsOptions) -> bool {
     || options.allow_net_connect.is_some()
     || options.allow_net_listen.is_some()
 }
+
+/// The rule a "broker not built" gap names.
+const BROKER_RULE: &str = "--kernel-sandbox (broker)";
 
 pub use deno_lib::kernel_sandbox::options_allow_all;
 pub use deno_lib::kernel_sandbox::options_have_deny;
@@ -1409,9 +1607,157 @@ impl<'a> Compiler<'a> {
       .map(|l| l.iter().map(|p| self.abs(p)).collect())
   }
 
+  /// Whether paths are compared resolved as well as spelled: where a Mode A
+  /// enforcer resolves the paths it is given (Landlock opens each rule's
+  /// path, Seatbelt checks resolved paths).
+  fn resolves(&self) -> bool {
+    cfg!(unix) && matches!(self.os(), TargetOs::Linux | TargetOs::Macos)
+  }
+
+  /// `path` resolved, or `None` when that can't be told.
+  fn resolved(&self, path: &Path) -> Option<PathBuf> {
+    let r = resolve_prefix(path);
+    r.decided.then(|| r.full())
+  }
+
+  /// Whether `path` lies at or beneath `base`, by spelling or resolved.
+  fn within(&self, path: &Path, base: &Path) -> Reach {
+    if path.starts_with(base) {
+      return Reach::Inside;
+    }
+    if !self.resolves() {
+      return Reach::Outside;
+    }
+    let (Some(path), Some(base)) = (self.resolved(path), self.resolved(base))
+    else {
+      return Reach::Undecided;
+    };
+    if path.starts_with(&base) {
+      Reach::Inside
+    } else {
+      Reach::Outside
+    }
+  }
+
+  /// Whether `path` lies in `scope`, by spelling or resolved: inside one
+  /// rule is inside, otherwise any rule that can't be told makes it
+  /// undecided.
+  fn reach(&self, scope: &PathScope, path: &Path) -> Reach {
+    // by spelling first: no file system access
+    if scope.covers(path) {
+      return Reach::Inside;
+    }
+    match scope {
+      PathScope::All => Reach::Inside,
+      PathScope::Paths { paths } => {
+        let mut out = Reach::Outside;
+        for rule in paths {
+          match self.within(path, &rule.path) {
+            Reach::Inside => return Reach::Inside,
+            Reach::Undecided => out = Reach::Undecided,
+            Reach::Outside => {}
+          }
+        }
+        out
+      }
+    }
+  }
+
+  /// The user's allows that lie inside one of `denies` are left out of the
+  /// kernel's scope (the deny wins, as in Deno's checks); an allow whose
+  /// place can't be told is a fail-open gap (`enforce` refuses). Implicit
+  /// entries stay (the runtime needs them; inside a deny they are a gap of
+  /// their own).
+  fn carve(
+    &mut self,
+    scope: PathScope,
+    denies: &[(PathBuf, String)],
+    class: GapClass,
+  ) -> PathScope {
+    let PathScope::Paths { paths } = scope else {
+      return scope;
+    };
+    let mut kept = Vec::with_capacity(paths.len());
+    for rule in paths {
+      if rule.implicit.is_some() {
+        kept.push(rule);
+        continue;
+      }
+      let mut drop_rule = false;
+      for (deny, flag) in denies {
+        match self.within(&rule.path, deny) {
+          Reach::Inside => {
+            self.gap(
+              class,
+              flag.clone(),
+              format!(
+                "fail closed: {} is left out of the kernel's {} scope, as it lies inside the denied path (the deny wins, as in Deno's checks)",
+                rule.path.display(),
+                class.as_str()
+              ),
+              GapResolution::FailClosed,
+              None,
+            );
+            drop_rule = true;
+            break;
+          }
+          Reach::Undecided => {
+            self.gap(
+              class,
+              flag.clone(),
+              format!(
+                "Deno only: whether {} lies inside the denied path can't be told (a folder on the way can't be searched)",
+                rule.path.display()
+              ),
+              GapResolution::FailOpen,
+              Some(ExactWith::Never),
+            );
+          }
+          Reach::Outside => {}
+        }
+      }
+      if !drop_rule {
+        kept.push(rule);
+      }
+    }
+    PathScope::Paths { paths: kept }
+  }
+
+  /// The read denies (`--deny-read`, `--ignore-read`) with their flags.
+  fn read_denies(&self) -> Vec<(PathBuf, String)> {
+    let mut out = Vec::new();
+    for (list, flag) in [
+      (&self.opts().deny_read, "--deny-read"),
+      (&self.opts().ignore_read, "--ignore-read"),
+    ] {
+      for path in self.abs_list(list).unwrap_or_default() {
+        let rule = format!("{flag}={}", path.display());
+        out.push((path, rule));
+      }
+    }
+    out
+  }
+
+  fn write_denies(&self) -> Vec<(PathBuf, String)> {
+    self
+      .abs_list(&self.opts().deny_write)
+      .unwrap_or_default()
+      .into_iter()
+      .map(|path| {
+        let rule = format!("--deny-write={}", path.display());
+        (path, rule)
+      })
+      .collect()
+  }
+
   fn run(mut self) -> CompiledPolicy {
     let read = self.read_scope();
     let write = self.write_scope();
+    // an allow inside a deny of its class is held by leaving it out
+    let read_denies = self.read_denies();
+    let read = self.carve(read, &read_denies, GapClass::Read);
+    let write_denies = self.write_denies();
+    let write = self.carve(write, &write_denies, GapClass::Write);
     let deny_read = self.deny_read(&read, &write);
     let deny_write = self.deny_write(&write);
     let exec = self.exec();
@@ -1421,6 +1767,13 @@ impl<'a> Compiler<'a> {
     let sys = self.sys(&net);
     let env_scrub = self.env_scrub();
     let scopes = self.scopes(&unix);
+    // signals can reach only this process: what Landlock's scope (ABI 6)
+    // holds, by seccomp, where no child may start (Deno.kill needs
+    // --allow-run, which isn't granted)
+    let signal_self = self.os() == TargetOs::Linux
+      && self.native
+      && self.opts().allow_run.is_none()
+      && !scopes.signal;
     self.import_gap(&net);
     self.fs_mechanism_gaps(&read, &write);
     self.metadata_gaps(&read, &write);
@@ -1431,11 +1784,60 @@ impl<'a> Compiler<'a> {
       refuse_listen,
       clone3_enosys: !self.deny_only && self.os() == TargetOs::Linux,
       refuse_io_uring: self.os() == TargetOs::Linux,
+      signal_self,
       refuse_path_metadata: enforce
         && self.os() == TargetOs::Linux
         && !write.is_all(),
+      refuse_path_truncate: enforce
+        && self.os() == TargetOs::Linux
+        && !write.is_all()
+        && self.caps.landlock_abi.is_some()
+        && !self.caps.supports(Feature::FsTruncate),
       vsock,
     };
+    if self.caps.enforcer_built && self.shape == Shape::ModeB && !BROKER_BUILT {
+      let needs = match &net {
+        NetPolicy::Broker { .. } => "host-scoped network",
+        _ => "these rules",
+      };
+      self.gap(
+        GapClass::Enforcer,
+        BROKER_RULE,
+        format!(
+          "the supervising broker (Mode B) is not built into this runtime yet: {needs} would be held by Deno's checks only"
+        ),
+        GapResolution::FailOpen,
+        None,
+      );
+    }
+    if self.ctx().mode.fails_closed()
+      && self.os() == TargetOs::Linux
+      && !write.is_all()
+    {
+      self.gap(
+        GapClass::Metadata,
+        write_rule(self.opts()),
+        "fail closed: chmod, chown, utime and extended-attribute writes by path are refused, inside the write scope too (Deno.chmod, Deno.utime, cp -p, tar); the descriptor forms work",
+        GapResolution::FailClosed,
+        Some(ExactWith::Never),
+      );
+    }
+    if self.caps.enforcer_built
+      && self.os() == TargetOs::Linux
+      && !self.caps.seccomp
+      && self.shape == Shape::ModeA
+    {
+      // Mode A's one seccomp program (exec, sockets, the attack surface)
+      // can't be installed: probed, so enforce refuses here instead of
+      // failing after the re-exec
+      self.gap(
+        GapClass::Enforcer,
+        "--kernel-sandbox (seccomp)",
+        "a seccomp filter can't be installed here (a container's or an outer sandbox's seccomp profile refuses it): exec, socket and attack-surface rules would be held by Deno's checks only",
+        GapResolution::FailOpen,
+        Some(ExactWith::Never),
+      );
+    }
     if !self.caps.enforcer_built {
       let os = self.os().as_str();
       self.gap(
@@ -1545,6 +1947,7 @@ impl<'a> Compiler<'a> {
         ImplicitAccess::Read,
         ImplicitAccess::ReadMap,
         ImplicitAccess::ReadWrite,
+        ImplicitAccess::ListDir,
       ],
       writable.as_ref(),
     )
@@ -1626,7 +2029,7 @@ impl<'a> Compiler<'a> {
       .implicit
       .entries
       .iter()
-      .filter(|e| e.path.starts_with(deny))
+      .filter(|e| self.within(&e.path, deny) != Reach::Outside)
       .map(|e| (e.path.clone(), e.need))
       .collect();
     for (path, need) in inside {
@@ -1651,8 +2054,20 @@ impl<'a> Compiler<'a> {
     write: &PathScope,
     rule: &str,
   ) -> DenyEnforcement {
-    if !read.covers(path) {
-      return DenyEnforcement::Implied;
+    // Implied only when no allow reaches the deny, by spelling or resolved
+    match self.reach(read, path) {
+      Reach::Outside => return DenyEnforcement::Implied,
+      Reach::Undecided => {
+        self.gap(
+          GapClass::Read,
+          rule,
+          "Deno only: whether an allow reaches it can't be told (a folder on the way can't be searched)",
+          GapResolution::FailOpen,
+          Some(ExactWith::Never),
+        );
+        return DenyEnforcement::DenoOnly;
+      }
+      Reach::Inside => {}
     }
     if self.caps.supports(Feature::DenyInsideAllow) {
       return DenyEnforcement::Exact;
@@ -1667,9 +2082,9 @@ impl<'a> Compiler<'a> {
     }
     // Linux (review F7)
     let parent = path.parent().unwrap_or(path);
-    let stable = !write.covers(parent);
+    let stable = self.reach(write, parent) == Reach::Outside;
     let enforce = self.ctx().mode.fails_closed();
-    if self.caps.supports(Feature::Overmount) {
+    if OVERMOUNT_BUILT && self.caps.supports(Feature::Overmount) {
       return DenyEnforcement::Overmount;
     }
     if stable {
@@ -1699,8 +2114,18 @@ impl<'a> Compiler<'a> {
     let mut denies = Vec::new();
     for path in self.abs_list(&self.opts().deny_write).unwrap_or_default() {
       let rule = format!("--deny-write={}", path.display());
-      let enforcement = if !write.covers(&path) {
+      let reach = self.reach(write, &path);
+      let enforcement = if reach == Reach::Outside {
         DenyEnforcement::Implied
+      } else if reach == Reach::Undecided {
+        self.gap(
+          GapClass::Write,
+          rule,
+          "Deno only: whether an allow reaches it can't be told (a folder on the way can't be searched)",
+          GapResolution::FailOpen,
+          Some(ExactWith::Never),
+        );
+        DenyEnforcement::DenoOnly
       } else if self.caps.supports(Feature::DenyInsideAllow) {
         DenyEnforcement::Exact
       } else if self.os() == TargetOs::Linux && self.shape == Shape::ModeB {
@@ -1767,6 +2192,22 @@ impl<'a> Compiler<'a> {
     // unscoped FFI loads anything readable
     let ffi_all = self.opts().allow_ffi.as_ref().is_some_and(|l| l.is_empty());
     if self.opts().allow_run.is_some() || ffi_all {
+      return read.clone();
+    }
+    // macOS: a library outside the --allow-ffi paths still loaded under a
+    // profile that wrote file-map-executable for them alone (macOS 26.6), so
+    // the model claims only what holds: the read scope (plus the system
+    // code the profile always maps), as on Linux
+    if self.os() == TargetOs::Macos {
+      if let Some(list) = &self.opts().allow_ffi {
+        self.gap(
+          GapClass::Ffi,
+          format!("--allow-ffi={}", list.join(",")),
+          "macOS doesn't hold library loading to the --allow-ffi paths (file-map-executable didn't refuse in testing): native code may load any library in the read scope",
+          GapResolution::Documented,
+          None,
+        );
+      }
       return read.clone();
     }
     let ffi = self.opts().allow_ffi.clone();
@@ -1960,7 +2401,8 @@ impl<'a> Compiler<'a> {
           GapClass::Net,
           rule,
           "coarser: the kernel holds the ports, not the hosts; native code and children may reach any host on them and resolve any name",
-          GapResolution::FailOpen,
+          // the brief's macOS port rules: the coarsening is documented
+          GapResolution::Documented,
           Some(ExactWith::Broker),
         );
       }
@@ -1990,7 +2432,9 @@ impl<'a> Compiler<'a> {
             GapClass::Net,
             rule_text(&connect, "--allow-net"),
             "coarser: the kernel holds the ports, not the addresses; native code and children may reach any address on these ports (169.254.169.254 included)",
-            GapResolution::FailOpen,
+            // IP-literal / localhost port lists are what Mode A holds
+            // the coarsening is documented
+            GapResolution::Documented,
             Some(ExactWith::Broker),
           );
         }
@@ -2149,10 +2593,7 @@ impl<'a> Compiler<'a> {
 
   fn sys(&mut self, net: &NetPolicy) -> SysNarrowing {
     let o = self.opts();
-    let granted = |name: &str| match &o.allow_sys {
-      None => false,
-      Some(list) => list.is_empty() || list.iter().any(|n| n == name),
-    };
+    let granted = |name: &str| sys_granted(o, name);
     let mut out = SysNarrowing::default();
     match self.os() {
       TargetOs::Linux => {
@@ -2168,6 +2609,39 @@ impl<'a> Compiler<'a> {
         }
         out.netlink_route =
           granted("networkInterfaces") || !matches!(net, NetPolicy::Denied);
+        // other processes' /proc entries come and go (rules attach to
+        // inodes), and Landlock's ptrace scoping refuses them anyway
+        // the runtime's own reads, whatever --allow-sys says: Landlock rules
+        // attach to whole folders here (per-pid inodes, cgroup globs), so the
+        // kernel is wider than the processInfo / cpus / systemMemoryInfo
+        // file sets, never narrower
+        self.gap(
+          GapClass::Sys,
+          "implicit /proc/self, /sys/fs/cgroup",
+          "documented: the runtime reads its own /proc/self entries and the cgroup CPU / memory limits (V8 and tokio size themselves from them), so native code can read them whatever --allow-sys grants (processInfo, cpus, systemMemoryInfo hold them for Deno's APIs)",
+          GapResolution::Documented,
+          Some(ExactWith::Never),
+        );
+        if granted("processes") {
+          self.gap(
+            GapClass::Sys,
+            "--allow-sys=processes",
+            "fail closed: other processes' /proc/<pid> entries are not readable under the kernel sandbox (Landlock can't scope them by name)",
+            GapResolution::FailClosed,
+            Some(ExactWith::Never),
+          );
+        }
+        if self.opts().allow_env.as_ref().is_some_and(|l| l.is_empty())
+          && !self.deny_only
+        {
+          self.gap(
+            GapClass::Env,
+            "--allow-env",
+            "fail closed: other processes' /proc/<pid>/environ is not readable under the kernel sandbox",
+            GapResolution::FailClosed,
+            Some(ExactWith::Never),
+          );
+        }
       }
       TargetOs::Macos => {
         out.denied_sysctls.push("kern.proc*".to_string());
@@ -2179,6 +2653,25 @@ impl<'a> Compiler<'a> {
         }
       }
       _ => {}
+    }
+    // shared memory by name: the runtime and the system libraries use it,
+    // and neither mechanism scopes it to this process
+    let shm = match self.os() {
+      TargetOs::Linux => Some("/dev/shm"),
+      TargetOs::Macos => Some("POSIX shared memory and semaphores"),
+      _ => None,
+    };
+    if let Some(shm) = shm
+      && self.native
+      && !self.deny_only
+    {
+      self.gap(
+        GapClass::Sys,
+        format!("implicit {shm}"),
+        "documented: named shared memory isn't scoped to this process: native code can open the user's other named shared memory by its name",
+        GapResolution::Documented,
+        Some(ExactWith::Never),
+      );
     }
     let unscoped = self.opts().allow_sys.as_ref().is_some_and(|l| l.is_empty());
     if !unscoped {
@@ -2215,8 +2708,11 @@ impl<'a> Compiler<'a> {
     if unscoped {
       return None;
     }
+    // enforce re-executes on Linux and macOS: the new image gets only what
+    // the grant names
     let scrub = self.ctx().mode.fails_closed()
-      && (self.os() == TargetOs::Linux || self.shape == Shape::ModeB);
+      && (matches!(self.os(), TargetOs::Linux | TargetOs::Macos)
+        || self.shape == Shape::ModeB);
     let rule = match &self.opts().allow_env {
       None => "no --allow-env".to_string(),
       Some(list) => format!("--allow-env={}", list.join(",")),
@@ -2246,18 +2742,9 @@ impl<'a> Compiler<'a> {
     };
     let linux = self.os() == TargetOs::Linux;
     // only native code (FFI, addons, children) can signal or reach sockets
-    // around Deno's APIs
-    if linux && self.native && self.opts().allow_run.is_none() && !scopes.signal
-    {
-      self.gap(
-        GapClass::Signal,
-        "no --allow-run",
-        "native code can signal any process of the same user (Deno.kill needs --allow-run)",
-        GapResolution::FailOpen,
-        Capabilities::landlock_abi_for(Feature::ScopeSignal)
-          .map(|abi| ExactWith::LandlockAbi { abi }),
-      );
-    }
+    // around Deno's APIs; signals without Landlock's scope (before ABI 6)
+    // are held by seccomp when nothing may start a child
+    // (SyscallPolicy::signal_self)
     if linux
       && self.native
       && *unix != UnixPolicy::Denied
@@ -2356,13 +2843,24 @@ impl<'a> Compiler<'a> {
         );
       }
       if !self.caps.supports(Feature::FsTruncate) {
-        self.gap(
-          GapClass::Write,
-          write_rule(self.opts()),
-          "truncating a readable file outside the write scope isn't refused (Landlock before TRUNCATE)",
-          GapResolution::FailOpen,
-          linux_abi(Feature::FsTruncate),
-        );
+        if self.ctx().mode.fails_closed() {
+          // seccomp closes it (SyscallPolicy::refuse_path_truncate)
+          self.gap(
+            GapClass::Write,
+            write_rule(self.opts()),
+            "fail closed: truncate(2) by path, read-only truncating opens and openat2 are refused (Landlock before TRUNCATE); ftruncate on a file opened for writing works",
+            GapResolution::FailClosed,
+            linux_abi(Feature::FsTruncate),
+          );
+        } else {
+          self.gap(
+            GapClass::Write,
+            write_rule(self.opts()),
+            "truncating a readable file outside the write scope isn't refused (Landlock before TRUNCATE)",
+            GapResolution::FailOpen,
+            linux_abi(Feature::FsTruncate),
+          );
+        }
       }
     }
   }

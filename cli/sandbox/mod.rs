@@ -9,10 +9,14 @@
 //! - This module wires them to a CLI run: [`check_run`] at startup
 //!   (`--kernel-sandbox`, `--kernel-sandbox-report`), and [`info`] for
 //!   `deno info --json` (`kernelSandbox`).
+//! - [`enforce`]: applying the policy under `--kernel-sandbox=enforce`
+//!   (Mode A on Linux and macOS, DENEXT.md item 425).
 //!
-//! Nothing is enforced yet: `auto` applies nothing, `warn` reports, and
-//! `enforce` / `broker` refuse to start because no enforcer is built in.
+//! Opt-in only: `auto` applies nothing in this release line, `warn`
+//! reports, `enforce` applies the policy (or refuses to start when a rule
+//! can't be held), and `broker` refuses to start (Mode B isn't built yet).
 
+pub mod enforce;
 pub mod policy;
 
 use std::fmt::Write as _;
@@ -53,7 +57,8 @@ use self::policy::UnixPolicy;
 use crate::args::CliOptions;
 use crate::args::DenoSubcommand;
 
-/// The mechanisms this machine offers. No enforcer is built in yet.
+/// The mechanisms this machine offers, and whether this runtime has a Mode A
+/// enforcer for them (Linux on x86_64 / aarch64, macOS).
 pub fn detect_capabilities() -> Capabilities {
   let os = TargetOs::current();
   #[allow(unused_mut, reason = "set per OS")]
@@ -61,14 +66,21 @@ pub fn detect_capabilities() -> Capabilities {
   #[cfg(target_os = "linux")]
   {
     caps.landlock_abi = crate::supply_chain::sandbox_linux::landlock_abi().ok();
-    // the lifecycle jail installs seccomp filters on every supported arch
-    caps.seccomp = cfg!(any(target_arch = "x86_64", target_arch = "aarch64"));
+    // the seccomp programs are assembled for these architectures (the frame
+    // kills other architectures' syscalls); whether this process may
+    // install one (an outer profile may refuse it) is probed
+    let arch = cfg!(any(target_arch = "x86_64", target_arch = "aarch64"));
+    caps.seccomp =
+      arch && deno_sandbox::enforce_linux::seccomp_available().is_ok();
     caps.user_namespaces =
       crate::supply_chain::sandbox_linux::netns_available().is_ok();
+    caps.enforcer_built = arch;
   }
   #[cfg(target_os = "macos")]
   {
-    caps.seatbelt = crate::supply_chain::sandbox_macos::available().is_ok();
+    caps.seatbelt = deno_sandbox::macos::sandbox_init_available()
+      || crate::supply_chain::sandbox_macos::available().is_ok();
+    caps.enforcer_built = true;
   }
   #[cfg(windows)]
   {
@@ -131,8 +143,8 @@ fn config_mode(
 
 /// The mode `deno compile` bakes into a binary: `--kernel-sandbox`, else
 /// deno.json `permissions.kernelSandbox`, else nothing (`auto`). A mode that
-/// fails closed is refused while no enforcer is built in, so no binary is
-/// made that can't start.
+/// fails closed is refused while compiled programs have no enforcer, so
+/// no binary is made that can't start.
 pub fn compile_mode(
   cli_options: &CliOptions,
 ) -> Result<Option<KernelSandboxMode>, AnyError> {
@@ -140,12 +152,13 @@ pub fn compile_mode(
     Some(mode) => Some(mode),
     None => config_mode(cli_options)?,
   };
+  // compiled programs get their enforcer in a later phase: until then
+  // a binary baked with a failing-closed mode couldn't start
   if let Some(mode) = mode
     && mode.fails_closed()
-    && !detect_capabilities().enforcer_built
   {
     bail!(
-      "--kernel-sandbox={mode}: no kernel enforcer is built into this runtime yet, so a program compiled with it could not start. Use --kernel-sandbox=warn, auto or off."
+      "--kernel-sandbox={mode}: compiled programs have no kernel enforcer yet, so a program compiled with it could not start. Use --kernel-sandbox=warn, auto or off."
     );
   }
   Ok(mode)
@@ -193,25 +206,78 @@ fn context_for(
     cli_options.initial_cwd().to_path_buf(),
   );
   ctx.exe = std::env::current_exe().ok();
+  #[allow(clippy::disallowed_methods, reason = "the user's real home")]
+  {
+    ctx.home = std::env::var_os("HOME")
+      .filter(|h| !h.is_empty())
+      .map(PathBuf::from);
+  }
   ctx.deno_dir = deno_dir;
   ctx.node_modules = node_modules;
+  // the config files discovery read: every deno.json / package.json of the
+  // workspace (an ancestor folder's too, outside any read grant), the import
+  // map and the lockfile. A re-executed image discovers them again under the
+  // sandbox, and the compared policy holds the set, so both images must find
+  // the same files. Never `.npmrc` (it can hold registry credentials): a
+  // confined image treats an unreadable one as absent.
   let workspace = &cli_options.start_dir.workspace;
-  ctx.config_files = workspace
-    .root_deno_json()
-    .into_iter()
-    .chain(cli_options.start_dir.member_deno_json())
+  let flags = cli_options.flags();
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "the files the real file system holds, as discovery read them"
+  )]
+  let config_files: Vec<PathBuf> = workspace
+    .deno_jsons()
     .filter_map(|c| c.specifier.to_file_path().ok())
+    .chain(workspace.package_jsons().map(|p| p.path.clone()))
+    .chain(workspace.to_import_map_path().ok().flatten())
+    .chain(match &flags.lock {
+      Some(lock) => Some(cli_options.initial_cwd().join(lock)),
+      None => Some(workspace.root_dir_path().join("deno.lock")),
+    })
+    .filter(|p| p.is_file())
     .collect();
+  ctx.config_files = config_files;
   ctx.config_files.sort();
   ctx.config_files.dedup();
-  let flags = cli_options.flags();
   ctx.inspector_port = flags
     .inspect
     .or(flags.inspect_brk)
     .or(flags.inspect_wait)
     .map(|addr| addr.port());
   ctx.tty_parent = std::io::stdin().is_terminal();
+  ctx.ttys = std_stream_ttys();
   ctx
+}
+
+/// The terminals the standard streams are (`ttyname` of fds 0 to 2),
+/// deduplicated.
+fn std_stream_ttys() -> Vec<PathBuf> {
+  #[allow(unused_mut, reason = "filled on unix")]
+  let mut out = Vec::new();
+  #[cfg(unix)]
+  for fd in 0..=2 {
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = [0u8; 256];
+    // SAFETY: a buffer of the given size; isatty / ttyname_r have no other
+    // preconditions
+    let ok = unsafe {
+      libc::isatty(fd) == 1
+        && libc::ttyname_r(fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len())
+          == 0
+    };
+    if !ok {
+      continue;
+    }
+    let len = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    let path =
+      PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..len]).to_os_string());
+    if path.is_absolute() && !out.contains(&path) {
+      out.push(path);
+    }
+  }
+  out.sort();
+  out
 }
 
 /// The mode the policy is compiled for: the applying mode, or what `auto`
@@ -228,8 +294,9 @@ fn policy_mode(resolution: &ModeResolution) -> KernelSandboxMode {
 
 /// The startup check of a `deno run`-family command, once its permissions
 /// are resolved: decides the mode, prints `--kernel-sandbox-report`, prints
-/// the `warn` notice, and refuses to start under `enforce` / `broker` when a
-/// rule can't be held (always, while no enforcer is built in).
+/// the `warn` notice, refuses to start under `enforce` / `broker` when a
+/// rule can't be held, and otherwise prepares the enforcement plan
+/// ([`enforce::prepare`]; applied before user code runs).
 pub fn check_run(
   cli_options: &CliOptions,
   options: &PermissionsOptions,
@@ -253,9 +320,20 @@ pub fn check_run(
   let compiled = KernelPolicy::compile(options, &implicit, &ctx);
   static PRINTED: Once = Once::new();
   PRINTED.call_once(|| {
+    // the image before a re-exec (Linux) already printed it
+    if enforce::confined_at_startup() {
+      return;
+    }
     #[allow(clippy::print_stderr, reason = "the report is the output asked for")]
     if report {
-      eprint!("{}", render_report(&resolution, &ctx.caps, &compiled));
+      // the OS translation's own gaps too (macOS)
+      let mut shown = compiled.clone();
+      shown.gaps.extend(enforce::report_gaps(&compiled, &ctx));
+      let skipped = skipped_npmrcs(cli_options, &ctx, &compiled);
+      eprint!(
+        "{}",
+        render_report(&resolution, &ctx.caps, &shown, &skipped)
+      );
     } else if resolution.mode == KernelSandboxMode::Warn {
       let deno_only = compiled
         .gaps
@@ -280,6 +358,7 @@ pub fn check_run(
         fatal.join("\n")
       );
     }
+    enforce::prepare(&compiled, &ctx)?;
   }
   Ok(resolution)
 }
@@ -439,10 +518,46 @@ fn unix_text(unix: &UnixPolicy) -> String {
 
 /// `--kernel-sandbox-report`: the mode, the machine, the policy and every
 /// gap, one line each (`!` marks a gap `enforce` refuses to start on).
+/// The `.npmrc` files discovery would read (beside the workspace's
+/// deno.json / package.json, and in the home folder) that exist and that the
+/// read grant doesn't cover: never readable under enforce (they may hold
+/// registry tokens), so a confined process treats them as absent.
+fn skipped_npmrcs(
+  cli_options: &CliOptions,
+  ctx: &Context,
+  compiled: &CompiledPolicy,
+) -> Vec<PathBuf> {
+  let mut dirs: Vec<PathBuf> = vec![
+    cli_options.start_dir.workspace.root_dir_path(),
+    cli_options.initial_cwd().to_path_buf(),
+  ];
+  dirs.extend(ctx.config_files.iter().filter_map(|f| {
+    let name = f.file_name()?.to_str()?;
+    matches!(name, "deno.json" | "deno.jsonc" | "package.json")
+      .then(|| f.parent().map(|p| p.to_path_buf()))
+      .flatten()
+  }));
+  dirs.extend(ctx.home.clone());
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "whether the real file exists, as discovery would find it"
+  )]
+  let mut out: Vec<PathBuf> = dirs
+    .into_iter()
+    .map(|d| d.join(".npmrc"))
+    .filter(|p| p.is_file())
+    .filter(|p| !compiled.policy.fs.read.grant_covers(p))
+    .collect();
+  out.sort();
+  out.dedup();
+  out
+}
+
 pub fn render_report(
   resolution: &ModeResolution,
   caps: &Capabilities,
   compiled: &CompiledPolicy,
+  skipped_npmrcs: &[PathBuf],
 ) -> String {
   let p = &compiled.policy;
   let mut out = String::new();
@@ -526,6 +641,32 @@ pub fn render_report(
   implicit.sort_unstable();
   implicit.dedup();
   writeln!(w, "    implicit:   {}", implicit.join(", ")).unwrap();
+  // folders only listed (macOS: the working directory, and `/` for
+  // children), never read beneath
+  let listed: Vec<String> = compiled
+    .implicit
+    .entries
+    .iter()
+    .filter(|e| e.access == policy::ImplicitAccess::ListDir)
+    .map(|e| e.path.display().to_string())
+    .collect();
+  for npmrc in skipped_npmrcs {
+    writeln!(
+      w,
+      "    skipped:    {} (may hold registry tokens; never readable under enforce; grant it with --allow-read={} if you accept the exposure)",
+      npmrc.display(),
+      npmrc.display()
+    )
+    .unwrap();
+  }
+  if !listed.is_empty() {
+    writeln!(
+      w,
+      "    list only:  {} (the folders' names, never what is beneath them)",
+      listed.join(", ")
+    )
+    .unwrap();
+  }
   let fatal = compiled.fatal_gaps().count();
   writeln!(
     w,
@@ -574,7 +715,8 @@ pub struct KernelSandboxInfo {
   pub would_apply: AutoPlan,
   /// Why `effective` is what it is.
   pub reason: String,
-  /// Whether the kernel enforces anything. `false` in this release line.
+  /// Whether the kernel enforces anything for such a run (`auto` applies
+  /// nothing in this release line: only an explicit `enforce` does).
   pub enforced: bool,
   /// Whether this runtime has an enforcer for this OS.
   pub enforcer_built: bool,
@@ -616,7 +758,11 @@ pub fn info(cli_options: &CliOptions) -> KernelSandboxInfo {
   features.dedup();
   if !caps.enforcer_built {
     warnings.push(
-      "kernel sandbox: no enforcer is built into this runtime yet; --kernel-sandbox=enforce and broker refuse to start".to_string(),
+      "kernel sandbox: no enforcer for this OS is built into this runtime; --kernel-sandbox=enforce and broker refuse to start".to_string(),
+    );
+  } else if !policy::BROKER_BUILT {
+    warnings.push(
+      "kernel sandbox: the supervising broker (Mode B) is not built in yet; --kernel-sandbox=broker refuses to start, and enforce refuses rules only the broker can hold".to_string(),
     );
   }
   if caps.os == TargetOs::Linux && caps.landlock_abi.is_none() {

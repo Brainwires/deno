@@ -14,6 +14,9 @@ use pretty_assertions::assert_eq;
 
 use super::*;
 
+// the rows below describe a runtime without the broker or the overmount
+const _: () = assert!(!BROKER_BUILT && !OVERMOUNT_BUILT);
+
 fn linux(abi: Option<u32>) -> Capabilities {
   Capabilities {
     os: TargetOs::Linux,
@@ -283,7 +286,9 @@ fn fs_rows() {
       },
     },
     Row {
-      name: "Linux with user namespaces: overmount",
+      // the overmount isn't built yet (OVERMOUNT_BUILT): user namespaces
+      // change nothing until it is
+      name: "Linux with user namespaces: no overmount yet, Deno-only",
       options: PermissionsOptions {
         allow_read: s(&["/project"]),
         allow_write: s(&["/project"]),
@@ -295,8 +300,11 @@ fn fs_rows() {
       check: |c| {
         assert_eq!(
           deny(&c.policy.fs.deny_read, "/project/.env"),
-          DenyEnforcement::Overmount
+          DenyEnforcement::DenoOnly
         );
+        let g = gap(c, GapClass::Read);
+        assert_eq!(g.resolution, GapResolution::FailOpen);
+        assert_eq!(g.exact_with, Some(ExactWith::UserNamespaces));
       },
     },
     Row {
@@ -423,7 +431,11 @@ fn fs_rows() {
           deny(&c.policy.fs.deny_write, "/out/keep"),
           DenyEnforcement::Broker
         );
-        assert_eq!(c.fatal_gaps().count(), 0);
+        // the broker isn't built yet (BROKER_BUILT): one fatal gap says so
+        let fatal: Vec<_> = c.fatal_gaps().collect();
+        assert_eq!(fatal.len(), 1, "{fatal:#?}");
+        assert_eq!(fatal[0].class, GapClass::Enforcer);
+        assert_eq!(fatal[0].rule, BROKER_RULE);
       },
     },
     Row {
@@ -474,7 +486,34 @@ fn fs_rows() {
         assert!(c.gaps.iter().any(|g| g.class == GapClass::Write
           && g.resolution == GapResolution::FailOpen
           && g.exact_with == Some(ExactWith::LandlockAbi { abi: 3 })));
+        assert!(!c.policy.syscalls.refuse_path_truncate);
       },
+    },
+    Row {
+      name: "Linux enforce before TRUNCATE: seccomp refuses the truncations, fail closed",
+      options: PermissionsOptions {
+        allow_write: s(&["/out"]),
+        ..Default::default()
+      },
+      caps: linux(Some(2)),
+      mode: Enforce,
+      check: |c| {
+        assert!(c.policy.syscalls.refuse_path_truncate);
+        assert!(c.gaps.iter().any(|g| g.class == GapClass::Write
+          && g.resolution == GapResolution::FailClosed
+          && g.exact_with == Some(ExactWith::LandlockAbi { abi: 3 })));
+        assert_eq!(c.fatal_gaps().count(), 0, "{:#?}", c.gaps);
+      },
+    },
+    Row {
+      name: "Linux enforce with TRUNCATE: nothing extra refused",
+      options: PermissionsOptions {
+        allow_write: s(&["/out"]),
+        ..Default::default()
+      },
+      caps: linux(Some(3)),
+      mode: Enforce,
+      check: |c| assert!(!c.policy.syscalls.refuse_path_truncate),
     },
     Row {
       name: "Linux without Landlock: reads and writes are Deno-only",
@@ -571,9 +610,12 @@ fn net_rows() {
             },
           }
         );
+        // what Mode A holds: the coarsening is documented, so
+        // enforce runs with it
         let g = gap(c, GapClass::Net);
-        assert_eq!(g.resolution, GapResolution::FailOpen);
+        assert_eq!(g.resolution, GapResolution::Documented);
         assert!(g.detail.contains("169.254.169.254"));
+        assert_eq!(c.fatal_gaps().count(), 0, "{:#?}", c.gaps);
       },
     },
     Row {
@@ -636,6 +678,7 @@ fn net_rows() {
         assert!(c.policy.syscalls.refuse_listen);
         let g = gap(c, GapClass::Net);
         assert!(g.detail.contains("not the hosts"));
+        assert_eq!(g.resolution, GapResolution::Documented);
         assert_eq!(g.exact_with, Some(ExactWith::Broker));
       },
     },
@@ -892,7 +935,9 @@ fn run_and_ffi_rows() {
       },
     },
     Row {
-      name: "macOS --allow-ffi=P: map-executable scoped to P and the system",
+      // file-map-executable didn't hold to the --allow-ffi paths in testing
+      // (macOS 26.6): the model claims the read scope, as on Linux
+      name: "macOS --allow-ffi=P: code loads from the read scope, documented",
       options: PermissionsOptions {
         allow_ffi: s(&["/project/lib/libfoo.dylib"]),
         allow_read: s(&["/project"]),
@@ -902,9 +947,14 @@ fn run_and_ffi_rows() {
       mode: Auto,
       check: |c| {
         let map = &c.policy.fs.map_exec;
+        assert_eq!(map, &c.policy.fs.read);
         assert!(map.covers(Path::new("/project/lib/libfoo.dylib")));
-        assert!(map.covers(Path::new("/usr/lib/libSystem.B.dylib")));
-        assert!(!map.covers(Path::new("/project/other.dylib")));
+        assert!(map.covers(Path::new("/project/other.dylib")));
+        assert!(!map.covers(Path::new("/elsewhere/lib.dylib")));
+        assert!(!macos().supports(Feature::MapExecutable));
+        let g = gap(c, GapClass::Ffi);
+        assert_eq!(g.resolution, GapResolution::Documented);
+        assert!(g.detail.contains("read scope"), "{}", g.detail);
       },
     },
     Row {
@@ -933,7 +983,7 @@ fn run_and_ffi_rows() {
       },
     },
     Row {
-      name: "Linux before ABI 6 with FFI and no run: signals are a gap",
+      name: "Linux before ABI 6 with FFI and no run: seccomp holds signals",
       options: PermissionsOptions {
         allow_ffi: all(),
         ..Default::default()
@@ -942,9 +992,20 @@ fn run_and_ffi_rows() {
       mode: Auto,
       check: |c| {
         assert!(!c.policy.scopes.signal);
-        let g = gap(c, GapClass::Signal);
-        assert_eq!(g.exact_with, Some(ExactWith::LandlockAbi { abi: 6 }));
+        assert!(c.policy.syscalls.signal_self);
+        assert!(!c.gaps.iter().any(|g| g.class == GapClass::Signal));
       },
+    },
+    Row {
+      name: "Linux before ABI 6 with a run list: signals not narrowed",
+      options: PermissionsOptions {
+        allow_ffi: all(),
+        allow_run: s(&["/bin/true"]),
+        ..Default::default()
+      },
+      caps: linux(Some(4)),
+      mode: Auto,
+      check: |c| assert!(!c.policy.syscalls.signal_self),
     },
     Row {
       name: "Linux ABI 6: signals and abstract sockets scoped",
@@ -956,6 +1017,7 @@ fn run_and_ffi_rows() {
       mode: Auto,
       check: |c| {
         assert!(c.policy.scopes.signal && c.policy.scopes.abstract_unix);
+        assert!(!c.policy.syscalls.signal_self);
         assert!(!c.gaps.iter().any(|g| g.class == GapClass::Signal));
       },
     },
@@ -1058,14 +1120,19 @@ fn sys_and_env_rows() {
       },
     },
     Row {
-      name: "macOS enforce in Mode A: no scrub (no exec)",
+      name: "macOS enforce: the re-executed image is scrubbed too",
       options: PermissionsOptions {
         allow_env: s(&["PORT"]),
         ..Default::default()
       },
       caps: macos(),
       mode: Enforce,
-      check: |c| assert_eq!(c.policy.env_scrub, None),
+      check: |c| {
+        let keep = c.policy.env_scrub.as_ref().unwrap();
+        assert!(keep.contains(&"PORT".to_string()));
+        assert!(!keep.contains(&"DENO_AUTH_TOKENS".to_string()));
+        assert!(!c.gaps.iter().any(|g| g.class == GapClass::Env));
+      },
     },
     Row {
       name: "unscoped env: nothing to scrub, no gap",
@@ -1077,7 +1144,9 @@ fn sys_and_env_rows() {
       mode: Enforce,
       check: |c| {
         assert_eq!(c.policy.env_scrub, None);
-        assert!(!c.gaps.iter().any(|g| g.class == GapClass::Env));
+        // only the fail-closed note: other processes' /proc/<pid>/environ
+        assert!(!c.gaps.iter().any(|g| g.class == GapClass::Env
+          && g.resolution != GapResolution::FailClosed));
       },
     },
   ]);
@@ -1109,7 +1178,15 @@ fn metadata_and_windows_rows() {
       },
       caps: linux(Some(6)),
       mode: Enforce,
-      check: |c| assert!(c.policy.syscalls.refuse_path_metadata),
+      check: |c| {
+        assert!(c.policy.syscalls.refuse_path_metadata);
+        // inside the write scope too: a fail-closed gap says so
+        assert!(has_gap(c, GapClass::Metadata, GapResolution::FailClosed));
+        // and not the auto-mode residual (the metadata-read gap stays)
+        assert!(!c.gaps.iter().any(|g| g.class == GapClass::Metadata
+          && g.resolution == GapResolution::Documented
+          && g.detail.contains("change the mode")));
+      },
     },
     Row {
       name: "Windows: reads documented Deno-only, writes confined",
@@ -1156,10 +1233,26 @@ fn implicit_set_follows_the_grant() {
     &PermissionsOptions::default(),
     &Context {
       tty_parent: true,
+      ttys: vec![PathBuf::from("/dev/pts/3")],
       ..c.clone()
     },
   );
   assert!(has(&tty, "/dev/tty"));
+  // the standard streams' own terminal, never every terminal of the user
+  assert!(has(&tty, "/dev/pts/3"));
+  assert!(!has(&tty, "/dev/pts"));
+  let policy = KernelPolicy::compile(
+    &PermissionsOptions::default(),
+    &tty,
+    &Context {
+      tty_parent: true,
+      ttys: vec![PathBuf::from("/dev/pts/3")],
+      ..c.clone()
+    },
+  );
+  assert!(policy.policy.fs.write.covers(Path::new("/dev/pts/3")));
+  assert!(!policy.policy.fs.write.covers(Path::new("/dev/pts/4")));
+  assert!(!policy.policy.fs.read.covers(Path::new("/dev/pts/4")));
   // dynamic entries
   let full = ImplicitSet::build(
     &PermissionsOptions::default(),
@@ -1236,7 +1329,6 @@ fn capability_table() {
     Feature::FsRead,
     Feature::FsWrite,
     Feature::DenyInsideAllow,
-    Feature::MapExecutable,
     Feature::UnixSocketPaths,
     Feature::TcpPorts,
   ] {
@@ -1407,3 +1499,287 @@ fn policy_hash_is_stable() {
 
 /// SHA-256 of the JSON above, first 8 bytes in hex.
 const HASH_OF_FIXED_POLICY: &str = "e310efe41517d7d3";
+
+// enforce with an enforcer but no broker: the Mode A rules that made the
+// broker necessary are named in its fatal gap
+#[test]
+fn broker_not_built_names_the_rules() {
+  let c = compile(
+    &PermissionsOptions {
+      allow_write: s(&["/out"]),
+      deny_write: s(&["/out/keep"]),
+      ..Default::default()
+    },
+    linux(Some(6)),
+    KernelSandboxMode::Enforce,
+  );
+  let fatal: Vec<_> = c.fatal_gaps().collect();
+  assert_eq!(fatal.len(), 1, "{fatal:#?}");
+  assert!(
+    fatal[0].detail.contains("--deny-write=/out/keep"),
+    "{}",
+    fatal[0].detail
+  );
+  // a host name: the broker gap, whatever the mode
+  let c = auto(
+    &PermissionsOptions {
+      allow_net: s(&["example.com:443"]),
+      ..Default::default()
+    },
+    linux(Some(6)),
+  );
+  assert!(
+    c.fatal_gaps()
+      .any(|g| g.rule == BROKER_RULE && g.detail.contains("host-scoped")),
+    "{:#?}",
+    c.gaps
+  );
+}
+
+// the files an --allow-sys name reads are in the read scope only when it
+// is granted (Linux); other processes' entries are a fail-closed gap
+#[test]
+fn sys_names_grant_their_proc_files() {
+  let read = |c: &CompiledPolicy| match &c.policy.fs.read {
+    PathScope::Paths { paths } => {
+      paths.iter().map(|r| r.path.clone()).collect::<Vec<_>>()
+    }
+    PathScope::All => panic!("read all"),
+  };
+  let none = auto(&PermissionsOptions::default(), linux(Some(6)));
+  for file in [
+    "/proc/meminfo",
+    "/proc/loadavg",
+    "/proc/uptime",
+    "/proc/version",
+  ] {
+    assert!(!read(&none).contains(&PathBuf::from(file)), "{file}");
+  }
+  let some = auto(
+    &PermissionsOptions {
+      allow_sys: s(&["loadavg", "osRelease", "processes"]),
+      ..Default::default()
+    },
+    linux(Some(6)),
+  );
+  assert!(read(&some).contains(&PathBuf::from("/proc/loadavg")));
+  assert!(read(&some).contains(&PathBuf::from("/proc/version")));
+  assert!(!read(&some).contains(&PathBuf::from("/proc/meminfo")));
+  assert!(
+    some.gaps.iter().any(|g| g.rule == "--allow-sys=processes"
+      && g.resolution == GapResolution::FailClosed),
+    "{:#?}",
+    some.gaps
+  );
+  // the runtime's own /proc/self and cgroup reads are documented, not hidden
+  assert!(
+    some
+      .gaps
+      .iter()
+      .any(|g| g.rule.starts_with("implicit /proc/self")
+        && g.resolution == GapResolution::Documented),
+    "{:#?}",
+    some.gaps
+  );
+  let unscoped = auto(
+    &PermissionsOptions {
+      allow_sys: all(),
+      ..Default::default()
+    },
+    linux(Some(6)),
+  );
+  assert!(read(&unscoped).contains(&PathBuf::from("/proc/meminfo")));
+  // a bare --allow-sys doesn't include the named-only processes: no gap for
+  // other processes' entries unless it is named
+  assert!(
+    !unscoped.gaps.iter().any(|g| g.rule.contains("processes")),
+    "{:#?}",
+    unscoped.gaps
+  );
+  // macOS reads sysctls, not files
+  let mac = auto(
+    &PermissionsOptions {
+      allow_sys: all(),
+      ..Default::default()
+    },
+    macos(),
+  );
+  assert!(!read(&mac).contains(&PathBuf::from("/proc/meminfo")));
+}
+
+/// A scratch folder (not canonicalized: on macOS the temp folder is itself
+/// reached through a symlink) holding `real/` and `link -> real`.
+fn aliased_tree(name: &str) -> PathBuf {
+  let dir = std::env::temp_dir()
+    .join(format!("deno_policy_alias_{name}_{}", std::process::id()));
+  let _ = std::fs::remove_dir_all(&dir);
+  std::fs::create_dir_all(dir.join("real/sub")).unwrap();
+  std::fs::write(dir.join("real/.env"), "").unwrap();
+  std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+  dir
+}
+
+fn p(dir: &Path, rel: &str) -> String {
+  dir.join(rel).to_str().unwrap().to_string()
+}
+
+// a deny is compared with the allows on resolved paths too: one spelled
+// through another path than its allow is still held (never classed as
+// outside every allow, which would leave it to Deno's checks alone)
+#[test]
+fn denies_compare_resolved_paths() {
+  let dir = aliased_tree("deny");
+  for (allow, denied) in [("link", "real/.env"), ("real", "link/.env")] {
+    let options = PermissionsOptions {
+      allow_read: s(&[&p(&dir, allow)]),
+      deny_read: s(&[&p(&dir, denied)]),
+      ..Default::default()
+    };
+    let lin = compile(&options, linux(Some(4)), Enforce);
+    assert_eq!(
+      deny(&lin.policy.fs.deny_read, &p(&dir, denied)),
+      DenyEnforcement::Expand,
+      "{allow} / {denied}"
+    );
+    let mac = compile(&options, macos(), Enforce);
+    assert_eq!(
+      deny(&mac.policy.fs.deny_read, &p(&dir, denied)),
+      DenyEnforcement::Exact,
+      "{allow} / {denied}"
+    );
+    // a write deny reached through an alias: Landlock can't hold it inside
+    // the allow (only the broker could), so enforce refuses
+    let options = PermissionsOptions {
+      allow_write: s(&[&p(&dir, allow)]),
+      deny_write: s(&[&p(&dir, denied)]),
+      ..Default::default()
+    };
+    let lin = compile(&options, linux(Some(4)), Enforce);
+    assert_ne!(
+      deny(&lin.policy.fs.deny_write, &p(&dir, denied)),
+      DenyEnforcement::Implied
+    );
+    assert!(lin.fatal_gaps().count() > 0, "{:#?}", lin.gaps);
+    let mac = compile(&options, macos(), Enforce);
+    assert_eq!(
+      deny(&mac.policy.fs.deny_write, &p(&dir, denied)),
+      DenyEnforcement::Exact
+    );
+  }
+  std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// an allow inside a deny of its class is left out of the kernel's scope
+// (the deny wins, as in Deno's checks), spelled either way
+#[test]
+fn allows_inside_a_deny_are_left_out() {
+  let dir = aliased_tree("carve");
+  for (allow, denied) in [
+    ("real/sub", "real"),
+    ("link/sub", "real"),
+    ("real/sub", "link"),
+    ("real", "real"),
+  ] {
+    for caps in [linux(Some(4)), macos()] {
+      let c = compile(
+        &PermissionsOptions {
+          allow_read: s(&[&p(&dir, allow)]),
+          deny_read: s(&[&p(&dir, denied)]),
+          allow_write: s(&[&p(&dir, allow)]),
+          deny_write: s(&[&p(&dir, denied)]),
+          ..Default::default()
+        },
+        caps,
+        Enforce,
+      );
+      assert_eq!(grants(&c.policy.fs.read), Vec::<PathBuf>::new());
+      assert_eq!(grants(&c.policy.fs.write), Vec::<PathBuf>::new());
+      assert_eq!(
+        deny(&c.policy.fs.deny_read, &p(&dir, denied)),
+        DenyEnforcement::Implied
+      );
+      assert_eq!(
+        deny(&c.policy.fs.deny_write, &p(&dir, denied)),
+        DenyEnforcement::Implied
+      );
+      for class in [GapClass::Read, GapClass::Write] {
+        assert!(
+          c.gaps.iter().any(|g| g.class == class
+            && g.resolution == GapResolution::FailClosed
+            && g.detail.contains("left out")),
+          "{allow} / {denied}: {:#?}",
+          c.gaps
+        );
+      }
+      assert_eq!(c.fatal_gaps().count(), 0, "{:#?}", c.gaps);
+    }
+  }
+  // an allow beside the deny stays
+  let c = compile(
+    &PermissionsOptions {
+      allow_read: s(&[&p(&dir, "real/sub"), &p(&dir, "other")]),
+      deny_read: s(&[&p(&dir, "real")]),
+      ..Default::default()
+    },
+    linux(Some(4)),
+    Enforce,
+  );
+  assert_eq!(grants(&c.policy.fs.read), vec![dir.join("other")]);
+  std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// a path whose resolution stops at a folder that can't be searched can't be
+// placed: a fail-open gap, so enforce refuses
+#[test]
+fn unresolvable_paths_fail_closed() {
+  use std::os::unix::fs::PermissionsExt;
+  let dir = aliased_tree("undecided");
+  let locked = dir.join("locked");
+  std::fs::create_dir_all(locked.join("in")).unwrap();
+  std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+    .unwrap();
+  // root can search any folder: nothing to measure then
+  if std::fs::read_dir(&locked).is_err() {
+    let c = compile(
+      &PermissionsOptions {
+        allow_read: s(&[&p(&dir, "real")]),
+        deny_read: s(&[&p(&dir, "locked/in/x")]),
+        ..Default::default()
+      },
+      linux(Some(4)),
+      Enforce,
+    );
+    assert_eq!(
+      deny(&c.policy.fs.deny_read, &p(&dir, "locked/in/x")),
+      DenyEnforcement::DenoOnly
+    );
+    assert!(
+      c.fatal_gaps().any(|g| g.detail.contains("can't be told")),
+      "{:#?}",
+      c.gaps
+    );
+  }
+  std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+    .unwrap();
+  std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// a machine where a seccomp filter can't be installed (an outer profile
+// refuses it): enforce refuses on Linux rather than failing after the
+// re-exec
+#[test]
+fn no_seccomp_refuses_enforce() {
+  let caps = Capabilities {
+    seccomp: false,
+    ..linux(Some(6))
+  };
+  let c = compile(&PermissionsOptions::default(), caps, Enforce);
+  assert!(
+    c.fatal_gaps()
+      .any(|g| g.class == GapClass::Enforcer && g.rule.contains("seccomp")),
+    "{:#?}",
+    c.gaps
+  );
+  let ok = compile(&PermissionsOptions::default(), linux(Some(6)), Enforce);
+  assert!(!ok.gaps.iter().any(|g| g.rule.contains("seccomp")));
+}

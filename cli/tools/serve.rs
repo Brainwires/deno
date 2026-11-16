@@ -62,6 +62,13 @@ pub async fn serve(
 
   maybe_npm_install(&factory).await?;
 
+  // denext: --kernel-sandbox=enforce applies once the graph is loaded
+  crate::sandbox::enforce::apply_pending(
+    &factory,
+    std::slice::from_ref(main_module),
+  )
+  .await?;
+
   let worker_factory = Arc::new(
     factory
       .create_cli_main_worker_factory_with_roots(roots)

@@ -548,6 +548,18 @@ fn should_run(if_cond: Option<&str>) -> bool {
           std::env::var_os(format!("DENO_SQL_TEST_POSTGRES_{v}")).is_some()
         })
       }
+      // denext: the kernel sandbox's --kernel-sandbox=enforce can run here
+      // (Linux: Landlock and a working seccomp; macOS: Seatbelt), as the
+      // runtime itself reports it
+      "kernelSandboxEnforce" => kernel_sandbox_caps().0,
+      "kernelSandboxEnforceLinux" => {
+        cfg!(target_os = "linux") && kernel_sandbox_caps().0
+      }
+      "kernelSandboxEnforceMac" => {
+        cfg!(target_os = "macos") && kernel_sandbox_caps().0
+      }
+      // ... and holds TCP port rules (Linux: Landlock ABI 4 or later)
+      "kernelSandboxNetPorts" => kernel_sandbox_caps().1,
       "notMacIntel" => {
         cfg!(unix)
           && !(cfg!(target_os = "macos") && cfg!(target_arch = "x86_64"))
@@ -571,6 +583,41 @@ fn should_run(if_cond: Option<&str>) -> bool {
   } else {
     true
   }
+}
+
+/// Whether `--kernel-sandbox=enforce` can run on this machine, and whether
+/// it holds TCP port rules: `deno info --json`'s `kernelSandbox`.
+fn kernel_sandbox_caps() -> (bool, bool) {
+  static CAPS: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
+  *CAPS.get_or_init(|| {
+    if !cfg!(unix) {
+      return (false, false);
+    }
+    let Ok(output) = std::process::Command::new(test_util::deno_exe_path())
+      .args(["info", "--json"])
+      .output()
+    else {
+      return (false, false);
+    };
+    let Ok(info) = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+    else {
+      return (false, false);
+    };
+    let ks = &info["kernelSandbox"];
+    let caps = &ks["capabilities"];
+    if ks["enforcerBuilt"] != serde_json::Value::Bool(true) {
+      return (false, false);
+    }
+    if cfg!(target_os = "linux") {
+      let abi = ks["landlockAbi"].as_u64();
+      let enforce =
+        abi.is_some() && caps["seccomp"] == serde_json::Value::Bool(true);
+      (enforce, enforce && abi.is_some_and(|abi| abi >= 4))
+    } else {
+      let enforce = caps["seatbelt"] == serde_json::Value::Bool(true);
+      (enforce, enforce)
+    }
+  })
 }
 
 fn run_step(
