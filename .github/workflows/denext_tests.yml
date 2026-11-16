@@ -152,7 +152,7 @@ jobs:
       hosted: ${{ steps.pick.outputs.hosted }}
     steps:
       - id: pick
-        uses: Brainwires/.github/actions/pick-runners@15e1b9a5cae06b73b91be1482adedc5ccfb6a742 # pick-runners
+        uses: Brainwires/.github/actions/pick-runners@067b448d5eb4f03857159feba626dca848c52176 # pick-runners
         with:
           # guard first (it runs first); cargo audit starts in guard's slot
           # when guard ends (it needs guard). lint's macos-15 entry only on a
@@ -404,7 +404,7 @@ jobs:
       # The Windows pools are not widened (ops/runners/allowlist.json): they
       # serve only push / dispatch runs of these refs, and a job they refuse
       # closes the pool. Any other run keeps the image (no pool).
-      pick_pool: ${{ ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'development-denext' || github.ref_name == 'development' || github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'rel/') || startsWith(github.ref_name, 'train/') || startsWith(github.ref_name, 'fix/') || startsWith(github.ref_name, 'feat/'))) && 'windows-x64' || '' }}
+      pick_pool: ${{ ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'development-denext' || github.ref_name == 'development' || github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'rel/') || startsWith(github.ref_name, 'train/') || startsWith(github.ref_name, 'pretest/') || startsWith(github.ref_name, 'fix/') || startsWith(github.ref_name, 'feat/'))) && 'windows-x64' || '' }}
 
   linux:
     name: ubuntu-22.04
@@ -479,4 +479,4 @@ jobs:
       # The Windows pools are not widened (ops/runners/allowlist.json): they
       # serve only push / dispatch runs of these refs, and a job they refuse
       # closes the pool. Any other run keeps the image (no pool).
-      pick_pool: ${{ ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'development-denext' || github.ref_name == 'development' || github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'rel/') || startsWith(github.ref_name, 'train/') || startsWith(github.ref_name, 'fix/') || startsWith(github.ref_name, 'feat/'))) && 'windows-arm64' || '' }}
+      pick_pool: ${{ ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'development-denext' || github.ref_name == 'development' || github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'rel/') || startsWith(github.ref_name, 'train/') || startsWith(github.ref_name, 'pretest/') || startsWith(github.ref_name, 'fix/') || startsWith(github.ref_name, 'feat/'))) && 'windows-arm64' || '' }}

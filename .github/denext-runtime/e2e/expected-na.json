@@ -1,5 +1,5 @@
 {
-  "$comment": "The e2e checks expected to be n/a, per <target>/<backend>/<variant> and area (run.ts): any other n/a fails the run (P7). Taken from the runtime runs of rc.5, rc.6 and ee49f60f0, which agree. When a check stops being n/a, run.ts says so: drop it here. A check may only be added with the reason it cannot run on that runner.",
+  "$comment": "The e2e checks expected to be n/a, per <target>/<backend>/<variant> and area (run.ts): any other n/a fails the run (P7). Taken from the runtime runs of rc.5, rc.6 and ee49f60f0, which agree. When a check stops being n/a, run.ts says so: drop it here. A check may only be added with the reason it cannot run on that runner. origin's backpressure check on the Windows webview legs: WebView2 reads a custom-scheme response ahead into its own memory at a pace that varies run to run (under 64 MiB, or 86 MB on an Arm64 runner while the page had read 1.1 MB), so laufey's high-water mark cannot be observed there; the app (apps/origin) reports n/a only for a valid measurement that read ahead, and a flood that never ran is still a failure.",
   "aarch64-apple-darwin/webview/default": {
     "deeplink": [
       "install from the .msi"
@@ -289,7 +289,8 @@
       "launch: a notification the user dismisses fires close"
     ],
     "origin": [
-      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1"
+      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1",
+      "launch: a stream the page stops reading is held back (backpressure), not drained"
     ],
     "passkeys": [
       "launch: a completed registration / authentication ceremony"
@@ -384,7 +385,8 @@
       "launch: an application-menu accelerator fires its item"
     ],
     "origin": [
-      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1"
+      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1",
+      "launch: a stream the page stops reading is held back (backpressure), not drained"
     ],
     "passkeys": [
       "launch: a completed registration / authentication ceremony"

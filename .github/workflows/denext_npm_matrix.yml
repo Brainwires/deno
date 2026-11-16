@@ -64,7 +64,7 @@ jobs:
       hosted: ${{ steps.pick.outputs.hosted }}
     steps:
       - id: pick
-        uses: Brainwires/.github/actions/pick-runners@15e1b9a5cae06b73b91be1482adedc5ccfb6a742 # pick-runners
+        uses: Brainwires/.github/actions/pick-runners@067b448d5eb4f03857159feba626dca848c52176 # pick-runners
         with:
           jobs: guard=linux-x64@ubuntu-24.04 matrix=linux-x64-docker@ubuntu-22.04
           vars: ${{ toJSON(vars) }}

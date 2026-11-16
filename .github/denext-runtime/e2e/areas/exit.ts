@@ -135,10 +135,18 @@ export async function run(env: Env, rep: AreaReport) {
     });
     const r = await waitResult("exit", { seen, launch: token, ms: 90_000 });
     if (!r) {
+      // What the launch got as far as: its backend's result (stages: the
+      // page served, and how far its script ran), and the host's output.
+      const partial = (await results("exit")).find((x) => x.launch === token);
       rep.check(
         `${label}: the app wrote a result`,
         false,
-        await tail(l.logFile),
+        {
+          result: partial
+            ? { pid: partial.pid, checks: partial.checks, data: partial.data }
+            : null,
+          log: await tail(l.logFile),
+        },
       );
       await kill(l, app.artifact);
       return;

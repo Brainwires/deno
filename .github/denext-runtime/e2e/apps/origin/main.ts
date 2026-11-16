@@ -495,10 +495,18 @@ async function afterPage() {
   // stops pulling the app's stream. CEF reads the response at the page's
   // pace; the WebKit engines and WebView2 read it into their own memory as
   // fast as laufey offers it, so there the bound is the engine's, not the
-  // bridge's.
-  const held = flood.atPause > 0 && flood.pageRead > 0 &&
-    flood.atPause <= 64 * 1024 * 1024 && flood.atPause < FLOOD_TOTAL;
-  if (held || r.params.backend === "cef") {
+  // bridge's. WebView2's read-ahead depends on how fast it drains in the
+  // page's 3 s pause: under 64 MiB on one run, 86 MB on the next (an Arm64
+  // runner), so on Windows the webview legs list it as n/a too.
+  //
+  // The n/a is only for that engine read-ahead: the page read its 1 MiB and
+  // reported the pause (a measurement), and the app produced more than 64 MiB.
+  // A flood that never ran, a page that read nothing or never reported, is a
+  // failure on every backend.
+  const measured = flood.atPause > 0 && flood.pageRead > 0;
+  const held = measured && flood.atPause <= 64 * 1024 * 1024 &&
+    flood.atPause < FLOOD_TOTAL;
+  if (held || !measured || r.params.backend === "cef") {
     r.check(
       "a stream the page stops reading is held back (backpressure), not drained",
       held,
@@ -507,7 +515,7 @@ async function afterPage() {
   } else {
     r.na(
       "a stream the page stops reading is held back (backpressure), not drained",
-      `the ${r.params.backend} engine read the whole response into its own memory (${flood.atPause} bytes produced while the page had read ${flood.pageRead}); laufey's high-water mark bounds only its own queue`,
+      `the ${r.params.backend} engine read the response ahead into its own memory (${flood.atPause} of ${FLOOD_TOTAL} bytes produced while the page had read ${flood.pageRead}); laufey's high-water mark bounds only its own queue`,
     );
   }
 

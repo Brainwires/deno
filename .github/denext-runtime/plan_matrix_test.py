@@ -660,6 +660,16 @@ class Workflow(unittest.TestCase):
         self.assertNotIn("pick_runner", setup)
         self.assertIn("POOL_FREE: ${{ steps.pools.outputs.free }}", setup)
         self.assertIn("POOL_BLOCKED: ${{ steps.pools.outputs.blocked }}", setup)
+
+    def test_setup_is_named_as_a_picker(self):
+        # The shared action's settle (in a sibling run) waits for picker jobs by
+        # name: `pick … runners`, `<leg> / pick … runners`, `<job>: pick … runners`.
+        # setup's `pools` step picks the matrix's slots, so its name must match.
+        setup = job_block(self.text, "setup")
+        m = re.search(r'^    name: ["\']?([^"\'\n]+)["\']?$', setup, re.M)
+        self.assertIsNotNone(m)
+        self.assertRegex(m.group(1), r"(^| / |: )pick [^/]*runners?$")
+        self.assertIn("uses: Brainwires/.github/actions/pick-runners@", setup)
         self.assertIn("MACOS_CAP: '3'", setup)
         self.assertIn("POOL_HEALTH: ${{ vars.DENEXT_POOL_HEALTH }}", setup)
         self.assertIn("SKIP_JOBS:", setup)

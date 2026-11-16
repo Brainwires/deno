@@ -19,12 +19,20 @@ globalThis.addEventListener("unload", () => {
   r.set("unloadRan", true);
 });
 
+// The page says how far it got (POST /stage), so a launch whose page never
+// posts its result shows where it stopped: never requested, never ran, or
+// stuck in localStorage or IndexedDB.
 const SCRIPT = `
+const stage = (s) => fetch("/stage", { method: "POST", body: s }).catch(() => {});
+addEventListener("error", (e) => stage("error: " + (e.error?.stack ?? e.message)));
+addEventListener("unhandledrejection", (e) => stage("unhandled rejection: " + String(e.reason?.stack ?? e.reason)));
+stage("script running");
 const value = "launch-" + Date.now() + "-" + Math.random().toString(36).slice(2);
 const out = { value, origin: location.origin };
 out.localPrevious = localStorage.getItem("e2e-exit");
 localStorage.setItem("e2e-exit", value);
 out.localReadBack = localStorage.getItem("e2e-exit");
+stage("localStorage done");
 const idb = (mode, f) => new Promise((resolve, reject) => {
   const open = indexedDB.open("e2e-exit", 1);
   open.onupgradeneeded = () => open.result.createObjectStore("kv");
@@ -41,6 +49,7 @@ try {
   await idb("readwrite", (s) => s.put(value, "e2e"));
   out.idbReadBack = await idb("readonly", (s) => s.get("e2e"));
 } catch (e) { out.idbError = String(e); }
+stage("IndexedDB done");
 await fetch("/result", { method: "POST", body: JSON.stringify(out) });
 `;
 
@@ -62,5 +71,10 @@ Deno.serve(async (req) => {
     }, 0);
     return new Response("ok");
   }
+  if (url.pathname === "/stage") {
+    r.mark(`page: ${await req.text()}`);
+    return new Response("ok");
+  }
+  r.mark(`served ${url.pathname}`);
   return html(page("e2e exit", "", SCRIPT));
 });
