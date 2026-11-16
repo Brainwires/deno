@@ -209,7 +209,7 @@ impl WatchSender {
   /// watch reports on everything below them: a `--deny-read` or
   /// `--ignore-read` scope inside the watched tree, and, where the backend
   /// follows symlinks while walking the tree (inotify and kqueue unless
-  /// told not to, see [`follows_symlinks`]; FSEvents and
+  /// told not to, see [`ensure_watcher`]; FSEvents and
   /// `ReadDirectoryChangesW` report the paths they see changing), whatever
   /// a link leads to. An event path is passed on only when reading it is
   /// granted, by the path as reported and by the path it resolves to, so a
@@ -534,8 +534,6 @@ fn ensure_watcher(
     return Ok(ws.inner.clone());
   }
 
-  let follow_symlinks =
-    follows_symlinks(state.try_borrow::<PermissionsContainer>());
   let senders: Arc<Mutex<Vec<WatchSender>>> = Arc::new(Mutex::new(Vec::new()));
   let sender_clone = senders.clone();
   let watcher: RecommendedWatcher = Watcher::new(
@@ -549,8 +547,14 @@ fn ensure_watcher(
         dispatch(ws, &res2);
       }
     },
-    // denext: see [`follows_symlinks`].
-    notify::Config::default().with_follow_symlinks(follow_symlinks),
+    // denext: don't walk into symlinked directories while setting up a
+    // recursive watch (honored by the inotify and kqueue backends, which
+    // otherwise add a watch on every directory a link inside the tree leads
+    // to). Events from a link's target were never wanted: they are reported
+    // under a path outside the watched tree, or inside a deny scope, and
+    // `WatchSender::readable_event` drops whatever still gets through. A
+    // watched path that is itself a link is still followed.
+    notify::Config::default().with_follow_symlinks(false),
   )
   .map_err(|e| FsEventsError::Notify(JsNotifyError(e)))?;
 
@@ -566,22 +570,6 @@ fn ensure_watcher(
   });
 
   Ok(inner)
-}
-
-/// denext: whether a recursive watch walks into symlinked directories
-/// (honored by the inotify and kqueue backends, which then add a watch on
-/// every directory a link inside the tree leads to).
-///
-/// It does, as upstream, while every read is granted and no read is denied:
-/// a dev server watching `app/` keeps seeing changes in a linked workspace
-/// package. Otherwise it doesn't: a link's target can lie outside the
-/// granted scopes or inside a deny scope, and an event there would name it
-/// (`WatchSender::readable_event` still drops whatever gets through). The
-/// watcher is shared by every watch of a runtime and created by the first,
-/// so a later revoke narrows what is reported, not what is walked. A watched
-/// path that is itself a link is followed either way.
-fn follows_symlinks(permissions: Option<&PermissionsContainer>) -> bool {
-  permissions.is_none_or(|p| p.query_read_all() && !p.has_read_deny_rules())
 }
 
 /// Make `path` absolute and collapse `.` / `..` segments so that paths
@@ -918,26 +906,6 @@ mod tests {
     )
     .unwrap();
     PermissionsContainer::new(Arc::new(parser), perms)
-  }
-
-  // a recursive watch walks into symlinked directories, as upstream, only
-  // while every read is granted and none is denied
-  #[test]
-  fn follows_symlinks_only_without_read_limits() {
-    assert!(follows_symlinks(None));
-    assert!(follows_symlinks(Some(&permissions_with(
-      Some(vec![]),
-      None
-    ))));
-    assert!(!follows_symlinks(Some(&permissions_with(
-      Some(vec!["/tmp".to_string()]),
-      None,
-    ))));
-    assert!(!follows_symlinks(Some(&permissions_with(
-      Some(vec![]),
-      Some(vec!["/tmp/secret".to_string()]),
-    ))));
-    assert!(!follows_symlinks(Some(&permissions_with(None, None))));
   }
 
   // a watcher error is delivered with only the paths the runtime may read:

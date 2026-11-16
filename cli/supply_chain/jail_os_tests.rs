@@ -1382,7 +1382,7 @@ print("rdonly-trunc-out", r(lambda: os.close(os.open(sys.argv[2] + "/f", os.O_RD
       r() { if "$@" 2>/dev/null; then echo ok; else echo refused; fi; }
       if [ -e "/dev/shm/$1" ]; then echo "host-seen yes"; else echo "host-seen no"; fi
       echo "host-write $(r sh -c 'echo x > "/dev/shm/$1"' sh "$1")"
-      echo "own-write $(r sh -c 'echo x > "/dev/shm/$2"' sh "$2")"
+      echo "own-write $(r sh -c 'echo x > "/dev/shm/$1"' sh "$2")"
       echo "own-chmod $(r chmod 600 "/dev/shm/$2")"
       if [ -n "$3" ]; then
         echo "semaphore $(r "$3" -c 'import multiprocessing; multiprocessing.Lock()')"

@@ -140,11 +140,12 @@
       "args": "run --quiet --kernel-sandbox=enforce --allow-read=inside --allow-write=inside annotate.ts",
       "output": "note.out"
     },
-    // the note on a Deno op the kernel refused (macOS: a terminal that isn't
-    // one of the standard streams', which Deno's check allows here)
+    // the note on a Deno op the kernel refused (macOS: /dev/tty for reading,
+    // which Deno's check allows with a read grant, while no standard stream
+    // of the spec is a terminal)
     "note_macos": {
       "if": "kernelSandboxEnforceMac",
-      "args": "run --quiet --kernel-sandbox=enforce --allow-write annotate.ts",
+      "args": "run --quiet --kernel-sandbox=enforce --allow-read annotate.ts",
       "output": "note.out"
     },
     // P4: the PID is unchanged across the re-exec, signals are delivered

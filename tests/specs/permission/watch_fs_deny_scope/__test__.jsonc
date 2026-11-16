@@ -30,12 +30,12 @@
         }
       ]
     },
-    // with no read limit, a recursive watch still follows a symlinked
-    // directory inside the tree (inotify; FSEvents never follows links)
-    "watch_fs_follows_links_without_deny": {
-      "if": "linux",
+    // with no deny, a change made through a link to a directory inside the
+    // watched tree is reported by its real path
+    "watch_fs_link_inside_tree": {
+      "if": "unix",
       "args": "run --allow-read --allow-write watch_link.ts",
-      "output": "saw the change through the link: true\n"
+      "output": "saw both changes: true\n"
     },
     "node_fs_watch": {
       "if": "unix",

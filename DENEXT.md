@@ -16673,10 +16673,13 @@ where the changes are discussed.
      - **Watchers:** every path a `Deno.watchFs` event or error reports (and so
        `node:fs.watch`) is checked against the read permission without prompting
        (`PermissionsContainer::query_read_reachable`); unreadable paths are
-       dropped, and an event with none left is not delivered. While reads are
-       limited, a recursive watch doesn't walk into symlinked directories
-       (`follows_symlinks`); with every read granted and none denied it does, as
-       before.
+       dropped, and an event with none left is not delivered. A recursive watch
+       doesn't walk into symlinked directories (`with_follow_symlinks(false)`,
+       honoured by inotify and kqueue). No event that was delivered before is
+       lost: a change is reported only when its resolved path lies inside the
+       watched tree (upstream's `event_matches_watched_paths`), so a link's
+       target outside the tree was never reported, and one inside it is reported
+       by its real path.
      - **Limits:** a deny scope covers names, not files: another hard link to a
        denied file is outside it. The package.json and BYONM module checks
        resolve a path and the loader then reads it by name, as every path-based
@@ -16689,7 +16692,6 @@ where the changes are discussed.
        `test_deny_scope_written_through_a_link`,
        `test_deny_scope_that_is_a_link` and
        `test_deny_scope_written_through_a_junction` (Windows); `fs_events`'s
-       `follows_symlinks_only_without_read_limits` and
        `watcher_errors_leave_out_paths_the_runtime_may_not_read`.
      - Node tests enabled: none; Node has no read permissions.
 
