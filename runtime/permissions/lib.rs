@@ -8875,7 +8875,7 @@ mod tests {
       &self,
       text: &str,
     ) -> Result<DenyRunDescriptor, PathResolveError> {
-      if text.contains("/") {
+      if AllowRunDescriptor::is_path(text) {
         Ok(DenyRunDescriptor::Path(self.join_path_with_root(text)))
       } else {
         Ok(DenyRunDescriptor::Name(text.to_string()))
@@ -12627,7 +12627,15 @@ mod tests {
   #[test]
   fn self_fork_authorization_follows_the_run_permission() {
     let parser = TestPermissionDescriptorParser;
-    let cmd = parser.parse_run_query("/app/bin").unwrap();
+    // a path every parser here resolves alike: on Windows `/app/bin` has no
+    // drive, so the query resolves it onto the current drive while the test
+    // parser keeps a deny as written, and they wouldn't compare
+    let (app, other) = if cfg!(windows) {
+      ("C:\\app\\bin", "C:\\other")
+    } else {
+      ("/app/bin", "/other")
+    };
+    let cmd = parser.parse_run_query(app).unwrap();
     let container = |opts: PermissionsOptions| {
       PermissionsContainer::new(
         Arc::new(TestPermissionDescriptorParser),
@@ -12707,7 +12715,7 @@ mod tests {
     revoked.revoke_run(None).unwrap();
     assert!(!revoked.may_authorize_self_fork(&cmd));
     let revoked_one = container(Default::default());
-    revoked_one.revoke_run(Some("/other")).unwrap();
+    revoked_one.revoke_run(Some(other)).unwrap();
     assert!(!revoked_one.may_authorize_self_fork(&cmd));
     // deep clones keep it either way
     assert!(!revoked.deep_clone().may_authorize_self_fork(&cmd));
@@ -12716,7 +12724,7 @@ mod tests {
         .deep_clone_without_prompt()
         .may_authorize_self_fork(&cmd)
     );
-    for deny in [vec![], svec!["/app/bin"]] {
+    for deny in [vec![], vec![app.to_string()]] {
       let denied = container(PermissionsOptions {
         deny_run: Some(deny),
         ..Default::default()
@@ -12725,7 +12733,7 @@ mod tests {
     }
     // a deny of another program leaves it
     let other = container(PermissionsOptions {
-      deny_run: Some(svec!["/other"]),
+      deny_run: Some(vec![other.to_string()]),
       ..Default::default()
     });
     assert!(other.may_authorize_self_fork(&cmd));
