@@ -1063,7 +1063,10 @@ fn linux_sandbox(
 /// write root that isn't is left out (an allow that can't be written grants
 /// nothing); a deny that isn't is replaced by its nearest ancestor that is
 /// (a deny that can't be written must not deny nothing).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(
+  not(target_os = "macos"),
+  allow(dead_code, reason = "the Seatbelt profile is macOS only")
+)]
 fn seatbelt_paths(
   write: &[PathBuf],
   deny_read: &[PathBuf],

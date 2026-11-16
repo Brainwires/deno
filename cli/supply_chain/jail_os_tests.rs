@@ -1343,8 +1343,13 @@ print("rdonly-trunc-out", r(lambda: os.close(os.open(sys.argv[2] + "/f", os.O_RD
       echo "null $(r sh -c 'exec 3</dev/null' sh)"
       echo "urandom $(r sh -c 'head -c 4 /dev/urandom >/dev/null' sh)"
     "#;
-    let out =
-      jailed_shell(script, &[slave.clone()], &inside, Confine::Jail).await;
+    let out = jailed_shell(
+      script,
+      std::slice::from_ref(&slave),
+      &inside,
+      Confine::Jail,
+    )
+    .await;
     // SAFETY: opened above
     unsafe { libc::close(master) };
     for line in ["tty refused", "null ok", "urandom ok"] {

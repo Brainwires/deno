@@ -670,8 +670,8 @@ mod tests {
           .program();
         // every test holds (the mask drops the high bits)
         let mut held = [0u32; 6];
-        for i in 0..n as usize {
-          held[i] = if equal {
+        for (i, arg) in held.iter_mut().enumerate().take(n as usize) {
+          *arg = if equal {
             0x100 | (10 + i as u32)
           } else {
             0x100
