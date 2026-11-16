@@ -363,6 +363,25 @@ pub fn check_run(
   Ok(resolution)
 }
 
+/// Warns once that deno.json's kernel sandbox mode doesn't cover lint
+/// plugins: `deno lint` (and the language server) run their code with no
+/// kernel sandbox, whatever `permissions.kernelSandbox` says.
+pub fn warn_lint_plugins_unconfined(cli_options: &CliOptions) {
+  let Ok(Some(mode)) = config_mode(cli_options) else {
+    return;
+  };
+  if !mode.fails_closed() {
+    return;
+  }
+  static WARN: Once = Once::new();
+  WARN.call_once(|| {
+    log::warn!(
+      "{} deno.json permissions.kernelSandbox={mode} doesn't cover lint plugins: their code runs with no kernel sandbox",
+      crate::colors::yellow("Warning"),
+    );
+  });
+}
+
 /// Refuses to start `what`, a program this process would run directly
 /// rather than through `deno run` (`deno x` of a package's native
 /// executable), when the kernel sandbox would enforce for a run with these

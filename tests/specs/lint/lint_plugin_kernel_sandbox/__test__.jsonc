@@ -1,0 +1,7 @@
+// denext (DENEXT.md items 425 and 444): deno.json's kernel sandbox mode
+// doesn't cover lint plugins, and deno lint says so
+{
+  "tempDir": true,
+  "args": "lint a.ts",
+  "output": "lint.out"
+}

@@ -1,0 +1,2 @@
+Warning deno.json permissions.kernelSandbox=enforce doesn't cover lint plugins: their code runs with no kernel sandbox
+Checked 1 file

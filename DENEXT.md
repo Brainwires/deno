@@ -16306,6 +16306,11 @@ where the changes are discussed.
        takes no `--kernel-sandbox` / `--kernel-sandbox-report` (a parse error),
        and applies the deny and ignore flags it is given, which it accepted and
        ignored before (as upstream does).
+     - Not covered, and not refused: lint plugins. `deno lint` and the language
+       server run plugin code with no kernel sandbox whatever deno.json's
+       `permissions.kernelSandbox` says (neither takes the mode); `deno lint`
+       says so once when deno.json sets `enforce` and plugins are configured
+       (`sandbox::warn_lint_plugins_unconfined`). Confining them is item 444.
      - macOS: the working directory itself is listable (a `literal` rule:
        `getcwd` opens `.`, which spawning a child needs), nothing beneath it;
        under `--allow-run` so is `/` (dyld in every new process lists it and
@@ -16843,6 +16848,16 @@ where the changes are discussed.
        `jail.rs`'s `mentions_shared_memory_only_for_its_markers` and
        `no_shm_hint_names_dev_shm_and_the_reason`.
      - Node tests enabled: none; no Node API changes.
+
+444. **Planned (the permission trains before denext 5.0): lint plugins under the
+     kernel sandbox** (CLI). `deno lint` and the language server load lint
+     plugins (JavaScript) and run them with every permission and no kernel
+     sandbox; deno.json's `permissions.kernelSandbox` doesn't apply to them
+     (item 425 lists them as not covered, and `deno lint` warns under
+     `enforce`). The plan: run plugin code in a worker of its own held to a
+     read-only policy over the linted files (no write, no network, no run),
+     applied by the same enforcer as `deno run` where the mode enforces.
+     - Status: not started.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

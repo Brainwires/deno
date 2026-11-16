@@ -372,6 +372,8 @@ impl WorkspaceLinter {
 
     let mut plugin_runner = None;
     if !plugin_specifiers.is_empty() {
+      // denext: deno.json's kernel sandbox mode doesn't confine plugins
+      crate::sandbox::warn_lint_plugins_unconfined(cli_options);
       let logger = plugins::PluginLogger::new(logger_printer);
       let runner = plugins::create_runner_and_load_plugins(
         plugin_specifiers,
