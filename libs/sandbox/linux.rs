@@ -18,8 +18,10 @@
 //! - A script that may reach only some hosts (DENEXT.md item 111) goes
 //!   through its allow-listing proxy (`crate::proxy`): Landlock ABI 4+
 //!   (Linux 6.7+) allows TCP `connect` only to the proxy's port and no
-//!   `bind` (no listening for connections from outside), and seccomp
-//!   allows only TCP sockets (no UDP, so no DNS or other datagrams; no SCTP
+//!   `bind`, and the jail's seccomp rules refuse `listen(2)` (no listening
+//!   for connections from outside: `listen` on an unbound socket binds an
+//!   ephemeral port itself, an implicit bind Landlock's `BIND_TCP` doesn't
+//!   see; GHSA-9363-h8qp-jg52), and seccomp allows only TCP sockets (no UDP, so no DNS or other datagrams; no SCTP
 //!   or MPTCP, which Landlock's port rules don't cover) and no TCP Fast Open
 //!   sends (`MSG_FASTOPEN` connects without `connect(2)`). Landlock matches
 //!   the port, not the address, so where unprivileged user namespaces are

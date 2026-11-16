@@ -15963,24 +15963,39 @@ where the changes are discussed.
      - Node tests enabled: none; `node:http` upgrades and the `ws` package don't
        go through this client.
 
-419. **`fix(supply-chain)`: the Linux script jail's socket filter refuses one
-     more socket operation** (CLI only; `cli/supply_chain/jail.rs`,
+419. **`fix(supply-chain)`: a Linux script held to a host list can't listen for
+     connections** (GHSA-9363-h8qp-jg52; CLI only; `cli/supply_chain/jail.rs`,
      `libs/sandbox/seccomp.rs`, `cli/supply_chain/jail_os_tests.rs`; first
      written against `cli/supply_chain/sandbox_linux.rs`, which item 420 moves).
-     A lifecycle script held to a host list (item 111), or given no network, now
-     gets EACCES from one more socket operation in the jail's seccomp filter. A
-     script whose network is fully open (`net: true`) is unchanged, and the
-     proxy's socket in a script's own network namespace is set up before the
-     filter is installed. The no-network-namespace warning now says that such a
-     script shares this host's network.
+     Item 111 holds a lifecycle script with a host list to its allow-listing
+     proxy: Landlock ABI 4 (Linux 6.7+) allows TCP `connect` only to the proxy's
+     port and refuses `bind`, which was meant to rule out listening. But
+     `listen(2)` on a socket that was never bound makes the kernel bind it to
+     `0.0.0.0:<ephemeral port>` itself (`inet_autobind`), past
+     `security_socket_bind`, so Landlock's `BIND_TCP` never saw it, and the
+     seccomp filter had no rule for `listen`. Where unprivileged user namespaces
+     are unavailable (Ubuntu 23.10+ and its AppArmor restriction, GitHub's
+     `ubuntu-24.04` runners, Docker's default seccomp profile), the script runs
+     in the host's network namespace, so the listener took connections from
+     other users, the LAN or the internet: an inbound channel around the proxy's
+     allow-list for whatever the jail lets the script read. The seccomp filter
+     now refuses `listen` with EACCES unless the script's network is fully open
+     (`net: true`), under a host list and with no network alike. An explicit
+     bind is already refused there, so no legitimate script loses anything; the
+     proxy's listener in a script's own namespace is bound and listening before
+     the filter is installed. The no-network-namespace warning now says the
+     script may not listen.
      - User-facing note: on Linux, a lifecycle script with a host list or no
-       network has one more socket operation refused with EACCES.
+       network gets EACCES from `listen()`; from 3.0.0-rc.6 to 3.0.0-denext.23,
+       a bare `listen()` without a network namespace of the script's own
+       accepted connections from outside the jail. macOS is not affected
+       (Seatbelt refuses the listen itself).
      - Tests: `supply_chain::jail_os_tests::linux::seccomp_program_semantics`
-       (refused under a host list and with no network, allowed with the open
-       network);
-       `supply_chain::jail_os_tests::linux::proxy_held_script_socket_filter` (a
-       forked child confined as a proxy-held script gets EACCES with a `bind`
-       first and without one; skipped without Landlock ABI 4).
+       (`listen` refused under a host list and with no network, allowed with the
+       open network);
+       `supply_chain::jail_os_tests::linux::proxy_held_script_cannot_listen` (a
+       forked child confined as a proxy-held script: bind-then-listen and a bare
+       listen both get EACCES; skipped without Landlock ABI 4).
      - Node tests enabled: none; no Node API changes.
 
 420. **`refactor(sandbox)`: the lifecycle jail's OS enforcers are a library

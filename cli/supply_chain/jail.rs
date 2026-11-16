@@ -144,8 +144,10 @@ pub use deno_sandbox::OsNet;
 /// The seccomp program of a jailed script's processes (DENEXT.md items 111
 /// and 124): `io_uring_setup` fails (io_uring opens sockets and does I/O
 /// past the syscall filter), `ioctl(TIOCSTI)` / `ioctl(TIOCLINUX)` fail with
-/// EPERM (they type into a terminal), one more socket operation fails with
-/// EACCES unless the network is open, through the proxy the TCP Fast Open
+/// EPERM (they type into a terminal), `listen` fails with EACCES unless the
+/// network is open (an unbound socket's `listen` binds an ephemeral port on
+/// every address itself, which Landlock's `BIND_TCP` doesn't mediate;
+/// GHSA-9363-h8qp-jg52), through the proxy the TCP Fast Open
 /// sends fail (`MSG_FASTOPEN` connects a socket without `connect(2)`, past
 /// Landlock), and `socket(2)` creates netlink sockets, plus IPv4 / IPv6
 /// ones when the network is open (TCP streams only through the proxy).
@@ -176,8 +178,11 @@ pub fn seccomp_spec(net: OsNet) -> deno_sandbox::SeccompSpec {
       errno: libc::EPERM,
     });
   if !matches!(net, OsNet::Open) {
-    // refused without the whole network. The proxy's socket in a
-    // namespace is set up before this filter is installed (NetnsHandoff
+    // no serving: Landlock refuses an explicit bind, but listen(2) on an
+    // unbound socket auto-binds 0.0.0.0:<ephemeral> past it, reachable from
+    // the host and the network wherever the script has no namespace of its
+    // own (GHSA-9363-h8qp-jg52). The proxy's listener in a namespace is
+    // bound and listening before this filter is installed (NetnsHandoff
     // runs first).
     spec = spec.rule(SyscallRule::Deny {
       nr: NR_LISTEN,
@@ -762,7 +767,7 @@ fn unconfined_warning(reason: &str) -> String {
 #[cfg(target_os = "linux")]
 fn no_netns_warning(reason: &str) -> String {
   format!(
-    "jail-scripts: lifecycle scripts can't get a network namespace of their own here ({reason}); a script held to a host list shares this host's network: it may connect only to its proxy's port number, which another machine could answer on."
+    "jail-scripts: lifecycle scripts can't get a network namespace of their own here ({reason}); a script held to a host list shares this host's network: it may connect only to its proxy's port number, which another machine could answer on, and may not listen for connections."
   )
 }
 

@@ -12,8 +12,8 @@
 //! regenerate them from the new program, and say why in the commit.
 //!
 //! The `denied` and `proxy` seccomp goldens were regenerated on the train
-//! for DENEXT.md item 419: one more `Deny` rule after the `ioctl` rule when
-//! the network isn't fully open. The `open` program and the Seatbelt
+//! for DENEXT.md item 419 (GHSA-9363-h8qp-jg52): a `Deny` of `listen(2)`
+//! after the `ioctl` rule when the network isn't fully open. The `open` program and the Seatbelt
 //! profiles are unchanged.
 
 use std::path::PathBuf;
@@ -355,7 +355,8 @@ mod linux {
       fastopen
     );
     assert_eq!(run_filter(&program, NR_SENDMSG, [3, 0, 0, 0, 0, 0]), allow);
-    // refused without the whole network, allowed with it
+    // no listening without the whole network: listen(2) auto-binds an
+    // unbound socket past Landlock's BIND_TCP
     assert_eq!(run_filter(&program, NR_LISTEN, [3, 1, 0, 0, 0, 0]), eacces);
     assert_eq!(
       run_filter(
@@ -381,11 +382,10 @@ mod linux {
   }
 
   /// Confines a forked child as a proxy-held script is (Landlock with the
-  /// proxy port, then the jail's seccomp program) and reports what the
-  /// filtered socket operation returns there, after a `bind` or without one:
-  /// 0, or the errno.
+  /// proxy port, then the jail's seccomp program) and reports what `bind` +
+  /// `listen` and a bare `listen` (no `bind`) return there: 0, or the errno.
   #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-  fn socket_op_in_confined_child(bind_first: bool) -> i32 {
+  fn listen_in_confined_child(bind_first: bool) -> i32 {
     use std::os::fd::AsRawFd;
     let dir = tempfile::tempdir().unwrap();
     let ruleset = super::super::sandbox_linux::build_ruleset(
@@ -469,25 +469,27 @@ mod linux {
     code
   }
 
-  // A proxy-held script: the filtered socket operation is refused with a
-  // `bind` first and without one.
+  // A proxy-held script can't serve: neither bind-then-listen (Landlock's
+  // BIND_TCP) nor a bare listen(2), whose implicit ephemeral bind Landlock
+  // doesn't mediate (it would listen on 0.0.0.0, reachable from outside
+  // wherever there is no network namespace; GHSA-9363-h8qp-jg52).
   #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
   #[test]
   #[allow(clippy::print_stderr, reason = "test code: a skip note")]
-  fn proxy_held_script_socket_filter() {
+  fn proxy_held_script_cannot_listen() {
     if !super::super::sandbox_linux::can_confine_to_port() {
       eprintln!("skipped: no Landlock ABI 4 here");
       return;
     }
     assert_eq!(
-      socket_op_in_confined_child(true),
+      listen_in_confined_child(true),
       libc::EACCES,
-      "after bind"
+      "bind + listen"
     );
     assert_eq!(
-      socket_op_in_confined_child(false),
+      listen_in_confined_child(false),
       libc::EACCES,
-      "without bind"
+      "listen, no bind"
     );
   }
 
