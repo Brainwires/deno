@@ -2918,8 +2918,9 @@ declare namespace Deno {
      * The OS's secret store, for a small secret per (service, account), with
      * the CEF and WebView backends: on Linux the Secret Service
      * (gnome-keyring, KWallet's Secret Service, KeePassXC) through libsecret;
-     * on macOS the Keychain. `supported` is false elsewhere (Windows, Winit),
-     * where every call rejects with `Deno.errors.NotSupported`.
+     * on macOS the Keychain; on Windows the Credential Manager. `supported`
+     * is false elsewhere (Winit), where every call rejects with
+     * `Deno.errors.NotSupported`.
      *
      * Linux: items carry the attributes `service` and `account` (as
      * `secret-tool store … service S account A` writes them); `set` replaces
@@ -2950,6 +2951,17 @@ declare namespace Deno {
      * tool that wrote it. `set` and `delete` never prompt (a locked keychain
      * rejects); `get` may (a locked keychain to unlock, an ad-hoc build
      * rebuilt since it stored the item) and rejects after `timeout`.
+     *
+     * Windows: generic credentials in the user's Credential Manager, kept on
+     * this machine and encrypted for the user (DPAPI), under a target that
+     * names the app (`laufey/<app id>/<service>/<account>`, percent-encoded).
+     * A value may be up to 64 KiB (a long one is split across several
+     * credentials); a longer one rejects. A logon session with no credential
+     * store (a service, an SSH key logon) rejects with
+     * `"SecureStoreUnavailable"` saying so; there is never a plaintext
+     * fallback. An item an earlier runtime stored in the PasswordVault
+     * (resource = service, user = account) is moved into the Credential
+     * Manager the first time it is read.
      *
      * Needs the `secureStore` desktop capability baked in by the app's
      * packaging (`"capabilities": ["secureStore"]` in the embedded

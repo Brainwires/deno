@@ -33,6 +33,7 @@ const want = r.params as {
   secureStoreReason?: string;
   secureStoreGetMayBeNull?: boolean;
   secureStoreMac?: boolean;
+  secureStoreWindows?: boolean;
 };
 
 // Optional: a runtime older than laufey API 45 has none (the cookie checks
@@ -249,6 +250,71 @@ if (want.secureStoreMac) {
     "delete, then get is null",
     !("name" in deleted) && "value" in after && after.value === null,
     { deleted, after },
+  );
+}
+
+// Windows (laufey 0.8.1): the Credential Manager.
+if (want.secureStoreWindows) {
+  r.check("secureStore is supported (Windows)", store?.supported === true);
+  if (!store) throw new Error("no Deno.desktop.secureStore");
+  const full = store as typeof store & {
+    delete(s: string, a: string, o?: { timeout?: number }): Promise<unknown>;
+  };
+  const service = `dev.denext.e2e.keyring.${Deno.pid}`;
+  const o = { timeout: 20000 };
+  const outcome = async (p: Promise<unknown>) => {
+    try {
+      return { value: await p };
+    } catch (e) {
+      return { name: (e as Error).name, message: (e as Error).message };
+    }
+  };
+  const secret = 'e2e \u2713 "q"\nline 2';
+  const set1 = await outcome(full.set(service, "a/b c", "one", o));
+  const set2 = await outcome(full.set(service, "a/b c", secret, o));
+  const got = await outcome(full.get(service, "a/b c", o));
+  r.set("secureStoreWindows", { set1, set2, got });
+  r.check(
+    "secureStore set / replace / get round trip (Credential Manager)",
+    !("name" in set1) && !("name" in set2) && "value" in got &&
+      got.value === secret,
+    { set1, set2, got },
+  );
+  // Longer than one credential's blob: split across credentials and read
+  // back whole; then shorter again, and the leftover parts are gone.
+  const long = "x".repeat(20000) + "\u2713end";
+  const setLong = await outcome(full.set(service, "long", long, o));
+  const gotLong = await outcome(full.get(service, "long", o));
+  const setShort = await outcome(full.set(service, "long", "short", o));
+  const gotShort = await outcome(full.get(service, "long", o));
+  r.check(
+    "a value longer than one credential round-trips, and shrinks back",
+    !("name" in setLong) && "value" in gotLong && gotLong.value === long &&
+      !("name" in setShort) && "value" in gotShort &&
+      gotShort.value === "short",
+    {
+      setLong,
+      gotLongLength: "value" in gotLong
+        ? String(gotLong.value).length
+        : gotLong,
+      setShort,
+      gotShort,
+    },
+  );
+  const tooLong = await outcome(
+    full.set(service, "huge", "y".repeat(70 * 1024), o),
+  );
+  r.check("a value over 64 KiB is refused", "name" in tooLong, tooLong);
+  const deleted = await outcome(full.delete(service, "a/b c", o));
+  const deletedLong = await outcome(full.delete(service, "long", o));
+  const after = await outcome(full.get(service, "a/b c", o));
+  const afterLong = await outcome(full.get(service, "long", o));
+  r.check(
+    "delete, then get is null",
+    !("name" in deleted) && !("name" in deletedLong) && "value" in after &&
+      after.value === null && "value" in afterLong &&
+      afterLong.value === null,
+    { deleted, deletedLong, after, afterLong },
   );
 }
 

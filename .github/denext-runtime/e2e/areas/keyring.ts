@@ -11,7 +11,9 @@
 // GNOME with kwalletd installed but not running: not Chromium's store there,
 // so still basic. On macOS the secure store (laufey API 47) is the
 // Keychain: a round trip, and an item only the app may read
-// (secureStoreMac).
+// (secureStoreMac). On Windows (laufey 0.8.1) it is the Credential Manager:
+// a round trip, a value split across credentials, the 64 KiB limit and a
+// delete (secureStoreWindows).
 
 import {
   type AreaReport,
@@ -58,6 +60,11 @@ export async function run(env: Env, rep: AreaReport) {
     // the app's, and `security find-generic-password -w` (another program)
     // doesn't get the app's secret.
     params.secureStoreMac = true;
+  }
+  if (env.target.endsWith("-pc-windows-msvc")) {
+    // The Credential Manager: set / replace / get, a value longer than one
+    // credential holds, the size limit, and delete.
+    params.secureStoreWindows = true;
   }
   const p = await packageApp(env, {
     app: "keyring",
