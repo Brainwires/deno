@@ -668,7 +668,7 @@ impl Supervisor {
     }
     // the private /dev/shm, by its file system, whatever path it shows here
     if let Some(dev) = self.private_shm_dev()
-      && fstat(fd).is_some_and(|st| st.st_dev as u64 == dev)
+      && fstat(fd).is_some_and(|st| st.st_dev == dev)
     {
       return Ok(());
     }
@@ -991,6 +991,10 @@ fn is_symlink(fd: &OwnedFd) -> bool {
   fstat(fd).is_some_and(|st| st.st_mode & libc::S_IFMT == libc::S_IFLNK)
 }
 
+#[allow(
+  clippy::unnecessary_cast,
+  reason = "st_nlink is u64 on x86_64 and u32 on aarch64"
+)]
 fn link_count(fd: &OwnedFd) -> Option<u64> {
   fstat(fd).map(|st| st.st_nlink as u64)
 }
