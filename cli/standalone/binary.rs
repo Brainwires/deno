@@ -1365,6 +1365,14 @@ impl<'a> DenoCompileBinaryWriter<'a> {
           show_on_first_load: w.show_on_first_load,
           overlay: w.overlay,
           background_throttling: w.background_throttling,
+          macos_hidden_mode: match w.macos_hidden_mode {
+            deno_config::deno_json::DesktopMacosHiddenMode::Invisible => {
+              deno_lib::standalone::binary::MacosHiddenMode::Invisible
+            }
+            deno_config::deno_json::DesktopMacosHiddenMode::OrderOut => {
+              deno_lib::standalone::binary::MacosHiddenMode::OrderOut
+            }
+          },
         }),
     };
 

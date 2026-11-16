@@ -531,6 +531,19 @@ declare namespace Deno {
      *
      * @default {true} */
     backgroundThrottling?: boolean;
+    /** How the window is hidden on macOS (the system WebView). `"invisible"`
+     * (the default): {@linkcode BrowserWindow.hide} and `show: false` keep
+     * the window ordered in but invisible (fully transparent, clicks passing
+     * through, never key or main, out of window cycling, Mission Control, the
+     * Window menu and screen sharing), so a page with `backgroundThrottling:
+     * false` keeps its timers' rate; a full-screen window is ordered out all
+     * the same. `"orderOut"`: the window is really removed, and macOS then
+     * throttles its page. Other platforms ignore it. Creation time only: the
+     * first window takes over the window the app started with only when this
+     * agrees with `desktop.initialWindow.macosHiddenMode`.
+     *
+     * @default {"invisible"} */
+    macosHiddenMode?: "invisible" | "orderOut";
     /** Minimum size, applied with {@linkcode BrowserWindow.setMinimumSize}.
      * `0` (the default) is no limit. */
     minWidth?: number;
@@ -1487,6 +1500,15 @@ declare namespace Deno {
     unhandledKeys: boolean;
     /** `forwardKeys` / {@linkcode WebView.setForwardKeys} work. */
     forwardKeys: boolean;
+    /** {@linkcode WebView.blur} hands the keyboard back to the window's
+     * page. */
+    blur: boolean;
+    /** A forwarded keydown's keyup comes as a `"key"` event with
+     * `type: "keyup"`. */
+    keyUp: boolean;
+    /** A `forwardKeys` entry with a leading `!` (`"!CmdOrCtrl+W"`) is
+     * matched before the app menu's accelerators. */
+    forwardKeysBeforeMenu: boolean;
   }
 
   /** Where a {@linkcode WebView} sits: CSS pixels relative to the top-left
@@ -1550,7 +1572,11 @@ declare namespace Deno {
     /** Accelerators (`"CmdOrCtrl+1"`, `"Meta+Shift+L"`: the syntax global
      * shortcuts and menus take) whose keys go to the app as `"key"` events
      * (`forwarded: true`) instead of the page; at most 64, each 1 to 64
-     * characters. The app menu's accelerators still win. */
+     * characters (a leading `!` counted). The app menu's accelerators win
+     * over an entry, unless it starts with `!` (`"!CmdOrCtrl+W"`), which is
+     * matched before them (`webViewCapabilities().forwardKeysBeforeMenu`).
+     * Where `webViewCapabilities().keyUp`, a forwarded keydown's keyup comes
+     * as a `"key"` event with `type: "keyup"`. */
     forwardKeys?: string[];
   }
 
@@ -1654,8 +1680,11 @@ declare namespace Deno {
       source?: string;
       line?: number;
     };
-    /** The native view gained or lost keyboard focus. */
-    "focus-change": { focused: boolean };
+    /** The native view gained or lost keyboard focus. `reason` says why it
+     * lost it when the app did it: `"hidden"` (the view was hidden while it
+     * had the focus, which goes back to the window's page) or `"blur"`
+     * ({@linkcode WebView.blur}); absent otherwise. */
+    "focus-change": { focused: boolean; reason?: "hidden" | "blur" };
     /** A popup the view didn't open (`allowPopups: "deny"` only):
      * `"popup"` when window features were given, else `"tab"`. */
     "new-window": { url: string; disposition: "popup" | "tab" };
@@ -1681,7 +1710,10 @@ declare namespace Deno {
      * had it), `false` for a keydown the page didn't handle, reported after
      * it (where `unhandledKeys`). */
     key: {
-      type: "keydown";
+      /** `"keyup"` for the keyup of a forwarded keydown (where
+       * `webViewCapabilities().keyUp`), matched by `code`; a key still down
+       * when the view loses the focus gets its keyup then. */
+      type: "keydown" | "keyup";
       key: string;
       code: string;
       altKey: boolean;
@@ -1750,6 +1782,12 @@ declare namespace Deno {
     /** Move keyboard focus into the view (`"focus-change"` reports when it
      * leaves). No-op once closed. */
     focus(): void;
+    /** Hand the keyboard focus back to the window's page if the view has
+     * it, without activating the app or reordering windows
+     * (`"focus-change"` with `reason: "blur"`). `true` also when the view
+     * didn't have the focus; `false` where unsupported
+     * (`webViewCapabilities().blur`) or once closed. */
+    blur(): boolean;
     /** The view's URL, title, load state, history and place. Throws a
      * {@linkcode WebViewError} with code `closed` once closed. */
     state(): WebViewState;

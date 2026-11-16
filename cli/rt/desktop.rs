@@ -984,6 +984,7 @@ pub const DESKTOP_JS: &str = r#"
     focus: 6,
     raise: 7,
     lower: 8,
+    blur: 9,
   };
   const WEBVIEW_CAPTURE_FORMATS = { __proto__: null, png: 0, jpeg: 1 };
   const WEBVIEW_POPUPS = ["deny", "same-view", "browser"];
@@ -1226,6 +1227,10 @@ pub const DESKTOP_JS: &str = r#"
       if (!this.#closed) {
         op_desktop_webview_command(this.#id, WEBVIEW_COMMANDS.focus);
       }
+    }
+    blur() {
+      return !this.#closed &&
+        op_desktop_webview_command(this.#id, WEBVIEW_COMMANDS.blur);
     }
     state() {
       if (this.#closed) throw webViewError("closed", "the web view is closed");
@@ -5065,6 +5070,7 @@ mod tests {
       "focus: 6,",
       "raise: 7,",
       "lower: 8,",
+      "blur: 9,",
     ] {
       assert!(commands.contains(entry), "{entry}");
     }
@@ -5076,6 +5082,7 @@ mod tests {
     for method in [
       "op_desktop_webview_command(this.#id, WEBVIEW_COMMANDS.raise);",
       "op_desktop_webview_command(this.#id, WEBVIEW_COMMANDS.lower);",
+      "op_desktop_webview_command(this.#id, WEBVIEW_COMMANDS.blur);",
       "return !this.#closed && op_desktop_webview_set_z_order(this.#id, zOrder);",
       "return !this.#closed && op_desktop_webview_set_zoom(this.#id, factor);",
       "op_desktop_webview_find(this.#id, text, forward, matchCase);",

@@ -463,6 +463,12 @@
               "description": "Throttle the page's timers while the window is not on screen. Set to false to keep them at their rate, for an app whose main window works while hidden (a tray menu, a background sync); then the first `new Deno.BrowserWindow({ backgroundThrottling: false })` takes this window over. macOS only; Windows, Linux and CEF throttle a hidden page without freezing it and ignore it. Defaults to true.",
               "default": true
             },
+            "macosHiddenMode": {
+              "type": "string",
+              "enum": ["invisible", "orderOut"],
+              "description": "How the window is hidden on macOS (the system WebView). \"invisible\" (the default) keeps a hidden window ordered in but invisible (transparent, clicks passing through, out of window cycling and Mission Control), so a page with backgroundThrottling false keeps its timers' rate; \"orderOut\" really removes it, and macOS then throttles its page. Ignored elsewhere.",
+              "default": "invisible"
+            },
             "overlay": {
               "type": "boolean",
               "description": "A Wayland layer-shell overlay surface where the compositor has one (KDE Plasma, wlroots compositors; not GNOME): on top of other windows, on every workspace, with no taskbar entry and, with noActivate, never focused. An ordinary window elsewhere. Defaults to false.",

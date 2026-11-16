@@ -128,7 +128,7 @@ pub enum AppOriginError {
 ///
 /// `initialWindow` mirrors `desktop.initialWindow` (width, height, frameless,
 /// noActivate, transparentTitlebar, transparent, showOnFirstLoad, overlay,
-/// backgroundThrottling), so a
+/// backgroundThrottling, macosHiddenMode), so a
 /// stock CLI that rejects the key in deno.json can still configure the
 /// bootstrap window (a tray-only app sets `"showOnFirstLoad": false`). The
 /// metadata's value, written by a CLI that knows the key, takes precedence.
@@ -186,6 +186,7 @@ struct SerializedInitialWindow {
   show_on_first_load: Option<bool>,
   overlay: Option<bool>,
   background_throttling: Option<bool>,
+  macos_hidden_mode: Option<super::binary::MacosHiddenMode>,
 }
 
 /// The validated contents of an [`APP_CONFIG_FILE`].
@@ -341,6 +342,9 @@ pub fn parse_app_config_file(bytes: &[u8]) -> Result<AppConfigFile, String> {
         background_throttling: w
           .background_throttling
           .unwrap_or(defaults.background_throttling),
+        macos_hidden_mode: w
+          .macos_hidden_mode
+          .unwrap_or(defaults.macos_hidden_mode),
       }
     }),
   })
@@ -740,7 +744,22 @@ mod tests {
       .unwrap()
       .background_throttling
     );
+    // a bootstrap window hidden by ordering it out (an unset key keeps it
+    // ordered in, invisible)
+    assert_eq!(
+      parse_app_config_file(
+        br#"{ "initialWindow": { "macosHiddenMode": "orderOut" } }"#
+      )
+      .unwrap()
+      .initial_window,
+      Some(super::super::binary::InitialWindowConfig {
+        macos_hidden_mode: super::super::binary::MacosHiddenMode::OrderOut,
+        ..Default::default()
+      })
+    );
     for bad in [
+      r#"{ "initialWindow": { "macosHiddenMode": "hidden" } }"#,
+      r#"{ "initialWindow": { "macosHiddenMode": true } }"#,
       r#"{ "initialWindow": { "backgroundThrottling": "no" } }"#,
       r#"{ "initialWindow": { "backgroundThrotling": false } }"#,
       r#"{ "initialWindow": { "overlay": "yes" } }"#,

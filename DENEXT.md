@@ -16920,6 +16920,52 @@ where the changes are discussed.
        app reaches of 0.8.1 is item 446.
      - Node tests enabled: none; no Node API changes.
 
+446. **`feat(desktop)`: laufey 0.8.1 in the runtime: the macOS hidden mode and
+     web view blur, keyups and before-menu keys** (runtime and CLI;
+     `runtime/ops/desktop.rs`, `cli/rt_desktop/lib.rs`, `cli/rt/desktop.rs`,
+     `cli/lib/standalone/binary.rs`, `cli/lib/standalone/app_origin.rs`,
+     `cli/standalone/binary.rs`, `libs/config/deno_json/mod.rs`,
+     `cli/schemas/config-file.v1.json`, `cli/tsc/dts/lib.deno.desktop.d.ts`).
+     What laufey 0.8.1 (item 445) adds that an app reaches, wired through the
+     runtime so the framework needs no later runtime for it:
+     - **`macosHiddenMode`** (`"invisible"` | `"orderOut"`, default
+       `"invisible"`): a `BrowserWindow` creation option, and
+       `desktop.initialWindow.macosHiddenMode` in deno.json (also in the app
+       config file's `initialWindow`, and carried in the compiled metadata),
+       mapped to laufey's `MacosHiddenMode`. `"invisible"` hides a window by
+       keeping it ordered in but invisible, so a page with
+       `backgroundThrottling: false` keeps its timers' rate on macOS;
+       `"orderOut"` really removes it and macOS throttles its page. Other
+       platforms ignore it. The first `BrowserWindow` takes over the bootstrap
+       window only when its mode agrees with the initial window's. An unknown
+       value is a `TypeError` (and a config error in deno.json).
+     - **Web views:** `WebView.prototype.blur()` (`WEBVIEW_COMMAND_BLUR`, 9)
+       hands the keyboard back to the window's page without activating the app
+       or reordering windows, returning `false` where unsupported or closed;
+       `webViewCapabilities()` reports `blur`, `keyUp` and
+       `forwardKeysBeforeMenu`. A `forwardKeys` entry with a leading `!` is
+       matched before the app menu's accelerators (the 64-character limit counts
+       the `!`); `"key"` events carry `type: "keydown" | "keyup"` (a forwarded
+       keydown's keyup), and `"focus-change"` carries
+       `reason:
+       "hidden" | "blur"` when the app took the focus away. Both
+       pass through from laufey unchanged.
+     - User-facing note:
+       `new Deno.BrowserWindow({ macosHiddenMode:
+       "orderOut" })` (or
+       `desktop.initialWindow.macosHiddenMode`) opts a window out of the
+       invisible hiding; `webView.blur()`, keyup events and `"!"`-prefixed
+       `forwardKeys` entries work where the capabilities say so.
+     - Tests: `deno_runtime`'s `macos_hidden_mode_names`,
+       `browser_window_adopts_the_bootstrap_window_only_when_it_fits` (the
+       hidden mode cases), `webview_capabilities_wire_shape` and the command
+       numbers; `denort_desktop`'s `macos_hidden_mode_maps_to_laufey` and the
+       web view command mapping; `deno_lib`'s app config and metadata cases;
+       `deno_config`'s `desktop_initial_window_config` and
+       `the_config_schema_describes_every_desktop_key`; `denort`'s `DESKTOP_JS`
+       checks (`blur: 9`, the `blur()` call).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -16929,8 +16975,8 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
-416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441) are what the
-prebuilt `libdenort` carries. The CLI-side parts (for example writing
+416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446) are what
+the prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.

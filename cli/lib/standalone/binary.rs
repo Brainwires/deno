@@ -210,10 +210,30 @@ pub struct InitialWindowConfig {
   /// key existed, which is the throttled default.
   #[serde(default = "default_background_throttling")]
   pub background_throttling: bool,
+  /// `macosHiddenMode`: how the window is hidden on macOS. Absent in
+  /// metadata written before the key existed, which is the default.
+  #[serde(default)]
+  pub macos_hidden_mode: MacosHiddenMode,
 }
 
 fn default_background_throttling() -> bool {
   true
+}
+
+/// How a window is hidden on macOS (the system WebView; laufey 0.8.1).
+/// Matters for an unthrottled window (`backgroundThrottling: false`): WebKit
+/// runs a page at full rate only while its view is on screen.
+#[derive(
+  Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum MacosHiddenMode {
+  /// Kept ordered in, invisible (transparent, clicks passing through, out of
+  /// window cycling and Mission Control), so its page keeps its rate.
+  #[default]
+  Invisible,
+  /// Ordered out, really removed; the OS then throttles its page.
+  OrderOut,
 }
 
 impl Default for InitialWindowConfig {
@@ -228,6 +248,7 @@ impl Default for InitialWindowConfig {
       show_on_first_load: true,
       overlay: false,
       background_throttling: true,
+      macos_hidden_mode: MacosHiddenMode::Invisible,
     }
   }
 }
@@ -548,6 +569,7 @@ fn check_has_len(input: &[u8], len: usize) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
   use super::InitialWindowConfig;
+  use super::MacosHiddenMode;
 
   #[test]
   fn initial_window_metadata_without_background_throttling_is_throttled() {
@@ -560,10 +582,17 @@ mod tests {
     .unwrap();
     assert!(old.background_throttling);
     assert!(!old.overlay);
+    assert_eq!(old.macos_hidden_mode, MacosHiddenMode::Invisible);
     let unthrottled = InitialWindowConfig {
       background_throttling: false,
+      macos_hidden_mode: MacosHiddenMode::OrderOut,
       ..Default::default()
     };
+    assert!(
+      serde_json::to_string(&unthrottled)
+        .unwrap()
+        .contains(r#""macos_hidden_mode":"orderOut""#)
+    );
     let round_trip: InitialWindowConfig =
       serde_json::from_str(&serde_json::to_string(&unthrottled).unwrap())
         .unwrap();

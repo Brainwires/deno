@@ -800,6 +800,10 @@ impl WefDesktopApi {
         } else {
           laufey::BackgroundThrottling::None
         },
+        macos_hidden_mode: laufey_macos_hidden_mode(
+          options.macos_hidden_mode
+            == deno_lib::standalone::binary::MacosHiddenMode::OrderOut,
+        ),
       },
     );
     let window =
@@ -853,6 +857,17 @@ fn will_navigate_answer(decision: u32) -> laufey::NavigationAnswer {
   }
 }
 
+/// laufey's macOS hidden mode for a window (`macosHiddenMode`): ordered out
+/// when asked, else kept ordered in, invisible (laufey's default), so an
+/// unthrottled window's hidden page keeps its timers' rate.
+fn laufey_macos_hidden_mode(order_out: bool) -> laufey::MacosHiddenMode {
+  if order_out {
+    laufey::MacosHiddenMode::OrderOut
+  } else {
+    laufey::MacosHiddenMode::Invisible
+  }
+}
+
 impl denort::desktop::DesktopApi for WefDesktopApi {
   fn create_window(
     &self,
@@ -865,6 +880,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     hidden: bool,
     overlay: bool,
     background_throttling: bool,
+    macos_hidden_order_out: bool,
   ) -> u32 {
     let window = laufey::Window::new_with_options(
       width,
@@ -881,6 +897,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
         } else {
           laufey::BackgroundThrottling::None
         },
+        macos_hidden_mode: laufey_macos_hidden_mode(macos_hidden_order_out),
       },
     );
     let window = self.setup_window_events(window, None);
@@ -1874,6 +1891,9 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       menu_accelerators: c.menu_accelerators(),
       unhandled_keys: c.unhandled_keys(),
       forward_keys: c.forward_keys(),
+      blur: c.blur(),
+      key_up: c.key_up(),
+      forward_keys_before_menu: c.forward_keys_before_menu(),
     }
   }
 
@@ -1935,6 +1955,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       Some(WebViewCommand::Focus) => view.focus(),
       Some(WebViewCommand::Raise) => view.raise(),
       Some(WebViewCommand::Lower) => view.lower(),
+      Some(WebViewCommand::Blur) => view.blur(),
       None => false,
     }
   }
@@ -2620,6 +2641,7 @@ enum WebViewCommand {
   Focus,
   Raise,
   Lower,
+  Blur,
 }
 
 fn webview_command(command: u32) -> Option<WebViewCommand> {
@@ -2637,6 +2659,7 @@ fn webview_command(command: u32) -> Option<WebViewCommand> {
     d::WEBVIEW_COMMAND_FOCUS => WebViewCommand::Focus,
     d::WEBVIEW_COMMAND_RAISE => WebViewCommand::Raise,
     d::WEBVIEW_COMMAND_LOWER => WebViewCommand::Lower,
+    d::WEBVIEW_COMMAND_BLUR => WebViewCommand::Blur,
     _ => return None,
   })
 }
@@ -4584,6 +4607,8 @@ async fn run_desktop(
           transparent: initial_window.transparent,
           overlay: initial_window.overlay,
           unthrottled: !initial_window.background_throttling,
+          macos_hidden_order_out: initial_window.macos_hidden_mode
+            == deno_lib::standalone::binary::MacosHiddenMode::OrderOut,
         },
       ));
       if let Some(name) = title_name {
@@ -4726,6 +4751,25 @@ async fn run_desktop(
 #[cfg(test)]
 mod tests {
   use std::ffi::OsString;
+
+  // `macosHiddenMode`: "orderOut" maps to laufey's OrderOut, anything else
+  // (the default) to Invisible
+  #[test]
+  fn macos_hidden_mode_maps_to_laufey() {
+    use super::laufey_macos_hidden_mode;
+    assert_eq!(
+      laufey_macos_hidden_mode(true),
+      laufey::MacosHiddenMode::OrderOut
+    );
+    assert_eq!(
+      laufey_macos_hidden_mode(false),
+      laufey::MacosHiddenMode::Invisible
+    );
+    assert_eq!(
+      laufey::MacosHiddenMode::default(),
+      laufey::MacosHiddenMode::Invisible
+    );
+  }
 
   #[test]
   fn will_navigate_answers_map_to_laufey() {
@@ -4960,8 +5004,9 @@ mod tests {
     assert_eq!(webview_command(6), Some(C::Focus));
     assert_eq!(webview_command(7), Some(C::Raise));
     assert_eq!(webview_command(8), Some(C::Lower));
+    assert_eq!(webview_command(9), Some(C::Blur));
     assert_eq!(webview_command(0), None);
-    assert_eq!(webview_command(9), None);
+    assert_eq!(webview_command(10), None);
   }
 
   #[test]

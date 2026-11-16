@@ -1734,6 +1734,15 @@ pub struct WebViewCapabilitiesInfo {
   /// `forwardKeys` / `setForwardKeys()` take keys from the page ("key",
   /// `forwarded: true`).
   pub forward_keys: bool,
+  /// `WebView.blur()` hands the keyboard back to the window's page (laufey
+  /// 0.8.1).
+  pub blur: bool,
+  /// A forwarded keydown's keyup comes as a "key" event with `type:
+  /// "keyup"` (laufey 0.8.1).
+  pub key_up: bool,
+  /// A `forwardKeys` entry with a leading `!` is matched before the app
+  /// menu's accelerators (laufey 0.8.1).
+  pub forward_keys_before_menu: bool,
 }
 
 /// A web view's place in its window: CSS pixels from the top-left of the
@@ -1984,6 +1993,8 @@ pub const WEBVIEW_COMMAND_STOP: u32 = 5;
 pub const WEBVIEW_COMMAND_FOCUS: u32 = 6;
 pub const WEBVIEW_COMMAND_RAISE: u32 = 7;
 pub const WEBVIEW_COMMAND_LOWER: u32 = 8;
+/// Hand the keyboard back to the window's page (laufey 0.8.1).
+pub const WEBVIEW_COMMAND_BLUR: u32 = 9;
 
 /// The most `forwardKeys` entries, and the longest one (bytes).
 pub const WEBVIEW_MAX_FORWARD_KEYS: usize = 64;
@@ -2892,6 +2903,7 @@ pub trait DesktopApi: Send + Sync + 'static {
     hidden: bool,
     overlay: bool,
     background_throttling: bool,
+    macos_hidden_order_out: bool,
   ) -> u32;
   /// Close a specific window.
   fn close_window(&self, window_id: u32);
@@ -3637,6 +3649,9 @@ pub struct InitialWindowAttributes {
   /// (`backgroundThrottling: false`). The bootstrap window is throttled
   /// unless `initialWindow.backgroundThrottling` is false.
   pub unthrottled: bool,
+  /// Hidden on macOS by ordering it out (`macosHiddenMode: "orderOut"`)
+  /// rather than kept ordered in, invisible (`"invisible"`, the default).
+  pub macos_hidden_order_out: bool,
 }
 
 /// Whether a `new BrowserWindow(options)` may adopt the bootstrap window
@@ -3661,6 +3676,26 @@ fn adopts_initial_window(
     && agrees(o.transparent, initial.transparent)
     && agrees(o.overlay, initial.overlay)
     && agrees(o.background_throttling.map(|t| !t), initial.unthrottled)
+    && agrees(
+      o.macos_hidden_mode
+        .as_deref()
+        .and_then(|m| macos_hidden_order_out(m).ok()),
+      initial.macos_hidden_order_out,
+    )
+}
+
+/// `macosHiddenMode`: `true` for `"orderOut"` (a hidden window is ordered
+/// out, so the OS throttles its page), `false` for `"invisible"` (the
+/// default: an unthrottled window is hidden by staying ordered in, invisible,
+/// so its page keeps its timers' rate; laufey 0.8.1). macOS only.
+pub fn macos_hidden_order_out(mode: &str) -> Result<bool, JsErrorBox> {
+  match mode {
+    "invisible" => Ok(false),
+    "orderOut" => Ok(true),
+    other => Err(JsErrorBox::type_error(format!(
+      "macosHiddenMode must be \"invisible\" or \"orderOut\", not {other:?}"
+    ))),
+  }
 }
 
 /// The native API for a `Deno.desktop` constructor. Workers have no desktop
@@ -3878,6 +3913,13 @@ impl BrowserWindow {
     if let Some(title) = options.as_ref().and_then(|o| o.title.as_deref()) {
       reject_nul("the window title", title)?;
     }
+    let hidden_order_out = match options
+      .as_ref()
+      .and_then(|o| o.macos_hidden_mode.as_deref())
+    {
+      Some(mode) => macos_hidden_order_out(mode)?,
+      None => false,
+    };
 
     // Use the initial window if this is the first BrowserWindow whose
     // creation-time options it satisfies, otherwise create a new one (the
@@ -3919,6 +3961,7 @@ impl BrowserWindow {
           hidden,
           overlay,
           background_throttling,
+          hidden_order_out,
         )
       });
     // The adopted bootstrap window is created hidden: `show: false` keeps it
@@ -4707,6 +4750,9 @@ struct BrowserWindowOptions {
   /// screen (Electron's `backgroundThrottling`; laufey API 51). Throttled,
   /// never frozen, by default. Creation time only.
   background_throttling: Option<bool>,
+  /// How the window is hidden on macOS: `"invisible"` (the default) or
+  /// `"orderOut"` (see [`macos_hidden_order_out`]). Creation time only.
+  macos_hidden_mode: Option<String>,
 }
 
 /// The most rectangles `setHitRegion()` takes.
@@ -5758,7 +5804,7 @@ fn op_desktop_webview_command(
   #[smi] webview_id: u32,
   #[smi] command: u32,
 ) -> bool {
-  (WEBVIEW_COMMAND_BACK..=WEBVIEW_COMMAND_LOWER).contains(&command)
+  (WEBVIEW_COMMAND_BACK..=WEBVIEW_COMMAND_BLUR).contains(&command)
     && state
       .try_borrow::<Arc<dyn DesktopApi>>()
       .is_some_and(|api| api.webview_command(webview_id, command))
@@ -11272,6 +11318,17 @@ mod tests {
     assert!(std::panic::catch_unwind(|| method.fast_fn()).is_err());
   }
 
+  // `macosHiddenMode` takes the two names, and refuses any other
+  #[test]
+  fn macos_hidden_mode_names() {
+    use super::macos_hidden_order_out;
+    assert!(!macos_hidden_order_out("invisible").unwrap());
+    assert!(macos_hidden_order_out("orderOut").unwrap());
+    for bad in ["", "OrderOut", "order-out", "hidden"] {
+      assert!(macos_hidden_order_out(bad).is_err(), "{bad}");
+    }
+  }
+
   #[test]
   fn browser_window_adopts_the_bootstrap_window_only_when_it_fits() {
     use super::BrowserWindowOptions;
@@ -11382,6 +11439,22 @@ mod tests {
         ..Default::default()
       })
     ));
+    // `macosHiddenMode`: an `initialWindow` hidden by ordering it out is
+    // adopted by a request that leaves the mode unset or asks for the same,
+    // and the default one not by a request for "orderOut"
+    let order_out = InitialWindowAttributes {
+      macos_hidden_order_out: true,
+      ..Default::default()
+    };
+    let mode = |m: &str| BrowserWindowOptions {
+      macos_hidden_mode: Some(m.to_string()),
+      ..Default::default()
+    };
+    assert!(adopts_initial_window(&order_out, None));
+    assert!(adopts_initial_window(&order_out, Some(&mode("orderOut"))));
+    assert!(!adopts_initial_window(&order_out, Some(&mode("invisible"))));
+    assert!(adopts_initial_window(&plain, Some(&mode("invisible"))));
+    assert!(!adopts_initial_window(&plain, Some(&mode("orderOut"))));
     // A frameless `initialWindow` is adopted by a frameless request, and
     // not by one asking for a frame.
     let frameless = InitialWindowAttributes {
@@ -11702,6 +11775,9 @@ mod tests {
         "menuAccelerators": false,
         "unhandledKeys": false,
         "forwardKeys": false,
+        "blur": false,
+        "keyUp": false,
+        "forwardKeysBeforeMenu": false,
       })
     );
     let caps = WebViewCapabilitiesInfo {
@@ -11712,9 +11788,11 @@ mod tests {
       persistent_partitions: true,
       permission_prompts: false,
       dev_tools: true,
+      forward_keys_before_menu: true,
       ..Default::default()
     };
     let v = serde_json::to_value(caps).unwrap();
+    assert_eq!(v["forwardKeysBeforeMenu"], true);
     assert_eq!(v["engine"], "cef");
     assert_eq!(v["persistentPartitions"], true);
     assert_eq!(v["devTools"], true);
@@ -12050,6 +12128,7 @@ mod tests {
     assert_eq!(super::WEBVIEW_COMMAND_FOCUS, 6);
     assert_eq!(super::WEBVIEW_COMMAND_RAISE, 7);
     assert_eq!(super::WEBVIEW_COMMAND_LOWER, 8);
+    assert_eq!(super::WEBVIEW_COMMAND_BLUR, 9);
   }
 
   #[test]

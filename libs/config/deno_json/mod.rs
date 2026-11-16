@@ -1192,6 +1192,7 @@ struct SerializedDesktopInitialWindowConfig {
   pub show_on_first_load: Option<bool>,
   pub overlay: Option<bool>,
   pub background_throttling: Option<bool>,
+  pub macos_hidden_mode: Option<DesktopMacosHiddenMode>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -1280,6 +1281,7 @@ impl SerializedDesktopConfig {
         show_on_first_load: w.show_on_first_load.unwrap_or(true),
         overlay: w.overlay.unwrap_or(false),
         background_throttling: w.background_throttling.unwrap_or(true),
+        macos_hidden_mode: w.macos_hidden_mode.unwrap_or_default(),
       }),
     }
   }
@@ -1379,6 +1381,19 @@ pub struct DesktopInitialWindowConfig {
   /// `false` keeps the page's timers at their rate while the window is not
   /// on screen (macOS); `true`, the default, throttles them.
   pub background_throttling: bool,
+  /// How the window is hidden on macOS (`macosHiddenMode`).
+  pub macos_hidden_mode: DesktopMacosHiddenMode,
+}
+
+/// `desktop.initialWindow.macosHiddenMode`: `"invisible"` (the default)
+/// keeps a hidden window ordered in, invisible, so an unthrottled page keeps
+/// its rate; `"orderOut"` really removes it, and the OS throttles its page.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DesktopMacosHiddenMode {
+  #[default]
+  Invisible,
+  OrderOut,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -4750,7 +4765,8 @@ mod tests {
             "transparent": true,
             "showOnFirstLoad": false,
             "overlay": true,
-            "backgroundThrottling": false
+            "backgroundThrottling": false,
+            "macosHiddenMode": "orderOut"
           }
         }
       }"#,
@@ -4770,6 +4786,7 @@ mod tests {
         show_on_first_load: false,
         overlay: true,
         background_throttling: false,
+        macos_hidden_mode: DesktopMacosHiddenMode::OrderOut,
       }),
     );
   }
@@ -4809,7 +4826,8 @@ mod tests {
           "transparent": true,
           "showOnFirstLoad": false,
           "overlay": true,
-          "backgroundThrottling": false
+          "backgroundThrottling": false,
+          "macosHiddenMode": "orderOut"
         }
       }
     }"#;
