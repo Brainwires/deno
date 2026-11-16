@@ -131,6 +131,25 @@ pub fn discover_npmrc_from_home<TSys: EnvVar + EnvHomeDir + FsRead>(
   discover_npmrc(sys, None, None)
 }
 
+/// denext: whether the OS confines this process (see
+/// [`set_kernel_confined`]).
+static KERNEL_CONFINED: std::sync::atomic::AtomicBool =
+  std::sync::atomic::AtomicBool::new(false);
+
+/// denext: marks this process as confined by the OS: a kernel sandbox plan
+/// it applied, or (a child of a confined process) the kernel's own report.
+/// An unreadable `.npmrc` then counts as absent, as the policy never makes
+/// it readable. Set by the CLI from what the kernel says, never from the
+/// environment, so nothing a parent sets can change it; it can only make a
+/// refused read count as absent.
+pub fn set_kernel_confined() {
+  KERNEL_CONFINED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn kernel_confined() -> bool {
+  KERNEL_CONFINED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// denext: says once per process that the kernel sandbox kept an `.npmrc`
 /// out of reach, so it was treated as absent.
 fn note_kernel_skipped_npmrc(path: &std::path::Path) {
@@ -172,7 +191,7 @@ fn discover_npmrc<TSys: EnvVar + EnvHomeDir + FsRead>(
       }
       Err(err)
         if err.kind() == std::io::ErrorKind::PermissionDenied
-          && sys.env_var("DENO_INTERNAL_KERNEL_CONFINED").is_ok() =>
+          && kernel_confined() =>
       {
         note_kernel_skipped_npmrc(&path);
         None

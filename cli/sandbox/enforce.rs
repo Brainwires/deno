@@ -853,7 +853,9 @@ pub fn startup() {
     if let Err(err) = result {
       refuse_at_startup(&err);
     }
-    if deno_sandbox::enforce_linux::applied_plan().is_some() {
+    if deno_sandbox::enforce_linux::applied_plan().is_some()
+      || kernel_reports_confined()
+    {
       mark_confined();
     }
   }
@@ -867,7 +869,11 @@ pub fn startup() {
         let _ = INHERITED.set(plan);
         mark_confined();
       }
-      Ok(None) => {}
+      Ok(None) => {
+        if kernel_reports_confined() {
+          mark_confined();
+        }
+      }
       Err(err) => refuse_at_startup(&err),
     }
   }
@@ -926,16 +932,30 @@ fn apply_inherited_macos(plan: &EnforcePlan) -> Result<(), String> {
   Ok(())
 }
 
-/// Tells the config loaders this process started confined
-/// (`DENO_INTERNAL_KERNEL_CONFINED`): an unreadable `.npmrc` then counts as
-/// absent, as the policy never makes it readable. A variable, so the
-/// resolver crates need nothing of the CLI's; set while the process has one
-/// thread. Children inherit it, which is harmless: it can only make a
-/// refused read count as absent, never widen anything.
+/// Tells the config loaders this process runs confined: an unreadable
+/// `.npmrc` then counts as absent, as the policy never makes it readable
+/// (`deno_resolver::npmrc::set_kernel_confined`). Decided from the plan this
+/// process applied or the kernel's own report, never from a variable a
+/// parent could set; nothing in the environment says so either.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn mark_confined() {
-  // SAFETY: called from `startup`, while the process has one thread
-  unsafe { std::env::set_var("DENO_INTERNAL_KERNEL_CONFINED", "1") };
+  deno_resolver::npmrc::set_kernel_confined();
+}
+
+/// Whether the kernel reports this process as confined without a plan of
+/// its own: a child of a confined process (Linux: no-new-privileges and a
+/// seccomp filter, which a sandboxed parent hands every child; macOS: a
+/// Seatbelt sandbox).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn kernel_reports_confined() -> bool {
+  #[cfg(target_os = "linux")]
+  {
+    deno_sandbox::enforce_linux::status_confined()
+  }
+  #[cfg(target_os = "macos")]
+  {
+    deno_sandbox::macos::is_sandboxed() == Some(true)
+  }
 }
 
 fn refuse_at_startup(err: &str) -> ! {
