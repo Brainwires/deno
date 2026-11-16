@@ -616,6 +616,21 @@ function validateRequestAuthority(
   return result;
 }
 
+const CONNECT_AUTHORITY_RE = new SafeRegExp(
+  /^(?:\[([0-9A-Fa-f:.]+)\]|([^:[\]/?#@\s]+)):([0-9]{1,5})$/,
+);
+
+// The authority a CONNECT request target names (`host:port` or
+// `[v6]:port`, RFC 9112 section 3.2.3), as `{ host, port }`; `null` when it
+// is anything else.
+function connectTargetAuthority(path) {
+  const match = CONNECT_AUTHORITY_RE.exec(String(path ?? ""));
+  if (match === null) return null;
+  const port = NumberParseInt(match[3], 10);
+  if (port > 65535) return null;
+  return { host: match[1] ?? match[2], port };
+}
+
 // For an http request through an http proxy (RFC 9112 section 3.2.2): check
 // the request authority, rewrite the path to absolute-form and add the
 // Proxy-Connection / Proxy-Authorization headers. CONNECT and `OPTIONS *`
@@ -795,13 +810,33 @@ function ClientRequest(input, options, cb) {
     // `port` may be a numeric string; coerce and clamp to the op's u16 range
     // so the argument conversion never throws.
     const targetPort = NumberParseInt(port, 10);
+    const apiName = protocol === "https:"
+      ? "node:https.request()"
+      : "node:http.request()";
     op_node_http_check_proxy_net(
       host,
       NumberIsFinite(targetPort) && targetPort >= 0 && targetPort <= 65535
         ? targetPort
         : 0,
-      protocol === "https:" ? "node:https.request()" : "node:http.request()",
+      apiName,
     );
+    // An http CONNECT keeps its request target (`options.path`) on the way to
+    // the proxy, which dials that authority: it is the destination, so it is
+    // checked too.
+    const requestMethod = typeof options.method === "string"
+      ? StringPrototypeToUpperCase(options.method)
+      : "GET";
+    if (protocol === "http:" && requestMethod === "CONNECT") {
+      const authority = connectTargetAuthority(options.path);
+      if (authority === null) {
+        throw new ERR_INVALID_ARG_VALUE(
+          "options.path",
+          options.path,
+          "must be host:port for a CONNECT through a proxy",
+        );
+      }
+      op_node_http_check_proxy_net(authority.host, authority.port, apiName);
+    }
     this[kProxy] = proxyEntry;
     optsWithoutSignal._proxy = proxyEntry;
     optsWithoutSignal._proxyTargetHost = host;

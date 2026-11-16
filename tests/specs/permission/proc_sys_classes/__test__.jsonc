@@ -1,0 +1,48 @@
+{
+  // denext: reading Linux /proc and /sys files takes the --allow-sys name for
+  // the information they expose (cpus, systemMemoryInfo, loadavg, osUptime,
+  // osRelease, processInfo, processes) with the read grant, instead of
+  // --allow-all. processInfo and processes are granted only when named: a
+  // bare --allow-sys leaves them out. Control surfaces still need
+  // --allow-all.
+  "tests": {
+    "read_only": {
+      "if": "linux",
+      "args": "run --no-prompt --allow-read probe.ts",
+      "output": "read_only.out"
+    },
+    "with_names": {
+      "if": "linux",
+      "args": "run --no-prompt --allow-read --allow-sys=cpus,systemMemoryInfo,loadavg,osUptime,osRelease,processInfo,processes probe.ts",
+      "output": "with_names.out"
+    },
+    "unscoped_sys": {
+      "if": "linux",
+      "args": "run --no-prompt --allow-read --allow-sys probe.ts",
+      "output": "unscoped_sys.out"
+    },
+    "unscoped_sys_message": {
+      "if": "linux",
+      "args": "run --no-prompt --allow-read --allow-sys message.ts",
+      "output": "message.out"
+    },
+    "deny_names": {
+      "if": "linux",
+      "args": "run --no-prompt --allow-read --allow-sys --deny-sys=processInfo,processes probe.ts",
+      "output": "deny_names.out"
+    },
+    "config_permission_set": {
+      "if": "linux",
+      "args": "run --config config/deno.json -P probe.ts",
+      "output": "config.out"
+    },
+    "query": {
+      "args": "run --no-prompt --allow-sys=processInfo query.ts",
+      "output": "query.out"
+    },
+    "query_unscoped": {
+      "args": "run --no-prompt --allow-sys query.ts",
+      "output": "query_unscoped.out"
+    }
+  }
+}

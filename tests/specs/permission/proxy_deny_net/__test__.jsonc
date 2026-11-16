@@ -1,0 +1,8 @@
+{
+  "tests": {
+    "proxy_deny_net": {
+      "args": "run -A main.ts",
+      "output": "main.out"
+    }
+  }
+}

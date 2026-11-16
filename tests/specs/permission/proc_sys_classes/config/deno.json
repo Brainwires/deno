@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "default": {
+      "read": true,
+      "sys": ["processInfo", "cpus"]
+    }
+  }
+}

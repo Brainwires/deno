@@ -28,7 +28,7 @@ Docs: https://docs.deno.com/go/permissions
                                             --allow-net-listen  |  --allow-net-listen=\"127.0.0.1:8080\"
   -E, --allow-env[=<VARIABLE_NAME>...]      Allow access to environment variables. Optionally specify accessible environment variables.
                                             --allow-env  |  --allow-env=\"PORT,HOME,PATH\"
-  -S, --allow-sys[=<API_NAME>...]           Allow access to OS information. Optionally allow specific APIs by function name.
+  -S, --allow-sys[=<API_NAME>...]           Allow access to OS information. Optionally allow specific APIs by function name. processInfo and processes (reading /proc on Linux) are granted only when named; a bare flag leaves them out.
                                             --allow-sys  |  --allow-sys=\"systemMemoryInfo,osRelease\"
   --allow-run[=<PROGRAM_NAME>...]           Allow running subprocesses. Optionally specify allowed runnable program names. A program Deno runs is not bound by Deno's permissions, so this is effectively full trust unless an OS sandbox confines it.
                                             --allow-run  |  --allow-run=\"whoami,ps\"

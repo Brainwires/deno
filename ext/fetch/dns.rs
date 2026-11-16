@@ -310,6 +310,39 @@ fn check_resolved(
   .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e).into())
 }
 
+fn has_ip_deny_rules(
+  permissions: &PermissionsContainer,
+  kind: ResolvedDenyCheckKind,
+  port: u16,
+) -> bool {
+  match kind {
+    ResolvedDenyCheckKind::Net => {
+      permissions.has_net_connect_ip_deny_rules(port)
+    }
+    ResolvedDenyCheckKind::Import => permissions.has_import_ip_deny_rules(port),
+  }
+}
+
+/// Denies a proxied destination whose name could not be resolved locally
+/// while an IP-address deny rule could apply to it. See [`CheckDst`].
+fn check_unresolved(
+  permissions: &PermissionsContainer,
+  kind: ResolvedDenyCheckKind,
+  host: &str,
+  port: u16,
+) -> Result<(), BoxError> {
+  let mut permissions = permissions.clone();
+  match kind {
+    ResolvedDenyCheckKind::Net => {
+      permissions.check_net_connect_unresolved(host, port, "fetch()")
+    }
+    ResolvedDenyCheckKind::Import => {
+      permissions.check_import_unresolved(host, port, "import()")
+    }
+  }
+  .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e).into())
+}
+
 /// Finds the permission error a [`PermissionedHttpConnector`] refused a
 /// resolved address with, anywhere in an error's source chain (a
 /// `ClientSendError` wraps hyper's error, which wraps the connector's).
@@ -413,7 +446,7 @@ impl Service<Uri> for PermissionedHttpConnector {
   }
 }
 
-/// Lets a connector run a best-effort net-deny check against a destination
+/// Lets a connector run the IP-address net-deny check against a destination
 /// `Uri` without opening a connection to it.
 ///
 /// Used by the proxy connector: when a request is routed through a proxy, the
@@ -422,9 +455,20 @@ impl Service<Uri> for PermissionedHttpConnector {
 /// enforced against the destination's pre-resolution hostname. This resolves
 /// the destination and checks every resolved address too.
 ///
-/// It is best-effort: a proxy may be able to reach a host this process cannot
-/// resolve locally, so a resolution failure here is not fatal. The connection
-/// to the proxy itself is still checked separately.
+/// It fails closed: when an IP-address deny rule could apply to the
+/// destination and its name does not resolve locally (or resolves to nothing),
+/// the request is denied, because the proxy would resolve the name on its own
+/// and connect wherever it points, denied addresses included. With no such
+/// rule nothing is resolved at all: name-form rules were applied to the URL
+/// before the request started, and a lookup would only leak the name to the
+/// local resolver.
+///
+/// Residual risk: the proxy repeats the lookup, so an answer that differs
+/// between the local resolver and the proxy's (split-horizon DNS, rebinding
+/// between the two lookups) is not caught here. IP-address deny rules are a
+/// hard boundary only for direct connections, which connect to exactly the
+/// addresses that were checked. The connection to the proxy itself is
+/// checked separately.
 pub trait CheckDst {
   fn check_dst(
     &self,
@@ -448,14 +492,24 @@ impl CheckDst for PermissionedHttpConnector {
       if let Ok(ip) = bare_host.parse::<IpAddr>() {
         return check_resolved(permissions, this.deny_check_kind, &ip, port);
       }
-      let Ok(name) = Name::from_str(bare_host) else {
+      if !has_ip_deny_rules(permissions, this.deny_check_kind, port) {
         return Ok(());
+      }
+      let addrs: Vec<SocketAddr> = match Name::from_str(bare_host) {
+        Ok(name) => match this.resolver.clone().call(name).await {
+          Ok(addrs) => addrs.collect(),
+          Err(_) => Vec::new(),
+        },
+        Err(_) => Vec::new(),
       };
-      // Best-effort: if the destination can't be resolved locally, let the
-      // proxy handle it rather than failing the request.
-      let Ok(addrs) = this.resolver.clone().call(name).await else {
-        return Ok(());
-      };
+      if addrs.is_empty() {
+        return check_unresolved(
+          permissions,
+          this.deny_check_kind,
+          bare_host,
+          port,
+        );
+      }
       for addr in addrs {
         check_resolved(permissions, this.deny_check_kind, &addr.ip(), port)?;
       }

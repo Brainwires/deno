@@ -1,0 +1,10 @@
+PASS: fetch, unresolvable name under an IP deny rule
+PASS: fetch, unresolvable name under a subnet deny rule
+PASS: fetch, resolvable alias of a denied address
+PASS: fetch, IP deny rule for another port does not block
+PASS: fetch, no IP deny rule does not block
+PASS: fetch, name-form deny on the env proxy host
+PASS: fetch, deny on the proxy host's other port does not block
+PASS: node:http, resolvable alias of a denied address
+PASS: node:http, unresolvable name under an IP deny rule
+PASS: node:http, no IP deny rule does not block

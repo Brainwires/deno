@@ -1,0 +1,12 @@
+{
+  // A node:net connect to a name with several addresses (the address
+  // selection path) fails with the permission error, on the socket, when
+  // --deny-net refuses every address, and goes on to the next address when
+  // it refuses only some.
+  "tests": {
+    "refused_addresses": {
+      "args": "run --allow-net --deny-net=127.0.0.2,127.0.0.3 main.mjs",
+      "output": "main.out"
+    }
+  }
+}

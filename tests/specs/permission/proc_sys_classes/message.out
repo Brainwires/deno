@@ -1,0 +1,2 @@
+Requires sys access to "processInfo", run again with the --allow-sys=processInfo flag (a bare --allow-sys does not grant it)
+Requires sys access to "processes", run again with the --allow-sys=processes flag (a bare --allow-sys does not grant it)

@@ -1,0 +1,13 @@
+/proc/cpuinfo: NotCapable
+/proc/meminfo: NotCapable
+/proc/loadavg: NotCapable
+/proc/uptime: NotCapable
+/proc/version: NotCapable
+/proc/self/status: NotCapable
+/proc/thread-self/stat: NotCapable
+/proc/1/comm: NotCapable
+/proc/self/mem: NotCapable
+/proc/self/root/etc/hostname: NotCapable
+/proc/self/../1/mem: NotCapable
+/proc/self/environ: NotCapable
+readDir /proc: NotCapable

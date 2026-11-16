@@ -30,6 +30,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 use super::CheckoutTracker;
+use super::Client;
 use super::ConnectionReused;
 use super::ConnectionUsage;
 use super::CreateHttpClientOptions;
@@ -412,6 +413,118 @@ async fn test_http_proxy_denies_destination_resolving_to_denied_ip() {
   assert!(
     msg.contains("net access") && msg.contains(denied_ip),
     "expected a net-deny error for the destination IP, got: {err}"
+  );
+}
+
+/// A resolver that resolves nothing, like a name only the proxy's resolver
+/// knows.
+#[derive(Debug)]
+struct FailingResolver;
+
+impl dns::Resolve for FailingResolver {
+  fn resolve(&self, _name: Name) -> dns::Resolving {
+    Box::pin(async {
+      Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "no such host",
+      ))
+    })
+  }
+}
+
+fn proxied_client(
+  proxy_url: String,
+  resolver: dns::Resolver,
+  permissions: PermissionsContainer,
+) -> Client {
+  create_http_client(
+    "fetch/test",
+    CreateHttpClientOptions {
+      root_cert_store: None,
+      ca_certs: vec![],
+      proxy: Some(deno_tls::Proxy::Http {
+        url: proxy_url,
+        basic_auth: None,
+      }),
+      unsafely_ignore_certificate_errors: Some(vec![]),
+      client_cert_chain_and_key: None,
+      pool_max_idle_per_host: None,
+      pool_idle_timeout: None,
+      dns_resolver: resolver,
+      permissions: Some(permissions),
+      resolved_deny_check_kind: Default::default(),
+      http1: true,
+      http2: true,
+      local_address: None,
+      client_builder_hook: None,
+      http2_max_header_list_size: None,
+      connect_timeout: None,
+    },
+  )
+  .unwrap()
+}
+
+// A proxied destination whose name does not resolve locally can't be compared
+// with the IP-address deny rules. Under an IP deny rule that could apply, it
+// fails closed; with only name-form rules, an
+// unresolvable name still goes to the proxy.
+#[tokio::test]
+async fn test_http_proxy_unresolvable_destination_fails_closed_under_ip_deny() {
+  let src_addr = create_https_server(true, Ipv4Addr::LOCALHOST.into()).await;
+  let prx_addr = create_http_proxy(src_addr).await;
+
+  for deny in ["192.0.2.1", "192.0.2.0/24", "[2001:db8::1]"] {
+    let client = proxied_client(
+      format!("http://{}", prx_addr),
+      dns::Resolver::custom(Arc::new(FailingResolver)),
+      deny_net_permissions(&[deny]),
+    );
+    let req = http::Request::builder()
+      .uri("https://only.at.proxy.example/foo")
+      .body(crate::ReqBody::empty())
+      .unwrap();
+    let err = client.send(req).await.unwrap_err();
+    assert!(
+      err.to_string().contains("could not resolve locally"),
+      "{deny}: expected a fail-closed denial, got: {err}"
+    );
+  }
+
+  let client = proxied_client(
+    format!("http://{}", prx_addr),
+    dns::Resolver::custom(Arc::new(FailingResolver)),
+    deny_net_permissions(&["evil.example"]),
+  );
+  let req = http::Request::builder()
+    .uri("https://only.at.proxy.example/foo")
+    .body(crate::ReqBody::empty())
+    .unwrap();
+  let res = client.send(req).await.unwrap();
+  assert_eq!(res.status(), http::StatusCode::OK);
+}
+
+// The hop to an HTTP proxy was compared only by resolved address with IP deny
+// rules, so a name-form rule on the proxy host never applied to it.
+#[tokio::test]
+async fn test_http_proxy_host_denied_by_name() {
+  let src_addr = create_https_server(true, Ipv4Addr::LOCALHOST.into()).await;
+  let prx_addr = create_http_proxy(src_addr).await;
+  let port = prx_addr.port();
+
+  let client = proxied_client(
+    format!("http://localhost:{port}"),
+    dns::Resolver::default(),
+    deny_net_permissions(&[&format!("localhost:{port}")]),
+  );
+  let req = http::Request::builder()
+    .uri(format!("https://{src_addr}/foo"))
+    .body(crate::ReqBody::empty())
+    .unwrap();
+  let err = client.send(req).await.unwrap_err();
+  let msg = err.to_string();
+  assert!(
+    msg.contains("net access") && msg.contains(&format!("localhost:{port}")),
+    "expected a net-deny error for the proxy host, got: {err}"
   );
 }
 

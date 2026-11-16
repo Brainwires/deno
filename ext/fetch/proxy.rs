@@ -199,9 +199,11 @@ fn proxy_env_var(name: &str) -> Option<&'static str> {
 /// configuration. Read at client creation, a value set with `Deno.env.set()`
 /// would let a program with `--allow-env` route its requests through a host it
 /// may not connect to. An explicit `Deno.createHttpClient({ proxy })` is
-/// permission-checked and unaffected.
+/// permission-checked and unaffected. `DENO_PROXY_RESOLVES_NAMES` (see
+/// `deno_permissions::proxy_resolves_names`) is read at the same time.
 pub fn snapshot_proxy_env() {
   proxy_env();
+  deno_permissions::snapshot_proxy_resolves_names();
 }
 
 pub(crate) fn from_env() -> Proxies {
@@ -666,6 +668,17 @@ where
           dst: proxy_dst,
           auth,
         } => {
+          // An environment proxy is operator configuration, so the hop to it
+          // is not subject to `--allow-net`, and the connector below compares
+          // only the proxy's resolved addresses with IP-address deny rules.
+          // A name-form deny (`--deny-net=proxy.internal`) still has to hold
+          // for the proxy host: check it by the name the proxy is configured
+          // with before connecting. (An explicit `createHttpClient({ proxy })`
+          // was already fully checked when the client was created.)
+          if let Err(err) = check_proxy_host_deny(&self.permissions, &proxy_dst)
+          {
+            return Box::pin(async move { Err(err) });
+          }
           let mut connector =
             HttpsConnector::from((self.http.clone(), self.tls_proxy.clone()));
           let connecting = connector.call(proxy_dst);
@@ -822,6 +835,36 @@ where
         .map_err(Into::into),
     )
   }
+}
+
+/// Runs the name-form connect deny rules against an HTTP(S) proxy's host.
+fn check_proxy_host_deny(
+  permissions: &Option<PermissionsContainer>,
+  proxy_dst: &Uri,
+) -> Result<(), BoxError> {
+  let Some(permissions) = permissions else {
+    return Ok(());
+  };
+  let Some(host) = proxy_dst.host() else {
+    return Ok(());
+  };
+  let host = host
+    .strip_prefix('[')
+    .and_then(|s| s.strip_suffix(']'))
+    .unwrap_or(host);
+  let port = proxy_dst.port_u16().unwrap_or_else(|| {
+    if proxy_dst.scheme() == Some(&Scheme::HTTPS) {
+      443
+    } else {
+      80
+    }
+  });
+  permissions
+    .clone()
+    .check_net_connect_deny_only(&(host, Some(port)), "fetch() proxy")
+    .map_err(|e| {
+      std::io::Error::new(std::io::ErrorKind::PermissionDenied, e).into()
+    })
 }
 
 async fn tunnel<T>(

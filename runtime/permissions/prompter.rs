@@ -124,9 +124,16 @@ pub(crate) const RUN_TRUST_NOTE: &str = "Run access is full trust: the program i
 /// The lines a prompt adds for permission `name` between its header and
 /// the stack trace.
 #[cfg(not(target_arch = "wasm32"))]
+/// denext: a prompt for a sys name that a bare `--allow-sys` doesn't grant
+/// (its flag is written `sys=<name>`) says so.
+const NAMED_SYS_NOTE: &str =
+  "A bare --allow-sys does not grant this; only --allow-sys naming it does.";
+
 fn prompt_note_lines(name: &str) -> &'static [&'static str] {
   if name == "run" {
     &[RUN_TRUST_NOTE]
+  } else if name.starts_with("sys=") {
+    &[NAMED_SYS_NOTE]
   } else {
     &[]
   }
@@ -626,7 +633,8 @@ impl PermissionPrompter for TtyPrompter {
         "Learn more at: {}",
         colors::cyan_with_underline(&format!(
           "https://docs.deno.com/go/--allow-{}",
-          name
+          // `sys=<name>`: the page for the permission.
+          name.split('=').next().unwrap_or_default()
         ))
       );
       writeln!(&mut output, "┠─ {}", colors::italic(&msg)).unwrap();
@@ -803,6 +811,13 @@ pub mod tests {
     for name in ["read", "write", "net", "env", "sys", "ffi", "import"] {
       assert!(prompt_note_lines(name).is_empty(), "{name}");
     }
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  #[test]
+  fn named_sys_prompt_says_a_bare_grant_does_not_cover_it() {
+    assert_eq!(prompt_note_lines("sys=processes"), &[NAMED_SYS_NOTE]);
+    assert!(NAMED_SYS_NOTE.contains("bare --allow-sys does not grant"));
   }
 
   #[cfg(not(target_arch = "wasm32"))]

@@ -1,0 +1,13 @@
+/proc/cpuinfo: read
+/proc/meminfo: read
+/proc/loadavg: read
+/proc/uptime: read
+/proc/version: read
+/proc/self/status: read
+/proc/thread-self/stat: read
+/proc/1/comm: read
+/proc/self/mem: NotCapable
+/proc/self/root/etc/hostname: NotCapable
+/proc/self/../1/mem: NotCapable
+/proc/self/environ: NotCapable
+readDir /proc: read

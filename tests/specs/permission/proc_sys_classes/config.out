@@ -1,0 +1,14 @@
+Warning Permissions in the config file is an experimental feature and may change in the future.
+/proc/cpuinfo: read
+/proc/meminfo: NotCapable
+/proc/loadavg: NotCapable
+/proc/uptime: NotCapable
+/proc/version: NotCapable
+/proc/self/status: read
+/proc/thread-self/stat: read
+/proc/1/comm: NotCapable
+/proc/self/mem: NotCapable
+/proc/self/root/etc/hostname: NotCapable
+/proc/self/../1/mem: NotCapable
+/proc/self/environ: NotCapable
+readDir /proc: NotCapable

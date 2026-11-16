@@ -4729,7 +4729,12 @@ declare namespace Deno {
    * @category Permissions */
   export interface SysPermissionDescriptor {
     name: "sys";
-    /** The specific information to scope the permission to. */
+    /** The specific information to scope the permission to.
+     *
+     * `"processInfo"` (this process's `/proc` entries) and `"processes"`
+     * (other processes' `/proc` listing) are granted only by a grant that
+     * names them, such as `--allow-sys=processes`; an unscoped `--allow-sys`
+     * does not include them. */
     kind?:
       | "loadavg"
       | "hostname"
@@ -4746,7 +4751,9 @@ declare namespace Deno {
       | "getPriority"
       | "setPriority"
       | "ca"
-      | "umask";
+      | "umask"
+      | "processInfo"
+      | "processes";
   }
 
   /** The permission descriptor for the `allow-ffi` and `deny-ffi` permissions, which controls

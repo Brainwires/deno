@@ -837,6 +837,13 @@ function _internalConnectMultiple(context, canceled?: boolean) {
       return;
     }
 
+    // Every address refused by a permission check (the only error `connect`
+    // throws rather than returns): the socket fails with that refusal, as a
+    // single-address connect does, not with an aggregate of them.
+    if (context.refused === context.errors.length) {
+      self.destroy(context.errors[0]);
+      return;
+    }
     self.destroy(new NodeAggregateError(context.errors));
     return;
   }
@@ -921,10 +928,20 @@ function _internalConnectMultiple(context, canceled?: boolean) {
     `${address}:${port}`,
   );
 
-  if (addressType === 4) {
-    err = self._handle.connect(req, address, port);
-  } else {
-    err = self._handle.connect6(req, address, port);
+  try {
+    if (addressType === 4) {
+      err = self._handle.connect(req, address, port);
+    } else {
+      err = self._handle.connect6(req, address, port);
+    }
+  } catch (e) {
+    // A permission refusal of this address: try the next one, as for any
+    // failed attempt, instead of throwing out of the lookup callback.
+    context.refused = (context.refused ?? 0) + 1;
+    ArrayPrototypePush(context.errors, e);
+    self.emit("connectionAttemptFailed", address, port, addressType, e);
+    _internalConnectMultiple(context);
+    return;
   }
 
   if (err) {
