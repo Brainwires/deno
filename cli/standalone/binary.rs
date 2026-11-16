@@ -532,6 +532,24 @@ impl<'a> DenoCompileBinaryWriter<'a> {
     )
   }
 
+  /// deno.json `desktop.release.publicKey` for a desktop build, checked to
+  /// be an Ed25519 public key (DENEXT.md item 433).
+  fn resolve_release_public_key(&self) -> Result<Option<String>, AnyError> {
+    if !self.is_desktop {
+      return Ok(None);
+    }
+    let key = release_public_key_from_config(
+      self.cli_options.start_dir.to_desktop_config(),
+    )?;
+    if let Some(warning) = release_key_warning(
+      self.cli_options.start_dir.to_desktop_config().ok(),
+      key.as_deref(),
+    ) {
+      log::warn!("{} {warning}", crate::colors::yellow("Warning"));
+    }
+    Ok(key)
+  }
+
   pub async fn write_bin(
     &self,
     options: WriteBinOptions<'_>,
@@ -1318,6 +1336,7 @@ impl<'a> DenoCompileBinaryWriter<'a> {
         .to_desktop_config()
         .ok()
         .and_then(|c| c.release.as_ref()?.base_url.clone()),
+      release_public_key: self.resolve_release_public_key()?,
       update_public_key: self.resolve_update_public_key()?,
       app_origin: desktop_app_identity
         .as_mut()
@@ -2379,6 +2398,46 @@ fn update_public_key_from_config<E: std::fmt::Display>(
   Ok(Some(key.trim().to_string()))
 }
 
+/// The `Deno.autoUpdate` public key a desktop build bakes in:
+/// `desktop.release.publicKey` trimmed, after checking it is an Ed25519 key.
+/// Without it the app's `Deno.autoUpdate` applies no patch.
+fn release_public_key_from_config<E: std::fmt::Display>(
+  config: Result<&deno_config::deno_json::DesktopConfig, E>,
+) -> Result<Option<String>, AnyError> {
+  let config = config.map_err(|e| {
+    deno_core::anyhow::anyhow!(
+      "invalid desktop config, so desktop.release.publicKey can't be read: {e}"
+    )
+  })?;
+  let Some(key) = config.release.as_ref().and_then(|r| r.public_key.clone())
+  else {
+    return Ok(None);
+  };
+  deno_runtime::ops::desktop::parse_auto_update_public_key(&key)
+    .map(Some)
+    .map_err(|e| {
+      deno_core::anyhow::anyhow!("invalid desktop.release.publicKey: {e}")
+    })
+}
+
+/// The compile-time warning for a desktop app that names a release server
+/// (`desktop.release.baseUrl`) but no `desktop.release.publicKey`: its
+/// `Deno.autoUpdate` can't verify any patch, so it never checks.
+fn release_key_warning(
+  config: Option<&deno_config::deno_json::DesktopConfig>,
+  key: Option<&str>,
+) -> Option<&'static str> {
+  let base_url = config
+    .and_then(|c| c.release.as_ref())
+    .and_then(|r| r.base_url.as_deref());
+  (base_url.is_some() && key.is_none()).then_some(
+    "desktop.release.baseUrl is set without desktop.release.publicKey: \
+     Deno.autoUpdate can verify no update without the key, so this app will \
+     not check for updates. Add the key before shipping a build that should \
+     update.",
+  )
+}
+
 #[cfg(test)]
 mod tests {
   use std::cell::Cell;
@@ -2395,6 +2454,8 @@ mod tests {
   use super::denext_release_sums_url;
   use super::embedded_denort_sha256;
   use super::load_verified_denext_denort;
+  use super::release_key_warning;
+  use super::release_public_key_from_config;
   use super::runtime_archive_name;
   use super::sha256_hex;
   use super::sha256sums_entry;
@@ -2925,5 +2986,62 @@ mod tests {
     .to_string();
     assert!(err.contains("invalid desktop config"), "{err}");
     assert!(err.contains("desktop.update: invalid type"), "{err}");
+  }
+
+  // DENEXT.md item 433: Deno.autoUpdate's key is checked at compile time.
+  #[test]
+  fn release_public_key_comes_from_a_valid_config_only() {
+    use deno_config::deno_json::DesktopConfig;
+    use deno_config::deno_json::DesktopReleaseConfig;
+    let with_key = |key: &str| DesktopConfig {
+      release: Some(DesktopReleaseConfig {
+        base_url: None,
+        public_key: Some(key.to_string()),
+      }),
+      ..Default::default()
+    };
+    assert_eq!(
+      release_public_key_from_config::<String>(Ok(&DesktopConfig::default()))
+        .unwrap(),
+      None
+    );
+    // RFC 8032's first test key.
+    let key = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=";
+    assert_eq!(
+      release_public_key_from_config::<String>(Ok(&with_key(&format!(
+        " {key}\n"
+      ))))
+      .unwrap()
+      .as_deref(),
+      Some(key)
+    );
+    for bad in ["nope", "AAAA"] {
+      let err = release_public_key_from_config::<String>(Ok(&with_key(bad)))
+        .unwrap_err()
+        .to_string();
+      assert!(err.contains("invalid desktop.release.publicKey"), "{err}");
+    }
+    assert!(
+      release_public_key_from_config::<String>(Err("bad".to_string())).is_err()
+    );
+  }
+
+  #[test]
+  fn a_release_server_without_a_key_warns() {
+    use deno_config::deno_json::DesktopConfig;
+    use deno_config::deno_json::DesktopReleaseConfig;
+    let config = |base_url: Option<&str>| DesktopConfig {
+      release: Some(DesktopReleaseConfig {
+        base_url: base_url.map(str::to_string),
+        public_key: None,
+      }),
+      ..Default::default()
+    };
+    let with_url = config(Some("https://releases.example/app"));
+    let warning = release_key_warning(Some(&with_url), None).unwrap();
+    assert!(warning.contains("desktop.release.publicKey"), "{warning}");
+    assert!(release_key_warning(Some(&with_url), Some("key")).is_none());
+    assert!(release_key_warning(Some(&config(None)), None).is_none());
+    assert!(release_key_warning(None, None).is_none());
   }
 }

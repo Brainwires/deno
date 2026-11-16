@@ -34,6 +34,7 @@ use deno_lib::loader::as_deno_resolver_requested_module_type;
 use deno_lib::loader::loaded_module_source_to_module_source_code;
 use deno_lib::loader::module_format_from_requested_type;
 use deno_lib::loader::module_type_from_media_and_requested_type;
+use deno_lib::npm::DenyReadPackageJsonFilter;
 use deno_lib::npm::NpmRegistryReadPermissionChecker;
 use deno_lib::npm::NpmRegistryReadPermissionCheckerMode;
 use deno_lib::npm::create_npm_process_state_provider;
@@ -1157,8 +1158,14 @@ impl NodeRequireLoader for EmbeddedModuleLoader {
     permissions: &mut PermissionsContainer,
     path: Cow<'a, Path>,
   ) -> Result<Cow<'a, Path>, JsErrorBox> {
-    if self.shared.modules.path_in_root(&path) {
-      // allow reading if the file is in the root directory
+    // A file embedded in the binary is part of the program: no check. A
+    // path under the root that the binary doesn't hold (a self-extracting
+    // binary's root is a real directory, so a link made there leads
+    // anywhere) is read from the host file system and checked like any
+    // other read (DENEXT.md item 438).
+    if self.shared.modules.path_in_root(&path)
+      && self.shared.vfs.file_entry(&path).is_ok()
+    {
       return Ok(path);
     }
 
@@ -1394,6 +1401,9 @@ pub struct RunOptions {
   /// Version and rollback state for desktop auto-update JS initialization.
   pub auto_update_version: Option<String>,
   pub auto_update_rolled_back: bool,
+  /// Whether the app has a `desktop.release.publicKey` baked in. Without one
+  /// `Deno.autoUpdate` can't verify any patch, so it doesn't check at all.
+  pub auto_update_has_key: bool,
   /// Error reporting URL from deno.json `desktop.errorReporting.url`.
   pub error_reporting_url: Option<String>,
   /// Auto-update release base URL from deno.json `desktop.release.baseUrl`.
@@ -1788,6 +1798,12 @@ pub async fn run_with_options(
       Permissions::from_options(desc_parser.as_ref(), &permissions)?;
     PermissionsContainer::new(desc_parser, permissions)
   };
+  // denext (DENEXT.md item 439): a package.json a read deny covers is
+  // missing to module resolution
+  pkg_json_resolver.set_read_filter(Arc::new(DenyReadPackageJsonFilter::new(
+    sys.clone(),
+    permissions.clone(),
+  )));
   // denext (DENEXT.md item 102): a compiled app's `request.signal` is free of
   // the legacy abort on a sent response, as `deno run`'s, unless it was
   // compiled with `--unstable-legacy-abort` (or `"unstable": ["legacy-abort"]`
@@ -2004,6 +2020,7 @@ pub async fn run_with_options(
       options.auto_update_version.as_deref(),
       options.auto_update_rolled_back,
       options.release_base_url.as_deref(),
+      options.auto_update_has_key,
     );
     worker
       .js_runtime()

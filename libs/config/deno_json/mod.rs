@@ -1159,6 +1159,8 @@ struct SerializedDesktopUpdateConfig {
 struct SerializedDesktopReleaseConfig {
   #[serde(rename = "baseUrl")]
   pub base_url: Option<String>,
+  #[serde(rename = "publicKey")]
+  pub public_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -1257,6 +1259,7 @@ impl SerializedDesktopConfig {
       }),
       release: self.release.map(|r| DesktopReleaseConfig {
         base_url: r.base_url,
+        public_key: r.public_key,
       }),
       update: self.update.map(|u| DesktopUpdateConfig {
         public_key: u.public_key,
@@ -1337,6 +1340,10 @@ pub struct DesktopOutputConfig {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DesktopReleaseConfig {
   pub base_url: Option<String>,
+  /// The Ed25519 public key (base64, 32 bytes) `Deno.autoUpdate` manifests
+  /// must be signed with, baked into the app; without it no patch is
+  /// applied.
+  pub public_key: Option<String>,
 }
 
 /// `desktop.update`: full-app self-update (`Deno.desktop.updater`).

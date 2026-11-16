@@ -864,6 +864,7 @@ impl CliFactory {
         npmrc_path.as_deref(),
       )
       .with_upstream_by_name(supply_chain.jail_upstream_by_name)
+      .with_deno_dir(self.deno_dir()?.root.clone())
       .with_known_packages(supply_chain.jail_known_packages)
       .with_node_headers(self.deno_dir().ok().map(|deno_dir| {
         Arc::new(crate::supply_chain::node_headers::NodeHeaders::new(
@@ -1378,6 +1379,14 @@ impl CliFactory {
     // issue #7590.
     let maybe_file_watcher_communicator = self.watcher_communicator.clone();
     let pkg_json_resolver = self.pkg_json_resolver()?;
+    // denext (DENEXT.md item 439): a package.json a read deny covers is
+    // missing to module resolution
+    pkg_json_resolver.set_read_filter(Arc::new(
+      deno_lib::npm::DenyReadPackageJsonFilter::new(
+        self.sys(),
+        self.root_permissions_container()?.clone(),
+      ),
+    ));
     let module_loader_factory = self.create_module_loader_factory().await?;
     self.maybe_start_inspector_server()?;
 

@@ -2,6 +2,8 @@
 // node_modules: `evil` straight to `outside`, `chain` to `src`, whose `u`
 // links on to `outside`, and `lib` (outside node_modules) to `outside` too.
 // `pkg` is a pnpm-style link into node_modules/.pnpm, which stays readable.
+// `other/node_modules/x` is a node_modules directory outside the project, and
+// `far` links to `other`, so its real path is inside a node_modules too.
 const root = Deno.cwd();
 const linkType = Deno.build.os === "windows" ? "junction" : "dir";
 const pnpmPkg = `${root}/node_modules/.pnpm/pkg@1.0.0/node_modules/pkg`;
@@ -22,6 +24,11 @@ Deno.writeTextFileSync(
   '{ "name": "pkg", "version": "1.0.0", "main": "index.js" }\n',
 );
 Deno.writeTextFileSync(`${pnpmPkg}/index.js`, "module.exports = 'pkg';\n");
+Deno.mkdirSync(`${root}/other/node_modules/x`, { recursive: true });
+Deno.writeTextFileSync(
+  `${root}/other/node_modules/x/s.json`,
+  '{ "secret": "other" }\n',
+);
 
 Deno.symlinkSync(`${root}/outside`, `${root}/node_modules/evil`, {
   type: linkType,
@@ -32,3 +39,6 @@ Deno.symlinkSync(`${root}/src`, `${root}/node_modules/chain`, {
 Deno.symlinkSync(`${root}/outside`, `${root}/src/u`, { type: linkType });
 Deno.symlinkSync(`${root}/outside`, `${root}/lib`, { type: linkType });
 Deno.symlinkSync(pnpmPkg, `${root}/node_modules/pkg`, { type: linkType });
+Deno.symlinkSync(`${root}/other`, `${root}/node_modules/far`, {
+  type: linkType,
+});

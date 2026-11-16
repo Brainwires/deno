@@ -18,12 +18,12 @@
 const EXPECTED_OP_COUNT = 145;
 // The main scope minus WORKER_EXCLUDED_OPS in 99_main.js: upstream strips the
 // two text-clipboard ops from workers, and the fork strips every new
-// main-scope-only desktop op (85) and the native classes that need the
-// desktop backend (BrowserWindow, Dock, Tray, Notification), leaving
-// upstream's 20 minus those 4, plus op_desktop_screens,
-// op_desktop_window_capabilities, op_desktop_webview_capabilities (all
-// read-only) and op_desktop_alert_async.
-const EXPECTED_WORKER_OP_COUNT = 20;
+// main-scope-only desktop op (85), the native classes that need the
+// desktop backend (BrowserWindow, Dock, Tray, Notification) and the three
+// Deno.autoUpdate ops (DENEXT.md item 433), leaving upstream's 20 minus
+// those 7, plus op_desktop_screens, op_desktop_window_capabilities,
+// op_desktop_webview_capabilities (all read-only) and op_desktop_alert_async.
+const EXPECTED_WORKER_OP_COUNT = 17;
 
 function getExposedOpNames(): string[] {
   // @ts-ignore TS doesn't allow to index with symbol

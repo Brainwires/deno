@@ -381,6 +381,10 @@
             "baseUrl": {
               "type": "string",
               "description": "Base URL for auto-update release artifacts."
+            },
+            "publicKey": {
+              "type": "string",
+              "description": "The Ed25519 public key (base64, 32 bytes) that signs Deno.autoUpdate's latest.json, baked into the app. Without it, Deno.autoUpdate applies no patch."
             }
           }
         },

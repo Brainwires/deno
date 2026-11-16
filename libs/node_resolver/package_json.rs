@@ -76,15 +76,41 @@ impl deno_package_json::PackageJsonCache for PackageJsonThreadLocalCache {
 pub type PackageJsonResolverRc<TSys> =
   deno_maybe_sync::MaybeArc<PackageJsonResolver<TSys>>;
 
+/// Decides which package.json files resolution must treat as missing
+/// (denext, DENEXT.md item 439): the embedder's read deny rules, which the
+/// resolver itself knows nothing of.
+pub trait PackageJsonReadFilter:
+  std::fmt::Debug + deno_maybe_sync::MaybeSend + deno_maybe_sync::MaybeSync
+{
+  /// Whether the package.json at `path` is hidden from resolution.
+  fn is_hidden(&self, path: &Path) -> bool;
+}
+
+#[allow(clippy::disallowed_types, reason = "definition")]
+pub type PackageJsonReadFilterRc =
+  deno_maybe_sync::MaybeArc<dyn PackageJsonReadFilter>;
+
 #[derive(Debug)]
 pub struct PackageJsonResolver<TSys: FsRead + FsMetadata> {
   sys: TSys,
   loader_cache: Option<PackageJsonCacheRc>,
+  read_filter: deno_maybe_sync::MaybeOnceLock<PackageJsonReadFilterRc>,
 }
 
 impl<TSys: FsRead + FsMetadata> PackageJsonResolver<TSys> {
   pub fn new(sys: TSys, loader_cache: Option<PackageJsonCacheRc>) -> Self {
-    Self { sys, loader_cache }
+    Self {
+      sys,
+      loader_cache,
+      read_filter: Default::default(),
+    }
+  }
+
+  /// Sets the filter that hides package.json files from resolution (the
+  /// first one set stays). Checked before the cache, so a package.json read
+  /// before it was set is hidden as well.
+  pub fn set_read_filter(&self, filter: PackageJsonReadFilterRc) {
+    let _ = self.read_filter.set(filter);
   }
 
   pub fn sys(&self) -> &TSys {
@@ -137,6 +163,13 @@ impl<TSys: FsRead + FsMetadata> PackageJsonResolver<TSys> {
     &self,
     path: &Path,
   ) -> Result<Option<PackageJsonRc>, PackageJsonLoadError> {
+    if self
+      .read_filter
+      .get()
+      .is_some_and(|filter| filter.is_hidden(path))
+    {
+      return Ok(None);
+    }
     let result = PackageJson::load_from_path(
       &self.sys,
       self
@@ -183,6 +216,45 @@ mod tests {
   use sys_traits::impls::InMemorySys;
 
   use super::*;
+
+  // DENEXT.md item 439: a hidden package.json is missing to resolution,
+  // cached or not
+  #[test]
+  fn read_filter_hides_package_json() {
+    use sys_traits::FsCreateDirAll;
+    use sys_traits::FsWrite;
+
+    #[derive(Debug)]
+    struct HideSecret;
+    impl PackageJsonReadFilter for HideSecret {
+      fn is_hidden(&self, path: &Path) -> bool {
+        path.starts_with("/app/secret")
+      }
+    }
+
+    let sys = InMemorySys::default();
+    sys.fs_create_dir_all("/app/secret").unwrap();
+    sys
+      .fs_write("/app/secret/package.json", r#"{ "main": "x.js" }"#)
+      .unwrap();
+    sys
+      .fs_write("/app/package.json", r#"{ "name": "app" }"#)
+      .unwrap();
+    let resolver: PackageJsonResolver<InMemorySys> = PackageJsonResolver::new(
+      sys,
+      Some(deno_maybe_sync::new_rc(PackageJsonThreadLocalCache)),
+    );
+    let secret = Path::new("/app/secret/package.json");
+    assert!(resolver.load_package_json(secret).unwrap().is_some());
+    resolver.set_read_filter(deno_maybe_sync::new_rc(HideSecret));
+    assert!(resolver.load_package_json(secret).unwrap().is_none());
+    let closest = resolver
+      .get_closest_package_json(Path::new("/app/secret/x.js"))
+      .unwrap()
+      .unwrap();
+    assert_eq!(closest.name.as_deref(), Some("app"));
+    PackageJsonThreadLocalCache::clear();
+  }
 
   #[test]
   fn package_scope_stops_at_node_modules() {

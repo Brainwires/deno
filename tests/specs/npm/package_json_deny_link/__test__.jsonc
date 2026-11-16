@@ -1,0 +1,46 @@
+{
+  // DENEXT.md item 439: a package.json reached through a link into a
+  // --deny-read scope is missing to module resolution, so nothing from it
+  // (here an `exports` target) reaches the program, by `require()` or the ES
+  // module resolver, in `deno run` and in a compiled program. Without the
+  // deny the value is visible, which shows the setup reaches it.
+  "tempDir": true,
+  "tests": {
+    "run": {
+      "if": "unix",
+      "steps": [
+        { "args": "run -A setup.js", "output": "" },
+        {
+          "args": "run --allow-read resolve.cjs",
+          "output": "require.resolve: seen\n"
+        },
+        {
+          "args": "run --allow-read --deny-read=denied resolve.cjs",
+          "output": "require.resolve: hidden\n"
+        },
+        {
+          "args": "run --allow-read resolve.mjs",
+          "output": "import.meta.resolve: seen\n"
+        },
+        {
+          "args": "run --allow-read --deny-read=denied resolve.mjs",
+          "output": "import.meta.resolve: hidden\n"
+        }
+      ]
+    },
+    "compiled": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "compile --allow-read --allow-write --deny-read=denied --output main compile/main.ts",
+          "output": "[WILDCARD]"
+        },
+        {
+          "commandName": "./main",
+          "args": [],
+          "output": "compiled require.resolve: hidden\n"
+        }
+      ]
+    }
+  }
+}

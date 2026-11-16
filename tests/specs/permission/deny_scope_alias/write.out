@@ -1,0 +1,6 @@
+write by the real name: denied
+node writeFileSync by the real name: denied
+remove by the real name: denied
+link scope, target by the real name: denied
+unrelated file: allowed
+recursive remove of a tree holding it: denied

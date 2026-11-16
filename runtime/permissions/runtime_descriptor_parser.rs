@@ -185,6 +185,10 @@ impl<TSys: RuntimePermissionDescriptorParserSys + std::fmt::Debug>
     })
   }
 
+  fn resolve_deny_scope(&self, path: &PathDescriptor) -> Option<PathBuf> {
+    SpecialFilePathQueryDescriptor::resolve_deny_scope(&self.sys, path)
+  }
+
   fn parse_net_query(
     &self,
     text: &str,

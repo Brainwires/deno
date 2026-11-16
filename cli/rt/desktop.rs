@@ -13,6 +13,10 @@ use deno_core::OpState;
 pub use deno_runtime::ops::desktop::AutoUpdateState;
 pub use deno_runtime::ops::desktop::DesktopApi;
 pub use deno_runtime::ops::desktop::MenuItem;
+pub use deno_runtime::ops::desktop::pending_update_digest;
+pub use deno_runtime::ops::desktop::pending_update_matches_record;
+pub use deno_runtime::ops::desktop::pending_update_record_path;
+pub use deno_runtime::ops::desktop::write_pending_update_record;
 
 /// JS code that exposes desktop APIs via `Deno.BrowserWindow` and `Deno.desktop`.
 pub const DESKTOP_JS: &str = r#"
@@ -4271,19 +4275,28 @@ pub fn desktop_auto_update_js(
   version: Option<&str>,
   rolled_back: bool,
   release_base_url: Option<&str>,
+  has_key: bool,
 ) -> String {
   format!(
     r#"(() => {{
+  const ops = Deno[Deno.internal].core.ops;
   const {{
     op_desktop_apply_patch,
     op_desktop_verify_ed25519,
     op_desktop_confirm_update,
-  }} = Deno[Deno.internal].core.ops;
+  }} = ops;
+  // Held here only: the app's own code (and anything it imports) can't reach
+  // the update ops through `Deno[Deno.internal].core.ops` (DENEXT.md item
+  // 269).
+  delete ops.op_desktop_apply_patch;
+  delete ops.op_desktop_verify_ed25519;
+  delete ops.op_desktop_confirm_update;
   const {{ propReadOnly, propWritable }} = Deno[Deno.internal].core;
 
   const _version = {version};
   const _rolledBack = {rolled_back};
   const _releaseBaseUrl = {release_base_url};
+  const _hasKey = {has_key};
 
   const ROLLBACK_REASON = "Update failed to start, rolled back.";
 
@@ -4322,6 +4335,14 @@ pub fn desktop_auto_update_js(
       }});
     }}
 
+    // Without a baked key no patch can be verified (the patch op refuses
+    // every one), so nothing is downloaded at all.
+    if (!_hasKey) {{
+      console.error(
+        "Deno.autoUpdate: this app was built without desktop.release.publicKey, so no update can be verified; not checking for updates",
+      );
+      return;
+    }}
     if (!_version) {{
       console.warn("Deno.autoUpdate: no version in deno.json, skipping");
       return;
@@ -4357,39 +4378,36 @@ pub fn desktop_auto_update_js(
         }}
         if (manifest.version === _version) return;
 
-        if (publicKey) {{
-          const sig = manifest.signature;
-          if (typeof sig !== "string" || !sig) {{
-            console.error(
-              "Deno.autoUpdate: publicKey configured but manifest has no signature",
-            );
-            return;
-          }}
-          // Signature is computed over the manifest with the `signature` field
-          // removed, serialized canonically. To avoid depending on a JCS
-          // implementation, signers must put the signature on a top-level
-          // `signature` field and include the rest of the manifest verbatim
-          // under a `signed` field (string). We then verify over that string.
-          const signed = manifest.signed;
-          if (typeof signed !== "string") {{
-            console.error(
-              "Deno.autoUpdate: signed manifest must include a `signed` string field",
-            );
-            return;
-          }}
-          if (!op_desktop_verify_ed25519(publicKey, sig, te.encode(signed))) {{
-            console.error("Deno.autoUpdate: manifest signature verification failed");
-            return;
-          }}
-          // Re-parse the signed payload — only its contents are trusted.
-          try {{
-            manifest = JSON.parse(signed);
-          }} catch {{
-            console.error("Deno.autoUpdate: signed payload is not valid JSON");
-            return;
-          }}
-          if (manifest.version === _version) return;
+        // Every manifest is signed: the patch op checks the signature
+        // against the key baked into the app (deno.json
+        // `desktop.release.publicKey`) and takes the patch's SHA-256 from
+        // the signed payload alone (DENEXT.md item 433). Signers put the
+        // signature on a top-level `signature` field and the manifest
+        // verbatim under a `signed` field (string), signed as that string.
+        const sig = manifest.signature;
+        const signed = manifest.signed;
+        if (typeof sig !== "string" || !sig || typeof signed !== "string") {{
+          console.error(
+            "Deno.autoUpdate: latest.json must be signed (`signed` and `signature` fields)",
+          );
+          return;
         }}
+        // An optional `publicKey` option checks it here too, before any
+        // download; the patch op checks the baked key regardless.
+        if (
+          publicKey && !op_desktop_verify_ed25519(publicKey, sig, te.encode(signed))
+        ) {{
+          console.error("Deno.autoUpdate: manifest signature verification failed");
+          return;
+        }}
+        // Re-parse the signed payload — only its contents are trusted.
+        try {{
+          manifest = JSON.parse(signed);
+        }} catch {{
+          console.error("Deno.autoUpdate: signed payload is not valid JSON");
+          return;
+        }}
+        if (manifest.version === _version) return;
 
         const patchEntry = manifest.patches?.[_version];
         if (!patchEntry) {{
@@ -4397,7 +4415,7 @@ pub fn desktop_auto_update_js(
             _version, "->", manifest.version);
           return;
         }}
-        // Accept either a string (legacy/unsafe) or {{ name, sha256 }}. The
+        // Accept either a string (legacy) or {{ name, sha256 }}. The signed
         // SHA-256 is required — Rust will reject the patch otherwise.
         const patchName = typeof patchEntry === "string"
           ? patchEntry
@@ -4421,7 +4439,7 @@ pub fn desktop_auto_update_js(
         }});
         if (!patchResp.ok) return;
         const patchBytes = new Uint8Array(await patchResp.arrayBuffer());
-        op_desktop_apply_patch(patchBytes, patchSha256);
+        op_desktop_apply_patch(patchBytes, signed, sig);
         if (typeof onUpdateReady === "function") {{
           try {{ onUpdateReady(manifest.version); }} catch (e) {{
             console.error("Deno.autoUpdate onUpdateReady threw:", e);
@@ -4450,6 +4468,7 @@ pub fn desktop_auto_update_js(
 "#,
     version = serde_json::to_string(&version).unwrap(),
     rolled_back = if rolled_back { "true" } else { "false" },
+    has_key = if has_key { "true" } else { "false" },
     release_base_url = serde_json::to_string(&release_base_url).unwrap(),
   )
 }
@@ -5541,7 +5560,7 @@ mod tests {
 
   #[test]
   fn auto_update_js_inlines_version_as_json_literal() {
-    let js = desktop_auto_update_js(Some("1.2.3"), false, None);
+    let js = desktop_auto_update_js(Some("1.2.3"), false, None, true);
     // The version must be a JSON-quoted string, not a bare identifier:
     // we feed it through serde_json::to_string. A regression that
     // dropped the quoting would produce invalid JS for any non-trivial
@@ -5556,7 +5575,7 @@ mod tests {
 
   #[test]
   fn auto_update_js_serializes_none_as_null_literal() {
-    let js = desktop_auto_update_js(None, true, None);
+    let js = desktop_auto_update_js(None, true, None, false);
     assert!(js.contains("const _version = null"));
     assert!(js.contains("const _rolledBack = true"));
     assert!(js.contains("const _releaseBaseUrl = null"));
@@ -5570,6 +5589,7 @@ mod tests {
       Some("1.0.0"),
       false,
       Some("https://releases.example/app"),
+      true,
     );
     assert!(
       js.contains(r#"const _releaseBaseUrl = "https://releases.example/app""#),
@@ -5578,14 +5598,49 @@ mod tests {
     assert!(js.contains("url = _releaseBaseUrl"));
   }
 
+  // Without a baked key nothing is fetched: the check stops before it is
+  // scheduled, with one message.
+  #[test]
+  fn auto_update_js_without_a_key_never_checks() {
+    let js = desktop_auto_update_js(Some("1.0.0"), false, None, false);
+    assert!(js.contains("const _hasKey = false"));
+    let gate = js.find("if (!_hasKey)").expect("the key gate");
+    let fetch = js.find("fetch(base").expect("the manifest fetch");
+    let schedule = js.find("setTimeout(check").expect("the schedule");
+    assert!(gate < fetch && gate < schedule);
+    assert!(js.contains("built without desktop.release.publicKey"));
+    let js = desktop_auto_update_js(Some("1.0.0"), false, None, true);
+    assert!(js.contains("const _hasKey = true"));
+  }
+
   #[test]
   fn auto_update_js_blocks_non_https_manifest_url() {
     // Anti-downgrade defence: the auto-update path must refuse to
     // fetch its manifest over http://, gopher://, file://, etc. A
     // change that loosened this check is a security regression.
-    let js = desktop_auto_update_js(Some("1.0.0"), false, None);
+    let js = desktop_auto_update_js(Some("1.0.0"), false, None, true);
     assert!(js.contains("isHttpsUrl"));
     assert!(js.contains("https:"));
+  }
+
+  // DENEXT.md item 433: the update ops are taken off `core.ops` once the
+  // script holds them, and the patch op gets the signed payload and its
+  // signature (it checks them against the baked key), not a hash.
+  #[test]
+  fn auto_update_js_hides_its_ops_and_passes_the_signed_manifest() {
+    let js = desktop_auto_update_js(Some("1.0.0"), false, None, true);
+    for op in [
+      "op_desktop_apply_patch",
+      "op_desktop_verify_ed25519",
+      "op_desktop_confirm_update",
+    ] {
+      let delete = format!("delete ops.{op};");
+      let capture = js.find(&format!("    {op},")).expect(op);
+      let hidden = js.find(&delete).expect(&delete);
+      assert!(capture < hidden, "{op} is captured before it is deleted");
+    }
+    assert!(js.contains("op_desktop_apply_patch(patchBytes, signed, sig)"));
+    assert!(js.contains("latest.json must be signed"));
   }
 
   // --- desktop_error_reporting_js ---
@@ -5679,7 +5734,12 @@ mod tests {
     let scripts = [
       DESKTOP_JS.to_string(),
       desktop_error_reporting_js(Some("https://err.example/r"), Some("1.0.0")),
-      desktop_auto_update_js(Some("1.0.0"), false, Some("https://up.example/")),
+      desktop_auto_update_js(
+        Some("1.0.0"),
+        false,
+        Some("https://up.example/"),
+        true,
+      ),
     ];
     let mut checked = 0;
     for script in &scripts {

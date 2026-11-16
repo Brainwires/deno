@@ -1,0 +1,29 @@
+{
+  // DENEXT.md item 433: Deno.autoUpdate's patch op stages a new runtime
+  // library, so it needs the full --allow-ffi and write access before it
+  // looks at anything, and workers don't get it at all. Outside a desktop app
+  // it then has no update state; nothing is written either way.
+  "tempDir": true,
+  "tests": {
+    "no_ffi": {
+      "args": "run --allow-read=. main.js",
+      "output": "no_permissions.out",
+      "exitCode": 0
+    },
+    "write_without_ffi": {
+      "args": "run --allow-write --allow-read=. main.js",
+      "output": "no_permissions.out",
+      "exitCode": 0
+    },
+    "ffi_without_write": {
+      "args": "run --allow-ffi --allow-read=. main.js",
+      "output": "no_state.out",
+      "exitCode": 0
+    },
+    "ffi_and_write": {
+      "args": "run --allow-ffi --allow-write --allow-read=. main.js",
+      "output": "no_state.out",
+      "exitCode": 0
+    }
+  }
+}

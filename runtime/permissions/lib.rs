@@ -37,6 +37,7 @@ pub mod broker;
 #[cfg(unix)]
 pub mod checked_open;
 mod ipc_pipe;
+pub mod kernel_sandbox_state;
 pub mod prompter;
 mod runtime_descriptor_parser;
 pub mod which;
@@ -1915,7 +1916,7 @@ impl QueryDescriptor for ReadQueryDescriptor<'_> {
   }
 
   fn matches_deny(&self, other: &Self::DenyDesc) -> bool {
-    self.0.starts_with(&other.0)
+    other.0.covers_for_deny(&self.0)
   }
 
   fn revokes(&self, other: &Self::AllowDesc) -> bool {
@@ -1923,7 +1924,7 @@ impl QueryDescriptor for ReadQueryDescriptor<'_> {
   }
 
   fn stronger_than_deny(&self, other: &Self::DenyDesc) -> bool {
-    other.0.starts_with(&self.0)
+    other.0.lies_within(&self.0)
   }
 
   fn overlaps_deny(&self, other: &Self::DenyDesc) -> bool {
@@ -1941,21 +1942,26 @@ pub struct PathDescriptor {
   /// Custom requested display name when differs from resolved.
   requested: Option<String>,
   is_windows_device_path: bool,
-  /// denext: where an allow scope leads once its symlinks are resolved, when
-  /// that differs from `path` (see [`ResolvedScope`]). Set only on the
+  /// denext: where a scope leads once its symlinks are resolved, when that
+  /// differs from `path` (see [`ResolvedScope`]). Set only on the
   /// `--allow-read` / `--allow-write` scopes the runtime parses from options
-  /// and on a worker's scopes; never compared by `PartialEq` / `Hash`.
+  /// and on a worker's scopes, and on the `--deny-read` / `--deny-write` /
+  /// `--ignore-read` / `--deny-ffi` scopes; never compared by `PartialEq` /
+  /// `Hash`.
   resolved: Option<Box<ResolvedScope>>,
 }
 
-/// denext: the resolved location of an allow scope. An access is checked on
+/// denext: the resolved location of a scope. An access is checked on
 /// the path it names and again on the path the kernel reaches (its symlinks
 /// resolved), so a scope that is itself reached through a symlink (macOS's
 /// `/tmp` -> `/private/tmp`, a temp directory under `/var` -> `/private/var`,
 /// a Windows junction, a project folder behind a link) must also cover its
-/// resolved location, or every access under it would be refused. Resolved
-/// once, when the scope is parsed: a link swapped after that is not followed
-/// again (see the TOCTOU note on `PermissionsContainer::check_resolved_path`).
+/// resolved location, or every access under it would be refused. A deny or
+/// ignore scope records its resolved location too, so an access that names
+/// that location (or reaches it through some other link) is refused as well
+/// (`SpecialFilePathQueryDescriptor::resolve_deny_scope`). Resolved once,
+/// when the scope is parsed: a link swapped after that is not followed again
+/// (see the TOCTOU note on `PermissionsContainer::check_resolved_path`).
 #[derive(Clone, Debug)]
 pub struct ResolvedScope {
   path: PathBuf,
@@ -2028,6 +2034,23 @@ impl PathDescriptor {
         .resolved
         .as_ref()
         .is_some_and(|resolved| query.cmp_path.starts_with(&resolved.cmp_path))
+  }
+
+  /// denext: whether `query` lies within this deny (or ignore) scope as
+  /// written or within the scope's resolved location ([`ResolvedScope`]).
+  fn covers_for_deny(&self, query: &PathQueryDescriptor) -> bool {
+    self.covers_for_allow(query)
+  }
+
+  /// denext: whether this deny (or ignore) scope, as written or at its
+  /// resolved location ([`ResolvedScope`]), lies within `base`: a recursive
+  /// operation on `base` would reach it.
+  fn lies_within(&self, base: &PathQueryDescriptor) -> bool {
+    self.cmp_path.starts_with(&base.cmp_path)
+      || self
+        .resolved
+        .as_ref()
+        .is_some_and(|resolved| resolved.cmp_path.starts_with(&base.cmp_path))
   }
 
   /// denext: records where this allow scope leads once its symlinks are
@@ -2181,7 +2204,7 @@ impl QueryDescriptor for WriteQueryDescriptor<'_> {
   }
 
   fn matches_deny(&self, other: &Self::DenyDesc) -> bool {
-    self.0.starts_with(&other.0)
+    other.0.covers_for_deny(&self.0)
   }
 
   fn revokes(&self, other: &Self::AllowDesc) -> bool {
@@ -2189,7 +2212,7 @@ impl QueryDescriptor for WriteQueryDescriptor<'_> {
   }
 
   fn stronger_than_deny(&self, other: &Self::DenyDesc) -> bool {
-    other.0.starts_with(&self.0)
+    other.0.lies_within(&self.0)
   }
 
   fn overlaps_deny(&self, other: &Self::DenyDesc) -> bool {
@@ -3743,6 +3766,45 @@ impl SpecialFilePathQueryDescriptor<'_> {
     push_name(&mut resolved, name);
     Some(resolved)
   }
+
+  /// denext: where the deny (or ignore) scope `scope` lies once its symlinks
+  /// are resolved, through the same resolution an access gets. A deny scope
+  /// is otherwise compared only as written, against the path an access
+  /// names and the path it resolves to: with `--deny-read=/tmp/secret` on
+  /// macOS (`/tmp` -> `/private/tmp`), `/private/tmp/secret/x` matched
+  /// neither, and any symlink on the way to a deny scope gave it a second
+  /// name that was not denied.
+  ///
+  /// Unlike an allow scope ([`Self::resolve_allow_scope`]), a deny scope that
+  /// is itself a symlink covers its target too, whoever owns the link. For
+  /// an allow scope, following a link the user owns would widen the grant
+  /// to wherever that link points (a planted link would be an escalation),
+  /// so only root-owned system links are followed. For a deny scope the
+  /// direction is reversed: covering the target as well only takes access
+  /// away, so following the link is the safe reading of a rule that names
+  /// it, and refusing only the link's own name would leave its target
+  /// reachable under its real name. The link itself stays denied as
+  /// written. Resolved once, when the scope is parsed, before any program
+  /// code runs, so the program cannot steer it; a link changed afterwards
+  /// is not followed again (the TOCTOU note on
+  /// `PermissionsContainer::check_resolved_path` applies). `None` for a
+  /// device path, the Linux `/proc` and `/dev` trees, or a scope that does
+  /// not resolve.
+  ///
+  /// A deny scope covers names, not files: another hard link to a denied
+  /// file (a second directory entry for the same inode, which no path
+  /// resolution leads back to the scope) is outside it. Keep what a deny
+  /// scope protects off file systems where an allowed directory can hold
+  /// such a link, or out of reach of `--allow-write` there.
+  pub fn resolve_deny_scope(
+    sys: &(impl sys_traits::FsCanonicalize + sys_traits::FsReadLink),
+    scope: &PathDescriptor,
+  ) -> Option<PathBuf> {
+    if scope.is_windows_device_path || is_linux_special_path(&scope.path) {
+      return None;
+    }
+    canonicalize_path_maybe_not_exists_following_links(sys, &scope.path).ok()
+  }
 }
 
 /// On Linux, /proc and /dev contain magic links that we don't want to resolve.
@@ -3914,7 +3976,10 @@ impl SysDescriptor {
       | "networkInterfaces" | "systemMemoryInfo" | "uid" | "gid" | "cpus"
       | "homedir" | "getegid" | "statfs" | "getPriority" | "setPriority"
       | "userInfo" | "setegid" | "seteuid" | "setgid" | "setuid" | "ca"
-      | "umask" => Ok(Self(kind)),
+      | "umask"
+      // denext: reading this process's / any process's /proc entries (see
+      // `linux_special_read_sys_kind`).
+      | "processInfo" | "processes" => Ok(Self(kind)),
 
       // the underlying permission check changed to `userInfo` to better match the API,
       // alias this to avoid breaking existing projects with `--allow-sys=username`
@@ -3925,6 +3990,35 @@ impl SysDescriptor {
 
   pub fn into_string(self) -> String {
     self.0
+  }
+
+  /// denext: `processInfo` and `processes` (Linux `/proc` reads, see
+  /// `linux_special_read_sys_kind`) are granted only by a grant that names
+  /// them (`--allow-sys=processes`, `sys: ["processes"]`, or a prompt for that
+  /// name), or by `--allow-all`; a bare `--allow-sys` doesn't include them,
+  /// because other processes' command lines and this process's memory map
+  /// are more than the OS information the other names expose.
+  pub fn is_named_only(&self) -> bool {
+    matches!(self.0.as_str(), "processInfo" | "processes")
+  }
+
+  /// The flag that grants a named-only name, as prompts write it.
+  fn named_only_flag(&self) -> String {
+    format!("sys={}", self.0)
+  }
+
+  /// The refusal message for a named-only name.
+  fn named_only_hint(&self, access: &str) -> String {
+    let name = &self.0;
+    if is_standalone() {
+      format!(
+        "Requires {access}, specify the required permissions during compilation using `deno compile --allow-sys={name}` (a bare --allow-sys does not grant it)"
+      )
+    } else {
+      format!(
+        "Requires {access}, run again with the --allow-sys={name} flag (a bare --allow-sys does not grant it)"
+      )
+    }
   }
 }
 
@@ -3957,6 +4051,9 @@ impl QueryDescriptor for SysDescriptor {
     perm: &mut UnaryPermission<Self::AllowDesc>,
     api_name: Option<&str>,
   ) -> Result<(), PermissionDeniedError> {
+    if self.is_named_only() {
+      return perm.check_named_only(self, api_name);
+    }
     audit_and_skip_check_if_is_permission_fully_granted!(
       perm,
       Self::flag_name(),
@@ -4179,7 +4276,7 @@ impl QueryDescriptor for FfiQueryDescriptor<'_> {
   }
 
   fn matches_deny(&self, other: &Self::DenyDesc) -> bool {
-    self.0.starts_with(&other.0)
+    other.0.covers_for_deny(&self.0)
   }
 
   fn revokes(&self, other: &Self::AllowDesc) -> bool {
@@ -4187,7 +4284,7 @@ impl QueryDescriptor for FfiQueryDescriptor<'_> {
   }
 
   fn stronger_than_deny(&self, other: &Self::DenyDesc) -> bool {
-    other.0.starts_with(&self.0)
+    other.0.lies_within(&self.0)
   }
 
   fn overlaps_deny(&self, other: &Self::DenyDesc) -> bool {
@@ -4427,6 +4524,84 @@ where
   Ok(())
 }
 
+/// The denial for a destination that IP-address deny rules cannot be checked
+/// against because its name did not resolve locally. See
+/// `PermissionsContainer::check_net_connect_unresolved`.
+/// denext: whether the operator said the proxy resolves names the local
+/// resolver can't (`DENO_PROXY_RESOLVES_NAMES=1`), read once with the proxy
+/// variables before any user code runs (see [`snapshot_proxy_resolves_names`]).
+static PROXY_RESOLVES_NAMES: std::sync::OnceLock<bool> =
+  std::sync::OnceLock::new();
+
+/// The environment variable that turns [`proxy_resolves_names`] on.
+pub const PROXY_RESOLVES_NAMES_ENV: &str = "DENO_PROXY_RESOLVES_NAMES";
+
+/// Reads `DENO_PROXY_RESOLVES_NAMES` now if it wasn't read yet. Called with
+/// the proxy variables' snapshot (`deno_fetch::snapshot_proxy_env`), before
+/// any user code runs, so a program can't turn it on with `Deno.env.set()`.
+pub fn snapshot_proxy_resolves_names() {
+  proxy_resolves_names();
+}
+
+/// Whether a proxied destination whose name doesn't resolve locally may go
+/// to the proxy under an IP-address deny rule (by default it is refused, see
+/// [`PermissionsContainer::check_net_connect_unresolved`]). On a network
+/// where only the proxy can resolve outside names, every proxied request
+/// would otherwise fail once any IP-address `--deny-net` rule exists. The
+/// operator opts in with `DENO_PROXY_RESOLVES_NAMES=1` and accepts that such
+/// names are then held to name-form rules only: the proxy picks their
+/// addresses. A name that does resolve locally is still checked by address.
+#[allow(
+  clippy::disallowed_methods,
+  reason = "operator configuration, read once before user code runs"
+)]
+pub fn proxy_resolves_names() -> bool {
+  *PROXY_RESOLVES_NAMES.get_or_init(|| {
+    std::env::var_os(PROXY_RESOLVES_NAMES_ENV).is_some_and(|v| v == "1")
+  })
+}
+
+fn unresolved_destination_denied(
+  flag_name: &'static str,
+  host: &str,
+  port: u16,
+  api_name: &str,
+) -> PermissionDeniedError {
+  let info = format!("\"{host}:{port}\"");
+  let mut err = PermissionState::permission_denied_error(
+    flag_name,
+    Some(info.as_str()),
+    PermissionState::Denied,
+  );
+  err.custom_message = Some(format!(
+    "Requires {}, which {api_name} could not resolve locally to check against the IP address --deny-{flag_name} rules, so it is denied (a proxy would resolve it on its own; set {PROXY_RESOLVES_NAMES_ENV}=1 where only the proxy can resolve names)",
+    err.access
+  ));
+  err
+}
+
+/// Whether a permission has a deny rule written as an IP address or subnet
+/// that could apply to a connection on `port` (a rule without a port applies
+/// to every port).
+///
+/// Such a rule can only be enforced against an address, so a destination that
+/// is a name has to be resolved before the rule can say anything about it.
+fn has_ip_deny_rule_for_port<TAllow: AllowDescriptor>(
+  perm: &UnaryPermission<TAllow>,
+  port: u16,
+  net: impl Fn(&TAllow::DenyDesc) -> &NetDescriptor,
+) -> bool {
+  perm.descriptors.iter().any(|item| match item {
+    UnaryPermissionDesc::FlagDenied(v)
+    | UnaryPermissionDesc::FlagIgnored(v) => {
+      let NetDescriptor(host, rule_port) = net(v);
+      matches!(host, Host::Ip(_) | Host::IpSubnet(_))
+        && rule_port.is_none_or(|p| p == u32::from(port))
+    }
+    _ => false,
+  })
+}
+
 impl UnaryPermission<NetConnectDescriptor> {
   pub fn query(&self, host: Option<&NetConnectDescriptor>) -> PermissionState {
     self.query_desc(host, AllowPartial::TreatAsPartialGranted)
@@ -4662,15 +4837,25 @@ impl UnaryPermission<EnvDescriptor> {
 
 impl UnaryPermission<SysDescriptor> {
   pub fn query(&self, kind: Option<&SysDescriptor>) -> PermissionState {
-    self.query_desc(kind, AllowPartial::TreatAsPartialGranted)
+    match kind {
+      Some(kind) if kind.is_named_only() => self.named_only_state(kind),
+      _ => self.query_desc(kind, AllowPartial::TreatAsPartialGranted),
+    }
   }
 
   pub fn request(&mut self, kind: Option<&SysDescriptor>) -> PermissionState {
-    self.request_desc(kind)
+    match kind {
+      Some(kind) if kind.is_named_only() => self.request_named_only(kind),
+      _ => self.request_desc(kind),
+    }
   }
 
   pub fn revoke(&mut self, kind: Option<&SysDescriptor>) -> PermissionState {
-    self.revoke_desc(kind)
+    let state = self.revoke_desc(kind);
+    match kind {
+      Some(kind) if kind.is_named_only() => self.named_only_state(kind),
+      _ => state,
+    }
   }
 
   pub fn check(
@@ -4678,12 +4863,90 @@ impl UnaryPermission<SysDescriptor> {
     kind: &SysDescriptor,
     api_name: Option<&str>,
   ) -> Result<(), PermissionDeniedError> {
+    if kind.is_named_only() {
+      write_audit(SysDescriptor::flag_name(), kind.display_name());
+      return self.check_named_only(kind, api_name);
+    }
     audit_and_skip_check_if_is_permission_fully_granted!(
       self,
       SysDescriptor::flag_name(),
       kind.display_name()
     );
     self.check_desc(Some(kind), false, api_name)
+  }
+
+  /// denext: the state of a name that only a grant naming it holds (see
+  /// [`SysDescriptor::is_named_only`]): an unscoped grant counts for nothing,
+  /// denials and ignores apply as usual.
+  fn named_only_state(&self, kind: &SysDescriptor) -> PermissionState {
+    self
+      .query_allowed_desc_for_exact_match(
+        Some(kind),
+        AllowPartial::TreatAsPartialGranted,
+      )
+      .unwrap_or(if self.flag_ignored_global {
+        PermissionState::Ignored
+      } else if self.flag_denied_global {
+        PermissionState::Denied
+      } else {
+        PermissionState::Prompt
+      })
+  }
+
+  /// denext: a prompt for a named-only sys name offers yes or no (no "allow
+  /// all sys", which wouldn't grant it) and names the flag that does.
+  fn prompt_named_only(
+    &mut self,
+    kind: &SysDescriptor,
+    api_name: Option<&str>,
+  ) -> PermissionState {
+    let msg =
+      format!("sys access to {}", format_display_name(kind.display_name()));
+    match permission_prompt(&msg, &kind.named_only_flag(), api_name, false) {
+      PromptResponse::Allow | PromptResponse::AllowAll => {
+        self.insert_granted(Some(kind));
+        PermissionState::Granted
+      }
+      PromptResponse::Deny => {
+        self.insert_prompt_denied(Some(kind.clone()));
+        PermissionState::Denied
+      }
+    }
+  }
+
+  fn request_named_only(&mut self, kind: &SysDescriptor) -> PermissionState {
+    match self.named_only_state(kind) {
+      PermissionState::Prompt if self.prompt => {
+        self.prompt_named_only(kind, Some("Deno.permissions.request()"))
+      }
+      PermissionState::Prompt => PermissionState::Denied,
+      state => state,
+    }
+  }
+
+  fn check_named_only(
+    &mut self,
+    kind: &SysDescriptor,
+    api_name: Option<&str>,
+  ) -> Result<(), PermissionDeniedError> {
+    let info = || Some(format_display_name(kind.display_name()).into_owned());
+    let mut state = self.named_only_state(kind);
+    if state == PermissionState::Prompt && self.prompt && !has_broker() {
+      state = self.prompt_named_only(kind, api_name);
+    }
+    let (result, _, _) = state.check(
+      SysDescriptor::flag_name(),
+      api_name,
+      || Some(kind.display_name().into_owned()),
+      info,
+      false,
+    );
+    result.map_err(|mut err| {
+      if err.custom_message.is_none() {
+        err.custom_message = Some(kind.named_only_hint(&err.access));
+      }
+      err
+    })
   }
 
   pub fn check_all(&mut self) -> Result<(), PermissionDeniedError> {
@@ -4853,6 +5116,14 @@ pub struct Permissions {
   /// minimal inherited environment (plus these names); see
   /// [`PermissionsOptions::clean_run_env`]. A worker takes its parent's.
   clean_run_env: Option<Vec<String>>,
+  /// Whether these permissions may authorize an embedder's fork of its own
+  /// executable without the run permission (`deno_process`'s self-fork,
+  /// DENEXT.md item 434): the program's own permissions, as built, or a
+  /// worker's that inherit every permission from such a parent. A worker
+  /// given any permission of its own (`"none"`, `run: false`, a list) and any
+  /// `Deno.permissions.revoke(...)` turn it off for good, since the fork
+  /// starts with the permissions as built.
+  self_fork: bool,
 }
 
 impl Permissions {
@@ -5070,8 +5341,17 @@ impl Permissions {
       }
     }
 
+    // denext: deny and ignore scopes also cover their resolved location
+    // (see `SpecialFilePathQueryDescriptor::resolve_deny_scope`), so a deny
+    // written through a symlink can't be reached under the other name.
+    let deny_scope = |desc: PathDescriptor| {
+      let resolved = parser.resolve_deny_scope(&desc);
+      desc.with_resolved(resolved)
+    };
     let mut deny_write = parse_maybe_vec(opts.deny_write.as_deref(), |item| {
-      parser.parse_write_descriptor(item)
+      parser
+        .parse_write_descriptor(item)
+        .map(|desc| WriteDescriptor(deny_scope(desc.0)))
     })?;
     let allow_run = opts
       .allow_run
@@ -5097,7 +5377,7 @@ impl Permissions {
       deny_write.extend(
         allow_run_vec
           .iter()
-          .map(|item| WriteDescriptor(item.0.clone())),
+          .map(|item| WriteDescriptor(deny_scope(item.0.clone()))),
       );
     }
 
@@ -5113,6 +5393,7 @@ impl Permissions {
     Ok(Self {
       net_directional,
       clean_run_env: opts.clean_run_env.clone(),
+      self_fork: true,
       read: Permissions::new_unary_with_ignore(
         parse_maybe_vec(opts.allow_read.as_deref(), |item| {
           parser.parse_read_descriptor(item).map(|desc| {
@@ -5121,10 +5402,14 @@ impl Permissions {
           })
         })?,
         parse_maybe_vec(opts.deny_read.as_deref(), |item| {
-          parser.parse_read_descriptor(item)
+          parser
+            .parse_read_descriptor(item)
+            .map(|desc| ReadDescriptor(deny_scope(desc.0)))
         })?,
         parse_maybe_vec(opts.ignore_read.as_deref(), |text| {
-          parser.parse_read_descriptor(text)
+          parser
+            .parse_read_descriptor(text)
+            .map(|desc| ReadDescriptor(deny_scope(desc.0)))
         })?,
         opts.prompt,
       ),
@@ -5198,7 +5483,9 @@ impl Permissions {
           parser.parse_ffi_descriptor(text)
         })?,
         parse_maybe_vec(opts.deny_ffi.as_deref(), |text| {
-          parser.parse_ffi_descriptor(text)
+          parser
+            .parse_ffi_descriptor(text)
+            .map(|desc| FfiDescriptor(deny_scope(desc.0)))
         })?,
         opts.prompt,
       ),
@@ -5235,6 +5522,7 @@ impl Permissions {
       midi: UnaryPermission::allow_all(),
       net_directional: false,
       clean_run_env: None,
+      self_fork: true,
     }
   }
 
@@ -5263,6 +5551,7 @@ impl Permissions {
       midi: Permissions::new_unary(None, None, prompt),
       net_directional: false,
       clean_run_env: None,
+      self_fork: true,
     }
   }
 }
@@ -5474,6 +5763,160 @@ pub struct PermissionsContainer {
   resolved_import_hosts: ResolvedHostsCache,
 }
 
+/// denext: [`linux_special_read_sys_kind`] for the path as written, held
+/// only when the path the kernel reaches (its symlinks resolved) is in the same
+/// class: `/sys/devices/system/cpu/cpu0/node0` is a link to
+/// `/sys/devices/system/node/node0`, and `cpuN/{subsystem,firmware_node,
+/// driver}` lead elsewhere in sysfs, so the written path alone would let
+/// `--allow-sys=cpus` reach attributes no class maps. `/proc/self` and
+/// `/proc/thread-self` resolve to `/proc/<own pid>` and
+/// `/proc/<own pid>/task/<tid>`, which stay `processInfo`. A path that can't be
+/// resolved (missing, or no permission) is in no class.
+///
+/// The open then follows the written path again. That can't reach anything
+/// else: every link on these paths is made by the kernel (procfs and sysfs
+/// take no `symlink(2)` from anyone, root included), the classes never name a
+/// per-process link (`cwd`, `root`, `exe`, `fd/*`, `map_files` are excluded),
+/// and the one value that differs between the two walks, a pid, is either this
+/// process's own (it can't be reused while the process lives, and only its own
+/// threads are under its `task/`) or another process's listing file, which is
+/// `processes` whatever process it names. Remounting `/proc` or `/sys` needs
+/// privileges this check can't hold against anyway.
+#[allow(
+  clippy::disallowed_methods,
+  reason = "procfs / sysfs links are resolved by the kernel, which sys_traits doesn't abstract"
+)]
+fn linux_special_read_sys_kind_checked(path: &Path) -> Option<&'static str> {
+  let own_pid = proc_self_pid();
+  let resolved = std::fs::canonicalize(path).ok()?;
+  linux_special_read_sys_kind_resolved(path, &resolved, own_pid)
+}
+
+/// denext: this process's pid as the mounted `/proc` numbers it (the target
+/// of its `self` link). That is the number `/proc/<pid>` paths are compared
+/// with: under a `/proc` that belongs to another pid namespace,
+/// `getpid()` is a different number (or names another process there).
+/// `None` when the link can't be read, and then no number is this process.
+#[allow(
+  clippy::disallowed_methods,
+  reason = "procfs links are resolved by the kernel, which sys_traits doesn't abstract"
+)]
+fn proc_self_pid() -> Option<u32> {
+  std::fs::read_link("/proc/self")
+    .ok()?
+    .to_str()?
+    .parse()
+    .ok()
+}
+
+/// The class of `path` when `resolved` (`path` with its links resolved) is in
+/// the same one, else `None`.
+fn linux_special_read_sys_kind_resolved(
+  path: &Path,
+  resolved: &Path,
+  own_pid: Option<u32>,
+) -> Option<&'static str> {
+  let kind = linux_special_read_sys_kind(path, own_pid)?;
+  (linux_special_read_sys_kind(resolved, own_pid) == Some(kind)).then_some(kind)
+}
+
+/// denext: the `--allow-sys` name that grants *reading* a Linux `/proc` or
+/// `/sys` path (with the read grant on the path, which the caller checks), or
+/// `None` when the path stays behind `--allow-all` (writes never come here).
+/// `path` is absolute and lexically normalized, as `check_special_file` gets
+/// it (the `/proc` and `/sys` trees are not canonicalized, so `..` was
+/// removed by name and the path is opened as written).
+///
+/// - System information, the data the matching APIs already gate:
+///   `/proc/{cpuinfo,stat}` and `/sys/devices/system/cpu/**` → `cpus`;
+///   `/proc/meminfo` → `systemMemoryInfo`; `/proc/loadavg` → `loadavg`;
+///   `/proc/uptime` → `osUptime`; `/proc/version` → `osRelease`; a cgroup
+///   limit or usage file (`/sys/fs/cgroup/**/<controller>.{max,current}`) →
+///   `systemMemoryInfo` for `memory.*`, `cpus` for `cpu.*` / `cpuset.*`,
+///   `processes` for `pids.*`.
+/// - This process (`/proc/self`, `/proc/thread-self`, `/proc/<own pid>`, and
+///   `task/<tid>/` under the first and the last) →
+///   `processInfo` for `status`, `stat`, `statm`, `maps`, `cgroup`, `limits`,
+///   `cmdline`, `comm`.
+/// - Any other process's read-only listing (`/proc` itself, and
+///   `/proc/<pid>/{stat,status,cmdline,comm}` with `task/<tid>/` too) →
+///   `processes`. A number is this process only when it is `own_pid` (see
+///   [`proc_self_pid`]); a thread id of this process counts as another
+///   process (the narrower rule).
+///
+/// `processInfo` and `processes` take effect only when named
+/// ([`SysDescriptor::is_named_only`]); a bare `--allow-sys` grants the
+/// system-information classes only.
+/// - Everything else (`mem`, `root`, `cwd`, `exe`, `fd/*`, `map_files`,
+///   `environ` (which the caller sends to `--allow-env`), `/proc/sys`, the
+///   rest of `/sys`, devices) → `None`.
+fn linux_special_read_sys_kind(
+  path: &Path,
+  own_pid: Option<u32>,
+) -> Option<&'static str> {
+  use std::path::Component;
+  let mut parts = Vec::new();
+  for component in path.components() {
+    match component {
+      Component::RootDir => {}
+      Component::Normal(name) => parts.push(name.to_str()?),
+      // `..` or a prefix: not a normalized absolute path. (`components()`
+      // drops `.`.)
+      _ => return None,
+    }
+  }
+  let is_number =
+    |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+  match parts.as_slice() {
+    ["proc"] => Some("processes"),
+    ["proc", "cpuinfo" | "stat"] => Some("cpus"),
+    ["proc", "meminfo"] => Some("systemMemoryInfo"),
+    ["proc", "loadavg"] => Some("loadavg"),
+    ["proc", "uptime"] => Some("osUptime"),
+    ["proc", "version"] => Some("osRelease"),
+    ["proc", who, rest @ ..] => {
+      let own = match *who {
+        "self" | "thread-self" => true,
+        pid if is_number(pid) => {
+          own_pid.is_some() && pid.parse::<u32>().ok() == own_pid
+        }
+        _ => return None,
+      };
+      let file = match rest {
+        [file] => *file,
+        // `thread-self` is already a task directory.
+        ["task", tid, file] if *who != "thread-self" && is_number(tid) => *file,
+        _ => return None,
+      };
+      match file {
+        "status" | "stat" | "statm" | "maps" | "cgroup" | "limits"
+        | "cmdline" | "comm"
+          if own =>
+        {
+          Some("processInfo")
+        }
+        "stat" | "status" | "cmdline" | "comm" => Some("processes"),
+        _ => None,
+      }
+    }
+    ["sys", "devices", "system", "cpu", ..] => Some("cpus"),
+    ["sys", "fs", "cgroup", .., file] => {
+      let (controller, _) = file.split_once('.')?;
+      let (_, suffix) = file.rsplit_once('.')?;
+      if suffix != "max" && suffix != "current" {
+        return None;
+      }
+      match controller {
+        "memory" => Some("systemMemoryInfo"),
+        "cpu" | "cpuset" => Some("cpus"),
+        "pids" => Some("processes"),
+        _ => None,
+      }
+    }
+    _ => None,
+  }
+}
+
 impl PermissionsContainer {
   pub fn new(
     descriptor_parser: Arc<dyn PermissionDescriptorParser>,
@@ -5527,6 +5970,10 @@ impl PermissionsContainer {
     child_permissions_arg: ChildPermissionsArg,
   ) -> Result<PermissionsContainer, ChildPermissionError> {
     let mut worker_perms = Permissions::none_without_prompt();
+    // Only a worker that inherits every permission keeps the parent's say
+    // over a self-fork (DENEXT.md item 434): a fork starts with the
+    // permissions the program was built with, more than a narrowed worker's.
+    let inherits_all = child_permissions_arg == ChildPermissionsArg::inherit();
 
     let mut inner = self.inner.lock();
 
@@ -5656,14 +6103,27 @@ impl PermissionsContainer {
         ))
       },
     )?;
-    worker_perms.sys = inner.sys.create_child_permissions(
-      child_permissions_arg.sys,
-      |text| {
-        Ok::<_, SysDescriptorParseError>(Some(
-          self.descriptor_parser.parse_sys_descriptor(text)?,
-        ))
-      },
-    )?;
+    let parse_sys = |text: &str| {
+      Ok::<_, SysDescriptorParseError>(Some(
+        self.descriptor_parser.parse_sys_descriptor(text)?,
+      ))
+    };
+    worker_perms.sys = if inner.all_granted() {
+      // denext: under --allow-all a worker may also be given the sys names
+      // a bare grant leaves out (`SysDescriptor::is_named_only`). Nothing
+      // prompts here, so the parent's own state needs no update.
+      let mut parent_sys = inner.sys.clone();
+      for name in ["processInfo", "processes"] {
+        parent_sys.insert_granted(Some(&SysDescriptor(name.to_string())));
+      }
+      parent_sys
+        .create_child_permissions(child_permissions_arg.sys, parse_sys)?
+    } else {
+      inner
+        .sys
+        .create_child_permissions(child_permissions_arg.sys, parse_sys)?
+    };
+    worker_perms.self_fork = inner.self_fork && inherits_all;
     worker_perms.run = inner.run.create_child_permissions(
       child_permissions_arg.run,
       |text| match self.descriptor_parser.parse_allow_run_descriptor(text)? {
@@ -6005,6 +6465,65 @@ impl PermissionsContainer {
     Ok(())
   }
 
+  /// Whether any read deny exists: a `--deny-read` or `--ignore-read`
+  /// scope, or a read denied at a prompt. Without one,
+  /// [`Self::check_read_not_denied`] refuses nothing.
+  /// A number that changes whenever the read denies do (a read denied at a
+  /// prompt adds one; nothing removes one), for caches of deny verdicts.
+  pub fn read_deny_generation(&self) -> usize {
+    let inner = self.inner.lock();
+    let read = &inner.read;
+    let denies = read
+      .descriptors
+      .inner
+      .iter()
+      .filter(|d| !matches!(d, UnaryPermissionDesc::Granted(_)))
+      .count();
+    denies * 8
+      + usize::from(read.flag_denied_global) * 4
+      + usize::from(read.flag_ignored_global) * 2
+      + usize::from(read.prompt_denied_global)
+  }
+
+  pub fn has_read_deny_rules(&self) -> bool {
+    let inner = self.inner.lock();
+    let read = &inner.read;
+    read.flag_denied_global
+      || read.flag_ignored_global
+      || read.prompt_denied_global
+      || read.descriptors.has_any_denied_or_ignored()
+  }
+
+  /// The deny half of the read check alone: refuses `path` when a
+  /// `--deny-read` or `--ignore-read` scope (or a read denied at a prompt)
+  /// covers it, whatever the allow scopes say. For reads that are exempt
+  /// from the allow scopes but never from a deny (a BYONM `node_modules`
+  /// file, DENEXT.md item 435).
+  pub fn check_read_not_denied(
+    &self,
+    path: &Path,
+    api_name: Option<&str>,
+  ) -> Result<(), PermissionCheckError> {
+    if !self.has_read_deny_rules() {
+      return Ok(());
+    }
+    let desc = self
+      .descriptor_parser
+      .parse_path_query(Cow::Owned(path.to_path_buf()))?
+      .into_read();
+    let mut inner = self.inner.lock();
+    if matches!(
+      inner.read.query(Some(&desc)),
+      PermissionState::Denied | PermissionState::Ignored
+    ) {
+      inner
+        .read
+        .check_partial(&desc, api_name)
+        .map_err(ignored_to_not_found)?;
+    }
+    Ok(())
+  }
+
   /// Whether an access of `access_kind` needs the re-check of its resolved
   /// path: some kind of access it performs is not granted for every path
   /// (a scoped allow, a deny or ignore rule, prompting or a broker).
@@ -6331,10 +6850,13 @@ impl PermissionsContainer {
     kind: &str,
     api_name: &str,
   ) -> Result<(), PermissionCheckError> {
-    self.inner.lock().sys.check(
-      &self.descriptor_parser.parse_sys_descriptor(kind)?,
-      Some(api_name),
-    )?;
+    let kind = self.descriptor_parser.parse_sys_descriptor(kind)?;
+    let mut inner = self.inner.lock();
+    // denext: `--allow-all` grants the names a bare --allow-sys leaves out.
+    if kind.is_named_only() && inner.all_granted() {
+      return Ok(());
+    }
+    inner.sys.check(&kind, Some(api_name))?;
     Ok(())
   }
 
@@ -6391,7 +6913,7 @@ impl PermissionsContainer {
   }
 
   pub fn revoke_midi(&self, sysex: bool) -> PermissionState {
-    self.inner.lock().midi.revoke(midi_kind(sysex))
+    self.lock_for_revoke().midi.revoke(midi_kind(sysex))
   }
 
   pub fn request_midi(&self, sysex: bool) -> PermissionState {
@@ -6432,7 +6954,7 @@ impl PermissionsContainer {
     &self,
     path: SpecialFilePathQueryDescriptor<'a>,
     access_kind: OpenAccessKind,
-    _api_name: Option<&str>,
+    api_name: Option<&str>,
   ) -> Result<CheckedPath<'a>, PermissionCheckError> {
     let requested = path.requested;
     let canonicalized = path.canonicalized;
@@ -6525,6 +7047,13 @@ impl PermissionsContainer {
         } else if path.starts_with("/proc/pressure/") {
           // Allow /proc/pressure/* files with just --allow-read since they are
           // read-only system monitoring files that only expose performance metrics
+        } else if let Some(kind) = (!access_kind.is_write())
+          .then(|| linux_special_read_sys_kind_checked(&path))
+          .flatten()
+        {
+          // denext: the read grant on the path was checked by the caller; the
+          // information it exposes is what this --allow-sys name gates.
+          self.check_sys(kind, api_name.unwrap_or("Deno.open()"))?;
         } else {
           self.check_has_all_permissions(&path)?;
         }
@@ -6852,6 +7381,107 @@ impl PermissionsContainer {
     ips
   }
 
+  /// Whether the connect-direction deny list (the legacy `net` one outside
+  /// the directional model) has a rule written as an IP address or subnet
+  /// that could apply to `port`.
+  pub fn has_net_connect_ip_deny_rules(&self, port: u16) -> bool {
+    let inner = self.inner.lock();
+    if inner.net_directional_active() {
+      has_ip_deny_rule_for_port(&inner.net_connect, port, |d| &d.0)
+    } else {
+      has_ip_deny_rule_for_port(&inner.net, port, |d| d)
+    }
+  }
+
+  /// Whether the import deny list has a rule written as an IP address or
+  /// subnet that could apply to `port`.
+  pub fn has_import_ip_deny_rules(&self, port: u16) -> bool {
+    has_ip_deny_rule_for_port(&self.inner.lock().import, port, |d| &d.0)
+  }
+
+  /// Fails closed for a destination name that could not be resolved locally
+  /// while an IP-address connect deny rule could apply to it.
+  ///
+  /// For a request routed through a proxy, the runtime never connects to the
+  /// destination itself: the proxy resolves the name and connects. The only
+  /// way to hold an IP-address deny rule against such a destination is to
+  /// resolve the name here and compare the addresses, and when the name does
+  /// not resolve here (a name only the proxy's resolver knows, a split-horizon
+  /// zone, a transient failure) there is nothing to compare. Letting the
+  /// request through would let `--deny-net=10.0.0.5` be reached as any name
+  /// that resolves to it only at the proxy, so deny instead.
+  ///
+  /// Residual risk, by design out of reach of a client-side check: the proxy
+  /// resolves the name again on its own, and may get a different answer than
+  /// the local resolver did (split-horizon DNS, DNS rebinding between the two
+  /// lookups). IP-address deny rules are a hard boundary only for direct
+  /// connections; name-form rules hold through a proxy because they are
+  /// compared before any lookup.
+  pub fn check_net_connect_unresolved(
+    &mut self,
+    host: &str,
+    port: u16,
+    api_name: &str,
+  ) -> Result<(), PermissionCheckError> {
+    if !self.has_net_connect_ip_deny_rules(port) || proxy_resolves_names() {
+      return Ok(());
+    }
+    let flag_name = if self.inner.lock().net_directional_active() {
+      NetConnectDescriptor::flag_name()
+    } else {
+      NetDescriptor::flag_name()
+    };
+    Err(unresolved_destination_denied(flag_name, host, port, api_name).into())
+  }
+
+  /// [`Self::check_net_connect_unresolved`] for module loading under
+  /// `--deny-import`.
+  pub fn check_import_unresolved(
+    &mut self,
+    host: &str,
+    port: u16,
+    api_name: &str,
+  ) -> Result<(), PermissionCheckError> {
+    if !self.has_import_ip_deny_rules(port) || proxy_resolves_names() {
+      return Ok(());
+    }
+    Err(
+      unresolved_destination_denied(
+        ImportDescriptor::flag_name(),
+        host,
+        port,
+        api_name,
+      )
+      .into(),
+    )
+  }
+
+  /// Checks a (host, port) pair against the connect-direction deny rules only,
+  /// by the name as written, without consulting any allow rule.
+  ///
+  /// For the hop to a proxy configured by the operator through the
+  /// environment (`HTTP_PROXY` / `HTTPS_PROXY`), which is deliberately not
+  /// subject to `--allow-net`: it is configuration, not something the program
+  /// chose. An explicit deny still has to hold, though, and the connector only
+  /// compares the proxy's resolved addresses with IP-address deny rules, so a
+  /// name-form rule such as `--deny-net=proxy.internal` would otherwise never
+  /// be consulted.
+  pub fn check_net_connect_deny_only<T: AsRef<str>>(
+    &mut self,
+    host: &(T, Option<u16>),
+    _api_name: &str,
+  ) -> Result<(), PermissionCheckError> {
+    let hostname = Host::parse_for_query(host.0.as_ref())?;
+    let desc = NetDescriptor(hostname, host.1.map(Into::into));
+    let inner = self.inner.lock();
+    if inner.net_directional_active() {
+      check_deny_only(&inner.net_connect, &desc.into_connect())?;
+    } else {
+      check_deny_only(&inner.net, &desc)?;
+    }
+    Ok(())
+  }
+
   /// Vsock connect-direction permission check.
   #[inline(always)]
   pub fn check_net_connect_vsock(
@@ -7031,6 +7661,49 @@ impl PermissionsContainer {
 
   // query
 
+  /// denext: whether reading `path` is granted without asking, both by the
+  /// path as given and by the path it resolves to (all symlinks followed, a
+  /// missing tail kept as written). Never prompts: a path that would need a
+  /// prompt is not granted.
+  ///
+  /// Used to filter what a file watcher reports. A recursive watch is
+  /// checked once, on its root, but it reports on everything below: a
+  /// `--deny-read` (or `--ignore-read`) scope inside the watched tree, and
+  /// whatever a symlink inside the tree leads to (some watcher backends
+  /// follow links into other directories). Each reported path has to be
+  /// readable on its own for the event to reveal it.
+  pub fn query_read_reachable(&self, path: &Path) -> bool {
+    if self.inner.lock().read.is_allow_all() {
+      return true;
+    }
+    let granted = |query: PathQueryDescriptor<'_>| {
+      matches!(
+        self.inner.lock().read.query(Some(&query.into_read())),
+        PermissionState::Granted | PermissionState::GrantedPartial
+      )
+    };
+    let Ok(query) = self
+      .descriptor_parser
+      .parse_path_query(Cow::Owned(path.to_path_buf()))
+    else {
+      return false;
+    };
+    if !granted(query.clone()) {
+      return false;
+    }
+    let given = query.path.clone().into_owned();
+    match self.descriptor_parser.parse_special_file_descriptor(query) {
+      Ok(special) if special.canonicalized && special.path != given => {
+        match self.descriptor_parser.parse_path_query(special.path) {
+          Ok(resolved) => granted(resolved),
+          Err(_) => false,
+        }
+      }
+      Ok(_) => true,
+      Err(_) => false,
+    }
+  }
+
   #[inline(always)]
   pub fn query_read(
     &self,
@@ -7185,19 +7858,18 @@ impl PermissionsContainer {
     &self,
     kind: Option<&str>,
   ) -> Result<PermissionState, SysDescriptorParseError> {
+    let kind = kind
+      .map(|kind| self.descriptor_parser.parse_sys_descriptor(kind))
+      .transpose()?;
     let inner = self.inner.lock();
     let permission = &inner.sys;
-    if permission.is_allow_all() {
+    let named_only = kind.as_ref().is_some_and(|kind| kind.is_named_only());
+    if named_only && inner.all_granted()
+      || !named_only && permission.is_allow_all()
+    {
       return Ok(PermissionState::Granted);
     }
-    Ok(
-      permission.query(
-        kind
-          .map(|kind| self.descriptor_parser.parse_sys_descriptor(kind))
-          .transpose()?
-          .as_ref(),
-      ),
-    )
+    Ok(permission.query(kind.as_ref()))
   }
 
   #[inline(always)]
@@ -7278,7 +7950,7 @@ impl PermissionsContainer {
     path: Option<&str>,
   ) -> Result<PermissionState, PathResolveError> {
     Ok(
-      self.inner.lock().read.revoke(
+      self.lock_for_revoke().read.revoke(
         path
           .map(|path| {
             Ok::<_, PathResolveError>(
@@ -7300,7 +7972,7 @@ impl PermissionsContainer {
     path: Option<&str>,
   ) -> Result<PermissionState, PathResolveError> {
     Ok(
-      self.inner.lock().write.revoke(
+      self.lock_for_revoke().write.revoke(
         path
           .map(|path| {
             Ok::<_, PathResolveError>(
@@ -7325,7 +7997,7 @@ impl PermissionsContainer {
     // `net` field. Use `name: "net-connect"` / `name: "net-listen"` to
     // revoke directional grants.
     Ok(
-      self.inner.lock().net.revoke(
+      self.lock_for_revoke().net.revoke(
         match host {
           None => None,
           Some(h) => Some(self.descriptor_parser.parse_net_query(h)?),
@@ -7340,7 +8012,7 @@ impl PermissionsContainer {
     &self,
     host: Option<&str>,
   ) -> Result<PermissionState, NetDescriptorParseError> {
-    let mut inner = self.inner.lock();
+    let mut inner = self.lock_for_revoke();
     let query_desc = match host {
       None => None,
       Some(h) => Some(self.descriptor_parser.parse_net_query(h)?),
@@ -7368,7 +8040,7 @@ impl PermissionsContainer {
     &self,
     host: Option<&str>,
   ) -> Result<PermissionState, NetDescriptorParseError> {
-    let mut inner = self.inner.lock();
+    let mut inner = self.lock_for_revoke();
     let query_desc = match host {
       None => None,
       Some(h) => Some(self.descriptor_parser.parse_net_query(h)?),
@@ -7390,7 +8062,7 @@ impl PermissionsContainer {
 
   #[inline(always)]
   pub fn revoke_env(&self, var: Option<&str>) -> PermissionState {
-    self.inner.lock().env.revoke(var)
+    self.lock_for_revoke().env.revoke(var)
   }
 
   #[inline(always)]
@@ -7399,7 +8071,7 @@ impl PermissionsContainer {
     kind: Option<&str>,
   ) -> Result<PermissionState, SysDescriptorParseError> {
     Ok(
-      self.inner.lock().sys.revoke(
+      self.lock_for_revoke().sys.revoke(
         kind
           .map(|kind| self.descriptor_parser.parse_sys_descriptor(kind))
           .transpose()?
@@ -7413,14 +8085,33 @@ impl PermissionsContainer {
     &self,
     cmd: Option<&str>,
   ) -> Result<PermissionState, RunDescriptorParseError> {
-    Ok(
-      self.inner.lock().run.revoke(
-        cmd
-          .map(|request| self.descriptor_parser.parse_run_query(request))
-          .transpose()?
-          .as_ref(),
-      ),
-    )
+    let cmd = cmd
+      .map(|request| self.descriptor_parser.parse_run_query(request))
+      .transpose()?;
+    // Revoking any run permission also revokes the say over a self-fork
+    // (DENEXT.md item 434).
+    Ok(self.lock_for_revoke().run.revoke(cmd.as_ref()))
+  }
+
+  /// The permissions, locked for a revoke. Any revoke also ends the say over
+  /// a self-fork: a fork starts with the permissions the program was built
+  /// with, so after a revoke it would have more than its parent.
+  fn lock_for_revoke(&self) -> parking_lot::MutexGuard<'_, Permissions> {
+    let mut inner = self.inner.lock();
+    inner.self_fork = false;
+    inner
+  }
+
+  /// Whether a fork of the embedder's own executable (`cmd`) may skip the
+  /// run check (`deno_process`'s self-fork): only for the program's own
+  /// permissions or a worker's that inherit run, never after a run revoke,
+  /// and never when a `--deny-run` covers `cmd` (DENEXT.md item 434).
+  /// Otherwise the fork is checked like any other program.
+  pub fn may_authorize_self_fork(&self, cmd: &RunQueryDescriptor) -> bool {
+    let inner = self.inner.lock();
+    inner.self_fork
+      && inner.run.query(Some(cmd)) != PermissionState::Denied
+      && !inner.run.is_partial_flag_denied(Some(cmd))
   }
 
   #[inline(always)]
@@ -7429,7 +8120,7 @@ impl PermissionsContainer {
     path: Option<&str>,
   ) -> Result<PermissionState, PathResolveError> {
     Ok(
-      self.inner.lock().ffi.revoke(
+      self.lock_for_revoke().ffi.revoke(
         path
           .map(|path| {
             Ok::<_, PathResolveError>(
@@ -7451,7 +8142,7 @@ impl PermissionsContainer {
     host: Option<&str>,
   ) -> Result<PermissionState, NetDescriptorParseError> {
     Ok(
-      self.inner.lock().import.revoke(
+      self.lock_for_revoke().import.revoke(
         match host {
           None => None,
           Some(h) => {
@@ -7587,14 +8278,16 @@ impl PermissionsContainer {
     &self,
     kind: Option<&str>,
   ) -> Result<PermissionState, SysDescriptorParseError> {
-    Ok(
-      self.inner.lock().sys.request(
-        kind
-          .map(|kind| self.descriptor_parser.parse_sys_descriptor(kind))
-          .transpose()?
-          .as_ref(),
-      ),
-    )
+    let kind = kind
+      .map(|kind| self.descriptor_parser.parse_sys_descriptor(kind))
+      .transpose()?;
+    let mut inner = self.inner.lock();
+    if kind.as_ref().is_some_and(|kind| kind.is_named_only())
+      && inner.all_granted()
+    {
+      return Ok(PermissionState::Granted);
+    }
+    Ok(inner.sys.request(kind.as_ref()))
   }
 
   #[inline(always)]
@@ -8044,6 +8737,16 @@ pub trait PermissionDescriptorParser: Debug + Send + Sync {
   /// file system access.
   fn is_executable_file(&self, _path: &Path) -> bool {
     false
+  }
+
+  /// denext: where the deny (or ignore) scope `path` lies once its symlinks
+  /// are resolved, the final one included (see
+  /// `SpecialFilePathQueryDescriptor::resolve_deny_scope`), recorded on the
+  /// scope so that an access reaching that location under another name is
+  /// still refused (see [`ResolvedScope`]). `None` when the parser does not
+  /// resolve paths or the scope does not resolve.
+  fn resolve_deny_scope(&self, _path: &PathDescriptor) -> Option<PathBuf> {
+    None
   }
 
   fn parse_net_query(
@@ -8713,6 +9416,541 @@ mod tests {
     }
   }
 
+  // A proxied request is resolved and connected by the proxy, so IP-address
+  // deny rules can only be held against a destination name through a local
+  // lookup: a name that does not resolve locally has to fail closed whenever
+  // such a rule could apply to its port, and only then.
+  #[test]
+  fn test_net_connect_unresolved_fails_closed_under_ip_deny_rules() {
+    let container = |deny: &[&str], directional: bool| {
+      let parser = TestPermissionDescriptorParser;
+      let deny: Vec<String> = deny.iter().map(|s| s.to_string()).collect();
+      let opts = if directional {
+        PermissionsOptions {
+          allow_net_connect: Some(svec![]),
+          deny_net_connect: Some(deny),
+          prompt: false,
+          ..Default::default()
+        }
+      } else {
+        PermissionsOptions {
+          allow_net: Some(svec![]),
+          deny_net: Some(deny),
+          prompt: false,
+          ..Default::default()
+        }
+      };
+      let perms = Permissions::from_options(&parser, &opts).unwrap();
+      PermissionsContainer::new(Arc::new(parser), perms)
+    };
+    for directional in [false, true] {
+      for rule in ["10.0.0.5", "10.0.0.0/8", "[::1]", "10.0.0.5:8080"] {
+        let mut perms = container(&[rule], directional);
+        assert!(perms.has_net_connect_ip_deny_rules(8080), "{rule}");
+        let err = perms
+          .check_net_connect_unresolved("only.at.proxy", 8080, "fetch()")
+          .unwrap_err();
+        assert!(
+          err.to_string().contains("\"only.at.proxy:8080\""),
+          "{rule}: {err}"
+        );
+      }
+      // A port-scoped IP rule for another port cannot apply.
+      let mut perms = container(&["10.0.0.5:9090"], directional);
+      assert!(!perms.has_net_connect_ip_deny_rules(8080));
+      perms
+        .check_net_connect_unresolved("only.at.proxy", 8080, "fetch()")
+        .unwrap();
+      // Name-form rules are compared before any lookup, so they never make
+      // an unresolvable name fail.
+      let mut perms = container(&["evil.example.com"], directional);
+      assert!(!perms.has_net_connect_ip_deny_rules(8080));
+      perms
+        .check_net_connect_unresolved("only.at.proxy", 8080, "fetch()")
+        .unwrap();
+    }
+    // Import deny rules are separate from net ones.
+    let parser = TestPermissionDescriptorParser;
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        deny_import: Some(svec!["10.0.0.0/8"]),
+        prompt: false,
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    let mut perms = PermissionsContainer::new(Arc::new(parser), perms);
+    assert!(perms.has_import_ip_deny_rules(443));
+    assert!(!perms.has_net_connect_ip_deny_rules(443));
+    assert!(
+      perms
+        .check_import_unresolved("only.at.proxy", 443, "import()")
+        .is_err()
+    );
+  }
+
+  // The hop to an environment proxy is not subject to `--allow-net`, but a
+  // name-form `--deny-net` naming the proxy host has to stop it.
+  #[test]
+  fn test_net_connect_deny_only_by_name() {
+    for directional in [false, true] {
+      let parser = TestPermissionDescriptorParser;
+      let opts = if directional {
+        PermissionsOptions {
+          allow_net_connect: Some(svec!["example.com"]),
+          deny_net_connect: Some(svec!["proxy.internal", "localhost:3128"]),
+          prompt: false,
+          ..Default::default()
+        }
+      } else {
+        PermissionsOptions {
+          allow_net: Some(svec!["example.com"]),
+          deny_net: Some(svec!["proxy.internal", "localhost:3128"]),
+          prompt: false,
+          ..Default::default()
+        }
+      };
+      let perms = Permissions::from_options(&parser, &opts).unwrap();
+      let mut perms = PermissionsContainer::new(Arc::new(parser), perms);
+      for (host, port) in [("proxy.internal", 8080), ("localhost", 3128)] {
+        assert!(
+          perms
+            .check_net_connect_deny_only(&(host, Some(port)), "fetch() proxy")
+            .is_err(),
+          "{host}:{port}"
+        );
+      }
+      // Not allowed, but not denied either: the deny-only check passes it.
+      for (host, port) in [("other.proxy", 8080), ("localhost", 8080)] {
+        perms
+          .check_net_connect_deny_only(&(host, Some(port)), "fetch() proxy")
+          .unwrap();
+      }
+    }
+  }
+
+  // denext: which --allow-sys name, if any, grants reading a /proc or /sys
+  // path; everything else stays behind --allow-all.
+  #[test]
+  fn linux_special_read_sys_kinds() {
+    let own = Some(4242);
+    let kind = |p: &str| linux_special_read_sys_kind(Path::new(p), own);
+    for (path, expected) in [
+      ("/proc/cpuinfo", Some("cpus")),
+      ("/proc/stat", Some("cpus")),
+      ("/proc/meminfo", Some("systemMemoryInfo")),
+      ("/proc/loadavg", Some("loadavg")),
+      ("/proc/uptime", Some("osUptime")),
+      ("/proc/version", Some("osRelease")),
+      ("/sys/devices/system/cpu", Some("cpus")),
+      (
+        "/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq",
+        Some("cpus"),
+      ),
+      ("/sys/fs/cgroup/memory.max", Some("systemMemoryInfo")),
+      (
+        "/sys/fs/cgroup/user.slice/memory.current",
+        Some("systemMemoryInfo"),
+      ),
+      ("/sys/fs/cgroup/memory.swap.max", Some("systemMemoryInfo")),
+      ("/sys/fs/cgroup/cpu.max", Some("cpus")),
+      ("/sys/fs/cgroup/pids.current", Some("processes")),
+      // This process.
+      ("/proc/self/status", Some("processInfo")),
+      ("/proc/self/stat", Some("processInfo")),
+      ("/proc/self/statm", Some("processInfo")),
+      ("/proc/self/maps", Some("processInfo")),
+      ("/proc/self/cgroup", Some("processInfo")),
+      ("/proc/self/limits", Some("processInfo")),
+      ("/proc/thread-self/status", Some("processInfo")),
+      ("/proc/4242/maps", Some("processInfo")),
+      ("/proc/self/task/4243/status", Some("processInfo")),
+      ("/proc/4242/task/4243/limits", Some("processInfo")),
+      ("/proc/self/comm", Some("processInfo")),
+      ("/proc/self/cmdline", Some("processInfo")),
+      ("/proc/4242/cmdline", Some("processInfo")),
+      // Other processes: the listing only.
+      ("/proc", Some("processes")),
+      ("/proc/1/stat", Some("processes")),
+      ("/proc/1/status", Some("processes")),
+      ("/proc/1/cmdline", Some("processes")),
+      ("/proc/1/comm", Some("processes")),
+      ("/proc/1/task/7/comm", Some("processes")),
+      // Another process's (or a thread of this one's) private files.
+      ("/proc/1/maps", None),
+      ("/proc/1/limits", None),
+      ("/proc/4243/maps", None),
+      ("/proc/1/task/7/maps", None),
+      // Control surfaces.
+      ("/proc/self/mem", None),
+      ("/proc/self/root", None),
+      ("/proc/self/root/etc/shadow", None),
+      ("/proc/self/cwd", None),
+      ("/proc/self/exe", None),
+      ("/proc/self/fd/3", None),
+      ("/proc/self/map_files/7f-80", None),
+      ("/proc/self/oom_score_adj", None),
+      ("/proc/self/attr/current", None),
+      ("/proc/self/environ", None),
+      ("/proc/1/mem", None),
+      ("/proc/1/task/7/mem", None),
+      ("/proc/thread-self/task/7/status", None),
+      ("/proc/self", None),
+      ("/proc/sys/kernel/hostname", None),
+      ("/proc/kcore", None),
+      ("/sys/kernel/debug", None),
+      ("/sys/fs/cgroup/cgroup.procs", None),
+      ("/sys/fs/cgroup/memory.pressure", None),
+      ("/sys/fs/cgroup/io.max", None),
+      ("/dev/sda", None),
+      // A `..` left in the path is never matched (`.` is a no-op the path
+      // components drop, as the kernel does).
+      ("/proc/self/../1/mem", None),
+      ("/proc/self/../cpuinfo", None),
+      ("/proc/./cpuinfo", Some("cpus")),
+    ] {
+      assert_eq!(kind(path), expected, "{path}");
+    }
+    // With this process's number unknown, no number is this process.
+    let unknown = |p: &str| linux_special_read_sys_kind(Path::new(p), None);
+    assert_eq!(unknown("/proc/4242/maps"), None);
+    assert_eq!(unknown("/proc/4242/cmdline"), Some("processes"));
+    assert_eq!(unknown("/proc/self/maps"), Some("processInfo"));
+  }
+
+  // denext: the pid compared with `/proc/<pid>` paths is the one the mounted
+  // /proc gives this process.
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn proc_self_pid_is_the_proc_self_link() {
+    #[allow(clippy::disallowed_methods, reason = "the host's procfs")]
+    let link = std::fs::read_link("/proc/self").unwrap();
+    assert_eq!(
+      proc_self_pid().map(|pid| pid.to_string()),
+      Some(link.to_string_lossy().into_owned())
+    );
+  }
+
+  // denext: the process names are granted only when named: a bare sys grant
+  // doesn't hold them, for checks, queries, requests and worker permissions.
+  #[test]
+  fn sys_process_names_need_a_named_grant() {
+    let parser = TestPermissionDescriptorParser;
+    let make = |allow: Option<Vec<String>>, deny: Option<Vec<String>>| {
+      PermissionsContainer::new(
+        Arc::new(TestPermissionDescriptorParser),
+        Permissions::from_options(
+          &parser,
+          &PermissionsOptions {
+            allow_sys: allow,
+            deny_sys: deny,
+            prompt: false,
+            ..Default::default()
+          },
+        )
+        .unwrap(),
+      )
+    };
+    let bare = make(Some(vec![]), None);
+    for name in ["processInfo", "processes"] {
+      let err = bare.check_sys(name, "test").unwrap_err().to_string();
+      assert!(err.contains(&format!("--allow-sys={name}")), "{err}");
+      assert!(
+        err.contains("a bare --allow-sys does not grant it"),
+        "{err}"
+      );
+      assert_eq!(bare.query_sys(Some(name)).unwrap(), PermissionState::Prompt);
+      assert_eq!(
+        bare.request_sys(Some(name)).unwrap(),
+        PermissionState::Denied
+      );
+      assert!(bare.check_sys(name, "test").is_err());
+      let named = make(Some(vec![name.to_string()]), None);
+      assert!(named.check_sys(name, "test").is_ok());
+      assert_eq!(
+        named.query_sys(Some(name)).unwrap(),
+        PermissionState::Granted
+      );
+      let denied = make(Some(vec![name.to_string()]), Some(svec![name]));
+      assert!(denied.check_sys(name, "test").is_err());
+      // A worker of a bare-sys parent can't be given the name.
+      let child = || {
+        let mut child = ChildPermissionsArg::none();
+        child.sys =
+          ChildUnaryPermissionArg::GrantedList(vec![name.to_string()]);
+        child
+      };
+      assert!(bare.create_child_permissions(child()).is_err());
+      let mut granted = ChildPermissionsArg::none();
+      granted.sys = ChildUnaryPermissionArg::Granted;
+      let worker = bare.create_child_permissions(granted).unwrap();
+      assert!(worker.check_sys(name, "test").is_err());
+      // Named in the parent, or --allow-all: the worker may have it.
+      assert!(named.create_child_permissions(child()).is_ok());
+      let all = PermissionsContainer::new(
+        Arc::new(TestPermissionDescriptorParser),
+        Permissions::allow_all(),
+      );
+      assert!(all.check_sys(name, "test").is_ok());
+      assert_eq!(all.query_sys(Some(name)).unwrap(), PermissionState::Granted);
+      let worker = all.create_child_permissions(child()).unwrap();
+      assert!(worker.check_sys(name, "test").is_ok());
+    }
+    // The other names are still in a bare grant.
+    assert!(bare.check_sys("cpus", "test").is_ok());
+    assert_eq!(
+      bare.query_sys(Some("osRelease")).unwrap(),
+      PermissionState::Granted
+    );
+    assert_eq!(bare.query_sys(None).unwrap(), PermissionState::Granted);
+  }
+
+  // denext: a class holds only when the resolved path is in it too.
+  #[test]
+  fn linux_special_read_sys_kind_follows_links() {
+    let own = Some(4242);
+    let kind = |path: &str, resolved: &str| {
+      linux_special_read_sys_kind_resolved(
+        Path::new(path),
+        Path::new(resolved),
+        own,
+      )
+    };
+    // The proc links resolve into the same class.
+    assert_eq!(
+      kind("/proc/self/status", "/proc/4242/status"),
+      Some("processInfo")
+    );
+    assert_eq!(
+      kind("/proc/thread-self/stat", "/proc/4242/task/4243/stat"),
+      Some("processInfo")
+    );
+    assert_eq!(
+      kind("/proc/self/comm", "/proc/4242/comm"),
+      Some("processInfo")
+    );
+    assert_eq!(
+      kind(
+        "/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq",
+        "/sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq"
+      ),
+      Some("cpus")
+    );
+    // A link out of the class is in none.
+    for (path, resolved) in [
+      (
+        "/sys/devices/system/cpu/cpu0/node0/meminfo",
+        "/sys/devices/system/node/node0/meminfo",
+      ),
+      (
+        "/sys/devices/system/cpu/cpu0/firmware_node/path",
+        "/sys/devices/LNXSYSTM:00/LNXCPU:00/path",
+      ),
+      ("/sys/devices/system/cpu/cpu0/subsystem", "/sys/bus/cpu"),
+      // The pid differs between the walks only for this process.
+      ("/proc/self/status", "/proc/1/status"),
+      ("/proc/self/maps", "/proc/4243/maps"),
+    ] {
+      assert_eq!(kind(path, resolved), None, "{path} -> {resolved}");
+    }
+  }
+
+  // denext: the /proc and /sys classes through check_open, with the paths
+  // normalized the way the runtime parser does it.
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn check_open_proc_sys_classes() {
+    set_prompter(Box::new(TestPrompter));
+    let container = |allow_sys: Option<Vec<String>>, deny_sys: Vec<String>| {
+      let parser =
+        runtime_descriptor_parser::RuntimePermissionDescriptorParser::new(
+          sys_traits::impls::RealSys,
+        );
+      let perms = Permissions::from_options(
+        &parser,
+        &PermissionsOptions {
+          allow_read: Some(vec![]),
+          allow_write: Some(vec![]),
+          allow_sys,
+          deny_sys: (!deny_sys.is_empty()).then_some(deny_sys),
+          prompt: false,
+          ..Default::default()
+        },
+      )
+      .unwrap();
+      PermissionsContainer::new(Arc::new(parser), perms)
+    };
+    let read = |perms: &PermissionsContainer, path: &str| {
+      perms
+        .check_open(
+          Cow::Owned(PathBuf::from(path)),
+          OpenAccessKind::Read,
+          Some("test"),
+        )
+        .map(|checked| checked.into_owned_path())
+    };
+    let write = |perms: &PermissionsContainer, path: &str| {
+      perms
+        .check_open(
+          Cow::Owned(PathBuf::from(path)),
+          OpenAccessKind::Write,
+          Some("test"),
+        )
+        .is_ok()
+    };
+    let own = format!("/proc/{}", std::process::id());
+    let classes = [
+      (
+        "cpus",
+        vec!["/proc/cpuinfo", "/proc/stat", "/sys/devices/system/cpu"],
+      ),
+      ("systemMemoryInfo", vec!["/proc/meminfo"]),
+      ("loadavg", vec!["/proc/loadavg"]),
+      ("osUptime", vec!["/proc/uptime"]),
+      ("osRelease", vec!["/proc/version"]),
+      (
+        "processInfo",
+        vec![
+          "/proc/self/status",
+          "/proc/thread-self/stat",
+          "/proc/self/maps",
+        ],
+      ),
+      (
+        "processes",
+        vec!["/proc", "/proc/1/stat", "/proc/1/cmdline"],
+      ),
+    ];
+    // Read alone: every class still needs more (it needed --allow-all).
+    let none = container(None, vec![]);
+    for (_, paths) in &classes {
+      for path in paths {
+        assert!(read(&none, path).is_err(), "{path}");
+      }
+    }
+    for (kind, paths) in &classes {
+      let granted = container(Some(vec![kind.to_string()]), vec![]);
+      for path in paths {
+        assert!(read(&granted, path).is_ok(), "{kind}: {path}");
+        // Never for a write.
+        assert!(!write(&granted, path), "{kind}: write {path}");
+      }
+      // Unscoped --allow-sys grants the system-information names but not
+      // the process ones, which take effect only when named; a deny of the
+      // name refuses it.
+      let all = container(Some(vec![]), vec![]);
+      let denied = container(Some(vec![]), vec![kind.to_string()]);
+      let named_only = matches!(*kind, "processInfo" | "processes");
+      for path in paths {
+        assert_eq!(read(&all, path).is_ok(), !named_only, "{kind}: {path}");
+        assert!(read(&denied, path).is_err(), "{kind}: denied {path}");
+      }
+    }
+    // --allow-all reads them all.
+    let allow_all = PermissionsContainer::new(
+      Arc::new(TestPermissionDescriptorParser),
+      Permissions::allow_all(),
+    );
+    for (kind, paths) in &classes {
+      for path in paths {
+        assert!(read(&allow_all, path).is_ok(), "all: {kind}: {path}");
+      }
+    }
+    let own_status = format!("{own}/status");
+    assert!(
+      read(&container(Some(svec!["processInfo"]), vec![]), &own_status).is_ok()
+    );
+    // The control surfaces still need --allow-all, with every sys name and
+    // through `..`, `task/<tid>` and thread-self.
+    let every = container(Some(vec![]), vec![]);
+    for path in [
+      "/proc/self/mem".to_string(),
+      "/proc/self/root/etc/passwd".to_string(),
+      "/proc/self/cwd".to_string(),
+      "/proc/self/exe".to_string(),
+      "/proc/self/fd/0".to_string(),
+      "/proc/1/maps".to_string(),
+      "/proc/1/mem".to_string(),
+      "/proc/self/../1/mem".to_string(),
+      "/proc/self/../1/root".to_string(),
+      "/proc/thread-self/../1/mem".to_string(),
+      format!("{own}/task/{}/mem", std::process::id()),
+      format!("{own}/task/{}/../../../1/mem", std::process::id()),
+      "/proc/1/task/1/mem".to_string(),
+      "/proc/self/map_files".to_string(),
+      "/proc/sys/kernel/hostname".to_string(),
+      "/sys/kernel/mm".to_string(),
+      "/dev/sda".to_string(),
+    ] {
+      assert!(read(&every, &path).is_err(), "{path}");
+    }
+    for path in [
+      "/proc/self/oom_score_adj",
+      "/proc/self/attr/current",
+      "/proc/sys/kernel/hostname",
+      "/sys/devices/system/cpu/cpu0/online",
+      "/sys/fs/cgroup/memory.max",
+      "/proc/self/status",
+    ] {
+      assert!(!write(&every, path), "write {path}");
+    }
+    // `..` is removed by name before the check: what is checked is what is
+    // opened.
+    assert_eq!(
+      read(
+        &container(Some(svec!["cpus"]), vec![]),
+        "/proc/self/../cpuinfo"
+      )
+      .unwrap(),
+      PathBuf::from("/proc/cpuinfo")
+    );
+    // environ: all of --allow-env, as before.
+    assert!(read(&every, "/proc/self/environ").is_err());
+    // A path that doesn't exist resolves to nothing: no class.
+    assert!(read(&every, "/proc/self/denext-no-such-file").is_err());
+    // /proc/self and /proc/thread-self resolve into this process's entries.
+    let process_info = container(Some(svec!["processInfo"]), vec![]);
+    assert!(read(&process_info, "/proc/self/status").is_ok());
+    assert!(read(&process_info, "/proc/thread-self/status").is_ok());
+    // A link under /sys/devices/system/cpu that leads elsewhere in sysfs
+    // (`cpuN/node0`, `subsystem`, `firmware_node`, `driver`, where the host
+    // has them) needs --allow-all, through the link and below it.
+    let cpus = container(Some(svec!["cpus"]), vec![]);
+    #[allow(clippy::disallowed_methods, reason = "the host's sysfs")]
+    let links: Vec<PathBuf> = std::fs::read_dir("/sys/devices/system/cpu/cpu0")
+      .map(|entries| {
+        entries
+          .filter_map(|e| e.ok())
+          .filter(|e| e.file_type().is_ok_and(|t| t.is_symlink()))
+          .map(|e| e.path())
+          .filter(|p| {
+            std::fs::canonicalize(p)
+              .is_ok_and(|r| !r.starts_with("/sys/devices/system/cpu"))
+          })
+          .collect()
+      })
+      .unwrap_or_default();
+    for link in &links {
+      let link = link.display().to_string();
+      assert!(read(&cpus, &link).is_err(), "{link}");
+      assert!(read(&every, &link).is_err(), "{link}");
+    }
+    // Every CPU device has kernel links out of its directory (`subsystem`
+    // at least), so this part always checks something.
+    assert!(!links.is_empty(), "no links under cpu0");
+    #[allow(clippy::disallowed_methods, reason = "the host's sysfs")]
+    let has_node0 =
+      std::fs::metadata("/sys/devices/system/cpu/cpu0/node0/meminfo").is_ok();
+    if has_node0 {
+      assert!(
+        read(&cpus, "/sys/devices/system/cpu/cpu0/node0/meminfo").is_err()
+      );
+    }
+    // A file of cpu0's own still reads with `cpus`.
+    assert!(read(&cpus, "/sys/devices/system/cpu/online").is_ok());
+  }
+
   // denext (DENEXT.md item 129): a confined lifecycle-script jail lets a
   // scoped `deno` create symlinks whose link and target both stay within its
   // write roots (electron's app bundle); without the jail roots, or for a
@@ -9068,6 +10306,150 @@ mod tests {
     }
   }
 
+  #[cfg(unix)]
+  fn deny_scope_perms(
+    deny_read: &[&Path],
+    deny_write: &[&Path],
+    ignore_read: &[&Path],
+  ) -> PermissionsContainer {
+    let to_strings = |paths: &[&Path]| {
+      (!paths.is_empty()).then(|| {
+        paths
+          .iter()
+          .map(|path| path.display().to_string())
+          .collect::<Vec<_>>()
+      })
+    };
+    let parser =
+      runtime_descriptor_parser::RuntimePermissionDescriptorParser::new(
+        sys_traits::impls::RealSys,
+      );
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_read: Some(vec![]),
+        allow_write: Some(vec![]),
+        deny_read: to_strings(deny_read),
+        deny_write: to_strings(deny_write),
+        ignore_read: to_strings(ignore_read),
+        prompt: false,
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    PermissionsContainer::new(Arc::new(parser), perms)
+  }
+
+  // A deny scope written through a symlinked directory (macOS's `/tmp`, any
+  // link on the way) was compared only as written, against the path an
+  // access names and the path it resolves to, so the deny scope's own
+  // resolved location was reachable by its real name.
+  #[cfg(unix)]
+  #[test]
+  #[allow(clippy::disallowed_methods, reason = "a real directory tree")]
+  fn test_deny_scope_written_through_a_link() {
+    set_prompter(Box::new(TestPrompter));
+    let (base, rootlink) = resolved_scope_tree("deny_resolved_root");
+    let deny = rootlink.join("outside");
+    let perms = deny_scope_perms(&[&deny], &[&deny], &[]);
+    let open = |path: PathBuf, kind: OpenAccessKind| {
+      perms
+        .check_open(Cow::Owned(path), kind, Some("api"))
+        .is_ok()
+    };
+    use OpenAccessKind::*;
+    // as written, and by the real name
+    for path in [
+      deny.join("secret.txt"),
+      base.join("outside/secret.txt"),
+      base.join("outside/dir"),
+      base.join("outside/new.txt"),
+    ] {
+      assert!(!open(path.clone(), Read), "{}", path.display());
+      assert!(!open(path.clone(), ReadNoFollow), "{}", path.display());
+      assert!(!open(path.clone(), Write), "{}", path.display());
+      assert!(!open(path.clone(), WriteNoFollow), "{}", path.display());
+    }
+    // through a link elsewhere that leads into the real location
+    assert!(!open(base.join("safe/link"), Read));
+    assert!(!open(base.join("safe/dirlink/secret.txt"), Read));
+    // a recursive operation over a tree holding the real location
+    assert!(perms.check_write(Cow::Owned(base.clone()), "api").is_err());
+    assert!(
+      perms
+        .check_write_resolved(&base.join("outside/secret.txt"), "api")
+        .is_err()
+    );
+    // the rest of the tree is untouched
+    assert!(open(base.join("safe/file.txt"), Read));
+    assert!(open(base.join("safe/new.txt"), Write));
+    assert!(open(base.clone(), Read));
+    assert!(perms.query_read_reachable(&base.join("safe/file.txt")));
+    assert!(!perms.query_read_reachable(&base.join("outside/secret.txt")));
+    assert!(!perms.query_read_reachable(&base.join("safe/link")));
+
+    // `--ignore-read` scopes resolve the same way (reads look like NotFound)
+    let perms = deny_scope_perms(&[], &[], &[&deny]);
+    assert!(
+      perms
+        .check_open(
+          Cow::Owned(base.join("outside/secret.txt")),
+          Read,
+          Some("api"),
+        )
+        .is_err()
+    );
+    assert!(!perms.query_read_reachable(&base.join("outside/secret.txt")));
+    let _ = std::fs::remove_dir_all(base.parent().unwrap());
+  }
+
+  // A deny scope that is itself a link covers its target too, whoever owns
+  // the link: for a deny, that only takes access away (an allow scope keeps
+  // a user-owned link's target out, see `test_allow_scope_that_is_a_link`).
+  #[cfg(unix)]
+  #[test]
+  #[allow(clippy::disallowed_methods, reason = "a real directory tree")]
+  fn test_deny_scope_that_is_a_link() {
+    set_prompter(Box::new(TestPrompter));
+    let (base, _) = resolved_scope_tree("deny_resolved_link_scope");
+    let safe = base.join("safe");
+    let perms =
+      deny_scope_perms(&[&safe.join("dirlink")], &[&safe.join("link")], &[]);
+    let open = |path: PathBuf, kind: OpenAccessKind| {
+      perms
+        .check_open(Cow::Owned(path), kind, Some("api"))
+        .is_ok()
+    };
+    use OpenAccessKind::*;
+    // the link's own name, and its target by the real name
+    assert!(!open(safe.join("dirlink"), ReadNoFollow));
+    assert!(!open(safe.join("dirlink/secret.txt"), Read));
+    assert!(!open(base.join("outside/secret.txt"), Read));
+    assert!(!open(base.join("outside/dir"), Read));
+    assert!(!open(base.join("outside/secret.txt"), Write));
+    assert!(open(safe.join("file.txt"), Read));
+    assert!(open(safe.join("file.txt"), Write));
+    let _ = std::fs::remove_dir_all(base.parent().unwrap());
+
+    #[cfg(target_os = "macos")]
+    {
+      let name = format!("deno_permissions_tmp_deny_{}", std::process::id());
+      let deny = Path::new("/tmp").join(&name);
+      let perms = deny_scope_perms(&[&deny], &[&deny], &[]);
+      for kind in [Read, Write, ReadNoFollow, WriteNoFollow] {
+        for path in [deny.join("x"), Path::new("/private/tmp").join(&name)] {
+          assert!(
+            perms
+              .check_open(Cow::Owned(path.clone()), kind, Some("api"))
+              .is_err(),
+            "{} {kind:?}",
+            path.display()
+          );
+        }
+      }
+    }
+  }
+
   // denext (DENEXT.md 286): a worker's scope covers its resolved location
   // only where the parent's grants reach it.
   #[cfg(unix)]
@@ -9170,6 +10552,70 @@ mod tests {
       junction.join("secret.txt"),
       OpenAccessKind::WriteNoFollow
     ));
+    let _ = std::fs::remove_dir(&junction);
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  // A deny scope written through a junction also covers the junction's
+  // target, by its real name.
+  #[cfg(windows)]
+  #[test]
+  #[allow(clippy::disallowed_methods, reason = "a real directory tree")]
+  fn test_deny_scope_written_through_a_junction() {
+    use sys_traits::EnvTempDir;
+    set_prompter(Box::new(TestPrompter));
+    let parent =
+      sys_traits::impls::RealSys
+        .env_temp_dir()
+        .unwrap()
+        .join(format!(
+          "deno_permissions_deny_junction_{}",
+          std::process::id()
+        ));
+    let _ = std::fs::remove_dir_all(&parent);
+    std::fs::create_dir_all(parent.join("real/secret")).unwrap();
+    std::fs::write(parent.join("real/secret/file.txt"), "secret").unwrap();
+    std::fs::write(parent.join("real/ok.txt"), "ok").unwrap();
+    let junction = parent.join("junction");
+    let status = std::process::Command::new("cmd")
+      .args(["/C", "mklink", "/J"])
+      .arg(&junction)
+      .arg(parent.join("real"))
+      .output()
+      .unwrap();
+    assert!(status.status.success(), "{status:?}");
+    let deny = junction.join("secret").display().to_string();
+    let parser =
+      runtime_descriptor_parser::RuntimePermissionDescriptorParser::new(
+        sys_traits::impls::RealSys,
+      );
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_read: Some(vec![]),
+        allow_write: Some(vec![]),
+        deny_read: Some(vec![deny.clone()]),
+        deny_write: Some(vec![deny]),
+        prompt: false,
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    let perms = PermissionsContainer::new(Arc::new(parser), perms);
+    let open = |path: PathBuf, kind: OpenAccessKind| {
+      perms
+        .check_open(Cow::Owned(path), kind, Some("api"))
+        .is_ok()
+    };
+    let real = parent.join("real/secret/file.txt");
+    assert!(!open(
+      junction.join("secret/file.txt"),
+      OpenAccessKind::Read
+    ));
+    assert!(!open(real.clone(), OpenAccessKind::Read));
+    assert!(!open(real.clone(), OpenAccessKind::Write));
+    assert!(!open(real, OpenAccessKind::WriteNoFollow));
+    assert!(open(parent.join("real/ok.txt"), OpenAccessKind::Read));
     let _ = std::fs::remove_dir(&junction);
     let _ = std::fs::remove_dir_all(&parent);
   }
@@ -11175,6 +12621,116 @@ mod tests {
     );
   }
 
+  // DENEXT.md item 434: the say over a self-fork stays with the program's
+  // own permissions and workers that inherit run from them; a worker with
+  // its own run permission, a run revoke and a run deny lose it.
+  #[test]
+  fn self_fork_authorization_follows_the_run_permission() {
+    let parser = TestPermissionDescriptorParser;
+    let cmd = parser.parse_run_query("/app/bin").unwrap();
+    let container = |opts: PermissionsOptions| {
+      PermissionsContainer::new(
+        Arc::new(TestPermissionDescriptorParser),
+        Permissions::from_options(&TestPermissionDescriptorParser, &opts)
+          .unwrap(),
+      )
+    };
+    let main = container(Default::default());
+    assert!(main.may_authorize_self_fork(&cmd));
+    let inherit = main
+      .create_child_permissions(ChildPermissionsArg::inherit())
+      .unwrap();
+    assert!(inherit.may_authorize_self_fork(&cmd));
+    assert!(
+      inherit
+        .create_child_permissions(ChildPermissionsArg::inherit())
+        .unwrap()
+        .may_authorize_self_fork(&cmd)
+    );
+    for arg in [
+      ChildPermissionsArg::none(),
+      ChildPermissionsArg {
+        run: ChildUnaryPermissionArg::NotGranted,
+        ..ChildPermissionsArg::inherit()
+      },
+    ] {
+      let narrowed = main.create_child_permissions(arg).unwrap();
+      assert!(!narrowed.may_authorize_self_fork(&cmd));
+      // ... and its own workers, inheriting or not.
+      assert!(
+        !narrowed
+          .create_child_permissions(ChildPermissionsArg::inherit())
+          .unwrap()
+          .may_authorize_self_fork(&cmd)
+      );
+    }
+    // A worker narrowed in any other permission loses it too.
+    let narrowed_read = main
+      .create_child_permissions(ChildPermissionsArg {
+        read: ChildUnaryPermissionArg::NotGranted,
+        ..ChildPermissionsArg::inherit()
+      })
+      .unwrap();
+    assert!(!narrowed_read.may_authorize_self_fork(&cmd));
+    // Any revoke ends it, not only a run revoke.
+    for revoke in [
+      &(|c: &PermissionsContainer| {
+        c.revoke_net(None).unwrap();
+      }) as &dyn Fn(&PermissionsContainer),
+      &|c| {
+        c.revoke_read(None).unwrap();
+      },
+      &|c| {
+        c.revoke_write(None).unwrap();
+      },
+      &|c| {
+        c.revoke_env(None);
+      },
+      &|c| {
+        c.revoke_sys(None).unwrap();
+      },
+      &|c| {
+        c.revoke_ffi(None).unwrap();
+      },
+      &|c| {
+        c.revoke_import(None).unwrap();
+      },
+      &|c| {
+        c.revoke_midi(false);
+      },
+    ] {
+      let c = container(Default::default());
+      revoke(&c);
+      assert!(!c.may_authorize_self_fork(&cmd));
+    }
+    let revoked = container(Default::default());
+    revoked.revoke_run(None).unwrap();
+    assert!(!revoked.may_authorize_self_fork(&cmd));
+    let revoked_one = container(Default::default());
+    revoked_one.revoke_run(Some("/other")).unwrap();
+    assert!(!revoked_one.may_authorize_self_fork(&cmd));
+    // deep clones keep it either way
+    assert!(!revoked.deep_clone().may_authorize_self_fork(&cmd));
+    assert!(
+      main
+        .deep_clone_without_prompt()
+        .may_authorize_self_fork(&cmd)
+    );
+    for deny in [vec![], svec!["/app/bin"]] {
+      let denied = container(PermissionsOptions {
+        deny_run: Some(deny),
+        ..Default::default()
+      });
+      assert!(!denied.may_authorize_self_fork(&cmd));
+    }
+    // a deny of another program leaves it
+    let other = container(PermissionsOptions {
+      deny_run: Some(svec!["/other"]),
+      ..Default::default()
+    });
+    assert!(other.may_authorize_self_fork(&cmd));
+  }
+
   #[test]
   fn test_create_child_permissions() {
     set_prompter(Box::new(TestPrompter));
@@ -11208,6 +12764,8 @@ mod tests {
           None,
           false
         ),
+        // run is not inherited (DENEXT.md item 434)
+        self_fork: false,
         ..Permissions::none_without_prompt()
       }
     );
@@ -11261,10 +12819,12 @@ mod tests {
         ..ChildPermissionsArg::none()
       })
       .unwrap();
-    assert_eq!(
-      main_perms.inner.lock().clone(),
-      worker_perms.inner.lock().clone()
-    );
+    // The worker's own run list leaves the self-fork to the run check
+    // (DENEXT.md item 434); otherwise the two are the same.
+    let mut worker_inner = worker_perms.inner.lock().clone();
+    assert!(!worker_inner.self_fork);
+    worker_inner.self_fork = true;
+    assert_eq!(main_perms.inner.lock().clone(), worker_inner);
     assert_eq!(
       main_perms
         .inner

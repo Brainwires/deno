@@ -1,0 +1,54 @@
+{
+  "tempDir": true,
+  "tests": {
+    // a recursive Deno.watchFs does not report changes inside a --deny-read
+    // scope below the watched root, by its name or through a symlink
+    "watch_fs": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write setup.ts",
+          "output": "setup done\n"
+        },
+        {
+          "args": "run --allow-read --allow-write --deny-read=watched/secret watch.ts",
+          "output": "watch.out"
+        }
+      ]
+    },
+    // the same without a symlink, on every platform (ReadDirectoryChangesW
+    // on Windows)
+    "watch_fs_nolink": {
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write setup.ts nolink",
+          "output": "setup done\n"
+        },
+        {
+          "args": "run --allow-read --allow-write --deny-read=watched/secret watch.ts",
+          "output": "watch.out"
+        }
+      ]
+    },
+    // with no read limit, a recursive watch still follows a symlinked
+    // directory inside the tree (inotify; FSEvents never follows links)
+    "watch_fs_follows_links_without_deny": {
+      "if": "linux",
+      "args": "run --allow-read --allow-write watch_link.ts",
+      "output": "saw the change through the link: true\n"
+    },
+    "node_fs_watch": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write setup.ts",
+          "output": "setup done\n"
+        },
+        {
+          "args": "run --allow-read --allow-write --deny-read=watched/secret watch_node.mjs",
+          "output": "watch.out"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,9 @@
+as written: denied
+by the real name: denied
+stat by the real name: denied
+readDir by the real name: denied
+node readFileSync by the real name: denied
+through another link: denied
+link scope, as written: denied
+link scope, target by the real name: denied
+unrelated file: allowed

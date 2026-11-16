@@ -1,0 +1,3 @@
+require: NotCapable
+_extensions json: NotCapable
+readTextFileSync: NotCapable

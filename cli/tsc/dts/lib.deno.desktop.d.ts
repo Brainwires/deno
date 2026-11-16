@@ -324,17 +324,15 @@ declare namespace Deno {
      * performed ~1s after the call; pass an interval to keep checking for
      * the lifetime of the process. */
     interval?: number;
-    /** Base64-encoded 32-byte Ed25519 public key used to verify the
-     * release manifest.
+    /** Base64-encoded 32-byte Ed25519 public key to check the release
+     * manifest with before any patch is downloaded.
      *
-     * When set, `latest.json` must carry a top-level `signature` (base64
-     * Ed25519 signature) over a `signed` field holding the manifest JSON
-     * as a string. The signature is verified before any patch is fetched,
-     * and only the contents of the verified `signed` payload are trusted.
-     * A manifest that is unsigned or fails verification is rejected.
-     *
-     * Strongly recommended for production: without it, update integrity
-     * rests solely on TLS and the per-patch SHA-256 in the manifest. */
+     * Optional: the patch is always verified against the key baked into
+     * the app at compile time (deno.json `desktop.release.publicKey`), and
+     * without that key no patch is applied. `latest.json` must carry a
+     * top-level `signature` (base64 Ed25519 signature) over a `signed`
+     * field holding the manifest JSON as a string; only the contents of the
+     * verified `signed` payload are trusted. */
     publicKey?: string;
     /** Called once an update has been downloaded, verified, and staged for
      * the next launch. Receives the version string being staged. */
@@ -353,12 +351,21 @@ declare namespace Deno {
    * fetched and its `version` compared against {@linkcode
    * Deno.desktopVersion}:
    *
-   * - If `publicKey` is set, the manifest signature is verified first and
-   *   an unsigned or invalid manifest is rejected.
-   * - If the manifest advertises a newer version and lists a patch from
-   *   the currently running version (under `patches[<currentVersion>]`,
-   *   as `{ name, sha256 }`), that patch is downloaded, checked against
-   *   its declared SHA-256, applied, and staged for the next launch.
+   * - The manifest must be signed with the key in deno.json
+   *   `desktop.release.publicKey` (baked into the app at compile time); an
+   *   unsigned or invalid manifest gets no patch, and an app built without
+   *   the key doesn't check for updates at all.
+   * - The signed payload names the app (`app`: `desktop.app.identifier`,
+   *   else the app name), expires (`expiresAt`, an RFC 3339 time from which
+   *   it is refused) and carries a `sequence`, an integer that only grows:
+   *   the app records the highest it accepted and refuses a lower one. Its
+   *   `version` must be a higher semver than the running one.
+   * - If the signed manifest lists a patch from the currently running
+   *   version (under `patches[<currentVersion>]`, as
+   *   `{ name, sha256, targetSha256 }`), that patch is downloaded, checked
+   *   against its signed SHA-256, applied, the result checked against
+   *   `targetSha256`, and staged for the next launch. Staging needs
+   *   `--allow-ffi` and write access to the app's installed library.
    * - `onUpdateReady` is then invoked. The new version takes effect the
    *   next time the app starts.
    *

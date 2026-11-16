@@ -23,6 +23,8 @@ pub use deno_package_json::PackageJson;
 pub use npm::InNpmPackageChecker;
 pub use npm::NpmPackageFolderResolver;
 pub use package_json::PackageJsonCacheRc;
+pub use package_json::PackageJsonReadFilter;
+pub use package_json::PackageJsonReadFilterRc;
 pub use package_json::PackageJsonResolver;
 pub use package_json::PackageJsonResolverRc;
 pub use package_json::PackageJsonThreadLocalCache;

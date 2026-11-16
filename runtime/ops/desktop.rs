@@ -4752,6 +4752,13 @@ pub struct AutoUpdateState {
   pub app_version: Option<String>,
   /// Whether we rolled back from a failed update on this launch.
   pub rolled_back: bool,
+  /// deno.json `desktop.release.publicKey` (Ed25519, base64), baked into the
+  /// app at compile time: the only key a `Deno.autoUpdate` manifest may be
+  /// signed with. Without one, no patch is applied.
+  pub public_key: Option<String>,
+  /// The app's identity baked in at compile time (`desktop.app.identifier`,
+  /// else the app name): a manifest's signed `app` must name it.
+  pub app_id: Option<String>,
 }
 
 /// Hex-decoded length of a SHA-256 digest.
@@ -4775,21 +4782,310 @@ fn dylib_magic_ok(bytes: &[u8]) -> bool {
   ) || m.starts_with(b"MZ")
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+  use sha2::Digest;
+  faster_hex::hex_string(&sha2::Sha256::digest(bytes)).to_lowercase()
+}
+
+/// The digest the patch op records for a staged library (hex SHA-256).
+pub fn pending_update_digest(bytes: &[u8]) -> String {
+  sha256_hex(bytes)
+}
+
+fn is_sha256_hex(s: &str) -> bool {
+  s.len() == SHA256_HEX_LEN && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// The `.update` file the patch op stages next to the runtime library, which
+/// the next launch swaps in.
+pub fn pending_update_path(dylib_path: &std::path::Path) -> std::path::PathBuf {
+  dylib_path.with_extension(format!(
+    "{}.update",
+    dylib_path.extension().unwrap_or_default().to_string_lossy()
+  ))
+}
+
+/// Where the patch op records the SHA-256 of the library it staged for
+/// `dylib_path`: the user's own state directory (`~/Library/Application
+/// Support` on macOS, `$XDG_STATE_HOME` or `~/.local/state` elsewhere), not
+/// the directory the library is in, under a name derived from the library's
+/// path. The next launch swaps a staged `.update` in only when it matches
+/// this record (denext, DENEXT.md item 433); `None` when there is no home
+/// directory.
+pub fn pending_update_record_path(
+  dylib_path: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+  use std::path::PathBuf;
+  let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
+  let home = PathBuf::from(home);
+  if !home.is_absolute() {
+    return None;
+  }
+  let base = if cfg!(target_os = "macos") {
+    home.join("Library").join("Application Support")
+  } else {
+    std::env::var_os("XDG_STATE_HOME")
+      .map(PathBuf::from)
+      .filter(|p| p.is_absolute())
+      .unwrap_or_else(|| home.join(".local").join("state"))
+  };
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "names the record after the running library's real path"
+  )]
+  let canonical = std::fs::canonicalize(dylib_path)
+    .unwrap_or_else(|_| dylib_path.to_path_buf());
+  let key = sha256_hex(canonical.as_os_str().as_encoded_bytes());
+  Some(
+    base
+      .join("deno-desktop")
+      .join("pending-updates")
+      .join(format!("{key}.sha256")),
+  )
+}
+
+/// Writes `digest_hex` to `record`, its directory private to the user
+/// (0700) and the file too (0600), replacing it atomically.
+#[allow(
+  clippy::disallowed_methods,
+  reason = "privileged auto-update record in the user's state directory"
+)]
+pub fn write_pending_update_record(
+  record: &std::path::Path,
+  digest_hex: &str,
+) -> std::io::Result<()> {
+  let dir = record
+    .parent()
+    .ok_or_else(|| std::io::Error::other("the record has no directory"))?;
+  let mut builder = std::fs::DirBuilder::new();
+  builder.recursive(true);
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::DirBuilderExt;
+    builder.mode(0o700);
+  }
+  builder.create(dir)?;
+  let tmp = {
+    let mut tmp = record.as_os_str().to_owned();
+    tmp.push(".tmp");
+    std::path::PathBuf::from(tmp)
+  };
+  let _ = std::fs::remove_file(&tmp);
+  let mut options = std::fs::OpenOptions::new();
+  options.write(true).create_new(true);
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::OpenOptionsExt;
+    options.mode(0o600);
+  }
+  {
+    use std::io::Write;
+    let mut file = options.open(&tmp)?;
+    file.write_all(digest_hex.as_bytes())?;
+    file.sync_all()?;
+  }
+  std::fs::rename(&tmp, record)
+}
+
+/// Whether the staged `update` file is the one the patch op recorded in
+/// `record` (its SHA-256). A missing or unreadable record, or one that names
+/// other bytes, is no.
+#[allow(
+  clippy::disallowed_methods,
+  reason = "reads the staged runtime library before the app starts"
+)]
+pub fn pending_update_matches_record(
+  update: &std::path::Path,
+  record: Option<&std::path::Path>,
+) -> bool {
+  let Some(record) = record else {
+    return false;
+  };
+  let Ok(expected) = std::fs::read_to_string(record) else {
+    return false;
+  };
+  let expected = expected.trim().to_ascii_lowercase();
+  if !is_sha256_hex(&expected) {
+    return false;
+  }
+  match std::fs::read(update) {
+    Ok(bytes) => sha256_hex(&bytes) == expected,
+    Err(_) => false,
+  }
+}
+
+/// The `Deno.autoUpdate` manifest's signed payload, as far as the patch op
+/// reads it:
+///
+/// ```json
+/// {"app":"com.example.app","version":"1.1.0",
+///  "expiresAt":"2026-12-01T00:00:00Z","sequence":1795000000,
+///  "patches":{"1.0.0":{"name":"1.0.0-to-1.1.0.bsdiff",
+///    "sha256":"<hex of the patch>","targetSha256":"<hex of the result>"}}}
+/// ```
+///
+/// The field names are `Deno.desktop.updater`'s. `app` must be the app's
+/// baked identity; `expiresAt` (RFC 3339) is refused from that time on;
+/// `sequence` (an integer up to 2^53 - 1 that only grows) is refused when
+/// lower than the highest this install accepted, which it records; `version`
+/// must be a higher semver than the running one; the patch's `sha256` and
+/// the patched library's `targetSha256` must both match.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SignedPatchManifest {
+  version: String,
+  #[serde(default)]
+  app: Option<String>,
+  #[serde(default)]
+  expires_at: Option<String>,
+  #[serde(default)]
+  sequence: Option<u64>,
+  #[serde(default)]
+  patches: std::collections::HashMap<String, serde_json::Value>,
+}
+
+/// Where the patch op keeps the highest manifest `sequence` it accepted, next
+/// to the staged update's record.
+fn auto_update_sequence_path(record: &std::path::Path) -> std::path::PathBuf {
+  record.with_extension("sequence")
+}
+
+/// The recorded `sequence` floor: `None` when nothing was recorded yet; an
+/// unreadable or malformed record is an error (never "no floor").
+#[allow(
+  clippy::disallowed_methods,
+  reason = "privileged auto-update state in the user's state directory"
+)]
+fn read_auto_update_sequence(
+  path: &std::path::Path,
+) -> Result<Option<u64>, String> {
+  match std::fs::read_to_string(path) {
+    Ok(text) => text
+      .trim()
+      .parse::<u64>()
+      .map(Some)
+      .map_err(|_| format!("{} is not a sequence number", path.display())),
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+    Err(e) => Err(format!("can't read {}: {e}", path.display())),
+  }
+}
+
+/// A hex SHA-256 field of a patch entry, lowercased.
+fn patch_entry_sha256(
+  entry: Option<&serde_json::Value>,
+  key: &str,
+) -> Option<String> {
+  entry
+    .and_then(|entry| entry.get(key))
+    .and_then(|v| v.as_str())
+    .map(|s| s.trim().to_ascii_lowercase())
+    .filter(|s| is_sha256_hex(s))
+}
+
+/// The signed manifest's freshness and binding: the app it names, its
+/// expiry, its sequence against `floor`, and a version above `current`.
+fn check_patch_manifest(
+  manifest: &SignedPatchManifest,
+  app_id: Option<&str>,
+  current: &str,
+  now_unix: i64,
+  floor: Option<u64>,
+) -> Result<(), String> {
+  use super::desktop_update::manifest::MAX_SEQUENCE;
+  use super::desktop_update::manifest::parse_rfc3339;
+  use super::desktop_update::manifest::parse_version;
+  let Some(app_id) = app_id else {
+    return Err("the app has no identity to bind its updates to".into());
+  };
+  if manifest.app.as_deref() != Some(app_id) {
+    return Err(format!(
+      "the signed manifest is not for this app (its `app` must be {app_id:?})"
+    ));
+  }
+  let Some(expires) = manifest.expires_at.as_deref() else {
+    return Err(
+      "the signed manifest has no expiresAt (an RFC 3339 time after which \
+       it is refused)"
+        .into(),
+    );
+  };
+  let Some(expires_unix) = parse_rfc3339(expires) else {
+    return Err(format!(
+      "expiresAt {expires:?} is not an RFC 3339 timestamp"
+    ));
+  };
+  if now_unix >= expires_unix {
+    return Err(format!(
+      "the signed manifest expired at {expires} (or this computer's clock is \
+       wrong)"
+    ));
+  }
+  let Some(sequence) = manifest.sequence else {
+    return Err(
+      "the signed manifest has no sequence (a release counter that only \
+       grows)"
+        .into(),
+    );
+  };
+  if sequence > MAX_SEQUENCE {
+    return Err(format!("sequence must be 0..={MAX_SEQUENCE}"));
+  }
+  if floor.is_some_and(|floor| sequence < floor) {
+    let floor = floor.unwrap_or_default();
+    return Err(format!(
+      "the signed manifest's sequence {sequence} is lower than {floor}, which \
+       this install already accepted"
+    ));
+  }
+  let offered = parse_version(&manifest.version, "the manifest's version")
+    .map_err(|e| e.message)?;
+  let running =
+    parse_version(current, "the app's version").map_err(|e| e.message)?;
+  if offered <= running {
+    return Err(format!(
+      "the signed manifest offers {} which is not newer than the running {current}",
+      manifest.version
+    ));
+  }
+  Ok(())
+}
+
+/// The patch op's checks and work, apart from the op so tests can give it a
+/// state and a record location. Returns the staged `.update` path.
+///
+/// The op writes native code the next launch runs, so it needs the full
+/// `--allow-ffi` and write access to the runtime library (denext, DENEXT.md
+/// item 433). The SHA-256 it checks comes from the manifest's signed payload,
+/// verified here against the key baked into the app, never from the caller.
 #[allow(
   clippy::disallowed_methods,
   reason = "privileged auto-update op writes the live dylib outside any user's sandbox by design"
 )]
-#[op2(fast)]
-pub fn op_desktop_apply_patch(
-  state: &mut OpState,
-  #[buffer] patch_bytes: &[u8],
-  #[string] expected_sha256: &str,
-) -> Result<(), deno_error::JsErrorBox> {
-  let update_state =
-    state.try_borrow::<AutoUpdateState>().ok_or_else(|| {
-      deno_error::JsErrorBox::generic("Auto-update state not initialized")
-    })?;
+fn apply_desktop_patch(
+  permissions: Option<&deno_permissions::PermissionsContainer>,
+  update_state: Option<&AutoUpdateState>,
+  patch_bytes: &[u8],
+  signed_manifest: &str,
+  signature_b64: &str,
+  record: impl FnOnce(&std::path::Path) -> Option<std::path::PathBuf>,
+  now_unix: i64,
+) -> Result<std::path::PathBuf, deno_error::JsErrorBox> {
+  let permissions = permissions.ok_or_else(|| {
+    deno_error::JsErrorBox::new("NotCapable", "Requires ffi access")
+  })?;
+  permissions
+    .check_ffi_all()
+    .map_err(deno_error::JsErrorBox::from_err)?;
+  let update_state = update_state.ok_or_else(|| {
+    deno_error::JsErrorBox::generic("Auto-update state not initialized")
+  })?;
   let dylib_path = &update_state.dylib_path;
+  let update_path = pending_update_path(dylib_path);
+  for path in [dylib_path.as_path(), update_path.as_path()] {
+    permissions
+      .check_write(Cow::Borrowed(path), "Deno.autoUpdate")
+      .map_err(deno_error::JsErrorBox::from_err)?;
+  }
 
   // Patching a file inside a macOS `.app` breaks the bundle's code signature
   // (and its notarization): the next launch fails Gatekeeper, or the patched
@@ -4809,23 +5105,62 @@ pub fn op_desktop_apply_patch(
     ));
   }
 
-  // Verify the patch bytes against the SHA-256 declared in the manifest before
-  // we trust them with `bspatch`. Without this, anyone who can MITM the patch
-  // download (or compromise the release host) could deliver arbitrary native
-  // code. The hash itself is only as trustworthy as the manifest delivery
-  // (TLS) and, when configured, the manifest signature checked in JS.
-  let expected_sha256 = expected_sha256.trim().to_ascii_lowercase();
-  if expected_sha256.len() != SHA256_HEX_LEN
-    || !expected_sha256.chars().all(|c| c.is_ascii_hexdigit())
+  // The manifest must be signed by the key baked into the app: a key the
+  // caller passes proves nothing.
+  let Some(public_key) = update_state.public_key.as_deref() else {
+    return Err(deno_error::JsErrorBox::generic(
+      "Deno.autoUpdate: no desktop.release.publicKey was baked into this \
+       app, so no patch can be verified; refusing to apply it",
+    ));
+  };
+  if !verify_ed25519_b64(public_key, signature_b64, signed_manifest.as_bytes())
   {
     return Err(deno_error::JsErrorBox::generic(
-      "Auto-update: manifest is missing a valid SHA-256 patch hash",
+      "Deno.autoUpdate: manifest signature verification failed",
     ));
   }
-  let actual_sha256 = {
-    use sha2::Digest;
-    faster_hex::hex_string(&sha2::Sha256::digest(patch_bytes)).to_lowercase()
+  let manifest: SignedPatchManifest = serde_json::from_str(signed_manifest)
+    .map_err(|e| {
+      deno_error::JsErrorBox::generic(format!(
+        "Auto-update: the signed manifest is not valid: {e}"
+      ))
+    })?;
+  let Some(current) = update_state.app_version.as_deref() else {
+    return Err(deno_error::JsErrorBox::generic(
+      "Auto-update: the app has no version to patch from",
+    ));
   };
+  let record_path = record(dylib_path).ok_or_else(|| {
+    deno_error::JsErrorBox::generic(
+      "Auto-update: no private directory to record the staged update in",
+    )
+  })?;
+  let sequence_path = auto_update_sequence_path(&record_path);
+  let floor = read_auto_update_sequence(&sequence_path).map_err(|e| {
+    deno_error::JsErrorBox::generic(format!("Auto-update: {e}"))
+  })?;
+  check_patch_manifest(
+    &manifest,
+    update_state.app_id.as_deref(),
+    current,
+    now_unix,
+    floor,
+  )
+  .map_err(|e| deno_error::JsErrorBox::generic(format!("Auto-update: {e}")))?;
+  let entry = manifest.patches.get(current);
+  let (Some(expected_sha256), Some(expected_target_sha256)) = (
+    patch_entry_sha256(entry, "sha256"),
+    patch_entry_sha256(entry, "targetSha256"),
+  ) else {
+    return Err(deno_error::JsErrorBox::generic(
+      "Auto-update: the signed manifest has no sha256 and targetSha256 for \
+       a patch from this version",
+    ));
+  };
+
+  // Verify the patch bytes against the SHA-256 the signed manifest declares
+  // before we trust them with `bspatch`.
+  let actual_sha256 = sha256_hex(patch_bytes);
   if actual_sha256 != expected_sha256 {
     return Err(deno_error::JsErrorBox::generic(format!(
       "Auto-update: patch SHA-256 mismatch (expected {expected_sha256}, got {actual_sha256})"
@@ -4852,21 +5187,47 @@ pub fn op_desktop_apply_patch(
     })?;
 
   // Sanity-check the patched bytes look like a real native binary. This
-  // doesn't make the file safe to load (the hash check above does that), but
-  // it catches a malformed or empty payload before we stage the swap and
-  // shrinks the window where rename(2) into place could fail and leave the
-  // app without a working dylib.
+  // doesn't make the file safe to load (the signed hash check above does
+  // that), but it catches a malformed or empty payload before we stage the
+  // swap.
   if !dylib_magic_ok(&patched) {
     return Err(deno_error::JsErrorBox::generic(
       "Auto-update: patched dylib does not look like a native binary",
     ));
   }
+  // The result is the library the publisher signed for, not whatever this
+  // patch makes of the library on disk.
+  let patched_sha256 = sha256_hex(&patched);
+  if patched_sha256 != expected_target_sha256 {
+    return Err(deno_error::JsErrorBox::generic(format!(
+      "Auto-update: the patched library's SHA-256 is not the signed \
+       targetSha256 (expected {expected_target_sha256}, got {patched_sha256})"
+    )));
+  }
 
-  let update_path = dylib_path.with_extension(format!(
-    "{}.update",
-    dylib_path.extension().unwrap_or_default().to_string_lossy()
-  ));
+  // The manifest is accepted: its sequence is the new floor.
+  if let Some(sequence) = manifest.sequence {
+    write_pending_update_record(&sequence_path, &sequence.to_string())
+      .map_err(|e| {
+        deno_error::JsErrorBox::generic(format!(
+          "Failed to record the update's sequence at {}: {}",
+          sequence_path.display(),
+          e
+        ))
+      })?;
+  }
+
+  // The record first: the next launch swaps in only a staged file that
+  // matches it.
+  write_pending_update_record(&record_path, &patched_sha256).map_err(|e| {
+    deno_error::JsErrorBox::generic(format!(
+      "Failed to record the staged update at {}: {}",
+      record_path.display(),
+      e
+    ))
+  })?;
   std::fs::write(&update_path, &patched).map_err(|e| {
+    let _ = std::fs::remove_file(&record_path);
     deno_error::JsErrorBox::generic(format!(
       "Failed to write update to {}: {}",
       update_path.display(),
@@ -4879,7 +5240,48 @@ pub fn op_desktop_apply_patch(
     update_path.display()
   );
 
-  Ok(())
+  Ok(update_path)
+}
+
+#[op2(fast)]
+pub fn op_desktop_apply_patch(
+  state: &mut OpState,
+  #[buffer] patch_bytes: &[u8],
+  #[string] signed_manifest: &str,
+  #[string] signature_b64: &str,
+) -> Result<(), deno_error::JsErrorBox> {
+  #[allow(clippy::disallowed_methods, reason = "the manifest's expiry")]
+  let now_unix = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|d| d.as_secs() as i64)
+    .unwrap_or(0);
+  apply_desktop_patch(
+    state.try_borrow::<deno_permissions::PermissionsContainer>(),
+    state.try_borrow::<AutoUpdateState>(),
+    patch_bytes,
+    signed_manifest,
+    signature_b64,
+    pending_update_record_path,
+    now_unix,
+  )
+  .map(|_| ())
+}
+
+/// Checks a `desktop.release.publicKey` (an Ed25519 public key, base64 of
+/// its 32 bytes) and returns it trimmed: what `deno compile --desktop` bakes
+/// in for [`AutoUpdateState::public_key`].
+pub fn parse_auto_update_public_key(key: &str) -> Result<String, String> {
+  use base64::Engine;
+  let key = key.trim();
+  let bytes = base64::engine::general_purpose::STANDARD
+    .decode(key)
+    .map_err(|e| format!("not base64: {e}"))?;
+  let bytes: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+    format!("an Ed25519 public key is 32 bytes, not {}", bytes.len())
+  })?;
+  ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+    .map_err(|e| format!("not an Ed25519 public key: {e}"))?;
+  Ok(key.to_string())
 }
 
 /// Verify an Ed25519 signature over `message` using the base64-encoded
@@ -9773,6 +10175,336 @@ mod tests {
     assert!(!dylib_magic_ok(&[0xDE, 0xAD, 0xBE, 0xEF]));
     // The wrapper check is the last line of defence — failure here means
     // we'd write garbage as the staged dylib.
+  }
+
+  // --- op_desktop_apply_patch (denext, DENEXT.md item 433) ---
+
+  struct PatchFixture {
+    _tmp: tempfile::TempDir,
+    dylib: std::path::PathBuf,
+    record: std::path::PathBuf,
+    patch: Vec<u8>,
+    target: Vec<u8>,
+  }
+
+  #[allow(clippy::disallowed_methods, reason = "test fixtures on disk")]
+  fn patch_fixture() -> PatchFixture {
+    let tmp = tempfile::tempdir().unwrap();
+    let dylib = tmp.path().join("libdenort.so");
+    let source = b"\x7fELF the running runtime".to_vec();
+    std::fs::write(&dylib, &source).unwrap();
+    let target = b"\x7fELF the next runtime, longer".to_vec();
+    let mut patch = Vec::new();
+    qbsdiff::Bsdiff::new(&source, &target)
+      .compare(std::io::Cursor::new(&mut patch))
+      .unwrap();
+    let record = tmp.path().join("state").join("pending.sha256");
+    PatchFixture {
+      _tmp: tmp,
+      dylib,
+      record,
+      patch,
+      target,
+    }
+  }
+
+  fn patch_permissions(
+    allow_ffi: bool,
+    allow_write: bool,
+  ) -> deno_permissions::PermissionsContainer {
+    use deno_permissions::Permissions;
+    use deno_permissions::PermissionsContainer;
+    use deno_permissions::PermissionsOptions;
+    use deno_permissions::RuntimePermissionDescriptorParser;
+    let parser =
+      RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys);
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_ffi: allow_ffi.then(Vec::new),
+        allow_write: allow_write.then(Vec::new),
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    PermissionsContainer::new(std::sync::Arc::new(parser), perms)
+  }
+
+  /// 2026-11-01T00:00:00Z: "now" for the patch tests.
+  const PATCH_NOW: i64 = 1_793_491_200;
+
+  fn manifest_payload(patch: &[u8], target: &[u8]) -> serde_json::Value {
+    use super::sha256_hex;
+    serde_json::json!({
+      "app": "com.example.app",
+      "version": "1.1.0",
+      "expiresAt": "2026-12-01T00:00:00Z",
+      "sequence": 10,
+      "patches": { "1.0.0": {
+        "name": "p.bsdiff",
+        "sha256": sha256_hex(patch),
+        "targetSha256": sha256_hex(target),
+      } },
+    })
+  }
+
+  fn sign_payload(
+    sk: &ed25519_dalek::SigningKey,
+    payload: &serde_json::Value,
+  ) -> (String, String) {
+    use ed25519_dalek::Signer;
+    let signed = payload.to_string();
+    let sig = b64(&sk.sign(signed.as_bytes()).to_bytes());
+    (signed, sig)
+  }
+
+  fn signed_manifest(
+    sk: &ed25519_dalek::SigningKey,
+    patch: &[u8],
+  ) -> (String, String) {
+    let f = patch_fixture();
+    sign_payload(sk, &manifest_payload(patch, &f.target))
+  }
+
+  fn update_state(
+    f: &PatchFixture,
+    key: Option<String>,
+  ) -> super::AutoUpdateState {
+    super::AutoUpdateState {
+      dylib_path: f.dylib.clone(),
+      app_version: Some("1.0.0".into()),
+      rolled_back: false,
+      public_key: key,
+      app_id: Some("com.example.app".into()),
+    }
+  }
+
+  #[test]
+  #[allow(clippy::disallowed_methods, reason = "test fixtures on disk")]
+  fn apply_patch_needs_ffi_and_write_and_a_baked_key() {
+    use deno_error::JsErrorClass;
+
+    use super::AutoUpdateState;
+    use super::apply_desktop_patch;
+    use super::pending_update_matches_record;
+    use super::pending_update_path;
+    let f = patch_fixture();
+    let (sk, vk) = keypair_from_seed(&[7u8; 32]);
+    let (signed, sig) = signed_manifest(&sk, &f.patch);
+    let key = Some(b64(&vk.to_bytes()));
+    let state = update_state(&f, key.clone());
+    let record = |_: &std::path::Path| Some(f.record.clone());
+    let run = |perms: &deno_permissions::PermissionsContainer,
+               state: &AutoUpdateState,
+               signed: &str,
+               sig: &str| {
+      apply_desktop_patch(
+        Some(perms),
+        Some(state),
+        &f.patch,
+        signed,
+        sig,
+        record,
+        PATCH_NOW,
+      )
+    };
+    let update = pending_update_path(&f.dylib);
+    // No --allow-ffi, or ffi without write access to the library: NotCapable,
+    // before anything is read or written.
+    for perms in [
+      patch_permissions(false, false),
+      patch_permissions(false, true),
+      patch_permissions(true, false),
+    ] {
+      let err = run(&perms, &state, &signed, &sig).unwrap_err();
+      assert_eq!(err.get_class(), "NotCapable", "{err}");
+    }
+    assert!(
+      apply_desktop_patch(
+        None,
+        Some(&state),
+        &f.patch,
+        &signed,
+        &sig,
+        record,
+        PATCH_NOW
+      )
+      .is_err()
+    );
+    let perms = patch_permissions(true, true);
+    // No key baked into the app: refused, whatever the caller signed.
+    let err = run(&perms, &update_state(&f, None), &signed, &sig).unwrap_err();
+    assert!(
+      err.to_string().contains("desktop.release.publicKey"),
+      "{err}"
+    );
+    // Signed by another key (one the caller picked): refused.
+    let (other, _) = keypair_from_seed(&[8u8; 32]);
+    let (signed_other, sig_other) = signed_manifest(&other, &f.patch);
+    let err = run(&perms, &state, &signed_other, &sig_other).unwrap_err();
+    assert!(err.to_string().contains("signature"), "{err}");
+    // The signed SHA-256 names other bytes: refused.
+    let (signed_wrong, sig_wrong) = signed_manifest(&sk, b"other patch");
+    let err = run(&perms, &state, &signed_wrong, &sig_wrong).unwrap_err();
+    assert!(err.to_string().contains("mismatch"), "{err}");
+    assert!(!update.exists(), "nothing staged by a refused patch");
+    assert!(!f.record.exists());
+    // Everything in order: staged, and recorded where the next launch looks.
+    assert_eq!(run(&perms, &state, &signed, &sig).unwrap(), update);
+    #[allow(clippy::disallowed_methods, reason = "test fixtures on disk")]
+    let staged = std::fs::read(&update).unwrap();
+    assert_eq!(staged, f.target);
+    assert!(pending_update_matches_record(&update, Some(&f.record)));
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      #[allow(clippy::disallowed_methods, reason = "test fixtures on disk")]
+      let mode = std::fs::metadata(&f.record).unwrap().permissions().mode();
+      assert_eq!(mode & 0o777, 0o600);
+    }
+  }
+
+  // A signed manifest is bound to its app, expires, carries a sequence the
+  // install records and never accepts lower, offers only a newer version, and
+  // names the patched library's SHA-256.
+  #[test]
+  #[allow(clippy::disallowed_methods, reason = "test fixtures on disk")]
+  fn apply_patch_checks_the_manifest() {
+    use super::apply_desktop_patch;
+    use super::pending_update_path;
+    let f = patch_fixture();
+    let (sk, vk) = keypair_from_seed(&[7u8; 32]);
+    let state = update_state(&f, Some(b64(&vk.to_bytes())));
+    let perms = patch_permissions(true, true);
+    let run = |payload: &serde_json::Value, now: i64| {
+      let (signed, sig) = sign_payload(&sk, payload);
+      apply_desktop_patch(
+        Some(&perms),
+        Some(&state),
+        &f.patch,
+        &signed,
+        &sig,
+        |_: &std::path::Path| Some(f.record.clone()),
+        now,
+      )
+    };
+    let good = manifest_payload(&f.patch, &f.target);
+    let with = |key: &str, value: serde_json::Value| {
+      let mut p = good.clone();
+      if value.is_null() {
+        p.as_object_mut().unwrap().remove(key);
+      } else {
+        p[key] = value;
+      }
+      p
+    };
+    let refused = |payload: serde_json::Value, now: i64, why: &str| {
+      let err = run(&payload, now).unwrap_err().to_string();
+      assert!(err.contains(why), "{why}: {err}");
+    };
+    refused(
+      with("app", "com.other.app".into()),
+      PATCH_NOW,
+      "not for this app",
+    );
+    refused(
+      with("app", serde_json::Value::Null),
+      PATCH_NOW,
+      "not for this app",
+    );
+    refused(good.clone(), 1_796_083_200, "expired");
+    refused(
+      with("expiresAt", serde_json::Value::Null),
+      PATCH_NOW,
+      "expiresAt",
+    );
+    refused(with("expiresAt", "tomorrow".into()), PATCH_NOW, "RFC 3339");
+    refused(
+      with("sequence", serde_json::Value::Null),
+      PATCH_NOW,
+      "sequence",
+    );
+    refused(with("version", "1.0.0".into()), PATCH_NOW, "not newer");
+    refused(with("version", "0.9.0".into()), PATCH_NOW, "not newer");
+    let mut no_target = good.clone();
+    no_target["patches"]["1.0.0"]
+      .as_object_mut()
+      .unwrap()
+      .remove("targetSha256");
+    refused(no_target, PATCH_NOW, "targetSha256");
+    let mut wrong_target = good.clone();
+    wrong_target["patches"]["1.0.0"]["targetSha256"] =
+      super::sha256_hex(b"another library").into();
+    refused(wrong_target, PATCH_NOW, "targetSha256");
+    // An app with no identity takes no patch.
+    let (signed, sig) = sign_payload(&sk, &good);
+    let anonymous = super::AutoUpdateState {
+      app_id: None,
+      ..update_state(&f, Some(b64(&vk.to_bytes())))
+    };
+    assert!(
+      apply_desktop_patch(
+        Some(&perms),
+        Some(&anonymous),
+        &f.patch,
+        &signed,
+        &sig,
+        |_: &std::path::Path| Some(f.record.clone()),
+        PATCH_NOW,
+      )
+      .unwrap_err()
+      .to_string()
+      .contains("no identity")
+    );
+    assert!(!pending_update_path(&f.dylib).exists());
+    let sequence = f.record.with_extension("sequence");
+    assert!(!sequence.exists(), "nothing accepted yet");
+    // Accepted: its sequence is recorded ...
+    run(&good, PATCH_NOW).unwrap();
+    assert_eq!(std::fs::read_to_string(&sequence).unwrap(), "10");
+    // ... the same release again is fine, an older one is refused, a newer
+    // one raises the floor.
+    run(&good, PATCH_NOW).unwrap();
+    refused(with("sequence", 9.into()), PATCH_NOW, "lower than 10");
+    run(&with("sequence", 11.into()), PATCH_NOW).unwrap();
+    assert_eq!(std::fs::read_to_string(&sequence).unwrap(), "11");
+    refused(good.clone(), PATCH_NOW, "lower than 11");
+    // A damaged record refuses rather than forgetting the floor.
+    std::fs::write(&sequence, "garbage").unwrap();
+    refused(
+      with("sequence", 12.into()),
+      PATCH_NOW,
+      "not a sequence number",
+    );
+  }
+
+  #[test]
+  #[allow(clippy::disallowed_methods, reason = "test fixtures on disk")]
+  fn a_staged_update_matches_only_its_record() {
+    use super::pending_update_matches_record;
+    use super::pending_update_record_path;
+    use super::sha256_hex;
+    use super::write_pending_update_record;
+    let tmp = tempfile::tempdir().unwrap();
+    let update = tmp.path().join("lib.so.update");
+    let record = tmp.path().join("r").join("x.sha256");
+    std::fs::write(&update, b"\x7fELF staged").unwrap();
+    assert!(!pending_update_matches_record(&update, None));
+    assert!(!pending_update_matches_record(&update, Some(&record)));
+    write_pending_update_record(&record, &sha256_hex(b"\x7fELF staged"))
+      .unwrap();
+    assert!(pending_update_matches_record(&update, Some(&record)));
+    std::fs::write(&update, b"\x7fELF replaced").unwrap();
+    assert!(!pending_update_matches_record(&update, Some(&record)));
+    std::fs::write(&record, "not a digest").unwrap();
+    assert!(!pending_update_matches_record(&update, Some(&record)));
+    // The record lives outside the library's directory, keyed by its path.
+    let lib = tmp.path().join("lib.so");
+    std::fs::write(&lib, b"x").unwrap();
+    if let Some(path) = pending_update_record_path(&lib) {
+      assert!(!path.starts_with(tmp.path()));
+      assert!(path.to_string_lossy().contains("pending-updates"));
+    }
   }
 
   // --- op_desktop_verify_ed25519 ---

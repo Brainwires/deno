@@ -2974,7 +2974,10 @@ fn get_dylib_path() -> Option<PathBuf> {
 /// Uses a sentinel file (`.update-ok`) to detect if the last update
 /// booted successfully:
 ///
-/// - `.update` exists → apply it (current → `.backup`, `.update` → current)
+/// - `.update` exists and matches the digest the patch op recorded for it
+///   (`record`, in the user's state directory: DENEXT.md item 433) → apply
+///   it (current → `.backup`, `.update` → current); one with no matching
+///   record is deleted, never applied
 /// - `.backup` exists but `.update-ok` doesn't → last update crashed, rollback
 /// - `.backup` exists and `.update-ok` exists → previous update succeeded, clean up
 ///
@@ -2983,13 +2986,23 @@ fn get_dylib_path() -> Option<PathBuf> {
 // sole call site so it isn't flagged as dead code on other platforms.
 #[cfg(unix)]
 #[allow(clippy::print_stderr, reason = "runs before logging is initialized")]
-fn apply_pending_update(dylib_path: &Path) -> bool {
+fn apply_pending_update(dylib_path: &Path, record: Option<&Path>) -> bool {
   let ext = dylib_path.extension().unwrap_or_default().to_string_lossy();
   let update_path = dylib_path.with_extension(format!("{}.update", ext));
   let backup_path = dylib_path.with_extension(format!("{}.backup", ext));
   let sentinel_path = dylib_path.with_extension(format!("{}.update-ok", ext));
 
-  if update_path.exists() {
+  if update_path.exists()
+    && !denort::desktop::pending_update_matches_record(&update_path, record)
+  {
+    // Not the file the patch op staged (it checks permissions and the
+    // manifest's signature, and records what it wrote): never run it.
+    eprintln!("[desktop] discarding a staged update with no matching record");
+    let _ = std::fs::remove_file(&update_path);
+    if let Some(record) = record {
+      let _ = std::fs::remove_file(record);
+    }
+  } else if update_path.exists() {
     // New update pending — apply it.
     // Remove stale sentinel so we can detect if *this* update fails.
     let _ = std::fs::remove_file(&sentinel_path);
@@ -3018,6 +3031,9 @@ fn apply_pending_update(dylib_path: &Path) -> bool {
         && std::fs::rename(&tmp_path, dylib_path).is_ok();
       if copy_ok {
         let _ = std::fs::remove_file(&update_path);
+        if let Some(record) = record {
+          let _ = std::fs::remove_file(record);
+        }
       } else {
         // Couldn't apply the update by rename or copy. Leave `.update` in
         // place so the next launch retries, drop the stale `.tmp`, and
@@ -3030,6 +3046,8 @@ fn apply_pending_update(dylib_path: &Path) -> bool {
           "[desktop] failed to apply staged update; will retry on next launch"
         );
       }
+    } else if let Some(record) = record {
+      let _ = std::fs::remove_file(record);
     }
     return false;
   }
@@ -3057,11 +3075,15 @@ fn apply_pending_update(dylib_path: &Path) -> bool {
 /// had not yet written its sentinel, whenever the app forked a worker. The
 /// app's next launch applies it.
 #[cfg(unix)]
-fn apply_pending_update_on_launch(dylib_path: &Path, is_worker: bool) -> bool {
+fn apply_pending_update_on_launch(
+  dylib_path: &Path,
+  is_worker: bool,
+  record: Option<&Path>,
+) -> bool {
   if is_worker {
     return false;
   }
-  apply_pending_update(dylib_path)
+  apply_pending_update(dylib_path, record)
 }
 
 /// The argument a laufey Linux host's D-Bus activation launch carries (the
@@ -3239,7 +3261,8 @@ laufey::main!(|| {
       // (No print of the path here: this runs on every launch, and stderr
       // is the app's own.)
       if let Some(ref dylib_path) = get_dylib_path() {
-        apply_pending_update_on_launch(dylib_path, is_worker)
+        let record = denort::desktop::pending_update_record_path(dylib_path);
+        apply_pending_update_on_launch(dylib_path, is_worker, record.as_deref())
       } else {
         eprintln!("[desktop] could not determine dylib path");
         false
@@ -4266,6 +4289,12 @@ async fn run_desktop(
       dylib_path: p,
       app_version: data.metadata.app_version.clone(),
       rolled_back: update_rolled_back, // from laufey::main! startup check
+      public_key: data.metadata.release_public_key.clone(),
+      app_id: data
+        .metadata
+        .app_identifier
+        .clone()
+        .or_else(|| data.metadata.app_name.clone()),
     }
   });
   #[cfg(not(unix))]
@@ -4281,6 +4310,9 @@ async fn run_desktop(
     .and_then(|s| s.app_version.clone());
   let auto_update_rolled_back =
     auto_update_state.as_ref().is_some_and(|s| s.rolled_back);
+  let auto_update_has_key = auto_update_state
+    .as_ref()
+    .is_some_and(|s| s.public_key.is_some());
 
   // The app's identity (deno.json `desktop.app.name`, else the output file's
   // name, baked in at compile time): scheme registration below.
@@ -4561,6 +4593,7 @@ async fn run_desktop(
     override_main_module: None,
     auto_update_version,
     auto_update_rolled_back,
+    auto_update_has_key,
     error_reporting_url: data.metadata.error_reporting_url.clone(),
     release_base_url: data.metadata.release_base_url.clone(),
     inspect_brk,
@@ -5431,6 +5464,24 @@ mod tests {
       std::fs::read_to_string(path).unwrap()
     }
 
+    /// Where these tests keep the patch op's record (DENEXT.md item 433).
+    fn record(tmp: &std::path::Path) -> std::path::PathBuf {
+      tmp.join("state").join("pending.sha256")
+    }
+
+    /// Stages `content` as the patch op does: the `.update` file and its
+    /// digest in the record.
+    fn stage(tmp: &std::path::Path, update: &std::path::Path, content: &str) {
+      touch(update, content);
+      let digest = denort::desktop::pending_update_digest(content.as_bytes());
+      denort::desktop::write_pending_update_record(&record(tmp), &digest)
+        .unwrap();
+    }
+
+    fn apply(tmp: &std::path::Path, dylib: &std::path::Path) -> bool {
+      apply_pending_update(dylib, Some(&record(tmp)))
+    }
+
     fn paths(
       tmp: &std::path::Path,
     ) -> (
@@ -5451,7 +5502,7 @@ mod tests {
       let tmp = tempfile::tempdir().unwrap();
       let (dylib, _, _, _) = paths(tmp.path());
       touch(&dylib, "live");
-      let rolled_back = apply_pending_update(&dylib);
+      let rolled_back = apply(tmp.path(), &dylib);
       assert!(!rolled_back, "no .update / .backup → no rollback");
       assert_eq!(read(&dylib), "live", "dylib must be untouched");
     }
@@ -5461,8 +5512,8 @@ mod tests {
       let tmp = tempfile::tempdir().unwrap();
       let (dylib, update, backup, sentinel) = paths(tmp.path());
       touch(&dylib, "old");
-      touch(&update, "new");
-      let rolled_back = apply_pending_update(&dylib);
+      stage(tmp.path(), &update, "new");
+      let rolled_back = apply(tmp.path(), &dylib);
 
       assert!(!rolled_back, "applying a fresh update is not a rollback");
       assert_eq!(
@@ -5475,8 +5526,33 @@ mod tests {
       // Stale sentinel from a prior update is cleared so the next launch
       // can detect THIS update's success/failure.
       assert!(!sentinel.exists());
-      // The staged update file is consumed.
+      // The staged update file is consumed, and its record.
       assert!(!update.exists());
+      assert!(!record(tmp.path()).exists());
+    }
+
+    // DENEXT.md item 433: a `.update` file the patch op didn't record (one
+    // dropped next to the library, or replaced after the op wrote it) is
+    // deleted, never swapped in.
+    #[test]
+    fn pending_update_without_its_record_is_discarded() {
+      let tmp = tempfile::tempdir().unwrap();
+      let (dylib, update, backup, _) = paths(tmp.path());
+      touch(&dylib, "old");
+      touch(&update, "planted");
+      assert!(!apply(tmp.path(), &dylib));
+      assert!(!apply_pending_update(&dylib, None));
+      assert_eq!(read(&dylib), "old", "an unrecorded update is not applied");
+      assert!(!update.exists(), "and is deleted");
+      assert!(!backup.exists());
+
+      // Recorded, then replaced: the digest no longer matches.
+      stage(tmp.path(), &update, "new");
+      touch(&update, "replaced");
+      assert!(!apply(tmp.path(), &dylib));
+      assert_eq!(read(&dylib), "old");
+      assert!(!update.exists());
+      assert!(!record(tmp.path()).exists());
     }
 
     #[test]
@@ -5484,10 +5560,10 @@ mod tests {
       let tmp = tempfile::tempdir().unwrap();
       let (dylib, update, backup, sentinel) = paths(tmp.path());
       touch(&dylib, "old");
-      touch(&update, "new");
+      stage(tmp.path(), &update, "new");
       touch(&sentinel, "ok"); // sentinel left over from a previous launch
       touch(&backup, "very-old"); // and a backup, also stale
-      apply_pending_update(&dylib);
+      apply(tmp.path(), &dylib);
       // After applying a new update: backup is the just-replaced 'old',
       // sentinel was cleared. The previous backup ("very-old") must not
       // persist, or rollback would resurrect a two-version-old dylib.
@@ -5503,7 +5579,7 @@ mod tests {
       let (dylib, _, backup, _) = paths(tmp.path());
       touch(&dylib, "new-but-broken");
       touch(&backup, "old-but-known-good");
-      let rolled_back = apply_pending_update(&dylib);
+      let rolled_back = apply(tmp.path(), &dylib);
       assert!(rolled_back, "missing sentinel must trigger rollback");
       assert_eq!(
         read(&dylib),
@@ -5522,7 +5598,7 @@ mod tests {
       touch(&dylib, "new");
       touch(&backup, "old");
       touch(&sentinel, "ok");
-      let rolled_back = apply_pending_update(&dylib);
+      let rolled_back = apply(tmp.path(), &dylib);
       assert!(!rolled_back);
       assert!(!backup.exists(), "successful-boot path must delete .backup");
       assert!(
@@ -5545,12 +5621,17 @@ mod tests {
       let tmp = tempfile::tempdir().unwrap();
       let (dylib, update, backup, sentinel) = paths(tmp.path());
       touch(&dylib, "old");
-      touch(&update, "new");
+      stage(tmp.path(), &update, "new");
+      let rec = record(tmp.path());
       let args: Vec<OsString> = vec!["run".into(), "worker.js".into()];
       let ipc = |n: &str| (n == "NODE_CHANNEL_FD").then(|| OsString::from("3"));
       let is_worker = is_worker_launch(&args, ipc);
       assert!(is_worker, "a forked `run` with an IPC channel is a worker");
-      assert!(!apply_pending_update_on_launch(&dylib, is_worker));
+      assert!(!apply_pending_update_on_launch(
+        &dylib,
+        is_worker,
+        Some(&rec)
+      ));
       assert_eq!(read(&dylib), "old", "the running app's dylib is untouched");
       assert_eq!(read(&update), "new", "the staged update waits");
       assert!(!backup.exists());
@@ -5558,16 +5639,20 @@ mod tests {
       // ... nor roll back an update on trial (no sentinel yet).
       std::fs::remove_file(&update).unwrap();
       touch(&backup, "previous");
-      assert!(!apply_pending_update_on_launch(&dylib, true));
+      assert!(!apply_pending_update_on_launch(&dylib, true, Some(&rec)));
       assert_eq!(read(&dylib), "old");
       assert!(backup.exists() && !sentinel.exists());
 
       // The app's own launch (no worker argv or env) applies it.
       std::fs::remove_file(&backup).unwrap();
-      touch(&update, "new");
+      stage(tmp.path(), &update, "new");
       let is_worker = is_worker_launch(&[], |_| None);
       assert!(!is_worker);
-      assert!(!apply_pending_update_on_launch(&dylib, is_worker));
+      assert!(!apply_pending_update_on_launch(
+        &dylib,
+        is_worker,
+        Some(&rec)
+      ));
       assert_eq!(read(&dylib), "new");
       assert_eq!(read(&backup), "old");
     }
@@ -5580,7 +5665,7 @@ mod tests {
       let (dylib, _, _, sentinel) = paths(tmp.path());
       touch(&dylib, "live");
       touch(&sentinel, "ok");
-      let rolled_back = apply_pending_update(&dylib);
+      let rolled_back = apply(tmp.path(), &dylib);
       assert!(!rolled_back);
       assert_eq!(read(&dylib), "live");
     }

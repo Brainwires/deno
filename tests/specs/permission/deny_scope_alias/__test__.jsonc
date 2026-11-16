@@ -1,0 +1,33 @@
+{
+  "tempDir": true,
+  "tests": {
+    // a --deny-read scope written through a symlink holds on its real
+    // location, and one that is itself a symlink covers its target
+    "deny_read_scope_alias": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write setup.ts",
+          "output": "setup done\n"
+        },
+        {
+          "args": "run --allow-read --deny-read=rootlink/secret,dlink read.ts",
+          "output": "read.out"
+        }
+      ]
+    },
+    "deny_write_scope_alias": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write setup.ts",
+          "output": "setup done\n"
+        },
+        {
+          "args": "run --allow-read --allow-write --deny-write=rootlink/secret,dlink write.ts",
+          "output": "write.out"
+        }
+      ]
+    }
+  }
+}

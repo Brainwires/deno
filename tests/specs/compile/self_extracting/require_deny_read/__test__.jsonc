@@ -1,0 +1,19 @@
+{
+  // DENEXT.md item 438: a self-extracting binary's root is a real
+  // directory; require() of a file that isn't embedded there is checked like
+  // any other read, --deny-read included
+  "tempDir": true,
+  "tests": {
+    "require_deny_read": {
+      "if": "unix",
+      "steps": [{
+        "args": "compile --self-extracting --allow-read --allow-write --deny-read=secret --output main main.ts",
+        "output": "[WILDCARD]"
+      }, {
+        "commandName": "./main",
+        "args": [],
+        "output": "main.out"
+      }]
+    }
+  }
+}

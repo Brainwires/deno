@@ -42,6 +42,31 @@
       "output": "relative: NotCapable\nabsolute: NotCapable\n"
     },
     {
+      // The node_modules exemption itself (DENEXT.md item 435): a file whose
+      // real path is in a node_modules directory, absolute or through a link
+      "args": "run deny.cjs",
+      "output": "absolute: other\nlink: other\n"
+    },
+    {
+      // ... is exempt from the allow scopes, never from --deny-read on its
+      // real path or its spelling (DENEXT.md item 435). Unix only, as above.
+      "if": "unix",
+      "args": "run --deny-read=other deny.cjs",
+      "output": "absolute: NotCapable\nlink: NotCapable\n"
+    },
+    {
+      // a deny scope that is itself a link covers its target too (DENEXT.md
+      // item 436): the spelling through the link and the real path alike
+      "if": "unix",
+      "args": "run --deny-read=node_modules/far deny.cjs",
+      "output": "absolute: NotCapable\nlink: NotCapable\n"
+    },
+    {
+      "if": "unix",
+      "args": "run --deny-read=other deny.mjs",
+      "output": "json import: TypeError: Requires read access to \"[WILDCARD]/other/node_modules/x/s.json\"\n"
+    },
+    {
       // The main module through a link (lib -> outside) resolves to its real
       // path (DENEXT.md item 395), so it runs exactly as naming
       // outside/mod.cjs does: the main module needs no read grant, and

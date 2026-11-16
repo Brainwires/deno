@@ -1524,6 +1524,22 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
       return eszip_loader.load(specifier);
     }
 
+    // A file in a package skips the graph (and `check_specifier`), so an
+    // `import()` of it is checked here: in a BYONM project it is exempt from
+    // the allow scopes, never from a `--deny-read` on its real path or its
+    // spelling, as `require()` of it is (DENEXT.md item 435).
+    if options.is_dynamic_import
+      && specifier.scheme() == "file"
+      && inner.shared.in_npm_pkg_checker.in_npm_package(specifier)
+      && let Ok(path) = deno_path_util::url_to_file_path(specifier)
+      && let Err(err) = inner
+        .shared
+        .npm_registry_permission_checker
+        .ensure_module_not_denied(&inner.permissions, &path)
+    {
+      return deno_core::ModuleLoadResponse::Sync(Err(err));
+    }
+
     if specifier.scheme() == crate::tools::test::vitest::SCHEME {
       use crate::tools::test::vitest::mocks::MockSource;
       let module_source = |source: String, specifier: &ModuleSpecifier| {

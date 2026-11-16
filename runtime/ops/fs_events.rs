@@ -196,9 +196,69 @@ struct WatchSender {
   sender: mpsc::Sender<Result<FsEvent, NotifyError>>,
   /// See [`FsEventsResource::overflowed`].
   overflowed: Arc<AtomicBool>,
+  /// The permissions of the runtime that opened the watch, which every
+  /// reported path is checked against (see [`WatchSender::readable_event`]).
+  permissions: Option<PermissionsContainer>,
 }
 
 impl WatchSender {
+  /// denext: the event with only the paths the watching runtime may read,
+  /// or `None` when none is left.
+  ///
+  /// The watch was permission-checked on the paths it names, but a recursive
+  /// watch reports on everything below them: a `--deny-read` or
+  /// `--ignore-read` scope inside the watched tree, and, where the backend
+  /// follows symlinks while walking the tree (inotify and kqueue unless
+  /// told not to, see [`follows_symlinks`]; FSEvents and
+  /// `ReadDirectoryChangesW` report the paths they see changing), whatever
+  /// a link leads to. An event path is passed on only when reading it is
+  /// granted, by the path as reported and by the path it resolves to, so a
+  /// denied file's name, and the fact that it changed, stay hidden. The
+  /// check never prompts.
+  fn readable_event(&self, event: &FsEvent) -> Option<FsEvent> {
+    let Some(permissions) = &self.permissions else {
+      return Some(event.clone());
+    };
+    if event.paths.is_empty() {
+      return Some(event.clone());
+    }
+    let paths: Vec<PathBuf> = event
+      .paths
+      .iter()
+      .filter(|path| permissions.query_read_reachable(path))
+      .cloned()
+      .collect();
+    if paths.is_empty() {
+      return None;
+    }
+    Some(FsEvent {
+      kind: event.kind,
+      paths,
+      flag: event.flag,
+    })
+  }
+
+  /// denext: the watcher error with only the paths the watching runtime may
+  /// read, as [`Self::readable_event`] does for events, or `None` when it
+  /// named paths and none is left (an error about a denied path says that
+  /// the path exists). An error that names no path is delivered as is.
+  fn readable_error(&self, err: &NotifyError) -> Option<NotifyError> {
+    let mut err = clone_notify_error(err);
+    let Some(permissions) = &self.permissions else {
+      return Some(err);
+    };
+    if err.paths.is_empty() {
+      return Some(err);
+    }
+    err
+      .paths
+      .retain(|path| permissions.query_read_reachable(path));
+    if err.paths.is_empty() {
+      return None;
+    }
+    Some(err)
+  }
+
   /// Deliver an event or error without blocking the notify backend thread.
   /// If the queue is full the message is dropped and the overflow is
   /// recorded so the consumer learns about the loss via a `"rescan"` event.
@@ -379,6 +439,7 @@ fn make_watch_sender(
   ignore: Vec<PathBuf>,
   sender: mpsc::Sender<Result<FsEvent, NotifyError>>,
   overflowed: Arc<AtomicBool>,
+  permissions: Option<PermissionsContainer>,
 ) -> WatchSender {
   let canonical_paths = paths.iter().map(|p| canonicalize_path(p)).collect();
   let canonical_ignore = ignore.iter().map(|p| canonicalize_path(p)).collect();
@@ -390,6 +451,79 @@ fn make_watch_sender(
     canonical_ignore,
     sender,
     overflowed,
+    permissions,
+  }
+}
+
+/// Hands one backend event or error to one watcher: an event only when it
+/// concerns the watcher's paths (and not only its `ignore` paths), each with
+/// only the paths the watcher's runtime may read.
+fn dispatch(ws: &WatchSender, res: &Result<FsEvent, NotifyError>) {
+  match res {
+    // Only send the event if the path matches one of the paths
+    // that the user is watching.
+    Ok(event) => {
+      // Skip events whose paths all fall under one of the ignored
+      // paths (the `ignore` option). Removed files are checked too so
+      // deletions inside an ignored directory don't leak through
+      // (canonicalize/is_same_file fail for paths that no longer
+      // exist). The `is_empty` guard keeps this off the event-callback
+      // hot path for the common case where `ignore` is unused.
+      //
+      // `all` (not `any`) means an event is dropped only when every
+      // path is ignored, so a rename out of an ignored dir into a
+      // watched one (paths = [from, to] with `from` ignored and `to`
+      // watched) is still delivered. The reverse case (rename into an
+      // ignored dir) still delivers an event containing the ignored
+      // `to` path; that is intentional.
+      if !ws.ignore.is_empty()
+        && !event.paths.is_empty()
+        && event.paths.iter().all(|event_path| {
+          event_matches_watched_paths(
+            event_path,
+            &ws.ignore,
+            &ws.canonical_ignore,
+          ) || removed_event_matches_watched_paths(
+            event_path,
+            &ws.ignore,
+            &ws.canonical_ignore,
+          )
+        })
+      {
+        return;
+      }
+      if event.paths.iter().any(|event_path| {
+        event_matches_watched_paths(event_path, &ws.paths, &ws.canonical_paths)
+      }) {
+        if let Some(event) = ws.readable_event(event) {
+          ws.send_or_record_overflow(Ok(event));
+        }
+      } else if event.paths.iter().any(|event_path| {
+        removed_event_matches_watched_paths(
+          event_path,
+          &ws.paths,
+          &ws.canonical_paths,
+        )
+      }) {
+        let remove_event = FsEvent {
+          kind: "remove",
+          paths: event.paths.clone(),
+          flag: None,
+        };
+        if let Some(event) = ws.readable_event(&remove_event) {
+          ws.send_or_record_overflow(Ok(event));
+        }
+      }
+    }
+    // Watcher errors are not reliably path-scoped (their `paths` are
+    // often empty), so deliver them to every watcher rather than
+    // dropping them on the floor, with the paths this watcher may not
+    // read left out.
+    Err(err) => {
+      if let Some(err) = ws.readable_error(err) {
+        ws.send_or_record_overflow(Err(err));
+      }
+    }
   }
 }
 
@@ -400,6 +534,8 @@ fn ensure_watcher(
     return Ok(ws.inner.clone());
   }
 
+  let follow_symlinks =
+    follows_symlinks(state.try_borrow::<PermissionsContainer>());
   let senders: Arc<Mutex<Vec<WatchSender>>> = Arc::new(Mutex::new(Vec::new()));
   let sender_clone = senders.clone();
   let watcher: RecommendedWatcher = Watcher::new(
@@ -410,72 +546,11 @@ fn ensure_watcher(
         Err(e) => Err(e),
       };
       for ws in sender_clone.lock().iter() {
-        match &res2 {
-          // Only send the event if the path matches one of the paths
-          // that the user is watching.
-          Ok(event) => {
-            // Skip events whose paths all fall under one of the ignored
-            // paths (the `ignore` option). Removed files are checked too so
-            // deletions inside an ignored directory don't leak through
-            // (canonicalize/is_same_file fail for paths that no longer
-            // exist). The `is_empty` guard keeps this off the event-callback
-            // hot path for the common case where `ignore` is unused.
-            //
-            // `all` (not `any`) means an event is dropped only when every
-            // path is ignored, so a rename out of an ignored dir into a
-            // watched one (paths = [from, to] with `from` ignored and `to`
-            // watched) is still delivered. The reverse case (rename into an
-            // ignored dir) still delivers an event containing the ignored
-            // `to` path; that is intentional.
-            if !ws.ignore.is_empty()
-              && !event.paths.is_empty()
-              && event.paths.iter().all(|event_path| {
-                event_matches_watched_paths(
-                  event_path,
-                  &ws.ignore,
-                  &ws.canonical_ignore,
-                ) || removed_event_matches_watched_paths(
-                  event_path,
-                  &ws.ignore,
-                  &ws.canonical_ignore,
-                )
-              })
-            {
-              continue;
-            }
-            if event.paths.iter().any(|event_path| {
-              event_matches_watched_paths(
-                event_path,
-                &ws.paths,
-                &ws.canonical_paths,
-              )
-            }) {
-              ws.send_or_record_overflow(Ok(event.clone()));
-            } else if event.paths.iter().any(|event_path| {
-              removed_event_matches_watched_paths(
-                event_path,
-                &ws.paths,
-                &ws.canonical_paths,
-              )
-            }) {
-              let remove_event = FsEvent {
-                kind: "remove",
-                paths: event.paths.clone(),
-                flag: None,
-              };
-              ws.send_or_record_overflow(Ok(remove_event));
-            }
-          }
-          // Watcher errors are not reliably path-scoped (their `paths` are
-          // often empty), so deliver them to every watcher rather than
-          // dropping them on the floor.
-          Err(err) => {
-            ws.send_or_record_overflow(Err(clone_notify_error(err)));
-          }
-        }
+        dispatch(ws, &res2);
       }
     },
-    Default::default(),
+    // denext: see [`follows_symlinks`].
+    notify::Config::default().with_follow_symlinks(follow_symlinks),
   )
   .map_err(|e| FsEventsError::Notify(JsNotifyError(e)))?;
 
@@ -491,6 +566,22 @@ fn ensure_watcher(
   });
 
   Ok(inner)
+}
+
+/// denext: whether a recursive watch walks into symlinked directories
+/// (honored by the inotify and kqueue backends, which then add a watch on
+/// every directory a link inside the tree leads to).
+///
+/// It does, as upstream, while every read is granted and no read is denied:
+/// a dev server watching `app/` keeps seeing changes in a linked workspace
+/// package. Otherwise it doesn't: a link's target can lie outside the
+/// granted scopes or inside a deny scope, and an event there would name it
+/// (`WatchSender::readable_event` still drops whatever gets through). The
+/// watcher is shared by every watch of a runtime and created by the first,
+/// so a later revoke narrows what is reported, not what is walked. A watched
+/// path that is itself a link is followed either way.
+fn follows_symlinks(permissions: Option<&PermissionsContainer>) -> bool {
+  permissions.is_none_or(|p| p.query_read_all() && !p.has_read_deny_rules())
 }
 
 /// Make `path` absolute and collapse `.` / `..` segments so that paths
@@ -573,6 +664,7 @@ fn open_fs_events_resource(
   let overflowed = Arc::new(AtomicBool::new(false));
 
   let inner = ensure_watcher(state)?;
+  let permissions = state.try_borrow::<PermissionsContainer>().cloned();
 
   let id = inner.next_id.fetch_add(1, Ordering::Relaxed);
 
@@ -582,6 +674,7 @@ fn open_fs_events_resource(
     ignore_paths,
     sender,
     overflowed.clone(),
+    permissions,
   ));
 
   let recursive_mode = if recursive {
@@ -802,6 +895,98 @@ mod tests {
         assert_eq!(io_err.to_string(), "denied");
       }
       kind => panic!("expected Io error, got {kind:?}"),
+    }
+  }
+
+  fn permissions_with(
+    allow_read: Option<Vec<String>>,
+    deny_read: Option<Vec<String>>,
+  ) -> PermissionsContainer {
+    use deno_permissions::Permissions;
+    use deno_permissions::PermissionsOptions;
+    use deno_permissions::RuntimePermissionDescriptorParser;
+
+    let parser =
+      RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys);
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_read,
+        deny_read,
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    PermissionsContainer::new(Arc::new(parser), perms)
+  }
+
+  // a recursive watch walks into symlinked directories, as upstream, only
+  // while every read is granted and none is denied
+  #[test]
+  fn follows_symlinks_only_without_read_limits() {
+    assert!(follows_symlinks(None));
+    assert!(follows_symlinks(Some(&permissions_with(
+      Some(vec![]),
+      None
+    ))));
+    assert!(!follows_symlinks(Some(&permissions_with(
+      Some(vec!["/tmp".to_string()]),
+      None,
+    ))));
+    assert!(!follows_symlinks(Some(&permissions_with(
+      Some(vec![]),
+      Some(vec!["/tmp/secret".to_string()]),
+    ))));
+    assert!(!follows_symlinks(Some(&permissions_with(None, None))));
+  }
+
+  // a watcher error is delivered with only the paths the runtime may read:
+  // one that names only denied paths is dropped, one with no path is
+  // delivered as is
+  #[allow(clippy::disallowed_methods, reason = "test fixtures on disk")]
+  #[test]
+  fn watcher_errors_leave_out_paths_the_runtime_may_not_read() {
+    let dir = test_util::TempDir::new();
+    let root = canonicalize_path(dir.path().as_path()).unwrap();
+    let secret = root.join("secret");
+    let ok = root.join("ok");
+    std::fs::create_dir_all(&secret).unwrap();
+    std::fs::create_dir_all(&ok).unwrap();
+    let (sender, mut receiver) = mpsc::channel(8);
+    let ws = make_watch_sender(
+      0,
+      vec![root.clone()],
+      vec![],
+      sender,
+      Arc::new(AtomicBool::new(false)),
+      Some(permissions_with(
+        Some(vec![]),
+        Some(vec![secret.to_string_lossy().into_owned()]),
+      )),
+    );
+    let err = |paths: Vec<PathBuf>| {
+      Err(NotifyError {
+        kind: notify::ErrorKind::Io(std::io::Error::new(
+          std::io::ErrorKind::PermissionDenied,
+          "denied",
+        )),
+        paths,
+      })
+    };
+
+    dispatch(&ws, &err(vec![secret.join("inner")]));
+    assert!(receiver.try_recv().is_err(), "an error about a denied path");
+
+    dispatch(&ws, &err(vec![secret.clone(), ok.clone()]));
+    match receiver.try_recv() {
+      Ok(Err(e)) => assert_eq!(e.paths, vec![ok.clone()]),
+      other => panic!("expected an error, got {other:?}"),
+    }
+
+    dispatch(&ws, &err(vec![]));
+    match receiver.try_recv() {
+      Ok(Err(e)) => assert!(e.paths.is_empty()),
+      other => panic!("expected an error, got {other:?}"),
     }
   }
 

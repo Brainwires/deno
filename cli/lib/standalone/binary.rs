@@ -117,6 +117,11 @@ pub struct Metadata {
   /// Auto-update release base URL from deno.json `desktop.release.baseUrl`.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub release_base_url: Option<String>,
+  /// deno.json `desktop.release.publicKey` (Ed25519, base64), checked at
+  /// compile time: the key every `Deno.autoUpdate` manifest must be signed
+  /// with. Desktop builds only.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub release_public_key: Option<String>,
   /// The full-app update public key from deno.json
   /// `desktop.update.publicKey` (ECDSA P-256, base64 SPKI or PEM), checked
   /// at compile time. Every `Deno.desktop.updater` manifest must be signed by

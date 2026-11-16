@@ -917,6 +917,11 @@ const NOT_IMPORTED_OPS = [
 // window's createWebView() made (evaluate runs script in a remote page,
 // capture reads what it shows), which are the main scope's alone too.
 const WORKER_EXCLUDED_OPS = [
+  // Deno.autoUpdate stages a new runtime library for the app's next launch:
+  // the main scope's own update script holds these (DENEXT.md item 433).
+  "op_desktop_apply_patch",
+  "op_desktop_confirm_update",
+  "op_desktop_verify_ed25519",
   "BrowserWindow",
   "Dock",
   "Tray",

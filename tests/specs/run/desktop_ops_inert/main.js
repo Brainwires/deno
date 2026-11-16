@@ -56,8 +56,10 @@ const png = new Uint8Array([
 // Ordered as in NOT_IMPORTED_OPS. Each case calls the op the way its
 // `Deno.desktop` wrapper would, with arguments that would act in an app.
 const cases = {
+  // Needs --allow-ffi and write access first (desktop_auto_update_patch has
+  // the rest).
   op_desktop_apply_patch: () =>
-    ops.op_desktop_apply_patch(new Uint8Array(4), "00".repeat(32)),
+    ops.op_desktop_apply_patch(new Uint8Array(4), "{}", "AAAA"),
   op_desktop_confirm_update: () => ops.op_desktop_confirm_update(),
   op_desktop_verify_ed25519: () =>
     ops.op_desktop_verify_ed25519("AAAA", "AAAA", new Uint8Array(1)),

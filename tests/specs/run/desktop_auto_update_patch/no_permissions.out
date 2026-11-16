@@ -1,0 +1,3 @@
+NotCapable: Requires ffi access, run again with the --allow-ffi flag
+worker: undefined undefined undefined
+staged: 0

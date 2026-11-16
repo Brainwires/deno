@@ -130,7 +130,10 @@ pub fn set_self_fork_cwd_env_var(key: impl Into<OsString>) {
 
 /// The variables of [`set_self_fork_env_var`] (and
 /// [`set_self_fork_cwd_env_var`], naming `cwd`) for a child running `cmd`
-/// with an IPC channel: none unless `cmd` is this process's own executable.
+/// with an IPC channel: none unless `cmd` is exactly the path of this
+/// process's own executable that a fork runs ([`current_exe_if`]; the spawn
+/// replaces any other name of it with that path at its check), so the
+/// variables go only to the file that was checked.
 fn self_fork_env(cmd: &Path, cwd: &Path) -> Vec<(OsString, OsString)> {
   let mut env = SELF_FORK_ENV
     .lock()
@@ -140,7 +143,9 @@ fn self_fork_env(cmd: &Path, cwd: &Path) -> Vec<(OsString, OsString)> {
     .lock()
     .unwrap_or_else(std::sync::PoisonError::into_inner)
     .clone();
-  if (env.is_empty() && cwd_key.is_none()) || !is_current_exe(cmd) {
+  if (env.is_empty() && cwd_key.is_none())
+    || current_exe_if(cmd).as_deref() != Some(cmd)
+  {
     return Vec::new();
   }
   if let Some(key) = cwd_key {
@@ -153,15 +158,24 @@ fn self_fork_env(cmd: &Path, cwd: &Path) -> Vec<(OsString, OsString)> {
 /// Whether spawning `cmd` with an IPC channel (`ipc`) is a fork of this
 /// process's own executable that an embedder authorizes itself (the children
 /// [`self_fork_env`] gives its variables to): the run permission isn't
-/// checked for it. A packaged desktop app forks its own executable for its
-/// workers, wherever it is installed, and that path is unknown when the app's
-/// permissions are baked; the runtime authorizes such a launch with the
-/// per-launch token it hands only its own forks. Without an IPC channel, or
-/// with no embedder variable registered (the CLI), spawning the executable
-/// needs the permission as any program does.
-fn is_authorized_self_fork(cmd: &Path, ipc: bool) -> bool {
+/// checked for it, as long as the caller's permissions may authorize it
+/// ([`PermissionsContainer::may_authorize_self_fork`], checked in
+/// [`check_run_permission`]: not a worker given its own run permission, no
+/// run revoke, no `--deny-run` covering it; DENEXT.md item 434). A packaged
+/// desktop app forks its own executable for its workers, wherever it is
+/// installed, and that path is unknown when the app's permissions are baked;
+/// the runtime authorizes such a launch with the per-launch token it hands
+/// only its own forks. Without an IPC channel, or with no embedder variable
+/// registered (the CLI), spawning the executable needs the permission as any
+/// program does.
+///
+/// Returns the path the fork must run: this executable's own resolved path,
+/// the one compared. The spawn runs that path, never `cmd` as given, so a
+/// link named `cmd` that is changed after the check can't make it start
+/// another program.
+fn is_authorized_self_fork(cmd: &Path, ipc: bool) -> Option<PathBuf> {
   if !ipc {
-    return false;
+    return None;
   }
   let registered = !SELF_FORK_ENV
     .lock()
@@ -171,26 +185,31 @@ fn is_authorized_self_fork(cmd: &Path, ipc: bool) -> bool {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .is_some();
-  registered && is_current_exe(cmd)
+  if registered {
+    current_exe_if(cmd)
+  } else {
+    None
+  }
 }
 
-/// Whether `cmd` is this process's own executable (the same file, whatever
-/// path names it).
-fn is_current_exe(cmd: &Path) -> bool {
+/// This process's own executable, with every link resolved (on Windows
+/// without the `\\?\` prefix), when `cmd` names the same file by whatever
+/// path; else `None`. The resolved path is what a fork runs: on Linux,
+/// macOS and Windows alike it names the installed executable itself, which
+/// only whoever may replace the app can change.
+fn current_exe_if(cmd: &Path) -> Option<PathBuf> {
   #[allow(
     clippy::disallowed_methods,
     reason = "compares a resolved command with the running executable on the real fs"
   )]
   fn canonical(p: &Path) -> Option<PathBuf> {
-    std::fs::canonicalize(p).ok()
+    let path = std::fs::canonicalize(p).ok()?;
+    #[cfg(windows)]
+    let path = deno_path_util::strip_unc_prefix(path);
+    Some(path)
   }
-  let Ok(exe) = std::env::current_exe() else {
-    return false;
-  };
-  match (canonical(cmd), canonical(&exe)) {
-    (Some(a), Some(b)) => a == b,
-    _ => false,
-  }
+  let exe = canonical(&std::env::current_exe().ok()?)?;
+  (canonical(cmd)? == exe).then_some(exe)
 }
 
 #[cfg(unix)]
@@ -744,6 +763,11 @@ impl TryFrom<ExitStatus> for ChildStatus {
       }
     } else {
       let code = code.expect("Should have either an exit code or a signal.");
+      // denext: under the kernel sandbox, a failing child may have been
+      // refused something it inherited the rules for
+      if code != 0 {
+        deno_permissions::kernel_sandbox_state::note_child_failed(code);
+      }
 
       ChildStatus {
         success: code == 0,
@@ -1718,6 +1742,7 @@ fn compute_run_cmd_and_check_permissions(
       command: arg_cmd.to_string(),
       error: Box::new(e),
     })?;
+  let self_fork_exe = is_authorized_self_fork(&cmd, ipc);
   check_run_permission(
     state,
     &RunQueryDescriptor::Path(
@@ -1726,8 +1751,11 @@ fn compute_run_cmd_and_check_permissions(
     ),
     &run_env,
     api_name,
-    is_authorized_self_fork(&cmd, ipc),
+    self_fork_exe.is_some(),
   )?;
+  // A fork of this executable runs the resolved path the check compared,
+  // not `cmd`, which may name something else by now.
+  let cmd = self_fork_exe.unwrap_or(cmd);
   // denext (DENEXT.md item 232): a program the app carries runs only as it
   // was packaged, whoever spawns it.
   // It runs the path that was checked, not the spelling the app used.
@@ -1861,6 +1889,31 @@ impl std::cmp::PartialEq for EnvVarKey {
   }
 }
 
+/// denext: a variable every child process gets with the value pinned here
+/// at startup, whatever environment the caller passes (`clearEnv`, an `env`
+/// without it, or another value for it). Inside a jailed npm lifecycle
+/// script the CLI pins the jail's own variable, so a `deno` the script starts
+/// through `node:child_process` or `Deno.Command` clamps itself to the jail
+/// even when the caller dropped or rewrote the variable.
+static PINNED_CHILD_ENV: std::sync::OnceLock<(OsString, OsString)> =
+  std::sync::OnceLock::new();
+
+/// Pins `key` = `value` into every child's environment (see
+/// [`PINNED_CHILD_ENV`]); only the first call takes effect.
+pub fn pin_child_env_var(key: OsString, value: OsString) {
+  let _ = PINNED_CHILD_ENV.set((key, value));
+}
+
+/// Sets the pinned variable, if any, over whatever `envs` holds.
+fn apply_pinned_child_env(
+  envs: &mut HashMap<EnvVarKey, OsString>,
+  pinned: Option<&(OsString, OsString)>,
+) {
+  if let Some((key, value)) = pinned {
+    envs.insert(EnvVarKey::new(key.clone()), value.clone());
+  }
+}
+
 struct RunEnv {
   envs: HashMap<EnvVarKey, OsString>,
   /// Best-effort cwd used for resolving relative cmd paths and PATH lookups.
@@ -1919,7 +1972,7 @@ fn compute_run_env(
       Err(e) => return Err(ProcessError::FailedResolvingCwd(e)),
     },
   };
-  let envs = if arg_clear_env {
+  let mut envs = if arg_clear_env {
     arg_envs
       .iter()
       .map(|(k, v)| (EnvVarKey::from_str(k), OsString::from(v)))
@@ -1941,6 +1994,7 @@ fn compute_run_env(
     }
     envs
   };
+  apply_pinned_child_env(&mut envs, PINNED_CHILD_ENV.get());
   Ok(RunEnv {
     envs,
     cwd,
@@ -2006,7 +2060,8 @@ fn check_run_permission(
   run_env: &RunEnv,
   api_name: &str,
   // An embedder-authorized fork of this executable (is_authorized_self_fork):
-  // only the LD_* / DYLD_* check below applies to it.
+  // only the LD_* / DYLD_* check below applies to it, when the caller's
+  // permissions may authorize it (DENEXT.md item 434).
   self_fork: bool,
 ) -> Result<(), CheckRunPermissionError> {
   let permissions = state.borrow_mut::<PermissionsContainer>();
@@ -2030,7 +2085,7 @@ fn check_run_permission(
         ),
       )));
     }
-    if !self_fork {
+    if !self_fork || !permissions.may_authorize_self_fork(cmd) {
       permissions.check_run(cmd, api_name)?;
     }
   }
@@ -3102,13 +3157,27 @@ mod self_fork_tests {
   /// Whether a process with no permissions may spawn `cmd` (with `env`, and
   /// an IPC channel when `ipc`).
   fn may_spawn(cmd: &std::path::Path, ipc: bool, env: &[(&str, &str)]) -> bool {
-    let mut state = OpState::new(None);
+    may_spawn_as(no_permissions(), cmd, ipc, env)
+  }
+
+  fn no_permissions() -> PermissionsContainer {
     let parser =
       RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys);
-    state.put(PermissionsContainer::new(
+    PermissionsContainer::new(
       Arc::new(parser),
       Permissions::none_without_prompt(),
-    ));
+    )
+  }
+
+  /// Whether a process holding `permissions` may spawn `cmd`.
+  fn may_spawn_as(
+    permissions: PermissionsContainer,
+    cmd: &std::path::Path,
+    ipc: bool,
+    env: &[(&str, &str)],
+  ) -> bool {
+    let mut state = OpState::new(None);
+    state.put(permissions);
     let env: Vec<(String, String)> = env
       .iter()
       .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -3471,7 +3540,7 @@ mod self_fork_tests {
   // them must see none.
   #[test]
   fn self_fork_env_goes_only_to_this_executable() {
-    let exe = std::env::current_exe().unwrap();
+    let exe = super::current_exe_if(&std::env::current_exe().unwrap()).unwrap();
     let cwd = std::path::Path::new("/some/dir");
     // Nothing registered: nothing added.
     assert!(super::self_fork_env(&exe, cwd).is_empty());
@@ -3483,7 +3552,8 @@ mod self_fork_tests {
       super::self_fork_env(&exe, cwd),
       vec![("DENO_PROCESS_TEST_SELF_FORK".into(), "b".into())]
     );
-    // The same file through another path.
+    // The same path with a `.` in it is the same path (another name of the
+    // file, a link, gets nothing: see below).
     let dir = exe.parent().unwrap();
     let via_dot = dir.join(".").join(exe.file_name().unwrap());
     assert_eq!(super::self_fork_env(&via_dot, cwd).len(), 1);
@@ -3513,6 +3583,30 @@ mod self_fork_tests {
     // with an IPC channel needs no run permission, by any path to it ...
     assert!(may_spawn(&exe, true, &[]));
     assert!(may_spawn(&via_dot, true, &[]));
+    // ... and the spawn runs the resolved executable, never the name it was
+    // given, which could name another program by the time it starts.
+    #[cfg(unix)]
+    {
+      let links = tempfile::tempdir().unwrap();
+      let link = links.path().join("app");
+      std::os::unix::fs::symlink(&exe, &link).unwrap();
+      let mut state = OpState::new(None);
+      state.put(no_permissions());
+      let (cmd, _, _) = super::compute_run_cmd_and_check_permissions(
+        link.to_str().unwrap(),
+        None,
+        &[],
+        true,
+        &mut state,
+        "Deno.Command().spawn()",
+        true,
+        true,
+      )
+      .unwrap();
+      assert_eq!(cmd, exe);
+      assert_eq!(super::self_fork_env(&cmd, cwd).len(), 2);
+      assert!(super::self_fork_env(&link, cwd).is_empty());
+    }
     // ... but spawning it without an IPC channel still does,
     assert!(!may_spawn(&exe, false, &[]));
     // as does any other program, with one or not,
@@ -3525,6 +3619,90 @@ mod self_fork_tests {
       true,
       &[("DYLD_INSERT_LIBRARIES", "/tmp/x")]
     ));
+
+    // DENEXT.md item 434: only the caller's own say counts. A worker given
+    // its own run permission ("none", run: false), a run revoke, or a
+    // --deny-run covering the executable leaves the fork to the run check,
+    // which refuses it (NotCapable); a worker inheriting run keeps it.
+    use deno_permissions::ChildPermissionsArg;
+    let main = no_permissions();
+    assert!(may_spawn_as(
+      main
+        .create_child_permissions(ChildPermissionsArg::inherit())
+        .unwrap(),
+      &exe,
+      true,
+      &[]
+    ));
+    let none_worker = main
+      .create_child_permissions(ChildPermissionsArg::none())
+      .unwrap();
+    assert!(!may_spawn_as(none_worker.clone(), &exe, true, &[]));
+    assert!(!may_spawn_as(
+      none_worker
+        .create_child_permissions(ChildPermissionsArg::inherit())
+        .unwrap(),
+      &exe,
+      true,
+      &[]
+    ));
+    let revoked = no_permissions();
+    revoked.revoke_run(None).unwrap();
+    assert!(!may_spawn_as(revoked, &exe, true, &[]));
+    // A fork starts with the permissions as built: after any revoke, or in a
+    // worker narrowed in any permission, it is checked like any program.
+    let revoked_net = no_permissions();
+    revoked_net.revoke_net(None).unwrap();
+    assert!(!may_spawn_as(revoked_net, &exe, true, &[]));
+    let narrowed: ChildPermissionsArg =
+      deno_core::serde_json::from_value(deno_core::serde_json::json!({
+        "env": "inherit", "net": "inherit", "ffi": "inherit",
+        "import": "inherit", "read": false, "run": "inherit",
+        "sys": "inherit", "write": "inherit", "midi": "inherit",
+      }))
+      .unwrap();
+    assert!(!may_spawn_as(
+      main.create_child_permissions(narrowed).unwrap(),
+      &exe,
+      true,
+      &[]
+    ));
+    let parser =
+      RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys);
+    let denied = PermissionsContainer::new(
+      Arc::new(RuntimePermissionDescriptorParser::new(
+        sys_traits::impls::RealSys,
+      )),
+      Permissions::from_options(
+        &parser,
+        &deno_permissions::PermissionsOptions {
+          deny_run: Some(vec![]),
+          ..Default::default()
+        },
+      )
+      .unwrap(),
+    );
+    let mut state = OpState::new(None);
+    state.put(denied);
+    let err = super::compute_run_cmd_and_check_permissions(
+      exe.to_str().unwrap(),
+      None,
+      &[],
+      true,
+      &mut state,
+      "Deno.Command().spawn()",
+      true,
+      true,
+    )
+    .err()
+    .expect("a --deny-run app's fork is refused");
+    assert_eq!(
+      deno_error::JsErrorClass::get_class(&err),
+      "NotCapable",
+      "{err}"
+    );
+    // The program's own permissions, untouched, still fork.
+    assert!(may_spawn_as(main, &exe, true, &[]));
   }
 }
 
@@ -3598,6 +3776,39 @@ mod clean_run_env_tests {
     assert_eq!(keeps("lc_all", &[]), cfg!(windows));
     assert_eq!(keeps("SystemRoot", &[]), cfg!(windows));
     assert_eq!(keeps("COMSPEC", &[]), cfg!(windows));
+  }
+
+  // a pinned variable survives a cleared environment, an environment
+  // without it and one that rewrites it; nothing is added unpinned
+  #[test]
+  fn pinned_child_env_wins() {
+    use std::collections::HashMap;
+
+    use super::apply_pinned_child_env;
+    let key = OsString::from("DENO_TEST_PINNED");
+    let pinned = (key.clone(), OsString::from("jail"));
+    let mut cleared = HashMap::new();
+    apply_pinned_child_env(&mut cleared, Some(&pinned));
+    assert_eq!(
+      cleared.get(&EnvVarKey::new(key.clone())),
+      Some(&OsString::from("jail"))
+    );
+    let mut rewritten = HashMap::from([
+      (
+        EnvVarKey::new(key.clone()),
+        OsString::from("{\"write\":[\"/\"]}"),
+      ),
+      (EnvVarKey::from_str("PATH"), OsString::from("/bin")),
+    ]);
+    apply_pinned_child_env(&mut rewritten, Some(&pinned));
+    assert_eq!(
+      rewritten.get(&EnvVarKey::new(key.clone())),
+      Some(&OsString::from("jail"))
+    );
+    assert_eq!(rewritten.len(), 2);
+    let mut unpinned = HashMap::new();
+    apply_pinned_child_env(&mut unpinned, None);
+    assert!(unpinned.is_empty());
   }
 
   #[cfg(unix)]

@@ -1,4 +1,4 @@
-op_desktop_apply_patch throws Error: Auto-update state not initialized
+op_desktop_apply_patch throws NotCapable: Requires ffi access, run again with the --allow-ffi flag
 op_desktop_confirm_update -> null
 op_desktop_verify_ed25519 -> false
 op_desktop_init -> "-> null; again throws Error: the desktop runtime is already set up"
