@@ -429,22 +429,42 @@ fn related_addresses_are_redacted() {
   assert_eq!(redact(host), host);
 }
 
+// W3C bufferedAmount falls as SCTP takes data from its send queue: every
+// byte sent is reported by `dcsent` once transmitted (before the peer's
+// acknowledgement, which the engine's back-pressure then waits for).
 #[tokio::test]
-async fn buffered_amount_drains_to_zero() {
+async fn sent_bytes_are_reported_as_sctp_transmits_them() {
   let (a, b, id, mut ea, _eb) = connect(reliable()).await;
-  a.set_buffered_amount_low_threshold(id, 1024);
+  const TOTAL: usize = 64 * 16 * 1024;
   for _ in 0..64 {
     a.send(id, false, &[7u8; 16 * 1024]).unwrap();
   }
   assert!(a.buffered_amount(id) > 1024);
-  wait_for(&a, &mut ea, |e| matches!(e, JsEvent::DataChannelLow { .. })).await;
+  let reported = |events: &[JsEvent]| -> f64 {
+    events
+      .iter()
+      .map(|e| match e {
+        JsEvent::DataChannelSent { channel, bytes } if *channel == id => *bytes,
+        _ => 0.0,
+      })
+      .sum()
+  };
+  ea.clear();
+  tokio::time::timeout(Duration::from_secs(20), async {
+    while reported(&ea) < TOTAL as f64 {
+      ea.extend(a.next_events().await.expect("peer closed"));
+    }
+  })
+  .await
+  .expect("every byte is reported sent");
+  assert_eq!(reported(&ea), TOTAL as f64, "not more than was sent");
   tokio::time::timeout(Duration::from_secs(20), async {
     while a.buffered_amount(id) > 0 {
       tokio::time::sleep(Duration::from_millis(20)).await;
     }
   })
   .await
-  .expect("bufferedAmount drains");
+  .expect("the engine's back-pressure drains");
   a.close();
   b.close();
 }

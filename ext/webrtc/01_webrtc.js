@@ -18,7 +18,6 @@ const {
   op_webrtc_certificate_drop,
   op_webrtc_certificate_from_pem,
   op_webrtc_certificate_to_pem,
-  op_webrtc_dc_buffered_amount,
   op_webrtc_dc_close,
   op_webrtc_dc_id,
   op_webrtc_dc_send,
@@ -721,7 +720,9 @@ class RTCDataChannel extends EventTarget {
       id: init.id ?? null,
       binaryType: "arraybuffer",
       lowThreshold: 0,
-      lastBuffered: 0,
+      // [[BufferedAmount]]: what send() accepted that SCTP hasn't taken from
+      // its queue yet (`dcsent`).
+      buffered: 0,
       // Bytes accepted by send() but still waiting behind a Blob read: they
       // count in bufferedAmount from the call on.
       queuedBytes: 0,
@@ -776,14 +777,7 @@ class RTCDataChannel extends EventTarget {
   }
   get bufferedAmount() {
     webidl.assertBranded(this, RTCDataChannelPrototype);
-    const pc = this[_pc];
-    if (!pc[_state].closed && this[_state].readyState !== "closed") {
-      this[_state].lastBuffered = op_webrtc_dc_buffered_amount(
-        pc[_rid],
-        this[_channel],
-      );
-    }
-    return this[_state].lastBuffered + this[_state].queuedBytes;
+    return this[_state].buffered + this[_state].queuedBytes;
   }
   get bufferedAmountLowThreshold() {
     webidl.assertBranded(this, RTCDataChannelPrototype);
@@ -899,12 +893,8 @@ const RTCDataChannelPrototype = RTCDataChannel.prototype;
 
 function sendNow(channel, text, bytes) {
   const pc = channel[_pc];
-  channel[_state].lastBuffered = op_webrtc_dc_send(
-    pc[_rid],
-    channel[_channel],
-    text,
-    bytes,
-  );
+  op_webrtc_dc_send(pc[_rid], channel[_channel], text, bytes);
+  channel[_state].buffered += TypedArrayPrototypeGetByteLength(bytes);
 }
 
 function drainQueue(channel) {
@@ -1586,7 +1576,11 @@ function setTransportStates(pc, silent = false) {
     if (!silent) fire(ice, new Event("gatheringstatechange"));
   }
   let dtlsState = dtls[_transportState].state;
-  if (s.closed || s.connectionState === "closed") dtlsState = "closed";
+  // The peer's close_notify closes the DTLS transport itself (the engine
+  // says so) while the connection, by its own rules, stays connected.
+  if (
+    s.closed || s.connectionState === "closed" || s.dtlsState === "closed"
+  ) dtlsState = "closed";
   else if (s.connectionState === "failed") dtlsState = "failed";
   else if (s.connectionState === "connected") dtlsState = "connected";
   else if (s.connectionState === "connecting") dtlsState = "connecting";
@@ -2726,6 +2720,7 @@ class RTCPeerConnection extends EventTarget {
       connectionState: "new",
       sctp: null,
       sctpState: null,
+      dtlsState: null,
       dtls: null,
       transceivers: [],
       // Remote MediaStreams by id.
@@ -4097,6 +4092,10 @@ function dispatchEngineEvent(pc, event) {
     case "negotiationneeded":
       queueNegotiationNeeded(pc);
       break;
+    case "dtlsstatechange":
+      state.dtlsState = event.state;
+      setTransportStates(pc);
+      break;
     case "sctpstatechange":
       if (state.sctp === null) break;
       state.sctpState = event.state;
@@ -4183,10 +4182,15 @@ function dispatchEngineEvent(pc, event) {
       );
       break;
     }
-    case "dclow": {
+    case "dcsent": {
       const channel = channelFor(pc, event);
       if (channel === undefined) break;
-      fire(channel, new Event("bufferedamountlow"));
+      const s = channel[_state];
+      const before = s.buffered;
+      s.buffered = MathMax(0, before - event.bytes);
+      if (before > s.lowThreshold && s.buffered <= s.lowThreshold) {
+        fire(channel, new Event("bufferedamountlow"));
+      }
       break;
     }
     case "dcmessage": {

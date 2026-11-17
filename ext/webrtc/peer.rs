@@ -344,6 +344,10 @@ pub enum JsEvent {
   /// `RTCSctpTransport.state`, from the SCTP association.
   #[serde(rename = "sctpstatechange")]
   SctpState { state: &'static str },
+  /// The DTLS transport's own state, as the engine has it (the peer's
+  /// close_notify closes it while the connection stays `connected`).
+  #[serde(rename = "dtlsstatechange")]
+  DtlsState { state: String },
   #[serde(rename = "dcopen", rename_all = "camelCase")]
   DataChannelOpen {
     channel: u32,
@@ -361,9 +365,11 @@ pub enum JsEvent {
   DataChannelClose { channel: u32 },
   #[serde(rename = "dcerror")]
   DataChannelError { channel: u32 },
-  /// The channel's buffered amount fell to its low threshold or below.
-  #[serde(rename = "dclow")]
-  DataChannelLow { channel: u32 },
+  /// SCTP took `bytes` more of the channel's application data from its send
+  /// queue (W3C: "when the underlying data transport sends data from its
+  /// queue ... reduce [[BufferedAmount]]").
+  #[serde(rename = "dcsent")]
+  DataChannelSent { channel: u32, bytes: f64 },
   #[serde(rename = "dcmessage")]
   DataChannelMessage {
     channel: u32,
@@ -522,8 +528,13 @@ pub struct Core {
   remote_known: bool,
   /// The engine went `checking` before that: reported once one is.
   checking_held: bool,
+  /// Per data channel handle, the application bytes SCTP had taken from the
+  /// send queue when last reported (`track_sent`).
+  sent: HashMap<u32, u64>,
   /// The `RTCSctpTransport` state last reported ("" before any).
   sctp_state: &'static str,
+  /// The DTLS transport state last reported ("" before any).
+  dtls_state: String,
   /// Local candidates signalled in this gathering phase (an ICE restart
   /// starts a new one).
   local_gathered: usize,
@@ -934,6 +945,52 @@ impl Core {
     if next != self.sctp_state {
       self.sctp_state = next;
       self.events.push_back(JsEvent::SctpState { state: next });
+    }
+  }
+
+  /// Reports what each channel's SCTP stream has sent since the last pass.
+  fn track_sent(&mut self) {
+    let handles: Vec<u32> = self.sent.keys().copied().collect();
+    for handle in handles {
+      let Some(now) = self
+        .pc
+        .data_channel(handle as RTCDataChannelId)
+        .map(|c| c.bytes_dequeued())
+      else {
+        self.sent.remove(&handle);
+        continue;
+      };
+      let last = self.sent.insert(handle, now).unwrap_or(0);
+      if now > last {
+        self.events.push_back(JsEvent::DataChannelSent {
+          channel: handle,
+          bytes: (now - last) as f64,
+        });
+      }
+    }
+  }
+
+  /// The DTLS transport's state: reached through the SCTP transport, else
+  /// through a receiver (all of them share the one bundled transport).
+  fn track_dtls_state(&mut self) {
+    let state = match self.pc.sctp() {
+      Some(sctp) => Some(sctp.transport().state()),
+      None => {
+        let receivers: Vec<_> = self.pc.get_receivers().collect();
+        receivers.into_iter().find_map(|id| {
+          self
+            .pc
+            .rtp_receiver(id)
+            .and_then(|r| r.transport().map(|t| t.state()))
+        })
+      }
+    };
+    let Some(state) = state.map(|s| s.to_string()) else {
+      return;
+    };
+    if state != self.dtls_state {
+      self.dtls_state.clone_from(&state);
+      self.events.push_back(JsEvent::DtlsState { state });
     }
   }
 
@@ -1679,6 +1736,7 @@ impl Core {
         RTCPeerConnectionEvent::OnDataChannel(dc) => {
           let event = match dc {
             RTCDataChannelEvent::OnOpen(handle) => {
+              self.sent.entry(handle as u32).or_insert(0);
               let Some(channel) = self.pc.data_channel(handle) else {
                 continue;
               };
@@ -1704,11 +1762,8 @@ impl Core {
             RTCDataChannelEvent::OnError(handle) => JsEvent::DataChannelError {
               channel: handle as u32,
             },
-            RTCDataChannelEvent::OnBufferedAmountLow(handle) => {
-              JsEvent::DataChannelLow {
-                channel: handle as u32,
-              }
-            }
+            // `bufferedamountlow` follows what is sent, not what is
+            // acknowledged (`track_sent`).
             _ => continue,
           };
           self.events.push_back(event);
@@ -1793,8 +1848,12 @@ impl Core {
       let b = self.service_servers(now);
       self.maybe_complete_gathering();
       self.fail_without_pairs();
-      self.collect_events(now);
+      // The transports' states before the events they come with (a channel's
+      // open after its SCTP transport is connected).
       self.track_sctp_state();
+      self.track_dtls_state();
+      self.collect_events(now);
+      self.track_sent();
       if !a && !b {
         break;
       }
@@ -2074,7 +2133,9 @@ impl Peer {
         recv_rx: Some(recv_rx),
         media: MediaState::default(),
         remote_known: false,
+        sent: HashMap::new(),
         sctp_state: "",
+        dtls_state: String::new(),
         local_gathered: 0,
         remote_gathered: false,
         checking_held: false,
@@ -2445,6 +2506,7 @@ impl Peer {
         .map_err(rtc_err)?;
       let handle = channel.id() as u32;
       let id = channel.stream_id();
+      core.sent.insert(handle, 0);
       // A negotiated channel created on a live association is open at once
       // and the engine reports no open for it; JavaScript still gets its
       // `open` event (asynchronously, as the spec has it).
@@ -2513,8 +2575,9 @@ impl Peer {
     Ok(buffered)
   }
 
-  /// `bufferedAmount`: bytes sent that SCTP hasn't released (acknowledged
-  /// or abandoned).
+  /// Bytes sent that SCTP hasn't released (acknowledged or abandoned): the
+  /// engine's send back-pressure, which the tests watch drain.
+  #[cfg(test)]
   pub fn buffered_amount(&self, handle: u32) -> u32 {
     let mut core = self.core.borrow_mut();
     core
