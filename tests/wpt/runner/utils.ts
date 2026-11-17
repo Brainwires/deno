@@ -15,6 +15,7 @@ export const {
   ["auto-config"]: autoConfig,
   ["inspect-brk"]: inspectBrk,
   ["no-ignore"]: noIgnore,
+  ["dom-shim"]: domShim,
   binary,
 } = parseArgs(Deno.args, {
   "--": true,
@@ -25,6 +26,7 @@ export const {
     "no-interactive",
     "inspect-brk",
     "no-ignore",
+    "dom-shim",
   ],
   string: ["json", "wptreport", "binary"],
 });

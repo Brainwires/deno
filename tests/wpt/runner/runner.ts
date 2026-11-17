@@ -6,7 +6,13 @@ import {
   TextLineStream,
   toFileUrl,
 } from "../../../tools/util.js";
-import { assert, denoBinary, ManifestTestOptions, runPy } from "./utils.ts";
+import {
+  assert,
+  denoBinary,
+  domShim,
+  ManifestTestOptions,
+  runPy,
+} from "./utils.ts";
 import { DOMParser } from "jsr:@b-fuze/deno-dom@0.1.56/wasm";
 
 export async function runWithTestUtil<T>(
@@ -251,6 +257,13 @@ function getShim(test: string): string {
   return shim.join("\n");
 }
 
+/** The bundle step that sets `document.currentScript` (see dom_shim.js). */
+function setCurrentScript(src: string | null | undefined): string {
+  return `document[Symbol.for("deno.wpt.setCurrentScript")](${
+    src === undefined ? "undefined" : JSON.stringify(src)
+  });`;
+}
+
 async function generateBundle(location: URL): Promise<string> {
   const res = await fetch(location);
   const body = await res.text();
@@ -269,6 +282,20 @@ async function generateBundle(location: URL): Promise<string> {
     ]);
   }
   const shim = getShim(location.pathname);
+  // With `--dom-shim`, `document` is installed once `testharness.js` has run
+  // (see dom_shim.js), and from then on each script sees itself as
+  // `document.currentScript` while it runs.
+  let domInstalled = false;
+  const runScript = (url: string, src: string | null, contents: string) => {
+    scriptContents.push([url, shim]);
+    if (domInstalled) {
+      scriptContents.push([url, setCurrentScript(src)]);
+    }
+    scriptContents.push([url, contents]);
+    if (domInstalled) {
+      scriptContents.push([url, setCurrentScript(undefined)]);
+    }
+  };
   for (const script of scripts) {
     const src = script.getAttribute("src");
     if (src === "/resources/testharnessreport.js") {
@@ -276,21 +303,31 @@ async function generateBundle(location: URL): Promise<string> {
         join(ROOT_PATH, "./tests/wpt/runner/testharnessreport.js"),
       );
       const contents = await Deno.readTextFile(url);
-      scriptContents.push([url.href, shim]);
-      scriptContents.push([url.href, contents]);
+      runScript(url.href, new URL(src, location).href, contents);
     } else if (src) {
       const url = new URL(src, location);
       const res = await fetch(url);
       if (res.ok) {
         const contents = await res.text();
-        scriptContents.push([url.href, shim]);
-        scriptContents.push([url.href, contents]);
+        runScript(url.href, url.href, contents);
+        if (
+          domShim && !domInstalled &&
+          url.pathname === "/resources/testharness.js"
+        ) {
+          const shimUrl = toFileUrl(
+            join(ROOT_PATH, "./tests/wpt/runner/dom_shim.js"),
+          );
+          scriptContents.push([
+            shimUrl.href,
+            await Deno.readTextFile(shimUrl),
+          ]);
+          domInstalled = true;
+        }
       }
     } else {
       const url = new URL(`#${inlineScriptCount}`, location);
       inlineScriptCount++;
-      scriptContents.push([url.href, shim]);
-      scriptContents.push([url.href, script.textContent]);
+      runScript(url.href, null, script.textContent);
     }
   }
 
