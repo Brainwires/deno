@@ -1336,12 +1336,34 @@ impl From<deno_io::fs::FsStat> for NodeFsStat {
   }
 }
 
+/// The check `Deno.FsFile.prototype.stat()` makes: the descriptor was opened
+/// with the permission its open needed, which may be write only, so reading
+/// the file's metadata through it needs read permission on the file's path
+/// (a `--deny-read` path opened for writing keeps its size, times and owner
+/// to itself). A descriptor without a path (a standard stream, a pipe, a
+/// socket) has nothing to check.
+fn check_fd_stat(
+  state: &OpState,
+  file: &Rc<dyn deno_io::fs::File>,
+  api_name: &'static str,
+) -> Result<(), FsError> {
+  if let Some(path) = file.maybe_path() {
+    state.borrow::<PermissionsContainer>().check_open(
+      Cow::Borrowed(path),
+      OpenAccessKind::Read,
+      Some(api_name),
+    )?;
+  }
+  Ok(())
+}
+
 #[op2]
 pub fn op_node_fs_fstat_sync(
   state: &mut OpState,
   fd: i32,
 ) -> Result<NodeFsStat, FsError> {
   let file = file_for_fd(state, fd)?;
+  check_fd_stat(state, &file, "node:fs.fstatSync()")?;
   let stat = file.stat_sync()?;
   Ok(NodeFsStat::from(stat))
 }
@@ -1352,6 +1374,7 @@ pub async fn op_node_fs_fstat(
   fd: i32,
 ) -> Result<NodeFsStat, FsError> {
   let file = file_for_fd(&mut state.borrow_mut(), fd)?;
+  check_fd_stat(&state.borrow(), &file, "node:fs.fstat()")?;
   let stat = file.stat_async().await?;
   Ok(NodeFsStat::from(stat))
 }
