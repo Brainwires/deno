@@ -17667,6 +17667,16 @@ where the changes are discussed.
          stray `negotiationneeded` after a restart's exchange; `RTCError`
          `sdp-syntax-error` for malformed SDP; duplicate-msid rejection; the
          operations-chain probe.
+     - Engine (`train/denext26`, commit 4c269458): `PassThroughInterceptor`, the
+       inner end its docs now give for a nested interceptor in a registry slot
+       (its GCC and adaptive jitter buffer). The recipe they gave before, around
+       `NoopInterceptor`, put the chain's RTCP terminus inside the slot, so in
+       `Slot::CongestionControl` no NACK, receiver report, PLI or FIR got past
+       GCC. Deno's chain (`register_default_interceptors`) has no nested
+       interceptor and was not affected; `deno_webrtc`'s
+       `media_chain_delivers_key_frame_requests` now checks that no slot of it
+       holds the terminus and that a PLI reaches the application (the engine's
+       `gcc::twcc_gcc::tests::rtcp_passes_the_gcc_slot` checks the GCC recipe).
      - With the data channel and media work together (train denext.26, measured
        as above): all `webrtc*` directories 1822 / 2821 (64.6%) and 69 files
        passing fully; `webrtc/` 1465 / 2145, `webrtc-encoded-transform` 82 /

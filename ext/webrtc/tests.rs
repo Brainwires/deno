@@ -1019,3 +1019,44 @@ fn gathering_needs_a_live_media_section() {
     "{head}m=audio 0 UDP/TLS/RTP/SAVPF 0\r\na=bundle-only\r\n"
   )));
 }
+
+// The interceptor chain `media_stack` builds delivers an inbound key-frame
+// request (PLI) to the application, past every interceptor: no slot holds the
+// RTCP terminus (a nested interceptor wrapped around `NoopInterceptor` would
+// end all inbound RTCP in its slot, NACKs and receiver reports included).
+#[test]
+fn media_chain_delivers_key_frame_requests() {
+  use rtc::interceptor::AttributedPacket;
+  use rtc::interceptor::Packet;
+  use rtc::interceptor::TaggedPacket;
+  use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+  use rtc::sansio::Protocol;
+  let (_engine, registry) = crate::media::media_stack().unwrap();
+  for (slot, name) in registry.slots() {
+    assert!(!name.contains("Noop"), "{slot:?} holds {name}");
+  }
+  let mut chain = registry.build();
+  chain
+    .handle_read(TaggedPacket {
+      now: std::time::Instant::now(),
+      transport: rtc::shared::TransportContext::default(),
+      message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(
+        PictureLossIndication {
+          sender_ssrc: 1,
+          media_ssrc: 2,
+        },
+      )])),
+    })
+    .unwrap();
+  let mut delivered = 0;
+  while let Some(read) = chain.poll_read() {
+    if let Packet::Rtcp(packets) = &read.message.packet
+      && packets.iter().any(|p| {
+        p.as_any().downcast_ref::<PictureLossIndication>().is_some()
+      })
+    {
+      delivered += 1;
+    }
+  }
+  assert_eq!(delivered, 1, "the PLI reached the application");
+}
