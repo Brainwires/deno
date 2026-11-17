@@ -79,12 +79,13 @@ denort = { path = "../rt", default-features = false }
 # runtime 3.0.0-denext.21: CEF 156.0.28; runtime 3.0.0-denext.22, API 57:
 # title visibility and toolbar style, and an accessory app's focused window
 # brought to the front on macOS; API 58: child web views, their keys and
-# focus; runtime 3.0.0-denext.25: laufey v0.8.1, CEF 156.0.30), pinned to a
-# commit of the Brainwires/laufey fork's development-denext or a release
-# branch cut from it (release/0.8.1 for v0.8.1).
+# focus; runtime 3.0.0-denext.25: laufey v0.8.1, CEF 156.0.30; runtime
+# 3.0.0-denext.26: laufey v0.8.2), pinned to a commit of the Brainwires/laufey
+# fork's development-denext or a release branch cut from it (release/0.8.1 for
+# v0.8.1, train/laufey-0.8.2 for v0.8.2).
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "668cc3fcc0f8722150ffec519aa16e0c38149783" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "83bd73d7d2ea3e62dd1b9d532db7f16fe3ae2e1a" }
 libsui.workspace = true
 
 bytes.workspace = true

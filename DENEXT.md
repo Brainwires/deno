@@ -17613,6 +17613,23 @@ where the changes are discussed.
        holds (325 files, none failing that the expectations have passing).
      - Node tests enabled: none; `node:` has no WebRTC API.
 
+453. **laufey v0.8.2** (`83bd73d`; laufey API 58, no ABI change; runtime
+     3.0.0-denext.26; `cli/rt_desktop/Cargo.toml`, `Cargo.lock`,
+     `.github/workflows/denext_runtime.yml`). laufey `668cc3f..83bd73d`
+     (`train/laufey-0.8.2`, merged into `development-denext`, tag v0.8.2):
+     - macOS (WebView backend): over a shown child web view only its page sets
+       the cursor (the window's page view no longer takes the mouse moves that
+       land in a child), as WebKitGTK and Chromium already behave;
+     - CEF: a CEF eval-result isolation fix (an evaluation's result is taken
+       only from the main frame of the browser it was sent to);
+     - a native e2e check for the cursor over child web views.
+     - User-facing note: the pointer over an embedded web view on macOS is the
+       view's own; no API change.
+     - Tests: laufey's `pending_evals_test` and the native e2e
+       `webview_cursor_checks`; the desktop window and runtime workflows run on
+       the new pin.
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -17672,10 +17689,11 @@ will-navigate and a re-issue token bound to the backend's own load, item 342,
 and CEF 156.0.28, item 356; and, for runtime 3.0.0-denext.22, API 57, title
 visibility and toolbar style and an accessory app's focused window brought to
 the front on macOS, item 361; and API 58, child web views, their keys and focus,
-item 368; and, for runtime 3.0.0-denext.25, laufey v0.8.1, item 445), at the
-commit pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The
-same commit is the `laufey` git dependency of `cli/rt_desktop/Cargo.toml` (crate
-0.8.1, API 58, CEF 156.0.30).
+item 368; and, for runtime 3.0.0-denext.25, laufey v0.8.1, item 445; and, for
+runtime 3.0.0-denext.26, laufey v0.8.2, item 453), at the commit pinned by
+`LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The same commit is the
+`laufey` git dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.2, API 58, CEF
+156.0.30).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the
