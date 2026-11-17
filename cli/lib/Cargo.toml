@@ -45,5 +45,10 @@ thiserror.workspace = true
 twox-hash.workspace = true
 url.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+# denext: the inherited kernel policy's carrier (DENEXT.md item 449), read by
+# the CLI and denort alike; without the proxy feature
+deno_sandbox.workspace = true

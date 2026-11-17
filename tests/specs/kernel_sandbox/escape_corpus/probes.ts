@@ -312,4 +312,8 @@ export const PROBES: Probe[] = [
 export const VECTORS = ["ffi", "napi", "npm", "child"] as const;
 /** `nested` (--expect=enforce only): a `deno run -A` the confined host
  * starts, driving the FFI vector; it inherits the host's grant. */
-export type Vector = typeof VECTORS[number] | "nested";
+export type Vector =
+  | typeof VECTORS[number]
+  | "nested"
+  | "nested-env"
+  | "nested-closed";

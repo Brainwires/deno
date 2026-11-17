@@ -1,0 +1,5 @@
+env -i, inside: ok
+env -i, outside: NotCapable
+closed, inside: NotCapable (grants unknown)
+closed, outside: NotCapable (grants unknown)
+closed warning: true

@@ -1109,8 +1109,11 @@ async fn resolve_flags_and_init(
   if sandbox::enforce::confined_at_startup() {
     flags.cached_only = true;
   }
-  // denext: a jailed npm lifecycle script can't install or fetch packages
-  if let Err(err) = supply_chain::jail::check_subcommand(&flags) {
+  // denext: a jailed npm lifecycle script, or a process inside a kernel
+  // sandbox an ancestor applied, can't install or fetch packages
+  if let Err(err) = supply_chain::jail::check_subcommand(&flags)
+    .and_then(|()| sandbox::inherit::check_subcommand(&flags))
+  {
     exit_for_error(err, initial_cwd.as_deref());
   }
   // preserve already loaded env variables

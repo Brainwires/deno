@@ -637,7 +637,13 @@ pub fn render_report(
   )
   .unwrap();
   let inherited = inherit::inherited_layers().len();
-  if inherited > 0 {
+  if inherit::grants_unknown() {
+    writeln!(
+      w,
+      "  inherited: confined by an ancestor's kernel sandbox whose grants weren't handed down (its descriptor was closed on the way here); every permission is refused"
+    )
+    .unwrap();
+  } else if inherited > 0 {
     writeln!(
       w,
       "  inherited: {inherited} kernel sandbox layer(s) from the starting process (measured); this run's grant is intersected with them"

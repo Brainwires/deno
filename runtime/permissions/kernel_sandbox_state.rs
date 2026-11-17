@@ -11,6 +11,7 @@ use std::sync::atomic::Ordering;
 
 static ENFORCING: AtomicBool = AtomicBool::new(false);
 static INHERITED: AtomicBool = AtomicBool::new(false);
+static GRANTS_UNKNOWN: AtomicBool = AtomicBool::new(false);
 
 /// Records that the kernel sandbox now enforces this process's grant.
 pub fn set_enforcing() {
@@ -28,6 +29,22 @@ pub fn is_enforcing() -> bool {
 pub fn set_inherited() {
   INHERITED.store(true, Ordering::SeqCst);
 }
+
+/// Records that a kernel sandbox of this runtime holds the process but the
+/// grants it runs under weren't handed down (a program between them closed
+/// the descriptor): every permission is refused, and each refusal says why
+/// ([`GRANTS_UNKNOWN_NOTE`]).
+pub fn set_grants_unknown() {
+  GRANTS_UNKNOWN.store(true, Ordering::SeqCst);
+}
+
+/// See [`set_grants_unknown`].
+pub fn grants_unknown() -> bool {
+  GRANTS_UNKNOWN.load(Ordering::SeqCst)
+}
+
+/// The note on a `NotCapable` error while the grants are unknown.
+pub const GRANTS_UNKNOWN_NOTE: &str = " (confined by an ancestor's kernel sandbox; grants unknown: every permission is refused because the descriptor that hands them down was closed on the way here)";
 
 /// Whether a kernel sandbox holds this process: its own
 /// ([`is_enforcing`]) or one it inherited ([`set_inherited`]). Decides the

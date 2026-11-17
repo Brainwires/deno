@@ -64,7 +64,7 @@ Docs: https://docs.deno.com/go/permissions
                                             --ignore-env  |  --ignore-env=\"PORT,HOME,PATH\"
   --ignore-read[=<PATH>...]                 Ignore file system read access with a `NotFound` error. Optionally specify ignored paths.
                                             --ignore-read  |  --ignore-read=\"/etc,/var/log.txt\"
-  --kernel-sandbox=<MODE>                   (Preview) Kernel sandbox mode: off, warn, auto (default), enforce or broker. Holds native code (FFI, Node-API addons) and subprocesses to the granted permissions with the OS (Landlock and seccomp on Linux, Seatbelt on macOS) once the permission set is fixed. Not yet enforced by this runtime: enforce and broker refuse to start.
+  --kernel-sandbox=<MODE>                   (Preview) Kernel sandbox mode: off, warn, auto (default), enforce or broker. Holds native code (FFI, Node-API addons) and subprocesses to the granted permissions with the OS (Landlock and seccomp on Linux, Seatbelt on macOS) once the permission set is fixed. enforce applies it on Linux and macOS and refuses to start when the OS can't hold a rule (and on other systems); auto applies nothing yet; broker refuses to start (its supervising process isn't built in yet).
                                             --kernel-sandbox=warn  |  --kernel-sandbox=off
   --kernel-sandbox-exec=strict              (Preview) Under the kernel sandbox, the whole process tree may start only the --allow-run programs (and the interpreters they need) instead of any readable program. A program that starts others (git runs ssh) needs them listed too.
                                             --kernel-sandbox-exec=strict --allow-run=git,ssh

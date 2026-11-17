@@ -17089,12 +17089,9 @@ where the changes are discussed.
        Linux Mode A that grant opens every socket the user can reach (item 422's
        fail-open gap, refused by `enforce`) until the broker can pass the one
        socket.
-     - Not covered yet: a compiled program started inside a sandbox reads no
-       carrier (`denort` has no `cli/sandbox`; it is held by the kernel all the
-       same, with bare `EACCES`); `deno install` / `add` inside a sandbox aren't
-       refused the way the jail refuses them; a program that closes inherited
-       descriptors (Python's `close_fds`) hands its own `deno` children no
-       carrier (they stay confined, with bare `EACCES`).
+     - Not covered by this item (item 450 covers them): a compiled program
+       started inside a sandbox, `deno install` / `add` inside one, and a
+       program that drops the carrier (`env -i`, Python's `close_fds`).
      - User-facing note: inside a kernel sandbox, `deno` processes started by
        the program are held to its grant by their own checks too (`NotCapable`),
        and `--kernel-sandbox-exec=strict` limits the programs the whole tree may
@@ -17129,6 +17126,106 @@ where the changes are discussed.
        run list).
      - Node tests enabled: none; no Node API changes.
 
+450. **`feat(permissions)`: the kernel sandbox's children: compiled programs,
+     writing subcommands, launchers that drop the carrier** (CLI and runtime;
+     denext-only; opt-in, as item 425; `cli/lib/kernel_inherit.rs` (moved from
+     `cli/sandbox/inherit.rs`),
+     `cli/sandbox/{inherit,enforce,policy,
+     mod}.rs`, `cli/rt/{lib,run}.rs`,
+     `cli/lib.rs`, `cli/lib/Cargo.toml`,
+     `libs/sandbox/{inherit,enforce_linux,seatbelt}.rs`,
+     `runtime/permissions/{lib,kernel_sandbox_state}.rs`,
+     `libs/cli_parser/src/permission_help.rs`,
+     `cli/schemas/config-file.v1.json`). The gaps item 449 left open.
+     - Compiled programs. The carrier's model, its acceptance and the
+       intersection move to `deno_lib::kernel_inherit`, which the CLI and
+       `denort` share (with `resolve_prefix` and the refusal note). A program
+       built with `deno compile` and started inside a kernel sandbox reads the
+       carrier first thing in `main`, with the same checks (a carrier, the
+       kernel reporting the process confined, every probe refused), and
+       intersects its baked permissions with every layer before they are built
+       (its own embedded files stay readable), so its checks answer `NotCapable`
+       where the kernel would answer a bare `EACCES`; its own children get the
+       carrier too. A program baked with `enforce` / `broker` still refuses to
+       start: `denort` has no enforcer.
+     - Writing subcommands. Inside a kernel sandbox an ancestor applied (a
+       carrier accepted, or unknown grants, below), `deno` refuses the
+       subcommands the lifecycle jail refuses, before they start: everything but
+       `run`, `eval`, `task`, `repl`, `test`, `bench`, `check`, `info`, `types`,
+       `help`, `completions` and `serve`. `install`, `add`, `remove`, `cache`,
+       `fmt`, `compile`, `outdated --update` and the rest write the project, the
+       lockfile or the caches outside the permission system, which the sandbox
+       would refuse half-way.
+     - Launchers that drop the carrier. `env -i` clears the variable but keeps
+       the descriptor; Python's `close_fds` closes it. The enforcer now marks
+       its sandbox: on Linux the seccomp program answers `prctl` option
+       `0x646e786b` (no kernel defines it; unconfined it fails with `EINVAL`)
+       with `ENOTRECOVERABLE`; on macOS the Seatbelt profile refuses reading
+       sysctl `kern.singleuser` (nothing needs it) while `kern.nisdomainname`
+       stays readable, a pair a profile that allows every sysctl or one that
+       lists the sysctls it allows doesn't produce. The marker grants nothing. A
+       process whose variable names no carrier that measures, and only one the
+       marker says this runtime's sandbox holds (asked only after the kernel
+       reports it confined: no cost to an unconfined run), looks for carriers
+       among its descriptors 3 to 1024; every one that measures applies
+       (several: all their layers, and no descriptor is pinned for the children,
+       which look for themselves). With none, the grants are unknown and the
+       process fails closed: one warning ("confined by an ancestor's kernel
+       sandbox; grants unknown"), every permission refused (a layer that grants
+       nothing; prompting off), and each `NotCapable` error ends with a note
+       saying why; `--kernel-sandbox-report` says so. Design: refusing
+       everything is the narrowest reading, as the jail takes an unreadable jail
+       as the narrowest one; the kernel holds such a process to its domain
+       either way, so the marker only decides whether Deno's own checks refuse
+       everything too. It is never a trust upgrade: a process can fake the
+       marker only by confining itself, which only narrows it, and someone
+       else's sandbox (a container's filter, a service manager's, an agent's
+       Seatbelt profile) doesn't carry it, so a `deno` there runs with its own
+       grant, as before. A `deno -A` started through a launcher that closes
+       descriptors keeps the parent's grant only when the launcher keeps the
+       descriptor open (Python: `pass_fds`). Limits: a `--deny-sys` that makes
+       the profile refuse `kern.nisdomainname` removes the macOS marker (such a
+       process runs as before: confined, with bare `EPERM`).
+     - The `--kernel-sandbox` help no longer says `enforce` refuses to start (it
+       applies on Linux and macOS since item 425): it says `enforce` applies
+       there and refuses where the OS can't hold a rule, `auto` applies nothing
+       yet, and `broker` refuses to start. deno.json's
+       `permissions.kernelSandbox` description says the same; code comments that
+       still said nothing is enforced are corrected.
+     - User-facing note: a program built with `deno compile` and started inside
+       a kernel sandbox is held to the sandbox's grant by its own checks
+       (`NotCapable`); `deno install` / `add` and the other subcommands that
+       write the project or the caches refuse to run inside one; a `deno` whose
+       launcher closed the descriptor that hands the grant down refuses every
+       permission, saying why.
+     - Tests: `deno_sandbox`'s
+       `inherit::tests::{a_scan_finds_the_carriers_only,
+       an_unconfined_process_is_not_marked,
+       the_enforce_filter_is_marked_and_others_are_not}`
+       (Linux: a forked child under the enforce program reads as marked, under
+       another filter not),
+       `enforce_linux::tests::{seccomp_program_for_enforce,
+       seccomp_program_switches}`
+       (the marker) and `seatbelt::tests::cli_profile_marker`; `deno_lib`'s
+       `kernel_inherit::tests::{the_variables_carrier_wins,
+       unmarked_processes_inherit_nothing,
+       a_cleared_variable_is_found_by_its_descriptor,
+       a_closed_descriptor_fails_closed, unknown_grants_refuse_everything,
+       note_only_while_confined, quoted_paths}`
+       and item 449's intersection tests (moved); the CLI's
+       `sandbox::inherit::tests::{writing_subcommands_are_refused_when_confined,
+       nothing_is_refused_outside_a_sandbox}`;
+       `deno_permissions`'s `permission_error_hint_notes_unknown_grants`;
+       `deno_cli_parser`'s `permission_help_section_is_rendered`; spec
+       `kernel_sandbox::children` (`launchers_drop_the_carrier`: `env -i` keeps
+       the grant, a closed descriptor refuses everything;
+       `compiled_program_inherits`; `writing_subcommands_refused`;
+       `foreign_sandbox_not_marked_mac`: a permissive `sandbox-exec` profile
+       doesn't fail closed); and `kernel_sandbox::escape_corpus::corpus_enforce`
+       with two more vectors, `nested-env` (expected as `nested`) and
+       `nested-closed` (every check `n/a`, each saying `grants unknown`).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -17139,8 +17236,8 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449) are what the prebuilt `libdenort` carries. The CLI-side parts (for example
-writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+449, 450) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.
 

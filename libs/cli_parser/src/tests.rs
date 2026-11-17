@@ -1631,6 +1631,12 @@ fn permission_help_section_is_rendered() {
     assert!(run.contains(flag), "{flag}");
   }
   assert!(run.contains("effectively full trust unless an OS sandbox"));
+  // denext: enforce applies on Linux and macOS (DENEXT.md item 450)
+  assert!(!run.contains("Not yet enforced"), "{run}");
+  assert!(
+    run.contains("enforce applies it on Linux and macOS"),
+    "{run}"
+  );
   // Hidden from the table above, documented in the section below.
   assert!(!run.contains("  -R, --allow-read[=VALUE...]  \n"));
 

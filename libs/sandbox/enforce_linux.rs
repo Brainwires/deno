@@ -507,6 +507,7 @@ pub fn build_ruleset(
 /// Syscall numbers the program names, per architecture.
 #[cfg(target_arch = "x86_64")]
 mod nr {
+  pub const PRCTL: u32 = 157;
   pub const CLONE: u32 = 56;
   pub const UNSHARE: u32 = 272;
   pub const SETNS: u32 = 308;
@@ -581,6 +582,7 @@ mod nr {
 
 #[cfg(target_arch = "aarch64")]
 mod nr {
+  pub const PRCTL: u32 = 167;
   pub const CLONE: u32 = 220;
   pub const UNSHARE: u32 = 97;
   pub const SETNS: u32 = 268;
@@ -658,6 +660,18 @@ pub const CLONE_NAMESPACE_FLAGS: u32 = 0x0002_0000 // NEWNS
 /// `unshare(2)` also takes `CLONE_NEWTIME`.
 pub const UNSHARE_NAMESPACE_FLAGS: u32 = CLONE_NAMESPACE_FLAGS | 0x80;
 
+/// The `prctl(2)` option the enforce seccomp program answers with
+/// [`MARKER_ERRNO`]: how a process tells that a kernel sandbox of this
+/// runtime holds it when no carrier was handed down
+/// (`crate::inherit::kernel_reports_marked`). No kernel defines it, so
+/// unconfined (or under anyone else's filter) it fails with `EINVAL`; the
+/// rule grants nothing.
+pub const MARKER_PRCTL_OPTION: u32 = 0x646e_786b;
+
+/// The errno the marker rule answers [`MARKER_PRCTL_OPTION`] with (one
+/// `prctl(2)` never returns).
+pub const MARKER_ERRNO: i32 = libc::ENOTRECOVERABLE;
+
 /// The seccomp program for a plan: one complete filter, `EPERM` / `ENOSYS`
 /// answers (catchable errors in JS), never a kill but for another
 /// architecture's syscalls (the frame).
@@ -675,6 +689,13 @@ pub fn seccomp_spec(seccomp: &SeccompPlan, net: &NetPlan) -> SeccompSpec {
   const NR_CLONE3: u32 = 435;
   let eperm = libc::EPERM;
   let mut spec = SeccompSpec::new()
+    // the marker: this runtime's sandbox holds the process
+    .rule(SyscallRule::DenyArgIn {
+      nr: nr::PRCTL,
+      arg: 0,
+      values: vec![MARKER_PRCTL_OPTION],
+      errno: MARKER_ERRNO,
+    })
     // the ioctl request is argument 1: typing into a terminal
     .rule(SyscallRule::DenyArgIn {
       nr: NR_IOCTL,
@@ -1401,6 +1422,17 @@ mod tests {
         eperm
       );
     }
+    // the marker, and no other prctl option
+    assert_eq!(
+      run_filter(&p, nr::PRCTL, [MARKER_PRCTL_OPTION, 0, 0, 0, 0, 0]),
+      eno(MARKER_ERRNO)
+    );
+    for option in [libc::PR_GET_NO_NEW_PRIVS, libc::PR_GET_SECCOMP] {
+      assert_eq!(
+        run_filter(&p, nr::PRCTL, [option as u32, 0, 0, 0, 0, 0]),
+        SECCOMP_RET_ALLOW
+      );
+    }
     // never V8's memory syscalls (mmap, mprotect, madvise, futex, membarrier)
     #[cfg(target_arch = "x86_64")]
     let memory = [9u32, 10, 28, 202, 324, 329, 330];
@@ -1415,6 +1447,11 @@ mod tests {
   fn seccomp_program_switches() {
     let none = SeccompPlan::default();
     let p = seccomp_spec(&none, &NetPlan::Open).program();
+    // the marker is in every program
+    assert_eq!(
+      run_filter(&p, nr::PRCTL, [MARKER_PRCTL_OPTION, 0, 0, 0, 0, 0]),
+      eno(MARKER_ERRNO)
+    );
     assert_eq!(run_filter(&p, nr::EXECVE, [0; 6]), SECCOMP_RET_ALLOW);
     assert_eq!(run_filter(&p, NR_LISTEN, [0; 6]), SECCOMP_RET_ALLOW);
     assert_eq!(run_filter(&p, 435, [0; 6]), SECCOMP_RET_ALLOW);

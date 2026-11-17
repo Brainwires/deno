@@ -1,0 +1,3 @@
+foreign, inside: ok
+foreign, outside: ok
+foreign warning: false

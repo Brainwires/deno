@@ -18,8 +18,10 @@
 //! turning it on is the one-line [`AUTO_APPLIES`] change: enforce where the
 //! author fixed the permissions (a compiled program, an explicit `auto`), warn
 //! for other runs whose permissions are fixed only because no prompt can
-//! happen. Until an enforcer is built in, `enforce` / `broker` refuse to start
-//! (the CLI reports which rules it would have needed).
+//! happen. The CLI's `enforce` applies the policy on Linux and macOS (and
+//! refuses to start when the OS can't hold a rule, or elsewhere); `broker`
+//! refuses to start until its supervising process is built in, and so does a
+//! compiled program baked with either (`denort` has no enforcer).
 
 use std::fmt;
 use std::str::FromStr;

@@ -73,20 +73,39 @@ try {
       };
       break;
     }
-    case "nested": {
+    case "nested":
+    case "nested-env":
+    case "nested-closed": {
       // a deno this one starts with -A (the run grant names the runtime):
-      // it inherits this run's grant and drives the FFI vector
-      const o = new Deno.Command(Deno.execPath(), {
-        args: [
-          "run",
-          "--quiet",
-          "--no-prompt",
-          "-A",
-          "--node-modules-dir=manual",
-          `${work}host.ts`,
-          "ffi",
-          "nested",
-        ],
+      // it inherits this run's grant and drives the FFI vector. nested-env
+      // starts it through `env -i` (the variable cleared, the descriptor
+      // open: found again); nested-closed through a shell that closes the
+      // descriptor (grants unknown: it fails closed)
+      const denoArgs = [
+        "run",
+        "--quiet",
+        "--no-prompt",
+        "-A",
+        "--node-modules-dir=manual",
+        `${work}host.ts`,
+        "ffi",
+        vector,
+      ];
+      const [program, args] = vector === "nested-env"
+        ? ["/usr/bin/env", ["-i", Deno.execPath(), ...denoArgs]]
+        : vector === "nested-closed"
+        ? ["/bin/bash", [
+          "-c",
+          // the variable is pinned into every child's environment
+          'eval "exec ${DENO_INTERNAL_KERNEL_POLICY:-999}<&-"; ' +
+          'unset DENO_INTERNAL_KERNEL_POLICY; exec "$@"',
+          "sh",
+          Deno.execPath(),
+          ...denoArgs,
+        ]]
+        : [Deno.execPath(), denoArgs];
+      const o = new Deno.Command(program, {
+        args,
         stdout: "piped",
         stderr: "piped",
       }).outputSync();
@@ -96,8 +115,11 @@ try {
         const r = JSON.parse(line) as { id: string; out: string };
         lines.set(r.id, r.out);
       }
-      const err = new TextDecoder().decode(o.stderr).trim().split("\n")
-        .slice(-1)[0];
+      // the line that says why it stopped (a nested deno with grants
+      // unknown can't even read its configuration: NotCapable, saying so)
+      const errLines = new TextDecoder().decode(o.stderr).trim().split("\n");
+      const err = errLines.find((l) => /NotCapable.*grants unknown/.test(l)) ??
+        errLines.slice(-1)[0];
       run = (id) => lines.get(id) ?? `n/a nested deno exited ${o.code}: ${err}`;
       break;
     }

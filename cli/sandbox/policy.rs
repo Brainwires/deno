@@ -1089,73 +1089,7 @@ impl PathScope {
   }
 }
 
-/// The existing part of `path` resolved (symlinks, `..`, the on-disk
-/// spelling), and the rest: the components that don't exist yet. `decided`
-/// is false when resolution stopped at something other than a missing
-/// component (a folder that can't be searched, a symlink loop): the rest
-/// may then still hold a link, and what the path names can't be told.
-pub struct ResolvedPrefix {
-  pub existing: PathBuf,
-  pub rest: PathBuf,
-  pub decided: bool,
-}
-
-impl ResolvedPrefix {
-  pub fn full(&self) -> PathBuf {
-    if self.rest.as_os_str().is_empty() {
-      self.existing.clone()
-    } else {
-      self.existing.join(&self.rest)
-    }
-  }
-}
-
-/// Resolves the existing part of `path` ([`ResolvedPrefix`]).
-#[allow(
-  clippy::disallowed_methods,
-  reason = "the kernel resolves the real file system's links, never a virtual one"
-)]
-pub fn resolve_prefix(path: &Path) -> ResolvedPrefix {
-  let mut existing = path.to_path_buf();
-  let mut rest = Vec::new();
-  let mut decided = true;
-  loop {
-    match std::fs::canonicalize(&existing) {
-      Ok(canonical) => {
-        let mut tail = PathBuf::new();
-        for part in rest.iter().rev() {
-          tail.push(part);
-        }
-        return ResolvedPrefix {
-          existing: canonical,
-          rest: tail,
-          decided,
-        };
-      }
-      Err(err) => {
-        if !matches!(
-          err.kind(),
-          std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-        ) {
-          decided = false;
-        }
-      }
-    }
-    match (existing.file_name(), existing.parent()) {
-      (Some(name), Some(parent)) => {
-        rest.push(name.to_os_string());
-        existing = parent.to_path_buf();
-      }
-      _ => {
-        return ResolvedPrefix {
-          existing: path.to_path_buf(),
-          rest: PathBuf::new(),
-          decided: false,
-        };
-      }
-    }
-  }
-}
+pub use deno_lib::kernel_inherit::resolve_prefix;
 
 /// Whether a path lies in a scope, deciding on resolved paths as well as
 /// the spelling (an allow and a deny may name one object through different

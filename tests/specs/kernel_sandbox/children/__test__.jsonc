@@ -1,4 +1,4 @@
-// denext (DENEXT.md item 449): children of a process the kernel sandbox
+// denext (DENEXT.md items 449, 450): children of a process the kernel sandbox
 // confines. A nested deno inherits the grant it runs under (the policy
 // handed down, measured by the kernel) and refuses with NotCapable; a
 // program like git works with documented grants; a grandchild that orphans
@@ -64,6 +64,39 @@
       "if": "kernelSandboxEnforceLinux",
       "args": "run --quiet --kernel-sandbox=enforce --allow-run=sh hint_signal.ts",
       "output": "hint_signal.out"
+    },
+    // denext (DENEXT.md item 450): `env -i` clears the variable, the
+    // descriptor is found again; a closed descriptor fails closed
+    "launchers_drop_the_carrier": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet --kernel-sandbox=enforce --allow-run --allow-read=inside launchers.ts",
+      "output": "launchers.out"
+    },
+    // a compiled program honours the carrier as `deno run` does
+    "compiled_program_inherits": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        {
+          "args": "compile --quiet -A --output inside/prog inside/closed_read.ts",
+          "output": ""
+        },
+        {
+          "args": "run --quiet --kernel-sandbox=enforce --allow-run --allow-read=inside compiled.ts",
+          "output": "compiled.out"
+        }
+      ]
+    },
+    // `deno add` / `install` / `cache` / `fmt` refused inside the sandbox
+    "writing_subcommands_refused": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet --kernel-sandbox=enforce --allow-run --allow-read=inside install_refused.ts",
+      "output": "install_refused.out"
+    },
+    // someone else's Seatbelt profile never reads as this runtime's
+    "foreign_sandbox_not_marked_mac": {
+      "if": "kernelSandboxEnforceMac",
+      "args": "run --quiet -A foreign.ts",
+      "output": "foreign.out"
     },
     // a grandchild that orphans itself stays confined, measured from
     // outside (Linux: /proc/<pid>/status; macOS: sandbox_check)

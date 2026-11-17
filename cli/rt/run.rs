@@ -1763,7 +1763,7 @@ pub async fn run_with_options(
   // front avoids forcing every `deno desktop` user to remember `-A`.
   let has_desktop = op_state_init.is_some();
   // denext (DENEXT.md item 420): the baked kernel-sandbox mode; an opt-in
-  // preview, nothing is enforced yet
+  // preview, and compiled programs have no enforcer yet
   deno_lib::kernel_sandbox::check_compiled(
     metadata.kernel_sandbox,
     metadata.desktop_dev,
@@ -1790,6 +1790,19 @@ pub async fn run_with_options(
         &vfs,
         &entrypoint_dir(&root_path, &metadata.entrypoint_key),
       );
+    }
+
+    // denext (DENEXT.md item 450): started inside a kernel sandbox, the
+    // baked grant is intersected with the grants the sandbox holds it to
+    // (so its checks answer NotCapable where the kernel would refuse), or
+    // refused entirely when they couldn't be read; its own files stay
+    // readable
+    let inherited = deno_lib::kernel_inherit::inherited_layers();
+    if !inherited.is_empty() {
+      #[allow(clippy::disallowed_methods, reason = "the process's real cwd")]
+      let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
+      deno_lib::kernel_inherit::clamp(&mut permissions, inherited, &cwd);
+      grant_vfs_read_access(&mut permissions, &root_path);
     }
 
     let desc_parser =

@@ -19,6 +19,16 @@
 //! ([`kernel_reports_confined`]) and each layer's probe path is refused
 //! ([`refuses_read`]). Even then it can only narrow: the CLI intersects its
 //! own grant with it, and it never switches a check or a sandbox off.
+//!
+//! A program between the confined process and a `deno` may drop the carrier:
+//! `/usr/bin/env -i` clears the variable (the descriptor stays open, and
+//! [`scan_inherited`] finds it), Python's `close_fds` closes the descriptor.
+//! The enforcer marks its sandbox ([`kernel_reports_marked`]: a `prctl(2)`
+//! option the seccomp program answers on Linux, a sysctl pair the Seatbelt
+//! profile tells apart on macOS), so a process with no carrier can still
+//! tell that this runtime's sandbox holds it, with grants it can't know; the
+//! CLI then refuses every permission. The marker grants nothing, and a
+//! process that fakes it only narrows itself.
 
 #![allow(
   clippy::disallowed_methods,
@@ -224,6 +234,84 @@ pub fn kernel_reports_confined() -> bool {
   }
 }
 
+/// Whether a kernel sandbox of this runtime (`--kernel-sandbox=enforce`)
+/// holds this process, told by its marker, which no other sandbox carries
+/// (see the module docs). Linux: confined (no-new-privileges and a seccomp
+/// filter) and `prctl(MARKER_PRCTL_OPTION)` fails with `MARKER_ERRNO`.
+/// macOS: sandboxed, `MARKER_SYSCTL_ALLOWED` readable and
+/// `MARKER_SYSCTL_DENIED` refused. Asked only of a process that found no
+/// carrier: it decides whether the process runs with no permissions at all,
+/// never whether it gets any.
+pub fn kernel_reports_marked() -> bool {
+  #[cfg(target_os = "linux")]
+  {
+    use crate::enforce_linux::MARKER_ERRNO;
+    use crate::enforce_linux::MARKER_PRCTL_OPTION;
+    if !crate::enforce_linux::status_confined() {
+      return false;
+    }
+    // SAFETY: a plain query with no pointers; no kernel defines the option
+    let res =
+      unsafe { libc::prctl(MARKER_PRCTL_OPTION as libc::c_int, 0, 0, 0, 0) };
+    res == -1 && io::Error::last_os_error().raw_os_error() == Some(MARKER_ERRNO)
+  }
+  #[cfg(target_os = "macos")]
+  {
+    use crate::seatbelt::MARKER_SYSCTL_ALLOWED;
+    use crate::seatbelt::MARKER_SYSCTL_DENIED;
+    crate::macos::is_sandboxed() == Some(true)
+      && sysctl_readable(MARKER_SYSCTL_ALLOWED) == Some(true)
+      && sysctl_readable(MARKER_SYSCTL_DENIED) == Some(false)
+  }
+}
+
+/// Whether this process may read sysctl `name`: `Some(false)` when the
+/// sandbox refuses it (`EPERM`), `None` when it can't be told (no such
+/// sysctl).
+#[cfg(target_os = "macos")]
+fn sysctl_readable(name: &str) -> Option<bool> {
+  let name = std::ffi::CString::new(name).ok()?;
+  let mut buf = [0u8; 1024];
+  let mut len = buf.len();
+  // SAFETY: a NUL-terminated name, a buffer and its length; nothing written
+  let res = unsafe {
+    libc::sysctlbyname(
+      name.as_ptr(),
+      buf.as_mut_ptr() as *mut libc::c_void,
+      &mut len,
+      std::ptr::null_mut(),
+      0,
+    )
+  };
+  if res == 0 {
+    return Some(true);
+  }
+  match io::Error::last_os_error().raw_os_error() {
+    Some(libc::EPERM) => Some(false),
+    // the value didn't fit: it was readable
+    Some(libc::ENOMEM) => Some(true),
+    _ => None,
+  }
+}
+
+/// The highest descriptor [`scan_inherited`] looks at.
+pub const SCAN_MAX_FD: i32 = 1024;
+
+/// The carriers among this process's open descriptors 3 to `max_fd`: for a
+/// process whose variable was cleared (`env -i`) while the descriptor
+/// stayed open. Each is read as [`read_fd`] reads one (a sealed memfd, an
+/// unlinked read-only file, at most [`MAX_POLICY_BYTES`]); whether its
+/// bytes are a policy, and whether it measures, the caller decides.
+pub fn scan_inherited(max_fd: i32) -> Vec<Carrier> {
+  (3..=max_fd)
+    .filter(|fd| {
+      // SAFETY: asking whether a descriptor is open
+      unsafe { libc::fcntl(*fd, libc::F_GETFD) >= 0 }
+    })
+    .filter_map(|fd| read_fd(fd).ok().map(|bytes| Carrier { fd, bytes }))
+    .collect()
+}
+
 /// Whether the kernel refuses this process reading `path` (a layer's
 /// probe): Linux, opening it fails with `EACCES` / `EPERM` (a missing file
 /// doesn't count); macOS, `sandbox_check` says the profile refuses it.
@@ -297,6 +385,93 @@ mod tests {
     // SAFETY: a valid descriptor and buffer
     unsafe { libc::write(fd.as_raw_fd(), b"{}".as_ptr() as *const _, 2) };
     assert!(read_fd(fd.as_raw_fd()).unwrap_err().contains("not sealed"));
+  }
+
+  #[test]
+  fn a_scan_finds_the_carriers_only() {
+    let carrier = seal(b"{\"scan\":1}").unwrap();
+    // a plain file open read-only is no carrier
+    let other = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
+    let found = scan_inherited(SCAN_MAX_FD);
+    assert!(
+      found
+        .iter()
+        .any(|c| c.fd == carrier.as_raw_fd() && c.bytes == b"{\"scan\":1}"),
+      "{found:?}"
+    );
+    assert!(found.iter().all(|c| c.fd != other.as_raw_fd()));
+    // above the limit: not looked at
+    assert!(
+      scan_inherited(carrier.as_raw_fd() - 1)
+        .iter()
+        .all(|c| c.fd != carrier.as_raw_fd())
+    );
+  }
+
+  #[test]
+  fn an_unconfined_process_is_not_marked() {
+    // a container's own filter may confine the test process; no filter but
+    // this runtime's answers the marker
+    assert!(!kernel_reports_marked());
+  }
+
+  /// Linux: whether a forked child that installs `program` reads as
+  /// marked (`None`: this host can't install a filter).
+  #[cfg(target_os = "linux")]
+  fn marked_under(program: &[u8]) -> Option<bool> {
+    use crate::seccomp::SockFilter;
+    use crate::seccomp::SockFprog;
+    let prog = SockFprog {
+      len: (program.len() / 8) as u16,
+      filter: program.as_ptr() as *const SockFilter,
+    };
+    // SAFETY: fork; the child runs only prctl and _exit
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0);
+    if pid == 0 {
+      // SAFETY: the child's only thread, then _exit
+      unsafe {
+        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+          || libc::prctl(
+            libc::PR_SET_SECCOMP,
+            libc::SECCOMP_MODE_FILTER,
+            &prog as *const SockFprog,
+            0,
+            0,
+          ) != 0
+        {
+          libc::_exit(2);
+        }
+        libc::_exit(if kernel_reports_marked() { 0 } else { 1 });
+      }
+    }
+    let mut status = 0;
+    // SAFETY: waiting for the child just forked
+    unsafe { libc::waitpid(pid, &mut status, 0) };
+    assert!(libc::WIFEXITED(status));
+    match libc::WEXITSTATUS(status) {
+      2 => None,
+      code => Some(code == 0),
+    }
+  }
+
+  // only this runtime's enforce program carries the marker: a filter of
+  // anyone else's (a container's, a service manager's) doesn't
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn the_enforce_filter_is_marked_and_others_are_not() {
+    let plan = crate::plan::SeccompPlan::default();
+    let enforce =
+      crate::enforce_linux::seccomp_spec(&plan, &crate::plan::NetPlan::Open)
+        .program();
+    let foreign = crate::seccomp::SeccompSpec::new()
+      .unix_sockets(true)
+      .inet_sockets(crate::seccomp::InetSockets::Any)
+      .program();
+    if let Some(marked) = marked_under(&enforce) {
+      assert!(marked, "the enforce program reads as marked");
+      assert_eq!(marked_under(&foreign), Some(false));
+    }
   }
 
   #[test]

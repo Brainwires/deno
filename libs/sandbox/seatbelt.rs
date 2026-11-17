@@ -258,6 +258,18 @@ const SYSTEM_CODE: &[&str] = &[
   "/private/var/db/dyld",
 ];
 
+/// The marker pair of the cli profile: a process can tell that a kernel
+/// sandbox of this runtime holds it when no carrier was handed down
+/// (`crate::inherit::kernel_reports_marked`): reading
+/// [`MARKER_SYSCTL_ALLOWED`] works and reading [`MARKER_SYSCTL_DENIED`] is
+/// refused. A profile that allows every sysctl allows both, one that lists
+/// the sysctls it allows doesn't name the first; neither reads as marked.
+/// Both exist on every macOS, nothing needs the denied one (whether the
+/// machine booted single-user), and the pair grants nothing.
+pub const MARKER_SYSCTL_ALLOWED: &str = "kern.nisdomainname";
+/// See [`MARKER_SYSCTL_ALLOWED`].
+pub const MARKER_SYSCTL_DENIED: &str = "kern.singleuser";
+
 /// The mach services the runtime needs whatever the grant: the user
 /// database, temp directories, logging, notifications, preferences
 /// (CoreFoundation, read-only).
@@ -362,6 +374,11 @@ pub fn cli_profile(plan: &MacosPlan) -> String {
   p.push_str("(allow signal (target same-sandbox))\n");
   p.push_str("(allow process-info* (target same-sandbox))\n");
   p.push_str("(allow sysctl-read)\n");
+  // the marker pair (the allowed one is covered by the line above)
+  p.push_str(&format!(
+    "(deny sysctl-read (with no-report) (sysctl-name {}))\n",
+    quote_str(MARKER_SYSCTL_DENIED)
+  ));
   if !plan.denied_sysctls.is_empty() {
     let names = plan
       .denied_sysctls
@@ -774,6 +791,20 @@ mod tests {
     // without a list: any program
     plan.exec_only.clear();
     assert!(cli_profile(&plan).contains("(allow process-exec)\n"));
+  }
+
+  // the marker pair: every sysctl readable but the denied one
+  #[test]
+  fn cli_profile_marker() {
+    let p = cli_profile(&cli_plan());
+    let allow = p.find("(allow sysctl-read)\n").unwrap();
+    let deny = p
+      .find(
+        "(deny sysctl-read (with no-report) (sysctl-name \"kern.singleuser\"))\n",
+      )
+      .unwrap();
+    assert!(allow < deny, "{p}");
+    assert!(!p.contains(MARKER_SYSCTL_ALLOWED), "{p}");
   }
 
   #[test]

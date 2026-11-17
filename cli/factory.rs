@@ -1261,7 +1261,7 @@ impl CliFactory {
         let cli_options = self.cli_options()?;
         let options = cli_options.permissions_options()?;
         // denext: the kernel sandbox's mode, report and preview checks
-        // (DENEXT.md item 420); nothing is enforced yet
+        // (DENEXT.md item 420), and enforce's plan (item 425)
         if crate::sandbox::run_kind(cli_options.sub_command())
           != deno_lib::kernel_sandbox::RunKind::NotARuntime
         {

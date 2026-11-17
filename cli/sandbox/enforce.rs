@@ -1381,64 +1381,7 @@ pub fn guard_user_code() -> Result<(), std::io::Error> {
   Ok(())
 }
 
-/// The path a permission error names (`..., open '/x/y'`), if any.
-#[cfg(any(target_os = "linux", test))]
-fn quoted_path(message: &str) -> Option<&str> {
-  let end = message.rfind('\'')?;
-  let start = message[..end].rfind('\'')?;
-  let path = &message[start + 1..end];
-  path.starts_with('/').then_some(path)
-}
-
-#[cfg(target_os = "linux")]
-fn mode_allows(path: &str) -> bool {
-  use std::os::unix::ffi::OsStrExt;
-  let check = |p: &Path, mode| {
-    std::ffi::CString::new(p.as_os_str().as_bytes())
-      // SAFETY: a valid path
-      .is_ok_and(|c| unsafe { libc::access(c.as_ptr(), mode) } == 0)
-  };
-  let path = Path::new(path);
-  if check(path, libc::F_OK) {
-    // Landlock doesn't mediate access(2): a mode that allows reading and
-    // writing can't explain the refusal
-    return check(path, libc::R_OK | libc::W_OK);
-  }
-  // a path that doesn't exist yet: creating it needs the folder
-  path
-    .parent()
-    .is_some_and(|parent| check(parent, libc::W_OK | libc::X_OK))
-}
-
-/// The note on a `PermissionDenied` error while a kernel sandbox holds the
-/// process (its own, or one it inherited and accepted):
-/// Linux: `EPERM` (seccomp's answer; a file mode gives `EACCES`), or
-/// `EACCES` where the file's mode allows the access (`access(2)`, which
-/// Landlock doesn't mediate) or the operation names no path (a socket);
-/// macOS: `EPERM` (Seatbelt's answer; file modes give `EACCES`).
-pub fn permission_denied_note(
-  errno: Option<i32>,
-  message: &str,
-) -> Option<&'static str> {
-  if !kernel_sandbox_state::is_confined() {
-    return None;
-  }
-  let errno = errno?;
-  let note = Some(kernel_sandbox_state::REFUSED_NOTE);
-  #[cfg(unix)]
-  if errno == libc::EPERM {
-    return note;
-  }
-  #[cfg(target_os = "linux")]
-  if errno == libc::EACCES {
-    return match quoted_path(message) {
-      Some(path) if !mode_allows(path) => None,
-      _ => note,
-    };
-  }
-  let _ = (message, errno, note);
-  None
-}
+pub use deno_lib::kernel_inherit::permission_denied_note;
 
 #[cfg(test)]
 mod tests {
@@ -1555,29 +1498,5 @@ mod tests {
       other => panic!("{other:?}"),
     }
     std::fs::remove_dir_all(&root).unwrap();
-  }
-
-  // the note is a no-op unless the kernel sandbox enforces this process
-  // (nothing in the unit tests turns enforcing on)
-  #[test]
-  fn note_only_while_enforcing() {
-    assert!(!kernel_sandbox_state::is_enforcing());
-    for errno in [libc::EPERM, libc::EACCES] {
-      assert_eq!(
-        permission_denied_note(Some(errno), "denied (os error 1): open '/x'"),
-        None
-      );
-    }
-    assert_eq!(permission_denied_note(None, "denied"), None);
-  }
-
-  #[test]
-  fn quoted_paths() {
-    assert_eq!(
-      quoted_path("Permission denied (os error 13): open '/a/b c'"),
-      Some("/a/b c")
-    );
-    assert_eq!(quoted_path("Permission denied (os error 13)"), None);
-    assert_eq!(quoted_path("spawn 'probe'"), None);
   }
 }

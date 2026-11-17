@@ -45,7 +45,7 @@ const vectors =
   (args.vectors
     ? args.vectors.split(",")
     : expect === "enforce"
-    ? [...VECTORS, "nested"]
+    ? [...VECTORS, "nested", "nested-env", "nested-closed"]
     : [...VECTORS]) as Vector[];
 const isMac = Deno.build.os === "darwin";
 const cc = Deno.env.get("CC") ?? "cc";
@@ -223,7 +223,12 @@ const configs: Record<string, string[]> = expect === "enforce"
     "net-all": [...files, "--allow-net"],
     run: [...files, `--allow-run=${work}/probe`],
     // the run list names the runtime too: the nested vector's deno
-    nested: [...files, `--allow-run=${work}/probe,${Deno.execPath()}`],
+    // (and the launchers the nested-env / nested-closed vectors start it
+    // through)
+    nested: [
+      ...files,
+      `--allow-run=${work}/probe,${Deno.execPath()},/usr/bin/env,/bin/bash`,
+    ],
   }
   : {
     today: [
@@ -318,14 +323,33 @@ for (const r of rows) {
   );
 }
 const bad = rows.filter((r) => !expected(r).has(r.state));
-// the nested vector must have run where its deno may start (all n/a there
-// would hide a nested deno that failed to start)
-const nestedRows = rows.filter((r) =>
-  r.config === "nested" && r.vector === "nested"
+// the nested vectors must have run where their deno may start (all n/a
+// there would hide a nested deno that failed to start)
+for (const vector of ["nested", "nested-env"]) {
+  const nestedRows = rows.filter((r) =>
+    r.config === "nested" && r.vector === vector
+  );
+  if (nestedRows.length && nestedRows.every((r) => r.state === "n/a")) {
+    bad.push(...nestedRows.slice(0, 1).map((r) => ({ ...r, state: "crash" })));
+    console.log(
+      `corpus: the ${vector} deno never ran: ${nestedRows[0].detail}`,
+    );
+  }
+}
+// the descriptor closed on the way: the nested deno must have run and
+// failed closed (Deno's own check refuses the FFI vector, saying why), not
+// failed to start
+const closedRows = rows.filter((r) =>
+  r.config === "nested" && r.vector === "nested-closed"
 );
-if (nestedRows.length && nestedRows.every((r) => r.state === "n/a")) {
-  bad.push(...nestedRows.slice(0, 1).map((r) => ({ ...r, state: "crash" })));
-  console.log(`corpus: the nested deno never ran: ${nestedRows[0].detail}`);
+const notClosed = closedRows.filter((r) => !/grants unknown/.test(r.detail));
+if (notClosed.length) {
+  bad.push(...notClosed.slice(0, 1).map((r) => ({ ...r, state: "crash" })));
+  console.log(
+    `corpus: the nested deno with no descriptor didn't fail closed: ${
+      notClosed[0].detail
+    }`,
+  );
 }
 const summary = Object.entries(counts).sort().map(([k, v]) => `${v} ${k}`).join(
   ", ",

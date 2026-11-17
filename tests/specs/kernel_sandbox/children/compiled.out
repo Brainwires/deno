@@ -1,0 +1,4 @@
+compiled, inside: ok
+compiled, outside: NotCapable
+compiled closed, inside: NotCapable (grants unknown)
+compiled closed, outside: NotCapable (grants unknown)

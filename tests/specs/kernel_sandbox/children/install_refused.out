@@ -1,0 +1,7 @@
+hint: a child process exited with code 1 inside the kernel sandbox[WILDLINE]
+add: code 1, refused: true
+install: code 1, refused: true
+cache: code 1, refused: true
+fmt: code 1, refused: true
+run, inside: ok
+run, outside: NotCapable

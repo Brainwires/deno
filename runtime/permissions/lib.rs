@@ -96,12 +96,32 @@ pub struct PermissionDeniedError {
 }
 
 fn format_permission_error(name: &'static str) -> String {
-  if is_standalone() {
+  permission_error_hint(
+    name,
+    is_standalone(),
+    kernel_sandbox_state::grants_unknown(),
+  )
+}
+
+/// What a `NotCapable` error tells the user to do. denext (DENEXT.md item
+/// 450): inside an ancestor's kernel sandbox whose grants are unknown, no
+/// flag can grant it, and the error says why.
+fn permission_error_hint(
+  name: &str,
+  standalone: bool,
+  grants_unknown: bool,
+) -> String {
+  let note = if grants_unknown {
+    kernel_sandbox_state::GRANTS_UNKNOWN_NOTE
+  } else {
+    ""
+  };
+  if standalone {
     format!(
-      "specify the required permissions during compilation using `deno compile --allow-{name}`"
+      "specify the required permissions during compilation using `deno compile --allow-{name}`{note}"
     )
   } else {
-    format!("run again with the --allow-{name} flag")
+    format!("run again with the --allow-{name} flag{note}")
   }
 }
 
@@ -9949,6 +9969,28 @@ mod tests {
     }
     // A file of cpu0's own still reads with `cpus`.
     assert!(read(&cpus, "/sys/devices/system/cpu/online").is_ok());
+  }
+
+  #[test]
+  fn permission_error_hint_notes_unknown_grants() {
+    assert_eq!(
+      permission_error_hint("read", false, false),
+      "run again with the --allow-read flag"
+    );
+    assert_eq!(
+      permission_error_hint("read", false, true),
+      format!(
+        "run again with the --allow-read flag{}",
+        kernel_sandbox_state::GRANTS_UNKNOWN_NOTE
+      )
+    );
+    assert!(
+      permission_error_hint("net", true, true)
+        .starts_with("specify the required permissions during compilation using `deno compile --allow-net`")
+    );
+    assert!(
+      permission_error_hint("net", true, true).contains("grants unknown")
+    );
   }
 
   // denext (DENEXT.md item 129): a confined lifecycle-script jail lets a

@@ -105,6 +105,10 @@ pub fn main() {
     "NODE_CHANNEL_FD",
     deno_runtime::deno_process::NPM_RESOLUTION_STATE_FD_ENV_VAR_NAME,
   ]);
+  // denext (DENEXT.md item 450): inside a kernel sandbox a confined
+  // ancestor applied, the grants it hands down (measured), or none at all
+  // when they can't be read; applied to the baked permissions in `run`
+  deno_lib::kernel_inherit::load_at_startup();
   setup_panic_hook();
   init_logging(None, None);
 
