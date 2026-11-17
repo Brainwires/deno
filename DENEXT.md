@@ -16992,6 +16992,24 @@ where the changes are discussed.
      - Node tests enabled: none, because this is the JavaScript engine's patch
        level, not a Node API.
 
+448. **`chore(deps)`: stacker 0.1.25** (CLI and runtime; `Cargo.lock`). stacker
+     (the deep-recursion guard of swc's parser and lexer) moves from 0.1.15 to
+     0.1.25. On Linux, 0.1.15 found the main thread's stack bounds with
+     `pthread_getattr_np` and asserted that it succeeded; glibc answers that
+     call for the main thread by reading `/proc/self/maps`, which a process
+     started inside a kernel sandbox can't read (item 449: the sandbox's
+     `/proc/self` rule names the process that made it), so a nested `deno`
+     transpiling TypeScript panicked. 0.1.25 treats bounds it can't read as
+     unknown and grows a fresh stack instead. No other crate moves (its
+     `windows-sys 0.60` is already in the lockfile).
+     - User-facing note: none beyond item 449 (a `deno` started inside a kernel
+       sandbox runs TypeScript).
+     - Tests (they come with item 449, which adds the nested run): spec
+       `kernel_sandbox::children::nested_deno_not_capable` (the nested program
+       is TypeScript) and the escape corpus's `nested` vector (it runs
+       `host.ts`); with 0.1.15 both panic in `stacker::guess_os_stack_limit`.
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -17001,11 +17019,11 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
-416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447) are
-what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
-`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
-in the branch too, but a stock CLI does not run them; denext's own launcher
-provides that environment.
+416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448)
+are what the prebuilt `libdenort` carries. The CLI-side parts (for example
+writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+launchers) are in the branch too, but a stock CLI does not run them; denext's
+own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
