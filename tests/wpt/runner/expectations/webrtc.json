@@ -1,10 +1,6 @@
 {
   "RTCCertificate-postMessage.html": false,
-  "RTCCertificate.html": {
-    "expectedFailures": [
-      "RTCPeerConnection({ certificates }) should generate offer SDP with fingerprint of all provided certificates"
-    ]
-  },
+  "RTCCertificate.html": true,
   "RTCConfiguration-bundlePolicy.html": {
     "expectedFailures": [
       "\"balanced\" bundle policy should gather ICE candidates for each media type in use",
@@ -82,8 +78,6 @@
     "expectedFailures": [
       "Two connected iceTransports should have matching local/remote candidates returned",
       "RTCIceTransport should not transition to \"checking\" until after the answer is set _and_ the first remote candidate is received",
-      "Remote ICE restart should not result in a different ICE transport",
-      "Remote ICE restart should not result in a different ICE transport (DataChannel case)",
       "RTCIceTransport should transition to \"closed\" if the underlying transport is closed because the answer used bundle"
     ]
   },
@@ -92,48 +86,8 @@
   "RTCPeerConnection-add-track-no-deadlock.https.html": false,
   "RTCPeerConnection-addIceCandidate-connectionSetup.html": true,
   "RTCPeerConnection-addIceCandidate-timing.https.html": true,
-  "RTCPeerConnection-addIceCandidate.html?interop-2026": {
-    "expectedFailures": [
-      "addIceCandidate should not recognize relayProtocol or url"
-    ]
-  },
-  "RTCPeerConnection-addIceCandidate.html?rest": {
-    "expectedFailures": [
-      "addIceCandidate({\"candidate\":\"\",\"sdpMid\":null,\"sdpMLineIndex\":null}) works",
-      "addIceCandidate({\"candidate\":\"\",\"sdpMid\":null,\"sdpMLineIndex\":null}) adds a=end-of-candidates to both m-sections",
-      "addIceCandidate(undefined) works",
-      "addIceCandidate(undefined) adds a=end-of-candidates to both m-sections",
-      "addIceCandidate(null) works",
-      "addIceCandidate(null) adds a=end-of-candidates to both m-sections",
-      "addIceCandidate({}) works",
-      "addIceCandidate({}) adds a=end-of-candidates to both m-sections",
-      "addIceCandidate({}) in stable should work, and add a=end-of-candidates to both m-sections",
-      "addIceCandidate({usernameFragment: usernameFragment1, sdpMid: sdpMid1}) should work, and add a=end-of-candidates to the first m-section",
-      "addIceCandidate({usernameFragment: usernameFragment2, sdpMLineIndex: 1}) should work, and add a=end-of-candidates to the first m-section",
-      "addIceCandidate({usernameFragment: \"no such ufrag\"}) should not work",
-      "Add ICE candidate after setting remote description should succeed",
-      "Add ICE candidate with RTCIceCandidate should succeed",
-      "Add candidate with only valid sdpMid should succeed",
-      "Add candidate with only valid sdpMid and RTCIceCandidate should succeed",
-      "Add candidate with only valid sdpMLineIndex should succeed",
-      "addIceCandidate with first sdpMid and sdpMLineIndex add candidate to first media stream",
-      "addIceCandidate with second sdpMid and sdpMLineIndex should add candidate to second media stream",
-      "Add candidate for first media stream with null usernameFragment should add candidate to first media stream",
-      "Adding multiple candidates should add candidates to their corresponding media stream",
-      "Add with empty candidate string (end of candidates) should succeed",
-      "Add candidate with both sdpMid and sdpMLineIndex manually set to null should reject with TypeError",
-      "addIceCandidate with a candidate and neither sdpMid nor sdpMLineIndex should reject with TypeError",
-      "Add candidate with only valid candidate string should reject with TypeError",
-      "Add candidate with invalid candidate string and both sdpMid and sdpMLineIndex null should reject with TypeError",
-      "Add candidate with invalid sdpMid should reject with OperationError",
-      "Add candidate with invalid sdpMLineIndex should reject with OperationError",
-      "Invalid sdpMLineIndex should be ignored if valid sdpMid is provided",
-      "Add candidate for media stream 2 with null usernameFragment should succeed",
-      "Add candidate with invalid usernameFragment should reject with OperationError",
-      "Add candidate with invalid candidate string should reject with OperationError",
-      "Add candidate with sdpMid belonging to different usernameFragment should reject with OperationError"
-    ]
-  },
+  "RTCPeerConnection-addIceCandidate.html?interop-2026": true,
+  "RTCPeerConnection-addIceCandidate.html?rest": true,
   "RTCPeerConnection-addTcpIceCandidate.html": {
     "expectedFailures": [
       "TCP candidate aimed at port 8001 accepted",
@@ -164,11 +118,7 @@
     ]
   },
   "RTCPeerConnection-constructor.html": true,
-  "RTCPeerConnection-createAnswer.html": {
-    "expectedFailures": [
-      "createAnswer() returns RTCSessionDescriptionInit"
-    ]
-  },
+  "RTCPeerConnection-createAnswer.html": true,
   "RTCPeerConnection-createDataChannel.html?interop-2026": true,
   "RTCPeerConnection-createDataChannel.html?rest": {
     "expectedFailures": [
@@ -182,13 +132,7 @@
   },
   "RTCPeerConnection-createOffer.html?interop-2026": true,
   "RTCPeerConnection-createOffer.html?rest": true,
-  "RTCPeerConnection-description-attributes-timing.https.html": {
-    "expectedFailures": [
-      "pendingRemoteDescription is surfaced at the right time",
-      "currentLocalDescription is surfaced at the right time",
-      "currentRemoteDescription is surfaced at the right time"
-    ]
-  },
+  "RTCPeerConnection-description-attributes-timing.https.html": true,
   "RTCPeerConnection-explicit-rollback-iceGatheringState.html": false,
   "RTCPeerConnection-generateCertificate.html": {
     "expectedFailures": [
@@ -244,9 +188,7 @@
   },
   "RTCPeerConnection-iceGatheringState.html?rest": {
     "expectedFailures": [
-      "setLocalDescription() with no transports should not cause iceGatheringState to change",
-      "gathering state and candidate callbacks should fire in the correct order",
-      "sRD does not cause ICE gathering state changes"
+      "gathering state and candidate callbacks should fire in the correct order"
     ]
   },
   "RTCPeerConnection-mandatory-getStats.https.html": false,
@@ -273,11 +215,8 @@
   },
   "RTCPeerConnection-operations.https.html?interop-2026": {
     "expectedFailures": [
-      "createOffer must detect InvalidStateError synchronously when chain is empty (prerequisite)",
-      "isOperationsChainEmpty detects empty in have-remote-offer",
       "createAnswer uses operations chain",
       "setLocalDescription uses operations chain",
-      "setRemoteDescription uses operations chain",
       "addIceCandidate uses operations chain",
       "replaceTrack uses operations chain",
       "pc.getStats does NOT use the operations chain",
@@ -287,11 +226,9 @@
   },
   "RTCPeerConnection-operations.https.html?rest": {
     "expectedFailures": [
-      "addIceCandidate must detect InvalidStateError synchronously when chain is empty",
       "createOffer uses operations chain",
       "Negotiationneeded only fires once operations chain is empty",
-      "setParameters does NOT use the operations chain",
-      "Operations queue not vulnerable to recursion by chained negotiationneeded"
+      "setParameters does NOT use the operations chain"
     ]
   },
   "RTCPeerConnection-perfect-negotiation-stress-glare-linear.https.html": false,
@@ -331,9 +268,7 @@
   },
   "RTCPeerConnection-setLocalDescription-answer.html": {
     "expectedFailures": [
-      "setLocalDescription() with answer not created by own createAnswer() should reject with InvalidModificationError",
-      "Calling setLocalDescription(answer) from have-local-offer state should reject with InvalidStateError",
-      "Setting previously generated answer after a call to createOffer should work"
+      "setLocalDescription() with answer not created by own createAnswer() should reject with InvalidModificationError"
     ]
   },
   "RTCPeerConnection-setLocalDescription-offer.html?interop-2026": false,
@@ -345,61 +280,35 @@
   "RTCPeerConnection-setLocalDescription-parameterless.https.html?interop-2026": true,
   "RTCPeerConnection-setLocalDescription-parameterless.https.html?rest": {
     "expectedFailures": [
-      "Parameterless SLD() in 'have-remote-offer' goes to 'stable'",
-      "Parameterless SLD() in 'have-remote-offer' sets currentLocalDescription",
       "Parameterless SLD() uses [[LastCreatedOffer]] if it is still valid",
       "Parameterless SLD() uses [[LastCreatedAnswer]] if it is still valid",
-      "Parameterless SLD() never settles if closed while pending",
-      "Parameterless SLD() in a full O/A exchange succeeds"
+      "Parameterless SLD() never settles if closed while pending"
     ]
   },
-  "RTCPeerConnection-setLocalDescription-pranswer.html": {
-    "expectedFailures": [
-      "setLocalDescription(pranswer) can be applied multiple times while still in have-local-pranswer"
-    ]
-  },
-  "RTCPeerConnection-setLocalDescription-rollback.html": {
-    "expectedFailures": [
-      "setLocalDescription(rollback) after setting a remote offer should reject with InvalidStateError"
-    ]
-  },
+  "RTCPeerConnection-setLocalDescription-pranswer.html": true,
+  "RTCPeerConnection-setLocalDescription-rollback.html": true,
   "RTCPeerConnection-setLocalDescription.html": {
     "expectedFailures": [
       "Calling createOffer() and setLocalDescription() again after one round of local-offer/remote-answer should succeed",
       "Switching role from answerer to offerer after going back to stable state should succeed"
     ]
   },
-  "RTCPeerConnection-setRemoteDescription-answer.html": {
-    "expectedFailures": [
-      "Calling setRemoteDescription(answer) from have-remote-offer state should reject with InvalidStateError"
-    ]
-  },
+  "RTCPeerConnection-setRemoteDescription-answer.html": true,
   "RTCPeerConnection-setRemoteDescription-nomsid.html": false,
   "RTCPeerConnection-setRemoteDescription-offer.html?interop-2026": false,
   "RTCPeerConnection-setRemoteDescription-offer.html?rest": {
     "expectedFailures": [
-      "setRemoteDescription multiple times should succeed",
-      "setRemoteDescription multiple times with different offer should succeed",
       "setRemoteDescription(offer) with invalid SDP should reject with RTCError",
-      "setRemoteDescription(offer) from have-local-offer should roll back and succeed",
-      "Naive rollback approach is not glare-proof (control)",
       "setRemoteDescription(offer) from have-local-offer is glare-proof",
       "setRemoteDescription(invalidOffer) from have-local-offer does not undo rollback",
-      "repeated sRD(offer) works",
       "setRemoteDescription(section with duplicate msid) rejects"
     ]
   },
-  "RTCPeerConnection-setRemoteDescription-pranswer.html": {
-    "expectedFailures": [
-      "setRemoteDescription(pranswer) multiple times should succeed",
-      "setRemoteDescription(answer) from have-remote-pranswer state should succeed"
-    ]
-  },
+  "RTCPeerConnection-setRemoteDescription-pranswer.html": true,
   "RTCPeerConnection-setRemoteDescription-replaceTrack.https.html": false,
   "RTCPeerConnection-setRemoteDescription-rollback.html?interop-2026": false,
   "RTCPeerConnection-setRemoteDescription-rollback.html?rest": {
     "expectedFailures": [
-      "setRemoteDescription(rollback) after setting a local offer should reject with InvalidStateError",
       "local offer created before setRemoteDescription(remote offer) with different transceiver level assignments then rollback should still be usable",
       "rollback of a remote offer should keep a transceiver",
       "rollback of a remote offer should keep a transceiver created by addtrack",
@@ -424,7 +333,53 @@
       "Closing on rollback neither resolves nor rejects"
     ]
   },
-  "RTCPeerConnection-transceivers.https.html": false,
+  "RTCPeerConnection-transceivers.https.html": {
+    "expectedFailures": [
+      "addTrack: creates a transceiver for the sender",
+      "addTrack: \"transceiver == {sender,receiver}\"",
+      "addTrack: transceiver.sender is associated with the track",
+      "addTrack: transceiver.receiver has its own track",
+      "addTrack: transceiver.receiver's track is muted",
+      "addTrack: transceiver is not associated with an m-section",
+      "addTrack: transceiver is not stopped",
+      "addTrack: transceiver's direction is sendrecv",
+      "addTrack: transceiver's currentDirection is null",
+      "setLocalDescription(offer): transceiver gets associated with an m-section",
+      "setLocalDescription(offer): transceiver.mid matches the offer SDP",
+      "setRemoteDescription(offer): ontrack fires with a track",
+      "setRemoteDescription(offer): ontrack's stream.id is the same as stream.id",
+      "setRemoteDescription(offer): ontrack fires with a transceiver.",
+      "setRemoteDescription(offer): transceiver.mid is the same on both ends",
+      "setRemoteDescription(offer): \"transceiver == {sender,receiver}\"",
+      "setRemoteDescription(offer): transceiver.direction is recvonly",
+      "setRemoteDescription(offer): transceiver.currentDirection is null",
+      "setRemoteDescription(offer): transceiver.stopped is false",
+      "setLocalDescription(answer): transceiver.currentDirection is recvonly",
+      "setLocalDescription(answer): transceiver.currentDirection is sendonly",
+      "addTransceiver(track): creates a transceiver for the track",
+      "addTransceiver(track): \"transceiver == {sender,receiver}\"",
+      "addTransceiver(track, init): initialize direction to inactive",
+      "addTransceiver(track, init): initialize sendEncodings[0].active to false",
+      "addTransceiver(0 streams): ontrack fires with no stream",
+      "addTransceiver(1 stream): ontrack fires with corresponding stream",
+      "addTransceiver(2 streams): ontrack fires with corresponding two streams",
+      "addTrack(0 streams): ontrack fires with no stream",
+      "addTrack(1 stream): ontrack fires with corresponding stream",
+      "addTrack(2 streams): ontrack fires with corresponding two streams",
+      "addTransceiver('audio'): creates a transceiver with direction sendrecv",
+      "addTransceiver('audio'): transceiver.receiver.track.kind == 'audio'",
+      "addTransceiver('video'): transceiver.receiver.track.kind == 'video'",
+      "addTransceiver('audio'): transceiver.sender.track == null",
+      "addTransceiver('audio'): transceiver.currentDirection is null",
+      "addTransceiver('audio'): transceiver.stopped is false",
+      "addTrack reuses reusable transceivers",
+      "addTransceiver does not reuse reusable transceivers",
+      "Can setup two-way call using a single transceiver",
+      "Closing the PC stops the transceivers",
+      "Changing transceiver direction to 'sendrecv' makes ontrack fire",
+      "transceiver.sender.track does not revert to an old state"
+    ]
+  },
   "RTCPeerConnection-transport-stats.https.html": false,
   "RTCPeerConnection-video-element-loadedmetadata-event.html": false,
   "RTCPeerConnection-videoDetectorTest.html": false,
@@ -739,7 +694,6 @@
   "no-media-call.html": false,
   "outbound-rtp-encoding-index.https.html": {
     "expectedFailures": [
-      "In simulcast, encodingIndex reflects index of sendEncodings",
       "encodingIndex is undefined for audio streams"
     ]
   },
@@ -773,7 +727,13 @@
     "dtls-certificates.html": true,
     "dtls-close.html": true,
     "dtls-fingerprint-validation.html": false,
-    "dtls-setup.https.html": false,
+    "dtls-setup.https.html": {
+      "expectedFailures": [
+        "PC with setup=actpass should have a dtlsRole of client",
+        "PC with setup=active should have a dtlsRole of server",
+        "PC with setup=passive should have a dtlsRole of client"
+      ]
+    },
     "h264-profile-levels.https.html?interop-2026": false,
     "h264-profile-levels.https.html?rest": false,
     "h264-unidirectional-codec-offer.https.html": false,
@@ -782,7 +742,7 @@
     "handover-datachannel.html": false,
     "handover.html": true,
     "ice-state.https.html": false,
-    "ice-ufragpwd.html": false,
+    "ice-ufragpwd.html": true,
     "jsep-initial-offer.https.html": true,
     "missing-fields.html": false,
     "msid-generate.html": {
@@ -862,7 +822,6 @@
   "rtp-stats-lifetime.https.html": {
     "expectedFailures": [
       "RTCOutboundRtpStreamStats exists after returning to stable",
-      "RTCOutboundRtpStreamStats exists per simulcast encoding",
       "RTCInboundRtpStreamStats are created by packet reception",
       "RTCOutboundRtpStreamStats remain in pc.getStats() after sender.replaceTrack(null)",
       "RTCOutboundRtpStreamStats remain in sender.getStats() after sender.replaceTrack(null)",
