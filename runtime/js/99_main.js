@@ -121,6 +121,7 @@ const {
   QuotaExceededError,
 } = core.loadExtScript("ext:deno_web/01_dom_exception.js");
 import {
+  loadEncodedTransform,
   unstableForWindowOrWorkerGlobalScope,
   windowOrWorkerGlobalScope,
 } from "ext:runtime/98_global_scope_shared.js";
@@ -289,6 +290,9 @@ let globalDispatchEvent;
 // Worker's `startCpuProfile()`, `getHeapSnapshot()`, ...) before any
 // listener sees them; returns true for a message it handled.
 let workerControlHook = null;
+// The key of an RTCRtpScriptTransform's message to its worker
+// (03_encoded_transform.js' TRANSFORM_KEY).
+const RTC_TRANSFORM_KEY = "__denoRtcRtpScriptTransform";
 internals.setWorkerControlHook = (hook) => {
   workerControlHook = hook;
 };
@@ -320,6 +324,15 @@ function dispatchWorkerMessage(data) {
   }
 
   if (workerControlHook !== null && workerControlHook(message)) {
+    return;
+  }
+  // An RTCRtpScriptTransform made for this worker: `rtctransform`, not
+  // `message` (ext/webrtc's 03_encoded_transform.js).
+  if (
+    message !== null && typeof message === "object" &&
+    ObjectHasOwn(message, RTC_TRANSFORM_KEY) &&
+    loadEncodedTransform().receiveTransform(message, globalDispatchEvent)
+  ) {
     return;
   }
 
@@ -1582,6 +1595,7 @@ function bootstrapWorkerRuntime(
 
     event.defineEventHandler(globalThis, "message");
     event.defineEventHandler(globalThis, "error", undefined, true);
+    event.defineEventHandler(globalThis, "rtctransform");
 
     // `Deno.exit()` closes the worker using the internal worker close
     // operation. Setting an exit code using an op in worker context is a no-op.

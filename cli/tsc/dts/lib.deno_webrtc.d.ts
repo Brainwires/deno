@@ -384,6 +384,9 @@ interface RTCRtpEncodingParameters {
   scaleResolutionDownBy?: number;
   priority?: string;
   networkPriority?: string;
+  /** Whether the sender may vary an audio frame's length with the network
+   * (it keeps the length as written; default false). */
+  adaptivePtime?: boolean;
 }
 
 /**
@@ -433,9 +436,141 @@ interface RTCRtpTransceiverInit {
 }
 
 /**
- * A media track. Deno has no capture devices: a remote track is a
- * receiver's (read its RTP with `Deno.webrtc.readRtp(receiver)`), and a
- * local one is a `Deno.webrtc.EncodedMediaTrack`.
+ * A numeric range a constrainable property takes.
+ *
+ * @category WebRTC
+ */
+interface ULongRange {
+  max?: number;
+  min?: number;
+}
+
+/** @category WebRTC */
+interface DoubleRange {
+  max?: number;
+  min?: number;
+}
+
+/** @category WebRTC */
+interface ConstrainULongRange extends ULongRange {
+  exact?: number;
+  ideal?: number;
+}
+
+/** @category WebRTC */
+interface ConstrainDoubleRange extends DoubleRange {
+  exact?: number;
+  ideal?: number;
+}
+
+/** @category WebRTC */
+interface ConstrainBooleanParameters {
+  exact?: boolean;
+  ideal?: boolean;
+}
+
+/** @category WebRTC */
+interface ConstrainDOMStringParameters {
+  exact?: string | string[];
+  ideal?: string | string[];
+}
+
+/** @category WebRTC */
+type ConstrainULong = number | ConstrainULongRange;
+/** @category WebRTC */
+type ConstrainDouble = number | ConstrainDoubleRange;
+/** @category WebRTC */
+type ConstrainBoolean = boolean | ConstrainBooleanParameters;
+/** @category WebRTC */
+type ConstrainDOMString = string | string[] | ConstrainDOMStringParameters;
+
+/**
+ * One set of constraints on a track: an `exact` / `min` / `max` is
+ * required, a bare value or `ideal` is what the device comes closest to.
+ *
+ * @category WebRTC
+ */
+interface MediaTrackConstraintSet {
+  aspectRatio?: ConstrainDouble;
+  autoGainControl?: ConstrainBoolean;
+  channelCount?: ConstrainULong;
+  deviceId?: ConstrainDOMString;
+  echoCancellation?: ConstrainBoolean;
+  facingMode?: ConstrainDOMString;
+  frameRate?: ConstrainDouble;
+  groupId?: ConstrainDOMString;
+  height?: ConstrainULong;
+  latency?: ConstrainDouble;
+  noiseSuppression?: ConstrainBoolean;
+  resizeMode?: ConstrainDOMString;
+  sampleRate?: ConstrainULong;
+  sampleSize?: ConstrainULong;
+  width?: ConstrainULong;
+}
+
+/**
+ * A track's constraints: a constraint set, and `advanced` sets taken in
+ * order where the device can meet each one entirely.
+ *
+ * @category WebRTC
+ */
+interface MediaTrackConstraints extends MediaTrackConstraintSet {
+  advanced?: MediaTrackConstraintSet[];
+}
+
+/**
+ * What a capture device can do, per constrainable property.
+ *
+ * @category WebRTC
+ */
+interface MediaTrackCapabilities {
+  aspectRatio?: DoubleRange;
+  autoGainControl?: boolean[];
+  channelCount?: ULongRange;
+  deviceId?: string;
+  echoCancellation?: boolean[];
+  facingMode?: string[];
+  frameRate?: DoubleRange;
+  groupId?: string;
+  height?: ULongRange;
+  latency?: DoubleRange;
+  noiseSuppression?: boolean[];
+  resizeMode?: string[];
+  sampleRate?: ULongRange;
+  sampleSize?: ULongRange;
+  width?: ULongRange;
+}
+
+/**
+ * The values a track's constrainable properties have now.
+ *
+ * @category WebRTC
+ */
+interface MediaTrackSettings {
+  aspectRatio?: number;
+  autoGainControl?: boolean;
+  channelCount?: number;
+  deviceId?: string;
+  echoCancellation?: boolean;
+  facingMode?: string;
+  frameRate?: number;
+  groupId?: string;
+  height?: number;
+  latency?: number;
+  noiseSuppression?: boolean;
+  resizeMode?: string;
+  sampleRate?: number;
+  sampleSize?: number;
+  width?: number;
+}
+
+/**
+ * A media track. Deno has no capture devices of its own: a remote track is
+ * a receiver's (read its RTP with `Deno.webrtc.readRtp(receiver)`), a local
+ * one is a `Deno.webrtc.EncodedMediaTrack`, or, under
+ * `DENO_FAKE_MEDIA_DEVICES=1`, a fake camera's or microphone's from
+ * `navigator.mediaDevices.getUserMedia()`. Only a capture device's track has
+ * capabilities, settings and constraints.
  *
  * @category WebRTC
  */
@@ -450,11 +585,11 @@ interface MediaStreamTrack extends EventTarget {
   onended: ((this: MediaStreamTrack, ev: Event) => any) | null;
   onmute: ((this: MediaStreamTrack, ev: Event) => any) | null;
   onunmute: ((this: MediaStreamTrack, ev: Event) => any) | null;
-  applyConstraints(constraints?: Record<string, unknown>): Promise<void>;
+  applyConstraints(constraints?: MediaTrackConstraints): Promise<void>;
   clone(): MediaStreamTrack;
-  getCapabilities(): Record<string, unknown>;
-  getConstraints(): Record<string, unknown>;
-  getSettings(): Record<string, unknown>;
+  getCapabilities(): MediaTrackCapabilities;
+  getConstraints(): MediaTrackConstraints;
+  getSettings(): MediaTrackSettings;
   stop(): void;
 }
 
@@ -691,6 +826,10 @@ interface RTCRtpSender {
   replaceTrack(withTrack: MediaStreamTrack | null): Promise<void>;
   setParameters(parameters: RTCRtpSendParameters): Promise<void>;
   setStreams(...streams: MediaStream[]): void;
+  /** An `RTCRtpScriptTransform` or `RTCRtpSFrameEncryptor` the sender's
+   * encoded frames go through before they are sent (a transform serves one
+   * sender or receiver). */
+  transform: RTCRtpScriptTransform | RTCRtpSFrameEncryptor | null;
 }
 
 /**
@@ -717,6 +856,10 @@ interface RTCRtpReceiver {
   getParameters(): RTCRtpParameters;
   getStats(): Promise<RTCStatsReport>;
   getSynchronizationSources(): RTCRtpContributingSource[];
+  /** An `RTCRtpScriptTransform` or `RTCRtpSFrameDecryptor` the receiver's
+   * encoded frames go through (what comes out is dropped: there is no
+   * decoder). */
+  transform: RTCRtpScriptTransform | RTCRtpSFrameDecryptor | null;
 }
 
 /**
@@ -1639,4 +1782,236 @@ declare namespace Deno {
       level: "off" | "error" | "warn" | "info" | "debug" | "trace",
     ): void;
   }
+}
+
+/**
+ * What an encoded frame's metadata names, sent or received.
+ *
+ * @category WebRTC
+ */
+interface RTCEncodedFrameMetadata {
+  contributingSources?: number[];
+  /** The sender's capture time (sent frames), on `performance.now()`'s
+   * clock. */
+  captureTime?: number;
+  mimeType?: string;
+  payloadType?: number;
+  /** When the frame was put together (received frames). */
+  receiveTime?: number;
+  rtpTimestamp?: number;
+  senderCaptureTimeOffset?: number;
+  synchronizationSource?: number;
+}
+
+/** @category WebRTC */
+interface RTCEncodedVideoFrameMetadata extends RTCEncodedFrameMetadata {
+  dependencies?: number[];
+  frameId?: number;
+  height?: number;
+  spatialIndex?: number;
+  temporalIndex?: number;
+  timestamp?: number;
+  width?: number;
+}
+
+/** @category WebRTC */
+interface RTCEncodedAudioFrameMetadata extends RTCEncodedFrameMetadata {
+  audioLevel?: number;
+  /** The first RTP packet's (received frames). */
+  sequenceNumber?: number;
+}
+
+/** @category WebRTC */
+type RTCEncodedVideoFrameType = "delta" | "empty" | "key";
+
+/** @category WebRTC */
+interface RTCEncodedVideoFrameOptions {
+  metadata?: RTCEncodedVideoFrameMetadata;
+}
+
+/** @category WebRTC */
+interface RTCEncodedAudioFrameOptions {
+  metadata?: RTCEncodedAudioFrameMetadata;
+}
+
+/**
+ * An encoded video frame in an `RTCRtpScriptTransform`'s worker. It can be
+ * posted to another realm (`postMessage`); writing it to the transformer's
+ * `writable` moves its `data` (detached here).
+ *
+ * @category WebRTC
+ */
+interface RTCEncodedVideoFrame {
+  data: ArrayBuffer;
+  readonly type: RTCEncodedVideoFrameType;
+  getMetadata(): RTCEncodedVideoFrameMetadata;
+}
+
+/** @category WebRTC */
+declare var RTCEncodedVideoFrame: {
+  readonly prototype: RTCEncodedVideoFrame;
+  /** A copy of `originalFrame`, with metadata from `options` replacing
+   * its own. */
+  new (
+    originalFrame: RTCEncodedVideoFrame,
+    options?: RTCEncodedVideoFrameOptions,
+  ): RTCEncodedVideoFrame;
+};
+
+/**
+ * An encoded audio frame in an `RTCRtpScriptTransform`'s worker.
+ *
+ * @category WebRTC
+ */
+interface RTCEncodedAudioFrame {
+  data: ArrayBuffer;
+  getMetadata(): RTCEncodedAudioFrameMetadata;
+}
+
+/** @category WebRTC */
+declare var RTCEncodedAudioFrame: {
+  readonly prototype: RTCEncodedAudioFrame;
+  new (
+    originalFrame: RTCEncodedAudioFrame,
+    options?: RTCEncodedAudioFrameOptions,
+  ): RTCEncodedAudioFrame;
+};
+
+/**
+ * Hands a sender's or receiver's encoded frames to a worker
+ * (`sender.transform = new RTCRtpScriptTransform(worker, options)`): the
+ * worker gets an `rtctransform` event whose `transformer` reads them and
+ * writes back what goes on. A sender's frames are those of a fake capture
+ * device (`DENO_FAKE_MEDIA_DEVICES=1`); a receiver's are its RTP packets put
+ * back together.
+ *
+ * @category WebRTC
+ */
+interface RTCRtpScriptTransform {}
+
+/**
+ * An SFrame cipher suite (RFC 9605). The `AES_256_CTR_HMAC_SHA512_*` suites
+ * are refused with `NotSupportedError`.
+ *
+ * @category WebRTC
+ */
+type SFrameCipherSuite =
+  | "AES_128_CTR_HMAC_SHA256_80"
+  | "AES_128_CTR_HMAC_SHA256_64"
+  | "AES_128_CTR_HMAC_SHA256_32"
+  | "AES_128_GCM_SHA256_128"
+  | "AES_256_GCM_SHA512_128"
+  | "AES_256_CTR_HMAC_SHA512_80"
+  | "AES_256_CTR_HMAC_SHA512_64"
+  | "AES_256_CTR_HMAC_SHA512_32";
+
+/** @category WebRTC */
+interface SFrameTransformOptions {
+  cipherSuite: SFrameCipherSuite;
+}
+
+/** A key ID: 0 to 2^64 - 1. @category WebRTC */
+type CryptoKeyID = number | bigint;
+
+/**
+ * Encrypts each chunk as one SFrame (a `BufferSource` gives an
+ * `ArrayBuffer`, an encoded frame its own `data`). Frames written before
+ * a key is set are dropped.
+ *
+ * @category WebRTC
+ */
+interface SFrameEncryptorStream {
+  readonly readable: ReadableStream;
+  readonly writable: WritableStream;
+  /** The base key (an HKDF `CryptoKey` with `deriveBits`) and its KID. */
+  setEncryptionKey(key: CryptoKey, keyId: CryptoKeyID): Promise<void>;
+}
+
+/** @category WebRTC */
+declare var SFrameEncryptorStream: {
+  readonly prototype: SFrameEncryptorStream;
+  new (options: SFrameTransformOptions): SFrameEncryptorStream;
+};
+
+/**
+ * Decrypts each chunk as one SFrame. A frame that doesn't decrypt is
+ * reported as an `error` event and comes out empty.
+ *
+ * @category WebRTC
+ */
+interface SFrameDecryptorStream extends EventTarget {
+  readonly readable: ReadableStream;
+  readonly writable: WritableStream;
+  onerror:
+    | ((this: SFrameDecryptorStream, ev: SFrameTransformErrorEvent) => any)
+    | null;
+  addDecryptionKey(key: CryptoKey, keyId: CryptoKeyID): Promise<void>;
+  removeDecryptionKey(keyId: CryptoKeyID): Promise<void>;
+}
+
+/** @category WebRTC */
+declare var SFrameDecryptorStream: {
+  readonly prototype: SFrameDecryptorStream;
+  new (options: SFrameTransformOptions): SFrameDecryptorStream;
+};
+
+/** @category WebRTC */
+type SFrameTransformErrorEventType = "authentication" | "keyID" | "syntax";
+
+/** @category WebRTC */
+interface SFrameTransformErrorEventInit extends EventInit {
+  errorType: SFrameTransformErrorEventType;
+  frame: any;
+  keyID?: CryptoKeyID | null;
+}
+
+/**
+ * A frame an SFrame decryptor could not decrypt.
+ *
+ * @category WebRTC
+ */
+interface SFrameTransformErrorEvent extends Event {
+  readonly errorType: SFrameTransformErrorEventType;
+  readonly keyID: CryptoKeyID | null;
+  readonly frame: any;
+}
+
+/** @category WebRTC */
+declare var SFrameTransformErrorEvent: {
+  readonly prototype: SFrameTransformErrorEvent;
+  new (
+    type: string,
+    eventInitDict: SFrameTransformErrorEventInit,
+  ): SFrameTransformErrorEvent;
+};
+
+/** @category WebRTC */
+interface RTCRtpSFrameEncryptorOptions extends SFrameTransformOptions {
+  /** Only `"per-frame"`; `"per-packet"` is refused with
+   * `NotSupportedError`. */
+  type?: "per-frame" | "per-packet";
+}
+
+/**
+ * A sender's `transform` that encrypts each frame as an SFrame before it
+ * is packetized (not for H.264 / H.265, whose packetizers read the frame).
+ *
+ * @category WebRTC
+ */
+interface RTCRtpSFrameEncryptor {
+  setEncryptionKey(key: CryptoKey, keyId: CryptoKeyID): Promise<void>;
+}
+
+/**
+ * A receiver's `transform` that decrypts each frame, reporting the ones it
+ * can't as `error` events.
+ *
+ * @category WebRTC
+ */
+interface RTCRtpSFrameDecryptor extends EventTarget {
+  onerror:
+    | ((this: RTCRtpSFrameDecryptor, ev: SFrameTransformErrorEvent) => any)
+    | null;
+  addDecryptionKey(key: CryptoKey, keyId: CryptoKeyID): Promise<void>;
+  removeDecryptionKey(keyId: CryptoKeyID): Promise<void>;
 }

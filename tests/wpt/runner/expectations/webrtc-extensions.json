@@ -21,7 +21,7 @@
   "RTCOAuthCredential.html": false,
   "RTCRtpCorruptionDetection-headerExtensionControl.html": false,
   "RTCRtpEncodingParameters-scaleResolutionDownTo.https.html": false,
-  "RTCRtpParameters-adaptivePtime.html": false,
+  "RTCRtpParameters-adaptivePtime.html": true,
   "RTCRtpSynchronizationSource-captureTimestamp.html": false,
   "RTCRtpSynchronizationSource-senderCaptureTimeOffset.html": false,
   "RTCRtpTransceiver-headerExtensionControl.html": false,

@@ -43,6 +43,8 @@ use rtc::peer_connection::configuration::RTCBundlePolicy;
 use serde::Deserialize;
 use serde::Serialize;
 
+mod encoded_frames;
+mod fake_media;
 mod media;
 mod net;
 mod peer;
@@ -145,6 +147,12 @@ deno_core::extension!(
     op_webrtc_receiver_sources,
     op_webrtc_sender_write_rtp,
     op_webrtc_sender_write_frame,
+    op_webrtc_sender_write_fake,
+    op_webrtc_sender_fake_frame,
+    op_webrtc_sender_reserve_frame,
+    op_webrtc_sender_write_frame_at,
+    op_webrtc_receiver_transform,
+    op_webrtc_fake_media_devices,
     op_webrtc_receiver_read_rtp,
     op_webrtc_receiver_request_key_frame,
     op_webrtc_sender_send_dtmf,
@@ -156,7 +164,12 @@ deno_core::extension!(
     op_webrtc_network_close,
     op_webrtc_set_log_level,
   ],
-  lazy_loaded_js = ["01_webrtc.js"],
+  lazy_loaded_js = [
+    "01_webrtc.js",
+    "02_media_devices.js",
+    "03_encoded_transform.js",
+    "04_sframe.js",
+  ],
 );
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
@@ -979,6 +992,76 @@ fn op_webrtc_sender_write_frame(
   duration_ms: f64,
 ) -> Result<bool, WebRtcError> {
   peer(state, rid)?.media(|core| core.write_frame(key, data, duration_ms))
+}
+
+#[op2(fast)]
+fn op_webrtc_sender_write_fake(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+  key: u32,
+  stereo: bool,
+) -> Result<bool, WebRtcError> {
+  peer(state, rid)?.media(|core| core.write_fake(key, stereo))
+}
+
+/// A fake device's next frame for a sender with an encoded transform (it
+/// is written later with `op_webrtc_sender_write_frame_at`).
+#[op2]
+#[serde]
+fn op_webrtc_sender_fake_frame(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+  key: u32,
+  stereo: bool,
+) -> Result<Option<media::FakeFrame>, WebRtcError> {
+  peer(state, rid)?.media(|core| core.fake_frame(key, stereo))
+}
+
+/// Takes the RTP timestamp of a sender's next frame, for an encoded
+/// transform's frame; null before negotiation.
+#[op2]
+#[serde]
+fn op_webrtc_sender_reserve_frame(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+  key: u32,
+  duration_ms: f64,
+) -> Result<Option<media::SenderFrameInfo>, WebRtcError> {
+  peer(state, rid)?.media(|core| core.reserve_frame(key, duration_ms))
+}
+
+/// Writes an encoded transform's frame at the RTP timestamp it reserved.
+#[op2(fast)]
+fn op_webrtc_sender_write_frame_at(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+  key: u32,
+  #[buffer] data: &[u8],
+  duration_ms: f64,
+  rtp_timestamp: u32,
+) -> Result<bool, WebRtcError> {
+  peer(state, rid)?.media(|core| {
+    core.write_frame_at(key, data, duration_ms, Some(rtp_timestamp))
+  })
+}
+
+/// `receiver.transform` set or cleared: the receiver's frames are
+/// delivered as `encodedframe` events while it is set.
+#[op2(fast)]
+fn op_webrtc_receiver_transform(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+  key: u32,
+  on: bool,
+) -> Result<(), WebRtcError> {
+  peer(state, rid)?.media(|core| core.receiver_transform(key, on))
+}
+
+/// Whether `navigator.mediaDevices` has its fake devices
+/// (`DENO_FAKE_MEDIA_DEVICES=1`).
+#[op2(fast)]
+fn op_webrtc_fake_media_devices() -> bool {
+  fake_media::enabled()
 }
 
 #[op2(fast)]

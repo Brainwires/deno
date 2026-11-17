@@ -562,7 +562,20 @@
   },
   "RTCRtpTransceiver-stopping.https.html?interop-2026": false,
   "RTCRtpTransceiver-stopping.https.html?rest": false,
-  "RTCRtpTransceiver.https.html?interop-2026": false,
+  "RTCRtpTransceiver.https.html?interop-2026": {
+    "expectedFailures": [
+      "checkCurrentDirection",
+      "checkLocalRollback",
+      "checkMsectionReuse",
+      "checkRemoteRollback",
+      "checkStop",
+      "checkStopAfterCreateAnswer",
+      "checkStopAfterCreateOffer",
+      "checkStopAfterSetLocalAnswer",
+      "checkStopAfterSetLocalOffer",
+      "checkStopAfterSetRemoteOffer"
+    ]
+  },
   "RTCRtpTransceiver.https.html?rest": {
     "expectedFailures": [
       "checkAddTransceiverWithTrack",
@@ -587,7 +600,6 @@
       "checkStopAfterCreateOfferWithReusedMsection",
       "checkAddIceCandidateToStoppedTransceiver",
       "checkBundleTagRejected",
-      "track with audio gets muted when setting the transceiver direction to 'inactive'",
       "track with audio gets unmuted when setting the transceiver direction to 'sendrecv' after 'inactive'",
       "track with video gets unmuted when packets flow.",
       "track with video gets muted when setting the transceiver direction to 'inactive'",

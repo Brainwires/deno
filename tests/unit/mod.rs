@@ -111,6 +111,13 @@ fn run_test(test: &CollectedTest) -> TestResult {
     deno = deno.env("DENO_WEBRTC_LOOPBACK_ONLY", "1");
   }
 
+  // The fake camera and microphone of `navigator.mediaDevices`.
+  if test.name.ends_with("::webrtc_media_test") {
+    deno = deno
+      .env("DENO_WEBRTC_LOOPBACK_ONLY", "1")
+      .env("DENO_FAKE_MEDIA_DEVICES", "1");
+  }
+
   if test.name.ends_with("::html_rewriter_test") {
     deno = deno.arg("--unstable-html-rewriter");
   }
