@@ -2403,9 +2403,11 @@ function validateEncodings(list, kind, method, keepRid) {
     }
     const enc = { active: e.active === undefined ? true : !!e.active };
     if (e.rid !== undefined) {
+      // At most 16 alphanumeric characters (the RtpStreamId header
+      // extension's limit).
       const rid = String(e.rid);
       if (
-        rid.length === 0 || rid.length > 255 ||
+        rid.length === 0 || rid.length > 16 ||
         !RegExpPrototypeTest(RID_RE, rid)
       ) {
         throw new TypeError(`${method}: '${rid}' is not a valid rid`);
@@ -2421,7 +2423,9 @@ function validateEncodings(list, kind, method, keepRid) {
     if (e.maxBitrate !== undefined) {
       enc.maxBitrate = webidl.converters["unsigned long"](e.maxBitrate);
     }
-    if (e.maxFramerate !== undefined) {
+    // An audio encoding has no frame rate: its maxFramerate is dropped,
+    // even an invalid one.
+    if (e.maxFramerate !== undefined && kind === "video") {
       const f = webidl.converters["double"](e.maxFramerate);
       if (f < 0) throw new RangeError(`${method}: maxFramerate below 0`);
       enc.maxFramerate = f;
