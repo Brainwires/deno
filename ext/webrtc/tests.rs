@@ -19,6 +19,7 @@ use crate::WebRtcError;
 use crate::peer::RemoteCandidate;
 use crate::peer::candidate_address;
 use crate::peer::classify_remote_candidate;
+use crate::peer::epoch_fields_to_ms;
 
 /// Loopback only: interface enumeration is refused, so host candidates are
 /// `127.0.0.1` alone and the test is the same on every machine.
@@ -916,4 +917,21 @@ fn mdns_is_off_without_its_permissions() {
     a.close();
     b.close();
   });
+}
+
+#[test]
+fn stats_epoch_fields_are_milliseconds() {
+  let stats = epoch_fields_to_ms(serde_json::json!({
+    "id": "PC",
+    "type": "peer-connection",
+    "timestamp": 1794904159.643,
+    "lastPacketReceivedTimestamp": 2.5,
+    "bytesSent": 7,
+  }));
+  assert_eq!(
+    stats["timestamp"].as_f64().unwrap().round(),
+    1794904159643.0
+  );
+  assert_eq!(stats["lastPacketReceivedTimestamp"], 2500.0);
+  assert_eq!(stats["bytesSent"], 7);
 }

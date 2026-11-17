@@ -259,6 +259,29 @@ impl IceServerSpec {
   }
 }
 
+/// The stats fields the engine writes from a `SystemInstant`: seconds since
+/// the epoch (`rtc_shared::serde::instant_to_epoch`), where the stats
+/// dictionaries have a `DOMHighResTimeStamp` in milliseconds.
+const STATS_EPOCH_FIELDS: [&str; 5] = [
+  "timestamp",
+  "lastPacketSentTimestamp",
+  "lastPacketReceivedTimestamp",
+  "remoteTimestamp",
+  "estimatedPlayoutTimestamp",
+];
+
+/// One stats dictionary with its epoch fields in milliseconds.
+pub fn epoch_fields_to_ms(mut stats: serde_json::Value) -> serde_json::Value {
+  if let Some(map) = stats.as_object_mut() {
+    for key in STATS_EPOCH_FIELDS {
+      if let Some(seconds) = map.get(key).and_then(serde_json::Value::as_f64) {
+        map.insert(key.to_string(), serde_json::json!(seconds * 1000.0));
+      }
+    }
+  }
+  stats
+}
+
 /// Options for [`Peer::new`], from `RTCConfiguration`.
 #[derive(Default)]
 pub struct PeerOptions {
@@ -2463,6 +2486,7 @@ impl Peer {
               _ => return None,
             }
             .ok()
+            .map(epoch_fields_to_ms)
           })
           .collect(),
       )
