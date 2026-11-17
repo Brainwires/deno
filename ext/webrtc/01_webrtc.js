@@ -3529,24 +3529,26 @@ class RTCPeerConnection extends EventTarget {
   }
 
   static generateCertificate(keygenAlgorithm) {
+    const prefix =
+      "Failed to execute 'generateCertificate' on 'RTCPeerConnection'";
     let alg;
+    // `expires` (ms from now) is the spec's extension of the algorithm
+    // dictionary ([EnforceRange] DOMTimeStamp); 30 days by default, as
+    // browsers do. A bad value rejects the promise with a TypeError.
+    let expires = 30 * 24 * 3600 * 1000;
     try {
-      webidl.requiredArguments(
-        arguments.length,
-        1,
-        "Failed to execute 'generateCertificate' on 'RTCPeerConnection'",
-      );
+      webidl.requiredArguments(arguments.length, 1, prefix);
       alg = normalizeKeygen(keygenAlgorithm);
+      if (keygenAlgorithm?.expires !== undefined) {
+        expires = webidl.converters["unsigned long long"](
+          keygenAlgorithm.expires,
+          prefix,
+          "'expires'",
+          { enforceRange: true },
+        );
+      }
     } catch (error) {
       return PromiseReject(error);
-    }
-    // `expires` (ms from now) is the spec's extension of the algorithm
-    // dictionary; 30 days by default, as browsers do.
-    let expires = 30 * 24 * 3600 * 1000;
-    if (keygenAlgorithm?.expires !== undefined) {
-      expires = webidl.converters["unsigned long long"](
-        keygenAlgorithm.expires,
-      );
     }
     // The expiry instant on the JS clock (see generate_certificate).
     return PromisePrototypeThen(
