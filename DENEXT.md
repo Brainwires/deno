@@ -17080,6 +17080,68 @@ where the changes are discussed.
        on. The engine's own SDP carries no `a=ice-options:trickle`, so two Deno
        peers now see `canTrickleIceCandidates === false` (true before), as the
        spec has it for that SDP.
+     - Negotiation / SDP fixes (branch `webrtc/a-sdp`; the engine's in
+       Brainwires/webrtc-rs-rtc branch `webrtc/a-sdp`, commit fe1cd289, which
+       `Cargo.toml` pins), each with engine unit tests:
+       - A BUNDLE group's m-sections may carry their own ICE credentials (an
+         offer under the `balanced` / `max-compat` policy): the
+         offerer-tagged m-section's are the transport's (RFC 8843 §7.2); the
+         other m-sections' candidates are recorded in the remote description
+         and not given to the agent. Outside a BUNDLE group, differing
+         credentials are still refused (one ICE transport per connection).
+       - A description with no m-section (an offer made before any
+         transceiver or data channel) is applied and answered without ICE
+         credentials; transports start with the first description that has
+         an m-section, so a remote offer can be applied again, or rolled back
+         and applied again (it threw "ICETransport can only be called in
+         ICETransportStateNew").
+       - Signaling (RFC 9429 §5.5 / §5.6): `have-remote-offer` takes another
+         remote offer, `have-local-pranswer` / `have-remote-pranswer` another
+         provisional answer; a remote pranswer decides the ICE role as an
+         answer does and sets no `currentDirection`; a type the state doesn't
+         take is an `InvalidStateError`.
+       - `addIceCandidate()` per W3C: the media section by `sdpMid` or
+         `sdpMLineIndex`, the `usernameFragment` checked against that
+         section's `ice-ufrag`, and the candidate or `a=end-of-candidates`
+         (for `null` / `{}` / an empty candidate, every section) added to the
+         pending and current remote descriptions.
+       - `ice-ufrag` / `ice-pwd` syntax checked (RFC 8839 §5.4,
+         `InvalidAccessError`); `a=ice-options:trickle` written (RFC 8829
+         §5.2.1), so two Deno peers see `canTrickleIceCandidates === true`
+         again; an `a=fingerprint` per certificate; an answer to
+         `setup:active` / `setup:passive` takes the other role (RFC 5763
+         §5); media sections without `a=ssrc` accepted with several
+         m-sections, the SSRC bound by the MID header extension (RFC 8843
+         §9.2; it refused the description: "no trackStreams found for SSRC");
+         the transport stats' `dtlsRole` is `unknown` until decided.
+       - In `ext/webrtc`: rolling back a remote offer removes the tracks it
+         started receiving from their streams (`removetrack`) and restores
+         stream membership; ICE gathering starts only with a local
+         description that has an m-section.
+       - Numbers (a full `webrtc` run on biscuits, as above): `webrtc/`
+         1461 / 2112 subtests (69.2%) and 62 files passing fully, from 1390 /
+         2110 and 52; all `webrtc*` directories 1523 / 2505, from 1452 / 2503;
+         no regressions. Files turned green: `RTCCertificate`,
+         `RTCPeerConnection-addIceCandidate` (both variants; `?rest` was 1 /
+         34), `-createAnswer`, `-description-attributes-timing`,
+         `-setLocalDescription-pranswer`, `-setLocalDescription-rollback`,
+         `-setRemoteDescription-answer`, `-setRemoteDescription-pranswer` and
+         `protocol/ice-ufragpwd`; better: `-setRemoteDescription-offer`,
+         `-setLocalDescription-parameterless`, `-operations`, `RTCIceTransport`,
+         `protocol/dtls-setup`.
+       - Still open in this area: per-m-section gathering for `balanced` /
+         `max-compat` (one ICE agent per connection: an initial offer under
+         those policies would need a transport, credentials and candidates
+         per m-section); a non-BUNDLE remote description with per-section
+         credentials (same reason); parameterless `setLocalDescription()`
+         doesn't yet make its offer with a pending `restartIce()` (doing so
+         is right, +5 `restartIce` subtests, but the engine applies the
+         offerer's new credentials at `setLocalDescription` rather than
+         keeping the old session until the answer, RFC 8445 §9, so
+         `RTCDataChannel-iceRestart`'s step-by-step test loses its data
+         channel: an ICE-restart fix first); a stray `negotiationneeded`
+         after a restart's exchange; `RTCError` `sdp-syntax-error` for malformed
+         SDP; duplicate-msid rejection; the operations-chain probe.
      - Node tests enabled: none; `node:` has no WebRTC API.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
