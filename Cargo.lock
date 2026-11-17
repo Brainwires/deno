@@ -2323,7 +2323,7 @@ dependencies = [
 
 [[package]]
 name = "deno"
-version = "3.0.0-denext.25"
+version = "3.0.0-denext.26"
 dependencies = [
  "anstream",
  "ar_archive_writer",
@@ -4314,7 +4314,7 @@ dependencies = [
 
 [[package]]
 name = "denort"
-version = "3.0.0-denext.25"
+version = "3.0.0-denext.26"
 dependencies = [
  "async-trait",
  "bincode",
