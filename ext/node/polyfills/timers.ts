@@ -6,6 +6,7 @@ const {
   FunctionPrototypeBind,
   ObjectCreate,
   ObjectDefineProperty,
+  ObjectPrototypeIsPrototypeOf,
   Promise,
   PromiseReject,
   PromiseWithResolvers,
@@ -25,7 +26,8 @@ let mockTimers = null;
 const kInstallMockTimers = SymbolFor("Deno.internal.node.mockTimers");
 const {
   getActiveTimer,
-  getActiveUserTimer,
+  getKnownTimer,
+  kTimerId,
   Immediate,
   kDestroy,
   Timeout,
@@ -164,13 +166,21 @@ ObjectDefineProperty(setTimeout, promisify.custom, {
   },
 });
 
-// A `Timeout` object reaches its own timer (runtime-internal code clears its
-// system timers this way); a bare numeric id never reaches a system timer.
+const TimeoutPrototype = Timeout.prototype;
+
+// As Node.js' `clearTimeout`: a `Timeout` clears itself; a number or string
+// reaches only a timer whose `[Symbol.toPrimitive]()` handed that id out
+// (`knownTimersById`), so a guessed id, a system timer's included, does
+// nothing. Other values are ignored.
 function clearTimerById(timeout: Timeout | number | string) {
-  const id = +timeout;
-  const timer = typeof timeout === "object"
-    ? getActiveTimer(id)
-    : getActiveUserTimer(id);
+  let timer;
+  if (typeof timeout === "object") {
+    if (ObjectPrototypeIsPrototypeOf(TimeoutPrototype, timeout)) {
+      timer = getActiveTimer(timeout[kTimerId]);
+    }
+  } else if (typeof timeout === "number" || typeof timeout === "string") {
+    timer = getKnownTimer(+timeout);
+  }
   timer?.[kDestroy]();
 }
 

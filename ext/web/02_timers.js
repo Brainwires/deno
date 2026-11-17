@@ -14,8 +14,7 @@ const { op_defer } = core.ops;
 const {
   createTimer,
   cancelTimer,
-  getTimer,
-  kSystemTimer,
+  getKnownTimer,
   kTimerOwner,
   refTimer: coreRefTimer,
   unrefTimer: coreUnrefTimer,
@@ -98,19 +97,12 @@ function setInterval(callback, timeout = 0, ...args) {
   return timer._timerId;
 }
 
-/**
- * Look up a timer by numeric id in core's shared map (web and Node.js timers
- * alike). Runtime-internal (system) timers are never returned, so a stray id
- * can't cancel or (un)ref them.
- */
-function getUserTimer(id) {
-  const timer = getTimer(id);
-  if (timer === undefined || timer[kSystemTimer]) return undefined;
-  return timer;
-}
-
+// Numeric ids resolve through core's shared map (web and Node.js timers
+// alike) with Node.js' rule: a Node.js `Timeout` only once its id was handed
+// out by `[Symbol.toPrimitive]()`, so a guessed id (or a runtime-internal
+// timer's) reaches nothing.
 function clearTimer(id) {
-  const timer = getUserTimer(id);
+  const timer = getKnownTimer(id);
   if (timer === undefined) return;
   const owner = timer[kTimerOwner];
   if (owner !== undefined) {
@@ -147,7 +139,7 @@ function unrefTimer(id) {
     id?.unref?.();
     return;
   }
-  const timer = getUserTimer(id);
+  const timer = getKnownTimer(id);
   if (timer === undefined) return;
   const owner = timer[kTimerOwner];
   if (owner !== undefined) {
@@ -165,7 +157,7 @@ function refTimer(id) {
     id?.ref?.();
     return;
   }
-  const timer = getUserTimer(id);
+  const timer = getKnownTimer(id);
   if (timer === undefined) return;
   const owner = timer[kTimerOwner];
   if (owner !== undefined) {

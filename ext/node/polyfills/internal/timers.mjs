@@ -60,7 +60,8 @@ const kTimeout = Symbol("timeout");
 const kSuspended = Symbol("suspended");
 const kRefed = core.kRefed;
 const kTimerOwner = core.kTimerOwner;
-const kSystemTimer = core.kSystemTimer;
+const kKnownById = core.kKnownById;
+const kHasPrimitive = Symbol("hasPrimitive");
 const createTimer = Symbol("createTimer");
 
 // Active timers live in core's single id -> timer map (shared with the web
@@ -77,16 +78,15 @@ function getActiveTimer(id) {
 }
 
 /**
- * As `getActiveTimer`, but never a system timer: for a lookup by a numeric id
- * that came from user code.
+ * The `Timeout` a numeric (or string) id from user code names. As Node.js'
+ * `knownTimersById`: only a timer whose `[Symbol.toPrimitive]()` handed that
+ * id out, until it ends; a guessed id matches nothing.
  *
  * @param {number} id
  * @returns {Timeout | undefined}
  */
-function getActiveUserTimer(id) {
-  const timer = core.getTimer(id);
-  if (timer === undefined || timer[kSystemTimer]) return undefined;
-  return timer[kTimerOwner];
+function getKnownTimer(id) {
+  return core.getKnownTimer(id)?.[kTimerOwner];
 }
 
 function getActiveResourcesInfo() {
@@ -165,6 +165,18 @@ function Timeout(callback, after, args, isRepeat, isRefed, isSystem) {
     value: !!isSystem,
     writable: true,
   });
+  // Node.js' `kHasPrimitive`, and whether the id it handed out is still known
+  // (cleared when the timer ends). Non-enumerable, as `kSystem`.
+  ObjectDefineProperty(this, kHasPrimitive, {
+    __proto__: null,
+    value: false,
+    writable: true,
+  });
+  ObjectDefineProperty(this, kKnownById, {
+    __proto__: null,
+    value: false,
+    writable: true,
+  });
 
   const asyncId = nextAsyncId();
   const triggerAsyncId = executionAsyncId();
@@ -225,6 +237,7 @@ Timeout.prototype[createTimer] = function () {
         self[kTimerId] = self[createTimer]();
       } else {
         self._destroyed = true;
+        self[kKnownById] = false;
       }
     }
   }
@@ -303,6 +316,7 @@ Timeout.prototype[kDestroy] = function () {
     this._idleTimeout = -1;
     this._idleStart = DateNow();
     this._onTimeout = null;
+    this[kKnownById] = false;
     cancelTimer_(this._timer);
     if (
       this._asyncId !== undefined &&
@@ -376,7 +390,13 @@ Timeout.prototype.hasRef = function () {
   return this[kRefed];
 };
 
+// Handing out the numeric id makes it known, as Node.js' `knownTimersById`
+// (only the first time: an id forgotten when the timer ended stays so).
 Timeout.prototype[SymbolToPrimitive] = function () {
+  if (!this[kHasPrimitive]) {
+    this[kHasPrimitive] = true;
+    if (!this._destroyed) this[kKnownById] = true;
+  }
   return this[kTimerId];
 };
 
@@ -503,7 +523,7 @@ return {
   kTimeout,
   kRefed,
   getActiveTimer,
-  getActiveUserTimer,
+  getKnownTimer,
   getActiveResourcesInfo,
   Timeout,
   getTimerDuration,

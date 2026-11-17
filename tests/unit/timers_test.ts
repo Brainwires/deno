@@ -802,8 +802,11 @@ Deno.test({
   },
 });
 
-// Runtime-internal (system) timers, such as a node:net socket's idle timeout,
-// stay out of reach of a user-supplied numeric id.
+// As in Node.js, a numeric id reaches a timer only once the timer handed it
+// out (`[Symbol.toPrimitive]()`, e.g. `+timer`). A guessed id does nothing,
+// which also keeps runtime-internal (system) timers, such as a node:net
+// socket's idle timeout, out of reach. These tests read the id through the
+// internal `timerId` symbol, which doesn't hand it out.
 Deno.test({
   name: "numeric timer APIs leave system timers alone",
   permissions: { run: true, read: true },
@@ -815,10 +818,11 @@ Deno.test({
         console.log("socket timeout");
         socket.destroy();
       });
-      const kTimeout = Object.getOwnPropertySymbols(socket)
-        .find((s) => s.description === "timeout");
-      const systemTimer = socket[kTimeout];
-      const id = +systemTimer;
+      const symbol = (o, name) =>
+        Object.getOwnPropertySymbols(o).find((s) => s.description === name);
+      const systemTimer = socket[symbol(socket, "timeout")];
+      const id = systemTimer[symbol(systemTimer, "timerId")];
+      console.log(typeof id);
       Deno.refTimer(id);
       console.log(systemTimer.hasRef());
       systemTimer.ref();
@@ -827,12 +831,41 @@ Deno.test({
       systemTimer.unref();
       clearTimeout(id);
       clearInterval(id);
+      clearTimeout(String(id));
       console.log(systemTimer._destroyed);
       // The system timer is unref'd: keep the process alive past it.
       setTimeout(() => {}, 200);
     `);
     assertEquals(statusCode, 0);
-    assertEquals(output, "false\ntrue\nfalse\nsocket timeout\n");
+    assertEquals(output, "number\nfalse\ntrue\nfalse\nsocket timeout\n");
+  },
+});
+
+Deno.test({
+  name: "numeric timer APIs ignore a guessed id of a user timer",
+  permissions: { run: true, read: true },
+  fn: async () => {
+    const [statusCode, output] = await execCode(`
+      const first = setTimeout(() => {}, 1000);
+      const firstId = +first;
+      clearTimeout(firstId);
+      const timer = setTimeout(() => console.log("fired"), 20);
+      const kTimerId = Object.getOwnPropertySymbols(timer)
+        .find((s) => s.description === "timerId");
+      // The neighbouring id, never handed out by the timer itself.
+      const guessed = timer[kTimerId];
+      console.log(guessed === firstId + 1);
+      clearTimeout(guessed);
+      clearInterval(guessed);
+      clearTimeout(String(guessed));
+      Deno.unrefTimer(guessed);
+      console.log(timer._destroyed, timer.hasRef());
+      // Once handed out, the same id works.
+      const other = setTimeout(() => console.log("unexpected"), 10);
+      clearTimeout(+other);
+    `);
+    assertEquals(statusCode, 0);
+    assertEquals(output, "true\nfalse true\nfired\n");
   },
 });
 

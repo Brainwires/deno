@@ -17744,21 +17744,31 @@ where the changes are discussed.
        when there is one, else on the core timer. Node's `getActiveTimer` and
        `process.getActiveResourcesInfo()` read the core map (the latter still
        counts only refed Node.js timers).
-     - Runtime-internal (system) timers stay out of reach of a numeric id from
-       user code: core marks them (`core.kSystemTimer`), the web lookups skip
-       them, and Node's `clearTimeout` / `clearInterval` given a number or
-       string skip them too (given the `Timeout` object, as runtime-internal
-       code passes it, they still clear it). Previously the global
-       `clearTimeout(id)` could cancel, for example, a `node:net` socket's idle
-       timer by its id.
+     - A numeric (or string) id follows Node.js' rule (`knownTimersById` in
+       `lib/timers.js`): it reaches a Node.js `Timeout` only once the timer
+       handed that id out through `[Symbol.toPrimitive]()` (`+timer`), until the
+       timer fires for the last time or is cleared. A guessed id matches
+       nothing, so `clearTimeout(+t + 1)` leaves the next timer alone, and
+       runtime-internal (system) timers, whose ids are never handed out, stay
+       out of reach. `core.getKnownTimer(id)` applies the rule for the web
+       `clearTimeout` / `clearInterval`, `Deno.refTimer` / `Deno.unrefTimer` and
+       Node's `clearTimeout` / `clearInterval`; the flag lives on the owner
+       under a symbol (`core.kKnownById`), so the known set is the core map's
+       live entries and can't outlive a timer. An ownerless timer (the web
+       layer's own numeric-id timers) stays reachable by its id, its only
+       handle. Node's `clearTimeout` given an object clears it only when it is a
+       `Timeout`, and ignores other values, as Node.js does. Previously any
+       number reached any Node.js timer through the global `clearTimeout`, so a
+       stray id could cancel, for example, a `node:net` socket's idle timer.
      - Ported from are-we-dodo-yet/dodo PR #23, with the owner link as a symbol
-       rather than a property, and the system-timer guard added.
+       rather than a property, and Node.js' known-id rule added.
      - Tests: `tests/unit/timers_test.ts` (numeric `Deno.unrefTimer` /
        `Deno.refTimer` on a timeout and an interval, numeric `clearTimeout` /
        `clearInterval`, a timeout turned into an interval in its callback, the
-       map back at its baseline once timers end, numeric APIs leaving a system
-       timer alone) and `tests/unit_node/timers_test.ts`
-       (`getActiveResourcesInfo` following numeric ref / unref / clear).
+       map back at its baseline once timers end, a system timer's id and a user
+       timer's guessed neighbouring id both doing nothing) and
+       `tests/unit_node/timers_test.ts` (`getActiveResourcesInfo` following
+       numeric ref / unref / clear).
      - Node tests enabled: none; the `node_compat` timer tests pass as before.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,

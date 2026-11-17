@@ -1318,9 +1318,10 @@
     refTimer: __timers.refTimer,
     unrefTimer: __timers.unrefTimer,
     getTimer: __timers.getTimer,
+    getKnownTimer: __timers.getKnownTimer,
     getActiveTimers: __timers.getActiveTimers,
     kTimerOwner: __timers.kTimerOwner,
-    kSystemTimer: __timers.kSystemTimer,
+    kKnownById: __timers.kKnownById,
     // System timers bypass Deno's test sanitizer resource tracking.
     createSystemTimer: (callback, after, isRefed) =>
       __timers.createTimer(callback, after, undefined, false, !!isRefed, true),

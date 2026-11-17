@@ -176,10 +176,11 @@
   // Links a core timer to the object that owns it (a Node.js `Timeout`), so
   // a lookup by numeric id can act through the owner's own close/ref/unref.
   const kTimerOwner = Symbol("timerOwner");
-  // Marks a runtime-internal timer. User-facing lookups by id (the web
-  // `clearTimeout` / `clearInterval`, `Deno.refTimer` / `Deno.unrefTimer`)
-  // skip these.
-  const kSystemTimer = Symbol("systemTimer");
+  // Set on an owner once its numeric id has been handed out (a Node.js
+  // `Timeout`'s `[Symbol.toPrimitive]()`), and cleared when it ends. As in
+  // Node.js (`knownTimersById`), a lookup by a numeric id reaches an owned
+  // timer only while this is set: a guessed id never matches.
+  const kKnownById = Symbol("knownById");
 
   // The single id -> core timer map shared by the web and Node.js timer
   // layers (both take their ids from `nextTimerId`). It holds every live
@@ -194,6 +195,16 @@
 
   function getTimer(id) {
     return MapPrototypeGet(activeTimers, id);
+  }
+
+  // The timer a numeric id from user code may act on: an ownerless timer (the
+  // id is its only handle), or an owned one whose id its owner handed out.
+  function getKnownTimer(id) {
+    const timer = MapPrototypeGet(activeTimers, id);
+    if (timer === undefined) return undefined;
+    const owner = timer[kTimerOwner];
+    if (owner !== undefined && !owner[kKnownById]) return undefined;
+    return timer;
   }
 
   // Allocates a fresh array of every tracked timer on each call: meant for
@@ -411,7 +422,6 @@
       [kRefed]: isRefed,
       _timerId: id,
       [kTimerOwner]: owner,
-      [kSystemTimer]: !!isSystem,
     };
 
     if (isRefed) incRefCount();
@@ -473,9 +483,10 @@
     refTimer,
     unrefTimer,
     getTimer,
+    getKnownTimer,
     getActiveTimers,
     kTimerOwner,
-    kSystemTimer,
+    kKnownById,
     insert,
     incRefCount,
     decRefCount,
