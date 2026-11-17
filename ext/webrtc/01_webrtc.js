@@ -539,6 +539,17 @@ class RTCDataChannelEvent extends Event {
 }
 webidl.configureInterface(RTCDataChannelEvent);
 
+// RTCErrorDetailType (W3C WebRTC 1.0 section 11.1.2).
+const ERROR_DETAILS = [
+  "data-channel-failure",
+  "dtls-failure",
+  "fingerprint-failure",
+  "sctp-failure",
+  "sdp-syntax-error",
+  "hardware-encoder-not-available",
+  "hardware-encoder-error",
+];
+
 class RTCError extends DOMException {
   #init;
 
@@ -550,13 +561,18 @@ class RTCError extends DOMException {
         "Failed to construct 'RTCError': 'errorDetail' is required",
       );
     }
+    const errorDetail = String(detail);
+    if (!ArrayPrototypeIncludes(ERROR_DETAILS, errorDetail)) {
+      throw new TypeError(
+        `Failed to construct 'RTCError': '${errorDetail}' is not a valid value for 'errorDetail'`,
+      );
+    }
     this.#init = {
-      errorDetail: String(detail),
+      errorDetail,
       sdpLineNumber: init.sdpLineNumber ?? null,
       sctpCauseCode: init.sctpCauseCode ?? null,
       receivedAlert: init.receivedAlert ?? null,
       sentAlert: init.sentAlert ?? null,
-      httpRequestStatusCode: init.httpRequestStatusCode ?? null,
     };
   }
 
@@ -574,9 +590,6 @@ class RTCError extends DOMException {
   }
   get sentAlert() {
     return this.#init.sentAlert;
-  }
-  get httpRequestStatusCode() {
-    return this.#init.httpRequestStatusCode;
   }
 }
 webidl.configureInterface(RTCError);

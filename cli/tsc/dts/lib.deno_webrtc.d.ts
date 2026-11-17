@@ -1020,7 +1020,6 @@ interface RTCErrorInit {
  */
 interface RTCError extends DOMException {
   readonly errorDetail: RTCErrorDetailType;
-  readonly httpRequestStatusCode: number | null;
   readonly receivedAlert: number | null;
   readonly sctpCauseCode: number | null;
   readonly sdpLineNumber: number | null;
