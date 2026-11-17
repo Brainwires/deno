@@ -2769,6 +2769,12 @@ class RTCPeerConnection extends EventTarget {
     }
     return enqueue(this, () => {
       const state = this[_state];
+      const signaling = state.signalingState;
+      if (signaling !== "stable" && signaling !== "have-local-offer") {
+        throw invalidState(
+          `Cannot create an offer in signaling state '${signaling}'`,
+        );
+      }
       const iceRestart = !!options?.iceRestart || !!state.restartIce;
       state.restartIce = false;
       // Legacy offerToReceiveAudio / offerToReceiveVideo: a recvonly
