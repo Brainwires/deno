@@ -384,6 +384,9 @@ interface RTCRtpEncodingParameters {
   scaleResolutionDownBy?: number;
   priority?: string;
   networkPriority?: string;
+  /** Whether the sender may vary an audio frame's length with the network
+   * (it keeps the length as written; default false). */
+  adaptivePtime?: boolean;
 }
 
 /**

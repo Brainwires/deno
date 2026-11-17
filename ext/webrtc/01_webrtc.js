@@ -1755,6 +1755,9 @@ class RTCRtpSender {
       }
       out.priority = e.priority ?? "low";
       out.networkPriority = e.networkPriority ?? "low";
+      // webrtc-extensions: whether the sender may vary its frame length (it
+      // never does; the member is kept as set).
+      out.adaptivePtime = e.adaptivePtime ?? false;
       return out;
     });
     const hasNegotiated = transceiver[_state].currentDirection !== null;
@@ -2497,6 +2500,7 @@ function validateEncodings(list, kind, method, keepRid) {
     if (e.networkPriority !== undefined) {
       enc.networkPriority = String(e.networkPriority);
     }
+    if (e.adaptivePtime !== undefined) enc.adaptivePtime = !!e.adaptivePtime;
     ArrayPrototypePush(out, enc);
   }
   return out;
