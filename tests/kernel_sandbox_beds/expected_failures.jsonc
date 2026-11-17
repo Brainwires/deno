@@ -1,0 +1,1268 @@
+// denext (DENEXT.md item 451): the reviewed list of what fails when the suites
+// run under DENO_INTERNAL_KERNEL_SANDBOX_FORCE (README.md). Keys: the forced
+// mode, then the suite, then test names (a trailing `*` is a prefix); `os`
+// limits an entry to some OSes (`linux`, `darwin`; default: every OS);
+// `reason` says why. Nothing here is skipped: the tests run, and compare.ts
+// fails a bed on any failure not listed.
+{
+  "enforce": {
+    // Linux, the first pass's final binary (200 of 3913 fail; 279 before the
+    // fixes this pass made): every entry is a documented gap, another phase's
+    // (P6 subprocess / TTY, P8 broker), a known item 425 re-exec or hand-over
+    // bug, or explicitly "to triage" in the second pass
+    "specs": {
+      "specs::bundle::require_browser::api": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::bundle::worker::bundle_in_worker": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::bundle::workspace_registry::workspace_registry_only_applies_to_project_dependencies": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::cert::cafile_url_imports_unsafe_ssl": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 re-exec): a startup warning prints in both images"
+      },
+      "specs::cert::deno_land_unsafe_ssl": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 re-exec): a startup warning prints in both images"
+      },
+      "specs::cert::ip_address_unsafe_ssl": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 re-exec): a startup warning prints in both images"
+      },
+      "specs::clean::entrypoint::jsr_http": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::clean::entrypoint::vendor": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::cli::otel_basic::uncaught": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::compile::crash_report::selftest_writes_one_report": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::compile::ffi": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::compile::node_pty_addon": {
+        "os": [
+          "linux"
+        ],
+        "reason": "the TTY rule (P6): opening a pseudo-terminal under enforce"
+      },
+      "specs::coverage::missing_source_file": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (P5 second pass): a confined run's emits are in its overlay, which `deno coverage` (unconfined) never reads"
+      },
+      "specs::coverage::signal_flush::run_own_listener": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::coverage::signal_flush::test_sigint": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::coverage::signal_flush::test_sigint_twice": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::import_map::import_map_config::run_config": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 re-exec): a startup warning prints in both images"
+      },
+      "specs::install::bundled_deps_prefers": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::install::ci_vendor_type_only_import": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::install::package_json_invalid_alias::leading_dot_hoisted": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (P5 second pass): linked or out-of-project packages (npm links, jsr deps in node_modules) aren't in the read scope"
+      },
+      "specs::install::package_json_invalid_alias::leading_dot_isolated": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (P5 second pass): linked or out-of-project packages (npm links, jsr deps in node_modules) aren't in the read scope"
+      },
+      "specs::jsr::worker": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::kernel_sandbox::enforce::default_unaffected": {
+        "os": [
+          "linux"
+        ],
+        "reason": "by design: asserts the kernel sandbox's unforced behaviour (the mode, the report, -A and the default unaffected), which the force changes"
+      },
+      "specs::kernel_sandbox::policy::broker_refuses": {
+        "os": [
+          "linux"
+        ],
+        "reason": "by design: asserts the kernel sandbox's unforced behaviour (the mode, the report, -A and the default unaffected), which the force changes"
+      },
+      "specs::kernel_sandbox::policy::config": {
+        "os": [
+          "linux"
+        ],
+        "reason": "by design: asserts the kernel sandbox's unforced behaviour (the mode, the report, -A and the default unaffected), which the force changes"
+      },
+      "specs::kernel_sandbox::policy::env_never_raises": {
+        "os": [
+          "linux"
+        ],
+        "reason": "by design: asserts the kernel sandbox's unforced behaviour (the mode, the report, -A and the default unaffected), which the force changes"
+      },
+      "specs::kernel_sandbox::policy::report": {
+        "os": [
+          "linux"
+        ],
+        "reason": "by design: asserts the kernel sandbox's unforced behaviour (the mode, the report, -A and the default unaffected), which the force changes"
+      },
+      "specs::kernel_sandbox::policy::report_allow_all": {
+        "os": [
+          "linux"
+        ],
+        "reason": "by design: asserts the kernel sandbox's unforced behaviour (the mode, the report, -A and the default unaffected), which the force changes"
+      },
+      "specs::kernel_sandbox::policy::report_explicit_auto": {
+        "os": [
+          "linux"
+        ],
+        "reason": "by design: asserts the kernel sandbox's unforced behaviour (the mode, the report, -A and the default unaffected), which the force changes"
+      },
+      "specs::kernel_sandbox::policy::warn": {
+        "os": [
+          "linux"
+        ],
+        "reason": "by design: asserts the kernel sandbox's unforced behaviour (the mode, the report, -A and the default unaffected), which the force changes"
+      },
+      "specs::lockfile::frozen_lockfile::non_analyzable_dynamic_http": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::lockfile::frozen_lockfile::non_analyzable_dynamic_jsr": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::lockfile::frozen_lockfile::non_analyzable_dynamic_npm": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::lockfile::run_overlapping_npm_constraints::non_analyzable_dynamic": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): a nested deno started by the confined program (exec / clamp rules are P6's)"
+      },
+      "specs::node::child_process_deno_child_all_permissions::granted_run": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): children started by the confined program"
+      },
+      "specs::node::child_process_deno_child_all_permissions::no_run_permission": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): children started by the confined program"
+      },
+      "specs::node::child_process_extra_pipes": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): children started by the confined program"
+      },
+      "specs::node::child_process_shell_escape::shell_args_escaped": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::node::cjs_dynamic_import_esm_with_exports": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 hand-over): the confined image's static graph differs from the first image's (a linked or typed remote module); P5 second pass"
+      },
+      "specs::node::fd_sockets::inherited_fd_permissions": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::node::fd_sockets::pty_fd": {
+        "os": [
+          "linux"
+        ],
+        "reason": "the TTY rule (P6): opening a pseudo-terminal under enforce"
+      },
+      "specs::node::fd_sockets::pty_fd_no_permissions": {
+        "os": [
+          "linux"
+        ],
+        "reason": "the TTY rule (P6): opening a pseudo-terminal under enforce"
+      },
+      "specs::node::fs_cp_ignored_permissions": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): chmod / utime by path are refused inside a scoped write on Linux (fail-closed gap)"
+      },
+      "specs::node::fs_cp_relative_dest": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): chmod / utime by path are refused inside a scoped write on Linux (fail-closed gap)"
+      },
+      "specs::node::http_address_override::https_duplicate_unix": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::node::http_address_override::unix_duplicate": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::node::http_address_override::unix_override_only": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::node::http_proxy_agent_false::connect_with_agent_false_is_direct": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::node::http_proxy_crlf_target::crlf_target_is_refused": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::node::http_proxy_target_permission::target_denied_is_blocked": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::node::module_register_hooks_esm::import_attributes_custom": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::node::module_register_hooks_esm::load_import_attributes": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::node::node_debug": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::node::node_mode_error_output::node_mode": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::node::node_test_cli::coverage_threshold": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::node::node_test_cli::failure_stack_frames": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::node::node_test_cli::missing_file": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::node::node_test_cli::rerun_failures": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::node::node_test_cli::rerun_failures_invalid_file": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::node::process_exec_argv::flags": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 re-exec): process.execArgv shows the confined image's added --cached-only"
+      },
+      "specs::node::process_exec_argv::no_flags": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 re-exec): process.execArgv shows the confined image's added --cached-only"
+      },
+      "specs::node::tcp_numeric_deny::numeric_aliases": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::node::tls_happy_eyeballs::tls_happy_eyeballs": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::node::trace_sigint::listener_keeps_the_signal": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::npm::adding_npm_dep_in_dynamic_import": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::npm::byonm_remote_entrypoint::jsr_main_module": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 hand-over): the confined image compiles a different policy (workspace glob members or pnpm-workspace discovery the confined image can't list); P5 second pass"
+      },
+      "specs::npm::byonm_require_link_escape": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 hand-over): the confined image's static graph differs from the first image's (a linked or typed remote module); P5 second pass"
+      },
+      "specs::npm::byonm_run_npm::not_in_deps": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::npm::compare_globals": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 re-exec): process.execArgv shows the confined image's added --cached-only"
+      },
+      "specs::npm::dynamic_import": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::npm::dynamic_import_invalid_package_name": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::npm::jsr_deps_in_node_modules::install_into_node_modules": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::npm::link_npm_package_deep::node_modules_dir_auto": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (P5 second pass): linked or out-of-project packages (npm links, jsr deps in node_modules) aren't in the read scope"
+      },
+      "specs::npm::link_npm_package_not_on_registry::node_modules_dir_auto": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (P5 second pass): linked or out-of-project packages (npm links, jsr deps in node_modules) aren't in the read scope"
+      },
+      "specs::npm::link_npm_package_top_level::node_modules_dir_auto": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (P5 second pass): linked or out-of-project packages (npm links, jsr deps in node_modules) aren't in the read scope"
+      },
+      "specs::npm::min_dep_age_full_packument_not_found": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::npm::no_shasums": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::npm::node_project_ts_resolution::package_json_project": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (P5 second pass): linked or out-of-project packages (npm links, jsr deps in node_modules) aren't in the read scope"
+      },
+      "specs::npm::npm_check_updates": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::npm::npm_shim::npm_shim": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::npm::npmrc_alongside_jsr_scope": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::npm::supply_chain_jail::escapes_denied_linux": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::npm::types_only_subpath::elided_check": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 hand-over): the confined image's static graph differs from the first image's (a linked or typed remote module); P5 second pass"
+      },
+      "specs::npm::unanalyzable_dynamic_import": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::npm::worker_shutdown_during_npm_import::with_lock": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::npm::worker_shutdown_during_npm_import::without_lock": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::npm::workers": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::npm::workspace_basic::node_modules_dir": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::npm::workspace_sub_deno_json::member": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::npm::workspace_sub_deno_json::member_with_deno_json": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::npm::workspace_wildcards": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 hand-over): the confined image compiles a different policy (workspace glob members or pnpm-workspace discovery the confined image can't list); P5 second pass"
+      },
+      "specs::permission::allow_import_worker::allowed": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::permission::chmod_ancestor_of_deny::deno_and_node": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::cp_symlink_ancestor_of_deny::node_cp": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::deny_net_fetch_resolved_ip::deny_net_fetch_resolved_ip": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::deny_net_node_tcp_wrap_bind_resolved_ip::deny_net_node_tcp_wrap_bind_resolved_ip": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::deny_net_node_tcp_wrap_bind_resolved_ip::numeric_aliases": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::deny_net_numeric_hostname::deny_net_numeric_hostname": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::deny_net_numeric_hostname_subnet::deny_net_numeric_hostname_subnet": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::deny_net_websocket_resolved_ip::deny_net_websocket_resolved_ip": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::deny_scope_alias::deny_write_scope_alias": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::futime_deny::deny_scope": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::make_temp_write_perm::reduced_perms": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::permission::net_directional::deny_net_listen_blocks_listen_with_connect_allow": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::net_directional_audit": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::net_directional_ops::connect_only": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): port-scoped network is coarser than Deno's checks (held by port on ABI 4+)"
+      },
+      "specs::permission::net_directional_ops::deny_connect": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): port-scoped network is coarser than Deno's checks (held by port on ABI 4+)"
+      },
+      "specs::permission::net_directional_ops::deny_listen": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): port-scoped network is coarser than Deno's checks (held by port on ABI 4+)"
+      },
+      "specs::permission::net_directional_ops::legacy_deny_net": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): port-scoped network is coarser than Deno's checks (held by port on ABI 4+)"
+      },
+      "specs::permission::net_directional_ops::listen_only": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): port-scoped network is coarser than Deno's checks (held by port on ABI 4+)"
+      },
+      "specs::permission::net_directional_ops::no_net": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): port-scoped network is coarser than Deno's checks (held by port on ABI 4+)"
+      },
+      "specs::permission::net_directional_ops::resolved_deny_connect": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::net_directional_ops::resolved_deny_listen": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::net_directional_ops::unix_connect_only": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::net_directional_ops::unix_legacy_allow_net": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::net_directional_ops::unix_listen_only": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::net_directional_ops::unix_scoped": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::net_directional_ops::worker_inherits_direction": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::node_net_connect_refused_addresses::refused_addresses": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::node_net_perm_token_graft::node_net_perm_token_graft": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::node_pipe_wrap_net_perm::node_pipe_wrap_abstract_socket": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (review F1): abstract Unix sockets need an explicit grant under enforce"
+      },
+      "specs::permission::proc_sys_classes::config_permission_set": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 re-exec): a startup warning prints in both images"
+      },
+      "specs::permission::read_partial_ancestor_of_deny::recursive_remove_blocked_by_denied_descendant": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::read_partial_ancestor_of_deny::stat_ancestor_of_denied_write": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::remove_link_ancestor_of_deny": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::rename_ancestor_of_deny": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::symlink_ancestor_of_deny::deno_and_node": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::symlink_resolve_deny::deny_write": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::unix_socket_posix_flag::posix_unix_socket_flag": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::wasi_link_no_follow::node_wasi": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::wasi_open_dangling_link::node_wasi": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::wasi_rename_ancestor_of_deny::node_wasi": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::wasi_symlink_target::node_wasi": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::permission::watch_fs_deny_scope::node_fs_watch": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (review F7): a read deny inside an allow is held by expansion on Linux, so a watch on the expanded folder sees nothing"
+      },
+      "specs::permission::watch_fs_deny_scope::watch_fs": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (review F7): a read deny inside an allow is held by expansion on Linux, so a watch on the expanded folder sees nothing"
+      },
+      "specs::permission::watch_fs_deny_scope::watch_fs_nolink": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (review F7): a read deny inside an allow is held by expansion on Linux, so a watch on the expanded folder sees nothing"
+      },
+      "specs::permission::write_allow_binary": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::run::045_proxy": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::run::_027_redirect_typescript_vendor_dir": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::run::cjs::non_utf8_path": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::run::config": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::run::config_permissions::basic::no_default": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 re-exec): a startup warning prints in both images"
+      },
+      "specs::run::config_permissions::basic::read_data": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 re-exec): a startup warning prints in both images"
+      },
+      "specs::run::config_permissions::basic::write": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::run::config_permissions::workspace::member": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 re-exec): a startup warning prints in both images"
+      },
+      "specs::run::config_permissions::workspace::root": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 re-exec): a startup warning prints in both images"
+      },
+      "specs::run::config_types": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 hand-over): the confined image's static graph differs from the first image's (a linked or typed remote module); P5 second pass"
+      },
+      "specs::run::config_types_remote": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 hand-over): the confined image's static graph differs from the first image's (a linked or typed remote module); P5 second pass"
+      },
+      "specs::run::crash_report::hanging_endpoint_is_bounded": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::run::crash_report::selftest_writes_one_report": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::run::default_ts::stdin": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a program read from stdin can't be re-executed under enforce"
+      },
+      "specs::run::deny_some_permission_args": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::run::dir_entrypoint::main_is_a_directory": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::run::dir_entrypoint::package_json_main": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::run::dynamic_import_concurrent_non_statically_analyzable": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::run::dynamic_import_dep_written_runtime_with_npm": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::run::dynamic_import_permissions_blob_remote": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::run::dynamic_import_permissions_remote_remote": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::run::error_015_dynamic_import_permissions": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::run::eszip": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): this command has no graph-first apply, so enforce refuses it"
+      },
+      "specs::run::eszip2": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): this command has no graph-first apply, so enforce refuses it"
+      },
+      "specs::run::exit_output_complete": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::run::ffi_relative_path": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::run::import_blob_url_imports": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::run::import_map_bare_specifier::relative_path_not_mapped": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::run::jsx_import_source::jsx_import_source_pragma_with_config_vendor_dir": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::run::lazy_dynamic_imports::enabled_config": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::run::lazy_dynamic_imports::enabled_flag": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::run::permission_args": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::run::pnpm_workspace_auto_migrate::auto_migrate_on_resolution_failure": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 hand-over): the confined image compiles a different policy (workspace glob members or pnpm-workspace discovery the confined image can't list); P5 second pass"
+      },
+      "specs::run::require_esm_npm_jsr": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::run::require_modules_multiple": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::run::run_coverage::run_coverage": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (P5 second pass): a confined run's emits are in its overlay, which `deno coverage` (unconfined) never reads"
+      },
+      "specs::run::run_coverage::run_coverage_env": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (P5 second pass): a confined run's emits are in its overlay, which `deno coverage` (unconfined) never reads"
+      },
+      "specs::run::run_coverage::test_child_process_coverage": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (P5 second pass): a confined run's emits are in its overlay, which `deno coverage` (unconfined) never reads"
+      },
+      "specs::run::run_task::deno_run_task_colon": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::run::serve_address_override_only_once::serve_address_override_only_once": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 re-exec): DENO_SERVE_ADDRESS is bound in the first image too"
+      },
+      "specs::run::sourcemap_external": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (P5 second pass): a module's external source map isn't in the read scope (only module files are)"
+      },
+      "specs::run::sourcemap_nonexistent_source::not_node_modules": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (P5 second pass): a module's external source map isn't in the read scope (only module files are)"
+      },
+      "specs::run::sourcemap_remote::basic": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (P5 second pass): a module's external source map isn't in the read scope (only module files are)"
+      },
+      "specs::run::sslkeylogfile::writes_keylog": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::run::stdin_cjs": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a program read from stdin can't be re-executed under enforce"
+      },
+      "specs::run::type_directives_02": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 hand-over): the confined image's static graph differs from the first image's (a linked or typed remote module); P5 second pass"
+      },
+      "specs::run::unstable_cron_socket_basic": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::run::unstable_cron_socket_reload": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::run::unstable_cron_socket_serve_reject": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::run::webstorage_serialization": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::serve::memory_address::tcp_refuses_forged_memory_target": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::serve::net_permissions_config_file": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::sql::pg_client_errors": {
+        "os": [
+          "linux"
+        ],
+        "reason": "enforce refuses rules the OS can't hold here (host-scoped network, scoped Unix sockets, write denies inside an allow, abstract sockets before Landlock ABI 6): the broker (Mode B, P8) holds them"
+      },
+      "specs::task::recursive_parallel": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
+      },
+      "specs::upgrade::delta": {
+        "os": [
+          "linux"
+        ],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
+      },
+      "specs::worker::worker_permissions_blob_remote": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::worker::worker_permissions_data_remote": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::worker::worker_permissions_dynamic_remote": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::worker::worker_permissions_remote_remote": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::worker::worker_permissions_static_remote_local": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::workspaces::vendor": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
+      },
+      "specs::x::permission_flags::deny_write_jsr": {
+        "os": [
+          "linux"
+        ],
+        "reason": "to fix (item 425 hand-over): the confined image compiles a different policy (workspace glob members or pnpm-workspace discovery the confined image can't list); P5 second pass"
+      }
+    },
+    "node_compat": {
+      "node_compat::internet::test-dgram-broadcast-multi-process.js": {
+        "os": ["linux"],
+        "reason": "fails on the Linux bed host with and without the force (multicast, DNS result order, IPv6 happy eyeballs depend on the host's network); listed until a CI run shows whether the force changes it"
+      },
+      "node_compat::internet::test-dgram-multicast-multi-process.js": {
+        "os": ["linux"],
+        "reason": "fails on the Linux bed host with and without the force (multicast, DNS result order, IPv6 happy eyeballs depend on the host's network); listed until a CI run shows whether the force changes it"
+      },
+      "node_compat::internet::test-dgram-multicast-ssm-multi-process.js": {
+        "os": ["linux"],
+        "reason": "fails on the Linux bed host with and without the force (multicast, DNS result order, IPv6 happy eyeballs depend on the host's network); listed until a CI run shows whether the force changes it"
+      },
+      "node_compat::internet::test-dns-getDefaultResultOrder.js": {
+        "os": ["linux"],
+        "reason": "fails on the Linux bed host with and without the force (multicast, DNS result order, IPv6 happy eyeballs depend on the host's network); listed until a CI run shows whether the force changes it"
+      },
+      "node_compat::internet::test-net-autoselectfamily-events-failure.js": {
+        "os": ["linux"],
+        "reason": "fails on the Linux bed host with and without the force (multicast, DNS result order, IPv6 happy eyeballs depend on the host's network); listed until a CI run shows whether the force changes it"
+      },
+      "node_compat::internet::test-net-autoselectfamily-timeout-close.js": {
+        "os": ["linux"],
+        "reason": "fails on the Linux bed host with and without the force (multicast, DNS result order, IPv6 happy eyeballs depend on the host's network); listed until a CI run shows whether the force changes it"
+      },
+      "node_compat::parallel::test-net-autoselectfamily.js": {
+        "os": ["linux"],
+        "reason": "fails on the Linux bed host with and without the force (multicast, DNS result order, IPv6 happy eyeballs depend on the host's network); listed until a CI run shows whether the force changes it"
+      },
+      "node_compat::parallel::test-permission-allow-child-process-cli.js": {
+        "os": ["linux"],
+        "reason": "subprocess policy (P6): child_process.fork of this runtime under a scoped --allow-run is refused (EACCES at exec); the run/exec rule for nested deno is P6's"
+      },
+      "node_compat::parallel::test-runner-reporters.js": {
+        "os": ["linux"],
+        "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr when a child exits non-zero, and the test compares that stderr; where the hint goes is P6's"
+      }
+    },
+    "npm_matrix": {
+      "node-pty": {
+        "os": ["darwin"],
+        "reason": "the TTY rule (P6): the macOS profile allows no pseudo-terminal, so node-pty's spawn is refused (EPERM) even under -A; Linux passes"
+      }
+    },
+    "denext_integration": {},
+    "denext_e2e": {}
+  },
+  // project mode is the exploratory bed for implicit-set gaps (an unscoped
+  // grant narrowed to the project): not curated yet, so it gates nothing.
+  // Its first run (Linux node_compat: about 500 of 3878 fail, most of them a
+  // nested deno that can't read its own /proc/self, P6) is in the item 451
+  // report
+  "project": {
+    "specs": {},
+    "node_compat": {},
+    "npm_matrix": {},
+    "denext_integration": {},
+    "denext_e2e": {}
+  }
+}

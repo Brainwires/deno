@@ -1,0 +1,282 @@
+# The forced kernel sandbox beds (DENEXT.md item 451): the suites run with
+# DENO_INTERNAL_KERNEL_SANDBOX_FORCE set, so every `deno run` / `deno serve`
+# they start runs under --kernel-sandbox=enforce (`-A` included; `project`
+# also narrows an unscoped read / write grant, for the kernel only, to the
+# project, the working directory and the temp folder). Each suite's failures
+# are compared with the reviewed list in
+# tests/kernel_sandbox_beds/expected_failures.jsonc: a failure that isn't
+# listed for the OS fails the job, a listed entry that passed is reported as
+# stale.
+#
+# Linux always; `macos: true` adds specs and node_compat on macOS arm64 (the
+# npm matrix needs Docker for its services, and denext's suites run on Linux).
+# Dispatched by hand only (no schedule): before a kernel sandbox default
+# changes, and on a train that touches the sandbox.
+name: denext kernel sandbox beds
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: The forced mode (enforce = each run's own grant; project = -A narrowed to the project for the kernel)
+        type: choice
+        options: [enforce, project]
+        default: enforce
+      suites:
+        description: Comma-separated suites (specs, node_compat, npm_matrix, denext)
+        type: string
+        default: specs,node_compat,npm_matrix,denext
+      denext_ref:
+        description: The Brainwires/denext ref whose integration and e2e suites run on this runtime
+        type: string
+        default: development
+      macos:
+        description: Also run specs and node_compat on macOS arm64 (our pool while it has a free slot, else macos-15)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: denext-kernel-beds-${{ github.ref }}-${{ inputs.force }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  RUST_BACKTRACE: full
+  TOOLS_DENO_VERSION: 2.9.7
+  # the forced mode (a choice input), read by compare.ts's --force
+  KERNEL_BED_FORCE: ${{ inputs.force }}
+
+jobs:
+  # Where each bed runs: our pools while they have a free slot, else GitHub's
+  # images at once (the shared pick-runners action).
+  runners:
+    name: pick runners
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read # the repository's queued / running jobs
+    outputs:
+      plan: ${{ steps.pick.outputs.plan }}
+    steps:
+      - id: pick
+        uses: Brainwires/.github/actions/pick-runners@0285478f4ade2850db7708170074bf11c0e95545 # pick-runners
+        with:
+          jobs: specs=linux-x64@ubuntu-24.04 node_compat=linux-x64@ubuntu-24.04 npm_matrix=linux-x64-docker@ubuntu-22.04 denext=linux-x64@ubuntu-24.04 specs_macos=macos-arm64@macos-15 node_compat_macos=macos-arm64@macos-15
+          vars: ${{ toJSON(vars) }}
+
+  specs:
+    name: specs ${{ matrix.os }} (forced ${{ inputs.force }})
+    needs: runners
+    if: ${{ !cancelled() && contains(format(',{0},', inputs.suites), ',specs,') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.macos && '["linux","macos"]' || '["linux"]') }}
+    runs-on: ${{ matrix.os == 'macos' && (fromJSON(needs.runners.outputs.plan || '{}').specs_macos || 'macos-15') || (fromJSON(needs.runners.outputs.plan || '{}').specs || 'ubuntu-24.04') }}
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          submodules: false
+      - name: Clone submodule ./tests/util/std
+        run: git submodule update --init --recursive --depth=1 -- ./tests/util/std
+      - uses: ./.github/denext-tests/setup
+        with:
+          cache-key: kernel-beds-specs
+      - name: Build debug
+        run: cargo build --locked --bin deno --bin denort --bin test_server && cargo build -p test_ffi
+      - name: Specs under the forced kernel sandbox
+        env:
+          DENO_INTERNAL_KERNEL_SANDBOX_FORCE: ${{ inputs.force }}
+        run: |
+          set -o pipefail
+          cargo test -p specs_tests --test specs 2>&1 | tee specs.log || true
+      - name: Compare with the expected failures
+        run: deno run -A tests/kernel_sandbox_beds/compare.ts --force "$KERNEL_BED_FORCE" --suite specs --cargo-log specs.log --json specs.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: kernel-beds-specs-${{ matrix.os }}-${{ inputs.force }}
+          path: |
+            specs.log
+            specs.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  node_compat:
+    name: node_compat ${{ matrix.os }} (forced ${{ inputs.force }})
+    needs: runners
+    if: ${{ !cancelled() && contains(format(',{0},', inputs.suites), ',node_compat,') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.macos && '["linux","macos"]' || '["linux"]') }}
+    runs-on: ${{ matrix.os == 'macos' && (fromJSON(needs.runners.outputs.plan || '{}').node_compat_macos || 'macos-15') || (fromJSON(needs.runners.outputs.plan || '{}').node_compat || 'ubuntu-24.04') }}
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          submodules: false
+      - name: Clone submodules
+        run: |
+          git submodule update --init --recursive --depth=1 -- ./tests/util/std
+          git submodule update --init --depth=1 -- ./tests/node_compat/runner/suite
+      - uses: ./.github/denext-tests/setup
+        with:
+          cache-key: kernel-beds-node-compat
+          libclang: 'false'
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+      - name: Build debug
+        run: cargo build --locked --bin deno --bin test_server
+      - name: node_compat under the forced kernel sandbox
+        env:
+          DENO_INTERNAL_KERNEL_SANDBOX_FORCE: ${{ inputs.force }}
+        run: |
+          set -o pipefail
+          cargo test -p node_compat_tests --test node_compat 2>&1 | tee node_compat.log || true
+      - name: Compare with the expected failures
+        run: deno run -A tests/kernel_sandbox_beds/compare.ts --force "$KERNEL_BED_FORCE" --suite node_compat --cargo-log node_compat.log --json node_compat.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: kernel-beds-node-compat-${{ matrix.os }}-${{ inputs.force }}
+          path: |
+            node_compat.log
+            node_compat.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  npm_matrix:
+    name: npm matrix (forced ${{ inputs.force }})
+    needs: runners
+    if: ${{ !cancelled() && contains(format(',{0},', inputs.suites), ',npm_matrix,') }}
+    # The docker-enabled Linux pool (services.sh starts its registries with
+    # Docker), else GitHub's ubuntu-22.04.
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').npm_matrix || 'ubuntu-22.04' }}
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          submodules: false
+      - name: Clone submodule ./tests/util/std
+        run: git submodule update --init --recursive --depth=1 -- ./tests/util/std
+      - uses: ./.github/denext-tests/setup
+        with:
+          cache-key: npm-matrix
+      - name: Build debug
+        run: cargo build --locked --bin deno
+      - name: Start the services
+        run: tests/npm_matrix/services.sh up
+      - name: The matrix under the forced kernel sandbox
+        env:
+          DENO_INTERNAL_KERNEL_SANDBOX_FORCE: ${{ inputs.force }}
+        run: |
+          # run.ts runs on the tools deno, which ignores the variable; it
+          # forwards it to each case's deno (this runtime)
+          deno run -A --config=tests/config/deno.json tests/npm_matrix/run.ts \
+            --deno target/debug/deno --jobs 3 --json npm-matrix.jsonl || true
+      - name: Stop the services
+        if: always()
+        run: tests/npm_matrix/services.sh down
+      - name: Compare with the expected failures
+        run: deno run -A tests/kernel_sandbox_beds/compare.ts --force "$KERNEL_BED_FORCE" --suite npm_matrix --npm-jsonl npm-matrix.jsonl --json npm_matrix.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: kernel-beds-npm-matrix-${{ inputs.force }}
+          path: |
+            npm-matrix.jsonl
+            npm_matrix.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  denext:
+    name: denext integration + e2e (forced ${{ inputs.force }})
+    needs: runners
+    if: ${{ !cancelled() && contains(format(',{0},', inputs.suites), ',denext,') }}
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').denext || 'ubuntu-24.04' }}
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          submodules: false
+      - uses: ./.github/denext-tests/setup
+        with:
+          cache-key: kernel-beds-denext
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+      - name: Build debug
+        run: cargo build --locked --bin deno --bin denort
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Brainwires/denext
+          ref: ${{ inputs.denext_ref }}
+          path: denext
+          persist-credentials: false
+      - name: This runtime as denext's Deno
+        run: |
+          mkdir -p "$RUNNER_TEMP/rt"
+          ln -sf "$GITHUB_WORKSPACE/target/debug/deno" "$RUNNER_TEMP/rt/deno"
+          echo "$RUNNER_TEMP/rt" >> "$GITHUB_PATH"
+          echo "DENEXT_DENO=$GITHUB_WORKSPACE/target/debug/deno" >> "$GITHUB_ENV"
+      - name: Playwright's Chromium (e2e)
+        working-directory: denext
+        run: deno run -A npm:playwright-core@1.63.0 install ${{ runner.environment == 'github-hosted' && '--with-deps' || '' }} chromium || true
+      # test-run.ts is itself a `deno run`: under the force, the whole test
+      # tree runs inside its sandbox (children of a confined process aren't
+      # forced again; they inherit it)
+      - name: denext integration under the forced kernel sandbox
+        working-directory: denext
+        env:
+          DENO_INTERNAL_KERNEL_SANDBOX_FORCE: ${{ inputs.force }}
+        run: |
+          set -o pipefail
+          deno task test:integration 2>&1 | tee ../denext_integration.log || true
+      - name: denext e2e under the forced kernel sandbox
+        working-directory: denext
+        env:
+          DENO_INTERNAL_KERNEL_SANDBOX_FORCE: ${{ inputs.force }}
+        run: |
+          set -o pipefail
+          deno task test:e2e 2>&1 | tee ../denext_e2e.log || true
+      - name: Compare with the expected failures
+        run: |
+          rc=0
+          deno run -A tests/kernel_sandbox_beds/compare.ts --force "$KERNEL_BED_FORCE" --suite denext_integration --deno-test-log denext_integration.log --json denext_integration.json || rc=1
+          deno run -A tests/kernel_sandbox_beds/compare.ts --force "$KERNEL_BED_FORCE" --suite denext_e2e --deno-test-log denext_e2e.log --json denext_e2e.json || rc=1
+          exit $rc
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: kernel-beds-denext-${{ inputs.force }}
+          path: |
+            denext_integration.log
+            denext_e2e.log
+            denext_integration.json
+            denext_e2e.json
+          if-no-files-found: ignore
+          retention-days: 14

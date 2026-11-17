@@ -1108,6 +1108,10 @@ async fn resolve_flags_and_init(
   // remote modules from the cache only (its first image fetched the graph)
   if sandbox::enforce::confined_at_startup() {
     flags.cached_only = true;
+    // and it doesn't type-check again: the first image checked the static
+    // graph before the re-exec (the checker runs as a child process, which a
+    // confined run without a run grant can't start; item 451)
+    flags.type_check_mode = deno_cli_parser::flags::TypeCheckMode::None;
   }
   // denext: a jailed npm lifecycle script, or a process inside a kernel
   // sandbox an ancestor applied, can't install or fetch packages
@@ -1126,8 +1130,19 @@ async fn resolve_flags_and_init(
   deno_lib::kernel_sandbox::snapshot_env_override(
     std::env::var(deno_lib::kernel_sandbox::KERNEL_SANDBOX_ENV_VAR).ok(),
   );
+  // denext: the test harnesses' forced enforce (DENEXT.md item 451), read
+  // at the same point
+  deno_lib::kernel_sandbox::snapshot_forced(
+    std::env::var(deno_lib::kernel_sandbox::KERNEL_SANDBOX_FORCE_ENV_VAR).ok(),
+  );
 
-  if let Some(files) = &flags.env_file {
+  // denext: a process confined by the kernel sandbox at startup doesn't load
+  // the env files again: the image before it loaded them into the
+  // environment it handed over (item 451), and the files (often secrets)
+  // stay out of the confined process's read scope
+  if let Some(files) = &flags.env_file
+    && !sandbox::enforce::confined_at_startup()
+  {
     let cwd = match &flags.initial_cwd {
       Some(cwd) => Cow::Borrowed(cwd),
       None => match resolve_cwd(None) {

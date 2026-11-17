@@ -31,7 +31,9 @@ use deno_core::anyhow::bail;
 use deno_core::error::AnyError;
 use deno_core::serde_json;
 use deno_lib::kernel_sandbox::AutoPlan;
+use deno_lib::kernel_sandbox::ForcedEnforce;
 use deno_lib::kernel_sandbox::KERNEL_SANDBOX_ENV_VAR;
+use deno_lib::kernel_sandbox::KERNEL_SANDBOX_FORCE_ENV_VAR;
 use deno_lib::kernel_sandbox::KernelSandboxMode;
 use deno_lib::kernel_sandbox::ModeInputs;
 use deno_lib::kernel_sandbox::ModeReason;
@@ -173,12 +175,76 @@ fn under_denext_dev() -> bool {
   std::env::var_os("DENEXT_DEV_TOKEN").is_some()
 }
 
+/// The harnesses' forced enforce (`DENO_INTERNAL_KERNEL_SANDBOX_FORCE`,
+/// item 451), for the subcommands `enforce` covers (`run`, `serve`), and not
+/// for a child of a confined process (its parent's sandbox already holds it;
+/// nesting is the subprocess policy's).
+fn forced_for(subcommand: &DenoSubcommand) -> Option<ForcedEnforce> {
+  let forced = match deno_lib::kernel_sandbox::forced() {
+    Ok(forced) => forced?,
+    Err(value) => {
+      static WARN: Once = Once::new();
+      WARN.call_once(|| {
+        log::warn!(
+          "{} {KERNEL_SANDBOX_FORCE_ENV_VAR}={value:?} is ignored: it accepts only \"enforce\" and \"project\"",
+          crate::colors::yellow("Warning"),
+        );
+      });
+      return None;
+    }
+  };
+  if !matches!(
+    subcommand,
+    DenoSubcommand::Run(_) | DenoSubcommand::Serve(_)
+  ) {
+    return None;
+  }
+  if enforce::confined_by_a_parent() {
+    return None;
+  }
+  Some(forced)
+}
+
+/// The grant the kernel policy is compiled from: the run's own, or under the
+/// harness's `project` force an unscoped read / write narrowed to the
+/// workspace, the working directory and the temp folder (Deno's checks keep
+/// the run's own grant, so what the kernel refuses beyond them shows what the
+/// implicit set lacks).
+fn policy_options(
+  cli_options: &CliOptions,
+  options: &PermissionsOptions,
+) -> PermissionsOptions {
+  if forced_for(&cli_options.flags().subcommand) != Some(ForcedEnforce::Project)
+  {
+    return options.clone();
+  }
+  let mut out = options.clone();
+  let mut roots: Vec<String> = [
+    cli_options.start_dir.workspace.root_dir_path(),
+    cli_options.initial_cwd().to_path_buf(),
+    #[allow(clippy::disallowed_methods, reason = "the real temp folder")]
+    std::env::temp_dir(),
+  ]
+  .iter()
+  .filter_map(|p| p.to_str().map(|s| s.to_string()))
+  .collect();
+  roots.sort();
+  roots.dedup();
+  for list in [&mut out.allow_read, &mut out.allow_write] {
+    if list.as_ref().is_some_and(|l| l.is_empty()) {
+      *list = Some(roots.clone());
+    }
+  }
+  out
+}
+
 fn mode_inputs(
   cli_options: &CliOptions,
   options: &PermissionsOptions,
 ) -> Result<ModeInputs, AnyError> {
   let flags = cli_options.flags();
   Ok(ModeInputs {
+    forced: forced_for(&flags.subcommand),
     kind: Some(run_kind(&flags.subcommand)),
     flag: flag_mode(cli_options)?,
     env: env_override_warned(),
@@ -229,17 +295,36 @@ fn context_for(
     clippy::disallowed_methods,
     reason = "the files the real file system holds, as discovery read them"
   )]
-  let config_files: Vec<PathBuf> = workspace
+  let mut config_files: Vec<PathBuf> = workspace
     .deno_jsons()
+    .chain(workspace.link_deno_jsons())
     .filter_map(|c| c.specifier.to_file_path().ok())
     .chain(workspace.package_jsons().map(|p| p.path.clone()))
+    .chain(workspace.link_pkg_jsons().map(|p| p.path.clone()))
     .chain(workspace.to_import_map_path().ok().flatten())
-    .chain(match &flags.lock {
-      Some(lock) => Some(cli_options.initial_cwd().join(lock)),
-      None => Some(workspace.root_dir_path().join("deno.lock")),
-    })
+    // an import map given by --import-map (a local file)
+    .chain(
+      flags
+        .import_map_path
+        .as_ref()
+        .filter(|p| !p.contains("://") || p.starts_with("file:"))
+        .and_then(|p| {
+          deno_path_util::resolve_url_or_path(p, cli_options.initial_cwd()).ok()
+        })
+        .and_then(|url| url.to_file_path().ok()),
+    )
     .filter(|p| p.is_file())
     .collect();
+  // the lockfile this run uses, whether or not it exists yet: the first
+  // image writes a new one before the re-exec (item 451), and the next
+  // image must read it (a rule on a path that doesn't exist is skipped)
+  if !flags.no_lock {
+    let lock = match &flags.lock {
+      Some(lock) => Some(cli_options.initial_cwd().join(lock)),
+      None => workspace.resolve_lockfile_path().ok().flatten(),
+    };
+    config_files.extend(lock);
+  }
   ctx.config_files = config_files;
   ctx.config_files.sort();
   ctx.config_files.dedup();
@@ -251,7 +336,118 @@ fn context_for(
   ctx.tty_parent = std::io::stdin().is_terminal();
   ctx.ttys = std_stream_ttys();
   ctx.exec_strict = flags.permissions.kernel_sandbox_exec_strict;
+  ctx.coverage_dir = cli_options.coverage_dir();
+  ctx.profile_dirs = cli_options
+    .cpu_prof_dir()
+    .into_iter()
+    .chain(cli_options.heap_prof_config().map(|c| c.dir))
+    .collect();
+  ctx.profile_dirs.sort();
+  ctx.profile_dirs.dedup();
+  ctx.tls_files = tls_files();
+  // `--cert <file>` (DENO_CERT's flag form), relative to the working folder
+  if let Some(deno_lib::args::CaData::File(cert)) = cli_options.ca_data() {
+    ctx.tls_files.push(cli_options.initial_cwd().join(cert));
+    ctx.tls_files.sort();
+    ctx.tls_files.dedup();
+  }
+  ctx.origin_data = origin_data_dirs(cli_options, ctx.deno_dir.as_deref());
   ctx
+}
+
+/// This program's own origin data folders (`localStorage`, the Cache API):
+/// `location_data/<key>` and `location_data/web_cache/<key>`, keyed as the
+/// worker keys them (`--location`, deno.json, else the main module), never
+/// another program's. The main module is resolved here without
+/// `CliOptions::resolve_main_module`, which keeps its first answer (a bare or
+/// `npm:` entrypoint resolves through the workspace resolver later); one this
+/// can't resolve the same way gets no folder (its `localStorage` fails
+/// closed under enforce).
+fn origin_data_dirs(
+  cli_options: &CliOptions,
+  deno_dir: Option<&std::path::Path>,
+) -> Vec<PathBuf> {
+  let Some(deno_dir) = deno_dir else {
+    return Vec::new();
+  };
+  let resolver = cli_options.resolve_storage_key_resolver();
+  // a key that doesn't depend on the main module (--location, deno.json)
+  let placeholder =
+    |name: &str| deno_core::url::Url::parse(&format!("file:///{name}")).ok();
+  let fixed = match (placeholder("a.ts"), placeholder("b.ts")) {
+    (Some(a), Some(b)) => {
+      let key = resolver.resolve_storage_key(&a);
+      (key == resolver.resolve_storage_key(&b)).then_some(key)
+    }
+    _ => None,
+  };
+  let key = match fixed {
+    Some(key) => key,
+    None => {
+      let script = match &cli_options.flags().subcommand {
+        DenoSubcommand::Run(flags) if !flags.is_stdin() => &flags.script,
+        DenoSubcommand::Serve(flags) => &flags.script,
+        _ => return Vec::new(),
+      };
+      // a local file or a URL, resolved as the run resolves it; a bare or
+      // `npm:` / `jsr:` entrypoint, a folder or a Node binary main: none
+      let plain = script.starts_with('.')
+        || std::path::Path::new(script).is_absolute()
+        || ["file:", "http:", "https:"]
+          .iter()
+          .any(|scheme| script.starts_with(scheme));
+      if !plain || cli_options.is_node_main() {
+        return Vec::new();
+      }
+      let Ok(main_module) = cli_options.resolve_entrypoint_path(script) else {
+        return Vec::new();
+      };
+      #[allow(clippy::disallowed_methods, reason = "the real file system")]
+      if main_module.to_file_path().is_ok_and(|path| path.is_dir()) {
+        return Vec::new();
+      }
+      resolver.resolve_storage_key(&main_module)
+    }
+  };
+  let Some(key) = key else {
+    return Vec::new();
+  };
+  let hash = deno_lib::util::checksum::r#gen(&[key.as_bytes()]);
+  let origin = deno_dir.join("location_data");
+  vec![origin.join(&hash), origin.join("web_cache").join(&hash)]
+}
+
+/// The certificate files and folders the environment names (read only with
+/// network; each variable is kept through the re-exec's scrub).
+fn tls_files() -> Vec<PathBuf> {
+  #[allow(clippy::disallowed_methods, reason = "the real environment")]
+  let mut out: Vec<PathBuf> = [
+    "DENO_CERT",
+    "NODE_EXTRA_CA_CERTS",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+  ]
+  .iter()
+  .filter_map(std::env::var_os)
+  .flat_map(|v| {
+    // SSL_CERT_DIR may list several folders
+    std::env::split_paths(&v).collect::<Vec<_>>()
+  })
+  .filter(|p| p.is_absolute())
+  .collect();
+  out.sort();
+  out.dedup();
+  out
+}
+
+/// The policy-keyed cache overlay for a policy compiled without one:
+/// `DENO_DIR/sandboxed/<hash>`. Confined runs of that policy keep their
+/// SQLite caches and new emits there; every other run's cache paths are
+/// outside `sandboxed/`, so none reads what a confined run wrote (item 451).
+pub fn cache_overlay_for(deno_dir: &std::path::Path, hash: &str) -> PathBuf {
+  deno_dir
+    .join(deno_resolver::cache::SANDBOX_OVERLAY_DIR)
+    .join(hash)
 }
 
 /// The terminals the standard streams are (`ttyname` of fds 0 to 2),
@@ -320,8 +516,39 @@ pub fn check_run(
     deno_dir,
     node_modules,
   );
-  let implicit = ImplicitSet::build(options, &ctx);
-  let compiled = KernelPolicy::compile(options, &implicit, &ctx);
+  let options = &policy_options(cli_options, options);
+  let mut ctx = ctx;
+  // this program's origin data folders, as the overlay: created by the image
+  // that isn't confined yet under enforce, used only when they exist
+  #[allow(clippy::disallowed_methods, reason = "the real file system")]
+  if resolution.mode.fails_closed() && !enforce::confined_at_startup() {
+    for dir in &ctx.origin_data {
+      let _ = std::fs::create_dir_all(dir);
+    }
+  }
+  #[allow(clippy::disallowed_methods, reason = "the real file system")]
+  ctx.origin_data.retain(|dir| dir.is_dir());
+  let mut implicit = ImplicitSet::build(options, &ctx);
+  let mut compiled = KernelPolicy::compile(options, &implicit, &ctx);
+  // the cache overlay is keyed by the policy without it; it is used only
+  // when its folder exists (the image that isn't confined yet creates it
+  // under enforce), so both images compile the same policy, and a DENO_DIR
+  // that can't be written (a child of a confined process, a read-only
+  // container) leaves the caches in memory instead of refusing to start
+  if !ctx.compiled
+    && let Some(deno_dir) = &ctx.deno_dir
+  {
+    let overlay = cache_overlay_for(deno_dir, &compiled.hash());
+    if resolution.mode.fails_closed() && !enforce::confined_at_startup() {
+      enforce::create_cache_overlay(&overlay);
+    }
+    #[allow(clippy::disallowed_methods, reason = "the real file system")]
+    if overlay.is_dir() {
+      ctx.cache_overlay = Some(overlay);
+      implicit = ImplicitSet::build(options, &ctx);
+      compiled = KernelPolicy::compile(options, &implicit, &ctx);
+    }
+  }
   static PRINTED: Once = Once::new();
   PRINTED.call_once(|| {
     // the image before a re-exec (Linux) already printed it
@@ -417,6 +644,7 @@ fn source_name(source: ModeSource) -> &'static str {
     ModeSource::Env => KERNEL_SANDBOX_ENV_VAR,
     ModeSource::Config => "deno.json permissions.kernelSandbox",
     ModeSource::Compiled => "compiled",
+    ModeSource::Forced => KERNEL_SANDBOX_FORCE_ENV_VAR,
   }
 }
 

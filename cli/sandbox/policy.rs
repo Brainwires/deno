@@ -574,6 +574,20 @@ pub enum ImplicitNeed {
   /// The working directory itself, listed but not read beneath (macOS:
   /// `getcwd` opens `.`, which spawning a child needs).
   WorkingDir,
+  /// The policy-keyed cache overlay (`DENO_DIR/sandboxed/<policy hash>`):
+  /// the SQLite caches and new emits of confined runs with this policy,
+  /// never read by any other run (plan §5.1, item 451).
+  CacheOverlay,
+  /// `--coverage=<dir>` / `DENO_COVERAGE_DIR`: written for the user.
+  Coverage,
+  /// Certificate files the environment names (`DENO_CERT`, `SSL_CERT_FILE`,
+  /// `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`), only with network.
+  TlsFiles,
+  /// This program's own `localStorage` and Cache API folders
+  /// (`location_data/<key>`, `location_data/web_cache/<key>`).
+  OriginData,
+  /// `--cpu-prof` / `--heap-prof` folders: written for the user.
+  Profiles,
 }
 
 impl ImplicitNeed {
@@ -595,6 +609,11 @@ impl ImplicitNeed {
       Self::Inspector => "inspector",
       Self::SysInfo => "sys info",
       Self::WorkingDir => "working directory",
+      Self::CacheOverlay => "cache overlay",
+      Self::Coverage => "coverage",
+      Self::TlsFiles => "TLS files",
+      Self::OriginData => "origin data",
+      Self::Profiles => "profiles",
     }
   }
 
@@ -657,8 +676,15 @@ struct ImplicitRow {
   when: When,
 }
 
-/// The per-OS implicit paths, each with who needs it. P5 refines this list;
-/// every entry is data here, printed by `--kernel-sandbox-report`.
+/// The per-OS implicit paths, each with who needs it (plan §5.1, first P5
+/// pass, item 451); every entry is data here, printed by
+/// `--kernel-sandbox-report`. The dynamic entries (the runtime binary, the
+/// DENO_DIR caches read-only and this policy's cache overlay, this program's
+/// origin data, the project's config files and lockfile, the coverage
+/// folder, certificate files the environment names, the standard streams'
+/// terminals, the `--allow-sys` names' `/proc` files) are added by
+/// [`ImplicitSet::build`]. Not implicit, on purpose: the temp folder
+/// (`Deno.makeTempFile` needs a write grant), the home folder, `.npmrc`.
 static IMPLICIT_ROWS: &[ImplicitRow] = {
   use ImplicitAccess::*;
   use ImplicitNeed::*;
@@ -676,7 +702,8 @@ static IMPLICIT_ROWS: &[ImplicitRow] = {
     };
   }
   &[
-    // Linux: the loader and libraries (ld.so.cache: dlopen by soname)
+    // Linux: the loader and libraries (ld.so.cache: dlopen by soname; glibc's
+    // locale archive and gconv modules live under /usr/lib too)
     r!(Linux, "/lib", SharedLibraries, ReadMap, Always),
     r!(Linux, "/lib64", SharedLibraries, ReadMap, Always),
     r!(Linux, "/usr/lib", SharedLibraries, ReadMap, Always),
@@ -685,16 +712,19 @@ static IMPLICIT_ROWS: &[ImplicitRow] = {
     r!(Linux, "/etc/ld.so.cache", SharedLibraries, Read, Always),
     r!(Linux, "/etc/ld.so.conf", SharedLibraries, Read, Always),
     r!(Linux, "/etc/ld.so.conf.d", SharedLibraries, Read, Always),
-    // Linux: time and locale
+    // Linux: time and locale (/etc/localtime is a symlink: the rule follows
+    // it to its zoneinfo file; ICU's data is embedded)
     r!(Linux, "/usr/share/zoneinfo", LocaleTime, Read, Always),
     r!(Linux, "/etc/localtime", LocaleTime, Read, Always),
     r!(Linux, "/usr/lib/locale", LocaleTime, Read, Always),
     r!(Linux, "/usr/share/locale", LocaleTime, Read, Always),
-    // Linux: users (os.userInfo works without network)
+    // Linux: users (os.userInfo, getpwuid: NSS reads these; nscd and
+    // systemd-userdb are Unix sockets, refused, and NSS falls back to files)
     r!(Linux, "/etc/passwd", Users, Read, Always),
     r!(Linux, "/etc/group", Users, Read, Always),
     r!(Linux, "/etc/nsswitch.conf", Users, Read, Always),
-    // Linux: DNS, only with network
+    // Linux: DNS, only with network (resolv.conf's target under
+    // /run/systemd/resolve or /run/NetworkManager)
     r!(Linux, "/etc/resolv.conf", Dns, Read, NetAllowed),
     r!(Linux, "/etc/hosts", Dns, Read, NetAllowed),
     r!(Linux, "/etc/gai.conf", Dns, Read, NetAllowed),
@@ -703,7 +733,8 @@ static IMPLICIT_ROWS: &[ImplicitRow] = {
     r!(Linux, "/etc/protocols", Dns, Read, NetAllowed),
     r!(Linux, "/run/systemd/resolve", Dns, Read, NetAllowed),
     r!(Linux, "/run/NetworkManager", Dns, Read, NetAllowed),
-    // Linux: TLS roots, only with network
+    // Linux: TLS roots, only with network (the bundled roots need nothing;
+    // these serve DENO_TLS_CA_STORE=system)
     r!(Linux, "/etc/ssl", TlsRoots, Read, NetAllowed),
     r!(Linux, "/etc/pki", TlsRoots, Read, NetAllowed),
     r!(Linux, "/etc/ca-certificates", TlsRoots, Read, NetAllowed),
@@ -721,7 +752,8 @@ static IMPLICIT_ROWS: &[ImplicitRow] = {
     r!(Linux, "/proc/stat", ProcessInfo, Read, Always),
     r!(Linux, "/sys/devices/system/cpu", ProcessInfo, Read, Always),
     r!(Linux, "/sys/fs/cgroup", ProcessInfo, Read, Always),
-    // Linux: devices
+    // Linux: devices (/dev/shm: V8 and POSIX shared memory; a documented gap,
+    // named segments aren't per process)
     r!(Linux, "/dev/null", Devices, ReadWrite, Always),
     r!(Linux, "/dev/zero", Devices, ReadWrite, Always),
     r!(Linux, "/dev/full", Devices, ReadWrite, Always),
@@ -739,6 +771,15 @@ static IMPLICIT_ROWS: &[ImplicitRow] = {
     r!(Linux, "/sbin", ChildrenBaseline, ReadMap, RunGranted),
     r!(Linux, "/etc", ChildrenBaseline, Read, RunGranted),
     r!(Linux, "/opt", ChildrenBaseline, ReadMap, RunGranted),
+    // Linuxbrew's system-wide prefix (as /opt/homebrew is on macOS, under
+    // /opt): programs on PATH there (python3, git) run as children
+    r!(
+      Linux,
+      "/home/linuxbrew/.linuxbrew",
+      ChildrenBaseline,
+      ReadMap,
+      RunGranted
+    ),
     // macOS: dyld, libraries and the shared cache
     r!(Macos, "/usr/lib", SharedLibraries, ReadMap, Always),
     r!(Macos, "/System", SharedLibraries, ReadMap, Always),
@@ -911,12 +952,41 @@ impl ImplicitSet {
     if !ctx.compiled
       && let Some(deno_dir) = &ctx.deno_dir
     {
+      // (Node-API addons in the npm cache load from the read scope: loading
+      // one needs --allow-ffi, whose load-code scope is the read scope)
       for sub in DENO_DIR_READ {
         add(
           &deno_dir.join(sub),
           ImplicitNeed::DenoDir,
           ImplicitAccess::Read,
         );
+      }
+      // the overlay lies inside DENO_DIR, so it is only ever this run's
+      if let Some(overlay) = &ctx.cache_overlay
+        && overlay.starts_with(deno_dir)
+      {
+        add(
+          overlay,
+          ImplicitNeed::CacheOverlay,
+          ImplicitAccess::ReadWrite,
+        );
+      }
+      // this program's localStorage / Cache API folders, never another's
+      for dir in &ctx.origin_data {
+        if dir.starts_with(deno_dir.join("location_data")) {
+          add(dir, ImplicitNeed::OriginData, ImplicitAccess::ReadWrite);
+        }
+      }
+    }
+    if let Some(dir) = &ctx.coverage_dir {
+      add(dir, ImplicitNeed::Coverage, ImplicitAccess::ReadWrite);
+    }
+    for dir in &ctx.profile_dirs {
+      add(dir, ImplicitNeed::Profiles, ImplicitAccess::ReadWrite);
+    }
+    if net_allowed {
+      for file in &ctx.tls_files {
+        add(file, ImplicitNeed::TlsFiles, ImplicitAccess::Read);
       }
     }
     for file in &ctx.config_files {
@@ -990,6 +1060,17 @@ pub struct Context {
   pub compiled: bool,
   /// `--kernel-sandbox-exec=strict` (plan D3's opt-in).
   pub exec_strict: bool,
+  /// The policy-keyed cache overlay (`DENO_DIR/sandboxed/<hash>`), set once
+  /// the policy without it is hashed.
+  pub cache_overlay: Option<PathBuf>,
+  /// The coverage folder the run writes (`--coverage`, `DENO_COVERAGE_DIR`).
+  pub coverage_dir: Option<PathBuf>,
+  /// Certificate files and folders the environment names.
+  pub tls_files: Vec<PathBuf>,
+  /// This program's own origin data folders (`localStorage`, the Cache API).
+  pub origin_data: Vec<PathBuf>,
+  /// The `--cpu-prof` / `--heap-prof` folders the run writes.
+  pub profile_dirs: Vec<PathBuf>,
 }
 
 impl Context {
@@ -1012,6 +1093,11 @@ impl Context {
       ttys: Vec::new(),
       compiled: false,
       exec_strict: false,
+      cache_overlay: None,
+      coverage_dir: None,
+      tls_files: Vec::new(),
+      origin_data: Vec::new(),
+      profile_dirs: Vec::new(),
     }
   }
 }
@@ -1528,6 +1614,10 @@ struct Compiler<'a> {
   caps: Capabilities,
   gaps: Vec<PolicyGap>,
   deny_only: bool,
+  /// Every allow unscoped and no deny (`-A`): only the forced harness
+  /// compiles it (plain `-A` is off). Nothing is narrower than the grant, so
+  /// reaching every socket is the grant, not a gap.
+  allow_all: bool,
   /// Native code can run (FFI, addons or children).
   native: bool,
 }
@@ -1547,6 +1637,7 @@ impl<'a> Compiler<'a> {
       caps: ctx.caps,
       gaps: Vec::new(),
       deny_only: options_allow_all(options) && options_have_deny(options),
+      allow_all: options_allow_all(options) && !options_have_deny(options),
       native: options.allow_ffi.is_some() || options.allow_run.is_some(),
     }
   }
@@ -2523,6 +2614,10 @@ impl<'a> Compiler<'a> {
         UnixPolicy::Denied
       };
     }
+    if self.allow_all {
+      // -A: every socket, as Deno's checks allow
+      return UnixPolicy::Open;
+    }
     if self.deny_only {
       // -A with denies: every socket the user can reach
       if os == TargetOs::Linux && self.shape == Shape::ModeA {
@@ -2786,6 +2881,7 @@ impl<'a> Compiler<'a> {
     // (SyscallPolicy::signal_self)
     if linux
       && self.native
+      && !self.allow_all
       && *unix != UnixPolicy::Denied
       && !scopes.abstract_unix
     {

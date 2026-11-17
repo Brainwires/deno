@@ -1098,7 +1098,7 @@ impl CliOptions {
   /// link keeps its spelling: canonicalizing it would also expand a Windows
   /// 8.3 short name (`RUNNER~1`), and the emit cache and `deno clean -e`
   /// key a module by the spelling the other commands use.
-  fn resolve_entrypoint_path(
+  pub(crate) fn resolve_entrypoint_path(
     &self,
     script: &str,
   ) -> Result<ModuleSpecifier, AnyError> {

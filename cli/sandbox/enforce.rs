@@ -112,10 +112,15 @@ const RUNTIME_CONFIG_ENV: &[&str] = &[
   "DENO_UNSTABLE_*",
   "DENO_EMIT_CACHE_MODE",
   "DENO_DISABLE_VERBATIM_MODULE_SYNTAX",
+  // runtime behaviour switches the forced beds found scrubbed (item 451)
+  "DENO_DISABLE_OFFSCREEN_CANVAS",
+  "DENO_PATCH_REACT_CVE",
   "DENO_COVERAGE_DIR",
   "DENO_TRACE_PERMISSIONS",
   "DENO_AUDIT_PERMISSIONS",
   "DENO_KERNEL_SANDBOX",
+  // the harnesses' forced enforce: both images decide the same mode
+  "DENO_INTERNAL_KERNEL_SANDBOX_FORCE",
   "DENO_SERVE_ADDRESS",
   "DENO_AUTO_SERVE",
   "DENO_USE_CGROUPS",
@@ -127,6 +132,9 @@ const RUNTIME_CONFIG_ENV: &[&str] = &[
   "DENO_LOG_STYLE",
   "NODE_OPTIONS",
   "NODE_EXTRA_CA_CERTS",
+  // certificate locations (the policy reads them with network)
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
   "NODE_USE_ENV_PROXY",
   "RUST_LOG",
   "RUST_BACKTRACE",
@@ -229,6 +237,7 @@ pub fn plan_for(
     module_files: Vec::new(),
     expanded: Vec::new(),
     config_env: Vec::new(),
+    cache_overlay: ctx.cache_overlay.clone(),
   };
   match p.os {
     #[cfg(any(target_os = "linux", test))]
@@ -630,7 +639,7 @@ mod macos {
     Ok(SbFilter::Regex(regex))
   }
 
-  fn scope(
+  pub fn scope(
     scope: &PathScope,
     what: &str,
     listed: &[PathBuf],
@@ -645,6 +654,16 @@ mod macos {
           {
             // a listed folder (ImplicitAccess::ListDir): the folder itself,
             // never what is beneath it
+            resolve_prefix(&rule.path)
+              .full()
+              .to_str()
+              .map(|p| SbFilter::Literal(p.to_string()))
+          } else if rule.implicit
+            == Some(crate::sandbox::policy::ImplicitNeed::ProjectConfig)
+          {
+            // a config file or the lockfile: a file whether or not it exists
+            // yet (the first image writes a new lockfile before the re-exec,
+            // item 451), so both images write the same filter
             resolve_prefix(&rule.path)
               .full()
               .to_str()
@@ -919,6 +938,9 @@ pub fn startup() {
     if let Err(err) = result {
       refuse_at_startup(&err);
     }
+    if let Some(plan) = deno_sandbox::enforce_linux::applied_plan() {
+      use_cache_overlay(plan);
+    }
     if deno_sandbox::enforce_linux::applied_plan().is_some()
       || kernel_reports_confined()
     {
@@ -935,6 +957,7 @@ pub fn startup() {
         if let Err(err) = apply_inherited_macos(&plan) {
           refuse_at_startup(&err);
         }
+        use_cache_overlay(&plan);
         let _ = INHERITED.set(plan);
         mark_confined();
       }
@@ -947,6 +970,52 @@ pub fn startup() {
     }
     inherit::load_at_startup();
   }
+}
+
+/// The image after the re-exec, confined by `plan`: its caches move to the
+/// plan's cache overlay (item 451). Only an applied plan sets it, never the
+/// environment, so an unconfined run never reads an overlay; one without an
+/// overlay's shape refuses (the hand-over never widens).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn use_cache_overlay(plan: &EnforcePlan) {
+  if let Some(overlay) = &plan.cache_overlay
+    && !deno_resolver::cache::set_sandbox_overlay(overlay.clone())
+  {
+    refuse_at_startup(&format!("{} is not a cache overlay", overlay.display()));
+  }
+}
+
+/// Creates the cache overlay folder, the user's alone (0700), in the image
+/// that isn't confined yet. A failure leaves it absent: the policy then has
+/// no overlay and the caches stay in memory.
+pub fn create_cache_overlay(overlay: &Path) {
+  if std::fs::create_dir_all(overlay).is_err() {
+    return;
+  }
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let parent = overlay.parent().unwrap_or(overlay);
+    for dir in [parent, overlay] {
+      let _ =
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+  }
+}
+
+/// Creates the folders the plan writes on the user's behalf (the coverage
+/// and profile folders) before the re-exec: a Landlock rule needs its path to
+/// exist.
+fn create_runtime_dirs(ctx: &Context) -> Result<(), AnyError> {
+  for dir in ctx.coverage_dir.iter().chain(&ctx.profile_dirs) {
+    std::fs::create_dir_all(dir).map_err(|err| {
+      deno_core::anyhow::anyhow!(
+        "--kernel-sandbox=enforce: creating the output folder {} failed: {err}",
+        dir.display()
+      )
+    })?;
+  }
+  Ok(())
 }
 
 /// The Seatbelt profile for a plan: its macOS part, with the program's
@@ -1055,6 +1124,19 @@ pub fn confined_at_startup() -> bool {
   }
 }
 
+/// Whether the kernel reports this process confined by a sandbox it didn't
+/// apply itself (a child of a confined process).
+pub fn confined_by_a_parent() -> bool {
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  {
+    !confined_at_startup() && kernel_reports_confined()
+  }
+  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+  {
+    false
+  }
+}
+
 fn start_enforcing() {
   kernel_sandbox_state::set_enforcing();
   deno_core::error::set_permission_denied_note(permission_denied_note);
@@ -1069,6 +1151,11 @@ pub fn prepare(
   ctx: &Context,
   options: &PermissionsOptions,
 ) -> Result<(), AnyError> {
+  // before the plan is built (it names only folders that exist), and only
+  // in the image that isn't confined yet (the next one finds them)
+  if !confined_at_startup() {
+    create_runtime_dirs(ctx)?;
+  }
   let (plan, gaps) = plan_for(compiled, ctx);
   let fatal: Vec<String> = gaps
     .iter()
@@ -1151,12 +1238,22 @@ async fn graph_module_files(
   roots: &[ModuleSpecifier],
 ) -> Result<Vec<PathBuf>, AnyError> {
   use crate::graph_container::ModuleGraphContainer;
+  // an `npm:` entrypoint of a project that manages its own node_modules
+  // ("manual") can't be a graph root (the run resolves it in node_modules,
+  // which the policy reads; there is nothing to fetch): its own imports load
+  // from node_modules at run time (item 451)
+  let byonm = factory.npm_resolver().await?.is_byonm();
+  let roots: Vec<ModuleSpecifier> = roots
+    .iter()
+    .filter(|r| !(byonm && r.scheme() == "npm"))
+    .cloned()
+    .collect();
   if roots.is_empty() {
     return Ok(Vec::new());
   }
   let container = factory.main_module_graph_container().await?;
   container
-    .check_specifiers(roots, Default::default())
+    .check_specifiers(&roots, Default::default())
     .await?;
   let graph = container.graph();
   let mut files: Vec<PathBuf> = graph
@@ -1270,6 +1367,12 @@ pub async fn apply_pending(
   let mut plan = pending.clone();
   plan.module_files = graph_module_files(factory, roots).await?;
   check_module_files(&plan.module_files)?;
+  // the lockfile the graph load updated is written now: the confined image
+  // can't write it (unless a grant covers it), and the re-exec runs no
+  // exit hook (item 451)
+  if let Some(lockfile) = factory.maybe_lockfile().await? {
+    lockfile.write_if_changed()?;
+  }
   let plan = &plan;
   let deno_dir = factory.deno_dir().ok().map(|d| d.root.clone());
   #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1281,6 +1384,15 @@ pub async fn apply_pending(
   };
   #[cfg(any(target_os = "linux", target_os = "macos"))]
   let keep = |fd: i32| fd == carrier_fd || keep_fd(fd);
+  // what this image printed (the type check's `Check`, downloads, warnings)
+  // must reach the terminal: the exec discards anything still buffered
+  // (item 451)
+  log::logger().flush();
+  {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+  }
   #[cfg(target_os = "linux")]
   {
     let env = reexec_env(plan, deno_dir.as_deref(), carrier_fd);
@@ -1498,5 +1610,58 @@ mod tests {
       other => panic!("{other:?}"),
     }
     std::fs::remove_dir_all(&root).unwrap();
+  }
+
+  /// Item 451: a project config file (the lockfile the first image may
+  /// create before the re-exec) is the same literal filter before and after
+  /// it exists, so both images write the same macOS plan.
+  #[test]
+  fn config_files_filter_the_same_before_they_exist() {
+    let root = scratch("config_literal");
+    let lock = root.join("deno.lock");
+    let rules = PathScope::Paths {
+      paths: vec![crate::sandbox::policy::PathRule {
+        path: lock.clone(),
+        implicit: Some(crate::sandbox::policy::ImplicitNeed::ProjectConfig),
+      }],
+    };
+    let mut gaps = Vec::new();
+    let before = macos::scope(&rules, "read", &[], &mut gaps);
+    std::fs::write(&lock, "{}").unwrap();
+    let after = macos::scope(&rules, "read", &[], &mut gaps);
+    assert_eq!(before, after);
+    assert!(gaps.is_empty());
+    match after {
+      deno_sandbox::plan::SbScope::Filters { filters } => assert!(matches!(
+        &filters[..],
+        [deno_sandbox::plan::SbFilter::Literal(p)] if p.ends_with("deno.lock")
+      )),
+      other => panic!("{other:?}"),
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+  }
+
+  // the note is a no-op unless the kernel sandbox enforces this process
+  // (nothing in the unit tests turns enforcing on)
+  #[test]
+  fn note_only_while_enforcing() {
+    assert!(!kernel_sandbox_state::is_enforcing());
+    for errno in [libc::EPERM, libc::EACCES] {
+      assert_eq!(
+        permission_denied_note(Some(errno), "denied (os error 1): open '/x'"),
+        None
+      );
+    }
+    assert_eq!(permission_denied_note(None, "denied"), None);
+  }
+
+  #[test]
+  fn quoted_paths() {
+    assert_eq!(
+      quoted_path("Permission denied (os error 13): open '/a/b c'"),
+      Some("/a/b c")
+    );
+    assert_eq!(quoted_path("Permission denied (os error 13)"), None);
+    assert_eq!(quoted_path("spawn 'probe'"), None);
   }
 }

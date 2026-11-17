@@ -1,6 +1,8 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::env;
+#[cfg(test)]
+use std::path::Path;
 use std::path::PathBuf;
 
 use deno_cache_dir::DenoDirResolutionError;
@@ -66,6 +68,57 @@ impl<TSys: DenoDirSys> DenoDirProvider<TSys> {
 /// of each instead (see DENEXT.md, "Caches of their own").
 pub const DENEXT_CACHE_SUFFIX: &str = "_denext";
 
+/// denext: the DENO_DIR folder holding the kernel sandbox's policy-keyed
+/// cache overlays (`sandboxed/<policy hash>`, DENEXT.md item 451).
+///
+/// A process confined by `--kernel-sandbox=enforce` can't write the shared
+/// caches (a cache a confined run wrote and a less confined run later trusted
+/// would be a privilege ladder: V8 runs code-cache bytecode once the source
+/// hash matches, and emits are trusted output). Its SQLite caches and its new
+/// emits live in the overlay of its policy instead, read and written only by
+/// confined runs of that same policy; an unconfined run, or one under another
+/// policy, never has an overlay and never looks under `sandboxed/`. The shared
+/// emits stay readable beneath it (written by runs at least as trusted).
+pub const SANDBOX_OVERLAY_DIR: &str = "sandboxed";
+
+/// The overlay this process uses, set once by the CLI from the kernel
+/// sandbox plan it applied at startup (never from the environment).
+static SANDBOX_OVERLAY: std::sync::OnceLock<PathBuf> =
+  std::sync::OnceLock::new();
+
+/// denext: whether `dir` has an overlay's shape: absolute, its parent named
+/// [`SANDBOX_OVERLAY_DIR`], its own name 16 lowercase hex digits (the
+/// policy hash).
+pub fn is_sandbox_overlay_path(dir: &std::path::Path) -> bool {
+  let name_ok = dir.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+    n.len() == 16
+      && n
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+  });
+  let parent_ok = dir
+    .parent()
+    .and_then(|p| p.file_name())
+    .is_some_and(|n| n == SANDBOX_OVERLAY_DIR);
+  dir.is_absolute() && name_ok && parent_ok
+}
+
+/// denext: makes this process's version-keyed caches and new emits use the
+/// overlay `dir` (see [`SANDBOX_OVERLAY_DIR`]). Called by the CLI, first
+/// thing in `main`, with the overlay of the kernel sandbox plan it applied;
+/// a path without an overlay's shape is refused (`false`). A later call
+/// keeps the first value.
+pub fn set_sandbox_overlay(dir: PathBuf) -> bool {
+  if !is_sandbox_overlay_path(&dir) {
+    return false;
+  }
+  SANDBOX_OVERLAY.set(dir).is_ok()
+}
+
+fn sandbox_overlay() -> Option<&'static PathBuf> {
+  SANDBOX_OVERLAY.get()
+}
+
 /// `DenoDir` serves as coordinator for multiple `DiskCache`s containing them
 /// in single directory that can be controlled with `$DENO_DIR` env variable.
 #[derive(Debug, Clone)]
@@ -74,17 +127,44 @@ pub struct DenoDir<TSys: DiskCacheSys> {
   pub root: PathBuf,
   /// Used by TsCompiler to cache compiler output.
   pub gen_cache: DiskCache<TSys>,
+  /// denext: where the version-keyed caches live: `root`, or the kernel
+  /// sandbox's overlay (see [`SANDBOX_OVERLAY_DIR`]).
+  cache_root: PathBuf,
 }
 
 impl<TSys: DiskCacheSys> DenoDir<TSys> {
   pub fn new(sys: TSys, root: PathBuf) -> Self {
+    Self::with_overlay(sys, root, sandbox_overlay().cloned())
+  }
+
+  /// denext: [`Self::new`] with an explicit cache overlay, used only when it
+  /// lies directly in this DENO_DIR's [`SANDBOX_OVERLAY_DIR`] (a confined run
+  /// with another DENO_DIR keeps the shared paths, which it can't write).
+  pub fn with_overlay(
+    sys: TSys,
+    root: PathBuf,
+    overlay: Option<PathBuf>,
+  ) -> Self {
     #[cfg(not(target_arch = "wasm32"))]
     assert!(root.is_absolute());
 
+    let overlay = overlay.filter(|o| {
+      is_sandbox_overlay_path(o)
+        && o.parent() == Some(root.join(SANDBOX_OVERLAY_DIR).as_path())
+    });
     let gen_path = root.join("gen");
+    let (gen_cache, cache_root) = match overlay {
+      // new emits go to the overlay; the shared emits stay readable
+      Some(overlay) => (
+        DiskCache::new(sys, overlay.join("gen")).with_read_fallback(gen_path),
+        overlay,
+      ),
+      None => (DiskCache::new(sys, gen_path), root.clone()),
+    };
     Self {
       root,
-      gen_cache: DiskCache::new(sys, gen_path),
+      gen_cache,
+      cache_root,
     }
   }
 
@@ -96,7 +176,7 @@ impl<TSys: DiskCacheSys> DenoDir<TSys> {
   /// The fork's own copy of the version-keyed cache `name`, see
   /// [`DENEXT_CACHE_SUFFIX`].
   fn denext_cache_path(&self, name: &str) -> PathBuf {
-    self.root.join(format!("{name}{DENEXT_CACHE_SUFFIX}"))
+    self.cache_root.join(format!("{name}{DENEXT_CACHE_SUFFIX}"))
   }
 
   /// Path for the V8 code cache.
@@ -235,5 +315,67 @@ mod test {
     assert_eq!(dir.remote_folder_path(), root.join("remote"));
     assert_eq!(dir.npm_folder_path(), root.join("npm"));
     assert_eq!(dir.registries_folder_path(), root.join("registries"));
+  }
+
+  /// denext (item 451): a confined run's version-keyed caches and new emits
+  /// live in its policy's overlay; a DENO_DIR without one (every unconfined
+  /// run) never names a path under `sandboxed/`.
+  #[test]
+  fn sandbox_overlay_paths() {
+    let root = if cfg!(windows) {
+      PathBuf::from("C:\\deno_dir")
+    } else {
+      PathBuf::from("/deno_dir")
+    };
+    let overlay = root.join(SANDBOX_OVERLAY_DIR).join("0123456789abcdef");
+    let shared = DenoDir::with_overlay(RealSys, root.clone(), None);
+    let confined =
+      DenoDir::with_overlay(RealSys, root.clone(), Some(overlay.clone()));
+    let paths = |dir: &DenoDir<RealSys>| {
+      vec![
+        dir.code_cache_db_file_path(),
+        dir.fmt_incremental_cache_db_file_path(),
+        dir.lint_incremental_cache_db_file_path(),
+        dir.dep_analysis_db_file_path(),
+        dir.fast_check_cache_db_file_path(),
+        dir.node_analysis_db_file_path(),
+        dir.type_checking_cache_db_file_path(),
+        dir.gen_cache.location.clone(),
+      ]
+    };
+    for path in paths(&shared) {
+      assert!(
+        !path.starts_with(root.join(SANDBOX_OVERLAY_DIR)),
+        "{}",
+        path.display()
+      );
+    }
+    for path in paths(&confined) {
+      assert!(path.starts_with(&overlay), "{}", path.display());
+    }
+    // the download caches stay shared (read-only to a confined run)
+    assert_eq!(confined.remote_folder_path(), root.join("remote"));
+    assert_eq!(confined.npm_folder_path(), root.join("npm"));
+    // an overlay of another DENO_DIR, or without an overlay's shape, is
+    // ignored
+    for bad in [
+      PathBuf::from("/other/sandboxed/0123456789abcdef"),
+      root.join(SANDBOX_OVERLAY_DIR).join("0123456789ABCDEF"),
+      root.join(SANDBOX_OVERLAY_DIR).join("short"),
+      root.join("gen").join("0123456789abcdef"),
+      root.clone(),
+    ] {
+      let dir = DenoDir::with_overlay(RealSys, root.clone(), Some(bad.clone()));
+      assert_eq!(
+        dir.code_cache_db_file_path(),
+        shared.code_cache_db_file_path(),
+        "{}",
+        bad.display()
+      );
+    }
+    assert!(is_sandbox_overlay_path(&overlay));
+    assert!(!is_sandbox_overlay_path(Path::new(
+      "sandboxed/0123456789abcdef"
+    )));
   }
 }

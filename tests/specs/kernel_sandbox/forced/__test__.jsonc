@@ -1,0 +1,33 @@
+// denext (DENEXT.md item 451): the test harnesses' forced kernel sandbox.
+// DENO_INTERNAL_KERNEL_SANDBOX_FORCE=enforce runs every `deno run` /
+// `deno serve` under --kernel-sandbox=enforce, -A included; `project` also
+// narrows an unscoped read / write grant, for the kernel only, to the
+// project, the working directory and the temp folder. An explicit off wins.
+{
+  "tempDir": true,
+  "tests": {
+    "forced_allow_all": {
+      "if": "kernelSandboxEnforce",
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_FORCE": "enforce" },
+      "args": "run -A --kernel-sandbox-report main.ts",
+      "output": "forced_allow_all.out"
+    },
+    "forced_project": {
+      "if": "kernelSandboxEnforce",
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_FORCE": "project" },
+      "args": "run -A --kernel-sandbox-report main.ts",
+      "output": "forced_project.out"
+    },
+    "explicit_off_wins": {
+      "if": "unix",
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_FORCE": "enforce" },
+      "args": "run -A --kernel-sandbox=off --kernel-sandbox-report main.ts",
+      "output": "forced_off.out"
+    },
+    "invalid_value_is_ignored": {
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_FORCE": "on" },
+      "args": "run main.ts",
+      "output": "forced_invalid.out"
+    }
+  }
+}

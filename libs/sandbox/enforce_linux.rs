@@ -1297,6 +1297,7 @@ mod tests {
       module_files: vec!["/w/main.ts".into()],
       expanded: Vec::new(),
       config_env: vec![("JSR_URL".into(), "https://jsr.test/".into())],
+      cache_overlay: Some("/d/sandboxed/0123456789abcdef".into()),
     };
     assert_eq!(plan.without_measured_lists().module_files.len(), 0);
     let bytes = plan.to_bytes();
@@ -1588,6 +1589,7 @@ mod tests {
       module_files: Vec::new(),
       expanded: Vec::new(),
       config_env: Vec::new(),
+      cache_overlay: None,
     };
     let fd = seal_plan(&plan.to_bytes()).unwrap();
     // sealed: no more writes

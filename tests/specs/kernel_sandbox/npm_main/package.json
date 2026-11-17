@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@denotest/bin": "1.0.0"
+  }
+}

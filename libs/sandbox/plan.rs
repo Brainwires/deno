@@ -66,6 +66,11 @@ pub struct EnforcePlan {
   /// behave differently refuses to start.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub config_env: Vec<(String, String)>,
+  /// The policy-keyed cache overlay (`DENO_DIR/sandboxed/<policy hash>`)
+  /// the confined image keeps its caches in (DENEXT.md item 451); its write
+  /// rule is among the plan's rules. Part of the equality.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cache_overlay: Option<PathBuf>,
 }
 
 impl EnforcePlan {
@@ -361,6 +366,7 @@ mod tests {
       module_files: Vec::new(),
       expanded: expanded.iter().map(PathBuf::from).collect(),
       config_env: Vec::new(),
+      cache_overlay: None,
     }
   }
 

@@ -229,7 +229,7 @@ fn main() {
   let all_tests_flaky = *IS_CI && !cli_args.report;
 
   // Run sequential tests with parallelism=1
-  let summary = file_test_runner::run_tests_summary(
+  let sequential_summary = file_test_runner::run_tests_summary(
     &sequential_category,
     RunOptions {
       parallelism: file_test_runner::Parallelism::from_usize(1),
@@ -252,9 +252,9 @@ fn main() {
       }
     },
   );
-  if !cli_args.report {
-    summary.panic_on_failures();
-  }
+  // denext (DENEXT.md item 451): the parallel tests run even when a
+  // sequential one failed, so one run lists every failure (the forced
+  // kernel sandbox beds compare the whole list); both are checked below
 
   // Run parallel tests
   let summary = file_test_runner::run_tests_summary(
@@ -282,6 +282,7 @@ fn main() {
   );
 
   if !cli_args.report {
+    sequential_summary.panic_on_failures();
     summary.panic_on_failures();
   } else if std::env::var("CI").is_ok() {
     report::generate_report(&results.lock().unwrap());

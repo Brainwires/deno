@@ -1,0 +1,15 @@
+// denext (DENEXT.md item 451): the kernel sandbox's policy-keyed cache
+// overlay: a confined run keeps its caches in DENO_DIR/sandboxed/<policy
+// hash>, a confined run of the same policy reads them first, and no other run
+// (unconfined, or another policy) ever reads them. The driver runs
+// unconfined and starts each run with a deadline.
+{
+  "tempDir": true,
+  "tests": {
+    "overlay_is_keyed_and_never_read_unconfined": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet -A --kernel-sandbox=off driver.ts",
+      "output": "driver.out"
+    }
+  }
+}

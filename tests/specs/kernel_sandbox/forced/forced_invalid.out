@@ -1,0 +1,2 @@
+Warning DENO_INTERNAL_KERNEL_SANDBOX_FORCE="on" is ignored: it accepts only "enforce" and "project"
+hello

@@ -1,0 +1,9 @@
+kernel sandbox (preview): enforce (DENO_INTERNAL_KERNEL_SANDBOX_FORCE); applies: enforce; would apply: off
+  permission set: fixed (no prompt can widen it)
+  machine: [WILDLINE]
+  policy [WILDLINE] (mode A, self-confined)
+    read:       [WILDLINE] + implicit set ([WILDLINE])
+    deny read:  none
+    write:      [WILDLINE] + implicit set ([WILDLINE])
+[WILDCARD]
+hello

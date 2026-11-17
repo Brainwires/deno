@@ -1,0 +1,20 @@
+// denext (DENEXT.md item 451): an `npm:` entrypoint of a package.json
+// project (node_modules installed, "manual") runs under enforce. The policy's
+// origin data key must not resolve the main module before the run does: that
+// resolution is kept, and without the workspace's resolver an `npm:`
+// entrypoint fails to resolve.
+{
+  "tempDir": true,
+  "tests": {
+    "npm_entrypoint_under_enforce": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        { "args": "install", "output": "[WILDCARD]" },
+        {
+          "args": "run --quiet --kernel-sandbox=enforce npm:@denotest/bin/cli-esm hello there",
+          "output": "hello\nthere\n"
+        }
+      ]
+    }
+  }
+}
