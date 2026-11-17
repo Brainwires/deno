@@ -487,3 +487,56 @@ Deno.test("sframeEncryptsWhatASenderSends", async () => {
     stream.getTracks().forEach((t) => t.stop());
   }
 });
+
+const KEY_FRAME_WORKER = `
+self.onrtctransform = async (event) => {
+  const t = event.transformer;
+  const reader = t.readable.getReader();
+  const writer = t.writable.getWriter();
+  if (t.options.name === "receiver") {
+    t.generateKeyFrame().catch((e) => self.postMessage(e.name));
+  } else {
+    t.generateKeyFrame().then(() => self.postMessage("generated"));
+  }
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    await writer.write(value);
+  }
+};
+`;
+
+Deno.test("scriptTransformGeneratesKeyFrames", async () => {
+  const url = `data:application/javascript,${
+    encodeURIComponent(KEY_FRAME_WORKER)
+  }`;
+  const worker = new Worker(url, { type: "module" });
+  const messages: string[] = [];
+  const both = new Promise<void>((resolve) => {
+    worker.onmessage = (e) => {
+      messages.push(e.data);
+      if (messages.length === 2) resolve();
+    };
+  });
+  const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  try {
+    const sender = a.addTrack(stream.getTracks()[0], stream);
+    sender.transform = new RTCRtpScriptTransform(worker, { name: "sender" });
+    b.ontrack = (e) => {
+      e.receiver.transform = new RTCRtpScriptTransform(worker, {
+        name: "receiver",
+      });
+    };
+    await connect(a, b);
+    await timeout(both, 20_000, "generateKeyFrame");
+    // A sender's resolves at its next key frame; a receiver's rejects.
+    assertEquals(messages.sort(), ["InvalidStateError", "generated"]);
+  } finally {
+    a.close();
+    b.close();
+    worker.terminate();
+    stream.getTracks().forEach((t) => t.stop());
+  }
+});

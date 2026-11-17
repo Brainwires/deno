@@ -408,6 +408,16 @@ function onTransformerMessage(transform, message) {
         return;
       }
     }
+    const { _source } = internals();
+    if (track[_source]?.device === undefined) {
+      // A track the program feeds (Deno.webrtc.EncodedMediaTrack): it is
+      // asked for the key frame, as at a remote PLI.
+      const event = new Event("keyframerequest");
+      setIsTrusted(event, true);
+      track.dispatchEvent(event);
+      reply(state, id);
+      return;
+    }
     // Resolved when the next key frame goes to the worker (the fake
     // camera's clip starts with one every second).
     ArrayPrototypePush(state.keyFrameWaiters, id);
