@@ -822,9 +822,10 @@ interface RTCRtpSender {
   replaceTrack(withTrack: MediaStreamTrack | null): Promise<void>;
   setParameters(parameters: RTCRtpSendParameters): Promise<void>;
   setStreams(...streams: MediaStream[]): void;
-  /** An `RTCRtpScriptTransform` the sender's encoded frames go through
-   * before they are sent (a transform serves one sender or receiver). */
-  transform: RTCRtpScriptTransform | null;
+  /** An `RTCRtpScriptTransform` or `RTCRtpSFrameEncryptor` the sender's
+   * encoded frames go through before they are sent (a transform serves one
+   * sender or receiver). */
+  transform: RTCRtpScriptTransform | RTCRtpSFrameEncryptor | null;
 }
 
 /**
@@ -851,9 +852,10 @@ interface RTCRtpReceiver {
   getParameters(): RTCRtpParameters;
   getStats(): Promise<RTCStatsReport>;
   getSynchronizationSources(): RTCRtpContributingSource[];
-  /** An `RTCRtpScriptTransform` the receiver's encoded frames go through
-   * (what it writes back is dropped: there is no decoder). */
-  transform: RTCRtpScriptTransform | null;
+  /** An `RTCRtpScriptTransform` or `RTCRtpSFrameDecryptor` the receiver's
+   * encoded frames go through (what comes out is dropped: there is no
+   * decoder). */
+  transform: RTCRtpScriptTransform | RTCRtpSFrameDecryptor | null;
 }
 
 /**
@@ -1882,3 +1884,126 @@ declare var RTCEncodedAudioFrame: {
  * @category WebRTC
  */
 interface RTCRtpScriptTransform {}
+
+/**
+ * An SFrame cipher suite (RFC 9605). The `AES_256_CTR_HMAC_SHA512_*` suites
+ * are refused with `NotSupportedError`.
+ *
+ * @category WebRTC
+ */
+type SFrameCipherSuite =
+  | "AES_128_CTR_HMAC_SHA256_80"
+  | "AES_128_CTR_HMAC_SHA256_64"
+  | "AES_128_CTR_HMAC_SHA256_32"
+  | "AES_128_GCM_SHA256_128"
+  | "AES_256_GCM_SHA512_128"
+  | "AES_256_CTR_HMAC_SHA512_80"
+  | "AES_256_CTR_HMAC_SHA512_64"
+  | "AES_256_CTR_HMAC_SHA512_32";
+
+/** @category WebRTC */
+interface SFrameTransformOptions {
+  cipherSuite: SFrameCipherSuite;
+}
+
+/** A key ID: 0 to 2^64 - 1. @category WebRTC */
+type CryptoKeyID = number | bigint;
+
+/**
+ * Encrypts each chunk as one SFrame (a `BufferSource` gives an
+ * `ArrayBuffer`, an encoded frame its own `data`). Frames written before
+ * a key is set are dropped.
+ *
+ * @category WebRTC
+ */
+interface SFrameEncryptorStream {
+  readonly readable: ReadableStream;
+  readonly writable: WritableStream;
+  /** The base key (an HKDF `CryptoKey` with `deriveBits`) and its KID. */
+  setEncryptionKey(key: CryptoKey, keyId: CryptoKeyID): Promise<void>;
+}
+
+/** @category WebRTC */
+declare var SFrameEncryptorStream: {
+  readonly prototype: SFrameEncryptorStream;
+  new (options: SFrameTransformOptions): SFrameEncryptorStream;
+};
+
+/**
+ * Decrypts each chunk as one SFrame. A frame that doesn't decrypt is
+ * reported as an `error` event and comes out empty.
+ *
+ * @category WebRTC
+ */
+interface SFrameDecryptorStream extends EventTarget {
+  readonly readable: ReadableStream;
+  readonly writable: WritableStream;
+  onerror: ((this: SFrameDecryptorStream, ev: SFrameTransformErrorEvent) => any) | null;
+  addDecryptionKey(key: CryptoKey, keyId: CryptoKeyID): Promise<void>;
+  removeDecryptionKey(keyId: CryptoKeyID): Promise<void>;
+}
+
+/** @category WebRTC */
+declare var SFrameDecryptorStream: {
+  readonly prototype: SFrameDecryptorStream;
+  new (options: SFrameTransformOptions): SFrameDecryptorStream;
+};
+
+/** @category WebRTC */
+type SFrameTransformErrorEventType = "authentication" | "keyID" | "syntax";
+
+/** @category WebRTC */
+interface SFrameTransformErrorEventInit extends EventInit {
+  errorType: SFrameTransformErrorEventType;
+  frame: any;
+  keyID?: CryptoKeyID | null;
+}
+
+/**
+ * A frame an SFrame decryptor could not decrypt.
+ *
+ * @category WebRTC
+ */
+interface SFrameTransformErrorEvent extends Event {
+  readonly errorType: SFrameTransformErrorEventType;
+  readonly keyID: CryptoKeyID | null;
+  readonly frame: any;
+}
+
+/** @category WebRTC */
+declare var SFrameTransformErrorEvent: {
+  readonly prototype: SFrameTransformErrorEvent;
+  new (
+    type: string,
+    eventInitDict: SFrameTransformErrorEventInit,
+  ): SFrameTransformErrorEvent;
+};
+
+/** @category WebRTC */
+interface RTCRtpSFrameEncryptorOptions extends SFrameTransformOptions {
+  /** Only `"per-frame"`; `"per-packet"` is refused with
+   * `NotSupportedError`. */
+  type?: "per-frame" | "per-packet";
+}
+
+/**
+ * A sender's `transform` that encrypts each frame as an SFrame before it
+ * is packetized (not for H.264 / H.265, whose packetizers read the frame).
+ *
+ * @category WebRTC
+ */
+interface RTCRtpSFrameEncryptor {
+  setEncryptionKey(key: CryptoKey, keyId: CryptoKeyID): Promise<void>;
+}
+
+/**
+ * A receiver's `transform` that decrypts each frame, reporting the ones it
+ * can't as `error` events.
+ *
+ * @category WebRTC
+ */
+interface RTCRtpSFrameDecryptor extends EventTarget {
+  onerror: ((this: RTCRtpSFrameDecryptor, ev: SFrameTransformErrorEvent) => any) | null;
+  addDecryptionKey(key: CryptoKey, keyId: CryptoKeyID): Promise<void>;
+  removeDecryptionKey(keyId: CryptoKeyID): Promise<void>;
+}

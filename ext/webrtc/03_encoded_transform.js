@@ -34,6 +34,7 @@ const {
   MapPrototypeSet,
   ObjectDefineProperty,
   ObjectPrototypeIsPrototypeOf,
+  PromisePrototypeThen,
   PromiseReject,
   PromiseWithResolvers,
   SafeMap,
@@ -419,16 +420,43 @@ function onTransformerMessage(transform, message) {
   }
 }
 
+// SFrame (04_sframe.js): loaded with the first SFrame transform.
+let sframeMod;
+const loadSFrame = () =>
+  sframeMod ??
+    (sframeMod = core.loadExtScript("ext:deno_webrtc/04_sframe.js"));
+
+// An RTCRtpSFrameEncryptor / RTCRtpSFrameDecryptor's transform state.
+function initRtpTransform(sframeTransform) {
+  sframeTransform[_state] = {
+    port: null,
+    target: null,
+    side: null,
+    keyFrameWaiters: [],
+    size: null,
+    closed: false,
+    sframe: true,
+  };
+}
+
 // `sender.transform` / `receiver.transform` set (01_webrtc.js).
 function setTransform(owner, side, transform) {
   const { _transform, _pc, _transceiver, _key, _rid, _state: s } =
     internals();
   if (transform !== null) {
+    const isScript = ObjectPrototypeIsPrototypeOf(
+      RTCRtpScriptTransformPrototype,
+      transform,
+    );
     if (
-      !ObjectPrototypeIsPrototypeOf(RTCRtpScriptTransformPrototype, transform)
+      !isScript &&
+      !(transform?.[_state]?.sframe &&
+        loadSFrame().isSFrameTransform(transform, side))
     ) {
       throw new TypeError(
-        `Failed to set 'transform': not an RTCRtpScriptTransform or null`,
+        side === "sender"
+          ? "Failed to set 'transform': not an RTCRtpScriptTransform, an RTCRtpSFrameEncryptor or null"
+          : "Failed to set 'transform': not an RTCRtpScriptTransform, an RTCRtpSFrameDecryptor or null",
       );
     }
     const state = transform[_state];
@@ -448,7 +476,7 @@ function setTransform(owner, side, transform) {
     const state = transform[_state];
     state.target = owner;
     state.side = side;
-    state.port.postMessage({ attach: side });
+    state.port?.postMessage({ attach: side });
   }
   if (side === "receiver" && !pc[s].closed) {
     op_webrtc_receiver_transform(
@@ -470,6 +498,10 @@ function feedFake(sender, pc, key, stereo) {
   const state = sender[_transform][_state];
   const f = op_webrtc_sender_fake_frame(pc[_rid], key, stereo);
   if (f === null) return false;
+  if (state.sframe) {
+    sendThroughSFrame(sender, state, pc, key, f);
+    return true;
+  }
   const data = copyBytes(f.data);
   const info = f.info;
   const metadata = {
@@ -516,6 +548,35 @@ function feedFake(sender, pc, key, stereo) {
   return true;
 }
 
+// A sender's frame through its RTCRtpSFrameEncryptor, then out at the RTP
+// timestamp it took. H.264 / H.265 frames are not sent: their payloaders
+// read NAL units, which the ciphertext no longer has.
+function sendThroughSFrame(sender, state, pc, key, f) {
+  const mime = StringPrototypeToLowerCase(f.info.mimeType);
+  if (mime === "video/h264" || mime === "video/h265") return;
+  const { _rid, _state: pcState, _transform } = internals();
+  const transform = sender[_transform];
+  PromisePrototypeThen(
+    loadSFrame().processRtpFrame(transform, "sender", f.data),
+    (out) => {
+      if (out === null || state.closed || pc[pcState].closed) return;
+      if (sender[_transform] !== transform) return;
+      try {
+        op_webrtc_sender_write_frame_at(
+          pc[_rid],
+          key,
+          out,
+          f.durationMs,
+          f.info.rtpTimestamp >>> 0,
+        );
+      } catch {
+        // The sender went away.
+      }
+    },
+    () => {},
+  );
+}
+
 function copyBytes(view) {
   const out = new Uint8Array(TypedArrayPrototypeGetByteLength(view));
   out.set(
@@ -535,6 +596,15 @@ function deliverReceived(receiver, event) {
   if (transform === null) return;
   const state = transform[_state];
   const info = event.info;
+  if (state.sframe) {
+    // Decrypted for its errors; there is no decoder for the plaintext.
+    PromisePrototypeThen(
+      loadSFrame().processRtpFrame(transform, "receiver", event.data),
+      () => {},
+      () => {},
+    );
+    return;
+  }
   const metadata = {
     synchronizationSource: info.synchronizationSource,
     payloadType: info.payloadType,
@@ -581,7 +651,7 @@ function deliverReceived(receiver, event) {
 function keyFrameRequested(sender) {
   const { _transform } = internals();
   const transform = sender[_transform] ?? null;
-  if (transform === null) return;
+  if (transform === null || transform[_state].sframe) return;
   transform[_state].port.postMessage({ keyframerequest: null });
 }
 
@@ -595,6 +665,7 @@ function ownerClosed(...owners) {
     const state = transform[_state];
     if (state.closed) continue;
     state.closed = true;
+    if (state.port === null) continue;
     state.port.postMessage({ close: true });
     state.port.close();
   }
@@ -796,6 +867,8 @@ return {
   deliverReceived,
   deserializeFrame,
   feedFake,
+  initRtpTransform,
+  isFrame,
   keyFrameRequested,
   ownerClosed,
   receiveTransform,

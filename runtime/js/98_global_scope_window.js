@@ -8,6 +8,7 @@ import {
 } from "ext:core/ops";
 import {
   loadEncodedTransform,
+  loadSFrame,
   selfDescriptor,
 } from "ext:runtime/98_global_scope_shared.js";
 const {
@@ -268,6 +269,14 @@ const mainRuntimeGlobalProperties = {
   RTCRtpScriptTransform: core.propNonEnumerableLazyLoaded(
     (m) => m.RTCRtpScriptTransform,
     loadEncodedTransform,
+  ),
+  RTCRtpSFrameDecryptor: core.propNonEnumerableLazyLoaded(
+    (m) => m.RTCRtpSFrameDecryptor,
+    loadSFrame,
+  ),
+  RTCRtpSFrameEncryptor: core.propNonEnumerableLazyLoaded(
+    (m) => m.RTCRtpSFrameEncryptor,
+    loadSFrame,
   ),
   alert: core.propWritableLazyLoaded((p) => p.alert, lazyPrompt),
   confirm: core.propWritableLazyLoaded((p) => p.confirm, lazyPrompt),

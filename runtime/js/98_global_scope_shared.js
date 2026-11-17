@@ -129,6 +129,11 @@ const loadEncodedTransform = () =>
     (_encodedTransformMod = core.loadExtScript(
       "ext:deno_webrtc/03_encoded_transform.js",
     ));
+// SFrame (ext/webrtc's 04_sframe.js): loaded on first access.
+let _sframeMod;
+const loadSFrame = () =>
+  _sframeMod ??
+    (_sframeMod = core.loadExtScript("ext:deno_webrtc/04_sframe.js"));
 core.registerCloneableResource(
   "RTCEncodedVideoFrame",
   (data) => loadEncodedTransform().deserializeFrame(data),
@@ -294,6 +299,18 @@ const windowOrWorkerGlobalScope = {
   RTCEncodedVideoFrame: core.propNonEnumerableLazyLoaded(
     (m) => m.RTCEncodedVideoFrame,
     loadEncodedTransform,
+  ),
+  SFrameDecryptorStream: core.propNonEnumerableLazyLoaded(
+    (m) => m.SFrameDecryptorStream,
+    loadSFrame,
+  ),
+  SFrameEncryptorStream: core.propNonEnumerableLazyLoaded(
+    (m) => m.SFrameEncryptorStream,
+    loadSFrame,
+  ),
+  SFrameTransformErrorEvent: core.propNonEnumerableLazyLoaded(
+    (m) => m.SFrameTransformErrorEvent,
+    loadSFrame,
   ),
   MediaStreamTrack: core.propNonEnumerableLazyLoaded(
     (webrtc) => webrtc.MediaStreamTrack,
@@ -731,6 +748,7 @@ unstableForWindowOrWorkerGlobalScope[unstableIds.rawImports] = {
 
 export {
   loadEncodedTransform,
+  loadSFrame,
   selfDescriptor,
   unstableForWindowOrWorkerGlobalScope,
   windowOrWorkerGlobalScope,

@@ -168,6 +168,7 @@ deno_core::extension!(
     "01_webrtc.js",
     "02_media_devices.js",
     "03_encoded_transform.js",
+    "04_sframe.js",
   ],
 );
 

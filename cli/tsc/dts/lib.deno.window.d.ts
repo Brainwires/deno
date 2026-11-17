@@ -489,6 +489,18 @@ declare var RTCRtpScriptTransform: {
   ): RTCRtpScriptTransform;
 };
 
+/** @category WebRTC */
+declare var RTCRtpSFrameEncryptor: {
+  readonly prototype: RTCRtpSFrameEncryptor;
+  new (options: RTCRtpSFrameEncryptorOptions): RTCRtpSFrameEncryptor;
+};
+
+/** @category WebRTC */
+declare var RTCRtpSFrameDecryptor: {
+  readonly prototype: RTCRtpSFrameDecryptor;
+  new (options: SFrameTransformOptions): RTCRtpSFrameDecryptor;
+};
+
 /**
  * A required constraint a device can't meet; `constraint` names it.
  *

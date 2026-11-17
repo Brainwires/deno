@@ -256,3 +256,228 @@ Deno.test("scriptTransformSeesSentAndReceivedFrames", async () => {
     stream.getTracks().forEach((t) => t.stop());
   }
 });
+
+function hex(s: string): Uint8Array {
+  const clean = s.replace(/\s+/g, "");
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; ++i) {
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function baseKey(raw: Uint8Array): Promise<CryptoKey> {
+  return crypto.subtle.importKey("raw", raw, "HKDF", false, ["deriveBits"]);
+}
+
+// RFC 9605 Appendix C.3: SFrame encryption and decryption.
+const SFRAME_VECTORS: [string, string][] = [
+  [
+    "AES_128_CTR_HMAC_SHA256_80",
+    "9901234567449408b6f490086165b9d6f62b24ae1a59a56486b4ae8ed036b88912e24f11",
+  ],
+  [
+    "AES_128_CTR_HMAC_SHA256_64",
+    "99012345673f31438db4d09434e43afa0f8a2f00867a2be085046a9f5cb4f101d607",
+  ],
+  [
+    "AES_128_CTR_HMAC_SHA256_32",
+    "990123456717fc8af28a5a695afcfc6c8df6358a17e26b2fcb3bae32e443",
+  ],
+  [
+    "AES_128_GCM_SHA256_128",
+    "9901234567b7412c2513a1b66dbb48841bbaf17f598751176ad847681a69c6d0b091c07018ce4adb34eb",
+  ],
+  [
+    "AES_256_GCM_SHA512_128",
+    "990123456794f509d36e9beacb0e261d99c7d1e972f1fed787d4049f17ca21353c1cc24d56ceabced279",
+  ],
+];
+
+Deno.test("sframeMatchesRfc9605Vectors", async () => {
+  // Loads 04_sframe.js, which installs the test hook.
+  assertEquals(typeof SFrameEncryptorStream, "function");
+  // @ts-ignore internal test hook
+  const vector = Deno[Deno.internal].sframeVector;
+  const key = await baseKey(hex("000102030405060708090a0b0c0d0e0f"));
+  const metadata = hex("4945544620534672616d65205747");
+  const pt = hex("64726166742d696574662d736672616d652d656e63");
+  for (const [suite, ct] of SFRAME_VECTORS) {
+    const out = await vector(suite, key, 0x123n, 0x4567n, metadata, pt);
+    assertEquals(toHex(out.ct), ct, suite);
+    assertEquals(toHex(out.pt), toHex(pt), suite);
+  }
+});
+
+Deno.test("sframeStreamsRoundTrip", async () => {
+  const raw = crypto.getRandomValues(new Uint8Array(16));
+  const key = await baseKey(raw);
+  for (
+    const cipherSuite of [
+      "AES_128_CTR_HMAC_SHA256_80",
+      "AES_128_GCM_SHA256_128",
+    ] as const
+  ) {
+    const encryptor = new SFrameEncryptorStream({ cipherSuite });
+    const decryptor = new SFrameDecryptorStream({ cipherSuite });
+    await encryptor.setEncryptionKey(key, 300n);
+    await decryptor.addDecryptionKey(key, 300);
+    const writer = encryptor.writable.getWriter();
+    const reader = decryptor.readable.getReader();
+    encryptor.readable.pipeTo(decryptor.writable);
+    const sent = Uint8Array.from({ length: 64 }, (_, i) => i);
+    writer.write(sent);
+    writer.write(sent.subarray(8));
+    const a = await reader.read();
+    const b = await reader.read();
+    assertEquals(new Uint8Array(a.value as ArrayBuffer), sent);
+    assertEquals(new Uint8Array(b.value as ArrayBuffer), sent.subarray(8));
+    await writer.close();
+    await reader.cancel();
+  }
+});
+
+Deno.test("sframeDecryptorReportsErrors", async () => {
+  const cipherSuite = "AES_128_CTR_HMAC_SHA256_80";
+  const key = await baseKey(new Uint8Array(16));
+  const other = await baseKey(new Uint8Array(16).fill(1));
+  const encryptor = new SFrameEncryptorStream({ cipherSuite });
+  await encryptor.setEncryptionKey(key, 5);
+  const ew = encryptor.writable.getWriter();
+  const er = encryptor.readable.getReader();
+  const [, first] = await Promise.all([
+    ew.write(new Uint8Array([1, 2, 3, 4])),
+    er.read(),
+  ]);
+  const encrypted = first.value as ArrayBuffer;
+
+  const decryptor = new SFrameDecryptorStream({ cipherSuite });
+  const errors: SFrameTransformErrorEvent[] = [];
+  decryptor.onerror = (e) => errors.push(e as SFrameTransformErrorEvent);
+  const dw = decryptor.writable.getWriter();
+  const dr = decryptor.readable.getReader();
+  // The readable has no queue: each write is taken while a read waits.
+  const roundTrip = async (chunk: BufferSource) =>
+    (await Promise.all([dw.write(chunk), dr.read()]))[1].value;
+  // No key for KID 5.
+  assertEquals(await roundTrip(encrypted), new ArrayBuffer(0));
+  // The wrong key: authentication fails.
+  await decryptor.addDecryptionKey(other, 5);
+  await roundTrip(encrypted);
+  // An empty frame has no header.
+  await roundTrip(new Uint8Array(0));
+  assertEquals(errors.map((e) => e.errorType), [
+    "keyID",
+    "authentication",
+    "syntax",
+  ]);
+  assertEquals(errors[0].keyID, 5);
+  // A chunk of another type errors the stream.
+  const read = dr.read().catch((e) => e);
+  await assertRejects(() => dw.write({} as ArrayBuffer), TypeError);
+  assert((await read) instanceof TypeError);
+
+  let typeError = false;
+  try {
+    new SFrameEncryptorStream({ cipherSuite: "nope" as never });
+  } catch (e) {
+    typeError = e instanceof TypeError;
+  }
+  assert(typeError);
+  let notSupported = false;
+  try {
+    new RTCRtpSFrameEncryptor({ cipherSuite: "AES_256_CTR_HMAC_SHA512_80" });
+  } catch (e) {
+    notSupported = (e as DOMException).name === "NotSupportedError";
+  }
+  assert(notSupported);
+  await ew.close();
+  await er.cancel();
+});
+
+Deno.test("sframeTransformsAttachOnce", async () => {
+  const pc = new RTCPeerConnection();
+  try {
+    const encryptor = new RTCRtpSFrameEncryptor({
+      cipherSuite: "AES_128_GCM_SHA256_128",
+    });
+    const decryptor = new RTCRtpSFrameDecryptor({
+      cipherSuite: "AES_128_GCM_SHA256_128",
+    });
+    const t1 = pc.addTransceiver("audio");
+    const t2 = pc.addTransceiver("video");
+    t1.sender.transform = encryptor;
+    t1.receiver.transform = decryptor;
+    assert(t1.sender.transform === encryptor);
+    for (
+      const set of [
+        () => t2.sender.transform = encryptor,
+        () => t2.receiver.transform = decryptor,
+      ]
+    ) {
+      let name = "";
+      try {
+        set();
+      } catch (e) {
+        name = (e as DOMException).name;
+      }
+      assertEquals(name, "InvalidStateError");
+    }
+    // An encryptor is no receiver transform.
+    let typeError = false;
+    try {
+      // @ts-ignore deliberately the wrong kind
+      t2.receiver.transform = encryptor;
+    } catch (e) {
+      typeError = e instanceof TypeError;
+    }
+    assert(typeError);
+    t1.sender.transform = null;
+    assertEquals(t1.sender.transform, null);
+    await Promise.resolve();
+  } finally {
+    pc.close();
+  }
+});
+
+Deno.test("sframeEncryptsWhatASenderSends", async () => {
+  const cipherSuite = "AES_128_CTR_HMAC_SHA256_80";
+  const key = await baseKey(crypto.getRandomValues(new Uint8Array(16)));
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  try {
+    const sender = a.addTrack(stream.getTracks()[0], stream);
+    const encryptor = new RTCRtpSFrameEncryptor({ cipherSuite });
+    await encryptor.setEncryptionKey(key, 9);
+    sender.transform = encryptor;
+    const decryptor = new RTCRtpSFrameDecryptor({ cipherSuite });
+    const errors: string[] = [];
+    // Without its key the receiver can't decrypt: the frames are SFrames
+    // with KID 9.
+    const keyError = new Promise<SFrameTransformErrorEvent>((resolve) => {
+      decryptor.onerror = (e) => {
+        errors.push((e as SFrameTransformErrorEvent).errorType);
+        resolve(e as SFrameTransformErrorEvent);
+      };
+    });
+    b.ontrack = (e) => e.receiver.transform = decryptor;
+    await connect(a, b);
+    const error = await timeout(keyError, 15_000, "SFrame error");
+    assertEquals(error.errorType, "keyID");
+    assertEquals(error.keyID, 9);
+    // With it, they decrypt.
+    await decryptor.addDecryptionKey(key, 9);
+    const count = errors.length;
+    await new Promise((r) => setTimeout(r, 300));
+    assert(errors.length <= count + 2, `errors after the key: ${errors}`);
+  } finally {
+    a.close();
+    b.close();
+    stream.getTracks().forEach((t) => t.stop());
+  }
+});
