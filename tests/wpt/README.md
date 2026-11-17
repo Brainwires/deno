@@ -68,6 +68,8 @@ Tests are run in parallel across CPU cores, partitioned by top-level directory.
 - `--inspect-brk` — Attach the V8 inspector to each test
 - `--no-ignore` — Run tests marked with `{"ignore": true}` in expectations
 - `--exit-zero` — Exit with code 0 even if there are failures
+- `--dom-shim` — Give `.html` tests a small, layout-free `document` (see
+  [The `--dom-shim` document](#the---dom-shim-document))
 
 ## Updating expectations
 
@@ -142,6 +144,35 @@ browser one. There is no DOM: a test that needs `document`, an `<iframe>`, a
 `<video>` / `<canvas>` element or a browsing context fails, and its expectation
 says so (`false`, or its subtests under `expectedFailures`).
 
+### The `--dom-shim` document
+
+Many `.html` tests touch the page only for bookkeeping: a helper reads
+`document.currentScript`, appends a scratch element to `document.body`, or
+checks whether an element interface exists before taking another path. Without a
+DOM each of those is a `ReferenceError` before the test reaches the API it is
+about. `--dom-shim` installs `./tests/wpt/runner/dom_shim.js` right after
+`testharness.js` has loaded (so testharness keeps its shell environment), and
+gives those tests a node tree to talk to and nothing more:
+
+- `document` with `documentElement`, `head`, `body`, `title` (the page's
+  `<title>`), `currentScript` (the running `<script>`, `null` between scripts),
+  `readyState` (`"complete"`), `createElement`, `createTextNode`,
+  `getElementById` and `getElementsByTagName`;
+- `Node` / `Element` with `appendChild`, `insertBefore`, `removeChild`,
+  `append`, `remove`, `contains`, attributes and `textContent`;
+- `HTMLCanvasElement`, which exists but draws nothing: `getContext()` returns
+  `null` and there is no `captureStream()`, so a helper that feature-detects
+  canvas capture falls back to `getUserMedia()` (the fake devices);
+- every tag outside a small table (`html`, `head`, `body`, `title`, `div`,
+  `span`, `p`, `pre`, `script`, `canvas`) is an `HTMLUnknownElement`: there is
+  no `<video>`, `<audio>`, `<iframe>` or `<img>`.
+
+The page's own markup is not copied into it (`getElementById` finds only what a
+script created), and the shim never dispatches an event, lays anything out or
+fakes an API under test: a test either reaches the real implementation or still
+fails. The option is off by default, and the expectation files are written
+without it.
+
 ### WebRTC (`webrtc`, `webrtc-extensions`, `webrtc-stats`)
 
 These open real peer connections over loopback. In a container or a machine
@@ -158,7 +189,8 @@ the fake camera and microphone, whose tracks send real media. Most of the files
 that still fail on media do so in the suite's own helpers: `getNoiseStream()`'s
 `canCreate()` reads `HTMLCanvasElement.prototype` before it falls back to
 `getUserMedia()`, and `resources/testdriver.js` reads `document` when it loads;
-both are `ReferenceError`s in a runtime without a DOM.
+both are `ReferenceError`s in a runtime without a DOM. `--dom-shim` gets both,
+and the helpers' scratch elements, past that point.
 
 ## FAQ
 
