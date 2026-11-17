@@ -487,6 +487,34 @@ fn ice_server_urls() {
     IceServerSpec::parse("http://example.org", None, None),
     Err(WebRtcError::Syntax(_))
   ));
+  // No userinfo or path after the scheme (a SyntaxError before the TURN
+  // credential check), an empty credential or a username over 509 bytes.
+  for url in [
+    "stun:user@example.org",
+    "turn:example.org/",
+    "stun:a.org\\p",
+  ] {
+    assert!(
+      matches!(
+        IceServerSpec::parse(url, Some("u"), Some("p")),
+        Err(WebRtcError::Syntax(_))
+      ),
+      "{url}"
+    );
+  }
+  assert!(matches!(
+    IceServerSpec::parse("turn:turn.example.org", Some("u"), Some("")),
+    Err(WebRtcError::InvalidAccess(_))
+  ));
+  let long = "u".repeat(510);
+  assert!(matches!(
+    IceServerSpec::parse("turns:turn.example.org", Some(&long), Some("p")),
+    Err(WebRtcError::InvalidAccess(_))
+  ));
+  assert!(
+    IceServerSpec::parse("turn:turn.example.org", Some(&long[1..]), Some("p"))
+      .is_ok()
+  );
   let tcp = IceServerSpec::parse(
     "turn:turn.example.org?transport=tcp",
     Some("u"),
