@@ -459,8 +459,17 @@ class RTCPeerConnectionIceEvent extends Event {
   #url;
 
   constructor(type, eventInitDict = undefined) {
+    const prefix = "Failed to construct 'RTCPeerConnectionIceEvent'";
+    webidl.requiredArguments(arguments.length, 1, prefix);
+    const candidate = eventInitDict?.candidate ?? null;
+    if (
+      candidate !== null &&
+      !ObjectPrototypeIsPrototypeOf(RTCIceCandidatePrototype, candidate)
+    ) {
+      throw new TypeError(`${prefix}: 'candidate' is not an RTCIceCandidate`);
+    }
     super(type, eventInitDict);
-    this.#candidate = eventInitDict?.candidate ?? null;
+    this.#candidate = candidate;
     this.#url = eventInitDict?.url ?? null;
   }
 
@@ -509,7 +518,7 @@ webidl.configureInterface(RTCPeerConnectionIceErrorEvent);
 class RTCDataChannelEvent extends Event {
   #channel;
 
-  constructor(type, eventInitDict = undefined) {
+  constructor(type, eventInitDict) {
     super(type, eventInitDict);
     if (
       !ObjectPrototypeIsPrototypeOf(
@@ -1123,7 +1132,7 @@ function endTrack(track) {
 class MediaStreamTrackEvent extends Event {
   #track;
 
-  constructor(type, eventInitDict = undefined) {
+  constructor(type, eventInitDict) {
     super(type, eventInitDict);
     if (
       !ObjectPrototypeIsPrototypeOf(
@@ -2318,7 +2327,7 @@ function stopSending(transceiver) {
 class RTCTrackEvent extends Event {
   #init;
 
-  constructor(type, eventInitDict = undefined) {
+  constructor(type, eventInitDict) {
     super(type, eventInitDict);
     const init = eventInitDict ?? { __proto__: null };
     if (
