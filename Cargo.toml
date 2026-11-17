@@ -335,10 +335,10 @@ rstest = "0"
 # milliseconds) and `webrtc/a-sdp` (JSEP negotiation: BUNDLE credentials,
 # descriptions with no m-section, pranswer, addIceCandidate per media section),
 # plus `PassThroughInterceptor` for nested interceptors (the recipe's inner
-# end no longer ends inbound RTCP in its slot), pinned by its commit
-# (4c269458). On the aws-lc-rs crypto provider, the one Deno's rustls already
+# end no longer ends inbound RTCP in its slot) and `RTCIceCandidate::to_json`
+# without an empty mid, pinned by its commit (0aa2f6c4). On the aws-lc-rs crypto provider, the one Deno's rustls already
 # uses. Pre-1.0 and not externally audited.
-rtc = { git = "https://github.com/Brainwires/webrtc-rs-rtc", rev = "4c269458e4b6dbc19f9eb8a4f38029743051d600", default-features = false, features = ["crypto-aws-lc-rs"] }
+rtc = { git = "https://github.com/Brainwires/webrtc-rs-rtc", rev = "0aa2f6c4ee64f91b223b8f973704b9d4460afcf1", default-features = false, features = ["crypto-aws-lc-rs"] }
 rusqlite = { version = "0.41.1", features = ["unlock_notify", "bundled", "session", "modern_sqlite", "limits", "backup", "fallible_uint"] } # "modern_sqlite": need sqlite >= 3.49.0 for some db configs; "fallible_uint": ToSql for u64/usize (needed when crates like deno_cache are published/built standalone, not just feature-unified via denokv_sqlite)
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "std", "tls12", "aws_lc_rs"] }
 rustls-pemfile = "2"
