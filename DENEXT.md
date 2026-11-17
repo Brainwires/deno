@@ -17721,6 +17721,46 @@ where the changes are discussed.
        the new pin.
      - Node tests enabled: none; no Node API changes.
 
+454. **`fix(timers)`: one map of active timers for the web and Node.js timer
+     layers** (`fix/unified-timers`; runtime;
+     `libs/core/{01_core.js,02_timers.js}`, `ext/web/02_timers.js`,
+     `ext/node/polyfills/{timers.ts,internal/timers.mjs}`,
+     `tests/unit/timers_test.ts`, `tests/unit_node/timers_test.ts`). Inherited
+     from upstream Deno 2.9.8: `ext/web/02_timers.js` and
+     `ext/node/polyfills/internal/timers.mjs` each kept their own id -> timer
+     map, though both take their ids from core's single counter. The global
+     `setTimeout` / `setInterval` return Node.js `Timeout` objects, so
+     `Deno.unrefTimer(+timer)` / `Deno.refTimer(+timer)` with such a timer's
+     numeric id found nothing in the web map and did nothing: `timer.hasRef()`
+     stayed `true` and the timer kept the process alive.
+     - Core keeps the one map (`core.getTimer(id)`, and
+       `core.getActiveTimers()`, which allocates an array per call and is meant
+       for diagnostics). `createTimer` takes an optional owner, linked from the
+       core timer under a symbol (`core.kTimerOwner`); a Node.js `Timeout`
+       passes itself. A timer leaves the map wherever core untracks it (it fires
+       for the last time, or is cancelled).
+     - The web `clearTimeout` / `clearInterval` and `Deno.refTimer` /
+       `Deno.unrefTimer` act through the owner's `close()` / `ref()` / `unref()`
+       when there is one, else on the core timer. Node's `getActiveTimer` and
+       `process.getActiveResourcesInfo()` read the core map (the latter still
+       counts only refed Node.js timers).
+     - Runtime-internal (system) timers stay out of reach of a numeric id from
+       user code: core marks them (`core.kSystemTimer`), the web lookups skip
+       them, and Node's `clearTimeout` / `clearInterval` given a number or
+       string skip them too (given the `Timeout` object, as runtime-internal
+       code passes it, they still clear it). Previously the global
+       `clearTimeout(id)` could cancel, for example, a `node:net` socket's idle
+       timer by its id.
+     - Ported from are-we-dodo-yet/dodo PR #23, with the owner link as a symbol
+       rather than a property, and the system-timer guard added.
+     - Tests: `tests/unit/timers_test.ts` (numeric `Deno.unrefTimer` /
+       `Deno.refTimer` on a timeout and an interval, numeric `clearTimeout` /
+       `clearInterval`, a timeout turned into an interval in its callback, the
+       map back at its baseline once timers end, numeric APIs leaving a system
+       timer alone) and `tests/unit_node/timers_test.ts`
+       (`getActiveResourcesInfo` following numeric ref / unref / clear).
+     - Node tests enabled: none; the `node_compat` timer tests pass as before.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -17731,10 +17771,10 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452) are what the prebuilt `libdenort` carries. The CLI-side parts
-(for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged
-app's launchers) are in the branch too, but a stock CLI does not run them;
-denext's own launcher provides that environment.
+449, 450, 452, 454) are what the prebuilt `libdenort` carries. The CLI-side
+parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
+packaged app's launchers) are in the branch too, but a stock CLI does not run
+them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
