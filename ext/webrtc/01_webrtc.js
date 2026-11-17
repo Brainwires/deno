@@ -1448,6 +1448,22 @@ class RTCIceCandidatePair {
 webidl.configureInterface(RTCIceCandidatePair);
 const RTCIceCandidatePairPrototype = RTCIceCandidatePair.prototype;
 
+// Whether a description signals "a=ice-options:trickle" (RFC 8840 section
+// 4.1.3), at the session or a media level.
+function offersTrickle(sdp) {
+  const lines = StringPrototypeSplit(sdp, "\n");
+  for (let i = 0; i < lines.length; ++i) {
+    const line = StringPrototypeTrim(lines[i]);
+    if (!StringPrototypeStartsWith(line, "a=ice-options:")) continue;
+    const options = StringPrototypeSplit(
+      StringPrototypeSlice(line, 14),
+      SPACES,
+    );
+    if (ArrayPrototypeIncludes(options, "trickle")) return true;
+  }
+  return false;
+}
+
 function iceParameters(description) {
   if (description === null) return null;
   let usernameFragment = null;
@@ -2693,7 +2709,10 @@ class RTCPeerConnection extends EventTarget {
   }
   get canTrickleIceCandidates() {
     webidl.assertBranded(this, RTCPeerConnectionPrototype);
-    return this[_state].closed || this.remoteDescription === null ? null : true;
+    const remote = this.remoteDescription;
+    return this[_state].closed || remote === null
+      ? null
+      : offersTrickle(remote.sdp);
   }
   get localDescription() {
     webidl.assertBranded(this, RTCPeerConnectionPrototype);
