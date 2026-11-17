@@ -681,6 +681,18 @@ pub fn op_node_process_execve(
     3,
   )?;
 
+  // `args[0]` is the name the program is started under.
+  if let Some(argv0) = args.first() {
+    deno_process::check_argv0(
+      state,
+      &file,
+      &run.argv0,
+      argv0,
+      "node:process.execve",
+    )
+    .map_err(deno_process::ProcessError::from)?;
+  }
+
   let program = CString::new(run.program.as_os_str().as_bytes())
     .map_err(|_| invalid("execPath"))?;
   let argv = args
