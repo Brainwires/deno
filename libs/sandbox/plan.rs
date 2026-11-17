@@ -327,7 +327,8 @@ pub struct MacosPlan {
   pub ttys: Vec<String>,
 }
 
-#[cfg(test)]
+// The plan expansion only applies on Unix (the Linux enforcer), so its tests are Unix-only.
+#[cfg(all(test, unix))]
 mod tests {
   use super::*;
 
