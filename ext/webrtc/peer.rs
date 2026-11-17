@@ -590,6 +590,33 @@ pub(crate) fn rtc_err(e: impl std::fmt::Display) -> WebRtcError {
   WebRtcError::Operation(e.to_string())
 }
 
+/// Whether an SDP has an m-section that isn't rejected: port zero without
+/// `a=bundle-only` is a rejected one (RFC 8843 §6).
+pub(crate) fn has_live_media_section(sdp: &str) -> bool {
+  sdp.split("\nm=").skip(1).any(|section| {
+    let port = section.split_ascii_whitespace().nth(1);
+    port != Some("0") || section.contains("a=bundle-only")
+  })
+}
+
+/// An engine error applying a description: a type the signaling state
+/// doesn't take (RFC 9429 §5.5 / §5.6) is an InvalidStateError (W3C "set the
+/// RTCSessionDescription", step 4); anything else an OperationError.
+fn description_err(e: RtcError) -> WebRtcError {
+  match e {
+    RtcError::ErrSignalingStateCannotRollback
+    | RtcError::ErrSignalingStateProposedTransitionInvalid(_) => {
+      WebRtcError::InvalidState(e.to_string())
+    }
+    // A description the engine can't apply as written (the legacy
+    // InvalidAccessError browsers and the WPT keep).
+    RtcError::ErrSessionDescriptionInvalidIceCredentials => {
+      WebRtcError::InvalidAccess(e.to_string())
+    }
+    e => rtc_err(e),
+  }
+}
+
 /// The candidate's transport, address and port, from a candidate attribute
 /// value (`candidate:<foundation> <component> <transport> <priority>
 /// <address> <port> typ ...`).
@@ -2329,6 +2356,9 @@ impl Peer {
     kind: &str,
     sdp: String,
   ) -> Result<(), WebRtcError> {
+    // Gathering starts with the first description that has a transport to
+    // gather for (W3C: an m-section that isn't rejected).
+    let has_transport = has_live_media_section(&sdp);
     let desc = Self::description(kind, sdp)?;
     let restarted = self.guarded(|core| {
       let victims = if kind == "rollback" {
@@ -2340,14 +2370,13 @@ impl Peer {
       core
         .pc
         .set_local_description(Instant::now(), desc)
-        .map_err(|e| {
+        .map_err(|e| match e {
           // JSEP: an offer or answer other than the last one created.
-          let text = e.to_string();
-          if text.contains("does not match") {
-            WebRtcError::InvalidModification(text)
-          } else {
-            rtc_err(text)
+          RtcError::ErrSDPDoesNotMatchOffer
+          | RtcError::ErrSDPDoesNotMatchAnswer => {
+            WebRtcError::InvalidModification(e.to_string())
           }
+          e => description_err(e),
         })?;
       if kind == "rollback" {
         core.after_rollback(victims);
@@ -2363,7 +2392,7 @@ impl Peer {
           && core.local_ufrag() != ufrag_before,
       )
     })?;
-    if kind != "rollback" {
+    if kind != "rollback" && has_transport {
       if restarted {
         self.regather();
       } else {
@@ -2448,7 +2477,7 @@ impl Peer {
       core
         .pc
         .set_remote_description(Instant::now(), desc)
-        .map_err(rtc_err)?;
+        .map_err(description_err)?;
       // An ICE restart by the remote side: its candidates, and its
       // end-of-candidates, start over.
       if ufrag_before.is_some() && core.remote_ufrag() != ufrag_before {
@@ -2487,7 +2516,21 @@ impl Peer {
     username_fragment: Option<String>,
   ) -> Result<(), WebRtcError> {
     if candidate.trim().is_empty() {
-      // End-of-candidates for the remote's current generation.
+      // End-of-candidates: the engine checks the media section and the
+      // usernameFragment and marks the remote description; then the
+      // remote's current generation is complete.
+      self.guarded(|core| {
+        core
+          .pc
+          .add_remote_candidate(RTCIceCandidateInit {
+            candidate: String::new(),
+            sdp_mid,
+            sdp_mline_index: sdp_m_line_index,
+            username_fragment,
+            url: None,
+          })
+          .map_err(rtc_err)
+      })?;
       self.core.borrow_mut().remote_gathered = true;
       self.poke();
       return Ok(());
