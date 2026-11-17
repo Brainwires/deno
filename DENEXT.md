@@ -17345,16 +17345,24 @@ where the changes are discussed.
        with the overlay's emit replaced by a FIFO an unconfined run and another
        policy's run finish while a run of the first policy blocks on it: the
        overlay is read by that policy alone; a DENO_DIR where no overlay can be
-       made still runs), `kernel_sandbox::implicit` (a remote module and an npm
-       package with no network grant, the lockfile written and then `--frozen`;
-       `localStorage` across two confined runs; the coverage and CPU profile
-       folders; `--env-file` with `--import-map`), `kernel_sandbox::npm_main`
-       (an `npm:` entrypoint of a "manual" project), the CLI's
+       made still runs; a runtime started through a symlink keys the same
+       overlay in both images), `kernel_sandbox::implicit` (a remote module and
+       an npm package with no network grant, the lockfile written and then
+       `--frozen`; `localStorage` across two confined runs; the coverage and CPU
+       profile folders; `--env-file` with `--import-map`),
+       `kernel_sandbox::npm_main` (an `npm:` entrypoint of a "manual" project),
+       the CLI's
        `sandbox::enforce::tests::config_files_filter_the_same_before_they_exist`,
        the updated `kernel_sandbox::enforce::no_writable_descriptors` (the
        overlay's own caches are the one writable file), `kernel_sandbox::forced`
        (`-A` forced into Mode A, `project` narrowing, an explicit off winning,
        an invalid value ignored).
+     - Both images compile the same policy on macOS: the runtime's path and the
+       forced `project` mode's temp folder are canonical (`current_exe` is the
+       path a runtime was started by, a package manager's symlink, and `TMPDIR`
+       is `/var/folders/...` before the re-exec and `/private/var/folders/...`
+       after it); before, the overlay's key differed between the images and
+       enforce refused to start.
      - Node tests enabled: none; no Node API changes.
 
 452. **`test(wpt)`: WebRTC's web-platform-tests in the tree, and the conformance
@@ -17597,6 +17605,12 @@ where the changes are discussed.
        unchanged. No subtest the expectations had passing fails. More subtests
        are found because files that failed before reaching their tests now run
        them.
+     - With the data channel and media work together (train denext.26, measured
+       as above): all `webrtc*` directories 1822 / 2821 (64.6%) and 69 files
+       passing fully; `webrtc/` 1465 / 2145, `webrtc-encoded-transform` 82 /
+       124, `webrtc-stats` 241 / 304, `webrtc-extensions` 4 / 73, `-identity` 21
+       / 68, `-priority` 7 / 9, `-svc` 2 / 67, `-ice` 0 / 31; every expectation
+       holds (325 files, none failing that the expectations have passing).
      - Node tests enabled: none; `node:` has no WebRTC API.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
