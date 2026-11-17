@@ -222,8 +222,14 @@ fn policy_options(
   let mut roots: Vec<String> = [
     cli_options.start_dir.workspace.root_dir_path(),
     cli_options.initial_cwd().to_path_buf(),
+    // canonical: on macOS the image after the re-exec finds it by its
+    // canonical path (`/private/var/folders/...`), and both images must
+    // compile the same policy
     #[allow(clippy::disallowed_methods, reason = "the real temp folder")]
-    std::env::temp_dir(),
+    {
+      let temp = std::env::temp_dir();
+      temp.canonicalize().unwrap_or(temp)
+    },
   ]
   .iter()
   .filter_map(|p| p.to_str().map(|s| s.to_string()))
@@ -274,7 +280,16 @@ fn context_for(
     mode,
     cli_options.initial_cwd().to_path_buf(),
   );
-  ctx.exe = std::env::current_exe().ok();
+  // canonical, as the re-exec starts it: on macOS `current_exe` is the path
+  // the runtime was started by (a package manager's symlink), and the image
+  // after the re-exec must compile the same policy (its hash keys the cache
+  // overlay)
+  #[allow(clippy::disallowed_methods, reason = "the runtime's real file")]
+  {
+    ctx.exe = std::env::current_exe()
+      .ok()
+      .map(|exe| exe.canonicalize().unwrap_or(exe));
+  }
   #[allow(clippy::disallowed_methods, reason = "the user's real home")]
   {
     ctx.home = std::env::var_os("HOME")

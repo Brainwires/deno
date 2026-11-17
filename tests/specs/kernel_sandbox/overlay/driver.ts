@@ -12,8 +12,9 @@ async function run(
   label: string,
   args: string[],
   env: Record<string, string> = {},
+  exe = deno,
 ) {
-  const child = new Deno.Command(deno, {
+  const child = new Deno.Command(exe, {
     args: ["run", "--quiet", ...args, "typed.ts"],
     env,
     stdout: "piped",
@@ -98,3 +99,15 @@ Deno.writeTextFileSync(join(blocked, "sandboxed"), "");
 await run("no overlay possible", ["--kernel-sandbox=enforce"], {
   DENO_DIR: blocked,
 });
+
+// 5. a runtime started through a symlink (a package manager's bin link):
+// both images key the same overlay, so the confined run starts
+const linkDir = Deno.makeTempDirSync();
+const link = join(linkDir, "deno");
+Deno.symlinkSync(deno, link);
+await run(
+  "through a symlink",
+  ["--kernel-sandbox=enforce", "--allow-env=Y"],
+  {},
+  link,
+);

@@ -11,3 +11,4 @@ other policy: ok hello
 confined, first policy: blocked
 overlays now: 2
 no overlay possible: ok hello
+through a symlink: ok hello
