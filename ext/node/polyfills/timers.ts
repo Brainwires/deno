@@ -25,6 +25,7 @@ let mockTimers = null;
 const kInstallMockTimers = SymbolFor("Deno.internal.node.mockTimers");
 const {
   getActiveTimer,
+  getActiveUserTimer,
   Immediate,
   kDestroy,
   Timeout,
@@ -163,6 +164,16 @@ ObjectDefineProperty(setTimeout, promisify.custom, {
   },
 });
 
+// A `Timeout` object reaches its own timer (runtime-internal code clears its
+// system timers this way); a bare numeric id never reaches a system timer.
+function clearTimerById(timeout: Timeout | number | string) {
+  const id = +timeout;
+  const timer = typeof timeout === "object"
+    ? getActiveTimer(id)
+    : getActiveUserTimer(id);
+  timer?.[kDestroy]();
+}
+
 function clearTimeout(timeout?: Timeout | number) {
   if (timeout == null) {
     return;
@@ -171,8 +182,7 @@ function clearTimeout(timeout?: Timeout | number) {
     mockTimers._clearTimer(timeout);
     return;
   }
-  const id = +timeout;
-  getActiveTimer(id)?.[kDestroy]();
+  clearTimerById(timeout);
 }
 function setInterval(
   callback: (...args: unknown[]) => void,
@@ -193,8 +203,7 @@ function clearInterval(timeout?: Timeout | number | string) {
     mockTimers._clearTimer(timeout);
     return;
   }
-  const id = +timeout;
-  getActiveTimer(id)?.[kDestroy]();
+  clearTimerById(timeout);
 }
 function setImmediate(
   cb: (...args: unknown[]) => void,

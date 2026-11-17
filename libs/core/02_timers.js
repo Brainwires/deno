@@ -3,10 +3,17 @@
 
 ((window) => {
   const {
+    ArrayPrototypePush,
+    MapPrototypeDelete,
+    MapPrototypeGet,
+    MapPrototypeSet,
     MathMax,
     MathTrunc,
     NumberIsFinite,
     NumberMIN_SAFE_INTEGER,
+    SafeMap,
+    SafeMapIterator,
+    Symbol,
   } = window.__bootstrap.primordials;
   const {
     op_timer_schedule,
@@ -166,6 +173,39 @@
   let nextExpiry = Infinity;
   let nextTimerId = 1;
 
+  // Links a core timer to the object that owns it (a Node.js `Timeout`), so
+  // a lookup by numeric id can act through the owner's own close/ref/unref.
+  const kTimerOwner = Symbol("timerOwner");
+  // Marks a runtime-internal timer. User-facing lookups by id (the web
+  // `clearTimeout` / `clearInterval`, `Deno.refTimer` / `Deno.unrefTimer`)
+  // skip these.
+  const kSystemTimer = Symbol("systemTimer");
+
+  // The single id -> core timer map shared by the web and Node.js timer
+  // layers (both take their ids from `nextTimerId`). It holds every live
+  // user timer, and every system timer that has an owner; an ownerless
+  // system timer is never looked up by id.
+  const activeTimers = new SafeMap();
+
+  function untrack(timer) {
+    MapPrototypeDelete(activeTimers, timer._timerId);
+    op_timer_untrack(timer._timerId);
+  }
+
+  function getTimer(id) {
+    return MapPrototypeGet(activeTimers, id);
+  }
+
+  // Allocates a fresh array of every tracked timer on each call: meant for
+  // diagnostics such as `process.getActiveResourcesInfo()`, not hot paths.
+  function getActiveTimers() {
+    const timers = [];
+    for (const { 1: timer } of new SafeMapIterator(activeTimers)) {
+      ArrayPrototypePush(timers, timer);
+    }
+    return timers;
+  }
+
   // Shared buffer with Rust. Index 0: refed timer count.
   // Set by Rust during store_js_callbacks via __setTimerInfo.
   let timerInfo;
@@ -297,7 +337,7 @@
           if (timer[kRefed]) {
             decRefCount();
           }
-          op_timer_untrack(timer._timerId);
+          untrack(timer);
         }
         continue;
       }
@@ -323,7 +363,7 @@
           if (timer[kRefed]) {
             decRefCount();
           }
-          op_timer_untrack(timer._timerId);
+          untrack(timer);
         }
       }
     }
@@ -337,7 +377,16 @@
 
   // Timer item constructor (internal). Callers (web timers, node timers)
   // wrap this with their own validation and async context handling.
-  function createTimer(callback, after, args, isRepeat, isRefed, isSystem) {
+  // `owner` (optional) is the object a lookup by id acts through.
+  function createTimer(
+    callback,
+    after,
+    args,
+    isRepeat,
+    isRefed,
+    isSystem,
+    owner,
+  ) {
     if (after === undefined) {
       after = 1;
     } else {
@@ -361,11 +410,16 @@
       _destroyed: false,
       [kRefed]: isRefed,
       _timerId: id,
+      [kTimerOwner]: owner,
+      [kSystemTimer]: !!isSystem,
     };
 
     if (isRefed) incRefCount();
     insert(timer, after);
     op_timer_track(id, !!isRepeat, !!isSystem);
+    if (!isSystem || owner !== undefined) {
+      MapPrototypeSet(activeTimers, id, timer);
+    }
     if (__isLeakTracingEnabled()) {
       const error = new Error();
       ErrorCaptureStackTrace(error, createTimer);
@@ -384,7 +438,7 @@
       decRefCount();
     }
     L_remove(timer);
-    op_timer_untrack(timer._timerId);
+    untrack(timer);
   }
 
   function refreshTimer(timer) {
@@ -418,6 +472,10 @@
     refreshTimer,
     refTimer,
     unrefTimer,
+    getTimer,
+    getActiveTimers,
+    kTimerOwner,
+    kSystemTimer,
     insert,
     incRefCount,
     decRefCount,

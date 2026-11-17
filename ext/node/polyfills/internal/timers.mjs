@@ -19,15 +19,10 @@ const {
   ArrayPrototypePush,
   DateNow,
   FunctionPrototypeCall,
-  MapPrototypeDelete,
-  MapPrototypeGet,
-  MapPrototypeSet,
   NumberIsFinite,
   NumberIsNaN,
   ObjectDefineProperty,
   ReflectApply,
-  SafeMapIterator,
-  SafeMap,
   Symbol,
   SymbolDispose,
   SymbolToPrimitive,
@@ -64,28 +59,41 @@ const kSystem = Symbol("system");
 const kTimeout = Symbol("timeout");
 const kSuspended = Symbol("suspended");
 const kRefed = core.kRefed;
+const kTimerOwner = core.kTimerOwner;
+const kSystemTimer = core.kSystemTimer;
 const createTimer = Symbol("createTimer");
 
-/**
- * The keys in this map correspond to the key ID's in the spec's map of active
- * timers. The values are the timeout's status.
- *
- * @type {Map<number, Timeout>}
- */
-const activeTimers = new SafeMap();
+// Active timers live in core's single id -> timer map (shared with the web
+// timers); each Node.js `Timeout`'s core timer links back to it as its owner.
 
 /**
+ * The live `Timeout` with this id, system (runtime-internal) ones included.
+ *
  * @param {number} id
  * @returns {Timeout | undefined}
  */
 function getActiveTimer(id) {
-  return MapPrototypeGet(activeTimers, id);
+  return core.getTimer(id)?.[kTimerOwner];
+}
+
+/**
+ * As `getActiveTimer`, but never a system timer: for a lookup by a numeric id
+ * that came from user code.
+ *
+ * @param {number} id
+ * @returns {Timeout | undefined}
+ */
+function getActiveUserTimer(id) {
+  const timer = core.getTimer(id);
+  if (timer === undefined || timer[kSystemTimer]) return undefined;
+  return timer[kTimerOwner];
 }
 
 function getActiveResourcesInfo() {
   const resources = [];
-  for (const { 1: timeout } of new SafeMapIterator(activeTimers)) {
-    if (timeout[kRefed]) {
+  const timers = core.getActiveTimers();
+  for (let i = 0; i < timers.length; i++) {
+    if (timers[i][kTimerOwner]?.[kRefed]) {
       ArrayPrototypePush(resources, "Timeout");
     }
   }
@@ -205,18 +213,17 @@ Timeout.prototype[createTimer] = function () {
     } finally {
       // Cleanup runs after the callback (in a `finally` so it happens even if
       // the callback throws). Node keeps a one-shot Timeout reported as an
-      // active resource during its own callback and only drops it afterwards,
-      // so `activeTimers` must retain it for the duration of the call.
+      // active resource during its own callback and only drops it afterwards;
+      // core untracks the timer once this callback has returned.
       if (wasRepeat) {
         if (self._idleTimeout < 0 || self._onTimeout === null) {
           self[kDestroy]();
         }
       } else if (self._repeat) {
-        // timeout was converted to interval inside callback
-        MapPrototypeDelete(activeTimers, self[kTimerId]);
+        // timeout was converted to interval inside callback (core drops the
+        // old one-shot timer's id after this returns)
         self[kTimerId] = self[createTimer]();
       } else {
-        MapPrototypeDelete(activeTimers, self[kTimerId]);
         self._destroyed = true;
       }
     }
@@ -277,6 +284,7 @@ Timeout.prototype[createTimer] = function () {
     this._repeat,
     this[kRefed],
     this[kSystem],
+    this,
   );
   ObjectDefineProperty(this, "_timer", {
     __proto__: null,
@@ -285,9 +293,7 @@ Timeout.prototype[createTimer] = function () {
     enumerable: false,
     configurable: true,
   });
-  const id = timer._timerId;
-  MapPrototypeSet(activeTimers, id, this);
-  return id;
+  return timer._timerId;
 };
 
 Timeout.prototype[kDestroy] = function () {
@@ -298,7 +304,6 @@ Timeout.prototype[kDestroy] = function () {
     this._idleStart = DateNow();
     this._onTimeout = null;
     cancelTimer_(this._timer);
-    MapPrototypeDelete(activeTimers, this[kTimerId]);
     if (
       this._asyncId !== undefined &&
       !this._asyncDestroyed &&
@@ -416,7 +421,6 @@ function suspendTimeout(timeout) {
     timeout[kSuspended] = true;
     timeout._idleStart = DateNow();
     cancelTimer_(timeout._timer);
-    MapPrototypeDelete(activeTimers, timeout[kTimerId]);
   }
 }
 
@@ -499,6 +503,7 @@ return {
   kTimeout,
   kRefed,
   getActiveTimer,
+  getActiveUserTimer,
   getActiveResourcesInfo,
   Timeout,
   getTimerDuration,
