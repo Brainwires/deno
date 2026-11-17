@@ -18,8 +18,8 @@ const {
   op_webrtc_certificate_drop,
   op_webrtc_certificate_from_pem,
   op_webrtc_certificate_to_pem,
-  op_webrtc_dc_buffered_amount,
   op_webrtc_dc_close,
+  op_webrtc_dc_id,
   op_webrtc_dc_send,
   op_webrtc_dc_set_low_threshold,
   op_webrtc_pc_add_ice_candidate,
@@ -58,6 +58,7 @@ const {
   op_webrtc_transceiver_set_codec_preferences,
   op_webrtc_transceiver_set_direction,
   op_webrtc_transceiver_stop,
+  op_void_async_deferred,
 } = core.ops;
 const {
   ArrayBufferIsView,
@@ -65,6 +66,7 @@ const {
   ArrayFrom,
   ArrayIsArray,
   ArrayPrototypeIncludes,
+  ArrayPrototypeJoin,
   ArrayPrototypeMap,
   ArrayPrototypePush,
   ArrayPrototypeShift,
@@ -147,6 +149,7 @@ const {
   setIsTrusted,
 } = core.loadExtScript("ext:deno_web/02_event.js");
 const { Blob, BlobPrototype } = core.loadExtScript("ext:deno_web/09_file.js");
+const { performance } = core.loadExtScript("ext:deno_web/15_performance.js");
 const { clearTimeout, setTimeout } = core.loadExtScript(
   "ext:deno_web/02_timers.js",
 );
@@ -668,10 +671,12 @@ class RTCSctpTransport extends EventTarget {
     this[_pc] = pc;
   }
 
+  // The association's own state (the engine reports it): connecting until
+  // the SCTP handshake completes, closed for good once it ends.
   get state() {
     const pc = this[_pc][_state];
-    if (pc.closed || pc.connectionState === "closed") return "closed";
-    return pc.connectionState === "connected" ? "connected" : "connecting";
+    if (pc.closed) return "closed";
+    return pc.sctpState ?? "connecting";
   }
 
   // The remote description's a=max-message-size (65536 when absent, no
@@ -715,13 +720,17 @@ class RTCDataChannel extends EventTarget {
       id: init.id ?? null,
       binaryType: "arraybuffer",
       lowThreshold: 0,
-      lastBuffered: 0,
+      // [[BufferedAmount]]: what send() accepted that SCTP hasn't taken from
+      // its queue yet (`dcsent`).
+      buffered: 0,
       // Bytes accepted by send() but still waiting behind a Blob read: they
       // count in bufferedAmount from the call on.
       queuedBytes: 0,
       // Sends waiting for a Blob ahead of them to be read.
       queue: [],
       reading: false,
+      // close() was called with sends queued: the close follows them.
+      closeAfterQueue: false,
     };
     this[webidl.brand] = webidl.brand;
   }
@@ -752,7 +761,17 @@ class RTCDataChannel extends EventTarget {
   }
   get id() {
     webidl.assertBranded(this, RTCDataChannelPrototype);
-    return this[_state].id;
+    const state = this[_state];
+    // The engine assigns an in-band channel's id once the DTLS role is
+    // negotiated (an answer is applied); it doesn't change after that.
+    if (state.id === null && state.readyState !== "closed") {
+      const pc = this[_pc];
+      if (!pc[_state].closed) {
+        const id = op_webrtc_dc_id(pc[_rid], this[_channel]);
+        if (id >= 0) state.id = id;
+      }
+    }
+    return state.id;
   }
   get readyState() {
     webidl.assertBranded(this, RTCDataChannelPrototype);
@@ -760,14 +779,7 @@ class RTCDataChannel extends EventTarget {
   }
   get bufferedAmount() {
     webidl.assertBranded(this, RTCDataChannelPrototype);
-    const pc = this[_pc];
-    if (!pc[_state].closed && this[_state].readyState !== "closed") {
-      this[_state].lastBuffered = op_webrtc_dc_buffered_amount(
-        pc[_rid],
-        this[_channel],
-      );
-    }
-    return this[_state].lastBuffered + this[_state].queuedBytes;
+    return this[_state].buffered + this[_state].queuedBytes;
   }
   get bufferedAmountLowThreshold() {
     webidl.assertBranded(this, RTCDataChannelPrototype);
@@ -853,10 +865,13 @@ class RTCDataChannel extends EventTarget {
       return;
     }
     state.readyState = "closing";
-    const pc = this[_pc];
-    if (!pc[_state].closed) {
-      op_webrtc_dc_close(pc[_rid], this[_channel]);
+    // Sends still waiting for a Blob to be read go out first (the closing
+    // procedure finishes sending what send() accepted), then the close.
+    if (state.queue.length > 0) {
+      state.closeAfterQueue = true;
+      return;
     }
+    closeTransport(this);
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
@@ -881,14 +896,17 @@ defineEventHandler(RTCDataChannel.prototype, "message");
 webidl.configureInterface(RTCDataChannel);
 const RTCDataChannelPrototype = RTCDataChannel.prototype;
 
+function closeTransport(channel) {
+  const pc = channel[_pc];
+  if (!pc[_state].closed) {
+    op_webrtc_dc_close(pc[_rid], channel[_channel]);
+  }
+}
+
 function sendNow(channel, text, bytes) {
   const pc = channel[_pc];
-  channel[_state].lastBuffered = op_webrtc_dc_send(
-    pc[_rid],
-    channel[_channel],
-    text,
-    bytes,
-  );
+  op_webrtc_dc_send(pc[_rid], channel[_channel], text, bytes);
+  channel[_state].buffered += TypedArrayPrototypeGetByteLength(bytes);
 }
 
 function drainQueue(channel) {
@@ -902,7 +920,7 @@ function drainQueue(channel) {
         ArrayPrototypeShift(state.queue);
         state.queuedBytes = MathMax(0, state.queuedBytes - head.size);
         state.reading = false;
-        if (state.readyState === "open") {
+        if (state.readyState === "open" || state.closeAfterQueue) {
           try {
             sendNow(channel, false, new Uint8Array(buffer));
           } catch (error) {
@@ -931,6 +949,10 @@ function drainQueue(channel) {
       return;
     }
   }
+  if (state.closeAfterQueue) {
+    state.closeAfterQueue = false;
+    closeTransport(channel);
+  }
 }
 
 // A queued send that could not go out (a Blob that failed to read, or one
@@ -942,7 +964,15 @@ function failChannel(channel, cause) {
     cause?.message ?? String(cause),
   );
   fire(channel, new RTCErrorEvent("error", { error }));
-  channel.close();
+  const state = channel[_state];
+  state.queue = [];
+  state.queuedBytes = 0;
+  if (state.closeAfterQueue) {
+    state.closeAfterQueue = false;
+    closeTransport(channel);
+  } else {
+    channel.close();
+  }
 }
 
 function toBinary(channel, data) {
@@ -1404,6 +1434,16 @@ class RTCIceTransport extends EventTarget {
     webidl.assertBranded(this, RTCIceTransportPrototype);
     return this[_transportState].gatheringState;
   }
+  // The candidates gathered here and signalled with `icecandidate`, and the
+  // remote ones received with addIceCandidate().
+  getLocalCandidates() {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    return ArrayPrototypeSlice(this[_pc][_state].localCandidates);
+  }
+  getRemoteCandidates() {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    return ArrayPrototypeSlice(this[_pc][_state].remoteCandidates);
+  }
   getSelectedCandidatePair() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
     return selectedPair(this[_pc]);
@@ -1560,7 +1600,11 @@ function setTransportStates(pc, silent = false) {
     if (!silent) fire(ice, new Event("gatheringstatechange"));
   }
   let dtlsState = dtls[_transportState].state;
-  if (s.closed || s.connectionState === "closed") dtlsState = "closed";
+  // The peer's close_notify closes the DTLS transport itself (the engine
+  // says so) while the connection, by its own rules, stays connected.
+  if (
+    s.closed || s.connectionState === "closed" || s.dtlsState === "closed"
+  ) dtlsState = "closed";
   else if (s.connectionState === "failed") dtlsState = "failed";
   else if (s.connectionState === "connected") dtlsState = "connected";
   else if (s.connectionState === "connecting") dtlsState = "connecting";
@@ -1643,13 +1687,41 @@ function capabilities(kind, sender) {
 // getStats(): resolves in a later microtask (it is not on the operations
 // chain, and never settles synchronously); after close(), the stats the
 // connection had when it closed.
+// The stats timestamps on the Performance timeline: the engine reports each
+// relative to the moment the report was asked for, which is `base`.
+const STATS_TIME_FIELDS = [
+  "timestamp",
+  "lastPacketSentTimestamp",
+  "lastPacketReceivedTimestamp",
+  "remoteTimestamp",
+  "estimatedPlayoutTimestamp",
+];
+
+function engineStats(pc, key, sender) {
+  const base = performance.timeOrigin + performance.now();
+  const entries = op_webrtc_pc_get_stats(
+    pc[_rid],
+    key ?? 0,
+    key !== null,
+    sender,
+  );
+  for (let i = 0; i < entries.length; ++i) {
+    const stats = entries[i];
+    for (let f = 0; f < STATS_TIME_FIELDS.length; ++f) {
+      const field = STATS_TIME_FIELDS[f];
+      if (typeof stats[field] === "number") stats[field] += base;
+    }
+  }
+  return entries;
+}
+
 function statsFor(pc, key, sender) {
   const state = pc[_state];
   let entries;
   try {
     entries = state.closed
       ? (key === null ? state.lastStats ?? [] : [])
-      : op_webrtc_pc_get_stats(pc[_rid], key ?? 0, key !== null, sender);
+      : engineStats(pc, key, sender);
   } catch (error) {
     return PromiseReject(error);
   }
@@ -2671,6 +2743,8 @@ class RTCPeerConnection extends EventTarget {
       iceConnectionState: "new",
       connectionState: "new",
       sctp: null,
+      sctpState: null,
+      dtlsState: null,
       dtls: null,
       transceivers: [],
       // Remote MediaStreams by id.
@@ -2887,6 +2961,7 @@ class RTCPeerConnection extends EventTarget {
       const state = this[_state];
       if (type === "answer" || type === "pranswer") {
         state.iceRole ??= "controlled";
+        readChannelIds(this);
       }
       activate(this);
       syncTransceivers(this, { remote: false, type });
@@ -2953,6 +3028,7 @@ class RTCPeerConnection extends EventTarget {
         state.remoteMaxMessageSize = maxMessageSizeOf(sdp);
       }
       if (type === "answer" || type === "pranswer") {
+        readChannelIds(this);
         state.iceRole ??= "controlling";
       }
       activate(this);
@@ -2987,7 +3063,20 @@ class RTCPeerConnection extends EventTarget {
       );
     }
     return enqueue(this, () => {
-      if (candidate === undefined || candidate === null) return;
+      if (candidate === undefined || candidate === null) {
+        // `null` / no argument is the `{}` dictionary: end-of-candidates
+        // for every media section (ICE then knows the remote's candidates
+        // are all in). Before a remote description it is ignored.
+        if (this.remoteDescription !== null) {
+          op_webrtc_pc_add_ice_candidate(this[_rid], {
+            candidate: "",
+            sdpMid: null,
+            sdpMLineIndex: null,
+            usernameFragment: null,
+          });
+        }
+        return;
+      }
       const line = candidate.candidate === undefined
         ? ""
         : String(candidate.candidate);
@@ -3254,6 +3343,21 @@ class RTCPeerConnection extends EventTarget {
       iceServers: config.iceServers,
       iceTransportPolicy: config.iceTransportPolicy,
     });
+    // RFC 9429 section 4.1.18: a new ICE candidate policy, or new STUN / TURN
+    // servers, apply to the next gathering phase; once one has started,
+    // they set the needs-ice-restart bit, so the next offer restarts ICE.
+    const serverUrls = (servers) =>
+      ArrayPrototypeJoin(
+        ArrayPrototypeMap(servers, (s) => ArrayPrototypeJoin(s.urls, " ")),
+        "\n",
+      );
+    if (
+      (config.iceTransportPolicy !== current.iceTransportPolicy ||
+        serverUrls(config.iceServers) !== serverUrls(current.iceServers)) &&
+      this.localDescription !== null
+    ) {
+      this[_state].restartIce = true;
+    }
     config.certificates = current.certificates;
     config.network = current.network;
     this[_state].config = config;
@@ -3475,7 +3579,7 @@ class RTCPeerConnection extends EventTarget {
       // The resource is already gone.
     }
     try {
-      state.lastStats = op_webrtc_pc_get_stats(this[_rid], 0, false, false);
+      state.lastStats = engineStats(this, null, false);
     } catch {
       state.lastStats = [];
     }
@@ -3580,21 +3684,30 @@ defineEventHandler(RTCPeerConnection.prototype, "track");
 webidl.configureInterface(RTCPeerConnection);
 const RTCPeerConnectionPrototype = RTCPeerConnection.prototype;
 
-// An m=application section in both descriptions after an answer: the
-// connection has an SCTP transport (null again after a rollback to no
-// negotiated one).
+// W3C "set the RTCSessionDescription": a description (local or remote, an
+// offer too) that negotiates an SCTP transport, an m=application section,
+// creates the connection's RTCSctpTransport; a rollback to descriptions
+// without one sets it back to null.
 function updateSctpTransport(pc, type) {
   const state = pc[_state];
-  if (type !== "answer" && type !== "pranswer" && type !== "rollback") return;
-  const local = pc.localDescription;
-  const remote = pc.remoteDescription;
   const has = (d) =>
     d !== null && StringPrototypeIncludes(d.sdp, "\nm=application ");
-  if (has(local) && has(remote) && state.sctp === null) {
+  if (type === "rollback") {
+    if (
+      !has(pc.currentLocalDescription) && !has(pc.currentRemoteDescription)
+    ) {
+      state.sctp = null;
+      state.sctpState = null;
+    }
+    return;
+  }
+  if (
+    state.sctp === null &&
+    (has(pc.localDescription) || has(pc.remoteDescription))
+  ) {
+    state.sctpState = null;
     state.sctp = new RTCSctpTransport(illegalConstructorKey, pc);
     state.sctp[_transportState] = state.sctp.state;
-  } else if (type === "rollback" && pc.currentRemoteDescription === null) {
-    state.sctp = null;
   }
 }
 
@@ -3859,6 +3972,13 @@ function enqueue(pc, fn) {
   return result;
 }
 
+// An answer negotiates the DTLS role, and with it the ids of the channels
+// created before it (the getter reads them too; this keeps them for a
+// channel that closes before anything asks).
+function readChannelIds(pc) {
+  MapPrototypeForEach(pc[_channels], (channel) => channel.id);
+}
+
 function setSignalingState(pc, next) {
   const state = pc[_state];
   if (state.closed || state.signalingState === next) return;
@@ -3890,19 +4010,36 @@ function pump(pc) {
   PromisePrototypeThen(promise, (events) => {
     state.pending = null;
     if (events === null || state.closed) return;
-    for (let i = 0; i < events.length; ++i) {
-      try {
-        dispatchEngineEvent(pc, events[i]);
-      } catch (error) {
-        // Listener exceptions are reported by dispatchEvent itself; this is
-        // anything else, reported without stopping the other events.
-        reportException(error);
-      }
-      if (state.closed) return;
-    }
-    pump(pc);
+    if (events.length === 0) pump(pc);
+    else dispatchEngineEvents(pc, events, 0);
   }, () => {
     state.pending = null;
+  });
+}
+
+// Each engine event is its own task, as a browser queues one per event: a
+// listener's microtasks (an `await` that re-arms `onmessage`, say) run before
+// the next event is dispatched.
+function dispatchEngineEvents(pc, events, from) {
+  const state = pc[_state];
+  try {
+    dispatchEngineEvent(pc, events[from]);
+  } catch (error) {
+    // Listener exceptions are reported by dispatchEvent itself; this is
+    // anything else, reported without stopping the other events.
+    reportException(error);
+  }
+  if (state.closed) return;
+  if (from + 1 === events.length) {
+    pump(pc);
+    return;
+  }
+  const next = op_void_async_deferred();
+  state.pending = next;
+  if (!state.active) core.unrefOpPromise(next);
+  PromisePrototypeThen(next, () => {
+    state.pending = null;
+    if (!state.closed) dispatchEngineEvents(pc, events, from + 1);
   });
 }
 
@@ -3979,6 +4116,15 @@ function dispatchEngineEvent(pc, event) {
       break;
     case "negotiationneeded":
       queueNegotiationNeeded(pc);
+      break;
+    case "dtlsstatechange":
+      state.dtlsState = event.state;
+      setTransportStates(pc);
+      break;
+    case "sctpstatechange":
+      if (state.sctp === null) break;
+      state.sctpState = event.state;
+      setTransportStates(pc);
       break;
     case "trackunmute": {
       const t = transceiverFor(pc, event.transceiver);
@@ -4061,10 +4207,15 @@ function dispatchEngineEvent(pc, event) {
       );
       break;
     }
-    case "dclow": {
+    case "dcsent": {
       const channel = channelFor(pc, event);
       if (channel === undefined) break;
-      fire(channel, new Event("bufferedamountlow"));
+      const s = channel[_state];
+      const before = s.buffered;
+      s.buffered = MathMax(0, before - event.bytes);
+      if (before > s.lowThreshold && s.buffered <= s.lowThreshold) {
+        fire(channel, new Event("bufferedamountlow"));
+      }
       break;
     }
     case "dcmessage": {

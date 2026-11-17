@@ -17445,6 +17445,79 @@ where the changes are discussed.
        on. The engine's own SDP carries no `a=ice-options:trickle`, so two Deno
        peers now see `canTrickleIceCandidates === false` (true before), as the
        spec has it for that SDP.
+     - Data channels, hangs, stats and transports (`webrtc/b-channels`;
+       `ext/webrtc/{01_webrtc.js,peer.rs,lib.rs,tests.rs}`,
+       `cli/tsc/dts/lib.deno_webrtc.d.ts`; the engine pin moves to
+       Brainwires/webrtc-rs-rtc branch `webrtc/b-channels`, b91196d7). Engine
+       events are dispatched one task each (an `op_void_async_deferred` between
+       them), so a listener's `await` that re-arms `onmessage` runs before the
+       next message: the root of the `RTCDataChannel-send` / `-send-blob-order`
+       hangs. A data channel's `id` is assigned when an answer negotiates the
+       DTLS role (W3C "set the RTCSessionDescription"; the engine assigned it at
+       SCTP connect, the ext read it at `open`), and a channel created after
+       that gets one at once (`RTCDataChannel-id` 5/5, `createDataChannel?rest`
+       +6). Closing: a close the remote starts fires `closing` then `close`, a
+       lost association `error` (`sctp-failure`) then `close`, idle
+       pre-negotiated channels included; a stream id is free only once both
+       directions are reset (RFC 8831 6.7; a reused id was reset by the peer's
+       reply), a reset of a stream with no state is reported and echoed, the
+       close follows the sends before it (it was applied ahead of messages still
+       in the engine's pipeline), and the last message before a reset is no
+       longer lost to the closed stream's error (`RTCDataChannel-close` 11 of
+       12, `-send-close-*` all six). Blob sends still being read go out before a
+       `close()`. `bufferedAmount` falls when SCTP takes the data from its send
+       queue (engine `bytes_dequeued`), not on the peer's acknowledgement, and
+       `bufferedamountlow` follows it (`RTCDataChannel-bufferedAmount` 30/30; it
+       hung waiting for a message that had arrived before the low event).
+       `RTCSctpTransport` exists from any description with an m=application
+       section and follows the association (`connecting` / `connected` /
+       `closed` with `statechange`; the engine reported the accepting side's
+       association `closed` while it handshook); `RTCDtlsTransport` closes on
+       the peer's close_notify (`protocol/dtls-close`). Stats timestamps are on
+       the Performance timeline (the engine writes epoch milliseconds at full
+       precision, relative to the request in Rust, plus
+       `performance.timeOrigin +
+       performance.now()` in JavaScript;
+       `getStats-timestamp` +1). `setConfiguration` with a new
+       `iceTransportPolicy` or servers sets the needs-ice-restart bit (RFC 9429
+       4.1.18), an applied restart regathers on the bound sockets under the
+       current policy (the restart offer carries no old-generation candidates),
+       `addIceCandidate(null)` is end-of-candidates, and a check list that can
+       have no pair fails ICE once both sides have gathered
+       (`iceTransportPolicy?rest` 16 of 17).
+       `RTCIceTransport.getLocalCandidates()` / `getRemoteCandidates()`. Rust
+       tests: the engine's data channel handler (closing / error order, idle
+       channels), SCTP (reset echo, unknown-stream reset, `bytes_dequeued`), the
+       transport state, `instant_to_epoch` and the answer-time ids; ext
+       `tests.rs` (sent bytes reported, close after sends, stats timestamps).
+     - Still failing in that scope, with the cause: `RTCDataChannel-close`'s
+       last subtest closes the peer 100 ms after creating channels, before a
+       debug build has connected; `RTCSctpTransport-events` waits for a
+       `statechange` on the local `close()`, which webrtc-pc doesn't fire;
+       `iceTransportPolicy?rest`'s relay-to-all test, whose offerer's
+       end-of-candidates reaches the answerer before its remote description
+       (this side gathers a relay-only phase at once); `RTCDataChannel-send`'s
+       last subtest assigns a bare `onmessage` (a `window` global);
+       `RTCSctpTransport-maxMessageSize` (renegotiated sizes, the Blob size
+       check), `RTCIceTransport?rest` (Team A's areas: role, restart, bundle);
+       and the media helper (`getNoiseStream`, canvas) behind
+       `RTCDtlsTransport-state` / `-getRemoteCertificates`, the
+       createDataChannel media subtests and the RTCP timestamp subtest. An id
+       that runs out at the answer is left null rather than closing the channel
+       with an error, as webrtc-pc has it.
+     - Numbers after the data channel work (the same container run, expectations
+       updated): `webrtc/` 1462 / 2153 subtests (67.9%) and 65 files fully
+       passing, from 1390 / 2110 and 52; all `webrtc*` directories 1524 / 2546
+       and 67 files, from 1452 / 2503 and 54 (the subtest totals grew as hung
+       files now report every subtest). No subtest that passed before fails.
+       Turned green: `RTCDataChannel-bufferedAmount`, `-id`, `-send-blob-order`,
+       the six `-send-close-*`, `RTCSctpTransport-maxChannels?interop-2026`,
+       `RTCIceTransport?interop-2026`,
+       `RTCPeerConnection-addIceCandidate-timing`, `protocol/dtls-close`; unhung
+       with most subtests passing: `RTCDataChannel-close` (11 of 12), `-send`
+       (25 of 26), `iceTransportPolicy?rest` (16 of 17),
+       `RTCPeerConnection-iceGatheringState`, `-operations?rest`,
+       `getStats-timestamp`.
      - Node tests enabled: none; `node:` has no WebRTC API.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,

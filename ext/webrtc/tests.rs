@@ -19,7 +19,7 @@ use crate::WebRtcError;
 use crate::peer::RemoteCandidate;
 use crate::peer::candidate_address;
 use crate::peer::classify_remote_candidate;
-use crate::peer::epoch_fields_to_ms;
+use crate::peer::epoch_fields_relative;
 
 /// Loopback only: interface enumeration is refused, so host candidates are
 /// `127.0.0.1` alone and the test is the same on every machine.
@@ -429,22 +429,76 @@ fn related_addresses_are_redacted() {
   assert_eq!(redact(host), host);
 }
 
+// W3C bufferedAmount falls as SCTP takes data from its send queue: every
+// byte sent is reported by `dcsent` once transmitted (before the peer's
+// acknowledgement, which the engine's back-pressure then waits for).
 #[tokio::test]
-async fn buffered_amount_drains_to_zero() {
+async fn sent_bytes_are_reported_as_sctp_transmits_them() {
   let (a, b, id, mut ea, _eb) = connect(reliable()).await;
-  a.set_buffered_amount_low_threshold(id, 1024);
+  const TOTAL: usize = 64 * 16 * 1024;
   for _ in 0..64 {
     a.send(id, false, &[7u8; 16 * 1024]).unwrap();
   }
   assert!(a.buffered_amount(id) > 1024);
-  wait_for(&a, &mut ea, |e| matches!(e, JsEvent::DataChannelLow { .. })).await;
+  let reported = |events: &[JsEvent]| -> f64 {
+    events
+      .iter()
+      .map(|e| match e {
+        JsEvent::DataChannelSent { channel, bytes } if *channel == id => *bytes,
+        _ => 0.0,
+      })
+      .sum()
+  };
+  ea.clear();
+  tokio::time::timeout(Duration::from_secs(20), async {
+    while reported(&ea) < TOTAL as f64 {
+      ea.extend(a.next_events().await.expect("peer closed"));
+    }
+  })
+  .await
+  .expect("every byte is reported sent");
+  assert_eq!(reported(&ea), TOTAL as f64, "not more than was sent");
   tokio::time::timeout(Duration::from_secs(20), async {
     while a.buffered_amount(id) > 0 {
       tokio::time::sleep(Duration::from_millis(20)).await;
     }
   })
   .await
-  .expect("bufferedAmount drains");
+  .expect("the engine's back-pressure drains");
+  a.close();
+  b.close();
+}
+
+// A close right after sends follows them: the peer receives every message,
+// then the channel's close (RFC 8831 section 6.7; the reset went out ahead
+// of data still in the engine's pipeline).
+#[tokio::test]
+async fn close_after_send_delivers_the_data_first() {
+  let (a, b, id, _ea, mut eb) = connect(reliable()).await;
+  for _ in 0..16 {
+    a.send(id, false, &[7u8; 16 * 1024]).unwrap();
+  }
+  a.close_data_channel(id);
+  eb.clear();
+  tokio::time::timeout(Duration::from_secs(20), async {
+    while !eb
+      .iter()
+      .any(|e| matches!(e, JsEvent::DataChannelClose { .. }))
+    {
+      eb.extend(b.next_events().await.expect("peer closed"));
+    }
+  })
+  .await
+  .expect("the channel closes");
+  let close_at = eb
+    .iter()
+    .position(|e| matches!(e, JsEvent::DataChannelClose { .. }))
+    .unwrap();
+  let received: usize = messages(&eb[..close_at])
+    .iter()
+    .map(|(_, data)| data.len())
+    .sum();
+  assert_eq!(received, 16 * 16 * 1024);
   a.close();
   b.close();
 }
@@ -920,18 +974,32 @@ fn mdns_is_off_without_its_permissions() {
 }
 
 #[test]
-fn stats_epoch_fields_are_milliseconds() {
-  let stats = epoch_fields_to_ms(serde_json::json!({
-    "id": "PC",
-    "type": "peer-connection",
-    "timestamp": 1794904159.643,
-    "lastPacketReceivedTimestamp": 2.5,
-    "bytesSent": 7,
-  }));
-  assert_eq!(
-    stats["timestamp"].as_f64().unwrap().round(),
-    1794904159643.0
+fn stats_epoch_fields_are_relative_to_the_request() {
+  let stats = epoch_fields_relative(
+    serde_json::json!({
+      "id": "PC",
+      "type": "peer-connection",
+      "timestamp": 1794904159643.25,
+      "lastPacketReceivedTimestamp": 1794904157643.0,
+      "bytesSent": 7,
+    }),
+    1794904159643.0,
   );
-  assert_eq!(stats["lastPacketReceivedTimestamp"], 2500.0);
+  assert!((stats["timestamp"].as_f64().unwrap() - 0.25).abs() < 1e-6);
+  assert_eq!(stats["lastPacketReceivedTimestamp"], -2000.0);
   assert_eq!(stats["bytesSent"], 7);
+}
+
+// A report's own timestamp is the moment it was asked for, to well under a
+// millisecond (the engine used to truncate it to whole milliseconds).
+#[test]
+fn stats_timestamp_is_the_request_time() {
+  let peer = new_peer();
+  let stats = peer.stats(None).unwrap();
+  let pc = stats
+    .iter()
+    .find(|s| s["type"] == "peer-connection")
+    .expect("a peer-connection entry");
+  let offset = pc["timestamp"].as_f64().unwrap();
+  assert!((0.0..50.0).contains(&offset), "{offset}");
 }
