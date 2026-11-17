@@ -1,0 +1,15 @@
+{
+  "tests": {
+    // inspector.open() looks a host name up, so the permissions are checked
+    // before the lookup: the sys permission, then the net permission for the
+    // name as it was given.
+    "no_sys": {
+      "args": "run main.mjs",
+      "output": "no_sys.out"
+    },
+    "sys_without_net": {
+      "args": "run --allow-sys=inspector main.mjs",
+      "output": "sys_without_net.out"
+    }
+  }
+}
