@@ -244,8 +244,10 @@ function cachedDescription(pc, which, pair) {
 
 // `candidate:<foundation> <component> <transport> <priority> <address>
 // <port> typ <type> [raddr <a> rport <p>] [tcptype <t>] ...` (RFC 8839
-// section 5.1). A string that doesn't parse leaves every derived attribute
-// null.
+// section 5.1, RFC 6544 section 4.5), with no SDP framing ("a=") and no
+// surrounding whitespace. A TCP candidate other than a relay carries its
+// tcptype right after the related address. A string that doesn't parse
+// leaves every derived attribute null.
 const ICE_CHARS = new SafeRegExp("^[A-Za-z0-9+/]{1,32}$");
 const DIGITS_3 = new SafeRegExp("^[0-9]{1,3}$");
 const DIGITS_5 = new SafeRegExp("^[0-9]{1,5}$");
@@ -268,12 +270,8 @@ function nullCandidate() {
 }
 
 function parseCandidate(line) {
-  let value = StringPrototypeTrim(line);
-  if (StringPrototypeStartsWith(value, "a=")) {
-    value = StringPrototypeSlice(value, 2);
-  }
-  if (!StringPrototypeStartsWith(value, "candidate:")) return nullCandidate();
-  value = StringPrototypeSlice(value, 10);
+  if (!StringPrototypeStartsWith(line, "candidate:")) return nullCandidate();
+  const value = StringPrototypeSlice(line, 10);
   const f = StringPrototypeSplit(value, SPACES);
   if (f.length < 8) return nullCandidate();
   const foundation = f[0];
@@ -317,23 +315,30 @@ function parseCandidate(line) {
   }
   let hasRaddr = false;
   let hasRport = false;
-  for (let i = 8; i + 1 < f.length; i += 2) {
-    const key = StringPrototypeToLowerCase(f[i]);
-    if (key === "raddr") {
-      hasRaddr = true;
-      out.relatedAddress = f[i + 1];
-    } else if (key === "rport") {
-      if (!RegExpPrototypeTest(DIGITS_5, f[i + 1])) return nullCandidate();
-      const rport = NumberParseInt(f[i + 1], 10);
-      if (rport > 65535) return nullCandidate();
-      hasRport = true;
-      out.relatedPort = rport;
-    } else if (key === "tcptype") {
-      const tcpType = StringPrototypeToLowerCase(f[i + 1]);
-      if (ArrayPrototypeIncludes(["active", "passive", "so"], tcpType)) {
-        out.tcpType = tcpType;
-      }
+  let i = 8;
+  if (i + 1 < f.length && StringPrototypeToLowerCase(f[i]) === "raddr") {
+    hasRaddr = true;
+    out.relatedAddress = f[i + 1];
+    i += 2;
+  }
+  if (i + 1 < f.length && StringPrototypeToLowerCase(f[i]) === "rport") {
+    if (!RegExpPrototypeTest(DIGITS_5, f[i + 1])) return nullCandidate();
+    const rport = NumberParseInt(f[i + 1], 10);
+    if (rport > 65535) return nullCandidate();
+    hasRport = true;
+    out.relatedPort = rport;
+    i += 2;
+  }
+  if (i < f.length && StringPrototypeToLowerCase(f[i]) === "tcptype") {
+    const tcpType = i + 1 < f.length
+      ? StringPrototypeToLowerCase(f[i + 1])
+      : "";
+    if (!ArrayPrototypeIncludes(["active", "passive", "so"], tcpType)) {
+      return nullCandidate();
     }
+    out.tcpType = tcpType;
+  } else if (protocol === "tcp" && type !== "relay") {
+    return nullCandidate();
   }
   if (hasRaddr !== hasRport) return nullCandidate();
   if (
