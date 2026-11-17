@@ -79,7 +79,7 @@ op_desktop_close_reply -> null
 op_desktop_set_will_navigate -> false
 op_desktop_answer_will_navigate -> false
 op_desktop_set_app_menu -> false
-op_desktop_webview_capabilities -> {"supported":false,"engine":null,"capture":false,"evaluate":false,"persistentPartitions":false,"permissionPrompts":false,"zOrder":false,"zoom":false,"find":false,"devTools":false,"contextMenu":false,"print":false,"clipboard":false,"menuAccelerators":false,"unhandledKeys":false,"forwardKeys":false}
+op_desktop_webview_capabilities -> {"supported":false,"engine":null,"capture":false,"evaluate":false,"persistentPartitions":false,"permissionPrompts":false,"zOrder":false,"zoom":false,"find":false,"devTools":false,"contextMenu":false,"print":false,"clipboard":false,"menuAccelerators":false,"unhandledKeys":false,"forwardKeys":false,"blur":false,"keyUp":false,"forwardKeysBeforeMenu":false}
 op_desktop_webview_set_bounds -> false
 op_desktop_webview_set_visible -> false
 op_desktop_webview_navigate -> {"ok":false,"code":"unsupported","message":"embedded web views are not supported by this desktop backend"}
