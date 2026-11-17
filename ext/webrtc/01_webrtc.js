@@ -729,6 +729,8 @@ class RTCDataChannel extends EventTarget {
       // Sends waiting for a Blob ahead of them to be read.
       queue: [],
       reading: false,
+      // close() was called with sends queued: the close follows them.
+      closeAfterQueue: false,
     };
     this[webidl.brand] = webidl.brand;
   }
@@ -863,10 +865,13 @@ class RTCDataChannel extends EventTarget {
       return;
     }
     state.readyState = "closing";
-    const pc = this[_pc];
-    if (!pc[_state].closed) {
-      op_webrtc_dc_close(pc[_rid], this[_channel]);
+    // Sends still waiting for a Blob to be read go out first (the closing
+    // procedure finishes sending what send() accepted), then the close.
+    if (state.queue.length > 0) {
+      state.closeAfterQueue = true;
+      return;
     }
+    closeTransport(this);
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
@@ -891,6 +896,13 @@ defineEventHandler(RTCDataChannel.prototype, "message");
 webidl.configureInterface(RTCDataChannel);
 const RTCDataChannelPrototype = RTCDataChannel.prototype;
 
+function closeTransport(channel) {
+  const pc = channel[_pc];
+  if (!pc[_state].closed) {
+    op_webrtc_dc_close(pc[_rid], channel[_channel]);
+  }
+}
+
 function sendNow(channel, text, bytes) {
   const pc = channel[_pc];
   op_webrtc_dc_send(pc[_rid], channel[_channel], text, bytes);
@@ -908,7 +920,7 @@ function drainQueue(channel) {
         ArrayPrototypeShift(state.queue);
         state.queuedBytes = MathMax(0, state.queuedBytes - head.size);
         state.reading = false;
-        if (state.readyState === "open") {
+        if (state.readyState === "open" || state.closeAfterQueue) {
           try {
             sendNow(channel, false, new Uint8Array(buffer));
           } catch (error) {
@@ -937,6 +949,10 @@ function drainQueue(channel) {
       return;
     }
   }
+  if (state.closeAfterQueue) {
+    state.closeAfterQueue = false;
+    closeTransport(channel);
+  }
 }
 
 // A queued send that could not go out (a Blob that failed to read, or one
@@ -948,7 +964,15 @@ function failChannel(channel, cause) {
     cause?.message ?? String(cause),
   );
   fire(channel, new RTCErrorEvent("error", { error }));
-  channel.close();
+  const state = channel[_state];
+  state.queue = [];
+  state.queuedBytes = 0;
+  if (state.closeAfterQueue) {
+    state.closeAfterQueue = false;
+    closeTransport(channel);
+  } else {
+    channel.close();
+  }
 }
 
 function toBinary(channel, data) {

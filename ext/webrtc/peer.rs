@@ -1657,6 +1657,11 @@ impl Core {
       }
     }
     let mut mid = None::<String>;
+    // A channel's closing, error and close come after the messages the engine
+    // delivered with them: the engine queues messages apart from events, and
+    // a close the peer started follows its data on the wire (RFC 8831
+    // section 6.7), so none of it may be dropped as arriving "after" close.
+    let mut closes = Vec::new();
     while let Some(event) = self.pc.poll_event() {
       match event {
         RTCPeerConnectionEvent::OnNegotiationNeededEvent => {
@@ -1766,7 +1771,11 @@ impl Core {
             // acknowledged (`track_sent`).
             _ => continue,
           };
-          self.events.push_back(event);
+          if matches!(event, JsEvent::DataChannelOpen { .. }) {
+            self.events.push_back(event);
+          } else {
+            closes.push(event);
+          }
         }
         RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnOpen(init)) => {
           let index: usize = init.receiver_id.into();
@@ -1817,6 +1826,7 @@ impl Core {
         _ => {}
       }
     }
+    self.events.extend(closes);
   }
 
   /// Ends gathering once every server answered or gave up.

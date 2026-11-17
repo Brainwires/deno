@@ -469,6 +469,40 @@ async fn sent_bytes_are_reported_as_sctp_transmits_them() {
   b.close();
 }
 
+// A close right after sends follows them: the peer receives every message,
+// then the channel's close (RFC 8831 section 6.7; the reset went out ahead
+// of data still in the engine's pipeline).
+#[tokio::test]
+async fn close_after_send_delivers_the_data_first() {
+  let (a, b, id, _ea, mut eb) = connect(reliable()).await;
+  for _ in 0..16 {
+    a.send(id, false, &[7u8; 16 * 1024]).unwrap();
+  }
+  a.close_data_channel(id);
+  eb.clear();
+  tokio::time::timeout(Duration::from_secs(20), async {
+    while !eb
+      .iter()
+      .any(|e| matches!(e, JsEvent::DataChannelClose { .. }))
+    {
+      eb.extend(b.next_events().await.expect("peer closed"));
+    }
+  })
+  .await
+  .expect("the channel closes");
+  let close_at = eb
+    .iter()
+    .position(|e| matches!(e, JsEvent::DataChannelClose { .. }))
+    .unwrap();
+  let received: usize = messages(&eb[..close_at])
+    .iter()
+    .map(|(_, data)| data.len())
+    .sum();
+  assert_eq!(received, 16 * 16 * 1024);
+  a.close();
+  b.close();
+}
+
 #[test]
 fn stream_frames() {
   use crate::peer::frame_len_for_tests as len;
