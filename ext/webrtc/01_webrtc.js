@@ -1387,12 +1387,10 @@ class RTCIceTransport extends EventTarget {
 
   get role() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
-    const pc = this[_pc];
-    const local = pc[_state].lastLocalType;
-    if (local === undefined) return "unknown";
-    // The offerer is controlling (an ICE-lite peer never is, but that is
-    // only the server extension's case and it answers).
-    return pc[_state].offerer ? "controlling" : "controlled";
+    // Fixed by the first answer applied: the offerer of that exchange is
+    // controlling (an ICE-lite peer never is, but that is only the server
+    // extension's case and it answers); an ICE restart keeps it.
+    return this[_pc][_state].iceRole ?? "unknown";
   }
   get component() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
@@ -2660,9 +2658,8 @@ class RTCPeerConnection extends EventTarget {
       localCandidates: [],
       remoteCandidates: [],
       cname: uuid(),
-      offerer: false,
-      lastLocalType: undefined,
-      lastRemoteType: undefined,
+      // "controlling" / "controlled" once an answer is applied.
+      iceRole: null,
       negotiationQueued: false,
       descriptions: { local: null, remote: null },
       // getParameters() transaction timers, cleared by close().
@@ -2859,10 +2856,8 @@ class RTCPeerConnection extends EventTarget {
       }
       op_webrtc_pc_set_local_description(this[_rid], type, sdp ?? "");
       const state = this[_state];
-      if (type !== "rollback") {
-        state.lastLocalType = type;
-        if (type === "offer") state.offerer = true;
-        else if (type === "answer") state.offerer = false;
+      if (type === "answer" || type === "pranswer") {
+        state.iceRole ??= "controlled";
       }
       activate(this);
       syncTransceivers(this, { remote: false, type });
@@ -2928,9 +2923,8 @@ class RTCPeerConnection extends EventTarget {
       if (type !== "rollback") {
         state.remoteMaxMessageSize = maxMessageSizeOf(sdp);
       }
-      if (type !== "rollback") {
-        state.lastRemoteType = type;
-        if (type === "offer") state.offerer = false;
+      if (type === "answer" || type === "pranswer") {
+        state.iceRole ??= "controlling";
       }
       activate(this);
       const now = this[_state].signalingState;
