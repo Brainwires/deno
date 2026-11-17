@@ -163,6 +163,9 @@ async function runSingleTestInner(
       args,
       env: {
         NO_COLOR: "1",
+        // The fake camera and microphone of `navigator.mediaDevices`, as WPT
+        // runs browsers with `--use-fake-device-for-media-stream`.
+        DENO_FAKE_MEDIA_DEVICES: "1",
       },
       stdout: "null",
       stderr: "piped",

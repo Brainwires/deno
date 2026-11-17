@@ -365,6 +365,15 @@ interface Navigator {
   readonly platform: string;
   readonly userAgentData: NavigatorUAData;
   /**
+   * The capture devices. Deno has none of its own; under
+   * `DENO_FAKE_MEDIA_DEVICES=1` it has a fake camera (a moving test card,
+   * 640x480 at 30 fps) and a fake microphone (a tone, 48 kHz, mono or
+   * stereo), whose tracks send that media when added to a peer connection.
+   *
+   * @category WebRTC
+   */
+  readonly mediaDevices: MediaDevices;
+  /**
    * Web MIDI: access to the system's MIDI 1.0 ports. Needs `--allow-midi`,
    * and `--allow-midi=sysex` for `{ sysex: true }`; rejects with
    * `NotAllowedError` without it, and with `NotSupportedError` where the OS
@@ -374,6 +383,126 @@ interface Navigator {
    */
   requestMIDIAccess(options?: MIDIOptions): Promise<MIDIAccess>;
 }
+
+/**
+ * What `getUserMedia()` asks for: each kind `true` or with its constraints.
+ *
+ * @category WebRTC
+ */
+interface MediaStreamConstraints {
+  audio?: boolean | MediaTrackConstraints;
+  video?: boolean | MediaTrackConstraints;
+}
+
+/**
+ * The constrainable properties `getUserMedia()` understands, each `true`.
+ *
+ * @category WebRTC
+ */
+interface MediaTrackSupportedConstraints {
+  aspectRatio?: boolean;
+  autoGainControl?: boolean;
+  channelCount?: boolean;
+  deviceId?: boolean;
+  echoCancellation?: boolean;
+  facingMode?: boolean;
+  frameRate?: boolean;
+  groupId?: boolean;
+  height?: boolean;
+  latency?: boolean;
+  noiseSuppression?: boolean;
+  resizeMode?: boolean;
+  sampleRate?: boolean;
+  sampleSize?: boolean;
+  width?: boolean;
+}
+
+/** @category WebRTC */
+type MediaDeviceKind = "audioinput" | "audiooutput" | "videoinput";
+
+/**
+ * A capture device, as `enumerateDevices()` lists it.
+ *
+ * @category WebRTC
+ */
+interface MediaDeviceInfo {
+  readonly deviceId: string;
+  readonly groupId: string;
+  readonly kind: MediaDeviceKind;
+  readonly label: string;
+  toJSON(): any;
+}
+
+/** @category WebRTC */
+declare var MediaDeviceInfo: {
+  readonly prototype: MediaDeviceInfo;
+  new (): MediaDeviceInfo;
+};
+
+/**
+ * An input device: also what it can do.
+ *
+ * @category WebRTC
+ */
+interface InputDeviceInfo extends MediaDeviceInfo {
+  getCapabilities(): MediaTrackCapabilities;
+}
+
+/** @category WebRTC */
+declare var InputDeviceInfo: {
+  readonly prototype: InputDeviceInfo;
+  new (): InputDeviceInfo;
+};
+
+/**
+ * `navigator.mediaDevices`: the capture devices and `getUserMedia()`.
+ *
+ * @category WebRTC
+ */
+interface MediaDevices extends EventTarget {
+  ondevicechange: ((this: MediaDevices, ev: Event) => any) | null;
+  /** The devices: none, or under `DENO_FAKE_MEDIA_DEVICES=1` the fake
+   * microphone and camera. */
+  enumerateDevices(): Promise<MediaDeviceInfo[]>;
+  getSupportedConstraints(): MediaTrackSupportedConstraints;
+  /** A stream with a track of each kind asked for. Rejects with a
+   * `NotFoundError` when there is no such device, and with an
+   * `OverconstrainedError` when its required constraints can't be met. */
+  getUserMedia(constraints?: MediaStreamConstraints): Promise<MediaStream>;
+}
+
+/** @category WebRTC */
+declare var MediaDevices: {
+  readonly prototype: MediaDevices;
+  new (): MediaDevices;
+};
+
+/** @category WebRTC */
+declare var RTCRtpScriptTransform: {
+  readonly prototype: RTCRtpScriptTransform;
+  /** `options` (structured-cloned, with `transfer`) is the transformer's
+   * `options` in the worker. */
+  new (
+    worker: Worker | { worker: Worker; type?: "sframe" },
+    options?: any,
+    transfer?: object[],
+  ): RTCRtpScriptTransform;
+};
+
+/**
+ * A required constraint a device can't meet; `constraint` names it.
+ *
+ * @category WebRTC
+ */
+interface OverconstrainedError extends DOMException {
+  readonly constraint: string;
+}
+
+/** @category WebRTC */
+declare var OverconstrainedError: {
+  readonly prototype: OverconstrainedError;
+  new (constraint: string, message?: string): OverconstrainedError;
+};
 
 /**
  * Options for {@linkcode Navigator.requestMIDIAccess}.

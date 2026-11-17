@@ -120,6 +120,23 @@ let _webrtcMod;
 const loadWebRtc = () =>
   _webrtcMod ??
     (_webrtcMod = core.loadExtScript("ext:deno_webrtc/01_webrtc.js"));
+// WebRTC Encoded Transform (ext/webrtc's 03_encoded_transform.js): loaded on
+// first access. Its frames are Serializable, so every realm can deserialize
+// one before the module is loaded.
+let _encodedTransformMod;
+const loadEncodedTransform = () =>
+  _encodedTransformMod ??
+    (_encodedTransformMod = core.loadExtScript(
+      "ext:deno_webrtc/03_encoded_transform.js",
+    ));
+core.registerCloneableResource(
+  "RTCEncodedVideoFrame",
+  (data) => loadEncodedTransform().deserializeFrame(data),
+);
+core.registerCloneableResource(
+  "RTCEncodedAudioFrame",
+  (data) => loadEncodedTransform().deserializeFrame(data),
+);
 let _htmlRewriterMod;
 const loadHTMLRewriter = () =>
   _htmlRewriterMod ??
@@ -269,6 +286,14 @@ const windowOrWorkerGlobalScope = {
   MediaStream: core.propNonEnumerableLazyLoaded(
     (webrtc) => webrtc.MediaStream,
     loadWebRtc,
+  ),
+  RTCEncodedAudioFrame: core.propNonEnumerableLazyLoaded(
+    (m) => m.RTCEncodedAudioFrame,
+    loadEncodedTransform,
+  ),
+  RTCEncodedVideoFrame: core.propNonEnumerableLazyLoaded(
+    (m) => m.RTCEncodedVideoFrame,
+    loadEncodedTransform,
   ),
   MediaStreamTrack: core.propNonEnumerableLazyLoaded(
     (webrtc) => webrtc.MediaStreamTrack,
@@ -705,6 +730,7 @@ unstableForWindowOrWorkerGlobalScope[unstableIds.rawImports] = {
 };
 
 export {
+  loadEncodedTransform,
   selfDescriptor,
   unstableForWindowOrWorkerGlobalScope,
   windowOrWorkerGlobalScope,

@@ -82,6 +82,8 @@ const {
   DataViewPrototypeGetByteLength,
   DataViewPrototypeGetByteOffset,
   FunctionPrototypeCall,
+  ObjectDefineProperty,
+  ObjectGetOwnPropertyDescriptor,
   ObjectFreeze,
   ObjectPrototypeIsPrototypeOf,
   PromisePrototypeThen,
@@ -1078,6 +1080,8 @@ class MediaStreamTrack extends EventTarget {
     if (this[_receiver] !== null) {
       ArrayPrototypePush(this[_receiver][_state].clones, track);
     }
+    // A capture device's track: the clone takes its settings and constraints.
+    this[_source]?.device?.cloned(this, track);
     return track;
   }
 
@@ -1089,24 +1093,33 @@ class MediaStreamTrack extends EventTarget {
     state.readyState = "ended";
     if (this[_source] !== null) {
       SetPrototypeDelete(this[_source].tracks, this);
+      // A capture device whose last track stopped stops capturing.
+      if (this[_source].tracks.size === 0) this[_source].device?.ended();
     }
   }
 
+  // A capture device's track (02_media_devices.js) answers these from its
+  // device; any other track has no capabilities or constraints.
   getCapabilities() {
     webidl.assertBranded(this, MediaStreamTrackPrototype);
-    return {};
+    const device = this[_source]?.device;
+    return device ? device.capabilities(this) : {};
   }
   getConstraints() {
     webidl.assertBranded(this, MediaStreamTrackPrototype);
-    return {};
+    const device = this[_source]?.device;
+    return device ? device.constraints(this) : {};
   }
   getSettings() {
     webidl.assertBranded(this, MediaStreamTrackPrototype);
-    return { deviceId: "", groupId: "" };
+    const device = this[_source]?.device;
+    return device ? device.settings(this) : { deviceId: "", groupId: "" };
   }
-  applyConstraints(_constraints = undefined) {
-    webidl.assertBranded(this, MediaStreamTrackPrototype);
-    return PromiseResolve();
+  applyConstraints(constraints = undefined) {
+    const error = brandError(this, MediaStreamTrackPrototype);
+    if (error !== null) return PromiseReject(error);
+    const device = this[_source]?.device;
+    return device ? device.apply(this, constraints) : PromiseResolve();
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
@@ -1668,6 +1681,8 @@ function updateSenderSource(sender, previous, next) {
   }
   if (next !== null && next[_source] !== null) {
     SetPrototypeAdd(next[_source].senders, sender);
+    // A capture device starts sending (02_media_devices.js).
+    next[_source].device?.attached();
   }
 }
 
@@ -2169,6 +2184,45 @@ class RTCRtpReceiver {
 }
 webidl.configureInterface(RTCRtpReceiver);
 const RTCRtpReceiverPrototype = RTCRtpReceiver.prototype;
+
+// --- Encoded transforms: `sender.transform` / `receiver.transform` -----------
+// (WebRTC Encoded Transform; the rest is 03_encoded_transform.js, loaded when
+// a transform is first set.)
+
+const _transform = Symbol("[[transform]]");
+let encodedTransformMod;
+const loadEncodedTransform = () =>
+  encodedTransformMod ??
+    (encodedTransformMod = core.loadExtScript(
+      "ext:deno_webrtc/03_encoded_transform.js",
+    ));
+
+for (
+  const [prototype, side] of [
+    [RTCRtpSenderPrototype, "sender"],
+    [RTCRtpReceiverPrototype, "receiver"],
+  ]
+) {
+  // An accessor literal, so the functions are named `get transform` /
+  // `set transform` as Web IDL has them.
+  const { get, set } = ObjectGetOwnPropertyDescriptor({
+    get transform() {
+      webidl.assertBranded(this, prototype);
+      return this[_transform] ?? null;
+    },
+    set transform(value) {
+      webidl.assertBranded(this, prototype);
+      loadEncodedTransform().setTransform(this, side, value ?? null);
+    },
+  }, "transform");
+  ObjectDefineProperty(prototype, "transform", {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    get,
+    set,
+  });
+}
 
 function receiverSources(receiver, contributing) {
   const pc = receiver[_pc];
@@ -3503,6 +3557,10 @@ class RTCPeerConnection extends EventTarget {
       receiver[_state].track[_trackState].readyState = "ended";
       receiver[_state].receiving = false;
       closeReaders(receiver);
+      // Encoded transforms end with the connection (03_encoded_transform.js).
+      if (sender[_transform] || receiver[_transform]) {
+        loadEncodedTransform().ownerClosed(sender, receiver);
+      }
     }
     // The transports report closed (no events after close()).
     if (state.dtls !== null) {
@@ -3998,9 +4056,19 @@ function dispatchEngineEvent(pc, event) {
     }
     case "keyframerequest": {
       const t = transceiverFor(pc, event.transceiver);
-      const track = t?.[_state].sender[_state].track;
+      const sender = t?.[_state].sender;
+      // An encoded transform's worker hears it too (03_encoded_transform.js).
+      if (sender?.[_transform]) loadEncodedTransform().keyFrameRequested(sender);
+      const track = sender?.[_state].track;
       if (track === null || track === undefined) break;
       fire(track, new Event("keyframerequest"));
+      break;
+    }
+    case "encodedframe": {
+      // A received frame for the receiver's encoded transform.
+      const t = transceiverFor(pc, event.transceiver);
+      if (t === undefined) break;
+      loadEncodedTransform().deliverReceived(t[_state].receiver, event);
       break;
     }
     case "dcopen": {
@@ -4170,7 +4238,7 @@ function eachFedSender(source, fn) {
     ) {
       return;
     }
-    if (fn(pc, sender[_transceiver][_key])) n++;
+    if (fn(pc, sender[_transceiver][_key], sender)) n++;
   });
   return n;
 }
@@ -4524,5 +4592,18 @@ return {
   RTCStatsReport,
   RTCTrackEvent,
   webrtcNs,
+  // For 02_media_devices.js: the track internals a capture device needs.
+  mediaInternals: {
+    illegalConstructorKey,
+    _key,
+    _pc,
+    _rid,
+    _source,
+    _state,
+    _trackState,
+    _transceiver,
+    _transform,
+    eachFedSender,
+  },
 };
 })();

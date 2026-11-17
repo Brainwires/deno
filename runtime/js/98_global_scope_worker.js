@@ -6,7 +6,10 @@ import {
   op_bootstrap_numcpus,
   op_bootstrap_user_agent,
 } from "ext:core/ops";
-import { selfDescriptor } from "ext:runtime/98_global_scope_shared.js";
+import {
+  loadEncodedTransform,
+  selfDescriptor,
+} from "ext:runtime/98_global_scope_shared.js";
 const {
   ObjectDefineProperties,
   ObjectPrototypeIsPrototypeOf,
@@ -197,6 +200,19 @@ const workerRuntimeGlobalProperties = {
   navigator: core.propGetterOnly(() => workerNavigator),
   NavigatorUAData: core.propNonEnumerable(NavigatorUAData),
   self: selfDescriptor,
+  // WebRTC Encoded Transform, in a transform's worker.
+  KeyFrameRequestEvent: core.propNonEnumerableLazyLoaded(
+    (m) => m.KeyFrameRequestEvent,
+    loadEncodedTransform,
+  ),
+  RTCRtpScriptTransformer: core.propNonEnumerableLazyLoaded(
+    (m) => m.RTCRtpScriptTransformer,
+    loadEncodedTransform,
+  ),
+  RTCTransformEvent: core.propNonEnumerableLazyLoaded(
+    (m) => m.RTCTransformEvent,
+    loadEncodedTransform,
+  ),
 };
 
 export { workerRuntimeGlobalProperties };

@@ -367,6 +367,17 @@ pub enum JsEvent {
   /// The remote receiver asked a sender for a key frame (PLI / FIR).
   #[serde(rename = "keyframerequest")]
   KeyFrameRequest { transceiver: u32 },
+  /// A received frame, for the receiver's encoded transform.
+  #[serde(rename = "encodedframe")]
+  EncodedFrame {
+    transceiver: u32,
+    data: Payload,
+    #[serde(rename = "keyFrame")]
+    key_frame: bool,
+    width: Option<u16>,
+    height: Option<u16>,
+    info: crate::encoded_frames::ReceivedFrameInfo,
+  },
 }
 
 /// A received message's bytes, handed to V8 without a copy (as a
@@ -505,6 +516,8 @@ pub struct Core {
   recv_rx: Option<mpsc::Receiver<Datagram>>,
   /// Transceivers, senders and receivers (media.rs).
   pub(crate) media: MediaState,
+  /// Receivers whose frames go to an encoded transform (encoded_frames.rs).
+  pub(crate) transforms: crate::encoded_frames::ReceiverTransforms,
   /// `setConfiguration` changed the ICE servers since they were gathered.
   servers_changed: bool,
   /// A remote candidate is known (signalled, or a check arrived): until
@@ -1596,6 +1609,16 @@ impl Core {
               .push_back(JsEvent::TrackUnmute { transceiver: key });
           }
           self.media.saw_rtp(key, &packet.header);
+          if let Some(frame) = self.receive_for_transform(key, &packet) {
+            self.events.push_back(JsEvent::EncodedFrame {
+              transceiver: key,
+              data: Payload::new(frame.data),
+              key_frame: frame.key_frame,
+              width: frame.width_height.map(|(w, _)| w),
+              height: frame.width_height.map(|(_, h)| h),
+              info: frame.info,
+            });
+          }
           if self.media.reading.contains(&key)
             && let Ok(bytes) = packet.marshal()
           {
@@ -1609,6 +1632,10 @@ impl Core {
           if crate::media::wants_key_frame(&packets)
             && let Some(key) = self.key_for_track(&track_id)
           {
+            // A fake device's video starts over on its key frame.
+            if let Some(cursor) = self.media.fake.get_mut(&key) {
+              cursor.next = 0;
+            }
             self
               .events
               .push_back(JsEvent::KeyFrameRequest { transceiver: key });
@@ -1924,6 +1951,7 @@ impl Peer {
         recv_tx,
         recv_rx: Some(recv_rx),
         media: MediaState::default(),
+        transforms: Default::default(),
         servers_changed: false,
         remote_known: false,
         checking_held: false,

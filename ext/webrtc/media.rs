@@ -416,7 +416,91 @@ pub struct SenderPacketizer {
   payload_type: u8,
   mime_type: String,
   clock_rate: u32,
+  /// The next frame's RTP timestamp.
+  timestamp: u32,
   packetizer: Box<dyn Packetizer>,
+}
+
+/// What an encoded frame's metadata names about its sender.
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SenderFrameInfo {
+  pub synchronization_source: u32,
+  pub payload_type: u8,
+  pub mime_type: String,
+  pub rtp_timestamp: u32,
+}
+
+/// A fake capture device's frame, for an encoded transform.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FakeFrame {
+  pub data: deno_core::ToJsBuffer,
+  pub duration_ms: f64,
+  pub key_frame: bool,
+  pub width_height: Option<(u16, u16)>,
+  pub info: SenderFrameInfo,
+}
+
+/// Whether an encoded video frame is a key frame (audio frames are not
+/// typed): from its bitstream.
+pub fn is_key_frame(mime_type: &str, data: &[u8]) -> bool {
+  match mime_type.to_ascii_lowercase().as_str() {
+    // RFC 6386 9.1: bit 0 of the frame tag is 0 on a key frame.
+    "video/vp8" => data.first().is_some_and(|b| b & 1 == 0),
+    // VP9 uncompressed header: frame_marker (2), profile (2, a reserved
+    // zero bit for profile 3), show_existing_frame, then frame_type (0 =
+    // key).
+    "video/vp9" => data.first().is_some_and(|b| {
+      let profile = ((b >> 5) & 1) | (((b >> 4) & 1) << 1);
+      let shift = if profile == 3 { 1 } else { 0 };
+      (b >> (3 - shift)) & 1 == 0 && (b >> (2 - shift)) & 1 == 0
+    }),
+    "video/h264" => nal_units(data).any(|n| n.first().is_some_and(|b| b & 0x1f == 5)),
+    "video/h265" => nal_units(data)
+      .any(|n| n.first().is_some_and(|b| (16..=23).contains(&((b >> 1) & 0x3f)))),
+    "video/av1" => {
+      // A sequence header OBU (type 1) starts every key frame's temporal
+      // unit.
+      data.iter().take(16).any(|b| (b >> 3) & 0xf == 1)
+    }
+    _ => false,
+  }
+}
+
+/// The NAL units of an Annex B stream.
+fn nal_units(data: &[u8]) -> impl Iterator<Item = &[u8]> {
+  let mut starts = Vec::new();
+  let mut i = 0;
+  while i + 3 <= data.len() {
+    if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+      starts.push(i + 3);
+      i += 3;
+    } else {
+      i += 1;
+    }
+  }
+  let ends: Vec<usize> = starts
+    .iter()
+    .skip(1)
+    .map(|s| s - 3)
+    .chain(std::iter::once(data.len()))
+    .collect();
+  starts.into_iter().zip(ends).map(move |(a, b)| &data[a..b.max(a)])
+}
+
+/// A key frame's size, where its bitstream says it simply (VP8).
+pub fn frame_size(mime_type: &str, data: &[u8]) -> Option<(u16, u16)> {
+  if !mime_type.eq_ignore_ascii_case("video/vp8")
+    || data.len() < 10
+    || data[0] & 1 != 0
+    || data[3..6] != [0x9d, 0x01, 0x2a]
+  {
+    return None;
+  }
+  let w = u16::from_le_bytes([data[6], data[7]]) & 0x3fff;
+  let h = u16::from_le_bytes([data[8], data[9]]) & 0x3fff;
+  Some((w, h))
 }
 
 fn payloader_for(
@@ -464,6 +548,8 @@ pub struct MediaState {
   /// The SSRCs and CSRCs each receiver got packets from, for
   /// `getSynchronizationSources()` / `getContributingSources()`.
   pub sources: HashMap<u32, Vec<Source>>,
+  /// Where each sender fed by a fake capture device is in its clip.
+  pub fake: HashMap<u32, crate::fake_media::Cursor>,
 }
 
 /// A synchronization or contributing source a receiver heard from.
@@ -598,7 +684,7 @@ impl Core {
     self.media.created_by_remote.clear();
   }
 
-  fn index_of(&self, key: u32) -> Result<usize, WebRtcError> {
+  pub(crate) fn index_of(&self, key: u32) -> Result<usize, WebRtcError> {
     self
       .media
       .keys
@@ -981,24 +1067,33 @@ impl Core {
     data: &[u8],
     duration_ms: f64,
   ) -> Result<bool, WebRtcError> {
+    self.write_frame_at(key, data, duration_ms, None)
+  }
+
+  /// The packetizer of a sender's negotiated codec (the first that isn't a
+  /// repair format), made anew when the codec or SSRC changed; `None` before
+  /// negotiation or while the sender is paused.
+  fn sender_packetizer(
+    &mut self,
+    key: u32,
+  ) -> Result<Option<&mut SenderPacketizer>, WebRtcError> {
     if self.media.paused.contains(&key) {
-      return Ok(false);
+      return Ok(None);
     }
     let index = self.index_of(key)?;
     let now = Instant::now();
     let Some(mut sender) = self.pc.rtp_sender(index.into()) else {
-      return Ok(false);
+      return Ok(None);
     };
     let Some(ssrc) = sender.track().ssrcs().next() else {
-      return Ok(false);
+      return Ok(None);
     };
     let params = sender.get_parameters().clone();
-    // The first negotiated codec that isn't a repair format.
     let Some(codec) = params.rtp_parameters.codecs.iter().find(|c| {
       let m = c.rtp_codec.mime_type.to_ascii_lowercase();
       !m.ends_with("/rtx") && !m.contains("fec") && !m.ends_with("/red")
     }) else {
-      return Ok(false);
+      return Ok(None);
     };
     let needs_new = match self.media.packetizers.get(&key) {
       Some(p) => {
@@ -1024,6 +1119,8 @@ impl Core {
         Box::new(rtc::rtp::sequence::new_random_sequencer()),
         codec.rtp_codec.clock_rate,
       );
+      let mut start = [0u8; 4];
+      let _ = aws_lc_rs::rand::fill(&mut start);
       self.media.packetizers.insert(
         key,
         SenderPacketizer {
@@ -1031,16 +1128,69 @@ impl Core {
           payload_type: codec.payload_type,
           mime_type: codec.rtp_codec.mime_type.clone(),
           clock_rate: codec.rtp_codec.clock_rate,
+          timestamp: u32::from_le_bytes(start),
           packetizer: Box::new(packetizer),
         },
       );
     }
-    let p = self.media.packetizers.get_mut(&key).unwrap();
+    Ok(self.media.packetizers.get_mut(&key))
+  }
+
+  /// Takes the RTP timestamp of a sender's next frame of `duration_ms`
+  /// (an encoded transform's frame, written later with
+  /// [`write_frame_at`](Self::write_frame_at)), with what its metadata
+  /// names: `None` before negotiation.
+  pub(crate) fn reserve_frame(
+    &mut self,
+    key: u32,
+    duration_ms: f64,
+  ) -> Result<Option<SenderFrameInfo>, WebRtcError> {
+    let Some(p) = self.sender_packetizer(key)? else {
+      return Ok(None);
+    };
     let samples = ((duration_ms / 1000.0) * p.clock_rate as f64).round() as u32;
-    let packets = p
+    let rtp_timestamp = p.timestamp;
+    p.timestamp = p.timestamp.wrapping_add(samples);
+    Ok(Some(SenderFrameInfo {
+      synchronization_source: p.ssrc,
+      payload_type: p.payload_type,
+      mime_type: p.mime_type.clone(),
+      rtp_timestamp,
+    }))
+  }
+
+  /// Writes one encoded frame on a sender, cut into RTP packets: at the next
+  /// timestamp, or at `rtp_timestamp` (one [`reserve_frame`](Self::reserve_frame)
+  /// took). Returns whether it went out.
+  pub(crate) fn write_frame_at(
+    &mut self,
+    key: u32,
+    data: &[u8],
+    duration_ms: f64,
+    rtp_timestamp: Option<u32>,
+  ) -> Result<bool, WebRtcError> {
+    let index = self.index_of(key)?;
+    let now = Instant::now();
+    let Some(p) = self.sender_packetizer(key)? else {
+      return Ok(false);
+    };
+    let samples = ((duration_ms / 1000.0) * p.clock_rate as f64).round() as u32;
+    let timestamp = match rtp_timestamp {
+      Some(t) => t,
+      None => {
+        let t = p.timestamp;
+        p.timestamp = p.timestamp.wrapping_add(samples);
+        t
+      }
+    };
+    let mut packets = p
       .packetizer
       .packetize(now, &Bytes::copy_from_slice(data), samples)
       .map_err(|e| WebRtcError::Type(format!("Could not packetize: {e}")))?;
+    // The timestamps are ours, so a frame's metadata can name its own.
+    for packet in &mut packets {
+      packet.header.timestamp = timestamp;
+    }
     let Some(mut sender) = self.pc.rtp_sender(index.into()) else {
       return Ok(false);
     };
@@ -1049,6 +1199,71 @@ impl Core {
       sent |= sender.write_rtp(now, packet).is_ok();
     }
     Ok(sent)
+  }
+
+  /// A fake capture device's next frame for a sender (one with an encoded
+  /// transform, which writes it later), in the codec it negotiated: its
+  /// bytes, duration and whether it is a key frame, and the frame's
+  /// metadata. `None` before negotiation or for a codec there is no clip of.
+  pub(crate) fn fake_frame(
+    &mut self,
+    key: u32,
+    stereo: bool,
+  ) -> Result<Option<FakeFrame>, WebRtcError> {
+    let Some(mime) = self.sender_packetizer(key)?.map(|p| p.mime_type.clone())
+    else {
+      return Ok(None);
+    };
+    let cursor = self.media.fake.entry(key).or_default();
+    let Some((data, duration_ms)) = cursor.advance(&mime, stereo) else {
+      return Ok(None);
+    };
+    let Some(info) = self.reserve_frame(key, duration_ms)? else {
+      return Ok(None);
+    };
+    Ok(Some(FakeFrame {
+      data: data.to_vec().into(),
+      duration_ms,
+      key_frame: is_key_frame(&mime, data),
+      width_height: frame_size(&mime, data),
+      info,
+    }))
+  }
+
+  /// A fake capture device's next frame (`fake_media.rs`) on a sender, in
+  /// the codec it negotiated; `stereo` takes Opus' two-channel clip.
+  /// Returns whether it went out (false before negotiation, or for a codec
+  /// there is no clip of).
+  pub(crate) fn write_fake(
+    &mut self,
+    key: u32,
+    stereo: bool,
+  ) -> Result<bool, WebRtcError> {
+    if self.media.paused.contains(&key) {
+      return Ok(false);
+    }
+    let index = self.index_of(key)?;
+    let Some(mut sender) = self.pc.rtp_sender(index.into()) else {
+      return Ok(false);
+    };
+    let Some(mime) = sender
+      .get_parameters()
+      .rtp_parameters
+      .codecs
+      .iter()
+      .map(|c| c.rtp_codec.mime_type.clone())
+      .find(|m| {
+        let m = m.to_ascii_lowercase();
+        !m.ends_with("/rtx") && !m.contains("fec") && !m.ends_with("/red")
+      })
+    else {
+      return Ok(false);
+    };
+    let cursor = self.media.fake.entry(key).or_default();
+    let Some((frame, duration)) = cursor.advance(&mime, stereo) else {
+      return Ok(false);
+    };
+    self.write_frame(key, frame, duration)
   }
 
   /// `RTCDTMFSender`: one RFC 4733 event (0-9 → 0-9, `*` 10, `#` 11, A-D

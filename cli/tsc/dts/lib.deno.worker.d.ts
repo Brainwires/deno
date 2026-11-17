@@ -167,6 +167,7 @@ declare interface DedicatedWorkerGlobalScopeEventMap
   extends WorkerGlobalScopeEventMap {
   "message": MessageEvent;
   "messageerror": MessageEvent;
+  "rtctransform": RTCTransformEvent;
 }
 
 /**
@@ -204,6 +205,11 @@ declare interface DedicatedWorkerGlobalScope extends WorkerGlobalScope {
   /** Event handler for messageerror events that occur when a message cannot be deserialized. */
   onmessageerror:
     | ((this: DedicatedWorkerGlobalScope, ev: MessageEvent) => any)
+    | null;
+
+  /** An `RTCRtpScriptTransform` was made for this worker. */
+  onrtctransform:
+    | ((this: DedicatedWorkerGlobalScope, ev: RTCTransformEvent) => any)
     | null;
 
   /**
@@ -314,6 +320,68 @@ declare var onmessage:
 declare var onmessageerror:
   | ((this: DedicatedWorkerGlobalScope, ev: MessageEvent) => any)
   | null;
+
+/**
+ * An `RTCRtpScriptTransform` was made for this worker: its `transformer`
+ * reads the frames and writes back what goes on.
+ *
+ * @category WebRTC
+ */
+declare var onrtctransform:
+  | ((this: DedicatedWorkerGlobalScope, ev: RTCTransformEvent) => any)
+  | null;
+
+/**
+ * A sender's or receiver's encoded frames, in an `RTCRtpScriptTransform`'s
+ * worker.
+ *
+ * @category WebRTC
+ */
+interface RTCRtpScriptTransformer extends EventTarget {
+  /** The frames, in order; frames that would wait beyond 256 are dropped. */
+  readonly readable: ReadableStream<RTCEncodedVideoFrame | RTCEncodedAudioFrame>;
+  /** What goes on: a sender's are sent, a receiver's dropped. */
+  readonly writable: WritableStream<RTCEncodedVideoFrame | RTCEncodedAudioFrame>;
+  /** The `options` the transform was made with. */
+  readonly options: any;
+  /** The remote asked the sender for a key frame. */
+  onkeyframerequest:
+    | ((this: RTCRtpScriptTransformer, ev: KeyFrameRequestEvent) => any)
+    | null;
+  /** A video sender's: resolves when the next key frame is handed over
+   * (rejects with `InvalidStateError` on a receiver or an audio sender). */
+  generateKeyFrame(rid?: string): Promise<void>;
+  /** A video receiver's: asks the remote sender for a key frame (PLI). */
+  sendKeyFrameRequest(): Promise<void>;
+}
+
+/** @category WebRTC */
+declare var RTCRtpScriptTransformer: {
+  readonly prototype: RTCRtpScriptTransformer;
+  new (): never;
+};
+
+/** @category WebRTC */
+interface RTCTransformEvent extends Event {
+  readonly transformer: RTCRtpScriptTransformer;
+}
+
+/** @category WebRTC */
+declare var RTCTransformEvent: {
+  readonly prototype: RTCTransformEvent;
+  new (): never;
+};
+
+/** @category WebRTC */
+interface KeyFrameRequestEvent extends Event {
+  readonly rid: string | null;
+}
+
+/** @category WebRTC */
+declare var KeyFrameRequestEvent: {
+  readonly prototype: KeyFrameRequestEvent;
+  new (type: string, rid?: string): KeyFrameRequestEvent;
+};
 
 /**
  * Closes the worker thread.

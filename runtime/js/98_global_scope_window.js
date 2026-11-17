@@ -6,7 +6,10 @@ import {
   op_bootstrap_numcpus,
   op_bootstrap_user_agent,
 } from "ext:core/ops";
-import { selfDescriptor } from "ext:runtime/98_global_scope_shared.js";
+import {
+  loadEncodedTransform,
+  selfDescriptor,
+} from "ext:runtime/98_global_scope_shared.js";
 const {
   ObjectDefineProperties,
   ObjectPrototypeIsPrototypeOf,
@@ -115,6 +118,15 @@ class Navigator {
 
 const navigator = webidl.createBranded(Navigator);
 
+// `navigator.mediaDevices` (ext/webrtc's 02_media_devices.js): loaded on
+// first access.
+let _mediaDevicesMod;
+const loadMediaDevices = () =>
+  _mediaDevicesMod ??
+    (_mediaDevicesMod = core.loadExtScript(
+      "ext:deno_webrtc/02_media_devices.js",
+    ));
+
 function memoizeLazy(f) {
   let v_ = null;
   return () => {
@@ -180,6 +192,15 @@ ObjectDefineProperties(Navigator.prototype, {
       return [language()];
     },
   },
+  mediaDevices: {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    get() {
+      webidl.assertBranded(this, NavigatorPrototype);
+      return loadMediaDevices().getMediaDevices();
+    },
+  },
   locks: {
     __proto__: null,
     configurable: true,
@@ -228,6 +249,26 @@ const mainRuntimeGlobalProperties = {
   Navigator: core.propNonEnumerable(Navigator),
   navigator: core.propGetterOnly(() => navigator),
   NavigatorUAData: core.propNonEnumerable(NavigatorUAData),
+  MediaDevices: core.propNonEnumerableLazyLoaded(
+    (m) => m.MediaDevices,
+    loadMediaDevices,
+  ),
+  MediaDeviceInfo: core.propNonEnumerableLazyLoaded(
+    (m) => m.MediaDeviceInfo,
+    loadMediaDevices,
+  ),
+  InputDeviceInfo: core.propNonEnumerableLazyLoaded(
+    (m) => m.InputDeviceInfo,
+    loadMediaDevices,
+  ),
+  OverconstrainedError: core.propNonEnumerableLazyLoaded(
+    (m) => m.OverconstrainedError,
+    loadMediaDevices,
+  ),
+  RTCRtpScriptTransform: core.propNonEnumerableLazyLoaded(
+    (m) => m.RTCRtpScriptTransform,
+    loadEncodedTransform,
+  ),
   alert: core.propWritableLazyLoaded((p) => p.alert, lazyPrompt),
   confirm: core.propWritableLazyLoaded((p) => p.confirm, lazyPrompt),
   prompt: core.propWritableLazyLoaded((p) => p.prompt, lazyPrompt),
