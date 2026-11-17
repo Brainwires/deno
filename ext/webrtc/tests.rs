@@ -19,7 +19,7 @@ use crate::WebRtcError;
 use crate::peer::RemoteCandidate;
 use crate::peer::candidate_address;
 use crate::peer::classify_remote_candidate;
-use crate::peer::epoch_fields_to_ms;
+use crate::peer::epoch_fields_relative;
 
 /// Loopback only: interface enumeration is refused, so host candidates are
 /// `127.0.0.1` alone and the test is the same on every machine.
@@ -920,18 +920,32 @@ fn mdns_is_off_without_its_permissions() {
 }
 
 #[test]
-fn stats_epoch_fields_are_milliseconds() {
-  let stats = epoch_fields_to_ms(serde_json::json!({
-    "id": "PC",
-    "type": "peer-connection",
-    "timestamp": 1794904159.643,
-    "lastPacketReceivedTimestamp": 2.5,
-    "bytesSent": 7,
-  }));
-  assert_eq!(
-    stats["timestamp"].as_f64().unwrap().round(),
-    1794904159643.0
+fn stats_epoch_fields_are_relative_to_the_request() {
+  let stats = epoch_fields_relative(
+    serde_json::json!({
+      "id": "PC",
+      "type": "peer-connection",
+      "timestamp": 1794904159643.25,
+      "lastPacketReceivedTimestamp": 1794904157643.0,
+      "bytesSent": 7,
+    }),
+    1794904159643.0,
   );
-  assert_eq!(stats["lastPacketReceivedTimestamp"], 2500.0);
+  assert!((stats["timestamp"].as_f64().unwrap() - 0.25).abs() < 1e-6);
+  assert_eq!(stats["lastPacketReceivedTimestamp"], -2000.0);
   assert_eq!(stats["bytesSent"], 7);
+}
+
+// A report's own timestamp is the moment it was asked for, to well under a
+// millisecond (the engine used to truncate it to whole milliseconds).
+#[test]
+fn stats_timestamp_is_the_request_time() {
+  let peer = new_peer();
+  let stats = peer.stats(None).unwrap();
+  let pc = stats
+    .iter()
+    .find(|s| s["type"] == "peer-connection")
+    .expect("a peer-connection entry");
+  let offset = pc["timestamp"].as_f64().unwrap();
+  assert!((0.0..50.0).contains(&offset), "{offset}");
 }

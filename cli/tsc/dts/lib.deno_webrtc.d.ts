@@ -547,7 +547,11 @@ interface RTCIceTransport extends EventTarget {
     | ((this: RTCIceTransport, ev: Event) => any)
     | null;
   onstatechange: ((this: RTCIceTransport, ev: Event) => any) | null;
+  /** The local candidates gathered and signalled with `icecandidate`. */
+  getLocalCandidates(): RTCIceCandidate[];
   getLocalParameters(): RTCIceParameters | null;
+  /** The remote candidates received with `addIceCandidate()`. */
+  getRemoteCandidates(): RTCIceCandidate[];
   getRemoteParameters(): RTCIceParameters | null;
   getSelectedCandidatePair(): RTCIceCandidatePair | null;
 }

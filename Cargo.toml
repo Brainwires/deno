@@ -328,10 +328,12 @@ rstest = "0"
 # carries it: upstream `master` through 0fbcaa74 (after v0.21.1) merged into
 # our fork, plus the fork's peer-input hardening (`harden/peer-input`), and
 # from `v0.21.1+brainwires.2` ICE-TCP in both roles, per-address mDNS names
-# and PLI/FIR delivery: that release, pinned by its commit (dddbef43). On the
+# and PLI/FIR delivery: that release, then branch `webrtc/b-channels` (DENEXT.md
+# item 450: data channel ids at the answer, closing / failure events, SCTP
+# state, stats in milliseconds), pinned by its commit (f20fe74c). On the
 # aws-lc-rs crypto provider, the one Deno's rustls already uses. Pre-1.0 and
 # not externally audited.
-rtc = { git = "https://github.com/Brainwires/webrtc-rs-rtc", rev = "dddbef430ae47b8a9e4773fdaf2ee8fc3257c394", default-features = false, features = ["crypto-aws-lc-rs"] }
+rtc = { git = "https://github.com/Brainwires/webrtc-rs-rtc", rev = "f20fe74c962f61748810a8e12de0b27c121f62f4", default-features = false, features = ["crypto-aws-lc-rs"] }
 rusqlite = { version = "0.41.1", features = ["unlock_notify", "bundled", "session", "modern_sqlite", "limits", "backup", "fallible_uint"] } # "modern_sqlite": need sqlite >= 3.49.0 for some db configs; "fallible_uint": ToSql for u64/usize (needed when crates like deno_cache are published/built standalone, not just feature-unified via denokv_sqlite)
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "std", "tls12", "aws_lc_rs"] }
 rustls-pemfile = "2"

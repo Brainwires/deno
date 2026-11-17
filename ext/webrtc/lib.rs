@@ -125,6 +125,7 @@ deno_core::extension!(
     op_webrtc_pc_max_message_size,
     op_webrtc_dc_send,
     op_webrtc_dc_buffered_amount,
+    op_webrtc_dc_id,
     op_webrtc_dc_set_low_threshold,
     op_webrtc_dc_close,
     op_webrtc_generate_certificate,
@@ -574,6 +575,20 @@ fn op_webrtc_dc_buffered_amount(
   match state.resource_table.get::<PeerResource>(rid) {
     Ok(r) => r.0.buffered_amount(channel),
     Err(_) => 0,
+  }
+}
+
+/// `RTCDataChannel.id` while it is still null on the JavaScript side: the
+/// stream id the engine has assigned since, or -1 for none yet.
+#[op2(fast)]
+fn op_webrtc_dc_id(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+  #[smi] channel: u32,
+) -> i32 {
+  match state.resource_table.get::<PeerResource>(rid) {
+    Ok(r) => r.0.data_channel_id(channel).map_or(-1, i32::from),
+    Err(_) => -1,
   }
 }
 
