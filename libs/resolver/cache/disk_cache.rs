@@ -24,6 +24,9 @@ pub trait DiskCacheSys:
 pub struct DiskCache<TSys: DiskCacheSys> {
   sys: TSys,
   pub location: PathBuf,
+  /// denext: a folder read when `location` lacks a file, never written (the
+  /// shared emits beneath a kernel sandbox's cache overlay).
+  read_fallback: Option<PathBuf>,
 }
 
 impl<TSys: DiskCacheSys> DiskCache<TSys> {
@@ -32,7 +35,18 @@ impl<TSys: DiskCacheSys> DiskCache<TSys> {
     #[cfg(not(target_arch = "wasm32"))]
     assert!(location.is_absolute());
 
-    Self { sys, location }
+    Self {
+      sys,
+      location,
+      read_fallback: None,
+    }
+  }
+
+  /// denext: also reads `fallback` for a file `location` lacks; writes still
+  /// go to `location` only.
+  pub fn with_read_fallback(mut self, fallback: PathBuf) -> Self {
+    self.read_fallback = Some(fallback);
+    self
   }
 
   pub fn get_cache_filename_with_extension(
@@ -125,7 +139,15 @@ impl<TSys: DiskCacheSys> DiskCache<TSys> {
 
   pub fn get(&self, filename: &Path) -> std::io::Result<Vec<u8>> {
     let path = self.location.join(filename);
-    Ok(self.sys.fs_read(path)?.into_owned())
+    match self.sys.fs_read(path) {
+      Ok(bytes) => Ok(bytes.into_owned()),
+      Err(err) => match &self.read_fallback {
+        Some(fallback) if err.kind() == std::io::ErrorKind::NotFound => {
+          Ok(self.sys.fs_read(fallback.join(filename))?.into_owned())
+        }
+        _ => Err(err),
+      },
+    }
   }
 
   pub fn set(&self, filename: &Path, data: &[u8]) -> std::io::Result<()> {
@@ -141,6 +163,29 @@ mod tests {
   use test_util::TempDir;
 
   use super::*;
+
+  /// denext (item 448): a cache with a read fallback reads its own file
+  /// first, the fallback's when it has none, and writes only its own.
+  #[test]
+  fn read_fallback_reads_but_never_writes() {
+    let temp_dir = TempDir::new();
+    let own = temp_dir.path().join("own");
+    let shared = temp_dir.path().join("shared");
+    shared.create_dir_all();
+    shared.join("a.js").write("shared a");
+    shared.join("b.js").write("shared b");
+    let cache = DiskCache::new(RealSys, own.to_path_buf())
+      .with_read_fallback(shared.to_path_buf());
+    assert_eq!(cache.get(Path::new("a.js")).unwrap(), b"shared a");
+    cache.set(Path::new("b.js"), b"own b").unwrap();
+    assert_eq!(cache.get(Path::new("b.js")).unwrap(), b"own b");
+    assert_eq!(shared.join("b.js").read_to_string(), "shared b");
+    assert_eq!(own.join("b.js").read_to_string(), "own b");
+    assert!(cache.get(Path::new("c.js")).is_err());
+    // without the fallback the shared file isn't seen
+    let plain = DiskCache::new(RealSys, own.to_path_buf());
+    assert!(plain.get(Path::new("a.js")).is_err());
+  }
 
   #[test]
   fn test_set_get_cache_file() {

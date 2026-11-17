@@ -1,0 +1,4 @@
+kernel sandbox (preview): off (--kernel-sandbox); applies: off; would apply: off
+  why: turned off
+[WILDCARD]
+hello

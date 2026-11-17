@@ -1229,6 +1229,16 @@ fn implicit_set_follows_the_grant() {
     &c,
   );
   assert!(has(&net, "/etc/resolv.conf") && has(&net, "/etc/ssl"));
+  // Linuxbrew's prefix is part of the children baseline, only with run
+  assert!(!has(&none, "/home/linuxbrew/.linuxbrew"));
+  let run = ImplicitSet::build(
+    &PermissionsOptions {
+      allow_run: s(&["python3"]),
+      ..Default::default()
+    },
+    &c,
+  );
+  assert!(has(&run, "/home/linuxbrew/.linuxbrew"));
   let tty = ImplicitSet::build(
     &PermissionsOptions::default(),
     &Context {
@@ -1819,4 +1829,121 @@ fn no_seccomp_refuses_enforce() {
   );
   let ok = compile(&PermissionsOptions::default(), linux(Some(6)), Enforce);
   assert!(!ok.gaps.iter().any(|g| g.rule.contains("seccomp")));
+}
+
+/// Item 448: the runtime's own write needs (the cache overlay, the coverage
+/// folder) and the certificate files the environment names are implicit; the
+/// overlay only inside this DENO_DIR, the certificates only with network.
+#[test]
+fn runtime_writes_and_tls_files_are_implicit() {
+  for caps in [linux(Some(6)), macos()] {
+    let deno_dir = PathBuf::from("/home/me/.cache/deno");
+    let overlay = deno_dir.join("sandboxed").join("0123456789abcdef");
+    let c = Context {
+      deno_dir: Some(deno_dir.clone()),
+      cache_overlay: Some(overlay.clone()),
+      coverage_dir: Some(PathBuf::from("/project/cov")),
+      profile_dirs: vec![PathBuf::from("/project/prof")],
+      tls_files: vec![PathBuf::from("/etc/my-ca.pem")],
+      origin_data: vec![
+        deno_dir.join("location_data").join("abc"),
+        PathBuf::from("/elsewhere/location_data/abc"),
+      ],
+      ..ctx(caps, Enforce)
+    };
+    let entry = |set: &ImplicitSet, path: &Path| {
+      set.entries.iter().find(|e| e.path == path).cloned()
+    };
+    let none = ImplicitSet::build(&PermissionsOptions::default(), &c);
+    let o = entry(&none, &overlay).expect("the overlay");
+    assert_eq!(
+      (o.need, o.access),
+      (ImplicitNeed::CacheOverlay, ImplicitAccess::ReadWrite)
+    );
+    let cov = entry(&none, Path::new("/project/cov")).expect("coverage");
+    assert_eq!(
+      (cov.need, cov.access),
+      (ImplicitNeed::Coverage, ImplicitAccess::ReadWrite)
+    );
+    assert!(entry(&none, Path::new("/etc/my-ca.pem")).is_none());
+    // this program's origin data, only inside DENO_DIR's location_data
+    let origin = deno_dir.join("location_data").join("abc");
+    assert_eq!(
+      entry(&none, &origin).map(|e| (e.need, e.access)),
+      Some((ImplicitNeed::OriginData, ImplicitAccess::ReadWrite))
+    );
+    assert!(entry(&none, Path::new("/elsewhere/location_data/abc")).is_none());
+    let net = ImplicitSet::build(
+      &PermissionsOptions {
+        allow_net: s(&["127.0.0.1:443"]),
+        ..Default::default()
+      },
+      &c,
+    );
+    assert!(entry(&net, Path::new("/etc/my-ca.pem")).is_some());
+    // the compiled policy writes the overlay and the coverage folder, and
+    // nothing else of DENO_DIR
+    let policy =
+      KernelPolicy::compile(&PermissionsOptions::default(), &none, &c);
+    let write = &policy.policy.fs.write;
+    assert!(write.covers(&overlay.join("v8_code_cache_v2_denext")));
+    assert!(write.covers(Path::new("/project/cov/x.json")));
+    assert!(write.covers(Path::new("/project/prof/CPU.1.cpuprofile")));
+    assert!(!write.covers(&deno_dir.join("v8_code_cache_v2_denext")));
+    assert!(!write.covers(&deno_dir.join("gen")));
+    assert!(write.covers(&origin.join("local_storage")));
+    assert!(!write.covers(&deno_dir.join("location_data").join("other")));
+    assert!(
+      !write.covers(&deno_dir.join("sandboxed").join("fedcba9876543210"))
+    );
+    // an overlay outside DENO_DIR is never added
+    let outside = ImplicitSet::build(
+      &PermissionsOptions::default(),
+      &Context {
+        cache_overlay: Some(PathBuf::from("/tmp/sandboxed/0123456789abcdef")),
+        ..c.clone()
+      },
+    );
+    assert!(
+      !outside
+        .entries
+        .iter()
+        .any(|e| e.need == ImplicitNeed::CacheOverlay)
+    );
+  }
+}
+
+/// Item 448: plain `-A` (compiled only under the harness's forced enforce)
+/// holds nothing narrower than the grant: no Unix socket gap, so `enforce`
+/// starts in Mode A on every Landlock ABI; `-A` with denies keeps its gap.
+#[test]
+fn allow_all_has_no_socket_gap() {
+  let all = Some(Vec::new());
+  let options = PermissionsOptions {
+    allow_read: all.clone(),
+    allow_write: all.clone(),
+    allow_net: all.clone(),
+    allow_env: all.clone(),
+    allow_run: all.clone(),
+    allow_ffi: all.clone(),
+    allow_sys: all,
+    ..Default::default()
+  };
+  for abi in [1, 4, 6] {
+    let c = ctx(linux(Some(abi)).built(), Enforce);
+    let set = ImplicitSet::build(&options, &c);
+    let p = KernelPolicy::compile(&options, &set, &c);
+    assert_eq!(p.policy.shape, Shape::ModeA, "ABI {abi}");
+    assert_eq!(p.policy.unix, UnixPolicy::Open);
+    assert_eq!(p.policy.net, NetPolicy::Open);
+    assert_eq!(p.fatal_gaps().count(), 0, "ABI {abi}: {:?}", p.gaps);
+  }
+  let with_deny = PermissionsOptions {
+    deny_read: s(&["/secret"]),
+    ..options
+  };
+  let c = ctx(linux(Some(4)).built(), Enforce);
+  let set = ImplicitSet::build(&with_deny, &c);
+  let p = KernelPolicy::compile(&with_deny, &set, &c);
+  assert!(p.gaps.iter().any(|g| g.class == GapClass::Unix));
 }

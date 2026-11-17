@@ -40,6 +40,42 @@ pub const AUTO_APPLIES: bool = false;
 /// author's.
 pub const KERNEL_SANDBOX_ENV_VAR: &str = "DENO_KERNEL_SANDBOX";
 
+/// The test harnesses' switch (never a user setting): every `deno run` /
+/// `deno serve` of a suite runs under `--kernel-sandbox=enforce`, `-A`
+/// included (DENEXT.md item 448). `enforce` keeps each run's own grant;
+/// `project` also narrows an unscoped read or write grant, for the kernel
+/// only, to the project, the working directory and the temp folder, so a
+/// suite of `-A` programs shows what the implicit set lacks. It can only
+/// narrow: an explicit `off` (the flag, `DENO_KERNEL_SANDBOX=off` or
+/// deno.json's) still wins, and an unfixed run (`--watch`, HMR, `denext dev`, a permission
+/// broker) stays as it is.
+pub const KERNEL_SANDBOX_FORCE_ENV_VAR: &str =
+  "DENO_INTERNAL_KERNEL_SANDBOX_FORCE";
+
+/// The test harnesses' forced mode ([`KERNEL_SANDBOX_FORCE_ENV_VAR`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ForcedEnforce {
+  /// `enforce`, each run with its own grant.
+  Enforce,
+  /// `enforce`, an unscoped read / write grant narrowed for the kernel to
+  /// the project, the working directory and the temp folder.
+  Project,
+}
+
+impl ForcedEnforce {
+  /// The variable's value: `None` when unset or empty, `Err` for anything
+  /// but `enforce` / `project`.
+  pub fn parse(value: Option<&str>) -> Result<Option<Self>, String> {
+    match value {
+      None | Some("") => Ok(None),
+      Some("enforce") => Ok(Some(Self::Enforce)),
+      Some("project") => Ok(Some(Self::Project)),
+      Some(other) => Err(other.to_string()),
+    }
+  }
+}
+
 /// The values `--kernel-sandbox`, deno.json `permissions.kernelSandbox` and
 /// `deno compile --kernel-sandbox` accept.
 pub const KERNEL_SANDBOX_VALUES: &[&str] =
@@ -143,6 +179,8 @@ pub enum ModeSource {
   Config,
   /// `deno compile --kernel-sandbox`, read from the binary.
   Compiled,
+  /// The test harnesses' `DENO_INTERNAL_KERNEL_SANDBOX_FORCE`.
+  Forced,
 }
 
 /// Why the effective mode is what it is.
@@ -244,6 +282,8 @@ pub struct ModeInputs {
   pub dev_build: bool,
   /// An upstream permission broker is connected.
   pub permission_broker: bool,
+  /// The test harnesses' forced `enforce` (CLI `run` / `serve` only).
+  pub forced: Option<ForcedEnforce>,
 }
 
 /// The mode a process runs in, and why.
@@ -304,13 +344,21 @@ pub fn kernel_sandbox_mode(
       Some(mode) => (mode, ModeSource::Compiled),
       None => (KernelSandboxMode::Auto, ModeSource::Default),
     }
-  } else if let Some(mode) = inputs.flag {
+  } else if let Some(mode) = inputs.flag
+    && (inputs.forced.is_none() || mode == KernelSandboxMode::Off)
+  {
     (mode, ModeSource::Flag)
   } else if let Some(mode) = inputs
     .env
     .filter(|m| matches!(m, KernelSandboxMode::Off | KernelSandboxMode::Warn))
+    .filter(|m| inputs.forced.is_none() || *m == KernelSandboxMode::Off)
   {
     (mode, ModeSource::Env)
+  } else if inputs.forced.is_some()
+    && inputs.config != Some(KernelSandboxMode::Off)
+  {
+    // the harness's switch replaces every mode but an explicit off
+    (KernelSandboxMode::Enforce, ModeSource::Forced)
   } else if let Some(mode) = inputs.config {
     (mode, ModeSource::Config)
   } else {
@@ -348,7 +396,9 @@ pub fn kernel_sandbox_mode(
   if compiled && inputs.dev_build {
     return off(resolution, ModeReason::DevBuild);
   }
-  if inputs.allow_all && !inputs.has_deny {
+  // the harness forces `-A` runs too: the policy is then the whole grant
+  // plus the seccomp rules (or, for `project`, the narrowed one)
+  if inputs.allow_all && !inputs.has_deny && source != ModeSource::Forced {
     return off(resolution, ModeReason::AllowAll);
   }
   let unfixed_reason = if inputs.permission_broker {
@@ -368,6 +418,8 @@ pub fn kernel_sandbox_mode(
         resolution.mode = KernelSandboxMode::Warn;
         Ok(resolution)
       }
+      // a forced run that isn't fixed stays as it was
+      _ if source == ModeSource::Forced => off(resolution, reason),
       mode if mode.fails_closed() => Err(ModeError { mode, reason }),
       _ => off(resolution, reason),
     };
@@ -489,6 +541,22 @@ pub fn env_override() -> Result<Option<KernelSandboxMode>, String> {
     Some("warn") => Ok(Some(KernelSandboxMode::Warn)),
     Some(other) => Err(other.to_string()),
   }
+}
+
+/// `DENO_INTERNAL_KERNEL_SANDBOX_FORCE` as the CLI read it at startup.
+static FORCED: OnceLock<Option<String>> = OnceLock::new();
+
+/// Records the harness's [`KERNEL_SANDBOX_FORCE_ENV_VAR`], read with
+/// `DENO_KERNEL_SANDBOX` (before any `--env-file`). Later calls keep the first
+/// value.
+pub fn snapshot_forced(value: Option<String>) {
+  let _ = FORCED.set(value);
+}
+
+/// The harness's forced mode, or the raw value when it isn't one (the caller
+/// warns and ignores it).
+pub fn forced() -> Result<Option<ForcedEnforce>, String> {
+  ForcedEnforce::parse(FORCED.get().and_then(|v| v.as_deref()))
 }
 
 #[cfg(test)]
@@ -981,5 +1049,96 @@ mod tests {
     });
     assert!(r.deny_only);
     assert_eq!(r.mode, Warn);
+  }
+
+  /// The harness's forced enforce (item 448): it raises `auto`, `warn` and
+  /// `-A` to `enforce`, never an explicit `off`, and leaves an unfixed run
+  /// as it was (no error).
+  #[test]
+  fn forced_enforce_rows() {
+    let forced = |i: ModeInputs| ModeInputs {
+      forced: Some(ForcedEnforce::Enforce),
+      ..i
+    };
+    // a default run
+    let r = resolve(&forced(run()));
+    assert_eq!((r.mode, r.source), (Enforce, ModeSource::Forced));
+    assert!(r.fixed);
+    // -A with no deny: forced too (unforced, it is off)
+    let all = ModeInputs {
+      allow_all: true,
+      ..run()
+    };
+    assert_eq!(resolve(&all).reason, ModeReason::AllowAll);
+    assert_eq!(resolve(&forced(all)).mode, Enforce);
+    // a warn flag, config or variable is raised
+    for i in [
+      ModeInputs {
+        flag: Some(Warn),
+        ..run()
+      },
+      ModeInputs {
+        env: Some(Warn),
+        ..run()
+      },
+      ModeInputs {
+        config: Some(Auto),
+        ..run()
+      },
+    ] {
+      assert_eq!(resolve(&forced(i)).mode, Enforce);
+    }
+    // an explicit off wins (flag or break-glass variable)
+    for i in [
+      ModeInputs {
+        flag: Some(Off),
+        ..run()
+      },
+      ModeInputs {
+        env: Some(Off),
+        ..run()
+      },
+      ModeInputs {
+        config: Some(Off),
+        ..run()
+      },
+    ] {
+      let r = resolve(&forced(i));
+      assert_eq!((r.mode, r.reason), (Off, ModeReason::TurnedOff));
+    }
+    // unfixed: stays off, never the error an explicit enforce gets
+    let watch = ModeInputs {
+      watch: true,
+      ..run()
+    };
+    let r = resolve(&forced(watch.clone()));
+    assert_eq!((r.mode, r.reason), (Off, ModeReason::Watch));
+    assert!(
+      kernel_sandbox_mode(&ModeInputs {
+        flag: Some(Enforce),
+        ..watch
+      })
+      .is_err()
+    );
+    // a prompt that could happen no longer keeps it off
+    let tty = ModeInputs {
+      terminals: true,
+      ..run()
+    };
+    assert_eq!(resolve(&forced(tty)).mode, Enforce);
+    // not a runtime: off
+    let r = resolve(&forced(ModeInputs {
+      kind: Some(RunKind::NotARuntime),
+      ..Default::default()
+    }));
+    assert_eq!(r.mode, Off);
+    // the variable's values
+    assert_eq!(ForcedEnforce::parse(None), Ok(None));
+    assert_eq!(ForcedEnforce::parse(Some("")), Ok(None));
+    assert_eq!(
+      ForcedEnforce::parse(Some("project")),
+      Ok(Some(ForcedEnforce::Project))
+    );
+    assert!(ForcedEnforce::parse(Some("on")).is_err());
   }
 }

@@ -1,0 +1,72 @@
+// denext (DENEXT.md item 448): the kernel sandbox loads the program's graph
+// first. The first image fetches remote modules and npm packages and writes
+// the lockfile while it still can; the confined image reads them from the
+// cache with no network grant. Folders the runtime writes for the user (the
+// coverage profile, this program's localStorage) are in the policy.
+{
+  "tempDir": true,
+  "tests": {
+    "imports_need_no_net_grant": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        {
+          "args": "run --quiet --kernel-sandbox=enforce --allow-import=localhost:4545 --lock=deno.lock remote.ts",
+          "output": "Hello\n5\n"
+        },
+        {
+          "args": "run --quiet -A --kernel-sandbox=off check_lock.ts",
+          "output": "remote locked: true\nnpm locked: true\n"
+        },
+        // again, from the cache and the lockfile (frozen: nothing to write)
+        {
+          "args": "run --quiet --kernel-sandbox=enforce --allow-import=localhost:4545 --frozen --lock=deno.lock remote.ts",
+          "output": "Hello\n5\n"
+        }
+      ]
+    },
+    "local_storage_is_its_own": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        {
+          "args": "run --quiet --kernel-sandbox=enforce storage.ts",
+          "output": "runs: 1\n"
+        },
+        {
+          "args": "run --quiet --kernel-sandbox=enforce storage.ts",
+          "output": "runs: 2\n"
+        }
+      ]
+    },
+    "env_file_and_import_map_flag": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet --kernel-sandbox=enforce --env-file=env --allow-env=GREETING --import-map=map.json env_and_map.ts",
+      "output": "from the env file\nhello from the import map\n"
+    },
+    "cpu_profile_folder_is_written": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        {
+          "args": "run --quiet --kernel-sandbox=enforce --cpu-prof --cpu-prof-dir=prof prof.ts",
+          "output": "profiled\n"
+        },
+        {
+          "args": "run --quiet -A --kernel-sandbox=off check_prof.ts",
+          "output": "cpu profiles: true\n"
+        }
+      ]
+    },
+    "coverage_folder_is_written": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        {
+          "args": "run --quiet --kernel-sandbox=enforce --coverage=cov coverage.ts",
+          "output": "covered\n"
+        },
+        {
+          "args": "run --quiet -A --kernel-sandbox=off check_coverage.ts",
+          "output": "coverage files: true\n"
+        }
+      ]
+    }
+  }
+}

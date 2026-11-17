@@ -1,0 +1,13 @@
+confined: ok hello
+overlays: 1 true
+emit in the overlay: true
+code cache in the overlay: true
+nothing confined wrote outside it: true
+overlay is the user's alone: true
+confined again: ok hello
+fifo: true
+unconfined: ok hello
+other policy: ok hello
+confined, first policy: blocked
+overlays now: 2
+no overlay possible: ok hello

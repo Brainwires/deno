@@ -16992,6 +16992,137 @@ where the changes are discussed.
      - Node tests enabled: none, because this is the JavaScript engine's patch
        level, not a Node API.
 
+448. **`feat(permissions)`: the kernel sandbox's implicit set, a policy-keyed
+     cache overlay, and forced-enforce test beds** (CLI and tests; denext-only;
+     opt-in; `auto` unchanged; `cli/sandbox/{mod,enforce,
+     policy}.rs`,
+     `cli/lib/kernel_sandbox.rs`, `cli/lib.rs`,
+     `libs/resolver/cache/{deno_dir,disk_cache,mod}.rs`, `libs/sandbox/plan.rs`,
+     `tests/util/lib/builders.rs`, `tests/npm_matrix/run.ts`,
+     `tests/kernel_sandbox_beds/`, `.github/workflows/denext_kernel_beds.yml`).
+     The first pass of the compatibility phase of `--kernel-sandbox=enforce`
+     (item 425): what a confined run may read and write without a grant, and
+     beds that run whole suites under it.
+     - The cache overlay. A confined run never writes the shared DENO_DIR caches
+       (a cache a confined run wrote and a less confined run later trusted would
+       be a privilege ladder: V8 runs code-cache bytecode once the source hash
+       matches, and emits are trusted output). Its SQLite caches (the V8 code
+       cache, dependency and CommonJS analysis, fast check, type check, fmt /
+       lint incremental) and its new emits go to
+       `DENO_DIR/sandboxed/<policy hash>` instead, keyed by the hash of the
+       policy compiled without the overlay, created `0700` by the image that
+       isn't confined yet and named in the plan (part of the compared plan; its
+       write rule is the only DENO_DIR write the policy has besides this
+       program's origin data). Where it can't be created (a DENO_DIR the run
+       can't write: a child of a confined process, a read-only container) the
+       policy has no overlay and the caches stay in memory; enforce doesn't
+       refuse to start over it. The shared emits stay readable beneath it. Only
+       the plan a process applied at startup sets the overlay
+       (`deno_resolver::cache::set_sandbox_overlay`, which refuses a path
+       without an overlay's shape, and `DenoDir` uses it only when it lies in
+       that DENO_DIR's `sandboxed/`), never the environment: an unconfined run,
+       or a confined run of another policy, never reads it. Before this, a
+       confined run opened no cache it could write and started cold every time;
+       a second confined run with the same policy now finds its code cache and
+       emits.
+     - The graph first, with the lockfile: the first image already fetched the
+       static graph (remote modules, npm packages) before confining itself; it
+       now also writes the lockfile that load updated before the re-exec (the
+       confined image can't write it, and the re-exec runs no exit hook). An
+       enforced run needs no network grant for its own imports. The lockfile the
+       run uses is in the policy whether or not it exists yet (one the first
+       image created was unreadable to the confined image, `EACCES`, so a
+       project's first enforced run with remote imports failed), and on macOS
+       every project config file is a `literal` filter either way (a missing
+       path was a `subpath`, an existing file a `literal`, so the two images'
+       plans differed and the run refused to start). An `npm:` entrypoint of a
+       project that manages its own `node_modules` ("manual") is left out of the
+       graph-first load (the graph can't take it as a root; it resolves in
+       `node_modules`, which the policy reads, and there is nothing to fetch):
+       before, every such run under enforce failed with "Resolving npm specifier
+       entrypoints this way is currently not supported" (the npm matrix's
+       `prisma` and `playwright` cases).
+     - The implicit set gains, each only for the run that needs it: this
+       program's own `localStorage` and Cache API folders
+       (`location_data/<key>`, `location_data/web_cache/<key>`, keyed as the
+       worker keys them, from `--location`, deno.json, or a local or URL main
+       module resolved without fixing the run's own resolution; created like the
+       overlay and left out where they can't be; `localStorage.setItem` failed
+       with `EACCES` under enforce before), the coverage folder (`--coverage`,
+       `DENO_COVERAGE_DIR`) and the `--cpu-prof` / `--heap-prof` folders
+       (written for the user; the profiles failed with `EACCES` before), the
+       certificate files the environment names (`DENO_CERT`,
+       `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`) and `--cert`'s
+       file (with network only; the two `SSL_` variables are kept through the
+       re-exec's scrub and compared), the config files of the workspace's
+       `links` and an import map given by `--import-map` (both failed to load
+       before), and for children (`--allow-run`) Linuxbrew's system-wide prefix
+       `/home/linuxbrew/.linuxbrew` beside `/usr`, `/bin`, `/opt` (a program on
+       `PATH` there, such as `python3`, failed to start). The folders are
+       created before the plan is built (a Landlock rule needs its path).
+     - The confined image doesn't repeat what the first image did with access it
+       no longer has: it doesn't load the `--env-file` files again (the first
+       image loaded them into the environment it hands over; the files, often
+       secrets, stay out of the read scope; they failed with `EACCES` before),
+       and it doesn't type-check again (the first image's graph-first load
+       checked the static graph; the checker runs as a child process, so
+       `deno run --check` failed under enforce before), and the first image
+       flushes what it printed before the exec (its `Check` line could be lost).
+       Dynamic imports aren't type-checked under enforce.
+       `DENO_DISABLE_OFFSCREEN_CANVAS` and `DENO_PATCH_REACT_CVE` are kept
+       through the scrub (they were dropped, and the confined image behaved as
+       without them).
+     - `-A` with no deny compiled for the kernel (only the forced beds do that;
+       plain `-A` stays off) has no Unix-socket gap: reaching every socket is
+       the grant. It compiles to Mode A on every Landlock ABI.
+     - The forced beds: `DENO_INTERNAL_KERNEL_SANDBOX_FORCE=enforce|project`
+       (read with `DENO_KERNEL_SANDBOX`, before any env file; any other value is
+       ignored with a warning) runs every `deno run` / `deno serve` under
+       `--kernel-sandbox=enforce`, `-A` included. `project` also narrows an
+       unscoped read or write grant, for the kernel only, to the workspace, the
+       working directory and the temp folder, so a suite of `-A` programs shows
+       what the implicit set lacks (Deno's checks keep the run's own grant). It
+       can only narrow: an explicit `off` (the flag, `DENO_KERNEL_SANDBOX=off`,
+       deno.json) wins, an unfixed run (`--watch`, HMR, `denext dev`, a
+       permission broker) stays as it is, the subcommands `enforce` doesn't
+       cover yet are left alone, and a child of a confined process isn't forced
+       again (it inherits its parent's sandbox). The test harness forwards it to
+       every `deno` it starts (a cleared environment's too), as does the npm
+       matrix. `denext_kernel_beds.yml` (dispatched by hand; no schedule) runs
+       specs, node_compat, the npm matrix and denext's integration and e2e
+       suites under it on Linux, and `tests/kernel_sandbox_beds/compare.ts`
+       compares each suite's failures with the reviewed list in
+       `tests/kernel_sandbox_beds/expected_failures.jsonc` (a failure not listed
+       for the OS fails the job; a listed entry that passed is reported). The
+       node_compat harness runs its parallel tests even when a sequential one
+       failed (both are checked at the end), so one run lists every failure.
+     - User-facing note: under `--kernel-sandbox=enforce`, a second run is warm
+       (its caches live in `DENO_DIR/sandboxed/`, which `deno clean` removes
+       with the rest), `localStorage` and the Cache API work, `--coverage`
+       writes its profile, and the lockfile is written.
+     - Tests: `deno_lib`'s `kernel_sandbox::tests::forced_enforce_rows`;
+       `deno_resolver`'s `cache::deno_dir::test::sandbox_overlay_paths` and
+       `cache::disk_cache::tests::read_fallback_reads_but_never_writes`; the
+       CLI's
+       `sandbox::policy::tests::{runtime_writes_and_tls_files_are_implicit,
+       allow_all_has_no_socket_gap}`;
+       spec `kernel_sandbox::overlay` (a confined run's emit and code cache land
+       in its overlay, `0700`, nothing confined lands in the shared caches, and
+       with the overlay's emit replaced by a FIFO an unconfined run and another
+       policy's run finish while a run of the first policy blocks on it: the
+       overlay is read by that policy alone; a DENO_DIR where no overlay can be
+       made still runs), `kernel_sandbox::implicit` (a remote module and an npm
+       package with no network grant, the lockfile written and then `--frozen`;
+       `localStorage` across two confined runs; the coverage and CPU profile
+       folders; `--env-file` with `--import-map`), `kernel_sandbox::npm_main`
+       (an `npm:` entrypoint of a "manual" project), the CLI's
+       `sandbox::enforce::tests::config_files_filter_the_same_before_they_exist`,
+       the updated `kernel_sandbox::enforce::no_writable_descriptors` (the
+       overlay's own caches are the one writable file), `kernel_sandbox::forced`
+       (`-A` forced into Mode A, `project` narrowing, an explicit off winning,
+       an invalid value ignored).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
