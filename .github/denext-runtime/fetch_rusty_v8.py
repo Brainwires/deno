@@ -126,7 +126,9 @@ def sha256_of(path):
   return digest.hexdigest()
 
 
-def download(url, dest, attempts=4):
+def download(url, dest, attempts=6):
+  # GitHub's release downloads answer 502/503 in bursts that outlast a few seconds
+  # (2026-11-17: two setup steps failed after 15 s of retries), so back off up to ~2.5 min.
   last = None
   for attempt in range(attempts):
     try:
@@ -136,7 +138,8 @@ def download(url, dest, attempts=4):
       return
     except OSError as error:
       last = error
-      time.sleep(2**attempt)
+      if attempt + 1 < attempts:
+        time.sleep(min(30, 2 ** (attempt + 1)))
   raise Failure(f"download failed: {url}: {last}")
 
 
