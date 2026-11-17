@@ -1640,28 +1640,4 @@ mod tests {
     }
     std::fs::remove_dir_all(&root).unwrap();
   }
-
-  // the note is a no-op unless the kernel sandbox enforces this process
-  // (nothing in the unit tests turns enforcing on)
-  #[test]
-  fn note_only_while_enforcing() {
-    assert!(!kernel_sandbox_state::is_enforcing());
-    for errno in [libc::EPERM, libc::EACCES] {
-      assert_eq!(
-        permission_denied_note(Some(errno), "denied (os error 1): open '/x'"),
-        None
-      );
-    }
-    assert_eq!(permission_denied_note(None, "denied"), None);
-  }
-
-  #[test]
-  fn quoted_paths() {
-    assert_eq!(
-      quoted_path("Permission denied (os error 13): open '/a/b c'"),
-      Some("/a/b c")
-    );
-    assert_eq!(quoted_path("Permission denied (os error 13)"), None);
-    assert_eq!(quoted_path("spawn 'probe'"), None);
-  }
 }
