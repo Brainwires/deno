@@ -16861,9 +16861,9 @@ where the changes are discussed.
      applied by the same enforcer as `deno run` where the mode enforces.
      - Status: not started.
 
-445. **laufey v0.8.1** (`ba599e6`; laufey API 58, no ABI change; runtime
+445. **laufey v0.8.1** (`668cc3f`; laufey API 58, no ABI change; runtime
      3.0.0-denext.25; `cli/rt_desktop/Cargo.toml`, `Cargo.lock`,
-     `.github/workflows/denext_runtime.yml`). laufey `dde2507..ba599e6`: v0.8.0
+     `.github/workflows/denext_runtime.yml`). laufey `dde2507..668cc3f`: v0.8.0
      (`6bfd2ea`, `development-denext`), then v0.8.1:
      - hardening in the bridge's JavaScript call answers and in WebView2's
        stream acknowledgements;
@@ -16908,6 +16908,9 @@ where the changes are discussed.
        session with no credential store (a service, an SSH key logon), never
        plaintext; an item in the PasswordVault (resource = service, user =
        account) moves over when it is looked up;
+     - v0.8.1, macOS: an OS auth session started right after a cancel waits for
+       the cancelled sheet to leave (macOS's end report, else up to 15 s while
+       the anchor still has a sheet) and never anchors to a sheet mid-dismissal;
      - v0.8.1, Windows: tray menu items show their checkmarks and icons;
      - v0.8.1, macOS: Close Window (Cmd+W) in every menu bar;
      - v0.8.1: numbers on the bridge are read and written the same whatever the

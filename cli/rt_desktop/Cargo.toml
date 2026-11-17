@@ -84,7 +84,7 @@ denort = { path = "../rt", default-features = false }
 # branch cut from it (release/0.8.1 for v0.8.1).
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "ba599e6537df8ce82fd7f8ec19916a5ce9f1497f" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "668cc3fcc0f8722150ffec519aa16e0c38149783" }
 libsui.workspace = true
 
 bytes.workspace = true
