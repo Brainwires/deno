@@ -949,6 +949,13 @@ impl TestCommandBuilder {
     command.args(args.iter());
     if self.env_clear {
       command.env_clear();
+      // denext: the harness's forced kernel sandbox (DENEXT.md item 448)
+      // reaches every deno a suite starts, a cleared environment's too
+      if let Some(value) =
+        std::env::var_os("DENO_INTERNAL_KERNEL_SANDBOX_FORCE")
+      {
+        command.env("DENO_INTERNAL_KERNEL_SANDBOX_FORCE", value);
+      }
     }
     let envs = self.build_envs(&cwd);
     command.envs(envs);
