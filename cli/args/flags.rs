@@ -200,6 +200,9 @@ impl FlagsExt for Flags {
     if let Some(mode) = &self.permissions.kernel_sandbox {
       args.push(format!("--kernel-sandbox={mode}"));
     }
+    if self.permissions.kernel_sandbox_exec_strict {
+      args.push("--kernel-sandbox-exec=strict".to_string());
+    }
 
     if self.permissions.allow_all {
       args.push("--allow-all".to_string());

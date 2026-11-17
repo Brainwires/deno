@@ -1,0 +1,76 @@
+// denext (DENEXT.md item 449): children of a process the kernel sandbox
+// confines. A nested deno inherits the grant it runs under (the policy
+// handed down, measured by the kernel) and refuses with NotCapable; a
+// program like git works with documented grants; a grandchild that orphans
+// itself stays confined.
+{
+  "tempDir": true,
+  "tests": {
+    // a nested `deno run -A` gets NotCapable for a read outside the
+    // parent's grant (not the kernel's bare EACCES), also with a cleared
+    // environment, and its report names the inherited layer
+    "nested_deno_not_capable": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet --kernel-sandbox=enforce --allow-run --allow-read=inside nested.ts",
+      "output": "nested.out"
+    },
+    // a nested --kernel-sandbox=enforce stacks its own, narrower layer
+    // (Linux: Landlock domains nest)
+    "nested_enforce_stacks": {
+      "if": "kernelSandboxEnforceLinux",
+      "args": "run --quiet --kernel-sandbox=enforce --allow-run --allow-ffi --allow-read=inside nested_enforce.ts",
+      "output": "nested_enforce.out"
+    },
+    // macOS doesn't stack a second Seatbelt profile: a nested enforce
+    // refuses to start rather than run under the parent's wider one
+    "nested_enforce_refused_mac": {
+      "if": "kernelSandboxEnforceMac",
+      "args": "run --quiet --kernel-sandbox=enforce --allow-run --allow-ffi --allow-read=inside nested_enforce.ts",
+      "output": "nested_enforce_mac.out"
+    },
+    // --kernel-sandbox-exec=strict: the tree may start only the run list's
+    // programs (sh, not cat); without it, any readable program (plan D3)
+    "strict_exec": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet --kernel-sandbox=enforce --kernel-sandbox-exec=strict --allow-run=sh --allow-read=inside strict.ts",
+      "output": "strict.out"
+    },
+    "strict_exec_off": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet --kernel-sandbox=enforce --allow-run=sh --allow-read=inside strict.ts",
+      "output": "strict_off.out"
+    },
+    // `git status` with the documented grants
+    "git_status": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        { "args": "run --quiet -A git_setup.ts", "output": "" },
+        {
+          "args": "run --quiet --kernel-sandbox=enforce --allow-run=git --allow-read=repo,home git.ts",
+          "output": "git.out"
+        }
+      ]
+    },
+    // a deno confined only by the sandbox it inherited prints the hint
+    // when its child fails
+    "hint_in_nested_deno": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet --kernel-sandbox=enforce --allow-run --allow-read=inside hint_nested.ts",
+      "output": "nested hint: true\n"
+    },
+    // a child killed by SIGSYS (a seccomp kill) gets the hint; SIGTERM
+    // doesn't (Linux: a SIGSYS core on macOS would write a crash report)
+    "hint_on_refusal_signal": {
+      "if": "kernelSandboxEnforceLinux",
+      "args": "run --quiet --kernel-sandbox=enforce --allow-run=sh hint_signal.ts",
+      "output": "hint_signal.out"
+    },
+    // a grandchild that orphans itself stays confined, measured from
+    // outside (Linux: /proc/<pid>/status; macOS: sandbox_check)
+    "orphaned_grandchild_confined": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet -A orphan_outer.ts",
+      "output": "orphan.out"
+    }
+  }
+}

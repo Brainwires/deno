@@ -1160,6 +1160,12 @@ pub struct PermissionFlags {
   /// policy at startup. Not a grant.
   #[serde(default)]
   pub kernel_sandbox_report: bool,
+  /// denext: `--kernel-sandbox-exec=strict`: under the kernel sandbox, the
+  /// whole process tree may start only the `--allow-run` programs (and the
+  /// interpreters they need), not every readable program. Not a grant
+  /// (DENEXT.md item 449).
+  #[serde(default)]
+  pub kernel_sandbox_exec_strict: bool,
   pub allow_sys: Option<Vec<String>>,
   pub deny_sys: Option<Vec<String>>,
   pub allow_write: Option<Vec<String>>,

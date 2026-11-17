@@ -345,10 +345,19 @@ pub fn cli_profile(plan: &MacosPlan) -> String {
   }
   // processes
   p.push_str("(allow process-fork)\n");
-  if plan.exec {
+  if plan.exec && plan.exec_only.is_empty() {
     p.push_str("(allow process-exec)\n");
   } else {
     p.push_str("(deny process-exec)\n");
+  }
+  if plan.exec && !plan.exec_only.is_empty() {
+    // a strict exec scope: these files only (the last matching rule wins)
+    let only: Vec<SbFilter> = plan
+      .exec_only
+      .iter()
+      .map(|p| SbFilter::Literal(p.clone()))
+      .collect();
+    p.push_str(&format!("(allow process-exec {})\n", filters_text(&only)));
   }
   p.push_str("(allow signal (target same-sandbox))\n");
   p.push_str("(allow process-info* (target same-sandbox))\n");
@@ -736,6 +745,7 @@ mod tests {
         filters: vec![SbFilter::Literal("/w/lib.dylib".into())],
       },
       exec: false,
+      exec_only: vec![],
       net: NetPlan::Denied,
       unix: SbUnix::Denied,
       denied_sysctls: vec!["kern.proc*".into(), "vm.loadavg".into()],
@@ -746,6 +756,26 @@ mod tests {
 
   // deny by default, allows, then denies, then re-allows (the
   // last matching rule wins); no LaunchServices, AppleEvents or launchd
+  // denext (DENEXT.md item 449): a strict exec scope names its files
+  #[test]
+  fn cli_profile_strict_exec() {
+    let mut plan = cli_plan();
+    plan.exec = true;
+    plan.exec_only = vec!["/bin/sh".into(), "/usr/bin/git".into()];
+    let p = cli_profile(&plan);
+    assert!(!p.contains("(allow process-exec)\n"), "{p}");
+    let deny = p.find("(deny process-exec)\n").unwrap();
+    let allow = p
+      .find(
+        "(allow process-exec (literal \"/bin/sh\") (literal \"/usr/bin/git\"))",
+      )
+      .unwrap();
+    assert!(deny < allow, "{p}");
+    // without a list: any program
+    plan.exec_only.clear();
+    assert!(cli_profile(&plan).contains("(allow process-exec)\n"));
+  }
+
   #[test]
   fn cli_profile_order_and_refusals() {
     let p = cli_profile(&cli_plan());

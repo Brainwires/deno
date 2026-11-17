@@ -69,9 +69,14 @@ that is `open` where its cell says `kernel` is an escape.
 `--expect=enforce` runs host.ts under `--kernel-sandbox=enforce` in the
 configurations the kernel sandbox can hold (a name in `--allow-net` needs the
 broker, which isn't built yet): `files` (`--allow-read/write/ffi=<work>`, no
-network, no run), `net-all` (the same plus `--allow-net`) and `run` (plus
-`--allow-run=<work>/probe`, the child vector). `expect.ts` derives what each
-check may be from this machine's column (macOS, or Linux by Landlock ABI):
+network, no run), `net-all` (the same plus `--allow-net`), `run` (plus
+`--allow-run=<work>/probe`, the child vector) and `nested` (a run list that
+names the runtime too). Under `--expect=enforce` a fifth vector, `nested`, runs:
+the confined host starts `deno run -A host.ts ffi`, which inherits the host's
+grant (the policy handed down) and drives the FFI vector; its checks are
+expected as for a run list, and it must run where `nested` lets it start.
+`expect.ts` derives what each check may be from this machine's column (macOS, or
+Linux by Landlock ABI):
 
 | cell                                                   | macOS  | Linux ABI 1 | ABI 2-3 | ABI 4-5 | ABI 6+ |
 | ------------------------------------------------------ | ------ | ----------- | ------- | ------- | ------ |

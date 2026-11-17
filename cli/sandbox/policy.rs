@@ -988,6 +988,8 @@ pub struct Context {
   pub ttys: Vec<PathBuf>,
   /// A compiled program: no remote imports, no DENO_DIR caches.
   pub compiled: bool,
+  /// `--kernel-sandbox-exec=strict` (plan D3's opt-in).
+  pub exec_strict: bool,
 }
 
 impl Context {
@@ -1009,6 +1011,7 @@ impl Context {
       tty_parent: false,
       ttys: Vec::new(),
       compiled: false,
+      exec_strict: false,
     }
   }
 }
@@ -1226,6 +1229,10 @@ pub enum ExecScope {
   /// Any readable program may start; the protection is that children
   /// inherit the fs / net domain (plan D3).
   Unrestricted,
+  /// `--kernel-sandbox-exec=strict`: the whole process tree may start only
+  /// the `--allow-run` programs and the interpreters they need
+  /// ([`FsRules::exec_programs`]).
+  Listed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1236,6 +1243,10 @@ pub struct FsRules {
   pub deny_read: Vec<DenyRule>,
   pub deny_write: Vec<DenyRule>,
   pub exec: ExecScope,
+  /// The files [`ExecScope::Listed`] lets execute (canonical): the
+  /// programs, their `#!` interpreters and ELF loaders.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub exec_programs: Vec<PathBuf>,
   /// Where executable code may be loaded from (Seatbelt
   /// `file-map-executable`; on Linux the read scope bounds it).
   pub map_exec: PathScope,
@@ -1802,7 +1813,7 @@ impl<'a> Compiler<'a> {
     let write = self.carve(write, &write_denies, GapClass::Write);
     let deny_read = self.deny_read(&read, &write);
     let deny_write = self.deny_write(&write);
-    let exec = self.exec();
+    let (exec, exec_programs) = self.exec();
     let map_exec = self.map_exec(&read, &write);
     let (net, refuse_listen, vsock) = self.net();
     let unix = self.unix(&read, &write);
@@ -1913,6 +1924,7 @@ impl<'a> Compiler<'a> {
           deny_read,
           deny_write,
           exec,
+          exec_programs,
           map_exec,
         },
         net,
@@ -2202,19 +2214,21 @@ impl<'a> Compiler<'a> {
     denies
   }
 
-  fn exec(&mut self) -> ExecScope {
+  fn exec(&mut self) -> (ExecScope, Vec<PathBuf>) {
+    let strict = self.ctx().exec_strict;
     match &self.opts().allow_run {
-      None => ExecScope::None,
+      None => (ExecScope::None, Vec::new()),
+      Some(list) if list.is_empty() && strict => {
+        self.gap(
+          GapClass::Run,
+          "--kernel-sandbox-exec=strict --allow-run",
+          "a strict exec scope needs the programs listed (--allow-run=<programs>); with an unscoped --allow-run any readable program can start",
+          GapResolution::FailOpen,
+          Some(ExactWith::Never),
+        );
+        (ExecScope::Unrestricted, Vec::new())
+      }
       Some(list) => {
-        if !list.is_empty() {
-          self.gap(
-            GapClass::Run,
-            format!("--allow-run={}", list.join(",")),
-            "the kernel lets native code and children start any readable program; the protection is that every child inherits the file and network rules",
-            GapResolution::Documented,
-            None,
-          );
-        }
         if let Some(deny) = &self.opts().deny_run {
           self.gap(
             GapClass::Run,
@@ -2224,9 +2238,58 @@ impl<'a> Compiler<'a> {
             None,
           );
         }
-        ExecScope::Unrestricted
+        if list.is_empty() {
+          return (ExecScope::Unrestricted, Vec::new());
+        }
+        if strict {
+          let programs = self.exec_closure(list);
+          self.gap(
+            GapClass::Run,
+            format!(
+              "--kernel-sandbox-exec=strict --allow-run={}",
+              list.join(",")
+            ),
+            "the whole process tree may start only these programs and their interpreters; a program that starts others (git runs ssh, a compiler its assembler) needs them listed too",
+            GapResolution::Documented,
+            None,
+          );
+          return (ExecScope::Listed, programs);
+        }
+        self.gap(
+          GapClass::Run,
+          format!("--allow-run={}", list.join(",")),
+          "the kernel lets native code and children start any readable program; the protection is that every child inherits the file and network rules (--kernel-sandbox-exec=strict holds the tree to the list)",
+          GapResolution::Documented,
+          None,
+        );
+        (ExecScope::Unrestricted, Vec::new())
       }
     }
+  }
+
+  /// The files the run list needs to execute: each entry found as Deno
+  /// finds it (a path against the working directory, a name on `PATH`),
+  /// then its interpreters ([`deno_sandbox::exec::program_closure`]).
+  #[cfg(unix)]
+  fn exec_closure(&self, list: &[String]) -> Vec<PathBuf> {
+    let path = std::env::var_os("PATH");
+    let programs: Vec<PathBuf> = list
+      .iter()
+      .filter_map(|entry| {
+        if entry.contains('/') {
+          return Some(self.ctx().cwd.join(entry));
+        }
+        std::env::split_paths(path.as_ref()?)
+          .map(|dir| dir.join(entry))
+          .find(|p| p.is_file())
+      })
+      .collect();
+    deno_sandbox::exec::program_closure(&programs, path.as_deref())
+  }
+
+  #[cfg(not(unix))]
+  fn exec_closure(&self, _list: &[String]) -> Vec<PathBuf> {
+    Vec::new()
   }
 
   fn map_exec(&mut self, read: &PathScope, write: &PathScope) -> PathScope {

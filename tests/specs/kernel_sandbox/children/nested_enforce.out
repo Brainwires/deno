@@ -1,0 +1,4 @@
+native read inside/sub/b.txt: ok
+native read inside/a.txt: refused
+native read outside.txt: refused
+nested exit: 0

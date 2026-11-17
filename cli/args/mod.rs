@@ -1460,6 +1460,14 @@ impl CliOptions {
         &self.initial_cwd,
       );
     }
+    // denext: inside a kernel sandbox a confined ancestor handed down (and
+    // the kernel confirmed), every deno intersects its permissions with the
+    // grants it runs under (DENEXT.md item 449)
+    crate::sandbox::inherit::clamp(
+      &mut permissions_options,
+      crate::sandbox::inherit::inherited_layers(),
+      &self.initial_cwd,
+    );
     Ok(permissions_options)
   }
 
@@ -1488,6 +1496,11 @@ impl CliOptions {
         &self.initial_cwd,
       );
     }
+    crate::sandbox::inherit::clamp(
+      &mut options,
+      crate::sandbox::inherit::inherited_layers(),
+      &self.initial_cwd,
+    );
     Ok(Some(options))
   }
 

@@ -6,11 +6,14 @@
 // every attempt is native code (FFI, a Node-API addon, an addon inside an npm
 // package, or an --allow-run child), which is what the kernel layer is for.
 //
-//   deno run <grant> host.ts <vector>
+//   deno run <grant> host.ts <vector> [<label>]
 
 import { createRequire } from "node:module";
 
 const vector = Deno.args[0];
+// the vector the rows and the probe's files are named for (a nested deno
+// runs the FFI vector as "nested")
+const label = Deno.args[1] ?? vector;
 const work = new URL(".", import.meta.url).pathname;
 const { cfg, probes } = JSON.parse(
   Deno.readTextFileSync(`${work}cfg.json`),
@@ -18,7 +21,7 @@ const { cfg, probes } = JSON.parse(
   cfg: string;
   probes: string[];
 };
-const conf = `${cfg};vec=${vector}`;
+const conf = `${cfg};vec=${label}`;
 
 let run: (id: string) => string;
 try {
@@ -70,6 +73,34 @@ try {
       };
       break;
     }
+    case "nested": {
+      // a deno this one starts with -A (the run grant names the runtime):
+      // it inherits this run's grant and drives the FFI vector
+      const o = new Deno.Command(Deno.execPath(), {
+        args: [
+          "run",
+          "--quiet",
+          "--no-prompt",
+          "-A",
+          "--node-modules-dir=manual",
+          `${work}host.ts`,
+          "ffi",
+          "nested",
+        ],
+        stdout: "piped",
+        stderr: "piped",
+      }).outputSync();
+      const lines = new Map<string, string>();
+      for (const line of new TextDecoder().decode(o.stdout).split("\n")) {
+        if (!line.startsWith("{")) continue;
+        const r = JSON.parse(line) as { id: string; out: string };
+        lines.set(r.id, r.out);
+      }
+      const err = new TextDecoder().decode(o.stderr).trim().split("\n")
+        .slice(-1)[0];
+      run = (id) => lines.get(id) ?? `n/a nested deno exited ${o.code}: ${err}`;
+      break;
+    }
     default:
       throw new Error(`unknown vector ${vector}`);
   }
@@ -86,5 +117,5 @@ for (const id of probes) {
   } catch (e) {
     out = `n/a vector failed: ${(e as Error).message}`;
   }
-  console.log(JSON.stringify({ vector, id, out }));
+  console.log(JSON.stringify({ vector: label, id, out }));
 }

@@ -42,7 +42,11 @@ const dir = Deno.realPathSync(
 const work = `${dir}/work`;
 const out = `${dir}/outside`;
 const vectors =
-  (args.vectors ? args.vectors.split(",") : [...VECTORS]) as Vector[];
+  (args.vectors
+    ? args.vectors.split(",")
+    : expect === "enforce"
+    ? [...VECTORS, "nested"]
+    : [...VECTORS]) as Vector[];
 const isMac = Deno.build.os === "darwin";
 const cc = Deno.env.get("CC") ?? "cc";
 if (!["today", "enforce"].includes(expect)) {
@@ -218,6 +222,8 @@ const configs: Record<string, string[]> = expect === "enforce"
     files: [...files],
     "net-all": [...files, "--allow-net"],
     run: [...files, `--allow-run=${work}/probe`],
+    // the run list names the runtime too: the nested vector's deno
+    nested: [...files, `--allow-run=${work}/probe,${Deno.execPath()}`],
   }
   : {
     today: [
@@ -312,6 +318,15 @@ for (const r of rows) {
   );
 }
 const bad = rows.filter((r) => !expected(r).has(r.state));
+// the nested vector must have run where its deno may start (all n/a there
+// would hide a nested deno that failed to start)
+const nestedRows = rows.filter((r) =>
+  r.config === "nested" && r.vector === "nested"
+);
+if (nestedRows.length && nestedRows.every((r) => r.state === "n/a")) {
+  bad.push(...nestedRows.slice(0, 1).map((r) => ({ ...r, state: "crash" })));
+  console.log(`corpus: the nested deno never ran: ${nestedRows[0].detail}`);
+}
 const summary = Object.entries(counts).sort().map(([k, v]) => `${v} ${k}`).join(
   ", ",
 );

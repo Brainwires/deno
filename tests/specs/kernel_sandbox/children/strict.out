@@ -1,0 +1,2 @@
+sh builtin: exit 0
+[WILDCARD]sh starts cat: refused

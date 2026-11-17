@@ -175,6 +175,9 @@ pub struct FsRule {
   pub path: PathBuf,
   pub read: bool,
   pub write: bool,
+  /// The file may be executed (a strict exec scope's programs).
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub exec: bool,
 }
 
 /// TCP ports for one direction.
@@ -314,6 +317,10 @@ pub struct MacosPlan {
   /// Where executable code may be mapped from (dyld, dlopen).
   pub map_exec: SbScope,
   pub exec: bool,
+  /// With `exec`: only these files may be executed (canonical; a strict
+  /// exec scope). Empty: any.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub exec_only: Vec<String>,
   pub net: NetPlan,
   pub unix: SbUnix,
   /// sysctl names refused (a trailing `*`: a prefix).

@@ -38,12 +38,14 @@ use std::sync::OnceLock;
 use deno_core::ModuleSpecifier;
 use deno_core::anyhow::bail;
 use deno_core::error::AnyError;
+use deno_runtime::deno_permissions::PermissionsOptions;
 use deno_runtime::deno_permissions::kernel_sandbox_state;
 use deno_sandbox::plan::EnforcePlan;
 use deno_sandbox::plan::NetPlan;
 use deno_sandbox::plan::PLAN_FORMAT;
 use deno_sandbox::plan::Ports;
 
+use super::inherit;
 use super::policy::CompiledPolicy;
 use super::policy::Context;
 use super::policy::DenyEnforcement;
@@ -482,7 +484,8 @@ mod linux {
         }
       }
     }
-    handled.exec = p.fs.exec == ExecScope::None;
+    // no run grant: nothing may execute; a strict scope: the listed files
+    handled.exec = p.fs.exec != ExecScope::Unrestricted;
     let net = net_plan(&p.net)?;
     let probe = (handled.read && !rules.contains_key(Path::new("/")))
       .then(|| PathBuf::from("/"));
@@ -490,7 +493,18 @@ mod linux {
       handled,
       rules: rules
         .into_iter()
-        .map(|(path, (read, write))| FsRule { path, read, write })
+        .map(|(path, (read, write))| FsRule {
+          path,
+          read,
+          write,
+          exec: false,
+        })
+        .chain(p.fs.exec_programs.iter().map(|path| FsRule {
+          path: path.clone(),
+          read: false,
+          write: false,
+          exec: true,
+        }))
         .collect(),
       expand: roots,
       net,
@@ -747,7 +761,16 @@ mod macos {
         reallow_read,
         reallow_write,
         map_exec,
-        exec: p.fs.exec == ExecScope::Unrestricted,
+        exec: p.fs.exec != ExecScope::None,
+        exec_only: if p.fs.exec == ExecScope::Listed {
+          p.fs
+            .exec_programs
+            .iter()
+            .filter_map(|p| p.to_str().map(str::to_string))
+            .collect()
+        } else {
+          Vec::new()
+        },
         net,
         unix,
         denied_sysctls: p.sys.denied_sysctls.clone(),
@@ -800,6 +823,49 @@ mod macos {
 
 /// The plan waiting for [`apply_pending`].
 static PENDING: OnceLock<EnforcePlan> = OnceLock::new();
+
+/// What the processes this run starts inherit once it is confined: the
+/// layers it inherited and its own ([`inherit`]); handed to the re-executed
+/// image in a carrier descriptor with the plan.
+static PENDING_CARRIED: OnceLock<inherit::Carried> = OnceLock::new();
+
+/// The carried layers for a run with grant `options` and kernel plan
+/// `plan`: every layer this process inherited, then its own.
+fn carried_for(
+  options: &PermissionsOptions,
+  cwd: &Path,
+  plan: &EnforcePlan,
+) -> Result<inherit::Carried, AnyError> {
+  let mut layers = inherit::inherited_layers().to_vec();
+  layers.push(inherit::layer_for(options, cwd, plan.probe.clone()));
+  if layers.len() > inherit::MAX_LAYERS {
+    bail!(
+      "--kernel-sandbox=enforce refuses to start: {} kernel sandboxes are already nested here",
+      layers.len() - 1
+    );
+  }
+  Ok(inherit::Carried {
+    format: inherit::CARRIER_FORMAT,
+    layers,
+  })
+}
+
+/// The image after the re-exec: the carrier it inherited must end with this
+/// run's own layer (the image before it made it from the same grant), so
+/// the processes it starts are told exactly the grant it runs under.
+fn check_handed_down(
+  options: &PermissionsOptions,
+  cwd: &Path,
+  plan: &EnforcePlan,
+) -> Result<(), AnyError> {
+  let own = inherit::layer_for(options, cwd, plan.probe.clone());
+  if inherit::inherited_layers().last() != Some(&own) {
+    bail!(
+      "--kernel-sandbox=enforce refuses to start: the policy handed down to child processes isn't the one this run compiles"
+    );
+  }
+  Ok(())
+}
 
 /// The module files of the plan this process started under: each must be a
 /// local module of this run's own graph ([`apply_pending`] checks once the
@@ -858,6 +924,9 @@ pub fn startup() {
     {
       mark_confined();
     }
+    // the policy handed down by a confined ancestor (or, in the image after
+    // the re-exec, by the image before it), measured now the plan applies
+    inherit::load_at_startup();
   }
   #[cfg(target_os = "macos")]
   {
@@ -876,6 +945,7 @@ pub fn startup() {
       }
       Err(err) => refuse_at_startup(&err),
     }
+    inherit::load_at_startup();
   }
 }
 
@@ -997,6 +1067,7 @@ fn start_enforcing() {
 pub fn prepare(
   compiled: &CompiledPolicy,
   ctx: &Context,
+  options: &PermissionsOptions,
 ) -> Result<(), AnyError> {
   let (plan, gaps) = plan_for(compiled, ctx);
   let fatal: Vec<String> = gaps
@@ -1031,6 +1102,7 @@ pub fn prepare(
       if applied.without_measured_lists() == plan.without_measured_lists()
         && deno_sandbox::enforce_linux::status_confined()
       {
+        check_handed_down(options, &ctx.cwd, &plan)?;
         let _ = VERIFY_MODULES.set(applied.module_files.clone());
         start_enforcing();
         return Ok(());
@@ -1050,6 +1122,7 @@ pub fn prepare(
       if inherited.without_measured_lists() == plan.without_measured_lists()
         && measured
       {
+        check_handed_down(options, &ctx.cwd, &plan)?;
         let _ = VERIFY_MODULES.set(inherited.module_files.clone());
         start_enforcing();
         return Ok(());
@@ -1064,7 +1137,8 @@ pub fn prepare(
       );
     }
   }
-  if PENDING.set(plan).is_err() {
+  let carried = carried_for(options, &ctx.cwd, &plan)?;
+  if PENDING.set(plan).is_err() || PENDING_CARRIED.set(carried).is_err() {
     bail!("--kernel-sandbox=enforce: the plan was prepared twice");
   }
   Ok(())
@@ -1111,16 +1185,35 @@ pub fn is_pending() -> bool {
 fn reexec_env(
   plan: &EnforcePlan,
   deno_dir: Option<&Path>,
+  carrier_fd: i32,
 ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+  use deno_sandbox::inherit::POLICY_ENV_VAR;
   #[allow(clippy::disallowed_methods, reason = "the process's own environment")]
   let mut env: Vec<_> = std::env::vars_os()
     .filter(|(k, _)| k.to_str().is_some_and(|k| plan.keeps_env(k)))
+    .filter(|(k, _)| k != POLICY_ENV_VAR)
     .collect();
   if let Some(dir) = deno_dir {
     env.retain(|(k, _)| k != "DENO_DIR");
     env.push(("DENO_DIR".into(), dir.as_os_str().to_os_string()));
   }
+  // the carrier of the layers this run's children inherit (it replaces one
+  // this process inherited: the new one holds those layers too)
+  env.push((POLICY_ENV_VAR.into(), carrier_fd.to_string().into()));
   env
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// The carrier the re-executed image and its children inherit.
+fn seal_carrier() -> Result<std::os::fd::OwnedFd, AnyError> {
+  let Some(carried) = PENDING_CARRIED.get() else {
+    bail!("--kernel-sandbox=enforce: no policy to hand down was prepared");
+  };
+  deno_sandbox::inherit::seal(&carried.to_bytes()).map_err(|err| {
+    deno_core::anyhow::anyhow!(
+      "--kernel-sandbox=enforce: the policy for child processes can't be handed down: {err}"
+    )
+  })
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1179,10 +1272,20 @@ pub async fn apply_pending(
   check_module_files(&plan.module_files)?;
   let plan = &plan;
   let deno_dir = factory.deno_dir().ok().map(|d| d.root.clone());
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  let carrier = seal_carrier()?;
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  let carrier_fd = {
+    use std::os::fd::AsRawFd;
+    carrier.as_raw_fd()
+  };
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  let keep = |fd: i32| fd == carrier_fd || keep_fd(fd);
   #[cfg(target_os = "linux")]
   {
-    let env = reexec_env(plan, deno_dir.as_deref());
-    let err = deno_sandbox::enforce_linux::reexec(plan, env, keep_fd);
+    let env = reexec_env(plan, deno_dir.as_deref(), carrier_fd);
+    let err = deno_sandbox::enforce_linux::reexec(plan, env, keep);
+    drop(carrier);
     bail!(
       "--kernel-sandbox=enforce: re-executing under the sandbox failed: {err}"
     );
@@ -1200,9 +1303,10 @@ pub async fn apply_pending(
       .map_err(|err| {
         deno_core::anyhow::anyhow!("--kernel-sandbox=enforce: {err}")
       })?;
-    let env = reexec_env(plan, deno_dir.as_deref());
+    let env = reexec_env(plan, deno_dir.as_deref(), carrier_fd);
     if !uses_sandbox_exec_fallback() {
-      let err = deno_sandbox::macos::reexec_self(plan, &exe, env, keep_fd);
+      let err = deno_sandbox::macos::reexec_self(plan, &exe, env, keep);
+      drop(carrier);
       bail!(
         "--kernel-sandbox=enforce: re-executing under the sandbox failed: {err}"
       );
@@ -1213,9 +1317,9 @@ pub async fn apply_pending(
       bail!("--kernel-sandbox=enforce: the runtime's path is not UTF-8");
     };
     let profile = deno_sandbox::seatbelt::with_self_exec(&profile, exe);
-    let err = deno_sandbox::macos::reexec_under_sandbox_exec(
-      &profile, plan, env, keep_fd,
-    );
+    let err =
+      deno_sandbox::macos::reexec_under_sandbox_exec(&profile, plan, env, keep);
+    drop(carrier);
     bail!(
       "--kernel-sandbox=enforce: re-executing under sandbox-exec failed: {err}"
     );
@@ -1306,7 +1410,8 @@ fn mode_allows(path: &str) -> bool {
     .is_some_and(|parent| check(parent, libc::W_OK | libc::X_OK))
 }
 
-/// The note on a `PermissionDenied` error while the kernel sandbox enforces:
+/// The note on a `PermissionDenied` error while a kernel sandbox holds the
+/// process (its own, or one it inherited and accepted):
 /// Linux: `EPERM` (seccomp's answer; a file mode gives `EACCES`), or
 /// `EACCES` where the file's mode allows the access (`access(2)`, which
 /// Landlock doesn't mediate) or the operation names no path (a socket);
@@ -1315,7 +1420,7 @@ pub fn permission_denied_note(
   errno: Option<i32>,
   message: &str,
 ) -> Option<&'static str> {
-  if !kernel_sandbox_state::is_enforcing() {
+  if !kernel_sandbox_state::is_confined() {
     return None;
   }
   let errno = errno?;

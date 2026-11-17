@@ -17,6 +17,9 @@
 //   --allow-env grants: held.
 // - proc.signal without --allow-run: Landlock's scope (ABI 6) or, before
 //   it, seccomp lets signals reach this process only: held.
+// - nested (the run list names the runtime too): a `deno run -A` the host
+//   starts drives the FFI vector; it inherits the grant, so every check is
+//   expected as for the run list.
 
 import { CELLS } from "./probes.ts";
 
@@ -59,7 +62,10 @@ export function expectEnforce(
 ): Set<string> {
   const target = CELLS[cell]?.target[column];
   const net = config === "net-all";
-  const run = config === "run";
+  // `nested`: a run list that names the runtime as well
+  const run = config === "run" || config === "nested";
+  // the nested deno starts only where the run list names the runtime
+  if (vector === "nested" && config !== "nested") return new Set(["n/a"]);
   if (IP_CELLS.has(cell)) return net ? GRANTED : HELD;
   if (NON_IP_NET_CELLS.has(cell)) return HELD;
   if (cell === "net.netlink-route") return net ? EITHER : HELD;

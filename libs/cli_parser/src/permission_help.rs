@@ -66,6 +66,8 @@ Docs: https://docs.deno.com/go/permissions
                                             --ignore-read  |  --ignore-read=\"/etc,/var/log.txt\"
   --kernel-sandbox=<MODE>                   (Preview) Kernel sandbox mode: off, warn, auto (default), enforce or broker. Holds native code (FFI, Node-API addons) and subprocesses to the granted permissions with the OS (Landlock and seccomp on Linux, Seatbelt on macOS) once the permission set is fixed. Not yet enforced by this runtime: enforce and broker refuse to start.
                                             --kernel-sandbox=warn  |  --kernel-sandbox=off
+  --kernel-sandbox-exec=strict              (Preview) Under the kernel sandbox, the whole process tree may start only the --allow-run programs (and the interpreters they need) instead of any readable program. A program that starts others (git runs ssh) needs them listed too.
+                                            --kernel-sandbox-exec=strict --allow-run=git,ssh
   --kernel-sandbox-report                   (Preview) Print the kernel sandbox mode, the policy it would apply and the rules the OS can't hold, then run.
   DENO_KERNEL_SANDBOX                       Environmental variable to lower the kernel sandbox mode without editing the command (off or warn only; ignored by compiled programs and when set by --env-file).
                                             DENO_KERNEL_SANDBOX=off deno run main.ts

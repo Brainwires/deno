@@ -1,0 +1,5 @@
+inside: ok
+outside: NotCapable
+cleared env, inside: ok
+cleared env, outside: NotCapable
+report: true

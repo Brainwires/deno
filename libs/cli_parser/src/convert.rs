@@ -621,6 +621,9 @@ fn permission_args_parse(
   if result.get_bool("kernel-sandbox-report") {
     flags.permissions.kernel_sandbox_report = true;
   }
+  if result.get_one("kernel-sandbox-exec").is_some() {
+    flags.permissions.kernel_sandbox_exec_strict = true;
+  }
   perm_flag!("allow-sys", flags.permissions.allow_sys);
   perm_flag!("deny-sys", flags.permissions.deny_sys);
   path_perm_flag!("allow-ffi", flags.permissions.allow_ffi);
@@ -1803,10 +1806,13 @@ fn eval_denies_parse(
   let mut parsed = Flags::default();
   permission_args_parse(result, &mut parsed)?;
   let parsed = parsed.permissions;
-  if parsed.kernel_sandbox.is_some() || parsed.kernel_sandbox_report {
+  if parsed.kernel_sandbox.is_some()
+    || parsed.kernel_sandbox_report
+    || parsed.kernel_sandbox_exec_strict
+  {
     return Err(CliError::new(
       CliErrorKind::InvalidValue,
-      "deno eval doesn't take --kernel-sandbox or --kernel-sandbox-report: it runs with every permission. Save the code to a file and use deno run with the grants it needs",
+      "deno eval doesn't take --kernel-sandbox, --kernel-sandbox-exec or --kernel-sandbox-report: it runs with every permission. Save the code to a file and use deno run with the grants it needs",
     ));
   }
   let p = &mut flags.permissions;
@@ -2673,6 +2679,7 @@ fn install_parse(
       "deny-run",
       "clean-run-env",
       "kernel-sandbox",
+      "kernel-sandbox-exec",
       "kernel-sandbox-report",
       "allow-sys",
       "deny-sys",

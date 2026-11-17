@@ -24,9 +24,17 @@
 //!   Landlock and one seccomp program, the plan handed over in a sealed
 //!   memfd); on macOS [`macos`] re-executes too and the new image applies
 //!   its Seatbelt profile first thing (`sandbox_init`).
+//! - [`exec`]: the files a program list needs to execute (a strict exec
+//!   scope: the programs, their `#!` interpreters, the ELF loader).
+//! - [`inherit`]: the carrier that hands a confined process's policy to the
+//!   `deno` processes it starts (Linux and macOS).
 
 #[cfg(target_os = "linux")]
 pub mod enforce_linux;
+#[cfg(unix)]
+pub mod exec;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod inherit;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]

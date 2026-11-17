@@ -26,7 +26,9 @@
 use std::ffi::CString;
 use std::ffi::OsString;
 use std::io;
+use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
+use std::os::fd::BorrowedFd;
 use std::os::fd::FromRawFd;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
@@ -473,6 +475,9 @@ pub fn build_ruleset(
     if rule.write {
       rights |= write_rights(abi);
     }
+    if rule.exec {
+      rights |= ACCESS_FS_EXECUTE;
+    }
     // a rule may only name handled rights
     add_path_rule(&ruleset, &rule.path, rights & fs)?;
   }
@@ -877,10 +882,11 @@ pub fn seccomp_available() -> Result<(), String> {
 }
 
 /// The number of threads this process has.
-fn thread_count() -> usize {
-  std::fs::read_dir("/proc/self/task")
-    .map(|d| d.count())
-    .unwrap_or(usize::MAX)
+/// The threads of this process, from `/proc/self/task`; `None` when it
+/// can't be listed (an outer kernel sandbox's `/proc/self` rule names its
+/// own process: Landlock resolves the link when the rule is made).
+fn thread_count() -> Option<usize> {
+  std::fs::read_dir("/proc/self/task").ok().map(|d| d.count())
 }
 
 /// The plan applied to this process at startup, if any.
@@ -902,11 +908,23 @@ pub fn apply_self(plan: &EnforcePlan) -> Result<(), String> {
   };
   // the expanded entries must belong to the plan's own expansions
   plan.check_expanded()?;
-  let threads = thread_count();
-  if threads != 1 {
-    return Err(format!(
-      "the process has {threads} threads; the sandbox must apply while it has one"
-    ));
+  match thread_count() {
+    Some(1) => {}
+    Some(threads) => {
+      return Err(format!(
+        "the process has {threads} threads; the sandbox must apply while it has one"
+      ));
+    }
+    // inside an outer kernel sandbox that hides /proc/self (a nested
+    // enforce): the count can't be measured; the outer domain holds every
+    // thread whatever this layer adds, and nothing starts a thread before
+    // this point
+    None if status_confined() => {}
+    None => {
+      return Err(
+        "the process's threads can't be counted (/proc/self/task)".to_string(),
+      );
+    }
   }
   let (fs, net, scoped) = (
     linux.handled.read || linux.handled.write || linux.handled.exec,
@@ -961,21 +979,18 @@ pub fn apply_self(plan: &EnforcePlan) -> Result<(), String> {
   Ok(())
 }
 
-/// Whether `/proc/self/status` shows `no_new_privs` and a seccomp filter:
+/// Whether the kernel reports `no_new_privs` and a seccomp filter for this
+/// process (the `NoNewPrivs` / `Seccomp` fields of `/proc/<pid>/status`):
 /// the measured half of "this process is confined" (the other half is the
-/// plan [`apply_self`] recorded, and its probe).
+/// plan [`apply_self`] recorded, and its probe). Asked with `prctl`, which
+/// needs no file: a child of a confined process can't read its own
+/// `/proc/self` (the parent's rule names the parent's entry).
 pub fn status_confined() -> bool {
-  let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
-    return false;
-  };
-  let field = |name: &str| {
-    status
-      .lines()
-      .find_map(|l| l.strip_prefix(name))
-      .map(|v| v.trim().to_string())
-  };
-  field("NoNewPrivs:").as_deref() == Some("1")
-    && field("Seccomp:").as_deref() == Some("2")
+  // SAFETY: plain queries with no pointers
+  unsafe {
+    libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) == 1
+      && libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) == 2
+  }
 }
 
 const REQUIRED_SEALS: libc::c_int = libc::F_SEAL_SEAL
@@ -987,7 +1002,13 @@ const REQUIRED_SEALS: libc::c_int = libc::F_SEAL_SEAL
 /// more seals). The descriptor is not close-on-exec: it is the one the new
 /// image inherits.
 pub fn seal_plan(bytes: &[u8]) -> io::Result<OwnedFd> {
-  let name = c"deno-kernel-plan";
+  seal_bytes(c"deno-kernel-plan", bytes)
+}
+
+/// Writes `bytes` to a new memfd named `name` and seals it, as
+/// [`seal_plan`] does (also the carrier of the inherited policy,
+/// `crate::inherit`). Not close-on-exec.
+pub fn seal_bytes(name: &std::ffi::CStr, bytes: &[u8]) -> io::Result<OwnedFd> {
   // SAFETY: a valid name; MFD_ALLOW_SEALING, no MFD_CLOEXEC on purpose
   let fd =
     unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_ALLOW_SEALING) };
@@ -1027,6 +1048,14 @@ pub fn seal_plan(bytes: &[u8]) -> io::Result<OwnedFd> {
 /// Reads a plan from an inherited sealed memfd and closes it. Anything
 /// short of a sealed memfd of a sane size is an error.
 pub fn read_sealed(fd: OwnedFd) -> Result<Vec<u8>, String> {
+  let bytes = read_sealed_fd(fd.as_fd())?;
+  drop(fd);
+  Ok(bytes)
+}
+
+/// Reads a sealed memfd without closing it ([`read_sealed`]'s checks: a
+/// memfd carrying every seal, of a sane size).
+pub fn read_sealed_fd(fd: BorrowedFd<'_>) -> Result<Vec<u8>, String> {
   // SAFETY: a valid descriptor
   let seals = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GET_SEALS) };
   if seals < 0 {
@@ -1072,7 +1101,6 @@ pub fn read_sealed(fd: OwnedFd) -> Result<Vec<u8>, String> {
     }
     read += n as usize;
   }
-  drop(fd);
   Ok(buf)
 }
 
@@ -1211,6 +1239,7 @@ mod tests {
         path: "/tmp".into(),
         read: true,
         write: true,
+        exec: false,
       }],
       expand: Vec::new(),
       net,

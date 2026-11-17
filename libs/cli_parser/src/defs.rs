@@ -25,6 +25,9 @@ const SUPPORTED_OS: &[&str] = &[
 const KERNEL_SANDBOX_MODES: &[&str] =
   &["off", "warn", "auto", "enforce", "broker"];
 
+/// Values of `--kernel-sandbox-exec` (denext, DENEXT.md item 449).
+const KERNEL_SANDBOX_EXEC: &[&str] = &["strict"];
+
 // ============================================================
 // Shared arg groups
 // ============================================================
@@ -154,6 +157,15 @@ pub static PERMISSION_ARGS: &[ArgDef] = &[
     .num_args(NumArgs::Exact(1))
     .require_equals()
     .value_parser(ValueParser::Choices(KERNEL_SANDBOX_MODES))
+.hidden(),
+  // denext: the kernel holds the whole process tree to the --allow-run
+  // programs (DENEXT.md item 449).
+  ArgDef::new("kernel-sandbox-exec")
+    .long("kernel-sandbox-exec")
+    .action(ArgAction::Set)
+    .num_args(NumArgs::Exact(1))
+    .require_equals()
+    .value_parser(ValueParser::Choices(KERNEL_SANDBOX_EXEC))
 .hidden(),
   // denext: print the kernel sandbox policy at startup.
   ArgDef::new("kernel-sandbox-report")

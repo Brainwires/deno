@@ -895,6 +895,60 @@ fn unix_rows() {
 }
 
 /// §1.3 run and §1.4 ffi.
+// denext (DENEXT.md item 449): --kernel-sandbox-exec=strict holds the tree
+// to the run list's programs and their interpreters (plan D3's opt-in)
+#[cfg(unix)]
+#[test]
+#[allow(
+  clippy::disallowed_methods,
+  reason = "the real /bin/sh the closure resolves"
+)]
+fn strict_exec_lists_the_programs() {
+  let options = PermissionsOptions {
+    allow_run: s(&["sh"]),
+    ..Default::default()
+  };
+  let mut strict = ctx(linux(Some(6)), KernelSandboxMode::Enforce);
+  strict.exec_strict = true;
+  let c = compile_in(&options, &strict);
+  assert_eq!(c.policy.fs.exec, ExecScope::Listed);
+  assert!(!c.policy.syscalls.refuse_exec);
+  let sh = std::fs::canonicalize("/bin/sh").unwrap();
+  assert!(c.policy.fs.exec_programs.contains(&sh), "{c:?}");
+  let g = gap(&c, GapClass::Run);
+  assert_eq!(g.resolution, GapResolution::Documented);
+  assert!(g.detail.contains("only these programs"), "{}", g.detail);
+  assert!(c.fatal_gaps().next().is_none(), "{:?}", c.gaps);
+  // not strict: unrestricted, the list's gap names the opt-in
+  let c =
+    compile_in(&options, &ctx(linux(Some(6)), KernelSandboxMode::Enforce));
+  assert_eq!(c.policy.fs.exec, ExecScope::Unrestricted);
+  assert!(c.policy.fs.exec_programs.is_empty());
+  assert!(
+    gap(&c, GapClass::Run)
+      .detail
+      .contains("--kernel-sandbox-exec=strict")
+  );
+  // strict with an unscoped --allow-run can't list anything: enforce
+  // refuses
+  let unscoped = PermissionsOptions {
+    allow_run: all(),
+    ..Default::default()
+  };
+  let c = compile_in(&unscoped, &strict);
+  assert_eq!(c.policy.fs.exec, ExecScope::Unrestricted);
+  assert!(
+    c.fatal_gaps()
+      .any(|g| g.rule.contains("--kernel-sandbox-exec=strict")),
+    "{:?}",
+    c.gaps
+  );
+  // strict without a run grant: nothing may start, as without strict
+  let c = compile_in(&PermissionsOptions::default(), &strict);
+  assert_eq!(c.policy.fs.exec, ExecScope::None);
+  assert!(c.policy.syscalls.refuse_exec);
+}
+
 #[test]
 fn run_and_ffi_rows() {
   run_rows(vec![
@@ -1440,6 +1494,7 @@ fn policy_hash_is_stable() {
       deny_read: vec![],
       deny_write: vec![],
       exec: ExecScope::None,
+      exec_programs: vec![],
       map_exec: PathScope::Paths { paths: vec![] },
     },
     net: NetPolicy::Denied,

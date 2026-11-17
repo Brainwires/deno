@@ -1,1 +1,1 @@
-[WILDCARD]deno eval doesn't take --kernel-sandbox or --kernel-sandbox-report[WILDCARD]
+[WILDCARD]deno eval doesn't take --kernel-sandbox, --kernel-sandbox-exec or --kernel-sandbox-report[WILDCARD]

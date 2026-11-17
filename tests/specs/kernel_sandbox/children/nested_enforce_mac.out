@@ -1,0 +1,2 @@
+[WILDCARD]error: --kernel-sandbox=enforce refuses to start: this process already runs inside another Seatbelt sandbox[WILDCARD]
+nested exit: 1

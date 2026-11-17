@@ -3124,8 +3124,36 @@ fn kernel_sandbox_flags() {
   assert!(
     flags_from_vec(svec!["deno", "install", "--kernel-sandbox=warn"]).is_err()
   );
+  // --kernel-sandbox-exec takes `strict` only, and isn't a grant
+  let flags = flags_from_vec(svec![
+    "deno",
+    "run",
+    "--kernel-sandbox-exec=strict",
+    "--allow-run=git",
+    "script.ts"
+  ])
+  .unwrap();
+  assert!(flags.permissions.kernel_sandbox_exec_strict);
+  let flags = flags_from_vec(svec!["deno", "run", "script.ts"]).unwrap();
+  assert!(!flags.permissions.kernel_sandbox_exec_strict);
+  let flags = flags_from_vec(svec![
+    "deno",
+    "run",
+    "--kernel-sandbox-exec=strict",
+    "x.ts"
+  ])
+  .unwrap();
+  assert!(!flags.permissions.has_permission());
+  assert!(
+    flags_from_vec(svec!["deno", "run", "--kernel-sandbox-exec=loose", "x.ts"])
+      .is_err()
+  );
   // never for eval, which runs with every permission
-  for arg in ["--kernel-sandbox=enforce", "--kernel-sandbox-report"] {
+  for arg in [
+    "--kernel-sandbox=enforce",
+    "--kernel-sandbox-report",
+    "--kernel-sandbox-exec=strict",
+  ] {
     let err = flags_from_vec(svec!["deno", "eval", arg, "1"]).unwrap_err();
     assert!(err.to_string().contains("deno eval doesn't take"), "{err}");
   }

@@ -753,11 +753,16 @@ impl TryFrom<ExitStatus> for ChildStatus {
     let signal: Option<i32> = None;
 
     let status = if let Some(signal) = signal {
+      #[cfg(unix)]
+      let name = deno_signals::signal_int_to_str(signal)?;
+      // denext: a signal a kernel sandbox refusal can end a child with
+      #[cfg(unix)]
+      deno_permissions::kernel_sandbox_state::note_child_signaled(name);
       ChildStatus {
         success: false,
         code: 128 + signal,
         #[cfg(unix)]
-        signal: Some(deno_signals::signal_int_to_str(signal)?.to_string()),
+        signal: Some(name.to_string()),
         #[cfg(not(unix))]
         signal: None,
       }
@@ -1889,27 +1894,31 @@ impl std::cmp::PartialEq for EnvVarKey {
   }
 }
 
-/// denext: a variable every child process gets with the value pinned here
+/// denext: variables every child process gets with the values pinned here
 /// at startup, whatever environment the caller passes (`clearEnv`, an `env`
-/// without it, or another value for it). Inside a jailed npm lifecycle
+/// without them, or other values for them). Inside a jailed npm lifecycle
 /// script the CLI pins the jail's own variable, so a `deno` the script starts
 /// through `node:child_process` or `Deno.Command` clamps itself to the jail
-/// even when the caller dropped or rewrote the variable.
-static PINNED_CHILD_ENV: std::sync::OnceLock<(OsString, OsString)> =
-  std::sync::OnceLock::new();
+/// even when the caller dropped or rewrote the variable; inside a kernel
+/// sandbox it pins the inherited policy's carrier the same way.
+static PINNED_CHILD_ENV: std::sync::Mutex<Vec<(OsString, OsString)>> =
+  std::sync::Mutex::new(Vec::new());
 
 /// Pins `key` = `value` into every child's environment (see
-/// [`PINNED_CHILD_ENV`]); only the first call takes effect.
+/// [`PINNED_CHILD_ENV`]); only the first call for a key takes effect.
 pub fn pin_child_env_var(key: OsString, value: OsString) {
-  let _ = PINNED_CHILD_ENV.set((key, value));
+  let mut pinned = PINNED_CHILD_ENV.lock().unwrap();
+  if !pinned.iter().any(|(k, _)| *k == key) {
+    pinned.push((key, value));
+  }
 }
 
-/// Sets the pinned variable, if any, over whatever `envs` holds.
+/// Sets the pinned variables over whatever `envs` holds.
 fn apply_pinned_child_env(
   envs: &mut HashMap<EnvVarKey, OsString>,
-  pinned: Option<&(OsString, OsString)>,
+  pinned: &[(OsString, OsString)],
 ) {
-  if let Some((key, value)) = pinned {
+  for (key, value) in pinned {
     envs.insert(EnvVarKey::new(key.clone()), value.clone());
   }
 }
@@ -1994,7 +2003,7 @@ fn compute_run_env(
     }
     envs
   };
-  apply_pinned_child_env(&mut envs, PINNED_CHILD_ENV.get());
+  apply_pinned_child_env(&mut envs, &PINNED_CHILD_ENV.lock().unwrap());
   Ok(RunEnv {
     envs,
     cwd,
@@ -3788,7 +3797,7 @@ mod clean_run_env_tests {
     let key = OsString::from("DENO_TEST_PINNED");
     let pinned = (key.clone(), OsString::from("jail"));
     let mut cleared = HashMap::new();
-    apply_pinned_child_env(&mut cleared, Some(&pinned));
+    apply_pinned_child_env(&mut cleared, std::slice::from_ref(&pinned));
     assert_eq!(
       cleared.get(&EnvVarKey::new(key.clone())),
       Some(&OsString::from("jail"))
@@ -3800,14 +3809,22 @@ mod clean_run_env_tests {
       ),
       (EnvVarKey::from_str("PATH"), OsString::from("/bin")),
     ]);
-    apply_pinned_child_env(&mut rewritten, Some(&pinned));
+    apply_pinned_child_env(&mut rewritten, std::slice::from_ref(&pinned));
     assert_eq!(
       rewritten.get(&EnvVarKey::new(key.clone())),
       Some(&OsString::from("jail"))
     );
     assert_eq!(rewritten.len(), 2);
     let mut unpinned = HashMap::new();
-    apply_pinned_child_env(&mut unpinned, None);
+    apply_pinned_child_env(&mut unpinned, &[]);
+    // two pinned variables (the jail's and the kernel policy's) both apply
+    let both = [
+      pinned.clone(),
+      (OsString::from("DENO_TEST_PINNED_2"), OsString::from("7")),
+    ];
+    let mut two = HashMap::new();
+    apply_pinned_child_env(&mut two, &both);
+    assert_eq!(two.len(), 2);
     assert!(unpinned.is_empty());
   }
 

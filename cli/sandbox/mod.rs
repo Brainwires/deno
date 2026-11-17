@@ -11,12 +11,15 @@
 //!   `deno info --json` (`kernelSandbox`).
 //! - [`enforce`]: applying the policy under `--kernel-sandbox=enforce`
 //!   (Mode A on Linux and macOS, DENEXT.md item 425).
+//! - [`inherit`]: the policy a confined process hands the `deno` processes
+//!   it starts, and the intersection they apply (DENEXT.md item 449).
 //!
 //! Opt-in only: `auto` applies nothing in this release line, `warn`
 //! reports, `enforce` applies the policy (or refuses to start when a rule
 //! can't be held), and `broker` refuses to start (Mode B isn't built yet).
 
 pub mod enforce;
+pub mod inherit;
 pub mod policy;
 
 use std::fmt::Write as _;
@@ -247,6 +250,7 @@ fn context_for(
     .map(|addr| addr.port());
   ctx.tty_parent = std::io::stdin().is_terminal();
   ctx.ttys = std_stream_ttys();
+  ctx.exec_strict = flags.permissions.kernel_sandbox_exec_strict;
   ctx
 }
 
@@ -358,7 +362,7 @@ pub fn check_run(
         fatal.join("\n")
       );
     }
-    enforce::prepare(&compiled, &ctx)?;
+    enforce::prepare(&compiled, &ctx, options)?;
   }
   Ok(resolution)
 }
@@ -632,6 +636,14 @@ pub fn render_report(
     }
   )
   .unwrap();
+  let inherited = inherit::inherited_layers().len();
+  if inherited > 0 {
+    writeln!(
+      w,
+      "  inherited: {inherited} kernel sandbox layer(s) from the starting process (measured); this run's grant is intersected with them"
+    )
+    .unwrap();
+  }
   writeln!(w, "  machine: {}", machine_line(caps)).unwrap();
   let shape = match p.shape {
     policy::Shape::ModeA => "mode A, self-confined",
@@ -646,9 +658,18 @@ pub fn render_report(
     w,
     "    exec:       {}",
     match p.fs.exec {
-      ExecScope::None => "no programs",
+      ExecScope::None => "no programs".to_string(),
       ExecScope::Unrestricted =>
-        "any readable program (children inherit these rules)",
+        "any readable program (children inherit these rules)".to_string(),
+      ExecScope::Listed => format!(
+        "only {} (strict, for the whole process tree)",
+        p.fs
+          .exec_programs
+          .iter()
+          .map(|p| p.display().to_string())
+          .collect::<Vec<_>>()
+          .join(", ")
+      ),
     }
   )
   .unwrap();

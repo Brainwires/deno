@@ -1,0 +1,2 @@
+sh builtin: exit 0
+sh starts cat: ok

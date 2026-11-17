@@ -1,0 +1,3 @@
+signal: SIGTERM
+hint: a child process was killed by SIGSYS inside the kernel sandbox; children inherit the file and network rules, so it may have been refused something (see --kernel-sandbox-report)
+signal: SIGSYS

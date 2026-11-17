@@ -310,4 +310,6 @@ export const PROBES: Probe[] = [
 
 /** The ways native code reaches the OS under a Deno grant. */
 export const VECTORS = ["ffi", "napi", "npm", "child"] as const;
-export type Vector = typeof VECTORS[number];
+/** `nested` (--expect=enforce only): a `deno run -A` the confined host
+ * starts, driving the FFI vector; it inherits the host's grant. */
+export type Vector = typeof VECTORS[number] | "nested";

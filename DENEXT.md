@@ -17010,6 +17010,125 @@ where the changes are discussed.
        `host.ts`); with 0.1.15 both panic in `stacker::guess_os_stack_limit`.
      - Node tests enabled: none; no Node API changes.
 
+449. **`feat(permissions)`: the kernel sandbox's children: the inherited policy,
+     a strict exec scope, and the child hint** (CLI and runtime; denext-only;
+     opt-in, as item 425;
+     `libs/sandbox/{inherit,exec,plan,
+     enforce_linux,seatbelt}.rs`,
+     `cli/sandbox/{inherit,enforce,mod,
+     policy}.rs`,
+     `cli/args/{mod,flags}.rs`, `libs/cli_parser`,
+     `runtime/permissions/kernel_sandbox_state.rs`, `ext/process/lib.rs`). Item
+     425's sandbox reaches every process the program starts; this item makes
+     those processes behave well inside it.
+     - The inherited policy. A run under `--kernel-sandbox=enforce` hands the
+       processes it starts the grants it runs under: one layer per confined
+       ancestor (allows and denies resolved to absolute paths, the run list with
+       the programs it names, a probe path the kernel refuses), in a descriptor
+       every child inherits, its number in `DENO_INTERNAL_KERNEL_POLICY` (Linux:
+       a sealed memfd; macOS: an unlinked file open read-only, its writable
+       descriptor closed before any child starts). A `deno` that finds it
+       intersects its own permission options with every layer (the lifecycle
+       jail's `clamp_permissions`, generalised: an entry a layer covers is kept
+       as written, a wider one narrows to the layer's entries within it, the
+       network by direction, denies added; prompting off), so a nested
+       `deno run -A` gets `NotCapable` from its own checks where the kernel
+       would answer a bare `EACCES`. The variable is never trusted on its own:
+       the descriptor must be a carrier (sealed / unlinked and read-only), the
+       kernel must report the process confined (Linux: `NoNewPrivs` and
+       `Seccomp: 2` in `/proc/self/status`; macOS: `sandbox_check`), and every
+       layer's probe must exist and be refused (an open that fails with a
+       permission error; macOS: `sandbox_check`, which also answers non-zero for
+       a missing path, so the path must exist); anything else is ignored with a
+       warning. An accepted carrier only narrows: it never switches a check, the
+       kernel layer or a nested `enforce` off. The variable is pinned into every
+       child's environment (a `clearEnv` spawn keeps it; `pin_child_env_var` now
+       holds several variables, the jail's and this one). The re-executed image
+       checks that the carrier it inherited ends with its own layer, or refuses
+       to start. `--kernel-sandbox-report` in a nested run says how many layers
+       it inherited.
+     - Measuring confinement in a child (Linux): `NoNewPrivs` and the seccomp
+       mode are asked with `prctl` (`PR_GET_NO_NEW_PRIVS`, `PR_GET_SECCOMP`),
+       which needs no file. A child can't read its own `/proc/self` (Landlock
+       resolved the parent's implicit `/proc/self` rule to the parent's entry),
+       so item 425's reading of `/proc/self/status` never reported a child
+       confined; item 425's `.npmrc` rule for children now holds too. A nested
+       `enforce` whose `/proc/self/task` is hidden that way can't count its
+       threads; it applies its layer anyway only when the kernel reports it
+       confined (the outer domain holds every thread whatever the new layer
+       adds).
+     - A nested `--kernel-sandbox=enforce`: on Linux it stacks a layer of its
+       own (Landlock domains and seccomp filters nest) and hands its children
+       the longer list; on macOS it refuses to start, as before (Seatbelt can't
+       stack a second profile, and running under the parent's wider one would
+       not hold its own grant). Decided on the safer side; a macOS nested
+       enforce whose grant equals the parent's is a possible later relaxation.
+     - `--kernel-sandbox-exec=strict` (plan D3's opt-in; on every command that
+       takes `--kernel-sandbox`, refused by `deno eval`, written back by
+       `deno install` / `deno x`): the whole process tree may execute only the
+       `--allow-run` programs and what they need to start (a script's `#!`
+       interpreter, through `/usr/bin/env` the program it names, an ELF
+       program's loader, on macOS the shell the `/bin/sh` launcher starts),
+       Landlock `EXECUTE` rules on those files on Linux and `process-exec`
+       literals on macOS. The developer tools in macOS's `/usr/bin` (git,
+       python3, clang) start the real tool through xcrun, which a strict list
+       names too (`/Library/Developer/CommandLineTools/usr/bin/git`). Without
+       it, a run list keeps item 425's rule (any readable program, the
+       protection being that every child inherits the file and network rules),
+       and its documented gap names the opt-in. With an unscoped `--allow-run`
+       there is nothing to list: a fail-open gap, so `enforce` refuses.
+     - The child-failure hint (item 425) also shows inside a sandbox a process
+       inherited (a nested `deno`), and for a child killed by `SIGABRT` (macOS's
+       dyld refusing a library) or `SIGSYS` (a seccomp kill), not for signals a
+       parent or the user sends.
+     - Grants for programs: `git status` works with `--allow-run=git` and read
+       on the repository and the git config
+       (`--allow-read=<repo>,<home>/.gitconfig`); git's opportunistic index
+       refresh needs nothing written. A Unix socket a child needs
+       (`SSH_AUTH_SOCK`, a container daemon) needs `--allow-net=unix:<path>`; on
+       Linux Mode A that grant opens every socket the user can reach (item 422's
+       fail-open gap, refused by `enforce`) until the broker can pass the one
+       socket.
+     - Not covered yet: a compiled program started inside a sandbox reads no
+       carrier (`denort` has no `cli/sandbox`; it is held by the kernel all the
+       same, with bare `EACCES`); `deno install` / `add` inside a sandbox aren't
+       refused the way the jail refuses them; a program that closes inherited
+       descriptors (Python's `close_fds`) hands its own `deno` children no
+       carrier (they stay confined, with bare `EACCES`).
+     - User-facing note: inside a kernel sandbox, `deno` processes started by
+       the program are held to its grant by their own checks too (`NotCapable`),
+       and `--kernel-sandbox-exec=strict` limits the programs the whole tree may
+       start to the `--allow-run` list.
+     - Tests: `deno_sandbox`'s
+       `inherit::tests::{carrier_round_trip_keeps_the_descriptor_open,
+       carrier_refuses_what_is_not_one, carrier_refuses_an_unsealed_memfd,
+       an_unconfined_process_refuses_nothing}`,
+       `exec::tests::{shebang_lines, elf_interpreter_from_a_program_header,
+       closure_follows_scripts_to_their_interpreters,
+       closure_of_a_dynamic_program_has_its_loader}`
+       and `seatbelt::tests::cli_profile_strict_exec`; the CLI's
+       `sandbox::inherit::tests::{allow_all_becomes_the_ancestors_grant,
+       entries_keep_their_spelling_or_narrow_to_the_ancestors,
+       network_by_direction_and_port, env_patterns_and_names,
+       denies_are_added_once, run_entries_match_by_name_or_program,
+       clamping_with_its_own_layer_changes_nothing, several_layers_intersect,
+       a_carrier_is_accepted_only_where_it_measures}`
+       and `sandbox::policy::tests::strict_exec_lists_the_programs`;
+       `deno_process`'s `pinned_child_env_wins` (two variables);
+       `deno_cli_parser`'s `tests_full::kernel_sandbox_flags`; spec
+       `kernel_sandbox::children` (a nested `deno run -A` refused with
+       `NotCapable`, with a cleared environment too, and its report; a nested
+       `enforce` stacking on Linux and refused on macOS; `git status`; a
+       grandchild that orphans itself measured confined from outside, by
+       `/proc/<pid>/status` on Linux and `sandbox_check` on macOS, and still
+       refused a read outside the grant; the hint in a nested `deno` and on
+       `SIGSYS`; the strict exec scope and its absence); and
+       `kernel_sandbox::escape_corpus::corpus_enforce` with a fifth
+       configuration and vector, `nested` (a run list naming the runtime; a
+       `deno run -A` the host starts drives the FFI probes, expected as for a
+       run list).
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -17019,8 +17138,8 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
-416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448)
-are what the prebuilt `libdenort` carries. The CLI-side parts (for example
+416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
+449) are what the prebuilt `libdenort` carries. The CLI-side parts (for example
 writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.
