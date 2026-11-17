@@ -6,10 +6,9 @@
 
 import { assert, assertEquals, assertRejects } from "./test_util.ts";
 
-// deno-lint-ignore no-explicit-any
 function assertInstanceOf(
   value: unknown,
-  ctor: new (...args: any[]) => unknown,
+  ctor: new (...args: never[]) => unknown,
 ) {
   assert(value instanceof ctor, `expected an instance of ${ctor.name}`);
 }
