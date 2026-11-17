@@ -131,6 +131,32 @@ When the `run` command finishes, it shows a git diff between the current
 expectation files and what the actual results would produce. This makes it easy
 to see regressions and improvements.
 
+## Test files the runner takes
+
+Besides the `.any.js` / `.window.js` / `.worker.js` tests (whose HTML wrapper
+the WPT server generates), a suite's own `testharness.js` `.html` files run too:
+the runner fetches the page from the WPT server and runs its `<script src>` and
+inline `<script>` blocks in document order, as one program, with
+`globalThis.window` set and the runner's `testharnessreport.js` in place of the
+browser one. There is no DOM: a test that needs `document`, an `<iframe>`, a
+`<video>` / `<canvas>` element or a browsing context fails, and its expectation
+says so (`false`, or its subtests under `expectedFailures`).
+
+### WebRTC (`webrtc`, `webrtc-extensions`, `webrtc-stats`)
+
+These open real peer connections over loopback. In a container or a machine
+whose other interfaces shouldn't be used, run them with
+`DENO_WEBRTC_LOOPBACK_ONLY=1` (host candidates on `127.0.0.1` only):
+
+```shell
+DENO_WEBRTC_LOOPBACK_ONLY=1 ./tests/wpt/wpt.ts run -- webrtc webrtc-extensions webrtc-stats
+```
+
+Most of the files that fail need media the runtime doesn't have: the suite's
+`getNoiseStream()` helper draws to an `HTMLCanvasElement` / an `AudioContext` or
+falls back to `getUserMedia()`, so a test that sends a track fails before it
+reaches `RTCPeerConnection`.
+
 ## FAQ
 
 ### Upgrading the WPT submodule
