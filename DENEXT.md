@@ -17548,7 +17548,7 @@ where the changes are discussed.
        undeclared name), so every `.https.html` that loads it crashes, most of
        `webrtc-encoded-transform` included. No runtime API short of a DOM
        changes either; both are one-line upstream WPT fixes (a `typeof` guard).
-      
+
        Measured with both guards applied in a scratch copy (not in the tree):
        2053 / 3004 subtests pass instead of 1750 / 2778 (`webrtc/` 1660 / 2237
        instead of 1393 / 2102, `webrtc-encoded-transform` 115 / 219 instead of
@@ -17591,12 +17591,12 @@ where the changes are discussed.
      - Numbers after these (subtests passing / found, measured as above): all
        `webrtc*` directories 1751 / 2778 (63.0%; 1452 / 2503 before) and 56
        files passing fully (54); `webrtc/` 1394 / 2102 (1390 / 2110);
-       `webrtc-encoded-transform` 82 / 124 (23 before);
-       `webrtc-stats` 241 / 304 (3; `supported-stats` gets a track now);
-       `webrtc-extensions` 4 / 73 (2); `-identity` 21 / 68, `-priority` 7 / 9,
-       `-svc` 2 / 67 and `-ice` 0 / 31 unchanged. No subtest the expectations
-       had passing fails. More subtests are found because files that failed
-       before reaching their tests now run them.
+       `webrtc-encoded-transform` 82 / 124 (23 before); `webrtc-stats` 241 / 304
+       (3; `supported-stats` gets a track now); `webrtc-extensions` 4 / 73 (2);
+       `-identity` 21 / 68, `-priority` 7 / 9, `-svc` 2 / 67 and `-ice` 0 / 31
+       unchanged. No subtest the expectations had passing fails. More subtests
+       are found because files that failed before reaching their tests now run
+       them.
      - Node tests enabled: none; `node:` has no WebRTC API.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
@@ -17609,10 +17609,10 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452) are what the prebuilt `libdenort` carries. The CLI-side parts (for
-example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
-launchers) are in the branch too, but a stock CLI does not run them; denext's
-own launcher provides that environment.
+449, 450, 452) are what the prebuilt `libdenort` carries. The CLI-side parts
+(for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged
+app's launchers) are in the branch too, but a stock CLI does not run them;
+denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
