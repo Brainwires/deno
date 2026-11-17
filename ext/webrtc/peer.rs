@@ -161,6 +161,8 @@ const MAX_DIAL_QUEUE: usize = 8;
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long an mDNS query for a remote `.local` candidate is retried.
 const MDNS_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+/// The longest TURN username STUN carries (RFC 8489 section 14.3).
+const MAX_TURN_USERNAME_BYTES: usize = 509;
 
 /// The net permission gate. Production code wraps the runtime's
 /// `PermissionsContainer` (lib.rs); tests use their own guards.
@@ -200,7 +202,8 @@ pub struct IceServerSpec {
 
 impl IceServerSpec {
   /// Parses one URL of an `RTCIceServer`. `Err` is the W3C `SyntaxError`
-  /// (bad URL) or `InvalidAccessError` (TURN without credentials) message.
+  /// (bad URL) or `InvalidAccessError` (TURN without usable credentials)
+  /// message.
   pub fn parse(
     url: &str,
     username: Option<&str>,
@@ -209,11 +212,35 @@ impl IceServerSpec {
     let parsed = IceUrl::parse_url(url).map_err(|e| {
       WebRtcError::Syntax(format!("Invalid ICE server URL '{url}': {e}"))
     })?;
-    let turn = matches!(parsed.scheme, SchemeType::Turn | SchemeType::Turns);
-    if turn && (username.is_none() || credential.is_none()) {
-      return Err(WebRtcError::InvalidAccess(format!(
-        "TURN server '{url}' needs a username and a credential"
+    // RFC 7064 / 7065: `scheme ":" host [":" port]` and, for TURN, a
+    // `?transport=` query; no userinfo, authority or path.
+    let address = url
+      .split_once(':')
+      .map_or("", |(_, rest)| rest.split('?').next().unwrap_or_default());
+    if address.contains(['@', '/', '\\']) {
+      return Err(WebRtcError::Syntax(format!(
+        "Invalid ICE server URL '{url}': only a host and a port may follow the scheme"
       )));
+    }
+    let turn = matches!(parsed.scheme, SchemeType::Turn | SchemeType::Turns);
+    if turn {
+      match (username, credential) {
+        (Some(username), Some(credential))
+          if !credential.is_empty()
+            && username.len() <= MAX_TURN_USERNAME_BYTES => {}
+        (Some(username), Some(_))
+          if username.len() > MAX_TURN_USERNAME_BYTES =>
+        {
+          return Err(WebRtcError::InvalidAccess(format!(
+            "TURN server '{url}': the username is longer than {MAX_TURN_USERNAME_BYTES} bytes"
+          )));
+        }
+        _ => {
+          return Err(WebRtcError::InvalidAccess(format!(
+            "TURN server '{url}' needs a username and a non-empty credential"
+          )));
+        }
+      }
     }
     let transport = match (parsed.scheme, parsed.proto) {
       (SchemeType::Turns | SchemeType::Stuns, _) => ServerTransport::Tls,
@@ -230,6 +257,29 @@ impl IceServerSpec {
       transport,
     })
   }
+}
+
+/// The stats fields the engine writes from a `SystemInstant`: seconds since
+/// the epoch (`rtc_shared::serde::instant_to_epoch`), where the stats
+/// dictionaries have a `DOMHighResTimeStamp` in milliseconds.
+const STATS_EPOCH_FIELDS: [&str; 5] = [
+  "timestamp",
+  "lastPacketSentTimestamp",
+  "lastPacketReceivedTimestamp",
+  "remoteTimestamp",
+  "estimatedPlayoutTimestamp",
+];
+
+/// One stats dictionary with its epoch fields in milliseconds.
+pub fn epoch_fields_to_ms(mut stats: serde_json::Value) -> serde_json::Value {
+  if let Some(map) = stats.as_object_mut() {
+    for key in STATS_EPOCH_FIELDS {
+      if let Some(seconds) = map.get(key).and_then(serde_json::Value::as_f64) {
+        map.insert(key.to_string(), serde_json::json!(seconds * 1000.0));
+      }
+    }
+  }
+  stats
 }
 
 /// Options for [`Peer::new`], from `RTCConfiguration`.
@@ -2436,6 +2486,7 @@ impl Peer {
               _ => return None,
             }
             .ok()
+            .map(epoch_fields_to_ms)
           })
           .collect(),
       )

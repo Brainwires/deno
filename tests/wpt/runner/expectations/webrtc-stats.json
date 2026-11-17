@@ -1,0 +1,17 @@
+{
+  "RTCDataChannel-stats.html": false,
+  "getStats-remote-candidate-address.html": false,
+  "getStats-remote-candidate-ufrag.html": false,
+  "hardware-capability-stats.https.html": false,
+  "idlharness.window.html": true,
+  "outbound-rtp.https.html": false,
+  "rtp-stats-creation.html": {
+    "expectedFailures": [
+      "No RTCRtpStreamStats exist when only local description is set",
+      "No RTCRtpOutboundStreamStats should exist before negotiation completes",
+      "No RTCInboundRtpStreamStats exist until packets have been received",
+      "RTCAudioPlayoutStats should be present"
+    ]
+  },
+  "supported-stats.https.html": false
+}

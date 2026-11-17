@@ -244,8 +244,10 @@ function cachedDescription(pc, which, pair) {
 
 // `candidate:<foundation> <component> <transport> <priority> <address>
 // <port> typ <type> [raddr <a> rport <p>] [tcptype <t>] ...` (RFC 8839
-// section 5.1). A string that doesn't parse leaves every derived attribute
-// null.
+// section 5.1, RFC 6544 section 4.5), with no SDP framing ("a=") and no
+// surrounding whitespace. A TCP candidate other than a relay carries its
+// tcptype right after the related address. A string that doesn't parse
+// leaves every derived attribute null.
 const ICE_CHARS = new SafeRegExp("^[A-Za-z0-9+/]{1,32}$");
 const DIGITS_3 = new SafeRegExp("^[0-9]{1,3}$");
 const DIGITS_5 = new SafeRegExp("^[0-9]{1,5}$");
@@ -268,12 +270,8 @@ function nullCandidate() {
 }
 
 function parseCandidate(line) {
-  let value = StringPrototypeTrim(line);
-  if (StringPrototypeStartsWith(value, "a=")) {
-    value = StringPrototypeSlice(value, 2);
-  }
-  if (!StringPrototypeStartsWith(value, "candidate:")) return nullCandidate();
-  value = StringPrototypeSlice(value, 10);
+  if (!StringPrototypeStartsWith(line, "candidate:")) return nullCandidate();
+  const value = StringPrototypeSlice(line, 10);
   const f = StringPrototypeSplit(value, SPACES);
   if (f.length < 8) return nullCandidate();
   const foundation = f[0];
@@ -317,23 +315,30 @@ function parseCandidate(line) {
   }
   let hasRaddr = false;
   let hasRport = false;
-  for (let i = 8; i + 1 < f.length; i += 2) {
-    const key = StringPrototypeToLowerCase(f[i]);
-    if (key === "raddr") {
-      hasRaddr = true;
-      out.relatedAddress = f[i + 1];
-    } else if (key === "rport") {
-      if (!RegExpPrototypeTest(DIGITS_5, f[i + 1])) return nullCandidate();
-      const rport = NumberParseInt(f[i + 1], 10);
-      if (rport > 65535) return nullCandidate();
-      hasRport = true;
-      out.relatedPort = rport;
-    } else if (key === "tcptype") {
-      const tcpType = StringPrototypeToLowerCase(f[i + 1]);
-      if (ArrayPrototypeIncludes(["active", "passive", "so"], tcpType)) {
-        out.tcpType = tcpType;
-      }
+  let i = 8;
+  if (i + 1 < f.length && StringPrototypeToLowerCase(f[i]) === "raddr") {
+    hasRaddr = true;
+    out.relatedAddress = f[i + 1];
+    i += 2;
+  }
+  if (i + 1 < f.length && StringPrototypeToLowerCase(f[i]) === "rport") {
+    if (!RegExpPrototypeTest(DIGITS_5, f[i + 1])) return nullCandidate();
+    const rport = NumberParseInt(f[i + 1], 10);
+    if (rport > 65535) return nullCandidate();
+    hasRport = true;
+    out.relatedPort = rport;
+    i += 2;
+  }
+  if (i < f.length && StringPrototypeToLowerCase(f[i]) === "tcptype") {
+    const tcpType = i + 1 < f.length
+      ? StringPrototypeToLowerCase(f[i + 1])
+      : "";
+    if (!ArrayPrototypeIncludes(["active", "passive", "so"], tcpType)) {
+      return nullCandidate();
     }
+    out.tcpType = tcpType;
+  } else if (protocol === "tcp" && type !== "relay") {
+    return nullCandidate();
   }
   if (hasRaddr !== hasRport) return nullCandidate();
   if (
@@ -454,8 +459,17 @@ class RTCPeerConnectionIceEvent extends Event {
   #url;
 
   constructor(type, eventInitDict = undefined) {
+    const prefix = "Failed to construct 'RTCPeerConnectionIceEvent'";
+    webidl.requiredArguments(arguments.length, 1, prefix);
+    const candidate = eventInitDict?.candidate ?? null;
+    if (
+      candidate !== null &&
+      !ObjectPrototypeIsPrototypeOf(RTCIceCandidatePrototype, candidate)
+    ) {
+      throw new TypeError(`${prefix}: 'candidate' is not an RTCIceCandidate`);
+    }
     super(type, eventInitDict);
-    this.#candidate = eventInitDict?.candidate ?? null;
+    this.#candidate = candidate;
     this.#url = eventInitDict?.url ?? null;
   }
 
@@ -504,7 +518,7 @@ webidl.configureInterface(RTCPeerConnectionIceErrorEvent);
 class RTCDataChannelEvent extends Event {
   #channel;
 
-  constructor(type, eventInitDict = undefined) {
+  constructor(type, eventInitDict) {
     super(type, eventInitDict);
     if (
       !ObjectPrototypeIsPrototypeOf(
@@ -525,6 +539,17 @@ class RTCDataChannelEvent extends Event {
 }
 webidl.configureInterface(RTCDataChannelEvent);
 
+// RTCErrorDetailType (W3C WebRTC 1.0 section 11.1.2).
+const ERROR_DETAILS = [
+  "data-channel-failure",
+  "dtls-failure",
+  "fingerprint-failure",
+  "sctp-failure",
+  "sdp-syntax-error",
+  "hardware-encoder-not-available",
+  "hardware-encoder-error",
+];
+
 class RTCError extends DOMException {
   #init;
 
@@ -536,13 +561,18 @@ class RTCError extends DOMException {
         "Failed to construct 'RTCError': 'errorDetail' is required",
       );
     }
+    const errorDetail = String(detail);
+    if (!ArrayPrototypeIncludes(ERROR_DETAILS, errorDetail)) {
+      throw new TypeError(
+        `Failed to construct 'RTCError': '${errorDetail}' is not a valid value for 'errorDetail'`,
+      );
+    }
     this.#init = {
-      errorDetail: String(detail),
+      errorDetail,
       sdpLineNumber: init.sdpLineNumber ?? null,
       sctpCauseCode: init.sctpCauseCode ?? null,
       receivedAlert: init.receivedAlert ?? null,
       sentAlert: init.sentAlert ?? null,
-      httpRequestStatusCode: init.httpRequestStatusCode ?? null,
     };
   }
 
@@ -560,9 +590,6 @@ class RTCError extends DOMException {
   }
   get sentAlert() {
     return this.#init.sentAlert;
-  }
-  get httpRequestStatusCode() {
-    return this.#init.httpRequestStatusCode;
   }
 }
 webidl.configureInterface(RTCError);
@@ -1118,7 +1145,7 @@ function endTrack(track) {
 class MediaStreamTrackEvent extends Event {
   #track;
 
-  constructor(type, eventInitDict = undefined) {
+  constructor(type, eventInitDict) {
     super(type, eventInitDict);
     if (
       !ObjectPrototypeIsPrototypeOf(
@@ -1360,12 +1387,10 @@ class RTCIceTransport extends EventTarget {
 
   get role() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
-    const pc = this[_pc];
-    const local = pc[_state].lastLocalType;
-    if (local === undefined) return "unknown";
-    // The offerer is controlling (an ICE-lite peer never is, but that is
-    // only the server extension's case and it answers).
-    return pc[_state].offerer ? "controlling" : "controlled";
+    // Fixed by the first answer applied: the offerer of that exchange is
+    // controlling (an ICE-lite peer never is, but that is only the server
+    // extension's case and it answers); an ICE restart keeps it.
+    return this[_pc][_state].iceRole ?? "unknown";
   }
   get component() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
@@ -1422,6 +1447,22 @@ class RTCIceCandidatePair {
 }
 webidl.configureInterface(RTCIceCandidatePair);
 const RTCIceCandidatePairPrototype = RTCIceCandidatePair.prototype;
+
+// Whether a description signals "a=ice-options:trickle" (RFC 8840 section
+// 4.1.3), at the session or a media level.
+function offersTrickle(sdp) {
+  const lines = StringPrototypeSplit(sdp, "\n");
+  for (let i = 0; i < lines.length; ++i) {
+    const line = StringPrototypeTrim(lines[i]);
+    if (!StringPrototypeStartsWith(line, "a=ice-options:")) continue;
+    const options = StringPrototypeSplit(
+      StringPrototypeSlice(line, 14),
+      SPACES,
+    );
+    if (ArrayPrototypeIncludes(options, "trickle")) return true;
+  }
+  return false;
+}
 
 function iceParameters(description) {
   if (description === null) return null;
@@ -2313,7 +2354,7 @@ function stopSending(transceiver) {
 class RTCTrackEvent extends Event {
   #init;
 
-  constructor(type, eventInitDict = undefined) {
+  constructor(type, eventInitDict) {
     super(type, eventInitDict);
     const init = eventInitDict ?? { __proto__: null };
     if (
@@ -2362,9 +2403,11 @@ function validateEncodings(list, kind, method, keepRid) {
     }
     const enc = { active: e.active === undefined ? true : !!e.active };
     if (e.rid !== undefined) {
+      // At most 16 alphanumeric characters (the RtpStreamId header
+      // extension's limit).
       const rid = String(e.rid);
       if (
-        rid.length === 0 || rid.length > 255 ||
+        rid.length === 0 || rid.length > 16 ||
         !RegExpPrototypeTest(RID_RE, rid)
       ) {
         throw new TypeError(`${method}: '${rid}' is not a valid rid`);
@@ -2380,7 +2423,9 @@ function validateEncodings(list, kind, method, keepRid) {
     if (e.maxBitrate !== undefined) {
       enc.maxBitrate = webidl.converters["unsigned long"](e.maxBitrate);
     }
-    if (e.maxFramerate !== undefined) {
+    // An audio encoding has no frame rate: its maxFramerate is dropped,
+    // even an invalid one.
+    if (e.maxFramerate !== undefined && kind === "video") {
       const f = webidl.converters["double"](e.maxFramerate);
       if (f < 0) throw new RangeError(`${method}: maxFramerate below 0`);
       enc.maxFramerate = f;
@@ -2633,9 +2678,8 @@ class RTCPeerConnection extends EventTarget {
       localCandidates: [],
       remoteCandidates: [],
       cname: uuid(),
-      offerer: false,
-      lastLocalType: undefined,
-      lastRemoteType: undefined,
+      // "controlling" / "controlled" once an answer is applied.
+      iceRole: null,
       negotiationQueued: false,
       descriptions: { local: null, remote: null },
       // getParameters() transaction timers, cleared by close().
@@ -2669,7 +2713,10 @@ class RTCPeerConnection extends EventTarget {
   }
   get canTrickleIceCandidates() {
     webidl.assertBranded(this, RTCPeerConnectionPrototype);
-    return this[_state].closed || this.remoteDescription === null ? null : true;
+    const remote = this.remoteDescription;
+    return this[_state].closed || remote === null
+      ? null
+      : offersTrickle(remote.sdp);
   }
   get localDescription() {
     webidl.assertBranded(this, RTCPeerConnectionPrototype);
@@ -2722,6 +2769,12 @@ class RTCPeerConnection extends EventTarget {
     }
     return enqueue(this, () => {
       const state = this[_state];
+      const signaling = state.signalingState;
+      if (signaling !== "stable" && signaling !== "have-local-offer") {
+        throw invalidState(
+          `Cannot create an offer in signaling state '${signaling}'`,
+        );
+      }
       const iceRestart = !!options?.iceRestart || !!state.restartIce;
       state.restartIce = false;
       // Legacy offerToReceiveAudio / offerToReceiveVideo: a recvonly
@@ -2832,10 +2885,8 @@ class RTCPeerConnection extends EventTarget {
       }
       op_webrtc_pc_set_local_description(this[_rid], type, sdp ?? "");
       const state = this[_state];
-      if (type !== "rollback") {
-        state.lastLocalType = type;
-        if (type === "offer") state.offerer = true;
-        else if (type === "answer") state.offerer = false;
+      if (type === "answer" || type === "pranswer") {
+        state.iceRole ??= "controlled";
       }
       activate(this);
       syncTransceivers(this, { remote: false, type });
@@ -2901,9 +2952,8 @@ class RTCPeerConnection extends EventTarget {
       if (type !== "rollback") {
         state.remoteMaxMessageSize = maxMessageSizeOf(sdp);
       }
-      if (type !== "rollback") {
-        state.lastRemoteType = type;
-        if (type === "offer") state.offerer = false;
+      if (type === "answer" || type === "pranswer") {
+        state.iceRole ??= "controlling";
       }
       activate(this);
       const now = this[_state].signalingState;
@@ -3005,9 +3055,10 @@ class RTCPeerConnection extends EventTarget {
     if (this[_state].closed) {
       throw invalidState("RTCPeerConnection is closed");
     }
+    const prefix = "Failed to execute 'createDataChannel'";
     const dict = dataChannelDict ?? { __proto__: null };
     const init = {
-      label: String(label),
+      label: webidl.converters.USVString(label, prefix, "Argument 1"),
       ordered: dict.ordered === undefined ? true : !!dict.ordered,
       maxPacketLifeTime: dict.maxPacketLifeTime === undefined ||
           dict.maxPacketLifeTime === null
@@ -3026,7 +3077,9 @@ class RTCPeerConnection extends EventTarget {
           : webidl.converters["unsigned short"](dict.maxRetransmits, "", "", {
             enforceRange: true,
           }),
-      protocol: dict.protocol === undefined ? "" : String(dict.protocol),
+      protocol: dict.protocol === undefined
+        ? ""
+        : webidl.converters.USVString(dict.protocol, prefix, "'protocol'"),
       negotiated: !!dict.negotiated,
       id: dict.id === undefined || dict.id === null
         ? null
@@ -3044,10 +3097,20 @@ class RTCPeerConnection extends EventTarget {
         "Failed to execute 'createDataChannel': a negotiated channel needs an id",
       );
     }
-    if (init.id === 65535) {
-      throw new TypeError(
-        "Failed to execute 'createDataChannel': id 65535 is reserved",
-      );
+    // The id only counts for a negotiated channel; 65535 is reserved and
+    // an id an open channel has is in use.
+    if (init.negotiated && init.id === 65535) {
+      throw new TypeError(`${prefix}: id 65535 is reserved`);
+    }
+    if (init.negotiated) {
+      MapPrototypeForEach(this[_channels], (channel) => {
+        if (channel.id === init.id && channel.readyState !== "closed") {
+          throw new DOMException(
+            `${prefix}: id ${init.id} is in use`,
+            "OperationError",
+          );
+        }
+      });
     }
     if (TypedArrayPrototypeGetByteLength(core.encode(init.label)) > 65535) {
       throw new TypeError(
@@ -3068,7 +3131,7 @@ class RTCPeerConnection extends EventTarget {
       maxRetransmits: init.maxRetransmits,
       protocol: init.protocol,
       negotiated: init.negotiated,
-      id: init.id,
+      id: init.negotiated ? init.id : null,
     });
     const channel = new RTCDataChannel(illegalConstructorKey, this, {
       ...init,
@@ -3466,24 +3529,26 @@ class RTCPeerConnection extends EventTarget {
   }
 
   static generateCertificate(keygenAlgorithm) {
+    const prefix =
+      "Failed to execute 'generateCertificate' on 'RTCPeerConnection'";
     let alg;
+    // `expires` (ms from now) is the spec's extension of the algorithm
+    // dictionary ([EnforceRange] DOMTimeStamp); 30 days by default, as
+    // browsers do. A bad value rejects the promise with a TypeError.
+    let expires = 30 * 24 * 3600 * 1000;
     try {
-      webidl.requiredArguments(
-        arguments.length,
-        1,
-        "Failed to execute 'generateCertificate' on 'RTCPeerConnection'",
-      );
+      webidl.requiredArguments(arguments.length, 1, prefix);
       alg = normalizeKeygen(keygenAlgorithm);
+      if (keygenAlgorithm?.expires !== undefined) {
+        expires = webidl.converters["unsigned long long"](
+          keygenAlgorithm.expires,
+          prefix,
+          "'expires'",
+          { enforceRange: true },
+        );
+      }
     } catch (error) {
       return PromiseReject(error);
-    }
-    // `expires` (ms from now) is the spec's extension of the algorithm
-    // dictionary; 30 days by default, as browsers do.
-    let expires = 30 * 24 * 3600 * 1000;
-    if (keygenAlgorithm?.expires !== undefined) {
-      expires = webidl.converters["unsigned long long"](
-        keygenAlgorithm.expires,
-      );
     }
     // The expiry instant on the JS clock (see generate_certificate).
     return PromisePrototypeThen(

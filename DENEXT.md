@@ -17357,6 +17357,96 @@ where the changes are discussed.
        an invalid value ignored).
      - Node tests enabled: none; no Node API changes.
 
+452. **`test(wpt)`: WebRTC's web-platform-tests in the tree, and the conformance
+     fixes they found** (`feat/wpt-webrtc`; runtime and tests;
+     `ext/webrtc/{01_webrtc.js,peer.rs,media.rs,tests.rs}`,
+     `cli/tsc/dts/lib.deno_webrtc.d.ts`, `tests/wpt/README.md`,
+     `tests/wpt/runner/expectations/webrtc*.json`). Item 370 measured WPT
+     `webrtc/` outside the tree; now `./tests/wpt/wpt.ts run -- webrtc` runs
+     every `webrtc*` directory (`webrtc`, `-encoded-transform`, `-extensions`,
+     `-ice`, `-identity`, `-priority`, `-stats`, `-svc`: 325 test files with
+     their variants, 2503 subtests) against expectation files, so a regression
+     or a newly passing subtest shows up as a diff.
+     - The runner needed no change: Deno's WPT runner already runs a suite's own
+       `testharness.js` `.html` files (it fetches the page from `wpt serve` and
+       evaluates its `<script src>` and inline scripts in document order, with
+       `globalThis.window` set); only `.any.js` / `.window.js` / `.worker.js`
+       had been listed in any expectations. `tests/wpt/README.md` now says so,
+       and how the WebRTC files run (`DENO_WEBRTC_LOOPBACK_ONLY=1` in a
+       container or on a machine whose other interfaces shouldn't be used).
+     - What can't pass without a browser is in the expectations as `false` or as
+       the subtests under `expectedFailures`, never skipped. Of `webrtc/`'s 225
+       testharness files, 123 need no DOM or media; 73 build a track with the
+       suite's `getNoiseStream()` (an `AudioContext`, a canvas'
+       `captureStream()`, else `getUserMedia()`), and 29 use `document`, an
+       iframe, a `<video>`, `window.open` or the back-forward cache. Of the
+       failing subtests (after the fixes below), 327 fail on the media helper,
+       45 on `document`, and 348 on something else; 32 files report no result at
+       all (most of `simulcast/`, which needs media, the `simplecall` files,
+       which need `document`, and a few that hang).
+     - Fixes, each with the WPT subtests it turns green (measured against
+       runtime 3.0.0-denext.24's release `deno`, whose `ext/webrtc` is the
+       branch base's): `iceServers` refuses a STUN / TURN URL with userinfo, a
+       path or a backslash (`SyntaxError`, before the credential check), a TURN
+       server with an empty credential or a username over 509 bytes
+       (`InvalidAccessError`; RFC 8489's limit) — `RTCConfiguration-iceServers`
+       +18; `RTCIceCandidate` parses strictly (no `a=` framing or surrounding
+       whitespace, a TCP candidate other than a relay needs its tcptype right
+       after the related address, an unknown or missing tcptype value fails) —
+       +6; `RTCError` takes only an `RTCErrorDetailType` and has no
+       `httpRequestStatusCode` (that member is webrtc-identity's, which isn't
+       implemented: the identity idlharness subtest for it now fails, -1) — +2;
+       the required-dictionary event constructors (`RTCDataChannelEvent`,
+       `RTCTrackEvent`, `MediaStreamTrackEvent`) have `length` 2, and
+       `RTCPeerConnectionIceEvent` requires its type and an `RTCIceCandidate` or
+       `null` candidate — +5 (two of them idlharness' `length` checks);
+       `RTCIceTransport.role` is `unknown` until the first answer is applied and
+       keeps its value over an ICE restart — +2; `canTrickleIceCandidates`
+       reflects the remote description's `a=ice-options:trickle` — +1;
+       `createOffer()` rejects with `InvalidStateError` outside `stable` /
+       `have-local-offer` — +1; an encoding's `rid` is at most 16 characters and
+       an audio encoding drops `maxFramerate` (even an invalid one) — +2 / +3;
+       `createDataChannel()` converts its label and protocol as USVStrings,
+       checks id 65535 and an id in use (`OperationError`) only for a negotiated
+       channel — +5; `generateCertificate()` rejects (rather than throws) on a
+       bad `expires` and applies `[EnforceRange]` — +2; stats `timestamp`s (and
+       the other `SystemInstant` fields) are milliseconds since the epoch: the
+       engine writes seconds (`rtc_shared::serde::instant_to_epoch`, whose own
+       docs say milliseconds), `peer.rs` scales them — +1; and an `RTCRtpCodec`
+       dictionary leaves out a member the codec doesn't have (a video codec's
+       `channels`, an absent fmtp line) instead of `null` —
+       `RTCRtpParameters-codecs` / `-encodings` / `-maxFramerate`,
+       `getCapabilities`, `RTCRtpReceiver-getParameters`, `webrtc-priority` +59
+       together. In all +107 and -1 (the identity member above).
+     - Numbers (subtests passing / found, files passing fully): all `webrtc*`
+       directories 1346 / 2503 and 39 files before, 1452 / 2503 (58.0%) and 54
+       files after; `webrtc/` alone 1290 / 2110 (61.1%) and 38 files before,
+       1390 / 2110 (65.9%) and 52 files after; its 143 headless test files (with
+       variants) 809 / 1054 (76.8%). A second full run against the new
+       expectations was clean (325 files as expected, no flakes) on biscuits in
+       a Python 3.11 container with the WPT hosts and
+       `DENO_WEBRTC_LOOPBACK_ONLY=1`.
+     - Known gaps the expectations record (not fixed here): media (no
+       `getUserMedia`, `AudioContext` or canvas capture, so the media helper
+       fails before reaching `RTCPeerConnection`); DOM (`document`, iframes,
+       `window.open`, BFCache); engine behavior — a data channel's id is
+       assigned at `open`, not when SCTP connects (`RTCDataChannel-id`,
+       `createDataChannel` id checks after connection); `max-bundle`-only
+       gathering (`bundlePolicy` balanced / max-compat), one fingerprint per
+       certificate set (`RTCCertificate`), the engine refusing a remote
+       description with per-m-section ufrags (`addIceCandidate`, "conflicting
+       ice-ufrag values") or without an ICE ufrag (several SDP munging tests),
+       rollback / pranswer state transitions the engine refuses,
+       `getRemoteCandidates()`, RSA-1024 certificates, and stats timestamps at
+       the engine's millisecond resolution (a sub-millisecond check in
+       `getStats-timestamp`); unimplemented APIs — `RTCRtpScriptTransform` /
+       encoded transforms, SFrame, the `webrtc-extensions` and `webrtc-ice`
+       members, and the `operations`-chain probe `isOperationsChainEmpty` relies
+       on. The engine's own SDP carries no `a=ice-options:trickle`, so two Deno
+       peers now see `canTrickleIceCandidates === false` (true before), as the
+       spec has it for that SDP.
+     - Node tests enabled: none; `node:` has no WebRTC API.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -17367,7 +17457,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+449, 450, 452) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.

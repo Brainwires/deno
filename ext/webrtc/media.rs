@@ -121,15 +121,17 @@ fn direction_str(direction: RTCRtpTransceiverDirection) -> Option<String> {
   }
 }
 
-/// `RTCRtpCodec` as JavaScript sees it.
+/// `RTCRtpCodec` as JavaScript sees it: a dictionary, so a member the codec
+/// doesn't have (a video codec's `channels`, an absent fmtp line) is left
+/// out rather than `null`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct CodecArg {
   pub mime_type: String,
   pub clock_rate: u32,
-  #[serde(default)]
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   pub channels: Option<u16>,
-  #[serde(default)]
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   pub sdp_fmtp_line: Option<String>,
 }
 
