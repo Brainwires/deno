@@ -20,7 +20,9 @@ const {
   ArrayBuffer,
   ArrayBufferIsView,
   ArrayPrototypeIncludes,
+  ArrayPrototypeUnshift,
   BigInt,
+  Error,
   MapPrototypeDelete,
   MapPrototypeGet,
   MapPrototypeSet,
@@ -59,9 +61,27 @@ const subtle = () => cryptoMod.crypto.subtle;
 // RFC 9605 Table 1, with each suite's IANA value.
 const SUITES = {
   __proto__: null,
-  AES_128_CTR_HMAC_SHA256_80: { id: 1, hash: "SHA-256", nka: 16, nk: 48, nt: 10 },
-  AES_128_CTR_HMAC_SHA256_64: { id: 2, hash: "SHA-256", nka: 16, nk: 48, nt: 8 },
-  AES_128_CTR_HMAC_SHA256_32: { id: 3, hash: "SHA-256", nka: 16, nk: 48, nt: 4 },
+  AES_128_CTR_HMAC_SHA256_80: {
+    id: 1,
+    hash: "SHA-256",
+    nka: 16,
+    nk: 48,
+    nt: 10,
+  },
+  AES_128_CTR_HMAC_SHA256_64: {
+    id: 2,
+    hash: "SHA-256",
+    nka: 16,
+    nk: 48,
+    nt: 8,
+  },
+  AES_128_CTR_HMAC_SHA256_32: {
+    id: 3,
+    hash: "SHA-256",
+    nka: 16,
+    nk: 48,
+    nt: 4,
+  },
   AES_128_GCM_SHA256_128: { id: 4, hash: "SHA-256", nka: 0, nk: 16, nt: 16 },
   AES_256_GCM_SHA512_128: { id: 5, hash: "SHA-512", nka: 0, nk: 32, nt: 16 },
 };
@@ -85,13 +105,22 @@ function suiteOf(options, prefix) {
   if (options.cipherSuite === undefined) {
     throw new TypeError(`${prefix}: 'cipherSuite' is required`);
   }
-  const name = webidl.converters.DOMString(options.cipherSuite, prefix, "cipherSuite");
+  const name = webidl.converters.DOMString(
+    options.cipherSuite,
+    prefix,
+    "cipherSuite",
+  );
   if (!ArrayPrototypeIncludes(ALL_SUITES, name)) {
-    throw new TypeError(`${prefix}: '${name}' is not a valid SFrameCipherSuite`);
+    throw new TypeError(
+      `${prefix}: '${name}' is not a valid SFrameCipherSuite`,
+    );
   }
   const suite = SUITES[name];
   if (suite === undefined) {
-    throw new DOMException(`${prefix}: ${name} is not supported`, "NotSupportedError");
+    throw new DOMException(
+      `${prefix}: ${name} is not supported`,
+      "NotSupportedError",
+    );
   }
   return suite;
 }
@@ -136,7 +165,7 @@ function compactLength(value) {
   return n;
 }
 
-function concat(...parts) {
+function concat(parts) {
   let length = 0;
   for (let i = 0; i < parts.length; ++i) {
     length += TypedArrayPrototypeGetByteLength(parts[i]);
@@ -168,7 +197,8 @@ function encodeHeader(kid, ctr) {
     config |= 0x08 | (len - 1);
     parts[parts.length] = bigEndian(ctr, len);
   }
-  return concat(new Uint8Array([config]), ...parts);
+  ArrayPrototypeUnshift(parts, new Uint8Array([config]));
+  return concat(parts);
 }
 
 function readBigEndian(bytes, offset, length) {
@@ -203,14 +233,14 @@ function decodeHeader(bytes) {
 // keys ready for the suite's AEAD.
 async function deriveContext(suite, baseKey, kid) {
   const s = subtle();
-  const tail = concat(bigEndian(kid, 8), bigEndian(suite.id, 2));
+  const tail = concat([bigEndian(kid, 8), bigEndian(suite.id, 2)]);
   const derive = (label, bytes) =>
     s.deriveBits(
       {
         name: "HKDF",
         hash: suite.hash,
         salt: new Uint8Array(0),
-        info: concat(core.encode(label), tail),
+        info: concat([core.encode(label), tail]),
       },
       baseKey,
       bytes * 8,
@@ -257,14 +287,14 @@ function nonceOf(ctx, ctr) {
 // RFC 9605 4.5.1's tag.
 async function ctrTag(ctx, nonce, aad, ct) {
   const nt = ctx.suite.nt;
-  const data = concat(
+  const data = concat([
     bigEndian(TypedArrayPrototypeGetByteLength(aad), 8),
     bigEndian(TypedArrayPrototypeGetByteLength(ct), 8),
     bigEndian(nt, 8),
     nonce,
     aad,
     ct,
-  );
+  ]);
   const mac = new Uint8Array(await subtle().sign("HMAC", ctx.hmac, data));
   return TypedArrayPrototypeSubarray(mac, 0, nt);
 }
@@ -273,7 +303,7 @@ async function ctrTag(ctx, nonce, aad, ct) {
 async function encrypt(ctx, kid, ctr, metadata, plaintext) {
   const header = encodeHeader(kid, ctr);
   const nonce = nonceOf(ctx, ctr);
-  const aad = concat(header, metadata);
+  const aad = concat([header, metadata]);
   if (ctx.hmac === null) {
     const ct = new Uint8Array(
       await subtle().encrypt(
@@ -282,16 +312,20 @@ async function encrypt(ctx, kid, ctr, metadata, plaintext) {
         plaintext,
       ),
     );
-    return concat(header, ct);
+    return concat([header, ct]);
   }
   const ct = new Uint8Array(
     await subtle().encrypt(
-      { name: "AES-CTR", counter: concat(nonce, new Uint8Array(4)), length: 32 },
+      {
+        name: "AES-CTR",
+        counter: concat([nonce, new Uint8Array(4)]),
+        length: 32,
+      },
       ctx.aes,
       plaintext,
     ),
   );
-  return concat(header, ct, await ctrTag(ctx, nonce, aad, ct));
+  return concat([header, ct, await ctrTag(ctx, nonce, aad, ct)]);
 }
 
 class SFrameError extends Error {
@@ -312,7 +346,7 @@ async function decrypt(lookup, metadata, data) {
   const headerBytes = TypedArrayPrototypeSubarray(data, 0, header.length);
   const body = TypedArrayPrototypeSubarray(data, header.length);
   const nonce = nonceOf(ctx, header.ctr);
-  const aad = concat(headerBytes, metadata);
+  const aad = concat([headerBytes, metadata]);
   const nt = ctx.suite.nt;
   if (TypedArrayPrototypeGetByteLength(body) < nt) {
     throw new SFrameError("syntax", header.kid);
@@ -339,7 +373,11 @@ async function decrypt(lookup, metadata, data) {
   if (diff !== 0) throw new SFrameError("authentication", header.kid);
   return new Uint8Array(
     await subtle().decrypt(
-      { name: "AES-CTR", counter: concat(nonce, new Uint8Array(4)), length: 32 },
+      {
+        name: "AES-CTR",
+        counter: concat([nonce, new Uint8Array(4)]),
+        length: 32,
+      },
       ctx.aes,
       ct,
     ),
@@ -414,7 +452,11 @@ function createDecryptor(suite, target) {
 
 function addDecryptionKey(state, key, keyId) {
   return serialize(state, async () => {
-    MapPrototypeSet(state.keys, keyId, await deriveContext(state.suite, key, keyId));
+    MapPrototypeSet(
+      state.keys,
+      keyId,
+      await deriveContext(state.suite, key, keyId),
+    );
   });
 }
 
@@ -470,7 +512,9 @@ function transformChunk(chunk, controller, run) {
       controller.enqueue(new ArrayBuffer(0));
       return;
     }
-    controller.enqueue(TypedArrayPrototypeGetBuffer(TypedArrayPrototypeSlice(out)));
+    controller.enqueue(
+      TypedArrayPrototypeGetBuffer(TypedArrayPrototypeSlice(out)),
+    );
   });
 }
 
@@ -493,12 +537,14 @@ class SFrameTransformErrorEvent extends Event {
     if (eventInitDict.errorType === undefined) {
       throw new TypeError(`${prefix}: 'errorType' is required`);
     }
-    if (!("frame" in eventInitDict)) {
+    if (eventInitDict.frame === undefined) {
       throw new TypeError(`${prefix}: 'frame' is required`);
     }
     const errorType = webidl.converters.DOMString(eventInitDict.errorType);
     if (!ArrayPrototypeIncludes(ERROR_TYPES, errorType)) {
-      throw new TypeError(`${prefix}: '${errorType}' is not a valid error type`);
+      throw new TypeError(
+        `${prefix}: '${errorType}' is not a valid error type`,
+      );
     }
     super(type, eventInitDict);
     this.#errorType = errorType;
@@ -536,7 +582,11 @@ class SFrameEncryptorStream {
     this[_sframe] = state;
     state.stream = new TransformStream({
       transform: (chunk, controller) =>
-        transformChunk(chunk, controller, (bytes) => encryptBytes(state, bytes)),
+        transformChunk(
+          chunk,
+          controller,
+          (bytes) => encryptBytes(state, bytes),
+        ),
     });
     this[webidl.brand] = webidl.brand;
   }
@@ -551,7 +601,8 @@ class SFrameEncryptorStream {
   }
 
   setEncryptionKey(key, keyId) {
-    const prefix = "Failed to execute 'setEncryptionKey' on 'SFrameEncryptorStream'";
+    const prefix =
+      "Failed to execute 'setEncryptionKey' on 'SFrameEncryptorStream'";
     try {
       webidl.assertBranded(this, SFrameEncryptorStreamPrototype);
       webidl.requiredArguments(arguments.length, 2, prefix);
@@ -658,7 +709,8 @@ class RTCRtpSFrameEncryptor {
   }
 
   setEncryptionKey(key, keyId) {
-    const prefix = "Failed to execute 'setEncryptionKey' on 'RTCRtpSFrameEncryptor'";
+    const prefix =
+      "Failed to execute 'setEncryptionKey' on 'RTCRtpSFrameEncryptor'";
     try {
       webidl.assertBranded(this, RTCRtpSFrameEncryptorPrototype);
       webidl.requiredArguments(arguments.length, 2, prefix);

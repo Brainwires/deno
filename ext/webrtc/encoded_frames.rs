@@ -225,7 +225,10 @@ mod tests {
   fn audio_packets_are_frames() {
     let mut a = FrameAssembler::new(111, "audio/opus");
     let f = a
-      .push(&header(7, 960, true), &Bytes::from_static(&[0xf8, 0xff, 0xfe]))
+      .push(
+        &header(7, 960, true),
+        &Bytes::from_static(&[0xf8, 0xff, 0xfe]),
+      )
       .unwrap();
     assert_eq!(f.data, vec![0xf8, 0xff, 0xfe]);
     assert_eq!(f.info.rtp_timestamp, 960);
@@ -240,7 +243,10 @@ mod tests {
     // engine's depacketizer takes payloads of 4 bytes or more.
     let mut a = FrameAssembler::new(96, "video/VP8");
     let key = [0x10, 0, 0, 0, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0xe0, 0x01];
-    assert!(a.push(&header(1, 90, false), &Bytes::copy_from_slice(&key)).is_none());
+    assert!(
+      a.push(&header(1, 90, false), &Bytes::copy_from_slice(&key))
+        .is_none()
+    );
     let f = a
       .push(
         &header(2, 90, true),
@@ -249,7 +255,9 @@ mod tests {
       .unwrap();
     assert_eq!(
       f.data,
-      vec![0, 0, 0, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0xe0, 0x01, 0xaa, 0xbb, 0xcc]
+      vec![
+        0, 0, 0, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0xe0, 0x01, 0xaa, 0xbb, 0xcc
+      ]
     );
     assert!(f.key_frame);
     assert_eq!(f.width_height, Some((640, 480)));

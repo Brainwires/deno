@@ -25,12 +25,12 @@ const {
   ArrayPrototypeIncludes,
   ArrayPrototypeMap,
   ArrayPrototypePush,
+  ArrayPrototypeSlice,
   MathMax,
   MathMin,
   NumberIsFinite,
   ObjectFreeze,
   ObjectKeys,
-  ObjectPrototypeIsPrototypeOf,
   PromiseReject,
   PromiseResolve,
   SafeSet,
@@ -133,7 +133,10 @@ class MediaDeviceInfo {
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
-    return `${this.constructor.name} ${inspect(this.toJSON(), inspectOptions)}`;
+    const { deviceId, kind, label, groupId } = this[_info];
+    return `${this.constructor.name} ${
+      inspect({ deviceId, kind, label, groupId }, inspectOptions)
+    }`;
   }
 }
 webidl.configureInterface(MediaDeviceInfo);
@@ -187,6 +190,8 @@ const FAKE_DEVICES = ObjectFreeze([
   },
 ]);
 
+const KINDS = ["audio", "video"];
+
 const SUPPORTED_CONSTRAINTS = [
   "width",
   "height",
@@ -217,7 +222,7 @@ function capabilitiesOf(device) {
     if (p.range !== undefined) {
       out[keys[i]] = { min: p.range[0], max: p.range[1] };
     } else {
-      out[keys[i]] = [...p.values];
+      out[keys[i]] = ArrayPrototypeSlice(p.values);
     }
   }
   return out;
@@ -267,7 +272,8 @@ function narrow(device, name, c, current) {
   const p = device.properties[name];
   if (p === undefined) return current; // Not a property of this device.
   if (p.range !== undefined) {
-    let [lo, hi] = current;
+    let lo = current[0];
+    let hi = current[1];
     const num = (v) => (typeof v === "number" ? v : undefined);
     const exact = num(c.exact);
     const min = num(c.min);
@@ -299,7 +305,9 @@ function initialRanges(device) {
   const keys = ObjectKeys(device.properties);
   for (let i = 0; i < keys.length; ++i) {
     const p = device.properties[keys[i]];
-    ranges[keys[i]] = p.range !== undefined ? [...p.range] : [...p.values];
+    ranges[keys[i]] = ArrayPrototypeSlice(
+      p.range !== undefined ? p.range : p.values,
+    );
   }
   ranges.deviceId = true;
   ranges.groupId = true;
@@ -453,7 +461,7 @@ function createSource(device) {
     capabilities: () => capabilitiesOf(device),
     settings: (track) => ({ ...trackInfo(track).settings }),
     constraints: (track) => structuredCopy(trackInfo(track).constraints),
-    apply: (track, constraints) => {
+    applyConstraints: (track, constraints) => {
       let converted;
       try {
         converted = convertConstraints(
@@ -466,7 +474,10 @@ function createSource(device) {
       const { settings, failed } = selectSettings(device, converted);
       if (failed !== undefined) {
         return PromiseReject(
-          new OverconstrainedError(failed, "Constraints could not be satisfied"),
+          new OverconstrainedError(
+            failed,
+            "Constraints could not be satisfied",
+          ),
         );
       }
       WeakMapPrototypeSet(trackSettings, track, {
@@ -549,18 +560,21 @@ class MediaDevices extends EventTarget {
     return out;
   }
 
-  getUserMedia(constraints = {}) {
+  getUserMedia(constraints = undefined) {
     const prefix = "Failed to execute 'getUserMedia' on 'MediaDevices'";
     let requested;
     try {
       webidl.assertBranded(this, MediaDevicesPrototype);
       if (constraints === null || constraints === undefined) constraints = {};
-      if (typeof constraints !== "object" && typeof constraints !== "function") {
+      if (
+        typeof constraints !== "object" && typeof constraints !== "function"
+      ) {
         throw new TypeError(`${prefix}: constraints must be a dictionary`);
       }
       // MediaStreamConstraints: (boolean or MediaTrackConstraints) each.
       requested = [];
-      for (const kind of ["audio", "video"]) {
+      for (let k = 0; k < KINDS.length; ++k) {
+        const kind = KINDS[k];
         const v = constraints[kind];
         if (v === undefined || v === false) continue;
         if (isObject(v) || typeof v === "function") {

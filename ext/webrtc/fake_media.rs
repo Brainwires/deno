@@ -148,8 +148,20 @@ mod tests {
   #[test]
   fn opus_clips_are_mono_and_stereo() {
     // The TOC byte's `s` bit (0x04) marks a stereo frame.
-    assert!(clip("audio/opus", false).unwrap().0.iter().all(|f| f[0] & 4 == 0));
-    assert!(clip("audio/opus", true).unwrap().0.iter().all(|f| f[0] & 4 != 0));
+    assert!(
+      clip("audio/opus", false)
+        .unwrap()
+        .0
+        .iter()
+        .all(|f| f[0] & 4 == 0)
+    );
+    assert!(
+      clip("audio/opus", true)
+        .unwrap()
+        .0
+        .iter()
+        .all(|f| f[0] & 4 != 0)
+    );
   }
 
   #[test]

@@ -29,6 +29,7 @@ const {
   ArrayBufferPrototypeSlice,
   ArrayIsArray,
   ArrayPrototypePush,
+  ArrayPrototypeSlice,
   MapPrototypeDelete,
   MapPrototypeGet,
   MapPrototypeSet,
@@ -87,10 +88,10 @@ function invalidState(message) {
 function copyMetadata(metadata) {
   const out = { ...metadata };
   if (ArrayIsArray(metadata.contributingSources)) {
-    out.contributingSources = [...metadata.contributingSources];
+    out.contributingSources = ArrayPrototypeSlice(metadata.contributingSources);
   }
   if (ArrayIsArray(metadata.dependencies)) {
-    out.dependencies = [...metadata.dependencies];
+    out.dependencies = ArrayPrototypeSlice(metadata.dependencies);
   }
   return out;
 }
@@ -130,9 +131,14 @@ class RTCEncodedVideoFrame {
     const prefix = "Failed to construct 'RTCEncodedVideoFrame'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     if (
-      !ObjectPrototypeIsPrototypeOf(RTCEncodedVideoFramePrototype, originalFrame)
+      !ObjectPrototypeIsPrototypeOf(
+        RTCEncodedVideoFramePrototype,
+        originalFrame,
+      )
     ) {
-      throw new TypeError(`${prefix}: Argument 1 is not an RTCEncodedVideoFrame`);
+      throw new TypeError(
+        `${prefix}: Argument 1 is not an RTCEncodedVideoFrame`,
+      );
     }
     initFrame(this, {
       type: originalFrame[_type],
@@ -188,9 +194,14 @@ class RTCEncodedAudioFrame {
     const prefix = "Failed to construct 'RTCEncodedAudioFrame'";
     webidl.requiredArguments(arguments.length, 1, prefix);
     if (
-      !ObjectPrototypeIsPrototypeOf(RTCEncodedAudioFramePrototype, originalFrame)
+      !ObjectPrototypeIsPrototypeOf(
+        RTCEncodedAudioFramePrototype,
+        originalFrame,
+      )
     ) {
-      throw new TypeError(`${prefix}: Argument 1 is not an RTCEncodedAudioFrame`);
+      throw new TypeError(
+        `${prefix}: Argument 1 is not an RTCEncodedAudioFrame`,
+      );
     }
     initFrame(this, {
       type: undefined,
@@ -239,10 +250,7 @@ function isFrame(value) {
 
 // Serializable: a frame posted to another realm arrives as a frame (its
 // data copied, or moved when it is in the transfer list).
-for (const [ctor, name] of [
-  [RTCEncodedVideoFrame, "RTCEncodedVideoFrame"],
-  [RTCEncodedAudioFrame, "RTCEncodedAudioFrame"],
-]) {
+function makeSerializable(ctor, name) {
   ObjectDefineProperty(ctor.prototype, core.hostObjectBrand, {
     __proto__: null,
     value: function () {
@@ -259,6 +267,8 @@ for (const [ctor, name] of [
     writable: false,
   });
 }
+makeSerializable(RTCEncodedVideoFrame, "RTCEncodedVideoFrame");
+makeSerializable(RTCEncodedAudioFrame, "RTCEncodedAudioFrame");
 
 // Registered in every realm by 98_global_scope_shared.js.
 function deserializeFrame(serialized) {
@@ -302,9 +312,13 @@ class RTCRtpScriptTransform {
       ? []
       : webidl.converters["sequence<object>"](transfer, prefix, "Argument 3");
     const { port1, port2 } = new MessageChannel();
+    const transferList = [port2];
+    for (let i = 0; i < list.length; ++i) {
+      ArrayPrototypePush(transferList, list[i]);
+    }
     worker.postMessage(
       { [TRANSFORM_KEY]: { options, port: port2 } },
-      [port2, ...list],
+      transferList,
     );
     this[_state] = {
       port: port1,
@@ -441,8 +455,7 @@ function initRtpTransform(sframeTransform) {
 
 // `sender.transform` / `receiver.transform` set (01_webrtc.js).
 function setTransform(owner, side, transform) {
-  const { _transform, _pc, _transceiver, _key, _rid, _state: s } =
-    internals();
+  const { _transform, _pc, _transceiver, _key, _rid, _state: s } = internals();
   if (transform !== null) {
     const isScript = ObjectPrototypeIsPrototypeOf(
       RTCRtpScriptTransformPrototype,
@@ -512,7 +525,12 @@ function feedFake(sender, pc, key, stereo) {
     captureTime: performance.now(),
     mimeType: info.mimeType,
   };
-  if (StringPrototypeStartsWith(StringPrototypeToLowerCase(info.mimeType), "video/")) {
+  if (
+    StringPrototypeStartsWith(
+      StringPrototypeToLowerCase(info.mimeType),
+      "video/",
+    )
+  ) {
     if (f.widthHeight !== null) {
       state.size = f.widthHeight;
     }
@@ -614,7 +632,12 @@ function deliverReceived(receiver, event) {
     mimeType: info.mimeType,
   };
   const data = copyBytes(event.data);
-  if (StringPrototypeStartsWith(StringPrototypeToLowerCase(info.mimeType), "video/")) {
+  if (
+    StringPrototypeStartsWith(
+      StringPrototypeToLowerCase(info.mimeType),
+      "video/",
+    )
+  ) {
     if (event.width !== null && event.height !== null) {
       state.size = [event.width, event.height];
     }

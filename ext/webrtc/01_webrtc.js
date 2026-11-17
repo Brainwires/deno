@@ -1119,7 +1119,9 @@ class MediaStreamTrack extends EventTarget {
     const error = brandError(this, MediaStreamTrackPrototype);
     if (error !== null) return PromiseReject(error);
     const device = this[_source]?.device;
-    return device ? device.apply(this, constraints) : PromiseResolve();
+    return device
+      ? device.applyConstraints(this, constraints)
+      : PromiseResolve();
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
@@ -2200,12 +2202,7 @@ const loadEncodedTransform = () =>
       "ext:deno_webrtc/03_encoded_transform.js",
     ));
 
-for (
-  const [prototype, side] of [
-    [RTCRtpSenderPrototype, "sender"],
-    [RTCRtpReceiverPrototype, "receiver"],
-  ]
-) {
+function defineTransformAttribute(prototype, side) {
   // An accessor literal, so the functions are named `get transform` /
   // `set transform` as Web IDL has them.
   const { get, set } = ObjectGetOwnPropertyDescriptor({
@@ -2226,6 +2223,8 @@ for (
     set,
   });
 }
+defineTransformAttribute(RTCRtpSenderPrototype, "sender");
+defineTransformAttribute(RTCRtpReceiverPrototype, "receiver");
 
 function receiverSources(receiver, contributing) {
   const pc = receiver[_pc];
@@ -4062,7 +4061,9 @@ function dispatchEngineEvent(pc, event) {
       const t = transceiverFor(pc, event.transceiver);
       const sender = t?.[_state].sender;
       // An encoded transform's worker hears it too (03_encoded_transform.js).
-      if (sender?.[_transform]) loadEncodedTransform().keyFrameRequested(sender);
+      if (sender?.[_transform]) {
+        loadEncodedTransform().keyFrameRequested(sender);
+      }
       const track = sender?.[_state].track;
       if (track === null || track === undefined) break;
       fire(track, new Event("keyframerequest"));

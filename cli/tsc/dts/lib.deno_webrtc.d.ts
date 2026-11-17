@@ -1938,7 +1938,9 @@ declare var SFrameEncryptorStream: {
 interface SFrameDecryptorStream extends EventTarget {
   readonly readable: ReadableStream;
   readonly writable: WritableStream;
-  onerror: ((this: SFrameDecryptorStream, ev: SFrameTransformErrorEvent) => any) | null;
+  onerror:
+    | ((this: SFrameDecryptorStream, ev: SFrameTransformErrorEvent) => any)
+    | null;
   addDecryptionKey(key: CryptoKey, keyId: CryptoKeyID): Promise<void>;
   removeDecryptionKey(keyId: CryptoKeyID): Promise<void>;
 }
@@ -2003,7 +2005,9 @@ interface RTCRtpSFrameEncryptor {
  * @category WebRTC
  */
 interface RTCRtpSFrameDecryptor extends EventTarget {
-  onerror: ((this: RTCRtpSFrameDecryptor, ev: SFrameTransformErrorEvent) => any) | null;
+  onerror:
+    | ((this: RTCRtpSFrameDecryptor, ev: SFrameTransformErrorEvent) => any)
+    | null;
   addDecryptionKey(key: CryptoKey, keyId: CryptoKeyID): Promise<void>;
   removeDecryptionKey(keyId: CryptoKeyID): Promise<void>;
 }

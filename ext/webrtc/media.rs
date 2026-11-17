@@ -456,9 +456,13 @@ pub fn is_key_frame(mime_type: &str, data: &[u8]) -> bool {
       let shift = if profile == 3 { 1 } else { 0 };
       (b >> (3 - shift)) & 1 == 0 && (b >> (2 - shift)) & 1 == 0
     }),
-    "video/h264" => nal_units(data).any(|n| n.first().is_some_and(|b| b & 0x1f == 5)),
-    "video/h265" => nal_units(data)
-      .any(|n| n.first().is_some_and(|b| (16..=23).contains(&((b >> 1) & 0x3f)))),
+    "video/h264" => {
+      nal_units(data).any(|n| n.first().is_some_and(|b| b & 0x1f == 5))
+    }
+    "video/h265" => nal_units(data).any(|n| {
+      n.first()
+        .is_some_and(|b| (16..=23).contains(&((b >> 1) & 0x3f)))
+    }),
     "video/av1" => {
       // A sequence header OBU (type 1) starts every key frame's temporal
       // unit.
@@ -486,7 +490,10 @@ fn nal_units(data: &[u8]) -> impl Iterator<Item = &[u8]> {
     .map(|s| s - 3)
     .chain(std::iter::once(data.len()))
     .collect();
-  starts.into_iter().zip(ends).map(move |(a, b)| &data[a..b.max(a)])
+  starts
+    .into_iter()
+    .zip(ends)
+    .map(move |(a, b)| &data[a..b.max(a)])
 }
 
 /// A key frame's size, where its bitstream says it simply (VP8).

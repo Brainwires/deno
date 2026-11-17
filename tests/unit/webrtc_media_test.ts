@@ -7,7 +7,10 @@
 import { assert, assertEquals, assertRejects } from "./test_util.ts";
 
 // deno-lint-ignore no-explicit-any
-function assertInstanceOf(value: unknown, ctor: new (...args: any[]) => unknown) {
+function assertInstanceOf(
+  value: unknown,
+  ctor: new (...args: any[]) => unknown,
+) {
   assert(value instanceof ctor, `expected an instance of ${ctor.name}`);
 }
 
@@ -239,7 +242,10 @@ Deno.test("scriptTransformSeesSentAndReceivedFrames", async () => {
       metadata: { rtpTimestamp: 7 },
     });
     assertEquals(copy.getMetadata().rtpTimestamp, 7);
-    assertEquals(copy.getMetadata().synchronizationSource, s.synchronizationSource);
+    assertEquals(
+      copy.getMetadata().synchronizationSource,
+      s.synchronizationSource,
+    );
     // A transform is used by one sender or receiver at a time.
     const other = a.addTransceiver("audio").sender;
     let threw = false;

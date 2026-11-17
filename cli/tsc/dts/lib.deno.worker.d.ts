@@ -339,9 +339,13 @@ declare var onrtctransform:
  */
 interface RTCRtpScriptTransformer extends EventTarget {
   /** The frames, in order; frames that would wait beyond 256 are dropped. */
-  readonly readable: ReadableStream<RTCEncodedVideoFrame | RTCEncodedAudioFrame>;
+  readonly readable: ReadableStream<
+    RTCEncodedVideoFrame | RTCEncodedAudioFrame
+  >;
   /** What goes on: a sender's are sent, a receiver's dropped. */
-  readonly writable: WritableStream<RTCEncodedVideoFrame | RTCEncodedAudioFrame>;
+  readonly writable: WritableStream<
+    RTCEncodedVideoFrame | RTCEncodedAudioFrame
+  >;
   /** The `options` the transform was made with. */
   readonly options: any;
   /** The remote asked the sender for a key frame. */
