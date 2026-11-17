@@ -1051,9 +1051,9 @@ fn media_chain_delivers_key_frame_requests() {
   let mut delivered = 0;
   while let Some(read) = chain.poll_read() {
     if let Packet::Rtcp(packets) = &read.message.packet
-      && packets.iter().any(|p| {
-        p.as_any().downcast_ref::<PictureLossIndication>().is_some()
-      })
+      && packets
+        .iter()
+        .any(|p| p.as_any().downcast_ref::<PictureLossIndication>().is_some())
     {
       delivered += 1;
     }
