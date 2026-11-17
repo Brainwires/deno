@@ -32,7 +32,7 @@ async function connect(a: RTCPeerConnection, b: RTCPeerConnection) {
 }
 
 function timeout<T>(p: Promise<T>, ms = 15_000, what = "event"): Promise<T> {
-  let timer: number;
+  let timer: ReturnType<typeof setTimeout>;
   return Promise.race([
     p.finally(() => clearTimeout(timer)),
     new Promise<T>((_, reject) => {
@@ -262,7 +262,7 @@ Deno.test("scriptTransformSeesSentAndReceivedFrames", async () => {
   }
 });
 
-function hex(s: string): Uint8Array {
+function hex(s: string): Uint8Array<ArrayBuffer> {
   const clean = s.replace(/\s+/g, "");
   const out = new Uint8Array(clean.length / 2);
   for (let i = 0; i < out.length; ++i) {
@@ -275,7 +275,7 @@ function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function baseKey(raw: Uint8Array): Promise<CryptoKey> {
+function baseKey(raw: Uint8Array<ArrayBuffer>): Promise<CryptoKey> {
   return crypto.subtle.importKey("raw", raw, "HKDF", false, ["deriveBits"]);
 }
 
