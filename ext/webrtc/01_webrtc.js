@@ -2449,6 +2449,52 @@ function validateEncodings(list, kind, method, keepRid) {
 }
 const RID_RE = new SafeRegExp("^[A-Za-z0-9]+$");
 
+// Each transceiver's remote track state before a remote offer is applied, so
+// that rolling the offer back can undo what it did (W3C "set the
+// RTCSessionDescription", rollback: the remote streams are restored and a
+// track the offer started receiving is removed).
+function remoteTrackSnapshot(pc) {
+  const snapshot = new SafeMap();
+  const transceivers = pc[_state].transceivers;
+  for (let i = 0; i < transceivers.length; ++i) {
+    const rstate = transceivers[i][_state].receiver[_state];
+    MapPrototypeSet(snapshot, transceivers[i], {
+      receiving: rstate.receiving,
+      streams: rstate.streams,
+    });
+  }
+  return snapshot;
+}
+
+function restoreRemoteTracks(pc) {
+  const state = pc[_state];
+  const snapshot = state.remoteTracksBeforeOffer ?? new SafeMap();
+  state.remoteTracksBeforeOffer = null;
+  const transceivers = state.transceivers;
+  for (let i = 0; i < transceivers.length; ++i) {
+    const t = transceivers[i];
+    const rstate = t[_state].receiver[_state];
+    if (!rstate.receiving) continue;
+    const before = MapPrototypeGet(snapshot, t);
+    if (before === undefined || !before.receiving) {
+      removeRemoteTrack(t);
+      continue;
+    }
+    const now = rstate.streams;
+    for (let j = 0; j < now.length; ++j) {
+      if (!ArrayPrototypeIncludes(before.streams, now[j])) {
+        streamRemoveRemote(now[j], rstate.track);
+      }
+    }
+    for (let j = 0; j < before.streams.length; ++j) {
+      if (!ArrayPrototypeIncludes(now, before.streams[j])) {
+        streamAddRemote(before.streams[j], rstate.track);
+      }
+    }
+    rstate.streams = before.streams;
+  }
+}
+
 // The process of removing a remote track (the remote side stopped sending).
 function removeRemoteTrack(transceiver) {
   const receiver = transceiver[_state].receiver;
@@ -2677,6 +2723,7 @@ class RTCPeerConnection extends EventTarget {
       streams: new SafeMap(),
       localCandidates: [],
       remoteCandidates: [],
+      remoteTracksBeforeOffer: null,
       cname: uuid(),
       // "controlling" / "controlled" once an answer is applied.
       iceRole: null,
@@ -2947,8 +2994,13 @@ class RTCPeerConnection extends EventTarget {
       if (type !== "rollback") {
         requireRtcpMux(sdp);
       }
+      const offerFromStable = type === "offer" &&
+        this[_state].signalingState === "stable";
+      const before = offerFromStable ? remoteTrackSnapshot(this) : null;
       op_webrtc_pc_set_remote_description(this[_rid], type, sdp);
       const state = this[_state];
+      if (offerFromStable) state.remoteTracksBeforeOffer = before;
+      if (type === "rollback") restoreRemoteTracks(this);
       if (type !== "rollback") {
         state.remoteMaxMessageSize = maxMessageSizeOf(sdp);
       }
@@ -2987,7 +3039,9 @@ class RTCPeerConnection extends EventTarget {
       );
     }
     return enqueue(this, () => {
-      if (candidate === undefined || candidate === null) return;
+      // No candidate (undefined, null or `{}`) is the end-of-candidates
+      // indication for every media description.
+      candidate ??= { __proto__: null };
       const line = candidate.candidate === undefined
         ? ""
         : String(candidate.candidate);
@@ -3015,16 +3069,9 @@ class RTCPeerConnection extends EventTarget {
           );
         }
       }
+      // The engine checks a usernameFragment against its media description's
+      // ice-ufrag (each m-section may have its own).
       const ufrag = candidate.usernameFragment ?? null;
-      if (ufrag !== null) {
-        const remote = iceParameters(this.remoteDescription);
-        if (remote !== null && remote.usernameFragment !== ufrag) {
-          throw new DOMException(
-            "addIceCandidate: the usernameFragment is not the remote description's",
-            "OperationError",
-          );
-        }
-      }
       op_webrtc_pc_add_ice_candidate(this[_rid], {
         candidate: line,
         sdpMid: sdpMid === null ? null : String(sdpMid),

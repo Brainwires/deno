@@ -935,3 +935,19 @@ fn stats_epoch_fields_are_milliseconds() {
   assert_eq!(stats["lastPacketReceivedTimestamp"], 2500.0);
   assert_eq!(stats["bytesSent"], 7);
 }
+
+#[test]
+fn gathering_needs_a_live_media_section() {
+  use crate::peer::has_live_media_section;
+  let head = "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n";
+  assert!(!has_live_media_section(head));
+  assert!(has_live_media_section(&format!(
+    "{head}m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n"
+  )));
+  assert!(!has_live_media_section(&format!(
+    "{head}m=audio 0 UDP/TLS/RTP/SAVPF 0\r\na=mid:0\r\n"
+  )));
+  assert!(has_live_media_section(&format!(
+    "{head}m=audio 0 UDP/TLS/RTP/SAVPF 0\r\na=bundle-only\r\n"
+  )));
+}
