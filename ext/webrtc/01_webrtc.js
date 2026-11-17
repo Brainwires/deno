@@ -3702,7 +3702,8 @@ function updateSctpTransport(pc, type) {
     return;
   }
   if (
-    state.sctp === null && (has(pc.localDescription) || has(pc.remoteDescription))
+    state.sctp === null &&
+    (has(pc.localDescription) || has(pc.remoteDescription))
   ) {
     state.sctpState = null;
     state.sctp = new RTCSctpTransport(illegalConstructorKey, pc);

@@ -47,23 +47,17 @@
   },
   "RTCDataChannel-GC.html": true,
   "RTCDataChannel-binaryType.window.html": true,
-  "RTCDataChannel-bufferedAmount.html": false,
+  "RTCDataChannel-bufferedAmount.html": true,
   "RTCDataChannel-close.html": false,
   "RTCDataChannel-iceRestart.html": true,
-  "RTCDataChannel-id.html": {
-    "expectedFailures": [
-      "DTLS client uses odd data channel IDs",
-      "DTLS server uses even data channel IDs",
-      "Odd/even role should not be violated when mixing with negotiated channels"
-    ]
-  },
-  "RTCDataChannel-send-blob-order.html": false,
-  "RTCDataChannel-send-close-array-buffer-negotiated.window.html": false,
-  "RTCDataChannel-send-close-array-buffer.window.html": false,
-  "RTCDataChannel-send-close-blob-negotiated.window.html": false,
-  "RTCDataChannel-send-close-blob.window.html": false,
-  "RTCDataChannel-send-close-string-negotiated.window.html": false,
-  "RTCDataChannel-send-close-string.window.html": false,
+  "RTCDataChannel-id.html": true,
+  "RTCDataChannel-send-blob-order.html": true,
+  "RTCDataChannel-send-close-array-buffer-negotiated.window.html": true,
+  "RTCDataChannel-send-close-array-buffer.window.html": true,
+  "RTCDataChannel-send-close-blob-negotiated.window.html": true,
+  "RTCDataChannel-send-close-blob.window.html": true,
+  "RTCDataChannel-send-close-string-negotiated.window.html": true,
+  "RTCDataChannel-send-close-string.window.html": true,
   "RTCDataChannel-send.html": false,
   "RTCDataChannel-worker-GC.html": false,
   "RTCDataChannelEvent-constructor.html": true,
@@ -83,32 +77,21 @@
   "RTCError.html?rest": false,
   "RTCIceCandidate-constructor.html": true,
   "RTCIceConnectionState-candidate-pair.https.html": false,
-  "RTCIceTransport.html?interop-2026": {
-    "expectedFailures": [
-      "RTCIceTransport should transition to \"gathering\", then \"complete\" after sLD (DataChannel case)"
-    ]
-  },
+  "RTCIceTransport.html?interop-2026": true,
   "RTCIceTransport.html?rest": {
     "expectedFailures": [
       "Two connected iceTransports should have matching local/remote candidates returned",
-      "Unconnected iceTransport should have empty remote candidates and selected pair",
       "RTCIceTransport should not transition to \"checking\" until after the answer is set _and_ the first remote candidate is received",
       "Remote ICE restart should not result in a different ICE transport",
       "Remote ICE restart should not result in a different ICE transport (DataChannel case)",
-      "RTCIceTransport should transition to \"closed\" if the underlying transport is closed because the answer used bundle",
-      "RTCIceTransport does not expose remote peer-reflexive candidates."
+      "RTCIceTransport should transition to \"closed\" if the underlying transport is closed because the answer used bundle"
     ]
   },
   "RTCPeerConnection-GC.https.html": false,
   "RTCPeerConnection-SLD-SRD-timing.https.html": true,
   "RTCPeerConnection-add-track-no-deadlock.https.html": false,
   "RTCPeerConnection-addIceCandidate-connectionSetup.html": true,
-  "RTCPeerConnection-addIceCandidate-timing.https.html": {
-    "expectedFailures": [
-      "onicecandidate fires after resolving setLocalDescription in offerer",
-      "onicecandidate fires after resolving setLocalDescription in answerer"
-    ]
-  },
+  "RTCPeerConnection-addIceCandidate-timing.https.html": true,
   "RTCPeerConnection-addIceCandidate.html?interop-2026": {
     "expectedFailures": [
       "addIceCandidate should not recognize relayProtocol or url"
@@ -189,8 +172,6 @@
   "RTCPeerConnection-createDataChannel.html?interop-2026": true,
   "RTCPeerConnection-createDataChannel.html?rest": {
     "expectedFailures": [
-      "Channels created (after SCTP connected) should have id assigned",
-      "Reusing a data channel id that is in use (after setRemoteDescription, negotiated via DCEP) should throw OperationError",
       "addTrack, then creating datachannel, should negotiate properly",
       "addTrack, then creating datachannel, should negotiate properly when max-bundle is used",
       "Renegotiation with audio/video and datachannel should work properly",
@@ -214,7 +195,11 @@
       "generateCertificate({modulusLength: 1024}) with RSASSA-PKCS1-v1_5 parameters should succeed"
     ]
   },
-  "RTCPeerConnection-getStats-timestamp.https.html": false,
+  "RTCPeerConnection-getStats-timestamp.https.html": {
+    "expectedFailures": [
+      "RTCRemoteInboundRtpStats.timestamp is expressed as Performance time"
+    ]
+  },
   "RTCPeerConnection-getStats.https.html?interop-2026": {
     "expectedFailures": [
       "getStats() with track not added to connection should reject with InvalidAccessError",
@@ -252,15 +237,23 @@
       "ICE restart does not result in a transition back to checking"
     ]
   },
-  "RTCPeerConnection-iceGatheringState.html?interop-2026": false,
-  "RTCPeerConnection-iceGatheringState.html?rest": false,
+  "RTCPeerConnection-iceGatheringState.html?interop-2026": {
+    "expectedFailures": [
+      "renegotiation that closes all transports should result in ICE gathering state \"new\""
+    ]
+  },
+  "RTCPeerConnection-iceGatheringState.html?rest": {
+    "expectedFailures": [
+      "setLocalDescription() with no transports should not cause iceGatheringState to change",
+      "gathering state and candidate callbacks should fire in the correct order",
+      "sRD does not cause ICE gathering state changes"
+    ]
+  },
   "RTCPeerConnection-mandatory-getStats.https.html": false,
   "RTCPeerConnection-ondatachannel.html": {
     "expectedFailures": [
       "Open event should not be raised when closing the channel in the datachannel event",
-      "Open event should not be raised when sending and immediately closing the channel in the datachannel event",
-      "In-band negotiated channel created on remote peer should match the same configuration as local peer",
-      "In-band negotiated channel created on remote peer should match the same (default) configuration as local peer"
+      "Open event should not be raised when sending and immediately closing the channel in the datachannel event"
     ]
   },
   "RTCPeerConnection-onicecandidateerror.https.html": false,
@@ -292,7 +285,15 @@
       "receiver.getStats does NOT use the operations chain"
     ]
   },
-  "RTCPeerConnection-operations.https.html?rest": false,
+  "RTCPeerConnection-operations.https.html?rest": {
+    "expectedFailures": [
+      "addIceCandidate must detect InvalidStateError synchronously when chain is empty",
+      "createOffer uses operations chain",
+      "Negotiationneeded only fires once operations chain is empty",
+      "setParameters does NOT use the operations chain",
+      "Operations queue not vulnerable to recursion by chained negotiationneeded"
+    ]
+  },
   "RTCPeerConnection-perfect-negotiation-stress-glare-linear.https.html": false,
   "RTCPeerConnection-perfect-negotiation-stress-glare.https.html": false,
   "RTCPeerConnection-perfect-negotiation.https.html": false,
@@ -596,12 +597,12 @@
   },
   "RTCSctpTransport-constructor.html": true,
   "RTCSctpTransport-events.html": false,
-  "RTCSctpTransport-maxChannels.html?interop-2026": {
+  "RTCSctpTransport-maxChannels.html?interop-2026": true,
+  "RTCSctpTransport-maxChannels.html?rest": {
     "expectedFailures": [
-      "maxChannels gets instantiated after connecting"
+      "Sctp transport has null maxChannels and 65536 maxMessageSize in have-remote-offer after rollback"
     ]
   },
-  "RTCSctpTransport-maxChannels.html?rest": false,
   "RTCSctpTransport-maxMessageSize.html": {
     "expectedFailures": [
       "Renegotiate max-message-size with various values provided by the remote peer",
@@ -692,13 +693,9 @@
       "RTCDtlsTransport interface: attribute onstatechange",
       "RTCDtlsTransport interface: attribute onerror",
       "RTCIceTransport interface: existence and properties of interface object",
-      "RTCIceTransport interface: operation getLocalCandidates()",
-      "RTCIceTransport interface: operation getRemoteCandidates()",
       "RTCIceTransport interface: attribute onstatechange",
       "RTCIceTransport interface: attribute ongatheringstatechange",
       "RTCIceTransport interface: attribute onselectedcandidatepairchange",
-      "RTCIceTransport interface: idlTestObjects.iceTransport must inherit property \"getLocalCandidates()\" with the proper type",
-      "RTCIceTransport interface: idlTestObjects.iceTransport must inherit property \"getRemoteCandidates()\" with the proper type",
       "RTCDTMFToneChangeEvent interface: existence and properties of interface object",
       "RTCError interface: existence and properties of interface object",
       "RTCError interface object length",
@@ -762,7 +759,7 @@
     },
     "direction.html": false,
     "dtls-certificates.html": true,
-    "dtls-close.html": false,
+    "dtls-close.html": true,
     "dtls-fingerprint-validation.html": false,
     "dtls-setup.https.html": false,
     "h264-profile-levels.https.html?interop-2026": false,
