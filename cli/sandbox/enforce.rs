@@ -989,11 +989,11 @@ fn use_cache_overlay(plan: &EnforcePlan) {
 /// that isn't confined yet. A failure leaves it absent: the policy then has
 /// no overlay and the caches stay in memory.
 pub fn create_cache_overlay(overlay: &Path) {
-  if std::fs::create_dir_all(overlay).is_err() {
-    return;
-  }
+  let created = std::fs::create_dir_all(overlay).is_ok();
+  #[cfg(not(unix))]
+  let _ = created;
   #[cfg(unix)]
-  {
+  if created {
     use std::os::unix::fs::PermissionsExt;
     let parent = overlay.parent().unwrap_or(overlay);
     for dir in [parent, overlay] {
