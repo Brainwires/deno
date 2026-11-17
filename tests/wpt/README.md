@@ -152,10 +152,13 @@ whose other interfaces shouldn't be used, run them with
 DENO_WEBRTC_LOOPBACK_ONLY=1 ./tests/wpt/wpt.ts run -- webrtc webrtc-extensions webrtc-stats
 ```
 
-Most of the files that fail need media the runtime doesn't have: the suite's
-`getNoiseStream()` helper draws to an `HTMLCanvasElement` / an `AudioContext` or
-falls back to `getUserMedia()`, so a test that sends a track fails before it
-reaches `RTCPeerConnection`.
+The runner sets `DENO_FAKE_MEDIA_DEVICES=1` for every test (as wptrunner runs
+browsers with `--use-fake-device-for-media-stream`), so `getUserMedia()` gives
+the fake camera and microphone, whose tracks send real media. Most of the files
+that still fail on media do so in the suite's own helpers: `getNoiseStream()`'s
+`canCreate()` reads `HTMLCanvasElement.prototype` before it falls back to
+`getUserMedia()`, and `resources/testdriver.js` reads `document` when it loads;
+both are `ReferenceError`s in a runtime without a DOM.
 
 ## FAQ
 

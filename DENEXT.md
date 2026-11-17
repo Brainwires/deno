@@ -17080,6 +17080,85 @@ where the changes are discussed.
        on. The engine's own SDP carries no `a=ice-options:trickle`, so two Deno
        peers now see `canTrickleIceCandidates === false` (true before), as the
        spec has it for that SDP.
+     - Media path (`webrtc/c-apis`;
+       `ext/webrtc/{02_media_devices.js,fake_media.rs,fake_media/}`):
+       `navigator.mediaDevices` (`MediaDevices`, `MediaDeviceInfo`,
+       `InputDeviceInfo`, `OverconstrainedError`). The runtime has no devices
+       (`enumerateDevices()` is empty, `getUserMedia()` rejects with
+       `NotFoundError`) unless `DENO_FAKE_MEDIA_DEVICES=1`, Chrome's
+       `--use-fake-device-for-media-stream`: a fake camera (FFmpeg's testsrc2,
+       640x480 at 30 fps) and microphone (400 Hz, 48 kHz, mono or stereo) with
+       constraints, capabilities, settings and `applyConstraints()`. Their
+       tracks send real media: one second of each pre-encoded in every codec the
+       engine packetizes (Opus mono / stereo, PCMU, PCMA, G.722, VP8, VP9,
+       H.264, H.265, AV1; `fake_media/generate.sh` remakes them), looped in the
+       negotiated codec, the video restarting on its key frame at a PLI. The WPT
+       runner sets the variable (wptrunner runs browsers with the flag). Options
+       weighed: a Web Audio subset (`AudioContext`, `OscillatorNode`,
+       `MediaStreamAudioDestinationNode`) is audio only and would need an Opus
+       encoder in the runtime; `MediaStreamTrackGenerator` /
+       `VideoTrackGenerator` take raw `AudioData` / `VideoFrame`s, so they too
+       need encoders, and no `webrtc*` test uses them; fake devices cover audio
+       and video, every test that calls `getUserMedia()` itself, and
+       `getNoiseStream()`'s fallback. Chosen: fake devices.
+     - Why most media failures stay: the suite's `RTCPeerConnection-helper.js`
+       `canCreate()` reads `HTMLCanvasElement.prototype.captureStream` before it
+       checks `AudioContext` or falls back to `getUserMedia()`, a
+       `ReferenceError` in any runtime without `HTMLCanvasElement` (301 subtests
+       fail exactly there); and `resources/testdriver.js` reads
+       `document?.currentScript` at load (optional chaining doesn't guard an
+       undeclared name), so every `.https.html` that loads it crashes, most of
+       `webrtc-encoded-transform` included. No runtime API short of a DOM
+       changes either; both are one-line upstream WPT fixes (a `typeof` guard).
+      
+       Measured with both guards applied in a scratch copy (not in the tree):
+       2053 / 3004 subtests pass instead of 1750 / 2778 (`webrtc/` 1660 / 2237
+       instead of 1393 / 2102, `webrtc-encoded-transform` 115 / 219 instead of
+       82 / 124).
+     - Encoded transforms
+       (`ext/webrtc/{03_encoded_transform.js,encoded_frames.rs}`):
+       `RTCRtpScriptTransform`, `sender.transform` / `receiver.transform`, and
+       in the worker `rtctransform`, `RTCRtpScriptTransformer` (`readable`,
+       `writable`, `options`, `generateKeyFrame()`, `sendKeyFrameRequest()`,
+       `keyframerequest`) and `KeyFrameRequestEvent`; `RTCEncodedVideoFrame` /
+       `RTCEncodedAudioFrame` with copy constructors, Serializable, `data`
+       detached on write. A sender's frames are the fake devices', with their
+       metadata (the sender's packetizer now owns its RTP timestamps, so a frame
+       names the one it goes out at); a receiver's are its RTP packets put back
+       together (no jitter buffer: a frame with a gap is dropped; AV1 has no
+       depacketizer in the engine; the engine's VP8 depacketizer refuses a
+       payload under 4 bytes, so such a last fragment drops its frame). What a
+       receiver's transform writes back is dropped (no decoder).
+     - SFrame (`ext/webrtc/04_sframe.js`): RFC 9605's five cipher suites over
+       Web Crypto (`SFrameEncryptorStream`, `SFrameDecryptorStream`,
+       `RTCRtpSFrameEncryptor`, `RTCRtpSFrameDecryptor`,
+       `SFrameTransformErrorEvent`), matching the RFC's C.3 vectors; the
+       AES-256-CTR suites and per-packet SFrame are `NotSupportedError`. The
+       behavior tests (`sframe-*.html`) still use the earlier names
+       (`SFrameEncrypterStream`, `RTCRtpSFrameEncrypter`). An encryptor on an
+       H.264 / H.265 sender sends nothing (their packetizers read NAL units).
+     - `webrtc-extensions`: `RTCRtpEncodingParameters.adaptivePtime` (+2). Left:
+       header extension control, corruption detection,
+       `alwaysNegotiateDataChannels` and `rtpHeaderEncryptionPolicy` change the
+       SDP (negotiation); `RTCOAuthCredential` needs TURN OAuth (RFC 7635) in
+       the engine; capture timestamps and `scaleResolutionDownTo` sit behind the
+       two helper failures above.
+     - Not implemented, by decision: `webrtc-ice`'s `RTCIceTransport`
+       constructor / `gather()` / `start()` (a WICG draft with no way to send
+       data, shipped only behind a flag in Chrome and since removed);
+       `webrtc-identity` (an IdP proxy realm, and `peerIdentity` isolation of
+       media from page script, which a server runtime has no use for).
+       `webrtc-priority`'s remaining test needs `RTCDataChannel.priority` from
+       DCEP (data channels).
+     - Numbers after these (subtests passing / found, measured as above): all
+       `webrtc*` directories 1751 / 2778 (63.0%; 1452 / 2503 before) and 56
+       files passing fully (54); `webrtc/` 1394 / 2102 (1390 / 2110);
+       `webrtc-encoded-transform` 82 / 124 (23 before);
+       `webrtc-stats` 241 / 304 (3; `supported-stats` gets a track now);
+       `webrtc-extensions` 4 / 73 (2); `-identity` 21 / 68, `-priority` 7 / 9,
+       `-svc` 2 / 67 and `-ice` 0 / 31 unchanged. No subtest the expectations
+       had passing fails. More subtests are found because files that failed
+       before reaching their tests now run them.
      - Node tests enabled: none; `node:` has no WebRTC API.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
