@@ -17681,12 +17681,27 @@ where the changes are discussed.
        `sdpMid` (it wrote an empty one, which the per-section matching of
        `addIceCandidate` above refuses; the engine's `ice_tcp_rtc2rtc` tests
        pass again).
-     - With the data channel and media work together (train denext.26, measured
-       as above): all `webrtc*` directories 1822 / 2821 (64.6%) and 69 files
-       passing fully; `webrtc/` 1465 / 2145, `webrtc-encoded-transform` 82 /
-       124, `webrtc-stats` 241 / 304, `webrtc-extensions` 4 / 73, `-identity` 21
-       / 68, `-priority` 7 / 9, `-svc` 2 / 67, `-ice` 0 / 31; every expectation
-       holds (325 files, none failing that the expectations have passing).
+     - The WPT runner's `--dom-shim` (`train/denext26-wptshim`;
+       `tests/wpt/runner/{dom_shim.js,runner.ts,utils.ts}`, `tests/wpt/wpt.ts`,
+       `tests/wpt/README.md`): off by default, it gives `.html` tests a small,
+       layout-free `document` (`currentScript`, `body`, element creation, a
+       canvas element that draws nothing) so a helper's bookkeeping no longer
+       ends the test before the API it is about; it lays nothing out, dispatches
+       no events and fakes no API under test. The expectation files are written
+       without it.
+     - With the negotiation, data channel and media work together (train
+       denext.26, measured as above): all `webrtc*` directories 1897 / 2824
+       (67.2%) and 79 files passing fully; `webrtc/` 1540 / 2148,
+       `webrtc-encoded-transform` 82 / 124, `webrtc-stats` 241 / 304,
+       `webrtc-extensions` 4 / 73, `-identity` 21 / 68, `-priority` 7 / 9,
+       `-svc` 2 / 67, `-ice` 0 / 31. Against the expectations of each branch
+       before the merge no subtest that was passing fails; the expectations are
+       regenerated from the merged run (22 entries, each one tighter). With
+       `--dom-shim` (no expectation file): 2228 / 2935 (75.9%) and 100 files
+       passing fully; `webrtc/` 1834 / 2244, `webrtc-encoded-transform` 116 /
+       219, `webrtc-stats` 244 / 304, `webrtc-extensions` 4 / 55, `-identity` 21
+       / 68, `-priority` 7 / 9, `-svc` 2 / 5, `-ice` 0 / 31 (more subtests
+       found: files that crashed on a missing `document` now reach their tests).
      - Node tests enabled: none; `node:` has no WebRTC API.
 
 453. **laufey v0.8.2** (`83bd73d`; laufey API 58, no ABI change; runtime
