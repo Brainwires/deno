@@ -3055,9 +3055,10 @@ class RTCPeerConnection extends EventTarget {
     if (this[_state].closed) {
       throw invalidState("RTCPeerConnection is closed");
     }
+    const prefix = "Failed to execute 'createDataChannel'";
     const dict = dataChannelDict ?? { __proto__: null };
     const init = {
-      label: String(label),
+      label: webidl.converters.USVString(label, prefix, "Argument 1"),
       ordered: dict.ordered === undefined ? true : !!dict.ordered,
       maxPacketLifeTime: dict.maxPacketLifeTime === undefined ||
           dict.maxPacketLifeTime === null
@@ -3076,7 +3077,9 @@ class RTCPeerConnection extends EventTarget {
           : webidl.converters["unsigned short"](dict.maxRetransmits, "", "", {
             enforceRange: true,
           }),
-      protocol: dict.protocol === undefined ? "" : String(dict.protocol),
+      protocol: dict.protocol === undefined
+        ? ""
+        : webidl.converters.USVString(dict.protocol, prefix, "'protocol'"),
       negotiated: !!dict.negotiated,
       id: dict.id === undefined || dict.id === null
         ? null
@@ -3094,10 +3097,20 @@ class RTCPeerConnection extends EventTarget {
         "Failed to execute 'createDataChannel': a negotiated channel needs an id",
       );
     }
-    if (init.id === 65535) {
-      throw new TypeError(
-        "Failed to execute 'createDataChannel': id 65535 is reserved",
-      );
+    // The id only counts for a negotiated channel; 65535 is reserved and
+    // an id an open channel has is in use.
+    if (init.negotiated && init.id === 65535) {
+      throw new TypeError(`${prefix}: id 65535 is reserved`);
+    }
+    if (init.negotiated) {
+      MapPrototypeForEach(this[_channels], (channel) => {
+        if (channel.id === init.id && channel.readyState !== "closed") {
+          throw new DOMException(
+            `${prefix}: id ${init.id} is in use`,
+            "OperationError",
+          );
+        }
+      });
     }
     if (TypedArrayPrototypeGetByteLength(core.encode(init.label)) > 65535) {
       throw new TypeError(
@@ -3118,7 +3131,7 @@ class RTCPeerConnection extends EventTarget {
       maxRetransmits: init.maxRetransmits,
       protocol: init.protocol,
       negotiated: init.negotiated,
-      id: init.id,
+      id: init.negotiated ? init.id : null,
     });
     const channel = new RTCDataChannel(illegalConstructorKey, this, {
       ...init,
