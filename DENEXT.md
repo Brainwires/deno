@@ -13691,7 +13691,9 @@ where the changes are discussed.
        the wild, in CISA's KEV catalog). Chrome fixed it in 156.0.8078.96 and
        157.0.8103.50; no CEF build carries it yet (every CEF 156 build is on
        156.0.8078.88, and CEF 158 is beta). The next CEF build on Chromium
-       156.0.8078.96 or newer replaces this pin.
+       156.0.8078.96 or newer replaces this pin. Fixed in runtime
+       3.0.0-denext.25: laufey v0.8.1 moves to CEF 156.0.30 (Chromium
+       156.0.8078.96), item 445.
      - **Little CMS.** `lcms2-sys` 4.0.5 → 4.0.7 (lockfile only; `lcms2` 6.1.0
        asks for `^4.0.4`) moves the statically linked Little CMS from 2.16 to
        2.19: CVE-2026-41254 / GHSA-4xp6-rcgg-m9qq (an integer overflow in
@@ -16859,10 +16861,10 @@ where the changes are discussed.
      applied by the same enforcer as `deno run` where the mode enforces.
      - Status: not started.
 
-445. **laufey v0.8.0** (`6bfd2ea`, `development-denext`; laufey API 58, no ABI
-     change; runtime 3.0.0-denext.25; `cli/rt_desktop/Cargo.toml`, `Cargo.lock`,
-     `.github/workflows/denext_runtime.yml`). laufey development-denext
-     `dde2507..6bfd2ea`, tagged v0.8.0:
+445. **laufey v0.8.1** (`ba599e6`; laufey API 58, no ABI change; runtime
+     3.0.0-denext.25; `cli/rt_desktop/Cargo.toml`, `Cargo.lock`,
+     `.github/workflows/denext_runtime.yml`). laufey `dde2507..ba599e6`: v0.8.0
+     (`6bfd2ea`, `development-denext`), then v0.8.1:
      - hardening in the bridge's JavaScript call answers and in WebView2's
        stream acknowledgements;
      - WebView2 DevTools windows tracked from their creation, one open at a time
@@ -16877,7 +16879,45 @@ where the changes are discussed.
      - opt-in WebView2 traces (`LAUFEY_TRACE_DEVTOOLS`,
        `LAUFEY_TRACE_PERMISSIONS`, `LAUFEY_TRACE_PASSKEY`,
        `LAUFEY_TRACE_NETWORK`), more native e2e checks, and CI on the shared
-       runner picker.
+       runner picker;
+     - v0.8.1, macOS (WebView backend), for a window whose page runs unthrottled
+       (`backgroundThrottling: false`): while one is open the app holds a
+       user-initiated activity (idle sleep still allowed), so macOS never puts
+       it into App Nap; such a window's web view ignores window occlusion; and
+       it is hidden by staying ordered in but invisible (fully transparent,
+       clicks passing through, never key or main, out of window cycling, Mission
+       Control, the Window menu, screen sharing and accessibility, reported as
+       not visible), so its hidden page keeps its timer rate. A full-screen
+       window is ordered out all the same, and `MacosHiddenMode::OrderOut`
+       (`LAUFEY_WINDOW_FLAG_MACOS_HIDDEN_ORDER_OUT`) asks for a window that is
+       really removed;
+     - v0.8.1, embedded web views: the keyup of each forwarded keydown on every
+       backend, `BLUR` (the keyboard back to the window's page), `forwardKeys`
+       entries with a leading `!` matched before the app menu's accelerators,
+       the focus returned to the window's page when a focused view hides (a
+       FOCUS event with a reason), and `evaluate` in an isolated world under a
+       page's CSP;
+     - v0.8.1, CEF 156.0.30 (Chromium 156.0.8078.96), which carries the fix for
+       the exploited CVE-2026-125350 (item 356); the spellcheck dictionaries
+       stay at the same `hunspell_dictionaries` commit;
+     - v0.8.1, Windows: the secure store (`secret_store_supported`, `secret_*`)
+       in the Credential Manager: generic credentials kept on the machine and
+       encrypted for the user (DPAPI), target
+       `laufey/<app id>/<service>/<account>` (percent-encoded), values up to 64
+       KiB split across credentials, `UNAVAILABLE` with the reason for a logon
+       session with no credential store (a service, an SSH key logon), never
+       plaintext; an item in the PasswordVault (resource = service, user =
+       account) moves over when it is looked up;
+     - v0.8.1, Windows: tray menu items show their checkmarks and icons;
+     - v0.8.1, macOS: Close Window (Cmd+W) in every menu bar;
+     - v0.8.1: numbers on the bridge are read and written the same whatever the
+       locale;
+     - v0.8.1: full screen and minimize are refused on a window hidden in the
+       invisible mode;
+     - v0.8.1, CI: the background e2e checks are strict, the CEF download is
+       retried, and the single-instance log is fixed;
+     - v0.8.1 publishes to crates.io only from upstream's repository. What an
+       app reaches of 0.8.1 is item 446.
      - Node tests enabled: none; no Node API changes.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
@@ -16939,10 +16979,10 @@ will-navigate and a re-issue token bound to the backend's own load, item 342,
 and CEF 156.0.28, item 356; and, for runtime 3.0.0-denext.22, API 57, title
 visibility and toolbar style and an accessory app's focused window brought to
 the front on macOS, item 361; and API 58, child web views, their keys and focus,
-item 368; and, for runtime 3.0.0-denext.25, laufey v0.8.0, item 445), at the
+item 368; and, for runtime 3.0.0-denext.25, laufey v0.8.1, item 445), at the
 commit pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The
 same commit is the `laufey` git dependency of `cli/rt_desktop/Cargo.toml` (crate
-0.8.0, API 58, CEF 156.0.28).
+0.8.1, API 58, CEF 156.0.30).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the
