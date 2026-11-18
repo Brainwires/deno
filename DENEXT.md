@@ -17721,6 +17721,25 @@ where the changes are discussed.
        the new pin.
      - Node tests enabled: none; no Node API changes.
 
+454. **`test(ext/webgpu)`: the WebGPU unit tests free their devices**
+     (`tests/unit/webgpu_test.ts`, `tests/unit/mod.rs`). Test-only; no runtime
+     change. On a GPU-less Windows host (the WARP software adapter) each device
+     commits about 270 MB, and `device.destroy()` only marks it lost: the memory
+     goes when the GC drops the last JS object holding it. The file's 17 devices
+     stayed alive until exit, the process committed 4.7 GB, and on our 8 GB
+     Windows x64 hosts the last two tests (`writeBufferAcceptsArrayBuffer`,
+     `webgpuSetBindGroupBoundsCheck`) failed with an `OperationError`, "Not
+     enough memory left".
+     - Every test opens its device with `using gpu = await openGpu()`, which
+       destroys the buffers and textures the test created (`gpu.track(…)`) and
+       then the device when the test ends, passed or failed, and runs a
+       collection before it opens the next device. The unit runner passes
+       `--v8-flags=--expose-gc` to this file for that.
+     - Measured on brain (Windows 11, 8 GB, WARP, the debug `deno`): peak commit
+       4.7 GB with 2 failures before, 1.1 GB with all 21 passing after (Linux
+       with lavapipe: peak RSS 510 MB before, 430 MB after).
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

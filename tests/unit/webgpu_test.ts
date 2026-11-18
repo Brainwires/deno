@@ -53,6 +53,57 @@ function checkWindowingSystem(): boolean {
   }
 }
 
+// Every test that needs a device opens it with `using gpu = await openGpu()`,
+// which destroys the buffers and textures it tracks and then the device when
+// the test ends, failed or not. That alone is not enough: `device.destroy()`
+// only marks a wgpu device lost, and its memory is freed when the GC drops the
+// last JS object holding it. A software adapter (WARP on a GPU-less Windows
+// host) commits about 270 MB per device, so a run that kept every test's
+// device alive until exit committed 4.7 GB and failed with "Not enough memory
+// left" on an 8 GB host. So opening a device first runs a collection (the
+// unit runner passes --expose-gc to this file), which frees the devices of
+// the tests before it.
+interface GpuTestDevice extends Disposable {
+  adapter: GPUAdapter;
+  device: GPUDevice;
+  /** Destroys `resource` (a buffer or a texture) before the device. */
+  track<T extends { destroy(): undefined }>(resource: T): T;
+}
+
+async function openGpu(
+  deviceDescriptor?: (adapter: GPUAdapter) => GPUDeviceDescriptor,
+): Promise<GpuTestDevice> {
+  collectGarbage();
+  const adapter = await navigator.gpu.requestAdapter();
+  assert(adapter);
+  const device = await adapter.requestDevice(deviceDescriptor?.(adapter));
+  assert(device);
+  const resources: { destroy(): undefined }[] = [];
+  return {
+    adapter,
+    device,
+    track(resource) {
+      resources.push(resource);
+      return resource;
+    },
+    [Symbol.dispose]() {
+      for (const resource of resources.splice(0).reverse()) {
+        resource.destroy();
+      }
+      device.destroy();
+    },
+  };
+}
+
+function collectGarbage() {
+  // deno-lint-ignore no-explicit-any
+  const gc = (globalThis as any).gc;
+  if (typeof gc !== "function") return;
+  // The second pass frees what the first pass's finalizers released.
+  gc();
+  gc();
+}
+
 Deno.test(function webgpuErrorBuildersPreserveClassState() {
   // Accessing the lazy global loads WebGPU and registers its error builders.
   void GPUValidationError;
@@ -95,13 +146,10 @@ Deno.test({
   permissions: { read: true, env: true },
   ignore: isWsl || isCIWithoutGPU,
 }, async function webgpuComputePass() {
-  const adapter = await navigator.gpu.requestAdapter();
-  assert(adapter);
-
   const numbers = [1, 4, 3, 295];
 
-  const device = await adapter.requestDevice();
-  assert(device);
+  using gpu = await openGpu();
+  const { device } = gpu;
 
   const shaderCode = await Deno.readTextFile(
     "tests/testdata/webgpu/computepass_shader.wgsl",
@@ -113,27 +161,27 @@ Deno.test({
 
   const size = new Float32Array(numbers).byteLength;
 
-  const inputDataBuffer = device.createBuffer({
+  const inputDataBuffer = gpu.track(device.createBuffer({
     label: "Input Data Buffer",
     size: size,
     usage: GPUBufferUsage.STORAGE,
     mappedAtCreation: true,
-  });
+  }));
   const buf = new Float32Array(inputDataBuffer.getMappedRange());
   buf.set(numbers);
   inputDataBuffer.unmap();
 
-  const outputDataBuffer = device.createBuffer({
+  const outputDataBuffer = gpu.track(device.createBuffer({
     label: "Output Data Buffer",
     size: size,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-  });
+  }));
 
-  const downloadBuffer = device.createBuffer({
+  const downloadBuffer = gpu.track(device.createBuffer({
     label: "Download Buffer",
     size: size,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-  });
+  }));
 
   const bindGroupLayout = device.createBindGroupLayout({
     entries: [
@@ -203,28 +251,23 @@ Deno.test({
   assertEquals(new Float32Array(data), new Float32Array([2, 8, 6, 590]));
 
   downloadBuffer.unmap();
-
-  device.destroy();
 });
 
 Deno.test({
   ignore: isWsl || isCIWithoutGPU,
 }, async function webgpuBufferUnmapWritesMappedRangesBack() {
-  const adapter = await navigator.gpu.requestAdapter();
-  assert(adapter);
-
-  const device = await adapter.requestDevice();
-  assert(device);
+  using gpu = await openGpu();
+  const { device } = gpu;
 
   const size = 16;
-  const writeBuffer = device.createBuffer({
+  const writeBuffer = gpu.track(device.createBuffer({
     size,
     usage: GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC,
-  });
-  const readBuffer = device.createBuffer({
+  }));
+  const readBuffer = gpu.track(device.createBuffer({
     size,
     usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-  });
+  }));
 
   await writeBuffer.mapAsync(GPUMapMode.WRITE);
   const firstRange = writeBuffer.getMappedRange(0, 8);
@@ -266,22 +309,18 @@ Deno.test({
   readBuffer.unmap();
 
   assertEquals(readRange.byteLength, 0);
-  device.destroy();
 });
 
 Deno.test({
   ignore: isWsl || isCIWithoutGPU,
 }, async function webgpuBufferDestroyDetachesMappedRange() {
-  const adapter = await navigator.gpu.requestAdapter();
-  assert(adapter);
+  using gpu = await openGpu();
+  const { device } = gpu;
 
-  const device = await adapter.requestDevice();
-  assert(device);
-
-  const buffer = device.createBuffer({
+  const buffer = gpu.track(device.createBuffer({
     size: 4096,
     usage: GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC,
-  });
+  }));
 
   await buffer.mapAsync(GPUMapMode.WRITE);
   const mappedRange = buffer.getMappedRange();
@@ -293,19 +332,14 @@ Deno.test({
   assertEquals(mappedRange.byteLength, 0);
   assertEquals(mappedView.byteLength, 0);
   assertEquals(mappedView[0], undefined);
-
-  device.destroy();
 });
 
 Deno.test({
   permissions: { read: true, env: true },
   ignore: isWsl || isCIWithoutGPU,
 }, async function webgpuHelloTriangle() {
-  const adapter = await navigator.gpu.requestAdapter();
-  assert(adapter);
-
-  const device = await adapter.requestDevice();
-  assert(device);
+  using gpu = await openGpu();
+  const { device } = gpu;
 
   const shaderCode = await Deno.readTextFile(
     "tests/testdata/webgpu/hellotriangle_shader.wgsl",
@@ -354,17 +388,17 @@ Deno.test({
     align;
   const paddedBytesPerRow = unpaddedBytesPerRow + paddedBytesPerRowPadding;
 
-  const outputBuffer = device.createBuffer({
+  const outputBuffer = gpu.track(device.createBuffer({
     label: "Capture",
     size: paddedBytesPerRow * dimensions.height,
     usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-  });
-  const texture = device.createTexture({
+  }));
+  const texture = gpu.track(device.createTexture({
     label: "Capture",
     size: dimensions,
     format: "rgba8unorm-srgb",
     usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
-  });
+  }));
 
   const encoder = device.createCommandEncoder();
   const view = texture.createView();
@@ -405,28 +439,19 @@ Deno.test({
   );
 
   outputBuffer.unmap();
-
-  device.destroy();
 });
 
 Deno.test({
   ignore: isWsl || isCIWithoutGPU,
 }, async function webgpuAdapterHasFeatures() {
-  const adapter = await navigator.gpu.requestAdapter();
-  assert(adapter);
-  assert(adapter.features);
-  const device = await adapter.requestDevice();
-  device.destroy();
+  using gpu = await openGpu();
+  assert(gpu.adapter.features);
 });
 
 Deno.test({
   ignore: isWsl || isCIWithoutGPU,
 }, async function webgpuNullWindowSurfaceThrows() {
-  const adapter = await navigator.gpu.requestAdapter();
-  assert(adapter);
-
-  const device = await adapter.requestDevice();
-  assert(device);
+  using _gpu = await openGpu();
 
   const msgIncludes = "Invalid parameters";
 
@@ -443,8 +468,6 @@ Deno.test({
     TypeError,
     msgIncludes,
   );
-
-  device.destroy();
 });
 
 Deno.test(function webgpuWindowSurfaceNoWidthHeight() {
@@ -499,33 +522,27 @@ Deno.test({
     ? createWin32Window()
     : createX11Window();
   try {
-    const adapter = await navigator.gpu.requestAdapter();
-    assert(adapter);
-    const device = await adapter.requestDevice();
-    assert(device);
-    try {
-      const surface = new Deno.UnsafeWindowSurface({
-        system: nativeWindow.system,
-        windowHandle: nativeWindow.windowHandle,
-        displayHandle: nativeWindow.displayHandle,
-        width: 320,
-        height: 240,
-      });
-      const context = surface.getContext("webgpu") as GPUCanvasContext;
-      context.configure({
-        device,
-        format: navigator.gpu.getPreferredCanvasFormat(),
-      });
-      // Each assignment triggers a resize of the configured context, which
-      // reads the same SurfaceData the setter just mutated. The getter reads
-      // prove the setters released their borrows.
-      surface.width = 640;
-      surface.height = 480;
-      assertEquals(surface.width, 640);
-      assertEquals(surface.height, 480);
-    } finally {
-      device.destroy();
-    }
+    using gpu = await openGpu();
+    const { device } = gpu;
+    const surface = new Deno.UnsafeWindowSurface({
+      system: nativeWindow.system,
+      windowHandle: nativeWindow.windowHandle,
+      displayHandle: nativeWindow.displayHandle,
+      width: 320,
+      height: 240,
+    });
+    const context = surface.getContext("webgpu") as GPUCanvasContext;
+    context.configure({
+      device,
+      format: navigator.gpu.getPreferredCanvasFormat(),
+    });
+    // Each assignment triggers a resize of the configured context, which
+    // reads the same SurfaceData the setter just mutated. The getter reads
+    // prove the setters released their borrows.
+    surface.width = 640;
+    surface.height = 480;
+    assertEquals(surface.width, 640);
+    assertEquals(surface.height, 480);
   } finally {
     nativeWindow.close();
   }
@@ -663,18 +680,16 @@ Deno.test(function getPreferredCanvasFormat() {
 Deno.test({
   ignore: isWsl || isCIWithoutGPU,
 }, async function validateGPUColor() {
-  const adapter = await navigator.gpu.requestAdapter();
-  assert(adapter);
-  const device = await adapter.requestDevice();
-  assert(device);
+  using gpu = await openGpu();
+  const { device } = gpu;
 
   const format = "rgba8unorm-srgb";
   const encoder = device.createCommandEncoder();
-  const texture = device.createTexture({
+  const texture = gpu.track(device.createTexture({
     size: [256, 256],
     format,
     usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
-  });
+  }));
   const view = texture.createView();
   const storeOp = "store";
   const loadOp = "clear";
@@ -719,30 +734,26 @@ Deno.test({
     TypeError,
     msgIncludes,
   );
-
-  device.destroy();
 });
 
 Deno.test({
   ignore: isWsl || isCIWithoutGPU,
 }, async function validateGPUExtent3D() {
-  const adapter = await navigator.gpu.requestAdapter();
-  assert(adapter);
-  const device = await adapter.requestDevice();
-  assert(device);
+  using gpu = await openGpu();
+  const { device } = gpu;
 
   const format = "rgba8unorm-srgb";
   const encoder = device.createCommandEncoder();
-  const buffer = device.createBuffer({
+  const buffer = gpu.track(device.createBuffer({
     size: new Uint32Array([1, 4, 3, 295]).byteLength,
     usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-  });
+  }));
   const usage = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC;
-  const texture = device.createTexture({
+  const texture = gpu.track(device.createTexture({
     size: [256, 256],
     format,
     usage,
-  });
+  }));
 
   // values for validating GPUExtent3D
   const belowSize: Array<number> = [];
@@ -813,8 +824,6 @@ Deno.test({
     msgIncludes,
   );
   // NOTE: GPUQueue.copyExternalImageToTexture needs to be validated the argument of copySize property's length when its a sequence, but it is not implemented yet
-
-  device.destroy();
 });
 
 Deno.test({
@@ -826,24 +835,22 @@ Deno.test({
 Deno.test({
   ignore: isWsl || isCIWithoutGPU,
 }, async function validateGPUOrigin3D() {
-  const adapter = await navigator.gpu.requestAdapter();
-  assert(adapter);
-  const device = await adapter.requestDevice();
-  assert(device);
+  using gpu = await openGpu();
+  const { device } = gpu;
 
   const format = "rgba8unorm-srgb";
   const encoder = device.createCommandEncoder();
-  const buffer = device.createBuffer({
+  const buffer = gpu.track(device.createBuffer({
     size: new Uint32Array([1, 4, 3, 295]).byteLength,
     usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-  });
+  }));
   const usage = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC;
   const size = [256, 256, 1];
-  const texture = device.createTexture({
+  const texture = gpu.track(device.createTexture({
     size,
     format,
     usage,
-  });
+  }));
 
   // value for validating GPUOrigin3D
   const overSize = [256, 256, 1, 1];
@@ -912,25 +919,21 @@ Deno.test({
     msgIncludes,
   );
   // NOTE: GPUQueue.copyExternalImageToTexture needs to be validated the argument of destination.origin property's length when its a sequence, but it is not implemented yet
-
-  device.destroy();
 });
 
 Deno.test({
   ignore: isWsl || isCIWithoutGPU,
 }, async function beginRenderPassWithoutDepthClearValue() {
-  const adapter = await navigator.gpu.requestAdapter();
-  assert(adapter);
-  const device = await adapter.requestDevice();
-  assert(device);
+  using gpu = await openGpu();
+  const { device } = gpu;
 
   const encoder = device.createCommandEncoder();
 
-  const depthTexture = device.createTexture({
+  const depthTexture = gpu.track(device.createTexture({
     size: [256, 256],
     format: "depth32float",
     usage: GPUTextureUsage.RENDER_ATTACHMENT,
-  });
+  }));
   const depthView = depthTexture.createView();
 
   const renderPass = encoder.beginRenderPass({
@@ -942,8 +945,6 @@ Deno.test({
   });
 
   assert(renderPass);
-
-  device.destroy();
 });
 
 // Regression test for https://github.com/denoland/deno/issues/24821.
@@ -956,16 +957,14 @@ Deno.test({
 Deno.test({
   ignore: isWsl || isCIWithoutGPU,
 }, async function renderPass2dArrayColorAttachmentDoesNotCorruptComputePass() {
-  const adapter = await navigator.gpu.requestAdapter();
-  assert(adapter);
-  const device = await adapter.requestDevice();
-  assert(device);
+  using gpu = await openGpu();
+  const { device } = gpu;
 
-  const texture = device.createTexture({
+  const texture = gpu.track(device.createTexture({
     format: "bgra8unorm",
     size: { width: 4, height: 4, depthOrArrayLayers: 1 },
     usage: GPUTextureUsage.RENDER_ATTACHMENT,
-  });
+  }));
   const view = texture.createView({ dimension: "2d-array" });
 
   const encoder = device.createCommandEncoder();
@@ -995,14 +994,14 @@ Deno.test({
     compute: { module: shaderModule, entryPoint: "main" },
   });
 
-  const storageBuffer = device.createBuffer({
+  const storageBuffer = gpu.track(device.createBuffer({
     size: 16,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-  });
-  const readBuffer = device.createBuffer({
+  }));
+  const readBuffer = gpu.track(device.createBuffer({
     size: 16,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-  });
+  }));
 
   const bindGroup = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
@@ -1026,8 +1025,6 @@ Deno.test({
     result,
     new Uint32Array([0xdeadbeef, 0xcafebabe, 0xfeedface, 0x12345678]),
   );
-
-  device.destroy();
 });
 
 Deno.test({
@@ -1061,64 +1058,54 @@ Deno.test({
     "maxComputeWorkgroupsPerDimension",
   ];
 
-  const adapter = await navigator.gpu.requestAdapter();
-  assert(adapter);
-
-  for (const limitName of limitNames) {
-    // deno-lint-ignore ban-ts-comment
-    // @ts-ignore
-    assertEquals(typeof adapter.limits[limitName], "number", limitName);
-  }
-
-  const device = await adapter.requestDevice({
-    // deno-lint-ignore ban-ts-comment
-    // @ts-ignore
-    requiredLimits: adapter.limits,
+  using gpu = await openGpu((adapter) => {
+    for (const limitName of limitNames) {
+      // deno-lint-ignore ban-ts-comment
+      // @ts-ignore
+      assertEquals(typeof adapter.limits[limitName], "number", limitName);
+    }
+    const descriptor: GPUDeviceDescriptor = {
+      // deno-lint-ignore ban-ts-comment
+      // @ts-ignore
+      requiredLimits: adapter.limits,
+    };
+    return descriptor;
   });
-  assert(device);
-
-  device.destroy();
+  assert(gpu.device);
 });
 
 Deno.test({
   ignore: isWsl || isCIWithoutGPU,
 }, async function testOnSubmittedWorkDone() {
-  const adapter = await navigator.gpu.requestAdapter();
-  assert(adapter);
-
-  const device = await adapter.requestDevice();
-  assert(device);
+  using gpu = await openGpu();
+  const { device } = gpu;
 
   const encoder = device.createCommandEncoder();
   const fut = device.queue.onSubmittedWorkDone();
   device.queue.submit([encoder.finish()]);
   await fut;
-
-  device.destroy();
 });
 
 Deno.test({
   permissions: { read: true, env: true },
   ignore: isWsl || isCIWithoutGPU,
 }, async function webgpuWriteBufferTypedArrayElementOffsets() {
-  const adapter = await navigator.gpu.requestAdapter();
-  assert(adapter);
-  const device = await adapter.requestDevice();
-  assert(device);
+  using gpu = await openGpu();
+  const { device } = gpu;
 
   const source = new Float32Array([1.0, 2.0, 3.0, 4.0]);
-  const gpuBuffer = device.createBuffer({
+  const gpuBuffer = gpu.track(device.createBuffer({
     size: 2 * Float32Array.BYTES_PER_ELEMENT,
     usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-  });
+  }));
 
   // dataOffset=1 and size=2 should be in elements for a Float32Array
   device.queue.writeBuffer(gpuBuffer, 0, source, 1, 2);
 
-  const readBuffer = device.createBuffer({
+  const readBuffer = gpu.track(device.createBuffer({
     size: 2 * Float32Array.BYTES_PER_ELEMENT,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-  });
+  }));
 
   const encoder = device.createCommandEncoder();
   encoder.copyBufferToBuffer(
@@ -1135,32 +1122,29 @@ Deno.test({
   assertEquals(result, new Float32Array([2.0, 3.0]));
 
   readBuffer.unmap();
-  device.destroy();
 });
 
 Deno.test({
   permissions: { env: true },
   ignore: isWsl || isCIWithoutGPU,
 }, async function writeBufferAcceptsArrayBuffer() {
-  const adapter = await navigator.gpu.requestAdapter();
-  assert(adapter);
-  const device = await adapter.requestDevice();
-  assert(device);
+  using gpu = await openGpu();
+  const { device } = gpu;
 
   const source = new ArrayBuffer(4 * Float32Array.BYTES_PER_ELEMENT);
   new Float32Array(source).set([1.0, 2.0, 3.0, 4.0]);
 
-  const gpuBuffer = device.createBuffer({
+  const gpuBuffer = gpu.track(device.createBuffer({
     size: source.byteLength,
     usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-  });
+  }));
 
   device.queue.writeBuffer(gpuBuffer, 0, source);
 
-  const readBuffer = device.createBuffer({
+  const readBuffer = gpu.track(device.createBuffer({
     size: source.byteLength,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-  });
+  }));
 
   const encoder = device.createCommandEncoder();
   encoder.copyBufferToBuffer(gpuBuffer, 0, readBuffer, 0, source.byteLength);
@@ -1171,7 +1155,6 @@ Deno.test({
   assertEquals(result, new Float32Array([1.0, 2.0, 3.0, 4.0]));
 
   readBuffer.unmap();
-  device.destroy();
 });
 
 // Regression test for https://github.com/denoland/deno/issues/33956.
@@ -1184,9 +1167,8 @@ Deno.test({
   permissions: { read: true, env: true },
   ignore: isWsl || isCIWithoutGPU,
 }, async function webgpuSetBindGroupBoundsCheck() {
-  const adapter = await navigator.gpu.requestAdapter();
-  assert(adapter);
-  const device = await adapter.requestDevice();
+  using gpu = await openGpu();
+  const { device } = gpu;
 
   const layout = device.createBindGroupLayout({ entries: [] });
   const bg = device.createBindGroup({ layout, entries: [] });
@@ -1229,8 +1211,6 @@ Deno.test({
     pass.setBindGroup(0, bg, new Uint32Array(4), 0, 0);
     pass.end();
   }
-
-  device.destroy();
 });
 
 async function checkIsWsl() {

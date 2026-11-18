@@ -133,7 +133,10 @@ fn run_test(test: &CollectedTest) -> TestResult {
   }
 
   if test.name.ends_with("::webgpu_test") {
-    deno = deno.arg("--unstable-webgpu");
+    // denext: --expose-gc lets each test free the previous tests' devices
+    // (`openGpu` in webgpu_test.ts); a software adapter otherwise runs an
+    // 8 GB host out of memory
+    deno = deno.arg("--unstable-webgpu").arg("--v8-flags=--expose-gc");
   }
 
   if test.name.ends_with("::worker_permissions_test")
