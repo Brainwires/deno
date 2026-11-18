@@ -22,6 +22,15 @@ Prints the JSON list of targets on stdout. Each entry has:
   release failure. So x86_64-apple-darwin launches on GitHub's image unless
   RUNNER_MACOS_X64_GUI names a pool that has a GUI session. The arm64 GUI
   runner follows RUNNER_MACOS_ARM unless RUNNER_MACOS_ARM_GUI overrides it.
+  Never the mac-x64 pool (`denext-macos-x64`), even when RUNNER_MACOS_X64_GUI
+  names it: since 2026-11-18 its jobs are denied Accessibility, Screen
+  Recording, Input Monitoring, Camera, Microphone and Automation without a
+  prompt (the MacBook's console session is the user's; ops/runners README
+  "Permissions on mac-x64"), and the e2e posts key events through the
+  Accessibility grant. With MACOS_X64_GUI_ON_ARM=1 (or true / on / yes) and
+  an arm64 GUI pool, x86_64-apple-darwin's launch jobs run on that pool
+  instead, the x86_64 app under Rosetta 2: the Tart guests pre-grant every
+  privacy permission (ops/runners tart/provision-tcc-guest.sh).
 - `laufey_runner`: where the laufey job builds the backend hosts. For
   x86_64-unknown-linux-gnu this is the Ubuntu 22.04 Linux pool
   (RUNNER_LINUX_X64_2204), whose image carries every package that job
@@ -100,8 +109,8 @@ only takes a job that would otherwise wait.
 
 Env: TARGETS ("all" or a comma-separated list of triples),
      RUNNER_MACOS_ARM, RUNNER_MACOS_X64, RUNNER_MACOS_ARM_GUI,
-     RUNNER_MACOS_X64_GUI, RUNNER_LINUX_X64_2204, MACOS_X64_ON_ARM (each
-     optional),
+     RUNNER_MACOS_X64_GUI, RUNNER_LINUX_X64_2204, MACOS_X64_ON_ARM,
+     MACOS_X64_GUI_ON_ARM (each optional),
      RUNNER_MACOS_ARM_SLOTS, RUNNER_MACOS_X64_SLOTS,
      RUNNER_LINUX_X64_2204_SLOTS (each optional, default 1),
      POOL_FREE (the shared picker's `free` output: {label: free slots},
@@ -343,6 +352,29 @@ def allocate(targets, env):
     return targets
 
 
+# The mac-x64 pool's label: no launch job runs there (see `gui_runner` in the
+# module docstring).
+MAC_X64_POOL = "denext-macos-x64"
+
+
+def _flag(env, name):
+    return (env.get(name) or "").strip().lower() in ("1", "true", "on", "yes")
+
+
+def x64_gui(env):
+    """Where x86_64-apple-darwin's launch jobs (package, e2e_fork) run: the
+    arm64 GUI pool under Rosetta 2 with MACOS_X64_GUI_ON_ARM, else
+    RUNNER_MACOS_X64_GUI unless that names the mac-x64 pool, else the
+    image ("")."""
+    arm = env.get("RUNNER_MACOS_ARM_GUI", "") or env.get("RUNNER_MACOS_ARM", "")
+    if _flag(env, "MACOS_X64_GUI_ON_ARM") and arm.strip():
+        return arm
+    named = env.get("RUNNER_MACOS_X64_GUI", "")
+    if named.strip() and _label(_runner(named, "macos-15-intel")) == MAC_X64_POOL:
+        return ""
+    return named
+
+
 def x64_on_arm(env):
     """Whether x86_64-apple-darwin builds on the arm64 pool under Rosetta 2
     (`rosetta` in the module docstring): MACOS_X64_ON_ARM on and an arm64
@@ -380,9 +412,9 @@ def plan(env):
         # follow its build jobs.
         "macos-15": env.get("RUNNER_MACOS_ARM_GUI", "")
         or env.get("RUNNER_MACOS_ARM", ""),
-        # The mac-x64 pool has no GUI session (see the module docstring):
-        # never RUNNER_MACOS_X64 here.
-        "macos-15-intel": env.get("RUNNER_MACOS_X64_GUI", ""),
+        # The mac-x64 pool has no GUI session and denies the privacy
+        # permissions (see the module docstring): never the mac-x64 pool here.
+        "macos-15-intel": x64_gui(env),
     }
     laufey = {
         "x86_64-unknown-linux-gnu": env.get("RUNNER_LINUX_X64_2204", ""),

@@ -282,6 +282,7 @@ jobs:
           # x86_64 toolchain under Rosetta 2 (`rosetta`, plan_matrix.py);
           # unset: the mac-x64 pool.
           MACOS_X64_ON_ARM: ${{ vars.MACOS_X64_ON_ARM }}
+          MACOS_X64_GUI_ON_ARM: ${{ vars.MACOS_X64_GUI_ON_ARM }}
           # The laufey job's Linux x64 leg (`laufey_runner`).
           RUNNER_LINUX_X64_2204: ${{ vars.RUNNER_LINUX_X64_2204 }}
           # The overflow (`runs_on`, plan_matrix.py): each pool's free slots

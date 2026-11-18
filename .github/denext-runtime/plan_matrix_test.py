@@ -211,16 +211,38 @@ class Rosetta(unittest.TestCase):
             self.assertEqual(x64["runs_on"][job], ARM, job)
 
     def test_an_x64_gui_pool_takes_the_launch_jobs(self):
-        # RUNNER_MACOS_X64_GUI naming the mac-x64 pool: package and e2e_fork
-        # run there while it has a slot (denort, on the image, holds none).
+        # RUNNER_MACOS_X64_GUI naming another pool with a GUI session: package
+        # and e2e_fork run there while it has a slot.
+        gui = '["self-hosted","denext-macos-x64-gui"]'
         m = self.plan(
             MACOS_X64_ON_ARM="1",
             RUNNER_MACOS_ARM_SLOTS="4",
-            RUNNER_MACOS_X64_GUI=POOLS["RUNNER_MACOS_X64"],
+            RUNNER_MACOS_X64_GUI=gui,
+            POOL_FREE='{"denext-macos-x64-gui": 1}',
         )
         x64 = m["x86_64-apple-darwin"]
-        self.assertEqual(x64["runs_on"]["package"], X64)
-        self.assertEqual(x64["runs_on"]["e2e_fork"], X64)
+        self.assertEqual(x64["gui_runner"], json.loads(gui))
+
+    def test_the_mac_x64_pool_never_takes_the_launch_jobs(self):
+        # The MacBook denies Accessibility & co. to its jobs (no prompt): even
+        # named by RUNNER_MACOS_X64_GUI, the launch jobs go to the image.
+        for named in (POOLS["RUNNER_MACOS_X64"], "denext-macos-x64"):
+            m = self.plan(MACOS_X64_ON_ARM="1", RUNNER_MACOS_ARM_SLOTS="4", RUNNER_MACOS_X64_GUI=named)
+            x64 = m["x86_64-apple-darwin"]
+            self.assertEqual(x64["gui_runner"], "macos-15-intel", named)
+            self.assertEqual(x64["runs_on"]["package"], "macos-15-intel", named)
+            self.assertEqual(x64["runs_on"]["e2e_fork"], "macos-15-intel", named)
+
+    def test_x64_launch_jobs_on_the_arm_pool(self):
+        # MACOS_X64_GUI_ON_ARM: the Tart guests (every privacy permission
+        # pre-granted) run x86_64's package and e2e_fork under Rosetta 2.
+        m = self.plan(MACOS_X64_GUI_ON_ARM="1", RUNNER_MACOS_ARM_SLOTS="4", RUNNER_MACOS_X64_GUI=POOLS["RUNNER_MACOS_X64"])
+        x64 = m["x86_64-apple-darwin"]
+        self.assertEqual(x64["gui_runner"], ARM)
+        self.assertEqual(x64["runs_on"]["package"], ARM)
+        self.assertEqual(x64["runs_on"]["e2e_fork"], ARM)
+        # Off (or no arm64 pool): unchanged.
+        self.assertEqual(self.plan(MACOS_X64_GUI_ON_ARM="0")["x86_64-apple-darwin"]["gui_runner"], "macos-15-intel")
 
     def test_no_x64_pool_means_no_fallback(self):
         env = {"TARGETS": "all", "RUNNER_MACOS_ARM": POOLS["RUNNER_MACOS_ARM"],
