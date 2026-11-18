@@ -49,8 +49,7 @@
 # jobs decide; a fork's pull request always takes the image). With the ops
 # switch `github_off` in DENEXT_POOL_HEALTH a job of that image family waits
 # for our pool instead of overflowing. Every job of the gate can run on our
-# pools (the pickers themselves on the linux-x64 pool) except the Windows
-# node_compat shards, which the job firewall keeps on GitHub's images.
+# pools, the pickers themselves on the linux-x64 pool.
 # - macOS x64 (macos-15-intel) and Linux arm64 (ubuntu-22.04-arm), two of the
 #   other release architectures: build + libs only (macOS x64 also the node
 #   suites); Windows arm64 (windows-11-arm): build + libs + unit + the node
@@ -400,10 +399,10 @@ jobs:
     name: windows-2022
     needs: guard
     if: ${{ needs.guard.outputs.verified != 'true' && (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.windows)) }}
-    # The build (the fast host, windows-x64-fast), libs, unit_node, unit and specs take the
-    # win-x64 pools (the MacBook's VM and brain, 4 threads / 8 GB each; LLVM's libclang for
-    # bindgen on both since 2026-11-17) while they have a free slot, else windows-2022;
-    # node_compat stays on the image (the job firewall; see denext_tests_os.yml's test-runner).
+    # The build (the fast host, windows-x64-fast), libs, node_compat, unit_node, unit and specs
+    # take the win-x64 pools (the MacBook's VM and brain, 4 threads / 8 GB each; LLVM's libclang
+    # for bindgen on both since 2026-11-17) while they have a free slot, else windows-2022
+    # (node_compat's network tests: see denext_tests_os.yml's test-runner).
     uses: ./.github/workflows/denext_tests_os.yml
     permissions:
       contents: read
@@ -488,10 +487,9 @@ jobs:
     with:
       os: windows-11-arm
       libs_and_unit: true
-      # Plus unit_node + node_compat (2 shards). The build, libs, unit and
-      # unit_node on the win-arm64 pool (RUNNER_WINDOWS_ARM) while it has a
-      # free slot, else windows-11-arm; node_compat on the image (see
-      # denext_tests_os.yml).
+      # Plus unit_node + node_compat (2 shards). Every job on the win-arm64
+      # pool (RUNNER_WINDOWS_ARM) while it has a free slot, else
+      # windows-11-arm (see denext_tests_os.yml's test-runner).
       node_suites: true
       # The Windows pools are not widened (ops/runners/allowlist.json): they
       # serve only push / dispatch runs of these refs, and a job they refuse

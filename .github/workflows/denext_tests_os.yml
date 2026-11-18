@@ -292,13 +292,16 @@ jobs:
           # The `pick` keys of the test matrix below (and libs) this leg runs,
           # longest first (Linux x64, run 43019147950: libs 11 min,
           # integration 8-9, node_compat 8, specs 7-8, unit and unit_node 5).
-          # Node's network tests (UDP broadcast, IPv6 autoselectfamily, the
-          # internet/ suite) cannot pass on our Windows runners, whose job
-          # firewall isolates them from the LAN by design (broadcast and
-          # private ranges blocked): node_compat on a Windows leg is never
-          # listed, so it runs on GitHub's image. Every other job of a Windows
-          # leg is (libs since the pool hosts have LLVM's libclang, and
-          # windows-11-arm's unit).
+          # A Windows leg lists every job, node_compat included (2026-11-17).
+          # Its network tests used to fail on our Windows runners (fdbc43cd93):
+          # the job firewall blocked the three addresses Node's dgram tests
+          # send to (test-dgram-broadcast-multi-process, -multicast-multi-
+          # process, -multicast-ssm-multi-process: 255.255.255.255,
+          # 224.0.0.114, 232.1.1.1), and the MacBook guest's dead slirp IPv6
+          # route hung the autoselectfamily tests. Now the firewall lets the
+          # job send UDP to those three on port 12346 only, IPv6 is unbound
+          # there, and every test passed as the job account on brain (ops/
+          # runners/windows-x64/guest/lib-x64.ps1 Set-JobFirewallDgram).
           suites=false
           if [ "$LIBS_ONLY" != true ] && [ "$LIBS_AND_UNIT" != true ]; then suites=true; fi
           keys=()
@@ -307,7 +310,7 @@ jobs:
           elif [[ "$OS" == windows* ]]; then
             if [ "$suites" = true ]; then keys+=(specs_0 specs_1); fi
             keys+=(libs)
-            if [ "$NODE_SUITES" = true ]; then keys+=(unit_node); fi
+            if [ "$NODE_SUITES" = true ]; then keys+=(node_compat_0 node_compat_1 unit_node); fi
             if [ "$suites" = true ] || [ "$LIBS_AND_UNIT" = true ]; then keys+=(unit); fi
           else
             if [ "$PICK_ALL" = true ]; then keys+=(libs); fi
