@@ -323,10 +323,16 @@ jobs:
           # The long specs shards (70 min on win-x64, 80-85 on win-x64-brain, an i3)
           # ask for the fast Windows host only: windows-x64-fast is the label
           # only win-x64's runners carry; when that host is busy they take the
-          # image, never brain.
+          # image, never brain. `libs` too (2026-11-18): its
+          # tools::installer::global::tests::install_unicode runs a .cmd shim
+          # under an empty environment, and on brain (Windows 11 build 26300,
+          # Smart App Control in evaluation mode) cmd.exe exits 1 on any batch
+          # file without SystemRoot; the MacBook's build VM has Smart App
+          # Control off (ops/runners/windows-x64/README.md), brain, the user's
+          # own PC, keeps it.
           for k in ${keys[@]+"${keys[@]}"}; do
             p=$POOL
-            if [ "$POOL" = windows-x64 ] && [[ "$k" == specs_* ]]; then p=windows-x64-fast; fi
+            if [ "$POOL" = windows-x64 ] && { [[ "$k" == specs_* ]] || [ "$k" = libs ]; }; then p=windows-x64-fast; fi
             jobs="$jobs $k=$p@$OS"
           done
           echo "jobs=${jobs# }" >>"$GITHUB_OUTPUT"
