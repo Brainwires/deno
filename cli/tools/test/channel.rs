@@ -524,9 +524,20 @@ mod tests {
     assert_eq!(messages.len(), 100000);
   }
 
-  /// Test that flushing a large number of times doesn't hang.
+  /// Test that flushing after writes that fill the pipe doesn't hang (#23210).
+  ///
+  /// Each round writes 4, 16, 64 and 128 KiB, at least a full pipe buffer
+  /// (4 KiB on Windows, 64 KiB on most Unixes), with a flush after each, so a
+  /// flush starts while the pipe is full. Every round sets up the deadlock, so
+  /// the round count buys confidence, not coverage.
+  /// It used to be 25,000 rounds: 5.3 GB through the pipe, 4 KiB per read, and
+  /// 100,000 flushes, a context-switch-bound transfer that took 60 to 150
+  /// seconds on a Windows x64 runner and passed the 240 second timeout (the
+  /// watchdog's `exit(1)`, with no failed test named) while the other flush
+  /// tests ran beside it on four cores.
   #[tokio::test]
   async fn test_flush_large() {
+    const ROUNDS: usize = 2_000;
     test_util::timeout!(240);
     let (mut worker, mut receiver) = create_single_test_event_channel();
     let recv_handle = spawn(async move {
@@ -540,7 +551,7 @@ mod tests {
       queue
     });
     let send_handle = spawn_blocking(move || {
-      for _ in 0..25000 {
+      for _ in 0..ROUNDS {
         // Write one pipe buffer's worth of message here. We try a few different sizes of potentially
         // blocking writes.
         worker.stderr.write_all(&[0; 4 * 1024]).unwrap();
@@ -556,7 +567,7 @@ mod tests {
     });
     send_handle.await.unwrap();
     let messages = recv_handle.await.unwrap();
-    assert_eq!(messages.len(), 100000);
+    assert_eq!(messages.len(), ROUNDS * 4);
   }
 
   /// Test that flushing a large number of times doesn't hang.
