@@ -399,10 +399,10 @@ jobs:
     name: windows-2022
     needs: guard
     if: ${{ needs.guard.outputs.verified != 'true' && (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.windows)) }}
-    # The build (the fast host, windows-x64-fast), libs, node_compat, unit_node, unit and specs
-    # take the win-x64 pools (the MacBook's VM and brain, 4 threads / 8 GB each; LLVM's libclang
-    # for bindgen on both since 2026-11-17) while they have a free slot, else windows-2022
-    # (node_compat's network tests: see denext_tests_os.yml's test-runner).
+    # The build, libs, specs and node_compat take the fast host (windows-x64-fast: the MacBook's
+    # VM, never brain), unit_node and unit the win-x64 pools (the MacBook's VM and brain, 4 threads
+    # / 8 GB each; LLVM's libclang for bindgen on both since 2026-11-17), while they have a free
+    # slot, else windows-2022 (node_compat's network tests: see denext_tests_os.yml's test-runner).
     uses: ./.github/workflows/denext_tests_os.yml
     permissions:
       contents: read

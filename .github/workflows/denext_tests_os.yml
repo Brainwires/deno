@@ -329,10 +329,16 @@ jobs:
           # Smart App Control in evaluation mode) cmd.exe exits 1 on any batch
           # file without SystemRoot; the MacBook's build VM has Smart App
           # Control off (ops/runners/windows-x64/README.md), brain, the user's
-          # own PC, keeps it.
+          # own PC, keeps it. `node_compat_*` too (2026-11-18): the harness's
+          # 10 s per-test limit is wall clock, and on brain's i3-5005U one
+          # child deno costs ~0.5 s (simple tests 0.7-1.0 s against ~0.1 s on
+          # mac-arm), so test-runner-reporters (20 spawnSync children) and
+          # test-process-exit-code-validation (34) time out there even when
+          # the harness has drained every other test (run 44246923840 job
+          # 134771714979: 10173 ms on the isolated retry).
           for k in ${keys[@]+"${keys[@]}"}; do
             p=$POOL
-            if [ "$POOL" = windows-x64 ] && { [[ "$k" == specs_* ]] || [ "$k" = libs ]; }; then p=windows-x64-fast; fi
+            if [ "$POOL" = windows-x64 ] && { [[ "$k" == specs_* ]] || [[ "$k" == node_compat_* ]] || [ "$k" = libs ]; }; then p=windows-x64-fast; fi
             jobs="$jobs $k=$p@$OS"
           done
           echo "jobs=${jobs# }" >>"$GITHUB_OUTPUT"
