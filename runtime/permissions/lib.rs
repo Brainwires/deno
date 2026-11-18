@@ -2556,6 +2556,30 @@ impl QueryDescriptor for NetDescriptor {
   }
 }
 
+impl NetDescriptor {
+  /// The unspecified address (`0.0.0.0`, `::`, the IPv4-mapped
+  /// `::ffff:0.0.0.0`) names this host: a connection to it reaches the
+  /// loopback address of its family. A connect-direction deny rule for
+  /// loopback therefore holds for it too; this is the descriptor such a rule
+  /// is also held against (`Permissions::check_connect_unspecified_deny`).
+  /// Only connections: a listener on the unspecified address is not one on
+  /// loopback alone, and allow rules are not widened.
+  fn unspecified_as_loopback(&self) -> Option<NetDescriptor> {
+    let Host::Ip(ip) = &self.0 else {
+      return None;
+    };
+    let ip = normalize_ip(*ip);
+    if !ip.is_unspecified() {
+      return None;
+    }
+    let loopback = match ip {
+      IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+      IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+    };
+    Some(NetDescriptor(Host::Ip(loopback), self.1))
+  }
+}
+
 impl AllowDescriptor for NetDescriptor {
   type QueryDesc<'a> = NetDescriptor;
   type DenyDesc = NetDescriptor;
@@ -5165,6 +5189,25 @@ impl Permissions {
     self.net_directional
   }
 
+  /// Holds the connect-direction deny rules against the loopback address a
+  /// connection to `desc` reaches when `desc` is the unspecified address
+  /// (see [`NetDescriptor::unspecified_as_loopback`]); nothing otherwise.
+  fn check_connect_unspecified_deny(
+    &mut self,
+    desc: &NetDescriptor,
+  ) -> Result<(), PermissionDeniedError> {
+    let Some(loopback) = desc.unspecified_as_loopback() else {
+      return Ok(());
+    };
+    if self.net_directional_active() {
+      self
+        .net_connect
+        .check_resolved_ip_deny(&loopback.into_connect())
+    } else {
+      self.net.check_resolved_ip_deny(&loopback)
+    }
+  }
+
   pub fn all_granted(&self) -> bool {
     // Net is "fully granted" if either the legacy `--allow-net` field
     // grants all, or both directional permissions grant all. The two
@@ -7148,6 +7191,7 @@ impl PermissionsContainer {
       );
       let desc = self.descriptor_parser.parse_net_descriptor_from_url(url)?;
       inner.net.check(&desc, Some(api_name))?;
+      inner.check_connect_unspecified_deny(&desc)?;
       return Ok(());
     }
     audit_and_skip_check_if_is_permission_fully_granted!(
@@ -7160,6 +7204,7 @@ impl PermissionsContainer {
       .parse_net_descriptor_from_url(url)?
       .into_connect();
     inner.net_connect.check(&desc, Some(api_name))?;
+    inner.check_connect_unspecified_deny(&desc.0)?;
     Ok(())
   }
 
@@ -7190,6 +7235,7 @@ impl PermissionsContainer {
       let hostname = Host::parse_for_query(host.0.as_ref())?;
       let descriptor = NetDescriptor(hostname, host.1.map(Into::into));
       legacy.check(&descriptor, Some(api_name))?;
+      inner.check_connect_unspecified_deny(&descriptor)?;
       return Ok(());
     }
     let connect = &mut inner.net_connect;
@@ -7206,6 +7252,7 @@ impl PermissionsContainer {
     let descriptor =
       NetConnectDescriptor(NetDescriptor(hostname, host.1.map(Into::into)));
     connect.check(&descriptor, Some(api_name))?;
+    inner.check_connect_unspecified_deny(&descriptor.0)?;
     Ok(())
   }
 
@@ -7272,6 +7319,7 @@ impl PermissionsContainer {
     let mut inner = self.inner.lock();
     let desc =
       NetDescriptor(Host::Ip(normalize_ip(*resolved_ip)), Some(port.into()));
+    inner.check_connect_unspecified_deny(&desc)?;
     if inner.net_directional_active() {
       inner
         .net_connect
@@ -7493,7 +7541,8 @@ impl PermissionsContainer {
   ) -> Result<(), PermissionCheckError> {
     let hostname = Host::parse_for_query(host.0.as_ref())?;
     let desc = NetDescriptor(hostname, host.1.map(Into::into));
-    let inner = self.inner.lock();
+    let mut inner = self.inner.lock();
+    inner.check_connect_unspecified_deny(&desc)?;
     if inner.net_directional_active() {
       check_deny_only(&inner.net_connect, &desc.into_connect())?;
     } else {
@@ -9434,6 +9483,166 @@ mod tests {
         );
       }
     }
+  }
+
+  // The unspecified address names this host: connecting to it reaches
+  // loopback, so a loopback deny rule holds for a connection to it, spelled
+  // as an address or reached through a name, in the legacy and the
+  // directional model.
+  #[test]
+  fn test_net_deny_loopback_covers_unspecified_address() {
+    for (deny_net, deny_net_connect) in [
+      (Some(svec!["127.0.0.1"]), None),
+      (None, Some(svec!["127.0.0.1"])),
+    ] {
+      let directional = deny_net_connect.is_some();
+      let parser = TestPermissionDescriptorParser;
+      let perms = Permissions::from_options(
+        &parser,
+        &PermissionsOptions {
+          allow_net: (!directional).then(Vec::new),
+          deny_net,
+          allow_net_connect: directional.then(Vec::new),
+          allow_net_listen: directional.then(Vec::new),
+          deny_net_connect,
+          prompt: false,
+          ..Default::default()
+        },
+      )
+      .unwrap();
+      let mut perms = PermissionsContainer::new(Arc::new(parser), perms);
+      assert!(
+        perms
+          .check_net_connect(&("0.0.0.0", Some(8080)), "api")
+          .is_err(),
+        "directional: {directional}"
+      );
+      assert!(
+        perms
+          .check_net_connect_url(
+            &Url::parse("http://0.0.0.0:8080/").unwrap(),
+            "api"
+          )
+          .is_err(),
+        "directional: {directional}"
+      );
+      assert!(
+        perms
+          .check_net_connect_deny_only(&("0.0.0.0", Some(8080)), "api")
+          .is_err(),
+        "directional: {directional}"
+      );
+      assert!(
+        perms
+          .check_net_connect(&("192.168.1.1", Some(8080)), "api")
+          .is_ok(),
+        "directional: {directional}"
+      );
+    }
+
+    for (deny_rule, denied, allowed) in [
+      ("127.0.0.1", "0.0.0.0", "::"),
+      ("127.0.0.0/8", "0.0.0.0", "::"),
+      ("127.0.0.1:8080", "0.0.0.0", "::"),
+      ("[::1]", "::", "0.0.0.0"),
+      ("[::1]:8080", "::", "0.0.0.0"),
+    ] {
+      let parser = TestPermissionDescriptorParser;
+      let perms = Permissions::from_options(
+        &parser,
+        &PermissionsOptions {
+          allow_net: Some(vec![]),
+          deny_net: Some(vec![deny_rule.to_string()]),
+          prompt: false,
+          ..Default::default()
+        },
+      )
+      .unwrap();
+      let mut perms = PermissionsContainer::new(Arc::new(parser), perms);
+
+      assert!(
+        perms
+          .check_net_connect(&(denied, Some(8080)), "api")
+          .is_err(),
+        "{denied}:8080 should be denied by {deny_rule}"
+      );
+      assert!(
+        perms
+          .check_net_connect_resolved(&denied.parse().unwrap(), 8080, "api")
+          .is_err(),
+        "resolved {denied}:8080 should be denied by {deny_rule}"
+      );
+      // Connections only: a listener on the unspecified address is not one
+      // on loopback alone, and keeps the rule for its own spelling.
+      assert!(
+        perms.check_net_listen(&(denied, Some(8080)), "api").is_ok(),
+        "a listener on {denied}:8080 should not be denied by {deny_rule}"
+      );
+      // The other family's unspecified address is another address.
+      assert!(
+        perms
+          .check_net_connect(&(allowed, Some(8080)), "api")
+          .is_ok(),
+        "{allowed}:8080 should not be denied by {deny_rule}"
+      );
+      assert!(
+        perms
+          .check_net_connect_resolved(&allowed.parse().unwrap(), 8080, "api")
+          .is_ok(),
+        "resolved {allowed}:8080 should not be denied by {deny_rule}"
+      );
+      // A port-scoped rule keeps its port.
+      if deny_rule.ends_with(":8080") {
+        assert!(
+          perms
+            .check_net_connect(&(denied, Some(9090)), "api")
+            .is_ok(),
+          "{denied}:9090 should not be denied by {deny_rule}"
+        );
+      }
+    }
+
+    // A rule for another address says nothing about the unspecified one.
+    let parser = TestPermissionDescriptorParser;
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_net: Some(vec![]),
+        deny_net: Some(svec!["192.168.1.1"]),
+        prompt: false,
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    let mut perms = PermissionsContainer::new(Arc::new(parser), perms);
+    assert!(
+      perms
+        .check_net_connect(&("0.0.0.0", Some(8080)), "api")
+        .is_ok()
+    );
+
+    // The IPv4-mapped spelling is the IPv4 unspecified address.
+    let parser = TestPermissionDescriptorParser;
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_net: Some(vec![]),
+        deny_net: Some(svec!["127.0.0.1"]),
+        prompt: false,
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    let mut perms = PermissionsContainer::new(Arc::new(parser), perms);
+    assert!(
+      perms
+        .check_net_connect_resolved(
+          &"::ffff:0.0.0.0".parse().unwrap(),
+          8080,
+          "api"
+        )
+        .is_err()
+    );
   }
 
   // A proxied request is resolved and connected by the proxy, so IP-address

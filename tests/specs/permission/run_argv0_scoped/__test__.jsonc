@@ -1,0 +1,39 @@
+{
+  // A scoped --allow-run grants a program under its own name: argv[0] picks
+  // what a multi-call program (BusyBox, Toybox) runs as, so only an unscoped
+  // --allow-run may choose it.
+  // A scoped --allow-run refuses a child whose environment has LD_* / DYLD_*
+  // variables; the test runner's own may have them.
+  "envs": {
+    "LD_LIBRARY_PATH": "",
+    "LD_PRELOAD": "",
+    "DYLD_FALLBACK_LIBRARY_PATH": ""
+  },
+  "tests": {
+    "spawn_scoped": {
+      "if": "unix",
+      "args": "run --allow-env --allow-run=/bin/sh spawn.mjs",
+      "output": "spawn_scoped.out"
+    },
+    "spawn_unscoped": {
+      "if": "unix",
+      "args": "run --allow-env --allow-run spawn.mjs",
+      "output": "spawn_unscoped.out"
+    },
+    "execve_scoped_other_name": {
+      "if": "unix",
+      "args": "run --allow-env --allow-run=/bin/sh execve.mjs ls",
+      "output": "denied\n"
+    },
+    "execve_scoped_own_name": {
+      "if": "unix",
+      "args": "run --allow-env --allow-run=/bin/sh execve.mjs sh",
+      "output": "ran\n"
+    },
+    "execve_unscoped_other_name": {
+      "if": "unix",
+      "args": "run --allow-env --allow-run execve.mjs ls",
+      "output": "ran\n"
+    }
+  }
+}

@@ -69,6 +69,22 @@ pub fn op_inspector_open(
     IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
   const DEFAULT_PORT: u16 = 9229;
 
+  let port = port.unwrap_or(DEFAULT_PORT);
+
+  // Checked before the host is looked at: a host name is resolved below, and
+  // a lookup is a network request (a name the program chose reaches a
+  // resolver), so it needs the same permissions as the listener itself.
+  {
+    let permissions = state.borrow_mut::<PermissionsContainer>();
+    permissions.check_sys("inspector", "inspector.open")?;
+    if let Some(h) = &host
+      && h.parse::<IpAddr>().is_err()
+    {
+      permissions
+        .check_net_listen(&(h.as_str(), Some(port)), "inspector.open")?;
+    }
+  }
+
   let host_ip: IpAddr = match &host {
     Some(h) => {
       if let Ok(ip) = h.parse::<IpAddr>() {
@@ -100,12 +116,10 @@ pub fn op_inspector_open(
     }
     None => DEFAULT_HOST,
   };
-  let port = port.unwrap_or(DEFAULT_PORT);
   let addr = SocketAddr::new(host_ip, port);
 
   {
     let permissions = state.borrow_mut::<PermissionsContainer>();
-    permissions.check_sys("inspector", "inspector.open")?;
     permissions
       .check_net_listen(&(host_ip.to_string(), Some(port)), "inspector.open")?;
   }

@@ -993,6 +993,14 @@ fn create_command(
     ipc,
   )?;
 
+  // `argv0` is applied below, and only off Windows.
+  #[cfg(not(windows))]
+  if let Some(argv0) = &args.argv0
+    && !wrap_in_shell
+  {
+    check_argv0(state, &args.cmd, &cmd, argv0, api_name)?;
+  }
+
   // On Unix, optionally run the command through `/bin/sh` so that files which
   // the kernel can't exec directly (e.g. shell scripts without a shebang) are
   // still executed. This mirrors glibc's `execvp` (`maybe_script_execute`),
@@ -2099,6 +2107,44 @@ fn check_run_permission(
     }
   }
   Ok(())
+}
+
+/// A program started under a name other than its own. A multi-call program
+/// (BusyBox, Toybox, a single-binary coreutils) decides what it is by
+/// `argv[0]`, so a run grant for one of its names (`--allow-run=ls`) would
+/// otherwise run every one of them (`sh`). Only an unscoped `--allow-run` may
+/// choose `argv[0]`. A scoped grant keeps the program's name: the command as
+/// it was spelled, or the file name of that spelling or of the resolved
+/// program. This executable is exempt (`node:child_process` starts it as
+/// `node`; a grant to run it is a grant to run anything already).
+pub fn check_argv0(
+  state: &mut OpState,
+  spelled: &str,
+  resolved: &Path,
+  argv0: &str,
+  api_name: &str,
+) -> Result<(), CheckRunPermissionError> {
+  let argv0_os = OsStr::new(argv0);
+  let is_name_of =
+    |path: &Path| path.file_name().is_some_and(|name| name == argv0_os);
+  if argv0 == spelled
+    || argv0_os == resolved.as_os_str()
+    || is_name_of(Path::new(spelled))
+    || is_name_of(resolved)
+    || std::env::current_exe().is_ok_and(|exe| exe == resolved)
+  {
+    return Ok(());
+  }
+  let permissions = state.borrow_mut::<PermissionsContainer>();
+  if permissions.query_run_all(api_name) {
+    return Ok(());
+  }
+  Err(CheckRunPermissionError::Other(JsErrorBox::new(
+    "NotCapable",
+    format!(
+      "Requires --allow-run permissions to spawn subprocess with an argv0 ({argv0:?}) other than the program's name. Alternatively, spawn without the argv0 option."
+    ),
+  )))
 }
 
 fn get_requires_allow_all_env_vars(env: &RunEnv) -> Vec<&str> {

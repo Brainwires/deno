@@ -1,0 +1,16 @@
+{
+  "tempDir": true,
+  "tests": {
+    // A descriptor opened for writing in a --deny-read scope: fs.fstat() and
+    // fs.fstatSync() need read permission on its path, as
+    // Deno.FsFile.prototype.stat() does.
+    "deny_read": {
+      "args": "run --allow-read --allow-write --deny-read=denied main.ts",
+      "output": "main.out"
+    },
+    "no_read": {
+      "args": "run --allow-write main.ts",
+      "output": "no_read.out"
+    }
+  }
+}

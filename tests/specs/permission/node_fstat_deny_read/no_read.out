@@ -1,0 +1,4 @@
+fstatSync: denied
+fstat: denied
+write: 1
+stdout: number
