@@ -46,7 +46,11 @@
 # here and in each leg, `pick build runners` for a leg's build) that runs the
 # shared pick-runners action: the job takes our pool while it has a free slot
 # and its GitHub image at once otherwise (DENEXT_POOL_HEALTH and the queued
-# jobs decide; a fork's pull request always takes the image).
+# jobs decide; a fork's pull request always takes the image). With the ops
+# switch `github_off` in DENEXT_POOL_HEALTH a job of that image family waits
+# for our pool instead of overflowing. Every job of the gate can run on our
+# pools (the pickers themselves on the linux-x64 pool) except the Windows
+# node_compat shards, which the job firewall keeps on GitHub's images.
 # - macOS x64 (macos-15-intel) and Linux arm64 (ubuntu-22.04-arm), two of the
 #   other release architectures: build + libs only (macOS x64 also the node
 #   suites); Windows arm64 (windows-11-arm): build + libs + unit + the node
@@ -142,8 +146,13 @@ jobs:
   # its image (each runs-on's `||`).
   runners:
     name: pick runners
-    # GitHub's image: the pick must not wait in the queue it shortens.
-    runs-on: ubuntu-latest
+    # Our Linux x64 pool (RUNNER_LINUX_X64, biscuits): no job of a run that is
+    # not a fork's pull request goes to a GitHub-hosted runner, the pickers
+    # included (2026-11-17, "use only our runners"). The cost: the pick waits
+    # for a free slot there, and while GitHub is on it counts its own slot as
+    # busy (one Linux job may overflow that would have fit). A fork's pull
+    # request, or the variable unset: GitHub's ubuntu-latest, as before.
+    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || fromJSON(vars.RUNNER_LINUX_X64 || '"ubuntu-latest"') }}
     timeout-minutes: 5
     permissions:
       actions: read # the repository's queued / running jobs
@@ -155,10 +164,12 @@ jobs:
         uses: Brainwires/.github/actions/pick-runners@b22319621b56184a647fddfdcbefa300bcb6efc5 # pick-runners
         with:
           # guard first (it runs first); cargo audit starts in guard's slot
-          # when guard ends (it needs guard). lint's macos-15 entry only on a
-          # run whose matrix has it; its windows-2022 entry stays on the image
-          # (the 8 GB VM).
-          jobs: ${{ format('guard=linux-x64@ubuntu-24.04 audit=~guard lint_linux=linux-x64-2204@ubuntu-22.04{0}', (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.macos)) && ' lint_macos=macos-arm64@macos-15' || '') }}
+          # when guard ends (it needs guard). lint's macos-15 and windows-2022
+          # entries only on a run whose matrix has them; the windows-2022 one
+          # on the win-x64 pools (LLVM's libclang for the build scripts'
+          # bindgen is on both hosts since 2026-11-17) only on the refs those
+          # pools serve (the windows leg's pick_pool below), else the image.
+          jobs: ${{ format('guard=linux-x64@ubuntu-24.04 audit=~guard lint_linux=linux-x64-2204@ubuntu-22.04{0}{1}', (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.macos)) && ' lint_macos=macos-arm64@macos-15' || '', ((github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.windows)) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref_name == 'development-denext' || github.ref_name == 'development' || github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'rel/') || startsWith(github.ref_name, 'train/') || startsWith(github.ref_name, 'pretest/') || startsWith(github.ref_name, 'fix/') || startsWith(github.ref_name, 'feat/'))) && ' lint_windows=windows-x64@windows-2022' || '') }}
           vars: ${{ toJSON(vars) }}
 
   # The verified-SHA guard (.github/denext-runtime/guard_verified.py, DENEXT.md
@@ -219,9 +230,9 @@ jobs:
     if: ${{ !cancelled() && needs.guard.result == 'success' && needs.guard.outputs.verified != 'true' }}
     # The macos-15 entry on our macos-arm64 pool, the ubuntu-22.04 one on the
     # Ubuntu 22.04 Linux pool (its image carries the setup action's packages),
-    # each while it has a free slot, else its GitHub image (runners). The
-    # windows-2022 entry stays on the image (the 8 GB VM).
-    runs-on: ${{ matrix.os != 'windows-2022' && fromJSON(needs.runners.outputs.plan || '{}')[matrix.os == 'macos-15' && 'lint_macos' || 'lint_linux'] || matrix.os }}
+    # the windows-2022 one on the win-x64 pools (on the refs they serve), each
+    # while it has a free slot, else its GitHub image (runners).
+    runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}')[matrix.os == 'macos-15' && 'lint_macos' || (matrix.os == 'windows-2022' && 'lint_windows' || 'lint_linux')] || matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -389,11 +400,10 @@ jobs:
     name: windows-2022
     needs: guard
     if: ${{ needs.guard.outputs.verified != 'true' && (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.windows)) }}
-    # Stays on GitHub's image: a debug deno build + the suite on the 1-slot 4 vCPU / 8 GB
-    # Windows VM, and the setup action writes the hosts file (the job account is no admin).
-    # Its unit_node, unit and specs jobs (against this build) take the win-x64 pool while it
-    # has a free slot, else windows-2022; node_compat stays on the image (see
-    # denext_tests_os.yml's test-runner).
+    # The build (the fast host, windows-x64-fast), libs, unit_node, unit and specs take the
+    # win-x64 pools (the MacBook's VM and brain, 4 threads / 8 GB each; LLVM's libclang for
+    # bindgen on both since 2026-11-17) while they have a free slot, else windows-2022;
+    # node_compat stays on the image (the job firewall; see denext_tests_os.yml's test-runner).
     uses: ./.github/workflows/denext_tests_os.yml
     permissions:
       contents: read
@@ -457,6 +467,12 @@ jobs:
     with:
       os: ubuntu-22.04-arm
       libs_only: true
+      # The build and libs on the linux-arm64 pool (Docker on the mini, 6 CPUs,
+      # 6 GB + 2 GB swap) while it has a free slot, else GitHub's
+      # ubuntu-22.04-arm. They fit there linked with lld (the setup action;
+      # GNU ld OOMed linking deno_snapshots' build script, run 43880087120).
+      pick_all: true
+      pick_pool: linux-arm64
 
   # Windows arm64 ships (CLI, denort, runtime) and has its own code paths
   # (DENEXT.md items 105 and 118 fixed x64 ones): build, libs and the unit
@@ -472,9 +488,10 @@ jobs:
     with:
       os: windows-11-arm
       libs_and_unit: true
-      # Plus unit_node + node_compat (2 shards): unit_node on the win-arm64
-      # pool (RUNNER_WINDOWS_ARM) while it has a free slot, else
-      # windows-11-arm; node_compat on the image (see denext_tests_os.yml).
+      # Plus unit_node + node_compat (2 shards). The build, libs, unit and
+      # unit_node on the win-arm64 pool (RUNNER_WINDOWS_ARM) while it has a
+      # free slot, else windows-11-arm; node_compat on the image (see
+      # denext_tests_os.yml).
       node_suites: true
       # The Windows pools are not widened (ops/runners/allowlist.json): they
       # serve only push / dispatch runs of these refs, and a job they refuse

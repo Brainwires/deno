@@ -50,6 +50,28 @@ runs:
         # image has the packages (our Linux pool images do).
         bash .github/denext-runtime/apt_install.sh libclang-dev cmake protobuf-compiler
 
+    # Linux arm64 links with lld (upstream's Linux CI links with lld too). With
+    # GNU ld, linking deno_snapshots' build script (V8, statically) beside five
+    # other rustc jobs was OOM-killed in the linux-arm64 pool's container
+    # (6 CPUs, 6 GB + 2 GB swap): run 43880087120, and again when measured on
+    # 2026-11-17 (killed 169 s in); with lld the same build finished in 174 s.
+    # The flags join .cargo/config.toml's target.'cfg(all())' ones (checked in
+    # the build's fingerprints). Our pool's image has ld.lld (a missing one is
+    # an error there); a GitHub image without it keeps its default linker.
+    - name: Link with lld (Linux arm64)
+      if: runner.os == 'Linux' && runner.arch == 'ARM64'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v ld.lld >/dev/null 2>&1; then
+          ld.lld --version
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=lld" >>"$GITHUB_ENV"
+        elif [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
+          echo "::error::no ld.lld on this runner: GNU ld does not fit the arm64 debug link in the pool's memory"; exit 1
+        else
+          echo "::notice::no ld.lld on this image: the default linker"
+        fi
+
     - name: libclang (Windows)
       if: runner.os == 'Windows' && inputs.libclang == 'true'
       shell: bash
@@ -64,6 +86,26 @@ runs:
           fi
         done
         echo "::error::libclang.dll not found"; exit 1
+
+    # libz-sys builds zlib-ng with CMake. GitHub's Windows images have cmake on
+    # PATH; our Windows pool hosts have VS Build Tools' own CMake (the "C++ CMake
+    # tools" component) off PATH (the win-x64 guest's build failed "is `cmake`
+    # not installed?", 2026-11-17). Puts VS's CMake and Ninja on this job's PATH
+    # when the runner has no cmake.
+    - name: CMake (Windows, when the runner has none on PATH)
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v cmake >/dev/null 2>&1; then cmake --version | head -n 1; exit 0; fi
+        vs=$("/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -products '*' -property installationPath)
+        ext="$(cygpath -u "$vs")/Common7/IDE/CommonExtensions/Microsoft/CMake"
+        if [ ! -f "$ext/CMake/bin/cmake.exe" ]; then
+          echo "::error::no cmake on PATH and none in VS Build Tools ($vs)"; exit 1
+        fi
+        cygpath -w "$ext/CMake/bin" >>"$GITHUB_PATH"
+        cygpath -w "$ext/Ninja" >>"$GITHUB_PATH"
+        "$ext/CMake/bin/cmake.exe" --version | head -n 1
 
     # Every pool image carries rustup for its job user except the Windows x64
     # VM's (its jobs install their own into the per-job profile): there, and
