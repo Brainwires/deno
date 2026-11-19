@@ -21,8 +21,9 @@
 //!   the supervisor resolves the caller's path (or descriptor) to an
 //!   `O_PATH` descriptor of its own, checks where that object really is, and
 //!   performs the change on that descriptor, so a path or descriptor swapped
-//!   after the check can't redirect it. An absolute path is resolved from
-//!   the caller's own root (its mount namespace), and the caller's private
+//!   after the check can't redirect it. Every path is resolved within the
+//!   caller's own root (its mount namespace, or a chroot of its own): `..`
+//!   stops there and an absolute symlink starts there. The caller's private
 //!   `/dev/shm`, if it has one, is recognized by its file system. Pipes, sockets and other objects
 //!   with no path, and unlinked files, are not files outside the roots. A
 //!   path through a procfs magic link (`/dev/fd/N`, `/proc/self/fd/N`,
@@ -46,6 +47,7 @@ use std::os::fd::AsRawFd;
 use std::os::fd::FromRawFd;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -917,65 +919,121 @@ fn open_object(tid: u32, obj: Obj) -> Result<OwnedFd, i32> {
       empty_path,
     } => {
       let path = read_cstr(tid, path, libc::PATH_MAX as usize)?;
-      if path.as_bytes().is_empty() {
-        if !empty_path {
-          return Err(libc::ENOENT);
-        }
-        return if dirfd == AT_FDCWD {
-          open_path(&format!("/proc/{tid}/cwd"), libc::O_PATH)
-        } else {
-          open_object(tid, Obj::Fd(dirfd))
-        };
-      }
-      // an absolute path from the caller's own root: its mount namespace
-      // (a private /dev/shm) or a chroot of its own
-      let absolute = path.as_bytes().starts_with(b"/");
-      let path = if absolute {
-        let rest = path.as_bytes().iter().position(|b| *b != b'/');
-        match rest {
-          Some(at) => CString::new(&path.as_bytes()[at..]).unwrap(),
-          None => CString::new(".").unwrap(),
-        }
-      } else {
-        path
-      };
-      let base = if absolute {
-        open_path(
-          &format!("/proc/{tid}/root"),
-          libc::O_PATH | libc::O_DIRECTORY,
-        )?
-      } else if dirfd == AT_FDCWD {
-        open_path(
-          &format!("/proc/{tid}/cwd"),
-          libc::O_PATH | libc::O_DIRECTORY,
-        )?
-      } else if dirfd < 0 {
-        return Err(libc::EBADF);
-      } else {
-        open_path(
-          &format!("/proc/{tid}/fd/{dirfd}"),
-          libc::O_PATH | libc::O_DIRECTORY,
-        )
-        .map_err(|e| if e == libc::ENOENT { libc::EBADF } else { e })?
-      };
-      let nofollow = if follow { 0 } else { libc::O_NOFOLLOW };
-      let flags = libc::O_PATH | libc::O_CLOEXEC | nofollow;
-      // No magic link: this process resolves the path, so `/proc/self`
-      // (`/dev/fd`, `/dev/stdin`, `/proc/thread-self`) would name the
-      // supervisor, and `/proc/self/fd/N` its own descriptor N, not the
-      // caller's
-      match openat2(&base, &path, flags, libc::RESOLVE_NO_MAGICLINKS) {
-        Ok(fd) => Ok(fd),
-        // a magic link on the way (it resolves without the restriction),
-        // refused; otherwise a real symlink loop, the caller's own ELOOP
-        Err(libc::ELOOP) => match openat2(&base, &path, flags, 0) {
-          Ok(_) => Err(libc::EPERM),
-          Err(e) => Err(e),
-        },
+      resolve(tid, dirfd, path, follow, empty_path)
+    }
+  }
+}
+
+/// The caller's `path` (relative to `dirfd`, or its working directory)
+/// resolved as the caller resolves it, confined to the caller's own root
+/// (its mount namespace, or a chroot of its own): `openat2` with
+/// `RESOLVE_IN_ROOT` beneath `/proc/<tid>/root`, so `..` stops at that root
+/// and an absolute symlink starts from it, never from this process's. A
+/// relative path is joined to the base directory's path beneath that root
+/// (a rename meanwhile can only move the lookup elsewhere beneath the same
+/// root, and the object found is checked like any other); a base outside
+/// the caller's root is refused.
+///
+/// No magic link either: this process resolves the path, so `/proc/self`
+/// (`/dev/fd`, `/dev/stdin`, `/proc/thread-self`) would name the
+/// supervisor, and `/proc/self/fd/N` its own descriptor N, not the
+/// caller's.
+fn resolve(
+  tid: u32,
+  dirfd: i32,
+  path: CString,
+  follow: bool,
+  empty_path: bool,
+) -> Result<OwnedFd, i32> {
+  if path.as_bytes().is_empty() {
+    if !empty_path {
+      return Err(libc::ENOENT);
+    }
+    return if dirfd == AT_FDCWD {
+      open_path(&format!("/proc/{tid}/cwd"), libc::O_PATH)
+    } else {
+      open_object(tid, Obj::Fd(dirfd))
+    };
+  }
+  let root = open_path(
+    &format!("/proc/{tid}/root"),
+    libc::O_PATH | libc::O_DIRECTORY,
+  )?;
+  let path = if path.as_bytes().starts_with(b"/") {
+    path
+  } else {
+    let base = if dirfd == AT_FDCWD {
+      open_path(
+        &format!("/proc/{tid}/cwd"),
+        libc::O_PATH | libc::O_DIRECTORY,
+      )?
+    } else if dirfd < 0 {
+      return Err(libc::EBADF);
+    } else {
+      open_path(
+        &format!("/proc/{tid}/fd/{dirfd}"),
+        libc::O_PATH | libc::O_DIRECTORY,
+      )
+      .map_err(|e| if e == libc::ENOENT { libc::EBADF } else { e })?
+    };
+    let mut joined = beneath(&root, &base)?;
+    if !joined.is_empty() {
+      joined.push(b'/');
+    }
+    joined.extend_from_slice(path.as_bytes());
+    CString::new(joined).map_err(|_| libc::EINVAL)?
+  };
+  let nofollow = if follow { 0 } else { libc::O_NOFOLLOW };
+  let flags = libc::O_PATH | libc::O_CLOEXEC | nofollow;
+  match openat2(
+    &root,
+    &path,
+    flags,
+    libc::RESOLVE_IN_ROOT | libc::RESOLVE_NO_MAGICLINKS,
+  ) {
+    Ok(fd) => Ok(fd),
+    // ELOOP: a real symlink loop (the caller's own ELOOP), or a magic link
+    // on the way, refused (a scoped lookup refuses those with EXDEV)
+    Err(libc::ELOOP) => {
+      match openat2(&root, &path, flags, libc::RESOLVE_IN_ROOT) {
+        Err(libc::ELOOP) => Err(libc::ELOOP),
+        Err(libc::EXDEV) | Ok(_) => Err(libc::EPERM),
         Err(e) => Err(e),
       }
     }
+    Err(e) => Err(e),
   }
+}
+
+/// The path of the directory `base` beneath the directory `root` (both
+/// this process's descriptors), without a leading `/`: empty for the root
+/// itself. A base outside the root (a chroot the caller left its working
+/// directory outside of) is refused; one that was removed has no entries.
+fn beneath(root: &OwnedFd, base: &OwnedFd) -> Result<Vec<u8>, i32> {
+  let name = |fd: &OwnedFd| {
+    std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+      .map(|p| p.into_os_string().into_vec())
+      .map_err(|_| libc::EPERM)
+  };
+  let (root, base) = (name(root)?, name(base)?);
+  if root.ends_with(b" (deleted)") || !root.starts_with(b"/") {
+    return Err(libc::EPERM);
+  }
+  if base.ends_with(b" (deleted)") {
+    return Err(libc::ENOENT);
+  }
+  let rest = if root == b"/" {
+    base.strip_prefix(b"/")
+  } else {
+    base.strip_prefix(root.as_slice()).and_then(|r| {
+      if r.is_empty() {
+        Some(r)
+      } else {
+        r.strip_prefix(b"/")
+      }
+    })
+  };
+  rest.map(<[u8]>::to_vec).ok_or(libc::EPERM)
 }
 
 /// `path` opened beneath `base` with `openat2`'s `resolve` restrictions; a
@@ -1198,6 +1256,149 @@ mod tests {
     }
     assert!(metadata_syscalls().contains(&nr::FCHMODAT));
     assert!(signal_syscalls().contains(&nr::PIDFD_SEND_SIGNAL));
+  }
+
+  /// A child of this process chrooted into a directory, its working
+  /// directory that root; killed and reaped on drop.
+  struct Chrooted(libc::pid_t);
+
+  impl Drop for Chrooted {
+    fn drop(&mut self) {
+      // SAFETY: our own child, reaped once
+      unsafe {
+        libc::kill(self.0, libc::SIGKILL);
+        libc::waitpid(self.0, std::ptr::null_mut(), 0);
+      }
+    }
+  }
+
+  /// `dir` as a chrooted child's root: by `chroot` itself where this
+  /// process may (CAP_SYS_CHROOT), else in a user namespace of its own;
+  /// `None` where neither works (a container's seccomp profile, Ubuntu's
+  /// AppArmor restriction on unprivileged user namespaces), and then no
+  /// unprivileged process here has a root of its own either.
+  fn chrooted(dir: &Path) -> Option<Chrooted> {
+    let dir = CString::new(dir.as_os_str().as_bytes()).unwrap();
+    let mut fds = [0; 2];
+    // SAFETY: an out array of two descriptors
+    assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+    // SAFETY: the child makes only async-signal-safe syscalls, then exits
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+      // SAFETY: raw syscalls on arguments prepared before the fork
+      unsafe {
+        let ok = (libc::chroot(dir.as_ptr()) == 0
+          || (libc::unshare(libc::CLONE_NEWUSER) == 0
+            && libc::chroot(dir.as_ptr()) == 0))
+          && libc::chdir(c"/".as_ptr()) == 0;
+        if ok {
+          libc::write(fds[1], b"r".as_ptr().cast(), 1);
+          libc::close(fds[1]);
+          loop {
+            libc::pause();
+          }
+        }
+        libc::_exit(1);
+      }
+    }
+    assert!(pid > 0);
+    let child = Chrooted(pid);
+    let mut byte = 0u8;
+    // SAFETY: our pipe's ends and a one-byte buffer
+    let n = unsafe {
+      libc::close(fds[1]);
+      let n = libc::read(fds[0], (&mut byte as *mut u8).cast(), 1);
+      libc::close(fds[0]);
+      n
+    };
+    (n == 1).then_some(child)
+  }
+
+  /// A fresh directory (canonical) removed on drop.
+  struct Scratch(PathBuf);
+
+  impl Scratch {
+    fn new(name: &str) -> Self {
+      let base = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+      let dir = base.join(format!("notify-{name}-{}", std::process::id()));
+      let _ = std::fs::remove_dir_all(&dir);
+      std::fs::create_dir(&dir).unwrap();
+      Scratch(dir)
+    }
+  }
+
+  impl Drop for Scratch {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.0);
+    }
+  }
+
+  fn identity(fd: &OwnedFd) -> (u64, u64) {
+    let st = fstat(fd).unwrap();
+    (st.st_dev, st.st_ino)
+  }
+
+  fn identity_of(path: &Path) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(path).unwrap();
+    (m.dev(), m.ino())
+  }
+
+  // An absolute symlink in a caller with a root of its own starts from that
+  // root, as the caller's own lookup does, not from the supervisor's: the
+  // link names a supervisor-side file, and the caller's file at that path
+  // is what the supervisor finds
+  #[test]
+  #[allow(clippy::print_stderr, reason = "test code: a skip note")]
+  fn absolute_symlinks_start_from_the_callers_root() {
+    let scratch = Scratch::new("abslink");
+    let jail = scratch.0.join("jail");
+    let host = scratch.0.join("host/target");
+    std::fs::create_dir_all(host.parent().unwrap()).unwrap();
+    std::fs::write(&host, "supervisor side\n").unwrap();
+    let mine = jail.join(host.strip_prefix("/").unwrap());
+    std::fs::create_dir_all(mine.parent().unwrap()).unwrap();
+    std::fs::write(&mine, "caller side\n").unwrap();
+    std::os::unix::fs::symlink(&host, jail.join("link")).unwrap();
+    let Some(child) = chrooted(&jail) else {
+      eprintln!("skipped: no chroot or user namespace here");
+      return;
+    };
+    for (dirfd, path) in [(AT_FDCWD, c"/link"), (AT_FDCWD, c"link")] {
+      let fd = resolve(child.0 as u32, dirfd, path.into(), true, false)
+        .unwrap_or_else(|e| panic!("{path:?}: errno {e}"));
+      assert_eq!(identity(&fd), identity_of(&mine), "{path:?}");
+    }
+    // not following the link: the link itself, beneath the caller's root
+    let fd =
+      resolve(child.0 as u32, AT_FDCWD, c"/link".into(), false, false).unwrap();
+    assert!(is_symlink(&fd));
+  }
+
+  // `..` stops at a caller's own root, as the caller's own lookup does: a
+  // `../../..` escape finds the caller's file, not the supervisor-side file
+  // above that root
+  #[test]
+  #[allow(clippy::print_stderr, reason = "test code: a skip note")]
+  fn dot_dot_stops_at_the_callers_root() {
+    let scratch = Scratch::new("dotdot");
+    let jail = scratch.0.join("x/y/jail");
+    std::fs::create_dir_all(jail.join("sub")).unwrap();
+    std::fs::write(scratch.0.join("secret"), "supervisor side\n").unwrap();
+    std::fs::write(jail.join("secret"), "caller side\n").unwrap();
+    let Some(child) = chrooted(&jail) else {
+      eprintln!("skipped: no chroot or user namespace here");
+      return;
+    };
+    for path in [
+      c"../../../secret",
+      c"/../../../secret",
+      c"sub/../../../../secret",
+    ] {
+      let fd = resolve(child.0 as u32, AT_FDCWD, path.into(), true, false)
+        .unwrap_or_else(|e| panic!("{path:?}: errno {e}"));
+      assert_eq!(identity(&fd), identity_of(&jail.join("secret")), "{path:?}");
+    }
   }
 
   #[test]
