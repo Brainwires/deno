@@ -10,6 +10,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 static ENFORCING: AtomicBool = AtomicBool::new(false);
+static WARNING: AtomicBool = AtomicBool::new(false);
 static INHERITED: AtomicBool = AtomicBool::new(false);
 static GRANTS_UNKNOWN: AtomicBool = AtomicBool::new(false);
 
@@ -21,6 +22,40 @@ pub fn set_enforcing() {
 /// Whether the kernel sandbox enforces this process's grant.
 pub fn is_enforcing() -> bool {
   ENFORCING.load(Ordering::SeqCst)
+}
+
+/// Records that the kernel sandbox runs in warn mode in this process
+/// (`--kernel-sandbox=warn`): nothing is refused, and what `enforce` would
+/// refuse is reported (`deno_sandbox::would_deny`).
+pub fn set_warning() {
+  WARNING.store(true, Ordering::SeqCst);
+}
+
+/// Whether the kernel sandbox runs in warn mode in this process.
+pub fn is_warning() -> bool {
+  WARNING.load(Ordering::Relaxed)
+}
+
+/// Warn mode: the program is about to start `program` (a path or a name).
+/// Reports once per program what is known about it inside a kernel sandbox:
+/// the grant it needs of its own, or that it can't work there whatever is
+/// granted. Says nothing about a program with nothing known, and nothing
+/// outside warn mode.
+pub fn note_spawn(program: &str) {
+  if !is_warning() {
+    return;
+  }
+  if let Some(advice) = deno_sandbox::would_deny::program_advisory(program) {
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    deno_sandbox::would_deny::report(
+      deno_sandbox::would_deny::WouldDeny::ungrantable(
+        deno_sandbox::would_deny::AccessClass::Exec,
+        name,
+        advice,
+      )
+      .from_source(deno_sandbox::would_deny::Source::Advisory),
+    );
+  }
 }
 
 /// Records that this process runs inside a kernel sandbox a parent applied

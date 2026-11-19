@@ -175,7 +175,11 @@
     // report names its self-exec gap, and the listing-only entries
     "fallback_gap_reported_macos": {
       "if": "mac",
-      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_EXEC": "1" },
+      "envs": {
+        "DENO_INTERNAL_KERNEL_SANDBOX_EXEC": "1",
+        // the report is what this checks, not warn mode's observer
+        "DENO_KERNEL_SANDBOX_WARN_OBSERVE": "0"
+      },
       "args": "run --quiet --kernel-sandbox-report --kernel-sandbox=warn main.ts",
       "output": "fallback_gap.out"
     },

@@ -12,16 +12,30 @@
 # npm matrix needs Docker for its services, and denext's suites run on Linux).
 # Dispatched by hand only (no schedule): before a kernel sandbox default
 # changes, and on a train that touches the sandbox.
+#
+# `stage` (DENEXT.md item 957) runs the suites with the defaults of a later
+# rollout stage of `auto` instead of a forced mode
+# (DENO_INTERNAL_KERNEL_SANDBOX_STAGE=r3|r4, with `force: none`): what a
+# default flip would change, before the constant moves. The run's name carries
+# its inputs: tests/kernel_sandbox_beds/soak.ts reads the runs back and counts
+# the soak in front of a flip (seven green full runs in a row, four hours
+# apart, the newest on the candidate commit).
 name: denext kernel sandbox beds
+run-name: kernel beds force=${{ inputs.force }} stage=${{ inputs.stage }} suites=${{ inputs.suites }} macos=${{ inputs.macos }}
 
 on:
   workflow_dispatch:
     inputs:
       force:
-        description: The forced mode (enforce = each run's own grant; project = -A narrowed to the project for the kernel)
+        description: The forced mode (enforce = each run's own grant; project = -A narrowed to the project for the kernel; none = nothing forced, for a stage bed)
         type: choice
-        options: [enforce, project]
+        options: [enforce, project, none]
         default: enforce
+      stage:
+        description: The rollout stage of auto the suites run at (none = the shipped stage; r3 / r4 = that stage's defaults, with force none)
+        type: choice
+        options: [none, r3, r4]
+        default: none
       suites:
         description: Comma-separated suites (specs, node_compat, npm_matrix, denext)
         type: string
@@ -39,7 +53,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: denext-kernel-beds-${{ github.ref }}-${{ inputs.force }}
+  group: denext-kernel-beds-${{ github.ref }}-${{ inputs.force }}-${{ inputs.stage }}
   cancel-in-progress: false
 
 env:
@@ -48,10 +62,16 @@ env:
   CARGO_PROFILE_DEV_DEBUG: '0'
   RUST_BACKTRACE: full
   TOOLS_DENO_VERSION: 2.9.7
-  # the forced mode (a choice input), read by compare.ts's --force
-  KERNEL_BED_FORCE: ${{ inputs.force }}
+  # the bed's key in expected_failures.jsonc, read by compare.ts's --force:
+  # the forced mode, or `stage-r3` / `stage-r4` for a stage bed
+  KERNEL_BED_FORCE: ${{ inputs.stage != 'none' && format('stage-{0}', inputs.stage) || inputs.force }}
+  # the rollout stage (empty: the shipped one); only this runtime reads it
+  DENO_INTERNAL_KERNEL_SANDBOX_STAGE: ${{ inputs.stage != 'none' && inputs.stage || '' }}
 
 jobs:
+  # A forced mode and a stage together are neither bed (the force replaces
+  # the stage's choice), and neither one is no bed at all: every suite's `if`
+  # asks for exactly one of them, so such a dispatch runs nothing.
   # Where each bed runs: our pools while they have a free slot, else GitHub's
   # images at once (the shared pick-runners action).
   runners:
@@ -70,9 +90,9 @@ jobs:
           vars: ${{ toJSON(vars) }}
 
   specs:
-    name: specs ${{ matrix.os }} (forced ${{ inputs.force }})
+    name: specs ${{ matrix.os }} (${{ inputs.stage != 'none' && format('stage {0}', inputs.stage) || format('forced {0}', inputs.force) }})
     needs: runners
-    if: ${{ !cancelled() && contains(format(',{0},', inputs.suites), ',specs,') }}
+    if: ${{ !cancelled() && (inputs.force == 'none') != (inputs.stage == 'none') && contains(format(',{0},', inputs.suites), ',specs,') }}
     strategy:
       fail-fast: false
       matrix:
@@ -96,7 +116,7 @@ jobs:
         run: cargo build --locked --bin deno --bin denort --bin test_server && cargo build -p test_ffi
       - name: Specs under the forced kernel sandbox
         env:
-          DENO_INTERNAL_KERNEL_SANDBOX_FORCE: ${{ inputs.force }}
+          DENO_INTERNAL_KERNEL_SANDBOX_FORCE: ${{ inputs.force != 'none' && inputs.force || '' }}
         run: |
           set -o pipefail
           cargo test -p specs_tests --test specs 2>&1 | tee specs.log || true
@@ -105,7 +125,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: kernel-beds-specs-${{ matrix.os }}-${{ inputs.force }}
+          name: kernel-beds-specs-${{ matrix.os }}-${{ inputs.force }}-${{ inputs.stage }}
           path: |
             specs.log
             specs.json
@@ -113,9 +133,9 @@ jobs:
           retention-days: 14
 
   node_compat:
-    name: node_compat ${{ matrix.os }} (forced ${{ inputs.force }})
+    name: node_compat ${{ matrix.os }} (${{ inputs.stage != 'none' && format('stage {0}', inputs.stage) || format('forced {0}', inputs.force) }})
     needs: runners
-    if: ${{ !cancelled() && contains(format(',{0},', inputs.suites), ',node_compat,') }}
+    if: ${{ !cancelled() && (inputs.force == 'none') != (inputs.stage == 'none') && contains(format(',{0},', inputs.suites), ',node_compat,') }}
     strategy:
       fail-fast: false
       matrix:
@@ -145,7 +165,7 @@ jobs:
         run: cargo build --locked --bin deno --bin test_server
       - name: node_compat under the forced kernel sandbox
         env:
-          DENO_INTERNAL_KERNEL_SANDBOX_FORCE: ${{ inputs.force }}
+          DENO_INTERNAL_KERNEL_SANDBOX_FORCE: ${{ inputs.force != 'none' && inputs.force || '' }}
         run: |
           set -o pipefail
           cargo test -p node_compat_tests --test node_compat 2>&1 | tee node_compat.log || true
@@ -154,7 +174,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: kernel-beds-node-compat-${{ matrix.os }}-${{ inputs.force }}
+          name: kernel-beds-node-compat-${{ matrix.os }}-${{ inputs.force }}-${{ inputs.stage }}
           path: |
             node_compat.log
             node_compat.json
@@ -162,9 +182,9 @@ jobs:
           retention-days: 14
 
   npm_matrix:
-    name: npm matrix (forced ${{ inputs.force }})
+    name: npm matrix (${{ inputs.stage != 'none' && format('stage {0}', inputs.stage) || format('forced {0}', inputs.force) }})
     needs: runners
-    if: ${{ !cancelled() && contains(format(',{0},', inputs.suites), ',npm_matrix,') }}
+    if: ${{ !cancelled() && (inputs.force == 'none') != (inputs.stage == 'none') && contains(format(',{0},', inputs.suites), ',npm_matrix,') }}
     # The docker-enabled Linux pool (services.sh starts its registries with
     # Docker), else GitHub's ubuntu-22.04.
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').npm_matrix || 'ubuntu-22.04' }}
@@ -188,7 +208,7 @@ jobs:
         run: tests/npm_matrix/services.sh up
       - name: The matrix under the forced kernel sandbox
         env:
-          DENO_INTERNAL_KERNEL_SANDBOX_FORCE: ${{ inputs.force }}
+          DENO_INTERNAL_KERNEL_SANDBOX_FORCE: ${{ inputs.force != 'none' && inputs.force || '' }}
         run: |
           # run.ts runs on the tools deno, which ignores the variable; it
           # forwards it to each case's deno (this runtime)
@@ -202,7 +222,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: kernel-beds-npm-matrix-${{ inputs.force }}
+          name: kernel-beds-npm-matrix-${{ inputs.force }}-${{ inputs.stage }}
           path: |
             npm-matrix.jsonl
             npm_matrix.json
@@ -210,9 +230,9 @@ jobs:
           retention-days: 14
 
   denext:
-    name: denext integration + e2e (forced ${{ inputs.force }})
+    name: denext integration + e2e (${{ inputs.stage != 'none' && format('stage {0}', inputs.stage) || format('forced {0}', inputs.force) }})
     needs: runners
-    if: ${{ !cancelled() && contains(format(',{0},', inputs.suites), ',denext,') }}
+    if: ${{ !cancelled() && (inputs.force == 'none') != (inputs.stage == 'none') && contains(format(',{0},', inputs.suites), ',denext,') }}
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').denext || 'ubuntu-24.04' }}
     timeout-minutes: 300
     defaults:
@@ -252,14 +272,14 @@ jobs:
       - name: denext integration under the forced kernel sandbox
         working-directory: denext
         env:
-          DENO_INTERNAL_KERNEL_SANDBOX_FORCE: ${{ inputs.force }}
+          DENO_INTERNAL_KERNEL_SANDBOX_FORCE: ${{ inputs.force != 'none' && inputs.force || '' }}
         run: |
           set -o pipefail
           deno task test:integration 2>&1 | tee ../denext_integration.log || true
       - name: denext e2e under the forced kernel sandbox
         working-directory: denext
         env:
-          DENO_INTERNAL_KERNEL_SANDBOX_FORCE: ${{ inputs.force }}
+          DENO_INTERNAL_KERNEL_SANDBOX_FORCE: ${{ inputs.force != 'none' && inputs.force || '' }}
         run: |
           set -o pipefail
           deno task test:e2e 2>&1 | tee ../denext_e2e.log || true
@@ -272,7 +292,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: kernel-beds-denext-${{ inputs.force }}
+          name: kernel-beds-denext-${{ inputs.force }}-${{ inputs.stage }}
           path: |
             denext_integration.log
             denext_e2e.log

@@ -1264,5 +1264,11 @@
     "npm_matrix": {},
     "denext_integration": {},
     "denext_e2e": {}
-  }
+  },
+  // The stage beds (DENEXT.md item 957): the suites at a later rollout stage
+  // of `auto` (DENO_INTERNAL_KERNEL_SANDBOX_STAGE), nothing forced. Empty
+  // until the first run of each is triaged: every failure is unexpected, so
+  // the first run lists what a default flip would change.
+  "stage-r3": {},
+  "stage-r4": {}
 }

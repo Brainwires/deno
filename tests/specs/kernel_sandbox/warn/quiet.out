@@ -1,0 +1,2 @@
+Warning kernel sandbox (warn, preview): nothing is refused; [WILDLINE] rule(s) would be held by Deno's checks only. Run with --kernel-sandbox-report for the policy.
+hello

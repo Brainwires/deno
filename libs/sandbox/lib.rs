@@ -37,6 +37,9 @@
 //! - [`supervise`]: the supervisor of `--kernel-sandbox=broker`: the
 //!   unconfined process that forks the confined worker, stays behind as its
 //!   broker, passes signals on and exits as it exited.
+//! - [`would_deny`]: warn mode's one event ("the sandbox would refuse
+//!   this", with the grant that would allow it) and the reporter every part
+//!   of the sandbox hands it to instead of refusing.
 
 #[cfg(target_os = "linux")]
 pub mod enforce_linux;
@@ -62,6 +65,7 @@ pub mod seatbelt;
 pub mod seccomp;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod supervise;
+pub mod would_deny;
 
 #[cfg(target_os = "linux")]
 pub use seccomp::SeccompSpec;

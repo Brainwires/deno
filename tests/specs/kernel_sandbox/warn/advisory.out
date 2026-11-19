@@ -1,0 +1,4 @@
+Warning kernel sandbox (warn, preview): nothing is refused; [WILDLINE] rule(s) would be held by Deno's checks only. Run with --kernel-sandbox-report for the policy.
+[WILDCARD]Warning kernel sandbox (warn): git inside the sandbox: it reads its configuration (grant --allow-read=<home>/.gitconfig) and, for SSH remotes, the agent socket (--allow-net=unix:$SSH_AUTH_SOCK)
+git ran: true
+[WILDCARD]

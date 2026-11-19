@@ -1,0 +1,4 @@
+kernel sandbox (preview): auto (--kernel-sandbox); applies: enforce; would apply: enforce
+  why: auto: the author fixed the permissions (a compiled program, or auto set explicitly)
+[WILDCARD]
+hello

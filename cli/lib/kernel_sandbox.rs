@@ -14,14 +14,21 @@
 //!
 //! `auto` (the default) applies nothing in this release line: the kernel
 //! sandbox is an opt-in preview (`--kernel-sandbox=warn|enforce|broker`).
-//! [`ModeResolution::would_apply`] records what `auto` would choose, so
-//! turning it on is the one-line [`AUTO_APPLIES`] change: enforce where the
-//! author fixed the permissions (a compiled program, an explicit `auto`), warn
-//! for other runs whose permissions are fixed only because no prompt can
-//! happen. The CLI's `enforce` applies the policy on Linux and macOS (and
-//! refuses to start when the OS can't hold a rule, or elsewhere); `broker`
-//! refuses to start until its supervising process is built in, and so does a
-//! compiled program baked with either (`denort` has no enforcer).
+//! What `auto` does is one constant, [`AUTO_STAGE`] (DENEXT.md item 957):
+//!
+//! | stage | author-fixed (compiled, explicit `auto`) | fixed only by no prompt |
+//! | --- | --- | --- |
+//! | [`AutoStage::Preview`] | nothing (recorded in `would_apply`) | nothing |
+//! | [`AutoStage::R3`] | enforce | warn |
+//! | [`AutoStage::R4`] | enforce | enforce |
+//!
+//! A mode `auto` chose never refuses to start: where `enforce` can't hold the
+//! grant (a rule only the broker holds, a command it doesn't cover) the caller
+//! falls back to `warn` ([`ModeResolution::auto_chosen`]). The CLI's `enforce`
+//! applies the policy on Linux and macOS (and refuses to start when the OS
+//! can't hold a rule, or elsewhere); `broker` refuses to start until its
+//! supervising process is built in, and so does a compiled program baked with
+//! either (`denort` has no enforcer).
 
 use std::fmt;
 use std::str::FromStr;
@@ -31,9 +38,58 @@ use deno_runtime::deno_permissions::PermissionsOptions;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// Whether `auto` applies what [`ModeResolution::would_apply`] names. `false`
-/// for the whole preview line: `auto` equals `off` (no default change).
-pub const AUTO_APPLIES: bool = false;
+/// How far the rollout of `auto` has come (DENEXT.md item 957).
+#[derive(
+  Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Default,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoStage {
+  /// `auto` applies nothing (the opt-in preview): it equals `off`, and
+  /// records what the next stage would apply.
+  #[default]
+  Preview,
+  /// `auto` enforces where the author fixed the permissions (a compiled
+  /// program, `auto` written in a flag or deno.json, as `denext start` and a
+  /// strict desktop package do), and warns for a run whose permissions are
+  /// fixed only because no prompt can happen (no terminal, `--no-prompt`).
+  R3,
+  /// `auto` enforces wherever the permission set is fixed.
+  R4,
+}
+
+impl AutoStage {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Preview => "preview",
+      Self::R3 => "r3",
+      Self::R4 => "r4",
+    }
+  }
+
+  /// The harness variable's value: `None` when unset or empty, `Err` for
+  /// anything but `r3` / `r4`.
+  pub fn parse(value: Option<&str>) -> Result<Option<Self>, String> {
+    match value {
+      None | Some("") => Ok(None),
+      Some("r3") => Ok(Some(Self::R3)),
+      Some("r4") => Ok(Some(Self::R4)),
+      Some(other) => Err(other.to_string()),
+    }
+  }
+}
+
+/// The stage this runtime ships at. The flip to the next stage is this one
+/// line, made only when that stage's preconditions hold
+/// (`tests/kernel_sandbox_beds/r4_preconditions.ts`).
+pub const AUTO_STAGE: AutoStage = AutoStage::Preview;
+
+/// The test harnesses' switch (never a user setting): runs `auto` at a later
+/// stage than [`AUTO_STAGE`], so the beds soak the next stage's defaults
+/// before the constant moves. It can only raise the stage (an earlier one is
+/// ignored), so it only ever narrows; read with `DENO_KERNEL_SANDBOX`, before
+/// any `--env-file`.
+pub const KERNEL_SANDBOX_STAGE_ENV_VAR: &str =
+  "DENO_INTERNAL_KERNEL_SANDBOX_STAGE";
 
 /// The environment variable that can lower the mode of a `deno run`-family
 /// command without editing it (break-glass). It accepts only `off` and
@@ -217,6 +273,12 @@ pub enum ModeReason {
   /// release line (the kernel sandbox is opt-in); `would_apply` says what it
   /// would choose.
   NotYetEnforced,
+  /// `auto` chose the mode: the author fixed the permissions (a compiled
+  /// program, or `auto` written in a flag or deno.json).
+  AutoAuthorFixed,
+  /// `auto` chose the mode: no prompt can widen the grant in this run (no
+  /// terminal, or `--no-prompt`).
+  AutoNoPrompt,
 }
 
 impl ModeReason {
@@ -239,11 +301,18 @@ impl ModeReason {
       Self::NotYetEnforced => {
         "auto applies nothing yet (the kernel sandbox is an opt-in preview)"
       }
+      Self::AutoAuthorFixed => {
+        "auto: the author fixed the permissions (a compiled program, or auto set explicitly)"
+      }
+      Self::AutoNoPrompt => {
+        "auto: no prompt can widen the grant here (no terminal, or --no-prompt)"
+      }
     }
   }
 }
 
-/// What `auto` would choose on this run (applied only with [`AUTO_APPLIES`]).
+/// What `auto` chooses on this run from [`AutoStage::R3`] on (in the preview
+/// it is only recorded).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AutoPlan {
@@ -286,6 +355,9 @@ pub struct ModeInputs {
   pub permission_broker: bool,
   /// The test harnesses' forced `enforce` (CLI `run` / `serve` only).
   pub forced: Option<ForcedEnforce>,
+  /// The stage `auto` runs at; `None`: [`AUTO_STAGE`]. Set from the
+  /// harnesses' [`KERNEL_SANDBOX_STAGE_ENV_VAR`], and by tests.
+  pub stage: Option<AutoStage>,
 }
 
 /// The mode a process runs in, and why.
@@ -303,8 +375,14 @@ pub struct ModeResolution {
   pub fixed: bool,
   /// `-A` with deny rules: only the denies would be enforced.
   pub deny_only: bool,
-  /// What `auto` would choose here (`AUTO_APPLIES` turns it on).
+  /// What `auto` chooses here (applied from [`AutoStage::R3`] on).
   pub would_apply: AutoPlan,
+  /// The stage `auto` ran at.
+  pub stage: AutoStage,
+  /// `auto` chose [`ModeResolution::mode`] (nobody asked for it by name):
+  /// such a mode never refuses to start. Where `enforce` can't hold the
+  /// grant, the caller runs it as `warn`.
+  pub auto_chosen: bool,
   /// Whether the kernel enforces anything for this process. Always `false`
   /// in this runtime.
   pub enforced: bool,
@@ -335,7 +413,8 @@ pub struct ModeError {
 ///    `auto` → `off`. An explicit `warn` / `enforce` / `broker` applies, and
 ///    then turns prompting into denials.
 /// 7. Otherwise the set is fixed: the requested mode applies; `auto` records
-///    what it would choose and applies nothing while `AUTO_APPLIES` is off.
+///    what it would choose, applies nothing in [`AutoStage::Preview`], and
+///    from [`AutoStage::R3`] on applies it (`auto_chosen`).
 pub fn kernel_sandbox_mode(
   inputs: &ModeInputs,
 ) -> Result<ModeResolution, ModeError> {
@@ -381,6 +460,8 @@ pub fn kernel_sandbox_mode(
     fixed,
     deny_only: inputs.allow_all && inputs.has_deny,
     would_apply: AutoPlan::Off,
+    stage: inputs.stage.unwrap_or(AUTO_STAGE).max(AUTO_STAGE),
+    auto_chosen: false,
     enforced: false,
   };
   let off = |mut r: ModeResolution, reason: ModeReason| {
@@ -430,21 +511,29 @@ pub fn kernel_sandbox_mode(
     return off(resolution, ModeReason::Prompt);
   }
   if requested == KernelSandboxMode::Auto {
-    resolution.would_apply = if compiled || source != ModeSource::Default {
-      AutoPlan::Enforce
-    } else {
-      AutoPlan::Warn
-    };
-    if AUTO_APPLIES {
-      resolution.mode = match resolution.would_apply {
-        AutoPlan::Enforce => KernelSandboxMode::Enforce,
-        AutoPlan::Warn => KernelSandboxMode::Warn,
-        AutoPlan::Off => KernelSandboxMode::Off,
+    let author_fixed = compiled || source != ModeSource::Default;
+    resolution.would_apply =
+      if author_fixed || resolution.stage == AutoStage::R4 {
+        AutoPlan::Enforce
+      } else {
+        AutoPlan::Warn
       };
+    if resolution.stage == AutoStage::Preview {
+      resolution.mode = KernelSandboxMode::Off;
+      resolution.reason = ModeReason::NotYetEnforced;
       return Ok(resolution);
     }
-    resolution.mode = KernelSandboxMode::Off;
-    resolution.reason = ModeReason::NotYetEnforced;
+    resolution.mode = match resolution.would_apply {
+      AutoPlan::Enforce => KernelSandboxMode::Enforce,
+      AutoPlan::Warn => KernelSandboxMode::Warn,
+      AutoPlan::Off => KernelSandboxMode::Off,
+    };
+    resolution.reason = if author_fixed {
+      ModeReason::AutoAuthorFixed
+    } else {
+      ModeReason::AutoNoPrompt
+    };
+    resolution.auto_chosen = true;
     return Ok(resolution);
   }
   // an explicit warn / enforce / broker: no prompt may widen it
@@ -511,8 +600,16 @@ pub fn check_compiled(
   })
   // a compiled program has no watch, broker or dev-server inputs
   .expect("a compiled program's mode never conflicts");
+  let mut resolution = resolution;
   if resolution.mode.fails_closed() {
-    return Err(NoEnforcerError(resolution.mode));
+    if !resolution.auto_chosen {
+      return Err(NoEnforcerError(resolution.mode));
+    }
+    // a mode `auto` chose never refuses to start: with no enforcer built
+    // into this runtime the program runs as it did
+    resolution.mode = KernelSandboxMode::Off;
+    resolution.reason = ModeReason::NotYetEnforced;
+    resolution.auto_chosen = false;
   }
   if resolution.mode == KernelSandboxMode::Warn {
     #[allow(clippy::print_stderr, reason = "the warn mode's one line")]
@@ -559,6 +656,22 @@ pub fn snapshot_forced(value: Option<String>) {
 /// warns and ignores it).
 pub fn forced() -> Result<Option<ForcedEnforce>, String> {
   ForcedEnforce::parse(FORCED.get().and_then(|v| v.as_deref()))
+}
+
+/// `DENO_INTERNAL_KERNEL_SANDBOX_STAGE` as the CLI read it at startup.
+static STAGE: OnceLock<Option<String>> = OnceLock::new();
+
+/// Records the harness's [`KERNEL_SANDBOX_STAGE_ENV_VAR`], read with
+/// `DENO_KERNEL_SANDBOX` (before any `--env-file`). Later calls keep the first
+/// value.
+pub fn snapshot_stage(value: Option<String>) {
+  let _ = STAGE.set(value);
+}
+
+/// The harness's stage, or the raw value when it isn't one (the caller warns
+/// and ignores it).
+pub fn stage_override() -> Result<Option<AutoStage>, String> {
+  AutoStage::parse(STAGE.get().and_then(|v| v.as_deref()))
 }
 
 #[cfg(test)]
@@ -911,7 +1024,261 @@ mod tests {
       assert_eq!(r.would_apply, row.plan, "{}", row.name);
       assert_eq!(r.fixed, row.fixed, "{}", row.name);
       assert!(!r.enforced, "{}: nothing is enforced yet", row.name);
+      assert!(
+        !r.auto_chosen,
+        "{}: the preview's auto applies nothing",
+        row.name
+      );
+      assert_eq!(r.stage, AUTO_STAGE, "{}", row.name);
     }
+  }
+
+  /// The rollout stages of `auto` (DENEXT.md item 957). Each row is a run
+  /// and what `auto` applies to it in the preview, at R3 and at R4.
+  #[test]
+  fn auto_stage_matrix() {
+    let tty = |mut i: ModeInputs| {
+      i.terminals = true;
+      i
+    };
+    let compiled = || ModeInputs {
+      kind: Some(RunKind::Compiled),
+      ..run()
+    };
+    // (name, inputs, [preview, r3, r4])
+    let rows: Vec<(&str, ModeInputs, [KernelSandboxMode; 3])> = vec![
+      (
+        "a bare run with no terminal (CI): warn at R3, enforce at R4",
+        run(),
+        [Off, Warn, Enforce],
+      ),
+      (
+        "--no-prompt on a terminal: the same",
+        ModeInputs {
+          prompt: false,
+          ..tty(run())
+        },
+        [Off, Warn, Enforce],
+      ),
+      (
+        "a compiled program: enforce from R3",
+        compiled(),
+        [Off, Enforce, Enforce],
+      ),
+      (
+        "a compiled program on a terminal with prompting: fixed all the same",
+        tty(compiled()),
+        [Off, Enforce, Enforce],
+      ),
+      (
+        "auto written in a flag (denext start): enforce from R3",
+        ModeInputs {
+          flag: Some(Auto),
+          ..run()
+        },
+        [Off, Enforce, Enforce],
+      ),
+      (
+        "auto written in deno.json: enforce from R3",
+        ModeInputs {
+          config: Some(Auto),
+          ..run()
+        },
+        [Off, Enforce, Enforce],
+      ),
+      (
+        "-A with a deny, no terminal: the denies, warn then enforce",
+        ModeInputs {
+          allow_all: true,
+          has_deny: true,
+          ..run()
+        },
+        [Off, Warn, Enforce],
+      ),
+      (
+        "jupyter never prompts",
+        ModeInputs {
+          kind: Some(RunKind::Jupyter),
+          ..tty(run())
+        },
+        [Off, Warn, Enforce],
+      ),
+      // never changed by a stage
+      ("a prompt can happen", tty(run()), [Off, Off, Off]),
+      (
+        "explicit auto while a prompt can happen",
+        ModeInputs {
+          flag: Some(Auto),
+          ..tty(run())
+        },
+        [Off, Off, Off],
+      ),
+      (
+        "plain -A",
+        ModeInputs {
+          allow_all: true,
+          ..run()
+        },
+        [Off, Off, Off],
+      ),
+      (
+        "--watch",
+        ModeInputs {
+          watch: true,
+          ..run()
+        },
+        [Off, Off, Off],
+      ),
+      (
+        "denext dev",
+        ModeInputs {
+          denext_dev: true,
+          ..run()
+        },
+        [Off, Off, Off],
+      ),
+      (
+        "a permission broker",
+        ModeInputs {
+          permission_broker: true,
+          ..run()
+        },
+        [Off, Off, Off],
+      ),
+      (
+        "not a runtime",
+        ModeInputs {
+          kind: Some(RunKind::NotARuntime),
+          ..run()
+        },
+        [Off, Off, Off],
+      ),
+      (
+        "a compiled desktop development build",
+        ModeInputs {
+          dev_build: true,
+          ..compiled()
+        },
+        [Off, Off, Off],
+      ),
+      (
+        "DENO_KERNEL_SANDBOX=off (break-glass)",
+        ModeInputs {
+          env: Some(Off),
+          ..run()
+        },
+        [Off, Off, Off],
+      ),
+      (
+        "DENO_KERNEL_SANDBOX=warn lowers R4's enforce",
+        ModeInputs {
+          env: Some(Warn),
+          ..run()
+        },
+        [Warn, Warn, Warn],
+      ),
+      (
+        "deno.json off",
+        ModeInputs {
+          config: Some(Off),
+          ..run()
+        },
+        [Off, Off, Off],
+      ),
+      (
+        "a compiled program baked off",
+        ModeInputs {
+          baked: Some(Off),
+          ..compiled()
+        },
+        [Off, Off, Off],
+      ),
+      (
+        "an explicit enforce",
+        ModeInputs {
+          flag: Some(Enforce),
+          ..run()
+        },
+        [Enforce, Enforce, Enforce],
+      ),
+    ];
+    let stages = [AutoStage::Preview, AutoStage::R3, AutoStage::R4];
+    for (name, inputs, expected) in rows {
+      for (stage, want) in stages.iter().zip(expected) {
+        let r = resolve(&ModeInputs {
+          stage: Some(*stage),
+          ..inputs.clone()
+        });
+        assert_eq!(r.mode, want, "{name} at {stage:?}");
+        assert_eq!(r.stage, *stage, "{name} at {stage:?}");
+        // only a mode `auto` chose is marked, and it is never the preview's
+        let chosen = inputs.flag.is_none_or(|m| m == Auto)
+          && inputs.env.is_none()
+          && inputs.baked.is_none()
+          && inputs.config.is_none_or(|m| m == Auto)
+          && want != Off;
+        assert_eq!(r.auto_chosen, chosen, "{name} at {stage:?}");
+        if r.auto_chosen {
+          assert!(
+            matches!(
+              r.reason,
+              ModeReason::AutoAuthorFixed | ModeReason::AutoNoPrompt
+            ),
+            "{name} at {stage:?}"
+          );
+          assert!(r.fixed, "{name} at {stage:?}");
+        }
+      }
+    }
+    // the reasons say which kind of fixed
+    let r = resolve(&ModeInputs {
+      stage: Some(AutoStage::R3),
+      ..run()
+    });
+    assert_eq!(r.reason, ModeReason::AutoNoPrompt);
+    assert_eq!(r.would_apply, AutoPlan::Warn);
+    let r = resolve(&ModeInputs {
+      stage: Some(AutoStage::R3),
+      ..compiled()
+    });
+    assert_eq!(r.reason, ModeReason::AutoAuthorFixed);
+    // what R4 applies is what it records
+    let r = resolve(&ModeInputs {
+      stage: Some(AutoStage::R4),
+      ..run()
+    });
+    assert_eq!(r.would_apply, AutoPlan::Enforce);
+    // an unfixed run under an auto stage is never an error
+    for stage in stages {
+      assert!(
+        kernel_sandbox_mode(&ModeInputs {
+          stage: Some(stage),
+          watch: true,
+          ..run()
+        })
+        .is_ok()
+      );
+    }
+  }
+
+  #[test]
+  fn the_stage_variable_only_raises() {
+    assert_eq!(AutoStage::parse(None), Ok(None));
+    assert_eq!(AutoStage::parse(Some("")), Ok(None));
+    assert_eq!(AutoStage::parse(Some("r3")), Ok(Some(AutoStage::R3)));
+    assert_eq!(AutoStage::parse(Some("r4")), Ok(Some(AutoStage::R4)));
+    // the preview can't be asked for: the variable never lowers the stage
+    assert!(AutoStage::parse(Some("preview")).is_err());
+    assert!(AutoStage::parse(Some("R4")).is_err());
+    assert!(
+      AutoStage::Preview < AutoStage::R3 && AutoStage::R3 < AutoStage::R4
+    );
+    // a stage before the shipped one is raised to it
+    let r = resolve(&ModeInputs {
+      stage: Some(AutoStage::Preview),
+      ..run()
+    });
+    assert_eq!(r.stage, AUTO_STAGE);
   }
 
   #[test]
@@ -1018,6 +1385,9 @@ mod tests {
       check_compiled(Some(Enforce), true, &options).unwrap().mode,
       Off
     );
+    // no baked mode: `auto`, which at this stage applies nothing
+    let r = check_compiled(None, false, &options).unwrap();
+    assert_eq!((r.mode, r.auto_chosen), (Off, false));
   }
 
   #[test]

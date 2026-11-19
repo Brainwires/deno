@@ -1,0 +1,3 @@
+{
+  "//": "Evidence for the preconditions of the R4 flip that a script can't check (r4_preconditions.ts). Each key is a precondition's id; the value says where the evidence is (a run URL, a document, an advisory id) and when it was recorded. An empty object: nothing recorded yet."
+}

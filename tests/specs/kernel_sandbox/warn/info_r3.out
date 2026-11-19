@@ -1,0 +1,5 @@
+{
+[WILDCARD]
+    "wouldApply": "warn",
+    "stage": "r3",
+[WILDCARD]

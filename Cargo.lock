@@ -3708,6 +3708,7 @@ dependencies = [
  "deno_error",
  "deno_net_route",
  "deno_path_util",
+ "deno_sandbox",
  "deno_terminal",
  "deno_unsync",
  "dunce",
