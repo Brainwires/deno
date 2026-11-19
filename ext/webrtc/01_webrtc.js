@@ -4957,7 +4957,22 @@ function pump(pc) {
 function dispatchEngineEvents(pc, events, from) {
   const state = pc[_state];
   try {
-    dispatchEngineEvent(pc, events[from]);
+    const event = events[from];
+    if (
+      event.type === "icegatheringstatechange" && event.state === "complete" &&
+      !event.endOfCandidates && state.iceGatheringState === "gathering"
+    ) {
+      // W3C webrtc-pc 5.6 (as amended by w3c/webrtc-pc#2894): gathering
+      // that finishes queues two tasks. The first fires `icecandidate` with
+      // an empty candidate string for the media description (its
+      // end-of-candidates), the second the gathering state changes and the
+      // global null candidate. The same event comes back as the next task.
+      event.endOfCandidates = true;
+      ArrayPrototypeSplice(events, from + 1, 0, event);
+      fireEndOfCandidates(pc);
+    } else {
+      dispatchEngineEvent(pc, event);
+    }
   } catch (error) {
     // Listener exceptions are reported by dispatchEvent itself; this is
     // anything else, reported without stopping the other events.
@@ -4975,6 +4990,29 @@ function dispatchEngineEvents(pc, events, from) {
     state.pending = null;
     if (!state.closed) dispatchEngineEvents(pc, events, from + 1);
   });
+}
+
+// The `icecandidate` event that ends a media description's candidates: an
+// RTCIceCandidate whose candidate is "" (W3C webrtc-pc 5.6).
+function fireEndOfCandidates(pc) {
+  const state = pc[_state];
+  // The last gathered candidate is of the generation that just ended.
+  const first = state.localCandidates[state.localCandidates.length - 1];
+  let sdpMid = first?.sdpMid ?? null;
+  if (sdpMid === null) {
+    const local = pc.localDescription;
+    sdpMid = local === null ? null : midsOf(local.sdp)[0] ?? null;
+  }
+  const candidate = new RTCIceCandidate({
+    candidate: "",
+    sdpMid,
+    sdpMLineIndex: first?.sdpMLineIndex ?? 0,
+    usernameFragment: first?.usernameFragment ?? null,
+  });
+  fire(
+    pc,
+    new RTCPeerConnectionIceEvent("icecandidate", { candidate, url: null }),
+  );
 }
 
 function channelFor(pc, event) {
