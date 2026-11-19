@@ -137,6 +137,22 @@ impl Service<Name> for Resolver {
     } else {
       name
     };
+    // denext: under a kernel sandbox with a broker, the broker is the
+    // system's resolver (it resolves only the names the grant holds).
+    if deno_net_route::route().is_some()
+      && !matches!(self.kind, ResolverKind::Custom(_))
+    {
+      let task = tokio::spawn(async move {
+        let addrs = tokio::task::spawn_blocking(move || {
+          deno_net_route::resolve_with_port(name.as_str(), 0)
+        })
+        .await
+        .map_err(io::Error::other)?
+        .unwrap_or_else(|| Ok(Vec::new()))?;
+        Ok(addrs.into_iter())
+      });
+      return ResolveFut { inner: task };
+    }
     let task = match &mut self.kind {
       ResolverKind::Gai(gai_resolver) => {
         let mut resolver = gai_resolver.clone();
@@ -243,6 +259,66 @@ impl PermissionedHttpConnector {
     connector.set_connect_timeout(self.connect_timeout);
     connector
   }
+}
+
+/// denext: a connection under a kernel sandbox with a broker
+/// (`deno_net_route`): this process can't make an IP socket, so the broker
+/// connects to each address in turn (`host` is the name they were resolved
+/// from, when there is one) and hands the socket over, which then gets the
+/// options `HttpConnector` would have set.
+async fn routed_connect(
+  addrs: &[SocketAddr],
+  host: Option<&str>,
+  local_address: Option<IpAddr>,
+  connect_timeout: Option<Duration>,
+) -> io::Result<TokioIo<TcpStream>> {
+  let mut last = None;
+  for addr in addrs {
+    let request = deno_net_route::TcpConnect {
+      addr: *addr,
+      host: host.map(str::to_string),
+      local: local_address
+        .filter(|local| local.is_ipv4() == addr.is_ipv4())
+        .map(|local| SocketAddr::new(local, 0)),
+    };
+    let connect = async move {
+      tokio::task::spawn_blocking(move || deno_net_route::connect_tcp(&request))
+        .await
+        .map_err(io::Error::other)?
+        .unwrap_or_else(|| {
+          Err(io::Error::other(
+            "the kernel sandbox's network route is gone",
+          ))
+        })
+    };
+    let stream = match connect_timeout {
+      Some(timeout) => match tokio::time::timeout(timeout, connect).await {
+        Ok(stream) => stream,
+        Err(_) => Err(io::Error::from(io::ErrorKind::TimedOut)),
+      },
+      None => connect.await,
+    };
+    match stream {
+      Ok(stream) => {
+        let keepalive = socket2::TcpKeepalive::new()
+          .with_time(TCP_KEEPALIVE_TIME)
+          .with_interval(TCP_KEEPALIVE_INTERVAL);
+        #[cfg(not(windows))]
+        let keepalive = keepalive.with_retries(TCP_KEEPALIVE_RETRIES);
+        // as `HttpConnector`: a socket that can't take them is still used
+        let _ = socket2::SockRef::from(&stream).set_tcp_keepalive(&keepalive);
+        return Ok(TokioIo::new(TcpStream::from_std(stream)?));
+      }
+      // a refusal is the answer for every address of this destination
+      Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+        return Err(err);
+      }
+      Err(err) => last = Some(err),
+    }
+  }
+  Err(last.unwrap_or_else(|| {
+    io::Error::new(io::ErrorKind::NotFound, "no addresses to connect to")
+  }))
 }
 
 /// Resolver handing out a fixed, already-permission-checked set of addresses.
@@ -406,7 +482,48 @@ impl Service<Uri> for PermissionedHttpConnector {
   fn call(&mut self, uri: Uri) -> Self::Future {
     let this = self.clone();
     Box::pin(async move {
+      let routed = deno_net_route::route().is_some();
       let Some(permissions) = &this.permissions else {
+        if routed {
+          // denext: no permissions to check here, but the broker checks
+          // its own: the destination must be in the network grant.
+          let Some((bare_host, port)) = bare_host_and_port(&uri) else {
+            return Err(
+              io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "missing host in URI",
+              )
+              .into(),
+            );
+          };
+          let (addrs, host) = match bare_host.parse::<IpAddr>() {
+            Ok(ip) => (vec![SocketAddr::new(ip, port)], None),
+            Err(_) => {
+              let name =
+                Name::from_str(bare_host).map_err(|e| -> BoxError {
+                  io::Error::new(io::ErrorKind::InvalidInput, e.to_string())
+                    .into()
+                })?;
+              let addrs = this
+                .resolver
+                .clone()
+                .call(name)
+                .await
+                .map_err(|e| -> BoxError { DnsError(e).into() })?
+                .map(|addr| SocketAddr::new(addr.ip(), port))
+                .collect();
+              (addrs, Some(bare_host))
+            }
+          };
+          return routed_connect(
+            &addrs,
+            host,
+            this.local_address,
+            this.connect_timeout,
+          )
+          .await
+          .map_err(Into::into);
+        }
         let mut connector = this.http_connector(this.resolver.clone());
         return connector.call(uri).await.map_err(Into::into);
       };
@@ -421,6 +538,16 @@ impl Service<Uri> for PermissionedHttpConnector {
         // IP literal: `HttpConnector` connects to it directly without
         // consulting the resolver.
         check_resolved(permissions, this.deny_check_kind, &ip, port)?;
+        if routed {
+          return routed_connect(
+            &[SocketAddr::new(ip, port)],
+            None,
+            this.local_address,
+            this.connect_timeout,
+          )
+          .await
+          .map_err(Into::into);
+        }
         let mut connector = this.http_connector(this.resolver.clone());
         return connector.call(uri).await.map_err(Into::into);
       }
@@ -437,6 +564,21 @@ impl Service<Uri> for PermissionedHttpConnector {
         .collect();
       for addr in &addrs {
         check_resolved(permissions, this.deny_check_kind, &addr.ip(), port)?;
+      }
+
+      if routed {
+        let addrs: Vec<SocketAddr> = addrs
+          .iter()
+          .map(|addr| SocketAddr::new(addr.ip(), port))
+          .collect();
+        return routed_connect(
+          &addrs,
+          Some(bare_host),
+          this.local_address,
+          this.connect_timeout,
+        )
+        .await
+        .map_err(Into::into);
       }
 
       let mut connector =

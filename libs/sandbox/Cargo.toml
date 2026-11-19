@@ -13,17 +13,19 @@ description = "OS confinement for Deno: Landlock and seccomp on Linux, Seatbelt 
 path = "lib.rs"
 
 [features]
-# the allow-listing HTTP proxy (an HTTP stack of its own): a binary that only
-# confines itself doesn't carry it
-proxy = ["dep:base64", "dep:futures", "dep:percent-encoding", "dep:url"]
+# the allow-listing HTTP proxy (an HTTP stack of its own) and the broker's
+# network authority: a binary that only confines itself carries neither
+proxy = ["dep:base64", "dep:futures", "dep:percent-encoding", "dep:socket2", "dep:url"]
 
 [dependencies]
 base64 = { workspace = true, optional = true }
+deno_net_route.workspace = true
 futures = { workspace = true, optional = true }
 log.workspace = true
 percent-encoding = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+socket2 = { workspace = true, optional = true }
 tokio.workspace = true
 url = { workspace = true, optional = true }
 

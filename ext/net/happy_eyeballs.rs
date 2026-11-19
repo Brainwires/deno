@@ -155,13 +155,15 @@ async fn start_connect(
       // `or_cancel` yields a nested `Result<Result<TcpStream, IoError>, _>`:
       // the outer layer reports cancellation, the inner one the connect
       // itself. Unwrap them on separate lines so the two `?` read clearly.
-      let connect = TcpStream::connect(addr).or_cancel(&cancel).await;
+      let connect = crate::routed::connect_tcp_stream(addr, None)
+        .or_cancel(&cancel)
+        .await;
       let connect = connect.map_err(|_| {
         IoError::new(ErrorKind::Interrupted, "Connection cancelled")
       })?;
       connect?
     }
-    None => TcpStream::connect(addr).await?,
+    None => crate::routed::connect_tcp_stream(addr, None).await?,
   };
   Ok((stream, addr))
 }

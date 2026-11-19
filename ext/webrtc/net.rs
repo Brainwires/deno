@@ -518,6 +518,19 @@ fn spawn_shared_reader(network: Weak<Network>, endpoint: SharedEndpoint) {
 /// Binds a TCP listener (an IPv6 one IPv6-only, so the two families stay
 /// apart).
 pub(crate) fn bind_tcp(addr: SocketAddr) -> std::io::Result<TcpListener> {
+  // denext: under a kernel sandbox the listener is one bound before the
+  // process confined itself, or the broker's to bind
+  if let Some(listener) =
+    deno_net_route::tcp_listener(&deno_net_route::TcpBind {
+      addr,
+      host: None,
+      reuse_port: false,
+      backlog: 128,
+      ipv6_only: addr.is_ipv6().then_some(true),
+    })
+  {
+    return TcpListener::from_std(listener?);
+  }
   let domain = if addr.is_ipv4() {
     socket2::Domain::IPV4
   } else {

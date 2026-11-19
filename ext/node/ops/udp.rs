@@ -92,22 +92,43 @@ pub fn op_node_udp_bind(
   } else {
     Domain::IPV6
   };
-  let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
-  if reuse_address {
-    #[cfg(any(
-      target_os = "windows",
-      target_os = "android",
-      target_os = "linux"
-    ))]
-    sock.set_reuse_address(true)?;
-    #[cfg(all(unix, not(any(target_os = "android", target_os = "linux"))))]
-    sock.set_reuse_port(true)?;
-  }
-  if addr.is_ipv6() && ipv6_only {
-    sock.set_only_v6(true)?;
-  }
-  let socket_addr = socket2::SockAddr::from(addr);
-  sock.bind(&socket_addr)?;
+  // denext: under a kernel sandbox with a broker the socket is the
+  // broker's to make (bound already), when the grant lets it hand one out.
+  let routed = deno_net_route::open_udp(&deno_net_route::UdpOpen {
+    bind: addr,
+    connect: None,
+    host: None,
+    reuse_address,
+    reuse_port: false,
+    ipv6_only: (addr.is_ipv6() && ipv6_only).then_some(true),
+  })
+  .transpose()?
+  .map(Socket::from);
+  let sock = match routed {
+    Some(sock) => sock,
+    None => {
+      let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+      if reuse_address {
+        #[cfg(any(
+          target_os = "windows",
+          target_os = "android",
+          target_os = "linux"
+        ))]
+        sock.set_reuse_address(true)?;
+        #[cfg(all(
+          unix,
+          not(any(target_os = "android", target_os = "linux"))
+        ))]
+        sock.set_reuse_port(true)?;
+      }
+      if addr.is_ipv6() && ipv6_only {
+        sock.set_only_v6(true)?;
+      }
+      let socket_addr = socket2::SockAddr::from(addr);
+      sock.bind(&socket_addr)?;
+      sock
+    }
+  };
   sock.set_nonblocking(true)?;
 
   let std_socket: std::net::UdpSocket = sock.into();

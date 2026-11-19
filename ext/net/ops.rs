@@ -53,7 +53,6 @@ use socket2::Domain;
 use socket2::Protocol;
 use socket2::Socket;
 use socket2::Type;
-use tokio::net::TcpStream;
 use tokio::net::UdpSocket;
 
 use crate::io::TcpStreamResource;
@@ -629,6 +628,9 @@ pub async fn op_net_connect_tcp_inner(
   resource_abort_id: Option<ResourceId>,
   options: Option<TcpConnectOptions>,
 ) -> Result<(ResourceId, IpAddr, IpAddr), NetError> {
+  // denext: the name this connection is checked under, which is also the
+  // name a kernel sandbox's broker is told the address came from.
+  let hostname;
   {
     let mut state_ = state.borrow_mut();
     // If token exists and the address matches to its resolved ips,
@@ -643,6 +645,7 @@ pub async fn op_net_connect_tcp_inner(
         &(&hostname_to_check, Some(addr.port)),
         "Deno.connect()",
       )?;
+    hostname = hostname_to_check;
   }
 
   let options = options.unwrap_or_default();
@@ -713,12 +716,17 @@ pub async fn op_net_connect_tcp_inner(
       // Single address or Happy Eyeballs disabled - use first address
       let addr = addrs[0];
       if let Some(cancel_handle) = &cancel_handle {
-        match TcpStream::connect(&addr).or_cancel(cancel_handle).await {
+        match crate::routed::connect_tcp_stream(addr, Some(&hostname))
+          .or_cancel(cancel_handle)
+          .await
+        {
           Ok(result) => result.map_err(NetError::Io),
           Err(err) => Err(NetError::Canceled(err)),
         }
       } else {
-        TcpStream::connect(&addr).await.map_err(NetError::Io)
+        crate::routed::connect_tcp_stream(addr, Some(&hostname))
+          .await
+          .map_err(NetError::Io)
       }
     }
   }
@@ -821,8 +829,17 @@ fn net_listen_udp(
   } else {
     Domain::IPV6
   };
-  let socket_tmp = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
-  if reuse_address {
+  // denext: under a kernel sandbox with a broker the socket is the
+  // broker's to make (bound already), when the grant lets it hand one out.
+  let routed = crate::routed::open_udp_socket(addr, reuse_address)
+    .transpose()?
+    .map(Socket::from);
+  let is_routed = routed.is_some();
+  let socket_tmp = match routed {
+    Some(socket) => socket,
+    None => Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?,
+  };
+  if reuse_address && !is_routed {
     // This logic is taken from libuv:
     //
     // On the BSDs, SO_REUSEPORT implies SO_REUSEADDR but with some additional
@@ -841,8 +858,10 @@ fn net_listen_udp(
     #[cfg(all(unix, not(any(target_os = "android", target_os = "linux"))))]
     socket_tmp.set_reuse_port(true)?;
   }
-  let socket_addr = socket2::SockAddr::from(addr);
-  socket_tmp.bind(&socket_addr)?;
+  if !is_routed {
+    let socket_addr = socket2::SockAddr::from(addr);
+    socket_tmp.bind(&socket_addr)?;
+  }
   socket_tmp.set_nonblocking(true)?;
 
   // Enable messages to be sent to the broadcast address (255.255.255.255) by default
@@ -1469,7 +1488,20 @@ pub async fn op_dns_resolve(
   // When the caller configured an explicit name server (e.g. via `node:dns`
   // `Resolver.setServers()`), use a connected UDP socket so that a refused
   // connection surfaces as `ECONNREFUSED` instead of timing out.
-  let lookup = if has_custom_name_server {
+  let lookup = if crate::routed::is_routed() {
+    // denext: under a kernel sandbox with a broker, each query is an
+    // exchange the broker carries out with a name server the grant names.
+    resolve_lookup(
+      &state,
+      crate::routed::RoutedRuntimeProvider::default(),
+      config,
+      opts,
+      name,
+      record_type,
+      cancel_rid,
+    )
+    .await?
+  } else if has_custom_name_server {
     resolve_lookup(
       &state,
       ConnectedUdpRuntimeProvider::default(),

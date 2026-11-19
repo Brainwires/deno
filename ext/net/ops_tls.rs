@@ -551,7 +551,7 @@ pub async fn op_net_connect_tls(
     result.stream
   } else {
     // Single address or Happy Eyeballs disabled - use first address
-    TcpStream::connect(addrs[0]).await?
+    crate::routed::connect_tcp_stream(addrs[0], Some(&addr.hostname)).await?
   };
 
   let local_addr = tcp_stream.local_addr()?;

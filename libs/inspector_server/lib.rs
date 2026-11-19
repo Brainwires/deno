@@ -329,7 +329,19 @@ impl InspectorServer {
     let (shutdown_server_tx, shutdown_server_rx) = broadcast::channel(1);
     let (reset_tx, reset_rx) = broadcast::channel(1);
 
-    let tcp_listener = std::net::TcpListener::bind(host)
+    // denext: under a kernel sandbox the inspector's listener was bound
+    // before the process confined itself, or is the broker's to bind
+    let tcp_listener =
+      match deno_net_route::tcp_listener(&deno_net_route::TcpBind {
+        addr: host,
+        host: None,
+        reuse_port: false,
+        backlog: 128,
+        ipv6_only: None,
+      }) {
+        Some(listener) => listener,
+        None => std::net::TcpListener::bind(host),
+      }
       .map_err(|source| InspectorServerError::Connect { host, source })?;
     tcp_listener.set_nonblocking(true)?;
     // TODO(bartlomieju): update process wide inspector server host

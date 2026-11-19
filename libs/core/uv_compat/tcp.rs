@@ -105,6 +105,12 @@ pub struct uv_tcp_t {
   /// `uv_tcp_connect` so the same fd is used throughout the lifecycle,
   /// preserving any socket options set between bind and listen/connect.
   pub(crate) internal_socket: Option<tokio::net::TcpSocket>,
+  /// denext: the `uv_tcp_bind` flags of a bind that made no socket: under a
+  /// kernel sandbox this process's sockets come from the broker, or from the
+  /// listeners bound before confinement (`deno_net_route`), so the bind is
+  /// carried out by `uv_listen` / `uv_tcp_connect`, which ask for a socket
+  /// bound to `internal_bind_addr`.
+  pub(crate) internal_routed_bind: Option<u32>,
   /// Deferred bind error (e.g. EADDRINUSE). Reported from listen/connect,
   /// matching libuv's `delayed_error` semantics.
   pub(crate) internal_delayed_error: c_int,
@@ -400,6 +406,7 @@ pub unsafe fn uv_tcp_init(loop_: *mut uv_loop_t, tcp: *mut uv_tcp_t) -> c_int {
     write(addr_of_mut!((*tcp).internal_fd), None);
     write(addr_of_mut!((*tcp).internal_bind_addr), None);
     write(addr_of_mut!((*tcp).internal_socket), None);
+    write(addr_of_mut!((*tcp).internal_routed_bind), None);
     write(addr_of_mut!((*tcp).internal_delayed_error), 0);
     write(addr_of_mut!((*tcp).internal_stream), None);
     write(addr_of_mut!((*tcp).internal_listener), None);
@@ -572,6 +579,33 @@ pub unsafe fn uv_tcp_fd_for_ipc(tcp: *mut uv_tcp_t) -> c_int {
   }
 }
 
+/// denext: whether a bind to `addr` is carried out later, by a socket this
+/// process doesn't make itself: every bind under a broker route, and a bind
+/// to an address a listener was bound on before confinement.
+fn routes_bind(addr: &SocketAddr) -> bool {
+  deno_net_route::route().is_some()
+    || deno_net_route::prebound_addrs().contains(addr)
+}
+
+/// denext: the listener for a bind that made no socket (see
+/// [`routes_bind`]); `None` when this process binds its own.
+fn routed_listener(
+  addr: SocketAddr,
+  flags: Option<u32>,
+  backlog: u32,
+) -> Option<std::io::Result<tokio::net::TcpListener>> {
+  let flags = flags.unwrap_or(0);
+  let listener = deno_net_route::tcp_listener(&deno_net_route::TcpBind {
+    addr,
+    host: None,
+    reuse_port: flags & UV_TCP_REUSEPORT != 0,
+    backlog: backlog as i32,
+    // libuv sets IPV6_V6ONLY from its flag on every IPv6 socket
+    ipv6_only: addr.is_ipv6().then_some(flags & UV_TCP_IPV6ONLY != 0),
+  })?;
+  Some(listener.and_then(tokio::net::TcpListener::from_std))
+}
+
 /// ### Safety
 /// `tcp` must be initialized by `uv_tcp_init`. `addr` must point to a valid sockaddr.
 pub unsafe fn uv_tcp_bind(
@@ -596,6 +630,19 @@ pub unsafe fn uv_tcp_bind(
       optval: *const c_void,
       optlen: c_int,
     ) -> c_int;
+  }
+
+  // denext: under a kernel sandbox with a broker (or for an address bound
+  // before confinement) this process makes no socket of its own: remember
+  // the bind for `uv_listen` / `uv_tcp_connect`.
+  if routes_bind(&sa) {
+    // SAFETY: Caller guarantees tcp is valid and initialized.
+    unsafe {
+      (*tcp).internal_delayed_error = 0;
+      (*tcp).internal_bind_addr = Some(sa);
+      (*tcp).internal_routed_bind = Some(flags);
+    }
+    return 0;
   }
 
   // SAFETY: Caller guarantees tcp is valid and initialized.
@@ -775,8 +822,28 @@ pub unsafe fn uv_tcp_connect(
     // socket identity so options set between bind and connect are retained
     // on the same fd, matching libuv's behavior.
     let socket = (*tcp).internal_socket.take();
+    // denext: under a broker route the connection is made by the broker
+    // (from the address a routed bind asked for), on a blocking thread.
+    let routed = socket.is_none() && deno_net_route::route().is_some();
+    let local = (*tcp).internal_routed_bind.and((*tcp).internal_bind_addr);
     (*tcp).internal_connect = Some(ConnectPending {
       future: Box::pin(async move {
+        if routed {
+          let request = deno_net_route::TcpConnect {
+            addr: sock_addr,
+            host: None,
+            local,
+          };
+          let stream = tokio::task::spawn_blocking(move || {
+            deno_net_route::connect_tcp(&request)
+          })
+          .await
+          .map_err(std::io::Error::other)?
+          .ok_or_else(|| {
+            std::io::Error::other("the kernel sandbox's network route is gone")
+          })??;
+          return tokio::net::TcpStream::from_std(stream);
+        }
         let socket = match socket {
           Some(s) => s,
           None => {
@@ -1198,40 +1265,60 @@ pub unsafe fn uv_listen(
       // identity so options set between bind and listen are retained on the
       // same fd, matching libuv's behavior.
       let socket = match tcp_ref.internal_socket.take() {
-        Some(s) => s,
+        Some(s) => Some(s),
         None => {
           // No prior bind — create a socket and bind to 0.0.0.0:0,
           // matching libuv's implicit bind in uv__tcp_listen.
           let bind_addr = tcp_ref
             .internal_bind_addr
             .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
-          let s = if bind_addr.is_ipv4() {
-            match tokio::net::TcpSocket::new_v4() {
-              Ok(s) => s,
+          // denext: a listener from the broker, or the one bound on this
+          // address before confinement.
+          if let Some(listener) = routed_listener(
+            bind_addr,
+            tcp_ref.internal_routed_bind,
+            effective_backlog,
+          ) {
+            let listener = match listener {
+              Ok(l) => l,
               Err(ref e) => return io_error_to_uv(e),
-            }
-          } else {
-            match tokio::net::TcpSocket::new_v6() {
-              Ok(s) => s,
-              Err(ref e) => return io_error_to_uv(e),
-            }
-          };
-          s.set_reuseaddr(true).ok();
-          if let Err(ref e) = s.bind(bind_addr) {
-            return io_error_to_uv(e);
+            };
+            tcp_ref.internal_listener_addr = listener.local_addr().ok();
+            tcp_ref.internal_listener = Some(listener);
           }
-          s
+          if tcp_ref.internal_listener.is_some() {
+            None
+          } else {
+            let s = if bind_addr.is_ipv4() {
+              match tokio::net::TcpSocket::new_v4() {
+                Ok(s) => s,
+                Err(ref e) => return io_error_to_uv(e),
+              }
+            } else {
+              match tokio::net::TcpSocket::new_v6() {
+                Ok(s) => s,
+                Err(ref e) => return io_error_to_uv(e),
+              }
+            };
+            s.set_reuseaddr(true).ok();
+            if let Err(ref e) = s.bind(bind_addr) {
+              return io_error_to_uv(e);
+            }
+            Some(s)
+          }
         }
       };
 
-      let tokio_listener = match socket.listen(effective_backlog) {
-        Ok(l) => l,
-        Err(ref e) => return io_error_to_uv(e),
-      };
+      if let Some(socket) = socket {
+        let tokio_listener = match socket.listen(effective_backlog) {
+          Ok(l) => l,
+          Err(ref e) => return io_error_to_uv(e),
+        };
 
-      let listener_addr = tokio_listener.local_addr().ok();
-      tcp_ref.internal_listener = Some(tokio_listener);
-      tcp_ref.internal_listener_addr = listener_addr;
+        let listener_addr = tokio_listener.local_addr().ok();
+        tcp_ref.internal_listener = Some(tokio_listener);
+        tcp_ref.internal_listener_addr = listener_addr;
+      }
     }
 
     tcp_ref.internal_connection_cb = cb;
@@ -1282,6 +1369,7 @@ pub fn new_tcp() -> uv_tcp_t {
     internal_fd: None,
     internal_bind_addr: None,
     internal_socket: None,
+    internal_routed_bind: None,
     internal_delayed_error: 0,
     internal_stream: None,
     internal_listener: None,
