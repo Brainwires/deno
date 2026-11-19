@@ -3,10 +3,17 @@
 
 ((window) => {
   const {
+    ArrayPrototypePush,
+    MapPrototypeDelete,
+    MapPrototypeGet,
+    MapPrototypeSet,
     MathMax,
     MathTrunc,
     NumberIsFinite,
     NumberMIN_SAFE_INTEGER,
+    SafeMap,
+    SafeMapIterator,
+    Symbol,
   } = window.__bootstrap.primordials;
   const {
     op_timer_schedule,
@@ -166,6 +173,50 @@
   let nextExpiry = Infinity;
   let nextTimerId = 1;
 
+  // Links a core timer to the object that owns it (a Node.js `Timeout`), so
+  // a lookup by numeric id can act through the owner's own close/ref/unref.
+  const kTimerOwner = Symbol("timerOwner");
+  // Set on an owner once its numeric id has been handed out (a Node.js
+  // `Timeout`'s `[Symbol.toPrimitive]()`), and cleared when it ends. As in
+  // Node.js (`knownTimersById`), a lookup by a numeric id reaches an owned
+  // timer only while this is set: a guessed id never matches.
+  const kKnownById = Symbol("knownById");
+
+  // The single id -> core timer map shared by the web and Node.js timer
+  // layers (both take their ids from `nextTimerId`). It holds every live
+  // user timer, and every system timer that has an owner; an ownerless
+  // system timer is never looked up by id.
+  const activeTimers = new SafeMap();
+
+  function untrack(timer) {
+    MapPrototypeDelete(activeTimers, timer._timerId);
+    op_timer_untrack(timer._timerId);
+  }
+
+  function getTimer(id) {
+    return MapPrototypeGet(activeTimers, id);
+  }
+
+  // The timer a numeric id from user code may act on: an ownerless timer (the
+  // id is its only handle), or an owned one whose id its owner handed out.
+  function getKnownTimer(id) {
+    const timer = MapPrototypeGet(activeTimers, id);
+    if (timer === undefined) return undefined;
+    const owner = timer[kTimerOwner];
+    if (owner !== undefined && !owner[kKnownById]) return undefined;
+    return timer;
+  }
+
+  // Allocates a fresh array of every tracked timer on each call: meant for
+  // diagnostics such as `process.getActiveResourcesInfo()`, not hot paths.
+  function getActiveTimers() {
+    const timers = [];
+    for (const { 1: timer } of new SafeMapIterator(activeTimers)) {
+      ArrayPrototypePush(timers, timer);
+    }
+    return timers;
+  }
+
   // Shared buffer with Rust. Index 0: refed timer count.
   // Set by Rust during store_js_callbacks via __setTimerInfo.
   let timerInfo;
@@ -297,7 +348,7 @@
           if (timer[kRefed]) {
             decRefCount();
           }
-          op_timer_untrack(timer._timerId);
+          untrack(timer);
         }
         continue;
       }
@@ -323,7 +374,7 @@
           if (timer[kRefed]) {
             decRefCount();
           }
-          op_timer_untrack(timer._timerId);
+          untrack(timer);
         }
       }
     }
@@ -337,7 +388,16 @@
 
   // Timer item constructor (internal). Callers (web timers, node timers)
   // wrap this with their own validation and async context handling.
-  function createTimer(callback, after, args, isRepeat, isRefed, isSystem) {
+  // `owner` (optional) is the object a lookup by id acts through.
+  function createTimer(
+    callback,
+    after,
+    args,
+    isRepeat,
+    isRefed,
+    isSystem,
+    owner,
+  ) {
     if (after === undefined) {
       after = 1;
     } else {
@@ -361,11 +421,15 @@
       _destroyed: false,
       [kRefed]: isRefed,
       _timerId: id,
+      [kTimerOwner]: owner,
     };
 
     if (isRefed) incRefCount();
     insert(timer, after);
     op_timer_track(id, !!isRepeat, !!isSystem);
+    if (!isSystem || owner !== undefined) {
+      MapPrototypeSet(activeTimers, id, timer);
+    }
     if (__isLeakTracingEnabled()) {
       const error = new Error();
       ErrorCaptureStackTrace(error, createTimer);
@@ -384,7 +448,7 @@
       decRefCount();
     }
     L_remove(timer);
-    op_timer_untrack(timer._timerId);
+    untrack(timer);
   }
 
   function refreshTimer(timer) {
@@ -418,6 +482,11 @@
     refreshTimer,
     refTimer,
     unrefTimer,
+    getTimer,
+    getKnownTimer,
+    getActiveTimers,
+    kTimerOwner,
+    kKnownById,
     insert,
     incRefCount,
     decRefCount,

@@ -19,15 +19,10 @@ const {
   ArrayPrototypePush,
   DateNow,
   FunctionPrototypeCall,
-  MapPrototypeDelete,
-  MapPrototypeGet,
-  MapPrototypeSet,
   NumberIsFinite,
   NumberIsNaN,
   ObjectDefineProperty,
   ReflectApply,
-  SafeMapIterator,
-  SafeMap,
   Symbol,
   SymbolDispose,
   SymbolToPrimitive,
@@ -64,28 +59,41 @@ const kSystem = Symbol("system");
 const kTimeout = Symbol("timeout");
 const kSuspended = Symbol("suspended");
 const kRefed = core.kRefed;
+const kTimerOwner = core.kTimerOwner;
+const kKnownById = core.kKnownById;
+const kHasPrimitive = Symbol("hasPrimitive");
 const createTimer = Symbol("createTimer");
 
-/**
- * The keys in this map correspond to the key ID's in the spec's map of active
- * timers. The values are the timeout's status.
- *
- * @type {Map<number, Timeout>}
- */
-const activeTimers = new SafeMap();
+// Active timers live in core's single id -> timer map (shared with the web
+// timers); each Node.js `Timeout`'s core timer links back to it as its owner.
 
 /**
+ * The live `Timeout` with this id, system (runtime-internal) ones included.
+ *
  * @param {number} id
  * @returns {Timeout | undefined}
  */
 function getActiveTimer(id) {
-  return MapPrototypeGet(activeTimers, id);
+  return core.getTimer(id)?.[kTimerOwner];
+}
+
+/**
+ * The `Timeout` a numeric (or string) id from user code names. As Node.js'
+ * `knownTimersById`: only a timer whose `[Symbol.toPrimitive]()` handed that
+ * id out, until it ends; a guessed id matches nothing.
+ *
+ * @param {number} id
+ * @returns {Timeout | undefined}
+ */
+function getKnownTimer(id) {
+  return core.getKnownTimer(id)?.[kTimerOwner];
 }
 
 function getActiveResourcesInfo() {
   const resources = [];
-  for (const { 1: timeout } of new SafeMapIterator(activeTimers)) {
-    if (timeout[kRefed]) {
+  const timers = core.getActiveTimers();
+  for (let i = 0; i < timers.length; i++) {
+    if (timers[i][kTimerOwner]?.[kRefed]) {
       ArrayPrototypePush(resources, "Timeout");
     }
   }
@@ -157,6 +165,18 @@ function Timeout(callback, after, args, isRepeat, isRefed, isSystem) {
     value: !!isSystem,
     writable: true,
   });
+  // Node.js' `kHasPrimitive`, and whether the id it handed out is still known
+  // (cleared when the timer ends). Non-enumerable, as `kSystem`.
+  ObjectDefineProperty(this, kHasPrimitive, {
+    __proto__: null,
+    value: false,
+    writable: true,
+  });
+  ObjectDefineProperty(this, kKnownById, {
+    __proto__: null,
+    value: false,
+    writable: true,
+  });
 
   const asyncId = nextAsyncId();
   const triggerAsyncId = executionAsyncId();
@@ -205,19 +225,19 @@ Timeout.prototype[createTimer] = function () {
     } finally {
       // Cleanup runs after the callback (in a `finally` so it happens even if
       // the callback throws). Node keeps a one-shot Timeout reported as an
-      // active resource during its own callback and only drops it afterwards,
-      // so `activeTimers` must retain it for the duration of the call.
+      // active resource during its own callback and only drops it afterwards;
+      // core untracks the timer once this callback has returned.
       if (wasRepeat) {
         if (self._idleTimeout < 0 || self._onTimeout === null) {
           self[kDestroy]();
         }
       } else if (self._repeat) {
-        // timeout was converted to interval inside callback
-        MapPrototypeDelete(activeTimers, self[kTimerId]);
+        // timeout was converted to interval inside callback (core drops the
+        // old one-shot timer's id after this returns)
         self[kTimerId] = self[createTimer]();
       } else {
-        MapPrototypeDelete(activeTimers, self[kTimerId]);
         self._destroyed = true;
+        self[kKnownById] = false;
       }
     }
   }
@@ -277,6 +297,7 @@ Timeout.prototype[createTimer] = function () {
     this._repeat,
     this[kRefed],
     this[kSystem],
+    this,
   );
   ObjectDefineProperty(this, "_timer", {
     __proto__: null,
@@ -285,9 +306,7 @@ Timeout.prototype[createTimer] = function () {
     enumerable: false,
     configurable: true,
   });
-  const id = timer._timerId;
-  MapPrototypeSet(activeTimers, id, this);
-  return id;
+  return timer._timerId;
 };
 
 Timeout.prototype[kDestroy] = function () {
@@ -297,8 +316,8 @@ Timeout.prototype[kDestroy] = function () {
     this._idleTimeout = -1;
     this._idleStart = DateNow();
     this._onTimeout = null;
+    this[kKnownById] = false;
     cancelTimer_(this._timer);
-    MapPrototypeDelete(activeTimers, this[kTimerId]);
     if (
       this._asyncId !== undefined &&
       !this._asyncDestroyed &&
@@ -371,7 +390,13 @@ Timeout.prototype.hasRef = function () {
   return this[kRefed];
 };
 
+// Handing out the numeric id makes it known, as Node.js' `knownTimersById`
+// (only the first time: an id forgotten when the timer ended stays so).
 Timeout.prototype[SymbolToPrimitive] = function () {
+  if (!this[kHasPrimitive]) {
+    this[kHasPrimitive] = true;
+    if (!this._destroyed) this[kKnownById] = true;
+  }
   return this[kTimerId];
 };
 
@@ -416,7 +441,6 @@ function suspendTimeout(timeout) {
     timeout[kSuspended] = true;
     timeout._idleStart = DateNow();
     cancelTimer_(timeout._timer);
-    MapPrototypeDelete(activeTimers, timeout[kTimerId]);
   }
 }
 
@@ -499,6 +523,7 @@ return {
   kTimeout,
   kRefed,
   getActiveTimer,
+  getKnownTimer,
   getActiveResourcesInfo,
   Timeout,
   getTimerDuration,

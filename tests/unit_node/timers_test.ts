@@ -4,6 +4,7 @@ import { assert, assertRejects, assertThrows, fail } from "@std/assert";
 import * as perfHooks from "node:perf_hooks";
 import * as timers from "node:timers";
 import * as timersPromises from "node:timers/promises";
+import process from "node:process";
 import { assertEquals } from "@std/assert";
 import {
   createHistogram,
@@ -175,6 +176,31 @@ Deno.test("[node/timers] clearTimeout with number", () => {
 Deno.test("[node/timers] clearInterval with number", () => {
   const timer = +timers.setInterval(() => fail(), 10);
   timers.clearInterval(timer);
+});
+
+Deno.test("[node/timers] getActiveResourcesInfo counts refed timers", () => {
+  const countTimeouts = () =>
+    process.getActiveResourcesInfo().filter((type) => type === "Timeout")
+      .length;
+  const before = countTimeouts();
+  const timeout = timers.setTimeout(() => fail(), 1000);
+  const unrefed = timers.setTimeout(() => fail(), 1000).unref();
+  const interval = timers.setInterval(() => fail(), 1000);
+  try {
+    assertEquals(countTimeouts(), before + 2);
+    // A numeric id reaches the Node.js timer, and the count follows.
+    Deno.unrefTimer(+interval);
+    assertEquals(countTimeouts(), before + 1);
+    Deno.refTimer(+unrefed);
+    assertEquals(countTimeouts(), before + 2);
+    timers.clearTimeout(+timeout);
+    assertEquals(countTimeouts(), before + 1);
+  } finally {
+    timers.clearTimeout(timeout);
+    timers.clearTimeout(unrefed);
+    timers.clearInterval(interval);
+  }
+  assertEquals(countTimeouts(), before);
 });
 
 Deno.test("[node/timers setImmediate returns Immediate object]", () => {

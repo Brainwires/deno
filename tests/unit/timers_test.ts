@@ -647,6 +647,228 @@ Deno.test({
   },
 });
 
+// The global setTimeout / setInterval return Node.js `Timeout` objects; their
+// numeric ids (`+timer`) are looked up in core's single timer map, so
+// `Deno.unrefTimer` / `Deno.refTimer` reach them.
+Deno.test({
+  name: "unrefTimer - numeric id of a timeout",
+  permissions: { run: true, read: true },
+  fn: async () => {
+    const [statusCode, output] = await execCode(`
+      const timer = setTimeout(() => console.log("kept alive"), 100);
+      Deno.unrefTimer(+timer);
+      console.log(timer.hasRef());
+    `);
+    assertEquals(statusCode, 0);
+    assertEquals(output, "false\n");
+  },
+});
+
+Deno.test({
+  name: "refTimer - numeric id of a timeout",
+  permissions: { run: true, read: true },
+  fn: async () => {
+    const [statusCode, output] = await execCode(`
+      const timer = setTimeout(() => console.log("1"), 10);
+      timer.unref();
+      Deno.refTimer(+timer);
+      console.log(timer.hasRef());
+    `);
+    assertEquals(statusCode, 0);
+    assertEquals(output, "true\n1\n");
+  },
+});
+
+Deno.test({
+  name: "unrefTimer - numeric id of an interval",
+  permissions: { run: true, read: true },
+  fn: async () => {
+    const [statusCode, output] = await execCode(`
+      let i = 0;
+      const timer = setInterval(() => {
+        console.log(++i);
+        if (i === 3) Deno.unrefTimer(+timer);
+        // Bounded, so a broken unref can't hang the test.
+        if (i === 20) clearInterval(timer);
+      }, 10);
+    `);
+    assertEquals(statusCode, 0);
+    assertEquals(output, "1\n2\n3\n");
+  },
+});
+
+Deno.test({
+  name: "refTimer - numeric id of an interval",
+  permissions: { run: true, read: true },
+  fn: async () => {
+    const [statusCode, output] = await execCode(`
+      let i = 0;
+      const timer = setInterval(() => {
+        console.log(++i);
+        if (i === 3) clearInterval(timer);
+      }, 10);
+      timer.unref();
+      Deno.refTimer(+timer);
+      console.log(timer.hasRef());
+    `);
+    assertEquals(statusCode, 0);
+    assertEquals(output, "true\n1\n2\n3\n");
+  },
+});
+
+Deno.test(async function clearTimeoutNumericIdOfTimeout() {
+  let fired = false;
+  const timer = setTimeout(() => {
+    fired = true;
+  }, 10);
+  clearTimeout(+timer);
+  await delay(30);
+  assert(!fired);
+});
+
+Deno.test(async function clearIntervalNumericIdOfInterval() {
+  let ticks = 0;
+  const timer = setInterval(() => {
+    ticks++;
+  }, 5);
+  clearInterval(+timer);
+  await delay(30);
+  assertEquals(ticks, 0);
+});
+
+Deno.test({
+  name: "timeout converted to an interval in its callback keeps a live id",
+  permissions: { run: true, read: true },
+  fn: async () => {
+    const [statusCode, output] = await execCode(`
+      const core = Deno[Deno.internal].core;
+      let n = 0;
+      let oldId = 0;
+      const timer = setTimeout(function () {
+        n++;
+        if (n === 1) {
+          oldId = +timer;
+          this._repeat = 10;
+          return;
+        }
+        if (n === 2) {
+          console.log(+timer !== oldId);
+          console.log(core.getTimer(oldId) === undefined);
+          console.log(core.getTimer(+timer)[core.kTimerOwner] === timer);
+          // The new id reaches the timer: once unref'd, the process exits.
+          Deno.unrefTimer(+timer);
+          console.log(timer.hasRef());
+        }
+        // Bounded, so a broken unref can't hang the test.
+        if (n === 20) clearInterval(timer);
+      }, 10);
+    `);
+    assertEquals(statusCode, 0);
+    assertEquals(output, "true\ntrue\ntrue\nfalse\n");
+  },
+});
+
+Deno.test({
+  name: "timer map returns to its baseline once timers end",
+  permissions: { run: true, read: true },
+  fn: async () => {
+    const [statusCode, output] = await execCode(`
+      const core = Deno[Deno.internal].core;
+      const base = core.getActiveTimers().length;
+      for (let i = 0; i < 50; i++) setTimeout(() => {}, 1);
+      const cleared = setTimeout(() => {}, 1000);
+      clearTimeout(+cleared);
+      const closed = setTimeout(() => {}, 1000);
+      closed.close();
+      const refreshed = setTimeout(() => {}, 1);
+      setTimeout(() => refreshed.refresh(), 5);
+      let ticks = 0;
+      const interval = setInterval(() => {
+        if (++ticks === 3) clearInterval(+interval);
+      }, 1);
+      let n = 0;
+      const converted = setTimeout(function () {
+        if (++n === 1) this._repeat = 1;
+        else if (n === 3) clearInterval(converted);
+      }, 1);
+      console.log(core.getActiveTimers().length - base);
+      setTimeout(() => {
+        // Only this callback's own timer is still tracked.
+        console.log(core.getActiveTimers().length - base);
+      }, 100);
+    `);
+    assertEquals(statusCode, 0);
+    assertEquals(output, "54\n1\n");
+  },
+});
+
+// As in Node.js, a numeric id reaches a timer only once the timer handed it
+// out (`[Symbol.toPrimitive]()`, e.g. `+timer`). A guessed id does nothing,
+// which also keeps runtime-internal (system) timers, such as a node:net
+// socket's idle timeout, out of reach. These tests read the id through the
+// internal `timerId` symbol, which doesn't hand it out.
+Deno.test({
+  name: "numeric timer APIs leave system timers alone",
+  permissions: { run: true, read: true },
+  fn: async () => {
+    const [statusCode, output] = await execCode(`
+      import net from "node:net";
+      const socket = new net.Socket();
+      socket.setTimeout(30, () => {
+        console.log("socket timeout");
+        socket.destroy();
+      });
+      const symbol = (o, name) =>
+        Object.getOwnPropertySymbols(o).find((s) => s.description === name);
+      const systemTimer = socket[symbol(socket, "timeout")];
+      const id = systemTimer[symbol(systemTimer, "timerId")];
+      console.log(typeof id);
+      Deno.refTimer(id);
+      console.log(systemTimer.hasRef());
+      systemTimer.ref();
+      Deno.unrefTimer(id);
+      console.log(systemTimer.hasRef());
+      systemTimer.unref();
+      clearTimeout(id);
+      clearInterval(id);
+      clearTimeout(String(id));
+      console.log(systemTimer._destroyed);
+      // The system timer is unref'd: keep the process alive past it.
+      setTimeout(() => {}, 200);
+    `);
+    assertEquals(statusCode, 0);
+    assertEquals(output, "number\nfalse\ntrue\nfalse\nsocket timeout\n");
+  },
+});
+
+Deno.test({
+  name: "numeric timer APIs ignore a guessed id of a user timer",
+  permissions: { run: true, read: true },
+  fn: async () => {
+    const [statusCode, output] = await execCode(`
+      const first = setTimeout(() => {}, 1000);
+      const firstId = +first;
+      clearTimeout(firstId);
+      const timer = setTimeout(() => console.log("fired"), 20);
+      const kTimerId = Object.getOwnPropertySymbols(timer)
+        .find((s) => s.description === "timerId");
+      // The neighbouring id, never handed out by the timer itself.
+      const guessed = timer[kTimerId];
+      console.log(guessed === firstId + 1);
+      clearTimeout(guessed);
+      clearInterval(guessed);
+      clearTimeout(String(guessed));
+      Deno.unrefTimer(guessed);
+      console.log(timer._destroyed, timer.hasRef());
+      // Once handed out, the same id works.
+      const other = setTimeout(() => console.log("unexpected"), 10);
+      clearTimeout(+other);
+    `);
+    assertEquals(statusCode, 0);
+    assertEquals(output, "true\nfalse true\nfired\n");
+  },
+});
+
 Deno.test({
   name: "AbortSignal.timeout() with no listeners",
   permissions: { run: true, read: true },
