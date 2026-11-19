@@ -754,6 +754,25 @@ const RTCSctpTransportPrototype = RTCSctpTransport.prototype;
 
 // --- RTCDataChannel --------------------------------------------------------
 
+// webrtc-priority 4: RTCPriorityType, and the DCEP priority each is sent as
+// (RFC 8831 6.4 / RFC 8832 5.1).
+const PRIORITY_VALUES = {
+  __proto__: null,
+  "very-low": 128,
+  low: 256,
+  medium: 512,
+  high: 1024,
+};
+
+// webrtc-priority 4.3: an incoming channel's priority from the DCEP value.
+function priorityFromDcep(value) {
+  if (typeof value !== "number") return "low";
+  if (value <= 128) return "very-low";
+  if (value <= 256) return "low";
+  if (value <= 512) return "medium";
+  return "high";
+}
+
 class RTCDataChannel extends EventTarget {
   constructor(key = undefined, pc = undefined, init = undefined) {
     if (key !== illegalConstructorKey) {
@@ -806,6 +825,11 @@ class RTCDataChannel extends EventTarget {
   get negotiated() {
     webidl.assertBranded(this, RTCDataChannelPrototype);
     return this[_init].negotiated;
+  }
+  // webrtc-priority 4.1: [[DataChannelPriority]].
+  get priority() {
+    webidl.assertBranded(this, RTCDataChannelPrototype);
+    return this[_init].priority ?? "low";
   }
   get id() {
     webidl.assertBranded(this, RTCDataChannelPrototype);
@@ -3638,7 +3662,16 @@ class RTCPeerConnection extends EventTarget {
         : webidl.converters["unsigned short"](dict.id, "", "", {
           enforceRange: true,
         }),
+      // webrtc-priority 4.2: RTCPriorityType priority = "low".
+      priority: dict.priority === undefined
+        ? "low"
+        : webidl.converters.DOMString(dict.priority, prefix, "'priority'"),
     };
+    if (PRIORITY_VALUES[init.priority] === undefined) {
+      throw new TypeError(
+        `${prefix}: '${init.priority}' is not a valid value for enumeration RTCPriorityType`,
+      );
+    }
     if (init.maxPacketLifeTime !== null && init.maxRetransmits !== null) {
       throw new TypeError(
         "Failed to execute 'createDataChannel': maxPacketLifeTime and maxRetransmits are mutually exclusive",
@@ -3684,6 +3717,7 @@ class RTCPeerConnection extends EventTarget {
       protocol: init.protocol,
       negotiated: init.negotiated,
       id: init.negotiated ? init.id : null,
+      priority: PRIORITY_VALUES[init.priority],
     });
     const channel = new RTCDataChannel(illegalConstructorKey, this, {
       ...init,
@@ -4994,6 +5028,7 @@ function dispatchEngineEvent(pc, event) {
           maxPacketLifeTime: event.maxPacketLifeTime ?? null,
           maxRetransmits: event.maxRetransmits ?? null,
           negotiated: event.negotiated,
+          priority: priorityFromDcep(event.priority),
           readyState: "open",
         });
         MapPrototypeSet(pc[_channels], event.channel, channel);

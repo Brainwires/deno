@@ -537,6 +537,13 @@ struct DataChannelArg {
   protocol: String,
   negotiated: bool,
   id: Option<u16>,
+  // wpt100:S2 the DCEP priority (webrtc-priority 4.3), 256 when absent.
+  #[serde(default = "default_channel_priority")]
+  priority: u16,
+}
+
+fn default_channel_priority() -> u16 {
+  256
 }
 
 #[derive(Serialize)]
@@ -573,6 +580,7 @@ fn op_webrtc_pc_create_data_channel(
       max_retransmits: arg.max_retransmits,
       protocol: arg.protocol,
       negotiated,
+      priority: arg.priority,
     },
   )?;
   Ok(CreatedChannel { channel, id })
