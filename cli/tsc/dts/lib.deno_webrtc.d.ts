@@ -142,7 +142,16 @@ type RTCErrorDetailType =
   | "hardware-encoder-error"
   | "hardware-encoder-not-available"
   | "sctp-failure"
-  | "sdp-syntax-error";
+  | "sdp-syntax-error"
+  // wpt100:identity — Identity for WebRTC's partial enum.
+  | "idp-bad-script-failure"
+  | "idp-execution-failure"
+  | "idp-load-failure"
+  | "idp-need-login"
+  | "idp-timeout"
+  | "idp-tls-failure"
+  | "idp-token-expired"
+  | "idp-token-invalid";
 
 /**
  * A STUN or TURN server for ICE. `urls` takes `stun:`, `turn:` and `turns:`

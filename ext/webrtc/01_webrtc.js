@@ -589,6 +589,16 @@ const ERROR_DETAILS = [
   "sdp-syntax-error",
   "hardware-encoder-not-available",
   "hardware-encoder-error",
+  // wpt100:identity — RTCErrorDetailTypeIdp (W3C WebRTC Identity section
+  // 10), the partial enum WebIDL can't write.
+  "idp-bad-script-failure",
+  "idp-execution-failure",
+  "idp-load-failure",
+  "idp-need-login",
+  "idp-timeout",
+  "idp-tls-failure",
+  "idp-token-expired",
+  "idp-token-invalid",
 ];
 
 class RTCError extends DOMException {
@@ -614,6 +624,15 @@ class RTCError extends DOMException {
       sctpCauseCode: init.sctpCauseCode ?? null,
       receivedAlert: init.receivedAlert ?? null,
       sentAlert: init.sentAlert ?? null,
+      // wpt100:identity — RTCErrorInit.httpRequestStatusCode (`long`,
+      // W3C WebRTC Identity section 10).
+      httpRequestStatusCode: init.httpRequestStatusCode === undefined
+        ? null
+        : webidl.converters.long(
+          init.httpRequestStatusCode,
+          "Failed to construct 'RTCError'",
+          "httpRequestStatusCode",
+        ),
     };
   }
 
@@ -631,6 +650,10 @@ class RTCError extends DOMException {
   }
   get sentAlert() {
     return this.#init.sentAlert;
+  }
+  // wpt100:identity
+  get httpRequestStatusCode() {
+    return this.#init.httpRequestStatusCode;
   }
 }
 webidl.configureInterface(RTCError);
