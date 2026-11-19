@@ -168,6 +168,12 @@ class RTCEncodedVideoFrame {
     webidl.assertBranded(this, RTCEncodedVideoFramePrototype);
     return this[_type];
   }
+  // The frame's RTP timestamp: the attribute the specification moved to
+  // `getMetadata().rtpTimestamp`, which every browser still has.
+  get timestamp() {
+    webidl.assertBranded(this, RTCEncodedVideoFramePrototype);
+    return this[_metadata].rtpTimestamp;
+  }
   get data() {
     webidl.assertBranded(this, RTCEncodedVideoFramePrototype);
     return this[_data];
@@ -227,6 +233,11 @@ class RTCEncodedAudioFrame {
     });
   }
 
+  // The frame's RTP timestamp (see RTCEncodedVideoFrame's).
+  get timestamp() {
+    webidl.assertBranded(this, RTCEncodedAudioFramePrototype);
+    return this[_metadata].rtpTimestamp;
+  }
   get data() {
     webidl.assertBranded(this, RTCEncodedAudioFramePrototype);
     return this[_data];
