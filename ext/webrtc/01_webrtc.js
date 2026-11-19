@@ -68,6 +68,9 @@ const {
   op_webrtc_transceiver_set_codec_preferences,
   op_webrtc_transceiver_set_direction,
   op_webrtc_transceiver_stop,
+  // wpt100:hdrext
+  op_webrtc_pc_set_negotiation_options,
+  op_webrtc_transceiver_set_header_extensions,
   op_void_async_deferred,
 } = core.ops;
 const {
@@ -3135,6 +3138,161 @@ function receiverSources(receiver, contributing) {
   }
 }
 
+// wpt100:hdrext — RTP header extension control (webrtc-extensions).
+const EXTENSION_DIRECTIONS = [
+  "sendrecv",
+  "sendonly",
+  "recvonly",
+  "inactive",
+  "stopped",
+];
+// Mandatory to use, both ways: the MID extension with BUNDLE (RFC 9143
+// section 9.1, RFC 8834 section 5.2.4).
+const MANDATORY_HEADER_EXTENSIONS = ["urn:ietf:params:rtp-hdrext:sdes:mid"];
+// Implemented, but not in an initial offer unless the application asks (an
+// answer still takes them when offered).
+const UNOFFERED_HEADER_EXTENSIONS = [
+  "http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time",
+];
+
+function copyHeaderExtensions(list) {
+  return ArrayPrototypeMap(
+    list,
+    (e) => ({ uri: e.uri, direction: e.direction }),
+  );
+}
+
+// [[HeaderExtensionsToNegotiate]] of a new transceiver: the first
+// non-stopping transceiver's of the same kind, else the implemented ones;
+// [[NegotiatedHeaderExtensions]]: each of them, "stopped".
+function initHeaderExtensions(transceiver, pc, kind) {
+  const state = transceiver[_state];
+  const first = ArrayPrototypeFind(
+    pc[_state].transceivers,
+    (t) =>
+      t[_state].kind === kind && !t[_state].stopping && !t[_state].stopped,
+  );
+  if (first !== undefined) {
+    state.headerExtensionsToNegotiate = copyHeaderExtensions(
+      first[_state].headerExtensionsToNegotiate,
+    );
+    state.userStoppedExtensions = new SafeSet();
+    SetPrototypeForEach(
+      first[_state].userStoppedExtensions,
+      (uri) => SetPrototypeAdd(state.userStoppedExtensions, uri),
+    );
+  } else {
+    const implemented = capabilities(kind, true)?.headerExtensions ?? [];
+    state.headerExtensionsToNegotiate = ArrayPrototypeMap(
+      implemented,
+      (h) => ({
+        uri: h.uri,
+        direction: ArrayPrototypeIncludes(UNOFFERED_HEADER_EXTENSIONS, h.uri)
+          ? "stopped"
+          : "sendrecv",
+      }),
+    );
+    state.userStoppedExtensions = new SafeSet();
+  }
+  state.negotiatedHeaderExtensions = ArrayPrototypeMap(
+    state.headerExtensionsToNegotiate,
+    (e) => ({ uri: e.uri, direction: "stopped" }),
+  );
+}
+
+// Before an offer or answer: the extensions each transceiver's media section
+// may carry. An offer has the ones not "stopped"; an answer the offered ones
+// the application didn't stop itself (one only the last negotiation left
+// "stopped" comes back when the peer offers it again).
+function pushHeaderExtensions(pc, offer) {
+  const transceivers = pc[_state].transceivers;
+  for (let i = 0; i < transceivers.length; ++i) {
+    const ts = transceivers[i][_state];
+    if (ts.stopped) continue;
+    const uris = [];
+    const list = ts.headerExtensionsToNegotiate;
+    for (let j = 0; j < list.length; ++j) {
+      const e = list[j];
+      const keep = offer
+        ? e.direction !== "stopped"
+        : !SetPrototypeHas(ts.userStoppedExtensions, e.uri);
+      if (keep) ArrayPrototypePush(uris, e.uri);
+    }
+    try {
+      op_webrtc_transceiver_set_header_extensions(
+        pc[_rid],
+        transceivers[i][_key],
+        uris,
+      );
+    } catch {
+      // The engine's transceiver is gone.
+    }
+  }
+}
+
+// The `a=extmap` lines of each media section, by mid: id and direction
+// (sendrecv when unstated) per URI.
+function extmapsOf(sdp) {
+  const out = new SafeMap();
+  const lines = StringPrototypeSplit(sdp, "\n");
+  let current = null;
+  for (let i = 0; i < lines.length; ++i) {
+    const line = StringPrototypeTrim(lines[i]);
+    if (StringPrototypeStartsWith(line, "m=")) {
+      const port = StringPrototypeSplit(line, " ")[1];
+      current = { mid: null, rejected: port === "0", extensions: [] };
+      continue;
+    }
+    if (current === null) continue;
+    if (line === "a=bundle-only") {
+      current.rejected = false;
+    } else if (StringPrototypeStartsWith(line, "a=mid:")) {
+      current.mid = StringPrototypeSlice(line, 6);
+      MapPrototypeSet(out, current.mid, current);
+    } else if (StringPrototypeStartsWith(line, "a=extmap:")) {
+      const fields = StringPrototypeSplit(StringPrototypeSlice(line, 9), " ");
+      if (fields.length < 2) continue;
+      const idDir = StringPrototypeSplit(fields[0], "/");
+      ArrayPrototypePush(current.extensions, {
+        id: NumberParseInt(idDir[0], 10),
+        direction: idDir[1] ?? "sendrecv",
+        uri: fields[1],
+      });
+    }
+  }
+  return out;
+}
+
+// webrtc-extensions, "set a session description" for an answer: each
+// extension's direction as the answer has it (reversed for a remote one,
+// "stopped" when absent) becomes both [[NegotiatedHeaderExtensions]] and
+// [[HeaderExtensionsToNegotiate]].
+function headerExtensionsNegotiated(pc, sdp, remote) {
+  const sections = extmapsOf(sdp);
+  const transceivers = pc[_state].transceivers;
+  for (let i = 0; i < transceivers.length; ++i) {
+    const ts = transceivers[i][_state];
+    if (ts.mid === null) continue;
+    const section = MapPrototypeGet(sections, ts.mid);
+    if (section === undefined) continue;
+    const negotiated = ArrayPrototypeMap(
+      ts.headerExtensionsToNegotiate,
+      (e) => {
+        const found = section.rejected
+          ? undefined
+          : ArrayPrototypeFind(section.extensions, (x) => x.uri === e.uri);
+        let direction = found === undefined ? "stopped" : found.direction;
+        if (found !== undefined && remote) {
+          direction = reverseDirection(direction);
+        }
+        return { uri: e.uri, direction };
+      },
+    );
+    ts.negotiatedHeaderExtensions = negotiated;
+    ts.headerExtensionsToNegotiate = copyHeaderExtensions(negotiated);
+  }
+}
+
 const DIRECTIONS = ["sendrecv", "sendonly", "recvonly", "inactive"];
 
 class RTCRtpTransceiver {
@@ -3156,6 +3314,7 @@ class RTCRtpTransceiver {
       transport: false,
       stableTransport: false,
     };
+    initHeaderExtensions(this, pc, init.kind);
     this[_state].sender = new RTCRtpSender(illegalConstructorKey, pc, this);
     this[_state].receiver = new RTCRtpReceiver(
       illegalConstructorKey,
@@ -3300,6 +3459,87 @@ class RTCRtpTransceiver {
         sdpFmtpLine: c.sdpFmtpLine ?? null,
       })),
     );
+  }
+
+  // wpt100:hdrext — webrtc-extensions RTP header extension control.
+  getHeaderExtensionsToNegotiate() {
+    webidl.assertBranded(this, RTCRtpTransceiverPrototype);
+    return copyHeaderExtensions(this[_state].headerExtensionsToNegotiate);
+  }
+
+  setHeaderExtensionsToNegotiate(extensions) {
+    webidl.assertBranded(this, RTCRtpTransceiverPrototype);
+    const prefix =
+      "Failed to execute 'setHeaderExtensionsToNegotiate' on 'RTCRtpTransceiver'";
+    webidl.requiredArguments(arguments.length, 1, prefix);
+    if (
+      extensions === null || typeof extensions !== "object" ||
+      typeof extensions[SymbolIterator] !== "function"
+    ) {
+      throw new TypeError(`${prefix}: the argument is not a sequence`);
+    }
+    const list = ArrayFrom(extensions);
+    const converted = [];
+    for (let i = 0; i < list.length; ++i) {
+      const e = list[i];
+      if (e === null || typeof e !== "object") {
+        throw new TypeError(
+          `${prefix}: an RTCRtpHeaderExtensionCapability must be an object`,
+        );
+      }
+      // `uri` is required; an empty one names no extension.
+      if (e.uri === undefined || String(e.uri) === "") {
+        throw new TypeError(`${prefix}: 'uri' is required`);
+      }
+      if (e.direction === undefined) {
+        throw new TypeError(`${prefix}: 'direction' is required`);
+      }
+      const direction = String(e.direction);
+      if (!ArrayPrototypeIncludes(EXTENSION_DIRECTIONS, direction)) {
+        throw new TypeError(
+          `${prefix}: '${direction}' is not a valid RTCRtpTransceiverDirection`,
+        );
+      }
+      ArrayPrototypePush(converted, { uri: String(e.uri), direction });
+    }
+    const current = this[_state].headerExtensionsToNegotiate;
+    if (converted.length !== current.length) {
+      throw new DOMException(
+        `${prefix}: the list must have the same extensions as getHeaderExtensionsToNegotiate()`,
+        "InvalidModificationError",
+      );
+    }
+    for (let i = 0; i < converted.length; ++i) {
+      const { uri, direction } = converted[i];
+      if (uri !== current[i].uri) {
+        throw new DOMException(
+          `${prefix}: '${uri}' is not the extension at index ${i}`,
+          "InvalidModificationError",
+        );
+      }
+      if (
+        ArrayPrototypeIncludes(MANDATORY_HEADER_EXTENSIONS, uri) &&
+        direction !== "sendrecv"
+      ) {
+        throw new DOMException(
+          `${prefix}: '${uri}' is mandatory and must be 'sendrecv'`,
+          "InvalidModificationError",
+        );
+      }
+    }
+    const stopped = new SafeSet();
+    for (let i = 0; i < converted.length; ++i) {
+      if (converted[i].direction === "stopped") {
+        SetPrototypeAdd(stopped, converted[i].uri);
+      }
+    }
+    this[_state].headerExtensionsToNegotiate = converted;
+    this[_state].userStoppedExtensions = stopped;
+  }
+
+  getNegotiatedHeaderExtensions() {
+    webidl.assertBranded(this, RTCRtpTransceiverPrototype);
+    return copyHeaderExtensions(this[_state].negotiatedHeaderExtensions);
   }
 }
 webidl.configureInterface(RTCRtpTransceiver);
@@ -3872,14 +4112,68 @@ function convertIceServers(servers) {
         );
       }
     }
+    // wpt100:hdrext — webrtc-extensions RTCIceServer.credentialType and
+    // RTCOAuthCredential (set the configuration, step 11.6).
+    const credentialType = server.credentialType === undefined
+      ? "password"
+      : String(server.credentialType);
+    if (credentialType !== "password" && credentialType !== "oauth") {
+      throw new TypeError(
+        `Failed to construct 'RTCPeerConnection': '${credentialType}' is not a valid value for 'credentialType'`,
+      );
+    }
+    let credential = server.credential === undefined
+      ? undefined
+      : String(server.credential);
+    if (credentialType === "oauth") {
+      const c = server.credential;
+      if (c !== null && typeof c === "object") {
+        if (c.macKey === undefined || c.accessToken === undefined) {
+          throw new TypeError(
+            "Failed to construct 'RTCPeerConnection': an RTCOAuthCredential needs 'macKey' and 'accessToken'",
+          );
+        }
+        credential = {
+          macKey: String(c.macKey),
+          accessToken: String(c.accessToken),
+        };
+      } else if (ArrayPrototypeSome(urls, isTurnUrl)) {
+        throw new DOMException(
+          "Failed to construct 'RTCPeerConnection': credentialType is 'oauth' but the credential is not an RTCOAuthCredential",
+          "InvalidAccessError",
+        );
+      }
+    }
     ArrayPrototypePush(out, {
       urls,
       username: server.username === undefined
         ? undefined
         : String(server.username),
-      credential: server.credential === undefined
-        ? undefined
-        : String(server.credential),
+      credential,
+      credentialType,
+    });
+  }
+  return out;
+}
+
+function isTurnUrl(url) {
+  const u = StringPrototypeToLowerCase(url);
+  return StringPrototypeStartsWith(u, "turn:") ||
+    StringPrototypeStartsWith(u, "turns:");
+}
+
+// wpt100:hdrext — the ICE servers the engine gets: not the OAuth ones (RFC
+// 7635 needs an ACCESS-TOKEN attribute the engine's TURN client doesn't
+// send; they are kept in the configuration, unused).
+function engineIceServers(servers) {
+  const out = [];
+  for (let i = 0; i < servers.length; ++i) {
+    const s = servers[i];
+    if (s.credentialType === "oauth") continue;
+    ArrayPrototypePush(out, {
+      urls: s.urls,
+      username: s.username,
+      credential: s.credential,
     });
   }
   return out;
@@ -3959,6 +4253,30 @@ function convertConfiguration(configuration, prefix) {
       "InvalidStateError",
     );
   }
+  // wpt100:hdrext — webrtc-extensions members.
+  const rtpHeaderEncryptionPolicy = config.rtpHeaderEncryptionPolicy ===
+      undefined
+    ? "negotiate"
+    : String(config.rtpHeaderEncryptionPolicy);
+  if (
+    !ArrayPrototypeIncludes(
+      ["disable", "negotiate", "require"],
+      rtpHeaderEncryptionPolicy,
+    )
+  ) {
+    throw new TypeError(
+      `${prefix}: '${rtpHeaderEncryptionPolicy}' is not a valid value for 'rtpHeaderEncryptionPolicy'`,
+    );
+  }
+  const alwaysNegotiateDataChannels = !!config.alwaysNegotiateDataChannels;
+  const targetLatency = config.targetLatency === undefined
+    ? "lowest"
+    : String(config.targetLatency);
+  if (targetLatency !== "lowest" && targetLatency !== "none") {
+    throw new TypeError(
+      `${prefix}: '${targetLatency}' is not a valid value for 'targetLatency'`,
+    );
+  }
   return {
     iceServers: convertIceServers(config.iceServers),
     iceTransportPolicy,
@@ -3967,6 +4285,9 @@ function convertConfiguration(configuration, prefix) {
     iceCandidatePoolSize,
     certificates,
     network,
+    rtpHeaderEncryptionPolicy,
+    alwaysNegotiateDataChannels,
+    targetLatency,
   };
 }
 
@@ -4015,7 +4336,7 @@ class RTCPeerConnection extends EventTarget {
       }
     }
     this[_rid] = op_webrtc_pc_create({
-      iceServers: config.iceServers,
+      iceServers: engineIceServers(config.iceServers),
       iceTransportPolicy: config.iceTransportPolicy,
       bundlePolicy: config.bundlePolicy,
       certificates: ArrayPrototypeMap(
@@ -4024,6 +4345,12 @@ class RTCPeerConnection extends EventTarget {
       ),
       network: config.network === null ? null : config.network[_rid],
     });
+    // wpt100:hdrext — rtpHeaderEncryptionPolicy, alwaysNegotiateDataChannels.
+    op_webrtc_pc_set_negotiation_options(
+      this[_rid],
+      config.rtpHeaderEncryptionPolicy,
+      config.alwaysNegotiateDataChannels,
+    );
     this[_channels] = new SafeMap();
     this[_state] = {
       config,
@@ -4303,6 +4630,7 @@ class RTCPeerConnection extends EventTarget {
         activate(this);
         descriptionApplied(this, true, type);
         syncTransceivers(this, { remote: false, type });
+        if (type === "answer") headerExtensionsNegotiated(this, sdp, false);
         setSignalingState(this, nextSignalingState(signaling, true, type));
         updateSctpTransport(this, type);
         setTransportStates(this);
@@ -4362,8 +4690,15 @@ class RTCPeerConnection extends EventTarget {
           requireUniqueMsids(sdp);
           // wpt100:codecs
           requirePayloadTypes(sdp);
+          // wpt100:hdrext
+          requireFingerprint(sdp);
+          requireCryptex(this, sdp);
+          requireStableExtensionIds(this, sdp);
           if (type === "answer" || type === "pranswer") {
+            // wpt100:codecs
             requireAnswerMediaTypes(this, sdp);
+            // wpt100:hdrext
+            requireAnswerDirections(this, sdp);
           }
         }
         const offerFromStable = type === "offer" &&
@@ -4387,6 +4722,8 @@ class RTCPeerConnection extends EventTarget {
         // when signalingstatechange fires; track events come after it
         // (webrtc-pc 4.4.1.6).
         const trackEvents = syncTransceivers(this, { remote: true, type });
+        // wpt100:hdrext
+        if (type === "answer") headerExtensionsNegotiated(this, sdp, true);
         setSignalingState(this, nextSignalingState(now, false, type));
         if (type === "rollback") restoreRemoteTracks(this);
         fireTrackEvents(this, trackEvents);
@@ -4635,7 +4972,12 @@ class RTCPeerConnection extends EventTarget {
       iceServers: ArrayPrototypeMap(config.iceServers, (s) => {
         const server = { urls: ArrayPrototypeSlice(s.urls) };
         if (s.username !== undefined) server.username = s.username;
-        if (s.credential !== undefined) server.credential = s.credential;
+        if (s.credential !== undefined) {
+          server.credential = typeof s.credential === "object"
+            ? { ...s.credential }
+            : s.credential;
+        }
+        server.credentialType = s.credentialType;
         return server;
       }),
       iceTransportPolicy: config.iceTransportPolicy,
@@ -4643,6 +4985,10 @@ class RTCPeerConnection extends EventTarget {
       rtcpMuxPolicy: config.rtcpMuxPolicy,
       iceCandidatePoolSize: config.iceCandidatePoolSize,
       certificates: ArrayPrototypeSlice(config.certificates),
+      // wpt100:hdrext
+      rtpHeaderEncryptionPolicy: config.rtpHeaderEncryptionPolicy,
+      alwaysNegotiateDataChannels: config.alwaysNegotiateDataChannels,
+      targetLatency: config.targetLatency,
     };
     if (config.network !== null) out.denoNetwork = config.network;
     return out;
@@ -4665,6 +5011,21 @@ class RTCPeerConnection extends EventTarget {
         `${prefix}: bundlePolicy and rtcpMuxPolicy can't change`,
         "InvalidModificationError",
       );
+    }
+    // wpt100:hdrext — webrtc-extensions: set only at construction.
+    const policy = config.rtpHeaderEncryptionPolicy;
+    const always = config.alwaysNegotiateDataChannels;
+    if (
+      policy !== current.rtpHeaderEncryptionPolicy ||
+      always !== current.alwaysNegotiateDataChannels
+    ) {
+      throw new DOMException(
+        `${prefix}: rtpHeaderEncryptionPolicy and alwaysNegotiateDataChannels can't change`,
+        "InvalidModificationError",
+      );
+    }
+    if (config.targetLatency !== current.targetLatency) {
+      throw new TypeError(`${prefix}: targetLatency can't change`);
     }
     const sameCerts = config.certificates.length === 0 ||
       (config.certificates.length === current.certificates.length &&
@@ -4700,7 +5061,7 @@ class RTCPeerConnection extends EventTarget {
     // the net permission for them; they apply to the next gathering (an
     // ICE restart).
     op_webrtc_pc_set_ice_servers(this[_rid], {
-      iceServers: config.iceServers,
+      iceServers: engineIceServers(config.iceServers),
       iceTransportPolicy: config.iceTransportPolicy,
     });
     // RFC 9429 section 4.1.18: a new ICE candidate policy, or new STUN / TURN
@@ -5136,6 +5497,117 @@ function requireRtcpMux(sdp) {
   }
 }
 
+// wpt100:hdrext — RFC 8827 section 6.5 / RFC 8826 section 4.3.1: no SDES,
+// DTLS-SRTP only; a description whose media has no DTLS fingerprint is
+// refused (RFC 9429 section 5.8) as InvalidAccessError.
+function requireFingerprint(sdp) {
+  if (StringPrototypeIncludes(sdp, "a=fingerprint:")) return;
+  const sections = mediaSectionsOf(sdp);
+  if (ArrayPrototypeSome(sections, (m) => !m.rejected)) {
+    throw new DOMException(
+      "setRemoteDescription: the description has no DTLS fingerprint (SDES is not supported)",
+      "InvalidAccessError",
+    );
+  }
+}
+
+// Whether `a=cryptex` (RFC 9335) applies to every RTP section of a
+// description: at the session level or on each live audio / video section;
+// `null` when it has no such section.
+function cryptexOf(sdp) {
+  const parts = StringPrototypeSplit(sdp, "\nm=");
+  const lines = (part) =>
+    ArrayPrototypeMap(StringPrototypeSplit(part, "\n"), StringPrototypeTrim);
+  const session = ArrayPrototypeIncludes(lines(parts[0]), "a=cryptex");
+  let rtp = 0;
+  let all = true;
+  for (let i = 1; i < parts.length; ++i) {
+    const section = lines(parts[i]);
+    const fields = StringPrototypeSplit(section[0], " ");
+    if (fields[0] !== "audio" && fields[0] !== "video") continue;
+    if (
+      fields[1] === "0" && !ArrayPrototypeIncludes(section, "a=bundle-only")
+    ) {
+      continue;
+    }
+    rtp++;
+    if (!ArrayPrototypeIncludes(section, "a=cryptex")) all = false;
+  }
+  if (rtp === 0) return null;
+  return session || all;
+}
+
+// webrtc-extensions: with rtpHeaderEncryptionPolicy "require", a remote
+// description with RTP media that doesn't signal cryptex is refused.
+function requireCryptex(pc, sdp) {
+  if (pc[_state].config.rtpHeaderEncryptionPolicy !== "require") return;
+  if (cryptexOf(sdp) === false) {
+    throw new DOMException(
+      "setRemoteDescription: rtpHeaderEncryptionPolicy is 'require', but the description doesn't signal a=cryptex",
+      "InvalidAccessError",
+    );
+  }
+}
+
+// RFC 8285 section 6: once negotiated, a media section's extension ids are
+// not remapped. A remote description that gives a URI another id, or an id
+// another URI, than the current descriptions of the same mid is refused.
+function requireStableExtensionIds(pc, sdp) {
+  const incoming = extmapsOf(sdp);
+  const previous = [];
+  const remote = pc.currentRemoteDescription;
+  const local = pc.currentLocalDescription;
+  if (remote !== null) ArrayPrototypePush(previous, extmapsOf(remote.sdp));
+  if (local !== null) ArrayPrototypePush(previous, extmapsOf(local.sdp));
+  MapPrototypeForEach(incoming, (section, mid) => {
+    if (section.rejected) return;
+    for (let p = 0; p < previous.length; ++p) {
+      const before = MapPrototypeGet(previous[p], mid);
+      if (before === undefined || before.rejected) continue;
+      for (let i = 0; i < section.extensions.length; ++i) {
+        const e = section.extensions[i];
+        const clash = ArrayPrototypeSome(
+          before.extensions,
+          (b) => (b.uri === e.uri) !== (b.id === e.id),
+        );
+        if (clash) {
+          throw new DOMException(
+            `setRemoteDescription: the extension '${e.uri}' of mid '${mid}' was remapped`,
+            "InvalidAccessError",
+          );
+        }
+      }
+    }
+  });
+}
+
+// RFC 3264 section 6.1 / RFC 9429 section 5.10: an answer's direction can't
+// exceed what the offer allows (it sends only what the offerer receives,
+// receives only what it sends).
+function requireAnswerDirections(pc, sdp) {
+  const offer = pc.pendingLocalDescription;
+  if (offer === null) return;
+  const offered = mediaSectionsOf(offer.sdp);
+  const answered = mediaSectionsOf(sdp);
+  for (let i = 0; i < answered.length; ++i) {
+    const a = answered[i];
+    if (a.rejected || a.mid === null) continue;
+    const o = ArrayPrototypeFind(offered, (m) => m.mid === a.mid);
+    if (o === undefined || o.rejected) continue;
+    const sends = (d) => d === "sendrecv" || d === "sendonly";
+    const receives = (d) => d === "sendrecv" || d === "recvonly";
+    if (
+      (sends(a.direction) && !receives(o.direction)) ||
+      (receives(a.direction) && !sends(o.direction))
+    ) {
+      throw new DOMException(
+        `setRemoteDescription: the answer's '${a.direction}' for mid '${a.mid}' exceeds the offer's '${o.direction}'`,
+        "InvalidAccessError",
+      );
+    }
+  }
+}
+
 function midsOf(sdp) {
   const mids = [];
   let inMedia = false;
@@ -5156,18 +5628,6 @@ function midsOf(sdp) {
 
 // An EncodedMediaTrack's codec, and for audio the telephone-event formats
 // RTCDTMFSender needs (media.rs `track_preferences`).
-// wpt100:transceiver: ops fail with WebRtcError::InvalidModification
-// (lib.rs: class "DOMExceptionInvalidModificationError"), which the runtime
-// registers no builder for, so the promise rejected with `undefined`. JSEP
-// ("an offer / answer other than the last one created") and
-// setCodecPreferences reject with an InvalidModificationError DOMException.
-core.registerErrorBuilder(
-  "DOMExceptionInvalidModificationError",
-  function DOMExceptionInvalidModificationError(msg) {
-    return new DOMException(msg, "InvalidModificationError");
-  },
-);
-
 function trackPreferences(codec) {
   const out = [codec];
   // wpt100:codecs: video keeps retransmission and FEC, which a preference
@@ -5568,6 +6028,7 @@ function createOfferSdp(pc, iceRestart) {
   const restart = iceRestart || state.configRestart ||
     SetPrototypeGetSize(state.iceCredentialsToReplace) > 0;
   syncDirections(pc);
+  pushHeaderExtensions(pc, true);
   const sdp = op_webrtc_pc_create_offer(pc[_rid], restart);
   state.configRestart = false;
   return sdp;
@@ -5647,6 +6108,8 @@ function createAnswerSdp(pc) {
       // The engine's transceiver is gone.
     }
   }
+  // wpt100:hdrext
+  pushHeaderExtensions(pc, false);
   return op_webrtc_pc_create_answer(pc[_rid]);
 }
 

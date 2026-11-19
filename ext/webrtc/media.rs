@@ -24,6 +24,7 @@ use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
+use rtc::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
 use rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtc::rtp::packetizer::Packetizer;
@@ -33,6 +34,7 @@ use rtc::rtp_transceiver::rtp_sender::RTCRtpCodec;
 use rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
 use rtc::rtp_transceiver::rtp_sender::RTCRtpCodingParameters;
 use rtc::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters;
+use rtc::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability;
 use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 use rtc::sansio::Protocol;
 use rtc::shared::marshal::Unmarshal;
@@ -82,7 +84,49 @@ pub fn media_stack() -> Result<(MediaEngine, Registry), WebRtcError> {
   let registry =
     register_default_interceptors(Registry::new(), &mut media_engine)
       .map_err(crate::peer::rtc_err)?;
+  register_header_extensions(&mut media_engine)?;
   Ok((media_engine, registry))
+}
+
+/// The RTP header extensions RFC 8834 section 5.2 has a WebRTC endpoint
+/// support, on top of the ones the default interceptors register (the
+/// simulcast `mid` / `rid` / `repaired-rid` for video, transport-wide
+/// congestion control for both): `mid` for audio too (5.2.4, mandatory with
+/// BUNDLE), the client-to-mixer audio level (5.2.2, RFC 6464) and the
+/// coordination of video orientation (5.2.5), and absolute capture time
+/// (abs-capture-time; RTCRtpTransceiver's header extension list starts it
+/// "stopped", so an offer carries it only once the application asks, while an
+/// answer takes it when offered). Registered after the defaults, so the ids
+/// those have stay as they were. A sender writes the audio level and the
+/// capture time (`header_extensions.rs`); the engine reads them from
+/// received packets as any other extension.
+fn register_header_extensions(
+  media_engine: &mut MediaEngine,
+) -> Result<(), WebRtcError> {
+  for (uri, kind) in [
+    (rtc::sdp::extmap::SDES_MID_URI, RtpCodecKind::Audio),
+    (rtc::sdp::extmap::AUDIO_LEVEL_URI, RtpCodecKind::Audio),
+    (rtc::sdp::extmap::VIDEO_ORIENTATION_URI, RtpCodecKind::Video),
+    (
+      crate::header_extensions::ABS_CAPTURE_TIME_URI,
+      RtpCodecKind::Audio,
+    ),
+    (
+      crate::header_extensions::ABS_CAPTURE_TIME_URI,
+      RtpCodecKind::Video,
+    ),
+  ] {
+    media_engine
+      .register_header_extension(
+        RTCRtpHeaderExtensionCapability {
+          uri: uri.to_string(),
+        },
+        kind,
+        None,
+      )
+      .map_err(crate::peer::rtc_err)?;
+  }
+  Ok(())
 }
 
 pub fn parse_kind(kind: &str) -> Result<RtpCodecKind, WebRtcError> {
@@ -213,7 +257,7 @@ pub fn capabilities(
 pub fn capabilities_from_sdp(kind: &str, sdp: &str) -> Capabilities {
   let mut codecs: Vec<(String, CodecArg)> = Vec::new();
   let mut fmtp: HashMap<String, String> = HashMap::new();
-  let mut header_extensions: Vec<HeaderExtensionCapability> = Vec::new();
+  let mut header_extensions: Vec<(u16, HeaderExtensionCapability)> = Vec::new();
   let mut in_kind = false;
   for line in sdp.lines() {
     let line = line.trim_end();
@@ -250,13 +294,25 @@ pub fn capabilities_from_sdp(kind: &str, sdp: &str) -> Capabilities {
       }
     } else if let Some(value) = line.strip_prefix("a=extmap:")
       && let Some(uri) = value.split_ascii_whitespace().nth(1)
-      && !header_extensions.iter().any(|h| h.uri == uri)
+      && !header_extensions.iter().any(|(_, h)| h.uri == uri)
     {
-      header_extensions.push(HeaderExtensionCapability {
-        uri: uri.to_string(),
-      });
+      // By id: the engine writes the lines in no particular order.
+      let id = value
+        .split(|c: char| c == '/' || c.is_ascii_whitespace())
+        .next()
+        .and_then(|id| id.parse::<u16>().ok())
+        .unwrap_or(u16::MAX);
+      header_extensions.push((
+        id,
+        HeaderExtensionCapability {
+          uri: uri.to_string(),
+        },
+      ));
     }
   }
+  header_extensions.sort_by_key(|(id, _)| *id);
+  let header_extensions: Vec<HeaderExtensionCapability> =
+    header_extensions.into_iter().map(|(_, h)| h).collect();
   let mut out: Vec<CodecArg> = Vec::new();
   for (pt, mut codec) in codecs {
     let lower = codec.mime_type.to_ascii_lowercase();
@@ -1021,6 +1077,45 @@ impl Core {
     self.set_codec_preferences_inner(index, &codecs)
   }
 
+  /// `setHeaderExtensionsToNegotiate()` and its effect on the next offer or
+  /// answer (webrtc-extensions): the URIs this transceiver's media section
+  /// may carry. JavaScript hands the list over before each offer and answer.
+  pub(crate) fn set_header_extensions_to_negotiate(
+    &mut self,
+    key: u32,
+    uris: Vec<String>,
+  ) -> Result<(), WebRtcError> {
+    let index = self.index_of(key)?;
+    if let Some(mut t) = self.pc.rtp_transceiver(index) {
+      t.set_header_extensions_to_negotiate(Some(uris));
+    }
+    Ok(())
+  }
+
+  /// `RTCConfiguration.rtpHeaderEncryptionPolicy` and
+  /// `alwaysNegotiateDataChannels` (webrtc-extensions).
+  pub(crate) fn set_negotiation_options(
+    &mut self,
+    rtp_header_encryption_policy: &str,
+    always_negotiate_data_channels: bool,
+  ) -> Result<(), WebRtcError> {
+    let policy = match rtp_header_encryption_policy {
+      "disable" => RTCRtpHeaderEncryptionPolicy::Disable,
+      "negotiate" => RTCRtpHeaderEncryptionPolicy::Negotiate,
+      "require" => RTCRtpHeaderEncryptionPolicy::Require,
+      other => {
+        return Err(WebRtcError::Type(format!(
+          "'{other}' is not a valid RTCRtpHeaderEncryptionPolicy"
+        )));
+      }
+    };
+    self.pc.set_rtp_header_encryption_policy(policy);
+    self
+      .pc
+      .set_always_negotiate_data_channels(always_negotiate_data_channels);
+    Ok(())
+  }
+
   pub(crate) fn transceivers(&mut self) -> Vec<TransceiverInfo> {
     self.sync_transceiver_keys(false);
     let remote = self
@@ -1377,6 +1472,7 @@ impl Core {
         t
       }
     };
+    let mime_type = p.mime_type.clone();
     let mut packets = p
       .packetizer
       .packetize(now, &Bytes::copy_from_slice(data), samples)
@@ -1388,6 +1484,37 @@ impl Core {
     let Some(mut sender) = self.pc.rtp_sender(index.into()) else {
       return Ok(false);
     };
+    // wpt100:hdrext — the negotiated audio level (RFC 6464) on each packet
+    // and the absolute capture time on the frame's first one.
+    let mut extension_id = |uri: &str| {
+      sender
+        .get_parameters()
+        .rtp_parameters
+        .header_extensions
+        .iter()
+        .find(|h| h.uri == uri)
+        .and_then(|h| u8::try_from(h.id).ok())
+    };
+    let level_id = extension_id(rtc::sdp::extmap::AUDIO_LEVEL_URI);
+    let capture_id =
+      extension_id(crate::header_extensions::ABS_CAPTURE_TIME_URI);
+    if let Some(id) = level_id
+      && let Some(level) =
+        crate::header_extensions::audio_level(&mime_type, data)
+    {
+      let payload = crate::header_extensions::audio_level_payload(level);
+      for packet in &mut packets {
+        let _ = packet.header.set_extension(id, payload.clone());
+      }
+    }
+    if let Some(id) = capture_id
+      && let Some(first) = packets.first_mut()
+    {
+      let payload = crate::header_extensions::abs_capture_time_payload(
+        std::time::SystemTime::now(),
+      );
+      let _ = first.header.set_extension(id, payload);
+    }
     let mut sent = false;
     for packet in packets {
       sent |= sender.write_rtp(now, packet).is_ok();
