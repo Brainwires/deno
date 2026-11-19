@@ -1743,6 +1743,14 @@ pub struct WebViewCapabilitiesInfo {
   /// A `forwardKeys` entry with a leading `!` is matched before the app
   /// menu's accelerators (laufey 0.8.1).
   pub forward_keys_before_menu: bool,
+  /// `downloads: "app"`: "download" events the app decides with
+  /// `WebView.controlDownload()` (laufey API 59).
+  pub download_events: bool,
+  /// `controlDownload(id, "pause" | "resume")` (laufey API 59).
+  pub download_pause: bool,
+  /// `permissions: "app"`: "permission-request" events the app answers with
+  /// `WebView.respondToPermissionRequest()` (laufey API 59).
+  pub permission_requests: bool,
 }
 
 /// A web view's place in its window: CSS pixels from the top-left of the
@@ -1806,6 +1814,19 @@ pub fn webview_error_message(code: &str) -> &'static str {
     }
     "no_window" | "closed" => "the window or web view is closed",
     "invalid" => "the web view options were refused",
+    _ => "the web view engine failed",
+  }
+}
+
+/// The message of a refused `controlDownload()` /
+/// `respondToPermissionRequest()` (laufey API 59).
+pub fn webview_control_message(code: &str) -> &'static str {
+  match code {
+    "invalid" => {
+      "no such download or permission request, or it does not take this now"
+    }
+    "closed" | "no_window" => "the web view is closed",
+    "unsupported" => "this web view engine can't do that",
     _ => "the web view engine failed",
   }
 }
@@ -1984,6 +2005,52 @@ pub struct WebViewCaptureOutcome {
   pub message: Option<String>,
 }
 
+/// `WebView.controlDownload(id, action, path?)` (laufey API 59,
+/// `LAUFEY_WEBVIEW_DOWNLOAD_*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebViewDownloadAction {
+  /// Answer a requested download: write it to the given absolute path.
+  Save,
+  /// Answer a requested download with the OS save panel.
+  SaveAs,
+  Cancel,
+  Pause,
+  Resume,
+}
+
+impl WebViewDownloadAction {
+  /// The action DESKTOP_JS names ("save", "saveAs", "cancel", "pause",
+  /// "resume").
+  pub fn parse(name: &str) -> Option<Self> {
+    Some(match name {
+      "save" => Self::Save,
+      "saveAs" => Self::SaveAs,
+      "cancel" => Self::Cancel,
+      "pause" => Self::Pause,
+      "resume" => Self::Resume,
+      _ => return None,
+    })
+  }
+}
+
+/// A download's save path as `controlDownload(id, "save", path)` takes it:
+/// absolute, at most 4096 bytes, and nothing laufey's C string can't carry
+/// (laufey checks the rest: its directory exists, it is not a directory or
+/// a link).
+pub fn webview_download_path_valid(path: &str) -> bool {
+  !path.is_empty()
+    && path.len() <= 4096
+    && !path.bytes().any(|b| b < 0x20 || b == 0x7f)
+    && Path::new(path).is_absolute()
+}
+
+/// Which menu `op_desktop_menu_snapshot` reads (`LAUFEY_MENU_KIND_*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuSnapshotKind {
+  Application,
+  Dock,
+}
+
 /// `LAUFEY_WEBVIEW_COMMAND_*`: what `op_desktop_webview_command` takes.
 pub const WEBVIEW_COMMAND_BACK: u32 = 1;
 pub const WEBVIEW_COMMAND_FORWARD: u32 = 2;
@@ -2146,6 +2213,9 @@ pub struct MenuCapabilitiesInfo {
   pub tooltips: bool,
   /// Destructive items are drawn as such (laufey API 49).
   pub destructive: bool,
+  /// `getApplicationMenu()` / `Deno.dock.getMenu()` read the native menu
+  /// back (laufey API 59).
+  pub snapshot: bool,
 }
 
 /// `Deno.desktop.notifications.capabilities()` (laufey API 41).
@@ -3158,6 +3228,39 @@ pub trait DesktopApi: Send + Sync + 'static {
     _keys: &[String],
   ) -> bool {
     false
+  }
+  /// Decide or control a download of a view created with `downloads:
+  /// "app"` (laufey API 59): `path` only for [`WebViewDownloadAction::Save`].
+  /// The error code ("invalid", "closed", "unsupported", "failed").
+  fn webview_download_control(
+    &self,
+    _webview_id: u32,
+    _download_id: u32,
+    _action: WebViewDownloadAction,
+    _path: Option<&str>,
+  ) -> Result<(), &'static str> {
+    Err(WEBVIEW_UNSUPPORTED)
+  }
+  /// Answer a permission request of a view created with `permissions:
+  /// "app"` (laufey API 59). The error code, as above.
+  fn webview_permission_respond(
+    &self,
+    _webview_id: u32,
+    _request_id: u32,
+    _allow: bool,
+  ) -> Result<(), &'static str> {
+    Err(WEBVIEW_UNSUPPORTED)
+  }
+  /// The application menu of `window_id` (0 on macOS: the menu bar as it is
+  /// now) or the Dock menu, read back from the OS as a JSON array of items
+  /// (laufey API 59, `menu_snapshot`). `None` when there is no such menu or
+  /// no read-back.
+  fn menu_snapshot(
+    &self,
+    _kind: MenuSnapshotKind,
+    _window_id: u32,
+  ) -> Option<String> {
+    None
   }
   fn set_traffic_light_position(
     &self,
@@ -6010,6 +6113,99 @@ fn op_desktop_webview_set_forward_keys(
       .is_some_and(|api| api.webview_set_forward_keys(webview_id, &keys))
 }
 
+/// `WebView.controlDownload(id, action, path?)` (laufey API 59). "save"
+/// writes a file where the app says, so it needs write permission for that
+/// path (a `NotCapable` error otherwise); every other refusal is a
+/// `WebViewError` code.
+#[op2]
+#[serde]
+fn op_desktop_webview_download_control(
+  state: &mut OpState,
+  #[smi] webview_id: u32,
+  #[smi] download_id: u32,
+  #[string] action: &str,
+  #[string] path: Option<String>,
+) -> Result<WebViewOutcome, JsErrorBox> {
+  let Some(action) = WebViewDownloadAction::parse(action) else {
+    return Ok(WebViewOutcome::error(
+      WEBVIEW_INVALID,
+      "action must be \"save\", \"saveAs\", \"cancel\", \"pause\" or \"resume\"",
+    ));
+  };
+  let path = if action == WebViewDownloadAction::Save {
+    let Some(path) = path.filter(|p| webview_download_path_valid(p)) else {
+      return Ok(WebViewOutcome::error(
+        WEBVIEW_INVALID,
+        "\"save\" takes an absolute path",
+      ));
+    };
+    state
+      .borrow::<deno_permissions::PermissionsContainer>()
+      .check_open(
+        Cow::Borrowed(Path::new(&path)),
+        deno_permissions::OpenAccessKind::Write,
+        Some("WebView.controlDownload()"),
+      )
+      .map_err(JsErrorBox::from_err)?;
+    Some(path)
+  } else {
+    None
+  };
+  let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() else {
+    return Ok(WebViewOutcome::code(WEBVIEW_UNSUPPORTED));
+  };
+  Ok(
+    match api.webview_download_control(
+      webview_id,
+      download_id,
+      action,
+      path.as_deref(),
+    ) {
+      Ok(()) => WebViewOutcome::ok(),
+      Err(code) => WebViewOutcome::error(code, webview_control_message(code)),
+    },
+  )
+}
+
+/// `WebView.respondToPermissionRequest(id, allow)` (laufey API 59).
+#[op2]
+#[serde]
+fn op_desktop_webview_permission_respond(
+  state: &mut OpState,
+  #[smi] webview_id: u32,
+  #[smi] request_id: u32,
+  allow: bool,
+) -> WebViewOutcome {
+  let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() else {
+    return WebViewOutcome::code(WEBVIEW_UNSUPPORTED);
+  };
+  match api.webview_permission_respond(webview_id, request_id, allow) {
+    Ok(()) => WebViewOutcome::ok(),
+    Err(code) => WebViewOutcome::error(code, webview_control_message(code)),
+  }
+}
+
+/// `BrowserWindow.getApplicationMenu()`, `Deno.desktop.getApplicationMenu()`
+/// and `Deno.dock.getMenu()` (laufey API 59): the native menu as a JSON
+/// array of items, or null. `kind` 0 is the application menu of `window_id`
+/// (0: the macOS menu bar as it is now), 1 the Dock menu.
+#[op2]
+#[string]
+fn op_desktop_menu_snapshot(
+  state: &mut OpState,
+  #[smi] kind: u32,
+  #[smi] window_id: u32,
+) -> Option<String> {
+  let kind = match kind {
+    0 => MenuSnapshotKind::Application,
+    1 => MenuSnapshotKind::Dock,
+    _ => return None,
+  };
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .and_then(|api| api.menu_snapshot(kind, window_id))
+}
+
 /// `WebView.print()`: the OS print dialog; false where unsupported.
 #[op2(fast)]
 fn op_desktop_webview_print(
@@ -8307,6 +8503,9 @@ deno_core::extension!(
     op_desktop_webview_open_devtools,
     op_desktop_webview_print,
     op_desktop_webview_set_forward_keys,
+    op_desktop_webview_download_control,
+    op_desktop_webview_permission_respond,
+    op_desktop_menu_snapshot,
   ],
   objects = [BrowserWindow, Dock, Tray, Notification],
 );
@@ -9762,6 +9961,7 @@ mod tests {
         "icons": false,
         "tooltips": false,
         "destructive": false,
+        "snapshot": false,
       })
     );
     assert_eq!(
@@ -11778,6 +11978,9 @@ mod tests {
         "blur": false,
         "keyUp": false,
         "forwardKeysBeforeMenu": false,
+        "downloadEvents": false,
+        "downloadPause": false,
+        "permissionRequests": false,
       })
     );
     let caps = WebViewCapabilitiesInfo {
@@ -12129,6 +12332,44 @@ mod tests {
     assert_eq!(super::WEBVIEW_COMMAND_RAISE, 7);
     assert_eq!(super::WEBVIEW_COMMAND_LOWER, 8);
     assert_eq!(super::WEBVIEW_COMMAND_BLUR, 9);
+  }
+
+  #[test]
+  fn webview_download_actions_and_paths() {
+    use super::WebViewDownloadAction as Action;
+    use super::webview_control_message;
+    use super::webview_download_path_valid;
+    assert_eq!(Action::parse("save"), Some(Action::Save));
+    assert_eq!(Action::parse("saveAs"), Some(Action::SaveAs));
+    assert_eq!(Action::parse("cancel"), Some(Action::Cancel));
+    assert_eq!(Action::parse("pause"), Some(Action::Pause));
+    assert_eq!(Action::parse("resume"), Some(Action::Resume));
+    for bad in ["", "Save", "save_as", "delete", "save\0"] {
+      assert_eq!(Action::parse(bad), None, "{bad:?}");
+    }
+    #[cfg(not(windows))]
+    {
+      assert!(webview_download_path_valid("/tmp/report.pdf"));
+      assert!(!webview_download_path_valid("C:\\Users\\a\\report.pdf"));
+    }
+    #[cfg(windows)]
+    {
+      assert!(webview_download_path_valid("C:\\Users\\a\\report.pdf"));
+      assert!(!webview_download_path_valid("/tmp/report.pdf"));
+    }
+    for bad in ["", "report.pdf", "./report.pdf", "/tmp/a\nb", "/tmp/a\0b"] {
+      assert!(!webview_download_path_valid(bad), "{bad:?}");
+    }
+    assert!(!webview_download_path_valid(&format!(
+      "/{}",
+      "a".repeat(4096)
+    )));
+    // Every code a backend answers with has a message of its own kind.
+    assert!(webview_control_message("invalid").contains("no such"));
+    assert!(webview_control_message("closed").contains("closed"));
+    assert!(webview_control_message("no_window").contains("closed"));
+    assert!(webview_control_message("unsupported").contains("can't"));
+    assert!(webview_control_message("failed").contains("failed"));
   }
 
   #[test]

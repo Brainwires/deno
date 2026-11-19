@@ -1296,6 +1296,13 @@ declare namespace Deno {
     reload(): void;
 
     setApplicationMenu(menu: MenuItem[]): void;
+    /** This window's application menu, read back from the native menu
+     * objects (for self-tests): what {@linkcode setApplicationMenu} ended
+     * up as, with the items the OS or the runtime added (on macOS the menu
+     * the bar shows while this window is key). `null` with no menu, once
+     * closed, and where `Deno.desktop.menuCapabilities().snapshot` is
+     * `false`. */
+    getApplicationMenu(): MenuSnapshotItem[] | null;
     /** Pop up a context menu inside this window.
      *
      * `x` and `y` are window-relative CSS pixels with a top-left origin — the
@@ -1405,6 +1412,11 @@ declare namespace Deno {
      * {@linkcode Deno.dock}. No-op on Windows and Linux. */
     setMenu(menu: MenuItem[] | null): void;
 
+    /** The Dock menu as AppKit holds it now, read back from the OS (for
+     * self-tests): `null` with no menu set, off macOS, and where
+     * `Deno.desktop.menuCapabilities().snapshot` is `false`. */
+    getMenu(): MenuSnapshotItem[] | null;
+
     /** Show or hide the app's dock icon.
      *
      * macOS only — controls the app's activation policy. No-op on
@@ -1509,6 +1521,128 @@ declare namespace Deno {
     /** A `forwardKeys` entry with a leading `!` (`"!CmdOrCtrl+W"`) is
      * matched before the app menu's accelerators. */
     forwardKeysBeforeMenu: boolean;
+    /** `downloads: "app"` works: each download comes as `"download"`
+     * events and {@linkcode WebView.controlDownload} decides it. */
+    downloadEvents: boolean;
+    /** {@linkcode WebView.controlDownload} takes `"pause"` and
+     * `"resume"`. */
+    downloadPause: boolean;
+    /** `permissions: "app"` works: each request comes as a
+     * `"permission-request"` event and
+     * {@linkcode WebView.respondToPermissionRequest} answers it. */
+    permissionRequests: boolean;
+  }
+
+  /** A permission a page in a {@linkcode WebView} asked for
+   * (`permissions: "app"`).
+   *
+   * @category Desktop
+   * @experimental
+   */
+  export type WebViewPermission =
+    | "camera"
+    | "microphone"
+    | "screen"
+    | "geolocation"
+    | "notifications"
+    | "midi"
+    | "pointer-lock"
+    | "storage-access"
+    | "sensors"
+    | "clipboard-read"
+    | "window-management"
+    | "local-fonts"
+    | "file-system"
+    | "multiple-downloads"
+    | "autoplay";
+
+  /** A `"download"` event of a {@linkcode WebView} created with
+   * `downloads: "app"`. Every event of one download carries the same `id`,
+   * `url` and `filename`.
+   *
+   * @category Desktop
+   * @experimental
+   */
+  export interface WebViewDownload {
+    /** Names the download in {@linkcode WebView.controlDownload}. */
+    id: number;
+    /** `"requested"` first: nothing is written until the app answers with
+     * `"save"`, `"saveAs"` or `"cancel"`. Then `"progressing"` (at most 5
+     * a second, and once on each pause / resume). `"completed"` and
+     * `"cancelled"` are the last event of a download; so is
+     * `"interrupted"` unless `canResume` is `true`, when `"resume"` or
+     * `"cancel"` ends the wait. Closing the view cancels its downloads. */
+    state:
+      | "requested"
+      | "progressing"
+      | "completed"
+      | "cancelled"
+      | "interrupted";
+    url: string;
+    /** The suggested name, reduced to a bare file name (never a path). */
+    filename: string;
+    mimeType?: string;
+    /** Left out while unknown. */
+    totalBytes?: number;
+    receivedBytes: number;
+    /** Where it is being saved, once decided. */
+    path?: string;
+    paused?: true;
+    canResume?: boolean;
+    /** Why it was interrupted. */
+    reason?: "network" | "server" | "file" | "crash" | "failed";
+  }
+
+  /** A `"permission-request"` event of a {@linkcode WebView} created with
+   * `permissions: "app"`.
+   *
+   * @category Desktop
+   * @experimental
+   */
+  export type WebViewPermissionRequest =
+    | {
+      /** Names the request in
+       * {@linkcode WebView.respondToPermissionRequest}. */
+      id: number;
+      state: "requested";
+      /** The origin that asked (`"https://example.com"`). */
+      origin: string;
+      /** What it asked for; one request may name several. */
+      permissions: WebViewPermission[];
+      /** The frame that asked, where the engine says (CEF for camera,
+       * microphone and screen; WKWebView; WebView2). */
+      frame?: { isMain: boolean; origin?: string };
+    }
+    | {
+      id: number;
+      /** The request went away unanswered (the page navigated, the engine
+       * withdrew it, or the view closed) and was refused. */
+      state: "cancelled";
+    };
+
+  /** One item of a menu read back from the OS
+   * ({@linkcode BrowserWindow.getApplicationMenu},
+   * {@linkcode Dock.getMenu}).
+   *
+   * @category Desktop
+   * @experimental
+   */
+  export interface MenuSnapshotItem {
+    type: "item" | "submenu" | "separator";
+    /** The title the native item shows. */
+    label: string;
+    /** A custom item's id. */
+    id?: string;
+    /** The role an item was built from. */
+    role?: string;
+    enabled: boolean;
+    checked: boolean;
+    visible: boolean;
+    /** The key the native item is bound to, in canonical form:
+     * `"Ctrl+Alt+Shift+Super+<Key>"` with the modifiers present (Command
+     * is `Super`). */
+    accelerator?: string;
+    submenu?: MenuSnapshotItem[];
   }
 
   /** Where a {@linkcode WebView} sits: CSS pixels relative to the top-left
@@ -1551,13 +1685,20 @@ declare namespace Deno {
      * Other schemes never open. @default {"same-view"} */
     allowPopups?: "deny" | "same-view" | "browser";
     /** `"deny"` cancels downloads, `"ask"` shows the save panel,
-     * `"browser"` hands the URL to the system browser.
-     * @default {"deny"} */
-    downloads?: "deny" | "ask" | "browser";
+     * `"browser"` hands the URL to the system browser, `"app"` reports each
+     * download as `"download"` events for the app to decide with
+     * {@linkcode WebView.controlDownload} (where
+     * `webViewCapabilities().downloadEvents`; refused as `invalid`
+     * elsewhere). @default {"deny"} */
+    downloads?: "deny" | "ask" | "browser" | "app";
     /** Camera, microphone, geolocation, notifications and the like:
-     * `"deny"` refuses without a prompt, `"ask"` prompts naming the origin.
-     * @default {"deny"} */
-    permissions?: "deny" | "ask";
+     * `"deny"` refuses without a prompt, `"ask"` prompts naming the origin,
+     * `"app"` reports each request as a `"permission-request"` event for
+     * the app to answer with
+     * {@linkcode WebView.respondToPermissionRequest} (where
+     * `webViewCapabilities().permissionRequests`; refused as `invalid`
+     * elsewhere). @default {"deny"} */
+    permissions?: "deny" | "ask" | "app";
     /** Replaces the engine's user agent string for this view. */
     userAgent?: string;
     /** `"native"`: the engine's own context menu; `"app"`: none, so the
@@ -1723,6 +1864,10 @@ declare namespace Deno {
       repeat: boolean;
       forwarded: boolean;
     };
+    /** A download of a view created with `downloads: "app"`. */
+    download: WebViewDownload;
+    /** A permission request of a view created with `permissions: "app"`. */
+    "permission-request": WebViewPermissionRequest;
   }
 
   /** The events of a {@linkcode WebView}.
@@ -1843,6 +1988,37 @@ declare namespace Deno {
      * events (see {@linkcode WebViewOptions.forwardKeys}). `false` where
      * unsupported (`webViewCapabilities().forwardKeys`) or once closed. */
     setForwardKeys(keys: string[]): boolean;
+    /** Decide or control a download of a view created with
+     * `downloads: "app"` (`id` from its `"download"` events):
+     *
+     * - `"save"`: answer a requested download by writing it to `path`
+     *   (absolute; its directory must exist; a file there is replaced).
+     *   Requires write permission for `path`.
+     * - `"saveAs"`: answer it with the OS save panel (dismissing the panel
+     *   cancels the download).
+     * - `"cancel"`: at any time before its last event.
+     * - `"pause"` / `"resume"`: where
+     *   `webViewCapabilities().downloadPause`; `"resume"` also restarts an
+     *   interrupted download whose `canResume` is `true`.
+     *
+     * Throws a {@linkcode WebViewError}: `invalid` (no such download, a
+     * finished one, an action its state does not take, or a bad path),
+     * `unsupported`, `closed`, `failed`. */
+    controlDownload(
+      id: number,
+      action: "save",
+      path: string,
+    ): void;
+    controlDownload(
+      id: number,
+      action: "saveAs" | "cancel" | "pause" | "resume",
+    ): void;
+    /** Allow or refuse a permission request of a view created with
+     * `permissions: "app"` (`id` from its `"permission-request"` event). An
+     * allowed capture still needs the OS's own consent for the app. Throws
+     * a {@linkcode WebViewError}: `invalid` (no such request: answered or
+     * cancelled), `unsupported`, `closed`. */
+    respondToPermissionRequest(id: number, allow: boolean): void;
     /** Open the OS print dialog for the page. `false` where unsupported or
      * once closed. */
     print(): boolean;
@@ -3342,6 +3518,10 @@ declare namespace Deno {
       tooltips: boolean;
       /** Destructive items are drawn as such (red). */
       destructive: boolean;
+      /** {@linkcode BrowserWindow.getApplicationMenu},
+       * {@linkcode getApplicationMenu} and {@linkcode Dock.getMenu} read
+       * the native menu back. */
+      snapshot: boolean;
     }
 
     /** The menu capabilities of this backend and OS. */
@@ -3989,6 +4169,13 @@ declare namespace Deno {
      * Windows and Linux have no app menu bar: there it is set on every
      * window, open now or opened later. `null` removes it. */
     export function setApplicationMenu(menu: MenuItem[] | null): void;
+
+    /** The menu bar as macOS shows it now, read back from AppKit (for
+     * self-tests): the key window's menu, else the app's own
+     * ({@linkcode setApplicationMenu}), else the default one. `null` on
+     * Windows and Linux, where a menu bar belongs to its window
+     * ({@linkcode BrowserWindow.getApplicationMenu}). */
+    export function getApplicationMenu(): MenuSnapshotItem[] | null;
 
     /** Whether the app quits when its last window closes (default `true`).
      * Creating a {@linkcode Deno.Tray} sets it to `false` unless the app set

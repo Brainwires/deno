@@ -119,6 +119,9 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_webview_stop_find,
     op_desktop_webview_open_devtools,
     op_desktop_webview_print,
+    op_desktop_webview_download_control,
+    op_desktop_webview_permission_respond,
+    op_desktop_menu_snapshot,
     op_desktop_webview_set_forward_keys,
   } = internals.core.ops;
   const BrowserWindowPrototype = BrowserWindow.prototype;
@@ -988,8 +991,19 @@ pub const DESKTOP_JS: &str = r#"
   };
   const WEBVIEW_CAPTURE_FORMATS = { __proto__: null, png: 0, jpeg: 1 };
   const WEBVIEW_POPUPS = ["deny", "same-view", "browser"];
-  const WEBVIEW_DOWNLOADS = ["deny", "ask", "browser"];
-  const WEBVIEW_PERMISSIONS = ["deny", "ask"];
+  // "app" (laufey API 59): the app decides each download ("download"
+  // events, WebView.controlDownload) / answers each permission request
+  // ("permission-request" events, WebView.respondToPermissionRequest).
+  const WEBVIEW_DOWNLOADS = ["deny", "ask", "browser", "app"];
+  const WEBVIEW_PERMISSIONS = ["deny", "ask", "app"];
+  const WEBVIEW_DOWNLOAD_ACTIONS = ["save", "saveAs", "cancel", "pause", "resume"];
+  // A download or permission request id from an event: a positive integer.
+  function webViewItemId(id, name) {
+    if (!Number.isInteger(id) || id <= 0 || id > 0xffffffff) {
+      throw webViewInvalid(`${name} must be the id of an event`);
+    }
+    return id;
+  }
   const WEBVIEW_CONTEXT_MENUS = ["native", "app"];
   // Accelerators ("CmdOrCtrl+1") the view hands to the app as "key" events
   // instead of the page: at most 64, each 1 to 64 characters.
@@ -1353,6 +1367,53 @@ pub const DESKTOP_JS: &str = r#"
       const checked = webViewForwardKeys(keys, "keys");
       return !this.#closed &&
         op_desktop_webview_set_forward_keys(this.#id, checked);
+    }
+    // Decide or control a download of a view created with downloads: "app"
+    // (laufey API 59): "save" writes it to `path` (absolute; needs write
+    // permission), "saveAs" asks with the OS save panel, "cancel", and
+    // "pause" / "resume" where webViewCapabilities().downloadPause. Throws
+    // a WebViewError: "invalid" (no such download, or it does not take the
+    // action now), "unsupported", "closed", "failed".
+    controlDownload(id, action, path) {
+      const checked = webViewItemId(id, "id");
+      if (!WEBVIEW_DOWNLOAD_ACTIONS.includes(action)) {
+        throw webViewInvalid(
+          `action must be ${
+            WEBVIEW_DOWNLOAD_ACTIONS.map((a) => JSON.stringify(a)).join(", ")
+          }`,
+        );
+      }
+      let target = null;
+      if (action === "save") {
+        if (typeof path !== "string" || path.length === 0 || path.includes("\0")) {
+          throw webViewInvalid("\"save\" takes an absolute path");
+        }
+        target = path;
+      }
+      if (this.#closed) throw webViewError("closed", "the web view is closed");
+      const outcome = op_desktop_webview_download_control(
+        this.#id,
+        checked,
+        action,
+        target,
+      );
+      if (!outcome.ok) throw webViewError(outcome.code, outcome.message);
+    }
+    // Allow or refuse a permission request of a view created with
+    // permissions: "app" (laufey API 59). Throws a WebViewError: "invalid"
+    // (no such request: answered, or cancelled), "unsupported", "closed".
+    respondToPermissionRequest(id, allow) {
+      const checked = webViewItemId(id, "id");
+      if (typeof allow !== "boolean") {
+        throw webViewInvalid("allow must be a boolean");
+      }
+      if (this.#closed) throw webViewError("closed", "the web view is closed");
+      const outcome = op_desktop_webview_permission_respond(
+        this.#id,
+        checked,
+        allow,
+      );
+      if (!outcome.ok) throw webViewError(outcome.code, outcome.message);
     }
     // The OS print dialog. False where unsupported and once closed.
     print() {
@@ -1771,6 +1832,26 @@ pub const DESKTOP_JS: &str = r#"
 
   internals.defineEventHandler(DockPrototype, "menuclick");
   internals.defineEventHandler(DockPrototype, "reopen");
+  // Menu read-back (laufey API 59): the native menu's items as the OS holds
+  // them now, or null (no such menu, or no read-back here:
+  // menuCapabilities().snapshot). Kind 0: the application menu of a window
+  // (0: the macOS menu bar as it is now); 1: the Dock menu.
+  function menuSnapshot(kind, windowId) {
+    const text = op_desktop_menu_snapshot(kind, windowId);
+    if (typeof text !== "string") return null;
+    try {
+      const items = JSON.parse(text);
+      return Array.isArray(items) ? items : null;
+    } catch {
+      return null;
+    }
+  }
+  DockPrototype.getMenu = function getMenu() {
+    return menuSnapshot(1, 0);
+  };
+  BrowserWindowPrototype.getApplicationMenu = function getApplicationMenu() {
+    return this.isClosed() ? null : menuSnapshot(0, this.windowId);
+  };
 
   const dock = new OrigDock();
   Object.defineProperty(Deno, "dock", internals.core.propReadOnly(dock));
@@ -2877,6 +2958,16 @@ pub const DESKTOP_JS: &str = r#"
     // with every window closed. Where a menu bar belongs to its window
     // (Windows, Linux) it is set on every window, open now or later. null
     // removes it.
+    // The menu bar as the OS shows it now (macOS; elsewhere null: a menu
+    // bar belongs to its window, BrowserWindow.getApplicationMenu()).
+    getApplicationMenu: {
+      value: function getApplicationMenu() {
+        return menuSnapshot(0, 0);
+      },
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    },
     setApplicationMenu: {
       value: function setApplicationMenu(menu) {
         if (menu !== null && !Array.isArray(menu)) {
@@ -5047,13 +5138,12 @@ mod tests {
     assert!(DESKTOP_JS.contains(
       "const WEBVIEW_POPUPS = [\"deny\", \"same-view\", \"browser\"];"
     ));
+    assert!(DESKTOP_JS.contains(
+      "const WEBVIEW_DOWNLOADS = [\"deny\", \"ask\", \"browser\", \"app\"];"
+    ));
     assert!(
-      DESKTOP_JS.contains(
-        "const WEBVIEW_DOWNLOADS = [\"deny\", \"ask\", \"browser\"];"
-      )
-    );
-    assert!(
-      DESKTOP_JS.contains("const WEBVIEW_PERMISSIONS = [\"deny\", \"ask\"];")
+      DESKTOP_JS
+        .contains("const WEBVIEW_PERMISSIONS = [\"deny\", \"ask\", \"app\"];")
     );
     // LAUFEY_WEBVIEW_COMMAND_* / LAUFEY_WEBVIEW_CAPTURE_*.
     let commands = DESKTOP_JS

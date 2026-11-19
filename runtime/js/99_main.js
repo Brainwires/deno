@@ -888,6 +888,9 @@ const NOT_IMPORTED_OPS = [
   "op_desktop_webview_open_devtools",
   "op_desktop_webview_print",
   "op_desktop_webview_set_forward_keys",
+  "op_desktop_webview_download_control",
+  "op_desktop_webview_permission_respond",
+  "op_desktop_menu_snapshot",
   // Deno.desktop.updater (full-app self-update)
   "op_desktop_app_update_info",
   "op_desktop_app_update_check",
@@ -1041,6 +1044,9 @@ const WORKER_EXCLUDED_OPS = [
   "op_desktop_webview_open_devtools",
   "op_desktop_webview_print",
   "op_desktop_webview_set_forward_keys",
+  "op_desktop_webview_download_control",
+  "op_desktop_webview_permission_respond",
+  "op_desktop_menu_snapshot",
 ];
 
 function removeImportedOps(isWorker = false) {
