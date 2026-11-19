@@ -4168,6 +4168,17 @@ declare namespace Deno {
       readonly readable: ReadableStream<Uint8Array<ArrayBuffer>>;
       readonly writable: WritableStream<Uint8Array<ArrayBufferLike>>;
       resize(cols: number, rows: number): void;
+      /** The terminal device's path, as {@linkcode Deno.Pty.ttyName}. */
+      readonly ttyName: string | null;
+      /** The terminal's foreground process, as
+       * {@linkcode Deno.Pty.foreground}. */
+      foreground(): {
+        pgid: number | null;
+        pid: number;
+        name: string;
+        argv: string[] | null;
+        cwd: string | null;
+      } | null;
     };
 
     [Symbol.asyncDispose](): Promise<void>;

@@ -219,6 +219,9 @@ const cases = {
   op_desktop_query_notification_permission: () =>
     ops.op_desktop_query_notification_permission(),
   op_desktop_screens: () => ops.op_desktop_screens(),
+  // laufey API 60 (DENEXT.md item 471).
+  op_desktop_window_order: () => ops.op_desktop_window_order(),
+  op_desktop_pointer: () => ops.op_desktop_pointer(),
   op_desktop_window_capabilities: () => ops.op_desktop_window_capabilities(),
   // laufey API 50 (DENEXT.md item 183).
   op_desktop_tray_capabilities: () => ops.op_desktop_tray_capabilities(),

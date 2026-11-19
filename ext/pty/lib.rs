@@ -32,6 +32,7 @@ use serde::Serialize;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
+mod foreground;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
@@ -50,6 +51,8 @@ deno_core::extension!(
     op_pty_kill,
     op_pty_resize,
     op_pty_foreground_process,
+    op_pty_foreground,
+    op_pty_tty_name,
   ],
   lazy_loaded_js = ["01_pty.js"],
 );
@@ -336,5 +339,47 @@ fn op_pty_foreground_process(
   #[smi] rid: ResourceId,
 ) -> Result<Option<String>, PtyError> {
   let resource = state.resource_table.get::<PtyMasterResource>(rid)?;
-  Ok(resource.pty.foreground_process())
+  Ok(resource.pty.foreground().map(|fg| fg.name))
+}
+
+/// `Deno.Pty.foreground()`'s answer (DENEXT.md item 470).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ForegroundInfo {
+  pgid: Option<i32>,
+  pid: u32,
+  name: String,
+  argv: Option<Vec<String>>,
+  cwd: Option<String>,
+}
+
+/// The terminal's foreground process: its process group, and the name,
+/// arguments and working directory of the process in it. No permission
+/// beyond the `--allow-run` the terminal was opened under: the processes
+/// described are the ones the app's own terminal runs.
+#[op2]
+#[serde]
+fn op_pty_foreground(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+) -> Result<Option<ForegroundInfo>, PtyError> {
+  let resource = state.resource_table.get::<PtyMasterResource>(rid)?;
+  Ok(resource.pty.foreground().map(|fg| ForegroundInfo {
+    pgid: fg.pgid,
+    pid: fg.pid,
+    name: fg.name,
+    argv: fg.argv,
+    cwd: fg.cwd,
+  }))
+}
+
+/// The terminal device's path (`Deno.Pty.ttyName`); `None` on Windows.
+#[op2]
+#[string]
+fn op_pty_tty_name(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+) -> Result<Option<String>, PtyError> {
+  let resource = state.resource_table.get::<PtyMasterResource>(rid)?;
+  Ok(resource.pty.tty_name())
 }

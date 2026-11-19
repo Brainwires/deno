@@ -57,7 +57,7 @@ use denort::run::RunOptions;
 /// makes the failure mode obvious instead of "the desktop app silently won't
 /// launch".
 const _: () = assert!(
-  laufey::LAUFEY_API_VERSION == 59,
+  laufey::LAUFEY_API_VERSION == 60,
   "LAUFEY_API_VERSION mismatch: update this assert and the prebuilt backend release pin in cli/tools/desktop.rs when laufey bumps its API version",
 );
 
@@ -1300,6 +1300,9 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       // Title visibility and toolbar style (laufey API 57).
       title_visibility: c.title_hidden(),
       toolbar_style: c.toolbar_style(),
+      // The stacking order and the pointer (laufey API 60).
+      window_order: c.z_order(),
+      pointer: c.pointer_state(),
     }
   }
 
@@ -1838,6 +1841,19 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
 
   fn window_screen_id(&self, window_id: u32) -> Option<i64> {
     laufey::Window::from_id(window_id).get_screen_id()
+  }
+
+  fn window_order(&self) -> Option<Vec<u32>> {
+    laufey::window_z_order()
+  }
+
+  fn pointer(&self) -> Option<deno_runtime::ops::desktop::PointerInfo> {
+    laufey::pointer_state().map(|p| deno_runtime::ops::desktop::PointerInfo {
+      x: p.x,
+      y: p.y,
+      buttons: p.buttons,
+      window_id: p.window_id,
+    })
   }
 
   fn set_titlebar_style(&self, window_id: u32, style: i32) -> bool {

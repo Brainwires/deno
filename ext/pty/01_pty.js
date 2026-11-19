@@ -9,10 +9,12 @@
 (function () {
 const { core, primordials } = __bootstrap;
 const {
+  op_pty_foreground,
   op_pty_foreground_process,
   op_pty_kill,
   op_pty_resize,
   op_pty_spawn,
+  op_pty_tty_name,
   op_pty_wait,
 } = core.ops;
 const {
@@ -96,11 +98,29 @@ function spawnPty(options, apiName) {
   const readable = readableStreamForRid(masterRid, true);
   const writable = writableStreamForRid(masterRid, false);
 
+  // The terminal device's path: fixed for the terminal's life, so read once
+  // (`null` on Windows, where a ConPTY is not a named device).
+  const ttyName = op_pty_tty_name(masterRid);
+
+  // What runs in the terminal right now (DENEXT.md item 470); `null` once
+  // the terminal is closed or nothing is in its foreground.
+  function foreground() {
+    let info;
+    try {
+      info = op_pty_foreground(masterRid);
+    } catch {
+      return null;
+    }
+    return info ?? null;
+  }
+
   const handle = {
     pid,
+    ttyName,
     readable,
     writable,
     status,
+    foreground,
     resize(cols, rows) {
       checkSize("cols", cols, "Failed to execute 'resize'");
       checkSize("rows", rows, "Failed to execute 'resize'");

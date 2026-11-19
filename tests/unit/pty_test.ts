@@ -678,3 +678,238 @@ Deno.test(
     );
   },
 );
+
+// `Deno.Pty.foreground()` and `ttyName` (DENEXT.md item 470).
+
+// What `sh` is called once it runs (macOS's /bin/sh re-executes bash, dash
+// or zsh).
+const SH_NAME = /^(sh|bash|dash|zsh)$/;
+
+// Polls `foreground()` until `accept` takes its answer: a shell starts a
+// command (fork, a new process group, exec) in steps the terminal shows one
+// by one.
+async function foregroundUntil(
+  pty: { foreground(): Deno.PtyForegroundProcess | null },
+  accept: (fg: Deno.PtyForegroundProcess | null) => boolean,
+): Promise<Deno.PtyForegroundProcess | null> {
+  const deadline = Date.now() + 60_000;
+  let fg = pty.foreground();
+  while (!accept(fg)) {
+    if (Date.now() > deadline) {
+      throw new Error(`foreground never matched: ${JSON.stringify(fg)}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    fg = pty.foreground();
+  }
+  return fg;
+}
+
+Deno.test(
+  { permissions: { run: true, read: true, write: true }, ignore: isWindows },
+  async function ptyForegroundFollowsTheShellsJobs() {
+    const dir = await Deno.realPath(await Deno.makeTempDir());
+    const other = await Deno.realPath(await Deno.makeTempDir());
+    try {
+      // an interactive shell has job control: each command runs in a process
+      // group of its own, which the shell makes the terminal's foreground
+      const pty = Deno.openPty({
+        cmd: "sh",
+        args: ["-i"],
+        cwd: dir,
+        clearEnv: true,
+        env: { PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin", PS1: "$ " },
+        cols: 80,
+        rows: 24,
+      });
+      // drained for the whole test, so the shell never blocks on output
+      let output = "";
+      const drained = (async () => {
+        const decoder = new TextDecoder();
+        for await (const chunk of pty.readable) {
+          output += decoder.decode(chunk, { stream: true });
+        }
+      })();
+
+      // at its prompt, the shell is its terminal's foreground process
+      const atPrompt = await foregroundUntil(
+        pty,
+        (fg) => fg?.pid === pty.pid && fg.argv !== null,
+      );
+      assert(atPrompt !== null);
+      assertEquals(atPrompt.pgid, pty.pid);
+      // the name is the program's own: macOS's /bin/sh runs another shell
+      assertMatch(atPrompt.name, SH_NAME);
+      assertEquals(atPrompt.argv, ["sh", "-i"]);
+      assertEquals(atPrompt.cwd, dir);
+
+      // the device is the one `tty` names inside the terminal
+      assert(pty.ttyName !== null);
+      assertMatch(pty.ttyName, /^\/dev\/(pts\/\d+|ttys\d+)$/);
+      await write(pty, "tty\r");
+      const ttyDeadline = Date.now() + 60_000;
+      while (!output.includes(`${pty.ttyName}\r\n`)) {
+        assert(Date.now() < ttyDeadline, `no tty in ${JSON.stringify(output)}`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      // a command in the foreground: its own group, its arguments, and the
+      // directory the shell was in when it started it
+      await write(pty, `cd '${other}'\r`);
+      await write(pty, "sleep 300\r");
+      const running = await foregroundUntil(
+        pty,
+        (fg) => fg?.name === "sleep" && fg.argv !== null,
+      );
+      assert(running !== null);
+      assertEquals(running.argv, ["sleep", "300"]);
+      assertEquals(running.cwd, other);
+      assertEquals(running.pgid, running.pid);
+      assert(running.pid !== pty.pid);
+
+      // interrupted: the shell is in the foreground again, where it went
+      await write(pty, "\x03");
+      const back = await foregroundUntil(pty, (fg) => fg?.pid === pty.pid);
+      assertMatch(back?.name ?? "", SH_NAME);
+      assertEquals(back?.cwd, other);
+
+      // a pipeline whose first command (the group's leader) has exited is
+      // described by the member still running
+      await write(pty, "true | sleep 301\r");
+      const member = await foregroundUntil(
+        pty,
+        (fg) => fg?.name === "sleep" && fg.argv?.[1] === "301",
+      );
+      assert(member !== null);
+      assert(member.pgid !== null && member.pgid !== pty.pid);
+      await write(pty, "\x03");
+      await foregroundUntil(pty, (fg) => fg?.pid === pty.pid);
+
+      await write(pty, "exit\r");
+      const status = await pty.status;
+      assertEquals(status.signal, null);
+      await drained;
+      // the terminal is closed: nothing to describe, and no throw
+      assertEquals(pty.foreground(), null);
+      assertMatch(pty.ttyName, /^\/dev\//);
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+      await Deno.remove(other, { recursive: true });
+    }
+  },
+);
+
+Deno.test(
+  { permissions: { run: true, read: true }, ignore: isWindows },
+  async function ptyForegroundAfterExecAndAfterTheChildIsGone() {
+    // `exec` keeps the process and its group: the same pid, another program
+    const pty = Deno.openPty({
+      cmd: "sh",
+      args: ["-c", "echo ready; exec sleep 300"],
+      cols: 80,
+      rows: 24,
+    });
+    await readUntil(pty.readable, "ready");
+    const fg = await foregroundUntil(pty, (fg) => fg?.name === "sleep");
+    assertEquals(fg?.pid, pty.pid);
+    assertEquals(fg?.pgid, pty.pid);
+    assertEquals(fg?.argv, ["sleep", "300"]);
+    pty.kill("SIGKILL");
+    await pty.status;
+    // reaped, the terminal still open: its session is over, so it has no
+    // foreground process (never a stale or unrelated one)
+    assertEquals(pty.foreground(), null);
+    await readAll(pty.readable);
+    assertEquals(pty.foreground(), null);
+  },
+);
+
+Deno.test(
+  { permissions: { run: true, read: true }, ignore: !isWindows },
+  async function ptyForegroundOnWindowsIsFoundInTheProcessTree() {
+    const pty = Deno.openPty({
+      cmd: "cmd.exe",
+      args: ["/d", "/k", "echo ready"],
+      cols: 80,
+      rows: 24,
+    });
+    let output = "";
+    const drained = (async () => {
+      const decoder = new TextDecoder();
+      for await (const chunk of pty.readable) {
+        output += decoder.decode(chunk, { stream: true });
+      }
+    })();
+    // a ConPTY is not a named device
+    assertEquals(pty.ttyName, null);
+    // the shell at its prompt
+    const atPrompt = await foregroundUntil(
+      pty,
+      (fg) => fg?.pid === pty.pid && fg.argv !== null && fg.cwd !== null,
+    );
+    assert(atPrompt !== null);
+    assertEquals(atPrompt.pgid, null);
+    assertEquals(atPrompt.name.toLowerCase(), "cmd.exe");
+    assertEquals(atPrompt.argv?.slice(1), ["/d", "/k", "echo ready"]);
+    assertEquals(atPrompt.cwd?.toLowerCase(), Deno.cwd().toLowerCase());
+
+    // a command the shell waits for
+    await write(pty, "ping -n 300 127.0.0.1\r");
+    const running = await foregroundUntil(
+      pty,
+      (fg) => fg?.name.toLowerCase() === "ping.exe" && fg.argv !== null,
+    );
+    assert(running !== null);
+    assert(running.pid !== pty.pid);
+    assertEquals(running.pgid, null);
+    assertEquals(running.argv?.slice(1), ["-n", "300", "127.0.0.1"]);
+
+    // Ctrl+C ends it: the shell again
+    await write(pty, "\x03");
+    await foregroundUntil(pty, (fg) => fg?.pid === pty.pid);
+
+    await write(pty, "exit\r");
+    await pty.status;
+    await drained;
+    assert(output.includes("ready"));
+    assertEquals(pty.foreground(), null);
+  },
+);
+
+Deno.test(
+  { permissions: { run: true, read: true } },
+  async function commandPtyHasForegroundAndTtyName() {
+    const child = new Deno.Command(shell, {
+      args: isWindows
+        ? ["/d", "/c", "ping -n 300 127.0.0.1"]
+        : ["-c", "echo ready; exec sleep 300"],
+      pty: { cols: 80, rows: 24 },
+    }).spawn();
+    const drained = readAll(child.pty.readable);
+    const fg = await foregroundUntil(
+      child.pty,
+      (fg) => fg !== null && /^(sleep|ping\.exe)$/i.test(fg.name),
+    );
+    assert(fg !== null);
+    if (isWindows) {
+      assertEquals(child.pty.ttyName, null);
+      assertEquals(fg.pgid, null);
+    } else {
+      assertMatch(child.pty.ttyName ?? "", /^\/dev\//);
+      assertEquals(fg.pid, child.pid);
+      assertEquals(fg.pgid, child.pid);
+    }
+    if (isWindows) {
+      // the shell's child holds the console: end it, then the shell
+      new Deno.Command("taskkill", {
+        args: ["/f", "/t", "/pid", String(child.pid)],
+        stdout: "null",
+        stderr: "null",
+      }).outputSync();
+    } else {
+      child.kill("SIGKILL");
+    }
+    await child.status;
+    await drained;
+    assertEquals(child.pty.foreground(), null);
+  },
+);

@@ -1691,6 +1691,26 @@ pub struct WindowCapabilitiesInfo {
   pub title_visibility: bool,
   /// `BrowserWindow.setToolbarStyle()` works (laufey API 57, macOS 11+).
   pub toolbar_style: bool,
+  /// `Deno.desktop.windowOrder()` answers (laufey API 60): macOS, Windows,
+  /// Linux on X11. No Wayland compositor tells a client how windows stack.
+  pub window_order: bool,
+  /// `Deno.desktop.pointer()` answers (laufey API 60): macOS, Windows, Linux
+  /// on X11. A Wayland client learns the pointer only inside its surfaces.
+  pub pointer: bool,
+}
+
+/// `Deno.desktop.pointer()` (laufey API 60, DENEXT.md item 471): where the
+/// pointer is on the screen (in `BrowserWindow.getPosition()`'s space), the
+/// buttons held (a DOM `MouseEvent.buttons`) and the app's window under it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PointerInfo {
+  pub x: i32,
+  pub y: i32,
+  pub buttons: u32,
+  /// `None`: over another application's window, the desktop, a menu, or a
+  /// window that lets clicks through.
+  pub window_id: Option<u32>,
 }
 
 /// `Deno.desktop.webViewCapabilities()` (laufey API 58): whether windows can
@@ -3081,6 +3101,16 @@ pub trait DesktopApi: Send + Sync + 'static {
     Vec::new()
   }
   fn window_screen_id(&self, _window_id: u32) -> Option<i64> {
+    None
+  }
+  /// The app's on-screen windows as the OS stacks them, front to back
+  /// (laufey `window_z_order`); `None` where the backend can't tell.
+  fn window_order(&self) -> Option<Vec<u32>> {
+    None
+  }
+  /// The pointer, asked of the OS now (laufey `pointer_state`); `None` where
+  /// the backend can't tell.
+  fn pointer(&self) -> Option<PointerInfo> {
     None
   }
   /// 0 default, 1 hidden, 2 hidden inset.
@@ -5799,6 +5829,27 @@ fn op_desktop_screens(state: &mut OpState) -> Vec<ScreenInfo> {
     .unwrap_or_default()
 }
 
+/// `Deno.desktop.windowOrder()`: the ids of the app's on-screen windows,
+/// front to back; `null` where the OS doesn't tell (and outside a desktop
+/// app).
+#[op2]
+#[serde]
+fn op_desktop_window_order(state: &mut OpState) -> Option<Vec<u32>> {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .and_then(|api| api.window_order())
+}
+
+/// `Deno.desktop.pointer()`: the pointer's place on the screen, the buttons
+/// held and the app's window under it; `null` where the OS doesn't tell.
+#[op2]
+#[serde]
+fn op_desktop_pointer(state: &mut OpState) -> Option<PointerInfo> {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .and_then(|api| api.pointer())
+}
+
 /// `Deno.desktop.windowCapabilities()`.
 #[op2]
 #[serde]
@@ -8472,6 +8523,8 @@ deno_core::extension!(
     op_desktop_request_notification_permission,
     op_desktop_query_notification_permission,
     op_desktop_screens,
+    op_desktop_window_order,
+    op_desktop_pointer,
     op_desktop_window_capabilities,
     op_desktop_tray_capabilities,
     op_desktop_window_level_code,
@@ -9182,6 +9235,27 @@ mod tests {
     }
     assert_eq!(caps["tabbed"], json!(true));
     assert_eq!(caps["mica"], json!(false));
+    // laufey API 60: off unless the backend reports them.
+    assert_eq!(caps["windowOrder"], json!(false));
+    assert_eq!(caps["pointer"], json!(false));
+    assert_eq!(
+      serde_json::to_value(super::PointerInfo {
+        x: -3,
+        y: 40,
+        buttons: 5,
+        window_id: None,
+      })
+      .unwrap(),
+      json!({ "x": -3, "y": 40, "buttons": 5, "windowId": null })
+    );
+    assert_eq!(
+      serde_json::to_value(super::PointerInfo {
+        window_id: Some(7),
+        ..Default::default()
+      })
+      .unwrap()["windowId"],
+      json!(7)
+    );
   }
 
   fn rect(x: i32, y: i32, width: i32, height: i32) -> super::DesktopRect {

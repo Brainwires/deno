@@ -17912,6 +17912,115 @@ where the changes are discussed.
      - User-facing note: none; tooling only. Usage: `tools/README.md`,
        "denext/flake_hunt.ts".
      - Node tests enabled: none.
+460. **`feat(pty)`: `Deno.Pty.foreground()` and `Deno.Pty.ttyName`: what runs in
+     a terminal, asked of the OS** (`desktop/d28-qutty-2`; runtime;
+     `ext/pty/{foreground.rs,unix.rs,windows.rs,lib.rs,01_pty.js,Cargo.toml}`,
+     `ext/process/40_process.js`,
+     `cli/tsc/dts/{lib.deno_pty.d.ts,lib.deno.ns.d.ts}`; the item number is a
+     placeholder for the train lead to renumber). A terminal emulator shows what
+     its tab runs (`vim notes.md`, the folder). The runtime kept the answer to
+     itself: the master descriptor is not reachable from JavaScript, so an app
+     had to call `proc_pidinfo` over FFI on macOS and read `/proc` on Linux, and
+     had nothing on Windows.
+     - `pty.foreground()` returns `{ pgid, pid, name, argv, cwd } | null`, asked
+       at each call and never cached. On macOS and Linux `pgid` is the
+       terminal's foreground process group (`tcgetpgrp` on the master) and the
+       process described is its leader, or another member once the leader has
+       exited (a pipeline whose first command is done: macOS
+       `proc_listpgrppids`, Linux a scan of `/proc/*/stat`). `name` is the
+       kernel's (`proc_pidinfo(PROC_PIDTBSDINFO)`; `/proc/<pid>/stat`), `argv`
+       comes from `sysctl(KERN_PROCARGS2)` / `/proc/<pid>/cmdline`, `cwd` from
+       `proc_pidinfo(PROC_PIDVNODEPATHINFO)` / the `/proc/<pid>/cwd` link.
+       `argv` and `cwd` are `null` when the OS refuses (another user's process,
+       such as a `sudo`); a zombie is never described; `null` when the terminal
+       is closed or nothing is in its foreground.
+     - Windows has no foreground process group, and a console's process list
+       (`GetConsoleProcessList`) can be read only by a process attached to that
+       console; attaching the runtime (`AttachConsole`) is process-wide, so it
+       would hand the console to every child spawned meanwhile and take a CLI's
+       own console away. The process is found in the tree instead (a Toolhelp
+       snapshot): from the terminal's program, while the process is a shell
+       (`cmd.exe`, `powershell.exe`, `pwsh.exe`, `bash.exe`, …) with a running
+       child, the child started last is taken; the answer is the first process
+       that is not a shell, or a shell with no child. A child is believed only
+       when it started after its parent (a parent id in the snapshot outlives
+       its process), and the terminal's own program cannot be confused with a
+       later process, because the handle the pty holds keeps its id reserved.
+       `pgid` is `null`; `argv` and `cwd` are read from the process's
+       environment block (`NtQueryInformationProcess`, `ReadProcessMemory`),
+       `null` for a process that cannot be opened. Known limit, in the type's
+       documentation: a `start /b` job can be named in place of an older
+       foreground program.
+     - `pty.ttyName` is the terminal device (`/dev/ttys004`, `/dev/pts/3`: what
+       `tty` prints inside it); `null` on Windows, where a ConPTY is not a named
+       device.
+     - `Deno.ChildProcess.pty` (a `Deno.Command` spawned with `pty`) has both
+       too. The `node-pty` shim's `process` reads the same answer, so it now
+       names the foreground process on Windows as well.
+     - Permissions: none beyond the `--allow-run` the terminal was opened under.
+       Only processes running on the app's own terminal are described, and what
+       is read of them (`argv`, `cwd`) is what the terminal's own output would
+       show; no pid is taken from JavaScript.
+     - `foreground.rs` depends on `libc` / `windows-sys` alone, so its tests run
+       against real child processes without the runtime: name, arguments and
+       directory of a child; a zombie and a missing process; a group whose
+       leader is gone; the `KERN_PROCARGS2` and `/proc/<pid>/stat` parsers (a
+       name holding parentheses, truncated buffers, the environment after the
+       arguments never read); on Windows `cmd /c ping` and a non-shell root.
+       `tests/unit/pty_test.ts`: an interactive shell's jobs (the prompt, a
+       foreground `sleep` in its own group with its arguments and the directory
+       the shell was in, Ctrl+C back to the shell, a pipeline whose leader has
+       exited), `ttyName` against `tty`, `exec`, a reaped child, `Deno.Command`
+       with `pty`, and the Windows tree.
+     - Node tests enabled: none.
+461. **`feat(desktop)`: `Deno.desktop.windowOrder()` and
+     `Deno.desktop.pointer()`: the real stacking order of the app's windows, and
+     the pointer on the screen** (`desktop/d28-qutty-2`; desktop runtime; laufey
+     API 60 (`window_z_order`, `pointer_state`); `runtime/ops/desktop.rs`,
+     `cli/rt_desktop/lib.rs`, `cli/rt/desktop.rs`, `runtime/js/99_main.js`,
+     `cli/tsc/dts/lib.deno.desktop.d.ts`; the item number is a placeholder for
+     the train lead to renumber). An app with several windows had to guess both:
+     which window is in front from the order the windows were focused in (wrong
+     for a window raised without focus, an always-on-top window, another app's
+     window in between), and during a drag from one window to another where the
+     pointer is, from page pointer capture and hand-calibrated window frames (a
+     page hears the pointer only relative to its own window).
+     - `Deno.desktop.windowOrder()`: the `windowId`s of the app's on-screen
+       windows as the OS stacks them, front to back. Not listed: a hidden or
+       minimized window, one on another Space / virtual desktop / workspace, an
+       embedded web view (not a window).
+     - `Deno.desktop.pointer()`: `{ x, y, buttons, windowId }`, asked of the OS
+       at each call: the pointer in `BrowserWindow.getPosition()`'s space, the
+       buttons held as a DOM `MouseEvent.buttons` (bit 1 is the button that
+       clicks, for a left-handed user too) and the app's window a click there
+       would reach, counting every application's windows (`null` over another
+       app's window, the desktop, a menu, a click-through window). It answers
+       outside the app's windows and during a drag another window started;
+       polled once per frame while a button is held it is a drag session
+       (denext's `startDragSession` does that).
+     - macOS: `+[NSWindow windowNumbersWithOptions:]`,
+       `+[NSEvent mouseLocation]` / `pressedMouseButtons`,
+       `windowNumberAtPoint:`. Windows: `EnumWindows` less hidden, minimized and
+       cloaked windows; `GetCursorPos`, `WindowFromPoint`, `GetAsyncKeyState`
+       (the swapped-buttons setting applied). Linux X11: the root window's
+       children matched to each window's top-level ancestor, and `QueryPointer`,
+       over an XCB connection of laufey's own. Every engine of an OS shares the
+       code (WKWebView and CEF; WebView2 and CEF; WebKitGTK and CEF).
+     - Wayland: both return `null`, and `windowCapabilities().windowOrder` /
+       `.pointer` are `false`. By the protocol's design a client is told neither
+       how the compositor stacks surfaces nor where the pointer is outside its
+       own surfaces, and XWayland knows only X11 windows; this is not a missing
+       implementation.
+     - Main-scope only (both ops are in `WORKER_EXCLUDED_OPS`), inert outside a
+       desktop app (`null`; `tests/specs/run/desktop_ops_inert`), and no
+       permission: an Electron app reads the same from
+       `screen.getCursorScreenPoint()`.
+     - laufey's `native_e2e` checks both against real windows on every engine
+       (the order follows the window raised last; a hidden, minimized or closed
+       window leaves it; a window moved under the pointer is the one named, and
+       not once hidden). `runtime/ops/desktop.rs` tests the serialized shapes;
+       `tests/unit/ops_test.ts` counts the two ops.
+     - Node tests enabled: none.
 
 460. **`feat(desktop)`: laufey API 59: web view downloads and permission
      requests the app decides, menu read-back, and a macOS panel whose show()
