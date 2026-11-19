@@ -23,10 +23,13 @@ const {
   ArrayPrototypeUnshift,
   BigInt,
   Error,
+  FunctionPrototypeCall,
   MapPrototypeDelete,
   MapPrototypeGet,
   MapPrototypeSet,
   Number,
+  ObjectDefineProperty,
+  ObjectGetOwnPropertyDescriptor,
   ObjectPrototypeIsPrototypeOf,
   PromisePrototypeThen,
   PromiseReject,
@@ -650,6 +653,24 @@ function decryptorMethods(Class, name) {
     },
   }.removeDecryptionKey;
   defineEventHandler(prototype, "error");
+  // The attribute checks its `this`, as Web IDL has a regular attribute.
+  const { get, set } = ObjectGetOwnPropertyDescriptor(prototype, "onerror");
+  const branded = {
+    get onerror() {
+      webidl.assertBranded(this, prototype);
+      return FunctionPrototypeCall(get, this);
+    },
+    set onerror(value) {
+      webidl.assertBranded(this, prototype);
+      FunctionPrototypeCall(set, this, value);
+    },
+  };
+  ObjectDefineProperty(prototype, "onerror", {
+    __proto__: null,
+    ...ObjectGetOwnPropertyDescriptor(branded, "onerror"),
+    enumerable: true,
+    configurable: true,
+  });
 }
 
 class SFrameDecryptorStream extends EventTarget {

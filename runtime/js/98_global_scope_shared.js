@@ -1,7 +1,14 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 import { core, primordials } from "ext:core/mod.js";
-const { SafeArrayIterator, TypeError } = primordials;
+const {
+  ArrayPrototypeFilter,
+  ObjectKeys,
+  RegExpPrototypeTest,
+  SafeArrayIterator,
+  SafeRegExp,
+  TypeError,
+} = primordials;
 
 const event = core.loadExtScript("ext:deno_web/02_event.js");
 const loadBase64 = () => core.loadExtScript("ext:deno_web/05_base64.js");
@@ -746,10 +753,24 @@ unstableForWindowOrWorkerGlobalScope[unstableIds.rawImports] = {
   ),
 };
 
+// The WebRTC interface objects are lazily loaded like the ones above, but
+// become data properties of the global object at bootstrap
+// (`op_webrtc_data_globals`), as Web IDL has an interface object.
+const WEBRTC_GLOBAL = new SafeRegExp(
+  "^(RTC|MediaStream|MediaDevice|SFrame|InputDeviceInfo$|OverconstrainedError$|KeyFrameRequestEvent$)",
+);
+function webrtcGlobalNames(properties) {
+  return ArrayPrototypeFilter(
+    ObjectKeys(properties),
+    (name) => RegExpPrototypeTest(WEBRTC_GLOBAL, name),
+  );
+}
+
 export {
   loadEncodedTransform,
   loadSFrame,
   selfDescriptor,
   unstableForWindowOrWorkerGlobalScope,
+  webrtcGlobalNames,
   windowOrWorkerGlobalScope,
 };

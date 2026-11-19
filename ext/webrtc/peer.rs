@@ -574,6 +574,16 @@ pub struct Core {
   mdns_failed: bool,
 }
 
+/// The four description slots of a connection, each `(type, sdp)`.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerDescriptions {
+  pub current_local: Option<(String, String)>,
+  pub pending_local: Option<(String, String)>,
+  pub current_remote: Option<(String, String)>,
+  pub pending_remote: Option<(String, String)>,
+}
+
 pub struct Peer {
   pub core: RefCell<Core>,
   guard: Rc<dyn NetGuard>,
@@ -2711,10 +2721,29 @@ impl Peer {
       .and_then(|s| s.max_message_size())
   }
 
+  /// `localDescription`: the pending local description, else the current
+  /// one.
   pub fn local_description(&self) -> Option<(String, String)> {
+    let d = self.descriptions();
+    d.pending_local.or(d.current_local)
+  }
+
+  /// `remoteDescription`: the pending remote description, else the current
+  /// one.
+  pub fn remote_description(&self) -> Option<(String, String)> {
+    let d = self.descriptions();
+    d.pending_remote.or(d.current_remote)
+  }
+
+  /// The four description slots of the W3C API, each as `(type, sdp)`: a
+  /// current description stays in place while a new offer is pending, as
+  /// `currentLocalDescription` / `pendingLocalDescription` (and the remote
+  /// pair) have it.
+  pub fn descriptions(&self) -> PeerDescriptions {
     let core = self.core.borrow();
-    core.pc.local_description().map(|d| {
-      let sdp = if core.mdns_mode == MdnsMode::Gather {
+    let redact = core.mdns_mode == MdnsMode::Gather;
+    let local = |d: RTCSessionDescription| {
+      let sdp = if redact {
         d.sdp
           .split_inclusive('\n')
           .map(|line| match line.strip_prefix("a=candidate:") {
@@ -2730,16 +2759,15 @@ impl Peer {
         d.sdp
       };
       (d.sdp_type.to_string(), sdp)
-    })
-  }
-
-  pub fn remote_description(&self) -> Option<(String, String)> {
-    self
-      .core
-      .borrow()
-      .pc
-      .remote_description()
-      .map(|d| (d.sdp_type.to_string(), d.sdp.clone()))
+    };
+    let remote =
+      |d: &RTCSessionDescription| (d.sdp_type.to_string(), d.sdp.clone());
+    PeerDescriptions {
+      current_local: core.pc.current_local_description().map(local),
+      pending_local: core.pc.pending_local_description().map(local),
+      current_remote: core.pc.current_remote_description().map(remote),
+      pending_remote: core.pc.pending_remote_description().map(remote),
+    }
   }
 
   /// `getStats()`; `selector` is a transceiver key and whether its sender

@@ -33,6 +33,7 @@ use deno_core::OpState;
 use deno_core::Resource;
 use deno_core::ResourceId;
 use deno_core::op2;
+use deno_core::v8;
 use deno_net::DefaultTlsOptions;
 use deno_net::UnsafelyIgnoreCertificateErrors;
 use deno_permissions::PermissionsContainer;
@@ -163,6 +164,7 @@ deno_core::extension!(
     op_webrtc_network_tcp_addresses,
     op_webrtc_network_close,
     op_webrtc_set_log_level,
+    op_webrtc_data_globals,
   ],
   lazy_loaded_js = [
     "01_webrtc.js",
@@ -171,6 +173,77 @@ deno_core::extension!(
     "04_sframe.js",
   ],
 );
+
+/// The getter of a lazy data property (`op_webrtc_data_globals`): calls the
+/// JavaScript getter the property had, which loads the module that defines
+/// the interface. V8 then replaces the property with the value.
+fn data_global_getter<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  _key: v8::Local<'s, v8::Name>,
+  args: v8::PropertyCallbackArguments<'s>,
+  mut rv: v8::ReturnValue<v8::Value>,
+) {
+  let Ok(getter) = v8::Local::<v8::Function>::try_from(args.data()) else {
+    return;
+  };
+  let receiver: v8::Local<v8::Value> = args.holder().into();
+  if let Some(value) = getter.call(scope, receiver, &[]) {
+    rv.set(value);
+  }
+}
+
+/// Turns the lazily loaded WebRTC interface objects from accessors on the
+/// global object into (lazy) data properties, as Web IDL has an interface
+/// object: `Object.getOwnPropertyDescriptor(globalThis, "RTCPeerConnection")`
+/// is `{ value, writable: true, enumerable: false, configurable: true }`
+/// with no getter. The module still loads on first use: V8 calls the old
+/// getter the first time the property is read, then keeps the value. Called
+/// once per realm at bootstrap (a snapshot can't hold these properties
+/// without an external reference for their getter); `names` that are not
+/// own accessors of `target` are skipped.
+#[op2(nofast)]
+fn op_webrtc_data_globals<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  target: v8::Local<'s, v8::Object>,
+  names: v8::Local<'s, v8::Array>,
+) {
+  let get_key = v8::String::new_external_onebyte_static(scope, b"get")
+    .unwrap()
+    .into();
+  for i in 0..names.length() {
+    let Some(name) = names.get_index(scope, i) else {
+      continue;
+    };
+    let Ok(name) = v8::Local::<v8::Name>::try_from(name) else {
+      continue;
+    };
+    let Some(descriptor) = target.get_own_property_descriptor(scope, name)
+    else {
+      continue;
+    };
+    let Ok(descriptor) = v8::Local::<v8::Object>::try_from(descriptor) else {
+      continue;
+    };
+    let Some(getter) = descriptor.get(scope, get_key) else {
+      continue;
+    };
+    if !getter.is_function() {
+      continue;
+    }
+    if target.delete(scope, name.into()) != Some(true) {
+      continue;
+    }
+    target.set_lazy_data_property_with_data(
+      scope,
+      name,
+      data_global_getter,
+      getter,
+      v8::PropertyAttribute::DONT_ENUM,
+      v8::SideEffectType::HasSideEffect,
+      v8::SideEffectType::HasSideEffect,
+    );
+  }
+}
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 pub enum WebRtcError {
@@ -445,23 +518,13 @@ fn op_webrtc_pc_add_ice_candidate(
   )
 }
 
-#[derive(Serialize)]
-struct Descriptions {
-  local: Option<(String, String)>,
-  remote: Option<(String, String)>,
-}
-
 #[op2]
 #[serde]
 fn op_webrtc_pc_descriptions(
   state: &mut OpState,
   #[smi] rid: ResourceId,
-) -> Result<Descriptions, WebRtcError> {
-  let peer = peer(state, rid)?;
-  Ok(Descriptions {
-    local: peer.local_description(),
-    remote: peer.remote_description(),
-  })
+) -> Result<peer::PeerDescriptions, WebRtcError> {
+  Ok(peer(state, rid)?.descriptions())
 }
 
 #[derive(Deserialize)]

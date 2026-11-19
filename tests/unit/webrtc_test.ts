@@ -1334,7 +1334,9 @@ Deno.test("webrtcSpecDetails", async () => {
     .call({});
   assert(p instanceof Promise);
   await assertRejects(() => p, TypeError);
-  // restartIce() before the first negotiation fires nothing.
+  // restartIce() before the first negotiation fires nothing (the event the
+  // transceivers above asked for is its own task: let it pass first).
+  await new Promise((r) => setTimeout(r, 20));
   let needed = 0;
   pc.onnegotiationneeded = () => needed++;
   pc.restartIce();
@@ -1620,4 +1622,567 @@ Deno.test("webrtcSetLogLevel", { permissions: { run: true } }, async () => {
   assert(!quiet.includes(" RS - rtc"), quiet);
   const verbose = await run("trace");
   assert(/^(TRACE|DEBUG|INFO) RS - rtc/m.test(verbose), verbose);
+});
+
+// --- WPT parity (DENEXT.md item 460) -----------------------------------------
+
+const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+Deno.test("webrtcInterfaceObjectsAreDataProperties", () => {
+  // Web IDL: an interface object is a data property of the global object
+  // (no getter), writable, not enumerable, configurable. The module still
+  // loads on first use.
+  for (
+    const name of [
+      "RTCPeerConnection",
+      "RTCDataChannel",
+      "RTCSessionDescription",
+      "RTCIceCandidate",
+      "RTCRtpSender",
+      "RTCRtpScriptTransform",
+      "RTCEncodedVideoFrame",
+      "MediaStream",
+      "MediaStreamTrack",
+    ]
+  ) {
+    const d = Object.getOwnPropertyDescriptor(globalThis, name)!;
+    assert(d !== undefined, name);
+    assertEquals(d.get, undefined, name);
+    assertEquals(d.set, undefined, name);
+    assertEquals(typeof d.value, "function", name);
+    assertEquals(
+      [d.writable, d.enumerable, d.configurable],
+      [true, false, true],
+      name,
+    );
+    assertEquals(d.value.name, name);
+  }
+  assert(!Object.keys(globalThis).includes("RTCPeerConnection"));
+  // An assignment replaces the value, as with any data property.
+  const real = globalThis.RTCIceCandidate;
+  // deno-lint-ignore no-explicit-any
+  (globalThis as any).RTCIceCandidate = 1;
+  // deno-lint-ignore no-explicit-any
+  assertEquals((globalThis as any).RTCIceCandidate, 1);
+  globalThis.RTCIceCandidate = real;
+});
+
+Deno.test("webrtcEventHandlerAttributesCheckThis", () => {
+  const pc = new RTCPeerConnection();
+  const channel = pc.createDataChannel("x");
+  for (
+    const [proto, name, instance] of [
+      [RTCPeerConnection.prototype, "onnegotiationneeded", pc],
+      [RTCPeerConnection.prototype, "ontrack", pc],
+      [RTCDataChannel.prototype, "onopen", channel],
+      [RTCDataChannel.prototype, "onmessage", channel],
+    ] as const
+  ) {
+    const d = Object.getOwnPropertyDescriptor(proto, name)!;
+    assertEquals(d.get!.name, `get ${name}`);
+    assertEquals(d.set!.name, `set ${name}`);
+    assertEquals([d.enumerable, d.configurable], [true, true]);
+    // On the prototype itself, or on another object: a TypeError.
+    assertThrows(() => d.get!.call(proto), TypeError);
+    assertThrows(() => d.get!.call({}), TypeError);
+    assertThrows(() => d.set!.call({}, null), TypeError);
+    // On an instance it is an ordinary event handler attribute.
+    assertEquals(d.get!.call(instance), null);
+    const handler = () => {};
+    d.set!.call(instance, handler);
+    assertEquals(d.get!.call(instance), handler);
+    d.set!.call(instance, 5);
+    assertEquals(d.get!.call(instance), null);
+  }
+  // A maplike's @@iterator is its entries function.
+  assertEquals(
+    // deno-lint-ignore no-explicit-any
+    (RTCStatsReport.prototype as any)[Symbol.iterator],
+    RTCStatsReport.prototype.entries,
+  );
+  assertEquals(RTCSessionDescription.length, 1);
+  assertEquals(RTCError.length, 1);
+  assertEquals(RTCErrorEvent.length, 2);
+  assertEquals(RTCPeerConnectionIceErrorEvent.length, 2);
+  assertEquals(RTCPeerConnection.prototype.setRemoteDescription.length, 1);
+  pc.close();
+});
+
+Deno.test("webrtcOperationsChain", async () => {
+  // Whether a promise is settled after the microtasks of this task.
+  const settled = async (p: Promise<unknown>) => {
+    const pending = {};
+    let state = "pending";
+    for (let i = 0; i < 20; ++i) {
+      state = await Promise.race([p, pending]).then(
+        (v) => v === pending ? "pending" : "fulfilled",
+        () => "rejected",
+      );
+    }
+    return state;
+  };
+  const pc = new RTCPeerConnection();
+  // An operation on an empty chain starts at once: a wrong state rejects
+  // within the task.
+  assertEquals(await settled(pc.createAnswer()), "rejected");
+  assertEquals(
+    await settled(pc.setLocalDescription({ type: "rollback" })),
+    "rejected",
+  );
+  assertEquals(await settled(pc.addIceCandidate()), "rejected");
+  // One that runs takes a task: the chain is busy across microtasks, and a
+  // second operation waits for it.
+  const offer = pc.createOffer();
+  const answer = pc.createAnswer();
+  assertEquals(await settled(offer), "pending");
+  assertEquals(await settled(answer), "pending");
+  assertEquals((await offer).type, "offer");
+  await assertRejects(() => answer, DOMException, "stable");
+  // Operations run in call order, each seeing the state the one before left.
+  const order: string[] = [];
+  pc.onsignalingstatechange = () => order.push(pc.signalingState);
+  const a = pc.setLocalDescription().then(() => order.push("sld"));
+  const b = pc.setLocalDescription({ type: "rollback" }).then(() =>
+    order.push("rollback")
+  );
+  // Nothing has changed yet when the calls return.
+  assertEquals(pc.signalingState, "stable");
+  await Promise.all([a, b]);
+  assertEquals(order, ["have-local-offer", "sld", "stable", "rollback"]);
+  // getStats() and setParameters() are not on the chain, and take a task.
+  const t = pc.addTransceiver("audio");
+  const stats = pc.getStats();
+  const set = t.sender.setParameters(t.sender.getParameters());
+  assertEquals(await settled(stats), "pending");
+  assertEquals(await settled(set), "pending");
+  await Promise.all([stats, set]);
+  // An operation pending when the connection closes never settles.
+  let late = false;
+  pc.createOffer().then(() => late = true, () => late = true);
+  pc.close();
+  await tick(30);
+  assertEquals(late, false);
+  await assertRejects(() => pc.createOffer(), DOMException, "closed");
+});
+
+Deno.test("webrtcDescriptionSlots", async () => {
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  a.createDataChannel("x");
+  assertEquals(a.currentLocalDescription, null);
+  assertEquals(a.pendingLocalDescription, null);
+  await a.setLocalDescription();
+  assertEquals(a.currentLocalDescription, null);
+  assertEquals(a.pendingLocalDescription!.type, "offer");
+  assertEquals(a.localDescription, a.pendingLocalDescription);
+  await b.setRemoteDescription(a.localDescription!);
+  assertEquals(b.pendingRemoteDescription!.type, "offer");
+  assertEquals(b.currentRemoteDescription, null);
+  await b.setLocalDescription();
+  assertEquals(b.currentLocalDescription!.type, "answer");
+  assertEquals(b.currentRemoteDescription!.type, "offer");
+  assertEquals(b.pendingRemoteDescription, null);
+  await a.setRemoteDescription(b.localDescription!);
+  assertEquals(a.pendingLocalDescription, null);
+  const first = a.currentLocalDescription!;
+  assertEquals(first.type, "offer");
+  assertEquals(a.currentRemoteDescription!.type, "answer");
+  // A new offer is pending while the negotiated descriptions stay current.
+  a.addTransceiver("audio");
+  await a.setLocalDescription();
+  assertEquals(a.currentLocalDescription!.type, "offer");
+  assertEquals(a.currentRemoteDescription!.type, "answer");
+  assert(a.pendingLocalDescription!.sdp.includes("m=audio"));
+  assert(!a.currentLocalDescription!.sdp.includes("m=audio"));
+  assertEquals(a.localDescription, a.pendingLocalDescription);
+  // Rolled back, the current pair is what is left.
+  await a.setLocalDescription({ type: "rollback" });
+  assertEquals(a.pendingLocalDescription, null);
+  assert(!a.localDescription!.sdp.includes("m=audio"));
+  assertEquals(a.localDescription, a.currentLocalDescription);
+  // The slots keep their values after close().
+  const last = a.currentLocalDescription!.sdp;
+  a.close();
+  assertEquals(a.currentLocalDescription!.sdp, last);
+  assertEquals(a.pendingLocalDescription, null);
+  b.close();
+});
+
+Deno.test("webrtcNegotiationNeededFollowsTheSpec", async () => {
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  let events = 0;
+  a.onnegotiationneeded = () => events++;
+  const exchange = async () => {
+    await a.setLocalDescription();
+    await b.setRemoteDescription(a.localDescription!);
+    await b.setLocalDescription();
+    await a.setRemoteDescription(b.localDescription!);
+  };
+  const expect = async (count: number, what: string) => {
+    await tick(20);
+    assertEquals(events, count, what);
+    events = 0;
+  };
+  const ufrag = (pc: RTCPeerConnection) =>
+    /a=ice-ufrag:(.*)/.exec(pc.localDescription!.sdp)![1];
+  // The event is a task of its own, never fired inside the call.
+  const t = a.addTransceiver("audio");
+  a.createDataChannel("x");
+  assertEquals(events, 0);
+  await Promise.resolve();
+  assertEquals(events, 0);
+  await expect(1, "one event for the changes of one task");
+  // Before the first negotiation there is nothing for restartIce() to
+  // replace.
+  a.restartIce();
+  await expect(0, "restartIce() before negotiation");
+  await exchange();
+  await expect(0, "negotiated: nothing needed");
+  // A direction change needs negotiation; changing it back takes the need
+  // away before the event fires.
+  t.direction = "inactive";
+  t.direction = "sendrecv";
+  await expect(0, "direction changed and restored");
+  t.direction = "inactive";
+  await expect(1, "direction changed");
+  // Nothing fires while an offer is out; the need is worked out again once
+  // signaling is stable.
+  await a.setLocalDescription();
+  t.direction = "sendrecv";
+  await expect(0, "not in have-local-offer");
+  await b.setRemoteDescription(a.localDescription!);
+  await b.setLocalDescription();
+  await a.setRemoteDescription(b.localDescription!);
+  await expect(1, "the change made during the negotiation");
+  await exchange();
+  await expect(0, "negotiated again");
+  // A direction the negotiated session already has needs nothing: the
+  // answerer receives only, so this side is sending only as it is.
+  t.direction = "sendonly";
+  await expect(0, "sendonly is what was negotiated");
+  t.direction = "sendrecv";
+  // setStreams(): a different set of streams needs negotiation, the same set
+  // (in any order, with duplicates) does not.
+  const [s1, s2] = [new MediaStream(), new MediaStream()];
+  t.sender.setStreams(s1, s2);
+  await expect(1, "streams set");
+  await exchange();
+  assert(a.localDescription!.sdp.includes(`a=msid:${s1.id} `));
+  assert(a.localDescription!.sdp.includes(`a=msid:${s2.id} `));
+  t.sender.setStreams(s2, s1, s2);
+  await expect(0, "the same streams");
+  t.sender.setStreams(s1);
+  await expect(1, "a stream removed");
+  await exchange();
+  // restartIce(): an event, fresh credentials in the next offer (also a
+  // parameterless one), and no further event once they are negotiated.
+  const before = ufrag(a);
+  a.restartIce();
+  await expect(1, "restartIce()");
+  await exchange();
+  assert(ufrag(a) !== before, "ICE restarted");
+  await expect(0, "restart negotiated");
+  const after = ufrag(a);
+  await exchange();
+  assertEquals(ufrag(a), after, "no second restart");
+  // A rollback keeps the restart pending.
+  a.restartIce();
+  await expect(1, "restartIce() again");
+  await a.setLocalDescription();
+  await a.setLocalDescription({ type: "rollback" });
+  await expect(1, "still needed after the rollback");
+  a.close();
+  b.close();
+});
+
+Deno.test("webrtcAddTransceiverIsNotTakenByARemoteOffer", async () => {
+  // RFC 9429 section 5.10: a remote offer's new media section takes a
+  // transceiver addTrack() created, never one addTransceiver() did.
+  const offerer = new RTCPeerConnection();
+  offerer.addTransceiver("audio");
+  await offerer.setLocalDescription();
+  const sdp = offerer.localDescription!;
+
+  const viaTransceiver = new RTCPeerConnection();
+  const own = viaTransceiver.addTransceiver("audio");
+  let needed = 0;
+  viaTransceiver.onnegotiationneeded = () => needed++;
+  await viaTransceiver.setRemoteDescription(sdp);
+  assertEquals(viaTransceiver.getTransceivers().length, 2);
+  assertEquals(own.mid, null);
+  await viaTransceiver.setLocalDescription();
+  // Its own transceiver still has no media section: negotiation is needed.
+  await tick(20);
+  assertEquals(needed, 1);
+  viaTransceiver.close();
+
+  const viaTrack = new RTCPeerConnection();
+  const track = new Deno.webrtc.EncodedMediaTrack({
+    kind: "audio",
+    mimeType: "audio/opus",
+  });
+  viaTrack.addTrack(track);
+  await viaTrack.setRemoteDescription(sdp);
+  assertEquals(viaTrack.getTransceivers().length, 1);
+  assertEquals(viaTrack.getTransceivers()[0].mid, "0");
+  viaTrack.close();
+  offerer.close();
+  track.stop();
+});
+
+Deno.test("webrtcMsidLines", async () => {
+  const pc = new RTCPeerConnection();
+  const [s1, s2] = [new MediaStream(), new MediaStream()];
+  pc.addTransceiver("audio");
+  pc.addTransceiver("video", { streams: [s1, s2] });
+  const { sdp } = await pc.createOffer();
+  const msids = sdp!.split("\r\n").filter((l) => l.startsWith("a=msid:"))
+    .map((l) => l.slice(7).split(" ")[0]);
+  // No stream: `-`. Two streams: a line each.
+  assertEquals(msids, ["-", s1.id, s2.id]);
+  // A remote section with `a=msid:-` has a track in no stream; one with no
+  // `a=msid` line at all has it in a default stream.
+  const receive = async (offer: string) => {
+    const remote = new RTCPeerConnection();
+    const event = once<RTCTrackEvent>(remote, "track");
+    await remote.setRemoteDescription({ type: "offer", sdp: offer });
+    const { streams } = await event;
+    remote.close();
+    return streams.length;
+  };
+  const audioOnly = new RTCPeerConnection();
+  audioOnly.addTransceiver("audio");
+  const offer = (await audioOnly.createOffer()).sdp!;
+  assert(/a=msid:- /.test(offer));
+  assertEquals(await receive(offer), 0);
+  assertEquals(await receive(offer.replace(/a=msid:[^\r\n]*\r\n/g, "")), 1);
+  audioOnly.close();
+  pc.close();
+});
+
+Deno.test("webrtcStatsReferencesResolve", async () => {
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  const track = new Deno.webrtc.EncodedMediaTrack({
+    kind: "audio",
+    mimeType: "audio/opus",
+  });
+  a.addTrack(track);
+  const channel = a.createDataChannel("x");
+  // No trickling: the remote candidates come from the descriptions, and the
+  // pair that wins may be one a connectivity check discovered.
+  await a.setLocalDescription();
+  await waitGathered(a);
+  await b.setRemoteDescription(a.localDescription!);
+  await b.setLocalDescription();
+  await waitGathered(b);
+  await a.setRemoteDescription(b.localDescription!);
+  await Promise.all([connected(a), connected(b)]);
+  if (channel.readyState !== "open") await once(channel, "open");
+  const report = await a.getStats();
+  const all = [...report.values()];
+  const types = new Set(all.map((s) => s.type));
+  for (
+    const type of [
+      "peer-connection",
+      "transport",
+      "candidate-pair",
+      "local-candidate",
+      "remote-candidate",
+      "certificate",
+      "codec",
+      "outbound-rtp",
+      "media-source",
+      "data-channel",
+    ]
+  ) {
+    assert(types.has(type), `${type} in ${[...types]}`);
+  }
+  // Every `...Id` member names a stats object of the same report (none is
+  // an empty placeholder), and no enum member is `Unspecified`.
+  for (const stats of all) {
+    for (const [key, value] of Object.entries(stats)) {
+      if (key !== "id" && key.endsWith("Id") && typeof value === "string") {
+        assert(report.has(value), `${stats.type}.${key} = ${value}`);
+      }
+      assert(value !== "Unspecified", `${stats.type}.${key}`);
+    }
+  }
+  const pair = all.find((s) => s.type === "candidate-pair" && s.nominated);
+  assertEquals(report.get(pair.localCandidateId).type, "local-candidate");
+  assertEquals(report.get(pair.remoteCandidateId).type, "remote-candidate");
+  const outbound = all.find((s) => s.type === "outbound-rtp");
+  const codec = report.get(outbound.codecId);
+  assertEquals(codec.type, "codec");
+  assertEquals(codec.mimeType.toLowerCase(), "audio/opus");
+  assertEquals(report.get(codec.transportId).type, "transport");
+  const source = report.get(outbound.mediaSourceId);
+  assertEquals(
+    [source.type, source.kind, source.trackIdentifier],
+    ["media-source", "audio", track.id],
+  );
+  // The certificate is base64 DER.
+  const certificate = all.find((s) => s.type === "certificate");
+  const der = Uint8Array.from(
+    atob(certificate.base64Certificate),
+    (c) => c.charCodeAt(0),
+  );
+  assertEquals(der[0], 0x30);
+  a.close();
+  b.close();
+  track.stop();
+});
+
+Deno.test("webrtcSendEncodingsRules", async () => {
+  const pc = new RTCPeerConnection();
+  // Audio has one encoding; a lone encoding has no rid.
+  const audio = pc.addTransceiver("audio", {
+    sendEncodings: [{ rid: "foo" }, { rid: "bar" }],
+  });
+  const a = audio.sender.getParameters().encodings;
+  assertEquals(a.length, 1);
+  assert(!("rid" in a[0]));
+  assert(!("scaleResolutionDownBy" in a[0]));
+  const lone = pc.addTransceiver("video", { sendEncodings: [{ rid: "x" }] });
+  assert(!("rid" in lone.sender.getParameters().encodings[0]));
+  // scaleResolutionDownBy: 1 where missing when another encoding has one,
+  // else powers of two ending at full size.
+  const some = pc.addTransceiver("video", {
+    sendEncodings: [{ rid: "foo" }, { rid: "bar", scaleResolutionDownBy: 3 }],
+  });
+  assertEquals(
+    some.sender.getParameters().encodings.map((e) => e.scaleResolutionDownBy),
+    [1, 3],
+  );
+  const none = pc.addTransceiver("video", {
+    sendEncodings: [{ rid: "q" }, { rid: "h" }, { rid: "f" }],
+  });
+  assertEquals(
+    none.sender.getParameters().encodings.map((e) => e.scaleResolutionDownBy),
+    [4, 2, 1],
+  );
+  // A long list is cut.
+  const many = pc.addTransceiver("video", {
+    sendEncodings: Array.from({ length: 100 }, (_, i) => ({ rid: `r${i}` })),
+  });
+  assert(many.sender.getParameters().encodings.length <= 16);
+  // setParameters() needs `encodings`.
+  const params = some.sender.getParameters();
+  // deno-lint-ignore no-explicit-any
+  delete (params as any).encodings;
+  await assertRejects(() => some.sender.setParameters(params), TypeError);
+  pc.close();
+});
+
+Deno.test("webrtcGlareRollsBackInItsOwnTask", async () => {
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  a.createDataChannel("a");
+  b.createDataChannel("b");
+  await a.setLocalDescription();
+  const states: string[] = [];
+  a.onsignalingstatechange = () => states.push(a.signalingState);
+  // A remote offer in have-local-offer: the implicit rollback is a task of
+  // its own (signaling is stable in between), then the offer is applied.
+  const p = a.setRemoteDescription(await b.createOffer());
+  await once(a, "signalingstatechange");
+  assertEquals(a.signalingState, "stable");
+  assertEquals(a.pendingLocalDescription, null);
+  assertEquals(a.pendingRemoteDescription, null);
+  await p;
+  assertEquals(states, ["stable", "have-remote-offer"]);
+  await a.setRemoteDescription({ type: "rollback" });
+  // The rollback stands when the offer is not SDP; that failure is an
+  // RTCError.
+  await a.setLocalDescription();
+  const error = await assertRejects(
+    () => a.setRemoteDescription({ type: "offer", sdp: "Invalid SDP" }),
+    RTCError,
+  );
+  assertEquals(error.name, "OperationError");
+  assertEquals(error.errorDetail, "sdp-syntax-error");
+  assertEquals(a.signalingState, "stable");
+  assertEquals(a.pendingLocalDescription, null);
+  a.close();
+  b.close();
+});
+
+Deno.test("webrtcInactiveOfferPausesATransceiver", async () => {
+  // A remote a=inactive section pauses the transceiver (it does not stop
+  // it): the track is removed, and comes back when the offer is rolled back
+  // or the remote side sends again.
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  const track = new Deno.webrtc.EncodedMediaTrack({
+    kind: "audio",
+    mimeType: "audio/opus",
+  });
+  const stream = new MediaStream();
+  a.addTrack(track, stream);
+  const first = once<RTCTrackEvent>(b, "track");
+  await a.setLocalDescription();
+  await b.setRemoteDescription(a.localDescription!);
+  await b.setLocalDescription();
+  await a.setRemoteDescription(b.localDescription!);
+  const remote = (await first).streams[0];
+  assertEquals(remote.getTracks().length, 1);
+  const [ta] = a.getTransceivers();
+  const [tb] = b.getTransceivers();
+  ta.direction = "inactive";
+  const removed = once(remote, "removetrack");
+  await a.setLocalDescription();
+  await b.setRemoteDescription(a.localDescription!);
+  await removed;
+  assertEquals(tb.currentDirection, "recvonly");
+  assertEquals(tb.direction, "recvonly");
+  // Rolled back: the track is back, with a track event.
+  const revived = once<RTCTrackEvent>(b, "track");
+  await b.setRemoteDescription({ type: "rollback" });
+  assertEquals((await revived).streams[0].id, stream.id);
+  // Applied for real, then sending again: the same transceiver receives.
+  await a.setLocalDescription({ type: "rollback" });
+  await a.setLocalDescription();
+  await b.setRemoteDescription(a.localDescription!);
+  await b.setLocalDescription();
+  await a.setRemoteDescription(b.localDescription!);
+  assertEquals(tb.currentDirection, "inactive");
+  assert(/a=inactive/.test(b.localDescription!.sdp));
+  assert(!/^m=audio 0 /m.test(b.localDescription!.sdp));
+  ta.direction = "sendrecv";
+  const again = once<RTCTrackEvent>(b, "track");
+  await a.setLocalDescription();
+  await b.setRemoteDescription(a.localDescription!);
+  await b.setLocalDescription();
+  await a.setRemoteDescription(b.localDescription!);
+  assertEquals((await again).transceiver, tb);
+  assertEquals(tb.currentDirection, "recvonly");
+  assertEquals(b.getTransceivers().length, 1);
+  a.close();
+  b.close();
+  track.stop();
+});
+
+Deno.test("webrtcStatsDtlsRoleFromTheDescriptions", async () => {
+  // The transport's dtlsRole is known once the descriptions are negotiated
+  // (the a=setup:active side is the client), before DTLS starts.
+  const role = async (setup: string) => {
+    const a = new RTCPeerConnection();
+    const b = new RTCPeerConnection();
+    a.createDataChannel("x");
+    const offer = (await a.createOffer()).sdp!.replace(
+      /a=setup:actpass/g,
+      `a=setup:${setup}`,
+    );
+    await b.setRemoteDescription({ type: "offer", sdp: offer });
+    await b.setLocalDescription();
+    const report = await b.getStats();
+    const transport = [...report.values()].find((s) => s.type === "transport");
+    a.close();
+    b.close();
+    return transport?.dtlsRole;
+  };
+  assertEquals(await role("active"), "server");
+  assertEquals(await role("passive"), "client");
+  assertEquals(await role("actpass"), "client");
 });

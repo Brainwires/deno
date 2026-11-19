@@ -160,6 +160,28 @@ Deno.test("fakeTracksSendMedia", async () => {
     }
     const sources = tracks[0].getSynchronizationSources();
     assertEquals(sources.length, 1);
+    // getStats() on both sides: every `...Id` member names a stats object of
+    // the same report, and a sender with a camera track has a media-source
+    // with the camera's dimensions.
+    for (const pc of [a, b]) {
+      const report = await pc.getStats();
+      for (const stats of report.values()) {
+        for (const [key, value] of Object.entries(stats)) {
+          if (key !== "id" && key.endsWith("Id")) {
+            assert(report.has(value as string), `${stats.type}.${key}`);
+          }
+        }
+      }
+    }
+    const sent = [...(await a.getStats()).values()];
+    const video = sent.find((s) =>
+      s.type === "media-source" && s.kind === "video"
+    );
+    assert(video.width > 0 && video.height > 0 && video.framesPerSecond > 0);
+    const outbound = sent.find((s) =>
+      s.type === "outbound-rtp" && s.kind === "video"
+    );
+    assertEquals(outbound.mediaSourceId, video.id);
   } finally {
     a.close();
     b.close();
