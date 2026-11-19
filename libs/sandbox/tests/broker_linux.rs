@@ -297,6 +297,7 @@ mod linux {
         net: NetPlan::Open,
         scope_signal: false,
         scope_abstract_unix: false,
+        prebound: Vec::new(),
         seccomp: SeccompPlan {
           attack_surface: true,
           clone3_enosys: true,
@@ -306,6 +307,7 @@ mod linux {
         },
       }),
       macos: None,
+      windows: None,
       env_keep: None,
       probe: None,
       module_files: Vec::new(),
