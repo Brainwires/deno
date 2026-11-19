@@ -3034,6 +3034,33 @@ function negotiateEncodings(transceiver, remote, phase) {
   }
 }
 
+// RFC 5761 section 4: with RTP and RTCP multiplexed (which WebRTC requires),
+// payload types 64 to 95 would be taken for RTCP packet types, so an RTP
+// m-section may not use them (InvalidAccessError, as browsers reject it).
+function requirePayloadTypes(sdp) {
+  const lines = StringPrototypeSplit(sdp, "\n");
+  for (let i = 0; i < lines.length; ++i) {
+    const line = StringPrototypeTrim(lines[i]);
+    if (!StringPrototypeStartsWith(line, "m=")) continue;
+    const fields = ArrayPrototypeFilter(
+      StringPrototypeSplit(StringPrototypeSlice(line, 2), " "),
+      (f) => f !== "",
+    );
+    if (fields.length < 4 || !StringPrototypeIncludes(fields[2], "RTP")) {
+      continue;
+    }
+    for (let j = 3; j < fields.length; ++j) {
+      const pt = NumberParseInt(fields[j], 10);
+      if (pt >= 64 && pt <= 95) {
+        throw new DOMException(
+          `setRemoteDescription: payload type ${pt} collides with RTCP (RFC 5761)`,
+          "InvalidAccessError",
+        );
+      }
+    }
+  }
+}
+
 // The simulcast encodings one sender may have.
 const MAX_ENCODINGS = 16;
 const RID_RE = new SafeRegExp("^[A-Za-z0-9]+$");
@@ -3726,6 +3753,8 @@ class RTCPeerConnection extends EventTarget {
         if (type !== "rollback") {
           requireSdpSyntax(sdp);
           requireRtcpMux(sdp);
+          // wpt100:codecs
+          requirePayloadTypes(sdp);
         }
         const offerFromStable = type === "offer" &&
           this[_state].signalingState === "stable";
