@@ -37,6 +37,7 @@ pub mod broker;
 #[cfg(unix)]
 pub mod checked_open;
 mod ipc_pipe;
+pub mod kernel_broker;
 pub mod kernel_sandbox_state;
 pub mod prompter;
 mod runtime_descriptor_parser;
@@ -352,11 +353,34 @@ impl Deref for PathBufWithRequested {
   }
 }
 
+/// denext: the scope a checked path's operation is held to when it opens
+/// the path race-safely ([`checked_open`]): the allow roots and denies of
+/// the access the check granted, as they stood at the check. Empty when
+/// nothing narrows the access (everything granted, nothing denied), for the
+/// paths that name the opener's own objects (`/proc`, `/dev`), and off Unix.
+#[derive(Clone, Default)]
+pub struct OpenScopeRef(#[cfg(unix)] Option<Arc<checked_open::OpenScope>>);
+
+impl std::fmt::Debug for OpenScopeRef {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    #[cfg(unix)]
+    let scoped = self.0.is_some();
+    #[cfg(not(unix))]
+    let scoped = false;
+    write!(
+      f,
+      "OpenScopeRef({})",
+      if scoped { "scoped" } else { "none" }
+    )
+  }
+}
+
 #[derive(Debug)]
 pub struct CheckedPath<'a> {
   // these are private to prevent someone constructing this outside the crate
   path: PathWithRequested<'a>,
   canonicalized: bool,
+  scope: OpenScopeRef,
 }
 
 impl<'a> CheckedPath<'a> {
@@ -367,11 +391,22 @@ impl<'a> CheckedPath<'a> {
         requested: None,
       },
       canonicalized: false,
+      scope: OpenScopeRef::default(),
     }
   }
 
   pub fn canonicalized(&self) -> bool {
     self.canonicalized
+  }
+
+  /// denext: the scope to open this path in ([`checked_open::open_checked`],
+  /// [`checked_open::parent_checked`]), when the access is a scoped one.
+  /// With one, the operation must go through those: the open is then the
+  /// check, and a symlink swapped in after [`PermissionsContainer::check_open`]
+  /// leads nowhere the permissions don't allow.
+  #[cfg(unix)]
+  pub fn open_scope(&self) -> Option<&checked_open::OpenScope> {
+    self.scope.0.as_deref()
   }
 
   pub fn display(&self) -> std::path::Display<'_> {
@@ -386,6 +421,7 @@ impl<'a> CheckedPath<'a> {
     CheckedPathBuf {
       path: self.path.as_owned(),
       canonicalized: self.canonicalized,
+      scope: self.scope.clone(),
     }
   }
 
@@ -393,6 +429,7 @@ impl<'a> CheckedPath<'a> {
     CheckedPathBuf {
       path: self.path.into_owned(),
       canonicalized: self.canonicalized,
+      scope: self.scope.clone(),
     }
   }
 
@@ -429,6 +466,7 @@ impl AsRef<Path> for CheckedPath<'_> {
 pub struct CheckedPathBuf {
   path: PathBufWithRequested,
   canonicalized: bool,
+  scope: OpenScopeRef,
 }
 
 impl CheckedPathBuf {
@@ -436,13 +474,21 @@ impl CheckedPathBuf {
     Self {
       path: PathBufWithRequested::only_path(path),
       canonicalized: false,
+      scope: OpenScopeRef::default(),
     }
+  }
+
+  /// denext: see [`CheckedPath::open_scope`].
+  #[cfg(unix)]
+  pub fn open_scope(&self) -> Option<&checked_open::OpenScope> {
+    self.scope.0.as_deref()
   }
 
   pub fn as_checked_path(&self) -> CheckedPath<'_> {
     CheckedPath {
       path: self.path.as_path_with_requested(),
       canonicalized: self.canonicalized,
+      scope: self.scope.clone(),
     }
   }
 
@@ -902,12 +948,32 @@ impl<TAllowDesc: AllowDescriptor> UnaryPermissionDesc<TAllowDesc> {
   }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone)]
 struct UnaryPermissionDescriptors<TAllowDesc: AllowDescriptor> {
   inner: Vec<UnaryPermissionDesc<TAllowDesc>>,
   has_flag_denied: bool,
   has_prompt_denied: bool,
   has_flag_ignored: bool,
+  /// denext: bumped by every change to `inner`, so what is derived from the
+  /// list (the scopes of race-safe opens) knows when to derive it again.
+  /// Not part of equality.
+  generation: u64,
+}
+
+impl<TAllowDesc: AllowDescriptor> PartialEq
+  for UnaryPermissionDescriptors<TAllowDesc>
+{
+  fn eq(&self, other: &Self) -> bool {
+    self.inner == other.inner
+      && self.has_flag_denied == other.has_flag_denied
+      && self.has_prompt_denied == other.has_prompt_denied
+      && self.has_flag_ignored == other.has_flag_ignored
+  }
+}
+
+impl<TAllowDesc: AllowDescriptor> Eq
+  for UnaryPermissionDescriptors<TAllowDesc>
+{
 }
 
 impl<TAllowDesc: AllowDescriptor> Default
@@ -919,6 +985,7 @@ impl<TAllowDesc: AllowDescriptor> Default
       has_flag_denied: false,
       has_prompt_denied: false,
       has_flag_ignored: false,
+      generation: 0,
     }
   }
 }
@@ -958,10 +1025,12 @@ impl<TAllowDesc: AllowDescriptor> UnaryPermissionDescriptors<TAllowDesc> {
     }
     if let Err(insert_index) = self.inner.binary_search(&item) {
       self.inner.insert(insert_index, item);
+      self.generation += 1;
     }
   }
 
   pub fn revoke_granted(&mut self, desc: &TAllowDesc::QueryDesc<'_>) {
+    self.generation += 1;
     self.inner.retain(|v| match v {
       UnaryPermissionDesc::Granted(v) => !desc.revokes(v),
       UnaryPermissionDesc::FlagDenied(_)
@@ -971,6 +1040,7 @@ impl<TAllowDesc: AllowDescriptor> UnaryPermissionDescriptors<TAllowDesc> {
   }
 
   pub fn revoke_all_granted(&mut self) {
+    self.generation += 1;
     self.inner.retain(|v| match v {
       UnaryPermissionDesc::Granted(_) => false,
       UnaryPermissionDesc::FlagDenied(_)
@@ -1026,6 +1096,59 @@ impl<
       granted_global: true,
       ..Default::default()
     }
+  }
+
+  /// denext: what tells one state of this permission's scopes from
+  /// another (see [`PermissionsContainer::open_scope`]).
+  #[cfg(unix)]
+  fn scope_stamp(&self) -> ScopeStamp {
+    ScopeStamp {
+      flags: [
+        self.granted_global,
+        self.flag_denied_global,
+        self.flag_ignored_global,
+        self.prompt_denied_global,
+      ],
+      generation: self.descriptors.generation,
+    }
+  }
+
+  /// denext: the allow roots (`None`: everywhere) and the denies of this
+  /// permission as paths, each scope in its spelling and, where that
+  /// differs, its resolved location.
+  #[cfg(unix)]
+  fn scope_paths(&self) -> (Option<Vec<PathBuf>>, Vec<PathBuf>)
+  where
+    TAllowDesc: AsRef<PathDescriptor>,
+    TAllowDesc::DenyDesc: AsRef<PathDescriptor>,
+  {
+    fn push(out: &mut Vec<PathBuf>, desc: &PathDescriptor) {
+      out.push(desc.path.clone());
+      if let Some(resolved) = &desc.resolved {
+        out.push(resolved.path.clone());
+      }
+    }
+    let mut roots = Vec::new();
+    let mut denies = Vec::new();
+    for desc in self.descriptors.iter() {
+      match desc {
+        UnaryPermissionDesc::Granted(d) => push(&mut roots, d.as_ref()),
+        UnaryPermissionDesc::FlagDenied(d)
+        | UnaryPermissionDesc::FlagIgnored(d)
+        | UnaryPermissionDesc::PromptDenied(d) => push(&mut denies, d.as_ref()),
+      }
+    }
+    let roots = if self.flag_denied_global
+      || self.flag_ignored_global
+      || self.prompt_denied_global
+    {
+      Some(Vec::new())
+    } else if self.granted_global {
+      None
+    } else {
+      Some(roots)
+    };
+    (roots, denies)
   }
 
   pub fn is_allow_all(&self) -> bool {
@@ -2159,6 +2282,46 @@ impl PathDescriptor {
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
 pub struct ReadDescriptor(pub PathDescriptor);
+
+impl AsRef<PathDescriptor> for ReadDescriptor {
+  fn as_ref(&self) -> &PathDescriptor {
+    &self.0
+  }
+}
+
+impl AsRef<PathDescriptor> for WriteDescriptor {
+  fn as_ref(&self) -> &PathDescriptor {
+    &self.0
+  }
+}
+
+/// denext: see [`UnaryPermission::scope_stamp`].
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScopeStamp {
+  flags: [bool; 4],
+  generation: u64,
+}
+
+/// denext: the scopes of race-safe opens, derived from the read and write
+/// permissions and kept until those change (a scope holds its roots open).
+#[cfg(unix)]
+#[derive(Default)]
+struct OpenScopeCache {
+  stamp: Option<(ScopeStamp, ScopeStamp)>,
+  read: Option<Arc<checked_open::OpenScope>>,
+  write: Option<Arc<checked_open::OpenScope>>,
+  read_write: Option<Arc<checked_open::OpenScope>>,
+}
+
+#[cfg(unix)]
+impl std::fmt::Debug for OpenScopeCache {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("OpenScopeCache")
+      .field("stamp", &self.stamp)
+      .finish_non_exhaustive()
+  }
+}
 
 impl AllowDescriptor for ReadDescriptor {
   type QueryDesc<'a> = ReadQueryDescriptor<'a>;
@@ -5821,6 +5984,9 @@ type ResolvedHostsCache = Arc<Mutex<HashMap<(String, u16), Vec<IpAddr>>>>;
 pub struct PermissionsContainer {
   descriptor_parser: Arc<dyn PermissionDescriptorParser>,
   inner: Arc<Mutex<Permissions>>,
+  /// denext: see [`PermissionsContainer::open_scope`].
+  #[cfg(unix)]
+  open_scopes: Arc<Mutex<OpenScopeCache>>,
   /// Hosts already resolved for the import deny check. See
   /// [`PermissionsContainer::resolve_host`].
   resolved_import_hosts: ResolvedHostsCache,
@@ -5988,6 +6154,8 @@ impl PermissionsContainer {
     Self {
       descriptor_parser,
       inner: Arc::new(Mutex::new(perms)),
+      #[cfg(unix)]
+      open_scopes: Default::default(),
       resolved_import_hosts: Default::default(),
     }
   }
@@ -5996,6 +6164,8 @@ impl PermissionsContainer {
     Self {
       descriptor_parser: self.descriptor_parser.clone(),
       inner: Arc::new(Mutex::new(self.inner.lock().clone())),
+      #[cfg(unix)]
+      open_scopes: Default::default(),
       resolved_import_hosts: Default::default(),
     }
   }
@@ -6011,6 +6181,8 @@ impl PermissionsContainer {
     Self {
       descriptor_parser: self.descriptor_parser.clone(),
       inner: Arc::new(Mutex::new(permissions)),
+      #[cfg(unix)]
+      open_scopes: Default::default(),
       resolved_import_hosts: Default::default(),
     }
   }
@@ -6352,9 +6524,92 @@ impl PermissionsContainer {
     )? {
       OpenGrants::AllGranted(path) => Ok(path),
       OpenGrants::Special(special_path) => {
-        self.check_special_file(special_path, access_kind, api_name)
+        let path =
+          self.check_special_file(special_path, access_kind, api_name)?;
+        Ok(self.with_open_scope(path, access_kind))
       }
     }
+  }
+
+  /// denext: `path`, checked for `access_kind`, with the scope its
+  /// operation opens it in (see [`CheckedPath::open_scope`]).
+  #[cfg_attr(not(unix), allow(unused_mut, unused_variables))]
+  fn with_open_scope<'a>(
+    &self,
+    mut path: CheckedPath<'a>,
+    access_kind: OpenAccessKind,
+  ) -> CheckedPath<'a> {
+    #[cfg(unix)]
+    {
+      path.scope = OpenScopeRef(self.open_scope(&path, access_kind));
+    }
+    path
+  }
+
+  /// denext: the scope an access of `access_kind` to `path` is opened in:
+  /// the allow roots and denies of the read permission, the write
+  /// permission, or both (a root of one inside a root of the other; every
+  /// deny), as they are now. `None` when nothing narrows the access (it is
+  /// granted everywhere and nothing is denied), when a permission broker
+  /// decides instead, and for the kernel's own trees (`/dev`, Linux `/proc`
+  /// and `/sys`: [`checked_open::opens_by_name`]), which the special-file
+  /// check decides.
+  ///
+  /// The scopes are derived once and kept until the read or write
+  /// permission changes (a prompt's answer, a revoke).
+  #[cfg(unix)]
+  fn open_scope(
+    &self,
+    path: &Path,
+    access_kind: OpenAccessKind,
+  ) -> Option<Arc<checked_open::OpenScope>> {
+    if has_broker() || checked_open::opens_by_name(path) {
+      return None;
+    }
+    let inner = self.inner.lock();
+    let read = access_kind.is_read() && !inner.read.is_allow_all();
+    let write = access_kind.is_write() && !inner.write.is_allow_all();
+    if !read && !write {
+      return None;
+    }
+    let stamp = (inner.read.scope_stamp(), inner.write.scope_stamp());
+    let mut cache = self.open_scopes.lock();
+    if cache.stamp != Some(stamp) {
+      *cache = OpenScopeCache {
+        stamp: Some(stamp),
+        ..Default::default()
+      };
+    }
+    // an access that reads and writes where only one of the two is
+    // narrowed is held to that one
+    let slot = match (read, write) {
+      (true, false) => &mut cache.read,
+      (false, true) => &mut cache.write,
+      _ => &mut cache.read_write,
+    };
+    if let Some(scope) = slot {
+      return Some(scope.clone());
+    }
+    let (roots, denies) = match (read, write) {
+      (true, false) => inner.read.scope_paths(),
+      (false, true) => inner.write.scope_paths(),
+      _ => {
+        let (read_roots, mut denies) = inner.read.scope_paths();
+        let (write_roots, write_denies) = inner.write.scope_paths();
+        denies.extend(write_denies);
+        (
+          checked_open::intersect_roots(read_roots, write_roots),
+          denies,
+        )
+      }
+    };
+    // a scope that can't be built (a path that isn't absolute) holds
+    // nothing: every open in it is refused
+    let scope = checked_open::OpenScope::new(roots, denies)
+      .unwrap_or_else(|_| checked_open::OpenScope::nothing());
+    let scope = Arc::new(scope);
+    *slot = Some(scope.clone());
+    Some(scope)
   }
 
   /// The grant half of `check_open()`: the read / write allow and deny
@@ -6379,6 +6634,7 @@ impl PermissionsContainer {
             requested: None,
           },
           canonicalized: false,
+          scope: OpenScopeRef::default(),
         }));
       }
       let should_check_read =
@@ -6825,6 +7081,7 @@ impl PermissionsContainer {
           requested: None,
         },
         canonicalized: false,
+        scope: OpenScopeRef::default(),
       })
     } else {
       let desc = self.descriptor_parser.parse_path_query(path)?.into_write();
@@ -6840,6 +7097,7 @@ impl PermissionsContainer {
           requested: desc.0.requested.map(Cow::Owned),
         },
         canonicalized: false,
+        scope: OpenScopeRef::default(),
       })
     }
   }
@@ -6865,6 +7123,7 @@ impl PermissionsContainer {
           requested: None,
         },
         canonicalized: false,
+        scope: OpenScopeRef::default(),
       })
     } else {
       let desc = self.descriptor_parser.parse_path_query(path)?.into_write();
@@ -6879,6 +7138,7 @@ impl PermissionsContainer {
           requested: desc.0.requested.map(Cow::Owned),
         },
         canonicalized: false,
+        scope: OpenScopeRef::default(),
       })
     }
   }
@@ -7036,6 +7296,7 @@ impl PermissionsContainer {
           requested: requested.map(Cow::Owned),
         },
         canonicalized,
+        scope: OpenScopeRef::default(),
       });
     }
 
@@ -7048,6 +7309,7 @@ impl PermissionsContainer {
           requested: requested.map(Cow::Owned),
         },
         canonicalized,
+        scope: OpenScopeRef::default(),
       });
     }
 
@@ -7085,6 +7347,7 @@ impl PermissionsContainer {
           requested: requested.map(Cow::Owned),
         },
         canonicalized,
+        scope: OpenScopeRef::default(),
       });
     }
 
@@ -7099,6 +7362,7 @@ impl PermissionsContainer {
             requested: requested.map(Cow::Owned),
           },
           canonicalized,
+          scope: OpenScopeRef::default(),
         });
       }
       if path.starts_with("/dev")
@@ -7135,6 +7399,7 @@ impl PermissionsContainer {
             requested: requested.map(Cow::Owned),
           },
           canonicalized,
+          scope: OpenScopeRef::default(),
         });
       }
 
@@ -7167,6 +7432,7 @@ impl PermissionsContainer {
         requested: requested.map(Cow::Owned),
       },
       canonicalized,
+      scope: OpenScopeRef::default(),
     })
   }
 
