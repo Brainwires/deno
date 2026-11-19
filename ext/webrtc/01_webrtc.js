@@ -1759,11 +1759,14 @@ const STATS_TIME_FIELDS = [
 
 function engineStats(pc, key, sender) {
   const base = performance.timeOrigin + performance.now();
-  const entries = op_webrtc_pc_get_stats(
-    pc[_rid],
-    key ?? 0,
-    key !== null,
-    sender,
+  const entries = ArrayPrototypeMap(
+    op_webrtc_pc_get_stats(
+      pc[_rid],
+      key ?? 0,
+      key !== null,
+      sender,
+    ),
+    plainStats,
   );
   for (let i = 0; i < entries.length; ++i) {
     const stats = entries[i];
@@ -1773,6 +1776,18 @@ function engineStats(pc, key, sender) {
     }
   }
   return refineStats(pc, entries, base);
+}
+
+// A stats object is a dictionary (webrtc-stats 5, `RTCStats`): an ordinary
+// object, as its records (`qualityLimitationDurations`) are. The op hands
+// over null-prototype objects, which have no `hasOwnProperty`.
+function plainStats(value) {
+  if (value === null || typeof value !== "object") return value;
+  if (ArrayIsArray(value)) return ArrayPrototypeMap(value, plainStats);
+  const out = {};
+  // The op's objects have no prototype: this sees their own members only.
+  for (const key in value) out[key] = plainStats(value[key]);
+  return out;
 }
 
 // Members the engine fills with an empty string, `Unspecified` or a zero
