@@ -1040,6 +1040,19 @@ function failChannel(channel, cause) {
   }
 }
 
+// W3C "announce the RTCDataChannel as open" for a channel the remote peer
+// opened: a task after the `datachannel` event's.
+function announceOpen(pc, channel) {
+  const next = op_void_async_deferred();
+  if (!pc[_state].active) core.unrefOpPromise(next);
+  PromisePrototypeThen(next, () => {
+    if (pc[_state].closed) return;
+    const state = channel[_state];
+    if (state.readyState !== "open") return;
+    fire(channel, new Event("open"));
+  });
+}
+
 function toBinary(channel, data) {
   if (channel[_state].binaryType === "blob") {
     return new Blob([data]);
@@ -4968,7 +4981,10 @@ function dispatchEngineEvent(pc, event) {
     case "dcopen": {
       let channel = channelFor(pc, event);
       if (channel === undefined) {
-        // Opened by the remote peer: announced with `datachannel`.
+        // Opened by the remote peer: announced with `datachannel`. Its
+        // readyState is already "open" there (so it can send), and `open`
+        // follows in a task of its own (W3C "announce the channel as open"):
+        // a channel closed in the `datachannel` handler reports no `open`.
         channel = new RTCDataChannel(illegalConstructorKey, pc, {
           channel: event.channel,
           id: event.id,
@@ -4982,7 +4998,7 @@ function dispatchEngineEvent(pc, event) {
         });
         MapPrototypeSet(pc[_channels], event.channel, channel);
         fire(pc, new RTCDataChannelEvent("datachannel", { channel }));
-        fire(channel, new Event("open"));
+        announceOpen(pc, channel);
         break;
       }
       if (channel[_state].readyState !== "connecting") break;
