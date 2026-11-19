@@ -2,6 +2,8 @@
 
 mod interface;
 mod ops;
+#[cfg(unix)]
+mod scoped;
 mod std_fs;
 
 pub use deno_io::fs::FsError;

@@ -16,7 +16,8 @@
 //!
 //! Opt-in only: `auto` applies nothing in this release line, `warn`
 //! reports, `enforce` applies the policy (or refuses to start when a rule
-//! can't be held), and `broker` refuses to start (Mode B isn't built yet).
+//! can't be held), and `broker` is `enforce` under a supervising broker
+//! (Mode B; its file side is built, its network side not yet).
 
 pub mod enforce;
 pub mod inherit;
@@ -1073,9 +1074,9 @@ pub fn info(cli_options: &CliOptions) -> KernelSandboxInfo {
     warnings.push(
       "kernel sandbox: no enforcer for this OS is built into this runtime; --kernel-sandbox=enforce and broker refuse to start".to_string(),
     );
-  } else if !policy::BROKER_BUILT {
+  } else if !policy::BROKER_NET_BUILT {
     warnings.push(
-      "kernel sandbox: the supervising broker (Mode B) is not built in yet; --kernel-sandbox=broker refuses to start, and enforce refuses rules only the broker can hold".to_string(),
+      "kernel sandbox: the supervising broker (Mode B) holds file rules only (a write deny inside a write allow on Linux); its network side is not built in yet, so --kernel-sandbox=broker and enforce refuse rules only that side can hold (hosts, Unix sockets by path on Linux, module fetches after start)".to_string(),
     );
   }
   if caps.os == TargetOs::Linux && caps.landlock_abi.is_none() {

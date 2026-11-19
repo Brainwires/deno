@@ -15,7 +15,7 @@ use serde::Serialize;
 
 /// Bumped whenever the serialized shape changes; a plan of another format is
 /// refused.
-pub const PLAN_FORMAT: u32 = 1;
+pub const PLAN_FORMAT: u32 = 2;
 
 /// The largest plan a hand-over carries (a read expansion is at most some
 /// tens of thousands of paths).
@@ -71,6 +71,30 @@ pub struct EnforcePlan {
   /// rule is among the plan's rules. Part of the equality.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub cache_overlay: Option<PathBuf>,
+  /// `--kernel-sandbox=broker`: the process runs under a supervising
+  /// broker, which holds these grants (Deno's own read and write rules,
+  /// exactly). Part of the equality: the confined image runs only under the
+  /// broker policy it compiles itself.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub broker: Option<BrokerPlan>,
+  /// The entries a write expansion allows (Linux,
+  /// [`LinuxPlan::expand_write`]): like [`Self::expanded`], measured by the
+  /// first image and checked against the roots by the new one.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub expanded_write: Vec<PathBuf>,
+}
+
+/// What the supervising broker holds: the run's read and write grants and
+/// denies as Deno's checks hold them (the user's, never the runtime's
+/// implicit set). `None` lists are unscoped grants. Every scope appears as
+/// written and, where it differs, resolved.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrokerPlan {
+  pub read: Option<Vec<PathBuf>>,
+  pub deny_read: Vec<PathBuf>,
+  pub write: Option<Vec<PathBuf>>,
+  pub deny_write: Vec<PathBuf>,
 }
 
 impl EnforcePlan {
@@ -80,6 +104,7 @@ impl EnforcePlan {
     Self {
       module_files: Vec::new(),
       expanded: Vec::new(),
+      expanded_write: Vec::new(),
       ..self.clone()
     }
   }
@@ -90,15 +115,29 @@ impl EnforcePlan {
   /// above one, at most [`MAX_EXPANDED`] of them. Anything else could widen
   /// the read scope past what the policy says, so it is an error.
   pub fn check_expanded(&self) -> Result<(), String> {
+    let linux = self.linux.as_ref();
+    Self::check_entries(
+      &self.expanded,
+      linux.map(|l| &l.expand[..]).unwrap_or(&[]),
+    )?;
+    Self::check_entries(
+      &self.expanded_write,
+      linux.map(|l| &l.expand_write[..]).unwrap_or(&[]),
+    )
+  }
+
+  fn check_entries(
+    expanded: &[PathBuf],
+    roots: &[ExpandRoot],
+  ) -> Result<(), String> {
     use std::path::Component;
-    if self.expanded.len() > MAX_EXPANDED {
+    if expanded.len() > MAX_EXPANDED {
       return Err(format!(
         "{} expanded entries, more than {MAX_EXPANDED}",
-        self.expanded.len()
+        expanded.len()
       ));
     }
-    let roots = self.linux.as_ref().map(|l| &l.expand[..]).unwrap_or(&[]);
-    for path in &self.expanded {
+    for path in expanded {
       let plain = path.is_absolute()
         && path
           .components()
@@ -263,6 +302,13 @@ pub struct LinuxPlan {
   /// The read expansions; their entries are [`EnforcePlan::expanded`].
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub expand: Vec<ExpandRoot>,
+  /// The write expansions (a write deny inside a write allow, under the
+  /// broker): the folder and the folders on the way to the deny get no
+  /// write rule, so the kernel refuses changes directly in them (the
+  /// broker makes those for Deno's own operations); every other entry gets
+  /// one. Their entries are [`EnforcePlan::expanded_write`].
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub expand_write: Vec<ExpandRoot>,
   pub net: NetPlan,
   /// Landlock ABI 6 scopes.
   pub scope_signal: bool,
@@ -367,6 +413,8 @@ mod tests {
       expanded: expanded.iter().map(PathBuf::from).collect(),
       config_env: Vec::new(),
       cache_overlay: None,
+      broker: None,
+      expanded_write: Vec::new(),
     }
   }
 

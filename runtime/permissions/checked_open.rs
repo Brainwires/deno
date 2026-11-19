@@ -2068,4 +2068,170 @@ mod tests {
       );
     }
   }
+  #[test]
+  fn a_file_root_is_that_one_name() {
+    let t = tree();
+    let file = t.allowed.join("dir/f");
+    fs::write(t.allowed.join("dir/sibling"), "sibling").unwrap();
+    // a link beside the file root, to its sibling and to the outside
+    symlink("sibling", t.allowed.join("dir/to-sibling")).unwrap();
+    let opts = CheckedOpenOptions::new().read(true);
+    for walk in [true, false] {
+      let scope = OpenScope::new(Some(vec![file.clone()]), vec![])
+        .unwrap()
+        .force_component_walk(walk);
+      let opened = open_checked(&scope, &file, &opts).unwrap();
+      let mut text = String::new();
+      {
+        use std::io::Read;
+        opened.into_std_file().read_to_string(&mut text).unwrap();
+      }
+      assert_eq!(text, "checked");
+      // nothing else in its folder
+      for other in ["dir/sibling", "dir/to-sibling", "dir", "dir2"] {
+        assert!(
+          open_checked(&scope, &t.allowed.join(other), &opts)
+            .unwrap_err()
+            .is_not_capable(),
+          "{other}"
+        );
+      }
+      // the root replaced by a link to its sibling: followed, refused
+      fs::remove_file(&file).unwrap();
+      symlink("sibling", &file).unwrap();
+      assert!(
+        open_checked(&scope, &file, &opts)
+          .unwrap_err()
+          .is_not_capable()
+      );
+      fs::remove_file(&file).unwrap();
+      fs::write(&file, "checked").unwrap();
+    }
+  }
+
+  #[test]
+  fn custom_flags_keep_the_options_in_charge() {
+    let opts = CheckedOpenOptions::new()
+      .read(true)
+      .custom_flags(libc::O_WRONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    // the access mode stays the options'; O_NOFOLLOW becomes the policy
+    assert_eq!(opts.flags() & libc::O_ACCMODE, libc::O_RDONLY);
+    assert_eq!(opts.symlinks, Symlinks::NoFollowFinal);
+    assert!(opts.flags() & libc::O_NONBLOCK != 0);
+    assert_eq!(opts.flags() & libc::O_NOFOLLOW, 0);
+    #[cfg(target_os = "linux")]
+    {
+      let opts = CheckedOpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_TMPFILE | libc::O_PATH);
+      assert_eq!(opts.flags() & libc::O_PATH, 0);
+      assert_eq!(opts.flags() & libc::O_TMPFILE, 0);
+      assert_eq!(opts.flags() & libc::O_DIRECTORY, 0);
+      let opts = CheckedOpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY);
+      assert!(opts.flags() & libc::O_DIRECTORY != 0);
+    }
+  }
+
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn a_path_only_open_follows_links_like_any_other() {
+    let t = tree();
+    symlink("dir/f", t.allowed.join("to-f")).unwrap();
+    symlink(t.outside.join("f"), t.allowed.join("to-secret")).unwrap();
+    let kind = |file: &CheckedFile| {
+      // SAFETY: zeroed is a valid stat; the call fills it
+      let mut st: libc::stat = unsafe { std::mem::zeroed() };
+      // SAFETY: a valid descriptor and buffer
+      unsafe { libc::fstat(file.as_fd().as_raw_fd(), &mut st) };
+      st.st_mode & libc::S_IFMT
+    };
+    for scope in scopes(&t, vec![]) {
+      let follow = CheckedOpenOptions::new().path_only(true);
+      let file =
+        open_checked(&scope, &t.allowed.join("to-f"), &follow).unwrap();
+      assert_eq!(kind(&file), libc::S_IFREG);
+      assert_eq!(file.real_path().unwrap(), t.allowed.join("dir/f"));
+      // the link itself with no-follow
+      let nofollow = follow.clone().symlinks(Symlinks::NoFollowFinal);
+      let link =
+        open_checked(&scope, &t.allowed.join("to-f"), &nofollow).unwrap();
+      assert_eq!(kind(&link), libc::S_IFLNK);
+      // a link that leaves the scope is never named through
+      assert!(
+        open_checked(&scope, &t.allowed.join("to-secret"), &follow)
+          .unwrap_err()
+          .is_not_capable()
+      );
+    }
+  }
+
+  #[test]
+  fn remove_dir_all_never_enters_a_link() {
+    let t = tree();
+    let victim = t.allowed.join("tree");
+    fs::create_dir_all(victim.join("a/b")).unwrap();
+    fs::write(victim.join("a/b/f"), "x").unwrap();
+    symlink(&t.outside, victim.join("a/out")).unwrap();
+    symlink(t.outside.join("f"), victim.join("file-link")).unwrap();
+    for scope in scopes(&t, vec![]) {
+      if !victim.exists() {
+        fs::create_dir_all(victim.join("a")).unwrap();
+        symlink(&t.outside, victim.join("a/out")).unwrap();
+      }
+      let parent = parent_checked(&scope, &victim).unwrap();
+      let kinds = open_checked(
+        &scope,
+        &victim,
+        &CheckedOpenOptions::new().read(true).directory(true),
+      )
+      .unwrap()
+      .read_dir_kinds()
+      .unwrap();
+      assert!(kinds.iter().any(|(n, k)| n == "a" && *k == EntryKind::Dir));
+      parent.remove_dir_all().unwrap();
+      assert!(!victim.exists());
+      // what the links pointed at is untouched
+      assert_eq!(fs::read_to_string(t.outside.join("f")).unwrap(), "secret");
+      assert_eq!(
+        fs::read_to_string(t.outside.join("dir/f")).unwrap(),
+        "secret"
+      );
+    }
+    // the entry itself swapped for a link to the outside: not entered
+    symlink(&t.outside, &victim).unwrap();
+    let scope = &scopes(&t, vec![])[0];
+    let parent = parent_checked(scope, &victim).unwrap();
+    assert!(parent.remove_dir_all().is_err());
+    assert!(t.outside.join("f").exists());
+  }
+
+  #[test]
+  fn roots_intersect_to_the_inner_one() {
+    let p = |s: &str| PathBuf::from(s);
+    assert_eq!(intersect_roots(None, None), None);
+    assert_eq!(
+      intersect_roots(Some(vec![p("/a")]), None),
+      Some(vec![p("/a")])
+    );
+    assert_eq!(
+      intersect_roots(
+        Some(vec![p("/a"), p("/b/c"), p("/d")]),
+        Some(vec![p("/a/x"), p("/b"), p("/e")])
+      ),
+      Some(vec![p("/a/x"), p("/b/c")])
+    );
+    assert_eq!(
+      intersect_roots(Some(vec![p("/a")]), Some(vec![])),
+      Some(vec![])
+    );
+    assert!(opens_by_name(Path::new("/dev/null")));
+    assert!(opens_by_name(Path::new("/dev/fd/3")));
+    assert!(!opens_by_name(Path::new("/device")));
+    assert_eq!(
+      opens_by_name(Path::new("/proc/self/fd/0")),
+      cfg!(target_os = "linux")
+    );
+  }
 }

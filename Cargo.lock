@@ -2968,6 +2968,7 @@ dependencies = [
  "same-file",
  "serde",
  "sys_traits",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "windows-sys 0.59.0",

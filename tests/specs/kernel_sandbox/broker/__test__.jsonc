@@ -1,0 +1,60 @@
+// denext (DENEXT.md item 9xx): --kernel-sandbox=broker, the supervising
+// broker (Mode B). The program runs confined in a child of the supervisor;
+// what the kernel can't hold to Deno's rule exactly, the broker does.
+// Linux: a write deny inside a write allow. The kernel refuses changes
+// directly in the folders that lead to the deny (native code and children
+// get that view); Deno's own operations there go through the broker, which
+// holds the deny exactly. macOS holds the deny in the kernel; the supervisor
+// and its broker run all the same.
+{
+  "tempDir": true,
+  "tests": {
+    "write_deny_is_exact": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        { "args": "run --quiet -A setup.ts", "output": "" },
+        {
+          "args": "run --quiet --kernel-sandbox=broker --allow-ffi --allow-read=. --allow-write=out --deny-write=out/keep write_deny.ts",
+          "output": "write_deny.out"
+        }
+      ]
+    },
+    // enforce takes the broker by itself where it closes a gap (Linux: the
+    // write deny); on macOS enforce holds it alone
+    "enforce_chooses_the_broker": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        { "args": "run --quiet -A setup.ts", "output": "" },
+        {
+          "args": "run --quiet --kernel-sandbox=enforce --allow-ffi --allow-read=. --allow-write=out --deny-write=out/keep write_deny.ts",
+          "output": "write_deny.out"
+        }
+      ]
+    },
+    // the supervisor exits as the program exits
+    "exit_code": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet --kernel-sandbox=broker --allow-write=out exit.ts",
+      "output": "leaving\n",
+      "exitCode": 7
+    },
+    // the report names the shape and the broker's part
+    "report": {
+      "if": "kernelSandboxEnforceLinux",
+      "steps": [
+        { "args": "run --quiet -A setup.ts", "output": "" },
+        {
+          "args": "run --kernel-sandbox=broker --kernel-sandbox-report --allow-read=. --allow-write=out --deny-write=out/keep exit0.ts",
+          "output": "report.out"
+        }
+      ]
+    },
+    // a rule only the broker's network side could hold still refuses
+    "network_side_not_built": {
+      "if": "kernelSandboxEnforceLinux",
+      "args": "run --quiet --kernel-sandbox=broker --allow-net=example.com exit0.ts",
+      "output": "net.out",
+      "exitCode": 1
+    }
+  }
+}

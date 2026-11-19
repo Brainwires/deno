@@ -29,6 +29,7 @@ use super::protocol;
 use super::protocol::CHOWN_KEEP;
 use super::protocol::MAX_PAYLOAD;
 use super::protocol::OpenFlags;
+use super::protocol::Remove;
 use super::protocol::Request;
 use super::protocol::Response;
 use super::protocol::Time;
@@ -232,10 +233,10 @@ impl BrokerClient {
     })
   }
 
-  pub fn remove(&self, path: &Path, dir: bool) -> io::Result<()> {
+  pub fn remove(&self, path: &Path, what: Remove) -> io::Result<()> {
     self.done(&Request::Remove {
       path: wire_path(path)?,
-      dir,
+      what,
     })
   }
 

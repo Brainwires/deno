@@ -65,7 +65,7 @@
 //! | 0x0003 | `Received` | | (no response: the last response's descriptor arrived) |
 //! | 0x0010 | `Open` | `path`, `flags: u32` ([`OpenFlags`]), `mode: u32` | `Ok` + a descriptor |
 //! | 0x0011 | `Mkdir` | `path`, `mode: u32` | `Ok` |
-//! | 0x0012 | `Remove` | `path`, `dir: u32` (0 a file or link, 1 a directory) | `Ok` |
+//! | 0x0012 | `Remove` | `path`, `what: u32` (0 a file or link, 1 an empty directory, 2 a directory and everything in it) | `Ok` |
 //! | 0x0013 | `Rename` | `from: path`, `to: path`, `flags: u32` (1: don't replace) | `Ok` |
 //! | 0x0014 | `Symlink` | `target: bytes`, `link: path` | `Ok` |
 //! | 0x0015 | `Link` | `existing: path`, `new: path` | `Ok` |
@@ -266,6 +266,17 @@ fn is_wire_path(bytes: &[u8]) -> bool {
     .all(|c| !c.is_empty() && c != b"." && c != b"..")
 }
 
+/// What [`Request::Remove`] removes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remove {
+  /// A file, or a symlink itself.
+  File,
+  /// An empty directory.
+  Dir,
+  /// A directory and everything in it (no link in it is followed).
+  Tree,
+}
+
 /// What the confined side asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -289,7 +300,7 @@ pub enum Request {
   },
   Remove {
     path: WirePath,
-    dir: bool,
+    what: Remove,
   },
   Rename {
     from: WirePath,
@@ -604,9 +615,13 @@ pub fn encode_request(id: u32, request: &Request) -> Vec<u8> {
       w.path(path);
       w.u32(*mode);
     }
-    Request::Remove { path, dir } => {
+    Request::Remove { path, what } => {
       w.path(path);
-      w.u32(u32::from(*dir));
+      w.u32(match what {
+        Remove::File => 0,
+        Remove::Dir => 1,
+        Remove::Tree => 2,
+      });
     }
     Request::Rename {
       from,
@@ -696,7 +711,12 @@ pub fn decode_request(
     },
     0x0012 => Request::Remove {
       path: r.path("path")?,
-      dir: r.flag("dir", 1)?,
+      what: match r.u32()? {
+        0 => Remove::File,
+        1 => Remove::Dir,
+        2 => Remove::Tree,
+        _ => return Err(ProtocolError::Field("what")),
+      },
     },
     0x0013 => Request::Rename {
       from: r.path("from")?,
@@ -856,11 +876,15 @@ pub(crate) mod tests {
       },
       Request::Remove {
         path: path("/a/b"),
-        dir: false,
+        what: Remove::File,
       },
       Request::Remove {
         path: path("/a/dir"),
-        dir: true,
+        what: Remove::Dir,
+      },
+      Request::Remove {
+        path: path("/a/dir"),
+        what: Remove::Tree,
       },
       Request::Rename {
         from: path("/a/b"),
@@ -1062,14 +1086,27 @@ pub(crate) mod tests {
     // a boolean that is neither 0 nor its bit
     let remove = Request::Remove {
       path: path("/a"),
-      dir: true,
+      what: Remove::Dir,
     };
     assert_eq!(
       reframe(&remove, &|p| {
         let n = p.len();
+        p[n - 4] = 3;
+      }),
+      Err(ProtocolError::Field("what"))
+    );
+    // a boolean that is neither 0 nor its bit
+    let rename = Request::Rename {
+      from: path("/a"),
+      to: path("/b"),
+      noreplace: true,
+    };
+    assert_eq!(
+      reframe(&rename, &|p| {
+        let n = p.len();
         p[n - 4] = 2;
       }),
-      Err(ProtocolError::Field("dir"))
+      Err(ProtocolError::Field("flags"))
     );
     // nanoseconds of a second or more
     let utime = Request::Utime {

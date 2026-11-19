@@ -44,6 +44,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use super::protocol::OpenFlags;
+use super::protocol::Remove;
 use super::protocol::Request;
 #[cfg(target_os = "linux")]
 use super::protocol::Time;
@@ -180,11 +181,18 @@ impl FsBroker {
     }
   }
 
-  fn remove(&self, path: &WirePath, dir: bool) -> Reply {
-    match self.parent(&self.write, path) {
-      Ok(parent) if dir => done(parent.remove_dir()),
-      Ok(parent) => done(parent.remove_file()),
-      Err(reply) => reply,
+  fn remove(&self, path: &WirePath, what: Remove) -> Reply {
+    let parent = match self.parent(&self.write, path) {
+      Ok(parent) => parent,
+      Err(reply) => return reply,
+    };
+    match what {
+      Remove::File => done(parent.remove_file()),
+      Remove::Dir => done(parent.remove_dir()),
+      // a tree that holds a denied path stays (Deno's own check refuses a
+      // recursive removal over a deny too); nothing in it is followed
+      Remove::Tree if self.holds_a_deny(&parent) => Reply::denied(),
+      Remove::Tree => done(parent.remove_dir_all()),
     }
   }
 
@@ -375,7 +383,7 @@ impl Handler for FsBroker {
       }
       Request::Open { path, flags, mode } => self.open(path, *flags, *mode),
       Request::Mkdir { path, mode } => self.mkdir(path, *mode),
-      Request::Remove { path, dir } => self.remove(path, *dir),
+      Request::Remove { path, what } => self.remove(path, *what),
       Request::Rename {
         from,
         to,

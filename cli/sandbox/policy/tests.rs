@@ -15,7 +15,7 @@ use pretty_assertions::assert_eq;
 use super::*;
 
 // the rows below describe a runtime without the broker or the overmount
-const _: () = assert!(!BROKER_BUILT && !OVERMOUNT_BUILT);
+const _: () = assert!(BROKER_FS_BUILT && !BROKER_NET_BUILT && !OVERMOUNT_BUILT);
 
 fn linux(abi: Option<u32>) -> Capabilities {
   Capabilities {
@@ -431,11 +431,9 @@ fn fs_rows() {
           deny(&c.policy.fs.deny_write, "/out/keep"),
           DenyEnforcement::Broker
         );
-        // the broker isn't built yet (BROKER_BUILT): one fatal gap says so
+        // the broker's file side holds it: nothing fatal is left
         let fatal: Vec<_> = c.fatal_gaps().collect();
-        assert_eq!(fatal.len(), 1, "{fatal:#?}");
-        assert_eq!(fatal[0].class, GapClass::Enforcer);
-        assert_eq!(fatal[0].rule, BROKER_RULE);
+        assert!(fatal.is_empty(), "{fatal:#?}");
       },
     },
     Row {

@@ -43,10 +43,18 @@ use sha2::Digest;
 /// Bumped whenever the serialized shape changes (part of the policy hash).
 pub const POLICY_FORMAT: u32 = 1;
 
-/// Whether this runtime has the supervising broker (Mode B). Not yet: a
-/// policy that needs it carries a fail-open gap, so `enforce` refuses to
-/// start rather than apply rules nothing holds.
-pub const BROKER_BUILT: bool = false;
+/// Whether this runtime's supervising broker (Mode B) has the file
+/// operations: a write deny inside a write allow on Linux is then held
+/// exactly (the kernel refuses changes directly in the folders that lead to
+/// the deny; the broker makes them for Deno's own operations).
+pub const BROKER_FS_BUILT: bool = true;
+
+/// Whether the broker has the network side (connecting and binding by
+/// host, name resolution, Unix sockets by path, module fetches after
+/// start). Not yet: a policy that needs it carries a fail-open gap, so
+/// `enforce` and `broker` refuse to start rather than apply rules nothing
+/// holds.
+pub const BROKER_NET_BUILT: bool = false;
 
 /// Whether this runtime overmounts denied paths in a user + mount namespace
 /// (the exact Linux read deny). Not yet: the model falls back to expansion
@@ -1462,7 +1470,7 @@ impl KernelPolicy {
       rules.dedup();
       let mut mode_b =
         Compiler::new(options, implicit, ctx, Shape::ModeB).run();
-      if !BROKER_BUILT && !rules.is_empty() {
+      if !rules.is_empty() {
         // say which rules made the broker necessary, and what they are
         let needs = broker_needs(host_net, rules.len());
         for gap in &mut mode_b.gaps {
@@ -1496,7 +1504,7 @@ const BROKER_RULE: &str = "--kernel-sandbox (broker)";
 
 /// The broker gap's opening words.
 const BROKER_NOT_BUILT: &str =
-  "the supervising broker (Mode B) is not built into this runtime yet";
+  "the supervising broker's network side is not built into this runtime yet";
 
 /// What the broker gap says would be held by Deno's checks only: the
 /// host-scoped network when that is the one rule that needs the broker,
@@ -1873,7 +1881,23 @@ impl<'a> Compiler<'a> {
         && !self.caps.supports(Feature::FsTruncate),
       vsock,
     };
-    if self.caps.enforcer_built && self.shape == Shape::ModeB && !BROKER_BUILT {
+    // what of Mode B this policy leans on: the file side (a write deny
+    // held by the broker) is built; the network side (hosts, Unix sockets
+    // by path on Linux, module fetches after start) is not yet
+    let needs_net_side = matches!(net, NetPolicy::Broker { .. })
+      || (self.os() == TargetOs::Linux
+        && matches!(unix, UnixPolicy::Paths { .. }))
+      || (!self.ctx().compiled
+        && !matches!(net, NetPolicy::Open)
+        && self.opts().allow_import.is_some());
+    let needs_fs_side = deny_write
+      .iter()
+      .any(|d| d.enforcement == DenyEnforcement::Broker);
+    if self.caps.enforcer_built
+      && self.shape == Shape::ModeB
+      && ((needs_net_side && !BROKER_NET_BUILT)
+        || (needs_fs_side && !BROKER_FS_BUILT))
+    {
       let needs = match &net {
         NetPolicy::Broker { .. } => "host-scoped network",
         _ => "these rules",

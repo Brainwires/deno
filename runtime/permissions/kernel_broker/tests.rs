@@ -27,6 +27,7 @@ use super::fs::FsBroker;
 use super::fs::FsPolicy;
 use super::protocol;
 use super::protocol::OpenFlags;
+use super::protocol::Remove;
 use super::protocol::Request;
 use super::protocol::Response;
 use super::protocol::Time;
@@ -292,9 +293,10 @@ fn name_operations_hold_the_deny() {
   assert_eq!(fs::read(bed.p("allowed/hard")).unwrap(), b"other");
   c.truncate(&bed.p("allowed/other"), 2).unwrap();
   assert_eq!(fs::read(bed.p("allowed/other")).unwrap(), b"ot");
-  c.remove(&bed.p("allowed/hard"), false).unwrap();
-  c.remove(&bed.p("allowed/made/moved"), false).unwrap();
-  c.remove(&bed.p("allowed/made"), true).unwrap();
+  c.remove(&bed.p("allowed/hard"), Remove::File).unwrap();
+  c.remove(&bed.p("allowed/made/moved"), Remove::File)
+    .unwrap();
+  c.remove(&bed.p("allowed/made"), Remove::Dir).unwrap();
   assert!(!bed.p("allowed/made").exists());
   // into, out of and inside the deny; out of and into the outside
   let denied: &[(&str, &str)] = &[
@@ -333,13 +335,40 @@ fn name_operations_hold_the_deny() {
     "outside/data",
     "allowed/to-outside/data",
   ] {
-    assert_eq!(errno(c.remove(&bed.p(path), false)), libc::EACCES, "{path}");
+    assert_eq!(
+      errno(c.remove(&bed.p(path), Remove::File)),
+      libc::EACCES,
+      "{path}"
+    );
     assert_eq!(errno(c.truncate(&bed.p(path), 0)), libc::EACCES, "{path}");
   }
   // a link is removed itself, never what it points at
-  c.remove(&bed.p("allowed/to-key"), false).unwrap();
+  c.remove(&bed.p("allowed/to-key"), Remove::File).unwrap();
   // truncation never follows a link
   assert_eq!(errno(c.truncate(&bed.p("allowed/to-file"), 0)), libc::ELOOP);
+  // a tree goes with everything in it, links removed as links
+  fs::create_dir_all(bed.p("allowed/tree/deep")).unwrap();
+  fs::write(bed.p("allowed/tree/deep/f"), "f").unwrap();
+  symlink(bed.p("outside"), bed.p("allowed/tree/out")).unwrap();
+  assert_eq!(
+    errno(c.remove(&bed.p("allowed/tree"), Remove::Dir)),
+    libc::ENOTEMPTY
+  );
+  c.remove(&bed.p("allowed/tree"), Remove::Tree).unwrap();
+  assert!(!bed.p("allowed/tree").exists());
+  // never the tree that holds the deny, nor one outside
+  for path in ["allowed", "allowed/secret", "outside"] {
+    assert_eq!(
+      errno(c.remove(&bed.p(path), Remove::Tree)),
+      libc::EACCES,
+      "{path}"
+    );
+  }
+  // a link to a folder is not a tree: it is never entered
+  assert_eq!(
+    errno(c.remove(&bed.p("allowed/to-outside"), Remove::Tree)),
+    libc::ENOTDIR
+  );
   // a folder that holds a denied path doesn't move (the deny would move
   // with it)
   fs::create_dir_all(bed.p("allowed/box")).unwrap();
@@ -592,7 +621,7 @@ fn many_threads_share_the_client() {
             .open(&path, OpenFlags::WRITE.with(OpenFlags::CREATE_NEW), 0o600)
             .unwrap();
           fs::File::from(fd).write_all(b"x").unwrap();
-          live.client.remove(&path, false).unwrap();
+          live.client.remove(&path, Remove::File).unwrap();
           assert_eq!(
             errno(live.client.open(
               &root.join("secret/key"),
@@ -831,7 +860,7 @@ fn random_request(rng: &mut Rng, bed: &Bed, vocab: &[PathBuf]) -> Request {
     },
     4 => Request::Remove {
       path: path(rng),
-      dir: flag(rng),
+      what: [Remove::File, Remove::Dir, Remove::Tree][rng.below(3)],
     },
     5 => Request::Rename {
       from: path(rng),
