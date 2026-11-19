@@ -2750,16 +2750,53 @@ class RTCRtpTransceiver {
 webidl.configureInterface(RTCRtpTransceiver);
 const RTCRtpTransceiverPrototype = RTCRtpTransceiver.prototype;
 
+// webrtc-pc 5.4 "stop sending and receiving". The receiver's track ends as the
+// user agent's own doing (not track.stop()), which mediacapture-main does in a
+// queued task: the stop() call or the description that caused it returns
+// first, with the track still live (WPT RTCRtpTransceiver-stopping).
 function stopSending(transceiver) {
   const sender = transceiver[_state].sender;
   updateSenderSource(sender, sender[_state].track, null);
   const receiver = transceiver[_state].receiver;
   removeRemoteTrack(transceiver);
   closeReaders(receiver);
-  endTrack(receiver[_state].track);
+  endTrackSoon(receiver[_state].track);
   for (let i = 0; i < receiver[_state].clones.length; ++i) {
-    endTrack(receiver[_state].clones[i]);
+    endTrackSoon(receiver[_state].clones[i]);
   }
+}
+
+// A plain timer, not one of the connection's: close() ends the track at once
+// without an event, and the task then finds it ended.
+function endTrackSoon(track) {
+  if (track[_trackState].readyState === "ended") return;
+  setTimeout(() => endTrack(track), 0);
+}
+
+// webrtc-pc 5.4 "stop the RTCRtpTransceiver": [[Stopping]] and [[Stopped]]
+// (currentDirection reads "stopped"). `engine` stops the engine's transceiver
+// too (a remote description rejected its m-section); a rolled-back remote
+// offer's is gone from the engine already.
+function stopTransceiverNow(pc, transceiver, engine) {
+  const ts = transceiver[_state];
+  if (ts.stopped) return;
+  if (!ts.stopping) stopSending(transceiver);
+  ts.stopping = true;
+  ts.stopped = true;
+  if (engine) {
+    try {
+      op_webrtc_transceiver_stop(pc[_rid], transceiver[_key]);
+    } catch {
+      // The engine's transceiver is gone.
+    }
+  }
+}
+
+// A stopped transceiver leaves the connection's set of transceivers and loses
+// its mid; the engine keeps its own, which the next syncs leave out.
+function retireTransceiver(pc, transceiver) {
+  transceiver[_state].mid = null;
+  SetPrototypeAdd(pc[_state].retired, transceiver[_key]);
 }
 
 class RTCTrackEvent extends Event {
@@ -3178,6 +3215,9 @@ class RTCPeerConnection extends EventTarget {
       dtlsState: null,
       dtls: null,
       transceivers: [],
+      // wpt100:transceiver: keys of the stopped transceivers that left
+      // `transceivers` (the engine keeps them).
+      retired: new SafeSet(),
       // Remote MediaStreams by id.
       streams: new SafeMap(),
       localCandidates: [],
@@ -4346,12 +4386,14 @@ function syncTransceivers(pc, phase) {
     const t = state.transceivers[i];
     MapPrototypeSet(known, t[_key], t);
   }
+  const seen = new SafeSet();
   const next = [];
   const settled = phase !== null &&
     (phase.type === "answer" || phase.type === "rollback");
   const trackEvents = [];
   for (let i = 0; i < infos.length; ++i) {
     const info = infos[i];
+    if (SetPrototypeHas(state.retired, info.key)) continue;
     let t = MapPrototypeGet(known, info.key);
     if (t === undefined) {
       if (info.kind !== "audio" && info.kind !== "video") continue;
@@ -4368,6 +4410,7 @@ function syncTransceivers(pc, phase) {
         ? [{ active: true, scaleResolutionDownBy: 1 }]
         : [{ active: true }];
     }
+    SetPrototypeAdd(seen, info.key);
     const ts = t[_state];
     if (phase !== null && phase.type === "rollback" && info.mid === null) {
       ts.mid = null;
@@ -4381,19 +4424,26 @@ function syncTransceivers(pc, phase) {
       }
     }
     const remote = info.remote;
-    if (settled && phase.type === "answer") {
-      if (ts.stopping || (remote !== null && remote.rejected)) {
-        if (!ts.stopped) {
-          stopSending(t);
-          ts.stopping = false;
-          ts.stopped = true;
-        }
-      }
+    // webrtc-pc 4.4.1.6: a media description the remote side rejected stops
+    // its transceiver at once (an offer: [[Stopped]] while the answer is
+    // pending; WPT "Remotely stopped transceiver goes directly to stopped").
+    // In an answer this is also how a stopping transceiver becomes stopped:
+    // the offer that followed stop() rejected its m-section, and so does the
+    // answer. A stopping transceiver whose m-section the answer did not
+    // reject (stopped after the offer came in: answered inactive) stays
+    // stopping until the next offer.
+    if (
+      phase !== null && phase.type !== "rollback" && remote !== null &&
+      remote.rejected && !ts.stopped
+    ) {
+      stopTransceiverNow(pc, t, true);
     }
     if (
       phase !== null && phase.remote && phase.type !== "rollback" &&
-      remote !== null && !ts.stopped && !ts.stopping
+      remote !== null && !ts.stopped
     ) {
+      // A stopping transceiver still takes part (WPT checkStopAfterCreateOffer:
+      // the answer to an offer made before stop() fires its track event).
       const remoteSends = !remote.rejected &&
         (remote.direction === "sendrecv" || remote.direction === "sendonly");
       const receptive = ts.direction === "sendrecv" ||
@@ -4430,9 +4480,23 @@ function syncTransceivers(pc, phase) {
         removeRemoteTrack(t);
       }
     }
-    if (!(settled && ts.stopped && phase.type === "answer")) {
-      ArrayPrototypePush(next, t);
+    if (settled && phase.type === "answer" && ts.stopped) {
+      // Negotiated stopped: out of the set, without a mid (webrtc-pc 4.4.1.6).
+      retireTransceiver(pc, t);
+      continue;
     }
+    ArrayPrototypePush(next, t);
+  }
+  // Transceivers the engine no longer has: a rolled-back remote offer created
+  // them, and nothing kept them (webrtc-pc 4.4.1.6 rollback: "stop the
+  // RTCRtpTransceiver ... and remove it from the set of transceivers"). Their
+  // receiver track ends (WPT "Rollback when removing transceiver does end the
+  // track").
+  for (let i = 0; i < state.transceivers.length; ++i) {
+    const t = state.transceivers[i];
+    if (SetPrototypeHas(seen, t[_key])) continue;
+    stopTransceiverNow(pc, t, false);
+    retireTransceiver(pc, t);
   }
   state.transceivers = next;
   for (let i = 0; i < trackEvents.length; ++i) {
