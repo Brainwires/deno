@@ -26,6 +26,8 @@ const {
 } = core.ops;
 const {
   ArrayBufferPrototypeGetByteLength,
+  ArrayBufferPrototypeGetDetached,
+  ArrayBufferPrototypeGetResizable,
   ArrayBufferPrototypeSlice,
   ArrayIsArray,
   ArrayPrototypePush,
@@ -96,9 +98,29 @@ function copyMetadata(metadata) {
   return out;
 }
 
+// wpt100:S2 begin (frame data and structured clone, webrtc-encoded-transform
+// 7.4 / 8.4). The copy constructor serializes the original frame: a frame
+// whose data was transferred away cannot be, so it throws a DataCloneError.
 function copyBuffer(buffer) {
+  if (ArrayBufferPrototypeGetDetached(buffer)) {
+    throw new DOMException(
+      "The frame's data was transferred: it cannot be copied",
+      "DataCloneError",
+    );
+  }
   return ArrayBufferPrototypeSlice(buffer, 0);
 }
+
+// `attribute ArrayBuffer data`: neither a view nor (absent [AllowResizable])
+// a resizable buffer.
+function convertFrameData(value, prefix) {
+  const buffer = webidl.converters.ArrayBuffer(value, prefix);
+  if (ArrayBufferPrototypeGetResizable(buffer)) {
+    throw new TypeError(`${prefix}: a resizable ArrayBuffer is not allowed`);
+  }
+  return buffer;
+}
+// wpt100:S2 end
 
 // Metadata given to a copy constructor may change what describes the frame
 // but not where it comes from.
@@ -162,7 +184,7 @@ class RTCEncodedVideoFrame {
   }
   set data(value) {
     webidl.assertBranded(this, RTCEncodedVideoFramePrototype);
-    this[_data] = webidl.converters.ArrayBuffer(
+    this[_data] = convertFrameData(
       value,
       "Failed to set 'data' on 'RTCEncodedVideoFrame'",
     );
@@ -221,7 +243,7 @@ class RTCEncodedAudioFrame {
   }
   set data(value) {
     webidl.assertBranded(this, RTCEncodedAudioFramePrototype);
-    this[_data] = webidl.converters.ArrayBuffer(
+    this[_data] = convertFrameData(
       value,
       "Failed to set 'data' on 'RTCEncodedAudioFrame'",
     );

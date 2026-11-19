@@ -364,6 +364,8 @@ pub enum JsEvent {
     max_packet_life_time: Option<u16>,
     max_retransmits: Option<u16>,
     negotiated: bool,
+    /// The DCEP priority (RFC 8832 5.1): the peer's, for a channel it opened.
+    priority: u16,
   },
   #[serde(rename = "dcclosing")]
   DataChannelClosing { channel: u32 },
@@ -1957,6 +1959,7 @@ impl Core {
                 max_packet_life_time: channel.max_packet_life_time(),
                 max_retransmits: channel.max_retransmits(),
                 negotiated: channel.negotiated(),
+                priority: channel.priority(),
               }
             }
             RTCDataChannelEvent::OnClosing(handle) => {
@@ -2797,6 +2800,7 @@ impl Peer {
           max_packet_life_time: channel.max_packet_life_time(),
           max_retransmits: channel.max_retransmits(),
           negotiated: channel.negotiated(),
+          priority: channel.priority(),
         };
         core.events.push_back(open);
       }

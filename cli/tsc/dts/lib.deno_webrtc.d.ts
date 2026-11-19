@@ -17,6 +17,14 @@
 type RTCSdpType = "answer" | "offer" | "pranswer" | "rollback";
 
 /**
+ * The relative priority of a data channel (WebRTC Priority Control API),
+ * carried to the peer in the channel's DCEP open message.
+ *
+ * @category WebRTC
+ */
+type RTCPriorityType = "high" | "low" | "medium" | "very-low";
+
+/**
  * Where the connection is in the offer/answer exchange.
  *
  * @category WebRTC
@@ -1052,6 +1060,8 @@ interface RTCDataChannelInit {
   protocol?: string;
   negotiated?: boolean;
   id?: number;
+  /** The channel's priority, `"low"` by default. */
+  priority?: RTCPriorityType;
 }
 
 /**
@@ -1296,6 +1306,8 @@ interface RTCDataChannel extends EventTarget {
   readonly maxPacketLifeTime: number | null;
   readonly maxRetransmits: number | null;
   readonly negotiated: boolean;
+  /** The priority the channel was created with (or the peer opened it with). */
+  readonly priority: RTCPriorityType;
   onbufferedamountlow: ((this: RTCDataChannel, ev: Event) => any) | null;
   onclose: ((this: RTCDataChannel, ev: Event) => any) | null;
   onclosing: ((this: RTCDataChannel, ev: Event) => any) | null;
