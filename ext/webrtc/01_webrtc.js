@@ -5048,6 +5048,19 @@ function resumeGathering(pc) {
   });
 }
 
+// The STUN / TURN server URL an icecandidateerror names: the URL as the
+// ICE agent uses it, so a `turns:` URL carries its implied TCP transport
+// (RFC 7065 section 3: TURN over TLS runs over TCP).
+function iceErrorUrl(url) {
+  if (
+    typeof url === "string" && StringPrototypeStartsWith(url, "turns:") &&
+    !StringPrototypeIncludes(url, "?")
+  ) {
+    return `${url}?transport=tcp`;
+  }
+  return url;
+}
+
 // The `icecandidate` event that ends a media description's candidates: an
 // RTCIceCandidate whose candidate is "" (W3C webrtc-pc 5.6).
 function fireEndOfCandidates(pc) {
@@ -5108,8 +5121,11 @@ function dispatchEngineEvent(pc, event) {
         pc,
         new RTCPeerConnectionIceErrorEvent("icecandidateerror", {
           address: event.address ?? null,
-          port: event.port ?? null,
-          url: event.url,
+          // No local address was used (the server's name didn't resolve, or
+          // no socket could reach it): port 0 with the null address, as
+          // browsers report it.
+          port: event.port ?? (event.address == null ? 0 : null),
+          url: iceErrorUrl(event.url),
           errorCode: event.errorCode,
           errorText: event.errorText,
         }),
