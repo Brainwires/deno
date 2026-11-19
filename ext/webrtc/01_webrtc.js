@@ -1478,6 +1478,41 @@ class RTCCertificate {
 webidl.configureInterface(RTCCertificate);
 const RTCCertificatePrototype = RTCCertificate.prototype;
 
+// [Serializable] (W3C WebRTC 4.9.2): the serialized certificate carries its
+// key, fingerprints and expiry; it deserializes only where RTCCertificate is
+// exposed ([Exposed=Window]), so a worker gets `messageerror`.
+ObjectDefineProperty(RTCCertificatePrototype, core.hostObjectBrand, {
+  __proto__: null,
+  value: function () {
+    return {
+      type: "RTCCertificate",
+      pem: op_webrtc_certificate_to_pem(this[_certRid]),
+      expires: this.expires,
+    };
+  },
+  enumerable: false,
+  configurable: false,
+  writable: false,
+});
+
+// Registered in every realm by 98_global_scope_shared.js.
+function deserializeCertificate(serialized) {
+  const { WorkerGlobalScope } = core.loadExtScript(
+    "ext:deno_web/04_global_interfaces.js",
+  );
+  if (ObjectPrototypeIsPrototypeOf(WorkerGlobalScope.prototype, globalThis)) {
+    throw new DOMException(
+      "RTCCertificate is not exposed in a worker",
+      "DataCloneError",
+    );
+  }
+  const info = op_webrtc_certificate_from_pem(String(serialized.pem));
+  return new RTCCertificate(illegalConstructorKey, {
+    ...info,
+    expires: serialized.expires,
+  });
+}
+
 // WebCrypto's AlgorithmIdentifier as generateCertificate takes it.
 function normalizeKeygen(keygenAlgorithm) {
   if (typeof keygenAlgorithm === "string") {
@@ -5548,6 +5583,8 @@ return {
   RTCStatsReport,
   RTCTrackEvent,
   webrtcNs,
+  // wpt100:S2 for 98_global_scope_shared.js (RTCCertificate deserialization).
+  deserializeCertificate,
   // For 02_media_devices.js: the track internals a capture device needs.
   mediaInternals: {
     illegalConstructorKey,

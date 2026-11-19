@@ -149,6 +149,12 @@ core.registerCloneableResource(
   "RTCEncodedAudioFrame",
   (data) => loadEncodedTransform().deserializeFrame(data),
 );
+// wpt100:S2 RTCCertificate is Serializable: every realm can receive one
+// before WebRTC is loaded there (ext/webrtc's 01_webrtc.js).
+core.registerCloneableResource(
+  "RTCCertificate",
+  (data) => loadWebRtc().deserializeCertificate(data),
+);
 let _htmlRewriterMod;
 const loadHTMLRewriter = () =>
   _htmlRewriterMod ??
