@@ -5287,6 +5287,9 @@ class RTCPeerConnection extends EventTarget {
       }
     }
     state.iceCredentialsToReplace = replace;
+    // The next offer restarts ICE: the last created offer / answer are stale
+    // (webrtc-pc 4.4.1.5, wpt100:transceiver).
+    invalidateCreated(this);
     updateNegotiationNeeded(this);
   }
 
