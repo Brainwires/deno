@@ -1894,6 +1894,9 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       blur: c.blur(),
       key_up: c.key_up(),
       forward_keys_before_menu: c.forward_keys_before_menu(),
+      download_events: c.download_events(),
+      download_pause: c.download_pause(),
+      permission_requests: c.permission_requests(),
     }
   }
 
@@ -2050,6 +2053,49 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
 
   fn webview_set_forward_keys(&self, webview_id: u32, keys: &[String]) -> bool {
     laufey::WebView::from_id(webview_id).set_forward_keys(keys)
+  }
+
+  fn webview_download_control(
+    &self,
+    webview_id: u32,
+    download_id: u32,
+    action: deno_runtime::ops::desktop::WebViewDownloadAction,
+    path: Option<&str>,
+  ) -> Result<(), &'static str> {
+    use deno_runtime::ops::desktop::WebViewDownloadAction as Action;
+    let action = match action {
+      Action::Save => laufey::DownloadAction::Save(path.unwrap_or_default()),
+      Action::SaveAs => laufey::DownloadAction::SaveAs,
+      Action::Cancel => laufey::DownloadAction::Cancel,
+      Action::Pause => laufey::DownloadAction::Pause,
+      Action::Resume => laufey::DownloadAction::Resume,
+    };
+    laufey::WebView::from_id(webview_id)
+      .download_control(download_id, action)
+      .map_err(|e| e.code())
+  }
+
+  fn webview_permission_respond(
+    &self,
+    webview_id: u32,
+    request_id: u32,
+    allow: bool,
+  ) -> Result<(), &'static str> {
+    laufey::WebView::from_id(webview_id)
+      .permission_respond(request_id, allow)
+      .map_err(|e| e.code())
+  }
+
+  fn menu_snapshot(
+    &self,
+    kind: deno_runtime::ops::desktop::MenuSnapshotKind,
+    window_id: u32,
+  ) -> Option<String> {
+    use deno_runtime::ops::desktop::MenuSnapshotKind as Kind;
+    laufey::menu_snapshot(match kind {
+      Kind::Application => laufey::MenuKind::Application { window_id },
+      Kind::Dock => laufey::MenuKind::Dock,
+    })
   }
 
   fn set_traffic_light_position(
@@ -2492,6 +2538,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       icons: c.icons(),
       tooltips: c.tooltips(),
       destructive: c.destructive(),
+      snapshot: c.snapshot(),
     }
   }
 

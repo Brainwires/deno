@@ -14,12 +14,14 @@ import {
   desktop,
   errorOf,
   html,
+  OS,
   page,
   Report,
   shared,
   sleep,
   titledWindow,
   waitFor,
+  within,
 } from "../_shared/e2e.ts";
 import {
   activate,
@@ -45,6 +47,8 @@ const EVENTS = [
   "find-result",
   "context-menu",
   "key",
+  "download",
+  "permission-request",
   "closed",
 ];
 const appOrigin = Deno.env.get("DENO_DESKTOP_APP_ORIGIN") ?? "app://localhost";
@@ -66,6 +70,7 @@ Deno.serve((req) => {
 // The web views' pages, on a plain local http server. Page A logs to the
 // console, links to B, and reports what it can reach of the app.
 let probe: any = null;
+const DOWNLOAD_BODY = "denext-dl!\n";
 const PROBE_SCRIPT = `
 console.log("wv-a-console");
 const out = { bindings: typeof window.bindings };
@@ -107,6 +112,35 @@ for (const t of ["mousedown", "mouseup", "wheel", "mousemove"]) {
   }, true);
 }`,
       ));
+    }
+    if (path === "/dl/small") {
+      // An attachment: a navigation to it becomes a download.
+      return new Response(DOWNLOAD_BODY, {
+        headers: {
+          "content-type": "text/plain",
+          "content-disposition": 'attachment; filename="report.txt"',
+          "content-length": String(DOWNLOAD_BODY.length),
+        },
+      });
+    }
+    if (path === "/dl/slow") {
+      // 64 chunks of 64 KiB, one every 100 ms: long enough to cancel.
+      const chunk = new Uint8Array(64 * 1024).fill(120);
+      let sent = 0;
+      const body = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          if (sent++ >= 64) return controller.close();
+          controller.enqueue(chunk);
+          await sleep(100);
+        },
+      });
+      return new Response(body, {
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-disposition": 'attachment; filename="slow.bin"',
+          "content-length": String(64 * 64 * 1024),
+        },
+      });
     }
     if (path === "/probe") {
       const body = await req.json();
@@ -223,6 +257,9 @@ r.check(
       "menuAccelerators",
       "unhandledKeys",
       "forwardKeys",
+      "downloadEvents",
+      "downloadPause",
+      "permissionRequests",
     ]
       .every((k) => typeof caps[k] === "boolean") &&
     (caps.engine === null || ENGINES.includes(caps.engine)) &&
@@ -260,6 +297,345 @@ if (!caps.supported) {
   );
 } else {
   await r.step("web view", () => runSupported());
+  await r.step("web view downloads", () => runAppDownloads());
+  await r.step("web view permission requests", () => runAppPermissions());
+}
+
+/** Whether `path` exists. */
+async function exists(path: string): Promise<boolean> {
+  try {
+    await Deno.lstat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// --- downloads the app decides (laufey API 59, downloads: "app") ---
+async function runAppDownloads() {
+  const options = {
+    url: URL_B,
+    bounds: { x: 10, y: 10, width: 200, height: 120 },
+    partition: "ephemeral:e2e-app",
+    downloads: "app",
+  };
+  if (!caps.downloadEvents) {
+    const refused = await errorOf(() => win.createWebView(options));
+    r.check(
+      'no download events: downloads: "app" is refused as invalid',
+      isWebViewError(refused, "invalid"),
+      refused && describeError(refused),
+    );
+    r.na("web view download events", `engine ${caps.engine}`);
+    return;
+  }
+  const dir = await Deno.realPath(await Deno.makeTempDir({ prefix: "e2e-wv-" }));
+  const view = win.createWebView(options);
+  const log = record(view);
+  await next(log, 0, "load", (d) => d.state === "complete");
+
+  // Announced, held, then saved to exactly the chosen path.
+  view.navigate(`${BASE}/dl/small`);
+  const requested = await next(
+    log,
+    0,
+    "download",
+    (d) => d.state === "requested",
+  );
+  r.set("downloadRequested", requested?.detail ?? null);
+  r.check(
+    "a download is announced: requested, with its URL and a bare file name",
+    requested !== null && Number.isInteger(requested.detail.id) &&
+      requested.detail.url === `${BASE}/dl/small` &&
+      requested.detail.filename === "report.txt" &&
+      requested.detail.receivedBytes === 0 &&
+      requested.detail.path === undefined,
+    requested?.detail,
+  );
+  if (requested === null) {
+    view.close();
+    return;
+  }
+  const first = requested.detail.id;
+  const target = `${dir}${OS === "windows" ? "\\" : "/"}saved report.txt`;
+  await Deno.writeTextFile(target, "an older file");
+  await sleep(500);
+  r.check(
+    "nothing is written while a download waits for the app",
+    [...Deno.readDirSync(dir)].length === 1,
+  );
+  const control = (id: unknown, action: unknown, path?: unknown) =>
+    errorOf(() => (view as any).controlDownload(id, action, path));
+  r.check(
+    "controlDownload() refuses a bad id, action or path as invalid",
+    isWebViewError(await control(0, "cancel"), "invalid") &&
+      isWebViewError(await control(first, "delete"), "invalid") &&
+      isWebViewError(await control(first, "save"), "invalid") &&
+      isWebViewError(await control(first, "save", "report.txt"), "invalid") &&
+      isWebViewError(await control(first, "save", dir), "invalid") &&
+      isWebViewError(await control(first + 100000, "cancel"), "invalid"),
+  );
+  const saved = await control(first, "save", target);
+  r.check("save is accepted for a requested download", saved === null, saved);
+  const completed = await next(
+    log,
+    0,
+    "download",
+    (d) => d.id === first && d.state === "completed",
+  );
+  r.check(
+    "the saved download completes at the chosen path, replacing the file",
+    completed !== null && completed.detail.path === target &&
+      completed.detail.receivedBytes === DOWNLOAD_BODY.length &&
+      await Deno.readTextFile(target) === DOWNLOAD_BODY &&
+      [...Deno.readDirSync(dir)].length === 1,
+    completed?.detail,
+  );
+  const states = log.filter((e) =>
+    e.type === "download" && e.detail.id === first
+  ).map((e) => e.detail.state);
+  r.check(
+    "its events run requested, progressing*, completed",
+    states[0] === "requested" && states.at(-1) === "completed" &&
+      states.slice(1, -1).every((s) => s === "progressing"),
+    states,
+  );
+  r.check(
+    "a finished download refuses control: invalid",
+    isWebViewError(await control(first, "cancel"), "invalid"),
+  );
+
+  // Cancelled before the answer.
+  view.navigate(`${BASE}/dl/small`);
+  const second = (await next(
+    log,
+    0,
+    "download",
+    (d) => d.state === "requested" && d.id !== first,
+  ))?.detail.id;
+  if (second !== undefined) {
+    const cancelled = await control(second, "cancel");
+    const end = await next(
+      log,
+      0,
+      "download",
+      (d) => d.id === second && d.state === "cancelled",
+    );
+    r.check(
+      "a download cancelled before its answer reports cancelled and writes nothing",
+      cancelled === null && end !== null &&
+        [...Deno.readDirSync(dir)].length === 1,
+      cancelled,
+    );
+  } else {
+    r.fail("a second download was not announced");
+  }
+
+  // Progress, pause / resume where reported, a cancel part-way.
+  const slow = `${dir}${OS === "windows" ? "\\" : "/"}slow.bin`;
+  view.navigate(`${BASE}/dl/slow`);
+  const third = (await next(
+    log,
+    0,
+    "download",
+    (d) => d.state === "requested" && d.id !== first && d.id !== second,
+  ))?.detail.id;
+  if (third !== undefined) {
+    await control(third, "save", slow);
+    const progress = await next(
+      log,
+      0,
+      "download",
+      (d) => d.id === third && d.state === "progressing" && d.receivedBytes > 0,
+    );
+    r.check(
+      "a download in progress reports its bytes and path",
+      progress !== null && progress.detail.path === slow,
+      progress?.detail,
+    );
+    if (caps.downloadPause) {
+      const paused = await control(third, "pause");
+      const pausedEvent = await next(
+        log,
+        0,
+        "download",
+        (d) => d.id === third && d.paused === true,
+      );
+      const resumed = await control(third, "resume");
+      r.check(
+        "pause and resume are accepted and reported",
+        paused === null && pausedEvent !== null && resumed === null,
+        { paused, resumed },
+      );
+    } else {
+      r.check(
+        "no pause here: pause is unsupported",
+        isWebViewError(await control(third, "pause"), "unsupported"),
+      );
+    }
+    const cancelled = await control(third, "cancel");
+    const end = await next(
+      log,
+      0,
+      "download",
+      (d) => d.id === third && d.state === "cancelled",
+    );
+    await waitFor(async () => !(await exists(slow)), 10000);
+    r.check(
+      "a download cancelled part-way reports cancelled and leaves no file",
+      cancelled === null && end !== null && !(await exists(slow)),
+    );
+  } else {
+    r.fail("the slow download was not announced");
+  }
+
+  // Closing the view cancels a waiting download before "closed".
+  view.navigate(`${BASE}/dl/small`);
+  const fourth = (await next(
+    log,
+    0,
+    "download",
+    (d) =>
+      d.state === "requested" && ![first, second, third].includes(d.id),
+  ))?.detail.id;
+  view.close();
+  await next(log, 0, "closed", () => true, 10000);
+  await sleep(1000);
+  const closedAt = log.findIndex((e) => e.type === "closed");
+  const cancelledAt = log.findIndex((e) =>
+    e.type === "download" && e.detail.id === fourth &&
+    e.detail.state === "cancelled"
+  );
+  r.check(
+    "closing the view cancels a waiting download before closed, its last event",
+    fourth !== undefined && cancelledAt !== -1 && cancelledAt < closedAt &&
+      closedAt === log.length - 1,
+    { fourth, cancelledAt, closedAt, events: log.length },
+  );
+  r.check(
+    "a closed view's controlDownload() throws closed",
+    isWebViewError(await control(first, "cancel"), "closed"),
+  );
+  await Deno.remove(dir, { recursive: true }).catch(() => {});
+}
+
+// --- permission requests the app answers (laufey API 59) ---
+async function runAppPermissions() {
+  const options = {
+    url: URL_B,
+    bounds: { x: 10, y: 10, width: 200, height: 120 },
+    partition: "ephemeral:e2e-app-perm",
+    permissions: "app",
+  };
+  if (!caps.permissionRequests) {
+    const refused = await errorOf(() => win.createWebView(options));
+    r.check(
+      'no permission requests: permissions: "app" is refused as invalid',
+      isWebViewError(refused, "invalid"),
+      refused && describeError(refused),
+    );
+    r.na("web view permission requests", `engine ${caps.engine}`);
+    return;
+  }
+  if (!caps.evaluate) {
+    r.na("web view permission requests", "no evaluate to raise one");
+    return;
+  }
+  // WKWebView hands the embedder capture requests only.
+  const wk = caps.engine === "wkwebview";
+  const kind = wk ? "microphone" : "geolocation";
+  const ask = wk
+    ? `navigator.mediaDevices.getUserMedia({ audio: true }).then(
+        (s) => { s.getTracks().forEach((t) => t.stop()); return "granted"; },
+        (e) => "refused:" + e.name)`
+    : `new Promise((done) => navigator.geolocation.getCurrentPosition(
+        () => done("granted"), (e) => done("refused:" + e.code),
+        { timeout: 60000 }))`;
+  const view = win.createWebView(options);
+  const log = record(view);
+  await next(log, 0, "load", (d) => d.state === "complete");
+  const answer = view.evaluate(ask).catch((e: unknown) => describeError(e));
+  const requested = await next(
+    log,
+    0,
+    "permission-request",
+    (d) => d.state === "requested",
+  );
+  if (requested === null) {
+    // The engine answered by itself (no capture device in this session).
+    r.na(
+      "web view permission requests",
+      `the engine raised none for ${kind}: ${
+        JSON.stringify(await within(answer, 5000))
+      }`,
+    );
+    view.close();
+    return;
+  }
+  r.set("permissionRequested", requested.detail);
+  const id = requested.detail.id;
+  r.check(
+    "a permission request names its origin and what it asks for",
+    Number.isInteger(id) && requested.detail.origin === BASE &&
+      Array.isArray(requested.detail.permissions) &&
+      requested.detail.permissions.includes(kind) &&
+      (requested.detail.frame === undefined ||
+        requested.detail.frame.isMain === true),
+    requested.detail,
+  );
+  const respond = (rid: unknown, allow: unknown) =>
+    errorOf(() => (view as any).respondToPermissionRequest(rid, allow));
+  r.check(
+    "respondToPermissionRequest() refuses a bad id or answer as invalid",
+    isWebViewError(await respond(0, false), "invalid") &&
+      isWebViewError(await respond(id, "no"), "invalid") &&
+      isWebViewError(await respond(id + 100000, false), "invalid"),
+  );
+  const refusedIt = await respond(id, false);
+  const pageAnswer = JSON.stringify(await within(answer, 30000));
+  r.check(
+    "refusing a request is accepted and the page's request is refused",
+    refusedIt === null && pageAnswer.includes("refused"),
+    { refusedIt, pageAnswer },
+  );
+  r.check(
+    "an answered request refuses a second answer: invalid",
+    isWebViewError(await respond(id, true), "invalid"),
+  );
+
+  // A waiting request is cancelled by the view's close, before "closed".
+  const mark = log.length;
+  view.evaluate(ask).catch(() => {});
+  const again = await next(
+    log,
+    mark,
+    "permission-request",
+    (d) => d.state === "requested",
+    10000,
+  );
+  view.close();
+  await next(log, 0, "closed", () => true, 10000);
+  if (again === null) {
+    r.na(
+      "a permission request waiting at close",
+      "the engine did not ask again",
+    );
+  } else {
+    const closedAt = log.findIndex((e) => e.type === "closed");
+    const cancelledAt = log.findIndex((e) =>
+      e.type === "permission-request" && e.detail.id === again.detail.id &&
+      e.detail.state === "cancelled"
+    );
+    r.check(
+      "closing the view cancels a waiting permission request before closed",
+      cancelledAt !== -1 && cancelledAt < closedAt,
+      { cancelledAt, closedAt },
+    );
+  }
+  r.check(
+    "a closed view's respondToPermissionRequest() throws closed",
+    isWebViewError(await respond(id, false), "closed"),
+  );
 }
 
 async function runSupported() {

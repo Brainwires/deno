@@ -17913,6 +17913,65 @@ where the changes are discussed.
        "denext/flake_hunt.ts".
      - Node tests enabled: none.
 
+460. **`feat(desktop)`: laufey API 59: web view downloads and permission
+     requests the app decides, menu read-back, and a macOS panel whose show()
+     takes no keyboard** (runtime; `runtime/ops/desktop.rs`,
+     `cli/rt/desktop.rs`, `cli/rt_desktop/lib.rs`, `cli/rt_desktop/Cargo.toml`,
+     `Cargo.lock`, `cli/tsc/dts/lib.deno.desktop.d.ts`,
+     `.github/workflows/denext_runtime.yml`,
+     `.github/denext-runtime/e2e/apps/webview/main.ts`,
+     `.github/denext-runtime/e2e/apps/menus/main.ts`). laufey `83bd73d..c94192e`
+     (`feat/qutty-1`; the pin moves to the release tag when laufey cuts it).
+     - **Downloads.** `createWebView({ downloads: "app" })` (where
+       `webViewCapabilities().downloadEvents`; refused as `invalid` elsewhere,
+       never the engine's default) reports each download as `"download"`
+       events (`id`, `state`: `requested`, `progressing`, `completed`,
+       `cancelled`, `interrupted`; `url`, a bare `filename`, `mimeType`,
+       `totalBytes`, `receivedBytes`, `path`, `paused`, `canResume`, `reason`).
+       Nothing is saved until `WebView.controlDownload(id, "save", path)` or
+       `"saveAs"` (the OS save panel); `"cancel"` at any time; `"pause"` /
+       `"resume"` where `downloadPause` (CEF, WebView2). Closing the view
+       cancels its downloads before `"closed"`.
+     - **`"save"` needs write permission** for the path
+       (`check_open(..., Write)`, a `NotCapable` error otherwise): the engine,
+       not Deno's file system API, writes the file, so without the check a
+       page's download would be a write outside the app's `--allow-write`.
+     - **Permission requests.** `createWebView({ permissions: "app" })` (where
+       `permissionRequests`) reports each request as a `"permission-request"`
+       event (`id`, `origin`, `permissions`, `frame` where the engine says
+       which frame asked) answered with
+       `WebView.respondToPermissionRequest(id, allow)`; a request that goes
+       away unanswered (a navigation, the view closing) is refused and
+       reported with `state: "cancelled"`. The engine's own prompt never
+       shows.
+     - **Menu read-back**, for self-tests: `BrowserWindow.getApplicationMenu()`,
+       `Deno.desktop.getApplicationMenu()` (the macOS menu bar as it is now)
+       and `Deno.dock.getMenu()` return the native menu's items (`type`,
+       `label`, `id`, `role`, `enabled`, `checked`, `visible`, `accelerator`,
+       `submenu`) or `null`; `menuCapabilities().snapshot` says whether the
+       backend reads them.
+     - **The Dock menu** (verified, no change): `Deno.dock.setMenu()` already
+       takes full items (separators, `checked`, submenus), AppKit draws them,
+       and a click fires `"menuclick"` on `Deno.dock` with `detail.id`,
+       whether or not a window is open.
+     - **macOS panels** (laufey): `show()` of a hidden non-activating window
+       (`focusable: false`) no longer makes it key, on both backends, and on
+       CEF `focus()` no longer activates the app for one; the panel's built-in
+       join-all-Spaces is undone by `setVisibleOnAllWorkspaces(false)`
+       (checked in laufey's e2e).
+     - Engines: downloads on CEF, WKWebView (macOS 11.3+), WebView2 and
+       WebKitGTK 2.40+; pause only on CEF and WebView2. Permission requests on
+       all four; WKWebView raises only camera and microphone, WebKitGTK names
+       no frame, and Chromium (CEF) remembers a prompted kind's answer per
+       origin in the view's partition.
+     - Tests: `runtime/ops/desktop.rs` unit tests (the action names, the path
+       rule, the capability JSON), `cli/rt/desktop.rs` (the option lists), the
+       desktop e2e `webview` app (downloads: announce, hold, save, cancel,
+       pause where reported, close; permission requests: ask, refuse, close)
+       and `menus` app (read-back of the app menu and the Dock menu); laufey's
+       `webview_test`, `webview_app_checks` and menu / panel e2e.
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -17923,10 +17982,10 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457) are what the prebuilt `libdenort` carries. The CLI-side
-parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
-packaged app's launchers) are in the branch too, but a stock CLI does not run
-them; denext's own launcher provides that environment.
+449, 450, 452, 455, 457, 460) are what the prebuilt `libdenort` carries. The
+CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
+into a packaged app's launchers) are in the branch too, but a stock CLI does not
+run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
@@ -17973,10 +18032,11 @@ and CEF 156.0.28, item 356; and, for runtime 3.0.0-denext.22, API 57, title
 visibility and toolbar style and an accessory app's focused window brought to
 the front on macOS, item 361; and API 58, child web views, their keys and focus,
 item 368; and, for runtime 3.0.0-denext.25, laufey v0.8.1, item 445; and, for
-runtime 3.0.0-denext.26, laufey v0.8.2, item 453), at the commit pinned by
-`LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The same commit is the
-`laufey` git dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.2, API 58, CEF
-156.0.30).
+runtime 3.0.0-denext.26, laufey v0.8.2, item 453; and, for runtime
+3.0.0-denext.28, API 59, web view downloads and permission requests the app
+decides and menu read-back, item 460), at the commit pinned by `LAUFEY_SHA` in
+the workflow (or the `laufey_ref` input). The same commit is the `laufey` git
+dependency of `cli/rt_desktop/Cargo.toml` (API 59, CEF 156.0.30).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the

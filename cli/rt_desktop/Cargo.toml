@@ -80,12 +80,15 @@ denort = { path = "../rt", default-features = false }
 # title visibility and toolbar style, and an accessory app's focused window
 # brought to the front on macOS; API 58: child web views, their keys and
 # focus; runtime 3.0.0-denext.25: laufey v0.8.1, CEF 156.0.30; runtime
-# 3.0.0-denext.26: laufey v0.8.2), pinned to a commit of the Brainwires/laufey
-# fork's development-denext or a release branch cut from it (release/0.8.1 for
-# v0.8.1, train/laufey-0.8.2 for v0.8.2).
+# 3.0.0-denext.26: laufey v0.8.2; runtime 3.0.0-denext.28, API 59: web view
+# downloads and permission requests the app decides, menu read-back, and a
+# non-activating macOS panel's show() that takes no keyboard: laufey's
+# feat/qutty-1 until its release is tagged), pinned to a commit of the
+# Brainwires/laufey fork's development-denext or a release branch cut from it
+# (release/0.8.1 for v0.8.1, train/laufey-0.8.2 for v0.8.2).
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "83bd73d7d2ea3e62dd1b9d532db7f16fe3ae2e1a" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "c94192e00ea5bd79ccc1ce0afa27f3c46b49e592" }
 libsui.workspace = true
 
 bytes.workspace = true
