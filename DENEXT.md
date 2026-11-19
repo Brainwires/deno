@@ -18930,6 +18930,129 @@ where the changes are discussed.
        `windows_default_unaffected`, `windows_no_children`,
        `windows_child_inherits`).
      - Node tests enabled: none; no Node API changes.
+475. **`feat(ext/webrtc)`: WebRTC WPT-100: the next round of the
+     web-platform-tests, in ten streams** (`webrtc/wpt-100`; runtime and
+     tests; `ext/webrtc/{01_webrtc.js,03_encoded_transform.js,05_transfer.js,
+     06_identity.js,lib.rs,peer.rs,media.rs,media_sink.rs,ice_transport.rs,
+     header_extensions.rs,encoded_frames.rs}`,
+     `runtime/js/{11_workers.js,98_global_scope_shared.js,
+     98_global_scope_window.js,99_main.js}`, `runtime/ops/worker_host.rs`,
+     `cli/tsc/dts/lib.deno_webrtc.d.ts`, `tests/wpt/**`,
+     `tests/unit/webrtc_*_test.ts`, `Cargo.toml`). Item 460's comparison left
+     875 of the 3,338 `webrtc*` subtests at WPT `71b58bb19` failing with the
+     runner's document environment; this item takes the 663 that need no real
+     encoder (the plan's Phase 1). The WPT suite moves to `71b58bb19`, the
+     revision the browser numbers are defined at. Every pass is the unmodified
+     upstream test; subtests that pass only through the runner's media sink
+     elements are reported on their own line.
+     - **Harness:** the runner's document environment is the default for the
+       WebRTC and Media Capture directories, the test file's own markup is
+       instantiated (with named access on `window`), the runner's
+       `testdriver-vendor.js` answers `set_permission` for capture,
+       `--no-hosts` runs without `/etc/hosts` entries or sudo, a test file
+       that runs out of time reports `TIMEOUT`, Python 3.11 and newer are
+       accepted, and `mediacapture-streams` is a tracked, non-gating suite.
+       `tests/wpt/README.md` documents the tiers (T0, T1, T1m), the honesty
+       rules and the environment's features.
+     - **Transceivers:** the `stop()` lifecycle (stopping, stopped, removal,
+       the track's end) and `RTCRtpTransceiver.stopped`; a parameterless
+       `setLocalDescription()` uses `[[LastCreatedOffer]]` /
+       `[[LastCreatedAnswer]]` while still valid (a generation counter that
+       every change a new description would show moves on); an answer's
+       directions intersect the offer with the transceiver's own; sender and
+       receiver `transport` stay `null` until a description assigns one;
+       `setRemoteDescription` orders transceivers before
+       `signalingstatechange` and rejects one msid on two media sections;
+       `addTrack` or a sending direction on a remote offer's transceiver gives
+       it a sender; DTMF playout stops with a receive-only direction; a
+       receiver track unmutes when RTP resumes after a remote pause; the
+       ops' `InvalidModificationError` is a `DOMException` (one builder in
+       `99_main.js`). Engine: stopped transceivers in offers and answers,
+       m-line recycling, remote sections without `a=mid`.
+     - **ICE and DTLS:** `new RTCIceTransport()` (webrtc-ice's standalone
+       transport, nine ops in `ice_transport.rs`); `getSelectedCandidatePair()`
+       is the ICE agent's pair, and a peer-reflexive remote candidate hides
+       its address (in the stats too); a gathered candidate joins the local
+       description with its `icecandidate` event, and finished gathering fires
+       the empty end-of-candidates candidate first; rolling back the first
+       offer takes the gathering state back to `new`; an ICE restart on a
+       connected transport doesn't go back to `checking`; ICE stuck in
+       `checking` with remote candidates still to come is `disconnected`;
+       `icecandidateerror` without a local address has port 0.
+     - **Codecs and simulcast:** `getParameters().codecs` come from the
+       negotiated m-sections; `RTCRtpEncodingParameters.codec`,
+       `encodingComplexity`, `scalabilityMode` and the transaction rules;
+       simulcast encodings follow `a=rid` / `a=simulcast`; an answer's
+       m-sections must have the offer's media types, and a remote RTP section
+       with payload type 64 to 95 is an `InvalidAccessError`; an
+       `EncodedMediaTrack`'s preferences list RTX and FEC. Engine: unknown
+       media types answered rejected, static audio payload types, each
+       simulcast layer's first alternative, codec preferences that keep only
+       the repair formats they list, and the default AV1 codec's `profile=0`
+       fmtp (it said VP9's `profile-id`).
+     - **Header extensions and SDP rules:** RTP header extension control on
+       `RTCRtpTransceiver` (`getHeaderExtensionsToNegotiate`,
+       `setHeaderExtensionsToNegotiate`, `getNegotiatedHeaderExtensions`);
+       `rtpHeaderEncryptionPolicy` (Cryptex, RFC 9335, in the engine),
+       `alwaysNegotiateDataChannels`, `targetLatency` and OAuth ICE
+       credentials in `RTCConfiguration`; the RFC 8834 header extensions, with
+       the audio level measured from the frame's PCM and the capture time on
+       what a sender writes (`header_extensions.rs`); remote descriptions
+       without a DTLS fingerprint (SDES), without cryptex under `require`,
+       with remapped extension ids or with directions the offer doesn't allow
+       are refused. Engine: `tlsVersion` is `"FEFD"`.
+     - **Data channels:** a transferable `RTCDataChannel` (`05_transfer.js`,
+       a proxy over a `MessagePort` to the realm that owns it);
+       `RTCCertificate` is serializable, for a window only;
+       `RTCDataChannel.priority` (webrtc-priority, carried in the DCEP OPEN by
+       the engine); a remote channel's `open` is a task after `datachannel`;
+       `[[MaxMessageSize]]` follows each answer and `send()` checks it;
+       encoded frame data takes no resizable buffer, and a transferred one is
+       not copied. Engine: an exhausted partially reliable loss is abandoned
+       in Fast Recovery; an empty message counts as 0 bytes received.
+     - **Stats:** stats objects are ordinary dictionaries and exist from the
+       moment webrtc-stats creates them; transport stats carry the ICE and DTLS
+       state and the ICE role from the start; a stopped transceiver's RTP
+       stream stats end with the negotiation; `outbound-rtp` `active` follows
+       the encoding and `encodingIndex` is video only; `inbound-rtp`
+       `trackIdentifier` is the receiver track's id.
+     - **Media sink:** `Deno.webrtc.readFrames()` hands out a remote track's
+       received frames (`media_sink.rs`, two ops) and `getSettings()` has
+       their coded size; the WPT runner's `<video>` / `<audio>` elements
+       (`tests/wpt/runner/media_env.js`) are fed only by those frames; a remote
+       track mutes when its RTP stops and unmutes when it resumes; a receiver
+       track the user agent ends fires `ended` in a queued task. Engine: VP9
+       non-flexible mode with the scalability structure, whole H.264 / H.265
+       access units, Ogg packets by the segment table, the `SettingEngine`
+       mid generator.
+     - **Encoded transform:** `RTCRtpSender` / `RTCRtpReceiver`
+       `createEncodedStreams()`; `RTCEncodedVideoFrame` /
+       `RTCEncodedAudioFrame` `timestamp`; frame metadata `frameId`,
+       `dependencies`, `audioLevel` (a sender's the level measured from the
+       frame's PCM, absent without one) and capture times;
+       `generateKeyFrame` / `sendKeyFrameRequest` follow the spec's checks; a
+       transformed sender's frames start once the connection is up; a script
+       transformer writes back only its own frames, in order; a transform once
+       attached stays its first owner's. SFrame's dropped `…Encrypter` names
+       are not aliased.
+     - **Identity:** Identity for WebRTC (`06_identity.js`): the IdP proxy at
+       `https://<domain>/.well-known/idp-proxy/<protocol>` runs in an
+       internal permissionless script worker (`runtime/js/11_workers.js`,
+       `runtime/ops/worker_host.rs`); `setIdentityProvider`,
+       `getIdentityAssertion`, `peerIdentity`, `idpLoginUrl`,
+       `idpErrorInfo`, the `a=identity` line on created descriptions and its
+       validation on remote ones; `RTCConfiguration.peerIdentity`; `RTCError`'s
+       `idp-*` details and `httpRequestStatusCode`.
+     - Engine: Brainwires/webrtc-rs-rtc `wpt100/integration` (d24baa50) on
+       `webrtc/d28-wpt`, `FORK.md` rows for each change.
+     - Not done: no `crossOriginIsolated` global (the subtests that need it
+       stay failing); canvas capture, pixel checks, encoder scaling, SVC and
+       `AudioContext` wait for real codecs (Phase 2).
+     - Tests: `tests/unit/webrtc_{ice,codecs,hdrext,datachannel,stats,
+       transform,identity}_test.ts`; engine tests per crate (`rtc-srtp`
+       Cryptex vectors, `rtc-sctp` Fast Recovery, `rtc-media` readers,
+       `rtc-rtp` VP9).
+     - Node tests enabled: none; no Node API changes.
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -18940,7 +19063,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-474) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-475) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
