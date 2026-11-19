@@ -9,9 +9,9 @@ import {
 import {
   assert,
   denoBinary,
-  domShim,
   ManifestTestOptions,
   runPy,
+  wantsDocument,
 } from "./utils.ts";
 import { DOMParser } from "jsr:@b-fuze/deno-dom@0.1.56/wasm";
 
@@ -130,7 +130,7 @@ async function runSingleTestInner(
     url.pathname.indexOf("."),
   );
   const { title } = Object.fromEntries(_options.script_metadata || []);
-  const bundle = await generateBundle(url);
+  const bundle = await generateBundle(url, wantsDocument(url.pathname));
   const tempFile = await Deno.makeTempFile({
     prefix: "wpt-bundle-",
     suffix: ".js",
@@ -264,7 +264,10 @@ function setCurrentScript(src: string | null | undefined): string {
   });`;
 }
 
-async function generateBundle(location: URL): Promise<string> {
+async function generateBundle(
+  location: URL,
+  useDocument: boolean,
+): Promise<string> {
   const res = await fetch(location);
   const body = await res.text();
   const doc = new DOMParser().parseFromString(body, "text/html");
@@ -282,7 +285,7 @@ async function generateBundle(location: URL): Promise<string> {
     ]);
   }
   const shim = getShim(location.pathname);
-  // With `--dom-shim`, `document` is installed once `testharness.js` has run
+  // With `useDocument`, `document` is installed once `testharness.js` has run
   // (see dom_shim.js), and from then on each script sees itself as
   // `document.currentScript` while it runs.
   let domInstalled = false;
@@ -311,7 +314,7 @@ async function generateBundle(location: URL): Promise<string> {
         const contents = await res.text();
         runScript(url.href, url.href, contents);
         if (
-          domShim && !domInstalled &&
+          useDocument && !domInstalled &&
           url.pathname === "/resources/testharness.js"
         ) {
           const shimUrl = toFileUrl(

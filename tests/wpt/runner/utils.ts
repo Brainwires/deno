@@ -4,6 +4,22 @@
 import { parseArgs } from "@std/cli/parse-args";
 import { checkCiHash, join, resolve, ROOT_PATH } from "../../../tools/util.js";
 
+const args = parseArgs(Deno.args, {
+  "--": true,
+  boolean: [
+    "all",
+    "quiet",
+    "release",
+    "no-interactive",
+    "inspect-brk",
+    "no-ignore",
+    "document",
+    "no-document",
+    "dom-shim",
+  ],
+  string: ["json", "wptreport", "binary"],
+});
+
 export const {
   all,
   json,
@@ -15,21 +31,58 @@ export const {
   ["auto-config"]: autoConfig,
   ["inspect-brk"]: inspectBrk,
   ["no-ignore"]: noIgnore,
-  ["dom-shim"]: domShim,
   binary,
-} = parseArgs(Deno.args, {
-  "--": true,
-  boolean: [
-    "all",
-    "quiet",
-    "release",
-    "no-interactive",
-    "inspect-brk",
-    "no-ignore",
-    "dom-shim",
-  ],
-  string: ["json", "wptreport", "binary"],
-});
+} = args;
+
+/**
+ * The runner's document environment (tier T1, see README.md): `"auto"` gives
+ * it to the window-scoped tests of `DOCUMENT_SUITES`, `"on"` (`--document`,
+ * or its old name `--dom-shim`) to every window-scoped test, and `"off"`
+ * (`--no-document`, tier T0) to none.
+ */
+export const documentMode: "auto" | "on" | "off" = args["no-document"]
+  ? "off"
+  : args.document || args["dom-shim"]
+  ? "on"
+  : "auto";
+
+/**
+ * The suites whose window-scoped tests get the document environment by
+ * default. They test APIs the runtime implements (WebRTC, Media Capture), not
+ * the DOM: the environment is plumbing there. A suite about the DOM or HTML
+ * itself never gets it by default, since the environment would then be the
+ * thing under test.
+ */
+export const DOCUMENT_SUITES: readonly string[] = [
+  "webrtc",
+  "webrtc-encoded-transform",
+  "webrtc-extensions",
+  "webrtc-ice",
+  "webrtc-identity",
+  "webrtc-priority",
+  "webrtc-stats",
+  "webrtc-svc",
+  "mediacapture-streams",
+];
+
+/** The top-level suite directory of a test path such as `/webrtc/x.html`. */
+export function suiteOf(path: string): string {
+  return path.split("/")[1] ?? "";
+}
+
+/**
+ * Whether a test (its URL path) runs with the document environment. Only a
+ * window-scoped test gets it: a suite's own `.html` file or a `.window.js`
+ * test. An `.any.js` test is written for every global and a `.worker.js` one
+ * for a worker, so neither is defined as a document.
+ */
+export function wantsDocument(pathname: string): boolean {
+  if (documentMode === "off") return false;
+  const name = pathname.slice(pathname.lastIndexOf("/") + 1);
+  if (/\.any\./.test(name) || /\.worker\.html$/.test(name)) return false;
+  return documentMode === "on" ||
+    DOCUMENT_SUITES.includes(suiteOf(pathname));
+}
 
 export function denoBinary() {
   if (binary) {

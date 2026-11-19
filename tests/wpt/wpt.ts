@@ -242,7 +242,11 @@ Options:
     --wptreport=<file> Write results in wptreport format
     --inspect-brk      Attach V8 inspector to each test
     --no-ignore        Include tests marked with {"ignore": true}
-    --dom-shim         Give .html tests a small layout-free document
+    --no-document      Run window-scoped tests without the runner's document
+                       environment (tier T0; it is on by default for the
+                       WebRTC and Media Capture suites)
+    --document         Give every window-scoped test the document environment
+                       (--dom-shim is the old name)
     --exit-zero        Exit with code 0 even on failures
 `);
     Deno.exit(1);
@@ -523,7 +527,11 @@ Options:
     --json=<file>      Write test results as JSON
     --inspect-brk      Attach V8 inspector to each test
     --no-ignore        Include tests marked with {"ignore": true}
-    --dom-shim         Give .html tests a small layout-free document
+    --no-document      Run window-scoped tests without the runner's document
+                       environment (tier T0; it is on by default for the
+                       WebRTC and Media Capture suites)
+    --document         Give every window-scoped test the document environment
+                       (--dom-shim is the old name)
 `);
     Deno.exit(1);
   }
