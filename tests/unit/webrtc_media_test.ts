@@ -455,12 +455,12 @@ Deno.test("sframeEncryptsWhatASenderSends", async () => {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   const a = new RTCPeerConnection();
   const b = new RTCPeerConnection();
+  const encryptor = new RTCRtpSFrameEncryptor({ cipherSuite });
+  const decryptor = new RTCRtpSFrameDecryptor({ cipherSuite });
   try {
     const sender = a.addTrack(stream.getTracks()[0], stream);
-    const encryptor = new RTCRtpSFrameEncryptor({ cipherSuite });
     await encryptor.setEncryptionKey(key, 9);
     sender.transform = encryptor;
-    const decryptor = new RTCRtpSFrameDecryptor({ cipherSuite });
     const errors: string[] = [];
     // Without its key the receiver can't decrypt: the frames are SFrames
     // with KID 9.
@@ -484,6 +484,13 @@ Deno.test("sframeEncryptsWhatASenderSends", async () => {
     a.close();
     b.close();
     stream.getTracks().forEach((t) => t.stop());
+    // Frames taken before close() are still going through WebCrypto (one
+    // after another: an AES op, then an HMAC op). Each transform's key
+    // changes join the same queue, so awaiting one waits for those frames;
+    // otherwise the last frame's HMAC can start after this test's leak
+    // check and finish during the next test.
+    await encryptor.setEncryptionKey(key, 9);
+    await decryptor.removeDecryptionKey(9);
   }
 });
 
