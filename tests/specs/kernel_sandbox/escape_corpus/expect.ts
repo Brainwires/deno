@@ -83,7 +83,11 @@ export function expectEnforce(
   if (vector === "nested-closed") return new Set(["n/a"]);
   if (IP_CELLS.has(cell)) return net ? GRANTED : HELD;
   if (NON_IP_NET_CELLS.has(cell)) return HELD;
-  if (cell === "net.netlink-route") return net ? EITHER : HELD;
+  // route netlink (interface listing) goes with any network grant, the
+  // broker-held one included
+  if (cell === "net.netlink-route") {
+    return net || config.startsWith("net-host") ? EITHER : HELD;
+  }
   if (cell === "exec.run-list") {
     if (run) return EITHER;
     return vector === "child" ? new Set(["n/a"]) : HELD;
