@@ -494,7 +494,10 @@ pub fn decode_header(
   Ok(Header { kind, id, len })
 }
 
-fn encode_frame(kind: u16, id: u32, payload: &[u8]) -> Vec<u8> {
+/// A frame of `kind` around `payload` (the operations outside this module:
+/// the network kinds of [`super::net`]). `payload` must be at most
+/// [`MAX_PAYLOAD`] bytes.
+pub fn encode_frame(kind: u16, id: u32, payload: &[u8]) -> Vec<u8> {
   assert!(payload.len() <= MAX_PAYLOAD, "a payload within the cap");
   let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
   out.extend_from_slice(&MAGIC);

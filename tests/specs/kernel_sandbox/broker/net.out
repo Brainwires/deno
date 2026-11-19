@@ -1,1 +1,11 @@
-[WILDCARD]network side is not built into this runtime yet[WILDCARD]
+Deno.connect, a granted name: ping
+fetch, a granted name: hello from the granted server
+node:net, a granted name: pong
+node:http, a granted name: hello from the granted server
+Deno.listen, a granted address: ping
+node:net server, a granted address: node
+Deno.connect, a port the grant doesn't name: NotCapable: Requires net access to "localhost:PORT", run again with the --allow-net flag
+Deno.connect, another spelling of an address: PermissionDenied: refused by the kernel sandbox's broker: connecting to 127.0.0.1:PORT is not something the network grant allows
+Deno.listenDatagram, a granted address: PermissionDenied: refused by the kernel sandbox's broker: a UDP socket on 127.0.0.2:0 (one can send to any address, so a host-scoped grant has none) is not something the network grant allows
+native connect to the granted port: refused
+inner exited with 0

@@ -104,16 +104,44 @@ pub async fn op_node_getaddrinfo(
   }
 
   let hostname_clone = hostname.clone();
-  let resolved_ips =
-    spawn_blocking(move || getaddrinfo_inner(&hostname_clone, family, hints))
-      .await
-      .map_err(|e| DnsError::Io(e.into()))??;
+  let resolved_ips = spawn_blocking(move || {
+    // denext: under a kernel sandbox with a broker, the broker resolves
+    // (only the names the grant holds); this process has no resolver socket.
+    match deno_net_route::resolve(&hostname_clone) {
+      Some(addrs) => routed_addrinfo(addrs?, &hostname_clone, family),
+      None => getaddrinfo_inner(&hostname_clone, family, hints),
+    }
+  })
+  .await
+  .map_err(|e| DnsError::Io(e.into()))??;
 
   Ok(NetPermToken {
     hostname,
     port,
     resolved_ips,
   })
+}
+
+/// denext: the broker's answer in the shape `getaddrinfo` gives one: the
+/// addresses of the family asked for, as text.
+fn routed_addrinfo(
+  addrs: Vec<std::net::IpAddr>,
+  hostname: &str,
+  family: i32,
+) -> Result<Vec<String>, DnsError> {
+  let addrs: Vec<String> = addrs
+    .into_iter()
+    .filter(|addr| match family {
+      4 => addr.is_ipv4(),
+      6 => addr.is_ipv6(),
+      _ => true,
+    })
+    .map(|addr| addr.to_string())
+    .collect();
+  if addrs.is_empty() {
+    return Err(DnsError::Resolution(hostname.to_string()));
+  }
+  Ok(addrs)
 }
 
 fn getaddrinfo_inner(

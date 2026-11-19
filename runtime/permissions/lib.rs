@@ -6464,6 +6464,52 @@ impl PermissionsContainer {
     self.check_open_with_requested(path, access_kind, None, api_name)
   }
 
+  /// denext: checks a file that is already open by where it really is: the
+  /// check `check_open` makes of a path, made of the object the descriptor
+  /// holds. An operation that can't open through the race-safe opens
+  /// (`checked_open`) checks its path, opens it, then calls this before it
+  /// reads or hands out anything: a symlink swapped in between the check
+  /// and the open leads to a file that is refused here, and the caller
+  /// drops the descriptor. For reads only: an open that creates or
+  /// truncates has changed the file before this runs.
+  ///
+  /// A file unlinked since it was opened is refused (it can't be told
+  /// from a swapped one). Where the system can't report a descriptor's
+  /// path (Linux without `/proc`, platforms with no such query) nothing
+  /// more is checked: the path check that came before stands alone, as it
+  /// did before this existed.
+  #[cfg(unix)]
+  pub fn check_opened(
+    &self,
+    file: &impl std::os::fd::AsFd,
+    access_kind: OpenAccessKind,
+    api_name: Option<&str>,
+  ) -> Result<(), PermissionCheckError> {
+    match checked_open::opened_path(file.as_fd()) {
+      checked_open::OpenedPath::At(path) => self
+        .check_open(Cow::Owned(path), access_kind, api_name)
+        .map(|_| ()),
+      checked_open::OpenedPath::Unlinked => {
+        Err(PermissionCheckError::Io(std::io::Error::new(
+          std::io::ErrorKind::PermissionDenied,
+          "the file was removed while it was being opened",
+        )))
+      }
+      checked_open::OpenedPath::Unknown => Ok(()),
+    }
+  }
+
+  /// denext: see the Unix `check_opened`; nothing more is checked here.
+  #[cfg(not(unix))]
+  pub fn check_opened<T>(
+    &self,
+    _file: &T,
+    _access_kind: OpenAccessKind,
+    _api_name: Option<&str>,
+  ) -> Result<(), PermissionCheckError> {
+    Ok(())
+  }
+
   /// As `check_open()`, but permission error messages will anonymize the path
   /// by replacing it with the given `display`.
   #[must_use = "the resolved return value to mitigate time-of-check to time-of-use issues"]
@@ -10598,6 +10644,91 @@ mod tests {
     assert!(
       permission_error_hint("net", true, true).contains("grants unknown")
     );
+  }
+
+  // denext (DENEXT.md item 9xx): a check made after the open, of the object
+  // the descriptor holds: a link swapped in between a path check and the
+  // open leads to a file that is refused, and so is a file unlinked since.
+  #[cfg(unix)]
+  #[test]
+  #[allow(clippy::disallowed_methods, reason = "a real directory tree")]
+  fn check_opened_checks_where_the_file_is() {
+    use sys_traits::EnvTempDir;
+    set_prompter(Box::new(TestPrompter));
+    let sys = sys_traits::impls::RealSys;
+    let base = sys.env_temp_dir().unwrap().join(format!(
+      "deno_permissions_check_opened_{}",
+      std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("allowed/denied")).unwrap();
+    std::fs::create_dir_all(base.join("outside")).unwrap();
+    let base = std::fs::canonicalize(&base).unwrap();
+    let allowed = base.join("allowed");
+    std::fs::write(allowed.join("file"), "inside").unwrap();
+    std::fs::write(allowed.join("denied/file"), "denied").unwrap();
+    std::fs::write(base.join("outside/secret"), "secret").unwrap();
+
+    let parser =
+      runtime_descriptor_parser::RuntimePermissionDescriptorParser::new(sys);
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_read: Some(vec![allowed.display().to_string()]),
+        deny_read: Some(vec![allowed.join("denied").display().to_string()]),
+        prompt: false,
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    let perms = PermissionsContainer::new(Arc::new(parser), perms);
+    let opened = |path: &Path| {
+      let file = std::fs::File::open(path).unwrap();
+      perms.check_opened(&file, OpenAccessKind::Read, Some("api"))
+    };
+
+    // a file where the grant says
+    opened(&allowed.join("file")).unwrap();
+    // the path check passes for a regular file; then the name is swapped
+    // for a link out of the grant, and the open follows it
+    let name = allowed.join("swapped");
+    std::fs::write(&name, "inside").unwrap();
+    perms
+      .check_open(Cow::Borrowed(&name), OpenAccessKind::Read, Some("api"))
+      .unwrap();
+    std::fs::remove_file(&name).unwrap();
+    std::os::unix::fs::symlink(base.join("outside/secret"), &name).unwrap();
+    let err = opened(&name).unwrap_err();
+    assert!(
+      matches!(err, PermissionCheckError::PermissionDenied(_)),
+      "{err:?}"
+    );
+    // ... or for a link into a denied folder inside the grant
+    std::fs::remove_file(&name).unwrap();
+    std::os::unix::fs::symlink(allowed.join("denied/file"), &name).unwrap();
+    assert!(opened(&name).is_err());
+    // a link that stays inside the grant is the file it leads to
+    std::fs::remove_file(&name).unwrap();
+    std::os::unix::fs::symlink(allowed.join("file"), &name).unwrap();
+    opened(&name).unwrap();
+
+    // a file unlinked since it was opened can't be told from a swapped one
+    let gone = allowed.join("gone");
+    std::fs::write(&gone, "x").unwrap();
+    let file = std::fs::File::open(&gone).unwrap();
+    std::fs::remove_file(&gone).unwrap();
+    let err = perms
+      .check_opened(&file, OpenAccessKind::Read, Some("api"))
+      .unwrap_err();
+    assert!(matches!(err, PermissionCheckError::Io(_)), "{err:?}");
+
+    // a descriptor with no path (a pipe) is left to the check before it
+    let (reader, _writer) = std::io::pipe().unwrap();
+    perms
+      .check_opened(&reader, OpenAccessKind::Read, Some("api"))
+      .unwrap();
+
+    let _ = std::fs::remove_dir_all(&base);
   }
 
   // denext (DENEXT.md item 129): a confined lifecycle-script jail lets a

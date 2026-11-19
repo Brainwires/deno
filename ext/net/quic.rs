@@ -281,7 +281,13 @@ pub(crate) fn op_quic_endpoint_create(
   }
 
   let config = quinn::EndpointConfig::default();
-  let socket = std::net::UdpSocket::bind(addr)?;
+  // denext: under a kernel sandbox with a broker the socket is the
+  // broker's to make, when the grant lets it hand one out (QUIC sends from
+  // one socket to every peer).
+  let socket = match crate::routed::open_udp_socket(addr, false) {
+    Some(socket) => socket?,
+    None => std::net::UdpSocket::bind(addr)?,
+  };
   let endpoint = quinn::Endpoint::new(
     config,
     None,

@@ -11,6 +11,7 @@ pub mod ops_unix;
 mod quic;
 pub mod raw;
 pub mod resolve_addr;
+pub mod routed;
 pub mod tcp;
 pub mod tunnel;
 #[cfg(windows)]

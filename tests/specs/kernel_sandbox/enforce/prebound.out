@@ -1,0 +1,7 @@
+first listener answered: deno
+second listener answered: node
+native socket: refused
+Deno.listen: 127.0.0.1, the granted port: true
+node:net listening
+another port: NotCapable
+server exited with 0

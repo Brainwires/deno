@@ -109,6 +109,14 @@
       "args": "run --quiet --kernel-sandbox=enforce --allow-ffi --allow-net=127.0.0.1:4545 net.ts",
       "output": "net.out"
     },
+    // item 9xx: an --allow-net-listen address is bound before the sandbox
+    // applies (Linux): the confined server has no IP socket of its own, and
+    // every listener on the address gets the one bound socket
+    "prebound_listen": {
+      "if": "kernelSandboxEnforceLinux",
+      "args": "run --quiet -A prebound_outer.ts",
+      "output": "prebound.out"
+    },
     // P3 (g) as the model holds it: native code loads libraries only from
     // the read scope (macOS doesn't hold loading to the --allow-ffi paths
     // alone: a documented gap)
@@ -161,15 +169,8 @@
       "args": "run --quiet -A integrity_outer.ts",
       "output": "outside unchanged: true[WILDCARD]"
     },
-    // a rule the OS can't hold: enforce refuses, naming it (Linux: a host
-    // name needs the broker's network side; a write deny inside a write
-    // allow is the broker's now, see ../broker)
-    "inexpressible_refused": {
-      "if": "kernelSandboxEnforceLinux",
-      "args": "run --kernel-sandbox=enforce --allow-net=example.com main.ts",
-      "output": "inexpressible.out",
-      "exitCode": 1
-    },
+    // (a write deny inside a write allow on Linux is no longer refused:
+    // enforce takes the broker for it, kernel_sandbox::broker)
     // macOS: where the sandbox-exec fallback would run (forced here), the
     // report names its self-exec gap, and the listing-only entries
     "fallback_gap_reported_macos": {

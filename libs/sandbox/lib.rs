@@ -18,6 +18,12 @@
 //!   metadata and truncation, which Landlock doesn't confine everywhere.
 //! - [`proxy`] (the `proxy` feature): the allow-listing HTTP / `CONNECT`
 //!   proxy a confined process with a host list reaches the network through.
+//! - [`net_authority`] (the `proxy` feature too): the network half of the
+//!   supervising broker: what a confined process asks for through
+//!   `deno_net_route`, checked and carried out outside the sandbox.
+//! - [`net_gate`]: `connect(2)` answered by the supervisor (Linux), so a
+//!   confined process tree reaches only the addresses the gate names (the
+//!   children's proxy) on every kernel, with or without Landlock's TCP rules.
 //! - [`plan`]: the enforcement plan a process applies to itself under
 //!   `--kernel-sandbox=enforce` (compiled by the CLI from its policy model),
 //!   and [`enforce_linux`]: applying it on Linux (exec, then restrict:
@@ -42,6 +48,10 @@ pub mod inherit;
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(all(unix, feature = "proxy"))]
+pub mod net_authority;
+#[cfg(target_os = "linux")]
+pub mod net_gate;
 #[cfg(target_os = "linux")]
 pub mod notify;
 pub mod plan;

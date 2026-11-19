@@ -871,7 +871,7 @@ impl Times {
   }
 }
 
-fn errno() -> i32 {
+pub(crate) fn errno() -> i32 {
   io::Error::last_os_error()
     .raw_os_error()
     .unwrap_or(libc::EIO)
@@ -1097,7 +1097,11 @@ fn link_count(fd: &OwnedFd) -> Option<u64> {
 }
 
 /// Reads exactly `buf.len()` bytes of the caller's memory at `addr`.
-fn read_exact(tid: u32, addr: u64, buf: &mut [u8]) -> Result<(), i32> {
+pub(crate) fn read_exact(
+  tid: u32,
+  addr: u64,
+  buf: &mut [u8],
+) -> Result<(), i32> {
   if addr == 0 {
     return Err(libc::EFAULT);
   }
@@ -1151,7 +1155,7 @@ fn read_cstr(tid: u32, addr: u64, max: usize) -> Result<CString, i32> {
 }
 
 /// A copy of the caller's descriptor `fd` in this process.
-fn steal_fd(tid: u32, fd: i32) -> Result<OwnedFd, i32> {
+pub(crate) fn steal_fd(tid: u32, fd: i32) -> Result<OwnedFd, i32> {
   let tgid = tgid_of(tid).ok_or(libc::ESRCH)?;
   // SAFETY: plain syscalls; the descriptors are owned once valid
   unsafe {

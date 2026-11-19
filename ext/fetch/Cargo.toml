@@ -23,6 +23,7 @@ deno_error.workspace = true
 deno_features.workspace = true
 deno_fs.workspace = true
 deno_io.workspace = true
+deno_net_route.workspace = true
 deno_path_util.workspace = true
 deno_permissions.workspace = true
 deno_tls.workspace = true
@@ -39,6 +40,7 @@ percent-encoding.workspace = true
 rustls-webpki.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+socket2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
@@ -57,7 +59,6 @@ deno_webidl.workspace = true
 fast-socks5.workspace = true
 rustls.workspace = true
 sha2.workspace = true
-socket2.workspace = true
 sys_traits = { workspace = true, features = ["libc", "real", "winapi"] }
 
 [[bench]]

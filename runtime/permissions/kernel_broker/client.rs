@@ -183,6 +183,60 @@ impl BrokerClient {
     result
   }
 
+  /// One request of a kind outside [`Request`] (the network operations of
+  /// [`super::net`]) and its response; `returns_fd`: whether a descriptor
+  /// may come with a success. The same channel discipline as
+  /// [`Self::request`].
+  pub fn request_raw(
+    &self,
+    kind: u16,
+    payload: &[u8],
+    returns_fd: bool,
+  ) -> io::Result<(Response, Option<OwnedFd>)> {
+    if payload.len() > MAX_PAYLOAD {
+      return Err(io::Error::from_raw_os_error(libc::EMSGSIZE));
+    }
+    let sock = self.checkout()?;
+    let result = self.round_trip_raw(sock.as_fd(), kind, payload, returns_fd);
+    let mut pool = self.pool.lock();
+    match &result {
+      Ok((Response::Invalid, _)) | Err(_) => pool.total -= 1,
+      Ok(_) => pool.idle.push(sock),
+    }
+    drop(pool);
+    self.available.notify_one();
+    result
+  }
+
+  fn round_trip_raw(
+    &self,
+    sock: BorrowedFd<'_>,
+    kind: u16,
+    payload: &[u8],
+    returns_fd: bool,
+  ) -> io::Result<(Response, Option<OwnedFd>)> {
+    let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+    let frame = protocol::encode_frame(kind, id, payload);
+    transport::send_frame(sock, &frame, None)?;
+    let mut frame = transport::recv_frame(sock)?;
+    if frame.header.id != id {
+      return Err(protocol_error("another request's answer"));
+    }
+    let response = protocol::decode_response(&frame.header, &frame.payload)
+      .map_err(|err| protocol_error(&err.to_string()))?;
+    if frame.fds.len() != response.fds() || (response.fds() == 1 && !returns_fd)
+    {
+      return Err(protocol_error("an unannounced descriptor"));
+    }
+    let fd = frame.fds.pop();
+    if fd.is_some() {
+      // the broker keeps its copy open until it hears this
+      let ack = protocol::encode_request(id, &Request::Received);
+      transport::send_frame(sock, &ack, None)?;
+    }
+    Ok((response, fd))
+  }
+
   /// The features the broker serves.
   pub fn hello(&self) -> io::Result<u64> {
     match self.request(&Request::Hello {

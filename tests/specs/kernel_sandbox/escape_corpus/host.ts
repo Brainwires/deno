@@ -132,6 +132,27 @@ try {
   run = () => `n/a vector could not load: ${why}`;
 }
 
+// Under a host-scoped network grant held by the kernel sandbox's broker, a
+// connection the runtime made through it: the probes then hold a socket the
+// broker handed over (net.retarget tries to point it elsewhere). Only where
+// the grant names localhost on the granted port.
+let held: Deno.Conn | undefined;
+const grantedPort = Number(/(?:^|;)tcpg=(\d+)/.exec(cfg)?.[1]);
+if (
+  grantedPort &&
+  Deno.permissions.querySync({
+      name: "net",
+      host: `localhost:${grantedPort}`,
+    }).state === "granted"
+) {
+  try {
+    held = await Deno.connect({ hostname: "127.0.0.1", port: grantedPort })
+      .catch(() => Deno.connect({ hostname: "localhost", port: grantedPort }));
+  } catch {
+    // nothing to hold: the probes say so
+  }
+}
+
 for (const id of probes) {
   let out: string;
   try {
@@ -141,3 +162,4 @@ for (const id of probes) {
   }
   console.log(JSON.stringify({ vector: label, id, out }));
 }
+held?.close();

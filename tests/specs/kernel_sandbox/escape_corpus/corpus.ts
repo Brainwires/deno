@@ -56,6 +56,10 @@ if (!["today", "enforce"].includes(expect)) {
 // --expect=enforce: the platform column this machine is (macOS, or Linux by
 // its Landlock ABI); without a kernel enforcer here there is nothing to hold
 let column: Column | undefined;
+// whether this runtime's supervising broker (Mode B) holds the network:
+// only then can a host-scoped grant be held, and the net-host
+// configurations run
+let brokerBuilt = false;
 if (expect === "enforce") {
   const info = JSON.parse(
     new TextDecoder().decode(
@@ -74,6 +78,7 @@ if (expect === "enforce") {
     Deno.exit(0);
   }
   column = columnFor(Deno.build.os, info.landlockAbi);
+  brokerBuilt = info.brokerNetBuilt === true;
 }
 
 function sh(cmd: string, argv: string[]) {
@@ -229,6 +234,24 @@ const configs: Record<string, string[]> = expect === "enforce"
       ...files,
       `--allow-run=${work}/probe,${Deno.execPath()},/usr/bin/env,/bin/bash`,
     ],
+    // a host-scoped network grant (the broker holds it): a public name on
+    // the granted port, and localhost there, which the host connects to
+    // through the broker so the probes hold a socket it handed over
+    ...(brokerBuilt
+      ? {
+        "net-host": [
+          ...files,
+          `--allow-net=example.com:${grantedPort},localhost:${grantedPort}`,
+        ],
+        // the same with a run list: the child vector, whose only network
+        // is the broker's proxy
+        "net-host-run": [
+          ...files,
+          `--allow-net=example.com:${grantedPort},localhost:${grantedPort}`,
+          `--allow-run=${work}/probe`,
+        ],
+      }
+      : {}),
   }
   : {
     today: [
@@ -246,6 +269,11 @@ type Row = {
   cell: string;
 };
 const rows: Row[] = [];
+if (expect === "enforce" && !brokerBuilt) {
+  console.log(
+    "net-host, net-host-run (a host-scoped network grant): skipped, the supervising broker isn't built into this runtime",
+  );
+}
 for (const [config, flags] of Object.entries(configs)) {
   const grant = [
     "run",

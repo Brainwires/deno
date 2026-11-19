@@ -40,7 +40,9 @@ pub async fn connect_happy_eyeballs(
     addrs,
     attempt_delay,
     cancel_handle,
-    TcpStream::connect,
+    // A broker-held network dials through the supervisor (DENEXT.md, the
+    // kernel sandbox's network broker); otherwise a plain connect.
+    |addr| crate::routed::connect_tcp_stream(addr, None),
   )
   .await
 }

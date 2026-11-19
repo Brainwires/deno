@@ -735,16 +735,38 @@ where
             // connections it does not get the TCP keepalive settings from
             // `dns.rs` and a silently dead pooled connection is only noticed
             // once TCP gives up retransmitting.
-            let io = if let Some((user, pass)) = auth {
-              Socks5Stream::connect_with_password(
-                socks_addr,
-                (host, port),
-                &user,
-                &pass,
-              )
-              .await?
+            // denext: under a kernel sandbox with a broker the connection
+            // to the SOCKS server is the broker's to make.
+            let routed = if deno_net_route::route().is_some() {
+              Some(routed_socks_server(socks_addr.0, socks_addr.1).await?)
             } else {
-              Socks5Stream::connect(socks_addr, (host, port)).await?
+              None
+            };
+            let io = match (routed, auth) {
+              (Some(socket), Some((user, pass))) => {
+                Socks5Stream::connect_with_password_and_socket(
+                  socket,
+                  (host, port),
+                  &user,
+                  &pass,
+                )
+                .await?
+              }
+              (Some(socket), None) => {
+                Socks5Stream::connect_with_socket(socket, (host, port)).await?
+              }
+              (None, Some((user, pass))) => {
+                Socks5Stream::connect_with_password(
+                  socks_addr,
+                  (host, port),
+                  &user,
+                  &pass,
+                )
+                .await?
+              }
+              (None, None) => {
+                Socks5Stream::connect(socks_addr, (host, port)).await?
+              }
             };
             let io = TokioIo::new(io.into_inner());
 
@@ -795,7 +817,19 @@ where
               )?;
               path = resolved_path.into_owned();
             }
-            let io = UnixStream::connect(&path).await?;
+            // denext: under a kernel sandbox with a broker, the broker
+            // connects
+            let io = if deno_net_route::route().is_some() {
+              let path = std::path::PathBuf::from(&path);
+              let stream = tokio::task::spawn_blocking(move || {
+                deno_net_route::connect_unix(&path)
+              })
+              .await?
+              .ok_or("the kernel sandbox's network route is gone")??;
+              UnixStream::from_std(stream)?
+            } else {
+              UnixStream::connect(&path).await?
+            };
             Ok(Proxied::Unix(TokioIo::new(io)))
           })
         }
@@ -1282,4 +1316,48 @@ fn test_no_proxy_ip_ranges() {
   for host in &should_match {
     assert!(no_proxy.contains(host), "should contain {:?}", host);
   }
+}
+
+/// denext: a connection to the SOCKS server `host:port` from a kernel
+/// sandbox's broker (`deno_net_route`), which resolves the name itself and
+/// connects to the first address that answers.
+async fn routed_socks_server(
+  host: &str,
+  port: u16,
+) -> std::io::Result<TcpStream> {
+  let host = host
+    .strip_prefix('[')
+    .and_then(|s| s.strip_suffix(']'))
+    .unwrap_or(host)
+    .to_string();
+  tokio::task::spawn_blocking(move || {
+    let gone =
+      || std::io::Error::other("the kernel sandbox's network route is gone");
+    let addrs =
+      deno_net_route::resolve_with_port(&host, port).ok_or_else(gone)??;
+    let mut last = None;
+    for addr in addrs {
+      let request = deno_net_route::TcpConnect {
+        addr,
+        host: Some(host.clone()),
+        local: None,
+      };
+      match deno_net_route::connect_tcp(&request).ok_or_else(gone)? {
+        Ok(stream) => return Ok(stream),
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+          return Err(err);
+        }
+        Err(err) => last = Some(err),
+      }
+    }
+    Err(last.unwrap_or_else(|| {
+      std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "no addresses to connect to",
+      )
+    }))
+  })
+  .await
+  .map_err(std::io::Error::other)?
+  .and_then(TcpStream::from_std)
 }

@@ -8,6 +8,12 @@
 //   socket, no netlink beyond what isn't granted (route included).
 // - net-all: the IP cells are granted (open; held would be a wrong
 //   refusal), Unix sockets, the session bus and non-route netlink stay held.
+// - net-host, net-host-run (a host-scoped grant, held by the broker; they
+//   run only where the runtime has one): every IP cell is held. Native code
+//   and children have no socket that reaches an address: the runtime's own
+//   come from the broker, connected to what the broker checked, a socket it
+//   handed over can't be pointed elsewhere (net.retarget), and a child's
+//   connect reaches the broker's proxy only.
 // - no --allow-run (files, net-all): native code can't start programs
 //   (exec.run-list held for the in-process vectors; the child vector can't
 //   load). With a run list: by design.
@@ -65,8 +71,10 @@ export function expectEnforce(
 ): Set<string> {
   const target = CELLS[cell]?.target[column];
   const net = config === "net-all";
-  // `nested`: a run list that names the runtime as well
-  const run = config === "run" || config === "nested";
+  // `nested`: a run list that names the runtime as well; `net-host-run`:
+  // a run list under a host-scoped network grant
+  const run = config === "run" || config === "nested" ||
+    config === "net-host-run";
   // the nested deno starts only where the run list names the runtime
   if (vector.startsWith("nested") && config !== "nested") {
     return new Set(["n/a"]);
@@ -75,7 +83,11 @@ export function expectEnforce(
   if (vector === "nested-closed") return new Set(["n/a"]);
   if (IP_CELLS.has(cell)) return net ? GRANTED : HELD;
   if (NON_IP_NET_CELLS.has(cell)) return HELD;
-  if (cell === "net.netlink-route") return net ? EITHER : HELD;
+  // route netlink (interface listing) goes with any network grant, the
+  // broker-held one included
+  if (cell === "net.netlink-route") {
+    return net || config.startsWith("net-host") ? EITHER : HELD;
+  }
   if (cell === "exec.run-list") {
     if (run) return EITHER;
     return vector === "child" ? new Set(["n/a"]) : HELD;

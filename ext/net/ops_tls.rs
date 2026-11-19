@@ -490,7 +490,15 @@ pub async fn op_net_connect_tls(
 
   if let Some(path) = cert_file {
     let mut buf = Vec::new();
-    File::open(path)?.read_to_end(&mut buf)?;
+    // denext: the file that opened is checked again as the object it is (a
+    // link swapped in after the path check is refused, not read)
+    let mut file = File::open(path)?;
+    state
+      .borrow_mut()
+      .borrow_mut::<PermissionsContainer>()
+      .check_opened(&file, OpenAccessKind::Read, Some("Deno.connectTls()"))
+      .map_err(NetError::Permission)?;
+    file.read_to_end(&mut buf)?;
     ca_certs.push(buf);
   };
 
@@ -551,7 +559,7 @@ pub async fn op_net_connect_tls(
     result.stream
   } else {
     // Single address or Happy Eyeballs disabled - use first address
-    TcpStream::connect(addrs[0]).await?
+    crate::routed::connect_tcp_stream(addrs[0], Some(&addr.hostname)).await?
   };
 
   let local_addr = tcp_stream.local_addr()?;

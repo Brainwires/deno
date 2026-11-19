@@ -1,0 +1,29 @@
+// denext (DENEXT.md item 9xx): the kernel sandbox's network route. With
+// DENO_INTERNAL_KERNEL_NET_ROUTE=in-process every socket of the runtime is
+// asked of the broker's network authority (in this process: it confines
+// nothing, but it is the same authority, with the run's own grant): the
+// routed paths of Deno.connect / listen, fetch, node:net, node:http and
+// node:dns work for what the grant names, and the authority refuses what
+// only it can tell (another spelling of an address, a UDP socket under a
+// host-scoped grant). Without the variable nothing is routed.
+{
+  "tests": {
+    "routed": {
+      "if": "unix",
+      "envs": { "DENO_INTERNAL_KERNEL_NET_ROUTE": "in-process" },
+      "args": "run -A --unstable-net main.ts",
+      "output": "routed.out"
+    },
+    "not_routed": {
+      "if": "unix",
+      "args": "run -A --unstable-net main.ts",
+      "output": "not_routed.out"
+    },
+    "invalid_value_is_ignored": {
+      "if": "unix",
+      "envs": { "DENO_INTERNAL_KERNEL_NET_ROUTE": "yes" },
+      "args": "run --allow-env=NOTHING ignored.ts",
+      "output": "ignored.out"
+    }
+  }
+}

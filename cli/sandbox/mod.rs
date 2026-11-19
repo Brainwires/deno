@@ -21,6 +21,8 @@
 
 pub mod enforce;
 pub mod inherit;
+#[cfg(unix)]
+pub mod net_broker;
 pub mod policy;
 
 use std::fmt::Write as _;
@@ -925,6 +927,16 @@ pub fn render_report(
   .unwrap();
   writeln!(w, "    load code:  {}", scope_text(&p.fs.map_exec)).unwrap();
   writeln!(w, "    net:        {}", net_text(&p.net)).unwrap();
+  if !p.prebound.is_empty() {
+    let listeners: Vec<String> =
+      p.prebound.iter().map(|addr| addr.to_string()).collect();
+    writeln!(
+      w,
+      "    listeners:  bound before the sandbox applies: {}",
+      listeners.join(", ")
+    )
+    .unwrap();
+  }
   writeln!(w, "    unix:       {}", unix_text(&p.unix)).unwrap();
   let mut sys: Vec<String> = p
     .sys
@@ -1034,6 +1046,12 @@ pub struct KernelSandboxInfo {
   pub enforced: bool,
   /// Whether this runtime has an enforcer for this OS.
   pub enforcer_built: bool,
+  /// Whether this runtime has the supervising broker (Mode B) for file
+  /// rules (an exact write deny inside a write allow on Linux).
+  pub broker_built: bool,
+  /// Whether its broker holds the network too (a host-scoped
+  /// `--allow-net`, Unix sockets by path).
+  pub broker_net_built: bool,
   /// `"landlock"`, `"seccomp"`, `"seatbelt"`, `"job-object"` or `"none"`.
   pub os_sandbox: &'static str,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -1093,6 +1111,8 @@ pub fn info(cli_options: &CliOptions) -> KernelSandboxInfo {
     reason: resolution.reason.describe().to_string(),
     enforced: resolution.enforced,
     enforcer_built: caps.enforcer_built,
+    broker_built: caps.enforcer_built && policy::BROKER_FS_BUILT,
+    broker_net_built: caps.enforcer_built && policy::BROKER_NET_BUILT,
     os_sandbox: os_sandbox(&caps),
     landlock_abi: caps.landlock_abi,
     capabilities: caps,

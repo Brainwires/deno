@@ -11,8 +11,20 @@ pub async fn resolve_addr(
   port: u16,
 ) -> Result<impl Iterator<Item = SocketAddr> + '_, std::io::Error> {
   let addr_port_pair = make_addr_port_pair(hostname, port);
-  let result = lookup_host(addr_port_pair).await?;
-  Ok(result)
+  // denext: under a kernel sandbox with a broker, the broker resolves (only
+  // the names the grant holds), off this thread.
+  if crate::routed::is_routed() {
+    let host = addr_port_pair.0.to_string();
+    let addrs = tokio::task::spawn_blocking(move || {
+      deno_net_route::resolve_with_port(&host, port)
+    })
+    .await
+    .map_err(std::io::Error::other)?
+    .unwrap_or_else(|| Ok(Vec::new()))?;
+    return Ok(addrs.into_iter());
+  }
+  let result: Vec<SocketAddr> = lookup_host(addr_port_pair).await?.collect();
+  Ok(result.into_iter())
 }
 
 /// Resolve network address *synchronously*.
@@ -21,8 +33,13 @@ pub fn resolve_addr_sync(
   port: u16,
 ) -> Result<impl Iterator<Item = SocketAddr> + use<>, std::io::Error> {
   let addr_port_pair = make_addr_port_pair(hostname, port);
-  let result = addr_port_pair.to_socket_addrs()?;
-  Ok(result)
+  // denext: as in `resolve_addr`
+  if let Some(addrs) = deno_net_route::resolve_with_port(addr_port_pair.0, port)
+  {
+    return Ok(addrs?.into_iter());
+  }
+  let result: Vec<SocketAddr> = addr_port_pair.to_socket_addrs()?.collect();
+  Ok(result.into_iter())
 }
 
 fn make_addr_port_pair(hostname: &str, port: u16) -> (&str, u16) {

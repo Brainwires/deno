@@ -9,10 +9,10 @@
     "reason": "auto applies nothing yet (the kernel sandbox is an opt-in preview)",
     "enforced": false,
     "enforcerBuilt": [WILDLINE],
+    "brokerBuilt": [WILDLINE],
+    "brokerNetBuilt": [WILDLINE],
     "osSandbox": "[WILDLINE]",
 [WILDCARD]
-    "warnings": [
-      "kernel sandbox: [WILDCARD]
-    ]
+    "warnings": [WILDCARD]
   }
 }

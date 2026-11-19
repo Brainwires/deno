@@ -12,6 +12,10 @@
 //!   request; [`fs::FsBroker`] is the handler for the file operations, which
 //!   resolves every path with the race-safe opens of
 //!   [`crate::checked_open`] against its own copy of the policy.
+//! - [`net`]: the network operations (the reserved kinds): their payloads,
+//!   the broker's side of them over any `deno_net_route::NetRoute` (the
+//!   CLI's network authority), and the confined side's route, which is the
+//!   one every socket-opening crate asks through `deno_net_route`.
 //! - [`client`]: the confined side: the process-wide [`client::BrokerClient`]
 //!   the file-system operations fall back to.
 //!
@@ -23,6 +27,7 @@
 pub mod client;
 #[cfg(unix)]
 pub mod fs;
+pub mod net;
 pub mod protocol;
 #[cfg(unix)]
 pub mod server;

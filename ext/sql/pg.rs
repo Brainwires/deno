@@ -452,7 +452,9 @@ async fn open_tcp(
       .borrow_mut()
       .borrow_mut::<PermissionsContainer>()
       .check_net_connect_resolved(&addr.ip(), addr.port(), API_NAME)?;
-    match TcpStream::connect(addr).await {
+    // denext: from the kernel sandbox's broker when this process's sockets
+    // are routed
+    match deno_net::routed::connect_tcp_stream(addr, Some(hostname)).await {
       Ok(stream) => {
         let _ = stream.set_nodelay(true);
         return Ok(stream);
@@ -468,7 +470,7 @@ async fn open_tcp(
 
 #[cfg(unix)]
 async fn open_unix(path: &std::path::Path) -> Result<UnixStream, SqlError> {
-  UnixStream::connect(path)
+  deno_net::routed::connect_unix_stream(path)
     .await
     .map_err(|e| connect_failed(&path.display().to_string(), e))
 }

@@ -744,19 +744,39 @@ fn mdns_permitted(guard: &dyn NetGuard) -> Result<(), String> {
 /// The mDNS socket: port 5353 on every IPv4 interface, shared with the
 /// host's own responder (address reuse), in the mDNS group.
 fn bind_mdns(hosts: &[IpAddr]) -> std::io::Result<UdpSocket> {
-  let socket = socket2::Socket::new(
-    socket2::Domain::IPV4,
-    socket2::Type::DGRAM,
-    Some(socket2::Protocol::UDP),
-  )?;
-  socket.set_reuse_address(true)?;
-  #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
-  socket.set_reuse_port(true)?;
+  let mdns_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), MDNS_PORT);
+  // denext: under a kernel sandbox with a broker the socket is the
+  // broker's to make (bound already), when the grant lets it hand one out.
+  let routed = deno_net_route::open_udp(&deno_net_route::UdpOpen {
+    bind: mdns_addr,
+    connect: None,
+    host: None,
+    reuse_address: true,
+    reuse_port: true,
+    ipv6_only: None,
+  })
+  .transpose()?
+  .map(socket2::Socket::from);
+  let is_routed = routed.is_some();
+  let socket = match routed {
+    Some(socket) => socket,
+    None => socket2::Socket::new(
+      socket2::Domain::IPV4,
+      socket2::Type::DGRAM,
+      Some(socket2::Protocol::UDP),
+    )?,
+  };
+  if !is_routed {
+    socket.set_reuse_address(true)?;
+    #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
+    socket.set_reuse_port(true)?;
+  }
   socket.set_nonblocking(true)?;
   socket.set_multicast_ttl_v4(255)?;
   socket.set_multicast_loop_v4(true)?;
-  socket
-    .bind(&SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), MDNS_PORT).into())?;
+  if !is_routed {
+    socket.bind(&mdns_addr.into())?;
+  }
   let group = rtc::mdns::MDNS_MULTICAST_IPV4;
   let mut joined = false;
   for ip in hosts {
@@ -838,6 +858,19 @@ pub(crate) fn interface_addresses(names: Option<&[String]>) -> Vec<IpAddr> {
 /// Binds a UDP socket (an IPv6 one IPv6-only, so the two families stay
 /// apart).
 pub(crate) fn bind_udp(addr: SocketAddr) -> std::io::Result<UdpSocket> {
+  // denext: under a kernel sandbox with a broker the socket is the
+  // broker's to make, when the grant lets it hand one out (an ICE socket
+  // sends to every candidate, so a host-scoped grant has none).
+  if let Some(socket) = deno_net_route::open_udp(&deno_net_route::UdpOpen {
+    bind: addr,
+    connect: None,
+    host: None,
+    reuse_address: false,
+    reuse_port: false,
+    ipv6_only: addr.is_ipv6().then_some(true),
+  }) {
+    return UdpSocket::from_std(socket?);
+  }
   let domain = if addr.is_ipv4() {
     socket2::Domain::IPV4
   } else {
@@ -3150,6 +3183,28 @@ async fn connect_tcp(
   bind: Option<IpAddr>,
   to: SocketAddr,
 ) -> std::io::Result<tokio::net::TcpStream> {
+  // denext: from the kernel sandbox's broker when this process's sockets
+  // are routed
+  if deno_net_route::route().is_some() {
+    let request = deno_net_route::TcpConnect {
+      addr: to,
+      host: None,
+      local: bind
+        .filter(|ip| ip.is_ipv4() == to.is_ipv4())
+        .map(|ip| SocketAddr::new(ip, 0)),
+    };
+    let stream = tokio::task::spawn_blocking(move || {
+      deno_net_route::connect_tcp(&request)
+    })
+    .await
+    .map_err(std::io::Error::other)?
+    .ok_or_else(|| {
+      std::io::Error::other("the kernel sandbox's network route is gone")
+    })??;
+    let stream = tokio::net::TcpStream::from_std(stream)?;
+    let _ = stream.set_nodelay(true);
+    return Ok(stream);
+  }
   let socket = if to.is_ipv4() {
     tokio::net::TcpSocket::new_v4()?
   } else {
@@ -3346,7 +3401,9 @@ async fn connect_stream(
   server: SocketAddr,
   index: usize,
 ) -> Result<(mpsc::UnboundedSender<Vec<u8>>, SocketAddr), String> {
-  let tcp = tokio::net::TcpStream::connect(server)
+  // denext: from the kernel sandbox's broker when this process's sockets
+  // are routed
+  let tcp = deno_net::routed::connect_tcp_stream(server, Some(&spec.host))
     .await
     .map_err(|e| format!("Could not connect to {}: {e}", spec.url))?;
   let _ = tcp.set_nodelay(true);
@@ -3404,7 +3461,9 @@ async fn add_server(peer: Rc<Peer>, spec: IceServerSpec) {
     peer.poke();
   };
   let resolved: Vec<SocketAddr> =
-    match tokio::net::lookup_host((spec.host.as_str(), spec.port)).await {
+    // denext: resolved by the kernel sandbox's broker when this process's
+    // sockets are routed
+    match deno_net::resolve_addr::resolve_addr(&spec.host, spec.port).await {
       Ok(addrs) => addrs.collect(),
       Err(e) => {
         finish(&peer, Some(format!("Could not resolve {}: {e}", spec.host)));

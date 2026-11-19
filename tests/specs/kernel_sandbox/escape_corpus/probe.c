@@ -608,6 +608,60 @@ static int net_tcp4(const char *cfg, res_t *r) {
   return tcp4("connect 127.0.0.1:<ungranted port>", "127.0.0.1", cfg_int(cfg, "tcp"), r, 2000);
 }
 
+// A connected TCP socket this process holds: one it can make itself (to the
+// listener on the granted port), else one it was handed (a descriptor the
+// runtime got from the kernel sandbox's broker; the host connects one before
+// the probes run). -1 with errno when there is neither.
+static int connected_socket(const char *cfg) {
+  int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  int made = errno;
+  if (fd >= 0) {
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons((uint16_t)cfg_int(cfg, "tcpg"));
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+    int e = connect_to(fd, (struct sockaddr *)&a, sizeof a, 2000);
+    if (e == 0) return fd;
+    close(fd);
+    made = e;
+  }
+  for (int i = 3; i < 256; i++) {
+    int type = 0;
+    socklen_t tl = sizeof type;
+    struct sockaddr_storage peer;
+    socklen_t pl = sizeof peer;
+    if (getsockopt(i, SOL_SOCKET, SO_TYPE, &type, &tl) != 0 || type != SOCK_STREAM) continue;
+    if (getpeername(i, (struct sockaddr *)&peer, &pl) != 0) continue;
+    if (peer.ss_family != AF_INET && peer.ss_family != AF_INET6) continue;
+    int copy = dup(i);
+    if (copy >= 0) return copy;
+  }
+  errno = made;
+  return -1;
+}
+
+// Points a connected TCP socket somewhere else: dissolve the association
+// (connect to AF_UNSPEC), then connect to a port no grant names. Linux lets a
+// TCP socket do that; BSD-family kernels refuse the second connect.
+static int net_retarget(const char *cfg, res_t *r) {
+  int fd = connected_socket(cfg);
+  if (fd < 0) return refused(r, "a connected TCP socket to re-point", errno);
+  struct sockaddr un = {0};
+  un.sa_family = AF_UNSPEC;
+  int dissolved = connect(fd, &un, sizeof un) == 0 ? 0 : errno;
+  struct sockaddr_in a = {0};
+  a.sin_family = AF_INET;
+  a.sin_port = htons((uint16_t)cfg_int(cfg, "tcp"));
+  inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+  int e = connect_to(fd, (struct sockaddr *)&a, sizeof a, 2000);
+  close(fd);
+  if (e == 0) return put(r, OPEN, "a connected socket re-pointed at an ungranted port");
+  if (e == EISCONN || e == EINVAL || e == EOPNOTSUPP || e == EAFNOSUPPORT)
+    return put(r, NA, "this kernel doesn't re-point a connected TCP socket (dissolve: %s, connect: %s)",
+               dissolved ? strerror(dissolved) : "ok", strerror(e));
+  return refused(r, "re-pointing a connected socket", e);
+}
+
 static int net_internal_on_granted_port(const char *cfg, res_t *r) {
   return tcp4("connect 127.0.0.1 on a port granted only to a public name", "127.0.0.1",
               cfg_int(cfg, "tcpg"), r, 2000);
@@ -880,6 +934,7 @@ static const struct {
     {"net.udp", net_udp, NULL},
     {"net.dns", net_dns, NULL},
     {"net.fastopen", net_fastopen, NULL},
+    {"net.retarget", net_retarget, NULL},
     {"net.unix_path", net_unix_path, NULL},
     {"net.unix_abstract", net_unix_abstract, NULL},
     {"net.netlink_route", net_netlink_route, NULL},

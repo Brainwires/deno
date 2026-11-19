@@ -49,12 +49,14 @@
         }
       ]
     },
-    // a rule only the broker's network side could hold still refuses
-    "network_side_not_built": {
-      "if": "kernelSandboxEnforceLinux",
-      "args": "run --quiet --kernel-sandbox=broker --allow-net=example.com exit0.ts",
-      "output": "net.out",
-      "exitCode": 1
+    // a host-scoped network grant: every socket of the program is made by
+    // the broker (names resolved there, the address checked is the address
+    // connected), another spelling of an address and a UDP socket are
+    // refused by it, and native code has no socket that reaches an address
+    "host_scoped_network": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet -A --unstable-net net_outer.ts",
+      "output": "net.out"
     }
   }
 }

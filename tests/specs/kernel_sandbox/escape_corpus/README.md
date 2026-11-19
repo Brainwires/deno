@@ -108,6 +108,17 @@ Landlock (or without an enforcer for the OS) the run is skipped with the reason.
 answers so on purpose); the baseline turns it into `host` on a kernel that lacks
 them.
 
+Where the runtime's supervising broker holds the network (`deno info --json` →
+`kernelSandbox.brokerNetBuilt`), two more configurations run: `net-host`
+(`--allow-net=example.com:<port>,localhost:<port>`, a host-scoped grant) and
+`net-host-run` (the same with `--allow-run=<work>/probe`, the child vector).
+Every IP cell must be held in both, on every column: the runtime's own sockets
+come from the broker, native code can't make one, a child's `connect` reaches
+only the broker's proxy, and a socket the broker handed over can't be pointed at
+another address (`net.retarget`: the host connects to the granted listener
+through the broker first, so the probes hold such a socket). Without the broker
+the run says the two were skipped.
+
 ## Kernel matrix
 
 The same directory runs unchanged on any Linux kernel: copy it to a VM booted on

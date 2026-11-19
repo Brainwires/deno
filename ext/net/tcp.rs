@@ -196,6 +196,20 @@ fn bind_socket_and_listen(
   _reuse_port: bool,
   backlog: i32,
 ) -> Result<std::net::TcpListener, std::io::Error> {
+  // denext: under a kernel sandbox this address may have been bound before
+  // the process confined itself, or its sockets come from the broker
+  // (`deno_net_route`); either way the listener is handed over, listening.
+  if let Some(listener) =
+    deno_net_route::tcp_listener(&deno_net_route::TcpBind {
+      addr: socket_addr,
+      host: None,
+      reuse_port: REUSE_PORT_LOAD_BALANCES && _reuse_port,
+      backlog,
+      ipv6_only: None,
+    })
+  {
+    return listener;
+  }
   let socket = if socket_addr.is_ipv4() {
     socket2::Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?
   } else {

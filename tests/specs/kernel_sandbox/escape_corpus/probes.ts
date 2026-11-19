@@ -292,6 +292,7 @@ export const PROBES: Probe[] = [
   { id: "net.tcp4", cell: "net.connect" },
   { id: "net.raw_connect", cell: "net.connect" },
   { id: "net.fastopen", cell: "net.connect" },
+  { id: "net.retarget", cell: "net.connect" },
   { id: "net.tcp6", cell: "net.ipv6" },
   { id: "net.internal_granted_port", cell: "net.host" },
   { id: "net.metadata", cell: "net.internal" },

@@ -154,7 +154,9 @@ pub async fn op_net_connect_unix(
       Some("Deno.connect()"),
     )?
   };
-  let unix_stream = UnixStream::connect(address_path).await?;
+  // denext: under a kernel sandbox with a broker, the broker connects
+  let unix_stream =
+    crate::routed::connect_unix_stream(Path::new(&*address_path)).await?;
   let local_addr = unix_stream.local_addr()?;
   let remote_addr = unix_stream.peer_addr()?;
   let local_addr_path = unix_socket_addr_path(&local_addr)?;
@@ -234,7 +236,11 @@ pub fn op_net_listen_unix(
     crate::NetDirection::Listen,
     Some(&api_call_expr),
   )?;
-  let listener = UnixListener::bind(&address_path)?;
+  // denext: under a kernel sandbox with a broker, the broker binds
+  let listener = match deno_net_route::unix_listener(&address_path) {
+    Some(listener) => UnixListener::from_std(listener?)?,
+    None => UnixListener::bind(&address_path)?,
+  };
   let local_addr = listener.local_addr()?;
   let pathname = unix_socket_addr_path(&local_addr)?;
   let listener_with_path =
@@ -297,6 +303,10 @@ pub fn pathstring(pathname: &Path) -> Result<String, NetError> {
 }
 
 fn bind_unix_datagram(address_path: &Path) -> Result<UnixDatagram, NetError> {
+  // denext: under a kernel sandbox with a broker, the broker binds
+  if let Some(socket) = deno_net_route::unix_datagram(address_path) {
+    return Ok(UnixDatagram::from_std(socket?)?);
+  }
   #[cfg(any(target_os = "android", target_os = "linux"))]
   if let Some((addr, addrlen)) = unix_sockaddr_from_abstract_path(address_path)?
   {
