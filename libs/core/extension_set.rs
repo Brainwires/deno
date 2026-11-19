@@ -169,47 +169,48 @@ pub fn create_op_ctxs(
   runtime_state: Rc<JsRuntimeState>,
   enable_stack_trace_in_ops: bool,
 ) -> (OpCtxs, usize) {
-  let op_count = op_decls.iter().map(|storage| storage.len()).sum::<usize>()
-    + op_method_decls.len();
-
   // Lay the declarations out in op-context order: method ops, then regular
   // ops. Each entry is a run of declarations that the returned `OpCtxs` keeps
   // alive for the lifetime of the realm; static method tables are borrowed,
   // only the name-patched constructors need an owned copy.
   //
-  // `ids` mirrors the flattened declaration sequence: every method op carries
-  // the id of the `OpMethodDecl` it belongs to, while regular ops are numbered
-  // from the end of the method block. This is also the index handed to the op
-  // metrics factory.
+  // denext: an op's id is its index in that sequence, for method ops too, so
+  // an id names one op: `op_ctxs[id]` is the op, and the op metrics factory
+  // gets ids below the count it is told. Every method op of a class used to carry the index
+  // of its `OpMethodDecl` instead, which is the index of some other, earlier
+  // op context: a pending async method was reported under that op's name
+  // (`SubtleCrypto.sign` as `left`, a `DOMRect` getter), and all of a class's
+  // methods shared one id.
   let mut decls =
     Vec::with_capacity(op_method_decls.len() * 3 + op_decls.len());
-  let mut ids: Vec<OpId> = Vec::with_capacity(op_count);
+  let mut methods_ctx_offset = 0;
 
-  for (index, decl) in op_method_decls.iter_mut().enumerate() {
+  for decl in op_method_decls.iter_mut() {
     if let Some(mut constructor) = decl.constructor {
       constructor.name = decl.name.0;
       constructor.name_fast = decl.name.1;
 
       decls.push(OpDeclStorage::Owned(vec![constructor]));
-      ids.push(index as _);
+      methods_ctx_offset += 1;
     }
 
     for methods in [decl.methods, decl.static_methods] {
       if !methods.is_empty() {
         decls.push(OpDeclStorage::Static(methods));
-        ids.extend(std::iter::repeat_n(index as OpId, methods.len()));
+        methods_ctx_offset += methods.len();
       }
     }
   }
 
   /* method op ctxs are stored before regular op ctxs */
-  let methods_ctx_offset = ids.len();
-
-  for storage in op_decls {
-    let start = ids.len();
-    ids.extend((start..start + storage.len()).map(|id| id as OpId));
-    decls.push(storage);
-  }
+  decls.extend(op_decls);
+  // Every op context, the method ops included (the count used to add one per
+  // class to the regular ops, fewer than the ids it was handed with).
+  let op_count = decls.iter().map(|storage| storage.len()).sum::<usize>();
+  assert!(
+    op_count <= OpId::MAX as usize + 1,
+    "too many ops for an OpId: {op_count}"
+  );
 
   let runtime_state_ptr = runtime_state.as_ref() as *const _;
   let op_ctxs = OpCtxs::new(
@@ -219,7 +220,7 @@ pub fn create_op_ctxs(
     runtime_state_ptr,
     enable_stack_trace_in_ops,
     |index, decl| {
-      let id = ids[index];
+      let id = index as OpId;
       let metrics_fn = op_metrics_factory_fn
         .as_ref()
         .and_then(|f| (f)(id, op_count, decl));

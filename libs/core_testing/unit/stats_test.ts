@@ -5,6 +5,7 @@ import {
   LeakType,
   StatsFactory,
 } from "checkin:async";
+import { TestObjectWrap } from "checkin:object";
 import {
   assert,
   assertEquals,
@@ -40,6 +41,33 @@ test(async function testStatsOps() {
   using statsAfter = StatsFactory.capture();
   const diff = StatsFactory.diff(statsBefore, statsAfter);
   assert(diff.empty);
+});
+
+// denext: a pending async method of a native class is reported under its own
+// name. Its op id used to be the index of its class among the classes, which
+// as an op id is another, earlier op (here one of `DOMPointReadOnly`'s).
+test(async function testStatsOpsNameAnAsyncMethod() {
+  // deno-lint-ignore no-explicit-any
+  const opNames = (data: any[]) =>
+    data.map((item) => item[LeakType.AsyncOp]?.[2]).sort().join(",");
+  using statsBefore = StatsFactory.capture();
+  const promise = new TestObjectWrap().withAsyncFn(50);
+  using statsMiddle = StatsFactory.capture();
+  const appeared = StatsFactory.diff(statsBefore, statsMiddle).appeared;
+  assertEquals(1, appeared.count(LeakType.AsyncOp));
+  assertEquals("withAsyncFn", opNames(appeared.rawData));
+  assertEquals("withAsyncFn", opNames(statsMiddle.dump().rawData));
+  // a regular op beside it keeps its own name
+  barrierCreate("named", 2);
+  const barrier = barrierAwait("named");
+  using statsBoth = StatsFactory.capture();
+  assertEquals(
+    "op_async_barrier_await,withAsyncFn",
+    opNames(statsBoth.dump().rawData),
+  );
+  await Promise.all([promise, barrier, barrierAwait("named")]);
+  using statsAfter = StatsFactory.capture();
+  assert(StatsFactory.diff(statsBefore, statsAfter).empty);
 });
 
 test(function testStatsResources() {

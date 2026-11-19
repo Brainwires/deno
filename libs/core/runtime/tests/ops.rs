@@ -698,3 +698,148 @@ op_async_arg_error Dispatched
 op_async_arg_error Error"#
   );
 }
+
+// denext: an op's id is its index among the op contexts, for the methods of
+// a native class too. Every method op of a class used to carry the index of
+// its class instead, which as an op id is another, earlier op: a pending
+// async method was reported under that op's name.
+struct OpIdProbeA;
+
+// SAFETY: the type holds no traced member.
+unsafe impl GarbageCollected for OpIdProbeA {
+  fn trace(&self, _visitor: &mut v8::cppgc::Visitor) {}
+
+  fn get_name(&self) -> &'static std::ffi::CStr {
+    c"OpIdProbeA"
+  }
+}
+
+#[op2]
+impl OpIdProbeA {
+  #[constructor]
+  #[cppgc]
+  fn new() -> OpIdProbeA {
+    OpIdProbeA
+  }
+
+  #[fast]
+  fn first(&self) {}
+
+  #[fast]
+  fn second(&self) {}
+}
+
+struct OpIdProbeB;
+
+// SAFETY: the type holds no traced member.
+unsafe impl GarbageCollected for OpIdProbeB {
+  fn trace(&self, _visitor: &mut v8::cppgc::Visitor) {}
+
+  fn get_name(&self) -> &'static std::ffi::CStr {
+    c"OpIdProbeB"
+  }
+}
+
+#[op2]
+impl OpIdProbeB {
+  #[constructor]
+  #[cppgc]
+  fn new() -> OpIdProbeB {
+    OpIdProbeB
+  }
+
+  async fn never_ends(&self) -> Result<(), JsErrorBox> {
+    std::future::pending::<()>().await;
+    Ok(())
+  }
+}
+
+#[op2]
+async fn op_id_probe_never_ends() -> Result<(), JsErrorBox> {
+  std::future::pending::<()>().await;
+  Ok(())
+}
+
+deno_core::extension!(
+  op_id_probe_ext,
+  ops = [op_id_probe_never_ends],
+  objects = [OpIdProbeA, OpIdProbeB],
+);
+
+#[tokio::test]
+async fn op_ids_are_op_context_indexes_for_method_ops_too() {
+  let seen = Rc::new(RefCell::new(vec![]));
+  let seen_clone = seen.clone();
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![op_id_probe_ext::init()],
+    op_metrics_factory_fn: Some(Box::new(move |id, count, op| {
+      seen_clone.borrow_mut().push((id, count, op.name));
+      None
+    })),
+    ..Default::default()
+  });
+
+  // The metrics factory is told each op once, under its index, with the
+  // number of ops there are.
+  let names = runtime.op_names();
+  let seen = seen.borrow().clone();
+  assert_eq!(seen.len(), names.len());
+  for (index, (id, count, name)) in seen.into_iter().enumerate() {
+    assert_eq!(id as usize, index, "{name}");
+    assert_eq!(count, names.len(), "{name}");
+    assert_eq!(names[index], name);
+  }
+  for method in ["OpIdProbeA", "first", "second", "OpIdProbeB", "neverEnds"] {
+    assert_eq!(names.iter().filter(|name| **name == method).count(), 1);
+  }
+
+  // A pending async method, and a pending regular op, each under its own
+  // name ("neverEnds" was "first": the second class's index, 1, is the first
+  // class's first method as an op id).
+  runtime
+    .execute_script(
+      "filename.js",
+      r#"
+      const { OpIdProbeB, op_id_probe_never_ends } = Deno.core.ops;
+      globalThis.pending = [
+        new OpIdProbeB().neverEnds(),
+        op_id_probe_never_ends(),
+      ];
+      "#,
+    )
+    .unwrap();
+  let stats = runtime
+    .runtime_activity_stats_factory()
+    .capture(&crate::stats::RuntimeActivityStatsFilter::all());
+  let mut pending = stats
+    .dump()
+    .active
+    .into_iter()
+    .filter_map(|activity| match activity {
+      crate::stats::RuntimeActivity::AsyncOp(_, _, name) => Some(name),
+      _ => None,
+    })
+    .collect::<Vec<_>>();
+  pending.sort();
+  assert_eq!(pending, ["neverEnds", "op_id_probe_never_ends"]);
+
+  // Leaving the regular op out by its id (how `deno test` leaves out the
+  // worker host's receive ops) leaves the method in.
+  let regular = names
+    .iter()
+    .position(|name| *name == "op_id_probe_never_ends")
+    .unwrap();
+  let stats = runtime.runtime_activity_stats_factory().capture(
+    &crate::stats::RuntimeActivityStatsFilter::all().omit_op(regular as _),
+  );
+  let pending = stats
+    .dump()
+    .active
+    .into_iter()
+    .filter_map(|activity| match activity {
+      crate::stats::RuntimeActivity::AsyncOp(_, _, name) => Some(name),
+      _ => None,
+    })
+    .collect::<Vec<_>>();
+  assert_eq!(pending, ["neverEnds"]);
+}
