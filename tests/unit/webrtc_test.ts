@@ -2186,3 +2186,71 @@ Deno.test("webrtcStatsDtlsRoleFromTheDescriptions", async () => {
   assertEquals(await role("passive"), "client");
   assertEquals(await role("actpass"), "client");
 });
+
+Deno.test("webrtcIceRestartKeepsDataFlowing", async () => {
+  // RFC 8445 section 9: the previously selected pair is used until the
+  // restart selects a new one. A message each way after every signalling
+  // step of an ICE restart, then on the new pair.
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  // One gathering phase's candidates, complete at the null candidate; they
+  // are signalled once the other side has the description they belong to.
+  const gathered = (pc: RTCPeerConnection) =>
+    new Promise<RTCIceCandidate[]>((resolve) => {
+      const list: RTCIceCandidate[] = [];
+      const listener = (e: Event) => {
+        const { candidate } = e as RTCPeerConnectionIceEvent;
+        if (candidate) return void list.push(candidate);
+        pc.removeEventListener("icecandidate", listener);
+        resolve(list);
+      };
+      pc.addEventListener("icecandidate", listener);
+    });
+  const signal = async (
+    candidates: Promise<RTCIceCandidate[]>,
+    to: RTCPeerConnection,
+  ) => {
+    for (const c of await candidates) await to.addIceCandidate(c);
+  };
+  const channel = a.createDataChannel("restart");
+  const remoteChannel = once<RTCDataChannelEvent>(b, "datachannel");
+  let fromA = gathered(a);
+  let fromB = gathered(b);
+  await a.setLocalDescription();
+  await b.setRemoteDescription(a.localDescription!);
+  await b.setLocalDescription();
+  await a.setRemoteDescription(b.localDescription!);
+  await Promise.all([signal(fromA, b), signal(fromB, a)]);
+  const remote = (await remoteChannel).channel;
+  if (channel.readyState !== "open") await once(channel, "open");
+  if (remote.readyState !== "open") await once(remote, "open");
+  const pingPong = async (step: string) => {
+    for (const [from, to] of [[channel, remote], [remote, channel]]) {
+      const got = once<MessageEvent>(to, "message", 5_000);
+      from.send(step);
+      assertEquals((await got).data, step, step);
+    }
+  };
+  const ufrag = (pc: RTCPeerConnection) =>
+    /a=ice-ufrag:(.*)/.exec(pc.localDescription!.sdp)![1];
+  await pingPong("connected");
+  const before = [ufrag(a), ufrag(b)];
+  a.restartIce();
+  fromA = gathered(a);
+  await a.setLocalDescription();
+  assert(ufrag(a) !== before[0], "the offer restarts ICE");
+  await pingPong("the offerer set its restart offer");
+  await b.setRemoteDescription(a.localDescription!);
+  await pingPong("the answerer set the offer");
+  fromB = gathered(b);
+  await b.setLocalDescription();
+  assert(ufrag(b) !== before[1], "the answer restarts ICE");
+  await pingPong("the answerer set its answer");
+  await a.setRemoteDescription(b.localDescription!);
+  await pingPong("the offerer set the answer");
+  await Promise.all([signal(fromA, b), signal(fromB, a)]);
+  await Promise.all([connected(a), connected(b)]);
+  await pingPong("the restart selected its pair");
+  a.close();
+  b.close();
+});

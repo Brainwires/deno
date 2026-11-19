@@ -17990,9 +17990,18 @@ where the changes are discussed.
      - Engine
        ([Brainwires/webrtc-rs-rtc](https://github.com/Brainwires/webrtc-rs-rtc)
        `webrtc/d28-wpt`, on `0.21.1+brainwires.3`): the `a=msid` lines, the
-       `set_associable_with_remote_offer` flag, `a=inactive` without a stop, and
-       the selected pair's candidates in the stats report; `FORK.md` there lists
-       them.
+       `set_associable_with_remote_offer` flag, `a=inactive` without a stop, the
+       selected pair's candidates in the stats report, and the ICE restart
+       below; `FORK.md` there lists them.
+     - **An ICE restart no longer interrupts data** (engine, RFC 8445 section
+       9): the agent keeps writing to, and accepting from, the pair it had until
+       the restart selects a new one. It dropped the selected pair when the
+       restart was applied (the offerer at `setLocalDescription`, the answerer
+       at `setRemoteDescription`), so data channels and media stopped for as
+       long as signalling took; a parameterless `setLocalDescription()` after
+       `restartIce()` now restarts ICE and would have reached that. The engine's
+       `ice_restart_keeps_path_rtc2rtc` sends a message each way after every
+       signalling step, on a simulated network.
      - **Measured** (the Mac mini, every `webrtc*` file bundled as the WPT
        runner bundles it, loopback only, no `--dom-shim`; a subtest a browser
        reports and Deno does not counts as a fail): 2,079 of 3,338 (62.3%; it
@@ -18002,17 +18011,13 @@ where the changes are discussed.
        files 67 (`RTCPeerConnection-onnegotiationneeded` 18, `-restartIce` 13,
        `-operations` 10, `-setRemoteDescription*` 9, `RollbackEvents` 6,
        `dtls-fingerprint-validation` 5, ...), stats 25 (`supported-stats` 22,
-       `dtls-setup` 3), codecs, parameters and msid 11. Three that passed fail:
+       `dtls-setup` 3), codecs, parameters and msid 11. Two that passed fail:
        `supported-stats`' `tcpType` (a UDP candidate has none; it was
        `"Unspecified"`) and `playoutId` (it was `""`, an id that named nothing;
-       "All references resolve" passes instead), and
-       `RTCDataChannel-iceRestart`'s step-by-step test (below). The Linux run
-       with the WPT runner, and the expectation files, are still to do.
-     - **Known gaps left:** an ICE restart interrupts the offerer's data until
-       the answer (the engine installs the new credentials at
-       `setLocalDescription`; RFC 8445 section 9 keeps the old pair until a new
-       one is selected), which a parameterless `setLocalDescription()` after
-       `restartIce()` now reaches; a transferable `RTCDataChannel` (48 subtests;
+       "All references resolve" passes instead). With the ICE restart fix: 2,080, and
+       2,463 (73.8%) with the runner's `--dom-shim`. The run with `wpt.ts` on
+       Linux and the expectation files are refreshed once, on the merged train.
+     - **Known gaps left:** a transferable `RTCDataChannel` (48 subtests;
        Firefox and Safari); `getHeaderExtensionsToNegotiate` (21; Chrome); the
        identity provider API (17; Firefox); `stop()`'s stopping / stopped steps
        (20); duplicate-msid rejection; `RTCPeerConnection-mandatory-getStats`
@@ -18023,12 +18028,12 @@ where the changes are discussed.
        `signalingState` right after calling, without awaiting, sees the old
        state); `currentLocalDescription` is no longer `null` during a
        renegotiation; an operation still pending at `close()` does not reject.
-     - Tests: `tests/unit/webrtc_test.ts`, twelve tests from
+     - Tests: `tests/unit/webrtc_test.ts`, thirteen tests from
        `webrtcInterfaceObjectsAreDataProperties` to
-       `webrtcStatsDtlsRoleFromTheDescriptions` (the operations chain, the
-       description slots, the negotiation-needed cases, `addTransceiver` against
-       a remote offer, the msid lines, stats references, the encoding rules,
-       glare); `deno_webrtc`'s
+       `webrtcIceRestartKeepsDataFlowing` (the operations chain, the description
+       slots, the negotiation-needed cases, `addTransceiver` against a remote
+       offer, the msid lines, stats references, the encoding rules, glare);
+       `deno_webrtc`'s
        `description_slots_keep_the_current_pair_during_renegotiation`,
        `stats_selected_pair_candidates_are_in_the_report` and
        `remote_sections_streams`; the engine's
