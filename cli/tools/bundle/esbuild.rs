@@ -260,6 +260,18 @@ mod tests {
     std::fs::write(&path, format!("#!/bin/sh\necho {version}\n")).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
       .unwrap();
+    // Another test thread that forks while this file was open for writing
+    // keeps it open until its child execs, and until then running the file
+    // fails with ETXTBSY ("text file busy"), which `local_esbuild` would read
+    // as "no esbuild". Wait until the stand-in can actually run.
+    for _ in 0..200 {
+      match std::process::Command::new(&path).arg("--version").output() {
+        Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+          std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        _ => break,
+      }
+    }
     path
   }
 
