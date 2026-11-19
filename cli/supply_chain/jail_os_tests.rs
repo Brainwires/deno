@@ -1116,6 +1116,110 @@ print("utime-nofollow-link", r(lambda: os.utime(sys.argv[1] + "/link", (0, 0), f
     assert_eq!(before.modified().unwrap(), after.modified().unwrap());
   }
 
+  // A path through a procfs magic link (`/dev/fd/N`, `/proc/self/fd/N`,
+  // `/proc/thread-self/fd/N`) never reaches the supervisor's own
+  // descriptors: the supervisor resolves the caller's path, so `self` there
+  // is the installer. Here the installer holds a pipe (no path) and a file
+  // beneath the write root at descriptor numbers the script doesn't have;
+  // each change is refused and neither object changes (raw syscalls from
+  // python where there is one: chmod(1) stats the path first, which fails in
+  // the caller). The caller's own descriptor through such a path is refused
+  // too (fails closed)
+  #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+  #[tokio::test]
+  #[allow(clippy::print_stderr, reason = "test code: a skip note")]
+  async fn jailed_script_magic_links_never_reach_the_supervisor() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::PermissionsExt;
+    if super::super::sandbox_linux::landlock_abi().is_err() {
+      eprintln!("skipped: no Landlock here");
+      return;
+    }
+    let (_dir, inside, _outside) = two_dirs();
+    std::fs::write(inside.join("g"), "content\n").unwrap();
+    std::fs::set_permissions(
+      inside.join("g"),
+      std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    let before = std::fs::metadata(inside.join("g")).unwrap();
+    // close-on-exec, both: the jailed shell has neither descriptor
+    let (pipe_read, _pipe_write) = std::io::pipe().unwrap();
+    let pipe_mode = |fd: &std::io::PipeReader| {
+      // SAFETY: a zeroed stat is a valid out parameter
+      let mut st: libc::stat = unsafe { std::mem::zeroed() };
+      // SAFETY: a valid descriptor and out parameter
+      assert_eq!(unsafe { libc::fstat(fd.as_raw_fd(), &mut st) }, 0);
+      st.st_mode & 0o7777
+    };
+    let pipe_before = pipe_mode(&pipe_read);
+    let held = std::fs::File::open(inside.join("g")).unwrap();
+    let script = r#"
+      r() { if "$@" 2>/dev/null; then echo ok; else echo refused; fi; }
+      echo "supervisor-file-times $(r touch -m -d @0 "/proc/thread-self/fd/$3")"
+      echo "own-fd $(r sh -c 'exec 5<"$1"; chmod 600 /dev/fd/5' sh "$1/f")"
+      echo "control $(r chmod 640 "$1/f")"
+      if [ -n "$4" ]; then "$4" -c '
+import errno, os, sys
+def r(f):
+    try:
+        f(); return "ok"
+    except OSError as e:
+        return "refused" if e.errno == errno.EPERM else "error %d" % e.errno
+pipe, held = sys.argv[1], sys.argv[2]
+print("supervisor-pipe", r(lambda: os.chmod("/dev/fd/" + pipe, 0o606)))
+print("supervisor-file", r(lambda: os.chmod("/proc/self/fd/" + held, 0o600)))
+print("supervisor-file-owner", r(lambda: os.chown("/dev/fd/" + held, os.getuid(), -1)))
+print("supervisor-file-size", r(lambda: os.truncate("/dev/fd/" + held, 0)))
+' "$2" "$3"; fi
+    "#;
+    let python = python3()
+      .map(|p| p.to_string_lossy().into_owned())
+      .unwrap_or_default();
+    let out = jailed_shell(
+      script,
+      &[
+        inside.to_string_lossy().into_owned(),
+        pipe_read.as_raw_fd().to_string(),
+        held.as_raw_fd().to_string(),
+        python.clone(),
+      ],
+      &inside,
+      Confine::Jail,
+    )
+    .await;
+    for line in [
+      "supervisor-file-times refused",
+      "own-fd refused",
+      "control ok",
+    ] {
+      assert!(out.lines().any(|l| l == line), "missing {line:?} in\n{out}");
+    }
+    if !python.is_empty() {
+      for line in [
+        "supervisor-pipe refused",
+        "supervisor-file refused",
+        "supervisor-file-owner refused",
+      ] {
+        assert!(out.lines().any(|l| l == line), "missing {line:?} in\n{out}");
+      }
+      // Landlock (ABI 3+) or the supervisor holds truncate: refused, or the
+      // caller's own ENOENT (it has no such descriptor), never done
+      assert!(
+        out.lines().any(|l| l.starts_with("supervisor-file-size ")
+          && l != "supervisor-file-size ok"),
+        "truncate through the supervisor's descriptor in\n{out}"
+      );
+    }
+    assert_eq!(std::fs::read(inside.join("g")).unwrap(), b"content\n");
+    assert_eq!(pipe_mode(&pipe_read), pipe_before);
+    assert_eq!(mode_of(&inside.join("g")), 0o644);
+    let after = std::fs::metadata(inside.join("g")).unwrap();
+    assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+    assert_eq!(mode_of(&inside.join("f")), 0o640);
+    drop(held);
+  }
+
   // A jailed script sets and removes extended attributes beneath its roots
   // only (where the file system takes user attributes at all)
   #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]

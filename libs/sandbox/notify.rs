@@ -24,7 +24,11 @@
 //!   after the check can't redirect it. An absolute path is resolved from
 //!   the caller's own root (its mount namespace), and the caller's private
 //!   `/dev/shm`, if it has one, is recognized by its file system. Pipes, sockets and other objects
-//!   with no path, and unlinked files, are not files outside the roots.
+//!   with no path, and unlinked files, are not files outside the roots. A
+//!   path through a procfs magic link (`/dev/fd/N`, `/proc/self/fd/N`,
+//!   `/proc/<pid>/cwd/...`) is refused: resolved here it would name the
+//!   supervisor's own descriptors; the descriptor forms (`fchmod`, ...) and
+//!   `AT_EMPTY_PATH` reach the caller's.
 //!
 //! Everything fails closed: a request the supervisor can't decide is
 //! refused, and once the supervisor is gone the notified syscalls fail with
@@ -955,21 +959,56 @@ fn open_object(tid: u32, obj: Obj) -> Result<OwnedFd, i32> {
         .map_err(|e| if e == libc::ENOENT { libc::EBADF } else { e })?
       };
       let nofollow = if follow { 0 } else { libc::O_NOFOLLOW };
-      // SAFETY: a valid directory descriptor and NUL-terminated path
-      let fd = unsafe {
-        libc::openat(
-          base.as_raw_fd(),
-          path.as_ptr(),
-          libc::O_PATH | libc::O_CLOEXEC | nofollow,
-        )
-      };
-      if fd < 0 {
-        return Err(errno());
+      let flags = libc::O_PATH | libc::O_CLOEXEC | nofollow;
+      // No magic link: this process resolves the path, so `/proc/self`
+      // (`/dev/fd`, `/dev/stdin`, `/proc/thread-self`) would name the
+      // supervisor, and `/proc/self/fd/N` its own descriptor N, not the
+      // caller's
+      match openat2(&base, &path, flags, libc::RESOLVE_NO_MAGICLINKS) {
+        Ok(fd) => Ok(fd),
+        // a magic link on the way (it resolves without the restriction),
+        // refused; otherwise a real symlink loop, the caller's own ELOOP
+        Err(libc::ELOOP) => match openat2(&base, &path, flags, 0) {
+          Ok(_) => Err(libc::EPERM),
+          Err(e) => Err(e),
+        },
+        Err(e) => Err(e),
       }
-      // SAFETY: just opened
-      Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
   }
+}
+
+/// `path` opened beneath `base` with `openat2`'s `resolve` restrictions; a
+/// kernel without `openat2` (older than any with Landlock) fails closed.
+fn openat2(
+  base: &OwnedFd,
+  path: &CString,
+  flags: libc::c_int,
+  resolve: u64,
+) -> Result<OwnedFd, i32> {
+  // SAFETY: a plain struct; zeroed is "no mode, no restriction"
+  let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+  how.flags = flags as u64;
+  how.resolve = resolve;
+  // SAFETY: a valid directory descriptor, NUL-terminated path and an
+  // open_how of the size given
+  let fd = unsafe {
+    libc::syscall(
+      libc::SYS_openat2,
+      base.as_raw_fd(),
+      path.as_ptr(),
+      &how as *const libc::open_how,
+      std::mem::size_of::<libc::open_how>(),
+    )
+  };
+  if fd < 0 {
+    return Err(match errno() {
+      libc::ENOSYS => libc::EPERM,
+      e => e,
+    });
+  }
+  // SAFETY: just opened
+  Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
 }
 
 fn fstat(fd: &OwnedFd) -> Option<libc::stat> {
