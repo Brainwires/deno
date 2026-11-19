@@ -539,8 +539,17 @@ function postFrame(state, frame) {
 
 // A fake device's frame for a sender with a transform (02_media_devices.js).
 function feedFake(sender, pc, key, stereo) {
-  const { _transform, _rid } = internals();
+  const { _transform, _rid, _state: pcState } = internals();
   const state = sender[_transform][_state];
+  // The device's frames start once the connection is up: before DTLS is
+  // connected, a frame the transform writes back cannot be sent, and a
+  // transform that writes only its first frame would send nothing (an
+  // encoder starts with the transport too). The clip, and its RTP
+  // timestamps, start there.
+  const connection = pc[pcState].connectionState;
+  if (connection !== "connected" && connection !== "disconnected") {
+    return false;
+  }
   const f = op_webrtc_sender_fake_frame(pc[_rid], key, stereo);
   if (f === null) return false;
   if (state.sframe) {
