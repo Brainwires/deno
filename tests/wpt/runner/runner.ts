@@ -257,13 +257,90 @@ function getShim(test: string): string {
   return shim.join("\n");
 }
 
-/** The bundle step that sets `document.currentScript` (see dom_shim.js). */
-function setCurrentScript(src: string | null | undefined): string {
-  return `document[Symbol.for("deno.wpt.setCurrentScript")](${
-    src === undefined ? "undefined" : JSON.stringify(src)
+/** A runner file under `tests/wpt/runner/`, read once. */
+const runnerFiles = new Map<string, Promise<string | null>>();
+function readRunnerFile(name: string): Promise<string | null> {
+  let file = runnerFiles.get(name);
+  if (!file) {
+    file = Deno.readTextFile(join(ROOT_PATH, "./tests/wpt/runner", name))
+      .catch((err) => {
+        if (err instanceof Deno.errors.NotFound) return null;
+        throw err;
+      });
+    runnerFiles.set(name, file);
+  }
+  return file;
+}
+
+function runnerFileUrl(name: string): string {
+  return toFileUrl(join(ROOT_PATH, "./tests/wpt/runner", name)).href;
+}
+
+/**
+ * One node of the test file's own markup, in document order, for the document
+ * environment to instantiate (see `loadMarkup` in dom_shim.js): `p` is the
+ * parent's index (-1 for `<html>`), `t` an element's local name and `a` its
+ * attributes, `x` a text node's data.
+ */
+interface MarkupNode {
+  p: number;
+  t?: string;
+  a?: [string, string][];
+  x?: string;
+}
+
+// deno-lint-ignore no-explicit-any
+type ParsedNode = any;
+
+/**
+ * Flattens the parsed page under `<html>` into `MarkupNode`s (elements and
+ * non-blank text; no comments) and returns them with each `<script>` element
+ * and its index, in document order.
+ */
+function flattenMarkup(
+  documentElement: ParsedNode,
+): { nodes: MarkupNode[]; scripts: { element: ParsedNode; index: number }[] } {
+  const nodes: MarkupNode[] = [];
+  const scripts: { element: ParsedNode; index: number }[] = [];
+  const visit = (node: ParsedNode, parent: number) => {
+    if (node.nodeType === 3) {
+      const data = String(node.nodeValue ?? "");
+      if (data.trim() !== "") nodes.push({ p: parent, x: data });
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    const index = nodes.length;
+    const attributes: [string, string][] = [];
+    for (const name of node.getAttributeNames() as string[]) {
+      attributes.push([name, String(node.getAttribute(name) ?? "")]);
+    }
+    const localName = String(node.localName ?? node.tagName).toLowerCase();
+    nodes.push(
+      attributes.length > 0
+        ? { p: parent, t: localName, a: attributes }
+        : { p: parent, t: localName },
+    );
+    if (localName === "script") scripts.push({ element: node, index });
+    for (const child of node.childNodes) visit(child, index);
+  };
+  if (documentElement) visit(documentElement, -1);
+  return { nodes, scripts };
+}
+
+/** A bundle step that calls one of the document environment's runner hooks. */
+function documentHook(name: string, ...args: unknown[]): string {
+  return `document[Symbol.for(${JSON.stringify(`deno.wpt.${name}`)})](${
+    args.map((arg) => JSON.stringify(arg)).join(", ")
   });`;
 }
 
+/**
+ * The test file as one program: its `<script>`s in document order, with the
+ * runner's `testharnessreport.js` in place of the suite's. With `useDocument`, the document environment (dom_shim.js, then
+ * media_env.js when present) is installed right after `testharness.js`, the
+ * page's own markup is instantiated into it up to each script before that
+ * script runs (as an HTML parser would have), and the rest after the last one.
+ */
 async function generateBundle(
   location: URL,
   useDocument: boolean,
@@ -272,9 +349,9 @@ async function generateBundle(
   const body = await res.text();
   const doc = new DOMParser().parseFromString(body, "text/html");
   assert(doc, "document should have been parsed");
-  const scripts = doc.getElementsByTagName("script");
+  const { nodes, scripts } = flattenMarkup(doc.documentElement);
   const title = doc.getElementsByTagName("title")[0]?.childNodes[0]?.nodeValue;
-  const scriptContents = [];
+  const scriptContents: [string, string][] = [];
   let inlineScriptCount = 0;
   if (title) {
     const url = new URL(`#${inlineScriptCount}`, location);
@@ -285,53 +362,73 @@ async function generateBundle(
     ]);
   }
   const shim = getShim(location.pathname);
-  // With `useDocument`, `document` is installed once `testharness.js` has run
-  // (see dom_shim.js), and from then on each script sees itself as
-  // `document.currentScript` while it runs.
+  // Once the document environment is installed, each script sees its own
+  // element as `document.currentScript` while it runs.
   let domInstalled = false;
-  const runScript = (url: string, src: string | null, contents: string) => {
+  const runScript = (url: string, index: number, contents: string) => {
     scriptContents.push([url, shim]);
     if (domInstalled) {
-      scriptContents.push([url, setCurrentScript(src)]);
+      scriptContents.push([url, documentHook("setCurrentScript", index)]);
     }
     scriptContents.push([url, contents]);
     if (domInstalled) {
-      scriptContents.push([url, setCurrentScript(undefined)]);
+      scriptContents.push([url, documentHook("setCurrentScript")]);
     }
   };
-  for (const script of scripts) {
+  const installDocument = async () => {
+    scriptContents.push([
+      runnerFileUrl("dom_shim.js"),
+      (await readRunnerFile("dom_shim.js"))!,
+    ]);
+    // The media elements (`<video>` / `<audio>`) over the runtime's received
+    // frames, when the runner has them.
+    const mediaEnv = await readRunnerFile("media_env.js");
+    if (mediaEnv !== null) {
+      scriptContents.push([runnerFileUrl("media_env.js"), mediaEnv]);
+    }
+    scriptContents.push([
+      runnerFileUrl("dom_shim.js") + "#markup",
+      documentHook("loadMarkup", nodes),
+    ]);
+    domInstalled = true;
+  };
+  for (const { element: script, index } of scripts) {
     const src = script.getAttribute("src");
-    if (src === "/resources/testharnessreport.js") {
-      const url = toFileUrl(
-        join(ROOT_PATH, "./tests/wpt/runner/testharnessreport.js"),
-      );
-      const contents = await Deno.readTextFile(url);
-      runScript(url.href, new URL(src, location).href, contents);
-    } else if (src) {
+    if (src) {
       const url = new URL(src, location);
-      const res = await fetch(url);
-      if (res.ok) {
-        const contents = await res.text();
-        runScript(url.href, url.href, contents);
+      let contents: string | null = null;
+      let scriptUrl = url.href;
+      if (url.pathname === "/resources/testharnessreport.js") {
+        scriptUrl = runnerFileUrl("testharnessreport.js");
+        contents = await readRunnerFile("testharnessreport.js");
+      } else {
+        const res = await fetch(url);
+        if (res.ok) {
+          contents = await res.text();
+        } else {
+          await res.body?.cancel();
+        }
+      }
+      if (contents !== null) {
+        runScript(scriptUrl, index, contents);
         if (
           useDocument && !domInstalled &&
           url.pathname === "/resources/testharness.js"
         ) {
-          const shimUrl = toFileUrl(
-            join(ROOT_PATH, "./tests/wpt/runner/dom_shim.js"),
-          );
-          scriptContents.push([
-            shimUrl.href,
-            await Deno.readTextFile(shimUrl),
-          ]);
-          domInstalled = true;
+          await installDocument();
         }
       }
     } else {
       const url = new URL(`#${inlineScriptCount}`, location);
       inlineScriptCount++;
-      runScript(url.href, null, script.textContent);
+      runScript(url.href, index, script.textContent);
     }
+  }
+  if (domInstalled) {
+    scriptContents.push([
+      runnerFileUrl("dom_shim.js") + "#markup-end",
+      documentHook("finishMarkup"),
+    ]);
   }
 
   return scriptContents.map(([url, contents]) => `
