@@ -145,6 +145,12 @@ const ERROR_CODE_UNREACHABLE: u16 = 701;
 /// engine, but a peer that connects ICE and never finishes DTLS is broken:
 /// a wrong fingerprint, a certificate the engine refused).
 pub const DTLS_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long ICE may stay `checking` without a connection while the remote
+/// side hasn't signalled end-of-candidates before it is reported
+/// `disconnected` (W3C webrtc-pc 4.3.3: checked the pairs it has and found no
+/// connection, still waiting for remote candidates). The engine's own
+/// disconnected timeout.
+const CHECKING_STALL: Duration = Duration::from_secs(5);
 /// Remote addresses remembered as having sent STUN.
 const MAX_STUN_PEERS: usize = 256;
 /// The largest frame read from a TCP/TLS TURN connection (a STUN message or
@@ -544,6 +550,8 @@ pub struct Core {
   /// An ICE restart's `checking` on a connected transport was not reported
   /// (see `collect_events`); cleared by the next other ICE state.
   restart_masked: bool,
+  /// When `checking` was last reported (see [`CHECKING_STALL`]).
+  checking_since: Option<Instant>,
   /// Per data channel handle, the application bytes SCTP had taken from the
   /// send queue when last reported (`track_sent`).
   sent: HashMap<u32, u64>,
@@ -1825,6 +1833,7 @@ impl Core {
     if self.checking_held && self.remote_known {
       self.checking_held = false;
       if !self.failed {
+        self.checking_since = Some(now);
         self.events.push_back(JsEvent::IceConnectionState {
           state: "checking".to_string(),
         });
@@ -1906,6 +1915,8 @@ impl Core {
             self.ice_up = false;
             self.ice_up_at = None;
           }
+          self.checking_since =
+            (state == "checking" && !self.failed).then_some(now);
           if !self.failed || state == "closed" {
             self.events.push_back(JsEvent::IceConnectionState { state });
           }
@@ -2057,6 +2068,19 @@ impl Core {
       self.ice_up_at = None;
       self.fail("DTLS did not connect after ICE did");
     }
+    if let Some(since) = self.checking_since
+      && now.duration_since(since) >= CHECKING_STALL
+    {
+      self.checking_since = None;
+      if !self.failed && !self.remote_gathered {
+        self.events.push_back(JsEvent::IceConnectionState {
+          state: "disconnected".to_string(),
+        });
+        self.events.push_back(JsEvent::ConnectionState {
+          state: "disconnected".to_string(),
+        });
+      }
+    }
     for _ in 0..MAX_PUMP_ROUNDS {
       let a = self.flush_engine_writes(guard);
       let b = self.service_servers(now);
@@ -2083,6 +2107,10 @@ impl Core {
     }
     if let Some(up) = self.ice_up_at {
       let t = up + DTLS_TIMEOUT;
+      deadline = Some(deadline.map_or(t, |d| d.min(t)));
+    }
+    if let Some(since) = self.checking_since {
+      let t = since + CHECKING_STALL;
       deadline = Some(deadline.map_or(t, |d| d.min(t)));
     }
     deadline
@@ -2355,6 +2383,7 @@ impl Peer {
         remote_gathered: false,
         checking_held: false,
         restart_masked: false,
+        checking_since: None,
         this: this.clone(),
         tcp_links: HashMap::new(),
         tcp_dialing: HashMap::new(),
