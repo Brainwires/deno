@@ -321,6 +321,10 @@ pub struct CreateWorkerArgs {
   /// denext: the profilers a `worker_threads` Worker's `execArgv` asks for.
   #[from_v8(serde)]
   profile: Option<WorkerProfileArgs>,
+  /// denext: a worker with no permission at all (the WebRTC identity
+  /// provider proxy, `ext/webrtc/06_identity.js`). Internal callers only; it
+  /// takes privileges away, so it needs no `--unstable-worker-options`.
+  no_permissions: Option<bool>,
 }
 
 /// denext: `--cpu-prof` / `--heap-prof` in a `worker_threads` Worker's
@@ -435,8 +439,11 @@ fn op_create_worker(
   }
 
   let parent_permissions = state.borrow_mut::<PermissionsContainer>();
-  let worker_permissions = if let Some(child_permissions_arg) = args.permissions
-  {
+  let worker_permissions = if args.no_permissions == Some(true) {
+    parent_permissions
+      .create_child_permissions(ChildPermissionsArg::none())
+      .map_err(CreateWorkerError::Permission)?
+  } else if let Some(child_permissions_arg) = args.permissions {
     parent_permissions
       .create_child_permissions(child_permissions_arg)
       .map_err(CreateWorkerError::Permission)?
