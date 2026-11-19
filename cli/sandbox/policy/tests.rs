@@ -1820,18 +1820,19 @@ fn denies_compare_resolved_paths() {
       "{allow} / {denied}"
     );
     // a write deny reached through an alias: Landlock can't hold it inside
-    // the allow (only the broker could), so enforce refuses
+    // the allow, so enforce takes the broker, which holds it
     let options = PermissionsOptions {
       allow_write: s(&[&p(&dir, allow)]),
       deny_write: s(&[&p(&dir, denied)]),
       ..Default::default()
     };
     let lin = compile(&options, linux(Some(4)), Enforce);
-    assert_ne!(
+    assert_eq!(
       deny(&lin.policy.fs.deny_write, &p(&dir, denied)),
-      DenyEnforcement::Implied
+      DenyEnforcement::Broker
     );
-    assert!(lin.fatal_gaps().count() > 0, "{:#?}", lin.gaps);
+    assert_eq!(lin.policy.shape, Shape::ModeB);
+    assert_eq!(lin.fatal_gaps().count(), 0, "{:#?}", lin.gaps);
     let mac = compile(&options, macos(), Enforce);
     assert_eq!(
       deny(&mac.policy.fs.deny_write, &p(&dir, denied)),
