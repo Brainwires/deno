@@ -3780,6 +3780,13 @@ class RTCPeerConnection extends EventTarget {
         if (type !== "rollback") {
           requireSdpSyntax(sdp);
           requireRtcpMux(sdp);
+          // wpt100:hdrext
+          requireFingerprint(sdp);
+          requireCryptex(this, sdp);
+          requireStableExtensionIds(this, sdp);
+          if (type === "answer" || type === "pranswer") {
+            requireAnswerDirections(this, sdp);
+          }
         }
         const offerFromStable = type === "offer" &&
           this[_state].signalingState === "stable";
@@ -4557,6 +4564,117 @@ function requireRtcpMux(sdp) {
     if (!StringPrototypeIncludes(section, "a=rtcp-mux")) {
       throw new DOMException(
         "setRemoteDescription: rtcpMuxPolicy is 'require', but a media section doesn't multiplex RTCP",
+        "InvalidAccessError",
+      );
+    }
+  }
+}
+
+// wpt100:hdrext — RFC 8827 section 6.5 / RFC 8826 section 4.3.1: no SDES,
+// DTLS-SRTP only; a description whose media has no DTLS fingerprint is
+// refused (RFC 9429 section 5.8) as InvalidAccessError.
+function requireFingerprint(sdp) {
+  if (StringPrototypeIncludes(sdp, "a=fingerprint:")) return;
+  const sections = mediaSectionsOf(sdp);
+  if (ArrayPrototypeSome(sections, (m) => !m.rejected)) {
+    throw new DOMException(
+      "setRemoteDescription: the description has no DTLS fingerprint (SDES is not supported)",
+      "InvalidAccessError",
+    );
+  }
+}
+
+// Whether `a=cryptex` (RFC 9335) applies to every RTP section of a
+// description: at the session level or on each live audio / video section;
+// `null` when it has no such section.
+function cryptexOf(sdp) {
+  const parts = StringPrototypeSplit(sdp, "\nm=");
+  const lines = (part) =>
+    ArrayPrototypeMap(StringPrototypeSplit(part, "\n"), StringPrototypeTrim);
+  const session = ArrayPrototypeIncludes(lines(parts[0]), "a=cryptex");
+  let rtp = 0;
+  let all = true;
+  for (let i = 1; i < parts.length; ++i) {
+    const section = lines(parts[i]);
+    const fields = StringPrototypeSplit(section[0], " ");
+    if (fields[0] !== "audio" && fields[0] !== "video") continue;
+    if (
+      fields[1] === "0" && !ArrayPrototypeIncludes(section, "a=bundle-only")
+    ) {
+      continue;
+    }
+    rtp++;
+    if (!ArrayPrototypeIncludes(section, "a=cryptex")) all = false;
+  }
+  if (rtp === 0) return null;
+  return session || all;
+}
+
+// webrtc-extensions: with rtpHeaderEncryptionPolicy "require", a remote
+// description with RTP media that doesn't signal cryptex is refused.
+function requireCryptex(pc, sdp) {
+  if (pc[_state].config.rtpHeaderEncryptionPolicy !== "require") return;
+  if (cryptexOf(sdp) === false) {
+    throw new DOMException(
+      "setRemoteDescription: rtpHeaderEncryptionPolicy is 'require', but the description doesn't signal a=cryptex",
+      "InvalidAccessError",
+    );
+  }
+}
+
+// RFC 8285 section 6: once negotiated, a media section's extension ids are
+// not remapped. A remote description that gives a URI another id, or an id
+// another URI, than the current descriptions of the same mid is refused.
+function requireStableExtensionIds(pc, sdp) {
+  const incoming = extmapsOf(sdp);
+  const previous = [];
+  const remote = pc.currentRemoteDescription;
+  const local = pc.currentLocalDescription;
+  if (remote !== null) ArrayPrototypePush(previous, extmapsOf(remote.sdp));
+  if (local !== null) ArrayPrototypePush(previous, extmapsOf(local.sdp));
+  MapPrototypeForEach(incoming, (section, mid) => {
+    if (section.rejected) return;
+    for (let p = 0; p < previous.length; ++p) {
+      const before = MapPrototypeGet(previous[p], mid);
+      if (before === undefined || before.rejected) continue;
+      for (let i = 0; i < section.extensions.length; ++i) {
+        const e = section.extensions[i];
+        const clash = ArrayPrototypeSome(
+          before.extensions,
+          (b) => (b.uri === e.uri) !== (b.id === e.id),
+        );
+        if (clash) {
+          throw new DOMException(
+            `setRemoteDescription: the extension '${e.uri}' of mid '${mid}' was remapped`,
+            "InvalidAccessError",
+          );
+        }
+      }
+    }
+  });
+}
+
+// RFC 3264 section 6.1 / RFC 9429 section 5.10: an answer's direction can't
+// exceed what the offer allows (it sends only what the offerer receives,
+// receives only what it sends).
+function requireAnswerDirections(pc, sdp) {
+  const offer = pc.pendingLocalDescription;
+  if (offer === null) return;
+  const offered = mediaSectionsOf(offer.sdp);
+  const answered = mediaSectionsOf(sdp);
+  for (let i = 0; i < answered.length; ++i) {
+    const a = answered[i];
+    if (a.rejected || a.mid === null) continue;
+    const o = ArrayPrototypeFind(offered, (m) => m.mid === a.mid);
+    if (o === undefined || o.rejected) continue;
+    const sends = (d) => d === "sendrecv" || d === "sendonly";
+    const receives = (d) => d === "sendrecv" || d === "recvonly";
+    if (
+      (sends(a.direction) && !receives(o.direction)) ||
+      (receives(a.direction) && !sends(o.direction))
+    ) {
+      throw new DOMException(
+        `setRemoteDescription: the answer's '${a.direction}' for mid '${a.mid}' exceeds the offer's '${o.direction}'`,
         "InvalidAccessError",
       );
     }
