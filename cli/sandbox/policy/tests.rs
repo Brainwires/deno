@@ -15,7 +15,7 @@ use pretty_assertions::assert_eq;
 use super::*;
 
 // the rows below describe a runtime without the broker or the overmount
-const _: () = assert!(BROKER_FS_BUILT && !BROKER_NET_BUILT && !OVERMOUNT_BUILT);
+const _: () = assert!(BROKER_FS_BUILT && BROKER_NET_BUILT && !OVERMOUNT_BUILT);
 
 fn linux(abi: Option<u32>) -> Capabilities {
   Capabilities {
@@ -658,7 +658,7 @@ fn net_rows() {
       },
     },
     Row {
-      name: "macOS: a name with a port is held by port, hosts Deno-only",
+      name: "macOS: a name goes to the broker too",
       options: PermissionsOptions {
         allow_net_connect: s(&["example.com:443"]),
         ..Default::default()
@@ -666,18 +666,18 @@ fn net_rows() {
       caps: macos(),
       mode: Auto,
       check: |c| {
+        assert_eq!(c.policy.shape, Shape::ModeB);
         assert_eq!(
           c.policy.net,
-          NetPolicy::Ports {
-            connect: PortScope::Ports { ports: vec![443] },
-            bind: PortScope::None,
+          NetPolicy::Broker {
+            connect: HostScope::Hosts {
+              hosts: vec!["example.com:443".to_string()]
+            },
+            bind: HostScope::None,
+            deny: vec![],
           }
         );
-        assert!(c.policy.syscalls.refuse_listen);
-        let g = gap(c, GapClass::Net);
-        assert!(g.detail.contains("not the hosts"));
-        assert_eq!(g.resolution, GapResolution::Documented);
-        assert_eq!(g.exact_with, Some(ExactWith::Broker));
+        assert!(!c.gaps.iter().any(|g| g.class == GapClass::Net));
       },
     },
     Row {
@@ -1708,11 +1708,10 @@ fn policy_hash_is_stable() {
 /// SHA-256 of the JSON above, first 8 bytes in hex.
 const HASH_OF_FIXED_POLICY: &str = "e310efe41517d7d3";
 
-// enforce with the broker's file side but not its network side: a write
-// deny is held (nothing fatal); the rules only the network side could hold
-// are named in its fatal gap
+// enforce takes the broker for what Mode A can't hold: a write deny inside
+// a write allow on Linux, a host name anywhere. Nothing is left fatal.
 #[test]
-fn broker_not_built_names_the_rules() {
+fn the_broker_holds_what_mode_a_cant() {
   let c = compile(
     &PermissionsOptions {
       allow_write: s(&["/out"]),
@@ -1735,21 +1734,6 @@ fn broker_not_built_names_the_rules() {
   );
   assert_eq!(c.policy.shape, Shape::ModeB);
   assert_eq!(c.fatal_gaps().count(), 0, "{:#?}", c.gaps);
-  // the network side's rules still refuse under an explicit broker: a
-  // named socket (held by path only by the broker on Linux)
-  let c = compile(
-    &PermissionsOptions {
-      allow_net: s(&["unix:/var/run/docker.sock"]),
-      ..Default::default()
-    },
-    linux(Some(6)),
-    KernelSandboxMode::Broker,
-  );
-  assert!(
-    c.fatal_gaps().any(|g| g.class == GapClass::Unix),
-    "{:#?}",
-    c.gaps
-  );
   // a network grant the kernel holds alone doesn't refuse the broker
   let c = compile(
     &PermissionsOptions {
@@ -1781,63 +1765,67 @@ fn broker_not_built_names_the_rules() {
     "{:#?}",
     c.gaps
   );
-  // a host name: the broker gap, whatever the mode
-  let c = auto(
-    &PermissionsOptions {
-      allow_net: s(&["example.com:443"]),
-      ..Default::default()
-    },
-    linux(Some(6)),
-  );
-  assert!(
-    c.fatal_gaps()
-      .any(|g| g.rule == BROKER_RULE && g.detail.contains("host-scoped")),
-    "{:#?}",
-    c.gaps
-  );
-  // a host name and a write deny inside a write allow: the host name is
-  // what the unbuilt side would hold; the write deny is held
   let c = compile(
     &PermissionsOptions {
       allow_write: s(&["/out"]),
       deny_write: s(&["/out/keep"]),
-      allow_net: s(&["example.com:443"]),
       ..Default::default()
     },
     linux(Some(6)),
     KernelSandboxMode::Enforce,
-  );
-  let fatal: Vec<_> = c.fatal_gaps().collect();
-  assert_eq!(fatal.len(), 1, "{fatal:#?}");
-  let detail = &fatal[0].detail;
-  assert!(!detail.contains("--deny-write=/out/keep"), "{detail}");
-  assert!(detail.contains("--allow-net=example.com:443"), "{detail}");
-  assert!(
-    detail.contains("host-scoped network would be held"),
-    "{detail}"
   );
   assert_eq!(
     deny(&c.policy.fs.deny_write, "/out/keep"),
     DenyEnforcement::Broker
   );
-  // the host name alone names itself
-  let c = compile(
-    &PermissionsOptions {
-      allow_net: s(&["example.com:443"]),
-      ..Default::default()
-    },
-    linux(Some(6)),
-    KernelSandboxMode::Enforce,
+  // no network to hold: it stays denied, not the broker's
+  assert_eq!(c.policy.net, NetPolicy::Denied);
+  // a host name: the broker's network, on Linux and macOS alike
+  for caps in [linux(Some(1)), linux(Some(6)), macos()] {
+    let c = compile(
+      &PermissionsOptions {
+        allow_net: s(&["example.com:443"]),
+        ..Default::default()
+      },
+      caps,
+      KernelSandboxMode::Enforce,
+    );
+    assert_eq!(c.policy.shape, Shape::ModeB, "{caps:?}");
+    assert!(matches!(c.policy.net, NetPolicy::Broker { .. }), "{caps:?}");
+    assert_eq!(c.fatal_gaps().count(), 0, "{caps:?}: {:#?}", c.gaps);
+  }
+  // an explicit broker with the whole network: nothing to hold, so the
+  // process keeps its own sockets; with a deny, the broker holds it
+  let open = PermissionsOptions {
+    allow_net: all(),
+    ..Default::default()
+  };
+  assert_eq!(
+    compile(&open, linux(Some(6)), Broker).policy.net,
+    NetPolicy::Open
   );
-  let fatal: Vec<_> = c.fatal_gaps().collect();
-  assert_eq!(fatal.len(), 1, "{fatal:#?}");
-  assert!(
-    fatal[0].detail.contains(
-      "host-scoped network would be held by Deno's checks only (needed for: --allow-net=example.com:443)"
-    ),
-    "{}",
-    fatal[0].detail
-  );
+  let denied = PermissionsOptions {
+    deny_net: s(&["169.254.169.254"]),
+    ..open
+  };
+  assert!(matches!(
+    compile(&denied, linux(Some(6)), Broker).policy.net,
+    NetPolicy::Broker { .. }
+  ));
+  // and an address list, exact under an explicit broker (Mode A holds it
+  // by port)
+  let ports = PermissionsOptions {
+    allow_net: s(&["127.0.0.1:5432"]),
+    ..Default::default()
+  };
+  assert!(matches!(
+    compile(&ports, macos(), Broker).policy.net,
+    NetPolicy::Broker { .. }
+  ));
+  assert!(matches!(
+    compile(&ports, macos(), Enforce).policy.net,
+    NetPolicy::Ports { .. }
+  ));
 }
 
 // the files an --allow-sys name reads are in the read scope only when it
@@ -1952,7 +1940,7 @@ fn denies_compare_resolved_paths() {
       "{allow} / {denied}"
     );
     // a write deny reached through an alias: Landlock can't hold it inside
-    // the allow, so enforce takes the broker, which holds it
+    // the allow, so enforce takes the broker for it
     let options = PermissionsOptions {
       allow_write: s(&[&p(&dir, allow)]),
       deny_write: s(&[&p(&dir, denied)]),

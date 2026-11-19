@@ -330,6 +330,8 @@ fn broker_plan(compiled: &CompiledPolicy) -> deno_sandbox::plan::BrokerPlan {
     deny_read: denies(&fs.deny_read),
     write: scope(&fs.write),
     deny_write: denies(&fs.deny_write),
+    // filled in by `prepare`, which has the flags' lists
+    net: None,
   }
 }
 
