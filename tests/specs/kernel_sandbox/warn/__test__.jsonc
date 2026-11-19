@@ -18,7 +18,9 @@
             "DENO_KERNEL_SANDBOX_WARN_LOG": "warn.jsonl",
             "DENO_KERNEL_SANDBOX_WARN_OBSERVE": "0"
           },
-          "args": "run --kernel-sandbox=warn --allow-run=git --allow-read=. spawn.ts",
+          // an unscoped --allow-run: the harness sets LD_LIBRARY_PATH on
+          // Linux, which a scoped run list refuses to hand a child
+          "args": "run --kernel-sandbox=warn --allow-run --allow-read=. spawn.ts",
           "output": "advisory.out"
         },
         {
