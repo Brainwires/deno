@@ -341,6 +341,10 @@ pub struct RemoteSection {
   /// Port 0: the section was rejected.
   pub rejected: bool,
   pub kind: String,
+  /// The layers of the section's `a=simulcast` `recv` list (RFC 8853): the
+  /// first of each layer's alternatives, without the paused marker `~`,
+  /// each once, in the list's order.
+  pub simulcast_recv: Vec<String>,
 }
 
 /// A transceiver as JavaScript reconciles it after every operation.
@@ -391,6 +395,7 @@ pub fn sections(sdp: &str) -> HashMap<String, RemoteSection> {
           streams: vec![],
           rejected: port == "0",
           kind,
+          simulcast_recv: vec![],
         },
       ));
       continue;
@@ -411,12 +416,34 @@ pub fn sections(sdp: &str) -> HashMap<String, RemoteSection> {
       {
         section.streams.push(stream.to_string());
       }
+    } else if let Some(value) = attr.strip_prefix("simulcast:") {
+      section.simulcast_recv = simulcast_recv_layers(value);
     } else if matches!(attr, "sendrecv" | "sendonly" | "recvonly" | "inactive")
     {
       section.direction = attr.to_string();
     }
   }
   flush(&mut current, has_msid);
+  out
+}
+
+/// The layers of an `a=simulcast` value's `recv` list (`send 1;2 recv
+/// a,b;~c`): the first alternative of each, `~` dropped, each once.
+fn simulcast_recv_layers(value: &str) -> Vec<String> {
+  let mut out: Vec<String> = Vec::new();
+  let mut fields = value.split_ascii_whitespace();
+  while let (Some(direction), Some(list)) = (fields.next(), fields.next()) {
+    if !direction.eq_ignore_ascii_case("recv") {
+      continue;
+    }
+    for layer in list.split(';') {
+      let first = layer.split(',').next().unwrap_or_default();
+      let rid = first.strip_prefix('~').unwrap_or(first);
+      if !rid.is_empty() && !out.iter().any(|r| r == rid) {
+        out.push(rid.to_string());
+      }
+    }
+  }
   out
 }
 

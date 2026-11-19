@@ -2967,6 +2967,73 @@ function validateEncodings(list, kind, method, keepRid) {
   return out;
 }
 
+// A sender's [[SendEncodings]] when a description has been applied
+// (webrtc-pc 4.4.1.6 "set the RTCSessionDescription"): `remote` is the
+// transceiver's m-section in the remote description.
+// - A remote offer asking to receive simulcast gives a sender that has one
+//   encoding without a rid one encoding per offered layer (the first of each
+//   layer's alternatives, each once), scaled down by powers of two; the
+//   encodings it replaced come back on a rollback.
+// - An answer (local or remote) keeps the encodings whose layer the remote
+//   description still has, in the sender's order, or only the first when it
+//   has none of them (no simulcast, or every layer gone).
+// - An answer also drops an encoding's codec that is no longer negotiated.
+// Each success task clears [[LastReturnedParameters]].
+function negotiateEncodings(transceiver, remote, phase) {
+  const sender = transceiver[_state].sender;
+  const s = sender[_state];
+  if (phase.type === "rollback") {
+    if (s.ridlessEncodings !== undefined && s.ridlessEncodings !== null) {
+      s.encodings = s.ridlessEncodings;
+      s.ridlessEncodings = null;
+    }
+    s.lastParameters = null;
+    return;
+  }
+  s.lastParameters = null;
+  const video = transceiver[_state].kind === "video";
+  const layers = remote?.simulcastRecv ?? [];
+  if (phase.remote && phase.type === "offer" && video && layers.length > 0) {
+    const encodings = s.encodings;
+    if (encodings.length === 1 && encodings[0].rid === undefined) {
+      const n = MathMin(layers.length, MAX_ENCODINGS);
+      const next = [];
+      for (let i = 0; i < n; ++i) {
+        ArrayPrototypePush(next, {
+          active: true,
+          rid: layers[i],
+          scaleResolutionDownBy: 2 ** (n - 1 - i),
+        });
+      }
+      s.ridlessEncodings = encodings;
+      s.encodings = next;
+    }
+  }
+  if (phase.type !== "answer" && phase.type !== "pranswer") return;
+  if (phase.type === "answer") s.ridlessEncodings = null;
+  if (s.encodings.length > 1 && remote !== null && remote !== undefined) {
+    const kept = ArrayPrototypeFilter(
+      s.encodings,
+      (e) => e.rid !== undefined && ArrayPrototypeIncludes(layers, e.rid),
+    );
+    s.encodings = kept.length > 0 ? kept : [s.encodings[0]];
+  }
+  if (ArrayPrototypeSome(s.encodings, (e) => e.codec !== undefined)) {
+    const negotiated = senderNegotiated(sender).codecs;
+    if (negotiated.length > 0) {
+      for (let i = 0; i < s.encodings.length; ++i) {
+        const e = s.encodings[i];
+        if (
+          e.codec !== undefined &&
+          !ArrayPrototypeSome(negotiated, (c) => codecMatches(c, e.codec))
+        ) {
+          delete e.codec;
+        }
+      }
+    }
+  }
+}
+
 // The simulcast encodings one sender may have.
 const MAX_ENCODINGS = 16;
 const RID_RE = new SafeRegExp("^[A-Za-z0-9]+$");
@@ -4596,6 +4663,8 @@ function syncTransceivers(pc, phase) {
         removeRemoteTrack(t);
       }
     }
+    // wpt100:codecs
+    if (phase !== null) negotiateEncodings(t, remote, phase);
     if (!(settled && ts.stopped && phase.type === "answer")) {
       ArrayPrototypePush(next, t);
     }
