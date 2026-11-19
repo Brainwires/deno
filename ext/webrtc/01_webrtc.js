@@ -5105,6 +5105,9 @@ class RTCPeerConnection extends EventTarget {
     MapPrototypeSet(this[_channels], created.channel, channel);
     if (!this[_state].hadDataChannel) {
       this[_state].hadDataChannel = true;
+      // A new offer would carry the data m= section: the last created offer
+      // / answer are stale (webrtc-pc 4.4.1.5, wpt100:transceiver).
+      invalidateCreated(this);
       updateNegotiationNeeded(this);
     }
     // A negotiated channel opens with the connection, without DCEP; its
