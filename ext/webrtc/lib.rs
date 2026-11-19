@@ -47,6 +47,7 @@ use serde::Serialize;
 mod encoded_frames;
 mod fake_media;
 mod media;
+mod media_sink;
 mod net;
 mod peer;
 
@@ -165,6 +166,8 @@ deno_core::extension!(
     op_webrtc_network_close,
     op_webrtc_set_log_level,
     op_webrtc_data_globals,
+    // wpt100:mediasink
+    op_webrtc_receiver_muted,
   ],
   lazy_loaded_js = [
     "01_webrtc.js",
@@ -1140,6 +1143,21 @@ fn op_webrtc_receiver_read_rtp(
     } else {
       core.media.reading.remove(&key);
     }
+    Ok(())
+  })
+}
+
+// wpt100:mediasink
+/// A receiver's track was muted (its remote side stopped sending): the next
+/// RTP packet unmutes it again (`trackunmute`).
+#[op2(fast)]
+fn op_webrtc_receiver_muted(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+  key: u32,
+) -> Result<(), WebRtcError> {
+  peer(state, rid)?.media(|core| {
+    core.receiver_muted(key);
     Ok(())
   })
 }

@@ -60,6 +60,8 @@ const {
   op_webrtc_transceiver_set_direction,
   op_webrtc_transceiver_stop,
   op_void_async_deferred,
+  // wpt100:mediasink
+  op_webrtc_receiver_muted,
 } = core.ops;
 const {
   ArrayBufferIsView,
@@ -1224,7 +1226,21 @@ function setMuted(track, muted) {
   const state = track[_trackState];
   if (state.readyState === "ended" || state.muted === muted) return;
   state.muted = muted;
+  // A remote track: the next packet that arrives unmutes it again.
+  if (muted) rearmUnmute(track[_receiver]);
   fire(track, new Event(muted ? "mute" : "unmute"));
+}
+
+// The receiver's next RTP packet sends a `trackunmute` event again.
+function rearmUnmute(receiver) {
+  if (receiver === null || receiver === undefined) return;
+  const pc = receiver[_pc];
+  if (pc[_state].closed) return;
+  try {
+    op_webrtc_receiver_muted(pc[_rid], receiver[_transceiver][_key]);
+  } catch {
+    // The transceiver is gone.
+  }
 }
 
 // A track the user agent ends (anything but its own stop()): mediacapture-
@@ -4916,6 +4932,13 @@ function dispatchEngineEvent(pc, event) {
       const t = transceiverFor(pc, event.transceiver);
       if (t === undefined) break;
       const receiver = t[_state].receiver;
+      // wpt100:mediasink: a packet still in flight after the remote side
+      // stopped sending (by negotiation) leaves the track muted; the next
+      // packet asks again.
+      if (!receiver[_state].receiving) {
+        rearmUnmute(receiver);
+        break;
+      }
       setMuted(receiver[_state].track, false);
       for (let i = 0; i < receiver[_state].clones.length; ++i) {
         setMuted(receiver[_state].clones[i], false);
@@ -4926,6 +4949,18 @@ function dispatchEngineEvent(pc, event) {
       const t = transceiverFor(pc, event.transceiver);
       if (t === undefined) break;
       deliverRtp(t[_state].receiver, event.data);
+      break;
+    }
+    // wpt100:mediasink
+    case "trackmute": {
+      // The receiver's RTP stopped (media_sink.rs's SILENCE).
+      const t = transceiverFor(pc, event.transceiver);
+      if (t === undefined) break;
+      const receiver = t[_state].receiver;
+      setMuted(receiver[_state].track, true);
+      for (let i = 0; i < receiver[_state].clones.length; ++i) {
+        setMuted(receiver[_state].clones[i], true);
+      }
       break;
     }
     case "keyframerequest": {

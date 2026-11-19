@@ -396,6 +396,10 @@ pub enum JsEvent {
     height: Option<u16>,
     info: crate::encoded_frames::ReceivedFrameInfo,
   },
+  // wpt100:mediasink
+  /// A receiver's RTP stopped for `media_sink::SILENCE`: its track mutes.
+  #[serde(rename = "trackmute")]
+  TrackMute { transceiver: u32 },
 }
 
 /// A received message's bytes, handed to V8 without a copy (as a
@@ -536,6 +540,8 @@ pub struct Core {
   pub(crate) media: MediaState,
   /// Receivers whose frames go to an encoded transform (encoded_frames.rs).
   pub(crate) transforms: crate::encoded_frames::ReceiverTransforms,
+  /// Received frames, sizes and silence per receiver (media_sink.rs).
+  pub(crate) sinks: crate::media_sink::MediaSinks,
   /// A remote candidate is known (signalled, or a check arrived): until
   /// then ICE stays `new`, as the spec's `checking` needs one.
   remote_known: bool,
@@ -1888,6 +1894,8 @@ impl Core {
               .push_back(JsEvent::TrackUnmute { transceiver: key });
           }
           self.media.saw_rtp(key, &packet.header);
+          // wpt100:mediasink
+          self.sinks.saw_packet(key, now);
           if let Some(frame) = self.receive_for_transform(key, &packet) {
             self.events.push_back(JsEvent::EncodedFrame {
               transceiver: key,
@@ -1961,6 +1969,8 @@ impl Core {
       self.track_dtls_state();
       self.collect_events(now);
       self.track_sent();
+      // wpt100:mediasink
+      self.check_silence(now);
       if !a && !b {
         break;
       }
@@ -1976,6 +1986,10 @@ impl Core {
     }
     if let Some(up) = self.ice_up_at {
       let t = up + DTLS_TIMEOUT;
+      deadline = Some(deadline.map_or(t, |d| d.min(t)));
+    }
+    // wpt100:mediasink
+    if let Some(t) = self.sinks.silence_deadline() {
       deadline = Some(deadline.map_or(t, |d| d.min(t)));
     }
     deadline
@@ -2240,6 +2254,7 @@ impl Peer {
         recv_rx: Some(recv_rx),
         media: MediaState::default(),
         transforms: Default::default(),
+        sinks: Default::default(),
         remote_known: false,
         sent: HashMap::new(),
         sctp_state: "",
