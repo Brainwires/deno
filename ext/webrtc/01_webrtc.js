@@ -2027,7 +2027,7 @@ class RTCRtpSender {
   }
   get transport() {
     webidl.assertBranded(this, RTCRtpSenderPrototype);
-    return dtlsTransportOf(this[_pc]);
+    return rtpTransportOf(this[_transceiver]);
   }
   get dtmf() {
     webidl.assertBranded(this, RTCRtpSenderPrototype);
@@ -2380,7 +2380,12 @@ function dtmfPlayout(dtmf) {
   const sender = state.sender;
   const pc = sender[_pc];
   const t = sender[_transceiver][_state];
-  if (pc[_state].closed || t.stopping || t.stopped) {
+  // Playout task, step 1-2: a stopping transceiver, or one negotiated to
+  // send nothing (currentDirection recvonly / inactive), plays no more tones.
+  if (
+    pc[_state].closed || t.stopping || t.stopped ||
+    t.currentDirection === "recvonly" || t.currentDirection === "inactive"
+  ) {
     state.playing = false;
     return;
   }
@@ -2444,7 +2449,7 @@ class RTCRtpReceiver {
   }
   get transport() {
     webidl.assertBranded(this, RTCRtpReceiverPrototype);
-    return dtlsTransportOf(this[_pc]);
+    return rtpTransportOf(this[_transceiver]);
   }
   get jitterBufferTarget() {
     webidl.assertBranded(this, RTCRtpReceiverPrototype);
@@ -2598,6 +2603,10 @@ class RTCRtpTransceiver {
       currentDirection: null,
       stopping: false,
       stopped: false,
+      // [[SenderTransport]] / [[ReceiverTransport]] are set (true) and their
+      // values at the last stable state, which a rollback restores.
+      transport: false,
+      stableTransport: false,
     };
     this[_state].sender = new RTCRtpSender(illegalConstructorKey, pc, this);
     this[_state].receiver = new RTCRtpReceiver(
@@ -2642,12 +2651,32 @@ class RTCRtpTransceiver {
     if (state.direction === direction) return;
     state.direction = direction;
     op_webrtc_transceiver_set_direction(pc[_rid], this[_key], direction);
+    // wpt100:transceiver: a remote offer's transceiver made to send has a
+    // sender in the engine now (media.rs ensure_sender), paused until its
+    // RTCRtpSender has a track.
+    if (direction === "sendrecv" || direction === "sendonly") {
+      const sender = state.sender;
+      op_webrtc_sender_set_paused(
+        pc[_rid],
+        this[_key],
+        sender[_state].track === null ||
+          !(sender[_state].encodings[0]?.active ?? true),
+      );
+    }
+    invalidateCreated(pc);
     updateNegotiationNeeded(pc);
   }
   get currentDirection() {
     webidl.assertBranded(this, RTCRtpTransceiverPrototype);
     const state = this[_state];
     return state.stopped ? "stopped" : state.currentDirection;
+  }
+  // wpt100:transceiver: `stopped` left webrtc-pc for `currentDirection ==
+  // "stopped"`, but every browser still has it and the WPT transceiver tests
+  // read it: the transceiver's [[Stopped]] slot.
+  get stopped() {
+    webidl.assertBranded(this, RTCRtpTransceiverPrototype);
+    return this[_state].stopped;
   }
 
   stop() {
@@ -2659,6 +2688,7 @@ class RTCRtpTransceiver {
     stopSending(this);
     state.stopping = true;
     op_webrtc_transceiver_stop(pc[_rid], this[_key]);
+    invalidateCreated(pc);
     updateNegotiationNeeded(pc);
   }
 
@@ -2711,6 +2741,7 @@ class RTCRtpTransceiver {
       }
     }
     if (pc[_state].closed) return;
+    invalidateCreated(pc);
     op_webrtc_transceiver_set_codec_preferences(
       pc[_rid],
       this[_key],
@@ -2726,16 +2757,64 @@ class RTCRtpTransceiver {
 webidl.configureInterface(RTCRtpTransceiver);
 const RTCRtpTransceiverPrototype = RTCRtpTransceiver.prototype;
 
+// webrtc-pc 5.4 "stop sending and receiving". The receiver's track ends as the
+// user agent's own doing (not track.stop()), which mediacapture-main does in a
+// queued task: the stop() call or the description that caused it returns
+// first, with the track still live (WPT RTCRtpTransceiver-stopping).
+// The sender's and receiver's `transport` (one object for both): null until a
+// description gives the transceiver one (webrtc-pc 4.4.1.6: a local offer or
+// answer, or a remote answer; never a remote offer), and null again when a
+// rollback takes it back. The engine bundles everything on its one DTLS
+// transport, which is the object every transceiver shares.
+function rtpTransportOf(transceiver) {
+  return transceiver[_state].transport
+    ? dtlsTransportOf(transceiver[_pc])
+    : null;
+}
+
 function stopSending(transceiver) {
   const sender = transceiver[_state].sender;
   updateSenderSource(sender, sender[_state].track, null);
   const receiver = transceiver[_state].receiver;
   removeRemoteTrack(transceiver);
   closeReaders(receiver);
-  endTrack(receiver[_state].track);
+  endTrackSoon(receiver[_state].track);
   for (let i = 0; i < receiver[_state].clones.length; ++i) {
-    endTrack(receiver[_state].clones[i]);
+    endTrackSoon(receiver[_state].clones[i]);
   }
+}
+
+// A plain timer, not one of the connection's: close() ends the track at once
+// without an event, and the task then finds it ended.
+function endTrackSoon(track) {
+  if (track[_trackState].readyState === "ended") return;
+  setTimeout(() => endTrack(track), 0);
+}
+
+// webrtc-pc 5.4 "stop the RTCRtpTransceiver": [[Stopping]] and [[Stopped]]
+// (currentDirection reads "stopped"). `engine` stops the engine's transceiver
+// too (a remote description rejected its m-section); a rolled-back remote
+// offer's is gone from the engine already.
+function stopTransceiverNow(pc, transceiver, engine) {
+  const ts = transceiver[_state];
+  if (ts.stopped) return;
+  if (!ts.stopping) stopSending(transceiver);
+  ts.stopping = true;
+  ts.stopped = true;
+  if (engine) {
+    try {
+      op_webrtc_transceiver_stop(pc[_rid], transceiver[_key]);
+    } catch {
+      // The engine's transceiver is gone.
+    }
+  }
+}
+
+// A stopped transceiver leaves the connection's set of transceivers and loses
+// its mid; the engine keeps its own, which the next syncs leave out.
+function retireTransceiver(pc, transceiver) {
+  transceiver[_state].mid = null;
+  SetPrototypeAdd(pc[_state].retired, transceiver[_key]);
 }
 
 class RTCTrackEvent extends Event {
@@ -2902,6 +2981,7 @@ function restoreRemoteTracks(pc) {
       continue;
     }
     const now = rstate.streams;
+    let added = false;
     for (let j = 0; j < now.length; ++j) {
       if (!ArrayPrototypeIncludes(before.streams, now[j])) {
         streamRemoveRemote(now[j], rstate.track);
@@ -2910,9 +2990,12 @@ function restoreRemoteTracks(pc) {
     for (let j = 0; j < before.streams.length; ++j) {
       if (!ArrayPrototypeIncludes(now, before.streams[j])) {
         streamAddRemote(before.streams[j], rstate.track);
+        added = true;
       }
     }
     rstate.streams = before.streams;
+    // The streams the rollback gave back are announced as new ones are.
+    if (added) ArrayPrototypePush(revived, t);
   }
   for (let i = 0; i < revived.length; ++i) {
     const receiver = revived[i][_state].receiver;
@@ -3154,6 +3237,14 @@ class RTCPeerConnection extends EventTarget {
       dtlsState: null,
       dtls: null,
       transceivers: [],
+      // wpt100:transceiver: keys of the stopped transceivers that left
+      // `transceivers` (the engine keeps them).
+      retired: new SafeSet(),
+      // wpt100:transceiver: [[LastCreatedOffer]] / [[LastCreatedAnswer]]
+      // ({ sdp, generation }), valid while `generation` is unchanged.
+      lastCreatedOffer: null,
+      lastCreatedAnswer: null,
+      generation: 0,
       // Remote MediaStreams by id.
       streams: new SafeMap(),
       localCandidates: [],
@@ -3302,10 +3393,9 @@ class RTCPeerConnection extends EventTarget {
         }
         // A plain RTCSessionDescriptionInit, as the spec has it (libraries
         // such as simple-peer edit its `sdp` before setLocalDescription).
-        return {
-          type: "offer",
-          sdp: createOfferSdp(this, !!options?.iceRestart),
-        };
+        const sdp = createOfferSdp(this, !!options?.iceRestart);
+        state.lastCreatedOffer = { sdp, generation: state.generation };
+        return { type: "offer", sdp };
       });
     });
   }
@@ -3323,10 +3413,14 @@ class RTCPeerConnection extends EventTarget {
           `Cannot create an answer in signaling state '${state}'`,
         );
       }
-      return inTask(this, () => ({
-        type: "answer",
-        sdp: op_webrtc_pc_create_answer(this[_rid]),
-      }));
+      return inTask(this, () => {
+        const sdp = createAnswerSdp(this);
+        this[_state].lastCreatedAnswer = {
+          sdp,
+          generation: this[_state].generation,
+        };
+        return { type: "answer", sdp };
+      });
     });
   }
 
@@ -3378,9 +3472,17 @@ class RTCPeerConnection extends EventTarget {
       }
       return inTask(this, () => {
         if (type !== "rollback" && (sdp === undefined || sdp === "")) {
-          sdp = type === "offer"
-            ? createOfferSdp(this, false)
-            : op_webrtc_pc_create_answer(this[_rid]);
+          // webrtc-pc 4.4.1.5: [[LastCreatedOffer]] / [[LastCreatedAnswer]]
+          // while still valid, else a new one.
+          const offer = type === "offer";
+          sdp = lastCreated(this, offer);
+          if (sdp === null) {
+            // The engine compares a description with the last one it made.
+            sdp = offer ? createOfferSdp(this, false) : createAnswerSdp(this);
+            const created = { sdp, generation: this[_state].generation };
+            if (offer) this[_state].lastCreatedOffer = created;
+            else this[_state].lastCreatedAnswer = created;
+          }
         }
         op_webrtc_pc_set_local_description(this[_rid], type, sdp ?? "");
         const state = this[_state];
@@ -3447,6 +3549,7 @@ class RTCPeerConnection extends EventTarget {
         if (type !== "rollback") {
           requireSdpSyntax(sdp);
           requireRtcpMux(sdp);
+          requireUniqueMsids(sdp);
         }
         const offerFromStable = type === "offer" &&
           this[_state].signalingState === "stable";
@@ -3465,9 +3568,13 @@ class RTCPeerConnection extends EventTarget {
         activate(this);
         const now = this[_state].signalingState;
         descriptionApplied(this, false, type);
+        // The transceivers are in place (a remote offer's new ones included)
+        // when signalingstatechange fires; track events come after it
+        // (webrtc-pc 4.4.1.6).
+        const trackEvents = syncTransceivers(this, { remote: true, type });
         setSignalingState(this, nextSignalingState(now, false, type));
         if (type === "rollback") restoreRemoteTracks(this);
-        syncTransceivers(this, { remote: true, type });
+        fireTrackEvents(this, trackEvents);
         updateSctpTransport(this, type);
         setTransportStates(this);
         negotiationSettled(this);
@@ -3908,6 +4015,7 @@ class RTCPeerConnection extends EventTarget {
         : d === "inactive"
         ? "sendonly"
         : d;
+      invalidateCreated(this);
       updateNegotiationNeeded(this);
       return sender;
     }
@@ -3941,7 +4049,14 @@ class RTCPeerConnection extends EventTarget {
       );
     }
     const transceiver = sender[_transceiver];
-    if (transceiver[_state].stopped || sender[_state].track === null) return;
+    // A stopping transceiver is left alone too (WPT "Calling removeTrack on a
+    // stopped transceiver should be a no-op"; w3c/webrtc-pc#2874).
+    if (
+      transceiver[_state].stopping || transceiver[_state].stopped ||
+      sender[_state].track === null
+    ) {
+      return;
+    }
     setSenderTrack(sender, null);
     const d = transceiver[_state].direction;
     const next = d === "sendrecv"
@@ -3957,6 +4072,7 @@ class RTCPeerConnection extends EventTarget {
         next,
       );
     }
+    invalidateCreated(this);
     updateNegotiationNeeded(this);
   }
 
@@ -4225,6 +4341,18 @@ function midsOf(sdp) {
 
 // An EncodedMediaTrack's codec, and for audio the telephone-event formats
 // RTCDTMFSender needs (media.rs `track_preferences`).
+// wpt100:transceiver: ops fail with WebRtcError::InvalidModification
+// (lib.rs: class "DOMExceptionInvalidModificationError"), which the runtime
+// registers no builder for, so the promise rejected with `undefined`. JSEP
+// ("an offer / answer other than the last one created") and
+// setCodecPreferences reject with an InvalidModificationError DOMException.
+core.registerErrorBuilder(
+  "DOMExceptionInvalidModificationError",
+  function DOMExceptionInvalidModificationError(msg) {
+    return new DOMException(msg, "InvalidModificationError");
+  },
+);
+
 function trackPreferences(codec) {
   const out = [codec];
   if (
@@ -4285,6 +4413,7 @@ function addTransceiverInner(pc, trackOrKind, init) {
   if (track !== null) setSenderTrack(sender, track);
   ArrayPrototypePush(pc[_state].transceivers, transceiver);
   syncTransceivers(pc, null);
+  invalidateCreated(pc);
   updateNegotiationNeeded(pc);
   return transceiver;
 }
@@ -4296,32 +4425,38 @@ function addTransceiverInner(pc, trackOrKind, init) {
 // a remote track".
 function syncTransceivers(pc, phase) {
   const state = pc[_state];
-  if (state.closed) return;
+  if (state.closed) return [];
   const infos = op_webrtc_pc_transceivers(pc[_rid]);
   const known = new SafeMap();
   for (let i = 0; i < state.transceivers.length; ++i) {
     const t = state.transceivers[i];
     MapPrototypeSet(known, t[_key], t);
   }
+  const seen = new SafeSet();
   const next = [];
   const settled = phase !== null &&
     (phase.type === "answer" || phase.type === "rollback");
   const trackEvents = [];
   for (let i = 0; i < infos.length; ++i) {
     const info = infos[i];
+    if (SetPrototypeHas(state.retired, info.key)) continue;
     let t = MapPrototypeGet(known, info.key);
     if (t === undefined) {
       if (info.kind !== "audio" && info.kind !== "video") continue;
+      // A remote offer's new transceiver is recvonly (webrtc-pc 4.4.1.6,
+      // "create an RTCRtpTransceiver ... direction recvonly"), whatever the
+      // engine narrowed its own to; the answer narrows it (createAnswerSdp).
       t = new RTCRtpTransceiver(illegalConstructorKey, pc, {
         key: info.key,
         kind: info.kind,
         mid: info.mid,
-        direction: info.direction ?? "recvonly",
+        direction: "recvonly",
       });
       t[_state].sender[_state].encodings = info.kind === "video"
         ? [{ active: true, scaleResolutionDownBy: 1 }]
         : [{ active: true }];
     }
+    SetPrototypeAdd(seen, info.key);
     const ts = t[_state];
     if (phase !== null && phase.type === "rollback" && info.mid === null) {
       ts.mid = null;
@@ -4335,19 +4470,26 @@ function syncTransceivers(pc, phase) {
       }
     }
     const remote = info.remote;
-    if (settled && phase.type === "answer") {
-      if (ts.stopping || (remote !== null && remote.rejected)) {
-        if (!ts.stopped) {
-          stopSending(t);
-          ts.stopping = false;
-          ts.stopped = true;
-        }
-      }
+    // webrtc-pc 4.4.1.6: a media description the remote side rejected stops
+    // its transceiver at once (an offer: [[Stopped]] while the answer is
+    // pending; WPT "Remotely stopped transceiver goes directly to stopped").
+    // In an answer this is also how a stopping transceiver becomes stopped:
+    // the offer that followed stop() rejected its m-section, and so does the
+    // answer. A stopping transceiver whose m-section the answer did not
+    // reject (stopped after the offer came in: answered inactive) stays
+    // stopping until the next offer.
+    if (
+      phase !== null && phase.type !== "rollback" && remote !== null &&
+      remote.rejected && !ts.stopped
+    ) {
+      stopTransceiverNow(pc, t, true);
     }
     if (
       phase !== null && phase.remote && phase.type !== "rollback" &&
-      remote !== null && !ts.stopped && !ts.stopping
+      remote !== null && !ts.stopped
     ) {
+      // A stopping transceiver still takes part (WPT checkStopAfterCreateOffer:
+      // the answer to an offer made before stop() fires its track event).
       const remoteSends = !remote.rejected &&
         (remote.direction === "sendrecv" || remote.direction === "sendonly");
       const receptive = ts.direction === "sendrecv" ||
@@ -4365,6 +4507,7 @@ function syncTransceivers(pc, phase) {
         const rstate = receiver[_state];
         const track = rstate.track;
         const old = rstate.streams;
+        let added = false;
         for (let j = 0; j < old.length; ++j) {
           if (!ArrayPrototypeIncludes(streams, old[j])) {
             streamRemoveRemote(old[j], track);
@@ -4373,10 +4516,14 @@ function syncTransceivers(pc, phase) {
         for (let j = 0; j < streams.length; ++j) {
           if (!ArrayPrototypeIncludes(old, streams[j])) {
             streamAddRemote(streams[j], track);
+            added = true;
           }
         }
         rstate.streams = streams;
-        if (!rstate.receiving) {
+        // A track event when the track starts being received, and when the
+        // description adds streams to it ("set the associated remote
+        // streams" grew addList).
+        if (!rstate.receiving || added) {
           rstate.receiving = true;
           ArrayPrototypePush(trackEvents, [t, streams]);
         }
@@ -4384,11 +4531,42 @@ function syncTransceivers(pc, phase) {
         removeRemoteTrack(t);
       }
     }
-    if (!(settled && ts.stopped && phase.type === "answer")) {
-      ArrayPrototypePush(next, t);
+    if (phase !== null) {
+      if (phase.type === "rollback") {
+        ts.transport = ts.stableTransport;
+      } else if (
+        ts.mid !== null && (!phase.remote || phase.type !== "offer")
+      ) {
+        ts.transport = true;
+      }
+      if (settled) ts.stableTransport = ts.transport;
     }
+    if (settled && phase.type === "answer" && ts.stopped) {
+      // Negotiated stopped: out of the set, without a mid (webrtc-pc 4.4.1.6).
+      retireTransceiver(pc, t);
+      continue;
+    }
+    ArrayPrototypePush(next, t);
+  }
+  // Transceivers the engine no longer has: a rolled-back remote offer created
+  // them, and nothing kept them (webrtc-pc 4.4.1.6 rollback: "stop the
+  // RTCRtpTransceiver ... and remove it from the set of transceivers"). Their
+  // receiver track ends (WPT "Rollback when removing transceiver does end the
+  // track").
+  for (let i = 0; i < state.transceivers.length; ++i) {
+    const t = state.transceivers[i];
+    if (SetPrototypeHas(seen, t[_key])) continue;
+    stopTransceiverNow(pc, t, false);
+    retireTransceiver(pc, t);
   }
   state.transceivers = next;
+  return trackEvents;
+}
+
+// The track events a remote description queued (webrtc-pc 4.4.1.6: after
+// signalingstatechange).
+function fireTrackEvents(pc, trackEvents) {
+  if (trackEvents === undefined) return;
   for (let i = 0; i < trackEvents.length; ++i) {
     const { 0: t, 1: streams } = trackEvents[i];
     const receiver = t[_state].receiver;
@@ -4564,6 +4742,93 @@ function createOfferSdp(pc, iceRestart) {
   return sdp;
 }
 
+// RFC 8830 section 2: one MediaStreamTrack is in one m-section, so an
+// `a=msid:<stream> <track>` value two m-sections both carry is an invalid
+// description, which setRemoteDescription rejects with an OperationError.
+// (An msid with no track part, and rejected sections, say nothing here.)
+function requireUniqueMsids(sdp) {
+  const seen = new SafeSet();
+  let mine = null;
+  const flush = () => {
+    if (mine === null) return;
+    const values = ArrayFrom(new SafeSet(mine));
+    for (let i = 0; i < values.length; ++i) {
+      if (SetPrototypeHas(seen, values[i])) {
+        throw new DOMException(
+          `setRemoteDescription: the msid '${values[i]}' is in two media sections`,
+          "OperationError",
+        );
+      }
+      SetPrototypeAdd(seen, values[i]);
+    }
+  };
+  const lines = StringPrototypeSplit(sdp, "\n");
+  for (let i = 0; i < lines.length; ++i) {
+    const line = StringPrototypeTrim(lines[i]);
+    if (StringPrototypeStartsWith(line, "m=")) {
+      flush();
+      const parts = StringPrototypeSplit(line, " ");
+      mine = parts[1] === "0" ? null : [];
+    } else if (mine !== null && StringPrototypeStartsWith(line, "a=msid:")) {
+      const value = StringPrototypeTrim(StringPrototypeSlice(line, 7));
+      const parts = ArrayPrototypeFilter(
+        StringPrototypeSplit(value, " "),
+        (part) => part !== "",
+      );
+      if (parts.length >= 2) {
+        ArrayPrototypePush(mine, `${parts[0]} ${parts[1]}`);
+      }
+    }
+  }
+  flush();
+}
+
+// createAnswer's SDP. JSEP (RFC 9429 5.3.1): each answered m= section's
+// direction is the transceiver's own direction intersected with the reverse
+// of the offered one, and a stopping transceiver answers inactive (it is
+// rejected by the next offer). The engine writes its own direction into the
+// answer, and only half narrows it when it applies the offer (a sendonly offer
+// left a sendrecv transceiver answering sendrecv; a remote offer's transceiver
+// answered sendonly with nothing to send), so the directions are set here.
+function createAnswerSdp(pc) {
+  const state = pc[_state];
+  const byKey = new SafeMap();
+  for (let i = 0; i < state.transceivers.length; ++i) {
+    const t = state.transceivers[i];
+    MapPrototypeSet(byKey, t[_key], t);
+  }
+  const infos = op_webrtc_pc_transceivers(pc[_rid]);
+  for (let i = 0; i < infos.length; ++i) {
+    const info = infos[i];
+    const remote = info.remote;
+    if (remote === null || remote.rejected) continue;
+    const t = MapPrototypeGet(byKey, info.key);
+    if (t === undefined) continue;
+    const ts = t[_state];
+    if (ts.stopped) continue;
+    const want = ts.stopping
+      ? "inactive"
+      : intersectDirections(ts.direction, reverseDirection(remote.direction));
+    if (info.direction === want) continue;
+    try {
+      op_webrtc_transceiver_set_direction(pc[_rid], t[_key], want);
+    } catch {
+      // The engine's transceiver is gone.
+    }
+  }
+  return op_webrtc_pc_create_answer(pc[_rid]);
+}
+
+function intersectDirections(a, b) {
+  const send = (a === "sendrecv" || a === "sendonly") &&
+    (b === "sendrecv" || b === "sendonly");
+  const recv = (a === "sendrecv" || a === "recvonly") &&
+    (b === "sendrecv" || b === "recvonly");
+  return send
+    ? (recv ? "sendrecv" : "sendonly")
+    : (recv ? "recvonly" : "inactive");
+}
+
 // The engine narrows a transceiver's direction to what a remote offer allows
 // when it applies one (that is how it works out its answer), and keeps the
 // narrowed one. The application's own direction is the one here: an offer
@@ -4603,12 +4868,30 @@ function sameIds(a, b) {
   return true;
 }
 
+// [[LastCreatedOffer]] / [[LastCreatedAnswer]]'s SDP if nothing that goes into
+// a description changed since it was created (invalidateCreated), else null.
+function lastCreated(pc, offer) {
+  const state = pc[_state];
+  const last = offer ? state.lastCreatedOffer : state.lastCreatedAnswer;
+  return last !== null && last.generation === state.generation
+    ? last.sdp
+    : null;
+}
+
+// A change that a new offer or answer would show (a transceiver, a direction,
+// a track, codec preferences, an applied description): the last created ones
+// are stale.
+function invalidateCreated(pc) {
+  pc[_state].generation++;
+}
+
 // Bookkeeping when a description has been applied: the stream ids each
 // sender has in the local description (what `a=msid` carries), the type of
 // the current local description, and restartIce()'s credentials, which a
 // completed negotiation with fresh ones retires.
 function descriptionApplied(pc, local, type) {
   const state = pc[_state];
+  invalidateCreated(pc);
   const transceivers = state.transceivers;
   if (type === "rollback") {
     for (let i = 0; i < transceivers.length; ++i) {
