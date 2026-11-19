@@ -3535,6 +3535,9 @@ class RTCRtpTransceiver {
     }
     this[_state].headerExtensionsToNegotiate = converted;
     this[_state].userStoppedExtensions = stopped;
+    // A new offer or answer would carry other a=extmap lines: the last
+    // created ones are stale (wpt100:transceiver's generation counter).
+    invalidateCreated(this[_pc]);
   }
 
   getNegotiatedHeaderExtensions() {
