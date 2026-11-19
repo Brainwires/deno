@@ -31,7 +31,6 @@ const {
   op_webrtc_pc_create_offer,
   op_webrtc_pc_descriptions,
   op_webrtc_pc_get_stats,
-  op_webrtc_pc_max_message_size,
   op_webrtc_pc_next_events,
   op_webrtc_pc_set_local_description,
   op_webrtc_pc_set_remote_description,
@@ -704,6 +703,8 @@ webidl.configureInterface(RTCStatsReport);
 
 // What this side's SCTP sends at most (the engine's bound, as browsers).
 const LOCAL_MAX_MESSAGE_SIZE = 262144;
+// The remote max-message-size of the last answer applied (null before one).
+const _maxMessageSize = Symbol("[[MaxMessageSize]]");
 
 class RTCSctpTransport extends EventTarget {
   constructor(key = undefined, pc = undefined) {
@@ -712,6 +713,7 @@ class RTCSctpTransport extends EventTarget {
     }
     super();
     this[_pc] = pc;
+    this[_maxMessageSize] = null;
     this[webidl.brand] = webidl.brand;
   }
 
@@ -724,16 +726,13 @@ class RTCSctpTransport extends EventTarget {
     return pc.sctpState ?? "connecting";
   }
 
-  // The remote description's a=max-message-size (65536 when absent, no
-  // limit when 0), capped by what this side can send.
+  // [[MaxMessageSize]] (W3C "update the data max message size"): set when
+  // an answer or pranswer is applied, from the remote description's
+  // a=max-message-size (65536 when absent, no limit when 0), capped by what
+  // this side can send. Until then the remote limit is RFC 8841's default.
   get maxMessageSize() {
     webidl.assertBranded(this, RTCSctpTransportPrototype);
-    const pc = this[_pc];
-    if (!pc[_state].closed) {
-      const engine = op_webrtc_pc_max_message_size(pc[_rid]);
-      if (engine > 0) return engine;
-    }
-    const remote = pc[_state].remoteMaxMessageSize ?? 65536;
+    const remote = this[_maxMessageSize] ?? 65536;
     return remote === 0
       ? LOCAL_MAX_MESSAGE_SIZE
       : MathMin(remote, LOCAL_MAX_MESSAGE_SIZE);
@@ -869,6 +868,8 @@ class RTCDataChannel extends EventTarget {
       );
     }
     if (ObjectPrototypeIsPrototypeOf(BlobPrototype, data)) {
+      // The byte size of a Blob is known synchronously (send() step 4).
+      checkMessageSize(this, data.size);
       // A Blob is read first; later sends wait behind it so the order on the
       // wire is the order of the calls.
       state.queuedBytes += data.size;
@@ -899,6 +900,7 @@ class RTCDataChannel extends EventTarget {
       text = true;
       bytes = core.encode(String(data));
     }
+    checkMessageSize(this, TypedArrayPrototypeGetByteLength(bytes));
     if (state.queue.length > 0) {
       state.queuedBytes += TypedArrayPrototypeGetByteLength(bytes);
       ArrayPrototypePush(state.queue, { text, bytes });
@@ -944,6 +946,20 @@ defineHandler(RTCDataChannel.prototype, "close");
 defineHandler(RTCDataChannel.prototype, "message");
 webidl.configureInterface(RTCDataChannel);
 const RTCDataChannelPrototype = RTCDataChannel.prototype;
+
+// W3C send() step 5: a message larger than the SCTP transport's
+// maxMessageSize is a TypeError, thrown by send() itself.
+function checkMessageSize(channel, size) {
+  const sctp = channel[_pc][_state].sctp;
+  const limit = sctp === null || sctp === undefined
+    ? null
+    : sctp.maxMessageSize;
+  if (limit !== null && size > limit) {
+    throw new TypeError(
+      `Failed to execute 'send' on 'RTCDataChannel': the message (${size} bytes) is larger than the connection's maxMessageSize (${limit})`,
+    );
+  }
+}
 
 function closeTransport(channel) {
   const pc = channel[_pc];
@@ -4160,6 +4176,15 @@ function updateSctpTransport(pc, type) {
     state.sctpState = null;
     state.sctp = new RTCSctpTransport(illegalConstructorKey, pc);
     state.sctp[_transportState] = state.sctp.state;
+  }
+  // W3C "set the RTCSessionDescription" 4.4.1.6: an answer or pranswer (local
+  // or remote) runs "update the data max message size" with the remote
+  // description of that moment, a renegotiation included.
+  if (state.sctp !== null && (type === "answer" || type === "pranswer")) {
+    const remote = pc.remoteDescription;
+    if (remote !== null) {
+      state.sctp[_maxMessageSize] = maxMessageSizeOf(remote.sdp) ?? 65536;
+    }
   }
 }
 
