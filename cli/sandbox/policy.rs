@@ -3012,12 +3012,11 @@ impl<'a> Compiler<'a> {
   /// Remote modules fetched after start (dynamic `import()`, npm
   /// auto-install) need the network the kernel policy may not grant.
   fn import_gap(&mut self, net: &NetPolicy) {
-    // under the broker its network side fetches them; until that is built
-    // Mode B fails closed like Mode A
-    if self.ctx().compiled
-      || self.broker_net()
-      || matches!(net, NetPolicy::Open)
-    {
+    // the broker's network side holds the network grant, not the import
+    // list: a fetch after start is still refused (a host the net grant
+    // doesn't name) or has no socket at all, so Mode B fails closed like
+    // Mode A until the broker has an import class
+    if self.ctx().compiled || matches!(net, NetPolicy::Open) {
       return;
     }
     if let Some(list) = &self.opts().allow_import {
