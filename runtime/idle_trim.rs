@@ -633,13 +633,21 @@ mod tests {
     assert_eq!(s.deadline(), Some(t0 + ms(25_000)));
   }
 
-  /// A stand-in event loop: pending until `done`, woken by whoever holds the
-  /// waker it registered.
+  /// A stand-in event loop: pending until `done`. While `ticks_left` is not
+  /// zero it is busy the way the real loop is: it holds a 10 ms timer of its
+  /// own, registered with the waker it is polled with, and arms the next one
+  /// when one fires.
   #[derive(Default)]
   struct FakeLoop {
     waker: Option<Waker>,
     polls: usize,
+    tick: Option<Pin<Box<tokio::time::Sleep>>>,
+    ticks_left: usize,
+    /// The trims counted when the last tick fired.
+    trims_when_busy_ended: Option<usize>,
   }
+
+  const TICK: Duration = Duration::from_millis(10);
 
   fn drive(
     trim: &mut IdleTrim,
@@ -650,6 +658,7 @@ mod tests {
     std::future::poll_fn(move |cx| {
       let fake = fake.clone();
       let trims = trims.clone();
+      let trims_seen = trims.clone();
       let done = done.clone();
       trim.poll(
         cx,
@@ -658,6 +667,19 @@ mod tests {
           let mut f = fake.borrow_mut();
           f.polls += 1;
           f.waker = Some(cx.waker().clone());
+          while f.ticks_left > 0 {
+            let tick = f
+              .tick
+              .get_or_insert_with(|| Box::pin(tokio::time::sleep(TICK)));
+            if tick.as_mut().poll(cx).is_pending() {
+              break;
+            }
+            f.tick = None;
+            f.ticks_left -= 1;
+            if f.ticks_left == 0 {
+              f.trims_when_busy_ended = Some(trims_seen.get());
+            }
+          }
           if done.get() {
             Poll::Ready(())
           } else {
@@ -671,47 +693,59 @@ mod tests {
 
   #[tokio::test]
   async fn trims_an_idle_loop_once_and_not_a_busy_one() {
-    let fake = Rc::new(std::cell::RefCell::new(FakeLoop::default()));
+    let fake = Rc::new(std::cell::RefCell::new(FakeLoop {
+      // A "busy" loop: a timer of its own every 10 ms (far shorter than the
+      // delay), 30 times over. No trim may run.
+      ticks_left: 30,
+      ..Default::default()
+    }));
     let trims = Rc::new(Cell::new(0));
     let done = Rc::new(Cell::new(false));
     let mut idle = IdleTrim::new(config(150, 0));
-    let local = tokio::task::LocalSet::new();
-    local
-      .run_until(async {
-        // A "busy" loop: woken every 10 ms (far shorter than the delay) for
-        // 300 ms. No trim may run.
-        let busy = {
-          let fake = fake.clone();
-          tokio::task::spawn_local(async move {
-            for _ in 0..30 {
-              tokio::time::sleep(Duration::from_millis(10)).await;
-              if let Some(w) = fake.borrow().waker.clone() {
-                w.wake();
-              }
-            }
-          })
-        };
-        let drive_fut = drive(&mut idle, &fake, &trims, &done);
-        tokio::pin!(drive_fut);
-        tokio::select! {
-          _ = &mut drive_fut => unreachable!(),
-          _ = busy => {}
-        }
-        assert_eq!(trims.get(), 0, "trimmed while the loop was busy");
-        // Then idle for 800 ms: exactly one trim.
-        tokio::select! {
-          _ = &mut drive_fut => unreachable!(),
-          _ = tokio::time::sleep(Duration::from_millis(800)) => {}
-        }
-        assert_eq!(trims.get(), 1);
-        // The loop finishing still resolves the wrapped poll.
-        done.set(true);
-        if let Some(w) = fake.borrow().waker.clone() {
-          w.wake();
-        }
-        drive_fut.await;
-      })
-      .await;
+    let drive_fut = drive(&mut idle, &fake, &trims, &done);
+    tokio::pin!(drive_fut);
+    // The loop's timers wake it through the waker it was polled with, as the
+    // real event loop's do, so each is activity however late this thread gets
+    // to run: a timer that fires together with the trim's own (a machine too
+    // loaded to run the test for 150 ms) still counts first. The test used to
+    // wake the loop from a second task, which then ran after the trim, and
+    // counted trims only once that task had ended.
+    let step = Duration::from_millis(20);
+    let within = |limit: Duration| Instant::now() + limit;
+    let deadline = within(Duration::from_secs(60));
+    while fake.borrow().trims_when_busy_ended.is_none() {
+      assert!(Instant::now() < deadline, "the busy loop never ended");
+      tokio::select! {
+        _ = &mut drive_fut => unreachable!(),
+        _ = tokio::time::sleep(step) => {}
+      }
+    }
+    assert_eq!(
+      fake.borrow().trims_when_busy_ended,
+      Some(0),
+      "trimmed while the loop was busy"
+    );
+    // Then idle: one trim, however long this thread waits for the CPU.
+    let deadline = within(Duration::from_secs(60));
+    while trims.get() == 0 {
+      assert!(Instant::now() < deadline, "an idle loop was never trimmed");
+      tokio::select! {
+        _ = &mut drive_fut => unreachable!(),
+        _ = tokio::time::sleep(step) => {}
+      }
+    }
+    // And only one: several more delays pass with no second trim.
+    tokio::select! {
+      _ = &mut drive_fut => unreachable!(),
+      _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+    }
+    assert_eq!(trims.get(), 1);
+    // The loop finishing still resolves the wrapped poll.
+    done.set(true);
+    if let Some(w) = fake.borrow().waker.clone() {
+      w.wake();
+    }
+    drive_fut.await;
     assert_eq!(trims.get(), 1);
     assert!(fake.borrow().polls > 30);
   }

@@ -33,18 +33,21 @@ async function readAll(stream: ReadableStream<Uint8Array>): Promise<string> {
   return text + decoder.decode();
 }
 
-// Reads until `needle` has been seen (or the stream ended), returning what
-// was read; the reader is released, not cancelled, so the terminal stays
-// readable.
+// Reads until `needle` has been seen (a string, or a test of all the text
+// read so far), or the stream ended, returning what was read; the reader is
+// released, not cancelled, so the terminal stays readable.
 async function readUntil(
   stream: ReadableStream<Uint8Array>,
-  needle: string,
+  needle: string | ((text: string) => boolean),
 ): Promise<string> {
+  const seen = typeof needle === "string"
+    ? (text: string) => text.includes(needle)
+    : needle;
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let text = "";
   try {
-    while (!text.includes(needle)) {
+    while (!seen(text)) {
       const { value, done } = await reader.read();
       if (done) break;
       text += decoder.decode(value, { stream: true });
@@ -206,19 +209,42 @@ Deno.test(
 Deno.test(
   { permissions: { run: true, read: true }, ignore: isWindows },
   async function ptyKillDefaultsToSighup() {
-    // what a closing terminal sends; a shell that traps it says so
-    const pty = Deno.openPty({
+    // What a closing terminal sends. Two children, each in a state the
+    // signal can't race: the test used to trap HUP in a shell that then
+    // ran `exec sleep`, and a kill that arrived before the exec (a loaded
+    // machine) ran the trap, so the child exited 3 instead of dying of the
+    // signal.
+    // 1. Nothing traps it, before or after the exec: the child dies of it.
+    const plain = Deno.openPty({
       cmd: "sh",
-      args: ["-c", "trap 'echo hup; exit 3' HUP; echo ready; exec sleep 30"],
+      args: ["-c", "echo ready; exec sleep 30"],
       cols: 80,
       rows: 24,
     });
-    await readUntil(pty.readable, "ready");
-    pty.kill();
-    const status = await pty.status;
-    await readAll(pty.readable);
-    // `exec sleep` replaced the shell, so the signal ended it
+    await readUntil(plain.readable, "ready");
+    plain.kill();
+    const status = await plain.status;
+    await readAll(plain.readable);
     assertEquals(status.signal, "SIGHUP");
+    assertEquals(status.code, 128 + 1);
+    // 2. A shell that traps it, and stays the shell, says which signal came
+    // (it runs the trap once the `sleep` in the foreground ends).
+    const trapping = Deno.openPty({
+      cmd: "sh",
+      args: [
+        "-c",
+        "trap 'echo hup; exit 3' HUP; echo ready; while :; do sleep 0.1; done",
+      ],
+      cols: 80,
+      rows: 24,
+    });
+    await readUntil(trapping.readable, "ready");
+    trapping.kill();
+    const output = await readAll(trapping.readable);
+    assertStringIncludes(output, `hup${EOL}`);
+    const trapped = await trapping.status;
+    assertEquals(trapped.signal, null);
+    assertEquals(trapped.code, 3);
   },
 );
 
@@ -230,17 +256,24 @@ Deno.test(
     // signalled. (It ignores SIGHUP because the kernel sends the terminal's
     // foreground group one when its session leader, the shell, exits; a
     // SIGTERM reaching it could only come from a group-wide kill.)
+    // The job says `ready` once it ignores SIGHUP, and the test waits for
+    // that: a SIGTERM sent as soon as the shell had printed the job's pid
+    // could end the shell before the job had run its `trap`, and the
+    // kernel's SIGHUP then killed the job (ESRCH below, on a loaded machine).
     const pty = Deno.openPty({
       cmd: "sh",
       args: [
         "-c",
-        "trap 'echo term; exit 4' TERM; (trap '' HUP; exec sleep 30) </dev/null >/dev/null 2>&1 & echo $!; wait $!",
+        "trap 'echo term; exit 4' TERM; (trap '' HUP; echo ready; exec sleep 30 >/dev/null 2>&1) </dev/null & echo pid=$!; wait $!",
       ],
       cols: 80,
       rows: 24,
     });
-    const seen = await readUntil(pty.readable, "\n");
-    const grandchild = Number(seen.trim());
+    const seen = await readUntil(
+      pty.readable,
+      (text) => /pid=\d+\r?\n/.test(text) && text.includes("ready"),
+    );
+    const grandchild = Number(seen.match(/pid=(\d+)/)?.[1]);
     assert(grandchild > 0, seen);
     pty.kill("SIGTERM");
     const output = await readAll(pty.readable);

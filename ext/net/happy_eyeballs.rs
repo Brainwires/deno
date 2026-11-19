@@ -36,6 +36,29 @@ pub async fn connect_happy_eyeballs(
   attempt_delay: Duration,
   cancel_handle: Option<Rc<CancelHandle>>,
 ) -> Result<HappyEyeballsResult, IoError> {
+  connect_happy_eyeballs_with(
+    addrs,
+    attempt_delay,
+    cancel_handle,
+    TcpStream::connect,
+  )
+  .await
+}
+
+/// [`connect_happy_eyeballs`] over `connect`, which dials one address. The
+/// tests pass a stand-in whose first address never answers: no real address
+/// hangs on every host (a CI container's network refuses 10.0.0.0/8 at once
+/// or lets the SYN time out, by the minute).
+async fn connect_happy_eyeballs_with<C, F>(
+  addrs: Vec<SocketAddr>,
+  attempt_delay: Duration,
+  cancel_handle: Option<Rc<CancelHandle>>,
+  connect: C,
+) -> Result<HappyEyeballsResult, IoError>
+where
+  C: Fn(SocketAddr) -> F,
+  F: Future<Output = Result<TcpStream, IoError>>,
+{
   if addrs.is_empty() {
     return Err(IoError::new(
       ErrorKind::InvalidInput,
@@ -57,7 +80,7 @@ pub async fn connect_happy_eyeballs(
   // Start first connection immediately
   if let Some(addr) = addr_iter.next() {
     attempted_addresses.push(addr);
-    pending.push(start_connect(addr, cancel_handle.clone()));
+    pending.push(start_connect(connect(addr), addr, cancel_handle.clone()));
   }
 
   let mut next_attempt_at = Instant::now() + attempt_delay;
@@ -78,7 +101,7 @@ pub async fn connect_happy_eyeballs(
         .next()
         .expect("has_more_addrs is true, so there should be an address");
       attempted_addresses.push(addr);
-      pending.push(start_connect(addr, cancel_handle.clone()));
+      pending.push(start_connect(connect(addr), addr, cancel_handle.clone()));
       next_attempt_at = Instant::now() + attempt_delay;
       continue;
     }
@@ -107,7 +130,7 @@ pub async fn connect_happy_eyeballs(
       _ = sleep_until(next_attempt_at), if has_more_addrs => {
         let addr = addr_iter.next().expect("has_more_addrs is true, so there should be an address");
         attempted_addresses.push(addr);
-        pending.push(start_connect(addr, cancel_handle.clone()));
+        pending.push(start_connect(connect(addr), addr, cancel_handle.clone()));
         next_attempt_at = Instant::now() + attempt_delay;
       }
     }
@@ -145,8 +168,10 @@ fn interleave_addresses(addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
   result
 }
 
-/// Start a connection attempt to a single address.
+/// Runs one connection attempt (`connect`, to `addr`) under the cancel
+/// handle.
 async fn start_connect(
+  connect: impl Future<Output = Result<TcpStream, IoError>>,
   addr: SocketAddr,
   cancel_handle: Option<Rc<CancelHandle>>,
 ) -> Result<(TcpStream, SocketAddr), IoError> {
@@ -155,13 +180,13 @@ async fn start_connect(
       // `or_cancel` yields a nested `Result<Result<TcpStream, IoError>, _>`:
       // the outer layer reports cancellation, the inner one the connect
       // itself. Unwrap them on separate lines so the two `?` read clearly.
-      let connect = TcpStream::connect(addr).or_cancel(&cancel).await;
+      let connect = connect.or_cancel(&cancel).await;
       let connect = connect.map_err(|_| {
         IoError::new(ErrorKind::Interrupted, "Connection cancelled")
       })?;
       connect?
     }
-    None => TcpStream::connect(addr).await?,
+    None => connect.await?,
   };
   Ok((stream, addr))
 }
@@ -411,7 +436,12 @@ mod tests {
 
   #[tokio::test]
   async fn test_parallel_second_wins() {
-    // First address hangs (non-routable), second is a valid listener
+    // denext: the first address never answers, the second is a valid
+    // listener. The first is a stand-in, not a real address: the test used
+    // 10.255.255.1, which a host with no route to 10.0.0.0/8 refuses at once
+    // (the second attempt then starts without the delay), and which the same
+    // host can answer either way from one minute to the next, so probing it
+    // again after the fact said nothing about the attempt under test.
     let hanging_addr: SocketAddr = "10.255.255.1:80".parse().unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -419,34 +449,60 @@ mod tests {
 
     let start = std::time::Instant::now();
     let attempt_delay = Duration::from_millis(50);
-    let result = connect_happy_eyeballs(
+    let result = connect_happy_eyeballs_with(
       vec![hanging_addr, good_addr],
       attempt_delay,
       None,
+      |addr| async move {
+        if addr == hanging_addr {
+          std::future::pending::<()>().await;
+        }
+        TcpStream::connect(addr).await
+      },
     )
     .await;
 
     let elapsed = start.elapsed();
 
+    // The first attempt is still pending, so a result at all means the
+    // second ran beside it.
     assert!(result.is_ok());
     let result = result.unwrap();
     assert_eq!(result.addr, good_addr);
     // Both addresses should be in attempted list (parallel attempts)
-    assert_eq!(result.attempted_addresses.len(), 2);
-    // Should complete in roughly delay + connection time, not full timeout
-    assert!(elapsed < Duration::from_millis(500));
-    // denext: the second attempt waits out the delay only while the first is
-    // still pending. A host with no route to 10.0.0.0/8 (a CI VM) refuses the
-    // first at once, and the second then starts without waiting.
-    let first_hangs = tokio::time::timeout(
-      attempt_delay * 2,
-      tokio::net::TcpStream::connect(hanging_addr),
+    assert_eq!(result.attempted_addresses, vec![hanging_addr, good_addr]);
+    // The second attempt waited out the delay, as the first was pending.
+    assert!(attempt_delay <= elapsed, "{elapsed:?}");
+  }
+
+  #[tokio::test]
+  async fn test_parallel_second_starts_at_once_after_a_fast_failure() {
+    // denext: the other half of the rule. The first address fails at once,
+    // so the second starts without waiting out the delay (an hour here).
+    let failing_addr: SocketAddr = "10.255.255.1:80".parse().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let good_addr = listener.local_addr().unwrap();
+
+    let result = tokio::time::timeout(
+      Duration::from_secs(60),
+      connect_happy_eyeballs_with(
+        vec![failing_addr, good_addr],
+        Duration::from_secs(3600),
+        None,
+        |addr| async move {
+          if addr == failing_addr {
+            return Err(IoError::from(ErrorKind::ConnectionRefused));
+          }
+          TcpStream::connect(addr).await
+        },
+      ),
     )
     .await
-    .is_err();
-    if first_hangs {
-      assert!(attempt_delay < elapsed);
-    }
+    .expect("the second attempt waited for the delay")
+    .unwrap();
+    assert_eq!(result.addr, good_addr);
+    assert_eq!(result.attempted_addresses, vec![failing_addr, good_addr]);
   }
 
   #[tokio::test]
