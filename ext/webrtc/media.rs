@@ -677,8 +677,10 @@ impl Core {
   pub(crate) fn rollback_victims(&mut self) -> Vec<usize> {
     let mut out = Vec::new();
     for (index, key) in self.media.keys.clone().iter().enumerate() {
+      // The engine removes what the offer created unless `addTrack` touched
+      // it (attach_track drops the key from created_by_remote).
       if self.media.created_by_remote.contains(key)
-        && self.pc.rtp_sender(index.into()).is_none()
+        && self.pc.rtp_transceiver(index).is_some()
       {
         out.push(index);
       }
@@ -808,6 +810,12 @@ impl Core {
 
   /// `addTrack` onto a transceiver JavaScript chose for reuse: the sender
   /// takes the track (its id and streams go in the msid) and starts sending.
+  /// A transceiver a remote offer created has no engine sender until now; the
+  /// engine hands out a sender only while the direction sends, so the
+  /// direction gains `send` first. One `addTransceiver` created stays out of a
+  /// remote offer's new m-sections (WPT checkAddTransceiverThenAddTrackPairs:
+  /// browsers keep it unassociable), and `addTrack` keeps a transceiver a
+  /// rolled-back remote offer created (W3C 4.4.1.6).
   pub(crate) fn attach_track(
     &mut self,
     key: u32,
@@ -816,6 +824,44 @@ impl Core {
   ) -> Result<(), WebRtcError> {
     let index = self.index_of(key)?;
     let kind = self.media.kinds.get(&key).copied().unwrap_or_default();
+    let streams = msid_streams(streams);
+    let stream = streams[0].clone();
+    if let Some(mut t) = self.pc.rtp_transceiver(index) {
+      let has_recv = t.direction().has_recv();
+      t.set_direction(RTCRtpTransceiverDirection::from_send_recv(
+        true, has_recv,
+      ));
+      t.keep_on_rollback();
+    }
+    self.media.created_by_remote.retain(|k| *k != key);
+    let has_sender = self
+      .pc
+      .rtp_transceiver(index)
+      .is_some_and(|t| t.sender().is_some());
+    if !has_sender {
+      self
+        .pc
+        .add_track_to_transceiver(
+          index,
+          MediaStreamTrack::new(
+            stream,
+            track.id.clone(),
+            track.label,
+            kind,
+            vec![RTCRtpEncodingParameters {
+              active: true,
+              ..Default::default()
+            }],
+          ),
+        )
+        .map_err(crate::peer::rtc_err)?;
+      if let Some(mut sender) = self.pc.rtp_sender(index.into()) {
+        sender.set_streams(streams);
+      }
+      self.media.track_keys.insert(track.id, key);
+      self.media.paused.remove(&key);
+      return Ok(());
+    }
     let Some(mut sender) = self.pc.rtp_sender(index.into()) else {
       return Err(WebRtcError::InvalidState(
         "The transceiver has no sender".to_string(),
@@ -823,8 +869,6 @@ impl Core {
     };
     let codings = sender.track().codings().to_vec();
     let old = sender.track().track_id().to_string();
-    let streams = msid_streams(streams);
-    let stream = streams[0].clone();
     sender
       .replace_track(MediaStreamTrack::new(
         stream,
@@ -838,20 +882,24 @@ impl Core {
     self.media.track_keys.remove(&old);
     self.media.track_keys.insert(track.id, key);
     self.media.paused.remove(&key);
-    if let Some(mut t) = self.pc.rtp_transceiver(index) {
-      t.set_associable_with_remote_offer(true);
-      let has_recv = t.direction().has_recv();
-      t.set_direction(RTCRtpTransceiverDirection::from_send_recv(
-        true, has_recv,
-      ));
-    }
     Ok(())
+  }
+
+  /// A transceiver a remote offer created has no engine sender. Made to send
+  /// (a sending direction, or `replaceTrack` with a track) without `addTrack`,
+  /// it gets one: SSRCs in the answer, an outbound stream. A rollback still
+  /// removes it (only `addTrack` keeps it).
+  fn ensure_sender(&mut self, key: u32) {
+    if let Ok(index) = self.index_of(key) {
+      let _ = self.pc.ensure_transceiver_sender(index);
+    }
   }
 
   pub(crate) fn set_sender_paused(&mut self, key: u32, paused: bool) {
     if paused {
       self.media.paused.insert(key);
     } else {
+      self.ensure_sender(key);
       self.media.paused.remove(&key);
     }
   }
@@ -875,6 +923,9 @@ impl Core {
   ) -> Result<(), WebRtcError> {
     let direction = parse_direction(direction)?;
     let index = self.index_of(key)?;
+    if direction.has_send() {
+      self.ensure_sender(key);
+    }
     if let Some(mut t) = self.pc.rtp_transceiver(index) {
       t.set_direction(direction);
     }

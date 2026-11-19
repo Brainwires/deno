@@ -2642,6 +2642,18 @@ class RTCRtpTransceiver {
     if (state.direction === direction) return;
     state.direction = direction;
     op_webrtc_transceiver_set_direction(pc[_rid], this[_key], direction);
+    // wpt100:transceiver: a remote offer's transceiver made to send has a
+    // sender in the engine now (media.rs ensure_sender), paused until its
+    // RTCRtpSender has a track.
+    if (direction === "sendrecv" || direction === "sendonly") {
+      const sender = state.sender;
+      op_webrtc_sender_set_paused(
+        pc[_rid],
+        this[_key],
+        sender[_state].track === null ||
+          !(sender[_state].encodings[0]?.active ?? true),
+      );
+    }
     updateNegotiationNeeded(pc);
   }
   get currentDirection() {
@@ -3941,7 +3953,14 @@ class RTCPeerConnection extends EventTarget {
       );
     }
     const transceiver = sender[_transceiver];
-    if (transceiver[_state].stopped || sender[_state].track === null) return;
+    // A stopping transceiver is left alone too (WPT "Calling removeTrack on a
+    // stopped transceiver should be a no-op"; w3c/webrtc-pc#2874).
+    if (
+      transceiver[_state].stopping || transceiver[_state].stopped ||
+      sender[_state].track === null
+    ) {
+      return;
+    }
     setSenderTrack(sender, null);
     const d = transceiver[_state].direction;
     const next = d === "sendrecv"
