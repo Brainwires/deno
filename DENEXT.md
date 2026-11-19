@@ -17956,15 +17956,18 @@ where the changes are discussed.
 
 911. **`feat(permissions)`: the kernel sandbox's network route: one seam for
      every socket, the broker's network authority, and `connect` answered by
-     the supervisor** (CLI and runtime; denext-only; inert until the
-     supervising broker installs a route; `libs/net_route` (new crate
+     the supervisor** (CLI and runtime; denext-only; opt-in, as item 425;
+     `libs/net_route` (new crate
      `deno_net_route`), `libs/sandbox/{net_authority,net_gate,notify,lib}.rs`,
      `cli/sandbox/{net_broker,mod}.rs`, `cli/factory.rs`,
      `libs/core/uv_compat/tcp.rs`,
      `ext/net/{routed,ops,ops_tls,ops_unix,tcp,resolve_addr,
      happy_eyeballs,quic}.rs`,
      `ext/fetch/{dns,proxy}.rs`, `ext/node/ops/{dns,udp}.rs`, `ext/sql/pg.rs`,
-     `ext/webrtc/{peer,net}.rs`, `libs/inspector_server/lib.rs`). The network
+     `ext/webrtc/{peer,net}.rs`, `libs/inspector_server/lib.rs`,
+     `runtime/permissions/kernel_broker/{net,client,protocol,mod}.rs`,
+     `cli/sandbox/{enforce,policy}.rs`, `libs/sandbox/{plan,enforce_linux}.rs`).
+     The network
      half of Mode B (`--kernel-sandbox=broker`, and `enforce` with a host-scoped
      `--allow-net`): no kernel can scope a socket by host, so a process held to
      such a grant makes no IP socket of its own and asks the broker outside the
@@ -18035,16 +18038,70 @@ where the changes are discussed.
        notification and `pidfd_getfd` (Linux 5.9), with or without Landlock's
        network rules. On macOS the same is the profile's
        `localhost:<proxy port>` rule.
-     - The broker's supervisor and wire protocol are another item; until it
-       installs a route and the gate, `--kernel-sandbox=broker` still refuses
-       to start. `deno info --json` → `kernelSandbox.brokerBuilt` says whether
-       this runtime has it.
+     - Over the broker (item 901's supervisor and protocol). The network
+       operations are the protocol's reserved kinds `0x0100`-`0x0106`
+       (`deno_permissions::kernel_broker::net`: `Resolve`, `ConnectTcp`,
+       `BindTcp`, `OpenUdp`, `UdpExchange`, `ConnectUnix`, `BindUnix`; strict
+       payloads, fuzzed; a refusal by the grant is `Denied`, the OS's an
+       `Errno`; a malformed payload is `Invalid` and the requester drops the
+       channel). The supervisor answers them through the authority, built from
+       the network lists the run's flags wrote (carried in the plan's broker
+       part, so both images compare them) and, for Unix sockets, the read and
+       write scopes the broker holds; the worker installs the route
+       (`BrokerRoute`) when it takes its broker channel, before any module
+       loads, and refuses to start if the broker doesn't serve the network
+       features. `BrokerClient::request_raw` carries a kind outside the file
+       operations' `Request`.
+     - The kernel side of a broker-held network. The confined tree has no IP
+       socket (`socket(2)` refused), and on Linux `listen` and `connect` are
+       refused outright (`SeccompPlan::refuse_connect`): its sockets arrive
+       connected or listening, so it never connects one, and a socket the
+       broker handed over can't be dissolved and pointed elsewhere. Native
+       code and child processes therefore have no network at all under a
+       host-scoped grant (fail closed; the allow-listing proxy for children,
+       with `connect` answered by the supervisor instead of refused, is the
+       gate above and not wired yet). On macOS the profile denies all network.
+     - The policy model. `BROKER_NET_BUILT`: a host name in `--allow-net`
+       compiles to Mode B on Linux and on macOS (no kernel scopes by host; the
+       macOS port-only rule for names is gone), with no fatal gap, so `enforce`
+       starts under the broker for it. Under an explicit `broker` every scoped
+       list or deny is the broker's (an IP / `localhost` port list is then
+       exact, not held by port), and a network with nothing to hold (unscoped,
+       no deny) stays the process's own. `deno info --json` →
+       `kernelSandbox.brokerBuilt` / `brokerNetBuilt` say what this runtime's
+       broker holds.
+     - Not carried by the broker (each fails under a broker-held network,
+       none is an escape): a module fetched after start, npm auto-install, the
+       OpenTelemetry exporter, `Deno.cron`'s control socket, the deploy
+       tunnel, `node:net` named pipes, abstract Unix sockets, UDP sockets
+       under a host-scoped grant, and any network of child processes.
      - `DENO_INTERNAL_KERNEL_NET_ROUTE=in-process` (internal; any other value
        is ignored with a warning) installs the authority as a route inside the
        process itself: no boundary, so it confines nothing and can only narrow
        (the authority holds the run's own grant). It is how the suites drive
        every routed path and the authority's decisions without a supervisor.
-     - User-facing note: none yet (inert until the broker is built in).
+     - User-facing note: `--kernel-sandbox=enforce` (and `broker`) now runs
+       with a host name in `--allow-net`: the program's sockets are made by
+       the supervising broker, which holds the grant exactly (names resolved
+       by the broker, no answer inside the machine or its network unless the
+       grant names that address); native code and child processes have no
+       network; UDP is refused under such a grant.
+     - Tests (the broker): `deno_permissions`'s
+       `kernel_broker::net::tests::{requests_round_trip, answers_round_trip,
+       malformed_payloads_are_refused, fuzzed_payloads_never_panic,
+       the_route_reaches_the_authority_through_the_broker}`; `deno_sandbox`'s
+       `enforce_linux::tests::seccomp_program_refuses_connect_under_a_net_broker`;
+       the CLI's `sandbox::policy::tests::the_broker_holds_what_mode_a_cant`
+       and the updated `net_rows`; spec `kernel_sandbox::broker`
+       (`host_scoped_network`: under `--kernel-sandbox=broker
+       --allow-net=localhost:<p>,...` the program's `Deno.connect`, `fetch`,
+       `node:net`, `node:http`, `Deno.listen` and `node:net` server work
+       through the supervisor, another spelling of an address and a UDP socket
+       are refused by it, native `connect` to the granted port is refused) and
+       `kernel_sandbox::policy` (`broker_runs`; `deno info --json` has
+       `brokerBuilt` / `brokerNetBuilt`). `kernel_sandbox::enforce`'s
+       `inexpressible_refused` is gone: `enforce` takes the broker for a write
+       deny inside a write allow.
      - Tests: `deno_net_route`'s `unrouted_callers_get_nothing`,
        `a_prebound_listener_is_handed_out_again_and_again`,
        `a_refusal_is_permission_denied`; `deno_sandbox`'s

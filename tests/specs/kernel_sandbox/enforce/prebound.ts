@@ -13,9 +13,9 @@ tcpConnect("native socket", port);
 
 const listener = Deno.listen({ hostname: "127.0.0.1", port });
 console.log(
-  `Deno.listen: ${(listener.addr as Deno.NetAddr).hostname}, the granted port: ${
-    (listener.addr as Deno.NetAddr).port === port
-  }`,
+  `Deno.listen: ${
+    (listener.addr as Deno.NetAddr).hostname
+  }, the granted port: ${(listener.addr as Deno.NetAddr).port === port}`,
 );
 const conn = await listener.accept();
 await conn.write(new TextEncoder().encode("deno"));

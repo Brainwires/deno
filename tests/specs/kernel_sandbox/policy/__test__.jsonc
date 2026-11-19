@@ -38,11 +38,14 @@
       "output": "enforce.out",
       "exitCode": 1
     },
+    // no enforcer, no broker
     "broker_refuses": {
-      "args": "run --kernel-sandbox=broker --allow-net=example.com main.ts",
+      "if": "windows",
+      "args": "run --kernel-sandbox=broker main.ts",
       "output": "broker.out",
       "exitCode": 1
     },
+    // where there is one, the program runs under its supervising broker
     "broker_runs": {
       "if": "kernelSandboxEnforce",
       "args": "run --kernel-sandbox=broker main.ts",

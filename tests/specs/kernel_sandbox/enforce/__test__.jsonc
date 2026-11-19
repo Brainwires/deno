@@ -168,14 +168,8 @@
       "args": "run --quiet -A integrity_outer.ts",
       "output": "outside unchanged: true[WILDCARD]"
     },
-    // a rule the OS can't hold: enforce refuses, naming it (Linux: a write
-    // deny inside a write allow needs the broker)
-    "inexpressible_refused": {
-      "if": "kernelSandboxEnforceLinux",
-      "args": "run --kernel-sandbox=enforce --allow-write=inside --deny-write=inside/a.txt main.ts",
-      "output": "inexpressible.out",
-      "exitCode": 1
-    },
+    // (a write deny inside a write allow on Linux is no longer refused:
+    // enforce takes the broker for it, kernel_sandbox::broker)
     // macOS: where the sandbox-exec fallback would run (forced here), the
     // report names its self-exec gap, and the listing-only entries
     "fallback_gap_reported_macos": {

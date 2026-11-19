@@ -34,31 +34,43 @@ await attempt("Deno.connect, a granted name", async () =>
     await Deno.connect({ hostname: "localhost", port: echoPort }),
   ));
 
-await attempt("fetch, a granted name", async () =>
-  await (await fetch(`http://localhost:${httpPort}/`)).text());
+await attempt(
+  "fetch, a granted name",
+  async () => await (await fetch(`http://localhost:${httpPort}/`)).text(),
+);
 
-await attempt("node:net, a granted name", () =>
-  new Promise((resolve, reject) => {
-    const socket = net.connect({ host: "localhost", port: echoPort, family: 4 });
-    socket.on("error", reject);
-    socket.on("connect", () => socket.write("pong"));
-    socket.on("data", (data) => {
-      socket.destroy();
-      resolve(String(data));
-    });
-  }));
+await attempt(
+  "node:net, a granted name",
+  () =>
+    new Promise((resolve, reject) => {
+      const socket = net.connect({
+        host: "localhost",
+        port: echoPort,
+        family: 4,
+      });
+      socket.on("error", reject);
+      socket.on("connect", () => socket.write("pong"));
+      socket.on("data", (data) => {
+        socket.destroy();
+        resolve(String(data));
+      });
+    }),
+);
 
-await attempt("node:http, a granted name", () =>
-  new Promise((resolve, reject) => {
-    nodeHttp.get(
-      { host: "localhost", port: httpPort, family: 4, agent: false },
-      (res) => {
-        let body = "";
-        res.on("data", (chunk) => body += chunk);
-        res.on("end", () => resolve(body));
-      },
-    ).on("error", reject);
-  }));
+await attempt(
+  "node:http, a granted name",
+  () =>
+    new Promise((resolve, reject) => {
+      nodeHttp.get(
+        { host: "localhost", port: httpPort, family: 4, agent: false },
+        (res) => {
+          let body = "";
+          res.on("data", (chunk) => body += chunk);
+          res.on("end", () => resolve(body));
+        },
+      ).on("error", reject);
+    }),
+);
 
 await attempt("Deno.listen, a granted address", async () => {
   const listener = Deno.listen({ hostname: "127.0.0.1", port: listenPort });
@@ -74,34 +86,43 @@ await attempt("Deno.listen, a granted address", async () => {
   return text;
 });
 
-await attempt("node:net server, a granted address", () =>
-  new Promise((resolve, reject) => {
-    const server = net.createServer((socket) => socket.pipe(socket));
-    server.on("error", reject);
-    server.listen(listenPort, "127.0.0.1", () => {
-      const socket = net.connect({ host: "127.0.0.1", port: listenPort });
-      socket.on("error", reject);
-      socket.on("connect", () => socket.write("node"));
-      socket.on("data", (data) => {
-        socket.destroy();
-        server.close(() => resolve(String(data)));
+await attempt(
+  "node:net server, a granted address",
+  () =>
+    new Promise((resolve, reject) => {
+      const server = net.createServer((socket) => socket.pipe(socket));
+      server.on("error", reject);
+      server.listen(listenPort, "127.0.0.1", () => {
+        const socket = net.connect({ host: "127.0.0.1", port: listenPort });
+        socket.on("error", reject);
+        socket.on("connect", () => socket.write("node"));
+        socket.on("data", (data) => {
+          socket.destroy();
+          server.close(() => resolve(String(data)));
+        });
       });
-    });
-  }));
+    }),
+);
 
 // Deno's own check refuses what the grant doesn't name, before any route
-await attempt("Deno.connect, a port the grant doesn't name", async () =>
-  await echoOnce(
-    await Deno.connect({ hostname: "localhost", port: otherPort }),
-  ));
+await attempt(
+  "Deno.connect, a port the grant doesn't name",
+  async () =>
+    await echoOnce(
+      await Deno.connect({ hostname: "localhost", port: otherPort }),
+    ),
+);
 
 // Deno takes "2130706433" as a name, and the grant names it; the resolver
 // reads it as 127.0.0.1, an address the grant doesn't name. Deno's checks
 // alone connect; the broker's authority refuses.
-await attempt("Deno.connect, another spelling of an address", async () =>
-  await echoOnce(
-    await Deno.connect({ hostname: "2130706433", port: otherPort }),
-  ));
+await attempt(
+  "Deno.connect, another spelling of an address",
+  async () =>
+    await echoOnce(
+      await Deno.connect({ hostname: "2130706433", port: otherPort }),
+    ),
+);
 
 // a UDP socket can send to any address: the authority hands out none
 // under a host-scoped grant (without it the bind is the OS's to answer:
@@ -148,5 +169,7 @@ await attempt("Deno.listenDatagram, a granted address", () => {
     reached = libc.symbols.connect(fd, sa, 16) === 0;
     libc.symbols.close(fd);
   }
-  console.log(`native connect to the granted port: ${reached ? "connected" : "refused"}`);
+  console.log(
+    `native connect to the granted port: ${reached ? "connected" : "refused"}`,
+  );
 }

@@ -114,8 +114,8 @@ Where the runtime's supervising broker holds the network (`deno info --json` →
 `net-host-run` (the same with `--allow-run=<work>/probe`, the child vector).
 Every IP cell must be held in both, on every column: the runtime's own sockets
 come from the broker, native code can't make one, a child's `connect` reaches
-only the broker's proxy, and a socket the broker handed over can't be pointed
-at another address (`net.retarget`: the host connects to the granted listener
+only the broker's proxy, and a socket the broker handed over can't be pointed at
+another address (`net.retarget`: the host connects to the granted listener
 through the broker first, so the probes hold such a socket). Without the broker
 the run says the two were skipped.
 

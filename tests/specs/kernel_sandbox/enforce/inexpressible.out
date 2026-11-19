@@ -1,3 +1,0 @@
-error: --kernel-sandbox=enforce refuses to start: the OS can't hold these rules here:
-[WILDCARD]--deny-write=[WILDCARD]
-Use --kernel-sandbox=warn to run with Deno's checks only, or --kernel-sandbox-report for the whole policy.
