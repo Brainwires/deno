@@ -134,10 +134,11 @@
         }
       ]
     },
-    // the note on a Deno op the kernel refused (Linux: chmod by path)
+    // the note on a Deno op the kernel refused (Linux: a file made after
+    // start in a folder whose read allow is expanded around a deny)
     "note_linux": {
       "if": "kernelSandboxEnforceLinux",
-      "args": "run --quiet --kernel-sandbox=enforce --allow-read=inside --allow-write=inside annotate.ts",
+      "args": "run --quiet --kernel-sandbox=enforce --allow-read=inside --deny-read=inside/none.txt --allow-write=inside annotate.ts",
       "output": "note.out"
     },
     // the note on a Deno op the kernel refused (macOS: /dev/tty for reading,
@@ -160,11 +161,12 @@
       "args": "run --quiet -A integrity_outer.ts",
       "output": "outside unchanged: true[WILDCARD]"
     },
-    // a rule the OS can't hold: enforce refuses, naming it (Linux: a write
-    // deny inside a write allow needs the broker)
+    // a rule the OS can't hold: enforce refuses, naming it (Linux: a host
+    // name needs the broker's network side; a write deny inside a write
+    // allow is the broker's now, see ../broker)
     "inexpressible_refused": {
       "if": "kernelSandboxEnforceLinux",
-      "args": "run --kernel-sandbox=enforce --allow-write=inside --deny-write=inside/a.txt main.ts",
+      "args": "run --kernel-sandbox=enforce --allow-net=example.com main.ts",
       "output": "inexpressible.out",
       "exitCode": 1
     },
