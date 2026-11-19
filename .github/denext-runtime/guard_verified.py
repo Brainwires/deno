@@ -30,6 +30,20 @@ are dispatched from either: 3.0.0-denext.22 ran on `train/denext22`).
 And never when any run of this workflow on the commit failed, timed out or
 failed to start (tag_gate.py's RED): the full run goes ahead and shows it.
 
+Two cases of a run that is still going (3.0.0-denext.27: the branch was
+pushed with the tag, four minutes before the train's own runtime run of the
+commit ended, and a second full build of it held the one Intel Mac slot for
+2 h 33 min):
+
+- denext_runtime.yml: the commit's `denext-runtime-v*` tag build is queued
+  or running. It is this commit's build (every target, tested, published),
+  so the push's jobs are skipped at once: verified by deferral. If the tag
+  build then fails, it is the red run of the commit, and the next release is
+  a new commit.
+- a run that would vouch once green (the kinds above, by event and branch)
+  is still going: the guard waits for it, up to GUARD_WAIT seconds, and
+  decides again. A run that is still going at the limit vouches for nothing.
+
 Never a false green: any error reading the API (a failed `gh` call, output
 that does not parse) prints a warning and `verified=false`, so the run goes
 ahead in full. The script always exits 0 unless its arguments are wrong.
@@ -37,7 +51,8 @@ ahead in full. The script always exits 0 unless its arguments are wrong.
 Usage: guard_verified.py <workflow file name>
 Env:   REPO (owner/name), SHA (the pushed commit), EVENT (github.event_name),
        REF (github.ref), RUN_ID (this run, left out) and GH_TOKEN for the gh
-       CLI.
+       CLI. GUARD_WAIT: the most seconds to wait for a run that would vouch
+       (default 0: decide at once).
 Prints the reason, then `verified=true` or `verified=false` (the line the
 workflow appends to $GITHUB_OUTPUT).
 """
@@ -47,6 +62,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -127,6 +143,48 @@ def vouches(workflow, run, jobs_of):
     raise ValueError(f"unknown workflow {workflow}")
 
 
+def may_vouch(workflow, run):
+    """Whether a run is of a kind that vouches once it is green: `vouches`
+    by event and branch alone, its jobs not read (they are not all there
+    while it runs)."""
+    event = run.get("event")
+    branch = run.get("head_branch") or ""
+    if workflow == TESTS:
+        return event == "workflow_dispatch" and is_release_branch(branch)
+    if workflow == RUNTIME:
+        if event == "push" and branch.startswith(RUNTIME_TAG_PREFIX):
+            return True
+        return event in ("workflow_dispatch", "push") and is_release_branch(
+            branch
+        )
+    if workflow == NPM_MATRIX:
+        return event == "push" and is_release_branch(branch)
+    raise ValueError(f"unknown workflow {workflow}")
+
+
+def others(sha, own_run, runs):
+    """The commit's runs of the workflow, this run left out."""
+    return [
+        r
+        for r in runs
+        if r.get("head_sha") == sha and str(r.get("id")) != str(own_run or "")
+    ]
+
+
+def awaited(workflow, sha, own_run, runs):
+    """The ids of the runs worth waiting for: still going, of a kind that
+    vouches once green, and no run of the commit red (a red run forces the
+    full run whatever else passes)."""
+    runs = others(sha, own_run, runs)
+    if any(r.get("conclusion") in tag_gate.RED for r in runs):
+        return []
+    return [
+        r["id"]
+        for r in runs
+        if r.get("status") != "completed" and may_vouch(workflow, r)
+    ]
+
+
 def decide(workflow, sha, own_run, runs, jobs_of):
     """(verified, reason) for one commit.
 
@@ -134,11 +192,7 @@ def decide(workflow, sha, own_run, runs, jobs_of):
       `head_branch`, `head_sha`, `status` and `conclusion`.
     jobs_of: run id -> that run's jobs (see passed_jobs); it may raise.
     """
-    runs = [
-        r
-        for r in runs
-        if r.get("head_sha") == sha and str(r.get("id")) != str(own_run or "")
-    ]
+    runs = others(sha, own_run, runs)
     red = [r["id"] for r in runs if r.get("conclusion") in tag_gate.RED]
     if red:
         return False, (
@@ -155,6 +209,20 @@ def decide(workflow, sha, own_run, runs, jobs_of):
                 f" ({r.get('event')} on {r.get('head_branch')}); skipping"
                 " this run's jobs"
             )
+    if workflow == RUNTIME:
+        # The tag build of this commit, queued or running: this push would
+        # build the same commit beside it.
+        for r in sorted(runs, key=lambda r: r["id"]):
+            if (
+                r.get("status") != "completed"
+                and r.get("event") == "push"
+                and (r.get("head_branch") or "").startswith(RUNTIME_TAG_PREFIX)
+            ):
+                return True, (
+                    f"the tag build of {sha} is under way: run {r['id']}"
+                    f" ({r.get('head_branch')}) builds, tests and publishes"
+                    " every target of this commit; skipping this run's jobs"
+                )
     return False, (
         f"no earlier successful {workflow} run verifies {sha}: running in full"
     )
@@ -197,8 +265,30 @@ def gh_jobs(repo, run_id):
     ]
 
 
-def check(workflow, env, runs_of=gh_runs, jobs_of=gh_jobs):
-    """(verified, reason); any error reading the API is `verified=false`."""
+# How often check() looks again while it waits.
+GUARD_POLL = 30
+
+
+def guard_wait(value):
+    """GUARD_WAIT as whole seconds; unset, empty or not a number: 0."""
+    try:
+        return max(0, int((value or "").strip() or 0))
+    except ValueError:
+        return 0
+
+
+def check(
+    workflow,
+    env,
+    runs_of=gh_runs,
+    jobs_of=gh_jobs,
+    sleep=time.sleep,
+    clock=time.monotonic,
+):
+    """(verified, reason); any error reading the API is `verified=false`.
+    While the answer is no and a run that would vouch is still going, looks
+    again every GUARD_POLL seconds, for at most GUARD_WAIT (each wait is
+    reported on stderr: the workflow reads stdout's first and last line)."""
     if not is_guarded(env.get("EVENT"), env.get("REF")):
         return False, (
             f"{env.get('EVENT')} on {env.get('REF')} is not a push to"
@@ -207,14 +297,26 @@ def check(workflow, env, runs_of=gh_runs, jobs_of=gh_jobs):
     repo, sha = env.get("REPO", ""), env.get("SHA", "")
     if not repo or not sha:
         return False, "::warning::REPO or SHA is unset: running in full"
+    own = env.get("RUN_ID", "")
+    deadline = clock() + guard_wait(env.get("GUARD_WAIT"))
     try:
-        return decide(
-            workflow,
-            sha,
-            env.get("RUN_ID", ""),
-            runs_of(repo, workflow, sha),
-            lambda run_id: jobs_of(repo, run_id),
-        )
+        while True:
+            runs = runs_of(repo, workflow, sha)
+            verdict = decide(
+                workflow, sha, own, runs, lambda run_id: jobs_of(repo, run_id)
+            )
+            going = awaited(workflow, sha, own, runs)
+            left = deadline - clock()
+            if verdict[0] or not going or left <= 0:
+                return verdict
+            print(
+                f"{workflow} runs of {sha} that would verify it are still"
+                f" going: {', '.join(map(str, going))}; waiting up to"
+                f" {int(left)}s more",
+                file=sys.stderr,
+                flush=True,
+            )
+            sleep(min(GUARD_POLL, left))
     except Exception as e:  # noqa: BLE001 - any failure means a full run
         detail = str(e).strip().replace("\n", " ")
         if isinstance(e, subprocess.CalledProcessError) and e.stderr:

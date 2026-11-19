@@ -17789,6 +17789,40 @@ where the changes are discussed.
        numeric ref / unref / clear).
      - Node tests enabled: none; the `node_compat` timer tests pass as before.
 
+456. **`ci(denext)`: a tag pushed with its branch is no longer refused, and the
+     branch push does not build the commit again** (CI;
+     `.github/denext-runtime/tag_gate.py`, `guard_verified.py`, their tests,
+     `.github/workflows/denext_runtime.yml`, `denext_tests.yml`,
+     `denext_npm_matrix.yml`). The 3.0.0-denext.27 tag was pushed together with
+     `development-denext`. The branch push's own `denext tests` run of the
+     commit (95 s, green on the verified-SHA guard) was still going when the
+     tag's gate looked 100 s later, the gate refused the tag ("runs still in
+     progress"), and the failed run sat four hours before its re-run. The same
+     push started a second full `denext runtime` build of the commit (2 h 41
+     min, 153 min of the one Intel Mac slot, 740 GitHub minutes), because the
+     train's runtime run that would have vouched for it ended 4 min 30 s
+     later. Two changes:
+     - The tag gate waits for `denext tests` runs of the commit that are still
+       going, polling every 30 s for at most `PENDING_WAIT` seconds (1,800 in
+       the workflow; unset: refuse at once, as before). The verdict is
+       unchanged: the run must end, and end green, or the gate refuses.
+     - The guard treats two runs that are still going. For `denext runtime`,
+       the commit's own `denext-runtime-v*` tag build queued or running stands
+       for the push: every other job is skipped at once (if that tag build
+       fails it is the commit's red run, and the next release is a new
+       commit). For every guarded workflow, a run that would vouch once green
+       (by event and branch, item 354's kinds) is waited for, at most
+       `GUARD_WAIT` seconds (1,200 in the workflows; the guard job's timeout is
+       30 min), and the guard decides again; one still going at the limit
+       vouches for nothing, and a red run of the commit ends the wait with a
+       full run.
+     - User-facing note: none; CI only.
+     - Tests: `tag_gate_test.py` (the wait ends when the run ends, at its
+       limit, and a run that ends red still refuses), `guard_verified_test.py`
+       (the tag build under way, a failed tag build forcing a full run, a train
+       run awaited to green, to its limit and to red), run by the lint job.
+     - Node tests enabled: none, because this is CI only.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -18081,7 +18115,8 @@ replaced: a failed tag build is fixed by the next version); and (`tag_gate.py`)
 a full `denext tests` (`denext_tests.yml`) run, every OS leg green (Windows
 arm64 included), passed on exactly the tagged commit, no `denext tests` run of
 that commit failed in any attempt (a green re-run does not clear a red one) or
-is still running, and the commit is on `development-denext` or `rel/<version>`.
+is still running (the gate waits up to 30 minutes for one, item 456), and the
+commit is on `development-denext` or `rel/<version>`.
 After the release, `development-denext` is fast-forwarded to the release commit:
 check that the branch's checks on the new head finish green (each workflow's
 `verified-SHA guard` skips a run whose commit already passed on its release
