@@ -30,6 +30,9 @@
 //!   Landlock and one seccomp program, the plan handed over in a sealed
 //!   memfd); on macOS [`macos`] re-executes too and the new image applies
 //!   its Seatbelt profile first thing (`sandbox_init`).
+//! - [`windows`]: Windows' small tier, applied in place: a job object (no
+//!   breakaway, kill on close, a process limit) and a lowered integrity
+//!   level with the write roots labelled Low.
 //! - [`exec`]: the files a program list needs to execute (a strict exec
 //!   scope: the programs, their `#!` interpreters, the ELF loader).
 //! - [`inherit`]: the carrier that hands a confined process's policy to the
@@ -66,6 +69,8 @@ pub mod seccomp;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod supervise;
 pub mod would_deny;
+#[cfg(windows)]
+pub mod windows;
 
 #[cfg(target_os = "linux")]
 pub use seccomp::SeccompSpec;

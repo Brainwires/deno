@@ -1717,15 +1717,22 @@ pub async fn run_with_options(
       metadata.workspace_resolver.catalogs,
     )
   };
-  let code_cache = match metadata.code_cache_key {
-    Some(code_cache_key) => Some(Arc::new(DenoCompileCodeCache::new(
-      root_path.with_file_name(format!(
-        "{}.cache",
-        root_path.file_name().unwrap().to_string_lossy()
-      )),
-      code_cache_key,
-    ))),
-    None => {
+  // denext (DENEXT.md item 901): a program confined by its kernel sandbox
+  // keeps its code cache in its own cache folder (the only place it may
+  // write for itself), or has none where that folder couldn't be made
+  let code_cache_path = if crate::kernel::enforcing() {
+    crate::kernel::cache_dir().map(|dir| dir.join("code.cache"))
+  } else {
+    Some(root_path.with_file_name(format!(
+      "{}.cache",
+      root_path.file_name().unwrap().to_string_lossy()
+    )))
+  };
+  let code_cache = match (metadata.code_cache_key, code_cache_path) {
+    (Some(code_cache_key), Some(path)) => {
+      Some(Arc::new(DenoCompileCodeCache::new(path, code_cache_key)))
+    }
+    _ => {
       log::debug!("Code cache disabled.");
       None
     }
@@ -1762,15 +1769,20 @@ pub async fn run_with_options(
   // `DESKTOP_LOOPBACK_HOSTS` for why it is not port-scoped). Granting them up
   // front avoids forcing every `deno desktop` user to remember `-A`.
   let has_desktop = op_state_init.is_some();
-  // denext (DENEXT.md item 420): the baked kernel-sandbox mode; an opt-in
-  // preview, and compiled programs have no enforcer yet
-  deno_lib::kernel_sandbox::check_compiled(
+  // denext (DENEXT.md items 420 and 901): the baked kernel-sandbox mode. A
+  // mode that fails closed runs only when the sandbox was applied at startup
+  // (`kernel::startup`, in `main`); a path that got here without it refuses
+  let kernel_resolution = deno_lib::kernel_sandbox::check_compiled(
     metadata.kernel_sandbox,
     metadata.desktop_dev,
     &metadata.permissions,
   )?;
   let permissions = {
     let mut permissions = metadata.permissions;
+    if kernel_resolution.mode.fails_closed() {
+      // the set is fixed: a prompt could only grant what the kernel refuses
+      permissions.prompt = false;
+    }
     // grant read access to the vfs
     grant_vfs_read_access(&mut permissions, &root_path);
 

@@ -1,0 +1,6 @@
+run 1: hello
+run 2: hello
+policy folders: 1
+code cache there: true
+shared code cache: false
+modes: 700 700

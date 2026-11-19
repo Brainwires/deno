@@ -2,8 +2,8 @@
 
 //! denext: the kernel sandbox (DENEXT.md item 420), an opt-in preview.
 //!
-//! - [`policy`]: the policy model (what each OS mechanism would apply, and
-//!   the gaps), pure data.
+//! - [`policy`] (`deno_lib::kernel_policy`): the policy model (what each OS
+//!   mechanism would apply, and the gaps), pure data.
 //! - The mode decision lives in `deno_lib::kernel_sandbox`, shared with
 //!   `denort`.
 //! - This module wires them to a CLI run: [`check_run`] at startup
@@ -23,7 +23,6 @@ pub mod enforce;
 pub mod inherit;
 #[cfg(unix)]
 pub mod net_broker;
-pub mod policy;
 pub mod warn;
 
 use std::fmt::Write as _;
@@ -34,6 +33,11 @@ use std::sync::Once;
 use deno_core::anyhow::bail;
 use deno_core::error::AnyError;
 use deno_core::serde_json;
+pub use deno_lib::kernel_apply::detect_capabilities;
+use deno_lib::kernel_apply::std_stream_ttys;
+use deno_lib::kernel_apply::tls_files;
+/// The policy model, shared with `denort` (`deno_lib::kernel_policy`).
+pub use deno_lib::kernel_policy as policy;
 use deno_lib::kernel_sandbox::AutoPlan;
 use deno_lib::kernel_sandbox::AutoStage;
 use deno_lib::kernel_sandbox::ForcedEnforce;
@@ -67,39 +71,6 @@ use self::policy::TargetOs;
 use self::policy::UnixPolicy;
 use crate::args::CliOptions;
 use crate::args::DenoSubcommand;
-
-/// The mechanisms this machine offers, and whether this runtime has a Mode A
-/// enforcer for them (Linux on x86_64 / aarch64, macOS).
-pub fn detect_capabilities() -> Capabilities {
-  let os = TargetOs::current();
-  #[allow(unused_mut, reason = "set per OS")]
-  let mut caps = Capabilities::none(os);
-  #[cfg(target_os = "linux")]
-  {
-    caps.landlock_abi = crate::supply_chain::sandbox_linux::landlock_abi().ok();
-    // the seccomp programs are assembled for these architectures (the frame
-    // kills other architectures' syscalls); whether this process may
-    // install one (an outer profile may refuse it) is probed
-    let arch = cfg!(any(target_arch = "x86_64", target_arch = "aarch64"));
-    caps.seccomp =
-      arch && deno_sandbox::enforce_linux::seccomp_available().is_ok();
-    caps.user_namespaces =
-      crate::supply_chain::sandbox_linux::netns_available().is_ok();
-    caps.enforcer_built = arch;
-  }
-  #[cfg(target_os = "macos")]
-  {
-    caps.seatbelt = deno_sandbox::macos::sandbox_init_available()
-      || crate::supply_chain::sandbox_macos::available().is_ok();
-    caps.enforcer_built = true;
-  }
-  #[cfg(windows)]
-  {
-    caps.job_object = true;
-    caps.low_integrity = true;
-  }
-  caps
-}
 
 /// The subcommand's kind, for the mode decision.
 pub fn run_kind(subcommand: &DenoSubcommand) -> RunKind {
@@ -181,27 +152,132 @@ fn config_mode(
   })
 }
 
+/// What `deno compile` is building, for [`compile_mode`].
+#[derive(Debug, Clone, Copy)]
+pub struct CompileKind<'a> {
+  /// A desktop app (`deno desktop`): its process hosts a browser engine.
+  pub desktop: bool,
+  /// `--target` (`None`: this machine's).
+  pub target: Option<&'a str>,
+}
+
+impl CompileKind<'_> {
+  /// The OS the program will run on.
+  fn os(&self) -> TargetOs {
+    match self.target {
+      None => TargetOs::current(),
+      Some(t) if t.contains("linux") => TargetOs::Linux,
+      Some(t) if t.contains("darwin") => TargetOs::Macos,
+      Some(t) if t.contains("windows") => TargetOs::Windows,
+      Some(_) => TargetOs::Other,
+    }
+  }
+}
+
 /// The mode `deno compile` bakes into a binary: `--kernel-sandbox`, else
-/// deno.json `permissions.kernelSandbox`, else nothing (`auto`). A mode that
-/// fails closed is refused while compiled programs have no enforcer, so
-/// no binary is made that can't start.
+/// deno.json `permissions.kernelSandbox`, else nothing (`auto`). The program
+/// applies it at startup, in place (DENEXT.md item 901). A mode the program
+/// could never start with is refused here, so no such binary is made:
+/// `broker` (the supervising broker isn't built in), and `enforce` for a
+/// target without an enforcer. For `enforce` the policy is compiled for the
+/// target OS with every mechanism present, and the rules that OS can't hold
+/// are printed as a warning (the program would refuse to start there; what
+/// the machine it runs on lacks is only known at startup).
 pub fn compile_mode(
   cli_options: &CliOptions,
+  kind: CompileKind,
 ) -> Result<Option<KernelSandboxMode>, AnyError> {
   let mode = match flag_mode(cli_options)? {
     Some(mode) => Some(mode),
     None => config_mode(cli_options)?,
   };
-  // compiled programs get their enforcer in a later phase: until then
-  // a binary baked with a failing-closed mode couldn't start
-  if let Some(mode) = mode
-    && mode.fails_closed()
-  {
-    bail!(
-      "--kernel-sandbox={mode}: compiled programs have no kernel enforcer yet, so a program compiled with it could not start. Use --kernel-sandbox=warn, auto or off."
-    );
+  match mode {
+    Some(KernelSandboxMode::Broker) => bail!(
+      "--kernel-sandbox=broker: the supervising broker isn't built into this runtime, so a program compiled with it could not start. Use --kernel-sandbox=enforce, warn, auto or off."
+    ),
+    Some(KernelSandboxMode::Enforce) => {
+      let os = kind.os();
+      if !compile_target_enforces(os, kind.desktop) {
+        bail!(
+          "--kernel-sandbox=enforce: {} have no kernel enforcer, so a program compiled with it could not start. Use --kernel-sandbox=warn, auto or off.",
+          if kind.desktop {
+            "desktop apps"
+          } else {
+            "programs for this target"
+          }
+        );
+      }
+      warn_compile_gaps(cli_options, os)?;
+    }
+    _ => {}
   }
   Ok(mode)
+}
+
+/// Whether a program for `os` has an enforcer for a baked `enforce`.
+fn compile_target_enforces(os: TargetOs, desktop: bool) -> bool {
+  !desktop
+    && matches!(os, TargetOs::Linux | TargetOs::Macos | TargetOs::Windows)
+}
+
+/// The machine a compiled program is assumed to run on, for the build-time
+/// warning: `os` with every mechanism its newest release has.
+fn best_capabilities(os: TargetOs) -> Capabilities {
+  let mut caps = Capabilities::none(os);
+  match os {
+    TargetOs::Linux => {
+      caps.landlock_abi = Some(u32::MAX);
+      caps.seccomp = true;
+      caps.user_namespaces = true;
+    }
+    TargetOs::Macos => caps.seatbelt = true,
+    TargetOs::Windows => {
+      caps.job_object = true;
+      caps.low_integrity = true;
+    }
+    TargetOs::Other => {}
+  }
+  caps.enforcer_built = true;
+  caps
+}
+
+/// Warns, once, about the baked grant's rules the target OS could never
+/// hold under `enforce` (the program would refuse to start there).
+fn warn_compile_gaps(
+  cli_options: &CliOptions,
+  os: TargetOs,
+) -> Result<(), AnyError> {
+  let options = cli_options.permissions_options()?;
+  if policy::options_allow_all(&options) && !policy::options_have_deny(&options)
+  {
+    // plain -A: the program runs with the kernel sandbox off
+    return Ok(());
+  }
+  let mut ctx = Context::new(
+    best_capabilities(os),
+    KernelSandboxMode::Enforce,
+    cli_options.initial_cwd().to_path_buf(),
+  );
+  ctx.compiled = true;
+  ctx.exec_strict = cli_options.flags().permissions.kernel_sandbox_exec_strict;
+  let implicit = ImplicitSet::build(&options, &ctx);
+  let compiled = KernelPolicy::compile(&options, &implicit, &ctx);
+  let fatal: Vec<String> = compiled
+    .fatal_gaps()
+    .map(|g| format!("  - {}: {}", g.rule, g.detail))
+    .collect();
+  if !fatal.is_empty() {
+    static WARN: Once = Once::new();
+    WARN.call_once(|| {
+      log::warn!(
+        "{} --kernel-sandbox=enforce: {} can't hold these rules, so the compiled program would refuse to start there:\n{}",
+        crate::colors::yellow("Warning"),
+        os.as_str(),
+        fatal.join("\n")
+      );
+    });
+  }
+  Ok(())
 }
 
 /// Whether this process runs under `denext dev` (its dev server hands its
@@ -468,29 +544,6 @@ fn origin_data_dirs(
   vec![origin.join(&hash), origin.join("web_cache").join(&hash)]
 }
 
-/// The certificate files and folders the environment names (read only with
-/// network; each variable is kept through the re-exec's scrub).
-fn tls_files() -> Vec<PathBuf> {
-  #[allow(clippy::disallowed_methods, reason = "the real environment")]
-  let mut out: Vec<PathBuf> = [
-    "DENO_CERT",
-    "NODE_EXTRA_CA_CERTS",
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
-  ]
-  .iter()
-  .filter_map(std::env::var_os)
-  .flat_map(|v| {
-    // SSL_CERT_DIR may list several folders
-    std::env::split_paths(&v).collect::<Vec<_>>()
-  })
-  .filter(|p| p.is_absolute())
-  .collect();
-  out.sort();
-  out.dedup();
-  out
-}
-
 /// The policy-keyed cache overlay for a policy compiled without one:
 /// `DENO_DIR/sandboxed/<hash>`. Confined runs of that policy keep their
 /// SQLite caches and new emits there; every other run's cache paths are
@@ -499,36 +552,6 @@ pub fn cache_overlay_for(deno_dir: &std::path::Path, hash: &str) -> PathBuf {
   deno_dir
     .join(deno_resolver::cache::SANDBOX_OVERLAY_DIR)
     .join(hash)
-}
-
-/// The terminals the standard streams are (`ttyname` of fds 0 to 2),
-/// deduplicated.
-fn std_stream_ttys() -> Vec<PathBuf> {
-  #[allow(unused_mut, reason = "filled on unix")]
-  let mut out = Vec::new();
-  #[cfg(unix)]
-  for fd in 0..=2 {
-    use std::os::unix::ffi::OsStrExt;
-    let mut buf = [0u8; 256];
-    // SAFETY: a buffer of the given size; isatty / ttyname_r have no other
-    // preconditions
-    let ok = unsafe {
-      libc::isatty(fd) == 1
-        && libc::ttyname_r(fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len())
-          == 0
-    };
-    if !ok {
-      continue;
-    }
-    let len = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
-    let path =
-      PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..len]).to_os_string());
-    if path.is_absolute() && !out.contains(&path) {
-      out.push(path);
-    }
-  }
-  out.sort();
-  out
 }
 
 /// The mode the policy is compiled for: the applying mode, or what `auto`

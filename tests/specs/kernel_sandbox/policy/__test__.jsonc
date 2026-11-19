@@ -95,9 +95,11 @@
       "args": "info --json",
       "output": "info_config.out"
     },
-    "compile_refuses_enforce": {
-      "args": "compile --kernel-sandbox=enforce --output out main.ts",
-      "output": "compile_enforce.out",
+    // enforce is baked and applied by the program (kernel_sandbox/compiled);
+    // broker can't be: no program is made that couldn't start
+    "compile_refuses_broker": {
+      "args": "compile --kernel-sandbox=broker --output out main.ts",
+      "output": "compile_broker.out",
       "exitCode": 1
     },
     "compile_bakes_warn": {

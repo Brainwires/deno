@@ -7,12 +7,11 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use deno_core::serde_json;
-use deno_lib::kernel_sandbox::KernelSandboxMode;
 use deno_runtime::deno_permissions::PermissionsOptions;
 use pretty_assertions::assert_eq;
 
 use super::*;
+use crate::kernel_sandbox::KernelSandboxMode;
 
 // the rows below describe a runtime without the broker or the overmount
 const _: () = assert!(BROKER_FS_BUILT && BROKER_NET_BUILT && !OVERMOUNT_BUILT);

@@ -1,0 +1,3 @@
+[WILDCARD]exit 1
+
+this program was compiled with --kernel-sandbox=enforce and refuses to start: this process already runs inside another Seatbelt sandbox (an app sandbox, an agent's sandbox, sandbox-exec, a confined parent), and macOS doesn't stack a second profile

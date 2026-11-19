@@ -1,0 +1,6 @@
+read inside: ok
+read outside: refused
+create outside: refused
+chmod outside: refused
+unlink outside: refused
+create inside: ok

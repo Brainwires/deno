@@ -276,20 +276,28 @@ static int fs_race(const char *cfg, const char *vec, res_t *r) {
     }
     _exit(0);
   }
-  int wins = 0, refusals = 0, last = 0;
+  // The opens go on for as long as the swapper runs, then a few more: on a
+  // loaded machine the forked swapper may not be scheduled before a fixed
+  // number of opens is over, and then none of them met the secret side. The
+  // link's last state is the secret, so the opens after the swapper ended
+  // always meet it.
+  int wins = 0, refusals = 0, last = 0, tries = 0, swapping = 1, after = 0;
   char b[64];
-  for (int i = 0; i < 4000; i++) {
+  while (tries < 4000000 && (swapping || after < 16)) {
     if (read_file(lnk, b, sizeof b) >= 0) {
       if (strncmp(b, "TOP-SECRET", 10) == 0) wins++;
     } else if (errno == EPERM || errno == EACCES) {
       refusals++;
       last = errno;
     }
+    tries++;
+    if (!swapping) after++;
+    else if (waitpid(pid, NULL, WNOHANG) == pid) swapping = 0;
   }
-  waitpid(pid, NULL, 0);
-  if (wins) return put(r, OPEN, "%d of 4000 opens through the swapped link read the secret", wins);
+  if (swapping) waitpid(pid, NULL, 0);
+  if (wins) return put(r, OPEN, "%d of %d opens through the swapped link read the secret", wins, tries);
   if (refusals) return put(r, HELD, "every secret-side open refused (%s, %d times)", strerror(last), refusals);
-  return put(r, OPEN, "no race win in 4000 tries (not a refusal; rerun)");
+  return put(r, OPEN, "no race win in %d tries (not a refusal; rerun)", tries);
 }
 
 static int fd_inherited(const char *cfg, res_t *r) {

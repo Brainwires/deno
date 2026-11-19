@@ -24,11 +24,11 @@
 //!
 //! A mode `auto` chose never refuses to start: where `enforce` can't hold the
 //! grant (a rule only the broker holds, a command it doesn't cover) the caller
-//! falls back to `warn` ([`ModeResolution::auto_chosen`]). The CLI's `enforce`
-//! applies the policy on Linux and macOS (and refuses to start when the OS
-//! can't hold a rule, or elsewhere); `broker` refuses to start until its
-//! supervising process is built in, and so does a compiled program baked with
-//! either (`denort` has no enforcer).
+//! falls back to `warn` ([`ModeResolution::auto_chosen`]). `enforce` applies
+//! the policy on Linux and macOS (and refuses to start when the OS can't hold
+//! a rule, or elsewhere), for the CLI and for a compiled program baked with it
+//! (`deno_lib::kernel_apply`); `broker` refuses to start until its supervising
+//! process is built in.
 
 use std::fmt;
 use std::str::FromStr;
@@ -573,23 +573,21 @@ pub fn options_have_deny(options: &PermissionsOptions) -> bool {
   .any(|o| o.is_some())
 }
 
-/// A compiled program's mode needs an enforcer this runtime doesn't have.
+/// A compiled program's mode asks for a sandbox that wasn't applied.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-  "this program was compiled with --kernel-sandbox={0}, but no kernel enforcer is built into this runtime, so it refuses to start"
+  "this program was compiled with --kernel-sandbox={0}, but the kernel sandbox wasn't applied to this process, so it refuses to start"
 )]
 pub struct NoEnforcerError(pub KernelSandboxMode);
 
-/// `denort`'s startup check: the baked mode (flags, `DENO_KERNEL_SANDBOX`
-/// and deno.json are not read; the mode is the author's). `warn` prints one
-/// line; `enforce` / `broker` refuse to start while no enforcer is built in
-/// (`deno compile` already refuses to bake them).
-pub fn check_compiled(
+/// A compiled program's mode: the baked one (flags, `DENO_KERNEL_SANDBOX`
+/// and deno.json are not read; the mode is the author's). Pure.
+pub fn compiled_resolution(
   baked: Option<KernelSandboxMode>,
   dev_build: bool,
   options: &PermissionsOptions,
-) -> Result<ModeResolution, NoEnforcerError> {
-  let resolution = kernel_sandbox_mode(&ModeInputs {
+) -> ModeResolution {
+  kernel_sandbox_mode(&ModeInputs {
     kind: Some(RunKind::Compiled),
     baked,
     dev_build,
@@ -599,25 +597,34 @@ pub fn check_compiled(
     ..Default::default()
   })
   // a compiled program has no watch, broker or dev-server inputs
-  .expect("a compiled program's mode never conflicts");
-  let mut resolution = resolution;
-  if resolution.mode.fails_closed() {
+  .expect("a compiled program's mode never conflicts")
+}
+
+/// `denort`'s guard before it builds the program's permissions: a baked
+/// mode that fails closed (`enforce`, `broker`) runs only when the sandbox
+/// was applied at startup (`deno_lib::kernel_apply::start_compiled`, which
+/// records it in `kernel_sandbox_state`). A code path that reaches user code
+/// without it (a runtime entry that doesn't call the startup, an OS without
+/// an enforcer) refuses instead of running unconfined, unless `auto` chose
+/// the mode: a mode `auto` chose never refuses to start (item 957), and
+/// `start_compiled` has already fallen back to `warn`'s line for it.
+pub fn check_compiled(
+  baked: Option<KernelSandboxMode>,
+  dev_build: bool,
+  options: &PermissionsOptions,
+) -> Result<ModeResolution, NoEnforcerError> {
+  let mut resolution = compiled_resolution(baked, dev_build, options);
+  if resolution.mode.fails_closed()
+    && !deno_runtime::deno_permissions::kernel_sandbox_state::is_enforcing()
+  {
     if !resolution.auto_chosen {
       return Err(NoEnforcerError(resolution.mode));
     }
-    // a mode `auto` chose never refuses to start: with no enforcer built
-    // into this runtime the program runs as it did
+    // the sandbox wasn't applied to this process: the program runs as it
+    // did, held by Deno's checks
     resolution.mode = KernelSandboxMode::Off;
     resolution.reason = ModeReason::NotYetEnforced;
     resolution.auto_chosen = false;
-  }
-  if resolution.mode == KernelSandboxMode::Warn {
-    #[allow(clippy::print_stderr, reason = "the warn mode's one line")]
-    {
-      eprintln!(
-        "Warning kernel sandbox (warn, preview): nothing is refused; no kernel enforcer is built into this runtime, so every rule is held by Deno's checks only."
-      );
-    }
   }
   Ok(resolution)
 }

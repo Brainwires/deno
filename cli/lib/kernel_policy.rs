@@ -25,21 +25,25 @@
 //! only when the expansion is stable, by overmounting where user namespaces
 //! exist, and is otherwise a reported Deno-only rule.
 
+#![allow(
+  clippy::disallowed_methods,
+  reason = "the policy is compiled for the real file system and environment (the reach of a deny, the programs on PATH), never a virtual one"
+)]
+
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
 
-use deno_core::serde_json;
-use deno_lib::kernel_sandbox::KernelSandboxMode;
 use deno_path_util::normalize_path;
 use deno_runtime::deno_permissions::Host;
 use deno_runtime::deno_permissions::NetDescriptor;
 use deno_runtime::deno_permissions::PermissionsOptions;
 use serde::Deserialize;
 use serde::Serialize;
-use sha2::Digest;
+
+use crate::kernel_sandbox::KernelSandboxMode;
 
 /// Bumped whenever the serialized shape changes (part of the policy hash).
 pub const POLICY_FORMAT: u32 = 1;
@@ -988,6 +992,17 @@ impl ImplicitSet {
         }
       }
     }
+    // a compiled program's own cache folder (its V8 code cache, the native
+    // addons it extracts), keyed by its policy like the overlay (item 901)
+    if ctx.compiled
+      && let Some(overlay) = &ctx.cache_overlay
+    {
+      add(
+        overlay,
+        ImplicitNeed::CacheOverlay,
+        ImplicitAccess::ReadWrite,
+      );
+    }
     if let Some(dir) = &ctx.coverage_dir {
       add(dir, ImplicitNeed::Coverage, ImplicitAccess::ReadWrite);
     }
@@ -1070,8 +1085,8 @@ pub struct Context {
   pub compiled: bool,
   /// `--kernel-sandbox-exec=strict` (plan D3's opt-in).
   pub exec_strict: bool,
-  /// The policy-keyed cache overlay (`DENO_DIR/sandboxed/<hash>`), set once
-  /// the policy without it is hashed.
+  /// The policy-keyed cache overlay (`DENO_DIR/sandboxed/<hash>`; a compiled
+  /// program's own cache folder), set once the policy without it is hashed.
   pub cache_overlay: Option<PathBuf>,
   /// The coverage folder the run writes (`--coverage`, `DENO_COVERAGE_DIR`).
   pub coverage_dir: Option<PathBuf>,
@@ -1185,7 +1200,7 @@ impl PathScope {
   }
 }
 
-pub use deno_lib::kernel_inherit::resolve_prefix;
+pub use crate::kernel_inherit::resolve_prefix;
 
 /// Whether a path lies in a scope, deciding on resolved paths as well as
 /// the spelling (an allow and a deny may name one object through different
@@ -1434,8 +1449,9 @@ impl KernelPolicy {
   /// over the canonical JSON (every list sorted).
   pub fn hash(&self) -> String {
     let json = serde_json::to_vec(self).expect("policy serializes");
-    let digest = sha2::Sha256::digest(&json);
-    faster_hex::hex_string(&digest[..8])
+    let mut hex = crate::util::checksum::r#gen(&[json]);
+    hex.truncate(16);
+    hex
   }
 
   /// Compiles `options` for `ctx`, choosing Mode B where the policy needs it:
@@ -1549,8 +1565,8 @@ fn net_rule(options: &PermissionsOptions) -> String {
   }
 }
 
-pub use deno_lib::kernel_sandbox::options_allow_all;
-pub use deno_lib::kernel_sandbox::options_have_deny;
+pub use crate::kernel_sandbox::options_allow_all;
+pub use crate::kernel_sandbox::options_have_deny;
 
 /// A net list entry, classified for the kernel.
 #[derive(Debug, Clone, PartialEq, Eq)]

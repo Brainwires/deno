@@ -21,6 +21,7 @@ mod code_cache;
 pub mod desktop;
 pub mod file_system;
 pub mod hmr;
+pub mod kernel;
 mod node;
 pub mod run;
 
@@ -60,7 +61,9 @@ fn unwrap_or_exit<T>(result: Result<T, AnyError>) -> T {
 
 pub fn load_env_vars(env_vars: &IndexMap<String, String>) {
   env_vars.iter().for_each(|env_var| {
-    if env::var(env_var.0).is_err() {
+    // denext (DENEXT.md item 901): under the kernel sandbox the environment
+    // holds only what the plan keeps, the env file's variables included
+    if env::var(env_var.0).is_err() && kernel::keeps_env(env_var.0) {
       // SAFETY: called during single-threaded startup before tokio runtime
       unsafe { std::env::set_var(env_var.0, env_var.1) };
     }
@@ -127,12 +130,24 @@ pub fn main() {
   deno_runtime::crash_report::maybe_selftest();
 
   let args: Vec<_> = env::args_os().collect();
-  let standalone = extract_standalone(Cow::Owned(args));
+  // denext (DENEXT.md item 901): the kernel sandbox a program was compiled
+  // with applies here, in place: the process has one thread and has opened
+  // nothing of its own yet. A self-extracting program's files are written
+  // first (its extraction folder is readable under the sandbox, never
+  // writable).
+  let standalone = extract_standalone(Cow::Owned(args)).and_then(|data| {
+    if data.metadata.self_extracting.is_some() {
+      binary::extract_vfs_to_disk(&data.vfs, &data.root_path)?;
+    }
+    if let Err(err) = kernel::startup(&data) {
+      exit_with_message(&err.to_string(), 1);
+    }
+    Ok(data)
+  });
   let future = async move {
     match standalone {
       Ok(data) => {
         let sys = if data.metadata.self_extracting.is_some() {
-          binary::extract_vfs_to_disk(&data.vfs, &data.root_path)?;
           DenoRtSys::new_self_extracting(data.vfs.clone())
         } else {
           DenoRtSys::new(data.vfs.clone())

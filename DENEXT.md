@@ -18762,6 +18762,168 @@ where the changes are discussed.
        `tests/kernel_sandbox_beds/{soak_test,r4_preconditions_test}.ts`
        (`deno test`).
      - Node tests enabled: none; no Node API changes.
+
+457. **`feat(permissions)`: a compiled program enforces its baked grant with the
+     kernel sandbox (`deno compile --kernel-sandbox=enforce`)** (CLI and
+     runtime; denext-only; opt-in, as item 425; `auto` unchanged; code comments
+     call this item 901 until the train numbers it;
+     `cli/lib/{kernel_apply,kernel_plan,kernel_policy,
+     kernel_sandbox}.rs`,
+     `cli/rt/{kernel,lib,run}.rs`, `cli/sandbox/{mod,enforce}.rs`,
+     `cli/tools/compile.rs`, `cli/standalone/binary.rs`,
+     `cli/lib/standalone/binary.rs`, `ext/process/lib.rs`,
+     `ext/rt_helper/lib.rs`, `ext/napi/lib.rs`). Kernel-sandbox phase P9's
+     headless part: items 425 and 449-451 confined `deno run`; a compiled
+     program baked with `enforce` refused to start (`denort` had no enforcer),
+     and `deno compile` refused to bake it.
+     - Shared code. The policy model (`cli/sandbox/policy.rs`, now
+       `deno_lib::kernel_policy`) and its translation into the enforcers' plan
+       (cut from `cli/sandbox/enforce.rs` into `deno_lib::kernel_plan`) move to
+       `deno_lib`, which `denort` links; `cli/sandbox` re-exports both, and the
+       machine detection, the terminal and certificate lookups and the cache
+       folder's creation go to `deno_lib::kernel_apply`. No behaviour change for
+       `deno run` (the tests moved with the code: `kernel_policy::tests`,
+       `kernel_plan::tests`).
+     - In place, no re-exec. `denort`'s `main` calls
+       `deno_lib::kernel_apply::start_compiled` once the embedded metadata is
+       read, before the telemetry, the runtime and any thread start. A compiled
+       program has its modules embedded and fetches nothing, so the first image
+       is the one that is confined (the review's "zero added exec" for
+       `denort`): Linux applies `no_new_privs`, the Landlock ruleset and the
+       seccomp program to its one thread (`enforce_linux::apply_self`, which
+       refuses a process with more); macOS calls `sandbox_init` and measures the
+       profile (`sandbox_check`, the probe path). Neither platform uses a plan
+       hand-over, so nothing in the environment can stand in for one. A
+       self-extracting program writes its files before the sandbox applies; its
+       extraction folder is in the read scope, never the write scope.
+     - The grant: the baked permissions, intersected with the layers a confined
+       ancestor handed down (item 450), plus a self-extracting program's
+       extraction folder. The embedded file system's virtual root is not part of
+       the kernel policy (nothing of it is on disk). The implicit set is a
+       compiled program's (`Context::compiled`: the executable itself, no
+       DENO_DIR). The mode is the baked one only: flags, the environment and
+       deno.json are not read. Prompting is off once the mode fails closed (a
+       program compiled without `--no-prompt` no longer prompts on a terminal
+       under `enforce`: plan D4).
+     - The program's own cache folder. A confined program can't write the temp
+       folder, where its V8 code cache (`<temp>/deno-compile-<name>.cache`) and
+       its extracted native addons (`<temp>/deno-native-addons`) live. Under
+       `enforce` both go to
+       `<temp>/deno-compile-<name>.sandboxed/<policy
+       hash>`
+       (`code.cache`, `addons/`), keyed by the policy compiled without it as
+       item 451's overlay is, created `0700` before the sandbox applies, and
+       used only when the folder and its parent are real directories of the
+       effective user with mode `0700` (`kernel_apply::is_private_dir`: the temp
+       folder is shared on Linux). It is the only place the policy lets the
+       program write for itself (`ImplicitNeed::CacheOverlay`), and no
+       unconfined run reads it, so a confined program can't plant a code cache
+       for a less confined one. Where it can't be made the program has no code
+       cache and an embedded native addon fails to load.
+       `denort_helper::set_native_addon_cache_dir` lets the runtime choose the
+       addon folder (the same private-directory check as the default's).
+     - Children. The carrier (item 449) is sealed before the sandbox applies and
+       holds the inherited layers plus the program's own; its descriptor is
+       named in the environment and pinned for children
+       (`deno_process::repin_child_env_var`, which replaces the carrier the
+       program itself inherited). The environment is scrubbed in place to the
+       plan's list before any thread exists, and the variables of a baked
+       `--env-file` are set only when the plan keeps them. Started inside a
+       sandbox with `enforce` baked: Linux stacks the program's own layer; macOS
+       refuses to start (Seatbelt can't stack a second profile), as a nested
+       `deno run --kernel-sandbox=enforce` does.
+     - `deno compile`: `--kernel-sandbox=enforce` is baked for Linux, macOS and
+       Windows targets (item 902) of a command-line program; `broker` is refused
+       (no program is made that couldn't start), and so is `enforce` for a
+       desktop app (its process hosts a browser engine; not built yet) and for
+       another target OS. `--kernel-sandbox-exec=strict` is baked too
+       (`Metadata::kernel_sandbox_exec_strict`). With `enforce`, the policy is
+       compiled for the target OS with every mechanism present and the rules
+       that OS could never hold are printed as a warning (the program would
+       refuse to start there). A baked `warn` prints how many rules only Deno's
+       checks would hold, as `deno run` does.
+     - Failing closed: `denort` builds the program's permissions only after
+       `kernel_sandbox::check_compiled`, which refuses a mode that fails closed
+       unless the sandbox was applied at startup, so a runtime entry that
+       doesn't run the startup (the desktop library) can't run such a program
+       unconfined.
+     - Not in this item: `auto` still applies nothing (`AUTO_APPLIES`), so a
+       program compiled without a mode runs as before; the run-time line for a
+       prompt refused on a terminal (review D4); desktop apps.
+     - User-facing note: `deno compile --kernel-sandbox=enforce` now builds a
+       program that confines itself to its baked permissions at startup on Linux
+       and macOS (native code, addons and children included), with no flag at
+       run time; its code cache and extracted addons live in
+       `<temp>/deno-compile-<name>.sandboxed/`.
+     - Tests: `deno_lib`'s
+       `kernel_apply::tests::{off_and_auto_apply_nothing,
+       broker_refuses_and_a_dev_build_is_off,
+       a_cache_folder_must_be_this_users_alone}`
+       and the moved `kernel_policy::tests` / `kernel_plan::tests`; spec
+       `kernel_sandbox::compiled` (items 425's P3 / P4 probes as compiled
+       programs: native reads and writes, an `--allow-run` child, a native
+       connect by port, a read deny inside an allow, a library outside the read
+       scope; `-A` and a program compiled without a mode unaffected; the
+       scrubbed environment; no prompt; the cache folder, `0700`, with no shared
+       code cache written; nested under a confined `deno run` on Linux and
+       refused on macOS; a rule the OS can't hold warned about at compile and
+       refused at start) and `kernel_sandbox::policy` (`compile_refuses_broker`,
+       and `compile_bakes_warn` with the new line).
+     - Node tests enabled: none; no Node API changes.
+
+458. **`feat(permissions)`: Windows' small tier for compiled programs: a job
+     object and a lowered integrity level** (runtime; denext-only; opt-in; code
+     comments call this item 902 until the train numbers it;
+     `libs/sandbox/{windows,plan,lib}.rs`, `libs/sandbox/Cargo.toml`,
+     `cli/lib/{kernel_plan,kernel_apply}.rs`). The first kernel enforcement on
+     Windows (plan §1.9, review §5b tier 1), for a program compiled with
+     `--kernel-sandbox=enforce` (item 901), applied in place at the top of
+     `main`.
+     - The job object (`deno_sandbox::windows::apply_job`): an anonymous job the
+       process assigns itself to, with no breakaway (a child created with
+       `CREATE_BREAKAWAY_FROM_JOB` is refused), kill on close (the handle is
+       never inheritable and lives as long as the process, so the tree ends with
+       it), and with no `--allow-run` an active-process limit of 1 (the kernel
+       refuses every new process, native code's too). The limits are read back
+       (`IsProcessInJob`, `QueryInformationJobObject`); a process that can't be
+       put in a job refuses to start.
+     - Writes (`label_low`, `lower_integrity`): with a scoped write grant the
+       process lowers its own token to Low integrity
+       (`SetTokenInformation(TokenIntegrityLevel)`, read back), after labelling
+       each write root of the policy Low (`S:(ML;OICI;NW;;;LW)`, inherited; a
+       root already labelled Low is left alone). Windows then refuses writes to
+       every object labelled Medium or higher. The label is persistent and makes
+       the folder writable to every Low process of the user, so a grant on a
+       drive root, the profile folder or one that holds it, the Windows folder
+       or a system-wide program folder is refused (`refuses_label`) and the
+       program doesn't start. An unscoped `--allow-write` leaves the level
+       alone.
+     - The plan (`WindowsPlan { no_children, write_roots }`,
+       `EnforcePlan::
+       windows`) is translated from the policy model,
+       which already described the tier (item 422's capability rows: reads and
+       the network are documented Deno-only rules on Windows, never fatal).
+     - Limits, documented: reads and the network aren't confined; folders
+       already labelled Low stay writable; a write root that doesn't exist yet
+       can't be created; no carrier is handed to nested `deno` processes;
+       `deno run --kernel-sandbox=enforce` still refuses on Windows (it has
+       opened its caches by the time it could lower its level, and can't
+       re-execute in place); the handle-returning file checks (the race-safe
+       opens of item 421, Unix-only) are not built for Windows.
+     - User-facing note: on Windows a program compiled with
+       `--kernel-sandbox=enforce` runs in a job object (no children without
+       `--allow-run`; the tree ends with it) and, with a scoped `--allow-write`,
+       at Low integrity with its write folders labelled Low.
+     - Tests: `deno_sandbox`'s
+       `windows::tests::{the_job_refuses_children_and_reads_back,
+       a_job_with_children_keeps_them_in_it,
+       low_integrity_writes_only_labelled_folders,
+       wide_roots_are_never_labelled}`
+       (each process-changing test runs in a child of the test binary); spec
+       `kernel_sandbox::compiled` (`windows_native_writes`,
+       `windows_default_unaffected`, `windows_no_children`,
+       `windows_child_inherits`).
+     - Node tests enabled: none; no Node API changes.
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
