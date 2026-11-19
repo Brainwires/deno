@@ -1227,11 +1227,18 @@ function setMuted(track, muted) {
   fire(track, new Event(muted ? "mute" : "unmute"));
 }
 
+// A track the user agent ends (anything but its own stop()): mediacapture-
+// main 4.3.1.2 queues a task that sets its readyState and fires `ended`,
+// and does nothing if the track ended meanwhile (stop(), or close()).
+// webrtc-pc's "stop sending and receiving" ends the receiver's track so.
 function endTrack(track) {
-  const state = track[_trackState];
-  if (state.readyState === "ended") return;
-  state.readyState = "ended";
-  fire(track, new Event("ended"));
+  if (track[_trackState].readyState === "ended") return;
+  setTimeout(() => {
+    const state = track[_trackState];
+    if (state.readyState === "ended") return;
+    state.readyState = "ended";
+    fire(track, new Event("ended"));
+  }, 0);
 }
 
 class MediaStreamTrackEvent extends Event {
