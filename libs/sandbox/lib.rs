@@ -28,6 +28,9 @@
 //!   scope: the programs, their `#!` interpreters, the ELF loader).
 //! - [`inherit`]: the carrier that hands a confined process's policy to the
 //!   `deno` processes it starts (Linux and macOS).
+//! - [`would_deny`]: warn mode's one event ("the sandbox would refuse
+//!   this", with the grant that would allow it) and the reporter every part
+//!   of the sandbox hands it to instead of refusing.
 
 #[cfg(target_os = "linux")]
 pub mod enforce_linux;
@@ -47,6 +50,7 @@ pub mod proxy;
 pub mod seatbelt;
 #[cfg(target_os = "linux")]
 pub mod seccomp;
+pub mod would_deny;
 
 #[cfg(target_os = "linux")]
 pub use seccomp::SeccompSpec;

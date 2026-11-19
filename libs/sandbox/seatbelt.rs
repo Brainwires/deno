@@ -491,6 +491,57 @@ pub fn cli_profile(plan: &MacosPlan) -> String {
   p
 }
 
+/// The reporting profile of a warn run (`--kernel-sandbox=warn`): it allows
+/// everything, and reports to the unified log exactly what [`cli_profile`]
+/// would refuse for the same plan. Each rule of the enforce profile keeps
+/// its place (the last matching rule wins): `(deny default)` and every
+/// `(deny …)` become `(allow (with report) (with message "<tag>") …)`, the
+/// allows stay silent. The sandbox marker is left out (a warn run's children
+/// are not confined, and must not read as held by this runtime's sandbox).
+///
+/// `tag` marks this run's lines in the log (see
+/// [`crate::would_deny::parse_seatbelt_report`]). `quiet` paths are read and
+/// written silently: what the runtime itself writes in a warn run that an
+/// enforced run does elsewhere or before it confines itself (the shared
+/// DENO_DIR caches, where an enforced run uses its overlay).
+pub fn cli_report_profile(
+  plan: &MacosPlan,
+  tag: &str,
+  quiet: &[String],
+) -> Result<String, String> {
+  if !crate::would_deny::valid_tag(tag) {
+    return Err(format!("{tag:?} can't tag a profile's reports"));
+  }
+  let report = format!("(allow (with report) (with message \"{tag}\") ");
+  let marker = format!("(sysctl-name {})", quote_str(MARKER_SYSCTL_DENIED));
+  let mut out = String::new();
+  for line in cli_profile(plan).lines() {
+    if line == "(deny default)" {
+      out.push_str(&report);
+      out.push_str("default)\n");
+      if !quiet.is_empty() {
+        let filters: Vec<SbFilter> =
+          quiet.iter().map(|p| SbFilter::Subpath(p.clone())).collect();
+        out.push_str(&format!(
+          "(allow file-read* file-write* {})\n",
+          filters_text(&filters)
+        ));
+      }
+    } else if let Some(rest) = line.strip_prefix("(deny ") {
+      if rest.contains(&marker) {
+        continue;
+      }
+      out.push_str(&report);
+      out.push_str(rest);
+      out.push('\n');
+    } else {
+      out.push_str(line);
+      out.push('\n');
+    }
+  }
+  Ok(out)
+}
+
 /// `profile` letting the process run exactly the program at `exe` (the
 /// `sandbox-exec` fallback execs the runtime under the profile); appended,
 /// so it wins over an earlier `(deny process-exec)`.
@@ -805,6 +856,50 @@ mod tests {
       .unwrap();
     assert!(allow < deny, "{p}");
     assert!(!p.contains(MARKER_SYSCTL_ALLOWED), "{p}");
+  }
+
+  // the reporting profile of a warn run: every rule in its place, each
+  // refusal an allow that reports under the run's tag, nothing refused
+  #[test]
+  fn cli_report_profile_reports_what_enforce_refuses() {
+    let plan = cli_plan();
+    let enforce = cli_profile(&plan);
+    let p = cli_report_profile(&plan, "denext-ks:t1", &["/cache".to_string()])
+      .unwrap();
+    let report = "(allow (with report) (with message \"denext-ks:t1\") ";
+    assert!(
+      p.starts_with(&format!(
+        "(version 1)\n{report}default)\n(allow file-read* file-write* (subpath \"/cache\"))\n(allow file-read-metadata)\n"
+      )),
+      "{p}"
+    );
+    assert!(!p.contains("(deny "), "{p}");
+    // the marker is the enforce profile's alone
+    assert!(!p.contains(MARKER_SYSCTL_DENIED), "{p}");
+    // every other rule of the enforce profile is there, in its order: an
+    // allow as it was, a deny as a reporting allow
+    let mut at = 0;
+    for line in enforce.lines().skip(2) {
+      if line.contains(MARKER_SYSCTL_DENIED) {
+        continue;
+      }
+      let want = match line.strip_prefix("(deny ") {
+        Some(rest) => format!("{report}{rest}\n"),
+        None => format!("{line}\n"),
+      };
+      let found = p[at..]
+        .find(&want)
+        .unwrap_or_else(|| panic!("missing or out of order: {want}\n{p}"));
+      at += found + want.len();
+    }
+    assert_eq!(at, p.len(), "{p}");
+    // no quiet paths: no extra rule
+    let bare = cli_report_profile(&plan, "t", &[]).unwrap();
+    assert!(!bare.contains("file-read* file-write*"), "{bare}");
+    // a tag that could end the rule early is refused
+    for tag in ["", "a\") (allow default", "a b"] {
+      assert!(cli_report_profile(&plan, tag, &[]).is_err(), "{tag:?}");
+    }
   }
 
   #[test]
