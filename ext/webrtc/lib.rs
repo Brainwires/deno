@@ -46,6 +46,8 @@ use serde::Serialize;
 
 mod encoded_frames;
 mod fake_media;
+// wpt100:ice
+mod ice_transport;
 mod media;
 mod net;
 mod peer;
@@ -165,6 +167,16 @@ deno_core::extension!(
     op_webrtc_network_close,
     op_webrtc_set_log_level,
     op_webrtc_data_globals,
+    // wpt100:ice
+    op_webrtc_pc_ice_selected_pair,
+    op_webrtc_ice_create,
+    op_webrtc_ice_local_parameters,
+    op_webrtc_ice_gather,
+    op_webrtc_ice_start,
+    op_webrtc_ice_add_remote_candidate,
+    op_webrtc_ice_selected_pair,
+    op_webrtc_ice_stop,
+    op_webrtc_ice_next_events,
   ],
   lazy_loaded_js = [
     "01_webrtc.js",
@@ -1204,6 +1216,135 @@ fn op_webrtc_pc_selected_pair(
       .selected_pair()
       .map(|(l, r)| (l.to_string(), r.to_string(), protocol)),
   )
+}
+
+/// The ICE agent's selected candidate pair (W3C webrtc-pc 5.6
+/// `getSelectedCandidatePair()`), with each candidate's fields; `None` until
+/// ICE has selected one.
+#[op2]
+#[serde]
+fn op_webrtc_pc_ice_selected_pair(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+) -> Result<Option<peer::SelectedPair>, WebRtcError> {
+  let peer = peer(state, rid)?;
+  Ok(peer.ice_selected_pair())
+}
+
+// --- RTCIceTransport (W3C webrtc-ice) ---------------------------------------
+// wpt100:ice: the standalone transport of `new RTCIceTransport()`.
+
+struct IceTransportResource(Rc<ice_transport::IceTransport>);
+
+impl Resource for IceTransportResource {
+  fn name(&self) -> std::borrow::Cow<'_, str> {
+    "rtcIceTransport".into()
+  }
+
+  fn close(self: Rc<Self>) {
+    self.0.stop();
+  }
+}
+
+fn ice_transport(
+  state: &OpState,
+  rid: ResourceId,
+) -> Result<Rc<ice_transport::IceTransport>, WebRtcError> {
+  Ok(
+    state
+      .resource_table
+      .get::<IceTransportResource>(rid)?
+      .0
+      .clone(),
+  )
+}
+
+#[op2(fast)]
+#[smi]
+fn op_webrtc_ice_create(
+  state: &mut OpState,
+) -> Result<ResourceId, WebRtcError> {
+  let permissions = state.borrow::<PermissionsContainer>().clone();
+  let guard = Rc::new(PermissionsGuard(RefCell::new(permissions)));
+  let transport = ice_transport::IceTransport::new(guard)?;
+  Ok(state.resource_table.add(IceTransportResource(transport)))
+}
+
+/// `(usernameFragment, password)`.
+#[op2]
+#[serde]
+fn op_webrtc_ice_local_parameters(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+) -> Result<(String, String), WebRtcError> {
+  Ok(ice_transport(state, rid)?.local_parameters())
+}
+
+/// `gather()`; the ICE servers are validated by `ice_server_specs` (the
+/// permission and syntax checks a connection makes) but not used yet.
+#[op2]
+fn op_webrtc_ice_gather(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+  #[serde] ice_servers: Vec<IceServerArg>,
+  relay_only: bool,
+) -> Result<(), WebRtcError> {
+  let transport = ice_transport(state, rid)?;
+  let mut permissions = state.borrow::<PermissionsContainer>().clone();
+  ice_server_specs(&mut permissions, &ice_servers)?;
+  transport.gather(relay_only)
+}
+
+#[op2(fast)]
+fn op_webrtc_ice_start(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+  #[string] ufrag: String,
+  #[string] pwd: String,
+  controlling: bool,
+) -> Result<(), WebRtcError> {
+  ice_transport(state, rid)?.start(ufrag, pwd, controlling)
+}
+
+#[op2(fast)]
+fn op_webrtc_ice_add_remote_candidate(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+  #[string] candidate: String,
+) -> Result<(), WebRtcError> {
+  ice_transport(state, rid)?.add_remote_candidate(&candidate)
+}
+
+#[op2]
+#[serde]
+fn op_webrtc_ice_selected_pair(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+) -> Result<Option<peer::SelectedPair>, WebRtcError> {
+  Ok(ice_transport(state, rid)?.selected_pair())
+}
+
+#[op2(fast)]
+fn op_webrtc_ice_stop(state: &mut OpState, #[smi] rid: ResourceId) {
+  if let Ok(resource) = state.resource_table.take::<IceTransportResource>(rid) {
+    resource.0.stop();
+  }
+}
+
+#[op2]
+#[serde]
+async fn op_webrtc_ice_next_events(
+  state: Rc<RefCell<OpState>>,
+  #[smi] rid: ResourceId,
+) -> Result<Option<Vec<ice_transport::IceEvent>>, WebRtcError> {
+  let transport = {
+    let state = state.borrow();
+    match state.resource_table.get::<IceTransportResource>(rid) {
+      Ok(r) => r.0.clone(),
+      Err(_) => return Ok(None),
+    }
+  };
+  Ok(transport.next_events().await)
 }
 
 // --- Deno.webrtc.Network ---------------------------------------------------

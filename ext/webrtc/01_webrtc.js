@@ -43,6 +43,15 @@ const {
   op_webrtc_pc_add_transceiver,
   op_webrtc_pc_attach_track,
   op_webrtc_pc_selected_pair,
+  op_webrtc_pc_ice_selected_pair,
+  op_webrtc_ice_add_remote_candidate,
+  op_webrtc_ice_create,
+  op_webrtc_ice_gather,
+  op_webrtc_ice_local_parameters,
+  op_webrtc_ice_next_events,
+  op_webrtc_ice_selected_pair,
+  op_webrtc_ice_start,
+  op_webrtc_ice_stop,
   op_webrtc_pc_set_ice_servers,
   op_webrtc_pc_transceivers,
   op_webrtc_receiver_parameters,
@@ -267,10 +276,13 @@ function descriptionFrom(pair) {
 // doesn't change; after close(), what the slot held then.
 function descriptionSlot(pc, slot) {
   const state = pc[_state];
-  const pair = state.closed
+  let pair = state.closed
     ? state.last?.[slot]
     : op_webrtc_pc_descriptions(pc[_rid])[slot];
   if (pair === null || pair === undefined) return null;
+  if (slot === "currentLocal" || slot === "pendingLocal") {
+    pair = [pair[0], announcedSdp(state, pair[1])];
+  }
   const cache = state.descriptions;
   const held = cache[slot];
   if (held !== null && held.type === pair[0] && held.sdp === pair[1]) {
@@ -279,6 +291,59 @@ function descriptionSlot(pc, slot) {
   const description = descriptionFrom(pair);
   cache[slot] = description;
   return description;
+}
+
+// The key a gathered candidate is announced under: the local ICE ufrag it was
+// gathered for and the candidate's first eight fields (foundation to type),
+// which the SDP line and the event's string share whatever extensions follow.
+function announcedKey(ufrag, candidate) {
+  const fields = StringPrototypeSplit(StringPrototypeTrim(candidate), SPACES);
+  return `${ufrag ?? ""} ${
+    ArrayPrototypeJoin(ArrayPrototypeSlice(fields, 0, 8), " ")
+  }`;
+}
+
+// A local description as the application has been told of it. The engine
+// writes each candidate into its local description as it gathers it, but W3C
+// webrtc-pc 5.6 ("When an ICE candidate is gathered") adds the candidate to
+// [[CurrentLocalDescription]] / [[PendingLocalDescription]] in the same task
+// that fires its `icecandidate` event: before that event the description
+// lacks it, so a description read right after setLocalDescription() has no
+// candidate line, and each announced candidate makes a new description object
+// (descriptionSlot compares the text). `a=end-of-candidates` likewise waits
+// for the `complete` gathering state.
+function announcedSdp(state, sdp) {
+  if (
+    !StringPrototypeIncludes(sdp, "a=candidate:") &&
+    !StringPrototypeIncludes(sdp, "a=end-of-candidates")
+  ) {
+    return sdp;
+  }
+  const lines = StringPrototypeSplit(sdp, "\n");
+  const out = [];
+  let ufrag = "";
+  for (let i = 0; i < lines.length; ++i) {
+    const line = lines[i];
+    const trimmed = StringPrototypeTrim(line);
+    if (StringPrototypeStartsWith(trimmed, "a=ice-ufrag:")) {
+      ufrag = StringPrototypeSlice(trimmed, 12);
+    } else if (StringPrototypeStartsWith(trimmed, "a=candidate:")) {
+      const candidate = StringPrototypeSlice(trimmed, 2);
+      if (
+        !SetPrototypeHas(state.announced, announcedKey(ufrag, candidate)) &&
+        !SetPrototypeHas(state.announced, announcedKey(null, candidate))
+      ) {
+        continue;
+      }
+    } else if (
+      trimmed === "a=end-of-candidates" &&
+      state.iceGatheringState !== "complete"
+    ) {
+      continue;
+    }
+    ArrayPrototypePush(out, line);
+  }
+  return ArrayPrototypeJoin(out, "\n");
 }
 
 // --- RTCIceCandidate -------------------------------------------------------
@@ -390,11 +455,27 @@ function parseCandidate(line) {
   return out;
 }
 
+// Makes an RTCIceCandidate whose derived attributes are given rather than
+// parsed (see RTCIceCandidate's static block).
+let candidateWithFields;
+
 class RTCIceCandidate {
   #init;
   #parsed;
   #relayProtocol;
   #url;
+
+  static {
+    // A peer-reflexive remote candidate the application never signalled is
+    // exposed with an empty candidate string and no address (W3C webrtc-pc
+    // 4.8.1, "the address is not exposed"), but with the fields the agent
+    // learned: those can't come from parsing a string.
+    candidateWithFields = (init, parsed) => {
+      const candidate = new RTCIceCandidate(init);
+      candidate.#parsed = parsed;
+      return candidate;
+    };
+  }
 
   constructor(candidateInitDict = undefined) {
     const init = candidateInitDict ?? { __proto__: null };
@@ -1465,20 +1546,45 @@ function normalizeKeygen(keygenAlgorithm) {
 // --- RTCDtlsTransport / RTCIceTransport -------------------------------------
 
 const _transportState = Symbol("[[transportState]]");
+// wpt100:ice: the state of a standalone transport (`new RTCIceTransport()`,
+// W3C webrtc-ice); undefined on a peer connection's transport.
+const _ice = Symbol("[[iceTransport]]");
 
 class RTCIceTransport extends EventTarget {
   constructor(key = undefined, pc = undefined) {
-    if (key !== illegalConstructorKey) {
-      webidl.illegalConstructor();
-    }
     super();
+    this[webidl.brand] = webidl.brand;
+    if (key !== illegalConstructorKey) {
+      // W3C webrtc-ice: `new RTCIceTransport()` is a transport of its own,
+      // driven by gather() / start() / addRemoteCandidate() (ice_transport.rs).
+      const rid = op_webrtc_ice_create();
+      const params = op_webrtc_ice_local_parameters(rid);
+      this[_ice] = {
+        rid,
+        role: null,
+        state: "new",
+        gatheringState: "new",
+        local: [],
+        remote: [],
+        // Generated with the transport (RFC 8445 section 5.3), kept after
+        // stop().
+        localParameters: { usernameFragment: params[0], password: params[1] },
+        remoteParameters: null,
+        closed: false,
+        active: false,
+        pending: null,
+      };
+      // One never stopped is stopped when it is collected.
+      iceTransportRegistry.register(this, rid);
+      return;
+    }
     this[_pc] = pc;
     this[_transportState] = { state: "new", gatheringState: "new" };
-    this[webidl.brand] = webidl.brand;
   }
 
   get role() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    if (this[_ice] !== undefined) return this[_ice].role;
     // Fixed by the first answer applied: the offerer of that exchange is
     // controlling (an ICE-lite peer never is, but that is only the server
     // extension's case and it answers); an ICE restart keeps it.
@@ -1490,40 +1596,329 @@ class RTCIceTransport extends EventTarget {
   }
   get state() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    if (this[_ice] !== undefined) return this[_ice].state;
     return this[_transportState].state;
   }
   get gatheringState() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    if (this[_ice] !== undefined) return this[_ice].gatheringState;
     return this[_transportState].gatheringState;
   }
   // The candidates gathered here and signalled with `icecandidate`, and the
   // remote ones received with addIceCandidate().
   getLocalCandidates() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    if (this[_ice] !== undefined) return ArrayPrototypeSlice(this[_ice].local);
     return ArrayPrototypeSlice(this[_pc][_state].localCandidates);
   }
   getRemoteCandidates() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    if (this[_ice] !== undefined) {
+      return ArrayPrototypeSlice(this[_ice].remote);
+    }
     return ArrayPrototypeSlice(this[_pc][_state].remoteCandidates);
   }
   getSelectedCandidatePair() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    if (this[_ice] !== undefined) return iceSelectedPair(this[_ice]);
     return selectedPair(this[_pc]);
   }
   getLocalParameters() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    const ice = this[_ice];
+    if (ice !== undefined) return { ...ice.localParameters };
     return iceParameters(this[_pc].localDescription);
   }
   getRemoteParameters() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    const ice = this[_ice];
+    if (ice !== undefined) {
+      return ice.remoteParameters === null ? null : { ...ice.remoteParameters };
+    }
     return iceParameters(this[_pc].remoteDescription);
+  }
+
+  // --- W3C webrtc-ice: the standalone transport's methods ---
+
+  gather(options = undefined) {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    const ice = requireStandalone(this, "gather");
+    const opts = options ?? { __proto__: null };
+    if (typeof opts !== "object") {
+      throw new TypeError(
+        "Failed to execute 'gather' on 'RTCIceTransport': the options must be an object",
+      );
+    }
+    const gatherPolicy = opts.gatherPolicy === undefined
+      ? "all"
+      : String(opts.gatherPolicy);
+    if (gatherPolicy !== "all" && gatherPolicy !== "relay") {
+      throw new TypeError(
+        `Failed to execute 'gather' on 'RTCIceTransport': '${gatherPolicy}' is not a valid value for 'gatherPolicy'`,
+      );
+    }
+    // `sequence<RTCIceServer>`: null is not a sequence (a TypeError).
+    const servers = convertIceServers(opts.iceServers);
+    if (ice.closed) {
+      throw invalidState("The RTCIceTransport is closed");
+    }
+    if (ice.gatheringState !== "new") {
+      throw invalidState("gather() was already called");
+    }
+    op_webrtc_ice_gather(ice.rid, servers, gatherPolicy === "relay");
+    // The candidates and the `complete` state follow as events; the change
+    // to "gathering" itself is not one.
+    ice.gatheringState = "gathering";
+    iceActivate(ice);
+    icePump(this);
+  }
+
+  start(remoteParameters = undefined, role = "controlled") {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    const ice = requireStandalone(this, "start");
+    const prefix = "Failed to execute 'start' on 'RTCIceTransport'";
+    const params = remoteParameters ?? { __proto__: null };
+    if (typeof params !== "object") {
+      throw new TypeError(`${prefix}: remoteParameters must be an object`);
+    }
+    role = String(role);
+    if (role !== "controlling" && role !== "controlled") {
+      throw new TypeError(
+        `${prefix}: '${role}' is not a valid value for 'role'`,
+      );
+    }
+    if (ice.closed) {
+      throw invalidState("The RTCIceTransport is closed");
+    }
+    if (
+      params.usernameFragment === undefined || params.password === undefined
+    ) {
+      throw new TypeError(
+        `${prefix}: remoteParameters needs a usernameFragment and a password`,
+      );
+    }
+    const usernameFragment = String(params.usernameFragment);
+    const password = String(params.password);
+    // RFC 8839 section 5.4: ice-ufrag is 4 to 256 ice-chars, ice-pwd 22 to
+    // 256.
+    if (!RegExpPrototypeTest(ICE_UFRAG, usernameFragment)) {
+      throw new DOMException(
+        `${prefix}: '${usernameFragment}' is not a valid usernameFragment`,
+        "SyntaxError",
+      );
+    }
+    if (!RegExpPrototypeTest(ICE_PWD, password)) {
+      throw new DOMException(
+        `${prefix}: the password is not valid`,
+        "SyntaxError",
+      );
+    }
+    if (ice.role !== null && ice.role !== role) {
+      throw invalidState(
+        `${prefix}: the role is '${ice.role}' and cannot change`,
+      );
+    }
+    const previous = ice.remoteParameters;
+    if (
+      previous !== null && (previous.usernameFragment !== usernameFragment ||
+        previous.password !== password)
+    ) {
+      // The remote side restarted: its candidates are flushed, and the
+      // transport is "new" until one of the new generation arrives.
+      ice.remote = [];
+      if (ice.state === "checking") ice.state = "new";
+    }
+    op_webrtc_ice_start(
+      ice.rid,
+      usernameFragment,
+      password,
+      role === "controlling",
+    );
+    ice.role = role;
+    ice.remoteParameters = { usernameFragment, password };
+    if (ice.remote.length > 0 && ice.state === "new") ice.state = "checking";
+    iceActivate(ice);
+    icePump(this);
+  }
+
+  stop() {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    const ice = requireStandalone(this, "stop");
+    if (ice.closed) return;
+    ice.closed = true;
+    ice.state = "closed";
+    if (ice.active && ice.pending) core.unrefOpPromise(ice.pending);
+    ice.active = false;
+    op_webrtc_ice_stop(ice.rid);
+  }
+
+  addRemoteCandidate(remoteCandidate = undefined) {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    const ice = requireStandalone(this, "addRemoteCandidate");
+    const candidate = ObjectPrototypeIsPrototypeOf(
+        RTCIceCandidatePrototype,
+        remoteCandidate,
+      )
+      ? remoteCandidate
+      : new RTCIceCandidate(remoteCandidate ?? { sdpMid: "" });
+    if (ice.closed) {
+      throw invalidState("The RTCIceTransport is closed");
+    }
+    // An empty candidate is the remote end-of-candidates.
+    if (candidate.candidate === "") return;
+    if (candidate.foundation === null || candidate.type === null) {
+      throw new DOMException(
+        `Failed to execute 'addRemoteCandidate' on 'RTCIceTransport': '${candidate.candidate}' is not a valid candidate`,
+        "OperationError",
+      );
+    }
+    op_webrtc_ice_add_remote_candidate(ice.rid, candidate.candidate);
+    ArrayPrototypePush(ice.remote, candidate);
+    if (ice.remoteParameters !== null && ice.state === "new") {
+      ice.state = "checking";
+    }
   }
 }
 defineHandler(RTCIceTransport.prototype, "statechange");
 defineHandler(RTCIceTransport.prototype, "gatheringstatechange");
 defineHandler(RTCIceTransport.prototype, "selectedcandidatepairchange");
+defineHandler(RTCIceTransport.prototype, "error");
+defineHandler(RTCIceTransport.prototype, "icecandidate");
 webidl.configureInterface(RTCIceTransport);
 const RTCIceTransportPrototype = RTCIceTransport.prototype;
+
+const iceTransportRegistry = new SafeFinalizationRegistry((rid) => {
+  try {
+    op_webrtc_ice_stop(rid);
+  } catch {
+    // Already gone.
+  }
+});
+
+// RFC 8839 section 5.4 (ice-char = ALPHA / DIGIT / "+" / "/").
+const ICE_UFRAG = new SafeRegExp("^[A-Za-z0-9+/]{4,256}$");
+const ICE_PWD = new SafeRegExp("^[A-Za-z0-9+/]{22,256}$");
+
+// The webrtc-ice methods exist only on a transport of its own: a peer
+// connection's transport is driven by its descriptions.
+function requireStandalone(transport, method) {
+  const ice = transport[_ice];
+  if (ice === undefined) {
+    throw invalidState(
+      `RTCIceTransport.${method}() is only for a transport made with new RTCIceTransport()`,
+    );
+  }
+  return ice;
+}
+
+// A gathering or started transport keeps the process alive, as an open
+// socket does, until stop().
+function iceActivate(ice) {
+  if (ice.closed || ice.active) return;
+  ice.active = true;
+  if (ice.pending) core.refOpPromise(ice.pending);
+}
+
+function icePump(transport) {
+  const ice = transport[_ice];
+  if (ice.closed || ice.pending) return;
+  const promise = op_webrtc_ice_next_events(ice.rid);
+  ice.pending = promise;
+  if (!ice.active) core.unrefOpPromise(promise);
+  PromisePrototypeThen(promise, (events) => {
+    ice.pending = null;
+    if (events === null || ice.closed) return;
+    iceDispatchEvents(transport, events, 0);
+  }, () => {
+    ice.pending = null;
+  });
+}
+
+// Each event is its own task, as for a peer connection.
+function iceDispatchEvents(transport, events, from) {
+  const ice = transport[_ice];
+  try {
+    iceDispatchEvent(transport, events, from);
+  } catch (error) {
+    reportException(error);
+  }
+  if (ice.closed) return;
+  if (from + 1 >= events.length) {
+    icePump(transport);
+    return;
+  }
+  const next = op_void_async_deferred();
+  ice.pending = next;
+  if (!ice.active) core.unrefOpPromise(next);
+  PromisePrototypeThen(next, () => {
+    ice.pending = null;
+    if (!ice.closed) iceDispatchEvents(transport, events, from + 1);
+  });
+}
+
+function iceDispatchEvent(transport, events, from) {
+  const ice = transport[_ice];
+  const event = events[from];
+  switch (event.type) {
+    case "icecandidate": {
+      const candidate = new RTCIceCandidate({
+        candidate: event.candidate,
+        sdpMid: "",
+        sdpMLineIndex: 0,
+        usernameFragment: ice.localParameters.usernameFragment,
+      });
+      ArrayPrototypePush(ice.local, candidate);
+      fire(
+        transport,
+        new RTCPeerConnectionIceEvent("icecandidate", { candidate }),
+      );
+      break;
+    }
+    case "gatheringcomplete":
+      // W3C webrtc-ice: the null candidate, then (a task of its own) the
+      // gathering state "complete".
+      ArrayPrototypeSplice(events, from + 1, 0, { type: "gatheringstate" });
+      fire(
+        transport,
+        new RTCPeerConnectionIceEvent("icecandidate", { candidate: null }),
+      );
+      break;
+    case "gatheringstate":
+      if (ice.gatheringState === "complete") break;
+      ice.gatheringState = "complete";
+      fire(transport, new Event("gatheringstatechange"));
+      break;
+    case "statechange":
+      // `checking` is set by start() / addRemoteCandidate() themselves (the
+      // agent reports it as soon as it starts, before any candidate).
+      if (event.state === "checking" || ice.state === event.state) break;
+      ice.state = event.state;
+      fire(transport, new Event("statechange"));
+      break;
+    case "selectedcandidatepairchange":
+      fire(transport, new Event("selectedcandidatepairchange"));
+      break;
+    case "rolechange":
+      ice.role = event.controlling ? "controlling" : "controlled";
+      break;
+  }
+}
+
+// The standalone transport's selected pair, its candidates matched with the
+// ones gathered and added (a peer-reflexive remote one hides its address).
+function iceSelectedPair(ice) {
+  if (ice.closed) return null;
+  const pair = op_webrtc_ice_selected_pair(ice.rid);
+  if (pair === null) return null;
+  return new RTCIceCandidatePair(
+    illegalConstructorKey,
+    findPairCandidate(ice.local, pair.local) ?? synthPairCandidate(pair.local),
+    findPairCandidate(ice.remote, pair.remote) ??
+      (pair.remote.type === "prflx"
+        ? hiddenPairCandidate(pair.remote)
+        : synthPairCandidate(pair.remote)),
+  );
+}
 
 class RTCIceCandidatePair {
   #local;
@@ -1674,11 +2069,77 @@ function setTransportStates(pc, silent = false) {
   }
 }
 
+// The candidate of `list` (signalled or received by the application) at a
+// selected pair candidate's address, port and protocol.
+function findPairCandidate(list, cand) {
+  for (let i = 0; i < list.length; ++i) {
+    const c = list[i];
+    const host = StringPrototypeIncludes(c.address ?? "", ":")
+      ? `[${c.address}]`
+      : c.address;
+    if (`${host}:${c.port}` === cand.addr && c.protocol === cand.protocol) {
+      return c;
+    }
+  }
+  return null;
+}
+
+// A selected pair candidate the application doesn't have (gathered or
+// learned by the agent itself), written out from its fields.
+function synthPairCandidate(cand) {
+  const related = cand.relatedAddress !== ""
+    ? ` raddr ${cand.relatedAddress} rport ${cand.relatedPort}`
+    : cand.type === "host"
+    ? ""
+    : " raddr 0.0.0.0 rport 0";
+  const foundation = RegExpPrototypeTest(ICE_CHARS, cand.foundation)
+    ? cand.foundation
+    : "0";
+  return new RTCIceCandidate({
+    candidate: `candidate:${foundation} 1 ${cand.protocol} ${
+      MathMax(1, cand.priority)
+    } ${cand.address} ${cand.port} typ ${cand.type}${related}${
+      cand.protocol === "tcp" && cand.type !== "relay" ? " tcptype active" : ""
+    }`,
+    sdpMLineIndex: 0,
+  });
+}
+
+// A peer-reflexive remote candidate the application never signalled: W3C
+// webrtc-pc 4.8.1 exposes it with an empty candidate string and a null
+// address (its address came from the network, not from the application).
+function hiddenPairCandidate(cand) {
+  return candidateWithFields({ candidate: "", sdpMLineIndex: 0 }, {
+    foundation: cand.foundation,
+    component: "rtp",
+    priority: cand.priority,
+    address: null,
+    protocol: cand.protocol === "tcp" ? "tcp" : "udp",
+    port: cand.port,
+    type: "prflx",
+    tcpType: null,
+    relatedAddress: null,
+    relatedPort: cand.relatedPort,
+  });
+}
+
 // The selected pair as RTCIceCandidates, from the candidates this side
 // signalled and received (matched by address); null before ICE connects.
 function selectedPair(pc) {
   const state = pc[_state];
   if (state.closed) return null;
+  const ice = op_webrtc_pc_ice_selected_pair(pc[_rid]);
+  if (ice !== null) {
+    return new RTCIceCandidatePair(
+      illegalConstructorKey,
+      findPairCandidate(state.localCandidates, ice.local) ??
+        synthPairCandidate(ice.local),
+      findPairCandidate(state.remoteCandidates, ice.remote) ??
+        (ice.remote.type === "prflx"
+          ? hiddenPairCandidate(ice.remote)
+          : synthPairCandidate(ice.remote)),
+    );
+  }
   const pair = op_webrtc_pc_selected_pair(pc[_rid]);
   if (pair === null) return null;
   const protocol = pair[2];
@@ -1835,6 +2296,19 @@ function refineStats(pc, entries, now) {
       case "local-candidate":
       case "remote-candidate":
         if (stats.relatedAddress === undefined) delete stats.relatedPort;
+        // wpt100:ice: a peer-reflexive remote candidate's address came from
+        // the network, not from the application: webrtc-stats 8.13 leaves it
+        // null unless the application signalled that address itself.
+        if (
+          stats.type === "remote-candidate" &&
+          stats.candidateType === "prflx" &&
+          !ArrayPrototypeSome(
+            state.remoteCandidates,
+            (c) => c.address === stats.address,
+          )
+        ) {
+          stats.address = null;
+        }
         break;
       case "certificate":
         if (
@@ -3248,6 +3722,13 @@ class RTCPeerConnection extends EventTarget {
       // Remote MediaStreams by id.
       streams: new SafeMap(),
       localCandidates: [],
+      // announcedKey()s of the gathered candidates whose icecandidate event
+      // was dispatched: only those are in the local description.
+      announced: new SafeSet(),
+      // A rolled-back first offer discarded its gathering (discardGathering).
+      gatheringDiscarded: false,
+      // The gathering state the engine last reported.
+      engineGatheringState: "new",
       remoteCandidates: [],
       remoteTracksBeforeOffer: null,
       cname: uuid(),
@@ -3486,6 +3967,8 @@ class RTCPeerConnection extends EventTarget {
         }
         op_webrtc_pc_set_local_description(this[_rid], type, sdp ?? "");
         const state = this[_state];
+        if (type === "rollback") discardGathering(this);
+        else if (state.gatheringDiscarded) resumeGathering(this);
         if (type === "answer" || type === "pranswer") {
           state.iceRole ??= "controlled";
           readChannelIds(this);
@@ -5085,7 +5568,22 @@ function pump(pc) {
 function dispatchEngineEvents(pc, events, from) {
   const state = pc[_state];
   try {
-    dispatchEngineEvent(pc, events[from]);
+    const event = events[from];
+    if (
+      event.type === "icegatheringstatechange" && event.state === "complete" &&
+      !event.endOfCandidates && state.iceGatheringState === "gathering"
+    ) {
+      // W3C webrtc-pc 5.6 (as amended by w3c/webrtc-pc#2894): gathering
+      // that finishes queues two tasks. The first fires `icecandidate` with
+      // an empty candidate string for the media description (its
+      // end-of-candidates), the second the gathering state changes and the
+      // global null candidate. The same event comes back as the next task.
+      event.endOfCandidates = true;
+      ArrayPrototypeSplice(events, from + 1, 0, event);
+      fireEndOfCandidates(pc);
+    } else {
+      dispatchEngineEvent(pc, event);
+    }
   } catch (error) {
     // Listener exceptions are reported by dispatchEvent itself; this is
     // anything else, reported without stopping the other events.
@@ -5103,6 +5601,92 @@ function dispatchEngineEvents(pc, events, from) {
     state.pending = null;
     if (!state.closed) dispatchEngineEvents(pc, events, from + 1);
   });
+}
+
+// setLocalDescription(rollback) of the first offer leaves no local
+// description: the ICE transports that offer created are discarded, and with
+// no transport the ICE gathering state is "new" again (W3C webrtc-pc 4.4.1.6
+// rollback, 4.4.4 "update the ICE gathering state"). Gathering still running
+// for it is not reported any more.
+function discardGathering(pc) {
+  const state = pc[_state];
+  if (
+    pc.currentLocalDescription !== null || pc.pendingLocalDescription !== null
+  ) {
+    return;
+  }
+  if (state.iceGatheringState === "new") return;
+  state.gatheringDiscarded = true;
+  state.iceGatheringState = "new";
+  setTransportStates(pc);
+  fire(pc, new Event("icegatheringstatechange"));
+}
+
+// The next local description after such a rollback: the engine keeps the
+// sockets and candidates it gathered (it gathers once per connection), so
+// the gathering state goes where the engine's is again, through "gathering"
+// (and, if the engine had finished, "complete" with its null candidate, in a
+// task of its own).
+function resumeGathering(pc) {
+  const state = pc[_state];
+  state.gatheringDiscarded = false;
+  const engine = state.engineGatheringState;
+  if (engine === "new" || state.iceGatheringState !== "new") return;
+  state.iceGatheringState = "gathering";
+  setTransportStates(pc);
+  fire(pc, new Event("icegatheringstatechange"));
+  if (engine !== "complete") return;
+  PromisePrototypeThen(op_void_async_deferred(), () => {
+    if (
+      state.closed || state.gatheringDiscarded ||
+      state.iceGatheringState !== "gathering"
+    ) {
+      return;
+    }
+    state.iceGatheringState = "complete";
+    setTransportStates(pc);
+    fire(pc, new Event("icegatheringstatechange"));
+    fire(
+      pc,
+      new RTCPeerConnectionIceEvent("icecandidate", { candidate: null }),
+    );
+  });
+}
+
+// The STUN / TURN server URL an icecandidateerror names: the URL as the
+// ICE agent uses it, so a `turns:` URL carries its implied TCP transport
+// (RFC 7065 section 3: TURN over TLS runs over TCP).
+function iceErrorUrl(url) {
+  if (
+    typeof url === "string" && StringPrototypeStartsWith(url, "turns:") &&
+    !StringPrototypeIncludes(url, "?")
+  ) {
+    return `${url}?transport=tcp`;
+  }
+  return url;
+}
+
+// The `icecandidate` event that ends a media description's candidates: an
+// RTCIceCandidate whose candidate is "" (W3C webrtc-pc 5.6).
+function fireEndOfCandidates(pc) {
+  const state = pc[_state];
+  // The last gathered candidate is of the generation that just ended.
+  const first = state.localCandidates[state.localCandidates.length - 1];
+  let sdpMid = first?.sdpMid ?? null;
+  if (sdpMid === null) {
+    const local = pc.localDescription;
+    sdpMid = local === null ? null : midsOf(local.sdp)[0] ?? null;
+  }
+  const candidate = new RTCIceCandidate({
+    candidate: "",
+    sdpMid,
+    sdpMLineIndex: first?.sdpMLineIndex ?? 0,
+    usernameFragment: first?.usernameFragment ?? null,
+  });
+  fire(
+    pc,
+    new RTCPeerConnectionIceEvent("icecandidate", { candidate, url: null }),
+  );
 }
 
 function channelFor(pc, event) {
@@ -5124,6 +5708,10 @@ function dispatchEngineEvent(pc, event) {
         usernameFragment: event.usernameFragment,
       });
       ArrayPrototypePush(state.localCandidates, candidate);
+      SetPrototypeAdd(
+        state.announced,
+        announcedKey(event.usernameFragment ?? null, event.candidate),
+      );
       fire(
         pc,
         new RTCPeerConnectionIceEvent("icecandidate", {
@@ -5138,8 +5726,11 @@ function dispatchEngineEvent(pc, event) {
         pc,
         new RTCPeerConnectionIceErrorEvent("icecandidateerror", {
           address: event.address ?? null,
-          port: event.port ?? null,
-          url: event.url,
+          // No local address was used (the server's name didn't resolve, or
+          // no socket could reach it): port 0 with the null address, as
+          // browsers report it.
+          port: event.port ?? (event.address == null ? 0 : null),
+          url: iceErrorUrl(event.url),
           errorCode: event.errorCode,
           errorText: event.errorText,
         }),
@@ -5149,6 +5740,9 @@ function dispatchEngineEvent(pc, event) {
       // The JS side sets the signaling state as each description is applied.
       break;
     case "icegatheringstatechange":
+      state.engineGatheringState = event.state;
+      // A rolled-back first offer discarded what was being gathered.
+      if (state.gatheringDiscarded) break;
       if (state.iceGatheringState === event.state) break;
       state.iceGatheringState = event.state;
       setTransportStates(pc);
