@@ -28,19 +28,26 @@ const {
   ArrayBufferPrototypeGetByteLength,
   ArrayBufferPrototypeSlice,
   ArrayIsArray,
+  ArrayPrototypeIncludes,
   ArrayPrototypePush,
   ArrayPrototypeSlice,
   MapPrototypeDelete,
   MapPrototypeGet,
   MapPrototypeSet,
+  MathRound,
   ObjectDefineProperty,
   ObjectPrototypeIsPrototypeOf,
   PromisePrototypeThen,
   PromiseReject,
   PromiseWithResolvers,
+  RegExpPrototypeTest,
   SafeMap,
+  SafeRegExp,
+  StringPrototypeSlice,
+  StringPrototypeSplit,
   StringPrototypeStartsWith,
   StringPrototypeToLowerCase,
+  StringPrototypeTrim,
   Symbol,
   SymbolFor,
   TypeError,
@@ -350,10 +357,10 @@ class RTCRtpScriptTransform {
 webidl.configureInterface(RTCRtpScriptTransform);
 const RTCRtpScriptTransformPrototype = RTCRtpScriptTransform.prototype;
 
-function reply(state, id, error) {
+function reply(state, id, error = undefined, value = undefined) {
   state.port.postMessage(
     error === undefined
-      ? { resolve: id }
+      ? { resolve: id, value }
       : { reject: id, name: error.name, message: error.message },
   );
 }
@@ -389,37 +396,123 @@ function onTransformerMessage(transform, message) {
     return;
   }
   if (message.generateKeyFrame !== undefined) {
-    const id = message.generateKeyFrame;
-    const sender = state.side === "sender" ? state.target : null;
-    const { _state: trackKey, _trackState } = internals();
-    const track = sender?.[trackKey].track ?? null;
-    if (track === null || track[_trackState].kind !== "video") {
+    generateKeyFrame(state, message.generateKeyFrame, message.rid);
+    return;
+  }
+  if (message.sendKeyFrameRequest !== undefined) {
+    const id = message.sendKeyFrameRequest;
+    // The transformer's [[depacketizer]]: the receiver it was attached to,
+    // also once detached from it.
+    if (state.ownerSide !== "receiver") {
+      reply(state, id, invalidState("sendKeyFrameRequest: not a receiver"));
+      return;
+    }
+    if (state.kind !== "video") {
+      reply(state, id, invalidState("sendKeyFrameRequest: not video"));
+      return;
+    }
+    // Detached: there is nothing to ask, which is not an error.
+    if (state.target === null) {
+      reply(state, id);
+      return;
+    }
+    const { pc, key } = ownerParts(state);
+    const { _rid, _state: pcState } = internals();
+    if (!pc[pcState].closed) {
+      try {
+        op_webrtc_receiver_request_key_frame(pc[_rid], key);
+      } catch {
+        // The receiver went away.
+      }
+    }
+    reply(state, id);
+  }
+}
+
+// RFC 8852 3: an RtpStreamId is 1 to 255 alphanumeric characters.
+const RID_SYNTAX = new SafeRegExp("^[A-Za-z0-9]{1,255}$");
+
+// The rids a sender may send now: those the remote description accepted
+// (`a=rid:<id> recv` in the transceiver's m-section; none once negotiation
+// dropped simulcast), or before an answer, those of its encodings.
+function negotiatedRids(sender) {
+  const { _pc, _transceiver } = internals();
+  const pc = sender[_pc];
+  const mid = sender[_transceiver].mid;
+  const description = pc.currentRemoteDescription;
+  const rids = [];
+  if (description === null || mid === null) {
+    const encodings = sender.getParameters().encodings;
+    for (let i = 0; i < encodings.length; ++i) {
+      if (encodings[i].rid !== undefined) {
+        ArrayPrototypePush(rids, encodings[i].rid);
+      }
+    }
+    return rids;
+  }
+  const sections = StringPrototypeSplit(description.sdp, "\nm=");
+  for (let i = 1; i < sections.length; ++i) {
+    const lines = StringPrototypeSplit(sections[i], "\n");
+    let found = false;
+    const sectionRids = [];
+    for (let j = 0; j < lines.length; ++j) {
+      const line = StringPrototypeTrim(lines[j]);
+      if (line === `a=mid:${mid}`) found = true;
+      if (StringPrototypeStartsWith(line, "a=rid:")) {
+        const parts = StringPrototypeSplit(StringPrototypeSlice(line, 6), " ");
+        if (parts[1] === "recv") ArrayPrototypePush(sectionRids, parts[0]);
+      }
+    }
+    if (found) return sectionRids;
+  }
+  return rids;
+}
+
+// RTCRtpScriptTransformer.generateKeyFrame(rid), on the window side. The
+// promise resolves with the key frame's timestamp once that frame went to
+// the worker (before the frame message: see feedFake).
+function generateKeyFrame(state, id, rid) {
+  // The transformer's [[encoder]]: the sender it was attached to, also once
+  // detached from it.
+  const sender = state.ownerSide === "sender" ? state.owner : null;
+  if (sender === null || state.kind !== "video") {
+    reply(
+      state,
+      id,
+      invalidState("generateKeyFrame: not a video sender's transform"),
+    );
+    return;
+  }
+  if (rid !== undefined && rid !== null) {
+    if (!RegExpPrototypeTest(RID_SYNTAX, rid)) {
       reply(
         state,
         id,
-        invalidState("generateKeyFrame: not a video sender with a track"),
+        new DOMException(
+          `generateKeyFrame: '${rid}' is not a valid rid`,
+          "NotAllowedError",
+        ),
       );
       return;
     }
-    if (message.rid !== undefined && message.rid !== null) {
-      const rids = sender.getParameters().encodings;
-      let found = false;
-      for (let i = 0; i < rids.length; ++i) {
-        if (rids[i].rid === message.rid) found = true;
-      }
-      if (!found) {
-        reply(
-          state,
-          id,
-          new DOMException(
-            `generateKeyFrame: no encoding with rid '${message.rid}'`,
-            "NotFoundError",
-          ),
-        );
-        return;
-      }
+    if (!ArrayPrototypeIncludes(negotiatedRids(sender), rid)) {
+      reply(
+        state,
+        id,
+        new DOMException(
+          `generateKeyFrame: no encoding with rid '${rid}'`,
+          "NotFoundError",
+        ),
+      );
+      return;
     }
-    const { _source } = internals();
+  }
+  // Detached, or a sender with no track: no frame will come, so the promise
+  // waits (it is not an error, and a later frame of this sender resolves
+  // it).
+  const { _state: senderState, _source } = internals();
+  const track = sender[senderState].track;
+  if (state.target === sender && track !== null) {
     if (track[_source]?.device === undefined) {
       // A track the program feeds (Deno.webrtc.EncodedMediaTrack): it is
       // asked for the key frame, as at a remote PLI.
@@ -429,30 +522,10 @@ function onTransformerMessage(transform, message) {
       reply(state, id);
       return;
     }
-    // Resolved when the next key frame goes to the worker (the fake
-    // camera's clip starts with one every second).
-    ArrayPrototypePush(state.keyFrameWaiters, id);
-    return;
   }
-  if (message.sendKeyFrameRequest !== undefined) {
-    const id = message.sendKeyFrameRequest;
-    if (state.side !== "receiver") {
-      reply(state, id, invalidState("sendKeyFrameRequest: not a receiver"));
-      return;
-    }
-    const receiver = state.target;
-    const { _state: kindKey } = internals();
-    if (receiver[kindKey].track.kind !== "video") {
-      reply(state, id, invalidState("sendKeyFrameRequest: not video"));
-      return;
-    }
-    const { pc, key } = ownerParts(state);
-    const { _rid, _state: pcState } = internals();
-    if (!pc[pcState].closed) {
-      op_webrtc_receiver_request_key_frame(pc[_rid], key);
-    }
-    reply(state, id);
-  }
+  // Resolved when the sender's next key frame goes to the worker (the fake
+  // camera's clip starts with one every second).
+  ArrayPrototypePush(state.keyFrameWaiters, id);
 }
 
 // SFrame (04_sframe.js): loaded with the first SFrame transform.
@@ -558,12 +631,13 @@ function feedFake(sender, pc, key, stereo) {
   }
   const data = copyBytes(f.data);
   const info = f.info;
+  const captureTime = performance.now();
   const metadata = {
     synchronizationSource: info.synchronizationSource,
     payloadType: info.payloadType,
     contributingSources: [],
     rtpTimestamp: info.rtpTimestamp,
-    captureTime: performance.now(),
+    captureTime,
     mimeType: info.mimeType,
   };
   if (
@@ -581,6 +655,9 @@ function feedFake(sender, pc, key, stereo) {
     }
     metadata.spatialIndex = 0;
     metadata.temporalIndex = 0;
+    // The raw frame's presentation timestamp, in microseconds: when the
+    // device took it.
+    metadata.timestamp = MathRound(captureTime * 1000);
     const frame = new RTCEncodedVideoFrame(illegalConstructorKey, {
       type: f.keyFrame ? "key" : "delta",
       data,
@@ -591,7 +668,9 @@ function feedFake(sender, pc, key, stereo) {
     if (f.keyFrame && state.keyFrameWaiters.length > 0) {
       const waiters = state.keyFrameWaiters;
       state.keyFrameWaiters = [];
-      for (let i = 0; i < waiters.length; ++i) reply(state, waiters[i]);
+      for (let i = 0; i < waiters.length; ++i) {
+        reply(state, waiters[i], undefined, metadata.timestamp);
+      }
     }
   } else {
     postFrame(
@@ -900,7 +979,8 @@ function onTransformMessage(transformer, message) {
     if (pending === undefined) return;
     MapPrototypeDelete(state.pending, id);
     if (message.resolve !== undefined) {
-      pending.resolve(undefined);
+      // generateKeyFrame() resolves with the key frame's timestamp.
+      pending.resolve(message.value);
     } else {
       pending.reject(new DOMException(message.message, message.name));
     }
