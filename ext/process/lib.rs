@@ -2184,7 +2184,7 @@ fn get_requires_allow_all_env_vars(env: &RunEnv) -> Vec<&str> {
 }
 
 /// A spawn that failed never hands its IPC channel to JavaScript, so nothing
-/// would close the parent's end: close it here (DENEXT.md item 473). Before,
+/// would close the parent's end: close it here (DENEXT.md item 464). Before,
 /// each failed `spawn(..., { stdio: [..., "ipc"] })` (a missing program) left
 /// the channel's resource and its descriptors open for the process's life.
 fn close_ipc_of_failed_spawn<T>(

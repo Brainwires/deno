@@ -428,7 +428,7 @@ Deno.test("[node/net] listen on :: with ipv6Only: true leaves the IPv4 port free
 });
 
 // A local IPC path: a named pipe on Windows, a Unix socket elsewhere
-// (DENEXT.md item 472). More clients than libuv's four pending instances
+// (DENEXT.md item 463). More clients than libuv's four pending instances
 // stay connected at once, and the server still accepts the next one: the
 // pipe's instance limit used to be 4, after which it never accepted again.
 Deno.test("[node/net] a path server keeps accepting past four open connections", async () => {

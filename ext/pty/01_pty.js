@@ -102,7 +102,7 @@ function spawnPty(options, apiName) {
   // (`null` on Windows, where a ConPTY is not a named device).
   const ttyName = op_pty_tty_name(masterRid);
 
-  // What runs in the terminal right now (DENEXT.md item 470); `null` once
+  // What runs in the terminal right now (DENEXT.md item 461); `null` once
   // the terminal is closed or nothing is in its foreground.
   function foreground() {
     let info;

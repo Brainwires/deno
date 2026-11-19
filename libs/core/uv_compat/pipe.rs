@@ -937,7 +937,7 @@ pub unsafe fn uv_pipe_listen(
     // keeps LISTENING, not how many may exist. With the limit at 4, the
     // instance `uv_pipe_accept` creates for the next client failed
     // (ERROR_PIPE_BUSY) once four clients were connected, and the server
-    // never accepted again (DENEXT.md item 472).
+    // never accepted again (DENEXT.md item 463).
     let mut opts = tokio::net::windows::named_pipe::ServerOptions::new();
     opts.first_pipe_instance(true);
     let server = match opts.create(&path) {

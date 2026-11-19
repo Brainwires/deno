@@ -17912,7 +17912,64 @@ where the changes are discussed.
      - User-facing note: none; tooling only. Usage: `tools/README.md`,
        "denext/flake_hunt.ts".
      - Node tests enabled: none.
-460. **`feat(pty)`: `Deno.Pty.foreground()` and `Deno.Pty.ttyName`: what runs in
+460. **`feat(desktop)`: laufey API 59: web view downloads and permission
+     requests the app decides, menu read-back, and a macOS panel whose show()
+     takes no keyboard** (runtime; `runtime/ops/desktop.rs`,
+     `cli/rt/desktop.rs`, `cli/rt_desktop/lib.rs`, `cli/rt_desktop/Cargo.toml`,
+     `Cargo.lock`, `cli/tsc/dts/lib.deno.desktop.d.ts`,
+     `.github/workflows/denext_runtime.yml`,
+     `.github/denext-runtime/e2e/apps/webview/main.ts`,
+     `.github/denext-runtime/e2e/apps/menus/main.ts`). laufey `83bd73d..cc82a4c`
+     (`feat/qutty-1`; the pin moves to the release tag when laufey cuts it).
+     - **Downloads.** `createWebView({ downloads: "app" })` (where
+       `webViewCapabilities().downloadEvents`; refused as `invalid` elsewhere,
+       never the engine's default) reports each download as `"download"` events
+       (`id`, `state`: `requested`, `progressing`, `completed`, `cancelled`,
+       `interrupted`; `url`, a bare `filename`, `mimeType`, `totalBytes`,
+       `receivedBytes`, `path`, `paused`, `canResume`, `reason`). Nothing is
+       saved until `WebView.controlDownload(id, "save", path)` or `"saveAs"`
+       (the OS save panel); `"cancel"` at any time; `"pause"` / `"resume"` where
+       `downloadPause` (CEF, WebView2). Closing the view cancels its downloads
+       before `"closed"`.
+     - **`"save"` needs write permission** for the path
+       (`check_open(..., Write)`, a `NotCapable` error otherwise): the engine,
+       not Deno's file system API, writes the file, so without the check a
+       page's download would be a write outside the app's `--allow-write`.
+     - **Permission requests.** `createWebView({ permissions: "app" })` (where
+       `permissionRequests`) reports each request as a `"permission-request"`
+       event (`id`, `origin`, `permissions`, `frame` where the engine says which
+       frame asked) answered with
+       `WebView.respondToPermissionRequest(id, allow)`; a request that goes away
+       unanswered (a navigation, the view closing) is refused and reported with
+       `state: "cancelled"`. The engine's own prompt never shows.
+     - **Menu read-back**, for self-tests: `BrowserWindow.getApplicationMenu()`,
+       `Deno.desktop.getApplicationMenu()` (the macOS menu bar as it is now) and
+       `Deno.dock.getMenu()` return the native menu's items (`type`, `label`,
+       `id`, `role`, `enabled`, `checked`, `visible`, `accelerator`, `submenu`)
+       or `null`; `menuCapabilities().snapshot` says whether the backend reads
+       them.
+     - **The Dock menu** (verified, no change): `Deno.dock.setMenu()` already
+       takes full items (separators, `checked`, submenus), AppKit draws them,
+       and a click fires `"menuclick"` on `Deno.dock` with `detail.id`, whether
+       or not a window is open.
+     - **macOS panels** (laufey): `show()` of a hidden non-activating window
+       (`focusable: false`) no longer makes it key, on both backends, and on CEF
+       `focus()` no longer activates the app for one; the panel's built-in
+       join-all-Spaces is undone by `setVisibleOnAllWorkspaces(false)` (checked
+       in laufey's e2e).
+     - Engines: downloads on CEF, WKWebView (macOS 11.3+), WebView2 and
+       WebKitGTK 2.40+; pause only on CEF and WebView2. Permission requests on
+       all four; WKWebView raises only camera and microphone, WebKitGTK names no
+       frame, and Chromium (CEF) remembers a prompted kind's answer per origin
+       in the view's partition.
+     - Tests: `runtime/ops/desktop.rs` unit tests (the action names, the path
+       rule, the capability JSON), `cli/rt/desktop.rs` (the option lists), the
+       desktop e2e `webview` app (downloads: announce, hold, save, cancel, pause
+       where reported, close; permission requests: ask, refuse, close) and
+       `menus` app (read-back of the app menu and the Dock menu); laufey's
+       `webview_test`, `webview_app_checks` and menu / panel e2e.
+     - Node tests enabled: none; no Node API changes.
+461. **`feat(pty)`: `Deno.Pty.foreground()` and `Deno.Pty.ttyName`: what runs in
      a terminal, asked of the OS** (`desktop/d28-qutty-2`; runtime;
      `ext/pty/{foreground.rs,unix.rs,windows.rs,lib.rs,01_pty.js,Cargo.toml}`,
      `ext/process/40_process.js`,
@@ -17973,7 +18030,7 @@ where the changes are discussed.
        exited), `ttyName` against `tty`, `exec`, a reaped child, `Deno.Command`
        with `pty`, and the Windows tree.
      - Node tests enabled: none.
-461. **`feat(desktop)`: `Deno.desktop.windowOrder()` and
+462. **`feat(desktop)`: `Deno.desktop.windowOrder()` and
      `Deno.desktop.pointer()`: the real stacking order of the app's windows, and
      the pointer on the screen** (`desktop/d28-qutty-2`; desktop runtime; laufey
      API 60 (`window_z_order`, `pointer_state`); `runtime/ops/desktop.rs`,
@@ -18021,7 +18078,7 @@ where the changes are discussed.
        not once hidden). `runtime/ops/desktop.rs` tests the serialized shapes;
        `tests/unit/ops_test.ts` counts the two ops.
      - Node tests enabled: none.
-462. **`fix(node/net)`: a Windows named-pipe server keeps accepting past four
+463. **`fix(node/net)`: a Windows named-pipe server keeps accepting past four
      open connections** (`desktop/d28-qutty-2`; runtime;
      `libs/core/uv_compat/pipe.rs`, `tests/unit_node/net_test.ts`; the item
      number is a placeholder for the train lead to renumber). Named pipes are
@@ -18041,7 +18098,7 @@ where the changes are discussed.
        ten clients held open, then an eleventh, on a named pipe on Windows and a
        Unix socket elsewhere) is the proof on Windows.
      - Node tests enabled: none.
-463. **`fix(process)`: a spawn that fails closes its IPC channel**
+464. **`fix(process)`: a spawn that fails closes its IPC channel**
      (`desktop/d28-qutty-2`; runtime; `ext/process/lib.rs`,
      `tests/unit_node/child_process_test.ts`; the item number is a placeholder
      for the train lead to renumber). `create_command` adds the parent's end of
@@ -18058,65 +18115,6 @@ where the changes are discussed.
        with an IPC channel three times under the unit runner's resource
        sanitizer.
      - Node tests enabled: none.
-
-460. **`feat(desktop)`: laufey API 59: web view downloads and permission
-     requests the app decides, menu read-back, and a macOS panel whose show()
-     takes no keyboard** (runtime; `runtime/ops/desktop.rs`,
-     `cli/rt/desktop.rs`, `cli/rt_desktop/lib.rs`, `cli/rt_desktop/Cargo.toml`,
-     `Cargo.lock`, `cli/tsc/dts/lib.deno.desktop.d.ts`,
-     `.github/workflows/denext_runtime.yml`,
-     `.github/denext-runtime/e2e/apps/webview/main.ts`,
-     `.github/denext-runtime/e2e/apps/menus/main.ts`). laufey `83bd73d..cc82a4c`
-     (`feat/qutty-1`; the pin moves to the release tag when laufey cuts it).
-     - **Downloads.** `createWebView({ downloads: "app" })` (where
-       `webViewCapabilities().downloadEvents`; refused as `invalid` elsewhere,
-       never the engine's default) reports each download as `"download"`
-       events (`id`, `state`: `requested`, `progressing`, `completed`,
-       `cancelled`, `interrupted`; `url`, a bare `filename`, `mimeType`,
-       `totalBytes`, `receivedBytes`, `path`, `paused`, `canResume`, `reason`).
-       Nothing is saved until `WebView.controlDownload(id, "save", path)` or
-       `"saveAs"` (the OS save panel); `"cancel"` at any time; `"pause"` /
-       `"resume"` where `downloadPause` (CEF, WebView2). Closing the view
-       cancels its downloads before `"closed"`.
-     - **`"save"` needs write permission** for the path
-       (`check_open(..., Write)`, a `NotCapable` error otherwise): the engine,
-       not Deno's file system API, writes the file, so without the check a
-       page's download would be a write outside the app's `--allow-write`.
-     - **Permission requests.** `createWebView({ permissions: "app" })` (where
-       `permissionRequests`) reports each request as a `"permission-request"`
-       event (`id`, `origin`, `permissions`, `frame` where the engine says
-       which frame asked) answered with
-       `WebView.respondToPermissionRequest(id, allow)`; a request that goes
-       away unanswered (a navigation, the view closing) is refused and
-       reported with `state: "cancelled"`. The engine's own prompt never
-       shows.
-     - **Menu read-back**, for self-tests: `BrowserWindow.getApplicationMenu()`,
-       `Deno.desktop.getApplicationMenu()` (the macOS menu bar as it is now)
-       and `Deno.dock.getMenu()` return the native menu's items (`type`,
-       `label`, `id`, `role`, `enabled`, `checked`, `visible`, `accelerator`,
-       `submenu`) or `null`; `menuCapabilities().snapshot` says whether the
-       backend reads them.
-     - **The Dock menu** (verified, no change): `Deno.dock.setMenu()` already
-       takes full items (separators, `checked`, submenus), AppKit draws them,
-       and a click fires `"menuclick"` on `Deno.dock` with `detail.id`,
-       whether or not a window is open.
-     - **macOS panels** (laufey): `show()` of a hidden non-activating window
-       (`focusable: false`) no longer makes it key, on both backends, and on
-       CEF `focus()` no longer activates the app for one; the panel's built-in
-       join-all-Spaces is undone by `setVisibleOnAllWorkspaces(false)`
-       (checked in laufey's e2e).
-     - Engines: downloads on CEF, WKWebView (macOS 11.3+), WebView2 and
-       WebKitGTK 2.40+; pause only on CEF and WebView2. Permission requests on
-       all four; WKWebView raises only camera and microphone, WebKitGTK names
-       no frame, and Chromium (CEF) remembers a prompted kind's answer per
-       origin in the view's partition.
-     - Tests: `runtime/ops/desktop.rs` unit tests (the action names, the path
-       rule, the capability JSON), `cli/rt/desktop.rs` (the option lists), the
-       desktop e2e `webview` app (downloads: announce, hold, save, cancel,
-       pause where reported, close; permission requests: ask, refuse, close)
-       and `menus` app (read-back of the app menu and the Dock menu); laufey's
-       `webview_test`, `webview_app_checks` and menu / panel e2e.
-     - Node tests enabled: none; no Node API changes.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

@@ -2317,7 +2317,7 @@ Deno.test("[node/child_process] --input-type with a script file is ERR_INPUT_TYP
 });
 
 // A spawn that fails must not leave its IPC channel open (DENEXT.md item
-// 473): the parent's end was created before the spawn and nothing closed it.
+// 464): the parent's end was created before the spawn and nothing closed it.
 // The resource sanitizer of this test is the check.
 Deno.test("[node/child_process] a failed spawn with an IPC channel leaves no resource open", async () => {
   for (let i = 0; i < 3; i++) {

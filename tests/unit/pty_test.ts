@@ -679,7 +679,7 @@ Deno.test(
   },
 );
 
-// `Deno.Pty.foreground()` and `ttyName` (DENEXT.md item 470).
+// `Deno.Pty.foreground()` and `ttyName` (DENEXT.md item 461).
 
 // What `sh` is called once it runs (macOS's /bin/sh re-executes bash, dash
 // or zsh).
