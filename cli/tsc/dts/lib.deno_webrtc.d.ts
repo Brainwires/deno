@@ -884,6 +884,11 @@ interface RTCRtpSender {
    * encoded frames go through before they are sent (a transform serves one
    * sender or receiver). */
   transform: RTCRtpScriptTransform | RTCRtpSFrameEncryptor | null;
+  /** The insertable streams that preceded `transform` (Chrome's API): the
+   * sender's encoded frames in `readable`, and what is written to
+   * `writable` sent. Once only, and not with a transform set
+   * (`InvalidStateError`). */
+  createEncodedStreams(): RTCEncodedStreams;
 }
 
 /**
@@ -914,6 +919,10 @@ interface RTCRtpReceiver {
    * encoded frames go through (what comes out is dropped: there is no
    * decoder). */
   transform: RTCRtpScriptTransform | RTCRtpSFrameDecryptor | null;
+  /** The receiver's encoded frames in `readable` (what is written to
+   * `writable` is dropped: there is no decoder). Once only, and not with a
+   * transform set (`InvalidStateError`). */
+  createEncodedStreams(): RTCEncodedStreams;
 }
 
 /**
@@ -1953,6 +1962,9 @@ interface RTCEncodedAudioFrameOptions {
  */
 interface RTCEncodedVideoFrame {
   data: ArrayBuffer;
+  /** The RTP timestamp (`getMetadata().rtpTimestamp`), as browsers still
+   * have it. */
+  readonly timestamp: number;
   readonly type: RTCEncodedVideoFrameType;
   getMetadata(): RTCEncodedVideoFrameMetadata;
 }
@@ -1975,7 +1987,21 @@ declare var RTCEncodedVideoFrame: {
  */
 interface RTCEncodedAudioFrame {
   data: ArrayBuffer;
+  /** The RTP timestamp (`getMetadata().rtpTimestamp`). */
+  readonly timestamp: number;
   getMetadata(): RTCEncodedAudioFrameMetadata;
+}
+
+/**
+ * What `RTCRtpSender` / `RTCRtpReceiver` `createEncodedStreams()` returns.
+ * A frame can be written once (again: `OperationError`); anything else
+ * than a frame is a `TypeError`.
+ *
+ * @category WebRTC
+ */
+interface RTCEncodedStreams {
+  readable: ReadableStream<RTCEncodedVideoFrame | RTCEncodedAudioFrame>;
+  writable: WritableStream<RTCEncodedVideoFrame | RTCEncodedAudioFrame>;
 }
 
 /** @category WebRTC */
