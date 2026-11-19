@@ -3312,6 +3312,10 @@ class RTCPeerConnection extends EventTarget {
       // announcedKey()s of the gathered candidates whose icecandidate event
       // was dispatched: only those are in the local description.
       announced: new SafeSet(),
+      // A rolled-back first offer discarded its gathering (discardGathering).
+      gatheringDiscarded: false,
+      // The gathering state the engine last reported.
+      engineGatheringState: "new",
       remoteCandidates: [],
       remoteTracksBeforeOffer: null,
       cname: uuid(),
@@ -3539,6 +3543,8 @@ class RTCPeerConnection extends EventTarget {
         }
         op_webrtc_pc_set_local_description(this[_rid], type, sdp ?? "");
         const state = this[_state];
+        if (type === "rollback") discardGathering(this);
+        else if (state.gatheringDiscarded) resumeGathering(this);
         if (type === "answer" || type === "pranswer") {
           state.iceRole ??= "controlled";
           readChannelIds(this);
@@ -4992,6 +4998,56 @@ function dispatchEngineEvents(pc, events, from) {
   });
 }
 
+// setLocalDescription(rollback) of the first offer leaves no local
+// description: the ICE transports that offer created are discarded, and with
+// no transport the ICE gathering state is "new" again (W3C webrtc-pc 4.4.1.6
+// rollback, 4.4.4 "update the ICE gathering state"). Gathering still running
+// for it is not reported any more.
+function discardGathering(pc) {
+  const state = pc[_state];
+  if (
+    pc.currentLocalDescription !== null || pc.pendingLocalDescription !== null
+  ) {
+    return;
+  }
+  if (state.iceGatheringState === "new") return;
+  state.gatheringDiscarded = true;
+  state.iceGatheringState = "new";
+  setTransportStates(pc);
+  fire(pc, new Event("icegatheringstatechange"));
+}
+
+// The next local description after such a rollback: the engine keeps the
+// sockets and candidates it gathered (it gathers once per connection), so
+// the gathering state goes where the engine's is again, through "gathering"
+// (and, if the engine had finished, "complete" with its null candidate, in a
+// task of its own).
+function resumeGathering(pc) {
+  const state = pc[_state];
+  state.gatheringDiscarded = false;
+  const engine = state.engineGatheringState;
+  if (engine === "new" || state.iceGatheringState !== "new") return;
+  state.iceGatheringState = "gathering";
+  setTransportStates(pc);
+  fire(pc, new Event("icegatheringstatechange"));
+  if (engine !== "complete") return;
+  PromisePrototypeThen(op_void_async_deferred(), () => {
+    if (
+      state.closed || state.gatheringDiscarded ||
+      state.iceGatheringState !== "gathering"
+    ) {
+      return;
+    }
+    state.iceGatheringState = "complete";
+    setTransportStates(pc);
+    fire(pc, new Event("icegatheringstatechange"));
+    fire(
+      pc,
+      new RTCPeerConnectionIceEvent("icecandidate", { candidate: null }),
+    );
+  });
+}
+
 // The `icecandidate` event that ends a media description's candidates: an
 // RTCIceCandidate whose candidate is "" (W3C webrtc-pc 5.6).
 function fireEndOfCandidates(pc) {
@@ -5063,6 +5119,9 @@ function dispatchEngineEvent(pc, event) {
       // The JS side sets the signaling state as each description is applied.
       break;
     case "icegatheringstatechange":
+      state.engineGatheringState = event.state;
+      // A rolled-back first offer discarded what was being gathered.
+      if (state.gatheringDiscarded) break;
       if (state.iceGatheringState === event.state) break;
       state.iceGatheringState = event.state;
       setTransportStates(pc);
