@@ -29,6 +29,9 @@ deno_npm_installer.workspace = true
 deno_path_util.workspace = true
 deno_resolver = { workspace = true, features = ["sync"] }
 deno_runtime.workspace = true
+# denext: the kernel sandbox's enforcers, plan and carrier (DENEXT.md items
+# 425, 449), used by the CLI and denort alike; without the proxy feature
+deno_sandbox.workspace = true
 deno_semver.workspace = true
 deno_terminal.workspace = true
 env_logger.workspace = true
@@ -48,7 +51,5 @@ url.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
-[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
-# denext: the inherited kernel policy's carrier (DENEXT.md item 449), read by
-# the CLI and denort alike; without the proxy feature
-deno_sandbox.workspace = true
+[dev-dependencies]
+pretty_assertions.workspace = true

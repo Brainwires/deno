@@ -30,15 +30,14 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
 
-use deno_core::serde_json;
-use deno_lib::kernel_sandbox::KernelSandboxMode;
 use deno_path_util::normalize_path;
 use deno_runtime::deno_permissions::Host;
 use deno_runtime::deno_permissions::NetDescriptor;
 use deno_runtime::deno_permissions::PermissionsOptions;
 use serde::Deserialize;
 use serde::Serialize;
-use sha2::Digest;
+
+use crate::kernel_sandbox::KernelSandboxMode;
 
 /// Bumped whenever the serialized shape changes (part of the policy hash).
 pub const POLICY_FORMAT: u32 = 1;
@@ -1175,7 +1174,7 @@ impl PathScope {
   }
 }
 
-pub use deno_lib::kernel_inherit::resolve_prefix;
+pub use crate::kernel_inherit::resolve_prefix;
 
 /// Whether a path lies in a scope, deciding on resolved paths as well as
 /// the spelling (an allow and a deny may name one object through different
@@ -1419,8 +1418,9 @@ impl KernelPolicy {
   /// over the canonical JSON (every list sorted).
   pub fn hash(&self) -> String {
     let json = serde_json::to_vec(self).expect("policy serializes");
-    let digest = sha2::Sha256::digest(&json);
-    faster_hex::hex_string(&digest[..8])
+    let mut hex = crate::util::checksum::r#gen(&[json]);
+    hex.truncate(16);
+    hex
   }
 
   /// Compiles `options` for `ctx`, choosing Mode B where the policy needs it:
@@ -1530,8 +1530,8 @@ fn net_rule(options: &PermissionsOptions) -> String {
   }
 }
 
-pub use deno_lib::kernel_sandbox::options_allow_all;
-pub use deno_lib::kernel_sandbox::options_have_deny;
+pub use crate::kernel_sandbox::options_allow_all;
+pub use crate::kernel_sandbox::options_have_deny;
 
 /// A net list entry, classified for the kernel.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -2,8 +2,8 @@
 
 //! denext: the kernel sandbox (DENEXT.md item 420), an opt-in preview.
 //!
-//! - [`policy`]: the policy model (what each OS mechanism would apply, and
-//!   the gaps), pure data.
+//! - [`policy`] (`deno_lib::kernel_policy`): the policy model (what each OS
+//!   mechanism would apply, and the gaps), pure data.
 //! - The mode decision lives in `deno_lib::kernel_sandbox`, shared with
 //!   `denort`.
 //! - This module wires them to a CLI run: [`check_run`] at startup
@@ -20,7 +20,8 @@
 
 pub mod enforce;
 pub mod inherit;
-pub mod policy;
+/// The policy model, shared with `denort` (`deno_lib::kernel_policy`).
+pub use deno_lib::kernel_policy as policy;
 
 use std::fmt::Write as _;
 use std::io::IsTerminal;

@@ -3187,6 +3187,7 @@ dependencies = [
  "log",
  "node_resolver",
  "parking_lot",
+ "pretty_assertions",
  "serde",
  "serde_json",
  "sys_traits",

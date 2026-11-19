@@ -2,6 +2,8 @@
 
 pub mod args;
 pub mod kernel_inherit;
+pub mod kernel_plan;
+pub mod kernel_policy;
 pub mod kernel_sandbox;
 pub mod loader;
 pub mod npm;
