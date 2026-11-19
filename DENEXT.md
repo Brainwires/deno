@@ -18930,6 +18930,40 @@ where the changes are discussed.
        `windows_default_unaffected`, `windows_no_children`,
        `windows_child_inherits`).
      - Node tests enabled: none; no Node API changes.
+475. **laufey v0.9.0 and webrtc-rs-rtc `0.21.1+brainwires.4`** (`ee1feb7`
+     and `c16bfdef`; laufey API 60; runtime 3.0.0-denext.28;
+     `cli/rt_desktop/Cargo.toml`, `Cargo.toml`, `Cargo.lock`,
+     `.github/workflows/denext_runtime.yml`,
+     `.github/denext-runtime/fetch_dictionaries.py`). The pins of items 460 to
+     463 move from the feature branches to the releases cut from them.
+     - laufey `d26245f..ee1feb7` (`train/laufey-0.9.0`, merged into
+       `development-denext`, tag v0.9.0): API 59 and API 60 as released; CEF
+       156.0.31 (Chromium 156.0.8078.100, Chrome's security fixes on the 156
+       branch; the same CEF API version, and the same Hunspell dictionaries
+       commit, so `fetch_dictionaries.py` keeps its pins), under a dated
+       staleness waiver because CEF has published no stable 157 to 159 build;
+       the Linux CEF backend compiles again (API 60's capability check came
+       before its X11 helper); WebView2: a RESUME of an app-decided download
+       that comes before WebView2's asynchronous pause has taken effect is
+       applied once it has (it was lost, and the download stayed paused);
+       the native e2e's custom-scheme WebSocket probe waits on the socket's
+       events, and its pointer, focus and drop checks use a point of the test
+       window no other window covers; CI keeps Windows' "finish setting up
+       your device" prompt off the Windows runners.
+     - webrtc-rs-rtc `6d7b5f0b..c16bfdef` (`release/0.21.1-brainwires.4`,
+       merged into `master`, tag `v0.21.1+brainwires.4`): the release of
+       `webrtc/d28-wpt` (item 460's engine side: `a=msid` per stream,
+       `set_associable_with_remote_offer`, `a=inactive` pauses, the selected
+       pair's candidates in the stats, an ICE restart that keeps the previous
+       pair's path), with no code change over it.
+     - User-facing note: on Windows (WebView2), pausing a download and
+       resuming it at once leaves it running; otherwise none beyond items 460
+       to 463.
+     - Tests: laufey's full CI on `train/laufey-0.9.0` and its tag; the desktop
+       window and runtime workflows run on the new pin; the WebRTC unit and WPT
+       suites of `denext tests`.
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -18940,7 +18974,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-474) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-475) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
@@ -18994,9 +19028,10 @@ item 368; and, for runtime 3.0.0-denext.25, laufey v0.8.1, item 445; and, for
 runtime 3.0.0-denext.26, laufey v0.8.2, item 453; and, for runtime
 3.0.0-denext.28, API 59, web view downloads and permission requests the app
 decides and menu read-back, item 461, and API 60, the window order and the
-pointer, item 463), at the commit pinned by `LAUFEY_SHA` in
-the workflow (or the `laufey_ref` input). The same commit is the `laufey` git
-dependency of `cli/rt_desktop/Cargo.toml` (API 59, CEF 156.0.30).
+pointer, item 463, released as laufey v0.9.0 with CEF 156.0.31, item 475), at
+the commit pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input).
+The same commit is the `laufey` git dependency of `cli/rt_desktop/Cargo.toml`
+(crate 0.9.0, API 60, CEF 156.0.31).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the
