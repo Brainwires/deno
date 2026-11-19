@@ -336,7 +336,8 @@ function documentHook(name: string, ...args: unknown[]): string {
 
 /**
  * The test file as one program: its `<script>`s in document order, with the
- * runner's `testharnessreport.js` in place of the suite's. With `useDocument`, the document environment (dom_shim.js, then
+ * runner's `testharnessreport.js` and `testdriver-vendor.js` in place of the
+ * suite's. With `useDocument`, the document environment (dom_shim.js, then
  * media_env.js when present) is installed right after `testharness.js`, the
  * page's own markup is instantiated into it up to each script before that
  * script runs (as an HTML parser would have), and the rest after the last one.
@@ -401,6 +402,10 @@ async function generateBundle(
       if (url.pathname === "/resources/testharnessreport.js") {
         scriptUrl = runnerFileUrl("testharnessreport.js");
         contents = await readRunnerFile("testharnessreport.js");
+      } else if (url.pathname === "/resources/testdriver-vendor.js") {
+        // WPT's vendor hook for `test_driver` (see testdriver-vendor.js).
+        scriptUrl = runnerFileUrl("testdriver-vendor.js");
+        contents = await readRunnerFile("testdriver-vendor.js");
       } else {
         const res = await fetch(url);
         if (res.ok) {
