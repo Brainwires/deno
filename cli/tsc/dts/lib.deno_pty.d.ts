@@ -40,6 +40,34 @@ declare namespace Deno {
     rows: number;
   }
 
+  /** What runs in a terminal right now, from
+   * {@linkcode Deno.Pty.foreground}: the process a shell put in the
+   * foreground (`vim`, a build), or the shell itself while it waits at its
+   * prompt.
+   *
+   * Everything but `pid` and `name` is what the OS tells about the process
+   * at the moment of the call, and is `null` when it refuses: a process of
+   * another user (a `sudo` in the terminal) hides its arguments and working
+   * directory.
+   *
+   * @category Subprocess */
+  export interface PtyForegroundProcess {
+    /** The terminal's foreground process group (`tcgetpgrp`). `null` on
+     * Windows, which has no foreground process group. */
+    pgid: number | null;
+    /** The process described: the group's leader, or another member of the
+     * group once the leader has exited (a pipeline whose first command is
+     * done). On Windows, see {@linkcode Deno.Pty.foreground}. */
+    pid: number;
+    /** Its name: `vim` (Linux: at most 15 bytes, the kernel's `comm`;
+     * Windows: the image name, `vim.exe`). */
+    name: string;
+    /** Its arguments, the program first. */
+    argv: string[] | null;
+    /** Its working directory. */
+    cwd: string | null;
+  }
+
   /** A child process on a pseudo-terminal, from {@linkcode Deno.openPty}.
    *
    * The child's stdin, stdout and stderr are the terminal: what it prints
@@ -71,6 +99,10 @@ declare namespace Deno {
   export interface Pty extends AsyncDisposable {
     /** The child's process id. */
     readonly pid: number;
+    /** The terminal device the child runs on: `/dev/ttys004` on macOS,
+     * `/dev/pts/3` on Linux (what `tty` prints in it). `null` on Windows,
+     * where a ConPTY is not a named device. */
+    readonly ttyName: string | null;
     /** The child's output, as the terminal delivers it. */
     readonly readable: ReadableStream<Uint8Array<ArrayBuffer>>;
     /** The child's input: what a keyboard would send. */
@@ -82,6 +114,31 @@ declare namespace Deno {
     /** Changes the terminal's size (1 to 65535 each way). The child's
      * foreground process is told (`SIGWINCH` on Unix). */
     resize(cols: number, rows: number): void;
+    /** The terminal's foreground process, as a terminal emulator shows it in
+     * a tab title: asked of the OS at each call, never cached. `null` once
+     * the terminal is closed, or when nothing is in its foreground (every
+     * process on it has exited).
+     *
+     * On macOS and Linux this is the terminal's foreground process group
+     * (`tcgetpgrp`) and its leader. Windows has no foreground process group,
+     * and a console's process list can be read only from inside the console,
+     * so there the process is found in the tree below the terminal's
+     * program: while the process is a shell (`cmd.exe`, `powershell.exe`,
+     * `pwsh.exe`, `bash.exe`, …) with a running child, its child started
+     * last is taken; the answer is the first process that is not a shell,
+     * or a shell with no child. A program started in the background there
+     * (`start /b`) can be reported in place of an older foreground one.
+     *
+     * No permission is needed beyond the `--allow-run` the terminal was
+     * opened with: only processes running on this terminal are described.
+     *
+     * ```ts
+     * const pty = Deno.openPty({ cmd: "sh", cols: 80, rows: 24 });
+     * const fg = pty.foreground();
+     * // { pgid: 4242, pid: 4242, name: "sh", argv: ["sh"], cwd: "/home/me" }
+     * ```
+     */
+    foreground(): PtyForegroundProcess | null;
     /** Sends `signal` to the child (and only the child: not to the process
      * group it leads). On Windows every signal but `0` ends the process.
      *

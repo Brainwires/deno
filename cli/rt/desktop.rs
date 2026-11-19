@@ -89,6 +89,8 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_request_notification_permission,
     op_desktop_query_notification_permission,
     op_desktop_screens,
+    op_desktop_window_order,
+    op_desktop_pointer,
     op_desktop_window_capabilities,
     op_desktop_tray_capabilities,
     op_desktop_window_level_code,
@@ -3051,6 +3053,28 @@ pub const DESKTOP_JS: &str = r#"
     titleBarPreferences: {
       value: function titleBarPreferences() {
         return op_desktop_title_bar_preferences();
+      },
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    },
+    // The app's on-screen windows as the OS stacks them, front to back, by
+    // `windowId` (laufey API 60, DENEXT.md item 462); null where the OS
+    // doesn't tell (`windowCapabilities().windowOrder`).
+    windowOrder: {
+      value: function windowOrder() {
+        return op_desktop_window_order();
+      },
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    },
+    // The pointer, asked of the OS at each call: it answers outside the
+    // app's windows and during a drag, which page events don't. null where
+    // the OS doesn't tell (`windowCapabilities().pointer`).
+    pointer: {
+      value: function pointer() {
+        return op_desktop_pointer();
       },
       writable: true,
       configurable: true,

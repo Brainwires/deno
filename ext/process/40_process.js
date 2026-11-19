@@ -564,6 +564,8 @@ class ChildProcess {
         readable: pty.handle.readable,
         writable: pty.handle.writable,
         resize: pty.handle.resize,
+        ttyName: pty.handle.ttyName,
+        foreground: pty.handle.foreground,
       };
       const onAbort = () => {
         try {

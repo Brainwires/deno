@@ -426,3 +426,49 @@ Deno.test("[node/net] listen on :: with ipv6Only: true leaves the IPv4 port free
     }
   }
 });
+
+// A local IPC path: a named pipe on Windows, a Unix socket elsewhere
+// (DENEXT.md item 463). More clients than libuv's four pending instances
+// stay connected at once, and the server still accepts the next one: the
+// pipe's instance limit used to be 4, after which it never accepted again.
+Deno.test("[node/net] a path server keeps accepting past four open connections", async () => {
+  const dir = Deno.build.os === "windows"
+    ? undefined
+    : await Deno.makeTempDir();
+  const ipcPath = Deno.build.os === "windows"
+    ? `\\\\.\\pipe\\deno-test-${crypto.randomUUID()}`
+    : path.join(dir!, "s.sock");
+  const server = net.createServer((socket) => {
+    socket.on("error", () => {});
+    socket.on("data", (chunk) => socket.write(chunk));
+  });
+  const listening = Promise.withResolvers<void>();
+  server.once("error", listening.reject);
+  server.listen(ipcPath, listening.resolve);
+  await listening.promise;
+
+  const clients: net.Socket[] = [];
+  const echo = (id: number) => {
+    const done = Promise.withResolvers<void>();
+    const client = net.connect(ipcPath);
+    clients.push(client);
+    client.once("error", done.reject);
+    client.once("connect", () => client.write(`hello ${id}`));
+    client.once("data", (chunk) => {
+      assertEquals(String(chunk), `hello ${id}`);
+      done.resolve();
+    });
+    return done.promise;
+  };
+  try {
+    // Ten at once, all held open...
+    await Promise.all(Array.from({ length: 10 }, (_, i) => echo(i)));
+    // ...and one more after them.
+    await echo(10);
+    assertEquals(clients.length, 11);
+  } finally {
+    for (const client of clients) client.destroy();
+    await new Promise((resolve) => server.close(resolve));
+    if (dir) await Deno.remove(dir, { recursive: true });
+  }
+});

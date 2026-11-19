@@ -2679,6 +2679,31 @@ declare namespace Deno {
       titleVisibility: boolean;
       /** {@linkcode BrowserWindow.setToolbarStyle} works (macOS 11+). */
       toolbarStyle: boolean;
+      /** {@linkcode windowOrder} answers: macOS, Windows, and Linux on X11
+       * (no Wayland compositor tells a client how windows are stacked). */
+      windowOrder: boolean;
+      /** {@linkcode pointer} answers: macOS, Windows, and Linux on X11 (a
+       * Wayland client learns where the pointer is only inside its own
+       * windows). */
+      pointer: boolean;
+    }
+
+    /** The pointer, as {@linkcode pointer} reports it. */
+    export interface PointerState {
+      /** Where the pointer is on the screen, in the coordinates of
+       * {@linkcode BrowserWindow.getPosition} and {@linkcode screens}. */
+      x: number;
+      y: number;
+      /** The mouse buttons held, as the bits of a DOM `MouseEvent.buttons`:
+       * `1` the primary button (the one that clicks, whichever side the
+       * user put it on), `2` the secondary, `4` the middle one. */
+      buttons: number;
+      /** The {@linkcode BrowserWindow.windowId} of the app's window a click
+       * at that point would go to: the window that is on top there, counting
+       * every application's windows. `null` over another application's
+       * window, the desktop, a menu, or a window that lets clicks through
+       * ({@linkcode BrowserWindow.setIgnoreMouseEvents}). */
+      windowId: number | null;
     }
 
     /** A voice of {@linkcode speech.voices}. */
@@ -4096,6 +4121,43 @@ declare namespace Deno {
     export function screens(): Screen[];
     /** The primary display, or `null` when the backend can't list them. */
     export function getPrimaryScreen(): Screen | null;
+    /** The app's windows as the OS stacks them right now, front to back,
+     * by {@linkcode BrowserWindow.windowId}: the real z-order, which focus
+     * history only approximates (a window raised without being focused, an
+     * always-on-top window, a click on another app in between).
+     *
+     * Only windows that are on screen are listed: not a hidden or minimized
+     * one, nor one on another Space, virtual desktop or workspace. An
+     * embedded {@linkcode WebView} is not a window.
+     *
+     * `null` where the OS doesn't tell
+     * ({@linkcode windowCapabilities}`().windowOrder`: a Wayland session).
+     *
+     * ```ts
+     * const [front] = Deno.desktop.windowOrder() ?? [];
+     * ```
+     */
+    export function windowOrder(): number[] | null;
+    /** Where the pointer is on the screen, which mouse buttons are held and
+     * which of the app's windows is under it, asked of the OS at each call.
+     *
+     * A page hears pointer events only inside its own window (and, with
+     * pointer capture, relative to it). This answers anywhere on the screen
+     * and whichever window started the gesture, so a drag from one window
+     * of the app to another can follow the pointer: call it once per frame
+     * while a button is held, and stop when `buttons` is `0`.
+     *
+     * `null` where the OS doesn't tell
+     * ({@linkcode windowCapabilities}`().pointer`: a Wayland session).
+     *
+     * ```ts
+     * const p = Deno.desktop.pointer();
+     * if (p?.windowId != null) {
+     *   // the pointer is over the window with that id, at (p.x, p.y)
+     * }
+     * ```
+     */
+    export function pointer(): PointerState | null;
     /** What window features this backend supports on this OS. */
     export function windowCapabilities(): WindowCapabilities;
     /** Whether {@linkcode BrowserWindow.createWebView} works here, the

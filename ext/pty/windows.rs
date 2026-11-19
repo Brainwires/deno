@@ -77,6 +77,7 @@ use windows_sys::Win32::System::Threading::WT_EXECUTEONLYONCE;
 
 use crate::Exit;
 use crate::PtyError;
+use crate::foreground::Foreground;
 
 /// `ProcThreadAttributeValue(22, FALSE, TRUE, FALSE)`.
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x0002_0016;
@@ -201,6 +202,10 @@ impl Drop for PseudoConsole {
 
 pub struct Pty {
   console: Rc<PseudoConsole>,
+  /// The program the terminal started; the handle keeps its id from being
+  /// reused for as long as the terminal is open.
+  pid: u32,
+  process: Rc<OwnedHandle>,
 }
 
 pub struct ReadHalf(NamedPipeServer);
@@ -616,6 +621,8 @@ pub fn spawn(
     pid,
     pty: Pty {
       console: console.clone(),
+      pid,
+      process: process.clone(),
     },
     reader: ReadHalf(reader),
     writer: WriteHalf(writer),
@@ -641,7 +648,18 @@ impl Pty {
     hresult(unsafe { (self.console.api.resize)(hpc, coord(cols, rows)) })
   }
 
-  pub fn foreground_process(&self) -> Option<String> {
+  /// The terminal's foreground process, found in the process tree below
+  /// the program the terminal started (see `foreground.rs`: Windows has no
+  /// foreground process group).
+  pub fn foreground(&self) -> Option<Foreground> {
+    crate::foreground::foreground_of_tree(
+      self.pid,
+      self.process.as_raw_handle() as HANDLE,
+    )
+  }
+
+  /// A ConPTY is not a device with a name.
+  pub fn tty_name(&self) -> Option<String> {
     None
   }
 }

@@ -5,6 +5,7 @@
 // targets and events, scheme registration, passkeys, the rich clipboard, drag
 // out, file dialogs, message boxes, shortcuts, launch at login, DevTools, menus, scheduled
 // notifications, delivered notifications, share, user activity, screens,
+// the window order and the pointer,
 // window capabilities, tray capabilities, window levels, speech, platform
 // features, title bar
 // preferences, the secure store, the system stats, quit /
@@ -15,7 +16,7 @@
 // removeImportedOps() like upstream's own desktop ops.
 // Plus 9 for Vitest compatibility (`deno test`, item 23):
 // op_test_set_import_meta_proto and the eight op_vitest_* ops.
-const EXPECTED_OP_COUNT = 145;
+const EXPECTED_OP_COUNT = 150;
 // The main scope minus WORKER_EXCLUDED_OPS in 99_main.js: upstream strips the
 // two text-clipboard ops from workers, and the fork strips every new
 // main-scope-only desktop op (85), the native classes that need the

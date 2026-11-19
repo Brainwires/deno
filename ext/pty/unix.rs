@@ -30,6 +30,7 @@ use tokio::io::unix::AsyncFd;
 
 use crate::Exit;
 use crate::PtyError;
+use crate::foreground::Foreground;
 
 /// The master, shared by the two halves and the resizer.
 type Master = Rc<AsyncFd<OwnedFd>>;
@@ -326,55 +327,23 @@ impl Pty {
     set_winsize(self.master.as_raw_fd(), cols, rows)
   }
 
-  /// The foreground process group's leader, by name: `tcgetpgrp` on the
-  /// master, then the process's own name from the kernel (Linux: `/proc`;
-  /// macOS: `proc_name`).
-  pub fn foreground_process(&self) -> Option<String> {
+  /// The terminal's foreground process: `tcgetpgrp` on the master names
+  /// the foreground process group, and the kernel describes its leader (or
+  /// another member once the leader is gone); see `foreground.rs`. `None`
+  /// when the terminal has no foreground group (its session ended) or the
+  /// platform cannot describe a process.
+  pub fn foreground(&self) -> Option<Foreground> {
     // SAFETY: tcgetpgrp on an open terminal.
     let pgrp = unsafe { libc::tcgetpgrp(self.master.as_raw_fd()) };
-    if pgrp <= 0 {
-      return None;
-    }
-    process_name(pgrp)
+    crate::foreground::foreground_of_group(pgrp)
   }
-}
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn process_name(pid: libc::pid_t) -> Option<String> {
-  use std::io::Read;
-  // the process's own name is only in /proc
-  #[allow(clippy::disallowed_methods, reason = "reads procfs")]
-  let mut file = std::fs::File::open(format!("/proc/{pid}/comm")).ok()?;
-  let mut name = String::new();
-  file.read_to_string(&mut name).ok()?;
-  let name = name.trim();
-  (!name.is_empty()).then(|| name.to_string())
-}
-
-#[cfg(target_vendor = "apple")]
-fn process_name(pid: libc::pid_t) -> Option<String> {
-  let mut buf = [0u8; 256];
-  // SAFETY: libproc writes at most `buf.len()` bytes.
-  let len = unsafe {
-    libc::proc_name(
-      pid,
-      buf.as_mut_ptr() as *mut libc::c_void,
-      buf.len() as u32,
-    )
-  };
-  if len <= 0 {
-    return None;
+  /// The terminal device the child runs on (`/dev/ttys004`, `/dev/pts/3`):
+  /// the slave's path.
+  pub fn tty_name(&self) -> Option<String> {
+    let name = slave_name(self.master.get_ref()).ok()?;
+    Some(name.to_string_lossy().into_owned())
   }
-  Some(String::from_utf8_lossy(&buf[..len as usize]).into_owned())
-}
-
-#[cfg(not(any(
-  target_os = "linux",
-  target_os = "android",
-  target_vendor = "apple"
-)))]
-fn process_name(_pid: libc::pid_t) -> Option<String> {
-  None
 }
 
 /// A read of the master. On Linux, once the last slave descriptor closes,

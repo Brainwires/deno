@@ -18052,53 +18052,198 @@ where the changes are discussed.
      (`feat/qutty-1`; the pin moves to the release tag when laufey cuts it).
      - **Downloads.** `createWebView({ downloads: "app" })` (where
        `webViewCapabilities().downloadEvents`; refused as `invalid` elsewhere,
-       never the engine's default) reports each download as `"download"`
-       events (`id`, `state`: `requested`, `progressing`, `completed`,
-       `cancelled`, `interrupted`; `url`, a bare `filename`, `mimeType`,
-       `totalBytes`, `receivedBytes`, `path`, `paused`, `canResume`, `reason`).
-       Nothing is saved until `WebView.controlDownload(id, "save", path)` or
-       `"saveAs"` (the OS save panel); `"cancel"` at any time; `"pause"` /
-       `"resume"` where `downloadPause` (CEF, WebView2). Closing the view
-       cancels its downloads before `"closed"`.
+       never the engine's default) reports each download as `"download"` events
+       (`id`, `state`: `requested`, `progressing`, `completed`, `cancelled`,
+       `interrupted`; `url`, a bare `filename`, `mimeType`, `totalBytes`,
+       `receivedBytes`, `path`, `paused`, `canResume`, `reason`). Nothing is
+       saved until `WebView.controlDownload(id, "save", path)` or `"saveAs"`
+       (the OS save panel); `"cancel"` at any time; `"pause"` / `"resume"` where
+       `downloadPause` (CEF, WebView2). Closing the view cancels its downloads
+       before `"closed"`.
      - **`"save"` needs write permission** for the path
        (`check_open(..., Write)`, a `NotCapable` error otherwise): the engine,
        not Deno's file system API, writes the file, so without the check a
        page's download would be a write outside the app's `--allow-write`.
      - **Permission requests.** `createWebView({ permissions: "app" })` (where
        `permissionRequests`) reports each request as a `"permission-request"`
-       event (`id`, `origin`, `permissions`, `frame` where the engine says
-       which frame asked) answered with
-       `WebView.respondToPermissionRequest(id, allow)`; a request that goes
-       away unanswered (a navigation, the view closing) is refused and
-       reported with `state: "cancelled"`. The engine's own prompt never
-       shows.
+       event (`id`, `origin`, `permissions`, `frame` where the engine says which
+       frame asked) answered with
+       `WebView.respondToPermissionRequest(id, allow)`; a request that goes away
+       unanswered (a navigation, the view closing) is refused and reported with
+       `state: "cancelled"`. The engine's own prompt never shows.
      - **Menu read-back**, for self-tests: `BrowserWindow.getApplicationMenu()`,
-       `Deno.desktop.getApplicationMenu()` (the macOS menu bar as it is now)
-       and `Deno.dock.getMenu()` return the native menu's items (`type`,
-       `label`, `id`, `role`, `enabled`, `checked`, `visible`, `accelerator`,
-       `submenu`) or `null`; `menuCapabilities().snapshot` says whether the
-       backend reads them.
+       `Deno.desktop.getApplicationMenu()` (the macOS menu bar as it is now) and
+       `Deno.dock.getMenu()` return the native menu's items (`type`, `label`,
+       `id`, `role`, `enabled`, `checked`, `visible`, `accelerator`, `submenu`)
+       or `null`; `menuCapabilities().snapshot` says whether the backend reads
+       them.
      - **The Dock menu** (verified, no change): `Deno.dock.setMenu()` already
        takes full items (separators, `checked`, submenus), AppKit draws them,
-       and a click fires `"menuclick"` on `Deno.dock` with `detail.id`,
-       whether or not a window is open.
+       and a click fires `"menuclick"` on `Deno.dock` with `detail.id`, whether
+       or not a window is open.
      - **macOS panels** (laufey): `show()` of a hidden non-activating window
-       (`focusable: false`) no longer makes it key, on both backends, and on
-       CEF `focus()` no longer activates the app for one; the panel's built-in
-       join-all-Spaces is undone by `setVisibleOnAllWorkspaces(false)`
-       (checked in laufey's e2e).
+       (`focusable: false`) no longer makes it key, on both backends, and on CEF
+       `focus()` no longer activates the app for one; the panel's built-in
+       join-all-Spaces is undone by `setVisibleOnAllWorkspaces(false)` (checked
+       in laufey's e2e).
      - Engines: downloads on CEF, WKWebView (macOS 11.3+), WebView2 and
        WebKitGTK 2.40+; pause only on CEF and WebView2. Permission requests on
-       all four; WKWebView raises only camera and microphone, WebKitGTK names
-       no frame, and Chromium (CEF) remembers a prompted kind's answer per
-       origin in the view's partition.
+       all four; WKWebView raises only camera and microphone, WebKitGTK names no
+       frame, and Chromium (CEF) remembers a prompted kind's answer per origin
+       in the view's partition.
      - Tests: `runtime/ops/desktop.rs` unit tests (the action names, the path
        rule, the capability JSON), `cli/rt/desktop.rs` (the option lists), the
-       desktop e2e `webview` app (downloads: announce, hold, save, cancel,
-       pause where reported, close; permission requests: ask, refuse, close)
-       and `menus` app (read-back of the app menu and the Dock menu); laufey's
+       desktop e2e `webview` app (downloads: announce, hold, save, cancel, pause
+       where reported, close; permission requests: ask, refuse, close) and
+       `menus` app (read-back of the app menu and the Dock menu); laufey's
        `webview_test`, `webview_app_checks` and menu / panel e2e.
      - Node tests enabled: none; no Node API changes.
+461. **`feat(pty)`: `Deno.Pty.foreground()` and `Deno.Pty.ttyName`: what runs in
+     a terminal, asked of the OS** (`desktop/d28-qutty-2`; runtime;
+     `ext/pty/{foreground.rs,unix.rs,windows.rs,lib.rs,01_pty.js,Cargo.toml}`,
+     `ext/process/40_process.js`,
+     `cli/tsc/dts/{lib.deno_pty.d.ts,lib.deno.ns.d.ts}`; the item number is a
+     placeholder for the train lead to renumber). A terminal emulator shows what
+     its tab runs (`vim notes.md`, the folder). The runtime kept the answer to
+     itself: the master descriptor is not reachable from JavaScript, so an app
+     had to call `proc_pidinfo` over FFI on macOS and read `/proc` on Linux, and
+     had nothing on Windows.
+     - `pty.foreground()` returns `{ pgid, pid, name, argv, cwd } | null`, asked
+       at each call and never cached. On macOS and Linux `pgid` is the
+       terminal's foreground process group (`tcgetpgrp` on the master) and the
+       process described is its leader, or another member once the leader has
+       exited (a pipeline whose first command is done: macOS
+       `proc_listpgrppids`, Linux a scan of `/proc/*/stat`). `name` is the
+       kernel's (`proc_pidinfo(PROC_PIDTBSDINFO)`; `/proc/<pid>/stat`), `argv`
+       comes from `sysctl(KERN_PROCARGS2)` / `/proc/<pid>/cmdline`, `cwd` from
+       `proc_pidinfo(PROC_PIDVNODEPATHINFO)` / the `/proc/<pid>/cwd` link.
+       `argv` and `cwd` are `null` when the OS refuses (another user's process,
+       such as a `sudo`); a zombie is never described; `null` when the terminal
+       is closed or nothing is in its foreground.
+     - Windows has no foreground process group, and a console's process list
+       (`GetConsoleProcessList`) can be read only by a process attached to that
+       console; attaching the runtime (`AttachConsole`) is process-wide, so it
+       would hand the console to every child spawned meanwhile and take a CLI's
+       own console away. The process is found in the tree instead (a Toolhelp
+       snapshot): from the terminal's program, while the process is a shell
+       (`cmd.exe`, `powershell.exe`, `pwsh.exe`, `bash.exe`, …) with a running
+       child, the child started last is taken; the answer is the first process
+       that is not a shell, or a shell with no child. A child is believed only
+       when it started after its parent (a parent id in the snapshot outlives
+       its process), and the terminal's own program cannot be confused with a
+       later process, because the handle the pty holds keeps its id reserved.
+       `pgid` is `null`; `argv` and `cwd` are read from the process's
+       environment block (`NtQueryInformationProcess`, `ReadProcessMemory`),
+       `null` for a process that cannot be opened. Known limit, in the type's
+       documentation: a `start /b` job can be named in place of an older
+       foreground program.
+     - `pty.ttyName` is the terminal device (`/dev/ttys004`, `/dev/pts/3`: what
+       `tty` prints inside it); `null` on Windows, where a ConPTY is not a named
+       device.
+     - `Deno.ChildProcess.pty` (a `Deno.Command` spawned with `pty`) has both
+       too. The `node-pty` shim's `process` reads the same answer, so it now
+       names the foreground process on Windows as well.
+     - Permissions: none beyond the `--allow-run` the terminal was opened under.
+       Only processes running on the app's own terminal are described, and what
+       is read of them (`argv`, `cwd`) is what the terminal's own output would
+       show; no pid is taken from JavaScript.
+     - `foreground.rs` depends on `libc` / `windows-sys` alone, so its tests run
+       against real child processes without the runtime: name, arguments and
+       directory of a child; a zombie and a missing process; a group whose
+       leader is gone; the `KERN_PROCARGS2` and `/proc/<pid>/stat` parsers (a
+       name holding parentheses, truncated buffers, the environment after the
+       arguments never read); on Windows `cmd /c ping` and a non-shell root.
+       `tests/unit/pty_test.ts`: an interactive shell's jobs (the prompt, a
+       foreground `sleep` in its own group with its arguments and the directory
+       the shell was in, Ctrl+C back to the shell, a pipeline whose leader has
+       exited), `ttyName` against `tty`, `exec`, a reaped child, `Deno.Command`
+       with `pty`, and the Windows tree.
+     - Node tests enabled: none.
+462. **`feat(desktop)`: `Deno.desktop.windowOrder()` and
+     `Deno.desktop.pointer()`: the real stacking order of the app's windows, and
+     the pointer on the screen** (`desktop/d28-qutty-2`; desktop runtime; laufey
+     API 60 (`window_z_order`, `pointer_state`); `runtime/ops/desktop.rs`,
+     `cli/rt_desktop/lib.rs`, `cli/rt/desktop.rs`, `runtime/js/99_main.js`,
+     `cli/tsc/dts/lib.deno.desktop.d.ts`; the item number is a placeholder for
+     the train lead to renumber). An app with several windows had to guess both:
+     which window is in front from the order the windows were focused in (wrong
+     for a window raised without focus, an always-on-top window, another app's
+     window in between), and during a drag from one window to another where the
+     pointer is, from page pointer capture and hand-calibrated window frames (a
+     page hears the pointer only relative to its own window).
+     - `Deno.desktop.windowOrder()`: the `windowId`s of the app's on-screen
+       windows as the OS stacks them, front to back. Not listed: a hidden or
+       minimized window, one on another Space / virtual desktop / workspace, an
+       embedded web view (not a window).
+     - `Deno.desktop.pointer()`: `{ x, y, buttons, windowId }`, asked of the OS
+       at each call: the pointer in `BrowserWindow.getPosition()`'s space, the
+       buttons held as a DOM `MouseEvent.buttons` (bit 1 is the button that
+       clicks, for a left-handed user too) and the app's window a click there
+       would reach, counting every application's windows (`null` over another
+       app's window, the desktop, a menu, a click-through window). It answers
+       outside the app's windows and during a drag another window started;
+       polled once per frame while a button is held it is a drag session
+       (denext's `startDragSession` does that).
+     - macOS: `+[NSWindow windowNumbersWithOptions:]`,
+       `+[NSEvent mouseLocation]` / `pressedMouseButtons`,
+       `windowNumberAtPoint:`. Windows: `EnumWindows` less hidden, minimized and
+       cloaked windows; `GetCursorPos`, `WindowFromPoint`, `GetAsyncKeyState`
+       (the swapped-buttons setting applied). Linux X11: the root window's
+       children matched to each window's top-level ancestor, and `QueryPointer`,
+       over an XCB connection of laufey's own. Every engine of an OS shares the
+       code (WKWebView and CEF; WebView2 and CEF; WebKitGTK and CEF).
+     - Wayland: both return `null`, and `windowCapabilities().windowOrder` /
+       `.pointer` are `false`. By the protocol's design a client is told neither
+       how the compositor stacks surfaces nor where the pointer is outside its
+       own surfaces, and XWayland knows only X11 windows; this is not a missing
+       implementation.
+     - Main-scope only (both ops are in `WORKER_EXCLUDED_OPS`), inert outside a
+       desktop app (`null`; `tests/specs/run/desktop_ops_inert`), and no
+       permission: an Electron app reads the same from
+       `screen.getCursorScreenPoint()`.
+     - laufey's `native_e2e` checks both against real windows on every engine
+       (the order follows the window raised last; a hidden, minimized or closed
+       window leaves it; a window moved under the pointer is the one named, and
+       not once hidden). `runtime/ops/desktop.rs` tests the serialized shapes;
+       `tests/unit/ops_test.ts` counts the two ops.
+     - Node tests enabled: none.
+463. **`fix(node/net)`: a Windows named-pipe server keeps accepting past four
+     open connections** (`desktop/d28-qutty-2`; runtime;
+     `libs/core/uv_compat/pipe.rs`, `tests/unit_node/net_test.ts`; the item
+     number is a placeholder for the train lead to renumber). Named pipes are
+     the local IPC of Windows (`net.createServer().listen("\\\\.\\pipe\\name")`,
+     what denext's `listenLocalIpc` uses there; a Unix socket elsewhere).
+     `uv_pipe_listen` created the first instance with
+     `max_instances(pending_instances)`, 4 by default. The first instance's
+     limit is the pipe's for good, and libuv's `pending_instances` is how many
+     instances it keeps listening, not how many may exist (libuv passes
+     `PIPE_UNLIMITED_INSTANCES`). So with four clients connected, the instance
+     `uv_pipe_accept` creates for the next client failed (`ERROR_PIPE_BUSY`),
+     the failure was dropped, and the server had no listening instance left: it
+     never accepted again. The limit is gone (tokio's default, unlimited).
+     - Found by reading the source; the test
+       (`[node/net] a path server keeps
+       accepting past four open connections`:
+       ten clients held open, then an eleventh, on a named pipe on Windows and a
+       Unix socket elsewhere) is the proof on Windows.
+     - Node tests enabled: none.
+464. **`fix(process)`: a spawn that fails closes its IPC channel**
+     (`desktop/d28-qutty-2`; runtime; `ext/process/lib.rs`,
+     `tests/unit_node/child_process_test.ts`; the item number is a placeholder
+     for the train lead to renumber). `create_command` adds the parent's end of
+     a Node IPC channel (`stdio: [..., "ipc"]`, `fork()`) to the resource table
+     before the program is started. When the start failed (a missing program, a
+     refused one, and the first attempt of the `ENOEXEC` shell retry), the op
+     returned the error and nothing ever closed that resource: JavaScript never
+     learned its id. Each failed spawn left the channel and its descriptors open
+     for the life of the process (a supervisor retrying a helper that is not
+     there leaks one per attempt). Both spawn ops (`op_spawn_child`,
+     `op_node_spawn_child`) now close it on failure.
+     - Found by the resource sanitizer of a denext test (a detached sidecar
+       whose executable does not exist). The test here spawns a missing program
+       with an IPC channel three times under the unit runner's resource
+       sanitizer.
+     - Node tests enabled: none.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

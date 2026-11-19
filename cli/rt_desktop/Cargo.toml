@@ -83,12 +83,14 @@ denort = { path = "../rt", default-features = false }
 # 3.0.0-denext.26: laufey v0.8.2; runtime 3.0.0-denext.28, API 59: web view
 # downloads and permission requests the app decides, menu read-back, and a
 # non-activating macOS panel's show() that takes no keyboard: laufey's
-# feat/qutty-1 until its release is tagged), pinned to a commit of the
+# feat/qutty-1 until its release is tagged; API 60: the stacking order of the
+# app's windows and the pointer, laufey's feat/qutty-2 on top of it), pinned
+# to a commit of the
 # Brainwires/laufey fork's development-denext or a release branch cut from it
 # (release/0.8.1 for v0.8.1, train/laufey-0.8.2 for v0.8.2).
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "cc82a4c537fa472e8e56bbdb8b066157e2121f5d" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "d26245f4c80e2bb157f95fb3f2db4f34a3c83595" }
 libsui.workspace = true
 
 bytes.workspace = true

@@ -2183,6 +2183,23 @@ fn get_requires_allow_all_env_vars(env: &RunEnv) -> Vec<&str> {
   found_envs
 }
 
+/// A spawn that failed never hands its IPC channel to JavaScript, so nothing
+/// would close the parent's end: close it here (DENEXT.md item 464). Before,
+/// each failed `spawn(..., { stdio: [..., "ipc"] })` (a missing program) left
+/// the channel's resource and its descriptors open for the process's life.
+fn close_ipc_of_failed_spawn<T>(
+  state: &mut OpState,
+  child: &Result<T, ProcessError>,
+  pipe_rid: Option<ResourceId>,
+) {
+  if child.is_err()
+    && let Some(rid) = pipe_rid
+    && let Ok(resource) = state.resource_table.take_any(rid)
+  {
+    resource.close();
+  }
+}
+
 #[op2(stack_trace)]
 fn op_spawn_child(
   state: &mut OpState,
@@ -2199,6 +2216,7 @@ fn op_spawn_child(
     )?;
   let child =
     spawn_child(state, command, verified, pipe_rid, extra_pipe_fds, detached);
+  close_ipc_of_failed_spawn(state, &child, pipe_rid);
   for handle in handles_to_close {
     deno_io::close_raw_handle(handle);
   }
@@ -2211,6 +2229,7 @@ fn op_spawn_child(
       )?;
     let child =
       spawn_child(state, command, verified, pipe_rid, extra_pipe_fds, detached);
+    close_ipc_of_failed_spawn(state, &child, pipe_rid);
     for handle in handles_to_close {
       deno_io::close_raw_handle(handle);
     }
@@ -2245,6 +2264,7 @@ fn op_node_spawn_child(
     extra_pipe_fds,
     detached,
   );
+  close_ipc_of_failed_spawn(state, &child, pipe_rid);
   for handle in handles_to_close {
     deno_io::close_raw_handle(handle);
   }
@@ -2263,6 +2283,7 @@ fn op_node_spawn_child(
       extra_pipe_fds,
       detached,
     );
+    close_ipc_of_failed_spawn(state, &child, pipe_rid);
     for handle in handles_to_close {
       deno_io::close_raw_handle(handle);
     }
