@@ -285,16 +285,27 @@ export async function runGitDiff(args: string[]): Promise<void> {
 }
 
 export async function checkPy3Available() {
-  const { success, stdout } = await runPy(["--version"], {
+  const { success, stdout, stderr } = await runPy(["--version"], {
     stdout: "piped",
+    stderr: "piped",
   }).output();
   assert(success, "failed to run python --version");
-  const output = new TextDecoder().decode(stdout);
+  // Python 2 printed its version to stderr.
+  const output = new TextDecoder().decode(stdout) +
+    new TextDecoder().decode(stderr);
+  const match = output.match(/Python (\d+)\.(\d+)/);
+  const [major, minor] = match ? [Number(match[1]), Number(match[2])] : [0, 0];
+  // The suite's `wpt` script asks for 3.9 or newer; 3.11 is the floor here,
+  // the oldest the runner is used with. (An earlier 3.11-only check was for
+  // https://github.com/web-platform-tests/wpt/issues/44427 on an older
+  // suite.)
   assert(
-    output.includes("Python 3.11"),
+    major === 3 && minor >= 11,
     `The ${
       Deno.build.os == "windows" ? "python.exe" : "python3"
-    } in your path is not Python 3.11.x. See https://github.com/web-platform-tests/wpt/issues/44427 for more details.`,
+    } in your path is ${
+      match ? match[0] : "not Python"
+    }; the WPT server needs Python 3.11 or newer.`,
   );
 }
 
