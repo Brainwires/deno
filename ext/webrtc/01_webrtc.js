@@ -44,6 +44,14 @@ const {
   op_webrtc_pc_attach_track,
   op_webrtc_pc_selected_pair,
   op_webrtc_pc_ice_selected_pair,
+  op_webrtc_ice_add_remote_candidate,
+  op_webrtc_ice_create,
+  op_webrtc_ice_gather,
+  op_webrtc_ice_local_parameters,
+  op_webrtc_ice_next_events,
+  op_webrtc_ice_selected_pair,
+  op_webrtc_ice_start,
+  op_webrtc_ice_stop,
   op_webrtc_pc_set_ice_servers,
   op_webrtc_pc_transceivers,
   op_webrtc_receiver_parameters,
@@ -1538,20 +1546,45 @@ function normalizeKeygen(keygenAlgorithm) {
 // --- RTCDtlsTransport / RTCIceTransport -------------------------------------
 
 const _transportState = Symbol("[[transportState]]");
+// wpt100:ice: the state of a standalone transport (`new RTCIceTransport()`,
+// W3C webrtc-ice); undefined on a peer connection's transport.
+const _ice = Symbol("[[iceTransport]]");
 
 class RTCIceTransport extends EventTarget {
   constructor(key = undefined, pc = undefined) {
-    if (key !== illegalConstructorKey) {
-      webidl.illegalConstructor();
-    }
     super();
+    this[webidl.brand] = webidl.brand;
+    if (key !== illegalConstructorKey) {
+      // W3C webrtc-ice: `new RTCIceTransport()` is a transport of its own,
+      // driven by gather() / start() / addRemoteCandidate() (ice_transport.rs).
+      const rid = op_webrtc_ice_create();
+      const params = op_webrtc_ice_local_parameters(rid);
+      this[_ice] = {
+        rid,
+        role: null,
+        state: "new",
+        gatheringState: "new",
+        local: [],
+        remote: [],
+        // Generated with the transport (RFC 8445 section 5.3), kept after
+        // stop().
+        localParameters: { usernameFragment: params[0], password: params[1] },
+        remoteParameters: null,
+        closed: false,
+        active: false,
+        pending: null,
+      };
+      // One never stopped is stopped when it is collected.
+      iceTransportRegistry.register(this, rid);
+      return;
+    }
     this[_pc] = pc;
     this[_transportState] = { state: "new", gatheringState: "new" };
-    this[webidl.brand] = webidl.brand;
   }
 
   get role() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    if (this[_ice] !== undefined) return this[_ice].role;
     // Fixed by the first answer applied: the offerer of that exchange is
     // controlling (an ICE-lite peer never is, but that is only the server
     // extension's case and it answers); an ICE restart keeps it.
@@ -1563,40 +1596,329 @@ class RTCIceTransport extends EventTarget {
   }
   get state() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    if (this[_ice] !== undefined) return this[_ice].state;
     return this[_transportState].state;
   }
   get gatheringState() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    if (this[_ice] !== undefined) return this[_ice].gatheringState;
     return this[_transportState].gatheringState;
   }
   // The candidates gathered here and signalled with `icecandidate`, and the
   // remote ones received with addIceCandidate().
   getLocalCandidates() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    if (this[_ice] !== undefined) return ArrayPrototypeSlice(this[_ice].local);
     return ArrayPrototypeSlice(this[_pc][_state].localCandidates);
   }
   getRemoteCandidates() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    if (this[_ice] !== undefined) {
+      return ArrayPrototypeSlice(this[_ice].remote);
+    }
     return ArrayPrototypeSlice(this[_pc][_state].remoteCandidates);
   }
   getSelectedCandidatePair() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    if (this[_ice] !== undefined) return iceSelectedPair(this[_ice]);
     return selectedPair(this[_pc]);
   }
   getLocalParameters() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    const ice = this[_ice];
+    if (ice !== undefined) return { ...ice.localParameters };
     return iceParameters(this[_pc].localDescription);
   }
   getRemoteParameters() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    const ice = this[_ice];
+    if (ice !== undefined) {
+      return ice.remoteParameters === null ? null : { ...ice.remoteParameters };
+    }
     return iceParameters(this[_pc].remoteDescription);
+  }
+
+  // --- W3C webrtc-ice: the standalone transport's methods ---
+
+  gather(options = undefined) {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    const ice = requireStandalone(this, "gather");
+    const opts = options ?? { __proto__: null };
+    if (typeof opts !== "object") {
+      throw new TypeError(
+        "Failed to execute 'gather' on 'RTCIceTransport': the options must be an object",
+      );
+    }
+    const gatherPolicy = opts.gatherPolicy === undefined
+      ? "all"
+      : String(opts.gatherPolicy);
+    if (gatherPolicy !== "all" && gatherPolicy !== "relay") {
+      throw new TypeError(
+        `Failed to execute 'gather' on 'RTCIceTransport': '${gatherPolicy}' is not a valid value for 'gatherPolicy'`,
+      );
+    }
+    // `sequence<RTCIceServer>`: null is not a sequence (a TypeError).
+    const servers = convertIceServers(opts.iceServers);
+    if (ice.closed) {
+      throw invalidState("The RTCIceTransport is closed");
+    }
+    if (ice.gatheringState !== "new") {
+      throw invalidState("gather() was already called");
+    }
+    op_webrtc_ice_gather(ice.rid, servers, gatherPolicy === "relay");
+    // The candidates and the `complete` state follow as events; the change
+    // to "gathering" itself is not one.
+    ice.gatheringState = "gathering";
+    iceActivate(ice);
+    icePump(this);
+  }
+
+  start(remoteParameters = undefined, role = "controlled") {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    const ice = requireStandalone(this, "start");
+    const prefix = "Failed to execute 'start' on 'RTCIceTransport'";
+    const params = remoteParameters ?? { __proto__: null };
+    if (typeof params !== "object") {
+      throw new TypeError(`${prefix}: remoteParameters must be an object`);
+    }
+    role = String(role);
+    if (role !== "controlling" && role !== "controlled") {
+      throw new TypeError(
+        `${prefix}: '${role}' is not a valid value for 'role'`,
+      );
+    }
+    if (ice.closed) {
+      throw invalidState("The RTCIceTransport is closed");
+    }
+    if (
+      params.usernameFragment === undefined || params.password === undefined
+    ) {
+      throw new TypeError(
+        `${prefix}: remoteParameters needs a usernameFragment and a password`,
+      );
+    }
+    const usernameFragment = String(params.usernameFragment);
+    const password = String(params.password);
+    // RFC 8839 section 5.4: ice-ufrag is 4 to 256 ice-chars, ice-pwd 22 to
+    // 256.
+    if (!RegExpPrototypeTest(ICE_UFRAG, usernameFragment)) {
+      throw new DOMException(
+        `${prefix}: '${usernameFragment}' is not a valid usernameFragment`,
+        "SyntaxError",
+      );
+    }
+    if (!RegExpPrototypeTest(ICE_PWD, password)) {
+      throw new DOMException(
+        `${prefix}: the password is not valid`,
+        "SyntaxError",
+      );
+    }
+    if (ice.role !== null && ice.role !== role) {
+      throw invalidState(
+        `${prefix}: the role is '${ice.role}' and cannot change`,
+      );
+    }
+    const previous = ice.remoteParameters;
+    if (
+      previous !== null && (previous.usernameFragment !== usernameFragment ||
+        previous.password !== password)
+    ) {
+      // The remote side restarted: its candidates are flushed, and the
+      // transport is "new" until one of the new generation arrives.
+      ice.remote = [];
+      if (ice.state === "checking") ice.state = "new";
+    }
+    op_webrtc_ice_start(
+      ice.rid,
+      usernameFragment,
+      password,
+      role === "controlling",
+    );
+    ice.role = role;
+    ice.remoteParameters = { usernameFragment, password };
+    if (ice.remote.length > 0 && ice.state === "new") ice.state = "checking";
+    iceActivate(ice);
+    icePump(this);
+  }
+
+  stop() {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    const ice = requireStandalone(this, "stop");
+    if (ice.closed) return;
+    ice.closed = true;
+    ice.state = "closed";
+    if (ice.active && ice.pending) core.unrefOpPromise(ice.pending);
+    ice.active = false;
+    op_webrtc_ice_stop(ice.rid);
+  }
+
+  addRemoteCandidate(remoteCandidate = undefined) {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    const ice = requireStandalone(this, "addRemoteCandidate");
+    const candidate = ObjectPrototypeIsPrototypeOf(
+        RTCIceCandidatePrototype,
+        remoteCandidate,
+      )
+      ? remoteCandidate
+      : new RTCIceCandidate(remoteCandidate ?? { sdpMid: "" });
+    if (ice.closed) {
+      throw invalidState("The RTCIceTransport is closed");
+    }
+    // An empty candidate is the remote end-of-candidates.
+    if (candidate.candidate === "") return;
+    if (candidate.foundation === null || candidate.type === null) {
+      throw new DOMException(
+        `Failed to execute 'addRemoteCandidate' on 'RTCIceTransport': '${candidate.candidate}' is not a valid candidate`,
+        "OperationError",
+      );
+    }
+    op_webrtc_ice_add_remote_candidate(ice.rid, candidate.candidate);
+    ArrayPrototypePush(ice.remote, candidate);
+    if (ice.remoteParameters !== null && ice.state === "new") {
+      ice.state = "checking";
+    }
   }
 }
 defineHandler(RTCIceTransport.prototype, "statechange");
 defineHandler(RTCIceTransport.prototype, "gatheringstatechange");
 defineHandler(RTCIceTransport.prototype, "selectedcandidatepairchange");
+defineHandler(RTCIceTransport.prototype, "error");
+defineHandler(RTCIceTransport.prototype, "icecandidate");
 webidl.configureInterface(RTCIceTransport);
 const RTCIceTransportPrototype = RTCIceTransport.prototype;
+
+const iceTransportRegistry = new SafeFinalizationRegistry((rid) => {
+  try {
+    op_webrtc_ice_stop(rid);
+  } catch {
+    // Already gone.
+  }
+});
+
+// RFC 8839 section 5.4 (ice-char = ALPHA / DIGIT / "+" / "/").
+const ICE_UFRAG = new SafeRegExp("^[A-Za-z0-9+/]{4,256}$");
+const ICE_PWD = new SafeRegExp("^[A-Za-z0-9+/]{22,256}$");
+
+// The webrtc-ice methods exist only on a transport of its own: a peer
+// connection's transport is driven by its descriptions.
+function requireStandalone(transport, method) {
+  const ice = transport[_ice];
+  if (ice === undefined) {
+    throw invalidState(
+      `RTCIceTransport.${method}() is only for a transport made with new RTCIceTransport()`,
+    );
+  }
+  return ice;
+}
+
+// A gathering or started transport keeps the process alive, as an open
+// socket does, until stop().
+function iceActivate(ice) {
+  if (ice.closed || ice.active) return;
+  ice.active = true;
+  if (ice.pending) core.refOpPromise(ice.pending);
+}
+
+function icePump(transport) {
+  const ice = transport[_ice];
+  if (ice.closed || ice.pending) return;
+  const promise = op_webrtc_ice_next_events(ice.rid);
+  ice.pending = promise;
+  if (!ice.active) core.unrefOpPromise(promise);
+  PromisePrototypeThen(promise, (events) => {
+    ice.pending = null;
+    if (events === null || ice.closed) return;
+    iceDispatchEvents(transport, events, 0);
+  }, () => {
+    ice.pending = null;
+  });
+}
+
+// Each event is its own task, as for a peer connection.
+function iceDispatchEvents(transport, events, from) {
+  const ice = transport[_ice];
+  try {
+    iceDispatchEvent(transport, events, from);
+  } catch (error) {
+    reportException(error);
+  }
+  if (ice.closed) return;
+  if (from + 1 >= events.length) {
+    icePump(transport);
+    return;
+  }
+  const next = op_void_async_deferred();
+  ice.pending = next;
+  if (!ice.active) core.unrefOpPromise(next);
+  PromisePrototypeThen(next, () => {
+    ice.pending = null;
+    if (!ice.closed) iceDispatchEvents(transport, events, from + 1);
+  });
+}
+
+function iceDispatchEvent(transport, events, from) {
+  const ice = transport[_ice];
+  const event = events[from];
+  switch (event.type) {
+    case "icecandidate": {
+      const candidate = new RTCIceCandidate({
+        candidate: event.candidate,
+        sdpMid: "",
+        sdpMLineIndex: 0,
+        usernameFragment: ice.localParameters.usernameFragment,
+      });
+      ArrayPrototypePush(ice.local, candidate);
+      fire(
+        transport,
+        new RTCPeerConnectionIceEvent("icecandidate", { candidate }),
+      );
+      break;
+    }
+    case "gatheringcomplete":
+      // W3C webrtc-ice: the null candidate, then (a task of its own) the
+      // gathering state "complete".
+      ArrayPrototypeSplice(events, from + 1, 0, { type: "gatheringstate" });
+      fire(
+        transport,
+        new RTCPeerConnectionIceEvent("icecandidate", { candidate: null }),
+      );
+      break;
+    case "gatheringstate":
+      if (ice.gatheringState === "complete") break;
+      ice.gatheringState = "complete";
+      fire(transport, new Event("gatheringstatechange"));
+      break;
+    case "statechange":
+      // `checking` is set by start() / addRemoteCandidate() themselves (the
+      // agent reports it as soon as it starts, before any candidate).
+      if (event.state === "checking" || ice.state === event.state) break;
+      ice.state = event.state;
+      fire(transport, new Event("statechange"));
+      break;
+    case "selectedcandidatepairchange":
+      fire(transport, new Event("selectedcandidatepairchange"));
+      break;
+    case "rolechange":
+      ice.role = event.controlling ? "controlling" : "controlled";
+      break;
+  }
+}
+
+// The standalone transport's selected pair, its candidates matched with the
+// ones gathered and added (a peer-reflexive remote one hides its address).
+function iceSelectedPair(ice) {
+  if (ice.closed) return null;
+  const pair = op_webrtc_ice_selected_pair(ice.rid);
+  if (pair === null) return null;
+  return new RTCIceCandidatePair(
+    illegalConstructorKey,
+    findPairCandidate(ice.local, pair.local) ?? synthPairCandidate(pair.local),
+    findPairCandidate(ice.remote, pair.remote) ??
+      (pair.remote.type === "prflx"
+        ? hiddenPairCandidate(pair.remote)
+        : synthPairCandidate(pair.remote)),
+  );
+}
 
 class RTCIceCandidatePair {
   #local;

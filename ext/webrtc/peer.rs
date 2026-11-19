@@ -605,7 +605,9 @@ pub struct PairCandidate {
 }
 
 impl PairCandidate {
-  fn of(c: &rtc::peer_connection::transport::RTCIceCandidate) -> Self {
+  pub(crate) fn of(
+    c: &rtc::peer_connection::transport::RTCIceCandidate,
+  ) -> Self {
     let addr = match c.address.parse::<IpAddr>() {
       Ok(IpAddr::V6(ip)) => format!("[{ip}]:{}", c.port),
       Ok(IpAddr::V4(ip)) => format!("{ip}:{}", c.port),
