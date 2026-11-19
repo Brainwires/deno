@@ -1775,7 +1775,7 @@ function engineStats(pc, key, sender) {
       if (typeof stats[field] === "number") stats[field] += base;
     }
   }
-  return refineStats(pc, entries, base);
+  return refineStats(pc, entries, base, key === null);
 }
 
 // A stats object is a dictionary (webrtc-stats 5, `RTCStats`): an ordinary
@@ -1806,6 +1806,12 @@ const STATS_OPTIONAL_STRINGS = [
   "iceState",
   "dtlsState",
   "dtlsRole",
+  // A reference with nothing to name: no pair selected yet, no certificate
+  // exchanged, a stream not yet associated with a media section.
+  "selectedCandidatePairId",
+  "localCertificateId",
+  "remoteCertificateId",
+  "mid",
 ];
 const HEX_ONLY = new SafeRegExp("^(?:[0-9a-fA-F]{2})+$");
 
@@ -1822,7 +1828,8 @@ function hexToBase64(hex) {
 // transport), no member without a value, the certificate as base64 DER, the
 // codec an outbound stream sends with, and a `media-source` for each sender
 // with a track.
-function refineStats(pc, entries, now) {
+function refineStats(pc, engineEntries, now, whole) {
+  const entries = ArrayPrototypeFilter(engineEntries, remoteStreamReported);
   const ids = new SafeSet();
   let transportId = null;
   for (let i = 0; i < entries.length; ++i) {
@@ -1920,7 +1927,18 @@ function refineStats(pc, entries, now) {
     if (local?.codecId !== undefined) stats.codecId = local.codecId;
   }
   for (let i = 0; i < added.length; ++i) ArrayPrototypePush(entries, added[i]);
-  return entries;
+  if (whole) {
+    addSenderSources(state, entries, ids, now);
+    addChannelStats(pc, entries, ids, now);
+  }
+  // Before the first description there is no RTCDtlsTransport (and so no
+  // RTCIceTransport) for a `transport` object to describe.
+  const report = pc.localDescription === null &&
+      pc.remoteDescription === null
+    ? ArrayPrototypeFilter(entries, (e) => e.type !== "transport")
+    : entries;
+  dropUnresolvedReferences(report);
+  return report;
 }
 
 // The transport's ICE and DTLS state and the ICE role before the engine has
@@ -1960,6 +1978,81 @@ function transportStateStats(pc, stats) {
         : "unknown";
     }
     stats.iceRole = role;
+  }
+}
+
+// webrtc-stats 6.1: the remote RTP stream objects are created when their
+// RTCP packet is first received. The engine has one beside each local stream
+// from the start: a `remote-inbound-rtp` counts the receiver reports it was
+// made from (each one a round-trip measurement), a `remote-outbound-rtp` the
+// sender reports.
+function remoteStreamReported(stats) {
+  if (stats.type === "remote-inbound-rtp") {
+    return stats.roundTripTimeMeasurements !== 0;
+  }
+  if (stats.type === "remote-outbound-rtp") return stats.reportsSent !== 0;
+  return true;
+}
+
+// A `media-source` for each track attached to a sender (webrtc-stats
+// `RTCStatsType` "media-source": created when a track is attached to any
+// RTCRtpSender), also before the sender has an outbound stream.
+function addSenderSources(state, entries, ids, now) {
+  for (let i = 0; i < state.transceivers.length; ++i) {
+    const t = state.transceivers[i];
+    if (t[_state].stopped) continue;
+    const track = t[_state].sender[_state].track;
+    if (track === null || track === undefined) continue;
+    const source = mediaSourceStats(track, {}, now);
+    if (SetPrototypeHas(ids, source.id)) continue;
+    SetPrototypeAdd(ids, source.id);
+    ArrayPrototypePush(entries, source);
+  }
+}
+
+// A `data-channel` object for each channel from its creation (webrtc-stats
+// `RTCStatsType` "data-channel": created when the RTCDataChannel is), which
+// the engine has only once the channel opens. Before that the channel has
+// sent and received nothing; `dataChannelIdentifier` is there once the
+// channel has an id.
+function addChannelStats(pc, entries, ids, now) {
+  MapPrototypeForEach(pc[_channels], (channel, handle) => {
+    const id = `RTCDataChannel_${handle}`;
+    if (SetPrototypeHas(ids, id)) return;
+    SetPrototypeAdd(ids, id);
+    const stats = {
+      timestamp: now,
+      type: "data-channel",
+      id,
+      label: channel.label,
+      protocol: channel.protocol,
+      state: channel.readyState,
+      messagesSent: 0,
+      bytesSent: 0,
+      messagesReceived: 0,
+      bytesReceived: 0,
+    };
+    const streamId = channel.id;
+    if (streamId !== null) stats.dataChannelIdentifier = streamId;
+    ArrayPrototypePush(entries, stats);
+  });
+}
+
+// webrtc-stats 5 (`RTCStats`): a member that references another object
+// names one in the same report; a reference with nothing to name is left out.
+function dropUnresolvedReferences(entries) {
+  const ids = new SafeSet();
+  for (let i = 0; i < entries.length; ++i) SetPrototypeAdd(ids, entries[i].id);
+  for (let i = 0; i < entries.length; ++i) {
+    const stats = entries[i];
+    for (const key in stats) {
+      if (
+        StringPrototypeEndsWith(key, "Id") && typeof stats[key] === "string" &&
+        !SetPrototypeHas(ids, stats[key])
+      ) {
+        delete stats[key];
+      }
+    }
   }
 }
 
