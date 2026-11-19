@@ -268,10 +268,13 @@ function descriptionFrom(pair) {
 // doesn't change; after close(), what the slot held then.
 function descriptionSlot(pc, slot) {
   const state = pc[_state];
-  const pair = state.closed
+  let pair = state.closed
     ? state.last?.[slot]
     : op_webrtc_pc_descriptions(pc[_rid])[slot];
   if (pair === null || pair === undefined) return null;
+  if (slot === "currentLocal" || slot === "pendingLocal") {
+    pair = [pair[0], announcedSdp(state, pair[1])];
+  }
   const cache = state.descriptions;
   const held = cache[slot];
   if (held !== null && held.type === pair[0] && held.sdp === pair[1]) {
@@ -280,6 +283,59 @@ function descriptionSlot(pc, slot) {
   const description = descriptionFrom(pair);
   cache[slot] = description;
   return description;
+}
+
+// The key a gathered candidate is announced under: the local ICE ufrag it was
+// gathered for and the candidate's first eight fields (foundation to type),
+// which the SDP line and the event's string share whatever extensions follow.
+function announcedKey(ufrag, candidate) {
+  const fields = StringPrototypeSplit(StringPrototypeTrim(candidate), SPACES);
+  return `${ufrag ?? ""} ${
+    ArrayPrototypeJoin(ArrayPrototypeSlice(fields, 0, 8), " ")
+  }`;
+}
+
+// A local description as the application has been told of it. The engine
+// writes each candidate into its local description as it gathers it, but W3C
+// webrtc-pc 5.6 ("When an ICE candidate is gathered") adds the candidate to
+// [[CurrentLocalDescription]] / [[PendingLocalDescription]] in the same task
+// that fires its `icecandidate` event: before that event the description
+// lacks it, so a description read right after setLocalDescription() has no
+// candidate line, and each announced candidate makes a new description object
+// (descriptionSlot compares the text). `a=end-of-candidates` likewise waits
+// for the `complete` gathering state.
+function announcedSdp(state, sdp) {
+  if (
+    !StringPrototypeIncludes(sdp, "a=candidate:") &&
+    !StringPrototypeIncludes(sdp, "a=end-of-candidates")
+  ) {
+    return sdp;
+  }
+  const lines = StringPrototypeSplit(sdp, "\n");
+  const out = [];
+  let ufrag = "";
+  for (let i = 0; i < lines.length; ++i) {
+    const line = lines[i];
+    const trimmed = StringPrototypeTrim(line);
+    if (StringPrototypeStartsWith(trimmed, "a=ice-ufrag:")) {
+      ufrag = StringPrototypeSlice(trimmed, 12);
+    } else if (StringPrototypeStartsWith(trimmed, "a=candidate:")) {
+      const candidate = StringPrototypeSlice(trimmed, 2);
+      if (
+        !SetPrototypeHas(state.announced, announcedKey(ufrag, candidate)) &&
+        !SetPrototypeHas(state.announced, announcedKey(null, candidate))
+      ) {
+        continue;
+      }
+    } else if (
+      trimmed === "a=end-of-candidates" &&
+      state.iceGatheringState !== "complete"
+    ) {
+      continue;
+    }
+    ArrayPrototypePush(out, line);
+  }
+  return ArrayPrototypeJoin(out, "\n");
 }
 
 // --- RTCIceCandidate -------------------------------------------------------
@@ -3253,6 +3309,9 @@ class RTCPeerConnection extends EventTarget {
       // Remote MediaStreams by id.
       streams: new SafeMap(),
       localCandidates: [],
+      // announcedKey()s of the gathered candidates whose icecandidate event
+      // was dispatched: only those are in the local description.
+      announced: new SafeSet(),
       remoteCandidates: [],
       remoteTracksBeforeOffer: null,
       cname: uuid(),
@@ -4937,6 +4996,10 @@ function dispatchEngineEvent(pc, event) {
         usernameFragment: event.usernameFragment,
       });
       ArrayPrototypePush(state.localCandidates, candidate);
+      SetPrototypeAdd(
+        state.announced,
+        announcedKey(event.usernameFragment ?? null, event.candidate),
+      );
       fire(
         pc,
         new RTCPeerConnectionIceEvent("icecandidate", {
