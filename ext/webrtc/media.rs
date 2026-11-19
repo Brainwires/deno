@@ -1007,17 +1007,72 @@ impl Core {
     out
   }
 
+  /// The codecs of the transceiver's m-section in the current local
+  /// (`local`) or remote description, in the section's order.
+  fn negotiated_section_codecs(
+    &mut self,
+    index: usize,
+    local: bool,
+  ) -> Option<(String, Vec<(u8, CodecArg)>)> {
+    let mid = self.pc.rtp_transceiver(index)?.mid().clone()?;
+    let sdp = if local {
+      self
+        .pc
+        .current_local_description()
+        .or(self.pc.local_description())
+        .map(|d| d.sdp.clone())
+    } else {
+      self
+        .pc
+        .current_remote_description()
+        .or(self.pc.remote_description())
+        .map(|d| d.sdp.clone())
+    }?;
+    section_codecs(&sdp, &mid)
+  }
+
   pub(crate) fn sender_parameters(
     &mut self,
     key: u32,
   ) -> Result<serde_json::Value, WebRtcError> {
     let index = self.index_of(key)?;
+    // webrtc-pc 5.2 getParameters(): the codecs negotiated for sending, in
+    // the remote description's order with its payload types and fmtp lines
+    // (RFC 9429 5.3.1: the answerer sends what the offer lists), those this
+    // stack can send; a retransmission format with the primary it repairs.
+    let remote_codecs = self
+      .negotiated_section_codecs(index, false)
+      .map(|(kind, codecs)| sendable_codecs(&kind, codecs));
     let Some(mut sender) = self.pc.rtp_sender(index.into()) else {
-      return Ok(serde_json::Value::Null);
+      // A transceiver a remote offer made has no engine sender until it
+      // sends; what it may send is negotiated all the same.
+      return Ok(match remote_codecs {
+        Some(codecs) => serde_json::json!({
+          "codecs": codecs
+            .iter()
+            .map(|(pt, c)| section_codec_json(*pt, c))
+            .collect::<Vec<_>>(),
+          "headerExtensions": [],
+          "encodings": [],
+        }),
+        None => serde_json::Value::Null,
+      });
     };
     let params = sender.get_parameters().clone();
+    let codecs: Vec<serde_json::Value> = match remote_codecs {
+      Some(codecs) => codecs
+        .iter()
+        .map(|(pt, c)| section_codec_json(*pt, c))
+        .collect(),
+      None => params
+        .rtp_parameters
+        .codecs
+        .iter()
+        .map(codec_params_json)
+        .collect(),
+    };
     Ok(serde_json::json!({
-      "codecs": params.rtp_parameters.codecs.iter().map(codec_params_json).collect::<Vec<_>>(),
+      "codecs": codecs,
       "headerExtensions": params.rtp_parameters.header_extensions.iter().map(|h| serde_json::json!({
         "uri": h.uri, "id": h.id, "encrypted": h.encrypted,
       })).collect::<Vec<_>>(),
@@ -1033,12 +1088,27 @@ impl Core {
     key: u32,
   ) -> Result<serde_json::Value, WebRtcError> {
     let index = self.index_of(key)?;
+    // webrtc-pc 5.3 getParameters(): the codecs the receiver is prepared to
+    // receive, which are the local description's for its m-section.
+    let local_codecs = self.negotiated_section_codecs(index, true);
     let Some(mut receiver) = self.pc.rtp_receiver(index.into()) else {
       return Ok(serde_json::Value::Null);
     };
     let params = receiver.get_parameters().clone();
+    let codecs: Vec<serde_json::Value> = match local_codecs {
+      Some((_, codecs)) => codecs
+        .iter()
+        .map(|(pt, c)| section_codec_json(*pt, c))
+        .collect(),
+      None => params
+        .rtp_parameters
+        .codecs
+        .iter()
+        .map(codec_params_json)
+        .collect(),
+    };
     Ok(serde_json::json!({
-      "codecs": params.rtp_parameters.codecs.iter().map(codec_params_json).collect::<Vec<_>>(),
+      "codecs": codecs,
       "headerExtensions": params.rtp_parameters.header_extensions.iter().map(|h| serde_json::json!({
         "uri": h.uri, "id": h.id, "encrypted": h.encrypted,
       })).collect::<Vec<_>>(),
@@ -1464,6 +1534,182 @@ pub fn wants_key_frame(packets: &[Box<dyn rtc::rtcp::Packet>]) -> bool {
     p.as_any().downcast_ref::<PictureLossIndication>().is_some()
       || p.as_any().downcast_ref::<FullIntraRequest>().is_some()
   })
+}
+
+fn section_codec_json(payload_type: u8, c: &CodecArg) -> serde_json::Value {
+  let mut v = serde_json::to_value(c).unwrap_or(serde_json::Value::Null);
+  if let Some(obj) = v.as_object_mut() {
+    obj.insert("payloadType".to_string(), payload_type.into());
+  }
+  v
+}
+
+/// RFC 3551's static audio payload types, which may come without an
+/// `a=rtpmap` line.
+fn static_audio_codec(payload_type: u8) -> Option<(&'static str, u32)> {
+  match payload_type {
+    0 => Some(("PCMU", 8000)),
+    3 => Some(("GSM", 8000)),
+    4 => Some(("G723", 8000)),
+    8 => Some(("PCMA", 8000)),
+    9 => Some(("G722", 8000)),
+    13 => Some(("CN", 8000)),
+    18 => Some(("G729", 8000)),
+    _ => None,
+  }
+}
+
+/// The media kind and codecs (payload type, `a=rtpmap`, `a=fmtp`) of the
+/// m-section of `sdp` whose mid is `mid`, in the m= line's format order. A
+/// dynamic payload type with no `a=rtpmap` is left out.
+pub fn section_codecs(
+  sdp: &str,
+  mid: &str,
+) -> Option<(String, Vec<(u8, CodecArg)>)> {
+  struct Section {
+    kind: String,
+    formats: Vec<String>,
+    rtpmap: HashMap<String, String>,
+    fmtp: HashMap<String, String>,
+    mid: Option<String>,
+  }
+  let mut sections: Vec<Section> = Vec::new();
+  for line in sdp.lines() {
+    let line = line.trim_end();
+    if let Some(m) = line.strip_prefix("m=") {
+      let mut fields = m.split_ascii_whitespace();
+      let kind = fields.next().unwrap_or_default().to_string();
+      let formats = fields.skip(2).map(str::to_string).collect();
+      sections.push(Section {
+        kind,
+        formats,
+        rtpmap: HashMap::new(),
+        fmtp: HashMap::new(),
+        mid: None,
+      });
+      continue;
+    }
+    let Some(section) = sections.last_mut() else {
+      continue;
+    };
+    if let Some(value) = line.strip_prefix("a=mid:") {
+      section.mid = Some(value.trim().to_string());
+    } else if let Some(value) = line.strip_prefix("a=rtpmap:") {
+      if let Some((pt, rest)) = value.split_once(' ') {
+        section
+          .rtpmap
+          .entry(pt.to_string())
+          .or_insert_with(|| rest.trim().to_string());
+      }
+    } else if let Some(value) = line.strip_prefix("a=fmtp:")
+      && let Some((pt, params)) = value.split_once(' ')
+    {
+      section
+        .fmtp
+        .entry(pt.to_string())
+        .or_insert_with(|| params.trim().to_string());
+    }
+  }
+  let section = sections
+    .into_iter()
+    .find(|s| s.mid.as_deref() == Some(mid))?;
+  let audio = section.kind == "audio";
+  let mut out: Vec<(u8, CodecArg)> = Vec::new();
+  for format in &section.formats {
+    let Ok(pt) = format.parse::<u8>() else {
+      continue;
+    };
+    if out.iter().any(|(p, _)| *p == pt) {
+      continue;
+    }
+    let (name, clock_rate, channels) = match section.rtpmap.get(format) {
+      Some(map) => {
+        let mut parts = map.split('/');
+        let name = parts.next().unwrap_or_default().to_string();
+        let clock_rate = parts.next().and_then(|c| c.parse().ok()).unwrap_or(0);
+        let channels = parts.next().and_then(|c| c.parse().ok());
+        (name, clock_rate, channels)
+      }
+      None => match static_audio_codec(pt).filter(|_| audio) {
+        Some((name, clock_rate)) => (name.to_string(), clock_rate, None),
+        None => continue,
+      },
+    };
+    out.push((
+      pt,
+      CodecArg {
+        mime_type: format!("{}/{name}", section.kind),
+        clock_rate,
+        // An audio codec without a channel count is mono (RFC 4566).
+        channels: if audio { channels.or(Some(1)) } else { None },
+        sdp_fmtp_line: section.fmtp.get(format).cloned(),
+      },
+    ));
+  }
+  Some((section.kind, out))
+}
+
+/// The send codecs this stack implements for `kind` (computed once).
+fn supported_codecs(kind: &str) -> &'static [CodecArg] {
+  static AUDIO: std::sync::OnceLock<Vec<CodecArg>> = std::sync::OnceLock::new();
+  static VIDEO: std::sync::OnceLock<Vec<CodecArg>> = std::sync::OnceLock::new();
+  let cell = match kind {
+    "audio" => &AUDIO,
+    "video" => &VIDEO,
+    _ => return &[],
+  };
+  cell.get_or_init(|| {
+    capabilities(kind, true)
+      .ok()
+      .flatten()
+      .map(|c| c.codecs)
+      .unwrap_or_default()
+  })
+}
+
+fn is_rtx(c: &CodecArg) -> bool {
+  c.mime_type.to_ascii_lowercase().ends_with("/rtx")
+}
+
+/// The `apt` (RFC 4588) of a retransmission format's fmtp line.
+fn rtx_apt(c: &CodecArg) -> Option<u8> {
+  c.sdp_fmtp_line.as_deref()?.split(';').find_map(|p| {
+    p.trim()
+      .strip_prefix("apt=")
+      .and_then(|v| v.trim().parse().ok())
+  })
+}
+
+/// Of a remote m-section's codecs, those this stack can send (same name,
+/// clock rate and, for audio, channels as one it implements); a
+/// retransmission format only with the primary it repairs.
+fn sendable_codecs(
+  kind: &str,
+  codecs: Vec<(u8, CodecArg)>,
+) -> Vec<(u8, CodecArg)> {
+  let supported = supported_codecs(kind);
+  let known = |c: &CodecArg| {
+    supported.iter().any(|s| {
+      s.mime_type.eq_ignore_ascii_case(&c.mime_type)
+        && s.clock_rate == c.clock_rate
+        && (kind != "audio" || s.channels == c.channels)
+    })
+  };
+  let primaries: Vec<u8> = codecs
+    .iter()
+    .filter(|(_, c)| !is_rtx(c) && known(c))
+    .map(|(pt, _)| *pt)
+    .collect();
+  codecs
+    .into_iter()
+    .filter(|(pt, c)| {
+      if is_rtx(c) {
+        known(c) && rtx_apt(c).is_some_and(|apt| primaries.contains(&apt))
+      } else {
+        primaries.contains(pt)
+      }
+    })
+    .collect()
 }
 
 fn codec_params_json(c: &RTCRtpCodecParameters) -> serde_json::Value {
