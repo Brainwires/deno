@@ -122,6 +122,64 @@ class Evaluate(unittest.TestCase):
         self.assertIn("in progress", errors[0])
         self.assertIn("2", errors[0])
 
+    def test_pending_wait_parses_seconds(self):
+        self.assertEqual(gate.pending_wait("1800"), 1800)
+        self.assertEqual(gate.pending_wait(" 60 "), 60)
+        for value in (None, "", "soon", "-5"):
+            self.assertEqual(gate.pending_wait(value), 0)
+
+    def waiting(self, reads, wait):
+        """wait_for_pending over successive reads of the runs; returns
+        (the runs it settled on, the sleeps it took)."""
+        reads = list(reads)
+        now = [0.0]
+        sleeps = []
+
+        def fetch():
+            return reads.pop(0) if len(reads) > 1 else reads[0]
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        runs = gate.wait_for_pending(
+            fetch, wait, poll=30, sleep=sleep, clock=lambda: now[0]
+        )
+        return runs, sleeps
+
+    def test_the_gate_waits_for_a_run_that_is_still_going(self):
+        # The branch push's own run of the commit, a minute on the guard.
+        going = [run(1), run(2, None, "in_progress")]
+        done = [run(1), run(2)]
+        runs, sleeps = self.waiting([going, going, done], 1800)
+        self.assertEqual(sleeps, [30, 30])
+        _, errors = gate.evaluate(runs, legs({1: ALL_LEGS}), ON_DEV)
+        self.assertEqual(errors, [])
+
+    def test_the_wait_ends_at_its_limit_and_the_gate_refuses(self):
+        going = [run(1), run(2, None, "in_progress")]
+        runs, sleeps = self.waiting([going], 70)
+        self.assertEqual(sleeps, [30, 30, 10])
+        _, errors = gate.evaluate(runs, legs({1: ALL_LEGS}), ON_DEV)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("in progress", errors[0])
+
+    def test_a_run_that_ends_red_after_the_wait_still_refuses(self):
+        going = [run(1), run(2, None, "in_progress")]
+        red = [run(1), run(2, "failure")]
+        runs, _ = self.waiting([going, red], 1800)
+        _, errors = gate.evaluate(runs, legs({1: ALL_LEGS}), ON_DEV)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("failed on this commit: 2", errors[0])
+
+    def test_no_wait_without_a_limit_or_a_pending_run(self):
+        going = [run(1), run(2, None, "in_progress")]
+        self.assertEqual(self.waiting([going], 0)[1], [])
+        self.assertEqual(self.waiting([[run(1)]], 1800)[1], [])
+        # A run stuck in the queue is not waited for.
+        stuck = dict(run(3, None, "queued"), stuck=True)
+        self.assertEqual(self.waiting([[run(1), stuck]], 1800)[1], [])
+
     def test_a_run_stuck_in_the_queue_does_not_hold_the_release(self):
         # 41873491464: queued with no jobs for over a day; cancel and delete
         # both failed, and it held 3.0.0-denext.11.

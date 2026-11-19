@@ -168,7 +168,8 @@ jobs:
     if: ${{ !cancelled() }}
     # Our linux-x64 pool while it has a free slot, else ubuntu-24.04 (runners).
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').guard || 'ubuntu-24.04' }}
-    timeout-minutes: 10
+    # its own wait (GUARD_WAIT, 20 minutes) and the API reads
+    timeout-minutes: 30
     permissions:
       contents: read
       actions: read # reads this workflow's runs of the commit
@@ -192,6 +193,11 @@ jobs:
           EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
           RUN_ID: ${{ github.run_id }}
+          # A run of the commit that would verify it and is still going (the
+          # train's own run, minutes from its end when the branch is pushed)
+          # is waited for, up to 20 minutes, before this run builds the commit
+          # a second time (guard_verified.py GUARD_WAIT).
+          GUARD_WAIT: '1200'
         run: |
           set -uo pipefail
           # The script exits 0 and prints verified=false on any API error;
@@ -389,8 +395,13 @@ jobs:
             # `denext runtime` run of the commit (not this one) that built
             # that laufey's native hosts green on every target (the
             # `laufey / <target>` jobs). See tag_gate.py.
+            # A `denext tests` run of the commit that is still going (the
+            # branch push that came with the tag: a minute on the guard) is
+            # waited for, up to 30 minutes, instead of refusing the tag at
+            # once; it must still end green (tag_gate.py PENDING_WAIT).
             if ! gate=$(REPO="$REPO" SHA="$SHA" VERSION="$version" \
               LAUFEY_SHA="$LAUFEY_SHA" RUN_ID="$GITHUB_RUN_ID" \
+              PENDING_WAIT=1800 \
               python3 -I .github/denext-runtime/tag_gate.py); then
               echo "$gate"
               echo "::error::the tag gate refused $SHA (see above)"

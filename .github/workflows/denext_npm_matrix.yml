@@ -82,7 +82,8 @@ jobs:
     if: ${{ !cancelled() }}
     # Our linux-x64 pool while it has a free slot, else ubuntu-24.04 (runners).
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').guard || 'ubuntu-24.04' }}
-    timeout-minutes: 10
+    # its own wait (GUARD_WAIT, 20 minutes) and the API reads
+    timeout-minutes: 30
     permissions:
       contents: read
       actions: read # reads this workflow's runs of the commit
@@ -106,6 +107,11 @@ jobs:
           EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
           RUN_ID: ${{ github.run_id }}
+          # A run of the commit that would verify it and is still going (the
+          # train's own run, minutes from its end when the branch is pushed)
+          # is waited for, up to 20 minutes, before this run builds the commit
+          # a second time (guard_verified.py GUARD_WAIT).
+          GUARD_WAIT: '1200'
         run: |
           set -uo pipefail
           # The script exits 0 and prints verified=false on any API error;

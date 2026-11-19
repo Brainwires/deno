@@ -13,7 +13,12 @@ A `denext-runtime-v*` tag publishes only when, for the tagged commit:
   newer push) is not a failure. The way past a red run is a new commit.
   A run GitHub left queued with no jobs for over STUCK_AFTER seconds never
   started (one sat queued for days, and neither cancel nor delete removed
-  it): it doesn't hold the release, and it vouches for nothing;
+  it): it doesn't hold the release, and it vouches for nothing. A run still
+  going is waited for, up to PENDING_WAIT seconds, before the gate refuses:
+  the tag is often pushed with the branch, whose own `denext tests` run of
+  the commit (a minute on the verified-SHA guard) was in progress when the
+  3.0.0-denext.27 tag build looked, and that refusal cost the release four
+  hours. Waiting changes no verdict: the run must still end, and end green;
 - the commit is on development-denext, on the release branch rel/<version>
   or on its train branch (train/<version>, or train/<prerelease without
   dots>: train/denext22 for 3.0.0-denext.22, train/rc6 for 3.0.0-rc.6): a
@@ -37,6 +42,8 @@ Usage: tag_gate.py
 Env:   REPO (owner/name), SHA (the tagged commit), VERSION (the fork's version),
        LAUFEY_SHA (the pin), RUN_ID (the tag build's own run, left out; empty
        when the gate runs before tagging) and GH_TOKEN for the gh CLI.
+       PENDING_WAIT: the most seconds to wait for `denext tests` runs of the
+       commit that are still going (default 0: refuse at once).
        LAUFEY_MANIFEST overrides the Cargo.toml path (relative to the
        working directory, the repository root).
 Prints the full run's id as `full_run=<id>` and the laufey run's id as
@@ -58,6 +65,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 
 WORKFLOW = "denext_tests.yml"
@@ -328,6 +336,54 @@ def evaluate_laufey(runs, jobs_of, laufey_sha, repo, sha, branches):
     ]
 
 
+# How often wait_for_pending looks again.
+PENDING_POLL = 30
+
+
+def pending_wait(value):
+    """PENDING_WAIT as whole seconds; unset, empty or not a number: 0."""
+    try:
+        return max(0, int((value or "").strip() or 0))
+    except ValueError:
+        return 0
+
+
+def pending_runs(runs):
+    """The ids of the runs that hold the release because they are still
+    going (`evaluate`'s rule: not completed, and not stuck in the queue)."""
+    return [
+        r["id"]
+        for r in runs
+        if not r.get("stuck") and r["status"] != "completed"
+    ]
+
+
+def wait_for_pending(
+    fetch, wait, poll=PENDING_POLL, sleep=time.sleep, clock=time.monotonic
+):
+    """The commit's runs (`fetch()`), read again every `poll` seconds while
+    one is still going, for at most `wait` seconds (each wait is reported on
+    stderr, which the workflow shows as it happens). Returns the last read:
+    `evaluate` then refuses whatever is still going, and whatever ended red.
+    """
+    deadline = clock() + wait
+    runs = fetch()
+    while True:
+        pending = pending_runs(runs)
+        left = deadline - clock()
+        if not pending or left <= 0:
+            return runs
+        print(
+            "denext tests runs still in progress for this commit: "
+            + ", ".join(map(str, pending))
+            + f"; waiting up to {int(left)}s more for them",
+            file=sys.stderr,
+            flush=True,
+        )
+        sleep(min(poll, left))
+        runs = fetch()
+
+
 def gh_lines(args):
     out = subprocess.run(
         ["gh", "api", *args], check=True, capture_output=True, text=True
@@ -471,7 +527,9 @@ def main():
     env = os.environ
     repo, sha, version = env["REPO"], env["SHA"], env["VERSION"]
     laufey_sha = env.get("LAUFEY_SHA", "")
-    runs = gh_runs(repo, sha)
+    runs = wait_for_pending(
+        lambda: gh_runs(repo, sha), pending_wait(env.get("PENDING_WAIT"))
+    )
     contained_in = {
         branch: gh_contains(repo, sha, branch)
         for branch in release_branches(version)
