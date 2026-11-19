@@ -2663,6 +2663,7 @@ class RTCRtpTransceiver {
           !(sender[_state].encodings[0]?.active ?? true),
       );
     }
+    invalidateCreated(pc);
     updateNegotiationNeeded(pc);
   }
   get currentDirection() {
@@ -2687,6 +2688,7 @@ class RTCRtpTransceiver {
     stopSending(this);
     state.stopping = true;
     op_webrtc_transceiver_stop(pc[_rid], this[_key]);
+    invalidateCreated(pc);
     updateNegotiationNeeded(pc);
   }
 
@@ -2739,6 +2741,7 @@ class RTCRtpTransceiver {
       }
     }
     if (pc[_state].closed) return;
+    invalidateCreated(pc);
     op_webrtc_transceiver_set_codec_preferences(
       pc[_rid],
       this[_key],
@@ -3237,6 +3240,11 @@ class RTCPeerConnection extends EventTarget {
       // wpt100:transceiver: keys of the stopped transceivers that left
       // `transceivers` (the engine keeps them).
       retired: new SafeSet(),
+      // wpt100:transceiver: [[LastCreatedOffer]] / [[LastCreatedAnswer]]
+      // ({ sdp, generation }), valid while `generation` is unchanged.
+      lastCreatedOffer: null,
+      lastCreatedAnswer: null,
+      generation: 0,
       // Remote MediaStreams by id.
       streams: new SafeMap(),
       localCandidates: [],
@@ -3385,10 +3393,9 @@ class RTCPeerConnection extends EventTarget {
         }
         // A plain RTCSessionDescriptionInit, as the spec has it (libraries
         // such as simple-peer edit its `sdp` before setLocalDescription).
-        return {
-          type: "offer",
-          sdp: createOfferSdp(this, !!options?.iceRestart),
-        };
+        const sdp = createOfferSdp(this, !!options?.iceRestart);
+        state.lastCreatedOffer = { sdp, generation: state.generation };
+        return { type: "offer", sdp };
       });
     });
   }
@@ -3406,10 +3413,14 @@ class RTCPeerConnection extends EventTarget {
           `Cannot create an answer in signaling state '${state}'`,
         );
       }
-      return inTask(this, () => ({
-        type: "answer",
-        sdp: createAnswerSdp(this),
-      }));
+      return inTask(this, () => {
+        const sdp = createAnswerSdp(this);
+        this[_state].lastCreatedAnswer = {
+          sdp,
+          generation: this[_state].generation,
+        };
+        return { type: "answer", sdp };
+      });
     });
   }
 
@@ -3461,9 +3472,17 @@ class RTCPeerConnection extends EventTarget {
       }
       return inTask(this, () => {
         if (type !== "rollback" && (sdp === undefined || sdp === "")) {
-          sdp = type === "offer"
-            ? createOfferSdp(this, false)
-            : createAnswerSdp(this);
+          // webrtc-pc 4.4.1.5: [[LastCreatedOffer]] / [[LastCreatedAnswer]]
+          // while still valid, else a new one.
+          const offer = type === "offer";
+          sdp = lastCreated(this, offer);
+          if (sdp === null) {
+            // The engine compares a description with the last one it made.
+            sdp = offer ? createOfferSdp(this, false) : createAnswerSdp(this);
+            const created = { sdp, generation: this[_state].generation };
+            if (offer) this[_state].lastCreatedOffer = created;
+            else this[_state].lastCreatedAnswer = created;
+          }
         }
         op_webrtc_pc_set_local_description(this[_rid], type, sdp ?? "");
         const state = this[_state];
@@ -3996,6 +4015,7 @@ class RTCPeerConnection extends EventTarget {
         : d === "inactive"
         ? "sendonly"
         : d;
+      invalidateCreated(this);
       updateNegotiationNeeded(this);
       return sender;
     }
@@ -4052,6 +4072,7 @@ class RTCPeerConnection extends EventTarget {
         next,
       );
     }
+    invalidateCreated(this);
     updateNegotiationNeeded(this);
   }
 
@@ -4392,6 +4413,7 @@ function addTransceiverInner(pc, trackOrKind, init) {
   if (track !== null) setSenderTrack(sender, track);
   ArrayPrototypePush(pc[_state].transceivers, transceiver);
   syncTransceivers(pc, null);
+  invalidateCreated(pc);
   updateNegotiationNeeded(pc);
   return transceiver;
 }
@@ -4846,12 +4868,30 @@ function sameIds(a, b) {
   return true;
 }
 
+// [[LastCreatedOffer]] / [[LastCreatedAnswer]]'s SDP if nothing that goes into
+// a description changed since it was created (invalidateCreated), else null.
+function lastCreated(pc, offer) {
+  const state = pc[_state];
+  const last = offer ? state.lastCreatedOffer : state.lastCreatedAnswer;
+  return last !== null && last.generation === state.generation
+    ? last.sdp
+    : null;
+}
+
+// A change that a new offer or answer would show (a transceiver, a direction,
+// a track, codec preferences, an applied description): the last created ones
+// are stale.
+function invalidateCreated(pc) {
+  pc[_state].generation++;
+}
+
 // Bookkeeping when a description has been applied: the stream ids each
 // sender has in the local description (what `a=msid` carries), the type of
 // the current local description, and restartIce()'s credentials, which a
 // completed negotiation with fresh ones retires.
 function descriptionApplied(pc, local, type) {
   const state = pc[_state];
+  invalidateCreated(pc);
   const transceivers = state.transceivers;
   if (type === "rollback") {
     for (let i = 0; i < transceivers.length; ++i) {
