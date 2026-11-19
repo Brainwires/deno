@@ -265,6 +265,12 @@ const cases = {
   op_desktop_webview_print: () => ops.op_desktop_webview_print(1),
   op_desktop_webview_set_forward_keys: () =>
     ops.op_desktop_webview_set_forward_keys(1, ["CmdOrCtrl+1"]),
+  // ("save" asks for write permission before anything else.)
+  op_desktop_webview_download_control: () =>
+    ops.op_desktop_webview_download_control(1, 1, "cancel", null),
+  op_desktop_webview_permission_respond: () =>
+    ops.op_desktop_webview_permission_respond(1, 1, true),
+  op_desktop_menu_snapshot: () => ops.op_desktop_menu_snapshot(0, 0),
   // The updater ops (desktop_update_ops_inert has the detail).
   op_desktop_app_update_info: () => ops.op_desktop_app_update_info().configured,
   op_desktop_app_update_check: () =>

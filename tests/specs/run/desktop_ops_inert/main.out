@@ -51,7 +51,7 @@ op_desktop_canonical_accelerator -> null
 op_desktop_get_launch_at_login -> "not-supported"
 op_desktop_set_launch_at_login throws NotCapable: Requires sys access, run again with the --allow-sys flag
 op_desktop_devtools_enabled -> false
-op_desktop_menu_capabilities -> {"appMenu":false,"accelerators":false,"contextMenu":false,"contextClosed":false,"icons":false,"tooltips":false,"destructive":false}
+op_desktop_menu_capabilities -> {"appMenu":false,"accelerators":false,"contextMenu":false,"contextClosed":false,"icons":false,"tooltips":false,"destructive":false,"snapshot":false}
 op_desktop_notification_capabilities -> {"show":false,"schedule":false,"schedulePersists":false,"actions":false,"clicks":false,"coldStart":false,"delivered":false}
 op_desktop_schedule_notification throws NotCapable: Requires sys access, run again with the --allow-sys flag
 op_desktop_list_scheduled_notifications -> []
@@ -79,7 +79,7 @@ op_desktop_close_reply -> null
 op_desktop_set_will_navigate -> false
 op_desktop_answer_will_navigate -> false
 op_desktop_set_app_menu -> false
-op_desktop_webview_capabilities -> {"supported":false,"engine":null,"capture":false,"evaluate":false,"persistentPartitions":false,"permissionPrompts":false,"zOrder":false,"zoom":false,"find":false,"devTools":false,"contextMenu":false,"print":false,"clipboard":false,"menuAccelerators":false,"unhandledKeys":false,"forwardKeys":false,"blur":false,"keyUp":false,"forwardKeysBeforeMenu":false}
+op_desktop_webview_capabilities -> {"supported":false,"engine":null,"capture":false,"evaluate":false,"persistentPartitions":false,"permissionPrompts":false,"zOrder":false,"zoom":false,"find":false,"devTools":false,"contextMenu":false,"print":false,"clipboard":false,"menuAccelerators":false,"unhandledKeys":false,"forwardKeys":false,"blur":false,"keyUp":false,"forwardKeysBeforeMenu":false,"downloadEvents":false,"downloadPause":false,"permissionRequests":false}
 op_desktop_webview_set_bounds -> false
 op_desktop_webview_set_visible -> false
 op_desktop_webview_navigate -> {"ok":false,"code":"unsupported","message":"embedded web views are not supported by this desktop backend"}
@@ -96,6 +96,9 @@ op_desktop_webview_stop_find -> false
 op_desktop_webview_open_devtools -> {"ok":false,"code":"unsupported","message":"embedded web views are not supported by this desktop backend"}
 op_desktop_webview_print -> false
 op_desktop_webview_set_forward_keys -> false
+op_desktop_webview_download_control -> {"ok":false,"code":"unsupported","message":"embedded web views are not supported by this desktop backend"}
+op_desktop_webview_permission_respond -> {"ok":false,"code":"unsupported","message":"embedded web views are not supported by this desktop backend"}
+op_desktop_menu_snapshot -> null
 op_desktop_app_update_info -> false
 op_desktop_app_update_check throws Error: not_configured: full-app updates are only available in a packaged desktop app
 op_desktop_app_update_begin throws Error: not_configured: full-app updates are only available in a packaged desktop app
