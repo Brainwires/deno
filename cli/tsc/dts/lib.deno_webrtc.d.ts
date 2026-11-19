@@ -387,6 +387,46 @@ interface RTCRtpEncodingParameters {
   /** Whether the sender may vary an audio frame's length with the network
    * (it keeps the length as written; default false). */
   adaptivePtime?: boolean;
+  /** The codec this encoding is sent with: one of
+   * `RTCRtpSender.getCapabilities(kind).codecs` (`addTransceiver`), or of
+   * the negotiated codecs (`setParameters`). */
+  codec?: RTCRtpCodec;
+  /** How much effort the encoder spends (video; webrtc-extensions). */
+  encodingComplexity?: RTCEncodingComplexity;
+  /** The scalability mode (video; webrtc-svc), such as `"L1T3"`. */
+  scalabilityMode?: string;
+}
+
+/**
+ * How much effort a video encoder spends on an encoding.
+ *
+ * @category WebRTC
+ */
+type RTCEncodingComplexity =
+  | "low"
+  | "normal"
+  | "high"
+  | "very-high"
+  | "maximum";
+
+/**
+ * Per-encoding options of one `setParameters()` call (webrtc-extensions).
+ *
+ * @category WebRTC
+ */
+interface RTCEncodingOptions {
+  /** Asks the encoder for a key frame on this encoding. */
+  keyFrame?: boolean;
+}
+
+/**
+ * The second argument of `RTCRtpSender.setParameters()`.
+ *
+ * @category WebRTC
+ */
+interface RTCSetParameterOptions {
+  /** One entry per encoding, or none. */
+  encodingOptions?: RTCEncodingOptions[];
 }
 
 /**
@@ -824,7 +864,10 @@ interface RTCRtpSender {
   getParameters(): RTCRtpSendParameters;
   getStats(): Promise<RTCStatsReport>;
   replaceTrack(withTrack: MediaStreamTrack | null): Promise<void>;
-  setParameters(parameters: RTCRtpSendParameters): Promise<void>;
+  setParameters(
+    parameters: RTCRtpSendParameters,
+    setParameterOptions?: RTCSetParameterOptions,
+  ): Promise<void>;
   setStreams(...streams: MediaStream[]): void;
   /** An `RTCRtpScriptTransform` or `RTCRtpSFrameEncryptor` the sender's
    * encoded frames go through before they are sent (a transform serves one
