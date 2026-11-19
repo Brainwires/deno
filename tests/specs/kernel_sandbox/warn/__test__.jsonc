@@ -1,0 +1,100 @@
+// denext (DENEXT.md item 957): the kernel sandbox's warn mode and the rollout
+// stages of `auto`. `--kernel-sandbox=warn` reports what `enforce` would
+// refuse (the policy's startup refusals, an advisory for a program known to
+// need a grant, and on macOS what native code and children do) and refuses
+// nothing; DENO_KERNEL_SANDBOX_WARN_LOG collects it as JSON lines.
+// DENO_INTERNAL_KERNEL_SANDBOX_STAGE (the harnesses' switch) runs `auto` at a
+// later stage: r3 warns for a run with no terminal, r4 enforces it, and a
+// mode `auto` chose never refuses to start.
+{
+  "tempDir": true,
+  "tests": {
+    // an advisory for a program the run starts, and the log's records; the
+    // observer is off, so this is the same on every OS
+    "advisory_and_log": {
+      "steps": [
+        {
+          "envs": {
+            "DENO_KERNEL_SANDBOX_WARN_LOG": "warn.jsonl",
+            "DENO_KERNEL_SANDBOX_WARN_OBSERVE": "0"
+          },
+          "args": "run --kernel-sandbox=warn --allow-run=git --allow-read=. spawn.ts",
+          "output": "advisory.out"
+        },
+        {
+          "args": "run --allow-read=. read_log.ts",
+          "output": "log.out"
+        }
+      ]
+    },
+    // nothing to report: the mode's line and the program's output, as before
+    "nothing_to_report": {
+      "envs": { "DENO_KERNEL_SANDBOX_WARN_OBSERVE": "0" },
+      "args": "run --kernel-sandbox=warn --allow-read=. main.ts",
+      "output": "quiet.out"
+    },
+    // macOS: a child reads a file outside the grant; the run goes on, and
+    // the kernel's report comes back with the program and the grant
+    "observer_reports_a_child": {
+      "if": "mac",
+      "args": "run --kernel-sandbox=warn --allow-run=cat --allow-read=granted child.ts",
+      "output": "observer.out"
+    },
+    // R3: a run with no terminal that starts programs prints the notice
+    "stage_r3_notice": {
+      "if": "kernelSandboxEnforce",
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r3" },
+      "args": "run --allow-read=. --allow-run=git main.ts",
+      "output": "r3_notice.out"
+    },
+    // R3: with nothing native in the grant there is nothing to say
+    "stage_r3_quiet": {
+      "if": "kernelSandboxEnforce",
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r3" },
+      "args": "run --allow-read=. main.ts",
+      "output": "hello.out"
+    },
+    // R3: `auto` written out is the author's choice: enforced
+    "stage_r3_explicit_auto": {
+      "if": "kernelSandboxEnforce",
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r3" },
+      "args": "run --kernel-sandbox=auto --kernel-sandbox-report --allow-read=. main.ts",
+      "output": "r3_explicit_auto.out"
+    },
+    // R4: a run with no terminal is enforced
+    "stage_r4_enforces": {
+      "if": "kernelSandboxEnforce",
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r4" },
+      "args": "run --kernel-sandbox-report --allow-read=. main.ts",
+      "output": "r4_enforces.out"
+    },
+    // R4: a command enforce doesn't cover runs as warn, never an error
+    "stage_r4_falls_back": {
+      "if": "kernelSandboxEnforce",
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r4" },
+      "args": "test --no-check --allow-read=. a_test.ts",
+      "output": "r4_fallback.out"
+    },
+    // plain -A and an explicit off are never changed by a stage
+    "stage_r4_allow_all": {
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r4" },
+      "args": "run -A main.ts",
+      "output": "hello.out"
+    },
+    "stage_r4_off": {
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r4" },
+      "args": "run --kernel-sandbox=off --allow-read=. --allow-run=git main.ts",
+      "output": "hello.out"
+    },
+    "stage_in_info": {
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r3" },
+      "args": "info --json",
+      "output": "info_r3.out"
+    },
+    "stage_invalid_value_is_ignored": {
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "preview" },
+      "args": "run main.ts",
+      "output": "stage_invalid.out"
+    }
+  }
+}

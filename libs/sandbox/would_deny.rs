@@ -55,6 +55,13 @@ pub const WOULD_DENY_FORMAT: u32 = 1;
 /// file. Unset: stderr only.
 pub const WARN_LOG_ENV_VAR: &str = "DENO_KERNEL_SANDBOX_WARN_LOG";
 
+/// `0` keeps a warn run from applying its observer (macOS: the reporting
+/// Seatbelt profile): it then reports from the policy and the runtime only,
+/// and nothing at all is applied to the process. For a warn run of a program
+/// that applies a sandbox of its own, and for tools that only want the
+/// policy's own findings.
+pub const WARN_OBSERVE_ENV_VAR: &str = "DENO_KERNEL_SANDBOX_WARN_OBSERVE";
+
 /// The most distinct events printed to stderr; the rest are counted (and
 /// still written to the log file).
 pub const MAX_PRINTED: usize = 20;
@@ -211,6 +218,12 @@ pub struct WouldDeny {
   pub grant: Option<Grant>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub note: Option<String>,
+  /// The OS's own libraries made the access, in whatever program loaded
+  /// them, and do without it when it is refused (see [`system_noise`]): it
+  /// is written to the log, never printed, and never counted or turned into
+  /// a grant to add.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub benign: bool,
 }
 
 /// Names in a home folder that usually hold credentials: a suggestion to
@@ -257,6 +270,7 @@ impl WouldDeny {
       process: None,
       grant: None,
       note: None,
+      benign: false,
     }
   }
 
@@ -368,6 +382,14 @@ impl WouldDeny {
 
   /// The line printed for the event (without the `Warning` prefix).
   pub fn message(&self) -> String {
+    if self.source == Source::Advisory {
+      // nothing was refused or would be: what is known about a program
+      return format!(
+        "kernel sandbox (warn): {} inside the sandbox: {}",
+        self.target,
+        self.note.as_deref().unwrap_or("see the documentation")
+      );
+    }
     let mut out = String::from("kernel sandbox (warn): enforce would refuse ");
     let verb = self.class.verb();
     if !verb.is_empty() {
@@ -477,12 +499,19 @@ pub struct Summary {
   pub grants: Vec<Grant>,
   /// Distinct events no grant allows.
   pub ungrantable: usize,
+  /// Advisories about started programs (not counted in `distinct`).
+  pub advisories: usize,
+  /// Accesses by the OS's own libraries that do without them (logged only,
+  /// not counted in `distinct`).
+  pub benign: usize,
 }
 
 struct Reporter {
   seen: HashSet<(AccessClass, String, Option<String>)>,
   events: Vec<WouldDeny>,
   total: u64,
+  /// Distinct benign events (logged only).
+  benign: usize,
   printed: usize,
   log: Option<std::fs::File>,
   print: bool,
@@ -505,6 +534,10 @@ impl Reporter {
       v: WOULD_DENY_FORMAT,
       event: event.clone(),
     });
+    if event.benign {
+      self.benign += 1;
+      return;
+    }
     if self.print && self.printed < MAX_PRINTED {
       self.printed += 1;
       log::warn!("Warning {}", event.message());
@@ -516,7 +549,12 @@ impl Reporter {
     let mut by_class = BTreeMap::new();
     let mut grants: Vec<Grant> = Vec::new();
     let mut ungrantable = 0;
+    let mut advisories = 0;
     for event in &self.events {
+      if event.source == Source::Advisory {
+        advisories += 1;
+        continue;
+      }
       *by_class.entry(event.class).or_insert(0) += 1;
       match &event.grant {
         Some(grant) => grants.push(grant.clone()),
@@ -526,12 +564,14 @@ impl Reporter {
     grants.sort();
     grants.dedup();
     Summary {
-      distinct: self.events.len(),
+      distinct: self.events.len() - advisories,
       total: self.total,
       unprinted: self.events.len().saturating_sub(self.printed),
       by_class,
       grants,
       ungrantable,
+      advisories,
+      benign: self.benign,
     }
   }
 }
@@ -554,6 +594,7 @@ pub struct ReporterConfig {
 /// returns whether this one did. A log file that can't be opened for append
 /// leaves the file sink off (the events are still printed).
 pub fn install(config: ReporterConfig) -> bool {
+  #[allow(clippy::disallowed_methods, reason = "the real file system")]
   let log = config.log.as_ref().and_then(|path| {
     std::fs::OpenOptions::new()
       .create(true)
@@ -566,6 +607,7 @@ pub fn install(config: ReporterConfig) -> bool {
       seen: HashSet::new(),
       events: Vec::new(),
       total: 0,
+      benign: 0,
       printed: 0,
       log,
       print: config.print,
@@ -613,18 +655,33 @@ pub fn summary() -> Summary {
     .unwrap_or_default()
 }
 
-/// The last line of a warn run: how many accesses `enforce` would refuse
-/// and the grants that would allow them. `None` when nothing was reported.
+/// The last line of a warn run: the rules `enforce` would refuse to start
+/// over, how many accesses it would refuse, and the grants that would allow
+/// them. `None` when nothing was reported (advisories aside).
 pub fn summary_line(summary: &Summary) -> Option<String> {
   if summary.distinct == 0 {
     return None;
   }
-  let mut out = format!(
-    "kernel sandbox (warn): enforce would refuse {} access(es)",
-    summary.distinct
-  );
+  let startup = summary
+    .by_class
+    .get(&AccessClass::Startup)
+    .copied()
+    .unwrap_or(0);
+  let accesses = summary.distinct - startup;
+  let mut out = String::from("kernel sandbox (warn): enforce would refuse ");
+  if startup > 0 {
+    out.push_str(&format!(
+      "to start over {startup} rule(s) the OS can't hold here"
+    ));
+  }
+  if accesses > 0 {
+    if startup > 0 {
+      out.push_str(", and would refuse ");
+    }
+    out.push_str(&format!("{accesses} access(es)"));
+  }
   if summary.unprinted > 0 {
-    out.push_str(&format!(" ({} not shown above)", summary.unprinted));
+    out.push_str(&format!(" ({} line(s) not shown above)", summary.unprinted));
   }
   if !summary.grants.is_empty() {
     const SHOWN: usize = 12;
@@ -642,11 +699,10 @@ pub fn summary_line(summary: &Summary) -> Option<String> {
       out.push_str(&format!(" (+{} more)", summary.grants.len() - SHOWN));
     }
   }
-  if summary.ungrantable > 0 {
-    out.push_str(&format!(
-      ". {} can't be granted (see each line)",
-      summary.ungrantable
-    ));
+  // a startup rule has no grant by nature: only accesses count here
+  let ungrantable = summary.ungrantable.saturating_sub(startup);
+  if ungrantable > 0 {
+    out.push_str(&format!(". {ungrantable} can't be granted (see each line)"));
   }
   Some(out)
 }
@@ -720,6 +776,14 @@ pub fn parse_seatbelt_report(message: &str, tag: &str) -> Option<WouldDeny> {
       target.strip_prefix("path:").unwrap_or(target),
       "terminal ioctls are refused (a terminal can be made to type commands)",
     )
+  } else if (op.starts_with("file-read") || op.starts_with("file-write"))
+    && is_terminal_device(detail)
+  {
+    WouldDeny::ungrantable(
+      AccessClass::Other,
+      detail,
+      "a terminal other than the run's own is refused, whatever is granted",
+    )
   } else if op.starts_with("file-read") {
     WouldDeny::read(&path(detail))
   } else if op.starts_with("file-write") || op == "file-link" {
@@ -765,12 +829,62 @@ pub fn parse_seatbelt_report(message: &str, tag: &str) -> Option<WouldDeny> {
   } else {
     WouldDeny::ungrantable(AccessClass::Other, detail, none)
   };
-  Some(
-    event
-      .with_op(op)
-      .from_source(Source::Os)
-      .by(pid, Some(name)),
-  )
+  let mut event = event
+    .with_op(op)
+    .from_source(Source::Os)
+    .by(pid, Some(name));
+  event.benign = system_noise(op, detail);
+  Some(event)
+}
+
+/// What macOS's own libraries do in any process that loads them, refused
+/// by the cli profile and done without: the logging and network libraries
+/// reading their preferences and looking up their daemons when they first
+/// initialise, the text-encoding hint in the home folder. An access here is
+/// not the program's doing and needs no grant. Kept short and exact on
+/// purpose: an entry is added only for an access seen to be refused under
+/// `enforce` with the program carrying on.
+const SYSTEM_NOISE_PATHS: &[&str] = &[
+  "/Library/Preferences/com.apple.networkd.plist",
+  "/Library/Preferences/Logging/",
+  "/private/var/run/mDNSResponder",
+  "/dev/autofs_nowait",
+];
+const SYSTEM_NOISE_SERVICES: &[&str] = &[
+  "com.apple.diagnosticd",
+  "com.apple.logd",
+  "com.apple.system.opendirectoryd.libinfo",
+];
+
+/// Whether a Seatbelt report (`op`, with its detail) is one of the accesses
+/// in [`SYSTEM_NOISE_PATHS`] / [`SYSTEM_NOISE_SERVICES`], or a read of the
+/// network configuration (`system-info`).
+pub fn system_noise(op: &str, detail: &str) -> bool {
+  if op == "system-info" {
+    return true;
+  }
+  if op == "mach-lookup" {
+    return SYSTEM_NOISE_SERVICES.contains(&detail);
+  }
+  let path = detail.strip_prefix("path:").unwrap_or(detail);
+  (op.starts_with("file-read") || op == "network-outbound")
+    && (SYSTEM_NOISE_PATHS
+      .iter()
+      .any(|p| match p.strip_suffix('/') {
+        Some(_) => path.starts_with(p),
+        None => path == *p,
+      })
+      || path.ends_with("/.CFUserTextEncoding"))
+}
+
+/// Whether `path` is a terminal device the cli profile refuses unless it is
+/// one of the run's own (`/dev/tty`, `/dev/ttysNNN`, `/dev/pty…`).
+fn is_terminal_device(path: &str) -> bool {
+  path == "/dev/tty"
+    || path.starts_with("/dev/pty")
+    || path
+      .strip_prefix("/dev/ttys")
+      .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The port of a Seatbelt network detail such as `remote:*:443` or
@@ -978,6 +1092,7 @@ mod tests {
       seen: HashSet::new(),
       events: Vec::new(),
       total: 0,
+      benign: 0,
       printed: 0,
       log: None,
       print: false,
@@ -1008,12 +1123,61 @@ mod tests {
     );
     assert_eq!(
       summary_line(&summary).unwrap(),
-      "kernel sandbox (warn): enforce would refuse 4 access(es) (4 not shown above). Grants that would allow them: --allow-net=<host>:443 --allow-read=/a. 1 can't be granted (see each line)"
+      "kernel sandbox (warn): enforce would refuse 4 access(es) (4 line(s) not shown above). Grants that would allow them: --allow-net=<host>:443 --allow-read=/a. 1 can't be granted (see each line)"
     );
     assert_eq!(summary_line(&Summary::default()), None);
+    // an advisory is said, never counted as a refusal
+    let advisory = WouldDeny::ungrantable(
+      AccessClass::Exec,
+      "git",
+      "it reads its configuration",
+    )
+    .from_source(Source::Advisory);
+    assert_eq!(
+      advisory.message(),
+      "kernel sandbox (warn): git inside the sandbox: it reads its configuration"
+    );
+    reporter.report(advisory);
+    let summary = reporter.summary();
+    assert_eq!((summary.distinct, summary.advisories), (4, 1));
+    assert_eq!(summary.ungrantable, 1);
+    // rules enforce wouldn't start over are said apart from accesses
+    reporter.report(WouldDeny::startup(
+      "--allow-net=example.com",
+      "needs Mode B",
+    ));
+    let line = summary_line(&reporter.summary()).unwrap();
+    assert!(
+      line.starts_with(
+        "kernel sandbox (warn): enforce would refuse to start over 1 rule(s) the OS can't hold here, and would refuse 4 access(es)"
+      ),
+      "{line}"
+    );
+    assert!(
+      line.ends_with("1 can't be granted (see each line)"),
+      "{line}"
+    );
+    let mut only_startup = Reporter {
+      seen: HashSet::new(),
+      events: Vec::new(),
+      total: 0,
+      benign: 0,
+      printed: 1,
+      log: None,
+      print: false,
+    };
+    only_startup.report(WouldDeny::startup(
+      "--allow-net=example.com",
+      "needs Mode B",
+    ));
+    assert_eq!(
+      summary_line(&only_startup.summary()).unwrap(),
+      "kernel sandbox (warn): enforce would refuse to start over 1 rule(s) the OS can't hold here"
+    );
   }
 
   #[test]
+  #[allow(clippy::disallowed_methods, reason = "the real file system")]
   fn the_reporter_appends_json_lines() {
     let dir = std::env::temp_dir().join(format!(
       "deno_sandbox_would_deny_{}_{:?}",
@@ -1035,6 +1199,7 @@ mod tests {
         seen: HashSet::new(),
         events: Vec::new(),
         total: 0,
+        benign: 0,
         printed: 0,
         log: Some(open()),
         print: false,
@@ -1150,6 +1315,26 @@ mod tests {
     assert_eq!(event.target, "/dev/ttys003");
     assert_eq!(event.grant, None);
 
+    // a terminal that isn't the run's own: no grant
+    for line in [
+      "Sandbox: bash(4) allow file-read-data /dev/tty",
+      "Sandbox: bash(4) allow file-write-data /dev/ttys012",
+      "Sandbox: script(4) allow file-read-data /dev/ptmx-like",
+    ] {
+      let event = seatbelt(line);
+      if line.contains("ptmx-like") {
+        // not a terminal device name the profile refuses: an ordinary path
+        assert!(event.unwrap().grant.is_some(), "{line}");
+        continue;
+      }
+      let event = event.unwrap();
+      assert_eq!(event.grant, None, "{line}");
+      assert_eq!(event.class, AccessClass::Other, "{line}");
+    }
+    let event =
+      seatbelt("Sandbox: sh(4) allow file-read-data /dev/ttyS-notes").unwrap();
+    assert!(event.grant.is_some());
+
     // the kernel's duplicate counter
     let event = seatbelt(
       "Sandbox: 3 duplicate reports for git(9) allow file-read-data /Users/me/.gitconfig",
@@ -1165,6 +1350,68 @@ mod tests {
     assert_eq!(
       event.process.unwrap().name.as_deref(),
       Some("Google Chrome (Helper)")
+    );
+  }
+
+  #[test]
+  fn system_library_noise_is_logged_never_counted() {
+    for line in [
+      "Sandbox: deno(2) allow file-read-data /Library/Preferences/com.apple.networkd.plist",
+      "Sandbox: deno(2) allow file-read-data /Library/Preferences/Logging/com.apple.diagnosticd.filter.plist",
+      "Sandbox: deno(2) allow mach-lookup com.apple.diagnosticd",
+      "Sandbox: nc(3) allow mach-lookup com.apple.system.opendirectoryd.libinfo",
+      "Sandbox: deno(2) allow system-info net.link.addr",
+      "Sandbox: deno(2) allow network-outbound /private/var/run/mDNSResponder",
+      "Sandbox: nc(3) allow file-read-data /Users/me/.CFUserTextEncoding",
+      "Sandbox: nc(3) allow file-read-data /dev/autofs_nowait",
+    ] {
+      assert!(seatbelt(line).unwrap().benign, "{line}");
+    }
+    for line in [
+      // the program's doing: a preference file of its own, another service,
+      // a write, another socket
+      "Sandbox: deno(2) allow file-read-data /Library/Preferences/com.example.app.plist",
+      "Sandbox: deno(2) allow mach-lookup com.apple.windowserver.active",
+      "Sandbox: deno(2) allow file-write-data /Library/Preferences/Logging/x.plist",
+      "Sandbox: deno(2) allow network-outbound /private/var/run/docker.sock",
+      "Sandbox: git(9) allow file-read-data /Users/me/.gitconfig",
+    ] {
+      assert!(!seatbelt(line).unwrap().benign, "{line}");
+    }
+    let mut reporter = Reporter {
+      seen: HashSet::new(),
+      events: Vec::new(),
+      total: 0,
+      benign: 0,
+      printed: 0,
+      log: None,
+      print: false,
+    };
+    reporter.report(
+      seatbelt("Sandbox: deno(2) allow system-info net.link.addr").unwrap(),
+    );
+    reporter.report(
+      seatbelt("Sandbox: git(9) allow file-read-data /Users/me/.gitconfig")
+        .unwrap(),
+    );
+    let summary = reporter.summary();
+    assert_eq!((summary.distinct, summary.benign), (1, 1));
+    assert_eq!(summary.grants.len(), 1);
+    // the record says so, and an ordinary one leaves the field out
+    let line = Record::WouldDeny {
+      v: WOULD_DENY_FORMAT,
+      event: seatbelt("Sandbox: deno(2) allow system-info net.link.addr")
+        .unwrap(),
+    }
+    .to_line();
+    assert!(line.contains("\"benign\":true"), "{line}");
+    assert_eq!(
+      Record::from_line(&line),
+      Some(Record::WouldDeny {
+        v: WOULD_DENY_FORMAT,
+        event: seatbelt("Sandbox: deno(2) allow system-info net.link.addr")
+          .unwrap(),
+      })
     );
   }
 

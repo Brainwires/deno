@@ -22,7 +22,9 @@
       "args": "run --kernel-sandbox=auto --kernel-sandbox-report main.ts",
       "output": "report_explicit_auto.out"
     },
+    // the mode's line; the observer (macOS) has its own test, ../warn
     "warn": {
+      "envs": { "DENO_KERNEL_SANDBOX_WARN_OBSERVE": "0" },
       "args": "run --kernel-sandbox=warn main.ts",
       "output": "warn.out"
     },
@@ -49,6 +51,7 @@
     },
     "config": {
       "cwd": "config",
+      "envs": { "DENO_KERNEL_SANDBOX_WARN_OBSERVE": "0" },
       "args": "run main.ts",
       "output": "warn.out"
     },

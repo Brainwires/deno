@@ -21,6 +21,7 @@
 pub mod enforce;
 pub mod inherit;
 pub mod policy;
+pub mod warn;
 
 use std::fmt::Write as _;
 use std::io::IsTerminal;
@@ -31,9 +32,11 @@ use deno_core::anyhow::bail;
 use deno_core::error::AnyError;
 use deno_core::serde_json;
 use deno_lib::kernel_sandbox::AutoPlan;
+use deno_lib::kernel_sandbox::AutoStage;
 use deno_lib::kernel_sandbox::ForcedEnforce;
 use deno_lib::kernel_sandbox::KERNEL_SANDBOX_ENV_VAR;
 use deno_lib::kernel_sandbox::KERNEL_SANDBOX_FORCE_ENV_VAR;
+use deno_lib::kernel_sandbox::KERNEL_SANDBOX_STAGE_ENV_VAR;
 use deno_lib::kernel_sandbox::KernelSandboxMode;
 use deno_lib::kernel_sandbox::ModeInputs;
 use deno_lib::kernel_sandbox::ModeReason;
@@ -122,6 +125,35 @@ fn env_override_warned() -> Option<KernelSandboxMode> {
       });
       None
     }
+  }
+}
+
+/// The harnesses' rollout stage (`DENO_INTERNAL_KERNEL_SANDBOX_STAGE`, item
+/// 957); a value that isn't one is ignored with a warning.
+fn stage_override_warned() -> Option<AutoStage> {
+  match deno_lib::kernel_sandbox::stage_override() {
+    Ok(stage) => stage,
+    Err(value) => {
+      static WARN: Once = Once::new();
+      WARN.call_once(|| {
+        log::warn!(
+          "{} {KERNEL_SANDBOX_STAGE_ENV_VAR}={value:?} is ignored: it accepts only \"r3\" and \"r4\"",
+          crate::colors::yellow("Warning"),
+        );
+      });
+      None
+    }
+  }
+}
+
+/// Whether `enforce` covers the command: `run` of a file and `serve` (the
+/// others refuse to start under an `enforce` asked for by name; one `auto`
+/// chose runs them as `warn`).
+fn enforce_covers(subcommand: &DenoSubcommand) -> bool {
+  match subcommand {
+    DenoSubcommand::Run(run) => !run.is_stdin(),
+    DenoSubcommand::Serve(_) => true,
+    _ => false,
   }
 }
 
@@ -251,6 +283,7 @@ fn mode_inputs(
   let flags = cli_options.flags();
   Ok(ModeInputs {
     forced: forced_for(&flags.subcommand),
+    stage: stage_override_warned(),
     kind: Some(run_kind(&flags.subcommand)),
     flag: flag_mode(cli_options)?,
     env: env_override_warned(),
@@ -519,9 +552,25 @@ pub fn check_run(
   node_modules: Option<PathBuf>,
 ) -> Result<ModeResolution, AnyError> {
   let inputs = mode_inputs(cli_options, options)?;
-  let resolution = kernel_sandbox_mode(&inputs)?;
+  let mut resolution = kernel_sandbox_mode(&inputs)?;
   let report = cli_options.flags().permissions.kernel_sandbox_report
     && inputs.kind != Some(RunKind::NotARuntime);
+  // a mode `auto` chose never refuses to start (item 957): where enforce
+  // can't hold the grant, the run is a warn one, and says why
+  let covered = enforce_covers(&cli_options.flags().subcommand);
+  let mut degraded: Option<String> = None;
+  if resolution.auto_chosen && resolution.mode.fails_closed() {
+    if enforce::confined_by_a_parent() || !detect_capabilities().enforcer_built
+    {
+      // the parent's sandbox already holds this process and its children;
+      // or this runtime has no enforcer for the OS: the run stays as it was
+      resolution.mode = KernelSandboxMode::Off;
+      resolution.auto_chosen = false;
+    } else if !covered {
+      degraded = Some("enforce doesn't cover this command yet".to_string());
+      resolution.mode = KernelSandboxMode::Warn;
+    }
+  }
   if resolution.mode == KernelSandboxMode::Off && !report {
     return Ok(resolution);
   }
@@ -564,13 +613,27 @@ pub fn check_run(
       compiled = KernelPolicy::compile(options, &implicit, &ctx);
     }
   }
+  if resolution.auto_chosen
+    && resolution.mode.fails_closed()
+    && !enforce::confined_at_startup()
+  {
+    let fatal = warn::fatal_gaps(&compiled, &ctx);
+    if !fatal.is_empty() {
+      degraded =
+        Some(format!("{} rule(s) the OS can't hold here", fatal.len()));
+      resolution.mode = KernelSandboxMode::Warn;
+    }
+  }
   static PRINTED: Once = Once::new();
   PRINTED.call_once(|| {
     // the image before a re-exec (Linux) already printed it
     if enforce::confined_at_startup() {
       return;
     }
-    #[allow(clippy::print_stderr, reason = "the report is the output asked for")]
+    #[allow(
+      clippy::print_stderr,
+      reason = "the report is the output asked for"
+    )]
     if report {
       // the OS translation's own gaps too (macOS)
       let mut shown = compiled.clone();
@@ -580,16 +643,30 @@ pub fn check_run(
         "{}",
         render_report(&resolution, &ctx.caps, &shown, &skipped)
       );
-    } else if resolution.mode == KernelSandboxMode::Warn {
-      let deno_only = compiled
-        .gaps
-        .iter()
-        .filter(|g| g.resolution == GapResolution::FailOpen)
-        .count();
-      eprintln!(
-        "{} kernel sandbox (warn, preview): nothing is refused; {deno_only} rule(s) would be held by Deno's checks only. Run with --kernel-sandbox-report for the policy.",
-        crate::colors::yellow("Warning"),
-      );
+    }
+    if resolution.mode == KernelSandboxMode::Warn {
+      // warn reports what enforce would do with the grant: the policy as
+      // enforce compiles it
+      let enforced;
+      let (compiled, ctx) = if ctx.mode == KernelSandboxMode::Enforce {
+        (&compiled, &ctx)
+      } else {
+        let mut ctx = ctx.clone();
+        ctx.mode = KernelSandboxMode::Enforce;
+        let implicit = ImplicitSet::build(options, &ctx);
+        enforced = (KernelPolicy::compile(options, &implicit, &ctx), ctx);
+        (&enforced.0, &enforced.1)
+      };
+      warn::start(warn::WarnRun {
+        resolution: &resolution,
+        compiled,
+        ctx,
+        options,
+        observable: covered,
+        degraded: degraded.clone(),
+        header: !report,
+        skipped_npmrcs: skipped_npmrcs(cli_options, ctx, compiled),
+      });
     }
   });
   if resolution.mode.fails_closed() {
@@ -1026,6 +1103,9 @@ pub struct KernelSandboxInfo {
   pub effective: KernelSandboxMode,
   /// What `auto` would choose for such a run.
   pub would_apply: AutoPlan,
+  /// How far the rollout of `auto` has come in this runtime: `preview`
+  /// (`auto` applies nothing), `r3`, `r4`.
+  pub stage: AutoStage,
   /// Why `effective` is what it is.
   pub reason: String,
   /// Whether the kernel enforces anything for such a run (`auto` applies
@@ -1058,6 +1138,7 @@ pub fn info(cli_options: &CliOptions) -> KernelSandboxInfo {
     config,
     prompt: true,
     terminals: false,
+    stage: stage_override_warned(),
     ..Default::default()
   };
   let resolution =
@@ -1089,6 +1170,7 @@ pub fn info(cli_options: &CliOptions) -> KernelSandboxInfo {
     source: resolution.source,
     effective: resolution.mode,
     would_apply: resolution.would_apply,
+    stage: resolution.stage,
     reason: resolution.reason.describe().to_string(),
     enforced: resolution.enforced,
     enforcer_built: caps.enforcer_built,

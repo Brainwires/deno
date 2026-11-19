@@ -6,6 +6,7 @@
     "source": "config",
     "effective": "warn",
     "wouldApply": "off",
+    "stage": "preview",
     "reason": "as requested",
 [WILDCARD]
   }

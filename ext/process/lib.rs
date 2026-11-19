@@ -2106,6 +2106,15 @@ fn check_run_permission(
       permissions.check_run(cmd, api_name)?;
     }
   }
+  // denext: the kernel sandbox's warn mode says what is known about the
+  // program inside a sandbox (DENEXT.md item 957)
+  if deno_permissions::kernel_sandbox_state::is_warning() {
+    let program = match cmd {
+      RunQueryDescriptor::Path(path) => path.display_name().into_owned(),
+      RunQueryDescriptor::Name(name) => name.clone(),
+    };
+    deno_permissions::kernel_sandbox_state::note_spawn(&program);
+  }
   Ok(())
 }
 

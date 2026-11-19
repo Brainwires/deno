@@ -56,3 +56,41 @@ start listen on every interface, and macOS's firewall asks about each unsigned
 debug binary: run the macOS beds on CI runners, not on a machine someone is
 using. A home without a `~/.npmrc` (as on CI runners) keeps the confined runs'
 "treated as absent" note out of every expected output.
+
+## Stage beds and the soak
+
+denext (DENEXT.md item 957). What `--kernel-sandbox=auto` applies is one
+constant (`AUTO_STAGE` in `cli/lib/kernel_sandbox.rs`). Before it moves, the
+suites run at the next stage with nothing forced:
+
+```sh
+DENO_INTERNAL_KERNEL_SANDBOX_STAGE=r4 \
+  cargo test -p specs_tests --test specs 2>&1 | tee specs.log
+deno run -A tests/kernel_sandbox_beds/compare.ts --force stage-r4 \
+  --suite specs --cargo-log specs.log
+```
+
+`r3`: a compiled program and an explicit `auto` enforce, a run with no terminal
+warns. `r4`: every run whose permissions are fixed enforces. The variable only
+raises the stage, so it only narrows. A mode `auto` chose never refuses to
+start: where enforce can't hold a grant the run falls back to warn, so a stage
+bed's failures are behaviour changes, not startup refusals. Their lists are the
+`stage-r3` / `stage-r4` keys of `expected_failures.jsonc`.
+
+In CI: the workflow's `stage` input with `force: none`.
+
+A stage flips only after its bed soaked: **seven green full runs in a row**
+(every suite, macOS included), each started four hours or more after the one
+before, all on the candidate commit or its ancestors, the newest on the
+candidate itself. A full run that fails or is cancelled resets the count. The
+runs are dispatched by hand (no schedule); the four-hour spacing keeps what
+seven nights gave (a day at least of different times and runner states), and
+seven dispatches at once count as one.
+
+```sh
+deno run -A tests/kernel_sandbox_beds/soak.ts --bed stage-r4 --candidate <sha>
+```
+
+prints the counted runs, what is missing and the `gh workflow run` line for the
+next one; it exits 0 when the soak is complete. `r4_preconditions.ts` checks the
+rest of what must hold before the R4 flip.

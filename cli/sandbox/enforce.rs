@@ -121,6 +121,8 @@ const RUNTIME_CONFIG_ENV: &[&str] = &[
   "DENO_KERNEL_SANDBOX",
   // the harnesses' forced enforce: both images decide the same mode
   "DENO_INTERNAL_KERNEL_SANDBOX_FORCE",
+  // and the harnesses' rollout stage, for the same reason (item 957)
+  "DENO_INTERNAL_KERNEL_SANDBOX_STAGE",
   "DENO_SERVE_ADDRESS",
   "DENO_AUTO_SERVE",
   "DENO_USE_CGROUPS",
@@ -1022,6 +1024,18 @@ fn create_runtime_dirs(ctx: &Context) -> Result<(), AnyError> {
 /// module files readable.
 #[cfg(target_os = "macos")]
 fn macos_profile(plan: &EnforcePlan) -> Result<String, String> {
+  Ok(deno_sandbox::seatbelt::cli_profile(
+    &macos_plan_with_modules(plan)?,
+  ))
+}
+
+/// A plan's macOS part with the program's module files readable: what the
+/// enforce profile is written from, and warn mode's reporting profile
+/// (item 957).
+#[cfg(target_os = "macos")]
+pub(super) fn macos_plan_with_modules(
+  plan: &EnforcePlan,
+) -> Result<deno_sandbox::plan::MacosPlan, String> {
   let Some(macos) = &plan.macos else {
     return Err("the plan has no macOS part".to_string());
   };
@@ -1034,7 +1048,7 @@ fn macos_profile(plan: &EnforcePlan) -> Result<String, String> {
       }
     }
   }
-  Ok(deno_sandbox::seatbelt::cli_profile(&macos))
+  Ok(macos)
 }
 
 /// macOS, the image after the re-exec, first thing in `main` (before it
@@ -1341,6 +1355,16 @@ pub async fn apply_pending(
 ) -> Result<(), AnyError> {
   // the permission check that prepares the plan runs on first use
   factory.root_permissions_container()?;
+  // warn mode's observer applies where enforce would confine the process:
+  // the graph loaded, no user code run yet (item 957)
+  if super::warn::is_pending() {
+    // a graph that doesn't load is the run's own error to report: no
+    // observer then (it would report the program's modules)
+    if let Ok(files) = graph_module_files(factory, roots).await {
+      super::warn::apply_observer(files);
+    }
+    return Ok(());
+  }
   if let Some(handed_over) = VERIFY_MODULES.get() {
     // the image before this one listed these as the graph's modules: each
     // must be one of this run's own, or the hand-over widened something

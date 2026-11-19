@@ -6,6 +6,7 @@
     "source": "default",
     "effective": "off",
     "wouldApply": "warn",
+    "stage": "preview",
     "reason": "auto applies nothing yet (the kernel sandbox is an opt-in preview)",
     "enforced": false,
     "enforcerBuilt": [WILDLINE],

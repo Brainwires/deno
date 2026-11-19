@@ -17800,28 +17800,160 @@ where the changes are discussed.
      progress"), and the failed run sat four hours before its re-run. The same
      push started a second full `denext runtime` build of the commit (2 h 41
      min, 153 min of the one Intel Mac slot, 740 GitHub minutes), because the
-     train's runtime run that would have vouched for it ended 4 min 30 s
-     later. Two changes:
+     train's runtime run that would have vouched for it ended 4 min 30 s later.
+     Two changes:
      - The tag gate waits for `denext tests` runs of the commit that are still
        going, polling every 30 s for at most `PENDING_WAIT` seconds (1,800 in
        the workflow; unset: refuse at once, as before). The verdict is
        unchanged: the run must end, and end green, or the gate refuses.
-     - The guard treats two runs that are still going. For `denext runtime`,
-       the commit's own `denext-runtime-v*` tag build queued or running stands
-       for the push: every other job is skipped at once (if that tag build
-       fails it is the commit's red run, and the next release is a new
-       commit). For every guarded workflow, a run that would vouch once green
-       (by event and branch, item 354's kinds) is waited for, at most
-       `GUARD_WAIT` seconds (1,200 in the workflows; the guard job's timeout is
-       30 min), and the guard decides again; one still going at the limit
-       vouches for nothing, and a red run of the commit ends the wait with a
-       full run.
+     - The guard treats two runs that are still going. For `denext runtime`, the
+       commit's own `denext-runtime-v*` tag build queued or running stands for
+       the push: every other job is skipped at once (if that tag build fails it
+       is the commit's red run, and the next release is a new commit). For every
+       guarded workflow, a run that would vouch once green (by event and branch,
+       item 354's kinds) is waited for, at most `GUARD_WAIT` seconds (1,200 in
+       the workflows; the guard job's timeout is 30 min), and the guard decides
+       again; one still going at the limit vouches for nothing, and a red run of
+       the commit ends the wait with a full run.
      - User-facing note: none; CI only.
-     - Tests: `tag_gate_test.py` (the wait ends when the run ends, at its
-       limit, and a run that ends red still refuses), `guard_verified_test.py`
-       (the tag build under way, a failed tag build forcing a full run, a train
-       run awaited to green, to its limit and to red), run by the lint job.
+     - Tests: `tag_gate_test.py` (the wait ends when the run ends, at its limit,
+       and a run that ends red still refuses), `guard_verified_test.py` (the tag
+       build under way, a failed tag build forcing a full run, a train run
+       awaited to green, to its limit and to red), run by the lint job.
      - Node tests enabled: none, because this is CI only.
+
+457. **`feat(permissions)`: the kernel sandbox's warn mode, the rollout stages
+     of `auto`, and the gate in front of the R4 flip** (CLI, runtime and tests;
+     denext-only; opt-in, the shipped default unchanged; number to be assigned
+     at merge; `libs/sandbox/{would_deny,seatbelt,lib}.rs`,
+     `cli/sandbox/{warn,mod,enforce}.rs`, `cli/lib/kernel_sandbox.rs`,
+     `cli/lib.rs`, `runtime/permissions/{kernel_sandbox_state.rs,Cargo.toml}`,
+     `ext/process/lib.rs`, `tests/kernel_sandbox_beds/`,
+     `.github/workflows/denext_kernel_beds.yml`). Plan phase P10.
+     - One event for "the sandbox would refuse this":
+       `deno_sandbox::would_deny::WouldDeny` (the access's class and target, the
+       operation as seen, the source, the process when known, the grant that
+       would allow it or a note saying no grant can). Every part of the sandbox
+       that refuses under `enforce` reports one instead under `warn` and lets
+       the access go ahead:
+       `if would_deny::is_active() { would_deny::report(…) }
+       else { refuse }`.
+       The supervisor, the network connector and the desktop host (other phases)
+       report through it. The reporter prints each distinct event once through
+       `log::warn!` (the first 20) and appends one JSON object per line
+       (`Record`, format 1: a `run` line per process, then `wouldDeny` lines) to
+       the file `DENO_KERNEL_SANDBOX_WARN_LOG` names; several processes of a run
+       append to one file.
+     - `--kernel-sandbox=warn` reports from four sources. The policy, at
+       startup: each rule the OS can't hold here, over which `enforce` would
+       refuse to start (the policy is compiled as `enforce` compiles it; before,
+       warn counted the fail-open gaps of the policy compiled for warn). An
+       advisory for each program the run starts that is known to need a grant of
+       its own or to fail inside a sandbox (`program_advisory`: git, ssh, npm,
+       docker, sudo, a browser, tracers, sandbox builders), from
+       `deno_process`'s permission check. The runtime's decision points (above).
+       And the kernel, for native code and child processes, on macOS: the run
+       applies `seatbelt::cli_report_profile`, the enforce profile for the same
+       plan with `(deny default)` and every `(deny …)` rewritten as
+       `(allow
+       (with report) (with message "<tag>") …)` and the sandbox
+       marker left out, so it allows everything and reports exactly what
+       `enforce` refuses, tagged per run. It is applied in-process where
+       `enforce` re-executes (the graph loaded, its local files silent, no user
+       code run), with the shared DENO_DIR silent (an enforced run uses its
+       overlay). The lines are read back live from `log stream`, started before
+       the profile applies (macOS's `log` refuses to run inside any sandbox)
+       inside a shell that ends it within seconds of this process's end.
+       `log stream` prints its first line before it is attached, so the run
+       looks up a mach service that doesn't exist (the profile reports the
+       lookup) until that line comes back, before any user code runs (eight
+       seconds at most, then a warning) and again at exit (ten seconds at most),
+       so no access is missed at either end; then the summary line (the rules
+       `enforce` wouldn't start over, the count of accesses, the grants that
+       would allow them). What macOS's own libraries do in any process and do
+       without (the logging and network preference files, `diagnosticd` / `logd`
+       / directory lookups, the resolver socket, `system-info`, the
+       text-encoding hint) is marked `benign`: logged, never printed, counted or
+       turned into a grant; a terminal that isn't the run's own is reported with
+       no grant; the runtime's own system-information reads aren't reported.
+       Linux has no observer: Landlock has no permissive mode, and a seccomp
+       filter that only logs needs no-new-privileges, which changes what the
+       run's children can do; what native code and children would be refused
+       shows there only under `enforce` (the supervisor of Mode B is where a
+       tracing observer belongs: `Observer::SupervisorTrace` is reserved for
+       it).
+     - Decided on the safer side: the observer is applied only for a `warn`
+       asked for by name (the flag, deno.json, `DENO_KERNEL_SANDBOX`), on `run`
+       and `serve`. A Seatbelt profile, even one that allows everything, makes a
+       program that applies a sandbox of its own (a browser, `sandbox-exec`, a
+       nested `enforce`) fail, as under `enforce`: a mode chosen by a default
+       must not be able to break a program. `DENO_KERNEL_SANDBOX_WARN_OBSERVE=0`
+       turns it off for an asked-for warn too.
+     - The rollout of `auto` is one constant, `AUTO_STAGE` (`AutoStage`:
+       `Preview`, `R3`, `R4`; it replaces `AUTO_APPLIES`). `Preview` (shipped):
+       `auto` applies nothing, as before. `R3`: `auto` enforces where the author
+       fixed the permissions (a compiled program, `auto` written in a flag or
+       deno.json) and warns for a run fixed only because no prompt can happen.
+       `R4`: `auto` enforces wherever the set is fixed. Never changed by a
+       stage: a run that can prompt, plain `-A`, `--watch` / HMR / `denext dev`,
+       a permission broker, a desktop development build, an explicit `off`. A
+       mode `auto` chose (`ModeResolution::auto_chosen`) never refuses to start:
+       a command `enforce` doesn't cover (test, bench, repl, a program from
+       stdin) and a grant with a rule the OS can't hold run as warn, saying why
+       once; a process an ancestor's sandbox already holds adds nothing; a
+       compiled program with no enforcer in `denort` runs as before. The warn
+       `auto` chooses applies nothing to the process: the policy's startup
+       refusals and the advisories only, behind one notice printed once per
+       policy per machine (a marker in `DENO_DIR/kernel_sandbox_notices`), and
+       nothing at all for a run that grants neither `--allow-run` nor
+       `--allow-ffi` and has no rule the OS can't hold.
+       `DENO_INTERNAL_KERNEL_SANDBOX_STAGE=r3|r4` (the harnesses' switch, read
+       with `DENO_KERNEL_SANDBOX` before any env file, kept through the re-exec
+       and part of the compared plan) runs `auto` at a later stage; it can only
+       raise the stage. `deno info --json` → `kernelSandbox.stage`.
+     - The gate in front of a flip (`tests/kernel_sandbox_beds/`). The beds
+       workflow takes `stage` (with `force: none`): the suites run with a
+       stage's defaults, compared with the `stage-r3` / `stage-r4` lists (empty
+       until the first runs are triaged). Its run name carries its inputs.
+       `soak.ts` counts a bed's soak from the workflow's runs: seven green full
+       runs in a row (every suite, macOS included), each started four hours or
+       more after the one counted before, all on the candidate commit or its
+       ancestors, the newest on the candidate; a full run that failed or was
+       cancelled resets the count. The plan's "seven green nights" in runs: the
+       beds are dispatched by hand (no schedule), and the spacing keeps what
+       nights gave. `r4_preconditions.ts` checks the eight preconditions of the
+       R4 flip (review §7.4): `pass`, `fail`, or `manual` with the evidence
+       recorded in `r4_evidence.json`.
+     - Not in this item: the flip itself (`AUTO_STAGE` stays `Preview`); the
+       enforcer in `denort` and the desktop host (R3's compiled and desktop rows
+       need them); deny rules enforced while a prompt can happen (plan D1); a
+       Linux observer.
+     - User-facing note: `--kernel-sandbox=warn` now says what `enforce` would
+       refuse, line by line, with the grant that would allow each; on macOS that
+       includes what native code and child processes do.
+       `DENO_KERNEL_SANDBOX_WARN_LOG=<file>` collects it as JSON lines.
+     - Tests: `deno_sandbox`'s `would_deny::tests::*` (the grants, the
+       credential caution, the messages, the record format, duplicates, the file
+       sink, the Seatbelt line parser against lines captured on macOS, tags,
+       advisories) and
+       `seatbelt::tests::cli_report_profile_reports_what_enforce_refuses`;
+       `deno_lib`'s
+       `kernel_sandbox::tests::{auto_stage_matrix,
+       the_stage_variable_only_raises}`
+       and the updated `mode_matrix` / `compiled_check`; the CLI's
+       `sandbox::warn::tests::{
+       auto_notice_only_where_enforcement_would_show,
+       fatal_gaps_are_the_fail_open_ones}`;
+       spec `kernel_sandbox::warn` (the advisory and the log's records; macOS: a
+       child's read outside the grant reported with the program and the grant;
+       the R3 notice, R3's explicit `auto` and R4 enforcing, a command `enforce`
+       doesn't cover running as warn, `-A` and `off` unchanged, the stage in
+       `deno info --json`); the updated `kernel_sandbox::policy` (`stage` in the
+       info output; its warn tests and `enforce::fallback_gap_reported_macos`
+       run with the observer off);
+       `tests/kernel_sandbox_beds/{soak_test,r4_preconditions_test}.ts`
+       (`deno test`).
+     - Node tests enabled: none; no Node API changes.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
@@ -18116,9 +18248,9 @@ a full `denext tests` (`denext_tests.yml`) run, every OS leg green (Windows
 arm64 included), passed on exactly the tagged commit, no `denext tests` run of
 that commit failed in any attempt (a green re-run does not clear a red one) or
 is still running (the gate waits up to 30 minutes for one, item 456), and the
-commit is on `development-denext` or `rel/<version>`.
-After the release, `development-denext` is fast-forwarded to the release commit:
-check that the branch's checks on the new head finish green (each workflow's
+commit is on `development-denext` or `rel/<version>`. After the release,
+`development-denext` is fast-forwarded to the release commit: check that the
+branch's checks on the new head finish green (each workflow's
 `verified-SHA guard` skips a run whose commit already passed on its release
 branch or tag, item 354), and never cancel those runs. A pre-release version
 (`3.0.0-rc.N`) is published as a GitHub pre-release, never as the repository's
