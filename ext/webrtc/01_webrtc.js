@@ -2661,6 +2661,13 @@ class RTCRtpTransceiver {
     const state = this[_state];
     return state.stopped ? "stopped" : state.currentDirection;
   }
+  // wpt100:transceiver: `stopped` left webrtc-pc for `currentDirection ==
+  // "stopped"`, but every browser still has it and the WPT transceiver tests
+  // read it: the transceiver's [[Stopped]] slot.
+  get stopped() {
+    webidl.assertBranded(this, RTCRtpTransceiverPrototype);
+    return this[_state].stopped;
+  }
 
   stop() {
     webidl.assertBranded(this, RTCRtpTransceiverPrototype);
