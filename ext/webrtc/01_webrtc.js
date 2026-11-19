@@ -4559,6 +4559,20 @@ function midsOf(sdp) {
 // RTCDTMFSender needs (media.rs `track_preferences`).
 function trackPreferences(codec) {
   const out = [codec];
+  // wpt100:codecs: video keeps retransmission and FEC, which a preference
+  // list leaves out unless it lists them (media.rs track_preferences()).
+  if (
+    StringPrototypeStartsWith(
+      StringPrototypeToLowerCase(codec.mimeType),
+      "video/",
+    )
+  ) {
+    ArrayPrototypePush(
+      out,
+      { mimeType: "video/rtx", clockRate: 90000, channels: null },
+      { mimeType: "video/ulpfec", clockRate: 90000, channels: null },
+    );
+  }
   if (
     StringPrototypeStartsWith(
       StringPrototypeToLowerCase(codec.mimeType),

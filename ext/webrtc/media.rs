@@ -449,9 +449,20 @@ fn simulcast_recv_layers(value: &str) -> Vec<String> {
 
 /// The codec preferences an `EncodedMediaTrack` gives its transceiver: its
 /// codec, then (for audio) the telephone-event formats `RTCDTMFSender`
-/// needs, which a preference list would otherwise leave out.
+/// needs, and (for video) retransmission and FEC, which a preference list
+/// leaves out unless it lists them (W3C `setCodecPreferences`).
 pub fn track_preferences(codec: &CodecArg) -> Vec<CodecArg> {
   let mut out = vec![codec.clone()];
+  if codec.mime_type.to_ascii_lowercase().starts_with("video/") {
+    for mime_type in ["video/rtx", "video/ulpfec"] {
+      out.push(CodecArg {
+        mime_type: mime_type.to_string(),
+        clock_rate: 90000,
+        channels: None,
+        sdp_fmtp_line: None,
+      });
+    }
+  }
   if codec.mime_type.to_ascii_lowercase().starts_with("audio/") {
     for clock_rate in [48000, 8000] {
       out.push(CodecArg {
