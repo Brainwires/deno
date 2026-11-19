@@ -17920,7 +17920,7 @@ where the changes are discussed.
      `Cargo.lock`, `cli/tsc/dts/lib.deno.desktop.d.ts`,
      `.github/workflows/denext_runtime.yml`,
      `.github/denext-runtime/e2e/apps/webview/main.ts`,
-     `.github/denext-runtime/e2e/apps/menus/main.ts`). laufey `83bd73d..9e15a33`
+     `.github/denext-runtime/e2e/apps/menus/main.ts`). laufey `83bd73d..cc82a4c`
      (`feat/qutty-1`; the pin moves to the release tag when laufey cuts it).
      - **Downloads.** `createWebView({ downloads: "app" })` (where
        `webViewCapabilities().downloadEvents`; refused as `invalid` elsewhere,

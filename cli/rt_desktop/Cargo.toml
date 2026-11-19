@@ -88,7 +88,7 @@ denort = { path = "../rt", default-features = false }
 # (release/0.8.1 for v0.8.1, train/laufey-0.8.2 for v0.8.2).
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "9e15a33d0b76b4280b1ed36bc636ac4d28c3d551" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "cc82a4c537fa472e8e56bbdb8b066157e2121f5d" }
 libsui.workspace = true
 
 bytes.workspace = true
