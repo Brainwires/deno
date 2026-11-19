@@ -35,13 +35,33 @@ Options:
                       candidate and not on it)
   --reps <n>          repetitions per suite (default 10)
   --flaky-reps <n>    repetitions for the known-flaky list (default 30)
-  --host <h>          local (default), or an ssh host (biscuits): run there
-                      and wait for it; the marker is written here
-  --workers <n>       suite runs at once (default 2 in containers, 1 local
-                      on macOS)
+  --host <h>[:w],...  local (default), or hosts to share the repetitions
+                      among, by weight w (default 1): an ssh host (biscuits)
+                      or local; each runs its share and the marker is
+                      written here when every host is clean
+                      (recommended: biscuits:4,local:1)
+  --workers <n>       runs at once (default: the CPUs minus 2 on Linux, 1 in
+                      Docker Desktop, 1 native on macOS)
+  --chunk <n>         repetitions per run of a test file or crate (default 5;
+                      the rest of the repetitions are other runs, in
+                      parallel)
+  --profiles <list>   how the runs are constrained, comma separated: normal
+                      (the gate's container), cpu1 / cpu0.5 (the same
+                      container at --cpus=1 / 0.5, the harness at the gate's
+                      parallelism: timing races surface), a +hog suffix adds
+                      a busy loop in the container (cpu1+hog); default
+                      normal,cpu1,cpu0.5
+  --constrained-reps <n>  repetitions per constrained profile (default 3)
+  --hog               add the busy loop to every constrained profile
+  --shards <n>        shards for the suites not split per file (specs,
+                      integration, node_compat; default 4, the gate uses 2)
   --build-jobs <n>    CARGO_BUILD_JOBS for the build (default 4)
   --work-dir <dir>    where builds and runs live (default ~/flake-hunt)
-  --image <img>       the CI runner image (default denext-ci-linux-2204:latest)
+  --image <img>       the CI runner image (default denext-ci-linux-2204:latest
+                      on Linux x64, denext-ci-linux-arm64:latest on a Mac)
+  --native            on macOS: run on the host under nice instead of in
+                      Docker (unsigned test binaries listening can raise the
+                      firewall's dialog; never on a machine someone uses)
   --plan              print what would run, after the build, and exit
   --no-build          reuse the last build of the commit as it is
   --clean             remove the commit's build when the run ends
@@ -73,6 +93,26 @@ const KNOWN_FLAKY: {
     why: "same peer-connection teardown paths as webrtc_media_test",
   },
   {
+    suite: "unit",
+    filter: "unit::pty_test",
+    why:
+      "ptyKillDefaultsToSighup needed the harness's retry in 2 of 2 unit runs (flake hunt, 2026-11-19)",
+  },
+  {
+    suite: "libs",
+    crate: "deno_runtime",
+    filter: "idle_trim::tests",
+    why:
+      "trims_an_idle_loop_once_and_not_a_busy_one trimmed while the loop was busy in 1 of 4 libs runs (flake hunt, 2026-11-19)",
+  },
+  {
+    suite: "libs",
+    crate: "deno_net",
+    filter: "happy_eyeballs::tests",
+    why:
+      "test_parallel_second_wins: attempt_delay < elapsed failed in 1 of 5 runs under load (flake hunt, 2026-11-19)",
+  },
+  {
     suite: "libs",
     crate: "deno",
     filter: "supply_chain::jail_os_tests",
@@ -88,12 +128,15 @@ const KNOWN_FLAKY: {
 
 /** The harness suites: `cargo test -p <package> --test <suite>`, sharded as
  * the gate's test matrix shards them (denext_tests_os.yml). */
-const HARNESS_SUITES: Record<string, { pkg: string; shards: number }> = {
-  unit: { pkg: "unit_tests", shards: 1 },
-  "unit_node": { pkg: "unit_node_tests", shards: 1 },
-  specs: { pkg: "specs_tests", shards: 2 },
-  integration: { pkg: "integration_tests", shards: 2 },
-  "node_compat": { pkg: "node_compat_tests", shards: 2 },
+/** `perFile`: the suite runs one test file per harness run (the harness's
+ * own filter), so the repetitions of each file spread over every worker; the
+ * others run sharded (CI_SHARD_INDEX / CI_SHARD_TOTAL, --shards). */
+const HARNESS_SUITES: Record<string, { pkg: string; perFile: boolean }> = {
+  unit: { pkg: "unit_tests", perFile: true },
+  "unit_node": { pkg: "unit_node_tests", perFile: true },
+  specs: { pkg: "specs_tests", perFile: false },
+  integration: { pkg: "integration_tests", perFile: false },
+  "node_compat": { pkg: "node_compat_tests", perFile: false },
 };
 const ALL_SUITES = ["libs", "libs_core", ...Object.keys(HARNESS_SUITES)];
 
@@ -130,6 +173,7 @@ const MIN_FREE_DISK_GB = 35;
 const MIN_AVAIL_MEM_GB = 4;
 const MARKER_DIR = "~/.denext-runners/flake-hunt";
 const FAILURE_OUTPUT_LIMIT = 8 * 1024;
+let stopping = false;
 
 // ---------------------------------------------------------------------------
 // Arguments
@@ -143,15 +187,39 @@ interface Options {
   flakyReps: number;
   host: string;
   workers?: number;
+  chunk: number;
+  shards: number;
+  profiles: Profile[];
+  constrainedReps: number;
+  hog: boolean;
+  share?: [number, number, number]; // this host's [lo, hi) of W weight units
+  native: boolean;
   buildJobs: number;
   workDir: string;
-  image: string;
+  image?: string;
   plan: boolean;
   build: boolean;
   clean: boolean;
   marker: boolean;
   attach?: string;
   runId?: string;
+}
+
+/** A way to run: `cpus` caps the container (--cpus), `hog` adds a busy
+ * loop beside the tests. Single-CPU containers surface timing races that
+ * an idle many-core machine hides. */
+interface Profile {
+  name: string;
+  cpus?: number;
+  hog: boolean;
+}
+
+function parseProfiles(list: string): Profile[] {
+  return list.split(",").filter(Boolean).map((name) => {
+    const m = name.match(/^(normal|cpu(\d+(?:\.\d+)?))(\+hog)?$/);
+    if (!m) die(`unknown profile ${name} (normal, cpu1, cpu0.5, …, +hog)`);
+    return { name, cpus: m[2] ? Number(m[2]) : undefined, hog: !!m[3] };
+  });
 }
 
 function parseArgs(args: string[]): Options {
@@ -162,9 +230,14 @@ function parseArgs(args: string[]): Options {
     reps: 10,
     flakyReps: 30,
     host: "local",
+    chunk: 5,
+    shards: 4,
+    profiles: parseProfiles("normal,cpu1,cpu0.5"),
+    constrainedReps: 3,
+    hog: false,
+    native: false,
     buildJobs: 4,
     workDir: "~/flake-hunt",
-    image: "denext-ci-linux-2204:latest",
     plan: false,
     build: true,
     clean: false,
@@ -218,6 +291,32 @@ function parseArgs(args: string[]): Options {
       case "--workers":
         o.workers = int(value(i++), a);
         break;
+      case "--profiles":
+        o.profiles = parseProfiles(value(i++));
+        break;
+      case "--constrained-reps":
+        o.constrainedReps = int(value(i++), a);
+        break;
+      case "--hog":
+        o.hog = true;
+        break;
+      case "--chunk":
+        o.chunk = int(value(i++), a);
+        break;
+      case "--shards":
+        o.shards = int(value(i++), a);
+        break;
+      case "--native":
+        o.native = true;
+        break;
+      case "--share": {
+        const v = value(i++).split(":").map(Number);
+        if (v.length !== 3 || v.some((x) => !Number.isInteger(x) || x < 0)) {
+          die("--share wants lo:hi:total");
+        }
+        o.share = v as [number, number, number];
+        break;
+      }
       case "--build-jobs":
         o.buildJobs = int(value(i++), a);
         break;
@@ -255,6 +354,11 @@ function parseArgs(args: string[]): Options {
     }
   }
   o.workDir = expandHome(o.workDir);
+  if (o.hog) {
+    o.profiles = o.profiles.map((p) =>
+      p.cpus && !p.hog ? { ...p, name: `${p.name}+hog`, hog: true } : p
+    );
+  }
   return o;
 }
 
@@ -336,109 +440,169 @@ function sleep(ms: number) {
 }
 
 // ---------------------------------------------------------------------------
-// Remote mode: run on another host over ssh, wait, write the marker here.
+// Several hosts, or another host: each runs its share of the repetitions
+// (`--share`), detached, in its own ~/flake-hunt; this side waits for all of
+// them and writes the marker here when every one is clean.
+
+interface HostRun {
+  name: string; // an ssh host, or "local"
+  weight: number;
+  logOffset: number;
+  quiet: number;
+  status?: Status;
+}
 
 async function remote(o: Options, argv: string[]) {
-  const host = o.host;
-  // plain (non-interactive) ssh commands: an interactive login shell never
-  // lets the channel close behind a background process
-  const ssh = (script: string, allowFail = false) =>
-    run(["ssh", "-n", "-o", "BatchMode=yes", host, script], { allowFail });
+  const hosts: HostRun[] = o.host.split(",").filter(Boolean).map((h) => {
+    const [name, w] = h.split(":");
+    const weight = w === undefined ? 1 : Number(w);
+    if (!Number.isInteger(weight) || weight < 1) die(`bad host weight in ${h}`);
+    return { name, weight, logOffset: 0, quiet: 0 };
+  });
+  // plain (non-interactive) ssh: an interactive login shell never lets the
+  // channel close behind a background process
+  const sh = (h: HostRun, script: string, allowFail = false) =>
+    h.name === "local"
+      ? run(["bash", "-c", script], { allowFail })
+      : run(["ssh", "-n", "-o", "BatchMode=yes", h.name, script], {
+        allowFail,
+      });
   let runId = o.attach;
-  let sha: string;
   if (!runId) {
-    sha = await resolveLocalSha(o.commit);
+    const sha = await resolveLocalSha(o.commit);
     if (o.marker) await removeMarker(sha);
     runId = `${new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)}-${
       sha.slice(0, 8)
     }`;
-    // the remote side gets the same options with --host local, the resolved
-    // commit and the run id
+    // each host gets the same options with --host local, the resolved
+    // commit, the run id and its share
     const pass: string[] = [];
     for (let i = 0; i < argv.length; i++) {
-      if (["--host", "--commit", "--attach", "--run-id"].includes(argv[i])) {
+      if (
+        ["--host", "--commit", "--attach", "--run-id", "--share"].includes(
+          argv[i],
+        )
+      ) {
         i++;
         continue;
       }
       pass.push(argv[i]);
     }
-    pass.push(
-      "--host",
-      "local",
-      "--commit",
-      sha,
-      "--run-id",
-      runId,
-      "--no-marker",
-    );
-    const remoteDir = "~/flake-hunt";
-    await ssh(`mkdir -p ${remoteDir}/runs/${runId}`);
-    await run([
-      "scp",
-      "-q",
-      "-o",
-      "BatchMode=yes",
-      import.meta.filename!,
-      `${host}:flake-hunt/flake_hunt.ts`,
-    ]);
-    // deno is on PATH in a login shell there (nvm-style profiles)
-    const deno = (await run([
-      "ssh",
-      "-n",
-      "-o",
-      "BatchMode=yes",
-      host,
-      "bash -lic 'command -v deno' 2>/dev/null",
-    ])).stdout
-      .trim().split("\n").pop()!;
-    if (!deno.startsWith("/")) die(`no deno on ${host}`);
-    await ssh(
-      `cd ${remoteDir} && (setsid nohup ${deno} run -A flake_hunt.ts ${
-        pass.map(shq).join(" ")
-      } ` +
-        `>runs/${runId}/driver.log 2>&1 </dev/null &) && echo started`,
-    );
-    log(
-      `started ${runId} on ${host} (re-attach: --host ${host} --attach ${runId})`,
-    );
+    const total = hosts.reduce((a, h) => a + h.weight, 0);
+    let lo = 0;
+    for (const h of hosts) {
+      const args = [
+        ...pass,
+        "--host",
+        "local",
+        "--commit",
+        sha,
+        "--run-id",
+        runId,
+        "--no-marker",
+        ...(hosts.length > 1
+          ? ["--share", `${lo}:${lo + h.weight}:${total}`]
+          : []),
+      ];
+      lo += h.weight;
+      await sh(h, `mkdir -p ~/flake-hunt/runs/${runId}`);
+      let deno: string;
+      if (h.name === "local") {
+        await Deno.copyFile(
+          import.meta.filename!,
+          expandHome("~/flake-hunt/flake_hunt.ts"),
+        );
+        deno = Deno.execPath();
+      } else {
+        await run([
+          "scp",
+          "-q",
+          "-o",
+          "BatchMode=yes",
+          import.meta.filename!,
+          `${h.name}:flake-hunt/flake_hunt.ts`,
+        ]);
+        // deno is on PATH in a login shell there (nvm-style profiles)
+        deno = (await run([
+          "ssh",
+          "-n",
+          "-o",
+          "BatchMode=yes",
+          h.name,
+          "bash -lic 'command -v deno' 2>/dev/null",
+        ])).stdout.trim().split("\n").pop()!;
+        if (!deno.startsWith("/")) die(`no deno on ${h.name}`);
+      }
+      const detach = h.name === "local" ? "nohup" : "setsid nohup";
+      await sh(
+        h,
+        `cd ~/flake-hunt && (${detach} ${shq(deno)} run -A flake_hunt.ts ${
+          args.map(shq).join(" ")
+        } >runs/${runId}/driver.log 2>&1 </dev/null &) && echo started`,
+      );
+      log(`started ${runId} on ${h.name}`);
+    }
+    log(`re-attach: --host ${o.host} --attach ${runId}`);
   }
-  let offset = 0;
-  let quietPolls = 0;
   while (true) {
     await sleep(30_000);
-    const r = await ssh(
-      `cd ~/flake-hunt/runs/${runId} && tail -c +${
-        offset + 1
-      } driver.log; echo; echo "@@FH-STATUS"; cat status.json 2>/dev/null`,
-      true,
-    );
-    if (r.code !== 0) {
-      if (++quietPolls > 20) {
-        die(`lost ${host} for 10 minutes; re-attach with --attach ${runId}`);
+    for (const h of hosts) {
+      if (h.status?.state === "done") continue;
+      const r = await sh(
+        h,
+        `cd ~/flake-hunt/runs/${runId} && tail -c +${
+          h.logOffset + 1
+        } driver.log; echo; echo "@@FH-STATUS"; cat status.json 2>/dev/null`,
+        true,
+      );
+      if (r.code !== 0) {
+        if (++h.quiet > 20) {
+          die(
+            `lost ${h.name} for 10 minutes; re-attach with --attach ${runId}`,
+          );
+        }
+        continue;
       }
-      continue;
+      h.quiet = 0;
+      const [chunk, status] = r.stdout.split("\n@@FH-STATUS\n");
+      const text = chunk.endsWith("\n") ? chunk.slice(0, -1) : chunk;
+      if (text) {
+        const prefix = hosts.length > 1 ? `${h.name}| ` : "";
+        const lines = text.split("\n").map((l) => prefix + l).join("\n");
+        Deno.stdout.writeSync(new TextEncoder().encode(lines + "\n"));
+        h.logOffset += new TextEncoder().encode(text).length;
+      }
+      try {
+        h.status = JSON.parse(status);
+      } catch { /* not written yet */ }
     }
-    quietPolls = 0;
-    const [chunk, status] = r.stdout.split("\n@@FH-STATUS\n");
-    const text = chunk.endsWith("\n") ? chunk.slice(0, -1) : chunk;
-    if (text) {
-      Deno.stdout.writeSync(new TextEncoder().encode(text));
-      offset += new TextEncoder().encode(text).length;
+    if (!hosts.every((h) => h.status?.state === "done")) continue;
+    const exit = Math.max(...hosts.map((h) => h.status!.exit ?? 2));
+    for (const h of hosts) {
+      log(
+        `${h.name}: exit ${
+          h.status!.exit
+        } (report: ~/flake-hunt/runs/${runId}/report.md there)`,
+      );
     }
-    let st: Status | undefined;
-    try {
-      st = JSON.parse(status);
-    } catch { /* not written yet */ }
-    if (st?.state !== "done") continue;
-    if (st.exit === 0 && st.qualifies && o.marker) {
-      await writeMarker(st.marker!);
-      log(`marker written: ${MARKER_DIR}/${st.marker!.sha}.ok`);
-    } else if (st.exit === 0 && !st.qualifies) {
+    const qualifies = hosts.every((h) => h.status!.qualifies);
+    if (exit === 0 && qualifies && o.marker) {
+      const ms = hosts.map((h) => h.status!.marker!);
+      const m: Marker = {
+        ...ms[0],
+        tasks: ms.reduce((a, x) => a + x.tasks, 0),
+        hosts: ms.flatMap((x) => x.hosts),
+        started: ms.map((x) => x.started).sort()[0],
+        finished: ms.map((x) => x.finished).sort().pop()!,
+      };
+      await writeMarker(m);
+      log(`marker written: ${MARKER_DIR}/${m.sha}.ok`);
+    } else if (exit === 0 && !qualifies) {
       log(
         "clean, but this selection does not qualify for the release marker (full, or fast + libs + unit)",
       );
     }
-    Deno.exit(st.exit ?? 2);
+    Deno.exit(exit);
   }
 }
 
@@ -458,6 +622,8 @@ interface Marker {
   suites: string[];
   reps: number;
   flakyReps: number;
+  profiles: string[];
+  constrainedReps: number;
   tasks: number;
   hosts: string[];
   base?: string;
@@ -493,6 +659,7 @@ interface Paths {
   build: string; // cargo's JSON messages
   cache: string; // the cargo home and prebuilt V8, shared across commits
   runDir: string;
+  volume?: string; // Docker Desktop: the commit's tree lives in this volume
 }
 
 async function prepareCheckout(
@@ -541,6 +708,9 @@ async function prepareCheckout(
     build: `${commitDir}/build`,
     cache: `${work}/cache`,
     runDir: `${work}/runs/${runId}`,
+    volume: !isLinux && !o.native
+      ? `flake-hunt-${sha.slice(0, 12)}`
+      : undefined,
   };
   await Deno.mkdir(p.runDir, { recursive: true });
   const fresh = !await exists(`${p.src}/.git`);
@@ -587,6 +757,76 @@ async function prepareCheckout(
     await run(["sudo", "-n", "chown", "-R", "1001:1001", commitDir, p.cache]);
   }
   return { sha, p };
+}
+
+/** Docker Desktop: the commit's tree goes into its own volume (a copy of the
+ * host checkout), owned by the runner user; other commits' volumes go. */
+async function prepareVolume(p: Paths, image: string) {
+  const vol = p.volume!;
+  const vols = (await run(["docker", "volume", "ls", "-q"])).stdout.split("\n");
+  for (const v of vols) {
+    if (/^flake-hunt-[0-9a-f]{12}$/.test(v) && v !== vol) {
+      await run(["docker", "volume", "rm", v], { allowFail: true });
+    }
+  }
+  const d = ["docker", "run", "--rm", "--network", "none"];
+  await run([
+    ...d,
+    "--user",
+    "0",
+    "--mount",
+    `type=volume,src=${vol},dst=/fh`,
+    "--mount",
+    "type=volume,src=flake-hunt-cache,dst=/fh-cache",
+    "--entrypoint",
+    "chown",
+    image,
+    "1001:1001",
+    "/fh",
+    "/fh-cache",
+  ]);
+  const seeded = await run([
+    ...d,
+    "--user",
+    "1001:1001",
+    "--mount",
+    `type=volume,src=${vol},dst=/fh`,
+    "--entrypoint",
+    "test",
+    image,
+    "-e",
+    "/fh/.seeded",
+  ], { allowFail: true });
+  if (seeded.code !== 0) {
+    log(`copying the checkout into the Docker volume ${vol}`);
+    await run([
+      ...d,
+      "--user",
+      "1001:1001",
+      "--mount",
+      `type=volume,src=${vol},dst=/fh`,
+      "--mount",
+      `type=bind,src=${p.src},dst=/seed,readonly`,
+      "--entrypoint",
+      "bash",
+      image,
+      "-c",
+      "rm -rf /fh/src && mkdir -p /fh/src /fh/build && cp -R /seed/. /fh/src/ && touch /fh/.seeded",
+    ]);
+  }
+}
+
+/** Docker Desktop: the build's JSON messages and metadata back to the host. */
+async function readBackBuild(p: Paths, image: string) {
+  await Deno.mkdir(p.build, { recursive: true });
+  const r = await run([
+    "bash",
+    "-c",
+    `docker run --rm --network none --user 1001:1001 --mount type=volume,src=${p.volume},dst=/fh --entrypoint tar ${image} -C /fh/build -cf - . | tar -xf - -C ${
+      shq(p.build)
+    }`,
+  ], { allowFail: true });
+  if (r.code !== 0) die(`could not read the build back: ${r.stderr}`);
 }
 
 async function removeTree(dir: string) {
@@ -668,11 +908,29 @@ interface Executor {
       logFile: string;
       timeoutMin: number;
       build?: boolean;
+      cpus?: number; // a constrained profile's --cpus
       env: Record<string, string>;
     },
   ): Promise<number>;
   killAll(): Promise<void>;
   hosts(): Promise<string[]>;
+}
+
+/** Where the containers run: biscuits' Docker (the Linux x64 pool's
+ * profile) or Docker Desktop on a Mac (the linux-arm64 pool's image with the
+ * x64 job seccomp profile, no AppArmor, a CPU quota per job; the trees live in
+ * Docker volumes, as a bind mount from macOS is too slow for a build and has
+ * no hard links). */
+interface DockerProfile {
+  image: string;
+  seccomp: string;
+  apparmor?: string;
+  ipv6Sysctl: boolean;
+  testCpus: number; // --cpus of a test container
+  testParallelism: number; // FILE_TEST_RUNNER_PARALLELISM
+  volume?: string; // the commit's volume (Docker Desktop)
+  cacheVolume?: string;
+  where: string;
 }
 
 class DockerExecutor implements Executor {
@@ -684,7 +942,7 @@ class DockerExecutor implements Executor {
     public p: Paths,
     public runId: string,
     public slots: number,
-    public nproc: number,
+    public prof: DockerProfile,
     public dns: string[],
   ) {}
 
@@ -693,6 +951,7 @@ class DockerExecutor implements Executor {
     ip: string,
     build: boolean,
     env: Record<string, string>,
+    cpus?: number,
   ): string[] {
     const a = [
       "run",
@@ -711,7 +970,9 @@ class DockerExecutor implements Executor {
       "--hostname",
       "denext-ci",
       "--network",
-      `name=${JOB.network},ip=${ip},driver-opt=com.docker.network.endpoint.sysctls=net.ipv6.conf.IFNAME.disable_ipv6=0`,
+      this.prof.ipv6Sysctl
+        ? `name=${JOB.network},ip=${ip},driver-opt=com.docker.network.endpoint.sysctls=net.ipv6.conf.IFNAME.disable_ipv6=0`
+        : `name=${JOB.network},ip=${ip}`,
       "--add-host",
       "hashy.deno.deno.net:127.0.0.1",
       ...this.dns.flatMap((d) => ["--dns", d]),
@@ -720,11 +981,11 @@ class DockerExecutor implements Executor {
       "--pids-limit",
       JOB.pids,
       "--memory",
-      build ? "8g" : JOB.mem,
+      build ? (this.prof.volume ? "6g" : "8g") : JOB.mem,
       "--memory-swap",
-      build ? "12g" : JOB.memSwap,
+      build ? (this.prof.volume ? "8g" : "12g") : JOB.memSwap,
       "--cpus",
-      String(build ? this.o.buildJobs : this.nproc),
+      String(build ? this.o.buildJobs : cpus ?? this.prof.testCpus),
       "--cpu-shares",
       JOB.cpuShares,
       "--cap-drop",
@@ -732,13 +993,11 @@ class DockerExecutor implements Executor {
       "--security-opt",
       "no-new-privileges",
       "--security-opt",
-      `seccomp=${JOB.seccomp}`,
-      "--security-opt",
-      `apparmor=${JOB.apparmor}`,
-      "--mount",
-      `type=bind,src=${this.p.commitDir},dst=/fh`,
-      "--mount",
-      `type=bind,src=${this.p.cache},dst=/fh-cache`,
+      `seccomp=${this.prof.seccomp}`,
+      ...(this.prof.apparmor
+        ? ["--security-opt", `apparmor=${this.prof.apparmor}`]
+        : []),
+      ...mounts(this.p, this.prof),
     ];
     for (const [k, v] of Object.entries(env)) a.push("-e", `${k}=${v}`);
     return a;
@@ -752,6 +1011,7 @@ class DockerExecutor implements Executor {
       logFile: string;
       timeoutMin: number;
       build?: boolean;
+      cpus?: number; // a constrained profile's --cpus
       env: Record<string, string>;
     },
   ): Promise<number> {
@@ -761,17 +1021,20 @@ class DockerExecutor implements Executor {
       JOB.ipBase - (o.build ? 1 : 0) + (o.build ? 0 : o.slot)
     }`;
     const args = [
-      ...this.args(name, ip, !!o.build, o.env),
-      this.o.image,
+      ...this.args(name, ip, !!o.build, o.env, o.cpus),
+      this.prof.image,
       "bash",
       "-c",
       script,
     ];
     const cmd = ["docker", ...args];
-    // the build takes the fork builds' lock, as every local fork build does
-    const full = o.build
+    // the build takes the fork builds' lock on Linux, as every local fork
+    // build does; on a Mac the heavy-build lock (one heavy build at a time)
+    const full = !o.build
+      ? cmd
+      : isLinux
       ? ["flock", expandHome("~/.fork-cargo.lock"), ...cmd]
-      : cmd;
+      : ["bash", "-c", HEAVY_LOCK, "_", ...cmd];
     this.running.add(name);
     try {
       return await spawnLogged(full, o.logFile, o.timeoutMin, async () => {
@@ -797,7 +1060,7 @@ class DockerExecutor implements Executor {
 
   hosts() {
     return Promise.resolve([
-      `${Deno.hostname()} (linux ${Deno.build.arch}, ${this.o.image}, ${this.slots} containers)`,
+      `${Deno.hostname()} (${this.prof.where}, ${this.prof.image}, ${this.slots} containers)`,
     ]);
   }
 }
@@ -819,6 +1082,7 @@ class LocalExecutor implements Executor {
       logFile: string;
       timeoutMin: number;
       build?: boolean;
+      cpus?: number; // a constrained profile's --cpus
       env: Record<string, string>;
     },
   ): Promise<number> {
@@ -863,6 +1127,31 @@ class LocalExecutor implements Executor {
   }
 }
 
+function mounts(p: Paths, prof: DockerProfile): string[] {
+  return prof.volume
+    ? [
+      "--mount",
+      `type=volume,src=${prof.volume},dst=/fh`,
+      "--mount",
+      `type=volume,src=${prof.cacheVolume},dst=/fh-cache`,
+    ]
+    : [
+      "--mount",
+      `type=bind,src=${p.commitDir},dst=/fh`,
+      "--mount",
+      `type=bind,src=${p.cache},dst=/fh-cache`,
+    ];
+}
+
+/** On the Mac mini: one heavy build at a time (~/.cache/denext-heavy.lock.d,
+ * a mkdir lock) and only below a 1-minute load of 10. */
+const HEAVY_LOCK = `
+lock="$HOME/.cache/denext-heavy.lock.d"; mkdir -p "$HOME/.cache"
+until mkdir "$lock" 2>/dev/null; do sleep 20; done
+trap 'rmdir "$lock"' EXIT
+while [ "$(sysctl -n vm.loadavg | awk '{print int($2)}')" -ge 10 ]; do sleep 20; done
+"$@"`;
+
 async function spawnLogged(
   cmd: string[],
   logFile: string,
@@ -899,17 +1188,44 @@ async function makeExecutor(
   p: Paths,
   runId: string,
 ): Promise<Executor> {
-  if (!isLinux) {
+  if (!isLinux && o.native) {
     if (o.workers && o.workers > 1) {
       log(
-        "local mode on macOS runs one suite at a time (fixed test server ports)",
+        "native mode on macOS runs one suite at a time (fixed test server ports)",
       );
     }
     return new LocalExecutor(o, p);
   }
-  await run(["docker", "image", "inspect", o.image]).catch(() =>
-    die(`no image ${o.image} on this host`)
+  const image = o.image ??
+    (isLinux ? "denext-ci-linux-2204:latest" : "denext-ci-linux-arm64:latest");
+  await run(["docker", "image", "inspect", image]).catch(() =>
+    die(`no image ${image} on this host`)
   );
+  if (!isLinux) {
+    // Docker Desktop: the linux-arm64 pool's profile (denext-internal
+    // ops/runners/linux-arm64/run-job.sh); the CPU quota is the job's CPUs
+    const vmCpus = Number(
+      (await run(["docker", "info", "--format", "{{.NCPU}}"])).stdout.trim(),
+    );
+    const cpus = Math.min(4, vmCpus);
+    const seccomp = expandHome(
+      // the x64 pool's job profile (Docker's default + pidfd_getfd + AF_VSOCK),
+      // which the gate's unit and spec runs have; the arm64 pool's own copy
+      // still refuses AF_VSOCK, and the gate runs only libs there
+      "~/Source/Brainwires/denext-internal/ops/runners/linux/seccomp-job.json",
+    );
+    if (!await exists(seccomp)) die(`no seccomp profile ${seccomp}`);
+    return new DockerExecutor(o, p, runId, o.workers ?? 1, {
+      image,
+      seccomp,
+      ipv6Sysctl: false,
+      testCpus: cpus,
+      testParallelism: Math.max(1, cpus - 1),
+      volume: p.volume,
+      cacheVolume: "flake-hunt-cache",
+      where: `Docker Desktop, linux ${Deno.build.arch}`,
+    }, ["1.1.1.1", "8.8.8.8"]);
+  }
   const nproc = Number((await run(["nproc"])).stdout.trim());
   let dns: string[] = [];
   try {
@@ -926,7 +1242,15 @@ async function makeExecutor(
       .slice(0, 3);
   } catch { /* none */ }
   if (dns.length === 0) dns = ["1.1.1.1", "8.8.8.8"];
-  return new DockerExecutor(o, p, runId, o.workers ?? 2, nproc, dns);
+  return new DockerExecutor(o, p, runId, o.workers ?? Math.max(2, nproc - 2), {
+    image,
+    seccomp: JOB.seccomp,
+    apparmor: JOB.apparmor,
+    ipv6Sysctl: true,
+    testCpus: nproc,
+    testParallelism: Math.max(1, JOB.cpus - 1),
+    where: `linux ${Deno.build.arch}`,
+  }, dns);
 }
 
 // ---------------------------------------------------------------------------
@@ -942,6 +1266,7 @@ function buildScript(
   root: string,
   buildDir: string,
   cacheDir: string,
+  docker: boolean,
 ): string {
   const cargoJson = (args: string, out: string) =>
     `cargo test ${args} --no-run --message-format=json-render-diagnostics >${buildDir}/${out}.json.tmp && mv ${buildDir}/${out}.json.tmp ${buildDir}/${out}.json`;
@@ -949,13 +1274,24 @@ function buildScript(
     "set -euo pipefail",
     `cd ${root}`,
     `export RUSTUP_TOOLCHAIN="$(sed -n 's/^channel = "\\(.*\\)"$/\\1/p' rust-toolchain.toml)"`,
-    `export CARGO_HOME=${cacheDir}/cargo-home`,
+    docker ? `export CARGO_HOME=${cacheDir}/cargo-home` : ":",
     `mkdir -p ${buildDir}`,
     `host="$(rustc -vV | sed -n 's/^host: //p')"`,
-    // seed the prebuilt V8 library only once: a re-seeded library is newer
-    // than the v8 crate's build, and everything above it would rebuild
-    `seed=; [ -e target/debug/gn_out/obj/librusty_v8.a ] || [ -e target/debug/gn_out/obj/rusty_v8.lib ] || seed="--seed-dir target/debug"`,
-    `eval "$(python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "$host" --dest ${cacheDir}/v8 $seed --print-env)"`,
+    // Linux arm64 links with lld, as the setup action does (GNU ld does not
+    // fit the debug link in the pool's memory)
+    `if [ "$host" = aarch64-unknown-linux-gnu ] && command -v ld.lld >/dev/null; then export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=-fuse-ld=lld"; fi`,
+    // native macOS: the pinned ld64.lld the rustflags link with (the setup
+    // action's install_ld64.sh), and an SDK that LLD 20 can read
+    `if [ "$(uname)" = Darwin ]; then GITHUB_PATH=/dev/null GITHUB_WORKSPACE="$PWD" bash .github/denext-runtime/install_ld64.sh >/dev/null; export PATH="$PWD/third_party/prebuilt/mac:$PATH"; sdk=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk; if [ -d "$sdk" ]; then export SDKROOT="$sdk"; fi; fi`,
+    // the prebuilt V8, verified (fetch_rusty_v8.py) once per rusty_v8.sha256
+    // and reused: a re-fetched archive or a re-seeded library is newer than
+    // the v8 crate's build, and everything above it would rebuild
+    `key="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest()[:16])' .github/denext-runtime/rusty_v8.sha256)"`,
+    `envf=${cacheDir}/v8/env-$host-$key.sh`,
+    `if ! { [ -s "$envf" ] && . "$envf" && python3 -c 'import hashlib,os,sys;sys.exit(hashlib.sha256(open(os.environ["RUSTY_V8_ARCHIVE"],"rb").read()).hexdigest()!=os.environ["RUSTY_V8_ARCHIVE_SHA256"])' && [ -e "$RUSTY_V8_SRC_BINDING_PATH" ]; }; then`,
+    `  python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "$host" --dest ${cacheDir}/v8 --print-env >"$envf.tmp" && mv "$envf.tmp" "$envf" && . "$envf"`,
+    `fi`,
+    `if [ ! -e target/debug/gn_out/obj/librusty_v8.a ]; then mkdir -p target/debug/gn_out/obj && gunzip -c "$RUSTY_V8_ARCHIVE" >target/debug/gn_out/obj/librusty_v8.a.part && mv target/debug/gn_out/obj/librusty_v8.a.part target/debug/gn_out/obj/librusty_v8.a; fi`,
     `cargo metadata --format-version 1 --no-deps >${buildDir}/metadata.json`,
     "echo '=== build: deno, denort, test_server'",
     // the build job's `Build debug`, verbatim
@@ -1199,29 +1535,53 @@ interface ExeRun {
 interface Task {
   id: string;
   suite: string;
-  label: string; // libs, unit, specs (1/2), unit webrtc_test …
-  rep: number;
+  label: string; // libs deno, unit unit::pty_test, specs (1/4) …
+  rep: number; // the first repetition this run does
+  reps: number; // repetitions this run does, one after another
   kind: "libtest" | "harness";
   exes: ExeRun[];
   env: Record<string, string>;
   timeoutMin: number;
   resultsName?: string; // harness: target/test_results_<name>.json
+  profile: Profile;
+}
+
+interface TaskOptions {
+  testParallelism?: number;
+  chunk: number;
+  shards: number;
+  lists: Record<string, string[]>; // perFile suites: their test files
+  profiles: Profile[];
+  constrainedReps: number; // per constrained profile, at most a unit's reps
+}
+
+/** One unit of repetition: a lib test binary (with its step's arguments, or
+ * a filter), one test file of a perFile suite, or one shard of another
+ * suite. Its repetitions are split into runs of --chunk, which the workers
+ * take in parallel. */
+interface Unit {
+  suite: string;
+  label: string;
+  kind: Task["kind"];
+  exes: ExeRun[];
+  env: Record<string, string>;
+  reps: number;
+  timeoutMin: number;
+  resultsName?: string;
 }
 
 function buildTasks(
   sels: Selection[],
   steps: CargoStep[],
   exes: Record<string, TestExe[]>,
-  testParallelism: number | undefined,
+  to: TaskOptions,
 ): Task[] {
-  // rep-major, so every suite is in flight at once (realistic load)
-  const perSel: Task[][] = [];
+  const units: Unit[] = [];
+  const base: Record<string, string> = { ...CI_ENV };
+  if (to.testParallelism) {
+    base.FILE_TEST_RUNNER_PARALLELISM = String(to.testParallelism);
+  }
   for (const s of sels) {
-    const list: Task[] = [];
-    const base: Record<string, string> = { ...CI_ENV };
-    if (testParallelism) {
-      base.FILE_TEST_RUNNER_PARALLELISM = String(testParallelism);
-    }
     if (s.suite === "libs" || s.suite === "libs_core") {
       const stepNames = s.step
         ? [s.step]
@@ -1229,13 +1589,12 @@ function buildTasks(
       if (s.suite === "libs_core" && s.step === "libs_core") {
         stepNames.push("libs_core_snapshot");
       }
-      const runs: ExeRun[] = [];
       for (const sn of stepNames) {
         const step = steps.find((x) => x.name === sn)!;
         for (const e of exes[sn] ?? []) {
           if (s.crates && !s.crates.includes(e.crate)) continue;
-          // a fast filter replaces the step's own filters but keeps its skips
-          // and thread count
+          // a filter replaces the step's own filters but keeps its skips and
+          // thread count
           let args = step.testArgs;
           if (s.filter) {
             args = [];
@@ -1246,58 +1605,87 @@ function buildTasks(
             }
             args.push(s.filter);
           }
-          runs.push({ exe: e, args });
-        }
-      }
-      if (runs.length === 0) continue;
-      const label = `${s.suite}${s.crates ? ` ${s.crates.join(",")}` : ""}${
-        s.filter ? ` ${s.filter}` : ""
-      }`;
-      for (let r = 1; r <= s.reps; r++) {
-        list.push({
-          id: "",
-          suite: s.suite,
-          label,
-          rep: r,
-          kind: "libtest",
-          exes: runs,
-          env: base,
-          timeoutMin: 240,
-        });
-      }
-    } else {
-      const h = HARNESS_SUITES[s.suite];
-      const exe = (exes[s.suite] ?? [])[0];
-      if (!exe) continue;
-      const shards = s.filter ? 1 : h.shards;
-      for (let r = 1; r <= s.reps; r++) {
-        for (let sh = 0; sh < shards; sh++) {
-          const env = { ...base };
-          if (shards > 1) {
-            env.CI_SHARD_INDEX = String(sh);
-            env.CI_SHARD_TOTAL = String(shards);
-          }
-          list.push({
-            id: "",
+          units.push({
             suite: s.suite,
-            label: `${s.suite}${shards > 1 ? ` (${sh + 1}/${shards})` : ""}${
-              s.filter ? ` ${s.filter}` : ""
-            }`,
-            rep: r,
-            kind: "harness",
-            exes: [{ exe, args: s.filter ? [s.filter] : [] }],
-            env,
-            timeoutMin: 120,
-            resultsName: s.suite,
+            label: `${s.suite} ${e.crate}${
+              sn === "libs_core_snapshot" ? " (snapshot tests)" : ""
+            }${s.filter ? ` ~ ${s.filter}` : ""}`,
+            kind: "libtest",
+            exes: [{ exe: e, args }],
+            env: base,
+            reps: s.reps,
+            timeoutMin: 60,
           });
         }
       }
+      continue;
     }
-    perSel.push(list);
+    const exe = (exes[s.suite] ?? [])[0];
+    if (!exe) continue;
+    const harness = (label: string, filter: string | undefined, env = base) =>
+      units.push({
+        suite: s.suite,
+        label,
+        kind: "harness",
+        exes: [{ exe, args: filter ? [filter] : [] }],
+        env,
+        reps: s.reps,
+        timeoutMin: 120,
+        resultsName: s.suite,
+      });
+    if (s.filter) {
+      harness(`${s.suite} ~ ${s.filter}`, s.filter);
+    } else if (HARNESS_SUITES[s.suite].perFile && to.lists[s.suite]?.length) {
+      for (const name of to.lists[s.suite]) harness(`${s.suite} ${name}`, name);
+    } else {
+      for (let sh = 0; sh < to.shards; sh++) {
+        harness(
+          `${s.suite} (${sh + 1}/${to.shards})`,
+          undefined,
+          to.shards > 1
+            ? {
+              ...base,
+              CI_SHARD_INDEX: String(sh),
+              CI_SHARD_TOTAL: String(to.shards),
+            }
+            : base,
+        );
+      }
+    }
   }
+  // chunk-major: the first chunk of every unit, then the second, … so every
+  // suite is in flight at once (realistic load) and each unit's chunks run
+  // in parallel
   const tasks: Task[] = [];
-  for (let i = 0; perSel.some((l) => i < l.length); i++) {
-    for (const l of perSel) if (i < l.length) tasks.push(l[i]);
+  // every profile runs every unit: the gate's container --reps times, each
+  // constrained one --constrained-reps times
+  const runs = to.profiles.flatMap((pr) =>
+    units.map((u) => ({
+      u,
+      pr,
+      reps: pr.cpus ? Math.min(u.reps, to.constrainedReps) : u.reps,
+    }))
+  ).filter((x) => x.reps > 0);
+  const maxReps = Math.max(0, ...runs.map((x) => x.reps));
+  for (let start = 1; start <= maxReps; start += to.chunk) {
+    for (const { u, pr, reps } of runs) {
+      if (start > reps) continue;
+      const n = Math.min(to.chunk, reps - start + 1);
+      tasks.push({
+        id: "",
+        suite: u.suite,
+        label: pr.cpus || pr.hog ? `${u.label} [${pr.name}]` : u.label,
+        rep: start,
+        reps: n,
+        kind: u.kind,
+        exes: u.exes,
+        env: u.env,
+        // a constrained run is slower: a longer leash, never a shorter one
+        timeoutMin: u.timeoutMin * n * (pr.cpus ? Math.ceil(4 / pr.cpus) : 1),
+        resultsName: u.resultsName,
+        profile: pr,
+      });
+    }
   }
   tasks.forEach((t, i) => t.id = `t${String(i + 1).padStart(4, "0")}`);
   return tasks;
@@ -1305,26 +1693,38 @@ function buildTasks(
 
 /** The bash a task runs: a fresh hard-link copy of the checkout (each run
  * starts from a clean tree, as a CI job does, and runs of the same suite never
- * share a directory), then each test binary as `cargo test` runs it (cwd and
- * CARGO_* of its package), then the results and the git-clean check. */
+ * share a directory), then its repetitions, each running every test binary as
+ * `cargo test` runs it (cwd and CARGO_* of its package), then the results and
+ * the gate's git-clean check. */
 function taskScript(t: Task, root: string, farm: string | undefined): string {
   const w = farm ?? root;
   const L: string[] = ["set -u"];
   if (farm) {
     L.push(
       `rm -rf ${farm}; mkdir -p ${farm}/target/debug`,
-      `cd ${root} && for e in * .[!.]*; do [ "$e" = target ] || [ "$e" = '.[!.]*' ] || cp -al "$e" ${farm}/; done`,
+      // the source is copied (a test that rewrites a fixture in place must
+      // not reach the other runs or the build tree); .git and the built
+      // binaries, which nothing writes, are hard links
+      `cd ${root} && for e in * .[!.]*; do case "$e" in target | '.[!.]*') ;; .git) cp -al "$e" ${farm}/ ;; *) cp -a "$e" ${farm}/ ;; esac; done`,
       `cp -al ${root}/target/debug/deps ${farm}/target/debug/`,
-      `find ${root}/target/debug -maxdepth 1 -type f -exec cp -al {} ${farm}/target/debug/ \\;`,
+      `find ${root}/target/debug -maxdepth 1 -type f -exec cp -al {} ${farm}/target/debug/ ';'`,
     );
   }
   L.push(
     `cd ${w}`,
     `export RUSTUP_TOOLCHAIN="$(sed -n 's/^channel = "\\(.*\\)"$/\\1/p' rust-toolchain.toml)"`,
-    `export LD_LIBRARY_PATH=${w}/target/debug/deps:${w}/target/debug`,
-    `export DYLD_FALLBACK_LIBRARY_PATH=${w}/target/debug/deps:${w}/target/debug`,
-    `git status --porcelain --untracked-files=all 2>/dev/null | grep -v '^?? target/' >/tmp/fh-git-before || true`,
+    // as cargo runs a test: the target dirs and the toolchain's own libraries
+    // (a proc-macro crate's test binary links libstd dynamically)
+    `sysroot="$(rustc --print sysroot)"; host="$(rustc -vV | sed -n 's/^host: //p')"`,
+    `libs=${w}/target/debug/deps:${w}/target/debug:$sysroot/lib:$sysroot/lib/rustlib/$host/lib`,
+    `export LD_LIBRARY_PATH="$libs" DYLD_FALLBACK_LIBRARY_PATH="$libs"`,
     `rc_all=0`,
+    // the profile's busy loop beside the tests (+hog)
+    t.profile.hog ? `( while :; do :; done ) & hog=$!` : `hog=`,
+    `gitstate() { git status --porcelain --untracked-files=all 2>/dev/null | grep -v '^?? target/'; }`,
+    `for rep in $(seq ${t.rep} ${t.rep + t.reps - 1}); do`,
+    `echo "=== FH-REP $rep"`,
+    `gitstate >/tmp/fh-git-before || true`,
   );
   for (const r of t.exes) {
     const e = r.exe;
@@ -1346,11 +1746,18 @@ function taskScript(t: Task, root: string, farm: string | undefined): string {
       `rm -f ${w}/target/test_results_${t.resultsName}.json`,
     );
   }
-  // the gate's "Ensure no git changes" (new entries only, for the shared tree)
+  // the gate's "Ensure no git changes" (new entries only; its test jobs have
+  // the check, its libs job does not)
   L.push(
-    `git status --porcelain --untracked-files=all 2>/dev/null | grep -v '^?? target/' >/tmp/fh-git-after || true`,
-    `if ! diff -q /tmp/fh-git-before /tmp/fh-git-after >/dev/null; then echo "=== FH-GIT-DIRTY"; diff /tmp/fh-git-before /tmp/fh-git-after | head -50; echo "=== FH-GIT-END"; fi`,
+    ...(t.kind === "harness"
+      ? [
+        `gitstate >/tmp/fh-git-after || true`,
+        `if ! diff -q /tmp/fh-git-before /tmp/fh-git-after >/dev/null; then echo "=== FH-GIT-DIRTY"; diff /tmp/fh-git-before /tmp/fh-git-after | head -50; echo "=== FH-GIT-END"; fi`,
+      ]
+      : []),
+    `done`,
   );
+  L.push(`[ -z "$hog" ] || kill "$hog" 2>/dev/null`);
   if (farm) L.push(`cd / && rm -rf ${farm}`);
   L.push(`exit $rc_all`);
   return L.join("\n");
@@ -1366,6 +1773,7 @@ interface Failure {
   kind: "failed" | "retried" | "crashed" | "timeout" | "git-dirty";
   attempts: number; // failed attempts in this rep (the harness's retries)
   output: string;
+  rep: number;
 }
 
 interface TaskResult {
@@ -1387,8 +1795,33 @@ function cut(s: string): string {
 // deno-lint-ignore no-control-regex
 const ANSI = /\x1b\[[0-9;]*[A-Za-z]/g;
 
+/** A run's failures, per repetition (its `=== FH-REP <n>` sections). */
 function parseTask(t: Task, code: number, logText: string): Failure[] {
   const text = logText.replace(ANSI, "");
+  const parts = text.split(/^=== FH-REP (\d+)$/m);
+  if (parts.length < 3) return parseRep(t, code, text, t.rep);
+  const out: Failure[] = [];
+  for (let i = 1; i < parts.length; i += 2) {
+    const body = parts[i + 1];
+    const last = i + 2 >= parts.length;
+    const exits = [...body.matchAll(/^=== FH-EXIT \S+ (\d+)$/gm)].map((m) =>
+      Number(m[1])
+    );
+    // a repetition cut off (a timeout) has no exit line: the run's code
+    const rc = exits.length < t.exes.length
+      ? (last ? (code || 1) : 1)
+      : Math.max(0, ...exits);
+    out.push(...parseRep(t, rc, body, Number(parts[i])));
+  }
+  return out;
+}
+
+function parseRep(
+  t: Task,
+  code: number,
+  text: string,
+  rep: number,
+): Failure[] {
   const out: Failure[] = [];
   const add = (
     test: string,
@@ -1397,12 +1830,15 @@ function parseTask(t: Task, code: number, logText: string): Failure[] {
     attempts = 1,
   ) =>
     out.push({
-      key: `${t.suite}: ${test}`,
+      key: `${t.suite}: ${test}${
+        t.profile.cpus || t.profile.hog ? ` [${t.profile.name}]` : ""
+      }`,
       suite: t.suite,
       test,
       kind,
       attempts,
       output: cut(output),
+      rep,
     });
   if (/=== FH-TIMEOUT/.test(text)) {
     add(`${t.label} (whole run)`, "timeout", text.slice(-FAILURE_OUTPUT_LIMIT));
@@ -1583,7 +2019,7 @@ function report(
   for (const r of results) {
     runsPer.set(
       `${r.task.suite}|${r.task.label}`,
-      (runsPer.get(`${r.task.suite}|${r.task.label}`) ?? 0) + 1,
+      (runsPer.get(`${r.task.suite}|${r.task.label}`) ?? 0) + r.task.reps,
     );
   }
   for (const r of results) {
@@ -1600,22 +2036,30 @@ function report(
         };
         by.set(f.key, e);
       }
-      e.reps.add(r.task.id);
+      e.reps.add(`${r.task.id}#${f.rep}`);
       e.kinds.set(f.kind, (e.kinds.get(f.kind) ?? 0) + 1);
       e.attempts += f.attempts;
     }
   }
   const md: string[] = ["# Flake hunt", "", ...header, ""];
-  const suiteRows = new Map<string, { runs: number; secs: number }>();
+  const suiteRows = new Map<
+    string,
+    { units: Set<string>; reps: number; secs: number }
+  >();
   for (const r of results) {
-    const s = suiteRows.get(r.task.label) ?? { runs: 0, secs: 0 };
-    s.runs++;
+    const s = suiteRows.get(r.task.suite) ??
+      { units: new Set(), reps: 0, secs: 0 };
+    s.units.add(r.task.label);
+    s.reps += r.task.reps;
     s.secs += r.seconds;
-    suiteRows.set(r.task.label, s);
+    suiteRows.set(r.task.suite, s);
   }
-  md.push("| run | repetitions | mean time |", "| --- | ---: | ---: |");
+  md.push(
+    "| suite | units (files, crates, shards) | repetitions in all | worker time |",
+    "| --- | ---: | ---: | ---: |",
+  );
   for (const [l, s] of suiteRows) {
-    md.push(`| ${l} | ${s.runs} | ${fmtDur(s.secs / s.runs)} |`);
+    md.push(`| ${l} | ${s.units.size} | ${s.reps} | ${fmtDur(s.secs)} |`);
   }
   md.push("");
   if (by.size === 0) {
@@ -1719,8 +2163,12 @@ async function main() {
   // what to build: full mode everything; fast mode the suites its selection
   // can reach (decided after `cargo metadata`, which the build writes first)
   const ex = await makeExecutor(o, p, runId);
+  if (p.volume) await prepareVolume(p, (ex as DockerExecutor).prof.image);
   const sig = async () => {
     log("interrupted: stopping this run's containers / processes");
+    stopping = true; // no new run starts from here on
+    await ex.killAll();
+    await sleep(2000); // a run that was starting as we listed them
     await ex.killAll();
     Deno.exit(130);
   };
@@ -1761,7 +2209,14 @@ async function main() {
       }
     }, 60_000);
     const code = await ex.exec(
-      buildScript(steps, buildSuites, root, buildDir, cacheDir),
+      buildScript(
+        steps,
+        buildSuites,
+        root,
+        buildDir,
+        cacheDir,
+        ex.kind === "docker",
+      ),
       {
         name: "build",
         slot: 0,
@@ -1783,6 +2238,7 @@ async function main() {
       die(`the build failed (exit ${code}):\n${tail}`);
     }
     log(`built in ${fmtDur((Date.now() - t0) / 1000)}`);
+    if (p.volume) await readBackBuild(p, (ex as DockerExecutor).prof.image);
   }
 
   const hostRoot = p.src;
@@ -1834,14 +2290,66 @@ async function main() {
       !(whole.has(s.suite) && (s.filter || s.crates) && s.reps <= o.reps)
     );
   }
-  const testParallelism = ex.kind === "docker"
-    ? Math.max(1, JOB.cpus - 1)
-    : undefined;
-  const tasks = buildTasks(sels, steps, exes, testParallelism);
+  // this host's share of the repetitions (--host a:w,b:w hands each host a
+  // slice of every selection's repetitions)
+  if (o.share) {
+    const [lo, hi, total] = o.share;
+    for (const s of sels) {
+      s.reps = Math.floor(s.reps * hi / total) -
+        Math.floor(s.reps * lo / total);
+    }
+    sels = sels.filter((s) => s.reps > 0);
+  }
+  // the perFile suites' test files, from the harness's own --list
+  const lists: Record<string, string[]> = {};
+  for (const s of sels) {
+    if (s.filter || !HARNESS_SUITES[s.suite]?.perFile || lists[s.suite]) {
+      continue;
+    }
+    const e = (exes[s.suite] ?? [])[0];
+    if (!e) continue;
+    const listLog = `${p.runDir}/list-${s.suite}.log`;
+    await ex.exec(
+      `cd ${root}/${e.manifestDir} && ${root}/${e.exe} --list`,
+      {
+        name: `list-${s.suite}`,
+        slot: 0,
+        logFile: listLog,
+        timeoutMin: 10,
+        env: CI_ENV,
+      },
+    );
+    lists[s.suite] = [
+      ...(await Deno.readTextFile(listLog)).matchAll(/^(\S+): test$/gm),
+    ].map((m) => m[1]);
+    log(
+      `${s.suite}: ${lists[s.suite].length} test file(s), each run on its own`,
+    );
+  }
+  const tasks = buildTasks(sels, steps, exes, {
+    testParallelism: ex.kind === "docker"
+      ? (ex as DockerExecutor).prof.testParallelism
+      : undefined,
+    chunk: o.chunk,
+    shards: o.shards,
+    lists,
+    // the host itself cannot be capped: native mode runs the gate's profile
+    profiles: ex.kind === "docker"
+      ? o.profiles
+      : o.profiles.filter((pr) => !pr.cpus && !pr.hog),
+    constrainedReps: o.share
+      ? Math.floor(o.constrainedReps * o.share[1] / o.share[2]) -
+        Math.floor(o.constrainedReps * o.share[0] / o.share[2])
+      : o.constrainedReps,
+  });
   const ranSuites = [
     ...new Set(sels.filter((s) => !s.filter && !s.crates).map((s) => s.suite)),
   ];
-  log(`plan: ${tasks.length} run(s) on ${ex.slots} worker(s)`);
+  log(
+    `plan: ${tasks.length} run(s) on ${ex.slots} worker(s); profiles ${
+      [...new Set(tasks.map((t) => t.profile.name))].join(", ")
+    } (constrained ones x${o.constrainedReps} in all hosts)`,
+  );
   for (const s of sels) {
     log(
       `  ${s.suite}${s.crates ? ` [${s.crates.join(",")}]` : ""}${
@@ -1861,21 +2369,39 @@ async function main() {
   const results: TaskResult[] = [];
   const free = Array.from({ length: ex.slots }, (_, i) => i);
   const inFlight = new Set<Promise<void>>();
+  // a run's share of the worker budget: a capped (constrained) run uses at
+  // most its CPUs, so it costs half of them; a run in the gate's container
+  // may use every CPU and costs one
+  const cost = (t: Task) => t.profile.cpus ? t.profile.cpus / 2 : 1;
+  let load = 0;
   const t0 = Date.now();
   let next = 0;
   const allowed = async () => {
     if (ex.kind !== "docker") return ex.slots;
+    // the runner job containers only (not their service or dind sidecars):
+    // denext-ci-linux-x64-<slot>-<time> on biscuits,
+    // denext-ci-linux-arm64-<slot>-<time> in Docker Desktop
     const r = await run(
-      ["docker", "ps", "-q", "--filter", "label=denext-ci=1"],
+      [
+        "docker",
+        "ps",
+        "--filter",
+        "label=denext-ci=1",
+        "--format",
+        "{{.Names}}",
+      ],
       { allowFail: true },
     );
-    const runners = r.stdout.split("\n").filter(Boolean).length;
-    return Math.max(1, ex.slots - Math.max(0, runners - 1));
+    const runners = r.stdout.split("\n")
+      .filter((n) => /^denext-ci-linux-[a-z0-9]+-\d+-\d+$/.test(n)).length;
+    // each busy runner job takes two of our workers' room
+    return Math.max(1, ex.slots - 2 * runners);
   };
   await Deno.mkdir(`${p.runDir}/logs`, { recursive: true });
   while (next < tasks.length || inFlight.size > 0) {
     if (
-      next < tasks.length && free.length > 0 && inFlight.size < await allowed()
+      next < tasks.length && free.length > 0 &&
+      (inFlight.size === 0 || load + cost(tasks[next]) <= await allowed())
     ) {
       if (
         await availMemGb() < MIN_AVAIL_MEM_GB ||
@@ -1887,8 +2413,10 @@ async function main() {
         } else await Promise.race(inFlight);
         continue;
       }
+      if (stopping) break;
       const t = tasks[next++];
       const slot = free.shift()!;
+      load += cost(t);
       const logFile = `${p.runDir}/logs/${t.id}-${
         t.label.replace(/[^A-Za-z0-9_.-]+/g, "_").slice(0, 60)
       }-r${t.rep}.log`;
@@ -1897,7 +2425,9 @@ async function main() {
       const pr = (async () => {
         await Deno.writeTextFile(
           logFile,
-          `=== ${t.id} ${t.label} rep ${t.rep} slot ${slot}\n`,
+          `=== ${t.id} ${t.label} reps ${t.rep}-${
+            t.rep + t.reps - 1
+          } slot ${slot}\n`,
         );
         const code = await ex.exec(taskScript(t, root, farm), {
           name: t.id,
@@ -1905,12 +2435,13 @@ async function main() {
           logFile,
           timeoutMin: t.timeoutMin,
           env: t.env,
+          cpus: t.profile.cpus,
         });
         const failures = parseTask(t, code, await Deno.readTextFile(logFile));
         const seconds = (Date.now() - s0) / 1000;
         results.push({ task: t, code, seconds, failures, logFile });
         log(
-          `${t.id} ${t.label} rep ${t.rep}: ${
+          `${t.id} ${t.label} x${t.reps}: ${
             failures.length
               ? `${failures.length} FAILURE(S): ${
                 failures.map((f) => f.test).slice(0, 3).join(", ")
@@ -1926,6 +2457,7 @@ async function main() {
         });
       })().finally(() => {
         free.push(slot);
+        load -= cost(t);
         inFlight.delete(pr);
       });
       inFlight.add(pr);
@@ -1958,6 +2490,8 @@ async function main() {
     suites: o.mode === "full" ? ALL_SUITES : ["fast", ...ranSuites],
     reps: o.reps,
     flakyReps: o.flakyReps,
+    profiles: o.profiles.map((pr) => pr.name),
+    constrainedReps: o.constrainedReps,
     tasks: tasks.length,
     hosts,
     base,
