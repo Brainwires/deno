@@ -1896,6 +1896,14 @@ function refineStats(pc, engineEntries, now, whole) {
           state.transceivers,
           (t) => t[_state].mid !== null && t[_state].mid === stats.mid,
         );
+        // An encoding is "active" as the application configured it
+        // (webrtc-stats `RTCOutboundRtpStreamStats.active`:
+        // `RTCRtpEncodingParameters.active`).
+        const encodings = t?.[_state].sender[_state].encodings;
+        const encoding = encodings?.[stats.encodingIndex ?? 0];
+        if (encoding !== undefined) stats.active = encoding.active !== false;
+        // `encodingIndex` exists for video streams only.
+        if (stats.kind === "audio") delete stats.encodingIndex;
         if (t === undefined) break;
         if (stats.codecId === undefined) {
           const codec = sendCodecStats(pc, t, transportId, now);
