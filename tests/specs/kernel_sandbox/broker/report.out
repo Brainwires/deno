@@ -1,1 +1,1 @@
-[WILDCARD]shape: mode B, with a broker[WILDCARD]
+[WILDCARD](mode B, with a broker)[WILDCARD]deny write: [WILDCARD]keep (broker)[WILDCARD]

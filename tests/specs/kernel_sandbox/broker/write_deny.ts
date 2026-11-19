@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 // deno-lint-ignore-file no-console
 // --allow-write=out --deny-write=out/keep under the broker.
-import { check, cstr, libc } from "../enforce/native.ts";
+import { check, cstr, libc } from "./native.ts";
 
 function attempt(label: string, fn: () => void) {
   try {
