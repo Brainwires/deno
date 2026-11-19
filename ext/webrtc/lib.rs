@@ -167,6 +167,7 @@ deno_core::extension!(
     op_webrtc_set_log_level,
     op_webrtc_data_globals,
     // wpt100:mediasink
+    op_webrtc_receiver_read_frames,
     op_webrtc_receiver_muted,
   ],
   lazy_loaded_js = [
@@ -1148,6 +1149,18 @@ fn op_webrtc_receiver_read_rtp(
 }
 
 // wpt100:mediasink
+/// `Deno.webrtc.readFrames()`: whether a receiver's frames are put together
+/// and delivered (`mediaframe` events).
+#[op2(fast)]
+fn op_webrtc_receiver_read_frames(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+  key: u32,
+  on: bool,
+) -> Result<(), WebRtcError> {
+  peer(state, rid)?.media(|core| core.receiver_read_frames(key, on))
+}
+
 /// A receiver's track was muted (its remote side stopped sending): the next
 /// RTP packet unmutes it again (`trackunmute`).
 #[op2(fast)]
