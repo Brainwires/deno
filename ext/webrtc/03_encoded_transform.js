@@ -34,6 +34,7 @@ const {
   MapPrototypeDelete,
   MapPrototypeGet,
   MapPrototypeSet,
+  MathPow,
   MathRound,
   ObjectDefineProperty,
   ObjectPrototypeIsPrototypeOf,
@@ -346,6 +347,10 @@ class RTCRtpScriptTransform {
       keyFrameWaiters: [],
       // The last key frame's size, for the delta frames' metadata.
       size: null,
+      // For the video frames' frameId and dependencies (see videoFrameIds).
+      lastRtpTimestamp: null,
+      rtpCycles: 0,
+      lastFrameId: null,
       closed: false,
     };
     port1.onmessage = (event) => onTransformerMessage(this, event.data);
@@ -545,6 +550,9 @@ function initRtpTransform(sframeTransform) {
     kind: null,
     keyFrameWaiters: [],
     size: null,
+    lastRtpTimestamp: null,
+    rtpCycles: 0,
+    lastFrameId: null,
     closed: false,
     sframe: true,
   };
@@ -610,6 +618,41 @@ function postFrame(state, frame) {
   state.port.postMessage({ frame }, [frame[_data]]);
 }
 
+// A video frame's frameId and dependencies. The frameId is the frame's RTP
+// timestamp extended to 64 bits (counting wraparounds): unique per frame and
+// increasing in decode order, as the device's clips and a remote encoder's
+// single-layer streams have no B-frames, and the sender and the receiver
+// both know it without a frame descriptor extension. A key frame depends on
+// nothing, a delta frame on the frame before it.
+function videoFrameIds(state, rtpTimestamp, keyFrame) {
+  const last = state.lastRtpTimestamp;
+  if (
+    last !== null && rtpTimestamp < last && last - rtpTimestamp > 0x80000000
+  ) {
+    state.rtpCycles++;
+  }
+  state.lastRtpTimestamp = rtpTimestamp;
+  const frameId = state.rtpCycles * 0x100000000 + rtpTimestamp;
+  const dependencies = keyFrame || state.lastFrameId === null
+    ? []
+    : [state.lastFrameId];
+  state.lastFrameId = frameId;
+  return { frameId, dependencies };
+}
+
+// RFC 6464 level (-dBov, 127 = silence) to RTCEncodedAudioFrameMetadata's
+// audioLevel, as webrtc-pc converts it for RTCRtpSynchronizationSource:
+// 10^(-level/20), 0 for silence.
+function linearAudioLevel(level) {
+  return level >= 127 ? 0 : MathPow(10, -level / 20);
+}
+
+// The fake microphone plays a sine of amplitude 1/8 (FFmpeg's `sine`
+// source, fake_media/generate.sh; each channel of the stereo clip too):
+// RMS 0.125 / sqrt(2) = -21.07 dBov, RFC 6464 level 21. Its frames carry
+// that level.
+const FAKE_TONE_RFC6464_LEVEL = 21;
+
 // A fake device's frame for a sender with a transform (02_media_devices.js).
 function feedFake(sender, pc, key, stereo) {
   const { _transform, _rid, _state: pcState } = internals();
@@ -655,6 +698,9 @@ function feedFake(sender, pc, key, stereo) {
     }
     metadata.spatialIndex = 0;
     metadata.temporalIndex = 0;
+    const ids = videoFrameIds(state, info.rtpTimestamp, f.keyFrame);
+    metadata.frameId = ids.frameId;
+    metadata.dependencies = ids.dependencies;
     // The raw frame's presentation timestamp, in microseconds: when the
     // device took it.
     metadata.timestamp = MathRound(captureTime * 1000);
@@ -673,6 +719,7 @@ function feedFake(sender, pc, key, stereo) {
       }
     }
   } else {
+    metadata.audioLevel = linearAudioLevel(FAKE_TONE_RFC6464_LEVEL);
     postFrame(
       state,
       new RTCEncodedAudioFrame(illegalConstructorKey, {
@@ -751,6 +798,15 @@ function deliverReceived(receiver, event) {
     receiveTime: performance.now(),
     mimeType: info.mimeType,
   };
+  // abs-capture-time, when negotiated and sent: the capture time on the
+  // capture system's clock plus the sender's estimate of that clock's
+  // offset, on this side's performance timeline.
+  if (info.captureTime !== null && info.captureTime !== undefined) {
+    const offset = info.senderCaptureTimeOffset ?? null;
+    metadata.captureTime = info.captureTime + (offset ?? 0) -
+      performance.timeOrigin;
+    if (offset !== null) metadata.senderCaptureTimeOffset = offset;
+  }
   const data = copyBytes(event.data);
   if (
     StringPrototypeStartsWith(
@@ -767,6 +823,9 @@ function deliverReceived(receiver, event) {
     }
     metadata.spatialIndex = 0;
     metadata.temporalIndex = 0;
+    const ids = videoFrameIds(state, info.rtpTimestamp, event.keyFrame);
+    metadata.frameId = ids.frameId;
+    metadata.dependencies = ids.dependencies;
     postFrame(
       state,
       new RTCEncodedVideoFrame(illegalConstructorKey, {
@@ -778,6 +837,10 @@ function deliverReceived(receiver, event) {
     );
   } else {
     metadata.sequenceNumber = info.sequenceNumber;
+    // The level the sender put in `ssrc-audio-level`, when negotiated.
+    if (info.audioLevel !== null && info.audioLevel !== undefined) {
+      metadata.audioLevel = linearAudioLevel(info.audioLevel);
+    }
     postFrame(
       state,
       new RTCEncodedAudioFrame(illegalConstructorKey, {
