@@ -18021,6 +18021,26 @@ where the changes are discussed.
        not once hidden). `runtime/ops/desktop.rs` tests the serialized shapes;
        `tests/unit/ops_test.ts` counts the two ops.
      - Node tests enabled: none.
+462. **`fix(node/net)`: a Windows named-pipe server keeps accepting past four
+     open connections** (`desktop/d28-qutty-2`; runtime;
+     `libs/core/uv_compat/pipe.rs`, `tests/unit_node/net_test.ts`; the item
+     number is a placeholder for the train lead to renumber). Named pipes are
+     the local IPC of Windows (`net.createServer().listen("\\\\.\\pipe\\name")`,
+     what denext's `listenLocalIpc` uses there; a Unix socket elsewhere).
+     `uv_pipe_listen` created the first instance with
+     `max_instances(pending_instances)`, 4 by default. The first instance's
+     limit is the pipe's for good, and libuv's `pending_instances` is how many
+     instances it keeps listening, not how many may exist (libuv passes
+     `PIPE_UNLIMITED_INSTANCES`). So with four clients connected, the instance
+     `uv_pipe_accept` creates for the next client failed (`ERROR_PIPE_BUSY`),
+     the failure was dropped, and the server had no listening instance left: it
+     never accepted again. The limit is gone (tokio's default, unlimited).
+     - Found by reading the source; the test
+       (`[node/net] a path server keeps
+       accepting past four open connections`:
+       ten clients held open, then an eleventh, on a named pipe on Windows and a
+       Unix socket elsewhere) is the proof on Windows.
+     - Node tests enabled: none.
 
 460. **`feat(desktop)`: laufey API 59: web view downloads and permission
      requests the app decides, menu read-back, and a macOS panel whose show()

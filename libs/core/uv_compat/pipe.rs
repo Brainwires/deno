@@ -931,10 +931,15 @@ pub unsafe fn uv_pipe_listen(
       None => return super::UV_EINVAL,
     };
 
+    // No instance limit (tokio's default, PIPE_UNLIMITED_INSTANCES), as
+    // libuv creates its pipes: the first instance's limit is the pipe's
+    // for good, and `pending_instances` (4) is how many instances libuv
+    // keeps LISTENING, not how many may exist. With the limit at 4, the
+    // instance `uv_pipe_accept` creates for the next client failed
+    // (ERROR_PIPE_BUSY) once four clients were connected, and the server
+    // never accepted again (DENEXT.md item 472).
     let mut opts = tokio::net::windows::named_pipe::ServerOptions::new();
-    opts
-      .first_pipe_instance(true)
-      .max_instances((*pipe).pending_instances as usize);
+    opts.first_pipe_instance(true);
     let server = match opts.create(&path) {
       Ok(s) => s,
       Err(e) => {
