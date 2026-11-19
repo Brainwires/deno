@@ -50,12 +50,13 @@ pub const POLICY_FORMAT: u32 = 1;
 /// the deny; the broker makes them for Deno's own operations).
 pub const BROKER_FS_BUILT: bool = true;
 
-/// Whether the broker has the network side (connecting and binding by
-/// host, name resolution, Unix sockets by path, module fetches after
-/// start). Not yet: a policy that needs it carries a fail-open gap, so
-/// `enforce` and `broker` refuse to start rather than apply rules nothing
-/// holds.
-pub const BROKER_NET_BUILT: bool = false;
+/// Whether the broker has the network side: connecting and binding by
+/// host, name resolution and Unix sockets by path are the broker's
+/// (`deno_sandbox::net_authority` over Deno's own checks), and the confined
+/// process makes no IP socket of its own. What it doesn't carry fails
+/// closed (a module fetched after start, the runtime's own services), so
+/// nothing is left to Deno's checks alone.
+pub const BROKER_NET_BUILT: bool = true;
 
 /// Whether this runtime overmounts denied paths in a user + mount namespace
 /// (the exact Linux read deny). Not yet: the model falls back to expansion
@@ -2517,12 +2518,16 @@ impl<'a> Compiler<'a> {
     let os = self.os();
     let ports_supported = self.caps.supports(Feature::TcpPorts);
 
-    // Mode B: hosts held exactly by the broker
-    let use_broker = self.broker_net()
+    // Mode B: hosts held exactly by the broker. A name needs it on Linux
+    // and macOS alike (no kernel scopes by host); so does every scoped list
+    // or deny under an explicit `broker`. A network with nothing to hold
+    // (unscoped, no deny) stays the process's own.
+    let nothing_to_hold = connect.is_any() && bind.is_any() && deny.is_empty();
+    let use_broker = (self.broker_net() && !nothing_to_hold)
       || (hosted && os == TargetOs::Linux)
       || (hosted
         && os == TargetOs::Macos
-        && self.has_portless(&connect, &bind));
+        && (BROKER_NET_BUILT || self.has_portless(&connect, &bind)));
     if use_broker && os != TargetOs::Windows {
       let host_scope = |side: &NetSide, extra: Option<u16>| -> HostScope {
         if side.is_any() {

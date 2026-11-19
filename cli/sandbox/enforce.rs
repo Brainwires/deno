@@ -349,10 +349,16 @@ fn net_plan(net: &NetPolicy) -> Result<NetPlan, PolicyGap> {
       connect: ports(connect),
       bind: ports(bind),
     },
+    // the broker holds the network: the confined process has no IP
+    // socket of its own (its sockets come from the broker, connected or
+    // listening)
+    NetPolicy::Broker { .. } if super::policy::BROKER_NET_BUILT => {
+      NetPlan::Denied
+    }
     NetPolicy::Broker { .. } => {
       return Err(fatal(
         "--allow-net",
-        "host-scoped network needs the broker (Mode B), which is not built in",
+        "host-scoped network needs the broker's network side (Mode B), which is not built in",
       ));
     }
   })
@@ -640,6 +646,7 @@ mod linux {
     // no run grant: nothing may execute; a strict scope: the listed files
     handled.exec = p.fs.exec != ExecScope::Unrestricted;
     let net = net_plan(&p.net)?;
+    let broker_net = matches!(p.net, NetPolicy::Broker { .. });
     let probe = (handled.read && !rules.contains_key(Path::new("/")))
       .then(|| PathBuf::from("/"));
     let plan = LinuxPlan {
@@ -669,7 +676,10 @@ mod linux {
         attack_surface: p.syscalls.attack_surface,
         clone3_enosys: p.syscalls.clone3_enosys,
         refuse_exec: p.syscalls.refuse_exec,
-        refuse_listen: p.syscalls.refuse_listen,
+        // under a broker that holds the network the broker listens and
+        // connects: the confined tree does neither
+        refuse_listen: p.syscalls.refuse_listen || broker_net,
+        refuse_connect: broker_net,
         refuse_io_uring: p.syscalls.refuse_io_uring,
         refuse_path_metadata: p.syscalls.refuse_path_metadata,
         refuse_path_truncate: p.syscalls.refuse_path_truncate,
@@ -1104,7 +1114,7 @@ pub fn startup() {
     }
     take_broker(
       deno_sandbox::enforce_linux::applied_plan()
-        .is_some_and(|plan| plan.broker.is_some()),
+        .and_then(|plan| plan.broker.as_ref()),
     );
     if deno_sandbox::enforce_linux::applied_plan().is_some()
       || kernel_reports_confined()
@@ -1123,12 +1133,12 @@ pub fn startup() {
           refuse_at_startup(&err);
         }
         use_cache_overlay(&plan);
-        take_broker(plan.broker.is_some());
+        take_broker(plan.broker.as_ref());
         let _ = INHERITED.set(plan);
         mark_confined();
       }
       Ok(None) => {
-        take_broker(false);
+        take_broker(None);
         if kernel_reports_confined() {
           mark_confined();
         }
@@ -1144,11 +1154,18 @@ pub fn startup() {
 /// closed otherwise (a channel nobody compiled is never used). A plan with
 /// a broker and no channel is refused later, in [`prepare`].
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn take_broker(expected: bool) {
+fn take_broker(expected: Option<&deno_sandbox::plan::BrokerPlan>) {
+  use deno_runtime::deno_permissions::kernel_broker;
   match deno_sandbox::supervise::take_broker_fd() {
-    Ok(Some(fd)) if expected => {
-      let _ =
-        deno_runtime::deno_permissions::kernel_broker::client::install(fd);
+    Ok(Some(fd)) if expected.is_some() => {
+      let _ = kernel_broker::client::install(fd);
+      // the broker holds the network: every socket of this process is
+      // asked of it from here on (before any module or user code runs)
+      if expected.is_some_and(|broker| broker.net.is_some()) {
+        deno_net_route::install(Box::new(
+          kernel_broker::net::BrokerRoute::new(),
+        ));
+      }
     }
     Ok(_) => {}
     Err(err) => refuse_at_startup(&err),
@@ -1203,8 +1220,19 @@ fn supervise(handoff: deno_sandbox::supervise::Handoff) -> ! {
       }
     }
   };
+  let net = broker.net.clone();
   let serve = move |sock: std::os::fd::OwnedFd| -> std::io::Result<()> {
-    let server = Server::new(FsBroker::new(&policy)?);
+    let net = match &net {
+      Some(net) => Some(
+        super::net_broker::route_for(net, &policy)
+          .map_err(|err| std::io::Error::other(err.to_string()))?,
+      ),
+      None => None,
+    };
+    let server = Server::new(super::net_broker::BrokerHandler {
+      fs: FsBroker::new(&policy)?,
+      net,
+    });
     server.spawn(sock).map(|_| ())
   };
   deno_sandbox::supervise::run(exec_worker, serve)
@@ -1406,9 +1434,30 @@ pub fn prepare(
       fatal.join("\n")
     );
   }
-  let Some(plan) = plan else {
+  let Some(mut plan) = plan else {
     bail!("--kernel-sandbox=enforce refuses to start: no plan for this OS");
   };
+  // the broker's copy of the network grant, as the flags wrote it (both
+  // images run this with the same options, so the plans still compare)
+  if matches!(compiled.policy.net, NetPolicy::Broker { .. })
+    && let Some(broker) = &mut plan.broker
+  {
+    let mut allow_listen = options.allow_net_listen.clone();
+    if let Some(port) = ctx.inspector_port {
+      // the inspector's own listener, which no flag grants
+      allow_listen
+        .get_or_insert_with(Vec::new)
+        .push(format!("127.0.0.1:{port}"));
+    }
+    broker.net = Some(deno_sandbox::plan::BrokerNet {
+      allow: options.allow_net.clone(),
+      deny: options.deny_net.clone(),
+      allow_connect: options.allow_net_connect.clone(),
+      deny_connect: options.deny_net_connect.clone(),
+      allow_listen,
+      deny_listen: options.deny_net_listen.clone(),
+    });
+  }
   let _ = READ_DENIES.set(
     compiled
       .policy
@@ -1485,7 +1534,13 @@ fn check_broker(plan: &EnforcePlan) -> Result<(), AnyError> {
       "--kernel-sandbox=broker refuses to start: this process has no channel to its broker"
     );
   };
+  let net = plan.broker.as_ref().is_some_and(|b| b.net.is_some());
+  let net_features =
+    deno_runtime::deno_permissions::kernel_broker::net::FEATURES;
   match broker.hello() {
+    Ok(served) if net && served & net_features != net_features => bail!(
+      "--kernel-sandbox=broker refuses to start: the broker doesn't serve network operations"
+    ),
     Ok(served) if served & features::FS != 0 => Ok(()),
     Ok(_) => bail!(
       "--kernel-sandbox=broker refuses to start: the broker doesn't serve file operations"

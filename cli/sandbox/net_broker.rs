@@ -189,6 +189,87 @@ pub fn authority(
   )?)))
 }
 
+/// The supervisor's network authority for a broker plan: Deno's checks over
+/// the network lists the run's flags wrote, and (for Unix sockets, which
+/// need read and write on their path) the read and write scopes the broker
+/// holds.
+pub fn route_for(
+  net: &deno_sandbox::plan::BrokerNet,
+  fs: &deno_runtime::deno_permissions::kernel_broker::fs::FsPolicy,
+) -> Result<InProcessRoute, AnyError> {
+  let paths = |scope: &Option<Vec<std::path::PathBuf>>| {
+    Some(match scope {
+      // unscoped
+      None => Vec::new(),
+      Some(paths) => paths.iter().map(|p| p.display().to_string()).collect(),
+    })
+  };
+  let denies = |list: &[std::path::PathBuf]| {
+    (!list.is_empty())
+      .then(|| list.iter().map(|p| p.display().to_string()).collect())
+  };
+  let options = PermissionsOptions {
+    allow_net: net.allow.clone(),
+    deny_net: net.deny.clone(),
+    allow_net_connect: net.allow_connect.clone(),
+    deny_net_connect: net.deny_connect.clone(),
+    allow_net_listen: net.allow_listen.clone(),
+    deny_net_listen: net.deny_listen.clone(),
+    // a scope with no entry is a grant of nothing, not an unscoped one
+    allow_read: paths(&fs.read).filter(|l| fs.read.is_none() || !l.is_empty()),
+    deny_read: denies(&fs.deny_read),
+    allow_write: paths(&fs.write)
+      .filter(|l| fs.write.is_none() || !l.is_empty()),
+    deny_write: denies(&fs.deny_write),
+    prompt: false,
+    ..Default::default()
+  };
+  let parser = Arc::new(
+    deno_runtime::deno_permissions::RuntimePermissionDescriptorParser::new(
+      sys_traits::impls::RealSys,
+    ),
+  );
+  Ok(InProcessRoute(Arc::new(authority(parser, &options)?)))
+}
+
+/// What the supervisor's broker answers with: the file operations, and the
+/// network operations (the protocol's reserved kinds) when the broker holds
+/// the network.
+pub struct BrokerHandler {
+  pub fs: deno_runtime::deno_permissions::kernel_broker::fs::FsBroker,
+  pub net: Option<InProcessRoute>,
+}
+
+impl deno_runtime::deno_permissions::kernel_broker::server::Handler
+  for BrokerHandler
+{
+  fn features(&self) -> u64 {
+    use deno_runtime::deno_permissions::kernel_broker::net::FEATURES;
+    self.fs.features() | if self.net.is_some() { FEATURES } else { 0 }
+  }
+
+  fn handle(
+    &self,
+    request: &deno_runtime::deno_permissions::kernel_broker::protocol::Request,
+  ) -> deno_runtime::deno_permissions::kernel_broker::server::Reply {
+    self.fs.handle(request)
+  }
+
+  fn handle_unknown(
+    &self,
+    kind: u16,
+    payload: &[u8],
+  ) -> deno_runtime::deno_permissions::kernel_broker::server::Reply {
+    use deno_runtime::deno_permissions::kernel_broker;
+    match &self.net {
+      Some(net) if kernel_broker::protocol::NET_KINDS.contains(&kind) => {
+        kernel_broker::net::serve(net, kind, payload)
+      }
+      _ => kernel_broker::server::Reply::unsupported(),
+    }
+  }
+}
+
 /// Installs the in-process route when [`NET_ROUTE_TEST_ENV_VAR`] asks for
 /// it (any other value is ignored with a warning).
 pub fn install_test_route(

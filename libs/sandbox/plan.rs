@@ -95,6 +95,25 @@ pub struct BrokerPlan {
   pub deny_read: Vec<PathBuf>,
   pub write: Option<Vec<PathBuf>>,
   pub deny_write: Vec<PathBuf>,
+  /// The run's network grant, when the broker holds the network (a
+  /// host-scoped `--allow-net`): the confined process then makes no IP
+  /// socket of its own and asks the broker for every one.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub net: Option<BrokerNet>,
+}
+
+/// The network lists of a run, as its flags wrote them (`None`: the flag
+/// wasn't given; empty: unscoped). The broker reads them with Deno's own
+/// permission checks.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrokerNet {
+  pub allow: Option<Vec<String>>,
+  pub deny: Option<Vec<String>>,
+  pub allow_connect: Option<Vec<String>>,
+  pub deny_connect: Option<Vec<String>>,
+  pub allow_listen: Option<Vec<String>>,
+  pub deny_listen: Option<Vec<String>>,
 }
 
 impl EnforcePlan {
@@ -273,6 +292,13 @@ pub struct SeccompPlan {
   /// child.
   #[serde(default)]
   pub signal_self: bool,
+  /// `connect(2)` refused outright: under a broker that holds the
+  /// network, the process tree makes no connection of its own (its sockets
+  /// arrive connected), and a socket the broker handed over must not be
+  /// pointed at another address (`connect` to `AF_UNSPEC` dissolves a TCP
+  /// association, and Landlock holds the next connect only from ABI 4).
+  #[serde(default)]
+  pub refuse_connect: bool,
   /// `socket(AF_UNIX)` allowed (`socketpair` always is).
   pub unix_sockets: bool,
   /// `socket(AF_NETLINK, *, NETLINK_ROUTE)` allowed (other protocols never).

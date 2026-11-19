@@ -755,6 +755,12 @@ pub fn seccomp_spec(seccomp: &SeccompPlan, net: &NetPlan) -> SeccompSpec {
       spec = spec.rule(SyscallRule::Deny { nr, errno: eperm });
     }
   }
+  if seccomp.refuse_connect {
+    spec = spec.rule(SyscallRule::Deny {
+      nr: crate::net_gate::NR_CONNECT,
+      errno: libc::EACCES,
+    });
+  }
   if seccomp.signal_self {
     // this process only (the PID is the first image's: the re-exec keeps
     // it); a thread id can't be told apart from another process's, and a
@@ -1306,6 +1312,7 @@ mod tests {
       clone3_enosys: true,
       refuse_exec: true,
       refuse_listen: true,
+      refuse_connect: false,
       refuse_io_uring: true,
       refuse_path_metadata: true,
       refuse_path_truncate: true,
@@ -1478,6 +1485,29 @@ mod tests {
     }
   }
 
+  // Under a broker that holds the network the tree makes no connection of
+  // its own: connect(2) is refused whatever the socket or the address
+  // (a socket the broker handed over can't be dissolved and re-pointed).
+  #[test]
+  fn seccomp_program_refuses_connect_under_a_net_broker() {
+    let eacces = eno(libc::EACCES);
+    let with = SeccompPlan {
+      refuse_connect: true,
+      ..Default::default()
+    };
+    let p = seccomp_spec(&with, &NetPlan::Denied).program();
+    assert_eq!(
+      run_filter(&p, crate::net_gate::NR_CONNECT, [3, 0, 16, 0, 0, 0]),
+      eacces
+    );
+    let without =
+      seccomp_spec(&SeccompPlan::default(), &NetPlan::Denied).program();
+    assert_eq!(
+      run_filter(&without, crate::net_gate::NR_CONNECT, [3, 0, 16, 0, 0, 0]),
+      SECCOMP_RET_ALLOW
+    );
+  }
+
   #[test]
   fn seccomp_program_switches() {
     let none = SeccompPlan::default();
@@ -1617,19 +1647,24 @@ mod tests {
   #[test]
   fn listeners_bound_before_the_filter_still_accept() {
     use std::os::fd::IntoRawFd;
-    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = free.local_addr().unwrap();
-    drop(free);
     // an address in use is recorded with its error, not fatal
     let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let taken_addr = taken.local_addr().unwrap();
-    bind_prebound(&[addr, taken_addr]);
+    bind_prebound(&[taken_addr]);
     let err = deno_net_route::prebound_tcp(&taken_addr).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
-    let listener = deno_net_route::prebound_tcp(&addr)
-      .unwrap()
-      .expect("bound before")
-      .into_raw_fd();
+    // a free one is bound (another test may take a port between the probe
+    // that finds it free and the bind: then the next one)
+    let (addr, listener) = (0..50)
+      .find_map(|_| {
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = free.local_addr().unwrap();
+        drop(free);
+        bind_prebound(&[addr]);
+        let listener = deno_net_route::prebound_tcp(&addr).ok()??;
+        Some((addr, listener.into_raw_fd()))
+      })
+      .expect("a free port to bind before");
     // a client waits in the backlog: the address listens from the start
     let _client = std::net::TcpStream::connect(addr).unwrap();
 

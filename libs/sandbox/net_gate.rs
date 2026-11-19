@@ -440,10 +440,27 @@ mod tests {
     matches!(results.as_deref(), Ok([e, 0]) if *e == libc::EACCES)
   }
 
+  /// Whether to skip a test that needs supervision (saying so). With
+  /// `DENO_SANDBOX_TEST_REQUIRE_SUPERVISION` set (the kernel matrix), a
+  /// host that can't supervise fails the test instead.
+  fn skip_without_supervision() -> bool {
+    if supervision_works() {
+      return false;
+    }
+    #[allow(clippy::disallowed_methods, reason = "a test switch")]
+    let required =
+      std::env::var_os("DENO_SANDBOX_TEST_REQUIRE_SUPERVISION").is_some();
+    assert!(
+      !required,
+      "seccomp user notification or pidfd_getfd is not usable here"
+    );
+    eprintln!("skipped: seccomp user notification is not usable here");
+    true
+  }
+
   #[test]
   fn a_gated_tree_reaches_only_the_listed_address() {
-    if !supervision_works() {
-      eprintln!("skipped: seccomp user notification is not usable here");
+    if skip_without_supervision() {
       return;
     }
     let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -503,8 +520,7 @@ mod tests {
 
   #[test]
   fn a_non_blocking_connect_reports_in_progress_or_done() {
-    if !supervision_works() {
-      eprintln!("skipped: seccomp user notification is not usable here");
+    if skip_without_supervision() {
       return;
     }
     let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -530,8 +546,7 @@ mod tests {
 
   #[test]
   fn nothing_listed_nothing_reached() {
-    if !supervision_works() {
-      eprintln!("skipped: seccomp user notification is not usable here");
+    if skip_without_supervision() {
       return;
     }
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();

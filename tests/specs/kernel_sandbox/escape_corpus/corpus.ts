@@ -56,8 +56,9 @@ if (!["today", "enforce"].includes(expect)) {
 // --expect=enforce: the platform column this machine is (macOS, or Linux by
 // its Landlock ABI); without a kernel enforcer here there is nothing to hold
 let column: Column | undefined;
-// whether this runtime has the supervising broker (Mode B): only then can
-// a host-scoped network grant be held, and the net-host configuration run
+// whether this runtime's supervising broker (Mode B) holds the network:
+// only then can a host-scoped grant be held, and the net-host
+// configurations run
 let brokerBuilt = false;
 if (expect === "enforce") {
   const info = JSON.parse(
@@ -77,7 +78,7 @@ if (expect === "enforce") {
     Deno.exit(0);
   }
   column = columnFor(Deno.build.os, info.landlockAbi);
-  brokerBuilt = info.brokerBuilt === true;
+  brokerBuilt = info.brokerNetBuilt === true;
 }
 
 function sh(cmd: string, argv: string[]) {

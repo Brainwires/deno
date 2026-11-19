@@ -108,8 +108,8 @@ Landlock (or without an enforcer for the OS) the run is skipped with the reason.
 answers so on purpose); the baseline turns it into `host` on a kernel that lacks
 them.
 
-Where the runtime has the supervising broker (`deno info --json` →
-`kernelSandbox.brokerBuilt`), two more configurations run: `net-host`
+Where the runtime's supervising broker holds the network (`deno info --json` →
+`kernelSandbox.brokerNetBuilt`), two more configurations run: `net-host`
 (`--allow-net=example.com:<port>,localhost:<port>`, a host-scoped grant) and
 `net-host-run` (the same with `--allow-run=<work>/probe`, the child vector).
 Every IP cell must be held in both, on every column: the runtime's own sockets
