@@ -2027,7 +2027,7 @@ class RTCRtpSender {
   }
   get transport() {
     webidl.assertBranded(this, RTCRtpSenderPrototype);
-    return dtlsTransportOf(this[_pc]);
+    return rtpTransportOf(this[_transceiver]);
   }
   get dtmf() {
     webidl.assertBranded(this, RTCRtpSenderPrototype);
@@ -2449,7 +2449,7 @@ class RTCRtpReceiver {
   }
   get transport() {
     webidl.assertBranded(this, RTCRtpReceiverPrototype);
-    return dtlsTransportOf(this[_pc]);
+    return rtpTransportOf(this[_transceiver]);
   }
   get jitterBufferTarget() {
     webidl.assertBranded(this, RTCRtpReceiverPrototype);
@@ -2603,6 +2603,10 @@ class RTCRtpTransceiver {
       currentDirection: null,
       stopping: false,
       stopped: false,
+      // [[SenderTransport]] / [[ReceiverTransport]] are set (true) and their
+      // values at the last stable state, which a rollback restores.
+      transport: false,
+      stableTransport: false,
     };
     this[_state].sender = new RTCRtpSender(illegalConstructorKey, pc, this);
     this[_state].receiver = new RTCRtpReceiver(
@@ -2754,6 +2758,17 @@ const RTCRtpTransceiverPrototype = RTCRtpTransceiver.prototype;
 // user agent's own doing (not track.stop()), which mediacapture-main does in a
 // queued task: the stop() call or the description that caused it returns
 // first, with the track still live (WPT RTCRtpTransceiver-stopping).
+// The sender's and receiver's `transport` (one object for both): null until a
+// description gives the transceiver one (webrtc-pc 4.4.1.6: a local offer or
+// answer, or a remote answer; never a remote offer), and null again when a
+// rollback takes it back. The engine bundles everything on its one DTLS
+// transport, which is the object every transceiver shares.
+function rtpTransportOf(transceiver) {
+  return transceiver[_state].transport
+    ? dtlsTransportOf(transceiver[_pc])
+    : null;
+}
+
 function stopSending(transceiver) {
   const sender = transceiver[_state].sender;
   updateSenderSource(sender, sender[_state].track, null);
@@ -4479,6 +4494,16 @@ function syncTransceivers(pc, phase) {
       } else if (receiver[_state].receiving && !remoteSends) {
         removeRemoteTrack(t);
       }
+    }
+    if (phase !== null) {
+      if (phase.type === "rollback") {
+        ts.transport = ts.stableTransport;
+      } else if (
+        ts.mid !== null && (!phase.remote || phase.type !== "offer")
+      ) {
+        ts.transport = true;
+      }
+      if (settled) ts.stableTransport = ts.transport;
     }
     if (settled && phase.type === "answer" && ts.stopped) {
       // Negotiated stopped: out of the set, without a mid (webrtc-pc 4.4.1.6).
