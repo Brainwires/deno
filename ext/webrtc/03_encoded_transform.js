@@ -324,6 +324,13 @@ class RTCRtpScriptTransform {
       port: port1,
       target: null,
       side: null,
+      // The sender or receiver it was first attached to (its [[owner]]),
+      // with that side and the media kind: a transform serves one owner
+      // for good, and its worker's key frame calls answer for that owner
+      // even after it is detached.
+      owner: null,
+      ownerSide: null,
+      kind: null,
       // generateKeyFrame() calls waiting for the next key frame.
       keyFrameWaiters: [],
       // The last key frame's size, for the delta frames' metadata.
@@ -456,6 +463,9 @@ function initRtpTransform(sframeTransform) {
     port: null,
     target: null,
     side: null,
+    owner: null,
+    ownerSide: null,
+    kind: null,
     keyFrameWaiters: [],
     size: null,
     closed: false,
@@ -482,8 +492,11 @@ function setTransform(owner, side, transform) {
           : "Failed to set 'transform': not an RTCRtpScriptTransform, an RTCRtpSFrameDecryptor or null",
       );
     }
+    // A transform once attached belongs to that sender or receiver, also
+    // after it is detached from it (WebRTC Encoded Transform, the
+    // `transform` setter: its [[owner]] is not reset).
     const state = transform[_state];
-    if (state.target !== null && state.target !== owner) {
+    if (state.owner !== null && state.owner !== owner) {
       throw invalidState("Failed to set 'transform': it is already in use");
     }
   }
@@ -499,6 +512,11 @@ function setTransform(owner, side, transform) {
     const state = transform[_state];
     state.target = owner;
     state.side = side;
+    if (state.owner === null) {
+      state.owner = owner;
+      state.ownerSide = side;
+      state.kind = owner[_transceiver][s].kind;
+    }
     state.port?.postMessage({ attach: side });
   }
   if (side === "receiver" && !pc[s].closed) {
