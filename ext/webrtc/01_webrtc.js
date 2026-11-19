@@ -134,6 +134,7 @@ const {
   SetPrototypeHas,
   StringPrototypeEndsWith,
   StringPrototypeIncludes,
+  StringPrototypeIndexOf,
   StringPrototypeLastIndexOf,
   StringPrototypeReplace,
   StringPrototypeToUpperCase,
@@ -2047,21 +2048,10 @@ class RTCRtpSender {
 
   getParameters() {
     webidl.assertBranded(this, RTCRtpSenderPrototype);
-    const pc = this[_pc];
-    const transceiver = this[_transceiver];
-    let negotiated = { codecs: [], headerExtensions: [], encodings: [] };
-    if (!pc[_state].closed) {
-      try {
-        negotiated = op_webrtc_sender_parameters(
-          pc[_rid],
-          transceiver[_key],
-        ) ?? negotiated;
-      } catch {
-        // The transceiver is gone.
-      }
-    }
     const state = this[_state];
-    const kind = transceiver[_state].kind;
+    const kind = this[_transceiver][_state].kind;
+    const negotiated = senderNegotiated(this);
+    const codecs = negotiated.codecs;
     const encodings = ArrayPrototypeMap(state.encodings, (e) => {
       const out = { active: e.active };
       if (e.rid !== undefined) out.rid = e.rid;
@@ -2075,22 +2065,33 @@ class RTCRtpSender {
       // webrtc-extensions: whether the sender may vary its frame length (it
       // never does; the member is kept as set).
       out.adaptivePtime = e.adaptivePtime ?? false;
+      if (e.codec !== undefined) out.codec = { ...e.codec };
+      if (e.encodingComplexity !== undefined) {
+        out.encodingComplexity = e.encodingComplexity;
+      }
+      if (e.scalabilityMode !== undefined) {
+        // Once a codec is negotiated, the mode it can send.
+        const sending = e.codec ??
+          ArrayPrototypeFind(codecs, (c) => !isRepairCodec(c.mimeType));
+        out.scalabilityMode = sending === undefined
+          ? e.scalabilityMode
+          : negotiatedScalabilityMode(e.scalabilityMode, sending.mimeType);
+      }
       return out;
     });
-    const hasNegotiated = transceiver[_state].currentDirection !== null;
+    // [[LastReturnedParameters]]: until the current task ends, the same
+    // transaction (webrtc-pc 5.2 getParameters()).
+    const previous = this[_pc][_state].closed ? null : state.lastParameters;
     const params = {
-      transactionId: uuid(),
+      transactionId: previous?.transactionId ?? uuid(),
       encodings,
-      headerExtensions: hasNegotiated
-        ? ArrayPrototypeMap(negotiated.headerExtensions, (h) => ({ ...h }))
-        : [],
-      rtcp: { cname: pc[_state].cname, reducedSize: false },
-      codecs: hasNegotiated
-        ? ArrayPrototypeMap(negotiated.codecs, (c) => ({ ...c }))
-        : [],
+      headerExtensions: negotiated.headerExtensions,
+      rtcp: { cname: this[_pc][_state].cname, reducedSize: false },
+      codecs,
     };
     state.lastParameters = {
       transactionId: params.transactionId,
+      codecs: params.codecs,
       snapshot: JSONStringify({
         e: ArrayPrototypeMap(params.encodings, (e) => e.rid ?? null),
         h: params.headerExtensions,
@@ -2098,29 +2099,43 @@ class RTCRtpSender {
         c: params.codecs,
       }),
     };
-    // The transaction id is valid until the current task ends.
-    const timers = pc[_state].timers;
-    const timer = setTimeout(() => {
-      SetPrototypeDelete(timers, timer);
-      if (state.lastParameters?.transactionId === params.transactionId) {
-        state.lastParameters = null;
-      }
-    }, 0);
-    SetPrototypeAdd(timers, timer);
+    if (previous === null) {
+      // The transaction id is valid until the current task ends.
+      const pc = this[_pc];
+      const timers = pc[_state].timers;
+      const last = state.lastParameters;
+      const timer = setTimeout(() => {
+        SetPrototypeDelete(timers, timer);
+        if (state.lastParameters?.transactionId === last.transactionId) {
+          state.lastParameters = null;
+        }
+      }, 0);
+      SetPrototypeAdd(timers, timer);
+    }
     return params;
   }
 
-  setParameters(parameters, _setParameterOptions = undefined) {
+  setParameters(parameters, setParameterOptions = undefined) {
     const branded = brandError(this, RTCRtpSenderPrototype);
     if (branded !== null) return PromiseReject(branded);
     const transceiver = this[_transceiver];
     const state = this[_state];
     try {
-      if (transceiver[_state].stopping || transceiver[_state].stopped) {
-        throw invalidState("The transceiver is stopped");
-      }
+      // The dictionary's required members (WebIDL conversion comes first).
       if (parameters === null || typeof parameters !== "object") {
         throw new TypeError("setParameters: parameters are required");
+      }
+      if (parameters.transactionId === undefined) {
+        throw new TypeError("setParameters: 'transactionId' is required");
+      }
+      if (parameters.encodings === undefined) {
+        throw new TypeError("setParameters: 'encodings' is required");
+      }
+      const encodingOptions = setParameterOptions?.encodingOptions === undefined
+        ? []
+        : ArrayFrom(setParameterOptions.encodingOptions);
+      if (transceiver[_state].stopping || transceiver[_state].stopped) {
+        throw invalidState("The transceiver is stopped");
       }
       const last = state.lastParameters;
       if (last === null) {
@@ -2131,9 +2146,6 @@ class RTCRtpSender {
           "The transactionId doesn't match the last getParameters()",
           "InvalidModificationError",
         );
-      }
-      if (parameters.encodings === undefined) {
-        throw new TypeError("setParameters: 'encodings' is required");
       }
       const encodings = ArrayFrom(parameters.encodings);
       const snapshot = JSONStringify({
@@ -2151,13 +2163,36 @@ class RTCRtpSender {
           "InvalidModificationError",
         );
       }
-      const next = validateEncodings(
-        encodings,
-        transceiver[_state].kind,
-        "setParameters",
-        true,
-      );
-      state.lastParameters = null;
+      const kind = transceiver[_state].kind;
+      // webrtc-extensions: encodingOptions, when given, has one entry per
+      // encoding (audio senders ignore it).
+      if (
+        kind === "video" && encodingOptions.length !== 0 &&
+        encodingOptions.length !== encodings.length
+      ) {
+        throw new DOMException(
+          "setParameters: encodingOptions doesn't match the encodings",
+          "InvalidModificationError",
+        );
+      }
+      const next = validateEncodings(encodings, kind, "setParameters", true);
+      // webrtc-pc 5.2 setParameters(): an encoding's codec must be one the
+      // sender can choose, the negotiated codecs, else what it implements.
+      let choosable = last.codecs ?? [];
+      if (choosable.length === 0) {
+        choosable = capabilities(kind, true)?.codecs ?? [];
+      }
+      for (let i = 0; i < next.length; ++i) {
+        if (
+          next[i].codec !== undefined &&
+          !ArrayPrototypeSome(choosable, (c) => codecMatches(c, next[i].codec))
+        ) {
+          throw new DOMException(
+            `setParameters: ${next[i].codec.mimeType} is not a codec the sender can use`,
+            "InvalidModificationError",
+          );
+        }
+      }
       state.encodings = next;
       const pc = this[_pc];
       if (!pc[_state].closed) {
@@ -2167,7 +2202,13 @@ class RTCRtpSender {
           state.track === null || !next[0]?.active,
         );
       }
-      return nextTask(null);
+      // [[LastReturnedParameters]] is cleared by the task that resolves the
+      // promise, so the same parameters may be set again before it runs.
+      return PromisePrototypeThen(nextTask(null), () => {
+        if (state.lastParameters?.transactionId === last.transactionId) {
+          state.lastParameters = null;
+        }
+      });
     } catch (error) {
       return PromiseReject(error);
     }
@@ -2231,6 +2272,39 @@ class RTCRtpSender {
 }
 webidl.configureInterface(RTCRtpSender);
 const RTCRtpSenderPrototype = RTCRtpSender.prototype;
+
+// The sender's negotiated codecs and header extensions (none before the
+// transceiver has negotiated a direction).
+function senderNegotiated(sender) {
+  const pc = sender[_pc];
+  const transceiver = sender[_transceiver];
+  let negotiated = { codecs: [], headerExtensions: [] };
+  if (!pc[_state].closed && transceiver[_state].currentDirection !== null) {
+    try {
+      negotiated = op_webrtc_sender_parameters(
+        pc[_rid],
+        transceiver[_key],
+      ) ?? negotiated;
+    } catch {
+      // The transceiver is gone.
+    }
+  }
+  return {
+    codecs: ArrayPrototypeMap(negotiated.codecs, (c) => ({ ...c })),
+    headerExtensions: ArrayPrototypeMap(
+      negotiated.headerExtensions,
+      (h) => ({ ...h }),
+    ),
+  };
+}
+
+// Retransmission, redundancy and FEC formats (RFC 4588, 2198, 5109).
+function isRepairCodec(mimeType) {
+  const m = StringPrototypeToLowerCase(String(mimeType));
+  return StringPrototypeEndsWith(m, "/rtx") ||
+    StringPrototypeEndsWith(m, "/red") ||
+    StringPrototypeIncludes(m, "fec");
+}
 
 function setSenderTrack(sender, track) {
   const state = sender[_state];
@@ -2829,7 +2903,48 @@ function validateEncodings(list, kind, method, keepRid) {
       enc.networkPriority = String(e.networkPriority);
     }
     if (e.adaptivePtime !== undefined) enc.adaptivePtime = !!e.adaptivePtime;
+    // webrtc-pc 5.2: the codec an encoding is sent with (an RTCRtpCodec).
+    if (e.codec !== undefined) enc.codec = convertCodec(e.codec, method);
+    // webrtc-extensions: an enum, so an unknown value is a TypeError for any
+    // kind; an audio encoding has no encoder complexity and drops it.
+    if (e.encodingComplexity !== undefined) {
+      const complexity = String(e.encodingComplexity);
+      if (!ArrayPrototypeIncludes(ENCODING_COMPLEXITIES, complexity)) {
+        throw new TypeError(
+          `${method}: '${complexity}' is not a valid RTCEncodingComplexity`,
+        );
+      }
+      if (kind === "video") enc.encodingComplexity = complexity;
+    }
+    // webrtc-svc 4.2.1: a mode no codec supports is an OperationError;
+    // audio has no scalability modes and drops it.
+    if (e.scalabilityMode !== undefined && kind === "video") {
+      const mode = String(e.scalabilityMode);
+      if (!ArrayPrototypeIncludes(SCALABILITY_MODES, mode)) {
+        throw new DOMException(
+          `${method}: '${mode}' is not a supported scalability mode`,
+          "OperationError",
+        );
+      }
+      enc.scalabilityMode = mode;
+    }
     ArrayPrototypePush(out, enc);
+  }
+  if (!keepRid) {
+    // webrtc-pc 5.1 addTransceiver(): a codec that is not one of
+    // RTCRtpSender.getCapabilities(kind).codecs is an OperationError.
+    const send = capabilities(kind, true)?.codecs ?? [];
+    for (let i = 0; i < out.length; ++i) {
+      if (
+        out[i].codec !== undefined &&
+        !ArrayPrototypeSome(send, (c) => codecMatches(c, out[i].codec))
+      ) {
+        throw new DOMException(
+          `${method}: ${out[i].codec.mimeType} is not a codec this sender implements`,
+          "OperationError",
+        );
+      }
+    }
   }
   if (!keepRid) {
     // addTransceiver(): at most MAX_ENCODINGS simulcast encodings, one for
@@ -2855,6 +2970,103 @@ function validateEncodings(list, kind, method, keepRid) {
 // The simulcast encodings one sender may have.
 const MAX_ENCODINGS = 16;
 const RID_RE = new SafeRegExp("^[A-Za-z0-9]+$");
+
+// webrtc-extensions RTCEncodingComplexity.
+const ENCODING_COMPLEXITIES = [
+  "low",
+  "normal",
+  "high",
+  "very-high",
+  "maximum",
+];
+
+// webrtc-svc section 6: the scalability modes.
+const SCALABILITY_MODES = [
+  "L1T1",
+  "L1T2",
+  "L1T3",
+  "L2T1",
+  "L2T1h",
+  "L2T1_KEY",
+  "L2T2",
+  "L2T2h",
+  "L2T2_KEY",
+  "L2T2_KEY_SHIFT",
+  "L2T3",
+  "L2T3h",
+  "L2T3_KEY",
+  "L2T3_KEY_SHIFT",
+  "L3T1",
+  "L3T1h",
+  "L3T1_KEY",
+  "L3T2",
+  "L3T2h",
+  "L3T2_KEY",
+  "L3T2_KEY_SHIFT",
+  "L3T3",
+  "L3T3h",
+  "L3T3_KEY",
+  "L3T3_KEY_SHIFT",
+  "S2T1",
+  "S2T1h",
+  "S2T2",
+  "S2T2h",
+  "S2T3",
+  "S2T3h",
+  "S3T1",
+  "S3T1h",
+  "S3T2",
+  "S3T2h",
+  "S3T3",
+  "S3T3h",
+];
+
+// The temporal layer count of a scalability mode ("L3T2_KEY" -> 2).
+function temporalLayers(mode) {
+  const i = StringPrototypeIndexOf(mode, "T");
+  return i === -1 ? 1 : NumberParseInt(StringPrototypeSlice(mode, i + 1), 10);
+}
+
+// The scalability mode a sender reports once a codec is negotiated: what was
+// asked for when the codec has it, else the codec's mode with the same
+// temporal layers and one spatial layer (VP8 and H.264 have no spatial
+// scalability, webrtc-svc section 4.2.1).
+function negotiatedScalabilityMode(mode, mimeType) {
+  const lower = StringPrototypeToLowerCase(mimeType);
+  if (lower !== "video/vp8" && lower !== "video/h264") return mode;
+  if (StringPrototypeStartsWith(mode, "L1T")) return mode;
+  return `L1T${MathMin(temporalLayers(mode), 3)}`;
+}
+
+// An RTCRtpCodec dictionary (mimeType and clockRate required).
+function convertCodec(codec, method) {
+  if (codec === null || typeof codec !== "object") {
+    throw new TypeError(`${method}: a codec must be an object`);
+  }
+  if (codec.mimeType === undefined || codec.clockRate === undefined) {
+    throw new TypeError(`${method}: a codec needs mimeType and clockRate`);
+  }
+  const out = {
+    mimeType: String(codec.mimeType),
+    clockRate: webidl.converters["unsigned long"](codec.clockRate),
+  };
+  if (codec.channels !== undefined) {
+    out.channels = webidl.converters["unsigned short"](codec.channels);
+  }
+  if (codec.sdpFmtpLine !== undefined) {
+    out.sdpFmtpLine = String(codec.sdpFmtpLine);
+  }
+  return out;
+}
+
+// webrtc-pc 5.2 "codec dictionary match" (payload types aside).
+function codecMatches(a, b) {
+  return StringPrototypeToLowerCase(String(a.mimeType)) ===
+      StringPrototypeToLowerCase(String(b.mimeType)) &&
+    a.clockRate === b.clockRate &&
+    (a.channels ?? null) === (b.channels ?? null) &&
+    (a.sdpFmtpLine ?? null) === (b.sdpFmtpLine ?? null);
+}
 
 // Each transceiver's remote track state before a remote offer is applied, so
 // that rolling the offer back can undo what it did (W3C "set the
