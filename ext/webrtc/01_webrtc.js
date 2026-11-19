@@ -2978,6 +2978,7 @@ function restoreRemoteTracks(pc) {
       continue;
     }
     const now = rstate.streams;
+    let added = false;
     for (let j = 0; j < now.length; ++j) {
       if (!ArrayPrototypeIncludes(before.streams, now[j])) {
         streamRemoveRemote(now[j], rstate.track);
@@ -2986,9 +2987,12 @@ function restoreRemoteTracks(pc) {
     for (let j = 0; j < before.streams.length; ++j) {
       if (!ArrayPrototypeIncludes(now, before.streams[j])) {
         streamAddRemote(before.streams[j], rstate.track);
+        added = true;
       }
     }
     rstate.streams = before.streams;
+    // The streams the rollback gave back are announced as new ones are.
+    if (added) ArrayPrototypePush(revived, t);
   }
   for (let i = 0; i < revived.length; ++i) {
     const receiver = revived[i][_state].receiver;
@@ -3544,9 +3548,13 @@ class RTCPeerConnection extends EventTarget {
         activate(this);
         const now = this[_state].signalingState;
         descriptionApplied(this, false, type);
+        // The transceivers are in place (a remote offer's new ones included)
+        // when signalingstatechange fires; track events come after it
+        // (webrtc-pc 4.4.1.6).
+        const trackEvents = syncTransceivers(this, { remote: true, type });
         setSignalingState(this, nextSignalingState(now, false, type));
         if (type === "rollback") restoreRemoteTracks(this);
-        syncTransceivers(this, { remote: true, type });
+        fireTrackEvents(this, trackEvents);
         updateSctpTransport(this, type);
         setTransportStates(this);
         negotiationSettled(this);
@@ -4394,7 +4402,7 @@ function addTransceiverInner(pc, trackOrKind, init) {
 // a remote track".
 function syncTransceivers(pc, phase) {
   const state = pc[_state];
-  if (state.closed) return;
+  if (state.closed) return [];
   const infos = op_webrtc_pc_transceivers(pc[_rid]);
   const known = new SafeMap();
   for (let i = 0; i < state.transceivers.length; ++i) {
@@ -4476,6 +4484,7 @@ function syncTransceivers(pc, phase) {
         const rstate = receiver[_state];
         const track = rstate.track;
         const old = rstate.streams;
+        let added = false;
         for (let j = 0; j < old.length; ++j) {
           if (!ArrayPrototypeIncludes(streams, old[j])) {
             streamRemoveRemote(old[j], track);
@@ -4484,10 +4493,14 @@ function syncTransceivers(pc, phase) {
         for (let j = 0; j < streams.length; ++j) {
           if (!ArrayPrototypeIncludes(old, streams[j])) {
             streamAddRemote(streams[j], track);
+            added = true;
           }
         }
         rstate.streams = streams;
-        if (!rstate.receiving) {
+        // A track event when the track starts being received, and when the
+        // description adds streams to it ("set the associated remote
+        // streams" grew addList).
+        if (!rstate.receiving || added) {
           rstate.receiving = true;
           ArrayPrototypePush(trackEvents, [t, streams]);
         }
@@ -4524,6 +4537,13 @@ function syncTransceivers(pc, phase) {
     retireTransceiver(pc, t);
   }
   state.transceivers = next;
+  return trackEvents;
+}
+
+// The track events a remote description queued (webrtc-pc 4.4.1.6: after
+// signalingstatechange).
+function fireTrackEvents(pc, trackEvents) {
+  if (trackEvents === undefined) return;
   for (let i = 0; i < trackEvents.length; ++i) {
     const { 0: t, 1: streams } = trackEvents[i];
     const receiver = t[_state].receiver;
