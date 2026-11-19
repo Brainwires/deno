@@ -39,6 +39,93 @@ import {
 
 const r = new Report("menus");
 
+// Menu read-back (laufey API 59): the native application menu and the Dock
+// menu hold what they were given.
+async function readBack(win: any) {
+  const mcaps = desktop.menuCapabilities();
+  r.check(
+    "menuCapabilities().snapshot is a boolean",
+    typeof mcaps.snapshot === "boolean",
+    mcaps,
+  );
+  if (!mcaps.snapshot) {
+    r.check(
+      "no read-back: getApplicationMenu() and Deno.dock.getMenu() are null",
+      win.getApplicationMenu() === null && (Deno as any).dock.getMenu() === null,
+    );
+    r.na("menu read-back", "not supported by this backend");
+    return;
+  }
+  let menu: any[] | null = null;
+  await waitFor(() => {
+    menu = win.getApplicationMenu();
+    return Array.isArray(menu) && menu.some((i) => i.label === "E2E");
+  }, 8000);
+  const e2e = (menu as any[] | null)?.find((i) => i.label === "E2E");
+  const fire = e2e?.submenu?.find((i: any) => i.label === "Fire");
+  r.set("applicationMenu", menu);
+  r.check(
+    "getApplicationMenu() reads the native menu: the submenu, the item, its id and accelerator",
+    e2e?.type === "submenu" && fire?.type === "item" && fire.id === "fire" &&
+      fire.enabled === true && fire.checked === false &&
+      fire.visible === true && typeof fire.accelerator === "string" &&
+      fire.accelerator.endsWith("+K"),
+    fire,
+  );
+  r.check(
+    "an accelerator that does not parse reads back without a key",
+    e2e?.submenu?.find((i: any) => i.label === "Bad accel")?.accelerator ===
+      undefined,
+  );
+  if (OS !== "darwin") {
+    r.check(
+      "off macOS there is no menu bar of the app or Dock menu to read",
+      desktop.getApplicationMenu() === null &&
+        (Deno as any).dock.getMenu() === null,
+    );
+    return;
+  }
+  const dock = (Deno as any).dock;
+  const dockClicks: string[] = [];
+  dock.addEventListener(
+    "menuclick",
+    (e: CustomEvent) => dockClicks.push(e.detail.id),
+  );
+  dock.setMenu([
+    { item: { label: "New Window", id: "dock-new", enabled: true } },
+    {
+      item: { label: "Pinned", id: "dock-pinned", enabled: true, checked: true },
+    },
+    "separator",
+    {
+      submenu: {
+        label: "Recent",
+        items: [{ item: { label: "One", id: "dock-one", enabled: true } }],
+      },
+    },
+  ]);
+  let dockMenu: any[] | null = null;
+  await waitFor(() => {
+    dockMenu = dock.getMenu();
+    return Array.isArray(dockMenu) && dockMenu.length === 4;
+  }, 8000);
+  r.set("dockMenu", dockMenu);
+  const items = (dockMenu ?? []) as any[];
+  r.check(
+    "the Dock menu holds full items: a checkmark, a separator and a submenu",
+    items[0]?.id === "dock-new" && items[0]?.checked === false &&
+      items[1]?.id === "dock-pinned" && items[1]?.checked === true &&
+      items[2]?.type === "separator" && items[3]?.type === "submenu" &&
+      items[3]?.submenu?.[0]?.id === "dock-one",
+    dockMenu,
+  );
+  dock.setMenu(null);
+  r.check(
+    "a cleared Dock menu reads back as null",
+    await waitFor(() => dock.getMenu() === null, 8000),
+  );
+}
+
 /** After `activate`: when it failed, the runner limitation that explains it,
  * or null when the window is at fault, so the check below runs and fails with
  * its own evidence; null when it succeeded. On Windows the evidence is
@@ -224,6 +311,7 @@ await r.step("menus", async () => {
       },
     },
   ]);
+  await readBack(win);
   if (cannotPress) {
     r.na("an application-menu accelerator fires its item", cannotPress);
   } else {

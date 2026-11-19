@@ -12335,6 +12335,41 @@ mod tests {
   }
 
   #[test]
+  fn webview_download_actions_and_paths() {
+    use super::WebViewDownloadAction as Action;
+    use super::webview_control_message;
+    use super::webview_download_path_valid;
+    assert_eq!(Action::parse("save"), Some(Action::Save));
+    assert_eq!(Action::parse("saveAs"), Some(Action::SaveAs));
+    assert_eq!(Action::parse("cancel"), Some(Action::Cancel));
+    assert_eq!(Action::parse("pause"), Some(Action::Pause));
+    assert_eq!(Action::parse("resume"), Some(Action::Resume));
+    for bad in ["", "Save", "save_as", "delete", "save\0"] {
+      assert_eq!(Action::parse(bad), None, "{bad:?}");
+    }
+    #[cfg(not(windows))]
+    {
+      assert!(webview_download_path_valid("/tmp/report.pdf"));
+      assert!(!webview_download_path_valid("C:\\Users\\a\\report.pdf"));
+    }
+    #[cfg(windows)]
+    {
+      assert!(webview_download_path_valid("C:\\Users\\a\\report.pdf"));
+      assert!(!webview_download_path_valid("/tmp/report.pdf"));
+    }
+    for bad in ["", "report.pdf", "./report.pdf", "/tmp/a\nb", "/tmp/a\0b"] {
+      assert!(!webview_download_path_valid(bad), "{bad:?}");
+    }
+    assert!(!webview_download_path_valid(&format!("/{}", "a".repeat(4096))));
+    // Every code a backend answers with has a message of its own kind.
+    assert!(webview_control_message("invalid").contains("no such"));
+    assert!(webview_control_message("closed").contains("closed"));
+    assert!(webview_control_message("no_window").contains("closed"));
+    assert!(webview_control_message("unsupported").contains("can't"));
+    assert!(webview_control_message("failed").contains("failed"));
+  }
+
+  #[test]
   fn webview_capture_scale_and_zoom_range() {
     use super::webview_capture_scale;
     assert_eq!(webview_capture_scale(0.0), Some(None));
