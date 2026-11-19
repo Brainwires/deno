@@ -5138,11 +5138,9 @@ mod tests {
     assert!(DESKTOP_JS.contains(
       "const WEBVIEW_POPUPS = [\"deny\", \"same-view\", \"browser\"];"
     ));
-    assert!(
-      DESKTOP_JS.contains(
-        "const WEBVIEW_DOWNLOADS = [\"deny\", \"ask\", \"browser\", \"app\"];"
-      )
-    );
+    assert!(DESKTOP_JS.contains(
+      "const WEBVIEW_DOWNLOADS = [\"deny\", \"ask\", \"browser\", \"app\"];"
+    ));
     assert!(
       DESKTOP_JS
         .contains("const WEBVIEW_PERMISSIONS = [\"deny\", \"ask\", \"app\"];")

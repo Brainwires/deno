@@ -51,7 +51,8 @@ async function readBack(win: any) {
   if (!mcaps.snapshot) {
     r.check(
       "no read-back: getApplicationMenu() and Deno.dock.getMenu() are null",
-      win.getApplicationMenu() === null && (Deno as any).dock.getMenu() === null,
+      win.getApplicationMenu() === null &&
+        (Deno as any).dock.getMenu() === null,
     );
     r.na("menu read-back", "not supported by this backend");
     return;
@@ -94,7 +95,12 @@ async function readBack(win: any) {
   dock.setMenu([
     { item: { label: "New Window", id: "dock-new", enabled: true } },
     {
-      item: { label: "Pinned", id: "dock-pinned", enabled: true, checked: true },
+      item: {
+        label: "Pinned",
+        id: "dock-pinned",
+        enabled: true,
+        checked: true,
+      },
     },
     "separator",
     {

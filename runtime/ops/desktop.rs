@@ -12360,7 +12360,10 @@ mod tests {
     for bad in ["", "report.pdf", "./report.pdf", "/tmp/a\nb", "/tmp/a\0b"] {
       assert!(!webview_download_path_valid(bad), "{bad:?}");
     }
-    assert!(!webview_download_path_valid(&format!("/{}", "a".repeat(4096))));
+    assert!(!webview_download_path_valid(&format!(
+      "/{}",
+      "a".repeat(4096)
+    )));
     // Every code a backend answers with has a message of its own kind.
     assert!(webview_control_message("invalid").contains("no such"));
     assert!(webview_control_message("closed").contains("closed"));

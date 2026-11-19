@@ -1572,7 +1572,12 @@ declare namespace Deno {
      * `"cancelled"` are the last event of a download; so is
      * `"interrupted"` unless `canResume` is `true`, when `"resume"` or
      * `"cancel"` ends the wait. Closing the view cancels its downloads. */
-    state: "requested" | "progressing" | "completed" | "cancelled" | "interrupted";
+    state:
+      | "requested"
+      | "progressing"
+      | "completed"
+      | "cancelled"
+      | "interrupted";
     url: string;
     /** The suggested name, reduced to a bare file name (never a path). */
     filename: string;

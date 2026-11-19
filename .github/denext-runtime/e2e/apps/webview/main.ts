@@ -329,7 +329,9 @@ async function runAppDownloads() {
     r.na("web view download events", `engine ${caps.engine}`);
     return;
   }
-  const dir = await Deno.realPath(await Deno.makeTempDir({ prefix: "e2e-wv-" }));
+  const dir = await Deno.realPath(
+    await Deno.makeTempDir({ prefix: "e2e-wv-" }),
+  );
   const view = win.createWebView(options);
   const log = record(view);
   await next(log, 0, "load", (d) => d.state === "complete");
@@ -495,8 +497,7 @@ async function runAppDownloads() {
     log,
     0,
     "download",
-    (d) =>
-      d.state === "requested" && ![first, second, third].includes(d.id),
+    (d) => d.state === "requested" && ![first, second, third].includes(d.id),
   ))?.detail.id;
   view.close();
   await next(log, 0, "closed", () => true, 10000);
