@@ -2024,3 +2024,81 @@ interface RTCRtpSFrameDecryptor extends EventTarget {
   addDecryptionKey(key: CryptoKey, keyId: CryptoKeyID): Promise<void>;
   removeDecryptionKey(keyId: CryptoKeyID): Promise<void>;
 }
+
+// wpt100:identity — Identity for WebRTC 1.0 (W3C webrtc-identity).
+
+/**
+ * The options of `RTCPeerConnection.setIdentityProvider()`, passed to the
+ * identity provider's `generateAssertion()`.
+ *
+ * @category WebRTC
+ */
+interface RTCIdentityProviderOptions {
+  /** The IdP's protocol: the IdP proxy is
+   * `https://<provider>/.well-known/idp-proxy/<protocol>`. No `/` or `\`.
+   * Defaults to `"default"`. */
+  protocol?: string;
+  /** The identity the user is expected to have, a hint to the IdP. */
+  usernameHint?: string;
+  /** The identity of the peer, for an IdP that binds both; defaults to
+   * `RTCConfiguration.peerIdentity`. */
+  peerIdentity?: string;
+}
+
+/**
+ * A validated peer identity: the IdP domain and the identity it vouched for.
+ *
+ * @category WebRTC
+ */
+interface RTCIdentityAssertion {
+  idp: string;
+  name: string;
+}
+
+/** @category WebRTC */
+declare var RTCIdentityAssertion: {
+  readonly prototype: RTCIdentityAssertion;
+  new (idp: string, name: string): RTCIdentityAssertion;
+};
+
+/** @category WebRTC */
+interface RTCConfiguration {
+  /** The target peer identity: the connection rejects a remote description
+   * whose `a=identity` doesn't validate to this identity. */
+  peerIdentity?: string;
+}
+
+/** @category WebRTC */
+interface RTCError {
+  /** For `"idp-load-failure"`: the HTTP status of the IdP proxy's load. */
+  readonly httpRequestStatusCode: number | null;
+}
+
+/** @category WebRTC */
+interface RTCPeerConnection {
+  /** Sets the identity provider whose assertion `createOffer()` /
+   * `createAnswer()` add as `a=identity`. The IdP proxy is fetched (net
+   * permission) and runs in a worker with no permissions. */
+  setIdentityProvider(
+    provider: string,
+    options?: RTCIdentityProviderOptions,
+  ): void;
+  /** Gets an identity assertion from the identity provider: the base64 JSON
+   * that `a=identity` carries. */
+  getIdentityAssertion(): Promise<string>;
+  /** The peer's identity, once a remote description's `a=identity`
+   * validates. */
+  readonly peerIdentity: Promise<RTCIdentityAssertion>;
+  /** Where the user can log in, after an `"idp-need-login"` error. */
+  readonly idpLoginUrl: string | null;
+  /** The identity provider's information about its last error. */
+  readonly idpErrorInfo: string | null;
+}
+
+/** @category WebRTC */
+interface MediaStreamTrack {
+  /** Whether the track's content is withheld from the application (never,
+   * in Deno). */
+  readonly isolated: boolean;
+  onisolationchange: ((this: MediaStreamTrack, ev: Event) => any) | null;
+}
