@@ -289,12 +289,15 @@ function descriptionSlot(pc, slot) {
   if (slot === "currentLocal" || slot === "pendingLocal") {
     pair = [pair[0], announcedSdp(state, pair[1])];
   }
+  // wpt100:identity — a local description shows the a=identity line the
+  // engine was given without (06_identity.js).
+  const sdp = identityHooks.reportedSdp(pc, slot, pair[1]);
   const cache = state.descriptions;
   const held = cache[slot];
-  if (held !== null && held.type === pair[0] && held.sdp === pair[1]) {
+  if (held !== null && held.type === pair[0] && held.sdp === sdp) {
     return held;
   }
-  const description = descriptionFrom(pair);
+  const description = descriptionFrom([pair[0], sdp]);
   cache[slot] = description;
   return description;
 }
@@ -676,6 +679,16 @@ const ERROR_DETAILS = [
   "sdp-syntax-error",
   "hardware-encoder-not-available",
   "hardware-encoder-error",
+  // wpt100:identity — RTCErrorDetailTypeIdp (W3C WebRTC Identity section
+  // 10), the partial enum WebIDL can't write.
+  "idp-bad-script-failure",
+  "idp-execution-failure",
+  "idp-load-failure",
+  "idp-need-login",
+  "idp-timeout",
+  "idp-tls-failure",
+  "idp-token-expired",
+  "idp-token-invalid",
 ];
 
 class RTCError extends DOMException {
@@ -701,6 +714,15 @@ class RTCError extends DOMException {
       sctpCauseCode: init.sctpCauseCode ?? null,
       receivedAlert: init.receivedAlert ?? null,
       sentAlert: init.sentAlert ?? null,
+      // wpt100:identity — RTCErrorInit.httpRequestStatusCode (`long`,
+      // W3C WebRTC Identity section 10).
+      httpRequestStatusCode: init.httpRequestStatusCode === undefined
+        ? null
+        : webidl.converters.long(
+          init.httpRequestStatusCode,
+          "Failed to construct 'RTCError'",
+          "httpRequestStatusCode",
+        ),
     };
   }
 
@@ -718,6 +740,10 @@ class RTCError extends DOMException {
   }
   get sentAlert() {
     return this.#init.sentAlert;
+  }
+  // wpt100:identity
+  get httpRequestStatusCode() {
+    return this.#init.httpRequestStatusCode;
   }
 }
 webidl.configureInterface(RTCError);
@@ -4732,6 +4758,11 @@ function convertConfiguration(configuration, prefix) {
       `${prefix}: '${targetLatency}' is not a valid value for 'targetLatency'`,
     );
   }
+  // wpt100:identity — RTCConfiguration.peerIdentity (W3C WebRTC Identity
+  // section 8.1): the target peer identity, a DOMString.
+  const peerIdentity = config.peerIdentity === undefined
+    ? null
+    : webidl.converters.DOMString(config.peerIdentity, prefix, "peerIdentity");
   return {
     iceServers: convertIceServers(config.iceServers),
     iceTransportPolicy,
@@ -4743,6 +4774,7 @@ function convertConfiguration(configuration, prefix) {
     rtpHeaderEncryptionPolicy,
     alwaysNegotiateDataChannels,
     targetLatency,
+    peerIdentity,
   };
 }
 
@@ -4953,7 +4985,7 @@ class RTCPeerConnection extends EventTarget {
           `Cannot create an offer in signaling state '${signaling}'`,
         );
       }
-      return inTask(this, () => {
+      const created = inTask(this, () => {
         // Legacy offerToReceiveAudio / offerToReceiveVideo: a recvonly
         // transceiver of that kind when there is none to receive on.
         const kinds = ["audio", "video"];
@@ -4987,6 +5019,8 @@ class RTCPeerConnection extends EventTarget {
         state.lastCreatedOffer = { sdp, generation: state.generation };
         return { type: "offer", sdp };
       });
+      // wpt100:identity — the a=identity assertion (06_identity.js).
+      return identityHooks.withAssertion(this, created);
     });
   }
 
@@ -5003,7 +5037,7 @@ class RTCPeerConnection extends EventTarget {
           `Cannot create an answer in signaling state '${state}'`,
         );
       }
-      return inTask(this, () => {
+      const created = inTask(this, () => {
         const sdp = createAnswerSdp(this);
         this[_state].lastCreatedAnswer = {
           sdp,
@@ -5011,6 +5045,8 @@ class RTCPeerConnection extends EventTarget {
         };
         return { type: "answer", sdp };
       });
+      // wpt100:identity — the a=identity assertion (06_identity.js).
+      return identityHooks.withAssertion(this, created);
     });
   }
 
@@ -5074,7 +5110,13 @@ class RTCPeerConnection extends EventTarget {
             else this[_state].lastCreatedAnswer = created;
           }
         }
-        op_webrtc_pc_set_local_description(this[_rid], type, sdp ?? "");
+        // wpt100:identity — the engine gets the description without the
+        // a=identity line createOffer / createAnswer added (06_identity.js).
+        op_webrtc_pc_set_local_description(
+          this[_rid],
+          type,
+          identityHooks.engineSdp(this, sdp ?? ""),
+        );
         const state = this[_state];
         if (type === "rollback") discardGathering(this);
         else if (state.gatheringDiscarded) resumeGathering(this);
@@ -5186,6 +5228,14 @@ class RTCPeerConnection extends EventTarget {
         setTransportStates(this);
         negotiationSettled(this);
       };
+      // wpt100:identity — a=identity validation (06_identity.js): before
+      // `apply` with a target peer identity, after it without.
+      const applyRemote = identityHooks.withRemoteIdentity(
+        this,
+        type,
+        description.sdp,
+        apply,
+      );
       if (type === "offer" && signaling === "have-local-offer") {
         // Implicit rollback (perfect negotiation's polite peer), a task of
         // its own: signaling is stable, with its event, before the offer is
@@ -5197,10 +5247,10 @@ class RTCPeerConnection extends EventTarget {
             syncTransceivers(this, { remote: false, type: "rollback" });
             setSignalingState(this, "stable");
           }),
-          () => inTask(this, apply),
+          () => inTask(this, applyRemote),
         );
       }
-      return inTask(this, apply);
+      return inTask(this, applyRemote);
     });
   }
 
@@ -5459,6 +5509,8 @@ class RTCPeerConnection extends EventTarget {
       targetLatency: config.targetLatency,
     };
     if (config.network !== null) out.denoNetwork = config.network;
+    // wpt100:identity
+    if (config.peerIdentity !== null) out.peerIdentity = config.peerIdentity;
     return out;
   }
 
@@ -5525,6 +5577,17 @@ class RTCPeerConnection extends EventTarget {
         "InvalidModificationError",
       );
     }
+    // wpt100:identity — the target peer identity can't change (W3C WebRTC
+    // 1.0's 2017 setConfiguration step; Firefox has it).
+    if (
+      config.peerIdentity !== null &&
+      config.peerIdentity !== current.peerIdentity
+    ) {
+      throw new DOMException(
+        `${prefix}: peerIdentity can't change`,
+        "InvalidModificationError",
+      );
+    }
     // Validates the ICE server URLs (SyntaxError / InvalidAccessError) and
     // the net permission for them; they apply to the next gathering (an
     // ICE restart).
@@ -5547,6 +5610,7 @@ class RTCPeerConnection extends EventTarget {
     ) {
       this[_state].configRestart = true;
     }
+    config.peerIdentity = current.peerIdentity;
     config.certificates = current.certificates;
     config.network = current.network;
     this[_state].config = config;
@@ -7787,6 +7851,21 @@ const webrtcNs = ObjectFreeze({
   setLogLevel,
 });
 
+// wpt100:identity — WebRTC Identity (06_identity.js): the RTCPeerConnection
+// members, RTCIdentityAssertion, MediaStreamTrack's isolation attributes and
+// the hooks createOffer / createAnswer / setRemoteDescription call.
+const identityHooks = core.loadExtScript("ext:deno_webrtc/06_identity.js")
+  .installIdentity({
+    _rid,
+    _state,
+    brandError,
+    defineHandler,
+    invalidState,
+    MediaStreamTrackPrototype,
+    RTCError,
+    RTCPeerConnectionPrototype,
+  });
+
 return {
   MediaStream,
   MediaStreamTrack,
@@ -7801,6 +7880,8 @@ return {
   RTCErrorEvent,
   RTCIceCandidate,
   RTCIceCandidatePair,
+  // wpt100:identity
+  RTCIdentityAssertion: identityHooks.RTCIdentityAssertion,
   RTCIceTransport,
   RTCPeerConnection,
   RTCPeerConnectionIceErrorEvent,

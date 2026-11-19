@@ -194,6 +194,8 @@ deno_core::extension!(
     "04_sframe.js",
     // wpt100:S2 transferable RTCDataChannel
     "05_transfer.js",
+    // wpt100:identity
+    "06_identity.js",
   ],
 );
 
