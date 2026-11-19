@@ -73,6 +73,10 @@ const _metadata = Symbol("[[metadata]]");
 const _type = Symbol("[[type]]");
 const _duration = Symbol("[[duration]]");
 const _state = Symbol("[[state]]");
+// The transformer a frame was enqueued by, and its place in that
+// transformer's readable (writeEncodedData's [[owner]] and [[counter]]).
+const _owner = Symbol("[[owner]]");
+const _counter = Symbol("[[counter]]");
 
 function fire(target, event) {
   setIsTrusted(event, true);
@@ -780,6 +784,10 @@ class RTCRtpScriptTransformer extends EventTarget {
       controller: null,
       nextId: 0,
       pending: new SafeMap(),
+      // The [[counter]] of the last frame enqueued in the readable, and of
+      // the last one written back.
+      enqueued: 0,
+      written: 0,
     };
     this[_state] = state;
     this[webidl.brand] = webidl.brand;
@@ -795,6 +803,14 @@ class RTCRtpScriptTransformer extends EventTarget {
             "RTCRtpScriptTransformer: only RTCEncodedVideoFrame and RTCEncodedAudioFrame can be written",
           );
         }
+        // writeEncodedData: only a frame this transformer's readable gave
+        // out, and only in order and once. A clone, a constructed frame, a
+        // frame of another transform or one written again is dropped (the
+        // write still succeeds).
+        if (chunk[_owner] !== state || chunk[_counter] <= state.written) {
+          return;
+        }
+        state.written = chunk[_counter];
         const data = chunk[_data];
         if (ArrayBufferPrototypeGetByteLength(data) === 0) return;
         // The frame's data moves to the sender: it is detached here.
@@ -863,7 +879,12 @@ function onTransformMessage(transformer, message) {
   if (message === null || typeof message !== "object") return;
   if (message.frame !== undefined) {
     const c = state.controller;
-    if (c !== null && c.desiredSize > 0) c.enqueue(message.frame);
+    if (c !== null && c.desiredSize > 0) {
+      const frame = message.frame;
+      frame[_owner] = state;
+      frame[_counter] = ++state.enqueued;
+      c.enqueue(frame);
+    }
   } else if (message.resolve !== undefined || message.reject !== undefined) {
     const id = message.resolve ?? message.reject;
     const pending = MapPrototypeGet(state.pending, id);
