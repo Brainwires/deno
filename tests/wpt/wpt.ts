@@ -32,10 +32,12 @@ import {
   ManifestTestVariation,
   noHosts,
   noIgnore,
+  NON_GATING_SUITES,
   quiet,
   rest,
   runGitDiff,
   runPy,
+  suiteOf,
   TestExpectation,
   updateManifest,
   wptreport,
@@ -217,6 +219,11 @@ interface TestToRun {
 
 function getTestTimeout(test: TestToRun) {
   if (Deno.env.get("CI")) {
+    // A tracked, non-gating suite's files get no more than an expected
+    // failure's time.
+    if (NON_GATING_SUITES.includes(suiteOf(test.path))) {
+      return { long: 60_000, default: 10_000 };
+    }
     // Don't give expected failures the full time
     if (test.expectation === false) {
       return { long: 60_000, default: 10_000 };
@@ -715,7 +722,18 @@ function reportFinal(
   const finalExpectedFailedButPassedTests: [string, TestCaseResult][] = [];
   const finalExpectedFailedButPassedFiles: string[] = [];
   const finalFailedFiles: string[] = [];
+  // Files of the tracked, non-gating suites that didn't match their
+  // expectations: listed, never a failed run.
+  const nonGatingMismatches: string[] = [];
   for (const { test, result } of results) {
+    if (NON_GATING_SUITES.includes(suiteOf(test.path))) {
+      const { failedCount } = analyzeTestResult(result, test.expectation);
+      const fileFailed = result.status !== 0 || result.harnessStatus === null;
+      if ((fileFailed && test.expectation !== false) || failedCount > 0) {
+        nonGatingMismatches.push(test.path);
+      }
+      continue;
+    }
     const {
       failed,
       failedCount,
@@ -747,7 +765,8 @@ function reportFinal(
       finalExpectedFailedButPassedFiles.push(test.path);
     }
   }
-  const finalPassedCount = finalTotalCount - finalFailedCount;
+  const finalPassedCount = finalTotalCount - finalFailedCount -
+    nonGatingMismatches.length;
 
   console.log(bold(blue("=".repeat(40))));
 
@@ -782,13 +801,20 @@ function reportFinal(
     console.log(`        ${JSON.stringify(result)}`);
   }
 
+  if (nonGatingMismatches.length > 0) {
+    console.log(`\nnon-gating files that differ from their expectations:\n`);
+  }
+  for (const path of nonGatingMismatches) {
+    console.log(`        ${JSON.stringify(path)}`);
+  }
+
   const failed = (finalFailedCount > 0) ||
     (finalExpectedFailedButPassedFiles.length > 0);
 
   console.log(
     `final result: ${
       failed ? red("failed") : green("ok")
-    }. ${finalPassedCount} passed; ${finalFailedCount} failed; ${finalExpectedFailedAndFailedCount} expected failure; total ${finalTotalCount} (${duration}ms)`,
+    }. ${finalPassedCount} passed; ${finalFailedCount} failed; ${finalExpectedFailedAndFailedCount} expected failure; ${nonGatingMismatches.length} non-gating mismatch; total ${finalTotalCount} (${duration}ms)`,
   );
 
   // We ignore the exit code of the test run because the CI job reports the
@@ -1001,10 +1027,18 @@ function discoverTestsToRun(
           const split = finalPath.split("/");
           const finalKey = split[split.length - 1];
 
-          const expectation = isLeafExpectation(parentExpectation)
+          let expectation = isLeafExpectation(parentExpectation)
             ? parentExpectation
             : (parentExpectation as Expectation)[finalKey];
 
+          // A non-gating suite runs the files its expectation file doesn't
+          // list yet (as if expected to pass), so `update` can add them.
+          if (
+            expectation === undefined &&
+            NON_GATING_SUITES.includes(suiteOf(finalPath))
+          ) {
+            expectation = true;
+          }
           if (expectation === undefined) continue;
 
           if (typeof expectation === "object") {
@@ -1040,10 +1074,16 @@ function discoverTestsToRun(
           });
         }
       } else {
-        const expectation = isLeafExpectation(parentExpectation)
+        let expectation = isLeafExpectation(parentExpectation)
           ? parentExpectation
           : (parentExpectation as Expectation)[key];
 
+        if (
+          expectation === undefined &&
+          NON_GATING_SUITES.includes(suiteOf(`${prefix}/${key}`))
+        ) {
+          expectation = {};
+        }
         if (expectation === undefined) continue;
 
         walk(entry, expectation, `${prefix}/${key}`);

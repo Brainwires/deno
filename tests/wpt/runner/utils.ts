@@ -67,6 +67,13 @@ export const DOCUMENT_SUITES: readonly string[] = [
   "mediacapture-streams",
 ];
 
+/**
+ * Suites whose results are tracked but never fail a run: their failures are
+ * listed, and a test file the expectation file doesn't list yet runs as if
+ * expected to pass (so `wpt.ts update` can fill the file in).
+ */
+export const NON_GATING_SUITES: readonly string[] = ["mediacapture-streams"];
+
 /** The top-level suite directory of a test path such as `/webrtc/x.html`. */
 export function suiteOf(path: string): string {
   return path.split("/")[1] ?? "";
