@@ -2380,7 +2380,12 @@ function dtmfPlayout(dtmf) {
   const sender = state.sender;
   const pc = sender[_pc];
   const t = sender[_transceiver][_state];
-  if (pc[_state].closed || t.stopping || t.stopped) {
+  // Playout task, step 1-2: a stopping transceiver, or one negotiated to
+  // send nothing (currentDirection recvonly / inactive), plays no more tones.
+  if (
+    pc[_state].closed || t.stopping || t.stopped ||
+    t.currentDirection === "recvonly" || t.currentDirection === "inactive"
+  ) {
     state.playing = false;
     return;
   }
