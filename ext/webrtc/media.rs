@@ -999,6 +999,13 @@ impl Core {
       let direction = direction_str(t.direction());
       let current_direction = direction_str(t.current_direction());
       let section = mid.as_ref().and_then(|m| remote.get(m)).cloned();
+      // The remote side doesn't send on this section (now): its track is
+      // muted, and the next RTP that arrives unmutes it again.
+      if section.as_ref().is_some_and(|s| {
+        s.rejected || !matches!(s.direction.as_str(), "sendrecv" | "sendonly")
+      }) {
+        self.media.flowing.remove(&key);
+      }
       let kind = match self.media.kinds.get(&key) {
         Some(kind) => kind_str(*kind).to_string(),
         None => {
