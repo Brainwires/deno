@@ -3344,7 +3344,7 @@ class RTCPeerConnection extends EventTarget {
       }
       return inTask(this, () => ({
         type: "answer",
-        sdp: op_webrtc_pc_create_answer(this[_rid]),
+        sdp: createAnswerSdp(this),
       }));
     });
   }
@@ -3399,7 +3399,7 @@ class RTCPeerConnection extends EventTarget {
         if (type !== "rollback" && (sdp === undefined || sdp === "")) {
           sdp = type === "offer"
             ? createOfferSdp(this, false)
-            : op_webrtc_pc_create_answer(this[_rid]);
+            : createAnswerSdp(this);
         }
         op_webrtc_pc_set_local_description(this[_rid], type, sdp ?? "");
         const state = this[_state];
@@ -4350,11 +4350,14 @@ function syncTransceivers(pc, phase) {
     let t = MapPrototypeGet(known, info.key);
     if (t === undefined) {
       if (info.kind !== "audio" && info.kind !== "video") continue;
+      // A remote offer's new transceiver is recvonly (webrtc-pc 4.4.1.6,
+      // "create an RTCRtpTransceiver ... direction recvonly"), whatever the
+      // engine narrowed its own to; the answer narrows it (createAnswerSdp).
       t = new RTCRtpTransceiver(illegalConstructorKey, pc, {
         key: info.key,
         kind: info.kind,
         mid: info.mid,
-        direction: info.direction ?? "recvonly",
+        direction: "recvonly",
       });
       t[_state].sender[_state].encodings = info.kind === "video"
         ? [{ active: true, scaleResolutionDownBy: 1 }]
@@ -4600,6 +4603,52 @@ function createOfferSdp(pc, iceRestart) {
   const sdp = op_webrtc_pc_create_offer(pc[_rid], restart);
   state.configRestart = false;
   return sdp;
+}
+
+// createAnswer's SDP. JSEP (RFC 9429 5.3.1): each answered m= section's
+// direction is the transceiver's own direction intersected with the reverse
+// of the offered one, and a stopping transceiver answers inactive (it is
+// rejected by the next offer). The engine writes its own direction into the
+// answer, and only half narrows it when it applies the offer (a sendonly offer
+// left a sendrecv transceiver answering sendrecv; a remote offer's transceiver
+// answered sendonly with nothing to send), so the directions are set here.
+function createAnswerSdp(pc) {
+  const state = pc[_state];
+  const byKey = new SafeMap();
+  for (let i = 0; i < state.transceivers.length; ++i) {
+    const t = state.transceivers[i];
+    MapPrototypeSet(byKey, t[_key], t);
+  }
+  const infos = op_webrtc_pc_transceivers(pc[_rid]);
+  for (let i = 0; i < infos.length; ++i) {
+    const info = infos[i];
+    const remote = info.remote;
+    if (remote === null || remote.rejected) continue;
+    const t = MapPrototypeGet(byKey, info.key);
+    if (t === undefined) continue;
+    const ts = t[_state];
+    if (ts.stopped) continue;
+    const want = ts.stopping
+      ? "inactive"
+      : intersectDirections(ts.direction, reverseDirection(remote.direction));
+    if (info.direction === want) continue;
+    try {
+      op_webrtc_transceiver_set_direction(pc[_rid], t[_key], want);
+    } catch {
+      // The engine's transceiver is gone.
+    }
+  }
+  return op_webrtc_pc_create_answer(pc[_rid]);
+}
+
+function intersectDirections(a, b) {
+  const send = (a === "sendrecv" || a === "sendonly") &&
+    (b === "sendrecv" || b === "sendonly");
+  const recv = (a === "sendrecv" || a === "recvonly") &&
+    (b === "sendrecv" || b === "recvonly");
+  return send
+    ? (recv ? "sendrecv" : "sendonly")
+    : (recv ? "recvonly" : "inactive");
 }
 
 // The engine narrows a transceiver's direction to what a remote offer allows
