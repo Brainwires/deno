@@ -238,14 +238,17 @@ pub fn plan_for(
     expanded: Vec::new(),
     config_env: Vec::new(),
     cache_overlay: ctx.cache_overlay.clone(),
+    broker: None,
+    expanded_write: Vec::new(),
   };
   match p.os {
     #[cfg(any(target_os = "linux", test))]
     TargetOs::Linux => match linux::plan(compiled) {
-      Ok((linux, probe, expanded)) => {
+      Ok((linux, measured)) => {
         plan.linux = Some(linux);
-        plan.probe = probe;
-        plan.expanded = expanded;
+        plan.probe = measured.probe;
+        plan.expanded = measured.expanded;
+        plan.expanded_write = measured.expanded_write;
         plan.env_keep = env_keep(&p.env_scrub);
         plan.config_env = config_env();
       }
@@ -278,8 +281,56 @@ pub fn plan_for(
       return (None, gaps);
     }
   }
+  // Mode B: the broker's copy of the run's own read and write rules
+  #[allow(unreachable_code, reason = "every arm returns on some targets")]
+  if p.shape == super::policy::Shape::ModeB {
+    plan.broker = Some(broker_plan(compiled));
+  }
   #[allow(unreachable_code, reason = "every arm returns on some targets")]
   (Some(plan), gaps)
+}
+
+/// What the supervising broker holds for `compiled`: the user's read and
+/// write grants (never the runtime's implicit set, which Deno's checks
+/// don't grant either) and every deny, each as written and resolved.
+fn broker_plan(compiled: &CompiledPolicy) -> deno_sandbox::plan::BrokerPlan {
+  fn both(path: &Path, out: &mut Vec<PathBuf>) {
+    let resolved = resolve_prefix(path).full();
+    out.push(path.to_path_buf());
+    if resolved != path {
+      out.push(resolved);
+    }
+  }
+  fn scope(scope: &PathScope) -> Option<Vec<PathBuf>> {
+    match scope {
+      PathScope::All => None,
+      PathScope::Paths { paths } => {
+        let mut out = Vec::new();
+        for rule in paths.iter().filter(|r| r.implicit.is_none()) {
+          both(&rule.path, &mut out);
+        }
+        out.sort();
+        out.dedup();
+        Some(out)
+      }
+    }
+  }
+  fn denies(rules: &[super::policy::DenyRule]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for rule in rules {
+      both(&rule.path, &mut out);
+    }
+    out.sort();
+    out.dedup();
+    out
+  }
+  let fs = &compiled.policy.fs;
+  deno_sandbox::plan::BrokerPlan {
+    read: scope(&fs.read),
+    deny_read: denies(&fs.deny_read),
+    write: scope(&fs.write),
+    deny_write: denies(&fs.deny_write),
+  }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
@@ -388,12 +439,33 @@ mod linux {
       .collect()
   }
 
-  /// The Linux plan, the probe path and the read expansion's entries.
+  /// What [`plan`] returns beside the plan itself.
+  pub struct Measured {
+    pub probe: Option<PathBuf>,
+    /// The read expansion's entries.
+    pub expanded: Vec<PathBuf>,
+    /// The write expansion's entries.
+    pub expanded_write: Vec<PathBuf>,
+  }
+
+  /// The write denies the broker holds, resolved like the expanded read
+  /// denies.
+  fn broker_deny_paths(
+    rules: &[crate::sandbox::policy::DenyRule],
+  ) -> Vec<PathBuf> {
+    rules
+      .iter()
+      .filter(|r| r.enforcement == DenyEnforcement::Broker)
+      .map(|r| resolve_prefix(&r.path).full())
+      .collect()
+  }
+
+  /// The Linux plan, the probe path and the expansions' entries.
   pub fn plan(
     compiled: &CompiledPolicy,
-  ) -> Result<(LinuxPlan, Option<PathBuf>, Vec<PathBuf>), PolicyGap> {
+  ) -> Result<(LinuxPlan, Measured), PolicyGap> {
     let p = &compiled.policy;
-    for rule in p.fs.deny_read.iter().chain(&p.fs.deny_write) {
+    for rule in &p.fs.deny_read {
       match rule.enforcement {
         DenyEnforcement::Implied | DenyEnforcement::Expand => {}
         // a Deno-only deny carries a fail-open gap (or, for a read deny
@@ -402,7 +474,23 @@ mod linux {
         other => {
           return Err(fatal(
             rule.path.display().to_string(),
-            format!("a deny held as {other:?} has no Mode A enforcer"),
+            format!("a read deny held as {other:?} has no enforcer here"),
+          ));
+        }
+      }
+    }
+    for rule in &p.fs.deny_write {
+      match rule.enforcement {
+        DenyEnforcement::Implied | DenyEnforcement::DenoOnly => {}
+        // under the broker: the allow is expanded for writes (the kernel
+        // refuses changes directly in the folders that lead to the deny)
+        // and the broker makes those changes, holding the deny exactly
+        DenyEnforcement::Broker
+          if p.shape == crate::sandbox::policy::Shape::ModeB => {}
+        other => {
+          return Err(fatal(
+            rule.path.display().to_string(),
+            format!("a write deny held as {other:?} has no enforcer here"),
           ));
         }
       }
@@ -484,14 +572,70 @@ mod linux {
         ),
       ));
     }
+    // the write expansion, for the denies the broker holds: the same walk
+    // as the read expansion, with write rights on what it allows
+    let broker_denies = broker_deny_paths(&p.fs.deny_write);
+    let mut write_roots: Vec<ExpandRoot> = Vec::new();
+    let mut write_entries: Vec<PathBuf> = Vec::new();
+    let mut expand_write_root = |root: &Path| -> Result<(), PolicyGap> {
+      let canonical = resolve_prefix(root).full();
+      let deny: Vec<PathBuf> = broker_denies
+        .iter()
+        .filter(|d| d.starts_with(&canonical))
+        .cloned()
+        .collect();
+      expand_read(&canonical, &deny, &mut write_entries).map_err(|why| {
+        fatal(
+          format!("--deny-write inside {}", root.display()),
+          format!("can't expand the allow to hold it: {why}"),
+        )
+      })?;
+      write_roots.push(ExpandRoot {
+        root: canonical,
+        deny,
+      });
+      Ok(())
+    };
     match &p.fs.write {
-      PathScope::All => {}
+      PathScope::All => {
+        if !broker_denies.is_empty() {
+          handled.write = true;
+          expand_write_root(Path::new("/"))?;
+        }
+      }
       PathScope::Paths { paths } => {
         handled.write = true;
         for rule in paths {
-          add(&mut rules, rule.path.clone(), false, true);
+          let canonical = resolve_prefix(&rule.path).full();
+          if broker_denies.iter().any(|d| d.starts_with(&canonical)) {
+            expand_write_root(&rule.path)?;
+          } else {
+            add(&mut rules, rule.path.clone(), false, true);
+          }
         }
       }
+    }
+    write_roots.sort();
+    write_roots.dedup();
+    write_entries.sort();
+    write_entries.dedup();
+    #[cfg(target_os = "linux")]
+    if !write_entries.is_empty()
+      && let Err(why) = deno_sandbox::enforce_linux::openat2_available()
+    {
+      return Err(fatal(
+        "--deny-write",
+        format!("the write expansion that holds it can't be applied: {why}"),
+      ));
+    }
+    if write_entries.len() > deno_sandbox::plan::MAX_EXPANDED {
+      return Err(fatal(
+        "--deny-write",
+        format!(
+          "holding the write denies needs more than {} Landlock rules",
+          deno_sandbox::plan::MAX_EXPANDED
+        ),
+      ));
     }
     // no run grant: nothing may execute; a strict scope: the listed files
     handled.exec = p.fs.exec != ExecScope::Unrestricted;
@@ -516,6 +660,7 @@ mod linux {
         }))
         .collect(),
       expand: roots,
+      expand_write: write_roots,
       net,
       scope_signal: p.scopes.signal,
       scope_abstract_unix: p.scopes.abstract_unix,
@@ -533,7 +678,14 @@ mod linux {
         vsock: p.syscalls.vsock,
       },
     };
-    Ok((plan, probe, entries))
+    Ok((
+      plan,
+      Measured {
+        probe,
+        expanded: entries,
+        expanded_write: write_entries,
+      },
+    ))
   }
 }
 
@@ -926,6 +1078,14 @@ static INHERITED: OnceLock<EnforcePlan> = OnceLock::new();
 /// plan, or a plan that can't be applied, ends the process: the hand-over
 /// never fails open.
 pub fn startup() {
+  // the supervisor image of --kernel-sandbox=broker: it forks the confined
+  // worker, stays behind as its broker and never returns
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  match deno_sandbox::supervise::take_handoff() {
+    Ok(Some(handoff)) => supervise(handoff),
+    Ok(None) => {}
+    Err(err) => refuse_at_startup(&err),
+  }
   #[cfg(target_os = "linux")]
   {
     let result =
@@ -941,6 +1101,10 @@ pub fn startup() {
     if let Some(plan) = deno_sandbox::enforce_linux::applied_plan() {
       use_cache_overlay(plan);
     }
+    take_broker(
+      deno_sandbox::enforce_linux::applied_plan()
+        .is_some_and(|plan| plan.broker.is_some()),
+    );
     if deno_sandbox::enforce_linux::applied_plan().is_some()
       || kernel_reports_confined()
     {
@@ -958,10 +1122,12 @@ pub fn startup() {
           refuse_at_startup(&err);
         }
         use_cache_overlay(&plan);
+        take_broker(plan.broker.is_some());
         let _ = INHERITED.set(plan);
         mark_confined();
       }
       Ok(None) => {
+        take_broker(false);
         if kernel_reports_confined() {
           mark_confined();
         }
@@ -970,6 +1136,77 @@ pub fn startup() {
     }
     inherit::load_at_startup();
   }
+}
+
+/// The worker's end of the broker channel, when the supervisor left one:
+/// this process's broker if the plan it runs under has one (`expected`),
+/// closed otherwise (a channel nobody compiled is never used). A plan with
+/// a broker and no channel is refused later, in [`prepare`].
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn take_broker(expected: bool) {
+  match deno_sandbox::supervise::take_broker_fd() {
+    Ok(Some(fd)) if expected => {
+      let _ =
+        deno_runtime::deno_permissions::kernel_broker::client::install(fd);
+    }
+    Ok(_) => {}
+    Err(err) => refuse_at_startup(&err),
+  }
+}
+
+/// The supervisor image: starts the broker for the plan's policy, forks
+/// the worker (which re-executes under the plan exactly as `enforce` does,
+/// with its end of the broker channel) and exits as the worker exits.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn supervise(handoff: deno_sandbox::supervise::Handoff) -> ! {
+  use deno_runtime::deno_permissions::kernel_broker::fs::FsBroker;
+  use deno_runtime::deno_permissions::kernel_broker::fs::FsPolicy;
+  use deno_runtime::deno_permissions::kernel_broker::server::Server;
+  use deno_sandbox::supervise::BROKER_FD_ENV_VAR;
+
+  let Some(broker) = handoff.plan.broker.clone() else {
+    refuse_at_startup("the supervisor's hand-over has no broker policy");
+  };
+  let policy = FsPolicy {
+    read: broker.read,
+    deny_read: broker.deny_read,
+    write: broker.write,
+    deny_write: broker.deny_write,
+  };
+  let exec_worker = |broker_fd: i32| -> std::io::Error {
+    let mut env = handoff.env_os();
+    env.retain(|(k, _)| k != BROKER_FD_ENV_VAR);
+    env.push((BROKER_FD_ENV_VAR.into(), broker_fd.to_string().into()));
+    // everything this image holds is what the first image kept for the
+    // worker (the launcher's descriptors, the policy carrier) and the
+    // channel
+    #[cfg(target_os = "linux")]
+    {
+      deno_sandbox::enforce_linux::reexec(&handoff.plan, env, |_| true)
+    }
+    #[cfg(target_os = "macos")]
+    {
+      match &handoff.sandbox_exec_profile {
+        None => deno_sandbox::macos::reexec_self(
+          &handoff.plan,
+          &handoff.exe,
+          env,
+          |_| true,
+        ),
+        Some(profile) => deno_sandbox::macos::reexec_under_sandbox_exec(
+          profile,
+          &handoff.plan,
+          env,
+          |_| true,
+        ),
+      }
+    }
+  };
+  let serve = move |sock: std::os::fd::OwnedFd| -> std::io::Result<()> {
+    let server = Server::new(FsBroker::new(&policy)?);
+    server.spawn(sock).map(|_| ())
+  };
+  deno_sandbox::supervise::run(exec_worker, serve)
 }
 
 /// The image after the re-exec, confined by `plan`: its caches move to the
@@ -1189,6 +1426,7 @@ pub fn prepare(
       if applied.without_measured_lists() == plan.without_measured_lists()
         && deno_sandbox::enforce_linux::status_confined()
       {
+        check_broker(&plan)?;
         check_handed_down(options, &ctx.cwd, &plan)?;
         let _ = VERIFY_MODULES.set(applied.module_files.clone());
         start_enforcing();
@@ -1209,6 +1447,7 @@ pub fn prepare(
       if inherited.without_measured_lists() == plan.without_measured_lists()
         && measured
       {
+        check_broker(&plan)?;
         check_handed_down(options, &ctx.cwd, &plan)?;
         let _ = VERIFY_MODULES.set(inherited.module_files.clone());
         start_enforcing();
@@ -1229,6 +1468,31 @@ pub fn prepare(
     bail!("--kernel-sandbox=enforce: the plan was prepared twice");
   }
   Ok(())
+}
+
+/// A plan with a broker runs only with its broker answering (the plan's
+/// kernel rules alone would refuse what Deno's rules allow).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn check_broker(plan: &EnforcePlan) -> Result<(), AnyError> {
+  use deno_runtime::deno_permissions::kernel_broker::client;
+  use deno_runtime::deno_permissions::kernel_broker::protocol::features;
+  if plan.broker.is_none() {
+    return Ok(());
+  }
+  let Some(broker) = client::get() else {
+    bail!(
+      "--kernel-sandbox=broker refuses to start: this process has no channel to its broker"
+    );
+  };
+  match broker.hello() {
+    Ok(served) if served & features::FS != 0 => Ok(()),
+    Ok(_) => bail!(
+      "--kernel-sandbox=broker refuses to start: the broker doesn't serve file operations"
+    ),
+    Err(err) => bail!(
+      "--kernel-sandbox=broker refuses to start: the broker doesn't answer: {err}"
+    ),
+  }
 }
 
 /// The local files of the static module graph of `roots`, loaded first (the
@@ -1394,6 +1658,13 @@ pub async fn apply_pending(
     let _ = std::io::stderr().flush();
   }
   #[cfg(target_os = "linux")]
+  if plan.broker.is_some() {
+    let env = reexec_env(plan, deno_dir.as_deref(), carrier_fd);
+    let err = exec_supervisor(plan, env, "/proc/self/exe".into(), None, keep);
+    drop(carrier);
+    bail!("--kernel-sandbox=broker: starting the supervisor failed: {err}");
+  }
+  #[cfg(target_os = "linux")]
   {
     let env = reexec_env(plan, deno_dir.as_deref(), carrier_fd);
     let err = deno_sandbox::enforce_linux::reexec(plan, env, keep);
@@ -1416,6 +1687,19 @@ pub async fn apply_pending(
         deno_core::anyhow::anyhow!("--kernel-sandbox=enforce: {err}")
       })?;
     let env = reexec_env(plan, deno_dir.as_deref(), carrier_fd);
+    if plan.broker.is_some() {
+      let fallback = if uses_sandbox_exec_fallback() {
+        let Some(exe) = exe.to_str() else {
+          bail!("--kernel-sandbox=broker: the runtime's path is not UTF-8");
+        };
+        Some(deno_sandbox::seatbelt::with_self_exec(&profile, exe))
+      } else {
+        None
+      };
+      let err = exec_supervisor(plan, env, exe.clone(), fallback, keep);
+      drop(carrier);
+      bail!("--kernel-sandbox=broker: starting the supervisor failed: {err}");
+    }
     if !uses_sandbox_exec_fallback() {
       let err = deno_sandbox::macos::reexec_self(plan, &exe, env, keep);
       drop(carrier);
@@ -1441,6 +1725,29 @@ pub async fn apply_pending(
     let _ = (plan, deno_dir);
     bail!("--kernel-sandbox=enforce: no Mode A enforcer for this OS");
   }
+}
+
+/// Re-executes this program as the supervisor of `plan`'s broker (see
+/// `deno_sandbox::supervise`); returns only on failure.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn exec_supervisor(
+  plan: &EnforcePlan,
+  env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+  exe: PathBuf,
+  sandbox_exec_profile: Option<String>,
+  keep: impl Fn(i32) -> bool,
+) -> std::io::Error {
+  use std::os::unix::ffi::OsStringExt;
+  let handoff = deno_sandbox::supervise::Handoff {
+    plan: plan.clone(),
+    env: env
+      .into_iter()
+      .map(|(k, v)| (k.into_vec(), v.into_vec()))
+      .collect(),
+    exe,
+    sandbox_exec_profile,
+  };
+  deno_sandbox::supervise::exec_supervisor(&handoff, keep)
 }
 
 /// Whether macOS enforcement would use the `sandbox-exec` fallback (no

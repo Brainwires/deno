@@ -2968,6 +2968,7 @@ dependencies = [
  "same-file",
  "serde",
  "sys_traits",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "windows-sys 0.59.0",
@@ -3909,6 +3910,7 @@ name = "deno_sandbox"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "deno_permissions",
  "futures",
  "libc",
  "log",
@@ -3916,6 +3918,7 @@ dependencies = [
  "rand 0.8.6",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "url",
 ]

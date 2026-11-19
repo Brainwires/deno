@@ -1,7 +1,8 @@
 // denext (DENEXT.md items 422, 425): the kernel sandbox, an opt-in preview.
 // `auto` (the default) applies nothing; `warn` reports; `enforce` applies the
 // policy on Linux and macOS (../enforce) and refuses to start elsewhere;
-// `broker` refuses to start (Mode B isn't built yet). `--kernel-sandbox-report`
+// `broker` is enforce under a supervising broker (../broker); a rule only its
+// unbuilt network side could hold refuses to start. `--kernel-sandbox-report`
 // prints the mode, the policy and its gaps, then runs the program.
 {
   "tempDir": true,
@@ -38,9 +39,14 @@
       "exitCode": 1
     },
     "broker_refuses": {
-      "args": "run --kernel-sandbox=broker main.ts",
+      "args": "run --kernel-sandbox=broker --allow-net=example.com main.ts",
       "output": "broker.out",
       "exitCode": 1
+    },
+    "broker_runs": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --kernel-sandbox=broker main.ts",
+      "output": "hello.out"
     },
     "invalid_value": {
       "args": "run --kernel-sandbox=strict main.ts",

@@ -432,6 +432,7 @@ pub fn build_ruleset(
   abi: u32,
   module_files: &[std::path::PathBuf],
   expanded: &[std::path::PathBuf],
+  expanded_write: &[std::path::PathBuf],
 ) -> Result<Option<OwnedFd>, String> {
   let (fs, net, scoped) = handled(plan, abi)?;
   if fs == 0 && net == 0 && scoped == 0 {
@@ -487,6 +488,11 @@ pub fn build_ruleset(
     }
     for entry in expanded {
       add_expanded_rule(&ruleset, entry, READ_RIGHTS & fs)?;
+    }
+  }
+  if fs & ACCESS_FS_WRITE_FILE != 0 {
+    for entry in expanded_write {
+      add_expanded_rule(&ruleset, entry, write_rights(abi) & fs)?;
     }
   }
   if let NetPlan::Ports { connect, bind } = &plan.net {
@@ -953,7 +959,13 @@ pub fn apply_self(plan: &EnforcePlan) -> Result<(), String> {
     linux.scope_signal || linux.scope_abstract_unix,
   );
   let ruleset = match landlock_abi() {
-    Ok(abi) => build_ruleset(linux, abi, &plan.module_files, &plan.expanded)?,
+    Ok(abi) => build_ruleset(
+      linux,
+      abi,
+      &plan.module_files,
+      &plan.expanded,
+      &plan.expanded_write,
+    )?,
     Err(err) if fs || net || scoped => return Err(err),
     Err(_) => None,
   };
@@ -1263,6 +1275,7 @@ mod tests {
         exec: false,
       }],
       expand: Vec::new(),
+      expand_write: Vec::new(),
       net,
       scope_signal: false,
       scope_abstract_unix: false,
@@ -1298,6 +1311,8 @@ mod tests {
       expanded: Vec::new(),
       config_env: vec![("JSR_URL".into(), "https://jsr.test/".into())],
       cache_overlay: Some("/d/sandboxed/0123456789abcdef".into()),
+      broker: None,
+      expanded_write: Vec::new(),
     };
     assert_eq!(plan.without_measured_lists().module_files.len(), 0);
     let bytes = plan.to_bytes();
@@ -1307,9 +1322,11 @@ mod tests {
     assert!(!plan.keeps_env("SECRET"));
     // malformed, another format, unknown fields: refused
     assert!(EnforcePlan::from_bytes(b"{").is_err());
-    let other = String::from_utf8(bytes.clone())
-      .unwrap()
-      .replace("\"format\":1", "\"format\":2");
+    let other = String::from_utf8(bytes.clone()).unwrap().replace(
+      &format!("\"format\":{PLAN_FORMAT}"),
+      &format!("\"format\":{}", PLAN_FORMAT + 1),
+    );
+    assert_ne!(other.as_bytes(), &bytes[..]);
     assert!(EnforcePlan::from_bytes(other.as_bytes()).is_err());
     let extra =
       String::from_utf8(bytes)
@@ -1590,6 +1607,8 @@ mod tests {
       expanded: Vec::new(),
       config_env: Vec::new(),
       cache_overlay: None,
+      broker: None,
+      expanded_write: Vec::new(),
     };
     let fd = seal_plan(&plan.to_bytes()).unwrap();
     // sealed: no more writes

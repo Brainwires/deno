@@ -18245,6 +18245,137 @@ where the changes are discussed.
        sanitizer.
      - Node tests enabled: none.
 
+901. **`feat(permissions)`: the kernel sandbox's supervising broker: the
+     supervisor, its protocol and the file operations** (CLI and runtime;
+     denext-only; opt-in: `--kernel-sandbox=broker`, and `enforce` where the
+     broker closes a gap; `auto` unchanged;
+     `runtime/permissions/kernel_broker/{mod,protocol,transport,server,fs,
+     client,tests}.rs`, `libs/sandbox/{supervise,plan,enforce_linux}.rs`,
+     `cli/sandbox/{enforce,policy,mod}.rs`). Mode B of the kernel sandbox
+     (item 422's model, item 425's enforcer), file side. Plan phase P8a.
+     - Why. Landlock rights only add down a tree, so a write deny inside a
+       write allow (`--allow-write=out --deny-write=out/keep`) can't be held
+       by the kernel alone: until now `enforce` refused to start on it and
+       `broker` wasn't built.
+     - The shape: exec, then fork, then restrict. The first image (flags
+       parsed, policy compiled, graph loaded) re-executes itself as the
+       supervisor image with a hand-over in a sealed descriptor
+       (`DENO_INTERNAL_KERNEL_SUPERVISE_FD`). That image has one thread and
+       loads no engine, module or configuration; first thing in `main` it
+       makes a socket pair and forks. The child re-executes once more as the
+       confined worker (the plan in its sealed descriptor exactly as under
+       `enforce`, plus its end of the channel,
+       `DENO_INTERNAL_KERNEL_BROKER_FD`); the parent stays as the supervisor:
+       it serves the channel, passes on signals a process sent it (one the
+       terminal made already reached the worker's process group), reaps, and
+       exits as the worker exited (its code, or the same signal). The
+       supervisor keeps the PID the program was started with. It is not
+       dumpable (Linux; `PT_DENY_ATTACH` on macOS), a child subreaper on
+       Linux (what the worker orphans ends with it), and the worker dies with
+       it (`PR_SET_PDEATHSIG`; on macOS the worker keeps running confined with
+       every brokered operation refused).
+     - The kernel's side on Linux: a write allow that holds a broker-held deny
+       gets no write rule of its own; every entry beside the way to the deny
+       gets one (`LinuxPlan::expand_write`, the read expansion's walk and its
+       limits; the entries are measured by the first image and checked
+       against the roots by the worker, `EnforcePlan::expanded_write`). So the
+       kernel refuses changes directly in the folders that lead to the deny,
+       and in folders made after the sandbox applied: native code and child
+       processes get that fail-closed view. Deno's own operations there are
+       asked of the broker.
+     - The broker is an authority: it holds the run's own read and write
+       grants and denies (`EnforcePlan::broker`, part of the plan the worker
+       compares with the one it compiles itself; the user's grants, never
+       the implicit set), resolves every path itself with the race-safe opens
+       (item 902's library: beneath an allow root, outside every deny,
+       decided on the object opened), acts itself and hands back only
+       descriptors it checked. It never enters `/proc`, `/sys` or `/dev`
+       (resolved by the broker those would name the broker's own objects),
+       hands out only regular files, folders and FIFOs, never waits on an
+       open, and creating a symlink takes the whole read and write permission
+       as Deno's check does. A recursive removal or a rename of a folder that
+       holds a denied path is refused.
+     - The protocol (`kernel_broker::protocol`, the definition the network
+       operations will build on): frames of a 16-byte header (`DKB2`, kind,
+       id, length at most 16 KiB) and a payload of fixed fields with nothing
+       after them; paths are absolute and already normal or the frame is
+       malformed. Operations: `Hello`, `Channel`, `Received`, `Open`,
+       `Mkdir`, `Remove` (a file, a folder, a tree), `Rename`, `Symlink`,
+       `Link`, `Chmod`, `Chown`, `Utime`, `Truncate`; kinds `0x0100`-`0x01ff`
+       are reserved for the network. Responses: `Ok` (at most one
+       descriptor, as `SCM_RIGHTS`), `Denied`, `Errno`, `Unsupported`,
+       `Invalid`, `Hello`, `Data`. One request at a time per channel;
+       concurrency is more channels (`Channel`, capped at 64 by the broker,
+       16 used by the client). No descriptor ever travels toward the broker
+       and no request refers to another, so the broker keeps no state per
+       requester. A malformed frame gets `Invalid` and closes that channel;
+       an unknown kind gets `Unsupported` and the channel stays. A descriptor
+       is acknowledged (`Received`) before the channel does anything else,
+       and the broker keeps its copy open until then (on macOS a descriptor
+       closed by its sender before it is received can arrive dead).
+     - Not yet (the network side, phase P8b): hosts, name resolution, Unix
+       sockets by path on Linux, module fetches after start. A policy that
+       needs them still carries a fatal gap (`BROKER_NET_BUILT`), so
+       `broker` and `enforce` refuse to start on it. Compiled programs
+       (`denort`) don't start a supervisor yet. Child processes don't get the
+       broker (the kernel's fail-closed view is theirs).
+     - User-facing: `--kernel-sandbox=broker` now runs; on Linux
+       `--deny-write` inside `--allow-write` is held exactly for Deno's
+       operations and fail-closed for native code and children (they can't
+       create, rename or remove directly in the allowed folder or in folders
+       made after start); the process the shell sees is the supervisor.
+     - Tests: `deno_permissions`' `kernel_broker::protocol::tests` (round
+       trips, every field check, `fuzz_request_parser`,
+       `fuzz_response_parser`), `kernel_broker::transport::tests`,
+       `kernel_broker::tests` (the deny inside the allow for every
+       operation, links, the kernel's trees, channels,
+       `model_no_request_sequence_leaves_the_policy`, `fuzz_live_server`
+       checked frame by frame against the protocol's rules;
+       `DENO_BROKER_FUZZ_ITERS` scales the fuzzers); `deno_sandbox`'s plan
+       tests; `sandbox::policy::tests`; spec `kernel_sandbox::broker`.
+     - Node tests enabled: none (no Node API changes).
+
+902. **`fix(permissions)`: `ext/fs` and `node:fs` open what they checked**
+     (runtime; Unix; `runtime/permissions/{lib,checked_open}.rs`,
+     `ext/fs/{scoped,std_fs,lib}.rs`). Plan phase P7b: the race-safe opens of
+     item 421's library are now what the real file system uses.
+     - Why. `check_open` resolves a path and the operation then opened the
+       name again: a symlink swapped in between (by the program, another
+       process, another user who can write a folder on the way) was followed
+       with no new check.
+     - A checked path now carries the scope its access was granted under
+       (`CheckedPath::open_scope`): the allow roots and denies of the read
+       permission, the write permission or both, as paths (each scope as
+       written and resolved), derived once and kept until a prompt's answer
+       or a revoke changes them. None when nothing narrows the access, under
+       a permission broker, and for `/dev`, Linux `/proc` and `/sys` (their
+       own check decides those; they are opened by name).
+     - With a scope, `RealFs` goes through `ext/fs/scoped.rs`: opens (and so
+       `readFile`, `writeFile`, `open`, every `node:fs` open), `truncate`,
+       `mkdir` (each level of a recursive one), `remove` (a tree is removed
+       level by level through descriptors, no link entered), `rename`,
+       `link`, `symlink`, `rmdir`, `chmod` / `chown` / `utime` (through an
+       open descriptor: `fchmod`, `fchown`, `futimens`), `lchown` / `lutime`
+       (`*at` on the checked folder), `stat` / `lstat`, `readDir`,
+       `readLink`. A path that leads outside the scope or into a deny is
+       `NotCapable`.
+     - Still by name after the check (the next phase): `realpath`, `statfs`,
+       `exists`, `chdir`, `copyFile`, `cp`, `lchmod`; on macOS the last step
+       of `lstat` and of a `stat` of a file that can't be opened; Windows;
+       the consumers outside `ext/fs` (SQLite, `watchFs`, `dlopen`,
+       `Deno.Command`'s `cwd`, TLS files).
+     - Behaviour changes: a recursive `mkdir` no longer creates missing
+       folders above the write scope; a file root (`--allow-read=/etc/hosts`)
+       and a scope reached through a link work in the library; `chmod` and
+       `utime` no longer need the path forms the kernel sandbox refuses.
+     - Tests: `checked_open::tests::{a_file_root_is_that_one_name,
+       custom_flags_keep_the_options_in_charge,
+       a_path_only_open_follows_links_like_any_other,
+       remove_dir_all_never_enters_a_link, roots_intersect_to_the_inner_one}`
+       beside the library's race tests; `deno_fs`'s `scoped::tests`.
+     - Node tests enabled: none (behaviour is unchanged for paths inside the
+       grant).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

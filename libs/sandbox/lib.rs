@@ -28,6 +28,9 @@
 //!   scope: the programs, their `#!` interpreters, the ELF loader).
 //! - [`inherit`]: the carrier that hands a confined process's policy to the
 //!   `deno` processes it starts (Linux and macOS).
+//! - [`supervise`]: the supervisor of `--kernel-sandbox=broker`: the
+//!   unconfined process that forks the confined worker, stays behind as its
+//!   broker, passes signals on and exits as it exited.
 
 #[cfg(target_os = "linux")]
 pub mod enforce_linux;
@@ -47,6 +50,8 @@ pub mod proxy;
 pub mod seatbelt;
 #[cfg(target_os = "linux")]
 pub mod seccomp;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod supervise;
 
 #[cfg(target_os = "linux")]
 pub use seccomp::SeccompSpec;

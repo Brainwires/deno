@@ -46,7 +46,10 @@
 //! caller passes the resolved form of a scope too where it differs (`/tmp`
 //! and `/private/tmp`).
 //!
-//! Library only: no op uses it yet.
+//! Who uses it: `ext/fs`'s real file system (and `node:fs` through it)
+//! opens every checked path here ([`crate::CheckedPath::open_scope`]), and
+//! the kernel-sandbox broker ([`crate::kernel_broker`]) resolves every path
+//! a confined process names with it.
 
 use std::ffi::CString;
 use std::ffi::OsStr;
@@ -122,6 +125,15 @@ impl OpenScope {
     })
   }
 
+  /// A scope that allows nothing.
+  pub fn nothing() -> Self {
+    Self {
+      roots: Some(Vec::new()),
+      deny: Vec::new(),
+      walk_only: false,
+    }
+  }
+
   /// Never uses `openat2`, only the component walk (tests and benchmarks).
   pub fn force_component_walk(mut self, walk_only: bool) -> Self {
     self.walk_only = walk_only;
@@ -151,9 +163,34 @@ impl OpenScope {
     if let Some(fd) = &*fd {
       return Ok((root.path.clone(), fd.clone()));
     }
-    let opened = open_root(&root.path).map_err(io_err(path))?;
+    let opened = match open_root(&root.path) {
+      Ok(opened) => opened,
+      // a root that is a file (`--allow-read=/etc/hosts`), or a link to
+      // one: the scope is that one name in its directory. The directory is
+      // opened by path, as a root is, and not kept; `in_file_root` keeps
+      // the lookup to the walk, which never resolves beneath it.
+      Err(err) if err.raw_os_error() == Some(libc::ENOTDIR) => {
+        let parent = root.path.parent().ok_or_else(not_capable)?;
+        let dir = open_root(parent).map_err(io_err(path))?;
+        return Ok((parent.to_path_buf(), dir));
+      }
+      Err(err) => return Err(io_err(path)(err)),
+    };
     *fd = Some(opened.clone());
     Ok((root.path.clone(), opened))
+  }
+
+  /// Whether `root` (as [`Self::root_for`] returned it for `path`) is the
+  /// directory of a file root rather than a root: nothing but the path
+  /// itself is in scope beneath it.
+  #[cfg(target_os = "linux")]
+  fn in_file_root(&self, root: &Path, path: &Path) -> bool {
+    match &self.roots {
+      None => false,
+      Some(roots) => !roots
+        .iter()
+        .any(|r| r.path == root && path.starts_with(&r.path)),
+    }
   }
 
   /// Whether a deny lies beneath `root` or covers it (then `openat2`
@@ -182,6 +219,50 @@ impl OpenScope {
   }
 }
 
+/// The reach of two allow lists at once (`None`: everywhere): each root
+/// that lies in a root of the other list.
+pub fn intersect_roots(
+  a: Option<Vec<PathBuf>>,
+  b: Option<Vec<PathBuf>>,
+) -> Option<Vec<PathBuf>> {
+  match (a, b) {
+    (None, None) => None,
+    (Some(x), None) | (None, Some(x)) => Some(x),
+    (Some(a), Some(b)) => {
+      let mut out: Vec<PathBuf> = Vec::new();
+      for x in &a {
+        for y in &b {
+          let inner = if x.starts_with(y) {
+            x
+          } else if y.starts_with(x) {
+            y
+          } else {
+            continue;
+          };
+          if !out.contains(inner) {
+            out.push(inner.clone());
+          }
+        }
+      }
+      Some(out)
+    }
+  }
+}
+
+/// Whether `path` is in one of the kernel's own trees rather than a place
+/// in the file system: `/dev` and, on Linux, `/proc` and `/sys`. Their
+/// links can be magic (`/dev/fd/N`, `/proc/self/fd/N` name a descriptor,
+/// not a path), so a walk that reads links as text can't follow them, and
+/// Deno's special-file check decides them on rules of its own (`/dev/null`
+/// needs no grant; most of `/proc` needs every one). They are opened by
+/// name. A path elsewhere that leads there through a symlink is refused by
+/// a scoped open unless the scope covers the place it leads to.
+pub fn opens_by_name(path: &Path) -> bool {
+  path.starts_with("/dev")
+    || cfg!(any(target_os = "linux", target_os = "android"))
+      && (path.starts_with("/proc") || path.starts_with("/sys"))
+}
+
 /// What an open does with symlinks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Symlinks {
@@ -204,6 +285,9 @@ pub struct CheckedOpenOptions {
   create: bool,
   create_new: bool,
   directory: bool,
+  nonblocking: bool,
+  path_only: bool,
+  custom_flags: libc::c_int,
   mode: u32,
   symlinks: Symlinks,
 }
@@ -225,6 +309,9 @@ impl CheckedOpenOptions {
       create: false,
       create_new: false,
       directory: false,
+      nonblocking: false,
+      path_only: false,
+      custom_flags: 0,
       mode: 0o666,
       symlinks: Symlinks::Follow,
     }
@@ -260,6 +347,43 @@ impl CheckedOpenOptions {
     self.directory = v;
     self
   }
+  /// `O_NONBLOCK`: the open itself never waits (a FIFO with no peer, a
+  /// device).
+  pub fn nonblocking(mut self, v: bool) -> Self {
+    self.nonblocking = v;
+    self
+  }
+  /// Linux `O_PATH`: a descriptor that names the object without opening it
+  /// (no read or search right on it is needed; it reads and writes
+  /// nothing). Ignored elsewhere.
+  pub fn path_only(mut self, v: bool) -> Self {
+    self.path_only = v;
+    self
+  }
+  /// The caller's own `open(2)` flags, added to the ones the options make
+  /// (`O_NOFOLLOW` here asks for [`Symlinks::NoFollowFinal`]; the access
+  /// mode bits and `O_PATH` / `O_TMPFILE` are dropped: the options decide
+  /// those).
+  pub fn custom_flags(mut self, flags: libc::c_int) -> Self {
+    #[cfg(target_os = "linux")]
+    let dropped =
+      libc::O_ACCMODE | libc::O_NOFOLLOW | libc::O_PATH | libc::O_TMPFILE;
+    #[cfg(not(target_os = "linux"))]
+    let dropped = libc::O_ACCMODE | libc::O_NOFOLLOW;
+    if flags & libc::O_NOFOLLOW != 0 && self.symlinks == Symlinks::Follow {
+      self.symlinks = Symlinks::NoFollowFinal;
+    }
+    // O_TMPFILE includes O_DIRECTORY's bit on Linux: keep a plain
+    // O_DIRECTORY the caller asked for
+    let directory = flags & libc::O_DIRECTORY != 0;
+    #[cfg(target_os = "linux")]
+    let directory = directory && flags & libc::O_TMPFILE != libc::O_TMPFILE;
+    self.custom_flags = flags & !dropped;
+    if directory {
+      self.custom_flags |= libc::O_DIRECTORY;
+    }
+    self
+  }
   pub fn mode(mut self, mode: u32) -> Self {
     self.mode = mode;
     self
@@ -289,7 +413,16 @@ impl CheckedOpenOptions {
     if self.directory {
       flags |= libc::O_DIRECTORY;
     }
-    flags | libc::O_CLOEXEC
+    if self.nonblocking {
+      flags |= libc::O_NONBLOCK;
+    }
+    #[cfg(target_os = "linux")]
+    if self.path_only {
+      // O_PATH takes only O_DIRECTORY, O_NOFOLLOW and O_CLOEXEC
+      flags = libc::O_PATH | (flags & libc::O_DIRECTORY);
+      return flags | libc::O_CLOEXEC;
+    }
+    flags | self.custom_flags | libc::O_CLOEXEC
   }
 }
 
@@ -317,6 +450,12 @@ impl CheckedFile {
   /// The names in an opened directory (without `.` and `..`).
   pub fn read_dir(&self) -> io::Result<Vec<OsString>> {
     read_dir_fd(self.fd.as_fd())
+  }
+
+  /// Where the opened object is now, as the kernel names it (`None` when
+  /// it can't be told: no `/proc`, an unlinked file).
+  pub fn real_path(&self) -> Option<PathBuf> {
+    fd_path(self.fd.as_fd())
   }
 }
 
@@ -372,6 +511,73 @@ impl CheckedParent {
     cvt(unsafe { libc::unlinkat(self.dir.as_raw_fd(), name.as_ptr(), flags) })
   }
 
+  /// Where the entry is now: the directory as the kernel names it, with
+  /// the name (`None` when the directory's path can't be told).
+  pub fn real_path(&self) -> Option<PathBuf> {
+    let mut path = fd_path(self.dir.as_fd())?;
+    path.push(&self.name);
+    Some(path)
+  }
+
+  /// Renames this entry to `to`'s, failing with `EEXIST` when `to` exists.
+  pub fn rename_noreplace_to(&self, to: &CheckedParent) -> io::Result<()> {
+    let from = cstr(&self.name)?;
+    let to_name = cstr(&to.name)?;
+    #[cfg(target_os = "linux")]
+    {
+      // SAFETY: valid descriptors and C strings
+      let res = unsafe {
+        libc::syscall(
+          libc::SYS_renameat2,
+          self.dir.as_raw_fd(),
+          from.as_ptr(),
+          to.dir.as_raw_fd(),
+          to_name.as_ptr(),
+          libc::RENAME_NOREPLACE,
+        )
+      };
+      if res < 0 {
+        return Err(io::Error::last_os_error());
+      }
+      Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+      // SAFETY: valid descriptors and C strings
+      cvt(unsafe {
+        libc::renameatx_np(
+          self.dir.as_raw_fd(),
+          from.as_ptr(),
+          to.dir.as_raw_fd(),
+          to_name.as_ptr(),
+          libc::RENAME_EXCL,
+        )
+      })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+      let _ = (from, to_name);
+      Err(io::Error::from_raw_os_error(libc::ENOSYS))
+    }
+  }
+
+  /// A new hard link at `to` to this entry (a symlink is linked itself,
+  /// never followed).
+  pub fn hard_link_to(&self, to: &CheckedParent) -> io::Result<()> {
+    let from = cstr(&self.name)?;
+    let to_name = cstr(&to.name)?;
+    // SAFETY: valid descriptors and C strings
+    cvt(unsafe {
+      libc::linkat(
+        self.dir.as_raw_fd(),
+        from.as_ptr(),
+        to.dir.as_raw_fd(),
+        to_name.as_ptr(),
+        0,
+      )
+    })
+  }
+
   /// Renames this entry to `to`'s.
   pub fn rename_to(&self, to: &CheckedParent) -> io::Result<()> {
     let from = cstr(&self.name)?;
@@ -416,6 +622,130 @@ impl CheckedParent {
   /// `lstat` of the entry.
   pub fn symlink_metadata(&self) -> io::Result<libc::stat> {
     fstatat(self.dir.as_fd(), &self.name, libc::AT_SYMLINK_NOFOLLOW)
+  }
+
+  /// The text of the entry, a symlink.
+  pub fn read_link(&self) -> io::Result<PathBuf> {
+    readlinkat(self.dir.as_fd(), &self.name)
+  }
+
+  /// Changes the owner and group of the entry itself (a symlink is not
+  /// followed). `None` leaves one as it is.
+  pub fn chown_nofollow(
+    &self,
+    uid: Option<u32>,
+    gid: Option<u32>,
+  ) -> io::Result<()> {
+    let name = cstr(&self.name)?;
+    // SAFETY: a valid descriptor and C string; -1 is "leave it"
+    cvt(unsafe {
+      libc::fchownat(
+        self.dir.as_raw_fd(),
+        name.as_ptr(),
+        uid.unwrap_or(u32::MAX) as libc::uid_t,
+        gid.unwrap_or(u32::MAX) as libc::gid_t,
+        libc::AT_SYMLINK_NOFOLLOW,
+      )
+    })
+  }
+
+  /// Sets the access and modification times of the entry itself (a symlink
+  /// is not followed).
+  pub fn utime_nofollow(
+    &self,
+    atime: libc::timespec,
+    mtime: libc::timespec,
+  ) -> io::Result<()> {
+    let name = cstr(&self.name)?;
+    let times = [atime, mtime];
+    // SAFETY: a valid descriptor, C string and two timespecs
+    cvt(unsafe {
+      libc::utimensat(
+        self.dir.as_raw_fd(),
+        name.as_ptr(),
+        times.as_ptr(),
+        libc::AT_SYMLINK_NOFOLLOW,
+      )
+    })
+  }
+
+  /// Removes the entry, a directory, with everything in it. Nothing is
+  /// followed: each level is opened with `O_NOFOLLOW` from the one above,
+  /// so a symlink swapped in for a directory is removed as a link, never
+  /// entered.
+  pub fn remove_dir_all(&self) -> io::Result<()> {
+    remove_tree(self.dir.as_fd(), &self.name, 0)
+  }
+}
+
+/// How deep [`CheckedParent::remove_dir_all`] descends (each level holds a
+/// descriptor).
+const MAX_REMOVE_DEPTH: usize = 512;
+
+fn remove_tree(
+  parent: BorrowedFd<'_>,
+  name: &OsStr,
+  depth: usize,
+) -> io::Result<()> {
+  if depth > MAX_REMOVE_DEPTH {
+    return Err(io::Error::from_raw_os_error(libc::ENAMETOOLONG));
+  }
+  let dir = openat(
+    parent,
+    name,
+    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+    0,
+  )?;
+  for entry in read_dir_fd(dir.as_fd())? {
+    let is_dir = fstatat(dir.as_fd(), &entry, libc::AT_SYMLINK_NOFOLLOW)
+      .is_ok_and(|st| st.st_mode & libc::S_IFMT == libc::S_IFDIR);
+    let removed = if is_dir {
+      remove_tree(dir.as_fd(), &entry, depth + 1)
+    } else {
+      unlinkat(dir.as_fd(), &entry, 0)
+    };
+    match removed {
+      Ok(()) => {}
+      // removed by someone else meanwhile
+      Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+      Err(err) => return Err(err),
+    }
+  }
+  unlinkat(parent, name, libc::AT_REMOVEDIR)
+}
+
+/// What a directory entry is, as far as a listing tells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+  File,
+  Dir,
+  Symlink,
+  Other,
+}
+
+impl CheckedFile {
+  /// The entries of an opened directory with their kinds (the entry
+  /// itself: a symlink is a symlink).
+  pub fn read_dir_kinds(&self) -> io::Result<Vec<(OsString, EntryKind)>> {
+    let names = read_dir_fd(self.fd.as_fd())?;
+    Ok(
+      names
+        .into_iter()
+        .map(|name| {
+          let kind =
+            match fstatat(self.fd.as_fd(), &name, libc::AT_SYMLINK_NOFOLLOW) {
+              Ok(st) => match st.st_mode & libc::S_IFMT {
+                libc::S_IFREG => EntryKind::File,
+                libc::S_IFDIR => EntryKind::Dir,
+                libc::S_IFLNK => EntryKind::Symlink,
+                _ => EntryKind::Other,
+              },
+              Err(_) => EntryKind::Other,
+            };
+          (name, kind)
+        })
+        .collect(),
+    )
   }
 }
 
@@ -487,7 +817,11 @@ pub fn open_checked(
     let rel = relative_components(&path, &root);
     #[cfg(target_os = "linux")]
     {
-      if !scope.walk_only && !scope.deny_touches(&root) && openat2_available() {
+      if !scope.walk_only
+        && !scope.deny_touches(&root)
+        && !scope.in_file_root(&root, &path)
+        && openat2_available()
+      {
         race_hook(RaceStage::BeforeFinal);
         let mut resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS;
         if opts.symlinks == Symlinks::Never {
@@ -532,7 +866,19 @@ pub fn open_checked(
       }
     };
     race_hook(RaceStage::BeforeFinal);
-    match openat(dir.as_fd(), name, final_flags(opts), opts.mode) {
+    let opened = match openat(dir.as_fd(), name, final_flags(opts), opts.mode) {
+      // a path-only open names a symlink instead of refusing it: when
+      // links are followed, read it like a refused one
+      Ok(fd)
+        if opts.path_only
+          && opts.symlinks == Symlinks::Follow
+          && is_symlink_fd(fd.as_fd()) =>
+      {
+        Err(io::Error::from_raw_os_error(libc::ELOOP))
+      }
+      other => other,
+    };
+    match opened {
       Ok(fd) => {
         if !scope.post_open_check(fd.as_fd(), None) {
           if opts.create_new {
@@ -600,7 +946,11 @@ pub fn parent_checked(
     };
     #[cfg(target_os = "linux")]
     {
-      if !scope.walk_only && !scope.deny_touches(&root) && openat2_available() {
+      if !scope.walk_only
+        && !scope.deny_touches(&root)
+        && !scope.in_file_root(&root, &path)
+        && openat2_available()
+      {
         race_hook(RaceStage::BeforeFinal);
         let resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS;
         let rel_dirs = dirs.to_vec();
@@ -899,6 +1249,14 @@ fn fstatat(
   // SAFETY: a valid descriptor, C string and stat buffer
   cvt(unsafe { libc::fstatat(dir.as_raw_fd(), c.as_ptr(), &mut st, flags) })?;
   Ok(st)
+}
+
+fn is_symlink_fd(fd: BorrowedFd<'_>) -> bool {
+  // SAFETY: zeroed is a valid stat; the call fills it
+  let mut st: libc::stat = unsafe { std::mem::zeroed() };
+  // SAFETY: a valid descriptor and stat buffer
+  let res = unsafe { libc::fstat(fd.as_raw_fd(), &mut st) };
+  res == 0 && st.st_mode & libc::S_IFMT == libc::S_IFLNK
 }
 
 fn is_symlink_at(dir: BorrowedFd<'_>, name: &OsStr) -> bool {
@@ -1709,5 +2067,171 @@ mod tests {
           .is_not_capable()
       );
     }
+  }
+  #[test]
+  fn a_file_root_is_that_one_name() {
+    let t = tree();
+    let file = t.allowed.join("dir/f");
+    fs::write(t.allowed.join("dir/sibling"), "sibling").unwrap();
+    // a link beside the file root, to its sibling and to the outside
+    symlink("sibling", t.allowed.join("dir/to-sibling")).unwrap();
+    let opts = CheckedOpenOptions::new().read(true);
+    for walk in [true, false] {
+      let scope = OpenScope::new(Some(vec![file.clone()]), vec![])
+        .unwrap()
+        .force_component_walk(walk);
+      let opened = open_checked(&scope, &file, &opts).unwrap();
+      let mut text = String::new();
+      {
+        use std::io::Read;
+        opened.into_std_file().read_to_string(&mut text).unwrap();
+      }
+      assert_eq!(text, "checked");
+      // nothing else in its folder
+      for other in ["dir/sibling", "dir/to-sibling", "dir", "dir2"] {
+        assert!(
+          open_checked(&scope, &t.allowed.join(other), &opts)
+            .unwrap_err()
+            .is_not_capable(),
+          "{other}"
+        );
+      }
+      // the root replaced by a link to its sibling: followed, refused
+      fs::remove_file(&file).unwrap();
+      symlink("sibling", &file).unwrap();
+      assert!(
+        open_checked(&scope, &file, &opts)
+          .unwrap_err()
+          .is_not_capable()
+      );
+      fs::remove_file(&file).unwrap();
+      fs::write(&file, "checked").unwrap();
+    }
+  }
+
+  #[test]
+  fn custom_flags_keep_the_options_in_charge() {
+    let opts = CheckedOpenOptions::new()
+      .read(true)
+      .custom_flags(libc::O_WRONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    // the access mode stays the options'; O_NOFOLLOW becomes the policy
+    assert_eq!(opts.flags() & libc::O_ACCMODE, libc::O_RDONLY);
+    assert_eq!(opts.symlinks, Symlinks::NoFollowFinal);
+    assert!(opts.flags() & libc::O_NONBLOCK != 0);
+    assert_eq!(opts.flags() & libc::O_NOFOLLOW, 0);
+    #[cfg(target_os = "linux")]
+    {
+      let opts = CheckedOpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_TMPFILE | libc::O_PATH);
+      assert_eq!(opts.flags() & libc::O_PATH, 0);
+      assert_eq!(opts.flags() & libc::O_TMPFILE, 0);
+      assert_eq!(opts.flags() & libc::O_DIRECTORY, 0);
+      let opts = CheckedOpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY);
+      assert!(opts.flags() & libc::O_DIRECTORY != 0);
+    }
+  }
+
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn a_path_only_open_follows_links_like_any_other() {
+    let t = tree();
+    symlink("dir/f", t.allowed.join("to-f")).unwrap();
+    symlink(t.outside.join("f"), t.allowed.join("to-secret")).unwrap();
+    let kind = |file: &CheckedFile| {
+      // SAFETY: zeroed is a valid stat; the call fills it
+      let mut st: libc::stat = unsafe { std::mem::zeroed() };
+      // SAFETY: a valid descriptor and buffer
+      unsafe { libc::fstat(file.as_fd().as_raw_fd(), &mut st) };
+      st.st_mode & libc::S_IFMT
+    };
+    for scope in scopes(&t, vec![]) {
+      let follow = CheckedOpenOptions::new().path_only(true);
+      let file =
+        open_checked(&scope, &t.allowed.join("to-f"), &follow).unwrap();
+      assert_eq!(kind(&file), libc::S_IFREG);
+      assert_eq!(file.real_path().unwrap(), t.allowed.join("dir/f"));
+      // the link itself with no-follow
+      let nofollow = follow.clone().symlinks(Symlinks::NoFollowFinal);
+      let link =
+        open_checked(&scope, &t.allowed.join("to-f"), &nofollow).unwrap();
+      assert_eq!(kind(&link), libc::S_IFLNK);
+      // a link that leaves the scope is never named through
+      assert!(
+        open_checked(&scope, &t.allowed.join("to-secret"), &follow)
+          .unwrap_err()
+          .is_not_capable()
+      );
+    }
+  }
+
+  #[test]
+  fn remove_dir_all_never_enters_a_link() {
+    let t = tree();
+    let victim = t.allowed.join("tree");
+    fs::create_dir_all(victim.join("a/b")).unwrap();
+    fs::write(victim.join("a/b/f"), "x").unwrap();
+    symlink(&t.outside, victim.join("a/out")).unwrap();
+    symlink(t.outside.join("f"), victim.join("file-link")).unwrap();
+    for scope in scopes(&t, vec![]) {
+      if !victim.exists() {
+        fs::create_dir_all(victim.join("a")).unwrap();
+        symlink(&t.outside, victim.join("a/out")).unwrap();
+      }
+      let parent = parent_checked(&scope, &victim).unwrap();
+      let kinds = open_checked(
+        &scope,
+        &victim,
+        &CheckedOpenOptions::new().read(true).directory(true),
+      )
+      .unwrap()
+      .read_dir_kinds()
+      .unwrap();
+      assert!(kinds.iter().any(|(n, k)| n == "a" && *k == EntryKind::Dir));
+      parent.remove_dir_all().unwrap();
+      assert!(!victim.exists());
+      // what the links pointed at is untouched
+      assert_eq!(fs::read_to_string(t.outside.join("f")).unwrap(), "secret");
+      assert_eq!(
+        fs::read_to_string(t.outside.join("dir/f")).unwrap(),
+        "secret"
+      );
+    }
+    // the entry itself swapped for a link to the outside: not entered
+    symlink(&t.outside, &victim).unwrap();
+    let scope = &scopes(&t, vec![])[0];
+    let parent = parent_checked(scope, &victim).unwrap();
+    assert!(parent.remove_dir_all().is_err());
+    assert!(t.outside.join("f").exists());
+  }
+
+  #[test]
+  fn roots_intersect_to_the_inner_one() {
+    let p = |s: &str| PathBuf::from(s);
+    assert_eq!(intersect_roots(None, None), None);
+    assert_eq!(
+      intersect_roots(Some(vec![p("/a")]), None),
+      Some(vec![p("/a")])
+    );
+    assert_eq!(
+      intersect_roots(
+        Some(vec![p("/a"), p("/b/c"), p("/d")]),
+        Some(vec![p("/a/x"), p("/b"), p("/e")])
+      ),
+      Some(vec![p("/a/x"), p("/b/c")])
+    );
+    assert_eq!(
+      intersect_roots(Some(vec![p("/a")]), Some(vec![])),
+      Some(vec![])
+    );
+    assert!(opens_by_name(Path::new("/dev/null")));
+    assert!(opens_by_name(Path::new("/dev/fd/3")));
+    assert!(!opens_by_name(Path::new("/device")));
+    assert_eq!(
+      opens_by_name(Path::new("/proc/self/fd/0")),
+      cfg!(target_os = "linux")
+    );
   }
 }

@@ -1,0 +1,23 @@
+deno create: ok
+deno rename: ok
+deno mkdir: ok
+deno create in the new folder: ok
+deno overwrite: ok
+deno truncate: ok
+deno chmod: ok
+deno remove: ok
+deno remove tree: ok
+deno create in an existing folder: ok
+content: cha
+deno create in the deny: NotCapable
+deno create through a link into the deny: NotCapable
+deno overwrite in the deny: NotCapable
+deno remove in the deny: NotCapable
+deno rename into the deny: NotCapable
+deno rename the deny: NotCapable
+native create in the deny: refused
+native create through a link into the deny: refused
+native unlink in the deny: refused
+native create in an existing folder: ok
+native create directly in the allowed folder: as documented
+kept: kept

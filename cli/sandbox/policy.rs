@@ -43,10 +43,18 @@ use sha2::Digest;
 /// Bumped whenever the serialized shape changes (part of the policy hash).
 pub const POLICY_FORMAT: u32 = 1;
 
-/// Whether this runtime has the supervising broker (Mode B). Not yet: a
-/// policy that needs it carries a fail-open gap, so `enforce` refuses to
-/// start rather than apply rules nothing holds.
-pub const BROKER_BUILT: bool = false;
+/// Whether this runtime's supervising broker (Mode B) has the file
+/// operations: a write deny inside a write allow on Linux is then held
+/// exactly (the kernel refuses changes directly in the folders that lead to
+/// the deny; the broker makes them for Deno's own operations).
+pub const BROKER_FS_BUILT: bool = true;
+
+/// Whether the broker has the network side (connecting and binding by
+/// host, name resolution, Unix sockets by path, module fetches after
+/// start). Not yet: a policy that needs it carries a fail-open gap, so
+/// `enforce` and `broker` refuse to start rather than apply rules nothing
+/// holds.
+pub const BROKER_NET_BUILT: bool = false;
 
 /// Whether this runtime overmounts denied paths in a user + mount namespace
 /// (the exact Linux read deny). Not yet: the model falls back to expansion
@@ -1446,11 +1454,15 @@ impl KernelPolicy {
           g.is_fatal_under_enforce() && g.exact_with == Some(ExactWith::Broker)
         }));
     if needs_broker {
+      // the rules the broker's unbuilt side would hold (a write deny is
+      // the built file side's: it is held, and not among them)
       let mut rules: Vec<String> = compiled
         .gaps
         .iter()
         .filter(|g| {
-          g.is_fatal_under_enforce() && g.exact_with == Some(ExactWith::Broker)
+          g.is_fatal_under_enforce()
+            && g.exact_with == Some(ExactWith::Broker)
+            && !(BROKER_FS_BUILT && g.class == GapClass::Write)
         })
         .map(|g| g.rule.clone())
         .collect();
@@ -1462,7 +1474,7 @@ impl KernelPolicy {
       rules.dedup();
       let mut mode_b =
         Compiler::new(options, implicit, ctx, Shape::ModeB).run();
-      if !BROKER_BUILT && !rules.is_empty() {
+      if !rules.is_empty() {
         // say which rules made the broker necessary, and what they are
         let needs = broker_needs(host_net, rules.len());
         for gap in &mut mode_b.gaps {
@@ -1496,7 +1508,7 @@ const BROKER_RULE: &str = "--kernel-sandbox (broker)";
 
 /// The broker gap's opening words.
 const BROKER_NOT_BUILT: &str =
-  "the supervising broker (Mode B) is not built into this runtime yet";
+  "the supervising broker's network side is not built into this runtime yet";
 
 /// What the broker gap says would be held by Deno's checks only: the
 /// host-scoped network when that is the one rule that needs the broker,
@@ -1816,6 +1828,14 @@ impl<'a> Compiler<'a> {
     out
   }
 
+  /// Whether the broker's network side holds this policy's network rules:
+  /// Mode B with that side built. Without it Mode B compiles the network
+  /// (hosts, Unix sockets, module fetches) as Mode A does: what the kernel
+  /// holds alone, with the same gaps.
+  fn broker_net(&self) -> bool {
+    self.shape == Shape::ModeB && BROKER_NET_BUILT
+  }
+
   fn write_denies(&self) -> Vec<(PathBuf, String)> {
     self
       .abs_list(&self.opts().deny_write)
@@ -1873,7 +1893,21 @@ impl<'a> Compiler<'a> {
         && !self.caps.supports(Feature::FsTruncate),
       vsock,
     };
-    if self.caps.enforcer_built && self.shape == Shape::ModeB && !BROKER_BUILT {
+    // what of Mode B this policy leans on: the file side (a write deny
+    // held by the broker) is built; the network side (hosts, Unix sockets
+    // by path on Linux) is not yet. Module fetches after start fail closed
+    // until then, as in Mode A (`import_gap`).
+    let needs_net_side = matches!(net, NetPolicy::Broker { .. })
+      || (self.os() == TargetOs::Linux
+        && matches!(unix, UnixPolicy::Paths { .. }));
+    let needs_fs_side = deny_write
+      .iter()
+      .any(|d| d.enforcement == DenyEnforcement::Broker);
+    if self.caps.enforcer_built
+      && self.shape == Shape::ModeB
+      && ((needs_net_side && !BROKER_NET_BUILT)
+        || (needs_fs_side && !BROKER_FS_BUILT))
+    {
       let needs = match &net {
         NetPolicy::Broker { .. } => "host-scoped network",
         _ => "these rules",
@@ -2411,7 +2445,7 @@ impl<'a> Compiler<'a> {
     let ports_supported = self.caps.supports(Feature::TcpPorts);
 
     // Mode B: hosts held exactly by the broker
-    let use_broker = self.shape == Shape::ModeB
+    let use_broker = self.broker_net()
       || (hosted && os == TargetOs::Linux)
       || (hosted
         && os == TargetOs::Macos
@@ -2620,7 +2654,7 @@ impl<'a> Compiler<'a> {
     }
     if self.deny_only {
       // -A with denies: every socket the user can reach
-      if os == TargetOs::Linux && self.shape == Shape::ModeA {
+      if os == TargetOs::Linux && !self.broker_net() {
         self.gap(
           GapClass::Unix,
           "--allow-all",
@@ -2634,7 +2668,7 @@ impl<'a> Compiler<'a> {
     if unscoped_net {
       // Deno allows any socket inside the read + write scope
       if read.is_all() && write.is_all() {
-        if os == TargetOs::Linux && self.shape == Shape::ModeA {
+        if os == TargetOs::Linux && !self.broker_net() {
           self.gap(
             GapClass::Unix,
             "--allow-net --allow-read --allow-write",
@@ -2645,7 +2679,7 @@ impl<'a> Compiler<'a> {
         }
         return UnixPolicy::Open;
       }
-      if os == TargetOs::Macos || self.shape == Shape::ModeB {
+      if os == TargetOs::Macos || self.broker_net() {
         // held per path: the folders both read and written
         let mut paths: Vec<PathBuf> = match (read, write) {
           (_, PathScope::Paths { paths }) if read.is_all() => paths
@@ -2705,7 +2739,7 @@ impl<'a> Compiler<'a> {
 
   fn named_unix(&mut self, named: Vec<PathBuf>) -> UnixPolicy {
     if self.os() == TargetOs::Linux
-      && self.shape == Shape::ModeA
+      && !self.broker_net()
       && !self.caps.supports(Feature::UnixSocketPaths)
     {
       let rule = named
@@ -2900,8 +2934,10 @@ impl<'a> Compiler<'a> {
   /// Remote modules fetched after start (dynamic `import()`, npm
   /// auto-install) need the network the kernel policy may not grant.
   fn import_gap(&mut self, net: &NetPolicy) {
+    // under the broker its network side fetches them; until that is built
+    // Mode B fails closed like Mode A
     if self.ctx().compiled
-      || self.shape == Shape::ModeB
+      || self.broker_net()
       || matches!(net, NetPolicy::Open)
     {
       return;

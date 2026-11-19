@@ -34,6 +34,31 @@ use crate::interface::FsReadDirRc;
 /// The path to hand the OS: a Windows path that names a DOS device
 /// (`C:\dir\con.mjs`) in its `\\?\` form, so it opens as a file, as in Node;
 /// any other path unchanged (DENEXT.md item 357).
+/// denext: on Unix, when the checked path carries an open scope (the
+/// access is a scoped one), the operation is the race-safe one in
+/// [`crate::scoped`] and the path-based code after this is not reached.
+macro_rules! scoped {
+  ($path:expr, |$scope:ident| $body:expr) => {
+    #[cfg(unix)]
+    if let Some($scope) = $path.open_scope() {
+      return $body;
+    }
+  };
+}
+
+/// denext: as [`scoped!`] for an operation on two paths: scoped when either
+/// is, the other then in the scope that holds nothing back.
+macro_rules! scoped2 {
+  ($a:expr, $b:expr, |$sa:ident, $sb:ident| $body:expr) => {
+    #[cfg(unix)]
+    if $a.open_scope().is_some() || $b.open_scope().is_some() {
+      let $sa = $a.open_scope().unwrap_or(&crate::scoped::UNSCOPED);
+      let $sb = $b.open_scope().unwrap_or(&crate::scoped::UNSCOPED);
+      return $body;
+    }
+  };
+}
+
 fn os_path(path: &Path) -> Cow<'_, Path> {
   sys_traits::impls::dos_device_safe_path(path)
 }
@@ -169,6 +194,9 @@ impl FileSystem for RealFs {
     recursive: bool,
     mode: Option<u32>,
   ) -> FsResult<()> {
+    scoped!(path, |scope| crate::scoped::mkdir(
+      scope, path, recursive, mode
+    ));
     mkdir(path, recursive, mode)
   }
   async fn mkdir_async(
@@ -177,11 +205,18 @@ impl FileSystem for RealFs {
     recursive: bool,
     mode: Option<u32>,
   ) -> FsResult<()> {
-    spawn_blocking(move || mkdir(&path, recursive, mode)).await?
+    spawn_blocking(move || {
+      scoped!(path, |scope| crate::scoped::mkdir(
+        scope, &path, recursive, mode
+      ));
+      mkdir(&path, recursive, mode)
+    })
+    .await?
   }
 
   #[cfg(unix)]
   fn chmod_sync(&self, path: &CheckedPath, mode: u32) -> FsResult<()> {
+    scoped!(path, |scope| crate::scoped::chmod(scope, path, mode));
     chmod(path, mode)
   }
   #[cfg(not(unix))]
@@ -191,7 +226,11 @@ impl FileSystem for RealFs {
 
   #[cfg(unix)]
   async fn chmod_async(&self, path: CheckedPathBuf, mode: u32) -> FsResult<()> {
-    spawn_blocking(move || chmod(&path, mode)).await?
+    spawn_blocking(move || {
+      scoped!(path, |scope| crate::scoped::chmod(scope, &path, mode));
+      chmod(&path, mode)
+    })
+    .await?
   }
   #[cfg(not(unix))]
   async fn chmod_async(&self, path: CheckedPathBuf, mode: i32) -> FsResult<()> {
@@ -204,6 +243,7 @@ impl FileSystem for RealFs {
     uid: Option<u32>,
     gid: Option<u32>,
   ) -> FsResult<()> {
+    scoped!(path, |scope| crate::scoped::chown(scope, path, uid, gid));
     chown(path, uid, gid)
   }
   async fn chown_async(
@@ -212,10 +252,15 @@ impl FileSystem for RealFs {
     uid: Option<u32>,
     gid: Option<u32>,
   ) -> FsResult<()> {
-    spawn_blocking(move || chown(&path, uid, gid)).await?
+    spawn_blocking(move || {
+      scoped!(path, |scope| crate::scoped::chown(scope, &path, uid, gid));
+      chown(&path, uid, gid)
+    })
+    .await?
   }
 
   fn remove_sync(&self, path: &CheckedPath, recursive: bool) -> FsResult<()> {
+    scoped!(path, |scope| crate::scoped::remove(scope, path, recursive));
     remove(path, recursive)
   }
   async fn remove_async(
@@ -223,7 +268,11 @@ impl FileSystem for RealFs {
     path: CheckedPathBuf,
     recursive: bool,
   ) -> FsResult<()> {
-    spawn_blocking(move || remove(&path, recursive)).await?
+    spawn_blocking(move || {
+      scoped!(path, |scope| crate::scoped::remove(scope, &path, recursive));
+      remove(&path, recursive)
+    })
+    .await?
   }
 
   fn copy_file_sync(
@@ -253,17 +302,27 @@ impl FileSystem for RealFs {
   }
 
   fn stat_sync(&self, path: &CheckedPath) -> FsResult<FsStat> {
+    scoped!(path, |scope| crate::scoped::stat(scope, path));
     stat(path)
   }
   async fn stat_async(&self, path: CheckedPathBuf) -> FsResult<FsStat> {
-    spawn_blocking(move || stat(&path)).await?
+    spawn_blocking(move || {
+      scoped!(path, |scope| crate::scoped::stat(scope, &path));
+      stat(&path)
+    })
+    .await?
   }
 
   fn lstat_sync(&self, path: &CheckedPath) -> FsResult<FsStat> {
+    scoped!(path, |scope| crate::scoped::lstat(scope, path));
     lstat(path)
   }
   async fn lstat_async(&self, path: CheckedPathBuf) -> FsResult<FsStat> {
-    spawn_blocking(move || lstat(&path)).await?
+    spawn_blocking(move || {
+      scoped!(path, |scope| crate::scoped::lstat(scope, &path));
+      lstat(&path)
+    })
+    .await?
   }
 
   fn statfs_sync(
@@ -298,12 +357,23 @@ impl FileSystem for RealFs {
   }
 
   fn read_dir_sync(&self, path: &CheckedPath) -> FsResult<Vec<FsDirEntry>> {
+    scoped!(path, |scope| crate::scoped::read_dir(scope, path));
     read_dir(path)
   }
   async fn read_dir_async(
     &self,
     path: CheckedPathBuf,
   ) -> FsResult<FsReadDirRc> {
+    #[cfg(unix)]
+    if path.open_scope().is_some() {
+      // listed whole from the checked descriptor, then handed out in turn
+      let entries = spawn_blocking(move || {
+        scoped!(path, |scope| crate::scoped::read_dir(scope, &path));
+        read_dir(&path)
+      })
+      .await??;
+      return Ok(new_rc(ListedReadDir(Mutex::new(entries.into()))));
+    }
     Ok(new_rc(RealFsReadDir(Mutex::new(
       tokio::fs::read_dir(path).await?,
     ))))
@@ -314,6 +384,9 @@ impl FileSystem for RealFs {
     oldpath: &CheckedPath,
     newpath: &CheckedPath,
   ) -> FsResult<()> {
+    scoped2!(oldpath, newpath, |from, to| crate::scoped::rename(
+      from, oldpath, to, newpath
+    ));
     fs::rename(os_path(oldpath), os_path(newpath)).map_err(Into::into)
   }
   async fn rename_async(
@@ -321,9 +394,13 @@ impl FileSystem for RealFs {
     oldpath: CheckedPathBuf,
     newpath: CheckedPathBuf,
   ) -> FsResult<()> {
-    spawn_blocking(move || fs::rename(os_path(&oldpath), os_path(&newpath)))
-      .await?
-      .map_err(Into::into)
+    spawn_blocking(move || {
+      scoped2!(oldpath, newpath, |from, to| crate::scoped::rename(
+        from, &oldpath, to, &newpath
+      ));
+      fs::rename(os_path(&oldpath), os_path(&newpath)).map_err(Into::into)
+    })
+    .await?
   }
 
   fn lchmod_sync(&self, path: &CheckedPath, mode: u32) -> FsResult<()> {
@@ -343,6 +420,9 @@ impl FileSystem for RealFs {
     oldpath: &CheckedPath,
     newpath: &CheckedPath,
   ) -> FsResult<()> {
+    scoped2!(oldpath, newpath, |from, to| crate::scoped::link(
+      from, oldpath, to, newpath
+    ));
     fs::hard_link(os_path(oldpath), os_path(newpath)).map_err(Into::into)
   }
   async fn link_async(
@@ -350,9 +430,13 @@ impl FileSystem for RealFs {
     oldpath: CheckedPathBuf,
     newpath: CheckedPathBuf,
   ) -> FsResult<()> {
-    spawn_blocking(move || fs::hard_link(os_path(&oldpath), os_path(&newpath)))
-      .await?
-      .map_err(Into::into)
+    spawn_blocking(move || {
+      scoped2!(oldpath, newpath, |from, to| crate::scoped::link(
+        from, &oldpath, to, &newpath
+      ));
+      fs::hard_link(os_path(&oldpath), os_path(&newpath)).map_err(Into::into)
+    })
+    .await?
   }
 
   fn symlink_sync(
@@ -361,6 +445,9 @@ impl FileSystem for RealFs {
     newpath: &CheckedPath,
     file_type: Option<FsFileType>,
   ) -> FsResult<()> {
+    scoped!(newpath, |scope| crate::scoped::symlink(
+      scope, oldpath, newpath
+    ));
     symlink(oldpath, newpath, file_type)
   }
   async fn symlink_async(
@@ -369,28 +456,41 @@ impl FileSystem for RealFs {
     newpath: CheckedPathBuf,
     file_type: Option<FsFileType>,
   ) -> FsResult<()> {
-    spawn_blocking(move || symlink(&oldpath, &newpath, file_type)).await?
+    spawn_blocking(move || {
+      scoped!(newpath, |scope| crate::scoped::symlink(
+        scope, &oldpath, &newpath
+      ));
+      symlink(&oldpath, &newpath, file_type)
+    })
+    .await?
   }
 
   fn read_link_sync(&self, path: &CheckedPath) -> FsResult<PathBuf> {
+    scoped!(path, |scope| crate::scoped::read_link(scope, path));
     fs::read_link(os_path(path)).map_err(Into::into)
   }
   async fn read_link_async(&self, path: CheckedPathBuf) -> FsResult<PathBuf> {
-    spawn_blocking(move || fs::read_link(os_path(&path)))
-      .await?
-      .map_err(Into::into)
+    spawn_blocking(move || {
+      scoped!(path, |scope| crate::scoped::read_link(scope, &path));
+      fs::read_link(os_path(&path)).map_err(Into::into)
+    })
+    .await?
   }
 
   fn rmdir_sync(&self, path: &CheckedPath) -> FsResult<()> {
+    scoped!(path, |scope| crate::scoped::rmdir(scope, path));
     fs::remove_dir(os_path(path)).map_err(Into::into)
   }
   async fn rmdir_async(&self, path: CheckedPathBuf) -> FsResult<()> {
-    spawn_blocking(move || fs::remove_dir(os_path(&path)))
-      .await?
-      .map_err(Into::into)
+    spawn_blocking(move || {
+      scoped!(path, |scope| crate::scoped::rmdir(scope, &path));
+      fs::remove_dir(os_path(&path)).map_err(Into::into)
+    })
+    .await?
   }
 
   fn truncate_sync(&self, path: &CheckedPath, len: u64) -> FsResult<()> {
+    scoped!(path, |scope| crate::scoped::truncate(scope, path, len));
     truncate(path, len)
   }
   async fn truncate_async(
@@ -398,7 +498,11 @@ impl FileSystem for RealFs {
     path: CheckedPathBuf,
     len: u64,
   ) -> FsResult<()> {
-    spawn_blocking(move || truncate(&path, len)).await?
+    spawn_blocking(move || {
+      scoped!(path, |scope| crate::scoped::truncate(scope, &path, len));
+      truncate(&path, len)
+    })
+    .await?
   }
 
   fn utime_sync(
@@ -409,6 +513,12 @@ impl FileSystem for RealFs {
     mtime_secs: i64,
     mtime_nanos: u32,
   ) -> FsResult<()> {
+    scoped!(path, |scope| crate::scoped::utime(
+      scope,
+      path,
+      (atime_secs, atime_nanos),
+      (mtime_secs, mtime_nanos)
+    ));
     let atime = filetime::FileTime::from_unix_time(atime_secs, atime_nanos);
     let mtime = filetime::FileTime::from_unix_time(mtime_secs, mtime_nanos);
     set_path_file_times(&os_path(path), atime, mtime).map_err(Into::into)
@@ -424,6 +534,12 @@ impl FileSystem for RealFs {
     let atime = filetime::FileTime::from_unix_time(atime_secs, atime_nanos);
     let mtime = filetime::FileTime::from_unix_time(mtime_secs, mtime_nanos);
     spawn_blocking(move || {
+      scoped!(path, |scope| crate::scoped::utime(
+        scope,
+        &path,
+        (atime_secs, atime_nanos),
+        (mtime_secs, mtime_nanos)
+      ));
       set_path_file_times(&os_path(&path), atime, mtime).map_err(Into::into)
     })
     .await?
@@ -437,6 +553,12 @@ impl FileSystem for RealFs {
     mtime_secs: i64,
     mtime_nanos: u32,
   ) -> FsResult<()> {
+    scoped!(path, |scope| crate::scoped::lutime(
+      scope,
+      path,
+      (atime_secs, atime_nanos),
+      (mtime_secs, mtime_nanos)
+    ));
     let atime = filetime::FileTime::from_unix_time(atime_secs, atime_nanos);
     let mtime = filetime::FileTime::from_unix_time(mtime_secs, mtime_nanos);
     filetime::set_symlink_file_times(os_path(path), atime, mtime)
@@ -454,6 +576,12 @@ impl FileSystem for RealFs {
     let atime = filetime::FileTime::from_unix_time(atime_secs, atime_nanos);
     let mtime = filetime::FileTime::from_unix_time(mtime_secs, mtime_nanos);
     spawn_blocking(move || {
+      scoped!(path, |scope| crate::scoped::lutime(
+        scope,
+        &path,
+        (atime_secs, atime_nanos),
+        (mtime_secs, mtime_nanos)
+      ));
       filetime::set_symlink_file_times(os_path(&path), atime, mtime)
         .map_err(Into::into)
     })
@@ -466,6 +594,7 @@ impl FileSystem for RealFs {
     uid: Option<u32>,
     gid: Option<u32>,
   ) -> FsResult<()> {
+    scoped!(path, |scope| crate::scoped::lchown(scope, path, uid, gid));
     lchown(path, uid, gid)
   }
 
@@ -475,7 +604,11 @@ impl FileSystem for RealFs {
     uid: Option<u32>,
     gid: Option<u32>,
   ) -> FsResult<()> {
-    spawn_blocking(move || lchown(&path, uid, gid)).await?
+    spawn_blocking(move || {
+      scoped!(path, |scope| crate::scoped::lchown(scope, &path, uid, gid));
+      lchown(&path, uid, gid)
+    })
+    .await?
   }
 
   fn write_file_sync(
@@ -1212,6 +1345,20 @@ fn read_dir(path: &Path) -> FsResult<Vec<FsDirEntry>> {
   Ok(entries)
 }
 
+/// denext: a directory listed whole (from a checked descriptor).
+#[cfg(unix)]
+#[derive(Debug)]
+struct ListedReadDir(Mutex<std::collections::VecDeque<FsDirEntry>>);
+
+#[cfg(unix)]
+#[async_trait::async_trait(?Send)]
+impl FsReadDir for ListedReadDir {
+  async fn next(&self) -> FsResult<Option<FsDirEntry>> {
+    let mut entries = self.0.try_lock().map_err(|_| FsError::FileBusy)?;
+    Ok(entries.pop_front())
+  }
+}
+
 #[derive(Debug)]
 struct RealFsReadDir(Mutex<tokio::fs::ReadDir>);
 
@@ -1392,6 +1539,9 @@ pub fn open_with_checked_path(
       deno_permissions::broker::BrokerOpenOutcome::OpenItself => {}
     }
   }
+  // denext: a scoped access opens race-safely, held to the allow roots and
+  // denies the check granted it under
+  scoped!(path, |scope| crate::scoped::open(scope, path, opts));
   // Rust's std::fs::OpenOptions requires write or append when create is set.
   // However, POSIX allows O_RDONLY | O_CREAT (create the file if it doesn't
   // exist, then open for reading). Handle this by creating the file first
