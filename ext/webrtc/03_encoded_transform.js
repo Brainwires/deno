@@ -85,6 +85,8 @@ const _state = Symbol("[[state]]");
 // transformer's readable (writeEncodedData's [[owner]] and [[counter]]).
 const _owner = Symbol("[[owner]]");
 const _counter = Symbol("[[counter]]");
+// A frame written to createEncodedStreams()'s writable.
+const _consumed = Symbol("[[consumed]]");
 
 function fire(target, event) {
   setIsTrusted(event, true);
@@ -381,6 +383,30 @@ function reply(state, id, error = undefined, value = undefined) {
   );
 }
 
+// A frame written back on a sender's transform (or encoded streams) goes
+// out at its RTP timestamp.
+function sendFrame(state, frame, data) {
+  if (ArrayBufferPrototypeGetByteLength(data) === 0) return;
+  const { pc, key } = ownerParts(state);
+  const { _rid, _state: pcState } = internals();
+  if (pc[pcState].closed) return;
+  const video = ObjectPrototypeIsPrototypeOf(
+    RTCEncodedVideoFramePrototype,
+    frame,
+  );
+  try {
+    op_webrtc_sender_write_frame_at(
+      pc[_rid],
+      key,
+      new Uint8Array(data),
+      frame[_duration] ?? (video ? 1000 / 30 : 20),
+      frame[_metadata].rtpTimestamp >>> 0,
+    );
+  } catch {
+    // The sender went away.
+  }
+}
+
 function ownerParts(state) {
   const { _pc, _transceiver, _key } = internals();
   const owner = state.target;
@@ -393,22 +419,7 @@ function onTransformerMessage(transform, message) {
   if (message.write !== undefined) {
     const frame = message.write;
     if (state.side !== "sender" || !isFrame(frame)) return;
-    const data = frame[_data];
-    if (ArrayBufferPrototypeGetByteLength(data) === 0) return;
-    const { pc, key } = ownerParts(state);
-    const { _rid, _state: pcState } = internals();
-    if (pc[pcState].closed) return;
-    try {
-      op_webrtc_sender_write_frame_at(
-        pc[_rid],
-        key,
-        new Uint8Array(data),
-        frame[_duration] ?? 20,
-        frame[_metadata].rtpTimestamp >>> 0,
-      );
-    } catch {
-      // The sender went away.
-    }
+    sendFrame(state, frame, frame[_data]);
     return;
   }
   if (message.generateKeyFrame !== undefined) {
@@ -598,6 +609,13 @@ function setTransform(owner, side, transform) {
   }
   const previous = owner[_transform] ?? null;
   if (previous === transform) return;
+  // createEncodedStreams() took the frames: no transform can be set.
+  if (previous !== null && previous[_state].legacy) {
+    if (transform === null) return;
+    throw invalidState(
+      "Failed to set 'transform': createEncodedStreams() was called",
+    );
+  }
   if (previous !== null) {
     previous[_state].target = null;
     previous[_state].side = null;
@@ -626,6 +644,16 @@ function setTransform(owner, side, transform) {
 
 function postFrame(state, frame) {
   if (state.closed) return;
+  if (state.legacy) {
+    // createEncodedStreams(): the frame is enqueued in this realm.
+    const c = state.controller;
+    try {
+      if (c !== null && c.desiredSize > 0) c.enqueue(frame);
+    } catch {
+      // The readable was cancelled.
+    }
+    return;
+  }
   state.port.postMessage({ frame }, [frame[_data]]);
 }
 
@@ -868,7 +896,11 @@ function deliverReceived(receiver, event) {
 function keyFrameRequested(sender) {
   const { _transform } = internals();
   const transform = sender[_transform] ?? null;
-  if (transform === null || transform[_state].sframe) return;
+  if (
+    transform === null || transform[_state].sframe || transform[_state].legacy
+  ) {
+    return;
+  }
   transform[_state].port.postMessage({ keyframerequest: null });
 }
 
@@ -882,10 +914,92 @@ function ownerClosed(...owners) {
     const state = transform[_state];
     if (state.closed) continue;
     state.closed = true;
+    if (state.legacy) {
+      try {
+        state.controller?.close();
+      } catch {
+        // Already closed or cancelled.
+      }
+      continue;
+    }
     if (state.port === null) continue;
     state.port.postMessage({ close: true });
     state.port.close();
   }
+}
+
+// --- createEncodedStreams() --------------------------------------------------
+// The insertable streams API that preceded RTCRtpScriptTransform (Chrome's
+// `RTCRtpSender/RTCRtpReceiver.createEncodedStreams()`): the owner's frames
+// in a readable in this realm, and a writable that sends what is written
+// (a receiver's go nowhere: there is no decoder). Unlike a script
+// transformer's, its writable takes any frame not written before,
+// constructed or cloned ones too, as Chrome's does.
+
+// Whether `sender.transform` / `receiver.transform` hides it (01_webrtc.js).
+function isEncodedStreams(transform) {
+  return transform[_state]?.legacy === true;
+}
+
+function createEncodedStreams(owner, side) {
+  const prefix = "Failed to execute 'createEncodedStreams'";
+  const { _transform, _pc, _transceiver, _key, _rid, _state: s } = internals();
+  const current = owner[_transform] ?? null;
+  if (current !== null) {
+    throw invalidState(
+      isEncodedStreams(current)
+        ? `${prefix}: the encoded streams were already created`
+        : `${prefix}: a transform is set`,
+    );
+  }
+  const state = {
+    legacy: true,
+    port: null,
+    target: owner,
+    side,
+    owner,
+    ownerSide: side,
+    kind: owner[_transceiver][s].kind,
+    keyFrameWaiters: [],
+    size: null,
+    lastRtpTimestamp: null,
+    rtpCycles: 0,
+    lastFrameId: null,
+    closed: false,
+    controller: null,
+  };
+  const readable = new ReadableStream({
+    start(controller) {
+      state.controller = controller;
+    },
+  }, { highWaterMark: READABLE_HIGH_WATER_MARK, size: () => 1 });
+  const writable = new WritableStream({
+    write(chunk) {
+      if (!isFrame(chunk)) {
+        throw new TypeError(
+          `${prefix}: only RTCEncodedVideoFrame and RTCEncodedAudioFrame can be written`,
+        );
+      }
+      // A frame is consumed by its first write; its data stays readable
+      // (Chrome's frames keep it too).
+      if (chunk[_consumed] === true) {
+        throw new DOMException(
+          `${prefix}: the frame was already written`,
+          "OperationError",
+        );
+      }
+      chunk[_consumed] = true;
+      if (state.side === "sender" && !state.closed) {
+        sendFrame(state, chunk, chunk[_data]);
+      }
+    },
+  });
+  owner[_transform] = { [_state]: state };
+  const pc = owner[_pc];
+  if (side === "receiver" && !pc[s].closed) {
+    op_webrtc_receiver_transform(pc[_rid], owner[_transceiver][_key], true);
+  }
+  return { readable, writable };
 }
 
 // --- the worker side ---------------------------------------------------------
@@ -1099,10 +1213,12 @@ return {
   RTCRtpScriptTransformer,
   RTCTransformEvent,
   TRANSFORM_KEY,
+  createEncodedStreams,
   deliverReceived,
   deserializeFrame,
   feedFake,
   initRtpTransform,
+  isEncodedStreams,
   isFrame,
   keyFrameRequested,
   ownerClosed,

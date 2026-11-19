@@ -2534,7 +2534,14 @@ function defineTransformAttribute(prototype, side) {
   const { get, set } = ObjectGetOwnPropertyDescriptor({
     get transform() {
       webidl.assertBranded(this, prototype);
-      return this[_transform] ?? null;
+      const transform = this[_transform] ?? null;
+      // createEncodedStreams()'s internal transform is not one.
+      if (
+        transform !== null && loadEncodedTransform().isEncodedStreams(transform)
+      ) {
+        return null;
+      }
+      return transform;
     },
     set transform(value) {
       webidl.assertBranded(this, prototype);
@@ -2551,6 +2558,26 @@ function defineTransformAttribute(prototype, side) {
 }
 defineTransformAttribute(RTCRtpSenderPrototype, "sender");
 defineTransformAttribute(RTCRtpReceiverPrototype, "receiver");
+
+// `createEncodedStreams()`: the insertable streams API that preceded
+// RTCRtpScriptTransform, as Chrome has it (03_encoded_transform.js).
+function defineCreateEncodedStreams(prototype, side) {
+  const { createEncodedStreams } = {
+    createEncodedStreams() {
+      webidl.assertBranded(this, prototype);
+      return loadEncodedTransform().createEncodedStreams(this, side);
+    },
+  };
+  ObjectDefineProperty(prototype, "createEncodedStreams", {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: createEncodedStreams,
+  });
+}
+defineCreateEncodedStreams(RTCRtpSenderPrototype, "sender");
+defineCreateEncodedStreams(RTCRtpReceiverPrototype, "receiver");
 
 function receiverSources(receiver, contributing) {
   const pc = receiver[_pc];
