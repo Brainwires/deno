@@ -310,6 +310,12 @@ pub struct LinuxPlan {
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub expand_write: Vec<ExpandRoot>,
   pub net: NetPlan,
+  /// TCP listeners to bind (and listen on) before the plan applies: the
+  /// addresses the grant names for listening. The operations that listen
+  /// there are handed these (`deno_net_route`), so the confined process
+  /// binds nothing itself.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub prebound: Vec<std::net::SocketAddr>,
   /// Landlock ABI 6 scopes.
   pub scope_signal: bool,
   pub scope_abstract_unix: bool,
@@ -403,6 +409,7 @@ mod tests {
         expand,
         expand_write: Vec::new(),
         net: NetPlan::Denied,
+        prebound: Vec::new(),
         scope_signal: false,
         scope_abstract_unix: false,
         seccomp: SeccompPlan::default(),

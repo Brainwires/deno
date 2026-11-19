@@ -1328,6 +1328,79 @@ fn fd_path(fd: BorrowedFd<'_>) -> Option<PathBuf> {
   }
 }
 
+/// Where an open descriptor's file is, for a check made after the open
+/// ([`crate::PermissionsContainer::check_opened`]).
+#[derive(Debug, PartialEq, Eq)]
+pub enum OpenedPath {
+  /// The file's own path (no symlink left in it: the kernel reports the
+  /// object's location).
+  At(PathBuf),
+  /// The file has no path any more (unlinked after it was opened).
+  Unlinked,
+  /// This system can't say (Linux without `/proc`; a platform with no such
+  /// query).
+  Unknown,
+}
+
+/// The path of the file `fd` has open, as the kernel reports it.
+pub fn opened_path(fd: BorrowedFd<'_>) -> OpenedPath {
+  #[cfg(target_os = "linux")]
+  {
+    let link = format!("/proc/self/fd/{}", fd.as_raw_fd());
+    let Ok(c) = CString::new(link) else {
+      return OpenedPath::Unknown;
+    };
+    let mut buf = vec![0u8; libc::PATH_MAX as usize + 1];
+    // SAFETY: a valid C string and buffer of the given size
+    let len = unsafe {
+      libc::readlink(
+        c.as_ptr(),
+        buf.as_mut_ptr() as *mut libc::c_char,
+        buf.len(),
+      )
+    };
+    if len <= 0 || len as usize >= buf.len() {
+      return OpenedPath::Unknown;
+    }
+    buf.truncate(len as usize);
+    if buf.ends_with(b" (deleted)") {
+      // a file really named so reads the same: refused with the unlinked
+      return OpenedPath::Unlinked;
+    }
+    if buf.first() != Some(&b'/') {
+      // a pipe, a socket, an anonymous file
+      return OpenedPath::Unknown;
+    }
+    OpenedPath::At(PathBuf::from(OsString::from_vec(buf)))
+  }
+  #[cfg(target_os = "macos")]
+  {
+    // a file with no links left has no path to report (a pipe or a socket
+    // never had one)
+    // SAFETY: a zeroed stat the kernel fills
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid descriptor and stat buffer
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } == 0 {
+      let kind = st.st_mode & libc::S_IFMT;
+      if kind != libc::S_IFREG && kind != libc::S_IFDIR {
+        return OpenedPath::Unknown;
+      }
+      if st.st_nlink == 0 {
+        return OpenedPath::Unlinked;
+      }
+    }
+    match fd_path(fd) {
+      Some(path) => OpenedPath::At(path),
+      None => OpenedPath::Unknown,
+    }
+  }
+  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+  {
+    let _ = fd;
+    OpenedPath::Unknown
+  }
+}
+
 fn read_dir_fd(fd: BorrowedFd<'_>) -> io::Result<Vec<OsString>> {
   // fdopendir takes the descriptor over: give it a duplicate
   let raw = dup(fd)?.into_raw_fd();

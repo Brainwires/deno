@@ -27,6 +27,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -1392,6 +1393,11 @@ pub struct KernelPolicy {
   pub deny_only: bool,
   pub fs: FsRules,
   pub net: NetPolicy,
+  /// TCP listeners bound before the process confines itself (Linux, Mode
+  /// A): the addresses the grant names for listening. The confined
+  /// process binds none of its own.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub prebound: Vec<SocketAddr>,
   pub unix: UnixPolicy,
   pub sys: SysNarrowing,
   /// `Some`: the environment a re-exec'd image keeps (Linux and macOS,
@@ -1558,6 +1564,38 @@ enum NetEntry {
   Hosted,
 }
 
+/// The addresses to bind before confinement for an `--allow-net-listen`
+/// list whose every IP entry is an address with a port: an IP literal as itself, `localhost`
+/// as both loopback addresses. `None` when the side is unscoped, empty, or
+/// has an entry that can't be bound ahead (a name, a subnet, no port, port
+/// 0: an ephemeral port is a new one for every listener).
+fn prebound_listeners(side: &NetSide) -> Option<Vec<SocketAddr>> {
+  use std::net::Ipv4Addr;
+  use std::net::Ipv6Addr;
+  if side.is_any() {
+    return None;
+  }
+  let mut addrs = BTreeSet::new();
+  for entry in side.entries() {
+    match NetDescriptor::parse_for_list(entry) {
+      Ok(NetDescriptor(Host::UnixSocket(_) | Host::Vsock(_), _)) => {}
+      Ok(NetDescriptor(Host::Ip(ip), Some(port))) => {
+        let port = u16::try_from(port).ok().filter(|port| *port != 0)?;
+        addrs.insert(SocketAddr::new(ip, port));
+      }
+      Ok(NetDescriptor(Host::Fqdn(_), Some(port)))
+        if matches!(classify_net(entry), NetEntry::AddressPort(_)) =>
+      {
+        let port = u16::try_from(port).ok().filter(|port| *port != 0)?;
+        addrs.insert(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port));
+        addrs.insert(SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port));
+      }
+      _ => return None,
+    }
+  }
+  (!addrs.is_empty()).then(|| addrs.into_iter().collect())
+}
+
 fn classify_net(entry: &str) -> NetEntry {
   match NetDescriptor::parse_for_list(entry) {
     Ok(NetDescriptor(Host::UnixSocket(path), _)) => NetEntry::Unix(path),
@@ -1632,6 +1670,8 @@ struct Compiler<'a> {
   allow_all: bool,
   /// Native code can run (FFI, addons or children).
   native: bool,
+  /// The listeners bound before confinement ([`KernelPolicy::prebound`]).
+  prebound: Vec<SocketAddr>,
 }
 
 impl<'a> Compiler<'a> {
@@ -1651,6 +1691,7 @@ impl<'a> Compiler<'a> {
       deny_only: options_allow_all(options) && options_have_deny(options),
       allow_all: options_allow_all(options) && !options_have_deny(options),
       native: options.allow_ffi.is_some() || options.allow_run.is_some(),
+      prebound: Vec::new(),
     }
   }
 
@@ -1965,6 +2006,7 @@ impl<'a> Compiler<'a> {
     let os = self.os();
     let shape = self.shape;
     let deny_only = self.deny_only;
+    let prebound = std::mem::take(&mut self.prebound);
     let implicit = self.implicit_set().clone();
     let mut gaps = self.gaps;
     gaps.sort_by(|a, b| {
@@ -1987,6 +2029,7 @@ impl<'a> Compiler<'a> {
           map_exec,
         },
         net,
+        prebound,
         unix,
         sys,
         env_scrub,
@@ -2429,9 +2472,39 @@ impl<'a> Compiler<'a> {
     }
     let connect_none =
       connect.list.is_none() || (!connect.is_any() && connect_ip.is_empty());
-    let bind_none = (bind.list.is_none()
+    let mut bind_none = (bind.list.is_none()
       || (!bind.is_any() && bind_ip.is_empty()))
       && inspector.is_none();
+    // Linux, Mode A: listeners `--allow-net-listen` names by address are
+    // bound before the process confines itself and handed to the operation
+    // that listens there, so the kernel policy has no bind side at all
+    // (review F2): a listen-only server runs with no IP socket of its own
+    // on every kernel, and the address is held, not only its port. Only
+    // the listen-direction flag: an `--allow-net` entry is most often a
+    // server to connect to, whose port this process must not take.
+    let hosted_connect = connect_ip.iter().any(|e| *e == NetEntry::Hosted);
+    let listen_only = NetSide::merged(&None, &o.allow_net_listen);
+    let allow_net_binds = !ip_entries(&NetSide::merged(&o.allow_net, &None))
+      .is_empty()
+      || o.allow_net.as_ref().is_some_and(|list| list.is_empty());
+    if self.os() == TargetOs::Linux
+      && self.shape == Shape::ModeA
+      && !hosted_connect
+      && !allow_net_binds
+      && inspector.is_none()
+      && let Some(prebound) = prebound_listeners(&listen_only)
+    {
+      self.gap(
+        GapClass::Net,
+        format!("--allow-net-listen={}", listen_only.entries().join(",")),
+        "bound before the sandbox applies: each address is bound (and listening) from startup for the life of the process, whether or not the program listens there; UDP on these addresses is refused",
+        GapResolution::Documented,
+        Some(ExactWith::Broker),
+      );
+      self.prebound = prebound;
+      bind_ip.clear();
+      bind_none = true;
+    }
 
     if connect_none && bind_none {
       return (NetPolicy::Denied, true, vsock);

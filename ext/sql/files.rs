@@ -33,7 +33,19 @@ pub async fn op_sql_read_text_file(
       Some(API_NAME),
     )?
     .into_owned_path();
-  tokio::fs::read_to_string(&checked).await.map_err(|e| {
+  let read_err = |e: std::io::Error| {
     SqlError::Io(std::io::Error::new(e.kind(), format!("{e}: read '{path}'")))
-  })
+  };
+  // denext: the file that opened is checked again as the object it is (a
+  // link swapped in after the path check is refused, not read)
+  let mut file = tokio::fs::File::open(&checked).await.map_err(read_err)?;
+  state
+    .borrow_mut()
+    .borrow_mut::<PermissionsContainer>()
+    .check_opened(&file, OpenAccessKind::Read, Some(API_NAME))?;
+  let mut text = String::new();
+  tokio::io::AsyncReadExt::read_to_string(&mut file, &mut text)
+    .await
+    .map_err(read_err)?;
+  Ok(text)
 }

@@ -147,6 +147,11 @@ pub fn refused(why: impl std::fmt::Display) -> io::Error {
 
 static PREBOUND: Mutex<Vec<(SocketAddr, OwnedSock)>> = Mutex::new(Vec::new());
 
+/// The addresses that could not be bound before confinement, with the
+/// error (its OS code): an operation that listens there gets that error,
+/// not the kernel's refusal of a socket it can no longer make.
+static PREBOUND_FAILED: Mutex<Vec<(SocketAddr, i32)>> = Mutex::new(Vec::new());
+
 /// Records a TCP listener bound (and listening) on `addr` before the
 /// process confined itself. It stays bound for the life of the process:
 /// every operation that listens on `addr` gets a duplicate, so listening
@@ -159,13 +164,26 @@ pub fn add_prebound_tcp(addr: SocketAddr, listener: OwnedSock) {
   }
 }
 
-/// The addresses bound before confinement.
+/// Records that `addr` could not be bound before confinement (`error`'s OS
+/// code is what listening there reports).
+pub fn add_prebound_failure(addr: SocketAddr, error: &io::Error) {
+  let code = error.raw_os_error().unwrap_or(0);
+  let mut failed = PREBOUND_FAILED.lock().unwrap_or_else(|e| e.into_inner());
+  if !failed.iter().any(|(a, _)| *a == addr) {
+    failed.push((addr, code));
+  }
+}
+
+/// The addresses a bind before confinement was tried for: the bound ones
+/// and the failed ones. An operation that binds one of them makes no
+/// socket of its own.
 pub fn prebound_addrs() -> Vec<SocketAddr> {
-  PREBOUND
-    .lock()
-    .unwrap_or_else(|e| e.into_inner())
+  let bound = PREBOUND.lock().unwrap_or_else(|e| e.into_inner());
+  let failed = PREBOUND_FAILED.lock().unwrap_or_else(|e| e.into_inner());
+  bound
     .iter()
     .map(|(addr, _)| *addr)
+    .chain(failed.iter().map(|(addr, _)| *addr))
     .collect()
 }
 
@@ -173,8 +191,15 @@ pub fn prebound_addrs() -> Vec<SocketAddr> {
 /// if there is one.
 pub fn prebound_tcp(addr: &SocketAddr) -> io::Result<Option<OwnedSock>> {
   let prebound = PREBOUND.lock().unwrap_or_else(|e| e.into_inner());
-  match prebound.iter().find(|(a, _)| a == addr) {
-    Some((_, sock)) => Ok(Some(sock.try_clone()?)),
+  if let Some((_, sock)) = prebound.iter().find(|(a, _)| a == addr) {
+    return Ok(Some(sock.try_clone()?));
+  }
+  let failed = PREBOUND_FAILED.lock().unwrap_or_else(|e| e.into_inner());
+  match failed.iter().find(|(a, _)| a == addr) {
+    Some((_, 0)) => Err(io::Error::other(format!(
+      "{addr} could not be bound before the kernel sandbox applied"
+    ))),
+    Some((_, code)) => Err(io::Error::from_raw_os_error(*code)),
     None => Ok(None),
   }
 }
@@ -351,6 +376,27 @@ mod tests {
       accepted.read_exact(&mut byte).unwrap();
       assert_eq!(&byte, b"x");
     }
+    // an address that could not be bound reports why
+    let taken = SocketAddr::from((Ipv4Addr::LOCALHOST, 2));
+    add_prebound_failure(taken, &io::Error::other("no code"));
+    assert!(prebound_addrs().contains(&taken));
+    let err = tcp_listener(&TcpBind {
+      addr: taken,
+      ..bind.clone()
+    })
+    .unwrap()
+    .unwrap_err();
+    assert!(err.to_string().contains("could not be bound"), "{err}");
+    let in_use = SocketAddr::from((Ipv4Addr::LOCALHOST, 3));
+    let os_err = TcpListener::bind(addr).unwrap_err();
+    add_prebound_failure(in_use, &os_err);
+    let err = tcp_listener(&TcpBind {
+      addr: in_use,
+      ..bind.clone()
+    })
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
     // another address has no listener, and no route binds one
     let other = SocketAddr::from((Ipv4Addr::LOCALHOST, 1));
     assert!(prebound_tcp(&other).unwrap().is_none());

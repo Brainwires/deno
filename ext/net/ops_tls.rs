@@ -490,7 +490,15 @@ pub async fn op_net_connect_tls(
 
   if let Some(path) = cert_file {
     let mut buf = Vec::new();
-    File::open(path)?.read_to_end(&mut buf)?;
+    // denext: the file that opened is checked again as the object it is (a
+    // link swapped in after the path check is refused, not read)
+    let mut file = File::open(path)?;
+    state
+      .borrow_mut()
+      .borrow_mut::<PermissionsContainer>()
+      .check_opened(&file, OpenAccessKind::Read, Some("Deno.connectTls()"))
+      .map_err(NetError::Permission)?;
+    file.read_to_end(&mut buf)?;
     ca_certs.push(buf);
   };
 

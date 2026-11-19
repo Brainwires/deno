@@ -1278,6 +1278,12 @@ impl CliFactory {
             node_modules,
           )?;
         }
+        // denext: the test suites' in-process network route
+        #[cfg(unix)]
+        crate::sandbox::net_broker::install_test_route(
+          desc_parser.clone(),
+          &options,
+        )?;
         let permissions =
           Permissions::from_options(desc_parser.as_ref(), &options)?;
 

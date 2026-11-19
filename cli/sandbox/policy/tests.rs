@@ -693,7 +693,7 @@ fn net_rows() {
       },
     },
     Row {
-      name: "--allow-net-listen=:8000 binds 8000 only",
+      name: "macOS: --allow-net-listen=:8000 binds 8000 only",
       options: PermissionsOptions {
         allow_net_listen: s(&[
           "0.0.0.0:8000",
@@ -702,7 +702,7 @@ fn net_rows() {
         ]),
         ..Default::default()
       },
-      caps: linux(Some(6)),
+      caps: macos(),
       mode: Auto,
       check: |c| {
         assert_eq!(
@@ -713,6 +713,29 @@ fn net_rows() {
           }
         );
         assert!(!c.policy.syscalls.refuse_listen);
+        assert!(c.policy.prebound.is_empty());
+      },
+    },
+    Row {
+      name: "Linux: a listen port that can't be bound ahead keeps its port rule",
+      options: PermissionsOptions {
+        // port 0 is a new port for every listener
+        allow_net_listen: s(&["127.0.0.1:8000", "127.0.0.1:0"]),
+        ..Default::default()
+      },
+      caps: linux(Some(6)),
+      mode: Auto,
+      check: |c| {
+        assert_eq!(
+          c.policy.net,
+          NetPolicy::Ports {
+            connect: PortScope::None,
+            bind: PortScope::Ports {
+              ports: vec![0, 8000]
+            },
+          }
+        );
+        assert!(c.policy.prebound.is_empty());
       },
     },
     Row {
@@ -1362,6 +1385,114 @@ fn implicit_set_follows_the_grant() {
   }
 }
 
+// Linux, Mode A: the addresses `--allow-net-listen` names are bound before
+// the process confines itself, so the kernel policy has no bind side: on
+// every Landlock ABI, a listen-only server has no IP socket of its own.
+#[test]
+fn listeners_are_bound_before_confinement() {
+  use std::net::SocketAddr;
+  let addrs = |list: &[&str]| -> Vec<SocketAddr> {
+    list.iter().map(|a| a.parse().unwrap()).collect()
+  };
+  let listen = PermissionsOptions {
+    allow_net_listen: s(&["0.0.0.0:8000", "127.0.0.1:8000", "localhost:9000"]),
+    ..Default::default()
+  };
+  // ABI 1 and 2 have no TCP rules at all; it holds there too
+  for abi in [1, 2, 4, 6] {
+    let c = compile(&listen, linux(Some(abi)), Enforce);
+    assert_eq!(c.policy.shape, Shape::ModeA, "abi {abi}");
+    assert_eq!(c.policy.net, NetPolicy::Denied, "abi {abi}");
+    assert_eq!(
+      c.policy.prebound,
+      addrs(&[
+        "0.0.0.0:8000",
+        "127.0.0.1:8000",
+        "127.0.0.1:9000",
+        "[::1]:9000"
+      ]),
+      "abi {abi}"
+    );
+    // the confined process never listens itself
+    assert!(c.policy.syscalls.refuse_listen, "abi {abi}");
+    assert_eq!(c.fatal_gaps().count(), 0, "abi {abi}: {:#?}", c.gaps);
+    let note = gap(&c, GapClass::Net);
+    assert_eq!(note.resolution, GapResolution::Documented);
+    assert!(note.detail.contains("bound before the sandbox applies"));
+  }
+
+  // with a connect grant beside it: the connect ports, no bind side
+  let both = PermissionsOptions {
+    allow_net_connect: s(&["127.0.0.1:5432"]),
+    ..listen.clone()
+  };
+  let c = compile(&both, linux(Some(6)), Enforce);
+  assert_eq!(
+    c.policy.net,
+    NetPolicy::Ports {
+      connect: PortScope::Ports { ports: vec![5432] },
+      bind: PortScope::None,
+    }
+  );
+  assert_eq!(c.policy.prebound.len(), 4);
+
+  // --allow-net names servers to connect to as often as addresses to
+  // listen on: its ports are never taken at startup
+  let allow_net = PermissionsOptions {
+    allow_net: s(&["127.0.0.1:5432"]),
+    ..Default::default()
+  };
+  let c = compile(&allow_net, linux(Some(6)), Enforce);
+  assert!(c.policy.prebound.is_empty());
+  let mixed = PermissionsOptions {
+    allow_net: s(&["127.0.0.1:5432"]),
+    ..listen.clone()
+  };
+  assert!(
+    compile(&mixed, linux(Some(6)), Enforce)
+      .policy
+      .prebound
+      .is_empty()
+  );
+
+  // not what can't be bound ahead: a subnet, a bare host, an unscoped
+  // listen grant; not with the inspector; not on macOS (bind ports hold)
+  for entries in [&["10.0.0.0/8:8000"][..], &["127.0.0.1"][..], &[][..]] {
+    let options = PermissionsOptions {
+      allow_net_listen: s(entries),
+      ..Default::default()
+    };
+    assert!(
+      compile(&options, linux(Some(6)), Auto)
+        .policy
+        .prebound
+        .is_empty(),
+      "{entries:?}"
+    );
+  }
+  let inspected = Context {
+    inspector_port: Some(9229),
+    ..ctx(linux(Some(6)), Enforce)
+  };
+  assert!(compile_in(&listen, &inspected).policy.prebound.is_empty());
+  assert!(
+    compile(&listen, macos(), Enforce)
+      .policy
+      .prebound
+      .is_empty()
+  );
+
+  // a policy without listeners serializes as before (its hash is unchanged)
+  let plain = compile(&allow_net, linux(Some(6)), Enforce);
+  assert!(
+    !serde_json::to_string(&plain.policy)
+      .unwrap()
+      .contains("prebound")
+  );
+  let json = serde_json::to_string(&c.policy).unwrap();
+  let _: KernelPolicy = serde_json::from_str(&json).unwrap();
+}
+
 #[test]
 fn inspector_port_is_bindable() {
   let c = Context {
@@ -1519,6 +1650,7 @@ fn policy_hash_is_stable() {
       map_exec: PathScope::Paths { paths: vec![] },
     },
     net: NetPolicy::Denied,
+    prebound: Vec::new(),
     unix: UnixPolicy::Denied,
     sys: SysNarrowing::default(),
     env_scrub: None,

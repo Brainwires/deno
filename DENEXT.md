@@ -17954,6 +17954,203 @@ where the changes are discussed.
      - Node tests enabled: none (behaviour is unchanged for paths inside the
        grant).
 
+911. **`feat(permissions)`: the kernel sandbox's network route: one seam for
+     every socket, the broker's network authority, and `connect` answered by
+     the supervisor** (CLI and runtime; denext-only; inert until the
+     supervising broker installs a route; `libs/net_route` (new crate
+     `deno_net_route`), `libs/sandbox/{net_authority,net_gate,notify,lib}.rs`,
+     `cli/sandbox/{net_broker,mod}.rs`, `cli/factory.rs`,
+     `libs/core/uv_compat/tcp.rs`,
+     `ext/net/{routed,ops,ops_tls,ops_unix,tcp,resolve_addr,
+     happy_eyeballs,quic}.rs`,
+     `ext/fetch/{dns,proxy}.rs`, `ext/node/ops/{dns,udp}.rs`, `ext/sql/pg.rs`,
+     `ext/webrtc/{peer,net}.rs`, `libs/inspector_server/lib.rs`). The network
+     half of Mode B (`--kernel-sandbox=broker`, and `enforce` with a host-scoped
+     `--allow-net`): no kernel can scope a socket by host, so a process held to
+     such a grant makes no IP socket of its own and asks the broker outside the
+     sandbox for every one.
+     - The seam. `deno_net_route` (no dependencies, so `deno_core` and every
+       extension take it) holds the broker's operations as one trait,
+       `NetRoute`: `resolve`, `connect_tcp`, `bind_tcp`, `open_udp`,
+       `udp_exchange`, `connect_unix`, `bind_unix`, each a blocking call that
+       returns a socket. A route is installed once, before user code, by the
+       process that applied a broker policy, and can't be replaced; with none
+       installed (every run today) each caller opens its sockets as before.
+       Routed: `Deno.connect` / `connectTls` / `startTls` with Happy Eyeballs,
+       `Deno.listen` / `listenTls` / `Deno.serve`, `Deno.resolveDns`, Unix
+       sockets, the `fetch` connector (so `WebSocket`, `EventSource`,
+       `Deno.createHttpClient`, Deno KV remote and the CLI's downloads) with its
+       HTTP, SOCKS and Unix-socket proxies, `node:net` and what is built on it
+       through the libuv TCP surface (`uv_tcp_bind` makes no socket under a
+       route: `uv_listen` / `uv_tcp_connect` carry the bind out), `node:dns`
+       lookups, `node:dgram`, the Postgres client, WebRTC's TCP paths and host
+       lookups, and the inspector server. A path that isn't routed fails under a
+       broker policy (the kernel refuses its socket); it is never an escape. The
+       table of every path, with its state and reason, is
+       `tests/specs/kernel_sandbox/escape_corpus/COVERAGE.md`.
+     - The authority (`deno_sandbox::net_authority`, with the proxy feature).
+       What the confined side sends is never believed: native code can write to
+       the broker's socket directly. Every operation is decided by a
+       `NetDecider`, which the CLI implements over Deno's own permission checks
+       built from the run's permission options with prompting off
+       (`cli/sandbox/net_broker.rs`), so the broker and the checks inside the
+       sandbox read the grant with the same code. A granted name is resolved by
+       the broker, and an answer on this machine or its networks (loopback,
+       private, link-local with `169.254.169.254`, the other ranges the
+       lifecycle jail's proxy refuses) is refused unless the grant also names
+       that address (an IP entry or a subnet): a granted public name can't be
+       rebound to `127.0.0.1` or a metadata endpoint, and one internal answer
+       refuses the whole name. `localhost` and `*.localhost` may lead to
+       loopback only. A connect request carries an address (most callers resolve
+       and connect in two steps); it must be one the grant names itself, or one
+       a granted name resolved to in the broker's own resolution: its answers
+       are remembered for five minutes, and a request that says which name it
+       resolved is resolved again on a miss. Deny rules hold for the name and
+       for the address. The socket is connected to exactly the checked address.
+       Listening sockets are bound and put to listen by the broker.
+     - UDP. A UDP socket handed over can't be held to a peer: on Linux `sendto`
+       with a destination works on a connected UDP socket, and `connect` can be
+       called again. So the broker hands one out only when a socket that can
+       send anywhere holds the grant (connecting is unscoped and nothing is
+       denied); under a host-scoped grant `Deno.listenDatagram`, `node:dgram`,
+       QUIC and WebRTC's UDP candidates are refused, saying why. A DNS query to
+       a name server the grant names (what `Deno.resolveDns` already requires)
+       is an operation instead: one datagram out, the first one back, on a
+       socket that never leaves the broker.
+     - `connect` answered by the supervisor (Linux,
+       `deno_sandbox::net_gate`). Two things undo a broker policy if `connect`
+       is left to the kernel: a TCP socket the broker connected can be pointed
+       at another address (`connect` to `AF_UNSPEC` dissolves the association;
+       Landlock refuses the next connect only from ABI 4, by port), and "only
+       the children's proxy" can't be said to the kernel (Landlock names a port,
+       not an address, and has no TCP rules before Linux 6.7; a network
+       namespace needs unprivileged user namespaces). A `ConnectGate` answers
+       the `connect` notifications of the confined tree's seccomp filter: it
+       copies the caller's address once, refuses everything but the addresses
+       it lists (`EACCES`: every other address, `AF_UNSPEC`, Unix sockets,
+       unknown families) and makes a listed connection itself on its own
+       duplicate of the caller's socket, so the address checked is the address
+       connected and the kernel never reads the caller's memory again. With it
+       a host-scoped grant is exact on every kernel that has seccomp user
+       notification and `pidfd_getfd` (Linux 5.9), with or without Landlock's
+       network rules. On macOS the same is the profile's
+       `localhost:<proxy port>` rule.
+     - The broker's supervisor and wire protocol are another item; until it
+       installs a route and the gate, `--kernel-sandbox=broker` still refuses
+       to start. `deno info --json` → `kernelSandbox.brokerBuilt` says whether
+       this runtime has it.
+     - `DENO_INTERNAL_KERNEL_NET_ROUTE=in-process` (internal; any other value
+       is ignored with a warning) installs the authority as a route inside the
+       process itself: no boundary, so it confines nothing and can only narrow
+       (the authority holds the run's own grant). It is how the suites drive
+       every routed path and the authority's decisions without a supervisor.
+     - User-facing note: none yet (inert until the broker is built in).
+     - Tests: `deno_net_route`'s `unrouted_callers_get_nothing`,
+       `a_prebound_listener_is_handed_out_again_and_again`,
+       `a_refusal_is_permission_denied`; `deno_sandbox`'s
+       `net_authority::tests::{only_granted_names_resolve,
+       a_granted_name_cannot_be_rebound_inside,
+       an_internal_answer_needs_the_address_in_the_grant,
+       localhost_leads_to_loopback_only, connects_to_exactly_what_was_checked,
+       an_answer_is_forgotten, a_literal_in_the_grant_is_reached_as_written,
+       deny_rules_hold_for_the_address, listeners_are_bound_here,
+       no_udp_socket_under_a_scoped_grant, a_datagram_exchange_stays_here,
+       the_answer_table_is_bounded, the_in_process_route_is_the_authority}`
+       and (Linux)
+       `net_gate::tests::{sockaddrs_parse_as_the_kernel_reads_them,
+       only_listed_addresses_pass,
+       a_gated_tree_reaches_only_the_listed_address,
+       a_non_blocking_connect_reports_in_progress_or_done,
+       nothing_listed_nothing_reached}`
+       (a forked child under the notifying filter: the listed address connects,
+       another port, another host on the listed port, the metadata address,
+       `AF_UNSPEC` and re-pointing a connected socket are refused; skipped,
+       saying so, where a container's seccomp profile keeps `pidfd_getfd`); the
+       CLI's
+       `sandbox::net_broker::tests::{the_grant_is_read_as_denos_checks_read_it,
+       directions_and_unscoped_grants,
+       prompting_is_off_whatever_the_run_says}`;
+       spec `kernel_sandbox::net_route` (under the in-process route:
+       `Deno.connect`, `fetch`, `node:dns`, `node:net`, `node:http`,
+       `Deno.listen` and a `node:net` server work for what the grant names; the
+       authority refuses another spelling of an address and a UDP socket under
+       a host-scoped grant; an unscoped grant gets its UDP socket; an invalid
+       value of the variable is ignored).
+     - Node tests enabled: none; no Node API changes.
+
+912. **`feat(permissions)`: listeners bound before the kernel sandbox applies
+     (Linux)** (CLI; denext-only; opt-in, as item 425;
+     `cli/sandbox/{policy,enforce,mod}.rs`,
+     `libs/sandbox/{plan,enforce_linux}.rs`, `libs/net_route`). Under
+     `--kernel-sandbox=enforce` on Linux, an `--allow-net-listen` list whose
+     every entry is an address with a port
+     (`--allow-net-listen=127.0.0.1:8000,localhost:9000`, `0.0.0.0:8080`; not a
+     name, a subnet, a bare host or port 0) is bound, listening, by the
+     re-executed image before it applies its plan, and each listener is handed
+     to the operation that listens on that address (`Deno.listen`,
+     `Deno.serve`, `node:net`, the libuv surface). `localhost` binds both
+     loopback addresses. Only the listen-direction flag: an `--allow-net` entry
+     is as often a server to connect to (`--allow-net=localhost:5432`), whose
+     port the process must not take at startup, so a grant with `--allow-net`
+     addresses keeps its port rules.
+     - The kernel policy then has no bind side: with no connect grant the
+       confined process has no IP socket at all (`net: denied`), on every
+       kernel. Before, a listen port needed Landlock's TCP rules (ABI 4, Linux
+       6.7): on an older kernel it was a fail-open gap and `enforce` refused to
+       start, and on a newer one any address on the port could be bound.
+     - The address stays bound for the life of the process: every listener on
+       it gets a duplicate of the one socket, so listening again after a close
+       works, as do several listeners (`reusePort`, `deno serve --parallel`); a
+       client that connects while nothing accepts waits instead of being
+       refused. An address that can't be bound at startup (in use, no IPv6)
+       doesn't stop the run: listening there reports that error. UDP on those
+       addresses is refused. The report lists them
+       (`listeners: bound before the sandbox applies: ...`) and the policy has
+       a `documented` note saying so.
+     - Not with `--inspect` (the inspector's port keeps its port rule), not
+       under a broker policy (the broker binds), not on macOS (Seatbelt holds
+       bind ports).
+     - User-facing note: under `--kernel-sandbox=enforce` on Linux, a server
+       that only listens on addresses the grant names runs on every kernel
+       with no network access of its own; those addresses are bound from
+       startup.
+     - Tests: the CLI's
+       `sandbox::policy::tests::listeners_are_bound_before_confinement`;
+       `deno_net_route`'s `a_prebound_listener_is_handed_out_again_and_again`;
+       spec `kernel_sandbox::enforce::prebound_listen` (Linux).
+     - Node tests enabled: none; no Node API changes.
+
+913. **`fix(permissions)`: a file checked again after it is opened** (runtime;
+     denext-only; `runtime/permissions/{lib,checked_open}.rs`,
+     `ext/net/ops_tls.rs`, `ext/sql/files.rs`).
+     `PermissionsContainer::check_opened(file, access, api)` makes the check
+     `check_open` makes of a path, of the object an open descriptor holds (its
+     path as the kernel reports it: `F_GETPATH`, `/proc/self/fd`). An operation
+     that can't open through the race-safe opens checks its path, opens it,
+     then calls this before it reads anything: a symlink swapped in between
+     the check and the open leads to a file that is refused. For reads only (an
+     open that creates or truncates has changed the file already). A file
+     unlinked since it was opened is refused; where the system can't report a
+     descriptor's path (Linux without `/proc`, Windows) nothing more is
+     checked. Used by `Deno.connectTls({ certFile })` and `Deno.SQL`'s file
+     reads; the list of path operations that stay checked by name, each with
+     its reason, is the second table of
+     `tests/specs/kernel_sandbox/escape_corpus/COVERAGE.md`.
+     - User-facing note: none (a race closed).
+     - Tests: `deno_permissions`'s `check_opened_checks_where_the_file_is`.
+     - Node tests enabled: none; no Node API changes.
+
+914. **`test(kernel-sandbox)`: the escape corpus's host-scoped network** (tests;
+     `tests/specs/kernel_sandbox/escape_corpus/`). A probe, `net.retarget`
+     (dissolve a connected TCP socket's association and connect it to a port no
+     grant names; it uses a socket it can make, else one it was handed), and,
+     where the runtime has the broker, two configurations under
+     `--expect=enforce`: `net-host` (`--allow-net=example.com:<port>,
+     localhost:<port>`) and `net-host-run` (the same with a run list, the child
+     vector). Every IP cell must be held in both on every column. Without the
+     broker the run says they were skipped.
+     - Node tests enabled: none; tests only.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

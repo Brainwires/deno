@@ -923,6 +923,21 @@ pub fn applied_plan() -> Option<&'static EnforcePlan> {
   APPLIED.get()
 }
 
+/// Binds the plan's listeners while this process can still make sockets,
+/// and records each for the operation that will listen there
+/// (`deno_net_route`). One that can't be bound (the address is in use, the
+/// family is missing) is recorded with its error, which that operation
+/// then reports; the sandbox applies either way.
+pub fn bind_prebound(addrs: &[std::net::SocketAddr]) {
+  for addr in addrs {
+    // close-on-exec, SO_REUSEADDR and listening, as std binds a listener
+    match std::net::TcpListener::bind(addr) {
+      Ok(listener) => deno_net_route::add_prebound_tcp(*addr, listener.into()),
+      Err(err) => deno_net_route::add_prebound_failure(*addr, &err),
+    }
+  }
+}
+
 /// Applies `plan` to this process: `no_new_privs`, the Landlock ruleset,
 /// then the seccomp program, and checks the probe. Must run while the
 /// process has one thread (the top of `main` in the re-executed image):
@@ -970,6 +985,7 @@ pub fn apply_self(plan: &EnforcePlan) -> Result<(), String> {
     Err(_) => None,
   };
   let program = seccomp_spec(&linux.seccomp, &linux.net).program();
+  bind_prebound(&linux.prebound);
   // SAFETY: plain prctl/syscalls on this (only) thread
   unsafe {
     if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
@@ -1277,6 +1293,7 @@ mod tests {
       expand: Vec::new(),
       expand_write: Vec::new(),
       net,
+      prebound: Vec::new(),
       scope_signal: false,
       scope_abstract_unix: false,
       seccomp,
@@ -1593,6 +1610,78 @@ mod tests {
     }
     // unfiltered, it works (kernels from 5.6)
     assert_eq!(openat2_available(), Ok(()));
+  }
+
+  // A listener bound before the plan applies is handed out afterwards, and
+  // accepts under a filter that lets the process make no IP socket.
+  #[test]
+  fn listeners_bound_before_the_filter_still_accept() {
+    use std::os::fd::IntoRawFd;
+    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = free.local_addr().unwrap();
+    drop(free);
+    // an address in use is recorded with its error, not fatal
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let taken_addr = taken.local_addr().unwrap();
+    bind_prebound(&[addr, taken_addr]);
+    let err = deno_net_route::prebound_tcp(&taken_addr).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+    let listener = deno_net_route::prebound_tcp(&addr)
+      .unwrap()
+      .expect("bound before")
+      .into_raw_fd();
+    // a client waits in the backlog: the address listens from the start
+    let _client = std::net::TcpStream::connect(addr).unwrap();
+
+    let program = seccomp_spec(&full(), &NetPlan::Denied).program();
+    let prog = SockFprog {
+      len: (program.len() / 8) as u16,
+      filter: program.as_ptr() as *const SockFilter,
+    };
+    // SAFETY: fork; the child runs only raw syscalls and _exit
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0);
+    if pid == 0 {
+      // SAFETY: the child's only thread, then _exit
+      unsafe {
+        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+          || libc::prctl(
+            libc::PR_SET_SECCOMP,
+            libc::SECCOMP_MODE_FILTER,
+            &prog as *const SockFprog,
+            0,
+            0,
+          ) != 0
+        {
+          libc::_exit(2);
+        }
+        // no IP socket of its own ...
+        if libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) >= 0
+          || *libc::__errno_location() != libc::EPERM
+        {
+          libc::_exit(3);
+        }
+        // ... and the listener bound before still accepts
+        let accepted = libc::accept4(
+          listener,
+          std::ptr::null_mut(),
+          std::ptr::null_mut(),
+          libc::SOCK_CLOEXEC,
+        );
+        libc::_exit(if accepted >= 0 { 0 } else { 4 });
+      }
+    }
+    let mut status = 0;
+    // SAFETY: waiting for the child just forked
+    unsafe { libc::waitpid(pid, &mut status, 0) };
+    assert!(libc::WIFEXITED(status));
+    match libc::WEXITSTATUS(status) {
+      // a host that can't install a filter can't measure this
+      2 => {}
+      code => assert_eq!(code, 0, "3: a socket was made; 4: no accept"),
+    }
+    // SAFETY: the duplicate taken above
+    unsafe { libc::close(listener) };
   }
 
   #[test]

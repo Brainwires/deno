@@ -662,6 +662,7 @@ mod linux {
       expand: roots,
       expand_write: write_roots,
       net,
+      prebound: p.prebound.clone(),
       scope_signal: p.scopes.signal,
       scope_abstract_unix: p.scopes.abstract_unix,
       seccomp: SeccompPlan {

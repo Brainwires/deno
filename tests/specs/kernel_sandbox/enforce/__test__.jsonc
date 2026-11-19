@@ -109,6 +109,14 @@
       "args": "run --quiet --kernel-sandbox=enforce --allow-ffi --allow-net=127.0.0.1:4545 net.ts",
       "output": "net.out"
     },
+    // item 9xx: an --allow-net-listen address is bound before the sandbox
+    // applies (Linux): the confined server has no IP socket of its own, and
+    // every listener on the address gets the one bound socket
+    "prebound_listen": {
+      "if": "kernelSandboxEnforceLinux",
+      "args": "run --quiet -A prebound_outer.ts",
+      "output": "prebound.out"
+    },
     // P3 (g) as the model holds it: native code loads libraries only from
     // the read scope (macOS doesn't hold loading to the --allow-ffi paths
     // alone: a documented gap)

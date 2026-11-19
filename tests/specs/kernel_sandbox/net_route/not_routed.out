@@ -1,0 +1,11 @@
+outer: a UDP socket with an unscoped grant
+Deno.connect, a granted name: ping
+fetch, a granted name: hello from the granted server
+node:net, a granted name: pong
+node:http, a granted name: hello from the granted server
+Deno.listen, a granted address: ping
+node:net server, a granted address: node
+Deno.connect, a port the grant doesn't name: NotCapable: Requires net access to "localhost:PORT", run again with the --allow-net flag
+Deno.connect, another spelling of an address: ping
+Deno.listenDatagram, a granted address: left to the OS
+inner exited with 0
