@@ -1926,6 +1926,17 @@ function refineStats(pc, engineEntries, now, whole) {
         }
         break;
       }
+      case "inbound-rtp": {
+        // `trackIdentifier` is the receiver's track's id (webrtc-stats
+        // `RTCInboundRtpStreamStats.trackIdentifier`), which the msid gave
+        // it, not the engine's own name for the track.
+        const t = transceiverOfStream(state, stats);
+        const track = t?.[_state].receiver[_state].track;
+        if (track !== undefined && track !== null) {
+          stats.trackIdentifier = track.id;
+        }
+        break;
+      }
     }
   }
   // A remote-inbound stream is coded as the outbound stream it reports on.
