@@ -1,0 +1,12 @@
+{
+  "check_subdomains": false,
+  "server_host": "127.0.0.1",
+  "ssl": {
+    "type": "pregenerated",
+    "pregenerated": {
+      "ca_cert_path": "../../../tests/wpt/runner/certs/cacert.pem",
+      "host_cert_path": "../../../tests/wpt/runner/certs/web-platform.test.pem",
+      "host_key_path": "../../../tests/wpt/runner/certs/web-platform.test.key"
+    }
+  }
+}

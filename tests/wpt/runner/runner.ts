@@ -10,20 +10,34 @@ import {
   assert,
   denoBinary,
   ManifestTestOptions,
+  noHosts,
   runPy,
   wantsDocument,
 } from "./utils.ts";
+import { startWptProxy, WptProxy } from "./proxy.ts";
 import { DOMParser } from "jsr:@b-fuze/deno-dom@0.1.56/wasm";
+
+/** The `--no-hosts` proxy while the WPT server runs (see proxy.ts). */
+let wptProxy: WptProxy | null = null;
+
+/** A request to the WPT server from the runner itself. */
+function wptFetch(url: URL | string): Promise<Response> {
+  return wptProxy ? fetch(url, { client: wptProxy.client }) : fetch(url);
+}
 
 export async function runWithTestUtil<T>(
   verbose: boolean,
   f: () => Promise<T>,
 ): Promise<T> {
+  // Without `/etc/hosts` entries the server can't bind to
+  // `web-platform.test`; `config.no-hosts.json` binds it to 127.0.0.1.
   const proc = runPy([
     "wpt",
     "serve",
     "--config",
-    "../../../tests/wpt/runner/config.json",
+    noHosts
+      ? "../../../tests/wpt/runner/config.no-hosts.json"
+      : "../../../tests/wpt/runner/config.json",
   ], {
     stdout: verbose ? "inherit" : "piped",
     stderr: verbose ? "inherit" : "piped",
@@ -33,7 +47,9 @@ export async function runWithTestUtil<T>(
   while (true) {
     await delay(1000);
     try {
-      const req = await fetch("http://localhost:8000/");
+      const req = await fetch(
+        noHosts ? "http://127.0.0.1:8000/" : "http://localhost:8000/",
+      );
       await req.body?.cancel();
       if (req.status == 200) {
         break;
@@ -55,9 +71,12 @@ export async function runWithTestUtil<T>(
 
   if (verbose) console.log(`Started wpt test util.`);
 
+  if (noHosts) wptProxy = startWptProxy();
   try {
     return await f();
   } finally {
+    wptProxy?.close();
+    wptProxy = null;
     if (verbose) console.log("Killing wpt test util.");
     try {
       proc.kill("SIGINT");
@@ -182,15 +201,26 @@ async function runSingleTestInner(
       "[]",
     );
 
+    const env: Record<string, string> = {
+      NO_COLOR: "1",
+      // The fake camera and microphone of `navigator.mediaDevices`, as WPT
+      // runs browsers with `--use-fake-device-for-media-stream`.
+      DENO_FAKE_MEDIA_DEVICES: "1",
+    };
+    if (wptProxy) {
+      // `--no-hosts`: the test reaches the WPT host names through the
+      // runner's proxy (fetch, workers' module loads), not `/etc/hosts`.
+      env.HTTP_PROXY = wptProxy.url;
+      env.HTTPS_PROXY = wptProxy.url;
+      env.http_proxy = wptProxy.url;
+      env.https_proxy = wptProxy.url;
+      env.NO_PROXY = "";
+      env.no_proxy = "";
+    }
     const start = performance.now();
     const proc = new Deno.Command(denoBinary(), {
       args,
-      env: {
-        NO_COLOR: "1",
-        // The fake camera and microphone of `navigator.mediaDevices`, as WPT
-        // runs browsers with `--use-fake-device-for-media-stream`.
-        DENO_FAKE_MEDIA_DEVICES: "1",
-      },
+      env,
       signal,
       stdout: "null",
       stderr: "piped",
@@ -370,7 +400,7 @@ async function generateBundle(
   location: URL,
   useDocument: boolean,
 ): Promise<string> {
-  const res = await fetch(location);
+  const res = await wptFetch(location);
   const body = await res.text();
   const doc = new DOMParser().parseFromString(body, "text/html");
   assert(doc, "document should have been parsed");
@@ -431,7 +461,7 @@ async function generateBundle(
         scriptUrl = runnerFileUrl("testdriver-vendor.js");
         contents = await readRunnerFile("testdriver-vendor.js");
       } else {
-        const res = await fetch(url);
+        const res = await wptFetch(url);
         if (res.ok) {
           contents = await res.text();
         } else {

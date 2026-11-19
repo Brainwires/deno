@@ -30,6 +30,7 @@ import {
   ManifestFolder,
   ManifestTestOptions,
   ManifestTestVariation,
+  noHosts,
   noIgnore,
   quiet,
   rest,
@@ -93,7 +94,14 @@ switch (command) {
   case "setup":
     await checkPy3Available();
     await updateManifest();
-    await setup();
+    if (noHosts) {
+      console.log(
+        "--no-hosts: skipping /etc/hosts (runs reach the WPT host names through the runner's proxy).",
+      );
+      console.log(green("Setup complete!"));
+    } else {
+      await setup();
+    }
     break;
 
   case "run": {
@@ -247,6 +255,8 @@ Options:
                        WebRTC and Media Capture suites)
     --document         Give every window-scoped test the document environment
                        (--dom-shim is the old name)
+    --no-hosts         Reach the WPT host names through a proxy the runner
+                       starts, instead of /etc/hosts entries
     --exit-zero        Exit with code 0 even on failures
 `);
     Deno.exit(1);
@@ -553,6 +563,8 @@ Options:
                        WebRTC and Media Capture suites)
     --document         Give every window-scoped test the document environment
                        (--dom-shim is the old name)
+    --no-hosts         Reach the WPT host names through a proxy the runner
+                       starts, instead of /etc/hosts entries
 `);
     Deno.exit(1);
   }

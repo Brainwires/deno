@@ -16,6 +16,7 @@ const args = parseArgs(Deno.args, {
     "document",
     "no-document",
     "dom-shim",
+    "no-hosts",
   ],
   string: ["json", "wptreport", "binary"],
 });
@@ -31,6 +32,7 @@ export const {
   ["auto-config"]: autoConfig,
   ["inspect-brk"]: inspectBrk,
   ["no-ignore"]: noIgnore,
+  ["no-hosts"]: noHosts,
   binary,
 } = args;
 
