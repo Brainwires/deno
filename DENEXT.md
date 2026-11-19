@@ -17800,28 +17800,118 @@ where the changes are discussed.
      progress"), and the failed run sat four hours before its re-run. The same
      push started a second full `denext runtime` build of the commit (2 h 41
      min, 153 min of the one Intel Mac slot, 740 GitHub minutes), because the
-     train's runtime run that would have vouched for it ended 4 min 30 s
-     later. Two changes:
+     train's runtime run that would have vouched for it ended 4 min 30 s later.
+     Two changes:
      - The tag gate waits for `denext tests` runs of the commit that are still
        going, polling every 30 s for at most `PENDING_WAIT` seconds (1,800 in
        the workflow; unset: refuse at once, as before). The verdict is
        unchanged: the run must end, and end green, or the gate refuses.
-     - The guard treats two runs that are still going. For `denext runtime`,
-       the commit's own `denext-runtime-v*` tag build queued or running stands
-       for the push: every other job is skipped at once (if that tag build
-       fails it is the commit's red run, and the next release is a new
-       commit). For every guarded workflow, a run that would vouch once green
-       (by event and branch, item 354's kinds) is waited for, at most
-       `GUARD_WAIT` seconds (1,200 in the workflows; the guard job's timeout is
-       30 min), and the guard decides again; one still going at the limit
-       vouches for nothing, and a red run of the commit ends the wait with a
-       full run.
+     - The guard treats two runs that are still going. For `denext runtime`, the
+       commit's own `denext-runtime-v*` tag build queued or running stands for
+       the push: every other job is skipped at once (if that tag build fails it
+       is the commit's red run, and the next release is a new commit). For every
+       guarded workflow, a run that would vouch once green (by event and branch,
+       item 354's kinds) is waited for, at most `GUARD_WAIT` seconds (1,200 in
+       the workflows; the guard job's timeout is 30 min), and the guard decides
+       again; one still going at the limit vouches for nothing, and a red run of
+       the commit ends the wait with a full run.
      - User-facing note: none; CI only.
-     - Tests: `tag_gate_test.py` (the wait ends when the run ends, at its
-       limit, and a run that ends red still refuses), `guard_verified_test.py`
-       (the tag build under way, a failed tag build forcing a full run, a train
-       run awaited to green, to its limit and to red), run by the lint job.
+     - Tests: `tag_gate_test.py` (the wait ends when the run ends, at its limit,
+       and a run that ends red still refuses), `guard_verified_test.py` (the tag
+       build under way, a failed tag build forcing a full run, a train run
+       awaited to green, to its limit and to red), run by the lint job.
      - Node tests enabled: none, because this is CI only.
+
+457. **`fix(core)`: an op's id is its own, for the methods of a native class
+     too** (runtime and CLI; `libs/core/extension_set.rs`,
+     `libs/core/runtime/tests/ops.rs`, `libs/core_testing/unit/stats_test.ts`).
+     Inherited from upstream Deno 2.9.8. `create_op_ctxs` gave every method op
+     of a native class (an `#[op2] impl`, registered through `objects = [...]`)
+     the index of its class among the classes as its op id, while regular ops
+     got their index among the op contexts. Everything that reads an id reads it
+     as that index (`op_ctxs[id]`, `JsRuntime::op_names()[id]`), so a method
+     op's id named another, earlier op context:
+     - `deno test`'s op sanitizer reported a pending async method under that
+       other op's name. A `crypto.subtle.sign()` or `decrypt()` left running was
+       "An async call to left" (`DOMRect`'s `left` getter,
+       `ext/web/geometry.rs`).
+     - A completed async method ran the op metrics of that other op (the CLI's
+       op tracing and an embedder's `op_metrics_factory_fn`), and the factory
+       was told a count (regular ops plus classes) smaller than the ids it was
+       handed.
+     - Now the id is the op context's index for every op, and the count is the
+       number of op contexts. The sanitizer's own lookup of the two worker-host
+       receive ops it leaves out (`create_test_sanitizer_helper`, by position in
+       `op_names()`) was right before and after: regular ops always had their
+       index, and no class index reaches that range.
+     - User-facing note: a leak report of `deno test` names the async method
+       that was left pending (its JavaScript name, `sign`); no API change.
+     - Tests: `op_ids_are_op_context_indexes_for_method_ops_too` in deno_core
+       (ids, the count, a pending async method's name beside a regular op's, and
+       the filter leaving one out by id) and `testStatsOpsNameAnAsyncMethod` in
+       the core's JavaScript unit tests.
+     - Node tests enabled: none; no Node API changes.
+
+458. **`test`: four tests hold on a loaded machine** (`tests/unit/pty_test.ts`,
+     `runtime/idle_trim.rs`, `ext/net/happy_eyeballs.rs`). Three failed in the
+     flake hunt (item 459) on the released 3.0.0-denext.27 commit, in a
+     container sharing its CPUs, and the fourth on a loaded Mac while the first
+     was checked; none is a runtime bug.
+     - `ptyKillDefaultsToSighup` trapped HUP in a shell that then ran
+       `exec sleep`, and expected the child to die of the signal. A `kill()`
+       that arrived before the `exec` ran the trap, and the child exited 3. The
+       test now has two children that the signal can't race: one that never
+       traps it (dies of SIGHUP before or after the `exec`) and a shell that
+       traps it and stays the shell (prints `hup`, exits 3).
+     - `ptyKillOnlyReachesTheChild` signalled the shell as soon as it had
+       printed its background job's pid. A shell that ended before the job had
+       run `trap '' HUP` took the job with it (the kernel's SIGHUP to the
+       terminal's foreground group), and the test's own `Deno.kill` of the job
+       then failed with ESRCH. The job now prints `ready` once it ignores the
+       signal, and the test waits for that.
+     - `idle_trim::tests::trims_an_idle_loop_once_and_not_a_busy_one` kept its
+       stand-in event loop busy from a second task. When the thread got no CPU
+       for the 150 ms delay, the trim's timer and that task's timer fired
+       together, the trim ran first, and the test saw a trim "while the loop was
+       busy". The stand-in loop now holds its own 10 ms timer under the waker it
+       is polled with, as the real event loop does, so a timer that fires with
+       the trim's counts as activity first; the idle half waits for the trim
+       instead of a fixed 800 ms.
+     - `happy_eyeballs::tests::test_parallel_second_wins` dialled 10.255.255.1
+       as the address that hangs, then dialled it again afterwards to learn
+       whether it had hung. A CI container's network answers that address either
+       way from one minute to the next (a cached unreachable neighbour, then a
+       SYN that times out), so the second probe said nothing about the first.
+       `connect_happy_eyeballs` is now a thin wrapper over
+       `connect_happy_eyeballs_with`, which takes the function that dials one
+       address; the test passes one whose first address never answers, and
+       asserts the delay as a lower bound. A second test has the first address
+       fail at once and an hour's delay. No behaviour change to `Deno.connect`.
+     - Node tests enabled: none.
+
+459. **`ci(denext)`: the flake hunt, the gate's suites many times over on our
+     own machines before a tag** (tooling; `tools/denext/flake_hunt.ts`,
+     `tools/README.md`). The tag gate (item 456, `tag_gate.py`) publishes a
+     runtime tag only when a full `denext tests` run of the commit passed on its
+     first attempt, so a test that fails one run in ten costs a gate restart of
+     about three hours: four different flakes did on 2026-11-18/19. The hunt
+     finds them first.
+     - It builds the candidate once in the CI runner image, as the gate's jobs
+       build it, then runs the built test binaries with the gate's environment:
+       each lib test binary, each test file of `unit` and `unit_node`, each
+       shard of `specs`, `integration` and `node_compat`, repeated (10 times by
+       default, 30 for the tests that flaked in a gate before), every run in its
+       own container with our pools' job profile.
+     - Each unit also runs in the same container capped at one CPU and at half a
+       CPU, with or without a busy loop beside it, which is where the timing
+       races of item 458 showed.
+     - A clean run that is full, or fast with at least the libs and unit suites,
+       writes a marker for the exact commit
+       (`~/.denext-runners/flake-hunt/<sha>.ok`), and a hook on the machine that
+       dispatches refuses a `denext tests` dispatch without it.
+     - User-facing note: none; tooling only. Usage: `tools/README.md`,
+       "denext/flake_hunt.ts".
+     - Node tests enabled: none.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
@@ -17833,7 +17923,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455) are what the prebuilt `libdenort` carries. The CLI-side
+449, 450, 452, 455, 457) are what the prebuilt `libdenort` carries. The CLI-side
 parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
 packaged app's launchers) are in the branch too, but a stock CLI does not run
 them; denext's own launcher provides that environment.
@@ -18116,9 +18206,9 @@ a full `denext tests` (`denext_tests.yml`) run, every OS leg green (Windows
 arm64 included), passed on exactly the tagged commit, no `denext tests` run of
 that commit failed in any attempt (a green re-run does not clear a red one) or
 is still running (the gate waits up to 30 minutes for one, item 456), and the
-commit is on `development-denext` or `rel/<version>`.
-After the release, `development-denext` is fast-forwarded to the release commit:
-check that the branch's checks on the new head finish green (each workflow's
+commit is on `development-denext` or `rel/<version>`. After the release,
+`development-denext` is fast-forwarded to the release commit: check that the
+branch's checks on the new head finish green (each workflow's
 `verified-SHA guard` skips a run whose commit already passed on its release
 branch or tag, item 354), and never cancel those runs. A pre-release version
 (`3.0.0-rc.N`) is published as a GitHub pre-release, never as the repository's
