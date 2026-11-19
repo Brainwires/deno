@@ -3697,6 +3697,7 @@ dependencies = [
  "chrono",
  "criterion",
  "deno_error",
+ "deno_net_route",
  "deno_path_util",
  "deno_terminal",
  "deno_unsync",
