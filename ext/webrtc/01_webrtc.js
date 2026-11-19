@@ -59,6 +59,9 @@ const {
   op_webrtc_transceiver_set_codec_preferences,
   op_webrtc_transceiver_set_direction,
   op_webrtc_transceiver_stop,
+  // wpt100:hdrext
+  op_webrtc_pc_set_negotiation_options,
+  op_webrtc_transceiver_set_header_extensions,
   op_void_async_deferred,
 } = core.ops;
 const {
@@ -2988,14 +2991,68 @@ function convertIceServers(servers) {
         );
       }
     }
+    // wpt100:hdrext — webrtc-extensions RTCIceServer.credentialType and
+    // RTCOAuthCredential (set the configuration, step 11.6).
+    const credentialType = server.credentialType === undefined
+      ? "password"
+      : String(server.credentialType);
+    if (credentialType !== "password" && credentialType !== "oauth") {
+      throw new TypeError(
+        `Failed to construct 'RTCPeerConnection': '${credentialType}' is not a valid value for 'credentialType'`,
+      );
+    }
+    let credential = server.credential === undefined
+      ? undefined
+      : String(server.credential);
+    if (credentialType === "oauth") {
+      const c = server.credential;
+      if (c !== null && typeof c === "object") {
+        if (c.macKey === undefined || c.accessToken === undefined) {
+          throw new TypeError(
+            "Failed to construct 'RTCPeerConnection': an RTCOAuthCredential needs 'macKey' and 'accessToken'",
+          );
+        }
+        credential = {
+          macKey: String(c.macKey),
+          accessToken: String(c.accessToken),
+        };
+      } else if (ArrayPrototypeSome(urls, isTurnUrl)) {
+        throw new DOMException(
+          "Failed to construct 'RTCPeerConnection': credentialType is 'oauth' but the credential is not an RTCOAuthCredential",
+          "InvalidAccessError",
+        );
+      }
+    }
     ArrayPrototypePush(out, {
       urls,
       username: server.username === undefined
         ? undefined
         : String(server.username),
-      credential: server.credential === undefined
-        ? undefined
-        : String(server.credential),
+      credential,
+      credentialType,
+    });
+  }
+  return out;
+}
+
+function isTurnUrl(url) {
+  const u = StringPrototypeToLowerCase(url);
+  return StringPrototypeStartsWith(u, "turn:") ||
+    StringPrototypeStartsWith(u, "turns:");
+}
+
+// wpt100:hdrext — the ICE servers the engine gets: not the OAuth ones (RFC
+// 7635 needs an ACCESS-TOKEN attribute the engine's TURN client doesn't
+// send; they are kept in the configuration, unused).
+function engineIceServers(servers) {
+  const out = [];
+  for (let i = 0; i < servers.length; ++i) {
+    const s = servers[i];
+    if (s.credentialType === "oauth") continue;
+    ArrayPrototypePush(out, {
+      urls: s.urls,
+      username: s.username,
+      credential: s.credential,
     });
   }
   return out;
@@ -3075,6 +3132,30 @@ function convertConfiguration(configuration, prefix) {
       "InvalidStateError",
     );
   }
+  // wpt100:hdrext — webrtc-extensions members.
+  const rtpHeaderEncryptionPolicy = config.rtpHeaderEncryptionPolicy ===
+      undefined
+    ? "negotiate"
+    : String(config.rtpHeaderEncryptionPolicy);
+  if (
+    !ArrayPrototypeIncludes(
+      ["disable", "negotiate", "require"],
+      rtpHeaderEncryptionPolicy,
+    )
+  ) {
+    throw new TypeError(
+      `${prefix}: '${rtpHeaderEncryptionPolicy}' is not a valid value for 'rtpHeaderEncryptionPolicy'`,
+    );
+  }
+  const alwaysNegotiateDataChannels = !!config.alwaysNegotiateDataChannels;
+  const targetLatency = config.targetLatency === undefined
+    ? "lowest"
+    : String(config.targetLatency);
+  if (targetLatency !== "lowest" && targetLatency !== "none") {
+    throw new TypeError(
+      `${prefix}: '${targetLatency}' is not a valid value for 'targetLatency'`,
+    );
+  }
   return {
     iceServers: convertIceServers(config.iceServers),
     iceTransportPolicy,
@@ -3083,6 +3164,9 @@ function convertConfiguration(configuration, prefix) {
     iceCandidatePoolSize,
     certificates,
     network,
+    rtpHeaderEncryptionPolicy,
+    alwaysNegotiateDataChannels,
+    targetLatency,
   };
 }
 
@@ -3131,7 +3215,7 @@ class RTCPeerConnection extends EventTarget {
       }
     }
     this[_rid] = op_webrtc_pc_create({
-      iceServers: config.iceServers,
+      iceServers: engineIceServers(config.iceServers),
       iceTransportPolicy: config.iceTransportPolicy,
       bundlePolicy: config.bundlePolicy,
       certificates: ArrayPrototypeMap(
@@ -3140,6 +3224,12 @@ class RTCPeerConnection extends EventTarget {
       ),
       network: config.network === null ? null : config.network[_rid],
     });
+    // wpt100:hdrext — rtpHeaderEncryptionPolicy, alwaysNegotiateDataChannels.
+    op_webrtc_pc_set_negotiation_options(
+      this[_rid],
+      config.rtpHeaderEncryptionPolicy,
+      config.alwaysNegotiateDataChannels,
+    );
     this[_channels] = new SafeMap();
     this[_state] = {
       config,
@@ -3713,7 +3803,12 @@ class RTCPeerConnection extends EventTarget {
       iceServers: ArrayPrototypeMap(config.iceServers, (s) => {
         const server = { urls: ArrayPrototypeSlice(s.urls) };
         if (s.username !== undefined) server.username = s.username;
-        if (s.credential !== undefined) server.credential = s.credential;
+        if (s.credential !== undefined) {
+          server.credential = typeof s.credential === "object"
+            ? { ...s.credential }
+            : s.credential;
+        }
+        server.credentialType = s.credentialType;
         return server;
       }),
       iceTransportPolicy: config.iceTransportPolicy,
@@ -3721,6 +3816,10 @@ class RTCPeerConnection extends EventTarget {
       rtcpMuxPolicy: config.rtcpMuxPolicy,
       iceCandidatePoolSize: config.iceCandidatePoolSize,
       certificates: ArrayPrototypeSlice(config.certificates),
+      // wpt100:hdrext
+      rtpHeaderEncryptionPolicy: config.rtpHeaderEncryptionPolicy,
+      alwaysNegotiateDataChannels: config.alwaysNegotiateDataChannels,
+      targetLatency: config.targetLatency,
     };
     if (config.network !== null) out.denoNetwork = config.network;
     return out;
@@ -3743,6 +3842,21 @@ class RTCPeerConnection extends EventTarget {
         `${prefix}: bundlePolicy and rtcpMuxPolicy can't change`,
         "InvalidModificationError",
       );
+    }
+    // wpt100:hdrext — webrtc-extensions: set only at construction.
+    const policy = config.rtpHeaderEncryptionPolicy;
+    const always = config.alwaysNegotiateDataChannels;
+    if (
+      policy !== current.rtpHeaderEncryptionPolicy ||
+      always !== current.alwaysNegotiateDataChannels
+    ) {
+      throw new DOMException(
+        `${prefix}: rtpHeaderEncryptionPolicy and alwaysNegotiateDataChannels can't change`,
+        "InvalidModificationError",
+      );
+    }
+    if (config.targetLatency !== current.targetLatency) {
+      throw new TypeError(`${prefix}: targetLatency can't change`);
     }
     const sameCerts = config.certificates.length === 0 ||
       (config.certificates.length === current.certificates.length &&
@@ -3778,7 +3892,7 @@ class RTCPeerConnection extends EventTarget {
     // the net permission for them; they apply to the next gathering (an
     // ICE restart).
     op_webrtc_pc_set_ice_servers(this[_rid], {
-      iceServers: config.iceServers,
+      iceServers: engineIceServers(config.iceServers),
       iceTransportPolicy: config.iceTransportPolicy,
     });
     // RFC 9429 section 4.1.18: a new ICE candidate policy, or new STUN / TURN

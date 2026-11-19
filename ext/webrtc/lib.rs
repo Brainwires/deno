@@ -167,6 +167,9 @@ deno_core::extension!(
     op_webrtc_network_close,
     op_webrtc_set_log_level,
     op_webrtc_data_globals,
+    // wpt100:hdrext
+    op_webrtc_transceiver_set_header_extensions,
+    op_webrtc_pc_set_negotiation_options,
   ],
   lazy_loaded_js = [
     "01_webrtc.js",
@@ -982,6 +985,34 @@ fn op_webrtc_transceiver_set_codec_preferences(
   #[serde] codecs: Vec<media::CodecArg>,
 ) -> Result<(), WebRtcError> {
   peer(state, rid)?.media(|core| core.set_codec_preferences(key, codecs))
+}
+
+// wpt100:hdrext
+#[op2]
+fn op_webrtc_transceiver_set_header_extensions(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+  key: u32,
+  #[serde] uris: Vec<String>,
+) -> Result<(), WebRtcError> {
+  peer(state, rid)?
+    .media(|core| core.set_header_extensions_to_negotiate(key, uris))
+}
+
+// wpt100:hdrext
+#[op2(fast)]
+fn op_webrtc_pc_set_negotiation_options(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+  #[string] rtp_header_encryption_policy: String,
+  always_negotiate_data_channels: bool,
+) -> Result<(), WebRtcError> {
+  peer(state, rid)?.media(|core| {
+    core.set_negotiation_options(
+      &rtp_header_encryption_policy,
+      always_negotiate_data_channels,
+    )
+  })
 }
 
 #[op2(fast)]

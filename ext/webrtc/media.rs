@@ -24,6 +24,7 @@ use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
+use rtc::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
 use rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtc::rtp::packetizer::Packetizer;
@@ -985,6 +986,45 @@ impl Core {
   ) -> Result<(), WebRtcError> {
     let index = self.index_of(key)?;
     self.set_codec_preferences_inner(index, &codecs)
+  }
+
+  /// `setHeaderExtensionsToNegotiate()` and its effect on the next offer or
+  /// answer (webrtc-extensions): the URIs this transceiver's media section
+  /// may carry. JavaScript hands the list over before each offer and answer.
+  pub(crate) fn set_header_extensions_to_negotiate(
+    &mut self,
+    key: u32,
+    uris: Vec<String>,
+  ) -> Result<(), WebRtcError> {
+    let index = self.index_of(key)?;
+    if let Some(mut t) = self.pc.rtp_transceiver(index) {
+      t.set_header_extensions_to_negotiate(Some(uris));
+    }
+    Ok(())
+  }
+
+  /// `RTCConfiguration.rtpHeaderEncryptionPolicy` and
+  /// `alwaysNegotiateDataChannels` (webrtc-extensions).
+  pub(crate) fn set_negotiation_options(
+    &mut self,
+    rtp_header_encryption_policy: &str,
+    always_negotiate_data_channels: bool,
+  ) -> Result<(), WebRtcError> {
+    let policy = match rtp_header_encryption_policy {
+      "disable" => RTCRtpHeaderEncryptionPolicy::Disable,
+      "negotiate" => RTCRtpHeaderEncryptionPolicy::Negotiate,
+      "require" => RTCRtpHeaderEncryptionPolicy::Require,
+      other => {
+        return Err(WebRtcError::Type(format!(
+          "'{other}' is not a valid RTCRtpHeaderEncryptionPolicy"
+        )));
+      }
+    };
+    self.pc.set_rtp_header_encryption_policy(policy);
+    self
+      .pc
+      .set_always_negotiate_data_channels(always_negotiate_data_channels);
+    Ok(())
   }
 
   pub(crate) fn transceivers(&mut self) -> Vec<TransceiverInfo> {
