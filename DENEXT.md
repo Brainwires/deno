@@ -18041,6 +18041,23 @@ where the changes are discussed.
        ten clients held open, then an eleventh, on a named pipe on Windows and a
        Unix socket elsewhere) is the proof on Windows.
      - Node tests enabled: none.
+463. **`fix(process)`: a spawn that fails closes its IPC channel**
+     (`desktop/d28-qutty-2`; runtime; `ext/process/lib.rs`,
+     `tests/unit_node/child_process_test.ts`; the item number is a placeholder
+     for the train lead to renumber). `create_command` adds the parent's end of
+     a Node IPC channel (`stdio: [..., "ipc"]`, `fork()`) to the resource table
+     before the program is started. When the start failed (a missing program, a
+     refused one, and the first attempt of the `ENOEXEC` shell retry), the op
+     returned the error and nothing ever closed that resource: JavaScript never
+     learned its id. Each failed spawn left the channel and its descriptors open
+     for the life of the process (a supervisor retrying a helper that is not
+     there leaks one per attempt). Both spawn ops (`op_spawn_child`,
+     `op_node_spawn_child`) now close it on failure.
+     - Found by the resource sanitizer of a denext test (a detached sidecar
+       whose executable does not exist). The test here spawns a missing program
+       with an IPC channel three times under the unit runner's resource
+       sanitizer.
+     - Node tests enabled: none.
 
 460. **`feat(desktop)`: laufey API 59: web view downloads and permission
      requests the app decides, menu read-back, and a macOS panel whose show()

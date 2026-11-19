@@ -2315,3 +2315,22 @@ Deno.test("[node/child_process] --input-type with a script file is ERR_INPUT_TYP
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+// A spawn that fails must not leave its IPC channel open (DENEXT.md item
+// 473): the parent's end was created before the spawn and nothing closed it.
+// The resource sanitizer of this test is the check.
+Deno.test("[node/child_process] a failed spawn with an IPC channel leaves no resource open", async () => {
+  for (let i = 0; i < 3; i++) {
+    const closed = Promise.withResolvers<void>();
+    const failed = Promise.withResolvers<NodeJS.ErrnoException>();
+    const child = CP.spawn("/nonexistent/deno-test-no-such-program", ["x"], {
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+    });
+    child.once("error", failed.resolve);
+    child.once("close", () => closed.resolve());
+    const err = await failed.promise;
+    assertEquals(err.code, "ENOENT");
+    await closed.promise;
+    assertEquals(child.connected, false);
+  }
+});
