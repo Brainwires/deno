@@ -708,12 +708,6 @@ function linearAudioLevel(level) {
   return level >= 127 ? 0 : MathPow(10, -level / 20);
 }
 
-// The fake microphone plays a sine of amplitude 1/8 (FFmpeg's `sine`
-// source, fake_media/generate.sh; each channel of the stereo clip too):
-// RMS 0.125 / sqrt(2) = -21.07 dBov, RFC 6464 level 21. Its frames carry
-// that level.
-const FAKE_TONE_RFC6464_LEVEL = 21;
-
 // A fake device's frame for a sender with a transform (02_media_devices.js).
 function feedFake(sender, pc, key, stereo) {
   const { _transform, _rid, _state: pcState } = internals();
@@ -780,7 +774,12 @@ function feedFake(sender, pc, key, stereo) {
       }
     }
   } else {
-    metadata.audioLevel = linearAudioLevel(FAKE_TONE_RFC6464_LEVEL);
+    // The level measured from the frame's PCM, the one the sender writes in
+    // the audio level header extension (header_extensions.rs); absent where
+    // the runtime has no PCM for the frame.
+    if (f.audioLevel !== null && f.audioLevel !== undefined) {
+      metadata.audioLevel = linearAudioLevel(f.audioLevel);
+    }
     postFrame(
       state,
       new RTCEncodedAudioFrame(illegalConstructorKey, {

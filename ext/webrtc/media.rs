@@ -562,6 +562,11 @@ pub struct FakeFrame {
   pub key_frame: bool,
   pub width_height: Option<(u16, u16)>,
   pub info: SenderFrameInfo,
+  /// The RFC 6464 level (-dBov) measured from the frame's PCM, as the sender
+  /// writes it in the audio level header extension
+  /// (`header_extensions::audio_level`); `None` where the PCM isn't at hand
+  /// (and for video).
+  pub audio_level: Option<u8>,
 }
 
 /// Whether an encoded video frame is a key frame (audio frames are not
@@ -1548,6 +1553,7 @@ impl Core {
       key_frame: is_key_frame(&mime, data),
       width_height: frame_size(&mime, data),
       info,
+      audio_level: crate::header_extensions::audio_level(&mime, data),
     }))
   }
 
