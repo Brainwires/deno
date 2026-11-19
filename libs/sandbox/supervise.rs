@@ -269,13 +269,16 @@ extern "C" fn forward(
   if worker <= 0 || info.is_null() {
     return;
   }
-  // SAFETY: the kernel's siginfo for this delivery
-  let code = unsafe { (*info).si_code };
+  // Linux says who made it in si_code (SI_USER, SI_QUEUE, SI_TKILL are not
+  // positive; the kernel's own are)
   #[cfg(target_os = "linux")]
-  let from_a_process = code <= 0; // SI_USER, SI_QUEUE, SI_TKILL
-  // macOS: SI_USER (kill) and SI_QUEUE (sigqueue)
+  // SAFETY: the kernel's siginfo for this delivery
+  let from_a_process = unsafe { (*info).si_code } <= 0;
+  // macOS leaves si_code 0 for kill(2) and names the sender in si_pid;
+  // a signal the terminal made has no sender
   #[cfg(not(target_os = "linux"))]
-  let from_a_process = code == 0x10001 || code == 0x10002;
+  // SAFETY: the kernel's siginfo for this delivery
+  let from_a_process = unsafe { (*info).si_pid } != 0;
   if from_a_process {
     // SAFETY: kill is async-signal-safe
     unsafe { libc::kill(worker, signal) };
@@ -287,7 +290,7 @@ fn forward_signals() {
     // SAFETY: a zeroed sigaction with a handler of the SA_SIGINFO shape
     unsafe {
       let mut action: libc::sigaction = std::mem::zeroed();
-      action.sa_sigaction = forward as usize;
+      action.sa_sigaction = forward as *const () as usize;
       action.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
       libc::sigemptyset(&mut action.sa_mask);
       libc::sigaction(*signal, &action, std::ptr::null_mut());

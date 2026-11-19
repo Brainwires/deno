@@ -1322,9 +1322,11 @@ mod tests {
     assert!(!plan.keeps_env("SECRET"));
     // malformed, another format, unknown fields: refused
     assert!(EnforcePlan::from_bytes(b"{").is_err());
-    let other = String::from_utf8(bytes.clone())
-      .unwrap()
-      .replace("\"format\":1", "\"format\":2");
+    let other = String::from_utf8(bytes.clone()).unwrap().replace(
+      &format!("\"format\":{PLAN_FORMAT}"),
+      &format!("\"format\":{}", PLAN_FORMAT + 1),
+    );
+    assert_ne!(other.as_bytes(), &bytes[..]);
     assert!(EnforcePlan::from_bytes(other.as_bytes()).is_err());
     let extra =
       String::from_utf8(bytes)

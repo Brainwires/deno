@@ -27,6 +27,15 @@ serde_json.workspace = true
 tokio.workspace = true
 url = { workspace = true, optional = true }
 
+[dev-dependencies]
+deno_permissions.workspace = true
+tempfile.workspace = true
+
+[[test]]
+name = "broker_linux"
+path = "tests/broker_linux.rs"
+harness = false
+
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
 rand.workspace = true

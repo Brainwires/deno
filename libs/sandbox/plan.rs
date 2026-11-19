@@ -401,6 +401,7 @@ mod tests {
         },
         rules: Vec::new(),
         expand,
+        expand_write: Vec::new(),
         net: NetPlan::Denied,
         scope_signal: false,
         scope_abstract_unix: false,
@@ -455,5 +456,61 @@ mod tests {
     let b = plan(roots, &[]);
     assert_eq!(a.without_measured_lists(), b.without_measured_lists());
     assert_ne!(a, b);
+  }
+
+  // the write expansion's entries are held to their own roots the same way,
+  // and the broker's policy is part of what two images compare
+  #[cfg(unix)]
+  #[test]
+  fn write_expansion_and_broker_are_checked_and_compared() {
+    let root = ExpandRoot {
+      root: PathBuf::from("/out"),
+      deny: vec![PathBuf::from("/out/keep")],
+    };
+    let mut p = plan(Vec::new(), &[]);
+    p.linux.as_mut().unwrap().expand_write = vec![root];
+    p.expanded_write = vec![PathBuf::from("/out/sub"), PathBuf::from("/out/f")];
+    p.check_expanded().unwrap();
+    for bad in [
+      "/out",
+      "/out/keep",
+      "/out/keep/x",
+      "/elsewhere",
+      "/out/../x",
+    ] {
+      let mut wrong = p.clone();
+      wrong.expanded_write.push(PathBuf::from(bad));
+      assert!(wrong.check_expanded().is_err(), "{bad}");
+    }
+    // a read root doesn't vouch for a write entry
+    let mut crossed = plan(
+      vec![ExpandRoot {
+        root: PathBuf::from("/r"),
+        deny: vec![PathBuf::from("/r/d")],
+      }],
+      &[],
+    );
+    crossed.expanded_write = vec![PathBuf::from("/r/x")];
+    assert!(crossed.check_expanded().is_err());
+    // measured lists aside, the broker's policy decides equality
+    let mut with_broker = p.clone();
+    with_broker.broker = Some(BrokerPlan {
+      read: None,
+      deny_read: Vec::new(),
+      write: Some(vec![PathBuf::from("/out")]),
+      deny_write: vec![PathBuf::from("/out/keep")],
+    });
+    assert_ne!(
+      with_broker.without_measured_lists(),
+      p.without_measured_lists()
+    );
+    let mut other_entries = with_broker.clone();
+    other_entries.expanded_write.clear();
+    assert_eq!(
+      with_broker.without_measured_lists(),
+      other_entries.without_measured_lists()
+    );
+    let bytes = with_broker.to_bytes();
+    assert_eq!(EnforcePlan::from_bytes(&bytes).unwrap(), with_broker);
   }
 }

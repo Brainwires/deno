@@ -7091,14 +7091,17 @@ impl PermissionsContainer {
       // skip checking for special permissions because we consider
       // write_partial as WriteNoFollow because it's only used for
       // fs::remove
-      Ok(CheckedPath {
-        path: PathWithRequested {
-          path: desc.0.path,
-          requested: desc.0.requested.map(Cow::Owned),
+      Ok(self.with_open_scope(
+        CheckedPath {
+          path: PathWithRequested {
+            path: desc.0.path,
+            requested: desc.0.requested.map(Cow::Owned),
+          },
+          canonicalized: false,
+          scope: OpenScopeRef::default(),
         },
-        canonicalized: false,
-        scope: OpenScopeRef::default(),
-      })
+        OpenAccessKind::WriteNoFollow,
+      ))
     }
   }
 
@@ -7132,14 +7135,17 @@ impl PermissionsContainer {
       self.check_no_follow_write_resolved(&desc, true, api_name)?;
       // skip checking for special permissions because this is treated as
       // WriteNoFollow (it's only used for the recursive `fs::remove` path)
-      Ok(CheckedPath {
-        path: PathWithRequested {
-          path: desc.0.path,
-          requested: desc.0.requested.map(Cow::Owned),
+      Ok(self.with_open_scope(
+        CheckedPath {
+          path: PathWithRequested {
+            path: desc.0.path,
+            requested: desc.0.requested.map(Cow::Owned),
+          },
+          canonicalized: false,
+          scope: OpenScopeRef::default(),
         },
-        canonicalized: false,
-        scope: OpenScopeRef::default(),
-      })
+        OpenAccessKind::WriteNoFollow,
+      ))
     }
   }
 
@@ -9396,6 +9402,132 @@ mod tests {
         is_ok
       );
     }
+  }
+
+  /// denext: a scoped access hands its operation the scope to open in; an
+  /// access nothing narrows, and the kernel's own trees, hand none; a
+  /// change to the permissions makes new scopes.
+  #[test]
+  #[cfg(unix)]
+  fn check_open_hands_out_the_open_scope() {
+    set_prompter(Box::new(TestPrompter));
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("data/secret")).unwrap();
+    std::fs::create_dir_all(root.join("other")).unwrap();
+    std::fs::write(root.join("data/f"), "f").unwrap();
+    std::fs::write(root.join("data/secret/key"), "key").unwrap();
+    std::fs::write(root.join("other/o"), "o").unwrap();
+    let text = |p: &Path| p.to_string_lossy().into_owned();
+    let parser = TestPermissionDescriptorParser;
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_read: Some(vec![
+          text(&root.join("data")),
+          "/dev/null".to_string(),
+        ]),
+        deny_read: Some(vec![text(&root.join("data/secret"))]),
+        allow_write: Some(vec![]),
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    let perms = PermissionsContainer::new(Arc::new(parser), perms);
+    let opts = checked_open::CheckedOpenOptions::new().read(true);
+    let file = root.join("data/f");
+    let checked = perms
+      .check_open(Cow::Borrowed(&file), OpenAccessKind::Read, Some("api"))
+      .unwrap();
+    let scope = checked.open_scope().expect("a scoped read");
+    assert!(checked_open::open_checked(scope, &file, &opts).is_ok());
+    // the scope holds what the check held: the deny, and the outside
+    for outside in ["data/secret/key", "other/o"] {
+      assert!(
+        checked_open::open_checked(scope, &root.join(outside), &opts)
+          .unwrap_err()
+          .is_not_capable(),
+        "{outside}"
+      );
+    }
+    // the same scope the next time (its roots stay open)
+    let again = perms
+      .check_open(Cow::Borrowed(&file), OpenAccessKind::Read, Some("api"))
+      .unwrap();
+    assert!(std::ptr::eq(scope, again.open_scope().unwrap()));
+    // an owned copy keeps it
+    assert!(again.as_owned().open_scope().is_some());
+    // unscoped write with nothing denied: nothing to hold the open to; a
+    // read and write is held to the read's scope
+    let write = perms
+      .check_open(Cow::Borrowed(&file), OpenAccessKind::Write, Some("api"))
+      .unwrap();
+    assert!(write.open_scope().is_none());
+    let both = perms
+      .check_open(Cow::Borrowed(&file), OpenAccessKind::ReadWrite, Some("api"))
+      .unwrap();
+    let both_scope = both.open_scope().expect("held to the read scope");
+    assert!(
+      checked_open::open_checked(both_scope, &root.join("other/o"), &opts)
+        .unwrap_err()
+        .is_not_capable()
+    );
+    // the remove checks hand one out too
+    let partial = perms
+      .check_write_partial(Cow::Borrowed(&file), "api")
+      .unwrap();
+    assert!(partial.open_scope().is_none(), "write is unscoped here");
+    // the kernel's own trees are opened by name
+    let null = perms
+      .check_open(
+        Cow::Borrowed(Path::new("/dev/null")),
+        OpenAccessKind::Read,
+        Some("api"),
+      )
+      .unwrap();
+    assert!(null.open_scope().is_none());
+    // a revoke changes the scope: the old one is not handed out again
+    let desc = perms
+      .descriptor_parser
+      .parse_path_query(Cow::Owned(root.join("data")))
+      .unwrap()
+      .into_read();
+    perms.inner.lock().read.revoke(Some(&desc));
+    assert!(
+      perms
+        .check_open(Cow::Borrowed(&file), OpenAccessKind::Read, Some("api"))
+        .is_err()
+    );
+
+    // a scoped write: the remove checks carry the write scope
+    let parser = TestPermissionDescriptorParser;
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_write: Some(vec![text(&root.join("data"))]),
+        deny_write: Some(vec![text(&root.join("data/secret"))]),
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    let perms = PermissionsContainer::new(Arc::new(parser), perms);
+    let partial = perms
+      .check_write_partial(Cow::Borrowed(&file), "api")
+      .unwrap();
+    let scope = partial.open_scope().expect("a scoped write");
+    assert!(checked_open::parent_checked(scope, &file).is_ok());
+    assert!(
+      checked_open::parent_checked(scope, &root.join("data/secret/key"))
+        .unwrap_err()
+        .is_not_capable()
+    );
+    assert!(
+      perms
+        .check_write(Cow::Borrowed(&root.join("data/f")), "api")
+        .unwrap()
+        .open_scope()
+        .is_some()
+    );
   }
 
   #[test]

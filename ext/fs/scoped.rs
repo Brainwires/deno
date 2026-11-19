@@ -188,6 +188,11 @@ pub fn open(
   path: &Path,
   opts: OpenOptions,
 ) -> FsResult<fs::File> {
+  // as `std::fs::OpenOptions` has it: truncating takes write access
+  // (never append), so a read-only open can't empty a file
+  if opts.truncate && !opts.create_new && (!opts.write || opts.append) {
+    return Err(FsError::Io(io::Error::from_raw_os_error(libc::EINVAL)));
+  }
   let result = open_checked(scope, path, &checked_options(&opts))
     .map(|file| file.into_std_file());
   or_broker(result, path, |broker| {
@@ -643,6 +648,14 @@ mod tests {
     };
     let err = open(&b.scope, &b.p("allowed/to-file"), nofollow).unwrap_err();
     assert_eq!(err.into_io_error().raw_os_error(), Some(libc::ELOOP));
+    // truncation needs write access, as before
+    let read_truncate = OpenOptions {
+      truncate: true,
+      ..read
+    };
+    let err = open(&b.scope, &b.p("allowed/file"), read_truncate).unwrap_err();
+    assert_eq!(err.into_io_error().raw_os_error(), Some(libc::EINVAL));
+    assert_eq!(fs::read(b.p("allowed/file")).unwrap(), b"file");
     // O_RDONLY | O_CREAT creates, then reads
     let create_read = OpenOptions {
       read: true,

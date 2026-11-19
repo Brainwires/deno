@@ -947,6 +947,10 @@ fn model_no_request_sequence_leaves_the_policy() {
         assert_eq!(response, Response::Denied, "{context}");
       }
     }
+    // a request may have taken the search bit off the allowed folder
+    // (its mode is the policy's to change); the check needs to walk it
+    fs::set_permissions(bed.p("allowed"), fs::Permissions::from_mode(0o755))
+      .unwrap();
     assert_eq!(before, bed.protected(), "round {round}");
   }
 }
