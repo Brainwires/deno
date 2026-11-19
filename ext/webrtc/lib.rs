@@ -165,6 +165,8 @@ deno_core::extension!(
     op_webrtc_network_close,
     op_webrtc_set_log_level,
     op_webrtc_data_globals,
+    // wpt100:ice
+    op_webrtc_pc_ice_selected_pair,
   ],
   lazy_loaded_js = [
     "01_webrtc.js",
@@ -1204,6 +1206,19 @@ fn op_webrtc_pc_selected_pair(
       .selected_pair()
       .map(|(l, r)| (l.to_string(), r.to_string(), protocol)),
   )
+}
+
+/// The ICE agent's selected candidate pair (W3C webrtc-pc 5.6
+/// `getSelectedCandidatePair()`), with each candidate's fields; `None` until
+/// ICE has selected one.
+#[op2]
+#[serde]
+fn op_webrtc_pc_ice_selected_pair(
+  state: &mut OpState,
+  #[smi] rid: ResourceId,
+) -> Result<Option<peer::SelectedPair>, WebRtcError> {
+  let peer = peer(state, rid)?;
+  Ok(peer.ice_selected_pair())
 }
 
 // --- Deno.webrtc.Network ---------------------------------------------------

@@ -574,6 +574,53 @@ pub struct Core {
   mdns_failed: bool,
 }
 
+/// One candidate of [`SelectedPair`], with the fields JavaScript needs to
+/// build the `RTCIceCandidate` (a peer-reflexive remote candidate is exposed
+/// without its address, so it can't be found among the signalled ones).
+#[derive(serde::Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PairCandidate {
+  /// `ip:port` (`[ip]:port` for IPv6), as the signalled candidates are matched.
+  pub addr: String,
+  pub address: String,
+  pub port: u16,
+  pub protocol: String,
+  #[serde(rename = "type")]
+  pub typ: String,
+  pub foundation: String,
+  pub priority: u32,
+  pub related_address: String,
+  pub related_port: u16,
+}
+
+impl PairCandidate {
+  fn of(c: &rtc::peer_connection::transport::RTCIceCandidate) -> Self {
+    let addr = match c.address.parse::<IpAddr>() {
+      Ok(IpAddr::V6(ip)) => format!("[{ip}]:{}", c.port),
+      Ok(IpAddr::V4(ip)) => format!("{ip}:{}", c.port),
+      Err(_) => format!("{}:{}", c.address, c.port),
+    };
+    Self {
+      addr,
+      address: c.address.clone(),
+      port: c.port,
+      protocol: c.protocol.to_string(),
+      typ: c.typ.to_string(),
+      foundation: c.foundation.clone(),
+      priority: c.priority,
+      related_address: c.related_address.clone(),
+      related_port: c.related_port,
+    }
+  }
+}
+
+/// The ICE agent's selected candidate pair.
+#[derive(serde::Serialize, Debug)]
+pub struct SelectedPair {
+  pub local: PairCandidate,
+  pub remote: PairCandidate,
+}
+
 /// The four description slots of a connection, each `(type, sdp)`.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1075,6 +1122,47 @@ impl Core {
       self.dtls_state.clone_from(&state);
       self.events.push_back(JsEvent::DtlsState { state });
     }
+  }
+
+  /// The engine's ICE transport's selected pair, reached through the SCTP
+  /// transport, else through a receiver or a sender (all of them share the one
+  /// bundled transport; a receiver or sender has one once it has a mid).
+  fn ice_selected_pair(&mut self) -> Option<SelectedPair> {
+    let to_pair =
+      |p: rtc::peer_connection::transport::RTCIceCandidatePair| SelectedPair {
+        local: PairCandidate::of(p.local()),
+        remote: PairCandidate::of(p.remote()),
+      };
+    if let Some(sctp) = self.pc.sctp() {
+      return sctp
+        .transport()
+        .ice_transport()
+        .get_selected_candidate_pair()
+        .map(to_pair);
+    }
+    let receivers: Vec<_> = self.pc.get_receivers().collect();
+    for id in receivers {
+      let pair = self.pc.rtp_receiver(id).and_then(|r| {
+        r.transport()
+          .map(|t| t.ice_transport().get_selected_candidate_pair())
+      });
+      match pair {
+        Some(pair) => return pair.map(to_pair),
+        None => continue,
+      }
+    }
+    let senders: Vec<_> = self.pc.get_senders().collect();
+    for id in senders {
+      let pair = self.pc.rtp_sender(id).and_then(|s| {
+        s.transport()
+          .map(|t| t.ice_transport().get_selected_candidate_pair())
+      });
+      match pair {
+        Some(pair) => return pair.map(to_pair),
+        None => continue,
+      }
+    }
+    None
   }
 
   /// RFC 8445 section 8.1.2 / RFC 8838 section 8: with gathering complete
@@ -2365,6 +2453,20 @@ impl Peer {
 
   pub fn selected_pair(&self) -> Option<(SocketAddr, SocketAddr)> {
     self.core.borrow().selected
+  }
+
+  /// The ICE agent's selected candidate pair (W3C webrtc-pc 5.6
+  /// `getSelectedCandidatePair()`): the nominated pair as soon as ICE has
+  /// one, on the controlled side too, before either side sent anything on it.
+  /// `None` before that, or when the connection is closed.
+  pub fn ice_selected_pair(&self) -> Option<SelectedPair> {
+    if self.closed.get() {
+      return None;
+    }
+    self
+      .guarded(|core| Ok(core.ice_selected_pair()))
+      .ok()
+      .flatten()
   }
 
   /// Whether the selected pair is an ICE-TCP one.

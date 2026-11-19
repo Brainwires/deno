@@ -43,6 +43,7 @@ const {
   op_webrtc_pc_add_transceiver,
   op_webrtc_pc_attach_track,
   op_webrtc_pc_selected_pair,
+  op_webrtc_pc_ice_selected_pair,
   op_webrtc_pc_set_ice_servers,
   op_webrtc_pc_transceivers,
   op_webrtc_receiver_parameters,
@@ -390,11 +391,27 @@ function parseCandidate(line) {
   return out;
 }
 
+// Makes an RTCIceCandidate whose derived attributes are given rather than
+// parsed (see RTCIceCandidate's static block).
+let candidateWithFields;
+
 class RTCIceCandidate {
   #init;
   #parsed;
   #relayProtocol;
   #url;
+
+  static {
+    // A peer-reflexive remote candidate the application never signalled is
+    // exposed with an empty candidate string and no address (W3C webrtc-pc
+    // 4.8.1, "the address is not exposed"), but with the fields the agent
+    // learned: those can't come from parsing a string.
+    candidateWithFields = (init, parsed) => {
+      const candidate = new RTCIceCandidate(init);
+      candidate.#parsed = parsed;
+      return candidate;
+    };
+  }
 
   constructor(candidateInitDict = undefined) {
     const init = candidateInitDict ?? { __proto__: null };
@@ -1674,11 +1691,77 @@ function setTransportStates(pc, silent = false) {
   }
 }
 
+// The candidate of `list` (signalled or received by the application) at a
+// selected pair candidate's address, port and protocol.
+function findPairCandidate(list, cand) {
+  for (let i = 0; i < list.length; ++i) {
+    const c = list[i];
+    const host = StringPrototypeIncludes(c.address ?? "", ":")
+      ? `[${c.address}]`
+      : c.address;
+    if (`${host}:${c.port}` === cand.addr && c.protocol === cand.protocol) {
+      return c;
+    }
+  }
+  return null;
+}
+
+// A selected pair candidate the application doesn't have (gathered or
+// learned by the agent itself), written out from its fields.
+function synthPairCandidate(cand) {
+  const related = cand.relatedAddress !== ""
+    ? ` raddr ${cand.relatedAddress} rport ${cand.relatedPort}`
+    : cand.type === "host"
+    ? ""
+    : " raddr 0.0.0.0 rport 0";
+  const foundation = RegExpPrototypeTest(ICE_CHARS, cand.foundation)
+    ? cand.foundation
+    : "0";
+  return new RTCIceCandidate({
+    candidate: `candidate:${foundation} 1 ${cand.protocol} ${
+      MathMax(1, cand.priority)
+    } ${cand.address} ${cand.port} typ ${cand.type}${related}${
+      cand.protocol === "tcp" && cand.type !== "relay" ? " tcptype active" : ""
+    }`,
+    sdpMLineIndex: 0,
+  });
+}
+
+// A peer-reflexive remote candidate the application never signalled: W3C
+// webrtc-pc 4.8.1 exposes it with an empty candidate string and a null
+// address (its address came from the network, not from the application).
+function hiddenPairCandidate(cand) {
+  return candidateWithFields({ candidate: "", sdpMLineIndex: 0 }, {
+    foundation: cand.foundation,
+    component: "rtp",
+    priority: cand.priority,
+    address: null,
+    protocol: cand.protocol === "tcp" ? "tcp" : "udp",
+    port: cand.port,
+    type: "prflx",
+    tcpType: null,
+    relatedAddress: null,
+    relatedPort: cand.relatedPort,
+  });
+}
+
 // The selected pair as RTCIceCandidates, from the candidates this side
 // signalled and received (matched by address); null before ICE connects.
 function selectedPair(pc) {
   const state = pc[_state];
   if (state.closed) return null;
+  const ice = op_webrtc_pc_ice_selected_pair(pc[_rid]);
+  if (ice !== null) {
+    return new RTCIceCandidatePair(
+      illegalConstructorKey,
+      findPairCandidate(state.localCandidates, ice.local) ??
+        synthPairCandidate(ice.local),
+      findPairCandidate(state.remoteCandidates, ice.remote) ??
+        (ice.remote.type === "prflx"
+          ? hiddenPairCandidate(ice.remote)
+          : synthPairCandidate(ice.remote)),
+    );
+  }
   const pair = op_webrtc_pc_selected_pair(pc[_rid]);
   if (pair === null) return null;
   const protocol = pair[2];
@@ -1835,6 +1918,19 @@ function refineStats(pc, entries, now) {
       case "local-candidate":
       case "remote-candidate":
         if (stats.relatedAddress === undefined) delete stats.relatedPort;
+        // wpt100:ice: a peer-reflexive remote candidate's address came from
+        // the network, not from the application: webrtc-stats 8.13 leaves it
+        // null unless the application signalled that address itself.
+        if (
+          stats.type === "remote-candidate" &&
+          stats.candidateType === "prflx" &&
+          !ArrayPrototypeSome(
+            state.remoteCandidates,
+            (c) => c.address === stats.address,
+          )
+        ) {
+          stats.address = null;
+        }
         break;
       case "certificate":
         if (
