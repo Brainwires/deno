@@ -1879,6 +1879,7 @@ function refineStats(pc, entries, now) {
           const role = negotiatedDtlsRole(pc);
           if (role !== null) stats.dtlsRole = role;
         }
+        transportStateStats(pc, stats);
         break;
       case "outbound-rtp": {
         const t = ArrayPrototypeFind(
@@ -1920,6 +1921,46 @@ function refineStats(pc, entries, now) {
   }
   for (let i = 0; i < added.length; ++i) ArrayPrototypePush(entries, added[i]);
   return entries;
+}
+
+// The transport's ICE and DTLS state and the ICE role before the engine has
+// any to report (webrtc-stats `RTCTransportStats`: the RTCIceTransport's
+// `state` and `role`, the RTCDtlsTransport's `state`). The role is the one
+// this side takes in the offer / answer exchange under way (RFC 8445
+// section 6.1.1: the offerer is controlling) until an answer fixes it.
+function transportStateStats(pc, stats) {
+  const s = pc[_state];
+  const dtls = s.dtls;
+  if (stats.iceState === undefined) {
+    stats.iceState = dtls !== null && dtls !== undefined
+      ? dtls[_transportState].ice[_transportState].state
+      : (s.closed ? "closed" : s.iceConnectionState);
+  }
+  if (stats.dtlsState === undefined) {
+    let dtlsState = dtls !== null && dtls !== undefined
+      ? dtls[_transportState].state
+      : "new";
+    if (dtls === null || dtls === undefined) {
+      if (s.closed || s.connectionState === "closed") dtlsState = "closed";
+      else if (s.connectionState === "failed") dtlsState = "failed";
+      else if (s.connectionState === "connected") dtlsState = "connected";
+      else if (s.connectionState === "connecting") dtlsState = "connecting";
+    }
+    stats.dtlsState = dtlsState;
+  }
+  if (stats.iceRole === undefined) {
+    let role = s.iceRole;
+    if (role === null || role === undefined) {
+      role = s.signalingState === "have-local-offer" ||
+          s.signalingState === "have-local-pranswer"
+        ? "controlling"
+        : s.signalingState === "have-remote-offer" ||
+            s.signalingState === "have-remote-pranswer"
+        ? "controlled"
+        : "unknown";
+    }
+    stats.iceRole = role;
+  }
 }
 
 // The DTLS role the current descriptions negotiated (RFC 5763 section 5: the
