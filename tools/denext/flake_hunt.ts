@@ -55,7 +55,9 @@ Options:
   --hog               add the busy loop to every constrained profile
   --shards <n>        shards for the suites not split per file (specs,
                       integration, node_compat; default 4, the gate uses 2)
-  --build-jobs <n>    CARGO_BUILD_JOBS for the build (default 4)
+  --build-jobs <n>    CARGO_BUILD_JOBS for the build (default 4; at most 4 on
+                      a Mac, whose builds take the shared
+                      /tmp/claude-501/mini-heavy-build.lock)
   --work-dir <dir>    where builds and runs live (default ~/flake-hunt)
   --image <img>       the CI runner image (default denext-ci-linux-2204:latest
                       on Linux x64, denext-ci-linux-arm64:latest on a Mac)
@@ -985,7 +987,7 @@ class DockerExecutor implements Executor {
       "--memory-swap",
       build ? (this.prof.volume ? "8g" : "12g") : JOB.memSwap,
       "--cpus",
-      String(build ? this.o.buildJobs : cpus ?? this.prof.testCpus),
+      String(build ? buildJobs(this.o) : cpus ?? this.prof.testCpus),
       "--cpu-shares",
       JOB.cpuShares,
       "--cap-drop",
@@ -1030,11 +1032,13 @@ class DockerExecutor implements Executor {
     const cmd = ["docker", ...args];
     // the build takes the fork builds' lock on Linux, as every local fork
     // build does; on a Mac the heavy-build lock (one heavy build at a time)
+    // on a Mac the docker client runs under nice (the containers' CPUs are
+    // capped by --cpus inside Docker Desktop's VM)
     const full = !o.build
-      ? cmd
+      ? (isLinux ? cmd : ["nice", "-n", "19", ...cmd])
       : isLinux
       ? ["flock", expandHome("~/.fork-cargo.lock"), ...cmd]
-      : ["bash", "-c", HEAVY_LOCK, "_", ...cmd];
+      : miniBuildLock(cmd);
     this.running.add(name);
     try {
       return await spawnLogged(full, o.logFile, o.timeoutMin, async () => {
@@ -1086,7 +1090,17 @@ class LocalExecutor implements Executor {
       env: Record<string, string>;
     },
   ): Promise<number> {
-    // nice, and a process group of its own, so a timeout or ^C ends every child
+    // nice, and a process group of its own, so a timeout or ^C ends every
+    // child; a build under the mini's shared build lock
+    const inner = [
+      "env",
+      "-u",
+      "CLAUDE_CODE_ENTRYPOINT",
+      ...Object.entries(o.env).map(([k, v]) => `${k}=${v}`),
+      "bash",
+      "-c",
+      script,
+    ];
     const cmd = [
       "nice",
       "-n",
@@ -1095,13 +1109,7 @@ class LocalExecutor implements Executor {
       "-e",
       "setpgrp(0,0); exec @ARGV or die",
       "--",
-      "env",
-      "-u",
-      "CLAUDE_CODE_ENTRYPOINT",
-      ...Object.entries(o.env).map(([k, v]) => `${k}=${v}`),
-      "bash",
-      "-c",
-      script,
+      ...(o.build ? miniBuildLock(inner) : inner),
     ];
     return await spawnLogged(cmd, o.logFile, o.timeoutMin, (pid) => {
       try {
@@ -1143,14 +1151,27 @@ function mounts(p: Paths, prof: DockerProfile): string[] {
     ];
 }
 
-/** On the Mac mini: one heavy build at a time (~/.cache/denext-heavy.lock.d,
- * a mkdir lock) and only below a 1-minute load of 10. */
-const HEAVY_LOCK = `
-lock="$HOME/.cache/denext-heavy.lock.d"; mkdir -p "$HOME/.cache"
-until mkdir "$lock" 2>/dev/null; do sleep 20; done
-trap 'rmdir "$lock"' EXIT
-while [ "$(sysctl -n vm.loadavg | awk '{print int($2)}')" -ge 10 ]; do sleep 20; done
-"$@"`;
+/** On the Mac mini every agent's heavy build takes ONE lock,
+ * /tmp/claude-501/mini-heavy-build.lock, held with lockf(1) for the whole
+ * build; the holder's pid goes into the file, as the other holders do. */
+const MINI_BUILD_LOCK = "/tmp/claude-501/mini-heavy-build.lock";
+function miniBuildLock(cmd: string[]): string[] {
+  return [
+    "/usr/bin/lockf",
+    "-k",
+    MINI_BUILD_LOCK,
+    "sh",
+    "-c",
+    'echo $$ >"$0"; exec "$@"',
+    MINI_BUILD_LOCK,
+    ...cmd,
+  ];
+}
+
+/** CARGO_BUILD_JOBS: at most 4 on the Mac mini (a shared machine). */
+function buildJobs(o: Options): number {
+  return isLinux ? o.buildJobs : Math.min(o.buildJobs, 4);
+}
 
 async function spawnLogged(
   cmd: string[],
@@ -2225,7 +2246,7 @@ async function main() {
         build: true,
         env: {
           ...CI_ENV,
-          CARGO_BUILD_JOBS: String(o.buildJobs),
+          CARGO_BUILD_JOBS: String(buildJobs(o)),
           CARGO_TERM_COLOR: "never",
         },
       },

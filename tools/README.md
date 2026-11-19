@@ -87,7 +87,9 @@ What it does:
   step) and of each harness suite (`unit`, `unit_node`, `specs`, `integration`,
   `node_compat`). The prebuilt V8 is verified once and reused, so a second run
   of the same commit builds nothing. On biscuits the build takes
-  `~/.fork-cargo.lock`; on the mini the heavy-build lock and a load gate.
+  `~/.fork-cargo.lock`; on the mini the one heavy-build lock every agent there
+  shares, `/tmp/claude-501/mini-heavy-build.lock` (held with `lockf`), at
+  `-j 4`, under `nice`.
 - **Runs the built test binaries** with the gate's environment (`CI=true`, so
   the harness retries and writes its JSON report, `CARGO_PROFILE_DEV_DEBUG=0`,
   `RUST_BACKTRACE=full`, ...), each binary from its package directory with the
