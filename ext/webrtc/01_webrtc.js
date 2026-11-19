@@ -4244,6 +4244,18 @@ function midsOf(sdp) {
 
 // An EncodedMediaTrack's codec, and for audio the telephone-event formats
 // RTCDTMFSender needs (media.rs `track_preferences`).
+// wpt100:transceiver: ops fail with WebRtcError::InvalidModification
+// (lib.rs: class "DOMExceptionInvalidModificationError"), which the runtime
+// registers no builder for, so the promise rejected with `undefined`. JSEP
+// ("an offer / answer other than the last one created") and
+// setCodecPreferences reject with an InvalidModificationError DOMException.
+core.registerErrorBuilder(
+  "DOMExceptionInvalidModificationError",
+  function DOMExceptionInvalidModificationError(msg) {
+    return new DOMException(msg, "InvalidModificationError");
+  },
+);
+
 function trackPreferences(codec) {
   const out = [codec];
   if (
