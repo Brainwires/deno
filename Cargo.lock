@@ -2683,6 +2683,7 @@ dependencies = [
  "deno_ast",
  "deno_core_icudata",
  "deno_error",
+ "deno_net_route",
  "deno_ops",
  "deno_path_util",
  "deno_unsync",
@@ -2891,6 +2892,7 @@ dependencies = [
  "deno_features",
  "deno_fs",
  "deno_io",
+ "deno_net_route",
  "deno_path_util",
  "deno_permissions",
  "deno_tls",
@@ -3091,6 +3093,7 @@ version = "0.34.0"
 dependencies = [
  "deno_core",
  "deno_error",
+ "deno_net_route",
  "fastwebsockets",
  "http",
  "http-body-util",
@@ -3309,6 +3312,7 @@ dependencies = [
  "deno_core",
  "deno_error",
  "deno_features",
+ "deno_net_route",
  "deno_permissions",
  "deno_signals",
  "deno_tls",
@@ -3334,6 +3338,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "deno_net_route"
+version = "0.1.0"
+
+[[package]]
 name = "deno_node"
 version = "0.198.0"
 dependencies = [
@@ -3353,6 +3361,7 @@ dependencies = [
  "deno_io",
  "deno_native_certs",
  "deno_net",
+ "deno_net_route",
  "deno_node_crypto",
  "deno_os",
  "deno_package_json",
@@ -3912,6 +3921,7 @@ name = "deno_sandbox"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "deno_net_route",
  "deno_permissions",
  "futures",
  "libc",
@@ -3920,6 +3930,7 @@ dependencies = [
  "rand 0.8.6",
  "serde",
  "serde_json",
+ "socket2 0.5.5",
  "tempfile",
  "tokio",
  "url",
@@ -4194,6 +4205,7 @@ dependencies = [
  "deno_core",
  "deno_error",
  "deno_net",
+ "deno_net_route",
  "deno_permissions",
  "deno_tls",
  "log",
