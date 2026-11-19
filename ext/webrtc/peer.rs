@@ -541,6 +541,9 @@ pub struct Core {
   remote_known: bool,
   /// The engine went `checking` before that: reported once one is.
   checking_held: bool,
+  /// An ICE restart's `checking` on a connected transport was not reported
+  /// (see `collect_events`); cleared by the next other ICE state.
+  restart_masked: bool,
   /// Per data channel handle, the application bytes SCTP had taken from the
   /// send queue when last reported (`track_sent`).
   sent: HashMap<u32, u64>,
@@ -1876,6 +1879,19 @@ impl Core {
         }
         RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(s) => {
           let state = s.to_string();
+          // An ICE restart on a connected transport keeps its selected pair
+          // (the engine's previous media path) until the new generation
+          // selects one, so the transport stays connected: W3C webrtc-pc
+          // 4.3.3 has `checking` only for a transport with no working pair.
+          // Its `checking` (and the connection's `connecting`) is not
+          // reported; a restart from `disconnected` or `failed` is.
+          if state == "checking" && self.ice_up {
+            self.restart_masked = true;
+            continue;
+          }
+          if state != "checking" {
+            self.restart_masked = false;
+          }
           if state == "checking" && !self.remote_known {
             self.checking_held = true;
             continue;
@@ -1901,6 +1917,9 @@ impl Core {
         }
         RTCPeerConnectionEvent::OnConnectionStateChangeEvent(s) => {
           let state = s.to_string();
+          if state == "connecting" && self.restart_masked {
+            continue;
+          }
           if state == "connected" {
             self.dtls_connected = true;
             self.ice_up_at = None;
@@ -2335,6 +2354,7 @@ impl Peer {
         local_gathered: 0,
         remote_gathered: false,
         checking_held: false,
+        restart_masked: false,
         this: this.clone(),
         tcp_links: HashMap::new(),
         tcp_dialing: HashMap::new(),
