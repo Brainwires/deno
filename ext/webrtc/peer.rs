@@ -404,6 +404,31 @@ pub enum JsEvent {
     height: Option<u16>,
     info: crate::encoded_frames::ReceivedFrameInfo,
   },
+  // wpt100:mediasink
+  /// A receiver's RTP stopped for `media_sink::SILENCE`: its track mutes.
+  #[serde(rename = "trackmute")]
+  TrackMute { transceiver: u32 },
+  /// A receiver's video names a new coded size (`getSettings()`).
+  #[serde(rename = "trackresize")]
+  TrackResize {
+    transceiver: u32,
+    width: u32,
+    height: u32,
+  },
+  /// A received frame, for `Deno.webrtc.readFrames()` readers.
+  #[serde(rename = "mediaframe")]
+  MediaFrame {
+    transceiver: u32,
+    data: Payload,
+    #[serde(rename = "keyFrame")]
+    key_frame: bool,
+    #[serde(rename = "mimeType")]
+    mime_type: String,
+    #[serde(rename = "rtpTimestamp")]
+    rtp_timestamp: u32,
+    width: Option<u32>,
+    height: Option<u32>,
+  },
 }
 
 /// A received message's bytes, handed to V8 without a copy (as a
@@ -544,6 +569,8 @@ pub struct Core {
   pub(crate) media: MediaState,
   /// Receivers whose frames go to an encoded transform (encoded_frames.rs).
   pub(crate) transforms: crate::encoded_frames::ReceiverTransforms,
+  /// Received frames, sizes and silence per receiver (media_sink.rs).
+  pub(crate) sinks: crate::media_sink::MediaSinks,
   /// A remote candidate is known (signalled, or a check arrived): until
   /// then ICE stays `new`, as the spec's `checking` needs one.
   remote_known: bool,
@@ -2011,6 +2038,26 @@ impl Core {
               .push_back(JsEvent::TrackUnmute { transceiver: key });
           }
           self.media.saw_rtp(key, &packet.header);
+          // wpt100:mediasink
+          let sink = self.sink_packet(key, &packet, now);
+          if let Some((width, height)) = sink.resize {
+            self.events.push_back(JsEvent::TrackResize {
+              transceiver: key,
+              width,
+              height,
+            });
+          }
+          if let Some(frame) = sink.frame {
+            self.events.push_back(JsEvent::MediaFrame {
+              transceiver: key,
+              key_frame: frame.key_frame,
+              mime_type: frame.mime_type,
+              rtp_timestamp: frame.rtp_timestamp,
+              width: frame.width_height.map(|(w, _)| w),
+              height: frame.width_height.map(|(_, h)| h),
+              data: Payload::new(frame.data),
+            });
+          }
           if let Some(frame) = self.receive_for_transform(key, &packet) {
             self.events.push_back(JsEvent::EncodedFrame {
               transceiver: key,
@@ -2097,6 +2144,8 @@ impl Core {
       self.track_dtls_state();
       self.collect_events(now);
       self.track_sent();
+      // wpt100:mediasink
+      self.check_silence(now);
       if !a && !b {
         break;
       }
@@ -2116,6 +2165,10 @@ impl Core {
     }
     if let Some(since) = self.checking_since {
       let t = since + CHECKING_STALL;
+      deadline = Some(deadline.map_or(t, |d| d.min(t)));
+    }
+    // wpt100:mediasink
+    if let Some(t) = self.sinks.silence_deadline() {
       deadline = Some(deadline.map_or(t, |d| d.min(t)));
     }
     deadline
@@ -2380,6 +2433,7 @@ impl Peer {
         recv_rx: Some(recv_rx),
         media: MediaState::default(),
         transforms: Default::default(),
+        sinks: Default::default(),
         remote_known: false,
         sent: HashMap::new(),
         sctp_state: "",

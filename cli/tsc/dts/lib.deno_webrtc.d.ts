@@ -614,11 +614,14 @@ interface MediaTrackSettings {
 
 /**
  * A media track. Deno has no capture devices of its own: a remote track is
- * a receiver's (read its RTP with `Deno.webrtc.readRtp(receiver)`), a local
+ * a receiver's (read its RTP with `Deno.webrtc.readRtp(receiver)`, or its
+ * frames with `Deno.webrtc.readFrames(track)`; a remote video track's
+ * `getSettings()` has the received width and height; it mutes when its RTP
+ * stops for two seconds and unmutes on the next packet), a local
  * one is a `Deno.webrtc.EncodedMediaTrack`, or, under
  * `DENO_FAKE_MEDIA_DEVICES=1`, a fake camera's or microphone's from
  * `navigator.mediaDevices.getUserMedia()`. Only a capture device's track has
- * capabilities, settings and constraints.
+ * capabilities and constraints.
  *
  * @category WebRTC
  */
@@ -1794,6 +1797,58 @@ declare namespace Deno {
       receiver: RTCRtpReceiver,
       options?: { highWaterMark?: number },
     ): ReadableStream<Uint8Array>;
+
+    /**
+     * A frame a remote track received: the bytes its RTP packets carried,
+     * put back together and still encoded (Deno has no decoder).
+     *
+     * @category WebRTC
+     */
+    export interface ReceivedFrame {
+      /** The encoded frame (Annex B for H.264). */
+      data: Uint8Array;
+      /** The codec's MIME type, as negotiated (`"video/VP8"`, ...). */
+      codec: string;
+      /** Whether the bitstream marks it a key frame (video). */
+      keyFrame: boolean;
+      /**
+       * The video's coded size, as the bitstream names it (a VP8 or VP9 key
+       * frame header, an H.264 or H.265 SPS): the last key frame's, so a
+       * delta frame carries it too. `null` for audio, and until a key frame
+       * arrived.
+       */
+      width: number | null;
+      height: number | null;
+      /** The frame's RTP timestamp. */
+      rtpTimestamp: number;
+      /** When it was delivered, on the `performance.now()` clock. */
+      timestamp: number;
+    }
+
+    /**
+     * Reads the frames a remote track (an `RTCRtpReceiver`'s, or a clone of
+     * one) receives, in the order they complete. A frame whose packets
+     * arrived out of order or with one missing is dropped, and a new reader
+     * of a video track asks the sender for a key frame. Real-time media
+     * doesn't wait: a frame that arrives while `highWaterMark` frames (64)
+     * are queued is dropped. A disabled track delivers none; the stream
+     * closes when the track ends. AV1 frames are not delivered.
+     *
+     * @example
+     * ```ts
+     * pc.ontrack = async ({ track }) => {
+     *   for await (const frame of Deno.webrtc.readFrames(track)) {
+     *     console.log(frame.codec, frame.keyFrame, frame.width, frame.height);
+     *   }
+     * };
+     * ```
+     *
+     * @category WebRTC
+     */
+    export function readFrames(
+      track: MediaStreamTrack,
+      options?: { highWaterMark?: number },
+    ): ReadableStream<ReceivedFrame>;
 
     /**
      * Asks the remote sender of a receiver for a key frame (RTCP PLI).

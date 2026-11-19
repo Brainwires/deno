@@ -71,6 +71,9 @@ const {
   op_webrtc_pc_set_negotiation_options,
   op_webrtc_transceiver_set_header_extensions,
   op_void_async_deferred,
+  // wpt100:mediasink
+  op_webrtc_receiver_muted,
+  op_webrtc_receiver_read_frames,
 } = core.ops;
 const {
   ArrayBufferIsView,
@@ -1387,6 +1390,7 @@ class MediaStreamTrack extends EventTarget {
     if (state.readyState === "ended") return;
     // No `ended` event: stop() is the application's own doing.
     state.readyState = "ended";
+    closeFrameReaders(this);
     if (this[_source] !== null) {
       SetPrototypeDelete(this[_source].tracks, this);
       // A capture device whose last track stopped stops capturing.
@@ -1409,7 +1413,20 @@ class MediaStreamTrack extends EventTarget {
   getSettings() {
     webidl.assertBranded(this, MediaStreamTrackPrototype);
     const device = this[_source]?.device;
-    return device ? device.settings(this) : { deviceId: "", groupId: "" };
+    if (device) return device.settings(this);
+    // A remote video track: the coded size of the frames it receives, as
+    // their bitstream names it (0 until one does).
+    const receiver = this[_receiver];
+    if (receiver !== null && this[_trackState].kind === "video") {
+      const size = receiver[_frameSize];
+      return {
+        deviceId: "",
+        groupId: "",
+        width: size?.width ?? 0,
+        height: size?.height ?? 0,
+      };
+    }
+    return { deviceId: "", groupId: "" };
   }
   applyConstraints(constraints = undefined) {
     const error = brandError(this, MediaStreamTrackPrototype);
@@ -1443,14 +1460,36 @@ function setMuted(track, muted) {
   const state = track[_trackState];
   if (state.readyState === "ended" || state.muted === muted) return;
   state.muted = muted;
+  // A remote track: the next packet that arrives unmutes it again.
+  if (muted) rearmUnmute(track[_receiver]);
   fire(track, new Event(muted ? "mute" : "unmute"));
 }
 
+// The receiver's next RTP packet sends a `trackunmute` event again.
+function rearmUnmute(receiver) {
+  if (receiver === null || receiver === undefined) return;
+  const pc = receiver[_pc];
+  if (pc[_state].closed) return;
+  try {
+    op_webrtc_receiver_muted(pc[_rid], receiver[_transceiver][_key]);
+  } catch {
+    // The transceiver is gone.
+  }
+}
+
+// A track the user agent ends (anything but its own stop()): mediacapture-
+// main 4.3.1.2 queues a task that sets its readyState and fires `ended`,
+// and does nothing if the track ended meanwhile (stop(), or close()).
+// webrtc-pc's "stop sending and receiving" ends the receiver's track so.
 function endTrack(track) {
-  const state = track[_trackState];
-  if (state.readyState === "ended") return;
-  state.readyState = "ended";
-  fire(track, new Event("ended"));
+  if (track[_trackState].readyState === "ended") return;
+  setTimeout(() => {
+    const state = track[_trackState];
+    if (state.readyState === "ended") return;
+    state.readyState = "ended";
+    closeFrameReaders(track);
+    fire(track, new Event("ended"));
+  }, 0);
 }
 
 class MediaStreamTrackEvent extends Event {
@@ -7016,6 +7055,13 @@ function dispatchEngineEvent(pc, event) {
       const t = transceiverFor(pc, event.transceiver);
       if (t === undefined) break;
       const receiver = t[_state].receiver;
+      // wpt100:mediasink: a packet still in flight after the remote side
+      // stopped sending (by negotiation) leaves the track muted; the next
+      // packet asks again.
+      if (!receiver[_state].receiving) {
+        rearmUnmute(receiver);
+        break;
+      }
       setMuted(receiver[_state].track, false);
       for (let i = 0; i < receiver[_state].clones.length; ++i) {
         setMuted(receiver[_state].clones[i], false);
@@ -7026,6 +7072,33 @@ function dispatchEngineEvent(pc, event) {
       const t = transceiverFor(pc, event.transceiver);
       if (t === undefined) break;
       deliverRtp(t[_state].receiver, event.data);
+      break;
+    }
+    // wpt100:mediasink
+    case "trackmute": {
+      // The receiver's RTP stopped (media_sink.rs's SILENCE).
+      const t = transceiverFor(pc, event.transceiver);
+      if (t === undefined) break;
+      const receiver = t[_state].receiver;
+      setMuted(receiver[_state].track, true);
+      for (let i = 0; i < receiver[_state].clones.length; ++i) {
+        setMuted(receiver[_state].clones[i], true);
+      }
+      break;
+    }
+    case "trackresize": {
+      const t = transceiverFor(pc, event.transceiver);
+      if (t === undefined) break;
+      t[_state].receiver[_frameSize] = {
+        width: event.width,
+        height: event.height,
+      };
+      break;
+    }
+    case "mediaframe": {
+      const t = transceiverFor(pc, event.transceiver);
+      if (t === undefined) break;
+      deliverFrame(t[_state].receiver, event);
       break;
     }
     case "keyframerequest": {
@@ -7365,6 +7438,7 @@ function deliverRtp(receiver, data) {
 }
 
 function closeReaders(receiver) {
+  closeAllFrameReaders(receiver);
   const readers = receiver[_readers];
   if (readers === undefined) return;
   SetPrototypeForEach(readers, (c) => {
@@ -7375,6 +7449,120 @@ function closeReaders(receiver) {
     }
   });
   receiver[_readers] = undefined;
+}
+
+// readFrames(track): the frames a remote track receives, put back together
+// from RTP, still encoded (there is no decoder), as a stream. Like readRtp,
+// it doesn't wait: a frame that arrives while `highWaterMark` frames (64)
+// are queued is dropped. A disabled track delivers none; the stream closes
+// when the track ends. This is what the WPT runner's media elements play.
+const _frameReaders = Symbol("[[frameReaders]]");
+const _frameSize = Symbol("[[frameSize]]");
+
+function readFrames(track, options = undefined) {
+  if (!ObjectPrototypeIsPrototypeOf(MediaStreamTrackPrototype, track)) {
+    throw new TypeError("readFrames: expected a MediaStreamTrack");
+  }
+  const receiver = track[_receiver];
+  if (receiver === null) {
+    throw new TypeError(
+      "readFrames: expected a remote track (an RTCRtpReceiver's)",
+    );
+  }
+  const highWaterMark = options?.highWaterMark === undefined
+    ? 64
+    : webidl.converters["unsigned long"](options.highWaterMark);
+  const pc = receiver[_pc];
+  let entry;
+  return new streams.ReadableStream({
+    start(controller) {
+      entry = { track, controller };
+      if (pc[_state].closed || track[_trackState].readyState === "ended") {
+        controller.close();
+        return;
+      }
+      receiver[_frameReaders] ??= new SafeSet();
+      SetPrototypeAdd(receiver[_frameReaders], entry);
+      syncFrameSink(receiver, true);
+    },
+    cancel() {
+      const readers = receiver[_frameReaders];
+      if (readers === undefined) return;
+      SetPrototypeDelete(readers, entry);
+      syncFrameSink(receiver, false);
+    },
+  }, { highWaterMark, size: () => 1 });
+}
+
+// Tells the engine whether the receiver's frames are wanted; a new reader
+// of a video track asks the sender for a key frame, which it needs first.
+function syncFrameSink(receiver, started) {
+  const pc = receiver[_pc];
+  if (pc[_state].closed) return;
+  const on = (receiver[_frameReaders]?.size ?? 0) > 0;
+  const key = receiver[_transceiver][_key];
+  try {
+    op_webrtc_receiver_read_frames(pc[_rid], key, on);
+    if (started && on && receiver[_state].track[_trackState].kind === "video") {
+      op_webrtc_receiver_request_key_frame(pc[_rid], key);
+    }
+  } catch {
+    // The transceiver is gone.
+  }
+}
+
+function deliverFrame(receiver, event) {
+  const readers = receiver[_frameReaders];
+  if (readers === undefined || readers.size === 0) return;
+  const timestamp = performance.now();
+  let first = true;
+  SetPrototypeForEach(readers, (entry) => {
+    const state = entry.track[_trackState];
+    if (state.readyState !== "live" || !state.enabled) return;
+    if (entry.controller.desiredSize <= 0) return;
+    // Every reader gets its own copy but the first.
+    entry.controller.enqueue({
+      data: first ? event.data : TypedArrayPrototypeSlice(event.data),
+      codec: event.mimeType,
+      keyFrame: event.keyFrame,
+      width: event.width ?? null,
+      height: event.height ?? null,
+      rtpTimestamp: event.rtpTimestamp,
+      timestamp,
+    });
+    first = false;
+  });
+}
+
+// The track ended: its readers' streams close.
+function closeFrameReaders(track) {
+  const receiver = track[_receiver];
+  const readers = receiver?.[_frameReaders];
+  if (readers === undefined) return;
+  SetPrototypeForEach(readers, (entry) => {
+    if (entry.track !== track) return;
+    SetPrototypeDelete(readers, entry);
+    try {
+      entry.controller.close();
+    } catch {
+      // Already closed.
+    }
+  });
+  syncFrameSink(receiver, false);
+}
+
+function closeAllFrameReaders(receiver) {
+  const readers = receiver[_frameReaders];
+  if (readers === undefined) return;
+  receiver[_frameReaders] = undefined;
+  SetPrototypeForEach(readers, (entry) => {
+    try {
+      entry.controller.close();
+    } catch {
+      // Already closed.
+    }
+  });
+  syncFrameSink(receiver, false);
 }
 
 function requestKeyFrame(receiver) {
@@ -7564,6 +7752,8 @@ const webrtcNs = ObjectFreeze({
   Network: RtcNetwork,
   createNetwork,
   readRtp,
+  // wpt100:mediasink
+  readFrames,
   requestKeyFrame,
   exportCertificate,
   importCertificate,
