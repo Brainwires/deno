@@ -17913,6 +17913,134 @@ where the changes are discussed.
        "denext/flake_hunt.ts".
      - Node tests enabled: none.
 
+460. **`fix(ext/webrtc)`: WebRTC closer to browsers on the web-platform-tests:
+     the operations chain, `negotiationneeded`, the four description slots,
+     interface objects, `getStats()` references** (`webrtc/d28-wpt`; runtime;
+     `ext/webrtc/{01_webrtc.js,04_sframe.js,lib.rs,peer.rs,media.rs,tests.rs}`,
+     `runtime/js/{98_global_scope_shared.js,99_main.js}`,
+     `tests/unit/webrtc_test.ts`, `Cargo.toml`). A comparison with the four
+     browsers on wpt.fyi (item 452's suites, WPT `71b58bb19`) had Deno at 1,915
+     of 3,338 subtests, browsers at 2,564 to 2,803, and 515 subtests that a
+     browser passes, Deno fails and no DOM or media element is involved in. This
+     item takes the largest groups of those.
+     - **Operations chain** (W3C webrtc-pc section 4.4.1.2): `createOffer`,
+       `createAnswer`, `setLocalDescription`, `setRemoteDescription`,
+       `addIceCandidate` and `replaceTrack` run one at a time in call order. An
+       operation on an empty chain starts inside the call, so a wrong state
+       rejects within the task; one that runs takes a task of the event loop to
+       finish (it was a microtask), so the state attributes and events change in
+       that task, not inside the call. An operation pending when the connection
+       closes never settles (it rejected). `getStats()` and `setParameters()`
+       are not on the chain and take a task too.
+     - **`negotiationneeded`** is the spec's algorithm in `01_webrtc.js`, not
+       the engine's flag: "check if negotiation is needed" over the current
+       descriptions (a data channel with no `m=application` section, a
+       transceiver with no media section, a direction neither description has, a
+       sender's stream ids other than the negotiated ones, a stopping
+       transceiver, `restartIce()` credentials still in use), and "update the
+       negotiation-needed flag": the event is a task of its own, fires once for
+       any number of changes, only with an empty chain and in the stable state,
+       and not at all when the need went away before the task ran.
+     - **`restartIce()`** keeps the credentials to replace
+       (`[[LocalIceCredentialsToReplace]]`): the next offer restarts ICE, also a
+       parameterless `setLocalDescription()`; a completed negotiation with fresh
+       credentials (the peer's restart included) retires them, a rollback does
+       not; before the first negotiation it does nothing.
+     - **Description slots:** `currentLocalDescription` /
+       `currentRemoteDescription` keep the negotiated pair while a new offer is
+       pending (they read `null` outside the stable state), the pending pair is
+       only what is being negotiated, and each keeps its value after `close()`
+       (`op_webrtc_pc_descriptions` returns the engine's four).
+     - **Glare:** a remote offer in `have-local-offer` rolls the local offer
+       back in a task of its own (`signalingstatechange` to `stable`), then
+       applies; the rollback stands when the offer fails. A description that is
+       not SDP rejects with an `RTCError` (`sdp-syntax-error`).
+     - **Rollback and `a=inactive`:** rolling back a remote offer that took a
+       track away brings it back with a `track` event; a remote `a=inactive`
+       section pauses a transceiver instead of stopping it (engine), and each
+       remote offer is answered from the application's direction, which an
+       earlier answer no longer narrows.
+     - **JSEP details:** a transceiver `addTransceiver()` made is not taken by a
+       remote offer's new media section, only one `addTrack()` made (RFC 9429
+       section 5.10; engine flag, `addTrack: true` from JavaScript); one
+       `a=msid` line per stream of a sender and `a=msid:-` for none (engine); a
+       remote section with no `a=msid` puts its track in a default stream;
+       `sendEncodings`: one encoding for audio, at most 16 for video, no `rid`
+       on a lone one, `scaleResolutionDownBy` 1 where missing when another
+       encoding has one; `setParameters()` without `encodings` is a `TypeError`.
+     - **Interface objects** are data properties of the global object, as Web
+       IDL has them
+       (`Object.getOwnPropertyDescriptor(globalThis,
+       "RTCPeerConnection")`
+       has a `value` and no getter), and still load the module on first use:
+       `op_webrtc_data_globals` turns the lazily loaded accessors into V8 lazy
+       data properties at bootstrap, in windows and workers (36 names in a
+       window, one op call). Event handler attributes check their `this` and are
+       named `get onopen` / `set onopen`; `RTCStatsReport`'s `@@iterator` is
+       `entries`; constructor and method lengths match the IDL; the
+       promise-returning methods of `RTCRtpSender` / `RTCRtpReceiver` reject on
+       a wrong `this`.
+     - **`getStats()`:** every `...Id` member names a stats object of the report
+       (a candidate pair its candidates, the peer-reflexive remote one included:
+       engine; a codec its transport; an outbound stream its codec and its
+       `media-source`, both new), a member the engine had no value for is left
+       out (it was `""` or `"Unspecified"`), `base64Certificate` is base64 (it
+       was hex), `iceLocalUsernameFragment` is the ufrag in use, and `dtlsRole`
+       is the role the descriptions negotiated, before DTLS starts.
+     - Engine
+       ([Brainwires/webrtc-rs-rtc](https://github.com/Brainwires/webrtc-rs-rtc)
+       `webrtc/d28-wpt`, on `0.21.1+brainwires.3`): the `a=msid` lines, the
+       `set_associable_with_remote_offer` flag, `a=inactive` without a stop, the
+       selected pair's candidates in the stats report, and the ICE restart
+       below; `FORK.md` there lists them.
+     - **An ICE restart no longer interrupts data** (engine, RFC 8445 section
+       9): the agent keeps writing to, and accepting from, the pair it had until
+       the restart selects a new one. It dropped the selected pair when the
+       restart was applied (the offerer at `setLocalDescription`, the answerer
+       at `setRemoteDescription`), so data channels and media stopped for as
+       long as signalling took; a parameterless `setLocalDescription()` after
+       `restartIce()` now restarts ICE and would have reached that. The engine's
+       `ice_restart_keeps_path_rtc2rtc` sends a message each way after every
+       signalling step, on a simulated network.
+     - **Measured** (the Mac mini, every `webrtc*` file bundled as the WPT
+       runner bundles it, loopback only, no `--dom-shim`; a subtest a browser
+       reports and Deno does not counts as a fail): 2,079 of 3,338 (62.3%; it
+       was 1,915, 57.4%, with the build of item 452 on Linux), 2,012 of the
+       3,109 some browser passes, 1,726 of the 2,360 all four pass. 169 subtests
+       newly pass: `idlharness` 66, the negotiation, rollback and operations
+       files 67 (`RTCPeerConnection-onnegotiationneeded` 18, `-restartIce` 13,
+       `-operations` 10, `-setRemoteDescription*` 9, `RollbackEvents` 6,
+       `dtls-fingerprint-validation` 5, ...), stats 25 (`supported-stats` 22,
+       `dtls-setup` 3), codecs, parameters and msid 11. Two that passed fail:
+       `supported-stats`' `tcpType` (a UDP candidate has none; it was
+       `"Unspecified"`) and `playoutId` (it was `""`, an id that named nothing;
+       "All references resolve" passes instead). With the ICE restart fix: 2,080, and
+       2,463 (73.8%) with the runner's `--dom-shim`. The run with `wpt.ts` on
+       Linux and the expectation files are refreshed once, on the merged train.
+     - **Known gaps left:** a transferable `RTCDataChannel` (48 subtests;
+       Firefox and Safari); `getHeaderExtensionsToNegotiate` (21; Chrome); the
+       identity provider API (17; Firefox); `stop()`'s stopping / stopped steps
+       (20); duplicate-msid rejection; `RTCPeerConnection-mandatory-getStats`
+       (72) needs the runner's `--dom-shim`, whose canvas feature test it trips
+       on.
+     - User-facing note: `negotiationneeded` and the results of the negotiation
+       methods arrive a task later than before, as in browsers (code that read
+       `signalingState` right after calling, without awaiting, sees the old
+       state); `currentLocalDescription` is no longer `null` during a
+       renegotiation; an operation still pending at `close()` does not reject.
+     - Tests: `tests/unit/webrtc_test.ts`, thirteen tests from
+       `webrtcInterfaceObjectsAreDataProperties` to
+       `webrtcIceRestartKeepsDataFlowing` (the operations chain, the description
+       slots, the negotiation-needed cases, `addTransceiver` against a remote
+       offer, the msid lines, stats references, the encoding rules, glare);
+       `deno_webrtc`'s
+       `description_slots_keep_the_current_pair_during_renegotiation`,
+       `stats_selected_pair_candidates_are_in_the_report` and
+       `remote_sections_streams`; the engine's
+       `test_offer_has_one_msid_line_per_stream` and
+       `test_remote_offer_skips_a_transceiver_that_is_not_associable`.
+     - Node tests enabled: none; `node:` has no WebRTC API.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

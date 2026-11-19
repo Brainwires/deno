@@ -23,6 +23,7 @@ import {
   op_proto_set_attempted,
   op_set_format_exception_callback,
   op_snapshot_options,
+  op_webrtc_data_globals,
   op_worker_close,
   op_worker_get_type,
   op_worker_maybe_wait_for_debugger,
@@ -123,6 +124,7 @@ const {
 import {
   loadEncodedTransform,
   unstableForWindowOrWorkerGlobalScope,
+  webrtcGlobalNames,
   windowOrWorkerGlobalScope,
 } from "ext:runtime/98_global_scope_shared.js";
 import {
@@ -673,6 +675,16 @@ function dispatchUnloadEvent() {
 let hasBootstrapped = false;
 // Set up global properties shared by main and worker runtime.
 core.defineGlobalProperties(globalThis, windowOrWorkerGlobalScope);
+// The WebRTC interface objects of each realm (DENEXT.md item 370), made data
+// properties at bootstrap.
+const webrtcWindowGlobals = webrtcGlobalNames({
+  ...windowOrWorkerGlobalScope,
+  ...mainRuntimeGlobalProperties,
+});
+const webrtcWorkerGlobals = webrtcGlobalNames({
+  ...windowOrWorkerGlobalScope,
+  ...workerRuntimeGlobalProperties,
+});
 
 // Set up global properties shared by main and worker runtime that are exposed
 // by unstable features if those are enabled.
@@ -1381,6 +1393,7 @@ function bootstrapMainRuntime(runtimeOptions, warmup = false) {
     // `Object.defineProperty(this, undefined, ...)` which fails because the
     // global `undefined` is non-configurable on `globalThis`.
     core.defineGlobalProperties(globalThis, mainRuntimeGlobalProperties);
+    op_webrtc_data_globals(globalThis, webrtcWindowGlobals);
     ObjectDefineProperties(globalThis, {
       // TODO(bartlomieju): in the future we might want to change the
       // behavior of setting `name` to actually update the process name.
@@ -1570,6 +1583,7 @@ function bootstrapWorkerRuntime(
       delete workerRuntimeGlobalProperties["self"];
     }
     ObjectDefineProperties(globalThis, workerRuntimeGlobalProperties);
+    op_webrtc_data_globals(globalThis, webrtcWorkerGlobals);
     ObjectDefineProperties(globalThis, {
       name: core.propWritable(name),
       // TODO(bartlomieju): should be readonly?

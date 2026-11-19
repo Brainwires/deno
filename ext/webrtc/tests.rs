@@ -1060,3 +1060,94 @@ fn media_chain_delivers_key_frame_requests() {
   }
   assert_eq!(delivered, 1, "the PLI reached the application");
 }
+
+/// The four description slots: a current description stays while a new offer
+/// is pending, and a rollback leaves it in place.
+#[tokio::test]
+async fn description_slots_keep_the_current_pair_during_renegotiation() {
+  let (a, _b, _, _, _) = connect(reliable()).await;
+  let slots = a.descriptions();
+  assert_eq!(slots.current_local.as_ref().unwrap().0, "offer");
+  assert_eq!(slots.current_remote.as_ref().unwrap().0, "answer");
+  assert!(slots.pending_local.is_none());
+  assert!(slots.pending_remote.is_none());
+  let current = slots.current_local.unwrap().1;
+
+  let offer = a.create_offer(true).unwrap();
+  a.set_local_description("offer", offer).unwrap();
+  let slots = a.descriptions();
+  assert_eq!(slots.pending_local.as_ref().unwrap().0, "offer");
+  assert_eq!(slots.current_remote.as_ref().unwrap().0, "answer");
+  // `localDescription` is the pending one; the current one is still there.
+  assert_eq!(a.local_description(), slots.pending_local);
+  let ufrag = |sdp: &str| {
+    sdp
+      .lines()
+      .find_map(|l| l.strip_prefix("a=ice-ufrag:"))
+      .unwrap()
+      .to_string()
+  };
+  assert_eq!(ufrag(&slots.current_local.unwrap().1), ufrag(&current));
+  assert_ne!(ufrag(&slots.pending_local.unwrap().1), ufrag(&current));
+
+  a.set_local_description("rollback", String::new()).unwrap();
+  let slots = a.descriptions();
+  assert!(slots.pending_local.is_none());
+  assert_eq!(ufrag(&slots.current_local.unwrap().1), ufrag(&current));
+}
+
+/// The selected pair's candidates are stats objects of the same report, also
+/// when the remote one was learned from a connectivity check.
+#[tokio::test]
+async fn stats_selected_pair_candidates_are_in_the_report() {
+  let (a, _b, _, _, _) = connect(reliable()).await;
+  let stats = a.stats(None).unwrap();
+  let ids: Vec<&str> = stats
+    .iter()
+    .filter_map(|s| s.get("id").and_then(|v| v.as_str()))
+    .collect();
+  let pair = stats
+    .iter()
+    .find(|s| {
+      s.get("type").and_then(|v| v.as_str()) == Some("candidate-pair")
+        && s.get("nominated").and_then(|v| v.as_bool()) == Some(true)
+    })
+    .expect("a nominated pair");
+  for (member, prefix) in [
+    ("localCandidateId", "RTCLocalIceCandidate_"),
+    ("remoteCandidateId", "RTCRemoteIceCandidate_"),
+  ] {
+    let id = pair.get(member).and_then(|v| v.as_str()).unwrap();
+    let full = format!("{prefix}{id}");
+    assert!(
+      ids.contains(&id) || ids.contains(&full.as_str()),
+      "{member} {id} is not in the report: {ids:?}"
+    );
+  }
+}
+
+/// A remote media section's streams: its `a=msid` stream ids, none for the
+/// id `-`, and one default stream when the section has no `a=msid` at all.
+#[test]
+fn remote_sections_streams() {
+  let sdp = "v=0\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+a=mid:0\r\n\
+a=msid:one track\r\n\
+a=msid:two track\r\n\
+a=msid:one track\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+a=mid:1\r\n\
+a=msid:- track\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+a=mid:2\r\n\
+a=sendonly\r\n\
+m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+a=mid:3\r\n";
+  let sections = crate::media::sections(sdp);
+  assert_eq!(sections["0"].streams, vec!["one", "two"]);
+  assert!(sections["1"].streams.is_empty());
+  assert_eq!(sections["2"].streams, vec!["default"]);
+  assert_eq!(sections["2"].direction, "sendonly");
+  assert!(sections["3"].streams.is_empty());
+}

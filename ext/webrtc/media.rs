@@ -313,6 +313,20 @@ pub struct TransceiverArg {
   /// The `Deno.webrtc.EncodedMediaTrack` codec, which becomes the sender's
   /// preferred codec.
   pub codec: Option<CodecArg>,
+  /// `addTrack` made the transceiver (not `addTransceiver`): a remote
+  /// offer's new media section of the same kind may take it.
+  #[serde(default)]
+  pub add_track: bool,
+}
+
+/// The stream ids of a sender's `a=msid` lines: the `MediaStream`s it is in,
+/// or `-` for none (RFC 9429 section 5.2.1).
+fn msid_streams(streams: Vec<String>) -> Vec<String> {
+  if streams.is_empty() {
+    vec!["-".to_string()]
+  } else {
+    streams
+  }
 }
 
 /// One m-section of the remote description, by mid.
@@ -341,19 +355,32 @@ pub struct TransceiverInfo {
   pub remote: Option<RemoteSection>,
 }
 
+/// The id of the stream a remote track with no `a=msid` is in.
+const DEFAULT_STREAM_ID: &str = "default";
+
 /// The m-sections of an SDP, keyed by mid.
 pub fn sections(sdp: &str) -> HashMap<String, RemoteSection> {
   let mut out = HashMap::new();
   let mut current: Option<(Option<String>, RemoteSection)> = None;
-  let mut flush = |current: &mut Option<(Option<String>, RemoteSection)>| {
-    if let Some((Some(mid), section)) = current.take() {
+  // Whether the current section has an `a=msid` line at all.
+  let mut has_msid = false;
+  let mut flush = |current: &mut Option<(Option<String>, RemoteSection)>,
+                   has_msid: bool| {
+    if let Some((Some(mid), mut section)) = current.take() {
+      // A media section with no `a=msid` at all (an endpoint that predates
+      // it): its track is in one default stream (RFC 9429 section 5.10; the
+      // id `-` means "no stream" and stays none).
+      if !has_msid && (section.kind == "audio" || section.kind == "video") {
+        section.streams.push(DEFAULT_STREAM_ID.to_string());
+      }
       out.insert(mid, section);
     }
   };
   for line in sdp.lines() {
     let line = line.trim_end();
     if let Some(m) = line.strip_prefix("m=") {
-      flush(&mut current);
+      flush(&mut current, has_msid);
+      has_msid = false;
       let mut fields = m.split_ascii_whitespace();
       let kind = fields.next().unwrap_or_default().to_string();
       let port = fields.next().unwrap_or_default();
@@ -377,6 +404,7 @@ pub fn sections(sdp: &str) -> HashMap<String, RemoteSection> {
     if let Some(value) = attr.strip_prefix("mid:") {
       *mid = Some(value.trim().to_string());
     } else if let Some(value) = attr.strip_prefix("msid:") {
+      has_msid = true;
       if let Some(stream) = value.split_ascii_whitespace().next()
         && stream != "-"
         && !section.streams.iter().any(|s| s == stream)
@@ -388,7 +416,7 @@ pub fn sections(sdp: &str) -> HashMap<String, RemoteSection> {
       section.direction = attr.to_string();
     }
   }
-  flush(&mut current);
+  flush(&mut current, has_msid);
   out
 }
 
@@ -620,22 +648,6 @@ impl MediaState {
   }
 }
 
-fn random_id() -> String {
-  use std::fmt::Write;
-  let mut out = String::with_capacity(32);
-  for _ in 0..16 {
-    let _ = write!(out, "{:02x}", rand_byte());
-  }
-  out
-}
-
-fn rand_byte() -> u8 {
-  let mut b = [0u8; 1];
-  // A track id only needs to be unique, not secret.
-  let _ = aws_lc_rs::rand::fill(&mut b);
-  b[0]
-}
-
 impl Core {
   /// Gives every engine transceiver a key (new ones are appended by the
   /// engine; `from_remote` marks those a remote offer created).
@@ -746,7 +758,7 @@ impl Core {
     };
     let index = match &arg.track {
       Some(track) => {
-        let stream = arg.streams.first().cloned().unwrap_or_else(random_id);
+        let stream = msid_streams(arg.streams.clone()).remove(0);
         let engine_track = MediaStreamTrack::new(
           stream,
           track.id.clone(),
@@ -768,9 +780,16 @@ impl Core {
     let key = self.media.keys[index];
     self.media.kinds.insert(key, kind);
     if let Some(mut sender) = self.pc.rtp_sender(index.into()) {
-      sender.set_streams(arg.streams);
+      sender.set_streams(msid_streams(arg.streams));
       let id = sender.track().track_id().to_string();
       self.media.track_keys.insert(id, key);
+    }
+    // RFC 9429 section 5.10: a remote offer's new media section takes a
+    // transceiver `addTrack` created, never one `addTransceiver` did.
+    if !arg.add_track
+      && let Some(mut t) = self.pc.rtp_transceiver(index)
+    {
+      t.set_associable_with_remote_offer(false);
     }
     if arg.track.is_none() {
       self.media.paused.insert(key);
@@ -804,7 +823,8 @@ impl Core {
     };
     let codings = sender.track().codings().to_vec();
     let old = sender.track().track_id().to_string();
-    let stream = streams.first().cloned().unwrap_or_else(random_id);
+    let streams = msid_streams(streams);
+    let stream = streams[0].clone();
     sender
       .replace_track(MediaStreamTrack::new(
         stream,
@@ -819,6 +839,7 @@ impl Core {
     self.media.track_keys.insert(track.id, key);
     self.media.paused.remove(&key);
     if let Some(mut t) = self.pc.rtp_transceiver(index) {
+      t.set_associable_with_remote_offer(true);
       let has_recv = t.direction().has_recv();
       t.set_direction(RTCRtpTransceiverDirection::from_send_recv(
         true, has_recv,
@@ -842,7 +863,7 @@ impl Core {
   ) -> Result<(), WebRtcError> {
     let index = self.index_of(key)?;
     if let Some(mut sender) = self.pc.rtp_sender(index.into()) {
-      sender.set_streams(streams);
+      sender.set_streams(msid_streams(streams));
     }
     Ok(())
   }
