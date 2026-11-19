@@ -1829,7 +1829,10 @@ function hexToBase64(hex) {
 // codec an outbound stream sends with, and a `media-source` for each sender
 // with a track.
 function refineStats(pc, engineEntries, now, whole) {
-  const entries = ArrayPrototypeFilter(engineEntries, remoteStreamReported);
+  const entries = withoutRetiredStreams(
+    pc,
+    ArrayPrototypeFilter(engineEntries, remoteStreamReported),
+  );
   const ids = new SafeSet();
   let transportId = null;
   for (let i = 0; i < entries.length; ++i) {
@@ -2054,6 +2057,52 @@ function dropUnresolvedReferences(entries) {
       }
     }
   }
+}
+
+// The transceiver an RTP stream's `mid` names, if this connection still
+// has it.
+function transceiverOfStream(state, stats) {
+  if (typeof stats.mid !== "string" || stats.mid === "") return undefined;
+  return ArrayPrototypeFind(
+    state.transceivers,
+    (t) => t[_state].mid === stats.mid,
+  );
+}
+
+// The RTP stream stats whose lifetime ended (webrtc-stats 6.1, "lifetime
+// considerations"): those of a transceiver that is stopped (webrtc-pc 5.4,
+// "stop the RTCRtpTransceiver": a negotiation completed after stop()) or
+// gone, with the remote stream objects and the codecs only they named.
+// stop() alone keeps them until that negotiation.
+function withoutRetiredStreams(pc, entries) {
+  const state = pc[_state];
+  const retired = new SafeSet();
+  const codecs = new SafeSet();
+  for (let i = 0; i < entries.length; ++i) {
+    const stats = entries[i];
+    if (stats.type !== "inbound-rtp" && stats.type !== "outbound-rtp") {
+      continue;
+    }
+    if (typeof stats.mid !== "string" || stats.mid === "") continue;
+    const t = transceiverOfStream(state, stats);
+    if (t !== undefined && !t[_state].stopped) continue;
+    SetPrototypeAdd(retired, stats.id);
+    if (typeof stats.codecId === "string") {
+      SetPrototypeAdd(codecs, stats.codecId);
+    }
+  }
+  if (SetPrototypeGetSize(retired) === 0) return entries;
+  const kept = ArrayPrototypeFilter(
+    entries,
+    (e) =>
+      !SetPrototypeHas(retired, e.id) && !SetPrototypeHas(retired, e.localId),
+  );
+  return ArrayPrototypeFilter(
+    kept,
+    (e) =>
+      e.type !== "codec" || !SetPrototypeHas(codecs, e.id) ||
+      ArrayPrototypeSome(kept, (o) => o.codecId === e.id),
+  );
 }
 
 // The DTLS role the current descriptions negotiated (RFC 5763 section 5: the
