@@ -155,6 +155,19 @@ core.registerCloneableResource(
   "RTCCertificate",
   (data) => loadWebRtc().deserializeCertificate(data),
 );
+// wpt100:S2 RTCDataChannel is Transferable, in every realm too
+// (ext/webrtc's 05_transfer.js).
+let _webrtcTransferMod;
+const loadWebRtcTransfer = () =>
+  _webrtcTransferMod ??
+    (_webrtcTransferMod = core.loadExtScript(
+      "ext:deno_webrtc/05_transfer.js",
+    ));
+core.registerTransferableResource(
+  "RTCDataChannel",
+  (channel) => loadWebRtcTransfer().transferSteps(channel),
+  (rid) => loadWebRtcTransfer().transferReceivingSteps(rid),
+);
 let _htmlRewriterMod;
 const loadHTMLRewriter = () =>
   _htmlRewriterMod ??

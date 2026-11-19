@@ -171,6 +171,8 @@ deno_core::extension!(
     "02_media_devices.js",
     "03_encoded_transform.js",
     "04_sframe.js",
+    // wpt100:S2 transferable RTCDataChannel
+    "05_transfer.js",
   ],
 );
 

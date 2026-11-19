@@ -773,6 +773,17 @@ function priorityFromDcep(value) {
   return "high";
 }
 
+// Transferable RTCDataChannel (W3C WebRTC 6.2): the transfer and the channel's
+// life in the receiving realm are 05_transfer.js. On this side a transferred
+// channel's engine events go to `_transferPort`; a received channel (its
+// [[pc]] in another realm) sends through `_proxyPort`.
+const _transferPort = Symbol("[[transferPort]]");
+const _proxyPort = Symbol("[[proxyPort]]");
+let transferMod;
+const loadTransfer = () =>
+  transferMod ??
+    (transferMod = core.loadExtScript("ext:deno_webrtc/05_transfer.js"));
+
 class RTCDataChannel extends EventTarget {
   constructor(key = undefined, pc = undefined, init = undefined) {
     if (key !== illegalConstructorKey) {
@@ -782,10 +793,15 @@ class RTCDataChannel extends EventTarget {
     this[_pc] = pc;
     this[_channel] = init.channel;
     this[_init] = init;
-    this[_state] = {
+    const state = {
       readyState: init.readyState ?? "connecting",
       id: init.id ?? null,
       binaryType: "arraybuffer",
+      // [[IsTransferable]]: true until a task queued at creation runs, send()
+      // is called or the channel is transferred.
+      transferable: pc !== null,
+      // A received channel's maxMessageSize (its connection is elsewhere).
+      maxMessageSize: init.maxMessageSize ?? null,
       lowThreshold: 0,
       // [[BufferedAmount]]: what send() accepted that SCTP hasn't taken from
       // its queue yet (`dcsent`).
@@ -799,7 +815,23 @@ class RTCDataChannel extends EventTarget {
       // close() was called with sends queued: the close follows them.
       closeAfterQueue: false,
     };
+    this[_state] = state;
     this[webidl.brand] = webidl.brand;
+    // W3C "create an RTCDataChannel": [[IsTransferable]] turns false in a
+    // task queued now, ahead of any task that delivers the channel's
+    // messages, so a channel is transferred in the task that made it (the
+    // `datachannel` event's, or the createDataChannel() caller's). A system
+    // timer: ordered with the program's own `setTimeout(0)`, it keeps
+    // nothing alive and is no test-sanitizer resource.
+    if (state.transferable) {
+      core.createSystemTimer(
+        () => {
+          state.transferable = false;
+        },
+        0,
+        false,
+      );
+    }
   }
 
   get label() {
@@ -835,10 +867,11 @@ class RTCDataChannel extends EventTarget {
     webidl.assertBranded(this, RTCDataChannelPrototype);
     const state = this[_state];
     // The engine assigns an in-band channel's id once the DTLS role is
-    // negotiated (an answer is applied); it doesn't change after that.
+    // negotiated (an answer is applied); it doesn't change after that. A
+    // received channel learns it from the realm that has the connection.
     if (state.id === null && state.readyState !== "closed") {
       const pc = this[_pc];
-      if (!pc[_state].closed) {
+      if (pc !== null && !pc[_state].closed) {
         const id = op_webrtc_dc_id(pc[_rid], this[_channel]);
         if (id >= 0) state.id = id;
       }
@@ -862,7 +895,9 @@ class RTCDataChannel extends EventTarget {
     const threshold = webidl.converters["unsigned long"](value);
     this[_state].lowThreshold = threshold;
     const pc = this[_pc];
-    if (!pc[_state].closed) {
+    if (pc === null) {
+      loadTransfer().proxySetThreshold(this, threshold);
+    } else if (!pc[_state].closed) {
       op_webrtc_dc_set_low_threshold(pc[_rid], this[_channel], threshold);
     }
   }
@@ -886,6 +921,8 @@ class RTCDataChannel extends EventTarget {
       "Failed to execute 'send' on 'RTCDataChannel'",
     );
     const state = this[_state];
+    // W3C send() step 2: a channel that sent can no longer be transferred.
+    state.transferable = false;
     if (state.readyState !== "open") {
       throw invalidState(
         `RTCDataChannel.readyState is '${state.readyState}', not 'open'`,
@@ -970,14 +1007,28 @@ defineHandler(RTCDataChannel.prototype, "close");
 defineHandler(RTCDataChannel.prototype, "message");
 webidl.configureInterface(RTCDataChannel);
 const RTCDataChannelPrototype = RTCDataChannel.prototype;
+// [Transferable] (W3C WebRTC 6.2): postMessage() takes a channel in its
+// transfer list; the steps are registered for every realm by
+// 98_global_scope_shared.js.
+ObjectDefineProperty(RTCDataChannelPrototype, core.hostObjectBrand, {
+  __proto__: null,
+  value: "RTCDataChannel",
+  enumerable: false,
+  configurable: false,
+  writable: false,
+});
 
 // W3C send() step 5: a message larger than the SCTP transport's
 // maxMessageSize is a TypeError, thrown by send() itself.
 function checkMessageSize(channel, size) {
-  const sctp = channel[_pc][_state].sctp;
-  const limit = sctp === null || sctp === undefined
-    ? null
-    : sctp.maxMessageSize;
+  let limit;
+  const pc = channel[_pc];
+  if (pc === null) {
+    limit = channel[_state].maxMessageSize;
+  } else {
+    const sctp = pc[_state].sctp;
+    limit = sctp === null || sctp === undefined ? null : sctp.maxMessageSize;
+  }
   if (limit !== null && size > limit) {
     throw new TypeError(
       `Failed to execute 'send' on 'RTCDataChannel': the message (${size} bytes) is larger than the connection's maxMessageSize (${limit})`,
@@ -987,14 +1038,20 @@ function checkMessageSize(channel, size) {
 
 function closeTransport(channel) {
   const pc = channel[_pc];
-  if (!pc[_state].closed) {
+  if (pc === null) {
+    loadTransfer().proxyClose(channel);
+  } else if (!pc[_state].closed) {
     op_webrtc_dc_close(pc[_rid], channel[_channel]);
   }
 }
 
 function sendNow(channel, text, bytes) {
   const pc = channel[_pc];
-  op_webrtc_dc_send(pc[_rid], channel[_channel], text, bytes);
+  if (pc === null) {
+    loadTransfer().proxySend(channel, text, bytes);
+  } else {
+    op_webrtc_dc_send(pc[_rid], channel[_channel], text, bytes);
+  }
   channel[_state].buffered += TypedArrayPrototypeGetByteLength(bytes);
 }
 
@@ -1065,16 +1122,40 @@ function failChannel(channel, cause) {
 }
 
 // W3C "announce the RTCDataChannel as open" for a channel the remote peer
-// opened: a task after the `datachannel` event's.
-function announceOpen(pc, channel) {
+// opened: a task after the `datachannel` event's. A channel transferred in
+// that event hears it in its new realm.
+function announceOpen(pc, channel, event) {
   const next = op_void_async_deferred();
   if (!pc[_state].active) core.unrefOpPromise(next);
   PromisePrototypeThen(next, () => {
     if (pc[_state].closed) return;
+    if (channel[_transferPort] !== undefined) {
+      loadTransfer().forwardEvent(channel, event);
+      return;
+    }
     const state = channel[_state];
     if (state.readyState !== "open") return;
     fire(channel, new Event("open"));
   });
+}
+
+// SCTP took `bytes` of the channel's data from its queue: [[BufferedAmount]]
+// goes down, and crossing the threshold fires `bufferedamountlow`.
+function channelSent(channel, bytes) {
+  const s = channel[_state];
+  const before = s.buffered;
+  s.buffered = MathMax(0, before - bytes);
+  if (before > s.lowThreshold && s.buffered <= s.lowThreshold) {
+    fire(channel, new Event("bufferedamountlow"));
+  }
+}
+
+// W3C "receiving messages on a data channel" (what arrives while the channel
+// is closing still reaches it, as before).
+function deliverChannelMessage(channel, text, bytes) {
+  if (channel[_state].readyState === "closed") return;
+  const data = text ? core.decode(bytes) : toBinary(channel, bytes);
+  fire(channel, new MessageEvent("message", { data }));
 }
 
 function toBinary(channel, data) {
@@ -4167,6 +4248,11 @@ class RTCPeerConnection extends EventTarget {
     // `close` (in a later task, after close() returns).
     const channels = [];
     MapPrototypeForEach(this[_channels], (channel) => {
+      // A transferred channel closes in the realm it went to.
+      if (channel[_transferPort] !== undefined) {
+        loadTransfer().forwardEvent(channel, { type: "dcclose" });
+        return;
+      }
       if (channel[_state].readyState !== "closed") {
         channel[_state].readyState = "closed";
         ArrayPrototypePush(channels, channel);
@@ -5053,7 +5139,8 @@ function dispatchEngineEvent(pc, event) {
         // Opened by the remote peer: announced with `datachannel`. Its
         // readyState is already "open" there (so it can send), and `open`
         // follows in a task of its own (W3C "announce the channel as open"):
-        // a channel closed in the `datachannel` handler reports no `open`.
+        // a channel closed or transferred in the `datachannel` handler
+        // reports no `open` here.
         channel = new RTCDataChannel(illegalConstructorKey, pc, {
           channel: event.channel,
           id: event.id,
@@ -5068,7 +5155,11 @@ function dispatchEngineEvent(pc, event) {
         });
         MapPrototypeSet(pc[_channels], event.channel, channel);
         fire(pc, new RTCDataChannelEvent("datachannel", { channel }));
-        announceOpen(pc, channel);
+        announceOpen(pc, channel, event);
+        break;
+      }
+      if (channel[_transferPort] !== undefined) {
+        loadTransfer().forwardEvent(channel, event);
         break;
       }
       if (channel[_state].readyState !== "connecting") break;
@@ -5079,9 +5170,12 @@ function dispatchEngineEvent(pc, event) {
     }
     case "dcclosing": {
       const channel = channelFor(pc, event);
-      if (channel === undefined || channel[_state].readyState === "closed") {
+      if (channel === undefined) break;
+      if (channel[_transferPort] !== undefined) {
+        loadTransfer().forwardEvent(channel, event);
         break;
       }
+      if (channel[_state].readyState === "closed") break;
       channel[_state].readyState = "closing";
       fire(channel, new Event("closing"));
       break;
@@ -5090,6 +5184,10 @@ function dispatchEngineEvent(pc, event) {
       const channel = channelFor(pc, event);
       if (channel === undefined) break;
       MapPrototypeDelete(pc[_channels], event.channel);
+      if (channel[_transferPort] !== undefined) {
+        loadTransfer().forwardEvent(channel, event);
+        break;
+      }
       if (channel[_state].readyState === "closed") break;
       channel[_state].readyState = "closed";
       fire(channel, new Event("close"));
@@ -5098,6 +5196,10 @@ function dispatchEngineEvent(pc, event) {
     case "dcerror": {
       const channel = channelFor(pc, event);
       if (channel === undefined) break;
+      if (channel[_transferPort] !== undefined) {
+        loadTransfer().forwardEvent(channel, event);
+        break;
+      }
       fire(
         channel,
         new RTCErrorEvent("error", {
@@ -5112,24 +5214,21 @@ function dispatchEngineEvent(pc, event) {
     case "dcsent": {
       const channel = channelFor(pc, event);
       if (channel === undefined) break;
-      const s = channel[_state];
-      const before = s.buffered;
-      s.buffered = MathMax(0, before - event.bytes);
-      if (before > s.lowThreshold && s.buffered <= s.lowThreshold) {
-        fire(channel, new Event("bufferedamountlow"));
+      if (channel[_transferPort] !== undefined) {
+        loadTransfer().forwardEvent(channel, event);
+        break;
       }
+      channelSent(channel, event.bytes);
       break;
     }
     case "dcmessage": {
       const channel = channelFor(pc, event);
-      if (channel === undefined || channel[_state].readyState === "closed") {
+      if (channel === undefined) break;
+      if (channel[_transferPort] !== undefined) {
+        loadTransfer().forwardEvent(channel, event);
         break;
       }
-      const data = event.text ? core.decode(event.data) : toBinary(
-        channel,
-        event.data,
-      );
-      fire(channel, new MessageEvent("message", { data }));
+      deliverChannelMessage(channel, event.text, event.data);
       break;
     }
   }
@@ -5583,8 +5682,26 @@ return {
   RTCStatsReport,
   RTCTrackEvent,
   webrtcNs,
-  // wpt100:S2 for 98_global_scope_shared.js (RTCCertificate deserialization).
+  // wpt100:S2 for 98_global_scope_shared.js (RTCCertificate deserialization)
+  // and 05_transfer.js (transferred RTCDataChannels).
   deserializeCertificate,
+  dataChannelInternals: {
+    illegalConstructorKey,
+    _channel,
+    _init,
+    _pc,
+    _proxyPort,
+    _rid,
+    _state,
+    _transferPort,
+    RTCDataChannel,
+    RTCError,
+    RTCErrorEvent,
+    channelSent,
+    deliverChannelMessage,
+    failChannel,
+    fire,
+  },
   // For 02_media_devices.js: the track internals a capture device needs.
   mediaInternals: {
     illegalConstructorKey,
