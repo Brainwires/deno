@@ -848,18 +848,25 @@ jobs:
 
       - name: libclang (Windows)
         if: runner.os == 'Windows'
+        shell: powershell
         run: |
-          set -euo pipefail
-          vs=$("/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -property installationPath)
+          # PowerShell, not Git Bash: on windows-11-arm Git Bash's shell is x64 under emulation, and a `$(…)`
+          # fork of the x86 vswhere.exe there can die with STATUS_SINGLE_STEP (0x80000004; denext.27 gate, job
+          # 135200287470; git-for-windows#5239). Same lookup and fallbacks as before.
+          $ErrorActionPreference = 'Stop'
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           # VS's own LLVM (x64, or ARM64 on windows-11-arm), else a system one.
-          for d in "$(cygpath -u "$vs")/VC/Tools/Llvm/${{ runner.arch == 'ARM64' && 'ARM64' || 'x64' }}/bin" "$(cygpath -u "$vs")/VC/Tools/Llvm/x64/bin" "/c/Program Files/LLVM/bin"; do
-            if [ -f "$d/libclang.dll" ]; then
-              echo "LIBCLANG_PATH=$(cygpath -w "$d")" >>"$GITHUB_ENV"
-              echo "LIBCLANG_PATH=$(cygpath -w "$d")"
+          $dirs = @()
+          if ($vs) { $dirs += "$vs\VC\Tools\Llvm\${{ runner.arch == 'ARM64' && 'ARM64' || 'x64' }}\bin", "$vs\VC\Tools\Llvm\x64\bin" }
+          $dirs += "$env:ProgramFiles\LLVM\bin"
+          foreach ($d in $dirs) {
+            if (Test-Path -LiteralPath "$d\libclang.dll") {
+              [IO.File]::AppendAllText($env:GITHUB_ENV, "LIBCLANG_PATH=$d`n")
+              Write-Output "LIBCLANG_PATH=$d"
               exit 0
-            fi
-          done
-          echo "::error::libclang.dll not found"; exit 1
+            }
+          }
+          Write-Output '::error::libclang.dll not found'; exit 1
 
       # ld64.lld: the aarch64-apple-darwin rustflags in .cargo/config.toml link
       # with -fuse-ld=lld, as deno's release does. The Deno that fetches it is
@@ -1168,18 +1175,25 @@ jobs:
 
       - name: libclang (Windows)
         if: runner.os == 'Windows'
+        shell: powershell
         run: |
-          set -euo pipefail
-          vs=$("/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -property installationPath)
+          # PowerShell, not Git Bash: on windows-11-arm Git Bash's shell is x64 under emulation, and a `$(…)`
+          # fork of the x86 vswhere.exe there can die with STATUS_SINGLE_STEP (0x80000004; denext.27 gate, job
+          # 135200287470; git-for-windows#5239). Same lookup and fallbacks as before.
+          $ErrorActionPreference = 'Stop'
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           # VS's own LLVM (x64, or ARM64 on windows-11-arm), else a system one.
-          for d in "$(cygpath -u "$vs")/VC/Tools/Llvm/${{ runner.arch == 'ARM64' && 'ARM64' || 'x64' }}/bin" "$(cygpath -u "$vs")/VC/Tools/Llvm/x64/bin" "/c/Program Files/LLVM/bin"; do
-            if [ -f "$d/libclang.dll" ]; then
-              echo "LIBCLANG_PATH=$(cygpath -w "$d")" >>"$GITHUB_ENV"
-              echo "LIBCLANG_PATH=$(cygpath -w "$d")"
+          $dirs = @()
+          if ($vs) { $dirs += "$vs\VC\Tools\Llvm\${{ runner.arch == 'ARM64' && 'ARM64' || 'x64' }}\bin", "$vs\VC\Tools\Llvm\x64\bin" }
+          $dirs += "$env:ProgramFiles\LLVM\bin"
+          foreach ($d in $dirs) {
+            if (Test-Path -LiteralPath "$d\libclang.dll") {
+              [IO.File]::AppendAllText($env:GITHUB_ENV, "LIBCLANG_PATH=$d`n")
+              Write-Output "LIBCLANG_PATH=$d"
               exit 0
-            fi
-          done
-          echo "::error::libclang.dll not found"; exit 1
+            }
+          }
+          Write-Output '::error::libclang.dll not found'; exit 1
 
       # ld64.lld: the aarch64-apple-darwin rustflags in .cargo/config.toml link
       # with -fuse-ld=lld, as deno's release does. The Deno that fetches it is
@@ -1456,18 +1470,25 @@ jobs:
 
       - name: libclang (Windows)
         if: runner.os == 'Windows'
+        shell: powershell
         run: |
-          set -euo pipefail
-          vs=$("/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -property installationPath)
+          # PowerShell, not Git Bash: on windows-11-arm Git Bash's shell is x64 under emulation, and a `$(…)`
+          # fork of the x86 vswhere.exe there can die with STATUS_SINGLE_STEP (0x80000004; denext.27 gate, job
+          # 135200287470; git-for-windows#5239). Same lookup and fallbacks as before.
+          $ErrorActionPreference = 'Stop'
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           # VS's own LLVM (x64, or ARM64 on windows-11-arm), else a system one.
-          for d in "$(cygpath -u "$vs")/VC/Tools/Llvm/${{ runner.arch == 'ARM64' && 'ARM64' || 'x64' }}/bin" "$(cygpath -u "$vs")/VC/Tools/Llvm/x64/bin" "/c/Program Files/LLVM/bin"; do
-            if [ -f "$d/libclang.dll" ]; then
-              echo "LIBCLANG_PATH=$(cygpath -w "$d")" >>"$GITHUB_ENV"
-              echo "LIBCLANG_PATH=$(cygpath -w "$d")"
+          $dirs = @()
+          if ($vs) { $dirs += "$vs\VC\Tools\Llvm\${{ runner.arch == 'ARM64' && 'ARM64' || 'x64' }}\bin", "$vs\VC\Tools\Llvm\x64\bin" }
+          $dirs += "$env:ProgramFiles\LLVM\bin"
+          foreach ($d in $dirs) {
+            if (Test-Path -LiteralPath "$d\libclang.dll") {
+              [IO.File]::AppendAllText($env:GITHUB_ENV, "LIBCLANG_PATH=$d`n")
+              Write-Output "LIBCLANG_PATH=$d"
               exit 0
-            fi
-          done
-          echo "::error::libclang.dll not found"; exit 1
+            }
+          }
+          Write-Output '::error::libclang.dll not found'; exit 1
 
       # ld64.lld: the aarch64-apple-darwin rustflags in .cargo/config.toml link
       # with -fuse-ld=lld, as deno's release does. The Deno that fetches it is
