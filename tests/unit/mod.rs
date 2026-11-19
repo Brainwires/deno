@@ -127,6 +127,13 @@ fn run_test(test: &CollectedTest) -> TestResult {
       .env("DENO_FAKE_MEDIA_DEVICES", "1");
   }
 
+  // wpt100:stats: the fake microphone for a sender's `media-source`.
+  if test.name.ends_with("::webrtc_stats_test") {
+    deno = deno
+      .env("DENO_WEBRTC_LOOPBACK_ONLY", "1")
+      .env("DENO_FAKE_MEDIA_DEVICES", "1");
+  }
+
   if test.name.ends_with("::html_rewriter_test") {
     deno = deno.arg("--unstable-html-rewriter");
   }

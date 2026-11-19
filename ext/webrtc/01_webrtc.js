@@ -2393,11 +2393,14 @@ const STATS_TIME_FIELDS = [
 
 function engineStats(pc, key, sender) {
   const base = performance.timeOrigin + performance.now();
-  const entries = op_webrtc_pc_get_stats(
-    pc[_rid],
-    key ?? 0,
-    key !== null,
-    sender,
+  const entries = ArrayPrototypeMap(
+    op_webrtc_pc_get_stats(
+      pc[_rid],
+      key ?? 0,
+      key !== null,
+      sender,
+    ),
+    plainStats,
   );
   for (let i = 0; i < entries.length; ++i) {
     const stats = entries[i];
@@ -2406,7 +2409,19 @@ function engineStats(pc, key, sender) {
       if (typeof stats[field] === "number") stats[field] += base;
     }
   }
-  return refineStats(pc, entries, base);
+  return refineStats(pc, entries, base, key === null);
+}
+
+// A stats object is a dictionary (webrtc-stats 5, `RTCStats`): an ordinary
+// object, as its records (`qualityLimitationDurations`) are. The op hands
+// over null-prototype objects, which have no `hasOwnProperty`.
+function plainStats(value) {
+  if (value === null || typeof value !== "object") return value;
+  if (ArrayIsArray(value)) return ArrayPrototypeMap(value, plainStats);
+  const out = {};
+  // The op's objects have no prototype: this sees their own members only.
+  for (const key in value) out[key] = plainStats(value[key]);
+  return out;
 }
 
 // Members the engine fills with an empty string, `Unspecified` or a zero
@@ -2425,6 +2440,12 @@ const STATS_OPTIONAL_STRINGS = [
   "iceState",
   "dtlsState",
   "dtlsRole",
+  // A reference with nothing to name: no pair selected yet, no certificate
+  // exchanged, a stream not yet associated with a media section.
+  "selectedCandidatePairId",
+  "localCertificateId",
+  "remoteCertificateId",
+  "mid",
 ];
 const HEX_ONLY = new SafeRegExp("^(?:[0-9a-fA-F]{2})+$");
 
@@ -2441,7 +2462,11 @@ function hexToBase64(hex) {
 // transport), no member without a value, the certificate as base64 DER, the
 // codec an outbound stream sends with, and a `media-source` for each sender
 // with a track.
-function refineStats(pc, entries, now) {
+function refineStats(pc, engineEntries, now, whole) {
+  const entries = withoutRetiredStreams(
+    pc,
+    ArrayPrototypeFilter(engineEntries, remoteStreamReported),
+  );
   const ids = new SafeSet();
   let transportId = null;
   for (let i = 0; i < entries.length; ++i) {
@@ -2511,12 +2536,21 @@ function refineStats(pc, entries, now) {
           const role = negotiatedDtlsRole(pc);
           if (role !== null) stats.dtlsRole = role;
         }
+        transportStateStats(pc, stats);
         break;
       case "outbound-rtp": {
         const t = ArrayPrototypeFind(
           state.transceivers,
           (t) => t[_state].mid !== null && t[_state].mid === stats.mid,
         );
+        // An encoding is "active" as the application configured it
+        // (webrtc-stats `RTCOutboundRtpStreamStats.active`:
+        // `RTCRtpEncodingParameters.active`).
+        const encodings = t?.[_state].sender[_state].encodings;
+        const encoding = encodings?.[stats.encodingIndex ?? 0];
+        if (encoding !== undefined) stats.active = encoding.active !== false;
+        // `encodingIndex` exists for video streams only.
+        if (stats.kind === "audio") delete stats.encodingIndex;
         if (t === undefined) break;
         if (stats.codecId === undefined) {
           const codec = sendCodecStats(pc, t, transportId, now);
@@ -2539,6 +2573,17 @@ function refineStats(pc, entries, now) {
         }
         break;
       }
+      case "inbound-rtp": {
+        // `trackIdentifier` is the receiver's track's id (webrtc-stats
+        // `RTCInboundRtpStreamStats.trackIdentifier`), which the msid gave
+        // it, not the engine's own name for the track.
+        const t = transceiverOfStream(state, stats);
+        const track = t?.[_state].receiver[_state].track;
+        if (track !== undefined && track !== null) {
+          stats.trackIdentifier = track.id;
+        }
+        break;
+      }
     }
   }
   // A remote-inbound stream is coded as the outbound stream it reports on.
@@ -2551,7 +2596,179 @@ function refineStats(pc, entries, now) {
     if (local?.codecId !== undefined) stats.codecId = local.codecId;
   }
   for (let i = 0; i < added.length; ++i) ArrayPrototypePush(entries, added[i]);
-  return entries;
+  if (whole) {
+    addSenderSources(state, entries, ids, now);
+    addChannelStats(pc, entries, ids, now);
+  }
+  // Before the first description there is no RTCDtlsTransport (and so no
+  // RTCIceTransport) for a `transport` object to describe.
+  const report = pc.localDescription === null &&
+      pc.remoteDescription === null
+    ? ArrayPrototypeFilter(entries, (e) => e.type !== "transport")
+    : entries;
+  dropUnresolvedReferences(report);
+  return report;
+}
+
+// The transport's ICE and DTLS state and the ICE role before the engine has
+// any to report (webrtc-stats `RTCTransportStats`: the RTCIceTransport's
+// `state` and `role`, the RTCDtlsTransport's `state`). The role is the one
+// this side takes in the offer / answer exchange under way (RFC 8445
+// section 6.1.1: the offerer is controlling) until an answer fixes it.
+function transportStateStats(pc, stats) {
+  const s = pc[_state];
+  const dtls = s.dtls;
+  if (stats.iceState === undefined) {
+    stats.iceState = dtls !== null && dtls !== undefined
+      ? dtls[_transportState].ice[_transportState].state
+      : (s.closed ? "closed" : s.iceConnectionState);
+  }
+  if (stats.dtlsState === undefined) {
+    let dtlsState = dtls !== null && dtls !== undefined
+      ? dtls[_transportState].state
+      : "new";
+    if (dtls === null || dtls === undefined) {
+      if (s.closed || s.connectionState === "closed") dtlsState = "closed";
+      else if (s.connectionState === "failed") dtlsState = "failed";
+      else if (s.connectionState === "connected") dtlsState = "connected";
+      else if (s.connectionState === "connecting") dtlsState = "connecting";
+    }
+    stats.dtlsState = dtlsState;
+  }
+  if (stats.iceRole === undefined) {
+    let role = s.iceRole;
+    if (role === null || role === undefined) {
+      role = s.signalingState === "have-local-offer" ||
+          s.signalingState === "have-local-pranswer"
+        ? "controlling"
+        : s.signalingState === "have-remote-offer" ||
+            s.signalingState === "have-remote-pranswer"
+        ? "controlled"
+        : "unknown";
+    }
+    stats.iceRole = role;
+  }
+}
+
+// webrtc-stats 6.1: the remote RTP stream objects are created when their
+// RTCP packet is first received. The engine has one beside each local stream
+// from the start: a `remote-inbound-rtp` counts the receiver reports it was
+// made from (each one a round-trip measurement), a `remote-outbound-rtp` the
+// sender reports.
+function remoteStreamReported(stats) {
+  if (stats.type === "remote-inbound-rtp") {
+    return stats.roundTripTimeMeasurements !== 0;
+  }
+  if (stats.type === "remote-outbound-rtp") return stats.reportsSent !== 0;
+  return true;
+}
+
+// A `media-source` for each track attached to a sender (webrtc-stats
+// `RTCStatsType` "media-source": created when a track is attached to any
+// RTCRtpSender), also before the sender has an outbound stream.
+function addSenderSources(state, entries, ids, now) {
+  for (let i = 0; i < state.transceivers.length; ++i) {
+    const t = state.transceivers[i];
+    if (t[_state].stopped) continue;
+    const track = t[_state].sender[_state].track;
+    if (track === null || track === undefined) continue;
+    const source = mediaSourceStats(track, {}, now);
+    if (SetPrototypeHas(ids, source.id)) continue;
+    SetPrototypeAdd(ids, source.id);
+    ArrayPrototypePush(entries, source);
+  }
+}
+
+// A `data-channel` object for each channel from its creation (webrtc-stats
+// `RTCStatsType` "data-channel": created when the RTCDataChannel is), which
+// the engine has only once the channel opens. Before that the channel has
+// sent and received nothing; `dataChannelIdentifier` is there once the
+// channel has an id.
+function addChannelStats(pc, entries, ids, now) {
+  MapPrototypeForEach(pc[_channels], (channel, handle) => {
+    const id = `RTCDataChannel_${handle}`;
+    if (SetPrototypeHas(ids, id)) return;
+    SetPrototypeAdd(ids, id);
+    const stats = {
+      timestamp: now,
+      type: "data-channel",
+      id,
+      label: channel.label,
+      protocol: channel.protocol,
+      state: channel.readyState,
+      messagesSent: 0,
+      bytesSent: 0,
+      messagesReceived: 0,
+      bytesReceived: 0,
+    };
+    const streamId = channel.id;
+    if (streamId !== null) stats.dataChannelIdentifier = streamId;
+    ArrayPrototypePush(entries, stats);
+  });
+}
+
+// webrtc-stats 5 (`RTCStats`): a member that references another object
+// names one in the same report; a reference with nothing to name is left out.
+function dropUnresolvedReferences(entries) {
+  const ids = new SafeSet();
+  for (let i = 0; i < entries.length; ++i) SetPrototypeAdd(ids, entries[i].id);
+  for (let i = 0; i < entries.length; ++i) {
+    const stats = entries[i];
+    for (const key in stats) {
+      if (
+        StringPrototypeEndsWith(key, "Id") && typeof stats[key] === "string" &&
+        !SetPrototypeHas(ids, stats[key])
+      ) {
+        delete stats[key];
+      }
+    }
+  }
+}
+
+// The transceiver an RTP stream's `mid` names, if this connection still
+// has it.
+function transceiverOfStream(state, stats) {
+  if (typeof stats.mid !== "string" || stats.mid === "") return undefined;
+  return ArrayPrototypeFind(
+    state.transceivers,
+    (t) => t[_state].mid === stats.mid,
+  );
+}
+
+// The RTP stream stats whose lifetime ended (webrtc-stats 6.1, "lifetime
+// considerations"): those of a transceiver that is stopped (webrtc-pc 5.4,
+// "stop the RTCRtpTransceiver": a negotiation completed after stop()) or
+// gone, with the remote stream objects and the codecs only they named.
+// stop() alone keeps them until that negotiation.
+function withoutRetiredStreams(pc, entries) {
+  const state = pc[_state];
+  const retired = new SafeSet();
+  const codecs = new SafeSet();
+  for (let i = 0; i < entries.length; ++i) {
+    const stats = entries[i];
+    if (stats.type !== "inbound-rtp" && stats.type !== "outbound-rtp") {
+      continue;
+    }
+    if (typeof stats.mid !== "string" || stats.mid === "") continue;
+    const t = transceiverOfStream(state, stats);
+    if (t !== undefined && !t[_state].stopped) continue;
+    SetPrototypeAdd(retired, stats.id);
+    if (typeof stats.codecId === "string") {
+      SetPrototypeAdd(codecs, stats.codecId);
+    }
+  }
+  if (SetPrototypeGetSize(retired) === 0) return entries;
+  const kept = ArrayPrototypeFilter(
+    entries,
+    (e) =>
+      !SetPrototypeHas(retired, e.id) && !SetPrototypeHas(retired, e.localId),
+  );
+  return ArrayPrototypeFilter(
+    kept,
+    (e) =>
+      e.type !== "codec" || !SetPrototypeHas(codecs, e.id) ||
+      ArrayPrototypeSome(kept, (o) => o.codecId === e.id),
+  );
 }
 
 // The DTLS role the current descriptions negotiated (RFC 5763 section 5: the
