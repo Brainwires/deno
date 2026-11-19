@@ -74,6 +74,8 @@ export interface TestResult {
   duration: number;
   status: number;
   stderr: string;
+  /** The runner stopped the test process because it ran out of time. */
+  timedOut?: boolean;
 }
 
 export interface TestHarnessStatus {
@@ -98,21 +100,36 @@ export async function runSingleTest(
   timeouts: { long: number; default: number },
   fileTimeout = 2 * 60_000,
 ): Promise<TestResult> {
-  const result = await Promise.race([
-    runSingleTestInner(url, _options, reporter, inspectBrk, timeouts),
-    new Promise<TestResult>((resolve) =>
-      setTimeout(() => {
-        resolve({
-          cases: [],
-          harnessStatus: null,
-          duration: fileTimeout,
-          status: 1,
-          stderr: `test file timed out after ${fileTimeout / 1000}s\n`,
-        });
-      }, fileTimeout)
-    ),
-  ]);
-  return result;
+  const abort = new AbortController();
+  let backstop: number | undefined;
+  try {
+    return await Promise.race([
+      runSingleTestInner(
+        url,
+        _options,
+        reporter,
+        inspectBrk,
+        timeouts,
+        abort.signal,
+      ),
+      new Promise<TestResult>((resolve) => {
+        backstop = setTimeout(() => {
+          // Stop the test process too, not only the wait for it.
+          abort.abort();
+          resolve({
+            cases: [],
+            harnessStatus: null,
+            duration: fileTimeout,
+            status: 1,
+            stderr: `test file timed out after ${fileTimeout / 1000}s\n`,
+            timedOut: true,
+          });
+        }, fileTimeout);
+      }),
+    ]);
+  } finally {
+    clearTimeout(backstop);
+  }
 }
 
 async function runSingleTestInner(
@@ -121,6 +138,7 @@ async function runSingleTestInner(
   reporter: (result: TestCaseResult) => void,
   inspectBrk: boolean,
   timeouts: { long: number; default: number },
+  signal: AbortSignal,
 ): Promise<TestResult> {
   const timeout = _options.timeout === "long"
     ? timeouts.long
@@ -173,9 +191,11 @@ async function runSingleTestInner(
         // runs browsers with `--use-fake-device-for-media-stream`.
         DENO_FAKE_MEDIA_DEVICES: "1",
       },
+      signal,
       stdout: "null",
       stderr: "piped",
     }).spawn();
+    let timedOut = false;
 
     const cases = [];
     let stderr = "";
@@ -188,6 +208,7 @@ async function runSingleTestInner(
     interval = setInterval(() => {
       const passedTime = performance.now() - start;
       if (passedTime > timeout) {
+        timedOut = true;
         try {
           proc.kill("SIGINT");
         } catch {
@@ -221,6 +242,9 @@ async function runSingleTestInner(
       duration,
       cases,
       stderr,
+      // A test that finished its harness before the kill landed did not time
+      // out.
+      timedOut: timedOut && harnessStatus === null,
     };
   } finally {
     clearInterval(interval);

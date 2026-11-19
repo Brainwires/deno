@@ -392,6 +392,23 @@ Options:
   return code;
 }
 
+/** testharness.js's harness statuses, as wptreport names them. */
+const HARNESS_STATUSES: Record<number, string> = {
+  0: "OK",
+  1: "ERROR",
+  2: "TIMEOUT",
+  3: "PRECONDITION_FAILED",
+};
+
+/** testharness.js's subtest statuses, as wptreport names them. */
+const SUBTEST_STATUSES: Record<number, string> = {
+  0: "PASS",
+  1: "FAIL",
+  2: "TIMEOUT",
+  3: "NOTRUN",
+  4: "PRECONDITION_FAILED",
+};
+
 async function generateWptReport(
   results: { test: TestToRun; result: TestResult }[],
   startTime: number,
@@ -400,13 +417,15 @@ async function generateWptReport(
   const runInfo = await generateRunInfo();
   const reportResults = [];
   for (const { test, result } of results) {
-    const status = result.status !== 0
+    const status = result.timedOut
+      ? "TIMEOUT"
+      : result.status !== 0
       ? "CRASH"
-      : result.harnessStatus?.status === 0
-      ? "OK"
-      : "ERROR";
+      : HARNESS_STATUSES[result.harnessStatus?.status ?? 1] ?? "ERROR";
     let message;
-    if (result.harnessStatus === null && result.status === 0) {
+    if (result.timedOut) {
+      message = result.stderr.trim() || "The test file timed out.";
+    } else if (result.harnessStatus === null && result.status === 0) {
       // If the only error is the event loop running out of tasks, using stderr
       // as the message won't help.
       message = "Event loop run out of tasks.";
@@ -431,7 +450,9 @@ async function generateWptReport(
 
         return {
           name: escapeLoneSurrogates(case_.name),
-          status: case_.passed ? "PASS" : "FAIL",
+          status: case_.passed
+            ? "PASS"
+            : SUBTEST_STATUSES[case_.status] ?? "FAIL",
           message: escapeLoneSurrogates(case_.message),
           expected,
           known_intermittent: [],
@@ -816,7 +837,9 @@ function reportVariation(
     }
 
     const expectFail = expectation === false;
-    const failReason = result.status !== 0
+    const failReason = result.timedOut
+      ? "the test file timed out"
+      : result.status !== 0
       ? "runner failed during test"
       : "the event loop run out of tasks during the test";
     console.log(
