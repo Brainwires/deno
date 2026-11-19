@@ -3061,6 +3061,27 @@ function requirePayloadTypes(sdp) {
   }
 }
 
+// RFC 9429 section 5.8.3 (RFC 3264 section 6): each m-section of an answer
+// has the media type of the offer's at the same index, known to this
+// endpoint or not.
+function requireAnswerMediaTypes(pc, sdp) {
+  const offer = op_webrtc_pc_descriptions(pc[_rid]).pendingLocal;
+  if (offer === null || offer === undefined) return;
+  const offered = mediaSectionsOf(offer[1]);
+  const answered = mediaSectionsOf(sdp);
+  const n = MathMin(offered.length, answered.length);
+  for (let i = 0; i < n; ++i) {
+    if (answered[i].kind !== offered[i].kind) {
+      throw new DOMException(
+        `setRemoteDescription: the answer's m-section ${i} is '${
+          answered[i].kind
+        }', the offer's '${offered[i].kind}'`,
+        "InvalidAccessError",
+      );
+    }
+  }
+}
+
 // The simulcast encodings one sender may have.
 const MAX_ENCODINGS = 16;
 const RID_RE = new SafeRegExp("^[A-Za-z0-9]+$");
@@ -3755,6 +3776,9 @@ class RTCPeerConnection extends EventTarget {
           requireRtcpMux(sdp);
           // wpt100:codecs
           requirePayloadTypes(sdp);
+          if (type === "answer" || type === "pranswer") {
+            requireAnswerMediaTypes(this, sdp);
+          }
         }
         const offerFromStable = type === "offer" &&
           this[_state].signalingState === "stable";
