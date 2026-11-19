@@ -1,5 +1,5 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-// denext (DENEXT.md item 957): the soak counter of the kernel sandbox beds.
+// denext (DENEXT.md item 472): the soak counter of the kernel sandbox beds.
 //
 //   deno test tests/kernel_sandbox_beds/soak_test.ts
 

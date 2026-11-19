@@ -2,7 +2,7 @@
 
 //! denext: the kernel policy's translation into the enforcers' plan
 //! (DENEXT.md item 425), shared by the CLI (`--kernel-sandbox=enforce`) and
-//! `denort` (a compiled program baked with `enforce`, DENEXT.md item 901).
+//! `denort` (a compiled program baked with `enforce`, DENEXT.md item 473).
 //!
 //! [`plan_for`] translates the policy model's [`CompiledPolicy`] into the
 //! enforcers' [`EnforcePlan`] (Landlock rules with the read expansion on
@@ -102,7 +102,7 @@ const RUNTIME_CONFIG_ENV: &[&str] = &[
   "DENO_KERNEL_SANDBOX",
   // the harnesses' forced enforce: both images decide the same mode
   "DENO_INTERNAL_KERNEL_SANDBOX_FORCE",
-  // and the harnesses' rollout stage, for the same reason (item 957)
+  // and the harnesses' rollout stage, for the same reason (item 472)
   "DENO_INTERNAL_KERNEL_SANDBOX_STAGE",
   "DENO_SERVE_ADDRESS",
   "DENO_AUTO_SERVE",
@@ -691,7 +691,7 @@ pub mod linux {
   }
 }
 
-/// Windows, the small tier (DENEXT.md item 902): the job object's process
+/// Windows, the small tier (DENEXT.md item 474): the job object's process
 /// limit and the write roots a lowered integrity level needs labelled.
 /// Reads and the network aren't in the plan (the model reports them as
 /// documented Deno-only rules).

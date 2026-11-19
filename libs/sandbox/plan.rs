@@ -38,7 +38,7 @@ pub struct EnforcePlan {
   pub linux: Option<LinuxPlan>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub macos: Option<MacosPlan>,
-  /// Windows, the small tier (DENEXT.md item 902).
+  /// Windows, the small tier (DENEXT.md item 474).
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub windows: Option<WindowsPlan>,
   /// The environment the re-executed image keeps (names; a trailing `*`
@@ -551,6 +551,7 @@ mod tests {
       deny_read: Vec::new(),
       write: Some(vec![PathBuf::from("/out")]),
       deny_write: vec![PathBuf::from("/out/keep")],
+      net: None,
     });
     assert_ne!(
       with_broker.without_measured_lists(),

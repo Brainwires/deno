@@ -1,5 +1,5 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-// denext (DENEXT.md item 957): the pure parts of the R4 precondition check.
+// denext (DENEXT.md item 472): the pure parts of the R4 precondition check.
 //
 //   deno test tests/kernel_sandbox_beds/r4_preconditions_test.ts
 

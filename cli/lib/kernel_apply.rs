@@ -282,7 +282,7 @@ fn fatal_list<'a>(
 /// process, in place. `warn` prints its line; `broker`, an OS without an
 /// enforcer and a rule the OS can't hold refuse to start (a mode `auto`
 /// chose falls back instead: off with no enforcer, else `warn`'s line,
-/// item 957). Whether the permission set allows prompting doesn't matter: a
+/// item 472). Whether the permission set allows prompting doesn't matter: a
 /// compiled program's set is its author's, and once the sandbox applies the
 /// caller turns prompting off (a prompt could only grant what the kernel
 /// refuses).
@@ -313,7 +313,7 @@ pub fn start_compiled(
   let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
   let mut ctx = compiled_context(mode, start.exec_strict, cwd);
   let mut compiled = compile_policy(start.options, &ctx);
-  // a mode `auto` chose never refuses to start (item 957): where enforce
+  // a mode `auto` chose never refuses to start (item 472): where enforce
   // can't hold the grant the program runs as a warn one, and says why
   let auto = resolution.auto_chosen;
   let fall_back = |why: String| {
@@ -363,7 +363,10 @@ pub fn start_compiled(
   let fatal = fatal_list(compiled.gaps.iter());
   if !fatal.is_empty() {
     if auto {
-      return Ok(fall_back(format!("{} rule(s) the OS can't hold", fatal.len())));
+      return Ok(fall_back(format!(
+        "{} rule(s) the OS can't hold",
+        fatal.len()
+      )));
     }
     return Err(refuse(
       mode,
@@ -377,7 +380,10 @@ pub fn start_compiled(
   let fatal = fatal_list(gaps.iter());
   if !fatal.is_empty() {
     if auto {
-      return Ok(fall_back(format!("{} rule(s) the OS can't hold", fatal.len())));
+      return Ok(fall_back(format!(
+        "{} rule(s) the OS can't hold",
+        fatal.len()
+      )));
     }
     return Err(refuse(
       mode,

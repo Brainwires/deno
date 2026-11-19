@@ -14,7 +14,7 @@
 //!
 //! `auto` (the default) applies nothing in this release line: the kernel
 //! sandbox is an opt-in preview (`--kernel-sandbox=warn|enforce|broker`).
-//! What `auto` does is one constant, [`AUTO_STAGE`] (DENEXT.md item 957):
+//! What `auto` does is one constant, [`AUTO_STAGE`] (DENEXT.md item 472):
 //!
 //! | stage | author-fixed (compiled, explicit `auto`) | fixed only by no prompt |
 //! | --- | --- | --- |
@@ -38,7 +38,7 @@ use deno_runtime::deno_permissions::PermissionsOptions;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// How far the rollout of `auto` has come (DENEXT.md item 957).
+/// How far the rollout of `auto` has come (DENEXT.md item 472).
 #[derive(
   Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Default,
 )]
@@ -606,7 +606,7 @@ pub fn compiled_resolution(
 /// records it in `kernel_sandbox_state`). A code path that reaches user code
 /// without it (a runtime entry that doesn't call the startup, an OS without
 /// an enforcer) refuses instead of running unconfined, unless `auto` chose
-/// the mode: a mode `auto` chose never refuses to start (item 957), and
+/// the mode: a mode `auto` chose never refuses to start (item 472), and
 /// `start_compiled` has already fallen back to `warn`'s line for it.
 pub fn check_compiled(
   baked: Option<KernelSandboxMode>,
@@ -1040,7 +1040,7 @@ mod tests {
     }
   }
 
-  /// The rollout stages of `auto` (DENEXT.md item 957). Each row is a run
+  /// The rollout stages of `auto` (DENEXT.md item 472). Each row is a run
   /// and what `auto` applies to it in the preview, at R3 and at R4.
   #[test]
   fn auto_stage_matrix() {

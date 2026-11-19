@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 // deno-lint-ignore-file no-console
-// denext (DENEXT.md item 957): what must hold before `--kernel-sandbox=auto`
+// denext (DENEXT.md item 472): what must hold before `--kernel-sandbox=auto`
 // moves to stage R4 (enforce wherever the permission set is fixed, a bare run
 // with no terminal included). One check per precondition; each is `pass`,
 // `fail`, or `manual` (a person records the evidence in r4_evidence.json,

@@ -342,7 +342,7 @@ fn op_pty_foreground_process(
   Ok(resource.pty.foreground().map(|fg| fg.name))
 }
 
-/// `Deno.Pty.foreground()`'s answer (DENEXT.md item 461).
+/// `Deno.Pty.foreground()`'s answer (DENEXT.md item 462).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ForegroundInfo {

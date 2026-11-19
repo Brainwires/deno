@@ -1,4 +1,4 @@
-// denext (DENEXT.md item 901): a program built with
+// denext (DENEXT.md item 473): a program built with
 // `deno compile --kernel-sandbox=enforce` applies its baked grant with the
 // OS at startup, in place (no re-exec). The probes are kernel_sandbox/
 // enforce's (P3 / P4): native code (FFI into libc, a child), which only the

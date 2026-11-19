@@ -10646,7 +10646,7 @@ mod tests {
     );
   }
 
-  // denext (DENEXT.md item 9xx): a check made after the open, of the object
+  // denext (DENEXT.md item 470): a check made after the open, of the object
   // the descriptor holds: a link swapped in between a path check and the
   // open leads to a file that is refused, and so is a file unlinked since.
   #[cfg(unix)]

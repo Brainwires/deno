@@ -1,4 +1,4 @@
-// denext (DENEXT.md item 9xx): --kernel-sandbox=broker, the supervising
+// denext (DENEXT.md item 466): --kernel-sandbox=broker, the supervising
 // broker (Mode B). The program runs confined in a child of the supervisor;
 // what the kernel can't hold to Deno's rule exactly, the broker does.
 // Linux: a write deny inside a write allow. The kernel refuses changes

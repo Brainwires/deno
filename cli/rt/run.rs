@@ -1717,7 +1717,7 @@ pub async fn run_with_options(
       metadata.workspace_resolver.catalogs,
     )
   };
-  // denext (DENEXT.md item 901): a program confined by its kernel sandbox
+  // denext (DENEXT.md item 473): a program confined by its kernel sandbox
   // keeps its code cache in its own cache folder (the only place it may
   // write for itself), or has none where that folder couldn't be made
   let code_cache_path = if crate::kernel::enforcing() {

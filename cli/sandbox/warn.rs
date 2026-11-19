@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-//! denext: the kernel sandbox's warn mode (DENEXT.md item 957):
+//! denext: the kernel sandbox's warn mode (DENEXT.md item 472):
 //! `--kernel-sandbox=warn` computes what `enforce` would refuse and reports
 //! it, each line naming the grant that would allow the access; nothing is
 //! refused.
@@ -123,7 +123,7 @@ pub fn fatal_gaps(compiled: &CompiledPolicy, ctx: &Context) -> Vec<PolicyGap> {
     // the translation is only worth making for a policy that would get
     // that far
     gaps.extend(
-      super::enforce::plan_for(compiled, ctx)
+      deno_lib::kernel_plan::plan_for(compiled, ctx)
         .1
         .into_iter()
         .filter(|g| g.is_fatal_under_enforce()),
@@ -236,7 +236,7 @@ pub fn start(run: WarnRun) {
   let observe =
     std::env::var_os(would_deny::WARN_OBSERVE_ENV_VAR).is_none_or(|v| v != "0");
   let plan = (!auto && observe && run.observable && cfg!(target_os = "macos"))
-    .then(|| super::enforce::plan_for(run.compiled, run.ctx).0)
+    .then(|| deno_lib::kernel_plan::plan_for(run.compiled, run.ctx).0)
     .flatten();
   let Some(plan) = plan else {
     would_deny::record_run(Record::Run {

@@ -46,6 +46,7 @@ use deno_sandbox::plan::EnforcePlan;
 use super::inherit;
 use super::policy::CompiledPolicy;
 use super::policy::Context;
+use super::policy::NetPolicy;
 use super::policy::resolve_prefix;
 
 // ---------------------------------------------------------------------------
@@ -328,7 +329,7 @@ fn macos_profile(plan: &EnforcePlan) -> Result<String, String> {
 
 /// A plan's macOS part with the program's module files readable: what the
 /// enforce profile is written from, and warn mode's reporting profile
-/// (item 957).
+/// (item 472).
 #[cfg(target_os = "macos")]
 pub(super) fn macos_plan_with_modules(
   plan: &EnforcePlan,
@@ -707,7 +708,7 @@ pub async fn apply_pending(
   // the permission check that prepares the plan runs on first use
   factory.root_permissions_container()?;
   // warn mode's observer applies where enforce would confine the process:
-  // the graph loaded, no user code run yet (item 957)
+  // the graph loaded, no user code run yet (item 472)
   if super::warn::is_pending() {
     // a graph that doesn't load is the run's own error to report: no
     // observer then (it would report the program's modules)

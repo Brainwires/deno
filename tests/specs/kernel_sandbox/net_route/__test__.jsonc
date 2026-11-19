@@ -1,4 +1,4 @@
-// denext (DENEXT.md item 9xx): the kernel sandbox's network route. With
+// denext (DENEXT.md item 468): the kernel sandbox's network route. With
 // DENO_INTERNAL_KERNEL_NET_ROUTE=in-process every socket of the runtime is
 // asked of the broker's network authority (in this process: it confines
 // nothing, but it is the same authority, with the run's own grant): the

@@ -13,7 +13,7 @@
 # Dispatched by hand only (no schedule): before a kernel sandbox default
 # changes, and on a train that touches the sandbox.
 #
-# `stage` (DENEXT.md item 957) runs the suites with the defaults of a later
+# `stage` (DENEXT.md item 472) runs the suites with the defaults of a later
 # rollout stage of `auto` instead of a forced mode
 # (DENO_INTERNAL_KERNEL_SANDBOX_STAGE=r3|r4, with `force: none`): what a
 # default flip would change, before the constant moves. The run's name carries

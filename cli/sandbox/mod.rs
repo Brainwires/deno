@@ -176,7 +176,7 @@ impl CompileKind<'_> {
 
 /// The mode `deno compile` bakes into a binary: `--kernel-sandbox`, else
 /// deno.json `permissions.kernelSandbox`, else nothing (`auto`). The program
-/// applies it at startup, in place (DENEXT.md item 901). A mode the program
+/// applies it at startup, in place (DENEXT.md item 473). A mode the program
 /// could never start with is refused here, so no such binary is made:
 /// `broker` (the supervising broker isn't built in), and `enforce` for a
 /// target without an enforcer. For `enforce` the policy is compiled for the
@@ -581,7 +581,7 @@ pub fn check_run(
   let mut resolution = kernel_sandbox_mode(&inputs)?;
   let report = cli_options.flags().permissions.kernel_sandbox_report
     && inputs.kind != Some(RunKind::NotARuntime);
-  // a mode `auto` chose never refuses to start (item 957): where enforce
+  // a mode `auto` chose never refuses to start (item 472): where enforce
   // can't hold the grant, the run is a warn one, and says why
   let covered = enforce_covers(&cli_options.flags().subcommand);
   let mut degraded: Option<String> = None;

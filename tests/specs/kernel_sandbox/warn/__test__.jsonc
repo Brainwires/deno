@@ -1,4 +1,4 @@
-// denext (DENEXT.md item 957): the kernel sandbox's warn mode and the rollout
+// denext (DENEXT.md item 472): the kernel sandbox's warn mode and the rollout
 // stages of `auto`. `--kernel-sandbox=warn` reports what `enforce` would
 // refuse (the policy's startup refusals, an advisory for a program known to
 // need a grant, and on macOS what native code and children do) and refuses

@@ -1924,7 +1924,7 @@ pub fn pin_child_env_var(key: OsString, value: OsString) {
 /// Pins `key` = `value` like [`pin_child_env_var`], replacing an earlier
 /// value: a compiled program that applies its own kernel sandbox in place
 /// replaces the carrier it inherited with the one that holds its own layer
-/// too (DENEXT.md item 901).
+/// too (DENEXT.md item 473).
 pub fn repin_child_env_var(key: OsString, value: OsString) {
   let mut pinned = PINNED_CHILD_ENV.lock().unwrap();
   pinned.retain(|(k, _)| *k != key);
@@ -2117,7 +2117,7 @@ fn check_run_permission(
     }
   }
   // denext: the kernel sandbox's warn mode says what is known about the
-  // program inside a sandbox (DENEXT.md item 957)
+  // program inside a sandbox (DENEXT.md item 472)
   if deno_permissions::kernel_sandbox_state::is_warning() {
     let program = match cmd {
       RunQueryDescriptor::Path(path) => path.display_name().into_owned(),
@@ -2203,7 +2203,7 @@ fn get_requires_allow_all_env_vars(env: &RunEnv) -> Vec<&str> {
 }
 
 /// A spawn that failed never hands its IPC channel to JavaScript, so nothing
-/// would close the parent's end: close it here (DENEXT.md item 464). Before,
+/// would close the parent's end: close it here (DENEXT.md item 465). Before,
 /// each failed `spawn(..., { stdio: [..., "ipc"] })` (a missing program) left
 /// the channel's resource and its descriptors open for the process's life.
 fn close_ipc_of_failed_spawn<T>(

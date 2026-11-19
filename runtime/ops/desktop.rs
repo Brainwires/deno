@@ -1699,7 +1699,7 @@ pub struct WindowCapabilitiesInfo {
   pub pointer: bool,
 }
 
-/// `Deno.desktop.pointer()` (laufey API 60, DENEXT.md item 462): where the
+/// `Deno.desktop.pointer()` (laufey API 60, DENEXT.md item 463): where the
 /// pointer is on the screen (in `BrowserWindow.getPosition()`'s space), the
 /// buttons held (a DOM `MouseEvent.buttons`) and the app's window under it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]

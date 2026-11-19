@@ -68,9 +68,9 @@ pub mod seatbelt;
 pub mod seccomp;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod supervise;
-pub mod would_deny;
 #[cfg(windows)]
 pub mod windows;
+pub mod would_deny;
 
 #[cfg(target_os = "linux")]
 pub use seccomp::SeccompSpec;

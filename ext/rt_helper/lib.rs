@@ -182,7 +182,7 @@ static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// denext: the folder native addons are extracted to, chosen by the
 /// runtime instead of the temp folder's shared one: a compiled program
 /// under the kernel sandbox writes only its own cache folder (DENEXT.md
-/// item 901). The folder must be private (the same check as the default's);
+/// item 473). The folder must be private (the same check as the default's);
 /// returns whether it is now the cache folder (`false`: not private, or one
 /// was already chosen).
 pub fn set_native_addon_cache_dir(dir: PathBuf) -> bool {

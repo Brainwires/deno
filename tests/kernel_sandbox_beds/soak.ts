@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 // deno-lint-ignore-file no-console
-// denext (DENEXT.md item 957): the soak of the kernel sandbox beds, the gate
+// denext (DENEXT.md item 472): the soak of the kernel sandbox beds, the gate
 // in front of a rollout stage of `--kernel-sandbox=auto`.
 //
 // A stage's default may flip only after the beds

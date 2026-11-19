@@ -993,7 +993,7 @@ impl ImplicitSet {
       }
     }
     // a compiled program's own cache folder (its V8 code cache, the native
-    // addons it extracts), keyed by its policy like the overlay (item 901)
+    // addons it extracts), keyed by its policy like the overlay (item 473)
     if ctx.compiled
       && let Some(overlay) = &ctx.cache_overlay
     {

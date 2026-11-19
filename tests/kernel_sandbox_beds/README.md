@@ -59,7 +59,7 @@ using. A home without a `~/.npmrc` (as on CI runners) keeps the confined runs'
 
 ## Stage beds and the soak
 
-denext (DENEXT.md item 957). What `--kernel-sandbox=auto` applies is one
+denext (DENEXT.md item 472). What `--kernel-sandbox=auto` applies is one
 constant (`AUTO_STAGE` in `cli/lib/kernel_sandbox.rs`). Before it moves, the
 suites run at the next stage with nothing forced:
 

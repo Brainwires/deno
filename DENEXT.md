@@ -18041,7 +18041,7 @@ where the changes are discussed.
        `test_remote_offer_skips_a_transceiver_that_is_not_associable`.
      - Node tests enabled: none; `node:` has no WebRTC API.
 
-460. **`feat(desktop)`: laufey API 59: web view downloads and permission
+461. **`feat(desktop)`: laufey API 59: web view downloads and permission
      requests the app decides, menu read-back, and a macOS panel whose show()
      takes no keyboard** (runtime; `runtime/ops/desktop.rs`,
      `cli/rt/desktop.rs`, `cli/rt_desktop/lib.rs`, `cli/rt_desktop/Cargo.toml`,
@@ -18098,16 +18098,15 @@ where the changes are discussed.
        `menus` app (read-back of the app menu and the Dock menu); laufey's
        `webview_test`, `webview_app_checks` and menu / panel e2e.
      - Node tests enabled: none; no Node API changes.
-461. **`feat(pty)`: `Deno.Pty.foreground()` and `Deno.Pty.ttyName`: what runs in
+462. **`feat(pty)`: `Deno.Pty.foreground()` and `Deno.Pty.ttyName`: what runs in
      a terminal, asked of the OS** (`desktop/d28-qutty-2`; runtime;
      `ext/pty/{foreground.rs,unix.rs,windows.rs,lib.rs,01_pty.js,Cargo.toml}`,
      `ext/process/40_process.js`,
-     `cli/tsc/dts/{lib.deno_pty.d.ts,lib.deno.ns.d.ts}`; the item number is a
-     placeholder for the train lead to renumber). A terminal emulator shows what
-     its tab runs (`vim notes.md`, the folder). The runtime kept the answer to
-     itself: the master descriptor is not reachable from JavaScript, so an app
-     had to call `proc_pidinfo` over FFI on macOS and read `/proc` on Linux, and
-     had nothing on Windows.
+     `cli/tsc/dts/{lib.deno_pty.d.ts,lib.deno.ns.d.ts}`). A terminal emulator
+     shows what its tab runs (`vim notes.md`, the folder). The runtime kept the
+     answer to itself: the master descriptor is not reachable from JavaScript,
+     so an app had to call `proc_pidinfo` over FFI on macOS and read `/proc` on
+     Linux, and had nothing on Windows.
      - `pty.foreground()` returns `{ pgid, pid, name, argv, cwd } | null`, asked
        at each call and never cached. On macOS and Linux `pgid` is the
        terminal's foreground process group (`tcgetpgrp` on the master) and the
@@ -18159,13 +18158,13 @@ where the changes are discussed.
        exited), `ttyName` against `tty`, `exec`, a reaped child, `Deno.Command`
        with `pty`, and the Windows tree.
      - Node tests enabled: none.
-462. **`feat(desktop)`: `Deno.desktop.windowOrder()` and
+463. **`feat(desktop)`: `Deno.desktop.windowOrder()` and
      `Deno.desktop.pointer()`: the real stacking order of the app's windows, and
      the pointer on the screen** (`desktop/d28-qutty-2`; desktop runtime; laufey
      API 60 (`window_z_order`, `pointer_state`); `runtime/ops/desktop.rs`,
      `cli/rt_desktop/lib.rs`, `cli/rt/desktop.rs`, `runtime/js/99_main.js`,
-     `cli/tsc/dts/lib.deno.desktop.d.ts`; the item number is a placeholder for
-     the train lead to renumber). An app with several windows had to guess both:
+     `cli/tsc/dts/lib.deno.desktop.d.ts`). An app with several windows had to
+     guess both:
      which window is in front from the order the windows were focused in (wrong
      for a window raised without focus, an always-on-top window, another app's
      window in between), and during a drag from one window to another where the
@@ -18207,30 +18206,30 @@ where the changes are discussed.
        not once hidden). `runtime/ops/desktop.rs` tests the serialized shapes;
        `tests/unit/ops_test.ts` counts the two ops.
      - Node tests enabled: none.
-463. **`fix(node/net)`: a Windows named-pipe server keeps accepting past four
+464. **`fix(node/net)`: a Windows named-pipe server keeps accepting past four
      open connections** (`desktop/d28-qutty-2`; runtime;
-     `libs/core/uv_compat/pipe.rs`, `tests/unit_node/net_test.ts`; the item
-     number is a placeholder for the train lead to renumber). Named pipes are
-     the local IPC of Windows (`net.createServer().listen("\\\\.\\pipe\\name")`,
-     what denext's `listenLocalIpc` uses there; a Unix socket elsewhere).
-     `uv_pipe_listen` created the first instance with
-     `max_instances(pending_instances)`, 4 by default. The first instance's
-     limit is the pipe's for good, and libuv's `pending_instances` is how many
-     instances it keeps listening, not how many may exist (libuv passes
-     `PIPE_UNLIMITED_INSTANCES`). So with four clients connected, the instance
-     `uv_pipe_accept` creates for the next client failed (`ERROR_PIPE_BUSY`),
-     the failure was dropped, and the server had no listening instance left: it
-     never accepted again. The limit is gone (tokio's default, unlimited).
+     `libs/core/uv_compat/pipe.rs`, `tests/unit_node/net_test.ts`). Named pipes
+     are the local IPC of Windows
+     (`net.createServer().listen("\\\\.\\pipe\\name")`, what denext's
+     `listenLocalIpc` uses there; a Unix socket elsewhere). `uv_pipe_listen`
+     created the first instance with `max_instances(pending_instances)`, 4 by
+     default. The first instance's limit is the pipe's for good, and libuv's
+     `pending_instances` is how many instances it keeps listening, not how many
+     may exist (libuv passes `PIPE_UNLIMITED_INSTANCES`). So with four clients
+     connected, the instance `uv_pipe_accept` creates for the next client failed
+     (`ERROR_PIPE_BUSY`), the failure was dropped, and the server had no
+     listening instance left: it never accepted again. The limit is gone
+     (tokio's default, unlimited).
      - Found by reading the source; the test
        (`[node/net] a path server keeps
        accepting past four open connections`:
        ten clients held open, then an eleventh, on a named pipe on Windows and a
        Unix socket elsewhere) is the proof on Windows.
      - Node tests enabled: none.
-464. **`fix(process)`: a spawn that fails closes its IPC channel**
+465. **`fix(process)`: a spawn that fails closes its IPC channel**
      (`desktop/d28-qutty-2`; runtime; `ext/process/lib.rs`,
-     `tests/unit_node/child_process_test.ts`; the item number is a placeholder
-     for the train lead to renumber). `create_command` adds the parent's end of
+     `tests/unit_node/child_process_test.ts`). `create_command` adds the
+     parent's end of
      a Node IPC channel (`stdio: [..., "ipc"]`, `fork()`) to the resource table
      before the program is started. When the start failed (a missing program, a
      refused one, and the first attempt of the `ENOEXEC` shell retry), the op
@@ -18245,7 +18244,7 @@ where the changes are discussed.
        sanitizer.
      - Node tests enabled: none.
 
-901. **`feat(permissions)`: the kernel sandbox's supervising broker: the
+466. **`feat(permissions)`: the kernel sandbox's supervising broker: the
      supervisor, its protocol and the file operations** (CLI and runtime;
      denext-only; opt-in: `--kernel-sandbox=broker`, and `enforce` where the
      broker closes a gap; `auto` unchanged;
@@ -18287,7 +18286,7 @@ where the changes are discussed.
        grants and denies (`EnforcePlan::broker`, part of the plan the worker
        compares with the one it compiles itself; the user's grants, never
        the implicit set), resolves every path itself with the race-safe opens
-       (item 902's library: beneath an allow root, outside every deny,
+       (item 467's library: beneath an allow root, outside every deny,
        decided on the object opened), acts itself and hands back only
        descriptors it checked. It never enters `/proc`, `/sys` or `/dev`
        (resolved by the broker those would name the broker's own objects),
@@ -18335,7 +18334,7 @@ where the changes are discussed.
        tests; `sandbox::policy::tests`; spec `kernel_sandbox::broker`.
      - Node tests enabled: none (no Node API changes).
 
-902. **`fix(permissions)`: `ext/fs` and `node:fs` open what they checked**
+467. **`fix(permissions)`: `ext/fs` and `node:fs` open what they checked**
      (runtime; Unix; `runtime/permissions/{lib,checked_open}.rs`,
      `ext/fs/{scoped,std_fs,lib}.rs`). Plan phase P7b: the race-safe opens of
      item 421's library are now what the real file system uses.
@@ -18376,7 +18375,7 @@ where the changes are discussed.
      - Node tests enabled: none (behaviour is unchanged for paths inside the
        grant).
 
-911. **`feat(permissions)`: the kernel sandbox's network route: one seam for
+468. **`feat(permissions)`: the kernel sandbox's network route: one seam for
      every socket, the broker's network authority, and `connect` answered by
      the supervisor** (CLI and runtime; denext-only; opt-in, as item 425;
      `libs/net_route` (new crate
@@ -18460,7 +18459,7 @@ where the changes are discussed.
        notification and `pidfd_getfd` (Linux 5.9), with or without Landlock's
        network rules. On macOS the same is the profile's
        `localhost:<proxy port>` rule.
-     - Over the broker (item 901's supervisor and protocol). The network
+     - Over the broker (item 466's supervisor and protocol). The network
        operations are the protocol's reserved kinds `0x0100`-`0x0106`
        (`deno_permissions::kernel_broker::net`: `Resolve`, `ConnectTcp`,
        `BindTcp`, `OpenUdp`, `UdpExchange`, `ConnectUnix`, `BindUnix`; strict
@@ -18557,7 +18556,7 @@ where the changes are discussed.
        value of the variable is ignored).
      - Node tests enabled: none; no Node API changes.
 
-912. **`feat(permissions)`: listeners bound before the kernel sandbox applies
+469. **`feat(permissions)`: listeners bound before the kernel sandbox applies
      (Linux)** (CLI; denext-only; opt-in, as item 425;
      `cli/sandbox/{policy,enforce,mod}.rs`,
      `libs/sandbox/{plan,enforce_linux}.rs`, `libs/net_route`). Under
@@ -18599,7 +18598,7 @@ where the changes are discussed.
        spec `kernel_sandbox::enforce::prebound_listen` (Linux).
      - Node tests enabled: none; no Node API changes.
 
-913. **`fix(permissions)`: a file checked again after it is opened** (runtime;
+470. **`fix(permissions)`: a file checked again after it is opened** (runtime;
      denext-only; `runtime/permissions/{lib,checked_open}.rs`,
      `ext/net/ops_tls.rs`, `ext/sql/files.rs`).
      `PermissionsContainer::check_opened(file, access, api)` makes the check
@@ -18619,7 +18618,7 @@ where the changes are discussed.
      - Tests: `deno_permissions`'s `check_opened_checks_where_the_file_is`.
      - Node tests enabled: none; no Node API changes.
 
-914. **`test(kernel-sandbox)`: the escape corpus's host-scoped network** (tests;
+471. **`test(kernel-sandbox)`: the escape corpus's host-scoped network** (tests;
      `tests/specs/kernel_sandbox/escape_corpus/`). A probe, `net.retarget`
      (dissolve a connected TCP socket's association and connect it to a port no
      grant names; it uses a socket it can make, else one it was handed), and,
@@ -18630,10 +18629,10 @@ where the changes are discussed.
      broker the run says they were skipped.
      - Node tests enabled: none; tests only.
 
-457. **`feat(permissions)`: the kernel sandbox's warn mode, the rollout stages
+472. **`feat(permissions)`: the kernel sandbox's warn mode, the rollout stages
      of `auto`, and the gate in front of the R4 flip** (CLI, runtime and tests;
-     denext-only; opt-in, the shipped default unchanged; number to be assigned
-     at merge; `libs/sandbox/{would_deny,seatbelt,lib}.rs`,
+     denext-only; opt-in, the shipped default unchanged;
+     `libs/sandbox/{would_deny,seatbelt,lib}.rs`,
      `cli/sandbox/{warn,mod,enforce}.rs`, `cli/lib/kernel_sandbox.rs`,
      `cli/lib.rs`, `runtime/permissions/{kernel_sandbox_state.rs,Cargo.toml}`,
      `ext/process/lib.rs`, `tests/kernel_sandbox_beds/`,
@@ -18763,10 +18762,9 @@ where the changes are discussed.
        (`deno test`).
      - Node tests enabled: none; no Node API changes.
 
-457. **`feat(permissions)`: a compiled program enforces its baked grant with the
+473. **`feat(permissions)`: a compiled program enforces its baked grant with the
      kernel sandbox (`deno compile --kernel-sandbox=enforce`)** (CLI and
-     runtime; denext-only; opt-in, as item 425; `auto` unchanged; code comments
-     call this item 901 until the train numbers it;
+     runtime; denext-only; opt-in, as item 425; `auto` unchanged;
      `cli/lib/{kernel_apply,kernel_plan,kernel_policy,
      kernel_sandbox}.rs`,
      `cli/rt/{kernel,lib,run}.rs`, `cli/sandbox/{mod,enforce}.rs`,
@@ -18833,7 +18831,7 @@ where the changes are discussed.
        refuses to start (Seatbelt can't stack a second profile), as a nested
        `deno run --kernel-sandbox=enforce` does.
      - `deno compile`: `--kernel-sandbox=enforce` is baked for Linux, macOS and
-       Windows targets (item 902) of a command-line program; `broker` is refused
+       Windows targets (item 474) of a command-line program; `broker` is refused
        (no program is made that couldn't start), and so is `enforce` for a
        desktop app (its process hosts a browser engine; not built yet) and for
        another target OS. `--kernel-sandbox-exec=strict` is baked too
@@ -18869,15 +18867,23 @@ where the changes are discussed.
        refused on macOS; a rule the OS can't hold warned about at compile and
        refused at start) and `kernel_sandbox::policy` (`compile_refuses_broker`,
        and `compile_bakes_warn` with the new line).
+     - With items 466-472 (the denext.28 train). The policy-model and
+       plan-translation changes of the broker, the network route and warn mode
+       were written against `cli/sandbox/{policy,enforce}.rs`; they live in
+       `cli/lib/kernel_{policy,plan}.rs` now, and `cli/sandbox` re-exports
+       them. Item 472's rule that a mode `auto` chose never refuses to start
+       holds for a compiled program too: `kernel_apply::start_compiled` runs it
+       off where the runtime has no enforcer for the OS and prints `warn`'s line
+       where enforce can't hold the grant, and `check_compiled` lets such a
+       program through. An explicit baked `enforce` still refuses.
      - Node tests enabled: none; no Node API changes.
 
-458. **`feat(permissions)`: Windows' small tier for compiled programs: a job
-     object and a lowered integrity level** (runtime; denext-only; opt-in; code
-     comments call this item 902 until the train numbers it;
+474. **`feat(permissions)`: Windows' small tier for compiled programs: a job
+     object and a lowered integrity level** (runtime; denext-only; opt-in;
      `libs/sandbox/{windows,plan,lib}.rs`, `libs/sandbox/Cargo.toml`,
      `cli/lib/{kernel_plan,kernel_apply}.rs`). The first kernel enforcement on
      Windows (plan §1.9, review §5b tier 1), for a program compiled with
-     `--kernel-sandbox=enforce` (item 901), applied in place at the top of
+     `--kernel-sandbox=enforce` (item 473), applied in place at the top of
      `main`.
      - The job object (`deno_sandbox::windows::apply_job`): an anonymous job the
        process assigns itself to, with no breakaway (a child created with
@@ -18934,10 +18940,11 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460) are what the prebuilt `libdenort` carries. The
-CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
-into a packaged app's launchers) are in the branch too, but a stock CLI does not
-run them; denext's own launcher provides that environment.
+449, 450, 452, 455, 457, 460-468, 470, 472-474) are what the prebuilt
+`libdenort` carries. The CLI-side parts (for example writing
+`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
+in the branch too, but a stock CLI does not run them; denext's own launcher
+provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
@@ -18986,7 +18993,8 @@ the front on macOS, item 361; and API 58, child web views, their keys and focus,
 item 368; and, for runtime 3.0.0-denext.25, laufey v0.8.1, item 445; and, for
 runtime 3.0.0-denext.26, laufey v0.8.2, item 453; and, for runtime
 3.0.0-denext.28, API 59, web view downloads and permission requests the app
-decides and menu read-back, item 460), at the commit pinned by `LAUFEY_SHA` in
+decides and menu read-back, item 461, and API 60, the window order and the
+pointer, item 463), at the commit pinned by `LAUFEY_SHA` in
 the workflow (or the `laufey_ref` input). The same commit is the `laufey` git
 dependency of `cli/rt_desktop/Cargo.toml` (API 59, CEF 156.0.30).
 

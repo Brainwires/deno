@@ -1135,7 +1135,7 @@ async fn resolve_flags_and_init(
   deno_lib::kernel_sandbox::snapshot_forced(
     std::env::var(deno_lib::kernel_sandbox::KERNEL_SANDBOX_FORCE_ENV_VAR).ok(),
   );
-  // denext: and the harnesses' rollout stage (DENEXT.md item 957)
+  // denext: and the harnesses' rollout stage (DENEXT.md item 472)
   deno_lib::kernel_sandbox::snapshot_stage(
     std::env::var(deno_lib::kernel_sandbox::KERNEL_SANDBOX_STAGE_ENV_VAR).ok(),
   );

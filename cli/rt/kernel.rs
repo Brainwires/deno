@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-//! denext: a compiled program's kernel sandbox (DENEXT.md item 901).
+//! denext: a compiled program's kernel sandbox (DENEXT.md item 473).
 //!
 //! A program built with `deno compile --kernel-sandbox=enforce` holds its
 //! baked grant with the OS from its first instruction of user code: `main`

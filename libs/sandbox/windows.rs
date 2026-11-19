@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-//! Windows, the small tier (DENEXT.md item 902): what a process can apply
+//! Windows, the small tier (DENEXT.md item 474): what a process can apply
 //! to itself, in place, with no relaunch and no administrator rights.
 //!
 //! - [`apply_job`]: a job object the process assigns itself to. No

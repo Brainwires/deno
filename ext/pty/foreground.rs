@@ -2,7 +2,7 @@
 
 //! What runs in a terminal right now: the foreground process of a pty, with
 //! its name, arguments and working directory (`Deno.Pty.foreground()`,
-//! DENEXT.md item 461).
+//! DENEXT.md item 462).
 //!
 //! This file asks the kernel about ONE process by id; which process is the
 //! terminal's foreground one is decided by `unix.rs` (`tcgetpgrp` on the

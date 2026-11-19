@@ -61,7 +61,7 @@ fn unwrap_or_exit<T>(result: Result<T, AnyError>) -> T {
 
 pub fn load_env_vars(env_vars: &IndexMap<String, String>) {
   env_vars.iter().for_each(|env_var| {
-    // denext (DENEXT.md item 901): under the kernel sandbox the environment
+    // denext (DENEXT.md item 473): under the kernel sandbox the environment
     // holds only what the plan keeps, the env file's variables included
     if env::var(env_var.0).is_err() && kernel::keeps_env(env_var.0) {
       // SAFETY: called during single-threaded startup before tokio runtime
@@ -130,7 +130,7 @@ pub fn main() {
   deno_runtime::crash_report::maybe_selftest();
 
   let args: Vec<_> = env::args_os().collect();
-  // denext (DENEXT.md item 901): the kernel sandbox a program was compiled
+  // denext (DENEXT.md item 473): the kernel sandbox a program was compiled
   // with applies here, in place: the process has one thread and has opened
   // nothing of its own yet. A self-extracting program's files are written
   // first (its extraction folder is readable under the sandbox, never

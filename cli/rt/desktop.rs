@@ -3059,7 +3059,7 @@ pub const DESKTOP_JS: &str = r#"
       enumerable: true,
     },
     // The app's on-screen windows as the OS stacks them, front to back, by
-    // `windowId` (laufey API 60, DENEXT.md item 462); null where the OS
+    // `windowId` (laufey API 60, DENEXT.md item 463); null where the OS
     // doesn't tell (`windowCapabilities().windowOrder`).
     windowOrder: {
       value: function windowOrder() {
