@@ -3530,6 +3530,7 @@ class RTCPeerConnection extends EventTarget {
         if (type !== "rollback") {
           requireSdpSyntax(sdp);
           requireRtcpMux(sdp);
+          requireUniqueMsids(sdp);
         }
         const offerFromStable = type === "offer" &&
           this[_state].signalingState === "stable";
@@ -4717,6 +4718,47 @@ function createOfferSdp(pc, iceRestart) {
   const sdp = op_webrtc_pc_create_offer(pc[_rid], restart);
   state.configRestart = false;
   return sdp;
+}
+
+// RFC 8830 section 2: one MediaStreamTrack is in one m-section, so an
+// `a=msid:<stream> <track>` value two m-sections both carry is an invalid
+// description, which setRemoteDescription rejects with an OperationError.
+// (An msid with no track part, and rejected sections, say nothing here.)
+function requireUniqueMsids(sdp) {
+  const seen = new SafeSet();
+  let mine = null;
+  const flush = () => {
+    if (mine === null) return;
+    const values = ArrayFrom(new SafeSet(mine));
+    for (let i = 0; i < values.length; ++i) {
+      if (SetPrototypeHas(seen, values[i])) {
+        throw new DOMException(
+          `setRemoteDescription: the msid '${values[i]}' is in two media sections`,
+          "OperationError",
+        );
+      }
+      SetPrototypeAdd(seen, values[i]);
+    }
+  };
+  const lines = StringPrototypeSplit(sdp, "\n");
+  for (let i = 0; i < lines.length; ++i) {
+    const line = StringPrototypeTrim(lines[i]);
+    if (StringPrototypeStartsWith(line, "m=")) {
+      flush();
+      const parts = StringPrototypeSplit(line, " ");
+      mine = parts[1] === "0" ? null : [];
+    } else if (mine !== null && StringPrototypeStartsWith(line, "a=msid:")) {
+      const value = StringPrototypeTrim(StringPrototypeSlice(line, 7));
+      const parts = ArrayPrototypeFilter(
+        StringPrototypeSplit(value, " "),
+        (part) => part !== "",
+      );
+      if (parts.length >= 2) {
+        ArrayPrototypePush(mine, `${parts[0]} ${parts[1]}`);
+      }
+    }
+  }
+  flush();
 }
 
 // createAnswer's SDP. JSEP (RFC 9429 5.3.1): each answered m= section's
