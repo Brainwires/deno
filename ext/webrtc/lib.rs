@@ -46,6 +46,8 @@ use serde::Serialize;
 
 mod encoded_frames;
 mod fake_media;
+// wpt100:hdrext
+mod header_extensions;
 mod media;
 mod net;
 mod peer;
