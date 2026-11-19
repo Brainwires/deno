@@ -1,8 +1,13 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 // @ts-check
 
-// A small, layout-free `document` for the WPT runner's `--dom-shim` flag.
+// The WPT runner's document environment (tier T1 in README.md): a small,
+// layout-free `document` for window-scoped tests (on by default for the
+// WebRTC and Media Capture suites, `--document` for all, `--no-document` for
+// none).
 //
+// Loading a test's document is the test runner's job (wptrunner does it for a
+// browser through WebDriver); it is test plumbing, not an API under test.
 // Many `.html` tests only touch the page for bookkeeping: a helper reads
 // `document.currentScript`, appends a scratch element to `document.body`, or
 // checks whether an element interface exists before choosing another path. In
@@ -19,12 +24,26 @@
 //   but draws nothing: `getContext()` returns `null` (the answer for a context
 //   type a user agent does not support) and it has no `captureStream()`, so a
 //   helper that feature-detects canvas capture falls back to `getUserMedia()`.
-//   Every tag outside the small table below (`video`, `audio`, `iframe`,
-//   `img`, ...) is an `HTMLUnknownElement`: this runtime has no such element.
+//   Every tag outside the small table below (`iframe`, `img`, ...) is an
+//   `HTMLUnknownElement`: this runtime has no such element. A runner
+//   environment file loaded after this one (media_env.js: `<video>`,
+//   `<audio>` over the runtime's received frames) adds element interfaces
+//   with the `deno.wpt.defineElement` hook, or by defining the global
+//   interface (`HTMLVideoElement`, ...) as a subclass of `HTMLElement`;
+// - the test file's own markup (`<div id="log">`, `<video id="video1">`):
+//   the runner hands over the parsed page (`deno.wpt.loadMarkup`) and the
+//   shim instantiates it as an HTML parser would have, the nodes before each
+//   `<script>` before that script runs (`deno.wpt.setCurrentScript`), the
+//   rest after the last one (`deno.wpt.finishMarkup`). That script element is
+//   `document.currentScript` while it runs;
+// - named access on the window (HTML 7.2.2.3): a connected element's `id`
+//   names a global that returns the element, unless the global object already
+//   has that property.
 //
-// There is no layout, style, parsing, rendering, media or browsing context,
-// and no event is ever dispatched by the shim. It must never make a test pass
-// without exercising the API under test; a gap stays a failure.
+// There is no layout, style, HTML parsing of strings (`innerHTML` is a plain
+// property), rendering, media or browsing context, and no event is ever
+// dispatched by the shim. It must never make a test pass without exercising
+// the API under test; a gap stays a failure.
 //
 // The runner evaluates this file after `testharness.js` has loaded, so
 // testharness keeps its shell environment (it picks the window environment
@@ -38,6 +57,13 @@
   let constructing = false;
   /** @type {(node: Node) => readonly Node[]} */
   let childrenOf;
+  /**
+   * Called with a node just inserted into a connected tree, and with an
+   * element whose `id` changed while connected (named access, see
+   * `exposeNamed`).
+   * @type {(node: Node) => void}
+   */
+  let onConnected = () => {};
 
   /**
    * The elements under `root`, in tree order, that `match` accepts.
@@ -139,6 +165,7 @@
         : this.#children.indexOf(child);
       this.#children.splice(index, 0, node);
       node.#parent = this;
+      if (node.isConnected) onConnected(node);
       return node;
     }
 
@@ -235,7 +262,12 @@
     }
     /** @param {string} name @param {unknown} value */
     setAttribute(name, value) {
-      this.#attributes.set(String(name).toLowerCase(), String(value));
+      const lower = String(name).toLowerCase();
+      this.#attributes.set(lower, String(value));
+      if (lower === "id" && this.isConnected) onConnected(this);
+    }
+    getAttributeNames() {
+      return [...this.#attributes.keys()];
     }
     /** @param {string} name */
     hasAttribute(name) {
@@ -308,6 +340,33 @@
   };
 
   /**
+   * Element interfaces a runner environment file may define as globals
+   * (subclasses of `HTMLElement`); `createElement` uses them when present.
+   * @type {Record<string, string>}
+   */
+  const environmentInterfaceNames = {
+    video: "HTMLVideoElement",
+    audio: "HTMLAudioElement",
+  };
+
+  /**
+   * The interface for a local name: the table, then an environment file's.
+   * @param {string} name
+   * @returns {typeof HTMLElement}
+   */
+  function interfaceFor(name) {
+    if (Object.hasOwn(elementInterfaces, name)) return elementInterfaces[name];
+    const globalName = environmentInterfaceNames[name];
+    const ctor = globalName === undefined
+      ? undefined
+      : Reflect.get(globalThis, globalName);
+    if (typeof ctor === "function" && ctor.prototype instanceof HTMLElement) {
+      return ctor;
+    }
+    return HTMLUnknownElement;
+  }
+
+  /**
    * @template {Node} T
    * @param {new (...args: any[]) => T} ctor
    * @param {...any} args
@@ -323,6 +382,23 @@
   }
 
   const setCurrentScript = Symbol.for("deno.wpt.setCurrentScript");
+  const loadMarkup = Symbol.for("deno.wpt.loadMarkup");
+  const finishMarkup = Symbol.for("deno.wpt.finishMarkup");
+  const defineElement = Symbol.for("deno.wpt.defineElement");
+
+  /**
+   * The test file's markup in document order (see `MarkupNode` in runner.ts):
+   * `p` is the parent's index (-1 for `<html>`), `t` an element's local name
+   * and `a` its attributes, `x` a text node's data.
+   * @typedef {{ p: number, t?: string, a?: [string, string][], x?: string }} MarkupNode
+   */
+
+  /**
+   * The `<title>` made from the page's title (`META_TITLE`) before the markup
+   * came; the markup's own `<title>` takes its place.
+   * @type {Element | null}
+   */
+  let titleFromMeta = null;
 
   class Document extends Node {
     /** @type {HTMLScriptElement | null} */
@@ -363,6 +439,11 @@
       return globalThis;
     }
 
+    /** @type {MarkupNode[]} */
+    #markup = [];
+    /** The markup nodes instantiated so far, by index. @type {Node[]} */
+    #markupNodes = [];
+
     /** @param {string} localName */
     createElement(localName) {
       const name = String(localName).toLowerCase();
@@ -372,7 +453,10 @@
           "InvalidCharacterError",
         );
       }
-      return createNode(elementInterfaces[name] ?? HTMLUnknownElement, name);
+      const element = createNode(interfaceFor(name), name);
+      // An environment file's constructor may not pass the name on.
+      if (element.localName !== name) element.localName = name;
+      return element;
     }
     /** @param {string} data */
     createTextNode(data) {
@@ -384,14 +468,28 @@
     }
 
     /**
-     * Runner hook: the `<script>` about to run (its `src`, or `null` for an
-     * inline script), or `undefined` once it has run.
-     * @param {string | null | undefined} src
+     * Runner hook: the `<script>` about to run (its index in the markup, or
+     * without markup its `src`, or `null` for an inline script), or
+     * `undefined` once it has run.
+     * @param {number | string | null | undefined} src
      */
     [setCurrentScript](src) {
       if (src === undefined) {
         this.#currentScript = null;
         return;
+      }
+      if (typeof src === "number") {
+        // The markup's `<script>` at that index, with its text, after
+        // everything before it.
+        let last = src;
+        while (this.#markup[last + 1]?.p === src) last++;
+        this.#materializeThrough(last);
+        const node = this.#markupNodes[src];
+        if (node instanceof HTMLScriptElement) {
+          this.#currentScript = node;
+          return;
+        }
+        src = null;
       }
       const script =
         /** @type {HTMLScriptElement} */ (this.createElement("script"));
@@ -399,7 +497,135 @@
       this.head?.appendChild(script);
       this.#currentScript = script;
     }
+
+    /**
+     * Runner hook: the test file's markup, instantiated as the scripts are
+     * reached (see the file comment).
+     * @param {MarkupNode[]} nodes
+     */
+    [loadMarkup](nodes) {
+      this.#markup = Array.isArray(nodes) ? nodes : [];
+      this.#markupNodes = [];
+    }
+
+    /** Runner hook: the scripts have all run; the rest of the markup. */
+    [finishMarkup]() {
+      this.#materializeThrough(this.#markup.length - 1);
+    }
+
+    /**
+     * Runner hook for environment files: `createElement(localName)` makes a
+     * `ctor`, a subclass of `HTMLElement`, which also becomes a global.
+     * @param {string} localName @param {typeof HTMLElement} ctor
+     */
+    [defineElement](localName, ctor) {
+      const name = String(localName).toLowerCase();
+      if (
+        typeof ctor !== "function" || !(ctor.prototype instanceof HTMLElement)
+      ) {
+        throw new TypeError("An element interface extends HTMLElement");
+      }
+      elementInterfaces[name] = ctor;
+      if (!(ctor.name in globalThis) && ctor.name !== "") {
+        Object.defineProperty(globalThis, ctor.name, {
+          value: ctor,
+          writable: true,
+          configurable: true,
+          enumerable: false,
+        });
+      }
+    }
+
+    /** @param {number} last */
+    #materializeThrough(last) {
+      const html = this.documentElement;
+      for (let i = this.#markupNodes.length; i <= last; i++) {
+        const entry = this.#markup[i];
+        if (entry === undefined) break;
+        const parent = entry.p === -1 ? this : this.#markupNodes[entry.p];
+        /** @type {Node} */
+        let node;
+        if (entry.t === undefined) {
+          node = this.createTextNode(entry.x ?? "");
+          (parent ?? this.body ?? this).appendChild(node);
+          this.#markupNodes[i] = node;
+          continue;
+        }
+        // The document's own `<html>`, `<head>` and `<body>` (and the
+        // `<title>` made from the page's title) stand for the parsed ones.
+        /** @type {Element | null} */
+        let existing = null;
+        if (entry.p === -1 && entry.t === "html") existing = html;
+        else if (parent === html && entry.t === "head") existing = this.head;
+        else if (parent === html && entry.t === "body") existing = this.body;
+        else if (
+          entry.t === "title" && titleFromMeta !== null &&
+          titleFromMeta.parentNode === parent
+        ) {
+          existing = titleFromMeta;
+          existing.textContent = "";
+          titleFromMeta = null;
+        }
+        /** @type {Element} */
+        let element;
+        if (existing !== null) {
+          element = existing;
+        } else {
+          try {
+            element = this.createElement(entry.t);
+          } catch {
+            element = createNode(HTMLUnknownElement, entry.t);
+          }
+        }
+        for (const [name, value] of entry.a ?? []) {
+          try {
+            element.setAttribute(name, value);
+          } catch {
+            // An attribute name the shim can't hold; the parser kept it.
+          }
+        }
+        if (existing === null) {
+          (parent ?? this.body ?? this).appendChild(element);
+        }
+        this.#markupNodes[i] = element;
+      }
+    }
   }
+
+  /** The ids already exposed as window properties. @type {Set<string>} */
+  const namedProperties = new Set();
+
+  /**
+   * Named access on the window (HTML 7.2.2.3): `window[id]` is the element
+   * with that id, unless the global object already has that property. Live:
+   * the getter looks the id up each time, so a removed element is gone.
+   * @param {string} id
+   */
+  function exposeNamed(id) {
+    if (id === "" || namedProperties.has(id) || id in globalThis) return;
+    namedProperties.add(id);
+    Object.defineProperty(globalThis, id, {
+      get: () => document.getElementById(id) ?? undefined,
+      // A script assigning the name (`var video1 = ...`) replaces it.
+      set: (value) => {
+        Object.defineProperty(globalThis, id, {
+          value,
+          writable: true,
+          configurable: true,
+          enumerable: true,
+        });
+      },
+      configurable: true,
+      enumerable: false,
+    });
+  }
+
+  onConnected = (node) => {
+    if (node instanceof Element) exposeNamed(node.id);
+    for (const element of descendants(node, (el) => el.id !== "")) {
+      exposeNamed(element.id);
+    }
+  };
 
   const document = createNode(Document);
   const html = document.appendChild(document.createElement("html"));
@@ -407,6 +633,7 @@
   html.appendChild(document.createElement("body"));
   if (typeof Reflect.get(globalThis, "META_TITLE") === "string") {
     document.title = Reflect.get(globalThis, "META_TITLE");
+    titleFromMeta = document.getElementsByTagName("title")[0] ?? null;
   }
 
   const globals = {

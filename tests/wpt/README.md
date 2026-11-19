@@ -15,15 +15,18 @@ updated:
 
 This will:
 
-- Check that Python 3.11 is available (required by the WPT test server)
+- Check that Python 3.11 or newer is available (required by the WPT test server)
 - Update the WPT manifest (`./tests/wpt/runner/manifest.json`)
-- Configure `/etc/hosts` with entries required by the WPT test server
+- Configure `/etc/hosts` with entries required by the WPT test server (skipped
+  with `--no-hosts`)
 
 You can specify the following flags:
 
 - `--rebuild` — Rebuild the manifest from scratch instead of incrementally
   updating. This can take up to 3 minutes.
 - `--auto-config` — Automatically configure `/etc/hosts` without prompting.
+- `--no-hosts` — Leave `/etc/hosts` alone; run with `--no-hosts` too (see
+  [Running without `/etc/hosts`](#running-without-etchosts)).
 
 ## Running tests
 
@@ -68,8 +71,34 @@ Tests are run in parallel across CPU cores, partitioned by top-level directory.
 - `--inspect-brk` — Attach the V8 inspector to each test
 - `--no-ignore` — Run tests marked with `{"ignore": true}` in expectations
 - `--exit-zero` — Exit with code 0 even if there are failures
-- `--dom-shim` — Give `.html` tests a small, layout-free `document` (see
-  [The `--dom-shim` document](#the---dom-shim-document))
+- `--no-document` — Run window-scoped tests without the runner's document
+  environment (tier T0, see
+  [The document environment](#the-document-environment)); it is on by default
+  for the WebRTC and Media Capture suites
+- `--document` — Give every window-scoped test the document environment
+  (`--dom-shim` is its old name)
+- `--no-hosts` — Reach the WPT host names through a proxy the runner starts,
+  instead of `/etc/hosts` entries
+
+A test file that runs out of time is reported as `TIMEOUT` in `--wptreport` (not
+`CRASH`), and testharness.js's own harness and subtest statuses (`TIMEOUT`,
+`NOTRUN`, `PRECONDITION_FAILED`) keep their names there.
+
+### Running without `/etc/hosts`
+
+The WPT server is reached by the names `web-platform.test`,
+`not-web-platform.test` and their subdomains. `--no-hosts` (on `setup`, `run`
+and `update`) needs no `/etc/hosts` entries and no root: the server binds to
+127.0.0.1 (`runner/config.no-hosts.json`), and the runner starts a small
+forwarding proxy on a loopback port (`runner/proxy.ts`: `CONNECT` tunnels and
+absolute-form HTTP requests) that sends those names to 127.0.0.1. The test
+processes get it as `HTTP_PROXY` / `HTTPS_PROXY`, which `fetch()` and the module
+loader (workers) honour.
+
+```shell
+./tests/wpt/wpt.ts setup --no-hosts
+./tests/wpt/wpt.ts run --no-hosts -- webrtc
+```
 
 ## Updating expectations
 
@@ -129,6 +158,11 @@ Example:
 }
 ```
 
+A suite can be tracked without gating (`NON_GATING_SUITES` in `runner/utils.ts`;
+today `mediacapture-streams`): its failures are listed after the run but never
+fail it, and a test file its expectation file doesn't list yet runs as if
+expected to pass, so `update` adds it.
+
 When the `run` command finishes, it shows a git diff between the current
 expectation files and what the actual results would produce. This makes it easy
 to see regressions and improvements.
@@ -139,39 +173,91 @@ Besides the `.any.js` / `.window.js` / `.worker.js` tests (whose HTML wrapper
 the WPT server generates), a suite's own `testharness.js` `.html` files run too:
 the runner fetches the page from the WPT server and runs its `<script src>` and
 inline `<script>` blocks in document order, as one program, with
-`globalThis.window` set and the runner's `testharnessreport.js` in place of the
-browser one. There is no DOM: a test that needs `document`, an `<iframe>`, a
-`<video>` / `<canvas>` element or a browsing context fails, and its expectation
-says so (`false`, or its subtests under `expectedFailures`).
+`globalThis.window` set, the runner's `testharnessreport.js` in place of the
+browser one and the runner's `testdriver-vendor.js` in place of the suite's (see
+below). Without the document environment there is no DOM: a test that needs
+`document` fails, and its expectation says so.
 
-### The `--dom-shim` document
+### The document environment
 
-Many `.html` tests touch the page only for bookkeeping: a helper reads
-`document.currentScript`, appends a scratch element to `document.body`, or
-checks whether an element interface exists before taking another path. Without a
-DOM each of those is a `ReferenceError` before the test reaches the API it is
-about. `--dom-shim` installs `./tests/wpt/runner/dom_shim.js` right after
-`testharness.js` has loaded (so testharness keeps its shell environment), and
-gives those tests a node tree to talk to and nothing more:
+A WPT `.html` test is defined as a document, and loading that document is the
+test runner's job for every product (wptrunner does it for browsers through
+WebDriver). `document`, `document.body`, `createElement` and `test_driver` are
+test plumbing, not APIs of the specs the tests are about. So the runner supplies
+them; Deno does not grow a `document` to pass them.
+
+Results are published in tiers:
+
+| Tier | What the test gets                                                                                                           |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------- |
+| T0   | The bare runtime, no document (`--no-document`)                                                                              |
+| T1   | T0 + the runner's document environment + its `testdriver-vendor.js`: the default for the WebRTC and Media Capture suites     |
+| T1m  | The part of T1 that passes only through the runner's media elements (`<video>` / `<audio>` driven by frames really received) |
+| T2   | Needs real encoding and decoding (canvas capture, pixel checks): not provided                                                |
+
+The environment is given to window-scoped tests (a suite's own `.html` files and
+`.window.js` tests; `.any.js` and `.worker.js` tests are written for any global
+or a worker, so they never get it). By default only the suites in
+`DOCUMENT_SUITES` (`runner/utils.ts`: the `webrtc*` directories and
+`mediacapture-streams`) get it: a suite about the DOM or HTML itself would
+otherwise be testing the environment. `--document` gives it to every
+window-scoped test, `--no-document` to none.
+
+Honesty rules for the environment:
+
+1. The upstream test files are never edited, skipped or special-cased by name.
+2. The environment implements no interface of the specs under test (webrtc-pc,
+   webrtc-stats, webrtc-encoded-transform, webrtc-extensions, webrtc-identity,
+   webrtc-priority, webrtc-svc, webrtc-ice, mediacapture-main). Those live in
+   the runtime.
+3. An environment object reports only what the runtime did. A `<video>` fires
+   `loadedmetadata` only after a real frame arrived on its track, and
+   `videoWidth` is the size coded in that frame. Nothing is answered from a
+   constant.
+4. A feature the environment lacks stays a failure.
+   `HTMLCanvasElement.getContext()` returns `null` and there is no
+   `captureStream()`.
+5. Reports list T0, T1 and T1m, and this feature list.
+
+What the environment has (`runner/dom_shim.js`, installed right after
+`testharness.js` has loaded so testharness keeps its shell environment, then
+`runner/media_env.js` when present):
 
 - `document` with `documentElement`, `head`, `body`, `title` (the page's
-  `<title>`), `currentScript` (the running `<script>`, `null` between scripts),
-  `readyState` (`"complete"`), `createElement`, `createTextNode`,
+  `<title>`), `currentScript` (the running `<script>` element, `null` between
+  scripts), `readyState` (`"complete"`), `createElement`, `createTextNode`,
   `getElementById` and `getElementsByTagName`;
 - `Node` / `Element` with `appendChild`, `insertBefore`, `removeChild`,
-  `append`, `remove`, `contains`, attributes and `textContent`;
+  `append`, `remove`, `contains`, attributes and `textContent` (`innerHTML` is a
+  plain property: nothing parses it);
+- the test file's own markup: the elements, attributes and text of the page are
+  instantiated as an HTML parser would have, the nodes before each `<script>`
+  before that script runs and the rest after the last one, so
+  `getElementById("log")` finds the page's `<div id="log">`;
+- named access on the window (HTML 7.2.2.3): a connected element's `id` is a
+  global naming that element (`video1` for `<video id="video1">`), unless the
+  global object already has that property;
 - `HTMLCanvasElement`, which exists but draws nothing: `getContext()` returns
   `null` and there is no `captureStream()`, so a helper that feature-detects
   canvas capture falls back to `getUserMedia()` (the fake devices);
-- every tag outside a small table (`html`, `head`, `body`, `title`, `div`,
-  `span`, `p`, `pre`, `script`, `canvas`) is an `HTMLUnknownElement`: there is
-  no `<video>`, `<audio>`, `<iframe>` or `<img>`.
+- the element interfaces of `media_env.js` (`<video>`, `<audio>` over the
+  runtime's received frames) when that file is present; every other tag outside
+  a small table (`html`, `head`, `body`, `title`, `div`, `span`, `p`, `pre`,
+  `script`, `canvas`) is an `HTMLUnknownElement`: there is no `<iframe>` or
+  `<img>`;
+- `test_driver.set_permission()` for `camera` and `microphone`
+  (`runner/testdriver-vendor.js`): `"granted"` resolves, since the runtime
+  grants `getUserMedia()` under the runner's `DENO_FAKE_MEDIA_DEVICES=1`; any
+  other state goes to the runtime's `Deno.webrtc.setMediaPermission()` when it
+  has one and rejects otherwise. Every other `test_driver` call rejects with
+  testdriver.js's "... is not implemented by testdriver-vendor.js", at once
+  (`in_automation`), including `click` and `bless`.
 
-The page's own markup is not copied into it (`getElementById` finds only what a
-script created), and the shim never dispatches an event, lays anything out or
-fakes an API under test: a test either reaches the real implementation or still
-fails. The option is off by default, and the expectation files are written
-without it.
+The environment never dispatches an event (no `load`, no `DOMContentLoaded`),
+lays anything out or fakes an API under test: a test either reaches the real
+implementation or still fails. Not available: iframes and other browsing
+contexts, navigation, service workers (their files are skipped by path),
+`crossOriginIsolated`, canvas drawing, `AudioContext`.
 
 ### WebRTC (`webrtc`, `webrtc-extensions`, `webrtc-stats`)
 
@@ -189,8 +275,8 @@ the fake camera and microphone, whose tracks send real media. Most of the files
 that still fail on media do so in the suite's own helpers: `getNoiseStream()`'s
 `canCreate()` reads `HTMLCanvasElement.prototype` before it falls back to
 `getUserMedia()`, and `resources/testdriver.js` reads `document` when it loads;
-both are `ReferenceError`s in a runtime without a DOM. `--dom-shim` gets both,
-and the helpers' scratch elements, past that point.
+both are `ReferenceError`s in a runtime without a DOM. The document environment
+gets both, and the helpers' scratch elements, past that point.
 
 ## FAQ
 

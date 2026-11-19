@@ -30,11 +30,14 @@ import {
   ManifestFolder,
   ManifestTestOptions,
   ManifestTestVariation,
+  noHosts,
   noIgnore,
+  NON_GATING_SUITES,
   quiet,
   rest,
   runGitDiff,
   runPy,
+  suiteOf,
   TestExpectation,
   updateManifest,
   wptreport,
@@ -93,7 +96,14 @@ switch (command) {
   case "setup":
     await checkPy3Available();
     await updateManifest();
-    await setup();
+    if (noHosts) {
+      console.log(
+        "--no-hosts: skipping /etc/hosts (runs reach the WPT host names through the runner's proxy).",
+      );
+      console.log(green("Setup complete!"));
+    } else {
+      await setup();
+    }
     break;
 
   case "run": {
@@ -209,6 +219,11 @@ interface TestToRun {
 
 function getTestTimeout(test: TestToRun) {
   if (Deno.env.get("CI")) {
+    // A tracked, non-gating suite's files get no more than an expected
+    // failure's time.
+    if (NON_GATING_SUITES.includes(suiteOf(test.path))) {
+      return { long: 60_000, default: 10_000 };
+    }
     // Don't give expected failures the full time
     if (test.expectation === false) {
       return { long: 60_000, default: 10_000 };
@@ -242,7 +257,13 @@ Options:
     --wptreport=<file> Write results in wptreport format
     --inspect-brk      Attach V8 inspector to each test
     --no-ignore        Include tests marked with {"ignore": true}
-    --dom-shim         Give .html tests a small layout-free document
+    --no-document      Run window-scoped tests without the runner's document
+                       environment (tier T0; it is on by default for the
+                       WebRTC and Media Capture suites)
+    --document         Give every window-scoped test the document environment
+                       (--dom-shim is the old name)
+    --no-hosts         Reach the WPT host names through a proxy the runner
+                       starts, instead of /etc/hosts entries
     --exit-zero        Exit with code 0 even on failures
 `);
     Deno.exit(1);
@@ -388,6 +409,23 @@ Options:
   return code;
 }
 
+/** testharness.js's harness statuses, as wptreport names them. */
+const HARNESS_STATUSES: Record<number, string> = {
+  0: "OK",
+  1: "ERROR",
+  2: "TIMEOUT",
+  3: "PRECONDITION_FAILED",
+};
+
+/** testharness.js's subtest statuses, as wptreport names them. */
+const SUBTEST_STATUSES: Record<number, string> = {
+  0: "PASS",
+  1: "FAIL",
+  2: "TIMEOUT",
+  3: "NOTRUN",
+  4: "PRECONDITION_FAILED",
+};
+
 async function generateWptReport(
   results: { test: TestToRun; result: TestResult }[],
   startTime: number,
@@ -396,13 +434,15 @@ async function generateWptReport(
   const runInfo = await generateRunInfo();
   const reportResults = [];
   for (const { test, result } of results) {
-    const status = result.status !== 0
+    const status = result.timedOut
+      ? "TIMEOUT"
+      : result.status !== 0
       ? "CRASH"
-      : result.harnessStatus?.status === 0
-      ? "OK"
-      : "ERROR";
+      : HARNESS_STATUSES[result.harnessStatus?.status ?? 1] ?? "ERROR";
     let message;
-    if (result.harnessStatus === null && result.status === 0) {
+    if (result.timedOut) {
+      message = result.stderr.trim() || "The test file timed out.";
+    } else if (result.harnessStatus === null && result.status === 0) {
       // If the only error is the event loop running out of tasks, using stderr
       // as the message won't help.
       message = "Event loop run out of tasks.";
@@ -427,7 +467,9 @@ async function generateWptReport(
 
         return {
           name: escapeLoneSurrogates(case_.name),
-          status: case_.passed ? "PASS" : "FAIL",
+          status: case_.passed
+            ? "PASS"
+            : SUBTEST_STATUSES[case_.status] ?? "FAIL",
           message: escapeLoneSurrogates(case_.message),
           expected,
           known_intermittent: [],
@@ -523,7 +565,13 @@ Options:
     --json=<file>      Write test results as JSON
     --inspect-brk      Attach V8 inspector to each test
     --no-ignore        Include tests marked with {"ignore": true}
-    --dom-shim         Give .html tests a small layout-free document
+    --no-document      Run window-scoped tests without the runner's document
+                       environment (tier T0; it is on by default for the
+                       WebRTC and Media Capture suites)
+    --document         Give every window-scoped test the document environment
+                       (--dom-shim is the old name)
+    --no-hosts         Reach the WPT host names through a proxy the runner
+                       starts, instead of /etc/hosts entries
 `);
     Deno.exit(1);
   }
@@ -674,7 +722,18 @@ function reportFinal(
   const finalExpectedFailedButPassedTests: [string, TestCaseResult][] = [];
   const finalExpectedFailedButPassedFiles: string[] = [];
   const finalFailedFiles: string[] = [];
+  // Files of the tracked, non-gating suites that didn't match their
+  // expectations: listed, never a failed run.
+  const nonGatingMismatches: string[] = [];
   for (const { test, result } of results) {
+    if (NON_GATING_SUITES.includes(suiteOf(test.path))) {
+      const { failedCount } = analyzeTestResult(result, test.expectation);
+      const fileFailed = result.status !== 0 || result.harnessStatus === null;
+      if ((fileFailed && test.expectation !== false) || failedCount > 0) {
+        nonGatingMismatches.push(test.path);
+      }
+      continue;
+    }
     const {
       failed,
       failedCount,
@@ -706,7 +765,8 @@ function reportFinal(
       finalExpectedFailedButPassedFiles.push(test.path);
     }
   }
-  const finalPassedCount = finalTotalCount - finalFailedCount;
+  const finalPassedCount = finalTotalCount - finalFailedCount -
+    nonGatingMismatches.length;
 
   console.log(bold(blue("=".repeat(40))));
 
@@ -741,13 +801,20 @@ function reportFinal(
     console.log(`        ${JSON.stringify(result)}`);
   }
 
+  if (nonGatingMismatches.length > 0) {
+    console.log(`\nnon-gating files that differ from their expectations:\n`);
+  }
+  for (const path of nonGatingMismatches) {
+    console.log(`        ${JSON.stringify(path)}`);
+  }
+
   const failed = (finalFailedCount > 0) ||
     (finalExpectedFailedButPassedFiles.length > 0);
 
   console.log(
     `final result: ${
       failed ? red("failed") : green("ok")
-    }. ${finalPassedCount} passed; ${finalFailedCount} failed; ${finalExpectedFailedAndFailedCount} expected failure; total ${finalTotalCount} (${duration}ms)`,
+    }. ${finalPassedCount} passed; ${finalFailedCount} failed; ${finalExpectedFailedAndFailedCount} expected failure; ${nonGatingMismatches.length} non-gating mismatch; total ${finalTotalCount} (${duration}ms)`,
   );
 
   // We ignore the exit code of the test run because the CI job reports the
@@ -808,7 +875,9 @@ function reportVariation(
     }
 
     const expectFail = expectation === false;
-    const failReason = result.status !== 0
+    const failReason = result.timedOut
+      ? "the test file timed out"
+      : result.status !== 0
       ? "runner failed during test"
       : "the event loop run out of tasks during the test";
     console.log(
@@ -958,10 +1027,18 @@ function discoverTestsToRun(
           const split = finalPath.split("/");
           const finalKey = split[split.length - 1];
 
-          const expectation = isLeafExpectation(parentExpectation)
+          let expectation = isLeafExpectation(parentExpectation)
             ? parentExpectation
             : (parentExpectation as Expectation)[finalKey];
 
+          // A non-gating suite runs the files its expectation file doesn't
+          // list yet (as if expected to pass), so `update` can add them.
+          if (
+            expectation === undefined &&
+            NON_GATING_SUITES.includes(suiteOf(finalPath))
+          ) {
+            expectation = true;
+          }
           if (expectation === undefined) continue;
 
           if (typeof expectation === "object") {
@@ -997,10 +1074,16 @@ function discoverTestsToRun(
           });
         }
       } else {
-        const expectation = isLeafExpectation(parentExpectation)
+        let expectation = isLeafExpectation(parentExpectation)
           ? parentExpectation
           : (parentExpectation as Expectation)[key];
 
+        if (
+          expectation === undefined &&
+          NON_GATING_SUITES.includes(suiteOf(`${prefix}/${key}`))
+        ) {
+          expectation = {};
+        }
         if (expectation === undefined) continue;
 
         walk(entry, expectation, `${prefix}/${key}`);
