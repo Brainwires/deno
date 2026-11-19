@@ -1,0 +1,6 @@
+read inside: ok
+read outside: ok
+create outside: ok
+chmod outside: ok
+unlink outside: ok
+create inside: ok

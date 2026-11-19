@@ -2,7 +2,7 @@
 
 //! denext: the kernel policy's translation into the enforcers' plan
 //! (DENEXT.md item 425), shared by the CLI (`--kernel-sandbox=enforce`) and
-//! `denort` (a compiled program baked with `enforce`, DENEXT.md item 9xx).
+//! `denort` (a compiled program baked with `enforce`, DENEXT.md item 901).
 //!
 //! [`plan_for`] translates the policy model's [`CompiledPolicy`] into the
 //! enforcers' [`EnforcePlan`] (Landlock rules with the read expansion on
@@ -213,6 +213,7 @@ pub fn plan_for(
     format: PLAN_FORMAT,
     linux: None,
     macos: None,
+    windows: None,
     env_keep: None,
     probe: None,
     module_files: Vec::new(),
@@ -252,6 +253,11 @@ pub fn plan_for(
       plan.macos = Some(macos);
       plan.env_keep = env_keep(&p.env_scrub);
       plan.config_env = config_env();
+    }
+    #[cfg(any(windows, test))]
+    TargetOs::Windows => {
+      let _ = ctx;
+      plan.windows = Some(windows::plan(compiled));
     }
     _ => {
       let _ = ctx;
@@ -515,6 +521,35 @@ pub mod linux {
       },
     };
     Ok((plan, probe, entries))
+  }
+}
+
+/// Windows, the small tier (DENEXT.md item 902): the job object's process
+/// limit and the write roots a lowered integrity level needs labelled.
+/// Reads and the network aren't in the plan (the model reports them as
+/// documented Deno-only rules).
+#[cfg(any(windows, test))]
+pub mod windows {
+  use deno_sandbox::plan::WindowsPlan;
+
+  use super::*;
+  use crate::kernel_policy::ExecScope;
+
+  pub fn plan(compiled: &CompiledPolicy) -> WindowsPlan {
+    let p = &compiled.policy;
+    WindowsPlan {
+      no_children: p.fs.exec == ExecScope::None,
+      write_roots: match &p.fs.write {
+        PathScope::All => None,
+        PathScope::Paths { paths } => {
+          let mut roots: Vec<PathBuf> =
+            paths.iter().map(|rule| rule.path.clone()).collect();
+          roots.sort();
+          roots.dedup();
+          Some(roots)
+        }
+      },
+    }
   }
 }
 

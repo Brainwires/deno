@@ -1,0 +1,2 @@
+[WILDCARD]Warning --kernel-sandbox=enforce: linux can't hold these rules, so the compiled program would refuse to start there:
+[WILDCARD]--deny-write=[WILDCARD]

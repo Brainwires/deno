@@ -1,0 +1,7 @@
+read inside: ok
+read outside: ok
+create outside: ok
+write outside: ok
+delete outside: ok
+create inside: ok
+write inside: ok

@@ -669,8 +669,14 @@ pub async fn compile_binary(
   };
   let cli_options = factory.cli_options()?;
   // denext: a kernel-sandbox mode the binary couldn't start with is refused
-  // before anything is built (DENEXT.md item 420)
-  crate::sandbox::compile_mode(cli_options)?;
+  // before anything is built (DENEXT.md items 420 and 901)
+  crate::sandbox::compile_mode(
+    cli_options,
+    crate::sandbox::CompileKind {
+      desktop: is_desktop,
+      target: compile_flags.target.as_deref(),
+    },
+  )?;
   let module_graph_creator = factory.module_graph_creator().await?;
   let binary_writer = factory.create_compile_binary_writer(is_desktop).await?;
   let entrypoint = cli_options.resolve_main_module()?;

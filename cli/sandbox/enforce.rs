@@ -197,23 +197,7 @@ fn use_cache_overlay(plan: &EnforcePlan) {
   }
 }
 
-/// Creates the cache overlay folder, the user's alone (0700), in the image
-/// that isn't confined yet. A failure leaves it absent: the policy then has
-/// no overlay and the caches stay in memory.
-pub fn create_cache_overlay(overlay: &Path) {
-  let created = std::fs::create_dir_all(overlay).is_ok();
-  #[cfg(not(unix))]
-  let _ = created;
-  #[cfg(unix)]
-  if created {
-    use std::os::unix::fs::PermissionsExt;
-    let parent = overlay.parent().unwrap_or(overlay);
-    for dir in [parent, overlay] {
-      let _ =
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
-    }
-  }
-}
+pub use deno_lib::kernel_apply::create_cache_overlay;
 
 /// Creates the folders the plan writes on the user's behalf (the coverage
 /// and profile folders) before the re-exec: a Landlock rule needs its path to

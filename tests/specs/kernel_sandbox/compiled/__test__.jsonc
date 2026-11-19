@@ -1,0 +1,263 @@
+// denext (DENEXT.md item 901): a program built with
+// `deno compile --kernel-sandbox=enforce` applies its baked grant with the
+// OS at startup, in place (no re-exec). The probes are kernel_sandbox/
+// enforce's (P3 / P4): native code (FFI into libc, a child), which only the
+// kernel holds.
+{
+  "tempDir": true,
+  "tests": {
+    // the program runs with no grant at all (its modules are embedded)
+    "runs_with_no_grant": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        {
+          "args": "compile --quiet --kernel-sandbox=enforce --output prog_main main.ts",
+          "output": ""
+        },
+        { "commandName": "./prog_main", "args": [], "output": "hello\n" }
+      ]
+    },
+    // P3 (a): native reads and writes outside the baked grant are refused
+    "native_files": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        {
+          "args": "compile --quiet --kernel-sandbox=enforce --allow-ffi --allow-read=inside --allow-write=inside --output prog_files files.ts",
+          "output": ""
+        },
+        { "commandName": "./prog_files", "args": [], "output": "files.out" }
+      ]
+    },
+    // P3 (e): -A changes nothing (the kernel sandbox stays off)
+    "allow_all_unaffected": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "compile --quiet -A --kernel-sandbox=enforce --output prog_all files.ts",
+          "output": ""
+        },
+        {
+          "commandName": "./prog_all",
+          "args": [],
+          "output": "files_allow_all.out"
+        }
+      ]
+    },
+    // P3 (f): a program compiled without a mode is unchanged (auto applies
+    // nothing in this release line)
+    "default_unaffected": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "compile --quiet --allow-ffi --allow-read=inside --allow-write=inside --output prog_default files.ts",
+          "output": ""
+        },
+        {
+          "commandName": "./prog_default",
+          "args": [],
+          "output": "files_allow_all.out"
+        }
+      ]
+    },
+    // P3 (b): an --allow-run child inherits the rules, with the hint
+    "child_inherits": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        {
+          "args": "compile --quiet --kernel-sandbox=enforce --allow-run=cat --allow-read=inside --output prog_child child.ts",
+          "output": ""
+        },
+        { "commandName": "./prog_child", "args": [], "output": "child.out" }
+      ]
+    },
+    // P3 (c): native code connects only to the granted port
+    "native_connect": {
+      "if": "kernelSandboxNetPorts",
+      "steps": [
+        {
+          "args": "compile --quiet --kernel-sandbox=enforce --allow-ffi --allow-net=127.0.0.1:4545 --output prog_net net.ts",
+          "output": ""
+        },
+        { "commandName": "./prog_net", "args": [], "output": "net.out" }
+      ]
+    },
+    // P3 (d): a read deny inside a read allow holds against native code
+    "deny_inside_allow": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        { "args": "run --quiet -A setup_link.ts", "output": "" },
+        {
+          "args": "compile --quiet --kernel-sandbox=enforce --allow-ffi --allow-read=inside --deny-read=inside/secret.txt --output prog_deny deny.ts",
+          "output": ""
+        },
+        { "commandName": "./prog_deny", "args": [], "output": "deny.out" }
+      ]
+    },
+    // P3 (g): native code loads libraries only from the read scope
+    "dylib_outside_read_scope": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        { "args": "run --quiet -A setup_dylib.ts", "output": "" },
+        {
+          "args": "compile --quiet --kernel-sandbox=enforce --allow-read=lib --allow-ffi --output prog_dylib dylib.ts",
+          "output": ""
+        },
+        { "commandName": "./prog_dylib", "args": [], "output": "dylib.out" }
+      ]
+    },
+    // the environment holds only what the grant names; children see the same
+    "env_scrubbed": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        {
+          "args": "compile --quiet --kernel-sandbox=enforce --allow-run=env --allow-env=P9_KEEP --output prog_env env.ts",
+          "output": ""
+        },
+        {
+          "commandName": "./prog_env",
+          "args": [],
+          "envs": { "P9_KEEP": "1", "P9_SECRET": "2" },
+          "output": "env.out"
+        }
+      ]
+    },
+    // the set is fixed: nothing is asked for, a missing grant is refused
+    "no_prompt": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        {
+          "args": "compile --quiet --kernel-sandbox=enforce --allow-read=inside --output prog_prompt prompt.ts",
+          "output": ""
+        },
+        { "commandName": "./prog_prompt", "args": [], "output": "prompt.out" }
+      ]
+    },
+    // the program's code cache lives in its own, policy-keyed cache folder
+    "own_cache_folder": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        {
+          "args": "compile --quiet --kernel-sandbox=enforce --output p9_cache_prog main.ts",
+          "output": ""
+        },
+        { "args": "run --quiet -A cache_outer.ts", "output": "cache.out" }
+      ]
+    },
+    // started by a confined `deno run`: Linux stacks the program's own layer
+    "nested_stacks_linux": {
+      "if": "kernelSandboxEnforceLinux",
+      "steps": [
+        {
+          "args": "compile --quiet --kernel-sandbox=enforce --allow-ffi --allow-read=inside --allow-write=inside --output prog_files files.ts",
+          "output": ""
+        },
+        {
+          "args": "run --quiet --kernel-sandbox=enforce --allow-run --allow-ffi --allow-read=. --allow-write=inside nested_outer.ts",
+          "output": "nested_linux.out"
+        }
+      ]
+    },
+    // ... macOS can't stack a second profile: the program refuses to start
+    "nested_refused_mac": {
+      "if": "kernelSandboxEnforceMac",
+      "steps": [
+        {
+          "args": "compile --quiet --kernel-sandbox=enforce --allow-ffi --allow-read=inside --allow-write=inside --output prog_files files.ts",
+          "output": ""
+        },
+        {
+          "args": "run --quiet --kernel-sandbox=enforce --allow-run --allow-ffi --allow-read=. --allow-write=inside nested_outer.ts",
+          "output": "nested_mac.out"
+        }
+      ]
+    },
+    // Windows, the small tier: a Low integrity level holds native writes to
+    // the write grant (reads stay Deno-only there)
+    "windows_native_writes": {
+      "if": "windows",
+      "steps": [
+        {
+          "args": "compile --quiet --kernel-sandbox=enforce --allow-ffi --allow-read=. --allow-write=inside --output prog_wfiles.exe win_files.ts",
+          "output": ""
+        },
+        {
+          "commandName": "./prog_wfiles.exe",
+          "args": [],
+          "output": "win_files.out"
+        }
+      ]
+    },
+    // ... and a program compiled without the mode is unchanged
+    "windows_default_unaffected": {
+      "if": "windows",
+      "steps": [
+        {
+          "args": "compile --quiet --allow-ffi --allow-read=. --allow-write=inside --output prog_wdefault.exe win_files.ts",
+          "output": ""
+        },
+        {
+          "commandName": "./prog_wdefault.exe",
+          "args": [],
+          "output": "win_files_default.out"
+        }
+      ]
+    },
+    // Windows: no --allow-run, so the job object refuses every new process
+    "windows_no_children": {
+      "if": "windows",
+      "steps": [
+        {
+          "args": "compile --quiet --kernel-sandbox=enforce --allow-ffi --allow-write --output prog_wkids.exe win_children.ts",
+          "output": ""
+        },
+        {
+          "commandName": "./prog_wkids.exe",
+          "args": [],
+          "output": "win_children.out"
+        },
+        {
+          "args": "compile --quiet --allow-ffi --allow-write --output prog_wkids_default.exe win_children.ts",
+          "output": ""
+        },
+        {
+          "commandName": "./prog_wkids_default.exe",
+          "args": [],
+          "output": "win_children_default.out"
+        }
+      ]
+    },
+    // Windows: a child inherits the lowered integrity level
+    "windows_child_inherits": {
+      "if": "windows",
+      "steps": [
+        {
+          "args": "compile --quiet --kernel-sandbox=enforce --allow-run=cmd --allow-read=. --allow-write=inside --output prog_wchild.exe win_child_writes.ts",
+          "output": ""
+        },
+        {
+          "commandName": "./prog_wchild.exe",
+          "args": [],
+          "output": "win_child_writes.out"
+        }
+      ]
+    },
+    // a rule the OS can't hold: a warning when compiling, and the program
+    // refuses to start, naming it (Linux: a write deny inside a write allow
+    // needs the broker)
+    "inexpressible_refused": {
+      "if": "kernelSandboxEnforceLinux",
+      "steps": [
+        {
+          "args": "compile --kernel-sandbox=enforce --allow-write=inside --deny-write=inside/a.txt --output prog_inex main.ts",
+          "output": "inexpressible_compile.out"
+        },
+        {
+          "commandName": "./prog_inex",
+          "args": [],
+          "output": "inexpressible_run.out",
+          "exitCode": 1
+        }
+      ]
+    }
+  }
+}

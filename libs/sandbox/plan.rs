@@ -38,6 +38,9 @@ pub struct EnforcePlan {
   pub linux: Option<LinuxPlan>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub macos: Option<MacosPlan>,
+  /// Windows, the small tier (DENEXT.md item 902).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub windows: Option<WindowsPlan>,
   /// The environment the re-executed image keeps (names; a trailing `*`
   /// matches a prefix). `None`: kept as it is.
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -156,6 +159,21 @@ impl EnforcePlan {
       }),
     }
   }
+}
+
+/// What a Windows process applies to itself (the small tier): a job object
+/// and, for a scoped write grant, a Low integrity level. Reads and the
+/// network are not in it (Deno-only on Windows).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WindowsPlan {
+  /// No `--allow-run`: the job's active-process limit is 1.
+  pub no_children: bool,
+  /// The folders and files the process may write, labelled Low before the
+  /// process lowers its own integrity level. `None`: writes aren't scoped
+  /// (the level stays as it is).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub write_roots: Option<Vec<PathBuf>>,
 }
 
 /// What Landlock handles: a handled class with no rule for a path is
@@ -361,6 +379,7 @@ mod tests {
         seccomp: SeccompPlan::default(),
       }),
       macos: None,
+      windows: None,
       env_keep: None,
       probe: None,
       module_files: Vec::new(),

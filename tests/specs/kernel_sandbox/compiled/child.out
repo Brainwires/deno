@@ -1,0 +1,3 @@
+[WILDCARD]cat inside/a.txt: exit 0
+[WILDCARD]cat outside.txt: exit 1
+[WILDCARD]

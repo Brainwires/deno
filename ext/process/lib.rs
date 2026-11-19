@@ -1921,6 +1921,16 @@ pub fn pin_child_env_var(key: OsString, value: OsString) {
   }
 }
 
+/// Pins `key` = `value` like [`pin_child_env_var`], replacing an earlier
+/// value: a compiled program that applies its own kernel sandbox in place
+/// replaces the carrier it inherited with the one that holds its own layer
+/// too (DENEXT.md item 901).
+pub fn repin_child_env_var(key: OsString, value: OsString) {
+  let mut pinned = PINNED_CHILD_ENV.lock().unwrap();
+  pinned.retain(|(k, _)| *k != key);
+  pinned.push((key, value));
+}
+
 /// Sets the pinned variables over whatever `envs` holds.
 fn apply_pinned_child_env(
   envs: &mut HashMap<EnvVarKey, OsString>,

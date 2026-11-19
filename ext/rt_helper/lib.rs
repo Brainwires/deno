@@ -177,9 +177,19 @@ fn resolve_temp_file_name(
   cache_dir.join(&file_name)
 }
 
-fn native_addon_cache_dir() -> std::io::Result<&'static Path> {
-  static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
+static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
+/// denext: the folder native addons are extracted to, chosen by the
+/// runtime instead of the temp folder's shared one: a compiled program
+/// under the kernel sandbox writes only its own cache folder (DENEXT.md
+/// item 901). The folder must be private (the same check as the default's);
+/// returns whether it is now the cache folder (`false`: not private, or one
+/// was already chosen).
+pub fn set_native_addon_cache_dir(dir: PathBuf) -> bool {
+  ensure_private_native_addon_dir(&dir).is_ok() && CACHE_DIR.set(dir).is_ok()
+}
+
+fn native_addon_cache_dir() -> std::io::Result<&'static Path> {
   if let Some(cache_dir) = CACHE_DIR.get() {
     return Ok(cache_dir);
   }

@@ -187,6 +187,11 @@ pub struct Metadata {
   /// is `auto` (DENEXT.md item 420).
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub kernel_sandbox: Option<crate::kernel_sandbox::KernelSandboxMode>,
+  /// `deno compile --kernel-sandbox-exec=strict`: under the baked `enforce`
+  /// the whole process tree may execute only the `--allow-run` programs
+  /// (DENEXT.md items 449 and 901).
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub kernel_sandbox_exec_strict: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]

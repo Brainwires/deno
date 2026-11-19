@@ -25,6 +25,11 @@
 //! only when the expansion is stable, by overmounting where user namespaces
 //! exist, and is otherwise a reported Deno-only rule.
 
+#![allow(
+  clippy::disallowed_methods,
+  reason = "the policy is compiled for the real file system and environment (the reach of a deny, the programs on PATH), never a virtual one"
+)]
+
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -977,6 +982,17 @@ impl ImplicitSet {
         }
       }
     }
+    // a compiled program's own cache folder (its V8 code cache, the native
+    // addons it extracts), keyed by its policy like the overlay (item 901)
+    if ctx.compiled
+      && let Some(overlay) = &ctx.cache_overlay
+    {
+      add(
+        overlay,
+        ImplicitNeed::CacheOverlay,
+        ImplicitAccess::ReadWrite,
+      );
+    }
     if let Some(dir) = &ctx.coverage_dir {
       add(dir, ImplicitNeed::Coverage, ImplicitAccess::ReadWrite);
     }
@@ -1059,8 +1075,8 @@ pub struct Context {
   pub compiled: bool,
   /// `--kernel-sandbox-exec=strict` (plan D3's opt-in).
   pub exec_strict: bool,
-  /// The policy-keyed cache overlay (`DENO_DIR/sandboxed/<hash>`), set once
-  /// the policy without it is hashed.
+  /// The policy-keyed cache overlay (`DENO_DIR/sandboxed/<hash>`; a compiled
+  /// program's own cache folder), set once the policy without it is hashed.
   pub cache_overlay: Option<PathBuf>,
   /// The coverage folder the run writes (`--coverage`, `DENO_COVERAGE_DIR`).
   pub coverage_dir: Option<PathBuf>,
