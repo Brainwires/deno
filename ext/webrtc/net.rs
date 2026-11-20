@@ -58,6 +58,7 @@ use tokio::net::TcpStream;
 use tokio::net::UdpSocket;
 
 use crate::WebRtcError;
+use crate::ecn::EcnUdpSocket;
 use crate::peer::Datagram;
 use crate::peer::NetGuard;
 use crate::peer::Peer;
@@ -251,7 +252,7 @@ impl NetworkOptions {
 /// One of a shared port's sockets.
 #[derive(Clone)]
 pub struct SharedEndpoint {
-  pub socket: Rc<UdpSocket>,
+  pub(crate) socket: Rc<EcnUdpSocket>,
   pub bound: SocketAddr,
   pub hosts: Vec<IpAddr>,
 }
@@ -330,7 +331,7 @@ impl Network {
           })?;
         let bound = socket.local_addr().map_err(crate::peer::rtc_err)?;
         shared.push(SharedEndpoint {
-          socket: Rc::new(socket),
+          socket: Rc::new(EcnUdpSocket::new(socket)),
           bound,
           hosts,
         });
@@ -488,7 +489,7 @@ fn spawn_shared_reader(network: Weak<Network>, endpoint: SharedEndpoint) {
       let mut buf = vec![0u8; 9216];
       loop {
         match endpoint.socket.recv_from(&mut buf).await {
-          Ok((n, from)) => {
+          Ok((n, from, ecn)) => {
             let Some(net) = network.upgrade() else {
               break;
             };
@@ -502,6 +503,7 @@ fn spawn_shared_reader(network: Weak<Network>, endpoint: SharedEndpoint) {
               via: Via::Socket,
               data: BytesMut::from(&buf[..n]),
               closed: None,
+              ecn,
             });
           }
           Err(e) => {

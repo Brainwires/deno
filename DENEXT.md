@@ -19291,6 +19291,52 @@ where the changes are discussed.
        `webrtcLaterTransceiverWorksAfterEarlierRemoved`); the engine's
        workspace; the WebRTC WPT run.
      - Node tests enabled: none; `node:` has no WebRTC API.
+
+482. **`feat(ext/webrtc)`: webrtc-rs-rtc `0.22.0+brainwires.4`, ECN / L4S**
+     (runtime; `Cargo.toml`, `Cargo.lock`, `ext/webrtc/Cargo.toml`,
+     `ext/webrtc/{ecn.rs,lib.rs,media.rs,net.rs,peer.rs,tests.rs}`). The
+     engine's ECN release (`a10b2f7d`): `TransportContext::ecn` carries each datagram's ECN
+     codepoint both ways (the one it arrived with into `handle_read`, the
+     one to send with out of `poll_write`), `SettingEngineBuilder::with_ecn`
+     marks the RTP (RTX included) of a stream that negotiated `ack ccfb`
+     ECT(1), and `configure_congestion_control_feedback` negotiates RFC 8888
+     feedback and reports each packet with the codepoint it arrived with.
+     Its statistics: `inbound-rtp` `packetsReceivedWithEct1` /
+     `packetsReceivedWithCe` (with ECN on) and `packetsReportedAsLost` /
+     `packetsReportedAsLostButRecovered` (with `ccfb`), `outbound-rtp`
+     `packetsSentWithEct1` (with ECN on), and `remote-inbound-rtp`
+     `packetsReceivedWithEct1`, `packetsReceivedWithCe`,
+     `packetsReportedAsLost`, `packetsReportedAsLostButRecovered` and
+     `packetsWithBleachedEct1Marking` from the reports received.
+     `ext/webrtc/ecn.rs` does the socket half with `quinn-udp` (already in
+     the tree under quinn): on the connection's UDP sockets and a shared
+     port's, every datagram is read with its `IP_TOS` / `IPV6_TCLASS`
+     control message (`IP_RECVTOS` / `IPV6_RECVTCLASS`; `IP_RECVECN` /
+     `IPV6_RECVECN` through `WSARecvMsg` on Windows) and sent with the
+     engine's codepoint as a per-datagram `IP_TOS` / `IPV6_TCLASS` (Windows
+     `IP_ECN` / `IPV6_ECN`) control message, so no socket option follows the
+     codepoint. Each connection turns the engine's ECN on where the platform
+     does both (Linux, Android, macOS, iOS, FreeBSD, and Windows with
+     `WSARecvMsg`, which a probe socket checks); a socket whose setup fails
+     keeps the plain path. `quinn-udp` also forbids IP fragmentation on those
+     sockets, as QUIC does (the engine's datagrams stay under its 1200-byte
+     MTU), and Linux's UDP GRO, which it turns on, is turned back off. ICE-TCP
+     and TURN relays carry no codepoint. `media_stack()` adds
+     `configure_congestion_control_feedback` beside GCC over TWCC (kept as
+     the congestion controller): offers carry `a=rtcp-fb:<pt> ack ccfb`; a
+     peer that doesn't answer it, as browsers don't unless Chrome's field
+     trial is on, negotiates without it and nothing is marked for that
+     stream; where both are negotiated the send history keeps one record
+     per packet, so the estimator takes each packet once.
+     - User-facing note: offers list `ack ccfb` feedback on every codec;
+       between two Deno peers (or with a browser that answers it) video and
+       audio RTP go out ECT(1) on UDP, and the ECN and RFC 8888 statistics
+       above are reported; on a platform without per-datagram ECN the ECN
+       members are absent.
+     - Tests: `tests/unit/webrtc_test.ts` (`webrtcEcnMarksVideoEct1`); the
+       engine's `ecn_l4s_rtc2rtc` and workspace; the WebRTC WPT run
+       (`webrtc-stats/supported-stats.https.html`).
+     - Node tests enabled: none; `node:` has no WebRTC API.
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

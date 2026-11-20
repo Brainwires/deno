@@ -1167,6 +1167,7 @@ fn datagram(local: SocketAddr, from: SocketAddr, stun: bool) -> Datagram {
     via: Via::Socket,
     data: bytes::BytesMut::from(&[first, 1, 0, 0, 0, 0, 0, 0][..]),
     closed: None,
+    ecn: None,
   }
 }
 

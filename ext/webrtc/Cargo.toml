@@ -24,6 +24,7 @@ deno_permissions.workspace = true
 deno_tls.workspace = true
 log.workspace = true
 netif.workspace = true
+quinn-udp.workspace = true
 rtc.workspace = true
 rustls.workspace = true
 rustls-tokio-stream.workspace = true
@@ -32,3 +33,6 @@ serde_json.workspace = true
 socket2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+libc.workspace = true

@@ -102,6 +102,7 @@ use rtc::peer_connection::transport::RTCIceCandidateInit;
 use rtc::peer_connection::transport::RTCIceCandidateType;
 use rtc::peer_connection::transport::RTCSctpTransportState;
 use rtc::sansio::Protocol;
+use rtc::shared::EcnCodepoint;
 use rtc::shared::TaggedBytesMut;
 use rtc::shared::TransportContext;
 use rtc::shared::TransportProtocol;
@@ -123,6 +124,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc;
 
 use crate::WebRtcError;
+use crate::ecn::EcnUdpSocket;
 use crate::media::MediaState;
 use crate::net::MdnsMode;
 use crate::net::Network;
@@ -468,6 +470,9 @@ pub(crate) struct Datagram {
   pub(crate) data: BytesMut,
   /// A TCP/TLS link to a TURN server ended (`stream` names it): why.
   pub(crate) closed: Option<String>,
+  /// The ECN codepoint a UDP datagram arrived with (`None`: Not-ECT, or a
+  /// socket without ECN; always `None` over TCP and TURN).
+  pub(crate) ecn: Option<EcnCodepoint>,
 }
 
 /// Where a [`Datagram`] came from.
@@ -490,7 +495,7 @@ struct TcpLink {
 
 /// The connection's UDP socket for one address family.
 struct UdpEndpoint {
-  socket: Rc<UdpSocket>,
+  socket: Rc<EcnUdpSocket>,
   /// What the socket is bound to; a wildcard address for a wildcard bind.
   bound: SocketAddr,
   /// The host candidate addresses on this socket's port.
@@ -614,7 +619,7 @@ pub struct Core {
   /// can't be used here: loopback only, or a permission refused).
   mdns_mode: MdnsMode,
   /// The mDNS socket, once opened.
-  mdns_socket: Option<Rc<UdpSocket>>,
+  mdns_socket: Option<Rc<EcnUdpSocket>>,
   /// Opening the mDNS socket failed (reported once).
   mdns_failed: bool,
   /// 1:1 NAT in host mode is the engine's (`with_nat_1to1_ips`): a host
@@ -1325,7 +1330,7 @@ impl Core {
 
   /// The UDP socket a datagram from `local` (a host candidate address or a
   /// base) goes out on.
-  fn endpoint_for(&self, local: SocketAddr) -> Option<Rc<UdpSocket>> {
+  fn endpoint_for(&self, local: SocketAddr) -> Option<Rc<EcnUdpSocket>> {
     self
       .endpoints
       .iter()
@@ -1667,7 +1672,7 @@ impl Core {
         .collect()
     };
     let socket = match bind_mdns(&hosts) {
-      Ok(socket) => Rc::new(socket),
+      Ok(socket) => Rc::new(EcnUdpSocket::plain(socket)),
       Err(e) => {
         self.mdns_failed = true;
         self.report_error(
@@ -1759,8 +1764,11 @@ impl Core {
         }
         continue;
       }
+      // The codepoint the engine chose (ECT(1) on the RTP of a stream
+      // that negotiated `ack ccfb`, with ECN on), per datagram.
       if let Some(socket) = self.endpoint_for(local)
-        && let Err(e) = socket.try_send_to(&msg.message, to)
+        && let Err(e) =
+          socket.try_send_to_ecn(&msg.message, to, msg.transport.ecn)
       {
         log::debug!("webrtc: send {local} -> {to}: {e}");
       }
@@ -2381,7 +2389,7 @@ impl Core {
       transport: TransportContext {
         local_addr: local,
         peer_addr: dg.from,
-        ecn: None,
+        ecn: dg.ecn,
         transport_protocol: TransportProtocol::UDP,
       },
       message: dg.data,
@@ -2411,7 +2419,13 @@ impl Peer {
         net
           .and_then(|n| n.max_message_size)
           .unwrap_or(SctpMaxMessageSize::MAX_MESSAGE_SIZE),
-      ));
+      ))
+      // ECN (L4S): the engine marks the RTP of a stream that negotiated
+      // `ack ccfb` ECT(1) and counts the codepoints datagrams arrive with,
+      // which the UDP sockets carry both ways where the platform lets them
+      // (`crate::ecn`). Over ICE-TCP and TURN relays nothing is marked on
+      // the wire, which the remote's feedback reports as bleached.
+      .with_ecn(crate::ecn::supported());
     if let Some(net) = net {
       settings = settings.with_lite(net.ice_lite);
       if let Some((disconnected, failed, keep_alive)) = net.ice_timeouts {
@@ -2444,7 +2458,7 @@ impl Peer {
         net.and_then(|n| n.interfaces.as_deref()),
       )) {
         Ok(socket) => {
-          mdns_socket = Some(Rc::new(socket));
+          mdns_socket = Some(Rc::new(EcnUdpSocket::plain(socket)));
           MdnsMode::Gather
         }
         Err(e) => {
@@ -3188,7 +3202,11 @@ impl Peer {
               .all(|s| s.relay != Some(msg.transport.local_addr))
             && let Some(socket) = core.endpoint_for(msg.transport.local_addr)
           {
-            let _ = socket.try_send_to(&msg.message, msg.transport.peer_addr);
+            let _ = socket.try_send_to_ecn(
+              &msg.message,
+              msg.transport.peer_addr,
+              msg.transport.ecn,
+            );
           }
         }
         let mut udp_writes = Vec::new();
@@ -3360,7 +3378,7 @@ impl Peer {
       });
 
       // (socket, bound address, host candidate addresses, own reader)
-      let mut planned: Vec<(Rc<UdpSocket>, SocketAddr, Vec<IpAddr>, bool)> =
+      let mut planned: Vec<(Rc<EcnUdpSocket>, SocketAddr, Vec<IpAddr>, bool)> =
         Vec::new();
       let net = core.options.network.clone();
       let opts = core.gather_options();
@@ -3381,7 +3399,7 @@ impl Peer {
                 None => bind_udp(SocketAddr::new(bind, 0)),
               };
               let socket = match socket {
-                Ok(s) => Rc::new(s),
+                Ok(s) => Rc::new(EcnUdpSocket::new(s)),
                 Err(e) => {
                   core.report_error(
                     "",
@@ -3519,6 +3537,7 @@ async fn read_ice_tcp<R: tokio::io::AsyncRead + Unpin>(
     via: Via::IceTcp(id),
     data,
     closed,
+    ecn: None,
   };
   if let Some(frame) = first
     && tx
@@ -3565,7 +3584,7 @@ async fn write_ice_tcp<W: tokio::io::AsyncWrite + Unpin>(
 }
 
 fn spawn_udp_reader(
-  socket: Rc<UdpSocket>,
+  socket: Rc<EcnUdpSocket>,
   local: SocketAddr,
   tx: mpsc::Sender<Datagram>,
   cancel: Rc<CancelHandle>,
@@ -3574,7 +3593,7 @@ fn spawn_udp_reader(
 }
 
 fn spawn_udp_reader_via(
-  socket: Rc<UdpSocket>,
+  socket: Rc<EcnUdpSocket>,
   local: SocketAddr,
   tx: mpsc::Sender<Datagram>,
   cancel: Rc<CancelHandle>,
@@ -3585,7 +3604,7 @@ fn spawn_udp_reader_via(
       let mut buf = vec![0u8; RECV_BUFFER_SIZE];
       loop {
         match socket.recv_from(&mut buf).await {
-          Ok((n, from)) => {
+          Ok((n, from, ecn)) => {
             let dg = Datagram {
               local,
               from,
@@ -3593,6 +3612,7 @@ fn spawn_udp_reader_via(
               via,
               data: BytesMut::from(&buf[..n]),
               closed: None,
+              ecn,
             };
             if let Err(mpsc::error::TrySendError::Closed(_)) = tx.try_send(dg) {
               break;
@@ -3642,6 +3662,7 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
             via: Via::Socket,
             data: BytesMut::from(&frame[..]),
             closed: None,
+            ecn: None,
           };
           if tx.send(dg).await.is_err() {
             return;
@@ -3658,6 +3679,7 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
       via: Via::Socket,
       data: BytesMut::new(),
       closed: Some(reason),
+      ecn: None,
     })
     .await;
 }
@@ -3982,7 +4004,7 @@ impl Core {
   ) -> usize {
     let bound = socket.local_addr().unwrap();
     self.endpoints.push(UdpEndpoint {
-      socket: Rc::new(socket),
+      socket: Rc::new(EcnUdpSocket::new(socket)),
       bound,
       hosts,
     });

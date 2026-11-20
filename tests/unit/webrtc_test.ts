@@ -2385,3 +2385,86 @@ Deno.test("webrtcLaterTransceiverWorksAfterEarlierRemoved", async () => {
   a.close();
   b.close();
 });
+
+// ECN / L4S (DENEXT.md item 482): the offer carries RFC 8888 feedback (`ack
+// ccfb`) and, where the platform reads and writes per-datagram ECN codepoints
+// on UDP (Linux, Android, macOS, FreeBSD, Windows), video negotiated with it
+// goes out ECT(1) and the receiver counts it; elsewhere the ECN members are
+// absent from the stats.
+const ECN_PLATFORMS = ["linux", "android", "darwin", "freebsd", "windows"];
+
+Deno.test("webrtcEcnMarksVideoEct1", async () => {
+  const ecn = ECN_PLATFORMS.includes(Deno.build.os);
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  const track = new Deno.webrtc.EncodedMediaTrack({
+    kind: "video",
+    mimeType: "video/VP8",
+  });
+  a.addTrack(track);
+  const gotTrack = once<RTCTrackEvent>(b, "track");
+  await negotiate(a, b);
+  assert(
+    /^a=rtcp-fb:\d+ ack ccfb\r?$/m.test(a.localDescription!.sdp),
+    "the offer has ack ccfb",
+  );
+  assert(
+    /^a=rtcp-fb:\d+ ack ccfb\r?$/m.test(b.localDescription!.sdp),
+    "the answer has ack ccfb",
+  );
+  const ev = await gotTrack;
+  await Promise.all([connected(a), connected(b)]);
+  const frame = new Uint8Array(3000).map((_, i) => i & 0xff);
+  const interval = setInterval(
+    () => track.writeFrame(frame, { duration: 33 }),
+    30,
+  );
+  // deno-lint-ignore no-explicit-any
+  let outbound: any;
+  // deno-lint-ignore no-explicit-any
+  let inbound: any;
+  try {
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      outbound = [...(await a.getStats(track)).values()].find((s) =>
+        s.type === "outbound-rtp"
+      );
+      inbound = [...(await ev.receiver.getStats()).values()].find((s) =>
+        s.type === "inbound-rtp"
+      );
+      const done = ecn
+        ? outbound?.packetsSentWithEct1 > 0 &&
+          inbound?.packetsReceivedWithEct1 > 0
+        : outbound?.packetsSent > 0 && inbound?.packetsReceived > 0;
+      if (done) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  } finally {
+    clearInterval(interval);
+  }
+  assert(outbound, "an outbound-rtp object");
+  assert(inbound, "an inbound-rtp object");
+  if (ecn) {
+    assert(
+      outbound.packetsSentWithEct1 > 0,
+      `packetsSentWithEct1 = ${outbound.packetsSentWithEct1}`,
+    );
+    assert(
+      inbound.packetsReceivedWithEct1 > 0,
+      `packetsReceivedWithEct1 = ${inbound.packetsReceivedWithEct1}`,
+    );
+    assertEquals(inbound.packetsReceivedWithCe, 0);
+  } else {
+    assert(outbound.packetsSent > 0);
+    assert(inbound.packetsReceived > 0);
+    assert(!("packetsSentWithEct1" in outbound), "no packetsSentWithEct1");
+    assert(
+      !("packetsReceivedWithEct1" in inbound),
+      "no packetsReceivedWithEct1",
+    );
+    assert(!("packetsReceivedWithCe" in inbound), "no packetsReceivedWithCe");
+  }
+  a.close();
+  b.close();
+  track.stop();
+});

@@ -26,6 +26,7 @@ use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::CongestionFeedback;
 use rtc::peer_connection::configuration::interceptor_registry::configure_congestion_control;
+use rtc::peer_connection::configuration::interceptor_registry::configure_congestion_control_feedback;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
 use rtc::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
@@ -55,8 +56,9 @@ const RTP_MTU: usize = 1200;
 /// The engine's media configuration: every codec browsers negotiate (Opus,
 /// G.722, PCMU/PCMA, VP8, VP9, H.264, AV1, H.265, RTX), the default
 /// interceptors (NACK, RTCP sender/receiver reports, TWCC feedback,
-/// simulcast header extensions) and send-side congestion control (GCC over
-/// TWCC, with a pacer).
+/// simulcast header extensions), send-side congestion control (GCC over
+/// TWCC, with a pacer) and RFC 8888 congestion control feedback (`ack
+/// ccfb`), which carries ECN.
 pub fn media_stack() -> Result<(MediaEngine, Registry), WebRtcError> {
   let mut media_engine = MediaEngine::default();
   media_engine
@@ -106,6 +108,16 @@ pub fn media_stack() -> Result<(MediaEngine, Registry), WebRtcError> {
     &mut media_engine,
   )
   .map_err(crate::peer::rtc_err)?;
+  // RFC 8888 feedback beside TWCC: `a=rtcp-fb:<pt> ack ccfb` on every codec
+  // and the recorder that reports each received packet with the ECN
+  // codepoint it arrived with. A stream sends ECT(1) (L4S) only once `ack
+  // ccfb` is negotiated, since an L4S sender needs CE reported back; a peer
+  // that doesn't answer it (browsers, unless Chrome's field trial is on)
+  // negotiates without it and keeps TWCC alone. Where both are negotiated
+  // the send history keeps one record per packet, so a packet both report
+  // reaches the estimator once.
+  let registry =
+    configure_congestion_control_feedback(registry, &mut media_engine);
   register_header_extensions(&mut media_engine)?;
   Ok((media_engine, registry))
 }

@@ -44,6 +44,7 @@ use rtc::peer_connection::configuration::RTCBundlePolicy;
 use serde::Deserialize;
 use serde::Serialize;
 
+mod ecn;
 mod encoded_frames;
 mod fake_media;
 // wpt100:ice
