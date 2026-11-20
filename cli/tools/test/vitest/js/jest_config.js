@@ -636,6 +636,10 @@ export async function resolveJestProject(
       happyDOM: environmentOptions,
     },
     setupFiles,
+    // Jest runs them one after another, in order (setupFiles, then
+    // setupFilesAfterEnv); Vitest's default imports them all at once, so a
+    // later file could run before an earlier one had finished loading.
+    sequence: { setupFiles: "list" },
     clearMocks: options.clearMocks ?? false,
     mockReset: options.resetMocks ?? false,
     restoreMocks: options.restoreMocks ?? false,
