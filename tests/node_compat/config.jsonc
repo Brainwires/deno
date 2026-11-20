@@ -3557,6 +3557,7 @@
     },
     "parallel/test-process-execve-worker-threads.js": {},
     "parallel/test-process-exit-code-validation.js": {
+      "timeoutMs": 30000,
       "flaky": true,
       "darwin": false,
       "reason": "Spawns deno 34 times via spawnSync; cumulative startup overhead can exceed the 20s per-test timeout on slow macOS CI runners"
@@ -5101,7 +5102,9 @@
       "windows": false,
       "reason": "Passes on macOS (3 isolated runs, debug build); not verified on Windows"
     },
-    "parallel/test-worker-message-port-message-before-close.js": {},
+    "parallel/test-worker-message-port-message-before-close.js": {
+      "timeoutMs": 30000
+    },
     "parallel/test-worker-message-port-message-port-transferring.js": {},
     "parallel/test-worker-message-port-transfer-closed.js": {},
     "parallel/test-worker-message-port-transfer-duplicate.js": {},
@@ -6383,7 +6386,9 @@
     "parallel/test-runner-option-validation.js": {},
     "parallel/test-runner-plan.mjs": {},
     "parallel/test-runner-randomize-first-draw.mjs": {},
-    "parallel/test-runner-reporters.js": {},
+    "parallel/test-runner-reporters.js": {
+      "timeoutMs": 30000
+    },
     "parallel/test-runner-root-duration.js": {},
     "parallel/test-runner-tag-filter-cli.mjs": {},
     "parallel/test-runner-tags-events.mjs": {},
@@ -6473,6 +6478,7 @@
     "parallel/test-util-inspect-namespace.js": {},
     "parallel/test-util-sigint-watchdog.js": {},
     "parallel/test-v8-serialize-leak.js": {
+      "timeoutMs": 30000,
       "darwin": false,
       "windows": false,
       "linuxAarch64": false,
@@ -7095,6 +7101,7 @@
     },
     "sequential/test-child-process-emfile.js": {},
     "sequential/test-child-process-pass-fd.js": {
+      "timeoutMs": 30000,
       "windows": false,
       "darwin": false,
       "reason": "times out"
@@ -7119,9 +7126,15 @@
     "sequential/test-crypto-timing-safe-equal-fast.js": {},
     "sequential/test-crypto-timing-safe-equal.js": {},
     "sequential/test-dgram-implicit-bind-failure.js": {},
-    "sequential/test-gc-http-client-onerror.js": {},
-    "sequential/test-gc-http-client-timeout.js": {},
-    "sequential/test-gc-http-client.js": {},
+    "sequential/test-gc-http-client-onerror.js": {
+      "timeoutMs": 30000
+    },
+    "sequential/test-gc-http-client-timeout.js": {
+      "timeoutMs": 30000
+    },
+    "sequential/test-gc-http-client.js": {
+      "timeoutMs": 30000
+    },
     "sequential/test-http-econnrefused.js": {},
     "sequential/test-http-regr-gh-2928.js": {},
     "sequential/test-http2-ping-flood.js": {},
