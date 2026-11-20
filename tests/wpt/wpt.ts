@@ -92,6 +92,14 @@ class TestFilter {
 
 const command = Deno.args[0];
 
+// Before the command dispatch below: generateWptReport reads it during a run.
+const HARNESS_STATUSES: Record<number, string> = {
+  0: "OK",
+  1: "ERROR",
+  2: "TIMEOUT",
+  3: "PRECONDITION_FAILED",
+};
+
 switch (command) {
   case "setup":
     await checkPy3Available();
@@ -410,12 +418,6 @@ Options:
 }
 
 /** testharness.js's harness statuses, as wptreport names them. */
-const HARNESS_STATUSES: Record<number, string> = {
-  0: "OK",
-  1: "ERROR",
-  2: "TIMEOUT",
-  3: "PRECONDITION_FAILED",
-};
 
 /** testharness.js's subtest statuses, as wptreport names them. */
 const SUBTEST_STATUSES: Record<number, string> = {
