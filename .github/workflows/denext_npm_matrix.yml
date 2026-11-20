@@ -64,7 +64,7 @@ jobs:
       hosted: ${{ steps.pick.outputs.hosted }}
     steps:
       - id: pick
-        uses: Brainwires/.github/actions/pick-runners@7475d2c4523faa74d428c3607a8fe195c1f782ac # pick-runners
+        uses: Brainwires/.github/actions/pick-runners@8a0cb356b969132668442f9539b75d3173d59b3e # pick-runners (ETA overflow)
         with:
           jobs: guard=linux-x64@ubuntu-24.04 matrix=linux-x64-docker@ubuntu-22.04
           vars: ${{ toJSON(vars) }}
