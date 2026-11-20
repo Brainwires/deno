@@ -604,26 +604,40 @@ async function runAppPermissions() {
     isWebViewError(await respond(id, true), "invalid"),
   );
 
-  // A waiting request is cancelled by the view's close, before "closed".
-  const mark = log.length;
-  view.evaluate(ask).catch(() => {});
-  const again = await next(
-    log,
-    mark,
-    "permission-request",
-    (d) => d.state === "requested",
-    10000,
-  );
   view.close();
   await next(log, 0, "closed", () => true, 10000);
+  r.check(
+    "a closed view's respondToPermissionRequest() throws closed",
+    isWebViewError(await respond(id, false), "closed"),
+  );
+
+  // A waiting request is cancelled by the view's close, before "closed". It is
+  // raised in a fresh view with its own partition: an engine may remember the
+  // refusal above for the origin and not ask again in the same one.
+  const waiting = win.createWebView({
+    ...options,
+    partition: "ephemeral:e2e-app-perm-close",
+  });
+  const wlog = record(waiting);
+  await next(wlog, 0, "load", (d) => d.state === "complete");
+  waiting.evaluate(ask).catch(() => {});
+  const again = await next(
+    wlog,
+    0,
+    "permission-request",
+    (d) => d.state === "requested",
+  );
+  waiting.close();
+  await next(wlog, 0, "closed", () => true, 10000);
   if (again === null) {
-    r.na(
-      "a permission request waiting at close",
-      "the engine did not ask again",
+    r.check(
+      "closing the view cancels a waiting permission request before closed",
+      false,
+      { reason: "a fresh view raised no permission request" },
     );
   } else {
-    const closedAt = log.findIndex((e) => e.type === "closed");
-    const cancelledAt = log.findIndex((e) =>
+    const closedAt = wlog.findIndex((e) => e.type === "closed");
+    const cancelledAt = wlog.findIndex((e) =>
       e.type === "permission-request" && e.detail.id === again.detail.id &&
       e.detail.state === "cancelled"
     );
@@ -633,10 +647,6 @@ async function runAppPermissions() {
       { cancelledAt, closedAt },
     );
   }
-  r.check(
-    "a closed view's respondToPermissionRequest() throws closed",
-    isWebViewError(await respond(id, false), "closed"),
-  );
 }
 
 async function runSupported() {
