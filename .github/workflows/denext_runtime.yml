@@ -925,15 +925,6 @@ jobs:
           rustup toolchain install "$tc" --profile minimal --no-self-update ${force_non_host:+"$force_non_host"}
           echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
 
-      # The `v8` crate is Brainwires/rusty_v8 (Cargo.toml's [patch.crates-io]):
-      # its prebuilt library and binding come from that repository's release,
-      # checked against .github/denext-runtime/rusty_v8.sha256, never from
-      # denoland's (DENEXT.md item 162). Fails closed.
-      - name: Prebuilt V8
-        # --seed-dir: the cache restores the v8 build-script fingerprint but
-        # not target/release/gn_out, where the script puts the library.
-        run: python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "${{ matrix.target }}" --dest "$RUNNER_TEMP/rusty_v8" --seed-dir target/release --github-env
-
       # Never on a tag: a cache any branch or pull request run could have
       # written must not reach a signed release (the production audit's P9).
       # A tag builds from a clean target/ and saves no cache.
@@ -943,6 +934,18 @@ jobs:
           prefix-key: denext-denort-v1
           key: ${{ matrix.target }}-${{ matrix.os }}
           cache-on-failure: false
+
+      # The `v8` crate is Brainwires/rusty_v8 (Cargo.toml's [patch.crates-io]):
+      # its prebuilt library and binding come from that repository's release,
+      # checked against .github/denext-runtime/rusty_v8.sha256, never from
+      # denoland's (DENEXT.md item 162). Fails closed.
+      - name: Prebuilt V8
+        # After the cache: rust-cache keeps only build/, .fingerprint/ and
+        # deps/ of target/release, and on a partial key match it pre-cleans
+        # the restored tree the same way, deleting a gn_out seeded before it.
+        # --seed-dir puts the library back in target/release/gn_out, where
+        # the build script (skipped: its fingerprint was restored) would.
+        run: python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "${{ matrix.target }}" --dest "$RUNNER_TEMP/rusty_v8" --seed-dir target/release --github-env
 
       # The laufey crate libdenort links and the backend hosts must come from
       # the SAME laufey revision: laufey's init_api rejects any C ABI version
@@ -1252,15 +1255,6 @@ jobs:
           rustup toolchain install "$tc" --profile minimal --no-self-update ${force_non_host:+"$force_non_host"}
           echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
 
-      # The `v8` crate is Brainwires/rusty_v8 (Cargo.toml's [patch.crates-io]):
-      # its prebuilt library and binding come from that repository's release,
-      # checked against .github/denext-runtime/rusty_v8.sha256, never from
-      # denoland's (DENEXT.md item 162). Fails closed.
-      - name: Prebuilt V8
-        # --seed-dir: the cache restores the v8 build-script fingerprint but
-        # not target/release/gn_out, where the script puts the library.
-        run: python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "${{ matrix.target }}" --dest "$RUNNER_TEMP/rusty_v8" --seed-dir target/release --github-env
-
       # Never on a tag: a cache any branch or pull request run could have
       # written must not reach a signed release (the production audit's P9).
       # A tag builds from a clean target/ and saves no cache.
@@ -1270,6 +1264,18 @@ jobs:
           prefix-key: denext-denort-bin-v1
           key: ${{ matrix.target }}-${{ matrix.os }}
           cache-on-failure: false
+
+      # The `v8` crate is Brainwires/rusty_v8 (Cargo.toml's [patch.crates-io]):
+      # its prebuilt library and binding come from that repository's release,
+      # checked against .github/denext-runtime/rusty_v8.sha256, never from
+      # denoland's (DENEXT.md item 162). Fails closed.
+      - name: Prebuilt V8
+        # After the cache: rust-cache keeps only build/, .fingerprint/ and
+        # deps/ of target/release, and on a partial key match it pre-cleans
+        # the restored tree the same way, deleting a gn_out seeded before it.
+        # --seed-dir puts the library back in target/release/gn_out, where
+        # the build script (skipped: its fingerprint was restored) would.
+        run: python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "${{ matrix.target }}" --dest "$RUNNER_TEMP/rusty_v8" --seed-dir target/release --github-env
 
       # Linux: link against upstream Deno's glibc 2.27 sysroot (clang + lld,
       # the sysroot's flags and tools/'s shims) instead of the runner's glibc
@@ -1547,15 +1553,6 @@ jobs:
           rustup toolchain install "$tc" --profile minimal --no-self-update ${force_non_host:+"$force_non_host"}
           echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
 
-      # The `v8` crate is Brainwires/rusty_v8 (Cargo.toml's [patch.crates-io]):
-      # its prebuilt library and binding come from that repository's release,
-      # checked against .github/denext-runtime/rusty_v8.sha256, never from
-      # denoland's (DENEXT.md item 162). Fails closed.
-      - name: Prebuilt V8
-        # --seed-dir: the cache restores the v8 build-script fingerprint but
-        # not target/release/gn_out, where the script puts the library.
-        run: python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "${{ matrix.target }}" --dest "$RUNNER_TEMP/rusty_v8" --seed-dir target/release --github-env
-
       # Never on a tag: a cache any branch or pull request run could have
       # written must not reach a signed release (the production audit's P9).
       # A tag builds from a clean target/ and saves no cache.
@@ -1565,6 +1562,18 @@ jobs:
           prefix-key: denext-cli-v2
           key: ${{ matrix.target }}-${{ matrix.os }}
           cache-on-failure: false
+
+      # The `v8` crate is Brainwires/rusty_v8 (Cargo.toml's [patch.crates-io]):
+      # its prebuilt library and binding come from that repository's release,
+      # checked against .github/denext-runtime/rusty_v8.sha256, never from
+      # denoland's (DENEXT.md item 162). Fails closed.
+      - name: Prebuilt V8
+        # After the cache: rust-cache keeps only build/, .fingerprint/ and
+        # deps/ of target/release, and on a partial key match it pre-cleans
+        # the restored tree the same way, deleting a gn_out seeded before it.
+        # --seed-dir puts the library back in target/release/gn_out, where
+        # the build script (skipped: its fingerprint was restored) would.
+        run: python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "${{ matrix.target }}" --dest "$RUNNER_TEMP/rusty_v8" --seed-dir target/release --github-env
 
       # Linux: link against upstream Deno's glibc 2.27 sysroot (clang + lld,
       # the sysroot's flags and tools/'s shims) instead of the runner's glibc
