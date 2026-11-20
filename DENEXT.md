@@ -19071,7 +19071,9 @@ where the changes are discussed.
 
 477. **`fix(ext/webrtc)`: WebRTC hardening** (runtime; `ext/webrtc/{peer.rs,
      01_webrtc.js,tests.rs}`, `Cargo.toml`, `Cargo.lock`). webrtc-rs-rtc
-     `0.21.1+brainwires.5` (`9a8917ef`, from `0.21.1+brainwires.4`):
+     `0.21.1+brainwires.6` (`cdcd6717`, from `0.21.1+brainwires.4`; `.5`
+     plus the fix for a data channel that never opened after a lost SCTP
+     INIT ACK, which `.5`'s one-association limit made fatal):
      hardening across DTLS, SCTP and data channels, SRTP / SRTCP, SDP, ICE and
      RTP (bounds on the state a peer can make the stack hold, stricter protocol
      state handling); no public API change beyond additions (`cargo
@@ -19079,7 +19081,8 @@ where the changes are discussed.
      the wildcard socket's route cache and a 1 MiB cap on a session
      description. Details follow in advisories.
      - User-facing note: a session description over 1 MiB is refused.
-     - Tests: webrtc-rs-rtc's workspace with `--all-features` (2330 pass);
+     - Tests: webrtc-rs-rtc's workspace with `--all-features` (2330 pass;
+       `.6` adds a test that drops the first INIT ACK);
        `ext/webrtc`'s unit tests.
      - Node tests enabled: none; `node:` has no WebRTC API.
 
