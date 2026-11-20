@@ -18967,7 +18967,10 @@ where the changes are discussed.
 476. **`fix`: what the denext.28 train's flake hunt found** (runtime, tests and
      CI; `ext/fs/30_fs.js`, `libs/core/runtime/jsruntime.rs`,
      `ext/node/polyfills/{fs,internal/child_process}.ts`,
-     `ext/os/40_signals.js`,
+     `ext/os/40_signals.js`, `runtime/permissions/{lib,checked_open}.rs`,
+     `runtime/ops/desktop.rs`, `cli/lib/kernel_policy.rs`,
+     `cli/sandbox/enforce.rs`, `ext/napi`, `ext/node/ops/fs.rs`,
+     `tests/util/server`,
      `tests/unit/{timers_test,pty_test,signal_test}.ts`,
      `cli/sandbox/warn.rs`,
      `.github/workflows/denext_runtime.yml`). The hunt (item 459) on the
@@ -18994,6 +18997,38 @@ where the changes are discussed.
        (`multipleSignalListenerTest` hung 2 runs in 5). Node.js calls a
        listener for each signal received. Upstream's loop has the same
        once-per-wakeup shape.
+     - Scoped file access (item 467's race-safe opens): a grant root that
+       doesn't exist yet (`--allow-write=./subdir/`, `--allow-write=
+       node_modules`, a file to be written) is that one name in its folder
+       until it exists, so it can be made and a recursive mkdir go on
+       beneath it; it failed every operation beneath it with NotFound. The
+       open scope follows the query's precedence: a prompt denial (node:fs.cp
+       asks for the folders above `--allow-read=.`) refuses only that path
+       and its ancestors, not the granted paths beneath it, and a global
+       ignore or deny (`"ignore": true`, `--deny-read` with no list) leaves
+       the granted roots open; both made every later open in the grant fail.
+     - Kernel sandbox: on Linux a confining parent is this runtime's
+       sandbox, told by its seccomp marker; no-new-privileges and a seccomp
+       filter alone are any hardened container's, inside which `auto` never
+       enforced and the harnesses' forced enforce was dropped. A compiled
+       program never compiles a Mode B policy (it runs no broker): a Linux
+       write deny inside a write allow is again a rule it can't hold (warned
+       at `deno compile`, refused at start), and a host-scoped `--allow-net`
+       no longer compiles to no network at all.
+     - Desktop: `createWebView()`'s op accepts item 461's `downloads: "app"`
+       and `permissions: "app"` (only the JavaScript layer had them; every
+       packaged e2e threw `invalid`); laufey still refuses "app" where
+       `webViewCapabilities()` says the engine lacks it. The inert-ops spec
+       counts the merged 116 desktop ops.
+     - Node-API: `napi_cancel_async_work` reports a cancel that lost the race
+       to the worker (`napi_generic_failure`, as Node's uv_cancel does);
+       it answered `napi_ok` and `complete` then ran with `napi_ok`.
+     - `node:fs`: a read on an fd (`fs.read`, `FileHandle.readFile`) never
+       resolves in the microtask checkpoint that started it (the op is
+       deferred, like its write sibling), so ticks queued before it run
+       first and an abort signal is seen between reads, as in Node.js.
+     - The test server answers 500 for a testdata file it couldn't read (a
+       loaded machine) instead of a 404 the CLI reported as a missing module.
      - `node:child_process`: a ChildProcess starts with `connected` false,
        as in Node.js; only the IPC channel's setup set it, so a spawn that
        failed before the channel existed (a missing program or `cwd`) left it
@@ -19007,6 +19042,11 @@ where the changes are discussed.
        still runs after `watchFile` has added its listener, so the initial
        change for a missing file arrives as in Node.js. Upstream has the
        same code.
+     - Tests that measured the machine, not the code: the test_util
+       semaphore test starts its clock with the permit held (a late thread
+       measured less than the hold), and `os.cpus()`'s test asserts what
+       Node.js guarantees (every CPU listed; the usable parallelism, which a
+       cgroup quota lowers, at most that).
      - Tests whose premise the train changed: warn mode's fatal-gap test
        (a host-scoped grant under enforce is the broker's since item 468,
        so it takes a rule enforce still refuses), and item 462's foreground
