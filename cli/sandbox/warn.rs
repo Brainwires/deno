@@ -563,18 +563,26 @@ mod tests {
   use super::super::policy::KernelPolicy;
   use super::*;
 
+  fn linux_caps(seccomp: bool) -> Capabilities {
+    Capabilities {
+      landlock_abi: Some(4),
+      seccomp,
+      enforcer_built: true,
+      ..Capabilities::none(super::super::policy::TargetOs::Linux)
+    }
+  }
+
   fn compiled_for(options: &PermissionsOptions) -> (CompiledPolicy, Context) {
+    compiled_with(options, linux_caps(true))
+  }
+
+  fn compiled_with(
+    options: &PermissionsOptions,
+    caps: Capabilities,
+  ) -> (CompiledPolicy, Context) {
     // what `enforce` would do with the grant is what warn reports
-    let ctx = Context::new(
-      Capabilities {
-        landlock_abi: Some(4),
-        seccomp: true,
-        enforcer_built: true,
-        ..Capabilities::none(super::super::policy::TargetOs::Linux)
-      },
-      KernelSandboxMode::Enforce,
-      PathBuf::from("/work"),
-    );
+    let ctx =
+      Context::new(caps, KernelSandboxMode::Enforce, PathBuf::from("/work"));
     let implicit = ImplicitSet::build(options, &ctx);
     (KernelPolicy::compile(options, &implicit, &ctx), ctx)
   }
@@ -639,14 +647,34 @@ mod tests {
   // the rules enforce would refuse to start over, each once
   #[test]
   fn fatal_gaps_are_the_fail_open_ones() {
-    // a host name needs the broker on Linux: fail-open under Mode A
-    let options = PermissionsOptions {
+    // a host name under enforce is the broker's on Linux (its network side,
+    // DENEXT.md item 468): held exactly, nothing in the policy to refuse to
+    // start over. (Only the policy here: the plan translation runs on its
+    // own OS, so a Linux plan made on another host would add its own gap.)
+    let hosted = PermissionsOptions {
       allow_net: Some(vec!["example.com:443".to_string()]),
       ..Default::default()
     };
-    let (compiled, ctx) = compiled_for(&options);
+    let (compiled, _) = compiled_for(&hosted);
+    assert!(matches!(
+      compiled.policy.net,
+      super::super::policy::NetPolicy::Broker { .. }
+    ));
+    assert_eq!(compiled.fatal_gaps().count(), 0);
+    // a rule the OS can't hold: a Linux whose seccomp filter can't be
+    // installed (a container's profile refuses it) leaves exec, socket and
+    // attack-surface rules to Deno's checks: fail-open, and enforce refuses
+    let options = PermissionsOptions {
+      allow_read: Some(vec!["/work".to_string()]),
+      allow_net: Some(vec!["127.0.0.1:8000".to_string()]),
+      ..Default::default()
+    };
+    let (compiled, ctx) = compiled_with(&options, linux_caps(false));
     let gaps = fatal_gaps(&compiled, &ctx);
-    assert!(!gaps.is_empty());
+    assert!(
+      gaps.iter().any(|g| g.rule == "--kernel-sandbox (seccomp)"),
+      "{gaps:?}"
+    );
     assert!(gaps.iter().all(|g| g.is_fatal_under_enforce()));
     let mut rules: Vec<_> = gaps.iter().map(|g| (&g.rule, &g.detail)).collect();
     let before = rules.len();
