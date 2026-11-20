@@ -18,6 +18,7 @@ use crate::ServerTransport;
 use crate::WebRtcError;
 use crate::peer::Datagram;
 use crate::peer::MAX_ROUTES;
+use crate::peer::MAX_SDP_BYTES;
 use crate::peer::RemoteCandidate;
 use crate::peer::Via;
 use crate::peer::candidate_address;
@@ -1207,4 +1208,37 @@ async fn route_cache_is_bounded_and_only_for_known_remotes() {
     core.handle_datagram_for_test(datagram(local, from, true));
     assert!(core.route_count_for_test() <= MAX_ROUTES);
   }
+}
+
+/// A description longer than the engine's 1 MiB limit is refused as an
+/// OperationError (what an unparsable one gets) by both setters, before the
+/// engine sees it; the limit itself, a rollback and a bad type are unchanged.
+#[tokio::test]
+async fn oversized_descriptions_are_refused_before_the_engine() {
+  let a = new_peer();
+  a.create_data_channel("x", reliable()).unwrap();
+  let offer = a.create_offer(false).unwrap();
+  let mut big = offer.clone();
+  big.push_str(&"a=x-pad:".repeat(MAX_SDP_BYTES / 8 + 1));
+  assert!(big.len() > MAX_SDP_BYTES);
+
+  for kind in ["offer", "answer", "pranswer"] {
+    let err = a.set_local_description(kind, big.clone()).unwrap_err();
+    assert!(matches!(err, WebRtcError::Operation(_)), "{kind}: {err:?}");
+    let b = new_peer();
+    let err = b.set_remote_description(kind, big.clone()).unwrap_err();
+    assert!(matches!(err, WebRtcError::Operation(_)), "{kind}: {err:?}");
+    assert!(err.to_string().contains("bytes"), "{err}");
+  }
+  // Nothing was applied: the real offer still sets.
+  a.set_local_description("offer", offer).unwrap();
+
+  // A bad type is still a TypeError, whatever the text's size.
+  let err = new_peer().set_remote_description("bogus", big).unwrap_err();
+  assert!(matches!(err, WebRtcError::Type(_)), "{err:?}");
+
+  // Exactly the limit passes the size check (and fails only as an SDP).
+  let exact = "v".repeat(MAX_SDP_BYTES);
+  assert!(crate::peer::check_sdp_size("offer", &exact).is_ok());
+  assert!(crate::peer::check_sdp_size("rollback", &(exact + "v")).is_ok());
 }

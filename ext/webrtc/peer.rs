@@ -605,6 +605,26 @@ pub(crate) fn rtc_err(e: impl std::fmt::Display) -> WebRtcError {
   WebRtcError::Operation(e.to_string())
 }
 
+/// The largest session description handed to the engine, in bytes (the
+/// engine's own `MAX_SDP_SIZE`, 1 MiB).
+pub(crate) const MAX_SDP_BYTES: usize = 1 << 20;
+
+/// Refuses an offer, answer or pranswer longer than [`MAX_SDP_BYTES`] before
+/// anything reads it, with the OperationError a description the engine can't
+/// parse gets. A rollback's text is ignored, and an unknown type stays the
+/// TypeError `description` reports.
+pub(crate) fn check_sdp_size(kind: &str, sdp: &str) -> Result<(), WebRtcError> {
+  if matches!(kind, "offer" | "answer" | "pranswer")
+    && sdp.len() > MAX_SDP_BYTES
+  {
+    return Err(WebRtcError::Operation(format!(
+      "session description of {} bytes exceeds {MAX_SDP_BYTES}",
+      sdp.len()
+    )));
+  }
+  Ok(())
+}
+
 /// Whether an SDP has an m-section that isn't rejected: port zero without
 /// `a=bundle-only` is a rejected one (RFC 8843 §6).
 pub(crate) fn has_live_media_section(sdp: &str) -> bool {
@@ -2439,6 +2459,7 @@ impl Peer {
     kind: &str,
     sdp: String,
   ) -> Result<(), WebRtcError> {
+    check_sdp_size(kind, &sdp)?;
     // Gathering starts with the first description that has a transport to
     // gather for (W3C: an m-section that isn't rejected).
     let has_transport = has_live_media_section(&sdp);
@@ -2521,6 +2542,7 @@ impl Peer {
     kind: &str,
     sdp: String,
   ) -> Result<(), WebRtcError> {
+    check_sdp_size(kind, &sdp)?;
     let mut kept = String::with_capacity(sdp.len());
     let mut checked = Vec::new();
     let mut named = false;
