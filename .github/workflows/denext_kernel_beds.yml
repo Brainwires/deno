@@ -84,7 +84,7 @@ jobs:
       plan: ${{ steps.pick.outputs.plan }}
     steps:
       - id: pick
-        uses: Brainwires/.github/actions/pick-runners@3aeabb54fe8ef9175bf9c1acf8c21b5d05bd88a3 # pick-runners
+        uses: Brainwires/.github/actions/pick-runners@7475d2c4523faa74d428c3607a8fe195c1f782ac # pick-runners
         with:
           jobs: specs=linux-x64@ubuntu-24.04 node_compat=linux-x64@ubuntu-24.04 npm_matrix=linux-x64-docker@ubuntu-22.04 denext=linux-x64@ubuntu-24.04 specs_macos=macos-arm64@macos-15 node_compat_macos=macos-arm64@macos-15
           vars: ${{ toJSON(vars) }}

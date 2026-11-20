@@ -147,7 +147,7 @@ jobs:
       hosted: ${{ steps.pick.outputs.hosted }}
     steps:
       - id: pick
-        uses: Brainwires/.github/actions/pick-runners@3aeabb54fe8ef9175bf9c1acf8c21b5d05bd88a3 # pick-runners
+        uses: Brainwires/.github/actions/pick-runners@7475d2c4523faa74d428c3607a8fe195c1f782ac # pick-runners
         with:
           # setup starts in guard's slot when guard ends (it needs guard);
           # publish, hours later, follows guard's choice too rather than
@@ -262,7 +262,7 @@ jobs:
       # marked not ok or paused, or one a re-run found stuck). plan_matrix.py
       # allocates them itself (POOL_FREE); the plan of these keys is unused.
       - id: pools
-        uses: Brainwires/.github/actions/pick-runners@3aeabb54fe8ef9175bf9c1acf8c21b5d05bd88a3 # pick-runners
+        uses: Brainwires/.github/actions/pick-runners@7475d2c4523faa74d428c3607a8fe195c1f782ac # pick-runners
         with:
           jobs: arm=macos-arm64 x64=macos-x64 l2204=linux-x64-2204
           vars: ${{ toJSON(vars) }}
