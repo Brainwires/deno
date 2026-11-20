@@ -1628,6 +1628,10 @@ function bootstrapWorkerRuntime(
     core.wrapConsole(globalThis.console, core.v8Console);
 
     event.defineEventHandler(globalThis, "message");
+    // HTML's DedicatedWorkerGlobalScope `onmessageerror`: a message that
+    // fails to deserialize here (dispatchWorkerMessage) fires `messageerror`,
+    // such as an RTCCertificate, which is not exposed in a worker.
+    event.defineEventHandler(globalThis, "messageerror");
     event.defineEventHandler(globalThis, "error", undefined, true);
     event.defineEventHandler(globalThis, "rtctransform");
 
