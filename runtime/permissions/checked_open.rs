@@ -166,10 +166,16 @@ impl OpenScope {
     let opened = match open_root(&root.path) {
       Ok(opened) => opened,
       // a root that is a file (`--allow-read=/etc/hosts`), or a link to
-      // one: the scope is that one name in its directory. The directory is
-      // opened by path, as a root is, and not kept; `in_file_root` keeps
-      // the lookup to the walk, which never resolves beneath it.
-      Err(err) if err.raw_os_error() == Some(libc::ENOTDIR) => {
+      // one, or a root that doesn't exist yet (`--allow-write=out.txt`,
+      // `--allow-write=node_modules`, to be created): the scope is that one
+      // name in its directory. The directory is opened by path, as a root
+      // is, and not kept (a root created later is opened as one then);
+      // `in_file_root` keeps the lookup to the walk, which never resolves
+      // beneath it, so the name itself (and nothing else in its directory)
+      // is reached, and a path beneath a root still missing isn't found.
+      Err(err)
+        if matches!(err.raw_os_error(), Some(libc::ENOTDIR | libc::ENOENT)) =>
+      {
         let parent = root.path.parent().ok_or_else(not_capable)?;
         let dir = open_root(parent).map_err(io_err(path))?;
         return Ok((parent.to_path_buf(), dir));
@@ -2306,5 +2312,66 @@ mod tests {
       opens_by_name(Path::new("/proc/self/fd/0")),
       cfg!(target_os = "linux")
     );
+  }
+
+  // denext: a root that doesn't exist yet (`--allow-write=subdir/`,
+  // `--allow-write=node_modules`, a file to be written) is that one name in
+  // its directory until it exists: it can be made, a recursive mkdir can go
+  // on beneath it, and nothing else in its directory is reached.
+  #[test]
+  fn a_missing_root_can_be_created_and_entered() {
+    let t = tree();
+    for walk_only in [true, false] {
+      let new_dir = t.base.join(format!("new-{walk_only}"));
+      let scope = OpenScope::new(Some(vec![new_dir.clone()]), Vec::new())
+        .unwrap()
+        .force_component_walk(walk_only);
+      // mkdir of the root itself (one level), then beneath it (two levels)
+      parent_checked(&scope, &new_dir)
+        .unwrap()
+        .mkdir(0o755)
+        .unwrap();
+      parent_checked(&scope, &new_dir.join("sub"))
+        .unwrap()
+        .mkdir(0o755)
+        .unwrap();
+      assert!(new_dir.join("sub").is_dir());
+      // a sibling of the root is still out of scope
+      assert!(matches!(
+        parent_checked(&scope, &t.base.join("other")),
+        Err(CheckedOpenError::NotCapable(_))
+      ));
+      // beneath a root still missing: not found, nothing created
+      let missing = t.base.join(format!("missing-{walk_only}"));
+      let scope = OpenScope::new(Some(vec![missing.clone()]), Vec::new())
+        .unwrap()
+        .force_component_walk(walk_only);
+      assert!(matches!(
+        parent_checked(&scope, &missing.join("a/b")),
+        Err(CheckedOpenError::Io { .. })
+      ));
+      assert!(!missing.exists());
+    }
+  }
+
+  #[test]
+  fn a_missing_file_root_can_be_created() {
+    let t = tree();
+    let file = t.base.join("out.txt");
+    for scope in [
+      OpenScope::new(Some(vec![file.clone()]), Vec::new())
+        .unwrap()
+        .force_component_walk(true),
+      OpenScope::new(Some(vec![file.clone()]), Vec::new()).unwrap(),
+    ] {
+      let _ = fs::remove_file(&file);
+      let opts = CheckedOpenOptions::new().write(true).create(true);
+      open_checked(&scope, &file, &opts).unwrap();
+      assert!(file.is_file());
+      assert!(matches!(
+        open_checked(&scope, &t.base.join("other.txt"), &opts),
+        Err(CheckedOpenError::NotCapable(_))
+      ));
+    }
   }
 }
