@@ -128,7 +128,7 @@ const loadMediaDevices = () =>
       "ext:deno_webrtc/02_media_devices.js",
     ));
 
-// wpt100:identity — WebRTC (ext/webrtc's 01_webrtc.js) for the Window-only
+// wpt100:identity: WebRTC (ext/webrtc's 01_webrtc.js) for the Window-only
 // RTCIdentityAssertion; the module loads once (98_global_scope_shared.js
 // loads the same one).
 let _webrtcWindowMod;

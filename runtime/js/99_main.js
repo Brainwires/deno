@@ -583,7 +583,7 @@ core.registerErrorBuilder(
     return new DOMException(msg, "InvalidAccessError");
   },
 );
-// wpt100:hdrext, wpt100:transceiver — ext/webrtc's
+// wpt100:hdrext, wpt100:transceiver: ext/webrtc's
 // `WebRtcError::InvalidModification` (JSEP's "an offer / answer other than the
 // last one created", setCodecPreferences): without a builder the op rejected
 // with `undefined`.
