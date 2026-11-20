@@ -19210,6 +19210,32 @@ where the changes are discussed.
        Cryptex vectors, `rtc-sctp` Fast Recovery, `rtc-media` readers,
        `rtc-rtp` VP9).
      - Node tests enabled: none; no Node API changes.
+
+479. **`fix(ext/webrtc)`: webrtc-rs-rtc `0.22.0+brainwires.1`** (runtime;
+     `Cargo.toml`, `Cargo.lock`, `ext/webrtc/{01_webrtc.js,media.rs}`).
+     The conformance release (`f36d9b2c`, from `0.21.1+brainwires.6` and
+     item 478's `wpt100/integration`): upstream's 0.22.0 with the fork's
+     work on SCTP and data channels, JSEP, ICE / TURN / mDNS, DTLS, SRTP,
+     RTP / RTCP and the interceptors, and the statistics report, each claim
+     a row of the engine's `docs/conformance.md`. The engine's public API
+     changed (its CHANGELOG lists the breaking changes); `ext/webrtc` uses
+     none of the changed Rust items, and its stats repairs that the engine
+     now does itself are gone (the certificate as base64 DER, a codec's
+     `transportId`, `encodingIndex` for video only, remote RTP stream
+     objects from their first RTCP report, members without a value left
+     out). The default codecs no longer offer ULPFEC, which the engine
+     neither encodes nor decodes, so an `EncodedMediaTrack`'s codec
+     preferences list RTX only.
+     - User-facing note: stats members the engine cannot measure are now
+       omitted instead of reported as 0 or `""`; ICE drops remote candidates
+       on unspecified, multicast, broadcast or port-0 addresses, and checks
+       a loopback or link-local remote address only from a local candidate
+       of the same scope; a remote mDNS name must be `<uuid>.local` (other
+       `.local` names are ignored); `video/ulpfec` is no longer in
+       `RTCRtpSender.getCapabilities("video")`.
+     - Tests: webrtc-rs-rtc's workspace with `--all-features` (2746 pass);
+       `ext/webrtc`'s unit tests and the WebRTC WPT run.
+     - Node tests enabled: none; `node:` has no WebRTC API.
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -19220,7 +19246,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-478) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-479) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
