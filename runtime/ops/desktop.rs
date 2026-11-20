@@ -1919,15 +1919,18 @@ pub fn validate_webview_options(
     &["deny", "same-view", "browser"],
     "allowPopups must be \"deny\", \"same-view\" or \"browser\"",
   )?;
+  // "app" (laufey API 59) is the app deciding each download / permission
+  // request; laufey refuses it as invalid where the engine has no download
+  // events / permission requests (webViewCapabilities()).
   one_of(
     &options.downloads,
-    &["deny", "ask", "browser"],
-    "downloads must be \"deny\", \"ask\" or \"browser\"",
+    &["deny", "ask", "browser", "app"],
+    "downloads must be \"deny\", \"ask\", \"browser\" or \"app\"",
   )?;
   one_of(
     &options.permissions,
-    &["deny", "ask"],
-    "permissions must be \"deny\" or \"ask\"",
+    &["deny", "ask", "app"],
+    "permissions must be \"deny\", \"ask\" or \"app\"",
   )?;
   one_of(
     &options.context_menu,
@@ -12246,7 +12249,7 @@ mod tests {
         Some("invalid")
       );
     }
-    for v in ["deny", "ask", "browser"] {
+    for v in ["deny", "ask", "browser", "app"] {
       assert_eq!(
         code(WebViewOptionsInfo {
           downloads: Some(v.into()),
@@ -12262,7 +12265,7 @@ mod tests {
       }),
       Some("invalid")
     );
-    for v in ["deny", "ask"] {
+    for v in ["deny", "ask", "app"] {
       assert_eq!(
         code(WebViewOptionsInfo {
           permissions: Some(v.into()),
