@@ -950,9 +950,11 @@ Deno.test("webrtcSenderParameters", async () => {
   const t = pc.addTransceiver("video", {
     sendEncodings: [{ rid: "hi" }, { rid: "lo", scaleResolutionDownBy: 2 }],
   });
+  // The dictionary's required members are missing: WebIDL's TypeError
+  // (WPT RTCRtpParameters-transactionId.html).
   await assertRejects(
     () => t.sender.setParameters({} as RTCRtpSendParameters),
-    DOMException,
+    TypeError,
   );
   const params = t.sender.getParameters();
   assertEquals(params.encodings.map((e) => e.rid), ["hi", "lo"]);
