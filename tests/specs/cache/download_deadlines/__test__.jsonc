@@ -27,10 +27,16 @@
       "exitCode": 1
     },
     "module_stalls_once": {
+      // Only the first attempt has to time out: the retry is answered at once,
+      // so a longer response deadline keeps a loaded machine from missing it.
+      "envs": { "DENO_DOWNLOAD_RESPONSE_TIMEOUT_MS": "5000" },
       "args": "run http://localhost:4545/download_deadlines/stall_once/mod.ts",
       "output": "module_stalls_once.out"
     },
     "module_slow_but_steady": {
+      // Two bytes every 200 ms for about 3.4 s: longer than the idle deadline in
+      // all, but never idle that long, even on a loaded machine.
+      "envs": { "DENO_DOWNLOAD_IDLE_TIMEOUT_MS": "3000" },
       "args": "run http://localhost:4545/download_deadlines/drip/mod.ts",
       "output": "module_slow_but_steady.out"
     },
