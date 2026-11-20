@@ -1397,7 +1397,9 @@ Deno.test("webrtcDtmf", async () => {
   const gotTrack = once<RTCTrackEvent>(b, "track");
   await negotiate(a, b);
   const { receiver } = await gotTrack;
-  await connected(a);
+  // Both ends: `a` can finish DTLS first, and until `b` has its SRTP keys it
+  // drops what arrives, here the whole 40 ms of the first tone.
+  await Promise.all([connected(a), connected(b)]);
   assertEquals(dtmf.canInsertDTMF, true);
   const err = assertThrows(() => dtmf.insertDTMF("1x"), DOMException);
   assertEquals((err as DOMException).name, "InvalidCharacterError");
