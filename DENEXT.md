@@ -18966,7 +18966,8 @@ where the changes are discussed.
 
 476. **`fix`: what the denext.28 train's flake hunt found** (runtime, tests and
      CI; `ext/fs/30_fs.js`, `libs/core/runtime/jsruntime.rs`,
-     `ext/node/polyfills/fs.ts`, `tests/unit/{timers_test,pty_test}.ts`,
+     `ext/node/polyfills/fs.ts`, `ext/os/40_signals.js`,
+     `tests/unit/{timers_test,pty_test,signal_test}.ts`,
      `cli/sandbox/warn.rs`,
      `.github/workflows/denext_runtime.yml`). The hunt (item 459) on the
      train's candidate, Linux, at one CPU and below:
@@ -18984,6 +18985,14 @@ where the changes are discussed.
        as in Node.js; before, an unref'd timer that was already due when the
        main module finished (a slow or starved main module) fired once
        (`unrefTimer`, 1 run in 5). Upstream's event loop has the same order.
+     - Signals: the listeners run once per delivery. The native side counts
+       each delivery, but its channel only says "changed", so the listeners
+       ran once per wakeup and deliveries that arrived while the event loop
+       wasn't polling (a busy or starved JS thread) were lost; a listener
+       counting its signals waited for them forever
+       (`multipleSignalListenerTest` hung 2 runs in 5). Node.js calls a
+       listener for each signal received. Upstream's loop has the same
+       once-per-wakeup shape.
      - `node:fs` `watchFile`: the poll's stat is synchronous. An async stat
        is an op the watcher can't cancel, so `unwatchFile()` during a poll
        left it running past the stop, which the test sanitizer reported as a
@@ -19002,13 +19011,14 @@ where the changes are discussed.
        seeded `gn_out` and a cached build failed to link `rusty_v8`.
      - User-facing note: `Deno.readDir`'s iterator rejects an overlapping
        `next()` every time, an unref'd timer no longer fires when nothing
-       keeps the process alive, and a stopped `watchFile` leaves no work
-       behind.
-     - Tests: `readDirConcurrentNextRejectsWithBusy`, the `unrefTimer` tests
-       and the `watchFile` tests 30 times plain and 30 under `taskpolicy -b`
-       on macOS; a new
+       keeps the process alive, a signal listener runs for every signal
+       delivered, and a stopped `watchFile` leaves no work behind.
+     - Tests: `readDirConcurrentNextRejectsWithBusy`, the `unrefTimer` tests,
+       `multipleSignalListenerTest` and the `watchFile` tests 30 times plain
+       and 30 under `taskpolicy -b` on macOS; a new signal test that delivers
+       two signals while the JS thread is busy (one call before); a new
        `unrefTimer` test whose main module outlasts its timer;
-       `tests/unit/{timers_test,pty_test,read_dir_test}.ts`,
+       `tests/unit/{timers_test,pty_test,read_dir_test,signal_test}.ts`,
        `tests/unit_node/{timers_test,_fs/_fs_watch_test}.ts` and `deno_core`'s
        timer tests whole.
      - Node tests enabled: none.

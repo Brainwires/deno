@@ -86,22 +86,34 @@ async function loop(sigData) {
   // with its own loop, and this one must stop rather than poll that resource
   // too (which would deliver every later signal twice).
   const rid = sigData.rid;
+  // denext: the deliveries the listeners have run for. A wakeup covers every
+  // delivery since the last one (the native side counts each; its channel
+  // only says "changed"), and the listeners run once per delivery, as
+  // Node.js (libuv) calls a signal's listener for each signal received.
+  // Running them once per wakeup lost the deliveries that arrived while the
+  // loop wasn't polling (a busy or starved JS thread), and a listener
+  // counting its signals waited for the lost ones forever.
+  let ran = 0;
   while (sigData.rid === rid) {
     // How many deliveries the resource has had in all; 0 once it is closed.
     const seen = await pollSignal(rid);
     if (seen === 0) {
       return;
     }
-    // The listeners at delivery: one added by a listener waits for the next
-    // signal, as with EventEmitter.
-    const listeners = ArrayFrom(new SafeSetIterator(sigData.listeners));
+    const deliveries = seen > ran ? seen - ran : 1;
+    ran = seen > ran ? seen : ran + 1;
     const pending = [];
     try {
-      for (let i = 0; i < listeners.length; i++) {
-        if (SetPrototypeHas(sigData.listeners, listeners[i])) {
-          const result = listeners[i]();
-          if (core.isPromise(result)) {
-            ArrayPrototypePush(pending, settled(result));
+      for (let d = 0; d < deliveries && sigData.rid === rid; d++) {
+        // The listeners at delivery: one added by a listener waits for the
+        // next signal, as with EventEmitter.
+        const listeners = ArrayFrom(new SafeSetIterator(sigData.listeners));
+        for (let i = 0; i < listeners.length; i++) {
+          if (SetPrototypeHas(sigData.listeners, listeners[i])) {
+            const result = listeners[i]();
+            if (core.isPromise(result)) {
+              ArrayPrototypePush(pending, settled(result));
+            }
           }
         }
       }

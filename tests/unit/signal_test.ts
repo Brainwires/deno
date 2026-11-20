@@ -162,6 +162,44 @@ Deno.test(
   },
 );
 
+// denext: each signal delivered runs the listeners once, even when several
+// arrive before the event loop gets to them (as Node.js calls a listener per
+// signal received). Here the JS thread is busy while two signals are
+// delivered, which coalesced them into one call before.
+Deno.test(
+  {
+    ignore: Deno.build.os === "windows",
+    permissions: { run: true },
+  },
+  async function signalListenerRunsOncePerDelivery() {
+    let count = 0;
+    const listener = () => {
+      count++;
+    };
+    Deno.addSignalListener("SIGUSR2", listener);
+    try {
+      const busy = (ms: number) => {
+        const end = Date.now() + ms;
+        while (Date.now() < end) {
+          // the signal thread delivers meanwhile; the event loop can't poll
+        }
+      };
+      Deno.kill(Deno.pid, "SIGUSR2");
+      busy(100);
+      Deno.kill(Deno.pid, "SIGUSR2");
+      busy(100);
+      const deadline = Date.now() + 10_000;
+      while (count < 2 && Date.now() < deadline) {
+        await delay(20);
+      }
+      await delay(100);
+      assertEquals(count, 2);
+    } finally {
+      Deno.removeSignalListener("SIGUSR2", listener);
+    }
+  },
+);
+
 // This tests that pending op_signal_poll doesn't block the runtime from exiting the process.
 Deno.test(
   {
