@@ -113,8 +113,11 @@ mod tests {
 
     let permit = sem.acquire();
 
+    // The clock starts here, with the permit already held: a thread that is
+    // scheduled late (a starved CPU) must not start its own clock afterwards
+    // and measure less than the time the permit was held.
+    let start = std::time::Instant::now();
     let handle = thread::spawn(move || {
-      let start = std::time::Instant::now();
       let _permit = sem_clone.acquire();
       start.elapsed()
     });
@@ -122,8 +125,9 @@ mod tests {
     thread::sleep(Duration::from_millis(50));
     drop(permit);
 
+    // the permit was held for at least the 50 ms the sleep guarantees
     let elapsed = handle.join().unwrap();
-    assert!(elapsed >= Duration::from_millis(40));
+    assert!(elapsed >= Duration::from_millis(50), "{elapsed:?}");
   }
 
   #[test]
