@@ -258,7 +258,19 @@ Deno.test({
 Deno.test({
   name: "os.cpus()",
   fn() {
-    assertEquals(os.cpus().length, navigator.hardwareConcurrency);
+    // os.cpus() lists every CPU the machine has, as Node.js does; the
+    // parallelism the process may use (hardwareConcurrency,
+    // os.availableParallelism(), libuv's uv_available_parallelism) honours a
+    // cgroup CPU quota or affinity mask, so it may be fewer (a container
+    // capped at one CPU on an eight-CPU host: 1 of 8).
+    const cpus = os.cpus().length;
+    assert(cpus >= 1);
+    assert(
+      navigator.hardwareConcurrency >= 1 &&
+        navigator.hardwareConcurrency <= cpus,
+      `hardwareConcurrency ${navigator.hardwareConcurrency}, cpus ${cpus}`,
+    );
+    assertEquals(os.availableParallelism(), navigator.hardwareConcurrency);
 
     for (const cpu of os.cpus()) {
       assert(cpu.model.length > 0);
