@@ -840,7 +840,13 @@ impl TestSetup {
         let exit_code = output.status.code();
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let output_str = format!("{}\n{}", stdout, stderr);
+        let mut output_str = format!("{}\n{}", stdout, stderr);
+        // denext: how a failed run ended, so a process that died without a
+        // word (a signal, an abort) is told apart from one that exited
+        if !success {
+          output_str
+            .push_str(&format!("\n[{}]", describe_status(&output.status)));
+        }
         (success, output_str, exit_code)
       }
       Err(_) => {
@@ -1218,4 +1224,27 @@ fn handle_expected_failure(
     )
     .into_bytes(),
   }
+}
+
+/// denext: how a test's process ended, for a failure report: its exit code,
+/// or (Unix) the signal that ended it and whether it dumped core.
+fn describe_status(status: &std::process::ExitStatus) -> String {
+  if let Some(code) = status.code() {
+    return format!("exit code {code}");
+  }
+  #[cfg(unix)]
+  {
+    use std::os::unix::process::ExitStatusExt;
+    if let Some(signal) = status.signal() {
+      return format!(
+        "killed by signal {signal}{}",
+        if status.core_dumped() {
+          " (core dumped)"
+        } else {
+          ""
+        }
+      );
+    }
+  }
+  format!("{status}")
 }
