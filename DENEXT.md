@@ -19236,6 +19236,25 @@ where the changes are discussed.
      - Tests: webrtc-rs-rtc's workspace with `--all-features` (2746 pass);
        `ext/webrtc`'s unit tests and the WebRTC WPT run.
      - Node tests enabled: none; `node:` has no WebRTC API.
+
+480. **`fix(ext/webrtc)`: webrtc-rs-rtc `0.22.0+brainwires.2`** (runtime;
+     `Cargo.toml`, `Cargo.lock`). The engine's fix release (`f0ebf8f2`): a
+     sender whose encodings leave the codec to negotiation, as every
+     `RTCRtpSender` here does, is now sent with its first negotiated media
+     codec and bound to the interceptors, so it sends RTCP sender reports,
+     answers NACKs (over RTX, which explicit encodings now get) and feeds
+     TWCC; before, none of that ran for media the runtime sent. Its
+     outbound stream registers that codec, so `codecId`, `rtxSsrc`, the
+     remote-inbound `jitter` / `roundTripTime` and `remote-outbound-rtp`
+     appear. A rejected m= section in a remote offer gets a stopped
+     transceiver (no `track` event), as JSEP and W3C require.
+     - User-facing note: lost video packets are retransmitted; the stats
+       members above are reported; `getTransceivers()` lists a stopped
+       transceiver for each rejected section of a remote offer.
+     - Tests: the engine's rtc-to-rtc tests (sender reports, NACK over RTX,
+       stats) and its workspace; `ext/webrtc`'s unit tests and the WebRTC WPT
+       run.
+     - Node tests enabled: none; `node:` has no WebRTC API.
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
