@@ -100,6 +100,14 @@ const HARNESS_STATUSES: Record<number, string> = {
   3: "PRECONDITION_FAILED",
 };
 
+const SUBTEST_STATUSES: Record<number, string> = {
+  0: "PASS",
+  1: "FAIL",
+  2: "TIMEOUT",
+  3: "NOTRUN",
+  4: "PRECONDITION_FAILED",
+};
+
 switch (command) {
   case "setup":
     await checkPy3Available();
@@ -420,13 +428,6 @@ Options:
 /** testharness.js's harness statuses, as wptreport names them. */
 
 /** testharness.js's subtest statuses, as wptreport names them. */
-const SUBTEST_STATUSES: Record<number, string> = {
-  0: "PASS",
-  1: "FAIL",
-  2: "TIMEOUT",
-  3: "NOTRUN",
-  4: "PRECONDITION_FAILED",
-};
 
 async function generateWptReport(
   results: { test: TestToRun; result: TestResult }[],
