@@ -355,7 +355,7 @@ rstest = "0"
 # interceptors and stats), pinned by that tag's commit. On the aws-lc-rs
 # crypto provider, the one Deno's rustls already uses. Pre-1.0 and not
 # externally audited.
-rtc = { git = "https://github.com/Brainwires/webrtc-rs-rtc", rev = "f0ebf8f2c1e28da83def5b01172025108115013a", default-features = false, features = ["crypto-aws-lc-rs"] }
+rtc = { git = "https://github.com/Brainwires/webrtc-rs-rtc", rev = "29e3e7ef726c144b172f6d2286dd7d59e54b593c", default-features = false, features = ["crypto-aws-lc-rs"] }
 rusqlite = { version = "0.41.1", features = ["unlock_notify", "bundled", "session", "modern_sqlite", "limits", "backup", "fallible_uint"] } # "modern_sqlite": need sqlite >= 3.49.0 for some db configs; "fallible_uint": ToSql for u64/usize (needed when crates like deno_cache are published/built standalone, not just feature-unified via denokv_sqlite)
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "std", "tls12", "aws_lc_rs"] }
 rustls-pemfile = "2"

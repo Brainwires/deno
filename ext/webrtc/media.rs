@@ -11,7 +11,8 @@
 //! RTP packets), and what a receiver gets is delivered as RTP packets to a
 //! `Deno.webrtc.readRtp()` reader.
 //!
-//! The engine names transceivers by their index, which a rollback can shift;
+//! The engine names transceivers by their index, which a removal (a rollback,
+//! or an answer rejecting a stopped transceiver's section) shifts;
 //! [`Core::keys`](crate::peer::Core) maps each index to a stable key that
 //! JavaScript uses instead.
 
@@ -661,9 +662,6 @@ pub struct MediaState {
   /// Engine transceiver index -> stable key.
   pub keys: Vec<u32>,
   pub next_key: u32,
-  /// Keys of transceivers the pending remote offer created (removed again by
-  /// a rollback when they have no sender, as the engine does).
-  pub created_by_remote: Vec<u32>,
   /// Kinds of the transceivers, by key.
   pub kinds: HashMap<u32, RtpCodecKind>,
   /// Engine track id -> transceiver key (receivers' and senders' tracks).
@@ -932,16 +930,13 @@ impl MediaState {
 
 impl Core {
   /// Gives every engine transceiver a key (new ones are appended by the
-  /// engine; `from_remote` marks those a remote offer created).
-  pub(crate) fn sync_transceiver_keys(&mut self, from_remote: bool) {
+  /// engine).
+  pub(crate) fn sync_transceiver_keys(&mut self) {
     let count = self.pc.get_transceivers().count();
     while self.media.keys.len() < count {
       let key = self.media.new_key();
       let index = self.media.keys.len();
       self.media.keys.push(key);
-      if from_remote {
-        self.media.created_by_remote.push(key);
-      }
       let kind = self
         .pc
         .rtp_receiver(index.into())
@@ -954,37 +949,37 @@ impl Core {
     }
   }
 
-  /// Before a rollback: the keys the engine is about to remove (created by
-  /// the pending remote offer, with no sender), in index order.
-  pub(crate) fn rollback_victims(&mut self) -> Vec<usize> {
-    let mut out = Vec::new();
-    for (index, key) in self.media.keys.clone().iter().enumerate() {
-      // The engine removes what the offer created unless `addTrack` touched
-      // it (attach_track drops the key from created_by_remote).
-      if self.media.created_by_remote.contains(key)
-        && self.pc.rtp_transceiver(index).is_some()
-      {
-        out.push(index);
+  /// After a description (or a rollback): drops the keys of the transceivers
+  /// the engine removed from its set, which moves the later ones down (a
+  /// rollback undoing the remote offer that created them, RFC 9429 section
+  /// 5.7; an answer leaving a stopped transceiver's m= section rejected, W3C
+  /// webrtc-pc 4.4.1.6), then keys the ones it added. The engine reports
+  /// each removal by the index the transceiver had then, in removal order,
+  /// so removing them in that order keeps the keys in step. An index past
+  /// the keys is a transceiver the same call added and removed again.
+  pub(crate) fn sync_removed_transceivers(&mut self) {
+    for index in self.pc.take_removed_transceivers() {
+      if index >= self.media.keys.len() {
+        continue;
       }
+      let key = self.media.keys.remove(index);
+      self.forget_transceiver(key);
     }
-    out
+    self.sync_transceiver_keys();
   }
 
-  pub(crate) fn after_rollback(&mut self, victims: Vec<usize>) {
-    for index in victims.into_iter().rev() {
-      if index < self.media.keys.len() {
-        let key = self.media.keys.remove(index);
-        self.media.kinds.remove(&key);
-        self.media.track_keys.retain(|_, k| *k != key);
-      }
-    }
-    self.media.created_by_remote.clear();
-    // Anything the engine still has beyond what we track gets a key.
-    self.sync_transceiver_keys(false);
-  }
-
-  pub(crate) fn negotiation_settled(&mut self) {
-    self.media.created_by_remote.clear();
+  /// Per-key state of a transceiver that left the set.
+  fn forget_transceiver(&mut self, key: u32) {
+    let media = &mut self.media;
+    media.kinds.remove(&key);
+    media.track_keys.retain(|_, k| *k != key);
+    media.reading.remove(&key);
+    media.paused.remove(&key);
+    media.packetizers.remove(&key);
+    media.flowing.remove(&key);
+    media.dtmf.remove(&key);
+    media.sources.remove(&key);
+    media.fake.remove(&key);
   }
 
   pub(crate) fn index_of(&self, key: u32) -> Result<usize, WebRtcError> {
@@ -1060,7 +1055,7 @@ impl Core {
         .add_transceiver_from_kind(kind, Some(init))
         .map_err(crate::peer::rtc_err)?,
     };
-    self.sync_transceiver_keys(false);
+    self.sync_transceiver_keys();
     let key = self.media.keys[index];
     self.media.kinds.insert(key, kind);
     if let Some(mut sender) = self.pc.rtp_sender(index.into()) {
@@ -1115,7 +1110,6 @@ impl Core {
       ));
       t.keep_on_rollback();
     }
-    self.media.created_by_remote.retain(|k| *k != key);
     let has_sender = self
       .pc
       .rtp_transceiver(index)
@@ -1305,7 +1299,7 @@ impl Core {
   }
 
   pub(crate) fn transceivers(&mut self) -> Vec<TransceiverInfo> {
-    self.sync_transceiver_keys(false);
+    self.sync_transceiver_keys();
     let remote = self
       .pc
       .remote_description()

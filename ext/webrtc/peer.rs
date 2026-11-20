@@ -2708,31 +2708,19 @@ impl Peer {
     let has_transport = has_live_media_section(&sdp);
     let desc = Self::description(kind, sdp)?;
     let restarted = self.guarded(|core| {
-      let victims = if kind == "rollback" {
-        core.rollback_victims()
-      } else {
-        Vec::new()
-      };
       let ufrag_before = core.local_ufrag();
-      core
-        .pc
-        .set_local_description(Instant::now(), desc)
-        .map_err(|e| match e {
-          // JSEP: an offer or answer other than the last one created.
-          RtcError::ErrSDPDoesNotMatchOffer
-          | RtcError::ErrSDPDoesNotMatchAnswer => {
-            WebRtcError::InvalidModification(e.to_string())
-          }
-          e => description_err(e),
-        })?;
-      if kind == "rollback" {
-        core.after_rollback(victims);
-      } else {
-        core.sync_transceiver_keys(false);
-        if kind == "answer" {
-          core.negotiation_settled();
+      let applied = core.pc.set_local_description(Instant::now(), desc);
+      // The engine may have removed transceivers (a rollback, an answer
+      // rejecting a stopped one's section), even on the way to an error.
+      core.sync_removed_transceivers();
+      applied.map_err(|e| match e {
+        // JSEP: an offer or answer other than the last one created.
+        RtcError::ErrSDPDoesNotMatchOffer
+        | RtcError::ErrSDPDoesNotMatchAnswer => {
+          WebRtcError::InvalidModification(e.to_string())
         }
-      }
+        e => description_err(e),
+      })?;
       Ok(
         kind != "rollback"
           && ufrag_before.is_some()
@@ -2816,16 +2804,10 @@ impl Peer {
       kept.lines().any(|l| l.trim_end() == "a=end-of-candidates");
     let desc = Self::description(kind, kept)?;
     self.guarded(|core| {
-      let victims = if kind == "rollback" {
-        core.rollback_victims()
-      } else {
-        Vec::new()
-      };
       let ufrag_before = core.remote_ufrag();
-      core
-        .pc
-        .set_remote_description(Instant::now(), desc)
-        .map_err(description_err)?;
+      let applied = core.pc.set_remote_description(Instant::now(), desc);
+      core.sync_removed_transceivers();
+      applied.map_err(description_err)?;
       // An ICE restart by the remote side: its candidates, and its
       // end-of-candidates, start over.
       if ufrag_before.is_some() && core.remote_ufrag() != ufrag_before {
@@ -2834,14 +2816,6 @@ impl Peer {
       }
       if end_of_candidates {
         core.remote_gathered = true;
-      }
-      if kind == "rollback" {
-        core.after_rollback(victims);
-      } else {
-        core.sync_transceiver_keys(kind == "offer");
-        if kind == "answer" {
-          core.negotiation_settled();
-        }
       }
       for addr in checked {
         core.mark_allowed(addr);

@@ -2288,3 +2288,89 @@ Deno.test("webrtcIceRestartKeepsDataFlowing", async () => {
   a.close();
   b.close();
 });
+
+/** Two `sendonly` Opus transceivers from `a` to `b`, negotiated and
+ * connected; `b`'s first is then stopped and the stop negotiated by `b`
+ * (its offer and `a`'s answer reject that m= section). */
+async function removeFirstOfTwo() {
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  const tracks = [0, 1].map(() =>
+    new Deno.webrtc.EncodedMediaTrack({
+      kind: "audio",
+      mimeType: "audio/opus",
+    })
+  );
+  for (const track of tracks) {
+    a.addTransceiver(track, { direction: "sendonly" });
+  }
+  await negotiate(a, b);
+  await Promise.all([connected(a), connected(b)]);
+  assertEquals(b.getTransceivers().length, 2);
+  const [stopped, kept] = b.getTransceivers();
+  const [aStopped, aKept] = a.getTransceivers();
+  stopped.stop();
+  await b.setLocalDescription();
+  await a.setRemoteDescription(b.localDescription!);
+  // The remote offer rejected the section: stopped at once, still listed
+  // until the answer.
+  assertEquals(aStopped.currentDirection, "stopped");
+  await a.setLocalDescription();
+  await b.setRemoteDescription(a.localDescription!);
+  return { a, b, tracks, stopped, kept, aStopped, aKept };
+}
+
+Deno.test("webrtcRejectedSectionRemovesStoppedTransceiver", async () => {
+  // W3C webrtc-pc 4.4.1.6: an answer that leaves a stopped transceiver's m=
+  // section rejected removes it from the set of transceivers, on the side
+  // that set the remote answer and on the side that set the local one.
+  const { a, b, stopped, kept, aStopped, aKept } = await removeFirstOfTwo();
+  assertEquals(stopped.currentDirection, "stopped");
+  assertEquals(stopped.mid, null);
+  assertEquals(b.getTransceivers(), [kept]);
+  assertEquals(a.getTransceivers(), [aKept]);
+  assert(!a.getTransceivers().includes(aStopped));
+  assertEquals(b.getReceivers(), [kept.receiver]);
+  assert(kept.mid !== null);
+  assertEquals(kept.mid, aKept.mid);
+  a.close();
+  b.close();
+});
+
+Deno.test("webrtcLaterTransceiverWorksAfterEarlierRemoved", async () => {
+  // The engine names transceivers by index: removing the first moves the
+  // second down. Its sender, receiver and stats must follow it.
+  const { a, b, tracks, kept, aKept } = await removeFirstOfTwo();
+  const packet = new Uint8Array(12 + 4);
+  packet[0] = 0x80;
+  packet[1] = 99;
+  packet.set([5, 6, 7, 8], 12);
+  const packets = rtpPackets(kept.receiver, 2);
+  let seq = 0;
+  const interval = setInterval(() => {
+    packet[2] = 0;
+    packet[3] = seq++;
+    tracks[1].writeRtp(packet);
+  }, 20);
+  try {
+    const got = await packets;
+    assertEquals(got.length, 2);
+    assertEquals([...got[0].subarray(12)], [5, 6, 7, 8]);
+  } finally {
+    clearInterval(interval);
+  }
+  const outbound = [...(await aKept.sender.getStats()).values()].filter((s) =>
+    s.type === "outbound-rtp"
+  );
+  assertEquals(outbound.length, 1);
+  assertEquals(outbound[0].mid, aKept.mid);
+  assert(outbound[0].packetsSent > 0);
+  const inbound = [...(await kept.receiver.getStats()).values()].filter((s) =>
+    s.type === "inbound-rtp"
+  );
+  assertEquals(inbound.length, 1);
+  assertEquals(inbound[0].mid, kept.mid);
+  assert(inbound[0].packetsReceived > 0);
+  a.close();
+  b.close();
+});
