@@ -6588,12 +6588,19 @@
   // RFC 8830 section 2: one MediaStreamTrack is in one m-section, so an
   // `a=msid:<stream> <track>` value two m-sections both carry is an invalid
   // description, which setRemoteDescription rejects with an OperationError.
-  // (An msid with no track part, and rejected sections, say nothing here.)
+  // (An msid with no track part, and rejected sections, say nothing here; nor
+  // does a recvonly or inactive section, which sends no track: RFC 9429
+  // section 5.10 reads `a=msid` only from a sendrecv or sendonly section. A
+  // track removed from one sender and added to another leaves its msid on the
+  // first section, which goes recvonly.)
   function requireUniqueMsids(sdp) {
     const seen = new SafeSet();
     let mine = null;
+    let inMedia = false;
+    let sessionSends = true;
+    let sends = true;
     const flush = () => {
-      if (mine === null) return;
+      if (mine === null || !sends) return;
       const values = ArrayFrom(new SafeSet(mine));
       for (let i = 0; i < values.length; ++i) {
         if (SetPrototypeHas(seen, values[i])) {
@@ -6614,6 +6621,14 @@
         flush();
         const parts = StringPrototypeSplit(line, " ");
         mine = parts[1] === "0" ? null : [];
+        inMedia = true;
+        sends = sessionSends;
+      } else if (line === "a=recvonly" || line === "a=inactive") {
+        if (!inMedia) sessionSends = false;
+        sends = false;
+      } else if (line === "a=sendrecv" || line === "a=sendonly") {
+        if (!inMedia) sessionSends = true;
+        sends = true;
       } else if (mine !== null && StringPrototypeStartsWith(line, "a=msid:")) {
         const value = StringPrototypeTrim(StringPrototypeSlice(line, 7));
         const parts = ArrayPrototypeFilter(

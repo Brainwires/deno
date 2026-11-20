@@ -1963,6 +1963,38 @@ Deno.test("webrtcMsidLines", async () => {
   pc.close();
 });
 
+Deno.test("webrtcDuplicateMsidCountsOnlySendingSections", async () => {
+  // RFC 8830 section 2: one track in two sending m-sections is an invalid
+  // description. A recvonly section sends no track (RFC 9429 section 5.10),
+  // so its stale msid (a track removed and added again) is not a duplicate.
+  const pc1 = new RTCPeerConnection();
+  pc1.addTransceiver("video");
+  const { sdp } = await pc1.createOffer();
+  const sections = sdp!.split(/^(?=m=)/m);
+  assertEquals(sections.length, 2);
+  assert(sections[1].includes("a=sendrecv"));
+  const copy = sections[1].replace("a=mid:", "a=mid:unique");
+  const pc2 = new RTCPeerConnection();
+  await assertRejects(
+    () =>
+      pc2.setRemoteDescription({
+        type: "offer",
+        sdp: sections[0] + sections[1] + copy,
+      }),
+    DOMException,
+    "two media sections",
+  );
+  // A receive-only section carries no SSRCs of its own.
+  const recvonly = copy.replace("a=sendrecv", "a=recvonly")
+    .replace(/a=ssrc[^\r\n]*\r\n/g, "");
+  const pc3 = new RTCPeerConnection();
+  await pc3.setRemoteDescription({
+    type: "offer",
+    sdp: sections[0] + recvonly + sections[1],
+  });
+  for (const pc of [pc1, pc2, pc3]) pc.close();
+});
+
 Deno.test("webrtcStatsReferencesResolve", async () => {
   const a = new RTCPeerConnection();
   const b = new RTCPeerConnection();
