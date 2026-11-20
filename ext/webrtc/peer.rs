@@ -617,6 +617,12 @@ pub struct Core {
   mdns_socket: Option<Rc<UdpSocket>>,
   /// Opening the mDNS socket failed (reported once).
   mdns_failed: bool,
+  /// 1:1 NAT in host mode is the engine's (`with_nat_1to1_ips`): a host
+  /// candidate is added on its private address and announced on the public
+  /// one, its base staying the private socket, so the addresses the engine
+  /// reads and writes on are the sockets' own. Off with mDNS names (the
+  /// engine can't map a name), where the public address is signalled here.
+  engine_nat: bool,
 }
 
 /// One candidate of [`SelectedPair`], with the fields JavaScript needs to
@@ -1378,9 +1384,12 @@ impl Core {
       self.routes.insert(from.ip(), ip);
       ip
     };
-    // 1:1 NAT in host mode: the host candidate is the public address.
+    // 1:1 NAT in host mode: the host candidate is the public address (unless
+    // the engine maps it, keeping the private socket as the base).
     let ip = match self.options.network.as_ref().map(|n| &n.options) {
-      Some(net) if !net.public_srflx => net.public_for(ip).unwrap_or(ip),
+      Some(net) if !net.public_srflx && !self.engine_nat => {
+        net.public_for(ip).unwrap_or(ip)
+      }
       _ => ip,
     };
     SocketAddr::new(ip, port)
@@ -1445,6 +1454,8 @@ impl Core {
           .map(|p| SocketAddr::new(p, bound.port()));
         let (host, srflx) = match public {
           Some(p) if opts.public_srflx => (private, Some(p)),
+          // The engine announces it on the public address.
+          Some(_) if self.engine_nat => (private, None),
           Some(p) => (p, None),
           None => (private, None),
         };
@@ -1511,9 +1522,10 @@ impl Core {
     for endpoint in &net.tcp {
       for ip in published_hosts(&endpoint.hosts, gather_names) {
         // 1:1 NAT: the public address in place of the private one (host
-        // mode), as for UDP; in srflx mode the host address itself.
+        // mode), as for UDP; in srflx mode, or when the engine maps it, the
+        // host address itself.
         let advertised = match opts.public_for(ip) {
-          Some(public) if !opts.public_srflx => public,
+          Some(public) if !opts.public_srflx && !self.engine_nat => public,
           _ => ip,
         };
         let passive = SocketAddr::new(advertised, endpoint.bound.port());
@@ -1623,7 +1635,7 @@ impl Core {
   /// private one, as for UDP.
   fn tcp_local(&self, local: SocketAddr) -> SocketAddr {
     match self.options.network.as_ref().map(|n| &n.options) {
-      Some(net) if !net.public_srflx => SocketAddr::new(
+      Some(net) if !net.public_srflx && !self.engine_nat => SocketAddr::new(
         net.public_for(local.ip()).unwrap_or(local.ip()),
         local.port(),
       ),
@@ -2444,6 +2456,25 @@ impl Peer {
     } else {
       mdns_mode
     };
+    // 1:1 NAT in host mode: the engine announces a mapped host candidate on
+    // the public address and keeps its private socket as the base, which is
+    // what its remote-address policy pairs (a loopback remote only from a
+    // loopback base). It can't map an mDNS name.
+    let engine_nat = mdns_mode != MdnsMode::Gather
+      && net.is_some_and(|n| !n.public_srflx && !n.public_addresses.is_empty());
+    if engine_nat && let Some(net) = net {
+      settings = settings.with_nat_1to1_ips(
+        net
+          .public_addresses
+          .iter()
+          .map(|p| match p.private {
+            Some(private) => format!("{}/{private}", p.public),
+            None => p.public.to_string(),
+          })
+          .collect(),
+        RTCIceCandidateType::Host,
+      );
+    }
     settings = settings
       .with_multicast_dns_mode(match mdns_mode {
         MdnsMode::Off => MulticastDnsMode::Disabled,
@@ -2511,6 +2542,7 @@ impl Peer {
         mdns_mode,
         mdns_socket: mdns_socket.clone(),
         mdns_failed: false,
+        engine_nat,
       }),
       guard,
       wake: Notify::new(),
