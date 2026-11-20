@@ -4981,9 +4981,10 @@ Deno.test("[node/http] a request queued behind one ended while connecting is sen
 
 // Node checks a proxied request's Host header and absolute-form path against
 // the authority it was built for, and canonicalizes the Host it sends.
-Deno.test("[node/http] proxied request authority is validated and canonicalized", () => {
+Deno.test("[node/http] proxied request authority is validated and canonicalized", async () => {
+  // An IP-literal proxy: a `localhost` one starts a DNS lookup that can outlive the test.
   const agent = new http.Agent({
-    proxyEnv: { HTTP_PROXY: "http://localhost:1" },
+    proxyEnv: { HTTP_PROXY: "http://127.0.0.1:1" },
   } as ProxyAgentLike);
   try {
     const req = http.request({
@@ -4997,7 +4998,9 @@ Deno.test("[node/http] proxied request authority is validated and canonicalized"
     req.on("error", () => {});
     assertEquals(req.path, "http://localhost/g");
     assertEquals(req.getHeader("host"), "localhost");
+    const closed = once(req, "close");
     req.destroy();
+    await closed;
 
     const options = { agent, host: "localhost", port: 3000, path: "/x" };
     for (
