@@ -288,7 +288,7 @@ function descriptionSlot(pc, slot) {
   if (slot === "currentLocal" || slot === "pendingLocal") {
     pair = [pair[0], announcedSdp(state, pair[1])];
   }
-  // wpt100:identity — a local description shows the a=identity line the
+  // wpt100:identity: a local description shows the a=identity line the
   // engine was given without (06_identity.js).
   const sdp = identityHooks.reportedSdp(pc, slot, pair[1]);
   const cache = state.descriptions;
@@ -678,7 +678,7 @@ const ERROR_DETAILS = [
   "sdp-syntax-error",
   "hardware-encoder-not-available",
   "hardware-encoder-error",
-  // wpt100:identity — RTCErrorDetailTypeIdp (W3C WebRTC Identity section
+  // wpt100:identity: RTCErrorDetailTypeIdp (W3C WebRTC Identity section
   // 10), the partial enum WebIDL can't write.
   "idp-bad-script-failure",
   "idp-execution-failure",
@@ -713,7 +713,7 @@ class RTCError extends DOMException {
       sctpCauseCode: init.sctpCauseCode ?? null,
       receivedAlert: init.receivedAlert ?? null,
       sentAlert: init.sentAlert ?? null,
-      // wpt100:identity — RTCErrorInit.httpRequestStatusCode (`long`,
+      // wpt100:identity: RTCErrorInit.httpRequestStatusCode (`long`,
       // W3C WebRTC Identity section 10).
       httpRequestStatusCode: init.httpRequestStatusCode === undefined
         ? null
@@ -3551,7 +3551,7 @@ function receiverSources(receiver, contributing) {
   }
 }
 
-// wpt100:hdrext — RTP header extension control (webrtc-extensions).
+// wpt100:hdrext: RTP header extension control (webrtc-extensions).
 const EXTENSION_DIRECTIONS = [
   "sendrecv",
   "sendonly",
@@ -3874,7 +3874,7 @@ class RTCRtpTransceiver {
     );
   }
 
-  // wpt100:hdrext — webrtc-extensions RTP header extension control.
+  // wpt100:hdrext: webrtc-extensions RTP header extension control.
   getHeaderExtensionsToNegotiate() {
     webidl.assertBranded(this, RTCRtpTransceiverPrototype);
     return copyHeaderExtensions(this[_state].headerExtensionsToNegotiate);
@@ -4528,7 +4528,7 @@ function convertIceServers(servers) {
         );
       }
     }
-    // wpt100:hdrext — webrtc-extensions RTCIceServer.credentialType and
+    // wpt100:hdrext: webrtc-extensions RTCIceServer.credentialType and
     // RTCOAuthCredential (set the configuration, step 11.6).
     const credentialType = server.credentialType === undefined
       ? "password"
@@ -4578,7 +4578,7 @@ function isTurnUrl(url) {
     StringPrototypeStartsWith(u, "turns:");
 }
 
-// wpt100:hdrext — the ICE servers the engine gets: not the OAuth ones (RFC
+// wpt100:hdrext: the ICE servers the engine gets: not the OAuth ones (RFC
 // 7635 needs an ACCESS-TOKEN attribute the engine's TURN client doesn't
 // send; they are kept in the configuration, unused).
 function engineIceServers(servers) {
@@ -4669,7 +4669,7 @@ function convertConfiguration(configuration, prefix) {
       "InvalidStateError",
     );
   }
-  // wpt100:hdrext — webrtc-extensions members.
+  // wpt100:hdrext: webrtc-extensions members.
   const rtpHeaderEncryptionPolicy = config.rtpHeaderEncryptionPolicy ===
       undefined
     ? "negotiate"
@@ -4693,7 +4693,7 @@ function convertConfiguration(configuration, prefix) {
       `${prefix}: '${targetLatency}' is not a valid value for 'targetLatency'`,
     );
   }
-  // wpt100:identity — RTCConfiguration.peerIdentity (W3C WebRTC Identity
+  // wpt100:identity: RTCConfiguration.peerIdentity (W3C WebRTC Identity
   // section 8.1): the target peer identity, a DOMString.
   const peerIdentity = config.peerIdentity === undefined
     ? null
@@ -4767,7 +4767,7 @@ class RTCPeerConnection extends EventTarget {
       ),
       network: config.network === null ? null : config.network[_rid],
     });
-    // wpt100:hdrext — rtpHeaderEncryptionPolicy, alwaysNegotiateDataChannels.
+    // wpt100:hdrext: rtpHeaderEncryptionPolicy, alwaysNegotiateDataChannels.
     op_webrtc_pc_set_negotiation_options(
       this[_rid],
       config.rtpHeaderEncryptionPolicy,
@@ -4954,7 +4954,7 @@ class RTCPeerConnection extends EventTarget {
         state.lastCreatedOffer = { sdp, generation: state.generation };
         return { type: "offer", sdp };
       });
-      // wpt100:identity — the a=identity assertion (06_identity.js).
+      // wpt100:identity: the a=identity assertion (06_identity.js).
       return identityHooks.withAssertion(this, created);
     });
   }
@@ -4980,7 +4980,7 @@ class RTCPeerConnection extends EventTarget {
         };
         return { type: "answer", sdp };
       });
-      // wpt100:identity — the a=identity assertion (06_identity.js).
+      // wpt100:identity: the a=identity assertion (06_identity.js).
       return identityHooks.withAssertion(this, created);
     });
   }
@@ -5048,7 +5048,7 @@ class RTCPeerConnection extends EventTarget {
         if (type !== "rollback" && typeof sdp === "string") {
           requireSdpSize(sdp);
         }
-        // wpt100:identity — the engine gets the description without the
+        // wpt100:identity: the engine gets the description without the
         // a=identity line createOffer / createAnswer added (06_identity.js).
         op_webrtc_pc_set_local_description(
           this[_rid],
@@ -5167,7 +5167,7 @@ class RTCPeerConnection extends EventTarget {
         setTransportStates(this);
         negotiationSettled(this);
       };
-      // wpt100:identity — a=identity validation (06_identity.js): before
+      // wpt100:identity: a=identity validation (06_identity.js): before
       // `apply` with a target peer identity, after it without.
       const applyRemote = identityHooks.withRemoteIdentity(
         this,
@@ -5471,7 +5471,7 @@ class RTCPeerConnection extends EventTarget {
         "InvalidModificationError",
       );
     }
-    // wpt100:hdrext — webrtc-extensions: set only at construction.
+    // wpt100:hdrext: webrtc-extensions: set only at construction.
     const policy = config.rtpHeaderEncryptionPolicy;
     const always = config.alwaysNegotiateDataChannels;
     if (
@@ -5516,7 +5516,7 @@ class RTCPeerConnection extends EventTarget {
         "InvalidModificationError",
       );
     }
-    // wpt100:identity — the target peer identity can't change (W3C WebRTC
+    // wpt100:identity: the target peer identity can't change (W3C WebRTC
     // 1.0's 2017 setConfiguration step; Firefox has it).
     if (
       config.peerIdentity !== null &&
@@ -6000,7 +6000,7 @@ function requireRtcpMux(sdp) {
   }
 }
 
-// wpt100:hdrext — RFC 8827 section 6.5 / RFC 8826 section 4.3.1: no SDES,
+// wpt100:hdrext: RFC 8827 section 6.5 / RFC 8826 section 4.3.1: no SDES,
 // DTLS-SRTP only; a description whose media has no DTLS fingerprint is
 // refused (RFC 9429 section 5.8) as InvalidAccessError.
 function requireFingerprint(sdp) {
@@ -7805,7 +7805,7 @@ const webrtcNs = ObjectFreeze({
   setLogLevel,
 });
 
-// wpt100:identity — WebRTC Identity (06_identity.js): the RTCPeerConnection
+// wpt100:identity: WebRTC Identity (06_identity.js): the RTCPeerConnection
 // members, RTCIdentityAssertion, MediaStreamTrack's isolation attributes and
 // the hooks createOffer / createAnswer / setRemoteDescription call.
 const identityHooks = core.loadExtScript("ext:deno_webrtc/06_identity.js")
