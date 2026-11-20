@@ -1149,11 +1149,18 @@ pub fn op_node_fs_read_sync(
   read_with_position(file, buf, position)
 }
 
-/// Async read for node:fs. Runs a blocking read on a spawned thread using
-/// the raw OS fd directly (no dup/clone). When the fd is closed via
 /// Async read for node:fs. Uses the File trait from FdTable for proper
-/// I/O through the file handle.
-#[op2]
+/// I/O through the file handle; the read runs on a blocking thread.
+///
+/// `deferred`, as its name says: the op is polled at once, but a result that
+/// is already there is delivered on a later event loop turn, never to the
+/// microtask checkpoint that started the read. Eagerly, a read the blocking
+/// thread finished before that first poll (the calling thread preempted
+/// after waking it, on a loaded machine) resolved in the same checkpoint,
+/// ahead of a `process.nextTick` queued before the read, as Node.js's reads,
+/// always completed through the loop, never do: `readFile` with a signal
+/// aborted on the next tick then completed instead of rejecting.
+#[op2(async(deferred))]
 #[smi]
 pub async fn op_node_fs_read_deferred(
   state: Rc<RefCell<OpState>>,
