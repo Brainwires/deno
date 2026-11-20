@@ -2459,7 +2459,13 @@ impl JsRuntime {
     // returned next-expiry state. Completed ops are resolved afterwards so
     // promise hooks that arm timers cannot be overwritten by an older timer
     // snapshot.
-    let timer_ready = Self::dispatch_user_timers(cx, scope, context_state)?;
+    let timer_ready = Self::dispatch_user_timers(
+      cx,
+      scope,
+      context_state,
+      modules,
+      dispatched_ops,
+    )?;
     did_work |= timer_ready;
     dispatched_ops |= Self::dispatch_event_loop_tick(cx, scope, context_state)?;
     // Microtask checkpoint after timer/op processing, but only when
@@ -3445,8 +3451,22 @@ impl JsRuntime {
     cx: &mut Context,
     scope: &mut v8::PinScope<'s, 'i>,
     context_state: &ContextState,
+    modules: &ModuleMap,
+    dispatched_ops: bool,
   ) -> Result<bool, Box<JsError>> {
     if context_state.user_timer.poll_ready(cx).is_pending() {
+      return Ok(false);
+    }
+    // denext: due timers run only while the loop is alive, as libuv runs an
+    // iteration's timers. When every pending timer is unref'd (the handle
+    // is) and nothing else keeps the loop running, they don't fire and the
+    // loop ends: Node.js's `setTimeout(f, 1).unref()` alone exits without
+    // calling f, even when f is already due once the main module has run (a
+    // slow or starved main module made it due before the first iteration).
+    if !context_state.user_timer.is_refed()
+      && !dispatched_ops
+      && !EventLoopPendingState::new(scope, context_state, modules).is_pending()
+    {
       return Ok(false);
     }
 

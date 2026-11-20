@@ -558,6 +558,26 @@ Deno.test({
   },
 });
 
+// denext: an unref'd timer that is already due once the main module has run
+// still doesn't fire when nothing else keeps the loop alive, as in Node.js
+// (libuv runs a loop's timers only while it is alive). A slow or starved
+// main module made the 1 ms timer of "unrefTimer" due before the first
+// iteration; this one waits it out on purpose.
+Deno.test({
+  name: "unrefTimer - an unref'd timer already due at the end of the main module",
+  permissions: { run: true, read: true },
+  fn: async () => {
+    const [statusCode, output] = await execCode(`
+      const timer = setTimeout(() => console.log("1"), 1);
+      Deno.unrefTimer(timer);
+      const end = Date.now() + 50;
+      while (Date.now() < end) {}
+    `);
+    assertEquals(statusCode, 0);
+    assertEquals(output, "");
+  },
+});
+
 Deno.test({
   name: "unrefTimer - mix ref and unref 1",
   permissions: { run: true, read: true },
