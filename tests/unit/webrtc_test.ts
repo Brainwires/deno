@@ -12,6 +12,17 @@ import {
   assertThrows,
 } from "./test_util.ts";
 
+// The payload of an RTP packet read with Deno.webrtc.readRtp (which yields whole packets): past the fixed header,
+// the CSRCs and, when the X bit is set, the header extension block (the runtime now adds the transport-wide
+// sequence number for congestion control, so a fixed 12-byte header is not an assumption a test can make).
+function rtpPayload(packet: Uint8Array): Uint8Array {
+  let offset = 12 + 4 * (packet[0] & 0x0f);
+  if (packet[0] & 0x10) {
+    offset += 4 + 4 * ((packet[offset + 2] << 8) | packet[offset + 3]);
+  }
+  return packet.subarray(offset);
+}
+
 function once<T extends Event = Event>(
   target: EventTarget,
   type: string,
@@ -887,7 +898,7 @@ Deno.test("webrtcRtpAndKeyFrameRequests", async () => {
   }, 20);
   try {
     const got = await packets;
-    assertEquals([...got[0].subarray(12)], [1, 2, 3, 4]);
+    assertEquals([...rtpPayload(got[0])], [1, 2, 3, 4]);
   } finally {
     clearInterval(interval);
   }
@@ -1424,8 +1435,8 @@ Deno.test("webrtcDtmf", async () => {
     const { value } = await reader.read();
     if ((value![1] & 0x7f) === pt) first = value;
   }
-  assertEquals(first[12], 1);
-  assertEquals(first[13] & 0x80, 0);
+  assertEquals(rtpPayload(first)[0], 1);
+  assertEquals(rtpPayload(first)[1] & 0x80, 0);
   await done;
   assertEquals(tones, ["1", "#", ""]);
   await reader.cancel();
@@ -2355,7 +2366,7 @@ Deno.test("webrtcLaterTransceiverWorksAfterEarlierRemoved", async () => {
   try {
     const got = await packets;
     assertEquals(got.length, 2);
-    assertEquals([...got[0].subarray(12)], [5, 6, 7, 8]);
+    assertEquals([...rtpPayload(got[0])], [5, 6, 7, 8]);
   } finally {
     clearInterval(interval);
   }
