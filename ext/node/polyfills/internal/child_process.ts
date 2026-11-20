@@ -316,6 +316,15 @@ class ChildProcess extends EventEmitter {
 
   disconnect;
 
+  /**
+   * Whether the IPC channel is open: false until a spawn with an `ipc`
+   * stdio sets the channel up (and again once it disconnects), as in Node.js,
+   * whose ChildProcess starts with it false. A spawn that fails before the
+   * channel exists (Linux reports a missing program at once) leaves it
+   * false, not undefined.
+   */
+  connected = false;
+
   #process;
   #windowsSignalFallback: string | null = null;
   #spawned = PromiseWithResolvers();

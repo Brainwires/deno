@@ -18966,7 +18966,8 @@ where the changes are discussed.
 
 476. **`fix`: what the denext.28 train's flake hunt found** (runtime, tests and
      CI; `ext/fs/30_fs.js`, `libs/core/runtime/jsruntime.rs`,
-     `ext/node/polyfills/fs.ts`, `ext/os/40_signals.js`,
+     `ext/node/polyfills/{fs,internal/child_process}.ts`,
+     `ext/os/40_signals.js`,
      `tests/unit/{timers_test,pty_test,signal_test}.ts`,
      `cli/sandbox/warn.rs`,
      `.github/workflows/denext_runtime.yml`). The hunt (item 459) on the
@@ -18993,6 +18994,11 @@ where the changes are discussed.
        (`multipleSignalListenerTest` hung 2 runs in 5). Node.js calls a
        listener for each signal received. Upstream's loop has the same
        once-per-wakeup shape.
+     - `node:child_process`: a ChildProcess starts with `connected` false,
+       as in Node.js; only the IPC channel's setup set it, so a spawn that
+       failed before the channel existed (a missing program or `cwd`) left it
+       undefined (item 465's test failed every run on Linux, and the same
+       spawns give undefined on macOS).
      - `node:fs` `watchFile`: the poll's stat is synchronous. An async stat
        is an op the watcher can't cancel, so `unwatchFile()` during a poll
        left it running past the stop, which the test sanitizer reported as a
