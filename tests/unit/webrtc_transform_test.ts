@@ -92,13 +92,16 @@ Deno.test("encodedStreamsAreCreatedOnce", async () => {
     // The streams are no transform, and leave no room for one.
     assertEquals(sender.transform, null);
     assertEquals(errorName(() => streamsOf(sender)), "InvalidStateError");
+    // One transform for both checks: refused by the sender, it has no owner
+    // and goes to the receiver, whose close() then closes its port.
+    const transform = new RTCRtpScriptTransform(worker);
     assertEquals(
-      errorName(() => sender.transform = new RTCRtpScriptTransform(worker)),
+      errorName(() => sender.transform = transform),
       "InvalidStateError",
     );
     sender.transform = null;
     // A receiver with a transform has no streams.
-    receiver.transform = new RTCRtpScriptTransform(worker);
+    receiver.transform = transform;
     assertEquals(errorName(() => streamsOf(receiver)), "InvalidStateError");
     // Only frames can be written.
     await assertRejects(
