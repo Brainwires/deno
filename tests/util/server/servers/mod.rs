@@ -1290,9 +1290,23 @@ console.log("imported", import.meta.url);
       let uri_path = req.uri().path();
       let mut file_path = testdata_path().to_path_buf();
       file_path.push(uri_path[1..].replace("%2f", "/"));
-      if let Ok(file) = tokio::fs::read(&file_path).await {
-        let file_resp = custom_headers(uri_path, file);
-        return Ok(file_resp);
+      match tokio::fs::read(&file_path).await {
+        Ok(file) => {
+          let file_resp = custom_headers(uri_path, file);
+          return Ok(file_resp);
+        }
+        // A file that is there but could not be read this time (out of
+        // file descriptors on a loaded machine, say) is a server error, not
+        // a 404: the CLI retries a 5xx, while a 404 makes the module
+        // "missing" and the test fails with a TS2307 that hides the cause.
+        Err(err) if file_path.is_file() => {
+          eprintln!("test_server: reading {}: {err}", file_path.display());
+          return Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(string_body(&format!("reading {uri_path}: {err}")))
+            .map_err(|e| e.into());
+        }
+        Err(_) => {}
       }
 
       if let Some(suffix) = uri_path.strip_prefix("/sleep/") {
