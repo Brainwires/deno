@@ -343,10 +343,11 @@ rstest = "0"
 # stream, `set_associable_with_remote_offer`, `a=inactive` pauses a
 # transceiver, the selected pair's candidates in the stats, an ICE restart
 # that keeps the previous pair until a new one is selected), released as
-# `0.21.1+brainwires.4` and pinned by that tag's commit. On the aws-lc-rs
-# crypto provider, the one Deno's rustls already uses. Pre-1.0 and not
-# externally audited.
-rtc = { git = "https://github.com/Brainwires/webrtc-rs-rtc", rev = "c16bfdef6f7e173a2fa05f1cbf1eef2999bd0c66", default-features = false, features = ["crypto-aws-lc-rs"] }
+# `0.21.1+brainwires.4`; then the hardening release `0.21.1+brainwires.5`
+# (DENEXT.md item 477), pinned by that tag's commit. On the aws-lc-rs crypto
+# provider, the one Deno's rustls already uses. Pre-1.0 and not externally
+# audited.
+rtc = { git = "https://github.com/Brainwires/webrtc-rs-rtc", rev = "9a8917ef6de4c62071c8f304987a228117f05e31", default-features = false, features = ["crypto-aws-lc-rs"] }
 rusqlite = { version = "0.41.1", features = ["unlock_notify", "bundled", "session", "modern_sqlite", "limits", "backup", "fallible_uint"] } # "modern_sqlite": need sqlite >= 3.49.0 for some db configs; "fallible_uint": ToSql for u64/usize (needed when crates like deno_cache are published/built standalone, not just feature-unified via denokv_sqlite)
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "std", "tls12", "aws_lc_rs"] }
 rustls-pemfile = "2"

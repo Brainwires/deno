@@ -19069,6 +19069,20 @@ where the changes are discussed.
        timer tests whole.
      - Node tests enabled: none.
 
+477. **`fix(ext/webrtc)`: WebRTC hardening** (runtime; `ext/webrtc/{peer.rs,
+     01_webrtc.js,tests.rs}`, `Cargo.toml`, `Cargo.lock`). webrtc-rs-rtc
+     `0.21.1+brainwires.5` (`9a8917ef`, from `0.21.1+brainwires.4`):
+     hardening across DTLS, SCTP and data channels, SRTP / SRTCP, SDP, ICE and
+     RTP (bounds on the state a peer can make the stack hold, stricter protocol
+     state handling); no public API change beyond additions (`cargo
+     semver-checks`: no semver update required). On the Deno side, a bound on
+     the wildcard socket's route cache and a 1 MiB cap on a session
+     description. Details follow in advisories.
+     - User-facing note: a session description over 1 MiB is refused.
+     - Tests: webrtc-rs-rtc's workspace with `--all-features` (2330 pass);
+       `ext/webrtc`'s unit tests.
+     - Node tests enabled: none; `node:` has no WebRTC API.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -19079,7 +19093,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-476) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-477) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
