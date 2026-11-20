@@ -438,8 +438,21 @@ pub fn confined_at_startup() -> bool {
 
 /// Whether the kernel reports this process confined by a sandbox it didn't
 /// apply itself (a child of a confined process).
+///
+/// Linux: this runtime's sandbox, told by its marker
+/// (`deno_sandbox::inherit::kernel_reports_marked`). No-new-privileges and a
+/// seccomp filter alone are any container's (Docker's
+/// `--security-opt no-new-privileges` with its default seccomp profile,
+/// Kubernetes' `allowPrivilegeEscalation: false`), and Linux stacks another
+/// domain under them, so they must not turn `auto` or the harnesses' forced
+/// enforce off. macOS: any Seatbelt sandbox, as macOS can't stack a second
+/// profile under one.
 pub fn confined_by_a_parent() -> bool {
-  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[cfg(target_os = "linux")]
+  {
+    !confined_at_startup() && deno_sandbox::inherit::kernel_reports_marked()
+  }
+  #[cfg(target_os = "macos")]
   {
     !confined_at_startup() && kernel_reports_confined()
   }
