@@ -1373,7 +1373,8 @@ type Transferable =
   | ArrayBuffer
   | ReadableStream
   | WritableStream
-  | TransformStream;
+  | TransformStream
+  | RTCDataChannel;
 
 /**
  * Options that control structured serialization operations such as
