@@ -468,7 +468,6 @@
   "RTCRtpSender-getParameters.html": false,
   "RTCRtpSender-getStats.https.html": false,
   "RTCRtpSender-replaceTrack.https.html": false,
-  "RTCRtpSender-setParameters-keyFrame.html": false,
   "RTCRtpSender-setParameters.html?interop-2026": true,
   "RTCRtpSender-setParameters.html?rest": {
     "expectedFailures": [
