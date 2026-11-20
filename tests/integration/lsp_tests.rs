@@ -4089,7 +4089,11 @@ fn lsp_large_doc_changes() {
   );
   client.shutdown();
 
-  assert!(client.duration().as_millis() <= 15000);
+  // A guard against quadratic change handling, which takes minutes. A debug
+  // build on a loaded runner needs well over 15 s for the whole session
+  // (the server start included), so 15 s failed without a regression.
+  let elapsed = client.duration().as_millis();
+  assert!(elapsed <= 60_000, "large document changes took {elapsed} ms");
 }
 
 #[test(timeout = 300)]
