@@ -10,11 +10,13 @@ const worker = new Worker(
   { type: "module" },
 );
 
-setTimeout(() => {
+// Close the parent once the child has started (a fixed delay raced a slow child
+// start on a busy machine).
+worker.onmessage = () => {
   console.log("About to close");
   worker.postMessage({});
 
   // Keep the process running for another two seconds, to make sure there's no
   // output from the child worker.
   setTimeout(() => {}, 2000);
-}, 1000);
+};

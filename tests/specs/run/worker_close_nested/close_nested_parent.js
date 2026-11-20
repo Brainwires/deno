@@ -2,10 +2,12 @@
 
 console.log("Starting the parent worker");
 
-new Worker(
+const child = new Worker(
   import.meta.resolve("./close_nested_child.js"),
   { type: "module" },
 );
+// Tell the main thread once the child is running.
+child.onmessage = () => self.postMessage("child started");
 
 self.addEventListener("message", () => {
   console.log("Closing");
