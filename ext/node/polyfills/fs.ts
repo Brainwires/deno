@@ -4041,18 +4041,20 @@ function symlinkSync(
 
 // -- watch --
 
-const statPromisified = promisify(stat) as {
-  (filename: string, options: { bigint: false }): Promise<Stats>;
-  (filename: string, options: { bigint: true }): Promise<BigIntStats>;
-};
-const statAsync = async (
+// denext: the poll's stat is synchronous. An async one is an op the watcher
+// can't cancel, so stop() (unwatchFile) during a poll left it running past
+// the stop: a pending op the test sanitizer reports as a leak, and work a
+// stopped watcher still did. With the stat taken at once, the only awaited
+// step is the interval sleep, which stop() aborts. (Node's libuv stats on
+// its thread pool; this costs one stat syscall on the main thread a poll.)
+const statForPoll = (
   filename: string,
   bigint: boolean,
-): Promise<Stats | BigIntStats> => {
+): Stats | BigIntStats => {
   try {
     return bigint
-      ? await statPromisified(filename, { bigint: true })
-      : await statPromisified(filename, { bigint: false });
+      ? statSync(filename, { bigint: true })
+      : statSync(filename, { bigint: false });
   } catch {
     return bigint ? emptyBigIntStats : emptyStats;
   }
@@ -4690,7 +4692,11 @@ class StatWatcher extends EventEmitter {
 
     const bigint = this.#bigint;
     (async () => {
-      let prev = await statAsync(filename, bigint);
+      // after watchFile has added its listener (it does once start returns),
+      // as an asynchronous first stat was
+      await PromiseResolve();
+      if (this.#abortController.signal.aborted) return;
+      let prev = statForPoll(filename, bigint);
 
       // libuv emits an initial "change" only when the first stat fails.
       if (prev === emptyStats || prev === emptyBigIntStats) {
@@ -4700,7 +4706,7 @@ class StatWatcher extends EventEmitter {
       try {
         while (true) {
           await this.#sleep(interval);
-          const curr = await statAsync(filename, bigint);
+          const curr = statForPoll(filename, bigint);
           if (statsChanged(prev, curr)) {
             this.#emitChange(curr, prev);
             prev = curr;

@@ -18964,6 +18964,55 @@ where the changes are discussed.
        suites of `denext tests`.
      - Node tests enabled: none; no Node API changes.
 
+476. **`fix`: what the denext.28 train's flake hunt found** (runtime, tests and
+     CI; `ext/fs/30_fs.js`, `libs/core/runtime/jsruntime.rs`,
+     `ext/node/polyfills/fs.ts`, `tests/unit/{timers_test,pty_test}.ts`,
+     `cli/sandbox/warn.rs`,
+     `.github/workflows/denext_runtime.yml`). The hunt (item 459) on the
+     train's candidate, Linux, at one CPU and below:
+     - `Deno.readDir`: a `next()` while another of the same iterator is
+       pending rejects with `Busy` at once. The only check was the op's
+       `try_lock` on the directory stream, which sees an overlap only while
+       the first call holds it across an await; a call served from tokio's
+       buffered batch, a first call done before the others were polled, or a
+       directory listed whole under a scoped grant (item 467) let every call
+       through, and upstream's `readDirConcurrentNextRejectsWithBusy` failed
+       2 runs in 5. Upstream has the same race.
+     - Timers: a due timer runs only while the event loop is alive, as libuv
+       runs a loop's timers. When every pending timer is unref'd and nothing
+       else keeps the loop running, they don't fire and the process ends,
+       as in Node.js; before, an unref'd timer that was already due when the
+       main module finished (a slow or starved main module) fired once
+       (`unrefTimer`, 1 run in 5). Upstream's event loop has the same order.
+     - `node:fs` `watchFile`: the poll's stat is synchronous. An async stat
+       is an op the watcher can't cancel, so `unwatchFile()` during a poll
+       left it running past the stop, which the test sanitizer reported as a
+       leak ("watchFile honors bigint option", 1 run in 5); the only awaited
+       step now is the interval sleep, which `stop()` aborts. The first stat
+       still runs after `watchFile` has added its listener, so the initial
+       change for a missing file arrives as in Node.js. Upstream has the
+       same code.
+     - Tests whose premise the train changed: warn mode's fatal-gap test
+       (a host-scoped grant under enforce is the broker's since item 468,
+       so it takes a rule enforce still refuses), and item 462's foreground
+       test (its grant names `env: ["PATH"]`, which it reads, and the shell's
+       `argv[0]` is the path the runtime resolved, as `Deno.Command` execs).
+     - CI: the runtime build seeds the prebuilt V8 after the Rust cache
+       restores; on a partial key match the cache's pre-clean deleted the
+       seeded `gn_out` and a cached build failed to link `rusty_v8`.
+     - User-facing note: `Deno.readDir`'s iterator rejects an overlapping
+       `next()` every time, an unref'd timer no longer fires when nothing
+       keeps the process alive, and a stopped `watchFile` leaves no work
+       behind.
+     - Tests: `readDirConcurrentNextRejectsWithBusy`, the `unrefTimer` tests
+       and the `watchFile` tests 30 times plain and 30 under `taskpolicy -b`
+       on macOS; a new
+       `unrefTimer` test whose main module outlasts its timer;
+       `tests/unit/{timers_test,pty_test,read_dir_test}.ts`,
+       `tests/unit_node/{timers_test,_fs/_fs_watch_test}.ts` and `deno_core`'s
+       timer tests whole.
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -18974,7 +19023,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-475) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-476) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
