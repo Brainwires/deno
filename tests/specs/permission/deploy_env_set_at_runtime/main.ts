@@ -8,11 +8,13 @@
 
 // Anything that connects here is a bypass: the child has no net access.
 let connections = 0;
+let onConnection: (() => void) | undefined;
 const listener = Deno.listen({ hostname: "127.0.0.1", port: 0 });
 const port = listener.addr.port;
 const accepting = (async () => {
   for await (const conn of listener) {
     connections++;
+    onConnection?.();
     conn.close();
   }
 })();
@@ -50,13 +52,46 @@ function expectNoConnection(name: string, seen: number) {
 }
 
 // Control: the variable set when the process starts is still honored.
-const atStartup = await runChild(
-  "DENO_UNSTABLE_CRON_SOCK",
-  `console.log("startup child done");`,
-  { DENO_UNSTABLE_CRON_SOCK: `tcp:127.0.0.1:${port}` },
-);
+//
+// The cron socket is dialed from the child's event loop, so a child that
+// exits at once may never dial it. This one waits on its stdin, which stays
+// open until the connection has arrived here (or a generous deadline for a
+// regression to report itself has passed).
+async function runStartupChild(): Promise<boolean> {
+  const script = await Deno.makeTempFile({ suffix: ".ts" });
+  await Deno.writeTextFile(
+    script,
+    `await Deno.stdin.readable.pipeTo(new WritableStream());
+console.log("startup child done");`,
+  );
+  const connected = new Promise<boolean>((resolve) => {
+    onConnection = () => resolve(true);
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), 60_000);
+  });
+  const child = new Deno.Command(Deno.execPath(), {
+    args: ["run", "--allow-env", "--unstable-cron", script],
+    env: { DENO_UNSTABLE_CRON_SOCK: `tcp:127.0.0.1:${port}` },
+    stdin: "piped",
+    stdout: "piped",
+    stderr: "null",
+  }).spawn();
+  const seen = await Promise.race([connected, deadline]);
+  clearTimeout(timer);
+  onConnection = undefined;
+  await child.stdin.close();
+  const { stdout } = await child.output();
+  await Deno.stdout.write(stdout);
+  await Deno.remove(script);
+  connections = 0;
+  return seen;
+}
+
+const atStartup = await runStartupChild();
 console.log(
-  atStartup > 0
+  atStartup
     ? "PASS: DENO_UNSTABLE_CRON_SOCK set at startup is used"
     : "FAIL: DENO_UNSTABLE_CRON_SOCK set at startup was not used",
 );
