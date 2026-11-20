@@ -1134,16 +1134,28 @@ impl<
       match desc {
         UnaryPermissionDesc::Granted(d) => push(&mut roots, d.as_ref()),
         UnaryPermissionDesc::FlagDenied(d)
-        | UnaryPermissionDesc::FlagIgnored(d)
-        | UnaryPermissionDesc::PromptDenied(d) => push(&mut denies, d.as_ref()),
+        | UnaryPermissionDesc::FlagIgnored(d) => push(&mut denies, d.as_ref()),
+        // A prompt denial refuses that path and the paths above it, never
+        // the ones beneath (`stronger_than_deny`, as `query` matches it), so
+        // it is no deny of a subtree here: an access beneath it the grant
+        // allows must open. (Node's `cp` asks for the folders above a
+        // `--allow-read=.` grant and records the refusals; every later open
+        // in the granted folder was refused.) The path and its ancestors
+        // are refused by the permission check before anything is opened.
+        UnaryPermissionDesc::PromptDenied(_) => {}
       }
     }
-    let roots = if self.flag_denied_global
-      || self.flag_ignored_global
-      || self.prompt_denied_global
+    // As `query_desc` decides: a scope that names the path wins; only a
+    // path no scope names falls to the global ignore / deny (and a global
+    // prompt denial covers no path at all). So the granted roots stay open
+    // under `"ignore": true` or `--deny-read` with no list (they made the
+    // scope allow nothing: `"read": { "allow": [...], "ignore": true }` in
+    // deno.json couldn't open its own allow list), and the unscoped grant
+    // reaches everywhere only with neither.
+    let roots = if self.granted_global
+      && !self.flag_denied_global
+      && !self.flag_ignored_global
     {
-      Some(Vec::new())
-    } else if self.granted_global {
       None
     } else {
       Some(roots)
@@ -9448,6 +9460,91 @@ mod tests {
         is_ok
       );
     }
+  }
+
+  /// denext: a global ignore or deny (`"ignore": true`, `--deny-read` with
+  /// no list) refuses only what no scope names, as the query decides: the
+  /// granted roots still open, the rest doesn't.
+  #[test]
+  #[cfg(unix)]
+  fn a_global_ignore_or_deny_leaves_the_granted_roots_open() {
+    set_prompter(Box::new(TestPrompter));
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("granted")).unwrap();
+    std::fs::create_dir_all(root.join("other")).unwrap();
+    std::fs::write(root.join("granted/f"), "f").unwrap();
+    std::fs::write(root.join("other/o"), "o").unwrap();
+    let opts = checked_open::CheckedOpenOptions::new().read(true);
+    for (ignore, deny) in [(Some(vec![]), None), (None, Some(vec![]))] {
+      let parser = TestPermissionDescriptorParser;
+      let perms = Permissions::from_options(
+        &parser,
+        &PermissionsOptions {
+          allow_read: Some(vec![root.join("granted").display().to_string()]),
+          ignore_read: ignore,
+          deny_read: deny,
+          ..Default::default()
+        },
+      )
+      .unwrap();
+      let perms = PermissionsContainer::new(Arc::new(parser), perms);
+      let file = root.join("granted/f");
+      let checked = perms
+        .check_open(Cow::Borrowed(&file), OpenAccessKind::Read, Some("api"))
+        .unwrap();
+      let scope = checked.open_scope().expect("a scoped read");
+      assert!(checked_open::open_checked(scope, &file, &opts).is_ok());
+      assert!(
+        checked_open::open_checked(scope, &root.join("other/o"), &opts)
+          .is_err()
+      );
+    }
+  }
+
+  /// denext: a prompt denial of a folder above a grant (node:fs.cp asks for
+  /// the folders above `--allow-read=.`) refuses that folder, as the query
+  /// does, but not the granted paths beneath it: their opens still succeed.
+  #[test]
+  #[cfg(unix)]
+  fn a_prompt_denied_ancestor_leaves_the_grant_beneath_it_open() {
+    set_prompter(Box::new(TestPrompter));
+    let prompt_value = PERMISSION_PROMPT_STUB_VALUE_SETTER.lock();
+    prompt_value.set(false);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("granted")).unwrap();
+    std::fs::write(root.join("granted/f"), "f").unwrap();
+    let parser = TestPermissionDescriptorParser;
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_read: Some(vec![root.join("granted").display().to_string()]),
+        prompt: true,
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    let perms = PermissionsContainer::new(Arc::new(parser), perms);
+    // the folder above the grant: asked, refused (the test prompter denies)
+    assert!(
+      perms
+        .check_open(Cow::Borrowed(&root), OpenAccessKind::Read, Some("api"))
+        .is_err()
+    );
+    let file = root.join("granted/f");
+    let checked = perms
+      .check_open(Cow::Borrowed(&file), OpenAccessKind::Read, Some("api"))
+      .unwrap();
+    let scope = checked.open_scope().expect("a scoped read");
+    let opts = checked_open::CheckedOpenOptions::new().read(true);
+    assert!(checked_open::open_checked(scope, &file, &opts).is_ok());
+    // the refused folder itself stays refused
+    assert!(
+      perms
+        .check_open(Cow::Borrowed(&root), OpenAccessKind::Read, Some("api"))
+        .is_err()
+    );
   }
 
   /// denext: a scoped access hands its operation the scope to open in; an
