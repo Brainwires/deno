@@ -94,10 +94,21 @@ Deno.test("napi tsfn get context", function () {
 });
 
 Deno.test("napi cancel async work", async function () {
-  const result = await new Promise((resolve) => {
-    asyncTask.test_cancel_async_work((cancelled) => {
-      resolve(cancelled);
+  // A cancel only succeeds while the work is still queued; the thread pool
+  // can start it first, and then the cancel must report failure and the work
+  // must complete normally. Every attempt must be consistent, and a cancel
+  // queued right behind the queue call must win within a few attempts.
+  let cancelledOnce = false;
+  for (let attempt = 0; attempt < 100 && !cancelledOnce; attempt++) {
+    let accepted;
+    const [cancelled, executed] = await new Promise((resolve) => {
+      accepted = asyncTask.test_cancel_async_work((cancelled, executed) => {
+        resolve([cancelled, executed]);
+      });
     });
-  });
-  assertEquals(result, true);
+    assertEquals(cancelled, accepted);
+    assertEquals(executed, !accepted);
+    cancelledOnce = accepted;
+  }
+  assertEquals(cancelledOnce, true);
 });

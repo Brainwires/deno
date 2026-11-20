@@ -897,12 +897,22 @@ fn napi_cancel_async_work(env: *mut Env, work: napi_async_work) -> napi_status {
 
   let work = unsafe { &*(work as *mut AsyncWork) };
 
-  let _ = work.state.compare_exchange(
-    AsyncWork::QUEUED,
-    AsyncWork::IDLE,
-    Ordering::SeqCst,
-    Ordering::Relaxed,
-  );
+  // As in Node (`uv_cancel`), only work that has not started can be
+  // cancelled. Work that is already running, or is not queued at all, can't
+  // be, and the caller is told so: its `complete` then runs with the status
+  // of the execution, not `napi_cancelled`.
+  if work
+    .state
+    .compare_exchange(
+      AsyncWork::QUEUED,
+      AsyncWork::IDLE,
+      Ordering::SeqCst,
+      Ordering::Relaxed,
+    )
+    .is_err()
+  {
+    return napi_set_last_error(env, napi_generic_failure);
+  }
 
   napi_clear_last_error(env)
 }

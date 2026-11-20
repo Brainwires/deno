@@ -767,17 +767,24 @@ extern "C" fn test_tsfn_get_context(
   result
 }
 
+// napi_cancel_async_work can only cancel work that has not started yet (as in
+// Node, where it is `uv_cancel`). The work runs on a thread pool that may pick
+// it up between the queue and the cancel, so the cancel can lose that race;
+// it then reports a failure and `complete` gets the execution's status. The
+// JS side checks that the two always agree and retries until a cancel wins.
 struct CancelBaton {
   func: napi_ref,
   task: napi_async_work,
+  executed: std::sync::atomic::AtomicBool,
 }
 
 unsafe extern "C" fn cancel_execute(_env: napi_env, data: *mut c_void) {
   unsafe {
     let baton: &CancelBaton = &*(data as *const CancelBaton);
     assert!(!baton.func.is_null());
-    // Sleep so the cancel has a chance to arrive before execute finishes.
-    std::thread::sleep(std::time::Duration::from_secs(10));
+    baton
+      .executed
+      .store(true, std::sync::atomic::Ordering::SeqCst);
   }
 }
 
@@ -789,6 +796,8 @@ unsafe extern "C" fn cancel_complete(
   unsafe {
     let baton: Box<CancelBaton> = Box::from_raw(data as *mut CancelBaton);
     let cancelled = status == napi_sys::Status::napi_cancelled;
+    assert!(cancelled || status == napi_ok);
+    let executed = baton.executed.load(std::sync::atomic::Ordering::SeqCst);
 
     let mut global: napi_value = ptr::null_mut();
     assert_napi_ok!(napi_get_global(env, &mut global));
@@ -796,16 +805,17 @@ unsafe extern "C" fn cancel_complete(
     let mut callback: napi_value = ptr::null_mut();
     assert_napi_ok!(napi_get_reference_value(env, baton.func, &mut callback));
 
-    let mut cancelled_value: napi_value = ptr::null_mut();
-    assert_napi_ok!(napi_get_boolean(env, cancelled, &mut cancelled_value));
+    let mut args: [napi_value; 2] = [ptr::null_mut(); 2];
+    assert_napi_ok!(napi_get_boolean(env, cancelled, &mut args[0]));
+    assert_napi_ok!(napi_get_boolean(env, executed, &mut args[1]));
 
     let mut _result: napi_value = ptr::null_mut();
     assert_napi_ok!(napi_call_function(
       env,
       global,
       callback,
-      1,
-      &cancelled_value,
+      2,
+      args.as_ptr(),
       &mut _result
     ));
     assert_napi_ok!(napi_delete_reference(env, baton.func));
@@ -813,6 +823,8 @@ unsafe extern "C" fn cancel_complete(
   }
 }
 
+// Queues the work, cancels it at once and returns whether the cancel was
+// accepted. The callback gets (cancelled, executed) once `complete` runs.
 extern "C" fn test_cancel_async_work(
   env: napi_env,
   info: napi_callback_info,
@@ -838,6 +850,7 @@ extern "C" fn test_cancel_async_work(
   let baton = Box::new(CancelBaton {
     func,
     task: ptr::null_mut(),
+    executed: std::sync::atomic::AtomicBool::new(false),
   });
   let baton_ptr = Box::into_raw(baton) as *mut c_void;
 
@@ -854,9 +867,15 @@ extern "C" fn test_cancel_async_work(
   let baton = unsafe { &mut *(baton_ptr as *mut CancelBaton) };
   baton.task = async_work;
   assert_napi_ok!(napi_queue_async_work(env, async_work));
-  assert_napi_ok!(napi_cancel_async_work(env, async_work));
+  let status = unsafe { napi_cancel_async_work(env, async_work) };
+  assert!(
+    status == napi_ok || status == napi_sys::Status::napi_generic_failure,
+    "unexpected napi_cancel_async_work status {status}"
+  );
 
-  ptr::null_mut()
+  let mut accepted: napi_value = ptr::null_mut();
+  assert_napi_ok!(napi_get_boolean(env, status == napi_ok, &mut accepted));
+  accepted
 }
 
 pub fn init(env: napi_env, exports: napi_value) {
