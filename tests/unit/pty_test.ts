@@ -705,19 +705,39 @@ async function foregroundUntil(
 }
 
 Deno.test(
-  { permissions: { run: true, read: true, write: true }, ignore: isWindows },
+  {
+    // env: the test hands its own PATH to the shell (the runtime reads none)
+    permissions: { run: true, read: true, write: true, env: ["PATH"] },
+    ignore: isWindows,
+  },
   async function ptyForegroundFollowsTheShellsJobs() {
     const dir = await Deno.realPath(await Deno.makeTempDir());
     const other = await Deno.realPath(await Deno.makeTempDir());
     try {
       // an interactive shell has job control: each command runs in a process
       // group of its own, which the shell makes the terminal's foreground
+      const path = Deno.env.get("PATH") ?? "/usr/bin:/bin";
+      // the child's argv[0] is the program as the runtime resolved it, as
+      // Deno.Command execs it: the first directory on PATH with `sh`
+      let resolvedSh: string | undefined;
+      for (const entry of path.split(":")) {
+        if (entry === "") continue;
+        try {
+          if ((await Deno.stat(`${entry}/sh`)).isFile) {
+            resolvedSh = `${entry}/sh`;
+            break;
+          }
+        } catch {
+          // not there
+        }
+      }
+      assert(resolvedSh !== undefined, `no sh on ${path}`);
       const pty = Deno.openPty({
         cmd: "sh",
         args: ["-i"],
         cwd: dir,
         clearEnv: true,
-        env: { PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin", PS1: "$ " },
+        env: { PATH: path, PS1: "$ " },
         cols: 80,
         rows: 24,
       });
@@ -739,7 +759,7 @@ Deno.test(
       assertEquals(atPrompt.pgid, pty.pid);
       // the name is the program's own: macOS's /bin/sh runs another shell
       assertMatch(atPrompt.name, SH_NAME);
-      assertEquals(atPrompt.argv, ["sh", "-i"]);
+      assertEquals(atPrompt.argv, [resolvedSh, "-i"]);
       assertEquals(atPrompt.cwd, dir);
 
       // the device is the one `tty` names inside the terminal
