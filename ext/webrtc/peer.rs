@@ -2110,6 +2110,7 @@ impl Core {
               .push_back(JsEvent::TrackUnmute { transceiver: key });
           }
           self.media.saw_rtp(key, &packet.header);
+          self.count_received_frame(key, &packet);
           // wpt100:mediasink
           let sink = self.sink_packet(key, &packet, now);
           if let Some((width, height)) = sink.resize {
@@ -3134,7 +3135,9 @@ impl Peer {
         .unwrap_or_default()
         .as_secs_f64()
         * 1000.0;
-      let report = core.pc.get_stats(Instant::now(), selector);
+      let now = Instant::now();
+      core.refresh_media_stats(now);
+      let report = core.pc.get_stats(now, selector);
       use RTCStatsReportEntry as E;
       Ok(
         report

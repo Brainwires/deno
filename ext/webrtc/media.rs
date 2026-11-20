@@ -683,10 +683,136 @@ pub struct MediaState {
   pub sources: HashMap<u32, Vec<Source>>,
   /// Where each sender fed by a fake capture device is in its clip.
   pub fake: HashMap<u32, crate::fake_media::Cursor>,
-  /// The video frames each outbound RTP stream (by SSRC) sent: its
-  /// `framesSent` (webrtc-stats), which the engine counts only when told.
-  pub frames_sent: HashMap<u32, u32>,
+  /// The encoded video frames each outbound RTP stream (by SSRC) took and
+  /// sent, which the engine counts only when told (webrtc-stats encoder
+  /// members: the encoder is upstream of the sender here).
+  pub sent_video: HashMap<u32, SentVideo>,
+  /// The complete video frames each inbound RTP stream (by SSRC) brought.
+  pub received_video: HashMap<u32, ReceivedVideo>,
 }
+
+/// What an outbound video stream's frames were, as they reached its sender:
+/// encoded frames, from a fake capture device's clip, an
+/// `EncodedMediaTrack` or an encoded transform. Only what the frames
+/// themselves show is counted (their number, key frames from the bitstream,
+/// their coded size, their byte size); the encoder's own measures (QP,
+/// encode time, quality limitation) are not known here and stay absent.
+#[derive(Debug, Default)]
+pub struct SentVideo {
+  pub frames_encoded: u32,
+  pub key_frames_encoded: u32,
+  pub frames_sent: u32,
+  pub huge_frames_sent: u32,
+  /// Bytes of the frames sent, for their average size.
+  pub bytes_sent: u64,
+  /// The coded size of the last frame that named one.
+  pub size: Option<(u32, u32)>,
+  /// When each frame of the last second reached the sender.
+  pub recent: std::collections::VecDeque<Instant>,
+}
+
+/// webrtc-stats `hugeFramesSent`: a frame at least 2.5 times the average
+/// size of the frames sent before it.
+const HUGE_FRAME_FACTOR: f64 = 2.5;
+
+impl SentVideo {
+  /// Frames that reached the sender in the second up to `now`
+  /// (`framesPerSecond`).
+  pub fn frames_per_second(&mut self, now: Instant) -> f64 {
+    while self.recent.front().is_some_and(|t| {
+      now.saturating_duration_since(*t) > std::time::Duration::from_secs(1)
+    }) {
+      self.recent.pop_front();
+    }
+    self.recent.len() as f64
+  }
+
+  /// One encoded frame reached the sender at `now`; `sent` when its packets
+  /// went out.
+  fn frame(&mut self, mime_type: &str, data: &[u8], sent: bool, now: Instant) {
+    self.frames_encoded = self.frames_encoded.saturating_add(1);
+    if is_key_frame(mime_type, data) {
+      self.key_frames_encoded = self.key_frames_encoded.saturating_add(1);
+    }
+    if let Some(size) = crate::media_sink::frame_coded_size(mime_type, data) {
+      self.size = Some(size);
+    }
+    self.recent.push_back(now);
+    self.frames_per_second(now);
+    if !sent {
+      return;
+    }
+    if self.frames_sent > 0 {
+      let average = self.bytes_sent as f64 / self.frames_sent as f64;
+      if data.len() as f64 >= HUGE_FRAME_FACTOR * average {
+        self.huge_frames_sent = self.huge_frames_sent.saturating_add(1);
+      }
+    }
+    self.frames_sent = self.frames_sent.saturating_add(1);
+    self.bytes_sent = self.bytes_sent.saturating_add(data.len() as u64);
+  }
+
+  fn update(&mut self, now: Instant) -> rtc::statistics::EncoderStatsUpdate {
+    rtc::statistics::EncoderStatsUpdate {
+      frames_encoded: Some(self.frames_encoded),
+      key_frames_encoded: Some(self.key_frames_encoded),
+      frames_sent: Some(self.frames_sent),
+      huge_frames_sent: Some(self.huge_frames_sent),
+      frame_width: self.size.map(|(w, _)| w),
+      frame_height: self.size.map(|(_, h)| h),
+      frames_per_second: Some(self.frames_per_second(now)),
+      ..Default::default()
+    }
+  }
+}
+
+/// The frames of an inbound video stream as its packets arrive: a frame is
+/// complete (webrtc-stats `framesReceived`) when its packets, from the one
+/// after the previous frame's last (RTP marker) packet through its own
+/// marker packet, all arrived in sequence. There is no jitter buffer, so a
+/// frame with a packet missing or out of order is not counted, as the frame
+/// assemblers (`encoded_frames.rs`) drop it; the first frame, whose start
+/// can't be told, is not counted either.
+#[derive(Debug, Default)]
+pub struct ReceivedVideo {
+  pub frames_received: u32,
+  /// The RTP timestamp of the frame in the making.
+  timestamp: Option<u32>,
+  /// The sequence number the next packet should have.
+  next: Option<u16>,
+  /// Whether the frame in the making lost a packet (or its start).
+  broken: bool,
+  /// Whether the last packet ended a frame.
+  ended: bool,
+}
+
+impl ReceivedVideo {
+  /// A received packet; returns whether it completed a frame.
+  pub fn packet(&mut self, header: &rtc::rtp::Header) -> bool {
+    let in_sequence = self.next == Some(header.sequence_number);
+    if self.timestamp != Some(header.timestamp) {
+      // A new frame starts whole only right after a frame's last packet.
+      self.timestamp = Some(header.timestamp);
+      self.broken = !(self.ended && in_sequence);
+    } else if !in_sequence {
+      self.broken = true;
+    }
+    self.next = Some(header.sequence_number.wrapping_add(1));
+    self.ended = header.marker;
+    if !header.marker {
+      return false;
+    }
+    self.timestamp = None;
+    if self.broken {
+      return false;
+    }
+    self.frames_received = self.frames_received.saturating_add(1);
+    true
+  }
+}
+
+/// At most this many inbound video streams are followed per connection.
+const MAX_RECEIVED_VIDEO_STREAMS: usize = 64;
 
 /// A synchronization or contributing source a receiver heard from.
 #[derive(Clone, Debug)]
@@ -739,6 +865,55 @@ impl MediaState {
       upsert(*csrc, true);
     }
     list.retain(|s| now - s.timestamp <= SOURCE_LIFETIME_MS);
+  }
+}
+
+impl Core {
+  /// A received RTP packet of a video receiver, for its stream's
+  /// `framesReceived` (padding-only packets carry no frame).
+  pub(crate) fn count_received_frame(
+    &mut self,
+    key: u32,
+    packet: &rtc::rtp::Packet,
+  ) {
+    if self.media.kinds.get(&key) != Some(&RtpCodecKind::Video)
+      || packet.payload.is_empty()
+    {
+      return;
+    }
+    let ssrc = packet.header.ssrc;
+    let streams = &mut self.media.received_video;
+    if !streams.contains_key(&ssrc)
+      && streams.len() >= MAX_RECEIVED_VIDEO_STREAMS
+    {
+      return;
+    }
+    let video = streams.entry(ssrc).or_default();
+    if video.packet(&packet.header) {
+      let frames_received = video.frames_received;
+      self.pc.update_decoder_stats(
+        ssrc,
+        rtc::statistics::DecoderStatsUpdate {
+          frames_received: Some(frames_received),
+          ..Default::default()
+        },
+      );
+    }
+  }
+
+  /// Brings the members measured over a window (`framesPerSecond`) up to
+  /// `now` before a report.
+  pub(crate) fn refresh_media_stats(&mut self, now: Instant) {
+    for (ssrc, video) in &mut self.media.sent_video {
+      let frames_per_second = video.frames_per_second(now);
+      self.pc.update_encoder_stats(
+        *ssrc,
+        rtc::statistics::EncoderStatsUpdate {
+          frames_per_second: Some(frames_per_second),
+          ..Default::default()
+        },
+      );
+    }
   }
 }
 
@@ -1527,18 +1702,13 @@ impl Core {
     for packet in packets {
       sent |= sender.write_rtp(now, packet).is_ok();
     }
-    // A video frame that went out counts in its stream's `framesSent`.
-    if sent && mime_type.to_ascii_lowercase().starts_with("video/") {
-      let count = self.media.frames_sent.entry(ssrc).or_insert(0);
-      *count = count.saturating_add(1);
-      let frames_sent = *count;
-      self.pc.update_encoder_stats(
-        ssrc,
-        rtc::statistics::EncoderStatsUpdate {
-          frames_sent: Some(frames_sent),
-          ..Default::default()
-        },
-      );
+    // A video frame that reached the sender counts in its stream's encoder
+    // stats, and in `framesSent` when it went out.
+    if mime_type.to_ascii_lowercase().starts_with("video/") {
+      let video = self.media.sent_video.entry(ssrc).or_default();
+      video.frame(&mime_type, data, sent, now);
+      let update = video.update(now);
+      self.pc.update_encoder_stats(ssrc, update);
     }
     Ok(sent)
   }
