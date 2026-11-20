@@ -255,6 +255,13 @@ function readDir(path) {
       let rid;
       let ridPromise;
       let finished = false;
+      // denext: a next() while another is pending rejects with Busy, always.
+      // The op's own check (a try_lock on the directory stream) only sees an
+      // overlap while the first call is inside the engine: a call served
+      // from tokio's buffered batch, a first call that completed before the
+      // others were polled (a starved CPU), or a directory listed whole
+      // under a scoped grant held no lock long enough, and none rejected.
+      let pending = false;
       async function getRid() {
         if (ridPromise === undefined) {
           ridPromise = op_fs_read_dir_async(pathString);
@@ -267,16 +274,27 @@ function readDir(path) {
           if (finished) {
             return { value: undefined, done: true };
           }
-          if (rid === undefined) {
-            await getRid();
+          if (pending) {
+            throw core.buildCustomError(
+              "Busy",
+              "Resource is unavailable because it is in use by a promise",
+            );
           }
-          const value = await op_fs_read_dir_async_next(rid);
-          if (value === null) {
-            finished = true;
-            core.close(rid);
-            return { value: undefined, done: true };
+          pending = true;
+          try {
+            if (rid === undefined) {
+              await getRid();
+            }
+            const value = await op_fs_read_dir_async_next(rid);
+            if (value === null) {
+              finished = true;
+              core.close(rid);
+              return { value: undefined, done: true };
+            }
+            return { value, done: false };
+          } finally {
+            pending = false;
           }
-          return { value, done: false };
         },
         async return(value) {
           if (finished) {
