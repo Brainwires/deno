@@ -4995,12 +4995,17 @@ Deno.test("[node/http] proxied request authority is validated and canonicalized"
       path: "/g",
       headers: { Host: "localhost:80" },
     });
-    req.on("error", () => {});
+    // Destroyed before it has a socket, the request emits Node's "socket hang
+    // up" and then "close". `events.once(req, "close")` would reject on that
+    // error, so collect it and wait for "close" with a plain listener.
+    const errors: Array<Error & { code?: string }> = [];
+    req.on("error", (err) => errors.push(err));
+    const closed = new Promise<void>((resolve) => req.on("close", resolve));
     assertEquals(req.path, "http://localhost/g");
     assertEquals(req.getHeader("host"), "localhost");
-    const closed = once(req, "close");
     req.destroy();
     await closed;
+    assertEquals(errors.map((err) => err.code), ["ECONNRESET"]);
 
     const options = { agent, host: "localhost", port: 3000, path: "/x" };
     for (
