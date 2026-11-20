@@ -14,7 +14,8 @@
 //!   `127.0.0.1` alone. The engine matches a datagram to a local candidate by
 //!   its exact local address, which a wildcard socket doesn't report, so the
 //!   local address of a datagram from a peer is the address the OS routes to
-//!   that peer from (a connected probe socket, cached per peer);
+//!   that peer from (a connected probe socket, cached per peer: bounded, and
+//!   only for a peer ICE or the permission gate vouched for);
 //! - one sans-I/O STUN/TURN client per ICE server URL: over the UDP socket,
 //!   or over its own TCP or TLS connection for `?transport=tcp` and `turns:`
 //!   (RFC 6544 framing: STUN messages and padded ChannelData on the stream);
@@ -147,6 +148,8 @@ const ERROR_CODE_UNREACHABLE: u16 = 701;
 pub const DTLS_TIMEOUT: Duration = Duration::from_secs(15);
 /// Remote addresses remembered as having sent STUN.
 const MAX_STUN_PEERS: usize = 256;
+/// Peer IPs whose local route is cached (wildcard sockets).
+pub(crate) const MAX_ROUTES: usize = 1024;
 /// The largest frame read from a TCP/TLS TURN connection (a STUN message or
 /// a ChannelData frame: 4 + 65535 bytes, padded).
 const MAX_STREAM_FRAME: usize = 4 + 65536;
@@ -516,6 +519,8 @@ pub struct Core {
   allowed: HashSet<SocketAddr>,
   refused: HashSet<SocketAddr>,
   /// Peer IP -> the local IP the OS routes to it from (wildcard sockets).
+  /// Only for addresses ICE or the permission gate vouched for (see
+  /// [`Core::local_for`]), and at most [`MAX_ROUTES`].
   routes: HashMap<IpAddr, IpAddr>,
   /// The selected candidate pair as (local, remote): where the engine's
   /// last non-STUN datagram went.
@@ -1175,18 +1180,53 @@ impl Core {
   }
 
   /// The local address a datagram on `endpoint` from `from` arrived on.
+  /// The OS route is probed and cached only for an address ICE or the
+  /// permission gate vouched for ([`Core::is_known_remote`]).
   fn local_for(&mut self, endpoint: usize, from: SocketAddr) -> SocketAddr {
+    let known = self.is_known_remote(from.ip());
+    self.local_address(endpoint, from, known)
+  }
+
+  /// Whether `ip` is a remote address ICE or the permission gate vouched for:
+  /// a signalled remote candidate, a STUN/TURN server, a destination the
+  /// engine sent to (which it does only for a signalled candidate or after
+  /// authenticating a check), or the selected pair's.
+  fn is_known_remote(&self, ip: IpAddr) -> bool {
+    self.selected.is_some_and(|(_, r)| r.ip() == ip)
+      || self.allowed.iter().any(|a| a.ip() == ip)
+  }
+
+  /// [`Core::local_for`] with the trust decided by the caller. With `probe`,
+  /// the OS route to `from` (a connected probe socket) is resolved and
+  /// cached. Without it the first host address stands in and nothing is
+  /// opened or kept, so a datagram from an address nobody vouched for costs
+  /// neither a socket nor memory.
+  fn local_address(
+    &mut self,
+    endpoint: usize,
+    from: SocketAddr,
+    probe: bool,
+  ) -> SocketAddr {
     let e = &self.endpoints[endpoint];
-    let (port, hosts) = (e.bound.port(), e.hosts.clone());
+    let port = e.bound.port();
     let ip = if !e.bound.ip().is_unspecified() {
       e.bound.ip()
+    } else if let Some(ip) = self.routes.get(&from.ip()) {
+      *ip
+    } else if !probe || e.hosts.len() <= 1 {
+      // With one host address (or none) a probe could give no other answer.
+      e.hosts.first().copied().unwrap_or(from.ip())
     } else {
-      *self.routes.entry(from.ip()).or_insert_with(|| {
-        route_to(from.ip())
-          .filter(|ip| hosts.contains(ip))
-          .or_else(|| hosts.first().copied())
-          .unwrap_or(from.ip())
-      })
+      let ip = route_to(from.ip())
+        .filter(|ip| e.hosts.contains(ip))
+        .or_else(|| e.hosts.first().copied())
+        .unwrap_or(from.ip());
+      // A cache: once full it starts over rather than grow.
+      if self.routes.len() >= MAX_ROUTES {
+        self.routes.clear();
+      }
+      self.routes.insert(from.ip(), ip);
+      ip
     };
     // 1:1 NAT in host mode: the host candidate is the public address.
     let ip = match self.options.network.as_ref().map(|n| &n.options) {
@@ -3530,7 +3570,8 @@ async fn add_server(peer: Rc<Peer>, spec: IceServerSpec) {
           finish(&peer, Some("No UDP socket for this family".to_string()));
           return;
         };
-        core.local_for(endpoint, server)
+        // The permission gate allowed `server` above.
+        core.local_address(endpoint, server, true)
       };
       (ServerLink::Udp, base)
     }
@@ -3685,5 +3726,34 @@ impl Peer {
 
   pub(crate) fn mdns_open_for_tests(&self) -> bool {
     self.core.borrow().mdns_socket.is_some()
+  }
+}
+
+#[cfg(test)]
+impl Core {
+  /// Test hook: a wildcard UDP endpoint on `socket` with these host
+  /// addresses; returns its index.
+  pub(crate) fn add_endpoint_for_test(
+    &mut self,
+    socket: UdpSocket,
+    hosts: Vec<IpAddr>,
+  ) -> usize {
+    let bound = socket.local_addr().unwrap();
+    self.endpoints.push(UdpEndpoint {
+      socket: Rc::new(socket),
+      bound,
+      hosts,
+    });
+    self.endpoints.len() - 1
+  }
+
+  /// Test hook: one datagram through the driver's receive path.
+  pub(crate) fn handle_datagram_for_test(&mut self, dg: Datagram) {
+    self.handle_datagram(dg);
+  }
+
+  /// Test hook: how many peer routes are cached.
+  pub(crate) fn route_count_for_test(&self) -> usize {
+    self.routes.len()
   }
 }

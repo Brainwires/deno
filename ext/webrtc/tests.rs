@@ -16,7 +16,10 @@ use crate::Peer;
 use crate::PeerOptions;
 use crate::ServerTransport;
 use crate::WebRtcError;
+use crate::peer::Datagram;
+use crate::peer::MAX_ROUTES;
 use crate::peer::RemoteCandidate;
+use crate::peer::Via;
 use crate::peer::candidate_address;
 use crate::peer::classify_remote_candidate;
 use crate::peer::epoch_fields_relative;
@@ -1150,4 +1153,58 @@ a=mid:3\r\n";
   assert_eq!(sections["2"].streams, vec!["default"]);
   assert_eq!(sections["2"].direction, "sendonly");
   assert!(sections["3"].streams.is_empty());
+}
+
+/// A datagram from `from` to `local`: a STUN-looking one (a first
+/// byte below 4, not a valid message) or not.
+fn datagram(local: SocketAddr, from: SocketAddr, stun: bool) -> Datagram {
+  let first = if stun { 0u8 } else { 0x80 };
+  Datagram {
+    local,
+    from,
+    stream: None,
+    via: Via::Socket,
+    data: bytes::BytesMut::from(&[first, 1, 0, 0, 0, 0, 0, 0][..]),
+    closed: None,
+  }
+}
+
+/// On a wildcard socket, datagrams from addresses nobody vouched for (no
+/// signalled candidate, no permitted send) cache no route, STUN-looking or
+/// not; a vouched-for address gets one, and the cache stays bounded however
+/// many vouched-for addresses there are.
+#[tokio::test]
+async fn route_cache_is_bounded_and_only_for_known_remotes() {
+  let peer = new_peer();
+  let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap();
+  let local = socket.local_addr().unwrap();
+  // Two host addresses, so the route would be probed.
+  let hosts: Vec<IpAddr> =
+    vec!["127.0.0.1".parse().unwrap(), "127.0.0.2".parse().unwrap()];
+  let mut core = peer.core.borrow_mut();
+  core.add_endpoint_for_test(socket, hosts);
+
+  for i in 0..(MAX_ROUTES as u32 * 4) {
+    let from = SocketAddr::new(
+      IpAddr::from(std::net::Ipv4Addr::from(0x0a00_0000 + i)),
+      40000,
+    );
+    core.handle_datagram_for_test(datagram(local, from, i % 2 == 0));
+  }
+  assert_eq!(core.route_count_for_test(), 0);
+
+  let known: SocketAddr = "127.0.0.1:40001".parse().unwrap();
+  core.mark_allowed(known);
+  core.handle_datagram_for_test(datagram(local, known, true));
+  assert_eq!(core.route_count_for_test(), 1);
+
+  for i in 0..(MAX_ROUTES as u32 + 100) {
+    let from = SocketAddr::new(
+      IpAddr::from(std::net::Ipv4Addr::from(0x7f01_0000 + i)),
+      40000,
+    );
+    core.mark_allowed(from);
+    core.handle_datagram_for_test(datagram(local, from, true));
+    assert!(core.route_count_for_test() <= MAX_ROUTES);
+  }
 }
