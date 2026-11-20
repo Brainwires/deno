@@ -14,7 +14,6 @@
 const { core, primordials } = __bootstrap;
 const { isDataView } = core;
 const {
-  op_base64_encode_from_buffer,
   op_webrtc_capabilities,
   op_webrtc_certificate_drop,
   op_webrtc_certificate_from_pem,
@@ -2489,49 +2488,15 @@ function plainStats(value) {
   return out;
 }
 
-// Members the engine fills with an empty string, `Unspecified` or a zero
-// when it has no value: webrtc-stats leaves such a member out.
-const STATS_OPTIONAL_STRINGS = [
-  "url",
-  "relayProtocol",
-  "tcpType",
-  "relatedAddress",
-  "issuerCertificateId",
-  "mediaSourceId",
-  "rid",
-  "codecId",
-  "playoutId",
-  "iceRole",
-  "iceState",
-  "dtlsState",
-  "dtlsRole",
-  // A reference with nothing to name: no pair selected yet, no certificate
-  // exchanged, a stream not yet associated with a media section.
-  "selectedCandidatePairId",
-  "localCertificateId",
-  "remoteCertificateId",
-  "mid",
-];
-const HEX_ONLY = new SafeRegExp("^(?:[0-9a-fA-F]{2})+$");
-
-function hexToBase64(hex) {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < bytes.length; ++i) {
-    bytes[i] = NumberParseInt(StringPrototypeSlice(hex, 2 * i, 2 * i + 2), 16);
-  }
-  return op_base64_encode_from_buffer(bytes, 0, bytes.length);
-}
-
 // What the W3C report has and the engine's doesn't: references that resolve
-// (a candidate pair names its candidates by their stats ids, a codec its
-// transport), no member without a value, the certificate as base64 DER, the
-// codec an outbound stream sends with, and a `media-source` for each sender
-// with a track.
+// (a candidate pair names its candidates by their stats ids), the codec an
+// outbound stream sends with, and a `media-source` for each sender with a
+// track. The engine itself leaves out members it has no value for, writes the
+// certificate as base64 DER, names each codec's transport, gives
+// `encodingIndex` to video streams only and creates a remote stream object
+// with its first RTCP report.
 function refineStats(pc, engineEntries, now, whole) {
-  const entries = withoutRetiredStreams(
-    pc,
-    ArrayPrototypeFilter(engineEntries, remoteStreamReported),
-  );
+  const entries = withoutRetiredStreams(pc, engineEntries);
   const ids = new SafeSet();
   let transportId = null;
   for (let i = 0; i < entries.length; ++i) {
@@ -2542,12 +2507,6 @@ function refineStats(pc, engineEntries, now, whole) {
   const state = pc[_state];
   for (let i = 0; i < entries.length; ++i) {
     const stats = entries[i];
-    for (let f = 0; f < STATS_OPTIONAL_STRINGS.length; ++f) {
-      const field = STATS_OPTIONAL_STRINGS[f];
-      if (stats[field] === "" || stats[field] === "Unspecified") {
-        delete stats[field];
-      }
-    }
     switch (stats.type) {
       case "candidate-pair": {
         const local = `RTCLocalIceCandidate_${stats.localCandidateId}`;
@@ -2573,21 +2532,11 @@ function refineStats(pc, engineEntries, now, whole) {
           stats.address = null;
         }
         break;
-      case "certificate":
-        if (
-          typeof stats.base64Certificate === "string" &&
-          RegExpPrototypeTest(HEX_ONLY, stats.base64Certificate)
-        ) {
-          stats.base64Certificate = hexToBase64(stats.base64Certificate);
-        }
-        break;
-      case "codec":
-        if (stats.transportId === undefined && transportId !== null) {
-          stats.transportId = transportId;
-        }
-        break;
       case "transport":
-        if (stats.iceLocalUsernameFragment === "") {
+        if (
+          stats.iceLocalUsernameFragment === undefined ||
+          stats.iceLocalUsernameFragment === ""
+        ) {
           // The ufrag of the local description in use.
           const slots = op_webrtc_pc_descriptions(pc[_rid]);
           const local = slots.currentLocal ?? slots.pendingLocal;
@@ -2614,8 +2563,6 @@ function refineStats(pc, engineEntries, now, whole) {
         const encodings = t?.[_state].sender[_state].encodings;
         const encoding = encodings?.[stats.encodingIndex ?? 0];
         if (encoding !== undefined) stats.active = encoding.active !== false;
-        // `encodingIndex` exists for video streams only.
-        if (stats.kind === "audio") delete stats.encodingIndex;
         if (t === undefined) break;
         if (stats.codecId === undefined) {
           const codec = sendCodecStats(pc, t, transportId, now);
@@ -2700,7 +2647,8 @@ function transportStateStats(pc, stats) {
     }
     stats.dtlsState = dtlsState;
   }
-  if (stats.iceRole === undefined) {
+  // The engine reports "unknown" until the agent has a role.
+  if (stats.iceRole === undefined || stats.iceRole === "unknown") {
     let role = s.iceRole;
     if (role === null || role === undefined) {
       role = s.signalingState === "have-local-offer" ||
@@ -2713,19 +2661,6 @@ function transportStateStats(pc, stats) {
     }
     stats.iceRole = role;
   }
-}
-
-// webrtc-stats 6.1: the remote RTP stream objects are created when their
-// RTCP packet is first received. The engine has one beside each local stream
-// from the start: a `remote-inbound-rtp` counts the receiver reports it was
-// made from (each one a round-trip measurement), a `remote-outbound-rtp` the
-// sender reports.
-function remoteStreamReported(stats) {
-  if (stats.type === "remote-inbound-rtp") {
-    return stats.roundTripTimeMeasurements !== 0;
-  }
-  if (stats.type === "remote-outbound-rtp") return stats.reportsSent !== 0;
-  return true;
 }
 
 // A `media-source` for each track attached to a sender (webrtc-stats
@@ -6198,8 +6133,9 @@ function midsOf(sdp) {
 // RTCDTMFSender needs (media.rs `track_preferences`).
 function trackPreferences(codec) {
   const out = [codec];
-  // wpt100:codecs: video keeps retransmission and FEC, which a preference
-  // list leaves out unless it lists them (media.rs track_preferences()).
+  // wpt100:codecs: video keeps retransmission, which a preference list
+  // leaves out unless it lists it (media.rs track_preferences()). The
+  // engine offers no FEC format by default.
   if (
     StringPrototypeStartsWith(
       StringPrototypeToLowerCase(codec.mimeType),
@@ -6209,7 +6145,6 @@ function trackPreferences(codec) {
     ArrayPrototypePush(
       out,
       { mimeType: "video/rtx", clockRate: 90000, channels: null },
-      { mimeType: "video/ulpfec", clockRate: 90000, channels: null },
     );
   }
   if (
