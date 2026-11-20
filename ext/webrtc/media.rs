@@ -20,9 +20,12 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use bytes::Bytes;
+use rtc::interceptor::Gcc;
 use rtc::interceptor::Registry;
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
+use rtc::peer_connection::configuration::interceptor_registry::CongestionFeedback;
+use rtc::peer_connection::configuration::interceptor_registry::configure_congestion_control;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
 use rtc::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
@@ -50,9 +53,10 @@ use crate::peer::Core;
 const RTP_MTU: usize = 1200;
 
 /// The engine's media configuration: every codec browsers negotiate (Opus,
-/// G.722, PCMU/PCMA, VP8, VP9, H.264, AV1, H.265, RTX) and the default
+/// G.722, PCMU/PCMA, VP8, VP9, H.264, AV1, H.265, RTX), the default
 /// interceptors (NACK, RTCP sender/receiver reports, TWCC feedback,
-/// simulcast header extensions).
+/// simulcast header extensions) and send-side congestion control (GCC over
+/// TWCC, with a pacer).
 pub fn media_stack() -> Result<(MediaEngine, Registry), WebRtcError> {
   let mut media_engine = MediaEngine::default();
   media_engine
@@ -85,6 +89,23 @@ pub fn media_stack() -> Result<(MediaEngine, Registry), WebRtcError> {
   let registry =
     register_default_interceptors(Registry::new(), &mut media_engine)
       .map_err(crate::peer::rtc_err)?;
+  // Send-side congestion control: transport-wide sequence numbers on what
+  // leaves, GCC over the TWCC feedback that comes back, and a pacer at its
+  // estimate. The estimate is the candidate pair's
+  // `availableOutgoingBitrate` and the outbound streams' `targetBitrate`.
+  // The defaults already negotiate TWCC (`transport-cc` feedback and the
+  // header extension, deduplicated here) and record arrivals for the remote
+  // side; this takes the receiver's slot with the same recorder. The pacer
+  // only queues (bounded, refusing past its limit as congestion would), and
+  // the driver releases from it at the engine's `poll_timeout`, so writes
+  // never wait on it.
+  let registry = configure_congestion_control(
+    registry,
+    Gcc::default(),
+    CongestionFeedback::Twcc,
+    &mut media_engine,
+  )
+  .map_err(crate::peer::rtc_err)?;
   register_header_extensions(&mut media_engine)?;
   Ok((media_engine, registry))
 }

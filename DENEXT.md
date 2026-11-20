@@ -19255,6 +19255,42 @@ where the changes are discussed.
        stats) and its workspace; `ext/webrtc`'s unit tests and the WebRTC WPT
        run.
      - Node tests enabled: none; `node:` has no WebRTC API.
+
+481. **`fix(ext/webrtc)`: webrtc-rs-rtc `0.22.0+brainwires.3`** (runtime;
+     `Cargo.toml`, `Cargo.lock`, `ext/webrtc/{media.rs,peer.rs}`). The
+     engine's next fix release (`29e3e7ef`): a renegotiation that changes a
+     sender's effective codec binds the sender again (its NACK buffer and the
+     TWCC send side start over; no RTCP BYE); a stopped transceiver whose m=
+     section an answer leaves rejected is removed from the set (W3C
+     webrtc-pc 4.4.1.6), and a rejected section in a remote description
+     stops an existing transceiver; the RTX SSRC is left out when RTX isn't
+     negotiated; `write_rtp` falls back to the negotiated payload type; RTCP
+     XR receiver reference time / DLRR reports give `remote-outbound-rtp`
+     its `roundTripTime`, `totalRoundTripTime` and
+     `roundTripTimeMeasurements`, and the default offers carry
+     `a=rtcp-fb:<pt> rrtr` on video. New API: `take_removed_transceivers()`,
+     the transceivers removed since the last call, by the index each had
+     then. `ext/webrtc` keys each engine transceiver index to a stable key;
+     after every local or remote description (and rollback, which the
+     engine now reports the same way, replacing the runtime's own guess at
+     which transceivers a rollback removes) it drops the removed keys and
+     their per-transceiver state, so the later transceivers keep their
+     senders, receivers and stats. `media_stack()` turns on send-side
+     congestion control (`configure_congestion_control` with GCC over TWCC):
+     transport-wide sequence numbers on what is sent, the estimate from the
+     feedback, and a pacer at that rate (a bounded queue the driver drains
+     at the engine's `poll_timeout`; writes never wait on it); the estimate
+     is the candidate pair's `availableOutgoingBitrate` and the outbound
+     streams' `targetBitrate`.
+     - User-facing note: `getTransceivers()` no longer lists a stopped
+       transceiver once an answer rejects its section; media is paced to a
+       bandwidth estimate (starting at 300 kb/s and following the remote's
+       TWCC feedback); the stats members above are reported.
+     - Tests: `tests/unit/webrtc_test.ts`
+       (`webrtcRejectedSectionRemovesStoppedTransceiver`,
+       `webrtcLaterTransceiverWorksAfterEarlierRemoved`); the engine's
+       workspace; the WebRTC WPT run.
+     - Node tests enabled: none; `node:` has no WebRTC API.
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
