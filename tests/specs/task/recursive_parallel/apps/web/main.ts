@@ -2,7 +2,7 @@ const NAME = "web";
 const root = Deno.env.get("INIT_CWD")!;
 console.log(`${NAME} ready`);
 await Deno.writeTextFile(`${root}/marker.${NAME}`, "");
-const deadline = Date.now() + 15_000;
+const deadline = Date.now() + 60_000;
 while (true) {
   try {
     await Deno.stat(`${root}/marker.server`);

@@ -6,7 +6,9 @@
   // member writes a marker file, then waits until all three markers exist
   // before exiting. Sequential execution would deadlock on the very first
   // member, so the test only passes when `deno task -r dev` runs the dev
-  // tasks concurrently across packages.
+  // tasks concurrently across packages. A member's dev task starts once its
+  // own build is done, so the output is one unordered block: the barrier, not
+  // the line order, is what proves the tasks ran concurrently.
   "tempDir": true,
   "args": "task -r dev",
   "envs": {
