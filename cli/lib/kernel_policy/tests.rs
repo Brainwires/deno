@@ -1827,6 +1827,60 @@ fn the_broker_holds_what_mode_a_cant() {
   ));
 }
 
+// a compiled program applies its sandbox in place and runs no broker: what
+// only the broker would hold stays a fatal gap (warned about at compile,
+// refused at start), never a Mode B policy
+#[test]
+fn a_compiled_program_has_no_broker() {
+  let compiled = |options: &PermissionsOptions, caps: Capabilities| {
+    let mut ctx = ctx(caps, KernelSandboxMode::Enforce);
+    ctx.compiled = true;
+    compile_in(options, &ctx)
+  };
+  let deny_inside = PermissionsOptions {
+    allow_write: s(&["/out"]),
+    deny_write: s(&["/out/keep"]),
+    ..Default::default()
+  };
+  let c = compiled(&deny_inside, linux(Some(6)));
+  assert_eq!(c.policy.shape, Shape::ModeA);
+  assert_eq!(
+    deny(&c.policy.fs.deny_write, "/out/keep"),
+    DenyEnforcement::DenoOnly
+  );
+  let fatal: Vec<_> = c.fatal_gaps().collect();
+  assert_eq!(fatal.len(), 1, "{:#?}", c.gaps);
+  assert_eq!(fatal[0].class, GapClass::Write);
+  assert!(fatal[0].rule.starts_with("--deny-write="), "{fatal:#?}");
+  // macOS holds the same deny itself: nothing fatal
+  let c = compiled(&deny_inside, macos());
+  assert_eq!(c.policy.shape, Shape::ModeA);
+  assert_eq!(c.fatal_gaps().count(), 0, "{:#?}", c.gaps);
+  // a host name: the broker's network, which a compiled program lacks
+  let host = PermissionsOptions {
+    allow_net: s(&["example.com:443"]),
+    ..Default::default()
+  };
+  for caps in [linux(Some(6)), macos()] {
+    let c = compiled(&host, caps);
+    assert_eq!(c.policy.shape, Shape::ModeA, "{caps:?}");
+    let fatal: Vec<_> = c.fatal_gaps().collect();
+    assert_eq!(fatal.len(), 1, "{caps:?}: {:#?}", c.gaps);
+    assert_eq!(fatal[0].class, GapClass::Net, "{caps:?}");
+    assert_eq!(fatal[0].rule, "--allow-net=example.com:443", "{caps:?}");
+  }
+  // an address list the kernel holds by port needs no broker
+  let c = compiled(
+    &PermissionsOptions {
+      allow_net: s(&["127.0.0.1:4545"]),
+      ..Default::default()
+    },
+    linux(Some(6)),
+  );
+  assert!(matches!(c.policy.net, NetPolicy::Ports { .. }));
+  assert_eq!(c.fatal_gaps().count(), 0, "{:#?}", c.gaps);
+}
+
 // the files an --allow-sys name reads are in the read scope only when it
 // is granted (Linux); other processes' entries are a fail-closed gap
 #[test]

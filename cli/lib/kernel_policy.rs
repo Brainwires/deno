@@ -1476,6 +1476,23 @@ impl KernelPolicy {
         && compiled.gaps.iter().any(|g| {
           g.is_fatal_under_enforce() && g.exact_with == Some(ExactWith::Broker)
         }));
+    if needs_broker && ctx.compiled {
+      // a compiled program applies its sandbox in place, with no supervising
+      // broker: what only the broker would hold stays a rule the OS can't
+      // hold (warned about at `deno compile`, refused at start), never a
+      // Mode B plan nothing runs
+      let mut compiled = compiled;
+      if matches!(compiled.policy.net, NetPolicy::Broker { .. }) {
+        compiled.gaps.push(PolicyGap {
+          class: GapClass::Net,
+          rule: net_rule(options),
+          detail: "Deno only: host-scoped network needs the supervising broker, which a compiled program doesn't run".to_string(),
+          resolution: GapResolution::FailOpen,
+          exact_with: Some(ExactWith::Broker),
+        });
+      }
+      return compiled;
+    }
     if needs_broker {
       // the rules the broker's unbuilt side would hold (a write deny is
       // the built file side's: it is held, and not among them)
