@@ -1,5 +1,8 @@
 {
+  // --parallel takes its job count from the CPUs available; on one CPU that is 1 and the
+  // ordinary reporter prints instead of the parallel one this checks.
   "args": "test --parallel --reload main.ts",
+  "envs": { "DENO_JOBS": "2" },
   "exitCode": 1,
   "output": "main.out"
 }
