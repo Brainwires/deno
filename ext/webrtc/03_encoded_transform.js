@@ -26,21 +26,31 @@ const {
 } = core.ops;
 const {
   ArrayBufferPrototypeGetByteLength,
+  ArrayBufferPrototypeGetDetached,
+  ArrayBufferPrototypeGetResizable,
   ArrayBufferPrototypeSlice,
   ArrayIsArray,
+  ArrayPrototypeIncludes,
   ArrayPrototypePush,
   ArrayPrototypeSlice,
   MapPrototypeDelete,
   MapPrototypeGet,
   MapPrototypeSet,
+  MathPow,
+  MathRound,
   ObjectDefineProperty,
   ObjectPrototypeIsPrototypeOf,
   PromisePrototypeThen,
   PromiseReject,
   PromiseWithResolvers,
+  RegExpPrototypeTest,
   SafeMap,
+  SafeRegExp,
+  StringPrototypeSlice,
+  StringPrototypeSplit,
   StringPrototypeStartsWith,
   StringPrototypeToLowerCase,
+  StringPrototypeTrim,
   Symbol,
   SymbolFor,
   TypeError,
@@ -73,6 +83,12 @@ const _metadata = Symbol("[[metadata]]");
 const _type = Symbol("[[type]]");
 const _duration = Symbol("[[duration]]");
 const _state = Symbol("[[state]]");
+// The transformer a frame was enqueued by, and its place in that
+// transformer's readable (writeEncodedData's [[owner]] and [[counter]]).
+const _owner = Symbol("[[owner]]");
+const _counter = Symbol("[[counter]]");
+// A frame written to createEncodedStreams()'s writable.
+const _consumed = Symbol("[[consumed]]");
 
 function fire(target, event) {
   setIsTrusted(event, true);
@@ -96,9 +112,29 @@ function copyMetadata(metadata) {
   return out;
 }
 
+// wpt100:S2 begin (frame data and structured clone, webrtc-encoded-transform
+// 7.4 / 8.4). The copy constructor serializes the original frame: a frame
+// whose data was transferred away cannot be, so it throws a DataCloneError.
 function copyBuffer(buffer) {
+  if (ArrayBufferPrototypeGetDetached(buffer)) {
+    throw new DOMException(
+      "The frame's data was transferred: it cannot be copied",
+      "DataCloneError",
+    );
+  }
   return ArrayBufferPrototypeSlice(buffer, 0);
 }
+
+// `attribute ArrayBuffer data`: neither a view nor (absent [AllowResizable])
+// a resizable buffer.
+function convertFrameData(value, prefix) {
+  const buffer = webidl.converters.ArrayBuffer(value, prefix);
+  if (ArrayBufferPrototypeGetResizable(buffer)) {
+    throw new TypeError(`${prefix}: a resizable ArrayBuffer is not allowed`);
+  }
+  return buffer;
+}
+// wpt100:S2 end
 
 // Metadata given to a copy constructor may change what describes the frame
 // but not where it comes from.
@@ -156,13 +192,19 @@ class RTCEncodedVideoFrame {
     webidl.assertBranded(this, RTCEncodedVideoFramePrototype);
     return this[_type];
   }
+  // The frame's RTP timestamp: the attribute the specification moved to
+  // `getMetadata().rtpTimestamp`, which every browser still has.
+  get timestamp() {
+    webidl.assertBranded(this, RTCEncodedVideoFramePrototype);
+    return this[_metadata].rtpTimestamp;
+  }
   get data() {
     webidl.assertBranded(this, RTCEncodedVideoFramePrototype);
     return this[_data];
   }
   set data(value) {
     webidl.assertBranded(this, RTCEncodedVideoFramePrototype);
-    this[_data] = webidl.converters.ArrayBuffer(
+    this[_data] = convertFrameData(
       value,
       "Failed to set 'data' on 'RTCEncodedVideoFrame'",
     );
@@ -215,13 +257,18 @@ class RTCEncodedAudioFrame {
     });
   }
 
+  // The frame's RTP timestamp (see RTCEncodedVideoFrame's).
+  get timestamp() {
+    webidl.assertBranded(this, RTCEncodedAudioFramePrototype);
+    return this[_metadata].rtpTimestamp;
+  }
   get data() {
     webidl.assertBranded(this, RTCEncodedAudioFramePrototype);
     return this[_data];
   }
   set data(value) {
     webidl.assertBranded(this, RTCEncodedAudioFramePrototype);
-    this[_data] = webidl.converters.ArrayBuffer(
+    this[_data] = convertFrameData(
       value,
       "Failed to set 'data' on 'RTCEncodedAudioFrame'",
     );
@@ -324,10 +371,21 @@ class RTCRtpScriptTransform {
       port: port1,
       target: null,
       side: null,
+      // The sender or receiver it was first attached to (its [[owner]]),
+      // with that side and the media kind: a transform serves one owner
+      // for good, and its worker's key frame calls answer for that owner
+      // even after it is detached.
+      owner: null,
+      ownerSide: null,
+      kind: null,
       // generateKeyFrame() calls waiting for the next key frame.
       keyFrameWaiters: [],
       // The last key frame's size, for the delta frames' metadata.
       size: null,
+      // For the video frames' frameId and dependencies (see videoFrameIds).
+      lastRtpTimestamp: null,
+      rtpCycles: 0,
+      lastFrameId: null,
       closed: false,
     };
     port1.onmessage = (event) => onTransformerMessage(this, event.data);
@@ -339,12 +397,36 @@ class RTCRtpScriptTransform {
 webidl.configureInterface(RTCRtpScriptTransform);
 const RTCRtpScriptTransformPrototype = RTCRtpScriptTransform.prototype;
 
-function reply(state, id, error) {
+function reply(state, id, error = undefined, value = undefined) {
   state.port.postMessage(
     error === undefined
-      ? { resolve: id }
+      ? { resolve: id, value }
       : { reject: id, name: error.name, message: error.message },
   );
+}
+
+// A frame written back on a sender's transform (or encoded streams) goes
+// out at its RTP timestamp.
+function sendFrame(state, frame, data) {
+  if (ArrayBufferPrototypeGetByteLength(data) === 0) return;
+  const { pc, key } = ownerParts(state);
+  const { _rid, _state: pcState } = internals();
+  if (pc[pcState].closed) return;
+  const video = ObjectPrototypeIsPrototypeOf(
+    RTCEncodedVideoFramePrototype,
+    frame,
+  );
+  try {
+    op_webrtc_sender_write_frame_at(
+      pc[_rid],
+      key,
+      new Uint8Array(data),
+      frame[_duration] ?? (video ? 1000 / 30 : 20),
+      frame[_metadata].rtpTimestamp >>> 0,
+    );
+  } catch {
+    // The sender went away.
+  }
 }
 
 function ownerParts(state) {
@@ -359,56 +441,127 @@ function onTransformerMessage(transform, message) {
   if (message.write !== undefined) {
     const frame = message.write;
     if (state.side !== "sender" || !isFrame(frame)) return;
-    const data = frame[_data];
-    if (ArrayBufferPrototypeGetByteLength(data) === 0) return;
-    const { pc, key } = ownerParts(state);
-    const { _rid, _state: pcState } = internals();
-    if (pc[pcState].closed) return;
-    try {
-      op_webrtc_sender_write_frame_at(
-        pc[_rid],
-        key,
-        new Uint8Array(data),
-        frame[_duration] ?? 20,
-        frame[_metadata].rtpTimestamp >>> 0,
-      );
-    } catch {
-      // The sender went away.
-    }
+    sendFrame(state, frame, frame[_data]);
     return;
   }
   if (message.generateKeyFrame !== undefined) {
-    const id = message.generateKeyFrame;
-    const sender = state.side === "sender" ? state.target : null;
-    const { _state: trackKey, _trackState } = internals();
-    const track = sender?.[trackKey].track ?? null;
-    if (track === null || track[_trackState].kind !== "video") {
+    generateKeyFrame(state, message.generateKeyFrame, message.rid);
+    return;
+  }
+  if (message.sendKeyFrameRequest !== undefined) {
+    const id = message.sendKeyFrameRequest;
+    // The transformer's [[depacketizer]]: the receiver it was attached to,
+    // also once detached from it.
+    if (state.ownerSide !== "receiver") {
+      reply(state, id, invalidState("sendKeyFrameRequest: not a receiver"));
+      return;
+    }
+    if (state.kind !== "video") {
+      reply(state, id, invalidState("sendKeyFrameRequest: not video"));
+      return;
+    }
+    // Detached: there is nothing to ask, which is not an error.
+    if (state.target === null) {
+      reply(state, id);
+      return;
+    }
+    const { pc, key } = ownerParts(state);
+    const { _rid, _state: pcState } = internals();
+    if (!pc[pcState].closed) {
+      try {
+        op_webrtc_receiver_request_key_frame(pc[_rid], key);
+      } catch {
+        // The receiver went away.
+      }
+    }
+    reply(state, id);
+  }
+}
+
+// RFC 8852 3: an RtpStreamId is 1 to 255 alphanumeric characters.
+const RID_SYNTAX = new SafeRegExp("^[A-Za-z0-9]{1,255}$");
+
+// The rids a sender may send now: those the remote description accepted
+// (`a=rid:<id> recv` in the transceiver's m-section; none once negotiation
+// dropped simulcast), or before an answer, those of its encodings.
+function negotiatedRids(sender) {
+  const { _pc, _transceiver } = internals();
+  const pc = sender[_pc];
+  const mid = sender[_transceiver].mid;
+  const description = pc.currentRemoteDescription;
+  const rids = [];
+  if (description === null || mid === null) {
+    const encodings = sender.getParameters().encodings;
+    for (let i = 0; i < encodings.length; ++i) {
+      if (encodings[i].rid !== undefined) {
+        ArrayPrototypePush(rids, encodings[i].rid);
+      }
+    }
+    return rids;
+  }
+  const sections = StringPrototypeSplit(description.sdp, "\nm=");
+  for (let i = 1; i < sections.length; ++i) {
+    const lines = StringPrototypeSplit(sections[i], "\n");
+    let found = false;
+    const sectionRids = [];
+    for (let j = 0; j < lines.length; ++j) {
+      const line = StringPrototypeTrim(lines[j]);
+      if (line === `a=mid:${mid}`) found = true;
+      if (StringPrototypeStartsWith(line, "a=rid:")) {
+        const parts = StringPrototypeSplit(StringPrototypeSlice(line, 6), " ");
+        if (parts[1] === "recv") ArrayPrototypePush(sectionRids, parts[0]);
+      }
+    }
+    if (found) return sectionRids;
+  }
+  return rids;
+}
+
+// RTCRtpScriptTransformer.generateKeyFrame(rid), on the window side. The
+// promise resolves with the key frame's timestamp once that frame went to
+// the worker (before the frame message: see feedFake).
+function generateKeyFrame(state, id, rid) {
+  // The transformer's [[encoder]]: the sender it was attached to, also once
+  // detached from it.
+  const sender = state.ownerSide === "sender" ? state.owner : null;
+  if (sender === null || state.kind !== "video") {
+    reply(
+      state,
+      id,
+      invalidState("generateKeyFrame: not a video sender's transform"),
+    );
+    return;
+  }
+  if (rid !== undefined && rid !== null) {
+    if (!RegExpPrototypeTest(RID_SYNTAX, rid)) {
       reply(
         state,
         id,
-        invalidState("generateKeyFrame: not a video sender with a track"),
+        new DOMException(
+          `generateKeyFrame: '${rid}' is not a valid rid`,
+          "NotAllowedError",
+        ),
       );
       return;
     }
-    if (message.rid !== undefined && message.rid !== null) {
-      const rids = sender.getParameters().encodings;
-      let found = false;
-      for (let i = 0; i < rids.length; ++i) {
-        if (rids[i].rid === message.rid) found = true;
-      }
-      if (!found) {
-        reply(
-          state,
-          id,
-          new DOMException(
-            `generateKeyFrame: no encoding with rid '${message.rid}'`,
-            "NotFoundError",
-          ),
-        );
-        return;
-      }
+    if (!ArrayPrototypeIncludes(negotiatedRids(sender), rid)) {
+      reply(
+        state,
+        id,
+        new DOMException(
+          `generateKeyFrame: no encoding with rid '${rid}'`,
+          "NotFoundError",
+        ),
+      );
+      return;
     }
-    const { _source } = internals();
+  }
+  // Detached, or a sender with no track: no frame will come, so the promise
+  // waits (it is not an error, and a later frame of this sender resolves
+  // it).
+  const { _state: senderState, _source } = internals();
+  const track = sender[senderState].track;
+  if (state.target === sender && track !== null) {
     if (track[_source]?.device === undefined) {
       // A track the program feeds (Deno.webrtc.EncodedMediaTrack): it is
       // asked for the key frame, as at a remote PLI.
@@ -418,30 +571,10 @@ function onTransformerMessage(transform, message) {
       reply(state, id);
       return;
     }
-    // Resolved when the next key frame goes to the worker (the fake
-    // camera's clip starts with one every second).
-    ArrayPrototypePush(state.keyFrameWaiters, id);
-    return;
   }
-  if (message.sendKeyFrameRequest !== undefined) {
-    const id = message.sendKeyFrameRequest;
-    if (state.side !== "receiver") {
-      reply(state, id, invalidState("sendKeyFrameRequest: not a receiver"));
-      return;
-    }
-    const receiver = state.target;
-    const { _state: kindKey } = internals();
-    if (receiver[kindKey].track.kind !== "video") {
-      reply(state, id, invalidState("sendKeyFrameRequest: not video"));
-      return;
-    }
-    const { pc, key } = ownerParts(state);
-    const { _rid, _state: pcState } = internals();
-    if (!pc[pcState].closed) {
-      op_webrtc_receiver_request_key_frame(pc[_rid], key);
-    }
-    reply(state, id);
-  }
+  // Resolved when the sender's next key frame goes to the worker (the fake
+  // camera's clip starts with one every second).
+  ArrayPrototypePush(state.keyFrameWaiters, id);
 }
 
 // SFrame (04_sframe.js): loaded with the first SFrame transform.
@@ -456,8 +589,14 @@ function initRtpTransform(sframeTransform) {
     port: null,
     target: null,
     side: null,
+    owner: null,
+    ownerSide: null,
+    kind: null,
     keyFrameWaiters: [],
     size: null,
+    lastRtpTimestamp: null,
+    rtpCycles: 0,
+    lastFrameId: null,
     closed: false,
     sframe: true,
   };
@@ -482,13 +621,23 @@ function setTransform(owner, side, transform) {
           : "Failed to set 'transform': not an RTCRtpScriptTransform, an RTCRtpSFrameDecryptor or null",
       );
     }
+    // A transform once attached belongs to that sender or receiver, also
+    // after it is detached from it (WebRTC Encoded Transform, the
+    // `transform` setter: its [[owner]] is not reset).
     const state = transform[_state];
-    if (state.target !== null && state.target !== owner) {
+    if (state.owner !== null && state.owner !== owner) {
       throw invalidState("Failed to set 'transform': it is already in use");
     }
   }
   const previous = owner[_transform] ?? null;
   if (previous === transform) return;
+  // createEncodedStreams() took the frames: no transform can be set.
+  if (previous !== null && previous[_state].legacy) {
+    if (transform === null) return;
+    throw invalidState(
+      "Failed to set 'transform': createEncodedStreams() was called",
+    );
+  }
   if (previous !== null) {
     previous[_state].target = null;
     previous[_state].side = null;
@@ -499,6 +648,11 @@ function setTransform(owner, side, transform) {
     const state = transform[_state];
     state.target = owner;
     state.side = side;
+    if (state.owner === null) {
+      state.owner = owner;
+      state.ownerSide = side;
+      state.kind = owner[_transceiver][s].kind;
+    }
     state.port?.postMessage({ attach: side });
   }
   if (side === "receiver" && !pc[s].closed) {
@@ -512,13 +666,61 @@ function setTransform(owner, side, transform) {
 
 function postFrame(state, frame) {
   if (state.closed) return;
+  if (state.legacy) {
+    // createEncodedStreams(): the frame is enqueued in this realm.
+    const c = state.controller;
+    try {
+      if (c !== null && c.desiredSize > 0) c.enqueue(frame);
+    } catch {
+      // The readable was cancelled.
+    }
+    return;
+  }
   state.port.postMessage({ frame }, [frame[_data]]);
+}
+
+// A video frame's frameId and dependencies. The frameId is the frame's RTP
+// timestamp extended to 64 bits (counting wraparounds): unique per frame and
+// increasing in decode order, as the device's clips and a remote encoder's
+// single-layer streams have no B-frames, and the sender and the receiver
+// both know it without a frame descriptor extension. A key frame depends on
+// nothing, a delta frame on the frame before it.
+function videoFrameIds(state, rtpTimestamp, keyFrame) {
+  const last = state.lastRtpTimestamp;
+  if (
+    last !== null && rtpTimestamp < last && last - rtpTimestamp > 0x80000000
+  ) {
+    state.rtpCycles++;
+  }
+  state.lastRtpTimestamp = rtpTimestamp;
+  const frameId = state.rtpCycles * 0x100000000 + rtpTimestamp;
+  const dependencies = keyFrame || state.lastFrameId === null
+    ? []
+    : [state.lastFrameId];
+  state.lastFrameId = frameId;
+  return { frameId, dependencies };
+}
+
+// RFC 6464 level (-dBov, 127 = silence) to RTCEncodedAudioFrameMetadata's
+// audioLevel, as webrtc-pc converts it for RTCRtpSynchronizationSource:
+// 10^(-level/20), 0 for silence.
+function linearAudioLevel(level) {
+  return level >= 127 ? 0 : MathPow(10, -level / 20);
 }
 
 // A fake device's frame for a sender with a transform (02_media_devices.js).
 function feedFake(sender, pc, key, stereo) {
-  const { _transform, _rid } = internals();
+  const { _transform, _rid, _state: pcState } = internals();
   const state = sender[_transform][_state];
+  // The device's frames start once the connection is up: before DTLS is
+  // connected, a frame the transform writes back cannot be sent, and a
+  // transform that writes only its first frame would send nothing (an
+  // encoder starts with the transport too). The clip, and its RTP
+  // timestamps, start there.
+  const connection = pc[pcState].connectionState;
+  if (connection !== "connected" && connection !== "disconnected") {
+    return false;
+  }
   const f = op_webrtc_sender_fake_frame(pc[_rid], key, stereo);
   if (f === null) return false;
   if (state.sframe) {
@@ -527,12 +729,13 @@ function feedFake(sender, pc, key, stereo) {
   }
   const data = copyBytes(f.data);
   const info = f.info;
+  const captureTime = performance.now();
   const metadata = {
     synchronizationSource: info.synchronizationSource,
     payloadType: info.payloadType,
     contributingSources: [],
     rtpTimestamp: info.rtpTimestamp,
-    captureTime: performance.now(),
+    captureTime,
     mimeType: info.mimeType,
   };
   if (
@@ -550,6 +753,12 @@ function feedFake(sender, pc, key, stereo) {
     }
     metadata.spatialIndex = 0;
     metadata.temporalIndex = 0;
+    const ids = videoFrameIds(state, info.rtpTimestamp, f.keyFrame);
+    metadata.frameId = ids.frameId;
+    metadata.dependencies = ids.dependencies;
+    // The raw frame's presentation timestamp, in microseconds: when the
+    // device took it.
+    metadata.timestamp = MathRound(captureTime * 1000);
     const frame = new RTCEncodedVideoFrame(illegalConstructorKey, {
       type: f.keyFrame ? "key" : "delta",
       data,
@@ -560,9 +769,17 @@ function feedFake(sender, pc, key, stereo) {
     if (f.keyFrame && state.keyFrameWaiters.length > 0) {
       const waiters = state.keyFrameWaiters;
       state.keyFrameWaiters = [];
-      for (let i = 0; i < waiters.length; ++i) reply(state, waiters[i]);
+      for (let i = 0; i < waiters.length; ++i) {
+        reply(state, waiters[i], undefined, metadata.timestamp);
+      }
     }
   } else {
+    // The level measured from the frame's PCM, the one the sender writes in
+    // the audio level header extension (header_extensions.rs); absent where
+    // the runtime has no PCM for the frame.
+    if (f.audioLevel !== null && f.audioLevel !== undefined) {
+      metadata.audioLevel = linearAudioLevel(f.audioLevel);
+    }
     postFrame(
       state,
       new RTCEncodedAudioFrame(illegalConstructorKey, {
@@ -641,6 +858,15 @@ function deliverReceived(receiver, event) {
     receiveTime: performance.now(),
     mimeType: info.mimeType,
   };
+  // abs-capture-time, when negotiated and sent: the capture time on the
+  // capture system's clock plus the sender's estimate of that clock's
+  // offset, on this side's performance timeline.
+  if (info.captureTime !== null && info.captureTime !== undefined) {
+    const offset = info.senderCaptureTimeOffset ?? null;
+    metadata.captureTime = info.captureTime + (offset ?? 0) -
+      performance.timeOrigin;
+    if (offset !== null) metadata.senderCaptureTimeOffset = offset;
+  }
   const data = copyBytes(event.data);
   if (
     StringPrototypeStartsWith(
@@ -657,6 +883,9 @@ function deliverReceived(receiver, event) {
     }
     metadata.spatialIndex = 0;
     metadata.temporalIndex = 0;
+    const ids = videoFrameIds(state, info.rtpTimestamp, event.keyFrame);
+    metadata.frameId = ids.frameId;
+    metadata.dependencies = ids.dependencies;
     postFrame(
       state,
       new RTCEncodedVideoFrame(illegalConstructorKey, {
@@ -668,6 +897,10 @@ function deliverReceived(receiver, event) {
     );
   } else {
     metadata.sequenceNumber = info.sequenceNumber;
+    // The level the sender put in `ssrc-audio-level`, when negotiated.
+    if (info.audioLevel !== null && info.audioLevel !== undefined) {
+      metadata.audioLevel = linearAudioLevel(info.audioLevel);
+    }
     postFrame(
       state,
       new RTCEncodedAudioFrame(illegalConstructorKey, {
@@ -684,7 +917,11 @@ function deliverReceived(receiver, event) {
 function keyFrameRequested(sender) {
   const { _transform } = internals();
   const transform = sender[_transform] ?? null;
-  if (transform === null || transform[_state].sframe) return;
+  if (
+    transform === null || transform[_state].sframe || transform[_state].legacy
+  ) {
+    return;
+  }
   transform[_state].port.postMessage({ keyframerequest: null });
 }
 
@@ -698,10 +935,92 @@ function ownerClosed(...owners) {
     const state = transform[_state];
     if (state.closed) continue;
     state.closed = true;
+    if (state.legacy) {
+      try {
+        state.controller?.close();
+      } catch {
+        // Already closed or cancelled.
+      }
+      continue;
+    }
     if (state.port === null) continue;
     state.port.postMessage({ close: true });
     state.port.close();
   }
+}
+
+// --- createEncodedStreams() --------------------------------------------------
+// The insertable streams API that preceded RTCRtpScriptTransform (Chrome's
+// `RTCRtpSender/RTCRtpReceiver.createEncodedStreams()`): the owner's frames
+// in a readable in this realm, and a writable that sends what is written
+// (a receiver's go nowhere: there is no decoder). Unlike a script
+// transformer's, its writable takes any frame not written before,
+// constructed or cloned ones too, as Chrome's does.
+
+// Whether `sender.transform` / `receiver.transform` hides it (01_webrtc.js).
+function isEncodedStreams(transform) {
+  return transform[_state]?.legacy === true;
+}
+
+function createEncodedStreams(owner, side) {
+  const prefix = "Failed to execute 'createEncodedStreams'";
+  const { _transform, _pc, _transceiver, _key, _rid, _state: s } = internals();
+  const current = owner[_transform] ?? null;
+  if (current !== null) {
+    throw invalidState(
+      isEncodedStreams(current)
+        ? `${prefix}: the encoded streams were already created`
+        : `${prefix}: a transform is set`,
+    );
+  }
+  const state = {
+    legacy: true,
+    port: null,
+    target: owner,
+    side,
+    owner,
+    ownerSide: side,
+    kind: owner[_transceiver][s].kind,
+    keyFrameWaiters: [],
+    size: null,
+    lastRtpTimestamp: null,
+    rtpCycles: 0,
+    lastFrameId: null,
+    closed: false,
+    controller: null,
+  };
+  const readable = new ReadableStream({
+    start(controller) {
+      state.controller = controller;
+    },
+  }, { highWaterMark: READABLE_HIGH_WATER_MARK, size: () => 1 });
+  const writable = new WritableStream({
+    write(chunk) {
+      if (!isFrame(chunk)) {
+        throw new TypeError(
+          `${prefix}: only RTCEncodedVideoFrame and RTCEncodedAudioFrame can be written`,
+        );
+      }
+      // A frame is consumed by its first write; its data stays readable
+      // (Chrome's frames keep it too).
+      if (chunk[_consumed] === true) {
+        throw new DOMException(
+          `${prefix}: the frame was already written`,
+          "OperationError",
+        );
+      }
+      chunk[_consumed] = true;
+      if (state.side === "sender" && !state.closed) {
+        sendFrame(state, chunk, chunk[_data]);
+      }
+    },
+  });
+  owner[_transform] = { [_state]: state };
+  const pc = owner[_pc];
+  if (side === "receiver" && !pc[s].closed) {
+    op_webrtc_receiver_transform(pc[_rid], owner[_transceiver][_key], true);
+  }
+  return { readable, writable };
 }
 
 // --- the worker side ---------------------------------------------------------
@@ -762,6 +1081,10 @@ class RTCRtpScriptTransformer extends EventTarget {
       controller: null,
       nextId: 0,
       pending: new SafeMap(),
+      // The [[counter]] of the last frame enqueued in the readable, and of
+      // the last one written back.
+      enqueued: 0,
+      written: 0,
     };
     this[_state] = state;
     this[webidl.brand] = webidl.brand;
@@ -777,6 +1100,14 @@ class RTCRtpScriptTransformer extends EventTarget {
             "RTCRtpScriptTransformer: only RTCEncodedVideoFrame and RTCEncodedAudioFrame can be written",
           );
         }
+        // writeEncodedData: only a frame this transformer's readable gave
+        // out, and only in order and once. A clone, a constructed frame, a
+        // frame of another transform or one written again is dropped (the
+        // write still succeeds).
+        if (chunk[_owner] !== state || chunk[_counter] <= state.written) {
+          return;
+        }
+        state.written = chunk[_counter];
         const data = chunk[_data];
         if (ArrayBufferPrototypeGetByteLength(data) === 0) return;
         // The frame's data moves to the sender: it is detached here.
@@ -845,14 +1176,20 @@ function onTransformMessage(transformer, message) {
   if (message === null || typeof message !== "object") return;
   if (message.frame !== undefined) {
     const c = state.controller;
-    if (c !== null && c.desiredSize > 0) c.enqueue(message.frame);
+    if (c !== null && c.desiredSize > 0) {
+      const frame = message.frame;
+      frame[_owner] = state;
+      frame[_counter] = ++state.enqueued;
+      c.enqueue(frame);
+    }
   } else if (message.resolve !== undefined || message.reject !== undefined) {
     const id = message.resolve ?? message.reject;
     const pending = MapPrototypeGet(state.pending, id);
     if (pending === undefined) return;
     MapPrototypeDelete(state.pending, id);
     if (message.resolve !== undefined) {
-      pending.resolve(undefined);
+      // generateKeyFrame() resolves with the key frame's timestamp.
+      pending.resolve(message.value);
     } else {
       pending.reject(new DOMException(message.message, message.name));
     }
@@ -897,10 +1234,12 @@ return {
   RTCRtpScriptTransformer,
   RTCTransformEvent,
   TRANSFORM_KEY,
+  createEncodedStreams,
   deliverReceived,
   deserializeFrame,
   feedFake,
   initRtpTransform,
+  isEncodedStreams,
   isFrame,
   keyFrameRequested,
   ownerClosed,

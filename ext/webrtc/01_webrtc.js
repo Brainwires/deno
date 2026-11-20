@@ -31,7 +31,6 @@ const {
   op_webrtc_pc_create_offer,
   op_webrtc_pc_descriptions,
   op_webrtc_pc_get_stats,
-  op_webrtc_pc_max_message_size,
   op_webrtc_pc_next_events,
   op_webrtc_pc_set_local_description,
   op_webrtc_pc_set_remote_description,
@@ -43,6 +42,15 @@ const {
   op_webrtc_pc_add_transceiver,
   op_webrtc_pc_attach_track,
   op_webrtc_pc_selected_pair,
+  op_webrtc_pc_ice_selected_pair,
+  op_webrtc_ice_add_remote_candidate,
+  op_webrtc_ice_create,
+  op_webrtc_ice_gather,
+  op_webrtc_ice_local_parameters,
+  op_webrtc_ice_next_events,
+  op_webrtc_ice_selected_pair,
+  op_webrtc_ice_start,
+  op_webrtc_ice_stop,
   op_webrtc_pc_set_ice_servers,
   op_webrtc_pc_transceivers,
   op_webrtc_receiver_parameters,
@@ -59,7 +67,13 @@ const {
   op_webrtc_transceiver_set_codec_preferences,
   op_webrtc_transceiver_set_direction,
   op_webrtc_transceiver_stop,
+  // wpt100:hdrext
+  op_webrtc_pc_set_negotiation_options,
+  op_webrtc_transceiver_set_header_extensions,
   op_void_async_deferred,
+  // wpt100:mediasink
+  op_webrtc_receiver_muted,
+  op_webrtc_receiver_read_frames,
 } = core.ops;
 const {
   ArrayBufferIsView,
@@ -134,6 +148,7 @@ const {
   SetPrototypeHas,
   StringPrototypeEndsWith,
   StringPrototypeIncludes,
+  StringPrototypeIndexOf,
   StringPrototypeLastIndexOf,
   StringPrototypeReplace,
   StringPrototypeToUpperCase,
@@ -267,18 +282,77 @@ function descriptionFrom(pair) {
 // doesn't change; after close(), what the slot held then.
 function descriptionSlot(pc, slot) {
   const state = pc[_state];
-  const pair = state.closed
+  let pair = state.closed
     ? state.last?.[slot]
     : op_webrtc_pc_descriptions(pc[_rid])[slot];
   if (pair === null || pair === undefined) return null;
+  if (slot === "currentLocal" || slot === "pendingLocal") {
+    pair = [pair[0], announcedSdp(state, pair[1])];
+  }
+  // wpt100:identity — a local description shows the a=identity line the
+  // engine was given without (06_identity.js).
+  const sdp = identityHooks.reportedSdp(pc, slot, pair[1]);
   const cache = state.descriptions;
   const held = cache[slot];
-  if (held !== null && held.type === pair[0] && held.sdp === pair[1]) {
+  if (held !== null && held.type === pair[0] && held.sdp === sdp) {
     return held;
   }
-  const description = descriptionFrom(pair);
+  const description = descriptionFrom([pair[0], sdp]);
   cache[slot] = description;
   return description;
+}
+
+// The key a gathered candidate is announced under: the local ICE ufrag it was
+// gathered for and the candidate's first eight fields (foundation to type),
+// which the SDP line and the event's string share whatever extensions follow.
+function announcedKey(ufrag, candidate) {
+  const fields = StringPrototypeSplit(StringPrototypeTrim(candidate), SPACES);
+  return `${ufrag ?? ""} ${
+    ArrayPrototypeJoin(ArrayPrototypeSlice(fields, 0, 8), " ")
+  }`;
+}
+
+// A local description as the application has been told of it. The engine
+// writes each candidate into its local description as it gathers it, but W3C
+// webrtc-pc 5.6 ("When an ICE candidate is gathered") adds the candidate to
+// [[CurrentLocalDescription]] / [[PendingLocalDescription]] in the same task
+// that fires its `icecandidate` event: before that event the description
+// lacks it, so a description read right after setLocalDescription() has no
+// candidate line, and each announced candidate makes a new description object
+// (descriptionSlot compares the text). `a=end-of-candidates` likewise waits
+// for the `complete` gathering state.
+function announcedSdp(state, sdp) {
+  if (
+    !StringPrototypeIncludes(sdp, "a=candidate:") &&
+    !StringPrototypeIncludes(sdp, "a=end-of-candidates")
+  ) {
+    return sdp;
+  }
+  const lines = StringPrototypeSplit(sdp, "\n");
+  const out = [];
+  let ufrag = "";
+  for (let i = 0; i < lines.length; ++i) {
+    const line = lines[i];
+    const trimmed = StringPrototypeTrim(line);
+    if (StringPrototypeStartsWith(trimmed, "a=ice-ufrag:")) {
+      ufrag = StringPrototypeSlice(trimmed, 12);
+    } else if (StringPrototypeStartsWith(trimmed, "a=candidate:")) {
+      const candidate = StringPrototypeSlice(trimmed, 2);
+      if (
+        !SetPrototypeHas(state.announced, announcedKey(ufrag, candidate)) &&
+        !SetPrototypeHas(state.announced, announcedKey(null, candidate))
+      ) {
+        continue;
+      }
+    } else if (
+      trimmed === "a=end-of-candidates" &&
+      state.iceGatheringState !== "complete"
+    ) {
+      continue;
+    }
+    ArrayPrototypePush(out, line);
+  }
+  return ArrayPrototypeJoin(out, "\n");
 }
 
 // --- RTCIceCandidate -------------------------------------------------------
@@ -390,11 +464,27 @@ function parseCandidate(line) {
   return out;
 }
 
+// Makes an RTCIceCandidate whose derived attributes are given rather than
+// parsed (see RTCIceCandidate's static block).
+let candidateWithFields;
+
 class RTCIceCandidate {
   #init;
   #parsed;
   #relayProtocol;
   #url;
+
+  static {
+    // A peer-reflexive remote candidate the application never signalled is
+    // exposed with an empty candidate string and no address (W3C webrtc-pc
+    // 4.8.1, "the address is not exposed"), but with the fields the agent
+    // learned: those can't come from parsing a string.
+    candidateWithFields = (init, parsed) => {
+      const candidate = new RTCIceCandidate(init);
+      candidate.#parsed = parsed;
+      return candidate;
+    };
+  }
 
   constructor(candidateInitDict = undefined) {
     const init = candidateInitDict ?? { __proto__: null };
@@ -589,6 +679,16 @@ const ERROR_DETAILS = [
   "sdp-syntax-error",
   "hardware-encoder-not-available",
   "hardware-encoder-error",
+  // wpt100:identity — RTCErrorDetailTypeIdp (W3C WebRTC Identity section
+  // 10), the partial enum WebIDL can't write.
+  "idp-bad-script-failure",
+  "idp-execution-failure",
+  "idp-load-failure",
+  "idp-need-login",
+  "idp-timeout",
+  "idp-tls-failure",
+  "idp-token-expired",
+  "idp-token-invalid",
 ];
 
 class RTCError extends DOMException {
@@ -614,6 +714,15 @@ class RTCError extends DOMException {
       sctpCauseCode: init.sctpCauseCode ?? null,
       receivedAlert: init.receivedAlert ?? null,
       sentAlert: init.sentAlert ?? null,
+      // wpt100:identity — RTCErrorInit.httpRequestStatusCode (`long`,
+      // W3C WebRTC Identity section 10).
+      httpRequestStatusCode: init.httpRequestStatusCode === undefined
+        ? null
+        : webidl.converters.long(
+          init.httpRequestStatusCode,
+          "Failed to construct 'RTCError'",
+          "httpRequestStatusCode",
+        ),
     };
   }
 
@@ -631,6 +740,10 @@ class RTCError extends DOMException {
   }
   get sentAlert() {
     return this.#init.sentAlert;
+  }
+  // wpt100:identity
+  get httpRequestStatusCode() {
+    return this.#init.httpRequestStatusCode;
   }
 }
 webidl.configureInterface(RTCError);
@@ -704,6 +817,8 @@ webidl.configureInterface(RTCStatsReport);
 
 // What this side's SCTP sends at most (the engine's bound, as browsers).
 const LOCAL_MAX_MESSAGE_SIZE = 262144;
+// The remote max-message-size of the last answer applied (null before one).
+const _maxMessageSize = Symbol("[[MaxMessageSize]]");
 
 class RTCSctpTransport extends EventTarget {
   constructor(key = undefined, pc = undefined) {
@@ -712,6 +827,7 @@ class RTCSctpTransport extends EventTarget {
     }
     super();
     this[_pc] = pc;
+    this[_maxMessageSize] = null;
     this[webidl.brand] = webidl.brand;
   }
 
@@ -724,16 +840,13 @@ class RTCSctpTransport extends EventTarget {
     return pc.sctpState ?? "connecting";
   }
 
-  // The remote description's a=max-message-size (65536 when absent, no
-  // limit when 0), capped by what this side can send.
+  // [[MaxMessageSize]] (W3C "update the data max message size"): set when
+  // an answer or pranswer is applied, from the remote description's
+  // a=max-message-size (65536 when absent, no limit when 0), capped by what
+  // this side can send. Until then the remote limit is RFC 8841's default.
   get maxMessageSize() {
     webidl.assertBranded(this, RTCSctpTransportPrototype);
-    const pc = this[_pc];
-    if (!pc[_state].closed) {
-      const engine = op_webrtc_pc_max_message_size(pc[_rid]);
-      if (engine > 0) return engine;
-    }
-    const remote = pc[_state].remoteMaxMessageSize ?? 65536;
+    const remote = this[_maxMessageSize] ?? 65536;
     return remote === 0
       ? LOCAL_MAX_MESSAGE_SIZE
       : MathMin(remote, LOCAL_MAX_MESSAGE_SIZE);
@@ -755,6 +868,36 @@ const RTCSctpTransportPrototype = RTCSctpTransport.prototype;
 
 // --- RTCDataChannel --------------------------------------------------------
 
+// webrtc-priority 4: RTCPriorityType, and the DCEP priority each is sent as
+// (RFC 8831 6.4 / RFC 8832 5.1).
+const PRIORITY_VALUES = {
+  __proto__: null,
+  "very-low": 128,
+  low: 256,
+  medium: 512,
+  high: 1024,
+};
+
+// webrtc-priority 4.3: an incoming channel's priority from the DCEP value.
+function priorityFromDcep(value) {
+  if (typeof value !== "number") return "low";
+  if (value <= 128) return "very-low";
+  if (value <= 256) return "low";
+  if (value <= 512) return "medium";
+  return "high";
+}
+
+// Transferable RTCDataChannel (W3C WebRTC 6.2): the transfer and the channel's
+// life in the receiving realm are 05_transfer.js. On this side a transferred
+// channel's engine events go to `_transferPort`; a received channel (its
+// [[pc]] in another realm) sends through `_proxyPort`.
+const _transferPort = Symbol("[[transferPort]]");
+const _proxyPort = Symbol("[[proxyPort]]");
+let transferMod;
+const loadTransfer = () =>
+  transferMod ??
+    (transferMod = core.loadExtScript("ext:deno_webrtc/05_transfer.js"));
+
 class RTCDataChannel extends EventTarget {
   constructor(key = undefined, pc = undefined, init = undefined) {
     if (key !== illegalConstructorKey) {
@@ -764,10 +907,15 @@ class RTCDataChannel extends EventTarget {
     this[_pc] = pc;
     this[_channel] = init.channel;
     this[_init] = init;
-    this[_state] = {
+    const state = {
       readyState: init.readyState ?? "connecting",
       id: init.id ?? null,
       binaryType: "arraybuffer",
+      // [[IsTransferable]]: true until a task queued at creation runs, send()
+      // is called or the channel is transferred.
+      transferable: pc !== null,
+      // A received channel's maxMessageSize (its connection is elsewhere).
+      maxMessageSize: init.maxMessageSize ?? null,
       lowThreshold: 0,
       // [[BufferedAmount]]: what send() accepted that SCTP hasn't taken from
       // its queue yet (`dcsent`).
@@ -781,7 +929,23 @@ class RTCDataChannel extends EventTarget {
       // close() was called with sends queued: the close follows them.
       closeAfterQueue: false,
     };
+    this[_state] = state;
     this[webidl.brand] = webidl.brand;
+    // W3C "create an RTCDataChannel": [[IsTransferable]] turns false in a
+    // task queued now, ahead of any task that delivers the channel's
+    // messages, so a channel is transferred in the task that made it (the
+    // `datachannel` event's, or the createDataChannel() caller's). A system
+    // timer: ordered with the program's own `setTimeout(0)`, it keeps
+    // nothing alive and is no test-sanitizer resource.
+    if (state.transferable) {
+      core.createSystemTimer(
+        () => {
+          state.transferable = false;
+        },
+        0,
+        false,
+      );
+    }
   }
 
   get label() {
@@ -808,14 +972,20 @@ class RTCDataChannel extends EventTarget {
     webidl.assertBranded(this, RTCDataChannelPrototype);
     return this[_init].negotiated;
   }
+  // webrtc-priority 4.1: [[DataChannelPriority]].
+  get priority() {
+    webidl.assertBranded(this, RTCDataChannelPrototype);
+    return this[_init].priority ?? "low";
+  }
   get id() {
     webidl.assertBranded(this, RTCDataChannelPrototype);
     const state = this[_state];
     // The engine assigns an in-band channel's id once the DTLS role is
-    // negotiated (an answer is applied); it doesn't change after that.
+    // negotiated (an answer is applied); it doesn't change after that. A
+    // received channel learns it from the realm that has the connection.
     if (state.id === null && state.readyState !== "closed") {
       const pc = this[_pc];
-      if (!pc[_state].closed) {
+      if (pc !== null && !pc[_state].closed) {
         const id = op_webrtc_dc_id(pc[_rid], this[_channel]);
         if (id >= 0) state.id = id;
       }
@@ -839,7 +1009,9 @@ class RTCDataChannel extends EventTarget {
     const threshold = webidl.converters["unsigned long"](value);
     this[_state].lowThreshold = threshold;
     const pc = this[_pc];
-    if (!pc[_state].closed) {
+    if (pc === null) {
+      loadTransfer().proxySetThreshold(this, threshold);
+    } else if (!pc[_state].closed) {
       op_webrtc_dc_set_low_threshold(pc[_rid], this[_channel], threshold);
     }
   }
@@ -863,12 +1035,16 @@ class RTCDataChannel extends EventTarget {
       "Failed to execute 'send' on 'RTCDataChannel'",
     );
     const state = this[_state];
+    // W3C send() step 2: a channel that sent can no longer be transferred.
+    state.transferable = false;
     if (state.readyState !== "open") {
       throw invalidState(
         `RTCDataChannel.readyState is '${state.readyState}', not 'open'`,
       );
     }
     if (ObjectPrototypeIsPrototypeOf(BlobPrototype, data)) {
+      // The byte size of a Blob is known synchronously (send() step 4).
+      checkMessageSize(this, data.size);
       // A Blob is read first; later sends wait behind it so the order on the
       // wire is the order of the calls.
       state.queuedBytes += data.size;
@@ -899,6 +1075,7 @@ class RTCDataChannel extends EventTarget {
       text = true;
       bytes = core.encode(String(data));
     }
+    checkMessageSize(this, TypedArrayPrototypeGetByteLength(bytes));
     if (state.queue.length > 0) {
       state.queuedBytes += TypedArrayPrototypeGetByteLength(bytes);
       ArrayPrototypePush(state.queue, { text, bytes });
@@ -944,17 +1121,51 @@ defineHandler(RTCDataChannel.prototype, "close");
 defineHandler(RTCDataChannel.prototype, "message");
 webidl.configureInterface(RTCDataChannel);
 const RTCDataChannelPrototype = RTCDataChannel.prototype;
+// [Transferable] (W3C WebRTC 6.2): postMessage() takes a channel in its
+// transfer list; the steps are registered for every realm by
+// 98_global_scope_shared.js.
+ObjectDefineProperty(RTCDataChannelPrototype, core.hostObjectBrand, {
+  __proto__: null,
+  value: "RTCDataChannel",
+  enumerable: false,
+  configurable: false,
+  writable: false,
+});
+
+// W3C send() step 5: a message larger than the SCTP transport's
+// maxMessageSize is a TypeError, thrown by send() itself.
+function checkMessageSize(channel, size) {
+  let limit;
+  const pc = channel[_pc];
+  if (pc === null) {
+    limit = channel[_state].maxMessageSize;
+  } else {
+    const sctp = pc[_state].sctp;
+    limit = sctp === null || sctp === undefined ? null : sctp.maxMessageSize;
+  }
+  if (limit !== null && size > limit) {
+    throw new TypeError(
+      `Failed to execute 'send' on 'RTCDataChannel': the message (${size} bytes) is larger than the connection's maxMessageSize (${limit})`,
+    );
+  }
+}
 
 function closeTransport(channel) {
   const pc = channel[_pc];
-  if (!pc[_state].closed) {
+  if (pc === null) {
+    loadTransfer().proxyClose(channel);
+  } else if (!pc[_state].closed) {
     op_webrtc_dc_close(pc[_rid], channel[_channel]);
   }
 }
 
 function sendNow(channel, text, bytes) {
   const pc = channel[_pc];
-  op_webrtc_dc_send(pc[_rid], channel[_channel], text, bytes);
+  if (pc === null) {
+    loadTransfer().proxySend(channel, text, bytes);
+  } else {
+    op_webrtc_dc_send(pc[_rid], channel[_channel], text, bytes);
+  }
   channel[_state].buffered += TypedArrayPrototypeGetByteLength(bytes);
 }
 
@@ -1022,6 +1233,43 @@ function failChannel(channel, cause) {
   } else {
     channel.close();
   }
+}
+
+// W3C "announce the RTCDataChannel as open" for a channel the remote peer
+// opened: a task after the `datachannel` event's. A channel transferred in
+// that event hears it in its new realm.
+function announceOpen(pc, channel, event) {
+  const next = op_void_async_deferred();
+  if (!pc[_state].active) core.unrefOpPromise(next);
+  PromisePrototypeThen(next, () => {
+    if (pc[_state].closed) return;
+    if (channel[_transferPort] !== undefined) {
+      loadTransfer().forwardEvent(channel, event);
+      return;
+    }
+    const state = channel[_state];
+    if (state.readyState !== "open") return;
+    fire(channel, new Event("open"));
+  });
+}
+
+// SCTP took `bytes` of the channel's data from its queue: [[BufferedAmount]]
+// goes down, and crossing the threshold fires `bufferedamountlow`.
+function channelSent(channel, bytes) {
+  const s = channel[_state];
+  const before = s.buffered;
+  s.buffered = MathMax(0, before - bytes);
+  if (before > s.lowThreshold && s.buffered <= s.lowThreshold) {
+    fire(channel, new Event("bufferedamountlow"));
+  }
+}
+
+// W3C "receiving messages on a data channel" (what arrives while the channel
+// is closing still reaches it, as before).
+function deliverChannelMessage(channel, text, bytes) {
+  if (channel[_state].readyState === "closed") return;
+  const data = text ? core.decode(bytes) : toBinary(channel, bytes);
+  fire(channel, new MessageEvent("message", { data }));
 }
 
 function toBinary(channel, data) {
@@ -1168,6 +1416,7 @@ class MediaStreamTrack extends EventTarget {
     if (state.readyState === "ended") return;
     // No `ended` event: stop() is the application's own doing.
     state.readyState = "ended";
+    closeFrameReaders(this);
     if (this[_source] !== null) {
       SetPrototypeDelete(this[_source].tracks, this);
       // A capture device whose last track stopped stops capturing.
@@ -1190,7 +1439,20 @@ class MediaStreamTrack extends EventTarget {
   getSettings() {
     webidl.assertBranded(this, MediaStreamTrackPrototype);
     const device = this[_source]?.device;
-    return device ? device.settings(this) : { deviceId: "", groupId: "" };
+    if (device) return device.settings(this);
+    // A remote video track: the coded size of the frames it receives, as
+    // their bitstream names it (0 until one does).
+    const receiver = this[_receiver];
+    if (receiver !== null && this[_trackState].kind === "video") {
+      const size = receiver[_frameSize];
+      return {
+        deviceId: "",
+        groupId: "",
+        width: size?.width ?? 0,
+        height: size?.height ?? 0,
+      };
+    }
+    return { deviceId: "", groupId: "" };
   }
   applyConstraints(constraints = undefined) {
     const error = brandError(this, MediaStreamTrackPrototype);
@@ -1224,14 +1486,36 @@ function setMuted(track, muted) {
   const state = track[_trackState];
   if (state.readyState === "ended" || state.muted === muted) return;
   state.muted = muted;
+  // A remote track: the next packet that arrives unmutes it again.
+  if (muted) rearmUnmute(track[_receiver]);
   fire(track, new Event(muted ? "mute" : "unmute"));
 }
 
+// The receiver's next RTP packet sends a `trackunmute` event again.
+function rearmUnmute(receiver) {
+  if (receiver === null || receiver === undefined) return;
+  const pc = receiver[_pc];
+  if (pc[_state].closed) return;
+  try {
+    op_webrtc_receiver_muted(pc[_rid], receiver[_transceiver][_key]);
+  } catch {
+    // The transceiver is gone.
+  }
+}
+
+// A track the user agent ends (anything but its own stop()): mediacapture-
+// main 4.3.1.2 queues a task that sets its readyState and fires `ended`,
+// and does nothing if the track ended meanwhile (stop(), or close()).
+// webrtc-pc's "stop sending and receiving" ends the receiver's track so.
 function endTrack(track) {
-  const state = track[_trackState];
-  if (state.readyState === "ended") return;
-  state.readyState = "ended";
-  fire(track, new Event("ended"));
+  if (track[_trackState].readyState === "ended") return;
+  setTimeout(() => {
+    const state = track[_trackState];
+    if (state.readyState === "ended") return;
+    state.readyState = "ended";
+    closeFrameReaders(track);
+    fire(track, new Event("ended"));
+  }, 0);
 }
 
 class MediaStreamTrackEvent extends Event {
@@ -1425,6 +1709,41 @@ class RTCCertificate {
 webidl.configureInterface(RTCCertificate);
 const RTCCertificatePrototype = RTCCertificate.prototype;
 
+// [Serializable] (W3C WebRTC 4.9.2): the serialized certificate carries its
+// key, fingerprints and expiry; it deserializes only where RTCCertificate is
+// exposed ([Exposed=Window]), so a worker gets `messageerror`.
+ObjectDefineProperty(RTCCertificatePrototype, core.hostObjectBrand, {
+  __proto__: null,
+  value: function () {
+    return {
+      type: "RTCCertificate",
+      pem: op_webrtc_certificate_to_pem(this[_certRid]),
+      expires: this.expires,
+    };
+  },
+  enumerable: false,
+  configurable: false,
+  writable: false,
+});
+
+// Registered in every realm by 98_global_scope_shared.js.
+function deserializeCertificate(serialized) {
+  const { WorkerGlobalScope } = core.loadExtScript(
+    "ext:deno_web/04_global_interfaces.js",
+  );
+  if (ObjectPrototypeIsPrototypeOf(WorkerGlobalScope.prototype, globalThis)) {
+    throw new DOMException(
+      "RTCCertificate is not exposed in a worker",
+      "DataCloneError",
+    );
+  }
+  const info = op_webrtc_certificate_from_pem(String(serialized.pem));
+  return new RTCCertificate(illegalConstructorKey, {
+    ...info,
+    expires: serialized.expires,
+  });
+}
+
 // WebCrypto's AlgorithmIdentifier as generateCertificate takes it.
 function normalizeKeygen(keygenAlgorithm) {
   if (typeof keygenAlgorithm === "string") {
@@ -1465,20 +1784,45 @@ function normalizeKeygen(keygenAlgorithm) {
 // --- RTCDtlsTransport / RTCIceTransport -------------------------------------
 
 const _transportState = Symbol("[[transportState]]");
+// wpt100:ice: the state of a standalone transport (`new RTCIceTransport()`,
+// W3C webrtc-ice); undefined on a peer connection's transport.
+const _ice = Symbol("[[iceTransport]]");
 
 class RTCIceTransport extends EventTarget {
   constructor(key = undefined, pc = undefined) {
-    if (key !== illegalConstructorKey) {
-      webidl.illegalConstructor();
-    }
     super();
+    this[webidl.brand] = webidl.brand;
+    if (key !== illegalConstructorKey) {
+      // W3C webrtc-ice: `new RTCIceTransport()` is a transport of its own,
+      // driven by gather() / start() / addRemoteCandidate() (ice_transport.rs).
+      const rid = op_webrtc_ice_create();
+      const params = op_webrtc_ice_local_parameters(rid);
+      this[_ice] = {
+        rid,
+        role: null,
+        state: "new",
+        gatheringState: "new",
+        local: [],
+        remote: [],
+        // Generated with the transport (RFC 8445 section 5.3), kept after
+        // stop().
+        localParameters: { usernameFragment: params[0], password: params[1] },
+        remoteParameters: null,
+        closed: false,
+        active: false,
+        pending: null,
+      };
+      // One never stopped is stopped when it is collected.
+      iceTransportRegistry.register(this, rid);
+      return;
+    }
     this[_pc] = pc;
     this[_transportState] = { state: "new", gatheringState: "new" };
-    this[webidl.brand] = webidl.brand;
   }
 
   get role() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    if (this[_ice] !== undefined) return this[_ice].role;
     // Fixed by the first answer applied: the offerer of that exchange is
     // controlling (an ICE-lite peer never is, but that is only the server
     // extension's case and it answers); an ICE restart keeps it.
@@ -1490,40 +1834,329 @@ class RTCIceTransport extends EventTarget {
   }
   get state() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    if (this[_ice] !== undefined) return this[_ice].state;
     return this[_transportState].state;
   }
   get gatheringState() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    if (this[_ice] !== undefined) return this[_ice].gatheringState;
     return this[_transportState].gatheringState;
   }
   // The candidates gathered here and signalled with `icecandidate`, and the
   // remote ones received with addIceCandidate().
   getLocalCandidates() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    if (this[_ice] !== undefined) return ArrayPrototypeSlice(this[_ice].local);
     return ArrayPrototypeSlice(this[_pc][_state].localCandidates);
   }
   getRemoteCandidates() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    if (this[_ice] !== undefined) {
+      return ArrayPrototypeSlice(this[_ice].remote);
+    }
     return ArrayPrototypeSlice(this[_pc][_state].remoteCandidates);
   }
   getSelectedCandidatePair() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    if (this[_ice] !== undefined) return iceSelectedPair(this[_ice]);
     return selectedPair(this[_pc]);
   }
   getLocalParameters() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    const ice = this[_ice];
+    if (ice !== undefined) return { ...ice.localParameters };
     return iceParameters(this[_pc].localDescription);
   }
   getRemoteParameters() {
     webidl.assertBranded(this, RTCIceTransportPrototype);
+    const ice = this[_ice];
+    if (ice !== undefined) {
+      return ice.remoteParameters === null ? null : { ...ice.remoteParameters };
+    }
     return iceParameters(this[_pc].remoteDescription);
+  }
+
+  // --- W3C webrtc-ice: the standalone transport's methods ---
+
+  gather(options = undefined) {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    const ice = requireStandalone(this, "gather");
+    const opts = options ?? { __proto__: null };
+    if (typeof opts !== "object") {
+      throw new TypeError(
+        "Failed to execute 'gather' on 'RTCIceTransport': the options must be an object",
+      );
+    }
+    const gatherPolicy = opts.gatherPolicy === undefined
+      ? "all"
+      : String(opts.gatherPolicy);
+    if (gatherPolicy !== "all" && gatherPolicy !== "relay") {
+      throw new TypeError(
+        `Failed to execute 'gather' on 'RTCIceTransport': '${gatherPolicy}' is not a valid value for 'gatherPolicy'`,
+      );
+    }
+    // `sequence<RTCIceServer>`: null is not a sequence (a TypeError).
+    const servers = convertIceServers(opts.iceServers);
+    if (ice.closed) {
+      throw invalidState("The RTCIceTransport is closed");
+    }
+    if (ice.gatheringState !== "new") {
+      throw invalidState("gather() was already called");
+    }
+    op_webrtc_ice_gather(ice.rid, servers, gatherPolicy === "relay");
+    // The candidates and the `complete` state follow as events; the change
+    // to "gathering" itself is not one.
+    ice.gatheringState = "gathering";
+    iceActivate(ice);
+    icePump(this);
+  }
+
+  start(remoteParameters = undefined, role = "controlled") {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    const ice = requireStandalone(this, "start");
+    const prefix = "Failed to execute 'start' on 'RTCIceTransport'";
+    const params = remoteParameters ?? { __proto__: null };
+    if (typeof params !== "object") {
+      throw new TypeError(`${prefix}: remoteParameters must be an object`);
+    }
+    role = String(role);
+    if (role !== "controlling" && role !== "controlled") {
+      throw new TypeError(
+        `${prefix}: '${role}' is not a valid value for 'role'`,
+      );
+    }
+    if (ice.closed) {
+      throw invalidState("The RTCIceTransport is closed");
+    }
+    if (
+      params.usernameFragment === undefined || params.password === undefined
+    ) {
+      throw new TypeError(
+        `${prefix}: remoteParameters needs a usernameFragment and a password`,
+      );
+    }
+    const usernameFragment = String(params.usernameFragment);
+    const password = String(params.password);
+    // RFC 8839 section 5.4: ice-ufrag is 4 to 256 ice-chars, ice-pwd 22 to
+    // 256.
+    if (!RegExpPrototypeTest(ICE_UFRAG, usernameFragment)) {
+      throw new DOMException(
+        `${prefix}: '${usernameFragment}' is not a valid usernameFragment`,
+        "SyntaxError",
+      );
+    }
+    if (!RegExpPrototypeTest(ICE_PWD, password)) {
+      throw new DOMException(
+        `${prefix}: the password is not valid`,
+        "SyntaxError",
+      );
+    }
+    if (ice.role !== null && ice.role !== role) {
+      throw invalidState(
+        `${prefix}: the role is '${ice.role}' and cannot change`,
+      );
+    }
+    const previous = ice.remoteParameters;
+    if (
+      previous !== null && (previous.usernameFragment !== usernameFragment ||
+        previous.password !== password)
+    ) {
+      // The remote side restarted: its candidates are flushed, and the
+      // transport is "new" until one of the new generation arrives.
+      ice.remote = [];
+      if (ice.state === "checking") ice.state = "new";
+    }
+    op_webrtc_ice_start(
+      ice.rid,
+      usernameFragment,
+      password,
+      role === "controlling",
+    );
+    ice.role = role;
+    ice.remoteParameters = { usernameFragment, password };
+    if (ice.remote.length > 0 && ice.state === "new") ice.state = "checking";
+    iceActivate(ice);
+    icePump(this);
+  }
+
+  stop() {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    const ice = requireStandalone(this, "stop");
+    if (ice.closed) return;
+    ice.closed = true;
+    ice.state = "closed";
+    if (ice.active && ice.pending) core.unrefOpPromise(ice.pending);
+    ice.active = false;
+    op_webrtc_ice_stop(ice.rid);
+  }
+
+  addRemoteCandidate(remoteCandidate = undefined) {
+    webidl.assertBranded(this, RTCIceTransportPrototype);
+    const ice = requireStandalone(this, "addRemoteCandidate");
+    const candidate = ObjectPrototypeIsPrototypeOf(
+        RTCIceCandidatePrototype,
+        remoteCandidate,
+      )
+      ? remoteCandidate
+      : new RTCIceCandidate(remoteCandidate ?? { sdpMid: "" });
+    if (ice.closed) {
+      throw invalidState("The RTCIceTransport is closed");
+    }
+    // An empty candidate is the remote end-of-candidates.
+    if (candidate.candidate === "") return;
+    if (candidate.foundation === null || candidate.type === null) {
+      throw new DOMException(
+        `Failed to execute 'addRemoteCandidate' on 'RTCIceTransport': '${candidate.candidate}' is not a valid candidate`,
+        "OperationError",
+      );
+    }
+    op_webrtc_ice_add_remote_candidate(ice.rid, candidate.candidate);
+    ArrayPrototypePush(ice.remote, candidate);
+    if (ice.remoteParameters !== null && ice.state === "new") {
+      ice.state = "checking";
+    }
   }
 }
 defineHandler(RTCIceTransport.prototype, "statechange");
 defineHandler(RTCIceTransport.prototype, "gatheringstatechange");
 defineHandler(RTCIceTransport.prototype, "selectedcandidatepairchange");
+defineHandler(RTCIceTransport.prototype, "error");
+defineHandler(RTCIceTransport.prototype, "icecandidate");
 webidl.configureInterface(RTCIceTransport);
 const RTCIceTransportPrototype = RTCIceTransport.prototype;
+
+const iceTransportRegistry = new SafeFinalizationRegistry((rid) => {
+  try {
+    op_webrtc_ice_stop(rid);
+  } catch {
+    // Already gone.
+  }
+});
+
+// RFC 8839 section 5.4 (ice-char = ALPHA / DIGIT / "+" / "/").
+const ICE_UFRAG = new SafeRegExp("^[A-Za-z0-9+/]{4,256}$");
+const ICE_PWD = new SafeRegExp("^[A-Za-z0-9+/]{22,256}$");
+
+// The webrtc-ice methods exist only on a transport of its own: a peer
+// connection's transport is driven by its descriptions.
+function requireStandalone(transport, method) {
+  const ice = transport[_ice];
+  if (ice === undefined) {
+    throw invalidState(
+      `RTCIceTransport.${method}() is only for a transport made with new RTCIceTransport()`,
+    );
+  }
+  return ice;
+}
+
+// A gathering or started transport keeps the process alive, as an open
+// socket does, until stop().
+function iceActivate(ice) {
+  if (ice.closed || ice.active) return;
+  ice.active = true;
+  if (ice.pending) core.refOpPromise(ice.pending);
+}
+
+function icePump(transport) {
+  const ice = transport[_ice];
+  if (ice.closed || ice.pending) return;
+  const promise = op_webrtc_ice_next_events(ice.rid);
+  ice.pending = promise;
+  if (!ice.active) core.unrefOpPromise(promise);
+  PromisePrototypeThen(promise, (events) => {
+    ice.pending = null;
+    if (events === null || ice.closed) return;
+    iceDispatchEvents(transport, events, 0);
+  }, () => {
+    ice.pending = null;
+  });
+}
+
+// Each event is its own task, as for a peer connection.
+function iceDispatchEvents(transport, events, from) {
+  const ice = transport[_ice];
+  try {
+    iceDispatchEvent(transport, events, from);
+  } catch (error) {
+    reportException(error);
+  }
+  if (ice.closed) return;
+  if (from + 1 >= events.length) {
+    icePump(transport);
+    return;
+  }
+  const next = op_void_async_deferred();
+  ice.pending = next;
+  if (!ice.active) core.unrefOpPromise(next);
+  PromisePrototypeThen(next, () => {
+    ice.pending = null;
+    if (!ice.closed) iceDispatchEvents(transport, events, from + 1);
+  });
+}
+
+function iceDispatchEvent(transport, events, from) {
+  const ice = transport[_ice];
+  const event = events[from];
+  switch (event.type) {
+    case "icecandidate": {
+      const candidate = new RTCIceCandidate({
+        candidate: event.candidate,
+        sdpMid: "",
+        sdpMLineIndex: 0,
+        usernameFragment: ice.localParameters.usernameFragment,
+      });
+      ArrayPrototypePush(ice.local, candidate);
+      fire(
+        transport,
+        new RTCPeerConnectionIceEvent("icecandidate", { candidate }),
+      );
+      break;
+    }
+    case "gatheringcomplete":
+      // W3C webrtc-ice: the null candidate, then (a task of its own) the
+      // gathering state "complete".
+      ArrayPrototypeSplice(events, from + 1, 0, { type: "gatheringstate" });
+      fire(
+        transport,
+        new RTCPeerConnectionIceEvent("icecandidate", { candidate: null }),
+      );
+      break;
+    case "gatheringstate":
+      if (ice.gatheringState === "complete") break;
+      ice.gatheringState = "complete";
+      fire(transport, new Event("gatheringstatechange"));
+      break;
+    case "statechange":
+      // `checking` is set by start() / addRemoteCandidate() themselves (the
+      // agent reports it as soon as it starts, before any candidate).
+      if (event.state === "checking" || ice.state === event.state) break;
+      ice.state = event.state;
+      fire(transport, new Event("statechange"));
+      break;
+    case "selectedcandidatepairchange":
+      fire(transport, new Event("selectedcandidatepairchange"));
+      break;
+    case "rolechange":
+      ice.role = event.controlling ? "controlling" : "controlled";
+      break;
+  }
+}
+
+// The standalone transport's selected pair, its candidates matched with the
+// ones gathered and added (a peer-reflexive remote one hides its address).
+function iceSelectedPair(ice) {
+  if (ice.closed) return null;
+  const pair = op_webrtc_ice_selected_pair(ice.rid);
+  if (pair === null) return null;
+  return new RTCIceCandidatePair(
+    illegalConstructorKey,
+    findPairCandidate(ice.local, pair.local) ?? synthPairCandidate(pair.local),
+    findPairCandidate(ice.remote, pair.remote) ??
+      (pair.remote.type === "prflx"
+        ? hiddenPairCandidate(pair.remote)
+        : synthPairCandidate(pair.remote)),
+  );
+}
 
 class RTCIceCandidatePair {
   #local;
@@ -1674,11 +2307,77 @@ function setTransportStates(pc, silent = false) {
   }
 }
 
+// The candidate of `list` (signalled or received by the application) at a
+// selected pair candidate's address, port and protocol.
+function findPairCandidate(list, cand) {
+  for (let i = 0; i < list.length; ++i) {
+    const c = list[i];
+    const host = StringPrototypeIncludes(c.address ?? "", ":")
+      ? `[${c.address}]`
+      : c.address;
+    if (`${host}:${c.port}` === cand.addr && c.protocol === cand.protocol) {
+      return c;
+    }
+  }
+  return null;
+}
+
+// A selected pair candidate the application doesn't have (gathered or
+// learned by the agent itself), written out from its fields.
+function synthPairCandidate(cand) {
+  const related = cand.relatedAddress !== ""
+    ? ` raddr ${cand.relatedAddress} rport ${cand.relatedPort}`
+    : cand.type === "host"
+    ? ""
+    : " raddr 0.0.0.0 rport 0";
+  const foundation = RegExpPrototypeTest(ICE_CHARS, cand.foundation)
+    ? cand.foundation
+    : "0";
+  return new RTCIceCandidate({
+    candidate: `candidate:${foundation} 1 ${cand.protocol} ${
+      MathMax(1, cand.priority)
+    } ${cand.address} ${cand.port} typ ${cand.type}${related}${
+      cand.protocol === "tcp" && cand.type !== "relay" ? " tcptype active" : ""
+    }`,
+    sdpMLineIndex: 0,
+  });
+}
+
+// A peer-reflexive remote candidate the application never signalled: W3C
+// webrtc-pc 4.8.1 exposes it with an empty candidate string and a null
+// address (its address came from the network, not from the application).
+function hiddenPairCandidate(cand) {
+  return candidateWithFields({ candidate: "", sdpMLineIndex: 0 }, {
+    foundation: cand.foundation,
+    component: "rtp",
+    priority: cand.priority,
+    address: null,
+    protocol: cand.protocol === "tcp" ? "tcp" : "udp",
+    port: cand.port,
+    type: "prflx",
+    tcpType: null,
+    relatedAddress: null,
+    relatedPort: cand.relatedPort,
+  });
+}
+
 // The selected pair as RTCIceCandidates, from the candidates this side
 // signalled and received (matched by address); null before ICE connects.
 function selectedPair(pc) {
   const state = pc[_state];
   if (state.closed) return null;
+  const ice = op_webrtc_pc_ice_selected_pair(pc[_rid]);
+  if (ice !== null) {
+    return new RTCIceCandidatePair(
+      illegalConstructorKey,
+      findPairCandidate(state.localCandidates, ice.local) ??
+        synthPairCandidate(ice.local),
+      findPairCandidate(state.remoteCandidates, ice.remote) ??
+        (ice.remote.type === "prflx"
+          ? hiddenPairCandidate(ice.remote)
+          : synthPairCandidate(ice.remote)),
+    );
+  }
   const pair = op_webrtc_pc_selected_pair(pc[_rid]);
   if (pair === null) return null;
   const protocol = pair[2];
@@ -1759,11 +2458,14 @@ const STATS_TIME_FIELDS = [
 
 function engineStats(pc, key, sender) {
   const base = performance.timeOrigin + performance.now();
-  const entries = op_webrtc_pc_get_stats(
-    pc[_rid],
-    key ?? 0,
-    key !== null,
-    sender,
+  const entries = ArrayPrototypeMap(
+    op_webrtc_pc_get_stats(
+      pc[_rid],
+      key ?? 0,
+      key !== null,
+      sender,
+    ),
+    plainStats,
   );
   for (let i = 0; i < entries.length; ++i) {
     const stats = entries[i];
@@ -1772,7 +2474,19 @@ function engineStats(pc, key, sender) {
       if (typeof stats[field] === "number") stats[field] += base;
     }
   }
-  return refineStats(pc, entries, base);
+  return refineStats(pc, entries, base, key === null);
+}
+
+// A stats object is a dictionary (webrtc-stats 5, `RTCStats`): an ordinary
+// object, as its records (`qualityLimitationDurations`) are. The op hands
+// over null-prototype objects, which have no `hasOwnProperty`.
+function plainStats(value) {
+  if (value === null || typeof value !== "object") return value;
+  if (ArrayIsArray(value)) return ArrayPrototypeMap(value, plainStats);
+  const out = {};
+  // The op's objects have no prototype: this sees their own members only.
+  for (const key in value) out[key] = plainStats(value[key]);
+  return out;
 }
 
 // Members the engine fills with an empty string, `Unspecified` or a zero
@@ -1791,6 +2505,12 @@ const STATS_OPTIONAL_STRINGS = [
   "iceState",
   "dtlsState",
   "dtlsRole",
+  // A reference with nothing to name: no pair selected yet, no certificate
+  // exchanged, a stream not yet associated with a media section.
+  "selectedCandidatePairId",
+  "localCertificateId",
+  "remoteCertificateId",
+  "mid",
 ];
 const HEX_ONLY = new SafeRegExp("^(?:[0-9a-fA-F]{2})+$");
 
@@ -1807,7 +2527,11 @@ function hexToBase64(hex) {
 // transport), no member without a value, the certificate as base64 DER, the
 // codec an outbound stream sends with, and a `media-source` for each sender
 // with a track.
-function refineStats(pc, entries, now) {
+function refineStats(pc, engineEntries, now, whole) {
+  const entries = withoutRetiredStreams(
+    pc,
+    ArrayPrototypeFilter(engineEntries, remoteStreamReported),
+  );
   const ids = new SafeSet();
   let transportId = null;
   for (let i = 0; i < entries.length; ++i) {
@@ -1835,6 +2559,19 @@ function refineStats(pc, entries, now) {
       case "local-candidate":
       case "remote-candidate":
         if (stats.relatedAddress === undefined) delete stats.relatedPort;
+        // wpt100:ice: a peer-reflexive remote candidate's address came from
+        // the network, not from the application: webrtc-stats 8.13 leaves it
+        // null unless the application signalled that address itself.
+        if (
+          stats.type === "remote-candidate" &&
+          stats.candidateType === "prflx" &&
+          !ArrayPrototypeSome(
+            state.remoteCandidates,
+            (c) => c.address === stats.address,
+          )
+        ) {
+          stats.address = null;
+        }
         break;
       case "certificate":
         if (
@@ -1864,12 +2601,21 @@ function refineStats(pc, entries, now) {
           const role = negotiatedDtlsRole(pc);
           if (role !== null) stats.dtlsRole = role;
         }
+        transportStateStats(pc, stats);
         break;
       case "outbound-rtp": {
         const t = ArrayPrototypeFind(
           state.transceivers,
           (t) => t[_state].mid !== null && t[_state].mid === stats.mid,
         );
+        // An encoding is "active" as the application configured it
+        // (webrtc-stats `RTCOutboundRtpStreamStats.active`:
+        // `RTCRtpEncodingParameters.active`).
+        const encodings = t?.[_state].sender[_state].encodings;
+        const encoding = encodings?.[stats.encodingIndex ?? 0];
+        if (encoding !== undefined) stats.active = encoding.active !== false;
+        // `encodingIndex` exists for video streams only.
+        if (stats.kind === "audio") delete stats.encodingIndex;
         if (t === undefined) break;
         if (stats.codecId === undefined) {
           const codec = sendCodecStats(pc, t, transportId, now);
@@ -1892,6 +2638,17 @@ function refineStats(pc, entries, now) {
         }
         break;
       }
+      case "inbound-rtp": {
+        // `trackIdentifier` is the receiver's track's id (webrtc-stats
+        // `RTCInboundRtpStreamStats.trackIdentifier`), which the msid gave
+        // it, not the engine's own name for the track.
+        const t = transceiverOfStream(state, stats);
+        const track = t?.[_state].receiver[_state].track;
+        if (track !== undefined && track !== null) {
+          stats.trackIdentifier = track.id;
+        }
+        break;
+      }
     }
   }
   // A remote-inbound stream is coded as the outbound stream it reports on.
@@ -1904,7 +2661,179 @@ function refineStats(pc, entries, now) {
     if (local?.codecId !== undefined) stats.codecId = local.codecId;
   }
   for (let i = 0; i < added.length; ++i) ArrayPrototypePush(entries, added[i]);
-  return entries;
+  if (whole) {
+    addSenderSources(state, entries, ids, now);
+    addChannelStats(pc, entries, ids, now);
+  }
+  // Before the first description there is no RTCDtlsTransport (and so no
+  // RTCIceTransport) for a `transport` object to describe.
+  const report = pc.localDescription === null &&
+      pc.remoteDescription === null
+    ? ArrayPrototypeFilter(entries, (e) => e.type !== "transport")
+    : entries;
+  dropUnresolvedReferences(report);
+  return report;
+}
+
+// The transport's ICE and DTLS state and the ICE role before the engine has
+// any to report (webrtc-stats `RTCTransportStats`: the RTCIceTransport's
+// `state` and `role`, the RTCDtlsTransport's `state`). The role is the one
+// this side takes in the offer / answer exchange under way (RFC 8445
+// section 6.1.1: the offerer is controlling) until an answer fixes it.
+function transportStateStats(pc, stats) {
+  const s = pc[_state];
+  const dtls = s.dtls;
+  if (stats.iceState === undefined) {
+    stats.iceState = dtls !== null && dtls !== undefined
+      ? dtls[_transportState].ice[_transportState].state
+      : (s.closed ? "closed" : s.iceConnectionState);
+  }
+  if (stats.dtlsState === undefined) {
+    let dtlsState = dtls !== null && dtls !== undefined
+      ? dtls[_transportState].state
+      : "new";
+    if (dtls === null || dtls === undefined) {
+      if (s.closed || s.connectionState === "closed") dtlsState = "closed";
+      else if (s.connectionState === "failed") dtlsState = "failed";
+      else if (s.connectionState === "connected") dtlsState = "connected";
+      else if (s.connectionState === "connecting") dtlsState = "connecting";
+    }
+    stats.dtlsState = dtlsState;
+  }
+  if (stats.iceRole === undefined) {
+    let role = s.iceRole;
+    if (role === null || role === undefined) {
+      role = s.signalingState === "have-local-offer" ||
+          s.signalingState === "have-local-pranswer"
+        ? "controlling"
+        : s.signalingState === "have-remote-offer" ||
+            s.signalingState === "have-remote-pranswer"
+        ? "controlled"
+        : "unknown";
+    }
+    stats.iceRole = role;
+  }
+}
+
+// webrtc-stats 6.1: the remote RTP stream objects are created when their
+// RTCP packet is first received. The engine has one beside each local stream
+// from the start: a `remote-inbound-rtp` counts the receiver reports it was
+// made from (each one a round-trip measurement), a `remote-outbound-rtp` the
+// sender reports.
+function remoteStreamReported(stats) {
+  if (stats.type === "remote-inbound-rtp") {
+    return stats.roundTripTimeMeasurements !== 0;
+  }
+  if (stats.type === "remote-outbound-rtp") return stats.reportsSent !== 0;
+  return true;
+}
+
+// A `media-source` for each track attached to a sender (webrtc-stats
+// `RTCStatsType` "media-source": created when a track is attached to any
+// RTCRtpSender), also before the sender has an outbound stream.
+function addSenderSources(state, entries, ids, now) {
+  for (let i = 0; i < state.transceivers.length; ++i) {
+    const t = state.transceivers[i];
+    if (t[_state].stopped) continue;
+    const track = t[_state].sender[_state].track;
+    if (track === null || track === undefined) continue;
+    const source = mediaSourceStats(track, {}, now);
+    if (SetPrototypeHas(ids, source.id)) continue;
+    SetPrototypeAdd(ids, source.id);
+    ArrayPrototypePush(entries, source);
+  }
+}
+
+// A `data-channel` object for each channel from its creation (webrtc-stats
+// `RTCStatsType` "data-channel": created when the RTCDataChannel is), which
+// the engine has only once the channel opens. Before that the channel has
+// sent and received nothing; `dataChannelIdentifier` is there once the
+// channel has an id.
+function addChannelStats(pc, entries, ids, now) {
+  MapPrototypeForEach(pc[_channels], (channel, handle) => {
+    const id = `RTCDataChannel_${handle}`;
+    if (SetPrototypeHas(ids, id)) return;
+    SetPrototypeAdd(ids, id);
+    const stats = {
+      timestamp: now,
+      type: "data-channel",
+      id,
+      label: channel.label,
+      protocol: channel.protocol,
+      state: channel.readyState,
+      messagesSent: 0,
+      bytesSent: 0,
+      messagesReceived: 0,
+      bytesReceived: 0,
+    };
+    const streamId = channel.id;
+    if (streamId !== null) stats.dataChannelIdentifier = streamId;
+    ArrayPrototypePush(entries, stats);
+  });
+}
+
+// webrtc-stats 5 (`RTCStats`): a member that references another object
+// names one in the same report; a reference with nothing to name is left out.
+function dropUnresolvedReferences(entries) {
+  const ids = new SafeSet();
+  for (let i = 0; i < entries.length; ++i) SetPrototypeAdd(ids, entries[i].id);
+  for (let i = 0; i < entries.length; ++i) {
+    const stats = entries[i];
+    for (const key in stats) {
+      if (
+        StringPrototypeEndsWith(key, "Id") && typeof stats[key] === "string" &&
+        !SetPrototypeHas(ids, stats[key])
+      ) {
+        delete stats[key];
+      }
+    }
+  }
+}
+
+// The transceiver an RTP stream's `mid` names, if this connection still
+// has it.
+function transceiverOfStream(state, stats) {
+  if (typeof stats.mid !== "string" || stats.mid === "") return undefined;
+  return ArrayPrototypeFind(
+    state.transceivers,
+    (t) => t[_state].mid === stats.mid,
+  );
+}
+
+// The RTP stream stats whose lifetime ended (webrtc-stats 6.1, "lifetime
+// considerations"): those of a transceiver that is stopped (webrtc-pc 5.4,
+// "stop the RTCRtpTransceiver": a negotiation completed after stop()) or
+// gone, with the remote stream objects and the codecs only they named.
+// stop() alone keeps them until that negotiation.
+function withoutRetiredStreams(pc, entries) {
+  const state = pc[_state];
+  const retired = new SafeSet();
+  const codecs = new SafeSet();
+  for (let i = 0; i < entries.length; ++i) {
+    const stats = entries[i];
+    if (stats.type !== "inbound-rtp" && stats.type !== "outbound-rtp") {
+      continue;
+    }
+    if (typeof stats.mid !== "string" || stats.mid === "") continue;
+    const t = transceiverOfStream(state, stats);
+    if (t !== undefined && !t[_state].stopped) continue;
+    SetPrototypeAdd(retired, stats.id);
+    if (typeof stats.codecId === "string") {
+      SetPrototypeAdd(codecs, stats.codecId);
+    }
+  }
+  if (SetPrototypeGetSize(retired) === 0) return entries;
+  const kept = ArrayPrototypeFilter(
+    entries,
+    (e) =>
+      !SetPrototypeHas(retired, e.id) && !SetPrototypeHas(retired, e.localId),
+  );
+  return ArrayPrototypeFilter(
+    kept,
+    (e) =>
+      e.type !== "codec" || !SetPrototypeHas(codecs, e.id) ||
+      ArrayPrototypeSome(kept, (o) => o.codecId === e.id),
+  );
 }
 
 // The DTLS role the current descriptions negotiated (RFC 5763 section 5: the
@@ -2027,7 +2956,7 @@ class RTCRtpSender {
   }
   get transport() {
     webidl.assertBranded(this, RTCRtpSenderPrototype);
-    return dtlsTransportOf(this[_pc]);
+    return rtpTransportOf(this[_transceiver]);
   }
   get dtmf() {
     webidl.assertBranded(this, RTCRtpSenderPrototype);
@@ -2047,21 +2976,10 @@ class RTCRtpSender {
 
   getParameters() {
     webidl.assertBranded(this, RTCRtpSenderPrototype);
-    const pc = this[_pc];
-    const transceiver = this[_transceiver];
-    let negotiated = { codecs: [], headerExtensions: [], encodings: [] };
-    if (!pc[_state].closed) {
-      try {
-        negotiated = op_webrtc_sender_parameters(
-          pc[_rid],
-          transceiver[_key],
-        ) ?? negotiated;
-      } catch {
-        // The transceiver is gone.
-      }
-    }
     const state = this[_state];
-    const kind = transceiver[_state].kind;
+    const kind = this[_transceiver][_state].kind;
+    const negotiated = senderNegotiated(this);
+    const codecs = negotiated.codecs;
     const encodings = ArrayPrototypeMap(state.encodings, (e) => {
       const out = { active: e.active };
       if (e.rid !== undefined) out.rid = e.rid;
@@ -2075,22 +2993,33 @@ class RTCRtpSender {
       // webrtc-extensions: whether the sender may vary its frame length (it
       // never does; the member is kept as set).
       out.adaptivePtime = e.adaptivePtime ?? false;
+      if (e.codec !== undefined) out.codec = { ...e.codec };
+      if (e.encodingComplexity !== undefined) {
+        out.encodingComplexity = e.encodingComplexity;
+      }
+      if (e.scalabilityMode !== undefined) {
+        // Once a codec is negotiated, the mode it can send.
+        const sending = e.codec ??
+          ArrayPrototypeFind(codecs, (c) => !isRepairCodec(c.mimeType));
+        out.scalabilityMode = sending === undefined
+          ? e.scalabilityMode
+          : negotiatedScalabilityMode(e.scalabilityMode, sending.mimeType);
+      }
       return out;
     });
-    const hasNegotiated = transceiver[_state].currentDirection !== null;
+    // [[LastReturnedParameters]]: until the current task ends, the same
+    // transaction (webrtc-pc 5.2 getParameters()).
+    const previous = this[_pc][_state].closed ? null : state.lastParameters;
     const params = {
-      transactionId: uuid(),
+      transactionId: previous?.transactionId ?? uuid(),
       encodings,
-      headerExtensions: hasNegotiated
-        ? ArrayPrototypeMap(negotiated.headerExtensions, (h) => ({ ...h }))
-        : [],
-      rtcp: { cname: pc[_state].cname, reducedSize: false },
-      codecs: hasNegotiated
-        ? ArrayPrototypeMap(negotiated.codecs, (c) => ({ ...c }))
-        : [],
+      headerExtensions: negotiated.headerExtensions,
+      rtcp: { cname: this[_pc][_state].cname, reducedSize: false },
+      codecs,
     };
     state.lastParameters = {
       transactionId: params.transactionId,
+      codecs: params.codecs,
       snapshot: JSONStringify({
         e: ArrayPrototypeMap(params.encodings, (e) => e.rid ?? null),
         h: params.headerExtensions,
@@ -2098,29 +3027,43 @@ class RTCRtpSender {
         c: params.codecs,
       }),
     };
-    // The transaction id is valid until the current task ends.
-    const timers = pc[_state].timers;
-    const timer = setTimeout(() => {
-      SetPrototypeDelete(timers, timer);
-      if (state.lastParameters?.transactionId === params.transactionId) {
-        state.lastParameters = null;
-      }
-    }, 0);
-    SetPrototypeAdd(timers, timer);
+    if (previous === null) {
+      // The transaction id is valid until the current task ends.
+      const pc = this[_pc];
+      const timers = pc[_state].timers;
+      const last = state.lastParameters;
+      const timer = setTimeout(() => {
+        SetPrototypeDelete(timers, timer);
+        if (state.lastParameters?.transactionId === last.transactionId) {
+          state.lastParameters = null;
+        }
+      }, 0);
+      SetPrototypeAdd(timers, timer);
+    }
     return params;
   }
 
-  setParameters(parameters, _setParameterOptions = undefined) {
+  setParameters(parameters, setParameterOptions = undefined) {
     const branded = brandError(this, RTCRtpSenderPrototype);
     if (branded !== null) return PromiseReject(branded);
     const transceiver = this[_transceiver];
     const state = this[_state];
     try {
-      if (transceiver[_state].stopping || transceiver[_state].stopped) {
-        throw invalidState("The transceiver is stopped");
-      }
+      // The dictionary's required members (WebIDL conversion comes first).
       if (parameters === null || typeof parameters !== "object") {
         throw new TypeError("setParameters: parameters are required");
+      }
+      if (parameters.transactionId === undefined) {
+        throw new TypeError("setParameters: 'transactionId' is required");
+      }
+      if (parameters.encodings === undefined) {
+        throw new TypeError("setParameters: 'encodings' is required");
+      }
+      const encodingOptions = setParameterOptions?.encodingOptions === undefined
+        ? []
+        : ArrayFrom(setParameterOptions.encodingOptions);
+      if (transceiver[_state].stopping || transceiver[_state].stopped) {
+        throw invalidState("The transceiver is stopped");
       }
       const last = state.lastParameters;
       if (last === null) {
@@ -2131,9 +3074,6 @@ class RTCRtpSender {
           "The transactionId doesn't match the last getParameters()",
           "InvalidModificationError",
         );
-      }
-      if (parameters.encodings === undefined) {
-        throw new TypeError("setParameters: 'encodings' is required");
       }
       const encodings = ArrayFrom(parameters.encodings);
       const snapshot = JSONStringify({
@@ -2151,13 +3091,36 @@ class RTCRtpSender {
           "InvalidModificationError",
         );
       }
-      const next = validateEncodings(
-        encodings,
-        transceiver[_state].kind,
-        "setParameters",
-        true,
-      );
-      state.lastParameters = null;
+      const kind = transceiver[_state].kind;
+      // webrtc-extensions: encodingOptions, when given, has one entry per
+      // encoding (audio senders ignore it).
+      if (
+        kind === "video" && encodingOptions.length !== 0 &&
+        encodingOptions.length !== encodings.length
+      ) {
+        throw new DOMException(
+          "setParameters: encodingOptions doesn't match the encodings",
+          "InvalidModificationError",
+        );
+      }
+      const next = validateEncodings(encodings, kind, "setParameters", true);
+      // webrtc-pc 5.2 setParameters(): an encoding's codec must be one the
+      // sender can choose, the negotiated codecs, else what it implements.
+      let choosable = last.codecs ?? [];
+      if (choosable.length === 0) {
+        choosable = capabilities(kind, true)?.codecs ?? [];
+      }
+      for (let i = 0; i < next.length; ++i) {
+        if (
+          next[i].codec !== undefined &&
+          !ArrayPrototypeSome(choosable, (c) => codecMatches(c, next[i].codec))
+        ) {
+          throw new DOMException(
+            `setParameters: ${next[i].codec.mimeType} is not a codec the sender can use`,
+            "InvalidModificationError",
+          );
+        }
+      }
       state.encodings = next;
       const pc = this[_pc];
       if (!pc[_state].closed) {
@@ -2167,7 +3130,13 @@ class RTCRtpSender {
           state.track === null || !next[0]?.active,
         );
       }
-      return nextTask(null);
+      // [[LastReturnedParameters]] is cleared by the task that resolves the
+      // promise, so the same parameters may be set again before it runs.
+      return PromisePrototypeThen(nextTask(null), () => {
+        if (state.lastParameters?.transactionId === last.transactionId) {
+          state.lastParameters = null;
+        }
+      });
     } catch (error) {
       return PromiseReject(error);
     }
@@ -2231,6 +3200,39 @@ class RTCRtpSender {
 }
 webidl.configureInterface(RTCRtpSender);
 const RTCRtpSenderPrototype = RTCRtpSender.prototype;
+
+// The sender's negotiated codecs and header extensions (none before the
+// transceiver has negotiated a direction).
+function senderNegotiated(sender) {
+  const pc = sender[_pc];
+  const transceiver = sender[_transceiver];
+  let negotiated = { codecs: [], headerExtensions: [] };
+  if (!pc[_state].closed && transceiver[_state].currentDirection !== null) {
+    try {
+      negotiated = op_webrtc_sender_parameters(
+        pc[_rid],
+        transceiver[_key],
+      ) ?? negotiated;
+    } catch {
+      // The transceiver is gone.
+    }
+  }
+  return {
+    codecs: ArrayPrototypeMap(negotiated.codecs, (c) => ({ ...c })),
+    headerExtensions: ArrayPrototypeMap(
+      negotiated.headerExtensions,
+      (h) => ({ ...h }),
+    ),
+  };
+}
+
+// Retransmission, redundancy and FEC formats (RFC 4588, 2198, 5109).
+function isRepairCodec(mimeType) {
+  const m = StringPrototypeToLowerCase(String(mimeType));
+  return StringPrototypeEndsWith(m, "/rtx") ||
+    StringPrototypeEndsWith(m, "/red") ||
+    StringPrototypeIncludes(m, "fec");
+}
 
 function setSenderTrack(sender, track) {
   const state = sender[_state];
@@ -2380,7 +3382,12 @@ function dtmfPlayout(dtmf) {
   const sender = state.sender;
   const pc = sender[_pc];
   const t = sender[_transceiver][_state];
-  if (pc[_state].closed || t.stopping || t.stopped) {
+  // Playout task, step 1-2: a stopping transceiver, or one negotiated to
+  // send nothing (currentDirection recvonly / inactive), plays no more tones.
+  if (
+    pc[_state].closed || t.stopping || t.stopped ||
+    t.currentDirection === "recvonly" || t.currentDirection === "inactive"
+  ) {
     state.playing = false;
     return;
   }
@@ -2444,7 +3451,7 @@ class RTCRtpReceiver {
   }
   get transport() {
     webidl.assertBranded(this, RTCRtpReceiverPrototype);
-    return dtlsTransportOf(this[_pc]);
+    return rtpTransportOf(this[_transceiver]);
   }
   get jitterBufferTarget() {
     webidl.assertBranded(this, RTCRtpReceiverPrototype);
@@ -2534,7 +3541,14 @@ function defineTransformAttribute(prototype, side) {
   const { get, set } = ObjectGetOwnPropertyDescriptor({
     get transform() {
       webidl.assertBranded(this, prototype);
-      return this[_transform] ?? null;
+      const transform = this[_transform] ?? null;
+      // createEncodedStreams()'s internal transform is not one.
+      if (
+        transform !== null && loadEncodedTransform().isEncodedStreams(transform)
+      ) {
+        return null;
+      }
+      return transform;
     },
     set transform(value) {
       webidl.assertBranded(this, prototype);
@@ -2551,6 +3565,26 @@ function defineTransformAttribute(prototype, side) {
 }
 defineTransformAttribute(RTCRtpSenderPrototype, "sender");
 defineTransformAttribute(RTCRtpReceiverPrototype, "receiver");
+
+// `createEncodedStreams()`: the insertable streams API that preceded
+// RTCRtpScriptTransform, as Chrome has it (03_encoded_transform.js).
+function defineCreateEncodedStreams(prototype, side) {
+  const { createEncodedStreams } = {
+    createEncodedStreams() {
+      webidl.assertBranded(this, prototype);
+      return loadEncodedTransform().createEncodedStreams(this, side);
+    },
+  };
+  ObjectDefineProperty(prototype, "createEncodedStreams", {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: createEncodedStreams,
+  });
+}
+defineCreateEncodedStreams(RTCRtpSenderPrototype, "sender");
+defineCreateEncodedStreams(RTCRtpReceiverPrototype, "receiver");
 
 function receiverSources(receiver, contributing) {
   const pc = receiver[_pc];
@@ -2582,6 +3616,161 @@ function receiverSources(receiver, contributing) {
   }
 }
 
+// wpt100:hdrext — RTP header extension control (webrtc-extensions).
+const EXTENSION_DIRECTIONS = [
+  "sendrecv",
+  "sendonly",
+  "recvonly",
+  "inactive",
+  "stopped",
+];
+// Mandatory to use, both ways: the MID extension with BUNDLE (RFC 9143
+// section 9.1, RFC 8834 section 5.2.4).
+const MANDATORY_HEADER_EXTENSIONS = ["urn:ietf:params:rtp-hdrext:sdes:mid"];
+// Implemented, but not in an initial offer unless the application asks (an
+// answer still takes them when offered).
+const UNOFFERED_HEADER_EXTENSIONS = [
+  "http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time",
+];
+
+function copyHeaderExtensions(list) {
+  return ArrayPrototypeMap(
+    list,
+    (e) => ({ uri: e.uri, direction: e.direction }),
+  );
+}
+
+// [[HeaderExtensionsToNegotiate]] of a new transceiver: the first
+// non-stopping transceiver's of the same kind, else the implemented ones;
+// [[NegotiatedHeaderExtensions]]: each of them, "stopped".
+function initHeaderExtensions(transceiver, pc, kind) {
+  const state = transceiver[_state];
+  const first = ArrayPrototypeFind(
+    pc[_state].transceivers,
+    (t) =>
+      t[_state].kind === kind && !t[_state].stopping && !t[_state].stopped,
+  );
+  if (first !== undefined) {
+    state.headerExtensionsToNegotiate = copyHeaderExtensions(
+      first[_state].headerExtensionsToNegotiate,
+    );
+    state.userStoppedExtensions = new SafeSet();
+    SetPrototypeForEach(
+      first[_state].userStoppedExtensions,
+      (uri) => SetPrototypeAdd(state.userStoppedExtensions, uri),
+    );
+  } else {
+    const implemented = capabilities(kind, true)?.headerExtensions ?? [];
+    state.headerExtensionsToNegotiate = ArrayPrototypeMap(
+      implemented,
+      (h) => ({
+        uri: h.uri,
+        direction: ArrayPrototypeIncludes(UNOFFERED_HEADER_EXTENSIONS, h.uri)
+          ? "stopped"
+          : "sendrecv",
+      }),
+    );
+    state.userStoppedExtensions = new SafeSet();
+  }
+  state.negotiatedHeaderExtensions = ArrayPrototypeMap(
+    state.headerExtensionsToNegotiate,
+    (e) => ({ uri: e.uri, direction: "stopped" }),
+  );
+}
+
+// Before an offer or answer: the extensions each transceiver's media section
+// may carry. An offer has the ones not "stopped"; an answer the offered ones
+// the application didn't stop itself (one only the last negotiation left
+// "stopped" comes back when the peer offers it again).
+function pushHeaderExtensions(pc, offer) {
+  const transceivers = pc[_state].transceivers;
+  for (let i = 0; i < transceivers.length; ++i) {
+    const ts = transceivers[i][_state];
+    if (ts.stopped) continue;
+    const uris = [];
+    const list = ts.headerExtensionsToNegotiate;
+    for (let j = 0; j < list.length; ++j) {
+      const e = list[j];
+      const keep = offer
+        ? e.direction !== "stopped"
+        : !SetPrototypeHas(ts.userStoppedExtensions, e.uri);
+      if (keep) ArrayPrototypePush(uris, e.uri);
+    }
+    try {
+      op_webrtc_transceiver_set_header_extensions(
+        pc[_rid],
+        transceivers[i][_key],
+        uris,
+      );
+    } catch {
+      // The engine's transceiver is gone.
+    }
+  }
+}
+
+// The `a=extmap` lines of each media section, by mid: id and direction
+// (sendrecv when unstated) per URI.
+function extmapsOf(sdp) {
+  const out = new SafeMap();
+  const lines = StringPrototypeSplit(sdp, "\n");
+  let current = null;
+  for (let i = 0; i < lines.length; ++i) {
+    const line = StringPrototypeTrim(lines[i]);
+    if (StringPrototypeStartsWith(line, "m=")) {
+      const port = StringPrototypeSplit(line, " ")[1];
+      current = { mid: null, rejected: port === "0", extensions: [] };
+      continue;
+    }
+    if (current === null) continue;
+    if (line === "a=bundle-only") {
+      current.rejected = false;
+    } else if (StringPrototypeStartsWith(line, "a=mid:")) {
+      current.mid = StringPrototypeSlice(line, 6);
+      MapPrototypeSet(out, current.mid, current);
+    } else if (StringPrototypeStartsWith(line, "a=extmap:")) {
+      const fields = StringPrototypeSplit(StringPrototypeSlice(line, 9), " ");
+      if (fields.length < 2) continue;
+      const idDir = StringPrototypeSplit(fields[0], "/");
+      ArrayPrototypePush(current.extensions, {
+        id: NumberParseInt(idDir[0], 10),
+        direction: idDir[1] ?? "sendrecv",
+        uri: fields[1],
+      });
+    }
+  }
+  return out;
+}
+
+// webrtc-extensions, "set a session description" for an answer: each
+// extension's direction as the answer has it (reversed for a remote one,
+// "stopped" when absent) becomes both [[NegotiatedHeaderExtensions]] and
+// [[HeaderExtensionsToNegotiate]].
+function headerExtensionsNegotiated(pc, sdp, remote) {
+  const sections = extmapsOf(sdp);
+  const transceivers = pc[_state].transceivers;
+  for (let i = 0; i < transceivers.length; ++i) {
+    const ts = transceivers[i][_state];
+    if (ts.mid === null) continue;
+    const section = MapPrototypeGet(sections, ts.mid);
+    if (section === undefined) continue;
+    const negotiated = ArrayPrototypeMap(
+      ts.headerExtensionsToNegotiate,
+      (e) => {
+        const found = section.rejected
+          ? undefined
+          : ArrayPrototypeFind(section.extensions, (x) => x.uri === e.uri);
+        let direction = found === undefined ? "stopped" : found.direction;
+        if (found !== undefined && remote) {
+          direction = reverseDirection(direction);
+        }
+        return { uri: e.uri, direction };
+      },
+    );
+    ts.negotiatedHeaderExtensions = negotiated;
+    ts.headerExtensionsToNegotiate = copyHeaderExtensions(negotiated);
+  }
+}
+
 const DIRECTIONS = ["sendrecv", "sendonly", "recvonly", "inactive"];
 
 class RTCRtpTransceiver {
@@ -2598,7 +3787,12 @@ class RTCRtpTransceiver {
       currentDirection: null,
       stopping: false,
       stopped: false,
+      // [[SenderTransport]] / [[ReceiverTransport]] are set (true) and their
+      // values at the last stable state, which a rollback restores.
+      transport: false,
+      stableTransport: false,
     };
+    initHeaderExtensions(this, pc, init.kind);
     this[_state].sender = new RTCRtpSender(illegalConstructorKey, pc, this);
     this[_state].receiver = new RTCRtpReceiver(
       illegalConstructorKey,
@@ -2642,12 +3836,32 @@ class RTCRtpTransceiver {
     if (state.direction === direction) return;
     state.direction = direction;
     op_webrtc_transceiver_set_direction(pc[_rid], this[_key], direction);
+    // wpt100:transceiver: a remote offer's transceiver made to send has a
+    // sender in the engine now (media.rs ensure_sender), paused until its
+    // RTCRtpSender has a track.
+    if (direction === "sendrecv" || direction === "sendonly") {
+      const sender = state.sender;
+      op_webrtc_sender_set_paused(
+        pc[_rid],
+        this[_key],
+        sender[_state].track === null ||
+          !(sender[_state].encodings[0]?.active ?? true),
+      );
+    }
+    invalidateCreated(pc);
     updateNegotiationNeeded(pc);
   }
   get currentDirection() {
     webidl.assertBranded(this, RTCRtpTransceiverPrototype);
     const state = this[_state];
     return state.stopped ? "stopped" : state.currentDirection;
+  }
+  // wpt100:transceiver: `stopped` left webrtc-pc for `currentDirection ==
+  // "stopped"`, but every browser still has it and the WPT transceiver tests
+  // read it: the transceiver's [[Stopped]] slot.
+  get stopped() {
+    webidl.assertBranded(this, RTCRtpTransceiverPrototype);
+    return this[_state].stopped;
   }
 
   stop() {
@@ -2659,6 +3873,7 @@ class RTCRtpTransceiver {
     stopSending(this);
     state.stopping = true;
     op_webrtc_transceiver_stop(pc[_rid], this[_key]);
+    invalidateCreated(pc);
     updateNegotiationNeeded(pc);
   }
 
@@ -2711,6 +3926,7 @@ class RTCRtpTransceiver {
       }
     }
     if (pc[_state].closed) return;
+    invalidateCreated(pc);
     op_webrtc_transceiver_set_codec_preferences(
       pc[_rid],
       this[_key],
@@ -2722,9 +3938,108 @@ class RTCRtpTransceiver {
       })),
     );
   }
+
+  // wpt100:hdrext — webrtc-extensions RTP header extension control.
+  getHeaderExtensionsToNegotiate() {
+    webidl.assertBranded(this, RTCRtpTransceiverPrototype);
+    return copyHeaderExtensions(this[_state].headerExtensionsToNegotiate);
+  }
+
+  setHeaderExtensionsToNegotiate(extensions) {
+    webidl.assertBranded(this, RTCRtpTransceiverPrototype);
+    const prefix =
+      "Failed to execute 'setHeaderExtensionsToNegotiate' on 'RTCRtpTransceiver'";
+    webidl.requiredArguments(arguments.length, 1, prefix);
+    if (
+      extensions === null || typeof extensions !== "object" ||
+      typeof extensions[SymbolIterator] !== "function"
+    ) {
+      throw new TypeError(`${prefix}: the argument is not a sequence`);
+    }
+    const list = ArrayFrom(extensions);
+    const converted = [];
+    for (let i = 0; i < list.length; ++i) {
+      const e = list[i];
+      if (e === null || typeof e !== "object") {
+        throw new TypeError(
+          `${prefix}: an RTCRtpHeaderExtensionCapability must be an object`,
+        );
+      }
+      // `uri` is required; an empty one names no extension.
+      if (e.uri === undefined || String(e.uri) === "") {
+        throw new TypeError(`${prefix}: 'uri' is required`);
+      }
+      if (e.direction === undefined) {
+        throw new TypeError(`${prefix}: 'direction' is required`);
+      }
+      const direction = String(e.direction);
+      if (!ArrayPrototypeIncludes(EXTENSION_DIRECTIONS, direction)) {
+        throw new TypeError(
+          `${prefix}: '${direction}' is not a valid RTCRtpTransceiverDirection`,
+        );
+      }
+      ArrayPrototypePush(converted, { uri: String(e.uri), direction });
+    }
+    const current = this[_state].headerExtensionsToNegotiate;
+    if (converted.length !== current.length) {
+      throw new DOMException(
+        `${prefix}: the list must have the same extensions as getHeaderExtensionsToNegotiate()`,
+        "InvalidModificationError",
+      );
+    }
+    for (let i = 0; i < converted.length; ++i) {
+      const { uri, direction } = converted[i];
+      if (uri !== current[i].uri) {
+        throw new DOMException(
+          `${prefix}: '${uri}' is not the extension at index ${i}`,
+          "InvalidModificationError",
+        );
+      }
+      if (
+        ArrayPrototypeIncludes(MANDATORY_HEADER_EXTENSIONS, uri) &&
+        direction !== "sendrecv"
+      ) {
+        throw new DOMException(
+          `${prefix}: '${uri}' is mandatory and must be 'sendrecv'`,
+          "InvalidModificationError",
+        );
+      }
+    }
+    const stopped = new SafeSet();
+    for (let i = 0; i < converted.length; ++i) {
+      if (converted[i].direction === "stopped") {
+        SetPrototypeAdd(stopped, converted[i].uri);
+      }
+    }
+    this[_state].headerExtensionsToNegotiate = converted;
+    this[_state].userStoppedExtensions = stopped;
+    // A new offer or answer would carry other a=extmap lines: the last
+    // created ones are stale (wpt100:transceiver's generation counter).
+    invalidateCreated(this[_pc]);
+  }
+
+  getNegotiatedHeaderExtensions() {
+    webidl.assertBranded(this, RTCRtpTransceiverPrototype);
+    return copyHeaderExtensions(this[_state].negotiatedHeaderExtensions);
+  }
 }
 webidl.configureInterface(RTCRtpTransceiver);
 const RTCRtpTransceiverPrototype = RTCRtpTransceiver.prototype;
+
+// webrtc-pc 5.4 "stop sending and receiving". The receiver's track ends as the
+// user agent's own doing (not track.stop()), which mediacapture-main does in a
+// queued task: the stop() call or the description that caused it returns
+// first, with the track still live (WPT RTCRtpTransceiver-stopping).
+// The sender's and receiver's `transport` (one object for both): null until a
+// description gives the transceiver one (webrtc-pc 4.4.1.6: a local offer or
+// answer, or a remote answer; never a remote offer), and null again when a
+// rollback takes it back. The engine bundles everything on its one DTLS
+// transport, which is the object every transceiver shares.
+function rtpTransportOf(transceiver) {
+  return transceiver[_state].transport
+    ? dtlsTransportOf(transceiver[_pc])
+    : null;
+}
 
 function stopSending(transceiver) {
   const sender = transceiver[_state].sender;
@@ -2732,10 +4047,43 @@ function stopSending(transceiver) {
   const receiver = transceiver[_state].receiver;
   removeRemoteTrack(transceiver);
   closeReaders(receiver);
-  endTrack(receiver[_state].track);
+  endTrackSoon(receiver[_state].track);
   for (let i = 0; i < receiver[_state].clones.length; ++i) {
-    endTrack(receiver[_state].clones[i]);
+    endTrackSoon(receiver[_state].clones[i]);
   }
+}
+
+// A plain timer, not one of the connection's: close() ends the track at once
+// without an event, and the task then finds it ended.
+function endTrackSoon(track) {
+  if (track[_trackState].readyState === "ended") return;
+  setTimeout(() => endTrack(track), 0);
+}
+
+// webrtc-pc 5.4 "stop the RTCRtpTransceiver": [[Stopping]] and [[Stopped]]
+// (currentDirection reads "stopped"). `engine` stops the engine's transceiver
+// too (a remote description rejected its m-section); a rolled-back remote
+// offer's is gone from the engine already.
+function stopTransceiverNow(pc, transceiver, engine) {
+  const ts = transceiver[_state];
+  if (ts.stopped) return;
+  if (!ts.stopping) stopSending(transceiver);
+  ts.stopping = true;
+  ts.stopped = true;
+  if (engine) {
+    try {
+      op_webrtc_transceiver_stop(pc[_rid], transceiver[_key]);
+    } catch {
+      // The engine's transceiver is gone.
+    }
+  }
+}
+
+// A stopped transceiver leaves the connection's set of transceivers and loses
+// its mid; the engine keeps its own, which the next syncs leave out.
+function retireTransceiver(pc, transceiver) {
+  transceiver[_state].mid = null;
+  SetPrototypeAdd(pc[_state].retired, transceiver[_key]);
 }
 
 class RTCTrackEvent extends Event {
@@ -2829,7 +4177,48 @@ function validateEncodings(list, kind, method, keepRid) {
       enc.networkPriority = String(e.networkPriority);
     }
     if (e.adaptivePtime !== undefined) enc.adaptivePtime = !!e.adaptivePtime;
+    // webrtc-pc 5.2: the codec an encoding is sent with (an RTCRtpCodec).
+    if (e.codec !== undefined) enc.codec = convertCodec(e.codec, method);
+    // webrtc-extensions: an enum, so an unknown value is a TypeError for any
+    // kind; an audio encoding has no encoder complexity and drops it.
+    if (e.encodingComplexity !== undefined) {
+      const complexity = String(e.encodingComplexity);
+      if (!ArrayPrototypeIncludes(ENCODING_COMPLEXITIES, complexity)) {
+        throw new TypeError(
+          `${method}: '${complexity}' is not a valid RTCEncodingComplexity`,
+        );
+      }
+      if (kind === "video") enc.encodingComplexity = complexity;
+    }
+    // webrtc-svc 4.2.1: a mode no codec supports is an OperationError;
+    // audio has no scalability modes and drops it.
+    if (e.scalabilityMode !== undefined && kind === "video") {
+      const mode = String(e.scalabilityMode);
+      if (!ArrayPrototypeIncludes(SCALABILITY_MODES, mode)) {
+        throw new DOMException(
+          `${method}: '${mode}' is not a supported scalability mode`,
+          "OperationError",
+        );
+      }
+      enc.scalabilityMode = mode;
+    }
     ArrayPrototypePush(out, enc);
+  }
+  if (!keepRid) {
+    // webrtc-pc 5.1 addTransceiver(): a codec that is not one of
+    // RTCRtpSender.getCapabilities(kind).codecs is an OperationError.
+    const send = capabilities(kind, true)?.codecs ?? [];
+    for (let i = 0; i < out.length; ++i) {
+      if (
+        out[i].codec !== undefined &&
+        !ArrayPrototypeSome(send, (c) => codecMatches(c, out[i].codec))
+      ) {
+        throw new DOMException(
+          `${method}: ${out[i].codec.mimeType} is not a codec this sender implements`,
+          "OperationError",
+        );
+      }
+    }
   }
   if (!keepRid) {
     // addTransceiver(): at most MAX_ENCODINGS simulcast encodings, one for
@@ -2852,9 +4241,221 @@ function validateEncodings(list, kind, method, keepRid) {
   return out;
 }
 
+// A sender's [[SendEncodings]] when a description has been applied
+// (webrtc-pc 4.4.1.6 "set the RTCSessionDescription"): `remote` is the
+// transceiver's m-section in the remote description.
+// - A remote offer asking to receive simulcast gives a sender that has one
+//   encoding without a rid one encoding per offered layer (the first of each
+//   layer's alternatives, each once), scaled down by powers of two; the
+//   encodings it replaced come back on a rollback.
+// - An answer (local or remote) keeps the encodings whose layer the remote
+//   description still has, in the sender's order, or only the first when it
+//   has none of them (no simulcast, or every layer gone).
+// - An answer also drops an encoding's codec that is no longer negotiated.
+// Each success task clears [[LastReturnedParameters]].
+function negotiateEncodings(transceiver, remote, phase) {
+  const sender = transceiver[_state].sender;
+  const s = sender[_state];
+  if (phase.type === "rollback") {
+    if (s.ridlessEncodings !== undefined && s.ridlessEncodings !== null) {
+      s.encodings = s.ridlessEncodings;
+      s.ridlessEncodings = null;
+    }
+    s.lastParameters = null;
+    return;
+  }
+  s.lastParameters = null;
+  const video = transceiver[_state].kind === "video";
+  const layers = remote?.simulcastRecv ?? [];
+  if (phase.remote && phase.type === "offer" && video && layers.length > 0) {
+    const encodings = s.encodings;
+    if (encodings.length === 1 && encodings[0].rid === undefined) {
+      const n = MathMin(layers.length, MAX_ENCODINGS);
+      const next = [];
+      for (let i = 0; i < n; ++i) {
+        ArrayPrototypePush(next, {
+          active: true,
+          rid: layers[i],
+          scaleResolutionDownBy: 2 ** (n - 1 - i),
+        });
+      }
+      s.ridlessEncodings = encodings;
+      s.encodings = next;
+    }
+  }
+  if (phase.type !== "answer" && phase.type !== "pranswer") return;
+  if (phase.type === "answer") s.ridlessEncodings = null;
+  if (s.encodings.length > 1 && remote !== null && remote !== undefined) {
+    const kept = ArrayPrototypeFilter(
+      s.encodings,
+      (e) => e.rid !== undefined && ArrayPrototypeIncludes(layers, e.rid),
+    );
+    s.encodings = kept.length > 0 ? kept : [s.encodings[0]];
+  }
+  if (ArrayPrototypeSome(s.encodings, (e) => e.codec !== undefined)) {
+    const negotiated = senderNegotiated(sender).codecs;
+    if (negotiated.length > 0) {
+      for (let i = 0; i < s.encodings.length; ++i) {
+        const e = s.encodings[i];
+        if (
+          e.codec !== undefined &&
+          !ArrayPrototypeSome(negotiated, (c) => codecMatches(c, e.codec))
+        ) {
+          delete e.codec;
+        }
+      }
+    }
+  }
+}
+
+// RFC 5761 section 4: with RTP and RTCP multiplexed (which WebRTC requires),
+// payload types 64 to 95 would be taken for RTCP packet types, so an RTP
+// m-section may not use them (InvalidAccessError, as browsers reject it).
+function requirePayloadTypes(sdp) {
+  const lines = StringPrototypeSplit(sdp, "\n");
+  for (let i = 0; i < lines.length; ++i) {
+    const line = StringPrototypeTrim(lines[i]);
+    if (!StringPrototypeStartsWith(line, "m=")) continue;
+    const fields = ArrayPrototypeFilter(
+      StringPrototypeSplit(StringPrototypeSlice(line, 2), " "),
+      (f) => f !== "",
+    );
+    if (fields.length < 4 || !StringPrototypeIncludes(fields[2], "RTP")) {
+      continue;
+    }
+    for (let j = 3; j < fields.length; ++j) {
+      const pt = NumberParseInt(fields[j], 10);
+      if (pt >= 64 && pt <= 95) {
+        throw new DOMException(
+          `setRemoteDescription: payload type ${pt} collides with RTCP (RFC 5761)`,
+          "InvalidAccessError",
+        );
+      }
+    }
+  }
+}
+
+// RFC 9429 section 5.8.3 (RFC 3264 section 6): each m-section of an answer
+// has the media type of the offer's at the same index, known to this
+// endpoint or not.
+function requireAnswerMediaTypes(pc, sdp) {
+  const offer = op_webrtc_pc_descriptions(pc[_rid]).pendingLocal;
+  if (offer === null || offer === undefined) return;
+  const offered = mediaSectionsOf(offer[1]);
+  const answered = mediaSectionsOf(sdp);
+  const n = MathMin(offered.length, answered.length);
+  for (let i = 0; i < n; ++i) {
+    if (answered[i].kind !== offered[i].kind) {
+      throw new DOMException(
+        `setRemoteDescription: the answer's m-section ${i} is '${
+          answered[i].kind
+        }', the offer's '${offered[i].kind}'`,
+        "InvalidAccessError",
+      );
+    }
+  }
+}
+
 // The simulcast encodings one sender may have.
 const MAX_ENCODINGS = 16;
 const RID_RE = new SafeRegExp("^[A-Za-z0-9]+$");
+
+// webrtc-extensions RTCEncodingComplexity.
+const ENCODING_COMPLEXITIES = [
+  "low",
+  "normal",
+  "high",
+  "very-high",
+  "maximum",
+];
+
+// webrtc-svc section 6: the scalability modes.
+const SCALABILITY_MODES = [
+  "L1T1",
+  "L1T2",
+  "L1T3",
+  "L2T1",
+  "L2T1h",
+  "L2T1_KEY",
+  "L2T2",
+  "L2T2h",
+  "L2T2_KEY",
+  "L2T2_KEY_SHIFT",
+  "L2T3",
+  "L2T3h",
+  "L2T3_KEY",
+  "L2T3_KEY_SHIFT",
+  "L3T1",
+  "L3T1h",
+  "L3T1_KEY",
+  "L3T2",
+  "L3T2h",
+  "L3T2_KEY",
+  "L3T2_KEY_SHIFT",
+  "L3T3",
+  "L3T3h",
+  "L3T3_KEY",
+  "L3T3_KEY_SHIFT",
+  "S2T1",
+  "S2T1h",
+  "S2T2",
+  "S2T2h",
+  "S2T3",
+  "S2T3h",
+  "S3T1",
+  "S3T1h",
+  "S3T2",
+  "S3T2h",
+  "S3T3",
+  "S3T3h",
+];
+
+// The temporal layer count of a scalability mode ("L3T2_KEY" -> 2).
+function temporalLayers(mode) {
+  const i = StringPrototypeIndexOf(mode, "T");
+  return i === -1 ? 1 : NumberParseInt(StringPrototypeSlice(mode, i + 1), 10);
+}
+
+// The scalability mode a sender reports once a codec is negotiated: what was
+// asked for when the codec has it, else the codec's mode with the same
+// temporal layers and one spatial layer (VP8 and H.264 have no spatial
+// scalability, webrtc-svc section 4.2.1).
+function negotiatedScalabilityMode(mode, mimeType) {
+  const lower = StringPrototypeToLowerCase(mimeType);
+  if (lower !== "video/vp8" && lower !== "video/h264") return mode;
+  if (StringPrototypeStartsWith(mode, "L1T")) return mode;
+  return `L1T${MathMin(temporalLayers(mode), 3)}`;
+}
+
+// An RTCRtpCodec dictionary (mimeType and clockRate required).
+function convertCodec(codec, method) {
+  if (codec === null || typeof codec !== "object") {
+    throw new TypeError(`${method}: a codec must be an object`);
+  }
+  if (codec.mimeType === undefined || codec.clockRate === undefined) {
+    throw new TypeError(`${method}: a codec needs mimeType and clockRate`);
+  }
+  const out = {
+    mimeType: String(codec.mimeType),
+    clockRate: webidl.converters["unsigned long"](codec.clockRate),
+  };
+  if (codec.channels !== undefined) {
+    out.channels = webidl.converters["unsigned short"](codec.channels);
+  }
+  if (codec.sdpFmtpLine !== undefined) {
+    out.sdpFmtpLine = String(codec.sdpFmtpLine);
+  }
+  return out;
+}
+
+// webrtc-pc 5.2 "codec dictionary match" (payload types aside).
+function codecMatches(a, b) {
+  return StringPrototypeToLowerCase(String(a.mimeType)) ===
+      StringPrototypeToLowerCase(String(b.mimeType)) &&
+    a.clockRate === b.clockRate &&
+    (a.channels ?? null) === (b.channels ?? null) &&
+    (a.sdpFmtpLine ?? null) === (b.sdpFmtpLine ?? null);
+}
 
 // Each transceiver's remote track state before a remote offer is applied, so
 // that rolling the offer back can undo what it did (W3C "set the
@@ -2902,6 +4503,7 @@ function restoreRemoteTracks(pc) {
       continue;
     }
     const now = rstate.streams;
+    let added = false;
     for (let j = 0; j < now.length; ++j) {
       if (!ArrayPrototypeIncludes(before.streams, now[j])) {
         streamRemoveRemote(now[j], rstate.track);
@@ -2910,9 +4512,12 @@ function restoreRemoteTracks(pc) {
     for (let j = 0; j < before.streams.length; ++j) {
       if (!ArrayPrototypeIncludes(now, before.streams[j])) {
         streamAddRemote(before.streams[j], rstate.track);
+        added = true;
       }
     }
     rstate.streams = before.streams;
+    // The streams the rollback gave back are announced as new ones are.
+    if (added) ArrayPrototypePush(revived, t);
   }
   for (let i = 0; i < revived.length; ++i) {
     const receiver = revived[i][_state].receiver;
@@ -2988,14 +4593,68 @@ function convertIceServers(servers) {
         );
       }
     }
+    // wpt100:hdrext — webrtc-extensions RTCIceServer.credentialType and
+    // RTCOAuthCredential (set the configuration, step 11.6).
+    const credentialType = server.credentialType === undefined
+      ? "password"
+      : String(server.credentialType);
+    if (credentialType !== "password" && credentialType !== "oauth") {
+      throw new TypeError(
+        `Failed to construct 'RTCPeerConnection': '${credentialType}' is not a valid value for 'credentialType'`,
+      );
+    }
+    let credential = server.credential === undefined
+      ? undefined
+      : String(server.credential);
+    if (credentialType === "oauth") {
+      const c = server.credential;
+      if (c !== null && typeof c === "object") {
+        if (c.macKey === undefined || c.accessToken === undefined) {
+          throw new TypeError(
+            "Failed to construct 'RTCPeerConnection': an RTCOAuthCredential needs 'macKey' and 'accessToken'",
+          );
+        }
+        credential = {
+          macKey: String(c.macKey),
+          accessToken: String(c.accessToken),
+        };
+      } else if (ArrayPrototypeSome(urls, isTurnUrl)) {
+        throw new DOMException(
+          "Failed to construct 'RTCPeerConnection': credentialType is 'oauth' but the credential is not an RTCOAuthCredential",
+          "InvalidAccessError",
+        );
+      }
+    }
     ArrayPrototypePush(out, {
       urls,
       username: server.username === undefined
         ? undefined
         : String(server.username),
-      credential: server.credential === undefined
-        ? undefined
-        : String(server.credential),
+      credential,
+      credentialType,
+    });
+  }
+  return out;
+}
+
+function isTurnUrl(url) {
+  const u = StringPrototypeToLowerCase(url);
+  return StringPrototypeStartsWith(u, "turn:") ||
+    StringPrototypeStartsWith(u, "turns:");
+}
+
+// wpt100:hdrext — the ICE servers the engine gets: not the OAuth ones (RFC
+// 7635 needs an ACCESS-TOKEN attribute the engine's TURN client doesn't
+// send; they are kept in the configuration, unused).
+function engineIceServers(servers) {
+  const out = [];
+  for (let i = 0; i < servers.length; ++i) {
+    const s = servers[i];
+    if (s.credentialType === "oauth") continue;
+    ArrayPrototypePush(out, {
+      urls: s.urls,
+      username: s.username,
+      credential: s.credential,
     });
   }
   return out;
@@ -3075,6 +4734,35 @@ function convertConfiguration(configuration, prefix) {
       "InvalidStateError",
     );
   }
+  // wpt100:hdrext — webrtc-extensions members.
+  const rtpHeaderEncryptionPolicy = config.rtpHeaderEncryptionPolicy ===
+      undefined
+    ? "negotiate"
+    : String(config.rtpHeaderEncryptionPolicy);
+  if (
+    !ArrayPrototypeIncludes(
+      ["disable", "negotiate", "require"],
+      rtpHeaderEncryptionPolicy,
+    )
+  ) {
+    throw new TypeError(
+      `${prefix}: '${rtpHeaderEncryptionPolicy}' is not a valid value for 'rtpHeaderEncryptionPolicy'`,
+    );
+  }
+  const alwaysNegotiateDataChannels = !!config.alwaysNegotiateDataChannels;
+  const targetLatency = config.targetLatency === undefined
+    ? "lowest"
+    : String(config.targetLatency);
+  if (targetLatency !== "lowest" && targetLatency !== "none") {
+    throw new TypeError(
+      `${prefix}: '${targetLatency}' is not a valid value for 'targetLatency'`,
+    );
+  }
+  // wpt100:identity — RTCConfiguration.peerIdentity (W3C WebRTC Identity
+  // section 8.1): the target peer identity, a DOMString.
+  const peerIdentity = config.peerIdentity === undefined
+    ? null
+    : webidl.converters.DOMString(config.peerIdentity, prefix, "peerIdentity");
   return {
     iceServers: convertIceServers(config.iceServers),
     iceTransportPolicy,
@@ -3083,6 +4771,10 @@ function convertConfiguration(configuration, prefix) {
     iceCandidatePoolSize,
     certificates,
     network,
+    rtpHeaderEncryptionPolicy,
+    alwaysNegotiateDataChannels,
+    targetLatency,
+    peerIdentity,
   };
 }
 
@@ -3131,7 +4823,7 @@ class RTCPeerConnection extends EventTarget {
       }
     }
     this[_rid] = op_webrtc_pc_create({
-      iceServers: config.iceServers,
+      iceServers: engineIceServers(config.iceServers),
       iceTransportPolicy: config.iceTransportPolicy,
       bundlePolicy: config.bundlePolicy,
       certificates: ArrayPrototypeMap(
@@ -3140,6 +4832,12 @@ class RTCPeerConnection extends EventTarget {
       ),
       network: config.network === null ? null : config.network[_rid],
     });
+    // wpt100:hdrext — rtpHeaderEncryptionPolicy, alwaysNegotiateDataChannels.
+    op_webrtc_pc_set_negotiation_options(
+      this[_rid],
+      config.rtpHeaderEncryptionPolicy,
+      config.alwaysNegotiateDataChannels,
+    );
     this[_channels] = new SafeMap();
     this[_state] = {
       config,
@@ -3154,9 +4852,24 @@ class RTCPeerConnection extends EventTarget {
       dtlsState: null,
       dtls: null,
       transceivers: [],
+      // wpt100:transceiver: keys of the stopped transceivers that left
+      // `transceivers` (the engine keeps them).
+      retired: new SafeSet(),
+      // wpt100:transceiver: [[LastCreatedOffer]] / [[LastCreatedAnswer]]
+      // ({ sdp, generation }), valid while `generation` is unchanged.
+      lastCreatedOffer: null,
+      lastCreatedAnswer: null,
+      generation: 0,
       // Remote MediaStreams by id.
       streams: new SafeMap(),
       localCandidates: [],
+      // announcedKey()s of the gathered candidates whose icecandidate event
+      // was dispatched: only those are in the local description.
+      announced: new SafeSet(),
+      // A rolled-back first offer discarded its gathering (discardGathering).
+      gatheringDiscarded: false,
+      // The gathering state the engine last reported.
+      engineGatheringState: "new",
       remoteCandidates: [],
       remoteTracksBeforeOffer: null,
       cname: uuid(),
@@ -3272,7 +4985,7 @@ class RTCPeerConnection extends EventTarget {
           `Cannot create an offer in signaling state '${signaling}'`,
         );
       }
-      return inTask(this, () => {
+      const created = inTask(this, () => {
         // Legacy offerToReceiveAudio / offerToReceiveVideo: a recvonly
         // transceiver of that kind when there is none to receive on.
         const kinds = ["audio", "video"];
@@ -3302,11 +5015,12 @@ class RTCPeerConnection extends EventTarget {
         }
         // A plain RTCSessionDescriptionInit, as the spec has it (libraries
         // such as simple-peer edit its `sdp` before setLocalDescription).
-        return {
-          type: "offer",
-          sdp: createOfferSdp(this, !!options?.iceRestart),
-        };
+        const sdp = createOfferSdp(this, !!options?.iceRestart);
+        state.lastCreatedOffer = { sdp, generation: state.generation };
+        return { type: "offer", sdp };
       });
+      // wpt100:identity — the a=identity assertion (06_identity.js).
+      return identityHooks.withAssertion(this, created);
     });
   }
 
@@ -3323,10 +5037,16 @@ class RTCPeerConnection extends EventTarget {
           `Cannot create an answer in signaling state '${state}'`,
         );
       }
-      return inTask(this, () => ({
-        type: "answer",
-        sdp: op_webrtc_pc_create_answer(this[_rid]),
-      }));
+      const created = inTask(this, () => {
+        const sdp = createAnswerSdp(this);
+        this[_state].lastCreatedAnswer = {
+          sdp,
+          generation: this[_state].generation,
+        };
+        return { type: "answer", sdp };
+      });
+      // wpt100:identity — the a=identity assertion (06_identity.js).
+      return identityHooks.withAssertion(this, created);
     });
   }
 
@@ -3378,15 +5098,31 @@ class RTCPeerConnection extends EventTarget {
       }
       return inTask(this, () => {
         if (type !== "rollback" && (sdp === undefined || sdp === "")) {
-          sdp = type === "offer"
-            ? createOfferSdp(this, false)
-            : op_webrtc_pc_create_answer(this[_rid]);
+          // webrtc-pc 4.4.1.5: [[LastCreatedOffer]] / [[LastCreatedAnswer]]
+          // while still valid, else a new one.
+          const offer = type === "offer";
+          sdp = lastCreated(this, offer);
+          if (sdp === null) {
+            // The engine compares a description with the last one it made.
+            sdp = offer ? createOfferSdp(this, false) : createAnswerSdp(this);
+            const created = { sdp, generation: this[_state].generation };
+            if (offer) this[_state].lastCreatedOffer = created;
+            else this[_state].lastCreatedAnswer = created;
+          }
         }
         if (type !== "rollback" && typeof sdp === "string") {
           requireSdpSize(sdp);
         }
-        op_webrtc_pc_set_local_description(this[_rid], type, sdp ?? "");
+        // wpt100:identity — the engine gets the description without the
+        // a=identity line createOffer / createAnswer added (06_identity.js).
+        op_webrtc_pc_set_local_description(
+          this[_rid],
+          type,
+          identityHooks.engineSdp(this, sdp ?? ""),
+        );
         const state = this[_state];
+        if (type === "rollback") discardGathering(this);
+        else if (state.gatheringDiscarded) resumeGathering(this);
         if (type === "answer" || type === "pranswer") {
           state.iceRole ??= "controlled";
           readChannelIds(this);
@@ -3394,6 +5130,7 @@ class RTCPeerConnection extends EventTarget {
         activate(this);
         descriptionApplied(this, true, type);
         syncTransceivers(this, { remote: false, type });
+        if (type === "answer") headerExtensionsNegotiated(this, sdp, false);
         setSignalingState(this, nextSignalingState(signaling, true, type));
         updateSctpTransport(this, type);
         setTransportStates(this);
@@ -3451,6 +5188,19 @@ class RTCPeerConnection extends EventTarget {
           requireSdpSize(sdp);
           requireSdpSyntax(sdp);
           requireRtcpMux(sdp);
+          requireUniqueMsids(sdp);
+          // wpt100:codecs
+          requirePayloadTypes(sdp);
+          // wpt100:hdrext
+          requireFingerprint(sdp);
+          requireCryptex(this, sdp);
+          requireStableExtensionIds(this, sdp);
+          if (type === "answer" || type === "pranswer") {
+            // wpt100:codecs
+            requireAnswerMediaTypes(this, sdp);
+            // wpt100:hdrext
+            requireAnswerDirections(this, sdp);
+          }
         }
         const offerFromStable = type === "offer" &&
           this[_state].signalingState === "stable";
@@ -3469,13 +5219,27 @@ class RTCPeerConnection extends EventTarget {
         activate(this);
         const now = this[_state].signalingState;
         descriptionApplied(this, false, type);
+        // The transceivers are in place (a remote offer's new ones included)
+        // when signalingstatechange fires; track events come after it
+        // (webrtc-pc 4.4.1.6).
+        const trackEvents = syncTransceivers(this, { remote: true, type });
+        // wpt100:hdrext
+        if (type === "answer") headerExtensionsNegotiated(this, sdp, true);
         setSignalingState(this, nextSignalingState(now, false, type));
         if (type === "rollback") restoreRemoteTracks(this);
-        syncTransceivers(this, { remote: true, type });
+        fireTrackEvents(this, trackEvents);
         updateSctpTransport(this, type);
         setTransportStates(this);
         negotiationSettled(this);
       };
+      // wpt100:identity — a=identity validation (06_identity.js): before
+      // `apply` with a target peer identity, after it without.
+      const applyRemote = identityHooks.withRemoteIdentity(
+        this,
+        type,
+        description.sdp,
+        apply,
+      );
       if (type === "offer" && signaling === "have-local-offer") {
         // Implicit rollback (perfect negotiation's polite peer), a task of
         // its own: signaling is stable, with its event, before the offer is
@@ -3487,10 +5251,10 @@ class RTCPeerConnection extends EventTarget {
             syncTransceivers(this, { remote: false, type: "rollback" });
             setSignalingState(this, "stable");
           }),
-          () => inTask(this, apply),
+          () => inTask(this, applyRemote),
         );
       }
-      return inTask(this, apply);
+      return inTask(this, applyRemote);
     });
   }
 
@@ -3613,7 +5377,16 @@ class RTCPeerConnection extends EventTarget {
         : webidl.converters["unsigned short"](dict.id, "", "", {
           enforceRange: true,
         }),
+      // webrtc-priority 4.2: RTCPriorityType priority = "low".
+      priority: dict.priority === undefined
+        ? "low"
+        : webidl.converters.DOMString(dict.priority, prefix, "'priority'"),
     };
+    if (PRIORITY_VALUES[init.priority] === undefined) {
+      throw new TypeError(
+        `${prefix}: '${init.priority}' is not a valid value for enumeration RTCPriorityType`,
+      );
+    }
     if (init.maxPacketLifeTime !== null && init.maxRetransmits !== null) {
       throw new TypeError(
         "Failed to execute 'createDataChannel': maxPacketLifeTime and maxRetransmits are mutually exclusive",
@@ -3659,6 +5432,7 @@ class RTCPeerConnection extends EventTarget {
       protocol: init.protocol,
       negotiated: init.negotiated,
       id: init.negotiated ? init.id : null,
+      priority: PRIORITY_VALUES[init.priority],
     });
     const channel = new RTCDataChannel(illegalConstructorKey, this, {
       ...init,
@@ -3668,6 +5442,9 @@ class RTCPeerConnection extends EventTarget {
     MapPrototypeSet(this[_channels], created.channel, channel);
     if (!this[_state].hadDataChannel) {
       this[_state].hadDataChannel = true;
+      // A new offer would carry the data m= section: the last created offer
+      // / answer are stale (webrtc-pc 4.4.1.5, wpt100:transceiver).
+      invalidateCreated(this);
       updateNegotiationNeeded(this);
     }
     // A negotiated channel opens with the connection, without DCEP; its
@@ -3717,7 +5494,12 @@ class RTCPeerConnection extends EventTarget {
       iceServers: ArrayPrototypeMap(config.iceServers, (s) => {
         const server = { urls: ArrayPrototypeSlice(s.urls) };
         if (s.username !== undefined) server.username = s.username;
-        if (s.credential !== undefined) server.credential = s.credential;
+        if (s.credential !== undefined) {
+          server.credential = typeof s.credential === "object"
+            ? { ...s.credential }
+            : s.credential;
+        }
+        server.credentialType = s.credentialType;
         return server;
       }),
       iceTransportPolicy: config.iceTransportPolicy,
@@ -3725,8 +5507,14 @@ class RTCPeerConnection extends EventTarget {
       rtcpMuxPolicy: config.rtcpMuxPolicy,
       iceCandidatePoolSize: config.iceCandidatePoolSize,
       certificates: ArrayPrototypeSlice(config.certificates),
+      // wpt100:hdrext
+      rtpHeaderEncryptionPolicy: config.rtpHeaderEncryptionPolicy,
+      alwaysNegotiateDataChannels: config.alwaysNegotiateDataChannels,
+      targetLatency: config.targetLatency,
     };
     if (config.network !== null) out.denoNetwork = config.network;
+    // wpt100:identity
+    if (config.peerIdentity !== null) out.peerIdentity = config.peerIdentity;
     return out;
   }
 
@@ -3747,6 +5535,21 @@ class RTCPeerConnection extends EventTarget {
         `${prefix}: bundlePolicy and rtcpMuxPolicy can't change`,
         "InvalidModificationError",
       );
+    }
+    // wpt100:hdrext — webrtc-extensions: set only at construction.
+    const policy = config.rtpHeaderEncryptionPolicy;
+    const always = config.alwaysNegotiateDataChannels;
+    if (
+      policy !== current.rtpHeaderEncryptionPolicy ||
+      always !== current.alwaysNegotiateDataChannels
+    ) {
+      throw new DOMException(
+        `${prefix}: rtpHeaderEncryptionPolicy and alwaysNegotiateDataChannels can't change`,
+        "InvalidModificationError",
+      );
+    }
+    if (config.targetLatency !== current.targetLatency) {
+      throw new TypeError(`${prefix}: targetLatency can't change`);
     }
     const sameCerts = config.certificates.length === 0 ||
       (config.certificates.length === current.certificates.length &&
@@ -3778,11 +5581,22 @@ class RTCPeerConnection extends EventTarget {
         "InvalidModificationError",
       );
     }
+    // wpt100:identity — the target peer identity can't change (W3C WebRTC
+    // 1.0's 2017 setConfiguration step; Firefox has it).
+    if (
+      config.peerIdentity !== null &&
+      config.peerIdentity !== current.peerIdentity
+    ) {
+      throw new DOMException(
+        `${prefix}: peerIdentity can't change`,
+        "InvalidModificationError",
+      );
+    }
     // Validates the ICE server URLs (SyntaxError / InvalidAccessError) and
     // the net permission for them; they apply to the next gathering (an
     // ICE restart).
     op_webrtc_pc_set_ice_servers(this[_rid], {
-      iceServers: config.iceServers,
+      iceServers: engineIceServers(config.iceServers),
       iceTransportPolicy: config.iceTransportPolicy,
     });
     // RFC 9429 section 4.1.18: a new ICE candidate policy, or new STUN / TURN
@@ -3800,6 +5614,7 @@ class RTCPeerConnection extends EventTarget {
     ) {
       this[_state].configRestart = true;
     }
+    config.peerIdentity = current.peerIdentity;
     config.certificates = current.certificates;
     config.network = current.network;
     this[_state].config = config;
@@ -3823,6 +5638,9 @@ class RTCPeerConnection extends EventTarget {
       }
     }
     state.iceCredentialsToReplace = replace;
+    // The next offer restarts ICE: the last created offer / answer are stale
+    // (webrtc-pc 4.4.1.5, wpt100:transceiver).
+    invalidateCreated(this);
     updateNegotiationNeeded(this);
   }
 
@@ -3912,6 +5730,7 @@ class RTCPeerConnection extends EventTarget {
         : d === "inactive"
         ? "sendonly"
         : d;
+      invalidateCreated(this);
       updateNegotiationNeeded(this);
       return sender;
     }
@@ -3945,7 +5764,14 @@ class RTCPeerConnection extends EventTarget {
       );
     }
     const transceiver = sender[_transceiver];
-    if (transceiver[_state].stopped || sender[_state].track === null) return;
+    // A stopping transceiver is left alone too (WPT "Calling removeTrack on a
+    // stopped transceiver should be a no-op"; w3c/webrtc-pc#2874).
+    if (
+      transceiver[_state].stopping || transceiver[_state].stopped ||
+      sender[_state].track === null
+    ) {
+      return;
+    }
     setSenderTrack(sender, null);
     const d = transceiver[_state].direction;
     const next = d === "sendrecv"
@@ -3961,6 +5787,7 @@ class RTCPeerConnection extends EventTarget {
         next,
       );
     }
+    invalidateCreated(this);
     updateNegotiationNeeded(this);
   }
 
@@ -4073,6 +5900,11 @@ class RTCPeerConnection extends EventTarget {
     // `close` (in a later task, after close() returns).
     const channels = [];
     MapPrototypeForEach(this[_channels], (channel) => {
+      // A transferred channel closes in the realm it went to.
+      if (channel[_transferPort] !== undefined) {
+        loadTransfer().forwardEvent(channel, { type: "dcclose" });
+        return;
+      }
       if (channel[_state].readyState !== "closed") {
         channel[_state].readyState = "closed";
         ArrayPrototypePush(channels, channel);
@@ -4165,6 +5997,15 @@ function updateSctpTransport(pc, type) {
     state.sctp = new RTCSctpTransport(illegalConstructorKey, pc);
     state.sctp[_transportState] = state.sctp.state;
   }
+  // W3C "set the RTCSessionDescription" 4.4.1.6: an answer or pranswer (local
+  // or remote) runs "update the data max message size" with the remote
+  // description of that moment, a renegotiation included.
+  if (state.sctp !== null && (type === "answer" || type === "pranswer")) {
+    const remote = pc.remoteDescription;
+    if (remote !== null) {
+      state.sctp[_maxMessageSize] = maxMessageSizeOf(remote.sdp) ?? 65536;
+    }
+  }
 }
 
 function maxMessageSizeOf(sdp) {
@@ -4224,6 +6065,117 @@ function requireRtcpMux(sdp) {
   }
 }
 
+// wpt100:hdrext — RFC 8827 section 6.5 / RFC 8826 section 4.3.1: no SDES,
+// DTLS-SRTP only; a description whose media has no DTLS fingerprint is
+// refused (RFC 9429 section 5.8) as InvalidAccessError.
+function requireFingerprint(sdp) {
+  if (StringPrototypeIncludes(sdp, "a=fingerprint:")) return;
+  const sections = mediaSectionsOf(sdp);
+  if (ArrayPrototypeSome(sections, (m) => !m.rejected)) {
+    throw new DOMException(
+      "setRemoteDescription: the description has no DTLS fingerprint (SDES is not supported)",
+      "InvalidAccessError",
+    );
+  }
+}
+
+// Whether `a=cryptex` (RFC 9335) applies to every RTP section of a
+// description: at the session level or on each live audio / video section;
+// `null` when it has no such section.
+function cryptexOf(sdp) {
+  const parts = StringPrototypeSplit(sdp, "\nm=");
+  const lines = (part) =>
+    ArrayPrototypeMap(StringPrototypeSplit(part, "\n"), StringPrototypeTrim);
+  const session = ArrayPrototypeIncludes(lines(parts[0]), "a=cryptex");
+  let rtp = 0;
+  let all = true;
+  for (let i = 1; i < parts.length; ++i) {
+    const section = lines(parts[i]);
+    const fields = StringPrototypeSplit(section[0], " ");
+    if (fields[0] !== "audio" && fields[0] !== "video") continue;
+    if (
+      fields[1] === "0" && !ArrayPrototypeIncludes(section, "a=bundle-only")
+    ) {
+      continue;
+    }
+    rtp++;
+    if (!ArrayPrototypeIncludes(section, "a=cryptex")) all = false;
+  }
+  if (rtp === 0) return null;
+  return session || all;
+}
+
+// webrtc-extensions: with rtpHeaderEncryptionPolicy "require", a remote
+// description with RTP media that doesn't signal cryptex is refused.
+function requireCryptex(pc, sdp) {
+  if (pc[_state].config.rtpHeaderEncryptionPolicy !== "require") return;
+  if (cryptexOf(sdp) === false) {
+    throw new DOMException(
+      "setRemoteDescription: rtpHeaderEncryptionPolicy is 'require', but the description doesn't signal a=cryptex",
+      "InvalidAccessError",
+    );
+  }
+}
+
+// RFC 8285 section 6: once negotiated, a media section's extension ids are
+// not remapped. A remote description that gives a URI another id, or an id
+// another URI, than the current descriptions of the same mid is refused.
+function requireStableExtensionIds(pc, sdp) {
+  const incoming = extmapsOf(sdp);
+  const previous = [];
+  const remote = pc.currentRemoteDescription;
+  const local = pc.currentLocalDescription;
+  if (remote !== null) ArrayPrototypePush(previous, extmapsOf(remote.sdp));
+  if (local !== null) ArrayPrototypePush(previous, extmapsOf(local.sdp));
+  MapPrototypeForEach(incoming, (section, mid) => {
+    if (section.rejected) return;
+    for (let p = 0; p < previous.length; ++p) {
+      const before = MapPrototypeGet(previous[p], mid);
+      if (before === undefined || before.rejected) continue;
+      for (let i = 0; i < section.extensions.length; ++i) {
+        const e = section.extensions[i];
+        const clash = ArrayPrototypeSome(
+          before.extensions,
+          (b) => (b.uri === e.uri) !== (b.id === e.id),
+        );
+        if (clash) {
+          throw new DOMException(
+            `setRemoteDescription: the extension '${e.uri}' of mid '${mid}' was remapped`,
+            "InvalidAccessError",
+          );
+        }
+      }
+    }
+  });
+}
+
+// RFC 3264 section 6.1 / RFC 9429 section 5.10: an answer's direction can't
+// exceed what the offer allows (it sends only what the offerer receives,
+// receives only what it sends).
+function requireAnswerDirections(pc, sdp) {
+  const offer = pc.pendingLocalDescription;
+  if (offer === null) return;
+  const offered = mediaSectionsOf(offer.sdp);
+  const answered = mediaSectionsOf(sdp);
+  for (let i = 0; i < answered.length; ++i) {
+    const a = answered[i];
+    if (a.rejected || a.mid === null) continue;
+    const o = ArrayPrototypeFind(offered, (m) => m.mid === a.mid);
+    if (o === undefined || o.rejected) continue;
+    const sends = (d) => d === "sendrecv" || d === "sendonly";
+    const receives = (d) => d === "sendrecv" || d === "recvonly";
+    if (
+      (sends(a.direction) && !receives(o.direction)) ||
+      (receives(a.direction) && !sends(o.direction))
+    ) {
+      throw new DOMException(
+        `setRemoteDescription: the answer's '${a.direction}' for mid '${a.mid}' exceeds the offer's '${o.direction}'`,
+        "InvalidAccessError",
+      );
+    }
+  }
+}
+
 function midsOf(sdp) {
   const mids = [];
   let inMedia = false;
@@ -4246,6 +6198,20 @@ function midsOf(sdp) {
 // RTCDTMFSender needs (media.rs `track_preferences`).
 function trackPreferences(codec) {
   const out = [codec];
+  // wpt100:codecs: video keeps retransmission and FEC, which a preference
+  // list leaves out unless it lists them (media.rs track_preferences()).
+  if (
+    StringPrototypeStartsWith(
+      StringPrototypeToLowerCase(codec.mimeType),
+      "video/",
+    )
+  ) {
+    ArrayPrototypePush(
+      out,
+      { mimeType: "video/rtx", clockRate: 90000, channels: null },
+      { mimeType: "video/ulpfec", clockRate: 90000, channels: null },
+    );
+  }
   if (
     StringPrototypeStartsWith(
       StringPrototypeToLowerCase(codec.mimeType),
@@ -4304,6 +6270,7 @@ function addTransceiverInner(pc, trackOrKind, init) {
   if (track !== null) setSenderTrack(sender, track);
   ArrayPrototypePush(pc[_state].transceivers, transceiver);
   syncTransceivers(pc, null);
+  invalidateCreated(pc);
   updateNegotiationNeeded(pc);
   return transceiver;
 }
@@ -4315,32 +6282,38 @@ function addTransceiverInner(pc, trackOrKind, init) {
 // a remote track".
 function syncTransceivers(pc, phase) {
   const state = pc[_state];
-  if (state.closed) return;
+  if (state.closed) return [];
   const infos = op_webrtc_pc_transceivers(pc[_rid]);
   const known = new SafeMap();
   for (let i = 0; i < state.transceivers.length; ++i) {
     const t = state.transceivers[i];
     MapPrototypeSet(known, t[_key], t);
   }
+  const seen = new SafeSet();
   const next = [];
   const settled = phase !== null &&
     (phase.type === "answer" || phase.type === "rollback");
   const trackEvents = [];
   for (let i = 0; i < infos.length; ++i) {
     const info = infos[i];
+    if (SetPrototypeHas(state.retired, info.key)) continue;
     let t = MapPrototypeGet(known, info.key);
     if (t === undefined) {
       if (info.kind !== "audio" && info.kind !== "video") continue;
+      // A remote offer's new transceiver is recvonly (webrtc-pc 4.4.1.6,
+      // "create an RTCRtpTransceiver ... direction recvonly"), whatever the
+      // engine narrowed its own to; the answer narrows it (createAnswerSdp).
       t = new RTCRtpTransceiver(illegalConstructorKey, pc, {
         key: info.key,
         kind: info.kind,
         mid: info.mid,
-        direction: info.direction ?? "recvonly",
+        direction: "recvonly",
       });
       t[_state].sender[_state].encodings = info.kind === "video"
         ? [{ active: true, scaleResolutionDownBy: 1 }]
         : [{ active: true }];
     }
+    SetPrototypeAdd(seen, info.key);
     const ts = t[_state];
     if (phase !== null && phase.type === "rollback" && info.mid === null) {
       ts.mid = null;
@@ -4354,19 +6327,26 @@ function syncTransceivers(pc, phase) {
       }
     }
     const remote = info.remote;
-    if (settled && phase.type === "answer") {
-      if (ts.stopping || (remote !== null && remote.rejected)) {
-        if (!ts.stopped) {
-          stopSending(t);
-          ts.stopping = false;
-          ts.stopped = true;
-        }
-      }
+    // webrtc-pc 4.4.1.6: a media description the remote side rejected stops
+    // its transceiver at once (an offer: [[Stopped]] while the answer is
+    // pending; WPT "Remotely stopped transceiver goes directly to stopped").
+    // In an answer this is also how a stopping transceiver becomes stopped:
+    // the offer that followed stop() rejected its m-section, and so does the
+    // answer. A stopping transceiver whose m-section the answer did not
+    // reject (stopped after the offer came in: answered inactive) stays
+    // stopping until the next offer.
+    if (
+      phase !== null && phase.type !== "rollback" && remote !== null &&
+      remote.rejected && !ts.stopped
+    ) {
+      stopTransceiverNow(pc, t, true);
     }
     if (
       phase !== null && phase.remote && phase.type !== "rollback" &&
-      remote !== null && !ts.stopped && !ts.stopping
+      remote !== null && !ts.stopped
     ) {
+      // A stopping transceiver still takes part (WPT checkStopAfterCreateOffer:
+      // the answer to an offer made before stop() fires its track event).
       const remoteSends = !remote.rejected &&
         (remote.direction === "sendrecv" || remote.direction === "sendonly");
       const receptive = ts.direction === "sendrecv" ||
@@ -4384,6 +6364,7 @@ function syncTransceivers(pc, phase) {
         const rstate = receiver[_state];
         const track = rstate.track;
         const old = rstate.streams;
+        let added = false;
         for (let j = 0; j < old.length; ++j) {
           if (!ArrayPrototypeIncludes(streams, old[j])) {
             streamRemoveRemote(old[j], track);
@@ -4392,10 +6373,14 @@ function syncTransceivers(pc, phase) {
         for (let j = 0; j < streams.length; ++j) {
           if (!ArrayPrototypeIncludes(old, streams[j])) {
             streamAddRemote(streams[j], track);
+            added = true;
           }
         }
         rstate.streams = streams;
-        if (!rstate.receiving) {
+        // A track event when the track starts being received, and when the
+        // description adds streams to it ("set the associated remote
+        // streams" grew addList).
+        if (!rstate.receiving || added) {
           rstate.receiving = true;
           ArrayPrototypePush(trackEvents, [t, streams]);
         }
@@ -4403,11 +6388,44 @@ function syncTransceivers(pc, phase) {
         removeRemoteTrack(t);
       }
     }
-    if (!(settled && ts.stopped && phase.type === "answer")) {
-      ArrayPrototypePush(next, t);
+    if (phase !== null) {
+      if (phase.type === "rollback") {
+        ts.transport = ts.stableTransport;
+      } else if (
+        ts.mid !== null && (!phase.remote || phase.type !== "offer")
+      ) {
+        ts.transport = true;
+      }
+      if (settled) ts.stableTransport = ts.transport;
+      // wpt100:codecs
+      negotiateEncodings(t, remote, phase);
     }
+    if (settled && phase.type === "answer" && ts.stopped) {
+      // Negotiated stopped: out of the set, without a mid (webrtc-pc 4.4.1.6).
+      retireTransceiver(pc, t);
+      continue;
+    }
+    ArrayPrototypePush(next, t);
+  }
+  // Transceivers the engine no longer has: a rolled-back remote offer created
+  // them, and nothing kept them (webrtc-pc 4.4.1.6 rollback: "stop the
+  // RTCRtpTransceiver ... and remove it from the set of transceivers"). Their
+  // receiver track ends (WPT "Rollback when removing transceiver does end the
+  // track").
+  for (let i = 0; i < state.transceivers.length; ++i) {
+    const t = state.transceivers[i];
+    if (SetPrototypeHas(seen, t[_key])) continue;
+    stopTransceiverNow(pc, t, false);
+    retireTransceiver(pc, t);
   }
   state.transceivers = next;
+  return trackEvents;
+}
+
+// The track events a remote description queued (webrtc-pc 4.4.1.6: after
+// signalingstatechange).
+function fireTrackEvents(pc, trackEvents) {
+  if (trackEvents === undefined) return;
   for (let i = 0; i < trackEvents.length; ++i) {
     const { 0: t, 1: streams } = trackEvents[i];
     const receiver = t[_state].receiver;
@@ -4578,9 +6596,99 @@ function createOfferSdp(pc, iceRestart) {
   const restart = iceRestart || state.configRestart ||
     SetPrototypeGetSize(state.iceCredentialsToReplace) > 0;
   syncDirections(pc);
+  pushHeaderExtensions(pc, true);
   const sdp = op_webrtc_pc_create_offer(pc[_rid], restart);
   state.configRestart = false;
   return sdp;
+}
+
+// RFC 8830 section 2: one MediaStreamTrack is in one m-section, so an
+// `a=msid:<stream> <track>` value two m-sections both carry is an invalid
+// description, which setRemoteDescription rejects with an OperationError.
+// (An msid with no track part, and rejected sections, say nothing here.)
+function requireUniqueMsids(sdp) {
+  const seen = new SafeSet();
+  let mine = null;
+  const flush = () => {
+    if (mine === null) return;
+    const values = ArrayFrom(new SafeSet(mine));
+    for (let i = 0; i < values.length; ++i) {
+      if (SetPrototypeHas(seen, values[i])) {
+        throw new DOMException(
+          `setRemoteDescription: the msid '${values[i]}' is in two media sections`,
+          "OperationError",
+        );
+      }
+      SetPrototypeAdd(seen, values[i]);
+    }
+  };
+  const lines = StringPrototypeSplit(sdp, "\n");
+  for (let i = 0; i < lines.length; ++i) {
+    const line = StringPrototypeTrim(lines[i]);
+    if (StringPrototypeStartsWith(line, "m=")) {
+      flush();
+      const parts = StringPrototypeSplit(line, " ");
+      mine = parts[1] === "0" ? null : [];
+    } else if (mine !== null && StringPrototypeStartsWith(line, "a=msid:")) {
+      const value = StringPrototypeTrim(StringPrototypeSlice(line, 7));
+      const parts = ArrayPrototypeFilter(
+        StringPrototypeSplit(value, " "),
+        (part) => part !== "",
+      );
+      if (parts.length >= 2) {
+        ArrayPrototypePush(mine, `${parts[0]} ${parts[1]}`);
+      }
+    }
+  }
+  flush();
+}
+
+// createAnswer's SDP. JSEP (RFC 9429 5.3.1): each answered m= section's
+// direction is the transceiver's own direction intersected with the reverse
+// of the offered one, and a stopping transceiver answers inactive (it is
+// rejected by the next offer). The engine writes its own direction into the
+// answer, and only half narrows it when it applies the offer (a sendonly offer
+// left a sendrecv transceiver answering sendrecv; a remote offer's transceiver
+// answered sendonly with nothing to send), so the directions are set here.
+function createAnswerSdp(pc) {
+  const state = pc[_state];
+  const byKey = new SafeMap();
+  for (let i = 0; i < state.transceivers.length; ++i) {
+    const t = state.transceivers[i];
+    MapPrototypeSet(byKey, t[_key], t);
+  }
+  const infos = op_webrtc_pc_transceivers(pc[_rid]);
+  for (let i = 0; i < infos.length; ++i) {
+    const info = infos[i];
+    const remote = info.remote;
+    if (remote === null || remote.rejected) continue;
+    const t = MapPrototypeGet(byKey, info.key);
+    if (t === undefined) continue;
+    const ts = t[_state];
+    if (ts.stopped) continue;
+    const want = ts.stopping
+      ? "inactive"
+      : intersectDirections(ts.direction, reverseDirection(remote.direction));
+    if (info.direction === want) continue;
+    try {
+      op_webrtc_transceiver_set_direction(pc[_rid], t[_key], want);
+    } catch {
+      // The engine's transceiver is gone.
+    }
+  }
+  // wpt100:hdrext
+  pushHeaderExtensions(pc, false);
+  return op_webrtc_pc_create_answer(pc[_rid]);
+}
+
+function intersectDirections(a, b) {
+  const send = (a === "sendrecv" || a === "sendonly") &&
+    (b === "sendrecv" || b === "sendonly");
+  const recv = (a === "sendrecv" || a === "recvonly") &&
+    (b === "sendrecv" || b === "recvonly");
+  return send
+    ? (recv ? "sendrecv" : "sendonly")
+    : (recv ? "recvonly" : "inactive");
 }
 
 // The engine narrows a transceiver's direction to what a remote offer allows
@@ -4622,12 +6730,30 @@ function sameIds(a, b) {
   return true;
 }
 
+// [[LastCreatedOffer]] / [[LastCreatedAnswer]]'s SDP if nothing that goes into
+// a description changed since it was created (invalidateCreated), else null.
+function lastCreated(pc, offer) {
+  const state = pc[_state];
+  const last = offer ? state.lastCreatedOffer : state.lastCreatedAnswer;
+  return last !== null && last.generation === state.generation
+    ? last.sdp
+    : null;
+}
+
+// A change that a new offer or answer would show (a transceiver, a direction,
+// a track, codec preferences, an applied description): the last created ones
+// are stale.
+function invalidateCreated(pc) {
+  pc[_state].generation++;
+}
+
 // Bookkeeping when a description has been applied: the stream ids each
 // sender has in the local description (what `a=msid` carries), the type of
 // the current local description, and restartIce()'s credentials, which a
 // completed negotiation with fresh ones retires.
 function descriptionApplied(pc, local, type) {
   const state = pc[_state];
+  invalidateCreated(pc);
   const transceivers = state.transceivers;
   if (type === "rollback") {
     for (let i = 0; i < transceivers.length; ++i) {
@@ -4821,7 +6947,22 @@ function pump(pc) {
 function dispatchEngineEvents(pc, events, from) {
   const state = pc[_state];
   try {
-    dispatchEngineEvent(pc, events[from]);
+    const event = events[from];
+    if (
+      event.type === "icegatheringstatechange" && event.state === "complete" &&
+      !event.endOfCandidates && state.iceGatheringState === "gathering"
+    ) {
+      // W3C webrtc-pc 5.6 (as amended by w3c/webrtc-pc#2894): gathering
+      // that finishes queues two tasks. The first fires `icecandidate` with
+      // an empty candidate string for the media description (its
+      // end-of-candidates), the second the gathering state changes and the
+      // global null candidate. The same event comes back as the next task.
+      event.endOfCandidates = true;
+      ArrayPrototypeSplice(events, from + 1, 0, event);
+      fireEndOfCandidates(pc);
+    } else {
+      dispatchEngineEvent(pc, event);
+    }
   } catch (error) {
     // Listener exceptions are reported by dispatchEvent itself; this is
     // anything else, reported without stopping the other events.
@@ -4839,6 +6980,92 @@ function dispatchEngineEvents(pc, events, from) {
     state.pending = null;
     if (!state.closed) dispatchEngineEvents(pc, events, from + 1);
   });
+}
+
+// setLocalDescription(rollback) of the first offer leaves no local
+// description: the ICE transports that offer created are discarded, and with
+// no transport the ICE gathering state is "new" again (W3C webrtc-pc 4.4.1.6
+// rollback, 4.4.4 "update the ICE gathering state"). Gathering still running
+// for it is not reported any more.
+function discardGathering(pc) {
+  const state = pc[_state];
+  if (
+    pc.currentLocalDescription !== null || pc.pendingLocalDescription !== null
+  ) {
+    return;
+  }
+  if (state.iceGatheringState === "new") return;
+  state.gatheringDiscarded = true;
+  state.iceGatheringState = "new";
+  setTransportStates(pc);
+  fire(pc, new Event("icegatheringstatechange"));
+}
+
+// The next local description after such a rollback: the engine keeps the
+// sockets and candidates it gathered (it gathers once per connection), so
+// the gathering state goes where the engine's is again, through "gathering"
+// (and, if the engine had finished, "complete" with its null candidate, in a
+// task of its own).
+function resumeGathering(pc) {
+  const state = pc[_state];
+  state.gatheringDiscarded = false;
+  const engine = state.engineGatheringState;
+  if (engine === "new" || state.iceGatheringState !== "new") return;
+  state.iceGatheringState = "gathering";
+  setTransportStates(pc);
+  fire(pc, new Event("icegatheringstatechange"));
+  if (engine !== "complete") return;
+  PromisePrototypeThen(op_void_async_deferred(), () => {
+    if (
+      state.closed || state.gatheringDiscarded ||
+      state.iceGatheringState !== "gathering"
+    ) {
+      return;
+    }
+    state.iceGatheringState = "complete";
+    setTransportStates(pc);
+    fire(pc, new Event("icegatheringstatechange"));
+    fire(
+      pc,
+      new RTCPeerConnectionIceEvent("icecandidate", { candidate: null }),
+    );
+  });
+}
+
+// The STUN / TURN server URL an icecandidateerror names: the URL as the
+// ICE agent uses it, so a `turns:` URL carries its implied TCP transport
+// (RFC 7065 section 3: TURN over TLS runs over TCP).
+function iceErrorUrl(url) {
+  if (
+    typeof url === "string" && StringPrototypeStartsWith(url, "turns:") &&
+    !StringPrototypeIncludes(url, "?")
+  ) {
+    return `${url}?transport=tcp`;
+  }
+  return url;
+}
+
+// The `icecandidate` event that ends a media description's candidates: an
+// RTCIceCandidate whose candidate is "" (W3C webrtc-pc 5.6).
+function fireEndOfCandidates(pc) {
+  const state = pc[_state];
+  // The last gathered candidate is of the generation that just ended.
+  const first = state.localCandidates[state.localCandidates.length - 1];
+  let sdpMid = first?.sdpMid ?? null;
+  if (sdpMid === null) {
+    const local = pc.localDescription;
+    sdpMid = local === null ? null : midsOf(local.sdp)[0] ?? null;
+  }
+  const candidate = new RTCIceCandidate({
+    candidate: "",
+    sdpMid,
+    sdpMLineIndex: first?.sdpMLineIndex ?? 0,
+    usernameFragment: first?.usernameFragment ?? null,
+  });
+  fire(
+    pc,
+    new RTCPeerConnectionIceEvent("icecandidate", { candidate, url: null }),
+  );
 }
 
 function channelFor(pc, event) {
@@ -4860,6 +7087,10 @@ function dispatchEngineEvent(pc, event) {
         usernameFragment: event.usernameFragment,
       });
       ArrayPrototypePush(state.localCandidates, candidate);
+      SetPrototypeAdd(
+        state.announced,
+        announcedKey(event.usernameFragment ?? null, event.candidate),
+      );
       fire(
         pc,
         new RTCPeerConnectionIceEvent("icecandidate", {
@@ -4874,8 +7105,11 @@ function dispatchEngineEvent(pc, event) {
         pc,
         new RTCPeerConnectionIceErrorEvent("icecandidateerror", {
           address: event.address ?? null,
-          port: event.port ?? null,
-          url: event.url,
+          // No local address was used (the server's name didn't resolve, or
+          // no socket could reach it): port 0 with the null address, as
+          // browsers report it.
+          port: event.port ?? (event.address == null ? 0 : null),
+          url: iceErrorUrl(event.url),
           errorCode: event.errorCode,
           errorText: event.errorText,
         }),
@@ -4885,6 +7119,9 @@ function dispatchEngineEvent(pc, event) {
       // The JS side sets the signaling state as each description is applied.
       break;
     case "icegatheringstatechange":
+      state.engineGatheringState = event.state;
+      // A rolled-back first offer discarded what was being gathered.
+      if (state.gatheringDiscarded) break;
       if (state.iceGatheringState === event.state) break;
       state.iceGatheringState = event.state;
       setTransportStates(pc);
@@ -4928,6 +7165,13 @@ function dispatchEngineEvent(pc, event) {
       const t = transceiverFor(pc, event.transceiver);
       if (t === undefined) break;
       const receiver = t[_state].receiver;
+      // wpt100:mediasink: a packet still in flight after the remote side
+      // stopped sending (by negotiation) leaves the track muted; the next
+      // packet asks again.
+      if (!receiver[_state].receiving) {
+        rearmUnmute(receiver);
+        break;
+      }
       setMuted(receiver[_state].track, false);
       for (let i = 0; i < receiver[_state].clones.length; ++i) {
         setMuted(receiver[_state].clones[i], false);
@@ -4938,6 +7182,33 @@ function dispatchEngineEvent(pc, event) {
       const t = transceiverFor(pc, event.transceiver);
       if (t === undefined) break;
       deliverRtp(t[_state].receiver, event.data);
+      break;
+    }
+    // wpt100:mediasink
+    case "trackmute": {
+      // The receiver's RTP stopped (media_sink.rs's SILENCE).
+      const t = transceiverFor(pc, event.transceiver);
+      if (t === undefined) break;
+      const receiver = t[_state].receiver;
+      setMuted(receiver[_state].track, true);
+      for (let i = 0; i < receiver[_state].clones.length; ++i) {
+        setMuted(receiver[_state].clones[i], true);
+      }
+      break;
+    }
+    case "trackresize": {
+      const t = transceiverFor(pc, event.transceiver);
+      if (t === undefined) break;
+      t[_state].receiver[_frameSize] = {
+        width: event.width,
+        height: event.height,
+      };
+      break;
+    }
+    case "mediaframe": {
+      const t = transceiverFor(pc, event.transceiver);
+      if (t === undefined) break;
+      deliverFrame(t[_state].receiver, event);
       break;
     }
     case "keyframerequest": {
@@ -4962,7 +7233,11 @@ function dispatchEngineEvent(pc, event) {
     case "dcopen": {
       let channel = channelFor(pc, event);
       if (channel === undefined) {
-        // Opened by the remote peer: announced with `datachannel`.
+        // Opened by the remote peer: announced with `datachannel`. Its
+        // readyState is already "open" there (so it can send), and `open`
+        // follows in a task of its own (W3C "announce the channel as open"):
+        // a channel closed or transferred in the `datachannel` handler
+        // reports no `open` here.
         channel = new RTCDataChannel(illegalConstructorKey, pc, {
           channel: event.channel,
           id: event.id,
@@ -4972,11 +7247,16 @@ function dispatchEngineEvent(pc, event) {
           maxPacketLifeTime: event.maxPacketLifeTime ?? null,
           maxRetransmits: event.maxRetransmits ?? null,
           negotiated: event.negotiated,
+          priority: priorityFromDcep(event.priority),
           readyState: "open",
         });
         MapPrototypeSet(pc[_channels], event.channel, channel);
         fire(pc, new RTCDataChannelEvent("datachannel", { channel }));
-        fire(channel, new Event("open"));
+        announceOpen(pc, channel, event);
+        break;
+      }
+      if (channel[_transferPort] !== undefined) {
+        loadTransfer().forwardEvent(channel, event);
         break;
       }
       if (channel[_state].readyState !== "connecting") break;
@@ -4987,9 +7267,12 @@ function dispatchEngineEvent(pc, event) {
     }
     case "dcclosing": {
       const channel = channelFor(pc, event);
-      if (channel === undefined || channel[_state].readyState === "closed") {
+      if (channel === undefined) break;
+      if (channel[_transferPort] !== undefined) {
+        loadTransfer().forwardEvent(channel, event);
         break;
       }
+      if (channel[_state].readyState === "closed") break;
       channel[_state].readyState = "closing";
       fire(channel, new Event("closing"));
       break;
@@ -4998,6 +7281,10 @@ function dispatchEngineEvent(pc, event) {
       const channel = channelFor(pc, event);
       if (channel === undefined) break;
       MapPrototypeDelete(pc[_channels], event.channel);
+      if (channel[_transferPort] !== undefined) {
+        loadTransfer().forwardEvent(channel, event);
+        break;
+      }
       if (channel[_state].readyState === "closed") break;
       channel[_state].readyState = "closed";
       fire(channel, new Event("close"));
@@ -5006,6 +7293,10 @@ function dispatchEngineEvent(pc, event) {
     case "dcerror": {
       const channel = channelFor(pc, event);
       if (channel === undefined) break;
+      if (channel[_transferPort] !== undefined) {
+        loadTransfer().forwardEvent(channel, event);
+        break;
+      }
       fire(
         channel,
         new RTCErrorEvent("error", {
@@ -5020,24 +7311,21 @@ function dispatchEngineEvent(pc, event) {
     case "dcsent": {
       const channel = channelFor(pc, event);
       if (channel === undefined) break;
-      const s = channel[_state];
-      const before = s.buffered;
-      s.buffered = MathMax(0, before - event.bytes);
-      if (before > s.lowThreshold && s.buffered <= s.lowThreshold) {
-        fire(channel, new Event("bufferedamountlow"));
+      if (channel[_transferPort] !== undefined) {
+        loadTransfer().forwardEvent(channel, event);
+        break;
       }
+      channelSent(channel, event.bytes);
       break;
     }
     case "dcmessage": {
       const channel = channelFor(pc, event);
-      if (channel === undefined || channel[_state].readyState === "closed") {
+      if (channel === undefined) break;
+      if (channel[_transferPort] !== undefined) {
+        loadTransfer().forwardEvent(channel, event);
         break;
       }
-      const data = event.text ? core.decode(event.data) : toBinary(
-        channel,
-        event.data,
-      );
-      fire(channel, new MessageEvent("message", { data }));
+      deliverChannelMessage(channel, event.text, event.data);
       break;
     }
   }
@@ -5260,6 +7548,7 @@ function deliverRtp(receiver, data) {
 }
 
 function closeReaders(receiver) {
+  closeAllFrameReaders(receiver);
   const readers = receiver[_readers];
   if (readers === undefined) return;
   SetPrototypeForEach(readers, (c) => {
@@ -5270,6 +7559,120 @@ function closeReaders(receiver) {
     }
   });
   receiver[_readers] = undefined;
+}
+
+// readFrames(track): the frames a remote track receives, put back together
+// from RTP, still encoded (there is no decoder), as a stream. Like readRtp,
+// it doesn't wait: a frame that arrives while `highWaterMark` frames (64)
+// are queued is dropped. A disabled track delivers none; the stream closes
+// when the track ends. This is what the WPT runner's media elements play.
+const _frameReaders = Symbol("[[frameReaders]]");
+const _frameSize = Symbol("[[frameSize]]");
+
+function readFrames(track, options = undefined) {
+  if (!ObjectPrototypeIsPrototypeOf(MediaStreamTrackPrototype, track)) {
+    throw new TypeError("readFrames: expected a MediaStreamTrack");
+  }
+  const receiver = track[_receiver];
+  if (receiver === null) {
+    throw new TypeError(
+      "readFrames: expected a remote track (an RTCRtpReceiver's)",
+    );
+  }
+  const highWaterMark = options?.highWaterMark === undefined
+    ? 64
+    : webidl.converters["unsigned long"](options.highWaterMark);
+  const pc = receiver[_pc];
+  let entry;
+  return new streams.ReadableStream({
+    start(controller) {
+      entry = { track, controller };
+      if (pc[_state].closed || track[_trackState].readyState === "ended") {
+        controller.close();
+        return;
+      }
+      receiver[_frameReaders] ??= new SafeSet();
+      SetPrototypeAdd(receiver[_frameReaders], entry);
+      syncFrameSink(receiver, true);
+    },
+    cancel() {
+      const readers = receiver[_frameReaders];
+      if (readers === undefined) return;
+      SetPrototypeDelete(readers, entry);
+      syncFrameSink(receiver, false);
+    },
+  }, { highWaterMark, size: () => 1 });
+}
+
+// Tells the engine whether the receiver's frames are wanted; a new reader
+// of a video track asks the sender for a key frame, which it needs first.
+function syncFrameSink(receiver, started) {
+  const pc = receiver[_pc];
+  if (pc[_state].closed) return;
+  const on = (receiver[_frameReaders]?.size ?? 0) > 0;
+  const key = receiver[_transceiver][_key];
+  try {
+    op_webrtc_receiver_read_frames(pc[_rid], key, on);
+    if (started && on && receiver[_state].track[_trackState].kind === "video") {
+      op_webrtc_receiver_request_key_frame(pc[_rid], key);
+    }
+  } catch {
+    // The transceiver is gone.
+  }
+}
+
+function deliverFrame(receiver, event) {
+  const readers = receiver[_frameReaders];
+  if (readers === undefined || readers.size === 0) return;
+  const timestamp = performance.now();
+  let first = true;
+  SetPrototypeForEach(readers, (entry) => {
+    const state = entry.track[_trackState];
+    if (state.readyState !== "live" || !state.enabled) return;
+    if (entry.controller.desiredSize <= 0) return;
+    // Every reader gets its own copy but the first.
+    entry.controller.enqueue({
+      data: first ? event.data : TypedArrayPrototypeSlice(event.data),
+      codec: event.mimeType,
+      keyFrame: event.keyFrame,
+      width: event.width ?? null,
+      height: event.height ?? null,
+      rtpTimestamp: event.rtpTimestamp,
+      timestamp,
+    });
+    first = false;
+  });
+}
+
+// The track ended: its readers' streams close.
+function closeFrameReaders(track) {
+  const receiver = track[_receiver];
+  const readers = receiver?.[_frameReaders];
+  if (readers === undefined) return;
+  SetPrototypeForEach(readers, (entry) => {
+    if (entry.track !== track) return;
+    SetPrototypeDelete(readers, entry);
+    try {
+      entry.controller.close();
+    } catch {
+      // Already closed.
+    }
+  });
+  syncFrameSink(receiver, false);
+}
+
+function closeAllFrameReaders(receiver) {
+  const readers = receiver[_frameReaders];
+  if (readers === undefined) return;
+  receiver[_frameReaders] = undefined;
+  SetPrototypeForEach(readers, (entry) => {
+    try {
+      entry.controller.close();
+    } catch {
+      // Already closed.
+    }
+  });
+  syncFrameSink(receiver, false);
 }
 
 function requestKeyFrame(receiver) {
@@ -5459,11 +7862,28 @@ const webrtcNs = ObjectFreeze({
   Network: RtcNetwork,
   createNetwork,
   readRtp,
+  // wpt100:mediasink
+  readFrames,
   requestKeyFrame,
   exportCertificate,
   importCertificate,
   setLogLevel,
 });
+
+// wpt100:identity — WebRTC Identity (06_identity.js): the RTCPeerConnection
+// members, RTCIdentityAssertion, MediaStreamTrack's isolation attributes and
+// the hooks createOffer / createAnswer / setRemoteDescription call.
+const identityHooks = core.loadExtScript("ext:deno_webrtc/06_identity.js")
+  .installIdentity({
+    _rid,
+    _state,
+    brandError,
+    defineHandler,
+    invalidState,
+    MediaStreamTrackPrototype,
+    RTCError,
+    RTCPeerConnectionPrototype,
+  });
 
 return {
   MediaStream,
@@ -5479,6 +7899,8 @@ return {
   RTCErrorEvent,
   RTCIceCandidate,
   RTCIceCandidatePair,
+  // wpt100:identity
+  RTCIdentityAssertion: identityHooks.RTCIdentityAssertion,
   RTCIceTransport,
   RTCPeerConnection,
   RTCPeerConnectionIceErrorEvent,
@@ -5491,6 +7913,26 @@ return {
   RTCStatsReport,
   RTCTrackEvent,
   webrtcNs,
+  // wpt100:S2 for 98_global_scope_shared.js (RTCCertificate deserialization)
+  // and 05_transfer.js (transferred RTCDataChannels).
+  deserializeCertificate,
+  dataChannelInternals: {
+    illegalConstructorKey,
+    _channel,
+    _init,
+    _pc,
+    _proxyPort,
+    _rid,
+    _state,
+    _transferPort,
+    RTCDataChannel,
+    RTCError,
+    RTCErrorEvent,
+    channelSent,
+    deliverChannelMessage,
+    failChannel,
+    fire,
+  },
   // For 02_media_devices.js: the track internals a capture device needs.
   mediaInternals: {
     illegalConstructorKey,

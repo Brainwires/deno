@@ -29,6 +29,61 @@ pub struct ReceivedFrameInfo {
   pub rtp_timestamp: u32,
   /// The first packet's (audio frames name it).
   pub sequence_number: u16,
+  /// The RFC 6464 audio level (0 loudest to 127 silence) the frame's packet
+  /// carried in `ssrc-audio-level`, when that extension was negotiated.
+  pub audio_level: Option<u8>,
+  /// abs-capture-time, when negotiated and sent: the capture time in Unix
+  /// milliseconds, and the sender's estimate of the capture clock's offset
+  /// from its own, in milliseconds (the extension's long form only).
+  pub capture_time: Option<f64>,
+  pub sender_capture_time_offset: Option<f64>,
+}
+
+const AUDIO_LEVEL_URI: &str = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
+const ABS_CAPTURE_TIME_URI: &str =
+  "http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time";
+/// Seconds from the NTP epoch (1900) to the Unix epoch (1970).
+const NTP_UNIX_OFFSET_SECS: f64 = 2_208_988_800.0;
+const TWO_POW_32: f64 = 4_294_967_296.0;
+
+/// RFC 6464 3: the V flag, then the level in -dBov.
+fn audio_level(payload: &[u8]) -> Option<u8> {
+  payload.first().map(|b| b & 0x7f)
+}
+
+/// abs-capture-time: a 64-bit NTP timestamp (UQ32.32), then optionally the
+/// estimated capture clock offset (Q32.32, signed). Returns them in Unix
+/// milliseconds and milliseconds.
+fn abs_capture_time(payload: &[u8]) -> Option<(f64, Option<f64>)> {
+  let ntp = u64::from_be_bytes(<[u8; 8]>::try_from(payload.get(..8)?).ok()?);
+  let seconds = (ntp >> 32) as f64 - NTP_UNIX_OFFSET_SECS;
+  let fraction = (ntp & 0xffff_ffff) as f64 / TWO_POW_32;
+  let offset = payload
+    .get(8..16)
+    .and_then(|b| <[u8; 8]>::try_from(b).ok())
+    .map(|b| i64::from_be_bytes(b) as f64 / TWO_POW_32 * 1000.0);
+  Some(((seconds + fraction) * 1000.0, offset))
+}
+
+/// What the packets of the frame being put together carried in header
+/// extensions (the first value of each).
+#[derive(Default, Clone, Copy, Debug)]
+struct FrameExtensions {
+  audio_level: Option<u8>,
+  capture_time: Option<f64>,
+  sender_capture_time_offset: Option<f64>,
+}
+
+/// A received frame's type: the bitstream's own key frame flag. A VP8 key
+/// frame also starts with the start code (RFC 6386 9.1), which tells a key
+/// frame from a payload a transform replaced.
+fn received_key_frame(mime_type: &str, data: &[u8]) -> bool {
+  if mime_type.eq_ignore_ascii_case("video/vp8") {
+    return data.len() >= 6
+      && data[0] & 1 == 0
+      && data[3..6] == [0x9d, 0x01, 0x2a];
+  }
+  crate::media::is_key_frame(mime_type, data)
 }
 
 /// A received frame, for a receiver's transform.
@@ -61,6 +116,11 @@ pub struct FrameAssembler {
   /// The frame being put together: its timestamp, first sequence number,
   /// the next sequence number expected, and its bytes so far.
   current: Option<(u32, u16, u16, Vec<u8>)>,
+  /// The negotiated ids of `ssrc-audio-level` and abs-capture-time.
+  audio_level_id: Option<u8>,
+  abs_capture_time_id: Option<u8>,
+  /// What the current frame's packets carried of them.
+  current_extensions: FrameExtensions,
 }
 
 impl FrameAssembler {
@@ -71,6 +131,39 @@ impl FrameAssembler {
       depacketizer: depacketizer_for(mime_type),
       audio: mime_type.to_ascii_lowercase().starts_with("audio/"),
       current: None,
+      audio_level_id: None,
+      abs_capture_time_id: None,
+      current_extensions: FrameExtensions::default(),
+    }
+  }
+
+  /// The header extension ids the receiver negotiated, whose values the
+  /// frames' metadata name.
+  pub fn with_extensions(
+    mut self,
+    audio_level_id: Option<u8>,
+    abs_capture_time_id: Option<u8>,
+  ) -> Self {
+    self.audio_level_id = audio_level_id;
+    self.abs_capture_time_id = abs_capture_time_id;
+    self
+  }
+
+  fn note_extensions(&mut self, header: &rtc::rtp::Header) {
+    let ext = &mut self.current_extensions;
+    if ext.audio_level.is_none()
+      && let Some(id) = self.audio_level_id
+      && let Some(payload) = header.get_extension(id)
+    {
+      ext.audio_level = audio_level(&payload);
+    }
+    if ext.capture_time.is_none()
+      && let Some(id) = self.abs_capture_time_id
+      && let Some(payload) = header.get_extension(id)
+      && let Some((time, offset)) = abs_capture_time(&payload)
+    {
+      ext.capture_time = Some(time);
+      ext.sender_capture_time_offset = offset;
     }
   }
 
@@ -100,6 +193,7 @@ impl FrameAssembler {
         return None; // The middle of a frame whose start was lost.
       }
       self.current = Some((header.timestamp, seq, seq, Vec::new()));
+      self.current_extensions = FrameExtensions::default();
     }
     let bytes = match &mut self.depacketizer {
       Some(d) => match d.depacketize(payload) {
@@ -111,6 +205,7 @@ impl FrameAssembler {
       },
       None => payload.clone(),
     };
+    self.note_extensions(header);
     let tail = self.audio
       || match &self.depacketizer {
         Some(d) => d.is_partition_tail(header.marker, payload),
@@ -127,8 +222,9 @@ impl FrameAssembler {
     if data.is_empty() {
       return None;
     }
+    let ext = self.current_extensions;
     Some(ReceivedFrame {
-      key_frame: crate::media::is_key_frame(&self.mime_type, &data),
+      key_frame: received_key_frame(&self.mime_type, &data),
       width_height: crate::media::frame_size(&self.mime_type, &data),
       info: ReceivedFrameInfo {
         synchronization_source: header.ssrc,
@@ -137,6 +233,9 @@ impl FrameAssembler {
         mime_type: self.mime_type.clone(),
         rtp_timestamp: ts,
         sequence_number: first,
+        audio_level: ext.audio_level,
+        capture_time: ext.capture_time,
+        sender_capture_time_offset: ext.sender_capture_time_offset,
       },
       data,
     })
@@ -184,17 +283,24 @@ impl Core {
     if stale {
       let index = self.index_of(key).ok()?;
       let mut receiver = self.pc.rtp_receiver(index.into())?;
-      let mime = receiver
-        .get_parameters()
-        .rtp_parameters
+      let params = &receiver.get_parameters().rtp_parameters;
+      let mime = params
         .codecs
         .iter()
         .find(|c| c.payload_type == pt)
         .map(|c| c.rtp_codec.mime_type.clone())?;
-      self
-        .transforms
-        .assemblers
-        .insert(key, Some(FrameAssembler::new(pt, &mime)));
+      let extension_id = |uri: &str| {
+        params
+          .header_extensions
+          .iter()
+          .find(|e| e.uri == uri)
+          .and_then(|e| u8::try_from(e.id).ok())
+      };
+      let assembler = FrameAssembler::new(pt, &mime).with_extensions(
+        extension_id(AUDIO_LEVEL_URI),
+        extension_id(ABS_CAPTURE_TIME_URI),
+      );
+      self.transforms.assemblers.insert(key, Some(assembler));
     }
     self
       .transforms
@@ -266,5 +372,54 @@ mod tests {
     assert!(a.push(&header(4, 180, false), &start).is_none());
     let end = Bytes::from_static(&[0x00, 0x02, 0x03, 0x04]);
     assert!(a.push(&header(6, 180, true), &end).is_none());
+  }
+
+  #[test]
+  fn a_vp8_payload_without_the_start_code_is_not_a_key_frame() {
+    // A transform replaced the frame with zeros: bit 0 is clear, but there
+    // is no start code.
+    assert!(!received_key_frame("video/VP8", &[0; 16]));
+    assert!(received_key_frame(
+      "video/vp8",
+      &[0, 0, 0, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0xe0, 0x01]
+    ));
+  }
+
+  #[test]
+  fn audio_level_and_abs_capture_time_are_read() {
+    let mut a =
+      FrameAssembler::new(111, "audio/opus").with_extensions(Some(1), Some(2));
+    // 2026-01-01T00:00:00Z is Unix 1767225600 s; half a second more.
+    let ntp_seconds: u64 = 1_767_225_600 + 2_208_988_800;
+    let ntp = (ntp_seconds << 32) | 0x8000_0000;
+    let mut abs = ntp.to_be_bytes().to_vec();
+    // An offset of -0.25 s in Q32.32.
+    abs.extend_from_slice(&(-(1i64 << 30)).to_be_bytes());
+    let mut h = header(9, 1920, true);
+    h.extension = true;
+    h.extension_profile = 0xBEDE;
+    h.extensions = vec![
+      rtc::rtp::header::Extension {
+        id: 1,
+        payload: Bytes::from_static(&[0x80 | 30]),
+      },
+      rtc::rtp::header::Extension {
+        id: 2,
+        payload: Bytes::from(abs),
+      },
+    ];
+    let f = a
+      .push(&h, &Bytes::from_static(&[0xf8, 0xff, 0xfe]))
+      .unwrap();
+    assert_eq!(f.info.audio_level, Some(30));
+    assert_eq!(f.info.capture_time, Some(1_767_225_600_500.0));
+    assert_eq!(f.info.sender_capture_time_offset, Some(-250.0));
+    // Without the extensions negotiated, none is named.
+    let mut b = FrameAssembler::new(111, "audio/opus");
+    let f = b
+      .push(&h, &Bytes::from_static(&[0xf8, 0xff, 0xfe]))
+      .unwrap();
+    assert_eq!(f.info.audio_level, None);
+    assert_eq!(f.info.capture_time, None);
   }
 }

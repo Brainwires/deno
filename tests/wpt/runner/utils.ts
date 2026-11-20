@@ -4,6 +4,23 @@
 import { parseArgs } from "@std/cli/parse-args";
 import { checkCiHash, join, resolve, ROOT_PATH } from "../../../tools/util.js";
 
+const args = parseArgs(Deno.args, {
+  "--": true,
+  boolean: [
+    "all",
+    "quiet",
+    "release",
+    "no-interactive",
+    "inspect-brk",
+    "no-ignore",
+    "document",
+    "no-document",
+    "dom-shim",
+    "no-hosts",
+  ],
+  string: ["json", "wptreport", "binary"],
+});
+
 export const {
   all,
   json,
@@ -15,21 +32,66 @@ export const {
   ["auto-config"]: autoConfig,
   ["inspect-brk"]: inspectBrk,
   ["no-ignore"]: noIgnore,
-  ["dom-shim"]: domShim,
+  ["no-hosts"]: noHosts,
   binary,
-} = parseArgs(Deno.args, {
-  "--": true,
-  boolean: [
-    "all",
-    "quiet",
-    "release",
-    "no-interactive",
-    "inspect-brk",
-    "no-ignore",
-    "dom-shim",
-  ],
-  string: ["json", "wptreport", "binary"],
-});
+} = args;
+
+/**
+ * The runner's document environment (tier T1, see README.md): `"auto"` gives
+ * it to the window-scoped tests of `DOCUMENT_SUITES`, `"on"` (`--document`,
+ * or its old name `--dom-shim`) to every window-scoped test, and `"off"`
+ * (`--no-document`, tier T0) to none.
+ */
+export const documentMode: "auto" | "on" | "off" = args["no-document"]
+  ? "off"
+  : args.document || args["dom-shim"]
+  ? "on"
+  : "auto";
+
+/**
+ * The suites whose window-scoped tests get the document environment by
+ * default. They test APIs the runtime implements (WebRTC, Media Capture), not
+ * the DOM: the environment is plumbing there. A suite about the DOM or HTML
+ * itself never gets it by default, since the environment would then be the
+ * thing under test.
+ */
+export const DOCUMENT_SUITES: readonly string[] = [
+  "webrtc",
+  "webrtc-encoded-transform",
+  "webrtc-extensions",
+  "webrtc-ice",
+  "webrtc-identity",
+  "webrtc-priority",
+  "webrtc-stats",
+  "webrtc-svc",
+  "mediacapture-streams",
+];
+
+/**
+ * Suites whose results are tracked but never fail a run: their failures are
+ * listed, and a test file the expectation file doesn't list yet runs as if
+ * expected to pass (so `wpt.ts update` can fill the file in).
+ */
+export const NON_GATING_SUITES: readonly string[] = ["mediacapture-streams"];
+
+/** The top-level suite directory of a test path such as `/webrtc/x.html`. */
+export function suiteOf(path: string): string {
+  return path.split("/")[1] ?? "";
+}
+
+/**
+ * Whether a test (its URL path) runs with the document environment. Only a
+ * window-scoped test gets it: a suite's own `.html` file or a `.window.js`
+ * test. An `.any.js` test is written for every global and a `.worker.js` one
+ * for a worker, so neither is defined as a document.
+ */
+export function wantsDocument(pathname: string): boolean {
+  if (documentMode === "off") return false;
+  const name = pathname.slice(pathname.lastIndexOf("/") + 1);
+  if (/\.any\./.test(name) || /\.worker\.html$/.test(name)) return false;
+  return documentMode === "on" ||
+    DOCUMENT_SUITES.includes(suiteOf(pathname));
+}
 
 export function denoBinary() {
   if (binary) {
@@ -230,16 +292,27 @@ export async function runGitDiff(args: string[]): Promise<void> {
 }
 
 export async function checkPy3Available() {
-  const { success, stdout } = await runPy(["--version"], {
+  const { success, stdout, stderr } = await runPy(["--version"], {
     stdout: "piped",
+    stderr: "piped",
   }).output();
   assert(success, "failed to run python --version");
-  const output = new TextDecoder().decode(stdout);
+  // Python 2 printed its version to stderr.
+  const output = new TextDecoder().decode(stdout) +
+    new TextDecoder().decode(stderr);
+  const match = output.match(/Python (\d+)\.(\d+)/);
+  const [major, minor] = match ? [Number(match[1]), Number(match[2])] : [0, 0];
+  // The suite's `wpt` script asks for 3.9 or newer; 3.11 is the floor here,
+  // the oldest the runner is used with. (An earlier 3.11-only check was for
+  // https://github.com/web-platform-tests/wpt/issues/44427 on an older
+  // suite.)
   assert(
-    output.includes("Python 3.11"),
+    major === 3 && minor >= 11,
     `The ${
       Deno.build.os == "windows" ? "python.exe" : "python3"
-    } in your path is not Python 3.11.x. See https://github.com/web-platform-tests/wpt/issues/44427 for more details.`,
+    } in your path is ${
+      match ? match[0] : "not Python"
+    }; the WPT server needs Python 3.11 or newer.`,
   );
 }
 

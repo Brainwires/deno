@@ -17,6 +17,14 @@
 type RTCSdpType = "answer" | "offer" | "pranswer" | "rollback";
 
 /**
+ * The relative priority of a data channel (WebRTC Priority Control API),
+ * carried to the peer in the channel's DCEP open message.
+ *
+ * @category WebRTC
+ */
+type RTCPriorityType = "high" | "low" | "medium" | "very-low";
+
+/**
  * Where the connection is in the offer/answer exchange.
  *
  * @category WebRTC
@@ -142,7 +150,16 @@ type RTCErrorDetailType =
   | "hardware-encoder-error"
   | "hardware-encoder-not-available"
   | "sctp-failure"
-  | "sdp-syntax-error";
+  | "sdp-syntax-error"
+  // wpt100:identity — Identity for WebRTC's partial enum.
+  | "idp-bad-script-failure"
+  | "idp-execution-failure"
+  | "idp-load-failure"
+  | "idp-need-login"
+  | "idp-timeout"
+  | "idp-tls-failure"
+  | "idp-token-expired"
+  | "idp-token-invalid";
 
 /**
  * A STUN or TURN server for ICE. `urls` takes `stun:`, `turn:` and `turns:`
@@ -387,6 +404,46 @@ interface RTCRtpEncodingParameters {
   /** Whether the sender may vary an audio frame's length with the network
    * (it keeps the length as written; default false). */
   adaptivePtime?: boolean;
+  /** The codec this encoding is sent with: one of
+   * `RTCRtpSender.getCapabilities(kind).codecs` (`addTransceiver`), or of
+   * the negotiated codecs (`setParameters`). */
+  codec?: RTCRtpCodec;
+  /** How much effort the encoder spends (video; webrtc-extensions). */
+  encodingComplexity?: RTCEncodingComplexity;
+  /** The scalability mode (video; webrtc-svc), such as `"L1T3"`. */
+  scalabilityMode?: string;
+}
+
+/**
+ * How much effort a video encoder spends on an encoding.
+ *
+ * @category WebRTC
+ */
+type RTCEncodingComplexity =
+  | "low"
+  | "normal"
+  | "high"
+  | "very-high"
+  | "maximum";
+
+/**
+ * Per-encoding options of one `setParameters()` call (webrtc-extensions).
+ *
+ * @category WebRTC
+ */
+interface RTCEncodingOptions {
+  /** Asks the encoder for a key frame on this encoding. */
+  keyFrame?: boolean;
+}
+
+/**
+ * The second argument of `RTCRtpSender.setParameters()`.
+ *
+ * @category WebRTC
+ */
+interface RTCSetParameterOptions {
+  /** One entry per encoding, or none. */
+  encodingOptions?: RTCEncodingOptions[];
 }
 
 /**
@@ -566,11 +623,14 @@ interface MediaTrackSettings {
 
 /**
  * A media track. Deno has no capture devices of its own: a remote track is
- * a receiver's (read its RTP with `Deno.webrtc.readRtp(receiver)`), a local
+ * a receiver's (read its RTP with `Deno.webrtc.readRtp(receiver)`, or its
+ * frames with `Deno.webrtc.readFrames(track)`; a remote video track's
+ * `getSettings()` has the received width and height; it mutes when its RTP
+ * stops for two seconds and unmutes on the next packet), a local
  * one is a `Deno.webrtc.EncodedMediaTrack`, or, under
  * `DENO_FAKE_MEDIA_DEVICES=1`, a fake camera's or microphone's from
  * `navigator.mediaDevices.getUserMedia()`. Only a capture device's track has
- * capabilities, settings and constraints.
+ * capabilities and constraints.
  *
  * @category WebRTC
  */
@@ -824,12 +884,20 @@ interface RTCRtpSender {
   getParameters(): RTCRtpSendParameters;
   getStats(): Promise<RTCStatsReport>;
   replaceTrack(withTrack: MediaStreamTrack | null): Promise<void>;
-  setParameters(parameters: RTCRtpSendParameters): Promise<void>;
+  setParameters(
+    parameters: RTCRtpSendParameters,
+    setParameterOptions?: RTCSetParameterOptions,
+  ): Promise<void>;
   setStreams(...streams: MediaStream[]): void;
   /** An `RTCRtpScriptTransform` or `RTCRtpSFrameEncryptor` the sender's
    * encoded frames go through before they are sent (a transform serves one
    * sender or receiver). */
   transform: RTCRtpScriptTransform | RTCRtpSFrameEncryptor | null;
+  /** The insertable streams that preceded `transform` (Chrome's API): the
+   * sender's encoded frames in `readable`, and what is written to
+   * `writable` sent. Once only, and not with a transform set
+   * (`InvalidStateError`). */
+  createEncodedStreams(): RTCEncodedStreams;
 }
 
 /**
@@ -860,6 +928,10 @@ interface RTCRtpReceiver {
    * encoded frames go through (what comes out is dropped: there is no
    * decoder). */
   transform: RTCRtpScriptTransform | RTCRtpSFrameDecryptor | null;
+  /** The receiver's encoded frames in `readable` (what is written to
+   * `writable` is dropped: there is no decoder). Once only, and not with a
+   * transform set (`InvalidStateError`). */
+  createEncodedStreams(): RTCEncodedStreams;
 }
 
 /**
@@ -1009,6 +1081,8 @@ interface RTCDataChannelInit {
   protocol?: string;
   negotiated?: boolean;
   id?: number;
+  /** The channel's priority, `"low"` by default. */
+  priority?: RTCPriorityType;
 }
 
 /**
@@ -1253,6 +1327,8 @@ interface RTCDataChannel extends EventTarget {
   readonly maxPacketLifeTime: number | null;
   readonly maxRetransmits: number | null;
   readonly negotiated: boolean;
+  /** The priority the channel was created with (or the peer opened it with). */
+  readonly priority: RTCPriorityType;
   onbufferedamountlow: ((this: RTCDataChannel, ev: Event) => any) | null;
   onclose: ((this: RTCDataChannel, ev: Event) => any) | null;
   onclosing: ((this: RTCDataChannel, ev: Event) => any) | null;
@@ -1741,6 +1817,58 @@ declare namespace Deno {
     ): ReadableStream<Uint8Array>;
 
     /**
+     * A frame a remote track received: the bytes its RTP packets carried,
+     * put back together and still encoded (Deno has no decoder).
+     *
+     * @category WebRTC
+     */
+    export interface ReceivedFrame {
+      /** The encoded frame (Annex B for H.264). */
+      data: Uint8Array;
+      /** The codec's MIME type, as negotiated (`"video/VP8"`, ...). */
+      codec: string;
+      /** Whether the bitstream marks it a key frame (video). */
+      keyFrame: boolean;
+      /**
+       * The video's coded size, as the bitstream names it (a VP8 or VP9 key
+       * frame header, an H.264 or H.265 SPS): the last key frame's, so a
+       * delta frame carries it too. `null` for audio, and until a key frame
+       * arrived.
+       */
+      width: number | null;
+      height: number | null;
+      /** The frame's RTP timestamp. */
+      rtpTimestamp: number;
+      /** When it was delivered, on the `performance.now()` clock. */
+      timestamp: number;
+    }
+
+    /**
+     * Reads the frames a remote track (an `RTCRtpReceiver`'s, or a clone of
+     * one) receives, in the order they complete. A frame whose packets
+     * arrived out of order or with one missing is dropped, and a new reader
+     * of a video track asks the sender for a key frame. Real-time media
+     * doesn't wait: a frame that arrives while `highWaterMark` frames (64)
+     * are queued is dropped. A disabled track delivers none; the stream
+     * closes when the track ends. AV1 frames are not delivered.
+     *
+     * @example
+     * ```ts
+     * pc.ontrack = async ({ track }) => {
+     *   for await (const frame of Deno.webrtc.readFrames(track)) {
+     *     console.log(frame.codec, frame.keyFrame, frame.width, frame.height);
+     *   }
+     * };
+     * ```
+     *
+     * @category WebRTC
+     */
+    export function readFrames(
+      track: MediaStreamTrack,
+      options?: { highWaterMark?: number },
+    ): ReadableStream<ReceivedFrame>;
+
+    /**
      * Asks the remote sender of a receiver for a key frame (RTCP PLI).
      * Returns whether it was sent.
      *
@@ -1843,6 +1971,9 @@ interface RTCEncodedAudioFrameOptions {
  */
 interface RTCEncodedVideoFrame {
   data: ArrayBuffer;
+  /** The RTP timestamp (`getMetadata().rtpTimestamp`), as browsers still
+   * have it. */
+  readonly timestamp: number;
   readonly type: RTCEncodedVideoFrameType;
   getMetadata(): RTCEncodedVideoFrameMetadata;
 }
@@ -1865,7 +1996,21 @@ declare var RTCEncodedVideoFrame: {
  */
 interface RTCEncodedAudioFrame {
   data: ArrayBuffer;
+  /** The RTP timestamp (`getMetadata().rtpTimestamp`). */
+  readonly timestamp: number;
   getMetadata(): RTCEncodedAudioFrameMetadata;
+}
+
+/**
+ * What `RTCRtpSender` / `RTCRtpReceiver` `createEncodedStreams()` returns.
+ * A frame can be written once (again: `OperationError`); anything else
+ * than a frame is a `TypeError`.
+ *
+ * @category WebRTC
+ */
+interface RTCEncodedStreams {
+  readable: ReadableStream<RTCEncodedVideoFrame | RTCEncodedAudioFrame>;
+  writable: WritableStream<RTCEncodedVideoFrame | RTCEncodedAudioFrame>;
 }
 
 /** @category WebRTC */
@@ -2014,4 +2159,82 @@ interface RTCRtpSFrameDecryptor extends EventTarget {
     | null;
   addDecryptionKey(key: CryptoKey, keyId: CryptoKeyID): Promise<void>;
   removeDecryptionKey(keyId: CryptoKeyID): Promise<void>;
+}
+
+// wpt100:identity — Identity for WebRTC 1.0 (W3C webrtc-identity).
+
+/**
+ * The options of `RTCPeerConnection.setIdentityProvider()`, passed to the
+ * identity provider's `generateAssertion()`.
+ *
+ * @category WebRTC
+ */
+interface RTCIdentityProviderOptions {
+  /** The IdP's protocol: the IdP proxy is
+   * `https://<provider>/.well-known/idp-proxy/<protocol>`. No `/` or `\`.
+   * Defaults to `"default"`. */
+  protocol?: string;
+  /** The identity the user is expected to have, a hint to the IdP. */
+  usernameHint?: string;
+  /** The identity of the peer, for an IdP that binds both; defaults to
+   * `RTCConfiguration.peerIdentity`. */
+  peerIdentity?: string;
+}
+
+/**
+ * A validated peer identity: the IdP domain and the identity it vouched for.
+ *
+ * @category WebRTC
+ */
+interface RTCIdentityAssertion {
+  idp: string;
+  name: string;
+}
+
+/** @category WebRTC */
+declare var RTCIdentityAssertion: {
+  readonly prototype: RTCIdentityAssertion;
+  new (idp: string, name: string): RTCIdentityAssertion;
+};
+
+/** @category WebRTC */
+interface RTCConfiguration {
+  /** The target peer identity: the connection rejects a remote description
+   * whose `a=identity` doesn't validate to this identity. */
+  peerIdentity?: string;
+}
+
+/** @category WebRTC */
+interface RTCError {
+  /** For `"idp-load-failure"`: the HTTP status of the IdP proxy's load. */
+  readonly httpRequestStatusCode: number | null;
+}
+
+/** @category WebRTC */
+interface RTCPeerConnection {
+  /** Sets the identity provider whose assertion `createOffer()` /
+   * `createAnswer()` add as `a=identity`. The IdP proxy is fetched (net
+   * permission) and runs in a worker with no permissions. */
+  setIdentityProvider(
+    provider: string,
+    options?: RTCIdentityProviderOptions,
+  ): void;
+  /** Gets an identity assertion from the identity provider: the base64 JSON
+   * that `a=identity` carries. */
+  getIdentityAssertion(): Promise<string>;
+  /** The peer's identity, once a remote description's `a=identity`
+   * validates. */
+  readonly peerIdentity: Promise<RTCIdentityAssertion>;
+  /** Where the user can log in, after an `"idp-need-login"` error. */
+  readonly idpLoginUrl: string | null;
+  /** The identity provider's information about its last error. */
+  readonly idpErrorInfo: string | null;
+}
+
+/** @category WebRTC */
+interface MediaStreamTrack {
+  /** Whether the track's content is withheld from the application (never,
+   * in Deno). */
+  readonly isolated: boolean;
+  onisolationchange: ((this: MediaStreamTrack, ev: Event) => any) | null;
 }

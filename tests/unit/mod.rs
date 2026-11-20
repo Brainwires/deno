@@ -110,9 +110,32 @@ fn run_test(test: &CollectedTest) -> TestResult {
   if test.name.ends_with("::webrtc_test") {
     deno = deno.env("DENO_WEBRTC_LOOPBACK_ONLY", "1");
   }
+  // wpt100:ice
+  if test.name.ends_with("::webrtc_ice_test") {
+    deno = deno.env("DENO_WEBRTC_LOOPBACK_ONLY", "1");
+  }
+
+  // wpt100:hdrext
+  if test.name.ends_with("::webrtc_hdrext_test") {
+    deno = deno.env("DENO_WEBRTC_LOOPBACK_ONLY", "1");
+  }
 
   // The fake camera and microphone of `navigator.mediaDevices`.
   if test.name.ends_with("::webrtc_media_test") {
+    deno = deno
+      .env("DENO_WEBRTC_LOOPBACK_ONLY", "1")
+      .env("DENO_FAKE_MEDIA_DEVICES", "1");
+  }
+
+  // wpt100:stats: the fake microphone for a sender's `media-source`.
+  if test.name.ends_with("::webrtc_stats_test") {
+    deno = deno
+      .env("DENO_WEBRTC_LOOPBACK_ONLY", "1")
+      .env("DENO_FAKE_MEDIA_DEVICES", "1");
+  }
+
+  // wpt100:S10 the encoded transform tests use the fake devices too.
+  if test.name.ends_with("::webrtc_transform_test") {
     deno = deno
       .env("DENO_WEBRTC_LOOPBACK_ONLY", "1")
       .env("DENO_FAKE_MEDIA_DEVICES", "1");

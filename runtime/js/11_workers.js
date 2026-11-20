@@ -68,6 +68,7 @@ function createWorker(
   workerType,
   closeOnIdle,
   resourceLimits,
+  noPermissions = false,
 ) {
   return op_create_worker({
     hasSourceCode,
@@ -78,8 +79,16 @@ function createWorker(
     workerType,
     closeOnIdle,
     resourceLimits,
+    noPermissions,
   });
 }
+
+// denext: internal Worker options, under a key only runtime code holds (the
+// WebRTC identity provider proxy, ext/webrtc/06_identity.js):
+// `{ sourceCode, noPermissions }` runs `sourceCode` as a script in place of
+// loading `specifier` (which stays the worker's location and origin), in a
+// worker with no permission at all.
+const internalWorkerOptions = Symbol("[[internalWorkerOptions]]");
 
 function hostTerminateWorker(id) {
   op_host_terminate_worker(id);
@@ -151,8 +160,12 @@ class Worker extends EventTarget {
     }
 
     this.#name = name;
+    const internal = options[internalWorkerOptions];
     let hasSourceCode, sourceCode;
-    if (workerType === "classic") {
+    if (internal !== undefined) {
+      hasSourceCode = true;
+      sourceCode = internal.sourceCode;
+    } else if (workerType === "classic") {
       hasSourceCode = true;
       sourceCode = `importScripts(${JSONStringify(specifier)});`;
     } else {
@@ -189,6 +202,7 @@ class Worker extends EventTarget {
       workerType,
       false,
       resourceLimits,
+      internal?.noPermissions === true,
     );
     this.#id = id;
     this.#pollControl();
@@ -420,5 +434,5 @@ webidl.converters["WorkerType"] = webidl.createEnumConverter("WorkerType", [
   "module",
 ]);
 
-return { Worker };
+return { internalWorkerOptions, Worker };
 })();

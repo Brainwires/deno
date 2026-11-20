@@ -24,6 +24,7 @@ use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
+use rtc::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
 use rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtc::rtp::packetizer::Packetizer;
@@ -33,6 +34,7 @@ use rtc::rtp_transceiver::rtp_sender::RTCRtpCodec;
 use rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
 use rtc::rtp_transceiver::rtp_sender::RTCRtpCodingParameters;
 use rtc::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters;
+use rtc::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability;
 use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 use rtc::sansio::Protocol;
 use rtc::shared::marshal::Unmarshal;
@@ -82,7 +84,49 @@ pub fn media_stack() -> Result<(MediaEngine, Registry), WebRtcError> {
   let registry =
     register_default_interceptors(Registry::new(), &mut media_engine)
       .map_err(crate::peer::rtc_err)?;
+  register_header_extensions(&mut media_engine)?;
   Ok((media_engine, registry))
+}
+
+/// The RTP header extensions RFC 8834 section 5.2 has a WebRTC endpoint
+/// support, on top of the ones the default interceptors register (the
+/// simulcast `mid` / `rid` / `repaired-rid` for video, transport-wide
+/// congestion control for both): `mid` for audio too (5.2.4, mandatory with
+/// BUNDLE), the client-to-mixer audio level (5.2.2, RFC 6464) and the
+/// coordination of video orientation (5.2.5), and absolute capture time
+/// (abs-capture-time; RTCRtpTransceiver's header extension list starts it
+/// "stopped", so an offer carries it only once the application asks, while an
+/// answer takes it when offered). Registered after the defaults, so the ids
+/// those have stay as they were. A sender writes the audio level and the
+/// capture time (`header_extensions.rs`); the engine reads them from
+/// received packets as any other extension.
+fn register_header_extensions(
+  media_engine: &mut MediaEngine,
+) -> Result<(), WebRtcError> {
+  for (uri, kind) in [
+    (rtc::sdp::extmap::SDES_MID_URI, RtpCodecKind::Audio),
+    (rtc::sdp::extmap::AUDIO_LEVEL_URI, RtpCodecKind::Audio),
+    (rtc::sdp::extmap::VIDEO_ORIENTATION_URI, RtpCodecKind::Video),
+    (
+      crate::header_extensions::ABS_CAPTURE_TIME_URI,
+      RtpCodecKind::Audio,
+    ),
+    (
+      crate::header_extensions::ABS_CAPTURE_TIME_URI,
+      RtpCodecKind::Video,
+    ),
+  ] {
+    media_engine
+      .register_header_extension(
+        RTCRtpHeaderExtensionCapability {
+          uri: uri.to_string(),
+        },
+        kind,
+        None,
+      )
+      .map_err(crate::peer::rtc_err)?;
+  }
+  Ok(())
 }
 
 pub fn parse_kind(kind: &str) -> Result<RtpCodecKind, WebRtcError> {
@@ -213,7 +257,7 @@ pub fn capabilities(
 pub fn capabilities_from_sdp(kind: &str, sdp: &str) -> Capabilities {
   let mut codecs: Vec<(String, CodecArg)> = Vec::new();
   let mut fmtp: HashMap<String, String> = HashMap::new();
-  let mut header_extensions: Vec<HeaderExtensionCapability> = Vec::new();
+  let mut header_extensions: Vec<(u16, HeaderExtensionCapability)> = Vec::new();
   let mut in_kind = false;
   for line in sdp.lines() {
     let line = line.trim_end();
@@ -250,13 +294,25 @@ pub fn capabilities_from_sdp(kind: &str, sdp: &str) -> Capabilities {
       }
     } else if let Some(value) = line.strip_prefix("a=extmap:")
       && let Some(uri) = value.split_ascii_whitespace().nth(1)
-      && !header_extensions.iter().any(|h| h.uri == uri)
+      && !header_extensions.iter().any(|(_, h)| h.uri == uri)
     {
-      header_extensions.push(HeaderExtensionCapability {
-        uri: uri.to_string(),
-      });
+      // By id: the engine writes the lines in no particular order.
+      let id = value
+        .split(|c: char| c == '/' || c.is_ascii_whitespace())
+        .next()
+        .and_then(|id| id.parse::<u16>().ok())
+        .unwrap_or(u16::MAX);
+      header_extensions.push((
+        id,
+        HeaderExtensionCapability {
+          uri: uri.to_string(),
+        },
+      ));
     }
   }
+  header_extensions.sort_by_key(|(id, _)| *id);
+  let header_extensions: Vec<HeaderExtensionCapability> =
+    header_extensions.into_iter().map(|(_, h)| h).collect();
   let mut out: Vec<CodecArg> = Vec::new();
   for (pt, mut codec) in codecs {
     let lower = codec.mime_type.to_ascii_lowercase();
@@ -341,6 +397,10 @@ pub struct RemoteSection {
   /// Port 0: the section was rejected.
   pub rejected: bool,
   pub kind: String,
+  /// The layers of the section's `a=simulcast` `recv` list (RFC 8853): the
+  /// first of each layer's alternatives, without the paused marker `~`,
+  /// each once, in the list's order.
+  pub simulcast_recv: Vec<String>,
 }
 
 /// A transceiver as JavaScript reconciles it after every operation.
@@ -391,6 +451,7 @@ pub fn sections(sdp: &str) -> HashMap<String, RemoteSection> {
           streams: vec![],
           rejected: port == "0",
           kind,
+          simulcast_recv: vec![],
         },
       ));
       continue;
@@ -411,6 +472,8 @@ pub fn sections(sdp: &str) -> HashMap<String, RemoteSection> {
       {
         section.streams.push(stream.to_string());
       }
+    } else if let Some(value) = attr.strip_prefix("simulcast:") {
+      section.simulcast_recv = simulcast_recv_layers(value);
     } else if matches!(attr, "sendrecv" | "sendonly" | "recvonly" | "inactive")
     {
       section.direction = attr.to_string();
@@ -420,11 +483,42 @@ pub fn sections(sdp: &str) -> HashMap<String, RemoteSection> {
   out
 }
 
+/// The layers of an `a=simulcast` value's `recv` list (`send 1;2 recv
+/// a,b;~c`): the first alternative of each, `~` dropped, each once.
+fn simulcast_recv_layers(value: &str) -> Vec<String> {
+  let mut out: Vec<String> = Vec::new();
+  let mut fields = value.split_ascii_whitespace();
+  while let (Some(direction), Some(list)) = (fields.next(), fields.next()) {
+    if !direction.eq_ignore_ascii_case("recv") {
+      continue;
+    }
+    for layer in list.split(';') {
+      let first = layer.split(',').next().unwrap_or_default();
+      let rid = first.strip_prefix('~').unwrap_or(first);
+      if !rid.is_empty() && !out.iter().any(|r| r == rid) {
+        out.push(rid.to_string());
+      }
+    }
+  }
+  out
+}
+
 /// The codec preferences an `EncodedMediaTrack` gives its transceiver: its
 /// codec, then (for audio) the telephone-event formats `RTCDTMFSender`
-/// needs, which a preference list would otherwise leave out.
+/// needs, and (for video) retransmission and FEC, which a preference list
+/// leaves out unless it lists them (W3C `setCodecPreferences`).
 pub fn track_preferences(codec: &CodecArg) -> Vec<CodecArg> {
   let mut out = vec![codec.clone()];
+  if codec.mime_type.to_ascii_lowercase().starts_with("video/") {
+    for mime_type in ["video/rtx", "video/ulpfec"] {
+      out.push(CodecArg {
+        mime_type: mime_type.to_string(),
+        clock_rate: 90000,
+        channels: None,
+        sdp_fmtp_line: None,
+      });
+    }
+  }
   if codec.mime_type.to_ascii_lowercase().starts_with("audio/") {
     for clock_rate in [48000, 8000] {
       out.push(CodecArg {
@@ -468,6 +562,11 @@ pub struct FakeFrame {
   pub key_frame: bool,
   pub width_height: Option<(u16, u16)>,
   pub info: SenderFrameInfo,
+  /// The RFC 6464 level (-dBov) measured from the frame's PCM, as the sender
+  /// writes it in the audio level header extension
+  /// (`header_extensions::audio_level`); `None` where the PCM isn't at hand
+  /// (and for video).
+  pub audio_level: Option<u8>,
 }
 
 /// Whether an encoded video frame is a key frame (audio frames are not
@@ -677,8 +776,10 @@ impl Core {
   pub(crate) fn rollback_victims(&mut self) -> Vec<usize> {
     let mut out = Vec::new();
     for (index, key) in self.media.keys.clone().iter().enumerate() {
+      // The engine removes what the offer created unless `addTrack` touched
+      // it (attach_track drops the key from created_by_remote).
       if self.media.created_by_remote.contains(key)
-        && self.pc.rtp_sender(index.into()).is_none()
+        && self.pc.rtp_transceiver(index).is_some()
       {
         out.push(index);
       }
@@ -808,6 +909,12 @@ impl Core {
 
   /// `addTrack` onto a transceiver JavaScript chose for reuse: the sender
   /// takes the track (its id and streams go in the msid) and starts sending.
+  /// A transceiver a remote offer created has no engine sender until now; the
+  /// engine hands out a sender only while the direction sends, so the
+  /// direction gains `send` first. One `addTransceiver` created stays out of a
+  /// remote offer's new m-sections (WPT checkAddTransceiverThenAddTrackPairs:
+  /// browsers keep it unassociable), and `addTrack` keeps a transceiver a
+  /// rolled-back remote offer created (W3C 4.4.1.6).
   pub(crate) fn attach_track(
     &mut self,
     key: u32,
@@ -816,6 +923,44 @@ impl Core {
   ) -> Result<(), WebRtcError> {
     let index = self.index_of(key)?;
     let kind = self.media.kinds.get(&key).copied().unwrap_or_default();
+    let streams = msid_streams(streams);
+    let stream = streams[0].clone();
+    if let Some(mut t) = self.pc.rtp_transceiver(index) {
+      let has_recv = t.direction().has_recv();
+      t.set_direction(RTCRtpTransceiverDirection::from_send_recv(
+        true, has_recv,
+      ));
+      t.keep_on_rollback();
+    }
+    self.media.created_by_remote.retain(|k| *k != key);
+    let has_sender = self
+      .pc
+      .rtp_transceiver(index)
+      .is_some_and(|t| t.sender().is_some());
+    if !has_sender {
+      self
+        .pc
+        .add_track_to_transceiver(
+          index,
+          MediaStreamTrack::new(
+            stream,
+            track.id.clone(),
+            track.label,
+            kind,
+            vec![RTCRtpEncodingParameters {
+              active: true,
+              ..Default::default()
+            }],
+          ),
+        )
+        .map_err(crate::peer::rtc_err)?;
+      if let Some(mut sender) = self.pc.rtp_sender(index.into()) {
+        sender.set_streams(streams);
+      }
+      self.media.track_keys.insert(track.id, key);
+      self.media.paused.remove(&key);
+      return Ok(());
+    }
     let Some(mut sender) = self.pc.rtp_sender(index.into()) else {
       return Err(WebRtcError::InvalidState(
         "The transceiver has no sender".to_string(),
@@ -823,8 +968,6 @@ impl Core {
     };
     let codings = sender.track().codings().to_vec();
     let old = sender.track().track_id().to_string();
-    let streams = msid_streams(streams);
-    let stream = streams[0].clone();
     sender
       .replace_track(MediaStreamTrack::new(
         stream,
@@ -838,20 +981,24 @@ impl Core {
     self.media.track_keys.remove(&old);
     self.media.track_keys.insert(track.id, key);
     self.media.paused.remove(&key);
-    if let Some(mut t) = self.pc.rtp_transceiver(index) {
-      t.set_associable_with_remote_offer(true);
-      let has_recv = t.direction().has_recv();
-      t.set_direction(RTCRtpTransceiverDirection::from_send_recv(
-        true, has_recv,
-      ));
-    }
     Ok(())
+  }
+
+  /// A transceiver a remote offer created has no engine sender. Made to send
+  /// (a sending direction, or `replaceTrack` with a track) without `addTrack`,
+  /// it gets one: SSRCs in the answer, an outbound stream. A rollback still
+  /// removes it (only `addTrack` keeps it).
+  fn ensure_sender(&mut self, key: u32) {
+    if let Ok(index) = self.index_of(key) {
+      let _ = self.pc.ensure_transceiver_sender(index);
+    }
   }
 
   pub(crate) fn set_sender_paused(&mut self, key: u32, paused: bool) {
     if paused {
       self.media.paused.insert(key);
     } else {
+      self.ensure_sender(key);
       self.media.paused.remove(&key);
     }
   }
@@ -875,6 +1022,9 @@ impl Core {
   ) -> Result<(), WebRtcError> {
     let direction = parse_direction(direction)?;
     let index = self.index_of(key)?;
+    if direction.has_send() {
+      self.ensure_sender(key);
+    }
     if let Some(mut t) = self.pc.rtp_transceiver(index) {
       t.set_direction(direction);
     }
@@ -932,6 +1082,45 @@ impl Core {
     self.set_codec_preferences_inner(index, &codecs)
   }
 
+  /// `setHeaderExtensionsToNegotiate()` and its effect on the next offer or
+  /// answer (webrtc-extensions): the URIs this transceiver's media section
+  /// may carry. JavaScript hands the list over before each offer and answer.
+  pub(crate) fn set_header_extensions_to_negotiate(
+    &mut self,
+    key: u32,
+    uris: Vec<String>,
+  ) -> Result<(), WebRtcError> {
+    let index = self.index_of(key)?;
+    if let Some(mut t) = self.pc.rtp_transceiver(index) {
+      t.set_header_extensions_to_negotiate(Some(uris));
+    }
+    Ok(())
+  }
+
+  /// `RTCConfiguration.rtpHeaderEncryptionPolicy` and
+  /// `alwaysNegotiateDataChannels` (webrtc-extensions).
+  pub(crate) fn set_negotiation_options(
+    &mut self,
+    rtp_header_encryption_policy: &str,
+    always_negotiate_data_channels: bool,
+  ) -> Result<(), WebRtcError> {
+    let policy = match rtp_header_encryption_policy {
+      "disable" => RTCRtpHeaderEncryptionPolicy::Disable,
+      "negotiate" => RTCRtpHeaderEncryptionPolicy::Negotiate,
+      "require" => RTCRtpHeaderEncryptionPolicy::Require,
+      other => {
+        return Err(WebRtcError::Type(format!(
+          "'{other}' is not a valid RTCRtpHeaderEncryptionPolicy"
+        )));
+      }
+    };
+    self.pc.set_rtp_header_encryption_policy(policy);
+    self
+      .pc
+      .set_always_negotiate_data_channels(always_negotiate_data_channels);
+    Ok(())
+  }
+
   pub(crate) fn transceivers(&mut self) -> Vec<TransceiverInfo> {
     self.sync_transceiver_keys(false);
     let remote = self
@@ -948,6 +1137,13 @@ impl Core {
       let direction = direction_str(t.direction());
       let current_direction = direction_str(t.current_direction());
       let section = mid.as_ref().and_then(|m| remote.get(m)).cloned();
+      // The remote side doesn't send on this section (now): its track is
+      // muted, and the next RTP that arrives unmutes it again.
+      if section.as_ref().is_some_and(|s| {
+        s.rejected || !matches!(s.direction.as_str(), "sendrecv" | "sendonly")
+      }) {
+        self.media.flowing.remove(&key);
+      }
       let kind = match self.media.kinds.get(&key) {
         Some(kind) => kind_str(*kind).to_string(),
         None => {
@@ -980,17 +1176,72 @@ impl Core {
     out
   }
 
+  /// The codecs of the transceiver's m-section in the current local
+  /// (`local`) or remote description, in the section's order.
+  fn negotiated_section_codecs(
+    &mut self,
+    index: usize,
+    local: bool,
+  ) -> Option<(String, Vec<(u8, CodecArg)>)> {
+    let mid = self.pc.rtp_transceiver(index)?.mid().clone()?;
+    let sdp = if local {
+      self
+        .pc
+        .current_local_description()
+        .or(self.pc.local_description())
+        .map(|d| d.sdp.clone())
+    } else {
+      self
+        .pc
+        .current_remote_description()
+        .or(self.pc.remote_description())
+        .map(|d| d.sdp.clone())
+    }?;
+    section_codecs(&sdp, &mid)
+  }
+
   pub(crate) fn sender_parameters(
     &mut self,
     key: u32,
   ) -> Result<serde_json::Value, WebRtcError> {
     let index = self.index_of(key)?;
+    // webrtc-pc 5.2 getParameters(): the codecs negotiated for sending, in
+    // the remote description's order with its payload types and fmtp lines
+    // (RFC 9429 5.3.1: the answerer sends what the offer lists), those this
+    // stack can send; a retransmission format with the primary it repairs.
+    let remote_codecs = self
+      .negotiated_section_codecs(index, false)
+      .map(|(kind, codecs)| sendable_codecs(&kind, codecs));
     let Some(mut sender) = self.pc.rtp_sender(index.into()) else {
-      return Ok(serde_json::Value::Null);
+      // A transceiver a remote offer made has no engine sender until it
+      // sends; what it may send is negotiated all the same.
+      return Ok(match remote_codecs {
+        Some(codecs) => serde_json::json!({
+          "codecs": codecs
+            .iter()
+            .map(|(pt, c)| section_codec_json(*pt, c))
+            .collect::<Vec<_>>(),
+          "headerExtensions": [],
+          "encodings": [],
+        }),
+        None => serde_json::Value::Null,
+      });
     };
     let params = sender.get_parameters().clone();
+    let codecs: Vec<serde_json::Value> = match remote_codecs {
+      Some(codecs) => codecs
+        .iter()
+        .map(|(pt, c)| section_codec_json(*pt, c))
+        .collect(),
+      None => params
+        .rtp_parameters
+        .codecs
+        .iter()
+        .map(codec_params_json)
+        .collect(),
+    };
     Ok(serde_json::json!({
-      "codecs": params.rtp_parameters.codecs.iter().map(codec_params_json).collect::<Vec<_>>(),
+      "codecs": codecs,
       "headerExtensions": params.rtp_parameters.header_extensions.iter().map(|h| serde_json::json!({
         "uri": h.uri, "id": h.id, "encrypted": h.encrypted,
       })).collect::<Vec<_>>(),
@@ -1006,12 +1257,27 @@ impl Core {
     key: u32,
   ) -> Result<serde_json::Value, WebRtcError> {
     let index = self.index_of(key)?;
+    // webrtc-pc 5.3 getParameters(): the codecs the receiver is prepared to
+    // receive, which are the local description's for its m-section.
+    let local_codecs = self.negotiated_section_codecs(index, true);
     let Some(mut receiver) = self.pc.rtp_receiver(index.into()) else {
       return Ok(serde_json::Value::Null);
     };
     let params = receiver.get_parameters().clone();
+    let codecs: Vec<serde_json::Value> = match local_codecs {
+      Some((_, codecs)) => codecs
+        .iter()
+        .map(|(pt, c)| section_codec_json(*pt, c))
+        .collect(),
+      None => params
+        .rtp_parameters
+        .codecs
+        .iter()
+        .map(codec_params_json)
+        .collect(),
+    };
     Ok(serde_json::json!({
-      "codecs": params.rtp_parameters.codecs.iter().map(codec_params_json).collect::<Vec<_>>(),
+      "codecs": codecs,
       "headerExtensions": params.rtp_parameters.header_extensions.iter().map(|h| serde_json::json!({
         "uri": h.uri, "id": h.id, "encrypted": h.encrypted,
       })).collect::<Vec<_>>(),
@@ -1211,6 +1477,7 @@ impl Core {
         t
       }
     };
+    let mime_type = p.mime_type.clone();
     let mut packets = p
       .packetizer
       .packetize(now, &Bytes::copy_from_slice(data), samples)
@@ -1222,6 +1489,37 @@ impl Core {
     let Some(mut sender) = self.pc.rtp_sender(index.into()) else {
       return Ok(false);
     };
+    // wpt100:hdrext — the negotiated audio level (RFC 6464) on each packet
+    // and the absolute capture time on the frame's first one.
+    let mut extension_id = |uri: &str| {
+      sender
+        .get_parameters()
+        .rtp_parameters
+        .header_extensions
+        .iter()
+        .find(|h| h.uri == uri)
+        .and_then(|h| u8::try_from(h.id).ok())
+    };
+    let level_id = extension_id(rtc::sdp::extmap::AUDIO_LEVEL_URI);
+    let capture_id =
+      extension_id(crate::header_extensions::ABS_CAPTURE_TIME_URI);
+    if let Some(id) = level_id
+      && let Some(level) =
+        crate::header_extensions::audio_level(&mime_type, data)
+    {
+      let payload = crate::header_extensions::audio_level_payload(level);
+      for packet in &mut packets {
+        let _ = packet.header.set_extension(id, payload.clone());
+      }
+    }
+    if let Some(id) = capture_id
+      && let Some(first) = packets.first_mut()
+    {
+      let payload = crate::header_extensions::abs_capture_time_payload(
+        std::time::SystemTime::now(),
+      );
+      let _ = first.header.set_extension(id, payload);
+    }
     let mut sent = false;
     for packet in packets {
       sent |= sender.write_rtp(now, packet).is_ok();
@@ -1255,6 +1553,7 @@ impl Core {
       key_frame: is_key_frame(&mime, data),
       width_height: frame_size(&mime, data),
       info,
+      audio_level: crate::header_extensions::audio_level(&mime, data),
     }))
   }
 
@@ -1437,6 +1736,182 @@ pub fn wants_key_frame(packets: &[Box<dyn rtc::rtcp::Packet>]) -> bool {
     p.as_any().downcast_ref::<PictureLossIndication>().is_some()
       || p.as_any().downcast_ref::<FullIntraRequest>().is_some()
   })
+}
+
+fn section_codec_json(payload_type: u8, c: &CodecArg) -> serde_json::Value {
+  let mut v = serde_json::to_value(c).unwrap_or(serde_json::Value::Null);
+  if let Some(obj) = v.as_object_mut() {
+    obj.insert("payloadType".to_string(), payload_type.into());
+  }
+  v
+}
+
+/// RFC 3551's static audio payload types, which may come without an
+/// `a=rtpmap` line.
+fn static_audio_codec(payload_type: u8) -> Option<(&'static str, u32)> {
+  match payload_type {
+    0 => Some(("PCMU", 8000)),
+    3 => Some(("GSM", 8000)),
+    4 => Some(("G723", 8000)),
+    8 => Some(("PCMA", 8000)),
+    9 => Some(("G722", 8000)),
+    13 => Some(("CN", 8000)),
+    18 => Some(("G729", 8000)),
+    _ => None,
+  }
+}
+
+/// The media kind and codecs (payload type, `a=rtpmap`, `a=fmtp`) of the
+/// m-section of `sdp` whose mid is `mid`, in the m= line's format order. A
+/// dynamic payload type with no `a=rtpmap` is left out.
+pub fn section_codecs(
+  sdp: &str,
+  mid: &str,
+) -> Option<(String, Vec<(u8, CodecArg)>)> {
+  struct Section {
+    kind: String,
+    formats: Vec<String>,
+    rtpmap: HashMap<String, String>,
+    fmtp: HashMap<String, String>,
+    mid: Option<String>,
+  }
+  let mut sections: Vec<Section> = Vec::new();
+  for line in sdp.lines() {
+    let line = line.trim_end();
+    if let Some(m) = line.strip_prefix("m=") {
+      let mut fields = m.split_ascii_whitespace();
+      let kind = fields.next().unwrap_or_default().to_string();
+      let formats = fields.skip(2).map(str::to_string).collect();
+      sections.push(Section {
+        kind,
+        formats,
+        rtpmap: HashMap::new(),
+        fmtp: HashMap::new(),
+        mid: None,
+      });
+      continue;
+    }
+    let Some(section) = sections.last_mut() else {
+      continue;
+    };
+    if let Some(value) = line.strip_prefix("a=mid:") {
+      section.mid = Some(value.trim().to_string());
+    } else if let Some(value) = line.strip_prefix("a=rtpmap:") {
+      if let Some((pt, rest)) = value.split_once(' ') {
+        section
+          .rtpmap
+          .entry(pt.to_string())
+          .or_insert_with(|| rest.trim().to_string());
+      }
+    } else if let Some(value) = line.strip_prefix("a=fmtp:")
+      && let Some((pt, params)) = value.split_once(' ')
+    {
+      section
+        .fmtp
+        .entry(pt.to_string())
+        .or_insert_with(|| params.trim().to_string());
+    }
+  }
+  let section = sections
+    .into_iter()
+    .find(|s| s.mid.as_deref() == Some(mid))?;
+  let audio = section.kind == "audio";
+  let mut out: Vec<(u8, CodecArg)> = Vec::new();
+  for format in &section.formats {
+    let Ok(pt) = format.parse::<u8>() else {
+      continue;
+    };
+    if out.iter().any(|(p, _)| *p == pt) {
+      continue;
+    }
+    let (name, clock_rate, channels) = match section.rtpmap.get(format) {
+      Some(map) => {
+        let mut parts = map.split('/');
+        let name = parts.next().unwrap_or_default().to_string();
+        let clock_rate = parts.next().and_then(|c| c.parse().ok()).unwrap_or(0);
+        let channels = parts.next().and_then(|c| c.parse().ok());
+        (name, clock_rate, channels)
+      }
+      None => match static_audio_codec(pt).filter(|_| audio) {
+        Some((name, clock_rate)) => (name.to_string(), clock_rate, None),
+        None => continue,
+      },
+    };
+    out.push((
+      pt,
+      CodecArg {
+        mime_type: format!("{}/{name}", section.kind),
+        clock_rate,
+        // An audio codec without a channel count is mono (RFC 4566).
+        channels: if audio { channels.or(Some(1)) } else { None },
+        sdp_fmtp_line: section.fmtp.get(format).cloned(),
+      },
+    ));
+  }
+  Some((section.kind, out))
+}
+
+/// The send codecs this stack implements for `kind` (computed once).
+fn supported_codecs(kind: &str) -> &'static [CodecArg] {
+  static AUDIO: std::sync::OnceLock<Vec<CodecArg>> = std::sync::OnceLock::new();
+  static VIDEO: std::sync::OnceLock<Vec<CodecArg>> = std::sync::OnceLock::new();
+  let cell = match kind {
+    "audio" => &AUDIO,
+    "video" => &VIDEO,
+    _ => return &[],
+  };
+  cell.get_or_init(|| {
+    capabilities(kind, true)
+      .ok()
+      .flatten()
+      .map(|c| c.codecs)
+      .unwrap_or_default()
+  })
+}
+
+fn is_rtx(c: &CodecArg) -> bool {
+  c.mime_type.to_ascii_lowercase().ends_with("/rtx")
+}
+
+/// The `apt` (RFC 4588) of a retransmission format's fmtp line.
+fn rtx_apt(c: &CodecArg) -> Option<u8> {
+  c.sdp_fmtp_line.as_deref()?.split(';').find_map(|p| {
+    p.trim()
+      .strip_prefix("apt=")
+      .and_then(|v| v.trim().parse().ok())
+  })
+}
+
+/// Of a remote m-section's codecs, those this stack can send (same name,
+/// clock rate and, for audio, channels as one it implements); a
+/// retransmission format only with the primary it repairs.
+fn sendable_codecs(
+  kind: &str,
+  codecs: Vec<(u8, CodecArg)>,
+) -> Vec<(u8, CodecArg)> {
+  let supported = supported_codecs(kind);
+  let known = |c: &CodecArg| {
+    supported.iter().any(|s| {
+      s.mime_type.eq_ignore_ascii_case(&c.mime_type)
+        && s.clock_rate == c.clock_rate
+        && (kind != "audio" || s.channels == c.channels)
+    })
+  };
+  let primaries: Vec<u8> = codecs
+    .iter()
+    .filter(|(_, c)| !is_rtx(c) && known(c))
+    .map(|(pt, _)| *pt)
+    .collect();
+  codecs
+    .into_iter()
+    .filter(|(pt, c)| {
+      if is_rtx(c) {
+        known(c) && rtx_apt(c).is_some_and(|apt| primaries.contains(&apt))
+      } else {
+        primaries.contains(pt)
+      }
+    })
+    .collect()
 }
 
 fn codec_params_json(c: &RTCRtpCodecParameters) -> serde_json::Value {

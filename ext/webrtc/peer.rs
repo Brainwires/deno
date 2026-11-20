@@ -146,6 +146,12 @@ const ERROR_CODE_UNREACHABLE: u16 = 701;
 /// engine, but a peer that connects ICE and never finishes DTLS is broken:
 /// a wrong fingerprint, a certificate the engine refused).
 pub const DTLS_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long ICE may stay `checking` without a connection while the remote
+/// side hasn't signalled end-of-candidates before it is reported
+/// `disconnected` (W3C webrtc-pc 4.3.3: checked the pairs it has and found no
+/// connection, still waiting for remote candidates). The engine's own
+/// disconnected timeout.
+const CHECKING_STALL: Duration = Duration::from_secs(5);
 /// Remote addresses remembered as having sent STUN.
 const MAX_STUN_PEERS: usize = 256;
 /// Peer IPs whose local route is cached (wildcard sockets).
@@ -361,6 +367,8 @@ pub enum JsEvent {
     max_packet_life_time: Option<u16>,
     max_retransmits: Option<u16>,
     negotiated: bool,
+    /// The DCEP priority (RFC 8832 5.1): the peer's, for a channel it opened.
+    priority: u16,
   },
   #[serde(rename = "dcclosing")]
   DataChannelClosing { channel: u32 },
@@ -398,6 +406,31 @@ pub enum JsEvent {
     width: Option<u16>,
     height: Option<u16>,
     info: crate::encoded_frames::ReceivedFrameInfo,
+  },
+  // wpt100:mediasink
+  /// A receiver's RTP stopped for `media_sink::SILENCE`: its track mutes.
+  #[serde(rename = "trackmute")]
+  TrackMute { transceiver: u32 },
+  /// A receiver's video names a new coded size (`getSettings()`).
+  #[serde(rename = "trackresize")]
+  TrackResize {
+    transceiver: u32,
+    width: u32,
+    height: u32,
+  },
+  /// A received frame, for `Deno.webrtc.readFrames()` readers.
+  #[serde(rename = "mediaframe")]
+  MediaFrame {
+    transceiver: u32,
+    data: Payload,
+    #[serde(rename = "keyFrame")]
+    key_frame: bool,
+    #[serde(rename = "mimeType")]
+    mime_type: String,
+    #[serde(rename = "rtpTimestamp")]
+    rtp_timestamp: u32,
+    width: Option<u32>,
+    height: Option<u32>,
   },
 }
 
@@ -541,11 +574,18 @@ pub struct Core {
   pub(crate) media: MediaState,
   /// Receivers whose frames go to an encoded transform (encoded_frames.rs).
   pub(crate) transforms: crate::encoded_frames::ReceiverTransforms,
+  /// Received frames, sizes and silence per receiver (media_sink.rs).
+  pub(crate) sinks: crate::media_sink::MediaSinks,
   /// A remote candidate is known (signalled, or a check arrived): until
   /// then ICE stays `new`, as the spec's `checking` needs one.
   remote_known: bool,
   /// The engine went `checking` before that: reported once one is.
   checking_held: bool,
+  /// An ICE restart's `checking` on a connected transport was not reported
+  /// (see `collect_events`); cleared by the next other ICE state.
+  restart_masked: bool,
+  /// When `checking` was last reported (see [`CHECKING_STALL`]).
+  checking_since: Option<Instant>,
   /// Per data channel handle, the application bytes SCTP had taken from the
   /// send queue when last reported (`track_sent`).
   sent: HashMap<u32, u64>,
@@ -577,6 +617,55 @@ pub struct Core {
   mdns_socket: Option<Rc<UdpSocket>>,
   /// Opening the mDNS socket failed (reported once).
   mdns_failed: bool,
+}
+
+/// One candidate of [`SelectedPair`], with the fields JavaScript needs to
+/// build the `RTCIceCandidate` (a peer-reflexive remote candidate is exposed
+/// without its address, so it can't be found among the signalled ones).
+#[derive(serde::Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PairCandidate {
+  /// `ip:port` (`[ip]:port` for IPv6), as the signalled candidates are matched.
+  pub addr: String,
+  pub address: String,
+  pub port: u16,
+  pub protocol: String,
+  #[serde(rename = "type")]
+  pub typ: String,
+  pub foundation: String,
+  pub priority: u32,
+  pub related_address: String,
+  pub related_port: u16,
+}
+
+impl PairCandidate {
+  pub(crate) fn of(
+    c: &rtc::peer_connection::transport::RTCIceCandidate,
+  ) -> Self {
+    let addr = match c.address.parse::<IpAddr>() {
+      Ok(IpAddr::V6(ip)) => format!("[{ip}]:{}", c.port),
+      Ok(IpAddr::V4(ip)) => format!("{ip}:{}", c.port),
+      Err(_) => format!("{}:{}", c.address, c.port),
+    };
+    Self {
+      addr,
+      address: c.address.clone(),
+      port: c.port,
+      protocol: c.protocol.to_string(),
+      typ: c.typ.to_string(),
+      foundation: c.foundation.clone(),
+      priority: c.priority,
+      related_address: c.related_address.clone(),
+      related_port: c.related_port,
+    }
+  }
+}
+
+/// The ICE agent's selected candidate pair.
+#[derive(serde::Serialize, Debug)]
+pub struct SelectedPair {
+  pub local: PairCandidate,
+  pub remote: PairCandidate,
 }
 
 /// The four description slots of a connection, each `(type, sdp)`.
@@ -1100,6 +1189,47 @@ impl Core {
       self.dtls_state.clone_from(&state);
       self.events.push_back(JsEvent::DtlsState { state });
     }
+  }
+
+  /// The engine's ICE transport's selected pair, reached through the SCTP
+  /// transport, else through a receiver or a sender (all of them share the one
+  /// bundled transport; a receiver or sender has one once it has a mid).
+  fn ice_selected_pair(&mut self) -> Option<SelectedPair> {
+    let to_pair =
+      |p: rtc::peer_connection::transport::RTCIceCandidatePair| SelectedPair {
+        local: PairCandidate::of(p.local()),
+        remote: PairCandidate::of(p.remote()),
+      };
+    if let Some(sctp) = self.pc.sctp() {
+      return sctp
+        .transport()
+        .ice_transport()
+        .get_selected_candidate_pair()
+        .map(to_pair);
+    }
+    let receivers: Vec<_> = self.pc.get_receivers().collect();
+    for id in receivers {
+      let pair = self.pc.rtp_receiver(id).and_then(|r| {
+        r.transport()
+          .map(|t| t.ice_transport().get_selected_candidate_pair())
+      });
+      match pair {
+        Some(pair) => return pair.map(to_pair),
+        None => continue,
+      }
+    }
+    let senders: Vec<_> = self.pc.get_senders().collect();
+    for id in senders {
+      let pair = self.pc.rtp_sender(id).and_then(|s| {
+        s.transport()
+          .map(|t| t.ice_transport().get_selected_candidate_pair())
+      });
+      match pair {
+        Some(pair) => return pair.map(to_pair),
+        None => continue,
+      }
+    }
+    None
   }
 
   /// RFC 8445 section 8.1.2 / RFC 8838 section 8: with gathering complete
@@ -1794,6 +1924,7 @@ impl Core {
     if self.checking_held && self.remote_known {
       self.checking_held = false;
       if !self.failed {
+        self.checking_since = Some(now);
         self.events.push_back(JsEvent::IceConnectionState {
           state: "checking".to_string(),
         });
@@ -1848,6 +1979,19 @@ impl Core {
         }
         RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(s) => {
           let state = s.to_string();
+          // An ICE restart on a connected transport keeps its selected pair
+          // (the engine's previous media path) until the new generation
+          // selects one, so the transport stays connected: W3C webrtc-pc
+          // 4.3.3 has `checking` only for a transport with no working pair.
+          // Its `checking` (and the connection's `connecting`) is not
+          // reported; a restart from `disconnected` or `failed` is.
+          if state == "checking" && self.ice_up {
+            self.restart_masked = true;
+            continue;
+          }
+          if state != "checking" {
+            self.restart_masked = false;
+          }
           if state == "checking" && !self.remote_known {
             self.checking_held = true;
             continue;
@@ -1862,6 +2006,8 @@ impl Core {
             self.ice_up = false;
             self.ice_up_at = None;
           }
+          self.checking_since =
+            (state == "checking" && !self.failed).then_some(now);
           if !self.failed || state == "closed" {
             self.events.push_back(JsEvent::IceConnectionState { state });
           }
@@ -1873,6 +2019,9 @@ impl Core {
         }
         RTCPeerConnectionEvent::OnConnectionStateChangeEvent(s) => {
           let state = s.to_string();
+          if state == "connecting" && self.restart_masked {
+            continue;
+          }
           if state == "connected" {
             self.dtls_connected = true;
             self.ice_up_at = None;
@@ -1897,6 +2046,7 @@ impl Core {
                 max_packet_life_time: channel.max_packet_life_time(),
                 max_retransmits: channel.max_retransmits(),
                 negotiated: channel.negotiated(),
+                priority: channel.priority(),
               }
             }
             RTCDataChannelEvent::OnClosing(handle) => {
@@ -1948,6 +2098,26 @@ impl Core {
               .push_back(JsEvent::TrackUnmute { transceiver: key });
           }
           self.media.saw_rtp(key, &packet.header);
+          // wpt100:mediasink
+          let sink = self.sink_packet(key, &packet, now);
+          if let Some((width, height)) = sink.resize {
+            self.events.push_back(JsEvent::TrackResize {
+              transceiver: key,
+              width,
+              height,
+            });
+          }
+          if let Some(frame) = sink.frame {
+            self.events.push_back(JsEvent::MediaFrame {
+              transceiver: key,
+              key_frame: frame.key_frame,
+              mime_type: frame.mime_type,
+              rtp_timestamp: frame.rtp_timestamp,
+              width: frame.width_height.map(|(w, _)| w),
+              height: frame.width_height.map(|(_, h)| h),
+              data: Payload::new(frame.data),
+            });
+          }
           if let Some(frame) = self.receive_for_transform(key, &packet) {
             self.events.push_back(JsEvent::EncodedFrame {
               transceiver: key,
@@ -2010,6 +2180,19 @@ impl Core {
       self.ice_up_at = None;
       self.fail("DTLS did not connect after ICE did");
     }
+    if let Some(since) = self.checking_since
+      && now.duration_since(since) >= CHECKING_STALL
+    {
+      self.checking_since = None;
+      if !self.failed && !self.remote_gathered {
+        self.events.push_back(JsEvent::IceConnectionState {
+          state: "disconnected".to_string(),
+        });
+        self.events.push_back(JsEvent::ConnectionState {
+          state: "disconnected".to_string(),
+        });
+      }
+    }
     for _ in 0..MAX_PUMP_ROUNDS {
       let a = self.flush_engine_writes(guard);
       let b = self.service_servers(now);
@@ -2021,6 +2204,8 @@ impl Core {
       self.track_dtls_state();
       self.collect_events(now);
       self.track_sent();
+      // wpt100:mediasink
+      self.check_silence(now);
       if !a && !b {
         break;
       }
@@ -2036,6 +2221,14 @@ impl Core {
     }
     if let Some(up) = self.ice_up_at {
       let t = up + DTLS_TIMEOUT;
+      deadline = Some(deadline.map_or(t, |d| d.min(t)));
+    }
+    if let Some(since) = self.checking_since {
+      let t = since + CHECKING_STALL;
+      deadline = Some(deadline.map_or(t, |d| d.min(t)));
+    }
+    // wpt100:mediasink
+    if let Some(t) = self.sinks.silence_deadline() {
       deadline = Some(deadline.map_or(t, |d| d.min(t)));
     }
     deadline
@@ -2300,6 +2493,7 @@ impl Peer {
         recv_rx: Some(recv_rx),
         media: MediaState::default(),
         transforms: Default::default(),
+        sinks: Default::default(),
         remote_known: false,
         sent: HashMap::new(),
         sctp_state: "",
@@ -2307,6 +2501,8 @@ impl Peer {
         local_gathered: 0,
         remote_gathered: false,
         checking_held: false,
+        restart_masked: false,
+        checking_since: None,
         this: this.clone(),
         tcp_links: HashMap::new(),
         tcp_dialing: HashMap::new(),
@@ -2425,6 +2621,20 @@ impl Peer {
 
   pub fn selected_pair(&self) -> Option<(SocketAddr, SocketAddr)> {
     self.core.borrow().selected
+  }
+
+  /// The ICE agent's selected candidate pair (W3C webrtc-pc 5.6
+  /// `getSelectedCandidatePair()`): the nominated pair as soon as ICE has
+  /// one, on the controlled side too, before either side sent anything on it.
+  /// `None` before that, or when the connection is closed.
+  pub fn ice_selected_pair(&self) -> Option<SelectedPair> {
+    if self.closed.get() {
+      return None;
+    }
+    self
+      .guarded(|core| Ok(core.ice_selected_pair()))
+      .ok()
+      .flatten()
   }
 
   /// Whether the selected pair is an ICE-TCP one.
@@ -2706,6 +2916,7 @@ impl Peer {
           max_packet_life_time: channel.max_packet_life_time(),
           max_retransmits: channel.max_retransmits(),
           negotiated: channel.negotiated(),
+          priority: channel.priority(),
         };
         core.events.push_back(open);
       }
