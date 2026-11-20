@@ -17,5 +17,5 @@ export async function run(env: Env, rep: AreaReport) {
     identifier: `dev.denext.e2e${env.nonce}.webview`,
   });
   await clearResults("webview");
-  await launchAndCollect(env, rep, "launch", p, { ms: 240_000 });
+  await launchAndCollect(env, rep, "launch", p, { ms: 420_000 });
 }

@@ -312,6 +312,12 @@ async function exists(path: string): Promise<boolean> {
 }
 
 // --- downloads the app decides (laufey API 59, downloads: "app") ---
+
+// How long a download event may take to arrive: far past what a loaded
+// hosted runner needs (each arrives within a second or two there), so only a
+// download that never reports fails. Every wait is on the event itself.
+const DOWNLOAD_EVENT_MS = 60_000;
+
 async function runAppDownloads() {
   const options = {
     url: URL_B,
@@ -334,14 +340,28 @@ async function runAppDownloads() {
   );
   const view = win.createWebView(options);
   const log = record(view);
-  await next(log, 0, "load", (d) => d.state === "complete");
+  // How long each wait took, for the record.
+  const waited: Record<string, number | string> = {};
+  r.set("downloadWaits", waited);
+  const event = async (
+    label: string,
+    match: (d: any) => boolean,
+    type = "download",
+  ) => {
+    const t0 = Date.now();
+    const found = await next(log, 0, type, match, DOWNLOAD_EVENT_MS);
+    waited[label] = found ? Date.now() - t0 : `never (${DOWNLOAD_EVENT_MS} ms)`;
+    return found;
+  };
+  const finished = (id: number) => (d: any) =>
+    d.id === id &&
+    ["completed", "cancelled", "interrupted"].includes(d.state);
+  await event("load", (d) => d.state === "complete", "load");
 
   // Announced, held, then saved to exactly the chosen path.
   view.navigate(`${BASE}/dl/small`);
-  const requested = await next(
-    log,
-    0,
-    "download",
+  const requested = await event(
+    "first requested",
     (d) => d.state === "requested",
   );
   r.set("downloadRequested", requested?.detail ?? null);
@@ -379,19 +399,16 @@ async function runAppDownloads() {
   );
   const saved = await control(first, "save", target);
   r.check("save is accepted for a requested download", saved === null, saved);
-  const completed = await next(
-    log,
-    0,
-    "download",
-    (d) => d.id === first && d.state === "completed",
-  );
+  // Its last event, whichever it is: a failure says which.
+  const last = await event("first finished", finished(first));
+  const completed = last?.detail.state === "completed" ? last : null;
   r.check(
     "the saved download completes at the chosen path, replacing the file",
     completed !== null && completed.detail.path === target &&
       completed.detail.receivedBytes === DOWNLOAD_BODY.length &&
       await Deno.readTextFile(target) === DOWNLOAD_BODY &&
       [...Deno.readDirSync(dir)].length === 1,
-    completed?.detail,
+    last?.detail ?? `no last event after ${DOWNLOAD_EVENT_MS} ms`,
   );
   const states = log.filter((e) =>
     e.type === "download" && e.detail.id === first
@@ -402,32 +419,52 @@ async function runAppDownloads() {
       states.slice(1, -1).every((s) => s === "progressing"),
     states,
   );
-  r.check(
-    "a finished download refuses control: invalid",
-    isWebViewError(await control(first, "cancel"), "invalid"),
-  );
+  if (last !== null) {
+    r.check(
+      "a finished download refuses control: invalid",
+      isWebViewError(await control(first, "cancel"), "invalid"),
+    );
+  } else {
+    // Never finished: not a finished download to ask. Cancel it so the next
+    // download starts alone, and wait for that to be reported.
+    r.fail(
+      "a finished download refuses control: invalid",
+      `the download never finished (${DOWNLOAD_EVENT_MS} ms)`,
+    );
+    await control(first, "cancel");
+    await event("first cancelled after the wait", finished(first));
+  }
+  if (completed === null) {
+    // A download that ended otherwise: the engine removes its partial file
+    // once that lands, before the next check lists the folder.
+    await waitFor(
+      () => [...Deno.readDirSync(dir)].length <= 1,
+      DOWNLOAD_EVENT_MS,
+    );
+  }
 
-  // Cancelled before the answer.
+  // Cancelled before the answer: the folder is left as it was.
+  const names = () =>
+    [...Deno.readDirSync(dir)].map((e) => e.name).sort().join("/");
+  const before = names();
   view.navigate(`${BASE}/dl/small`);
-  const second = (await next(
-    log,
-    0,
-    "download",
+  const second = (await event(
+    "second requested",
     (d) => d.state === "requested" && d.id !== first,
   ))?.detail.id;
   if (second !== undefined) {
     const cancelled = await control(second, "cancel");
-    const end = await next(
-      log,
-      0,
-      "download",
-      (d) => d.id === second && d.state === "cancelled",
-    );
+    const end = await event("second cancelled", finished(second));
     r.check(
       "a download cancelled before its answer reports cancelled and writes nothing",
-      cancelled === null && end !== null &&
-        [...Deno.readDirSync(dir)].length === 1,
-      cancelled,
+      cancelled === null && end?.detail.state === "cancelled" &&
+        names() === before,
+      {
+        cancelled: cancelled && describeError(cancelled),
+        end: end?.detail,
+        files: names(),
+        before,
+      },
     );
   } else {
     r.fail("a second download was not announced");
@@ -436,18 +473,14 @@ async function runAppDownloads() {
   // Progress, pause / resume where reported, a cancel part-way.
   const slow = `${dir}${OS === "windows" ? "\\" : "/"}slow.bin`;
   view.navigate(`${BASE}/dl/slow`);
-  const third = (await next(
-    log,
-    0,
-    "download",
+  const third = (await event(
+    "third requested",
     (d) => d.state === "requested" && d.id !== first && d.id !== second,
   ))?.detail.id;
   if (third !== undefined) {
     await control(third, "save", slow);
-    const progress = await next(
-      log,
-      0,
-      "download",
+    const progress = await event(
+      "third progressing",
       (d) => d.id === third && d.state === "progressing" && d.receivedBytes > 0,
     );
     r.check(
@@ -457,10 +490,8 @@ async function runAppDownloads() {
     );
     if (caps.downloadPause) {
       const paused = await control(third, "pause");
-      const pausedEvent = await next(
-        log,
-        0,
-        "download",
+      const pausedEvent = await event(
+        "third paused",
         (d) => d.id === third && d.paused === true,
       );
       const resumed = await control(third, "resume");
@@ -476,13 +507,11 @@ async function runAppDownloads() {
       );
     }
     const cancelled = await control(third, "cancel");
-    const end = await next(
-      log,
-      0,
-      "download",
+    const end = await event(
+      "third cancelled",
       (d) => d.id === third && d.state === "cancelled",
     );
-    await waitFor(async () => !(await exists(slow)), 10000);
+    await waitFor(async () => !(await exists(slow)), DOWNLOAD_EVENT_MS);
     r.check(
       "a download cancelled part-way reports cancelled and leaves no file",
       cancelled === null && end !== null && !(await exists(slow)),
@@ -493,14 +522,12 @@ async function runAppDownloads() {
 
   // Closing the view cancels a waiting download before "closed".
   view.navigate(`${BASE}/dl/small`);
-  const fourth = (await next(
-    log,
-    0,
-    "download",
+  const fourth = (await event(
+    "fourth requested",
     (d) => d.state === "requested" && ![first, second, third].includes(d.id),
   ))?.detail.id;
   view.close();
-  await next(log, 0, "closed", () => true, 10000);
+  await event("closed", () => true, "closed");
   await sleep(1000);
   const closedAt = log.findIndex((e) => e.type === "closed");
   const cancelledAt = log.findIndex((e) =>
