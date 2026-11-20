@@ -55,7 +55,7 @@ describe("config", () => {
   });
 
   it("uses the config's testTimeout", () => {
-    expect(g.__vitest_worker__.config.testTimeout).toBe(1234);
+    expect(g.__vitest_worker__.config.testTimeout).toBe(61234);
   });
 
   describe("restoreMocks", () => {

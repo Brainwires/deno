@@ -15,7 +15,9 @@ export default {
   testEnvironment: "node",
   globals: { __APP__: { name: "jest" } },
   restoreMocks: true,
-  testTimeout: 1234,
+  // Not the 5000 default, so the mapping shows; generous, since it bounds
+  // every test here and a loaded CI machine can take seconds over one.
+  testTimeout: 61234,
   transform: {
     "^.+\\.tsx?$": "ts-jest",
     "^.+\\.svg$": "<rootDir>/svg_transform.js",
