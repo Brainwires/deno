@@ -22,6 +22,7 @@ import {
   shared,
   sleep,
   titledWindow,
+  waitFor,
   within,
 } from "../_shared/e2e.ts";
 import {
@@ -33,6 +34,11 @@ import {
 } from "../_shared/input.ts";
 
 const r = new Report("dnd");
+// How long a dialog may take to show, or to close once aborted, and a drag to
+// settle: far past what a loaded hosted runner needs (a dialog shows in under
+// 2 s there, a refused drag settles at once), so only a hang fails.
+const DIALOG_MS = 60_000;
+const DRAG_MS = 60_000;
 const isA = (e: unknown, name: string) =>
   e instanceof Error && (e.name === name || e.constructor.name === name);
 
@@ -174,6 +180,10 @@ await r.step("dialogs", async () => {
     );
     return;
   }
+  // The dialog runs on its own thread (laufey's I/O thread on Windows): the
+  // app's timers keep firing while it is open.
+  let ticks = 0;
+  const ticker = setInterval(() => ticks++, 100);
   const ac = new AbortController();
   const t0 = Date.now();
   const p = errorOf(desktop.dialog.showOpenDialog(win, {
@@ -182,38 +192,56 @@ await r.step("dialogs", async () => {
     filters: [{ name: "Text", extensions: ["txt"] }],
     signal: ac.signal,
   }));
-  // Windows: when the dialog's own window appears (a hosted runner's shell
-  // can take a while to build the first one), for the record.
+  // Abort the dialog once it shows. On Windows its own window says when (a
+  // hosted runner's shell can take many seconds to build the first one, and
+  // a fixed wait raced it); elsewhere there is no handle on it, so wait the
+  // usual moment. An abort before the dialog shows is laufey's own case
+  // (it is applied as the dialog is set up), covered by its suite.
   if (OS === "windows") {
-    (async () => {
-      for (let i = 0; i < 200; i++) {
-        if (topLevelExists("e2e")) {
-          r.set("dialogWindowAfterMs", Date.now() - t0);
-          return;
-        }
-        await sleep(200);
-      }
-      r.set("dialogWindowAfterMs", "never (40 s)");
-    })();
+    const shown = await waitFor(
+      () => topLevelExists("e2e") === true,
+      DIALOG_MS,
+    );
+    r.set(
+      "dialogWindowAfterMs",
+      shown ? Date.now() - t0 : `never (${DIALOG_MS} ms)`,
+    );
+    r.check(
+      "the open dialog's window appears",
+      shown,
+      shown ? undefined : `no window titled e2e after ${DIALOG_MS} ms`,
+    );
+    // Shown is not yet set up: give it the moment the fixed wait gave.
+    await sleep(1000);
+  } else {
+    await sleep(2000);
   }
-  await sleep(2000);
   r.check(
     "a second dialog while one is open is Deno.errors.Busy",
     isA(await errorOf(desktop.dialog.showSaveDialog({})), "Busy"),
   );
-  r.set("abortAfterMs", Date.now() - t0);
+  const openMs = Date.now() - t0;
+  const openTicks = ticks;
+  clearInterval(ticker);
+  r.set("abortAfterMs", openMs);
   ac.abort(new Error("e2e abort"));
-  const got1 = await within(p, 15000);
+  const got1 = await within(p, DIALOG_MS);
+  r.set("closedAfterAbortMs", Date.now() - t0 - openMs);
   const e = "value" in got1 ? got1.value : null;
   r.check(
     "aborting closes the dialog and rejects with the signal's reason",
     e?.message === "e2e abort",
-    e && String(e),
+    "value" in got1
+      ? e && String(e)
+      : `still open ${DIALOG_MS} ms after abort()`,
   );
+  // A 100 ms interval over the time the dialog was open (a second or more):
+  // a quarter of its ticks, at most 5, ran even on a loaded runner, where a
+  // dialog that held the app's thread would let one through.
   r.check(
     "the runtime ran while the dialog was open",
-    Date.now() - t0 < 20000,
-    Date.now() - t0,
+    openTicks >= Math.min(5, Math.floor(openMs / 400)),
+    { openMs, ticks: openTicks },
   );
   // Every kind of dialog closes on abort and frees the slot: open / save,
   // modal to a window / app-level.
@@ -236,13 +264,16 @@ await r.step("dialogs", async () => {
             ? desktop.dialog.showOpenDialog(win, opts)
             : desktop.dialog.showOpenDialog(opts)),
       );
+      // Shown or not yet: an abort settles it either way.
       await sleep(1500);
       ac2.abort();
-      const got = await within(p2, 15000);
+      const got = await within(p2, DIALOG_MS);
       r.check(
         `a ${label} opens and closes on abort (AbortError)`,
         "value" in got && isA(got.value, "AbortError"),
-        "value" in got ? String(got.value) : "still open 15 s after abort()",
+        "value" in got
+          ? String(got.value)
+          : `still open ${DIALOG_MS} ms after abort()`,
       );
       if (!("value" in got)) break;
     }
@@ -273,7 +304,7 @@ await r.step("drag and drop", async () => {
   const drag = async () => {
     const settled = await within(
       win.startDrag({ files: [Deno.execPath()] }),
-      10000,
+      DRAG_MS,
     );
     return "value" in settled ? settled.value : "never settled";
   };

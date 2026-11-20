@@ -17,5 +17,5 @@ export async function run(env: Env, rep: AreaReport) {
     identifier: `dev.denext.e2e${env.nonce}.dnd`,
   });
   await clearResults("dnd");
-  await launchAndCollect(env, rep, "launch", p, { ms: 180_000 });
+  await launchAndCollect(env, rep, "launch", p, { ms: 360_000 });
 }
