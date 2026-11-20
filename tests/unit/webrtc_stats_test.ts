@@ -20,7 +20,10 @@ function assertReferencesResolve(report: RTCStatsReport) {
   for (const stats of report.values()) {
     for (const [key, value] of Object.entries(stats)) {
       if (key.endsWith("Id")) {
-        assert(report.has(value), `${stats.type}.${key} (${value}) resolves`);
+        assert(
+          typeof value === "string" && report.has(value),
+          `${stats.type}.${key} (${value}) resolves`,
+        );
       }
     }
   }

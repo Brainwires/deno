@@ -149,7 +149,10 @@ Deno.test("encodedStreamsCarryWrittenFrames", async () => {
       (got as unknown as { timestamp: number }).timestamp,
       metadata.rtpTimestamp,
     );
-    assertEquals(typeof got.getMetadata().sequenceNumber, "number");
+    assertEquals(
+      typeof (got as RTCEncodedAudioFrame).getMetadata().sequenceNumber,
+      "number",
+    );
   } finally {
     a.close();
     b.close();
