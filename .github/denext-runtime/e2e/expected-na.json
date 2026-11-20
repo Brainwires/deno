@@ -28,7 +28,7 @@
       "a staged update signed by the same Developer ID / Authenticode signer is accepted"
     ],
     "webview": [
-      "web view permission requests"
+      "launch: web view permission requests"
     ],
     "window": [
       "launch: close() of a WebGPU window closes it (isClosed)",
