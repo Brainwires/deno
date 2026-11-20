@@ -1,8 +1,12 @@
 {
   "RTCEncodedFrame-copy-construction.https.html": false,
+  "RTCEncodedFrame-shared-buffer.https.html": true,
   "RTCRtpScriptTransform-bad-chunk.https.html": true,
   "RTCRtpScriptTransform-encoded-transform.https.html": false,
+  "RTCRtpScriptTransform-late-transform.https.html": true,
+  "RTCRtpScriptTransform-padding.https.html": true,
   "RTCRtpScriptTransform-sender-worker-single-frame.https.html": false,
+  "RTCRtpScriptTransform-write-rules.https.html": true,
   "idlharness.https.window.html?exclude=.*SFrame.*": {
     "expectedFailures": [
       "RTCEncodedVideoFrame interface: existence and properties of interface object",
@@ -53,10 +57,12 @@
     "RTCEncodedAudioFrame-metadata.https.html": false,
     "RTCEncodedAudioFrame-receive-cloned.https.html": false,
     "RTCEncodedAudioFrame-send-incoming.https.html": false,
+    "RTCEncodedAudioFrame-serviceworker-failure.https.html": true,
     "RTCEncodedFrame-timestamps.html": false,
     "RTCEncodedVideoFrame-clone.https.html": false,
     "RTCEncodedVideoFrame-constructor.html": false,
     "RTCEncodedVideoFrame-metadata.https.html": false,
+    "RTCEncodedVideoFrame-serviceworker-failure.https.html": true,
     "RTCPeerConnection-insertable-streams-audio.https.html": false,
     "RTCPeerConnection-insertable-streams-errors.https.html": false,
     "RTCPeerConnection-insertable-streams-simulcast.https.html": false,

@@ -1,4 +1,5 @@
 {
+  "RTCCertificate-postMessage-to-workers.https.html": true,
   "RTCCertificate-postMessage.html": false,
   "RTCCertificate.html": true,
   "RTCConfiguration-bundlePolicy.html": {
@@ -73,6 +74,7 @@
   "RTCError.html?rest": false,
   "RTCIceCandidate-constructor.html": true,
   "RTCIceConnectionState-candidate-pair.https.html": false,
+  "RTCIceTransport-peer-reflexive-remote.html": true,
   "RTCIceTransport.html?interop-2026": true,
   "RTCIceTransport.html?rest": {
     "expectedFailures": [
@@ -133,6 +135,7 @@
   "RTCPeerConnection-createOffer.html?interop-2026": true,
   "RTCPeerConnection-createOffer.html?rest": true,
   "RTCPeerConnection-description-attributes-timing.https.html": true,
+  "RTCPeerConnection-description-candidate-replaced.https.html": true,
   "RTCPeerConnection-explicit-rollback-iceGatheringState.html": false,
   "RTCPeerConnection-generateCertificate.html": {
     "expectedFailures": [
@@ -235,6 +238,7 @@
   "RTCPeerConnection-perfect-negotiation-stress-glare.https.html": false,
   "RTCPeerConnection-perfect-negotiation.https.html": false,
   "RTCPeerConnection-plan-b-is-not-supported.html": true,
+  "RTCPeerConnection-pranswer-description-types.html": true,
   "RTCPeerConnection-relay-canvas.https.html": false,
   "RTCPeerConnection-remote-track-currentTime.https.html": false,
   "RTCPeerConnection-remote-track-mute.https.html": false,
@@ -285,6 +289,7 @@
       "Parameterless SLD() never settles if closed while pending"
     ]
   },
+  "RTCPeerConnection-setLocalDescription-pranswer-parameterless.html": true,
   "RTCPeerConnection-setLocalDescription-pranswer.html": true,
   "RTCPeerConnection-setLocalDescription-rollback.html": true,
   "RTCPeerConnection-setLocalDescription.html": {
@@ -733,6 +738,7 @@
         "PC with setup=passive should have a dtlsRole of client"
       ]
     },
+    "h264-fmtp-modifies-level.https.html": true,
     "h264-profile-levels.https.html?interop-2026": false,
     "h264-profile-levels.https.html?rest": false,
     "h264-unidirectional-codec-offer.https.html": false,
@@ -807,6 +813,7 @@
     "split.https.html": false,
     "transceiver-direction-match.html": false,
     "transceiver-mline-recycling.html": false,
+    "unknown-media-types-negotiation.html": true,
     "unknown-mediatypes.html": false,
     "video-codecs.https.html": {
       "expectedFailures": [

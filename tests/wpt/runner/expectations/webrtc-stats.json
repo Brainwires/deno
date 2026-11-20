@@ -1,5 +1,6 @@
 {
   "RTCDataChannel-stats.html": false,
+  "getStats-RTCAudioSourceStats.https.html": true,
   "getStats-remote-candidate-address.html": false,
   "getStats-remote-candidate-ufrag.html": false,
   "hardware-capability-stats.https.html": false,
@@ -13,6 +14,7 @@
       "RTCAudioPlayoutStats should be present"
     ]
   },
+  "stats-creation.html": true,
   "supported-stats.https.html": {
     "expectedFailures": [
       "All references resolve",
@@ -66,5 +68,6 @@
       "remote-candidate's id",
       "certificate's issuerCertificateId"
     ]
-  }
+  },
+  "video-psnr.https.html": true
 }

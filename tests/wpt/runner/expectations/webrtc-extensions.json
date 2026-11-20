@@ -22,8 +22,12 @@
   "RTCRtpCorruptionDetection-headerExtensionControl.html": false,
   "RTCRtpEncodingParameters-scaleResolutionDownTo.https.html": false,
   "RTCRtpParameters-adaptivePtime.html": true,
+  "RTCRtpParameters-encodingComplexity-stream.https.html": true,
+  "RTCRtpParameters-encodingComplexity.html": true,
+  "RTCRtpSender-setParameters-keyFrame.html": true,
   "RTCRtpSynchronizationSource-captureTimestamp.html": false,
   "RTCRtpSynchronizationSource-senderCaptureTimeOffset.html": false,
   "RTCRtpTransceiver-headerExtensionControl.html": false,
+  "targetLatency.html": true,
   "transfer-datachannel-service-worker.https.html": false
 }
