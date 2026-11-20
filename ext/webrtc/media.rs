@@ -729,7 +729,13 @@ impl SentVideo {
 
   /// One encoded frame reached the sender at `now`; `sent` when its packets
   /// went out.
-  fn frame(&mut self, mime_type: &str, data: &[u8], sent: bool, now: Instant) {
+  pub(crate) fn frame(
+    &mut self,
+    mime_type: &str,
+    data: &[u8],
+    sent: bool,
+    now: Instant,
+  ) {
     self.frames_encoded = self.frames_encoded.saturating_add(1);
     if is_key_frame(mime_type, data) {
       self.key_frames_encoded = self.key_frames_encoded.saturating_add(1);

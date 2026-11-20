@@ -1242,3 +1242,63 @@ async fn oversized_descriptions_are_refused_before_the_engine() {
   assert!(crate::peer::check_sdp_size("offer", &exact).is_ok());
   assert!(crate::peer::check_sdp_size("rollback", &(exact + "v")).is_ok());
 }
+
+fn rtp_header(seq: u16, ts: u32, marker: bool) -> rtc::rtp::Header {
+  rtc::rtp::Header {
+    sequence_number: seq,
+    timestamp: ts,
+    marker,
+    ..Default::default()
+  }
+}
+
+#[test]
+fn received_video_counts_frames_whose_packets_all_arrived() {
+  let mut video = crate::media::ReceivedVideo::default();
+  // The first frame's start can't be told: not counted.
+  assert!(!video.packet(&rtp_header(10, 100, true)));
+  // A two-packet frame, then a one-packet frame.
+  assert!(!video.packet(&rtp_header(11, 200, false)));
+  assert!(video.packet(&rtp_header(12, 200, true)));
+  assert!(video.packet(&rtp_header(13, 300, true)));
+  // A packet lost inside a frame, and the frame after a loss.
+  assert!(!video.packet(&rtp_header(14, 400, false)));
+  assert!(!video.packet(&rtp_header(16, 400, true)));
+  assert!(video.packet(&rtp_header(17, 500, true)));
+  // A frame whose first packet was lost.
+  assert!(!video.packet(&rtp_header(19, 600, true)));
+  assert!(video.packet(&rtp_header(20, 700, true)));
+  assert_eq!(video.frames_received, 4);
+  // Sequence numbers wrap.
+  let mut wrap = crate::media::ReceivedVideo::default();
+  assert!(!wrap.packet(&rtp_header(u16::MAX - 1, 100, true)));
+  assert!(!wrap.packet(&rtp_header(u16::MAX, 200, false)));
+  assert!(wrap.packet(&rtp_header(0, 200, true)));
+  assert_eq!(wrap.frames_received, 1);
+}
+
+#[test]
+fn sent_video_counts_what_the_frames_show() {
+  let mut video = crate::media::SentVideo::default();
+  let now = std::time::Instant::now();
+  // A VP8 key frame (frame tag bit 0 clear, start code, 320x240) and two
+  // small delta frames.
+  let mut key =
+    vec![0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00];
+  key.resize(100, 0);
+  let delta = vec![0x31u8; 10];
+  video.frame("video/VP8", &delta, true, now);
+  video.frame("video/VP8", &delta, true, now);
+  video.frame("video/VP8", &key, true, now);
+  video.frame("video/VP8", &delta, false, now);
+  assert_eq!(video.frames_encoded, 4);
+  assert_eq!(video.key_frames_encoded, 1);
+  assert_eq!(video.frames_sent, 3);
+  assert_eq!(video.huge_frames_sent, 1);
+  assert_eq!(video.size, Some((320, 240)));
+  assert_eq!(video.frames_per_second(now), 4.0);
+  assert_eq!(
+    video.frames_per_second(now + std::time::Duration::from_millis(1001)),
+    0.0
+  );
+}
