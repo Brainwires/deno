@@ -2566,6 +2566,17 @@
           }
           transportStateStats(pc, stats);
           break;
+        case "data-channel":
+          // `dataChannelIdentifier` is the channel's `id` (webrtc-stats
+          // `RTCDataChannelStats`), which is null until the SCTP stream id
+          // is chosen; the engine numbers the stream from the start.
+          MapPrototypeForEach(pc[_channels], (channel, handle) => {
+            if (`RTCDataChannel_${handle}` !== stats.id) return;
+            const streamId = channel.id;
+            if (streamId === null) delete stats.dataChannelIdentifier;
+            else stats.dataChannelIdentifier = streamId;
+          });
+          break;
         case "outbound-rtp": {
           const t = ArrayPrototypeFind(
             state.transceivers,

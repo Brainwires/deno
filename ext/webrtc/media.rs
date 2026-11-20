@@ -683,6 +683,9 @@ pub struct MediaState {
   pub sources: HashMap<u32, Vec<Source>>,
   /// Where each sender fed by a fake capture device is in its clip.
   pub fake: HashMap<u32, crate::fake_media::Cursor>,
+  /// The video frames each outbound RTP stream (by SSRC) sent: its
+  /// `framesSent` (webrtc-stats), which the engine counts only when told.
+  pub frames_sent: HashMap<u32, u32>,
 }
 
 /// A synchronization or contributing source a receiver heard from.
@@ -1477,6 +1480,7 @@ impl Core {
       }
     };
     let mime_type = p.mime_type.clone();
+    let ssrc = p.ssrc;
     let mut packets = p
       .packetizer
       .packetize(now, &Bytes::copy_from_slice(data), samples)
@@ -1522,6 +1526,19 @@ impl Core {
     let mut sent = false;
     for packet in packets {
       sent |= sender.write_rtp(now, packet).is_ok();
+    }
+    // A video frame that went out counts in its stream's `framesSent`.
+    if sent && mime_type.to_ascii_lowercase().starts_with("video/") {
+      let count = self.media.frames_sent.entry(ssrc).or_insert(0);
+      *count = count.saturating_add(1);
+      let frames_sent = *count;
+      self.pc.update_encoder_stats(
+        ssrc,
+        rtc::statistics::EncoderStatsUpdate {
+          frames_sent: Some(frames_sent),
+          ..Default::default()
+        },
+      );
     }
     Ok(sent)
   }
