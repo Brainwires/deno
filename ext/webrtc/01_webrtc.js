@@ -3382,6 +3382,9 @@ class RTCPeerConnection extends EventTarget {
             ? createOfferSdp(this, false)
             : op_webrtc_pc_create_answer(this[_rid]);
         }
+        if (type !== "rollback" && typeof sdp === "string") {
+          requireSdpSize(sdp);
+        }
         op_webrtc_pc_set_local_description(this[_rid], type, sdp ?? "");
         const state = this[_state];
         if (type === "answer" || type === "pranswer") {
@@ -3445,6 +3448,7 @@ class RTCPeerConnection extends EventTarget {
           );
         }
         if (type !== "rollback") {
+          requireSdpSize(sdp);
           requireSdpSyntax(sdp);
           requireRtcpMux(sdp);
         }
@@ -4173,6 +4177,21 @@ function maxMessageSizeOf(sdp) {
     }
   }
   return null;
+}
+
+// The longest description the engine takes (its MAX_SDP_SIZE, 1 MiB). The op
+// refuses more than that many UTF-8 bytes; a UTF-16 length over it is always
+// more bytes too, so this refuses it before any scan, with the RTCError
+// (OperationError) an unparsable description gets.
+const MAX_SDP_LENGTH = 1024 * 1024;
+
+function requireSdpSize(sdp) {
+  if (sdp.length > MAX_SDP_LENGTH) {
+    throw new RTCError(
+      { errorDetail: "sdp-syntax-error" },
+      `The description is longer than ${MAX_SDP_LENGTH} bytes`,
+    );
+  }
 }
 
 // rtcpMuxPolicy "require": a remote description whose audio or video
