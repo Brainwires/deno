@@ -33,7 +33,11 @@ const {
   TypedArrayPrototypeGetBuffer,
 } = primordials;
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
-const { op_node_scrypt_async, op_node_scrypt_sync } = core.ops;
+const {
+  op_node_scrypt_async,
+  op_node_scrypt_sync,
+  op_void_async_deferred,
+} = core.ops;
 const {
   validateFunction,
   validateInt32,
@@ -95,7 +99,12 @@ function scrypt(
   validateScryptParams(N, r, p, maxmem);
 
   if (keylen === 0) {
-    cb(null, Buffer.alloc(0));
+    // No key to derive, but still a job whose result the event loop
+    // delivers, as in Node.js: never during the call.
+    PromisePrototypeThen(
+      op_void_async_deferred(),
+      () => cb(null, Buffer.alloc(0)),
+    );
     return;
   }
 

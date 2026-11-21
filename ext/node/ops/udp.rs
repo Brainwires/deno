@@ -641,6 +641,10 @@ pub fn op_node_udp_leave_source_specific(
   )
 }
 
+// Not `async(deferred)`: Node.js sends with `uv_udp_try_send` first, and a
+// datagram that goes out at once (the usual case) has its callback run from
+// `process.nextTick`, ahead of the loop. A result that is ready on the first
+// poll is the same case here.
 #[op2]
 #[smi]
 pub async fn op_node_udp_send(
@@ -725,12 +729,42 @@ pub struct RecvResult {
   pub port: u16,
 }
 
-#[op2]
+/// Receives the first datagram of a burst (see `UDP_RECV_BURST` in
+/// `udp_wrap.ts`).
+///
+/// `async(deferred)`: libuv reads datagrams in the poll phase, so one that is
+/// already queued when the call is made is delivered by the loop, like one
+/// that arrives later: after `process.nextTick` callbacks and the timers that
+/// are due. Delivered at once, every queued datagram was received from the
+/// microtask of the one before, and a socket that was sent to faster than it
+/// read kept the loop from everything else.
+#[op2(async(deferred))]
 #[serde]
 pub async fn op_node_udp_recv(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
-  #[buffer] mut buf: JsBuffer,
+  #[buffer] buf: JsBuffer,
+) -> Result<RecvResult, NodeUdpError> {
+  udp_recv(state, rid, buf).await
+}
+
+/// Receives a later datagram of a burst: one that is already queued is
+/// returned at once, as libuv reads up to 32 datagrams for one readiness
+/// event before it goes back to the loop.
+#[op2]
+#[serde]
+pub async fn op_node_udp_recv_queued(
+  state: Rc<RefCell<OpState>>,
+  #[smi] rid: ResourceId,
+  #[buffer] buf: JsBuffer,
+) -> Result<RecvResult, NodeUdpError> {
+  udp_recv(state, rid, buf).await
+}
+
+async fn udp_recv(
+  state: Rc<RefCell<OpState>>,
+  rid: ResourceId,
+  mut buf: JsBuffer,
 ) -> Result<RecvResult, NodeUdpError> {
   let resource = state
     .borrow()

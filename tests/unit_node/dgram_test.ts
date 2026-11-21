@@ -412,3 +412,57 @@ Deno.test("[node/dgram] reusePort", {
     first.close();
   }
 });
+
+// denext: libuv reads at most 32 datagrams for one readiness event and then
+// returns to the loop. Every queued datagram used to be received from the
+// microtask of the one before, so a socket that always had one queued kept
+// the loop from its timers, immediates and other handles.
+Deno.test("[node/dgram] queued datagrams are received in bursts", {
+  permissions: { net: true },
+}, async () => {
+  const total = 100;
+  const receiver = createSocket("udp4");
+  await new Promise<void>((resolve) => receiver.bind(0, "127.0.0.1", resolve));
+  const port = receiver.address().port;
+  const sender = Deno.listenDatagram({
+    transport: "udp",
+    hostname: "127.0.0.1",
+    port: 0,
+  });
+  try {
+    let received = 0;
+    let receivedBeforeImmediate = -1;
+    const all = Promise.withResolvers<void>();
+    receiver.on("message", () => {
+      received++;
+      if (received === 1) {
+        // The check phase of the iteration that delivers this datagram.
+        setImmediate(() => {
+          receivedBeforeImmediate = received;
+        });
+      }
+      if (received === total) all.resolve();
+    });
+
+    // Each datagram leaves during its `send()` call; all of them are queued
+    // in the receiver's socket by the time this turn ends.
+    const sends = [];
+    const addr = { transport: "udp", hostname: "127.0.0.1", port } as const;
+    for (let i = 0; i < total; i++) {
+      sends.push(sender.send(new Uint8Array([i]), addr));
+    }
+    const end = performance.now() + 50;
+    while (performance.now() < end);
+
+    await Promise.all(sends);
+    await all.promise;
+    assertEquals(received, total);
+    assert(
+      receivedBeforeImmediate >= 1 && receivedBeforeImmediate <= 32,
+      `${receivedBeforeImmediate} datagrams were received before the loop's check phase`,
+    );
+  } finally {
+    sender.close();
+    await new Promise<void>((resolve) => receiver.close(resolve));
+  }
+});

@@ -33,6 +33,7 @@ const {
   op_node_udp_leave_source_specific,
   op_node_udp_open,
   op_node_udp_recv,
+  op_node_udp_recv_queued,
   op_node_udp_send,
   op_node_udp_set_broadcast,
   op_node_udp_set_multicast_interface,
@@ -51,6 +52,12 @@ const {
 } = primordials;
 
 const osErrorRegExp = new SafeRegExp(/os error (40|90|10040)/);
+
+// How many datagrams are received before the socket goes back to the event
+// loop for the next one: what libuv reads for one readiness event
+// (`uv__udp_recvmsg`), so a socket that always has a datagram queued leaves
+// the loop its timers and its other handles.
+const UDP_RECV_BURST = 32;
 
 const {
   AsyncWrap,
@@ -138,6 +145,8 @@ class UDP extends HandleWrap {
   #unrefed = false;
 
   #recvBufferSize = UDP_DGRAM_MAXSIZE;
+  /** How many datagrams the current burst has asked for. */
+  #recvBurst = 0;
   #sendBufferSize = UDP_DGRAM_MAXSIZE;
 
   onmessage!: (
@@ -437,6 +446,7 @@ class UDP extends HandleWrap {
   recvStart(): number {
     if (!this.#receiving) {
       this.#receiving = true;
+      this.#recvBurst = 0;
       this.#receive();
     }
 
@@ -685,7 +695,13 @@ class UDP extends HandleWrap {
     let remotePort: number | null = null;
 
     try {
-      const promise = op_node_udp_recv(this.#rid!, p);
+      // The first datagram of a burst is delivered by the event loop (a
+      // deferred op), the rest of it at once if they are already queued.
+      const recv = this.#recvBurst === 0
+        ? op_node_udp_recv
+        : op_node_udp_recv_queued;
+      this.#recvBurst = (this.#recvBurst + 1) % UDP_RECV_BURST;
+      const promise = recv(this.#rid!, p);
       if (this.#unrefed) {
         core.unrefOpPromise(promise);
       }

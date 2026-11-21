@@ -798,7 +798,10 @@ pub fn op_node_tls_start(
   Ok(())
 }
 
-#[op2]
+// `async(deferred)`: a handshake completes while the loop reads from the
+// stream, so a result that is ready on the first poll (the handshake is
+// already done, the resource is gone) is delivered by the loop too.
+#[op2(async(deferred), fast)]
 #[serde]
 pub async fn op_node_tls_handshake(
   state: Rc<RefCell<OpState>>,

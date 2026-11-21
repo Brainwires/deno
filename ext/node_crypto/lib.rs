@@ -230,7 +230,14 @@ pub fn op_node_check_prime_bytes(
   primes::is_probably_prime(&candidate, checks)
 }
 
-#[op2]
+// The async ops of this crate (`*_async`) back the `node:crypto` calls that
+// take a callback: jobs that Node.js runs on libuv's thread pool, whose
+// results the loop delivers in a later iteration. They are `async(deferred)`
+// so that a result that is ready on the first poll (a failure before the
+// blocking task starts, seeded random bytes, a task that finished first) is
+// delivered by the loop like any other, never in the microtask checkpoint of
+// the call, ahead of `process.nextTick` callbacks and of timers that are due.
+#[op2(async(deferred), fast)]
 pub async fn op_node_check_prime_async(
   #[bigint] num: i64,
   #[number] checks: usize,
@@ -240,7 +247,7 @@ pub async fn op_node_check_prime_async(
     .await
 }
 
-#[op2]
+#[op2(async(deferred))]
 pub fn op_node_check_prime_bytes_async(
   #[anybuffer] bytes: &[u8],
   #[number] checks: usize,
@@ -943,7 +950,7 @@ pub fn op_node_pbkdf2_validate(
   )
 }
 
-#[op2]
+#[op2(async(deferred))]
 pub async fn op_node_pbkdf2_async(
   #[anybuffer] password: JsBuffer,
   #[anybuffer] salt: JsBuffer,
@@ -988,7 +995,7 @@ pub enum RandomFillError {
   Failed,
 }
 
-#[op2]
+#[op2(async(deferred), fast)]
 pub fn op_node_fill_random_async(
   state: &mut OpState,
   #[smi] len: i32,
@@ -1065,7 +1072,7 @@ pub fn op_node_hkdf(
   hkdf_sync(digest_algorithm, handle, salt, info, okm)
 }
 
-#[op2]
+#[op2(async(deferred))]
 pub async fn op_node_hkdf_async(
   #[string] digest_algorithm: String,
   #[cppgc] handle: &KeyObjectHandle,
@@ -1205,7 +1212,7 @@ pub enum ScryptAsyncError {
   Other(JsErrorBox),
 }
 
-#[op2]
+#[op2(async(deferred))]
 pub async fn op_node_scrypt_async(
   #[serde] password: StringOrBuffer,
   #[serde] salt: StringOrBuffer,
@@ -1998,7 +2005,7 @@ pub fn op_node_gen_prime(
   gen_prime(size, safe, add.as_deref(), rem.as_deref())
 }
 
-#[op2]
+#[op2(async(deferred))]
 pub async fn op_node_gen_prime_async(
   #[number] size: usize,
   safe: bool,

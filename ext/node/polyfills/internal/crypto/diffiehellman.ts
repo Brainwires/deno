@@ -15,6 +15,7 @@ const {
   DataViewPrototypeGetByteOffset,
   Error,
   ObjectPrototypeIsPrototypeOf,
+  PromisePrototypeThen,
   String,
   StringPrototypeIncludes,
   TypeError,
@@ -35,6 +36,7 @@ const {
   op_node_ecdh_validate_private_key,
   op_node_ecdh_validate_public_key,
   op_node_gen_prime,
+  op_void_async_deferred,
 } = core.ops;
 
 const {
@@ -1653,12 +1655,23 @@ function diffieHellman(
   }
 
   if (callback) {
+    let secret: Buffer | undefined;
+    let error: Error | undefined;
+    let failed = false;
     try {
-      const secret = statelessDH(options.privateKey, options.publicKey);
-      callback(null, secret);
+      secret = statelessDH(options.privateKey, options.publicKey);
     } catch (err) {
-      callback(err as Error);
+      failed = true;
+      error = err as Error;
     }
+    // The job's result arrives through the event loop, as from libuv's
+    // thread pool in Node.js: never during the call. (Called inside the
+    // `try`, a callback that threw was also called a second time, with its
+    // own error.)
+    PromisePrototypeThen(
+      op_void_async_deferred(),
+      () => failed ? callback(error!) : callback(null, secret),
+    );
     return;
   }
 

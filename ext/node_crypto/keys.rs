@@ -3331,7 +3331,9 @@ pub fn op_node_generate_secret_key(#[smi] len: usize) -> KeyObjectHandle {
   KeyObjectHandle::Secret(key.into_boxed_slice())
 }
 
-#[op2]
+// `async(deferred)`, as every `*_async` op of this crate: see
+// `op_node_check_prime_async`.
+#[op2(async(deferred), fast)]
 #[cppgc]
 pub async fn op_node_generate_secret_key_async(
   #[smi] len: usize,
@@ -3446,7 +3448,7 @@ pub fn op_node_generate_rsa_key(
   generate_rsa(modulus_length, public_exponent)
 }
 
-#[op2]
+#[op2(async(deferred), fast)]
 #[cppgc]
 pub async fn op_node_generate_rsa_key_async(
   #[smi] modulus_length: usize,
@@ -3562,7 +3564,7 @@ pub fn op_node_generate_rsa_pss_key(
   )
 }
 
-#[op2]
+#[op2(async(deferred))]
 #[cppgc]
 pub async fn op_node_generate_rsa_pss_key_async(
   #[smi] modulus_length: usize,
@@ -3711,7 +3713,7 @@ pub fn op_node_generate_dsa_key(
   dsa_generate(modulus_length, divisor_length)
 }
 
-#[op2]
+#[op2(async(deferred), fast)]
 #[cppgc]
 pub async fn op_node_generate_dsa_key_async(
   #[smi] modulus_length: usize,
@@ -3768,7 +3770,7 @@ pub fn op_node_generate_ec_key(
   ec_generate(named_curve)
 }
 
-#[op2]
+#[op2(async(deferred), fast)]
 #[cppgc]
 pub async fn op_node_generate_ec_key_async(
   #[string] named_curve: String,
@@ -3798,7 +3800,7 @@ pub fn op_node_generate_pqc_key(
   pqc_generate(key_type)
 }
 
-#[op2]
+#[op2(async(deferred), fast)]
 #[cppgc]
 pub async fn op_node_generate_pqc_key_async(
   #[string] key_type: String,
@@ -3848,7 +3850,7 @@ pub fn op_node_generate_x25519_key() -> KeyObjectHandlePair {
   x25519_generate()
 }
 
-#[op2]
+#[op2(async(deferred), fast)]
 #[cppgc]
 pub async fn op_node_generate_x25519_key_async() -> KeyObjectHandlePair {
   spawn_blocking(x25519_generate).await.unwrap()
@@ -3867,7 +3869,7 @@ pub fn op_node_generate_ed25519_key() -> KeyObjectHandlePair {
   ed25519_generate()
 }
 
-#[op2]
+#[op2(async(deferred), fast)]
 #[cppgc]
 pub async fn op_node_generate_ed25519_key_async() -> KeyObjectHandlePair {
   spawn_blocking(ed25519_generate).await.unwrap()
@@ -3887,7 +3889,7 @@ pub fn op_node_generate_x448_key() -> KeyObjectHandlePair {
   x448_generate()
 }
 
-#[op2]
+#[op2(async(deferred), fast)]
 #[cppgc]
 pub async fn op_node_generate_x448_key_async() -> KeyObjectHandlePair {
   spawn_blocking(x448_generate).await.unwrap()
@@ -3910,7 +3912,7 @@ pub fn op_node_generate_ed448_key() -> KeyObjectHandlePair {
   ed448_generate()
 }
 
-#[op2]
+#[op2(async(deferred), fast)]
 #[cppgc]
 pub async fn op_node_generate_ed448_key_async() -> KeyObjectHandlePair {
   spawn_blocking(ed448_generate).await.unwrap()
@@ -3986,7 +3988,7 @@ pub fn op_node_generate_dh_group_key(
   dh_group_generate(group_name)
 }
 
-#[op2]
+#[op2(async(deferred), fast)]
 #[cppgc]
 pub async fn op_node_generate_dh_group_key_async(
   #[string] group_name: String,
@@ -4064,7 +4066,7 @@ pub fn op_node_generate_dh_key(
   dh_generate(prime, prime_len, generator)
 }
 
-#[op2]
+#[op2(async(deferred))]
 #[cppgc]
 pub async fn op_node_generate_dh_key_async(
   #[buffer(copy)] prime: Option<Box<[u8]>>,
