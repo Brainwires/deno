@@ -1,5 +1,7 @@
+// denext: an eszip run is one the kernel sandbox's auto leaves at warn
+// (with a notice; plan denext30 §8): this test is about the eszip layers
 {
-  "args": "run --eszip-internal-do-not-use src/main.ts#a.eszip,b.eszip",
+  "args": "run --kernel-sandbox=off --eszip-internal-do-not-use src/main.ts#a.eszip,b.eszip",
   "exitCode": 0,
   "output": "main.out"
 }

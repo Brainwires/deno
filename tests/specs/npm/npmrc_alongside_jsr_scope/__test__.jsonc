@@ -1,4 +1,8 @@
 {
-  "args": "run main.ts",
+  // denext: a project .npmrc that sets a registry makes the kernel sandbox's
+  // auto run as warn with a notice (plan denext30 §8, pinned by
+  // npmrc_source_sets_registries' unit test); this test is about the
+  // registries themselves
+  "args": "run --kernel-sandbox=off main.ts",
   "output": "output.out"
 }

@@ -106,12 +106,14 @@
       "args": "run --kernel-sandbox-report --allow-read=. main.ts",
       "output": "r4_enforces.out"
     },
-    // R4: a command enforce doesn't cover (eval; `deno test` is covered
-    // after its setup since WP-A) runs as warn, never an error
+    // R4: a command enforce doesn't cover (the REPL; `deno test` is covered
+    // after its setup since WP-A, and `deno eval` runs with every
+    // permission, which auto leaves off) runs as warn, never an error
     "stage_r4_falls_back": {
       "if": "kernelSandboxEnforce",
       "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r4" },
-      "args": ["eval", "--allow-read=.", "console.log('hello')"],
+      "args": ["repl", "--allow-read=.", "--eval", "console.log('hello')"],
+      "input": "close()\n",
       "output": "r4_fallback.out"
     },
     // R4: a program from stdin (like eval and the REPL) isn't covered by

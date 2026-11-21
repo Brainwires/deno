@@ -31,7 +31,9 @@
       "cwd": "leading_dot",
       "steps": [
         {
-          "args": "run --no-config --no-npm --no-lock --allow-write=node_modules setup.ts",
+          // (scaffolding: under the kernel sandbox a write grant to a folder
+          // that does not exist yet covers nothing on Linux)
+          "args": "run --kernel-sandbox=off --no-config --no-npm --no-lock --allow-write=node_modules setup.ts",
           "output": ""
         },
         {
@@ -49,7 +51,9 @@
       "cwd": "leading_dot",
       "steps": [
         {
-          "args": "run --no-config --no-npm --no-lock --allow-write=node_modules setup.ts",
+          // (scaffolding: under the kernel sandbox a write grant to a folder
+          // that does not exist yet covers nothing on Linux)
+          "args": "run --kernel-sandbox=off --no-config --no-npm --no-lock --allow-write=node_modules setup.ts",
           "output": ""
         },
         {

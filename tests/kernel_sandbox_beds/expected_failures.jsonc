@@ -125,18 +125,6 @@
         ],
         "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
       },
-      "specs::install::package_json_invalid_alias::leading_dot_hoisted": {
-        "os": [
-          "linux"
-        ],
-        "reason": "to fix (P5 second pass): linked or out-of-project packages (npm links, jsr deps in node_modules) aren't in the read scope"
-      },
-      "specs::install::package_json_invalid_alias::leading_dot_isolated": {
-        "os": [
-          "linux"
-        ],
-        "reason": "to fix (P5 second pass): linked or out-of-project packages (npm links, jsr deps in node_modules) aren't in the read scope"
-      },
       "specs::jsr::worker": {
         "os": [
           "linux"
@@ -490,12 +478,6 @@
           "linux"
         ],
         "reason": "subprocess policy (P6): the child-failure hint (item 425) is printed on the program's own stderr; where it goes is P6's"
-      },
-      "specs::npm::npmrc_alongside_jsr_scope": {
-        "os": [
-          "linux"
-        ],
-        "reason": "to triage (P5 second pass): fails only under the force; the first pass didn't pin the cause"
       },
       "specs::npm::supply_chain_jail::escapes_denied_linux": {
         "os": [
@@ -964,18 +946,6 @@
           "linux"
         ],
         "reason": "documented (item 425): a module or package the static graph didn't fetch (a dynamic import, npm auto-install) can't be fetched after confinement"
-      },
-      "specs::run::eszip": {
-        "os": [
-          "linux"
-        ],
-        "reason": "documented (item 425): this command has no graph-first apply, so enforce refuses it"
-      },
-      "specs::run::eszip2": {
-        "os": [
-          "linux"
-        ],
-        "reason": "documented (item 425): this command has no graph-first apply, so enforce refuses it"
       },
       "specs::run::exit_output_complete": {
         "os": [
