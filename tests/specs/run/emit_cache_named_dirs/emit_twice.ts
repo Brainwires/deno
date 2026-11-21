@@ -3,7 +3,9 @@
 const denoDir = `${Deno.cwd()}/deno_dir`;
 for (const env of [{}, { DENO_DISABLE_VERBATIM_MODULE_SYNTAX: "1" }, {}]) {
   const { code, stdout } = await new Deno.Command(Deno.execPath(), {
-    args: ["run", "mod.ts"],
+    // unconfined: a confined run keeps its emits in the policy's cache
+    // overlay (DENO_DIR/sandboxed/<hash>), not DENO_DIR/gen
+    args: ["run", "--kernel-sandbox=off", "mod.ts"],
     env: { ...env, DENO_DIR: denoDir },
   }).output();
   console.log(code, new TextDecoder().decode(stdout).trim());

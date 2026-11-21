@@ -217,8 +217,16 @@ impl EnforcePlan {
     Ok(())
   }
 
-  pub fn to_bytes(&self) -> Vec<u8> {
-    serde_json::to_vec(self).expect("a plan serializes")
+  /// The hand-over's bytes. An error, never a panic, when the plan names a
+  /// path that isn't UTF-8 (JSON can't hold it): the caller refuses to
+  /// re-execute.
+  pub fn to_bytes(&self) -> std::io::Result<Vec<u8>> {
+    serde_json::to_vec(self).map_err(|err| {
+      std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("the sandbox's plan can't be handed over: {err}"),
+      )
+    })
   }
 
   /// Parses a hand-over; anything malformed is an error (the caller refuses
@@ -512,6 +520,22 @@ mod tests {
     }
   }
 
+  // a module path that isn't UTF-8 can't be written into the JSON
+  // hand-over: an error for the caller to report, never a panic
+  #[test]
+  fn a_non_utf8_path_is_an_error_not_a_panic() {
+    use std::os::unix::ffi::OsStrExt;
+    let mut bad = plan(Vec::new(), &[]);
+    bad
+      .module_files
+      .push(PathBuf::from(std::ffi::OsStr::from_bytes(
+        b"/w/bad-\xff/m.cjs",
+      )));
+    let err = bad.to_bytes().unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    assert!(plan(Vec::new(), &[]).to_bytes().is_ok());
+  }
+
   // a hand-over's expanded entries can only be entries of the expanded
   // folders it compares, never a denied path, its folder, or anything else
   // (Unix only: the entries are the Linux enforcer's, on POSIX paths, and a
@@ -604,7 +628,7 @@ mod tests {
       with_broker.without_measured_lists(),
       other_entries.without_measured_lists()
     );
-    let bytes = with_broker.to_bytes();
+    let bytes = with_broker.to_bytes().unwrap();
     assert_eq!(EnforcePlan::from_bytes(&bytes).unwrap(), with_broker);
   }
 }

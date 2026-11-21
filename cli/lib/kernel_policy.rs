@@ -578,6 +578,12 @@ pub enum ImplicitNeed {
   DenoDir,
   /// The project's `node_modules`.
   NodeModules,
+  /// The project's vendor folder (deno.json `"vendor": true`): the remote
+  /// modules and JSR / registry metadata the run loads from it.
+  Vendor,
+  /// The packages deno.json `links` names (local folders outside the
+  /// project): the run reads them to link them into node_modules.
+  LinkedPackages,
   /// System programs and their data, when `--allow-run` is granted (the
   /// children baseline).
   ChildrenBaseline,
@@ -606,6 +612,10 @@ pub enum ImplicitNeed {
   /// a report written for the user (created before the sandbox applies, so
   /// a rule can name it).
   TestReport,
+  /// `DENO_AUDIT_PERMISSIONS=<file>`: the permission audit log written for
+  /// the user (created before the sandbox applies, as the runtime creates
+  /// it at startup anyway).
+  AuditLog,
 }
 
 impl ImplicitNeed {
@@ -623,6 +633,8 @@ impl ImplicitNeed {
       Self::ProjectConfig => "project config",
       Self::DenoDir => "DENO_DIR",
       Self::NodeModules => "node_modules",
+      Self::Vendor => "vendor",
+      Self::LinkedPackages => "linked packages",
       Self::ChildrenBaseline => "children baseline",
       Self::Inspector => "inspector",
       Self::SysInfo => "sys info",
@@ -633,6 +645,7 @@ impl ImplicitNeed {
       Self::OriginData => "origin data",
       Self::Profiles => "profiles",
       Self::TestReport => "test report",
+      Self::AuditLog => "permission audit log",
     }
   }
 
@@ -1017,6 +1030,9 @@ impl ImplicitSet {
     for file in &ctx.report_files {
       add(file, ImplicitNeed::TestReport, ImplicitAccess::ReadWrite);
     }
+    if let Some(file) = &ctx.audit_file {
+      add(file, ImplicitNeed::AuditLog, ImplicitAccess::ReadWrite);
+    }
     if net_allowed {
       for file in &ctx.tls_files {
         add(file, ImplicitNeed::TlsFiles, ImplicitAccess::Read);
@@ -1059,6 +1075,16 @@ impl ImplicitSet {
         ImplicitAccess::ReadMap,
       );
     }
+    // the vendor folder stands in for DENO_DIR's remote cache: the first
+    // image vendors the static graph, the confined one reads it
+    if !ctx.compiled
+      && let Some(vendor) = &ctx.vendor_dir
+    {
+      add(vendor, ImplicitNeed::Vendor, ImplicitAccess::Read);
+    }
+    for dir in &ctx.link_dirs {
+      add(dir, ImplicitNeed::LinkedPackages, ImplicitAccess::Read);
+    }
     entries.sort();
     entries.dedup();
     Self { entries }
@@ -1089,6 +1115,12 @@ pub struct Context {
   pub deno_dir: Option<PathBuf>,
   pub config_files: Vec<PathBuf>,
   pub node_modules: Option<PathBuf>,
+  /// The project's vendor folder (deno.json `"vendor": true`).
+  pub vendor_dir: Option<PathBuf>,
+  /// The folders deno.json `links` names.
+  pub link_dirs: Vec<PathBuf>,
+  /// The file `DENO_AUDIT_PERMISSIONS` names (not `otel`), absolute.
+  pub audit_file: Option<PathBuf>,
   pub inspector_port: Option<u16>,
   /// stdin is a terminal (the `/dev/tty` rule, plan §3).
   pub tty_parent: bool,
@@ -1143,6 +1175,9 @@ impl Context {
       deno_dir: None,
       config_files: Vec::new(),
       node_modules: None,
+      vendor_dir: None,
+      link_dirs: Vec::new(),
+      audit_file: None,
       inspector_port: None,
       tty_parent: false,
       ttys: Vec::new(),

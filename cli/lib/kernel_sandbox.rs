@@ -368,6 +368,12 @@ pub enum ModeReason {
   /// out of the sandbox (the outside helper), so confining it by default
   /// would break what it does (DENEXT.md item 488, the R4 decision).
   DesktopNotStrict,
+  /// The process runs inside an npm lifecycle script's jail
+  /// (`DENO_INTERNAL_LIFECYCLE_JAIL`): the jail is its confinement (the OS
+  /// sandbox around the script's whole process tree, and the permission
+  /// clamp), so `auto` adds nothing (denext.30 plan §1.1: the lifecycle
+  /// jail is unchanged).
+  LifecycleJail,
 }
 
 impl ModeReason {
@@ -407,6 +413,9 @@ impl ModeReason {
       }
       Self::DesktopNotStrict => {
         "auto applies nothing to a desktop app that isn't packaged strict (desktop.permissions: \"strict\")"
+      }
+      Self::LifecycleJail => {
+        "auto: the npm lifecycle-script jail already confines this process"
       }
     }
   }
@@ -473,6 +482,10 @@ pub struct ModeInputs {
   /// and decides again with it (`cli/sandbox::check_run`,
   /// `kernel_apply::start_compiled`).
   pub policy_needs_supervisor: bool,
+  /// The process runs inside an npm lifecycle script's jail
+  /// (`DENO_INTERNAL_LIFECYCLE_JAIL` is set): `auto` is then `off`
+  /// ([`ModeReason::LifecycleJail`]); an explicit mode applies as asked.
+  pub lifecycle_jail: bool,
 }
 
 /// The mode a process runs in, and why.
@@ -543,6 +556,9 @@ pub struct ModeError {
 ///    else the harness's forced `enforce`, else deno.json, else `auto`.
 /// 3. `off` → `off`. A development build of a compiled desktop app → `off`,
 ///    whatever is baked.
+///    Inside an npm lifecycle script's jail, `auto` (by default or written
+///    out) → `off` ([`ModeReason::LifecycleJail`]): the jail is the
+///    process's confinement.
 /// 4. `-A` with no deny → `off` (plain `-A` changes nothing), unless the
 ///    harness forced the mode.
 /// 5. `--watch`, HMR, `denext dev` or a permission broker: the set isn't
@@ -647,6 +663,12 @@ pub fn kernel_sandbox_mode(
   }
   if compiled && inputs.dev_build {
     return off(resolution, ModeReason::DevBuild);
+  }
+  // the lifecycle jail is unchanged at every stage: its OS sandbox and the
+  // permission clamp confine the script's process tree already, and a
+  // second policy compiled inside it can't see what the jail hides
+  if inputs.lifecycle_jail && requested == KernelSandboxMode::Auto {
+    return off(resolution, ModeReason::LifecycleJail);
   }
   // the harness forces `-A` runs too: the policy is then the whole grant
   // plus the seccomp rules (or, for `project`, the narrowed one)
@@ -1463,6 +1485,32 @@ mod tests {
       (
         "an explicit enforce",
         ModeInputs {
+          flag: Some(Enforce),
+          ..run()
+        },
+        [Enforce, Enforce, Enforce],
+      ),
+      (
+        "inside an npm lifecycle script's jail (no terminal): the jail confines it",
+        ModeInputs {
+          lifecycle_jail: true,
+          ..run()
+        },
+        [Off, Off, Off],
+      ),
+      (
+        "inside the lifecycle jail, auto written in deno.json: still the jail's",
+        ModeInputs {
+          lifecycle_jail: true,
+          config: Some(Auto),
+          ..run()
+        },
+        [Off, Off, Off],
+      ),
+      (
+        "inside the lifecycle jail, an explicit enforce applies as asked",
+        ModeInputs {
+          lifecycle_jail: true,
           flag: Some(Enforce),
           ..run()
         },

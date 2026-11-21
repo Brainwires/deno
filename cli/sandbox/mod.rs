@@ -566,6 +566,7 @@ fn mode_inputs(
     dev_build: false,
     permission_broker: deno_runtime::deno_permissions::broker::has_broker(),
     policy_needs_supervisor: false,
+    lifecycle_jail: crate::supply_chain::jail::jail_from_env().is_some(),
   })
 }
 
@@ -598,6 +599,14 @@ fn context_for(
   }
   ctx.deno_dir = deno_dir;
   ctx.node_modules = node_modules;
+  ctx.vendor_dir = cli_options.vendor_dir_path().cloned();
+  ctx.link_dirs = cli_options
+    .start_dir
+    .workspace
+    .link_folders()
+    .keys()
+    .filter_map(|url| url.to_file_path().ok())
+    .collect();
   // the config files discovery read: every deno.json / package.json of the
   // workspace (an ancestor folder's too, outside any read grant), the import
   // map and the lockfile. A re-executed image discovers them again under the
@@ -628,8 +637,53 @@ fn context_for(
         })
         .and_then(|url| url.to_file_path().ok()),
     )
+    // the tsconfig.json beside each of them: a package.json project resolves
+    // its `compilerOptions.paths` / `baseUrl` from it at run time, in the
+    // confined image too (its `extends` / `references` chain isn't followed
+    // here: a file it names outside the read grant stays unreadable)
+    .chain(
+      workspace
+        .deno_jsons()
+        .filter_map(|c| c.specifier.to_file_path().ok())
+        .chain(workspace.package_jsons().map(|p| p.path.clone()))
+        .filter_map(|p| Some(p.parent()?.join("tsconfig.json")))
+        .collect::<Vec<_>>(),
+    )
     .filter(|p| p.is_file())
     .collect();
+  // the package.json nearest the main module: the run reads it for the
+  // module's type (`"type": "module"`) even when discovery skipped it
+  // (`--no-config`), and the confined image reads it again
+  let main_script = match &flags.subcommand {
+    DenoSubcommand::Run(run_flags) if !run_flags.is_stdin() => {
+      Some(run_flags.script.as_str())
+    }
+    DenoSubcommand::Serve(serve_flags) => Some(serve_flags.script.as_str()),
+    _ => None,
+  };
+  if let Some(script) = main_script
+    && let Ok(url) = cli_options.resolve_entrypoint_path(script)
+    && let Ok(path) = url.to_file_path()
+    && let Some(found) = path
+      .ancestors()
+      .skip(1)
+      .map(|dir| dir.join("package.json"))
+      .find(|p| p.is_file())
+  {
+    config_files.push(found);
+  }
+  // `deno run .` / `deno run <dir>`: the main module is the directory's
+  // package.json "main" (else index.js), which the confined image resolves
+  // again from that file
+  if let DenoSubcommand::Run(run_flags) = &flags.subcommand
+    && !run_flags.is_stdin()
+    && let Ok(url) = cli_options.resolve_entrypoint_path(&run_flags.script)
+    && let Ok(dir) = url.to_file_path()
+    && dir.is_dir()
+    && dir.join("package.json").is_file()
+  {
+    config_files.push(dir.join("package.json"));
+  }
   // the lockfile this run uses, whether or not it exists yet: the first
   // image writes a new one before the re-exec (item 451), and the next
   // image must read it (a rule on a path that doesn't exist is skipped)
@@ -660,6 +714,14 @@ fn context_for(
   ctx.profile_dirs.sort();
   ctx.profile_dirs.dedup();
   ctx.report_files = report_files(cli_options);
+  // the permission audit log the runtime creates at startup, in both images
+  #[allow(clippy::disallowed_methods, reason = "the runtime reads it so")]
+  {
+    ctx.audit_file = std::env::var("DENO_AUDIT_PERMISSIONS")
+      .ok()
+      .filter(|target| !target.is_empty() && target != "otel")
+      .map(|target| cli_options.initial_cwd().join(target));
+  }
   ctx.tls_files = tls_files();
   // `--cert <file>` (DENO_CERT's flag form), relative to the working folder
   if let Some(deno_lib::args::CaData::File(cert)) = cli_options.ca_data() {
@@ -694,6 +756,55 @@ fn report_files(cli_options: &CliOptions) -> Vec<PathBuf> {
     files.push(cli_options.initial_cwd().join(audit));
   }
   files
+}
+
+/// A relative path written without `./` (`deno run src/main.ts`) that no
+/// import map, deno.json `imports`, package.json dependency or workspace
+/// package name can map: the run then resolves it as the path it spells.
+fn bare_path_unmapped(cli_options: &CliOptions, script: &str) -> bool {
+  // a scheme (`npm:`, `jsr:`, `node:`, …) or a scoped package name
+  if script.contains(':') || script.starts_with('@') || script.is_empty() {
+    return false;
+  }
+  if cli_options.flags().import_map_path.is_some() {
+    return false;
+  }
+  let workspace = &cli_options.start_dir.workspace;
+  if workspace.to_import_map_path().ok().flatten().is_some() {
+    return false;
+  }
+  let maps = |key: &str| {
+    key == script || (key.ends_with('/') && script.starts_with(key))
+  };
+  for deno_json in workspace.deno_jsons() {
+    let json = &deno_json.json;
+    if json.import_map.is_some() || json.scopes.is_some() {
+      return false;
+    }
+    if let Some(imports) = json.imports.as_ref().and_then(|i| i.as_object())
+      && imports.keys().any(|k| maps(k))
+    {
+      return false;
+    }
+  }
+  // the package a bare specifier names: its first path segment
+  let first = script.split('/').next().unwrap_or(script);
+  for pkg_json in workspace.package_jsons() {
+    let deps = [
+      &pkg_json.dependencies,
+      &pkg_json.dev_dependencies,
+      &pkg_json.peer_dependencies,
+      &pkg_json.optional_dependencies,
+    ];
+    if pkg_json.name.as_deref() == Some(first)
+      || deps
+        .iter()
+        .any(|d| d.as_ref().is_some_and(|d| d.contains_key(first)))
+    {
+      return false;
+    }
+  }
+  true
 }
 
 /// This program's own origin data folders (`localStorage`, the Cache API):
@@ -731,12 +842,17 @@ fn origin_data_dirs(
         _ => return Vec::new(),
       };
       // a local file or a URL, resolved as the run resolves it; a bare or
-      // `npm:` / `jsr:` entrypoint, a folder or a Node binary main: none
+      // `npm:` / `jsr:` entrypoint, a folder or a Node binary main: none. A
+      // relative path written without `./` (`deno run src/main.ts`) is
+      // bare: the run tries the workspace resolver first and falls back to
+      // the path, so it counts only when nothing in the workspace can map
+      // it (else the folder could be another program's)
       let plain = script.starts_with('.')
         || std::path::Path::new(script).is_absolute()
         || ["file:", "http:", "https:"]
           .iter()
-          .any(|scheme| script.starts_with(scheme));
+          .any(|scheme| script.starts_with(scheme))
+        || bare_path_unmapped(cli_options, script);
       if !plain || cli_options.is_node_main() {
         return Vec::new();
       }
@@ -1016,6 +1132,7 @@ pub fn check_run(
         fatal.join("\n")
       );
     }
+    enforce::set_auto_chosen(resolution.auto_chosen);
     enforce::prepare(&compiled, &ctx, options)?;
   }
   Ok(resolution)

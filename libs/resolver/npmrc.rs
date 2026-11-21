@@ -156,7 +156,7 @@ fn note_kernel_skipped_npmrc(path: &std::path::Path) {
   static NOTED: std::sync::Once = std::sync::Once::new();
   NOTED.call_once(|| {
     log::warn!(
-      "Warning kernel sandbox: {} isn't readable under --kernel-sandbox=enforce, so it is treated as absent (it may hold registry tokens): a custom registry or token from it is unavailable. Run once without --kernel-sandbox=enforce to cache the packages, or grant it with --allow-read={} if you accept the exposure.",
+      "Warning kernel sandbox: {} isn't readable inside the kernel sandbox (enforce), so it is treated as absent (it may hold registry tokens): a custom registry or token from it is unavailable. Run once with --kernel-sandbox=off to cache the packages, or grant it with --allow-read={} if you accept the exposure.",
       path.display(),
       path.display()
     );

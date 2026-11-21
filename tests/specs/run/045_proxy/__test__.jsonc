@@ -1,4 +1,6 @@
 {
-  "args": "run -L debug --allow-net --allow-env --allow-run --allow-read --reload --quiet --config ../../../config/deno.json proxy_test.ts",
+  // a test driver: its children (`deno cache`, …) run unconfined, as a
+  // confined parent's would be refused (`deno cache` inside a kernel sandbox)
+  "args": "run --kernel-sandbox=off -L debug --allow-net --allow-env --allow-run --allow-read --reload --quiet --config ../../../config/deno.json proxy_test.ts",
   "output": "proxy_test.ts.out"
 }

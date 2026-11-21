@@ -177,7 +177,7 @@ pub fn apply_profile(profile: &str) -> Result<(), String> {
 /// ([`take_inherited_plan`]). Not close-on-exec: it is the descriptor the
 /// new image inherits.
 fn plan_file(plan: &EnforcePlan) -> io::Result<OwnedFd> {
-  let bytes = plan.to_bytes();
+  let bytes = plan.to_bytes()?;
   let dir = std::env::temp_dir();
   let template = dir.join("deno-kernel-plan-XXXXXX");
   let Ok(c_template) = CString::new(template.as_os_str().as_bytes()) else {
