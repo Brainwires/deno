@@ -3288,6 +3288,39 @@ pub fn op_node_get_private_key_from_pair(
   pair.private_key.borrow_mut().take()
 }
 
+/// Generates the key with aws-lc (OpenSSL-speed prime search) when it
+/// supports the request: 2048, 3072, 4096 or 8192 bits with e = 65537.
+/// `None` sends every other size and exponent to the pure-Rust `rsa` path
+/// (Node allows any odd exponent and any size). The key comes back as
+/// PKCS#8 and is parsed into the `rsa` crate's type, so every later use of
+/// it is unchanged.
+fn generate_rsa_aws_lc(
+  modulus_length: usize,
+  public_exponent: usize,
+) -> Option<RsaPrivateKey> {
+  use aws_lc_rs::encoding::AsDer;
+  use aws_lc_rs::rsa::KeySize;
+
+  if public_exponent != 65537 {
+    return None;
+  }
+  let size = match modulus_length {
+    2048 => KeySize::Rsa2048,
+    3072 => KeySize::Rsa3072,
+    4096 => KeySize::Rsa4096,
+    8192 => KeySize::Rsa8192,
+    _ => return None,
+  };
+  let pair = aws_lc_rs::rsa::KeyPair::generate(size).ok()?;
+  let der = pair.as_der().ok()?;
+  let key = <RsaPrivateKey as rsa::pkcs8::DecodePrivateKey>::from_pkcs8_der(
+    der.as_ref(),
+  )
+  .ok()?;
+  (key.e() == &rsa::BigUint::from(65537u32) && key.n().bits() == modulus_length)
+    .then_some(key)
+}
+
 fn generate_rsa(
   modulus_length: usize,
   public_exponent: usize,
@@ -3299,12 +3332,15 @@ fn generate_rsa(
     )));
   }
 
-  let private_key = RsaPrivateKey::new_with_exp(
-    &mut thread_rng(),
-    modulus_length,
-    &rsa::BigUint::from_usize(public_exponent).unwrap(),
-  )
-  .map_err(|e| JsErrorBox::generic(e.to_string()))?;
+  let private_key = match generate_rsa_aws_lc(modulus_length, public_exponent) {
+    Some(key) => key,
+    None => RsaPrivateKey::new_with_exp(
+      &mut thread_rng(),
+      modulus_length,
+      &rsa::BigUint::from_usize(public_exponent).unwrap(),
+    )
+    .map_err(|e| JsErrorBox::generic(e.to_string()))?,
+  };
 
   let private_key = AsymmetricPrivateKey::Rsa(private_key);
   let public_key = private_key.to_public_key();
@@ -3344,12 +3380,15 @@ fn generate_rsa_pss(
   mf1_hash_algorithm: Option<&str>,
   salt_length: Option<u32>,
 ) -> Result<KeyObjectHandlePair, GenerateRsaPssError> {
-  let key = RsaPrivateKey::new_with_exp(
-    &mut thread_rng(),
-    modulus_length,
-    &rsa::BigUint::from_usize(public_exponent).unwrap(),
-  )
-  .unwrap();
+  let key = match generate_rsa_aws_lc(modulus_length, public_exponent) {
+    Some(key) => key,
+    None => RsaPrivateKey::new_with_exp(
+      &mut thread_rng(),
+      modulus_length,
+      &rsa::BigUint::from_usize(public_exponent).unwrap(),
+    )
+    .unwrap(),
+  };
 
   let details = if hash_algorithm.is_none()
     && mf1_hash_algorithm.is_none()
