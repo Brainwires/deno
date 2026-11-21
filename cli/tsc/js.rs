@@ -369,6 +369,7 @@ pub fn exec_request(
     extensions,
     create_params: create_isolate_create_params(&crate::sys::CliSys::default()),
     startup_snapshot: deno_snapshots::CLI_SNAPSHOT,
+    extension_transpiler: crate::tsc::tsc_extension_transpiler(),
     extension_code_cache,
     // The TSC isolate shares CLI_SNAPSHOT, which under node-defer leaves
     // node:process (and the rest of node's `lazy_loaded_esm` set) outside
@@ -690,6 +691,25 @@ mod tests {
       capture_emitted_files: false,
     };
     crate::tsc::exec(request, code_cache)
+  }
+
+  // denext: a build without a startup snapshot (`--features hmr`) evaluates
+  // the TSC isolate's extensions from source, which needs a transpiler for
+  // their TypeScript ESM; every such type check panicked without one
+  #[test]
+  fn tsc_isolate_transpiles_extensions_when_there_is_no_snapshot() {
+    let transpiler = crate::tsc::tsc_extension_transpiler();
+    assert_eq!(transpiler.is_some(), deno_snapshots::CLI_SNAPSHOT.is_none());
+    if let Some(transpile) = transpiler {
+      let (code, _) = transpile(
+        deno_core::ModuleName::from_static("ext:test/typed.ts"),
+        deno_core::ModuleCodeString::from_static(
+          "export function f(x: unknown): void {}",
+        ),
+      )
+      .unwrap();
+      assert!(!code.as_str().contains("unknown"), "{}", code.as_str());
+    }
   }
 
   #[tokio::test]

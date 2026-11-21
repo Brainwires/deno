@@ -5901,6 +5901,7 @@ fn run_tsc_thread(
     extensions,
     create_params: create_isolate_create_params(&crate::sys::CliSys::default()),
     startup_snapshot: deno_snapshots::CLI_SNAPSHOT,
+    extension_transpiler: crate::tsc::tsc_extension_transpiler(),
     inspector: has_inspector_server,
     // See cli/tsc/js.rs: the LSP TSC isolate shares CLI_SNAPSHOT and needs
     // the residual lazy-ESM/JS sources for node:* lookups (e.g. `process`).
