@@ -734,9 +734,8 @@ fn context_for(
 }
 
 /// The report files the run writes for the user: `deno test`'s JUnit file
-/// (`--junit-path`, or deno.json's `test.reporter`), never stdout (`-`),
-/// and the permission audit log (`DENO_AUDIT_PERMISSIONS=<file>`, which
-/// the CLI opens again in the image after the re-exec).
+/// (`--junit-path`, or deno.json's `test.reporter`), never stdout (`-`).
+/// (The permission audit log is `Context::audit_file`.)
 fn report_files(cli_options: &CliOptions) -> Vec<PathBuf> {
   let mut files = Vec::new();
   if let DenoSubcommand::Test(test_flags) = &cli_options.flags().subcommand {
@@ -747,13 +746,6 @@ fn report_files(cli_options: &CliOptions) -> Vec<PathBuf> {
         .filter(|path| path != "-")
         .map(|path| cli_options.initial_cwd().join(path)),
     );
-  }
-  #[allow(clippy::disallowed_methods, reason = "the process's own environment")]
-  if let Some(audit) = std::env::var_os("DENO_AUDIT_PERMISSIONS")
-    .filter(|target| !target.is_empty() && target != "otel")
-  {
-    // relative to the working folder, as the CLI creates it
-    files.push(cli_options.initial_cwd().join(audit));
   }
   files
 }

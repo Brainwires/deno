@@ -608,8 +608,7 @@ pub enum ImplicitNeed {
   OriginData,
   /// `--cpu-prof` / `--heap-prof` folders: written for the user.
   Profiles,
-  /// `deno test --junit-path=<file>`, the `DENO_AUDIT_PERMISSIONS` log:
-  /// a report written for the user (created before the sandbox applies, so
+  /// `deno test --junit-path=<file>`: a report written for the user (created before the sandbox applies, so
   /// a rule can name it).
   TestReport,
   /// `DENO_AUDIT_PERMISSIONS=<file>`: the permission audit log written for
@@ -1148,8 +1147,7 @@ pub struct Context {
   pub origin_data: Vec<PathBuf>,
   /// The `--cpu-prof` / `--heap-prof` folders the run writes.
   pub profile_dirs: Vec<PathBuf>,
-  /// Report files the run writes for the user (`deno test --junit-path`,
-  /// the `DENO_AUDIT_PERMISSIONS` log).
+  /// Report files the run writes for the user (`deno test --junit-path`).
   pub report_files: Vec<PathBuf>,
   /// `auto` enforces the deny rules alone (D1 / D2,
   /// `ModeResolution::deny_ceiling`): the grant passed in is
