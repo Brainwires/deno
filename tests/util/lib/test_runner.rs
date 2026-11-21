@@ -464,7 +464,10 @@ pub fn scale_timeout(timeout: Duration, factor: f64) -> Duration {
 
 /// A cgroup v2 `cpu.max` (`"<quota> <period>"`, or `"max <period>"` for no
 /// quota) as CPUs.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+  not(target_os = "linux"),
+  allow(dead_code, reason = "cgroup CPU limits are read on Linux only")
+)]
 fn parse_cgroup_v2_cpu_max(text: &str) -> Option<f64> {
   let mut parts = text.split_whitespace();
   let quota = parts.next()?;
@@ -474,19 +477,28 @@ fn parse_cgroup_v2_cpu_max(text: &str) -> Option<f64> {
 
 /// A cgroup v1 `cpu.cfs_quota_us` / `cpu.cfs_period_us` pair as CPUs (a
 /// quota of -1 is none).
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+  not(target_os = "linux"),
+  allow(dead_code, reason = "cgroup CPU limits are read on Linux only")
+)]
 fn parse_cgroup_v1_cfs(quota: &str, period: &str) -> Option<f64> {
   cpus_from_quota(quota.trim().parse().ok()?, period.trim().parse().ok()?)
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+  not(target_os = "linux"),
+  allow(dead_code, reason = "cgroup CPU limits are read on Linux only")
+)]
 fn cpus_from_quota(quota: f64, period: f64) -> Option<f64> {
   (quota > 0.0 && period > 0.0).then(|| quota / period)
 }
 
 /// `/proc/self/cgroup`'s cgroup v2 path (the `0::<path>` line) and its
 /// cgroup v1 path for the `cpu` controller.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+  not(target_os = "linux"),
+  allow(dead_code, reason = "cgroup CPU limits are read on Linux only")
+)]
 fn parse_proc_self_cgroup(text: &str) -> (Option<&str>, Option<&str>) {
   let mut v2 = None;
   let mut v1 = None;

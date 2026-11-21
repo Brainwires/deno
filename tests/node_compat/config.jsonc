@@ -609,6 +609,7 @@
     "parallel/test-child-process-default-options.js": {},
     "parallel/test-child-process-detached.js": {},
     "parallel/test-child-process-destroy.js": {},
+    "parallel/test-child-process-dgram-reuseport.js": {},
     "parallel/test-child-process-disconnect.js": {},
     "parallel/test-child-process-double-pipe.js": {},
     "parallel/test-child-process-env.js": {},
@@ -814,8 +815,12 @@
     "parallel/test-cluster-call-and-destroy.js": { "windows": false },
     "parallel/test-cluster-child-index-dgram.js": { "windows": false },
     "parallel/test-cluster-child-index-net.js": { "windows": false },
+    "parallel/test-cluster-dgram-1.js": {},
+    "parallel/test-cluster-dgram-2.js": {},
+    "parallel/test-cluster-dgram-bind-fd.js": {},
     "parallel/test-cluster-dgram-ipv6only.js": { "windows": false },
     "parallel/test-cluster-dgram-reuse.js": { "windows": false },
+    "parallel/test-cluster-dgram-reuseport.js": {},
     "parallel/test-cluster-disconnect-before-exit.js": { "windows": false },
     "parallel/test-cluster-disconnect-exitedAfterDisconnect-race.js": {
       "windows": false
@@ -824,6 +829,7 @@
     "parallel/test-cluster-disconnect-leak.js": { "windows": false },
     "parallel/test-cluster-disconnect-race.js": { "windows": false },
     "parallel/test-cluster-disconnect-unshared-tcp.js": { "windows": false },
+    "parallel/test-cluster-disconnect-unshared-udp.js": {},
     "parallel/test-cluster-disconnect-with-no-workers.js": { "windows": false },
     "parallel/test-cluster-disconnect.js": { "windows": false },
     "parallel/test-cluster-eaccess.js": { "windows": false },
@@ -1387,6 +1393,7 @@
     "parallel/test-dgram-oob-buffer.js": {},
     "parallel/test-dgram-recv-error.js": {},
     "parallel/test-dgram-ref.js": {},
+    "parallel/test-dgram-reuseport.js": {},
     "parallel/test-dgram-send-address-types.js": {},
     "parallel/test-dgram-send-bad-arguments.js": {},
     "parallel/test-dgram-send-callback-buffer-empty-address.js": {},
@@ -5955,31 +5962,6 @@
       "linuxAarch64": false,
       "reason": "err.syscall is undefined on linux-aarch64"
     },
-    "parallel/test-cluster-dgram-1.js": {
-      "linux": false,
-      "darwin": false,
-      "reason": "times out"
-    },
-    "parallel/test-cluster-dgram-2.js": {
-      "linux": false,
-      "darwin": false,
-      "reason": "times out"
-    },
-    "parallel/test-cluster-dgram-bind-fd.js": {
-      "linux": false,
-      "darwin": false,
-      "reason": "times out"
-    },
-    "parallel/test-cluster-dgram-reuseport.js": {
-      "linux": false,
-      "darwin": false,
-      "reason": "times out"
-    },
-    "parallel/test-cluster-disconnect-unshared-udp.js": {
-      "linux": false,
-      "darwin": false,
-      "reason": "times out"
-    },
     "parallel/test-cluster-http-pipe.js": {},
     "parallel/test-cluster-net-server-drop-connection.js": {},
     "parallel/test-common-gc.js": {},
@@ -7106,7 +7088,6 @@
     "sequential/test-child-process-pass-fd.js": {
       "timeoutMs": 30000,
       "windows": false,
-      "darwin": false,
       "reason": "times out"
     },
     "sequential/test-cluster-inspect-brk.js": {},

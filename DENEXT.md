@@ -19488,6 +19488,96 @@ where the changes are discussed.
        files skip themselves and `test-crypto-key-objects.js` runs its RSA-PSS
        part only on OpenSSL.
 
+485. **`fix`: what the denext.28 node_compat flake work left over** (runtime;
+     `runtime/ops/fs_events.rs`, `ext/node/polyfills/dgram.ts`,
+     `ext/node/polyfills/internal/child_process.ts`,
+     `ext/node/polyfills/internal/cluster/shared_handle.ts`,
+     `ext/node/polyfills/internal_binding/udp_wrap.ts`, `ext/node/ops/udp.rs`,
+     `runtime/js/99_main.js`, `cli/tsc/mod.rs`, `cli/lsp/tsc.rs`,
+     `tests/util/lib/test_runner.rs`). Bugs the hunt of items 476-482 found
+     beside the ones it fixed.
+     - **A non-recursive watch beside a recursive one**: every `Deno.watchFs()`
+       / `fs.watch()` of a runtime shares one notify backend, and each watcher
+       picked its events by a canonical-path prefix, so
+       `Deno.watchFs(dir + "/sub", { recursive: false })` beside
+       `Deno.watchFs(dir)` was handed the recursive watch's events for
+       `sub/nested/...`. A non-recursive watcher now passes on only its own path
+       and that directory's direct children (a child's parent, not the child's
+       resolved path, is compared, so a symlink in the directory still counts);
+       `ignore` paths still cover everything below them. The Linux new-directory
+       scan (item 482) already reported its synthesized creates to recursive
+       watchers only.
+     - **UDP in a cluster**: a worker's `dgram` bind never asked the primary for
+       the socket (`SharedHandle` answered ENOTSUP for UDP), so each worker
+       bound a port of its own: parallel/test-cluster-dgram-1.js sent to a port
+       no worker shared and timed out, and -2's workers were never closed by
+       `cluster.disconnect()`. As in Node.js, a worker's non-exclusive `bind()`
+       (an address, or `{ fd }`) now goes through `cluster._getServer()`: the
+       primary binds the socket once (`dgram._createSocketHandle`) and sends it
+       to every worker binding the same address as a raw UDP wrap
+       (`handleConversion["dgram.Native"]`, which `process.send()` also accepts
+       now), each worker reading its own copy. The socket closes with the last
+       worker.
+     - **`reusePort`**: the dgram option was ignored. A `reusePort` socket now
+       binds with Linux's `SO_REUSEPORT` (and is exclusive in a cluster worker,
+       as in Node.js); elsewhere the bind fails with ENOTSUP, as libuv does, so
+       Node's reusePort tests skip themselves there.
+     - **A datagram to `0.0.0.0` / `::`** goes to the loopback address of its
+       family, as Linux does in the kernel and libuv does on Windows. macOS
+       sends it to the primary interface's address, which a host firewall
+       dropping traffic to that address refuses with EHOSTUNREACH (Node.js fails
+       test-cluster-dgram-1.js the same way on such a host). A failed send also
+       reports the OS error's code instead of UNKNOWN.
+     - **Type checking in an `hmr` build**: `cargo build --features hmr` has no
+       startup snapshot, so the TSC isolates (`tsc::js`, the LSP's) evaluate the
+       snapshot's extensions from source. They had no extension transpiler
+       (`Uncaught SyntaxError` at `ext:deno_bundle_runtime/bundle.ts:18:31`, a
+       panic on every `deno test` / `deno check` that type-checked with the JS
+       compiler), and `runtime/js/99_main.js`'s `removeImportedOps()` then
+       deleted the compiler's own ops from `core.ops`
+       (`op_tsc_constants is not a
+       function`); a snapshot build evaluates
+       that module before those ops exist. The isolates now take the runtime's
+       transpiler in such a build, and the compiler's ops are on the list
+       `removeImportedOps()` keeps.
+     - **test-child-process-pass-fd.js on macOS**: 80 forked children take about
+       1 s on the mini (debug build) and 26-29 s at twelve copies at once beside
+       14 CPU hogs; it was disabled upstream (#34184). At a load average above
+       100 (two VMs and two cargo builds beside twelve copies) 4 of 144 runs
+       hung with one child alive after the parent's `kill()`; that never came
+       back in 960 later runs (both the train before this branch and with it),
+       so the cause is unknown.
+     - The time budget's cgroup helpers (`tests/util/lib/test_runner.rs`) give
+       their `allow(dead_code)` a reason, for
+       `clippy::allow_attributes_without_reason`.
+     - parallel/test-inspector-ip-detection.js hangs at "Testing /json/list" on
+       the mini with Node.js too: every TCP connection from the host to one of
+       its own non-loopback addresses is dropped there (the application
+       firewall's "block all incoming connections" in stealth mode, and the pf
+       policy that makes it explicit), so the test's connection to its LAN
+       address never completes. Environmental; a VM runner is unaffected.
+     - User-facing note: a non-recursive `Deno.watchFs()` / `fs.watch()` reports
+       only its directory's direct children whatever else is watched;
+       `node:cluster` shares UDP sockets with its workers; `dgram`'s `reusePort`
+       works on Linux (ENOTSUP elsewhere); a datagram sent to `0.0.0.0` goes to
+       loopback.
+     - Tests: `fs_events` unit tests (a non-recursive watcher beside a recursive
+       one, with removed paths; a non-recursive file watch) and
+       `watchFsNonRecursiveBesideRecursiveAncestor` in
+       `tests/unit/fs_events_test.ts` (fails on the train binary 3 of 3, passes
+       20 of 20); `udp` unit test for the loopback rewrite;
+       `tests/unit_node/dgram_test.ts` "a send to 0.0.0.0 reaches a local
+       socket" and "reusePort"; `tsc::js` test that a build without a snapshot
+       gives the TSC isolate a transpiler. macOS: the four cluster UDP tests 60
+       of 60 each (four in parallel), the harness 5 of 5;
+       test-child-process-pass-fd.js 20 of 20 alone, 15 of 15 in the harness, 18
+       of 18 at six at once; `tests/unit_node/_fs/` whole under the `hmr` build.
+       LINUX_RESULTS
+     - Node tests enabled: parallel/test-cluster-dgram-1.js, -2.js, -bind-fd.js,
+       -reuseport.js, test-cluster-disconnect-unshared-udp.js,
+       test-dgram-reuseport.js, test-child-process-dgram-reuseport.js, and
+       sequential/test-child-process-pass-fd.js on macOS.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -19498,7 +19588,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-484) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-485) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
