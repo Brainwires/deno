@@ -37,6 +37,65 @@ static CPU_CONTENTION: std::sync::OnceLock<
 
 const RUN_ARGS: &[&str] = &["run", "-A", "--quiet", "--unsafe-proto"];
 
+/// denext: the DENO_DIR the tests of one run share. Each test used to get a
+/// fresh one (`util::deno_cmd()`), so every test built a V8 code cache for
+/// `test/common/` and its own file that nothing read again, and created and
+/// removed the directory and its databases (about 68 ms of CPU per test in a
+/// debug build, half of it system time). The cache databases are SQLite in
+/// WAL mode (rusqlite waits up to 5 s on a lock), so the tests' processes
+/// share them safely. `"isolatedDenoDir": true` in config.jsonc, or
+/// `DENO_NODE_COMPAT_FRESH_DENO_DIR=1` for the whole run, gives each test a
+/// fresh one again. Set in `main`, which removes it at the end.
+static SHARED_DENO_DIR: std::sync::OnceLock<util::TempDir> =
+  std::sync::OnceLock::new();
+
+/// denext: kills the tests' process trees still running when `main` ends,
+/// a failure's unwinding included.
+struct KillProcessTreesOnDrop;
+
+impl Drop for KillProcessTreesOnDrop {
+  fn drop(&mut self) {
+    test_util::process::kill_all_process_trees();
+  }
+}
+
+/// Creates the run's shared DENO_DIR and warms it (one run of
+/// `test/common/index.js`, so the parallel tests start on a code cache of the
+/// common modules and on existing databases); removes it when dropped.
+struct SharedDenoDir(Option<util::TempDir>);
+
+impl SharedDenoDir {
+  fn create() -> Self {
+    if std::env::var_os("DENO_NODE_COMPAT_FRESH_DENO_DIR").is_some() {
+      return Self(None);
+    }
+    let dir = util::new_deno_dir();
+    let warm = util::deno_cmd_with_deno_dir(&dir)
+      .disable_diagnostic_logging()
+      .current_dir(tests_path().join("node_compat/runner/suite"))
+      .args_vec(RUN_ARGS)
+      .arg("test/common/index.js")
+      .env("NODE_SKIP_FLAG_CHECK", "1")
+      .env("NO_COLOR", "1")
+      .piped_output()
+      .output();
+    if let Err(err) = warm {
+      test_util::eprintln!("node_compat: warming the shared DENO_DIR: {err}");
+    }
+    _ = SHARED_DENO_DIR.set(dir.clone());
+    Self(Some(dir))
+  }
+}
+
+impl Drop for SharedDenoDir {
+  fn drop(&mut self) {
+    if let Some(dir) = self.0.take() {
+      // the static's clone keeps the directory alive; remove it by hand
+      _ = std::fs::remove_dir_all(dir.path());
+    }
+  }
+}
+
 const TEST_ARGS: &[&str] =
   &["test", "-A", "--quiet", "--unsafe-proto", "--no-check"];
 
@@ -121,6 +180,12 @@ struct TestConfig {
   /// counted as a pass, expected or not.
   #[serde(rename = "expectedSkip")]
   expected_skip: Option<ExpectedSkip>,
+  /// denext: runs the test on a fresh, empty DENO_DIR of its own instead of
+  /// the run's shared one (see [`SharedDenoDir`]). For a test whose outcome
+  /// depends on what is (not) in DENO_DIR. A test whose `env` sets
+  /// `DENO_DIR` gets that one.
+  #[serde(rename = "isolatedDenoDir", default)]
+  isolated_deno_dir: bool,
 }
 
 /// denext: `expectedSkip` in config.jsonc: one reason for every platform, or
@@ -211,6 +276,15 @@ fn main() {
   if category.is_empty() {
     return;
   }
+
+  // denext: one DENO_DIR for the run (removed at the end, a failure's
+  // unwinding included)
+  let _shared_deno_dir = SharedDenoDir::create();
+  // denext: each test leads a process group of its own (so a timeout kills
+  // its grandchildren too); those groups no longer get the terminal's
+  // Ctrl+C, so the harness kills them on a signal and when it ends
+  test_util::process::kill_process_trees_on_signal();
+  let _kill_trees = KillProcessTreesOnDrop;
 
   // Partition into sequential and parallel tests.
   //
@@ -782,6 +856,8 @@ struct TestSetup {
   args: Vec<String>,
   env_vars: HashMap<String, String>,
   timeout: Duration,
+  /// denext: a fresh DENO_DIR for this test instead of the shared one
+  isolated_deno_dir: bool,
 }
 
 impl TestSetup {
@@ -880,19 +956,32 @@ impl TestSetup {
     let timeout =
       test_util::test_runner::scale_timeout(timeout, timeout_factor);
 
+    let isolated_deno_dir = test_config.is_some_and(|c| c.isolated_deno_dir)
+      || env_vars.contains_key("DENO_DIR");
+
     TestSetup {
       test_suite_path,
       uses_node_test,
       args,
       env_vars,
       timeout,
+      isolated_deno_dir,
     }
   }
 
   fn run_piped(&self) -> (bool, String, Option<i32>) {
     use std::io::Read;
 
-    let mut cmd = util::deno_cmd().disable_diagnostic_logging();
+    let mut cmd = match SHARED_DENO_DIR.get() {
+      Some(shared) if !self.isolated_deno_dir => {
+        util::deno_cmd_with_deno_dir(shared)
+      }
+      _ => util::deno_cmd(),
+    }
+    .disable_diagnostic_logging()
+    // denext: the test and everything it starts form one tree, killed on
+    // a timeout and when the test ends (see `util::process::ProcessTree`)
+    .own_process_group();
     cmd = cmd.current_dir(&self.test_suite_path);
     for arg in &self.args {
       cmd = cmd.arg(arg);
@@ -937,11 +1026,8 @@ impl TestSetup {
         .take()
         .map(|p| Box::new(p) as Box<dyn Read + Send>),
     );
-    let pid = child.id();
-    let (tx, rx) = std::sync::mpsc::channel();
-    util::print::spawn_thread(move || {
-      let _ = tx.send(child.wait());
-    });
+    let tree = util::process::ProcessTree::new(&child);
+    let rx = tree.wait_in_thread(child);
 
     // the written (CPU-scaled) timeout plus the time the test was starved
     // of CPU, re-read at each deadline until it holds
@@ -981,7 +1067,7 @@ impl TestSetup {
         (false, format!("Failed to wait for the test: {err}"), None)
       }
       None => {
-        _ = util::process::kill(pid);
+        tree.kill();
         // what was printed before the kill (and in a moment after it)
         let _ = rx.recv_timeout(Duration::from_secs(2));
         let elapsed = mark.elapsed();

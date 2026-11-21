@@ -52,6 +52,12 @@ Each test entry can include the following optional configuration properties:
 - **`timeoutMs`** (integer): Overrides the per-test timeout (default 10 s, 20 s
   on macOS). Only for tests that are legitimately slow, never for a hang.
 
+- **`isolatedDenoDir`** (boolean): Runs the test on a fresh, empty `DENO_DIR` of
+  its own. The tests of a run otherwise share one (created and warmed at the
+  start, removed at the end), so each reuses the code cache of `test/common/`
+  instead of building one; a test whose `env` sets `DENO_DIR` uses that.
+  `DENO_NODE_COMPAT_FRESH_DENO_DIR=1` gives every test a fresh one.
+
 - **`sequential`** (boolean): Runs the test with the `sequential/` and `pummel/`
   tests, one at a time. Only for memory-heavy tests (leak tests that fill the
   heap on purpose) whose peak beside other tests gets the container killed for
