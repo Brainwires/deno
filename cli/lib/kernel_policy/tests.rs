@@ -1628,6 +1628,7 @@ fn policy_hash_is_stable() {
     os: TargetOs::Linux,
     shape: Shape::ModeA,
     deny_only: false,
+    deny_ceiling: false,
     fs: FsRules {
       read: PathScope::Paths {
         paths: vec![
@@ -2245,4 +2246,171 @@ fn allow_all_has_no_socket_gap() {
   let set = ImplicitSet::build(&with_deny, &c);
   let p = KernelPolicy::compile(&with_deny, &set, &c);
   assert!(p.gaps.iter().any(|g| g.class == GapClass::Unix));
+}
+
+/// A deny ceiling (D1 / D2, WP-A of denext.30) compiled for `options` on
+/// `caps`, as `check_run` does: the ceiling's grant, the context flag, and
+/// the mode `auto` chose (enforce).
+fn ceiling(options: &PermissionsOptions, caps: Capabilities) -> CompiledPolicy {
+  let mut ctx = ctx(caps, KernelSandboxMode::Enforce);
+  ctx.deny_ceiling = true;
+  compile_in(&deny_ceiling_options(options), &ctx)
+}
+
+/// The ceiling's grant: every allow unscoped, every deny kept.
+#[test]
+fn deny_ceiling_options_keep_only_the_denies() {
+  let options = PermissionsOptions {
+    allow_read: s(&["/project"]),
+    allow_net_connect: s(&["example.com:443"]),
+    deny_read: s(&["/home/me/.ssh"]),
+    ignore_env: s(&["TOKEN"]),
+    prompt: true,
+    ..Default::default()
+  };
+  let c = deny_ceiling_options(&options);
+  assert!(options_allow_all(&c));
+  assert!(options_have_deny(&c));
+  assert_eq!(c.deny_read, options.deny_read);
+  assert_eq!(c.ignore_env, options.ignore_env);
+  assert_eq!(c.allow_net_connect, None);
+  assert!(c.prompt);
+}
+
+/// Linux: a deny ceiling holds nothing without the overmount (Landlock
+/// needs no-new-privileges, an expansion freezes folders a prompt may
+/// write): each deny is a documented Deno-only rule, nothing is refused,
+/// no seccomp list, no scrub, Mode A. Whatever the mode says.
+#[test]
+fn deny_ceiling_linux_is_deno_only_and_touches_nothing() {
+  let options = PermissionsOptions {
+    allow_read: s(&["/project"]),
+    deny_read: s(&["/home/me/.ssh"]),
+    deny_write: s(&["/home/me/.ssh"]),
+    deny_net: s(&["169.254.169.254"]),
+    prompt: true,
+    ..Default::default()
+  };
+  for caps in [linux(Some(6)), linux_userns(6), linux(None)] {
+    let c = ceiling(&options, caps);
+    let p = &c.policy;
+    assert!(p.deny_only && p.deny_ceiling, "{caps:?}");
+    assert_eq!(p.shape, Shape::ModeA);
+    assert!(p.fs.read.is_all() && p.fs.write.is_all());
+    assert_eq!(p.fs.exec, ExecScope::Unrestricted);
+    assert_eq!(p.net, NetPolicy::Open);
+    assert_eq!(p.unix, UnixPolicy::Open);
+    assert_eq!(p.env_scrub, None);
+    assert_eq!(
+      p.syscalls,
+      SyscallPolicy {
+        attack_surface: false,
+        refuse_exec: false,
+        refuse_listen: false,
+        clone3_enosys: false,
+        refuse_io_uring: false,
+        refuse_path_metadata: false,
+        refuse_path_truncate: false,
+        vsock: true,
+        signal_self: false,
+      },
+      "{caps:?}"
+    );
+    assert_eq!(
+      deny(&p.fs.deny_read, "/home/me/.ssh"),
+      DenyEnforcement::DenoOnly
+    );
+    assert_eq!(
+      deny(&p.fs.deny_write, "/home/me/.ssh"),
+      DenyEnforcement::DenoOnly
+    );
+    assert!(!p.deny_ceiling_held(), "{caps:?}");
+    assert_eq!(c.fatal_gaps().count(), 0, "{:#?}", c.gaps);
+    // reported: the read deny says what would hold it
+    assert!(c.gaps.iter().any(|g| g.class == GapClass::Read
+      && g.rule == "--deny-read=/home/me/.ssh"
+      && g.exact_with == Some(ExactWith::UserNamespaces)));
+  }
+}
+
+/// The same denies under an explicit enforce (no ceiling) keep enforce's
+/// rules: the read deny is expanded, the seccomp list applies.
+#[test]
+fn deny_only_under_explicit_enforce_is_not_a_ceiling() {
+  let options = PermissionsOptions {
+    deny_read: s(&["/home/me/.ssh"]),
+    ..allow_all()
+  };
+  let c = compile(&options, linux(Some(6)), KernelSandboxMode::Enforce);
+  assert!(c.policy.deny_only && !c.policy.deny_ceiling);
+  assert!(c.policy.syscalls.refuse_io_uring);
+  // an explicit enforce in a ceiling's context still needs the flag: a
+  // context with it and a grant that isn't the ceiling's isn't one
+  let mut ctx = ctx(linux(Some(6)), KernelSandboxMode::Enforce);
+  ctx.deny_ceiling = true;
+  let partial = PermissionsOptions {
+    allow_read: s(&["/project"]),
+    deny_read: s(&["/project/secret"]),
+    ..Default::default()
+  };
+  assert!(!compile_in(&partial, &ctx).policy.deny_ceiling);
+}
+
+/// macOS: Seatbelt holds a deny ceiling exactly (an allow-default profile
+/// with the denies), and nothing is refused.
+#[test]
+fn deny_ceiling_macos_is_exact() {
+  let options = PermissionsOptions {
+    allow_read: s(&["/Users/me/project"]),
+    deny_read: s(&["/Users/me/.ssh"]),
+    deny_write: s(&["/Users/me/.zshrc"]),
+    deny_net: s(&["169.254.169.254"]),
+    prompt: true,
+    ..Default::default()
+  };
+  let c = ceiling(&options, macos());
+  let p = &c.policy;
+  assert!(p.deny_ceiling);
+  assert_eq!(p.shape, Shape::ModeA);
+  assert_eq!(deny(&p.fs.deny_read, "/Users/me/.ssh"), DenyEnforcement::Exact);
+  assert_eq!(
+    deny(&p.fs.deny_write, "/Users/me/.zshrc"),
+    DenyEnforcement::Exact
+  );
+  assert!(p.deny_ceiling_held());
+  assert_eq!(c.fatal_gaps().count(), 0, "{:#?}", c.gaps);
+  // a host deny is Deno's alone (documented), never the broker
+  assert!(has_gap(&c, GapClass::Net, GapResolution::Documented));
+  assert_eq!(p.net, NetPolicy::Open);
+  assert!(!p.syscalls.attack_surface);
+}
+
+/// A ceiling with denies the kernel never holds (env, sys, run) applies
+/// nothing on any OS.
+#[test]
+fn deny_ceiling_with_only_api_denies_holds_nothing() {
+  let options = PermissionsOptions {
+    deny_env: s(&["TOKEN"]),
+    deny_run: s(&["sudo"]),
+    deny_sys: s(&["hostname"]),
+    prompt: true,
+    ..Default::default()
+  };
+  for caps in [macos(), linux(Some(6))] {
+    let c = ceiling(&options, caps);
+    assert!(c.policy.deny_ceiling);
+    assert!(!c.policy.deny_ceiling_held(), "{caps:?}");
+    assert_eq!(c.fatal_gaps().count(), 0, "{:#?}", c.gaps);
+  }
+}
+
+/// `deno test --junit-path` writes its report through the implicit set.
+#[test]
+fn test_report_files_are_implicit() {
+  let mut ctx = ctx(linux(Some(6)), KernelSandboxMode::Enforce);
+  ctx.report_files = vec![PathBuf::from("/project/report.xml")];
+  let implicit = ImplicitSet::build(&PermissionsOptions::default(), &ctx);
+  assert!(implicit.entries.iter().any(|e| e.need == ImplicitNeed::TestReport
+    && e.access == ImplicitAccess::ReadWrite
+    && e.path == Path::new("/project/report.xml")));
 }

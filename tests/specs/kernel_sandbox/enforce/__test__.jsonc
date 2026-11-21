@@ -204,14 +204,9 @@
       "args": "info --json",
       "output": "info.out"
     },
-    // commands that can't apply the sandbox before user code refuse (deno
-    // eval grants everything by default, so enforce is off there, as for -A)
-    "test_refused": {
-      "if": "kernelSandboxEnforce",
-      "args": "test --kernel-sandbox=enforce main.ts",
-      "output": "test_refused.out",
-      "exitCode": 1
-    },
+    // (`deno test` / `deno bench` apply the sandbox after their own setup:
+    // kernel_sandbox::test_bench. deno eval grants everything by default, so
+    // enforce is off there, as for -A)
     // eval runs with every permission and takes no --kernel-sandbox
     "eval_flag_refused": {
       "args": "eval --kernel-sandbox=enforce console.log(1)",

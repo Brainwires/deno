@@ -2251,6 +2251,81 @@ fn collect_specifiers_with_test_mode(
   Ok(specifiers_with_mode)
 }
 
+/// denext (kernel sandbox): the modules a `deno test` runs, for the image
+/// after the re-exec ([`crate::sandbox::enforce::handed_over_entries`]).
+fn test_plan_entries(
+  specifiers_with_mode: &[(ModuleSpecifier, TestMode)],
+) -> Vec<crate::sandbox::enforce::PlanEntry> {
+  specifiers_with_mode
+    .iter()
+    .map(|(specifier, mode)| crate::sandbox::enforce::PlanEntry {
+      specifier: specifier.to_string(),
+      run: mode.needs_test_run(),
+      doc: mode.needs_test_extraction(),
+    })
+    .collect()
+}
+
+/// denext (kernel sandbox): the handed-over modules of the image after the
+/// re-exec, each checked against this run's own patterns: a local one must
+/// be a file a member's include set takes (and not one its exclude set
+/// drops) with a test extension, so a hand-over can't widen what the
+/// confined image reads or runs; a remote one reads nothing local. Anything
+/// else refuses.
+fn handed_over_test_specifiers<'a>(
+  member_patterns: impl Iterator<Item = &'a FilePatterns>,
+  entries: Vec<crate::sandbox::enforce::PlanEntry>,
+) -> Result<Vec<(ModuleSpecifier, TestMode)>, AnyError> {
+  let patterns: Vec<&FilePatterns> = member_patterns.collect();
+  entries
+    .into_iter()
+    .map(|entry| {
+      let specifier = ModuleSpecifier::parse(&entry.specifier)?;
+      let ok = if specifier.scheme() == "file" {
+        let path = deno_path_util::url_to_file_path(&specifier)?;
+        patterns.iter().any(|p| {
+          // what a walk of this member could find: inside its include set
+          // (or, with none, beneath its base) and not excluded
+          let taken = p.matches_path(&path, deno_config::glob::PathKind::File)
+            && (p.include.is_some() || path.starts_with(&p.base));
+          // and what the walk's predicate takes: a test module by its name
+          // or named by the include set itself; a doc-test source by its
+          // extension
+          let named = has_supported_test_path_name(&path)
+            || p
+              .include
+              .as_ref()
+              .is_some_and(|i| matches_pattern_or_exact_path(i, &path));
+          taken
+            && if entry.run {
+              is_script_ext(&path) && named
+            } else {
+              is_supported_test_ext(&path)
+            }
+        })
+      } else {
+        true
+      };
+      let mode = match (entry.run, entry.doc) {
+        (true, true) => TestMode::Both,
+        (true, false) => TestMode::Executable,
+        (false, true) => TestMode::Documentation,
+        (false, false) => {
+          return Err(anyhow!(
+            "--kernel-sandbox: {specifier} was handed over with nothing to run"
+          ));
+        }
+      };
+      if !ok {
+        return Err(anyhow!(
+          "--kernel-sandbox refuses to continue: {specifier} was handed over as a test module, but this run's patterns don't take it"
+        ));
+      }
+      Ok((specifier, mode))
+    })
+    .collect()
+}
+
 /// Collects module and document specifiers with test modes via
 /// `collect_specifiers_with_test_mode` which are then pre-fetched and adjusted
 /// based on the media type.
@@ -2508,9 +2583,9 @@ pub async fn run_tests(
 
   let worker_factory =
     Arc::new(factory.create_cli_main_worker_factory().await?);
-  // denext: a kernel-sandbox plan `deno test` can't apply refuses here,
-  // before anything is type-checked or reported
-  crate::sandbox::enforce::guard_user_code()?;
+  // denext (kernel sandbox, WP-A of denext.30): a pending plan applies after
+  // the type check, below; a worker made before then (a Vitest config run
+  // while finding the tests) refuses (`enforce::guard_user_code`)
   let mut vitest = if workspace_test_options.vitest_compat {
     Some(
       vitest::VitestCompat::setup(
@@ -2531,61 +2606,74 @@ pub async fn run_tests(
 
   let members_with_test_options =
     cli_options.resolve_test_options_for_members(&test_flags)?;
-  // With a Vitest config and no files on the command line, the config's
-  // `include` / `exclude` pick the test files, like `vitest run` does.
-  let specifiers_with_mode = match &vitest {
-    Some(vitest)
-      if vitest.has_config() && test_flags.files.include.is_empty() =>
+  // denext: the image after the kernel sandbox's re-exec runs exactly the
+  // modules the image before it found (it may not walk the folders, nor
+  // start git for --changed), each checked against this run's own patterns
+  let handed_over = crate::sandbox::enforce::handed_over_entries();
+  let specifiers_with_mode = if let Some(entries) = handed_over {
+    handed_over_test_specifiers(
+      members_with_test_options.iter().map(|(_, v)| &v.files),
+      entries,
+    )?
+  } else {
+    // With a Vitest config and no files on the command line, the config's
+    // `include` / `exclude` pick the test files, like `vitest run` does.
+    let specifiers_with_mode = match &vitest {
+      Some(vitest)
+        if vitest.has_config() && test_flags.files.include.is_empty() =>
+      {
+        vitest
+          .discover_specifiers()?
+          .into_iter()
+          .map(|specifier| (specifier, TestMode::Executable))
+          .collect()
+      }
+      _ => {
+        fetch_specifiers_with_test_mode(
+          cli_options,
+          file_fetcher,
+          members_with_test_options.into_iter().map(|(_, v)| v.files),
+          &workspace_test_options.doc,
+        )
+        .await?
+      }
+    };
+
+    let is_changed_filter =
+      test_flags.changed.is_some() || !test_flags.related.is_empty();
+
+    if !workspace_test_options.permit_no_files
+      && !is_changed_filter
+      && specifiers_with_mode.is_empty()
     {
-      vitest
-        .discover_specifiers()?
-        .into_iter()
-        .map(|specifier| (specifier, TestMode::Executable))
-        .collect()
+      return Err(anyhow!("No test modules found"));
     }
-    _ => {
-      fetch_specifiers_with_test_mode(
-        cli_options,
-        file_fetcher,
-        members_with_test_options.into_iter().map(|(_, v)| v.files),
-        &workspace_test_options.doc,
-      )
-      .await?
+
+    // Filter down to test modules affected by `--changed` / `--related`.
+    let specifiers_with_mode = match collect_changed_paths(
+      cli_options,
+      &test_flags.changed,
+      &test_flags.related,
+    )? {
+      None => specifiers_with_mode,
+      Some(changed_paths) => {
+        filter_specifiers_by_changed(
+          &factory,
+          cli_options,
+          specifiers_with_mode,
+          changed_paths,
+        )
+        .await?
+      }
+    };
+
+    if is_changed_filter && specifiers_with_mode.is_empty() {
+      log::info!("No test modules were affected by the given changes");
+      return Ok(());
     }
+    specifiers_with_mode
   };
-
-  let is_changed_filter =
-    test_flags.changed.is_some() || !test_flags.related.is_empty();
-
-  if !workspace_test_options.permit_no_files
-    && !is_changed_filter
-    && specifiers_with_mode.is_empty()
-  {
-    return Err(anyhow!("No test modules found"));
-  }
-
-  // Filter down to test modules affected by `--changed` / `--related`.
-  let specifiers_with_mode = match collect_changed_paths(
-    cli_options,
-    &test_flags.changed,
-    &test_flags.related,
-  )? {
-    None => specifiers_with_mode,
-    Some(changed_paths) => {
-      filter_specifiers_by_changed(
-        &factory,
-        cli_options,
-        specifiers_with_mode,
-        changed_paths,
-      )
-      .await?
-    }
-  };
-
-  if is_changed_filter && specifiers_with_mode.is_empty() {
-    log::info!("No test modules were affected by the given changes");
-    return Ok(());
-  }
+  let plan_entries = test_plan_entries(&specifiers_with_mode);
 
   let doc_tests = get_doc_tests(&specifiers_with_mode, file_fetcher).await?;
   let specifiers_for_typecheck_and_test =
@@ -2622,6 +2710,21 @@ pub async fn run_tests(
 
   let preload_modules = cli_options.preload_modules()?;
   let require_modules = cli_options.require_modules()?;
+
+  // denext (kernel sandbox, WP-A of denext.30): a pending plan applies
+  // here, after the type check and the coverage folder (made when the plan
+  // was prepared), before any test code runs; the process re-executes, and
+  // the confined image runs these modules
+  {
+    let mut roots = specifiers_for_typecheck_and_test.clone();
+    roots.extend(preload_modules.iter().cloned());
+    crate::sandbox::enforce::apply_pending_with_entries(
+      &factory,
+      &roots,
+      &plan_entries,
+    )
+    .await?;
+  }
 
   // Run tests
   test_specifiers(

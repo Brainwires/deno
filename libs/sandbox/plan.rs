@@ -85,6 +85,30 @@ pub struct EnforcePlan {
   /// first image and checked against the roots by the new one.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub expanded_write: Vec<PathBuf>,
+  /// The modules a `deno test` / `deno bench` runs, as the first image
+  /// found, filtered and type-checked them (WP-A of denext.30): the confined
+  /// image runs exactly these instead of walking folders it may not read or
+  /// asking git which files changed. Not part of the equality; the new image
+  /// checks each against its own include patterns, and the local ones are
+  /// among [`Self::module_files`].
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub entries: Vec<PlanEntry>,
+}
+
+/// A module a test or bench run runs ([`EnforcePlan::entries`]).
+#[derive(
+  Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanEntry {
+  /// The module's specifier (a `file:` URL, or a remote one an include
+  /// names).
+  pub specifier: String,
+  /// Its tests or benchmarks run.
+  pub run: bool,
+  /// The code blocks of its documentation run (`deno test --doc`).
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub doc: bool,
 }
 
 /// What the supervising broker holds: the run's read and write grants and
@@ -127,6 +151,7 @@ impl EnforcePlan {
       module_files: Vec::new(),
       expanded: Vec::new(),
       expanded_write: Vec::new(),
+      entries: Vec::new(),
       ..self.clone()
     }
   }
@@ -433,6 +458,11 @@ pub struct MacosPlan {
   /// when the parent has one, and the standard streams' own terminals;
   /// every other terminal is refused.
   pub ttys: Vec<String>,
+  /// A deny ceiling (D1 / D2): the profile allows everything by default and
+  /// refuses only the denies ([`crate::seatbelt::deny_only_profile`]); the
+  /// scopes above are then unscoped and unused.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub deny_only: bool,
 }
 
 // The plan expansion only applies on Unix (the Linux enforcer), so its tests are Unix-only.
@@ -468,6 +498,7 @@ mod tests {
       cache_overlay: None,
       broker: None,
       expanded_write: Vec::new(),
+      entries: Vec::new(),
     }
   }
 

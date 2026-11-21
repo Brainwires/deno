@@ -19337,6 +19337,105 @@ where the changes are discussed.
        engine's `ecn_l4s_rtc2rtc` and workspace; the WebRTC WPT run
        (`webrtc-stats/supported-stats.https.html`).
      - Node tests enabled: none; `node:` has no WebRTC API.
+
+483. **`feat(permissions)`: the kernel sandbox's deny ceilings, `deno test` /
+     `deno bench` under enforcement, and a compiled program's refused-prompt
+     line** (CLI and runtime; denext-only; denext.30 WP-A; `AUTO_STAGE`
+     unchanged, so what `auto` does by default is unchanged until the flip;
+     `cli/lib/{kernel_sandbox,kernel_policy,kernel_plan,kernel_apply}.rs`,
+     `cli/sandbox/{mod,enforce}.rs`, `cli/tools/{test,bench}/mod.rs`,
+     `cli/rt/run.rs`, `libs/sandbox/{plan,seatbelt}.rs`,
+     `runtime/permissions/prompter.rs`). Plan D1, D2 and D4, and the R4 row
+     for `test` / `bench` (plan O5).
+     - Deny ceilings (D1, D2). A `--deny-*` is a ceiling no prompt can lift, so
+       from R4 `auto` enforces a run's deny rules even while a prompt can
+       widen the rest (a terminal, prompting on), and does the same for `-A`
+       with denies, terminal or not. Nothing else changes: the policy is
+       compiled from `kernel_policy::deny_ceiling_options` (every allow
+       unscoped, every deny kept; `Context::deny_ceiling`,
+       `KernelPolicy::deny_ceiling`), with no seccomp program, no
+       no-new-privileges, no environment scrub and no read expansion, and Mode
+       A only. The prompt stays (`ModeResolution::fixed` is false;
+       `ModeReason::AutoDenyCeiling`; `ModeResolution::deny_ceiling`). An
+       explicit `enforce` with `-A` and denies keeps enforce's full policy; an
+       explicit `warn`, `DENO_KERNEL_SANDBOX=off|warn`, `--watch`, HMR,
+       `denext dev` and a permission broker win as before.
+     - macOS holds a ceiling with an allow-default Seatbelt profile that
+       refuses the read and write denies (and keeps the re-allows and the
+       marker pair, so a nested `deno` finds the handed-down policy):
+       `seatbelt::deny_only_profile`, `MacosPlan::deny_only`; the probe is the
+       first read deny. A child the prompt allowed, `sudo` included, runs.
+     - Linux would need an overmount in a user namespace (Landlock needs
+       no-new-privileges, and an expansion freezes folders a prompt may let the
+       program write), which isn't built (`OVERMOUNT_BUILT`): each deny is a
+       documented Deno-only rule (`ExactWith::UserNamespaces`), never a refusal
+       (decision O4), and a ceiling that holds nothing applies nothing (no
+       re-exec, no folder made; `KernelPolicy::deny_ceiling_held`,
+       `ModeReason::DenyCeilingDenoOnly`). Every fail-open gap of a ceiling is
+       documented instead, so `auto` never falls back to warn's line for one.
+       A command enforce doesn't cover (`eval`, a program from stdin, `repl`)
+       leaves its ceiling to Deno's checks the same way.
+     - `deno test` / `deno bench` (`EnforceCoverage::AfterSetup`). The plan
+       applies after the type check and the coverage folder (made when the
+       plan is prepared), before any test or bench code runs, instead of
+       refusing to start. The process re-executes as for `run`, and the
+       confined image runs exactly the modules the image before it found,
+       filtered (`--changed`, `--related`) and type-checked:
+       `EnforcePlan::entries` (`PlanEntry`), handed over with the plan and not
+       part of its equality; the confined image checks each against its own
+       include patterns and the discovery predicate, so a hand-over can't widen
+       what it reads or runs, and never walks folders it can't list or starts
+       git. A doc-test source the graph doesn't hold (a Markdown file) is among
+       the module files the confined image may read. The JUnit report
+       (`--junit-path`, not `-`) is created before the re-exec and written
+       through the implicit set (`ImplicitNeed::TestReport`). The kernel holds
+       the top-level grant; `Deno.test({ permissions })` and per-bench
+       permissions stay API-level. A worker made before the plan applies (a
+       Vitest config run while finding the tests) still refuses
+       (`enforce::guard_user_code`).
+     - The refused-prompt line (review D4). A compiled program whose baked
+       grant the kernel enforces refused every prompt silently. Where one could
+       have been shown (`prompter::can_prompt`, the shared rule the mode
+       decision and `TtyPrompter` use), `denort` now installs
+       `prompter::KernelSandboxPrompter`: every prompt is refused, and the first
+       refusal in the process prints one line naming the access and
+       `deno compile --kernel-sandbox=off`. With no terminal, prompting is off as
+       before.
+     - Not in this item: the overmount (Linux deny ceilings stay Deno-only, and
+       the plan's "one re-exec, at most 30 ms" for an interactive Linux run has
+       nothing to measure until it exists); Mode B under `auto` (WP-B);
+       packaged desktop apps (WP-C); the flip (WP-D).
+     - User-facing note (once `auto` reaches R4): `--deny-read` /
+       `--deny-write` now hold against native code and children on macOS even
+       in an interactive run, and with `-A`; nothing else about such a run
+       changes. `deno test` and `deno bench` run under `--kernel-sandbox=enforce`
+       (and `auto`) instead of refusing, with coverage and JUnit files written.
+       A compiled program that would have prompted says once that its
+       permissions are fixed and how to rebuild it with prompts.
+     - Tests: `kernel_sandbox::tests::{deny_only_matrix, prompt_mode_denies,
+       auto_stage_matrix_deny_only_prompt}`,
+       `sandbox::coverage_tests::test_and_bench_are_covered_after_setup`,
+       `kernel_policy::tests::{deny_ceiling_options_keep_only_the_denies,
+       deny_ceiling_linux_is_deno_only_and_touches_nothing,
+       deny_only_under_explicit_enforce_is_not_a_ceiling,
+       deny_ceiling_macos_is_exact, deny_ceiling_with_only_api_denies_holds_nothing,
+       test_report_files_are_implicit}`,
+       `seatbelt::tests::deny_only_profile_refuses_only_the_denies`,
+       `prompter::tests::{kernel_sandbox_prompter_refuses_and_names_the_switch,
+       can_prompt_needs_prompting_on}`; specs `kernel_sandbox::deny_only` (`-A`
+       with denies: native code and a child refused only the denied folder on
+       macOS, Deno-only and no seccomp / no-new-privileges added on Linux, the
+       report, the break-glass variable) and `kernel_sandbox::test_bench` (a
+       native read outside the grant refused inside `deno test`, explicit and
+       under `auto` at R4; coverage and JUnit written; `Deno.test({ permissions
+       })` unchanged; discovered modules and a Markdown doc test from the
+       hand-over; `deno bench`); integration
+       `kernel_sandbox::{deny_ceiling_prompt_grants_outside_the_deny_macos,
+       deny_ceiling_prompt_changes_nothing_linux, compiled_prompt_refused_line}`
+       (pseudo-terminal runs); the escape corpus's `deny-ceiling`
+       configuration (`expectDenyCeiling`). `enforce`'s `test_refused` spec is
+       gone (`deno test` no longer refuses).
+     - Node tests enabled: none; no Node API changes.
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -19347,7 +19446,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-479) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-479, 483) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

@@ -224,6 +224,7 @@ pub fn plan_for(
     cache_overlay: ctx.cache_overlay.clone(),
     broker: None,
     expanded_write: Vec::new(),
+    entries: Vec::new(),
   };
   match p.os {
     #[cfg(any(target_os = "linux", test))]
@@ -462,6 +463,16 @@ pub mod linux {
     compiled: &CompiledPolicy,
   ) -> Result<(LinuxPlan, Measured), PolicyGap> {
     let p = &compiled.policy;
+    // a deny ceiling holds only what an overmount holds on Linux (no
+    // no-new-privileges, no seccomp list): Mode A's Landlock plan can't
+    // carry it, so one that holds nothing is never applied (`check_run`
+    // turns it off first) and anything else isn't built
+    if p.deny_ceiling {
+      return Err(fatal(
+        "--deny-* (deny ceiling)",
+        "Linux holds a deny ceiling only by overmounting, which this runtime doesn't do",
+      ));
+    }
     for rule in &p.fs.deny_read {
       match rule.enforcement {
         DenyEnforcement::Implied | DenyEnforcement::Expand => {}
@@ -992,6 +1003,7 @@ pub mod macos {
           ttys.dedup();
           ttys
         },
+        deny_only: p.deny_ceiling,
       },
       gaps,
     )
@@ -1000,6 +1012,14 @@ pub mod macos {
   /// A path the profile must refuse to read: `/` when the read scope
   /// doesn't hold it (listing it needs `file-read-data`).
   pub fn probe(plan: &MacosPlan) -> Option<PathBuf> {
+    // a deny ceiling reads everything else: its first read deny is the
+    // path the profile must refuse
+    if plan.deny_only {
+      return plan.deny_read.iter().find_map(|f| match f {
+        SbFilter::Subpath(p) | SbFilter::Literal(p) => Some(PathBuf::from(p)),
+        SbFilter::Regex(_) => None,
+      });
+    }
     let SbScope::Filters { filters } = &plan.read else {
       return None;
     };

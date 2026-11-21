@@ -291,6 +291,9 @@ const CLI_MACH_ALLOW: &[&str] = &[
 /// wins). Code maps only from the load scope, the runtime and the system
 /// libraries. No LaunchServices, AppleEvents or launchd job submission.
 pub fn cli_profile(plan: &MacosPlan) -> String {
+  if plan.deny_only {
+    return deny_only_profile(plan);
+  }
   let mut p = String::from("(version 1)\n(deny default)\n");
   // files: allows
   p.push_str("(allow file-read-metadata)\n");
@@ -488,6 +491,48 @@ pub fn cli_profile(plan: &MacosPlan) -> String {
       }
     }
   }
+  p
+}
+
+/// The profile of a deny ceiling (D1 / D2, `plan.deny_only`): everything is
+/// allowed by default, as with no sandbox, and only the read and write
+/// denies are refused (the last matching rule wins), then the re-allows the
+/// denies must not swallow. Nothing else changes: no terminal, mach,
+/// LaunchServices, process or network rule, since a prompt may allow any of
+/// it; children inherit the profile. The marker pair says a kernel sandbox
+/// of this runtime holds the process, so a `deno` it starts finds the
+/// handed-down policy instead of applying a second profile (macOS can't
+/// stack one).
+pub fn deny_only_profile(plan: &MacosPlan) -> String {
+  let mut p = String::from("(version 1)\n(allow default)\n");
+  if !plan.deny_read.is_empty() {
+    p.push_str(&format!(
+      "(deny file-read* {})\n",
+      filters_text(&plan.deny_read)
+    ));
+  }
+  if !plan.deny_write.is_empty() {
+    p.push_str(&format!(
+      "(deny file-write* {})\n",
+      filters_text(&plan.deny_write)
+    ));
+  }
+  if !plan.reallow_read.is_empty() {
+    p.push_str(&format!(
+      "(allow file-read* {})\n",
+      filters_text(&plan.reallow_read)
+    ));
+  }
+  if !plan.reallow_write.is_empty() {
+    p.push_str(&format!(
+      "(allow file-write* {})\n",
+      filters_text(&plan.reallow_write)
+    ));
+  }
+  p.push_str(&format!(
+    "(deny sysctl-read (with no-report) (sysctl-name {}))\n",
+    quote_str(MARKER_SYSCTL_DENIED)
+  ));
   p
 }
 
@@ -819,7 +864,57 @@ mod tests {
       denied_sysctls: vec!["kern.proc*".into(), "vm.loadavg".into()],
       system_ca: false,
       ttys: vec![],
+      deny_only: false,
     }
+  }
+
+  /// A deny ceiling (D1 / D2): allow by default, the denies, the
+  /// re-allows, the marker, and nothing else (no terminal, mach, process or
+  /// network rule).
+  #[test]
+  fn deny_only_profile_refuses_only_the_denies() {
+    let plan = MacosPlan {
+      read: SbScope::All,
+      write: SbScope::All,
+      map_exec: SbScope::All,
+      exec: true,
+      net: NetPlan::Open,
+      unix: SbUnix::Open,
+      denied_sysctls: vec![],
+      deny_only: true,
+      ..cli_plan()
+    };
+    let p = cli_profile(&plan);
+    assert_eq!(p, deny_only_profile(&plan));
+    assert_eq!(
+      p,
+      concat!(
+        "(version 1)\n(allow default)\n",
+        "(deny file-read* (subpath \"/w/.env\"))\n",
+        "(deny file-write* (literal \"/w/out/keep\"))\n",
+        "(allow file-read* (literal \"/w/.env/deno.json\"))\n",
+        "(deny sysctl-read (with no-report) (sysctl-name \"kern.singleuser\"))\n",
+      )
+    );
+    for absent in [
+      "(deny default)",
+      "network",
+      "mach-lookup",
+      "process-exec",
+      "lsopen",
+      "file-ioctl",
+      "/dev/tty",
+    ] {
+      assert!(!p.contains(absent), "{absent} in\n{p}");
+    }
+    // warn's reporting profile of it reports the denies only
+    let r = cli_report_profile(&plan, "t1", &[]).unwrap();
+    assert!(r.contains("(allow default)"), "{r}");
+    assert!(
+      r.contains("(allow (with report) (with message \"t1\") file-read* (subpath \"/w/.env\"))"),
+      "{r}"
+    );
+    assert!(!r.contains("kern.singleuser"), "{r}");
   }
 
   // deny by default, allows, then denies, then re-allows (the

@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use deno_config::glob::FilePatterns;
 use deno_config::glob::WalkEntry;
 use deno_core::ModuleSpecifier;
 use deno_core::PollEventLoopOptions;
@@ -435,6 +436,46 @@ async fn bench_specifiers(
 }
 
 /// Checks if the path has a basename and extension Deno supports for benches.
+/// denext (kernel sandbox): the handed-over modules of the image after the
+/// re-exec, each checked against this run's own patterns as
+/// [`is_supported_bench_path`] would take it from a walk (inside a member's
+/// include set, or beneath its base with none; not excluded; a bench module
+/// by its name or named by the include set); a remote one reads nothing
+/// local. Anything else refuses.
+fn handed_over_bench_specifiers<'a>(
+  member_patterns: impl Iterator<Item = &'a FilePatterns>,
+  entries: Vec<crate::sandbox::enforce::PlanEntry>,
+) -> Result<Vec<ModuleSpecifier>, AnyError> {
+  let patterns: Vec<&FilePatterns> = member_patterns.collect();
+  entries
+    .into_iter()
+    .map(|entry| {
+      let specifier = ModuleSpecifier::parse(&entry.specifier)?;
+      let ok = !entry.doc
+        && entry.run
+        && (specifier.scheme() != "file" || {
+          let path = deno_path_util::url_to_file_path(&specifier)?;
+          is_script_ext(&path)
+            && patterns.iter().any(|p| {
+              p.matches_path(&path, deno_config::glob::PathKind::File)
+                && (p.include.is_some() || path.starts_with(&p.base))
+                && (has_supported_bench_path_name(&path)
+                  || p
+                    .include
+                    .as_ref()
+                    .is_some_and(|i| matches_pattern_or_exact_path(i, &path)))
+            })
+        });
+      if !ok {
+        return Err(anyhow!(
+          "--kernel-sandbox refuses to continue: {specifier} was handed over as a bench module, but this run's patterns don't take it"
+        ));
+      }
+      Ok(specifier)
+    })
+    .collect()
+}
+
 fn is_supported_bench_path(entry: WalkEntry) -> bool {
   if !is_script_ext(entry.path) {
     false
@@ -470,22 +511,33 @@ pub async fn run_benchmarks(
 
   let members_with_bench_options =
     cli_options.resolve_bench_options_for_members(&bench_flags)?;
-  let specifiers = members_with_bench_options
-    .iter()
-    .map(|(_, bench_options)| {
-      collect_specifiers(
-        CollectSpecifiersOptions {
-          file_patterns: bench_options.files.clone(),
-          vendor_folder: cli_options.vendor_dir_path().map(ToOwned::to_owned),
-          include_ignored_specified: false,
-        },
-        is_supported_bench_path,
-      )
-    })
-    .collect::<Result<Vec<_>, _>>()?
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
+  // denext: the image after the kernel sandbox's re-exec runs exactly the
+  // modules the image before it found (it may not walk the folders), each
+  // checked against this run's own patterns
+  let specifiers = match crate::sandbox::enforce::handed_over_entries() {
+    Some(entries) => handed_over_bench_specifiers(
+      members_with_bench_options.iter().map(|(_, o)| &o.files),
+      entries,
+    )?,
+    None => members_with_bench_options
+      .iter()
+      .map(|(_, bench_options)| {
+        collect_specifiers(
+          CollectSpecifiersOptions {
+            file_patterns: bench_options.files.clone(),
+            vendor_folder: cli_options
+              .vendor_dir_path()
+              .map(ToOwned::to_owned),
+            include_ignored_specified: false,
+          },
+          is_supported_bench_path,
+        )
+      })
+      .collect::<Result<Vec<_>, _>>()?
+      .into_iter()
+      .flatten()
+      .collect::<Vec<_>>(),
+  };
 
   if !workspace_bench_options.permit_no_files && specifiers.is_empty() {
     return Err(anyhow!("No bench modules found"));
@@ -508,6 +560,25 @@ pub async fn run_benchmarks(
 
   let preload_modules = cli_options.preload_modules()?;
   let require_modules = cli_options.require_modules()?;
+  // denext (kernel sandbox, WP-A of denext.30): a pending plan applies
+  // here, after the type check, before any bench code runs; the process
+  // re-executes, and the confined image runs these modules
+  {
+    let entries: Vec<crate::sandbox::enforce::PlanEntry> = specifiers
+      .iter()
+      .map(|specifier| crate::sandbox::enforce::PlanEntry {
+        specifier: specifier.to_string(),
+        run: true,
+        doc: false,
+      })
+      .collect();
+    let mut roots = specifiers.clone();
+    roots.extend(preload_modules.iter().cloned());
+    crate::sandbox::enforce::apply_pending_with_entries(
+      &factory, &roots, &entries,
+    )
+    .await?;
+  }
   let log_level = cli_options.log_level();
   let worker_factory =
     Arc::new(factory.create_cli_main_worker_factory().await?);

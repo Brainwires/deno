@@ -602,6 +602,9 @@ pub enum ImplicitNeed {
   OriginData,
   /// `--cpu-prof` / `--heap-prof` folders: written for the user.
   Profiles,
+  /// `deno test --junit-path=<file>`: the report written for the user
+  /// (created before the sandbox applies, so a rule can name it).
+  TestReport,
 }
 
 impl ImplicitNeed {
@@ -628,6 +631,7 @@ impl ImplicitNeed {
       Self::TlsFiles => "TLS files",
       Self::OriginData => "origin data",
       Self::Profiles => "profiles",
+      Self::TestReport => "test report",
     }
   }
 
@@ -1009,6 +1013,9 @@ impl ImplicitSet {
     for dir in &ctx.profile_dirs {
       add(dir, ImplicitNeed::Profiles, ImplicitAccess::ReadWrite);
     }
+    for file in &ctx.report_files {
+      add(file, ImplicitNeed::TestReport, ImplicitAccess::ReadWrite);
+    }
     if net_allowed {
       for file in &ctx.tls_files {
         add(file, ImplicitNeed::TlsFiles, ImplicitAccess::Read);
@@ -1096,6 +1103,14 @@ pub struct Context {
   pub origin_data: Vec<PathBuf>,
   /// The `--cpu-prof` / `--heap-prof` folders the run writes.
   pub profile_dirs: Vec<PathBuf>,
+  /// Report files the run writes for the user (`deno test --junit-path`).
+  pub report_files: Vec<PathBuf>,
+  /// `auto` enforces the deny rules alone (D1 / D2,
+  /// `ModeResolution::deny_ceiling`): the grant passed in is
+  /// [`deny_ceiling_options`], nothing is expanded or scrubbed, no seccomp
+  /// list applies, and a deny the OS can't hold that way is a documented
+  /// Deno-only rule, never a refusal (decision O4).
+  pub deny_ceiling: bool,
 }
 
 impl Context {
@@ -1123,7 +1138,30 @@ impl Context {
       tls_files: Vec::new(),
       origin_data: Vec::new(),
       profile_dirs: Vec::new(),
+      report_files: Vec::new(),
+      deny_ceiling: false,
     }
+  }
+}
+
+/// The grant a deny ceiling compiles (D1 / D2): every allow unscoped, every
+/// deny and ignore rule as the run wrote it. A prompt can grant anything
+/// but a denied path, so this is what the kernel may hold the run to
+/// without refusing what a prompt grants.
+pub fn deny_ceiling_options(options: &PermissionsOptions) -> PermissionsOptions {
+  let all = Some(Vec::new());
+  PermissionsOptions {
+    allow_read: all.clone(),
+    allow_write: all.clone(),
+    allow_net: all.clone(),
+    // `--allow-net` unscoped covers both directions
+    allow_net_connect: None,
+    allow_net_listen: None,
+    allow_env: all.clone(),
+    allow_run: all.clone(),
+    allow_ffi: all.clone(),
+    allow_sys: all,
+    ..options.clone()
   }
 }
 
@@ -1407,6 +1445,10 @@ pub struct KernelPolicy {
   pub shape: Shape,
   /// `-A` with denies: only the denies are applied.
   pub deny_only: bool,
+  /// A deny ceiling (D1 / D2, [`Context::deny_ceiling`]): nothing but the
+  /// denies is applied, with no seccomp list and no no-new-privileges.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub deny_ceiling: bool,
   pub fs: FsRules,
   pub net: NetPolicy,
   /// TCP listeners bound before the process confines itself (Linux, Mode
@@ -1444,6 +1486,24 @@ impl CompiledPolicy {
 }
 
 impl KernelPolicy {
+  /// A deny ceiling the kernel holds at least one rule of: a read or write
+  /// deny held exactly (Seatbelt) or by an overmount. A ceiling that holds
+  /// none applies nothing (no re-exec, no profile): its denies are Deno's
+  /// checks only, reported as such.
+  pub fn deny_ceiling_held(&self) -> bool {
+    self
+      .fs
+      .deny_read
+      .iter()
+      .chain(&self.fs.deny_write)
+      .any(|d| {
+        matches!(
+          d.enforcement,
+          DenyEnforcement::Exact | DenyEnforcement::Overmount
+        )
+      })
+  }
+
   /// A stable hash of the policy (format, rules; not the gaps): the key for
   /// per-policy caches and notice deduplication. 16 hex digits of SHA-256
   /// over the canonical JSON (every list sorted).
@@ -1468,7 +1528,9 @@ impl KernelPolicy {
       Shape::ModeA
     };
     let compiled = Compiler::new(options, implicit, ctx, first_shape).run();
-    if first_shape == Shape::ModeB {
+    // a deny ceiling holds what Mode A holds and reports the rest: it never
+    // starts a supervisor (nothing it leaves to Deno's checks is a refusal)
+    if first_shape == Shape::ModeB || compiled.policy.deny_ceiling {
       return compiled;
     }
     let needs_broker = matches!(compiled.policy.net, NetPolicy::Broker { .. })
@@ -1698,6 +1760,9 @@ struct Compiler<'a> {
   caps: Capabilities,
   gaps: Vec<PolicyGap>,
   deny_only: bool,
+  /// A deny ceiling ([`Context::deny_ceiling`] with denies): only the
+  /// denies are held, and what can't be held is documented, never refused.
+  ceiling: bool,
   /// Every allow unscoped and no deny (`-A`): only the forced harness
   /// compiles it (plain `-A` is off). Nothing is narrower than the grant, so
   /// reaching every socket is the grant, not a gap.
@@ -1723,6 +1788,9 @@ impl<'a> Compiler<'a> {
       caps: ctx.caps,
       gaps: Vec::new(),
       deny_only: options_allow_all(options) && options_have_deny(options),
+      ceiling: ctx.deny_ceiling
+        && options_allow_all(options)
+        && options_have_deny(options),
       allow_all: options_allow_all(options) && !options_have_deny(options),
       native: options.allow_ffi.is_some() || options.allow_run.is_some(),
       prebound: Vec::new(),
@@ -1753,6 +1821,14 @@ impl<'a> Compiler<'a> {
     resolution: GapResolution,
     exact_with: Option<ExactWith>,
   ) {
+    // a deny ceiling never refuses (decision O4): what the OS can't hold is
+    // a documented Deno-only rule, as the prompt run it is would have it
+    let resolution = if self.ceiling && resolution == GapResolution::FailOpen
+    {
+      GapResolution::Documented
+    } else {
+      resolution
+    };
     self.gaps.push(PolicyGap {
       class,
       rule: rule.into(),
@@ -1950,14 +2026,17 @@ impl<'a> Compiler<'a> {
     self.import_gap(&net);
     self.fs_mechanism_gaps(&read, &write);
     self.metadata_gaps(&read, &write);
-    let enforce = self.ctx().mode.fails_closed();
+    let enforce = self.ctx().mode.fails_closed() && !self.ceiling;
+    // a deny ceiling changes nothing but the denies: no seccomp program at
+    // all (D2), so a setuid child a prompt allowed still works
+    let ceiling = self.ceiling;
     let syscalls = SyscallPolicy {
       attack_surface: !self.deny_only,
       refuse_exec: exec == ExecScope::None,
       refuse_listen,
       clone3_enosys: !self.deny_only && self.os() == TargetOs::Linux,
-      refuse_io_uring: self.os() == TargetOs::Linux,
-      signal_self,
+      refuse_io_uring: !ceiling && self.os() == TargetOs::Linux,
+      signal_self: signal_self && !ceiling,
       refuse_path_metadata: enforce
         && self.os() == TargetOs::Linux
         && !write.is_all(),
@@ -2013,6 +2092,7 @@ impl<'a> Compiler<'a> {
       && self.os() == TargetOs::Linux
       && !self.caps.seccomp
       && self.shape == Shape::ModeA
+      && !self.ceiling
     {
       // Mode A's one seccomp program (exec, sockets, the attack surface)
       // can't be installed: probed, so enforce refuses here instead of
@@ -2040,6 +2120,7 @@ impl<'a> Compiler<'a> {
     let os = self.os();
     let shape = self.shape;
     let deny_only = self.deny_only;
+    let deny_ceiling = self.ceiling;
     let prebound = std::mem::take(&mut self.prebound);
     let implicit = self.implicit_set().clone();
     let mut gaps = self.gaps;
@@ -2053,6 +2134,7 @@ impl<'a> Compiler<'a> {
         os,
         shape,
         deny_only,
+        deny_ceiling,
         fs: FsRules {
           read,
           write,
@@ -2269,6 +2351,24 @@ impl<'a> Compiler<'a> {
         return DenyEnforcement::DenoOnly;
       }
       _ => return DenyEnforcement::DenoOnly,
+    }
+    // Linux, a deny ceiling (D1 / D2): Landlock needs no-new-privileges,
+    // which would change the rest of the run (a setuid program a prompt
+    // allowed), and a read expansion freezes folders a prompt may let the
+    // program write: the overmount where it is built, else Deno's check
+    // only, reported and never refused (decision O4)
+    if self.ceiling {
+      if OVERMOUNT_BUILT && self.caps.supports(Feature::Overmount) {
+        return DenyEnforcement::Overmount;
+      }
+      self.gap(
+        GapClass::Read,
+        rule,
+        "Deno only: as a deny ceiling Linux holds it only by overmounting it in a user namespace (Landlock would need no-new-privileges and an expanded allow, which change the rest of the run)",
+        GapResolution::Documented,
+        Some(ExactWith::UserNamespaces),
+      );
+      return DenyEnforcement::DenoOnly;
     }
     // Linux (review F7)
     let parent = path.parent().unwrap_or(path);
