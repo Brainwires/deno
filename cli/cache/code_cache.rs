@@ -25,6 +25,17 @@ pub static CODE_CACHE_DB: CacheDBConfiguration = CacheDBConfiguration {
   on_failure: CacheFailure::Blackhole,
 };
 
+/// The cache file was opened read-only (SQLite opens a file it can't write
+/// that way).
+fn is_readonly_db(err: &AnyError) -> bool {
+  use deno_runtime::deno_webstorage::rusqlite;
+  matches!(
+    err.downcast_ref::<rusqlite::Error>(),
+    Some(rusqlite::Error::SqliteFailure(e, _))
+      if e.code == rusqlite::ErrorCode::ReadOnly
+  )
+}
+
 pub struct CodeCache {
   inner: CodeCacheInner,
 }
@@ -43,7 +54,11 @@ impl CodeCache {
         // TODO(mmastrac): This behavior was inherited from before the refactoring but it probably makes sense to move it into the cache
         // at some point.
         // should never error here, but if it ever does don't fail
-        if cfg!(debug_assertions) {
+        // denext: a cache file this process can't write opens read-only
+        // (a read-only DENO_DIR, or one the kernel sandbox of the process
+        // that started this one leaves read-only): its writes fail, which
+        // is expected there, also in a debug build
+        if cfg!(debug_assertions) && !is_readonly_db(&err) {
           panic!("Error using code cache: {err:#}");
         } else {
           log::debug!("Error using code cache: {:#}", err);
@@ -172,6 +187,25 @@ fn serialize_code_cache_type(
 #[cfg(test)]
 mod test {
   use super::*;
+
+  #[test]
+  fn a_read_only_cache_file_is_expected() {
+    use deno_runtime::deno_webstorage::rusqlite;
+    let readonly: AnyError = rusqlite::Error::SqliteFailure(
+      rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_READONLY),
+      None,
+    )
+    .into();
+    assert!(is_readonly_db(&readonly));
+    let corrupt: AnyError = rusqlite::Error::SqliteFailure(
+      rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+      None,
+    )
+    .into();
+    assert!(!is_readonly_db(&corrupt));
+    // a read-only error is the default value, not a panic
+    assert_eq!(CodeCache::ensure_ok::<u8>(Err(readonly)), 0);
+  }
 
   #[test]
   pub fn end_to_end() {
