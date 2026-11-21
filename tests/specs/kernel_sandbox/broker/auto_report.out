@@ -1,0 +1,3 @@
+kernel sandbox (preview): auto (default); applies: broker; would apply: broker
+  why: auto: no prompt can widen the grant here (no terminal, or --no-prompt)
+[WILDCARD](mode B, with a broker)[WILDCARD]

@@ -6,6 +6,26 @@
 {
   "tempDir": true,
   "tests": {
+    // denext.30: a `deno` started by a program that runs under the
+    // supervising broker reaches the same broker (the way to it is handed
+    // down beside the policy): its own sockets and its changes directly in
+    // a folder that holds a write deny work as its parent's do, where
+    // before they met the kernel's refusals alone. Also through a shell in
+    // between, and never past its own checks
+    "brokered_child_shares_supervisor": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet -A brokered_outer.ts",
+      "output": "brokered.out"
+    },
+    // a child that confines itself further gives the way to its parent's
+    // broker up before it does (the broker answers for the parent's grant,
+    // which is wider than the child's own). Linux: macOS doesn't stack a
+    // second profile, so there a nested enforce doesn't start at all
+    "brokered_child_that_confines_itself": {
+      "if": "kernelSandboxEnforceLinux",
+      "args": "run --quiet -A brokered_outer.ts narrower",
+      "output": "brokered_narrower.out"
+    },
     // a nested `deno run -A` gets NotCapable for a read outside the
     // parent's grant (not the kernel's bare EACCES), also with a cleared
     // environment, and its report names the inherited layer

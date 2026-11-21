@@ -35,13 +35,17 @@ const grant = [
   `2130706433:${otherPort}`,
   "127.0.0.2",
 ].join(",");
+// BROKER_SPEC_AUTO: no mode is written; `auto` at the stage where it
+// enforces takes the broker by itself (this run has no terminal)
+const auto = Deno.env.get("BROKER_SPEC_AUTO") === "1";
 const { code, stdout, stderr } = await new Deno.Command(Deno.execPath(), {
+  env: auto ? { DENO_INTERNAL_KERNEL_SANDBOX_STAGE: "r4" } : {},
   args: [
     "run",
     "--quiet",
     "--no-prompt",
     "--unstable-net",
-    "--kernel-sandbox=broker",
+    ...(auto ? [] : ["--kernel-sandbox=broker"]),
     "--allow-ffi",
     `--allow-net=${grant}`,
     "net_inner.ts",

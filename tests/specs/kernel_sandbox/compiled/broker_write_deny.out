@@ -1,0 +1,9 @@
+create: ok
+rename: ok
+remove: ok
+create in the deny: NotCapable
+remove in the deny: NotCapable
+native create in the deny: refused
+native create in an existing folder: ok
+native create directly in the allowed folder: as documented
+kept: kept

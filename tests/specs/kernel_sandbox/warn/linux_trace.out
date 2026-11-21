@@ -1,0 +1,4 @@
+Warning kernel sandbox (warn, preview): nothing is refused; [WILDLINE] rule(s) would be held by Deno's checks only. Run with --kernel-sandbox-report for the policy.
+[WILDCARD]Warning kernel sandbox (warn): enforce would refuse reading [WILDLINE]outside.txt (cat, pid [WILDLINE]). Grant: --allow-read=[WILDLINE]outside.txt
+[WILDCARD]the child read it: true
+[WILDCARD]Warning kernel sandbox (warn): enforce would refuse [WILDLINE] access(es)[WILDLINE]--allow-read=[WILDLINE]outside.txt[WILDCARD]

@@ -42,6 +42,33 @@
       "args": "run --kernel-sandbox=warn --allow-run=cat --allow-read=granted child.ts",
       "output": "observer.out"
     },
+    // Linux: the same run beneath the tracing supervisor (denext.30).
+    // Landlock can't report without refusing, so the supervisor sees the
+    // tree's system calls: the child's read outside the grant goes ahead
+    // and is reported with the program and the grant, and the supervisor
+    // prints the summary when the run ends
+    "linux_trace_reports_child_read": {
+      "if": "kernelSandboxEnforceLinux",
+      "steps": [
+        {
+          "envs": { "DENO_KERNEL_SANDBOX_WARN_LOG": "trace.jsonl" },
+          "args": "run --kernel-sandbox=warn --allow-run=cat --allow-read=granted child.ts",
+          "output": "linux_trace.out"
+        },
+        {
+          "args": "run --allow-read=. read_trace_log.ts",
+          "output": "linux_trace_log.out"
+        }
+      ]
+    },
+    // ... and with the observer turned off the run is as on every OS: the
+    // mode's line, no supervisor, nothing about the child
+    "linux_trace_off": {
+      "if": "kernelSandboxEnforceLinux",
+      "envs": { "DENO_KERNEL_SANDBOX_WARN_OBSERVE": "0" },
+      "args": "run --kernel-sandbox=warn --allow-run=cat --allow-read=granted child.ts",
+      "output": "linux_trace_off.out"
+    },
     // R3: a run with no terminal that starts programs prints the notice
     "stage_r3_notice": {
       "if": "kernelSandboxEnforce",

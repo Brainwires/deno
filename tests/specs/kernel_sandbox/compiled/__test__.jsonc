@@ -241,22 +241,50 @@
         }
       ]
     },
-    // a rule the OS can't hold: a warning when compiling, and the program
-    // refuses to start, naming it (Linux: a write deny inside a write allow
-    // needs the broker)
-    "inexpressible_refused": {
-      "if": "kernelSandboxEnforceLinux",
+    // denext.30: a compiled program runs its own supervising broker where
+    // its grant has a rule only the broker holds (it forks in place before
+    // it confines itself; no warning when compiling, no refusal at start).
+    // Linux: a write deny inside a write allow, held exactly for the
+    // program's own operations and fail-closed for native code
+    "broker_write_deny_inside_allow": {
+      "if": "kernelSandboxEnforce",
       "steps": [
+        { "args": "run --quiet -A broker_setup.ts", "output": "" },
         {
-          "args": "compile --kernel-sandbox=enforce --allow-write=inside --deny-write=inside/a.txt --output prog_inex main.ts",
-          "output": "inexpressible_compile.out"
+          "args": "compile --kernel-sandbox=enforce --allow-ffi --allow-read=. --allow-write=bout --deny-write=bout/keep --output prog_bdeny broker_write_deny.ts",
+          "output": "broker_compile.out"
         },
         {
-          "commandName": "./prog_inex",
+          "commandName": "./prog_bdeny",
           "args": [],
-          "output": "inexpressible_run.out",
-          "exitCode": 1
+          "output": "broker_write_deny.out"
         }
+      ]
+    },
+    // a host-scoped network grant: every socket of the program is made by
+    // its supervisor's broker, and native code has none
+    "broker_host_scoped": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet -A broker_net_outer.ts enforce",
+      "output": "broker_net.out"
+    },
+    // ... the same with `broker` baked by name
+    "broker_baked_by_name": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet -A broker_net_outer.ts broker",
+      "output": "broker_net.out"
+    },
+    // the PID that was started is the supervisor's: a signal sent to it
+    // reaches the program, and it ends with the program's exit code or by
+    // the program's signal
+    "broker_exit_code_and_signals": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        {
+          "args": "compile --quiet --kernel-sandbox=broker --allow-run --allow-read=inside --output prog_bpid broker_pid_inner.ts",
+          "output": ""
+        },
+        { "args": "run --quiet -A broker_pid_outer.ts", "output": "broker_pid.out" }
       ]
     }
   }

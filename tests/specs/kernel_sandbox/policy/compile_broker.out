@@ -1,1 +1,1 @@
-[WILDCARD]error: --kernel-sandbox=broker: the supervising broker isn't built into this runtime, so a program compiled with it could not start. Use --kernel-sandbox=enforce, warn, auto or off.
+[WILDCARD]error: --kernel-sandbox=broker: programs for this target run no supervising broker, so a program compiled with it could not start. Use --kernel-sandbox=enforce, warn, auto or off.
