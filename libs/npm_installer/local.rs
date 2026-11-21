@@ -50,6 +50,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use sys_traits::FsDirEntry;
 use sys_traits::FsMetadata;
+use sys_traits::FsMetadataValue;
 use sys_traits::FsOpen;
 use sys_traits::FsWrite;
 use sys_traits::PathsInErrorsExt;
@@ -630,6 +631,15 @@ impl<
             let sys = self.sys.clone();
             crate::rt::spawn_blocking({
               move || {
+                // denext: a copy that already matches the linked folder is
+                // kept, so a run that may not write node_modules (a process
+                // the kernel sandbox confined after the first image
+                // installed) changes nothing
+                if dir_matches_except_node_modules_child(
+                  &sys, &from_path, &target,
+                ) {
+                  return Ok(());
+                }
                 clone_dir_recursive_except_node_modules_child(
                   &sys, &from_path, &target,
                 )
@@ -1353,6 +1363,73 @@ pub enum SyncResolutionWithFsError {
   #[class(inherit)]
   #[error(transparent)]
   ApplyPatch(#[from] crate::patch::ApplyPatchError),
+}
+
+/// Whether `to` is already what [`clone_dir_recursive_except_node_modules_child`]
+/// would make of `from`: the same entries (but `from`'s `node_modules`), the
+/// same folders and files with the same contents, no symlink in `to`. Any
+/// error (a name that can't be read, a missing entry) is a mismatch.
+pub(crate) fn dir_matches_except_node_modules_child(
+  sys: &(impl sys_traits::FsReadDir + sys_traits::FsMetadata + sys_traits::FsRead),
+  from: &Path,
+  to: &Path,
+) -> bool {
+  /// A folder's entries: name -> (folder, file); what is neither (a
+  /// symlink) is left out when `copied_only`, as the clone leaves it out.
+  fn entries(
+    sys: &impl sys_traits::FsReadDir,
+    dir: &Path,
+    copied_only: bool,
+  ) -> Option<BTreeMap<std::ffi::OsString, (bool, bool)>> {
+    let mut out = BTreeMap::new();
+    for entry in sys.fs_read_dir(dir).ok()? {
+      let entry = entry.ok()?;
+      let name = entry.file_name().into_owned();
+      let file_type = entry.file_type().ok()?;
+      let kind = (file_type.is_dir(), file_type.is_file());
+      if copied_only && (name == "node_modules" || kind == (false, false)) {
+        continue;
+      }
+      out.insert(name, kind);
+    }
+    Some(out)
+  }
+  let Ok(to_meta) = sys.fs_symlink_metadata(to) else {
+    return false;
+  };
+  if !to_meta.file_type().is_dir() {
+    return false;
+  }
+  let (Some(from_entries), Some(to_entries)) =
+    (entries(sys, from, true), entries(sys, to, false))
+  else {
+    return false;
+  };
+  // the same names, each the same kind (a symlink in `to` matches nothing)
+  if from_entries != to_entries {
+    return false;
+  }
+  from_entries.iter().all(|(name, (is_dir, _))| {
+    let (new_from, new_to) = (from.join(name), to.join(name));
+    if *is_dir {
+      return dir_matches_except_node_modules_child(sys, &new_from, &new_to);
+    }
+    match (sys.fs_metadata(&new_from), sys.fs_metadata(&new_to)) {
+      (Ok(a), Ok(b)) if a.len() == b.len() => {
+        // the clone hard-links where it can: the same file
+        let same_file = matches!(
+          (a.dev(), a.ino(), b.dev(), b.ino()),
+          (Ok(ad), Ok(ai), Ok(bd), Ok(bi)) if ad == bd && ai == bi
+        );
+        same_file
+          || matches!(
+            (sys.fs_read(&new_from), sys.fs_read(&new_to)),
+            (Ok(a), Ok(b)) if a == b
+          )
+      }
+      _ => false,
+    }
+  })
 }
 
 pub(crate) fn clone_dir_recursive_except_node_modules_child(
@@ -2491,6 +2568,47 @@ mod test {
 
     assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
     assert!(sys.fs_read_to_string(target.join("file")).is_err());
+  }
+
+  /// A linked package's copy that matches its folder is kept (a run that
+  /// may not write node_modules, such as a process the kernel sandbox
+  /// confined, changes nothing); any difference makes it stale.
+  #[test]
+  fn dir_matches_except_node_modules_child_tells_a_stale_copy() {
+    let sys = sys_traits::impls::InMemorySys::default();
+    let from = Path::new("/linked");
+    let to = Path::new("/project/node_modules/.deno/pkg/node_modules/pkg");
+    sys.fs_create_dir_all(from.join("lib")).unwrap();
+    sys
+      .fs_create_dir_all(from.join("node_modules/dep"))
+      .unwrap();
+    sys.fs_write(from.join("package.json"), "{}").unwrap();
+    sys
+      .fs_write(from.join("lib/main.mjs"), "export {}")
+      .unwrap();
+    sys
+      .fs_write(from.join("node_modules/dep/x.js"), "")
+      .unwrap();
+
+    assert!(!dir_matches_except_node_modules_child(&sys, from, to));
+    clone_dir_recursive_except_node_modules_child(&sys, from, to).unwrap();
+    // the source's own node_modules is never copied, nor compared
+    assert!(dir_matches_except_node_modules_child(&sys, from, to));
+
+    sys
+      .fs_write(from.join("lib/main.mjs"), "export { a }")
+      .unwrap();
+    assert!(!dir_matches_except_node_modules_child(&sys, from, to));
+    clone_dir_recursive_except_node_modules_child(&sys, from, to).unwrap();
+    assert!(dir_matches_except_node_modules_child(&sys, from, to));
+
+    // an extra or a missing entry
+    sys.fs_write(to.join("extra.js"), "").unwrap();
+    assert!(!dir_matches_except_node_modules_child(&sys, from, to));
+    sys_traits::FsRemoveFile::fs_remove_file(&sys, to.join("extra.js"))
+      .unwrap();
+    sys.fs_write(from.join("new.js"), "").unwrap();
+    assert!(!dir_matches_except_node_modules_child(&sys, from, to));
   }
 
   #[test]
