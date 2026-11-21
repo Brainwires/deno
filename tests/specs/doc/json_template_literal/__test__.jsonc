@@ -7,8 +7,10 @@
       "envs": { "FORCE_COLOR": "1" },
       "output": "json.out"
     },
+    // a test driver: the child `deno doc` writes the caches, which a
+    // confined parent's domain doesn't cover
     "no_escape_byte": {
-      "args": "run --allow-run --allow-read check.ts",
+      "args": "run --kernel-sandbox=off --allow-run --allow-read check.ts",
       "output": "check.out"
     }
   }
