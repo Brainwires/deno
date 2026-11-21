@@ -359,10 +359,10 @@ rstest = "0"
 # `.3` (DENEXT.md items 480, 481) and the ECN / L4S release
 # `0.22.0+brainwires.4` (DENEXT.md item 482: per-datagram ECN codepoints in
 # `TransportContext`, `with_ecn`, RFC 8888 `ack ccfb` feedback and the ECN
-# statistics), pinned by that release's commit. On the aws-lc-rs
-# crypto provider, the one Deno's rustls already uses. Pre-1.0 and not
-# externally audited.
-rtc = { git = "https://github.com/Brainwires/webrtc-rs-rtc", rev = "236bf18544f9649e0077104ede5b8b8010a95690", default-features = false, features = ["crypto-aws-lc-rs"] }
+# statistics), then `0.22.0+brainwires.5`, pinned by that release's commit. On
+# the aws-lc-rs crypto provider, the one Deno's rustls already uses. Pre-1.0
+# and not externally audited.
+rtc = { git = "https://github.com/Brainwires/webrtc-rs-rtc", rev = "8916bc3048c2b2a53788639f57e4a64a4a4b4696", default-features = false, features = ["crypto-aws-lc-rs"] }
 rusqlite = { version = "0.41.1", features = ["unlock_notify", "bundled", "session", "modern_sqlite", "limits", "backup", "fallible_uint"] } # "modern_sqlite": need sqlite >= 3.49.0 for some db configs; "fallible_uint": ToSql for u64/usize (needed when crates like deno_cache are published/built standalone, not just feature-unified via denokv_sqlite)
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "std", "tls12", "aws_lc_rs"] }
 rustls-pemfile = "2"
