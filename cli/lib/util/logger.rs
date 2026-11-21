@@ -1,9 +1,13 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::cell::Cell;
+use std::hash::Hasher;
 use std::io::Write;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use arc_swap::ArcSwap;
 use deno_runtime::deno_telemetry;
@@ -57,6 +61,108 @@ fn is_quieted(level: log::Level) -> bool {
   level > log::Level::Error && QUIET_DEPTH.with(|depth| depth.get() > 0)
 }
 
+// ---------------------------------------------------------------------------
+// denext: the kernel sandbox's re-executed image (DENEXT.md item 425)
+// ---------------------------------------------------------------------------
+
+/// The most records whose fingerprints are kept for the image after a
+/// re-exec ([`printed_record_fingerprints`]); the startup diagnostics are
+/// far fewer, and later records are never handed over.
+const MAX_PRINTED: usize = 512;
+
+/// Whether written records are still fingerprinted (until the hand-over, or
+/// [`MAX_PRINTED`] of them).
+static RECORDING: AtomicBool = AtomicBool::new(true);
+static PRINTED: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// Whether records the image before a re-exec already printed are dropped
+/// ([`suppress_already_printed`]).
+static SUPPRESSING: AtomicBool = AtomicBool::new(false);
+static ALREADY_PRINTED: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// A record's fingerprint: its level and its text (both images are the same
+/// binary, so the hasher's fixed keys give the same value in each).
+fn fingerprint(level: log::Level, args: &std::fmt::Arguments) -> u64 {
+  struct HashWriter(std::hash::DefaultHasher);
+  impl std::fmt::Write for HashWriter {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+      self.0.write(s.as_bytes());
+      Ok(())
+    }
+  }
+  let mut writer = HashWriter(std::hash::DefaultHasher::new());
+  writer.0.write_usize(level as usize);
+  let _ = std::fmt::write(&mut writer, *args);
+  writer.0.finish()
+}
+
+fn record_printed(fingerprint: u64) {
+  if !RECORDING.load(Ordering::Relaxed) {
+    return;
+  }
+  let mut printed = PRINTED.lock().unwrap_or_else(|e| e.into_inner());
+  if printed.len() >= MAX_PRINTED {
+    RECORDING.store(false, Ordering::Relaxed);
+    return;
+  }
+  printed.push(fingerprint);
+}
+
+/// Whether a record with `fingerprint` was already printed by the image
+/// before this one; each fingerprint handed over hides one record.
+fn take_already_printed(fingerprint: u64) -> bool {
+  if !SUPPRESSING.load(Ordering::Relaxed) {
+    return false;
+  }
+  let mut handed = ALREADY_PRINTED.lock().unwrap_or_else(|e| e.into_inner());
+  match handed.iter().position(|f| *f == fingerprint) {
+    Some(index) => {
+      handed.swap_remove(index);
+      true
+    }
+    None => false,
+  }
+}
+
+/// The fingerprints of the records this process wrote so far, for the image
+/// a kernel sandbox re-exec starts: it runs the same startup again and
+/// hides the diagnostics this image already printed
+/// ([`suppress_already_printed`]). Stops recording.
+pub fn printed_record_fingerprints() -> Vec<u64> {
+  RECORDING.store(false, Ordering::Relaxed);
+  PRINTED.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Stops fingerprinting written records: this process won't re-execute.
+pub fn stop_recording_printed() {
+  RECORDING.store(false, Ordering::Relaxed);
+  PRINTED.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
+/// The image after a kernel sandbox re-exec: until
+/// [`end_already_printed`], a record whose fingerprint the image before it
+/// handed over is dropped, once per fingerprint (that image printed it, and
+/// this one repeats the same startup). A record only this image produces is
+/// written as usual.
+pub fn suppress_already_printed(fingerprints: Vec<u64>) {
+  RECORDING.store(false, Ordering::Relaxed);
+  if fingerprints.is_empty() {
+    return;
+  }
+  *ALREADY_PRINTED.lock().unwrap_or_else(|e| e.into_inner()) = fingerprints;
+  SUPPRESSING.store(true, Ordering::Relaxed);
+}
+
+/// The image after the re-exec reached the point where the image before it
+/// re-executed: everything from here on is its own.
+pub fn end_already_printed() {
+  SUPPRESSING.store(false, Ordering::Relaxed);
+  ALREADY_PRINTED
+    .lock()
+    .unwrap_or_else(|e| e.into_inner())
+    .clear();
+}
+
 /// The WebRTC engine's records (the `rtc` and `rtc_*` crates) are shown at
 /// the level `Deno.webrtc.setLogLevel` sets (off by default; ext/webrtc
 /// reports what matters as `RTCPeerConnection` events, DENEXT.md item 370),
@@ -93,6 +199,17 @@ impl log::Log for CliLogger {
 
   fn log(&self, record: &log::Record) {
     if self.enabled(record.metadata()) {
+      // denext: the kernel sandbox's re-executed image doesn't print what
+      // the image before it printed
+      if RECORDING.load(Ordering::Relaxed)
+        || SUPPRESSING.load(Ordering::Relaxed)
+      {
+        let fp = fingerprint(record.level(), record.args());
+        if take_already_printed(fp) {
+          return;
+        }
+        record_printed(fp);
+      }
       (self.on_log_start)();
 
       let engine = deno_webrtc::is_engine_log_target(record.target());
@@ -256,6 +373,31 @@ mod tests {
       log::Level::Error
     )));
     assert!(deno_webrtc::set_engine_log_level("loud").is_err());
+  }
+
+  #[test]
+  fn fingerprints_tell_level_and_text_apart() {
+    let a = fingerprint(log::Level::Warn, &format_args!("Warning {}", 1));
+    assert_eq!(a, fingerprint(log::Level::Warn, &format_args!("Warning 1")));
+    assert_ne!(
+      a,
+      fingerprint(log::Level::Error, &format_args!("Warning 1"))
+    );
+    assert_ne!(a, fingerprint(log::Level::Warn, &format_args!("Warning 2")));
+  }
+
+  #[test]
+  fn already_printed_hides_each_handed_over_record_once() {
+    let warn = fingerprint(log::Level::Warn, &format_args!("twice"));
+    let other = fingerprint(log::Level::Warn, &format_args!("only here"));
+    suppress_already_printed(vec![warn]);
+    assert!(!take_already_printed(other));
+    assert!(take_already_printed(warn));
+    // a second record with the same text is this image's own
+    assert!(!take_already_printed(warn));
+    suppress_already_printed(vec![warn, warn]);
+    end_already_printed();
+    assert!(!take_already_printed(warn));
   }
 
   #[test]

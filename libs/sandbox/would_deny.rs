@@ -1262,6 +1262,7 @@ mod trace_tests {
       broker: None,
       expanded_write: Vec::new(),
       entries: Vec::new(),
+      member_configs: Vec::new(),
     }
   }
 

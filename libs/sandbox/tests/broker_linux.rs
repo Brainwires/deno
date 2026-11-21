@@ -317,6 +317,7 @@ mod linux {
       broker: None,
       expanded_write: expanded(&out, &deny),
       entries: Vec::new(),
+      member_configs: Vec::new(),
     };
     let policy = FsPolicy {
       read: None,

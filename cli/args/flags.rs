@@ -180,6 +180,130 @@ pub fn graph_kind(mode: TypeCheckMode) -> GraphKind {
   }
 }
 
+/// denext: whether this process's `--cached-only` is the kernel sandbox's,
+/// not the user's ([`imply_cached_only`]).
+static CACHED_ONLY_IMPLIED: std::sync::atomic::AtomicBool =
+  std::sync::atomic::AtomicBool::new(false);
+
+/// denext: a process the kernel sandbox confined at startup reads remote
+/// modules from the cache only (the image before it fetched the graph).
+/// That `--cached-only` is the runtime's own, not one of the program's
+/// flags: `process.execArgv` (and so a `fork()`ed child) doesn't carry it.
+pub fn imply_cached_only(flags: &mut Flags) {
+  if !flags.cached_only {
+    flags.cached_only = true;
+    CACHED_ONLY_IMPLIED.store(true, std::sync::atomic::Ordering::Relaxed);
+  }
+}
+
+/// [`FlagsExt::to_exec_argv`]; `cached_only_implied`: the run's
+/// `--cached-only` is the kernel sandbox's ([`imply_cached_only`]), which
+/// isn't reported.
+fn exec_argv(
+  flags: &Flags,
+  cwd: &Path,
+  cached_only_implied: bool,
+) -> Vec<String> {
+  if !matches!(
+    flags.subcommand,
+    DenoSubcommand::Run(_) | DenoSubcommand::Serve(_)
+  ) {
+    return vec![];
+  }
+  let absolute = |path: &str| -> String {
+    let path = Path::new(path);
+    if path.is_absolute() {
+      path.display().to_string()
+    } else {
+      normalize_path(Cow::Owned(cwd.join(path)))
+        .display()
+        .to_string()
+    }
+  };
+  let mut args = flags.to_permission_args();
+  match &flags.permission_set {
+    Some(set) if set.is_empty() => args.push("--permission-set".to_string()),
+    Some(set) => args.push(format!("--permission-set={set}")),
+    None => {}
+  }
+  if flags.unstable_config.legacy_flag_enabled {
+    args.push("--unstable".to_string());
+  }
+  for feature in &flags.unstable_config.features {
+    args.push(format!("--unstable-{feature}"));
+  }
+  if flags.no_detect_cjs {
+    args.push("--no-detect-cjs".to_string());
+  }
+  match &flags.config_flag {
+    ConfigFlag::Path(path) => {
+      args.push(format!("--config={}", absolute(path)));
+    }
+    ConfigFlag::Disabled => args.push("--no-config".to_string()),
+    ConfigFlag::Discover => {}
+  }
+  if let Some(mode) = flags.node_modules_dir {
+    args.push(format!("--node-modules-dir={}", mode.as_str()));
+  }
+  if let Some(import_map) = &flags.import_map_path {
+    // A URL stays as it is.
+    if deno_core::url::Url::parse(import_map).is_ok_and(|u| {
+      u.scheme().len() > 1 && !u.scheme().eq_ignore_ascii_case("file")
+    }) {
+      args.push(format!("--import-map={import_map}"));
+    } else {
+      args.push(format!("--import-map={}", absolute(import_map)));
+    }
+  }
+  if let Some(lock) = &flags.lock {
+    args.push(format!("--lock={}", absolute(lock)));
+  }
+  if flags.no_lock {
+    args.push("--no-lock".to_string());
+  }
+  match flags.frozen_lockfile {
+    Some(true) => args.push("--frozen".to_string()),
+    Some(false) => args.push("--frozen=false".to_string()),
+    None => {}
+  }
+  if flags.cached_only && !cached_only_implied {
+    args.push("--cached-only".to_string());
+  }
+  if flags.no_remote {
+    args.push("--no-remote".to_string());
+  }
+  if flags.no_npm {
+    args.push("--no-npm".to_string());
+  }
+  if let Some(CaData::File(cert)) = &flags.ca_data {
+    args.push(format!("--cert={}", absolute(cert)));
+  }
+  if let Some(location) = &flags.location {
+    args.push(format!("--location={location}"));
+  }
+  if flags.deterministic {
+    args.push("--deterministic".to_string());
+  }
+  if let Some(seed) = flags.seed {
+    args.push(format!("--seed={seed}"));
+  }
+  // `--seed` adds `--random-seed=<seed>` to the V8 flags at parse time; the
+  // child's own `--seed` adds it again.
+  let v8_flags: Vec<&str> = flags
+    .v8_flags
+    .iter()
+    .map(String::as_str)
+    .filter(|f| flags.seed.is_none() || !f.starts_with("--random-seed="))
+    .collect();
+  if !v8_flags.is_empty() {
+    args.push(format!("--v8-flags={}", v8_flags.join(",")));
+  }
+  for condition in &flags.node_conditions {
+    args.push(format!("--conditions={condition}"));
+  }
+  args
+}
+
 pub trait FlagsExt {
   fn to_permission_args(&self) -> Vec<String>;
   fn to_exec_argv(&self, cwd: &Path) -> Vec<String>;
@@ -465,104 +589,11 @@ impl FlagsExt for Flags {
   /// subcommand, and a flag not listed, gives nothing: upstream's
   /// `process.execArgv` is always empty.
   fn to_exec_argv(&self, cwd: &Path) -> Vec<String> {
-    if !matches!(
-      self.subcommand,
-      DenoSubcommand::Run(_) | DenoSubcommand::Serve(_)
-    ) {
-      return vec![];
-    }
-    let absolute = |path: &str| -> String {
-      let path = Path::new(path);
-      if path.is_absolute() {
-        path.display().to_string()
-      } else {
-        normalize_path(Cow::Owned(cwd.join(path)))
-          .display()
-          .to_string()
-      }
-    };
-    let mut args = self.to_permission_args();
-    match &self.permission_set {
-      Some(set) if set.is_empty() => args.push("--permission-set".to_string()),
-      Some(set) => args.push(format!("--permission-set={set}")),
-      None => {}
-    }
-    if self.unstable_config.legacy_flag_enabled {
-      args.push("--unstable".to_string());
-    }
-    for feature in &self.unstable_config.features {
-      args.push(format!("--unstable-{feature}"));
-    }
-    if self.no_detect_cjs {
-      args.push("--no-detect-cjs".to_string());
-    }
-    match &self.config_flag {
-      ConfigFlag::Path(path) => {
-        args.push(format!("--config={}", absolute(path)));
-      }
-      ConfigFlag::Disabled => args.push("--no-config".to_string()),
-      ConfigFlag::Discover => {}
-    }
-    if let Some(mode) = self.node_modules_dir {
-      args.push(format!("--node-modules-dir={}", mode.as_str()));
-    }
-    if let Some(import_map) = &self.import_map_path {
-      // A URL stays as it is.
-      if deno_core::url::Url::parse(import_map).is_ok_and(|u| {
-        u.scheme().len() > 1 && !u.scheme().eq_ignore_ascii_case("file")
-      }) {
-        args.push(format!("--import-map={import_map}"));
-      } else {
-        args.push(format!("--import-map={}", absolute(import_map)));
-      }
-    }
-    if let Some(lock) = &self.lock {
-      args.push(format!("--lock={}", absolute(lock)));
-    }
-    if self.no_lock {
-      args.push("--no-lock".to_string());
-    }
-    match self.frozen_lockfile {
-      Some(true) => args.push("--frozen".to_string()),
-      Some(false) => args.push("--frozen=false".to_string()),
-      None => {}
-    }
-    if self.cached_only {
-      args.push("--cached-only".to_string());
-    }
-    if self.no_remote {
-      args.push("--no-remote".to_string());
-    }
-    if self.no_npm {
-      args.push("--no-npm".to_string());
-    }
-    if let Some(CaData::File(cert)) = &self.ca_data {
-      args.push(format!("--cert={}", absolute(cert)));
-    }
-    if let Some(location) = &self.location {
-      args.push(format!("--location={location}"));
-    }
-    if self.deterministic {
-      args.push("--deterministic".to_string());
-    }
-    if let Some(seed) = self.seed {
-      args.push(format!("--seed={seed}"));
-    }
-    // `--seed` adds `--random-seed=<seed>` to the V8 flags at parse time; the
-    // child's own `--seed` adds it again.
-    let v8_flags: Vec<&str> = self
-      .v8_flags
-      .iter()
-      .map(String::as_str)
-      .filter(|f| self.seed.is_none() || !f.starts_with("--random-seed="))
-      .collect();
-    if !v8_flags.is_empty() {
-      args.push(format!("--v8-flags={}", v8_flags.join(",")));
-    }
-    for condition in &self.node_conditions {
-      args.push(format!("--conditions={condition}"));
-    }
-    args
+    exec_argv(
+      self,
+      cwd,
+      CACHED_ONLY_IMPLIED.load(std::sync::atomic::Ordering::Relaxed),
+    )
   }
 
   fn no_legacy_abort(&self) -> bool {
@@ -1129,6 +1160,25 @@ mod tests {
     let flags =
       flags_from_vec(svec!["deno", "test", "-A", "--unstable-kv"]).unwrap();
     assert!(flags.to_exec_argv(&cwd).is_empty());
+  }
+
+  // denext (DENEXT.md item 425): the `--cached-only` the kernel sandbox's
+  // re-executed image runs with is the runtime's, not the program's: it is
+  // not in `process.execArgv`; one the user passed still is
+  #[test]
+  fn exec_argv_leaves_an_implied_cached_only_out() {
+    let cwd = PathBuf::from("/project");
+    let mut flags =
+      flags_from_vec(svec!["deno", "run", "--allow-read", "main.ts"]).unwrap();
+    flags.cached_only = true;
+    assert_eq!(
+      exec_argv(&flags, &cwd, true),
+      vec!["--allow-read".to_string()]
+    );
+    assert_eq!(
+      exec_argv(&flags, &cwd, false),
+      vec!["--allow-read".to_string(), "--cached-only".to_string()]
+    );
   }
 
   // denext (DENEXT.md item 102): no legacy request.signal abort by default;

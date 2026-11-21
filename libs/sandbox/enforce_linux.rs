@@ -1535,6 +1535,7 @@ mod tests {
       broker: None,
       expanded_write: Vec::new(),
       entries: Vec::new(),
+      member_configs: Vec::new(),
     };
     assert_eq!(plan.without_measured_lists().module_files.len(), 0);
     let bytes = plan.to_bytes();
@@ -1980,6 +1981,7 @@ mod tests {
       broker: None,
       expanded_write: Vec::new(),
       entries: Vec::new(),
+      member_configs: Vec::new(),
     };
     let fd = seal_plan(&plan.to_bytes()).unwrap();
     // sealed: no more writes

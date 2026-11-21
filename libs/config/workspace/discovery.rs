@@ -45,6 +45,91 @@ use crate::util::is_skippable_io_error;
 use crate::workspace::ConfigReadError;
 use crate::workspace::Workspace;
 
+/// denext: the workspace members found by expanding a glob, in the order
+/// found ([`collected_member_configs`] / [`use_member_configs`]).
+#[derive(Default)]
+struct MemberConfigs {
+  /// What this process's expansions found (its walks of the folders).
+  collected: Vec<PathBuf>,
+  /// What a kernel sandbox's re-executed image is handed instead of walking.
+  handed: Option<Vec<PathBuf>>,
+}
+
+/// The most member config files recorded or handed over.
+const MAX_MEMBER_CONFIGS: usize = 20_000;
+
+static MEMBER_CONFIGS: std::sync::Mutex<MemberConfigs> =
+  std::sync::Mutex::new(MemberConfigs {
+    collected: Vec::new(),
+    handed: None,
+  });
+
+fn member_configs() -> std::sync::MutexGuard<'static, MemberConfigs> {
+  MEMBER_CONFIGS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// denext (DENEXT.md item 425): the config files of the workspace members
+/// this process found by expanding a glob member (`"workspaces":
+/// ["packages/*"]`, a `workspace` glob in deno.json), in the order found.
+/// The kernel sandbox's first image hands them to the image it re-executes,
+/// which can't list the folders the glob walks.
+pub fn collected_member_configs() -> Vec<PathBuf> {
+  member_configs().collected.clone()
+}
+
+/// denext (DENEXT.md item 425): the kernel sandbox's re-executed image
+/// expands glob members from `paths` (what the image before it found)
+/// instead of walking folders it may not list: each glob takes the handed
+/// files under its own folder that its own patterns match, so the list can
+/// only name members the workspace's globs name. Both images then discover
+/// the same workspace (the compared policy holds its config files).
+pub fn use_member_configs(paths: Vec<PathBuf>) {
+  let mut paths: Vec<PathBuf> = paths
+    .into_iter()
+    .filter(|p| {
+      p.is_absolute()
+        && p
+          .components()
+          .all(|c| !matches!(c, std::path::Component::ParentDir))
+        && p.file_name().is_some_and(|n| {
+          n == "deno.json" || n == "deno.jsonc" || n == "package.json"
+        })
+    })
+    .collect();
+  paths.truncate(MAX_MEMBER_CONFIGS);
+  member_configs().handed = Some(paths);
+}
+
+fn record_member_configs(found: &[PathBuf]) {
+  let mut configs = member_configs();
+  for path in found {
+    if configs.collected.len() >= MAX_MEMBER_CONFIGS {
+      break;
+    }
+    if !configs.collected.contains(path) {
+      configs.collected.push(path.clone());
+    }
+  }
+}
+
+/// The handed-over member config files under `dir` that `patterns` match,
+/// when this process was handed any ([`use_member_configs`]).
+fn handed_member_configs(
+  dir: &Path,
+  patterns: &FilePatterns,
+) -> Option<Vec<PathBuf>> {
+  let configs = member_configs();
+  let handed = configs.handed.as_ref()?;
+  Some(
+    handed
+      .iter()
+      .filter(|p| p.starts_with(dir))
+      .filter(|p| patterns.matches_path(p, crate::glob::PathKind::File))
+      .cloned()
+      .collect(),
+  )
+}
+
 #[derive(Debug)]
 pub enum DenoOrPkgJson {
   Deno(ConfigFileRc),
@@ -791,18 +876,25 @@ fn resolve_workspace_for_config_folder<
       let paths = if patterns.is_empty() {
         Vec::new()
       } else {
-        FileCollector::new(|_| true)
-          .ignore_git_folder()
-          .ignore_node_modules()
-          .set_vendor_folder(maybe_vendor_dir.clone())
-          .collect_file_patterns(
-            sys,
-            &FilePatterns {
-              base: dir_path.to_path_buf(),
-              include: Some(PathOrPatternSet::new(patterns)),
-              exclude: PathOrPatternSet::new(Vec::new()),
-            },
-          )
+        let file_patterns = FilePatterns {
+          base: dir_path.to_path_buf(),
+          include: Some(PathOrPatternSet::new(patterns)),
+          exclude: PathOrPatternSet::new(Vec::new()),
+        };
+        // denext: the kernel sandbox's re-executed image takes what the
+        // image before it found (it can't list the folders)
+        match handed_member_configs(dir_path, &file_patterns) {
+          Some(paths) => paths,
+          None => {
+            let paths = FileCollector::new(|_| true)
+              .ignore_git_folder()
+              .ignore_node_modules()
+              .set_vendor_folder(maybe_vendor_dir.clone())
+              .collect_file_patterns(sys, &file_patterns);
+            record_member_configs(&paths);
+            paths
+          }
+        }
       };
 
       Ok(paths)

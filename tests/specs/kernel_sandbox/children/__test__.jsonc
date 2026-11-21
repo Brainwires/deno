@@ -92,6 +92,15 @@
       "args": "run --quiet --kernel-sandbox=enforce --allow-run --allow-read=inside launchers.ts",
       "output": "launchers.out"
     },
+    // denext (DENEXT.md item 425): `fork()` works inside a confined run
+    // (the child's npm state needs no temp folder write) and passes on the
+    // program's flags, not the confined image's own --cached-only.
+    // Linux: macOS still writes that state to the temp folder
+    "fork_in_confined_run": {
+      "if": "kernelSandboxEnforceLinux",
+      "args": "run --quiet --kernel-sandbox=enforce --allow-run --allow-read --allow-env fork.mjs",
+      "output": "fork.out"
+    },
     // a compiled program honours the carrier as `deno run` does
     "compiled_program_inherits": {
       "if": "kernelSandboxEnforce",

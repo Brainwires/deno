@@ -1111,7 +1111,8 @@ async fn resolve_flags_and_init(
   // denext: a process confined by the kernel sandbox at startup reads
   // remote modules from the cache only (its first image fetched the graph)
   if sandbox::enforce::confined_at_startup() {
-    flags.cached_only = true;
+    // (the runtime's own: not reported in `process.execArgv`)
+    crate::args::imply_cached_only(&mut flags);
     // and it doesn't type-check again: the first image checked the static
     // graph before the re-exec (the checker runs as a child process, which a
     // confined run without a run grant can't start; item 451)
