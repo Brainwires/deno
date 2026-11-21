@@ -809,6 +809,89 @@ pub unsafe fn uv_tcp_connect(
       return err;
     }
 
+    // Take the pre-created socket from bind (if any). This preserves
+    // socket identity so options set between bind and connect are retained
+    // on the same fd, matching libuv's behavior.
+    let socket = (*tcp).internal_socket.take();
+    // denext: under a broker route the connection is made by the broker
+    // (from the address a routed bind asked for), on a blocking thread.
+    let routed = socket.is_none() && deno_net_route::route().is_some();
+    let local = (*tcp).internal_routed_bind.and((*tcp).internal_bind_addr);
+
+    let future: Pin<
+      Box<dyn Future<Output = std::io::Result<tokio::net::TcpStream>>>,
+    > = if routed {
+      Box::pin(async move {
+        let request = deno_net_route::TcpConnect {
+          addr: sock_addr,
+          host: None,
+          local,
+        };
+        let stream = tokio::task::spawn_blocking(move || {
+          deno_net_route::connect_tcp(&request)
+        })
+        .await
+        .map_err(std::io::Error::other)?
+        .ok_or_else(|| {
+          std::io::Error::other("the kernel sandbox's network route is gone")
+        })??;
+        tokio::net::TcpStream::from_std(stream)
+      })
+    } else {
+      let from_bind = socket.is_some();
+      let socket = match socket {
+        Some(s) => Ok(s),
+        // No prior bind — create a fresh socket matching the target
+        // address family.
+        None if sock_addr.is_ipv4() => tokio::net::TcpSocket::new_v4(),
+        None => tokio::net::TcpSocket::new_v6(),
+      };
+      // Match libuv's uv__tcp_connect: the non-blocking connect(2) is
+      // issued here, so an error the kernel reports at once (ENETUNREACH,
+      // EAFNOSUPPORT, EADDRNOTAVAIL, ...) is this call's return value, not
+      // a callback on a later loop turn. Happy eyeballs depends on it: a
+      // failure that reached JS only after the attempt timer fired was
+      // reported as a timeout and the next address was tried out of order.
+      // addr is the caller's valid sockaddr (checked above); this runs
+      // inside the function's unsafe block.
+      let started = socket.and_then(|socket| {
+        let start = start_nonblocking_connect(&socket, addr)?;
+        Ok((socket, start))
+      });
+      match started {
+        Err(e) => {
+          if from_bind {
+            // The bound socket was closed with the failed attempt.
+            (*tcp).internal_fd = None;
+          }
+          return io_error_to_uv(&e);
+        }
+        // Match libuv: ECONNREFUSED is reported from the callback on the
+        // next loop turn (its `delayed_error`), never synchronously.
+        Ok((_, ConnectStart::Deferred(e))) => {
+          if from_bind {
+            (*tcp).internal_fd = None;
+          }
+          Box::pin(async move { Err(e) })
+        }
+        Ok((socket, start)) => {
+          let std_stream = tcp_socket_into_std(socket);
+          Box::pin(async move {
+            let stream = tokio::net::TcpStream::from_std(std_stream)?;
+            if matches!(start, ConnectStart::InProgress) {
+              // What tokio's own connect does after mio's connect(2):
+              // wait for writability, then read SO_ERROR.
+              stream.writable().await?;
+              if let Some(e) = stream.take_error()? {
+                return Err(e);
+              }
+            }
+            Ok(stream)
+          })
+        }
+      }
+    };
+
     (*tcp).flags |= UV_HANDLE_ACTIVE;
     let mut handles = inner.tcp_handles.borrow_mut();
     if !handles.iter().any(|&h| std::ptr::eq(h, tcp)) {
@@ -818,52 +901,110 @@ pub unsafe fn uv_tcp_connect(
       w.mark_ready();
     }
 
-    // Take the pre-created socket from bind (if any). This preserves
-    // socket identity so options set between bind and connect are retained
-    // on the same fd, matching libuv's behavior.
-    let socket = (*tcp).internal_socket.take();
-    // denext: under a broker route the connection is made by the broker
-    // (from the address a routed bind asked for), on a blocking thread.
-    let routed = socket.is_none() && deno_net_route::route().is_some();
-    let local = (*tcp).internal_routed_bind.and((*tcp).internal_bind_addr);
-    (*tcp).internal_connect = Some(ConnectPending {
-      future: Box::pin(async move {
-        if routed {
-          let request = deno_net_route::TcpConnect {
-            addr: sock_addr,
-            host: None,
-            local,
-          };
-          let stream = tokio::task::spawn_blocking(move || {
-            deno_net_route::connect_tcp(&request)
-          })
-          .await
-          .map_err(std::io::Error::other)?
-          .ok_or_else(|| {
-            std::io::Error::other("the kernel sandbox's network route is gone")
-          })??;
-          return tokio::net::TcpStream::from_std(stream);
-        }
-        let socket = match socket {
-          Some(s) => s,
-          None => {
-            // No prior bind — create a fresh socket matching the
-            // target address family.
-            if sock_addr.is_ipv4() {
-              tokio::net::TcpSocket::new_v4()?
-            } else {
-              tokio::net::TcpSocket::new_v6()?
-            }
-          }
-        };
-        socket.connect(sock_addr).await
-      }),
-      req,
-      cb,
-    });
+    (*tcp).internal_connect = Some(ConnectPending { future, req, cb });
   }
 
   0
+}
+
+/// How a non-blocking connect(2) started.
+enum ConnectStart {
+  /// Connected at once (possible on loopback).
+  Connected,
+  /// In progress: completion is reported by writability + SO_ERROR.
+  InProgress,
+  /// A failure libuv reports from the callback rather than the call.
+  Deferred(std::io::Error),
+}
+
+/// Issue a non-blocking connect(2) on `socket` to the sockaddr at `addr`,
+/// as libuv's `uv__tcp_connect` does. Errors other than "in progress" and
+/// ECONNREFUSED are returned to the caller synchronously.
+///
+/// ### Safety
+/// `addr` must point to a valid `sockaddr_in` or `sockaddr_in6`.
+unsafe fn start_nonblocking_connect(
+  socket: &tokio::net::TcpSocket,
+  addr: *const c_void,
+) -> std::io::Result<ConnectStart> {
+  // SAFETY: Caller guarantees addr points to a valid sockaddr.
+  let family = unsafe { (*(addr as *const libc::sockaddr)).sa_family as i32 };
+  let len = if family == AF_INET {
+    std::mem::size_of::<sockaddr_in>()
+  } else {
+    std::mem::size_of::<sockaddr_in6>()
+  };
+  #[cfg(unix)]
+  {
+    use std::os::unix::io::AsRawFd;
+    let fd = socket.as_raw_fd();
+    loop {
+      // SAFETY: fd is a valid socket; addr/len describe a valid sockaddr.
+      let r = unsafe {
+        libc::connect(fd, addr as *const libc::sockaddr, len as libc::socklen_t)
+      };
+      if r == 0 {
+        return Ok(ConnectStart::Connected);
+      }
+      let err = std::io::Error::last_os_error();
+      match err.raw_os_error() {
+        Some(libc::EINTR) => continue,
+        Some(libc::EINPROGRESS) | Some(libc::EALREADY) => {
+          return Ok(ConnectStart::InProgress);
+        }
+        Some(libc::ECONNREFUSED) => return Ok(ConnectStart::Deferred(err)),
+        _ => return Err(err),
+      }
+    }
+  }
+  #[cfg(windows)]
+  {
+    use std::os::windows::io::AsRawSocket;
+    unsafe extern "system" {
+      fn connect(s: usize, name: *const c_void, namelen: c_int) -> c_int;
+      fn WSAGetLastError() -> c_int;
+    }
+    const WSAEWOULDBLOCK: c_int = 10035;
+    const WSAEINPROGRESS: c_int = 10036;
+    const WSAEALREADY: c_int = 10037;
+    const WSAECONNREFUSED: c_int = 10061;
+    // SAFETY: the socket is valid; addr/len describe a valid sockaddr.
+    let r =
+      unsafe { connect(socket.as_raw_socket() as usize, addr, len as c_int) };
+    if r == 0 {
+      return Ok(ConnectStart::Connected);
+    }
+    // SAFETY: plain FFI call reading this thread's last WinSock error.
+    let code = unsafe { WSAGetLastError() };
+    let err = std::io::Error::from_raw_os_error(code);
+    match code {
+      WSAEWOULDBLOCK | WSAEINPROGRESS | WSAEALREADY => {
+        Ok(ConnectStart::InProgress)
+      }
+      WSAECONNREFUSED => Ok(ConnectStart::Deferred(err)),
+      _ => Err(err),
+    }
+  }
+}
+
+/// Move a (non-blocking) `TcpSocket` into a `std::net::TcpStream` without
+/// touching the tokio reactor, so it can be registered later from inside
+/// the runtime with `TcpStream::from_std`.
+fn tcp_socket_into_std(socket: tokio::net::TcpSocket) -> std::net::TcpStream {
+  #[cfg(unix)]
+  {
+    use std::os::unix::io::FromRawFd;
+    use std::os::unix::io::IntoRawFd;
+    // SAFETY: into_raw_fd transfers sole ownership of a valid socket fd.
+    unsafe { std::net::TcpStream::from_raw_fd(socket.into_raw_fd()) }
+  }
+  #[cfg(windows)]
+  {
+    use std::os::windows::io::FromRawSocket;
+    use std::os::windows::io::IntoRawSocket;
+    // SAFETY: into_raw_socket transfers sole ownership of a valid socket.
+    unsafe { std::net::TcpStream::from_raw_socket(socket.into_raw_socket()) }
+  }
 }
 
 /// ### Safety

@@ -472,3 +472,69 @@ Deno.test("[node/net] a path server keeps accepting past four open connections",
     if (dir) await Deno.remove(dir, { recursive: true });
   }
 });
+
+// Happy eyeballs (`autoSelectFamily`): a connect the stack refuses at once is
+// the attempt's synchronous result, as libuv returns it from
+// `uv_tcp_connect`, so the next address is tried in order however late the
+// process gets the CPU back. It used to arrive on a later loop turn, behind
+// the attempt timer, and was reported as a timeout. TCP to a multicast address
+// is refused at once on Linux and macOS (EAFNOSUPPORT / ENETUNREACH).
+Deno.test({
+  name:
+    "[node/net] autoSelectFamily: an attempt refused at once fails before its attempt timer",
+  ignore: Deno.build.os === "windows",
+}, async () => {
+  const closed = net.createServer();
+  await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
+  const { port } = closed.address() as net.AddressInfo;
+  await new Promise((resolve) => closed.close(resolve));
+
+  const events: string[] = [];
+  const done = Promise.withResolvers<void>();
+  const socket = net.createConnection({
+    host: "example.org",
+    port,
+    // deno-lint-ignore no-explicit-any
+    // Answers from the check phase (after I/O), so the first attempt's
+    // connect is next polled after the timers phase of the next tick, where
+    // the attempt timer is due once the loop has been blocked past it.
+    // deno-lint-ignore no-explicit-any
+    lookup: ((_host: string, _opts: unknown, cb: any) =>
+      setImmediate(() =>
+        cb(null, [
+          { address: "224.0.0.1", family: 4 },
+          { address: "127.0.0.1", family: 4 },
+        ])
+      )) as unknown as net.LookupFunction,
+    autoSelectFamily: true,
+    autoSelectFamilyAttemptTimeout: 10,
+  });
+  socket.on("connectionAttempt", (address) => {
+    events.push(`attempt ${address}`);
+    if (address === "224.0.0.1") {
+      // Block the loop past the attempt timer before any I/O is polled.
+      process.nextTick(() => {
+        const until = performance.now() + 50;
+        while (performance.now() < until) {
+          // busy
+        }
+      });
+    }
+  });
+  socket.on("connectionAttemptFailed", (address) => {
+    events.push(`failed ${address}`);
+  });
+  socket.on("connectionAttemptTimeout", (address) => {
+    events.push(`timeout ${address}`);
+  });
+  socket.on("error", () => done.resolve());
+  socket.on("connect", () => done.resolve());
+  await done.promise;
+  socket.destroy();
+  assertEquals(events, [
+    "attempt 224.0.0.1",
+    "failed 224.0.0.1",
+    "attempt 127.0.0.1",
+    "failed 127.0.0.1",
+  ]);
+});

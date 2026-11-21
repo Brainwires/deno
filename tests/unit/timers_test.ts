@@ -564,7 +564,8 @@ Deno.test({
 // main module made the 1 ms timer of "unrefTimer" due before the first
 // iteration; this one waits it out on purpose.
 Deno.test({
-  name: "unrefTimer - an unref'd timer already due at the end of the main module",
+  name:
+    "unrefTimer - an unref'd timer already due at the end of the main module",
   permissions: { run: true, read: true },
   fn: async () => {
     const [statusCode, output] = await execCode(`
@@ -979,6 +980,72 @@ Deno.test({
     `);
     assertEquals(statusCode, 0);
     assertEquals(output, "");
+  },
+});
+
+// An aborted AbortSignal.any() never fires again: its listeners must not keep
+// its other timeout sources (and the event loop) alive. Node exits here.
+Deno.test({
+  name: "AbortSignal.any() of timeouts releases the later timer once aborted",
+  permissions: { run: true, read: true },
+  fn: async () => {
+    const [statusCode, output] = await execCode(`
+      const signal = AbortSignal.any([
+        AbortSignal.timeout(100),
+        AbortSignal.timeout(2000),
+      ]);
+      signal.addEventListener("abort", () => console.log("aborted"));
+
+      Deno.unrefTimer(
+        setTimeout(() => console.log("Unexpected: Unref timer"), 1500)
+      );
+    `);
+    assertEquals(statusCode, 0);
+    assertEquals(output, "aborted\n");
+  },
+});
+
+// The same with a once listener (as `events.once()` adds), which the event
+// target drops without going through removeEventListener.
+Deno.test({
+  name: "AbortSignal.any() of timeouts with a once listener releases the timer",
+  permissions: { run: true, read: true },
+  fn: async () => {
+    const [statusCode, output] = await execCode(`
+      const signal = AbortSignal.any([
+        AbortSignal.timeout(100),
+        AbortSignal.timeout(2000),
+      ]);
+      signal.addEventListener("abort", () => console.log("aborted"), {
+        once: true,
+      });
+
+      Deno.unrefTimer(
+        setTimeout(() => console.log("Unexpected: Unref timer"), 1500)
+      );
+    `);
+    assertEquals(statusCode, 0);
+    assertEquals(output, "aborted\n");
+  },
+});
+
+// A listener removed from a timeout source leaves the timer refed while an
+// AbortSignal.any() over it still listens.
+Deno.test({
+  name:
+    "AbortSignal.timeout() stays refed for a listening AbortSignal.any() after its own listener goes",
+  permissions: { run: true, read: true },
+  fn: async () => {
+    const [statusCode, output] = await execCode(`
+      const timeout = AbortSignal.timeout(500);
+      const signal = AbortSignal.any([timeout]);
+      signal.addEventListener("abort", () => console.log("aborted"));
+      const own = () => {};
+      timeout.addEventListener("abort", own);
+      timeout.removeEventListener("abort", own);
+    `);
+    assertEquals(statusCode, 0);
+    assertEquals(output, "aborted\n");
   },
 });
 

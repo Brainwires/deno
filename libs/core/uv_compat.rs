@@ -80,6 +80,9 @@ uv_errno!(UV_ETIMEDOUT, libc::ETIMEDOUT, -4039);
 uv_errno!(UV_EACCES, libc::EACCES, -4092);
 uv_errno!(UV_EPERM, libc::EPERM, -4048);
 uv_errno!(UV_EEXIST, libc::EEXIST, -4075);
+uv_errno!(UV_ENETUNREACH, libc::ENETUNREACH, -4062);
+uv_errno!(UV_EHOSTUNREACH, libc::EHOSTUNREACH, -4065);
+uv_errno!(UV_EAFNOSUPPORT, libc::EAFNOSUPPORT, -4094);
 pub const UV_EOF: i32 = -4095;
 
 pub fn uv_error_message(err: c_int) -> Option<&'static CStr> {
@@ -104,6 +107,9 @@ pub fn uv_error_message(err: c_int) -> Option<&'static CStr> {
     x if x == UV_EACCES => c"permission denied",
     x if x == UV_EPERM => c"operation not permitted",
     x if x == UV_EEXIST => c"file already exists",
+    x if x == UV_ENETUNREACH => c"network is unreachable",
+    x if x == UV_EHOSTUNREACH => c"host is unreachable",
+    x if x == UV_EAFNOSUPPORT => c"address family not supported",
     x if x == UV_EOF => c"end of file",
     _ => return None,
   };
@@ -162,6 +168,10 @@ pub(crate) fn io_error_to_uv(err: &std::io::Error) -> c_int {
           10057 => UV_ENOTCONN,     // WSAENOTCONN
           10038 => UV_ENOTSOCK,     // WSAENOTSOCK
           10035 => UV_EAGAIN,       // WSAEWOULDBLOCK
+          // A connect the stack refuses at once, as libuv translates it.
+          10051 => UV_ENETUNREACH,  // WSAENETUNREACH
+          10065 => UV_EHOSTUNREACH, // WSAEHOSTUNREACH
+          10047 => UV_EAFNOSUPPORT, // WSAEAFNOSUPPORT
           _ => UV_EINVAL,
         };
       }
