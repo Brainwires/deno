@@ -22,6 +22,7 @@ pub mod desktop;
 pub mod file_system;
 pub mod hmr;
 pub mod kernel;
+pub mod kernel_desktop;
 mod node;
 pub mod run;
 

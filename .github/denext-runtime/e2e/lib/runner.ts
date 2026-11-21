@@ -54,12 +54,19 @@ export interface Env {
  * The areas whose app only the fork's CLI packages as the runtime expects:
  * sidecarint's run grant names `$DENO_DESKTOP_CACHE`, which expands from the
  * app identifier the fork's CLI writes into the binary's metadata (the stock
- * CLI writes none, and the runtime drops the grant). Under the stock CLI
+ * CLI writes none, and the runtime drops the grant); kernelsandbox is
+ * packaged with `--kernel-sandbox=enforce`, which the stock CLI doesn't
+ * take for a desktop app. Under the stock CLI
  * they are n/a, and that n/a is the packager's, not the runner's, so it is
  * not compared with expected-na.json; with E2E_FORK_DENO set, run.ts runs
  * only these.
  */
-export const FORK_CLI_AREAS: ReadonlySet<string> = new Set(["sidecarint"]);
+export const FORK_CLI_AREAS: ReadonlySet<string> = new Set([
+  "sidecarint",
+  // `--kernel-sandbox` for a desktop app and the engine baked into the
+  // binary are the fork CLI's (DENEXT.md item 488).
+  "kernelsandbox",
+]);
 
 export function runtimeLib(target: string): string {
   if (target.includes("apple-darwin")) return "libdenort.dylib";

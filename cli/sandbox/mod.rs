@@ -169,6 +169,8 @@ pub struct CompileKind<'a> {
   pub desktop: bool,
   /// `--target` (`None`: this machine's).
   pub target: Option<&'a str>,
+  /// Print nothing (a second call for the same build).
+  pub quiet: bool,
 }
 
 impl CompileKind<'_> {
@@ -194,6 +196,13 @@ impl CompileKind<'_> {
 /// every mechanism present, and the rules that OS can't hold are printed as
 /// a warning (the program would refuse to start there; what the machine it
 /// runs on lacks is only known at startup).
+///
+/// A desktop app (DENEXT.md item 488) takes `enforce` and `auto` on every
+/// target: its startup confines the app's own process where its web engine
+/// can run inside the sandbox and reports the app headless-only (or `none`)
+/// where it can't, so no desktop app refuses to start over its engine. What
+/// the package gets for its target and engine is printed here
+/// (`kernel_desktop::packaged_guarantee`).
 pub fn compile_mode(
   cli_options: &CliOptions,
   kind: CompileKind,
@@ -216,6 +225,19 @@ pub fn compile_mode(
         );
       }
       warn_compile_gaps(cli_options, os, KernelSandboxMode::Broker)?;
+    }
+    Some(KernelSandboxMode::Enforce | KernelSandboxMode::Auto)
+      if kind.desktop =>
+    {
+      if !kind.quiet {
+        note_desktop_guarantee(
+          kind.os(),
+          deno_lib::kernel_sandbox::Engine::from_backend(
+            cli_options.flags().internal.desktop_backend.as_deref(),
+          ),
+          mode.unwrap_or_default(),
+        );
+      }
     }
     Some(KernelSandboxMode::Enforce) => {
       let os = kind.os();
@@ -242,7 +264,35 @@ fn compile_target_supervises(os: TargetOs, desktop: bool) -> bool {
   !desktop && matches!(os, TargetOs::Linux | TargetOs::Macos)
 }
 
-/// Whether a program for `os` has an enforcer for a baked `enforce`.
+/// Says, once per build, what a desktop app packaged with `mode` gets on
+/// `os` with `engine`: confined in place, or headless guarantees only.
+fn note_desktop_guarantee(
+  os: TargetOs,
+  engine: deno_lib::kernel_sandbox::Engine,
+  mode: KernelSandboxMode,
+) {
+  use deno_lib::kernel_desktop::DesktopSandbox;
+  let (sandbox, line) =
+    deno_lib::kernel_desktop::packaged_guarantee(os, engine);
+  static NOTE: Once = Once::new();
+  NOTE.call_once(|| match sandbox {
+    DesktopSandbox::Kernel => log::info!(
+      "{} --kernel-sandbox={mode} ({}, {}): {line}",
+      crate::colors::green("Kernel sandbox"),
+      os.as_str(),
+      engine.as_str(),
+    ),
+    DesktopSandbox::HeadlessOnly | DesktopSandbox::None => log::warn!(
+      "{} --kernel-sandbox={mode} ({}, {}): {line}",
+      crate::colors::yellow("Warning"),
+      os.as_str(),
+      engine.as_str(),
+    ),
+  });
+}
+
+/// Whether a program for `os` has an enforcer for a baked `enforce` (a
+/// desktop app never reaches this: its startup decides per engine).
 fn compile_target_enforces(os: TargetOs, desktop: bool) -> bool {
   !desktop
     && matches!(os, TargetOs::Linux | TargetOs::Macos | TargetOs::Windows)

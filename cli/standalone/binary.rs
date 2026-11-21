@@ -1227,6 +1227,8 @@ impl<'a> DenoCompileBinaryWriter<'a> {
         crate::sandbox::CompileKind {
           desktop: self.is_desktop,
           target: compile_flags.target.as_deref(),
+          // said once, by `compile_binary`'s own call
+          quiet: true,
         },
       )?,
       kernel_sandbox_exec_strict: self
@@ -1234,6 +1236,12 @@ impl<'a> DenoCompileBinaryWriter<'a> {
         .flags()
         .permissions
         .kernel_sandbox_exec_strict,
+      // denext (DENEXT.md item 488): the engine the app is packaged for
+      desktop_engine: self.is_desktop.then(|| {
+        deno_lib::kernel_sandbox::Engine::from_backend(
+          self.cli_options.flags().internal.desktop_backend.as_deref(),
+        )
+      }),
       code_cache_key,
       location: self.cli_options.location_flag().clone(),
       permissions: self.cli_options.permissions_options()?,

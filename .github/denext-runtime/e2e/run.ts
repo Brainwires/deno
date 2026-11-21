@@ -50,6 +50,7 @@ const AREAS: Record<
   menus: () => import("./areas/menus.ts"),
   asmt: () => import("./areas/asmt.ts"),
   sidecarint: () => import("./areas/sidecarint.ts"),
+  kernelsandbox: () => import("./areas/kernelsandbox.ts"),
   update: () => import("./areas/update.ts"),
   keyring: () => import("./areas/keyring.ts"),
   keyringpersist: () => import("./areas/keyringpersist.ts"),

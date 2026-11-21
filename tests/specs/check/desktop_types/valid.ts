@@ -78,6 +78,11 @@ async function platformFeatures() {
   const fileChooser: "portal" | "gtk" | null = f.fileChooser;
   const fileChooserReason: string | null = f.fileChooserReason;
   const cookies: "os" | "basic" | null = f.cookieEncryption;
+  // DENEXT.md item 488: what holds the app's own process, and why.
+  const held: "kernel" | "headless-only" | "none" | null = f.kernelSandbox;
+  const heldReason: string | null = f.kernelSandboxReason;
+  const opened: boolean = d.openExternal("https://example.com/");
+  console.log(held, heldReason, opened);
   console.log(mode, sandboxReason, fileChooser, fileChooserReason, cookies);
 }
 

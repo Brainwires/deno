@@ -17,6 +17,7 @@
 
 mod app_origin;
 mod dev_switches;
+mod kernel_start;
 mod napi_host_exports;
 mod scheme_bridge;
 mod scheme_registration;
@@ -1635,6 +1636,14 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
 
   fn platform_features(&self) -> Option<String> {
     laufey::platform_features()
+  }
+
+  fn kernel_sandbox(&self) -> Option<(&'static str, String)> {
+    kernel_start::report()
+  }
+
+  fn open_external(&self, url: &str) -> bool {
+    kernel_start::open_external(url)
   }
 
   fn tray_unavailable_reason(&self) -> Option<String> {
@@ -3308,6 +3317,182 @@ fn desktop_exit(code: i32) {
   end_process_now(code);
 }
 
+/// Applies a pending UI update (the runtime library swapped on launch),
+/// once per process: by the prestart when the host calls it (before the
+/// kernel sandbox, which would refuse the write), else by the runtime's
+/// start. Returns whether an update was rolled back.
+fn pending_update_step(is_worker: bool) -> bool {
+  static DONE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+  *DONE.get_or_init(|| {
+    #[cfg(unix)]
+    #[allow(
+      clippy::print_stderr,
+      reason = "runs before logging is initialized"
+    )]
+    {
+      match std::panic::catch_unwind(|| {
+        // (No print of the path here: this runs on every launch, and stderr
+        // is the app's own.)
+        if let Some(ref dylib_path) = get_dylib_path() {
+          let record = denort::desktop::pending_update_record_path(dylib_path);
+          apply_pending_update_on_launch(
+            dylib_path,
+            is_worker,
+            record.as_deref(),
+          )
+        } else {
+          eprintln!("[desktop] could not determine dylib path");
+          false
+        }
+      }) {
+        Ok(v) => v,
+        Err(e) => {
+          eprintln!("[desktop] update check panicked: {:?}", e);
+          false
+        }
+      }
+    }
+    #[cfg(not(unix))]
+    {
+      let _ = is_worker;
+      false
+    }
+  })
+}
+
+/// The full-app update watchdog, once per process (by the prestart when the
+/// host calls it: the helper it may start must not inherit the kernel
+/// sandbox): an update still unconfirmed from an earlier launch (it crashed
+/// or never called confirm()) is rolled back by the helper, which relaunches
+/// the previous version, and this process exits without starting (`Err`
+/// with the exit code). `Ok(trial)`: the first launch of a new version is
+/// its trial.
+fn app_update_trial_step() -> Result<bool, i32> {
+  static DONE: std::sync::OnceLock<Result<bool, i32>> =
+    std::sync::OnceLock::new();
+  *DONE.get_or_init(|| {
+    let args: Vec<String> = process_args_os()
+      .into_iter()
+      .filter_map(|a| a.into_string().ok())
+      .collect();
+    let mut trial = false;
+    match deno_runtime::ops::desktop_update::early_startup(&args, &mut trial) {
+      Some(code) => Err(code),
+      None => Ok(trial),
+    }
+  })
+}
+
+/// What happens before the app's host starts its web engine (see
+/// `kernel_start`). `Err`: the process must exit with this code.
+fn prestart(engine: std::ffi::c_int) -> Result<(), i32> {
+  let args = process_args_os();
+  // The updater's swap helper (`<exe> run denext-update-helper ...`) swaps
+  // the install: it is never confined, and nothing here is its business.
+  {
+    let args: Vec<String> = args
+      .iter()
+      .filter_map(|a| a.to_str().map(str::to_string))
+      .collect();
+    if deno_runtime::ops::desktop_update::swap::parse_helper_args(&args)
+      .is_some()
+    {
+      return Ok(());
+    }
+  }
+  kernel_start::set_host_engine(kernel_start::host_engine(engine));
+  kernel_start::load_inherited();
+  let is_worker =
+    worker_launch::is_worker_launch(args.get(1..).unwrap_or_default(), |n| {
+      env::var_os(n)
+    });
+  if !is_worker {
+    // Both write next to the install or start the helper that does: before
+    // the sandbox.
+    pending_update_step(false);
+    app_update_trial_step()?;
+  }
+  // A failure to read the embedded program is the runtime's own start to
+  // report (it has the logging).
+  let Ok(data) = denort::binary::extract_standalone_with_finder(
+    Cow::Owned(args),
+    find_section_in_dylib,
+  ) else {
+    return Ok(());
+  };
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "the launch directory, before the runtime (and its sys) exists"
+  )]
+  kernel_start::set_launch_cwd(env::current_dir().ok());
+  if data.metadata.self_extracting.is_some() {
+    // The app's files are written before the sandbox (its extraction
+    // folder is then read, never written); a fork finds them written by
+    // the app. Then the working directory the runtime's start moves to, so
+    // the grant's relative paths mean the same now and then.
+    if !is_worker {
+      if denort::binary::extract_vfs_to_disk(&data.vfs, &data.root_path)
+        .is_err()
+      {
+        // reported by the runtime's start, which tries again
+        kernel_start::keep_data(data);
+        return Ok(());
+      }
+      kernel_start::set_extracted();
+    }
+    if !(is_worker && data.metadata.desktop_dev) {
+      let _ = std::env::set_current_dir(&data.root_path);
+    }
+  }
+  let result = kernel_start::startup(&data, is_worker);
+  kernel_start::keep_data(data);
+  if let Err(message) = result {
+    #[allow(
+      clippy::print_stderr,
+      reason = "runs before logging is initialized"
+    )]
+    {
+      eprintln!("error: {message}");
+    }
+    return Err(1);
+  }
+  Ok(())
+}
+
+/// The host's first call, at the top of its `main`: before it starts its
+/// web engine, a thread, or anything else (DENEXT.md item 488). The kernel
+/// sandbox of a packaged app is decided and applied here, in place.
+/// `engine` is the host's own engine (1: the OS web view, 2: CEF; anything
+/// else: not said). Returns 1 to go on starting the app, or 0 with
+/// `*exit_code` set when the process must exit instead (the app refuses to
+/// start under its baked mode, or an update is being rolled back).
+///
+/// Optional for the host: one that doesn't call it starts the runtime as
+/// before, and the runtime does then what it still can.
+///
+/// # Safety
+/// `exit_code` must be null or point to a writable `int`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn laufey_runtime_prestart(
+  engine: std::ffi::c_int,
+  exit_code: *mut std::ffi::c_int,
+) -> std::ffi::c_int {
+  // A panic here must not unwind into the host. The app then starts
+  // without the sandbox having been decided, and the runtime's own guard
+  // (`kernel_sandbox::check_compiled`) refuses a baked enforce that wasn't
+  // applied.
+  match std::panic::catch_unwind(|| prestart(engine)) {
+    Ok(Err(code)) => {
+      if !exit_code.is_null() {
+        // SAFETY: the caller's contract
+        unsafe { *exit_code = code };
+      }
+      0
+    }
+    Ok(Ok(())) | Err(_) => 1,
+  }
+}
+
 laufey::main!(|| {
   // Full-app self-update helper (`<exe> run denext-update-helper <mode>
   // <pid>`): swap or roll back the install, relaunch, exit. Before anything
@@ -3339,30 +3524,9 @@ laufey::main!(|| {
       env::var_os(n)
     });
 
-  // Apply any pending update before anything else.
-  #[cfg(unix)]
-  #[allow(clippy::print_stderr, reason = "runs before logging is initialized")]
-  let update_rolled_back = {
-    match std::panic::catch_unwind(|| {
-      // (No print of the path here: this runs on every launch, and stderr
-      // is the app's own.)
-      if let Some(ref dylib_path) = get_dylib_path() {
-        let record = denort::desktop::pending_update_record_path(dylib_path);
-        apply_pending_update_on_launch(dylib_path, is_worker, record.as_deref())
-      } else {
-        eprintln!("[desktop] could not determine dylib path");
-        false
-      }
-    }) {
-      Ok(v) => v,
-      Err(e) => {
-        eprintln!("[desktop] update check panicked: {:?}", e);
-        false
-      }
-    }
-  };
-  #[cfg(not(unix))]
-  let update_rolled_back = false;
+  // Apply any pending update before anything else (done already when the
+  // host called the prestart: it must happen before the kernel sandbox).
+  let update_rolled_back = pending_update_step(is_worker);
 
   // Make NAPI symbols visible to native addons (e.g. next-swc).
   #[cfg(unix)]
@@ -3422,18 +3586,9 @@ laufey::main!(|| {
   // earlier launch (it crashed or never called confirm()) is rolled back
   // by the helper, which relaunches the previous version; this process
   // exits without starting. The first launch of a new version is its trial.
-  let app_update_trial = {
-    let args: Vec<String> = process_args_os()
-      .into_iter()
-      .filter_map(|a| a.into_string().ok())
-      .collect();
-    let mut trial = false;
-    if let Some(code) =
-      deno_runtime::ops::desktop_update::early_startup(&args, &mut trial)
-    {
-      exit_before_start(code);
-    }
-    trial
+  let app_update_trial = match app_update_trial_step() {
+    Ok(trial) => trial,
+    Err(code) => exit_before_start(code),
   };
 
   // From here on the app runs in its window: exits go through the backend,
@@ -3457,7 +3612,8 @@ laufey::main!(|| {
     clippy::disallowed_methods,
     reason = "the launch directory, before the runtime (and its sys) exists"
   )]
-  let launch_cwd = env::current_dir().ok();
+  let launch_cwd =
+    kernel_start::launch_cwd().unwrap_or_else(|| env::current_dir().ok());
 
   // Set up panic hook for desktop error reporting.  The error reporting
   // URL is only known after binary metadata is parsed (in run_desktop),
@@ -3517,10 +3673,13 @@ laufey::main!(|| {
   // worker / async tasks it spawns) would race with code that resolves
   // relative paths.
   let args: Vec<_> = process_args_os();
-  let data = match denort::binary::extract_standalone_with_finder(
-    Cow::Owned(args),
-    find_section_in_dylib,
-  ) {
+  // (Read already when the host called the prestart.)
+  let data = match kernel_start::take_data().map(Ok).unwrap_or_else(|| {
+    denort::binary::extract_standalone_with_finder(
+      Cow::Owned(args),
+      find_section_in_dylib,
+    )
+  }) {
     Ok(data) => data,
     Err(e) => {
       log::error!("[desktop] failed to read standalone section: {:?}", e);
@@ -3531,8 +3690,9 @@ laufey::main!(|| {
   // development build (see `dev_switches`).
   dev_switches::init(data.metadata.desktop_dev);
   if data.metadata.self_extracting.is_some() {
-    if let Err(e) =
-      denort::binary::extract_vfs_to_disk(&data.vfs, &data.root_path)
+    if !kernel_start::extracted()
+      && let Err(e) =
+        denort::binary::extract_vfs_to_disk(&data.vfs, &data.root_path)
     {
       log::error!("[desktop] failed to extract VFS: {:?}", e);
       return;
@@ -3547,6 +3707,19 @@ laufey::main!(|| {
       );
       return;
     }
+  }
+
+  // denext (DENEXT.md item 488): the kernel sandbox. A host that calls the
+  // prestart applied it before its engine started; one that doesn't gets
+  // it here, where macOS can still confine the process and Linux reports
+  // the app headless-only. A refusal (a baked enforce the OS can't hold)
+  // ends the app before it starts.
+  if let Err(message) = kernel_start::startup(&data, false) {
+    #[allow(clippy::print_stderr, reason = "a fatal startup error")]
+    {
+      eprintln!("error: {message}");
+    }
+    exit_before_start(1);
   }
 
   // The page origin the webview runs the app at: `desktop.app.origin` baked
@@ -3984,10 +4157,12 @@ fn run_headless_worker() {
         .filter(|m| !m.is_empty());
     log::debug!("[worker] fork_module: {:?}", fork_module);
 
-    let data = match denort::binary::extract_standalone_with_finder(
-      Cow::Owned(args),
-      find_section_in_dylib,
-    ) {
+    let data = match kernel_start::take_data().map(Ok).unwrap_or_else(|| {
+      denort::binary::extract_standalone_with_finder(
+        Cow::Owned(args),
+        find_section_in_dylib,
+      )
+    }) {
       Ok(data) => data,
       Err(e) => {
         log::error!("Worker failed to load standalone data: {:?}", e);
@@ -3995,6 +4170,14 @@ fn run_headless_worker() {
       }
     };
     let dev = dev_switches::init(data.metadata.desktop_dev);
+    // denext (DENEXT.md item 488): a fork of the app is held by the app's
+    // kernel sandbox when the app has one (inherited), and confines itself
+    // like a compiled program when the app's own process can't be confined
+    // (done already when the host called the prestart).
+    if let Err(message) = kernel_start::startup(&data, true) {
+      log::error!("{message}");
+      deno_runtime::exit(1);
+    }
 
     denort::load_env_vars(&data.metadata.env_vars_from_env_file);
 

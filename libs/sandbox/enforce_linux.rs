@@ -666,6 +666,28 @@ pub const CLONE_NAMESPACE_FLAGS: u32 = 0x0002_0000 // NEWNS
 /// `unshare(2)` also takes `CLONE_NEWTIME`.
 pub const UNSHARE_NAMESPACE_FLAGS: u32 = CLONE_NAMESPACE_FLAGS | 0x80;
 
+/// The namespaces Chromium's namespace sandbox makes for its zygote and
+/// helper processes: a user, a PID and a network namespace.
+pub const ENGINE_NAMESPACE_FLAGS: u32 = 0x1000_0000 // NEWUSER
+  | 0x2000_0000 // NEWPID
+  | 0x4000_0000; // NEWNET
+
+/// What a packaged desktop app's process needs that a headless program's
+/// plan refuses (DENEXT.md item 488): its web engine lives in the confined
+/// process and starts its own helper processes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DesktopVariant {
+  /// The engine is Chromium (CEF): `clone` / `unshare` may make the
+  /// namespaces of [`ENGINE_NAMESPACE_FLAGS`], which its namespace sandbox
+  /// puts the renderer, GPU and utility processes in. Every other namespace
+  /// flag, `setns` and the rest of the attack-surface list stay refused. A
+  /// process in such a namespace is still inside this Landlock domain and
+  /// under this seccomp program (both are inherited, whatever the
+  /// namespace), and a new network namespace holds no interface of the
+  /// host's.
+  pub engine_namespaces: bool,
+}
+
 /// The `prctl(2)` option the enforce seccomp program answers with
 /// [`MARKER_ERRNO`]: how a process tells that a kernel sandbox of this
 /// runtime holds it when no carrier was handed down
@@ -683,6 +705,16 @@ pub const MARKER_ERRNO: i32 = libc::ENOTRECOVERABLE;
 /// architecture's syscalls (the frame).
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn seccomp_spec(seccomp: &SeccompPlan, net: &NetPlan) -> SeccompSpec {
+  seccomp_spec_variant(seccomp, net, DesktopVariant::default())
+}
+
+/// [`seccomp_spec`] for a packaged desktop app's process (`variant`).
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub fn seccomp_spec_variant(
+  seccomp: &SeccompPlan,
+  net: &NetPlan,
+  variant: DesktopVariant,
+) -> SeccompSpec {
   use crate::seccomp::MSG_FASTOPEN;
   use crate::seccomp::NR_IO_URING_SETUP;
   use crate::seccomp::NR_IOCTL;
@@ -725,18 +757,24 @@ pub fn seccomp_spec(seccomp: &SeccompPlan, net: &NetPlan) -> SeccompSpec {
     });
   }
   if seccomp.attack_surface {
-    // the flags are argument 0 of both; anything else passes
+    // the flags are argument 0 of both; anything else passes. A desktop
+    // app on Chromium keeps the namespaces its engine's sandbox makes
+    let engine = if variant.engine_namespaces {
+      ENGINE_NAMESPACE_FLAGS
+    } else {
+      0
+    };
     spec = spec
       .rule(SyscallRule::DenyArgBits {
         nr: nr::CLONE,
         arg: 0,
-        mask: CLONE_NAMESPACE_FLAGS,
+        mask: CLONE_NAMESPACE_FLAGS & !engine,
         errno: eperm,
       })
       .rule(SyscallRule::DenyArgBits {
         nr: nr::UNSHARE,
         arg: 0,
-        mask: UNSHARE_NAMESPACE_FLAGS,
+        mask: UNSHARE_NAMESPACE_FLAGS & !engine,
         errno: eperm,
       })
       .rule(SyscallRule::Deny {
@@ -951,6 +989,22 @@ pub fn bind_prebound(addrs: &[std::net::SocketAddr]) {
 /// thread is an error, not a partial confinement.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn apply_self(plan: &EnforcePlan) -> Result<(), String> {
+  apply_self_variant(plan, DesktopVariant::default())
+}
+
+/// Whether this process has exactly one thread (what [`apply_self`]
+/// needs); `None` when its threads can't be counted.
+pub fn single_threaded() -> Option<bool> {
+  thread_count().map(|threads| threads == 1)
+}
+
+/// [`apply_self`] for a packaged desktop app's process (`variant`), called
+/// by the app's host before it starts its web engine or any thread.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub fn apply_self_variant(
+  plan: &EnforcePlan,
+  variant: DesktopVariant,
+) -> Result<(), String> {
   let Some(linux) = &plan.linux else {
     return Err("the plan has no Linux part".to_string());
   };
@@ -990,7 +1044,8 @@ pub fn apply_self(plan: &EnforcePlan) -> Result<(), String> {
     Err(err) if fs || net || scoped => return Err(err),
     Err(_) => None,
   };
-  let program = seccomp_spec(&linux.seccomp, &linux.net).program();
+  let program =
+    seccomp_spec_variant(&linux.seccomp, &linux.net, variant).program();
   bind_prebound(&linux.prebound);
   // SAFETY: plain prctl/syscalls on this (only) thread
   unsafe {
@@ -1032,6 +1087,147 @@ pub fn apply_self(plan: &EnforcePlan) -> Result<(), String> {
   }
   let _ = APPLIED.set(plan.clone());
   Ok(())
+}
+
+/// The steps of [`trial_engine_namespaces`]'s child, as its exit status.
+mod trial {
+  pub const APPLY: i32 = 10;
+  pub const CLONE: i32 = 11;
+  pub const SETGROUPS: i32 = 12;
+  pub const UID_MAP: i32 = 13;
+  pub const GID_MAP: i32 = 14;
+  pub const NESTED: i32 = 15;
+  pub const CHROOT: i32 = 16;
+  pub const DIED: i32 = 17;
+}
+
+/// Writes `text` to `path` with plain syscalls (after a raw `clone`: no
+/// allocation, nothing but system calls).
+fn write_small(path: &std::ffi::CStr, text: &[u8]) -> bool {
+  // SAFETY: a NUL-terminated path and a buffer of the given length
+  unsafe {
+    let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+    if fd < 0 {
+      return false;
+    }
+    let n = libc::write(fd, text.as_ptr() as *const libc::c_void, text.len());
+    libc::close(fd);
+    n == text.len() as isize
+  }
+}
+
+/// What Chromium's namespace sandbox does first, done by a process this
+/// plan confines: a child in new user, PID and network namespaces
+/// (`clone`, as Chromium's launcher calls it) that denies `setgroups`,
+/// maps its own ids, makes a nested user namespace and changes its root.
+/// Returns the step that failed.
+fn engine_namespace_steps(uid_map: &[u8], gid_map: &[u8]) -> i32 {
+  // SAFETY: raw clone with no stack: the child is a copy of this (single)
+  // thread, runs only system calls and exits
+  let pid = unsafe {
+    libc::syscall(
+      libc::SYS_clone,
+      (ENGINE_NAMESPACE_FLAGS as libc::c_ulong)
+        | libc::SIGCHLD as libc::c_ulong,
+      0usize,
+      0usize,
+      0usize,
+      0usize,
+    )
+  };
+  if pid < 0 {
+    return trial::CLONE;
+  }
+  if pid == 0 {
+    // SAFETY: plain system calls with constant arguments, in the child
+    let nested = || unsafe { libc::unshare(libc::CLONE_NEWUSER) == 0 };
+    // SAFETY: as above; a NUL-terminated constant path
+    let rooted = || unsafe { libc::chroot(c"/proc/self/fdinfo".as_ptr()) == 0 };
+    let code = if !write_small(c"/proc/self/setgroups", b"deny") {
+      trial::SETGROUPS
+    } else if !write_small(c"/proc/self/uid_map", uid_map) {
+      trial::UID_MAP
+    } else if !write_small(c"/proc/self/gid_map", gid_map) {
+      trial::GID_MAP
+    } else if !nested() {
+      trial::NESTED
+    } else if !rooted() {
+      trial::CHROOT
+    } else {
+      0
+    };
+    // SAFETY: the child ends here
+    unsafe { libc::_exit(code) };
+  }
+  let mut status = 0;
+  // SAFETY: waiting for the child just cloned
+  unsafe { libc::waitpid(pid as libc::pid_t, &mut status, 0) };
+  if libc::WIFEXITED(status) {
+    libc::WEXITSTATUS(status)
+  } else {
+    trial::DIED
+  }
+}
+
+/// Whether Chromium's namespace sandbox still starts inside `plan`
+/// (`variant`), measured before this process commits to the plan: a forked
+/// child applies the same plan to itself and takes the engine's first
+/// steps ([`engine_namespace_steps`]). A desktop app on Chromium is
+/// confined only when this passes: under `no_new_privs` Chromium has no
+/// other sandbox for web content (its setuid helper can't gain root), so a
+/// plan its namespace sandbox can't start in would leave web content less
+/// contained than without the kernel sandbox. Must run while the process
+/// has one thread.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub fn trial_engine_namespaces(
+  plan: &EnforcePlan,
+  variant: DesktopVariant,
+) -> Result<(), String> {
+  if single_threaded() != Some(true) {
+    return Err("the process doesn't have exactly one thread".to_string());
+  }
+  // SAFETY: getuid / getgid have no failure mode
+  let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+  let uid_map = format!("{uid} {uid} 1\n").into_bytes();
+  let gid_map = format!("{gid} {gid} 1\n").into_bytes();
+  // SAFETY: fork of a single-threaded process; the child applies the plan
+  // to itself, probes and exits
+  let pid = unsafe { libc::fork() };
+  if pid < 0 {
+    return Err(format!("fork failed: {}", io::Error::last_os_error()));
+  }
+  if pid == 0 {
+    let code = match apply_self_variant(plan, variant) {
+      Ok(()) => engine_namespace_steps(&uid_map, &gid_map),
+      Err(_) => trial::APPLY,
+    };
+    // SAFETY: the child ends here
+    unsafe { libc::_exit(code) };
+  }
+  let mut status = 0;
+  // SAFETY: waiting for the child just forked
+  unsafe { libc::waitpid(pid, &mut status, 0) };
+  let code = if libc::WIFEXITED(status) {
+    libc::WEXITSTATUS(status)
+  } else {
+    trial::DIED
+  };
+  let step = match code {
+    0 => return Ok(()),
+    trial::APPLY => "the plan could not be applied",
+    trial::CLONE => {
+      "a process in new user, PID and network namespaces could not be made"
+    }
+    trial::SETGROUPS => "/proc/self/setgroups could not be written",
+    trial::UID_MAP => "the user id map could not be written",
+    trial::GID_MAP => "the group id map could not be written",
+    trial::NESTED => "a nested user namespace could not be made",
+    trial::CHROOT => "the root could not be changed",
+    _ => "the trial process died",
+  };
+  Err(format!(
+    "Chromium's namespace sandbox does not start inside the kernel sandbox here: {step}"
+  ))
 }
 
 /// Whether the kernel reports `no_new_privs` and a seccomp filter for this
@@ -1389,6 +1585,53 @@ mod tests {
     scoped.scope_signal = true;
     assert!(handled(&scoped, 5).is_err());
     assert_eq!(handled(&scoped, 6).unwrap().2, SCOPE_SIGNAL);
+  }
+
+  // a desktop app on Chromium keeps the three namespaces its engine's
+  // sandbox makes, and nothing else of the attack-surface list
+  #[test]
+  fn seccomp_program_for_a_desktop_engine() {
+    let variant = DesktopVariant {
+      engine_namespaces: true,
+    };
+    let p = seccomp_spec_variant(&full(), &NetPlan::Open, variant).program();
+    let eperm = eno(libc::EPERM);
+    // Chromium's launcher: user + PID + network namespaces, SIGCHLD
+    assert_eq!(
+      run_filter(&p, nr::CLONE, [0x7000_0011, 0, 0, 0, 0, 0]),
+      SECCOMP_RET_ALLOW
+    );
+    assert_eq!(
+      run_filter(&p, nr::UNSHARE, [0x1000_0000, 0, 0, 0, 0, 0]),
+      SECCOMP_RET_ALLOW
+    );
+    // a mount, UTS, IPC, cgroup or time namespace is still refused, alone
+    // or with the allowed ones
+    for flag in [0x0002_0000u32, 0x0200_0000, 0x0400_0000, 0x0800_0000] {
+      assert_eq!(run_filter(&p, nr::CLONE, [flag, 0, 0, 0, 0, 0]), eperm);
+      assert_eq!(
+        run_filter(&p, nr::CLONE, [flag | 0x7000_0000, 0, 0, 0, 0, 0]),
+        eperm
+      );
+      assert_eq!(run_filter(&p, nr::UNSHARE, [flag, 0, 0, 0, 0, 0]), eperm);
+    }
+    assert_eq!(run_filter(&p, nr::UNSHARE, [0x80, 0, 0, 0, 0, 0]), eperm);
+    assert_eq!(run_filter(&p, nr::SETNS, [0; 6]), eperm);
+    for n in nr::SURFACE {
+      assert_eq!(run_filter(&p, *n, [0; 6]), eperm, "syscall {n}");
+    }
+    assert_eq!(run_filter(&p, 435, [0; 6]), eno(libc::ENOSYS));
+    // the default variant is the headless program's
+    assert_eq!(
+      seccomp_spec_variant(&full(), &NetPlan::Open, DesktopVariant::default())
+        .program(),
+      seccomp_spec(&full(), &NetPlan::Open).program()
+    );
+    let headless = seccomp_spec(&full(), &NetPlan::Open).program();
+    assert_eq!(
+      run_filter(&headless, nr::CLONE, [0x7000_0011, 0, 0, 0, 0, 0]),
+      eperm
+    );
   }
 
   #[test]

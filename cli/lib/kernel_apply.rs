@@ -2,8 +2,9 @@
 
 //! denext: what the CLI and `denort` share when the kernel sandbox applies
 //! (DENEXT.md items 425 and 901): the machine's mechanisms, the context
-//! pieces read from the process, and a compiled program's startup
-//! ([`start_compiled`]).
+//! pieces read from the process, a compiled program's startup
+//! ([`start_compiled`]) and a packaged desktop app's ([`start_desktop`],
+//! item 488).
 //!
 //! A compiled program applies its sandbox in-process, with no re-exec: its
 //! grant is baked, its modules are embedded, and it has fetched nothing, so
@@ -33,6 +34,10 @@ use deno_runtime::deno_permissions::PermissionsOptions;
 use deno_runtime::deno_permissions::kernel_sandbox_state;
 use deno_sandbox::plan::EnforcePlan;
 
+use crate::kernel_desktop::DesktopReport;
+use crate::kernel_desktop::DesktopSandbox;
+use crate::kernel_desktop::EngineFacts;
+use crate::kernel_desktop::engine_nests;
 use crate::kernel_inherit;
 use crate::kernel_plan::plan_for;
 use crate::kernel_policy::Capabilities;
@@ -48,6 +53,7 @@ use crate::kernel_sandbox::KernelSandboxMode;
 use crate::kernel_sandbox::ModeResolution;
 use crate::kernel_sandbox::compiled_resolution;
 use crate::kernel_sandbox::compiled_resolution_with;
+use crate::kernel_sandbox::desktop_resolution;
 
 /// The mechanisms this machine offers, and whether this runtime has a Mode A
 /// enforcer for them (Linux on x86_64 / aarch64, macOS).
@@ -287,31 +293,549 @@ fn fatal_list<'a>(
     .collect()
 }
 
+// ---------------------------------------------------------------------------
+// A packaged desktop app's startup (DENEXT.md item 488)
+// ---------------------------------------------------------------------------
+
+/// The outside helper a confined desktop app keeps for what must happen
+/// outside its sandbox (`deno_sandbox::outside`).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use deno_sandbox::outside;
+
+/// What a desktop app's startup knows beyond a compiled program's.
+#[derive(Debug, Default)]
+pub struct DesktopExtras<'a> {
+  /// This process is a fork of the app with no engine (a worker, a
+  /// sidecar): it is held by the app's sandbox when the app has one, and
+  /// confines itself like a compiled program when the app is headless-only.
+  pub worker: bool,
+  /// The baked permissions, which decide the mode
+  /// ([`CompiledStart::options`] is the kernel's grant, widened for the
+  /// engine). `None`: the grant itself.
+  pub baked: Option<&'a PermissionsOptions>,
+  /// The folders whose programs the engine runs (Linux), and the install
+  /// (`kernel_desktop::EnginePaths`).
+  pub exec: Vec<PathBuf>,
+  pub install: Option<PathBuf>,
+  /// What the grant already leaves to Deno's checks
+  /// (`kernel_desktop::DesktopGrant::residuals`).
+  pub residuals: Vec<String>,
+  /// The harnesses' later stage for `auto`
+  /// (`kernel_sandbox::KERNEL_SANDBOX_STAGE_ENV_VAR`), which only raises it.
+  pub stage: Option<crate::kernel_sandbox::AutoStage>,
+  /// Why the app's own process can't be confined, when the caller knows a
+  /// reason the engine table doesn't (an app without an identifier under a
+  /// scoped grant): the app is then headless-only.
+  pub blocked: Option<String>,
+  /// What the outside helper may do; `None`: no helper.
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  pub outside: Option<outside::Config>,
+}
+
+static DESKTOP_REPORT: std::sync::OnceLock<DesktopReport> =
+  std::sync::OnceLock::new();
+
+/// What a desktop app's startup decided, for the capability probe. `None`
+/// outside a packaged desktop app (or before its startup ran).
+pub fn desktop_report() -> Option<&'static DesktopReport> {
+  DESKTOP_REPORT.get()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+static OUTSIDE: std::sync::OnceLock<outside::Outside> =
+  std::sync::OnceLock::new();
+
+/// The outside helper of this (confined) desktop app.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn desktop_outside() -> Option<&'static outside::Outside> {
+  OUTSIDE.get()
+}
+
+/// Whether this process has exactly one thread (Linux: counted; elsewhere
+/// not needed, and reported as it can be told).
+fn single_threaded() -> bool {
+  #[cfg(target_os = "linux")]
+  {
+    deno_sandbox::enforce_linux::single_threaded() == Some(true)
+  }
+  #[cfg(not(target_os = "linux"))]
+  {
+    false
+  }
+}
+
+/// A desktop app's startup decision: the outcome, and the report the
+/// capability probe gives.
+pub type DesktopDecision = (CompiledOutcome, DesktopReport);
+
+/// Builds a desktop app's decision.
+fn desktop_outcome(
+  mut resolution: ModeResolution,
+  engine: Engine,
+  sandbox: DesktopSandbox,
+  reason: String,
+  residuals: Vec<String>,
+  plan: Option<EnforcePlan>,
+) -> DesktopDecision {
+  let enforcing = sandbox == DesktopSandbox::Kernel;
+  if !enforcing && resolution.mode.fails_closed() {
+    // the app's own process isn't confined: it runs held by Deno's checks
+    // (a strict package says so; it does not refuse to start)
+    resolution.mode = KernelSandboxMode::Off;
+    resolution.reason = crate::kernel_sandbox::ModeReason::DesktopEngine;
+    resolution.auto_chosen = false;
+  }
+  (
+    CompiledOutcome {
+      resolution,
+      enforcing,
+      cache_dir: None,
+      plan,
+    },
+    DesktopReport {
+      sandbox,
+      reason,
+      engine,
+      residuals,
+    },
+  )
+}
+
 /// A packaged desktop app's kernel-sandbox startup: in place, before the
 /// web engine starts and before any thread. `strict` is
-/// `desktop.permissions: "strict"`, `engine` the engine baked into the
-/// package ([`Engine`]).
-///
-/// A stub until WP-C (denext.30): it applies nothing and returns the
-/// not-enforced outcome a desktop app gets today (the baked mode resolved as
-/// for any compiled program, `enforcing: false`, no cache folder, no plan).
-/// Nothing calls it yet.
+/// `desktop.permissions: "strict"` (a baked `enforce`, which
+/// [`CompiledStart::baked`] carries), `engine` the engine baked into the
+/// package ([`Engine`]). See [`start_desktop_with`].
 pub fn start_desktop(
   start: &CompiledStart,
   strict: bool,
   engine: Engine,
 ) -> Result<CompiledOutcome, CompiledStartError> {
-  let _ = (strict, engine);
-  Ok(CompiledOutcome {
-    resolution: compiled_resolution(
-      start.baked,
-      start.dev_build,
-      start.options,
-    ),
-    enforcing: false,
-    cache_dir: None,
-    plan: None,
-  })
+  start_desktop_with(start, strict, engine, DesktopExtras::default())
+}
+
+/// A packaged desktop app's kernel-sandbox startup.
+///
+/// The app's host calls the runtime before it starts its web engine or any
+/// thread, and the sandbox is applied there, in place, as a compiled
+/// program's ([`start_compiled`]): no re-exec. What differs is the process:
+/// it hosts a web engine, so
+///
+/// - whether it can be confined at all depends on the engine and the
+///   machine (`kernel_desktop::engine_nests`). Where it can't (CEF on
+///   macOS, CEF on a Linux machine with only Chromium's setuid helper, a
+///   host that started the engine first on Linux), the app runs with its
+///   own process unconfined and is reported `headless-only`: never a
+///   refusal, also under a baked `enforce` (one line on stderr says so
+///   then). A system without an enforcer for desktop apps reports `none`;
+/// - macOS applies the desktop Seatbelt profile (allow by default, the
+///   grant's denies, no LaunchServices opens, AppleEvents or job
+///   submission), Linux the plan with the engine's needs
+///   (`kernel_desktop::desktop_plan`) and, under Chromium, the namespaces
+///   its sandbox makes, after a trial that those still work inside the
+///   plan (`enforce_linux::trial_engine_namespaces`);
+/// - the outside helper is forked right before the sandbox applies, for
+///   opening links and the updater's swap.
+///
+/// A development build, `off`, `-A` and (in the preview) `auto` apply
+/// nothing. Under `enforce`, a rule the OS can't hold and a failed apply
+/// refuse to start (a mode `auto` chose falls back instead), exactly as for
+/// a compiled program. The decision is recorded for the capability probe
+/// ([`desktop_report`]) and for `kernel_sandbox::check_compiled` (the
+/// first one of a process).
+pub fn start_desktop_with(
+  start: &CompiledStart,
+  strict: bool,
+  engine: Engine,
+  extras: DesktopExtras,
+) -> Result<CompiledOutcome, CompiledStartError> {
+  let (outcome, report) = decide_desktop(start, strict, engine, extras)?;
+  let _ = DESKTOP_REPORT.set(report);
+  crate::kernel_sandbox::set_desktop_resolution(outcome.resolution.clone());
+  Ok(outcome)
+}
+
+/// [`start_desktop_with`] without the recording: decides, applies, and
+/// returns the decision.
+pub fn decide_desktop(
+  start: &CompiledStart,
+  strict: bool,
+  engine: Engine,
+  extras: DesktopExtras,
+) -> Result<DesktopDecision, CompiledStartError> {
+  // `strict` is the baked enforce: the resolution carries it
+  let _ = strict;
+  let resolution = desktop_resolution(
+    start.baked,
+    start.dev_build,
+    extras.baked.unwrap_or(start.options),
+    engine,
+    extras.stage,
+  );
+  let mode = resolution.mode;
+  let auto = resolution.auto_chosen;
+  let mut residuals = extras.residuals.clone();
+  match mode {
+    KernelSandboxMode::Warn | KernelSandboxMode::Enforce => {}
+    KernelSandboxMode::Broker => {
+      return Err(refuse(
+        mode,
+        "the supervising broker can't hold a process that hosts a web engine",
+      ));
+    }
+    KernelSandboxMode::Off | KernelSandboxMode::Auto => {
+      let reason = resolution.reason.describe().to_string();
+      return Ok(desktop_outcome(
+        resolution,
+        engine,
+        DesktopSandbox::None,
+        reason,
+        Vec::new(),
+        None,
+      ));
+    }
+  }
+  // inside a sandbox an ancestor applied (the app's own, for a fork of
+  // it): that sandbox holds this process, and a second one isn't stacked
+  // (macOS can't; the permissions are clamped to the ancestor's grant)
+  if !kernel_inherit::inherited_layers().is_empty() {
+    return Ok(desktop_outcome(
+      resolution,
+      engine,
+      DesktopSandbox::Kernel,
+      "held by the kernel sandbox of the process that started it".to_string(),
+      residuals,
+      None,
+    ));
+  }
+  let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
+  let mut ctx = compiled_context(mode, start.exec_strict, cwd);
+  // a desktop app has its own enforcers: none on Windows (the small tier
+  // is a compiled program's)
+  ctx.caps = detect_capabilities();
+  let single = single_threaded();
+  let facts = EngineFacts {
+    os: ctx.caps.os,
+    engine,
+    enforcer_built: ctx.caps.enforcer_built,
+    single_threaded: single,
+    user_namespaces: ctx.caps.user_namespaces,
+    worker: extras.worker,
+  };
+  let not_confined = |resolution: ModeResolution,
+                      sandbox: DesktopSandbox,
+                      reason: String| {
+    if mode == KernelSandboxMode::Enforce && !auto {
+      #[allow(clippy::print_stderr, reason = "the one line a strict app says")]
+      {
+        eprintln!(
+          "Warning kernel sandbox (desktop, {}): this app's own process is not confined: {reason}. Deno's permission checks hold it.",
+          sandbox.as_str()
+        );
+      }
+    }
+    desktop_outcome(resolution, engine, sandbox, reason, Vec::new(), None)
+  };
+  if let Err(not) = engine_nests(&facts) {
+    return Ok(not_confined(resolution, not.sandbox, not.reason));
+  }
+  if !extras.worker
+    && let Some(why) = &extras.blocked
+  {
+    return Ok(not_confined(
+      resolution,
+      DesktopSandbox::HeadlessOnly,
+      why.clone(),
+    ));
+  }
+  if extras.worker && cfg!(target_os = "linux") && !single {
+    // a fork of a headless-only app, started by a host that doesn't call
+    // the runtime first: it can't confine itself in place either
+    return Ok(not_confined(
+      resolution,
+      DesktopSandbox::HeadlessOnly,
+      "the app's host started threads before the runtime could confine this process".to_string(),
+    ));
+  }
+  let mut compiled = compile_policy(start.options, &ctx);
+  if mode == KernelSandboxMode::Warn {
+    let deno_only = compiled
+      .gaps
+      .iter()
+      .filter(|g| g.resolution == GapResolution::FailOpen)
+      .count();
+    #[allow(clippy::print_stderr, reason = "the warn mode's one line")]
+    {
+      eprintln!(
+        "Warning kernel sandbox (warn, desktop): nothing is refused; {deno_only} rule(s) would be held by Deno's checks only."
+      );
+    }
+    return Ok(desktop_outcome(
+      resolution,
+      engine,
+      DesktopSandbox::None,
+      "warn: nothing is refused".to_string(),
+      Vec::new(),
+      None,
+    ));
+  }
+  // a mode `auto` chose never refuses to start: where enforce can't hold
+  // the grant the app runs as it did, and the report says why
+  let fall_back = |resolution: ModeResolution, why: String| {
+    #[allow(clippy::print_stderr, reason = "the warn mode's one line")]
+    {
+      eprintln!(
+        "Warning kernel sandbox (warn, auto): nothing is refused; enforce can't hold this app's grant here ({why}), so its rules are held by Deno's checks only."
+      );
+    }
+    desktop_outcome(
+      resolution,
+      engine,
+      DesktopSandbox::None,
+      format!("enforce can't hold this app's grant here: {why}"),
+      Vec::new(),
+      None,
+    )
+  };
+  if let Some(base) = &start.cache_base {
+    let dir = base.join(compiled.hash());
+    create_cache_overlay(&dir);
+    if is_private_dir(base) && is_private_dir(&dir) {
+      ctx.cache_overlay = Some(canonical_dir(dir));
+      compiled = compile_policy(start.options, &ctx);
+    }
+  }
+  let hint = "Package it with other permissions, or with --kernel-sandbox=warn to run with Deno's checks only.";
+  let fatal = fatal_list(compiled.gaps.iter());
+  let (plan, gaps) = if fatal.is_empty() {
+    plan_for(&compiled, &ctx)
+  } else {
+    (None, Vec::new())
+  };
+  let fatal = if fatal.is_empty() {
+    fatal_list(gaps.iter())
+  } else {
+    fatal
+  };
+  if !fatal.is_empty() {
+    if auto {
+      return Ok(fall_back(
+        resolution,
+        format!("{} rule(s) the OS can't hold", fatal.len()),
+      ));
+    }
+    return Err(refuse(
+      mode,
+      format!(
+        "the OS can't hold these rules here:\n{}\n{hint}",
+        fatal.join("\n")
+      ),
+    ));
+  }
+  let Some(mut plan) = plan else {
+    if auto {
+      return Ok(fall_back(resolution, "no plan for this OS".to_string()));
+    }
+    return Err(refuse(mode, "no plan for this OS"));
+  };
+  if !extras.worker {
+    crate::kernel_desktop::desktop_plan(
+      &mut plan,
+      &extras.exec,
+      extras.install.as_deref(),
+      // removing variables while other threads run is a data race: an app
+      // confined after its engine started (macOS, a host that doesn't call
+      // first) keeps its environment
+      single,
+    );
+    if plan.env_keep.is_none() && compiled.policy.env_scrub.is_some() {
+      residuals.push("environment: not scrubbed (the app's host started threads before the runtime could confine the process)".to_string());
+    }
+    residuals.extend(crate::kernel_desktop::standing_residuals(
+      ctx.caps.os,
+      engine,
+    ));
+  }
+  let engine_namespaces =
+    !extras.worker && engine == Engine::Cef && ctx.caps.os == TargetOs::Linux;
+  #[cfg(target_os = "linux")]
+  if engine_namespaces
+    && let Err(why) = deno_sandbox::enforce_linux::trial_engine_namespaces(
+      &plan,
+      deno_sandbox::enforce_linux::DesktopVariant {
+        engine_namespaces: true,
+      },
+    )
+  {
+    // never run web content with less than it has today: without the
+    // kernel sandbox Chromium keeps its own
+    return Ok(not_confined(resolution, DesktopSandbox::HeadlessOnly, why));
+  }
+  let mut layers = kernel_inherit::inherited_layers().to_vec();
+  layers.push(kernel_inherit::layer_for(
+    start.options,
+    &ctx.cwd,
+    plan.probe.clone(),
+  ));
+  if layers.len() > kernel_inherit::MAX_LAYERS {
+    if auto {
+      return Ok(fall_back(
+        resolution,
+        "too many nested kernel sandboxes".to_string(),
+      ));
+    }
+    return Err(refuse(mode, "too many kernel sandboxes are nested here"));
+  }
+  let carried = kernel_inherit::Carried {
+    format: kernel_inherit::CARRIER_FORMAT,
+    layers,
+  };
+  // the outside helper keeps what the process can do now: forked last
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  if !extras.worker
+    && let Some(config) = extras.outside
+  {
+    match outside::start(config) {
+      Ok(helper) => {
+        let _ = OUTSIDE.set(helper);
+      }
+      Err(err) => residuals.push(format!(
+        "outside helper: not started ({err}); links don't open in the browser and the updater can't swap the install from inside the sandbox"
+      )),
+    }
+  }
+  if let Err(why) = apply_desktop_in_place(
+    &plan,
+    &carried,
+    extras.worker,
+    engine_namespaces,
+    single,
+  ) {
+    if auto {
+      return Ok(fall_back(resolution, why));
+    }
+    return Err(refuse(mode, why));
+  }
+  kernel_sandbox_state::set_enforcing();
+  deno_runtime::deno_core::error::set_permission_denied_note(
+    kernel_inherit::permission_denied_note,
+  );
+  let reason = if extras.worker {
+    "a fork of the app, confined in place like a compiled program"
+  } else {
+    "the app's process, its native code and its children are held to the baked grant"
+  };
+  let mut decision = desktop_outcome(
+    resolution,
+    engine,
+    DesktopSandbox::Kernel,
+    reason.to_string(),
+    residuals,
+    Some(plan),
+  );
+  decision.0.cache_dir = ctx.cache_overlay.clone();
+  Ok(decision)
+}
+
+/// [`apply_in_place`] for a desktop app's process: the desktop Seatbelt
+/// profile (a fork without an engine takes the cli profile), the Linux plan
+/// with the engine's namespaces, and no change to the environment once
+/// other threads exist (the carrier then reaches children through the
+/// pinned child environment alone).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn apply_desktop_in_place(
+  plan: &EnforcePlan,
+  carried: &kernel_inherit::Carried,
+  worker: bool,
+  engine_namespaces: bool,
+  single_threaded: bool,
+) -> Result<(), String> {
+  use std::os::fd::IntoRawFd;
+
+  use deno_sandbox::inherit::POLICY_ENV_VAR;
+  #[cfg(target_os = "macos")]
+  {
+    match deno_sandbox::macos::is_sandboxed() {
+      Some(false) => {}
+      Some(true) => {
+        return Err(
+          "this process already runs inside another Seatbelt sandbox (an app sandbox, an agent's sandbox, sandbox-exec), and macOS doesn't stack a second profile"
+            .to_string(),
+        );
+      }
+      None => {
+        return Err(
+          "whether the process is sandboxed can't be measured here (no sandbox_check)"
+            .to_string(),
+        );
+      }
+    }
+    if !deno_sandbox::macos::sandbox_init_available() {
+      return Err("sandbox_init is not available here".to_string());
+    }
+  }
+  let carrier =
+    deno_sandbox::inherit::seal(&carried.to_bytes()).map_err(|err| {
+      format!("the policy for child processes can't be handed down: {err}")
+    })?;
+  if single_threaded {
+    scrub_env(plan);
+  }
+  #[cfg(target_os = "linux")]
+  {
+    let _ = worker;
+    deno_sandbox::enforce_linux::apply_self_variant(
+      plan,
+      deno_sandbox::enforce_linux::DesktopVariant { engine_namespaces },
+    )?;
+  }
+  #[cfg(target_os = "macos")]
+  {
+    let _ = engine_namespaces;
+    let Some(macos) = &plan.macos else {
+      return Err("the plan has no macOS part".to_string());
+    };
+    let profile = if worker {
+      deno_sandbox::seatbelt::cli_profile(macos)
+    } else {
+      deno_sandbox::seatbelt::desktop_profile(macos)
+    };
+    deno_sandbox::macos::apply_profile(&profile)?;
+    if deno_sandbox::macos::is_sandboxed() != Some(true) {
+      return Err("the profile was applied but doesn't show".to_string());
+    }
+    if let Some(probe) = &plan.probe
+      && deno_sandbox::macos::refuses_read(probe) != Some(true)
+    {
+      return Err(format!(
+        "{} is still readable with the profile applied: it doesn't hold here",
+        probe.display()
+      ));
+    }
+  }
+  // kept open for the life of the process: the descriptor children inherit
+  let fd = carrier.into_raw_fd();
+  if single_threaded {
+    // SAFETY: one thread (the host called before it started any)
+    unsafe { std::env::set_var(POLICY_ENV_VAR, fd.to_string()) };
+  }
+  deno_runtime::deno_process::repin_child_env_var(
+    POLICY_ENV_VAR.into(),
+    fd.to_string().into(),
+  );
+  deno_resolver::npmrc::set_kernel_confined();
+  Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn apply_desktop_in_place(
+  _plan: &EnforcePlan,
+  _carried: &kernel_inherit::Carried,
+  _worker: bool,
+  _engine_namespaces: bool,
+  _single_threaded: bool,
+) -> Result<(), String> {
+  Err("no kernel enforcer for desktop apps on this OS".to_string())
 }
 
 /// A compiled program's kernel-sandbox startup, first thing in `main`
@@ -785,6 +1309,88 @@ mod tests {
     let supervised = compile_policy(&options, &ctx);
     assert_eq!(supervised.policy.shape, Shape::ModeB);
     assert_eq!(supervised.fatal_gaps().count(), 0, "{:?}", supervised.gaps);
+  }
+
+  // DENEXT.md item 488: a desktop app whose mode applies nothing reports
+  // `none` with the reason, and a development build is off whatever is
+  // baked
+  #[test]
+  fn a_desktop_app_that_applies_nothing_reports_none() {
+    let options = options(&["/tmp"]);
+    let decide = |baked, dev_build, engine| {
+      decide_desktop(
+        &CompiledStart {
+          baked,
+          exec_strict: false,
+          dev_build,
+          options: &options,
+          cache_base: None,
+        },
+        baked == Some(KernelSandboxMode::Enforce),
+        engine,
+        DesktopExtras::default(),
+      )
+    };
+    for (baked, dev_build, why) in [
+      (None, false, "auto applies nothing yet"),
+      (Some(KernelSandboxMode::Off), false, "turned off"),
+      (
+        Some(KernelSandboxMode::Auto),
+        false,
+        "auto applies nothing yet",
+      ),
+      (
+        Some(KernelSandboxMode::Enforce),
+        true,
+        "a desktop development build",
+      ),
+    ] {
+      for engine in [Engine::Webview, Engine::Cef] {
+        let (outcome, report) = decide(baked, dev_build, engine).unwrap();
+        assert!(!outcome.enforcing, "{baked:?} {engine:?}");
+        assert_eq!(outcome.resolution.mode, KernelSandboxMode::Off);
+        assert!(outcome.plan.is_none());
+        assert_eq!(report.sandbox, DesktopSandbox::None);
+        assert_eq!(report.engine, engine);
+        assert!(report.reason.contains(why), "{}", report.reason);
+      }
+    }
+    // a baked broker can't hold a process with a web engine in it
+    let err = decide(Some(KernelSandboxMode::Broker), false, Engine::Webview)
+      .unwrap_err();
+    assert!(err.0.contains("web engine"), "{err}");
+  }
+
+  // CEF on macOS is headless-only under a baked enforce: the app starts,
+  // unconfined, and says why (nothing is applied, so this runs anywhere a
+  // Mac builds it)
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn macos_cef_is_headless_only_and_starts() {
+    let options = options(&["/tmp"]);
+    let (outcome, report) = decide_desktop(
+      &CompiledStart {
+        baked: Some(KernelSandboxMode::Enforce),
+        exec_strict: false,
+        dev_build: false,
+        options: &options,
+        cache_base: None,
+      },
+      true,
+      Engine::Cef,
+      DesktopExtras::default(),
+    )
+    .unwrap();
+    assert!(!outcome.enforcing);
+    assert_eq!(report.sandbox, DesktopSandbox::HeadlessOnly);
+    assert!(report.reason.contains("CEF on macOS"), "{}", report.reason);
+    // the compiled-program guard must not refuse it: the mode it sees is
+    // off, for the engine
+    assert_eq!(outcome.resolution.mode, KernelSandboxMode::Off);
+    assert_eq!(
+      outcome.resolution.reason,
+      crate::kernel_sandbox::ModeReason::DesktopEngine
+    );
   }
 
   #[cfg(unix)]

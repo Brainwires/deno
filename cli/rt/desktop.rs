@@ -60,6 +60,7 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_message_box,
     op_desktop_system_capabilities,
     op_desktop_platform_features,
+    op_desktop_open_external,
     op_desktop_title_bar_preferences,
     op_desktop_secret_supported,
     op_desktop_secret_request,
@@ -3046,6 +3047,19 @@ pub const DESKTOP_JS: &str = r#"
       configurable: true,
       enumerable: true,
     },
+    // Opens an http:, https: or mailto: URL in the user's browser or mail
+    // program (DENEXT.md item 488): true when the system's opener was
+    // started. Needs the run permission for that opener, and works in an
+    // app the kernel sandbox holds, where a child process can't open
+    // anything outside it.
+    openExternal: {
+      value: function openExternal(url) {
+        return op_desktop_open_external(String(url));
+      },
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    },
     // How the user set up title bars (laufey API 47), for an app that draws
     // its own: the buttons on each side, the double-click action, the
     // colour scheme. A promise of a fresh object per call; null outside a
@@ -5352,6 +5366,18 @@ mod tests {
     let app_body = &app_body[..app_body.find("break;").unwrap()];
     assert!(!app_body.contains("windows.get("), "{app_body}");
     assert!(window_case < app_case);
+  }
+
+  #[test]
+  fn desktop_js_installs_open_external() {
+    // DENEXT.md item 488: Deno.desktop.openExternal(url).
+    for needle in [
+      "openExternal: {",
+      "value: function openExternal(url) {",
+      "return op_desktop_open_external(String(url));",
+    ] {
+      assert!(DESKTOP_JS.contains(needle), "missing: {needle}");
+    }
   }
 
   #[test]

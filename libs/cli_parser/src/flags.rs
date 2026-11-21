@@ -1008,6 +1008,11 @@ pub struct InternalFlags {
   /// (`Metadata::desktop_dev`), the only kind whose runtime honours the
   /// development switches in its environment.
   pub is_desktop_dev: bool,
+  /// Set by `deno desktop` to the render backend it packages the app for
+  /// (`--backend` / deno.json `desktop.backend`; `None`: `webview`). The
+  /// binary records it as its web engine (`Metadata::desktop_engine`), which
+  /// decides whether the kernel sandbox can hold the app's own process.
+  pub desktop_backend: Option<String>,
   /// Set by `deno compile --bundle` when the bundled output contains
   /// references that need to resolve against npm packages at runtime
   /// (CJS dependencies, native addons). When true, the standalone

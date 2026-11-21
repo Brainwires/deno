@@ -1261,6 +1261,7 @@ mod trace_tests {
       cache_overlay: None,
       broker: None,
       expanded_write: Vec::new(),
+      entries: Vec::new(),
     }
   }
 

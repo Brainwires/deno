@@ -19633,6 +19633,149 @@ where the changes are discussed.
        `supervisor_as_pid_1` runs where `unshare` can make a PID namespace
        without privileges (the new `kernelSandboxPidNamespace` condition).
      - Node tests enabled: none; no Node API changes.
+
+488. **`feat(kernel)`: the kernel sandbox for packaged desktop apps**
+     (runtime, CLI; `cli/lib/{kernel_desktop,kernel_apply,kernel_sandbox}.rs`,
+     `cli/rt/{kernel_desktop,run}.rs`, `cli/rt_desktop/{kernel_start,lib}.rs`,
+     `libs/sandbox/{seatbelt,enforce_linux,outside,lib}.rs`,
+     `runtime/ops/desktop.rs`, `runtime/ops/desktop_update/swap.rs`,
+     `cli/sandbox/mod.rs`, `cli/standalone/binary.rs`,
+     `cli/lib/standalone/binary.rs`, `cli/tools/{compile,desktop}.rs`,
+     `libs/cli_parser/src/flags.rs`; denext.30's WP-C). A desktop app's
+     process hosts its web engine, so the sandbox a compiled program applies
+     in place (item 473) needs three things there: the engine must be able
+     to run inside it, it must apply before the engine starts a thread, and
+     what an app does through the system (open a link, swap its install)
+     must still work.
+     - **Mode.** `RunKind::DesktopPackaged { strict, engine }` resolves as a
+       compiled program: only the baked mode counts (no flag, environment,
+       deno.json or terminal), a development build is off, plain `-A` is
+       off, and `auto` applies what its stage says (a desktop app honours
+       the harnesses' raise-only `DENO_INTERNAL_KERNEL_SANDBOX_STAGE`, so the
+       desktop beds can soak the next stage). `strict`
+       (`desktop.permissions: "strict"`) is carried as a baked `enforce`:
+       there is no second switch. `deno compile` / `deno desktop` take
+       `--kernel-sandbox=enforce` and `auto` for a desktop app on every
+       target (`broker` is refused), record the engine in the binary
+       (`Metadata::desktop_engine`, from `--backend` / `desktop.backend`),
+       and say what the package gets for its target and engine.
+     - **Engines** (`kernel_desktop::engine_nests`). Confined in place:
+       WKWebView on macOS, WebKitGTK on Linux, CEF on Linux where Chromium's
+       namespace sandbox works. Reported `headless-only`, the app's own
+       process left unconfined: CEF on macOS (its helpers apply their own
+       Seatbelt profile and macOS stacks no second one, experiment E1); CEF
+       on a Linux machine with only Chromium's setuid helper (`no_new_privs`
+       would disable it and leave web content unsandboxed, E2); any Linux
+       app whose host started its engine before the runtime was called; an
+       app with a scoped grant and no identifier (its engine's folders can't
+       be named). `none`: Windows (no enforcer for desktop apps), `off`, a
+       development build, `-A`, the preview's `auto`. An engine that can't
+       nest is never a refusal to start, also under a baked `enforce`: the
+       app starts, one line on stderr says its own process is not confined,
+       and the probe says why. A rule the OS can't hold and a failed apply
+       still refuse under `enforce` (a mode `auto` chose falls back), as for
+       a compiled program. A fork of the app (a worker, a sidecar) is held
+       by the app's sandbox, which it inherits, and confines itself like a
+       compiled program where the app is headless-only.
+     - **Before the engine.** The runtime library exports
+       `laufey_runtime_prestart(engine, *exit_code)`; a host that knows it
+       calls it first thing in `main`, before the single-instance check, the
+       toolkit and the engine. Everything that must precede the sandbox
+       happens there (a pending UI update, the update watchdog, a
+       self-extracting app's files, the working directory), then
+       `kernel_apply::start_desktop_with` decides and applies. A host that
+       doesn't call it (the pinned laufey 0.9.0) starts the runtime as
+       before and the same startup runs from `laufey_runtime_start`: macOS
+       still confines the process there (a Seatbelt profile holds every
+       thread at once; the environment is then not scrubbed, since removing
+       variables under running threads is a race), Linux reports the app
+       headless-only (Landlock holds only threads made afterwards, and
+       `apply_self` refuses a process with more than one). The host half is
+       laufey's branch `kernel30/prestart` (one optional call in the Linux
+       and macOS WebView hosts and the Linux CEF host; no API version
+       change): until the pin moves to it, Linux desktop apps are
+       headless-only.
+     - **macOS: the desktop Seatbelt profile** (`seatbelt::desktop_profile`).
+       Allow by default (the window server, the GPU, the pasteboard, the
+       keychain, AppKit's services), then what the grant doesn't cover: file
+       contents outside the read scope and writes outside the write scope
+       (the cli profile's order: allows, denies, re-allows), code mapped
+       from outside the load scope, the system and the install, programs
+       without a run grant, IP sockets per the plan (no network grant: the
+       loopback interface only), Unix sockets but the plan's and the system
+       log's, and always `lsopen`, `appleevent-send` and `job-creation`.
+       Mach services, sysctl reads and signals are not narrowed.
+     - **Linux: the desktop variant** (`enforce_linux::DesktopVariant`,
+       `kernel_desktop::desktop_plan`). The plan of the grant plus: Unix
+       sockets and route netlink, no abstract-socket scope, no
+       signal-to-self rule, `execve` of the engine's helper programs only
+       (WebKitGTK's and GStreamer's folders, the install) when there is no
+       run grant; under CEF, `clone` / `unshare` may make user, PID and
+       network namespaces (every other namespace flag, `setns` and the rest
+       of the attack-surface list stay refused) and `/proc` is writable
+       (the id maps of each new process). Before a CEF app commits, a forked
+       child applies the same plan and takes Chromium's first steps
+       (`trial_engine_namespaces`: the namespaces, the id maps, a nested
+       user namespace, `chroot`); if that fails the app is headless-only,
+       never confined with web content less contained than before.
+     - **The engine's paths** (`kernel_desktop::engine_paths`) are added to
+       the kernel's grant only, never to Deno's checks: system fonts,
+       themes and toolkit data, GPU devices, the session's runtime folder,
+       the temp folder, the app's own data and cache folders (created
+       first), and per engine the WebKit / HTTP storage / saved-state
+       folders named after the app identifier (macOS) or the per-user font,
+       shader and certificate caches (Linux). The network is not narrowed
+       by host in a desktop app: any network grant leaves the kernel's
+       network open and is reported (host rules need the broker, which
+       can't hold a process hosting an engine); with no network grant macOS
+       keeps the app to loopback, Linux can't.
+     - **The outside helper** (`deno_sandbox::outside`). Forked right before
+       the sandbox applies, it stays unconfined and does only what it was
+       configured with before the fork: run the system opener with one
+       `http:`, `https:` or `mailto:` URL of printable ASCII (checked in the
+       helper; only for an app whose run grant names the opener), and start
+       the updater's swap helper for this install in its two modes (every
+       argument, the working directory and the environment fixed at the
+       fork). After the fork it only makes system calls on memory that
+       exists. `Deno.desktop.openExternal(url)` uses it (and runs the
+       opener directly in an app that isn't confined);
+       `desktop_update::swap::spawn_helper` goes through it in a confined
+       app.
+     - **The probe.** `Deno.desktop.platformFeatures()` gains
+       `kernelSandbox: "kernel" | "headless-only" | "none"` and
+       `kernelSandboxReason` (its `sandbox` key was taken: the Chromium
+       sandbox web content runs in).
+     - User-facing note: a desktop app packaged with
+       `--kernel-sandbox=enforce` is held by the kernel on macOS (WebView)
+       and, with a host that calls the runtime first, on Linux (WebView, and
+       CEF where Chromium's namespace sandbox works); elsewhere it runs as
+       before and `platformFeatures().kernelSandbox` says `headless-only`
+       or `none` with the reason. Inside the sandbox a child `open` /
+       `osascript` opens nothing: use `Deno.desktop.openExternal`.
+     - Known gaps: the full-app updater stages next to the install, which a
+       scoped write grant doesn't cover (staging is refused there; the swap
+       itself is routed outside); Linux leaves the session bus, every Unix
+       socket the user can reach and the network open; macOS leaves WebKit's
+       XPC processes outside the profile and narrows no mach service;
+       Windows has no enforcer for desktop apps; `sys` narrowing is not
+       applied in a desktop app.
+     - Tests: `kernel_sandbox::tests::{auto_stage_matrix_desktop_packaged,
+       desktop_packaged_reads_only_the_baked_mode}`;
+       `kernel_desktop::tests` (the engine table, the packaged guarantee,
+       the engine paths, the grant, the desktop plan); `kernel_apply::tests`
+       (`a_desktop_app_that_applies_nothing_reports_none`,
+       `macos_cef_is_headless_only_and_starts`); `deno_sandbox`:
+       `seatbelt::tests::desktop_profile_*`,
+       `enforce_linux::tests::seccomp_program_for_a_desktop_engine`,
+       `outside::tests`; the desktop e2e area `kernelsandbox`
+       (`.github/denext-runtime/e2e`, fork-CLI areas): the probe per leg,
+       `strict_native_write_refused`, `open_external_still_works`,
+       `macos_cef_headless_only_reported`, `linux_cef_setuid_only_reported`
+       and a row each for file dialogs, notifications, the tray, deep
+       links, the secure store and sidecars (the updater's swap is noted,
+       not run: see the gap); `tests/specs/run/desktop_ops_inert`
+       (`op_desktop_open_external`), `tests/specs/check/desktop_types`.
+     - Node tests enabled: none.
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -19643,7 +19786,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-479, 486, 487) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-479, 486-488) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
@@ -20239,6 +20382,14 @@ in the job summary, never skipped silently. Areas:
   manifest's version), the accepted sequence recorded, an unwritable install,
   1.0.0 -> 2.0.0 relaunch and confirm, a 3.0.0 trial that never confirms rolled
   back and refused (and kept in the rejected set).
+- **kernelsandbox** (fork CLI) — a strict package (`--kernel-sandbox=enforce`,
+  a scoped grant) on this leg's engine (item 488): what the probe says holds
+  the app and why, against what the engine, the OS and the host make of it; a
+  native write through FFI inside and outside the grant, refused exactly when
+  the app is kernel-held; `Deno.desktop.openExternal` (on macOS the browser
+  must come for the link, and for a child's `open` it must not); and one row
+  each for a file dialog, a notification, the tray, a launch deep link, the
+  secure store and a fork of the app.
 - **Node-API** stays in `launch.sh`.
 
 What a hosted runner cannot do, reported `n/a` with the reason:
