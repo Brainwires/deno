@@ -595,6 +595,55 @@ fn report_files(cli_options: &CliOptions) -> Vec<PathBuf> {
     .collect()
 }
 
+/// A relative path written without `./` (`deno run src/main.ts`) that no
+/// import map, deno.json `imports`, package.json dependency or workspace
+/// package name can map: the run then resolves it as the path it spells.
+fn bare_path_unmapped(cli_options: &CliOptions, script: &str) -> bool {
+  // a scheme (`npm:`, `jsr:`, `node:`, …) or a scoped package name
+  if script.contains(':') || script.starts_with('@') || script.is_empty() {
+    return false;
+  }
+  if cli_options.flags().import_map_path.is_some() {
+    return false;
+  }
+  let workspace = &cli_options.start_dir.workspace;
+  if workspace.to_import_map_path().ok().flatten().is_some() {
+    return false;
+  }
+  let maps = |key: &str| {
+    key == script || (key.ends_with('/') && script.starts_with(key))
+  };
+  for deno_json in workspace.deno_jsons() {
+    let json = &deno_json.json;
+    if json.import_map.is_some() || json.scopes.is_some() {
+      return false;
+    }
+    if let Some(imports) = json.imports.as_ref().and_then(|i| i.as_object())
+      && imports.keys().any(|k| maps(k))
+    {
+      return false;
+    }
+  }
+  // the package a bare specifier names: its first path segment
+  let first = script.split('/').next().unwrap_or(script);
+  for pkg_json in workspace.package_jsons() {
+    let deps = [
+      &pkg_json.dependencies,
+      &pkg_json.dev_dependencies,
+      &pkg_json.peer_dependencies,
+      &pkg_json.optional_dependencies,
+    ];
+    if pkg_json.name.as_deref() == Some(first)
+      || deps
+        .iter()
+        .any(|d| d.as_ref().is_some_and(|d| d.contains_key(first)))
+    {
+      return false;
+    }
+  }
+  true
+}
+
 /// This program's own origin data folders (`localStorage`, the Cache API):
 /// `location_data/<key>` and `location_data/web_cache/<key>`, keyed as the
 /// worker keys them (`--location`, deno.json, else the main module), never
@@ -630,12 +679,17 @@ fn origin_data_dirs(
         _ => return Vec::new(),
       };
       // a local file or a URL, resolved as the run resolves it; a bare or
-      // `npm:` / `jsr:` entrypoint, a folder or a Node binary main: none
+      // `npm:` / `jsr:` entrypoint, a folder or a Node binary main: none. A
+      // relative path written without `./` (`deno run src/main.ts`) is
+      // bare: the run tries the workspace resolver first and falls back to
+      // the path, so it counts only when nothing in the workspace can map
+      // it (else the folder could be another program's)
       let plain = script.starts_with('.')
         || std::path::Path::new(script).is_absolute()
         || ["file:", "http:", "https:"]
           .iter()
-          .any(|scheme| script.starts_with(scheme));
+          .any(|scheme| script.starts_with(scheme))
+        || bare_path_unmapped(cli_options, script);
       if !plain || cli_options.is_node_main() {
         return Vec::new();
       }
