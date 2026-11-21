@@ -231,6 +231,44 @@ Deno.test("fakeTrackUnmutesAfterRenegotiationToSendrecv", async () => {
   }
 });
 
+// A received video stream's RTP timestamps advance at its 90 kHz clock on
+// the arrival clock: the pacer does not hold the camera's frames back
+// behind a low first estimate (WPT webrtc/protocol/rtp-clockrate.html).
+Deno.test("fakeVideoRtpTimestampsAdvanceAt90kHz", async () => {
+  const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  try {
+    a.addTrack(stream.getTracks()[0], stream);
+    const track = new Promise<RTCTrackEvent>((resolve) => b.ontrack = resolve);
+    await connect(a, b);
+    const { receiver } = await timeout(track, 15_000, "ontrack");
+    const source = async () => {
+      const deadline = Date.now() + 15_000;
+      while (true) {
+        const sources = receiver.getSynchronizationSources();
+        if (sources.length > 0) return sources[0];
+        if (Date.now() > deadline) throw new Error("no RTP");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+    const first = await source();
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const second = await source();
+    const rate =
+      ((second.rtpTimestamp - first.rtpTimestamp + 0xffffffff) % 0xffffffff) /
+      (second.timestamp - first.timestamp) * 1000;
+    assert(
+      Math.abs(rate - 90000) <= 9000,
+      `video clock rate ${Math.round(rate)}, not about 90000`,
+    );
+  } finally {
+    a.close();
+    b.close();
+    stream.getTracks().forEach((t) => t.stop());
+  }
+});
+
 const TRANSFORM_WORKER = `
 self.onrtctransform = async (event) => {
   const t = event.transformer;

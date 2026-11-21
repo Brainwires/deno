@@ -20,8 +20,16 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use bytes::Bytes;
+use rtc::interceptor::Attribute;
+use rtc::interceptor::GCC_INITIAL_BITRATE;
 use rtc::interceptor::Gcc;
+use rtc::interceptor::Interceptor;
+use rtc::interceptor::PacerBuilder;
+use rtc::interceptor::PacerInterceptor;
 use rtc::interceptor::Registry;
+use rtc::interceptor::Slot;
+use rtc::interceptor::StreamInfo;
+use rtc::interceptor::TaggedPacket;
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::CongestionFeedback;
@@ -100,14 +108,26 @@ pub fn media_stack() -> Result<(MediaEngine, Registry), WebRtcError> {
   // side; this takes the receiver's slot with the same recorder. The pacer
   // only queues (bounded, refusing past its limit as congestion would), and
   // the driver releases from it at the engine's `poll_timeout`, so writes
-  // never wait on it.
+  // never wait on it. It paces at PACING_FACTOR times the estimate
+  // ([`FactorPacer`]), as libwebrtc does: what is written here comes at the
+  // rate its source has (a clip, an encoded transform, `writeFrame`), not one
+  // an encoder fits to the estimate, and pacing at the estimate itself would
+  // queue (and delay) everything such a source sends above it.
   let registry = configure_congestion_control(
     registry,
     Gcc::default(),
     CongestionFeedback::Twcc,
     &mut media_engine,
   )
-  .map_err(crate::peer::rtc_err)?;
+  .map_err(crate::peer::rtc_err)?
+  .with(
+    Slot::Pacer,
+    FactorPacer(
+      PacerBuilder::new()
+        .with_target_bitrate(GCC_INITIAL_BITRATE * PACING_FACTOR)
+        .build(),
+    ),
+  );
   // RFC 8888 feedback beside TWCC: `a=rtcp-fb:<pt> ack ccfb` on every codec
   // and the recorder that reports each received packet with the ECN
   // codepoint it arrived with. A stream sends ECT(1) (L4S) only once `ack
@@ -120,6 +140,106 @@ pub fn media_stack() -> Result<(MediaEngine, Registry), WebRtcError> {
     configure_congestion_control_feedback(registry, &mut media_engine);
   register_header_extensions(&mut media_engine)?;
   Ok((media_engine, registry))
+}
+
+/// How much faster than the congestion controller's estimate the pacer lets
+/// packets out: libwebrtc's pacing factor (`kDefaultPaceMultiplier`, 2.5).
+/// The pacer smooths bursts (a key frame's packets); it is not what holds a
+/// sender to the estimate, which is the encoder's job in a browser.
+pub const PACING_FACTOR: f64 = 2.5;
+
+/// The engine's pacer at [`PACING_FACTOR`] times the estimate. The engine
+/// paces at the estimate itself (it adds no headroom of its own) and hands
+/// the same number to the stats, so the estimate stays what
+/// `availableOutgoingBitrate` and `targetBitrate` report; only the rate this
+/// pacer releases at is scaled, each time an estimate goes past it.
+pub(crate) struct FactorPacer(pub(crate) PacerInterceptor);
+
+impl FactorPacer {
+  /// The estimate a packet on the read leg carries (the congestion
+  /// controller attaches it to the feedback that produced it).
+  fn estimate(msg: &TaggedPacket) -> Option<f64> {
+    match msg.message.get(&Attribute::TargetBitrateChanged {
+      bits_per_second: 0.0,
+    }) {
+      Some(Attribute::TargetBitrateChanged { bits_per_second }) => {
+        Some(*bits_per_second)
+      }
+      _ => None,
+    }
+  }
+}
+
+impl rtc::sansio::Protocol<TaggedPacket, TaggedPacket, ()> for FactorPacer {
+  type Rout = TaggedPacket;
+  type Wout = TaggedPacket;
+  type Eout = ();
+  type Error = rtc::shared::error::Error;
+  type Time = Instant;
+
+  fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+    let estimate = Self::estimate(&msg);
+    // The engine's pacer follows the estimate as it goes past; the scaled
+    // rate replaces what it set.
+    self.0.handle_read(msg)?;
+    if let Some(bits_per_second) = estimate {
+      self
+        .0
+        .pacer_mut()
+        .set_target_bitrate(bits_per_second * PACING_FACTOR);
+    }
+    Ok(())
+  }
+
+  fn poll_read(&mut self) -> Option<TaggedPacket> {
+    self.0.poll_read()
+  }
+
+  fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+    self.0.handle_write(msg)
+  }
+
+  fn poll_write(&mut self) -> Option<TaggedPacket> {
+    self.0.poll_write()
+  }
+
+  fn handle_event(&mut self, evt: ()) -> Result<(), Self::Error> {
+    self.0.handle_event(evt)
+  }
+
+  fn poll_event(&mut self) -> Option<()> {
+    self.0.poll_event()
+  }
+
+  fn handle_timeout(&mut self, now: Instant) -> Result<(), Self::Error> {
+    self.0.handle_timeout(now)
+  }
+
+  fn poll_timeout(&mut self) -> Option<Instant> {
+    self.0.poll_timeout()
+  }
+
+  fn close(&mut self) -> Result<(), Self::Error> {
+    self.0.close()
+  }
+}
+
+impl Interceptor for FactorPacer {
+  fn bind_local_stream(&mut self, info: &StreamInfo) {
+    self.0.bind_local_stream(info);
+  }
+
+  fn unbind_local_stream(&mut self, info: &StreamInfo) {
+    self.0.unbind_local_stream(info);
+  }
+
+  fn bind_remote_stream(&mut self, info: &StreamInfo) {
+    self.0.bind_remote_stream(info);
+  }
+
+  fn unbind_remote_stream(&mut self, info: &StreamInfo) {
+    self.0.unbind_remote_stream(info);
+  }
 }
 
 /// The RTP header extensions RFC 8834 section 5.2 has a WebRTC endpoint
@@ -2140,4 +2260,74 @@ fn codec_params_json(c: &RTCRtpCodecParameters) -> serde_json::Value {
     obj.insert("payloadType".to_string(), c.payload_type.into());
   }
   v
+}
+
+#[cfg(test)]
+mod factor_pacer_tests {
+  use std::time::Instant;
+
+  use rtc::interceptor::Attribute;
+  use rtc::interceptor::AttributedPacket;
+  use rtc::interceptor::GCC_INITIAL_BITRATE;
+  use rtc::interceptor::PacerBuilder;
+  use rtc::interceptor::Packet;
+  use rtc::interceptor::TaggedPacket;
+  use rtc::sansio::Protocol;
+  use rtc::shared::TransportContext;
+
+  use super::FactorPacer;
+  use super::PACING_FACTOR;
+
+  fn feedback(estimate: Option<f64>) -> TaggedPacket {
+    let mut message = AttributedPacket::new(Packet::Rtcp(vec![Box::new(
+      rtc::rtcp::receiver_report::ReceiverReport::default(),
+    )]));
+    if let Some(bits_per_second) = estimate {
+      message.add(Attribute::TargetBitrateChanged { bits_per_second });
+    }
+    TaggedPacket {
+      now: Instant::now(),
+      transport: TransportContext::default(),
+      message,
+    }
+  }
+
+  fn pacer() -> FactorPacer {
+    FactorPacer(
+      PacerBuilder::new()
+        .with_target_bitrate(GCC_INITIAL_BITRATE * PACING_FACTOR)
+        .build(),
+    )
+  }
+
+  // A congestion controller estimate paces at PACING_FACTOR times it, and the
+  // feedback that carried it goes on with the estimate itself (what the stats
+  // report).
+  #[test]
+  fn paces_at_the_factor_times_the_estimate() {
+    let mut p = pacer();
+    assert_eq!(
+      p.0.pacer().target_bitrate(),
+      GCC_INITIAL_BITRATE * PACING_FACTOR
+    );
+    p.handle_read(feedback(Some(400_000.0))).unwrap();
+    assert_eq!(p.0.pacer().target_bitrate(), 400_000.0 * PACING_FACTOR);
+    let out = p.poll_read().expect("the feedback goes on");
+    assert!(matches!(
+      out.message.get(&Attribute::TargetBitrateChanged {
+        bits_per_second: 0.0
+      }),
+      Some(Attribute::TargetBitrateChanged { bits_per_second })
+        if *bits_per_second == 400_000.0
+    ));
+  }
+
+  // Feedback without an estimate leaves the rate alone.
+  #[test]
+  fn keeps_the_rate_without_an_estimate() {
+    let mut p = pacer();
+    p.handle_read(feedback(Some(500_000.0))).unwrap();
+    p.handle_read(feedback(None)).unwrap();
+    assert_eq!(p.0.pacer().target_bitrate(), 500_000.0 * PACING_FACTOR);
+  }
 }
