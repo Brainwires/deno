@@ -3503,6 +3503,26 @@ pub trait DesktopApi: Send + Sync + 'static {
     SecretOutcome::Unsupported
   }
 
+  /// What holds this app's process (DENEXT.md item 483): `"kernel"` (the
+  /// kernel sandbox holds it, its native code and its children to the baked
+  /// grant), `"headless-only"` (its web engine can't run inside the sandbox
+  /// here, so the app's own process isn't confined) or `"none"`, with the
+  /// reason. `None` when the app's startup made no decision (not a packaged
+  /// desktop app).
+  fn kernel_sandbox(&self) -> Option<(&'static str, String)> {
+    None
+  }
+
+  /// Opens `url` (an `http:`, `https:` or `mailto:` URL the op has
+  /// checked) with the system's opener: in the user's browser or mail
+  /// program. In an app the kernel sandbox holds this goes through the
+  /// helper started before the sandbox applied; a program the app starts
+  /// itself would inherit the sandbox, which refuses to open anything
+  /// outside it. `false` when nothing was started.
+  fn open_external(&self, _url: &str) -> bool {
+    false
+  }
+
   /// How the user set up title bars (the backend's `title_bar_preferences`
   /// JSON object, laufey API 47): the buttons on each side, the double-click
   /// action, the colour scheme, the accent colour, the title bar font.
@@ -7293,6 +7313,7 @@ async fn op_desktop_platform_features(
     )
   };
   let api = api?;
+  let kernel_sandbox = api.kernel_sandbox();
   let json = deno_core::unsync::spawn_blocking(move || api.platform_features())
     .await
     .ok()??;
@@ -7300,7 +7321,90 @@ async fn op_desktop_platform_features(
   if !env_allowed {
     redact_desktop_hint(&mut features);
   }
+  // denext (DENEXT.md item 483): what holds the app's own process. The
+  // backend's `sandbox` is another thing (the Chromium sandbox web content
+  // runs in), so this has its own keys.
+  if let Some(obj) = features.as_object_mut() {
+    let (sandbox, reason) = match kernel_sandbox {
+      Some((sandbox, reason)) => (sandbox.into(), reason.into()),
+      None => (serde_json::Value::Null, serde_json::Value::Null),
+    };
+    obj.insert("kernelSandbox".to_string(), sandbox);
+    obj.insert("kernelSandboxReason".to_string(), reason);
+  }
   Some(features)
+}
+
+/// Whether `url` is one `Deno.desktop.openExternal` hands to the system: an
+/// `http:`, `https:` or `mailto:` URL of at most 2048 bytes of printable
+/// ASCII, with none of the characters a URL must percent-encode. The same
+/// rule the outside helper of a confined app applies (`deno_sandbox`), so a
+/// URL means the same with and without the kernel sandbox.
+pub fn is_external_url(url: &str) -> bool {
+  let bytes = url.as_bytes();
+  let has_prefix = |prefix: &[u8]| {
+    bytes.len() > prefix.len()
+      && bytes[..prefix.len()].eq_ignore_ascii_case(prefix)
+  };
+  bytes.len() <= 2048
+    && (has_prefix(b"http://")
+      || has_prefix(b"https://")
+      || has_prefix(b"mailto:"))
+    && bytes.iter().all(|b| {
+      matches!(b, 0x21..=0x7e)
+        && !matches!(
+          b,
+          b'"' | b'<' | b'>' | b'\\' | b'^' | b'`' | b'{' | b'|' | b'}'
+        )
+    })
+}
+
+/// The program `Deno.desktop.openExternal` runs, by the name a run grant
+/// names it.
+pub const EXTERNAL_OPENER: &str = if cfg!(target_os = "macos") {
+  "open"
+} else if cfg!(windows) {
+  "rundll32"
+} else {
+  "xdg-open"
+};
+
+/// `Deno.desktop.openExternal(url)` (DENEXT.md item 483): opens a link in
+/// the user's browser (or a `mailto:` in their mail program). `false`
+/// outside a desktop app and when the system's opener could not be started.
+/// It runs that opener, so it needs the run permission for it (`open`,
+/// `xdg-open`, `rundll32`), as starting it with `Deno.Command` does; unlike
+/// that, it also works in an app the kernel sandbox holds.
+#[op2(fast)]
+fn op_desktop_open_external(
+  state: &mut OpState,
+  #[string] url: &str,
+) -> Result<bool, JsErrorBox> {
+  let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>().cloned() else {
+    return Ok(false);
+  };
+  if !is_external_url(url) {
+    return Err(JsErrorBox::type_error(
+      "openExternal opens only http:, https: and mailto: URLs of printable ASCII (percent-encode the rest)",
+    ));
+  }
+  let granted = state
+    .try_borrow::<deno_permissions::PermissionsContainer>()
+    .is_some_and(|p| {
+      matches!(
+        p.query_run(Some(EXTERNAL_OPENER)),
+        Ok(deno_permissions::PermissionState::Granted)
+      )
+    });
+  if !granted {
+    return Err(JsErrorBox::new(
+      "NotCapable",
+      format!(
+        "Requires run access to \"{EXTERNAL_OPENER}\", run again with the --allow-run flag"
+      ),
+    ));
+  }
+  Ok(api.open_external(url))
 }
 
 /// A `Deno.desktop.secureStore` call (laufey API 47).
@@ -8496,6 +8600,7 @@ deno_core::extension!(
     op_desktop_message_box,
     op_desktop_system_capabilities,
     op_desktop_platform_features,
+    op_desktop_open_external,
     op_desktop_title_bar_preferences,
     op_desktop_secret_supported,
     op_desktop_secret_request,

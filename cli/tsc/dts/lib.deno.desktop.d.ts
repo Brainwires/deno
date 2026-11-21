@@ -2536,6 +2536,20 @@ declare namespace Deno {
       /** CEF on Linux: why the host chose that sandbox mode (what it found:
        * user namespaces, the helper, root). `null` otherwise. */
       sandboxReason: string | null;
+      /** What holds the app's own process to its baked permissions besides
+       * the runtime's checks: `"kernel"` (the kernel sandbox: native code
+       * and child processes are held too), `"headless-only"` (the web engine
+       * can't run inside the kernel sandbox here, so the app's own process
+       * isn't confined: CEF on macOS, CEF on a Linux machine with only
+       * Chromium's setuid sandbox helper) or `"none"` (off, a development
+       * build, nothing to narrow, or a system without an enforcer for
+       * desktop apps). Not {@linkcode PlatformFeatures.sandbox}, which is
+       * the Chromium sandbox web content runs in. `null` on a runtime that
+       * made no decision. */
+      kernelSandbox: "kernel" | "headless-only" | "none" | null;
+      /** Why {@linkcode PlatformFeatures.kernelSandbox} is what it is.
+       * `null` when that is. */
+      kernelSandboxReason: string | null;
       /** Linux: how notifications are sent: `"portal"` (xdg-desktop-portal's
        * Notification interface, with the app's id registered and its
        * `<app id>.desktop` installed, as a `.deb` or `.rpm` does) or
@@ -4170,6 +4184,21 @@ declare namespace Deno {
      * take a few seconds (xdg-desktop-portal starting). Read it again on
      * `"platformfeatureschanged"`. */
     export function platformFeatures(): Promise<PlatformFeatures | null>;
+    /** Opens a link in the user's browser, or a `mailto:` link in their
+     * mail program. Only `http:`, `https:` and `mailto:` URLs of printable
+     * ASCII (percent-encode anything else): any other value is a
+     * `TypeError`. Returns `true` when the system's opener was started,
+     * `false` outside a desktop app or when it could not be.
+     *
+     * It runs the system's opener (`open` on macOS, `xdg-open` on Linux,
+     * `rundll32` on Windows) and needs the run permission for it, as
+     * `new Deno.Command("open", …)` does. Use it instead of that command:
+     * in an app the kernel sandbox holds
+     * ({@linkcode PlatformFeatures.kernelSandbox} is `"kernel"`), a program
+     * the app starts inherits the sandbox and can't open anything outside
+     * it, while this goes through a helper started before the sandbox
+     * applied. */
+    export function openExternal(url: string): boolean;
     /** How the user set up title bars (the buttons on each side, the
      * double-click action, the colour scheme, the accent colour), for an app
      * that draws its own title bar. Resolves to `null` outside a desktop app

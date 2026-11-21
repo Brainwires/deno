@@ -138,6 +138,9 @@ const cases = {
     ops.op_desktop_message_box({ message: "m", buttons: ["OK"] }),
   op_desktop_system_capabilities: () => ops.op_desktop_system_capabilities(),
   op_desktop_platform_features: () => ops.op_desktop_platform_features(),
+  // Outside a desktop app: false, whatever the URL and the run permission.
+  op_desktop_open_external: () =>
+    ops.op_desktop_open_external("https://example.com/"),
   op_desktop_title_bar_preferences: () =>
     ops.op_desktop_title_bar_preferences(),
   op_desktop_secret_supported: () => ops.op_desktop_secret_supported(),
