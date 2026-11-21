@@ -102,6 +102,12 @@ struct TestConfig {
   /// and copy multi-gigabyte buffers), never to paper over a hang.
   #[serde(rename = "timeoutMs")]
   timeout_ms: Option<u64>,
+  /// denext: runs the test with the sequential tests, one at a time, though
+  /// it is not under `sequential/` or `pummel/`: a memory-heavy test (a leak
+  /// test that fills the heap on purpose) whose peak beside others' gets the
+  /// container killed for memory, taking its neighbours with it.
+  #[serde(default)]
+  sequential: bool,
   /// denext: the platforms where the test is expected to skip itself
   /// (`common.skip()`) because the platform or this build lacks the feature
   /// by design, with the reason. A bare string applies to every platform.
@@ -206,14 +212,40 @@ fn main() {
   // multi-gigabyte buffers or spin the CPU deliberately. Running a handful of
   // them concurrently starves a CI runner badly enough that the machine stops
   // responding, so they get the same one-at-a-time treatment as `sequential/`.
+  //
+  // denext: a test marked `"sequential": true` in config.jsonc (a
+  // memory-heavy leak test) runs with them too.
   const SEQUENTIAL_TEST_DIRS: &[&str] = &["sequential/", "pummel/"];
   let (sequential_category, parallel_category) = category.partition(|test| {
     SEQUENTIAL_TEST_DIRS
       .iter()
       .any(|dir| test.data.test_path.starts_with(dir))
+      || config
+        .tests
+        .get(&test.data.test_path)
+        .is_some_and(|c| c.sequential)
   });
 
   let parallelism = Parallelism::default();
+
+  // denext: the per-test timeouts scale with the CPU each running test gets
+  // (as Node's test.py and common.platformTimeout do): 1 on a runner with a
+  // CPU or more per test, longer where tests share one, never unbounded.
+  let cpus = test_util::test_runner::AvailableCpus::detect();
+  let timeout_factor = test_util::test_runner::timeout_scale_factor(
+    cpus.count,
+    parallelism.max_parallelism().get(),
+  );
+  let sequential_timeout_factor =
+    test_util::test_runner::timeout_scale_factor(cpus.count, 1);
+  test_util::eprintln!(
+    "node_compat: {:.2} CPU(s) ({}), {} test(s) at once: timeout factor {:.2} ({:.2} for the sequential tests)",
+    cpus.count,
+    cpus.source,
+    parallelism.max_parallelism().get(),
+    timeout_factor,
+    sequential_timeout_factor,
+  );
   let flaky_test_tracker = Arc::new(FlakyTestTracker::default());
 
   // Shared state for collecting results
@@ -247,7 +279,15 @@ fn main() {
           test_config.is_some_and(|c| c.flaky) || all_tests_flaky,
           &flaky_test_tracker,
           None,
-          || run_test(&cli_args, test, test_config, &results),
+          || {
+            run_test(
+              &cli_args,
+              test,
+              test_config,
+              &results,
+              sequential_timeout_factor,
+            )
+          },
         )
       }
     },
@@ -275,7 +315,7 @@ fn main() {
           test_config.is_some_and(|c| c.flaky) || all_tests_flaky,
           &flaky_test_tracker,
           Some(&parallelism),
-          || run_test(&cli_args, test, test_config, &results),
+          || run_test(&cli_args, test, test_config, &results, timeout_factor),
         )
       }
     },
@@ -738,6 +778,7 @@ impl TestSetup {
     cli_args: &CliArgs,
     data: &NodeCompatTestData,
     test_config: Option<&TestConfig>,
+    timeout_factor: f64,
   ) -> Self {
     let test_suite_path = tests_path().join("node_compat/runner/suite");
     let test_path = format!("test/{}", data.test_path);
@@ -813,6 +854,9 @@ impl TestSetup {
           10_000
         },
       ));
+    // denext: scaled by the CPU per running test (1 when uncontended)
+    let timeout =
+      test_util::test_runner::scale_timeout(timeout, timeout_factor);
 
     TestSetup {
       test_suite_path,
@@ -1005,6 +1049,7 @@ fn run_test(
   test: &CollectedTest<NodeCompatTestData>,
   test_config: Option<&TestConfig>,
   results: &Arc<Mutex<HashMap<String, CollectedResult>>>,
+  timeout_factor: f64,
 ) -> TestResult {
   let data = &test.data;
 
@@ -1037,7 +1082,7 @@ fn run_test(
     return TestResult::Ignored;
   }
 
-  let setup = TestSetup::new(cli_args, data, test_config);
+  let setup = TestSetup::new(cli_args, data, test_config, timeout_factor);
 
   let (success, output_text, exit_code) = if is_pseudo_tty_test {
     setup.run_pty()

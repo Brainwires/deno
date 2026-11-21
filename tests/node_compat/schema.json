@@ -95,6 +95,10 @@
           "description": "Overrides the per-test timeout in milliseconds (default 10s, 20s on macOS). Use sparingly — only for tests that are legitimately slow, such as pummel tests that allocate multi-gigabyte buffers.",
           "minimum": 1
         },
+        "sequential": {
+          "type": "boolean",
+          "description": "Runs the test with the sequential tests, one at a time, though it is not under sequential/ or pummel/. For memory-heavy tests (leak tests that fill the heap on purpose) whose peak beside other tests gets the container killed for memory, taking its neighbours with it. Never for a test that is merely slow."
+        },
         "expectedSkip": {
           "description": "The platforms where the test is expected to skip itself (Node's common.skip()) because the platform or this build lacks the feature by design, with the reason. A string applies to every platform. A test that skips itself is reported as skipped, never as passed; this only labels the skip.",
           "oneOf": [
