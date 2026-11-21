@@ -579,7 +579,6 @@ Deno.test({
   const socket = net.createConnection({
     host: "example.org",
     port,
-    // deno-lint-ignore no-explicit-any
     // Answers from the check phase (after I/O), so the first attempt's
     // connect is next polled after the timers phase of the next tick, where
     // the attempt timer is due once the loop has been blocked past it.
