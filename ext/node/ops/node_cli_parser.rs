@@ -206,6 +206,10 @@ const CHILD_DENO_FLAGS: &[&str] = &[
 
 /// The long Deno flags `process.execArgv` carries only as `--flag=value`.
 const CHILD_DENO_VALUE_FLAGS: &[&str] = &[
+  // denext: the kernel sandbox mode a run asked for (`to_exec_argv` keeps
+  // it, so a forked child of a confined run asks for the same)
+  "kernel-sandbox",
+  "kernel-sandbox-exec",
   "config",
   "import-map",
   "lock",
@@ -246,6 +250,16 @@ fn is_child_deno_flag(arg: &str) -> bool {
     || (value.is_some() && CHILD_DENO_VALUE_FLAGS.contains(&name))
 }
 
+/// A kernel sandbox flag a child of a confined run takes from the sandbox
+/// it starts in, not from its arguments: `enforce` / `broker` (and
+/// `--kernel-sandbox-exec`) can't be applied again inside the parent's
+/// domain (the child would refuse to start), while `off` and `warn` say what
+/// the child's own `auto` must not do.
+fn is_inherited_kernel_sandbox_flag(arg: &str) -> bool {
+  matches!(arg, "--kernel-sandbox=enforce" | "--kernel-sandbox=broker")
+    || arg.starts_with("--kernel-sandbox-exec=")
+}
+
 /// Splits the Deno flags of [`is_child_deno_flag`] off the flags before the
 /// script (the first argument that is not a flag, or `--`); the script and
 /// its arguments are never looked at. Returns `(deno flags, the rest)`.
@@ -258,7 +272,9 @@ fn split_child_deno_flags(args: Vec<String>) -> (Vec<String>, Vec<String>) {
       in_flags = false;
     }
     if in_flags && is_child_deno_flag(&arg) {
-      deno_flags.push(arg);
+      if !is_inherited_kernel_sandbox_flag(&arg) {
+        deno_flags.push(arg);
+      }
     } else {
       rest.push(arg);
     }
@@ -358,6 +374,26 @@ mod tests {
       split_child_deno_flags(svec!["--", "--allow-read", "child.js"]);
     assert!(deno.is_empty());
     assert_eq!(rest, svec!["--", "--allow-read", "child.js"]);
+  }
+
+  /// A confined run's `process.execArgv` names its kernel sandbox mode; a
+  /// forked child takes it as a Deno flag, never a V8 one.
+  #[test]
+  fn kernel_sandbox_flags_are_deno_flags() {
+    // enforce / broker hold the child as the parent's domain does: not
+    // passed on (applied again they'd refuse); off and warn are
+    let (deno, rest) = split_child_deno_flags(svec![
+      "--kernel-sandbox=enforce",
+      "--kernel-sandbox-exec=strict",
+      "--allow-read",
+      "child.js"
+    ]);
+    assert_eq!(deno, svec!["--allow-read"]);
+    assert_eq!(rest, svec!["child.js"]);
+    let (deno, rest) =
+      split_child_deno_flags(svec!["--kernel-sandbox=off", "child.js"]);
+    assert_eq!(deno, svec!["--kernel-sandbox=off"]);
+    assert_eq!(rest, svec!["child.js"]);
   }
 
   #[test]
