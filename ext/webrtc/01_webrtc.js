@@ -2569,10 +2569,17 @@
         case "data-channel":
           // `dataChannelIdentifier` is the channel's `id` (webrtc-stats
           // `RTCDataChannelStats`), which is null until the SCTP stream id
-          // is chosen; the engine numbers the stream from the start.
+          // is chosen; the engine numbers the stream from the start. A
+          // channel transferred to a worker is detached here (readyState
+          // "closed", so its `id` reads no further), and its id is the one
+          // the engine assigned.
           MapPrototypeForEach(pc[_channels], (channel, handle) => {
             if (`RTCDataChannel_${handle}` !== stats.id) return;
-            const streamId = channel.id;
+            let streamId = channel.id;
+            if (streamId === null && channel[_transferPort] !== undefined) {
+              const id = op_webrtc_dc_id(pc[_rid], handle);
+              if (id >= 0) streamId = id;
+            }
             if (streamId === null) delete stats.dataChannelIdentifier;
             else stats.dataChannelIdentifier = streamId;
           });

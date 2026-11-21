@@ -306,6 +306,43 @@ Deno.test({
   }
 });
 
+// The connection's data-channel stats object for a channel transferred to a
+// worker names the channel's id, which the original (detached, "closed")
+// no longer reads (WPT webrtc-stats RTCDataChannel-stats.html, offerer on
+// worker).
+Deno.test({
+  name: "webrtcDataChannelTransferredChannelStatsHaveItsId",
+  sanitizeOps: false,
+  sanitizeResources: false,
+}, async () => {
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  const { worker, next } = echoWorker();
+  try {
+    const channel = a.createDataChannel("stats-moved");
+    worker.postMessage({ channel }, [channel]);
+    await next("init");
+    const remote = once<RTCDataChannelEvent>(b, "datachannel");
+    await negotiate(a, b);
+    const peer = (await remote).channel;
+    const open = await next("open");
+    assertEquals(open.id, peer.id);
+    const stats = [...(await a.getStats()).values()].filter((s) =>
+      s.type === "data-channel"
+    );
+    assertEquals(stats.length, 1);
+    assertEquals(stats[0].label, "stats-moved");
+    assertEquals(stats[0].dataChannelIdentifier, open.id);
+    assertEquals(stats[0].state, "open");
+    assertEquals(stats[0].messagesSent, 0);
+    assertEquals(stats[0].bytesSent, 0);
+  } finally {
+    worker.terminate();
+    a.close();
+    b.close();
+  }
+});
+
 Deno.test({
   name: "webrtcDataChannelTransferInDatachannelEvent",
   sanitizeOps: false,
