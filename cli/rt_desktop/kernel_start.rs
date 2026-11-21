@@ -191,8 +191,10 @@ pub fn startup(data: &StandaloneData, worker: bool) -> Result<(), String> {
   let engine = denort::kernel_desktop::engine(data, host);
   let baked = denort::kernel_desktop::baked_options(data);
   let os = TargetOs::current();
-  // the harnesses' stage switch (the desktop beds run `auto` at the next
-  // stage with it): raise-only, so a packaged app honours it
+  // the harnesses' stage switch: raise-only, so a packaged app reads it
+  // like every other runtime. It changes nothing here today: only a strict
+  // package (a baked enforce) is confined, and `auto` leaves an app that
+  // isn't strict alone at every stage (`ModeReason::DesktopNotStrict`)
   let stage = deno_lib::kernel_sandbox::AutoStage::parse(
     std::env::var(deno_lib::kernel_sandbox::KERNEL_SANDBOX_STAGE_ENV_VAR)
       .ok()

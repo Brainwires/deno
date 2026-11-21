@@ -227,10 +227,13 @@ pub enum RunKind {
   /// A packaged desktop app (`denort_desktop`): fixed, mode baked at compile
   /// time, flags, environment and deno.json ignored as for
   /// [`RunKind::Compiled`]. `strict` is `desktop.permissions: "strict"`
-  /// (carried as a baked `enforce`); `engine` is the web engine baked into
-  /// the package. Whether the engine can run inside the sandbox on this
-  /// machine is not this module's question: `kernel_apply::start_desktop`
-  /// answers it and reports the app as kernel-held or headless-only
+  /// (carried as a baked `enforce`), the only desktop apps the kernel
+  /// sandbox is applied to: under `auto` one that isn't strict is off at
+  /// every stage ([`ModeReason::DesktopNotStrict`]). `engine` is the web
+  /// engine baked into the package. Whether the engine can run inside the
+  /// sandbox on this machine is not this module's question:
+  /// `kernel_apply::start_desktop` answers it and reports the app as
+  /// kernel-held or headless-only
   /// (DENEXT.md item 488).
   DesktopPackaged { strict: bool, engine: Engine },
   /// Anything that isn't a user-code runtime (`install`, `cache`, `compile`,
@@ -357,6 +360,14 @@ pub enum ModeReason {
   /// has no enforcer for desktop apps), so the app has the headless
   /// guarantees only (DENEXT.md item 488).
   DesktopEngine,
+  /// A packaged desktop app that doesn't bake strict permissions
+  /// (`desktop.permissions: "strict"`, a baked `enforce`): `auto` applies
+  /// nothing to it at any stage. Such an app starts `open` / `osascript` /
+  /// `xdg-open` for `openPath`, `revealInFileManager` and the auth
+  /// session's browser, and only http / https / mailto links have a way
+  /// out of the sandbox (the outside helper), so confining it by default
+  /// would break what it does (DENEXT.md item 488, the R4 decision).
+  DesktopNotStrict,
 }
 
 impl ModeReason {
@@ -393,6 +404,9 @@ impl ModeReason {
       }
       Self::DesktopEngine => {
         "the desktop app's web engine can't run inside the kernel sandbox here"
+      }
+      Self::DesktopNotStrict => {
+        "auto applies nothing to a desktop app that isn't packaged strict (desktop.permissions: \"strict\")"
       }
     }
   }
@@ -518,27 +532,53 @@ pub struct ModeError {
   pub reason: ModeReason,
 }
 
-/// Decides the kernel-sandbox mode (plan §2.1 as amended by the review):
+/// Decides the kernel-sandbox mode (plan §2.1 as amended by the review, and
+/// the denext.30 plan §1.1). The order is the contract; the first rule that
+/// matches decides:
 ///
-/// 1. Not a user-code runtime → `off`.
+/// 1. Not a user-code runtime → `off` ([`ModeReason::Subcommand`]).
 /// 2. The requested mode: a compiled program's or packaged desktop app's
-///    baked mode (flag, env and config ignored), else `--kernel-sandbox`, else `DENO_KERNEL_SANDBOX`
-///    (`off` / `warn` only), else deno.json, else `auto`.
-/// 3. `off` → `off`. A desktop development build → `off`.
-/// 4. `-A` with no deny → `off` (plain `-A` changes nothing).
+///    baked mode (flag, env, config and the harness's switch ignored), else
+///    `--kernel-sandbox`, else `DENO_KERNEL_SANDBOX` (`off` / `warn` only),
+///    else the harness's forced `enforce`, else deno.json, else `auto`.
+/// 3. `off` → `off`. A development build of a compiled desktop app → `off`,
+///    whatever is baked.
+/// 4. `-A` with no deny → `off` (plain `-A` changes nothing), unless the
+///    harness forced the mode.
 /// 5. `--watch`, HMR, `denext dev` or a permission broker: the set isn't
-///    fixed. `auto` → `off`, `warn` stays, `enforce` / `broker` → error.
-/// 6. A prompt can happen (CLI, prompting on, stdin and stderr terminals):
+///    fixed. `auto` → `off`, `warn` stays, `enforce` / `broker` → error (a
+///    forced run stays as it was).
+/// 6. The D1 ceiling (WP-A). A prompt can happen (CLI, prompting on, stdin
+///    and stderr terminals; never a compiled program or a desktop app):
 ///    `auto` → `off`, unless the run has deny rules: from
 ///    [`AutoStage::R4`] on, `auto` then enforces the denies alone (D1, D2:
 ///    a prompt can't lift a deny; [`ModeResolution::deny_ceiling`]), and the
-///    prompt stays. An explicit `warn` / `enforce` / `broker` applies, and
-///    then turns prompting into denials.
-/// 7. Otherwise the set is fixed: the requested mode applies; `auto` records
+///    prompt stays. A ceiling is Mode A only and never takes the broker.
+///    An explicit `warn` / `enforce` / `broker` applies, and then turns
+///    prompting into denials.
+/// 7. The desktop resolution (WP-C, the R4 decision). A packaged desktop
+///    app that isn't strict ([`RunKind::DesktopPackaged`] with
+///    `strict: false`) under `auto` → `off` at every stage
+///    ([`ModeReason::DesktopNotStrict`]). A strict one is a baked
+///    `enforce` (rule 9); whether its engine can run inside the sandbox is
+///    `kernel_apply::start_desktop_with`'s question, after this function.
+/// 8. Otherwise the set is fixed and `auto` decides by stage: it records
 ///    what it would choose, applies nothing in [`AutoStage::Preview`], and
-///    from [`AutoStage::R3`] on applies it (`auto_chosen`): `enforce`, or
-///    `broker` when the policy needs the supervisor
-///    ([`ModeInputs::policy_needs_supervisor`]).
+///    from [`AutoStage::R3`] on applies it (`auto_chosen`): `enforce` where
+///    the author fixed the permissions or the stage is R4, else `warn`.
+///    `-A` with denies is then a deny ceiling too (D2,
+///    [`ModeResolution::deny_only`]).
+/// 9. An explicit `warn` / `enforce` / `broker` applies as asked.
+///
+/// After the policy is compiled the caller decides once more (WP-B,
+/// `cli/sandbox::check_run`, `kernel_apply::start_compiled`): when the
+/// policy `enforce` compiles has the broker's shape, the same inputs with
+/// [`ModeInputs::policy_needs_supervisor`] turn rule 8's `enforce` into
+/// `broker` (`auto` takes the supervisor instead of falling back to
+/// `warn`). That second decision never changes rules 1 to 7: a deny
+/// ceiling's policy is never Mode B, and a desktop app runs no supervisor
+/// (`Context::compiled_supervisor` stays false in `start_desktop_with`, so
+/// what only the broker holds is a rule the OS can't hold there).
 pub fn kernel_sandbox_mode(
   inputs: &ModeInputs,
 ) -> Result<ModeResolution, ModeError> {
@@ -650,6 +690,15 @@ pub fn kernel_sandbox_mode(
     resolution.auto_chosen = true;
     return Ok(resolution);
   }
+  if requested == KernelSandboxMode::Auto
+    && matches!(kind, RunKind::DesktopPackaged { strict: false, .. })
+  {
+    // the R4 decision: a desktop app is kernel-enforced only when it is
+    // packaged strict (a baked enforce). One that isn't shells out to the
+    // system's openers, which only http / https / mailto links have a way
+    // around (the outside helper), so `auto` leaves it alone at every stage
+    return off(resolution, ModeReason::DesktopNotStrict);
+  }
   if requested == KernelSandboxMode::Auto {
     let author_fixed = compiled || source != ModeSource::Default;
     // whether this stage enforces the run (else it warns about it)
@@ -759,10 +808,12 @@ pub fn compiled_resolution_with(
 }
 
 /// A packaged desktop app's mode: the baked one, as
-/// [`compiled_resolution`] (`strict`: a baked `enforce`). `stage`: the
-/// harnesses' later stage for `auto` ([`KERNEL_SANDBOX_STAGE_ENV_VAR`]; it
-/// can only raise the stage, so a desktop app honours it: the desktop beds
-/// soak the next stage before the constant moves). Pure.
+/// [`compiled_resolution`] (`strict`: a baked `enforce`). An app that isn't
+/// strict (nothing baked, or a baked `auto`) is off at every stage
+/// ([`ModeReason::DesktopNotStrict`]). `stage`: the harnesses' later stage
+/// for `auto` ([`KERNEL_SANDBOX_STAGE_ENV_VAR`]; it can only raise the
+/// stage, so a desktop app reads it like every other runtime), which
+/// therefore changes nothing for a desktop app today. Pure.
 pub fn desktop_resolution(
   baked: Option<KernelSandboxMode>,
   dev_build: bool,
@@ -1497,9 +1548,23 @@ mod tests {
         [Off, Enforce, Enforce],
       ),
       (
-        "a desktop package that isn't strict: the author fixed it all the same",
+        "a desktop package that isn't strict (webview): auto applies nothing at any stage (the R4 decision)",
         desktop(false, Engine::Webview),
-        [Off, Enforce, Enforce],
+        [Off, Off, Off],
+      ),
+      (
+        "a desktop package that isn't strict (CEF): the same",
+        desktop(false, Engine::Cef),
+        [Off, Off, Off],
+      ),
+      (
+        "a desktop package that isn't strict, -A with denies: no deny ceiling either",
+        ModeInputs {
+          allow_all: true,
+          has_deny: true,
+          ..desktop(false, Engine::Webview)
+        },
+        [Off, Off, Off],
       ),
       (
         "a strict desktop package launched from a terminal: fixed all the same",
@@ -1530,8 +1595,34 @@ mod tests {
           assert!(r.auto_chosen, "{name} at {stage:?}");
           assert_eq!(r.reason, ModeReason::AutoAuthorFixed, "{name}");
         }
+        if matches!(
+          inputs.kind,
+          Some(RunKind::DesktopPackaged { strict: false, .. })
+        ) {
+          // not "not yet": no later stage changes it
+          assert_eq!(r.reason, ModeReason::DesktopNotStrict, "{name}");
+          assert_eq!(r.would_apply, AutoPlan::Off, "{name} at {stage:?}");
+          assert!(!r.auto_chosen && !r.deny_ceiling(), "{name}");
+        }
       }
     }
+    // what isn't `auto` is the author's word and applies as baked, strict
+    // or not: `warn` reports, and `off` is off
+    let r = resolve(&ModeInputs {
+      baked: Some(Warn),
+      stage: Some(AutoStage::R4),
+      ..desktop(false, Engine::Webview)
+    });
+    assert_eq!((r.mode, r.reason), (Warn, ModeReason::Requested));
+    // the second decision (a policy with the broker's shape) changes
+    // nothing for a desktop app that isn't strict
+    let r = resolve(&ModeInputs {
+      policy_needs_supervisor: true,
+      stage: Some(AutoStage::R4),
+      ..desktop(false, Engine::Webview)
+    });
+    assert_eq!((r.mode, r.reason), (Off, ModeReason::DesktopNotStrict));
+    assert!(!r.needs_supervisor);
   }
 
   // a packaged desktop app's mode is its baked one: the flag, the
@@ -1600,8 +1691,20 @@ mod tests {
     let auto = |stage| {
       desktop_resolution(None, false, &options, Engine::Webview, stage).mode
     };
+    // (nothing baked is a package that isn't strict: off at every stage)
     assert_eq!(auto(None), Off);
-    assert_eq!(auto(Some(AutoStage::R4)), Enforce);
+    assert_eq!(auto(Some(AutoStage::R4)), Off);
+    assert_eq!(
+      desktop_resolution(
+        None,
+        false,
+        &options,
+        Engine::Webview,
+        Some(AutoStage::R4)
+      )
+      .reason,
+      ModeReason::DesktopNotStrict
+    );
     assert_eq!(
       desktop_resolution(
         Some(Off),

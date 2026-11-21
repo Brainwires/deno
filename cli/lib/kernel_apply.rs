@@ -437,8 +437,14 @@ pub fn start_desktop(
 /// - the outside helper is forked right before the sandbox applies, for
 ///   opening links and the updater's swap.
 ///
-/// A development build, `off`, `-A` and (in the preview) `auto` apply
-/// nothing. Under `enforce`, a rule the OS can't hold and a failed apply
+/// Only a strict package (`desktop.permissions: "strict"`, a baked
+/// `enforce`) is confined. A development build, `off`, `-A` and `auto` at
+/// every stage (an app that isn't strict:
+/// `kernel_sandbox::ModeReason::DesktopNotStrict`) apply nothing: such an
+/// app starts the system's openers (`open`, `osascript`, `xdg-open`) for
+/// `openPath`, `revealInFileManager` and the auth session's browser, and
+/// only http / https / mailto links have a way out of the sandbox (the
+/// outside helper). Under `enforce`, a rule the OS can't hold and a failed apply
 /// refuse to start (a mode `auto` chose falls back instead), exactly as for
 /// a compiled program. The decision is recorded for the capability probe
 /// ([`desktop_report`]) and for `kernel_sandbox::check_compiled` (the
@@ -510,6 +516,10 @@ pub fn decide_desktop(
   }
   let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
   let mut ctx = compiled_context(mode, start.exec_strict, cwd);
+  // a desktop app never forks a supervisor of its own (its process hosts
+  // the web engine): what only the broker would hold stays a rule the OS
+  // can't hold, never a Mode B plan nothing runs
+  ctx.compiled_supervisor = false;
   // a desktop app has its own enforcers: none on Windows (the small tier
   // is a compiled program's)
   ctx.caps = detect_capabilities();
@@ -1332,12 +1342,13 @@ mod tests {
       )
     };
     for (baked, dev_build, why) in [
-      (None, false, "auto applies nothing yet"),
+      // not strict: `auto` applies nothing, at any stage
+      (None, false, "isn't packaged strict"),
       (Some(KernelSandboxMode::Off), false, "turned off"),
       (
         Some(KernelSandboxMode::Auto),
         false,
-        "auto applies nothing yet",
+        "isn't packaged strict",
       ),
       (
         Some(KernelSandboxMode::Enforce),

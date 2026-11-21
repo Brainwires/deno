@@ -48,8 +48,8 @@ pub enum DesktopSandbox {
   #[serde(rename = "headless-only")]
   HeadlessOnly,
   /// No kernel sandbox: turned off, a development build, nothing to
-  /// narrow, not applied by `auto` yet, or a system without an enforcer for
-  /// desktop apps.
+  /// narrow, `auto` (which applies nothing to an app that isn't packaged
+  /// strict), or a system without an enforcer for desktop apps.
   #[serde(rename = "none")]
   None,
 }

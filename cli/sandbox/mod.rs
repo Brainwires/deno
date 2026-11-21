@@ -198,11 +198,13 @@ impl CompileKind<'_> {
 /// runs on lacks is only known at startup).
 ///
 /// A desktop app (DENEXT.md item 488) takes `enforce` and `auto` on every
-/// target: its startup confines the app's own process where its web engine
-/// can run inside the sandbox and reports the app headless-only (or `none`)
-/// where it can't, so no desktop app refuses to start over its engine. What
-/// the package gets for its target and engine is printed here
-/// (`kernel_desktop::packaged_guarantee`).
+/// target. Under `enforce` (a strict package) its startup confines the
+/// app's own process where its web engine can run inside the sandbox and
+/// reports the app headless-only (or `none`) where it can't, so no desktop
+/// app refuses to start over its engine; what the package gets for its
+/// target and engine is printed here (`kernel_desktop::packaged_guarantee`).
+/// `auto` applies nothing to a desktop app, at any stage
+/// (`ModeReason::DesktopNotStrict`), and that is said here too.
 pub fn compile_mode(
   cli_options: &CliOptions,
   kind: CompileKind,
@@ -226,17 +228,29 @@ pub fn compile_mode(
       }
       warn_compile_gaps(cli_options, os, KernelSandboxMode::Broker)?;
     }
-    Some(KernelSandboxMode::Enforce | KernelSandboxMode::Auto)
-      if kind.desktop =>
-    {
+    Some(KernelSandboxMode::Enforce) if kind.desktop => {
       if !kind.quiet {
         note_desktop_guarantee(
           kind.os(),
           deno_lib::kernel_sandbox::Engine::from_backend(
             cli_options.flags().internal.desktop_backend.as_deref(),
           ),
-          mode.unwrap_or_default(),
+          KernelSandboxMode::Enforce,
         );
+      }
+    }
+    Some(KernelSandboxMode::Auto) if kind.desktop => {
+      // only a strict package is confined: `auto` leaves a desktop app
+      // alone at every stage (`ModeReason::DesktopNotStrict`)
+      if !kind.quiet {
+        static NOTE: Once = Once::new();
+        NOTE.call_once(|| {
+          log::info!(
+            "{} --kernel-sandbox=auto: {}; --kernel-sandbox=enforce confines it.",
+            crate::colors::green("Kernel sandbox"),
+            deno_lib::kernel_sandbox::ModeReason::DesktopNotStrict.describe(),
+          );
+        });
       }
     }
     Some(KernelSandboxMode::Enforce) => {

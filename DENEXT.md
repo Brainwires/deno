@@ -19650,11 +19650,13 @@ where the changes are discussed.
      - **Mode.** `RunKind::DesktopPackaged { strict, engine }` resolves as a
        compiled program: only the baked mode counts (no flag, environment,
        deno.json or terminal), a development build is off, plain `-A` is
-       off, and `auto` applies what its stage says (a desktop app honours
-       the harnesses' raise-only `DENO_INTERNAL_KERNEL_SANDBOX_STAGE`, so the
-       desktop beds can soak the next stage). `strict`
-       (`desktop.permissions: "strict"`) is carried as a baked `enforce`:
-       there is no second switch. `deno compile` / `deno desktop` take
+       off. `strict` (`desktop.permissions: "strict"`) is carried as a baked
+       `enforce`: there is no second switch, and it is the only way a
+       desktop app is confined (the R4 decision, below): `auto` applies
+       nothing to an app that isn't strict, at any stage
+       (`ModeReason::DesktopNotStrict`; the harnesses' raise-only
+       `DENO_INTERNAL_KERNEL_SANDBOX_STAGE` is read and changes nothing
+       there). `deno compile` / `deno desktop` take
        `--kernel-sandbox=enforce` and `auto` for a desktop app on every
        target (`broker` is refused), record the engine in the binary
        (`Metadata::desktop_engine`, from `--backend` / `desktop.backend`),
@@ -19669,12 +19671,11 @@ where the changes are discussed.
        app whose host started its engine before the runtime was called; an
        app with a scoped grant and no identifier (its engine's folders can't
        be named). `none`: Windows (no enforcer for desktop apps), `off`, a
-       development build, `-A`, the preview's `auto`. An engine that can't
+       development build, `-A`, `auto` (an app that isn't strict). An engine that can't
        nest is never a refusal to start, also under a baked `enforce`: the
        app starts, one line on stderr says its own process is not confined,
        and the probe says why. A rule the OS can't hold and a failed apply
-       still refuse under `enforce` (a mode `auto` chose falls back), as for
-       a compiled program. A fork of the app (a worker, a sidecar) is held
+       still refuse under `enforce`, as for a compiled program. A fork of the app (a worker, a sidecar) is held
        by the app's sandbox, which it inherits, and confines itself like a
        compiled program where the app is headless-only.
      - **Before the engine.** The runtime library exports
@@ -19741,6 +19742,27 @@ where the changes are discussed.
        opener directly in an app that isn't confined);
        `desktop_update::swap::spawn_helper` goes through it in a confined
        app.
+     - **The R4 decision: only a strict package is kernel-enforced** (the
+       train lead's, at the merge into `train/denext30`). A desktop app
+       that doesn't bake strict permissions resolves to `off` under `auto`
+       at every stage, preview, R3 and R4 alike, with
+       `ModeReason::DesktopNotStrict`, `would_apply: off` and the probe's
+       `kernelSandbox: "none"` (its reason says the app isn't packaged
+       strict). Why: such an app starts the system's openers (`open`,
+       `osascript`, `xdg-open`) for `openPath`, `revealInFileManager` and
+       the auth session's browser, and inside the sandbox only `http:`,
+       `https:` and `mailto:` links have a way out (the outside helper), so
+       a default-on sandbox would break what it does. The `AUTO_STAGE`
+       flip therefore changes nothing for desktop apps that aren't strict;
+       `-A` with denies gets no deny ceiling there either. A baked `warn`
+       or `off` applies as baked, and `deno compile` / `deno desktop` say
+       at build time that a baked `auto` applies nothing to a desktop app.
+       In the mode decision this is rule 7 (`kernel_sandbox_mode`'s doc
+       lists the order: subcommand, requested mode, off / development
+       build, plain `-A`, an unfixed set, the D1 deny ceiling, this rule,
+       `auto` by stage, an explicit mode; then the second decision with
+       the compiled policy, which takes the broker and never applies to a
+       desktop app: `Context::compiled_supervisor` stays false there).
      - **The probe.** `Deno.desktop.platformFeatures()` gains
        `kernelSandbox: "kernel" | "headless-only" | "none"` and
        `kernelSandboxReason` (its `sandbox` key was taken: the Chromium
