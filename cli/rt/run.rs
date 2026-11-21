@@ -2450,7 +2450,7 @@ pub(crate) struct DesktopTokenDirs {
 
 impl DesktopTokenDirs {
   /// The folders of the app with the identifier `app_id` (`None`: none).
-  fn for_app(app_id: Option<&str>) -> Self {
+  pub(crate) fn for_app(app_id: Option<&str>) -> Self {
     Self {
       cache: app_id.and_then(desktop_app_cache_dir),
       data: app_id.and_then(desktop_app_data_dir),

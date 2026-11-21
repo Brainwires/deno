@@ -2910,23 +2910,53 @@ pub fn spawn_helper(
   layout: &InstallLayout,
   mode: HelperMode,
 ) -> std::io::Result<()> {
+  // An app the kernel sandbox holds can't start a helper that replaces its
+  // install: a child inherits the sandbox. Its outside helper, forked
+  // before the sandbox applied, starts the same command (fixed then, for
+  // this install) instead.
+  if let Some(spawn) = OUTSIDE_SPAWNER.get() {
+    return spawn(mode);
+  }
   let exe = layout.exe();
   // Every host finds the runtime the installed app ships (a macOS bundle's
   // `libruntime.dylib`, the `<App>.dll` (`<App>.runtime.dll` behind CEF's
   // bootstrap) / `<App>.so` next to the executable)
   // for a headless launch too, and a packaged host ignores
   // LAUFEY_RUNTIME_PATH, so the helper needs no pointer to it.
-  let env = [("LAUFEY_SINGLE_INSTANCE", Some("0"))];
-  spawn_detached(
-    &exe,
-    &[
+  let (args, env) = helper_command(mode, std::process::id());
+  let env: Vec<(&str, Option<&str>)> =
+    env.iter().map(|(k, v)| (*k, Some(*v))).collect();
+  spawn_detached(&exe, &args, &layout.parent, &env)
+}
+
+/// How a confined app starts the helper (see [`spawn_helper`]).
+type OutsideSpawner =
+  Box<dyn Fn(HelperMode) -> std::io::Result<()> + Send + Sync>;
+
+static OUTSIDE_SPAWNER: std::sync::OnceLock<OutsideSpawner> =
+  std::sync::OnceLock::new();
+
+/// Makes [`spawn_helper`] start the helper through `spawn` (the app's
+/// outside helper, DENEXT.md item 483). The first call wins.
+pub fn set_outside_spawner(spawn: OutsideSpawner) {
+  let _ = OUTSIDE_SPAWNER.set(spawn);
+}
+
+/// The helper's arguments (after the executable) for the app `pid`, and
+/// the variables its environment adds: what [`spawn_helper`] runs, and what
+/// a confined app fixes for its outside helper before it confines itself.
+pub fn helper_command(
+  mode: HelperMode,
+  pid: u32,
+) -> (Vec<String>, [(&'static str, &'static str); 1]) {
+  (
+    vec![
       "run".into(),
       HELPER_ARG.into(),
       mode.as_str().into(),
-      std::process::id().to_string(),
+      pid.to_string(),
     ],
-    &layout.parent,
-    &env,
+    [("LAUFEY_SINGLE_INSTANCE", "0")],
   )
 }
 
