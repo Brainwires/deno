@@ -8,6 +8,20 @@
 //! on through `RegisterWaitForSingleObject` (the thread pool's wait, no
 //! thread of our own). Closing the pseudoconsole ends the child and, once
 //! its output has been drained, the output pipe.
+//!
+//! denext: the child runs in a job object of its own, assigned while it is
+//! still suspended (`CREATE_SUSPENDED`, then `AssignProcessToJobObject`, then
+//! `ResumeThread`), so every process it starts is in the job from its first
+//! instruction and a kill ends the whole tree (`TerminateJobObject`), as
+//! closing a Unix terminal ends its session. The job is not kill-on-close:
+//! when the child exits by itself, what it left running keeps running, and
+//! the job's handle is closed with the child's resource. It allows explicit
+//! breakaway (`JOB_OBJECT_LIMIT_BREAKAWAY_OK`, not the silent kind): a
+//! process started with `CREATE_BREAKAWAY_FROM_JOB` (a `Deno.Command` with
+//! `detached: true`) asked to outlive its parent, as a `setsid` daemon
+//! outlives a Unix terminal. Where no job can be made or assigned (a sandbox
+//! whose own job refuses nesting) the child still runs, and a kill ends the
+//! child alone, as before.
 
 use std::ffi::OsStr;
 use std::ffi::OsString;
@@ -49,6 +63,13 @@ use windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING;
 use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_INBOUND;
 use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_OUTBOUND;
 use windows_sys::Win32::System::Console::COORD;
+use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+use windows_sys::Win32::System::JobObjects::CreateJobObjectW;
+use windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+use windows_sys::Win32::System::JobObjects::JOBOBJECT_EXTENDED_LIMIT_INFORMATION;
+use windows_sys::Win32::System::JobObjects::JobObjectExtendedLimitInformation;
+use windows_sys::Win32::System::JobObjects::SetInformationJobObject;
+use windows_sys::Win32::System::JobObjects::TerminateJobObject;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
 use windows_sys::Win32::System::Pipes::CreateNamedPipeW;
@@ -56,6 +77,7 @@ use windows_sys::Win32::System::Pipes::PIPE_READMODE_BYTE;
 use windows_sys::Win32::System::Pipes::PIPE_REJECT_REMOTE_CLIENTS;
 use windows_sys::Win32::System::Pipes::PIPE_TYPE_BYTE;
 use windows_sys::Win32::System::Pipes::PIPE_WAIT;
+use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
 use windows_sys::Win32::System::Threading::CREATE_UNICODE_ENVIRONMENT;
 use windows_sys::Win32::System::Threading::CreateProcessW;
 use windows_sys::Win32::System::Threading::DeleteProcThreadAttributeList;
@@ -67,6 +89,7 @@ use windows_sys::Win32::System::Threading::InitializeProcThreadAttributeList;
 use windows_sys::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST;
 use windows_sys::Win32::System::Threading::PROCESS_INFORMATION;
 use windows_sys::Win32::System::Threading::RegisterWaitForSingleObject;
+use windows_sys::Win32::System::Threading::ResumeThread;
 use windows_sys::Win32::System::Threading::STARTF_USESTDHANDLES;
 use windows_sys::Win32::System::Threading::STARTUPINFOEXW;
 use windows_sys::Win32::System::Threading::TerminateProcess;
@@ -219,6 +242,9 @@ pub struct Waiter {
 
 pub struct Killer {
   process: Rc<OwnedHandle>,
+  /// The job the child runs in (none where it could not be put in one);
+  /// closed with the killer, which does not end what is still in it.
+  job: Option<OwnedHandle>,
 }
 
 pub struct Spawned {
@@ -578,7 +604,10 @@ pub fn spawn(
       std::ptr::null(),
       std::ptr::null(),
       FALSE,
-      EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+      // suspended until it is in its job (denext)
+      EXTENDED_STARTUPINFO_PRESENT
+        | CREATE_UNICODE_ENVIRONMENT
+        | CREATE_SUSPENDED,
       environment.as_mut_ptr() as *mut c_void,
       cwd.as_ptr(),
       &startup.StartupInfo,
@@ -595,19 +624,32 @@ pub fn spawn(
       .into(),
     );
   }
-  // SAFETY: CreateProcessW gave this process both handles.
-  unsafe {
-    CloseHandle(info.hThread);
-  }
-  // SAFETY: as above; the handle is owned from here.
+  // SAFETY: CreateProcessW gave this process the handle; owned from here.
   let process =
     Rc::new(unsafe { OwnedHandle::from_raw_handle(info.hProcess as _) });
   let pid = info.dwProcessId;
+  // denext: in its job before it runs a single instruction, so nothing it
+  // starts can be outside it.
+  let job = job_for(&process);
+  // SAFETY: the primary thread's handle CreateProcessW gave this process.
+  let resumed = unsafe { ResumeThread(info.hThread) };
+  // SAFETY: as above; not needed past the resume.
+  unsafe {
+    CloseHandle(info.hThread);
+  }
+  if resumed == u32::MAX {
+    let err = io::Error::last_os_error();
+    terminate(&process, job.as_ref());
+    return Err(
+      ProcessError::SpawnFailed {
+        command: run.argv0.to_string_lossy().into_owned(),
+        error: Box::new(ProcessError::Io(err)),
+      }
+      .into(),
+    );
+  }
   run.verify_after_spawn(|| {
-    // SAFETY: a process handle this process owns.
-    unsafe {
-      TerminateProcess(process.as_raw_handle() as HANDLE, 1);
-    }
+    terminate(&process, job.as_ref());
   })?;
 
   // SAFETY: both are the overlapped server ends created above, handed over
@@ -631,8 +673,60 @@ pub fn spawn(
       console,
       waiting: None,
     },
-    killer: Killer { process },
+    killer: Killer { process, job },
   })
+}
+
+/// A job for the suspended child, allowing explicit breakaway only (see the
+/// module's notes), or none where one cannot be made or assigned.
+fn job_for(process: &OwnedHandle) -> Option<OwnedHandle> {
+  // SAFETY: null security attributes (a handle no child inherits) and a
+  // null name (an anonymous job) are valid arguments.
+  let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+  if handle.is_null() {
+    return None;
+  }
+  // SAFETY: a new, open job handle nothing else owns.
+  let job = unsafe { OwnedHandle::from_raw_handle(handle as _) };
+  // SAFETY: the struct holds only integers, so all zeroes is a valid value.
+  let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION =
+    unsafe { std::mem::zeroed() };
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+  // SAFETY: `limits` outlives the call, and the length is its size.
+  let set = unsafe {
+    SetInformationJobObject(
+      job.as_raw_handle() as HANDLE,
+      JobObjectExtendedLimitInformation,
+      (&raw const limits).cast(),
+      std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+    )
+  };
+  if set == FALSE {
+    return None;
+  }
+  // SAFETY: both handles are open. A process already in a job (this one's,
+  // when the runtime runs in one) gets a nested job.
+  let assigned = unsafe {
+    AssignProcessToJobObject(
+      job.as_raw_handle() as HANDLE,
+      process.as_raw_handle() as HANDLE,
+    )
+  };
+  (assigned != FALSE).then_some(job)
+}
+
+/// Ends the child and, through its job, everything it started that has not
+/// broken away (exit code 1 for each, as `Deno.kill` on Windows).
+fn terminate(process: &OwnedHandle, job: Option<&OwnedHandle>) -> bool {
+  if let Some(job) = job {
+    // SAFETY: an open job handle this process owns.
+    if unsafe { TerminateJobObject(job.as_raw_handle() as HANDLE, 1) } != FALSE
+    {
+      return true;
+    }
+  }
+  // SAFETY: a process handle this process owns.
+  unsafe { TerminateProcess(process.as_raw_handle() as HANDLE, 1) != FALSE }
 }
 
 impl Pty {
@@ -795,8 +889,9 @@ impl Waiter {
 }
 
 impl Killer {
-  /// Ends the child (any signal but 0, which only checks that it runs), as
-  /// `Deno.kill` does on Windows.
+  /// Ends the child and the processes it started (any signal but 0, which
+  /// only checks that it runs), with the exit code `Deno.kill` gives on
+  /// Windows.
   pub fn kill(&self, signal: i32) -> Result<(), PtyError> {
     if exit_code(&self.process)?.is_some() {
       return Err(
@@ -806,20 +901,15 @@ impl Killer {
     if signal == 0 {
       return Ok(());
     }
-    // SAFETY: a process handle this process owns.
-    if unsafe { TerminateProcess(self.process.as_raw_handle() as HANDLE, 1) }
-      == FALSE
-    {
+    if !terminate(&self.process, self.job.as_ref()) {
       return Err(io::Error::last_os_error().into());
     }
     Ok(())
   }
 
   pub fn kill_on_drop(&self) {
-    // SAFETY: best-effort end of a process handle this process owns.
-    unsafe {
-      TerminateProcess(self.process.as_raw_handle() as HANDLE, 1);
-    }
+    // best effort: the runtime is ending with the child running
+    terminate(&self.process, self.job.as_ref());
   }
 }
 
