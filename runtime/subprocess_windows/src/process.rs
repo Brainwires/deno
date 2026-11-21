@@ -97,6 +97,7 @@ use windows_sys::Win32::System::Registry::RegCloseKey;
 use windows_sys::Win32::System::Registry::RegGetValueW;
 use windows_sys::Win32::System::Registry::RegOpenKeyExW;
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+use windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB;
 use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
@@ -244,6 +245,42 @@ fn uv_init_global_job_handle() {
       GlobalJobHandle(job)
     }
   });
+}
+
+/// Whether this process is in a job whose limits allow a child to break away
+/// from it (`JOB_OBJECT_LIMIT_BREAKAWAY_OK` or `_SILENT_BREAKAWAY_OK`). Only
+/// the job the process is immediately in is asked; an outer job of a nested
+/// chain may still refuse, which the spawn finds out (denext).
+fn current_job_allows_breakaway() -> bool {
+  use windows_sys::Win32::System::JobObjects::*;
+  let mut in_job: BOOL = FALSE;
+  // SAFETY: the pseudo handle of this process and a null job (any job) are
+  // valid arguments; `in_job` outlives the call.
+  if unsafe {
+    IsProcessInJob(GetCurrentProcess(), ptr::null_mut(), &mut in_job)
+  } == 0
+    || in_job == FALSE
+  {
+    return false;
+  }
+  // SAFETY: the struct holds only integers, so all zeroes is a valid value.
+  let mut info =
+    unsafe { mem::zeroed::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() };
+  // SAFETY: a null job is the one this process is immediately in; `info`
+  // outlives the call and the length is its size.
+  let queried = unsafe {
+    QueryInformationJobObject(
+      ptr::null_mut(),
+      JobObjectExtendedLimitInformation,
+      (&raw mut info).cast(),
+      mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+      ptr::null_mut(),
+    )
+  };
+  queried != 0
+    && info.BasicLimitInformation.LimitFlags
+      & (JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK)
+      != 0
 }
 
 #[derive(Debug)]
@@ -853,6 +890,14 @@ pub fn spawn(options: &SpawnOptions) -> Result<ChildProcess, std::io::Error> {
   if (options.flags & uv_process_flags::Detached) != 0 {
     process_flags |= DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
     process_flags |= CREATE_SUSPENDED;
+    // denext: a detached child leaves this process's job where the job lets
+    // it, so it outlives a kill-on-close job this process runs in (the
+    // global job below, once a non-detached spawn has made it, or a parent's
+    // such as `deno desktop --hmr`'s). Without it the child inherits the job
+    // and dies when the job's last handle closes, despite `detached`.
+    if current_job_allows_breakaway() {
+      process_flags |= CREATE_BREAKAWAY_FROM_JOB;
+    }
   }
 
   // Create the process
@@ -862,7 +907,7 @@ pub fn spawn(options: &SpawnOptions) -> Result<ChildProcess, std::io::Error> {
 
   let cwd_ptr = cwd.as_ptr();
 
-  let create_result = unsafe {
+  let create = |process_flags: u32, info: &mut PROCESS_INFORMATION| unsafe {
     CreateProcessW(
       app_path_ptr,         // Application path
       args_ptr as *mut u16, // Command line
@@ -874,9 +919,20 @@ pub fn spawn(options: &SpawnOptions) -> Result<ChildProcess, std::io::Error> {
       env_ptr as *mut _, // Environment
       cwd_ptr,           // Current directory
       (&raw const startup_ex).cast::<STARTUPINFOW>(), // Startup info
-      &mut info,         // Process information
+      info,              // Process information
     )
   };
+  let mut create_result = create(process_flags, &mut info);
+  // denext: an outer job (of a nested chain) that refuses breakaway fails
+  // the spawn with ERROR_ACCESS_DENIED; the child then stays in the jobs,
+  // as it did before breakaway was asked for.
+  if create_result == 0
+    && (process_flags & CREATE_BREAKAWAY_FROM_JOB) != 0
+    && unsafe { GetLastError() } == ERROR_ACCESS_DENIED
+  {
+    process_flags &= !CREATE_BREAKAWAY_FROM_JOB;
+    create_result = create(process_flags, &mut info);
+  }
 
   if create_result == 0 {
     // CreateProcessW failed
@@ -1929,5 +1985,66 @@ mod tests {
   #[test]
   fn test_make_program_args_verbatim_rejects_nuls() {
     assert_make_program_args_rejects_nuls(true);
+  }
+
+  // denext: a detached child is not in the kill-on-close job this process
+  // put itself in at its first non-detached spawn, so it outlives the
+  // process; a non-detached one is.
+  #[test]
+  fn detached_child_breaks_away_from_the_global_job() {
+    use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+    use windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION;
+
+    let in_global_job = |pid: u32| {
+      let job = UV_GLOBAL_JOB_HANDLE.get().expect("made by a spawn").0;
+      // SAFETY: plain arguments; the handle is closed below.
+      let process =
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
+      assert!(!process.is_null(), "{}", io::Error::last_os_error());
+      let mut in_job: BOOL = FALSE;
+      // SAFETY: both handles are open; `in_job` outlives the call.
+      let ok = unsafe { IsProcessInJob(process, job, &mut in_job) };
+      // SAFETY: opened above.
+      unsafe { CloseHandle(process) };
+      assert_ne!(ok, 0, "{}", io::Error::last_os_error());
+      in_job != FALSE
+    };
+
+    // runs for about 30 seconds unless it is killed
+    let ping = || {
+      let mut command = crate::Command::new("ping");
+      command
+        .args(["-n", "31", "127.0.0.1"])
+        .stdin(crate::Stdio::Null)
+        .stdout(crate::Stdio::Null)
+        .stderr(crate::Stdio::Null);
+      command
+    };
+    let mut attached = ping().spawn().unwrap();
+    let attached_pid = attached.id().unwrap();
+    // the first non-detached spawn put this process in the global job
+    assert!(current_job_allows_breakaway());
+    let mut detached = ping().detached().spawn().unwrap();
+    let detached_pid = detached.id().unwrap();
+    let attached_in = in_global_job(attached_pid);
+    let detached_in = in_global_job(detached_pid);
+    for pid in [attached_pid, detached_pid] {
+      let _ = process_kill(pid as i32, SIGTERM);
+    }
+    let _ = attached.wait_blocking();
+    let _ = detached.wait_blocking();
+    assert!(attached_in, "a non-detached child is in the global job");
+    if detached_in {
+      // An outer job this test runs in (a CI runner's) may refuse
+      // breakaway, which the spawn then falls back from. Only then may the
+      // detached child have stayed.
+      use std::os::windows::process::CommandExt;
+      let refused = std::process::Command::new("cmd.exe")
+        .args(["/d", "/c", "exit 0"])
+        .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
+        .status()
+        .is_err_and(|e| e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32));
+      assert!(refused, "a detached child left the global job");
+    }
   }
 }
