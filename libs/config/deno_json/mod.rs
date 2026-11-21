@@ -1103,6 +1103,11 @@ struct SerializedDesktopAppConfig {
   /// `HKCU\Software\Classes\<scheme>` protocol handler (Windows).
   #[serde(rename = "deepLinks")]
   pub deep_links: Option<Vec<String>>,
+  /// The app may be the system's web browser: the runtime also delivers
+  /// `http` / `https` links to it (`Deno.desktop.browserLinks`). The
+  /// schemes stay out of `deepLinks`, and the OS registration of a browser
+  /// is the packager's. Defaults to `false`.
+  pub browser: Option<bool>,
   /// The stable origin the app's renderer runs at, as `<scheme>://<host>`
   /// (e.g. `"acme://app"`). The desktop runtime registers `<scheme>` as a
   /// custom URL scheme with the webview and bridges its requests into the
@@ -1217,6 +1222,7 @@ impl SerializedDesktopConfig {
         name: a.name,
         identifier: a.identifier,
         deep_links: a.deep_links,
+        browser: a.browser,
         origin: a.origin,
         single_instance: a.single_instance,
         activation_policy: a.activation_policy,
@@ -1314,6 +1320,8 @@ pub struct DesktopAppConfig {
   pub identifier: Option<String>,
   pub icons: Option<DesktopIconsConfig>,
   pub deep_links: Option<Vec<String>>,
+  /// `desktop.app.browser`.
+  pub browser: Option<bool>,
   /// `desktop.app.origin` as written; validated by the CLI (`deno_lib`'s
   /// `AppOrigin`), not here.
   pub origin: Option<String>,

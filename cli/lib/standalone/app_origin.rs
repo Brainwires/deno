@@ -119,6 +119,11 @@ pub enum AppOriginError {
 /// those schemes as deep links (see [`super::launch_args`]). The metadata's
 /// list, written by a CLI that knows the key, takes precedence.
 ///
+/// `browser` mirrors `desktop.app.browser`: the app may be the system's web
+/// browser, so the runtime also delivers `http` / `https` links to it (see
+/// [`super::launch_args::accepted_link_schemes`]); opened HTML files arrive
+/// like any opened file. `true` here or in the metadata turns it on.
+///
 /// `singleInstance` mirrors `desktop.app.singleInstance`. The runtime cannot
 /// turn the single-instance lock on itself: laufey decides it in the host's
 /// `main()`, before the runtime is loaded, from `laufey-launch.json` next to
@@ -158,6 +163,7 @@ struct SerializedAppConfigFile {
   origin: Option<String>,
   identifier: Option<String>,
   deep_links: Option<Vec<String>>,
+  browser: Option<bool>,
   single_instance: Option<bool>,
   initial_window: Option<SerializedInitialWindow>,
   update: Option<SerializedUpdate>,
@@ -198,6 +204,8 @@ pub struct AppConfigFile {
   pub identifier: Option<String>,
   /// Normalized with [`super::launch_args::normalize_deep_link_schemes`].
   pub deep_links: Option<Vec<String>>,
+  /// `browser`: also receive `http` / `https` links.
+  pub browser: Option<bool>,
   pub single_instance: Option<bool>,
   /// `initialWindow`, with deno.json's defaults filled in.
   pub initial_window: Option<super::binary::InitialWindowConfig>,
@@ -323,6 +331,7 @@ pub fn parse_app_config_file(bytes: &[u8]) -> Result<AppConfigFile, String> {
     origin,
     identifier: config.identifier,
     deep_links,
+    browser: config.browser,
     single_instance: config.single_instance,
     initial_window: config.initial_window.map(|w| {
       let defaults = super::binary::InitialWindowConfig::default();
@@ -868,6 +877,32 @@ mod tests {
       parse_app_config_file(br#"{ "deepLinks": ["https"] }"#).unwrap_err();
     assert!(err.contains("deepLinks"), "{err}");
     assert!(err.contains("reserved"), "{err}");
+  }
+
+  #[test]
+  fn app_config_file_browser() {
+    let config = parse_app_config_file(
+      br#"{ "identifier": "com.example.browser", "deepLinks": ["acme"], "browser": true }"#,
+    )
+    .unwrap();
+    assert_eq!(config.browser, Some(true));
+    assert_eq!(config.deep_links, Some(vec!["acme".to_string()]));
+    assert_eq!(
+      parse_app_config_file(br#"{ "browser": false }"#)
+        .unwrap()
+        .browser,
+      Some(false)
+    );
+    assert_eq!(parse_app_config_file(b"{}").unwrap().browser, None);
+    for bad in [
+      r#"{ "browser": "yes" }"#,
+      r#"{ "browser": 1 }"#,
+      r#"{ "Browser": true }"#,
+      // A browser still never declares http / https as deep links.
+      r#"{ "browser": true, "deepLinks": ["https"] }"#,
+    ] {
+      assert!(parse_app_config_file(bad.as_bytes()).is_err(), "{bad}");
+    }
   }
 
   #[test]

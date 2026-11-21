@@ -32,6 +32,32 @@ use url::Url;
 pub const RESERVED_DEEP_LINK_SCHEMES: &[&str] =
   &["http", "https", "file", "ftp", "ws", "wss"];
 
+/// The schemes a browser app (`desktop.app.browser`, `"browser": true` in
+/// `.deno-desktop/app.json`) receives besides its deep links. They stay
+/// [`RESERVED_DEEP_LINK_SCHEMES`]: an app never declares them as deep links,
+/// and the runtime never registers them as its own (the OS lists a browser
+/// app from its packaging, and only the user makes it the default).
+pub const BROWSER_LINK_SCHEMES: &[&str] = &["http", "https"];
+
+/// The link schemes the app receives: its normalized deep-link schemes, plus
+/// [`BROWSER_LINK_SCHEMES`] when it is a browser app. Pass the result as the
+/// `schemes` of [`classify_open_url`] and [`parse_launch_args`]; scheme
+/// registration keeps using the deep links alone.
+pub fn accepted_link_schemes(
+  deep_links: &[String],
+  browser: bool,
+) -> Vec<String> {
+  let mut out = deep_links.to_vec();
+  if browser {
+    for scheme in BROWSER_LINK_SCHEMES {
+      if !out.iter().any(|s| s == scheme) {
+        out.push(scheme.to_string());
+      }
+    }
+  }
+  out
+}
+
 /// The host backend's own option that takes a value (`--runtime <path>`).
 /// Its value is an existing file and must not be mistaken for an opened file.
 const HOST_OPTIONS_WITH_VALUE: &[&str] = &["--runtime"];
@@ -95,7 +121,8 @@ pub enum OpenedItem {
 /// `openURLs`): a `file:` URL that maps to a local path is a
 /// [`OpenedItem::File`], a URL whose scheme (case-insensitive) is one of the
 /// app's declared deep-link `schemes` (as normalized by
-/// [`normalize_deep_link_schemes`]) is an [`OpenedItem::Url`] carrying the
+/// [`normalize_deep_link_schemes`], plus `http` / `https` for a browser app:
+/// see [`accepted_link_schemes`]) is an [`OpenedItem::Url`] carrying the
 /// string unchanged, and anything else is `None`: dropped.
 ///
 /// The OS routes the schemes the bundle declares, but a bundle can declare
@@ -157,8 +184,10 @@ pub struct LaunchTargets {
 /// executable name.
 ///
 /// - An absolute URL whose scheme (case-insensitive) is one of `schemes` (as
-///   normalized by [`normalize_deep_link_schemes`]) is a URL.
-/// - A `file:` URL whose local path exists is a file.
+///   normalized by [`normalize_deep_link_schemes`], plus `http` / `https`
+///   for a browser app: see [`accepted_link_schemes`]) is a URL.
+/// - A `file:` URL whose local path exists is a file (a Linux launcher's
+///   `%u` passes an opened document, an `.html` file say, this way).
 /// - Anything that names an existing path (`exists`) is a file. A relative
 ///   path is resolved against `cwd`; without an absolute `cwd` it is ignored.
 /// - Everything else is ignored: an argument starting with `-` (a flag, which
@@ -482,6 +511,118 @@ mod tests {
         PathBuf::from("D:\\data"),
         PathBuf::from("C:\\Users\\me\\notes.txt"),
       ]
+    );
+  }
+
+  #[test]
+  fn browser_apps_also_accept_http_and_https() {
+    let deep_links = strings(&["acme"]);
+    assert_eq!(accepted_link_schemes(&deep_links, false), deep_links);
+    let browser = accepted_link_schemes(&deep_links, true);
+    assert_eq!(browser, strings(&["acme", "http", "https"]));
+    assert_eq!(
+      accepted_link_schemes(&[], true),
+      strings(&["http", "https"])
+    );
+
+    // macOS openURLs: http / https only with the flag.
+    for url in ["https://example.com/a?b#c", "HTTP://Example.com/"] {
+      assert_eq!(
+        classify_open_url(url, &accepted_link_schemes(&deep_links, false)),
+        None,
+        "{url}"
+      );
+      assert_eq!(
+        classify_open_url(url, &browser),
+        Some(OpenedItem::Url(url.to_string())),
+        "{url}"
+      );
+    }
+    // Still nothing else: the flag adds exactly the two web schemes.
+    for other in ["ftp://example.com/", "ws://example.com/", "javascript:1"] {
+      assert_eq!(classify_open_url(other, &browser), None, "{other}");
+    }
+    assert_eq!(
+      classify_open_url("acme://x", &browser),
+      Some(OpenedItem::Url("acme://x".to_string()))
+    );
+
+    // Launch arguments, cold start and second instance alike.
+    let args = strings(&["https://example.com/page", "http://a.test/"]);
+    let none = |_: &Path| false;
+    let targets = parse_launch_args(
+      &args,
+      None,
+      &accepted_link_schemes(&deep_links, false),
+      none,
+    );
+    assert!(targets.urls.is_empty(), "{targets:?}");
+    let targets = parse_launch_args(&args, None, &browser, none);
+    assert_eq!(targets.urls, args);
+    // The Windows `-- "%1"` launch takes one browser link too.
+    let targets = parse_launch_args(
+      &strings(&["--", "https://example.com/"]),
+      None,
+      &browser,
+      none,
+    );
+    assert_eq!(targets.urls, strings(&["https://example.com/"]));
+
+    // Declaring them as deep links stays refused.
+    for scheme in BROWSER_LINK_SCHEMES {
+      assert!(RESERVED_DEEP_LINK_SCHEMES.contains(scheme));
+      assert!(validate_deep_link_scheme(scheme).is_err(), "{scheme}");
+      assert!(normalize_deep_link_schemes(&strings(&[scheme])).is_err());
+    }
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn file_url_arguments_become_paths() {
+    // A Linux launcher's `%u` passes an opened HTML file as a `file:` URL.
+    let existing = ["/home/me/page.html", "/home/me/My Page.xhtml"];
+    let exists = |p: &Path| existing.iter().any(|e| Path::new(e) == p);
+    let targets = parse_launch_args(
+      &strings(&[
+        "file:///home/me/page.html",
+        "file:///home/me/My%20Page.xhtml",
+        "file:///home/me/missing.html",
+      ]),
+      None,
+      &accepted_link_schemes(&[], true),
+      exists,
+    );
+    assert!(targets.urls.is_empty(), "{targets:?}");
+    assert_eq!(
+      targets.files,
+      vec![
+        PathBuf::from("/home/me/page.html"),
+        PathBuf::from("/home/me/My Page.xhtml"),
+      ]
+    );
+    // And the macOS openURLs delivery of the same file.
+    assert_eq!(
+      classify_open_url(
+        "file:///home/me/page.html",
+        &accepted_link_schemes(&[], true)
+      ),
+      Some(OpenedItem::File(PathBuf::from("/home/me/page.html")))
+    );
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn file_url_arguments_become_paths() {
+    let exists = |p: &Path| p == Path::new("C:\\Users\\me\\page.html");
+    let targets = parse_launch_args(
+      &strings(&["file:///C:/Users/me/page.html"]),
+      None,
+      &accepted_link_schemes(&[], true),
+      exists,
+    );
+    assert_eq!(
+      targets.files,
+      vec![PathBuf::from("C:\\Users\\me\\page.html")]
     );
   }
 }

@@ -3366,6 +3366,18 @@ declare namespace Deno {
     export const launchNotificationResponses:
       readonly NotificationResponseDetail[];
 
+    /** `true` when the app is a browser app (`desktop.app.browser` in
+     * deno.json, or `"browser": true` in an embedded
+     * `.deno-desktop/app.json`) and the runtime delivers `http` / `https`
+     * links to it as it does deep links: in {@linkcode launchUrls}, as
+     * `"openurl"` events (macOS) and in `"secondinstance"` events' `urls`.
+     * Opened HTML files arrive like any opened file
+     * ({@linkcode launchFiles}, `"openfile"`). `false` otherwise, and in a
+     * worker. The schemes are never registered for the app
+     * ({@linkcode registerScheme} refuses them): the OS lists a browser app
+     * from its packaging, and only the user makes it the default. */
+    export const browserLinks: boolean;
+
     /** A click on one of the app's notifications that no live
      * `Notification` object owns: one an earlier run of the app posted, a
      * {@linkcode Deno.desktop.notifications.schedule}d one, or the click that
