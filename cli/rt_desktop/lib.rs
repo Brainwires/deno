@@ -454,11 +454,6 @@ fn raw_window_handles(
 /// `WefDesktopApi::notifications`).
 const MAX_LIVE_NOTIFICATIONS: usize = 1024;
 
-/// laufey's menu capability bits for the dock menu (laufey.h), spelled here
-/// so the runtime builds against a laufey without the named constants.
-const LAUFEY_MENU_CAP_DOCK_MENU: u32 = 1 << 8;
-const LAUFEY_MENU_CAP_JUMP_LIST: u32 = 1 << 9;
-
 /// Remember notification `id` (ids grow, so the smallest is the oldest),
 /// forgetting the oldest beyond [`MAX_LIVE_NOTIFICATIONS`]. A forgotten one
 /// stays on screen; only `close()` from the app no longer reaches it.
@@ -2560,10 +2555,8 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       tooltips: c.tooltips(),
       destructive: c.destructive(),
       snapshot: c.snapshot(),
-      // laufey's LAUFEY_MENU_CAP_DOCK_MENU / LAUFEY_MENU_CAP_JUMP_LIST, read
-      // from the bits: a backend without them leaves them clear.
-      dock_menu: c.bits & LAUFEY_MENU_CAP_DOCK_MENU != 0,
-      jump_list: c.bits & LAUFEY_MENU_CAP_JUMP_LIST != 0,
+      dock_menu: c.dock_menu(),
+      jump_list: c.jump_list(),
     }
   }
 
