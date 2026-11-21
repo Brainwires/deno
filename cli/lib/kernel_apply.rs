@@ -312,8 +312,11 @@ pub fn start_desktop(
 /// chose falls back instead: off with no enforcer, else `warn`'s line,
 /// item 472). Whether the permission set allows prompting doesn't matter: a
 /// compiled program's set is its author's, and once the sandbox applies the
-/// caller turns prompting off (a prompt could only grant what the kernel
-/// refuses).
+/// caller refuses every prompt (a prompt could only grant what the kernel
+/// refuses; on a terminal the first refusal says so once, review D4). A
+/// program baked with `-A` and denies under `auto` gets the deny ceiling
+/// (D2): only the denies, nothing else changed, and nothing applied where
+/// the OS holds none of them.
 pub fn start_compiled(
   start: &CompiledStart,
 ) -> Result<CompiledOutcome, CompiledStartError> {
@@ -340,7 +343,21 @@ pub fn start_compiled(
   }
   let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
   let mut ctx = compiled_context(mode, start.exec_strict, cwd);
-  let mut compiled = compile_policy(start.options, &ctx);
+  // a deny ceiling (D2): the denies alone, every allow unscoped
+  let ceiling = resolution.deny_ceiling();
+  ctx.deny_ceiling = ceiling;
+  let ceiling_options;
+  let options = if ceiling {
+    ceiling_options = crate::kernel_policy::deny_ceiling_options(start.options);
+    &ceiling_options
+  } else {
+    start.options
+  };
+  let mut compiled = compile_policy(options, &ctx);
+  if ceiling && !compiled.policy.deny_ceiling_held() {
+    // the OS holds none of its denies here: nothing applies, as before
+    return Ok(outcome(false, None, None));
+  }
   // a mode `auto` chose never refuses to start (item 472): where enforce
   // can't hold the grant the program runs as a warn one, and says why
   let auto = resolution.auto_chosen;
@@ -385,7 +402,7 @@ pub fn start_compiled(
     create_cache_overlay(&dir);
     if is_private_dir(base) && is_private_dir(&dir) {
       ctx.cache_overlay = Some(canonical_dir(dir));
-      compiled = compile_policy(start.options, &ctx);
+      compiled = compile_policy(options, &ctx);
     }
   }
   let fatal = fatal_list(compiled.gaps.iter());
@@ -429,7 +446,7 @@ pub fn start_compiled(
   };
   let mut layers = kernel_inherit::inherited_layers().to_vec();
   layers.push(kernel_inherit::layer_for(
-    start.options,
+    options,
     &ctx.cwd,
     plan.probe.clone(),
   ));

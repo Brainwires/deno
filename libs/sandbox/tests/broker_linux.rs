@@ -316,6 +316,7 @@ mod linux {
       cache_overlay: None,
       broker: None,
       expanded_write: expanded(&out, &deny),
+      entries: Vec::new(),
     };
     let policy = FsPolicy {
       read: None,

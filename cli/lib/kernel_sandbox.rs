@@ -250,8 +250,9 @@ pub enum Engine {
 pub enum EnforceCoverage {
   /// The whole run, from before user code loads (`run` of a file, `serve`).
   Full,
-  /// The run after the command's own setup (type check, coverage directory):
-  /// `test` / `bench`. Not produced yet (WP-A, denext.30).
+  /// The run after the command's own setup (type check, coverage folder):
+  /// `test` / `bench`. The image before the re-exec type-checks and finds
+  /// the modules; the confined one runs exactly those (WP-A, denext.30).
   AfterSetup,
   /// Not covered: an `enforce` asked for by name refuses to start, one
   /// `auto` chose runs as `warn`.
@@ -314,6 +315,14 @@ pub enum ModeReason {
   /// `auto` chose the mode: no prompt can widen the grant in this run (no
   /// terminal, or `--no-prompt`).
   AutoNoPrompt,
+  /// `auto` chose the mode: a prompt can widen the grant, so only its deny
+  /// rules are enforced, as ceilings no prompt can lift (D1; `-A` with
+  /// denies on a terminal, D2).
+  AutoDenyCeiling,
+  /// `auto` would enforce the deny rules alone, but the OS can't hold any
+  /// of them here without changing the rest of the run (Linux without an
+  /// overmount): they stay Deno's checks only, reported, never refused.
+  DenyCeilingDenoOnly,
 }
 
 impl ModeReason {
@@ -341,6 +350,12 @@ impl ModeReason {
       }
       Self::AutoNoPrompt => {
         "auto: no prompt can widen the grant here (no terminal, or --no-prompt)"
+      }
+      Self::AutoDenyCeiling => {
+        "auto: only the deny rules are enforced (a prompt can't lift a deny), and nothing else changes"
+      }
+      Self::DenyCeilingDenoOnly => {
+        "auto: the deny rules are held by Deno's checks only here (the OS can't hold them without changing the rest of the run)"
       }
     }
   }
@@ -416,7 +431,9 @@ pub struct ModeResolution {
   pub reason: ModeReason,
   /// No prompt can widen the grant during this process's life.
   pub fixed: bool,
-  /// `-A` with deny rules: only the denies would be enforced.
+  /// Only the deny rules would be enforced, as ceilings: `-A` with deny
+  /// rules (D2), or, under `auto`, a run where a prompt can happen and that
+  /// has deny rules (D1).
   pub deny_only: bool,
   /// The run needs the supervising broker (Mode B). Always `false` until
   /// WP-B (denext.30) sets it.
@@ -432,6 +449,18 @@ pub struct ModeResolution {
   /// Whether the kernel enforces anything for this process. Always `false`
   /// in this runtime.
   pub enforced: bool,
+}
+
+impl ModeResolution {
+  /// `auto` enforces the deny rules alone (D1 / D2): the policy is compiled
+  /// as allow-everything-except-the-denies, with nothing else changed (no
+  /// seccomp list, no no-new-privileges, no environment scrub, no read
+  /// expansion), and a deny the OS can't hold that way is a reported
+  /// Deno-only rule, never a refusal (decision O4). An explicit `enforce`
+  /// with `-A` and denies is the full policy, as asked.
+  pub fn deny_ceiling(&self) -> bool {
+    self.deny_only && self.auto_chosen && self.mode.fails_closed()
+  }
 }
 
 /// An explicit `enforce` / `broker` that can't hold for this run.
@@ -456,7 +485,10 @@ pub struct ModeError {
 /// 5. `--watch`, HMR, `denext dev` or a permission broker: the set isn't
 ///    fixed. `auto` → `off`, `warn` stays, `enforce` / `broker` → error.
 /// 6. A prompt can happen (CLI, prompting on, stdin and stderr terminals):
-///    `auto` → `off`. An explicit `warn` / `enforce` / `broker` applies, and
+///    `auto` → `off`, unless the run has deny rules: from
+///    [`AutoStage::R4`] on, `auto` then enforces the denies alone (D1, D2:
+///    a prompt can't lift a deny; [`ModeResolution::deny_ceiling`]), and the
+///    prompt stays. An explicit `warn` / `enforce` / `broker` applies, and
 ///    then turns prompting into denials.
 /// 7. Otherwise the set is fixed: the requested mode applies; `auto` records
 ///    what it would choose, applies nothing in [`AutoStage::Preview`], and
@@ -555,7 +587,18 @@ pub fn kernel_sandbox_mode(
     };
   }
   if terminal_prompt && requested == KernelSandboxMode::Auto {
-    return off(resolution, ModeReason::Prompt);
+    // D1 / D2: the deny rules are ceilings no prompt can lift, so they are
+    // fixed even while a prompt can widen the rest (from R4); the prompt
+    // stays, and nothing but the denies is enforced
+    if !inputs.has_deny || resolution.stage < AutoStage::R4 {
+      return off(resolution, ModeReason::Prompt);
+    }
+    resolution.deny_only = true;
+    resolution.would_apply = AutoPlan::Enforce;
+    resolution.mode = KernelSandboxMode::Enforce;
+    resolution.reason = ModeReason::AutoDenyCeiling;
+    resolution.auto_chosen = true;
+    return Ok(resolution);
   }
   if requested == KernelSandboxMode::Auto {
     let author_fixed = compiled || source != ModeSource::Default;
@@ -1405,7 +1448,6 @@ mod tests {
   /// enforces its deny rules only (D1), and `-A --deny-*` does the same on
   /// a terminal (D2). WP-A.
   #[test]
-  #[ignore = "lands in WP-A"]
   fn auto_stage_matrix_deny_only_prompt() {
     let tty = |mut i: ModeInputs| {
       i.terminals = true;
@@ -1450,6 +1492,278 @@ mod tests {
       ..tty(run())
     });
     assert_eq!(r.mode, Off);
+  }
+
+  /// The deny-only rows (D1, D2): who gets the deny ceiling, at which
+  /// stage, and why. `(name, inputs, stage, mode, deny_only, ceiling,
+  /// reason)`.
+  #[test]
+  fn deny_only_matrix() {
+    let tty = |mut i: ModeInputs| {
+      i.terminals = true;
+      i
+    };
+    let deny = |i: ModeInputs| ModeInputs {
+      has_deny: true,
+      ..i
+    };
+    let all = |i: ModeInputs| ModeInputs {
+      allow_all: true,
+      ..i
+    };
+    let compiled = || ModeInputs {
+      kind: Some(RunKind::Compiled),
+      ..run()
+    };
+    use AutoStage::*;
+    #[allow(clippy::type_complexity, reason = "a table")]
+    let rows: Vec<(
+      &str,
+      ModeInputs,
+      AutoStage,
+      KernelSandboxMode,
+      bool,
+      bool,
+      ModeReason,
+    )> = vec![
+      (
+        "prompt + deny at R4: the ceiling",
+        deny(tty(run())),
+        R4,
+        Enforce,
+        true,
+        true,
+        ModeReason::AutoDenyCeiling,
+      ),
+      (
+        "prompt + deny at R3: nothing yet (D1 is an R4 default)",
+        deny(tty(run())),
+        R3,
+        Off,
+        false,
+        false,
+        ModeReason::Prompt,
+      ),
+      (
+        "prompt + deny in the preview: nothing",
+        deny(tty(run())),
+        Preview,
+        Off,
+        false,
+        false,
+        ModeReason::Prompt,
+      ),
+      (
+        "prompt, no deny, at R4: off",
+        tty(run()),
+        R4,
+        Off,
+        false,
+        false,
+        ModeReason::Prompt,
+      ),
+      (
+        "-A + deny on a terminal at R4: the ceiling (D2)",
+        all(deny(tty(run()))),
+        R4,
+        Enforce,
+        true,
+        true,
+        ModeReason::AutoDenyCeiling,
+      ),
+      (
+        "-A + deny, no terminal, at R4: the ceiling (D2)",
+        all(deny(run())),
+        R4,
+        Enforce,
+        true,
+        true,
+        ModeReason::AutoNoPrompt,
+      ),
+      (
+        "-A + deny, no terminal, at R3: warn, deny-only reported",
+        all(deny(run())),
+        R3,
+        Warn,
+        true,
+        false,
+        ModeReason::AutoNoPrompt,
+      ),
+      (
+        "a partial grant + deny, no terminal, at R4: the whole policy",
+        deny(run()),
+        R4,
+        Enforce,
+        false,
+        false,
+        ModeReason::AutoNoPrompt,
+      ),
+      (
+        "explicit enforce + deny on a terminal: the whole policy, as asked",
+        ModeInputs {
+          flag: Some(Enforce),
+          ..deny(tty(run()))
+        },
+        R4,
+        Enforce,
+        false,
+        false,
+        ModeReason::Requested,
+      ),
+      (
+        "explicit enforce with -A + deny: the denies, but not the ceiling (seccomp, expansion as enforce does)",
+        ModeInputs {
+          flag: Some(Enforce),
+          ..all(deny(run()))
+        },
+        R4,
+        Enforce,
+        true,
+        false,
+        ModeReason::Requested,
+      ),
+      (
+        "explicit warn + deny on a terminal: warn",
+        ModeInputs {
+          flag: Some(Warn),
+          ..deny(tty(run()))
+        },
+        R4,
+        Warn,
+        false,
+        false,
+        ModeReason::Requested,
+      ),
+      (
+        "DENO_KERNEL_SANDBOX=off + deny on a terminal: off",
+        ModeInputs {
+          env: Some(Off),
+          ..deny(tty(run()))
+        },
+        R4,
+        Off,
+        false,
+        false,
+        ModeReason::TurnedOff,
+      ),
+      (
+        "--watch + deny on a terminal: off (not fixed at all)",
+        ModeInputs {
+          watch: true,
+          ..deny(tty(run()))
+        },
+        R4,
+        Off,
+        false,
+        false,
+        ModeReason::Watch,
+      ),
+      (
+        "a compiled program with -A + deny: the ceiling from R3",
+        all(deny(compiled())),
+        R3,
+        Enforce,
+        true,
+        true,
+        ModeReason::AutoAuthorFixed,
+      ),
+      (
+        "a compiled program with a partial grant + deny on a terminal: the whole policy",
+        deny(tty(compiled())),
+        R4,
+        Enforce,
+        false,
+        false,
+        ModeReason::AutoAuthorFixed,
+      ),
+      (
+        "repl on a terminal with a deny: the ceiling at R4",
+        ModeInputs {
+          kind: Some(RunKind::Repl),
+          ..deny(tty(run()))
+        },
+        R4,
+        Enforce,
+        true,
+        true,
+        ModeReason::AutoDenyCeiling,
+      ),
+    ];
+    for (name, inputs, stage, mode, deny_only, ceiling, reason) in rows {
+      let r = resolve(&ModeInputs {
+        stage: Some(stage),
+        ..inputs
+      });
+      assert_eq!(r.mode, mode, "{name}");
+      assert_eq!(r.deny_only, deny_only, "{name}");
+      assert_eq!(r.deny_ceiling(), ceiling, "{name}");
+      assert_eq!(r.reason, reason, "{name}");
+    }
+  }
+
+  /// In prompt mode with deny rules (D1) the prompt stays: the set isn't
+  /// fixed, only its ceiling is, and the plan says enforce.
+  #[test]
+  fn prompt_mode_denies() {
+    let inputs = ModeInputs {
+      terminals: true,
+      has_deny: true,
+      stage: Some(AutoStage::R4),
+      ..run()
+    };
+    let r = resolve(&inputs);
+    assert!(!r.fixed, "a prompt can still widen the rest");
+    assert_eq!(r.would_apply, AutoPlan::Enforce);
+    assert_eq!(r.source, ModeSource::Default);
+    assert!(r.auto_chosen && r.deny_ceiling());
+    // explicit auto (a flag or deno.json) behaves the same
+    for i in [
+      ModeInputs {
+        flag: Some(Auto),
+        ..inputs.clone()
+      },
+      ModeInputs {
+        config: Some(Auto),
+        ..inputs.clone()
+      },
+    ] {
+      let r = resolve(&i);
+      assert_eq!((r.mode, r.reason), (Enforce, ModeReason::AutoDenyCeiling));
+      assert!(r.deny_ceiling());
+    }
+    // --no-prompt on the same terminal: fixed, so the whole policy
+    let r = resolve(&ModeInputs {
+      prompt: false,
+      ..inputs.clone()
+    });
+    assert!(r.fixed && !r.deny_only && !r.deny_ceiling());
+    assert_eq!(r.mode, Enforce);
+    // a permission broker: never fixed, never a ceiling
+    let r = resolve(&ModeInputs {
+      permission_broker: true,
+      ..inputs.clone()
+    });
+    assert_eq!((r.mode, r.reason), (Off, ModeReason::PermissionBroker));
+    // jupyter has no prompt: its set is fixed, the whole policy
+    let r = resolve(&ModeInputs {
+      kind: Some(RunKind::Jupyter),
+      ..inputs.clone()
+    });
+    assert!(r.fixed && !r.deny_ceiling());
+    // the harness's forced enforce: the whole policy, never the ceiling
+    let r = resolve(&ModeInputs {
+      forced: Some(ForcedEnforce::Enforce),
+      ..inputs
+    });
+    assert_eq!((r.mode, r.source), (Enforce, ModeSource::Forced));
+    assert!(!r.deny_ceiling());
+    // the reasons say what they are
+    assert!(ModeReason::AutoDenyCeiling.describe().contains("deny rules"));
+    assert!(
+      ModeReason::DenyCeilingDenoOnly
+        .describe()
+        .contains("Deno's checks only")
+    );
   }
 
   #[test]
