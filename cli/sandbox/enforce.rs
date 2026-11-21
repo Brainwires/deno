@@ -37,6 +37,8 @@
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use deno_core::ModuleSpecifier;
 use deno_core::anyhow::bail;
@@ -60,6 +62,27 @@ use super::policy::resolve_prefix;
 
 /// The plan waiting for [`apply_pending`].
 static PENDING: OnceLock<EnforcePlan> = OnceLock::new();
+
+/// The pending plan's `enforce` is one `auto` chose ([`set_auto_chosen`]):
+/// what the plan can't carry then drops it ([`DROPPED`]) instead of
+/// refusing to start.
+static AUTO_CHOSEN: AtomicBool = AtomicBool::new(false);
+
+/// `auto`'s pending plan was dropped before the re-exec: the run goes on
+/// with Deno's checks only, and nothing waits any more.
+static DROPPED: AtomicBool = AtomicBool::new(false);
+
+/// Records that the mode [`prepare`] is called for is one `auto` chose
+/// (it never refuses to start).
+pub fn set_auto_chosen(auto_chosen: bool) {
+  AUTO_CHOSEN.store(auto_chosen, Ordering::Relaxed);
+}
+
+/// The first module path the plan's hand-over can't carry: the plan is
+/// JSON, which holds UTF-8 paths only.
+fn unhandable_module(files: &[PathBuf]) -> Option<&PathBuf> {
+  files.iter().find(|f| f.to_str().is_none())
+}
 
 /// What the processes this run starts inherit once it is confined: the
 /// layers it inherited and its own ([`inherit`]); handed to the re-executed
@@ -711,7 +734,9 @@ async fn graph_module_files(
 
 /// Whether a plan waits for [`apply_pending`].
 pub fn is_pending() -> bool {
-  PENDING.get().is_some() && !kernel_sandbox_state::is_enforcing()
+  PENDING.get().is_some()
+    && !DROPPED.load(Ordering::Relaxed)
+    && !kernel_sandbox_state::is_enforcing()
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -888,6 +913,23 @@ pub async fn apply_pending_with_entries(
   plan.module_files.dedup();
   plan.entries = entries.to_vec();
   check_module_files(&plan.module_files)?;
+  if let Some(file) = unhandable_module(&plan.module_files) {
+    // a mode `auto` chose never refuses to start: the run goes on with
+    // Deno's checks only, and says so
+    if AUTO_CHOSEN.load(Ordering::Relaxed) {
+      DROPPED.store(true, Ordering::Relaxed);
+      log::warn!(
+        "{} the kernel sandbox isn't applied to this run: the module {} has a path that isn't UTF-8, which the sandbox's plan can't carry (Deno's permission checks still apply)",
+        crate::colors::yellow("Warning"),
+        file.display()
+      );
+      return Ok(());
+    }
+    bail!(
+      "--kernel-sandbox=enforce refuses to start: the module {} has a path that isn't UTF-8, which the sandbox's plan can't carry; rename it, or use --kernel-sandbox=off",
+      file.display()
+    );
+  }
   // the lockfile the graph load updated is written now: the confined image
   // can't write it (unless a grant covers it), and the re-exec runs no
   // exit hook (item 451)

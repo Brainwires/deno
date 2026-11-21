@@ -8,8 +8,10 @@
       "output": ""
     },
     {
+      // under an `enforce` that auto chose, the run goes on unconfined with
+      // one warning line: the sandbox's plan can't carry a non-UTF-8 path
       "args": "run main.ts",
-      "output": "caught\n"
+      "output": "[WILDCARD]caught\n"
     }
   ]
 }

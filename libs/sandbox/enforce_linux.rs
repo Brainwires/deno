@@ -1405,7 +1405,7 @@ pub fn reexec(
   env: Vec<(OsString, OsString)>,
   keep: impl Fn(i32) -> bool,
 ) -> io::Error {
-  let memfd = match seal_plan(&plan.to_bytes()) {
+  let memfd = match plan.to_bytes().and_then(|bytes| seal_plan(&bytes)) {
     Ok(fd) => fd,
     Err(err) => return err,
   };
@@ -1537,7 +1537,7 @@ mod tests {
       entries: Vec::new(),
     };
     assert_eq!(plan.without_measured_lists().module_files.len(), 0);
-    let bytes = plan.to_bytes();
+    let bytes = plan.to_bytes().unwrap();
     assert_eq!(EnforcePlan::from_bytes(&bytes).unwrap(), plan);
     assert!(plan.keeps_env("PATH"));
     assert!(plan.keeps_env("LC_ALL"));
@@ -1981,7 +1981,7 @@ mod tests {
       expanded_write: Vec::new(),
       entries: Vec::new(),
     };
-    let fd = seal_plan(&plan.to_bytes()).unwrap();
+    let fd = seal_plan(&plan.to_bytes().unwrap()).unwrap();
     // sealed: no more writes
     // SAFETY: a valid descriptor and buffer
     let n =

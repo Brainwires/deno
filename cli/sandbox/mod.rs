@@ -888,6 +888,7 @@ pub fn check_run(
         fatal.join("\n")
       );
     }
+    enforce::set_auto_chosen(resolution.auto_chosen);
     enforce::prepare(&compiled, &ctx, options)?;
   }
   Ok(resolution)
