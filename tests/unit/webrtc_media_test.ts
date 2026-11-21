@@ -189,6 +189,48 @@ Deno.test("fakeTracksSendMedia", async () => {
   }
 });
 
+// A transceiver whose direction goes back to "sendrecv" after "inactive"
+// sends again once the offer/answer completes, not as soon as the direction
+// is set: the remote track unmutes after the negotiation, as in a browser
+// (WPT RTCRtpTransceiver.https.html, "track with audio gets unmuted when
+// setting the transceiver direction to 'sendrecv' after 'inactive'").
+Deno.test("fakeTrackUnmutesAfterRenegotiationToSendrecv", async () => {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  try {
+    a.addTrack(stream.getTracks()[0], stream);
+    await connect(a, b);
+    const track = b.getReceivers()[0].track;
+    const event = (type: string) =>
+      timeout(
+        new Promise((resolve) =>
+          track.addEventListener(type, resolve, { once: true })
+        ),
+        15_000,
+        type,
+      );
+    await event("unmute");
+    a.getTransceivers()[0].direction = "inactive";
+    await Promise.all([connect(a, b), event("mute")]);
+    assert(track.muted);
+    a.getTransceivers()[0].direction = "sendrecv";
+    let early = false;
+    const onEarly = () => early = true;
+    track.addEventListener("unmute", onEarly, { once: true });
+    await connect(a, b);
+    track.removeEventListener("unmute", onEarly);
+    assert(!early, "unmuted before the negotiation completed");
+    assert(track.muted);
+    await event("unmute");
+    assert(!track.muted);
+  } finally {
+    a.close();
+    b.close();
+    stream.getTracks().forEach((t) => t.stop());
+  }
+});
+
 const TRANSFORM_WORKER = `
 self.onrtctransform = async (event) => {
   const t = event.transformer;

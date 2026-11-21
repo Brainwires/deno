@@ -7413,7 +7413,11 @@
   }
 
   // A sender currently fed by `source`: its track is one of the source's,
-  // live and enabled, its connection open and its transceiver sending.
+  // live and enabled, its connection open and its transceiver sending. A
+  // transceiver sends once negotiation says so (its currentDirection, which
+  // an answer sets), not when its direction is set: a direction that goes
+  // back to "sendrecv" starts the media when the offer/answer completes, as
+  // a browser's sender does, so the remote track unmutes after that.
   function eachFedSender(source, fn) {
     let n = 0;
     SetPrototypeForEach(source.senders, (sender) => {
@@ -7423,13 +7427,18 @@
       if (
         track === null || track[_trackState].readyState !== "live" ||
         !track[_trackState].enabled || pc[_state].closed || t.stopped ||
-        t.stopping || (t.direction !== "sendrecv" && t.direction !== "sendonly")
+        t.stopping || !directionSends(t.direction) ||
+        !directionSends(t.currentDirection)
       ) {
         return;
       }
       if (fn(pc, sender[_transceiver][_key], sender)) n++;
     });
     return n;
+  }
+
+  function directionSends(direction) {
+    return direction === "sendrecv" || direction === "sendonly";
   }
 
   class EncodedMediaTrack extends MediaStreamTrack {
