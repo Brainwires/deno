@@ -19337,6 +19337,202 @@ where the changes are discussed.
        engine's `ecn_l4s_rtc2rtc` and workspace; the WebRTC WPT run
        (`webrtc-stats/supported-stats.https.html`).
      - Node tests enabled: none; `node:` has no WebRTC API.
+483. **`feat(permissions)`: the kernel sandbox's broker by itself: `auto`
+     takes the supervisor, a compiled program runs its own, children of a
+     brokered run reach it, and Linux gets a warn observer** (CLI and runtime;
+     denext-only; opt-in as before: `AUTO_STAGE` is unchanged, so `auto` still
+     applies nothing; `cli/lib/{kernel_sandbox,kernel_apply,kernel_policy,
+     kernel_supervise,kernel_net_broker}.rs`,
+     `cli/sandbox/{mod,enforce,warn,net_broker}.rs`, `cli/rt/{kernel,lib}.rs`,
+     `libs/sandbox/{supervise,trace,would_deny,notify,lib}.rs`,
+     `runtime/permissions/kernel_broker/{dial,client,mod}.rs`,
+     `ext/io/inherited_fds.rs`). The denext.30 train's package for Mode B
+     (items 466 and 468): what was reachable only by writing
+     `--kernel-sandbox=broker` (or an `enforce` the broker closes a gap for)
+     becomes what `auto` chooses, in `deno` and in `denort`.
+     - `auto` chooses the broker. The mode is decided before a policy exists,
+       so it is decided twice: from the flags, then again once the policy
+       `enforce` compiles is known to have the broker's shape with nothing left
+       that can't be held (`ModeInputs::policy_needs_supervisor`, set by
+       `cli/sandbox::check_run` and `kernel_apply::start_compiled`). Where
+       `auto` would have enforced it then applies `broker`
+       (`AutoPlan::Broker`, `ModeResolution::needs_supervisor`) and the run
+       starts under the supervisor; before, a host-scoped `--allow-net` or a
+       write deny inside a write allow on Linux was "a rule the OS can't hold"
+       only in the sense that `auto` never asked for the broker. A run the
+       stage only warns about (R3, no terminal) still warns, and records
+       `broker` as what would apply. Nothing that keeps `auto` off changes
+       (a prompt, plain `-A`, `--watch`, `off`). The policy is compiled as
+       `enforce` compiles it, in both images: an explicit `broker` holds every
+       scoped rule through the broker, which nobody asked for here. A grant no
+       mode holds (no Landlock, a seccomp filter that can't be installed, a
+       command `enforce` doesn't cover) still falls back to `warn`: a mode
+       `auto` chose never refuses to start.
+     - What goes to the supervisor, unchanged from the policy model: a name in
+       a network grant on Linux and macOS, `--deny-net`, a write deny inside a
+       write allow on Linux, Unix sockets by path on Linux, and a port list on
+       a kernel without Landlock's TCP rules. A grant of IP literals or
+       `localhost` with ports stays Mode A (the kernel holds the ports, and the
+       report says any address on them is reachable): no supervisor, no extra
+       process. That is also the fallback the plan keeps for the startup
+       budget (60 ms for Mode B's two execs): nothing has to move if the
+       budget fails, because port-only grants never took the supervisor.
+     - A compiled program runs its own supervisor. `deno compile
+       --kernel-sandbox=broker` is accepted for Linux and macOS targets (still
+       refused for Windows and for a desktop app, whose compiled programs run
+       none), and a program compiled with `enforce` takes the broker by itself
+       where its grant needs it, as the CLI does; neither is "a rule the OS
+       can't hold" any more (`Context::compiled_supervisor`). `denort` has no
+       first image to leave (its grant is baked, its modules embedded), so it
+       doesn't exec: inside `kernel::startup`, with one thread, before the
+       JavaScript engine exists and before any embedded module is loaded, it
+       forks (`deno_sandbox::supervise::fork_worker`,
+       `kernel_supervise::fork_supervised`). The parent is the supervisor and
+       never returns from `startup`; the child confines itself in place and is
+       the program. The fork is refused, before anything happens, when the
+       process isn't single-threaded (Linux: `/proc/self/task`; macOS:
+       `pthread_is_threaded_np`, since the child goes on without an exec) or
+       when it could not confine itself anyway (macOS, inside another Seatbelt
+       sandbox): `auto` then runs the program with Deno's checks and says why,
+       a mode baked by name refuses to start. The broker's network authority
+       moved to `deno_lib` for this (`kernel_net_broker`; `deno_sandbox`'s
+       `proxy` feature is now in `denort` too).
+     - The supervisor as the process a launcher watches. It keeps the PID the
+       program was started with (the CLI by `execve`, `denort` by being the
+       fork's parent), exits with the program's exit code or by the signal that
+       killed it, and passes on the signals a process sends it. As PID 1 of a
+       container it has a handler for every signal it passes on (the kernel
+       delivers an init only what it handles), reaps what it is handed, and
+       exits `128 + signal` when the program died of a signal an init can't
+       die of. New: after the fork it closes every descriptor but stdio and
+       its channel. It used to keep what the first image kept for the worker
+       (a socket a service manager passed, a parent's pipe), so a pipe the
+       program closed never reached its end while the run lasted.
+     - Children of a brokered run reach the same broker. Before, a `deno` or
+       `denort` started by a brokered program met the kernel's refusals alone
+       (no socket under a host-scoped grant, no change directly in a folder
+       that holds a write deny). Now the worker leaves the processes it starts
+       a dial (`kernel_broker::dial`, named in
+       `DENO_INTERNAL_KERNEL_BROKER_DIAL`, beside the policy carrier of item
+       449 and pinned for children the same way): a channel of the broker used
+       only to ask for another channel, and a pipe holding one byte, the
+       token, that says whose turn it is. A child reads the token, asks for a
+       channel of its own, gives the token back (`Dial::connect`), and installs
+       that channel as its broker; the network route too, when the broker
+       answers that it serves the network (`kernel_supervise::
+       adopt_inherited_dial`). It works through a shell or another program in
+       between, since the descriptors are inherited rather than passed to a
+       program the parent recognizes. The protocol is unchanged: no descriptor
+       travels toward the broker, and the broker keeps no state per asker.
+       What bounds it:
+       - The broker answers every channel against the one policy it holds,
+         the run's own. A child gets through the dial what native code in its
+         parent could already ask for; its own checks come first, against its
+         grant intersected with the inherited one.
+       - A process that applies a kernel sandbox of its own gives the dial up
+         first: the CLI drops the variable from the re-executed image's
+         environment and never keeps the descriptors across the exec, the
+         confined image closes anything the variable still names before it
+         does anything else, and `denort` closes it before it applies its
+         sandbox. Its own grant may be narrower than the one the inherited
+         broker answers for.
+       - The variable is never trusted alone: the dial is taken only where the
+         kernel-verified carrier of a confined ancestor was accepted, each
+         descriptor must be of its kind (a socket, two ends of a pipe) and the
+         very object the variable names (its inode, where the OS numbers it),
+         and a token that doesn't come back in two seconds, a dial that doesn't
+         check or a broker that doesn't answer leave the process without a
+         broker, as before.
+       - The dial's descriptors and every broker channel are left out of the
+         descriptors a program inherited for itself
+         (`deno_io::exclude_inherited_fd`), the worker's own channel included:
+         program code can't adopt one and speak to the broker past its own
+         checks.
+       - A compiled program that `auto` would confine adds nothing of its own
+         inside an ancestor's kernel sandbox (as the CLI already did): it runs
+         under the inherited grant and takes the dial. One that bakes `enforce`
+         or `broker` by name applies its own layer and gives the dial up.
+       - The supervisor serves up to 1024 channels (it served 64): a control
+         channel and up to 16 working ones per process that takes the dial.
+     - Linux gets a warn observer (`Observer::SupervisorTrace`, reserved in
+       item 472). Landlock has no permissive mode, so nothing in the kernel
+       says what native code and children would be refused. Under a
+       `--kernel-sandbox=warn` asked for by name, on `run` and `serve`, the
+       process re-executes as a supervisor (the broker's shape:
+       `supervise::run_traced`) and the run starts again beneath it,
+       unconfined, under a seccomp filter that hands its opens, the calls that
+       make, remove or rename a name, `execve`, and `connect` / `bind` to the
+       supervisor. `deno_sandbox::trace::Tracer` resolves each call's path as
+       the caller would, asks `would_deny::TracePolicy` (the `enforce` plan of
+       the same grant, each rule as written and as it resolves) and reports
+       what would be refused with the program and the grant; every call then
+       continues as it was made. Reports start where `enforce` would confine
+       the process (the run opens a sentinel path once its graph is loaded),
+       the shared caches are silent, and under a broker plan this runtime's
+       own sockets and its changes in a folder with a write deny are not
+       reported (the broker makes them under `enforce`). The supervisor prints
+       its lines and its own summary, and appends to the warn log. Processes
+       the run leaves behind keep running: a forked observer answers their
+       calls until the last one is gone.
+     - Known gaps. The observer is for a `warn` asked for by name only, and
+       `DENO_KERNEL_SANDBOX_WARN_OBSERVE=0` turns it off: its filter sets
+       no-new-privileges (setuid programs in the tree don't elevate, as under
+       `enforce`), a program in the tree that installs a seccomp
+       user-notification listener of its own fails with `EBUSY` (a filter
+       chain holds one), every traced call waits for the supervisor, and it
+       reports from the caller's memory, so it is an observer and never a
+       boundary. It reports a UDP `connect` by port like a TCP one, a child's
+       read of its own `/proc/self` (refused under `enforce` too), and can't
+       tell a native connect inside this runtime's own process from the
+       runtime's under a broker plan. Under the supervisor: a signal sent to
+       the whole process group or control group by a process (`kill -TERM
+       -<pgid>`, systemd's default `KillMode=control-group`) reaches the
+       program twice; `SIGTSTP` sent to the supervisor's PID alone isn't passed
+       on; `sd_notify` from the program needs `NotifyAccess=all` (it is not
+       the main PID); the program's own PID is not the one the launcher holds.
+       A program that brings its own broker inside a brokered run has no
+       network (its supervisor is confined by the outer sandbox). A second
+       `deno` reached through a shell while the first holds the token waits
+       for it; a holder killed with the token leaves later askers without a
+       broker. A supervisor that can't fork after the exec ends the run with
+       an error even under `auto`.
+     - User-facing note: none yet for a default run (`auto` applies nothing
+       until the stage moves). `deno compile --kernel-sandbox=broker` now
+       builds for Linux and macOS, and a program compiled with `enforce` holds
+       a host-scoped `--allow-net` and a write deny inside a write allow
+       instead of refusing to start; a `deno` started by a program under
+       `--kernel-sandbox=broker` now has its parent's network and file grant
+       in full; `--kernel-sandbox=warn` on Linux now reports what native code
+       and child processes would be refused.
+     - Tests: `deno_lib`'s `kernel_sandbox::tests::{
+       auto_stage_matrix_broker_closable, auto_stage_matrix_broker_rows}`,
+       `kernel_apply::tests::{
+       a_compiled_policy_takes_the_broker_where_it_has_a_supervisor,
+       a_dev_build_is_off}` and the extended
+       `kernel_policy::tests::a_compiled_program_has_no_broker`;
+       `deno_sandbox`'s `would_deny::trace_tests::*` and (Linux)
+       `trace::tests::{a_traced_child_reads_and_is_reported,
+       the_traced_variable_names_the_run_and_its_state,
+       the_traced_list_has_each_call_once}`; `deno_permissions`'
+       `kernel_broker::tests::{a_dial_gives_each_asker_a_channel_of_its_own,
+       a_dial_is_used_by_one_asker_at_a_time,
+       a_dial_whose_token_is_lost_times_out_and_gives_no_channel,
+       a_dial_value_that_names_something_else_is_refused}` (the broker's
+       fuzzers are unchanged: the protocol is); specs
+       `kernel_sandbox::broker::{auto_host_scoped,
+       auto_write_deny_inside_allow, auto_write_deny_report,
+       supervisor_keeps_pid_status_and_signals, supervisor_as_pid_1}`,
+       `kernel_sandbox::compiled::{broker_write_deny_inside_allow,
+       broker_host_scoped, broker_baked_by_name,
+       broker_exit_code_and_signals}` (replacing `inexpressible_refused`),
+       `kernel_sandbox::children::{brokered_child_shares_supervisor,
+       brokered_child_that_confines_itself}`,
+       `kernel_sandbox::warn::{linux_trace_reports_child_read,
+       linux_trace_off}` and the updated
+       `kernel_sandbox::policy::compile_refuses_broker` (a Windows target).
+       `supervisor_as_pid_1` runs where `unshare` can make a PID namespace
+       without privileges (the new `kernelSandboxPidNamespace` condition).
+     - Node tests enabled: none; no Node API changes.
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -19347,7 +19543,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-479) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-479, 483) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
