@@ -68,6 +68,14 @@ Options:
   --no-build          reuse the last build of the commit as it is
   --clean             remove the commit's build when the run ends
   --no-marker         never write (or remove) the release marker
+  --carry <run-id>    carry the clean results of that earlier run forward
+                      (default: auto, the newest finished run whose
+                      candidate is an ancestor of this one): its units that
+                      passed with no flake, and that the diff since their
+                      commit cannot affect, are not run again; only the rest
+                      runs, its flaky tests at --flaky-reps (README,
+                      "Carry-forward")
+  --no-carry          run everything the selection names
   --attach <run-id>   with --host: wait for a run already started there
   --help
 `;
@@ -205,6 +213,9 @@ interface Options {
   marker: boolean;
   attach?: string;
   runId?: string;
+  carry: string; // a run id, "auto" or "none"
+  carryFile?: string; // set by --host: the carry source, merged there
+  modeSet: boolean; // --mode was given
 }
 
 /** A way to run: `cpus` caps the container (--cpus), `hog` adds a busy
@@ -244,6 +255,8 @@ function parseArgs(args: string[]): Options {
     build: true,
     clean: false,
     marker: true,
+    carry: "auto",
+    modeSet: false,
   };
   const value = (i: number) => {
     if (i + 1 >= args.length) die(`${args[i]} wants a value`);
@@ -268,6 +281,7 @@ function parseArgs(args: string[]): Options {
           die(`--mode wants fast or full, got ${m}`);
         }
         o.mode = m;
+        o.modeSet = true;
         break;
       }
       case "--suite":
@@ -343,6 +357,15 @@ function parseArgs(args: string[]): Options {
       case "--attach":
         o.attach = value(i++);
         break;
+      case "--carry":
+        o.carry = value(i++);
+        break;
+      case "--no-carry":
+        o.carry = "none";
+        break;
+      case "--carry-file":
+        o.carryFile = value(i++);
+        break; // set by --host for the remote side
       case "--run-id":
         o.runId = value(i++);
         break; // set by --host for the remote side
@@ -481,15 +504,63 @@ async function remote(o: Options, argv: string[]) {
     const pass: string[] = [];
     for (let i = 0; i < argv.length; i++) {
       if (
-        ["--host", "--commit", "--attach", "--run-id", "--share"].includes(
-          argv[i],
-        )
+        [
+          "--host",
+          "--commit",
+          "--attach",
+          "--run-id",
+          "--share",
+          "--carry",
+          "--carry-file",
+        ].includes(argv[i])
       ) {
         i++;
         continue;
       }
+      if (argv[i] === "--no-carry") continue;
       pass.push(argv[i]);
     }
+    // the carry source, merged across the hosts that hold it (this machine's
+    // runs included), handed to every host as runs/<id>/carry.json
+    let carry: CarrySource | undefined;
+    if (o.carry !== "none") {
+      const names = [...new Set([...hosts.map((h) => h.name), "local"])];
+      carry = await findCarrySource(
+        o.carry,
+        sha,
+        runId,
+        names,
+        "~/flake-hunt/runs",
+        (h, script) =>
+          sh({ name: h, weight: 1, logOffset: 0, quiet: 0 }, script, true),
+        async (old) =>
+          (await run(["git", "merge-base", "--is-ancestor", old, sha], {
+            allowFail: true,
+          })).code === 0,
+      );
+    }
+    if (carry) {
+      log(
+        `carrying from ${carry.runId} (${
+          carry.sha.slice(0, 12)
+        }, ${carry.units.length} unit(s) on record)`,
+      );
+      if (carry.qualifies && !o.modeSet && o.suites.length === 0) {
+        pass.push("--mode", carry.mode);
+        if (carry.requestedSuites.length) {
+          pass.push("--suite", carry.requestedSuites.join(","));
+        }
+        log(
+          `adopting ${carry.runId}'s selection: --mode ${carry.mode}${
+            carry.requestedSuites.length
+              ? ` --suite ${carry.requestedSuites.join(",")}`
+              : ""
+          }`,
+        );
+      }
+    }
+    const carryTmp = carry ? await Deno.makeTempFile({ suffix: ".json" }) : "";
+    if (carry) await Deno.writeTextFile(carryTmp, JSON.stringify(carry));
     const total = hosts.reduce((a, h) => a + h.weight, 0);
     let lo = 0;
     for (const h of hosts) {
@@ -505,9 +576,27 @@ async function remote(o: Options, argv: string[]) {
         ...(hosts.length > 1
           ? ["--share", `${lo}:${lo + h.weight}:${total}`]
           : []),
+        ...(carry
+          ? ["--carry-file", `runs/${runId}/carry.json`]
+          : ["--no-carry"]),
       ];
       lo += h.weight;
       await sh(h, `mkdir -p ~/flake-hunt/runs/${runId}`);
+      if (carry && h.name === "local") {
+        await Deno.copyFile(
+          carryTmp,
+          expandHome(`~/flake-hunt/runs/${runId}/carry.json`),
+        );
+      } else if (carry) {
+        await run([
+          "scp",
+          "-q",
+          "-o",
+          "BatchMode=yes",
+          carryTmp,
+          `${h.name}:flake-hunt/runs/${runId}/carry.json`,
+        ]);
+      }
       let deno: string;
       if (h.name === "local") {
         await Deno.copyFile(
@@ -544,6 +633,7 @@ async function remote(o: Options, argv: string[]) {
       );
       log(`started ${runId} on ${h.name}`);
     }
+    if (carryTmp) await Deno.remove(carryTmp);
     log(`re-attach: --host ${o.host} --attach ${runId}`);
   }
   while (true) {
@@ -632,6 +722,15 @@ interface Marker {
   started: string;
   finished: string;
   runId: string;
+  /** the --suite list (a later run that carries from this one adopts it) */
+  requestedSuites?: string[];
+  /** units carried from earlier runs instead of run here: each one's label,
+   * and the run and commit its result came from (README, "Carry-forward") */
+  carry?: {
+    from: string[];
+    ran: number;
+    units: Record<string, { runId: string; sha: string }>;
+  };
 }
 
 async function removeMarker(sha: string) {
@@ -1424,6 +1523,7 @@ interface Metadata {
     name: string;
     manifest_path: string;
     targets: { kind: string[]; name: string; src_path: string }[];
+    dependencies?: { name: string }[];
   }[];
 }
 
@@ -1585,6 +1685,861 @@ function existsSync(p: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Carry-forward: a re-hunt never retests what an earlier hunt vetted
+// (README, "Carry-forward"). An earlier run's unit that finished with no
+// failure is kept when the diff from the commit it ran on to the candidate
+// touches nothing it depends on; only the rest runs.
+
+/** One unit's result in a run's report.json (`units`), and in a carry
+ * source (merged across the run's hosts). `reps` / `constrainedReps`: the
+ * repetitions in the gate's container / in each constrained profile
+ * (undefined: not known, a run from before the carry-forward). A carried
+ * unit names the run and commit its result came from (`source`); one carried
+ * with flaky tests still to rerun lists them (`pending`). */
+export interface UnitRecord {
+  label: string;
+  suite: string;
+  reps?: number;
+  constrainedReps?: number;
+  failures: { test: string; kind: Failure["kind"] }[];
+  source?: { runId: string; sha: string };
+  pending?: string[];
+}
+
+/** An earlier run to carry from, merged across its hosts. */
+export interface CarrySource {
+  runId: string;
+  sha: string;
+  legacy: boolean; // a run from before the carry-forward (report.json v1)
+  mode: string;
+  requestedSuites: string[]; // its --suite list
+  qualifies: boolean;
+  reps: number;
+  flakyReps: number;
+  profiles: string[];
+  constrainedReps: number;
+  units: UnitRecord[];
+}
+
+const NAMED_KINDS: Failure["kind"][] = ["failed", "retried"];
+
+/** A task label without its profile suffix (`unit x [cpu1]` -> `unit x`). */
+export function baseLabel(label: string): string {
+  return label.replace(/ \[(?:normal|cpu\d+(?:\.\d+)?)(?:\+hog)?\]$/, "");
+}
+
+/** Merges each host's `units` of one run: the repetitions and failures of a
+ * unit that ran add up; a carried unit is the same on every host. */
+export function mergeUnitRecords(perHost: UnitRecord[][]): UnitRecord[] {
+  const by = new Map<string, UnitRecord>();
+  for (const recs of perHost) {
+    for (const r of recs) {
+      const x = by.get(r.label);
+      if (!x) {
+        by.set(r.label, {
+          ...r,
+          failures: [...r.failures],
+          pending: r.pending && [...r.pending],
+        });
+        continue;
+      }
+      if (r.source || x.source) {
+        // carried on one host: carried on all (the same plan); keep any
+        // failure a host saw in the pending tests' reruns
+        x.failures.push(...r.failures);
+        continue;
+      }
+      x.reps = x.reps === undefined || r.reps === undefined
+        ? undefined
+        : x.reps + r.reps;
+      x.constrainedReps =
+        x.constrainedReps === undefined || r.constrainedReps === undefined
+          ? undefined
+          : x.constrainedReps + r.constrainedReps;
+      x.failures.push(...r.failures);
+    }
+  }
+  return [...by.values()];
+}
+
+interface LegacyReport {
+  flakes: { test: string; kinds: Record<string, number>; firstLog: string }[];
+  runs: { id: string; label: string; failures: number }[];
+}
+
+/** The units of a run from before the carry-forward (report.json without
+ * `units`), from its runs and flakes. A unit with a failure that names no
+ * test (a crash, a timeout, a dirty tree), or whose failures cannot be
+ * attributed to named tests, is recorded as such (a whole rerun). */
+export function legacyUnits(
+  rep: LegacyReport,
+  mode: string,
+  reps: number,
+  flakyReps: number,
+  constrainedReps: number,
+): UnitRecord[] {
+  const units = new Map<string, UnitRecord & { dirty: boolean }>();
+  const labelOf = new Map<string, string>(); // task id -> unit label
+  for (const r of rep.runs) {
+    const label = baseLabel(r.label);
+    labelOf.set(r.id, label);
+    let u = units.get(label);
+    if (!u) {
+      const suite = label.split(" ")[0];
+      const known = mode === "fast" &&
+        KNOWN_FLAKY.some((k) =>
+          label === `${k.suite}${k.crate ? ` ${k.crate}` : ""} ~ ${k.filter}`
+        );
+      u = {
+        label,
+        suite,
+        reps: known ? flakyReps : reps,
+        constrainedReps,
+        failures: [],
+        dirty: false,
+      };
+      units.set(label, u);
+    }
+    if (r.failures > 0) u.dirty = true;
+  }
+  const labels = [...units.keys()];
+  for (const f of rep.flakes) {
+    const m = f.test.match(/^([a-z_]+): (.*)$/);
+    if (!m) continue;
+    const [, suite, rest] = m;
+    const test = baseLabel(rest);
+    const kinds = Object.keys(f.kinds) as Failure["kind"][];
+    if (kinds.every((k) => NAMED_KINDS.includes(k))) {
+      // a named test: the unit of its first failure
+      const id = f.firstLog.match(/\/(t\d+)-[^/]*$/)?.[1];
+      const u = id && units.get(labelOf.get(id) ?? "");
+      if (u) u.failures.push({ test, kind: kinds[0] });
+      continue;
+    }
+    // a failure naming no test: its text starts with the unit's label (a
+    // lib test binary's crash with the crate's name)
+    const crashKind = kinds.find((k) => !NAMED_KINDS.includes(k))!;
+    let hit = false;
+    for (const l of labels) {
+      const crate = l.split(" ")[1];
+      if (
+        test.startsWith(`${l} `) || test.startsWith(`${l}:`) ||
+        (l.startsWith(`${suite} `) && test.startsWith(`${crate} (`))
+      ) {
+        units.get(l)!.failures.push({ test, kind: crashKind });
+        hit = true;
+      }
+    }
+    if (!hit) {
+      // unattributable: every unit of the suite reruns whole
+      for (const l of labels.filter((l) => l.startsWith(`${suite} `))) {
+        units.get(l)!.failures.push({ test, kind: crashKind });
+      }
+    }
+  }
+  return [...units.values()].map(({ dirty, ...u }) => {
+    if (dirty && u.failures.length === 0) {
+      u.failures.push({ test: `${u.label} (unattributed)`, kind: "crashed" });
+    }
+    return u;
+  });
+}
+
+/** The --suite list of a run from before the carry-forward, from its plan
+ * lines in driver.log. */
+export function legacyRequestedSuites(driverLog: string): string[] {
+  return [
+    ...driverLog.matchAll(/^\[[\d:]+\] {3}([a-z_]+) x\d+ {2}\(--suite\)$/gm),
+  ].map((m) => m[1]);
+}
+
+/** The workspace crates and their path dependencies (`cargo metadata
+ * --no-deps`), paths relative to the checkout. */
+export interface CrateGraph {
+  packages: { name: string; dir: string; targets: string[]; deps: string[] }[];
+}
+
+export function crateGraph(meta: Metadata, src: string): CrateGraph {
+  const names = new Set(meta.packages.map((p) => p.name));
+  const rel = (p: string) =>
+    p.startsWith(src + "/") ? p.slice(src.length + 1) : p;
+  return {
+    packages: meta.packages.map((p) => ({
+      name: p.name,
+      dir: rel(p.manifest_path.replace(/\/Cargo\.toml$/, "")),
+      targets: p.targets.map((t) => t.name),
+      deps: (p.dependencies ?? []).map((d) => d.name).filter((n) =>
+        names.has(n)
+      ),
+    })),
+  };
+}
+
+/** What one changed file can affect. */
+export type FileClass =
+  | { kind: "ignore" } // docs, the hunt's own tooling, other workflows
+  | { kind: "all" } // shared inputs: everything
+  | { kind: "suite"; suite: string } // every unit of a harness suite
+  | { kind: "test"; suite: string; name: string } // one test file / module
+  | { kind: "crate"; crate: string }; // a workspace crate (and its dependents)
+
+/** Paths that no test or build reads: docs at the top, under doc/ and
+ * .github/, the hunt and lint tooling, workflows other than the tests'. */
+const IGNORED = [
+  /^[^/]+\.md$/,
+  /^doc\//,
+  /^\.github\/.*\.md$/,
+  /^\.github\/ISSUE_TEMPLATE\//,
+  /^\.github\/workflows\/(?!denext_tests)[^/]+$/,
+  /^tools\/[^/]+\.md$/,
+  /^tools\/denext\/flake_hunt(?:_test)?\.ts$/,
+  /^tools\/(?:format|lint|copyright_checker|jsdoc_checker)\.js$/,
+  /^\.dprint\.json$/,
+  /^\.gitignore$/,
+  /^\.editorconfig$/,
+  /^flake\.(?:nix|lock)$/,
+];
+
+/** Classifies a changed path (README, "Carry-forward"). `specDirOf` finds
+ * the spec directory (with a __test__.jsonc) holding a tests/specs file. */
+export function classifyFile(
+  path: string,
+  graph: CrateGraph,
+  specDirOf: (path: string) => string | undefined,
+): FileClass {
+  if (IGNORED.some((r) => r.test(path))) return { kind: "ignore" };
+  let m: RegExpMatchArray | null;
+  if ((m = path.match(/^tests\/unit\/([^/]+_test)\.ts$/))) {
+    return { kind: "test", suite: "unit", name: `unit::${m[1]}` };
+  }
+  if (
+    (m = path.match(/^tests\/unit\/__snapshots__\/([^/]+_test)\.ts\.snap$/))
+  ) {
+    return { kind: "test", suite: "unit", name: `unit::${m[1]}` };
+  }
+  if (path.startsWith("tests/unit/")) return { kind: "suite", suite: "unit" };
+  if (
+    (m = path.match(
+      /^tests\/unit_node\/((?:[^/]+\/)*[^/]+_test)\.(?:ts|mts|js|mjs|cjs)$/,
+    ))
+  ) {
+    return {
+      kind: "test",
+      suite: "unit_node",
+      name: `unit_node::${m[1].replaceAll("/", "::")}`,
+    };
+  }
+  if (path.startsWith("tests/unit_node/")) {
+    return { kind: "suite", suite: "unit_node" };
+  }
+  if (path.startsWith("tests/specs/")) {
+    const dir = specDirOf(path);
+    return dir
+      ? {
+        kind: "test",
+        suite: "specs",
+        name: `specs::${dir.split("/").slice(2).join("::")}`,
+      }
+      : { kind: "suite", suite: "specs" };
+  }
+  if ((m = path.match(/^tests\/integration\/([^/]+)_tests\.rs$/))) {
+    return {
+      kind: "test",
+      suite: "integration",
+      name: `integration::${m[1]}::`,
+    };
+  }
+  if (path.startsWith("tests/integration/")) {
+    return { kind: "suite", suite: "integration" };
+  }
+  if (path.startsWith("tests/node_compat/")) {
+    return { kind: "suite", suite: "node_compat" };
+  }
+  if (path.startsWith("tests/")) return { kind: "all" };
+  // a workspace crate's file (its sources, JS, Cargo.toml, build.rs,
+  // fixtures): the crate with the longest directory holding it
+  let best: { name: string; dir: string } | undefined;
+  for (const p of graph.packages) {
+    if (p.dir === "" || p.dir === ".") continue;
+    if (
+      path.startsWith(p.dir + "/") && (!best || p.dir.length > best.dir.length)
+    ) best = p;
+  }
+  return best ? { kind: "crate", crate: best.name } : { kind: "all" };
+}
+
+/** What a diff affects, from its files' classes. `crates`: the changed
+ * crates and every crate that depends on one (any kind of dependency);
+ * `harness`: a crate the harness suites' binaries or test crates are built
+ * from is among them, so every harness unit is affected. */
+export interface Impact {
+  all: boolean;
+  harness: boolean;
+  crates: Set<string>;
+  suites: Set<string>;
+  tests: { suite: string; name: string }[];
+}
+
+/** The binaries the harness suites run, and the test crates under tests/:
+ * a change in anything they are built from reaches every harness test. */
+const HARNESS_ROOTS = ["deno", "denort", "test_server"];
+
+export function computeImpact(classes: FileClass[], graph: CrateGraph): Impact {
+  const im: Impact = {
+    all: false,
+    harness: false,
+    crates: new Set(),
+    suites: new Set(),
+    tests: [],
+  };
+  const rdeps = new Map<string, string[]>();
+  for (const p of graph.packages) {
+    for (const d of p.deps) rdeps.set(d, [...(rdeps.get(d) ?? []), p.name]);
+  }
+  for (const c of classes) {
+    if (c.kind === "all") im.all = true;
+    else if (c.kind === "suite") im.suites.add(c.suite);
+    else if (c.kind === "test") im.tests.push({ suite: c.suite, name: c.name });
+    else if (c.kind === "crate") {
+      const todo = [c.crate];
+      while (todo.length) {
+        const n = todo.pop()!;
+        if (im.crates.has(n)) continue;
+        im.crates.add(n);
+        todo.push(...(rdeps.get(n) ?? []));
+      }
+    }
+  }
+  // the harness closure: the roots and the test crates, and all they depend on
+  const byName = new Map(graph.packages.map((p) => [p.name, p]));
+  const closure = new Set<string>();
+  const todo = graph.packages.filter((p) =>
+    HARNESS_ROOTS.includes(p.name) || p.dir.startsWith("tests/")
+  ).map((p) => p.name);
+  while (todo.length) {
+    const n = todo.pop()!;
+    if (closure.has(n)) continue;
+    closure.add(n);
+    todo.push(...(byName.get(n)?.deps ?? []));
+  }
+  im.harness = [...im.crates].some((c) => closure.has(c));
+  return im;
+}
+
+/** Whether a test name (or name prefix) `name` can be among the tests a
+ * harness filter `filter` selects. A perFile suite's names are its test
+ * files, which the filter matches as a substring; elsewhere a filter that is
+ * a path (`specs::a::b`, `::lsp::`) selects that subtree, and any other
+ * filter may match anything in the suite. */
+function filterCovers(suite: string, filter: string, name: string): boolean {
+  if (name.includes(filter) || filter.includes(name.replace(/::$/, ""))) {
+    return true;
+  }
+  if (HARNESS_SUITES[suite]?.perFile) return false;
+  return !filter.includes("::");
+}
+
+/** Whether a diff's impact reaches a unit (README, "Carry-forward"). */
+export function unitAffected(
+  u: { suite: string; key: UnitKey; kind: Task["kind"] },
+  im: Impact,
+  graph: CrateGraph,
+): boolean {
+  if (im.all) return true;
+  if (u.kind === "libtest") {
+    const pkg = graph.packages.find((p) =>
+      p.name === u.key.crate || p.targets.includes(u.key.crate ?? "")
+    );
+    return !pkg || im.crates.has(pkg.name);
+  }
+  if (im.harness || im.suites.has(u.suite)) return true;
+  for (const t of im.tests.filter((t) => t.suite === u.suite)) {
+    if (u.key.file !== undefined) {
+      if (u.key.file === t.name || u.key.file.startsWith(t.name)) return true;
+    } else if (u.key.filter !== undefined) {
+      if (filterCovers(u.suite, u.key.filter, t.name)) return true;
+    }
+    // a shard: its other tests' inputs are untouched; the touched test runs
+    // on its own (carryPlan's added selections)
+  }
+  return false;
+}
+
+export interface CarryPlan {
+  run: Unit[]; // the desired units still to run (repetitions adjusted)
+  carried: UnitRecord[];
+  extra: Selection[]; // flaky tests at --flaky-reps, touched tests of a shard
+  notes: string[];
+}
+
+/** Which desired units run and which carry (README, "Carry-forward").
+ * `impactFor(sha)`: the impact of the diff from that commit to the
+ * candidate. */
+export function carryPlan(
+  desired: Unit[],
+  source: CarrySource,
+  impactFor: (sha: string) => Impact,
+  graph: CrateGraph,
+  opts: { flakyReps: number; constrainedReps: number; profiles: string[] },
+): CarryPlan {
+  const plan: CarryPlan = { run: [], carried: [], extra: [], notes: [] };
+  const recs = new Map(source.units.map((r) => [r.label, r]));
+  const missing = opts.profiles.filter((p) => !source.profiles.includes(p));
+  if (missing.length || source.constrainedReps < opts.constrainedReps) {
+    plan.notes.push(
+      `nothing carried: ${source.runId} ran ${
+        source.profiles.join(",")
+      } x${source.constrainedReps}, this run wants ${
+        opts.profiles.join(",")
+      } x${opts.constrainedReps}`,
+    );
+    plan.run = desired;
+    return plan;
+  }
+  const extraKeys = new Set<string>();
+  const addExtra = (s: Selection) => {
+    const k = `${s.suite}|${s.crates?.join(",")}|${s.filter}`;
+    if (!extraKeys.has(k)) {
+      extraKeys.add(k);
+      plan.extra.push(s);
+    }
+  };
+  for (const u of desired) {
+    const r = recs.get(u.label);
+    if (!r) {
+      plan.run.push(u);
+      continue;
+    }
+    const from = r.source ?? { runId: source.runId, sha: source.sha };
+    // its flaky tests run on their own at --flaky-reps, whatever else runs
+    const pending = [
+      ...new Set(
+        r.failures.filter((f) => NAMED_KINDS.includes(f.kind)).map((f) =>
+          f.test
+        ),
+      ),
+    ];
+    for (const t of pending) {
+      addExtra(flakySelection(u.suite, t, opts.flakyReps, from.runId));
+    }
+    const im = impactFor(from.sha);
+    if (unitAffected(u, im, graph)) {
+      plan.run.push(u);
+      continue;
+    }
+    if (r.reps !== undefined && r.reps < u.reps) {
+      plan.run.push(u);
+      plan.notes.push(`${u.label}: ${from.runId} ran it x${r.reps} only`);
+      continue;
+    }
+    const named = r.failures.every((f) => NAMED_KINDS.includes(f.kind));
+    if (!named) {
+      plan.run.push(u); // a crash, a timeout or a dirty tree: all of it again
+      continue;
+    }
+    plan.carried.push({
+      label: u.label,
+      suite: u.suite,
+      reps: r.reps,
+      constrainedReps: r.constrainedReps,
+      failures: [],
+      source: from,
+      ...(pending.length ? { pending } : {}),
+    });
+    // a carried shard: the tests the diff touches run on their own
+    if (u.key.shard !== undefined) {
+      for (const t of im.tests.filter((t) => t.suite === u.suite)) {
+        addExtra({
+          suite: u.suite,
+          filter: t.name.startsWith("integration::")
+            ? t.name.slice("integration".length)
+            : t.name,
+          reps: u.reps,
+          why: `touched since ${from.sha.slice(0, 12)} (${u.label} carried)`,
+        });
+      }
+    }
+  }
+  return plan;
+}
+
+/** A flaky test of an earlier run, on its own: a lib test by its crate and
+ * path, a harness test by its name. */
+export function flakySelection(
+  suite: string,
+  test: string,
+  reps: number,
+  runId: string,
+): Selection {
+  const why = `flaky in ${runId}`;
+  if (suite === "libs" || suite === "libs_core") {
+    const i = test.indexOf("::");
+    return {
+      suite,
+      step: suite,
+      crates: [i < 0 ? test : test.slice(0, i)],
+      filter: i < 0 ? undefined : test.slice(i + 2),
+      reps,
+      why,
+    };
+  }
+  return { suite, filter: test, reps, why };
+}
+
+/** Whether a change to a source file is formatting only: the same text
+ * outside string literals once whitespace (between tokens) and trailing
+ * commas are dropped. Only Rust, JS/TS and JSON outside tests/ and testdata
+ * qualify; anything else (a .out file, a fixture, a string's contents)
+ * counts as a real change. */
+export function formattingOnly(
+  path: string,
+  before: string | undefined,
+  after: string | undefined,
+): boolean {
+  if (before === undefined || after === undefined) return false;
+  if (path.startsWith("tests/") || /(^|\/)testdata\//.test(path)) return false;
+  const ext = path.match(/\.([a-z]+)$/)?.[1] ?? "";
+  if (
+    !["rs", "ts", "tsx", "js", "mjs", "cjs", "jsx", "json", "jsonc"].includes(
+      ext,
+    )
+  ) {
+    return false;
+  }
+  return normalizeSource(before, ext) === normalizeSource(after, ext);
+}
+
+export function normalizeSource(text: string, ext: string): string {
+  const out: string[] = [];
+  const word = /[A-Za-z0-9_$]/;
+  let pendingSpace = false;
+  const emit = (s: string) => {
+    if (
+      pendingSpace && out.length && word.test(out[out.length - 1].slice(-1)) &&
+      word.test(s[0])
+    ) out.push(" ");
+    pendingSpace = false;
+    out.push(s);
+  };
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (/\s/.test(c)) {
+      pendingSpace = true;
+      i++;
+      continue;
+    }
+    // a comment: its words, whitespace collapsed (no string starts in one)
+    if (c === "/" && (text[i + 1] === "/" || text[i + 1] === "*")) {
+      const end = text[i + 1] === "/"
+        ? text.indexOf("\n", i)
+        : text.indexOf("*/", i + 2) + 2;
+      const stop = end <= 1 || end < 0 ? text.length : end;
+      emit(text.slice(i, stop).replace(/\s+/g, " ").trim());
+      i = stop;
+      continue;
+    }
+    // Rust raw strings: r"…", r#"…"#, br"…"
+    if (ext === "rs") {
+      const raw = text.slice(i).match(/^b?r(#*)"/);
+      if (raw && !(i > 0 && word.test(text[i - 1]))) {
+        const close = `"${raw[1]}`;
+        const end = text.indexOf(close, i + raw[0].length);
+        const stop = end < 0 ? text.length : end + close.length;
+        emit(text.slice(i, stop));
+        i = stop;
+        continue;
+      }
+      if (c === "'") {
+        // a char literal ('a', '\n', '\u{1F600}'), else a lifetime
+        const ch = text.slice(i).match(/^'(?:\\u\{[0-9a-fA-F]+\}|\\.|[^\\'])'/);
+        if (ch) {
+          emit(ch[0]);
+          i += ch[0].length;
+          continue;
+        }
+        emit(c);
+        i++;
+        continue;
+      }
+    }
+    if (c === '"' || c === "`" || (c === "'" && ext !== "rs")) {
+      let j = i + 1;
+      while (j < text.length && text[j] !== c) j += text[j] === "\\" ? 2 : 1;
+      emit(text.slice(i, j + 1));
+      i = j + 1;
+      continue;
+    }
+    if (c === ",") {
+      // a trailing comma: the next token closes a bracket
+      let j = i + 1;
+      while (j < text.length && /\s/.test(text[j])) j++;
+      if (/[)\]}>]/.test(text[j] ?? "")) {
+        i++;
+        continue;
+      }
+    }
+    emit(c);
+    i++;
+  }
+  return out.join("");
+}
+
+/** Why an earlier run's statuses (one per host that holds it) cannot be
+ * carried from, or undefined when they can: it finished on every host
+ * (exit 0 or 1: the infrastructure held), on one commit, and its hosts'
+ * shares cover all the repetitions. A run from before the carry-forward
+ * records no shares: the hosts that hold it are taken to be all of it. */
+export function carryIneligible(st: Status[]): string | undefined {
+  if (st.length === 0) return "not found";
+  if (st.some((s) => s.state !== "done")) return "not finished";
+  if (st.some((s) => s.exit !== 0 && s.exit !== 1)) {
+    return "it ended with an infrastructure error";
+  }
+  if (st.some((s) => !s.marker || !s.sha)) return "no record of what it ran";
+  if (new Set(st.map((s) => s.sha)).size > 1) {
+    return "its hosts ran different commits";
+  }
+  const v2 = st.filter((s) => s.format === 2).length;
+  if (v2 > 0 && v2 < st.length) return "its hosts ran different drivers";
+  if (v2 === 0) return undefined;
+  if (st.some((s) => !s.share)) {
+    return st.length === 1 ? undefined : "a host ran it without a share";
+  }
+  const shares = st.map((s) => s.share!).sort((a, b) => a[0] - b[0]);
+  let at = 0;
+  for (const [lo, hi, total] of shares) {
+    if (lo !== at || total !== shares[0][2]) return "a host's share is missing";
+    at = hi;
+  }
+  return at === shares[0][2] ? undefined : "a host's share is missing";
+}
+
+type Sh = (
+  host: string,
+  script: string,
+) => Promise<{ code: number; stdout: string }>;
+
+/** The earlier run to carry from (`want`: a run id, or "auto": the newest
+ * eligible one whose candidate is an ancestor of `sha`), merged across the
+ * hosts that hold it; undefined when there is none. */
+export async function findCarrySource(
+  want: string,
+  sha: string,
+  exclude: string | undefined,
+  hosts: string[],
+  runsDir: string, // shell text: ~/flake-hunt/runs, or a quoted path
+  sh: Sh,
+  isAncestor: (old: string) => Promise<boolean>,
+): Promise<CarrySource | undefined> {
+  const found = new Map<string, { host: string; status: Status }[]>();
+  for (const h of hosts) {
+    const r = await sh(
+      h,
+      `cd ${runsDir} 2>/dev/null || exit 0; for d in */; do d="\${d%/}"; [ -f "$d/status.json" ] || continue; printf '\\n@@FH-RUN %s\\n' "$d"; cat "$d/status.json"; done`,
+    );
+    if (r.code !== 0) {
+      log(`carry: could not list the runs on ${h}`);
+      continue;
+    }
+    for (const part of r.stdout.split("\n@@FH-RUN ").slice(1)) {
+      const nl = part.indexOf("\n");
+      try {
+        const status = JSON.parse(part.slice(nl + 1)) as Status;
+        const id = part.slice(0, nl).trim();
+        found.set(id, [...(found.get(id) ?? []), { host: h, status }]);
+      } catch { /* torn */ }
+    }
+  }
+  const ids = want === "auto"
+    ? [...found.keys()].filter((id) => id !== exclude).sort().reverse()
+    : [want];
+  for (const id of ids) {
+    const held = found.get(id) ?? [];
+    const st = held.map((x) => x.status);
+    const bad = carryIneligible(st) ??
+      (await isAncestor(st[0].sha!)
+        ? undefined
+        : `its candidate ${st[0].sha!.slice(0, 12)} is not an ancestor of ${
+          sha.slice(0, 12)
+        }`);
+    if (bad) {
+      if (want !== "auto") die(`--carry ${id}: ${bad}`);
+      continue;
+    }
+    const reports: (LegacyReport & { units?: UnitRecord[] })[] = [];
+    let requested: string[] = [];
+    let ok = true;
+    for (const { host } of held) {
+      const r = await sh(
+        host,
+        `cd ${runsDir}/${id} && cat report.json && printf '\\n@@FH-LOG\\n' && grep -E '^\\[[0-9:]+\\]   [a-z_]+ x[0-9]+  \\(--suite\\)$' driver.log; true`,
+      );
+      const [json, plan = ""] = r.stdout.split("\n@@FH-LOG\n");
+      try {
+        reports.push(JSON.parse(json));
+      } catch {
+        ok = false;
+      }
+      requested.push(...legacyRequestedSuites(plan));
+    }
+    if (!ok) {
+      if (want !== "auto") die(`--carry ${id}: no readable report.json`);
+      continue;
+    }
+    const m = st[0].marker!;
+    const legacy = st[0].format !== 2;
+    let units: UnitRecord[];
+    if (legacy) {
+      const per = reports.map((rep) =>
+        legacyUnits(rep, m.mode, m.reps, m.flakyReps, m.constrainedReps)
+      );
+      // the repetitions of a legacy run are its totals, not per host
+      const totals = new Map(per.flat().map((u) => [u.label, u]));
+      units = mergeUnitRecords(per).map((u) => ({
+        ...u,
+        reps: totals.get(u.label)!.reps,
+        constrainedReps: totals.get(u.label)!.constrainedReps,
+      }));
+      log(
+        `carry: ${id} is from before the carry-forward; taking ${
+          held.map((x) => x.host).join(", ")
+        } to be all of its hosts`,
+      );
+    } else {
+      units = mergeUnitRecords(reports.map((rep) => rep.units ?? []));
+      requested = m.requestedSuites ?? [];
+    }
+    return {
+      runId: id,
+      sha: st[0].sha!,
+      legacy,
+      mode: m.mode,
+      requestedSuites: [...new Set(requested)],
+      qualifies: st.every((s) => s.qualifies),
+      reps: m.reps,
+      flakyReps: m.flakyReps,
+      profiles: m.profiles,
+      constrainedReps: m.constrainedReps,
+      units,
+    };
+  }
+  if (want === "auto") log("carry: no earlier finished run to carry from");
+  return undefined;
+}
+
+/** The impact of the diff from `from` to `to` (README, "Carry-forward"):
+ * each changed file classified, formatting-only changes dropped. */
+export async function diffImpact(
+  mirror: string,
+  from: string,
+  to: string,
+  src: string,
+  graph: CrateGraph,
+): Promise<{ impact: Impact; files: number; formatting: number }> {
+  const files = (await run([
+    "git",
+    "-C",
+    mirror,
+    "diff",
+    "--no-renames",
+    "--name-only",
+    `${from}..${to}`,
+  ])).stdout.split("\n").filter(Boolean);
+  const blob = async (sha: string, path: string) => {
+    const r = await run(["git", "-C", mirror, "show", `${sha}:${path}`], {
+      allowFail: true,
+    });
+    return r.code === 0 ? r.stdout : undefined;
+  };
+  const specDirOf = (f: string) => {
+    let dir = f.split("/").slice(0, -1);
+    while (
+      dir.length > 2 && !existsSync(`${src}/${dir.join("/")}/__test__.jsonc`)
+    ) dir = dir.slice(0, -1);
+    return dir.length > 2 ? dir.join("/") : undefined;
+  };
+  const classes: FileClass[] = [];
+  let formatting = 0;
+  for (const f of files) {
+    const c = classifyFile(f, graph, specDirOf);
+    if (c.kind === "ignore") continue;
+    if (formattingOnly(f, await blob(from, f), await blob(to, f))) {
+      formatting++;
+      continue;
+    }
+    classes.push(c);
+  }
+  return {
+    impact: computeImpact(classes, graph),
+    files: files.length,
+    formatting,
+  };
+}
+
+/** The label of the unit a selection of one test builds (buildUnits). */
+function selectionLabel(s: Selection): string {
+  return s.crates
+    ? `${s.suite} ${s.crates[0]}${s.filter ? ` ~ ${s.filter}` : ""}`
+    : `${s.suite} ~ ${s.filter}`;
+}
+
+/** This host's record of each unit (report.json `units`): the units that
+ * ran, with their failures, and the carried ones, each with the failures
+ * of its pending flaky tests' reruns here (a rerun that could not run counts
+ * against the unit as a whole). */
+export function unitRecords(
+  units: Unit[],
+  results: { task: Task; failures: Failure[] }[],
+  carried: UnitRecord[],
+  constrainedReps: number,
+  flakyReps: number,
+): UnitRecord[] {
+  const out: UnitRecord[] = [];
+  for (const u of units) {
+    const seen = new Set<string>();
+    const failures: UnitRecord["failures"] = [];
+    for (const r of results.filter((r) => r.task.unit === u.label)) {
+      for (const f of r.failures) {
+        if (seen.has(`${f.kind}|${f.test}`)) continue;
+        seen.add(`${f.kind}|${f.test}`);
+        failures.push({ test: f.test, kind: f.kind });
+      }
+    }
+    out.push({
+      label: u.label,
+      suite: u.suite,
+      reps: u.reps,
+      constrainedReps: Math.min(u.reps, constrainedReps),
+      failures,
+    });
+  }
+  for (const c of carried) {
+    const failures: UnitRecord["failures"] = [];
+    for (const t of c.pending ?? []) {
+      const label = selectionLabel(flakySelection(c.suite, t, flakyReps, ""));
+      for (const r of results) {
+        if (r.task.suite !== c.suite) continue;
+        for (const f of r.failures) {
+          if (NAMED_KINDS.includes(f.kind) && f.test === t) {
+            if (!failures.some((x) => x.test === t)) {
+              failures.push({ test: t, kind: f.kind });
+            }
+          } else if (!NAMED_KINDS.includes(f.kind) && r.task.unit === label) {
+            failures.push({
+              test: `${c.label}: the rerun of ${t} failed to run`,
+              kind: "crashed",
+            });
+          }
+        }
+      }
+    }
+    out.push({ ...c, failures });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Tasks
 
 interface ExeRun {
@@ -1595,6 +2550,7 @@ interface ExeRun {
 interface Task {
   id: string;
   suite: string;
+  unit: string; // the unit's label (no profile)
   label: string; // libs deno, unit unit::pty_test, specs (1/4) …
   rep: number; // the first repetition this run does
   reps: number; // repetitions this run does, one after another
@@ -1606,22 +2562,36 @@ interface Task {
   profile: Profile;
 }
 
-interface TaskOptions {
+interface UnitOptions {
   testParallelism?: number;
-  chunk: number;
   shards: number;
   lists: Record<string, string[]>; // perFile suites: their test files
+}
+
+interface TaskOptions {
+  chunk: number;
   profiles: Profile[];
   constrainedReps: number; // per constrained profile, at most a unit's reps
+}
+
+/** What a unit covers, for the carry-forward's diff check: a lib test
+ * binary (`crate`, with an optional `filter`), one test file of a perFile
+ * suite (`file`), a filtered harness run (`filter`), or a shard. */
+export interface UnitKey {
+  crate?: string;
+  file?: string;
+  filter?: string;
+  shard?: number;
 }
 
 /** One unit of repetition: a lib test binary (with its step's arguments, or
  * a filter), one test file of a perFile suite, or one shard of another
  * suite. Its repetitions are split into runs of --chunk, which the workers
  * take in parallel. */
-interface Unit {
+export interface Unit {
   suite: string;
   label: string;
+  key: UnitKey;
   kind: Task["kind"];
   exes: ExeRun[];
   env: Record<string, string>;
@@ -1630,12 +2600,12 @@ interface Unit {
   resultsName?: string;
 }
 
-function buildTasks(
+function buildUnits(
   sels: Selection[],
   steps: CargoStep[],
   exes: Record<string, TestExe[]>,
-  to: TaskOptions,
-): Task[] {
+  to: UnitOptions,
+): Unit[] {
   const units: Unit[] = [];
   const base: Record<string, string> = { ...CI_ENV };
   if (to.testParallelism) {
@@ -1670,6 +2640,7 @@ function buildTasks(
             label: `${s.suite} ${e.crate}${
               sn === "libs_core_snapshot" ? " (snapshot tests)" : ""
             }${s.filter ? ` ~ ${s.filter}` : ""}`,
+            key: { crate: e.crate, filter: s.filter },
             kind: "libtest",
             exes: [{ exe: e, args }],
             env: base,
@@ -1682,10 +2653,16 @@ function buildTasks(
     }
     const exe = (exes[s.suite] ?? [])[0];
     if (!exe) continue;
-    const harness = (label: string, filter: string | undefined, env = base) =>
+    const harness = (
+      label: string,
+      key: UnitKey,
+      filter: string | undefined,
+      env = base,
+    ) =>
       units.push({
         suite: s.suite,
         label,
+        key,
         kind: "harness",
         exes: [{ exe, args: filter ? [filter] : [] }],
         env,
@@ -1694,13 +2671,16 @@ function buildTasks(
         resultsName: s.suite,
       });
     if (s.filter) {
-      harness(`${s.suite} ~ ${s.filter}`, s.filter);
+      harness(`${s.suite} ~ ${s.filter}`, { filter: s.filter }, s.filter);
     } else if (HARNESS_SUITES[s.suite].perFile && to.lists[s.suite]?.length) {
-      for (const name of to.lists[s.suite]) harness(`${s.suite} ${name}`, name);
+      for (const name of to.lists[s.suite]) {
+        harness(`${s.suite} ${name}`, { file: name }, name);
+      }
     } else {
       for (let sh = 0; sh < to.shards; sh++) {
         harness(
           `${s.suite} (${sh + 1}/${to.shards})`,
+          { shard: sh },
           undefined,
           to.shards > 1
             ? {
@@ -1713,6 +2693,17 @@ function buildTasks(
       }
     }
   }
+  // one unit per label (a carried flaky test's filter can repeat a desired
+  // unit): the most repetitions win
+  const byLabel = new Map<string, Unit>();
+  for (const u of units) {
+    const x = byLabel.get(u.label);
+    if (!x || u.reps > x.reps) byLabel.set(u.label, u);
+  }
+  return [...byLabel.values()];
+}
+
+function tasksFromUnits(units: Unit[], to: TaskOptions): Task[] {
   // chunk-major: the first chunk of every unit, then the second, … so every
   // suite is in flight at once (realistic load) and each unit's chunks run
   // in parallel
@@ -1734,6 +2725,7 @@ function buildTasks(
       tasks.push({
         id: "",
         suite: u.suite,
+        unit: u.label,
         label: pr.cpus || pr.hog ? `${u.label} [${pr.name}]` : u.label,
         rep: start,
         reps: n,
@@ -2037,6 +3029,8 @@ function escapeRe(s: string) {
 
 interface Status {
   state: "building" | "running" | "done";
+  format?: number; // 2: report.json has `units`, status has `share`
+  share?: [number, number, number];
   sha?: string;
   done?: number;
   total?: number;
@@ -2046,9 +3040,13 @@ interface Status {
 }
 
 let statusFile = "";
+let statusShare: Status["share"];
 async function setStatus(s: Status) {
   if (!statusFile) return;
-  await Deno.writeTextFile(`${statusFile}.tmp`, JSON.stringify(s));
+  await Deno.writeTextFile(
+    `${statusFile}.tmp`,
+    JSON.stringify({ format: 2, share: statusShare, ...s }),
+  );
   await Deno.rename(`${statusFile}.tmp`, statusFile);
 }
 
@@ -2063,6 +3061,7 @@ function report(
   results: TaskResult[],
   runDir: string,
   header: string[],
+  units: UnitRecord[],
 ): { flakes: number; md: string } {
   const by = new Map<
     string,
@@ -2158,6 +3157,7 @@ function report(
     `${runDir}/report.json`,
     JSON.stringify(
       {
+        format: 2,
         flakes: [...by.values()].map((e) => ({
           test: e.f.key,
           failedReps: e.reps.size,
@@ -2175,6 +3175,7 @@ function report(
           seconds: r.seconds,
           failures: r.failures.length,
         })),
+        units,
       },
       null,
       2,
@@ -2208,9 +3209,40 @@ async function main() {
   }
   const { sha, p } = await prepareCheckout(o, runId);
   statusFile = `${p.runDir}/status.json`;
+  statusShare = o.share;
   await setStatus({ state: "building", sha });
   if (o.marker) await removeMarker(sha);
   log(`candidate ${sha} (${o.mode} mode), run ${runId}, logs in ${p.runDir}`);
+
+  // the run to carry clean results from: merged by --host, else this
+  // host's own runs
+  let carry: CarrySource | undefined;
+  if (o.carryFile) {
+    carry = JSON.parse(await Deno.readTextFile(o.carryFile));
+  } else if (!o.runId && o.carry !== "none") {
+    carry = await findCarrySource(
+      o.carry,
+      sha,
+      runId,
+      ["local"],
+      shq(`${o.workDir}/runs`),
+      (_h, script) => run(["bash", "-c", script], { allowFail: true }),
+      async (old) =>
+        (await run(
+          ["git", "-C", p.mirror, "merge-base", "--is-ancestor", old, sha],
+          { allowFail: true },
+        )).code === 0,
+    );
+    if (carry?.qualifies && !o.modeSet && o.suites.length === 0) {
+      o.mode = carry.mode as Options["mode"];
+      o.suites = carry.requestedSuites;
+      log(
+        `adopting ${carry.runId}'s selection: --mode ${o.mode}${
+          o.suites.length ? ` --suite ${o.suites.join(",")}` : ""
+        }`,
+      );
+    }
+  }
 
   const steps = parseWorkflow(p.src);
   const libsCrates = new Set(
@@ -2350,16 +3382,6 @@ async function main() {
       !(whole.has(s.suite) && (s.filter || s.crates) && s.reps <= o.reps)
     );
   }
-  // this host's share of the repetitions (--host a:w,b:w hands each host a
-  // slice of every selection's repetitions)
-  if (o.share) {
-    const [lo, hi, total] = o.share;
-    for (const s of sels) {
-      s.reps = Math.floor(s.reps * hi / total) -
-        Math.floor(s.reps * lo / total);
-    }
-    sels = sels.filter((s) => s.reps > 0);
-  }
   // the perFile suites' test files, from the harness's own --list
   const lists: Record<string, string[]> = {};
   for (const s of sels) {
@@ -2386,30 +3408,19 @@ async function main() {
       `${s.suite}: ${lists[s.suite].length} test file(s), each run on its own`,
     );
   }
-  const tasks = buildTasks(sels, steps, exes, {
+  const unitOpts: UnitOptions = {
     testParallelism: ex.kind === "docker"
       ? (ex as DockerExecutor).prof.testParallelism
       : undefined,
-    chunk: o.chunk,
     shards: o.shards,
     lists,
-    // the host itself cannot be capped: native mode runs the gate's profile
-    profiles: ex.kind === "docker"
-      ? o.profiles
-      : o.profiles.filter((pr) => !pr.cpus && !pr.hog),
-    constrainedReps: o.share
-      ? Math.floor(o.constrainedReps * o.share[1] / o.share[2]) -
-        Math.floor(o.constrainedReps * o.share[0] / o.share[2])
-      : o.constrainedReps,
-  });
+  };
+  // the units the selection names, all their repetitions (every host's)
+  let units = buildUnits(sels, steps, exes, unitOpts);
   const ranSuites = [
     ...new Set(sels.filter((s) => !s.filter && !s.crates).map((s) => s.suite)),
   ];
-  log(
-    `plan: ${tasks.length} run(s) on ${ex.slots} worker(s); profiles ${
-      [...new Set(tasks.map((t) => t.profile.name))].join(", ")
-    } (constrained ones x${o.constrainedReps} in all hosts)`,
-  );
+  log(`${units.length} unit(s) selected`);
   for (const s of sels) {
     log(
       `  ${s.suite}${s.crates ? ` [${s.crates.join(",")}]` : ""}${
@@ -2417,6 +3428,89 @@ async function main() {
       } x${s.reps}  (${s.why})`,
     );
   }
+  // carry-forward: the units an earlier run vetted and the diff since cannot
+  // affect are not run again (README, "Carry-forward")
+  let carried: UnitRecord[] = [];
+  if (carry) {
+    const graph = crateGraph(meta, hostRoot);
+    const impacts = new Map<string, Impact>();
+    const shas = new Set([
+      carry.sha,
+      ...carry.units.flatMap((u) => u.source ? [u.source.sha] : []),
+    ]);
+    for (const from of shas) {
+      const d = await diffImpact(p.mirror, from, sha, hostRoot, graph);
+      impacts.set(from, d.impact);
+      log(
+        `carry: ${d.files} file(s) changed since ${
+          from.slice(0, 12)
+        } (${d.formatting} formatting only)${
+          d.impact.all
+            ? "; a shared input changed: nothing carries"
+            : d.impact.harness
+            ? "; the harness suites' binaries changed"
+            : ""
+        }`,
+      );
+    }
+    const plan = carryPlan(units, carry, (x) => impacts.get(x)!, graph, {
+      flakyReps: o.flakyReps,
+      constrainedReps: o.constrainedReps,
+      profiles: o.profiles.map((pr) => pr.name),
+    });
+    for (const n of plan.notes) log(`carry: ${n}`);
+    carried = plan.carried;
+    const extra = buildUnits(plan.extra, steps, exes, unitOpts);
+    const byLabel = new Map<string, Unit>();
+    for (const u of [...plan.run, ...extra]) {
+      const x = byLabel.get(u.label);
+      if (!x || u.reps > x.reps) byLabel.set(u.label, u);
+    }
+    units = [...byLabel.values()];
+    log(
+      `carry: ${carried.length} unit(s) carried from ${carry.runId}${
+        carried.some((c) => c.pending)
+          ? ` (${
+            carried.filter((c) => c.pending).length
+          } with flaky tests rerun on their own)`
+          : ""
+      }; ${plan.run.length} still to run, plus ${extra.length} flaky or touched test(s) on their own`,
+    );
+    for (const s of plan.extra) {
+      log(
+        `  ${s.suite}${s.crates ? ` [${s.crates.join(",")}]` : ""}${
+          s.filter ? ` ~ ${s.filter}` : ""
+        } x${s.reps}  (${s.why})`,
+      );
+    }
+  }
+  // this host's share of the repetitions (--host a:w,b:w hands each host a
+  // slice of every unit's repetitions)
+  if (o.share) {
+    const [lo, hi, total] = o.share;
+    units = units.map((u) => ({
+      ...u,
+      reps: Math.floor(u.reps * hi / total) - Math.floor(u.reps * lo / total),
+    })).filter((u) => u.reps > 0);
+  }
+  const hostConstrainedReps = o.share
+    ? Math.floor(o.constrainedReps * o.share[1] / o.share[2]) -
+      Math.floor(o.constrainedReps * o.share[0] / o.share[2])
+    : o.constrainedReps;
+  // the host itself cannot be capped: native mode runs the gate's profile
+  const hostProfiles = ex.kind === "docker"
+    ? o.profiles
+    : o.profiles.filter((pr) => !pr.cpus && !pr.hog);
+  const tasks = tasksFromUnits(units, {
+    chunk: o.chunk,
+    profiles: hostProfiles,
+    constrainedReps: hostConstrainedReps,
+  });
+  log(
+    `plan: ${tasks.length} run(s) on ${ex.slots} worker(s); profiles ${
+      [...new Set(tasks.map((t) => t.profile.name))].join(", ")
+    } (constrained ones x${o.constrainedReps} in all hosts)`,
+  );
   if (o.plan) {
     await setStatus({ state: "done", sha, exit: 0, qualifies: false });
     return;
@@ -2542,7 +3636,21 @@ async function main() {
       fmtDur((finished.getTime() - t0) / 1000)
     } (run phase), started ${started.toISOString()}`,
   ];
-  const { flakes, md } = report(results, p.runDir, header);
+  if (carried.length) {
+    header.push(
+      `- ${carried.length} unit(s) carried from earlier runs (${
+        [...new Set(carried.map((c) => c.source!.runId))].join(", ")
+      }), not run here`,
+    );
+  }
+  const records = unitRecords(
+    units,
+    results,
+    carried,
+    hostProfiles.some((pr) => pr.cpus || pr.hog) ? hostConstrainedReps : 0,
+    o.flakyReps,
+  );
+  const { flakes, md } = report(results, p.runDir, header, records);
   console.log("\n" + md.split("\n## ")[0]);
   console.log(`full report: ${p.runDir}/report.md`);
 
@@ -2563,6 +3671,18 @@ async function main() {
     started: started.toISOString(),
     finished: finished.toISOString(),
     runId,
+    requestedSuites: o.suites,
+    ...(carried.length
+      ? {
+        carry: {
+          from: [...new Set(carried.map((c) => c.source!.runId))],
+          ran: units.length,
+          units: Object.fromEntries(
+            carried.map((c) => [c.label, c.source!]),
+          ),
+        },
+      }
+      : {}),
   };
   if (exit === 0 && qualifies && o.marker) {
     await writeMarker(marker);

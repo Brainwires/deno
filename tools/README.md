@@ -167,11 +167,66 @@ the crate). It always adds the known-flaky list (`KNOWN_FLAKY` in the script:
 tests that flaked in a gate before) at `--flaky-reps` (default 30). `--suite`
 adds whole suites; `--mode full` runs every suite in full.
 
+**Carry-forward.** A re-hunt never retests what an earlier hunt vetted. By
+default (`--carry auto`) a run carries from the newest finished run (every host
+done, exit 0 or 1, every host's share present) whose candidate is an ancestor of
+the new one; `--carry <run-id>` names it, `--no-carry` runs everything. With
+`--host`, the machine that starts the hunt finds that run on the hosts (and in
+its own `~/flake-hunt/runs`), merges their results and hands each host
+`runs/<id>/carry.json`. When the earlier run qualified for the marker and no
+`--mode` or `--suite` is given, its selection is adopted, so re-running the bare
+command after a fix keeps the marker's coverage. Each host then builds the
+selection as usual and drops every unit (a lib test binary, a test file of
+`unit` / `unit_node`, a shard, a filtered run; `units` in `report.json`) that:
+
+- ran in the earlier run (or was carried by it) with at least as many
+  repetitions, and the earlier run had the same profiles and at least the same
+  `--constrained-reps`;
+- finished with no failure, or with failures that all name a test (`failed`,
+  `retried`): those tests then run on their own at `--flaky-reps` and the rest
+  of the unit carries. A crash, a timeout or a dirty tree reruns the whole unit;
+- is not affected by the diff from the commit its result came from (a result
+  carried twice keeps its first commit) to the candidate.
+
+The diff rule, per changed file (`classifyFile` / `unitAffected` in the script):
+
+- **Nothing**: Markdown at the top level, `doc/`, `.github/` Markdown and issue
+  templates, workflows other than `denext_tests*.yml`, `tools/*.md`, the hunt
+  itself and the lint / format scripts, `.dprint.json`, `.gitignore`. A change
+  that is formatting only (whitespace between tokens and trailing commas outside
+  string literals, in Rust, JS/TS and JSON outside `tests/` and `testdata/`:
+  what rustfmt and dprint change) counts as no change. Markdown a crate holds
+  counts as the crate's (a `build.rs` reads one).
+- **One test**: `tests/unit/<x>_test.ts` (and its snapshot) the units of
+  `unit::<x>_test`; a `tests/unit_node/` test file its file; a `tests/specs/`
+  file inside a spec directory that spec; `tests/integration/<x>_tests.rs` that
+  module. A unit filtered to other tests keeps its result; a carried shard keeps
+  its other tests' results and the touched test runs on its own.
+- **One suite**: any other file under `tests/unit/`, `tests/unit_node/`,
+  `tests/specs/`, `tests/integration/`, and anything under `tests/node_compat/`.
+- **A crate and everything built from it**: a file inside a workspace crate
+  (Rust, JS, `Cargo.toml`, `build.rs`, fixtures). The crate and every crate that
+  depends on it (any kind of dependency, from `cargo metadata`) lose their lib
+  test results; when one of them is something the harness suites run or are
+  built from (`deno`, `denort`, `test_server`, the crates under `tests/` and all
+  they depend on), every harness unit loses its result too. In practice a change
+  under `libs/`, `ext/`, `runtime/` or `cli/` reruns every harness suite and the
+  lib tests of the crates above it, while the lib tests of unrelated crates
+  carry.
+- **Everything**: `Cargo.lock`, the root `Cargo.toml`, `rust-toolchain.toml`,
+  `denext_tests_os.yml` (the test arguments), the rest of `.github/` (the
+  prebuilt V8 pin), shared test inputs (`tests/testdata/`, `tests/util/`,
+  `tests/registry/`, …) and any path in no crate.
+
 **The release marker.** A clean run that is full, or fast with at least
 `--suite libs,unit`, writes `~/.denext-runners/flake-hunt/<full sha>.ok` on the
 machine that started it (with `--host biscuits`: the Mac mini), a JSON record of
 the mode, suites, repetitions, hosts and times. A run removes that commit's old
-marker when it starts and writes nothing when it finds a flake. On the mini a
-hook refuses to dispatch the `denext tests` workflow unless the marker of the
-exact commit the ref points at exists (`denext-internal`
-`ops/release/gate-guard-hook.py`).
+marker when it starts and writes nothing when it finds a flake. A run that
+carried writes the marker for its own candidate when its own part is clean; the
+record then also holds `carry`: `from` (the runs results came from), `ran` (the
+units run here) and `units` (each carried unit's label with the `runId` and
+`sha` its result came from), so every unit behind the marker names the run that
+vetted it. On the mini a hook refuses to dispatch the `denext tests` workflow
+unless the marker of the exact commit the ref points at exists
+(`denext-internal` `ops/release/gate-guard-hook.py`).
