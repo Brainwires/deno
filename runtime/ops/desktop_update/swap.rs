@@ -2581,6 +2581,11 @@ pub fn wait_for_processes_in(dir: &Path, timeout: Duration) -> bool {
 /// app) the read end. A process running `dir` itself that holds a pipe this
 /// process holds is that server, and is left out. Another launch's mount
 /// still counts.
+///
+/// A detached sidecar the app let go running across the update is left out
+/// too (DENEXT.md item 486, see [`DETACHED_SIDECAR_MARKER`]): it outlives
+/// the app by design, so waiting for it only held the swap for the whole
+/// timeout.
 #[cfg(target_os = "linux")]
 pub fn wait_for_processes_in(dir: &Path, timeout: Duration) -> bool {
   let deadline = Instant::now() + timeout;
@@ -2600,7 +2605,7 @@ pub fn wait_for_processes_in(dir: &Path, timeout: Duration) -> bool {
 
 /// Linux: the pipes (their inode numbers) a process (`/proc/<pid>` or
 /// `/proc/self`) has open; empty where its descriptors can't be read.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 fn linux_pipes_of(
   proc_dir: impl AsRef<Path>,
 ) -> std::collections::HashSet<u64> {
@@ -2629,18 +2634,30 @@ fn linux_pipes_of(
 /// threads and zombies have neither. A process running `dir` itself (an
 /// AppImage file) that holds one of `own_pipes` (the FUSE server of the
 /// mount this process runs from, see [`wait_for_processes_in`]) is left
-/// out.
+/// out, and so is a detached sidecar let go across the update
+/// ([`linux_is_detached_sidecar`]).
 #[cfg(target_os = "linux")]
 fn linux_processes_in(
   dir: &Path,
   own_pipes: &std::collections::HashSet<u64>,
 ) -> Vec<u32> {
+  linux_processes_in_at(Path::new("/proc"), std::process::id(), dir, own_pipes)
+}
+
+/// [`linux_processes_in`] over the process directories in `proc_root`
+/// (`/proc`; a stand-in tree in the tests), leaving out `me`.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn linux_processes_in_at(
+  proc_root: &Path,
+  me: u32,
+  dir: &Path,
+  own_pipes: &std::collections::HashSet<u64>,
+) -> Vec<u32> {
   use std::os::unix::ffi::OsStrExt;
   use std::os::unix::fs::MetadataExt;
-  let me = std::process::id();
   // SAFETY: geteuid has no preconditions.
   let uid = unsafe { libc::geteuid() };
-  let Ok(entries) = std::fs::read_dir("/proc") else {
+  let Ok(entries) = std::fs::read_dir(proc_root) else {
     return Vec::new();
   };
   let mut out = Vec::new();
@@ -2689,9 +2706,49 @@ fn linux_processes_in(
     {
       continue;
     }
+    if linux_is_detached_sidecar(&proc_dir) {
+      continue;
+    }
     out.push(pid);
   }
   out
+}
+
+/// denext (DENEXT.md item 486): the variable denext's detached sidecar
+/// launcher (`spawnDetachedProcess` in denext's
+/// `src/desktop/sidecar-launch.ts`, `SIDECAR_DETACHED_ENV` in
+/// `src/desktop/sidecar.ts`) starts a detached sidecar with, as one
+/// `NAME=value` entry of its environment. Only that launcher sets it, on the
+/// detached sidecar itself (the sidecar takes it out of its own environment
+/// at start, so a child it starts does not inherit it). Before an update the
+/// app stops every detached sidecar but the ones that survive updates
+/// (`detached.keepAcrossUpdates` or a `detached.version`), which it lets go
+/// running, so one still running when the helper looks is one of those.
+#[cfg(any(target_os = "linux", test))]
+const DETACHED_SIDECAR_MARKER: &[u8] = b"DENEXT_SIDECAR_DETACHED=1";
+
+/// Whether `environ` (`/proc/<pid>/environ`: `NAME=value` entries, each
+/// ended by a NUL) holds [`DETACHED_SIDECAR_MARKER`] as a whole entry.
+#[cfg(any(target_os = "linux", test))]
+fn environ_marks_detached_sidecar(environ: &[u8]) -> bool {
+  environ
+    .split(|b| *b == 0)
+    .any(|entry| entry == DETACHED_SIDECAR_MARKER)
+}
+
+/// Linux: whether the process `proc_dir` (`/proc/<pid>`) is a detached
+/// sidecar ([`DETACHED_SIDECAR_MARKER`] in the environment it was started
+/// with). `/proc/<pid>/environ` is the block `execve` was given, so the
+/// sidecar taking the variable out of its environment later does not change
+/// it. It is readable only for this user's dumpable processes: one it can't
+/// be read for is not taken for a sidecar and is waited for, as before. Not
+/// a trust decision: any process of this user can carry the marker (or
+/// rewrite that block), and all it gains is not being waited for; on Linux
+/// the swap renames the install whether or not a process runs from it.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn linux_is_detached_sidecar(proc_dir: &Path) -> bool {
+  std::fs::read(proc_dir.join("environ"))
+    .is_ok_and(|environ| environ_marks_detached_sidecar(&environ))
 }
 
 /// A path as a case-insensitive comparison key: `\\?\` stripped, `/` as
@@ -3114,6 +3171,121 @@ mod tests {
     assert!(!wait_for_processes_in(&dir, Duration::from_millis(300)));
     assert!(wait_for_processes_in(&dir, Duration::from_secs(30)));
     child.wait().unwrap();
+  }
+
+  /// DENEXT.md item 486: the marker is one whole `NAME=value` entry of the
+  /// NUL-separated block, with exactly the value `1`.
+  #[test]
+  fn the_detached_sidecar_marker_is_a_whole_environ_entry() {
+    assert!(environ_marks_detached_sidecar(
+      b"DENEXT_SIDECAR_DETACHED=1\0"
+    ));
+    assert!(environ_marks_detached_sidecar(
+      b"HOME=/home/u\0DENEXT_SIDECAR_DETACHED=1\0PATH=/usr/bin\0"
+    ));
+    // No trailing NUL (a block cut short) still names it.
+    assert!(environ_marks_detached_sidecar(
+      b"A=b\0DENEXT_SIDECAR_DETACHED=1"
+    ));
+    for not_marked in [
+      &b""[..],
+      b"\0",
+      b"HOME=/home/u\0",
+      b"DENEXT_SIDECAR_DETACHED=0\0",
+      b"DENEXT_SIDECAR_DETACHED=\0",
+      b"DENEXT_SIDECAR_DETACHED=11\0",
+      b"DENEXT_SIDECAR_DETACHED=1 \0",
+      b"XDENEXT_SIDECAR_DETACHED=1\0",
+      b"DENEXT_SIDECAR_CHILD=srv\0",
+      b"FOO=DENEXT_SIDECAR_DETACHED=1\0",
+    ] {
+      assert!(
+        !environ_marks_detached_sidecar(not_marked),
+        "{}",
+        String::from_utf8_lossy(not_marked)
+      );
+    }
+  }
+
+  /// DENEXT.md item 486: the Linux scan over a stand-in `/proc`: a process
+  /// running from the install with the marker in its environment is left
+  /// out; one without it (or with another value), or whose environment
+  /// can't be read, still counts; one running from elsewhere never does,
+  /// marker or not; and neither does this process.
+  #[cfg(unix)]
+  #[test]
+  fn the_install_scan_leaves_out_detached_sidecars() {
+    let tmp = tempfile::tempdir().unwrap();
+    let install = tmp.path().join("App");
+    std::fs::create_dir_all(install.join("bin")).unwrap();
+    let app = install.join("bin").join("app");
+    std::fs::write(&app, b"").unwrap();
+    let elsewhere = tmp.path().join("other");
+    std::fs::write(&elsewhere, b"").unwrap();
+    let proc_root = tmp.path().join("proc");
+    let marked: &[u8] = b"HOME=/h\0DENEXT_SIDECAR_DETACHED=1\0";
+    let fake = |pid: u32, exe: &Path, environ: Option<&[u8]>| {
+      let dir = proc_root.join(pid.to_string());
+      std::fs::create_dir_all(&dir).unwrap();
+      std::os::unix::fs::symlink(exe, dir.join("exe")).unwrap();
+      if let Some(environ) = environ {
+        std::fs::write(dir.join("environ"), environ).unwrap();
+      }
+    };
+    // The surviving sidecar: left out.
+    fake(100, &app, Some(marked));
+    // The app's other processes: counted.
+    fake(101, &app, Some(b"HOME=/h\0"));
+    fake(102, &app, Some(b"DENEXT_SIDECAR_DETACHED=0\0"));
+    fake(103, &app, None);
+    // A sidecar whose executable was replaced still is one.
+    let deleted = PathBuf::from(format!("{} (deleted)", app.display()));
+    fake(104, &deleted, Some(marked));
+    // Elsewhere: never counted.
+    fake(105, &elsewhere, Some(marked));
+    fake(106, &elsewhere, Some(b""));
+    // This process: never counted.
+    fake(107, &app, Some(b""));
+    // Not a process directory.
+    std::fs::create_dir_all(proc_root.join("self")).unwrap();
+    let mut found =
+      linux_processes_in_at(&proc_root, 107, &install, &Default::default());
+    found.sort_unstable();
+    assert_eq!(found, vec![101, 102, 103]);
+    assert!(linux_is_detached_sidecar(&proc_root.join("100")));
+    assert!(!linux_is_detached_sidecar(&proc_root.join("101")));
+    assert!(!linux_is_detached_sidecar(&proc_root.join("103")));
+  }
+
+  /// DENEXT.md item 486, on the real `/proc`: a process started from the
+  /// install with `DENEXT_SIDECAR_DETACHED=1` (as denext's detached launcher
+  /// starts one) does not hold the helper's wait; the same program started
+  /// without it does.
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn a_detached_sidecar_does_not_hold_the_wait_linux() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("App");
+    std::fs::create_dir(&dir).unwrap();
+    let sleep = dir.join("sleep");
+    std::fs::copy(which_sleep(), &sleep).unwrap();
+    let mut sidecar = std::process::Command::new(&sleep)
+      .arg("30")
+      .env("DENEXT_SIDECAR_DETACHED", "1")
+      .spawn()
+      .unwrap();
+    let started = Instant::now();
+    assert!(wait_for_processes_in(&dir, Duration::from_secs(10)));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let mut plain = std::process::Command::new(&sleep)
+      .arg("30")
+      .spawn()
+      .unwrap();
+    assert!(!wait_for_processes_in(&dir, Duration::from_millis(300)));
+    plain.kill().unwrap();
+    plain.wait().unwrap();
+    sidecar.kill().unwrap();
+    sidecar.wait().unwrap();
   }
 
   /// The helper's own AppImage mount, as the type-2 runtime leaves it: a

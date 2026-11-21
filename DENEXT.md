@@ -19488,6 +19488,71 @@ where the changes are discussed.
        `dropping_the_job_kills_the_child` also checks the breakaway limit.
      - Node tests enabled: none (`node:child_process`'s `detached` runs on
        the same spawn, but no node_compat test checks job membership).
+486. **`feat(desktop)`: desktop path tokens in `unix:` net grants; the update
+     helper doesn't wait for surviving detached sidecars** (runtime;
+     `cli/rt/run.rs`, `runtime/ops/desktop_update/swap.rs`).
+     - A desktop app's baked `--allow-net` / `--allow-net-connect` /
+       `--allow-net-listen` value (and the matching `--deny-*`) of the form
+       `unix:$DENO_DESKTOP_DATA/...` or `unix:$DENO_DESKTOP_CACHE/...` names
+       a Unix socket in the app's data or cache folder: at launch the runtime
+       takes off `unix:`, expands the rest exactly as items 190 and 191 expand
+       a read / write / run value (`expand_desktop_path_entry`: no folder, a
+       `..` component, or the token followed by anything but a separator
+       can't be expanded) and puts `unix:` back. The same rules as there: an
+       allow entry that can't be expanded is dropped, never widened, and a
+       list left empty becomes no grant (`None`, never `Some(vec![])`, which
+       allows everything); a deny entry that can't be expanded stays as it
+       was. A net value without `unix:`, or with the token anywhere but right
+       after it, is left alone. This lets denext bake a scoped grant for a
+       sidecar's or the app's own control socket instead of an unscoped
+       `--allow-net`.
+     - denext gates on it by runtime version, as it does the data and cache
+       tokens (`supportsDesktopDataToken`): this is the first runtime that
+       expands the tokens in `unix:` net values. An older runtime reads
+       `unix:$DENO_DESKTOP_DATA/x.sock` as a relative socket path, which the
+       net descriptor parser refuses.
+     - The full-app update helper's wait for processes running from the
+       install (Linux; `wait_for_processes_in`, up to 60 s) leaves out a
+       detached sidecar the app let go running across the update: a process
+       whose `/proc/<pid>/environ` holds the whole entry
+       `DENEXT_SIDECAR_DETACHED=1`, which only denext's detached sidecar
+       launcher sets (on the sidecar itself; the sidecar removes it from its
+       own environment at start, so its children don't inherit it, while
+       `/proc/<pid>/environ`, the block `execve` was given, keeps it). The app
+       stops every other detached sidecar before it starts the helper, so one
+       still running is one with `detached.keepAcrossUpdates` or a
+       `detached.version`. It outlives the app by design, and waiting for it
+       only held every such update for the whole 60 s. A process whose
+       environment can't be read (another user's, a non-dumpable one) is
+       waited for, as before. Not a trust decision: any process of the user
+       could carry the marker, and all it gains is not being waited for; on
+       Linux the swap renames the install whether or not something runs from
+       it. The scan takes its `/proc` root as an argument so the tests run it
+       over a stand-in tree.
+     - Why the environment and not a list of pids in the update state: no
+       such list exists (denext's `installAppUpdateAndRelaunch` passes only
+       `force`), the state file is as writable by the user's processes as a
+       process's own environment, and the marker also covers an instance the
+       app didn't start in this run (a launch of another installed version, a
+       reattached one) without the app reading pids it never authenticated.
+     - macOS: the helper never waits for processes running from the install
+       (an app bundle is swapped by `renamex_np` whatever runs from it), so a
+       surviving sidecar needs nothing there. Windows: unchanged. A running
+       process locks its executable's folder, so a sidecar running from the
+       install would make the swap fail; denext stops every detached sidecar
+       before a Windows update (its docs say so). Letting one survive needs it
+       to run from a per-version copy outside the install, not done here.
+     - User-facing note: on Linux an update with a surviving detached sidecar
+       swaps as soon as the app's own processes have left, instead of after
+       60 s.
+     - Tests: `denort`'s `desktop_path_tokens_expand_in_unix_socket_net_grants`,
+       `desktop_unix_socket_net_tokens_never_widen_a_grant`,
+       `desktop_path_tokens_expand_in_unix_socket_net_denials`;
+       `deno_runtime`'s `the_detached_sidecar_marker_is_a_whole_environ_entry`,
+       `the_install_scan_leaves_out_detached_sidecars` (a stand-in `/proc`,
+       every Unix host) and `a_detached_sidecar_does_not_hold_the_wait_linux`
+       (the real `/proc`).
+     - Node tests enabled: none.
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -19498,7 +19563,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-479, 484) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-479, 484, 486) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

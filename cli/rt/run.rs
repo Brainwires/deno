@@ -2620,6 +2620,35 @@ fn has_desktop_path_token(entry: &str) -> bool {
     || entry.starts_with(DESKTOP_DATA_TOKEN)
 }
 
+/// What a `--allow-net` / `--allow-net-connect` / `--allow-net-listen` (or
+/// deny) value naming a Unix socket starts with.
+const UNIX_SOCKET_NET_PREFIX: &str = "unix:";
+
+/// denext (DENEXT.md item 486): `entry` of a net grant or denial with a
+/// desktop path token after `unix:` expanded as [`expand_desktop_path_entry`]
+/// does (`unix:$DENO_DESKTOP_DATA/ipc.sock` names the socket in the app's
+/// data folder): `Some(entry)` unchanged when it is not a `unix:` value with
+/// a token, `None` when its token cannot be expanded.
+fn expand_desktop_net_entry(
+  entry: &str,
+  dirs: &DesktopTokenDirs,
+) -> Option<String> {
+  match entry.strip_prefix(UNIX_SOCKET_NET_PREFIX) {
+    Some(path) if has_desktop_path_token(path) => {
+      expand_desktop_path_entry(path, dirs)
+        .map(|path| format!("{UNIX_SOCKET_NET_PREFIX}{path}"))
+    }
+    _ => Some(entry.to_string()),
+  }
+}
+
+/// Whether `entry` is a net value with a desktop path token after `unix:`.
+fn has_desktop_net_token(entry: &str) -> bool {
+  entry
+    .strip_prefix(UNIX_SOCKET_NET_PREFIX)
+    .is_some_and(has_desktop_path_token)
+}
+
 /// The folder of the entrypoint in the embedded file system: what a program
 /// sidecar's project-relative path is relative to (its `new URL(exec, base)`).
 fn entrypoint_dir(root: &std::path::Path, entrypoint_key: &str) -> PathBuf {
@@ -2753,47 +2782,57 @@ fn register_desktop_embedded_programs(
   deno_runtime::deno_process::set_embedded_programs(programs);
 }
 
-/// denext (DENEXT.md items 190, 191): expands the desktop path tokens
+/// denext (DENEXT.md items 190, 191, 486): expands the desktop path tokens
 /// ([`DESKTOP_CACHE_TOKEN`], [`DESKTOP_DATA_TOKEN`]) in the read, write and
-/// run grants and denials of a desktop app. An allow entry that cannot be
-/// expanded is dropped (never widened): a list left empty becomes no grant
-/// at all, not `Some(vec![])`, which would allow everything. A deny entry
-/// that cannot be expanded stays as it is (a relative path that names
-/// nothing the app uses).
+/// run grants and denials of a desktop app, and after `unix:` in its net,
+/// net-connect and net-listen grants and denials (a Unix socket in the app's
+/// own folder). An allow entry that cannot be expanded is dropped (never
+/// widened): a list left empty becomes no grant at all, not `Some(vec![])`,
+/// which would allow everything. A deny entry that cannot be expanded stays
+/// as it is (a relative path that names nothing the app uses).
 pub(crate) fn expand_desktop_path_tokens(
   permissions: &mut deno_runtime::deno_permissions::PermissionsOptions,
   dirs: &DesktopTokenDirs,
 ) {
-  for slot in [
-    &mut permissions.allow_read,
-    &mut permissions.allow_write,
-    &mut permissions.allow_run,
+  let path = (
+    has_desktop_path_token as fn(&str) -> bool,
+    expand_desktop_path_entry as fn(&str, &DesktopTokenDirs) -> Option<String>,
+  );
+  let net = (
+    has_desktop_net_token as fn(&str) -> bool,
+    expand_desktop_net_entry as fn(&str, &DesktopTokenDirs) -> Option<String>,
+  );
+  for (slot, (has_token, expand)) in [
+    (&mut permissions.allow_read, path),
+    (&mut permissions.allow_write, path),
+    (&mut permissions.allow_run, path),
+    (&mut permissions.allow_net, net),
+    (&mut permissions.allow_net_connect, net),
+    (&mut permissions.allow_net_listen, net),
   ] {
     let Some(entries) = slot else { continue };
-    if entries.is_empty() || !entries.iter().any(|e| has_desktop_path_token(e))
-    {
+    if entries.is_empty() || !entries.iter().any(|e| has_token(e)) {
       continue;
     }
-    let expanded: Vec<String> = entries
-      .iter()
-      .filter_map(|e| expand_desktop_path_entry(e, dirs))
-      .collect();
+    let expanded: Vec<String> =
+      entries.iter().filter_map(|e| expand(e, dirs)).collect();
     *slot = if expanded.is_empty() {
       None
     } else {
       Some(expanded)
     };
   }
-  for entries in [
-    &mut permissions.deny_read,
-    &mut permissions.deny_write,
-    &mut permissions.deny_run,
-  ]
-  .into_iter()
-  .flatten()
-  {
+  for (slot, expand) in [
+    (&mut permissions.deny_read, path.1),
+    (&mut permissions.deny_write, path.1),
+    (&mut permissions.deny_run, path.1),
+    (&mut permissions.deny_net, net.1),
+    (&mut permissions.deny_net_connect, net.1),
+    (&mut permissions.deny_net_listen, net.1),
+  ] {
+    let Some(entries) = slot else { continue };
     for entry in entries.iter_mut() {
-      if let Some(expanded) = expand_desktop_path_entry(entry, dirs) {
+      if let Some(expanded) = expand(entry, dirs) {
         *entry = expanded;
       }
     }
@@ -3327,6 +3366,151 @@ mod tests {
         "{raw}"
       );
     }
+  }
+
+  // --- unix: sockets in the app's folders (DENEXT.md item 486) ---
+
+  #[test]
+  fn desktop_path_tokens_expand_in_unix_socket_net_grants() {
+    use std::path::Path;
+    let data = Path::new("/home/u/.local/share/com.acme.notes");
+    let cache = Path::new("/home/u/.cache/com.acme.notes/denext");
+    let dirs = DesktopTokenDirs {
+      cache: Some(cache.to_path_buf()),
+      data: Some(data.to_path_buf()),
+    };
+    let unix = |p: &Path| format!("unix:{}", p.to_string_lossy());
+    let mut p = PermissionsOptions {
+      allow_net: Some(strs(&[
+        "unix:$DENO_DESKTOP_DATA/ipc.sock",
+        "127.0.0.1:8080",
+      ])),
+      allow_net_connect: Some(strs(&["unix:$DENO_DESKTOP_CACHE/s/a.sock"])),
+      allow_net_listen: Some(strs(&[
+        "unix:$DENO_DESKTOP_DATA\\run\\b.sock",
+        "unix:/run/app.sock",
+      ])),
+      ..Default::default()
+    };
+    expand_desktop_path_tokens(&mut p, &dirs);
+    assert_eq!(
+      p.allow_net,
+      Some(vec![unix(&data.join("ipc.sock")), "127.0.0.1:8080".into()])
+    );
+    assert_eq!(
+      p.allow_net_connect,
+      Some(vec![unix(&cache.join("s").join("a.sock"))])
+    );
+    assert_eq!(
+      p.allow_net_listen,
+      Some(vec![
+        unix(&data.join("run").join("b.sock")),
+        "unix:/run/app.sock".into()
+      ])
+    );
+
+    // A token that is not right after `unix:` is not one, and a net value
+    // with no `unix:` is never a path.
+    let mut p = PermissionsOptions {
+      allow_net: Some(strs(&[
+        "$DENO_DESKTOP_DATA/ipc.sock",
+        "unix:/x/$DENO_DESKTOP_DATA",
+      ])),
+      ..Default::default()
+    };
+    expand_desktop_path_tokens(&mut p, &dirs);
+    assert_eq!(
+      p.allow_net,
+      Some(strs(&[
+        "$DENO_DESKTOP_DATA/ipc.sock",
+        "unix:/x/$DENO_DESKTOP_DATA"
+      ]))
+    );
+  }
+
+  #[test]
+  fn desktop_unix_socket_net_tokens_never_widen_a_grant() {
+    use std::path::Path;
+    // No data folder: the entry is dropped; a list left empty is no grant
+    // (never `Some(vec![])`, allow-all); the rest of a list stays.
+    let dirs = DesktopTokenDirs {
+      cache: Some(Path::new("/c").to_path_buf()),
+      data: None,
+    };
+    let mut p = PermissionsOptions {
+      allow_net: Some(strs(&["unix:$DENO_DESKTOP_DATA/ipc.sock"])),
+      allow_net_connect: Some(strs(&[
+        "unix:$DENO_DESKTOP_DATA/a.sock",
+        "example.com:443",
+      ])),
+      allow_net_listen: Some(strs(&[
+        "unix:$DENO_DESKTOP_CACHE/../../etc/x.sock",
+        "unix:$DENO_DESKTOP_CACHEX/y.sock",
+        "unix:$DENO_DESKTOP_CACHE",
+      ])),
+      ..Default::default()
+    };
+    expand_desktop_path_tokens(&mut p, &dirs);
+    assert_eq!(p.allow_net, None);
+    assert_eq!(p.allow_net_connect, Some(strs(&["example.com:443"])));
+    let c = std::path::Path::new("/c").to_string_lossy().into_owned();
+    assert_eq!(p.allow_net_listen, Some(vec![format!("unix:{c}")]));
+
+    // Every entry unexpandable: no grant at all.
+    let mut p = PermissionsOptions {
+      allow_net_listen: Some(strs(&[
+        "unix:$DENO_DESKTOP_DATA/a.sock",
+        "unix:$DENO_DESKTOP_CACHE/../b.sock",
+      ])),
+      ..Default::default()
+    };
+    expand_desktop_path_tokens(&mut p, &dirs);
+    assert_eq!(p.allow_net_listen, None);
+
+    // An empty list (allow-all) and an unset one are left as they are.
+    let mut p = PermissionsOptions {
+      allow_net: Some(vec![]),
+      allow_net_connect: None,
+      ..Default::default()
+    };
+    expand_desktop_path_tokens(&mut p, &dirs);
+    assert_eq!(p.allow_net, Some(vec![]));
+    assert_eq!(p.allow_net_connect, None);
+  }
+
+  #[test]
+  fn desktop_path_tokens_expand_in_unix_socket_net_denials() {
+    use std::path::Path;
+    let data = Path::new("/d");
+    let dirs = DesktopTokenDirs {
+      cache: None,
+      data: Some(data.to_path_buf()),
+    };
+    let unix = |p: &Path| format!("unix:{}", p.to_string_lossy());
+    let mut p = PermissionsOptions {
+      deny_net: Some(strs(&["unix:$DENO_DESKTOP_DATA/admin.sock", "a.com"])),
+      deny_net_connect: Some(strs(&["unix:$DENO_DESKTOP_DATA/c.sock"])),
+      // No cache folder: a denial stays as it was (it names nothing the
+      // app uses), never dropped.
+      deny_net_listen: Some(strs(&[
+        "unix:$DENO_DESKTOP_DATA/l.sock",
+        "unix:$DENO_DESKTOP_CACHE/x.sock",
+      ])),
+      ..Default::default()
+    };
+    expand_desktop_path_tokens(&mut p, &dirs);
+    assert_eq!(
+      p.deny_net,
+      Some(vec![unix(&data.join("admin.sock")), "a.com".into()])
+    );
+    assert_eq!(p.deny_net_connect, Some(vec![unix(&data.join("c.sock"))]));
+    assert_eq!(
+      p.deny_net_listen,
+      Some(vec![
+        unix(&data.join("l.sock")),
+        "unix:$DENO_DESKTOP_CACHE/x.sock".into()
+      ])
+    );
   }
 
   #[cfg(windows)]
