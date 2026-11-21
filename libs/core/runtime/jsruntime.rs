@@ -539,9 +539,8 @@ pub struct JsRuntimeState {
     Option<WaitForInspectorDisconnectCallback>,
   pub(crate) validate_import_attributes_cb: Option<ValidateImportAttributesCb>,
   pub(crate) custom_module_evaluation_cb: Option<CustomModuleEvaluationCb>,
-  pub(crate) vm_dynamic_import_callbacks:
-    RefCell<HashMap<u32, v8::Global<v8::Function>>>,
-  pub(crate) next_vm_dynamic_import_callback_id: Cell<u32>,
+  pub(crate) vm_dynamic_import_dispatcher:
+    RefCell<Option<v8::Global<v8::Function>>>,
   /// Hook invoked by `host_initialize_import_meta_object_callback` when V8
   /// asks to initialize `import.meta` for a module that is *not* tracked by
   /// the module map. This is the path `node:vm` `SourceTextModule` takes:
@@ -907,8 +906,7 @@ impl JsRuntime {
       op_state: op_state.clone(),
       validate_import_attributes_cb: options.validate_import_attributes_cb,
       custom_module_evaluation_cb: options.custom_module_evaluation_cb,
-      vm_dynamic_import_callbacks: Default::default(),
-      next_vm_dynamic_import_callback_id: Cell::new(1),
+      vm_dynamic_import_dispatcher: Default::default(),
       external_module_import_meta_cb: Cell::new(None),
       eval_context_get_code_cache_cb: RefCell::new(
         eval_context_get_code_cache_cb,

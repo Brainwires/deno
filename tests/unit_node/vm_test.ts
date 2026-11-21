@@ -1,5 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import * as v8 from "node:v8";
 import vm, {
   compileFunction,
   createContext,
@@ -465,4 +466,37 @@ Deno.test("vm contextified sandbox survives detached function after gc", async (
   });
   const { code, stderr } = await command.output();
   assertEquals(code, 0, new TextDecoder().decode(stderr));
+});
+
+// Regression test: every Script compiled with an `importModuleDynamically`
+// callback stayed alive for good (the runtime kept the callback, whose
+// closure holds the Script, in a table of strong references). The callback
+// now lives as long as the compiled code, as in Node.js. A heap snapshot,
+// which `queryObjects` takes, first collects all available garbage.
+Deno.test("vm Script with importModuleDynamically is collectable", async () => {
+  let finalized = 0;
+  const registry = new FinalizationRegistry(() => {
+    finalized++;
+  });
+  for (let i = 0; i < 1000; i++) {
+    registry.register(
+      new Script(`"${i}";`, { importModuleDynamically() {} } as never),
+      i,
+    );
+  }
+  assertEquals(v8.queryObjects(Script, { format: "count" }), 0);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assertEquals(finalized, 1000);
+});
+
+Deno.test("vm dynamic import callbacks still run after gc", async () => {
+  // the Script object is dropped at once; its code still calls import()
+  const fn = runInThisContext(
+    `() => import("some-specifier")`,
+    {
+      importModuleDynamically: (specifier: string) => ({ specifier }),
+    } as never,
+  ) as () => Promise<{ specifier: string }>;
+  v8.queryObjects(Script, { format: "count" });
+  assertEquals((await fn()).specifier, "some-specifier");
 });

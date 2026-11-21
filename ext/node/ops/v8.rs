@@ -406,101 +406,336 @@ pub fn op_v8_set_heap_snapshot_near_heap_limit(
   Ok(())
 }
 
-// Walks the V8 heap snapshot and counts nodes that look like instances of a
-// class whose constructor name matches `ctor_name`. Used by `util.queryObjects`
-// / `v8.queryObjects` to implement `{ format: 'count' }` without exposing
-// `HeapProfiler::QueryObjects` (which the rusty_v8 crate does not bind).
+// Counts the live JS objects whose prototype chain includes the object that
+// `marker[key]` holds (a constructor's `prototype`), as Node.js's
+// `v8.queryObjects(ctor, { format: 'count' })` does with V8's
+// `HeapProfiler::QueryObjects` (which the rusty_v8 crate does not bind):
+// instances of subclasses count, and so do the subclasses' prototypes.
 //
-// Limitation: matches by the immediate constructor name only, so instances of
-// subclasses of `ctor` won't be counted. This is sufficient for Node's leak
-// tests (which check direct instances of `Channel`, `SourceTextModule`, ...).
+// It takes a heap snapshot (which first collects all garbage, as
+// `QueryObjects` does) and reads only what it needs from the serialized
+// JSON: the meta, the node and edge arrays as integers, and the indices of
+// two strings, `__proto__` (the edge V8 writes from every JS object to its
+// prototype) and `key` (the marker's edge to the target prototype). Parsing
+// the whole snapshot into a `serde_json::Value` tree took seconds in a debug
+// build on every call.
 #[op2(nofast)]
 #[smi]
 pub fn op_v8_query_objects_count(
   scope: &mut v8::PinScope<'_, '_>,
-  #[string] ctor_name: &str,
+  marker: v8::Local<v8::Object>,
+  #[string] key: &str,
 ) -> u32 {
-  use deno_core::serde_json;
-  use deno_core::serde_json::Value;
-
   let mut buf = Vec::new();
   scope.take_heap_snapshot(|chunk| {
     buf.extend_from_slice(chunk);
     true
   });
-  if buf.is_empty() {
-    return 0;
+  // the marker (and with it the target prototype) is alive until here
+  let _ = marker;
+  heap_snapshot::count_prototype_chain_matches(&buf, key.as_bytes())
+    .unwrap_or(0)
+}
+
+mod heap_snapshot {
+  use deno_core::serde_json;
+  use deno_core::serde_json::Value;
+
+  /// Node types that are JS objects (what `QueryObjects` iterates).
+  const JS_OBJECT_TYPES: [&str; 4] = ["object", "closure", "array", "regexp"];
+  /// The longest prototype chain followed (V8 has no cycles, but a broken
+  /// snapshot must not loop).
+  const MAX_CHAIN: usize = 1 << 16;
+
+  struct Meta {
+    node_fields: usize,
+    node_type: usize,
+    node_edge_count: usize,
+    js_object_types: Vec<u64>,
+    edge_fields: usize,
+    edge_type: usize,
+    edge_name: usize,
+    edge_to: usize,
+    property_edge: u64,
   }
 
-  let snapshot: Value = match serde_json::from_slice(&buf) {
-    Ok(v) => v,
-    Err(_) => return 0,
-  };
-
-  let meta = match snapshot.get("snapshot").and_then(|s| s.get("meta")) {
-    Some(m) => m,
-    None => return 0,
-  };
-  let node_fields = match meta.get("node_fields").and_then(|f| f.as_array()) {
-    Some(a) => a,
-    None => return 0,
-  };
-  let node_field_count = node_fields.len();
-  if node_field_count == 0 {
-    return 0;
+  fn field_index(fields: &[Value], name: &str) -> Option<usize> {
+    fields.iter().position(|f| f == name)
   }
-  let type_field_index = node_fields.iter().position(|f| f == "type");
-  let name_field_index = node_fields.iter().position(|f| f == "name");
-  let (Some(type_field_index), Some(name_field_index)) =
-    (type_field_index, name_field_index)
-  else {
-    return 0;
-  };
 
-  // `node_types` is an array where the entry at `type_field_index` is the
-  // list of named type variants (the rest are scalars like "string"/"number").
-  let object_type_index = match meta
-    .get("node_types")
-    .and_then(|t| t.as_array())
-    .and_then(|t| t.get(type_field_index))
-    .and_then(|t| t.as_array())
-  {
-    Some(types) => match types.iter().position(|t| t == "object") {
-      Some(i) => i as u64,
-      None => return 0,
-    },
-    None => return 0,
-  };
+  fn parse_meta(meta: &Value) -> Option<Meta> {
+    let node_fields = meta.get("node_fields")?.as_array()?;
+    let edge_fields = meta.get("edge_fields")?.as_array()?;
+    let node_type = field_index(node_fields, "type")?;
+    let edge_type = field_index(edge_fields, "type")?;
+    let node_types = meta.get("node_types")?.get(node_type)?.as_array()?;
+    let edge_types = meta.get("edge_types")?.get(edge_type)?.as_array()?;
+    Some(Meta {
+      node_fields: node_fields.len(),
+      node_type,
+      node_edge_count: field_index(node_fields, "edge_count")?,
+      js_object_types: node_types
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| JS_OBJECT_TYPES.iter().any(|j| *t == j))
+        .map(|(i, _)| i as u64)
+        .collect(),
+      edge_fields: edge_fields.len(),
+      edge_type,
+      edge_name: field_index(edge_fields, "name_or_index")?,
+      edge_to: field_index(edge_fields, "to_node")?,
+      property_edge: edge_types.iter().position(|t| t == "property")? as u64,
+    })
+    .filter(|m| m.node_fields > 0 && m.edge_fields > 0)
+  }
 
-  let nodes = match snapshot.get("nodes").and_then(|n| n.as_array()) {
-    Some(a) => a,
-    None => return 0,
-  };
-  let strings = match snapshot.get("strings").and_then(|s| s.as_array()) {
-    Some(a) => a,
-    None => return 0,
-  };
+  /// The position just past `"<name>":` in `buf`, searching from `from`.
+  fn after_key(buf: &[u8], from: usize, name: &[u8]) -> Option<usize> {
+    let mut needle = Vec::with_capacity(name.len() + 3);
+    needle.push(b'"');
+    needle.extend_from_slice(name);
+    needle.extend_from_slice(b"\":");
+    buf[from..]
+      .windows(needle.len())
+      .position(|w| w == needle.as_slice())
+      .map(|i| from + i + needle.len())
+  }
 
-  let mut count: u32 = 0;
-  for chunk in nodes.chunks_exact(node_field_count) {
-    let Some(ty) = chunk[type_field_index].as_u64() else {
-      continue;
-    };
-    if ty != object_type_index {
-      continue;
+  fn skip_ws(buf: &[u8], mut i: usize) -> usize {
+    while i < buf.len() && buf[i].is_ascii_whitespace() {
+      i += 1;
     }
-    let Some(name_idx) = chunk[name_field_index].as_u64() else {
-      continue;
-    };
-    let Some(name) = strings.get(name_idx as usize).and_then(|s| s.as_str())
-    else {
-      continue;
-    };
-    if name == ctor_name {
-      count = count.saturating_add(1);
+    i
+  }
+
+  /// A JSON array of non-negative integers at `i`; returns it and the
+  /// position after the closing bracket. (The work is left to std's
+  /// non-generic, always optimized code: a debug build parses the tens of
+  /// millions of digits in a snapshot a few times faster that way.)
+  fn parse_uint_array(buf: &[u8], i: usize) -> Option<(Vec<u64>, usize)> {
+    let i = skip_ws(buf, i);
+    if buf.get(i) != Some(&b'[') {
+      return None;
+    }
+    let body = &buf[i + 1..];
+    let len = body.iter().position(|b| *b == b']')?;
+    let text = std::str::from_utf8(&body[..len]).ok()?;
+    let mut out = Vec::with_capacity(len / 2);
+    if !text.trim_ascii().is_empty() {
+      for field in text.split(',') {
+        out.push(field.trim_ascii().parse::<u64>().ok()?);
+      }
+    }
+    Some((out, i + 1 + len + 1))
+  }
+
+  /// The indices in the JSON string array at `i` of the strings whose raw
+  /// (still escaped) text equals each of `wanted` (strings that need no
+  /// escaping, so raw equality is equality).
+  fn find_strings(
+    buf: &[u8],
+    i: usize,
+    wanted: &[&[u8]],
+  ) -> Option<Vec<Option<u64>>> {
+    let mut found = vec![None; wanted.len()];
+    let mut i = skip_ws(buf, i);
+    if buf.get(i) != Some(&b'[') {
+      return None;
+    }
+    i += 1;
+    let mut index: u64 = 0;
+    loop {
+      i = skip_ws(buf, i);
+      match *buf.get(i)? {
+        b']' => return Some(found),
+        b',' => i += 1,
+        b'"' => {
+          let start = i + 1;
+          i = start;
+          loop {
+            match *buf.get(i)? {
+              b'\\' => i += 2,
+              b'"' => break,
+              _ => i += 1,
+            }
+          }
+          let raw = &buf[start..i];
+          for (slot, w) in found.iter_mut().zip(wanted) {
+            if slot.is_none() && raw == *w {
+              *slot = Some(index);
+            }
+          }
+          index += 1;
+          i += 1;
+        }
+        _ => return None,
+      }
     }
   }
-  count
+
+  pub fn count_prototype_chain_matches(buf: &[u8], key: &[u8]) -> Option<u32> {
+    let snapshot_at = after_key(buf, 0, b"snapshot")?;
+    let meta: Value = serde_json::Deserializer::from_slice(&buf[snapshot_at..])
+      .into_iter::<Value>()
+      .next()?
+      .ok()?;
+    let meta = parse_meta(meta.get("meta")?)?;
+    let (nodes, after_nodes) =
+      parse_uint_array(buf, after_key(buf, snapshot_at, b"nodes")?)?;
+    let (edges, after_edges) =
+      parse_uint_array(buf, after_key(buf, after_nodes, b"edges")?)?;
+    let strings_at = after_key(buf, after_edges, b"strings")?;
+    let found = find_strings(buf, strings_at, &[b"__proto__", key])?;
+    let (proto_name, key_name) = (found[0]?, found[1]?);
+
+    let node_count = nodes.len() / meta.node_fields;
+    // each node's prototype (a node index), and the target prototype
+    let mut proto: Vec<Option<u32>> = vec![None; node_count];
+    let mut target = None;
+    let mut edge = 0usize;
+    for (n, node) in nodes.chunks_exact(meta.node_fields).enumerate() {
+      let count = node[meta.node_edge_count] as usize;
+      for _ in 0..count {
+        let e = edges.get(edge..edge + meta.edge_fields)?;
+        edge += meta.edge_fields;
+        if e[meta.edge_type] != meta.property_edge {
+          continue;
+        }
+        let to = (e[meta.edge_to] as usize / meta.node_fields) as u32;
+        let name = e[meta.edge_name];
+        if name == proto_name {
+          proto[n] = Some(to);
+        } else if name == key_name && target.is_none() {
+          target = Some(to);
+        }
+      }
+    }
+    let target = target?;
+
+    // 0 unknown, 1 reaches the target, 2 does not
+    let mut state = vec![0u8; node_count];
+    let mut count: u32 = 0;
+    let mut chain = Vec::new();
+    for n in 0..node_count {
+      let ty = nodes[n * meta.node_fields + meta.node_type];
+      if !meta.js_object_types.contains(&ty) {
+        continue;
+      }
+      chain.clear();
+      let mut cur = proto[n];
+      let verdict = loop {
+        let Some(p) = cur else { break 2 };
+        if p == target {
+          break 1;
+        }
+        let p = p as usize;
+        if state[p] != 0 {
+          break state[p];
+        }
+        if chain.len() >= MAX_CHAIN {
+          break 2;
+        }
+        chain.push(p);
+        cur = proto[p];
+      };
+      for &c in &chain {
+        state[c] = verdict;
+      }
+      if verdict == 1 {
+        count = count.saturating_add(1);
+      }
+    }
+    Some(count)
+  }
+
+  #[cfg(test)]
+  mod tests {
+    use super::*;
+
+    // nodes: [type, name, id, self_size, edge_count, trace_node_id,
+    // detachedness]; edges: [type, name_or_index, to_node]
+    fn snapshot(
+      nodes: &[[u64; 7]],
+      edges: &[[u64; 3]],
+      strings: &[&str],
+    ) -> Vec<u8> {
+      let ints = |v: Vec<u64>| {
+        v.iter()
+          .map(|n| n.to_string())
+          .collect::<Vec<_>>()
+          .join(",")
+      };
+      let strings = strings
+        .iter()
+        .map(|s| format!("\"{s}\""))
+        .collect::<Vec<_>>()
+        .join(",\n");
+      format!(
+        r#"{{"snapshot":{{"meta":{{"node_fields":["type","name","id","self_size","edge_count","trace_node_id","detachedness"],"node_types":[["hidden","array","string","object","code","closure","regexp","number","native"],"string","number","number","number","number","number"],"edge_fields":["type","name_or_index","to_node"],"edge_types":[["context","element","property","internal","hidden","shortcut","weak"],"string_or_number","node"]}},"node_count":{},"edge_count":{}}},
+"nodes":[{}],
+"edges":[{}],
+"trace_function_infos":[],
+"samples":[],
+"locations":[],
+"strings":["a \"quoted\" \\ one",
+{}]}}"#,
+        nodes.len(),
+        edges.len(),
+        ints(nodes.iter().flatten().copied().collect()),
+        ints(edges.iter().flatten().copied().collect()),
+        strings
+      )
+      .into_bytes()
+    }
+
+    #[test]
+    fn counts_the_prototype_chain() {
+      // strings: 0 escaped, 1 "__proto__", 2 "marker-key", 3 "x"
+      const OBJ: u64 = 3;
+      const NATIVE: u64 = 8;
+      const PROP: u64 = 2;
+      const F: u64 = 7; // node_fields
+      // node 0: marker -> 1 (Foo.prototype)
+      // node 1: Foo.prototype, proto -> 6 (Object.prototype)
+      // node 2: foo, proto -> 1
+      // node 3: Bar.prototype, proto -> 1
+      // node 4: bar, proto -> 3
+      // node 5: native with proto edge -> 1 (not a JS object)
+      // node 6: Object.prototype
+      // node 7: unrelated object, proto -> 6
+      let nodes = [
+        [OBJ, 3, 1, 0, 1, 0, 0],
+        [OBJ, 3, 2, 0, 1, 0, 0],
+        [OBJ, 3, 3, 0, 2, 0, 0],
+        [OBJ, 3, 4, 0, 1, 0, 0],
+        [OBJ, 3, 5, 0, 1, 0, 0],
+        [NATIVE, 3, 6, 0, 1, 0, 0],
+        [OBJ, 3, 7, 0, 0, 0, 0],
+        [OBJ, 3, 8, 0, 1, 0, 0],
+      ];
+      let edges = [
+        [PROP, 2, F],
+        [PROP, 1, 6 * F],
+        [PROP, 3, 7 * F],
+        [PROP, 1, F],
+        [PROP, 1, F],
+        [PROP, 1, 3 * F],
+        [PROP, 1, F],
+        [PROP, 1, 6 * F],
+      ];
+      let buf = snapshot(&nodes, &edges, &["__proto__", "marker-key", "x"]);
+      // foo, Bar.prototype, bar
+      assert_eq!(count_prototype_chain_matches(&buf, b"marker-key"), Some(3));
+      // no such marker edge
+      assert_eq!(count_prototype_chain_matches(&buf, b"other"), None);
+      // garbage
+      assert_eq!(count_prototype_chain_matches(b"{}", b"marker-key"), None);
+      assert_eq!(
+        count_prototype_chain_matches(&buf[..buf.len() / 2], b"marker-key"),
+        None
+      );
+    }
+  }
 }
 
 #[op2(fast)]

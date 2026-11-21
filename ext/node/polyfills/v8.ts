@@ -393,9 +393,13 @@ function setHeapSnapshotNearHeapLimit(limit: number) {
 
 // https://nodejs.org/api/v8.html#v8queryobjectsctor-options
 //
-// Deno currently only supports `{ format: 'count' }`. Returning live instances
-// would require V8's `HeapProfiler::QueryObjects`, which isn't exposed in the
-// rusty_v8 bindings; the count form is what Node's leak tests rely on.
+// Deno currently only supports `{ format: 'count' }` (and a `summary` built
+// from it). Returning live instances would require V8's
+// `HeapProfiler::QueryObjects`, which isn't exposed in the rusty_v8 bindings;
+// the count form is what Node's leak tests rely on. As in Node.js, an object
+// counts when `ctor.prototype` is on its prototype chain (instances of
+// subclasses, and the subclasses' prototypes, included).
+let queryObjectsMarkerId = 0;
 function queryObjects(
   ctor: { name?: string; prototype?: unknown },
   options:
@@ -411,16 +415,24 @@ function queryObjects(
   }
   const format = options?.format;
 
-  const name = typeof ctor.name === "string" ? ctor.name : "";
-  if (name === "") {
-    return format === "count" ? 0 : [];
+  const prototype = ctor.prototype;
+  let count = 0;
+  if (
+    prototype !== null &&
+    (typeof prototype === "object" || typeof prototype === "function")
+  ) {
+    // The op finds the prototype in the heap snapshot through this marker's
+    // property, named uniquely for the call.
+    const key = `__denextQueryObjectsTarget${queryObjectsMarkerId++}`;
+    const marker = { __proto__: null, [key]: prototype };
+    count = op_v8_query_objects_count(marker, key);
   }
-  const count = op_v8_query_objects_count(name);
   if (format === "count") {
     return count;
   }
   if (format === "summary") {
     if (count === 0) return [];
+    const name = typeof ctor.name === "string" ? ctor.name : "";
     return [`${count} instance(s) of ${name}`];
   }
   // Default format returns live object handles, which would require V8's

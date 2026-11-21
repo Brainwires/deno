@@ -21,7 +21,7 @@ const {
   op_vm_create_context,
   op_vm_create_context_without_contextify,
   op_vm_create_script,
-  op_vm_dynamic_import_callback_register,
+  op_vm_dynamic_import_dispatcher_register,
   op_vm_is_context,
   op_vm_module_create_source_text_module,
   op_vm_module_create_synthetic_module,
@@ -53,6 +53,7 @@ const {
   ERR_INVALID_ARG_TYPE,
   ERR_INVALID_ARG_VALUE,
   ERR_MODULE_LINK_MISMATCH,
+  ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING,
   ERR_VM_MODULE_ALREADY_LINKED,
   ERR_VM_MODULE_DIFFERENT_CONTEXT,
   ERR_VM_MODULE_NOT_MODULE,
@@ -84,6 +85,22 @@ const {
 
 const kParsingContext = Symbol("script parsing context");
 const importModuleDynamicallyMap = new SafeWeakMap();
+
+// `import()` in a script compiled with an `importModuleDynamically` callback
+// reaches the callback through the script's host-defined options, which hold
+// a symbol this map keys the callback by, as Node.js's module registries do.
+// The map is weak and only the compiled code holds the symbol, so the
+// callback, and the Script / function / module its closure captures as the
+// referrer, are collected with the code.
+const dynamicImportCallbacks = new SafeWeakMap();
+let dynamicImportDispatcherRegistered = false;
+function dispatchDynamicImport(key, specifier, attributes) {
+  const callback = WeakMapPrototypeGet(dynamicImportCallbacks, key);
+  if (callback === undefined) {
+    throw new ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING();
+  }
+  return callback(specifier, attributes);
+}
 
 const USE_MAIN_CONTEXT_DEFAULT_LOADER = Symbol(
   "USE_MAIN_CONTEXT_DEFAULT_LOADER",
@@ -232,7 +249,14 @@ function getImportModuleDynamicallyId(value, name, getReferrer) {
   if (value === undefined) {
     return 0;
   }
-  return op_vm_dynamic_import_callback_register(
+  if (!dynamicImportDispatcherRegistered) {
+    op_vm_dynamic_import_dispatcher_register(dispatchDynamicImport);
+    dynamicImportDispatcherRegistered = true;
+  }
+  const key = Symbol("vm dynamic import");
+  WeakMapPrototypeSet(
+    dynamicImportCallbacks,
+    key,
     (specifier, importAttributes) => {
       return PromisePrototypeThen(
         PromiseResolve(value(specifier, getReferrer(), importAttributes)),
@@ -240,6 +264,7 @@ function getImportModuleDynamicallyId(value, name, getReferrer) {
       );
     },
   );
+  return key;
 }
 
 function validateContext(contextifiedObject) {
