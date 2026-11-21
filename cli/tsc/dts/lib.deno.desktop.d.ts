@@ -1408,8 +1408,15 @@ declare namespace Deno {
     /** Set a custom right-click menu on the app's dock icon. Pass
      * `null` to remove any menu previously set.
      *
-     * macOS only. Click events are delivered as `"menuclick"` events on
-     * {@linkcode Deno.dock}. No-op on Windows and Linux. */
+     * macOS: the Dock menu. Windows: the "Tasks" of the taskbar button's
+     * jump list, where `Deno.desktop.menuCapabilities().jumpList` is true:
+     * a jump list is flat (a submenu's items are listed in its place between
+     * separators), and disabled items and roles are left out. Choosing a
+     * task starts the app; with the single-instance lock on the running app
+     * gets the click, else the app it started does, as soon as it listens.
+     * The tasks stay after the app quits until a later `setMenu`. Click
+     * events are delivered as `"menuclick"` events on
+     * {@linkcode Deno.dock}. No-op on Linux. */
     setMenu(menu: MenuItem[] | null): void;
 
     /** The Dock menu as AppKit holds it now, read back from the OS (for
@@ -3559,6 +3566,10 @@ declare namespace Deno {
        * {@linkcode getApplicationMenu} and {@linkcode Dock.getMenu} read
        * the native menu back. */
       snapshot: boolean;
+      /** {@linkcode Dock.setMenu} shows the menu (macOS, Windows). */
+      dockMenu: boolean;
+      /** The dock menu is a Windows jump list (see {@linkcode Dock.setMenu}). */
+      jumpList: boolean;
     }
 
     /** The menu capabilities of this backend and OS. */

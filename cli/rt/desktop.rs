@@ -1833,6 +1833,39 @@ pub const DESKTOP_JS: &str = r#"
   Object.setPrototypeOf(OrigDock.prototype, nativeDockConstructor.prototype);
   Deno.Dock = OrigDock;
 
+  function dispatchDockMenuClick(id) {
+    for (const d of docks) {
+      d.dispatchEvent(new CustomEvent("menuclick", { detail: { id } }));
+    }
+  }
+  // Windows jump-list tasks that reached the runtime as launches (the task
+  // started the app, or came from before the app set its dock menu): the
+  // launch inbox holds them until the first "menuclick" listener (or
+  // onmenuclick) on a Dock, then they are clicks like any other.
+  let dockMenuClicksSubscribed = false;
+  function subscribeDockMenuClicks() {
+    if (dockMenuClicksSubscribed) return;
+    dockMenuClicksSubscribed = true;
+    const pending = op_desktop_subscribe_launch_events("dockmenuclick");
+    if (pending.length > 0) {
+      // After the current task, as with Deno.desktop's launch events.
+      queueMicrotask(() => {
+        for (const ev of pending) dispatchDockMenuClick(ev.id);
+      });
+    }
+  }
+  const dockAddEventListener = EventTarget.prototype.addEventListener;
+  Object.defineProperty(DockPrototype, "addEventListener", {
+    value: function addEventListener(type, listener, options) {
+      dockAddEventListener.call(this, type, listener, options);
+      if (listener != null && String(type) === "menuclick") {
+        subscribeDockMenuClicks();
+      }
+    },
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
   internals.defineEventHandler(DockPrototype, "menuclick");
   internals.defineEventHandler(DockPrototype, "reopen");
   // Menu read-back (laufey API 59): the native menu's items as the OS holds
@@ -4242,11 +4275,7 @@ pub const DESKTOP_JS: &str = r#"
             break;
           }
           case "dockMenuClick": {
-            for (const d of docks) {
-              d.dispatchEvent(new CustomEvent("menuclick", {
-                detail: { id: ev.id },
-              }));
-            }
+            dispatchDockMenuClick(ev.id);
             break;
           }
           case "dockReopen": {
@@ -5293,6 +5322,42 @@ mod tests {
     );
     assert!(DESKTOP_JS.contains("launchUrls:"));
     assert!(DESKTOP_JS.contains("launchFiles:"));
+  }
+
+  #[test]
+  fn desktop_js_delivers_jump_list_tasks_as_dock_clicks() {
+    // The first "menuclick" listener on a Dock drains the launch inbox's
+    // jump-list tasks, which then dispatch like a live dock menu click.
+    let sub = DESKTOP_JS
+      .split("function subscribeDockMenuClicks() {")
+      .nth(1)
+      .unwrap();
+    let sub = &sub[..sub.find("\n  }").unwrap()];
+    assert!(
+      sub.contains("op_desktop_subscribe_launch_events(\"dockmenuclick\")")
+    );
+    assert!(sub.contains("dispatchDockMenuClick(ev.id)"));
+    assert!(
+      DESKTOP_JS
+        .contains("if (listener != null && String(type) === \"menuclick\") {")
+    );
+    // Defined before the on… handler, which adds its listener through it.
+    let add = DESKTOP_JS
+      .find("Object.defineProperty(DockPrototype, \"addEventListener\"")
+      .unwrap();
+    let handler = DESKTOP_JS
+      .find("internals.defineEventHandler(DockPrototype, \"menuclick\")")
+      .unwrap();
+    assert!(add < handler);
+    let live = DESKTOP_JS
+      .split("case \"dockMenuClick\": {")
+      .nth(1)
+      .unwrap();
+    assert!(
+      live
+        .trim_start()
+        .starts_with("dispatchDockMenuClick(ev.id);")
+    );
   }
 
   #[test]

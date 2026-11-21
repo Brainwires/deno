@@ -853,6 +853,9 @@ enum LaunchEventKind {
   OpenFile,
   SecondInstance,
   NotificationResponse,
+  /// A Windows jump-list task's launch (`Deno.dock`'s "menuclick"), from the
+  /// app's own arguments or a second instance's.
+  DockMenuClick,
 }
 
 impl LaunchEventKind {
@@ -862,6 +865,7 @@ impl LaunchEventKind {
       "openfile" => Some(Self::OpenFile),
       "secondinstance" => Some(Self::SecondInstance),
       "notificationresponse" => Some(Self::NotificationResponse),
+      "dockmenuclick" => Some(Self::DockMenuClick),
       _ => None,
     }
   }
@@ -879,6 +883,7 @@ struct LaunchInboxState {
   pending_files: std::collections::VecDeque<String>,
   pending_second_instances: std::collections::VecDeque<DesktopEvent>,
   pending_notification_responses: std::collections::VecDeque<DesktopEvent>,
+  pending_dock_items: std::collections::VecDeque<String>,
   subscribed_urls: bool,
   subscribed_files: bool,
   subscribed_second_instances: bool,
@@ -886,6 +891,7 @@ struct LaunchInboxState {
   /// A browser app (`desktop.app.browser`): http / https links are
   /// delivered too (`Deno.desktop.browserLinks`).
   browser_links: bool,
+  subscribed_dock_items: bool,
 }
 
 /// Deep links, opened files and second-instance launches on their way to
@@ -1051,6 +1057,20 @@ impl DesktopLaunchInbox {
     }
   }
 
+  /// A Windows jump-list task chosen: its dock menu item's id, from the app's
+  /// own launch arguments (the task started it) or a second instance's that
+  /// laufey did not turn into the click itself (the app had not set its dock
+  /// menu yet). Held until the app listens to `Deno.dock`'s "menuclick", then
+  /// delivered as that click. Untrusted input, like any launch argument.
+  pub fn dock_menu_click(&self, id: String) {
+    let mut state = self.lock();
+    if state.subscribed_dock_items {
+      send_launch_event(&state, DesktopEvent::DockMenuClick { id });
+    } else {
+      push_bounded(&mut state.pending_dock_items, id, "dockmenuclick");
+    }
+  }
+
   /// The launch snapshot: the process's own deep links and files, plus the
   /// URLs, files and notification responses delivered so far that no
   /// listener has taken. Empty after the first call.
@@ -1122,6 +1142,14 @@ impl DesktopLaunchInbox {
       LaunchEventKind::NotificationResponse => {
         state.subscribed_notification_responses = true;
         state.pending_notification_responses.drain(..).collect()
+      }
+      LaunchEventKind::DockMenuClick => {
+        state.subscribed_dock_items = true;
+        state
+          .pending_dock_items
+          .drain(..)
+          .map(|id| DesktopEvent::DockMenuClick { id })
+          .collect()
       }
     }
   }
@@ -2253,6 +2281,14 @@ pub struct MenuCapabilitiesInfo {
   /// `getApplicationMenu()` / `Deno.dock.getMenu()` read the native menu
   /// back (laufey API 59).
   pub snapshot: bool,
+  /// `Deno.dock.setMenu()` shows the menu: the macOS Dock menu, or the
+  /// Windows jump list's tasks.
+  pub dock_menu: bool,
+  /// The dock menu is a Windows jump list: flat (submenus inlined between
+  /// separators), without disabled items or checkmarks; choosing a task
+  /// starts the app, and its "menuclick" reaches the running app (with the
+  /// single-instance lock) or the one it started.
+  pub jump_list: bool,
 }
 
 /// `Deno.desktop.notifications.capabilities()` (laufey API 41).
@@ -9944,6 +9980,33 @@ mod tests {
   }
 
   #[test]
+  fn launch_inbox_holds_jump_list_tasks_until_the_dock_listens() {
+    let (inbox, mut rx) = inbox_with_channel(vec![], vec![]);
+    inbox.dock_menu_click("cold".into());
+    inbox.dock_menu_click("early".into());
+    assert!(drain(&mut rx).is_empty());
+    // Other kinds don't take them.
+    assert!(inbox.subscribe("secondinstance").is_empty());
+    assert!(inbox.take_launch_targets().urls.is_empty());
+    let pending = inbox.subscribe("dockmenuclick");
+    assert_eq!(
+      pending
+        .into_iter()
+        .map(|e| serde_json::to_value(e).unwrap())
+        .collect::<Vec<_>>(),
+      vec![
+        json!({ "kind": "dockMenuClick", "id": "cold" }),
+        json!({ "kind": "dockMenuClick", "id": "early" }),
+      ]
+    );
+    assert!(inbox.subscribe("dockmenuclick").is_empty());
+    inbox.dock_menu_click("warm".into());
+    let sent = drain(&mut rx);
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].contains("\"warm\""), "{sent:?}");
+  }
+
+  #[test]
   fn launch_snapshot_takes_argv_and_unclaimed_deliveries_once() {
     let (inbox, mut rx) =
       inbox_with_channel(vec!["acme://argv".into()], vec!["/argv/file".into()]);
@@ -10083,6 +10146,8 @@ mod tests {
         "tooltips": false,
         "destructive": false,
         "snapshot": false,
+        "dockMenu": false,
+        "jumpList": false,
       })
     );
     assert_eq!(

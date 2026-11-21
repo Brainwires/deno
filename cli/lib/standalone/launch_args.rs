@@ -264,6 +264,72 @@ fn normalize(path: PathBuf) -> PathBuf {
   deno_path_util::normalize_path(std::borrow::Cow::Owned(path)).into_owned()
 }
 
+/// The argument a Windows jump-list task starts the app with, before the
+/// dock menu item's id (laufey's `LAUFEY_MENU_CAP_JUMP_LIST`).
+pub const DOCK_ITEM_ARG_PREFIX: &str = "--laufey-dock-item=";
+
+/// The longest dock menu item id a jump-list task carries (laufey's cap).
+const DOCK_ITEM_MAX_ID_BYTES: usize = 512;
+
+/// The dock menu item a Windows jump-list task's launch carries, as laufey
+/// writes the task: `args` (a process's arguments after the executable) are
+/// exactly one argument, [`DOCK_ITEM_ARG_PREFIX`] followed by a non-empty id
+/// of at most 512 bytes. Anything else is not a task's launch, so a deep link
+/// (always after `--`) can never pass for one. The app's own launch (a task
+/// clicked while it wasn't running) and a second instance's are both
+/// checked: laufey turns a forwarded one into the click itself only once the
+/// app has set its dock menu.
+pub fn dock_item_from_args(args: &[String]) -> Option<&str> {
+  let [arg] = args else {
+    return None;
+  };
+  let id = arg.strip_prefix(DOCK_ITEM_ARG_PREFIX)?;
+  (!id.is_empty() && id.len() <= DOCK_ITEM_MAX_ID_BYTES).then_some(id)
+}
+
+#[cfg(test)]
+mod dock_item_tests {
+  use super::*;
+
+  fn strings(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+  }
+
+  #[test]
+  fn dock_item_launch() {
+    assert_eq!(
+      dock_item_from_args(&strings(&["--laufey-dock-item=new-window"])),
+      Some("new-window")
+    );
+    assert_eq!(
+      dock_item_from_args(&strings(&["--laufey-dock-item=a b"])),
+      Some("a b")
+    );
+    for not_one in [
+      &[][..],
+      &["--laufey-dock-item="][..],
+      &["--laufey-dock-item"][..],
+      &["--laufey-dock-item=a", "acme://x"][..],
+      &["--", "--laufey-dock-item=a"][..],
+      &["acme://x", "--laufey-dock-item=a"][..],
+    ] {
+      assert_eq!(dock_item_from_args(&strings(not_one)), None, "{not_one:?}");
+    }
+    let max = format!("{DOCK_ITEM_ARG_PREFIX}{}", "a".repeat(512));
+    assert!(dock_item_from_args(&[max]).is_some());
+    let over = format!("{DOCK_ITEM_ARG_PREFIX}{}", "a".repeat(513));
+    assert_eq!(dock_item_from_args(&[over]), None);
+    // Not a launch target either.
+    let targets = parse_launch_args(
+      &strings(&["--laufey-dock-item=x"]),
+      None,
+      &strings(&["acme"]),
+      |_| true,
+    );
+    assert_eq!(targets, LaunchTargets::default());
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
