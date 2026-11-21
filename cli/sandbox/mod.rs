@@ -474,6 +474,7 @@ fn mode_inputs(
     dev_build: false,
     permission_broker: deno_runtime::deno_permissions::broker::has_broker(),
     policy_needs_supervisor: false,
+    lifecycle_jail: crate::supply_chain::jail::jail_from_env().is_some(),
   })
 }
 
