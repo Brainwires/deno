@@ -41,6 +41,10 @@ pub fn create_basic_runtime() -> tokio::runtime::Runtime {
   builder
     .enable_io()
     .enable_time()
+    // The scheduler parked, so it polled its I/O driver: an event loop woken
+    // now needs no further poll before its next iteration (see
+    // `deno_core::event_loop::reactor_polled`).
+    .on_thread_unpark(deno_core::event_loop::reactor_polled)
     .event_interval(tokio_env("DENO_TOKIO_EVENT_INTERVAL", event_interval))
     .global_queue_interval(tokio_env(
       "DENO_TOKIO_GLOBAL_QUEUE_INTERVAL",

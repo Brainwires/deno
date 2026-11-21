@@ -19588,6 +19588,139 @@ where the changes are discussed.
        test-dgram-reuseport.js, test-child-process-dgram-reuseport.js, and
        sequential/test-child-process-pass-fd.js on macOS.
 
+486. **`fix`: the event loop polls for I/O between iterations, and async fs /
+     dns results are delivered by the loop** (runtime;
+     `libs/core/runtime/jsruntime.rs`, `libs/core/event_loop.rs`,
+     `libs/core/uv_compat.rs`, `libs/core/uv_compat/stream.rs`,
+     `libs/core/uv_compat/tcp.rs`, `runtime/tokio_util.rs`, `ext/fs/ops.rs`,
+     `ext/node/ops/fs.rs`, `ext/node/ops/dns.rs`, `ext/net/ops.rs`,
+     `ext/websocket/01_websocket.js`). Two places where the loop's phases
+     differed from libuv's.
+     - **I/O was polled once in 61 iterations.** A wake of the event loop went
+       straight to its task, which put the task back on the executor's run
+       queue, and tokio's current-thread scheduler polls its I/O driver only
+       when that queue is empty or after `event_interval` (61) task polls. A
+       loop that was woken again by the time an iteration returned (a chain of
+       immediates or ticks, a stream of I/O, async ops completing through the op
+       driver's task) saw socket and pipe readiness once in up to 61 iterations;
+       libuv polls for I/O on every iteration, with a zero timeout when it has
+       more to do. Beside a `setImmediate` chain that burns 5 ms a turn, an echo
+       on an open `node:net` socket took 122 immediates (617 ms; 2 and 12 ms in
+       Node.js) and one on a `Deno.Conn` 118; with `DENO_TOKIO_EVENT_INTERVAL=1`
+       both took 2, which is what pinned the cause.
+       sequential/test-gc-http-client.js created 648 requests before the first
+       response (Node.js about 72), which overflows macOS's 128-connection
+       listen backlog: `connect ECONNRESET`, every run.
+     - The loop's iterations now run under a waker of their own (`LoopWaker`),
+       which decides how a wake reaches the task. While the reactor could have
+       something for the loop (an async op or an external op is outstanding, or
+       a native stream handle exists, ref'd or not), a wake with no I/O poll
+       since the last iteration is handed to the scheduler, as
+       `tokio::task::yield_now` does, which wakes the task after it has polled
+       its drivers without blocking. A wake that arrives while an iteration runs
+       (the loop asking for another one) always goes that way, so I/O is polled
+       between two consecutive immediates, as in libuv; until the next iteration
+       nothing else wakes the task ahead of that poll. A wake made between
+       iterations by another task (the op driver's) takes the poll at most once
+       in 250 us, so a run of short async ops does not pay one per op, and one
+       made by the driver itself costs nothing (its wakes go out when its poll
+       returns). The rest reach the task at once: a wake after the executor
+       parked since the last iteration (the usual case: the loop waited and
+       something arrived; `deno_core::event_loop::reactor_polled()`, which the
+       runtime calls from tokio's `on_thread_unpark`, counts those), one from
+       another thread (a worker's scheduler must not hold it), one outside a
+       tokio runtime, and every wake while nothing is outstanding in the
+       reactor. Timers were never starved (a due timer is seen on the next poll)
+       and are not counted as reactor work.
+     - Cost: a non-blocking I/O poll per self-woken iteration, which is what
+       libuv pays. On the mini (macOS, load average 20 to 45 during the runs,
+       where a zero-timeout `kevent` alone measured 20 to 28 us): a pure
+       `setImmediate` chain is unchanged (0.7 to 1.5 us a turn before and after:
+       nothing is outstanding in the reactor); the same chain with an idle
+       socket open goes from 0.6 to 2 us a turn to 17 to 33 us, which is
+       Node.js's figure on the same machine (17 to 28 us); an `ab -k -c 50`
+       keep-alive benchmark is within noise (`node:http` median 9.0k before,
+       8.8k after over 8 alternating pairs; `Deno.serve` 42.7k and 44.2k; a
+       `node:http` handler that answers from `setImmediate` 11.9k and 11.3k);
+       awaited `Deno.stat()` / `Deno.readFile()` / `fs.stat()` in a loop are
+       within noise (17 to 59 us before, 18 to 59 us after per stat).
+     - **Two older bugs that prompt I/O exposed** (each fails on the train
+       before this item with `DENO_TOKIO_EVENT_INTERVAL=1`):
+       - The callback of a write that `uv_write` finished on the spot ran when
+         its handle's turn came in the ready queue, which could be after a peer
+         in the same process had read the data. libuv runs it in the pending
+         phase, before the next I/O poll (Node.js completes a plain socket's
+         write at once and a TLS socket's from an immediate), so a write's
+         callback always precedes the peer's read. An HTTP/2 server's `request`
+         listener destroyed the client's TLS socket while the client's last
+         write still looked pending, and the write failed with ECANCELED
+         (parallel/test-http2-client-jsstream-destroy.js, 40 of 40). The loop
+         now completes such TCP writes before it reads from any handle and after
+         each handle's callbacks.
+       - `WebSocket`: a close frame without a status code (and a read cancelled
+         by `Deno.serve`'s shutdown, reported the same way) was answered with a
+         close frame carrying code 1005, which is never sent (RFC 6455, 7.4.1).
+         The peer failed the connection with "Invalid close code" (an `error`
+         event, close 1006) when it read the answer, which it did whenever it
+         had not called `close()` itself by then (`websocketWriteLock` in
+         `tests/unit/websocket_test.ts`, every run). The answer now has no code.
+     - **An async op that was ready on its first poll resolved in the microtask
+       checkpoint of the call.** In a timers phase that is the checkpoint
+       between two timer lists, so the callback of an `fs` call made in one
+       timer ran before another timer due in the same phase; libuv delivers a
+       thread-pool result in the poll phase, after them. Items 476 and 482
+       deferred `fs.read` / `fs.write` / `fs.open` for this; every other async
+       op behind `node:fs` and `node:dns` was still eager. An op is ready on its
+       first poll when it fails before reaching a thread (a permission check, a
+       closed descriptor: every time), when the file system answers without one
+       (a compiled program's embedded files), and when the blocking thread
+       finishes first (a busy machine: `fs.stat` and `fs.readdir` in a timer ran
+       before the second timer in 4 to 9 of 300 rounds at twelve copies beside
+       twelve CPU hogs, in 48 of 48 runs).
+     - Now `async(deferred)` (the work still starts at the call; only the result
+       is delivered by the loop): the other 21 async ops of `ext/node/ops/fs.rs`
+       (exists, statfs, lutimes, lchown, lchmod, mkdtemp, rmdir, the descriptor
+       ops and `fs.cp`'s), `op_node_getaddrinfo` and `op_node_getnameinfo`, all
+       34 async ops of `ext/fs/ops.rs`, which `node:fs` is built on (`fs.stat`
+       is `Deno.stat`), and `op_dns_resolve` (`node:dns`'s resolver). The other
+       16 async ops of `ext/net/ops.rs` back `Deno.listen()` / `Deno.connect()`
+       / `Deno.DatagramConn` only (`node:net` and `node:dgram` have their own)
+       and stay eager: a queued connection or datagram is returned without a
+       loop turn.
+     - User-facing note: I/O progresses between consecutive immediates, and an
+       async `node:fs` / `node:dns` callback never runs before the timers due in
+       the phase that made the call. `Deno.stat()`, `Deno.readFile()`,
+       `Deno.resolveDns()` and the rest of the `Deno` file-system API resolve
+       through the loop every time: a call that fails its permission check, or
+       reads a compiled program's embedded file, no longer continues in the
+       microtask checkpoint of the call (one loop turn later; the order against
+       a promise chain made after the call changes, as it already did for a real
+       file).
+     - Tests: `tests/unit_node/timers_test.ts` "socket I/O progresses between
+       consecutive immediates" (122 immediates before, 2 after) and "a due timer
+       runs between consecutive immediates"; `tests/unit/timers_test.ts`
+       `ioAndTimersProgressBetweenImmediates` (`Deno.Conn`: 118 before);
+       `tests/specs/node/fs_async_completes_after_timers` (41 `node:fs` /
+       `node:dns` calls that fail before reaching a thread, each made in a timer
+       beside a second one: 33 ran before the second timer, none do);
+       `deno_core` unit tests of the waker. On macOS (release-lite, against the
+       train before this item): the real `fs.stat` / `fs.readdir` race 0 early
+       in 48 runs each under the same load; sequential/test-gc-http-client.js
+       passes (90 requests, 4.2 s); test-http2-client-jsstream-destroy.js 30 of
+       30; `tests/unit/` and `tests/unit_node/` whole, and the node_compat tests
+       named test-timers*, test-fs*, test-net*, test-dns*, test-http*, test-gc*,
+       test-child-process*, test-stream*, test-dgram*, test-tls* and test-pipe*
+       (about 2,100) with the same results as before except these, which now
+       pass: sequential/test-gc-http-client.js, -onerror.js,
+       parallel/test-gc-net-timeout.js and sequential/test-pipe.js. Three runs
+       of the test-http* set each had one to six other tests fail that passed
+       before (a different set each run, six of them 20 s timeouts started
+       together); none failed alone (20 to 60 runs each), and test-http2-pipe.js
+       fails as often before this item.
+     - Node tests enabled: parallel/test-gc-net-timeout.js (12 of 12; it failed
+       12 of 12 before). sequential/test-gc-http-client.js was enabled and
+       failed on macOS.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -19598,7 +19731,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-485) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-486) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
