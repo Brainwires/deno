@@ -994,6 +994,21 @@ impl<
         let Some(pkg_alias) = &pkg.alias else {
           continue;
         };
+        // denext: a link that already leads to the package is kept, so a
+        // run that may not write node_modules (a process the kernel
+        // sandbox confined after the first image installed) changes nothing
+        if let Ok(link) =
+          package_link_path(&self.root_node_modules_path, pkg_alias)
+          && let (Ok(current), Ok(target)) = (
+            sys.fs_canonicalize(&link),
+            sys.fs_canonicalize(&pkg.target_dir),
+          )
+          && current == target
+          // a symlink or a junction, never a copy of the folder
+          && sys.fs_read_link(&link).is_ok()
+        {
+          continue;
+        }
         symlink_package_dir(
           sys.as_ref(),
           &pkg.target_dir,
