@@ -507,6 +507,14 @@ fn context_for(
   }
   ctx.deno_dir = deno_dir;
   ctx.node_modules = node_modules;
+  ctx.vendor_dir = cli_options.vendor_dir_path().cloned();
+  ctx.link_dirs = cli_options
+    .start_dir
+    .workspace
+    .link_folders()
+    .keys()
+    .filter_map(|url| url.to_file_path().ok())
+    .collect();
   // the config files discovery read: every deno.json / package.json of the
   // workspace (an ancestor folder's too, outside any read grant), the import
   // map and the lockfile. A re-executed image discovers them again under the
@@ -581,6 +589,14 @@ fn context_for(
   ctx.profile_dirs.sort();
   ctx.profile_dirs.dedup();
   ctx.report_files = report_files(cli_options);
+  // the permission audit log the runtime creates at startup, in both images
+  #[allow(clippy::disallowed_methods, reason = "the runtime reads it so")]
+  {
+    ctx.audit_file = std::env::var("DENO_AUDIT_PERMISSIONS")
+      .ok()
+      .filter(|target| !target.is_empty() && target != "otel")
+      .map(|target| cli_options.initial_cwd().join(target));
+  }
   ctx.tls_files = tls_files();
   // `--cert <file>` (DENO_CERT's flag form), relative to the working folder
   if let Some(deno_lib::args::CaData::File(cert)) = cli_options.ca_data() {

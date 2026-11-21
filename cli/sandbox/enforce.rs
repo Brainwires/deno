@@ -411,7 +411,7 @@ fn create_runtime_dirs(ctx: &Context) -> Result<(), AnyError> {
       )
     })?;
   }
-  for file in &ctx.report_files {
+  for file in ctx.report_files.iter().chain(&ctx.audit_file) {
     let created = file
       .parent()
       .map_or(Ok(()), std::fs::create_dir_all)

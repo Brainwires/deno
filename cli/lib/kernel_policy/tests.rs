@@ -1358,10 +1358,34 @@ fn implicit_set_follows_the_grant() {
       deno_dir: Some(PathBuf::from("/home/me/.cache/deno")),
       config_files: vec![PathBuf::from("/project/deno.json")],
       node_modules: Some(PathBuf::from("/project/node_modules")),
+      vendor_dir: Some(PathBuf::from("/project/vendor")),
+      link_dirs: vec![PathBuf::from("/linked")],
+      audit_file: Some(PathBuf::from("/project/audit.jsonl")),
       ..c.clone()
     },
   );
+  assert!(
+    full
+      .entries
+      .iter()
+      .any(|e| e.path == Path::new("/project/audit.jsonl")
+        && e.need == ImplicitNeed::AuditLog
+        && e.access == ImplicitAccess::ReadWrite)
+  );
+  assert!(full.entries.iter().any(|e| e.path == Path::new("/linked")
+    && e.need == ImplicitNeed::LinkedPackages
+    && e.access == ImplicitAccess::Read));
   assert!(has(&full, "/nix/store"));
+  // the vendor folder is read (the remote modules a confined run loads),
+  // never written
+  assert!(
+    full
+      .entries
+      .iter()
+      .any(|e| e.path == Path::new("/project/vendor")
+        && e.need == ImplicitNeed::Vendor
+        && e.access == ImplicitAccess::Read)
+  );
   assert!(has(&full, "/home/me/.cache/deno/npm"));
   assert!(has(&full, "/project/deno.json"));
   assert!(has(&full, "/project/node_modules"));
@@ -1370,11 +1394,13 @@ fn implicit_set_follows_the_grant() {
     &PermissionsOptions::default(),
     &Context {
       deno_dir: Some(PathBuf::from("/home/me/.cache/deno")),
+      vendor_dir: Some(PathBuf::from("/project/vendor")),
       compiled: true,
       ..c
     },
   );
   assert!(!has(&compiled, "/home/me/.cache/deno/npm"));
+  assert!(!has(&compiled, "/project/vendor"));
   // never a credential folder
   for set in [&none, &net, &full] {
     assert!(!set.entries.iter().any(|e| {
