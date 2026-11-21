@@ -1121,6 +1121,11 @@ pub struct Context {
   /// The file `DENO_AUDIT_PERMISSIONS` names (not `otel`), absolute.
   pub audit_file: Option<PathBuf>,
   pub inspector_port: Option<u16>,
+  /// Unix sockets the runtime itself connects to, which no flag grants and
+  /// Deno's checks don't gate: the `Deno.cron` scheduler socket an operator
+  /// names in `DENO_UNSTABLE_CRON_SOCK` (`unix:<path>`). Held like a socket
+  /// `--allow-net=unix:<path>` names.
+  pub runtime_unix_sockets: Vec<PathBuf>,
   /// stdin is a terminal (the `/dev/tty` rule, plan §3).
   pub tty_parent: bool,
   /// The terminals the standard streams are (`ttyname` of fds 0 to 2): the
@@ -1177,6 +1182,7 @@ impl Context {
       link_dirs: Vec::new(),
       audit_file: None,
       inspector_port: None,
+      runtime_unix_sockets: Vec::new(),
       tty_parent: false,
       ttys: Vec::new(),
       compiled: false,
@@ -2691,7 +2697,15 @@ impl<'a> Compiler<'a> {
     }
 
     if connect_none && bind_none {
-      return (NetPolicy::Denied, true, vsock);
+      // no IP socket can be made, so listen(2) can't bind an ephemeral
+      // port: a Unix socket the grant lets this process listen on
+      // (`--allow-net-listen=unix:<path>`) may listen (its bind is what the
+      // file rules and the broker hold)
+      let unix_listen = bind
+        .entries()
+        .iter()
+        .any(|e| matches!(classify_net(e), NetEntry::Unix(_)));
+      return (NetPolicy::Denied, vsock || !unix_listen, vsock);
     }
     let refuse_listen = bind_none;
     let hosted = connect_ip
@@ -2897,6 +2911,8 @@ impl<'a> Compiler<'a> {
         NetEntry::Unix(path) => Some(path),
         _ => None,
       })
+      // the runtime's own sockets (the cron scheduler's), granted or not
+      .chain(self.ctx().runtime_unix_sockets.iter().cloned())
       .collect::<BTreeSet<_>>()
       .into_iter()
       .collect();
@@ -2929,7 +2945,22 @@ impl<'a> Compiler<'a> {
     if unscoped_net {
       // Deno allows any socket inside the read + write scope
       if read.is_all() && write.is_all() {
-        if os == TargetOs::Linux && !self.broker_net() {
+        // Unscoped read, write and net with no deny on read, write or net:
+        // Deno itself allows every socket then, so the kernel's "every
+        // socket" is the grant exactly, as for plain `-A` (item 451). No
+        // gap, so `auto` doesn't start a broker that would hold nothing.
+        let o = self.opts();
+        let narrowed = [
+          &o.deny_read,
+          &o.ignore_read,
+          &o.deny_write,
+          &o.deny_net,
+          &o.deny_net_connect,
+          &o.deny_net_listen,
+        ]
+        .iter()
+        .any(|d| d.is_some());
+        if os == TargetOs::Linux && !self.broker_net() && narrowed {
           self.gap(
             GapClass::Unix,
             "--allow-net --allow-read --allow-write",

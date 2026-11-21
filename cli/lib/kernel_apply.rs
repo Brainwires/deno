@@ -139,6 +139,23 @@ pub fn tls_files() -> Vec<PathBuf> {
   out
 }
 
+/// The Unix sockets the runtime itself connects to, which no flag grants:
+/// the `Deno.cron` scheduler socket `DENO_UNSTABLE_CRON_SOCK` names as
+/// `unix:<path>` (relative to `cwd`). Its `tcp:` and `vsock:` forms aren't
+/// listed: they stay under the run's network grant.
+pub fn runtime_unix_sockets(cwd: &Path) -> Vec<PathBuf> {
+  std::env::var("DENO_UNSTABLE_CRON_SOCK")
+    .ok()
+    .and_then(|addr| {
+      addr
+        .strip_prefix("unix:")
+        .filter(|path| !path.is_empty())
+        .map(|path| cwd.join(path))
+    })
+    .into_iter()
+    .collect()
+}
+
 /// Creates a cache overlay folder, the user's alone (0700, its parent too),
 /// in the image that isn't confined yet. A failure leaves it absent: the
 /// policy then has no overlay and the caches stay in memory.
@@ -273,6 +290,7 @@ fn compiled_context(
   ctx.tty_parent = std::io::stdin().is_terminal();
   ctx.ttys = std_stream_ttys();
   ctx.tls_files = tls_files();
+  ctx.runtime_unix_sockets = runtime_unix_sockets(&ctx.cwd);
   ctx
 }
 
