@@ -1,0 +1,14 @@
+{
+[WILDCARD]
+  "kernelSandbox": {
+    "preview": true,
+    "mode": "auto",
+    "source": "default",
+    "effective": "enforce",
+    "wouldApply": "enforce",
+    "stage": "r4",
+    "reason": "auto: no prompt can widen the grant here (no terminal, or --no-prompt)",
+    "enforced": false,
+[WILDCARD]
+  }
+}

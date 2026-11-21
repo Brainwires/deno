@@ -1,4 +1,3 @@
-kernel sandbox (preview): auto (--kernel-sandbox); applies: off; would apply: enforce
-  why: auto applies nothing yet (the kernel sandbox is an opt-in preview)
+kernel sandbox (preview): auto (--kernel-sandbox); applies: [WILDLINE]; would apply: enforce
 [WILDCARD]
 hello

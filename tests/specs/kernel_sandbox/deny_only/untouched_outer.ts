@@ -12,5 +12,15 @@ const out = new Deno.Command(Deno.execPath(), {
 }).outputSync();
 const child = new TextDecoder().decode(out.stdout);
 for (const key of ["NoNewPrivs", "Seccomp", "Seccomp_filters"]) {
-  console.log(`${key} unchanged: ${field(own, key) === field(child, key)}`);
+  const [was, now] = [field(own, key), field(child, key)];
+  // (the values, when they differ: a child that didn't run has none)
+  console.log(
+    `${key} unchanged: ${was === now}${
+      was === now ? "" : ` (${was} -> ${now})`
+    }`,
+  );
+}
+if (!out.success) {
+  console.log(`the child failed (${out.code}):`);
+  console.log(new TextDecoder().decode(out.stderr));
 }

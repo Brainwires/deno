@@ -6,7 +6,7 @@
     "source": "config",
     "effective": "warn",
     "wouldApply": "off",
-    "stage": "preview",
+    "stage": "[WILDLINE]",
     "reason": "as requested",
 [WILDCARD]
   }
