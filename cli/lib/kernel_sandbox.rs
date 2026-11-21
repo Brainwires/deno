@@ -218,9 +218,13 @@ pub enum RunKind {
   /// A compiled program (`denort`): always fixed, mode baked at compile time.
   Compiled,
   /// A packaged desktop app (`denort_desktop`): fixed, mode baked at compile
-  /// time. `strict` is `desktop.permissions: "strict"`; `engine` is the web
-  /// engine baked into the package. Not produced yet (WP-C, denext.30):
-  /// desktop apps resolve as [`RunKind::Compiled`] until it lands.
+  /// time, flags, environment and deno.json ignored as for
+  /// [`RunKind::Compiled`]. `strict` is `desktop.permissions: "strict"`
+  /// (carried as a baked `enforce`); `engine` is the web engine baked into
+  /// the package. Whether the engine can run inside the sandbox on this
+  /// machine is not this module's question: `kernel_apply::start_desktop`
+  /// answers it and reports the app as kernel-held or headless-only
+  /// (DENEXT.md item 483).
   DesktopPackaged { strict: bool, engine: Engine },
   /// Anything that isn't a user-code runtime (`install`, `cache`, `compile`,
   /// `fmt`, `lint`, `check`, `task`, `lsp`, …). npm lifecycle scripts keep the
@@ -237,11 +241,29 @@ pub enum RunKind {
 ///   namespace sandbox (or only the setuid helper) decides how far the
 ///   kernel sandbox can nest; on macOS a CEF app gets headless guarantees
 ///   only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Engine {
   Webview,
   Cef,
+}
+
+impl Engine {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Webview => "webview",
+      Self::Cef => "cef",
+    }
+  }
+
+  /// `deno desktop --backend` / deno.json `desktop.backend`: `cef` is
+  /// Chromium, everything else the OS web view.
+  pub fn from_backend(backend: Option<&str>) -> Self {
+    match backend {
+      Some("cef") => Self::Cef,
+      _ => Self::Webview,
+    }
+  }
 }
 
 /// How much of a command `enforce` covers.
@@ -314,6 +336,11 @@ pub enum ModeReason {
   /// `auto` chose the mode: no prompt can widen the grant in this run (no
   /// terminal, or `--no-prompt`).
   AutoNoPrompt,
+  /// A packaged desktop app whose own process isn't confined: its web
+  /// engine can't run inside the kernel sandbox on this machine (or this OS
+  /// has no enforcer for desktop apps), so the app has the headless
+  /// guarantees only (DENEXT.md item 483).
+  DesktopEngine,
 }
 
 impl ModeReason {
@@ -341,6 +368,9 @@ impl ModeReason {
       }
       Self::AutoNoPrompt => {
         "auto: no prompt can widen the grant here (no terminal, or --no-prompt)"
+      }
+      Self::DesktopEngine => {
+        "the desktop app's web engine can't run inside the kernel sandbox here"
       }
     }
   }
@@ -448,8 +478,8 @@ pub struct ModeError {
 /// Decides the kernel-sandbox mode (plan §2.1 as amended by the review):
 ///
 /// 1. Not a user-code runtime → `off`.
-/// 2. The requested mode: a compiled program's baked mode (flag, env and
-///    config ignored), else `--kernel-sandbox`, else `DENO_KERNEL_SANDBOX`
+/// 2. The requested mode: a compiled program's or packaged desktop app's
+///    baked mode (flag, env and config ignored), else `--kernel-sandbox`, else `DENO_KERNEL_SANDBOX`
 ///    (`off` / `warn` only), else deno.json, else `auto`.
 /// 3. `off` → `off`. A desktop development build → `off`.
 /// 4. `-A` with no deny → `off` (plain `-A` changes nothing).
@@ -465,7 +495,10 @@ pub fn kernel_sandbox_mode(
   inputs: &ModeInputs,
 ) -> Result<ModeResolution, ModeError> {
   let kind = inputs.kind.unwrap_or(RunKind::NotARuntime);
-  let compiled = kind == RunKind::Compiled;
+  // a packaged desktop app is a compiled program: its mode is baked, its
+  // set is its author's, and no prompt counts
+  let compiled =
+    matches!(kind, RunKind::Compiled | RunKind::DesktopPackaged { .. });
   let (requested, source) = if compiled {
     match inputs.baked {
       Some(mode) => (mode, ModeSource::Compiled),
@@ -648,6 +681,53 @@ pub fn compiled_resolution(
   .expect("a compiled program's mode never conflicts")
 }
 
+/// A packaged desktop app's mode: the baked one, as
+/// [`compiled_resolution`] (`strict`: a baked `enforce`). `stage`: the
+/// harnesses' later stage for `auto` ([`KERNEL_SANDBOX_STAGE_ENV_VAR`]; it
+/// can only raise the stage, so a desktop app honours it: the desktop beds
+/// soak the next stage before the constant moves). Pure.
+pub fn desktop_resolution(
+  baked: Option<KernelSandboxMode>,
+  dev_build: bool,
+  options: &PermissionsOptions,
+  engine: Engine,
+  stage: Option<AutoStage>,
+) -> ModeResolution {
+  kernel_sandbox_mode(&ModeInputs {
+    kind: Some(RunKind::DesktopPackaged {
+      strict: baked == Some(KernelSandboxMode::Enforce),
+      engine,
+    }),
+    baked,
+    dev_build,
+    allow_all: options_allow_all(options),
+    has_deny: options_have_deny(options),
+    prompt: options.prompt,
+    stage,
+    ..Default::default()
+  })
+  // as a compiled program: no watch, broker or dev-server inputs
+  .expect("a desktop app's mode never conflicts")
+}
+
+/// What a packaged desktop app's startup decided
+/// (`deno_lib::kernel_apply::start_desktop`), for [`check_compiled`].
+static DESKTOP: OnceLock<ModeResolution> = OnceLock::new();
+
+/// Records the resolution a packaged desktop app's kernel-sandbox startup
+/// reached. From then on [`check_compiled`] answers with it: a desktop
+/// app's startup is the one place that decides whether its process is
+/// confined (its engine may not run inside the sandbox, and it then runs
+/// headless-only instead of refusing to start). The first call wins.
+pub fn set_desktop_resolution(resolution: ModeResolution) {
+  let _ = DESKTOP.set(resolution);
+}
+
+/// The resolution [`set_desktop_resolution`] recorded.
+pub fn desktop_resolution_recorded() -> Option<&'static ModeResolution> {
+  DESKTOP.get()
+}
+
 /// `denort`'s guard before it builds the program's permissions: a baked
 /// mode that fails closed (`enforce`, `broker`) runs only when the sandbox
 /// was applied at startup (`deno_lib::kernel_apply::start_compiled`, which
@@ -661,6 +741,10 @@ pub fn check_compiled(
   dev_build: bool,
   options: &PermissionsOptions,
 ) -> Result<ModeResolution, NoEnforcerError> {
+  // a packaged desktop app's startup decided already
+  if let Some(resolution) = DESKTOP.get() {
+    return Ok(resolution.clone());
+  }
   let mut resolution = compiled_resolution(baked, dev_build, options);
   if resolution.mode.fails_closed()
     && !deno_runtime::deno_permissions::kernel_sandbox_state::is_enforcing()
@@ -1319,7 +1403,6 @@ mod tests {
   /// `auto_stage_matrix`'s denext.30 rows: packaged desktop apps (WP-C).
   /// What `auto` applies at each stage; `[preview, r3, r4]` as there.
   #[test]
-  #[ignore = "lands in WP-C"]
   fn auto_stage_matrix_desktop_packaged() {
     let desktop = |strict, engine| ModeInputs {
       kind: Some(RunKind::DesktopPackaged { strict, engine }),
@@ -1372,6 +1455,90 @@ mod tests {
         }
       }
     }
+  }
+
+  // a packaged desktop app's mode is its baked one: the flag, the
+  // environment, deno.json and the harness's switch are not read, a
+  // terminal doesn't unfix it, and `strict` is a baked enforce
+  #[test]
+  fn desktop_packaged_reads_only_the_baked_mode() {
+    let desktop = |engine| ModeInputs {
+      kind: Some(RunKind::DesktopPackaged {
+        strict: true,
+        engine,
+      }),
+      flag: Some(Off),
+      env: Some(Off),
+      config: Some(Warn),
+      forced: Some(ForcedEnforce::Project),
+      terminals: true,
+      prompt: true,
+      ..Default::default()
+    };
+    for engine in [Engine::Webview, Engine::Cef] {
+      let r = resolve(&ModeInputs {
+        baked: Some(Enforce),
+        ..desktop(engine)
+      });
+      assert_eq!((r.mode, r.source), (Enforce, ModeSource::Compiled));
+      assert!(r.fixed && !r.auto_chosen);
+      let r = resolve(&ModeInputs {
+        baked: Some(Off),
+        ..desktop(engine)
+      });
+      assert_eq!((r.mode, r.reason), (Off, ModeReason::TurnedOff));
+      // nothing baked: auto, which the preview doesn't apply
+      let r = resolve(&desktop(engine));
+      assert_eq!((r.requested, r.source), (Auto, ModeSource::Default));
+      assert_eq!(r.would_apply, AutoPlan::Enforce);
+      // a development build is off whatever is baked
+      let r = resolve(&ModeInputs {
+        baked: Some(Enforce),
+        dev_build: true,
+        ..desktop(engine)
+      });
+      assert_eq!((r.mode, r.reason), (Off, ModeReason::DevBuild));
+      // -A with no deny leaves nothing to narrow
+      let r = resolve(&ModeInputs {
+        baked: Some(Enforce),
+        allow_all: true,
+        ..desktop(engine)
+      });
+      assert_eq!((r.mode, r.reason), (Off, ModeReason::AllowAll));
+    }
+    let options = PermissionsOptions {
+      allow_read: Some(vec!["/data".to_string()]),
+      prompt: true,
+      ..Default::default()
+    };
+    let r =
+      desktop_resolution(Some(Enforce), false, &options, Engine::Cef, None);
+    assert_eq!(r.mode, Enforce);
+    assert!(
+      !desktop_resolution(Some(Enforce), true, &options, Engine::Cef, None)
+        .mode
+        .fails_closed()
+    );
+    // the harness's stage raises what auto applies, never what is baked
+    let auto = |stage| {
+      desktop_resolution(None, false, &options, Engine::Webview, stage).mode
+    };
+    assert_eq!(auto(None), Off);
+    assert_eq!(auto(Some(AutoStage::R4)), Enforce);
+    assert_eq!(
+      desktop_resolution(
+        Some(Off),
+        false,
+        &options,
+        Engine::Webview,
+        Some(AutoStage::R4)
+      )
+      .mode,
+      Off
+    );
+    assert_eq!(Engine::from_backend(Some("cef")), Engine::Cef);
+    assert_eq!(Engine::from_backend(Some("webview")), Engine::Webview);
+    assert_eq!(Engine::from_backend(None), Engine::Webview);
   }
 
   /// `auto_stage_matrix`'s denext.30 row: a policy only the broker can hold

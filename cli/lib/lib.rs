@@ -2,6 +2,7 @@
 
 pub mod args;
 pub mod kernel_apply;
+pub mod kernel_desktop;
 pub mod kernel_inherit;
 pub mod kernel_plan;
 pub mod kernel_policy;
