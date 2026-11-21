@@ -578,3 +578,52 @@ Deno.test(
     }
   },
 );
+
+// denext: every watcher of a runtime shares one notify backend, so a
+// recursive watch on an ancestor has the backend report nested paths to a
+// non-recursive watcher of a subdirectory too. The non-recursive watcher must
+// pass on only its directory's direct children.
+Deno.test(
+  { permissions: { read: true, write: true } },
+  async function watchFsNonRecursiveBesideRecursiveAncestor() {
+    const testDir = await makeTempDir();
+    const sub = testDir + "/sub";
+    const nested = sub + "/nested";
+    Deno.mkdirSync(nested, { recursive: true });
+    await delay(100);
+
+    using recursive = Deno.watchFs(testDir);
+    using flat = Deno.watchFs(sub, { recursive: false });
+
+    const deepFile = nested + "/deep.txt";
+    const directFile = sub + "/direct.txt";
+
+    // The recursive watcher sees the nested file; once it has, the backend
+    // has reported it, so a later direct-child event on the flat watcher
+    // proves the nested one was dropped rather than still in flight.
+    const sawDeep = (async () => {
+      for await (const event of recursive) {
+        if (event.paths.some((p) => p.endsWith("deep.txt"))) return;
+      }
+    })();
+    const flatPaths: string[] = [];
+    const sawDirect = (async () => {
+      for await (const event of flat) {
+        flatPaths.push(...event.paths);
+        if (event.paths.some((p) => p.endsWith("direct.txt"))) return;
+      }
+    })();
+
+    Deno.writeFileSync(deepFile, new Uint8Array([1]));
+    await sawDeep;
+    Deno.writeFileSync(directFile, new Uint8Array([1]));
+    await sawDirect;
+
+    for (const path of flatPaths) {
+      assert(
+        !path.includes("deep.txt"),
+        `non-recursive watcher received a nested path: ${path}`,
+      );
+    }
+  },
+);

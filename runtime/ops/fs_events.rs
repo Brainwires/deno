@@ -201,12 +201,10 @@ struct WatchSender {
   /// The permissions of the runtime that opened the watch, which every
   /// reported path is checked against (see [`WatchSender::readable_event`]).
   permissions: Option<PermissionsContainer>,
-  /// Whether the watch is recursive. Only recursive watchers are told about
-  /// what [`new_dir_scan`] finds in a new directory.
-  #[cfg_attr(
-    not(any(target_os = "linux", target_os = "android")),
-    allow(dead_code, reason = "read by the inotify new-directory scan")
-  )]
+  /// Whether the watch is recursive. A non-recursive watcher is told only
+  /// about its watched paths and their direct children (see
+  /// [`event_matches_watched_paths`]); only recursive watchers are told
+  /// about what the inotify new-directory scan finds in a new directory.
   recursive: bool,
 }
 
@@ -334,21 +332,49 @@ fn canonicalize_path(path: &Path) -> Option<PathBuf> {
 /// Check if `event_path` (or its canonicalized form) matches one of the
 /// watched paths. The watched paths are pre-canonicalized to avoid
 /// repeated syscalls in the hot path.
+///
+/// denext: with `recursive` an event anywhere below a watched directory
+/// matches; without it only the watched path itself and its direct
+/// children do. The notify backend is shared by every watcher of the
+/// runtime, so a non-recursive watch whose directory is also under a
+/// recursive watch (`Deno.watchFs(root)` beside
+/// `Deno.watchFs(root + "/sub", { recursive: false })`) is handed the
+/// recursive watch's nested events, and a prefix match passed them on.
 fn event_matches_watched_paths(
   event_path: &Path,
   paths: &[PathBuf],
   canonical_paths: &[Option<PathBuf>],
+  recursive: bool,
 ) -> bool {
-  // Canonicalize the event path at most once per call.
+  // Canonicalize the event path (and, for a non-recursive watch, its
+  // parent) at most once per call.
   let canonical_event_path = canonicalize_path(event_path);
+  let mut canonical_parent: Option<Option<PathBuf>> = None;
   for (path, canonical_path) in paths.iter().zip(canonical_paths.iter()) {
     if same_file::is_same_file(event_path, path).unwrap_or(false) {
       return true;
     }
-    if matches!(
-      (&canonical_event_path, canonical_path),
-      (Some(ce), Some(cp)) if ce.starts_with(cp)
-    ) {
+    let Some(cp) = canonical_path else {
+      continue;
+    };
+    if recursive {
+      if canonical_event_path
+        .as_ref()
+        .is_some_and(|ce| ce.starts_with(cp))
+      {
+        return true;
+      }
+      continue;
+    }
+    if canonical_event_path.as_ref() == Some(cp) {
+      return true;
+    }
+    // A direct child: its parent is the watched directory. The parent is
+    // compared rather than the canonical event path, so a symlink in the
+    // directory counts as its child wherever it leads.
+    let parent = canonical_parent
+      .get_or_insert_with(|| event_path.parent().and_then(canonicalize_path));
+    if parent.as_ref() == Some(cp) {
       return true;
     }
   }
@@ -360,11 +386,13 @@ fn event_matches_watched_paths(
 /// `event_matches_watched_paths` will fail for removed files (canonicalize
 /// and is_same_file don't work on non-existent paths). On macOS with
 /// FSEvents, remove events may arrive as generic events for a path that
-/// no longer exists.
+/// no longer exists. Without `recursive`, only a removed direct child (or
+/// the watched path itself) matches.
 fn removed_event_matches_watched_paths(
   event_path: &Path,
   paths: &[PathBuf],
   canonical_paths: &[Option<PathBuf>],
+  recursive: bool,
 ) -> bool {
   if !is_file_removed(event_path) {
     return false;
@@ -383,11 +411,13 @@ fn removed_event_matches_watched_paths(
     {
       return true;
     }
-    // Check if the removed file's parent is within a watched directory.
-    if matches!(
-      (&canonical_parent, canonical_path),
-      (Some(cp_event), Some(cp_watched)) if cp_event.starts_with(cp_watched)
-    ) {
+    // Check if the removed file's parent is within (non-recursive: is) a
+    // watched directory.
+    if let (Some(cp_event), Some(cp_watched)) =
+      (&canonical_parent, canonical_path)
+      && (cp_event == cp_watched
+        || (recursive && cp_event.starts_with(cp_watched)))
+    {
       return true;
     }
   }
@@ -490,21 +520,29 @@ fn dispatch(ws: &WatchSender, res: &Result<FsEvent, NotifyError>) {
       if !ws.ignore.is_empty()
         && !event.paths.is_empty()
         && event.paths.iter().all(|event_path| {
+          // An ignored directory is ignored with everything below it.
           event_matches_watched_paths(
             event_path,
             &ws.ignore,
             &ws.canonical_ignore,
+            true,
           ) || removed_event_matches_watched_paths(
             event_path,
             &ws.ignore,
             &ws.canonical_ignore,
+            true,
           )
         })
       {
         return;
       }
       if event.paths.iter().any(|event_path| {
-        event_matches_watched_paths(event_path, &ws.paths, &ws.canonical_paths)
+        event_matches_watched_paths(
+          event_path,
+          &ws.paths,
+          &ws.canonical_paths,
+          ws.recursive,
+        )
       }) {
         if let Some(event) = ws.readable_event(event) {
           ws.send_or_record_overflow(Ok(event));
@@ -514,6 +552,7 @@ fn dispatch(ws: &WatchSender, res: &Result<FsEvent, NotifyError>) {
           event_path,
           &ws.paths,
           &ws.canonical_paths,
+          ws.recursive,
         )
       }) {
         let remove_event = FsEvent {
@@ -1246,6 +1285,121 @@ mod tests {
       Ok(Err(e)) => assert!(e.paths.is_empty()),
       other => panic!("expected an error, got {other:?}"),
     }
+  }
+
+  fn watch_sender_for(
+    path: &Path,
+    recursive: bool,
+  ) -> (WatchSender, mpsc::Receiver<Result<FsEvent, NotifyError>>) {
+    let (sender, receiver) = mpsc::channel(16);
+    let ws = make_watch_sender(
+      0,
+      vec![path.to_path_buf()],
+      vec![],
+      sender,
+      Arc::new(AtomicBool::new(false)),
+      None,
+      recursive,
+    );
+    (ws, receiver)
+  }
+
+  fn received_paths(
+    receiver: &mut mpsc::Receiver<Result<FsEvent, NotifyError>>,
+  ) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    while let Ok(res) = receiver.try_recv() {
+      paths.extend(res.unwrap().paths);
+    }
+    paths
+  }
+
+  // denext: the notify backend is shared, so a recursive watch on an
+  // ancestor makes it report nested paths to every watcher; a non-recursive
+  // watcher passes on only its directory and the directory's direct children
+  #[allow(clippy::disallowed_methods, reason = "test fixtures on disk")]
+  #[test]
+  fn non_recursive_watcher_gets_only_direct_children() {
+    let dir = test_util::TempDir::new();
+    let root = canonicalize_path(dir.path().as_path()).unwrap();
+    let sub = root.join("sub");
+    let nested = sub.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let direct = sub.join("direct.txt");
+    let deep = nested.join("deep.txt");
+    let sibling = root.join("sibling.txt");
+    std::fs::write(&direct, b"x").unwrap();
+    std::fs::write(&deep, b"x").unwrap();
+    std::fs::write(&sibling, b"x").unwrap();
+    // removed paths take the removed-file path through the matcher
+    let gone_direct = sub.join("gone.txt");
+    let gone_deep = nested.join("gone.txt");
+
+    let (recursive, mut recursive_rx) = watch_sender_for(&root, true);
+    let (flat, mut flat_rx) = watch_sender_for(&sub, false);
+    for path in [
+      &sub,
+      &direct,
+      &nested,
+      &deep,
+      &sibling,
+      &gone_direct,
+      &gone_deep,
+    ] {
+      let event = Ok(FsEvent {
+        kind: "modify",
+        paths: vec![path.clone()],
+        flag: None,
+      });
+      dispatch(&recursive, &event);
+      dispatch(&flat, &event);
+    }
+
+    assert_eq!(
+      received_paths(&mut recursive_rx),
+      vec![
+        sub.clone(),
+        direct.clone(),
+        nested.clone(),
+        deep.clone(),
+        sibling.clone(),
+        gone_direct.clone(),
+        gone_deep.clone(),
+      ]
+    );
+    assert_eq!(
+      received_paths(&mut flat_rx),
+      vec![
+        sub.clone(),
+        direct.clone(),
+        nested.clone(),
+        gone_direct.clone()
+      ]
+    );
+  }
+
+  // a non-recursive watch on a file gets the file's events, not a sibling's
+  #[allow(clippy::disallowed_methods, reason = "test fixtures on disk")]
+  #[test]
+  fn non_recursive_file_watcher_gets_only_the_file() {
+    let dir = test_util::TempDir::new();
+    let root = canonicalize_path(dir.path().as_path()).unwrap();
+    let file = root.join("file.txt");
+    let other = root.join("other.txt");
+    std::fs::write(&file, b"x").unwrap();
+    std::fs::write(&other, b"x").unwrap();
+    let (flat, mut flat_rx) = watch_sender_for(&file, false);
+    for path in [&file, &other, &root] {
+      dispatch(
+        &flat,
+        &Ok(FsEvent {
+          kind: "modify",
+          paths: vec![path.clone()],
+          flag: None,
+        }),
+      );
+    }
+    assert_eq!(received_paths(&mut flat_rx), vec![file]);
   }
 
   // https://github.com/denoland/deno/issues/36937
