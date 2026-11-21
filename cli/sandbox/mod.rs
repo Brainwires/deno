@@ -537,6 +537,18 @@ fn context_for(
         })
         .and_then(|url| url.to_file_path().ok()),
     )
+    // the tsconfig.json beside each of them: a package.json project resolves
+    // its `compilerOptions.paths` / `baseUrl` from it at run time, in the
+    // confined image too (its `extends` / `references` chain isn't followed
+    // here: a file it names outside the read grant stays unreadable)
+    .chain(
+      workspace
+        .deno_jsons()
+        .filter_map(|c| c.specifier.to_file_path().ok())
+        .chain(workspace.package_jsons().map(|p| p.path.clone()))
+        .filter_map(|p| Some(p.parent()?.join("tsconfig.json")))
+        .collect::<Vec<_>>(),
+    )
     .filter(|p| p.is_file())
     .collect();
   // the lockfile this run uses, whether or not it exists yet: the first
