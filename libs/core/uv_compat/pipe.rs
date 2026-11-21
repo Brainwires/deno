@@ -27,6 +27,8 @@ use super::stream::uv_alloc_cb;
 use super::stream::uv_buf_t;
 use super::stream::uv_read_cb;
 use super::stream::uv_stream_t;
+use super::stream::uv_write_cb;
+use super::stream::uv_write_t;
 use super::tcp::WritePending;
 use super::tcp::io_error_to_uv;
 use super::uv_handle_t;
@@ -1744,6 +1746,36 @@ unsafe fn maybe_spawn_win_read(pipe_ptr: *mut uv_pipe_t) {
   }
 }
 
+/// Fires the callbacks of the writes at the head of the handle's queue that
+/// `uv_write` already wrote in full, and returns whether there were any (see
+/// `UvLoopInner::complete_written_writes`).
+///
+/// ### Safety
+/// `pipe_ptr` must be a live, initialized handle.
+pub(crate) unsafe fn complete_written_writes(pipe_ptr: *mut uv_pipe_t) -> bool {
+  let mut completed_writes: Vec<(*mut uv_write_t, Option<uv_write_cb>, c_int)> =
+    Vec::new();
+  // SAFETY: caller contract.
+  unsafe {
+    while let Some(status) = (*pipe_ptr)
+      .internal_write_queue
+      .front()
+      .and_then(|pw| pw.status)
+    {
+      let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
+      completed_writes.push((pw.req, pw.cb, status));
+    }
+    let any = !completed_writes.is_empty();
+    // No outstanding borrows on the handle: a callback may queue a write.
+    for (req, cb, status) in completed_writes {
+      if let Some(cb) = cb {
+        cb(req, status);
+      }
+    }
+    any
+  }
+}
+
 /// Poll a Windows pipe handle for connects, accepts, reads, and writes.
 #[cfg(windows)]
 pub(crate) unsafe fn poll_pipe_handle(
@@ -1823,13 +1855,23 @@ pub(crate) unsafe fn poll_pipe_handle(
     }
 
     // 3. Poll writes.
+    //    Two phases, as for TCP and as libuv's uv__write() and
+    //    uv__write_callbacks(): the loop writes and collects the completed
+    //    writes, and their callbacks run after it. A callback may write
+    //    again; that write is queued (the handle is marked ready) and is
+    //    polled on the next iteration. Fired from inside the loop, a callback
+    //    that always wrote again kept the loop here for as long as the peer
+    //    read faster than it wrote.
+    let mut completed_writes: Vec<(
+      *mut uv_write_t,
+      Option<uv_write_cb>,
+      c_int,
+    )> = Vec::new();
     while let Some(pw) = (*pipe_ptr).internal_write_queue.front() {
       if let Some(status) = pw.status {
         any_work = true;
         let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
-        if let Some(cb) = pw.cb {
-          cb(pw.req, status);
-        }
+        completed_writes.push((pw.req, pw.cb, status));
         continue;
       }
       // Try writing to whichever pipe type we have.
@@ -1839,9 +1881,7 @@ pub(crate) unsafe fn poll_pipe_handle(
         if s.is_empty() {
           let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
           any_work = true;
-          if let Some(cb) = pw.cb {
-            cb(pw.req, 0);
-          }
+          completed_writes.push((pw.req, pw.cb, 0));
           continue;
         }
         s
@@ -1885,9 +1925,7 @@ pub(crate) unsafe fn poll_pipe_handle(
           };
           if drained {
             let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
-            if let Some(cb) = pw.cb {
-              cb(pw.req, 0);
-            }
+            completed_writes.push((pw.req, pw.cb, 0));
           }
         }
         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1895,10 +1933,14 @@ pub(crate) unsafe fn poll_pipe_handle(
         }
         Err(ref e) => {
           let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
-          if let Some(cb) = pw.cb {
-            cb(pw.req, io_error_to_uv(e));
-          }
+          completed_writes.push((pw.req, pw.cb, io_error_to_uv(e)));
         }
+      }
+    }
+    // No outstanding borrows on the handle: a callback may queue a write.
+    for (req, cb, status) in completed_writes {
+      if let Some(cb) = cb {
+        cb(req, status);
       }
     }
 
@@ -2171,14 +2213,24 @@ pub(crate) unsafe fn poll_pipe_handle(
     }
 
     // 3. Poll writes.
+    //    Two phases, as for TCP and as libuv's uv__write() and
+    //    uv__write_callbacks(): the loop writes and collects the completed
+    //    writes, and their callbacks run after it. A callback may write
+    //    again; that write is queued (the handle is marked ready) and is
+    //    polled on the next iteration. Fired from inside the loop, a callback
+    //    that always wrote again kept the loop here for as long as the peer
+    //    read faster than it wrote.
+    let mut completed_writes: Vec<(
+      *mut uv_write_t,
+      Option<uv_write_cb>,
+      c_int,
+    )> = Vec::new();
     while let Some(pw) = (*pipe_ptr).internal_write_queue.front() {
       // If already completed synchronously, just fire the callback.
       if let Some(status) = pw.status {
         any_work = true;
         let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
-        if let Some(cb) = pw.cb {
-          cb(pw.req, status);
-        }
+        completed_writes.push((pw.req, pw.cb, status));
         continue;
       }
       // When iovecs are set, walk them one head-at-a-time; otherwise
@@ -2190,9 +2242,7 @@ pub(crate) unsafe fn poll_pipe_handle(
           // Fully drained — pop and fire callback.
           let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
           any_work = true;
-          if let Some(cb) = pw.cb {
-            cb(pw.req, 0);
-          }
+          completed_writes.push((pw.req, pw.cb, 0));
           continue;
         }
         s
@@ -2270,9 +2320,7 @@ pub(crate) unsafe fn poll_pipe_handle(
           };
           if drained {
             let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
-            if let Some(cb) = pw.cb {
-              cb(pw.req, 0);
-            }
+            completed_writes.push((pw.req, pw.cb, 0));
           }
         }
         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -2297,10 +2345,14 @@ pub(crate) unsafe fn poll_pipe_handle(
         }
         Err(ref e) => {
           let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
-          if let Some(cb) = pw.cb {
-            cb(pw.req, io_error_to_uv(e));
-          }
+          completed_writes.push((pw.req, pw.cb, io_error_to_uv(e)));
         }
+      }
+    }
+    // No outstanding borrows on the handle: a callback may queue a write.
+    for (req, cb, status) in completed_writes {
+      if let Some(cb) = cb {
+        cb(req, status);
       }
     }
 

@@ -3426,6 +3426,283 @@ async fn pipe_open_not_active_until_read_start() {
   .await;
 }
 
+// ========== Pending phase: writes completed on the spot ==========
+
+/// A write callback that always writes one more byte.
+struct Rewrite {
+  handle: *mut uv_stream_t,
+  callbacks: Cell<usize>,
+  stop: Cell<bool>,
+}
+
+unsafe extern "C" fn rewrite_cb(req: *mut uv_write_t, status: i32) {
+  static BYTE: [u8; 1] = *b"x";
+  // SAFETY: the request's data is the test's `Rewrite`, which outlives it.
+  unsafe {
+    let state = &*((*req).data as *const Rewrite);
+    if status != 0 || state.stop.get() {
+      return;
+    }
+    state.callbacks.set(state.callbacks.get() + 1);
+    let buf = uv_buf_t {
+      base: BYTE.as_ptr() as *mut _,
+      len: 1,
+    };
+    assert_ok(uv_write(req, state.handle, &buf, 1, Some(rewrite_cb)));
+  }
+}
+
+/// Starts the chain of writes on `handle`, and checks that an iteration
+/// completes a few of them, not as many as the kernel's buffer takes: a
+/// write that a write callback makes, and that also completes on the spot,
+/// is completed by a later iteration (one pass of the pending phase, like
+/// libuv's `uv__run_pending`), so timers and other handles get their turn.
+async fn assert_rewrites_do_not_hold_the_loop(
+  runtime: &mut JsRuntime,
+  handle: *mut uv_stream_t,
+) {
+  // The pass before the handles are read, the handle's own poll and the pass
+  // after it complete one write each.
+  const PER_ITERATION: usize = 8;
+  let state = Rewrite {
+    handle,
+    callbacks: Cell::new(0),
+    stop: Cell::new(false),
+  };
+  let mut req = new_write();
+  req.data = &state as *const Rewrite as *mut c_void;
+  unsafe { rewrite_cb(&mut req, 0) };
+  assert_eq!(state.callbacks.get(), 1);
+
+  tick(runtime).await;
+  let first = state.callbacks.get();
+  assert!(first > 1, "the write's callback ran");
+  assert!(
+    first <= 1 + PER_ITERATION,
+    "one iteration ran {first} write callbacks"
+  );
+  for _ in 0..10 {
+    tick(runtime).await;
+  }
+  let total = state.callbacks.get();
+  assert!(total >= first + 10, "every iteration completes a write");
+  assert!(total <= 1 + 11 * PER_ITERATION, "{total} write callbacks");
+
+  // The write in flight completes, and its callback writes no more.
+  state.stop.set(true);
+  tick(runtime).await;
+  tick(runtime).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn pipe_write_callback_that_writes_again_does_not_hold_the_loop() {
+  run_test(async |runtime, uv_loop| {
+    let mut pipe_fds = [0i32; 2];
+    assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+    // Never read: one-byte writes complete on the spot thousands of times
+    // before the pipe is full.
+    let _read_guard = FdGuard(pipe_fds[0]);
+
+    let mut pipe = new_pipe(false);
+    unsafe {
+      assert_ok(pipe::uv_pipe_init(uv_loop, &mut pipe, 0));
+      assert_ok(pipe::uv_pipe_open(&mut pipe, pipe_fds[1]));
+    }
+    let handle = &mut pipe as *mut uv_pipe_t as *mut uv_stream_t;
+    assert_rewrites_do_not_hold_the_loop(runtime, handle).await;
+
+    unsafe {
+      uv_close(handle as *mut uv_handle_t, None);
+    }
+    tick(runtime).await;
+  })
+  .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tcp_write_callback_that_writes_again_does_not_hold_the_loop() {
+  run_test(async |runtime, uv_loop| {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let connected = Rc::new(Cell::new(false));
+    let connected_ptr = Rc::into_raw(connected.clone());
+    unsafe extern "C" fn on_connect(req: *mut uv_connect_t, status: i32) {
+      assert_eq!(status, 0);
+      let connected = unsafe { Rc::from_raw((*req).data as *const Cell<bool>) };
+      connected.set(true);
+      let _ = Rc::into_raw(connected);
+    }
+
+    let mut client = std::mem::MaybeUninit::<uv_tcp_t>::uninit();
+    let client_ptr = client.as_mut_ptr();
+    let mut connect_req = std::mem::MaybeUninit::<uv_connect_t>::uninit();
+    let connect_req_ptr = connect_req.as_mut_ptr();
+    unsafe {
+      uv_tcp_init(uv_loop, client_ptr);
+      (*connect_req_ptr).data = connected_ptr as *mut c_void;
+      let mut addr = std::mem::MaybeUninit::<sockaddr_in>::uninit();
+      let ip = std::ffi::CString::new("127.0.0.1").unwrap();
+      uv_ip4_addr(ip.as_ptr(), port as i32, addr.as_mut_ptr());
+      assert_ok(uv_tcp_connect(
+        connect_req_ptr,
+        client_ptr,
+        addr.as_ptr() as *const c_void,
+        Some(on_connect),
+      ));
+    }
+    for _ in 0..1000 {
+      tick(runtime).await;
+      if connected.get() {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert!(connected.get(), "Client should have connected");
+    // Accepted and never read: one-byte writes complete on the spot until
+    // the socket buffers are full.
+    let (_peer, _) = listener.accept().unwrap();
+
+    assert_rewrites_do_not_hold_the_loop(
+      runtime,
+      client_ptr as *mut uv_stream_t,
+    )
+    .await;
+
+    unsafe {
+      uv_close(client_ptr as *mut uv_handle_t, None);
+      Rc::from_raw(connected_ptr);
+    }
+    tick(runtime).await;
+  })
+  .await;
+}
+
+/// The callback of a pipe write that was written on the spot runs before a
+/// peer in the same process reads what was written, whichever handle the
+/// loop polls first (libuv runs it in the pending phase, ahead of the I/O
+/// poll). Both ends write in the same turn, so the end that wrote first is
+/// polled first, with the other end's data already there to read.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn pipe_write_callbacks_run_before_the_peer_reads() {
+  type Events = RefCell<Vec<&'static str>>;
+  struct Labelled {
+    events: *const Events,
+    label: &'static str,
+  }
+
+  unsafe extern "C" fn alloc_cb(
+    _: *mut uv_handle_t,
+    size: usize,
+    buf: *mut uv_buf_t,
+  ) {
+    let mut v = Vec::<u8>::with_capacity(size);
+    unsafe {
+      (*buf).base = v.as_mut_ptr().cast();
+      (*buf).len = size;
+    }
+    std::mem::forget(v);
+  }
+  unsafe extern "C" fn read_cb(
+    stream: *mut uv_stream_t,
+    nread: isize,
+    buf: *const uv_buf_t,
+  ) {
+    unsafe {
+      if !(*buf).base.is_null() && (*buf).len > 0 {
+        drop(Vec::<u8>::from_raw_parts((*buf).base.cast(), 0, (*buf).len));
+      }
+      if nread > 0 {
+        let info = &*((*stream).data as *const Labelled);
+        (*info.events).borrow_mut().push(info.label);
+      }
+    }
+  }
+  unsafe extern "C" fn write_cb(req: *mut uv_write_t, status: i32) {
+    assert_eq!(status, 0);
+    unsafe {
+      let info = &*((*req).data as *const Labelled);
+      (*info.events).borrow_mut().push(info.label);
+    }
+  }
+
+  run_test(async |runtime, uv_loop| {
+    let mut fds = [0i32; 2];
+    assert_eq!(
+      unsafe {
+        libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr())
+      },
+      0
+    );
+
+    let events = Events::default();
+    let labelled = |label| Labelled {
+      events: &events,
+      label,
+    };
+    let a_read = labelled("a read");
+    let b_read = labelled("b read");
+    let a_write = labelled("a write");
+    let b_write = labelled("b write");
+
+    let mut a = new_pipe(false);
+    let mut b = new_pipe(false);
+    let a_ptr = &mut a as *mut uv_pipe_t as *mut uv_stream_t;
+    let b_ptr = &mut b as *mut uv_pipe_t as *mut uv_stream_t;
+    unsafe {
+      assert_ok(pipe::uv_pipe_init(uv_loop, &mut a, 0));
+      assert_ok(pipe::uv_pipe_open(&mut a, fds[0]));
+      assert_ok(pipe::uv_pipe_init(uv_loop, &mut b, 0));
+      assert_ok(pipe::uv_pipe_open(&mut b, fds[1]));
+      (*a_ptr).data = &a_read as *const Labelled as *mut c_void;
+      (*b_ptr).data = &b_read as *const Labelled as *mut c_void;
+      assert_ok(uv_read_start(a_ptr, Some(alloc_cb), Some(read_cb)));
+      assert_ok(uv_read_start(b_ptr, Some(alloc_cb), Some(read_cb)));
+    }
+    // Both handles have been polled and wait for data.
+    tick(runtime).await;
+    tick(runtime).await;
+    assert!(events.borrow().is_empty());
+
+    let mut a_req = new_write();
+    let mut b_req = new_write();
+    a_req.data = &a_write as *const Labelled as *mut c_void;
+    b_req.data = &b_write as *const Labelled as *mut c_void;
+    let buf = uv_buf_t {
+      base: b"x".as_ptr() as *mut _,
+      len: 1,
+    };
+    unsafe {
+      assert_ok(uv_write(&mut a_req, a_ptr, &buf, 1, Some(write_cb)));
+      assert_ok(uv_write(&mut b_req, b_ptr, &buf, 1, Some(write_cb)));
+    }
+    // Written on the spot; the callbacks wait for the loop.
+    assert!(events.borrow().is_empty());
+
+    for _ in 0..1000 {
+      tick(runtime).await;
+      if events.borrow().len() >= 4 {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert_eq!(
+      *events.borrow(),
+      ["a write", "b write", "a read", "b read"],
+      "both write callbacks run before either end reads"
+    );
+
+    unsafe {
+      uv_close(a_ptr as *mut uv_handle_t, None);
+      uv_close(b_ptr as *mut uv_handle_t, None);
+    }
+    tick(runtime).await;
+  })
+  .await;
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn pipe_listener_transfers_raw_fd_ownership() {

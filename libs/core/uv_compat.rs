@@ -15,6 +15,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::ffi::CStr;
 use std::ffi::c_int;
@@ -279,6 +280,8 @@ pub(crate) struct UvLoopInner {
   /// and whose callback has yet to run (see `complete_written_writes`).
   pub(crate) written_tcp: RefCell<Vec<Arc<waker::TcpHandleWaker>>>,
   pipe_handles: RefCell<Vec<*mut uv_pipe_t>>,
+  /// The same for pipe handles.
+  pub(crate) written_pipe: RefCell<Vec<Arc<waker::PipeHandleWaker>>>,
   tty_handles: RefCell<Vec<*mut uv_tty_t>>,
   waker: RefCell<Option<Waker>>,
   closing_handles: RefCell<VecDeque<(*mut uv_handle_t, Option<uv_close_cb>)>>,
@@ -290,6 +293,24 @@ pub(crate) struct UvLoopInner {
   /// callbacks may fire from tokio's reactor thread, so access goes
   /// through this Send+Sync struct instead of `UvLoopInner` directly.
   pub(crate) shared: std::sync::Arc<waker::LoopShared>,
+}
+
+/// The handles one pass of `UvLoopInner::complete_written_writes` has
+/// visited. A handle is listed once per write and is visited once: its first
+/// visit completes every write that is complete, and a second one would
+/// complete the writes that the callbacks of the first made.
+struct VisitedHandles(Option<HashSet<usize>>);
+
+impl VisitedHandles {
+  /// For a list of `listed` handles. One entry (the usual case) needs no
+  /// set.
+  fn new(listed: usize) -> Self {
+    Self((listed > 1).then(|| HashSet::with_capacity(listed)))
+  }
+
+  fn first_visit(&mut self, ptr: usize) -> bool {
+    self.0.as_mut().is_none_or(|visited| visited.insert(ptr))
+  }
 }
 
 impl UvLoopInner {
@@ -305,6 +326,7 @@ impl UvLoopInner {
       tcp_handles: RefCell::new(Vec::with_capacity(8)),
       written_tcp: RefCell::new(Vec::new()),
       pipe_handles: RefCell::new(Vec::with_capacity(4)),
+      written_pipe: RefCell::new(Vec::new()),
       tty_handles: RefCell::new(Vec::with_capacity(4)),
       waker: RefCell::new(None),
       closing_handles: RefCell::new(VecDeque::with_capacity(16)),
@@ -588,20 +610,9 @@ impl UvLoopInner {
     }
   }
 
-  /// Poll all TCP handles for I/O readiness and fire callbacks.
-  ///
-  /// Uses direct polling via tokio's `poll_accept`/`try_read`/`try_write`.
-  /// No spawned tasks, no channels -- zero allocation in the hot path.
-  ///
-  /// Multiple passes: after callbacks fire they may produce new data
-  /// (e.g. HTTP2 frame processing triggers writes which complete
-  /// immediately). Re-poll up to 16 times to batch I/O within a
-  /// single event loop tick.
-  ///
-  /// # Safety
-  /// All TCP handle pointers in `tcp_handles` must be valid.
-  /// Fires the callbacks of the TCP writes that `uv_write` wrote in full on
-  /// the spot, and returns whether there were any: libuv's pending phase.
+  /// Fires the callbacks of the TCP and pipe writes that `uv_write` wrote in
+  /// full on the spot, and returns whether there were any: libuv's pending
+  /// phase.
   ///
   /// libuv queues the callback of such a write for the next iteration and
   /// runs it before that iteration polls for I/O (Node.js completes a plain
@@ -616,27 +627,68 @@ impl UvLoopInner {
   /// iterations). [`Self::run_io`] therefore runs this before it reads from
   /// any handle, and after each handle's callbacks.
   ///
-  /// A callback may write again; a write that also completes on the spot is
-  /// completed here too, which ends when the socket's buffer is full.
+  /// One pass over the writes that were complete when the call started, as
+  /// libuv's `uv__run_pending` makes one pass over its queue: a callback may
+  /// write again, and a write that also completes on the spot waits for the
+  /// next call (the handle is marked ready, which wakes the loop). Completed
+  /// in the same call, a callback that always writes again (`function w() {
+  /// socket.write(chunk, w) }`) kept the loop here for as long as the peer
+  /// read faster than it wrote, and no timer or other handle ran. Such a
+  /// write is still completed before the peer's handle is read: the
+  /// readiness it causes reaches the loop through the I/O poll between two
+  /// iterations, and the next call of [`Self::run_io`] starts here.
   fn complete_written_writes(&self) -> bool {
     let mut any = false;
-    loop {
-      let written = std::mem::take(&mut *self.written_tcp.borrow_mut());
-      if written.is_empty() {
-        return any;
-      }
+
+    let written = std::mem::take(&mut *self.written_tcp.borrow_mut());
+    if !written.is_empty() {
+      let mut visited = VisitedHandles::new(written.len());
       for handle_waker in written {
         // Zero once the handle is torn down (its queue went with it).
         let ptr = handle_waker.live_ptr();
-        if ptr == 0 {
+        if ptr == 0 || !visited.first_visit(ptr) {
           continue;
         }
         // SAFETY: ptr is non-zero, so the handle has not been detached.
         any |= unsafe { tcp::complete_written_writes(ptr as *mut uv_tcp_t) };
       }
     }
+
+    let written = std::mem::take(&mut *self.written_pipe.borrow_mut());
+    if !written.is_empty() {
+      let mut visited = VisitedHandles::new(written.len());
+      for handle_waker in written {
+        let ptr = handle_waker.live_ptr();
+        if ptr == 0 || !visited.first_visit(ptr) {
+          continue;
+        }
+        // SAFETY: ptr is non-zero, so the handle has not been detached.
+        any |= unsafe { pipe::complete_written_writes(ptr as *mut uv_pipe_t) };
+      }
+    }
+
+    any
   }
 
+  /// Whether a write that `uv_write` wrote in full still waits for its
+  /// callback.
+  fn has_written_writes(&self) -> bool {
+    !self.written_tcp.borrow().is_empty()
+      || !self.written_pipe.borrow().is_empty()
+  }
+
+  /// Poll all TCP handles for I/O readiness and fire callbacks.
+  ///
+  /// Uses direct polling via tokio's `poll_accept`/`try_read`/`try_write`.
+  /// No spawned tasks, no channels -- zero allocation in the hot path.
+  ///
+  /// Multiple passes: after callbacks fire they may produce new data
+  /// (e.g. HTTP2 frame processing triggers writes which complete
+  /// immediately). Re-poll up to 16 times to batch I/O within a
+  /// single event loop tick.
+  ///
+  /// # Safety
+  /// All TCP handle pointers in `tcp_handles` must be valid.
   pub(crate) unsafe fn run_io(&self) -> bool {
     // Drain ready queues once. Each popped handle is polled with a
     // `Context` built from its own per-handle waker; tokio re-registers
@@ -678,7 +730,8 @@ impl UvLoopInner {
       // Pending phase: the callbacks of the writes `uv_write` completed on
       // the spot run before any handle is read, and again after each
       // handle's callbacks, which may have written (see
-      // `complete_written_writes`).
+      // `complete_written_writes`): once per handle, so the number of
+      // passes is bounded by the handles that were ready.
       any_work |= self.complete_written_writes();
       while let Some(handle_waker) = tcp_ready.pop_front() {
         handle_waker.reset_queued();
@@ -716,6 +769,7 @@ impl UvLoopInner {
         let mut cx = Context::from_waker(&waker);
         // SAFETY: pipe_ptr is live.
         any_work |= unsafe { pipe::poll_pipe_handle(pipe_ptr, &mut cx) };
+        any_work |= self.complete_written_writes();
       }
 
       // --- TTY ---
@@ -736,6 +790,13 @@ impl UvLoopInner {
         let mut cx = Context::from_waker(&waker);
         // SAFETY: tty_ptr is live.
         any_work |= unsafe { tty::poll_tty_handle(tty_ptr, &mut cx) };
+      }
+
+      // A callback of the last pass wrote again: the next iteration
+      // completes that write. Its handle was marked ready, which woke the
+      // loop unless the handle was already queued; this covers that case.
+      if self.has_written_writes() {
+        self.shared.loop_waker.wake();
       }
 
       any_work

@@ -1036,6 +1036,10 @@ unsafe fn write_pipe(
     }
     (*pipe).flags |= UV_HANDLE_ACTIVE;
     if let Some(w) = (*pipe).internal_waker.as_ref() {
+      if status.is_some() {
+        // Its callback runs in the loop's pending phase.
+        inner.written_pipe.borrow_mut().push(w.clone());
+      }
       w.mark_ready();
     }
   }

@@ -1802,12 +1802,14 @@ pub(crate) unsafe fn poll_tcp_handle(
               //
               // Under sustained HTTP keep-alive load that turns into
               // a self-wake loop: every tick re-queues every active
-              // connection, so tokio's executor sees us continuously
-              // awoken and never yields to its reactor (event_interval
-              // controls when the reactor is polled). New TCP
-              // readiness from the kernel piles up undelivered,
-              // pushing p99 from ~3 ms to ~30 ms at 100 connections
-              // for short responses where every read is partial.
+              // connection, and the next iteration polls each of them
+              // again only to find nothing to read. (The loop polls
+              // the reactor between two iterations whatever wakes it,
+              // see `LoopWaker` in runtime/jsruntime.rs, so new
+              // readiness is no longer held back behind those wakes
+              // as it was when the reactor was polled once in 61 task
+              // polls; what is left is the wasted iteration and the
+              // second poll of every connection.)
               //
               // Looping one more iteration costs an extra recv()
               // syscall, but that recv returns WouldBlock, clears
