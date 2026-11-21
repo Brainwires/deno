@@ -454,6 +454,11 @@ fn raw_window_handles(
 /// `WefDesktopApi::notifications`).
 const MAX_LIVE_NOTIFICATIONS: usize = 1024;
 
+/// laufey's menu capability bits for the dock menu (laufey.h), spelled here
+/// so the runtime builds against a laufey without the named constants.
+const LAUFEY_MENU_CAP_DOCK_MENU: u32 = 1 << 8;
+const LAUFEY_MENU_CAP_JUMP_LIST: u32 = 1 << 9;
+
 /// Remember notification `id` (ids grow, so the smallest is the oldest),
 /// forgetting the oldest beyond [`MAX_LIVE_NOTIFICATIONS`]. A forgotten one
 /// stays on screen; only `close()` from the app no longer reaches it.
@@ -2555,6 +2560,10 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       tooltips: c.tooltips(),
       destructive: c.destructive(),
       snapshot: c.snapshot(),
+      // laufey's LAUFEY_MENU_CAP_DOCK_MENU / LAUFEY_MENU_CAP_JUMP_LIST, read
+      // from the bits: a backend without them leaves them clear.
+      dock_menu: c.bits & LAUFEY_MENU_CAP_DOCK_MENU != 0,
+      jump_list: c.bits & LAUFEY_MENU_CAP_JUMP_LIST != 0,
     }
   }
 
@@ -3453,6 +3462,17 @@ laufey::main!(|| {
   // The updater's relaunch markers are not launch targets.
   let (launch_argv, app_updated_from, app_rolled_back_from) =
     deno_runtime::ops::desktop_update::split_launch_markers(&launch_argv);
+  // A Windows jump-list task that started the app: its dock menu item, which
+  // reaches the app as `Deno.dock`'s "menuclick" (through the launch inbox),
+  // not as a launch argument (nor one an update relaunch repeats).
+  let launch_dock_item =
+    deno_lib::standalone::launch_args::dock_item_from_args(&launch_argv)
+      .map(str::to_string);
+  let launch_argv = if launch_dock_item.is_some() {
+    Vec::new()
+  } else {
+    launch_argv
+  };
   #[allow(
     clippy::disallowed_methods,
     reason = "the launch directory, before the runtime (and its sys) exists"
@@ -3729,6 +3749,7 @@ laufey::main!(|| {
           deep_links,
           identifier: app_config.identifier,
           targets: launch_targets,
+          dock_item: launch_dock_item,
           initial_window: app_config.initial_window,
           display_name: app_config.name,
           app_update,
@@ -3826,6 +3847,8 @@ struct LaunchConfig {
   identifier: Option<String>,
   /// The deep links and files in this process's own arguments.
   targets: deno_lib::standalone::launch_args::LaunchTargets,
+  /// The dock menu item of the Windows jump-list task that started the app.
+  dock_item: Option<String>,
   /// `desktop.initialWindow` (metadata, else the embedded app.json).
   initial_window: deno_lib::standalone::binary::InitialWindowConfig,
   /// `name` from the embedded app.json (`desktop.app.name`): the title of
@@ -3887,8 +3910,17 @@ fn register_launch_handlers(
   // A later launch of the app, forwarded by laufey's single-instance lock
   // (a no-op unless the lock is on). Classified with the same rules as this
   // process's own arguments, relative paths against the forwarded directory.
+  // A Windows jump-list task's launch is the dock menu's click instead:
+  // laufey delivers it as that itself once the app set its dock menu, so one
+  // reaching here is a task from before (the jump list outlives the app).
   let second_inbox = inbox.clone();
   laufey::on_second_instance(move |args, cwd| {
+    if let Some(id) =
+      deno_lib::standalone::launch_args::dock_item_from_args(args)
+    {
+      second_inbox.dock_menu_click(id.to_string());
+      return;
+    }
     let cwd_path = (!cwd.is_empty()).then(|| std::path::Path::new(cwd));
     let targets = deno_lib::standalone::launch_args::parse_launch_args(
       args,
@@ -4449,6 +4481,7 @@ async fn run_desktop(
   let launch_deep_links = Arc::new(launch.deep_links);
   let app_update = launch.app_update;
   let baked_capabilities = launch.baked_capabilities;
+  let launch_dock_item = launch.dock_item;
   let launch_urls = launch.targets.urls;
   let launch_files: Vec<String> = launch
     .targets
@@ -4597,6 +4630,9 @@ async fn run_desktop(
         launch_files,
       );
       register_launch_handlers(&launch_inbox, launch_deep_links);
+      if let Some(id) = launch_dock_item {
+        launch_inbox.dock_menu_click(id);
+      }
       state.put(launch_inbox);
 
       // Register the declared schemes nobody handles (and refresh this
