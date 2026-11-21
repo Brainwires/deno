@@ -40,6 +40,7 @@ use deno_lib::kernel_apply::tls_files;
 pub use deno_lib::kernel_policy as policy;
 use deno_lib::kernel_sandbox::AutoPlan;
 use deno_lib::kernel_sandbox::AutoStage;
+use deno_lib::kernel_sandbox::EnforceCoverage;
 use deno_lib::kernel_sandbox::ForcedEnforce;
 use deno_lib::kernel_sandbox::KERNEL_SANDBOX_ENV_VAR;
 use deno_lib::kernel_sandbox::KERNEL_SANDBOX_FORCE_ENV_VAR;
@@ -120,14 +121,15 @@ fn stage_override_warned() -> Option<AutoStage> {
   }
 }
 
-/// Whether `enforce` covers the command: `run` of a file and `serve` (the
-/// others refuse to start under an `enforce` asked for by name; one `auto`
-/// chose runs them as `warn`).
-fn enforce_covers(subcommand: &DenoSubcommand) -> bool {
+/// How much of the command `enforce` covers: all of `run` of a file and
+/// `serve`; nothing of the others (they refuse to start under an `enforce`
+/// asked for by name; one `auto` chose runs them as `warn`).
+/// [`EnforceCoverage::AfterSetup`] (`test` / `bench`) lands in WP-A.
+fn enforce_covers(subcommand: &DenoSubcommand) -> EnforceCoverage {
   match subcommand {
-    DenoSubcommand::Run(run) => !run.is_stdin(),
-    DenoSubcommand::Serve(_) => true,
-    _ => false,
+    DenoSubcommand::Run(run) if !run.is_stdin() => EnforceCoverage::Full,
+    DenoSubcommand::Serve(_) => EnforceCoverage::Full,
+    _ => EnforceCoverage::None,
   }
 }
 
@@ -378,6 +380,7 @@ fn mode_inputs(
     denext_dev: under_denext_dev(),
     dev_build: false,
     permission_broker: deno_runtime::deno_permissions::broker::has_broker(),
+    policy_needs_supervisor: false,
   })
 }
 
@@ -592,7 +595,7 @@ pub fn check_run(
       // or this runtime has no enforcer for the OS: the run stays as it was
       resolution.mode = KernelSandboxMode::Off;
       resolution.auto_chosen = false;
-    } else if !covered {
+    } else if covered == EnforceCoverage::None {
       degraded = Some("enforce doesn't cover this command yet".to_string());
       resolution.mode = KernelSandboxMode::Warn;
     }
@@ -688,7 +691,7 @@ pub fn check_run(
         compiled,
         ctx,
         options,
-        observable: covered,
+        observable: covered != EnforceCoverage::None,
         degraded: degraded.clone(),
         header: !report,
         skipped_npmrcs: skipped_npmrcs(cli_options, ctx, compiled),
@@ -771,6 +774,7 @@ fn plan_name(plan: AutoPlan) -> &'static str {
     AutoPlan::Enforce => "enforce",
     AutoPlan::Warn => "warn",
     AutoPlan::Off => "off",
+    AutoPlan::Broker => "broker",
   }
 }
 
@@ -1223,5 +1227,27 @@ pub fn info(cli_options: &CliOptions) -> KernelSandboxInfo {
     capabilities: caps,
     features,
     warnings,
+  }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+  use super::*;
+  use crate::args::BenchFlags;
+  use crate::args::TestFlags;
+
+  /// `auto_stage_matrix`'s denext.30 row for `test` / `bench`: `enforce`
+  /// covers them after type check and coverage setup.
+  #[test]
+  #[ignore = "lands in WP-A"]
+  fn test_and_bench_are_covered_after_setup() {
+    assert_eq!(
+      enforce_covers(&DenoSubcommand::Test(TestFlags::default())),
+      EnforceCoverage::AfterSetup
+    );
+    assert_eq!(
+      enforce_covers(&DenoSubcommand::Bench(BenchFlags::default())),
+      EnforceCoverage::AfterSetup
+    );
   }
 }

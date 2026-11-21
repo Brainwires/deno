@@ -217,10 +217,45 @@ pub enum RunKind {
   Jupyter,
   /// A compiled program (`denort`): always fixed, mode baked at compile time.
   Compiled,
+  /// A packaged desktop app (`denort_desktop`): fixed, mode baked at compile
+  /// time. `strict` is `desktop.permissions: "strict"`; `engine` is the web
+  /// engine baked into the package. Not produced yet (WP-C, denext.30):
+  /// desktop apps resolve as [`RunKind::Compiled`] until it lands.
+  DesktopPackaged { strict: bool, engine: Engine },
   /// Anything that isn't a user-code runtime (`install`, `cache`, `compile`,
   /// `fmt`, `lint`, `check`, `task`, `lsp`, …). npm lifecycle scripts keep the
   /// lifecycle-script jail.
   NotARuntime,
+}
+
+/// A packaged desktop app's web engine. What each one means depends on the
+/// OS it runs on (denext.30 plan §1.1):
+///
+/// - [`Engine::Webview`]: the OS web view — WKWebView on macOS, WebKitGTK on
+///   Linux, WebView2 on Windows.
+/// - [`Engine::Cef`]: the bundled Chromium Embedded Framework. On Linux its
+///   namespace sandbox (or only the setuid helper) decides how far the
+///   kernel sandbox can nest; on macOS a CEF app gets headless guarantees
+///   only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Engine {
+  Webview,
+  Cef,
+}
+
+/// How much of a command `enforce` covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EnforceCoverage {
+  /// The whole run, from before user code loads (`run` of a file, `serve`).
+  Full,
+  /// The run after the command's own setup (type check, coverage directory):
+  /// `test` / `bench`. Not produced yet (WP-A, denext.30).
+  AfterSetup,
+  /// Not covered: an `enforce` asked for by name refuses to start, one
+  /// `auto` chose runs as `warn`.
+  None,
 }
 
 /// Where the requested mode came from.
@@ -324,6 +359,10 @@ pub enum AutoPlan {
   Warn,
   /// Not fixed, or turned off: nothing.
   Off,
+  /// The policy needs the supervising broker (Mode B): host-scoped network,
+  /// a write deny inside an allow, Unix sockets by path on Linux. Not
+  /// produced yet (WP-B, denext.30).
+  Broker,
 }
 
 /// Everything [`kernel_sandbox_mode`] decides from.
@@ -358,6 +397,10 @@ pub struct ModeInputs {
   /// The stage `auto` runs at; `None`: [`AUTO_STAGE`]. Set from the
   /// harnesses' [`KERNEL_SANDBOX_STAGE_ENV_VAR`], and by tests.
   pub stage: Option<AutoStage>,
+  /// The compiled policy needs the supervisor (Mode B) and every rule
+  /// enforce can't hold in place is one the broker closes. Nothing sets or
+  /// reads it yet (WP-B, denext.30).
+  pub policy_needs_supervisor: bool,
 }
 
 /// The mode a process runs in, and why.
@@ -375,6 +418,9 @@ pub struct ModeResolution {
   pub fixed: bool,
   /// `-A` with deny rules: only the denies would be enforced.
   pub deny_only: bool,
+  /// The run needs the supervising broker (Mode B). Always `false` until
+  /// WP-B (denext.30) sets it.
+  pub needs_supervisor: bool,
   /// What `auto` chooses here (applied from [`AutoStage::R3`] on).
   pub would_apply: AutoPlan,
   /// The stage `auto` ran at.
@@ -459,6 +505,7 @@ pub fn kernel_sandbox_mode(
     reason: ModeReason::Requested,
     fixed,
     deny_only: inputs.allow_all && inputs.has_deny,
+    needs_supervisor: false,
     would_apply: AutoPlan::Off,
     stage: inputs.stage.unwrap_or(AUTO_STAGE).max(AUTO_STAGE),
     auto_chosen: false,
@@ -527,6 +574,7 @@ pub fn kernel_sandbox_mode(
       AutoPlan::Enforce => KernelSandboxMode::Enforce,
       AutoPlan::Warn => KernelSandboxMode::Warn,
       AutoPlan::Off => KernelSandboxMode::Off,
+      AutoPlan::Broker => KernelSandboxMode::Broker,
     };
     resolution.reason = if author_fixed {
       ModeReason::AutoAuthorFixed
@@ -1266,6 +1314,142 @@ mod tests {
         .is_ok()
       );
     }
+  }
+
+  /// `auto_stage_matrix`'s denext.30 rows: packaged desktop apps (WP-C).
+  /// What `auto` applies at each stage; `[preview, r3, r4]` as there.
+  #[test]
+  #[ignore = "lands in WP-C"]
+  fn auto_stage_matrix_desktop_packaged() {
+    let desktop = |strict, engine| ModeInputs {
+      kind: Some(RunKind::DesktopPackaged { strict, engine }),
+      ..run()
+    };
+    let rows: Vec<(&str, ModeInputs, [KernelSandboxMode; 3])> = vec![
+      (
+        "a strict desktop package (webview): enforce from R3",
+        desktop(true, Engine::Webview),
+        [Off, Enforce, Enforce],
+      ),
+      (
+        "a strict desktop package (CEF): enforce from R3 (headless-only where the engine can't nest is the enforcer's call)",
+        desktop(true, Engine::Cef),
+        [Off, Enforce, Enforce],
+      ),
+      (
+        "a desktop package that isn't strict: the author fixed it all the same",
+        desktop(false, Engine::Webview),
+        [Off, Enforce, Enforce],
+      ),
+      (
+        "a strict desktop package launched from a terminal: fixed all the same",
+        ModeInputs {
+          terminals: true,
+          ..desktop(true, Engine::Webview)
+        },
+        [Off, Enforce, Enforce],
+      ),
+      (
+        "a desktop development build",
+        ModeInputs {
+          dev_build: true,
+          ..desktop(true, Engine::Webview)
+        },
+        [Off, Off, Off],
+      ),
+    ];
+    let stages = [AutoStage::Preview, AutoStage::R3, AutoStage::R4];
+    for (name, inputs, expected) in rows {
+      for (stage, want) in stages.iter().zip(expected) {
+        let r = resolve(&ModeInputs {
+          stage: Some(*stage),
+          ..inputs.clone()
+        });
+        assert_eq!(r.mode, want, "{name} at {stage:?}");
+        if want != Off {
+          assert!(r.auto_chosen, "{name} at {stage:?}");
+          assert_eq!(r.reason, ModeReason::AutoAuthorFixed, "{name}");
+        }
+      }
+    }
+  }
+
+  /// `auto_stage_matrix`'s denext.30 row: a policy only the broker can hold
+  /// (host-scoped network, a write deny inside an allow) goes to the
+  /// supervisor at R4 instead of falling back to warn (WP-B).
+  #[test]
+  #[ignore = "lands in WP-B"]
+  fn auto_stage_matrix_broker_closable() {
+    let inputs = ModeInputs {
+      policy_needs_supervisor: true,
+      ..run()
+    };
+    let r = resolve(&ModeInputs {
+      stage: Some(AutoStage::R4),
+      ..inputs.clone()
+    });
+    assert_eq!(r.would_apply, AutoPlan::Broker);
+    assert_eq!(r.mode, Broker);
+    assert!(r.needs_supervisor);
+    assert!(r.auto_chosen);
+    // the preview records it and applies nothing
+    let r = resolve(&ModeInputs {
+      stage: Some(AutoStage::Preview),
+      ..inputs
+    });
+    assert_eq!(r.mode, Off);
+    assert_eq!(r.would_apply, AutoPlan::Broker);
+  }
+
+  /// `auto_stage_matrix`'s denext.30 rows: a run where a prompt can happen
+  /// enforces its deny rules only (D1), and `-A --deny-*` does the same on
+  /// a terminal (D2). WP-A.
+  #[test]
+  #[ignore = "lands in WP-A"]
+  fn auto_stage_matrix_deny_only_prompt() {
+    let tty = |mut i: ModeInputs| {
+      i.terminals = true;
+      i
+    };
+    let rows: Vec<(&str, ModeInputs)> = vec![
+      (
+        "a prompt can happen, with a --deny-*: the denies (D1)",
+        ModeInputs {
+          has_deny: true,
+          ..tty(run())
+        },
+      ),
+      (
+        "-A with a --deny-* on a terminal: the denies (D2)",
+        ModeInputs {
+          allow_all: true,
+          has_deny: true,
+          ..tty(run())
+        },
+      ),
+    ];
+    for (name, inputs) in rows {
+      let r = resolve(&ModeInputs {
+        stage: Some(AutoStage::R4),
+        ..inputs.clone()
+      });
+      assert_eq!(r.mode, Enforce, "{name}");
+      assert!(r.deny_only, "{name}");
+      assert!(r.auto_chosen, "{name}");
+      // the prompt stays: the set isn't fixed, only its ceiling is
+      assert!(!r.fixed, "{name}");
+      let r = resolve(&ModeInputs {
+        stage: Some(AutoStage::Preview),
+        ..inputs
+      });
+      assert_eq!(r.mode, Off, "{name}");
+    }
+    // with no deny a prompt still means off at every stage
+    let r = resolve(&ModeInputs {
+      stage: Some(AutoStage::R4),
+      ..tty(run())
+    });
+    assert_eq!(r.mode, Off);
   }
 
   #[test]

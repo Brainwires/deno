@@ -34,6 +34,7 @@ use crate::kernel_policy::GapResolution;
 use crate::kernel_policy::ImplicitSet;
 use crate::kernel_policy::KernelPolicy;
 use crate::kernel_policy::TargetOs;
+use crate::kernel_sandbox::Engine;
 use crate::kernel_sandbox::KernelSandboxMode;
 use crate::kernel_sandbox::ModeResolution;
 use crate::kernel_sandbox::compiled_resolution;
@@ -274,6 +275,33 @@ fn fatal_list<'a>(
     .filter(|g| g.is_fatal_under_enforce())
     .map(|g| format!("  - {}: {}", g.rule, g.detail))
     .collect()
+}
+
+/// A packaged desktop app's kernel-sandbox startup: in place, before the
+/// web engine starts and before any thread. `strict` is
+/// `desktop.permissions: "strict"`, `engine` the engine baked into the
+/// package ([`Engine`]).
+///
+/// A stub until WP-C (denext.30): it applies nothing and returns the
+/// not-enforced outcome a desktop app gets today (the baked mode resolved as
+/// for any compiled program, `enforcing: false`, no cache folder, no plan).
+/// Nothing calls it yet.
+pub fn start_desktop(
+  start: &CompiledStart,
+  strict: bool,
+  engine: Engine,
+) -> Result<CompiledOutcome, CompiledStartError> {
+  let _ = (strict, engine);
+  Ok(CompiledOutcome {
+    resolution: compiled_resolution(
+      start.baked,
+      start.dev_build,
+      start.options,
+    ),
+    enforcing: false,
+    cache_dir: None,
+    plan: None,
+  })
 }
 
 /// A compiled program's kernel-sandbox startup, first thing in `main`
