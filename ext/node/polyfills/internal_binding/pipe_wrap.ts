@@ -92,12 +92,15 @@ PipeWrap.prototype.fchmod = function (mode: number): number {
     return MapPrototypeGet(codeMap, "EINVAL");
   }
 
+  // The "other" bits are spelled out: Windows has no S_IROTH / S_IWOTH
+  // constant, and there the op reads them as "Everyone may read / write the
+  // named pipe" (DENEXT.md item 484).
   let desiredMode = 0;
   if (mode & constants.UV_READABLE) {
-    desiredMode |= fs.S_IRUSR | fs.S_IRGRP | fs.S_IROTH;
+    desiredMode |= fs.S_IRUSR | fs.S_IRGRP | fs.S_IROTH | 0o004;
   }
   if (mode & constants.UV_WRITABLE) {
-    desiredMode |= fs.S_IWUSR | fs.S_IWGRP | fs.S_IWOTH;
+    desiredMode |= fs.S_IWUSR | fs.S_IWGRP | fs.S_IWOTH | 0o002;
   }
 
   return FunctionPrototypeCall(nativeFchmod, this, desiredMode);

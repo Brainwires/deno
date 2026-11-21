@@ -19371,6 +19371,68 @@ where the changes are discussed.
        (`app_config_file_browser`), `rt_desktop::app_origin`
        (`app_browser_from_metadata_or_app_json`).
      - Node tests enabled: none; Node has no desktop API.
+484. **`fix(node/net)`: a Windows named-pipe server's pipe belongs to the
+     account that created it** (security; runtime;
+     `libs/core/uv_compat/{pipe.rs,pipe_security.rs}`, `libs/core/Cargo.toml`,
+     `ext/node/ops/pipe_wrap.rs`,
+     `ext/node/polyfills/internal_binding/pipe_wrap.ts`,
+     `tests/unit_node/net_test.ts`). A `node:net` server on a pipe path
+     (`net.createServer().listen("\\\\.\\pipe\\name")`, the local IPC of
+     a Windows program and what denext's `listenLocalIpc` uses there) created
+     its pipe with no security attributes, so the pipe took Windows' default
+     descriptor, which also lets every other local account open it for
+     reading. Every instance is now created with an explicit descriptor
+     (`create_win_pipe_instance`):
+     - **The descriptor.** In SDDL,
+       `O:<user>D:P(A;;0x1f01ff;;;<user>)(A;;0x1f01ff;;;SY)`: owned by the
+       user of the process's token, with a protected DACL (nothing inherited)
+       of two ACEs, `FILE_ALL_ACCESS` for that user and for LocalSystem.
+       Administrators have no ACE: an elevated process of the same user
+       carries the user's SID and matches the first one, and an administrator
+       of another account is not a party to the program's IPC. A descriptor
+       that can't be built fails the listen; the pipe is never created with
+       the default one instead.
+     - **One owner per name.** The first instance a server creates carries
+       `FILE_FLAG_FIRST_PIPE_INSTANCE` (it already did), so `listen` on a
+       name another process serves fails with `EADDRINUSE` and the server
+       never becomes one more instance of a pipe it doesn't own. The
+       instances `uv_pipe_accept` creates afterwards, on the same handle,
+       don't carry it. With the DACL above, no other account can add an
+       instance of the server's pipe either (`FILE_CREATE_PIPE_INSTANCE`).
+     - **Local only.** `PIPE_REJECT_REMOTE_CLIENTS` on every instance (tokio's
+       default, now set explicitly).
+     - **`readableAll` / `writableAll`.** `server.listen({ path, readableAll,
+       writableAll })` was a no-op on Windows. It now does what libuv's
+       `uv_pipe_chmod` does (`uv_pipe_chmod` in `pipe.rs`; the instances are
+       opened with `WRITE_DAC` for it): the pipe's DACL is replaced with the
+       one above plus an ACE for Everyone, `(A;;0x120189;;;WD)` for
+       `readableAll` (`FILE_GENERIC_READ | FILE_WRITE_ATTRIBUTES`),
+       `(A;;0x120196;;;WD)` for `writableAll` (`FILE_GENERIC_WRITE |
+       FILE_READ_ATTRIBUTES`), `(A;;0x12019f;;;WD)` for both. As in Node,
+       `writableAll` includes the right to create instances of the pipe
+       (`FILE_GENERIC_WRITE` holds `FILE_CREATE_PIPE_INSTANCE`, and a client
+       that opens with `GENERIC_WRITE`, as Node's and tokio's do, needs it):
+       use it only for a pipe every local account is meant to share.
+     - **Stricter than Node, on purpose.** Node (libuv) creates the pipe with
+       the default descriptor unless one of the two options is set. Here the
+       default is the user and LocalSystem only, so a server that other
+       accounts must reach (a service a per-user client talks to) has to say
+       so with `readableAll` / `writableAll`. Clients are unchanged: they
+       connect as before, and a client of the same account always can.
+     - User-facing note: on Windows a `node:net` pipe server is reachable by
+       its own account and LocalSystem only; pass `readableAll` / `writableAll`
+       to `listen()` to open it to other accounts. A pipe name another
+       process already serves fails `listen()` with `EADDRINUSE`.
+     - Tests: `libs/core/uv_compat/pipe_security.rs` (Windows: the SDDL, the
+       built descriptor's owner, protection and ACEs, the descriptor read back
+       from a live pipe with `GetSecurityInfo`, a refused second first
+       instance, the Everyone ACE added and removed by the chmod, a later
+       instance sharing the first one's descriptor);
+       `tests/unit_node/net_test.ts` (`a second server on a served named pipe
+       fails with EADDRINUSE`, `a path server listens with readableAll and
+       writableAll`).
+     - Node tests enabled: none new; `parallel/test-net-server-listen-path.js`
+       (already enabled) now exercises the chmod on Windows.
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -19381,7 +19443,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-479) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-479, 484) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

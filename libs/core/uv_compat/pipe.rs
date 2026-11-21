@@ -68,6 +68,11 @@ pub struct uv_pipe_t {
   #[cfg(windows)]
   pub(crate) internal_win_client:
     Option<tokio::net::windows::named_pipe::NamedPipeClient>,
+  /// Who besides the process's account and LocalSystem may open the pipe
+  /// this handle listens on: `pipe_security::EVERYONE_READ` /
+  /// `EVERYONE_WRITE` (`readableAll` / `writableAll`), 0 for nobody.
+  #[cfg(windows)]
+  pub(crate) internal_win_everyone: u8,
   /// Pending `NamedPipeServer::connect()` future. When ready, a client
   /// has connected and the connection callback should fire.
   #[cfg(windows)]
@@ -257,6 +262,8 @@ pub fn new_pipe(ipc: bool) -> uv_pipe_t {
     internal_win_server: None,
     #[cfg(windows)]
     internal_win_client: None,
+    #[cfg(windows)]
+    internal_win_everyone: 0,
     #[cfg(windows)]
     internal_win_connect_fut: None,
     #[cfg(windows)]
@@ -915,6 +922,87 @@ pub unsafe fn uv_pipe_connect(
   0
 }
 
+/// Creates one instance of the pipe a server listens on (DENEXT.md item
+/// 484).
+///
+/// - An explicit security descriptor (see [`super::pipe_security`]): the
+///   account the process runs as and LocalSystem, plus Everyone only as
+///   `everyone` (`readableAll` / `writableAll`) says. Without one the pipe
+///   takes the default descriptor, which lets every local account read it.
+///   A descriptor that can't be built fails the call: the pipe is never
+///   created with the default one instead.
+/// - `first` sets `FILE_FLAG_FIRST_PIPE_INSTANCE`: the call fails
+///   (`ERROR_ACCESS_DENIED`) when the name already has an instance.
+/// - `PIPE_REJECT_REMOTE_CLIENTS`, always: a local IPC pipe is not reachable
+///   over SMB.
+/// - `WRITE_DAC` on the handle, which `uv_pipe_chmod` needs.
+///
+/// No instance limit (tokio's default, PIPE_UNLIMITED_INSTANCES), as libuv
+/// creates its pipes: the first instance's limit is the pipe's for good, and
+/// `pending_instances` (4) is how many instances libuv keeps LISTENING, not
+/// how many may exist. With the limit at 4, the instance `uv_pipe_accept`
+/// creates for the next client failed (ERROR_PIPE_BUSY) once four clients
+/// were connected, and the server never accepted again (DENEXT.md item 464).
+#[cfg(windows)]
+fn create_win_pipe_instance(
+  path: &str,
+  first: bool,
+  everyone: u8,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+  let mut security =
+    super::pipe_security::PipeSecurity::for_current_user(everyone)?;
+  let mut opts = tokio::net::windows::named_pipe::ServerOptions::new();
+  opts.first_pipe_instance(first);
+  opts.reject_remote_clients(true);
+  opts.write_dac(true);
+  // SAFETY: `security` holds a valid SECURITY_ATTRIBUTES and descriptor
+  // until the end of this function; CreateNamedPipeW copies the descriptor.
+  unsafe {
+    opts.create_with_security_attributes_raw(path, security.attributes())
+  }
+}
+
+/// `uv_pipe_chmod` for a Windows named pipe: `mode` is a combination of
+/// `UV_READABLE` (1) and `UV_WRITABLE` (2), and adds an ACE that lets
+/// Everyone open the pipe for reading and / or writing (`readableAll` /
+/// `writableAll` of `server.listen()`). The DACL is replaced, not added to,
+/// so a later call with fewer flags takes access away again. Applies to the
+/// listening pipe when there is one, and to the instances created after.
+///
+/// # Safety
+/// `pipe` must be a valid pointer to an initialized `uv_pipe_t`.
+#[cfg(windows)]
+pub unsafe fn uv_pipe_chmod(pipe: *mut uv_pipe_t, mode: c_int) -> c_int {
+  use std::os::windows::io::AsRawHandle;
+
+  use super::pipe_security::EVERYONE_READ;
+  use super::pipe_security::EVERYONE_WRITE;
+
+  if mode & !3 != 0 {
+    return super::UV_EINVAL;
+  }
+  let mut everyone = 0;
+  if mode & 1 != 0 {
+    everyone |= EVERYONE_READ;
+  }
+  if mode & 2 != 0 {
+    everyone |= EVERYONE_WRITE;
+  }
+  unsafe {
+    if let Some(server) = (*pipe).internal_win_server.as_ref()
+      && (*pipe).internal_bind_path.is_some()
+      && let Err(e) = super::pipe_security::set_pipe_dacl(
+        server.as_raw_handle() as _,
+        everyone,
+      )
+    {
+      return io_error_to_uv(&e);
+    }
+    (*pipe).internal_win_everyone = everyone;
+  }
+  0
+}
+
 /// Start listening for connections on a Windows named pipe.
 ///
 /// # Safety
@@ -938,9 +1026,16 @@ pub unsafe fn uv_pipe_listen(
     // instance `uv_pipe_accept` creates for the next client failed
     // (ERROR_PIPE_BUSY) once four clients were connected, and the server
     // never accepted again (DENEXT.md item 464).
-    let mut opts = tokio::net::windows::named_pipe::ServerOptions::new();
-    opts.first_pipe_instance(true);
-    let server = match opts.create(&path) {
+    // The first instance of this server's pipe (item 484):
+    // FILE_FLAG_FIRST_PIPE_INSTANCE, so a name some other process already
+    // serves fails the listen and this server never becomes one more
+    // instance of a pipe it does not own. Every later instance comes from
+    // `uv_pipe_accept` on this same handle, without the flag.
+    let server = match create_win_pipe_instance(
+      &path,
+      true,
+      (*pipe).internal_win_everyone,
+    ) {
       Ok(s) => s,
       Err(e) => {
         // ERROR_ACCESS_DENIED (5) from CreateNamedPipe with
@@ -1004,9 +1099,11 @@ pub unsafe fn uv_pipe_accept(
       // Create a new server instance for the next connection, and
       // queue up its connect future so we notice the next client.
       if let Some(ref path) = (*server).internal_bind_path {
-        let mut opts = tokio::net::windows::named_pipe::ServerOptions::new();
-        opts.first_pipe_instance(false);
-        if let Ok(new_server) = opts.create(path.as_str()) {
+        if let Ok(new_server) = create_win_pipe_instance(
+          path.as_str(),
+          false,
+          (*server).internal_win_everyone,
+        ) {
           let new_server = std::sync::Arc::new(new_server);
           let fut_server = new_server.clone();
           let connect_fut = Box::pin(async move { fut_server.connect().await });

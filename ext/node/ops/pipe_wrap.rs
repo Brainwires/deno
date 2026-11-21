@@ -511,9 +511,22 @@ impl PipeWrap {
     }
     #[cfg(windows)]
     {
-      let _ = mode;
-      // Windows named pipes don't support chmod.
-      0
+      // A named pipe has a DACL, not mode bits: the "other" bits say
+      // whether Everyone may read and / or write it (libuv's
+      // uv_pipe_chmod; DENEXT.md item 484).
+      let pipe = self.pipe_ptr();
+      if pipe.is_null() {
+        return uv_compat::UV_EBADF;
+      }
+      let mut flags = 0;
+      if mode & 0o004 != 0 {
+        flags |= 1; // UV_READABLE
+      }
+      if mode & 0o002 != 0 {
+        flags |= 2; // UV_WRITABLE
+      }
+      // SAFETY: pipe is valid (null-checked above).
+      unsafe { uv_compat::uv_pipe_chmod(pipe, flags) }
     }
   }
 
