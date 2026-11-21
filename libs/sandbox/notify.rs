@@ -995,6 +995,12 @@ pub(crate) fn resolve(
     joined.extend_from_slice(path.as_bytes());
     CString::new(joined).map_err(|_| libc::EINVAL)?
   };
+  // `/proc/self` names the process that looks it up, and the lookup below
+  // is this process's: name the caller's entry instead
+  let path = match caller_proc_view(tid, path.as_bytes()) {
+    Some(view) => CString::new(view).map_err(|_| libc::EINVAL)?,
+    None => path,
+  };
   let nofollow = if follow { 0 } else { libc::O_NOFOLLOW };
   let flags = libc::O_PATH | libc::O_CLOEXEC | nofollow;
   match openat2(
@@ -1015,6 +1021,34 @@ pub(crate) fn resolve(
     }
     Err(e) => Err(e),
   }
+}
+
+/// `path` with a leading `/proc/self` or `/proc/thread-self` (the process
+/// or thread that looks it up) replaced by the entry of the calling thread
+/// `tid`: `/proc/<its process>` and `/proc/<its process>/task/<tid>`. A
+/// supervisor resolving a caller's path would otherwise reach its own entry
+/// (the tracing observer reported the run's own `/proc/self` reads as the
+/// supervisor's). `None`: no such prefix, or the caller is gone.
+fn caller_proc_view(tid: u32, path: &[u8]) -> Option<Vec<u8>> {
+  let lead = path.iter().take_while(|b| **b == b'/').count();
+  let rest = &path[lead..];
+  let strip = |prefix: &[u8]| -> Option<usize> {
+    (rest.starts_with(prefix)
+      && (rest.len() == prefix.len() || rest[prefix.len()] == b'/'))
+      .then_some(prefix.len())
+  };
+  let (len, thread) = match strip(b"proc/self") {
+    Some(len) => (len, false),
+    None => (strip(b"proc/thread-self")?, true),
+  };
+  let tgid = tgid_of(tid)?;
+  let mut out = path[..lead].to_vec();
+  out.extend_from_slice(format!("proc/{tgid}").as_bytes());
+  if thread {
+    out.extend_from_slice(format!("/task/{tid}").as_bytes());
+  }
+  out.extend_from_slice(&rest[len..]);
+  Some(out)
 }
 
 /// The path of the directory `base` beneath the directory `root` (both
@@ -1253,6 +1287,30 @@ fn group_members(pgid: u32) -> Vec<u32> {
 mod tests {
   use super::*;
   use crate::seccomp::run_filter;
+
+  #[test]
+  fn proc_self_names_the_callers_entry() {
+    let pid = std::process::id();
+    // this thread (the test's own) as the caller
+    // SAFETY: gettid has no preconditions
+    let tid = unsafe { libc::syscall(libc::SYS_gettid) } as u32;
+    let view = |p: &str| {
+      caller_proc_view(tid, p.as_bytes()).map(|v| String::from_utf8(v).unwrap())
+    };
+    assert_eq!(view("/proc/self"), Some(format!("/proc/{pid}")));
+    assert_eq!(
+      view("/proc/self/cgroup"),
+      Some(format!("/proc/{pid}/cgroup"))
+    );
+    assert_eq!(
+      view("//proc/thread-self/comm"),
+      Some(format!("//proc/{pid}/task/{tid}/comm"))
+    );
+    assert_eq!(view("proc/self/maps"), Some(format!("proc/{pid}/maps")));
+    assert_eq!(view("/proc/selfish"), None);
+    assert_eq!(view("/proc/1/cgroup"), None);
+    assert_eq!(view("/tmp/proc/self"), None);
+  }
 
   #[test]
   fn notify_program_routes_only_the_listed_syscalls() {
