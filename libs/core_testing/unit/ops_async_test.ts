@@ -138,3 +138,50 @@ test(async function testEagerOpPromiseIsInternal() {
   }
   assert(threw);
 });
+
+// The primordials' promise helpers are runtime code whatever calls them: the
+// promises they make are counted as internal (`isCreatingInternalPromise`),
+// not left to the caller's stack frames, which a promise hook reads as core's
+// for them.
+test(async function testPrimordialPromiseHelpersAreInternal() {
+  // deno-lint-ignore no-explicit-any
+  const { primordials } = (globalThis as any).__bootstrap;
+  const {
+    PromisePrototypeCatch,
+    SafePromiseAll,
+    SafePromiseAllSettled,
+    SafePromiseAny,
+    SafePromisePrototypeFinally,
+    SafePromiseRace,
+  } = primordials;
+  const inputs = [Promise.resolve(1), Promise.resolve(2)];
+  let recording = false;
+  const created: boolean[] = [];
+  Deno.core.setPromiseHooks((_promise: Promise<unknown>) => {
+    if (recording) created.push(Deno.core.isCreatingInternalPromise());
+  });
+  let results: Promise<unknown>[];
+  recording = true;
+  try {
+    results = [
+      PromisePrototypeCatch(inputs[0], () => {}),
+      SafePromiseAll(inputs),
+      SafePromiseAllSettled(inputs),
+      SafePromiseAny(inputs),
+      SafePromiseRace(inputs),
+      SafePromisePrototypeFinally(inputs[0], () => {}),
+    ];
+  } finally {
+    recording = false;
+  }
+  assert(created.length >= results.length);
+  assertArrayEquals(created, created.map(() => true));
+  assertEquals(
+    JSON.stringify(await Promise.all(results)),
+    JSON.stringify([1, [1, 2], [
+      { status: "fulfilled", value: 1 },
+      { status: "fulfilled", value: 2 },
+    ], 1, 1, 1]),
+  );
+  assert(!Deno.core.isCreatingInternalPromise());
+});

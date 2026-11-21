@@ -1,5 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 import { AsyncLocalStorage, AsyncResource, createHook } from "node:async_hooks";
+import { pbkdf2 } from "node:crypto";
 import { access } from "node:fs";
 import process from "node:process";
 import { clearImmediate, setImmediate } from "node:timers";
@@ -444,6 +445,38 @@ Deno.test(function fsCallbacksReportNoOpPromises() {
   let left = count;
   for (let i = 0; i < count; i++) {
     access(import.meta.filename!, (err) => {
+      if (err) {
+        hook.disable();
+        done.reject(err);
+      } else if (--left === 0) {
+        hook.disable();
+        done.resolve();
+      }
+    });
+  }
+  return checked;
+});
+
+// A callback API whose polyfill chains its op promise through the
+// `PromisePrototypeCatch` primordial is a PBKDF2REQUEST and nothing else. The
+// primordial's frame is core's, which the creator check read as JS running a
+// promise job, so each call reported a PROMISE too.
+Deno.test(function polyfillPromisesThroughPrimordialsAreNoPromises() {
+  const types: Record<string, number> = {};
+  const count = 20;
+  const done = Promise.withResolvers<void>();
+  const checked = done.promise.then(() => {
+    assertEquals(types.PBKDF2REQUEST, count);
+    assertEquals(types.PROMISE ?? 0, 0);
+  });
+  const hook = createHook({
+    init(_asyncId, type) {
+      types[type] = (types[type] ?? 0) + 1;
+    },
+  }).enable();
+  let left = count;
+  for (let i = 0; i < count; i++) {
+    pbkdf2("secret", "salt", 1, 16, "sha256", (err) => {
       if (err) {
         hook.disable();
         done.reject(err);

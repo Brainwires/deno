@@ -6396,10 +6396,7 @@
     "parallel/test-runner-test-id.js": {},
     "parallel/test-runner-test-rerun-failures.js": {},
     "parallel/test-runner-todo-suite-hook-failure.js": {},
-    "parallel/test-runner-worker-id.js": {
-      "darwin": false,
-      "reason": "Flaky on macOS: failed 1 of 3 runs on macos-15 (a worker ID used 2 times, not 3; the count depends on which worker frees first); 3 of 3 on Linux, Windows x64 and Windows arm64"
-    },
+    "parallel/test-runner-worker-id.js": {},
     "parallel/test-signal-args.js": {
       "linux": false,
       "darwin": false,

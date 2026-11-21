@@ -169,19 +169,21 @@
   // op's promise, a lazily loaded module's evaluation). Promise hooks can ask
   // (`isCreatingInternalPromise`) so that `node:async_hooks` leaves them out:
   // Node's callback APIs create no promises, and code counting PROMISE
-  // resources must not see Deno's.
-  let internalPromiseDepth = 0;
+  // resources must not see Deno's. The counter is shared with the promise
+  // helpers of 00_primordials.js, which run before this file.
+  const internalPromiseScope = window.__bootstrap.internalPromiseScope;
+  delete window.__bootstrap.internalPromiseScope;
 
   function isCreatingInternalPromise() {
-    return internalPromiseDepth > 0;
+    return internalPromiseScope.depth > 0;
   }
 
   function enterInternalPromiseScope() {
-    internalPromiseDepth++;
+    internalPromiseScope.depth++;
   }
 
   function exitInternalPromiseScope() {
-    internalPromiseDepth--;
+    internalPromiseScope.depth--;
   }
 
   function setPromise(promiseId) {
@@ -199,7 +201,7 @@
     }
 
     // A promise hook (user code) runs while these are created and may throw.
-    internalPromiseDepth++;
+    internalPromiseScope.depth++;
     let wrappedPromise;
     try {
       const promise = new Promise((resolve, reject) => {
@@ -214,7 +216,7 @@
         },
       );
     } finally {
-      internalPromiseDepth--;
+      internalPromiseScope.depth--;
     }
     wrappedPromise[promiseIdSymbol] = promiseId;
     return wrappedPromise;
@@ -228,20 +230,20 @@
   // leaving the eager one unmarked made `node:async_hooks` report a PROMISE
   // for some `fs.access()` calls and not others.
   function resolveOpPromise(value) {
-    internalPromiseDepth++;
+    internalPromiseScope.depth++;
     try {
       return PromiseResolve(value);
     } finally {
-      internalPromiseDepth--;
+      internalPromiseScope.depth--;
     }
   }
 
   function rejectOpPromise(err) {
-    internalPromiseDepth++;
+    internalPromiseScope.depth++;
     try {
       return PromiseReject(err);
     } finally {
-      internalPromiseDepth--;
+      internalPromiseScope.depth--;
     }
   }
 

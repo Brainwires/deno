@@ -19183,7 +19183,8 @@ where the changes are discussed.
        `test-runner-worker-id`'s "Worker ID n should be used 3 times, got 4"
        asserts an even spread that holds only while every file takes as long
        as the others (Node.js v26.13 fails it too, 5 of 120 runs under load;
-       the pool hands a freed id to the next file, as Node.js's does); the
+       the pool handed a freed id to the next file, as Node.js's does; item
+       480 makes the share even); the
        timeouts of `test-runner-{cli-concurrency,tag-filter-cli,
        test-rerun-failures,worker-id}` and `test-output-junit-reporter` are
        spawn-heavy tests whose passing times rise to the 10 s budget on the
@@ -19192,6 +19193,66 @@ where the changes are discussed.
        failure fell in the run whose leak tests were OOM-killed (60 of 60 pass
        under 20-way load).
      - Node tests enabled: none (the three already run).
+
+480. **`fix(node)`: follow-ups of the denext.28 IPC and async_hooks fixes**
+     (runtime; `ext/node/polyfills/internal/{child_process,async_hooks}.ts`,
+     `ext/node/polyfills/internal/test/file_runner.ts`, `ext/node/ops/ipc.rs`,
+     `libs/core/{00_primordials,00_infra}.js`). What items 478 and 479 left
+     behind.
+     - **The same socket sent twice**: `process.send(msg, socket)` kept the
+       socket's handle, so a second send of the same socket transferred a
+       second copy of the descriptor. As in Node.js
+       (`handleConversion["net.Socket"].send`), the first send now takes the
+       handle (`socket._handle = null`, reads dropped, no idle timeout) unless
+       `keepOpen` is set, and closes it once the receiver acknowledges; a
+       second send finds no handle and sends the message alone.
+     - **A stray received descriptor**: a descriptor a peer attaches to a plain
+       message waits in the receive queue for a `NODE_HANDLE` message that
+       never comes (item 478 pairs them in order), and stayed open, registered
+       as adoptable, until the process exited. Channel teardown (disconnect,
+       end of the channel, the reader stopping) now closes every descriptor
+       still waiting (`op_node_ipc_close_received_fd`, which closes only a
+       descriptor still registered as adoptable), and so does a `NODE_HANDLE`
+       message whose handle could not be built.
+     - **Primordials' promises**: `PromisePrototypeCatch`, `SafePromiseAll`,
+       `SafePromiseAllSettled`, `SafePromiseAny`, `SafePromiseRace`,
+       `SafePromisePrototypeFinally` and `SafePromise` are arrow functions in
+       `ext:core/00_primordials.js`, so the promise a polyfill made through one
+       had a core frame as its creator, which `node:async_hooks` reads as the
+       event loop running a user promise job: `crypto.pbkdf2()` reported a
+       PROMISE per call besides its PBKDF2REQUEST. The internal promise scope's
+       counter now lives in 00_primordials.js (00_infra.js takes it over) and
+       those helpers make their promises inside it, and the creator check
+       passes primordials frames through to their caller. The audit of core's
+       other scripts (`01_core.js`, `02_timers.js`, `00_infra.js`, the
+       generated async stubs, the Rust-made promises) found no other promise
+       made outside the scope.
+     - **Worker IDs share the files evenly**: `NODE_TEST_WORKER_ID` (1 to the
+       concurrency, one file at a time per ID, reused) followed which worker
+       freed first, so a slow file left the other IDs serving most of the files
+       and `parallel/test-runner-worker-id` (9 files, concurrency 3, each ID 3
+       times) failed under load, on Node.js too. Each ID now runs
+       floor(files / concurrency) files and the first ones to need it one
+       more; a worker that has run its share stops, so the last files may wait
+       for a busy ID while another is idle. `--test-concurrency` stays the most
+       files run at once.
+     - User-facing note: a socket sent with `process.send()` / `child.send()`
+       no longer has a `_handle` afterwards (as in Node.js) and a second send
+       of it carries no handle; `node:test` may run fewer files at once near
+       the end of a run whose files take very different times.
+     - Tests: "a socket sent twice goes with the first message only" and "a
+       stray descriptor from the peer is closed when the channel goes away"
+       (the peer is a child sending a pipe's write end with its own
+       `sendmsg()`) in `tests/unit_node/child_process_test.ts`; "polyfill
+       promises through primordials are no promises" (`crypto.pbkdf2()`) in
+       `tests/unit_node/async_hooks_test.ts`; a `deno_core` unit test that the
+       primordials' helpers make internal promises; the `worker_id_even_share`
+       spec (one slow file of nine). Each of the four runtime tests fails on
+       the previous build.
+     - Node tests enabled: `parallel/test-cluster-send-deadlock.js` (not on
+       Windows, like the other socket-passing tests; its timeout was the
+       unacknowledged `NODE_HANDLE` of item 478: a reply handle read together
+       with an ack on Linux) and `parallel/test-runner-worker-id.js` on macOS.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
@@ -19203,7 +19264,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-478) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-480) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
