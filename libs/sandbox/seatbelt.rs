@@ -491,6 +491,211 @@ pub fn cli_profile(plan: &MacosPlan) -> String {
   p
 }
 
+/// Where a desktop app's process may map code from besides the plan's load
+/// scope and [`SYSTEM_CODE`]: the system's plug-ins (input methods, audio
+/// units, Quick Look), which only an administrator installs.
+const DESKTOP_SYSTEM_CODE: &[&str] = &["/Library"];
+
+/// The Unix sockets a desktop app's process reaches whatever the grant: the
+/// system log.
+const DESKTOP_UNIX_SOCKETS: &[&str] = &["/private/var/run/syslog"];
+
+/// The Seatbelt profile of a packaged desktop app whose web engine is the
+/// OS web view (WKWebView), applied to the app's own process (DENEXT.md
+/// item 483). Unlike [`cli_profile`] it allows by default: the window
+/// server, the GPU, the pasteboard, the keychain and AppKit's services stay
+/// reachable (a deny-default profile for a windowed process would have to
+/// list them all). What it refuses is what the grant doesn't cover, for
+/// native code and child processes as for Deno's own checks:
+///
+/// - file contents outside the read scope and writes outside the write
+///   scope (a scope that is `All` refuses nothing), then the exact denies,
+///   then the re-allows (the last matching rule wins); file metadata stays
+///   readable everywhere;
+/// - mapping code from outside the load scope;
+/// - running programs without a run grant;
+/// - IP sockets per the plan (with no network grant: the loopback
+///   interface only, where the app's own servers and the page's WebSocket
+///   relay listen), and Unix sockets but the plan's;
+/// - LaunchServices opens, AppleEvents and launchd job submission, the
+///   three ways a process asks the system to start a program outside its
+///   sandbox. Opening a link in the user's browser goes through the helper
+///   started before the profile applies (`crate::outside`).
+///
+/// Not narrowed: mach services, `sysctl` reads and signals (AppKit and
+/// WebKit use them freely), which the guarantee matrix lists. WebKit's web
+/// content, networking and GPU processes are XPC services launchd starts:
+/// they are outside this profile and keep WebKit's own.
+pub fn desktop_profile(plan: &MacosPlan) -> String {
+  let mut p = String::from("(version 1)\n(allow default)\n");
+  // files: metadata everywhere, contents by scope
+  p.push_str("(allow file-read-metadata)\n");
+  if !matches!(plan.read, SbScope::All) {
+    p.push_str("(deny file-read*)\n");
+    p.push_str("(allow file-read-metadata)\n");
+    allow_scope(&mut p, "file-read*", &plan.read);
+  }
+  if !matches!(plan.write, SbScope::All) {
+    p.push_str("(deny file-write*)\n");
+    allow_scope(&mut p, "file-write*", &plan.write);
+  }
+  if !plan.deny_read.is_empty() {
+    p.push_str(&format!(
+      "(deny file-read* {})\n",
+      filters_text(&plan.deny_read)
+    ));
+  }
+  if !plan.deny_write.is_empty() {
+    p.push_str(&format!(
+      "(deny file-write* {})\n",
+      filters_text(&plan.deny_write)
+    ));
+  }
+  if !plan.reallow_read.is_empty() {
+    p.push_str(&format!(
+      "(allow file-read* {})\n",
+      filters_text(&plan.reallow_read)
+    ));
+  }
+  if !plan.reallow_write.is_empty() {
+    p.push_str(&format!(
+      "(allow file-write* {})\n",
+      filters_text(&plan.reallow_write)
+    ));
+  }
+  // the terminals, as in the cli profile: only the plan's own, never
+  // ioctl-able (an app started from a shell must not type into it)
+  for op in ["file-read*", "file-write*"] {
+    p.push_str(&format!("(deny {op} {TTY_FILTERS})\n"));
+  }
+  if !plan.ttys.is_empty() {
+    let literals = plan
+      .ttys
+      .iter()
+      .map(|t| format!("(literal {})", quote_str(t)))
+      .collect::<Vec<_>>()
+      .join(" ");
+    for op in ["file-read*", "file-write*"] {
+      p.push_str(&format!("(allow {op} {literals})\n"));
+    }
+  }
+  p.push_str(&format!("(deny file-ioctl {TTY_FILTERS})\n"));
+  // code
+  if let SbScope::Filters { filters } = &plan.map_exec {
+    let mut map: Vec<SbFilter> = SYSTEM_CODE
+      .iter()
+      .chain(DESKTOP_SYSTEM_CODE)
+      .map(|s| SbFilter::Subpath(s.to_string()))
+      .collect();
+    map.extend(filters.iter().cloned());
+    p.push_str("(deny file-map-executable)\n");
+    p.push_str(&format!(
+      "(allow file-map-executable {})\n",
+      filters_text(&map)
+    ));
+  }
+  // processes
+  if !plan.exec || !plan.exec_only.is_empty() {
+    p.push_str("(deny process-exec)\n");
+  }
+  if plan.exec && !plan.exec_only.is_empty() {
+    let only: Vec<SbFilter> = plan
+      .exec_only
+      .iter()
+      .map(|p| SbFilter::Literal(p.clone()))
+      .collect();
+    p.push_str(&format!("(allow process-exec {})\n", filters_text(&only)));
+  }
+  // the marker pair, so a child can tell this runtime's sandbox holds it
+  p.push_str(&format!(
+    "(deny sysctl-read (with no-report) (sysctl-name {}))\n",
+    quote_str(MARKER_SYSCTL_DENIED)
+  ));
+  // the ways out through the system
+  p.push_str("(deny lsopen)\n(deny appleevent-send)\n(deny job-creation)\n");
+  // the network
+  let ip_denied = "(deny network-outbound (remote ip))\n(deny network-bind (local ip))\n(deny network-inbound (local ip))\n";
+  let mut resolver = true;
+  match &plan.net {
+    NetPlan::Open => {}
+    NetPlan::Denied => {
+      // no network grant: the loopback interface only
+      resolver = false;
+      p.push_str(ip_denied);
+      p.push_str("(allow network-outbound (remote ip \"localhost:*\"))\n");
+      p.push_str("(allow network-bind (local ip \"localhost:*\"))\n");
+      p.push_str("(allow network-inbound (local ip \"localhost:*\"))\n");
+    }
+    NetPlan::Ports { connect, bind } => {
+      p.push_str(ip_denied);
+      match connect {
+        Ports::Any => p.push_str("(allow network-outbound (remote ip))\n"),
+        Ports::List { ports } => {
+          for port in ports {
+            p.push_str(&format!(
+              "(allow network-outbound (remote ip \"*:{port}\"))\n"
+            ));
+          }
+        }
+      }
+      match bind {
+        Ports::Any => {
+          p.push_str("(allow network-bind (local ip))\n");
+          p.push_str("(allow network-inbound (local ip))\n");
+        }
+        Ports::List { ports } => {
+          for port in ports {
+            p.push_str(&format!(
+              "(allow network-bind (local ip \"*:{port}\"))\n"
+            ));
+            p.push_str(&format!(
+              "(allow network-inbound (local ip \"*:{port}\"))\n"
+            ));
+          }
+        }
+      }
+    }
+  }
+  // Unix sockets reach other daemons (a Docker socket runs anything): the
+  // plan's only, the system log and, with network, the resolver's
+  if !matches!(plan.unix, SbUnix::Open) {
+    p.push_str("(deny network-outbound (remote unix-socket))\n");
+    let mut sockets: Vec<&str> = DESKTOP_UNIX_SOCKETS.to_vec();
+    if resolver {
+      sockets.push("/private/var/run/mDNSResponder");
+    }
+    for path in sockets {
+      p.push_str(&format!(
+        "(allow network-outbound (remote unix-socket (path-literal {})))\n",
+        quote_str(path)
+      ));
+    }
+    if let SbUnix::Filters { filters } = &plan.unix {
+      for f in filters {
+        p.push_str(&format!(
+          "(allow network-outbound (remote unix-socket {}))\n",
+          unix_filter_text(f)
+        ));
+      }
+    }
+  }
+  p
+}
+
+/// A Unix-socket path filter (`path-literal` / `path-regex`).
+fn unix_filter_text(f: &SbFilter) -> String {
+  match f {
+    SbFilter::Literal(path) => format!("(path-literal {})", quote_str(path)),
+    SbFilter::Subpath(path) => format!(
+      "(path-regex #\"^{}(/|$)\")",
+      regex_escape(path).replace('"', "\\\"")
+    ),
+    SbFilter::Regex(r) => {
+      format!("(path-regex #\"{}\")", r.replace('"', "\\\""))
+    }
+  }
+}
+
 /// The reporting profile of a warn run (`--kernel-sandbox=warn`): it allows
 /// everything, and reports to the unified log exactly what [`cli_profile`]
 /// would refuse for the same plan. Each rule of the enforce profile keeps
@@ -794,6 +999,128 @@ mod tests {
     );
     assert!(!p.contains(
       "(allow mach-lookup (global-name \"com.apple.dnssd.service\"))"
+    ));
+  }
+
+  // DENEXT.md item 483: the desktop profile allows by default and refuses
+  // what the grant doesn't cover, in the cli profile's order (allows, then
+  // denies, then re-allows), with the three ways out through the system
+  // always refused
+  #[test]
+  fn desktop_profile_allows_by_default_and_denies_by_scope() {
+    let p = desktop_profile(&cli_plan());
+    assert!(p.starts_with("(version 1)\n(allow default)\n"), "{p}");
+    assert!(!p.contains("(deny default)"));
+    let at = |rule: &str| {
+      p.find(rule)
+        .unwrap_or_else(|| panic!("missing {rule}\n{p}"))
+    };
+    // contents by scope, metadata everywhere
+    assert!(
+      at("(deny file-read*)\n") < at("(allow file-read* (subpath \"/w\"))")
+    );
+    assert!(
+      at("(allow file-read* (subpath \"/w\"))")
+        < at("(deny file-read* (subpath \"/w/.env\"))")
+    );
+    assert!(
+      at("(deny file-read* (subpath \"/w/.env\"))")
+        < at("(allow file-read* (literal \"/w/.env/deno.json\"))")
+    );
+    assert!(
+      at("(deny file-write*)\n")
+        < at("(allow file-write* (subpath \"/w/out\"))")
+    );
+    assert!(
+      at("(allow file-write* (subpath \"/w/out\"))")
+        < at("(deny file-write* (literal \"/w/out/keep\"))")
+    );
+    at("(allow file-read-metadata)");
+    // code from the load scope and the system only
+    assert!(
+      at("(deny file-map-executable)\n")
+        < at("(allow file-map-executable (subpath \"/usr/lib\")")
+    );
+    assert!(p.contains("(subpath \"/Library\") (literal \"/w/lib.dylib\"))"));
+    // no run grant: nothing is executed
+    at("(deny process-exec)\n");
+    assert!(!p.contains("(allow process-exec"));
+    // the ways out
+    for rule in [
+      "(deny lsopen)",
+      "(deny appleevent-send)",
+      "(deny job-creation)",
+      "(deny file-ioctl (literal \"/dev/tty\")",
+      "(deny sysctl-read (with no-report) (sysctl-name \"kern.singleuser\"))",
+    ] {
+      at(rule);
+    }
+    // no network grant: the loopback interface only, no resolver
+    assert!(
+      at("(deny network-outbound (remote ip))")
+        < at("(allow network-outbound (remote ip \"localhost:*\"))")
+    );
+    at("(allow network-bind (local ip \"localhost:*\"))");
+    at("(allow network-inbound (local ip \"localhost:*\"))");
+    assert!(!p.contains("mDNSResponder"));
+    // Unix sockets: the system log's only
+    assert!(
+      at("(deny network-outbound (remote unix-socket))\n")
+        < at("(path-literal \"/private/var/run/syslog\")")
+    );
+    // mach services, signals and the plan's sysctl narrowing are not in it
+    assert!(!p.contains("mach-lookup"));
+    assert!(!p.contains("(target same-sandbox)"));
+    assert!(!p.contains("kern.proc"));
+  }
+
+  #[test]
+  fn desktop_profile_with_unscoped_grants_refuses_only_the_ways_out() {
+    let mut plan = cli_plan();
+    plan.read = SbScope::All;
+    plan.write = SbScope::All;
+    plan.deny_read.clear();
+    plan.deny_write.clear();
+    plan.reallow_read.clear();
+    plan.map_exec = SbScope::All;
+    plan.exec = true;
+    plan.net = NetPlan::Open;
+    plan.unix = SbUnix::Open;
+    let p = desktop_profile(&plan);
+    assert!(!p.contains("(deny file-read*)\n"), "{p}");
+    assert!(!p.contains("(deny file-write*)\n"), "{p}");
+    assert!(!p.contains("file-map-executable"), "{p}");
+    assert!(!p.contains("process-exec"), "{p}");
+    assert!(!p.contains("network"), "{p}");
+    for rule in [
+      "(deny lsopen)",
+      "(deny appleevent-send)",
+      "(deny job-creation)",
+    ] {
+      assert!(p.contains(rule), "{p}");
+    }
+    // a strict exec scope: those files only
+    plan.exec_only = vec!["/usr/bin/git".into()];
+    let p = desktop_profile(&plan);
+    let deny = p.find("(deny process-exec)").unwrap();
+    let allow = p
+      .find("(allow process-exec (literal \"/usr/bin/git\"))")
+      .unwrap();
+    assert!(deny < allow, "{p}");
+    // ports, and the plan's own sockets
+    plan.net = NetPlan::Ports {
+      connect: Ports::List { ports: vec![443] },
+      bind: Ports::List { ports: vec![] },
+    };
+    plan.unix = SbUnix::Filters {
+      filters: vec![SbFilter::Literal("/w/s.sock".into())],
+    };
+    let p = desktop_profile(&plan);
+    assert!(p.contains("(allow network-outbound (remote ip \"*:443\"))"));
+    assert!(!p.contains("(allow network-bind"), "{p}");
+    assert!(p.contains("mDNSResponder"));
+    assert!(p.contains(
+      "(allow network-outbound (remote unix-socket (path-literal \"/w/s.sock\")))"
     ));
   }
 

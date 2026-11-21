@@ -60,6 +60,8 @@ pub mod net_authority;
 pub mod net_gate;
 #[cfg(target_os = "linux")]
 pub mod notify;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod outside;
 pub mod plan;
 #[cfg(feature = "proxy")]
 pub mod proxy;
