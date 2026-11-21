@@ -303,15 +303,35 @@ fn use_cache_overlay(plan: &EnforcePlan) {
 
 pub use deno_lib::kernel_apply::create_cache_overlay;
 
-/// Creates the folders the plan writes on the user's behalf (the coverage
-/// and profile folders) before the re-exec: a Landlock rule needs its path to
-/// exist.
+/// Creates the folders and files the plan writes on the user's behalf (the
+/// coverage and profile folders, `deno test`'s JUnit report) before the
+/// re-exec: a Landlock rule needs its path to exist. A report file is
+/// created empty when absent (the run writes it over at the end).
 fn create_runtime_dirs(ctx: &Context) -> Result<(), AnyError> {
   for dir in ctx.coverage_dir.iter().chain(&ctx.profile_dirs) {
     std::fs::create_dir_all(dir).map_err(|err| {
       deno_core::anyhow::anyhow!(
         "--kernel-sandbox=enforce: creating the output folder {} failed: {err}",
         dir.display()
+      )
+    })?;
+  }
+  for file in &ctx.report_files {
+    let created = file
+      .parent()
+      .map_or(Ok(()), std::fs::create_dir_all)
+      .and_then(|_| {
+        std::fs::OpenOptions::new()
+          .write(true)
+          .create(true)
+          .truncate(false)
+          .open(file)
+          .map(|_| ())
+      });
+    created.map_err(|err| {
+      deno_core::anyhow::anyhow!(
+        "--kernel-sandbox=enforce: creating the report file {} failed: {err}",
+        file.display()
       )
     })?;
   }
@@ -710,6 +730,52 @@ fn keep_fd(fd: i32) -> bool {
   .any(|named| named == fd)
 }
 
+/// The plan this process started confined by (the image after the re-exec),
+/// if any.
+fn applied_plan() -> Option<&'static EnforcePlan> {
+  #[cfg(target_os = "linux")]
+  {
+    deno_sandbox::enforce_linux::applied_plan()
+  }
+  #[cfg(target_os = "macos")]
+  {
+    INHERITED.get()
+  }
+  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+  {
+    None
+  }
+}
+
+pub use deno_sandbox::plan::PlanEntry;
+
+/// The image after the re-exec of a `deno test` / `deno bench`: the modules
+/// the image before it found, filtered and type-checked
+/// ([`apply_pending_with_entries`]). `None` in any other process: the
+/// command finds its modules itself. The caller checks each against its
+/// own include patterns before it uses them.
+pub fn handed_over_entries() -> Option<Vec<PlanEntry>> {
+  let plan = applied_plan()?;
+  // a confined image of a plain run carries none: only a test / bench
+  // hand-over names entries, and it always names at least one
+  (!plan.entries.is_empty()).then(|| plan.entries.clone())
+}
+
+/// The local files of `entries` (a doc-test source such as a Markdown file
+/// isn't a module of the graph, but the confined image reads it to extract
+/// its code blocks).
+fn entry_files(entries: &[PlanEntry]) -> Vec<PathBuf> {
+  let mut files: Vec<PathBuf> = entries
+    .iter()
+    .filter_map(|e| ModuleSpecifier::parse(&e.specifier).ok())
+    .filter(|url| url.scheme() == "file")
+    .filter_map(|url| url.to_file_path().ok())
+    .collect();
+  files.sort();
+  files.dedup();
+  files
+}
+
 /// Applies the pending plan once the module graph of `roots` is loaded
 /// (remote modules cached), before any user code runs. The process
 /// re-executes under the plan (Linux, macOS), so this returns only an error
@@ -717,6 +783,20 @@ fn keep_fd(fd: i32) -> bool {
 pub async fn apply_pending(
   factory: &crate::factory::CliFactory,
   roots: &[ModuleSpecifier],
+) -> Result<(), AnyError> {
+  apply_pending_with_entries(factory, roots, &[]).await
+}
+
+/// [`apply_pending`] for `deno test` / `deno bench` (`EnforceCoverage::
+/// AfterSetup`): after the type check, with the modules the command runs
+/// (`entries`), which the confined image runs without finding them again
+/// ([`handed_over_entries`]); their local files are readable to it. In the
+/// confined image, each module file handed over must be one of the graph's
+/// or of the entries'.
+pub async fn apply_pending_with_entries(
+  factory: &crate::factory::CliFactory,
+  roots: &[ModuleSpecifier],
+  entries: &[PlanEntry],
 ) -> Result<(), AnyError> {
   // the permission check that prepares the plan runs on first use
   factory.root_permissions_container()?;
@@ -733,7 +813,10 @@ pub async fn apply_pending(
   if let Some(handed_over) = VERIFY_MODULES.get() {
     // the image before this one listed these as the graph's modules: each
     // must be one of this run's own, or the hand-over widened something
-    let files = graph_module_files(factory, roots).await?;
+    let mut files = graph_module_files(factory, roots).await?;
+    files.extend(entry_files(entries));
+    files.sort();
+    files.dedup();
     check_module_files(handed_over)?;
     if let Some(stray) =
       handed_over.iter().find(|f| files.binary_search(f).is_err())
@@ -755,6 +838,10 @@ pub async fn apply_pending(
   // and the caches are still open; its local files stay readable
   let mut plan = pending.clone();
   plan.module_files = graph_module_files(factory, roots).await?;
+  plan.module_files.extend(entry_files(entries));
+  plan.module_files.sort();
+  plan.module_files.dedup();
+  plan.entries = entries.to_vec();
   check_module_files(&plan.module_files)?;
   // the lockfile the graph load updated is written now: the confined image
   // can't write it (unless a grant covers it), and the re-exec runs no

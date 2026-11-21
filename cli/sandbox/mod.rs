@@ -122,13 +122,18 @@ fn stage_override_warned() -> Option<AutoStage> {
 }
 
 /// How much of the command `enforce` covers: all of `run` of a file and
-/// `serve`; nothing of the others (they refuse to start under an `enforce`
-/// asked for by name; one `auto` chose runs them as `warn`).
-/// [`EnforceCoverage::AfterSetup`] (`test` / `bench`) lands in WP-A.
+/// `serve`; `test` and `bench` after their own setup (the type check, the
+/// coverage folder: the image before the re-exec finds and checks the
+/// modules, the confined one runs exactly those); nothing of the others
+/// (they refuse to start under an `enforce` asked for by name; one `auto`
+/// chose runs them as `warn`, or, for a deny ceiling, as before).
 fn enforce_covers(subcommand: &DenoSubcommand) -> EnforceCoverage {
   match subcommand {
     DenoSubcommand::Run(run) if !run.is_stdin() => EnforceCoverage::Full,
     DenoSubcommand::Serve(_) => EnforceCoverage::Full,
+    DenoSubcommand::Test(_) | DenoSubcommand::Bench(_) => {
+      EnforceCoverage::AfterSetup
+    }
     _ => EnforceCoverage::None,
   }
 }
@@ -474,6 +479,7 @@ fn context_for(
     .collect();
   ctx.profile_dirs.sort();
   ctx.profile_dirs.dedup();
+  ctx.report_files = report_files(cli_options);
   ctx.tls_files = tls_files();
   // `--cert <file>` (DENO_CERT's flag form), relative to the working folder
   if let Some(deno_lib::args::CaData::File(cert)) = cli_options.ca_data() {
@@ -483,6 +489,21 @@ fn context_for(
   }
   ctx.origin_data = origin_data_dirs(cli_options, ctx.deno_dir.as_deref());
   ctx
+}
+
+/// The report files the run writes for the user: `deno test`'s JUnit file
+/// (`--junit-path`, or deno.json's `test.reporter`), never stdout (`-`).
+fn report_files(cli_options: &CliOptions) -> Vec<PathBuf> {
+  let DenoSubcommand::Test(test_flags) = &cli_options.flags().subcommand else {
+    return Vec::new();
+  };
+  cli_options
+    .resolve_workspace_test_options(test_flags)
+    .junit_path
+    .filter(|path| path != "-")
+    .map(|path| cli_options.initial_cwd().join(path))
+    .into_iter()
+    .collect()
 }
 
 /// This program's own origin data folders (`localStorage`, the Cache API):
@@ -595,6 +616,13 @@ pub fn check_run(
       // or this runtime has no enforcer for the OS: the run stays as it was
       resolution.mode = KernelSandboxMode::Off;
       resolution.auto_chosen = false;
+    } else if covered == EnforceCoverage::None && resolution.deny_ceiling() {
+      // a deny ceiling in a command enforce doesn't cover: its denies stay
+      // Deno's checks, as before (warn would report the whole grant of a
+      // run a prompt can widen)
+      resolution.mode = KernelSandboxMode::Off;
+      resolution.reason = ModeReason::DenyCeilingDenoOnly;
+      resolution.auto_chosen = false;
     } else if covered == EnforceCoverage::None {
       degraded = Some("enforce doesn't cover this command yet".to_string());
       resolution.mode = KernelSandboxMode::Warn;
@@ -609,8 +637,31 @@ pub fn check_run(
     deno_dir,
     node_modules,
   );
-  let options = &policy_options(cli_options, options);
+  // a deny ceiling (D1 / D2) compiles the denies alone: every allow
+  // unscoped, nothing else changed
+  let ceiling = resolution.deny_ceiling();
+  let options = &if ceiling {
+    policy::deny_ceiling_options(&policy_options(cli_options, options))
+  } else {
+    policy_options(cli_options, options)
+  };
   let mut ctx = ctx;
+  ctx.deny_ceiling = ceiling;
+  // a ceiling the OS holds none of here (Linux without an overmount, or
+  // denies the kernel never holds) applies nothing: no re-exec, no folder
+  // made; its denies are reported as Deno's checks only
+  if ceiling
+    && !KernelPolicy::compile(options, &ImplicitSet::build(options, &ctx), &ctx)
+      .policy
+      .deny_ceiling_held()
+  {
+    resolution.mode = KernelSandboxMode::Off;
+    resolution.reason = ModeReason::DenyCeilingDenoOnly;
+    resolution.auto_chosen = false;
+    if !report {
+      return Ok(resolution);
+    }
+  }
   // this program's origin data folders, as the overlay: created by the image
   // that isn't confined yet under enforce, used only when they exist
   #[allow(clippy::disallowed_methods, reason = "the real file system")]
@@ -979,10 +1030,15 @@ pub fn render_report(
     } else {
       "not fixed"
     },
-    if resolution.deny_only {
-      "; --allow-all with denies: only the denies apply"
-    } else {
+    if !resolution.deny_only {
       ""
+    } else if matches!(
+      resolution.reason,
+      ModeReason::AutoDenyCeiling | ModeReason::DenyCeilingDenoOnly
+    ) {
+      "; only the deny rules apply, as ceilings no prompt can lift"
+    } else {
+      "; --allow-all with denies: only the denies apply"
     }
   )
   .unwrap();
@@ -1239,7 +1295,6 @@ mod coverage_tests {
   /// `auto_stage_matrix`'s denext.30 row for `test` / `bench`: `enforce`
   /// covers them after type check and coverage setup.
   #[test]
-  #[ignore = "lands in WP-A"]
   fn test_and_bench_are_covered_after_setup() {
     assert_eq!(
       enforce_covers(&DenoSubcommand::Test(TestFlags::default())),
