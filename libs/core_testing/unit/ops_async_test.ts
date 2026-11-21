@@ -178,10 +178,17 @@ test(async function testPrimordialPromiseHelpersAreInternal() {
   assertArrayEquals(created, created.map(() => true));
   assertEquals(
     JSON.stringify(await Promise.all(results)),
-    JSON.stringify([1, [1, 2], [
-      { status: "fulfilled", value: 1 },
-      { status: "fulfilled", value: 2 },
-    ], 1, 1, 1]),
+    JSON.stringify([
+      1,
+      [1, 2],
+      [
+        { status: "fulfilled", value: 1 },
+        { status: "fulfilled", value: 2 },
+      ],
+      1,
+      1,
+      1,
+    ]),
   );
   assert(!Deno.core.isCreatingInternalPromise());
 });

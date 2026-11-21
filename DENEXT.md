@@ -18014,9 +18014,10 @@ where the changes are discussed.
        `dtls-setup` 3), codecs, parameters and msid 11. Two that passed fail:
        `supported-stats`' `tcpType` (a UDP candidate has none; it was
        `"Unspecified"`) and `playoutId` (it was `""`, an id that named nothing;
-       "All references resolve" passes instead). With the ICE restart fix: 2,080, and
-       2,463 (73.8%) with the runner's `--dom-shim`. The run with `wpt.ts` on
-       Linux and the expectation files are refreshed once, on the merged train.
+       "All references resolve" passes instead). With the ICE restart fix:
+       2,080, and 2,463 (73.8%) with the runner's `--dom-shim`. The run with
+       `wpt.ts` on Linux and the expectation files are refreshed once, on the
+       merged train.
      - **Known gaps left:** a transferable `RTCDataChannel` (48 subtests;
        Firefox and Safari); `getHeaderExtensionsToNegotiate` (21; Chrome); the
        identity provider API (17; Firefox); `stop()`'s stopping / stopped steps
@@ -18164,12 +18165,12 @@ where the changes are discussed.
      API 60 (`window_z_order`, `pointer_state`); `runtime/ops/desktop.rs`,
      `cli/rt_desktop/lib.rs`, `cli/rt/desktop.rs`, `runtime/js/99_main.js`,
      `cli/tsc/dts/lib.deno.desktop.d.ts`). An app with several windows had to
-     guess both:
-     which window is in front from the order the windows were focused in (wrong
-     for a window raised without focus, an always-on-top window, another app's
-     window in between), and during a drag from one window to another where the
-     pointer is, from page pointer capture and hand-calibrated window frames (a
-     page hears the pointer only relative to its own window).
+     guess both: which window is in front from the order the windows were
+     focused in (wrong for a window raised without focus, an always-on-top
+     window, another app's window in between), and during a drag from one window
+     to another where the pointer is, from page pointer capture and
+     hand-calibrated window frames (a page hears the pointer only relative to
+     its own window).
      - `Deno.desktop.windowOrder()`: the `windowId`s of the app's on-screen
        windows as the OS stacks them, front to back. Not listed: a hidden or
        minimized window, one on another Space / virtual desktop / workspace, an
@@ -18229,15 +18230,14 @@ where the changes are discussed.
 465. **`fix(process)`: a spawn that fails closes its IPC channel**
      (`desktop/d28-qutty-2`; runtime; `ext/process/lib.rs`,
      `tests/unit_node/child_process_test.ts`). `create_command` adds the
-     parent's end of
-     a Node IPC channel (`stdio: [..., "ipc"]`, `fork()`) to the resource table
-     before the program is started. When the start failed (a missing program, a
-     refused one, and the first attempt of the `ENOEXEC` shell retry), the op
-     returned the error and nothing ever closed that resource: JavaScript never
-     learned its id. Each failed spawn left the channel and its descriptors open
-     for the life of the process (a supervisor retrying a helper that is not
-     there leaks one per attempt). Both spawn ops (`op_spawn_child`,
-     `op_node_spawn_child`) now close it on failure.
+     parent's end of a Node IPC channel (`stdio: [..., "ipc"]`, `fork()`) to the
+     resource table before the program is started. When the start failed (a
+     missing program, a refused one, and the first attempt of the `ENOEXEC`
+     shell retry), the op returned the error and nothing ever closed that
+     resource: JavaScript never learned its id. Each failed spawn left the
+     channel and its descriptors open for the life of the process (a supervisor
+     retrying a helper that is not there leaks one per attempt). Both spawn ops
+     (`op_spawn_child`, `op_node_spawn_child`) now close it on failure.
      - Found by the resource sanitizer of a denext test (a detached sidecar
        whose executable does not exist). The test here spawns a missing program
        with an IPC channel three times under the unit runner's resource
@@ -18249,87 +18249,84 @@ where the changes are discussed.
      denext-only; opt-in: `--kernel-sandbox=broker`, and `enforce` where the
      broker closes a gap; `auto` unchanged;
      `runtime/permissions/kernel_broker/{mod,protocol,transport,server,fs,
-     client,tests}.rs`, `libs/sandbox/{supervise,plan,enforce_linux}.rs`,
-     `cli/sandbox/{enforce,policy,mod}.rs`). Mode B of the kernel sandbox
-     (item 422's model, item 425's enforcer), file side. Plan phase P8a.
-     - Why. Landlock rights only add down a tree, so a write deny inside a
-       write allow (`--allow-write=out --deny-write=out/keep`) can't be held
-       by the kernel alone: until now `enforce` refused to start on it and
-       `broker` wasn't built.
-     - The shape: exec, then fork, then restrict. The first image (flags
-       parsed, policy compiled, graph loaded) re-executes itself as the
-       supervisor image with a hand-over in a sealed descriptor
+     client,tests}.rs`,
+     `libs/sandbox/{supervise,plan,enforce_linux}.rs`,
+     `cli/sandbox/{enforce,policy,mod}.rs`). Mode B of the kernel sandbox (item
+     422's model, item 425's enforcer), file side. Plan phase P8a.
+     - Why. Landlock rights only add down a tree, so a write deny inside a write
+       allow (`--allow-write=out --deny-write=out/keep`) can't be held by the
+       kernel alone: until now `enforce` refused to start on it and `broker`
+       wasn't built.
+     - The shape: exec, then fork, then restrict. The first image (flags parsed,
+       policy compiled, graph loaded) re-executes itself as the supervisor image
+       with a hand-over in a sealed descriptor
        (`DENO_INTERNAL_KERNEL_SUPERVISE_FD`). That image has one thread and
-       loads no engine, module or configuration; first thing in `main` it
-       makes a socket pair and forks. The child re-executes once more as the
-       confined worker (the plan in its sealed descriptor exactly as under
-       `enforce`, plus its end of the channel,
-       `DENO_INTERNAL_KERNEL_BROKER_FD`); the parent stays as the supervisor:
-       it serves the channel, passes on signals a process sent it (one the
-       terminal made already reached the worker's process group), reaps, and
-       exits as the worker exited (its code, or the same signal). The
-       supervisor keeps the PID the program was started with. It is not
-       dumpable (Linux; `PT_DENY_ATTACH` on macOS), a child subreaper on
-       Linux (what the worker orphans ends with it), and the worker dies with
+       loads no engine, module or configuration; first thing in `main` it makes
+       a socket pair and forks. The child re-executes once more as the confined
+       worker (the plan in its sealed descriptor exactly as under `enforce`,
+       plus its end of the channel, `DENO_INTERNAL_KERNEL_BROKER_FD`); the
+       parent stays as the supervisor: it serves the channel, passes on signals
+       a process sent it (one the terminal made already reached the worker's
+       process group), reaps, and exits as the worker exited (its code, or the
+       same signal). The supervisor keeps the PID the program was started with.
+       It is not dumpable (Linux; `PT_DENY_ATTACH` on macOS), a child subreaper
+       on Linux (what the worker orphans ends with it), and the worker dies with
        it (`PR_SET_PDEATHSIG`; on macOS the worker keeps running confined with
        every brokered operation refused).
      - The kernel's side on Linux: a write allow that holds a broker-held deny
        gets no write rule of its own; every entry beside the way to the deny
        gets one (`LinuxPlan::expand_write`, the read expansion's walk and its
-       limits; the entries are measured by the first image and checked
-       against the roots by the worker, `EnforcePlan::expanded_write`). So the
-       kernel refuses changes directly in the folders that lead to the deny,
-       and in folders made after the sandbox applied: native code and child
-       processes get that fail-closed view. Deno's own operations there are
-       asked of the broker.
-     - The broker is an authority: it holds the run's own read and write
-       grants and denies (`EnforcePlan::broker`, part of the plan the worker
-       compares with the one it compiles itself; the user's grants, never
-       the implicit set), resolves every path itself with the race-safe opens
-       (item 467's library: beneath an allow root, outside every deny,
-       decided on the object opened), acts itself and hands back only
-       descriptors it checked. It never enters `/proc`, `/sys` or `/dev`
-       (resolved by the broker those would name the broker's own objects),
-       hands out only regular files, folders and FIFOs, never waits on an
-       open, and creating a symlink takes the whole read and write permission
-       as Deno's check does. A recursive removal or a rename of a folder that
-       holds a denied path is refused.
+       limits; the entries are measured by the first image and checked against
+       the roots by the worker, `EnforcePlan::expanded_write`). So the kernel
+       refuses changes directly in the folders that lead to the deny, and in
+       folders made after the sandbox applied: native code and child processes
+       get that fail-closed view. Deno's own operations there are asked of the
+       broker.
+     - The broker is an authority: it holds the run's own read and write grants
+       and denies (`EnforcePlan::broker`, part of the plan the worker compares
+       with the one it compiles itself; the user's grants, never the implicit
+       set), resolves every path itself with the race-safe opens (item 467's
+       library: beneath an allow root, outside every deny, decided on the object
+       opened), acts itself and hands back only descriptors it checked. It never
+       enters `/proc`, `/sys` or `/dev` (resolved by the broker those would name
+       the broker's own objects), hands out only regular files, folders and
+       FIFOs, never waits on an open, and creating a symlink takes the whole
+       read and write permission as Deno's check does. A recursive removal or a
+       rename of a folder that holds a denied path is refused.
      - The protocol (`kernel_broker::protocol`, the definition the network
-       operations will build on): frames of a 16-byte header (`DKB2`, kind,
-       id, length at most 16 KiB) and a payload of fixed fields with nothing
-       after them; paths are absolute and already normal or the frame is
-       malformed. Operations: `Hello`, `Channel`, `Received`, `Open`,
-       `Mkdir`, `Remove` (a file, a folder, a tree), `Rename`, `Symlink`,
-       `Link`, `Chmod`, `Chown`, `Utime`, `Truncate`; kinds `0x0100`-`0x01ff`
-       are reserved for the network. Responses: `Ok` (at most one
-       descriptor, as `SCM_RIGHTS`), `Denied`, `Errno`, `Unsupported`,
-       `Invalid`, `Hello`, `Data`. One request at a time per channel;
-       concurrency is more channels (`Channel`, capped at 64 by the broker,
-       16 used by the client). No descriptor ever travels toward the broker
-       and no request refers to another, so the broker keeps no state per
-       requester. A malformed frame gets `Invalid` and closes that channel;
-       an unknown kind gets `Unsupported` and the channel stays. A descriptor
-       is acknowledged (`Received`) before the channel does anything else,
-       and the broker keeps its copy open until then (on macOS a descriptor
-       closed by its sender before it is received can arrive dead).
+       operations will build on): frames of a 16-byte header (`DKB2`, kind, id,
+       length at most 16 KiB) and a payload of fixed fields with nothing after
+       them; paths are absolute and already normal or the frame is malformed.
+       Operations: `Hello`, `Channel`, `Received`, `Open`, `Mkdir`, `Remove` (a
+       file, a folder, a tree), `Rename`, `Symlink`, `Link`, `Chmod`, `Chown`,
+       `Utime`, `Truncate`; kinds `0x0100`-`0x01ff` are reserved for the
+       network. Responses: `Ok` (at most one descriptor, as `SCM_RIGHTS`),
+       `Denied`, `Errno`, `Unsupported`, `Invalid`, `Hello`, `Data`. One request
+       at a time per channel; concurrency is more channels (`Channel`, capped at
+       64 by the broker, 16 used by the client). No descriptor ever travels
+       toward the broker and no request refers to another, so the broker keeps
+       no state per requester. A malformed frame gets `Invalid` and closes that
+       channel; an unknown kind gets `Unsupported` and the channel stays. A
+       descriptor is acknowledged (`Received`) before the channel does anything
+       else, and the broker keeps its copy open until then (on macOS a
+       descriptor closed by its sender before it is received can arrive dead).
      - Not yet (the network side, phase P8b): hosts, name resolution, Unix
-       sockets by path on Linux, module fetches after start. A policy that
-       needs them still carries a fatal gap (`BROKER_NET_BUILT`), so
-       `broker` and `enforce` refuse to start on it. Compiled programs
-       (`denort`) don't start a supervisor yet. Child processes don't get the
-       broker (the kernel's fail-closed view is theirs).
-     - User-facing: `--kernel-sandbox=broker` now runs; on Linux
-       `--deny-write` inside `--allow-write` is held exactly for Deno's
-       operations and fail-closed for native code and children (they can't
-       create, rename or remove directly in the allowed folder or in folders
-       made after start); the process the shell sees is the supervisor.
-     - Tests: `deno_permissions`' `kernel_broker::protocol::tests` (round
-       trips, every field check, `fuzz_request_parser`,
-       `fuzz_response_parser`), `kernel_broker::transport::tests`,
-       `kernel_broker::tests` (the deny inside the allow for every
-       operation, links, the kernel's trees, channels,
-       `model_no_request_sequence_leaves_the_policy`, `fuzz_live_server`
-       checked frame by frame against the protocol's rules;
+       sockets by path on Linux, module fetches after start. A policy that needs
+       them still carries a fatal gap (`BROKER_NET_BUILT`), so `broker` and
+       `enforce` refuse to start on it. Compiled programs (`denort`) don't start
+       a supervisor yet. Child processes don't get the broker (the kernel's
+       fail-closed view is theirs).
+     - User-facing: `--kernel-sandbox=broker` now runs; on Linux `--deny-write`
+       inside `--allow-write` is held exactly for Deno's operations and
+       fail-closed for native code and children (they can't create, rename or
+       remove directly in the allowed folder or in folders made after start);
+       the process the shell sees is the supervisor.
+     - Tests: `deno_permissions`' `kernel_broker::protocol::tests` (round trips,
+       every field check, `fuzz_request_parser`, `fuzz_response_parser`),
+       `kernel_broker::transport::tests`, `kernel_broker::tests` (the deny
+       inside the allow for every operation, links, the kernel's trees,
+       channels, `model_no_request_sequence_leaves_the_policy`,
+       `fuzz_live_server` checked frame by frame against the protocol's rules;
        `DENO_BROKER_FUZZ_ITERS` scales the fuzzers); `deno_sandbox`'s plan
        tests; `sandbox::policy::tests`; spec `kernel_sandbox::broker`.
      - Node tests enabled: none (no Node API changes).
@@ -18338,36 +18335,36 @@ where the changes are discussed.
      (runtime; Unix; `runtime/permissions/{lib,checked_open}.rs`,
      `ext/fs/{scoped,std_fs,lib}.rs`). Plan phase P7b: the race-safe opens of
      item 421's library are now what the real file system uses.
-     - Why. `check_open` resolves a path and the operation then opened the
-       name again: a symlink swapped in between (by the program, another
-       process, another user who can write a folder on the way) was followed
-       with no new check.
+     - Why. `check_open` resolves a path and the operation then opened the name
+       again: a symlink swapped in between (by the program, another process,
+       another user who can write a folder on the way) was followed with no new
+       check.
      - A checked path now carries the scope its access was granted under
        (`CheckedPath::open_scope`): the allow roots and denies of the read
-       permission, the write permission or both, as paths (each scope as
-       written and resolved), derived once and kept until a prompt's answer
-       or a revoke changes them. None when nothing narrows the access, under
-       a permission broker, and for `/dev`, Linux `/proc` and `/sys` (their
-       own check decides those; they are opened by name).
+       permission, the write permission or both, as paths (each scope as written
+       and resolved), derived once and kept until a prompt's answer or a revoke
+       changes them. None when nothing narrows the access, under a permission
+       broker, and for `/dev`, Linux `/proc` and `/sys` (their own check decides
+       those; they are opened by name).
      - With a scope, `RealFs` goes through `ext/fs/scoped.rs`: opens (and so
        `readFile`, `writeFile`, `open`, every `node:fs` open), `truncate`,
        `mkdir` (each level of a recursive one), `remove` (a tree is removed
-       level by level through descriptors, no link entered), `rename`,
-       `link`, `symlink`, `rmdir`, `chmod` / `chown` / `utime` (through an
-       open descriptor: `fchmod`, `fchown`, `futimens`), `lchown` / `lutime`
-       (`*at` on the checked folder), `stat` / `lstat`, `readDir`,
-       `readLink`. A path that leads outside the scope or into a deny is
-       `NotCapable`.
+       level by level through descriptors, no link entered), `rename`, `link`,
+       `symlink`, `rmdir`, `chmod` / `chown` / `utime` (through an open
+       descriptor: `fchmod`, `fchown`, `futimens`), `lchown` / `lutime` (`*at`
+       on the checked folder), `stat` / `lstat`, `readDir`, `readLink`. A path
+       that leads outside the scope or into a deny is `NotCapable`.
      - Still by name after the check (the next phase): `realpath`, `statfs`,
-       `exists`, `chdir`, `copyFile`, `cp`, `lchmod`; on macOS the last step
-       of `lstat` and of a `stat` of a file that can't be opened; Windows;
-       the consumers outside `ext/fs` (SQLite, `watchFs`, `dlopen`,
-       `Deno.Command`'s `cwd`, TLS files).
-     - Behaviour changes: a recursive `mkdir` no longer creates missing
-       folders above the write scope; a file root (`--allow-read=/etc/hosts`)
-       and a scope reached through a link work in the library; `chmod` and
-       `utime` no longer need the path forms the kernel sandbox refuses.
-     - Tests: `checked_open::tests::{a_file_root_is_that_one_name,
+       `exists`, `chdir`, `copyFile`, `cp`, `lchmod`; on macOS the last step of
+       `lstat` and of a `stat` of a file that can't be opened; Windows; the
+       consumers outside `ext/fs` (SQLite, `watchFs`, `dlopen`, `Deno.Command`'s
+       `cwd`, TLS files).
+     - Behaviour changes: a recursive `mkdir` no longer creates missing folders
+       above the write scope; a file root (`--allow-read=/etc/hosts`) and a
+       scope reached through a link work in the library; `chmod` and `utime` no
+       longer need the path forms the kernel sandbox refuses.
+     - Tests:
+       `checked_open::tests::{a_file_root_is_that_one_name,
        custom_flags_keep_the_options_in_charge,
        a_path_only_open_follows_links_like_any_other,
        remove_dir_all_never_enters_a_link, roots_intersect_to_the_inner_one}`
@@ -18376,10 +18373,10 @@ where the changes are discussed.
        grant).
 
 468. **`feat(permissions)`: the kernel sandbox's network route: one seam for
-     every socket, the broker's network authority, and `connect` answered by
-     the supervisor** (CLI and runtime; denext-only; opt-in, as item 425;
-     `libs/net_route` (new crate
-     `deno_net_route`), `libs/sandbox/{net_authority,net_gate,notify,lib}.rs`,
+     every socket, the broker's network authority, and `connect` answered by the
+     supervisor** (CLI and runtime; denext-only; opt-in, as item 425;
+     `libs/net_route` (new crate `deno_net_route`),
+     `libs/sandbox/{net_authority,net_gate,notify,lib}.rs`,
      `cli/sandbox/{net_broker,mod}.rs`, `cli/factory.rs`,
      `libs/core/uv_compat/tcp.rs`,
      `ext/net/{routed,ops,ops_tls,ops_unix,tcp,resolve_addr,
@@ -18388,11 +18385,10 @@ where the changes are discussed.
      `ext/webrtc/{peer,net}.rs`, `libs/inspector_server/lib.rs`,
      `runtime/permissions/kernel_broker/{net,client,protocol,mod}.rs`,
      `cli/sandbox/{enforce,policy}.rs`, `libs/sandbox/{plan,enforce_linux}.rs`).
-     The network
-     half of Mode B (`--kernel-sandbox=broker`, and `enforce` with a host-scoped
-     `--allow-net`): no kernel can scope a socket by host, so a process held to
-     such a grant makes no IP socket of its own and asks the broker outside the
-     sandbox for every one.
+     The network half of Mode B (`--kernel-sandbox=broker`, and `enforce` with a
+     host-scoped `--allow-net`): no kernel can scope a socket by host, so a
+     process held to such a grant makes no IP socket of its own and asks the
+     broker outside the sandbox for every one.
      - The seam. `deno_net_route` (no dependencies, so `deno_core` and every
        extension take it) holds the broker's operations as one trait,
        `NetRoute`: `resolve`, `connect_tcp`, `bind_tcp`, `open_udp`,
@@ -18441,24 +18437,23 @@ where the changes are discussed.
        a name server the grant names (what `Deno.resolveDns` already requires)
        is an operation instead: one datagram out, the first one back, on a
        socket that never leaves the broker.
-     - `connect` answered by the supervisor (Linux,
-       `deno_sandbox::net_gate`). Two things undo a broker policy if `connect`
-       is left to the kernel: a TCP socket the broker connected can be pointed
-       at another address (`connect` to `AF_UNSPEC` dissolves the association;
-       Landlock refuses the next connect only from ABI 4, by port), and "only
-       the children's proxy" can't be said to the kernel (Landlock names a port,
-       not an address, and has no TCP rules before Linux 6.7; a network
-       namespace needs unprivileged user namespaces). A `ConnectGate` answers
-       the `connect` notifications of the confined tree's seccomp filter: it
-       copies the caller's address once, refuses everything but the addresses
-       it lists (`EACCES`: every other address, `AF_UNSPEC`, Unix sockets,
-       unknown families) and makes a listed connection itself on its own
-       duplicate of the caller's socket, so the address checked is the address
-       connected and the kernel never reads the caller's memory again. With it
-       a host-scoped grant is exact on every kernel that has seccomp user
-       notification and `pidfd_getfd` (Linux 5.9), with or without Landlock's
-       network rules. On macOS the same is the profile's
-       `localhost:<proxy port>` rule.
+     - `connect` answered by the supervisor (Linux, `deno_sandbox::net_gate`).
+       Two things undo a broker policy if `connect` is left to the kernel: a TCP
+       socket the broker connected can be pointed at another address (`connect`
+       to `AF_UNSPEC` dissolves the association; Landlock refuses the next
+       connect only from ABI 4, by port), and "only the children's proxy" can't
+       be said to the kernel (Landlock names a port, not an address, and has no
+       TCP rules before Linux 6.7; a network namespace needs unprivileged user
+       namespaces). A `ConnectGate` answers the `connect` notifications of the
+       confined tree's seccomp filter: it copies the caller's address once,
+       refuses everything but the addresses it lists (`EACCES`: every other
+       address, `AF_UNSPEC`, Unix sockets, unknown families) and makes a listed
+       connection itself on its own duplicate of the caller's socket, so the
+       address checked is the address connected and the kernel never reads the
+       caller's memory again. With it a host-scoped grant is exact on every
+       kernel that has seccomp user notification and `pidfd_getfd` (Linux 5.9),
+       with or without Landlock's network rules. On macOS the same is the
+       profile's `localhost:<proxy port>` rule.
      - Over the broker (item 466's supervisor and protocol). The network
        operations are the protocol's reserved kinds `0x0100`-`0x0106`
        (`deno_permissions::kernel_broker::net`: `Resolve`, `ConnectTcp`,
@@ -18476,12 +18471,12 @@ where the changes are discussed.
      - The kernel side of a broker-held network. The confined tree has no IP
        socket (`socket(2)` refused), and on Linux `listen` and `connect` are
        refused outright (`SeccompPlan::refuse_connect`): its sockets arrive
-       connected or listening, so it never connects one, and a socket the
-       broker handed over can't be dissolved and pointed elsewhere. Native
-       code and child processes therefore have no network at all under a
-       host-scoped grant (fail closed; the allow-listing proxy for children,
-       with `connect` answered by the supervisor instead of refused, is the
-       gate above and not wired yet). On macOS the profile denies all network.
+       connected or listening, so it never connects one, and a socket the broker
+       handed over can't be dissolved and pointed elsewhere. Native code and
+       child processes therefore have no network at all under a host-scoped
+       grant (fail closed; the allow-listing proxy for children, with `connect`
+       answered by the supervisor instead of refused, is the gate above and not
+       wired yet). On macOS the profile denies all network.
      - The policy model. `BROKER_NET_BUILT`: a host name in `--allow-net`
        compiles to Mode B on Linux and on macOS (no kernel scopes by host; the
        macOS port-only rule for names is gone), with no fatal gap, so `enforce`
@@ -18491,38 +18486,40 @@ where the changes are discussed.
        no deny) stays the process's own. `deno info --json` →
        `kernelSandbox.brokerBuilt` / `brokerNetBuilt` say what this runtime's
        broker holds.
-     - Not carried by the broker (each fails under a broker-held network,
-       none is an escape): a module fetched after start, npm auto-install, the
-       OpenTelemetry exporter, `Deno.cron`'s control socket, the deploy
-       tunnel, `node:net` named pipes, abstract Unix sockets, UDP sockets
-       under a host-scoped grant, and any network of child processes.
-     - `DENO_INTERNAL_KERNEL_NET_ROUTE=in-process` (internal; any other value
-       is ignored with a warning) installs the authority as a route inside the
+     - Not carried by the broker (each fails under a broker-held network, none
+       is an escape): a module fetched after start, npm auto-install, the
+       OpenTelemetry exporter, `Deno.cron`'s control socket, the deploy tunnel,
+       `node:net` named pipes, abstract Unix sockets, UDP sockets under a
+       host-scoped grant, and any network of child processes.
+     - `DENO_INTERNAL_KERNEL_NET_ROUTE=in-process` (internal; any other value is
+       ignored with a warning) installs the authority as a route inside the
        process itself: no boundary, so it confines nothing and can only narrow
        (the authority holds the run's own grant). It is how the suites drive
        every routed path and the authority's decisions without a supervisor.
-     - User-facing note: `--kernel-sandbox=enforce` (and `broker`) now runs
-       with a host name in `--allow-net`: the program's sockets are made by
-       the supervising broker, which holds the grant exactly (names resolved
-       by the broker, no answer inside the machine or its network unless the
-       grant names that address); native code and child processes have no
-       network; UDP is refused under such a grant.
+     - User-facing note: `--kernel-sandbox=enforce` (and `broker`) now runs with
+       a host name in `--allow-net`: the program's sockets are made by the
+       supervising broker, which holds the grant exactly (names resolved by the
+       broker, no answer inside the machine or its network unless the grant
+       names that address); native code and child processes have no network; UDP
+       is refused under such a grant.
      - Tests (the broker): `deno_permissions`'s
        `kernel_broker::net::tests::{requests_round_trip, answers_round_trip,
        malformed_payloads_are_refused, fuzzed_payloads_never_panic,
-       the_route_reaches_the_authority_through_the_broker}`; `deno_sandbox`'s
+       the_route_reaches_the_authority_through_the_broker}`;
+       `deno_sandbox`'s
        `enforce_linux::tests::seccomp_program_refuses_connect_under_a_net_broker`;
-       the CLI's `sandbox::policy::tests::the_broker_holds_what_mode_a_cant`
-       and the updated `net_rows`; spec `kernel_sandbox::broker`
-       (`host_scoped_network`: under `--kernel-sandbox=broker
-       --allow-net=localhost:<p>,...` the program's `Deno.connect`, `fetch`,
-       `node:net`, `node:http`, `Deno.listen` and `node:net` server work
-       through the supervisor, another spelling of an address and a UDP socket
-       are refused by it, native `connect` to the granted port is refused) and
-       `kernel_sandbox::policy` (`broker_runs`; `deno info --json` has
-       `brokerBuilt` / `brokerNetBuilt`). `kernel_sandbox::enforce`'s
-       `inexpressible_refused` is gone: `enforce` takes the broker for a write
-       deny inside a write allow.
+       the CLI's `sandbox::policy::tests::the_broker_holds_what_mode_a_cant` and
+       the updated `net_rows`; spec `kernel_sandbox::broker`
+       (`host_scoped_network`: under
+       `--kernel-sandbox=broker
+       --allow-net=localhost:<p>,...` the
+       program's `Deno.connect`, `fetch`, `node:net`, `node:http`, `Deno.listen`
+       and `node:net` server work through the supervisor, another spelling of an
+       address and a UDP socket are refused by it, native `connect` to the
+       granted port is refused) and `kernel_sandbox::policy` (`broker_runs`;
+       `deno info --json` has `brokerBuilt` / `brokerNetBuilt`).
+       `kernel_sandbox::enforce`'s `inexpressible_refused` is gone: `enforce`
+       takes the broker for a write deny inside a write allow.
      - Tests: `deno_net_route`'s `unrouted_callers_get_nothing`,
        `a_prebound_listener_is_handed_out_again_and_again`,
        `a_refusal_is_permission_denied`; `deno_sandbox`'s
@@ -18551,8 +18548,8 @@ where the changes are discussed.
        spec `kernel_sandbox::net_route` (under the in-process route:
        `Deno.connect`, `fetch`, `node:dns`, `node:net`, `node:http`,
        `Deno.listen` and a `node:net` server work for what the grant names; the
-       authority refuses another spelling of an address and a UDP socket under
-       a host-scoped grant; an unscoped grant gets its UDP socket; an invalid
+       authority refuses another spelling of an address and a UDP socket under a
+       host-scoped grant; an unscoped grant gets its UDP socket; an invalid
        value of the variable is ignored).
      - Node tests enabled: none; no Node API changes.
 
@@ -18565,33 +18562,32 @@ where the changes are discussed.
      (`--allow-net-listen=127.0.0.1:8000,localhost:9000`, `0.0.0.0:8080`; not a
      name, a subnet, a bare host or port 0) is bound, listening, by the
      re-executed image before it applies its plan, and each listener is handed
-     to the operation that listens on that address (`Deno.listen`,
-     `Deno.serve`, `node:net`, the libuv surface). `localhost` binds both
-     loopback addresses. Only the listen-direction flag: an `--allow-net` entry
-     is as often a server to connect to (`--allow-net=localhost:5432`), whose
-     port the process must not take at startup, so a grant with `--allow-net`
-     addresses keeps its port rules.
+     to the operation that listens on that address (`Deno.listen`, `Deno.serve`,
+     `node:net`, the libuv surface). `localhost` binds both loopback addresses.
+     Only the listen-direction flag: an `--allow-net` entry is as often a server
+     to connect to (`--allow-net=localhost:5432`), whose port the process must
+     not take at startup, so a grant with `--allow-net` addresses keeps its port
+     rules.
      - The kernel policy then has no bind side: with no connect grant the
        confined process has no IP socket at all (`net: denied`), on every
        kernel. Before, a listen port needed Landlock's TCP rules (ABI 4, Linux
        6.7): on an older kernel it was a fail-open gap and `enforce` refused to
        start, and on a newer one any address on the port could be bound.
-     - The address stays bound for the life of the process: every listener on
-       it gets a duplicate of the one socket, so listening again after a close
+     - The address stays bound for the life of the process: every listener on it
+       gets a duplicate of the one socket, so listening again after a close
        works, as do several listeners (`reusePort`, `deno serve --parallel`); a
        client that connects while nothing accepts waits instead of being
        refused. An address that can't be bound at startup (in use, no IPv6)
        doesn't stop the run: listening there reports that error. UDP on those
        addresses is refused. The report lists them
-       (`listeners: bound before the sandbox applies: ...`) and the policy has
-       a `documented` note saying so.
+       (`listeners: bound before the sandbox applies: ...`) and the policy has a
+       `documented` note saying so.
      - Not with `--inspect` (the inspector's port keeps its port rule), not
        under a broker policy (the broker binds), not on macOS (Seatbelt holds
        bind ports).
      - User-facing note: under `--kernel-sandbox=enforce` on Linux, a server
-       that only listens on addresses the grant names runs on every kernel
-       with no network access of its own; those addresses are bound from
-       startup.
+       that only listens on addresses the grant names runs on every kernel with
+       no network access of its own; those addresses are bound from startup.
      - Tests: the CLI's
        `sandbox::policy::tests::listeners_are_bound_before_confinement`;
        `deno_net_route`'s `a_prebound_listener_is_handed_out_again_and_again`;
@@ -18604,16 +18600,15 @@ where the changes are discussed.
      `PermissionsContainer::check_opened(file, access, api)` makes the check
      `check_open` makes of a path, of the object an open descriptor holds (its
      path as the kernel reports it: `F_GETPATH`, `/proc/self/fd`). An operation
-     that can't open through the race-safe opens checks its path, opens it,
-     then calls this before it reads anything: a symlink swapped in between
-     the check and the open leads to a file that is refused. For reads only (an
-     open that creates or truncates has changed the file already). A file
-     unlinked since it was opened is refused; where the system can't report a
-     descriptor's path (Linux without `/proc`, Windows) nothing more is
-     checked. Used by `Deno.connectTls({ certFile })` and `Deno.SQL`'s file
-     reads; the list of path operations that stay checked by name, each with
-     its reason, is the second table of
-     `tests/specs/kernel_sandbox/escape_corpus/COVERAGE.md`.
+     that can't open through the race-safe opens checks its path, opens it, then
+     calls this before it reads anything: a symlink swapped in between the check
+     and the open leads to a file that is refused. For reads only (an open that
+     creates or truncates has changed the file already). A file unlinked since
+     it was opened is refused; where the system can't report a descriptor's path
+     (Linux without `/proc`, Windows) nothing more is checked. Used by
+     `Deno.connectTls({ certFile })` and `Deno.SQL`'s file reads; the list of
+     path operations that stay checked by name, each with its reason, is the
+     second table of `tests/specs/kernel_sandbox/escape_corpus/COVERAGE.md`.
      - User-facing note: none (a race closed).
      - Tests: `deno_permissions`'s `check_opened_checks_where_the_file_is`.
      - Node tests enabled: none; no Node API changes.
@@ -18623,10 +18618,12 @@ where the changes are discussed.
      (dissolve a connected TCP socket's association and connect it to a port no
      grant names; it uses a socket it can make, else one it was handed), and,
      where the runtime has the broker, two configurations under
-     `--expect=enforce`: `net-host` (`--allow-net=example.com:<port>,
-     localhost:<port>`) and `net-host-run` (the same with a run list, the child
-     vector). Every IP cell must be held in both on every column. Without the
-     broker the run says they were skipped.
+     `--expect=enforce`: `net-host`
+     (`--allow-net=example.com:<port>,
+     localhost:<port>`) and
+     `net-host-run` (the same with a run list, the child vector). Every IP cell
+     must be held in both on every column. Without the broker the run says they
+     were skipped.
      - Node tests enabled: none; tests only.
 
 472. **`feat(permissions)`: the kernel sandbox's warn mode, the rollout stages
@@ -18870,12 +18867,12 @@ where the changes are discussed.
      - With items 466-472 (the denext.28 train). The policy-model and
        plan-translation changes of the broker, the network route and warn mode
        were written against `cli/sandbox/{policy,enforce}.rs`; they live in
-       `cli/lib/kernel_{policy,plan}.rs` now, and `cli/sandbox` re-exports
-       them. Item 472's rule that a mode `auto` chose never refuses to start
-       holds for a compiled program too: `kernel_apply::start_compiled` runs it
-       off where the runtime has no enforcer for the OS and prints `warn`'s line
-       where enforce can't hold the grant, and `check_compiled` lets such a
-       program through. An explicit baked `enforce` still refuses.
+       `cli/lib/kernel_{policy,plan}.rs` now, and `cli/sandbox` re-exports them.
+       Item 472's rule that a mode `auto` chose never refuses to start holds for
+       a compiled program too: `kernel_apply::start_compiled` runs it off where
+       the runtime has no enforcer for the OS and prints `warn`'s line where
+       enforce can't hold the grant, and `check_compiled` lets such a program
+       through. An explicit baked `enforce` still refuses.
      - Node tests enabled: none; no Node API changes.
 
 474. **`feat(permissions)`: Windows' small tier for compiled programs: a job
@@ -18930,8 +18927,8 @@ where the changes are discussed.
        `windows_default_unaffected`, `windows_no_children`,
        `windows_child_inherits`).
      - Node tests enabled: none; no Node API changes.
-475. **laufey v0.9.0 and webrtc-rs-rtc `0.21.1+brainwires.4`** (`ee1feb7`
-     and `c16bfdef`; laufey API 60; runtime 3.0.0-denext.28;
+475. **laufey v0.9.0 and webrtc-rs-rtc `0.21.1+brainwires.4`** (`ee1feb7` and
+     `c16bfdef`; laufey API 60; runtime 3.0.0-denext.28;
      `cli/rt_desktop/Cargo.toml`, `Cargo.toml`, `Cargo.lock`,
      `.github/workflows/denext_runtime.yml`,
      `.github/denext-runtime/fetch_dictionaries.py`). The pins of items 460 to
@@ -18945,20 +18942,19 @@ where the changes are discussed.
        the Linux CEF backend compiles again (API 60's capability check came
        before its X11 helper); WebView2: a RESUME of an app-decided download
        that comes before WebView2's asynchronous pause has taken effect is
-       applied once it has (it was lost, and the download stayed paused);
-       the native e2e's custom-scheme WebSocket probe waits on the socket's
-       events, and its pointer, focus and drop checks use a point of the test
-       window no other window covers; CI keeps Windows' "finish setting up
-       your device" prompt off the Windows runners.
-     - webrtc-rs-rtc `6d7b5f0b..c16bfdef` (`release/0.21.1-brainwires.4`,
-       merged into `master`, tag `v0.21.1+brainwires.4`): the release of
+       applied once it has (it was lost, and the download stayed paused); the
+       native e2e's custom-scheme WebSocket probe waits on the socket's events,
+       and its pointer, focus and drop checks use a point of the test window no
+       other window covers; CI keeps Windows' "finish setting up your device"
+       prompt off the Windows runners.
+     - webrtc-rs-rtc `6d7b5f0b..c16bfdef` (`release/0.21.1-brainwires.4`, merged
+       into `master`, tag `v0.21.1+brainwires.4`): the release of
        `webrtc/d28-wpt` (item 460's engine side: `a=msid` per stream,
        `set_associable_with_remote_offer`, `a=inactive` pauses, the selected
        pair's candidates in the stats, an ICE restart that keeps the previous
        pair's path), with no code change over it.
-     - User-facing note: on Windows (WebView2), pausing a download and
-       resuming it at once leaves it running; otherwise none beyond items 460
-       to 463.
+     - User-facing note: on Windows (WebView2), pausing a download and resuming
+       it at once leaves it running; otherwise none beyond items 460 to 463.
      - Tests: laufey's full CI on `train/laufey-0.9.0` and its tag; the desktop
        window and runtime workflows run on the new pin; the WebRTC unit and WPT
        suites of `denext tests`.
@@ -18970,120 +18966,119 @@ where the changes are discussed.
      `ext/os/40_signals.js`, `runtime/permissions/{lib,checked_open}.rs`,
      `runtime/ops/desktop.rs`, `cli/lib/kernel_policy.rs`,
      `cli/sandbox/enforce.rs`, `ext/napi`, `ext/node/ops/fs.rs`,
-     `tests/util/server`,
-     `tests/unit/{timers_test,pty_test,signal_test}.ts`,
-     `cli/sandbox/warn.rs`,
-     `.github/workflows/denext_runtime.yml`). The hunt (item 459) on the
-     train's candidate, Linux, at one CPU and below:
-     - `Deno.readDir`: a `next()` while another of the same iterator is
-       pending rejects with `Busy` at once. The only check was the op's
-       `try_lock` on the directory stream, which sees an overlap only while
-       the first call holds it across an await; a call served from tokio's
-       buffered batch, a first call done before the others were polled, or a
-       directory listed whole under a scoped grant (item 467) let every call
-       through, and upstream's `readDirConcurrentNextRejectsWithBusy` failed
-       2 runs in 5. Upstream has the same race.
+     `tests/util/server`, `tests/unit/{timers_test,pty_test,signal_test}.ts`,
+     `cli/sandbox/warn.rs`, `.github/workflows/denext_runtime.yml`). The hunt
+     (item 459) on the train's candidate, Linux, at one CPU and below:
+     - `Deno.readDir`: a `next()` while another of the same iterator is pending
+       rejects with `Busy` at once. The only check was the op's `try_lock` on
+       the directory stream, which sees an overlap only while the first call
+       holds it across an await; a call served from tokio's buffered batch, a
+       first call done before the others were polled, or a directory listed
+       whole under a scoped grant (item 467) let every call through, and
+       upstream's `readDirConcurrentNextRejectsWithBusy` failed 2 runs in 5.
+       Upstream has the same race.
      - Timers: a due timer runs only while the event loop is alive, as libuv
        runs a loop's timers. When every pending timer is unref'd and nothing
-       else keeps the loop running, they don't fire and the process ends,
-       as in Node.js; before, an unref'd timer that was already due when the
-       main module finished (a slow or starved main module) fired once
-       (`unrefTimer`, 1 run in 5). Upstream's event loop has the same order.
-     - Signals: the listeners run once per delivery. The native side counts
-       each delivery, but its channel only says "changed", so the listeners
-       ran once per wakeup and deliveries that arrived while the event loop
-       wasn't polling (a busy or starved JS thread) were lost; a listener
-       counting its signals waited for them forever
-       (`multipleSignalListenerTest` hung 2 runs in 5). Node.js calls a
-       listener for each signal received. Upstream's loop has the same
-       once-per-wakeup shape.
+       else keeps the loop running, they don't fire and the process ends, as in
+       Node.js; before, an unref'd timer that was already due when the main
+       module finished (a slow or starved main module) fired once (`unrefTimer`,
+       1 run in 5). Upstream's event loop has the same order.
+     - Signals: the listeners run once per delivery. The native side counts each
+       delivery, but its channel only says "changed", so the listeners ran once
+       per wakeup and deliveries that arrived while the event loop wasn't
+       polling (a busy or starved JS thread) were lost; a listener counting its
+       signals waited for them forever (`multipleSignalListenerTest` hung 2 runs
+       in 5). Node.js calls a listener for each signal received. Upstream's loop
+       has the same once-per-wakeup shape.
      - Scoped file access (item 467's race-safe opens): a grant root that
-       doesn't exist yet (`--allow-write=./subdir/`, `--allow-write=
-       node_modules`, a file to be written) is that one name in its folder
-       until it exists, so it can be made and a recursive mkdir go on
-       beneath it; it failed every operation beneath it with NotFound. The
-       open scope follows the query's precedence: a prompt denial (node:fs.cp
-       asks for the folders above `--allow-read=.`) refuses only that path
-       and its ancestors, not the granted paths beneath it, and a global
-       ignore or deny (`"ignore": true`, `--deny-read` with no list) leaves
-       the granted roots open; both made every later open in the grant fail.
-     - Kernel sandbox: on Linux a confining parent is this runtime's
-       sandbox, told by its seccomp marker; no-new-privileges and a seccomp
-       filter alone are any hardened container's, inside which `auto` never
-       enforced and the harnesses' forced enforce was dropped. A compiled
-       program never compiles a Mode B policy (it runs no broker): a Linux
-       write deny inside a write allow is again a rule it can't hold (warned
-       at `deno compile`, refused at start), and a host-scoped `--allow-net`
-       no longer compiles to no network at all.
-     - Desktop: `createWebView()`'s op accepts item 461's `downloads: "app"`
-       and `permissions: "app"` (only the JavaScript layer had them; every
-       packaged e2e threw `invalid`); laufey still refuses "app" where
+       doesn't exist yet (`--allow-write=./subdir/`,
+       `--allow-write=
+       node_modules`, a file to be written) is that one
+       name in its folder until it exists, so it can be made and a recursive
+       mkdir go on beneath it; it failed every operation beneath it with
+       NotFound. The open scope follows the query's precedence: a prompt denial
+       (node:fs.cp asks for the folders above `--allow-read=.`) refuses only
+       that path and its ancestors, not the granted paths beneath it, and a
+       global ignore or deny (`"ignore": true`, `--deny-read` with no list)
+       leaves the granted roots open; both made every later open in the grant
+       fail.
+     - Kernel sandbox: on Linux a confining parent is this runtime's sandbox,
+       told by its seccomp marker; no-new-privileges and a seccomp filter alone
+       are any hardened container's, inside which `auto` never enforced and the
+       harnesses' forced enforce was dropped. A compiled program never compiles
+       a Mode B policy (it runs no broker): a Linux write deny inside a write
+       allow is again a rule it can't hold (warned at `deno compile`, refused at
+       start), and a host-scoped `--allow-net` no longer compiles to no network
+       at all.
+     - Desktop: `createWebView()`'s op accepts item 461's `downloads: "app"` and
+       `permissions: "app"` (only the JavaScript layer had them; every packaged
+       e2e threw `invalid`); laufey still refuses "app" where
        `webViewCapabilities()` says the engine lacks it. The inert-ops spec
        counts the merged 116 desktop ops.
-     - Node-API: `napi_cancel_async_work` reports a cancel that lost the race
-       to the worker (`napi_generic_failure`, as Node's uv_cancel does);
-       it answered `napi_ok` and `complete` then ran with `napi_ok`.
+     - Node-API: `napi_cancel_async_work` reports a cancel that lost the race to
+       the worker (`napi_generic_failure`, as Node's uv_cancel does); it
+       answered `napi_ok` and `complete` then ran with `napi_ok`.
      - `node:fs`: a read on an fd (`fs.read`, `FileHandle.readFile`) never
-       resolves in the microtask checkpoint that started it (the op is
-       deferred, like its write sibling), so ticks queued before it run
-       first and an abort signal is seen between reads, as in Node.js.
+       resolves in the microtask checkpoint that started it (the op is deferred,
+       like its write sibling), so ticks queued before it run first and an abort
+       signal is seen between reads, as in Node.js.
      - The test server answers 500 for a testdata file it couldn't read (a
        loaded machine) instead of a 404 the CLI reported as a missing module.
-     - `node:child_process`: a ChildProcess starts with `connected` false,
-       as in Node.js; only the IPC channel's setup set it, so a spawn that
-       failed before the channel existed (a missing program or `cwd`) left it
-       undefined (item 465's test failed every run on Linux, and the same
-       spawns give undefined on macOS).
-     - `node:fs` `watchFile`: the poll's stat is synchronous. An async stat
-       is an op the watcher can't cancel, so `unwatchFile()` during a poll
-       left it running past the stop, which the test sanitizer reported as a
-       leak ("watchFile honors bigint option", 1 run in 5); the only awaited
-       step now is the interval sleep, which `stop()` aborts. The first stat
-       still runs after `watchFile` has added its listener, so the initial
-       change for a missing file arrives as in Node.js. Upstream has the
-       same code.
-     - Tests that measured the machine, not the code: the test_util
-       semaphore test starts its clock with the permit held (a late thread
-       measured less than the hold), and `os.cpus()`'s test asserts what
-       Node.js guarantees (every CPU listed; the usable parallelism, which a
-       cgroup quota lowers, at most that).
-     - Tests whose premise the train changed: warn mode's fatal-gap test
-       (a host-scoped grant under enforce is the broker's since item 468,
-       so it takes a rule enforce still refuses), and item 462's foreground
-       test (its grant names `env: ["PATH"]`, which it reads, and the shell's
-       `argv[0]` is the path the runtime resolved, as `Deno.Command` execs).
+     - `node:child_process`: a ChildProcess starts with `connected` false, as in
+       Node.js; only the IPC channel's setup set it, so a spawn that failed
+       before the channel existed (a missing program or `cwd`) left it undefined
+       (item 465's test failed every run on Linux, and the same spawns give
+       undefined on macOS).
+     - `node:fs` `watchFile`: the poll's stat is synchronous. An async stat is
+       an op the watcher can't cancel, so `unwatchFile()` during a poll left it
+       running past the stop, which the test sanitizer reported as a leak
+       ("watchFile honors bigint option", 1 run in 5); the only awaited step now
+       is the interval sleep, which `stop()` aborts. The first stat still runs
+       after `watchFile` has added its listener, so the initial change for a
+       missing file arrives as in Node.js. Upstream has the same code.
+     - Tests that measured the machine, not the code: the test_util semaphore
+       test starts its clock with the permit held (a late thread measured less
+       than the hold), and `os.cpus()`'s test asserts what Node.js guarantees
+       (every CPU listed; the usable parallelism, which a cgroup quota lowers,
+       at most that).
+     - Tests whose premise the train changed: warn mode's fatal-gap test (a
+       host-scoped grant under enforce is the broker's since item 468, so it
+       takes a rule enforce still refuses), and item 462's foreground test (its
+       grant names `env: ["PATH"]`, which it reads, and the shell's `argv[0]` is
+       the path the runtime resolved, as `Deno.Command` execs).
      - CI: the runtime build seeds the prebuilt V8 after the Rust cache
-       restores; on a partial key match the cache's pre-clean deleted the
-       seeded `gn_out` and a cached build failed to link `rusty_v8`.
+       restores; on a partial key match the cache's pre-clean deleted the seeded
+       `gn_out` and a cached build failed to link `rusty_v8`.
      - User-facing note: `Deno.readDir`'s iterator rejects an overlapping
-       `next()` every time, an unref'd timer no longer fires when nothing
-       keeps the process alive, a signal listener runs for every signal
-       delivered, and a stopped `watchFile` leaves no work behind.
+       `next()` every time, an unref'd timer no longer fires when nothing keeps
+       the process alive, a signal listener runs for every signal delivered, and
+       a stopped `watchFile` leaves no work behind.
      - Tests: `readDirConcurrentNextRejectsWithBusy`, the `unrefTimer` tests,
-       `multipleSignalListenerTest` and the `watchFile` tests 30 times plain
-       and 30 under `taskpolicy -b` on macOS; a new signal test that delivers
-       two signals while the JS thread is busy (one call before); a new
-       `unrefTimer` test whose main module outlasts its timer;
+       `multipleSignalListenerTest` and the `watchFile` tests 30 times plain and
+       30 under `taskpolicy -b` on macOS; a new signal test that delivers two
+       signals while the JS thread is busy (one call before); a new `unrefTimer`
+       test whose main module outlasts its timer;
        `tests/unit/{timers_test,pty_test,read_dir_test,signal_test}.ts`,
        `tests/unit_node/{timers_test,_fs/_fs_watch_test}.ts` and `deno_core`'s
        timer tests whole.
      - Node tests enabled: none.
 
-477. **`fix(ext/webrtc)`: WebRTC hardening** (runtime; `ext/webrtc/{peer.rs,
-     01_webrtc.js,tests.rs}`, `Cargo.toml`, `Cargo.lock`). webrtc-rs-rtc
-     `0.21.1+brainwires.6` (`cdcd6717`, from `0.21.1+brainwires.4`; `.5`
-     plus the fix for a data channel that never opened after a lost SCTP
-     INIT ACK, which `.5`'s one-association limit made fatal):
-     hardening across DTLS, SCTP and data channels, SRTP / SRTCP, SDP, ICE and
-     RTP (bounds on the state a peer can make the stack hold, stricter protocol
-     state handling); no public API change beyond additions (`cargo
-     semver-checks`: no semver update required). On the Deno side, a bound on
-     the wildcard socket's route cache and a 1 MiB cap on a session
+477. **`fix(ext/webrtc)`: WebRTC hardening** (runtime;
+     `ext/webrtc/{peer.rs,
+     01_webrtc.js,tests.rs}`, `Cargo.toml`,
+     `Cargo.lock`). webrtc-rs-rtc `0.21.1+brainwires.6` (`cdcd6717`, from
+     `0.21.1+brainwires.4`; `.5` plus the fix for a data channel that never
+     opened after a lost SCTP INIT ACK, which `.5`'s one-association limit made
+     fatal): hardening across DTLS, SCTP and data channels, SRTP / SRTCP, SDP,
+     ICE and RTP (bounds on the state a peer can make the stack hold, stricter
+     protocol state handling); no public API change beyond additions
+     (`cargo
+     semver-checks`: no semver update required). On the Deno side,
+     a bound on the wildcard socket's route cache and a 1 MiB cap on a session
      description. Details follow in advisories.
      - User-facing note: a session description over 1 MiB is refused.
-     - Tests: webrtc-rs-rtc's workspace with `--all-features` (2330 pass;
-       `.6` adds a test that drops the first INIT ACK);
-       `ext/webrtc`'s unit tests.
+     - Tests: webrtc-rs-rtc's workspace with `--all-features` (2330 pass; `.6`
+       adds a test that drops the first INIT ACK); `ext/webrtc`'s unit tests.
      - Node tests enabled: none; `node:` has no WebRTC API.
 478. **`fix(node)`: one owner for a pipe descriptor opened twice, and a handle
      sent right behind a message** (runtime;
@@ -19155,42 +19150,42 @@ where the changes are discussed.
      `libs/core_testing/unit/ops_async_test.ts`,
      `tests/unit_node/async_hooks_test.ts`). The denext.28 hunt's class-c
      `node:async_hooks` failures (`test-async-hooks-enable-recursive`,
-     `async-hooks/test-enable-in-init`, `async-hooks/test-disable-in-init`,
-     3-6 runs in 80): an init hook ran once more than Node.js runs it, for a
-     PROMISE. An async op hands back the promise `setPromise()` makes while
-     it is pending, created inside `isCreatingInternalPromise()` so that
+     `async-hooks/test-enable-in-init`, `async-hooks/test-disable-in-init`, 3-6
+     runs in 80): an init hook ran once more than Node.js runs it, for a
+     PROMISE. An async op hands back the promise `setPromise()` makes while it
+     is pending, created inside `isCreatingInternalPromise()` so that
      `node:async_hooks` leaves it out, but an op whose result was ready on its
      first poll (or that failed to dispatch) returned a plain
-     `Promise.resolve()` / `Promise.reject()` from the async stub, unmarked.
-     Its creator frame is core's stub, which the hook's stack check reads as
-     JS running a promise job, so it was reported as a user PROMISE. A
-     blocking op such as `fs.access()`'s `lstat` is sometimes done before the
-     first poll, so the extra init came and went with timing (about 1 in 1000
-     calls on an idle Mac); enabling a hook inside `init` only made it count
-     twice. The stub now makes both promises in the internal scope. Upstream
-     has the same stub; its `node:async_hooks` has no PROMISE resources.
-     - User-facing note: `node:async_hooks` no longer reports a PROMISE for
-       Node callback APIs (`fs`, `dns`, ...) whose op completed at once.
+     `Promise.resolve()` / `Promise.reject()` from the async stub, unmarked. Its
+     creator frame is core's stub, which the hook's stack check reads as JS
+     running a promise job, so it was reported as a user PROMISE. A blocking op
+     such as `fs.access()`'s `lstat` is sometimes done before the first poll, so
+     the extra init came and went with timing (about 1 in 1000 calls on an idle
+     Mac); enabling a hook inside `init` only made it count twice. The stub now
+     makes both promises in the internal scope. Upstream has the same stub; its
+     `node:async_hooks` has no PROMISE resources.
+     - User-facing note: `node:async_hooks` no longer reports a PROMISE for Node
+       callback APIs (`fs`, `dns`, ...) whose op completed at once.
      - Tests: a `deno_core` unit test that an eagerly resolved and an eagerly
-       rejected op promise are both made in the internal scope (fails before
-       the fix); a `node:async_hooks` unit test that 2000 concurrent
-       `fs.access()` calls report 2000 FSREQCALLBACKs and no PROMISE (5 of 6
-       runs failed before, 0 of 16 after); the three Node tests 60 times each
-       (4 failures in 60 before, 0 in 180 after) and the 138 configured
-       async-hooks / AsyncLocalStorage tests, unchanged.
+       rejected op promise are both made in the internal scope (fails before the
+       fix); a `node:async_hooks` unit test that 2000 concurrent `fs.access()`
+       calls report 2000 FSREQCALLBACKs and no PROMISE (5 of 6 runs failed
+       before, 0 of 16 after); the three Node tests 60 times each (4 failures in
+       60 before, 0 in 180 after) and the 138 configured async-hooks /
+       AsyncLocalStorage tests, unchanged.
      - The node:test findings of the same hunt are not runtime bugs:
        `test-runner-worker-id`'s "Worker ID n should be used 3 times, got 4"
-       asserts an even spread that holds only while every file takes as long
-       as the others (Node.js v26.13 fails it too, 5 of 120 runs under load;
-       the pool handed a freed id to the next file, as Node.js's does; item
-       480 makes the share even); the
-       timeouts of `test-runner-{cli-concurrency,tag-filter-cli,
-       test-rerun-failures,worker-id}` and `test-output-junit-reporter` are
-       spawn-heavy tests whose passing times rise to the 10 s budget on the
-       oversubscribed hunt host (CPU time equals wall time locally, no idle
-       wait); and `test-runner-enqueue-file-syntax-error`'s one silent
-       failure fell in the run whose leak tests were OOM-killed (60 of 60 pass
-       under 20-way load).
+       asserts an even spread that holds only while every file takes as long as
+       the others (Node.js v26.13 fails it too, 5 of 120 runs under load; the
+       pool handed a freed id to the next file, as Node.js's does; item 480
+       makes the share even); the timeouts of
+       `test-runner-{cli-concurrency,tag-filter-cli,
+       test-rerun-failures,worker-id}`
+       and `test-output-junit-reporter` are spawn-heavy tests whose passing
+       times rise to the 10 s budget on the oversubscribed hunt host (CPU time
+       equals wall time locally, no idle wait); and
+       `test-runner-enqueue-file-syntax-error`'s one silent failure fell in the
+       run whose leak tests were OOM-killed (60 of 60 pass under 20-way load).
      - Node tests enabled: none (the three already run).
 
 480. **`fix(node)`: follow-ups of the denext.28 IPC and async_hooks fixes**
@@ -19199,20 +19194,20 @@ where the changes are discussed.
      `libs/core/{00_primordials,00_infra}.js`). What items 478 and 479 left
      behind.
      - **The same socket sent twice**: `process.send(msg, socket)` kept the
-       socket's handle, so a second send of the same socket transferred a
-       second copy of the descriptor. As in Node.js
+       socket's handle, so a second send of the same socket transferred a second
+       copy of the descriptor. As in Node.js
        (`handleConversion["net.Socket"].send`), the first send now takes the
        handle (`socket._handle = null`, reads dropped, no idle timeout) unless
-       `keepOpen` is set, and closes it once the receiver acknowledges; a
-       second send finds no handle and sends the message alone.
+       `keepOpen` is set, and closes it once the receiver acknowledges; a second
+       send finds no handle and sends the message alone.
      - **A stray received descriptor**: a descriptor a peer attaches to a plain
-       message waits in the receive queue for a `NODE_HANDLE` message that
-       never comes (item 478 pairs them in order), and stayed open, registered
-       as adoptable, until the process exited. Channel teardown (disconnect,
-       end of the channel, the reader stopping) now closes every descriptor
-       still waiting (`op_node_ipc_close_received_fd`, which closes only a
-       descriptor still registered as adoptable), and so does a `NODE_HANDLE`
-       message whose handle could not be built.
+       message waits in the receive queue for a `NODE_HANDLE` message that never
+       comes (item 478 pairs them in order), and stayed open, registered as
+       adoptable, until the process exited. Channel teardown (disconnect, end of
+       the channel, the reader stopping) now closes every descriptor still
+       waiting (`op_node_ipc_close_received_fd`, which closes only a descriptor
+       still registered as adoptable), and so does a `NODE_HANDLE` message whose
+       handle could not be built.
      - **Primordials' promises**: `PromisePrototypeCatch`, `SafePromiseAll`,
        `SafePromiseAllSettled`, `SafePromiseAny`, `SafePromiseRace`,
        `SafePromisePrototypeFinally` and `SafePromise` are arrow functions in
@@ -19221,113 +19216,112 @@ where the changes are discussed.
        event loop running a user promise job: `crypto.pbkdf2()` reported a
        PROMISE per call besides its PBKDF2REQUEST. The internal promise scope's
        counter now lives in 00_primordials.js (00_infra.js takes it over) and
-       those helpers make their promises inside it, and the creator check
-       passes primordials frames through to their caller. The audit of core's
-       other scripts (`01_core.js`, `02_timers.js`, `00_infra.js`, the
-       generated async stubs, the Rust-made promises) found no other promise
-       made outside the scope.
+       those helpers make their promises inside it, and the creator check passes
+       primordials frames through to their caller. The audit of core's other
+       scripts (`01_core.js`, `02_timers.js`, `00_infra.js`, the generated async
+       stubs, the Rust-made promises) found no other promise made outside the
+       scope.
      - **Worker IDs share the files evenly**: `NODE_TEST_WORKER_ID` (1 to the
        concurrency, one file at a time per ID, reused) followed which worker
        freed first, so a slow file left the other IDs serving most of the files
        and `parallel/test-runner-worker-id` (9 files, concurrency 3, each ID 3
-       times) failed under load, on Node.js too. Each ID now runs
-       floor(files / concurrency) files and the first ones to need it one
-       more; a worker that has run its share stops, so the last files may wait
-       for a busy ID while another is idle. `--test-concurrency` stays the most
-       files run at once.
-     - User-facing note: a socket sent with `process.send()` / `child.send()`
-       no longer has a `_handle` afterwards (as in Node.js) and a second send
-       of it carries no handle; `node:test` may run fewer files at once near
-       the end of a run whose files take very different times.
+       times) failed under load, on Node.js too. Each ID now runs floor(files /
+       concurrency) files and the first ones to need it one more; a worker that
+       has run its share stops, so the last files may wait for a busy ID while
+       another is idle. `--test-concurrency` stays the most files run at once.
+     - User-facing note: a socket sent with `process.send()` / `child.send()` no
+       longer has a `_handle` afterwards (as in Node.js) and a second send of it
+       carries no handle; `node:test` may run fewer files at once near the end
+       of a run whose files take very different times.
      - Tests: "a socket sent twice goes with the first message only" and "a
-       stray descriptor from the peer is closed when the channel goes away"
-       (the peer is a child sending a pipe's write end with its own
-       `sendmsg()`) in `tests/unit_node/child_process_test.ts`; "polyfill
-       promises through primordials are no promises" (`crypto.pbkdf2()`) in
+       stray descriptor from the peer is closed when the channel goes away" (the
+       peer is a child sending a pipe's write end with its own `sendmsg()`) in
+       `tests/unit_node/child_process_test.ts`; "polyfill promises through
+       primordials are no promises" (`crypto.pbkdf2()`) in
        `tests/unit_node/async_hooks_test.ts`; a `deno_core` unit test that the
        primordials' helpers make internal promises; the `worker_id_even_share`
-       spec (one slow file of nine). Each of the four runtime tests fails on
-       the previous build.
+       spec (one slow file of nine). Each of the four runtime tests fails on the
+       previous build.
      - Node tests enabled: `parallel/test-cluster-send-deadlock.js` (not on
        Windows, like the other socket-passing tests; its timeout was the
        unacknowledged `NODE_HANDLE` of item 478: a reply handle read together
        with an ack on Linux) and `parallel/test-runner-worker-id.js` on macOS.
 
-481. **`fix`: happy eyeballs, `node:dns` timeouts and `AbortSignal.any()`
-     timers on a starved CPU** (runtime and tests; `libs/core/uv_compat{.rs,
+481. **`fix`: happy eyeballs, `node:dns` timeouts and `AbortSignal.any()` timers
+     on a starved CPU** (runtime and tests;
+     `libs/core/uv_compat{.rs,
      /tcp.rs,/tests.rs}`, `ext/net/ops.rs`,
      `ext/node/polyfills/internal_binding/cares_wrap.ts`,
      `ext/web/03_abort_signal.js`, `tests/unit_node/{net_test,dns_test}.ts`,
      `tests/unit/timers_test.ts`). From the denext.28 hunt's class (c)
      node_compat failures, Linux at one CPU and below:
-     - `node:net` happy eyeballs (`autoSelectFamily`): `uv_tcp_connect`
-       issues the non-blocking `connect(2)` itself, as libuv's
-       `uv__tcp_connect` does, so an error the kernel reports at once
-       (ENETUNREACH for IPv6 in a container without it, EAFNOSUPPORT,
-       EHOSTUNREACH) is the call's return value and the next address is
-       tried in the resolver's order. The connect ran in a future first
-       polled on a later loop turn: on a starved CPU the 10 ms attempt
-       timer, due in the timers phase ahead of the I/O phase, reported the
-       attempt as a timeout and the event order broke
+     - `node:net` happy eyeballs (`autoSelectFamily`): `uv_tcp_connect` issues
+       the non-blocking `connect(2)` itself, as libuv's `uv__tcp_connect` does,
+       so an error the kernel reports at once (ENETUNREACH for IPv6 in a
+       container without it, EAFNOSUPPORT, EHOSTUNREACH) is the call's return
+       value and the next address is tried in the resolver's order. The connect
+       ran in a future first polled on a later loop turn: on a starved CPU the
+       10 ms attempt timer, due in the timers phase ahead of the I/O phase,
+       reported the attempt as a timeout and the event order broke
        (`internet/test-net-autoselectfamily-events-failure.js`: 8.8.8.8 tried
-       where 2001:4860:4860::8888's failure was expected). ECONNREFUSED stays
-       a callback on the next turn, libuv's `delayed_error`. On Windows,
+       where 2001:4860:4860::8888's failure was expected). ECONNREFUSED stays a
+       callback on the next turn, libuv's `delayed_error`. On Windows,
        WSAENETUNREACH, WSAEHOSTUNREACH and WSAEAFNOSUPPORT map to their libuv
-       codes instead of EINVAL (the code that test's Windows entry names;
-       not verified on Windows yet).
-     - `node:dns` `Resolver({ timeout })`: the per-attempt timeout is the
-       op's request timeout, which hickory starts when the query is sent and
-       which reads an answer that has arrived before it checks the timer,
-       as c-ares times a query. It was a JS timer started before the query
-       went out (hickory sends from its background task on a later turn) and
-       due in the timers phase ahead of the op's completion: a starved
-       process reported ETIMEOUT for a query not sent yet, or already
-       answered (`parallel/test-dns-resolveany-bad-ancount.js`: one query of
-       two reached the server; 12 of 60 cold runs under `taskpolicy -b`
-       reached none). A timeout over 1 s is no longer cut short by hickory's
-       own 1 s timer, and with a timeout hickory makes one attempt per try on
-       the system resolver path too.
-     - `AbortSignal.any()`: once the signal aborts, its listeners no longer
-       keep its other `AbortSignal.timeout()` sources' timers refed; a
-       removed listener (on the signal or on a timeout source) unrefs a
-       source's timer only when no unaborted dependent still listens.
+       codes instead of EINVAL (the code that test's Windows entry names; not
+       verified on Windows yet).
+     - `node:dns` `Resolver({ timeout })`: the per-attempt timeout is the op's
+       request timeout, which hickory starts when the query is sent and which
+       reads an answer that has arrived before it checks the timer, as c-ares
+       times a query. It was a JS timer started before the query went out
+       (hickory sends from its background task on a later turn) and due in the
+       timers phase ahead of the op's completion: a starved process reported
+       ETIMEOUT for a query not sent yet, or already answered
+       (`parallel/test-dns-resolveany-bad-ancount.js`: one query of two reached
+       the server; 12 of 60 cold runs under `taskpolicy -b` reached none). A
+       timeout over 1 s is no longer cut short by hickory's own 1 s timer, and
+       with a timeout hickory makes one attempt per try on the system resolver
+       path too.
+     - `AbortSignal.any()`: once the signal aborts, its listeners no longer keep
+       its other `AbortSignal.timeout()` sources' timers refed; a removed
+       listener (on the signal or on a timeout source) unrefs a source's timer
+       only when no unaborted dependent still listens.
        `AbortSignal.any([AbortSignal.timeout(9000),
-       AbortSignal.timeout(110000)])` held the process 110 s after it aborted
-       (`deno run` of `parallel/test-abort-controller-any-timeout.js`; Node.js
-       exits at 9 s).
+       AbortSignal.timeout(110000)])`
+       held the process 110 s after it aborted (`deno run` of
+       `parallel/test-abort-controller-any-timeout.js`; Node.js exits at 9 s).
      - Measured, not fixed (time budgets): `wasi/test-wasi-pthread.js` (the
-       fixture gives a thread's worker 1 s to load while the main thread
-       waits; a debug worker loads in ~40 ms idle and over 1 s at 16 runs on
-       the efficiency cores, and the failed `pthread_create` is the
-       "unreachable"), `parallel/test-abort-controller-any-timeout.js` (waits
-       9 s by design in a 10 s budget), `parallel/test-buffer-constructor-
-       node-modules-paths.js` (13 child processes in series; each starts
-       faster than Node's), `parallel/test-webcrypto-digest-turboshake-
-       rfc.js` (TurboSHAKE over 24 MB takes 54 ms on a debug build, Node.js
-       93 ms; the rest is the test's JS) and
-       `parallel/test-webcrypto-sign-verify.js` (two RSA-4096 key
+       fixture gives a thread's worker 1 s to load while the main thread waits;
+       a debug worker loads in ~40 ms idle and over 1 s at 16 runs on the
+       efficiency cores, and the failed `pthread_create` is the "unreachable"),
+       `parallel/test-abort-controller-any-timeout.js` (waits 9 s by design in a
+       10 s budget),
+       `parallel/test-buffer-constructor-
+       node-modules-paths.js` (13
+       child processes in series; each starts faster than Node's),
+       `parallel/test-webcrypto-digest-turboshake-
+       rfc.js` (TurboSHAKE
+       over 24 MB takes 54 ms on a debug build, Node.js 93 ms; the rest is the
+       test's JS) and `parallel/test-webcrypto-sign-verify.js` (two RSA-4096 key
        generations, 0.4 to 2.8 s each with the pure-Rust `rsa` crate, 0.06 to
        0.6 s in Node.js; a passing run is reported "ignored" because the
        harness, like Node's `tools/test.py`, takes the Ed448 sub-case's
-       `printSkipMessage()` line for a skip, while a timed-out run is a
-       flake).
-     - User-facing note: a `node:net` connect the kernel refuses at once
-       fails synchronously, as in Node.js; a `node:dns` Resolver timeout runs
-       from the send; an aborted `AbortSignal.any()` no longer keeps the
-       process alive through its other timeouts.
-     - Tests: new `deno_core` tests (an immediate connect error is
-       synchronous; ECONNREFUSED comes from the callback), a `node:net` test
-       that blocks the loop past the attempt timer, a `node:dns` test that
-       blocks the loop past the timeout with the server in another process,
-       and three `AbortSignal` timer tests (each fails before the fix);
+       `printSkipMessage()` line for a skip, while a timed-out run is a flake).
+     - User-facing note: a `node:net` connect the kernel refuses at once fails
+       synchronously, as in Node.js; a `node:dns` Resolver timeout runs from the
+       send; an aborted `AbortSignal.any()` no longer keeps the process alive
+       through its other timeouts.
+     - Tests: new `deno_core` tests (an immediate connect error is synchronous;
+       ECONNREFUSED comes from the callback), a `node:net` test that blocks the
+       loop past the attempt timer, a `node:dns` test that blocks the loop past
+       the timeout with the server in another process, and three `AbortSignal`
+       timer tests (each fails before the fix);
        `test-net-autoselectfamily-events-failure.js` with
        `NODE_TEST_INET6_IP=fe80::1` (refused at once on macOS) under
        `taskpolicy -b` at 16 in parallel: 34 of 48 failed before (18 with the
-       hunt's message), none of 108 after;
-       `test-dns-resolveany-bad-ancount.js`: none of 108 failed after (48
-       under `taskpolicy -b`, 60 at 16 in parallel), and the new `node:dns`
-       test fails before; `uv_compat`'s tests whole,
-       `tests/unit_node/{net,dns}_test.ts`,
+       hunt's message), none of 108 after; `test-dns-resolveany-bad-ancount.js`:
+       none of 108 failed after (48 under `taskpolicy -b`, 60 at 16 in
+       parallel), and the new `node:dns` test fails before; `uv_compat`'s tests
+       whole, `tests/unit_node/{net,dns}_test.ts`,
        `tests/unit/{timers,abort_controller,event_target}_test.ts` and 316
        `node:net` / `node:dns` / `dgram` node_compat tests against the train
        (same results).

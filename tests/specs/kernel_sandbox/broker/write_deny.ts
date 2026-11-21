@@ -28,7 +28,10 @@ attempt(
 attempt("deno truncate", () => Deno.truncateSync("out/existing.txt", 3));
 attempt("deno chmod", () => Deno.chmodSync("out/existing.txt", 0o600));
 attempt("deno remove", () => Deno.removeSync("out/moved.txt"));
-attempt("deno remove tree", () => Deno.removeSync("out/made", { recursive: true }));
+attempt(
+  "deno remove tree",
+  () => Deno.removeSync("out/made", { recursive: true }),
+);
 attempt(
   "deno create in an existing folder",
   () => Deno.writeTextFileSync("out/sub/s.txt", "s"),
@@ -56,12 +59,18 @@ attempt(
 attempt("deno rename the deny", () => Deno.renameSync("out/keep", "out/gone"));
 
 // native code: the kernel alone
-check("native create in the deny", libc.symbols.creat(cstr("out/keep/n"), 0o600));
+check(
+  "native create in the deny",
+  libc.symbols.creat(cstr("out/keep/n"), 0o600),
+);
 check(
   "native create through a link into the deny",
   libc.symbols.creat(cstr("out/to-keep/n"), 0o600),
 );
-check("native unlink in the deny", libc.symbols.unlink(cstr("out/keep/kept.txt")));
+check(
+  "native unlink in the deny",
+  libc.symbols.unlink(cstr("out/keep/kept.txt")),
+);
 check(
   "native create in an existing folder",
   libc.symbols.creat(cstr("out/sub/n"), 0o600),
