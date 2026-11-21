@@ -127,6 +127,13 @@ impl BrokerClient {
     Ok((response, fd))
   }
 
+  /// A fresh channel of the broker, asked for on the control channel: the
+  /// working channels are made this way, and so is the channel a process
+  /// leaves for the processes it starts ([`super::dial`]).
+  pub fn channel(&self) -> io::Result<OwnedFd> {
+    self.new_channel()
+  }
+
   fn new_channel(&self) -> io::Result<OwnedFd> {
     let mut control = self.control.lock();
     let Some(sock) = control.as_ref() else {

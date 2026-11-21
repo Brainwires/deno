@@ -25,6 +25,22 @@ type FdIdentity = (u64, u64);
 static INHERITED_FDS: OnceLock<Mutex<HashMap<i32, FdIdentity>>> =
   OnceLock::new();
 
+/// Descriptors the runtime took for itself before the capture
+/// ([`exclude_inherited_fd`]).
+static EXCLUDED_FDS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+/// denext: `fd` is the runtime's own (a channel to the kernel sandbox's
+/// broker, taken or made at the very start of `main`), never a descriptor
+/// the program inherited for itself: no wrap may adopt it. Works before
+/// [`capture_inherited_fds`] (the capture leaves it out) and after (it is
+/// dropped from the set).
+pub fn exclude_inherited_fd(fd: i32) {
+  EXCLUDED_FDS.lock().unwrap().push(fd);
+  if let Some(fds) = INHERITED_FDS.get() {
+    fds.lock().unwrap().remove(&fd);
+  }
+}
+
 #[cfg(unix)]
 fn fd_identity(fd: i32) -> Option<FdIdentity> {
   // SAFETY: zeroed `stat` is a valid out-parameter for fstat.
@@ -95,14 +111,22 @@ pub fn capture_inherited_fds(exclude_env_vars: &[&str]) {
     if INHERITED_FDS.get().is_some() {
       return;
     }
+    // a variable names one descriptor, or several: `3`, `3,4`, and
+    // denext's `<fd>:<detail>,...` (the kernel sandbox's broker dial)
     let excluded: Vec<i32> = exclude_env_vars
       .iter()
       .filter_map(|name| std::env::var(name).ok())
-      .filter_map(|value| value.trim().parse::<i32>().ok())
+      .flat_map(|value| {
+        value
+          .split(',')
+          .filter_map(|part| part.split(':').next()?.trim().parse::<i32>().ok())
+          .collect::<Vec<_>>()
+      })
       .collect();
+    let own = EXCLUDED_FDS.lock().unwrap().clone();
     let mut map = HashMap::new();
     for fd in list_open_fds() {
-      if excluded.contains(&fd) {
+      if excluded.contains(&fd) || own.contains(&fd) {
         continue;
       }
       if let Some(identity) = fd_identity(fd) {
