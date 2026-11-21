@@ -308,8 +308,11 @@
     // tsconfig and .env files, setup files, `__mocks__` lookups and
     // automocks. The test's (and the config's) own reads stay checked.
     "runner_reads": {
+      // the runner's own reads with no grant, unconfined: under the kernel
+      // sandbox's R4 a Vitest config makes `auto` a warn run, whose notice
+      // this output doesn't hold (kernel_sandbox::test_bench pins that)
       "cwd": "runner_reads/project",
-      "args": "test --no-check",
+      "args": "test --kernel-sandbox=off --no-check",
       "output": "runner_reads/project.out",
       "exitCode": 0
     },
@@ -324,27 +327,36 @@
         },
         {
           "cwd": "runner_reads/project",
-          "args": "test --no-check src/symlink_escape.spec.ts",
+          "args": "test --kernel-sandbox=off --no-check src/symlink_escape.spec.ts",
           "output": "runner_reads/symlink_escape.out",
           "exitCode": 0
         }
       ]
     },
     "runner_reads_config_project": {
+      // the runner's own reads with no grant, unconfined: under the kernel
+      // sandbox's R4 a Vitest config makes `auto` a warn run, whose notice
+      // this output doesn't hold (kernel_sandbox::test_bench pins that)
       "cwd": "config_project",
-      "args": "test --no-check",
+      "args": "test --kernel-sandbox=off --no-check",
       "output": "config.out",
       "exitCode": 1
     },
     "runner_reads_mocking_project": {
+      // the runner's own reads with no grant, unconfined: under the kernel
+      // sandbox's R4 a Vitest config makes `auto` a warn run, whose notice
+      // this output doesn't hold (kernel_sandbox::test_bench pins that)
       "cwd": "mocking_project",
-      "args": "test --no-check",
+      "args": "test --kernel-sandbox=off --no-check",
       "output": "mocking_project.out",
       "exitCode": 0
     },
     "runner_reads_projects": {
+      // the runner's own reads with no grant, unconfined: under the kernel
+      // sandbox's R4 a Vitest config makes `auto` a warn run, whose notice
+      // this output doesn't hold (kernel_sandbox::test_bench pins that)
       "cwd": "projects",
-      "args": "test --no-check",
+      "args": "test --kernel-sandbox=off --no-check",
       "output": "projects.out",
       "exitCode": 0
     },

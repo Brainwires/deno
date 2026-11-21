@@ -6,7 +6,10 @@
         {
           // No read/write permissions needed for the default snapshot
           // location; creates __snapshots__/main_test.ts.snap.
-          "args": "test --update-snapshots main_test.ts",
+          // (unconfined: under the kernel sandbox's R4, --update-snapshots
+          // makes `auto` a warn run, whose notice this output doesn't hold;
+          // kernel_sandbox::test_bench pins that)
+          "args": "test --kernel-sandbox=off --update-snapshots main_test.ts",
           "exitCode": 0,
           "output": "main_update.out"
         },
@@ -17,7 +20,10 @@
         },
         {
           // Nothing changed, so nothing is updated or reported.
-          "args": "test --update-snapshots main_test.ts",
+          // (unconfined: under the kernel sandbox's R4, --update-snapshots
+          // makes `auto` a warn run, whose notice this output doesn't hold;
+          // kernel_sandbox::test_bench pins that)
+          "args": "test --kernel-sandbox=off --update-snapshots main_test.ts",
           "exitCode": 0,
           "output": "main_update_noop.out"
         }
@@ -41,7 +47,10 @@
     "update_writes_and_removes_stale": {
       "steps": [
         {
-          "args": "test --update-snapshots mismatch_test.ts",
+          // (unconfined: under the kernel sandbox's R4, --update-snapshots
+          // makes `auto` a warn run, whose notice this output doesn't hold;
+          // kernel_sandbox::test_bench pins that)
+          "args": "test --kernel-sandbox=off --update-snapshots mismatch_test.ts",
           "exitCode": 0,
           "output": "mismatch_update.out"
         },
@@ -62,7 +71,10 @@
         {
           // A name filter means other tests' snapshots may not have been
           // asserted this run, so stale entries are kept.
-          "args": "test --update-snapshots --filter mismatch mismatch_test.ts",
+          // (unconfined: under the kernel sandbox's R4, --update-snapshots
+          // makes `auto` a warn run, whose notice this output doesn't hold;
+          // kernel_sandbox::test_bench pins that)
+          "args": "test --kernel-sandbox=off --update-snapshots --filter mismatch mismatch_test.ts",
           "exitCode": 0,
           "output": "mismatch_update_filter.out"
         },

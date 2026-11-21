@@ -26,14 +26,20 @@
     // cli/tools/test/vitest/runner_reads.rs): a CommonJS config with
     // projects, the package.json "jest" key.
     "projects_no_permissions": {
+      // the runner's own reads with no grant, unconfined: under the kernel
+      // sandbox's R4 a Jest config makes `auto` a warn run, whose notice
+      // this output doesn't hold (kernel_sandbox::test_bench pins that)
       "cwd": "projects",
-      "args": "test --no-check",
+      "args": "test --kernel-sandbox=off --no-check",
       "output": "projects.out",
       "exitCode": 0
     },
     "package_json_no_permissions": {
+      // the runner's own reads with no grant, unconfined: under the kernel
+      // sandbox's R4 a Jest config makes `auto` a warn run, whose notice
+      // this output doesn't hold (kernel_sandbox::test_bench pins that)
       "cwd": "package_json",
-      "args": "test --no-check",
+      "args": "test --kernel-sandbox=off --no-check",
       "output": "package_json.out",
       "exitCode": 0
     },

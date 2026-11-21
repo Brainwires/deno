@@ -1106,7 +1106,9 @@ fn is_runtime_code(code: &str, runtime_len: Option<usize>) -> bool {
 /// A form of a module's code that V8 may have run.
 struct RuntimeCode {
   code: String,
-  /// The module's usual form (not changed by a program transform).
+  /// The module's usual form (not changed by a program transform), the
+  /// fallback when no form has the profile's length; a form emitted afresh
+  /// (no cached emit) or by a program transform is never that fallback.
   plain: bool,
 }
 
@@ -1147,11 +1149,34 @@ fn runtime_code_candidates(
       let module_kind = ModuleKind::from_is_cjs(
         cjs_tracker.is_maybe_cjs(&file.specifier, file.media_type)?,
       );
-      emitter
-        .maybe_cached_emit(&file.specifier, module_kind, original_source)?
-        .map(plain)
-        .into_iter()
-        .collect()
+      match emitter.maybe_cached_emit(
+        &file.specifier,
+        module_kind,
+        original_source,
+      )? {
+        Some(code) => vec![plain(code)],
+        // denext: a run the kernel sandbox confined keeps its emits in its
+        // policy's cache overlay, which no unconfined run reads or trusts
+        // (DENEXT.md item 451): the module is emitted again here from its
+        // source, as any unconfined run emits it, never read from there. It
+        // isn't the plain form: where the profile's length is known, it
+        // counts only when it is as long as the code that ran (a source
+        // changed since is skipped, as before).
+        None => emitter
+          .maybe_emit_source_sync(
+            &file.specifier,
+            file.media_type,
+            module_kind,
+            original_source,
+          )
+          .ok()
+          .map(|code| RuntimeCode {
+            code: code.to_string(),
+            plain: false,
+          })
+          .into_iter()
+          .collect(),
+      }
     }
     MediaType::SourceMap => {
       unreachable!()

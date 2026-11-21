@@ -672,6 +672,15 @@ fn check_broker(plan: &EnforcePlan) -> Result<(), AnyError> {
 
 /// The local files of the static module graph of `roots`, loaded first (the
 /// first image fetches and caches what it needs while it still can).
+///
+/// Only the modules the program can run: the code dependencies reachable
+/// from `roots` (dynamic imports the graph holds included), never a module
+/// reached through a type-only edge (`import type`, `@ts-types`, `/// <reference
+/// types>`, `compilerOptions.types`, an npm package's `.d.ts`). The image
+/// before the re-exec type-checks (its graph holds the types too) and the
+/// confined one doesn't (its graph is code only), and both must list the
+/// same files: the confined image checks that each file handed over is one
+/// of its own.
 async fn graph_module_files(
   factory: &crate::factory::CliFactory,
   roots: &[ModuleSpecifier],
@@ -695,18 +704,35 @@ async fn graph_module_files(
     .check_specifiers(&roots, Default::default())
     .await?;
   let graph = container.graph();
+  Ok(code_module_files(&graph, &roots))
+}
+
+/// The local files of the modules reachable from `roots` through code
+/// edges only (see [`graph_module_files`]), sorted.
+fn code_module_files(
+  graph: &deno_graph::ModuleGraph,
+  roots: &[ModuleSpecifier],
+) -> Vec<PathBuf> {
   let mut files: Vec<PathBuf> = graph
-    .modules()
-    .filter_map(|m| {
-      let specifier = m.specifier();
-      (specifier.scheme() == "file")
-        .then(|| specifier.to_file_path().ok())
-        .flatten()
+    .walk(
+      roots.iter(),
+      deno_graph::WalkOptions {
+        check_js: deno_graph::CheckJsOption::False,
+        follow_dynamic: true,
+        kind: deno_graph::GraphKind::CodeOnly,
+        prefer_fast_check_graph: false,
+      },
+    )
+    .filter_map(|(_, entry)| match entry {
+      deno_graph::ModuleEntryRef::Module(m) => Some(m.specifier()),
+      _ => None,
     })
+    .filter(|specifier| specifier.scheme() == "file")
+    .filter_map(|specifier| specifier.to_file_path().ok())
     .collect();
   files.sort();
   files.dedup();
-  Ok(files)
+  files
 }
 
 /// Whether a plan waits for [`apply_pending`].
@@ -821,6 +847,33 @@ fn entry_files(entries: &[PlanEntry]) -> Vec<PathBuf> {
   files
 }
 
+/// The snapshot files `deno test` reads without a permission check beside
+/// the modules of `entries` it runs (`__snapshots__/<file name>.snap`, the
+/// default location `cli/ops/testing.rs` derives from the test module
+/// itself): runner-managed data, as the coverage folder is, derived only
+/// from entries the confined image checks against its own patterns.
+fn snapshot_files(entries: &[PlanEntry]) -> Vec<PathBuf> {
+  let mut files: Vec<PathBuf> = entries
+    .iter()
+    .filter(|e| e.run)
+    .filter_map(|e| ModuleSpecifier::parse(&e.specifier).ok())
+    .filter(|url| url.scheme() == "file")
+    .filter_map(|url| url.to_file_path().ok())
+    .filter_map(|path| {
+      let name = path.file_name()?.to_string_lossy().into_owned();
+      Some(
+        path
+          .parent()?
+          .join("__snapshots__")
+          .join(format!("{name}.snap")),
+      )
+    })
+    .collect();
+  files.sort();
+  files.dedup();
+  files
+}
+
 /// Applies the pending plan once the module graph of `roots` is loaded
 /// (remote modules cached), before any user code runs. The process
 /// re-executes under the plan (Linux, macOS), so this returns only an error
@@ -829,7 +882,7 @@ pub async fn apply_pending(
   factory: &crate::factory::CliFactory,
   roots: &[ModuleSpecifier],
 ) -> Result<(), AnyError> {
-  apply_pending_with_entries(factory, roots, &[]).await
+  apply_pending_with_entries(factory, roots, &[], false).await
 }
 
 /// [`apply_pending`] for `deno test` / `deno bench` (`EnforceCoverage::
@@ -837,11 +890,15 @@ pub async fn apply_pending(
 /// (`entries`), which the confined image runs without finding them again
 /// ([`handed_over_entries`]); their local files are readable to it. In the
 /// confined image, each module file handed over must be one of the graph's
-/// or of the entries'.
+/// or of the entries'. `snapshots` (`deno test`): the existing snapshot
+/// files beside the modules it runs are readable too ([`snapshot_files`];
+/// writing them, `--update-snapshots`, isn't covered: `auto` runs that as
+/// `warn`).
 pub async fn apply_pending_with_entries(
   factory: &crate::factory::CliFactory,
   roots: &[ModuleSpecifier],
   entries: &[PlanEntry],
+  snapshots: bool,
 ) -> Result<(), AnyError> {
   // the permission check that prepares the plan runs on first use
   factory.root_permissions_container()?;
@@ -860,6 +917,11 @@ pub async fn apply_pending_with_entries(
     // must be one of this run's own, or the hand-over widened something
     let mut files = graph_module_files(factory, roots).await?;
     files.extend(entry_files(entries));
+    if snapshots {
+      // each derived from a checked entry; the image before this one handed
+      // over only those that existed
+      files.extend(snapshot_files(entries));
+    }
     files.sort();
     files.dedup();
     check_module_files(handed_over)?;
@@ -884,6 +946,13 @@ pub async fn apply_pending_with_entries(
   let mut plan = pending.clone();
   plan.module_files = graph_module_files(factory, roots).await?;
   plan.module_files.extend(entry_files(entries));
+  if snapshots {
+    // a read rule names an existing file; a snapshot file a test creates
+    // needs --update-snapshots, which enforce doesn't cover
+    plan
+      .module_files
+      .extend(snapshot_files(entries).into_iter().filter(|f| f.is_file()));
+  }
   plan.module_files.sort();
   plan.module_files.dedup();
   plan.entries = entries.to_vec();
@@ -1020,3 +1089,37 @@ pub fn guard_user_code() -> Result<(), std::io::Error> {
 }
 
 pub use deno_lib::kernel_inherit::permission_denied_note;
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn entry(specifier: &str, run: bool, doc: bool) -> PlanEntry {
+    PlanEntry {
+      specifier: specifier.to_string(),
+      run,
+      doc,
+    }
+  }
+
+  /// The snapshot files are the default location `cli/ops/testing.rs`
+  /// derives, beside modules that run, and nothing for a doc-only source or
+  /// a remote module.
+  #[cfg(unix)]
+  #[test]
+  fn snapshot_files_beside_run_entries() {
+    let files = snapshot_files(&[
+      entry("file:///w/a_test.ts", true, false),
+      entry("file:///w/sub/b_test.ts", true, true),
+      entry("file:///w/README.md", false, true),
+      entry("https://example.com/c_test.ts", true, false),
+    ]);
+    assert_eq!(
+      files,
+      vec![
+        PathBuf::from("/w/__snapshots__/a_test.ts.snap"),
+        PathBuf::from("/w/sub/__snapshots__/b_test.ts.snap"),
+      ]
+    );
+  }
+}

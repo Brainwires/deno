@@ -141,6 +141,98 @@ fn enforce_covers(subcommand: &DenoSubcommand) -> EnforceCoverage {
   }
 }
 
+/// What of this run would run user code, or need writes, before or beyond
+/// what `enforce` covers of its command ([`enforce_covers`]), so that the
+/// command isn't covered after all: `run --eszip-internal-do-not-use`
+/// (runs no graph first), a `deno test` that loads a Vitest or Jest config
+/// (its code runs while the tests are found, before the sandbox could
+/// apply), `deno test --update-snapshots` (writes snapshot files beside the
+/// tests, which no grant names), and a `test` / `bench` whose workspace
+/// members bring permission sets of their own (`-P`: the kernel holds the
+/// top-level grant only). `None`: nothing; else what to say about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Uncovered {
+  Eszip,
+  TestConfig,
+  UpdateSnapshots,
+  MemberPermissions,
+}
+
+impl Uncovered {
+  fn describe(self) -> &'static str {
+    match self {
+      Self::Eszip => "enforce doesn't cover this command yet",
+      Self::TestConfig => {
+        "enforce doesn't cover a test run that loads a Vitest or Jest config yet"
+      }
+      Self::UpdateSnapshots => "enforce doesn't cover --update-snapshots yet",
+      Self::MemberPermissions => {
+        "enforce doesn't cover workspace members with permission sets of their own yet"
+      }
+    }
+  }
+}
+
+/// [`enforce_covers`] for the command, less what [`Uncovered`] finds.
+fn coverage_with(
+  covered: EnforceCoverage,
+  uncovered: Option<Uncovered>,
+) -> (EnforceCoverage, Option<Uncovered>) {
+  match (covered, uncovered) {
+    (EnforceCoverage::None, _) => (EnforceCoverage::None, None),
+    (_, Some(why)) => (EnforceCoverage::None, Some(why)),
+    (covered, None) => (covered, None),
+  }
+}
+
+/// What of this run [`enforce_covers`] can't see from the command alone
+/// (see [`Uncovered`]).
+fn uncovered_by(cli_options: &CliOptions) -> Option<Uncovered> {
+  let flags = cli_options.flags();
+  let root_options = || cli_options.permissions_options().ok();
+  // a member whose permissions differ from the top-level grant (only with
+  // -P / config permissions; each member's tests run with their own)
+  let members_differ =
+    |dirs: Vec<deno_config::workspace::WorkspaceDirectoryRc>| {
+      let Some(root) = root_options() else {
+        return false;
+      };
+      dirs.iter().any(|dir| {
+        cli_options
+          .permissions_options_for_dir(dir)
+          .is_ok_and(|member| member != root)
+      })
+    };
+  match &flags.subcommand {
+    DenoSubcommand::Run(_) if flags.eszip => Some(Uncovered::Eszip),
+    DenoSubcommand::Test(test_flags) => {
+      let options = cli_options.resolve_workspace_test_options(test_flags);
+      if options.vitest_compat
+        && crate::tools::test::vitest::has_test_config(
+          cli_options.initial_cwd(),
+          test_flags.vitest.config.as_deref(),
+        )
+      {
+        Some(Uncovered::TestConfig)
+      } else if options.update_snapshots {
+        Some(Uncovered::UpdateSnapshots)
+      } else if cli_options
+        .resolve_test_options_for_members(test_flags)
+        .is_ok_and(|m| members_differ(m.into_iter().map(|(d, _)| d).collect()))
+      {
+        Some(Uncovered::MemberPermissions)
+      } else {
+        None
+      }
+    }
+    DenoSubcommand::Bench(bench_flags) => cli_options
+      .resolve_bench_options_for_members(bench_flags)
+      .is_ok_and(|m| members_differ(m.into_iter().map(|(d, _)| d).collect()))
+      .then_some(Uncovered::MemberPermissions),
+    _ => None,
+  }
+}
+
 /// `--kernel-sandbox`, parsed (the parser already checked the value).
 fn flag_mode(
   cli_options: &CliOptions,
@@ -711,7 +803,10 @@ pub fn check_run(
     && inputs.kind != Some(RunKind::NotARuntime);
   // a mode `auto` chose never refuses to start (item 472): where enforce
   // can't hold the grant, the run is a warn one, and says why
-  let covered = enforce_covers(&cli_options.flags().subcommand);
+  let (covered, uncovered) = coverage_with(
+    enforce_covers(&cli_options.flags().subcommand),
+    uncovered_by(cli_options),
+  );
   let mut degraded: Option<String> = None;
   if resolution.auto_chosen && resolution.mode.fails_closed() {
     if enforce::confined_by_a_parent() || !detect_capabilities().enforcer_built
@@ -728,7 +823,12 @@ pub fn check_run(
       resolution.reason = ModeReason::DenyCeilingDenoOnly;
       resolution.auto_chosen = false;
     } else if covered == EnforceCoverage::None {
-      degraded = Some("enforce doesn't cover this command yet".to_string());
+      degraded = Some(
+        uncovered
+          .map(Uncovered::describe)
+          .unwrap_or("enforce doesn't cover this command yet")
+          .to_string(),
+      );
       resolution.mode = KernelSandboxMode::Warn;
     }
   }
@@ -1429,6 +1529,36 @@ mod coverage_tests {
     assert_eq!(
       enforce_covers(&DenoSubcommand::Bench(BenchFlags::default())),
       EnforceCoverage::AfterSetup
+    );
+  }
+
+  /// What runs user code before the sandbox could apply, or writes what no
+  /// grant names, makes a covered command uncovered (`auto` then runs it as
+  /// `warn`, never refusing); a command already uncovered stays so, with
+  /// the generic reason.
+  #[test]
+  fn uncovered_parts_lower_the_coverage() {
+    for why in [
+      Uncovered::Eszip,
+      Uncovered::TestConfig,
+      Uncovered::UpdateSnapshots,
+      Uncovered::MemberPermissions,
+    ] {
+      for covered in [EnforceCoverage::Full, EnforceCoverage::AfterSetup] {
+        assert_eq!(
+          coverage_with(covered, Some(why)),
+          (EnforceCoverage::None, Some(why))
+        );
+      }
+      assert_eq!(
+        coverage_with(EnforceCoverage::None, Some(why)),
+        (EnforceCoverage::None, None)
+      );
+      assert!(why.describe().starts_with("enforce doesn't cover"));
+    }
+    assert_eq!(
+      coverage_with(EnforceCoverage::AfterSetup, None),
+      (EnforceCoverage::AfterSetup, None)
     );
   }
 }

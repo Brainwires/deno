@@ -148,6 +148,22 @@ pub fn collect_specifiers(
   Ok(prepared)
 }
 
+/// denext (kernel sandbox): whether [`collect_specifiers`] takes `path` as a
+/// file the include set names by its path (a command line argument such as
+/// `deno test extensionless`), whatever its name or extension: an exact
+/// [`PathOrPattern::Path`] entry the exclude set doesn't drop.
+pub fn is_explicitly_specified(
+  file_patterns: &FilePatterns,
+  path: &Path,
+) -> bool {
+  file_patterns.include.as_ref().is_some_and(|include| {
+    include
+      .inner()
+      .iter()
+      .any(|p| matches!(p, PathOrPattern::Path(p) if p == path))
+  }) && !file_patterns.exclude.matches_path(path)
+}
+
 /// Asynchronously removes a directory and all its descendants, but does not error
 /// when the directory does not exist.
 pub async fn remove_dir_all_if_exists(path: &Path) -> std::io::Result<()> {
@@ -453,5 +469,39 @@ mod tests {
         .collect::<Vec<_>>(),
       expected
     );
+  }
+
+  /// denext: a file named by its path is taken whatever its extension (as
+  /// `collect_specifiers` takes it), unless the exclude set drops it; a
+  /// pattern or a folder doesn't name a file.
+  #[test]
+  fn explicitly_specified_files() {
+    let temp_dir = TempDir::new();
+    let root = temp_dir.path().to_path_buf();
+    let file = root.join("extensionless").to_path_buf();
+    let other = root.join("other").to_path_buf();
+    let patterns =
+      |include: Vec<PathOrPattern>, exclude: Vec<PathOrPattern>| FilePatterns {
+        base: root.to_path_buf(),
+        include: Some(PathOrPatternSet::new(include)),
+        exclude: PathOrPatternSet::new(exclude),
+      };
+    let named = patterns(vec![PathOrPattern::Path(file.clone())], vec![]);
+    assert!(is_explicitly_specified(&named, &file));
+    assert!(!is_explicitly_specified(&named, &other));
+    let excluded = patterns(
+      vec![PathOrPattern::Path(file.clone())],
+      vec![PathOrPattern::Path(file.clone())],
+    );
+    assert!(!is_explicitly_specified(&excluded, &file));
+    let folder =
+      patterns(vec![PathOrPattern::Path(root.to_path_buf())], vec![]);
+    assert!(!is_explicitly_specified(&folder, &file));
+    let none = FilePatterns {
+      base: root.to_path_buf(),
+      include: None,
+      exclude: PathOrPatternSet::new(vec![]),
+    };
+    assert!(!is_explicitly_specified(&none, &file));
   }
 }
