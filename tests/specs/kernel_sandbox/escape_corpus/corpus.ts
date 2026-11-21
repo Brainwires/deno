@@ -26,7 +26,12 @@
 // from probes.ts's matrix targets.
 
 import { classify, parse, type Result } from "./classify.ts";
-import { type Column, columnFor, expectEnforce } from "./expect.ts";
+import {
+  type Column,
+  columnFor,
+  expectDenyCeiling,
+  expectEnforce,
+} from "./expect.ts";
 import { CELLS, PROBES, type Vector, VECTORS } from "./probes.ts";
 
 const args = Object.fromEntries(
@@ -217,6 +222,8 @@ console.log(
 //    the kernel sandbox can hold under --kernel-sandbox=enforce (a name in
 //    --allow-net needs the broker): files (read/write/ffi=<work>, no network,
 //    no run), the whole network, and a run list (the child vector).
+/** The deny ceiling's configuration (auto at R4, no --kernel-sandbox). */
+const DENY_CEILING = "deny-ceiling";
 const files = [
   `--allow-read=${work}`,
   `--allow-write=${work}`,
@@ -252,6 +259,13 @@ const configs: Record<string, string[]> = expect === "enforce"
         ],
       }
       : {}),
+    // the deny ceiling (D2): -A with denies on the outside folder, no
+    // --kernel-sandbox, auto at R4 (expectDenyCeiling)
+    [DENY_CEILING]: [
+      "-A",
+      `--deny-read=${out}`,
+      `--deny-write=${out}`,
+    ],
   }
   : {
     today: [
@@ -275,15 +289,19 @@ if (expect === "enforce" && !brokerBuilt) {
   );
 }
 for (const [config, flags] of Object.entries(configs)) {
+  const ceiling = config === DENY_CEILING;
+  const explicit = expect === "enforce" && !ceiling;
   const grant = [
     "run",
     "--quiet",
     "--no-prompt",
-    ...(expect === "enforce" ? ["--kernel-sandbox=enforce"] : []),
+    ...(explicit ? ["--kernel-sandbox=enforce"] : []),
     ...flags,
     "--node-modules-dir=manual",
   ];
   for (const vector of vectors) {
+    // the nested vectors need a run list that names the runtime
+    if (ceiling && vector.startsWith("nested")) continue;
     const o = new Deno.Command("/bin/sh", {
       // fd 3: opened by the launcher before the run, inherited by the host.
       args: [
@@ -299,6 +317,8 @@ for (const [config, flags] of Object.entries(configs)) {
         CORPUS_FD3: `${out}/secret2`,
         CORPUS_SECRET_ENV: "TOP-SECRET env",
         NO_COLOR: "1",
+        // the deny ceiling is auto's (the harness's stage switch)
+        ...(ceiling ? { DENO_INTERNAL_KERNEL_SANDBOX_STAGE: "r4" } : {}),
       },
       stdout: "piped",
       stderr: "piped",
@@ -337,9 +357,11 @@ const allowedToday = new Set(["open", "n/a", "host"]);
 const counts: Record<string, number> = {};
 for (const r of rows) counts[r.state] = (counts[r.state] ?? 0) + 1;
 const expected = (r: Row): Set<string> =>
-  expect === "enforce"
-    ? expectEnforce(r.cell, column!, r.config, r.vector)
-    : allowedToday;
+  expect !== "enforce"
+    ? allowedToday
+    : r.config === DENY_CEILING
+    ? expectDenyCeiling(r.cell, column!)
+    : expectEnforce(r.cell, column!, r.config, r.vector);
 for (const r of rows) {
   const ok = expected(r).has(r.state);
   console.log(

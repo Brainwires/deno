@@ -1,0 +1,65 @@
+// denext (WP-A of denext.30): `deno test` and `deno bench` under the kernel
+// sandbox. The sandbox applies after the type check and the coverage folder
+// are set up: the image before the re-exec finds and checks the modules,
+// the confined one runs exactly those (handed over, checked against the
+// run's own patterns). Native code is held to the top-level grant;
+// `Deno.test({ permissions })` stays an API-level narrowing.
+{
+  "tempDir": true,
+  "tests": {
+    // a native read outside the grant is refused inside `deno test`
+    "test_native_read_refused": {
+      "if": "kernelSandboxEnforce",
+      "args": "test --quiet --kernel-sandbox=enforce --allow-ffi --allow-read=inside native_test.ts",
+      "output": "[WILDCARD]read inside: ok[WILDCARD]read outside: refused[WILDCARD]ok | 1 passed[WILDCARD]"
+    },
+    // the same under auto at R4 (no terminal here)
+    "test_auto_r4": {
+      "if": "kernelSandboxEnforce",
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r4" },
+      "args": "test --quiet --allow-ffi --allow-read=inside native_test.ts",
+      "output": "[WILDCARD]read inside: ok[WILDCARD]read outside: refused[WILDCARD]ok | 1 passed[WILDCARD]"
+    },
+    // coverage and the JUnit report are still written
+    "coverage_and_junit_written": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        {
+          "args": "test --quiet --kernel-sandbox=enforce --allow-ffi --allow-read=inside --coverage=cov --junit-path=report.xml native_test.ts",
+          "output": "[WILDCARD]ok | 1 passed[WILDCARD]"
+        },
+        {
+          "args": "run --quiet -A check_outputs.ts",
+          "output": "coverage written: true\njunit written: true\n"
+        }
+      ]
+    },
+    // Deno.test({ permissions }) narrows as before
+    "test_permissions_unchanged": {
+      "if": "kernelSandboxEnforce",
+      "args": "test --quiet --kernel-sandbox=enforce --allow-read=inside perms_test.ts",
+      "output": "[WILDCARD]ok | 2 passed[WILDCARD]"
+    },
+    // test modules found by walking the folder, which the confined image
+    // can't list: it runs them from the hand-over
+    "test_discovered_modules": {
+      "if": "kernelSandboxEnforce",
+      "cwd": "discover",
+      "args": "test --quiet --kernel-sandbox=enforce",
+      "output": "[WILDCARD]ok | 1 passed[WILDCARD]"
+    },
+    // a doc-test source (Markdown) the graph doesn't hold is readable to the
+    // confined image, which extracts its code blocks
+    "test_doc_source": {
+      "if": "kernelSandboxEnforce",
+      "args": "test --quiet --kernel-sandbox=enforce --doc doc/README.md",
+      "output": "[WILDCARD]ok | 1 passed[WILDCARD]"
+    },
+    // `deno bench` too
+    "bench_native_read_refused": {
+      "if": "kernelSandboxEnforce",
+      "args": "bench --quiet --kernel-sandbox=enforce --allow-ffi --allow-read=inside native_bench.ts",
+      "output": "[WILDCARD]read inside: ok\nread outside: refused\n[WILDCARD]"
+    }
+  }
+}

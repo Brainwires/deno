@@ -1,0 +1,59 @@
+// denext (WP-A of denext.30): the deny ceiling. A run whose grant a prompt
+// can widen (D1), and `-A` with denies (D2), get only their deny rules
+// enforced under `auto` at R4: nothing else changes (no seccomp list, no
+// no-new-privileges, no environment scrub). macOS holds the denies with an
+// allow-default Seatbelt profile; Linux would need an overmount, so there
+// they stay Deno's checks only, reported, never refused (decision O4). The
+// prompt parts need a terminal: tests/integration/kernel_sandbox_tests.rs.
+{
+  "tempDir": true,
+  "envs": {
+    "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r4",
+    "DENY_ONLY_PROBE": "1"
+  },
+  "tests": {
+    // -A --deny-read: native code and a child are refused the denied folder
+    // and nothing else
+    "allow_all_deny_mac": {
+      "if": "kernelSandboxEnforceMac",
+      "args": "run --quiet -A --deny-read=secret --deny-write=secret ceiling.ts",
+      "output": "ceiling_mac.out"
+    },
+    // Linux: the denies are Deno's checks only; native code isn't held
+    "allow_all_deny_linux": {
+      "if": "kernelSandboxEnforceLinux",
+      "args": "run --quiet -A --deny-read=secret --deny-write=secret ceiling.ts",
+      "output": "ceiling_linux.out"
+    },
+    // ... and nothing else is applied: no seccomp, no no-new-privileges
+    "allow_all_deny_untouched_linux": {
+      "if": "kernelSandboxEnforceLinux",
+      "args": "run --quiet -A untouched_outer.ts",
+      "output": "NoNewPrivs unchanged: true\nSeccomp unchanged: true\nSeccomp_filters unchanged: true\n"
+    },
+    // the report says what applies and how each deny is held
+    "report_mac": {
+      "if": "kernelSandboxEnforceMac",
+      "args": "run --quiet --kernel-sandbox-report -A --deny-read=secret main.ts",
+      "output": "[WILDCARD]applies: enforce[WILDCARD]only the denies apply[WILDCARD]deny read:  [WILDCARD]secret (exact)[WILDCARD]hello\n"
+    },
+    "report_linux": {
+      "if": "kernelSandboxEnforceLinux",
+      "args": "run --quiet --kernel-sandbox-report -A --deny-read=secret main.ts",
+      "output": "[WILDCARD]applies: off[WILDCARD]held by Deno's checks only here[WILDCARD]deny read:  [WILDCARD]secret (denoOnly)[WILDCARD]hello\n"
+    },
+    // an explicit --kernel-sandbox=warn is warn's, not a ceiling's
+    "explicit_warn_is_not_a_ceiling": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet --kernel-sandbox=warn -A --deny-read=secret main.ts",
+      "output": "[WILDCARD]hello\n"
+    },
+    // the break-glass variable turns the ceiling off
+    "break_glass_off": {
+      "if": "kernelSandboxEnforce",
+      "envs": { "DENO_KERNEL_SANDBOX": "off" },
+      "args": "run --quiet -A --deny-read=secret --deny-write=secret ceiling.ts",
+      "output": "ceiling_linux.out"
+    }
+  }
+}

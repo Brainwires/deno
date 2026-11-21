@@ -98,3 +98,39 @@ export function expectEnforce(
   if (vector === "child" && !run) return new Set(["n/a"]);
   return target === "kernel" ? HELD : EITHER;
 }
+
+// The deny ceiling (WP-A of denext.30): `-A --deny-read=<outside>
+// --deny-write=<outside>` under `auto` at R4, no --kernel-sandbox. Only the
+// denies are enforced, and nothing else changes:
+//
+// - macOS (an allow-default Seatbelt profile with the denies): reading,
+//   writing, changing metadata of, or reaching through a symlink to the
+//   denied folder is held; linking an object out of it, the by-design
+//   cells and another process's memory (macOS may refuse task ports to any
+//   sandboxed process, whatever its profile) may go either way; every
+//   other cell is open as granted (no network, exec, IPC, signal or
+//   environment rule: -A grants them).
+// - Linux (no overmount built): the denies are Deno's checks only
+//   (decision O4), so nothing is held and nothing else is applied (no
+//   seccomp list, no no-new-privileges): every cell is as without a
+//   sandbox.
+const CEILING_HELD_MACOS = new Set([
+  "fs.read",
+  "fs.write",
+  "fs.meta",
+  "fs.symlink",
+]);
+const CEILING_EITHER_MACOS = new Set([
+  "fs.link",
+  "proc.ptrace",
+  "fs.proc",
+  "fd.inherited",
+  "sys.info",
+]);
+
+export function expectDenyCeiling(cell: string, column: Column): Set<string> {
+  if (column !== "macos") return GRANTED;
+  if (CEILING_HELD_MACOS.has(cell)) return HELD;
+  if (CEILING_EITHER_MACOS.has(cell)) return EITHER;
+  return GRANTED;
+}

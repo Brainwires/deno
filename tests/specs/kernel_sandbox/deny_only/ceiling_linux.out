@@ -1,0 +1,8 @@
+native read outside the deny: ok
+native read of the deny: ok
+native create in the deny: ok
+native create elsewhere: ok
+child read of the deny: ok
+child read elsewhere: ok
+native socket: ok
+env kept: 1

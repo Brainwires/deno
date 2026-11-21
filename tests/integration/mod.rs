@@ -47,6 +47,8 @@ mod jsr;
 mod jupyter;
 #[path = "jupyter_client.rs"]
 mod jupyter_client;
+#[path = "kernel_sandbox_tests.rs"]
+mod kernel_sandbox;
 #[path = "lint_tests.rs"]
 mod lint;
 #[path = "lsp_tests.rs"]
