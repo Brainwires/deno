@@ -322,20 +322,31 @@ ReadStream.prototype._read = async function (n) {
   this[kIsPerformingIO] = true;
 
   await new Promise((resolve) => {
-    this[kFs]
-      .read(
-        this.fd,
-        buf,
-        0,
-        n,
-        this.pos ?? null,
-        (_er, _bytesRead, _buf) => {
-          error = _er;
-          bytesRead = _bytesRead;
-          buffer = _buf;
-          return resolve(true);
-        },
-      );
+    try {
+      this[kFs]
+        .read(
+          this.fd,
+          buf,
+          0,
+          n,
+          this.pos ?? null,
+          (_er, _bytesRead, _buf) => {
+            error = _er;
+            bytesRead = _bytesRead;
+            buffer = _buf;
+            return resolve(true);
+          },
+        );
+    } catch (err) {
+      // `read` threw instead of calling back (an argument it refuses, an
+      // `fs` option whose `read` throws). Node.js's `_read` is synchronous,
+      // so `Readable.read()` catches the throw and makes it the stream's
+      // error; thrown out of this promise's executor it rejected the promise
+      // this async `_read` returns, which nothing handles. No I/O is in
+      // flight, so the stream is free to close its descriptor.
+      error = err;
+      resolve(true);
+    }
   });
 
   this[kIsPerformingIO] = false;
