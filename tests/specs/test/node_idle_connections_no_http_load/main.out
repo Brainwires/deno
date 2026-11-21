@@ -1,7 +1,8 @@
-running 3 tests from ./main.test.cjs
+running 4 tests from ./main.test.cjs
 first ... ok ([WILDCARD])
 no http module was loaded after the first test ... ok ([WILDCARD])
+the http agent is destroyed without node:http loaded ... ok ([WILDCARD])
 loaded agents are destroyed ... ok ([WILDCARD])
 
-ok | 3 passed | 0 failed ([WILDCARD])
+ok | 4 passed | 0 failed ([WILDCARD])
 

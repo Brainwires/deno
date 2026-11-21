@@ -76,8 +76,9 @@ function setMaxIdleHTTPParsers(max: number) {
   parsers.max = max;
 }
 
-// `closeIdleConnections` (node:module) destroys the global agent only once
-// this module is loaded; it never loads it to look.
+// Says that this module is loaded, for a check that must not load it to
+// look. (`closeIdleConnections` in node:module goes by the agent's module,
+// `internals.__nodeHttpAgentLoaded`, which is loaded without this one too.)
 internals.__nodeHttpLoaded = true;
 
 return {
