@@ -11,6 +11,15 @@
       "args": "run --quiet --kernel-sandbox=enforce main.ts",
       "output": "hello\n"
     },
+    // a remote module only a computed dynamic import names can't be
+    // fetched once confined (documented: the troubleshooting page's "A
+    // dynamic remote import() fails"); the stage-r4 bed lists the suites'
+    // tests that rely on it
+    "dynamic_remote_import_not_cached": {
+      "if": "kernelSandboxEnforceLinux",
+      "args": "run --quiet --kernel-sandbox=enforce --allow-import dyn_import.ts",
+      "output": "not found in cache\n"
+    },
     // P3 (a): native reads and writes outside the grant are refused
     "native_files": {
       "if": "kernelSandboxEnforce",

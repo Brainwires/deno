@@ -1282,7 +1282,122 @@
   // compiled spec's mode comes from its own --kernel-sandbox, never from
   // this bed.
   "stage-r4": {
-    "specs": {},
+    "specs": {
+      "specs::bundle::worker::bundle_in_worker": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425; kernel-sandbox-troubleshooting \"A dynamic remote import() fails\"): a remote module or npm package the static graph didn't fetch (a computed dynamic import, a worker's own graph, Deno.bundle's esbuild package, lazy dynamic imports) can't be fetched once confined; pinned by specs::kernel_sandbox::enforce::dynamic_remote_import_not_cached"
+      },
+      "specs::lockfile::frozen_lockfile::non_analyzable_dynamic_http": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425; kernel-sandbox-troubleshooting \"A dynamic remote import() fails\"): a remote module or npm package the static graph didn't fetch (a computed dynamic import, a worker's own graph, Deno.bundle's esbuild package, lazy dynamic imports) can't be fetched once confined; pinned by specs::kernel_sandbox::enforce::dynamic_remote_import_not_cached"
+      },
+      "specs::lockfile::frozen_lockfile::non_analyzable_dynamic_jsr": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425; kernel-sandbox-troubleshooting \"A dynamic remote import() fails\"): a remote module or npm package the static graph didn't fetch (a computed dynamic import, a worker's own graph, Deno.bundle's esbuild package, lazy dynamic imports) can't be fetched once confined; pinned by specs::kernel_sandbox::enforce::dynamic_remote_import_not_cached"
+      },
+      "specs::lockfile::frozen_lockfile::non_analyzable_dynamic_npm": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425; kernel-sandbox-troubleshooting \"A dynamic remote import() fails\"): a remote module or npm package the static graph didn't fetch (a computed dynamic import, a worker's own graph, Deno.bundle's esbuild package, lazy dynamic imports) can't be fetched once confined; pinned by specs::kernel_sandbox::enforce::dynamic_remote_import_not_cached"
+      },
+      "specs::lockfile::run_overlapping_npm_constraints::non_analyzable_dynamic": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 451): the lockfile is written by the image before the re-exec; an npm package a computed dynamic import adds after confinement can't be written to it (Failed writing lockfile, EACCES)"
+      },
+      "specs::npm::adding_npm_dep_in_dynamic_import": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425; kernel-sandbox-troubleshooting \"A dynamic remote import() fails\"): a remote module or npm package the static graph didn't fetch (a computed dynamic import, a worker's own graph, Deno.bundle's esbuild package, lazy dynamic imports) can't be fetched once confined; pinned by specs::kernel_sandbox::enforce::dynamic_remote_import_not_cached"
+      },
+      "specs::npm::dynamic_import": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425; kernel-sandbox-troubleshooting \"A dynamic remote import() fails\"): a remote module or npm package the static graph didn't fetch (a computed dynamic import, a worker's own graph, Deno.bundle's esbuild package, lazy dynamic imports) can't be fetched once confined; pinned by specs::kernel_sandbox::enforce::dynamic_remote_import_not_cached"
+      },
+      "specs::run::dynamic_import_concurrent_non_statically_analyzable": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425; kernel-sandbox-troubleshooting \"A dynamic remote import() fails\"): a remote module or npm package the static graph didn't fetch (a computed dynamic import, a worker's own graph, Deno.bundle's esbuild package, lazy dynamic imports) can't be fetched once confined; pinned by specs::kernel_sandbox::enforce::dynamic_remote_import_not_cached"
+      },
+      "specs::run::dynamic_import_permissions_blob_remote": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425; kernel-sandbox-troubleshooting \"A dynamic remote import() fails\"): a remote module or npm package the static graph didn't fetch (a computed dynamic import, a worker's own graph, Deno.bundle's esbuild package, lazy dynamic imports) can't be fetched once confined; pinned by specs::kernel_sandbox::enforce::dynamic_remote_import_not_cached"
+      },
+      "specs::run::dynamic_import_permissions_remote_remote": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425; kernel-sandbox-troubleshooting \"A dynamic remote import() fails\"): a remote module or npm package the static graph didn't fetch (a computed dynamic import, a worker's own graph, Deno.bundle's esbuild package, lazy dynamic imports) can't be fetched once confined; pinned by specs::kernel_sandbox::enforce::dynamic_remote_import_not_cached"
+      },
+      "specs::run::error_015_dynamic_import_permissions": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425; kernel-sandbox-troubleshooting \"A dynamic remote import() fails\"): a remote module or npm package the static graph didn't fetch (a computed dynamic import, a worker's own graph, Deno.bundle's esbuild package, lazy dynamic imports) can't be fetched once confined; pinned by specs::kernel_sandbox::enforce::dynamic_remote_import_not_cached"
+      },
+      "specs::run::import_blob_url_imports": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425; kernel-sandbox-troubleshooting \"A dynamic remote import() fails\"): a remote module or npm package the static graph didn't fetch (a computed dynamic import, a worker's own graph, Deno.bundle's esbuild package, lazy dynamic imports) can't be fetched once confined; pinned by specs::kernel_sandbox::enforce::dynamic_remote_import_not_cached"
+      },
+      "specs::run::lazy_dynamic_imports::enabled_config": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425; kernel-sandbox-troubleshooting \"A dynamic remote import() fails\"): a remote module or npm package the static graph didn't fetch (a computed dynamic import, a worker's own graph, Deno.bundle's esbuild package, lazy dynamic imports) can't be fetched once confined; pinned by specs::kernel_sandbox::enforce::dynamic_remote_import_not_cached"
+      },
+      "specs::run::lazy_dynamic_imports::enabled_flag": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425; kernel-sandbox-troubleshooting \"A dynamic remote import() fails\"): a remote module or npm package the static graph didn't fetch (a computed dynamic import, a worker's own graph, Deno.bundle's esbuild package, lazy dynamic imports) can't be fetched once confined; pinned by specs::kernel_sandbox::enforce::dynamic_remote_import_not_cached"
+      },
+      "specs::worker::worker_permissions_blob_remote": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425; kernel-sandbox-troubleshooting \"A dynamic remote import() fails\"): a remote module or npm package the static graph didn't fetch (a computed dynamic import, a worker's own graph, Deno.bundle's esbuild package, lazy dynamic imports) can't be fetched once confined; pinned by specs::kernel_sandbox::enforce::dynamic_remote_import_not_cached"
+      },
+      "specs::worker::worker_permissions_data_remote": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425; kernel-sandbox-troubleshooting \"A dynamic remote import() fails\"): a remote module or npm package the static graph didn't fetch (a computed dynamic import, a worker's own graph, Deno.bundle's esbuild package, lazy dynamic imports) can't be fetched once confined; pinned by specs::kernel_sandbox::enforce::dynamic_remote_import_not_cached"
+      },
+      "specs::worker::worker_permissions_dynamic_remote": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425; kernel-sandbox-troubleshooting \"A dynamic remote import() fails\"): a remote module or npm package the static graph didn't fetch (a computed dynamic import, a worker's own graph, Deno.bundle's esbuild package, lazy dynamic imports) can't be fetched once confined; pinned by specs::kernel_sandbox::enforce::dynamic_remote_import_not_cached"
+      },
+      "specs::worker::worker_permissions_remote_remote": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425; kernel-sandbox-troubleshooting \"A dynamic remote import() fails\"): a remote module or npm package the static graph didn't fetch (a computed dynamic import, a worker's own graph, Deno.bundle's esbuild package, lazy dynamic imports) can't be fetched once confined; pinned by specs::kernel_sandbox::enforce::dynamic_remote_import_not_cached"
+      },
+      "specs::worker::worker_permissions_static_remote_local": {
+        "os": [
+          "linux"
+        ],
+        "reason": "documented (item 425; kernel-sandbox-troubleshooting \"A dynamic remote import() fails\"): a remote module or npm package the static graph didn't fetch (a computed dynamic import, a worker's own graph, Deno.bundle's esbuild package, lazy dynamic imports) can't be fetched once confined; pinned by specs::kernel_sandbox::enforce::dynamic_remote_import_not_cached"
+      }
+    },
     "node_compat": {},
     "npm_matrix": {},
     "denext_integration": {},
