@@ -3367,6 +3367,12 @@ pub struct TranslatedArgs {
 
 /// Wraps eval code for Node.js compatibility.
 /// Makes builtin modules available as global variables.
+///
+/// denext: the globals are accessors that load their module on first use, as
+/// Node's are (`addBuiltinLibsToObject`): evaluating every builtin module
+/// before the string ran made each `node -e` child pay for some 200 polyfill
+/// scripts it never touched. A name the global object already has (`console`)
+/// is still assigned at once, because loading its module reads that global.
 pub fn wrap_eval_code(source_code: &str) -> String {
   // Use serde_json to properly escape the source code
   let json_escaped = serde_json::to_string(source_code).unwrap_or_else(|_| {
@@ -3380,9 +3386,34 @@ pub fn wrap_eval_code(source_code: &str) -> String {
   format!(
     r#"(
     globalThis.require = process.getBuiltinModule("module").createRequire(import.meta.url),
-    process.getBuiltinModule("module").builtinModules
+    ((load, define, has) => load("module").builtinModules
       .filter((m) => !/\/|crypto|process|_tls_common/.test(m))
-      .forEach((m) => {{ globalThis[m] = process.getBuiltinModule(m); }}),
+      .forEach((m) => {{
+        if (has(globalThis, m)) {{ globalThis[m] = load(m); return; }}
+        const set = (value) => {{
+          delete globalThis[m];
+          globalThis[m] = value;
+        }};
+        define(globalThis, m, {{
+          get() {{
+            const lib = load(m);
+            define(globalThis, m, {{
+              get: () => lib,
+              set,
+              configurable: true,
+              enumerable: false,
+            }});
+            return lib;
+          }},
+          set,
+          configurable: true,
+          enumerable: false,
+        }});
+      }}))(
+      process.getBuiltinModule.bind(process),
+      Object.defineProperty,
+      Object.hasOwn,
+    ),
     process.getBuiltinModule("vm").runInThisContext({}, {{
       filename: "[eval]",
       importModuleDynamically:
@@ -6963,6 +6994,27 @@ mod tests {
         "script.js"
       ]
     );
+  }
+
+  #[test]
+  fn eval_wrapper_loads_builtin_globals_on_first_use() {
+    let wrapped = wrap_eval_code("console.log(\"a\\b\")");
+    // The string runs as a script, escaped as a JSON string.
+    assert!(wrapped.contains(
+      r#"process.getBuiltinModule("vm").runInThisContext("console.log(\"a\\b\")", {"#
+    ));
+    // Each builtin module is an accessor on the global object (as in Node):
+    // nothing but a name the global object already has is loaded before the
+    // string runs.
+    assert!(wrapped.contains("get() {"));
+    assert!(wrapped.contains("enumerable: false"));
+    assert!(wrapped.contains(
+      "if (has(globalThis, m)) { globalThis[m] = load(m); return; }"
+    ));
+    assert!(!wrapped.contains("globalThis[m] = process.getBuiltinModule(m)"));
+    // The template's braces are balanced once formatted.
+    assert_eq!(wrapped.matches('{').count(), wrapped.matches('}').count());
+    assert_eq!(wrapped.matches('(').count(), wrapped.matches(')').count());
   }
 
   #[test]

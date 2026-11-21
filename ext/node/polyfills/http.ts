@@ -2,7 +2,7 @@
 // deno-lint-ignore-file no-explicit-any
 
 (function () {
-const { core, primordials } = __bootstrap;
+const { core, internals, primordials } = __bootstrap;
 const { ArrayPrototypeSlice, ArrayPrototypeSort } = primordials;
 
 const {
@@ -75,6 +75,10 @@ function setMaxIdleHTTPParsers(max: number) {
   validateInteger(max, "max", 1);
   parsers.max = max;
 }
+
+// `closeIdleConnections` (node:module) destroys the global agent only once
+// this module is loaded; it never loads it to look.
+internals.__nodeHttpLoaded = true;
 
 return {
   _connectionListener,

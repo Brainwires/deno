@@ -1,0 +1,15 @@
+{
+  "tests": {
+    // The file's own checks, and that the agents are destroyed once loaded.
+    "agents": {
+      "args": "test --no-check main.test.cjs",
+      "output": "main.out"
+    },
+    // The lazy-load log of a test file that never uses node:http names no
+    // HTTP module.
+    "lazy_load_log": {
+      "args": "run -A lazy_load_log.ts",
+      "output": "lazy_load_log.out"
+    }
+  }
+}

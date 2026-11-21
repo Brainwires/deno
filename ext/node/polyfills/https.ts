@@ -4,7 +4,7 @@
 // deno-lint-ignore-file no-explicit-any
 
 (function () {
-const { core, primordials } = __bootstrap;
+const { core, internals, primordials } = __bootstrap;
 const {
   ArrayIsArray,
   ArrayPrototypeIndexOf,
@@ -708,6 +708,10 @@ ObjectDefineProperty(request, "name", {
   __proto__: null,
   value: "node:https:request",
 });
+
+// `closeIdleConnections` (node:module) destroys the global agent only once
+// this module is loaded; it never loads it to look.
+internals.__nodeHttpsLoaded = true;
 
 return {
   Agent,
