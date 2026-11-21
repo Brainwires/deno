@@ -16,6 +16,12 @@
 //! - [`guard_user_code`] refuses to create a main worker while a plan is
 //!   pending (a code path that runs user code without the graph-first apply
 //!   fails closed).
+//! - A plan with a broker (Mode B: `--kernel-sandbox=broker`, an `enforce`
+//!   the broker closes a gap for, and from the stage where `auto` enforces
+//!   the `broker` it chooses) re-executes as the supervisor instead, which
+//!   forks the confined worker (`deno_sandbox::supervise`). The worker
+//!   leaves the `deno` / `denort` processes it starts a way to the same
+//!   broker (`deno_lib::kernel_supervise`).
 //! - [`permission_denied_note`]: the note on a permission error the kernel
 //!   sandbox probably caused.
 
@@ -46,7 +52,6 @@ use deno_sandbox::plan::EnforcePlan;
 use super::inherit;
 use super::policy::CompiledPolicy;
 use super::policy::Context;
-use super::policy::NetPolicy;
 use super::policy::resolve_prefix;
 
 // ---------------------------------------------------------------------------
@@ -143,6 +148,10 @@ pub fn startup() {
   // worker, stays behind as its broker and never returns
   #[cfg(any(target_os = "linux", target_os = "macos"))]
   match deno_sandbox::supervise::take_handoff() {
+    // ... or the supervisor image of an explicit warn (Linux): it observes
+    // the run instead of brokering for it
+    #[cfg(target_os = "linux")]
+    Ok(Some(handoff)) if handoff.trace.is_some() => trace_supervise(handoff),
     Ok(Some(handoff)) => supervise(handoff),
     Ok(None) => {}
     Err(err) => refuse_at_startup(&err),
@@ -161,6 +170,9 @@ pub fn startup() {
     }
     if let Some(plan) = deno_sandbox::enforce_linux::applied_plan() {
       use_cache_overlay(plan);
+      // this process confines itself: a dial it inherited belongs to an
+      // ancestor's broker, which answers for that ancestor's grant
+      deno_lib::kernel_supervise::drop_inherited_dial();
     }
     take_broker(
       deno_sandbox::enforce_linux::applied_plan()
@@ -174,11 +186,17 @@ pub fn startup() {
     // the policy handed down by a confined ancestor (or, in the image after
     // the re-exec, by the image before it), measured now the plan applies
     inherit::load_at_startup();
+    adopt_broker_of_a_parent(
+      deno_sandbox::enforce_linux::applied_plan().is_some(),
+    );
   }
   #[cfg(target_os = "macos")]
   {
     match deno_sandbox::macos::take_inherited_plan() {
       Ok(Some(plan)) => {
+        // (a dial this process inherited is given up before it confines
+        // itself, as on Linux)
+        deno_lib::kernel_supervise::drop_inherited_dial();
         if let Err(err) = apply_inherited_macos(&plan) {
           refuse_at_startup(&err);
         }
@@ -196,7 +214,26 @@ pub fn startup() {
       Err(err) => refuse_at_startup(&err),
     }
     inherit::load_at_startup();
+    adopt_broker_of_a_parent(INHERITED.get().is_some());
   }
+}
+
+/// A `deno` started inside a brokered run (it applies no plan of its own:
+/// `own_plan` is false, and the kernel-verified carrier of a confined
+/// ancestor was accepted) takes the way to that run's broker its parent
+/// left: its own operations then get what its parent's get, where before
+/// they met the kernel's refusals alone (no socket under a host-scoped
+/// network, no change directly in a folder that holds a write deny). What
+/// it may ask for is still decided by its own checks first, against its
+/// grant intersected with the inherited one.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn adopt_broker_of_a_parent(own_plan: bool) {
+  if own_plan {
+    return;
+  }
+  deno_lib::kernel_supervise::adopt_inherited_dial(
+    !inherit::inherited_layers().is_empty(),
+  );
 }
 
 /// The worker's end of the broker channel, when the supervisor left one:
@@ -205,17 +242,17 @@ pub fn startup() {
 /// a broker and no channel is refused later, in [`prepare`].
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn take_broker(expected: Option<&deno_sandbox::plan::BrokerPlan>) {
-  use deno_runtime::deno_permissions::kernel_broker;
   match deno_sandbox::supervise::take_broker_fd() {
     Ok(Some(fd)) if expected.is_some() => {
-      let _ = kernel_broker::client::install(fd);
       // the broker holds the network: every socket of this process is
       // asked of it from here on (before any module or user code runs)
-      if expected.is_some_and(|broker| broker.net.is_some()) {
-        deno_net_route::install(Box::new(
-          kernel_broker::net::BrokerRoute::new(),
-        ));
-      }
+      deno_lib::kernel_supervise::install_channel(
+        fd,
+        expected.is_some_and(|broker| broker.net.is_some()),
+      );
+      // the `deno` / `denort` processes this run starts reach the same
+      // broker
+      deno_lib::kernel_supervise::offer_dial();
     }
     Ok(_) => {}
     Err(err) => refuse_at_startup(&err),
@@ -227,19 +264,10 @@ fn take_broker(expected: Option<&deno_sandbox::plan::BrokerPlan>) {
 /// with its end of the broker channel) and exits as the worker exits.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn supervise(handoff: deno_sandbox::supervise::Handoff) -> ! {
-  use deno_runtime::deno_permissions::kernel_broker::fs::FsBroker;
-  use deno_runtime::deno_permissions::kernel_broker::fs::FsPolicy;
-  use deno_runtime::deno_permissions::kernel_broker::server::Server;
   use deno_sandbox::supervise::BROKER_FD_ENV_VAR;
 
   let Some(broker) = handoff.plan.broker.clone() else {
     refuse_at_startup("the supervisor's hand-over has no broker policy");
-  };
-  let policy = FsPolicy {
-    read: broker.read,
-    deny_read: broker.deny_read,
-    write: broker.write,
-    deny_write: broker.deny_write,
   };
   let exec_worker = |broker_fd: i32| -> std::io::Error {
     let mut env = handoff.env_os();
@@ -270,22 +298,66 @@ fn supervise(handoff: deno_sandbox::supervise::Handoff) -> ! {
       }
     }
   };
-  let net = broker.net.clone();
   let serve = move |sock: std::os::fd::OwnedFd| -> std::io::Result<()> {
-    let net = match &net {
-      Some(net) => Some(
-        super::net_broker::route_for(net, &policy)
-          .map_err(|err| std::io::Error::other(err.to_string()))?,
-      ),
-      None => None,
-    };
-    let server = Server::new(super::net_broker::BrokerHandler {
-      fs: FsBroker::new(&policy)?,
-      net,
-    });
-    server.spawn(sock).map(|_| ())
+    deno_lib::kernel_supervise::serve_broker(&broker, sock)
   };
   deno_sandbox::supervise::run(exec_worker, serve)
+}
+
+/// The supervisor image of an explicit `--kernel-sandbox=warn` on Linux:
+/// forks the run under a tracing filter and reports what `enforce` would
+/// refuse its native code and child processes (`deno_sandbox::trace`).
+/// Nothing is refused; the run isn't confined.
+#[cfg(target_os = "linux")]
+fn trace_supervise(handoff: deno_sandbox::supervise::Handoff) -> ! {
+  use deno_sandbox::trace::TRACED_ENV_VAR;
+  let Some(trace) = handoff.trace.clone() else {
+    refuse_at_startup("the supervisor's hand-over has no trace policy");
+  };
+  let exec_worker = |traced: bool| -> std::io::Error {
+    let mut env = handoff.env_os();
+    env.retain(|(k, _)| k != TRACED_ENV_VAR);
+    // names the run (this process, once it executes) and says whether the
+    // filter is in place; without it the run goes on unobserved and
+    // doesn't try for an observer again
+    env.push((
+      TRACED_ENV_VAR.into(),
+      deno_sandbox::trace::traced_env_value(traced).into(),
+    ));
+    deno_sandbox::supervise::exec_self(&handoff.exe, env)
+  };
+  deno_sandbox::supervise::run_traced(exec_worker, trace)
+}
+
+/// Re-executes this program as the tracing supervisor of an explicit
+/// `--kernel-sandbox=warn` (Linux), with the `enforce` plan of the run's
+/// grant to report against. The run starts again beneath it, unconfined,
+/// with the descriptors it inherited. Returns only on failure (the run
+/// then goes on as it is, without an observer).
+#[cfg(target_os = "linux")]
+pub(super) fn exec_trace_supervisor(
+  plan: &EnforcePlan,
+  trace: deno_sandbox::supervise::TraceHandoff,
+) -> std::io::Error {
+  use std::os::unix::ffi::OsStringExt;
+  // what this image printed must reach the terminal: the exec discards
+  // anything still buffered
+  log::logger().flush();
+  {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+  }
+  let handoff = deno_sandbox::supervise::Handoff {
+    plan: plan.clone(),
+    env: std::env::vars_os()
+      .map(|(k, v)| (k.into_vec(), v.into_vec()))
+      .collect(),
+    exe: "/proc/self/exe".into(),
+    sandbox_exec_profile: None,
+    trace: Some(trace),
+  };
+  deno_sandbox::supervise::exec_supervisor(&handoff, keep_fd)
 }
 
 /// The image after the re-exec, confined by `plan`: its caches move to the
@@ -498,25 +570,13 @@ pub fn prepare(
   };
   // the broker's copy of the network grant, as the flags wrote it (both
   // images run this with the same options, so the plans still compare)
-  if matches!(compiled.policy.net, NetPolicy::Broker { .. })
-    && let Some(broker) = &mut plan.broker
-  {
-    let mut allow_listen = options.allow_net_listen.clone();
-    if let Some(port) = ctx.inspector_port {
-      // the inspector's own listener, which no flag grants
-      allow_listen
-        .get_or_insert_with(Vec::new)
-        .push(format!("127.0.0.1:{port}"));
-    }
-    broker.net = Some(deno_sandbox::plan::BrokerNet {
-      allow: options.allow_net.clone(),
-      deny: options.deny_net.clone(),
-      allow_connect: options.allow_net_connect.clone(),
-      deny_connect: options.deny_net_connect.clone(),
-      allow_listen,
-      deny_listen: options.deny_net_listen.clone(),
-    });
-  }
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  deno_lib::kernel_supervise::fill_broker_net(
+    &mut plan,
+    compiled,
+    options,
+    ctx.inspector_port,
+  );
   let _ = READ_DENIES.set(
     compiled
       .policy
@@ -583,31 +643,11 @@ pub fn prepare(
 /// kernel rules alone would refuse what Deno's rules allow).
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn check_broker(plan: &EnforcePlan) -> Result<(), AnyError> {
-  use deno_runtime::deno_permissions::kernel_broker::client;
-  use deno_runtime::deno_permissions::kernel_broker::protocol::features;
-  if plan.broker.is_none() {
-    return Ok(());
-  }
-  let Some(broker) = client::get() else {
-    bail!(
-      "--kernel-sandbox=broker refuses to start: this process has no channel to its broker"
-    );
-  };
-  let net = plan.broker.as_ref().is_some_and(|b| b.net.is_some());
-  let net_features =
-    deno_runtime::deno_permissions::kernel_broker::net::FEATURES;
-  match broker.hello() {
-    Ok(served) if net && served & net_features != net_features => bail!(
-      "--kernel-sandbox=broker refuses to start: the broker doesn't serve network operations"
-    ),
-    Ok(served) if served & features::FS != 0 => Ok(()),
-    Ok(_) => bail!(
-      "--kernel-sandbox=broker refuses to start: the broker doesn't serve file operations"
-    ),
-    Err(err) => bail!(
-      "--kernel-sandbox=broker refuses to start: the broker doesn't answer: {err}"
-    ),
-  }
+  deno_lib::kernel_supervise::check_broker(plan).map_err(|why| {
+    deno_core::anyhow::anyhow!(
+      "--kernel-sandbox=broker refuses to start: {why}"
+    )
+  })
 }
 
 /// The local files of the static module graph of `roots`, loaded first (the
@@ -668,6 +708,11 @@ fn reexec_env(
   let mut env: Vec<_> = std::env::vars_os()
     .filter(|(k, _)| k.to_str().is_some_and(|k| plan.keeps_env(k)))
     .filter(|(k, _)| k != POLICY_ENV_VAR)
+    // a dial this process inherited is not the new image's: it confines
+    // itself, and the descriptors don't survive the exec
+    .filter(|(k, _)| {
+      k != deno_runtime::deno_permissions::kernel_broker::dial::DIAL_ENV_VAR
+    })
     .collect();
   if let Some(dir) = deno_dir {
     env.retain(|(k, _)| k != "DENO_DIR");
@@ -871,6 +916,7 @@ fn exec_supervisor(
       .collect(),
     exe,
     sandbox_exec_profile,
+    trace: None,
   };
   deno_sandbox::supervise::exec_supervisor(&handoff, keep)
 }

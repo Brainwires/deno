@@ -17,7 +17,10 @@
 //! Opt-in only: `auto` applies nothing in this release line, `warn`
 //! reports, `enforce` applies the policy (or refuses to start when a rule
 //! can't be held), and `broker` is `enforce` under a supervising broker
-//! (Mode B; its file side is built, its network side not yet).
+//! (Mode B: the file operations and the network). From the stage where
+//! `auto` enforces, it takes the broker by itself for a grant with a rule
+//! only the broker holds, instead of falling back to `warn`
+//! ([`check_run`]).
 
 pub mod enforce;
 pub mod inherit;
@@ -180,11 +183,12 @@ impl CompileKind<'_> {
 /// deno.json `permissions.kernelSandbox`, else nothing (`auto`). The program
 /// applies it at startup, in place (DENEXT.md item 473). A mode the program
 /// could never start with is refused here, so no such binary is made:
-/// `broker` (the supervising broker isn't built in), and `enforce` for a
-/// target without an enforcer. For `enforce` the policy is compiled for the
-/// target OS with every mechanism present, and the rules that OS can't hold
-/// are printed as a warning (the program would refuse to start there; what
-/// the machine it runs on lacks is only known at startup).
+/// `enforce` for a target without an enforcer, and `broker` for one whose
+/// compiled programs run no supervisor (Windows, a desktop app). For
+/// `enforce` and `broker` the policy is compiled for the target OS with
+/// every mechanism present, and the rules that OS can't hold are printed as
+/// a warning (the program would refuse to start there; what the machine it
+/// runs on lacks is only known at startup).
 pub fn compile_mode(
   cli_options: &CliOptions,
   kind: CompileKind,
@@ -194,9 +198,20 @@ pub fn compile_mode(
     None => config_mode(cli_options)?,
   };
   match mode {
-    Some(KernelSandboxMode::Broker) => bail!(
-      "--kernel-sandbox=broker: the supervising broker isn't built into this runtime, so a program compiled with it could not start. Use --kernel-sandbox=enforce, warn, auto or off."
-    ),
+    Some(KernelSandboxMode::Broker) => {
+      let os = kind.os();
+      if !compile_target_supervises(os, kind.desktop) {
+        bail!(
+          "--kernel-sandbox=broker: {} run no supervising broker, so a program compiled with it could not start. Use --kernel-sandbox=enforce, warn, auto or off.",
+          if kind.desktop {
+            "desktop apps"
+          } else {
+            "programs for this target"
+          }
+        );
+      }
+      warn_compile_gaps(cli_options, os, KernelSandboxMode::Broker)?;
+    }
     Some(KernelSandboxMode::Enforce) => {
       let os = kind.os();
       if !compile_target_enforces(os, kind.desktop) {
@@ -209,11 +224,17 @@ pub fn compile_mode(
           }
         );
       }
-      warn_compile_gaps(cli_options, os)?;
+      warn_compile_gaps(cli_options, os, KernelSandboxMode::Enforce)?;
     }
     _ => {}
   }
   Ok(mode)
+}
+
+/// Whether a compiled program for `os` runs its own supervising broker (it
+/// forks in place before it confines itself: `deno_lib::kernel_apply`).
+fn compile_target_supervises(os: TargetOs, desktop: bool) -> bool {
+  !desktop && matches!(os, TargetOs::Linux | TargetOs::Macos)
 }
 
 /// Whether a program for `os` has an enforcer for a baked `enforce`.
@@ -248,6 +269,7 @@ fn best_capabilities(os: TargetOs) -> Capabilities {
 fn warn_compile_gaps(
   cli_options: &CliOptions,
   os: TargetOs,
+  mode: KernelSandboxMode,
 ) -> Result<(), AnyError> {
   let options = cli_options.permissions_options()?;
   if policy::options_allow_all(&options) && !policy::options_have_deny(&options)
@@ -257,10 +279,12 @@ fn warn_compile_gaps(
   }
   let mut ctx = Context::new(
     best_capabilities(os),
-    KernelSandboxMode::Enforce,
+    mode,
     cli_options.initial_cwd().to_path_buf(),
   );
   ctx.compiled = true;
+  // (a desktop app is refused `enforce` before this; `broker` too)
+  ctx.compiled_supervisor = compile_target_supervises(os, false);
   ctx.exec_strict = cli_options.flags().permissions.kernel_sandbox_exec_strict;
   let implicit = ImplicitSet::build(&options, &ctx);
   let compiled = KernelPolicy::compile(&options, &implicit, &ctx);
@@ -272,7 +296,7 @@ fn warn_compile_gaps(
     static WARN: Once = Once::new();
     WARN.call_once(|| {
       log::warn!(
-        "{} --kernel-sandbox=enforce: {} can't hold these rules, so the compiled program would refuse to start there:\n{}",
+        "{} --kernel-sandbox={mode}: {} can't hold these rules, so the compiled program would refuse to start there:\n{}",
         crate::colors::yellow("Warning"),
         os.as_str(),
         fatal.join("\n")
@@ -562,9 +586,16 @@ pub fn cache_overlay_for(deno_dir: &std::path::Path, hash: &str) -> PathBuf {
 fn policy_mode(resolution: &ModeResolution) -> KernelSandboxMode {
   match resolution.mode {
     KernelSandboxMode::Off => match resolution.would_apply {
-      AutoPlan::Enforce => KernelSandboxMode::Enforce,
+      AutoPlan::Enforce | AutoPlan::Broker => KernelSandboxMode::Enforce,
       _ => KernelSandboxMode::Auto,
     },
+    // the broker `auto` chose is what `enforce` takes by itself for this
+    // grant: the policy is compiled as `enforce` compiles it (an explicit
+    // `broker` holds every scoped rule through the broker, which nobody
+    // asked for here), in both images of the run
+    KernelSandboxMode::Broker if resolution.auto_chosen => {
+      KernelSandboxMode::Enforce
+    }
     mode => mode,
   }
 }
@@ -574,6 +605,15 @@ fn policy_mode(resolution: &ModeResolution) -> KernelSandboxMode {
 /// the `warn` notice, refuses to start under `enforce` / `broker` when a
 /// rule can't be held, and otherwise prepares the enforcement plan
 /// ([`enforce::prepare`]; applied before user code runs).
+///
+/// The mode is decided twice. Once from the flags alone, to know how the
+/// policy is to be compiled; then, when the policy `enforce` compiles has
+/// the broker's shape and nothing is left that can't be held, again with
+/// that said (`ModeInputs::policy_needs_supervisor`): an `enforce` that
+/// `auto` chose becomes `broker`, and the run starts under the supervisor
+/// instead of falling back to `warn`. A policy the broker can't hold either
+/// (no Landlock, a seccomp filter that can't be installed, a rule no mode
+/// holds) still falls back: a mode `auto` chose never refuses to start.
 pub fn check_run(
   cli_options: &CliOptions,
   options: &PermissionsOptions,
@@ -653,6 +693,27 @@ pub fn check_run(
       resolution.mode = KernelSandboxMode::Warn;
     }
   }
+  // the policy as `enforce` compiles it needs the supervising broker, and
+  // with it every rule is held: decided again with that said
+  if compiled.policy.shape == policy::Shape::ModeB
+    && ctx.mode == KernelSandboxMode::Enforce
+    && degraded.is_none()
+    && compiled.fatal_gaps().next().is_none()
+  {
+    let again = kernel_sandbox_mode(&ModeInputs {
+      policy_needs_supervisor: true,
+      ..inputs.clone()
+    })?;
+    resolution.needs_supervisor = again.needs_supervisor;
+    if resolution.would_apply != AutoPlan::Off {
+      resolution.would_apply = again.would_apply;
+    }
+    // only a mode nothing above lowered (a parent's sandbox already holds
+    // this process, a command enforce doesn't cover)
+    if resolution.auto_chosen && resolution.mode == KernelSandboxMode::Enforce {
+      resolution.mode = again.mode;
+    }
+  }
   static PRINTED: Once = Once::new();
   PRINTED.call_once(|| {
     // the image before a re-exec (Linux) already printed it
@@ -663,7 +724,8 @@ pub fn check_run(
       clippy::print_stderr,
       reason = "the report is the output asked for"
     )]
-    if report {
+    // (beneath a tracing supervisor the image before this one printed it)
+    if report && !warn::printed_by_the_image_before() {
       // the OS translation's own gaps too (macOS)
       let mut shown = compiled.clone();
       shown.gaps.extend(enforce::report_gaps(&compiled, &ctx));

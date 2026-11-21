@@ -40,6 +40,10 @@
 //! - [`supervise`]: the supervisor of `--kernel-sandbox=broker`: the
 //!   unconfined process that forks the confined worker, stays behind as its
 //!   broker, passes signals on and exits as it exited.
+//! - [`trace`]: the tracing observer of an explicit `--kernel-sandbox=warn`
+//!   on Linux: the supervisor sees the process tree's file, exec and
+//!   socket-address system calls, reports what `enforce` would refuse and
+//!   lets every one continue.
 //! - [`would_deny`]: warn mode's one event ("the sandbox would refuse
 //!   this", with the grant that would allow it) and the reporter every part
 //!   of the sandbox hands it to instead of refusing.
@@ -68,6 +72,8 @@ pub mod seatbelt;
 pub mod seccomp;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod supervise;
+#[cfg(target_os = "linux")]
+pub mod trace;
 #[cfg(windows)]
 pub mod windows;
 pub mod would_deny;

@@ -281,6 +281,83 @@ impl NotifyHandoff {
   }
 }
 
+/// Answers the notifications of `listener` with `answer` until every
+/// process under the filter is gone or `stop` is set (checked every 100 ms).
+pub fn serve_notifications(
+  listener: &OwnedFd,
+  stop: &AtomicBool,
+  mut answer: impl FnMut(&Call) -> Answer,
+) {
+  let fd = listener.as_raw_fd();
+  loop {
+    if stop.load(Ordering::Relaxed) {
+      return;
+    }
+    let mut poll = libc::pollfd {
+      fd,
+      events: libc::POLLIN,
+      revents: 0,
+    };
+    // SAFETY: one pollfd
+    let ready = unsafe { libc::poll(&mut poll, 1, 100) };
+    if ready < 0 {
+      if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+        continue;
+      }
+      return;
+    }
+    if ready == 0 {
+      continue;
+    }
+    if poll.revents & libc::POLLIN == 0 {
+      // POLLHUP: no process uses the filter any more
+      return;
+    }
+    // SAFETY: the kernel wants a zeroed request
+    let mut req: libc::seccomp_notif = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid listener and request
+    if unsafe { libc::ioctl(fd, libc::SECCOMP_IOCTL_NOTIF_RECV as _, &mut req) }
+      != 0
+    {
+      match io::Error::last_os_error().raw_os_error() {
+        // the caller died, or a signal interrupted the wait
+        Some(libc::ENOENT) | Some(libc::EINTR) => continue,
+        _ => return,
+      }
+    }
+    let call = Call {
+      tid: req.pid,
+      nr: req.data.nr as u32,
+      args: req.data.args,
+    };
+    let answer = answer(&call);
+    // what the answer read of the caller (its memory, cwd, descriptors)
+    // was the caller's only if it is still waiting
+    // SAFETY: a valid listener and id
+    let valid = unsafe {
+      libc::ioctl(fd, libc::SECCOMP_IOCTL_NOTIF_ID_VALID as _, &req.id)
+    } == 0;
+    if !valid {
+      continue;
+    }
+    let mut resp = libc::seccomp_notif_resp {
+      id: req.id,
+      val: 0,
+      error: 0,
+      flags: 0,
+    };
+    match answer {
+      Answer::Continue => resp.flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE,
+      Answer::Done(Ok(val)) => resp.val = val,
+      Answer::Done(Err(errno)) => resp.error = -errno,
+    }
+    // SAFETY: a valid listener and response; a stale id is refused
+    unsafe {
+      libc::ioctl(fd, libc::SECCOMP_IOCTL_NOTIF_SEND as _, &resp);
+    }
+  }
+}
+
 /// The answer to one notification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answer {
@@ -346,75 +423,7 @@ impl Supervisor {
   /// Answers notifications on `listener` until every process under the
   /// filter is gone or `stop` is set (checked every 100 ms).
   pub fn serve(&self, listener: OwnedFd, stop: &AtomicBool) {
-    let fd = listener.as_raw_fd();
-    loop {
-      if stop.load(Ordering::Relaxed) {
-        return;
-      }
-      let mut poll = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-      };
-      // SAFETY: one pollfd
-      let ready = unsafe { libc::poll(&mut poll, 1, 100) };
-      if ready < 0 {
-        if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-          continue;
-        }
-        return;
-      }
-      if ready == 0 {
-        continue;
-      }
-      if poll.revents & libc::POLLIN == 0 {
-        // POLLHUP: no process uses the filter any more
-        return;
-      }
-      // SAFETY: the kernel wants a zeroed request
-      let mut req: libc::seccomp_notif = unsafe { std::mem::zeroed() };
-      // SAFETY: a valid listener and request
-      if unsafe {
-        libc::ioctl(fd, libc::SECCOMP_IOCTL_NOTIF_RECV as _, &mut req)
-      } != 0
-      {
-        match io::Error::last_os_error().raw_os_error() {
-          // the caller died, or a signal interrupted the wait
-          Some(libc::ENOENT) | Some(libc::EINTR) => continue,
-          _ => return,
-        }
-      }
-      let call = Call {
-        tid: req.pid,
-        nr: req.data.nr as u32,
-        args: req.data.args,
-      };
-      let answer = self.answer(&call);
-      // what the answer read of the caller (its memory, cwd, descriptors)
-      // was the caller's only if it is still waiting
-      // SAFETY: a valid listener and id
-      let valid = unsafe {
-        libc::ioctl(fd, libc::SECCOMP_IOCTL_NOTIF_ID_VALID as _, &req.id)
-      } == 0;
-      if !valid {
-        continue;
-      }
-      let mut resp = libc::seccomp_notif_resp {
-        id: req.id,
-        val: 0,
-        error: 0,
-        flags: 0,
-      };
-      match answer {
-        Answer::Continue => resp.flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE,
-        Answer::Done(Ok(val)) => resp.val = val,
-        Answer::Done(Err(errno)) => resp.error = -errno,
-      }
-      // SAFETY: a valid listener and response; a stale id is refused
-      unsafe {
-        libc::ioctl(fd, libc::SECCOMP_IOCTL_NOTIF_SEND as _, &resp);
-      }
-    }
+    serve_notifications(&listener, stop, |call| self.answer(call));
   }
 
   /// The answer to one syscall.
@@ -777,7 +786,7 @@ impl Supervisor {
   }
 }
 
-const AT_FDCWD: i32 = libc::AT_FDCWD;
+pub(crate) const AT_FDCWD: i32 = libc::AT_FDCWD;
 
 /// What a metadata syscall names: a path relative to a directory
 /// descriptor (or the working directory), or a descriptor.
@@ -889,7 +898,10 @@ fn within(path: &Path, roots: &[PathBuf]) -> bool {
   roots.iter().any(|root| path.starts_with(root))
 }
 
-fn open_path(path: &str, flags: libc::c_int) -> Result<OwnedFd, i32> {
+pub(crate) fn open_path(
+  path: &str,
+  flags: libc::c_int,
+) -> Result<OwnedFd, i32> {
   let c = CString::new(path).map_err(|_| libc::EINVAL)?;
   // SAFETY: a NUL-terminated path
   let fd = unsafe { libc::open(c.as_ptr(), flags | libc::O_CLOEXEC) };
@@ -938,7 +950,7 @@ fn open_object(tid: u32, obj: Obj) -> Result<OwnedFd, i32> {
 /// (`/dev/fd`, `/dev/stdin`, `/proc/thread-self`) would name the
 /// supervisor, and `/proc/self/fd/N` its own descriptor N, not the
 /// caller's.
-fn resolve(
+pub(crate) fn resolve(
   tid: u32,
   dirfd: i32,
   path: CString,
@@ -1132,7 +1144,11 @@ pub(crate) fn read_exact(
 }
 
 /// Reads a NUL-terminated string of at most `max` bytes from the caller.
-fn read_cstr(tid: u32, addr: u64, max: usize) -> Result<CString, i32> {
+pub(crate) fn read_cstr(
+  tid: u32,
+  addr: u64,
+  max: usize,
+) -> Result<CString, i32> {
   if addr == 0 {
     return Err(libc::EFAULT);
   }
@@ -1211,7 +1227,7 @@ fn proc_stat(pid: u32) -> Option<ProcStat> {
 }
 
 /// The thread group (process) of a thread.
-fn tgid_of(tid: u32) -> Option<u32> {
+pub(crate) fn tgid_of(tid: u32) -> Option<u32> {
   let status = std::fs::read_to_string(format!("/proc/{tid}/status")).ok()?;
   status
     .lines()

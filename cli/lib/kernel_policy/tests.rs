@@ -1827,9 +1827,12 @@ fn the_broker_holds_what_mode_a_cant() {
   ));
 }
 
-// a compiled program applies its sandbox in place and runs no broker: what
-// only the broker would hold stays a fatal gap (warned about at compile,
-// refused at start), never a Mode B policy
+// a compiled program with no supervisor of its own (a desktop app, whose
+// process hosts a browser engine; Windows) applies its sandbox in place and
+// runs no broker: what only the broker would hold stays a fatal gap (warned
+// about at compile, refused at start), never a Mode B policy. One that
+// forks its supervisor (`Context::compiled_supervisor`) compiles as the CLI
+// does.
 #[test]
 fn a_compiled_program_has_no_broker() {
   let compiled = |options: &PermissionsOptions, caps: Capabilities| {
@@ -1879,6 +1882,22 @@ fn a_compiled_program_has_no_broker() {
   );
   assert!(matches!(c.policy.net, NetPolicy::Ports { .. }));
   assert_eq!(c.fatal_gaps().count(), 0, "{:#?}", c.gaps);
+  // with a supervisor of its own the same grants take the broker
+  let supervised = |options: &PermissionsOptions, caps: Capabilities| {
+    let mut ctx = ctx(caps, KernelSandboxMode::Enforce);
+    ctx.compiled = true;
+    ctx.compiled_supervisor = true;
+    compile_in(options, &ctx)
+  };
+  let c = supervised(&deny_inside, linux(Some(6)));
+  assert_eq!(c.policy.shape, Shape::ModeB);
+  assert_eq!(c.fatal_gaps().count(), 0, "{:#?}", c.gaps);
+  for caps in [linux(Some(6)), macos()] {
+    let c = supervised(&host, caps);
+    assert_eq!(c.policy.shape, Shape::ModeB, "{caps:?}");
+    assert!(matches!(c.policy.net, NetPolicy::Broker { .. }), "{caps:?}");
+    assert_eq!(c.fatal_gaps().count(), 0, "{caps:?}: {:#?}", c.gaps);
+  }
 }
 
 // the files an --allow-sys name reads are in the read scope only when it

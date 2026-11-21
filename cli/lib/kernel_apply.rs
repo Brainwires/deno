@@ -12,6 +12,14 @@
 //! thread and has opened nothing (Linux: Landlock and seccomp apply to the
 //! calling thread only; macOS: `sandbox_init` is process-wide, but what is
 //! already open stays open).
+//!
+//! Where the baked grant has a rule only the supervising broker holds (a
+//! host-scoped network, a write deny inside a write allow on Linux), the
+//! program forks first, in place: the parent stays as the supervisor (one
+//! thread at the fork, no JavaScript engine, none of the embedded modules
+//! loaded, ever), and the child confines itself and runs the program
+//! (`kernel_supervise::fork_supervised`). The supervisor keeps the PID the
+//! program was started with and exits as the program exits.
 
 #![allow(
   clippy::disallowed_methods,
@@ -33,11 +41,13 @@ use crate::kernel_policy::Context;
 use crate::kernel_policy::GapResolution;
 use crate::kernel_policy::ImplicitSet;
 use crate::kernel_policy::KernelPolicy;
+use crate::kernel_policy::Shape;
 use crate::kernel_policy::TargetOs;
 use crate::kernel_sandbox::Engine;
 use crate::kernel_sandbox::KernelSandboxMode;
 use crate::kernel_sandbox::ModeResolution;
 use crate::kernel_sandbox::compiled_resolution;
+use crate::kernel_sandbox::compiled_resolution_with;
 
 /// The mechanisms this machine offers, and whether this runtime has a Mode A
 /// enforcer for them (Linux on x86_64 / aarch64, macOS).
@@ -307,40 +317,67 @@ pub fn start_desktop(
 /// A compiled program's kernel-sandbox startup, first thing in `main`
 /// (one thread, nothing opened): decides the baked mode, and under
 /// `enforce` compiles the policy for the baked grant and applies it to this
-/// process, in place. `warn` prints its line; `broker`, an OS without an
-/// enforcer and a rule the OS can't hold refuse to start (a mode `auto`
-/// chose falls back instead: off with no enforcer, else `warn`'s line,
-/// item 472). Whether the permission set allows prompting doesn't matter: a
+/// process, in place. `warn` prints its line; an OS without an enforcer and
+/// a rule the OS can't hold refuse to start (a mode `auto` chose falls back
+/// instead: off with no enforcer, else `warn`'s line, item 472). `broker`,
+/// and `enforce` or `auto` where the grant has a rule only the broker
+/// holds, fork first: **this function then returns in the child**, the
+/// confined worker, and the process that called it stays behind as the
+/// supervisor and never returns (it exits as the worker exits).
+/// Whether the permission set allows prompting doesn't matter: a
 /// compiled program's set is its author's, and once the sandbox applies the
 /// caller turns prompting off (a prompt could only grant what the kernel
 /// refuses).
 pub fn start_compiled(
   start: &CompiledStart,
 ) -> Result<CompiledOutcome, CompiledStartError> {
-  let resolution =
+  let mut resolution =
     compiled_resolution(start.baked, start.dev_build, start.options);
   let mode = resolution.mode;
+  match mode {
+    KernelSandboxMode::Warn
+    | KernelSandboxMode::Enforce
+    | KernelSandboxMode::Broker => {}
+    KernelSandboxMode::Off | KernelSandboxMode::Auto => {
+      return Ok(CompiledOutcome {
+        resolution,
+        enforcing: false,
+        cache_dir: None,
+        plan: None,
+      });
+    }
+  }
+  let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
+  let mut ctx = compiled_context(mode, start.exec_strict, cwd);
+  // a headless compiled program forks its own supervisor where a rule
+  // needs the broker (never a desktop app: `start_desktop` leaves this
+  // off, so what only the broker holds stays a rule the OS can't hold
+  // there)
+  ctx.compiled_supervisor = cfg!(any(target_os = "linux", target_os = "macos"));
+  if mode == KernelSandboxMode::Broker && !ctx.compiled_supervisor {
+    return Err(refuse(
+      mode,
+      "a compiled program has no supervising broker on this OS",
+    ));
+  }
+  let mut compiled = compile_policy(start.options, &ctx);
+  // the policy has the broker's shape: `auto` takes the supervisor where it
+  // would have enforced (the mode is decided again, now that the policy is
+  // known), and an `enforce` baked by name takes it by itself
+  if compiled.policy.shape == Shape::ModeB && mode != KernelSandboxMode::Warn {
+    resolution = compiled_resolution_with(
+      start.baked,
+      start.dev_build,
+      start.options,
+      true,
+    );
+  }
   let outcome = |enforcing, cache_dir, plan| CompiledOutcome {
     resolution: resolution.clone(),
     enforcing,
     cache_dir,
     plan,
   };
-  match mode {
-    KernelSandboxMode::Warn | KernelSandboxMode::Enforce => {}
-    KernelSandboxMode::Broker => {
-      return Err(refuse(
-        mode,
-        "the supervising broker isn't built into this runtime",
-      ));
-    }
-    KernelSandboxMode::Off | KernelSandboxMode::Auto => {
-      return Ok(outcome(false, None, None));
-    }
-  }
-  let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
-  let mut ctx = compiled_context(mode, start.exec_strict, cwd);
-  let mut compiled = compile_policy(start.options, &ctx);
   // a mode `auto` chose never refuses to start (item 472): where enforce
   // can't hold the grant the program runs as a warn one, and says why
   let auto = resolution.auto_chosen;
@@ -353,6 +390,16 @@ pub fn start_compiled(
     }
     outcome(false, None, None)
   };
+  if auto
+    && (!kernel_inherit::inherited_layers().is_empty()
+      || kernel_inherit::grants_unknown())
+  {
+    // as the CLI: a process an ancestor's kernel sandbox already holds adds
+    // nothing of its own when nobody asked it to by name. Its grant is
+    // intersected with the inherited one, and inside a brokered run it
+    // takes the way to that run's broker (the caller does both).
+    return Ok(outcome(false, None, None));
+  }
   if mode == KernelSandboxMode::Warn {
     let deno_only = compiled
       .gaps
@@ -421,12 +468,19 @@ pub fn start_compiled(
       ),
     ));
   }
-  let Some(plan) = plan else {
+  let Some(mut plan) = plan else {
     if auto {
       return Ok(fall_back("no plan for this OS".to_string()));
     }
     return Err(refuse(mode, "no plan for this OS"));
   };
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  crate::kernel_supervise::fill_broker_net(
+    &mut plan,
+    &compiled,
+    start.options,
+    ctx.inspector_port,
+  );
   let mut layers = kernel_inherit::inherited_layers().to_vec();
   layers.push(kernel_inherit::layer_for(
     start.options,
@@ -449,12 +503,67 @@ pub fn start_compiled(
     format: kernel_inherit::CARRIER_FORMAT,
     layers,
   };
+  // Mode B: the supervisor first. From here on this is the worker (the
+  // process that called is the supervisor and never comes back); a fork
+  // that can't be made leaves the one process as it was
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  let channel = if plan.broker.is_some() && can_apply_in_place() {
+    match crate::kernel_supervise::fork_supervised(&plan) {
+      Ok(channel) => Some(channel),
+      Err(why) if auto => {
+        return Ok(fall_back(format!(
+          "the supervising broker can't start: {why}"
+        )));
+      }
+      Err(why) => {
+        return Err(refuse(
+          mode,
+          format!("the supervising broker can't start: {why}"),
+        ));
+      }
+    }
+  } else {
+    None
+  };
+  // a dial this process inherited belongs to an ancestor's broker, which
+  // answers for that ancestor's grant: a process that confines itself
+  // gives it up first
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  crate::kernel_supervise::drop_inherited_dial();
   apply_in_place(&plan, &carried).map_err(|why| refuse(mode, why))?;
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  if let Some(channel) = channel {
+    let net = plan.broker.as_ref().is_some_and(|b| b.net.is_some());
+    crate::kernel_supervise::install_channel(channel, net);
+    crate::kernel_supervise::check_broker(&plan)
+      .map_err(|why| refuse(mode, why))?;
+    // the `deno` / `denort` processes this program starts reach the same
+    // broker
+    crate::kernel_supervise::offer_dial();
+  }
   kernel_sandbox_state::set_enforcing();
   deno_runtime::deno_core::error::set_permission_denied_note(
     kernel_inherit::permission_denied_note,
   );
   Ok(outcome(true, ctx.cache_overlay.clone(), Some(plan)))
+}
+
+/// Whether [`apply_in_place`] can apply a plan to this process at all, as
+/// far as that is known before trying: asked before the supervisor is
+/// forked, so a program that can't confine itself (macOS: it already runs
+/// inside another Seatbelt sandbox) refuses as one process, with
+/// [`apply_in_place`]'s own message, and leaves no supervisor behind.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn can_apply_in_place() -> bool {
+  #[cfg(target_os = "macos")]
+  {
+    deno_sandbox::macos::is_sandboxed() == Some(false)
+      && deno_sandbox::macos::sandbox_init_available()
+  }
+  #[cfg(target_os = "linux")]
+  {
+    true
+  }
 }
 
 /// Removes every variable the plan doesn't keep from this process's
@@ -614,31 +723,48 @@ mod tests {
   }
 
   #[test]
-  fn broker_refuses_and_a_dev_build_is_off() {
+  fn a_dev_build_is_off() {
     let options = options(&["/tmp"]);
-    let err = start_compiled(&CompiledStart {
-      baked: Some(KernelSandboxMode::Broker),
-      exec_strict: false,
-      dev_build: false,
-      options: &options,
-      cache_base: None,
-    })
-    .unwrap_err();
-    assert!(
-      err.0.contains("--kernel-sandbox=broker")
-        && err.0.contains("broker isn't built"),
-      "{err}"
-    );
-    // a desktop development build never enforces (hot reload rewrites it)
-    let outcome = start_compiled(&CompiledStart {
-      baked: Some(KernelSandboxMode::Enforce),
-      exec_strict: false,
-      dev_build: true,
-      options: &options,
-      cache_base: None,
-    })
-    .unwrap();
-    assert!(!outcome.enforcing);
+    // a desktop development build never enforces (hot reload rewrites it),
+    // whatever was baked
+    for baked in [KernelSandboxMode::Enforce, KernelSandboxMode::Broker] {
+      let outcome = start_compiled(&CompiledStart {
+        baked: Some(baked),
+        exec_strict: false,
+        dev_build: true,
+        options: &options,
+        cache_base: None,
+      })
+      .unwrap();
+      assert!(!outcome.enforcing, "{baked}");
+    }
+  }
+
+  /// A compiled program's policy takes the broker's shape only where the
+  /// program can fork a supervisor of its own.
+  #[test]
+  fn a_compiled_policy_takes_the_broker_where_it_has_a_supervisor() {
+    let options = PermissionsOptions {
+      allow_net: Some(vec!["example.com:443".to_string()]),
+      prompt: false,
+      ..Default::default()
+    };
+    let mut caps = Capabilities::none(TargetOs::Linux);
+    caps.landlock_abi = Some(6);
+    caps.seccomp = true;
+    caps.enforcer_built = true;
+    let mut ctx = Context::new(caps, KernelSandboxMode::Enforce, "/".into());
+    ctx.compiled = true;
+    // no supervisor (a desktop app): the host-scoped grant is a rule the OS
+    // can't hold, and the policy stays Mode A
+    let alone = compile_policy(&options, &ctx);
+    assert_eq!(alone.policy.shape, Shape::ModeA);
+    assert!(alone.fatal_gaps().count() > 0);
+    // with one: Mode B, nothing left that can't be held
+    ctx.compiled_supervisor = true;
+    let supervised = compile_policy(&options, &ctx);
+    assert_eq!(supervised.policy.shape, Shape::ModeB);
+    assert_eq!(supervised.fatal_gaps().count(), 0, "{:?}", supervised.gaps);
   }
 
   #[cfg(unix)]

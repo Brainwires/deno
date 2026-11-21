@@ -22,13 +22,20 @@
 //! | [`AutoStage::R3`] | enforce | warn |
 //! | [`AutoStage::R4`] | enforce | enforce |
 //!
-//! A mode `auto` chose never refuses to start: where `enforce` can't hold the
-//! grant (a rule only the broker holds, a command it doesn't cover) the caller
-//! falls back to `warn` ([`ModeResolution::auto_chosen`]). `enforce` applies
-//! the policy on Linux and macOS (and refuses to start when the OS can't hold
-//! a rule, or elsewhere), for the CLI and for a compiled program baked with it
-//! (`deno_lib::kernel_apply`); `broker` refuses to start until its supervising
-//! process is built in.
+//! Where the grant has a rule only the supervising broker holds exactly (a
+//! host-scoped network, a write deny inside a write allow on Linux), `auto`
+//! chooses the broker wherever it would have chosen `enforce`
+//! ([`AutoPlan::Broker`], [`ModeResolution::needs_supervisor`]): the caller
+//! compiles the policy, and says so in [`ModeInputs::policy_needs_supervisor`].
+//!
+//! A mode `auto` chose never refuses to start: where neither `enforce` nor
+//! the broker can hold the grant (a rule no mode holds here, a command they
+//! don't cover) the caller falls back to `warn`
+//! ([`ModeResolution::auto_chosen`]). `enforce` applies the policy on Linux
+//! and macOS (and refuses to start when the OS can't hold a rule, or
+//! elsewhere), for the CLI and for a compiled program baked with it
+//! (`deno_lib::kernel_apply`); `broker` is `enforce` under the supervising
+//! process, in the CLI and in a compiled program alike.
 
 use std::fmt;
 use std::str::FromStr;
@@ -360,8 +367,10 @@ pub enum AutoPlan {
   /// Not fixed, or turned off: nothing.
   Off,
   /// The policy needs the supervising broker (Mode B): host-scoped network,
-  /// a write deny inside an allow, Unix sockets by path on Linux. Not
-  /// produced yet (WP-B, denext.30).
+  /// a write deny inside an allow, Unix sockets by path on Linux. What
+  /// `auto` applies wherever it would otherwise enforce; a run it only
+  /// warns about at [`AutoStage::R3`] records it all the same (the broker is
+  /// what holds this grant once the run is enforced).
   Broker,
 }
 
@@ -398,8 +407,12 @@ pub struct ModeInputs {
   /// harnesses' [`KERNEL_SANDBOX_STAGE_ENV_VAR`], and by tests.
   pub stage: Option<AutoStage>,
   /// The compiled policy needs the supervisor (Mode B) and every rule
-  /// enforce can't hold in place is one the broker closes. Nothing sets or
-  /// reads it yet (WP-B, denext.30).
+  /// enforce can't hold in place is one the broker closes: the policy
+  /// compiled as `enforce` compiles it has the broker's shape and no rule
+  /// left that the OS can't hold. The mode is decided before a policy
+  /// exists, so the caller decides once without it, compiles the policy,
+  /// and decides again with it (`cli/sandbox::check_run`,
+  /// `kernel_apply::start_compiled`).
   pub policy_needs_supervisor: bool,
 }
 
@@ -418,8 +431,9 @@ pub struct ModeResolution {
   pub fixed: bool,
   /// `-A` with deny rules: only the denies would be enforced.
   pub deny_only: bool,
-  /// The run needs the supervising broker (Mode B). Always `false` until
-  /// WP-B (denext.30) sets it.
+  /// The run's policy needs the supervising broker (Mode B), whichever mode
+  /// applies: `auto` then chooses `broker` where it would enforce, and an
+  /// explicit `enforce` takes the broker by itself.
   pub needs_supervisor: bool,
   /// What `auto` chooses here (applied from [`AutoStage::R3`] on).
   pub would_apply: AutoPlan,
@@ -460,7 +474,9 @@ pub struct ModeError {
 ///    then turns prompting into denials.
 /// 7. Otherwise the set is fixed: the requested mode applies; `auto` records
 ///    what it would choose, applies nothing in [`AutoStage::Preview`], and
-///    from [`AutoStage::R3`] on applies it (`auto_chosen`).
+///    from [`AutoStage::R3`] on applies it (`auto_chosen`): `enforce`, or
+///    `broker` when the policy needs the supervisor
+///    ([`ModeInputs::policy_needs_supervisor`]).
 pub fn kernel_sandbox_mode(
   inputs: &ModeInputs,
 ) -> Result<ModeResolution, ModeError> {
@@ -505,7 +521,7 @@ pub fn kernel_sandbox_mode(
     reason: ModeReason::Requested,
     fixed,
     deny_only: inputs.allow_all && inputs.has_deny,
-    needs_supervisor: false,
+    needs_supervisor: inputs.policy_needs_supervisor,
     would_apply: AutoPlan::Off,
     stage: inputs.stage.unwrap_or(AUTO_STAGE).max(AUTO_STAGE),
     auto_chosen: false,
@@ -515,6 +531,7 @@ pub fn kernel_sandbox_mode(
     r.mode = KernelSandboxMode::Off;
     r.reason = reason;
     r.would_apply = AutoPlan::Off;
+    r.needs_supervisor = false;
     Ok(r)
   };
   if kind == RunKind::NotARuntime {
@@ -559,18 +576,22 @@ pub fn kernel_sandbox_mode(
   }
   if requested == KernelSandboxMode::Auto {
     let author_fixed = compiled || source != ModeSource::Default;
-    resolution.would_apply =
-      if author_fixed || resolution.stage == AutoStage::R4 {
-        AutoPlan::Enforce
-      } else {
-        AutoPlan::Warn
-      };
+    // whether this stage enforces the run (else it warns about it)
+    let enforces = author_fixed || resolution.stage == AutoStage::R4;
+    resolution.would_apply = if inputs.policy_needs_supervisor {
+      AutoPlan::Broker
+    } else if enforces {
+      AutoPlan::Enforce
+    } else {
+      AutoPlan::Warn
+    };
     if resolution.stage == AutoStage::Preview {
       resolution.mode = KernelSandboxMode::Off;
       resolution.reason = ModeReason::NotYetEnforced;
       return Ok(resolution);
     }
     resolution.mode = match resolution.would_apply {
+      _ if !enforces => KernelSandboxMode::Warn,
       AutoPlan::Enforce => KernelSandboxMode::Enforce,
       AutoPlan::Warn => KernelSandboxMode::Warn,
       AutoPlan::Off => KernelSandboxMode::Off,
@@ -635,6 +656,18 @@ pub fn compiled_resolution(
   dev_build: bool,
   options: &PermissionsOptions,
 ) -> ModeResolution {
+  compiled_resolution_with(baked, dev_build, options, false)
+}
+
+/// [`compiled_resolution`], decided again once the program's policy is
+/// compiled: `policy_needs_supervisor` says it has the broker's shape
+/// ([`ModeInputs::policy_needs_supervisor`]).
+pub fn compiled_resolution_with(
+  baked: Option<KernelSandboxMode>,
+  dev_build: bool,
+  options: &PermissionsOptions,
+  policy_needs_supervisor: bool,
+) -> ModeResolution {
   kernel_sandbox_mode(&ModeInputs {
     kind: Some(RunKind::Compiled),
     baked,
@@ -642,6 +675,7 @@ pub fn compiled_resolution(
     allow_all: options_allow_all(options),
     has_deny: options_have_deny(options),
     prompt: options.prompt,
+    policy_needs_supervisor,
     ..Default::default()
   })
   // a compiled program has no watch, broker or dev-server inputs
@@ -1378,7 +1412,6 @@ mod tests {
   /// (host-scoped network, a write deny inside an allow) goes to the
   /// supervisor at R4 instead of falling back to warn (WP-B).
   #[test]
-  #[ignore = "lands in WP-B"]
   fn auto_stage_matrix_broker_closable() {
     let inputs = ModeInputs {
       policy_needs_supervisor: true,
@@ -1399,6 +1432,123 @@ mod tests {
     });
     assert_eq!(r.mode, Off);
     assert_eq!(r.would_apply, AutoPlan::Broker);
+    assert!(!r.auto_chosen);
+  }
+
+  /// The rest of the broker's rows: where `auto` would enforce it takes the
+  /// supervisor, where it only warns it still warns, and nothing that keeps
+  /// `auto` off is changed by what the policy needs.
+  #[test]
+  fn auto_stage_matrix_broker_rows() {
+    let tty = |mut i: ModeInputs| {
+      i.terminals = true;
+      i
+    };
+    let needs = |i: ModeInputs| ModeInputs {
+      policy_needs_supervisor: true,
+      ..i
+    };
+    let compiled = || ModeInputs {
+      kind: Some(RunKind::Compiled),
+      ..run()
+    };
+    // (name, inputs, [preview, r3, r4])
+    let rows: Vec<(&str, ModeInputs, [KernelSandboxMode; 3])> = vec![
+      (
+        "a bare run with no terminal: warn at R3, the supervisor at R4",
+        needs(run()),
+        [Off, Warn, Broker],
+      ),
+      (
+        "a compiled program: the supervisor from R3",
+        needs(compiled()),
+        [Off, Broker, Broker],
+      ),
+      (
+        "auto written in a flag (denext start): the supervisor from R3",
+        needs(ModeInputs {
+          flag: Some(Auto),
+          ..run()
+        }),
+        [Off, Broker, Broker],
+      ),
+      // never changed by what the policy needs
+      ("a prompt can happen", needs(tty(run())), [Off, Off, Off]),
+      (
+        "plain -A",
+        needs(ModeInputs {
+          allow_all: true,
+          ..run()
+        }),
+        [Off, Off, Off],
+      ),
+      (
+        "--watch",
+        needs(ModeInputs {
+          watch: true,
+          ..run()
+        }),
+        [Off, Off, Off],
+      ),
+      (
+        "an explicit off",
+        needs(ModeInputs {
+          flag: Some(Off),
+          ..run()
+        }),
+        [Off, Off, Off],
+      ),
+      (
+        "DENO_KERNEL_SANDBOX=warn lowers the supervisor too",
+        needs(ModeInputs {
+          env: Some(Warn),
+          ..run()
+        }),
+        [Warn, Warn, Warn],
+      ),
+      (
+        "an explicit enforce stays enforce (it takes the broker by itself)",
+        needs(ModeInputs {
+          flag: Some(Enforce),
+          ..run()
+        }),
+        [Enforce, Enforce, Enforce],
+      ),
+    ];
+    let stages = [AutoStage::Preview, AutoStage::R3, AutoStage::R4];
+    for (name, inputs, expected) in rows {
+      for (stage, want) in stages.iter().zip(expected) {
+        let r = resolve(&ModeInputs {
+          stage: Some(*stage),
+          ..inputs.clone()
+        });
+        assert_eq!(r.mode, want, "{name} at {stage:?}");
+        // the supervisor is needed exactly where a mode is decided at all
+        let decided = r.reason != ModeReason::Prompt
+          && r.reason != ModeReason::AllowAll
+          && r.reason != ModeReason::Watch
+          && r.reason != ModeReason::TurnedOff;
+        assert_eq!(r.needs_supervisor, decided, "{name} at {stage:?}");
+        if r.mode == Broker {
+          assert!(r.auto_chosen, "{name} at {stage:?}");
+          assert_eq!(r.would_apply, AutoPlan::Broker, "{name} at {stage:?}");
+          assert!(r.fixed, "{name} at {stage:?}");
+        }
+      }
+    }
+    // a run R3 only warns about records the broker as what would apply
+    let r = resolve(&ModeInputs {
+      stage: Some(AutoStage::R3),
+      ..needs(run())
+    });
+    assert_eq!((r.mode, r.would_apply), (Warn, AutoPlan::Broker));
+    assert_eq!(r.reason, ModeReason::AutoNoPrompt);
+    // without the input nothing changed: every run decides as before
+    let r = resolve(&ModeInputs {
+      stage: Some(AutoStage::R4),
+      ..run()
+    });
+    assert_eq!((r.mode, r.needs_supervisor), (Enforce, false));
   }
 
   /// `auto_stage_matrix`'s denext.30 rows: a run where a prompt can happen

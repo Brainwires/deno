@@ -16,6 +16,9 @@
 //! - the kernel's own record of what the applied policy would have refused,
 //!   read back after the run (macOS: Seatbelt's report lines,
 //!   [`parse_seatbelt_report`]; [`Source::Os`]);
+//! - the supervisor that sees the process tree's system calls and lets them
+//!   continue (Linux: [`TracePolicy`] decides what each one would have met
+//!   under `enforce`; [`Source::Os`]);
 //! - an advisory about a program the run is about to start
 //!   ([`Source::Advisory`], [`program_advisory`]).
 //!
@@ -515,6 +518,7 @@ struct Reporter {
   printed: usize,
   log: Option<std::fs::File>,
   print: bool,
+  direct: bool,
 }
 
 impl Reporter {
@@ -540,7 +544,17 @@ impl Reporter {
     }
     if self.print && self.printed < MAX_PRINTED {
       self.printed += 1;
-      log::warn!("Warning {}", event.message());
+      if self.direct {
+        #[allow(
+          clippy::print_stderr,
+          reason = "the supervisor has no logger: its lines go to stderr"
+        )]
+        {
+          eprintln!("Warning {}", event.message());
+        }
+      } else {
+        log::warn!("Warning {}", event.message());
+      }
     }
     self.events.push(event);
   }
@@ -588,6 +602,9 @@ pub struct ReporterConfig {
   /// Print each distinct event (the first [`MAX_PRINTED`]) through
   /// `log::warn!`.
   pub print: bool,
+  /// Print straight to stderr instead of through `log::warn!`: for a
+  /// process that never sets a logger up (the supervisor image).
+  pub direct: bool,
 }
 
 /// Turns warn-mode reporting on for this process. The first call wins;
@@ -611,6 +628,7 @@ pub fn install(config: ReporterConfig) -> bool {
       printed: 0,
       log,
       print: config.print,
+      direct: config.direct,
     }))
     .is_ok();
   if installed {
@@ -943,6 +961,423 @@ pub fn program_advisory(program: &str) -> Option<&'static str> {
   })
 }
 
+// ---------------------------------------------------------------------------
+// The supervisor's trace (Linux): what `enforce` would refuse a system call
+// ---------------------------------------------------------------------------
+
+/// What the tracing supervisor of an explicit `--kernel-sandbox=warn`
+/// decides with ([`Observer::SupervisorTrace`], Linux): the `enforce` plan
+/// of the same grant, reduced to the questions a traced system call asks.
+/// Plain data and decisions on paths, so it is tested on every platform;
+/// the tracer itself (`deno_sandbox::trace`) only decodes system calls and
+/// resolves their paths.
+///
+/// It reports, it never refuses: an access it can't decide (a path that
+/// doesn't resolve, an address it can't read) is not reported.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TracePolicy {
+  /// The paths the kernel would let the tree read (each and everything
+  /// beneath it). `None`: reads aren't confined.
+  pub read: Option<Vec<PathBuf>>,
+  /// As [`Self::read`], for writes.
+  pub write: Option<Vec<PathBuf>>,
+  /// Under a broker plan: what Deno's own write rule allows (`None`:
+  /// everything) and denies. The runtime's own processes ask the broker for
+  /// what the kernel refuses them there, so for them a write is refused
+  /// only when both the kernel's rules and this rule refuse it.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub broker_write: Option<BrokerWrite>,
+  /// Read and written without a report: what this run touches that an
+  /// enforced run doesn't (the shared caches; an enforced run keeps its own
+  /// in the overlay).
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub quiet: Vec<PathBuf>,
+  /// No program may start (no `--allow-run`).
+  pub refuse_exec: bool,
+  /// With a strict exec scope: the only files that may be executed.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub exec_only: Option<Vec<PathBuf>>,
+  /// TCP ports the tree may connect to (`None`: any).
+  pub connect_ports: Option<Vec<u16>>,
+  /// TCP ports the tree may bind (`None`: any).
+  pub bind_ports: Option<Vec<u16>>,
+  /// The broker holds the network (a host-scoped grant): the runtime's own
+  /// sockets are made by the broker under `enforce`, where Deno's checks
+  /// decide them, so only other programs' connections are reported.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub broker_net: bool,
+  /// Unix sockets by path are allowed.
+  pub unix_sockets: bool,
+}
+
+/// Deno's own write rule, as the broker holds it ([`TracePolicy`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrokerWrite {
+  pub allow: Option<Vec<PathBuf>>,
+  pub deny: Vec<PathBuf>,
+}
+
+fn covers(roots: &[PathBuf], path: &Path) -> bool {
+  roots.iter().any(|root| path.starts_with(root))
+}
+
+fn ports_of(ports: &crate::plan::Ports) -> Option<Vec<u16>> {
+  match ports {
+    crate::plan::Ports::Any => None,
+    crate::plan::Ports::List { ports } => Some(ports.clone()),
+  }
+}
+
+impl TracePolicy {
+  /// The trace policy of `plan` (its Linux part; `None` without one):
+  /// every path rule, the program's module files and the expanded entries
+  /// as the enforcer would add them, and `quiet` on top.
+  pub fn from_plan(
+    plan: &crate::plan::EnforcePlan,
+    quiet: Vec<PathBuf>,
+  ) -> Option<Self> {
+    use crate::plan::NetPlan;
+    let linux = plan.linux.as_ref()?;
+    // a rule holds the object its path leads to (`/lib` is `/usr/lib` on
+    // most systems), and the tracer compares real paths: each path as
+    // written and as it resolves. `/proc/self` stays as written: it is the
+    // confined process's own entry, which the tracer names the same way.
+    let with_real = |paths: Vec<PathBuf>| -> Vec<PathBuf> {
+      let mut out = Vec::with_capacity(paths.len() * 2);
+      for path in paths {
+        #[allow(
+          clippy::disallowed_methods,
+          reason = "where the real file system leads the path"
+        )]
+        let real = (!path.starts_with("/proc/self")
+          && !path.starts_with("/proc/thread-self"))
+        .then(|| std::fs::canonicalize(&path).ok())
+        .flatten();
+        if let Some(real) = real
+          && real != path
+        {
+          out.push(real);
+        }
+        out.push(path);
+      }
+      out.sort();
+      out.dedup();
+      out
+    };
+    let rules = |want_write: bool| -> Vec<PathBuf> {
+      let mut out: Vec<PathBuf> = linux
+        .rules
+        .iter()
+        .filter(|r| if want_write { r.write } else { r.read })
+        .map(|r| r.path.clone())
+        .collect();
+      if want_write {
+        out.extend(plan.expanded_write.iter().cloned());
+      } else {
+        out.extend(plan.module_files.iter().cloned());
+        out.extend(plan.expanded.iter().cloned());
+      }
+      with_real(out)
+    };
+    let (connect_ports, bind_ports) = match &linux.net {
+      NetPlan::Open => (None, None),
+      NetPlan::Denied => (Some(Vec::new()), Some(Vec::new())),
+      NetPlan::Ports { connect, bind } => (ports_of(connect), ports_of(bind)),
+    };
+    let broker = plan.broker.as_ref();
+    Some(Self {
+      read: linux.handled.read.then(|| rules(false)),
+      write: linux.handled.write.then(|| rules(true)),
+      // (the broker's lists hold each path as written and resolved)
+      broker_write: broker.map(|b| BrokerWrite {
+        allow: b.write.clone(),
+        deny: b.deny_write.clone(),
+      }),
+      quiet: with_real(quiet),
+      refuse_exec: linux.seccomp.refuse_exec,
+      exec_only: (linux.handled.exec && !linux.seccomp.refuse_exec).then(
+        || {
+          with_real(
+            linux
+              .rules
+              .iter()
+              .filter(|r| r.exec)
+              .map(|r| r.path.clone())
+              .collect(),
+          )
+        },
+      ),
+      connect_ports,
+      bind_ports,
+      broker_net: broker.is_some_and(|b| b.net.is_some()),
+      unix_sockets: linux.seccomp.unix_sockets,
+    })
+  }
+
+  /// Reading (or listing) the object at `path` (resolved, absolute).
+  pub fn read_event(&self, path: &Path) -> Option<WouldDeny> {
+    let read = self.read.as_ref()?;
+    if covers(read, path) || covers(&self.quiet, path) {
+      return None;
+    }
+    Some(WouldDeny::read(path).from_source(Source::Os))
+  }
+
+  /// Writing, creating, removing or renaming at `path` (resolved,
+  /// absolute; for a name that doesn't exist yet, the folder it would be
+  /// made in). `runtime`: the caller is this runtime (the confined program
+  /// itself or a `deno` it started), which has the broker for what Deno's
+  /// own rule allows.
+  pub fn write_event(&self, path: &Path, runtime: bool) -> Option<WouldDeny> {
+    let write = self.write.as_ref()?;
+    if covers(write, path) || covers(&self.quiet, path) {
+      return None;
+    }
+    if runtime
+      && let Some(broker) = &self.broker_write
+      && broker
+        .allow
+        .as_ref()
+        .is_none_or(|allow| covers(allow, path))
+      && !covers(&broker.deny, path)
+    {
+      return None;
+    }
+    let event = WouldDeny::write(path).from_source(Source::Os);
+    Some(match &self.broker_write {
+      Some(broker) if !covers(&broker.deny, path) && !runtime => event.with_note(
+        "under enforce only this runtime's own operations may change entries directly in a folder that holds a --deny-write path",
+      ),
+      _ => event,
+    })
+  }
+
+  /// Starting the program at `path` (resolved).
+  pub fn exec_event(&self, path: &Path) -> Option<WouldDeny> {
+    let program = path.to_string_lossy();
+    if self.refuse_exec {
+      return Some(WouldDeny::exec(&program).from_source(Source::Os));
+    }
+    match &self.exec_only {
+      Some(only) if !only.iter().any(|p| p == path) => Some(
+        WouldDeny::exec(&program)
+          .from_source(Source::Os)
+          .with_note("--kernel-sandbox-exec=strict holds the whole process tree to the --allow-run list"),
+      ),
+      _ => None,
+    }
+  }
+
+  /// Connecting to `ip:port`. `runtime` as for [`Self::write_event`].
+  pub fn connect_event(
+    &self,
+    ip: std::net::IpAddr,
+    port: u16,
+    runtime: bool,
+  ) -> Option<WouldDeny> {
+    if self.broker_net {
+      if runtime {
+        return None;
+      }
+      return Some(
+        WouldDeny::connect(&ip.to_string(), port)
+          .from_source(Source::Os)
+          .with_note("under enforce a host-scoped network grant reaches only this runtime's own sockets (the broker makes them); another program has no network"),
+      );
+    }
+    let ports = self.connect_ports.as_ref()?;
+    if ports.contains(&port) {
+      return None;
+    }
+    Some(WouldDeny::connect(&ip.to_string(), port).from_source(Source::Os))
+  }
+
+  /// Binding `port` (0: any port).
+  pub fn bind_event(&self, port: u16, runtime: bool) -> Option<WouldDeny> {
+    if self.broker_net && runtime {
+      return None;
+    }
+    let ports = self.bind_ports.as_ref()?;
+    if port != 0 && ports.contains(&port) {
+      return None;
+    }
+    Some(WouldDeny::listen(port).from_source(Source::Os))
+  }
+
+  /// Connecting to (or binding) the Unix socket at `path`.
+  pub fn unix_event(&self, path: &Path, runtime: bool) -> Option<WouldDeny> {
+    if self.unix_sockets || (self.broker_net && runtime) {
+      return None;
+    }
+    Some(WouldDeny::unix(path).from_source(Source::Os))
+  }
+}
+
+#[cfg(test)]
+mod trace_tests {
+  use super::*;
+  use crate::plan::*;
+
+  fn linux_plan(net: NetPlan, seccomp: SeccompPlan) -> EnforcePlan {
+    EnforcePlan {
+      format: PLAN_FORMAT,
+      linux: Some(LinuxPlan {
+        handled: Handled {
+          read: true,
+          write: true,
+          exec: false,
+        },
+        rules: vec![
+          FsRule {
+            path: "/proj".into(),
+            read: true,
+            write: false,
+            exec: false,
+          },
+          FsRule {
+            path: "/proj/out".into(),
+            read: true,
+            write: true,
+            exec: false,
+          },
+        ],
+        expand: Vec::new(),
+        expand_write: Vec::new(),
+        net,
+        prebound: Vec::new(),
+        scope_signal: false,
+        scope_abstract_unix: false,
+        seccomp,
+      }),
+      macos: None,
+      windows: None,
+      env_keep: None,
+      probe: None,
+      module_files: vec!["/elsewhere/mod.ts".into()],
+      expanded: Vec::new(),
+      config_env: Vec::new(),
+      cache_overlay: None,
+      broker: None,
+      expanded_write: Vec::new(),
+    }
+  }
+
+  #[test]
+  fn trace_policy_reports_what_the_plan_refuses() {
+    let plan = linux_plan(
+      NetPlan::Ports {
+        connect: Ports::List { ports: vec![443] },
+        bind: Ports::List { ports: Vec::new() },
+      },
+      SeccompPlan {
+        refuse_exec: true,
+        ..Default::default()
+      },
+    );
+    let p = TracePolicy::from_plan(&plan, vec!["/cache".into()]).unwrap();
+    // reads: the rules, the module files, the quiet paths
+    assert!(p.read_event(Path::new("/proj/a.txt")).is_none());
+    assert!(p.read_event(Path::new("/elsewhere/mod.ts")).is_none());
+    assert!(p.read_event(Path::new("/cache/x")).is_none());
+    let event = p.read_event(Path::new("/home/me/.ssh/id")).unwrap();
+    assert_eq!(event.class, AccessClass::Read);
+    assert_eq!(event.source, Source::Os);
+    assert_eq!(
+      event.grant,
+      Some(Grant::new("--allow-read", "/home/me/.ssh/id"))
+    );
+    assert!(
+      event.note.is_some(),
+      "a credential path carries the caution"
+    );
+    // a sibling whose name only starts like a root isn't beneath it
+    assert!(p.read_event(Path::new("/project/a")).is_some());
+    // writes
+    assert!(p.write_event(Path::new("/proj/out/a"), false).is_none());
+    assert!(p.write_event(Path::new("/proj/a"), false).is_some());
+    assert!(p.write_event(Path::new("/cache/db"), true).is_none());
+    // exec, ports, Unix sockets
+    assert!(p.exec_event(Path::new("/bin/cat")).is_some());
+    let ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+    assert!(p.connect_event(ip, 443, false).is_none());
+    assert_eq!(
+      p.connect_event(ip, 80, false).unwrap().target,
+      "10.0.0.1:80"
+    );
+    assert!(p.bind_event(8000, false).is_some());
+    assert!(p.unix_event(Path::new("/run/docker.sock"), false).is_some());
+  }
+
+  #[test]
+  fn trace_policy_of_an_open_plan_reports_nothing() {
+    let mut plan = linux_plan(
+      NetPlan::Open,
+      SeccompPlan {
+        unix_sockets: true,
+        ..Default::default()
+      },
+    );
+    plan.linux.as_mut().unwrap().handled = Handled::default();
+    let p = TracePolicy::from_plan(&plan, Vec::new()).unwrap();
+    let ip: std::net::IpAddr = "::1".parse().unwrap();
+    assert!(p.read_event(Path::new("/etc/shadow")).is_none());
+    assert!(p.write_event(Path::new("/etc/x"), false).is_none());
+    assert!(p.exec_event(Path::new("/bin/sh")).is_none());
+    assert!(p.connect_event(ip, 1, false).is_none());
+    assert!(p.bind_event(0, false).is_none());
+    assert!(p.unix_event(Path::new("/x"), false).is_none());
+    // no Linux part: no trace
+    plan.linux = None;
+    assert!(TracePolicy::from_plan(&plan, Vec::new()).is_none());
+  }
+
+  #[test]
+  fn trace_policy_under_a_broker_plan() {
+    let mut plan = linux_plan(NetPlan::Denied, SeccompPlan::default());
+    // the write allow holds a broker-held deny: the kernel has rules for
+    // its other entries only
+    plan.linux.as_mut().unwrap().rules[1].write = false;
+    plan.expanded_write = vec!["/proj/out/logs".into()];
+    plan.broker = Some(BrokerPlan {
+      read: Some(vec!["/proj".into()]),
+      deny_read: Vec::new(),
+      write: Some(vec!["/proj/out".into()]),
+      deny_write: vec!["/proj/out/keep".into()],
+      net: Some(BrokerNet::default()),
+    });
+    let p = TracePolicy::from_plan(&plan, Vec::new()).unwrap();
+    // an expanded entry is the kernel's for everyone
+    assert!(
+      p.write_event(Path::new("/proj/out/logs/a"), false)
+        .is_none()
+    );
+    // directly in the split folder: the broker's, for the runtime only
+    assert!(p.write_event(Path::new("/proj/out/new"), true).is_none());
+    let event = p.write_event(Path::new("/proj/out/new"), false).unwrap();
+    assert!(event.note.unwrap().contains("--deny-write"));
+    // the deny holds for both
+    assert!(p.write_event(Path::new("/proj/out/keep/x"), true).is_some());
+    assert!(
+      p.write_event(Path::new("/proj/out/keep/x"), false)
+        .is_some()
+    );
+    // outside Deno's own rule: refused for the runtime too
+    assert!(p.write_event(Path::new("/tmp/x"), true).is_some());
+    // the network: the runtime's own sockets are the broker's to decide
+    let ip: std::net::IpAddr = "93.184.216.34".parse().unwrap();
+    assert!(p.connect_event(ip, 443, true).is_none());
+    assert!(p.connect_event(ip, 443, false).is_some());
+    assert!(p.bind_event(8000, true).is_none());
+    assert!(p.unix_event(Path::new("/x.sock"), true).is_none());
+    assert!(p.unix_event(Path::new("/x.sock"), false).is_some());
+    // round trip (the hand-over to the supervisor image)
+    let json = serde_json::to_string(&p).unwrap();
+    assert_eq!(serde_json::from_str::<TracePolicy>(&json).unwrap(), p);
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -1096,6 +1531,7 @@ mod tests {
       printed: 0,
       log: None,
       print: false,
+      direct: false,
     };
     reporter.report(WouldDeny::read(Path::new("/a")).by(1, Some("cat")));
     // the same access by the same program under another pid
@@ -1165,6 +1601,7 @@ mod tests {
       printed: 1,
       log: None,
       print: false,
+      direct: false,
     };
     only_startup.report(WouldDeny::startup(
       "--allow-net=example.com",
@@ -1203,6 +1640,7 @@ mod tests {
         printed: 0,
         log: Some(open()),
         print: false,
+        direct: false,
       };
       reporter.report(WouldDeny::read(Path::new(&format!("/{name}"))));
       reporter.report(WouldDeny::read(Path::new(&format!("/{name}"))));
@@ -1386,6 +1824,7 @@ mod tests {
       printed: 0,
       log: None,
       print: false,
+      direct: false,
     };
     reporter.report(
       seatbelt("Sandbox: deno(2) allow system-info net.link.addr").unwrap(),

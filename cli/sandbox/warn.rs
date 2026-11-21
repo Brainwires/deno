@@ -20,14 +20,20 @@
 //!    a Seatbelt profile that allows everything and reports exactly what the
 //!    enforce profile for the same plan refuses; the lines are read back from
 //!    the unified log when the process ends ([`finish`]). Linux has no
-//!    permissive mode for Landlock, so there is no observer there: what
-//!    native code and children would be refused shows only under `enforce`.
+//!    permissive mode for Landlock; there the run re-executes beneath a
+//!    supervising process that sees its tree's file, exec and socket-address
+//!    system calls, reports the ones the `enforce` plan would refuse and
+//!    lets every one continue (`deno_sandbox::trace`,
+//!    [`Observer::SupervisorTrace`]). The supervisor prints its own lines
+//!    and its own summary when the run ends.
 //!
 //! The observer is applied only for a `warn` someone asked for by name (the
 //! flag, deno.json, `DENO_KERNEL_SANDBOX`): a Seatbelt profile, even one
 //! that allows everything, makes a program that applies a sandbox of its own
 //! (a browser, `sandbox-exec`, a nested `--kernel-sandbox=enforce`) fail, as
-//! it would under `enforce`. The `warn` that `auto` chooses for a run with
+//! it would under `enforce`; the Linux trace sets no-new-privileges (setuid
+//! programs don't elevate) and takes the process tree's one seccomp
+//! listener. The `warn` that `auto` chooses for a run with
 //! no terminal ([`AutoStage::R3`](deno_lib::kernel_sandbox::AutoStage))
 //! applies nothing to the process: it reports from the policy and the
 //! runtime only, behind one notice per policy.
@@ -70,8 +76,8 @@ pub struct WarnRun<'a> {
 
 /// A warn run waiting for [`apply_observer`].
 #[cfg_attr(
-  not(target_os = "macos"),
-  allow(dead_code, reason = "read by the macOS observer")
+  not(any(target_os = "macos", target_os = "linux")),
+  allow(dead_code, reason = "read by the macOS and Linux observers")
 )]
 struct Pending {
   plan: EnforcePlan,
@@ -103,13 +109,68 @@ static OBSERVED: OnceLock<Observed> = OnceLock::new();
 #[cfg(target_os = "macos")]
 const SENTINEL_SERVICE: &str = "denext.kernel-sandbox.warn.sentinel.";
 
+/// Linux: this run's observer was decided (it runs beneath its tracing
+/// supervisor and said its user code starts, or no supervisor could start).
+#[cfg(target_os = "linux")]
+static TRACE_DECIDED: OnceLock<()> = OnceLock::new();
+
+/// Linux: how this process stands to a tracing supervisor
+/// (`deno_sandbox::trace::traced_run`). `root`: this process is the run a
+/// supervisor started, and whether its filter is in place (the image
+/// before the supervisor already printed the mode's line and the startup
+/// refusals). `inside`: an ancestor is such a run (its supervisor observes
+/// this process too; no second observer can start).
+struct Traced {
+  root: Option<bool>,
+  inside: bool,
+}
+
+fn traced_run() -> Traced {
+  #[cfg(target_os = "linux")]
+  {
+    use deno_sandbox::trace::TracedRun;
+    match deno_sandbox::trace::traced_run() {
+      Some(TracedRun::Root { observed }) => Traced {
+        root: Some(observed),
+        inside: false,
+      },
+      Some(TracedRun::Inside) => Traced {
+        root: None,
+        inside: true,
+      },
+      None => Traced {
+        root: None,
+        inside: false,
+      },
+    }
+  }
+  #[cfg(not(target_os = "linux"))]
+  {
+    Traced {
+      root: None,
+      inside: false,
+    }
+  }
+}
+
+/// Whether the image before this one already printed this run's report and
+/// the mode's line: this process is the run a tracing supervisor started
+/// (Linux), which that image became.
+pub fn printed_by_the_image_before() -> bool {
+  traced_run().root.is_some()
+}
+
 /// Whether the observer is applied to this process.
 fn observer_applied() -> bool {
   #[cfg(target_os = "macos")]
   {
     OBSERVED.get().is_some()
   }
-  #[cfg(not(target_os = "macos"))]
+  #[cfg(target_os = "linux")]
+  {
+    TRACE_DECIDED.get().is_some()
+  }
+  #[cfg(not(any(target_os = "macos", target_os = "linux")))]
   {
     false
   }
@@ -208,7 +269,8 @@ pub fn start(run: WarnRun) {
       return;
     }
     log::warn!("{} {notice}", crate::colors::yellow("Warning"));
-  } else if run.header {
+  } else if run.header && !printed_by_the_image_before() {
+    // (beneath a tracing supervisor the image before this one printed it)
     #[allow(clippy::print_stderr, reason = "the warn mode's line")]
     {
       eprintln!(
@@ -222,12 +284,19 @@ pub fn start(run: WarnRun) {
   let log = std::env::var_os(would_deny::WARN_LOG_ENV_VAR)
     .filter(|v| !v.is_empty())
     .map(PathBuf::from);
-  if !would_deny::install(would_deny::ReporterConfig { log, print: true }) {
+  if !would_deny::install(would_deny::ReporterConfig {
+    log,
+    print: true,
+    direct: false,
+  }) {
     return;
   }
   kernel_sandbox_state::set_warning();
-  for gap in &fatal {
-    would_deny::report(WouldDeny::startup(&gap.rule, &gap.detail));
+  // (beneath a tracing supervisor the image before this one reported them)
+  if !printed_by_the_image_before() {
+    for gap in &fatal {
+      would_deny::report(WouldDeny::startup(&gap.rule, &gap.detail));
+    }
   }
   deno_signals::before_exit(finish);
   // the observer: only for a warn asked for by name, on a command whose
@@ -235,9 +304,31 @@ pub fn start(run: WarnRun) {
   #[allow(clippy::disallowed_methods, reason = "the process's own environment")]
   let observe =
     std::env::var_os(would_deny::WARN_OBSERVE_ENV_VAR).is_none_or(|v| v != "0");
-  let plan = (!auto && observe && run.observable && cfg!(target_os = "macos"))
+  // macOS: the reporting profile. Linux: the tracing supervisor, where a
+  // seccomp filter can be installed; not when a supervisor already tried
+  // and couldn't, and not inside another run's trace
+  let traced = traced_run();
+  let os_observer = cfg!(target_os = "macos")
+    || (cfg!(target_os = "linux")
+      && run.ctx.caps.seccomp
+      && traced.root != Some(false)
+      && !traced.inside);
+  #[allow(unused_mut, reason = "the broker's network part is filled on unix")]
+  let mut plan = (!auto && observe && run.observable && os_observer)
     .then(|| deno_lib::kernel_plan::plan_for(run.compiled, run.ctx).0)
     .flatten();
+  // the broker's copy of the network grant, as `enforce` fills it in: the
+  // trace tells this runtime's own sockets (the broker's under enforce)
+  // from another program's by it
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  if let Some(plan) = &mut plan {
+    deno_lib::kernel_supervise::fill_broker_net(
+      plan,
+      run.compiled,
+      run.options,
+      run.ctx.inspector_port,
+    );
+  }
   let Some(plan) = plan else {
     would_deny::record_run(Record::Run {
       v: would_deny::WOULD_DENY_FORMAT,
@@ -276,8 +367,11 @@ pub fn is_pending() -> bool {
 /// Applies the observer once the module graph is loaded and before user
 /// code runs (where `enforce` confines the process): on macOS, the
 /// reporting Seatbelt profile for the plan, with the graph's local files
-/// `module_files` silent as under `enforce`. Never an error: an observer
-/// that can't be applied is said once, and the run goes on.
+/// `module_files` silent as under `enforce`; on Linux the process
+/// re-executes as the tracing supervisor of the run (which starts again
+/// beneath it and, back here, tells the supervisor its user code starts).
+/// Never an error: an observer that can't be applied is said once, and the
+/// run goes on.
 pub fn apply_observer(module_files: Vec<PathBuf>) {
   let Some(pending) = PENDING.get() else {
     return;
@@ -308,7 +402,63 @@ pub fn apply_observer(module_files: Vec<PathBuf>) {
       since,
     });
   }
-  #[cfg(not(target_os = "macos"))]
+  #[cfg(target_os = "linux")]
+  {
+    let record = |observer: Observer| {
+      would_deny::record_run(Record::Run {
+        v: would_deny::WOULD_DENY_FORMAT,
+        pid: std::process::id(),
+        os: std::env::consts::OS.to_string(),
+        policy: Some(pending.policy.clone()),
+        observer,
+        tag: None,
+        since: None,
+      });
+    };
+    let _ = TRACE_DECIDED.set(());
+    if traced_run().root == Some(true) {
+      // beneath the supervisor: reports start here, as enforce would
+      // confine the process here
+      deno_sandbox::trace::signal_start();
+      record(Observer::SupervisorTrace);
+      return;
+    }
+    let mut plan = pending.plan.clone();
+    plan.module_files = module_files;
+    // silent, as on macOS: the shared caches (an enforced run keeps its own
+    // in the overlay) and what this process reads that an enforced run
+    // never opens
+    let quiet: Vec<PathBuf> = pending
+      .quiet
+      .iter()
+      .map(PathBuf::from)
+      .chain(pending.own_quiet.iter().cloned())
+      .collect();
+    if let Some(policy) = would_deny::TracePolicy::from_plan(&plan, quiet) {
+      #[allow(
+        clippy::disallowed_methods,
+        reason = "the process's own environment and working directory"
+      )]
+      let log = std::env::var_os(would_deny::WARN_LOG_ENV_VAR)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .map(|log| match std::env::current_dir() {
+          Ok(cwd) => cwd.join(log),
+          Err(_) => log,
+        });
+      // returns only when the supervisor can't start
+      let err = super::enforce::exec_trace_supervisor(
+        &plan,
+        deno_sandbox::supervise::TraceHandoff { policy, log },
+      );
+      log::warn!(
+        "{} kernel sandbox (warn): what native code and child processes would be refused isn't observed in this run: the tracing supervisor can't start: {err}",
+        crate::colors::yellow("Warning"),
+      );
+    }
+    record(Observer::None);
+  }
+  #[cfg(not(any(target_os = "macos", target_os = "linux")))]
   {
     let _ = (pending, module_files);
   }
