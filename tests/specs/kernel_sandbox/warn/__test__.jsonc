@@ -97,11 +97,12 @@
       "args": "run --kernel-sandbox-report --allow-read=. main.ts",
       "output": "r4_enforces.out"
     },
-    // R4: a command enforce doesn't cover runs as warn, never an error
+    // R4: a command enforce doesn't cover (eval; `deno test` is covered
+    // after its setup since WP-A) runs as warn, never an error
     "stage_r4_falls_back": {
       "if": "kernelSandboxEnforce",
       "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r4" },
-      "args": "test --no-check --allow-read=. a_test.ts",
+      "args": ["eval", "--allow-read=.", "console.log('hello')"],
       "output": "r4_fallback.out"
     },
     // plain -A and an explicit off are never changed by a stage

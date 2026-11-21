@@ -7,17 +7,18 @@
 {
   "tempDir": true,
   "tests": {
-    // a native read outside the grant is refused inside `deno test`
+    // a native read outside the grant is refused inside `deno test` (no
+    // --quiet: it hides what a test prints)
     "test_native_read_refused": {
       "if": "kernelSandboxEnforce",
-      "args": "test --quiet --kernel-sandbox=enforce --allow-ffi --allow-read=inside native_test.ts",
+      "args": "test --kernel-sandbox=enforce --allow-ffi --allow-read=inside native_test.ts",
       "output": "[WILDCARD]read inside: ok[WILDCARD]read outside: refused[WILDCARD]ok | 1 passed[WILDCARD]"
     },
     // the same under auto at R4 (no terminal here)
     "test_auto_r4": {
       "if": "kernelSandboxEnforce",
       "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r4" },
-      "args": "test --quiet --allow-ffi --allow-read=inside native_test.ts",
+      "args": "test --allow-ffi --allow-read=inside native_test.ts",
       "output": "[WILDCARD]read inside: ok[WILDCARD]read outside: refused[WILDCARD]ok | 1 passed[WILDCARD]"
     },
     // coverage and the JUnit report are still written
@@ -54,6 +55,37 @@
       "if": "kernelSandboxEnforce",
       "args": "test --quiet --kernel-sandbox=enforce --doc doc/README.md",
       "output": "[WILDCARD]ok | 1 passed[WILDCARD]"
+    },
+    // the default snapshot files beside a test module are readable to the
+    // confined image, with no grant
+    "test_snapshot_read": {
+      "if": "kernelSandboxEnforce",
+      "args": "test --quiet --kernel-sandbox=enforce snap/snap_test.ts",
+      "output": "[WILDCARD]ok | 1 passed[WILDCARD]"
+    },
+    // writing them isn't covered: under auto at R4 the run is a warn one,
+    // never an error
+    "test_update_snapshots_falls_back": {
+      "if": "kernelSandboxEnforce",
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r4" },
+      "args": "test --update-snapshots snap/snap_test.ts",
+      "output": "[WILDCARD](enforce doesn't cover --update-snapshots yet)[WILDCARD]ok | 1 passed[WILDCARD]"
+    },
+    // a module named on the command line is handed over whatever its
+    // extension, as the walk takes it
+    "test_named_extensionless": {
+      "if": "kernelSandboxEnforce",
+      "args": "test --quiet --kernel-sandbox=enforce named/extensionless",
+      "output": "[WILDCARD]ok | 1 passed[WILDCARD]"
+    },
+    // a Vitest config runs while the tests are found, before the sandbox
+    // could apply: under auto at R4 the run is a warn one, never an error
+    "test_vitest_config_falls_back": {
+      "if": "kernelSandboxEnforce",
+      "cwd": "vitest",
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r4" },
+      "args": "test --no-check",
+      "output": "[WILDCARD](enforce doesn't cover a test run that loads a Vitest or Jest config yet)[WILDCARD]ok | 1 passed[WILDCARD]"
     },
     // `deno bench` too
     "bench_native_read_refused": {
