@@ -19433,6 +19433,61 @@ where the changes are discussed.
        writableAll`).
      - Node tests enabled: none new; `parallel/test-net-server-listen-path.js`
        (already enabled) now exercises the chmod on Windows.
+
+485. **`fix(pty)`: a Windows pty kill ends the process tree; detached
+     children leave their parent's job** (runtime, behavior change on
+     Windows; `ext/pty/{Cargo.toml,windows.rs}`,
+     `runtime/subprocess_windows/src/process.rs`, `cli/util/job_object.rs`,
+     `cli/tsc/dts/lib.deno_pty.d.ts`, `tests/unit/pty_test.ts`).
+     - The pty child runs in a job object of its own. It is created
+       `CREATE_SUSPENDED`, assigned with `AssignProcessToJobObject` and only
+       then resumed, so nothing it starts can run outside the job. `kill`
+       (and the kill when the runtime drops an unreaped child) is
+       `TerminateJobObject(job, 1)`: the child and every process it started
+       end with exit code 1. Before, `TerminateProcess` ended the child alone
+       and a shell's `ping` (or a dev server) kept running. The status is
+       still `GetExitCodeProcess` of the child. The job is not kill-on-close:
+       a child that exits by itself leaves what it started running, as
+       before, and the job handle is closed with the child's resource. It
+       allows explicit breakaway (`JOB_OBJECT_LIMIT_BREAKAWAY_OK`, not the
+       silent kind), so a `detached: true` child started inside the terminal
+       outlives a kill, as a `setsid` daemon outlives a Unix terminal. Where
+       no job can be made or assigned (a sandbox whose job refuses nesting)
+       the child still starts and a kill ends it alone.
+     - `Deno.Command` with `detached: true` on Windows adds
+       `CREATE_BREAKAWAY_FROM_JOB` when the job this process is immediately
+       in allows breakaway (`IsProcessInJob` + `QueryInformationJobObject`).
+       That job is usually the runtime's own kill-on-close job, which it
+       joins at its first non-detached spawn; a detached child used to
+       inherit it and die when the runtime exited. An outer job that refuses
+       breakaway fails the spawn with `ERROR_ACCESS_DENIED`, and the spawn is
+       retried without the flag (the child then stays in the jobs, as
+       before).
+     - `deno desktop --hmr` / `--inspect`'s kill-on-close job
+       (`cli/util/job_object.rs`) now allows explicit breakaway too: CEF /
+       WebView2 helpers and a dev server never ask, so they still end with
+       the run, while a detached sidecar outlives it, which is what
+       `detached` asks for.
+     - `PtyForegroundProcess.cwd` (and so `ptyInfo`'s cwd) can be `null` on
+       Windows for an elevated or protected process: reading another
+       process's working directory needs `PROCESS_VM_READ`, which such a
+       process refuses. No change; documented here.
+     - `lib.deno_pty.d.ts` no longer says Windows is unsupported; `kill`'s
+       doc says it ends the tree on Windows.
+     - User-facing note: on Windows, `pty.kill()` and disposing a pty end the
+       programs the child started too; a `detached: true` child outlives the
+       runtime even after a non-detached spawn.
+     - Tests: `tests/unit/pty_test.ts`, Windows only:
+       `ptyKillEndsTheProcessTreeOnWindows`,
+       `ptyResizeIsVisibleToTheChildOnWindows`, `ptyUtf8RoundTripOnWindows`,
+       `ptyVtOutputPassesThroughOnWindows`, `ptySpawnsPowerShellOnWindows`
+       (each of `pwsh.exe` / `powershell.exe` where installed),
+       `ptySpawnsWslOnWindows` (only with a WSL distribution) and
+       `ptyEnvAndCwdOnWindows`; `deno_subprocess_windows`'s
+       `detached_child_breaks_away_from_the_global_job`; `cli`'s
+       `dropping_the_job_kills_the_child` also checks the breakaway limit.
+     - Node tests enabled: none (`node:child_process`'s `detached` runs on
+       the same spawn, but no node_compat test checks job membership).
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

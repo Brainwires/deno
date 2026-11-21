@@ -140,7 +140,9 @@ declare namespace Deno {
      */
     foreground(): PtyForegroundProcess | null;
     /** Sends `signal` to the child (and only the child: not to the process
-     * group it leads). On Windows every signal but `0` ends the process.
+     * group it leads). On Windows every signal but `0` ends the process and
+     * every process it started (they share a job object; one started with
+     * `detached: true` has left it), each with exit code 1.
      *
      * @param [signal="SIGHUP"] what a closing terminal sends. */
     kill(signal?: Signal | number): void;
@@ -163,8 +165,10 @@ declare namespace Deno {
    * {@linkcode Deno.ChildProcess.pty} is its `readable`, `writable` and
    * `resize`.
    *
-   * Windows is not supported yet: there, `Deno.openPty` and `Deno.Command`
-   * with `pty` throw {@linkcode Deno.errors.NotSupported}.
+   * On Windows the terminal is a ConPTY (Windows 10 version 1809 or later;
+   * an older Windows throws {@linkcode Deno.errors.NotSupported}). Its output
+   * is the console's rendering of the child's: the text with VT sequences
+   * around it, lines ended as the console draws them.
    *
    * @tags allow-run
    * @category Subprocess */

@@ -13,7 +13,13 @@
 //!   process dies, however it dies, because the kernel then closes the handle.
 //!   The handle isn't inheritable, so no child can keep the job open.
 //! - Processes the child starts after [`KillOnCloseJob::assign`] are in the
-//!   job too. The job doesn't allow breakaway, so they can't leave it.
+//!   job too, and stay in it unless they ask to leave: the job allows
+//!   explicit breakaway (`JOB_OBJECT_LIMIT_BREAKAWAY_OK`) but not the silent
+//!   kind. The helpers above never ask, so they end with the run. A process
+//!   started with `CREATE_BREAKAWAY_FROM_JOB` does leave and outlives it:
+//!   that is how the runtime starts a `detached: true` child (a desktop
+//!   sidecar, a `Deno.Command`), whose point is to outlive its parent
+//!   (denext).
 //! - Processes started some other way, e.g. by a COM server or a service, are
 //!   not in the job and outlive it.
 
@@ -24,6 +30,7 @@ use std::os::windows::io::OwnedHandle;
 
 use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
 use windows_sys::Win32::System::JobObjects::CreateJobObjectW;
+use windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_BREAKAWAY_OK;
 use windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
 use windows_sys::Win32::System::JobObjects::JOBOBJECT_EXTENDED_LIMIT_INFORMATION;
 use windows_sys::Win32::System::JobObjects::JobObjectExtendedLimitInformation;
@@ -68,7 +75,8 @@ impl KillOnCloseJob {
     // SAFETY: the struct holds only integers, so all zeroes is a valid value.
     let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION =
       unsafe { std::mem::zeroed() };
-    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    info.BasicLimitInformation.LimitFlags =
+      JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
     // SAFETY: `info` outlives the call, and the length is its size.
     let set = unsafe {
       SetInformationJobObject(
@@ -90,7 +98,34 @@ mod tests {
   use std::process::Stdio;
   use std::time::Duration;
 
+  use std::os::windows::io::AsRawHandle;
+
+  use windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+  use windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+  use windows_sys::Win32::System::JobObjects::JOBOBJECT_EXTENDED_LIMIT_INFORMATION;
+  use windows_sys::Win32::System::JobObjects::JobObjectExtendedLimitInformation;
+  use windows_sys::Win32::System::JobObjects::QueryInformationJobObject;
+
   use super::KillOnCloseJob;
+
+  fn limit_flags(job: &KillOnCloseJob) -> u32 {
+    // SAFETY: the struct holds only integers, so all zeroes is a valid value.
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION =
+      unsafe { std::mem::zeroed() };
+    // SAFETY: an open job handle; `info` outlives the call and the length is
+    // its size.
+    let ok = unsafe {
+      QueryInformationJobObject(
+        job.0.as_raw_handle(),
+        JobObjectExtendedLimitInformation,
+        (&raw mut info).cast(),
+        std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        std::ptr::null_mut(),
+      )
+    };
+    assert_ne!(ok, 0, "{}", std::io::Error::last_os_error());
+    info.BasicLimitInformation.LimitFlags
+  }
 
   #[tokio::test]
   async fn dropping_the_job_kills_the_child() {
@@ -101,6 +136,10 @@ mod tests {
       .spawn()
       .unwrap();
     let job = KillOnCloseJob::assign(&child).unwrap();
+    // only an explicit breakaway (a detached spawn) may leave the job
+    let flags = limit_flags(&job);
+    assert_ne!(flags & JOB_OBJECT_LIMIT_BREAKAWAY_OK, 0);
+    assert_eq!(flags & JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, 0);
     drop(job);
     tokio::time::timeout(Duration::from_secs(10), child.wait())
       .await

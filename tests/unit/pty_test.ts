@@ -4,8 +4,10 @@
 // 260). Every test here fails on a build without the API (`Deno.openPty is
 // not a function`). On Windows the terminal is a ConPTY: its output is a
 // console's rendering (VT sequences around the text, lines ended as the
-// console draws them), so the Windows cases check the text only; the tests
-// that drive `sh`, `cat` or `stty` run on Unix only.
+// console draws them), so the Windows cases check the text only (with the
+// sequences taken out where the console may draw runs of spaces as cursor
+// moves); the tests that drive `sh`, `cat` or `stty` run on Unix only, and
+// the Windows ones drive `cmd.exe`, `mode`, PowerShell and WSL where present.
 
 import {
   assert,
@@ -65,6 +67,13 @@ const scopedEnv = {
   clearEnv: true,
   env: { PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin" },
 };
+
+// The text a console draws, its VT sequences replaced by a space (a cursor
+// move the console drew in place of spaces stays a separator).
+const VT_SEQUENCE =
+  // deno-lint-ignore no-control-regex
+  /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])/g;
+const plainText = (text: string) => text.replace(VT_SEQUENCE, " ");
 
 async function write(pty: Deno.Pty, text: string) {
   const writer = pty.writable.getWriter();
@@ -285,6 +294,37 @@ Deno.test(
 );
 
 Deno.test(
+  { permissions: { run: true, read: true, write: true }, ignore: !isWindows },
+  async function ptyEnvAndCwdOnWindows() {
+    const cwd = await Deno.makeTempDir({ prefix: "deno_pty_test" });
+    try {
+      // wide enough that the line is never wrapped by the console
+      const pty = Deno.openPty({
+        cmd: "cmd.exe",
+        args: ["/d", "/c", "echo [%PTY_TEST_VAR%^|%CD%]"],
+        cwd,
+        env: { PTY_TEST_VAR: "yes" },
+        cols: 400,
+        rows: 24,
+      });
+      const output = plainText(await readAll(pty.readable)).toLowerCase();
+      // the directory as given, or its long form where the temporary
+      // directory was named by an 8.3 short path
+      const real = (await Deno.realPath(cwd)).replace(/^\\\\\?\\/, "");
+      assert(
+        [cwd, real].some((dir) =>
+          output.includes(`[yes|${dir.toLowerCase()}]`)
+        ),
+        output,
+      );
+      assertEquals((await pty.status).code, 0);
+    } finally {
+      await Deno.remove(cwd, { recursive: true });
+    }
+  },
+);
+
+Deno.test(
   { permissions: { run: true, read: true, write: true }, ignore: isWindows },
   async function ptyEnvAndCwd() {
     const cwd = await Deno.makeTempDir({ prefix: "deno_pty_test" });
@@ -346,7 +386,7 @@ Deno.test(
     const settled = status;
     assert(settled !== undefined);
     if (isWindows) {
-      // a kill on Windows is TerminateProcess with exit code 1
+      // a kill on Windows ends the child's job, each process with exit code 1
       assertEquals(settled.code, 1);
       assertEquals(settled.signal, null);
     } else {
@@ -549,8 +589,8 @@ Deno.test(
 Deno.test(
   { permissions: { run: true, read: true }, ignore: !isWindows },
   async function ptyKillEndsTheChildOnWindows() {
-    // any signal is TerminateProcess (exit code 1), as Deno.kill on Windows;
-    // the output ends once the console is closed after the exit
+    // any signal ends the child's job (exit code 1, as Deno.kill on
+    // Windows); the output ends once the console is closed after the exit
     const pty = Deno.openPty({
       cmd: shell,
       args: shellArgs("pause >nul"),
@@ -568,6 +608,194 @@ Deno.test(
       TypeError,
       "already terminated",
     );
+  },
+);
+
+// Whether a process with this id and image name runs (`tasklist`'s CSV
+// line names both).
+function windowsProcessRuns(pid: number, image: string): boolean {
+  const { stdout } = new Deno.Command("tasklist", {
+    args: ["/fi", `PID eq ${pid}`, "/fo", "csv", "/nh"],
+    stdin: "null",
+    stdout: "piped",
+    stderr: "null",
+  }).outputSync();
+  const text = new TextDecoder().decode(stdout).toLowerCase();
+  return text.includes(`"${image.toLowerCase()}","${pid}"`);
+}
+
+Deno.test(
+  { permissions: { run: true, read: true }, ignore: !isWindows },
+  async function ptyKillEndsTheProcessTreeOnWindows() {
+    // The shell's child is in the job the terminal put the shell in: a kill
+    // ends it too, as closing a Unix terminal ends its session. (A kill
+    // that reached the shell alone left `ping` running for 5 minutes.)
+    const pty = Deno.openPty({
+      cmd: "cmd.exe",
+      args: ["/d", "/c", "ping -n 300 127.0.0.1"],
+      cols: 80,
+      rows: 24,
+    });
+    const drained = readAll(pty.readable);
+    const fg = await foregroundUntil(
+      pty,
+      (fg) => fg?.name.toLowerCase() === "ping.exe",
+    );
+    assert(fg !== null && fg.pid !== pty.pid);
+    const grandchild = fg.pid;
+    assert(windowsProcessRuns(grandchild, "ping.exe"));
+    pty.kill();
+    const status = await pty.status;
+    assertEquals(status.code, 1);
+    await drained;
+    // the job's processes are ended together; wait for the system to have
+    // removed the grandchild, which takes a moment on a loaded machine
+    const deadline = Date.now() + 60_000;
+    while (windowsProcessRuns(grandchild, "ping.exe")) {
+      assert(Date.now() < deadline, `ping.exe ${grandchild} outlived the kill`);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  },
+);
+
+Deno.test(
+  { permissions: { run: true, read: true }, ignore: !isWindows },
+  async function ptyResizeIsVisibleToTheChildOnWindows() {
+    // `mode con` prints the console's size: before the resize, then (after
+    // a line of input) after it
+    const pty = Deno.openPty({
+      cmd: "cmd.exe",
+      args: ["/d", "/c", "mode con & set /p line= & echo resized: & mode con"],
+      cols: 80,
+      rows: 24,
+    });
+    const first = await readUntil(
+      pty.readable,
+      (text) => /Columns:\s+80\b/.test(plainText(text)),
+    );
+    assertMatch(plainText(first), /Columns:\s+80\b/);
+    pty.resize(100, 50);
+    await write(pty, "go\r");
+    const output = plainText(await readAll(pty.readable));
+    const after = output.slice(output.lastIndexOf("resized:"));
+    assertMatch(after, /Columns:\s+100\b/);
+    assertEquals((await pty.status).code, 0);
+  },
+);
+
+Deno.test(
+  { permissions: { run: true, read: true }, ignore: !isWindows },
+  async function ptyUtf8RoundTripOnWindows() {
+    // A ConPTY's output is UTF-8 whatever the console's code page; under
+    // code page 65001 the shell's own output is too. Non-ASCII text from
+    // the command line comes back intact.
+    const pty = Deno.openPty({
+      cmd: "cmd.exe",
+      args: ["/d", "/c", "chcp 65001 >nul & echo [héllo ünï → 世界 ✓]"],
+      cols: 120,
+      rows: 24,
+    });
+    const output = plainText(await readAll(pty.readable));
+    for (const piece of ["héllo", "ünï", "→", "世界", "✓"]) {
+      assertStringIncludes(output, piece);
+    }
+    assertEquals((await pty.status).code, 0);
+  },
+);
+
+Deno.test(
+  { permissions: { run: true, read: true }, ignore: !isWindows },
+  async function ptyVtOutputPassesThroughOnWindows() {
+    // The console interprets the child's VT sequences and draws them for
+    // the terminal: a title (OSC 0) and a colour (SGR 31) the shell set
+    // arrive as sequences, not as text.
+    const pty = Deno.openPty({
+      cmd: "cmd.exe",
+      args: [
+        "/d",
+        "/c",
+        "title pty-vt-title & echo \x1b[31mred-text\x1b[0m",
+      ],
+      cols: 80,
+      rows: 24,
+    });
+    const output = await readAll(pty.readable);
+    // deno-lint-ignore no-control-regex
+    assertMatch(output, /\x1b\]0;[^\x07\x1b]*pty-vt-title/);
+    // deno-lint-ignore no-control-regex
+    assertMatch(output, /\x1b\[(?:[0-9;]*;)?31(?:;[0-9;]*)?m[\s\S]*red-text/);
+    assert(!plainText(output).includes("[31m"), "an SGR drawn as text");
+    assertEquals((await pty.status).code, 0);
+  },
+);
+
+Deno.test(
+  { permissions: { run: true, read: true }, ignore: !isWindows },
+  async function ptySpawnsPowerShellOnWindows() {
+    // PowerShell 7 (`pwsh`) and Windows PowerShell (`powershell.exe`), each
+    // where it is installed: both run on the terminal and see its size
+    let ran = 0;
+    for (const cmd of ["pwsh.exe", "powershell.exe"]) {
+      let pty: Deno.Pty;
+      try {
+        pty = Deno.openPty({
+          cmd,
+          args: [
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "'width=' + $Host.UI.RawUI.WindowSize.Width + ';ok'",
+          ],
+          cols: 110,
+          rows: 30,
+        });
+      } catch (err) {
+        if (err instanceof Deno.errors.NotFound) continue;
+        throw err;
+      }
+      ran++;
+      const output = plainText(await readAll(pty.readable));
+      assertStringIncludes(output, "width=110;ok", cmd);
+      assertEquals((await pty.status).code, 0, cmd);
+    }
+    if (ran === 0) console.log("no PowerShell on this machine: skipped");
+  },
+);
+
+Deno.test(
+  { permissions: { run: true, read: true }, ignore: !isWindows },
+  async function ptySpawnsWslOnWindows() {
+    // Only where WSL is installed and has a distribution (`wsl.exe -l -q`
+    // lists them, in UTF-16; it fails where none is set up or WSL is off).
+    let distros = "";
+    try {
+      const listed = await new Deno.Command("wsl.exe", {
+        args: ["-l", "-q"],
+        stdin: "null",
+        stdout: "piped",
+        stderr: "null",
+      }).output();
+      if (listed.success) {
+        distros = new TextDecoder("utf-16le").decode(listed.stdout)
+          .replaceAll("\0", "").trim();
+      }
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+    if (distros === "") {
+      console.log("no WSL distribution on this machine: skipped");
+      return;
+    }
+    const pty = Deno.openPty({
+      cmd: "wsl.exe",
+      args: ["-e", "sh", "-c", "echo wsl-pty-$((40 + 2))"],
+      cols: 80,
+      rows: 24,
+    });
+    const output = plainText(await readAll(pty.readable));
+    assertStringIncludes(output, "wsl-pty-42");
+    assertEquals((await pty.status).code, 0);
   },
 );
 
