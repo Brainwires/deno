@@ -2516,7 +2516,7 @@ impl<'a> Compiler<'a> {
     // on every kernel, and the address is held, not only its port. Only
     // the listen-direction flag: an `--allow-net` entry is most often a
     // server to connect to, whose port this process must not take.
-    let hosted_connect = connect_ip.iter().any(|e| *e == NetEntry::Hosted);
+    let hosted_connect = connect_ip.contains(&NetEntry::Hosted);
     let listen_only = NetSide::merged(&None, &o.allow_net_listen);
     let allow_net_binds = !ip_entries(&NetSide::merged(&o.allow_net, &None))
       .is_empty()
