@@ -560,6 +560,14 @@ fn should_run(if_cond: Option<&str>) -> bool {
       }
       // ... and holds TCP port rules (Linux: Landlock ABI 4 or later)
       "kernelSandboxNetPorts" => kernel_sandbox_caps().1,
+      // ... and a program can be made PID 1 of a PID namespace of its own
+      // without privileges (`unshare`: what a container's init is; refused
+      // where unprivileged user namespaces are, as inside most containers)
+      "kernelSandboxPidNamespace" => {
+        cfg!(target_os = "linux")
+          && kernel_sandbox_caps().0
+          && pid_namespace_available()
+      }
       "notMacIntel" => {
         cfg!(unix)
           && !(cfg!(target_os = "macos") && cfg!(target_arch = "x86_64"))
@@ -583,6 +591,28 @@ fn should_run(if_cond: Option<&str>) -> bool {
   } else {
     true
   }
+}
+
+/// Whether `unshare` can start a program as PID 1 of a new PID namespace
+/// here, unprivileged (a user namespace with it).
+fn pid_namespace_available() -> bool {
+  static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+  *AVAILABLE.get_or_init(|| {
+    std::process::Command::new("unshare")
+      .args([
+        "--user",
+        "--map-root-user",
+        "--pid",
+        "--fork",
+        "--mount-proc",
+        "true",
+      ])
+      .stdin(std::process::Stdio::null())
+      .stdout(std::process::Stdio::null())
+      .stderr(std::process::Stdio::null())
+      .status()
+      .is_ok_and(|status| status.success())
+  })
 }
 
 /// Whether `--kernel-sandbox=enforce` can run on this machine, and whether

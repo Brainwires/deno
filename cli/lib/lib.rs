@@ -3,9 +3,13 @@
 pub mod args;
 pub mod kernel_apply;
 pub mod kernel_inherit;
+#[cfg(unix)]
+pub mod kernel_net_broker;
 pub mod kernel_plan;
 pub mod kernel_policy;
 pub mod kernel_sandbox;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod kernel_supervise;
 pub mod loader;
 pub mod npm;
 pub mod resource_limits;

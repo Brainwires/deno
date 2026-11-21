@@ -1090,6 +1090,12 @@ pub struct Context {
   pub ttys: Vec<PathBuf>,
   /// A compiled program: no remote imports, no DENO_DIR caches.
   pub compiled: bool,
+  /// A compiled program that runs its own supervising broker (it forks in
+  /// place before it confines itself: Linux and macOS, never a desktop app,
+  /// whose process hosts a browser engine). Without it a compiled program's
+  /// policy never takes the broker's shape: what only the broker would hold
+  /// stays a rule the OS can't hold.
+  pub compiled_supervisor: bool,
   /// `--kernel-sandbox-exec=strict` (plan D3's opt-in).
   pub exec_strict: bool,
   /// The policy-keyed cache overlay (`DENO_DIR/sandboxed/<hash>`; a compiled
@@ -1132,6 +1138,7 @@ impl Context {
       tty_parent: false,
       ttys: Vec::new(),
       compiled: false,
+      compiled_supervisor: false,
       exec_strict: false,
       cache_overlay: None,
       coverage_dir: None,
@@ -1538,17 +1545,17 @@ impl KernelPolicy {
         && compiled.gaps.iter().any(|g| {
           g.is_fatal_under_enforce() && g.exact_with == Some(ExactWith::Broker)
         }));
-    if needs_broker && ctx.compiled {
-      // a compiled program applies its sandbox in place, with no supervising
-      // broker: what only the broker would hold stays a rule the OS can't
-      // hold (warned about at `deno compile`, refused at start), never a
-      // Mode B plan nothing runs
+    if needs_broker && ctx.compiled && !ctx.compiled_supervisor {
+      // a compiled program with no supervisor of its own (a desktop app,
+      // Windows) applies its sandbox in place: what only the broker would
+      // hold stays a rule the OS can't hold (warned about at `deno
+      // compile`, refused at start), never a Mode B plan nothing runs
       let mut compiled = compiled;
       if matches!(compiled.policy.net, NetPolicy::Broker { .. }) {
         compiled.gaps.push(PolicyGap {
           class: GapClass::Net,
           rule: net_rule(options),
-          detail: "Deno only: host-scoped network needs the supervising broker, which a compiled program doesn't run".to_string(),
+          detail: "Deno only: host-scoped network needs the supervising broker, which this kind of compiled program doesn't run".to_string(),
           resolution: GapResolution::FailOpen,
           exact_with: Some(ExactWith::Broker),
         });

@@ -82,6 +82,7 @@ pub use fd_table::FdTable;
 pub use fd_table::register_internal_fd;
 pub use inherited_fds::capture_inherited_fds;
 pub use inherited_fds::claim_inherited_fd;
+pub use inherited_fds::exclude_inherited_fd;
 pub use inherited_fds::is_inherited_fd;
 pub use inherited_fds::unclaim_inherited_fd;
 pub use pipe::AsyncPipeRead;

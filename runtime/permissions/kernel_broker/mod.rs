@@ -18,6 +18,8 @@
 //!   one every socket-opening crate asks through `deno_net_route`.
 //! - [`client`]: the confined side: the process-wide [`client::BrokerClient`]
 //!   the file-system operations fall back to.
+//! - [`dial`]: how a `deno` / `denort` the confined program starts gets a
+//!   channel of its own to the same broker.
 //!
 //! The broker is an authority, not an oracle: it holds a fixed policy, acts
 //! itself, hands back only objects it checked, never asks the confined side
@@ -25,6 +27,8 @@
 
 #[cfg(unix)]
 pub mod client;
+#[cfg(unix)]
+pub mod dial;
 #[cfg(unix)]
 pub mod fs;
 pub mod net;

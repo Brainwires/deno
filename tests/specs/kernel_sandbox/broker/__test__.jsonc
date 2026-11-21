@@ -57,6 +57,68 @@
       "if": "kernelSandboxEnforce",
       "args": "run --quiet -A --unstable-net net_outer.ts",
       "output": "net.out"
+    },
+    // denext.30: `auto` takes the broker by itself. At the stage where it
+    // enforces a run with no terminal (r4), a host-scoped grant starts
+    // under the supervisor instead of falling back to warn: the same
+    // program, the same answers, and no mode written anywhere. net.out's
+    // "another spelling of an address" row is the internal-address rule
+    // (plan D6) under `auto`: the grant names `2130706433`, a name to
+    // Deno's checks; the broker resolves it to 127.0.0.1, an address on
+    // this machine that the grant doesn't name, and refuses
+    "auto_host_scoped": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        {
+          "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r4" },
+          "args": "run --kernel-sandbox-report --allow-net=example.com:443 exit0.ts",
+          "output": "auto_report.out"
+        },
+        {
+          "envs": { "BROKER_SPEC_AUTO": "1" },
+          "args": "run --quiet -A --unstable-net net_outer.ts",
+          "output": "net.out"
+        }
+      ]
+    },
+    // ... and a write deny inside a write allow is held exactly (Linux:
+    // through the broker; macOS holds it in the kernel, with no supervisor)
+    "auto_write_deny_inside_allow": {
+      "if": "kernelSandboxEnforce",
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r4" },
+      "steps": [
+        { "args": "run --quiet -A setup.ts", "output": "" },
+        {
+          "args": "run --quiet --allow-ffi --allow-read=. --allow-write=out --deny-write=out/keep write_deny.ts",
+          "output": "write_deny.out"
+        }
+      ]
+    },
+    "auto_write_deny_report": {
+      "if": "kernelSandboxEnforceLinux",
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r4" },
+      "steps": [
+        { "args": "run --quiet -A setup.ts", "output": "" },
+        {
+          "args": "run --kernel-sandbox-report --allow-read=. --allow-write=out --deny-write=out/keep exit0.ts",
+          "output": "auto_report.out"
+        }
+      ]
+    },
+    // the supervisor keeps the PID the program was started with (what a
+    // service manager's Type=exec watches), passes a signal sent to it on,
+    // and exits with the program's status or by the program's signal
+    "supervisor_keeps_pid_status_and_signals": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet -A pid_outer.ts",
+      "output": "pid.out"
+    },
+    // as PID 1 of a PID namespace (a container's init): a SIGTERM from
+    // outside reaches the program, and the supervisor exits with its code
+    "supervisor_as_pid_1": {
+      "if": "kernelSandboxPidNamespace",
+      "args": "run --quiet -A pid1_outer.ts",
+      "output": "pid1.out"
     }
   }
 }

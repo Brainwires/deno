@@ -1150,3 +1150,150 @@ fn transport_send_flags() -> libc::c_int {
     0
   }
 }
+
+// ---------------------------------------------------------------------------
+// The dial: a channel for the processes a brokered run starts
+// ---------------------------------------------------------------------------
+
+/// A dial's descriptors are this test's to close (in a real run they stay
+/// open for the life of the process).
+struct OwnedDial(super::dial::Dial);
+
+impl Drop for OwnedDial {
+  fn drop(&mut self) {
+    self.0.close();
+  }
+}
+
+#[test]
+fn a_dial_gives_each_asker_a_channel_of_its_own() {
+  use super::dial::Dial;
+  let bed = Bed::new();
+  let live = start(&bed.policy());
+  let dial = OwnedDial(Dial::create(&live.client).unwrap());
+  // the descriptors are for every child: none is close-on-exec
+  for fd in dial.0.fds() {
+    // SAFETY: flags of an open descriptor
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    assert_eq!(flags & libc::FD_CLOEXEC, 0);
+  }
+  // what a child reads from its environment names the same dial
+  let value = dial.0.env_value();
+  let named = Dial::from_env_value(&value).unwrap();
+  assert_eq!(named, dial.0);
+  assert_eq!(Dial::named_fds(&value), dial.0.fds().to_vec());
+  // two askers: each gets a working channel, held to the broker's policy
+  for _ in 0..2 {
+    let child = BrokerClient::new(named.connect().unwrap());
+    assert!(child.hello().unwrap() & protocol::features::FS != 0);
+    assert_eq!(
+      read_fd(
+        child
+          .open(&bed.p("allowed/file"), OpenFlags::READ, 0)
+          .unwrap()
+      ),
+      "file"
+    );
+    assert_eq!(
+      errno(child.open(&bed.p("allowed/secret/key"), OpenFlags::READ, 0)),
+      libc::EACCES
+    );
+    assert_eq!(
+      errno(child.open(&bed.p("outside/data"), OpenFlags::READ, 0)),
+      libc::EACCES
+    );
+  }
+  // the parent's own client is untouched by its children's use of the dial
+  assert_eq!(
+    read_fd(
+      live
+        .client
+        .open(&bed.p("allowed/file"), OpenFlags::READ, 0)
+        .unwrap()
+    ),
+    "file"
+  );
+}
+
+#[test]
+fn a_dial_is_used_by_one_asker_at_a_time() {
+  use super::dial::Dial;
+  let bed = Bed::new();
+  let live = start(&bed.policy());
+  let dial = Arc::new(OwnedDial(Dial::create(&live.client).unwrap()));
+  let threads: Vec<_> = (0..8)
+    .map(|_| {
+      let dial = dial.clone();
+      let file = bed.p("allowed/file");
+      std::thread::spawn(move || {
+        let child = BrokerClient::new(dial.0.connect().unwrap());
+        read_fd(child.open(&file, OpenFlags::READ, 0).unwrap())
+      })
+    })
+    .collect();
+  for thread in threads {
+    assert_eq!(thread.join().unwrap(), "file");
+  }
+}
+
+#[test]
+fn a_dial_whose_token_is_lost_times_out_and_gives_no_channel() {
+  use super::dial::Dial;
+  let bed = Bed::new();
+  let live = start(&bed.policy());
+  let dial = OwnedDial(Dial::create(&live.client).unwrap());
+  // a holder that died with the token: read it and never give it back
+  let mut byte = 0u8;
+  // SAFETY: one byte from the token's read end into a valid buffer
+  let n =
+    unsafe { libc::read(dial.0.fds()[1], &mut byte as *mut u8 as *mut _, 1) };
+  assert_eq!(n, 1);
+  let err = dial
+    .0
+    .connect_within(std::time::Duration::from_millis(150))
+    .unwrap_err();
+  assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+}
+
+#[test]
+fn a_dial_value_that_names_something_else_is_refused() {
+  use super::dial::Dial;
+  let bed = Bed::new();
+  let live = start(&bed.policy());
+  let dial = OwnedDial(Dial::create(&live.client).unwrap());
+  let [channel, read, write] = dial.0.fds();
+  for bad in [
+    String::new(),
+    "3".to_string(),
+    "x:1,y:2,z:3".to_string(),
+    // two descriptors only, or one named twice
+    format!("{channel}:0,{read}:0"),
+    format!("{channel}:0,{read}:0,{read}:0"),
+    // stdio is never a dial
+    format!("0:0,{read}:0,{write}:0"),
+    // the kinds swapped: a pipe where the channel should be
+    format!("{read}:0,{channel}:0,{write}:0"),
+    // a descriptor that isn't open
+    format!("{channel}:0,{read}:0,1000000:0"),
+  ] {
+    assert!(Dial::from_env_value(&bad).is_err(), "{bad:?}");
+  }
+  // the right numbers with another object's inode: a program in between
+  // closed the dial and opened something else there
+  // (the value itself says which inode each descriptor has)
+  let inode: u64 = dial
+    .0
+    .env_value()
+    .split(',')
+    .nth(1)
+    .and_then(|part| part.split(':').nth(1)?.parse().ok())
+    .unwrap_or(0);
+  if inode != 0 {
+    let swapped = format!("{channel}:0,{read}:{},{write}:0", inode + 1);
+    assert!(Dial::from_env_value(&swapped).is_err());
+  }
+  // a plain file under a dial's number is not a dial
+  let file = fs::File::open(bed.p("allowed/file")).unwrap();
+  let value = format!("{}:0,{read}:0,{write}:0", file.as_raw_fd());
+  assert!(Dial::from_env_value(&value).is_err());
+}

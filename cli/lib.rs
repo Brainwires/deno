@@ -944,6 +944,10 @@ pub fn main() {
   deno_runtime::deno_io::capture_inherited_fds(&[
     "NODE_CHANNEL_FD",
     deno_runtime::deno_process::NPM_RESOLUTION_STATE_FD_ENV_VAR_NAME,
+    // denext: the way to an ancestor's kernel-sandbox broker is the
+    // runtime's, never a descriptor the program inherited for itself
+    #[cfg(unix)]
+    deno_runtime::deno_permissions::kernel_broker::dial::DIAL_ENV_VAR,
   ]);
   boot_phase("main start");
   #[cfg(feature = "dhat-heap")]

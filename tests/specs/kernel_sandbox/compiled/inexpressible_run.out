@@ -1,3 +1,0 @@
-error: this program was compiled with --kernel-sandbox=enforce and refuses to start: the OS can't hold these rules here:
-[WILDCARD]--deny-write=[WILDCARD]
-Compile it with other permissions, or with --kernel-sandbox=warn to run with Deno's checks only.

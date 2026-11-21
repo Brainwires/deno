@@ -1,0 +1,3 @@
+a run observed by the supervisor's trace: true
+the child's read: os open by cat
+the grant: --allow-read=…true

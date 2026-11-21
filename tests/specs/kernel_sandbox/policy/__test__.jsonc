@@ -95,10 +95,12 @@
       "args": "info --json",
       "output": "info_config.out"
     },
-    // enforce is baked and applied by the program (kernel_sandbox/compiled);
-    // broker can't be: no program is made that couldn't start
+    // enforce and broker are baked and applied by the program
+    // (kernel_sandbox/compiled). A program for a target whose compiled
+    // programs run no supervisor (Windows) can't be given `broker`: no
+    // program is made that couldn't start
     "compile_refuses_broker": {
-      "args": "compile --kernel-sandbox=broker --output out main.ts",
+      "args": "compile --kernel-sandbox=broker --target x86_64-pc-windows-msvc --output out main.ts",
       "output": "compile_broker.out",
       "exitCode": 1
     },

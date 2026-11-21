@@ -1,0 +1,5 @@
+the program is a child of the launched PID: true
+the program got SIGTERM
+exit code after SIGTERM: 7
+exit code: 9
+ended by: SIGKILL

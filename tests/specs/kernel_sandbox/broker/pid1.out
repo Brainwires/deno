@@ -1,0 +1,5 @@
+unshare has one child: true
+the supervisor is PID 1: true
+the program is not: true
+the program got SIGTERM
+exit code: 7

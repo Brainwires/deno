@@ -1,0 +1,8 @@
+compiled: true
+the program is a child of the launched PID: true
+Deno.connect, a granted name: ping
+fetch, a granted name: hello from the granted server
+Deno.connect, a port the grant doesn't name: NotCapable: Requires net access to "localhost:PORT", run again with the --allow-net flag
+Deno.connect, another spelling of an address: PermissionDenied: refused by the kernel sandbox's broker: connecting to 127.0.0.1:PORT is not something the network grant allows
+native connect to the granted port: refused
+the program exited with 0

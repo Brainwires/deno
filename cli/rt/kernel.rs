@@ -9,6 +9,15 @@
 //! applied in place (`deno_lib::kernel_apply::start_compiled`; no re-exec:
 //! the modules are embedded and nothing is fetched). Flags, the environment
 //! and deno.json are not read for it; the mode is the author's.
+//!
+//! Where the baked grant has a rule only the supervising broker holds (a
+//! host-scoped network, a write deny inside a write allow on Linux), the
+//! process forks inside [`startup`] before it confines itself: the parent
+//! stays behind as the supervisor and never leaves `startup` (one thread
+//! at the fork; it never loads the JavaScript engine or any of the embedded
+//! modules, serves the broker, passes signals on and exits as the program
+//! exits); the child returns from `startup` as the confined program.
+//! Everything in `main` after `startup` therefore runs in the worker only.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -69,6 +78,15 @@ pub fn startup(data: &StandaloneData) -> Result<(), AnyError> {
     options: &options,
     cache_base: cache_base(),
   })?;
+  // started inside a brokered run and not confining itself: the way to
+  // that run's broker its parent left (a program that confines itself gave
+  // it up before it applied its sandbox, in `start_compiled`)
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  if !outcome.enforcing {
+    deno_lib::kernel_supervise::adopt_inherited_dial(
+      !deno_lib::kernel_inherit::inherited_layers().is_empty(),
+    );
+  }
   if let Some(dir) = &outcome.cache_dir {
     // native addons are extracted beneath the program's own cache folder,
     // the only place it may write for itself
