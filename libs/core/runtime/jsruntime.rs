@@ -2402,8 +2402,8 @@ impl JsRuntime {
     // A wake that arrived while the iteration ran (the loop asking for
     // another one: immediates, ticks, more I/O, an op that just completed)
     // was held back, and is delivered now.
-    if outermost && loop_waker.end_poll() && result.is_pending() {
-      loop_waker.wake_held_back();
+    if outermost && loop_waker.end_poll() {
+      loop_waker.deliver_held_back(result.is_pending(), cx.waker());
     }
 
     // Tell V8's CPU profiler whether we're about to go idle. When the event
@@ -2969,10 +2969,31 @@ impl LoopWaker {
     self.reactor_may_have_events.store(value, Ordering::Relaxed);
   }
 
-  /// Delivers the wake that was held back while an iteration ran. The task's
-  /// waker is taken, as for every wake: until the next iteration nothing
-  /// else wakes the task, so a wake from another task cannot run the loop
-  /// ahead of the I/O poll this one waits for.
+  /// Delivers the wake that was held back while an iteration ran, the
+  /// iteration having returned `Poll::Pending` (`pending`) or `Poll::Ready`
+  /// to the task that `task` wakes.
+  ///
+  /// The wake is delivered after a `Poll::Ready` too. The loop has nothing
+  /// left to wait for then, but its caller may go on polling it: a worker
+  /// that idles in `onmessage`, `with_event_loop_future` (the REPL, Jupyter),
+  /// the pump of a module load. The wake may be the only notice of work that
+  /// the iteration did not see: a V8 foreground task posted from another
+  /// thread (an `Atomics.waitAsync` resolution, a `FinalizationRegistry`
+  /// cleanup), an inspector session, a `uv_async_send`. The loop is not known
+  /// to want an I/O poll, so the task is woken directly.
+  fn deliver_held_back(&self, pending: bool, task: &Waker) {
+    if pending {
+      self.wake_held_back();
+    } else {
+      task.wake_by_ref();
+    }
+  }
+
+  /// Delivers the wake that was held back while an iteration that returned
+  /// `Poll::Pending` ran. The task's waker is taken, as for every wake:
+  /// until the next iteration nothing else wakes the task, so a wake from
+  /// another task cannot run the loop ahead of the I/O poll this one waits
+  /// for.
   fn wake_held_back(&self) {
     if let Some(task) = self.task.take() {
       self.wake_task(&task);
@@ -4145,6 +4166,31 @@ mod loop_waker_tests {
     })
     .join()
     .unwrap();
+  }
+
+  #[test]
+  fn a_wake_during_an_iteration_that_returns_ready_wakes_the_task() {
+    let task = Arc::new(CountingWaker(AtomicUsize::new(0)));
+    let task_waker = Waker::from(task.clone());
+    let loop_waker = Arc::new(LoopWaker::default());
+    let waker = Waker::from(loop_waker.clone());
+
+    // The caller of a loop that returned `Poll::Ready` may return
+    // `Poll::Pending` itself (an idle worker), so the wake is not dropped.
+    assert!(loop_waker.begin_poll(&task_waker));
+    waker.wake_by_ref();
+    assert!(loop_waker.end_poll());
+    loop_waker.deliver_held_back(false, &task_waker);
+    assert_eq!(task.0.load(Ordering::SeqCst), 1);
+
+    // No wake while the iteration ran: nothing to deliver.
+    assert!(loop_waker.begin_poll(&task_waker));
+    assert!(!loop_waker.end_poll());
+    assert_eq!(task.0.load(Ordering::SeqCst), 1);
+
+    // A wake after the iteration still reaches the task.
+    waker.wake_by_ref();
+    assert_eq!(task.0.load(Ordering::SeqCst), 2);
   }
 
   #[test]

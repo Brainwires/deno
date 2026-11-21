@@ -1,0 +1,8 @@
+{
+  // A worker that idles in `onmessage` still runs a V8 task another thread
+  // posted while its last event loop iteration ran: the wake of the loop made
+  // during that iteration is not dropped when the iteration finds nothing
+  // left to do.
+  "args": "run -A main.js",
+  "output": "main.out"
+}

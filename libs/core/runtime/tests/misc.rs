@@ -79,6 +79,54 @@ impl WakeRef for LoggingWaker {
   }
 }
 
+/// A wake made while an iteration runs is held back until the iteration
+/// returns. It reaches the task even when the iteration returns
+/// `Poll::Ready`: the caller may go on waiting (a worker idle in
+/// `onmessage`), and the wake may stand for work the iteration did not see
+/// (a V8 foreground task posted from another thread).
+#[tokio::test]
+async fn a_wake_during_an_iteration_that_returns_ready_reaches_the_task() {
+  #[op2]
+  async fn op_async_yield() {
+    tokio::task::yield_now().await;
+  }
+
+  #[op2(fast)]
+  fn op_wake_loop(state: &mut OpState) {
+    state.waker.wake();
+  }
+
+  deno_core::extension!(test_ext, ops = [op_async_yield, op_wake_loop]);
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![test_ext::init()],
+    ..Default::default()
+  });
+  runtime
+    .execute_script(
+      "a.js",
+      "Deno.core.ops.op_async_yield().then(() => Deno.core.ops.op_wake_loop());",
+    )
+    .unwrap();
+
+  let logging_waker = Arc::new(LoggingWaker::default());
+  let waker = logging_waker.clone().into_waker();
+  let mut polls = 0;
+  loop {
+    logging_waker.woken.store(false, Ordering::SeqCst);
+    let res = runtime
+      .poll_event_loop(&mut Context::from_waker(&waker), Default::default());
+    polls += 1;
+    assert!(polls < 100);
+    if matches!(res, Poll::Ready(Ok(()))) {
+      // The iteration that ran `op_wake_loop` is the one that found nothing
+      // left to do.
+      assert!(logging_waker.woken.load(Ordering::SeqCst));
+      break;
+    }
+    tokio::task::yield_now().await;
+  }
+}
+
 /// This is a reproduction for a very obscure bug where the Deno runtime locks up we end up polling
 /// an empty JoinSet and attempt to resolve ops after-the-fact. There's a small footgun in the JoinSet
 /// API where polling it while empty returns Ready(None), which means that it never holds on to the
