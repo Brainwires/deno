@@ -2522,3 +2522,46 @@ Deno.test({
     }
   },
 });
+
+// denext: `node -e` exposes the builtin modules as globals. They load on first
+// use, as Node's do, instead of all being evaluated before the string runs.
+Deno.test(function spawnSyncEvalBuiltinGlobalsAreLazy() {
+  const code = `
+    const d = Object.getOwnPropertyDescriptor(globalThis, "zlib");
+    const out = [typeof d.get, d.enumerable];
+    out.push(typeof fs.readFileSync, fs === require("fs"));
+    out.push(Object.getOwnPropertyDescriptor(globalThis, "fs").get() === fs);
+    var http = 5;
+    out.push(http);
+    const net = require("net");
+    out.push(typeof net.connect);
+    os = 7;
+    out.push(os, Object.getOwnPropertyDescriptor(globalThis, "os").writable);
+    function url() {}
+    out.push(typeof url, console === require("console"));
+    out.push(typeof Object.getOwnPropertyDescriptor(globalThis, "zlib").get);
+    console.log(JSON.stringify(out));
+  `;
+  const ret = spawnSync(Deno.execPath(), ["-e", code], {
+    encoding: "utf8",
+  });
+  assertEquals(ret.stderr, "");
+  assertEquals(
+    JSON.parse(ret.stdout),
+    [
+      "function",
+      false,
+      "function",
+      true,
+      true,
+      5,
+      "function",
+      7,
+      true,
+      "function",
+      true,
+      "function",
+    ],
+  );
+  assertEquals(ret.status, 0);
+});

@@ -699,5 +699,9 @@ mod tests {
     );
     assert!(wrapped.contains("process.getBuiltinModule"));
     assert!(wrapped.contains("\"console.log(42)\""));
+    // The builtin modules are globals that load on first use: nothing but a
+    // name the global object already has is loaded before the string runs.
+    assert!(wrapped.contains("get() {"));
+    assert!(!wrapped.contains("globalThis[m] = process.getBuiltinModule(m)"));
   }
 }
