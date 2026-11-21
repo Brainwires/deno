@@ -1270,5 +1270,22 @@
   // until the first run of each is triaged: every failure is unexpected, so
   // the first run lists what a default flip would change.
   "stage-r3": {},
-  "stage-r4": {}
+  // stage-r4 (denext.30 WP-D): what the R4 flip changes. Triaged on the
+  // merged train before the flip commit; the soak (soak.ts, seven green full
+  // runs) counts only runs of this list. An entry is one of: a test that
+  // asserts unconfined behaviour (fix the test to say so itself, with
+  // --kernel-sandbox=off, instead of listing it), a gap the guarantee matrix
+  // documents (a context R4 leaves at warn or off: eval, stdin, repl,
+  // jupyter, a non-strict desktop package), or an implicit-set entry with
+  // the test that covers it. "to triage" / "to fix" fails precondition 2a.
+  // Compiled programs ignore the stage variable (their mode is baked), so a
+  // compiled spec's mode comes from its own --kernel-sandbox, never from
+  // this bed.
+  "stage-r4": {
+    "specs": {},
+    "node_compat": {},
+    "npm_matrix": {},
+    "denext_integration": {},
+    "denext_e2e": {}
+  }
 }

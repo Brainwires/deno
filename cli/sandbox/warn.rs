@@ -243,7 +243,7 @@ fn auto_notice(run: &WarnRun, fatal: usize) -> Option<String> {
       ": the programs it starts and the native code it loads will get the same file and network grants as the program",
     );
   }
-  out.push_str(". Nothing is refused now. See what would be with --kernel-sandbox=warn, choose a mode in deno.json (\"permissions\": { \"kernelSandbox\": … }), or set DENO_KERNEL_SANDBOX=off.");
+  out.push_str(". Nothing is refused now. See what would be with --kernel-sandbox=warn; to opt out, run with --kernel-sandbox=off or set \"permissions\": { \"kernelSandbox\": \"off\" } in deno.json.");
   Some(out)
 }
 
@@ -781,7 +781,8 @@ mod tests {
     assert!(notice.contains("no terminal"), "{notice}");
     assert!(notice.contains("the programs it starts"), "{notice}");
     assert!(notice.contains("--kernel-sandbox=warn"), "{notice}");
-    assert!(notice.contains("DENO_KERNEL_SANDBOX=off"), "{notice}");
+    assert!(notice.contains("--kernel-sandbox=off"), "{notice}");
+    assert!(notice.contains(r#""kernelSandbox": "off""#), "{notice}");
     let notice = auto_notice(
       &run(&quiet, Some("2 rule(s) the OS can't hold here".to_string())),
       2,

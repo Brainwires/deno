@@ -382,17 +382,20 @@ pub fn permission_denied_note(
     return None;
   }
   let errno = errno?;
-  let note =
-    Some(deno_runtime::deno_permissions::kernel_sandbox_state::REFUSED_NOTE);
+  // (the first refusal's note is longer, so it is taken only once the
+  // refusal is known to be the sandbox's)
+  let note = || {
+    Some(deno_runtime::deno_permissions::kernel_sandbox_state::refused_note())
+  };
   #[cfg(unix)]
   if errno == libc::EPERM {
-    return note;
+    return note();
   }
   #[cfg(target_os = "linux")]
   if errno == libc::EACCES {
     return match quoted_path(message) {
       Some(path) if !mode_allows(path) => None,
-      _ => note,
+      _ => note(),
     };
   }
   let _ = (message, errno, note);

@@ -19,7 +19,18 @@
 # default flip would change, before the constant moves. The run's name carries
 # its inputs: tests/kernel_sandbox_beds/soak.ts reads the runs back and counts
 # the soak in front of a flip (seven green full runs in a row, four hours
-# apart, the newest on the candidate commit).
+# apart, the newest on the candidate commit). The variable only raises the
+# stage (it never lowers what AUTO_STAGE ships), and compiled programs ignore
+# it: a compiled spec bakes its mode with its own --kernel-sandbox.
+#
+# The R4 soak run (denext.30; r4_preconditions.ts counts it):
+#   gh workflow run denext_kernel_beds.yml --ref train/denext30 -f force=none \
+#     -f stage=r4 -f macos=true -f suites=specs,node_compat,npm_matrix,denext \
+#     -f denext_ref=<the denext 5.0 branch>
+# The desktop bed is not here: a packaged app is a compiled program (the
+# stage variable doesn't reach it), so it is the kernelsandbox e2e area of
+# denext_runtime.yml, which packages a strict app on each engine:
+#   gh workflow run denext_runtime.yml --ref train/denext30 -f e2e_areas=kernelsandbox
 name: denext kernel sandbox beds
 run-name: kernel beds force=${{ inputs.force }} stage=${{ inputs.stage }} suites=${{ inputs.suites }} macos=${{ inputs.macos }}
 
@@ -32,7 +43,7 @@ on:
         options: [enforce, project, none]
         default: enforce
       stage:
-        description: The rollout stage of auto the suites run at (none = the shipped stage; r3 / r4 = that stage's defaults, with force none)
+        description: The rollout stage of auto the suites run at, exported as DENO_INTERNAL_KERNEL_SANDBOX_STAGE (raise-only; none = the shipped stage; r3 / r4 = that stage's defaults, with force none)
         type: choice
         options: [none, r3, r4]
         default: none

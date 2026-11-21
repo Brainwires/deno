@@ -950,11 +950,18 @@ impl TestCommandBuilder {
     if self.env_clear {
       command.env_clear();
       // denext: the harness's forced kernel sandbox (DENEXT.md item 451)
-      // reaches every deno a suite starts, a cleared environment's too
-      if let Some(value) =
-        std::env::var_os("DENO_INTERNAL_KERNEL_SANDBOX_FORCE")
-      {
-        command.env("DENO_INTERNAL_KERNEL_SANDBOX_FORCE", value);
+      // and its rollout stage (item 472) reach every deno a suite starts, a
+      // cleared environment's too. There is deliberately no harness-wide
+      // opt-out: a test that asserts unconfined behaviour says so itself
+      // (`--kernel-sandbox=off` in its own arguments), so the suites run at
+      // the stage that ships, or the bed's.
+      for name in [
+        "DENO_INTERNAL_KERNEL_SANDBOX_FORCE",
+        "DENO_INTERNAL_KERNEL_SANDBOX_STAGE",
+      ] {
+        if let Some(value) = std::env::var_os(name) {
+          command.env(name, value);
+        }
       }
     }
     let envs = self.build_envs(&cwd);

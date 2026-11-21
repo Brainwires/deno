@@ -27,8 +27,10 @@
 //
 // Beds: `enforce`, `project` (the forced modes) and `stage-r3`, `stage-r4`
 // (the defaults of a rollout stage, DENO_INTERNAL_KERNEL_SANDBOX_STAGE). Exits
-// 0 when the soak is complete, 1 when it isn't. Reads the runs with `gh api`
-// (one request) and the ancestry with `git merge-base`.
+// 0 when the soak is complete, 1 when it isn't. Reads the runs with `gh api`,
+// or, where `gh` is missing or not signed in, from GitHub's public REST API
+// with no token (the fork's runs are public); the ancestry with
+// `git merge-base`.
 
 import { parseArgs } from "jsr:@std/cli@1/parse-args";
 
@@ -199,6 +201,82 @@ async function output(cmd: string, args: string[]): Promise<string> {
   return new TextDecoder().decode(out.stdout);
 }
 
+/** Pages of 100 runs read at most (the newest first). */
+const MAX_PAGES = 10;
+
+/** One page of the REST API's runs: `gh api`, else a request with no token. */
+async function runsPage(path: string): Promise<unknown> {
+  try {
+    const out = await new Deno.Command("gh", {
+      args: ["api", path],
+      stdout: "piped",
+      stderr: "null",
+    }).output();
+    if (out.success) return JSON.parse(new TextDecoder().decode(out.stdout));
+  } catch {
+    // no gh on PATH: the public API below
+  }
+  const res = await fetch(`https://api.github.com/${path}`, {
+    headers: {
+      accept: "application/vnd.github+json",
+      "x-github-api-version": "2022-11-28",
+      "user-agent": "kernel-sandbox-beds",
+    },
+  });
+  if (!res.ok) {
+    await res.body?.cancel();
+    throw new Error(`GET ${path}: ${res.status} ${res.statusText}`);
+  }
+  return await res.json();
+}
+
+/** The dispatched runs of the beds workflow in `repo`, newest first. */
+export async function listBedRuns(repo: string): Promise<BedRun[]> {
+  const runs: BedRun[] = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const path =
+      `repos/${repo}/actions/workflows/denext_kernel_beds.yml/runs?event=workflow_dispatch&per_page=100&page=${page}`;
+    // deno-lint-ignore no-explicit-any
+    const listed: any = await runsPage(path);
+    const batch = listed?.workflow_runs ?? [];
+    // deno-lint-ignore no-explicit-any
+    runs.push(...batch.map((r: any) => ({
+      id: r.id,
+      title: r.display_title ?? r.name ?? "",
+      sha: r.head_sha,
+      status: r.status,
+      conclusion: r.conclusion,
+      startedAt: r.run_started_at ?? r.created_at,
+      url: r.html_url,
+    })));
+    if (batch.length < 100) break;
+  }
+  return runs;
+}
+
+/**
+ * Whether each run's commit is `candidate` or one of its ancestors
+ * (`git merge-base --is-ancestor`, in `cwd`): a commit this checkout lacks
+ * is not.
+ */
+export async function ancestry(
+  runs: BedRun[],
+  candidate: string,
+  cwd?: string,
+): Promise<(sha: string) => boolean> {
+  const known = new Map<string, boolean>();
+  for (const sha of new Set(runs.map((r) => r.sha))) {
+    const { success } = await new Deno.Command("git", {
+      args: ["merge-base", "--is-ancestor", sha, candidate],
+      cwd,
+      stdout: "null",
+      stderr: "null",
+    }).output();
+    known.set(sha, success);
+  }
+  return (sha) => known.get(sha) === true;
+}
+
 if (import.meta.main) {
   const args = parseArgs(Deno.args, {
     string: ["bed", "candidate", "repo", "ref"],
@@ -211,36 +289,8 @@ if (import.meta.main) {
   const repo = args.repo ?? "Brainwires/deno";
   const candidate = args.candidate ??
     (await output("git", ["rev-parse", "HEAD"])).trim();
-  const listed = JSON.parse(
-    await output("gh", [
-      "api",
-      `repos/${repo}/actions/workflows/denext_kernel_beds.yml/runs?event=workflow_dispatch&per_page=100`,
-    ]),
-  );
-  // deno-lint-ignore no-explicit-any
-  const runs: BedRun[] = listed.workflow_runs.map((r: any) => ({
-    id: r.id,
-    title: r.display_title ?? r.name ?? "",
-    sha: r.head_sha,
-    status: r.status,
-    conclusion: r.conclusion,
-    startedAt: r.run_started_at ?? r.created_at,
-    url: r.html_url,
-  }));
-  const ancestry = new Map<string, boolean>();
-  for (const sha of new Set(runs.map((r) => r.sha))) {
-    const { success } = await new Deno.Command("git", {
-      args: ["merge-base", "--is-ancestor", sha, candidate],
-      stderr: "null",
-    }).output();
-    ancestry.set(sha, success);
-  }
-  const result = soak(
-    runs,
-    bed,
-    candidate,
-    (sha) => ancestry.get(sha) === true,
-  );
+  const runs = await listBedRuns(repo);
+  const result = soak(runs, bed, candidate, await ancestry(runs, candidate));
   if (args.json) {
     console.log(JSON.stringify(result, null, 2));
   } else {

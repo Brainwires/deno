@@ -92,5 +92,54 @@ deno run -A tests/kernel_sandbox_beds/soak.ts --bed stage-r4 --candidate <sha>
 ```
 
 prints the counted runs, what is missing and the `gh workflow run` line for the
-next one; it exits 0 when the soak is complete. `r4_preconditions.ts` checks the
-rest of what must hold before the R4 flip.
+next one; it exits 0 when the soak is complete. It reads the runs with `gh api`,
+or, where `gh` is missing or not signed in, from GitHub's public API with no
+token. `r4_preconditions.ts` checks the rest of what must hold before the R4
+flip.
+
+## The R4 flip (denext.30)
+
+The R4 soak run, the one that counts:
+
+```sh
+gh workflow run denext_kernel_beds.yml --ref train/denext30 -f force=none \
+  -f stage=r4 -f macos=true -f suites=specs,node_compat,npm_matrix,denext \
+  -f denext_ref=<the denext 5.0 branch>
+```
+
+A triage run is the same with fewer suites or no macOS (it doesn't count, and
+doesn't reset the count). Triage happens on the merged train before the flip
+commit; each failure becomes a fix, a test that says `--kernel-sandbox=off`
+itself (the harness has no global opt-out: a test that asserts unconfined
+behaviour says so), or a `stage-r4` entry with a settled reason. Compiled
+programs ignore the stage variable, so a compiled spec's mode is the one it
+bakes.
+
+The desktop bed is the `kernelsandbox` e2e area of `denext_runtime.yml`
+(`-f e2e_areas=kernelsandbox`): a packaged app is a compiled program, so it runs
+with strict baked whatever the stage.
+
+```sh
+deno run -A tests/kernel_sandbox_beds/r4_preconditions.ts --candidate <sha> \
+  [--deno target/release/deno] [--denext ../denext]
+```
+
+exits 0 when every check passes or is pending:
+
+- `2a`: no "to triage" / "to fix" entry in `enforce`, `project`, `stage-r4`;
+- `2b-stage-r4`: the soak above (seven green full runs, four hours apart, on the
+  candidate or its ancestors, the newest on the candidate; a failed or cancelled
+  full run resets it);
+- `2c-enforce`, `2c-project`: the forced beds green once on the candidate;
+- `3`, `3b`: the startup cost with `--deno`: Mode A at most 30 ms, Mode B (the
+  supervising broker, a host-scoped network grant) at most 60 ms added;
+- `8` (replacing "R3 shipped in two releases", which can't hold): both stage
+  beds soaked, then two 5.0 release candidates on this runtime without a stage
+  revert. The second half can only come after the flip ships, so it reads
+  `pending` (it gates 5.0.0 final, not the flip) until recorded.
+
+`r4_evidence.json` records what a script can't check (shape:
+`r4_evidence.schema.json`): each key is a check's id, each value where the
+evidence is, as a string or `{ "evidence", "recorded", "by" }`. An entry turns a
+`manual` or `pending` check into a pass, never a failed one; an entry for no
+check fails the run.

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "r4_evidence.schema.json",
+  "title": "Evidence for the R4 flip's preconditions",
+  "description": "What r4_preconditions.ts can't check itself. Each key is the id of a check it prints (1, 2a, 2b-stage-r4, 2c-enforce, 2c-project, 3, 3b, 4, 5, 6, 7, 8); an entry turns that check from manual or pending into pass, never a failed one. r4_preconditions.ts fails on an entry for an id it doesn't make.",
+  "type": "object",
+  "properties": {
+    "$schema": { "type": "string" },
+    "//": { "type": "string", "description": "A comment." }
+  },
+  "patternProperties": {
+    "^(1|2a|2b-stage-r4|2c-enforce|2c-project|3|3b|4|5|6|7|8)$": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "description": "Where the evidence is: a run URL, a document, an advisory id, and when it was recorded."
+        },
+        {
+          "type": "object",
+          "required": ["evidence", "recorded"],
+          "additionalProperties": false,
+          "properties": {
+            "evidence": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Where the evidence is (run URLs, a document, an advisory id). For 8: the two 5.0 release candidates shipped on this runtime and that neither reverted the stage."
+            },
+            "recorded": {
+              "type": "string",
+              "format": "date",
+              "description": "When it was recorded (ISO 8601)."
+            },
+            "by": { "type": "string", "description": "Who recorded it." }
+          }
+        }
+      ]
+    }
+  },
+  "additionalProperties": false
+}

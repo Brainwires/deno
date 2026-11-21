@@ -1,3 +1,3 @@
-Warning kernel sandbox: this run has no terminal, so its permissions are fixed, and a later release holds them with the kernel: the programs it starts and the native code it loads will get the same file and network grants as the program. Nothing is refused now. See what would be with --kernel-sandbox=warn, choose a mode in deno.json ("permissions": { "kernelSandbox": … }), or set DENO_KERNEL_SANDBOX=off.
+Warning kernel sandbox: this run has no terminal, so its permissions are fixed, and a later release holds them with the kernel: the programs it starts and the native code it loads will get the same file and network grants as the program. Nothing is refused now. See what would be with --kernel-sandbox=warn; to opt out, run with --kernel-sandbox=off or set "permissions": { "kernelSandbox": "off" } in deno.json.
 [WILDCARD]hello
 [WILDCARD]

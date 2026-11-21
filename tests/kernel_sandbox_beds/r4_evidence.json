@@ -1,3 +1,4 @@
 {
-  "//": "Evidence for the preconditions of the R4 flip that a script can't check (r4_preconditions.ts). Each key is a precondition's id; the value says where the evidence is (a run URL, a document, an advisory id) and when it was recorded. An empty object: nothing recorded yet."
+  "$schema": "./r4_evidence.schema.json",
+  "//": "Evidence for the preconditions of the R4 flip that a script can't check (r4_preconditions.ts; shape: r4_evidence.schema.json). Each key is a precondition's id; the value says where the evidence is (a run URL, a document, an advisory id) and when it was recorded, as a string or { evidence, recorded, by }. 8 (O1) records the two 5.0 release candidates on this runtime without a stage revert. Nothing recorded yet."
 }

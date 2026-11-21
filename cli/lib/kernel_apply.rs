@@ -727,6 +727,8 @@ pub fn decide_desktop(
     return Err(refuse(mode, why));
   }
   kernel_sandbox_state::set_enforcing();
+  // baked when the program was built: the first refusal names that switch
+  kernel_sandbox_state::set_baked();
   deno_runtime::deno_core::error::set_permission_denied_note(
     kernel_inherit::permission_denied_note,
   );
@@ -1096,6 +1098,8 @@ pub fn start_compiled(
     crate::kernel_supervise::offer_dial();
   }
   kernel_sandbox_state::set_enforcing();
+  // baked when the program was built: the first refusal names that switch
+  kernel_sandbox_state::set_baked();
   deno_runtime::deno_core::error::set_permission_denied_note(
     kernel_inherit::permission_denied_note,
   );
