@@ -9,9 +9,6 @@
 (function () {
 const { core, primordials } = __bootstrap;
 const lazyNet = core.createLazyLoader("node:net");
-const { codeMap } = core.loadExtScript(
-  "ext:deno_node/internal_binding/uv.ts",
-);
 
 const { SafeMap } = primordials;
 
@@ -29,8 +26,13 @@ function SharedHandle(
 
   let rval: any;
   if (addressType === "udp4" || addressType === "udp6") {
-    // TODO(nathanwhit): wire dgram._createSocketHandle once dgram supports it.
-    rval = codeMap.get("ENOTSUP")!;
+    // denext: the primary binds the UDP socket and every worker reads from
+    // its own copy of it, as Node's SharedHandle does (cluster never
+    // round-robins datagrams).
+    const { _createSocketHandle } = core.loadExtScript(
+      "ext:deno_node/internal/dgram.ts",
+    );
+    rval = _createSocketHandle(address, port, addressType, fd, flags);
   } else {
     rval = (net as any)._createServerHandle(
       address,

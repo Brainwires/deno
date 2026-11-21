@@ -92,7 +92,10 @@ const { isArrayBufferView } = core.loadExtScript(
   "ext:deno_node/internal/util/types.ts",
 );
 
-const { UV_UDP_REUSEADDR, UV_UDP_IPV6ONLY } = os;
+const { UV_UDP_REUSEADDR, UV_UDP_REUSEPORT, UV_UDP_IPV6ONLY } = os;
+
+// Resolved at bind time: node:cluster loads node:dgram's neighbours.
+const lazyCluster = core.createLazyLoader("node:cluster");
 
 const udpSocketChannel = channel("udp.socket");
 
@@ -133,6 +136,11 @@ interface SocketOptions extends Abortable {
   type: SocketType;
   reuseAddr?: boolean;
   /**
+   * Binds with `SO_REUSEPORT` (Linux only; ENOTSUP elsewhere, as in Node).
+   * @default false
+   */
+  reusePort?: boolean;
+  /**
    * @default false
    */
   ipv6Only?: boolean;
@@ -154,6 +162,7 @@ interface SocketInternalState {
     | typeof CONNECT_STATE_CONNECTED;
   queue?: Array<() => void>;
   reuseAddr?: boolean;
+  reusePort?: boolean;
   ipv6Only?: boolean;
   recvBufferSize?: number;
   sendBufferSize?: number;
@@ -240,6 +249,7 @@ class Socket extends EventEmitter {
       connectState: CONNECT_STATE_DISCONNECTED,
       queue: undefined,
       reuseAddr: options && options.reuseAddr, // Use UV_UDP_REUSEADDR if true.
+      reusePort: options && options.reusePort, // Use UV_UDP_REUSEPORT if true.
       ipv6Only: options && options.ipv6Only,
       recvBufferSize,
       sendBufferSize,
@@ -463,13 +473,22 @@ class Socket extends EventEmitter {
       const fd = port.fd!;
       const state = this[kStateSymbol];
 
-      // TODO(cmorten): here we deviate somewhat from the Node implementation which
-      // makes use of the https://nodejs.org/api/cluster.html module to run servers
-      // across a "cluster" of Node processes to take advantage of multi-core
-      // systems.
-      //
-      // Though Deno has has a Worker capability from which we could simulate this,
-      // for now we assert that we are _always_ on the primary process.
+      // denext: a cluster worker asks the primary for the socket, as in
+      // Node, unless the bind is exclusive.
+      if (lazyCluster().default.isWorker && !port.exclusive) {
+        bindServerHandle(this, {
+          address: null,
+          port: null,
+          addressType: this.type,
+          fd,
+          flags: null,
+        }, (err: number) => {
+          state.bindState = BIND_STATE_UNBOUND;
+          this.emit("error", errnoException(err, "open"));
+        });
+
+        return this;
+      }
 
       const type = guessHandleType(fd);
 
@@ -489,12 +508,15 @@ class Socket extends EventEmitter {
     }
 
     let address: string;
+    let exclusive: boolean;
 
     if (isBindOptions(port)) {
       address = port.address || "";
+      exclusive = !!port.exclusive;
       port = port.port;
     } else {
       address = typeof address_ === "function" ? "" : (address_ as string);
+      exclusive = false;
     }
 
     // Defaulting address for bind to all interfaces
@@ -523,17 +545,35 @@ class Socket extends EventEmitter {
       if (state.ipv6Only) {
         flags |= UV_UDP_IPV6ONLY!;
       }
-
-      // TODO(cmorten): here we deviate somewhat from the Node implementation which
-      // makes use of the https://nodejs.org/api/cluster.html module to run servers
-      // across a "cluster" of Node processes to take advantage of multi-core
-      // systems.
-      //
-      // Though Deno has has a Worker capability from which we could simulate this,
-      // for now we assert that we are _always_ on the primary process.
+      // A reusePort socket is the worker's own: each binds the port itself
+      // and the kernel spreads the datagrams.
+      if (state.reusePort) {
+        exclusive = true;
+        flags |= UV_UDP_REUSEPORT;
+      }
 
       if (!state.handle) {
         return; // Handle has been closed in the mean time
+      }
+
+      // denext: a cluster worker shares the primary's socket (Node's
+      // SharedHandle), unless the bind is exclusive.
+      if (lazyCluster().default.isWorker && !exclusive) {
+        bindServerHandle(this, {
+          address: ip,
+          port: port,
+          addressType: this.type,
+          fd: -1,
+          flags,
+        }, (err: number) => {
+          state.bindState = BIND_STATE_UNBOUND;
+          this.emit(
+            "error",
+            exceptionWithHostPort(err, "bind", ip, port as number),
+          );
+        });
+
+        return;
       }
 
       // deno-lint-ignore deno-internal/prefer-primordials -- UDP handle's bind method, not Function.prototype.bind
@@ -1400,6 +1440,44 @@ function startListening(socket: Socket) {
   }
 
   socket.emit("listening");
+}
+
+/**
+ * Asks the cluster primary for the socket a worker's bind names, and makes
+ * it this socket's handle (Node's `bindServerHandle`).
+ */
+function bindServerHandle(
+  self: Socket,
+  options: {
+    address: string | null;
+    port: unknown;
+    addressType: SocketType;
+    fd: number;
+    flags: number | null;
+  },
+  errCb: (err: number) => void,
+) {
+  const state = self[kStateSymbol];
+  lazyCluster().default._getServer(
+    self,
+    options,
+    (err: number, handle: UDP) => {
+      if (err) {
+        // Do not call the callback if the socket is closed.
+        if (state.handle) errCb(err);
+        return;
+      }
+
+      if (!state.handle) {
+        // The socket was closed in the meantime.
+        handle.close();
+        return;
+      }
+
+      replaceHandle(self, handle);
+      startListening(self);
+    },
+  );
 }
 
 function replaceHandle(self: Socket, newHandle: UDP) {

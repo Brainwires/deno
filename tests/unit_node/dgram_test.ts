@@ -358,3 +358,57 @@ Deno.test("[node/dgram] large recvBufferSize and sendBufferSize do not throw", a
   });
   await promise;
 });
+
+// denext: a datagram sent to the unspecified address goes to loopback, as on
+// Linux (macOS sends it to the primary interface's address, which a host
+// firewall may drop); a cluster worker's shared socket is announced to the
+// primary bound to `0.0.0.0`.
+Deno.test("[node/dgram] a send to 0.0.0.0 reaches a local socket", {
+  permissions: { net: true },
+}, async () => {
+  const receiver = createSocket("udp4");
+  const sender = createSocket("udp4");
+  const { promise, resolve, reject } = Promise.withResolvers<string>();
+  receiver.on("message", (msg) => resolve(msg.toString()));
+  receiver.bind(0, "0.0.0.0", () => {
+    sender.send("hi", receiver.address().port, "0.0.0.0", (err) => {
+      if (err) reject(err);
+    });
+  });
+  try {
+    assertEquals(await promise, "hi");
+  } finally {
+    sender.close();
+    receiver.close();
+  }
+});
+
+// denext: `reusePort` is Linux's load-balancing SO_REUSEPORT; elsewhere the
+// bind fails with ENOTSUP, as in Node (libuv).
+Deno.test("[node/dgram] reusePort", {
+  permissions: { net: true },
+}, async () => {
+  const options = { type: "udp4", reusePort: true } as const;
+  const first = createSocket(options);
+  const bound = Promise.withResolvers<NodeJS.ErrnoException | null>();
+  first.once("error", (err) => bound.resolve(err));
+  first.bind(0, "127.0.0.1", () => bound.resolve(null));
+  const err = await bound.promise;
+  if (Deno.build.os !== "linux") {
+    assertEquals(err?.code, "ENOTSUP");
+    first.close();
+    return;
+  }
+  assertEquals(err, null);
+  const second = createSocket(options);
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  second.once("error", reject);
+  second.bind(first.address().port, "127.0.0.1", () => resolve());
+  try {
+    await promise;
+    assertEquals(second.address().port, first.address().port);
+  } finally {
+    second.close();
+    first.close();
+  }
+});

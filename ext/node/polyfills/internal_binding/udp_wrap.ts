@@ -569,6 +569,7 @@ class UDP extends HandleWrap {
         port,
         (flags & os.UV_UDP_REUSEADDR) !== 0,
         (flags & os.UV_UDP_IPV6ONLY) !== 0,
+        (flags & os.UV_UDP_REUSEPORT) !== 0,
       );
       const rid = result[0];
       const hostname = result[1];
@@ -651,7 +652,10 @@ class UDP extends HandleWrap {
         ) {
           err = codeMap.get("EMSGSIZE")!;
         } else {
-          err = codeMap.get("UNKNOWN")!;
+          // denext: the OS error's own code (EHOSTUNREACH, ENETUNREACH and so on)
+          // rather than UNKNOWN, as libuv reports it.
+          err = (typeof e?.code === "string" && codeMap.get(e.code)) ||
+            codeMap.get("UNKNOWN")!;
         }
 
         sent = 0;

@@ -2471,6 +2471,9 @@ const IPC_HANDLE_NET_SERVER = "net.Server";
 // (SharedHandle). Mirrors Node's `handleConversion["net.Native"]`.
 const IPC_HANDLE_NET_NATIVE = "net.Native";
 const IPC_HANDLE_DGRAM_SOCKET = "dgram.Socket";
+// node:cluster's SharedHandle sends the primary's raw UDP wrap to each worker
+// that binds the same address. Mirrors Node's `handleConversion["dgram.Native"]`.
+const IPC_HANDLE_DGRAM_NATIVE = "dgram.Native";
 const NODE_SOCKET_GET_COUNT = "NODE_SOCKET_GET_COUNT";
 const NODE_SOCKET_COUNT = "NODE_SOCKET_COUNT";
 const NODE_SOCKET_NOTIFY_CLOSE = "NODE_SOCKET_NOTIFY_CLOSE";
@@ -2766,6 +2769,28 @@ function getIpcHandleInfo(handle, options, target) {
     };
   }
 
+  if (ObjectPrototypeIsPrototypeOf(lazyUdpWrap().UDP.prototype, handle)) {
+    const rawFd = handle.fdForIpc();
+    if (rawFd < 0) {
+      throw new ERR_INVALID_HANDLE_TYPE();
+    }
+    return {
+      rawFd,
+      message: {
+        cmd: "NODE_HANDLE",
+        type: IPC_HANDLE_DGRAM_NATIVE,
+        msg: undefined,
+      },
+      // Node's handleConversion["dgram.Native"] has no postSend: the
+      // primary's SharedHandle keeps the socket until its last worker
+      // closes it.
+      closeAfterSend: false,
+      close() {
+        handle.close();
+      },
+    };
+  }
+
   if (ObjectPrototypeIsPrototypeOf(DgramSocket.prototype, handle)) {
     const udpHandle = handle[lazyDgramInternal().kStateSymbol]?.handle;
     if (!udpHandle || typeof udpHandle.fdForIpc !== "function") {
@@ -2869,6 +2894,17 @@ function createIpcHandle(message, rawFd) {
     // wrap to the listener. Cluster's worker-side onconnection() / shared()
     // takes ownership.
     return tcp;
+  }
+  if (message.type === IPC_HANDLE_DGRAM_NATIVE) {
+    const udp = new (lazyUdpWrap().UDP)();
+    const err = udp.open(rawFd);
+    if (err !== 0) {
+      udp.close();
+      throw errnoException(err, "open");
+    }
+    // Match Node's handleConversion["dgram.Native"].got: the raw wrap goes
+    // to the listener (cluster's shared(), then dgram's replaceHandle()).
+    return udp;
   }
   if (message.type === IPC_HANDLE_DGRAM_SOCKET) {
     const udp = new (lazyUdpWrap().UDP)();
@@ -3360,7 +3396,8 @@ function setupChannel(
         !ObjectPrototypeIsPrototypeOf(NetServer.prototype, handle) &&
         !ObjectPrototypeIsPrototypeOf(DgramSocket.prototype, handle) &&
         !ObjectPrototypeIsPrototypeOf(TCP.prototype, handle) &&
-        !ObjectPrototypeIsPrototypeOf(Pipe.prototype, handle)
+        !ObjectPrototypeIsPrototypeOf(Pipe.prototype, handle) &&
+        !ObjectPrototypeIsPrototypeOf(lazyUdpWrap().UDP.prototype, handle)
       ) {
         throw new ERR_INVALID_HANDLE_TYPE();
       }
