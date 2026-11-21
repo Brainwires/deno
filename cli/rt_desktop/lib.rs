@@ -3634,8 +3634,26 @@ laufey::main!(|| {
       data.vfs.read_file_all(file).ok().map(|b| b.into_owned())
     },
   );
+  // A browser app (`desktop.app.browser`) also receives http / https links:
+  // the metadata's flag, else `"browser": true` in the embedded app.json.
+  let app_browser = app_origin::resolve_app_browser(
+    data.metadata.app_browser,
+    &data.root_path,
+    &data.metadata.entrypoint_key,
+    |path| {
+      let file = data.vfs.file_entry(path).ok()?;
+      data.vfs.read_file_all(file).ok().map(|b| b.into_owned())
+    },
+  );
   let app_origin = app_config.origin;
   let deep_links = app_config.deep_links;
+  // The schemes of the links delivered to the app: its deep links, plus
+  // http / https for a browser app. Scheme registration (and
+  // getSchemeOwner / registerScheme) keeps to the deep links alone.
+  let link_schemes = deno_lib::standalone::launch_args::accepted_link_schemes(
+    &deep_links,
+    app_browser,
+  );
   // `LAUFEY_APP_ID` (the per-app web data directory, and the key of the
   // single-instance lock) is the backend's launch configuration: the host
   // reads it, or "appId" from `laufey-launch.json` next to the executable,
@@ -3654,12 +3672,13 @@ laufey::main!(|| {
   }
 
   // Deep links and files in the launch arguments: a URL with one of the
-  // app's registered schemes, or an existing path. Anything else (flags,
-  // the host's own `--runtime <path>`) is ignored.
+  // app's registered schemes (or http / https for a browser app), or an
+  // existing path. Anything else (flags, the host's own `--runtime <path>`)
+  // is ignored.
   let launch_targets = deno_lib::standalone::launch_args::parse_launch_args(
     &launch_argv,
     launch_cwd.as_deref(),
-    &deep_links,
+    &link_schemes,
     path_exists,
   );
   log::debug!(
@@ -3727,6 +3746,8 @@ laufey::main!(|| {
         ws_relay_listener,
         LaunchConfig {
           deep_links,
+          link_schemes,
+          browser_links: app_browser,
           identifier: app_config.identifier,
           targets: launch_targets,
           initial_window: app_config.initial_window,
@@ -3822,6 +3843,11 @@ fn path_exists(path: &std::path::Path) -> bool {
 struct LaunchConfig {
   /// The app's normalized deep-link schemes.
   deep_links: Vec<String>,
+  /// The schemes of the links delivered to the app: `deep_links`, plus
+  /// http / https for a browser app (`accepted_link_schemes`).
+  link_schemes: Vec<String>,
+  /// A browser app (`desktop.app.browser`): `Deno.desktop.browserLinks`.
+  browser_links: bool,
   /// `desktop.app.identifier`, validated.
   identifier: Option<String>,
   /// The deep links and files in this process's own arguments.
@@ -3841,10 +3867,11 @@ struct LaunchConfig {
 }
 
 /// Register the backend's open-URL and second-instance handlers, feeding
-/// `inbox`. Registered at runtime start: the backend buffers deliveries made
-/// before that (a launch link, a launch forwarded early) and flushes them into
-/// these handlers synchronously here, and `inbox` holds them until the app
-/// listens.
+/// `inbox`. `deep_links` are the link schemes delivered (the deep links,
+/// plus http / https for a browser app). Registered at runtime start: the
+/// backend buffers deliveries made before that (a launch link, a launch
+/// forwarded early) and flushes them into these handlers synchronously here,
+/// and `inbox` holds them until the app listens.
 fn register_launch_handlers(
   inbox: &denort::desktop::DesktopLaunchInbox,
   deep_links: Arc<Vec<String>>,
@@ -4441,12 +4468,13 @@ async fn run_desktop(
   // getSchemeOwner / registerScheme, and the startup pass below). A dev run
   // executes a development host, not the packaged app, so it writes nothing.
   let scheme_registrar = Arc::new(scheme_registration::SchemeRegistrar::new(
-    launch.deep_links.clone(),
+    launch.deep_links,
     launch.identifier.clone(),
     app_name.clone(),
     dev.hmr_dir.is_some() || dev.dev_url.is_some(),
   ));
-  let launch_deep_links = Arc::new(launch.deep_links);
+  let launch_link_schemes = Arc::new(launch.link_schemes);
+  let browser_links = launch.browser_links;
   let app_update = launch.app_update;
   let baked_capabilities = launch.baked_capabilities;
   let launch_urls = launch.targets.urls;
@@ -4596,7 +4624,8 @@ async fn run_desktop(
         launch_urls,
         launch_files,
       );
-      register_launch_handlers(&launch_inbox, launch_deep_links);
+      launch_inbox.set_browser_links(browser_links);
+      register_launch_handlers(&launch_inbox, launch_link_schemes);
       state.put(launch_inbox);
 
       // Register the declared schemes nobody handles (and refresh this

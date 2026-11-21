@@ -883,6 +883,9 @@ struct LaunchInboxState {
   subscribed_files: bool,
   subscribed_second_instances: bool,
   subscribed_notification_responses: bool,
+  /// A browser app (`desktop.app.browser`): http / https links are
+  /// delivered too (`Deno.desktop.browserLinks`).
+  browser_links: bool,
 }
 
 /// Deep links, opened files and second-instance launches on their way to
@@ -938,6 +941,17 @@ impl DesktopLaunchInbox {
       launch_files,
       ..Default::default()
     })))
+  }
+
+  /// Record that http / https links are delivered (a browser app), for
+  /// `Deno.desktop.browserLinks`.
+  pub fn set_browser_links(&self, on: bool) {
+    self.lock().browser_links = on;
+  }
+
+  /// Whether http / https links are delivered (a browser app).
+  pub fn browser_links(&self) -> bool {
+    self.lock().browser_links
   }
 
   fn lock(&self) -> std::sync::MutexGuard<'_, LaunchInboxState> {
@@ -5596,6 +5610,16 @@ fn op_desktop_take_launch_targets(
     .unwrap_or_default()
 }
 
+/// `Deno.desktop.browserLinks`: whether the runtime delivers http / https
+/// links to this app (a browser app, `desktop.app.browser`). `false` outside
+/// a desktop app's main scope, where no launch delivery runs.
+#[op2(fast)]
+fn op_desktop_browser_links(state: &mut OpState) -> bool {
+  state
+    .try_borrow::<DesktopLaunchInbox>()
+    .is_some_and(|inbox| inbox.browser_links())
+}
+
 /// Subscribe to one kind of launch event (`"openurl"`, `"openfile"`,
 /// `"secondinstance"`), returning the events buffered for it; see
 /// [`DesktopLaunchInbox`].
@@ -8466,6 +8490,7 @@ deno_core::extension!(
     op_desktop_recv_event,
     op_desktop_take_launch_targets,
     op_desktop_subscribe_launch_events,
+    op_desktop_browser_links,
     op_desktop_get_scheme_owner,
     op_desktop_register_scheme,
     op_desktop_passkey_capabilities,
@@ -9846,6 +9871,25 @@ mod tests {
       super::DesktopLaunchInbox::new(tx.0, launch_urls, launch_files),
       rx,
     )
+  }
+
+  #[test]
+  fn launch_inbox_browser_links_flag() {
+    let (inbox, _rx) = inbox_with_channel(vec![], vec![]);
+    assert!(!inbox.browser_links());
+    inbox.set_browser_links(true);
+    assert!(inbox.browser_links());
+    // A clone (the handlers' copy) sees the same flag.
+    let clone = inbox.clone();
+    assert!(clone.browser_links());
+    inbox.set_browser_links(false);
+    assert!(!clone.browser_links());
+    // Reading it leaves the launch snapshot in place.
+    let (inbox, _rx) =
+      inbox_with_channel(vec!["https://a.test/".into()], vec![]);
+    inbox.set_browser_links(true);
+    assert!(inbox.browser_links());
+    assert_eq!(inbox.take_launch_targets().urls, vec!["https://a.test/"]);
   }
 
   fn drain(rx: &mut super::DesktopEventReceiver) -> Vec<String> {

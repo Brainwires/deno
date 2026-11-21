@@ -31,6 +31,7 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_recv_event,
     op_desktop_take_launch_targets,
     op_desktop_subscribe_launch_events,
+    op_desktop_browser_links,
     op_desktop_get_scheme_owner,
     op_desktop_register_scheme,
     op_desktop_passkey_capabilities,
@@ -1979,6 +1980,14 @@ pub const DESKTOP_JS: &str = r#"
     // "notificationresponse": the click that launched it (laufey API 41).
     launchNotificationResponses: {
       get() { return getLaunchTargets().notifications; },
+      configurable: true,
+      enumerable: true,
+    },
+    // A browser app (desktop.app.browser): http / https links arrive like
+    // deep links ("openurl", launchUrls, "secondinstance"). Read live: it
+    // never takes the launch snapshot.
+    browserLinks: {
+      get() { return op_desktop_browser_links(); },
       configurable: true,
       enumerable: true,
     },
@@ -5279,6 +5288,9 @@ mod tests {
     assert!(DESKTOP_JS.contains("internals.defineEventHandler(desktop, type)"));
     // The launch snapshot is taken once, lazily.
     assert!(DESKTOP_JS.contains("op_desktop_take_launch_targets()"));
+    assert!(
+      DESKTOP_JS.contains("get() { return op_desktop_browser_links(); },")
+    );
     assert!(DESKTOP_JS.contains("launchUrls:"));
     assert!(DESKTOP_JS.contains("launchFiles:"));
   }

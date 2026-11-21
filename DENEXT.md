@@ -19337,6 +19337,40 @@ where the changes are discussed.
        engine's `ecn_l4s_rtc2rtc` and workspace; the WebRTC WPT run
        (`webrtc-stats/supported-stats.https.html`).
      - Node tests enabled: none; `node:` has no WebRTC API.
+
+483. **`feat(desktop)`: a browser app receives http / https links** (runtime;
+     `cli/lib/standalone/{launch_args.rs,app_origin.rs,binary.rs}`,
+     `cli/standalone/binary.rs`, `cli/rt_desktop/{lib.rs,app_origin.rs}`,
+     `cli/rt/desktop.rs`, `runtime/ops/desktop.rs`, `runtime/js/99_main.js`,
+     `libs/config/deno_json/mod.rs`, `cli/schemas/config-file.v1.json`,
+     `cli/tsc/dts/lib.deno.desktop.d.ts`). A desktop app that declares itself
+     a web browser, with `desktop.app.browser: true` in deno.json or
+     `"browser": true` in an embedded `.deno-desktop/app.json`, now receives
+     `http` and `https` links the way it receives its deep links: in
+     `Deno.desktop.launchUrls` at a cold start, as `"openurl"` events (macOS)
+     and in a `"secondinstance"` event's `urls` (a later launch forwarded by
+     the single-instance lock). Before, the runtime dropped every link whose
+     scheme was not a declared deep link, so a browser app never saw the web
+     links the OS opened with it. Opened HTML and XHTML files keep reaching
+     the open-file path (`launchFiles`, `"openfile"`), cold and warm,
+     including a Linux launcher's `%u`, which passes them as `file:` URLs.
+     `Deno.desktop.browserLinks` (`boolean`) says whether the runtime
+     delivers web links to the app: `true` for a browser app in its main
+     scope, `false` otherwise (no flag, a worker, outside a desktop app).
+     `http` and `https` stay refused in `desktop.app.deepLinks`, and the
+     runtime never registers them for the app (`registerScheme` refuses
+     them): the OS lists a browser app from what its packaging declares, and
+     only the user makes it the default browser. Every other scheme is still
+     dropped unless declared.
+     - User-facing note: set `desktop.app.browser` and the app's
+       `"openurl"` / `launchUrls` / `"secondinstance"` handlers get the web
+       links the OS sends it; check `Deno.desktop.browserLinks` before relying
+       on it.
+     - Tests: `launch_args` (`browser_apps_also_accept_http_and_https`,
+       `file_url_arguments_become_paths`), `app_origin`
+       (`app_config_file_browser`), `rt_desktop::app_origin`
+       (`app_browser_from_metadata_or_app_json`).
+     - Node tests enabled: none; Node has no desktop API.
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

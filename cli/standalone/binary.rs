@@ -1359,6 +1359,14 @@ impl<'a> DenoCompileBinaryWriter<'a> {
         .as_mut()
         .and_then(|identity| identity.identifier.take()),
       app_deep_links: desktop_deep_links,
+      app_browser: self.is_desktop
+        && self
+          .cli_options
+          .start_dir
+          .to_desktop_config()
+          .ok()
+          .and_then(|c| c.app.as_ref()?.browser)
+          .unwrap_or(false),
       desktop_dev: self.is_desktop && self.cli_options.is_desktop_dev_build(),
       initial_window: self
         .cli_options
