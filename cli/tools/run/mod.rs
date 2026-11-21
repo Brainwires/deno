@@ -223,6 +223,9 @@ pub async fn run_script(
   {
     let mut roots = vec![main_module.clone()];
     roots.extend(preload_modules.iter().cloned());
+    // the `--require` modules run before the main module: their files are
+    // the program's own, readable to the confined image like the graph's
+    roots.extend(require_modules.iter().cloned());
     crate::sandbox::enforce::apply_pending(&factory, &roots).await?;
   }
 

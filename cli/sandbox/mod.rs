@@ -559,6 +559,39 @@ fn context_for(
     )
     .filter(|p| p.is_file())
     .collect();
+  // the package.json nearest the main module: the run reads it for the
+  // module's type (`"type": "module"`) even when discovery skipped it
+  // (`--no-config`), and the confined image reads it again
+  let main_script = match &flags.subcommand {
+    DenoSubcommand::Run(run_flags) if !run_flags.is_stdin() => {
+      Some(run_flags.script.as_str())
+    }
+    DenoSubcommand::Serve(serve_flags) => Some(serve_flags.script.as_str()),
+    _ => None,
+  };
+  if let Some(script) = main_script
+    && let Ok(url) = cli_options.resolve_entrypoint_path(script)
+    && let Ok(path) = url.to_file_path()
+    && let Some(found) = path
+      .ancestors()
+      .skip(1)
+      .map(|dir| dir.join("package.json"))
+      .find(|p| p.is_file())
+  {
+    config_files.push(found);
+  }
+  // `deno run .` / `deno run <dir>`: the main module is the directory's
+  // package.json "main" (else index.js), which the confined image resolves
+  // again from that file
+  if let DenoSubcommand::Run(run_flags) = &flags.subcommand
+    && !run_flags.is_stdin()
+    && let Ok(url) = cli_options.resolve_entrypoint_path(&run_flags.script)
+    && let Ok(dir) = url.to_file_path()
+    && dir.is_dir()
+    && dir.join("package.json").is_file()
+  {
+    config_files.push(dir.join("package.json"));
+  }
   // the lockfile this run uses, whether or not it exists yet: the first
   // image writes a new one before the re-exec (item 451), and the next
   // image must read it (a rule on a path that doesn't exist is skipped)
