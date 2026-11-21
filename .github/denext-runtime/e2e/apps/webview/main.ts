@@ -71,6 +71,12 @@ Deno.serve((req) => {
 // console, links to B, and reports what it can reach of the app.
 let probe: any = null;
 const DOWNLOAD_BODY = "denext-dl!\n";
+// How long a download event may take to arrive: far past what a loaded
+// hosted runner needs (each arrives within a second or two there), so only a
+// download that never reports fails. Every wait is on the event itself.
+// Declared above the top-level `r.step` calls: runAppDownloads() reads it,
+// and a `const` below them is still in its temporal dead zone then.
+const DOWNLOAD_EVENT_MS = 60_000;
 const PROBE_SCRIPT = `
 console.log("wv-a-console");
 const out = { bindings: typeof window.bindings };
@@ -312,11 +318,6 @@ async function exists(path: string): Promise<boolean> {
 }
 
 // --- downloads the app decides (laufey API 59, downloads: "app") ---
-
-// How long a download event may take to arrive: far past what a loaded
-// hosted runner needs (each arrives within a second or two there), so only a
-// download that never reports fails. Every wait is on the event itself.
-const DOWNLOAD_EVENT_MS = 60_000;
 
 async function runAppDownloads() {
   const options = {
