@@ -61,6 +61,71 @@ async function hostCallsPrestart(artifact: string, exe: string) {
   return false;
 }
 
+/** The PIDs of this user's running Safari (macOS); `null` when they can't
+ * be listed, which the cleanup treats as "one may have been running". */
+async function safariPids(): Promise<Set<number> | null> {
+  if (OS !== "darwin") return new Set();
+  try {
+    const out = await new Deno.Command("/usr/bin/pgrep", {
+      // exact name, this user's processes only
+      args: ["-x", "-U", String(Deno.uid() ?? ""), "Safari"],
+      stdout: "piped",
+      stderr: "null",
+    }).output();
+    // 0: matches; 1: none; anything else: pgrep itself failed
+    if (out.code !== 0 && out.code !== 1) return null;
+    const pids = new TextDecoder().decode(out.stdout).split("\n")
+      .map((line) => Number(line.trim()))
+      .filter((pid) => Number.isInteger(pid) && pid > 1);
+    return new Set(pids);
+  } catch {
+    return null;
+  }
+}
+
+/** Quits the Safari this area's opened link started, by PID, and nothing
+ * else. It acts only when all of this holds: no Safari of this user was
+ * running before the app launched (`before` is an empty set), a browser
+ * came for this run's link (`came`), and a Safari process that wasn't there
+ * before is running now. A Safari that was already running, and any other
+ * browser, is left exactly as it is (the link's tab stays in it): never
+ * `tell application "Safari" to quit`, which would close a browser this
+ * area didn't start. (What is left: another job that starts Safari in the
+ * same session during this area's few minutes, with none running before,
+ * shares the one process this area's link landed in.) */
+async function quitSafariStartedHere(
+  before: Set<number> | null,
+  came: boolean,
+) {
+  if (OS !== "darwin" || !came || before === null || before.size > 0) return;
+  const now = await safariPids();
+  if (now === null) return;
+  for (const pid of now) {
+    // (`before` is empty here; kept so the rule reads as it is meant)
+    if (before.has(pid)) continue;
+    // a normal quit, addressed to that process alone
+    await new Deno.Command("/usr/bin/osascript", {
+      args: ["-l", "JavaScript", "-e", `Application(${pid}).quit()`],
+      stdout: "null",
+      stderr: "null",
+    }).output().catch(() => {});
+    let alive = true;
+    for (let i = 0; i < 20 && alive; i++) {
+      await sleep(250);
+      alive = (await safariPids())?.has(pid) ?? false;
+    }
+    if (alive) {
+      // no Automation consent on this runner, or it didn't quit: end the
+      // one process this run started
+      try {
+        Deno.kill(pid, "SIGTERM");
+      } catch {
+        // gone already
+      }
+    }
+  }
+}
+
 /** A loopback listener that records the request paths it gets. */
 function listen() {
   const seen: string[] = [];
@@ -114,6 +179,8 @@ export async function run(env: Env, rep: AreaReport) {
   const outside = path(home, `denext-e2e-ks-outside-${env.nonce}`);
   const outsideChild = path(home, `denext-e2e-ks-outside-child-${env.nonce}`);
   const web = listen();
+  // before anything of this area can start a browser
+  const safariBefore = await safariPids();
   try {
     const prestart = await hostCallsPrestart(p.artifact, p.exe);
     rep.note(`the host calls the runtime before its engine: ${prestart}`);
@@ -203,13 +270,10 @@ export async function run(env: Env, rep: AreaReport) {
   } finally {
     await web.close();
     for (const f of [inside, outside, outsideChild]) await rm(f);
-    if (OS === "darwin") {
-      // the browser the opened link started is the runner's to close
-      await new Deno.Command("/usr/bin/osascript", {
-        args: ["-e", 'tell application "Safari" to quit'],
-        stdout: "null",
-        stderr: "null",
-      }).output().catch(() => {});
-    }
+    // The browser the opened link started is this run's to close, and only
+    // that one: a self-hosted macOS runner may share its user session with
+    // other jobs (or a person), so a Safari that was already there is never
+    // touched.
+    await quitSafariStartedHere(safariBefore, web.seen.length > 0);
   }
 }
