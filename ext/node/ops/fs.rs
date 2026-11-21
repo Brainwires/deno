@@ -517,7 +517,16 @@ pub fn op_node_open_sync(
   Ok(fd)
 }
 
-#[op2(stack_trace)]
+/// `deferred` for the same reason as [`op_node_fs_read_deferred`]: Node.js's
+/// open completes through the loop, after every timer due in the phase that
+/// started it. Eagerly, an open the blocking thread finished before the first
+/// poll (a loaded machine) resolved in the microtask checkpoint that started
+/// it, which inside a timers phase is the one between two timer lists: an
+/// `fs.createReadStream()` made in one timer callback then issued its first
+/// read before another timer due in the same phase ran, so it read the file
+/// as it was before that timer's write (test-fs-read-stream-pos.js: a stream
+/// that ended with no data, 4 runs in 90 on a loaded Linux machine).
+#[op2(async(deferred), fast, stack_trace)]
 #[smi]
 pub async fn op_node_open(
   state: Rc<RefCell<OpState>>,

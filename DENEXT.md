@@ -19086,6 +19086,66 @@ where the changes are discussed.
        `ext/webrtc`'s unit tests.
      - Node tests enabled: none; `node:` has no WebRTC API.
 
+478. **`fix`: node:fs watch and stream races the denext.28 flake hunt found**
+     (runtime; `runtime/ops/fs_events.rs`, `ext/node/ops/fs.rs`). From the
+     hunt's class c (real bugs, not slowness), on Linux:
+     - `fs.watch()` and `Deno.watchFs()` with `recursive: true`: what is made in
+       a new directory right after it is reported, and as created. inotify has
+       no recursive watch, and notify's backend reports a new directory's
+       `Create` to the handler before it adds the directory's watch (once the
+       batch it read is handled), so a file made in the directory before that
+       was never reported and one whose write came after was reported only as
+       modified: test-fs-watch-recursive-add-file-to-new-folder.js timed out or
+       saw `'change' !== 'rename'`, 13 runs in 30 on a loaded Linux host. A new
+       directory under a recursive watch is now read on a helper thread once the
+       backend has added its watch (a `configure` call, which the backend's
+       event loop answers after that batch, is the barrier); every entry found
+       is a `create` event for the recursive watchers, and the events under the
+       directory are held back until then, so a modify never overtakes the
+       create and a create inotify did report is not repeated. Node.js's
+       recursive watcher on Linux reads a new directory the same way
+       (`lib/internal/fs/recursive_watch.js`). macOS and Windows watch
+       recursively natively and are unchanged.
+     - `fs.open()` completes through the loop (its op is deferred, like item
+       476's read): an open the blocking thread finished before its first poll
+       resolved in the microtask checkpoint that started it, which in a timers
+       phase is the one between two timer lists, so a `createReadStream()` made
+       in one timer read the file before another timer due in the same phase had
+       written to it. test-fs-read-stream-pos.js ended a stream with no data (a
+       `data` listener called 0 times), 4 runs in 90 at 6 in parallel on a
+       loaded Linux host; Node.js's open never completes before the phase's
+       timers ran.
+     - Already fixed by item 476's deferred read (the hunt's failures were all
+       on a candidate without it): test-fs-promises-file-handle-readFile.js
+       ("Missing expected rejection (AbortError): tick-N") and
+       test-stream-readable-async-iterators.js (`ERR_ASSERTION` instead of
+       `ERR_STREAM_PREMATURE_CLOSE`: the stream's EOF read resolved before the
+       loop body closed it).
+     - Time budget, not stalls: test-file-write-stream4.js copies
+       `process.execPath` (the 627 MB debug binary) through a read and a write
+       stream at `cp`'s speed (2.0-2.8 s against `cp`'s 2.1 s on the loaded
+       host), and test-fs-watch-recursive-linux-parallel-remove.js spends about
+       3.3 s of CPU (a child making and removing a file 10000 times, the parent
+       logging ~30000 events) in 1.9 s; both finish every run and time out only
+       on a CPU-limited runner.
+     - User-facing note: a recursive watch on Linux reports the contents of a
+       new directory (a `create` for each entry made before the directory was
+       watched), and `fs.open()`'s callback never runs before the timers due in
+       the phase that called it.
+     - Tests: a new `fs_events` unit test (Linux) that makes a directory with a
+       nested one and writes a file in it 50 times and wants each first reported
+       as created (fails at run 7 without the scan; 30 of 30 with it under six
+       CPU hogs, aarch64 Linux). On aarch64 Linux (Docker, six parallel loops
+       beside six CPU hogs): add-file-to-new-folder 150 of 150 (13 of 30 failed
+       on train HEAD on the loaded x86_64 host), read-stream-pos,
+       file-handle-readFile and readable-async-iterators 120 of 120 each, every
+       other `test-fs-watch-recursive-*` 10 of 10, `tests/unit_node/_fs/`,
+       `fs_test.ts` and `tests/unit/fs_events_test.ts` whole. On macOS, in
+       parallel loops: add-file-to-new-folder and read-stream-pos 178 of 178
+       each (some beside eight CPU hogs), file-handle-readFile and
+       readable-async-iterators 80 of 80.
+     - Node tests enabled: none (all were enabled and flaky).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -19096,7 +19156,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-477) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-478) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
