@@ -405,7 +405,7 @@ pub async fn op_fs_chmod_async(
 }
 
 #[cfg(not(unix))]
-#[op2(async(deferred), stack_trace)]
+#[op2(async(deferred), fast, stack_trace)]
 pub async fn op_fs_chmod_async(
   state: Rc<RefCell<OpState>>,
   #[string] path: String,
