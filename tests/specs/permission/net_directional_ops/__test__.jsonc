@@ -2,15 +2,19 @@
   // Every network operation, run under each net permission model: the
   // direction-specific flags grant and deny one direction only, and the
   // legacy --allow-net / --deny-net keep covering both. probe.ts prints
-  // "allowed" or the permission a denial names.
+  // "allowed" or the permission a denial names. Those that say
+  // --kernel-sandbox=off test Deno's checks alone: under `auto` from R4 the
+  // kernel sandbox answers first for some of them (a UDP socket under a
+  // one-direction or port-scoped grant, a host deny the broker holds), with
+  // its own error instead of the permission's name.
   "tests": {
     "listen_only": {
-      "args": "run --no-prompt --unstable-net --unstable-kv --allow-env=DENO_KV_ACCESS_TOKEN --allow-read --allow-sys --allow-net-listen ops.ts",
+      "args": "run --no-prompt --kernel-sandbox=off --unstable-net --unstable-kv --allow-env=DENO_KV_ACCESS_TOKEN --allow-read --allow-sys --allow-net-listen ops.ts",
       "envs": { "DENO_KV_ACCESS_TOKEN": "token" },
       "output": "listen_only.out"
     },
     "connect_only": {
-      "args": "run --no-prompt --unstable-net --unstable-kv --allow-env=DENO_KV_ACCESS_TOKEN --allow-read --allow-sys --allow-net-connect ops.ts",
+      "args": "run --no-prompt --kernel-sandbox=off --unstable-net --unstable-kv --allow-env=DENO_KV_ACCESS_TOKEN --allow-read --allow-sys --allow-net-connect ops.ts",
       "envs": { "DENO_KV_ACCESS_TOKEN": "token" },
       "output": "connect_only.out"
     },
@@ -20,7 +24,7 @@
       "output": "both.out"
     },
     "deny_connect": {
-      "args": "run --no-prompt --unstable-net --unstable-kv --allow-env=DENO_KV_ACCESS_TOKEN --allow-read --allow-sys --allow-net-connect --allow-net-listen --deny-net-connect=127.0.0.1,localhost ops.ts",
+      "args": "run --no-prompt --kernel-sandbox=off --unstable-net --unstable-kv --allow-env=DENO_KV_ACCESS_TOKEN --allow-read --allow-sys --allow-net-connect --allow-net-listen --deny-net-connect=127.0.0.1,localhost ops.ts",
       "envs": { "DENO_KV_ACCESS_TOKEN": "token" },
       "output": "deny_connect.out"
     },
@@ -35,12 +39,12 @@
       "output": "both.out"
     },
     "legacy_deny_net": {
-      "args": "run --no-prompt --unstable-net --unstable-kv --allow-env=DENO_KV_ACCESS_TOKEN --allow-read --allow-sys --allow-net --deny-net=127.0.0.1,localhost ops.ts",
+      "args": "run --no-prompt --kernel-sandbox=off --unstable-net --unstable-kv --allow-env=DENO_KV_ACCESS_TOKEN --allow-read --allow-sys --allow-net --deny-net=127.0.0.1,localhost ops.ts",
       "envs": { "DENO_KV_ACCESS_TOKEN": "token" },
       "output": "legacy_deny.out"
     },
     "no_net": {
-      "args": "run --no-prompt --unstable-net --unstable-kv --allow-env=DENO_KV_ACCESS_TOKEN --allow-read --allow-sys ops.ts",
+      "args": "run --no-prompt --kernel-sandbox=off --unstable-net --unstable-kv --allow-env=DENO_KV_ACCESS_TOKEN --allow-read --allow-sys ops.ts",
       "envs": { "DENO_KV_ACCESS_TOKEN": "token" },
       "output": "none.out"
     },

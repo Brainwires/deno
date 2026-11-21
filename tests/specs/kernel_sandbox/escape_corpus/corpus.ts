@@ -296,6 +296,9 @@ for (const [config, flags] of Object.entries(configs)) {
     "--quiet",
     "--no-prompt",
     ...(explicit ? ["--kernel-sandbox=enforce"] : []),
+    // --expect=today is the run without kernel enforcement, whatever `auto`
+    // would choose for it (from R4 it enforces a run with no terminal)
+    ...(expect === "today" ? ["--kernel-sandbox=off"] : []),
     ...flags,
     "--node-modules-dir=manual",
   ];

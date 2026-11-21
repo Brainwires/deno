@@ -940,7 +940,8 @@
     },
     "parallel/test-compile-cache-permission-allowed.js": {
       "windows": false,
-      "reason": "Passes on Linux and macOS (3 isolated runs each, debug build); not verified on Windows"
+      "reason": "Passes on Linux and macOS (3 isolated runs each, debug build); not verified on Windows. Node's permission model is Deno's checks: off the kernel sandbox, whose `auto` would hold the children to this run's grant",
+      "extraDenoArgs": ["--kernel-sandbox=off"]
     },
     "parallel/test-compile-cache-permission-disallowed.js": {
       "ignore": true,
@@ -3326,7 +3327,10 @@
       "ignore": true,
       "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
     },
-    "parallel/test-permission-allow-child-process-cli.js": {},
+    "parallel/test-permission-allow-child-process-cli.js": {
+      "reason": "Node's permission model is Deno's checks: off the kernel sandbox, whose `auto` would hold the children to this run's grant",
+      "extraDenoArgs": ["--kernel-sandbox=off"]
+    },
     "parallel/test-permission-allow-inspector.js": {
       "ignore": true,
       "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
@@ -3350,7 +3354,10 @@
       "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
     },
     "parallel/test-permission-drop-not-enabled.js": {},
-    "parallel/test-permission-fs-absolute-path.js": {},
+    "parallel/test-permission-fs-absolute-path.js": {
+      "reason": "Node's permission model is Deno's checks: off the kernel sandbox, whose `auto` would hold the children to this run's grant",
+      "extraDenoArgs": ["--kernel-sandbox=off"]
+    },
     "parallel/test-permission-fs-filehandle-utimes.js": {},
     "parallel/test-permission-fs-internal-module-stat.js": {
       "ignore": true,
@@ -3364,7 +3371,10 @@
       "ignore": true,
       "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
     },
-    "parallel/test-permission-fs-relative-path.js": {},
+    "parallel/test-permission-fs-relative-path.js": {
+      "reason": "Node's permission model is Deno's checks: off the kernel sandbox, whose `auto` would hold the children to this run's grant",
+      "extraDenoArgs": ["--kernel-sandbox=off"]
+    },
     "parallel/test-permission-fs-repeat-path.js": {
       "ignore": true,
       "reason": "Deno has its own permission system; Node.js --experimental-permission is not applicable"
