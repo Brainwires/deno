@@ -1074,10 +1074,7 @@
       "ignore": true,
       "reason": "Larger gap: compares OpenSSL error decoration (code, library, reason) between sync and async jobs for every operation; most node:crypto errors here carry no OpenSSL library / reason"
     },
-    "parallel/test-crypto-keygen.js": {
-      "ignore": true,
-      "reason": "Node 26 BoringSSL branch expects a synchronous RangeError 'publicExponent is invalid' for invalid RSA publicExponent which Deno validates asynchronously in the op"
-    },
+    "parallel/test-crypto-keygen.js": {},
     "parallel/test-crypto-keyobject-no-own-symbols.js": {
       "ignore": true,
       "reason": "Larger gap: KeyObject has own symbol properties (kKeyType, kHandle); Node keeps that state in private fields"

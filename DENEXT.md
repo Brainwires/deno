@@ -19420,6 +19420,74 @@ where the changes are discussed.
      - Node tests enabled: none; `test-webcrypto-sign-verify.js` and the
        `test-crypto-keygen*` files already ran and now finish faster.
 
+484. **`fix(ext/node_crypto,tests)`: older bugs found beside the RSA keygen
+     work** (runtime and tests; `ext/node_crypto/keys.rs`,
+     `ext/node/polyfills/internal/crypto/keygen.ts`, `tests/node_compat/`,
+     `Cargo.toml`).
+     - An invalid RSA public exponent: `generateKeyPair[Sync]('rsa-pss')`
+       panicked on one (an `unwrap()` on the pure-Rust generator's error) and
+       `'rsa'` threw a plain `Error` from the op. Both now throw what Node built
+       on BoringSSL throws (the TLS library `process.features` reports): a
+       synchronous `RangeError` `ERR_OUT_OF_RANGE` "publicExponent is invalid"
+       for an exponent that is even or below 3, from the sync and the callback
+       API alike; the op refuses the same exponents with the same error, and a
+       failed prime search is an error, not a panic.
+     - RSA-PSS keys export as PKCS#8
+       (`"exporting RSA-PSS private key as PKCS#8
+       is not supported yet"`
+       before), PEM, DER and encrypted: the id-RSASSA-PSS AlgorithmIdentifier
+       around the PKCS#1 RSAPrivateKey, with the key's RSASSA-PSS-params when it
+       has restrictions. The SPKI export dropped those params; it now writes
+       them too. The params are written as OpenSSL does: a field at its default
+       (SHA-1, MGF1 with SHA-1, salt length 20) is left out, so an all-default
+       key carries an empty SEQUENCE, and the hash AlgorithmIdentifiers carry
+       the NULL parameters RFC 4055 section 2.1 requires (byte for byte what
+       Node 26 on OpenSSL 4.1 writes; Node's own older fixtures, written without
+       the NULLs, still import).
+     - Importing RSASSA-PSS-params without a maskGenAlgorithm took MGF1's hash
+       from `hashAlgorithm`; RFC 4055's default is MGF1 with SHA-1, which Node
+       reports (a sha384 key with MGF1-SHA-1 read back as MGF1-SHA-384).
+     - node_compat harness: a `1..0 # Skipped:` line counted the whole test as
+       skipped even when `common.printSkipMessage()` printed it for one case and
+       the test ran and passed the rest. The harness now preloads
+       `tests/node_compat/skip_probe_preload.mjs` into every `deno run` test; it
+       marks a run whose `process.exit()` came from `common.skip()` (that
+       function on the stack when `process.reallyExit()` runs, since
+       `common.skip()` exits right after printing), and only such a run is a
+       skip, reported with the reason of its last skip line. node:test files
+       keep the "exited before any test ran" rule. Reclassified from skipped to
+       passed (each printed the line for an unsupported case only and passes),
+       18 tests: `test-crypto-cipheriv-decipheriv.js`,
+       `test-crypto-getcipherinfo.js`, `test-crypto-hash.js`,
+       `test-crypto-key-objects-raw.js`,
+       `test-crypto-keygen-async-elliptic-curve-jwk-ec.js`,
+       `test-crypto-keygen-async-elliptic-curve-jwk.js`,
+       `test-crypto-keygen-eddsa.js`, `test-crypto-keygen-raw.js`,
+       `test-crypto-pqc-key-objects-ml-dsa.js`,
+       `test-crypto-pqc-sign-verify-ml-dsa.js`, `test-crypto-rsa-dsa.js`,
+       `test-https-options-boolean-check.js`, `test-tls-getprotocol.js`,
+       `test-tls-no-cert-required.js`, `test-tls-options-boolean-check.js`,
+       `test-webcrypto-derivebits.js`, `test-webcrypto-sign-verify.js` and
+       `pummel/test-crypto-dh-keys.js`. Still skipped (they exit through
+       `common.skip()`): `test-crypto-sign-verify.js`, `test-intl.js`,
+       `test-tls-no-sslv3.js`, `test-tls-server-verify.js`.
+     - The root `Cargo.toml` passes dprint again (`libs/net_route` /
+       `deno_net_route` were out of order; no change in meaning).
+     - User-facing note: an invalid RSA exponent throws Node's error instead of
+       crashing the process (`rsa-pss`); RSA-PSS keys export as PKCS#8 and their
+       SPKI keeps the restrictions.
+     - Tests: `tests/unit_node/crypto/crypto_key_test.ts` ("RSA keygen refuses
+       an invalid public exponent", "RSA-PSS keys export as PKCS#8 and SPKI as
+       Node does" against keys Node generated,
+       `tests/unit_node/crypto/generate_rsa_pss_fixtures.mjs` →
+       `testdata/rsa_pss/`, "generated RSA-PSS keys export their parameters";
+       "RSA keygen round-trips through both generators" now round-trips RSA-PSS
+       through PKCS#8 / SPKI too); `tests/unit_node/crypto/` whole.
+     - Node tests enabled: `test-crypto-keygen.js` (5 of 5 runs). No node_compat
+       test exports an RSA-PSS key as PKCS#8 under BoringSSL: the RSA-PSS keygen
+       files skip themselves and `test-crypto-key-objects.js` runs its RSA-PSS
+       part only on OpenSSL.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -19430,7 +19498,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-483) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-484) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

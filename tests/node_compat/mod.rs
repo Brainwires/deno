@@ -822,6 +822,17 @@ impl TestSetup {
         args.push(arg.clone());
       }
     }
+    // denext: tells a whole-test `common.skip()` from a one-case
+    // `common.printSkipMessage()` (see self_skip_reason). `deno test` hides
+    // the skip line anyway, so node:test files go without it.
+    if !uses_node_test {
+      args.push("--preload".to_string());
+      args.push(
+        tests_path()
+          .join("node_compat/skip_probe_preload.mjs")
+          .to_string(),
+      );
+    }
     if cli_args.inspect_brk {
       args.push("--inspect-brk".to_string());
     }
@@ -975,21 +986,32 @@ impl TestSetup {
   }
 }
 
+/// Written to stderr by skip_probe_preload.mjs when the test exited through
+/// `common.skip()`.
+const COMMON_SKIP_MARKER: &str =
+  "denext-node-compat: exited through common.skip()";
+
 /// denext: why a test that exited 0 skipped itself, if it did.
 ///
-/// Node's `common.skip(msg)` prints `1..0 # Skipped: <msg>` and exits 0, and
-/// Node's own runner (tools/test.py) reports any test whose output carries
-/// that line as skipped, not passed. A test run under `deno test` (one that
-/// imports `node:test`) has its pre-test output hidden by `--quiet`, so the
-/// line never shows: there a file that exited before any test ran (`0 passed
-/// | 0 failed` after Deno's "called `Deno.exit(0)` from outside any test"
-/// note) skipped itself.
+/// Node's `common.skip(msg)` prints `1..0 # Skipped: <msg>` and exits 0.
+/// `common.printSkipMessage(msg)` prints the same line for one case of a
+/// test that goes on to run (and pass) the others, so the line alone does not
+/// make a skip: the run counts as one only when skip_probe_preload.mjs saw
+/// the process exit through `common.skip()`. A test run under `deno test`
+/// (one that imports `node:test`) has its pre-test output hidden by
+/// `--quiet`, so the line never shows: there a file that exited before any
+/// test ran (`0 passed | 0 failed` after Deno's "called `Deno.exit(0)` from
+/// outside any test" note) skipped itself.
 fn self_skip_reason(output: &str, uses_node_test: bool) -> Option<String> {
   static SKIP_LINE: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| {
       Regex::new(r"(?m)^1\.\.0 # Skipped:[ \t]*(.*?)\r?$").unwrap()
     });
-  if let Some(captures) = SKIP_LINE.captures(output) {
+  // common.skip() prints its line and exits at once, so the last skip line
+  // is the one it printed.
+  if output.contains(COMMON_SKIP_MARKER)
+    && let Some(captures) = SKIP_LINE.captures_iter(output).last()
+  {
     let message = captures.get(1).map(|m| m.as_str().trim()).unwrap_or("");
     return Some(if message.is_empty() {
       "(no reason given)".to_string()

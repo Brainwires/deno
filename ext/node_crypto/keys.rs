@@ -2200,7 +2200,9 @@ fn parse_rsa_pss_params(
           }
         }
       }
-      None => hash_algorithm,
+      // RFC 4055: maskGenAlgorithm defaults to MGF1 with SHA-1, whatever
+      // the hash (OpenSSL leaves it out only then).
+      None => RsaPssHashAlgorithm::Sha1,
     };
 
     // RFC 4055 / PKCS#1 v2.1 default for RSASSA-PSS-params.saltLength is 20,
@@ -2216,6 +2218,86 @@ fn parse_rsa_pss_params(
     None
   };
   Ok(details)
+}
+
+impl RsaPssHashAlgorithm {
+  fn oid(&self) -> rsa::pkcs8::ObjectIdentifier {
+    match self {
+      RsaPssHashAlgorithm::Sha1 => ID_SHA1_OID,
+      RsaPssHashAlgorithm::Sha224 => ID_SHA224_OID,
+      RsaPssHashAlgorithm::Sha256 => ID_SHA256_OID,
+      RsaPssHashAlgorithm::Sha384 => ID_SHA384_OID,
+      RsaPssHashAlgorithm::Sha512 => ID_SHA512_OID,
+      RsaPssHashAlgorithm::Sha512_224 => ID_SHA512_224_OID,
+      RsaPssHashAlgorithm::Sha512_256 => ID_SHA512_256_OID,
+    }
+  }
+}
+
+/// DER of the RSASSA-PSS-params (RFC 4055 section 3.1) for a key's
+/// restrictions, as OpenSSL writes them: a field at its default (SHA-1,
+/// MGF1 with SHA-1, salt length 20) is left out, so a key whose restrictions
+/// are all defaults carries an empty SEQUENCE, and the hash
+/// AlgorithmIdentifiers carry the NULL parameters RFC 4055 section 2.1
+/// requires.
+fn rsa_pss_params_der(
+  details: &RsaPssDetails,
+) -> rsa::pkcs8::der::Result<Vec<u8>> {
+  use rsa::pkcs8::der::TagMode;
+  use rsa::pkcs8::der::asn1::ContextSpecific;
+  use rsa::pkcs8::der::asn1::Null;
+
+  let null = AnyRef::from(Null);
+  let hash_identifier =
+    |hash: RsaPssHashAlgorithm| rsa::pkcs8::AlgorithmIdentifierRef {
+      oid: hash.oid(),
+      parameters: Some(null),
+    };
+
+  let mut fields = Vec::new();
+  if details.hash_algorithm != RsaPssHashAlgorithm::Sha1 {
+    let field = ContextSpecific {
+      tag_number: HASH_ALGORITHM_TAG,
+      tag_mode: TagMode::Explicit,
+      value: hash_identifier(details.hash_algorithm),
+    }
+    .to_der()?;
+    fields.extend_from_slice(&field);
+  }
+  if details.mf1_hash_algorithm != RsaPssHashAlgorithm::Sha1 {
+    let mgf1_hash = hash_identifier(details.mf1_hash_algorithm).to_der()?;
+    let field = ContextSpecific {
+      tag_number: MASK_GEN_ALGORITHM_TAG,
+      tag_mode: TagMode::Explicit,
+      value: rsa::pkcs8::AlgorithmIdentifierRef {
+        oid: ID_MFG1,
+        parameters: Some(AnyRef::try_from(mgf1_hash.as_slice())?),
+      },
+    }
+    .to_der()?;
+    fields.extend_from_slice(&field);
+  }
+  if details.salt_length != 20 {
+    let field = ContextSpecific {
+      tag_number: SALT_LENGTH_TAG,
+      tag_mode: TagMode::Explicit,
+      value: details.salt_length,
+    }
+    .to_der()?;
+    fields.extend_from_slice(&field);
+  }
+  AnyRef::new(Tag::Sequence, &fields)?.to_der()
+}
+
+/// The id-RSASSA-PSS AlgorithmIdentifier of a key: parameters only when the
+/// key has restrictions (`params` holds their DER), none otherwise.
+fn rsa_pss_algorithm_identifier(
+  params: Option<&[u8]>,
+) -> rsa::pkcs8::der::Result<rsa::pkcs8::AlgorithmIdentifierRef<'_>> {
+  Ok(rsa::pkcs8::AlgorithmIdentifierRef {
+    oid: RSASSA_PSS_OID,
+    parameters: params.map(AnyRef::try_from).transpose()?,
+  })
 }
 
 fn bytes_to_b64(bytes: &[u8]) -> String {
@@ -2272,8 +2354,6 @@ pub enum AsymmetricPublicKeyDerError {
   ExportingNonRsaPublicKeyAsPkcs1Unsupported,
   #[error("invalid EC public key")]
   InvalidEcPublicKey,
-  #[error("exporting RSA-PSS public key as SPKI is not supported yet")]
-  ExportingNonRsaPssPublicKeyAsSpkiUnsupported,
   #[error("invalid DSA public key")]
   InvalidDsaPublicKey,
   #[error("invalid X25519 public key")]
@@ -2378,11 +2458,15 @@ impl AsymmetricPublicKey {
             let pkcs1_der = key.key
               .to_pkcs1_der()
               .map_err(|_| AsymmetricPublicKeyDerError::InvalidRsaPublicKey)?;
+            let params = key
+              .details
+              .as_ref()
+              .map(rsa_pss_params_der)
+              .transpose()
+              .map_err(|_| AsymmetricPublicKeyDerError::InvalidRsaPublicKey)?;
             let spki = SubjectPublicKeyInfoRef {
-              algorithm: rsa::pkcs8::AlgorithmIdentifierRef {
-                oid: RSASSA_PSS_OID,
-                parameters: None,
-              },
+              algorithm: rsa_pss_algorithm_identifier(params.as_deref())
+                .map_err(|_| AsymmetricPublicKeyDerError::InvalidRsaPublicKey)?,
               subject_public_key: BitStringRef::from_bytes(pkcs1_der.as_bytes())
                 .map_err(|_| AsymmetricPublicKeyDerError::InvalidRsaPublicKey)?,
             };
@@ -2547,9 +2631,6 @@ pub enum AsymmetricPrivateKeyDerError {
   InvalidEcPrivateKey,
   #[error("exporting non-EC private key as SEC1 is not supported")]
   ExportingNonEcPrivateKeyAsSec1Unsupported,
-  #[class(type)]
-  #[error("exporting RSA-PSS private key as PKCS#8 is not supported yet")]
-  ExportingNonRsaPssPrivateKeyAsPkcs8Unsupported,
   #[error("invalid DSA private key")]
   InvalidDsaPrivateKey,
   #[error("invalid X25519 private key")]
@@ -2738,8 +2819,30 @@ impl AsymmetricPrivateKey {
               .map_err(|_| AsymmetricPrivateKeyDerError::InvalidRsaPrivateKey)?;
             document.to_bytes().to_vec().into_boxed_slice()
           }
-          AsymmetricPrivateKey::RsaPss(_key) => {
-            return Err(AsymmetricPrivateKeyDerError::ExportingNonRsaPssPrivateKeyAsPkcs8Unsupported)
+          AsymmetricPrivateKey::RsaPss(key) => {
+            // PKCS#8 with the id-RSASSA-PSS algorithm and the key's
+            // RSASSA-PSS-params (RFC 4055 section 1.2), around the
+            // PKCS#1 RSAPrivateKey.
+            let pkcs1_der = key
+              .key
+              .to_pkcs1_der()
+              .map_err(|_| AsymmetricPrivateKeyDerError::InvalidRsaPrivateKey)?;
+            let params = key
+              .details
+              .as_ref()
+              .map(rsa_pss_params_der)
+              .transpose()
+              .map_err(|_| AsymmetricPrivateKeyDerError::InvalidRsaPrivateKey)?;
+            let info = PrivateKeyInfo {
+              algorithm: rsa_pss_algorithm_identifier(params.as_deref())
+                .map_err(|_| AsymmetricPrivateKeyDerError::InvalidRsaPrivateKey)?,
+              private_key: pkcs1_der.as_bytes(),
+              public_key: None,
+            };
+            info
+              .to_der()
+              .map_err(|_| AsymmetricPrivateKeyDerError::InvalidRsaPrivateKey)?
+              .into_boxed_slice()
           }
           AsymmetricPrivateKey::Dsa(key) => {
             let document = key
@@ -3325,22 +3428,8 @@ fn generate_rsa(
   modulus_length: usize,
   public_exponent: usize,
 ) -> Result<KeyObjectHandlePair, JsErrorBox> {
-  if public_exponent <= 1 || public_exponent.is_multiple_of(2) {
-    return Err(JsErrorBox::generic(format!(
-      "invalid RSA public exponent: {}",
-      public_exponent
-    )));
-  }
-
-  let private_key = match generate_rsa_aws_lc(modulus_length, public_exponent) {
-    Some(key) => key,
-    None => RsaPrivateKey::new_with_exp(
-      &mut thread_rng(),
-      modulus_length,
-      &rsa::BigUint::from_usize(public_exponent).unwrap(),
-    )
-    .map_err(|e| JsErrorBox::generic(e.to_string()))?,
-  };
+  let private_key = generate_rsa_private_key(modulus_length, public_exponent)
+    .map_err(JsErrorBox::from_err)?;
 
   let private_key = AsymmetricPrivateKey::Rsa(private_key);
   let public_key = private_key.to_public_key();
@@ -3369,9 +3458,39 @@ pub async fn op_node_generate_rsa_key_async(
 }
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
-#[class(type)]
-#[error("digest not allowed for RSA-PSS keys{}", .0.as_ref().map(|digest| format!(": {digest}")).unwrap_or_default())]
-pub struct GenerateRsaPssError(Option<String>);
+pub enum GenerateRsaKeyError {
+  #[class(type)]
+  #[error("digest not allowed for RSA-PSS keys{}", .0.as_ref().map(|digest| format!(": {digest}")).unwrap_or_default())]
+  DigestNotAllowed(Option<String>),
+  /// What Node built on BoringSSL (the TLS library `process.features`
+  /// reports) throws for an exponent that is even or below 3.
+  #[class(range)]
+  #[property("code" = "ERR_OUT_OF_RANGE")]
+  #[error("publicExponent is invalid")]
+  InvalidPublicExponent,
+  #[class(generic)]
+  #[error("{0}")]
+  Generate(String),
+}
+
+/// Generates an RSA private key for `rsa` and `rsa-pss`: aws-lc where it
+/// supports the size and exponent, else the pure-Rust prime search. An even
+/// exponent or one below 3 is refused before either runs.
+fn generate_rsa_private_key(
+  modulus_length: usize,
+  public_exponent: usize,
+) -> Result<RsaPrivateKey, GenerateRsaKeyError> {
+  if public_exponent < 3 || public_exponent.is_multiple_of(2) {
+    return Err(GenerateRsaKeyError::InvalidPublicExponent);
+  }
+  if let Some(key) = generate_rsa_aws_lc(modulus_length, public_exponent) {
+    return Ok(key);
+  }
+  let exponent = rsa::BigUint::from_usize(public_exponent)
+    .ok_or(GenerateRsaKeyError::InvalidPublicExponent)?;
+  RsaPrivateKey::new_with_exp(&mut thread_rng(), modulus_length, &exponent)
+    .map_err(|e| GenerateRsaKeyError::Generate(e.to_string()))
+}
 
 fn generate_rsa_pss(
   modulus_length: usize,
@@ -3379,16 +3498,8 @@ fn generate_rsa_pss(
   hash_algorithm: Option<&str>,
   mf1_hash_algorithm: Option<&str>,
   salt_length: Option<u32>,
-) -> Result<KeyObjectHandlePair, GenerateRsaPssError> {
-  let key = match generate_rsa_aws_lc(modulus_length, public_exponent) {
-    Some(key) => key,
-    None => RsaPrivateKey::new_with_exp(
-      &mut thread_rng(),
-      modulus_length,
-      &rsa::BigUint::from_usize(public_exponent).unwrap(),
-    )
-    .unwrap(),
-  };
+) -> Result<KeyObjectHandlePair, GenerateRsaKeyError> {
+  let key = generate_rsa_private_key(modulus_length, public_exponent)?;
 
   let details = if hash_algorithm.is_none()
     && mf1_hash_algorithm.is_none()
@@ -3401,19 +3512,19 @@ fn generate_rsa_pss(
     let hash_algorithm = match_fixed_digest_with_oid!(
       hash_algorithm,
       fn (algorithm: Option<RsaPssHashAlgorithm>) {
-        algorithm.ok_or(GenerateRsaPssError(None))?
+        algorithm.ok_or(GenerateRsaKeyError::DigestNotAllowed(None))?
       },
       _ => {
-        return Err(GenerateRsaPssError(Some(hash_algorithm.to_string())))
+        return Err(GenerateRsaKeyError::DigestNotAllowed(Some(hash_algorithm.to_string())))
       }
     );
     let mf1_hash_algorithm = match_fixed_digest_with_oid!(
       mf1_hash_algorithm,
       fn (algorithm: Option<RsaPssHashAlgorithm>) {
-        algorithm.ok_or(GenerateRsaPssError(None))?
+        algorithm.ok_or(GenerateRsaKeyError::DigestNotAllowed(None))?
       },
       _ => {
-        return Err(GenerateRsaPssError(Some(mf1_hash_algorithm.to_string())))
+        return Err(GenerateRsaKeyError::DigestNotAllowed(Some(mf1_hash_algorithm.to_string())))
       }
     );
     let salt_length =
@@ -3441,7 +3552,7 @@ pub fn op_node_generate_rsa_pss_key(
   #[string] hash_algorithm: Option<String>, // todo: Option<&str> not supproted in ops yet
   #[string] mf1_hash_algorithm: Option<String>, // todo: Option<&str> not supproted in ops yet
   #[smi] salt_length: Option<u32>,
-) -> Result<KeyObjectHandlePair, GenerateRsaPssError> {
+) -> Result<KeyObjectHandlePair, GenerateRsaKeyError> {
   generate_rsa_pss(
     modulus_length,
     public_exponent,
@@ -3459,7 +3570,7 @@ pub async fn op_node_generate_rsa_pss_key_async(
   #[string] hash_algorithm: Option<String>, // todo: Option<&str> not supproted in ops yet
   #[string] mf1_hash_algorithm: Option<String>, // todo: Option<&str> not supproted in ops yet
   #[smi] salt_length: Option<u32>,
-) -> Result<KeyObjectHandlePair, GenerateRsaPssError> {
+) -> Result<KeyObjectHandlePair, GenerateRsaKeyError> {
   spawn_blocking(move || {
     generate_rsa_pss(
       modulus_length,

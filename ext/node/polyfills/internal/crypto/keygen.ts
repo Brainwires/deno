@@ -23,6 +23,7 @@ const {
   ERR_INCOMPATIBLE_OPTION_PAIR,
   ERR_INVALID_ARG_VALUE,
   ERR_MISSING_OPTION,
+  NodeRangeError,
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
 const { getCiphers } = core.loadExtScript(
   "ext:deno_node/internal/crypto/util.ts",
@@ -433,6 +434,15 @@ function validateKeyEncoding(keyType: string, options: any) {
   }
 }
 
+// Node built on BoringSSL (what `process.features.openssl_is_boringssl`
+// reports) refuses an even exponent or one below 3 synchronously, before the
+// key job starts.
+function validateRsaPublicExponent(publicExponent: number) {
+  if (publicExponent < 3 || publicExponent % 2 === 0) {
+    throw new NodeRangeError("ERR_OUT_OF_RANGE", "publicExponent is invalid");
+  }
+}
+
 function createJob(mode, type, options) {
   validateString(type, "type");
 
@@ -459,6 +469,7 @@ function createJob(mode, type, options) {
       }
 
       if (type === "rsa") {
+        validateRsaPublicExponent(publicExponent);
         if (mode === kSync) {
           return op_node_generate_rsa_key(
             modulusLength,
@@ -520,6 +531,7 @@ function createJob(mode, type, options) {
         }
       }
 
+      validateRsaPublicExponent(publicExponent);
       if (mode === kSync) {
         return op_node_generate_rsa_pss_key(
           modulusLength,

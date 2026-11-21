@@ -66,11 +66,15 @@ timeouts are as written; below that it is `1 / CPU per test`, at most 8, so a
 hang still fails. The runner prints the factor once at the start.
 
 A test that skips itself is reported as skipped, never as passed: Node's
-`common.skip()` prints `1..0 # Skipped: <reason>` and exits 0, and the runner
-reads that line as Node's own runner does. A test run under `deno test` (one
-that imports `node:test`) has its pre-test output hidden by `--quiet`, so there
-a file that exits before any test ran counts as skipped. A skip never fails CI;
-`expectedSkip` only labels it in the report as by design.
+`common.skip()` prints `1..0 # Skipped: <reason>` and exits 0.
+`common.printSkipMessage()` prints the same line for one case of a test that
+goes on to run the rest, so the runner preloads `skip_probe_preload.mjs`, which
+marks a run that exited through `common.skip()`; only that run counts as
+skipped, and a test that printed the line for one case and passed the others
+counts as passed. A test run under `deno test` (one that imports `node:test`)
+has its pre-test output hidden by `--quiet`, so there a file that exits before
+any test ran counts as skipped. A skip never fails CI; `expectedSkip` only
+labels it in the report as by design.
 
 ### Examples
 
