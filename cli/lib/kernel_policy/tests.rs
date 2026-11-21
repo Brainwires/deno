@@ -2441,3 +2441,23 @@ fn test_report_files_are_implicit() {
         && e.path == Path::new("/project/report.xml"))
   );
 }
+
+/// Plan D5: an enforce `auto` chose doesn't scrub the environment (env stays
+/// Deno's checks, a documented gap); the same grant under an enforce asked
+/// for by name does.
+#[test]
+fn auto_chosen_enforce_keeps_the_environment() {
+  let options = PermissionsOptions {
+    allow_env: s(&["PORT"]),
+    ..Default::default()
+  };
+  for caps in [linux(Some(6)), macos()] {
+    let mut chosen = ctx(caps.clone(), Enforce);
+    chosen.auto_chosen = true;
+    let c = compile_in(&options, &chosen);
+    assert_eq!(c.policy.env_scrub, None);
+    assert!(has_gap(&c, GapClass::Env, GapResolution::Documented));
+    let named = compile_in(&options, &ctx(caps, Enforce));
+    assert!(named.policy.env_scrub.is_some());
+  }
+}

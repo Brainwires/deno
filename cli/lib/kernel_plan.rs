@@ -229,6 +229,7 @@ pub fn plan_for(
     broker: None,
     expanded_write: Vec::new(),
     entries: Vec::new(),
+    member_configs: Vec::new(),
   };
   match p.os {
     #[cfg(any(target_os = "linux", test))]

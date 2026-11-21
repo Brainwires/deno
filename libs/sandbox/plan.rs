@@ -93,6 +93,14 @@ pub struct EnforcePlan {
   /// among [`Self::module_files`].
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub entries: Vec<PlanEntry>,
+  /// The config files of the workspace members the first image found by
+  /// expanding a glob member (`"workspaces": ["packages/*"]`), in the order
+  /// found: the confined image can't list the folders a glob walks, so it
+  /// expands its globs from these (each glob keeps only the files its own
+  /// patterns match). Not part of the equality; the config files both
+  /// images discover are (the policy reads them).
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub member_configs: Vec<PathBuf>,
 }
 
 /// A module a test or bench run runs ([`EnforcePlan::entries`]).
@@ -152,6 +160,7 @@ impl EnforcePlan {
       expanded: Vec::new(),
       expanded_write: Vec::new(),
       entries: Vec::new(),
+      member_configs: Vec::new(),
       ..self.clone()
     }
   }
@@ -499,6 +508,7 @@ mod tests {
       broker: None,
       expanded_write: Vec::new(),
       entries: Vec::new(),
+      member_configs: Vec::new(),
     }
   }
 

@@ -49,6 +49,13 @@
       "args": "run --quiet --kernel-sandbox=enforce --allow-read=. main.ts",
       "output": "hello from greet\n"
     },
+    // the re-executed image runs the same startup again, but a diagnostic
+    // the image before it printed prints once (item 425)
+    "startup_warning_prints_once": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --kernel-sandbox=enforce --unsafely-ignore-certificate-errors=localhost main.ts",
+      "output": "DANGER: TLS certificate validation is disabled for: localhost\nhello\n"
+    },
     // an .npmrc the read grant doesn't cover is never readable under
     // enforce (it may hold registry tokens): the report names it, and the
     // re-executed image says once that it treats it as absent

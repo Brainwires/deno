@@ -144,6 +144,10 @@ static INHERITED: OnceLock<EnforcePlan> = OnceLock::new();
 /// plan, or a plan that can't be applied, ends the process: the hand-over
 /// never fails open.
 pub fn startup() {
+  // first, while the process has one thread: the diagnostics the image
+  // before a re-exec printed (applied below once this process is known to
+  // be that re-executed image)
+  let printed = take_printed_handover();
   // the supervisor image of --kernel-sandbox=broker: it forks the confined
   // worker, stays behind as its broker and never returns
   #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -216,6 +220,64 @@ pub fn startup() {
     inherit::load_at_startup();
     adopt_broker_of_a_parent(INHERITED.get().is_some());
   }
+  if confined_at_startup() {
+    deno_lib::util::logger::suppress_already_printed(printed);
+    // the workspace's glob members as the image before this one found them
+    // (this one can't list the folders their globs walk)
+    if let Some(plan) = applied_plan() {
+      deno_config::workspace::use_member_configs(plan.member_configs.clone());
+    }
+  }
+}
+
+/// The variable naming the fingerprints of the records the image before a
+/// re-exec printed (its startup diagnostics: warnings about the flags, the
+/// config, the environment), comma-separated hex: the re-executed image
+/// runs the same startup again and hides each of them once
+/// (`deno_lib::util::logger::suppress_already_printed`), so they print one
+/// time. Set only by [`reexec_env`] (one this process inherited is dropped
+/// there), read only by an image confined at startup, and removed from the
+/// environment before anything else runs, so neither the program nor its
+/// children see it.
+const PRINTED_ENV_VAR: &str = "DENO_INTERNAL_KERNEL_PRINTED";
+
+/// Takes [`PRINTED_ENV_VAR`] out of the environment (whatever this process
+/// is) and parses it.
+fn take_printed_handover() -> Vec<u64> {
+  #[allow(clippy::disallowed_methods, reason = "the process's own environment")]
+  let Some(value) = std::env::var_os(PRINTED_ENV_VAR) else {
+    return Vec::new();
+  };
+  // SAFETY: called first thing in `main` (from `startup`), while the process
+  // has one thread
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "the process's own environment"
+  )]
+  unsafe {
+    std::env::remove_var(PRINTED_ENV_VAR)
+  };
+  value.to_str().map(parse_printed).unwrap_or_default()
+}
+
+/// [`PRINTED_ENV_VAR`]'s value for `fingerprints`.
+fn format_printed(fingerprints: &[u64]) -> String {
+  fingerprints
+    .iter()
+    .map(|f| format!("{f:x}"))
+    .collect::<Vec<_>>()
+    .join(",")
+}
+
+/// Parses [`PRINTED_ENV_VAR`]'s value (at most what [`format_printed`] can
+/// hand over; anything that isn't a fingerprint is skipped: the worst a
+/// malformed value does is hide nothing).
+fn parse_printed(value: &str) -> Vec<u64> {
+  value
+    .split(',')
+    .take(1024)
+    .filter_map(|f| u64::from_str_radix(f, 16).ok())
+    .collect()
 }
 
 /// A `deno` started inside a brokered run (it applies no plan of its own:
@@ -699,6 +761,16 @@ async fn graph_module_files(
   if roots.is_empty() {
     return Ok(Vec::new());
   }
+  // a root of a scheme the runtime doesn't load is an external module of
+  // the graph, which loads without error: refused here as the module load
+  // would refuse it, so the error comes from the image that isn't confined
+  // (`deno run <task>`'s task fallback runs there)
+  if let Some(root) = roots.iter().find(|r| !runtime_loads_scheme(r.scheme())) {
+    return Err(
+      deno_resolver::loader::UnsupportedSchemeError { url: root.clone() }
+        .into(),
+    );
+  }
   let container = factory.main_module_graph_container().await?;
   container
     .check_specifiers(&roots, Default::default())
@@ -735,6 +807,15 @@ fn code_module_files(
   files
 }
 
+/// Whether the runtime loads a main module of `scheme` (any other is an
+/// "Unsupported scheme" error at the module load).
+fn runtime_loads_scheme(scheme: &str) -> bool {
+  matches!(
+    scheme,
+    "file" | "http" | "https" | "blob" | "data" | "jsr" | "npm" | "node"
+  )
+}
+
 /// Whether a plan waits for [`apply_pending`].
 pub fn is_pending() -> bool {
   PENDING.get().is_some() && !kernel_sandbox_state::is_enforcing()
@@ -759,6 +840,8 @@ fn reexec_env(
     .filter(|(k, _)| {
       k != deno_runtime::deno_permissions::kernel_broker::dial::DIAL_ENV_VAR
     })
+    // only this image says what it printed
+    .filter(|(k, _)| k != PRINTED_ENV_VAR)
     .collect();
   if let Some(dir) = deno_dir {
     env.retain(|(k, _)| k != "DENO_DIR");
@@ -767,6 +850,11 @@ fn reexec_env(
   // the carrier of the layers this run's children inherit (it replaces one
   // this process inherited: the new one holds those layers too)
   env.push((POLICY_ENV_VAR.into(), carrier_fd.to_string().into()));
+  // what this image printed, which the next one doesn't print again
+  let printed = deno_lib::util::logger::printed_record_fingerprints();
+  if !printed.is_empty() {
+    env.push((PRINTED_ENV_VAR.into(), format_printed(&printed).into()));
+  }
   env
 }
 
@@ -933,9 +1021,14 @@ pub async fn apply_pending_with_entries(
         stray.display()
       );
     }
+    // the point where the image before this one re-executed: what is
+    // printed from here on, this image prints first
+    deno_lib::util::logger::end_already_printed();
     return Ok(());
   }
   let Some(pending) = PENDING.get() else {
+    // no re-exec follows: nothing to hand over
+    deno_lib::util::logger::stop_recording_printed();
     return Ok(());
   };
   if kernel_sandbox_state::is_enforcing() {
@@ -956,6 +1049,7 @@ pub async fn apply_pending_with_entries(
   plan.module_files.sort();
   plan.module_files.dedup();
   plan.entries = entries.to_vec();
+  plan.member_configs = deno_config::workspace::collected_member_configs();
   check_module_files(&plan.module_files)?;
   // the lockfile the graph load updated is written now: the confined image
   // can't write it (unless a grant covers it), and the re-exec runs no
@@ -1121,5 +1215,25 @@ mod tests {
         PathBuf::from("/w/sub/__snapshots__/b_test.ts.snap"),
       ]
     );
+  }
+
+  #[test]
+  fn main_module_schemes() {
+    for scheme in ["file", "https", "http", "data", "blob", "jsr", "npm"] {
+      assert!(runtime_loads_scheme(scheme), "{scheme}");
+    }
+    // `deno run main:foo` is the task `main:foo`
+    assert!(!runtime_loads_scheme("main"));
+    assert!(!runtime_loads_scheme("ext"));
+  }
+
+  #[test]
+  fn printed_fingerprints_round_trip() {
+    let fingerprints = vec![0, 1, u64::MAX, 0xdead_beef];
+    assert_eq!(parse_printed(&format_printed(&fingerprints)), fingerprints);
+    assert_eq!(format_printed(&[]), "");
+    assert!(parse_printed("").is_empty());
+    // anything else hides nothing
+    assert_eq!(parse_printed("zz,10,"), vec![0x10]);
   }
 }

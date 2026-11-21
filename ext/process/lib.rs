@@ -891,9 +891,33 @@ pub fn prepare_run(
   })
 }
 
+/// denext: an anonymous memory file for the npm resolution state handed to
+/// a child (closed on exec; the caller duplicates it for the child).
+#[cfg(target_os = "linux")]
+fn npm_process_state_memfd() -> Result<std::fs::File, std::io::Error> {
+  // SAFETY: libc call with a NUL-terminated name
+  let fd = unsafe {
+    libc::memfd_create(c"deno_npm_state".as_ptr(), libc::MFD_CLOEXEC)
+  };
+  if fd < 0 {
+    return Err(std::io::Error::last_os_error());
+  }
+  // SAFETY: `fd` is a new descriptor this function owns
+  Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
 pub fn npm_process_state_tempfile(
   contents: &[u8],
 ) -> Result<deno_io::RawIoHandle, std::io::Error> {
+  // denext: an anonymous memory file where there is one, so no temp folder
+  // write is needed (a process the kernel sandbox confines may have none,
+  // DENEXT.md item 425); else a temp file
+  #[cfg(target_os = "linux")]
+  let mut temp_file = match npm_process_state_memfd() {
+    Ok(file) => file,
+    Err(_) => tempfile::tempfile()?,
+  };
+  #[cfg(not(target_os = "linux"))]
   let mut temp_file = tempfile::tempfile()?;
   temp_file.write_all(contents)?;
   let handle = temp_file.into_raw_io_handle();
