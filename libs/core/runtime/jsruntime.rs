@@ -16,9 +16,15 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
 use std::task::Waker;
+use std::time::Duration;
 use std::time::Instant;
 
 use deno_error::JsErrorBox;
@@ -559,6 +565,9 @@ pub struct JsRuntimeState {
   pub(crate) function_templates: Rc<RefCell<FunctionTemplateData>>,
   pub(crate) callsite_prototype: RefCell<Option<v8::Global<v8::Object>>>,
   waker: Arc<AtomicWaker>,
+  /// The waker every event loop iteration runs under (see
+  /// [`JsRuntime::poll_event_loop`]).
+  loop_waker: Arc<LoopWaker>,
   /// Foreground V8 tasks queued by the custom platform. Shared with the
   /// global isolate registry so background threads can push tasks, while
   /// the event loop drains them without touching the global map.
@@ -917,6 +926,7 @@ impl JsRuntime {
         eval_context_set_code_cache_cb,
       ),
       waker: waker.clone(),
+      loop_waker: Default::default(),
       foreground_tasks: Default::default(),
       // Some fields are initialized later after isolate is created
       inspector: None.into(),
@@ -2357,13 +2367,28 @@ impl JsRuntime {
     let mut isolate =
       unsafe { v8::Isolate::from_raw_isolate_ptr(self.v8_isolate_ptr()) };
 
+    // The iteration runs under the loop's own waker (see [`LoopWaker`]), so
+    // that the executor polls its I/O driver between two iterations, as
+    // libuv polls for I/O on every iteration.
+    let loop_waker = self.inner.state.loop_waker.clone();
+    let outermost = loop_waker.begin_poll(cx.waker());
+
     let result = {
+      let waker = Waker::from(loop_waker.clone());
+      let cx = &mut Context::from_waker(&waker);
       v8::scope!(let isolate_scope, &mut isolate);
       let context =
         v8::Local::new(isolate_scope, self.inner.main_realm.context());
       let mut scope = v8::ContextScope::new(isolate_scope, context);
       self.poll_event_loop_inner(cx, &mut scope, poll_options)
     };
+
+    // A wake that arrived while the iteration ran (the loop asking for
+    // another one: immediates, ticks, more I/O, an op that just completed)
+    // was held back, and is delivered now.
+    if outermost && loop_waker.end_poll() && result.is_pending() {
+      loop_waker.wake_held_back();
+    }
 
     // Tell V8's CPU profiler whether we're about to go idle. When the event
     // loop has no immediate work it returns `Poll::Pending` and the task parks
@@ -2610,6 +2635,9 @@ impl JsRuntime {
     // Evaluate pending state
     let pending_state =
       EventLoopPendingState::new(scope, context_state, modules);
+    self.inner.state.loop_waker.set_reactor_may_have_events(
+      Self::reactor_may_have_events(context_state, &pending_state),
+    );
 
     if !pending_state.is_pending() {
       if has_inspector {
@@ -2793,6 +2821,207 @@ impl JsRuntime {
     }
 
     Poll::Pending
+  }
+}
+
+/// The waker an event loop iteration runs under, which decides how a wake of
+/// the loop reaches the task that polls it.
+///
+/// Passed straight on, a wake puts the task back on the executor's run queue,
+/// and tokio's current-thread scheduler polls its I/O driver only when that
+/// queue is empty, or after `event_interval` (61) task polls. A loop that is
+/// woken again by the time it returns (a chain of immediates or ticks, a
+/// server whose every iteration leaves work for the next, async ops that
+/// complete through the op driver's task) therefore saw socket and pipe
+/// readiness once in up to 61 iterations: a TCP echo beside a chain of
+/// immediates took 122 of them. libuv polls for I/O on every iteration, with
+/// a zero timeout when it has more to do.
+///
+/// So while the reactor could have something for the loop, a wake with no
+/// I/O poll since the last iteration is handed to the scheduler (as
+/// `tokio::task::yield_now` does), which wakes the task only after it has
+/// polled its drivers without blocking:
+///
+/// - A wake that arrives while an iteration runs (the loop asking for
+///   another one) is recorded and delivered that way when the iteration
+///   returns, every time: I/O is polled between two consecutive immediates,
+///   as in libuv.
+/// - A wake made between iterations on the executor's thread, by another
+///   task (the op driver's, when an async op completes) or by the driver
+///   itself (whose wakes go out as soon as its poll returns, at no cost),
+///   takes the poll unless one was made in the last
+///   [`LoopWaker::REACTOR_POLL_SLICE`]: a run of short async ops polls for
+///   I/O that often, not once per op (a non-blocking `kevent` costs about
+///   20 us on macOS).
+///
+/// The other wakes reach the task at once: one made after the executor
+/// parked since the last iteration (the loop waited and something arrived:
+/// the I/O poll has happened, see [`crate::event_loop::reactor_polled`]), one
+/// from another thread or outside a tokio runtime, and every wake while
+/// nothing is outstanding in the reactor, when the poll would be a wasted
+/// system call per iteration.
+struct LoopWaker {
+  state: AtomicU8,
+  /// The waker of the task that polls the loop.
+  task: AtomicWaker,
+  /// The thread that polled the last iteration (a `thread_token`).
+  thread: AtomicUsize,
+  /// The executor's I/O poll count when the last iteration ended.
+  reactor_polls: AtomicU64,
+  /// When a wake was last handed to the scheduler for an I/O poll
+  /// ([`LoopWaker::now`]; 0 for never).
+  last_reactor_poll: AtomicU64,
+  /// Whether the reactor could have events for the loop, as of the last
+  /// iteration (see `JsRuntime::reactor_may_have_events`).
+  reactor_may_have_events: AtomicBool,
+}
+
+impl Default for LoopWaker {
+  fn default() -> Self {
+    Self {
+      state: AtomicU8::new(Self::IDLE),
+      task: AtomicWaker::new(),
+      thread: AtomicUsize::new(0),
+      reactor_polls: AtomicU64::new(0),
+      last_reactor_poll: AtomicU64::new(0),
+      reactor_may_have_events: AtomicBool::new(true),
+    }
+  }
+}
+
+impl LoopWaker {
+  /// No iteration is running.
+  const IDLE: u8 = 0;
+  /// An iteration is running and nothing woke the loop since it started.
+  const POLLING: u8 = 1;
+  /// An iteration is running and the loop was woken since it started.
+  const WOKEN: u8 = 2;
+
+  /// How long a run of iterations woken by other tasks goes without an I/O
+  /// poll at most.
+  const REACTOR_POLL_SLICE: Duration = Duration::from_micros(250);
+
+  /// A monotonic time in microseconds, never 0.
+  fn now() -> u64 {
+    static BASE: OnceLock<Instant> = OnceLock::new();
+    BASE.get_or_init(Instant::now).elapsed().as_micros() as u64 + 1
+  }
+
+  /// Whether a wake made by another task at `now` takes an I/O poll, the
+  /// last one having been asked for at `last` (0 for never).
+  fn reactor_poll_is_due(last: u64, now: u64) -> bool {
+    last == 0
+      || now.saturating_sub(last) >= Self::REACTOR_POLL_SLICE.as_micros() as u64
+  }
+
+  /// Marks the start of an iteration polled by the task `waker` wakes.
+  /// Returns `false` for a poll nested in another one, whose end delivers
+  /// the wakes.
+  fn begin_poll(&self, waker: &Waker) -> bool {
+    if self
+      .state
+      .compare_exchange(
+        Self::IDLE,
+        Self::POLLING,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+      )
+      .is_err()
+    {
+      return false;
+    }
+    self.task.register(waker);
+    self
+      .thread
+      .store(crate::event_loop::thread_token(), Ordering::Relaxed);
+    // Until the iteration says otherwise (it may return early).
+    self.reactor_may_have_events.store(true, Ordering::Relaxed);
+    true
+  }
+
+  /// Marks the end of the iteration and returns whether the loop was woken
+  /// while it ran. A wake from another thread either lands before the swap
+  /// and is returned here, or finds the loop idle and wakes the task.
+  fn end_poll(&self) -> bool {
+    self
+      .reactor_polls
+      .store(crate::event_loop::reactor_polls(), Ordering::Relaxed);
+    self.state.swap(Self::IDLE, Ordering::AcqRel) == Self::WOKEN
+  }
+
+  fn set_reactor_may_have_events(&self, value: bool) {
+    self.reactor_may_have_events.store(value, Ordering::Relaxed);
+  }
+
+  /// Delivers the wake that was held back while an iteration ran. The task's
+  /// waker is taken, as for every wake: until the next iteration nothing
+  /// else wakes the task, so a wake from another task cannot run the loop
+  /// ahead of the I/O poll this one waits for.
+  fn wake_held_back(&self) {
+    if let Some(task) = self.task.take() {
+      self.wake_task(&task);
+    }
+  }
+
+  /// Wakes the task that polls the loop: after the executor's next I/O poll
+  /// while the reactor could have events for the loop, else at once.
+  fn wake_task(&self, task: &Waker) {
+    if self.reactor_may_have_events.load(Ordering::Relaxed) {
+      self.last_reactor_poll.store(Self::now(), Ordering::Relaxed);
+      // The deferred wake of `tokio::task::yield_now`: its first poll hands
+      // the waker to the scheduler, which wakes it after it has polled its
+      // drivers without blocking. On a thread that is not running a tokio
+      // scheduler it wakes the waker at once.
+      let yield_now = std::pin::pin!(tokio::task::yield_now());
+      let _ = yield_now.poll(&mut Context::from_waker(task));
+    } else {
+      task.wake_by_ref();
+    }
+  }
+}
+
+impl std::task::Wake for LoopWaker {
+  fn wake(self: Arc<Self>) {
+    self.wake_by_ref();
+  }
+
+  fn wake_by_ref(self: &Arc<Self>) {
+    match self.state.compare_exchange(
+      Self::POLLING,
+      Self::WOKEN,
+      Ordering::AcqRel,
+      Ordering::Acquire,
+    ) {
+      // An iteration is running: its end delivers the wake.
+      Ok(_) | Err(Self::WOKEN) => {}
+      // Between iterations. The task's waker is taken, so only the first
+      // wake since the last iteration does anything.
+      Err(_) => {
+        let Some(task) = self.task.take() else {
+          return;
+        };
+        if crate::event_loop::thread_token()
+          != self.thread.load(Ordering::Relaxed)
+          || crate::event_loop::reactor_polls()
+            != self.reactor_polls.load(Ordering::Relaxed)
+        {
+          // From another thread (which may run a scheduler of its own, a
+          // worker's, that must not hold this wake), or after the executor
+          // polled its I/O driver since the last iteration.
+          task.wake();
+        } else if self.reactor_may_have_events.load(Ordering::Relaxed)
+          && !Self::reactor_poll_is_due(
+            self.last_reactor_poll.load(Ordering::Relaxed),
+            Self::now(),
+          )
+        {
+          // Another task's wake, soon after an I/O poll.
+          task.wake();
+        } else {
+          self.wake_task(&task);
+        }
+      }
+    }
   }
 }
 
@@ -3504,6 +3733,23 @@ impl JsRuntime {
     Ok(true)
   }
 
+  /// Whether the reactor (the executor's I/O driver) could have something for
+  /// this loop: an async op or an external op is outstanding, or a native
+  /// stream handle exists (ref'd or not). Timers are not counted: a due timer
+  /// is seen on the next poll with no help from the time driver.
+  fn reactor_may_have_events(
+    context_state: &ContextState,
+    pending_state: &EventLoopPendingState,
+  ) -> bool {
+    context_state.pending_ops.len() > 0
+      || pending_state.has_pending_external_ops
+      || context_state
+        .uv_loop_inner
+        .get()
+        // SAFETY: the pointer is valid while the loop is registered.
+        .is_some_and(|uv_inner_ptr| unsafe { (*uv_inner_ptr).has_io_handles() })
+  }
+
   /// Phase 2a: Poll and dispatch V8 task spawner tasks.
   fn dispatch_task_spawner(
     cx: &mut Context,
@@ -3779,5 +4025,133 @@ fn mark_as_loaded_from_fs_during_snapshot(
   )]
   if let ExtensionFileSourceCode::LoadedFromFsDuringSnapshot(path) = source {
     files_loaded.push(path);
+  }
+}
+
+#[cfg(test)]
+mod loop_waker_tests {
+  use super::*;
+
+  struct CountingWaker(AtomicUsize);
+
+  impl std::task::Wake for CountingWaker {
+    fn wake(self: Arc<Self>) {
+      self.0.fetch_add(1, Ordering::SeqCst);
+    }
+  }
+
+  #[test]
+  fn holds_back_a_wake_during_an_iteration() {
+    let task = Arc::new(CountingWaker(AtomicUsize::new(0)));
+    let task_waker = Waker::from(task.clone());
+    let loop_waker = Arc::new(LoopWaker::default());
+    let waker = Waker::from(loop_waker.clone());
+
+    // Woken while an iteration runs: recorded, not passed to the task.
+    assert!(loop_waker.begin_poll(&task_waker));
+    waker.wake_by_ref();
+    waker.wake_by_ref();
+    assert_eq!(task.0.load(Ordering::SeqCst), 0);
+    assert!(loop_waker.end_poll());
+
+    // Not woken while the iteration ran.
+    assert!(loop_waker.begin_poll(&task_waker));
+    assert!(!loop_waker.end_poll());
+
+    // Woken between iterations: the task is woken at once, once.
+    waker.wake_by_ref();
+    assert_eq!(task.0.load(Ordering::SeqCst), 1);
+    waker.wake_by_ref();
+    assert_eq!(task.0.load(Ordering::SeqCst), 1);
+
+    // The next iteration registers the task again, and its end sees no wake
+    // left over from before it started.
+    assert!(loop_waker.begin_poll(&task_waker));
+    assert!(!loop_waker.end_poll());
+    waker.wake_by_ref();
+    assert_eq!(task.0.load(Ordering::SeqCst), 2);
+  }
+
+  #[tokio::test]
+  async fn a_wake_on_the_executor_thread_waits_for_the_reactor_poll() {
+    let task = Arc::new(CountingWaker(AtomicUsize::new(0)));
+    let task_waker = Waker::from(task.clone());
+    let loop_waker = Arc::new(LoopWaker::default());
+    let waker = Waker::from(loop_waker.clone());
+
+    // Between iterations, and at the end of one.
+    for during_poll in [false, true] {
+      let before = task.0.load(Ordering::SeqCst);
+      assert!(loop_waker.begin_poll(&task_waker));
+      if during_poll {
+        waker.wake_by_ref();
+        assert!(loop_waker.end_poll());
+        loop_waker.wake_held_back();
+        // Another task's wake does not run the loop ahead of the poll.
+        waker.wake_by_ref();
+      } else {
+        assert!(!loop_waker.end_poll());
+        waker.wake_by_ref();
+      }
+      // Handed to the scheduler, which wakes it once it has polled its
+      // drivers: after this task yields.
+      assert_eq!(task.0.load(Ordering::SeqCst), before);
+      tokio::task::yield_now().await;
+      assert_eq!(task.0.load(Ordering::SeqCst), before + 1);
+    }
+
+    // With nothing outstanding in the reactor the wake is immediate.
+    assert!(loop_waker.begin_poll(&task_waker));
+    loop_waker.set_reactor_may_have_events(false);
+    assert!(!loop_waker.end_poll());
+    waker.wake_by_ref();
+    assert_eq!(task.0.load(Ordering::SeqCst), 3);
+
+    // So is one made after the executor polled its I/O driver.
+    assert!(loop_waker.begin_poll(&task_waker));
+    assert!(!loop_waker.end_poll());
+    crate::event_loop::reactor_polled();
+    waker.wake_by_ref();
+    assert_eq!(task.0.load(Ordering::SeqCst), 4);
+
+    // And one from another thread, even one that runs a scheduler of its
+    // own (which would otherwise hold the wake until it parks).
+    assert!(loop_waker.begin_poll(&task_waker));
+    assert!(!loop_waker.end_poll());
+    std::thread::spawn(move || {
+      tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(async move {
+          waker.wake_by_ref();
+          assert_eq!(task.0.load(Ordering::SeqCst), 5);
+        });
+    })
+    .join()
+    .unwrap();
+  }
+
+  #[test]
+  fn another_tasks_wake_polls_the_reactor_once_a_slice() {
+    let slice = LoopWaker::REACTOR_POLL_SLICE.as_micros() as u64;
+    assert!(LoopWaker::reactor_poll_is_due(0, 1));
+    assert!(!LoopWaker::reactor_poll_is_due(10, 10));
+    assert!(!LoopWaker::reactor_poll_is_due(10, 10 + slice - 1));
+    assert!(LoopWaker::reactor_poll_is_due(10, 10 + slice));
+    assert!(LoopWaker::now() > 0);
+  }
+
+  #[test]
+  fn a_nested_poll_leaves_the_wake_to_the_outer_one() {
+    let task = Arc::new(CountingWaker(AtomicUsize::new(0)));
+    let task_waker = Waker::from(task.clone());
+    let loop_waker = Arc::new(LoopWaker::default());
+    let waker = Waker::from(loop_waker.clone());
+
+    assert!(loop_waker.begin_poll(&task_waker));
+    assert!(!loop_waker.begin_poll(&task_waker));
+    waker.wake_by_ref();
+    assert_eq!(task.0.load(Ordering::SeqCst), 0);
+    assert!(loop_waker.end_poll());
   }
 }

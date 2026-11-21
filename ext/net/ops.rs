@@ -1407,7 +1407,14 @@ async fn resolve_lookup<P: ConnectionProvider>(
   lookup.map_err(map_resolve_error)
 }
 
-#[op2(stack_trace)]
+// `async(deferred)`: this backs `node:dns`'s resolver (c-ares in Node.js,
+// whose answers arrive in the poll phase), so a result that is ready on the
+// first poll (an early failure, an answer the resolver already has) is
+// delivered by the loop like any other. The other async ops of this file back `Deno.listen()`,
+// `Deno.connect()` and `Deno.DatagramConn` only (`node:net` and `node:dgram`
+// have their own) and stay eager: a queued connection or datagram is returned
+// without a loop turn.
+#[op2(async(deferred), stack_trace)]
 pub async fn op_dns_resolve(
   state: Rc<RefCell<OpState>>,
   #[scoped] args: ResolveAddrArgs,

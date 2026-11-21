@@ -275,6 +275,9 @@ pub(crate) struct UvLoopInner {
   prepare_handles: RefCell<Vec<*mut uv_prepare_t>>,
   check_handles: RefCell<Vec<*mut uv_check_t>>,
   tcp_handles: RefCell<Vec<*mut uv_tcp_t>>,
+  /// The TCP handles with a write that `uv_write` wrote in full on the spot
+  /// and whose callback has yet to run (see `complete_written_writes`).
+  pub(crate) written_tcp: RefCell<Vec<Arc<waker::TcpHandleWaker>>>,
   pipe_handles: RefCell<Vec<*mut uv_pipe_t>>,
   tty_handles: RefCell<Vec<*mut uv_tty_t>>,
   waker: RefCell<Option<Waker>>,
@@ -300,6 +303,7 @@ impl UvLoopInner {
       prepare_handles: RefCell::new(Vec::with_capacity(8)),
       check_handles: RefCell::new(Vec::with_capacity(8)),
       tcp_handles: RefCell::new(Vec::with_capacity(8)),
+      written_tcp: RefCell::new(Vec::new()),
       pipe_handles: RefCell::new(Vec::with_capacity(4)),
       tty_handles: RefCell::new(Vec::with_capacity(4)),
       waker: RefCell::new(None),
@@ -368,6 +372,14 @@ impl UvLoopInner {
       deadline,
       Duration::from_millis(deadline.saturating_sub(self.now_ms())),
     ))
+  }
+
+  /// Whether any stream handle (TCP, pipe or TTY) exists, ref'd or not:
+  /// what the reactor may have readiness for.
+  pub(crate) fn has_io_handles(&self) -> bool {
+    !self.tcp_handles.borrow().is_empty()
+      || !self.pipe_handles.borrow().is_empty()
+      || !self.tty_handles.borrow().is_empty()
   }
 
   pub(crate) fn has_alive_handles(&self) -> bool {
@@ -588,6 +600,43 @@ impl UvLoopInner {
   ///
   /// # Safety
   /// All TCP handle pointers in `tcp_handles` must be valid.
+  /// Fires the callbacks of the TCP writes that `uv_write` wrote in full on
+  /// the spot, and returns whether there were any: libuv's pending phase.
+  ///
+  /// libuv queues the callback of such a write for the next iteration and
+  /// runs it before that iteration polls for I/O (Node.js completes a plain
+  /// socket's write at once, and a TLS socket's from an immediate), so the
+  /// callback of a write always runs before a peer in the same process
+  /// reads what was written. Fired only when the handle's turn came in the
+  /// ready queue, it ran after the peer's read whenever the peer's handle
+  /// was polled first, and the peer acted on the data while the write still
+  /// looked pending: an HTTP/2 server's `request` listener destroyed the
+  /// client's TLS socket, whose last write then failed with ECANCELED
+  /// (test-http2-client-jsstream-destroy.js, once I/O was polled between
+  /// iterations). [`Self::run_io`] therefore runs this before it reads from
+  /// any handle, and after each handle's callbacks.
+  ///
+  /// A callback may write again; a write that also completes on the spot is
+  /// completed here too, which ends when the socket's buffer is full.
+  fn complete_written_writes(&self) -> bool {
+    let mut any = false;
+    loop {
+      let written = std::mem::take(&mut *self.written_tcp.borrow_mut());
+      if written.is_empty() {
+        return any;
+      }
+      for handle_waker in written {
+        // Zero once the handle is torn down (its queue went with it).
+        let ptr = handle_waker.live_ptr();
+        if ptr == 0 {
+          continue;
+        }
+        // SAFETY: ptr is non-zero, so the handle has not been detached.
+        any |= unsafe { tcp::complete_written_writes(ptr as *mut uv_tcp_t) };
+      }
+    }
+  }
+
   pub(crate) unsafe fn run_io(&self) -> bool {
     // Drain ready queues once. Each popped handle is polled with a
     // `Context` built from its own per-handle waker; tokio re-registers
@@ -626,6 +675,11 @@ impl UvLoopInner {
       // destruction, so the atomic load is always safe.
       let mut tcp_ready: VecDeque<Arc<waker::TcpHandleWaker>> =
         std::mem::take(&mut *self.shared.ready_tcp.lock().unwrap());
+      // Pending phase: the callbacks of the writes `uv_write` completed on
+      // the spot run before any handle is read, and again after each
+      // handle's callbacks, which may have written (see
+      // `complete_written_writes`).
+      any_work |= self.complete_written_writes();
       while let Some(handle_waker) = tcp_ready.pop_front() {
         handle_waker.reset_queued();
         let ptr = handle_waker.live_ptr();
@@ -641,6 +695,7 @@ impl UvLoopInner {
         let mut cx = Context::from_waker(&waker);
         // SAFETY: tcp_ptr is live per the ptr check above.
         any_work |= unsafe { tcp::poll_tcp_handle(tcp_ptr, &mut cx) };
+        any_work |= self.complete_written_writes();
       }
 
       // --- pipe ---

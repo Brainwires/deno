@@ -1593,6 +1593,39 @@ pub fn new_tcp() -> uv_tcp_t {
   }
 }
 
+/// Fires the callbacks of the writes at the head of the handle's queue that
+/// `uv_write` already wrote in full, and returns whether there were any (see
+/// `UvLoopInner::complete_written_writes`).
+///
+/// ### Safety
+/// `tcp_ptr` must be a live, initialized handle.
+pub(crate) unsafe fn complete_written_writes(tcp_ptr: *mut uv_tcp_t) -> bool {
+  let mut completed_writes: Vec<(*mut uv_write_t, Option<uv_write_cb>)> =
+    Vec::new();
+  // SAFETY: caller contract.
+  unsafe {
+    while let Some(pw) = (*tcp_ptr).internal_write_queue.front() {
+      let written = match pw.iovecs {
+        Some(ref iov) => iov.is_empty(),
+        None => pw.offset >= pw.data.len(),
+      };
+      if !written {
+        break;
+      }
+      let pw = (*tcp_ptr).internal_write_queue.pop_front().unwrap();
+      completed_writes.push((pw.req, pw.cb));
+    }
+    let any = !completed_writes.is_empty();
+    // No outstanding borrows on the handle: a callback may queue a write.
+    for (req, cb) in completed_writes {
+      if let Some(cb) = cb {
+        cb(req, 0);
+      }
+    }
+    any
+  }
+}
+
 /// Poll a single TCP handle for I/O readiness and fire callbacks.
 /// Returns `true` if any work was completed.
 ///

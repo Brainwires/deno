@@ -87,7 +87,10 @@ pub fn op_node_getaddrinfo_flags() -> Vec<i32> {
   vec![AI_ADDRCONFIG, AI_ALL, AI_V4MAPPED]
 }
 
-#[op2(stack_trace)]
+// `async(deferred)`: getaddrinfo and getnameinfo run on libuv's thread pool,
+// whose results are delivered in the poll phase, never in the microtask
+// checkpoint of the call (a denied host, or a thread that finished first).
+#[op2(async(deferred), stack_trace)]
 #[cppgc]
 pub async fn op_node_getaddrinfo(
   state: Rc<RefCell<OpState>>,
@@ -323,7 +326,7 @@ fn getaddrinfo_inner(
   }
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), fast, stack_trace)]
 pub async fn op_node_getnameinfo(
   state: Rc<RefCell<OpState>>,
   #[string] ip: String,

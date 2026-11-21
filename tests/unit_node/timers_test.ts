@@ -383,3 +383,85 @@ Deno.test({
     );
   },
 });
+
+// A chain of immediates used to starve the reactor: the executor polled its
+// I/O driver once in 61 loop iterations, so socket readiness waited for up to
+// 61 immediates (an echo for 122). libuv polls for I/O and runs the due
+// timers on every iteration.
+function runImmediateChain(burnMs: number) {
+  const state = { ticks: 0, done: false };
+  const chain = () => {
+    state.ticks++;
+    const end = performance.now() + burnMs;
+    while (performance.now() < end);
+    if (!state.done) timers.setImmediate(chain);
+  };
+  timers.setImmediate(chain);
+  return state;
+}
+
+Deno.test({
+  name: "[node/timers] socket I/O progresses between consecutive immediates",
+  async fn() {
+    const net = await import("node:net");
+    const server = net.createServer((socket) => {
+      socket.on("data", (data) => socket.write(data));
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve)
+    );
+    const { port } = server.address() as { port: number };
+    const client = net.connect(port, "127.0.0.1");
+    client.setNoDelay(true);
+    await new Promise<void>((resolve) => client.once("connect", resolve));
+
+    const chain = runImmediateChain(5);
+    const tickLatencies: number[] = [];
+    try {
+      for (let i = 0; i < 5; i++) {
+        const sentAt = chain.ticks;
+        const echoed = new Promise<void>((resolve) =>
+          client.once("data", () => resolve())
+        );
+        client.write("x");
+        await echoed;
+        tickLatencies.push(chain.ticks - sentAt);
+      }
+    } finally {
+      chain.done = true;
+      client.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    // One round trip is two hops through the reactor: a few immediates. When
+    // the reactor was polled once in 61 iterations it took 61 to 122.
+    const worst = Math.max(...tickLatencies);
+    assert(
+      worst <= 16,
+      `an echo took ${tickLatencies} immediates; it should take a few`,
+    );
+  },
+});
+
+Deno.test({
+  name: "[node/timers] a due timer runs between consecutive immediates",
+  async fn() {
+    const chain = runImmediateChain(5);
+    const tickLatencies: number[] = [];
+    try {
+      for (let i = 0; i < 5; i++) {
+        const setAt = chain.ticks;
+        await new Promise<void>((resolve) => timers.setTimeout(resolve, 1));
+        tickLatencies.push(chain.ticks - setAt);
+      }
+    } finally {
+      chain.done = true;
+    }
+    // 1 ms is due after the first 5 ms immediate. (Timers were not starved
+    // as I/O was; this pins it.)
+    const worst = Math.max(...tickLatencies);
+    assert(
+      worst <= 8,
+      `a 1 ms timer took ${tickLatencies} immediates; it should take one or two`,
+    );
+  },
+});

@@ -6099,6 +6099,7 @@
     },
     "parallel/test-fs-write.js": {},
     "parallel/test-fs-writefile-with-fd.js": {},
+    "parallel/test-gc-net-timeout.js": {},
     "parallel/test-gc-tls-external-memory.js": {},
     "parallel/test-http-agent-abort-controller.js": {},
     "parallel/test-http-autoselectfamily.js": {},

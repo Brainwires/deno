@@ -1111,3 +1111,63 @@ Deno.test({
     AbortSignal.timeout(2000);
   },
 });
+
+// A chain of immediates used to starve the reactor, which was polled once in
+// 61 loop iterations: a `Deno.Conn` echo took about 118 immediates. A due
+// timer is checked beside it (timers were not starved).
+Deno.test(async function ioAndTimersProgressBetweenImmediates() {
+  const listener = Deno.listen({ hostname: "127.0.0.1", port: 0 });
+  const echo = (async () => {
+    const conn = await listener.accept();
+    const buf = new Uint8Array(16);
+    while (true) {
+      const n = await conn.read(buf);
+      if (n === null) break;
+      await conn.write(buf.subarray(0, n));
+    }
+    conn.close();
+  })();
+  const client = await Deno.connect({
+    hostname: "127.0.0.1",
+    port: (listener.addr as Deno.NetAddr).port,
+  });
+
+  let ticks = 0;
+  let done = false;
+  const chain = () => {
+    ticks++;
+    const end = performance.now() + 5;
+    while (performance.now() < end);
+    if (!done) setImmediate(chain);
+  };
+  setImmediate(chain);
+
+  const echoTicks: number[] = [];
+  const timerTicks: number[] = [];
+  try {
+    const buf = new Uint8Array(16);
+    for (let i = 0; i < 5; i++) {
+      let start = ticks;
+      await client.write(new Uint8Array([1]));
+      await client.read(buf);
+      echoTicks.push(ticks - start);
+
+      start = ticks;
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      timerTicks.push(ticks - start);
+    }
+  } finally {
+    done = true;
+    client.close();
+    await echo;
+    listener.close();
+  }
+  assert(
+    Math.max(...echoTicks) <= 16,
+    `an echo took ${echoTicks} immediates; it should take a few`,
+  );
+  assert(
+    Math.max(...timerTicks) <= 8,
+    `a 1 ms timer took ${timerTicks} immediates; it should take one or two`,
+  );
+});
