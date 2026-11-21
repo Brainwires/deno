@@ -2284,6 +2284,11 @@ fn handed_over_test_specifiers<'a>(
       let ok = if specifier.scheme() == "file" {
         let path = deno_path_util::url_to_file_path(&specifier)?;
         patterns.iter().any(|p| {
+          // a file the command line or the include set names by its path
+          // is taken whatever its name or extension, as the walk takes it
+          if crate::util::fs::is_explicitly_specified(p, &path) {
+            return true;
+          }
           // what a walk of this member could find: inside its include set
           // (or, with none, beneath its base) and not excluded
           let taken = p.matches_path(&path, deno_config::glob::PathKind::File)
@@ -2722,6 +2727,7 @@ pub async fn run_tests(
       &factory,
       &roots,
       &plan_entries,
+      true,
     )
     .await?;
   }

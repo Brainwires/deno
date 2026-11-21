@@ -440,8 +440,9 @@ async fn bench_specifiers(
 /// re-exec, each checked against this run's own patterns as
 /// [`is_supported_bench_path`] would take it from a walk (inside a member's
 /// include set, or beneath its base with none; not excluded; a bench module
-/// by its name or named by the include set); a remote one reads nothing
-/// local. Anything else refuses.
+/// by its name or named by the include set; or a file the include set names
+/// by its path, as [`collect_specifiers`] takes it); a remote one reads
+/// nothing local. Anything else refuses.
 fn handed_over_bench_specifiers<'a>(
   member_patterns: impl Iterator<Item = &'a FilePatterns>,
   entries: Vec<crate::sandbox::enforce::PlanEntry>,
@@ -455,16 +456,20 @@ fn handed_over_bench_specifiers<'a>(
         && entry.run
         && (specifier.scheme() != "file" || {
           let path = deno_path_util::url_to_file_path(&specifier)?;
-          is_script_ext(&path)
-            && patterns.iter().any(|p| {
-              p.matches_path(&path, deno_config::glob::PathKind::File)
-                && (p.include.is_some() || path.starts_with(&p.base))
-                && (has_supported_bench_path_name(&path)
-                  || p
-                    .include
-                    .as_ref()
-                    .is_some_and(|i| matches_pattern_or_exact_path(i, &path)))
-            })
+          // a file the command line or the include set names by its path is
+          // taken whatever its name or extension, as the walk takes it
+          patterns
+            .iter()
+            .any(|p| crate::util::fs::is_explicitly_specified(p, &path))
+            || (is_script_ext(&path)
+              && patterns.iter().any(|p| {
+                p.matches_path(&path, deno_config::glob::PathKind::File)
+                  && (p.include.is_some() || path.starts_with(&p.base))
+                  && (has_supported_bench_path_name(&path)
+                    || p.include.as_ref().is_some_and(|i| {
+                      matches_pattern_or_exact_path(i, &path)
+                    }))
+              }))
         });
       if !ok {
         return Err(anyhow!(
@@ -573,7 +578,7 @@ pub async fn run_benchmarks(
     let mut roots = specifiers.clone();
     roots.extend(preload_modules.iter().cloned());
     crate::sandbox::enforce::apply_pending_with_entries(
-      &factory, &roots, &entries,
+      &factory, &roots, &entries, false,
     )
     .await?;
   }
