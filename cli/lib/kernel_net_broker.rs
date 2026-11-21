@@ -178,6 +178,23 @@ impl NetDecider for PermissionsDecider {
       .check_net_unix_socket_connect(&resolved, Some(API_NAME))
       .is_ok()
   }
+
+  fn unix_listen(&self, path: &Path) -> bool {
+    let mut permissions = self.permissions.lock();
+    // what `Deno.listen({ transport: "unix" })` checks: read and write on
+    // the path, and the listen direction of the network grant for it
+    let Ok(checked) = permissions.check_open(
+      Cow::Borrowed(path),
+      OpenAccessKind::ReadWriteNoFollow,
+      Some(API_NAME),
+    ) else {
+      return false;
+    };
+    let resolved = checked.into_path();
+    permissions
+      .check_net_unix_socket_listen(&resolved, Some(API_NAME))
+      .is_ok()
+  }
 }
 
 /// The network authority of a run with these permission options.
@@ -410,5 +427,27 @@ mod tests {
     // answered at once, with no: a prompt would block the test
     assert!(!d.connect("example.com", 443));
     assert!(!d.unix(Path::new("/var/run/docker.sock")));
+  }
+
+  /// A Unix socket the grant names for one direction is bound or connected
+  /// in that direction only (`--allow-net-listen=unix:<path>` binds it).
+  #[test]
+  fn unix_sockets_by_direction() {
+    // (no symlink on the way: the grant and the checked path match as
+    // written)
+    let dir = std::env::temp_dir().canonicalize().unwrap();
+    let a = dir.join("deno-kernel-net-broker-a.sock");
+    let b = dir.join("deno-kernel-net-broker-b.sock");
+    let d = decider(PermissionsOptions {
+      allow_read: Some(vec![]),
+      allow_write: Some(vec![]),
+      allow_net_connect: list(&[&format!("unix:{}", a.display())]),
+      allow_net_listen: list(&[&format!("unix:{}", b.display())]),
+      ..Default::default()
+    });
+    assert!(d.unix(&a));
+    assert!(!d.unix_listen(&a));
+    assert!(d.unix_listen(&b));
+    assert!(!d.unix(&b));
   }
 }

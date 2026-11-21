@@ -90,6 +90,14 @@
       "args": "info --json",
       "output": "info_default.out"
     },
+    // from R4 (the stage the flip ships) the default enforces a run with no
+    // terminal, which is the run `deno info` describes
+    "info_json_r4": {
+      "if": "unix",
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r4" },
+      "args": "info --json",
+      "output": "info_r4.out"
+    },
     "info_json_config": {
       "cwd": "config",
       "args": "info --json",

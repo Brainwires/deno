@@ -602,8 +602,9 @@ pub enum ImplicitNeed {
   OriginData,
   /// `--cpu-prof` / `--heap-prof` folders: written for the user.
   Profiles,
-  /// `deno test --junit-path=<file>`: the report written for the user
-  /// (created before the sandbox applies, so a rule can name it).
+  /// `deno test --junit-path=<file>`, the `DENO_AUDIT_PERMISSIONS` log:
+  /// a report written for the user (created before the sandbox applies, so
+  /// a rule can name it).
   TestReport,
 }
 
@@ -1075,6 +1076,12 @@ pub struct Context {
   /// The effective requested mode (`auto` once enforcement ships, `warn`,
   /// `enforce`, `broker`). Decides the shape and env scrubbing.
   pub mode: KernelSandboxMode,
+  /// The mode the run asked for, before `auto` chose one
+  /// (`ModeResolution::requested`; `mode` by default). The environment is
+  /// scrubbed only when this is an explicit `enforce` / `broker` (a baked
+  /// one included: a strict desktop package), never for an `enforce` that
+  /// `auto` chose (D5, decision O12: it changes what children inherit).
+  pub requested: KernelSandboxMode,
   /// Relative grant paths resolve against this.
   pub cwd: PathBuf,
   pub exe: Option<PathBuf>,
@@ -1109,7 +1116,8 @@ pub struct Context {
   pub origin_data: Vec<PathBuf>,
   /// The `--cpu-prof` / `--heap-prof` folders the run writes.
   pub profile_dirs: Vec<PathBuf>,
-  /// Report files the run writes for the user (`deno test --junit-path`).
+  /// Report files the run writes for the user (`deno test --junit-path`,
+  /// the `DENO_AUDIT_PERMISSIONS` log).
   pub report_files: Vec<PathBuf>,
   /// `auto` enforces the deny rules alone (D1 / D2,
   /// `ModeResolution::deny_ceiling`): the grant passed in is
@@ -1117,12 +1125,6 @@ pub struct Context {
   /// list applies, and a deny the OS can't hold that way is a documented
   /// Deno-only rule, never a refusal (decision O4).
   pub deny_ceiling: bool,
-  /// `auto` chose the mode (`ModeResolution::auto_chosen`); it wasn't
-  /// requested by name. Plan D5: the environment is scrubbed only under an
-  /// enforce asked for by name (and a strict desktop package), never one
-  /// `auto` chose: env stays Deno's checks there (a documented gap), so an
-  /// unattended run keeps the variables the runtime and its tools read.
-  pub auto_chosen: bool,
 }
 
 impl Context {
@@ -1134,6 +1136,7 @@ impl Context {
     Self {
       caps,
       mode,
+      requested: mode,
       cwd,
       exe: None,
       home: None,
@@ -1153,7 +1156,6 @@ impl Context {
       profile_dirs: Vec::new(),
       report_files: Vec::new(),
       deny_ceiling: false,
-      auto_chosen: false,
     }
   }
 }
@@ -3106,7 +3108,7 @@ impl<'a> Compiler<'a> {
     // the grant names
     // (only under an enforce asked for by name, never one `auto` chose: D5)
     let scrub = self.ctx().mode.fails_closed()
-      && !self.ctx().auto_chosen
+      && self.ctx().requested.fails_closed()
       && (matches!(self.os(), TargetOs::Linux | TargetOs::Macos)
         || self.shape == Shape::ModeB);
     let rule = match &self.opts().allow_env {

@@ -1,4 +1,6 @@
 kernel sandbox (preview): auto (default); applies: enforce; would apply: enforce
   why: auto: no prompt can widen the grant here (no terminal, or --no-prompt)
 [WILDCARD]
+    env:        not scrubbed
+[WILDCARD]
 hello

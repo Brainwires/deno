@@ -39,6 +39,14 @@
       "args": "run --quiet --allow-ffi --allow-read=inside --allow-write=inside files.ts",
       "output": "files_allow_all.out"
     },
+    // ... and from R4 (the stage the flip ships) a run with no terminal is
+    // enforced by default: the same refusals as an explicit enforce
+    "default_r4_enforced": {
+      "if": "kernelSandboxEnforce",
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r4" },
+      "args": "run --quiet --allow-ffi --allow-read=inside --allow-write=inside files.ts",
+      "output": "files.out"
+    },
     // the project's deno.json / package.json sit in an ancestor folder
     // outside --allow-read: discovery reads them again in Linux's
     // re-executed image (the compared policy holds exactly that set), and

@@ -672,18 +672,28 @@ fn context_for(
 }
 
 /// The report files the run writes for the user: `deno test`'s JUnit file
-/// (`--junit-path`, or deno.json's `test.reporter`), never stdout (`-`).
+/// (`--junit-path`, or deno.json's `test.reporter`), never stdout (`-`),
+/// and the permission audit log (`DENO_AUDIT_PERMISSIONS=<file>`, which
+/// the CLI opens again in the image after the re-exec).
 fn report_files(cli_options: &CliOptions) -> Vec<PathBuf> {
-  let DenoSubcommand::Test(test_flags) = &cli_options.flags().subcommand else {
-    return Vec::new();
-  };
-  cli_options
-    .resolve_workspace_test_options(test_flags)
-    .junit_path
-    .filter(|path| path != "-")
-    .map(|path| cli_options.initial_cwd().join(path))
-    .into_iter()
-    .collect()
+  let mut files = Vec::new();
+  if let DenoSubcommand::Test(test_flags) = &cli_options.flags().subcommand {
+    files.extend(
+      cli_options
+        .resolve_workspace_test_options(test_flags)
+        .junit_path
+        .filter(|path| path != "-")
+        .map(|path| cli_options.initial_cwd().join(path)),
+    );
+  }
+  #[allow(clippy::disallowed_methods, reason = "the process's own environment")]
+  if let Some(audit) = std::env::var_os("DENO_AUDIT_PERMISSIONS")
+    .filter(|target| !target.is_empty() && target != "otel")
+  {
+    // relative to the working folder, as the CLI creates it
+    files.push(cli_options.initial_cwd().join(audit));
+  }
+  files
 }
 
 /// This program's own origin data folders (`localStorage`, the Cache API):
@@ -851,9 +861,9 @@ pub fn check_run(
   };
   let mut ctx = ctx;
   ctx.deny_ceiling = ceiling;
-  // D5: no env scrub under an enforce `auto` chose (both images decide the
-  // same, so their plans still compare)
-  ctx.auto_chosen = resolution.auto_chosen;
+  // an `enforce` `auto` chose doesn't scrub the environment (D5): only an
+  // explicit (or the harness's forced) enforce / broker does
+  ctx.requested = resolution.requested;
   // a ceiling the OS holds none of here (Linux without an overmount, or
   // denies the kernel never holds) applies nothing: no re-exec, no folder
   // made; its denies are reported as Deno's checks only
@@ -974,6 +984,10 @@ pub fn check_run(
       } else {
         let mut ctx = ctx.clone();
         ctx.mode = KernelSandboxMode::Enforce;
+        // an explicit warn reports what an explicit enforce would do
+        if ctx.requested == KernelSandboxMode::Warn {
+          ctx.requested = KernelSandboxMode::Enforce;
+        }
         let implicit = ImplicitSet::build(options, &ctx);
         enforced = (KernelPolicy::compile(options, &implicit, &ctx), ctx);
         (&enforced.0, &enforced.1)

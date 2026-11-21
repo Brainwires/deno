@@ -50,6 +50,9 @@ const { code, stdout, stderr } = await new Deno.Command(Deno.execPath(), {
     "run",
     "--quiet",
     "--no-prompt",
+    // the route under test is the in-process one: no kernel sandbox (from
+    // R4 `auto` would give this host-scoped grant the supervising broker)
+    "--kernel-sandbox=off",
     "--unstable-net",
     `--allow-net=${grant}`,
     "inner.ts",

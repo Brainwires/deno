@@ -1,0 +1,2 @@
+Warning kernel sandbox: auto can't enforce this run's permissions with the kernel here (enforce doesn't cover this command yet); it runs with Deno's checks only.
+hello

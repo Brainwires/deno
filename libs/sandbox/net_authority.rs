@@ -104,8 +104,16 @@ pub trait NetDecider: Send + Sync + 'static {
   /// Whether a socket that can send anywhere holds the grant: connecting
   /// is unscoped and nothing is denied.
   fn open_datagrams(&self) -> bool;
-  /// Deno's check for the Unix socket at `path` (read and write on it).
+  /// Deno's check for connecting to the Unix socket at `path` (read and
+  /// write on it, and the connect direction of the network grant).
   fn unix(&self, path: &Path) -> bool;
+  /// Deno's check for binding the Unix socket at `path` (read and write on
+  /// it, and the listen direction of the network grant:
+  /// `--allow-net-listen=unix:<path>`). A decider that doesn't tell the
+  /// directions apart answers as for a connect.
+  fn unix_listen(&self, path: &Path) -> bool {
+    self.unix(path)
+  }
 }
 
 /// Resolves a name to its addresses (the system's resolver, or a test's).
@@ -481,7 +489,7 @@ impl NetAuthority {
   /// A Unix socket bound to `path`: a listening stream socket, or a
   /// datagram one.
   pub fn bind_unix(&self, path: &Path, datagram: bool) -> io::Result<OwnedFd> {
-    if !self.decider.unix(path) {
+    if !self.decider.unix_listen(path) {
       return Err(refused(format_args!(
         "the socket {} is not in the grant",
         path.display()

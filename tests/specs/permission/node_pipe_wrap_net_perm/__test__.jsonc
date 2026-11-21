@@ -5,9 +5,12 @@
       "args": "run --allow-read --allow-write --deny-net main.ts",
       "output": "main.out"
     },
+    // Deno's check alone: under `auto` from R4 Linux's kernel sandbox
+    // refuses Unix sockets an unscoped --allow-net grants without read and
+    // write (a documented fail-closed gap; name them with unix:<path>)
     "node_pipe_wrap_abstract_socket": {
       "if": "linux",
-      "args": "run --allow-net abstract.ts",
+      "args": "run --kernel-sandbox=off --allow-net abstract.ts",
       "output": "abstract.out"
     }
   }
