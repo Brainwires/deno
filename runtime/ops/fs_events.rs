@@ -99,9 +99,7 @@ impl FsEventsResource {
       *count = count.saturating_sub(1);
       if *count == 0 {
         watched_paths.remove(&key);
-        // Best-effort: ignore errors (e.g. the watcher already lost track of
-        // the path because the path was deleted).
-        let _ = watcher.unwatch(path);
+        unwatch_shared(&mut watcher, &watched_paths, path);
       }
     }
   }
@@ -1024,8 +1022,12 @@ fn open_fs_events_resource(
         rollback_partial_open(&inner, id, &watched);
         return Err(FsEventsError::Notify(JsNotifyError(e)));
       }
+      let added = *count == 0;
       *count += 1;
       watched.push((path.clone(), recursive_mode));
+      if added && recursive_mode == RecursiveMode::NonRecursive {
+        restore_overlapping_watches(&mut watcher, &watched_paths, path);
+      }
     }
   }
 
@@ -1039,6 +1041,58 @@ fn open_fs_events_resource(
   };
   let rid = state.resource_table.add(resource);
   Ok(rid)
+}
+
+/// denext: removes `path`'s watch from the shared backend, then restores
+/// what that took from the watches still registered (see
+/// [`restore_overlapping_watches`]).
+fn unwatch_shared(
+  watcher: &mut RecommendedWatcher,
+  watched_paths: &HashMap<(PathBuf, RecursiveMode), usize>,
+  path: &Path,
+) {
+  // Best-effort: ignore errors (e.g. the watcher already lost track of the
+  // path because the path was deleted).
+  let _ = watcher.unwatch(path);
+  restore_overlapping_watches(watcher, watched_paths, path);
+}
+
+/// denext: inotify watches inodes, not (path, mode) pairs: notify's backend
+/// keeps one watch per directory, so watches on overlapping paths share it.
+/// Unwatching a recursive `dir` removed the watch of `dir/sub` that a
+/// non-recursive watch of `dir/sub` still needed (that watcher went silent),
+/// unwatching `dir/sub` took a directory out of a recursive watch of `dir`,
+/// and watching `dir/sub` non-recursively marked its directory
+/// non-recursive, so directories made in it later were no longer watched for
+/// the recursive watch. Every remaining registered watch overlapping `path`
+/// is applied again, the recursive ones last so their directories stay
+/// recursive (events are still matched per watcher, see
+/// [`event_matches_watched_paths`]). Other backends watch each path on its
+/// own and are left alone (re-adding a path on Windows would add a second
+/// `ReadDirectoryChangesW` request, denoland/deno#27742).
+#[cfg_attr(
+  not(any(target_os = "linux", target_os = "android")),
+  allow(
+    unused_variables,
+    reason = "only inotify shares a watch between overlapping paths"
+  )
+)]
+fn restore_overlapping_watches(
+  watcher: &mut RecommendedWatcher,
+  watched_paths: &HashMap<(PathBuf, RecursiveMode), usize>,
+  path: &Path,
+) {
+  #[cfg(any(target_os = "linux", target_os = "android"))]
+  {
+    let mut overlapping: Vec<&(PathBuf, RecursiveMode)> = watched_paths
+      .keys()
+      .filter(|(p, _)| p.starts_with(path) || path.starts_with(p))
+      .collect();
+    overlapping.sort_by_key(|(_, mode)| *mode == RecursiveMode::Recursive);
+    for (p, mode) in overlapping {
+      let _ = watcher.watch(p, *mode);
+    }
+  }
 }
 
 /// Undo the `senders` push and any `watch` calls we performed before
@@ -1060,7 +1114,7 @@ fn rollback_partial_open(
       *count = count.saturating_sub(1);
       if *count == 0 {
         watched_paths.remove(&key);
-        let _ = watcher.unwatch(path);
+        unwatch_shared(&mut watcher, &watched_paths, path);
       }
     }
   }

@@ -627,3 +627,41 @@ Deno.test(
     }
   },
 );
+
+// denext: watches on overlapping paths share the backend's watch of a
+// directory on Linux (inotify), so closing a recursive watcher of an
+// ancestor, or opening and closing a non-recursive one inside it, must leave
+// the other watcher's events intact.
+Deno.test(
+  { permissions: { read: true, write: true } },
+  async function watchFsOverlappingWatchersCloseIndependently() {
+    const testDir = await makeTempDir();
+    const sub = testDir + "/sub";
+    Deno.mkdirSync(sub);
+    await delay(100);
+
+    async function next(watcher: Deno.FsWatcher, name: string) {
+      for await (const event of watcher) {
+        if (event.paths.some((p) => p.endsWith(name))) return;
+      }
+    }
+
+    // The recursive watcher of the ancestor closes first.
+    const flat = Deno.watchFs(sub, { recursive: false });
+    Deno.watchFs(testDir).close();
+    const sawFirst = next(flat, "first.txt");
+    Deno.writeFileSync(sub + "/first.txt", new Uint8Array([1]));
+    await sawFirst;
+    flat.close();
+
+    // The non-recursive watcher inside it closes first, and a directory made
+    // in `sub` afterwards is still watched for the recursive one.
+    using recursive = Deno.watchFs(testDir);
+    Deno.watchFs(sub, { recursive: false }).close();
+    Deno.mkdirSync(sub + "/later");
+    await delay(200);
+    const sawSecond = next(recursive, "second.txt");
+    Deno.writeFileSync(sub + "/later/second.txt", new Uint8Array([1]));
+    await sawSecond;
+  },
+);

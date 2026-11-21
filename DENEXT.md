@@ -19507,6 +19507,17 @@ where the changes are discussed.
        `ignore` paths still cover everything below them. The Linux new-directory
        scan (item 482) already reported its synthesized creates to recursive
        watchers only.
+     - **Overlapping watches on Linux**: inotify watches inodes, and notify's
+       backend keeps one watch per directory, so watches of overlapping paths
+       shared it. Closing a recursive `Deno.watchFs(dir)` removed the watch of
+       `dir/sub` that a non-recursive watch of `dir/sub` still had (that watcher
+       went silent: `watchFsNonRecursiveBesideRecursiveAncestor` hung, its first
+       watcher closing), closing the non-recursive one took `dir/sub` out of the
+       recursive watch, and opening it marked `dir/sub` non-recursive, so
+       directories made there later went unwatched. After a watch is removed, or
+       a non-recursive one added, every remaining watch overlapping its path is
+       applied again on Linux, the recursive ones last. Other backends watch
+       each path on their own.
      - **UDP in a cluster**: a worker's `dgram` bind never asked the primary for
        the socket (`SharedHandle` answered ENOTSUP for UDP), so each worker
        bound a port of its own: parallel/test-cluster-dgram-1.js sent to a port
@@ -19563,16 +19574,21 @@ where the changes are discussed.
        loopback.
      - Tests: `fs_events` unit tests (a non-recursive watcher beside a recursive
        one, with removed paths; a non-recursive file watch) and
-       `watchFsNonRecursiveBesideRecursiveAncestor` in
-       `tests/unit/fs_events_test.ts` (fails on the train binary 3 of 3, passes
-       20 of 20); `udp` unit test for the loopback rewrite;
+       `watchFsNonRecursiveBesideRecursiveAncestor` and
+       `watchFsOverlappingWatchersCloseIndependently` (hangs on the train binary
+       on Linux) in `tests/unit/fs_events_test.ts` (fails on the train binary 3
+       of 3, passes 20 of 20); `udp` unit test for the loopback rewrite;
        `tests/unit_node/dgram_test.ts` "a send to 0.0.0.0 reaches a local
        socket" and "reusePort"; `tsc::js` test that a build without a snapshot
        gives the TSC isolate a transpiler. macOS: the four cluster UDP tests 60
        of 60 each (four in parallel), the harness 5 of 5;
        test-child-process-pass-fd.js 20 of 20 alone, 15 of 15 in the harness, 18
        of 18 at six at once; `tests/unit_node/_fs/` whole under the `hmr` build.
-       LINUX_RESULTS
+       On aarch64 Linux (Docker): `tests/unit/fs_events_test.ts` whole, the
+       non-recursive test 20 of 20, `dgram_test.ts`, every enabled
+       `test-fs-watch*` node test, the seven cluster / reuseport UDP tests,
+       test-cluster-dgram-reuse / -ipv6only / child-index-dgram and
+       test-child-process-pass-fd.js 10 of 10 each.
      - Node tests enabled: parallel/test-cluster-dgram-1.js, -2.js, -bind-fd.js,
        -reuseport.js, test-cluster-disconnect-unshared-udp.js,
        test-dgram-reuseport.js, test-child-process-dgram-reuseport.js, and
