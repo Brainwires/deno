@@ -1383,16 +1383,53 @@ pub fn take_inherited_plan() -> Result<Option<EnforcePlan>, String> {
   EnforcePlan::from_bytes(&bytes).map(Some)
 }
 
-/// The descriptors open in this process (fd 3 and up).
-fn open_fds() -> Vec<i32> {
-  std::fs::read_dir("/proc/self/fd")
-    .map(|d| {
-      d.flatten()
-        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
-        .filter(|fd| *fd > 2)
-        .collect()
+/// The descriptors open in this process (fd 3 and up), from
+/// `/proc/self/fd`; `None` when it can't be listed (inside an outer kernel
+/// sandbox whose `/proc/self` rule names its own process: a nested run).
+fn open_fds() -> Option<Vec<i32>> {
+  std::fs::read_dir("/proc/self/fd").ok().map(|d| {
+    d.flatten()
+      .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+      .filter(|fd| *fd > 2)
+      .collect()
+  })
+}
+
+/// Every descriptor number from 3 below the descriptor limit (at most
+/// 65536) that is open, probed one by one.
+fn probed_fds() -> Vec<i32> {
+  // SAFETY: a zeroed rlimit is a valid out parameter
+  let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+  // SAFETY: a valid out parameter
+  let ok = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0;
+  let max = if ok {
+    limit.rlim_cur.min(65_536) as i32
+  } else {
+    1024
+  };
+  (3..max)
+    .filter(|&fd| {
+      // SAFETY: flags of a descriptor number; one that isn't open just fails
+      unsafe { libc::fcntl(fd, libc::F_GETFD) >= 0 }
     })
-    .unwrap_or_default()
+    .collect()
+}
+
+/// Every descriptor from 3 up close-on-exec in one call (`close_range`,
+/// Linux 5.11; on an older kernel nothing happens and the caller's probe
+/// covers what lies below the limit).
+fn mark_all_close_on_exec() {
+  const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
+  // SAFETY: close_range with CLOSE_RANGE_CLOEXEC closes nothing; it only
+  // sets a flag
+  unsafe {
+    libc::syscall(
+      libc::SYS_close_range,
+      3 as libc::c_uint,
+      libc::c_uint::MAX,
+      CLOSE_RANGE_CLOEXEC,
+    );
+  }
 }
 
 /// Re-executes this program (`/proc/self/exe`, the same argv, so the PID is
@@ -1410,8 +1447,20 @@ pub fn reexec(
     Err(err) => return err,
   };
   let memfd_raw = memfd.as_raw_fd();
-  for fd in open_fds() {
-    if fd == memfd_raw || keep(fd) {
+  // where /proc/self/fd can't be listed (a nested run) the listing never
+  // fails open: every descriptor is made close-on-exec, then the open ones
+  // below the limit are probed and those to keep are opened again for the
+  // exec (a descriptor an ancestor's broker dial left must not survive it)
+  let (fds, restore) = match open_fds() {
+    Some(fds) => (fds, false),
+    None => {
+      mark_all_close_on_exec();
+      (probed_fds(), true)
+    }
+  };
+  for fd in fds {
+    let kept = fd == memfd_raw || keep(fd);
+    if kept && !restore {
       continue;
     }
     // SAFETY: setting a flag on a descriptor this process holds; a stale
@@ -1419,7 +1468,12 @@ pub fn reexec(
     unsafe {
       let flags = libc::fcntl(fd, libc::F_GETFD);
       if flags >= 0 {
-        libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+        let flags = if kept {
+          flags & !libc::FD_CLOEXEC
+        } else {
+          flags | libc::FD_CLOEXEC
+        };
+        libc::fcntl(fd, libc::F_SETFD, flags);
       }
     }
   }
