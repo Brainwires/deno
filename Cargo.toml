@@ -616,6 +616,14 @@ opt-level = 3
 [profile.dev.package.sha3]
 opt-level = 3
 
+# RSA key generation (WebCrypto, node:crypto) runs in aws-lc; its C code
+# is built at OPT_LEVEL 0 on `debug`, which makes RSA-4096 keys slow
+[profile.dev.package.aws-lc-sys]
+opt-level = 3
+
+[profile.dev.package.aws-lc-rs]
+opt-level = 3
+
 [profile.release.package.async-compression]
 opt-level = 3
 [profile.release.package.base64-simd]

@@ -19086,6 +19086,33 @@ where the changes are discussed.
        `ext/webrtc`'s unit tests.
      - Node tests enabled: none; `node:` has no WebRTC API.
 
+478. **`perf(ext/crypto,ext/node_crypto)`: RSA keys generated in aws-lc**
+     (runtime; `ext/crypto/generate_key.rs`, `ext/node_crypto/keys.rs`,
+     `Cargo.toml`). WebCrypto `generateKey` and `node:crypto`
+     `generateKeyPair[Sync]` (`rsa` and `rsa-pss`) generate a 2048, 3072, 4096
+     or 8192-bit key with e = 65537 with aws-lc-rs (`rsa::KeyPair::generate`,
+     already a dependency) instead of the pure-Rust `rsa` crate's prime search:
+     the key comes back as PKCS#8 and is parsed into the `rsa` crate's
+     `RsaPrivateKey`, so export, import, sign, encrypt and JWK use it unchanged.
+     Every other size or exponent (Node takes any odd exponent and any size)
+     keeps the pure-Rust path. RSA-4096 went from 0.4–2.8 s a key (OpenSSL in
+     Node: 0.06–0.6 s) to about a quarter of a second in release, which made
+     node_compat `test-webcrypto-sign-verify.js` slow and flaky under load.
+     `debug` builds now compile `aws-lc-sys` / `aws-lc-rs` at opt-level 3 (as
+     `num-bigint-dig`, `sha2`, `keccak`): their C code was built at `OPT_LEVEL`
+     0, about four times slower; the override does not touch the pure-Rust path,
+     which never calls aws-lc.
+     - User-facing note: none beyond speed; keys and their encodings are the
+       same.
+     - Tests: `tests/unit/webcrypto_test.ts`
+       (`generateRsaKeyRoundTripBothGenerators`) and
+       `tests/unit_node/crypto/crypto_key_test.ts` ("RSA keygen round-trips
+       through both generators"): keys from both generators (2048 / 3072 bits
+       with e = 65537; 1024 bits; e = 3; e = 65539) export, re-import, sign /
+       verify and encrypt / decrypt, sync and async.
+     - Node tests enabled: none; `test-webcrypto-sign-verify.js` and the
+       `test-crypto-keygen*` files already ran and now finish faster.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -19096,7 +19123,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-477) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-478) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

@@ -4494,3 +4494,87 @@ Deno.test(async function subtleMlDsaNonEmptyContextRejected() {
   );
   assertEquals(verified, false);
 });
+
+// RSA keys come from aws-lc for 2048 / 3072 / 4096 / 8192 bits with
+// e = 65537 and from the pure-Rust generator otherwise; both must give keys
+// that export, re-import, sign / verify and encrypt / decrypt.
+Deno.test(async function generateRsaKeyRoundTripBothGenerators() {
+  const subtle = globalThis.crypto.subtle;
+  const cases: [number, number[]][] = [
+    [2048, [1, 0, 1]], // aws-lc
+    [3072, [1, 0, 1]], // aws-lc
+    [1024, [1, 0, 1]], // pure Rust: size aws-lc doesn't generate
+    [2048, [3]], // pure Rust: exponent aws-lc doesn't generate
+  ];
+  const data = new TextEncoder().encode("round trip");
+  for (const [modulusLength, exponent] of cases) {
+    const publicExponent = new Uint8Array(exponent);
+    const signing = await subtle.generateKey(
+      {
+        name: "RSASSA-PKCS1-v1_5",
+        modulusLength,
+        publicExponent,
+        hash: "SHA-256",
+      },
+      true,
+      ["sign", "verify"],
+    );
+    const algorithm = signing.privateKey.algorithm as RsaHashedKeyAlgorithm;
+    assertEquals(algorithm.modulusLength, modulusLength);
+    assertEquals(algorithm.publicExponent, publicExponent);
+
+    const signature = await subtle.sign(
+      "RSASSA-PKCS1-v1_5",
+      signing.privateKey,
+      data,
+    );
+    assertEquals(signature.byteLength, modulusLength / 8);
+    assert(
+      await subtle.verify(
+        "RSASSA-PKCS1-v1_5",
+        signing.publicKey,
+        signature,
+        data,
+      ),
+    );
+
+    const importAlg = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" };
+    const pkcs8 = await subtle.exportKey("pkcs8", signing.privateKey);
+    const spki = await subtle.exportKey("spki", signing.publicKey);
+    const jwk = await subtle.exportKey("jwk", signing.privateKey);
+    assertEquals(jwk.e, exponent.length === 1 ? "Aw" : "AQAB");
+    const fromPkcs8 = await subtle.importKey("pkcs8", pkcs8, importAlg, true, [
+      "sign",
+    ]);
+    const fromSpki = await subtle.importKey("spki", spki, importAlg, true, [
+      "verify",
+    ]);
+    const fromJwk = await subtle.importKey("jwk", jwk, importAlg, true, [
+      "sign",
+    ]);
+    assertEquals(
+      new Uint8Array(await subtle.exportKey("pkcs8", fromJwk)),
+      new Uint8Array(pkcs8),
+    );
+    const resigned = await subtle.sign("RSASSA-PKCS1-v1_5", fromPkcs8, data);
+    assertEquals(new Uint8Array(resigned), new Uint8Array(signature));
+    assert(await subtle.verify("RSASSA-PKCS1-v1_5", fromSpki, signature, data));
+
+    const oaep = await subtle.generateKey(
+      { name: "RSA-OAEP", modulusLength, publicExponent, hash: "SHA-256" },
+      true,
+      ["encrypt", "decrypt"],
+    );
+    const ciphertext = await subtle.encrypt(
+      { name: "RSA-OAEP" },
+      oaep.publicKey,
+      data,
+    );
+    assertEquals(
+      new Uint8Array(
+        await subtle.decrypt({ name: "RSA-OAEP" }, oaep.privateKey, ciphertext),
+      ),
+      data,
+    );
+  }
+});

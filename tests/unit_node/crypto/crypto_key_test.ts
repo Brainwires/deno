@@ -13,6 +13,8 @@ import {
   generateKeyPair,
   generateKeyPairSync,
   KeyObject,
+  privateDecrypt,
+  publicEncrypt,
   randomBytes,
   sign,
   verify,
@@ -1760,4 +1762,68 @@ Deno.test("createPrivateKey rejects public CryptoKey", function () {
     () => createPrivateKey(rsaCryptoKeyPair.publicKey as any),
     TypeError,
   );
+});
+
+// node:crypto generates 2048 / 3072 / 4096 / 8192-bit keys with e = 65537
+// in aws-lc and every other size or exponent with the pure-Rust generator;
+// keys from both must export, re-import, sign / verify and encrypt / decrypt.
+Deno.test("RSA keygen round-trips through both generators", async function () {
+  const cases: [string, number, number][] = [
+    ["rsa", 2048, 65537], // aws-lc
+    ["rsa", 1024, 65537], // pure Rust: size aws-lc doesn't generate
+    ["rsa", 2048, 3], // pure Rust: exponent aws-lc doesn't generate
+    ["rsa", 1024, 0x10001 + 2], // pure Rust: a non-standard odd exponent
+    ["rsa-pss", 2048, 65537], // aws-lc
+    ["rsa-pss", 1024, 3], // pure Rust
+  ];
+  const data = Buffer.from("round trip");
+  const generate = promisify(generateKeyPair);
+  for (const [type, modulusLength, publicExponent] of cases) {
+    for (const async of [false, true]) {
+      const { privateKey, publicKey } = async
+        ? await (generate as any)(type, { modulusLength, publicExponent })
+        : generateKeyPairSync(type as "rsa", {
+          modulusLength,
+          publicExponent,
+        });
+      assertEquals(privateKey.asymmetricKeyType, type);
+      assertEquals(
+        privateKey.asymmetricKeyDetails.modulusLength,
+        modulusLength,
+      );
+      assertEquals(
+        privateKey.asymmetricKeyDetails.publicExponent,
+        BigInt(publicExponent),
+      );
+
+      const signature = sign("sha256", data, privateKey);
+      assertEquals(signature.length, modulusLength / 8);
+      assert(verify("sha256", data, publicKey, signature));
+
+      // RSA-PSS keys don't export as PKCS#8 yet (unrelated to keygen).
+      if (type !== "rsa") continue;
+      const pem = privateKey.export({ type: "pkcs8", format: "pem" });
+      const spki = publicKey.export({ type: "spki", format: "der" });
+      const jwk = privateKey.export({ format: "jwk" });
+      const reimported = createPrivateKey(pem);
+      const reimportedPublic = createPublicKey({
+        key: spki,
+        format: "der",
+        type: "spki",
+      });
+      assert(reimported.equals(privateKey));
+      assert(reimportedPublic.equals(publicKey));
+      assert(
+        verify(
+          "sha256",
+          data,
+          reimportedPublic,
+          sign("sha256", data, reimported),
+        ),
+      );
+      assert(createPrivateKey({ key: jwk, format: "jwk" }).equals(privateKey));
+      const ciphertext = publicEncrypt(publicKey, data);
+      assertEquals(privateDecrypt(privateKey, ciphertext), data);
+    }
+  }
 });
