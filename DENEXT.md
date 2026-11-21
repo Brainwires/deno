@@ -864,7 +864,8 @@ where the changes are discussed.
     `gen/` (keyed by the source, the transpile options and the `deno_ast`
     version, which both builds share; a module the Vitest transform changes is
     emitted under another key, so its emit is the one exception the two builds
-    overwrite). `deno clean` removes both copies. Tests:
+    overwrite). `deno clean` removes both copies. Since item 486 each name is a
+    base the runtime version is appended to. Tests:
     `version_keyed_caches_are_the_forks_own` in
     `libs/resolver/cache/deno_dir.rs`; the integration tests that inspect the
     type-check and code caches (`tests/integration/jsr_tests.rs`,
@@ -19587,6 +19588,85 @@ where the changes are discussed.
        -reuseport.js, test-cluster-disconnect-unshared-udp.js,
        test-dgram-reuseport.js, test-child-process-dgram-reuseport.js, and
        sequential/test-child-process-pass-fd.js on macOS.
+
+486. **`perf(cache)`: cache databases per runtime version, and a shared DENO_DIR
+     and killed process trees in the node_compat harness** (CLI and tests;
+     `cli/cache/cache_db.rs`, `cli/cache/cache_db_files.rs`,
+     `libs/resolver/cache/deno_dir.rs`, `tests/node_compat/mod.rs`,
+     `tests/util/lib/process.rs`, `tests/util/lib/builders.rs`).
+     - **One file per version.** Each DENO_DIR cache database (the V8 code
+       cache, the module-info, node-analysis, fast-check, type-check and
+       fmt/lint incremental caches) was one file that a CLI of another version
+       wiped on open (`CacheDBConfiguration::on_version_change`). Item 28 kept
+       the fork apart from stock Deno, but denext runtimes of different versions
+       (project pins, dev builds) still alternated on one file, so every switch
+       deleted and rebuilt it (the report that started this measured
+       `run empty.cjs` at 35 ms warm and 71 ms right after another version ran,
+       on a 485 MB code cache). On the mini (debug builds, alternating with a
+       3.0.0-denext.27 release, load average 20-30): `run empty.cjs` 69 ms warm
+       and 134 ms right after the other version before, 83 and 81 ms after;
+       `test/common/index.js` 137 and 189 ms before, 117 and 127 ms after.
+       `CacheDB::from_path` now opens `<name>_<version>` (the version with
+       anything outside `[A-Za-z0-9.+-]` replaced by `_`, always starting with a
+       digit), so versions never wipe each other; `on_version_change` still
+       guards a file whose stored version differs.
+     - **Pruning.** When a version's database is created, or when it was last
+       marked used more than a day ago (its modification time is then set, by
+       path, so at most one write a day), the other versions' files of that
+       cache, and the unversioned ones of earlier builds, whose newest
+       modification time among the database and its `-wal` / `-shm` / `-journal`
+       files is 7 days old or more are removed, the database first. The running
+       version's files are never touched, and a database another process has
+       open is kept: on Unix an `F_GETLK` probe of the database and its `-shm`
+       (every connection to a WAL database holds a read lock there); on Windows
+       the removal of an open file fails. The upkeep runs on the eager-init
+       thread after the connection opens, outside its lock.
+     - **node_compat: one DENO_DIR per run.** Each test got a fresh DENO_DIR
+       (`util::deno_cmd()`), so each built a V8 code cache of `test/common/` and
+       its own file that nothing read again. The run now shares one, created and
+       warmed (one run of `test/common/index.js`) before the tests and removed
+       at the end; the cache databases are SQLite in WAL mode and rusqlite waits
+       up to 5 s on a lock, so parallel tests share them safely. A test whose
+       `env` sets `DENO_DIR`, or marked `"isolatedDenoDir": true`, gets its own;
+       `DENO_NODE_COMPAT_FRESH_DENO_DIR=1` restores a fresh one for every test.
+       Measured with the same binaries (debug, 8 tests at once, load average
+       20-30): the 340 `test-fs-*` tests took 54 s of CPU on the shared
+       directory and 77 s on fresh ones (about 68 ms per test, half of it system
+       time creating and removing the directories and databases), the 72
+       `test-buffer*` tests 17 and 22 s.
+     - **node_compat: process trees.** A test that timed out was killed alone,
+       so its children survived it and the harness (five `fixtures/loop.js`
+       processes ran for 5.5 h). Each test now leads a process group of its own
+       (Unix) or runs in a kill-on-close job object (Windows): `ProcessTree`
+       kills the whole tree on a timeout, and also when the test's own process
+       exits, before it is reaped (a zombie leader keeps the group id from being
+       reused), so leftovers never outlive a test or hold its output pipes. The
+       groups no longer get the terminal's Ctrl+C, so the harness kills every
+       live tree on SIGINT / SIGTERM / SIGHUP and when `main` ends or unwinds. A
+       grandchild that starts a session of its own (`detached: true`) still
+       escapes on Unix.
+     - Tests: `versions_alternate_without_wiping` in `cli/cache/cache_db.rs`;
+       `version_tags_and_paths`, `groups_of_a_cache`,
+       `prunes_only_stale_files_of_other_versions`,
+       `marks_used_once_a_day_and_prunes_then` and
+       `keeps_a_database_another_process_holds` (a second process holds a stale
+       database open) in `cli/cache/cache_db_files.rs`;
+       `timeout_kills_the_grandchild`, `exit_kills_a_leftover_grandchild` and
+       `kill_all_kills_live_trees` in `tests/util/lib/process.rs`; the
+       integration tests that inspect the code and type-check caches look for
+       the versioned files. The whole node_compat suite on macOS (debug, 8 at
+       once), before and after: no test that passed before fails after; the four
+       tests that failed or skipped in one run only pass alone under both
+       harnesses (load flakes); the run before left a `fixtures/loop.js` process
+       behind (from parallel/test-inspector-ip-detection.js), the run after
+       none. A first version of `ProcessTree` waited for the leader without
+       closing its stdin first (as `Child::wait` does), which hung
+       parallel/test-worker-no-stdin-stdout-interaction.js (a worker reading
+       stdin); the waiter now closes it first.
+     - User-facing note: `DENO_DIR` holds one copy of each cache database per
+       runtime version (`v8_code_cache_v2_denext_<version>`, …); runtimes used
+       side by side keep their caches, and another version's copy goes once it
+       has gone unused for 7 days.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

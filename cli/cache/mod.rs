@@ -1,6 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 mod cache_db;
+mod cache_db_files;
 mod caches;
 mod check;
 mod code_cache;

@@ -4,7 +4,10 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::time::SystemTime;
 
 use deno_core::error::AnyError;
 use deno_core::parking_lot::Mutex;
@@ -79,6 +82,9 @@ pub struct CacheDBConfiguration {
   /// SQL to run for a new database.
   pub table_initializer: &'static str,
   /// SQL to run when the version from [`crate::version::deno()`] changes.
+  /// denext: an on-disk cache is a file of its version's own
+  /// ([`CacheDB::from_path`]), so this only runs for a database whose version
+  /// was rewritten in place (tests) or whose file names two versions alike.
   pub on_version_change: &'static str,
   /// Prepared statements to pre-heat while initializing the database.
   pub preheat_queries: &'static [&'static str],
@@ -163,6 +169,11 @@ pub struct CacheDB {
   // TODO(mmastrac): We can probably simplify our thread-safe implementation here
   conn: Arc<Mutex<OnceCell<ConnectionState>>>,
   path: Option<PathBuf>,
+  /// denext: the cache's file name without the version, whose other
+  /// versions' files are pruned ([`super::cache_db_files`]).
+  base_path: Option<PathBuf>,
+  /// denext: whether opening `path` created it.
+  created: Arc<AtomicBool>,
   config: &'static CacheDBConfiguration,
   version: &'static str,
 }
@@ -207,20 +218,30 @@ impl CacheDB {
     CacheDB {
       conn: Arc::new(Mutex::new(OnceCell::new())),
       path: None,
+      base_path: None,
+      created: Default::default(),
       config,
       version,
     }
   }
 
+  /// Opens the cache database `base_path` of `version`: denext keeps one
+  /// file per version, `<base_path>_<version>`, instead of wiping a shared
+  /// one whenever another version opened it, and removes the other
+  /// versions' files once they have gone unused for a week (see
+  /// [`super::cache_db_files`]).
   pub fn from_path(
     config: &'static CacheDBConfiguration,
-    path: PathBuf,
+    base_path: PathBuf,
     version: &'static str,
   ) -> Self {
+    let path = super::cache_db_files::versioned_path(&base_path, version);
     log::debug!("Opening cache {}...", path.to_string_lossy());
     let new = Self {
       conn: Arc::new(Mutex::new(OnceCell::new())),
       path: Some(path),
+      base_path: Some(base_path),
+      created: Default::default(),
       config,
       version,
     };
@@ -254,6 +275,8 @@ impl CacheDB {
     Self {
       conn: Arc::new(Mutex::new(cell)),
       path: self.path.clone(),
+      base_path: self.base_path.clone(),
+      created: self.created.clone(),
       config: self.config,
       version,
     }
@@ -263,8 +286,20 @@ impl CacheDB {
     let clone = self.clone();
     debug_assert!(tokio::runtime::Handle::try_current().is_ok());
     spawn_blocking(move || {
-      let lock = clone.conn.lock();
-      clone.initialize(&lock);
+      {
+        let lock = clone.conn.lock();
+        clone.initialize(&lock);
+      }
+      // denext: the version files' upkeep, off the main thread and outside
+      // the connection's lock
+      if let (Some(base_path), Some(path)) = (&clone.base_path, &clone.path) {
+        super::cache_db_files::maintain_versioned_files(
+          base_path,
+          path,
+          clone.created.load(Ordering::Relaxed),
+          SystemTime::now(),
+        );
+      }
     });
   }
 
@@ -338,9 +373,14 @@ impl CacheDB {
     &self,
     lock: &'a MutexGuard<OnceCell<ConnectionState>>,
   ) -> &'a ConnectionState {
-    lock.get_or_init(|| match self.open_connection() {
-      Ok(conn) => conn,
-      Err(e) => ConnectionState::Error(e.into()),
+    lock.get_or_init(|| {
+      if let Some(path) = &self.path {
+        self.created.store(!path.exists(), Ordering::Relaxed);
+      }
+      match self.open_connection() {
+        Ok(conn) => conn,
+        Err(e) => ConnectionState::Error(e.into()),
+      }
     })
   }
 
@@ -766,6 +806,44 @@ mod tests {
       })
       .unwrap();
     assert_eq!(res, None);
+  }
+
+  /// denext: two versions alternating on one cache keep each other's rows
+  /// (each opens a file of its own instead of wiping a shared one).
+  #[tokio::test]
+  async fn versions_alternate_without_wiping() {
+    let temp_dir = TempDir::new();
+    let base = temp_dir.path().join("test_cache").to_path_buf();
+    let rows = |version: &'static str| {
+      let db = CacheDB::from_path(&TEST_DB, base.clone(), version);
+      let mut rows = Vec::new();
+      db.with_connection(|conn| {
+        let mut stmt = conn.prepare("select value from test order by value")?;
+        let mut query = stmt.query([])?;
+        while let Some(row) = query.next()? {
+          rows.push(row.get::<_, String>(0)?);
+        }
+        Ok(())
+      })
+      .unwrap();
+      (db, rows)
+    };
+
+    let (db, empty) = rows("1.0.0");
+    assert!(empty.is_empty());
+    db.execute("insert into test values (?1)", ["one"]).unwrap();
+    drop(db);
+    let (db, empty) = rows("2.0.0");
+    assert!(empty.is_empty());
+    db.execute("insert into test values (?1)", ["two"]).unwrap();
+    drop(db);
+    for _ in 0..2 {
+      assert_eq!(rows("1.0.0").1, ["one"]);
+      assert_eq!(rows("2.0.0").1, ["two"]);
+    }
+    assert!(temp_dir.path().join("test_cache_1.0.0").exists());
+    assert!(temp_dir.path().join("test_cache_2.0.0").exists());
+    assert!(!temp_dir.path().join("test_cache").exists());
   }
 
   #[tokio::test]
