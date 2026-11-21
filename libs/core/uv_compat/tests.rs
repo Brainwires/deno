@@ -3468,6 +3468,262 @@ async fn pipe_bound_connect_transfers_raw_fd_ownership() {
   .await;
 }
 
+/// DENEXT.md item 478: `net.Socket({ fd: pipe.fd })` on a bound pipe opens
+/// the descriptor in a second handle. Only the handle that opened it last
+/// owns it: closing the first handle leaves the descriptor open for the
+/// second, which goes on using it.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn pipe_open_of_a_bound_pipe_fd_has_one_owner() {
+  use tokio::io::AsyncReadExt;
+
+  run_test(async |runtime, uv_loop| {
+    let server_path = pipe_test_socket_path("pipe-share-server");
+    let client_path = pipe_test_socket_path("pipe-share-client");
+    let listener = tokio::net::UnixListener::bind(&server_path).unwrap();
+    let server_path = server_path.to_string_lossy().into_owned();
+    let client_path = client_path.to_string_lossy().into_owned();
+
+    let mut bound = new_pipe(false);
+    let mut socket = new_pipe(false);
+    let mut req = new_connect();
+    unsafe {
+      assert_ok(pipe::uv_pipe_init(uv_loop, &mut bound, 0));
+      assert_ok(pipe::uv_pipe_init(uv_loop, &mut socket, 0));
+      assert_ok(pipe::uv_pipe_bind(&mut bound, &client_path));
+    }
+    let fd = bound.fd().expect("bound pipe should have a descriptor");
+    let fd_id = fd_identity(fd);
+    assert_eq!(bound.owned_fd(), Some(fd));
+
+    unsafe {
+      assert_ok(pipe::uv_pipe_open(&mut socket, fd));
+    }
+    // Both report the number, as with libuv; one owns it.
+    assert_eq!(bound.fd(), Some(fd));
+    assert_eq!(socket.fd(), Some(fd));
+    assert_eq!(bound.owned_fd(), None);
+    assert_eq!(socket.owned_fd(), Some(fd));
+
+    unsafe {
+      assert_ok(pipe::uv_pipe_connect(
+        &mut req,
+        &mut socket,
+        &server_path,
+        None,
+      ));
+    }
+    for _ in 0..10 {
+      tick(runtime).await;
+      if socket.internal_stream.is_some() {
+        break;
+      }
+      tokio::task::yield_now().await;
+    }
+    assert!(socket.internal_stream.is_some());
+    assert_eq!(socket.fd(), Some(fd));
+
+    // The first handle goes away while the socket is in use (the order
+    // `test-net-connect-options-fd` hits under load).
+    unsafe {
+      uv_close(&mut bound as *mut uv_pipe_t as *mut uv_handle_t, None);
+    }
+    tick(runtime).await;
+    assert_eq!(
+      fd_identity(fd),
+      fd_id,
+      "closing the first handle must leave the descriptor open"
+    );
+    // A raw write: tokio's `try_write` answers WouldBlock until the reactor
+    // has seen the socket writable.
+    assert_eq!(
+      unsafe { libc::write(fd, b"hi".as_ptr() as *const c_void, 2) },
+      2
+    );
+    let (mut accepted, _) = listener.accept().await.unwrap();
+    let mut received = [0u8; 2];
+    accepted.read_exact(&mut received).await.unwrap();
+    assert_eq!(&received, b"hi");
+
+    unsafe {
+      uv_close(&mut socket as *mut uv_pipe_t as *mut uv_handle_t, None);
+    }
+    tick(runtime).await;
+    assert_fd_closed(fd, fd_id);
+
+    drop(accepted);
+    drop(listener);
+    #[allow(
+      clippy::disallowed_methods,
+      reason = "clean up the real Unix socket created by Tokio"
+    )]
+    let _ = std::fs::remove_file(server_path);
+  })
+  .await;
+}
+
+/// DENEXT.md item 478, the other order: the second handle closes the
+/// descriptor, the number is given to another open file, and then the first
+/// handle is closed. It must not close the number again.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn pipe_close_after_its_fd_was_reopened_spares_a_reused_number() {
+  run_test(async |runtime, uv_loop| {
+    let client_path = pipe_test_socket_path("pipe-reuse-client");
+    let client_path = client_path.to_string_lossy().into_owned();
+
+    let mut bound = new_pipe(false);
+    let mut socket = new_pipe(false);
+    unsafe {
+      assert_ok(pipe::uv_pipe_init(uv_loop, &mut bound, 0));
+      assert_ok(pipe::uv_pipe_init(uv_loop, &mut socket, 0));
+      assert_ok(pipe::uv_pipe_bind(&mut bound, &client_path));
+    }
+    let fd = bound.fd().expect("bound pipe should have a descriptor");
+    let fd_id = fd_identity(fd);
+    unsafe {
+      assert_ok(pipe::uv_pipe_open(&mut socket, fd));
+      uv_close(&mut socket as *mut uv_pipe_t as *mut uv_handle_t, None);
+    }
+    tick(runtime).await;
+    assert_fd_closed(fd, fd_id);
+    assert_eq!(bound.fd(), Some(fd));
+    assert_eq!(bound.owned_fd(), None);
+
+    // Give the number to another open file. The kernel hands out the lowest
+    // free number, so this is `fd` unless a test on another thread took it
+    // first; then that test's file stands in for ours.
+    let mut others = Vec::new();
+    let mut reused = None;
+    for _ in 0..16 {
+      let (ours, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+      use std::os::unix::io::AsRawFd;
+      if ours.as_raw_fd() == fd {
+        reused = Some((ours, peer));
+        break;
+      }
+      others.push((ours, peer));
+    }
+    drop(others);
+    let reused_id = reused.as_ref().map(|_| fd_identity(fd));
+
+    unsafe {
+      uv_close(&mut bound as *mut uv_pipe_t as *mut uv_handle_t, None);
+    }
+    tick(runtime).await;
+    if let Some(reused_id) = reused_id {
+      assert_eq!(
+        fd_identity(fd),
+        reused_id,
+        "closing the first handle closed a descriptor it no longer owns"
+      );
+    }
+    drop(reused);
+  })
+  .await;
+}
+
+/// libuv's `uv__fd_exists`: a descriptor an active handle of the loop
+/// drives is refused, and stays with that handle.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn pipe_open_refuses_the_fd_of_an_active_handle() {
+  run_test(async |runtime, uv_loop| {
+    let socket_path = pipe_test_socket_path("pipe-exists");
+    let socket_path = socket_path.to_string_lossy().into_owned();
+
+    let mut server = new_pipe(false);
+    let mut other = new_pipe(false);
+    unsafe {
+      assert_ok(pipe::uv_pipe_init(uv_loop, &mut server, 0));
+      assert_ok(pipe::uv_pipe_init(uv_loop, &mut other, 0));
+      assert_ok(pipe::uv_pipe_bind(&mut server, &socket_path));
+      assert_ok(pipe::uv_pipe_listen(&mut server, 128, None));
+    }
+    let fd = server
+      .fd()
+      .expect("listening pipe should have a descriptor");
+    let fd_id = fd_identity(fd);
+
+    assert_eq!(unsafe { pipe::uv_pipe_open(&mut other, fd) }, UV_EEXIST);
+    assert_eq!(
+      unsafe { pipe::uv_pipe_open_listener(&mut other, fd) },
+      UV_EEXIST
+    );
+    assert_eq!(other.fd(), None);
+    assert_eq!(server.owned_fd(), Some(fd));
+
+    unsafe {
+      uv_close(&mut other as *mut uv_pipe_t as *mut uv_handle_t, None);
+    }
+    tick(runtime).await;
+    assert_eq!(fd_identity(fd), fd_id);
+    unsafe {
+      uv_close(&mut server as *mut uv_pipe_t as *mut uv_handle_t, None);
+    }
+    tick(runtime).await;
+    assert_fd_closed(fd, fd_id);
+  })
+  .await;
+}
+
+/// The TCP side of the same rule: `uv_tcp_open` refuses the descriptor of a
+/// listening handle of the loop before it takes it, so the refused open
+/// leaves the descriptor open and with its owner.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn tcp_open_refuses_the_fd_of_an_active_handle() {
+  use std::os::unix::io::AsRawFd;
+
+  run_test(async |runtime, uv_loop| {
+    let mut server = std::mem::MaybeUninit::<uv_tcp_t>::uninit();
+    let server_ptr = server.as_mut_ptr();
+    let mut other = std::mem::MaybeUninit::<uv_tcp_t>::uninit();
+    let other_ptr = other.as_mut_ptr();
+    unsafe {
+      uv_tcp_init(uv_loop, server_ptr);
+      uv_tcp_init(uv_loop, other_ptr);
+
+      let mut addr = std::mem::MaybeUninit::<sockaddr_in>::uninit();
+      let ip = std::ffi::CString::new("127.0.0.1").unwrap();
+      uv_ip4_addr(ip.as_ptr(), 0, addr.as_mut_ptr());
+      assert_ok(uv_tcp_bind(
+        server_ptr,
+        addr.as_ptr() as *const c_void,
+        0,
+        0,
+      ));
+      unsafe extern "C" fn on_connection(_: *mut uv_stream_t, _: i32) {}
+      assert_ok(uv_listen(
+        server_ptr as *mut uv_stream_t,
+        128,
+        Some(on_connection),
+      ));
+
+      let fd = (*server_ptr)
+        .internal_listener
+        .as_ref()
+        .expect("listening handle should have a listener")
+        .as_raw_fd();
+      let fd_id = fd_identity(fd);
+
+      assert_eq!(uv_tcp_open(other_ptr, fd), UV_EEXIST);
+      assert_eq!(uv_tcp_open_listener(other_ptr, fd), UV_EEXIST);
+      assert!((*other_ptr).internal_stream.is_none());
+      assert!((*other_ptr).internal_listener.is_none());
+      assert_eq!(fd_identity(fd), fd_id);
+
+      uv_close(other_ptr as *mut uv_handle_t, None);
+      tick(runtime).await;
+      assert_eq!(fd_identity(fd), fd_id);
+      uv_close(server_ptr as *mut uv_handle_t, None);
+      tick(runtime).await;
+      assert_fd_closed(fd, fd_id);
+    }
+  })
+  .await;
+}
+
 /// Regression test for https://github.com/denoland/deno/issues/33923.
 ///
 /// On Windows, when all named-pipe instances are in use (e.g., Docker

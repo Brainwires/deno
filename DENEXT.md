@@ -19086,6 +19086,72 @@ where the changes are discussed.
        `ext/webrtc`'s unit tests.
      - Node tests enabled: none; `node:` has no WebRTC API.
 
+478. **`fix(node)`: one owner for a pipe descriptor opened twice, and a handle
+     sent right behind a message** (runtime;
+     `libs/core/uv_compat/{pipe,tcp}.rs`, `libs/core/uv_compat.rs`,
+     `ext/node/ops/pipe_wrap.rs`,
+     `ext/node/polyfills/internal/child_process.ts`). Two more findings of the
+     flake hunt (item 459) on the train's candidate, both in how `node:net` and
+     `node:child_process` hold descriptors.
+     - **Descriptor ownership** (`parallel/test-net-connect-options-fd.js`, 4
+       runs in 80): `new Pipe()`, `bind()`, then `net.Socket({ fd: pipe.fd })`
+       opens the bound pipe's descriptor in a second handle, which libuv allows
+       for a handle that is not active yet. Both handles then held the number as
+       their own, so it was closed by each of them: by the socket's stream and
+       by the first handle's `close()`, in whichever order the test reached
+       them. Under load the first handle closed before the socket, and the debug
+       build stopped on the standard library's check of an owned descriptor. A
+       descriptor now has one owner, the handle that opened it last. Opening it
+       revokes the earlier handle's claim (`RawFdClaim`, per thread): that
+       handle keeps reporting the number through `fd`, as libuv does, but its
+       `close()`, `listen()` and `connect()` leave the descriptor alone
+       (`listen()` answers `EBADF`, `connect()` uses a new socket), and
+       `Pipe.close()` no longer drops the `FdTable` entry of a number it does
+       not own.
+     - The same rule for a descriptor an active handle drives: `uv_pipe_open`,
+       `uv_pipe_open_listener`, `uv_tcp_open` and `uv_tcp_open_listener` answer
+       `UV_EEXIST` when a pipe or TCP handle the loop polls already holds the
+       descriptor in a stream, listener or bound socket (libuv's
+       `uv__fd_exists`). The TCP opens also check that the reactor takes the
+       descriptor before they move it into a socket, so a refused open leaves it
+       with the caller, which `fd_adopt::finish` assumes when it closes the dup
+       it made. `TTY` never closes the descriptor it wraps and `dgram`'s open
+       has a single owner; neither changed.
+     - **A handle sent right behind a message**
+       (`parallel/test-cluster-send-handle-twice.js`: about 1 s, or a hang until
+       the timeout, 10 runs in 80): the kernel delivers a descriptor with the
+       read that reaches the first byte of the message it was sent with. On
+       Linux that read also returns the messages queued in front of it, and the
+       channel's reader gave the descriptor to the first message of the read.
+       cluster's worker writes `{ ack }` and then the socket back to back, so
+       when the primary read both at once the `NODE_HANDLE` message arrived with
+       no descriptor, was never acknowledged, and the worker held every later
+       send back for good; the descriptor stayed open in the primary, unused.
+       The channel now keeps received descriptors in arrival order and gives
+       each `NODE_HANDLE` message the oldest one: both arrive in sending order,
+       one descriptor per message. macOS starts a new read at a descriptor, so
+       it paired them correctly before.
+     - Not covered: a descriptor two isolates of one process open (claims are
+       per thread, and only a process-wide grant lets an isolate open a
+       descriptor it was not given).
+     - User-facing note: `handle.close()` on a pipe whose `fd` was passed to
+       `net.Socket({ fd })` no longer closes the socket's descriptor; opening
+       the descriptor of a listening or connected socket in a second handle
+       fails with `EEXIST`; a handle sent with `process.send()` / `child.send()`
+       right after another message always arrives.
+     - Tests: `pipe_open_of_a_bound_pipe_fd_has_one_owner`,
+       `pipe_close_after_its_fd_was_reopened_spares_a_reused_number`,
+       `pipe_open_refuses_the_fd_of_an_active_handle` and
+       `tcp_open_refuses_the_fd_of_an_active_handle` in deno_core; "a bound pipe
+       whose fd a socket opened no longer owns it" in
+       `tests/unit_node/net_test.ts` (both close orders, ten rounds, the number
+       handed to a file in between); "a handle sent right after a message
+       arrives with it" in `tests/unit_node/child_process_test.ts` (eight
+       rounds, the parent off its event loop while the child writes both
+       messages, so Linux reads them together every round).
+     - Node tests enabled: none; `parallel/test-net-connect-options-fd.js` and
+       `parallel/test-cluster-send-handle-twice.js` were enabled and flaky.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -19096,7 +19162,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-477) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-478) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

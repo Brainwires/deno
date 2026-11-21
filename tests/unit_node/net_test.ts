@@ -472,3 +472,88 @@ Deno.test("[node/net] a path server keeps accepting past four open connections",
     if (dir) await Deno.remove(dir, { recursive: true });
   }
 });
+
+// denext: `net.Socket({ fd: pipe.fd })` on a bound pipe opens the descriptor
+// in a second handle (Node's test-net-connect-options-fd). Both handles
+// report the number, but only the socket's owns it: closing the first handle
+// must neither close the descriptor under the socket, nor, once the socket
+// has closed it, close whatever was given the number since.
+Deno.test({
+  name: "[node/net] a bound pipe whose fd a socket opened no longer owns it",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const { Pipe, constants } = require("internal/test/binding")
+      .internalBinding("pipe_wrap");
+    const fs = require("node:fs");
+    // A short directory: a unix socket path is at most ~100 bytes.
+    const dir = await Deno.makeTempDir({ dir: "/tmp", prefix: "nfd" });
+    const serverPath = path.join(dir, "s");
+    const server = net.createServer((socket) => socket.pipe(socket));
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(serverPath, resolve);
+    });
+
+    const open = async (name: string) => {
+      const handle = new Pipe(constants.SOCKET);
+      assert(handle.bind(path.join(dir, name)) >= 0);
+      const fd: number = handle.fd;
+      assert(fd > 2);
+      const socket = new net.Socket({ fd, readable: true, writable: true });
+      await new Promise<void>((resolve, reject) => {
+        socket.once("error", reject);
+        socket.connect({ path: serverPath }, resolve);
+      });
+      // deno-lint-ignore no-explicit-any
+      assertEquals((socket as any)._handle.fd, fd);
+      assertEquals(handle.fd, fd);
+      return { handle, socket, fd };
+    };
+    const echo = (socket: net.Socket, text: string) =>
+      new Promise<string>((resolve, reject) => {
+        // A socket whose descriptor was closed under it never answers.
+        const timer = setTimeout(
+          () => reject(new Error("no echo: the socket lost its descriptor")),
+          10_000,
+        );
+        socket.once("error", reject);
+        socket.once("data", (chunk) => {
+          clearTimeout(timer);
+          resolve(String(chunk));
+        });
+        socket.write(text);
+      });
+    const closed = (socket: net.Socket) =>
+      new Promise<void>((resolve) => {
+        socket.once("close", () => resolve());
+        socket.destroy();
+      });
+
+    try {
+      for (let round = 0; round < 10; round++) {
+        // The first handle is closed while the socket is in use.
+        const a = await open(`a${round}`);
+        a.handle.close();
+        assertEquals(await echo(a.socket, `ping ${round}`), `ping ${round}`);
+        await closed(a.socket);
+
+        // The socket closes first and the number goes to a file.
+        const b = await open(`b${round}`);
+        await closed(b.socket);
+        const files: number[] = [];
+        while (files.length < 16 && files.at(-1) !== b.fd) {
+          files.push(fs.openSync(serverPath + ".txt", "a+"));
+        }
+        b.handle.close();
+        for (const file of files) {
+          // Throws EBADF if the handle closed a number it no longer owns.
+          fs.fstatSync(file);
+          fs.closeSync(file);
+        }
+      }
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});

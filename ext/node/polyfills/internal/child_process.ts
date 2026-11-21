@@ -11,6 +11,7 @@ const {
   ArrayPrototypeIncludes,
   ArrayPrototypeIndexOf,
   ArrayPrototypeMap,
+  ArrayPrototypeShift,
   DataViewPrototypeGetBuffer,
   DataViewPrototypeGetByteLength,
   DataViewPrototypeGetByteOffset,
@@ -2935,6 +2936,16 @@ function setupChannel(
   let pendingHandleInfo = null;
   let handleQueue = null;
   const receivedSocketLists = new SafeMap();
+  // denext: descriptors received (SCM_RIGHTS) and not yet matched to their
+  // NODE_HANDLE message. The kernel hands a descriptor over with the read
+  // that reaches the first byte of the message it was sent with, and on
+  // Linux that read also returns the messages queued in front of it. So the
+  // read op can report the descriptor on an earlier message than the
+  // NODE_HANDLE it belongs to (cluster's worker writes `{ ack }` and then a
+  // handle back to back). Descriptors and NODE_HANDLE messages both arrive
+  // in sending order, one descriptor per message, so they pair up first in,
+  // first out.
+  const receivedRawFds = [];
 
   function sendHandleAck() {
     const queueOk = [true];
@@ -3160,7 +3171,9 @@ function setupChannel(
         core.unrefOpPromise(prom);
         const read = await prom;
         const msg = read[0];
-        const rawFd = read[1];
+        if (typeof read[1] === "number") {
+          ArrayPrototypePush(receivedRawFds, read[1]);
+        }
         if (isInternal(msg)) {
           const cmd = internalCmdName(msg);
           if (cmd === "CLOSE") {
@@ -3173,7 +3186,8 @@ function setupChannel(
               target.disconnect();
             }
             return;
-          } else if (cmd === "HANDLE" && typeof rawFd === "number") {
+          } else if (cmd === "HANDLE" && receivedRawFds.length > 0) {
+            const rawFd = ArrayPrototypeShift(receivedRawFds);
             if (serialization === "json") {
               restorePrototype(msg);
             }

@@ -2334,3 +2334,77 @@ Deno.test("[node/child_process] a failed spawn with an IPC channel leaves no res
     assertEquals(child.connected, false);
   }
 });
+
+// denext: a handle sent right behind a plain message (DENEXT.md item 478).
+// On Linux one read of the channel returns both messages and the handle's
+// descriptor, which the reader gave to the first message: the handle message
+// arrived without it and was never acknowledged, so the sender held every
+// later send back for good (cluster's worker sends `{ ack }` and then a
+// socket: test-cluster-send-handle-twice hung). Each round the parent stays
+// off its event loop while the child writes both messages, so they are read
+// together.
+Deno.test({
+  name:
+    "[node/child_process] a handle sent right after a message arrives with it",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const script = path.join(
+      path.dirname(path.fromFileUrl(import.meta.url)),
+      "testdata",
+      "child_process_ipc_handle_after_message.js",
+    );
+    const rounds = 8;
+    const done = withTimeout<void>(30_000);
+    const exited = Promise.withResolvers<void>();
+    const child = CP.fork(script, [], { stdio: "inherit" });
+    child.once("exit", () => exited.resolve());
+    child.once("error", done.reject);
+    const idle = new Int32Array(new SharedArrayBuffer(4));
+    const received: string[] = [];
+    const go = (round: number) => {
+      child.send({ round }, (err) => {
+        if (err) {
+          done.reject(err);
+          return;
+        }
+        // The message is written. Block this thread while the child answers.
+        Atomics.wait(idle, 0, 0, 100);
+      });
+    };
+    // deno-lint-ignore no-explicit-any
+    child.on("message", (message: any, handle?: net.Server) => {
+      try {
+        if (message === "ready") {
+          go(0);
+        } else if (message.plain !== undefined) {
+          assertEquals(handle, undefined);
+          received.push(`plain ${message.plain}`);
+        } else {
+          assert(handle instanceof net.Server);
+          assert(handle.address() !== null);
+          handle.close();
+          received.push(`handle ${message.handle}`);
+          if (message.handle + 1 < rounds) {
+            go(message.handle + 1);
+          } else {
+            child.send("done");
+            done.resolve();
+          }
+        }
+      } catch (err) {
+        done.reject(err);
+      }
+    });
+    try {
+      await done.promise;
+      await exited.promise;
+    } finally {
+      child.kill();
+    }
+    assertEquals(
+      received,
+      Array.from({ length: rounds }, (_, i) => [`plain ${i}`, `handle ${i}`])
+        .flat(),
+    );
+  },
+});

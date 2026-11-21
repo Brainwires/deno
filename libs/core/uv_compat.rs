@@ -860,6 +860,41 @@ impl UvLoopInner {
     }
   }
 
+  /// denext: libuv's `uv__fd_exists`: whether a pipe or TCP handle the loop
+  /// polls, other than `except`, drives `fd` through a Tokio stream, listener
+  /// or pending connect. Opening `fd` in a second handle would give the
+  /// descriptor two owners, each closing it.
+  #[cfg(unix)]
+  pub(crate) fn fd_exists(
+    &self,
+    fd: std::os::unix::io::RawFd,
+    except: *const c_void,
+  ) -> bool {
+    // A list that is being changed (an open issued from inside a poll) is
+    // skipped: the check is a guard, and the open then proceeds as before.
+    if let Ok(handles) = self.pipe_handles.try_borrow() {
+      for &handle in handles.iter() {
+        // SAFETY: Handle pointers in pipe_handles are kept valid by the C caller until uv_close.
+        if handle as *const c_void != except
+          && unsafe { (*handle).tokio_owned_fd() } == Some(fd)
+        {
+          return true;
+        }
+      }
+    }
+    if let Ok(handles) = self.tcp_handles.try_borrow() {
+      for &handle in handles.iter() {
+        // SAFETY: Handle pointers in tcp_handles are kept valid by the C caller until uv_close.
+        if handle as *const c_void != except
+          && unsafe { (*handle).tokio_owned_fd() } == Some(fd)
+        {
+          return true;
+        }
+      }
+    }
+    false
+  }
+
   fn stop_pipe(&self, handle: *mut uv_pipe_t) {
     self
       .pipe_handles
