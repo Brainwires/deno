@@ -1109,10 +1109,8 @@ fn write_callsite_info_frame<'s, 'i>(
     }
   } else {
     let mut file_name = strings.file_name.take().unwrap_or_default();
-    match callsite_info_string(scope, slot!(FILE_NAME), &mut file_name) {
-      Ok(true) => strings.file_name = Some(file_name),
-      Ok(false) => {}
-      Err(err) => return Err(err),
+    if callsite_info_string(scope, slot!(FILE_NAME), &mut file_name)? {
+      strings.file_name = Some(file_name);
     }
   }
   let raw_line_number = callsite_info_int(slot!(LINE_NUMBER))?;
