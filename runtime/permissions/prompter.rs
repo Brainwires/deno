@@ -492,6 +492,65 @@ pub fn prompt_terminals_available() -> bool {
   std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
 
+/// denext: whether a permission prompt can happen in this process:
+/// prompting is on (`prompt_enabled`: not `--no-prompt` / `DENO_NO_PROMPT`)
+/// and [`prompt_terminals_available`]. The one rule the kernel sandbox's
+/// mode selection, a compiled program's refused-prompt line and
+/// [`TtyPrompter`] share, so they can't drift.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn can_prompt(prompt_enabled: bool) -> bool {
+  prompt_enabled && prompt_terminals_available()
+}
+
+/// denext (kernel sandbox, review D4): the switch a compiled program's
+/// author uses to keep permission prompts, named by the refused-prompt line.
+pub const KERNEL_SANDBOX_PROMPT_SWITCH: &str =
+  "deno compile --kernel-sandbox=off";
+
+/// denext (kernel sandbox, review D4): the line printed the first time a
+/// compiled program's prompt is refused because the kernel sandbox fixed its
+/// permissions. `what` is the access asked for (control characters made
+/// visible by the caller).
+pub fn kernel_sandbox_refused_prompt_line(what: &str) -> String {
+  format!(
+    "{PERMISSION_EMOJI}  Denied {what}: this program runs inside the kernel sandbox, which fixes its permissions, so it can't ask. Rebuild it with `{KERNEL_SANDBOX_PROMPT_SWITCH}` to keep permission prompts (this is said once)."
+  )
+}
+
+/// denext (kernel sandbox, review D4): the prompter of a compiled program
+/// whose permissions the kernel sandbox fixed while a prompt could have
+/// happened (stdin and stderr are terminals, prompting on). Every prompt is
+/// refused (a prompt could only grant what the kernel refuses), and the
+/// first refusal in the process prints [`kernel_sandbox_refused_prompt_line`]
+/// once.
+#[derive(Default)]
+pub struct KernelSandboxPrompter;
+
+static KERNEL_SANDBOX_PROMPT_NOTED: std::sync::Once = std::sync::Once::new();
+
+impl PermissionPrompter for KernelSandboxPrompter {
+  fn prompt(
+    &mut self,
+    message: &str,
+    _name: &str,
+    _api_name: Option<&str>,
+    _is_unary: bool,
+    _get_stack: Option<GetFormattedStackFn>,
+  ) -> PromptResponse {
+    KERNEL_SANDBOX_PROMPT_NOTED.call_once(|| {
+      #[cfg(not(target_arch = "wasm32"))]
+      let what = escape_control_characters(message);
+      #[cfg(target_arch = "wasm32")]
+      let what = message;
+      #[allow(clippy::print_stderr, reason = "the one line, once per process")]
+      {
+        eprintln!("{}", kernel_sandbox_refused_prompt_line(&what));
+      }
+    });
+    PromptResponse::Deny
+  }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Default)]
 pub struct TtyPrompter;
@@ -516,7 +575,9 @@ impl PermissionPrompter for TtyPrompter {
     // 10kB of permission prompting should be enough for anyone
     const MAX_PERMISSION_PROMPT_LENGTH: usize = 10 * 1024;
 
-    if !prompt_terminals_available() {
+    // denext: the shared rule (prompting itself is on, or this wasn't
+    // called)
+    if !can_prompt(true) {
       return PromptResponse::Deny;
     };
 
@@ -858,5 +919,31 @@ pub mod tests {
   #[test]
   fn escape_control_characters_leaves_safe_unicode_visible() {
     assert_eq!(escape_control_characters("文件.txt"), "文件.txt");
+  }
+
+  /// denext (kernel sandbox, D4): every prompt of a compiled program the
+  /// kernel sandbox fixed is refused, and the one line names the switch.
+  #[test]
+  fn kernel_sandbox_prompter_refuses_and_names_the_switch() {
+    let mut prompter = KernelSandboxPrompter;
+    for _ in 0..2 {
+      assert_eq!(
+        prompter.prompt("read access to \"/etc\"", "read", None, true, None),
+        PromptResponse::Deny
+      );
+    }
+    let line = kernel_sandbox_refused_prompt_line("read access to \"/etc\"");
+    assert!(line.contains("deno compile --kernel-sandbox=off"), "{line}");
+    assert!(line.contains("read access to \"/etc\""), "{line}");
+    assert!(line.contains("once"), "{line}");
+    // the line is printed once per process, whatever asks
+    assert!(KERNEL_SANDBOX_PROMPT_NOTED.is_completed());
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  #[test]
+  fn can_prompt_needs_prompting_on() {
+    assert!(!can_prompt(false));
+    assert_eq!(can_prompt(true), prompt_terminals_available());
   }
 }

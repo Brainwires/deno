@@ -1779,9 +1779,22 @@ pub async fn run_with_options(
   )?;
   let permissions = {
     let mut permissions = metadata.permissions;
-    if kernel_resolution.mode.fails_closed() {
-      // the set is fixed: a prompt could only grant what the kernel refuses
-      permissions.prompt = false;
+    if kernel_resolution.mode.fails_closed()
+      && !kernel_resolution.deny_ceiling()
+    {
+      // the set is fixed: a prompt could only grant what the kernel refuses.
+      // Where one could have been shown (a terminal, prompting on), each is
+      // refused and the first refusal says once why, naming the switch
+      // (review D4); elsewhere prompting is simply off
+      if permissions.prompt
+        && deno_runtime::deno_permissions::prompter::can_prompt(true)
+      {
+        deno_runtime::deno_permissions::prompter::set_prompter(Box::new(
+          deno_runtime::deno_permissions::prompter::KernelSandboxPrompter,
+        ));
+      } else {
+        permissions.prompt = false;
+      }
     }
     // grant read access to the vfs
     grant_vfs_read_access(&mut permissions, &root_path);
