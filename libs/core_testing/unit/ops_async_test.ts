@@ -1,10 +1,17 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-import { assert, assertStackTraceEquals, test } from "checkin:testing";
+import {
+  assert,
+  assertArrayEquals,
+  assertEquals,
+  assertStackTraceEquals,
+  test,
+} from "checkin:testing";
 import {
   asyncPromiseId,
   asyncYield,
   barrierAwait,
   barrierCreate,
+  fakeAsync,
 } from "checkin:async";
 import { asyncThrow } from "checkin:error";
 
@@ -98,4 +105,83 @@ test(async function testRefUnrefPromiseWithoutId() {
   Deno.core.refOpPromise(eager);
   Deno.core.unrefOpPromise(eager);
   await eager;
+});
+
+// An async op that completes on its first poll, or fails to dispatch, hands
+// back the runtime's own promise, as a pending op does: a promise hook can
+// tell any of them apart from JS's promises (`isCreatingInternalPromise`).
+// Whether a blocking op is still pending at that first poll is down to timing,
+// so `node:async_hooks` used to report a PROMISE for some `fs.access()` calls.
+test(async function testEagerOpPromiseIsInternal() {
+  let recording = false;
+  const created: boolean[] = [];
+  Deno.core.setPromiseHooks((_promise: Promise<unknown>) => {
+    if (recording) created.push(Deno.core.isCreatingInternalPromise());
+  });
+  let resolved: Promise<unknown>;
+  let rejected: Promise<unknown>;
+  recording = true;
+  try {
+    resolved = fakeAsync();
+    rejected = Deno.core.ops.op_async_throw_error_eager();
+  } finally {
+    recording = false;
+  }
+  assert(created.length > 0);
+  assertArrayEquals(created, created.map(() => true));
+  assertEquals(await resolved, 1);
+  let threw = false;
+  try {
+    await rejected;
+  } catch (e) {
+    threw = e instanceof TypeError;
+  }
+  assert(threw);
+});
+
+// The primordials' promise helpers are runtime code whatever calls them: the
+// promises they make are counted as internal (`isCreatingInternalPromise`),
+// not left to the caller's stack frames, which a promise hook reads as core's
+// for them.
+test(async function testPrimordialPromiseHelpersAreInternal() {
+  // deno-lint-ignore no-explicit-any
+  const { primordials } = (globalThis as any).__bootstrap;
+  const {
+    PromisePrototypeCatch,
+    SafePromiseAll,
+    SafePromiseAllSettled,
+    SafePromiseAny,
+    SafePromisePrototypeFinally,
+    SafePromiseRace,
+  } = primordials;
+  const inputs = [Promise.resolve(1), Promise.resolve(2)];
+  let recording = false;
+  const created: boolean[] = [];
+  Deno.core.setPromiseHooks((_promise: Promise<unknown>) => {
+    if (recording) created.push(Deno.core.isCreatingInternalPromise());
+  });
+  let results: Promise<unknown>[];
+  recording = true;
+  try {
+    results = [
+      PromisePrototypeCatch(inputs[0], () => {}),
+      SafePromiseAll(inputs),
+      SafePromiseAllSettled(inputs),
+      SafePromiseAny(inputs),
+      SafePromiseRace(inputs),
+      SafePromisePrototypeFinally(inputs[0], () => {}),
+    ];
+  } finally {
+    recording = false;
+  }
+  assert(created.length >= results.length);
+  assertArrayEquals(created, created.map(() => true));
+  assertEquals(
+    JSON.stringify(await Promise.all(results)),
+    JSON.stringify([1, [1, 2], [
+      { status: "fulfilled", value: 1 },
+      { status: "fulfilled", value: 2 },
+    ], 1, 1, 1]),
+  );
+  assert(!Deno.core.isCreatingInternalPromise());
 });

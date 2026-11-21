@@ -169,19 +169,21 @@
   // op's promise, a lazily loaded module's evaluation). Promise hooks can ask
   // (`isCreatingInternalPromise`) so that `node:async_hooks` leaves them out:
   // Node's callback APIs create no promises, and code counting PROMISE
-  // resources must not see Deno's.
-  let internalPromiseDepth = 0;
+  // resources must not see Deno's. The counter is shared with the promise
+  // helpers of 00_primordials.js, which run before this file.
+  const internalPromiseScope = window.__bootstrap.internalPromiseScope;
+  delete window.__bootstrap.internalPromiseScope;
 
   function isCreatingInternalPromise() {
-    return internalPromiseDepth > 0;
+    return internalPromiseScope.depth > 0;
   }
 
   function enterInternalPromiseScope() {
-    internalPromiseDepth++;
+    internalPromiseScope.depth++;
   }
 
   function exitInternalPromiseScope() {
-    internalPromiseDepth--;
+    internalPromiseScope.depth--;
   }
 
   function setPromise(promiseId) {
@@ -199,7 +201,7 @@
     }
 
     // A promise hook (user code) runs while these are created and may throw.
-    internalPromiseDepth++;
+    internalPromiseScope.depth++;
     let wrappedPromise;
     try {
       const promise = new Promise((resolve, reject) => {
@@ -214,10 +216,35 @@
         },
       );
     } finally {
-      internalPromiseDepth--;
+      internalPromiseScope.depth--;
     }
     wrappedPromise[promiseIdSymbol] = promiseId;
     return wrappedPromise;
+  }
+
+  // The promise an async op returns when it completed eagerly (its result
+  // was ready on the first poll) or failed to dispatch is the runtime's own,
+  // like the one `setPromise` makes for a pending op: a promise hook must be
+  // able to tell either apart from JS's promises. Which path an op takes
+  // depends on timing (a blocking task may finish before the first poll), so
+  // leaving the eager one unmarked made `node:async_hooks` report a PROMISE
+  // for some `fs.access()` calls and not others.
+  function resolveOpPromise(value) {
+    internalPromiseScope.depth++;
+    try {
+      return PromiseResolve(value);
+    } finally {
+      internalPromiseScope.depth--;
+    }
+  }
+
+  function rejectOpPromise(err) {
+    internalPromiseScope.depth++;
+    try {
+      return PromiseReject(err);
+    } finally {
+      internalPromiseScope.depth--;
+    }
   }
 
   function __resolvePromise(promiseId, res, isOk) {
@@ -270,11 +297,11 @@
             // deno-fmt-ignore
             const maybeResult = originalOp.call(this, id);
             if (maybeResult !== undefined) {
-              return PromiseResolve(maybeResult);
+              return resolveOpPromise(maybeResult);
             }
           } catch (err) {
             ErrorCaptureStackTrace(err, async_op_0);
-            return PromiseReject(err);
+            return rejectOpPromise(err);
           }
           if (isLeakTracingEnabled) {
             submitLeakTrace(id);
@@ -290,11 +317,11 @@
             // deno-fmt-ignore
             const maybeResult = originalOp.call(this, id, a);
             if (maybeResult !== undefined) {
-              return PromiseResolve(maybeResult);
+              return resolveOpPromise(maybeResult);
             }
           } catch (err) {
             ErrorCaptureStackTrace(err, async_op_1);
-            return PromiseReject(err);
+            return rejectOpPromise(err);
           }
           if (isLeakTracingEnabled) {
             submitLeakTrace(id);
@@ -310,11 +337,11 @@
             // deno-fmt-ignore
             const maybeResult = originalOp.call(this, id, a, b);
             if (maybeResult !== undefined) {
-              return PromiseResolve(maybeResult);
+              return resolveOpPromise(maybeResult);
             }
           } catch (err) {
             ErrorCaptureStackTrace(err, async_op_2);
-            return PromiseReject(err);
+            return rejectOpPromise(err);
           }
           if (isLeakTracingEnabled) {
             submitLeakTrace(id);
@@ -330,11 +357,11 @@
             // deno-fmt-ignore
             const maybeResult = originalOp.call(this, id, a, b, c);
             if (maybeResult !== undefined) {
-              return PromiseResolve(maybeResult);
+              return resolveOpPromise(maybeResult);
             }
           } catch (err) {
             ErrorCaptureStackTrace(err, async_op_3);
-            return PromiseReject(err);
+            return rejectOpPromise(err);
           }
           if (isLeakTracingEnabled) {
             submitLeakTrace(id);
@@ -350,11 +377,11 @@
             // deno-fmt-ignore
             const maybeResult = originalOp.call(this, id, a, b, c, d);
             if (maybeResult !== undefined) {
-              return PromiseResolve(maybeResult);
+              return resolveOpPromise(maybeResult);
             }
           } catch (err) {
             ErrorCaptureStackTrace(err, async_op_4);
-            return PromiseReject(err);
+            return rejectOpPromise(err);
           }
           if (isLeakTracingEnabled) {
             submitLeakTrace(id);
@@ -370,11 +397,11 @@
             // deno-fmt-ignore
             const maybeResult = originalOp.call(this, id, a, b, c, d, e);
             if (maybeResult !== undefined) {
-              return PromiseResolve(maybeResult);
+              return resolveOpPromise(maybeResult);
             }
           } catch (err) {
             ErrorCaptureStackTrace(err, async_op_5);
-            return PromiseReject(err);
+            return rejectOpPromise(err);
           }
           if (isLeakTracingEnabled) {
             submitLeakTrace(id);
@@ -390,11 +417,11 @@
             // deno-fmt-ignore
             const maybeResult = originalOp.call(this, id, a, b, c, d, e, f);
             if (maybeResult !== undefined) {
-              return PromiseResolve(maybeResult);
+              return resolveOpPromise(maybeResult);
             }
           } catch (err) {
             ErrorCaptureStackTrace(err, async_op_6);
-            return PromiseReject(err);
+            return rejectOpPromise(err);
           }
           if (isLeakTracingEnabled) {
             submitLeakTrace(id);
@@ -410,11 +437,11 @@
             // deno-fmt-ignore
             const maybeResult = originalOp.call(this, id, a, b, c, d, e, f, g);
             if (maybeResult !== undefined) {
-              return PromiseResolve(maybeResult);
+              return resolveOpPromise(maybeResult);
             }
           } catch (err) {
             ErrorCaptureStackTrace(err, async_op_7);
-            return PromiseReject(err);
+            return rejectOpPromise(err);
           }
           if (isLeakTracingEnabled) {
             submitLeakTrace(id);
@@ -430,11 +457,11 @@
             // deno-fmt-ignore
             const maybeResult = originalOp.call(this, id, a, b, c, d, e, f, g, h);
             if (maybeResult !== undefined) {
-              return PromiseResolve(maybeResult);
+              return resolveOpPromise(maybeResult);
             }
           } catch (err) {
             ErrorCaptureStackTrace(err, async_op_8);
-            return PromiseReject(err);
+            return rejectOpPromise(err);
           }
           if (isLeakTracingEnabled) {
             submitLeakTrace(id);
@@ -450,11 +477,11 @@
             // deno-fmt-ignore
             const maybeResult = originalOp.call(this, id, a, b, c, d, e, f, g, h, i);
             if (maybeResult !== undefined) {
-              return PromiseResolve(maybeResult);
+              return resolveOpPromise(maybeResult);
             }
           } catch (err) {
             ErrorCaptureStackTrace(err, async_op_9);
-            return PromiseReject(err);
+            return rejectOpPromise(err);
           }
           if (isLeakTracingEnabled) {
             submitLeakTrace(id);

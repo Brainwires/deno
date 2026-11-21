@@ -429,9 +429,64 @@ pub unsafe fn uv_tcp_init(loop_: *mut uv_loop_t, tcp: *mut uv_tcp_t) -> c_int {
   0
 }
 
+impl uv_tcp_t {
+  /// denext: the descriptor a Tokio stream, listener or bound socket of this
+  /// handle owns, if any.
+  #[cfg(unix)]
+  pub(crate) fn tokio_owned_fd(&self) -> Option<std::os::unix::io::RawFd> {
+    use std::os::unix::io::AsRawFd;
+
+    self
+      .internal_stream
+      .as_ref()
+      .map(|stream| stream.as_raw_fd())
+      .or_else(|| {
+        self
+          .internal_listener
+          .as_ref()
+          .map(|listener| listener.as_raw_fd())
+      })
+      .or_else(|| {
+        self
+          .internal_socket
+          .as_ref()
+          .map(|socket| socket.as_raw_fd())
+      })
+  }
+}
+
+/// denext: whether `uv_tcp_open` / `uv_tcp_open_listener` may wrap `fd`,
+/// checked before the descriptor is moved into a std socket so that a
+/// refused open leaves it with the caller (a failed `from_std` closes it).
+/// Refuses a descriptor an active handle of the loop already drives
+/// (`UV_EEXIST`, libuv's `uv__fd_exists`), and one the reactor cannot
+/// register.
+///
 /// ### Safety
 /// `tcp` must be a valid pointer to a `uv_tcp_t` initialized by `uv_tcp_init`.
-/// `fd` must be a valid, open file descriptor / socket.
+#[cfg(unix)]
+unsafe fn check_tcp_open(tcp: *mut uv_tcp_t, fd: c_int) -> c_int {
+  // SAFETY: the caller guarantees `tcp` is valid; a non-null `loop_` was set
+  // by `uv_tcp_init` from an initialized loop.
+  unsafe {
+    let loop_ = (*tcp).loop_;
+    if !loop_.is_null() && get_inner(loop_).fd_exists(fd, tcp as *const c_void)
+    {
+      return crate::uv_compat::UV_EEXIST;
+    }
+  }
+  // The registration is dropped at once; `from_std` makes the real one.
+  match super::pipe::register_raw_fd(fd) {
+    Ok(_) => 0,
+    Err(err) => io_error_to_uv(&err),
+  }
+}
+
+/// ### Safety
+/// `tcp` must be a valid pointer to a `uv_tcp_t` initialized by `uv_tcp_init`.
+/// `fd` must be a valid, open file descriptor / socket. On unix the handle
+/// owns `fd` once this returns 0, and an open `check_tcp_open` refuses
+/// leaves it with the caller.
 pub unsafe fn uv_tcp_open(tcp: *mut uv_tcp_t, fd: c_int) -> c_int {
   // The default open path wraps the fd as a connected `TcpStream`. Callers
   // that received a listening fd (e.g. via IPC handle passing for
@@ -444,6 +499,10 @@ pub unsafe fn uv_tcp_open(tcp: *mut uv_tcp_t, fd: c_int) -> c_int {
     #[cfg(unix)]
     {
       use std::os::unix::io::FromRawFd;
+      let err = check_tcp_open(tcp, fd);
+      if err != 0 {
+        return err;
+      }
       let std_stream = std::net::TcpStream::from_raw_fd(fd);
       std_stream.set_nonblocking(true).ok();
       match tokio::net::TcpStream::from_std(std_stream) {
@@ -498,6 +557,10 @@ pub unsafe fn uv_tcp_open_listener(tcp: *mut uv_tcp_t, fd: c_int) -> c_int {
   use std::os::unix::io::FromRawFd;
   // SAFETY: Caller guarantees tcp is initialized and fd is valid.
   unsafe {
+    let err = check_tcp_open(tcp, fd);
+    if err != 0 {
+      return err;
+    }
     // `tokio::net::TcpListener::from_std` doesn't call listen(2). If the
     // kernel fd is in BIND state (e.g. a freshly-bound primary handle that
     // SharedHandle just dup'd to us), we need to transition it before the

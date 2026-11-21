@@ -128,6 +128,13 @@
       "args": "run -A rerun_invalid_driver.mjs",
       "output": "r6/rerun_invalid.out"
     },
+    // `NODE_TEST_WORKER_ID`: each ID runs an even share of the files,
+    // whatever their durations, and one file at a time.
+    "worker_id_even_share": {
+      "cwd": "r6",
+      "args": "run -A worker_id_driver.mjs",
+      "output": "r6/worker_id.out"
+    },
     // A failure's stack: `node:internal/` frames and a CommonJS file's path.
     "failure_stack_frames": {
       "cwd": "r6",

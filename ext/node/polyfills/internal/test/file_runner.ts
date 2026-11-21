@@ -27,6 +27,7 @@ const {
   Error,
   JSONParse,
   JSONStringify,
+  MathFloor,
   MathMax,
   ObjectAssign,
   ObjectDefineProperty,
@@ -553,12 +554,30 @@ function startRun(options, report) {
       ? 1
       : options.maxConcurrency;
     let next = 0;
+    // Each worker ID (`NODE_TEST_WORKER_ID`, 1..limit) runs one file at a
+    // time and is reused for the next, as in Node.js. The IDs also share the
+    // files out evenly whatever the files' durations: every ID runs
+    // `perWorker` files, and `extra` of them one more. Node.js hands a freed
+    // ID to the next file, so how many files an ID serves there follows the
+    // timing, and a fast file can leave one ID serving more than its share
+    // (parallel/test-runner-worker-id asserts an even share and fails under
+    // load on Node.js too). A worker that has run its share stops, so the
+    // last files may wait for a busy ID instead of taking an idle one;
+    // `--test-concurrency` is the most files that run at once.
+    const perWorker = MathFloor(files.length / limit);
+    let extra = files.length % limit;
     const workers = [];
     for (let worker = 1; worker <= limit; worker++) {
       ArrayPrototypePush(
         workers,
         (async () => {
+          let served = 0;
           while (next < files.length && !interrupted) {
+            if (served >= perWorker) {
+              if (served > perWorker || extra === 0) break;
+              extra--;
+            }
+            served++;
             const index = next++;
             await runFile(files[index], index, worker);
           }
