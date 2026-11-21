@@ -525,9 +525,7 @@ pub async fn run_benchmarks(
         collect_specifiers(
           CollectSpecifiersOptions {
             file_patterns: bench_options.files.clone(),
-            vendor_folder: cli_options
-              .vendor_dir_path()
-              .map(ToOwned::to_owned),
+            vendor_folder: cli_options.vendor_dir_path().map(ToOwned::to_owned),
             include_ignored_specified: false,
           },
           is_supported_bench_path,

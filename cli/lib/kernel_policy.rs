@@ -1155,7 +1155,9 @@ impl Context {
 /// deny and ignore rule as the run wrote it. A prompt can grant anything
 /// but a denied path, so this is what the kernel may hold the run to
 /// without refusing what a prompt grants.
-pub fn deny_ceiling_options(options: &PermissionsOptions) -> PermissionsOptions {
+pub fn deny_ceiling_options(
+  options: &PermissionsOptions,
+) -> PermissionsOptions {
   let all = Some(Vec::new());
   PermissionsOptions {
     allow_read: all.clone(),
@@ -1830,8 +1832,7 @@ impl<'a> Compiler<'a> {
   ) {
     // a deny ceiling never refuses (decision O4): what the OS can't hold is
     // a documented Deno-only rule, as the prompt run it is would have it
-    let resolution = if self.ceiling && resolution == GapResolution::FailOpen
-    {
+    let resolution = if self.ceiling && resolution == GapResolution::FailOpen {
       GapResolution::Documented
     } else {
       resolution

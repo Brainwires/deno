@@ -2391,7 +2391,10 @@ fn deny_ceiling_macos_is_exact() {
   let p = &c.policy;
   assert!(p.deny_ceiling);
   assert_eq!(p.shape, Shape::ModeA);
-  assert_eq!(deny(&p.fs.deny_read, "/Users/me/.ssh"), DenyEnforcement::Exact);
+  assert_eq!(
+    deny(&p.fs.deny_read, "/Users/me/.ssh"),
+    DenyEnforcement::Exact
+  );
   assert_eq!(
     deny(&p.fs.deny_write, "/Users/me/.zshrc"),
     DenyEnforcement::Exact
@@ -2429,7 +2432,12 @@ fn test_report_files_are_implicit() {
   let mut ctx = ctx(linux(Some(6)), KernelSandboxMode::Enforce);
   ctx.report_files = vec![PathBuf::from("/project/report.xml")];
   let implicit = ImplicitSet::build(&PermissionsOptions::default(), &ctx);
-  assert!(implicit.entries.iter().any(|e| e.need == ImplicitNeed::TestReport
-    && e.access == ImplicitAccess::ReadWrite
-    && e.path == Path::new("/project/report.xml")));
+  assert!(
+    implicit
+      .entries
+      .iter()
+      .any(|e| e.need == ImplicitNeed::TestReport
+        && e.access == ImplicitAccess::ReadWrite
+        && e.path == Path::new("/project/report.xml"))
+  );
 }

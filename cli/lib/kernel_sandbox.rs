@@ -2075,7 +2075,11 @@ mod tests {
     assert_eq!((r.mode, r.source), (Enforce, ModeSource::Forced));
     assert!(!r.deny_ceiling());
     // the reasons say what they are
-    assert!(ModeReason::AutoDenyCeiling.describe().contains("deny rules"));
+    assert!(
+      ModeReason::AutoDenyCeiling
+        .describe()
+        .contains("deny rules")
+    );
     assert!(
       ModeReason::DenyCeilingDenoOnly
         .describe()
