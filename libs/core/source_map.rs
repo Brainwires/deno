@@ -104,6 +104,11 @@ pub struct SourceMapper {
   /// map" so a trace full of unmapped frames doesn't re-ask the loader once
   /// per frame; the LRU keeps that memo from growing without bound.
   maps: LruCache<String, Option<Arc<SourceMap>>>,
+  /// The last answer of `source_map_for`. The frames of a stack trace are
+  /// mostly of one file after another, and comparing two names is cheaper
+  /// than hashing one. Lookups it answers are consecutive ones of one file,
+  /// so `maps` keeps its least-recently-used order.
+  last_map: Option<(String, Option<Arc<SourceMap>>)>,
   source_lines: LruCache<(String, i64), Option<String>>,
 
   loader: Rc<dyn ModuleLoader>,
@@ -119,6 +124,7 @@ impl SourceMapper {
   pub fn new(loader: Rc<dyn ModuleLoader>) -> Self {
     Self {
       maps: LruCache::new(MAX_CACHED_SOURCE_MAPS),
+      last_map: None,
       source_lines: LruCache::new(MAX_CACHED_SOURCE_LINES),
       ext_source_maps: Default::default(),
       source_map_urls: Default::default(),
@@ -157,11 +163,27 @@ impl SourceMapper {
   /// Returns the decoded source map for `file_name`, decoding it on first
   /// use. Both hits and misses are cached (bounded by the LRU).
   fn source_map_for(&mut self, file_name: &str) -> Option<Arc<SourceMap>> {
-    if let Some(source_map) = self.maps.get(file_name) {
+    if let Some((last_file_name, source_map)) = &self.last_map
+      && last_file_name == file_name
+    {
       return source_map.clone();
     }
-    let source_map = self.decode_source_map(file_name).map(Arc::new);
-    self.maps.insert(file_name.to_owned(), source_map.clone());
+    let source_map = match self.maps.get(file_name) {
+      Some(source_map) => source_map.clone(),
+      None => {
+        let source_map = self.decode_source_map(file_name).map(Arc::new);
+        self.maps.insert(file_name.to_owned(), source_map.clone());
+        source_map
+      }
+    };
+    match &mut self.last_map {
+      Some((last_file_name, last_source_map)) => {
+        last_file_name.clear();
+        last_file_name.push_str(file_name);
+        *last_source_map = source_map.clone();
+      }
+      None => self.last_map = Some((file_name.to_owned(), source_map.clone())),
+    }
     source_map
   }
 

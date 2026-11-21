@@ -563,6 +563,10 @@ pub struct JsRuntimeState {
   pub(crate) cppgc_template: RefCell<Option<v8::Global<v8::FunctionTemplate>>>,
   pub(crate) function_templates: Rc<RefCell<FunctionTemplateData>>,
   pub(crate) callsite_prototype: RefCell<Option<v8::Global<v8::Object>>>,
+  /// `Deno.core.callSiteInfo`: reads a whole trace's call sites for the
+  /// default stack formatter in one call (see `collect_callsite_info`).
+  pub(crate) callsite_info_cb: RefCell<Option<v8::Global<v8::Function>>>,
+  pub(crate) stack_file_names: RefCell<crate::error::StackFileNames>,
   waker: Arc<AtomicWaker>,
   /// The waker every event loop iteration runs under (see
   /// [`JsRuntime::poll_event_loop`]).
@@ -932,6 +936,8 @@ impl JsRuntime {
       cppgc_template: None.into(),
       function_templates: Default::default(),
       callsite_prototype: None.into(),
+      callsite_info_cb: None.into(),
+      stack_file_names: Default::default(),
       lazy_extensions,
       tla_stall_retries: Cell::new(0),
     });
@@ -1770,6 +1776,18 @@ impl JsRuntime {
         BUILD_CUSTOM_ERROR,
         "Deno.core.buildCustomError",
       );
+      // Kept for the isolate (not the realm): V8 asks for a stack trace in
+      // whatever context reads `error.stack`, a `node:vm` one included.
+      let callsite_info_cb: v8::Local<v8::Function> = bindings::get(
+        scope,
+        core_obj,
+        CALL_SITE_INFO,
+        "Deno.core.callSiteInfo",
+      );
+      JsRuntime::state_from(scope)
+        .callsite_info_cb
+        .borrow_mut()
+        .replace(v8::Global::new(scope, callsite_info_cb));
       let error_constructors: v8::Local<v8::Object> = bindings::get(
         scope,
         core_obj,

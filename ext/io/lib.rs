@@ -1,7 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::fs::File as StdFile;
 use std::future::Future;
 use std::io;
@@ -18,7 +17,6 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::Stdio as StdStdio;
 use std::rc::Rc;
-#[cfg(windows)]
 use std::sync::Arc;
 
 use deno_core::AsyncMutFuture;
@@ -819,10 +817,12 @@ enum StdFileResourceKind {
 
 pub struct StdFileResourceInner {
   kind: StdFileResourceKind,
-  // We can't use an AsyncRefCell here because we need to allow
-  // access to the resource synchronously at any time and
-  // asynchronously one at a time in order
-  cell: RefCell<Option<StdFile>>,
+  // Shared with the blocking tasks that do the async work (std's `File` does
+  // its I/O through `&File`), so the file is usable synchronously at any time
+  // while one of them runs, and a task needs no duplicate of the descriptor.
+  // The descriptor is closed when the resource and the last task are done
+  // with it. Only `None` while dropping.
+  file: Option<Arc<StdFile>>,
   // Used to keep async actions in order and only allow one
   // to occur at a time
   cell_async_task_queue: Rc<TaskQueue>,
@@ -839,16 +839,23 @@ impl Drop for StdFileResourceInner {
       StdFileResourceKind::Stdin(_)
       | StdFileResourceKind::Stdout
       | StdFileResourceKind::Stderr => {
-        if let Some(file) = self.cell.borrow_mut().take() {
-          #[cfg(unix)]
-          {
-            use std::os::unix::io::IntoRawFd;
-            let _ = file.into_raw_fd();
-          }
-          #[cfg(windows)]
-          {
-            use std::os::windows::io::IntoRawHandle;
-            let _ = file.into_raw_handle();
+        if let Some(file) = self.file.take() {
+          match Arc::try_unwrap(file) {
+            Ok(file) => {
+              #[cfg(unix)]
+              {
+                use std::os::unix::io::IntoRawFd;
+                let _ = file.into_raw_fd();
+              }
+              #[cfg(windows)]
+              {
+                use std::os::windows::io::IntoRawHandle;
+                let _ = file.into_raw_handle();
+              }
+            }
+            // A blocking task (a pending read of stdin) still has it: leak
+            // this reference, so that task's end doesn't close the fd either.
+            Err(file) => std::mem::forget(file),
           }
         }
       }
@@ -931,39 +938,22 @@ impl StdFileResourceInner {
     StdFileResourceInner {
       kind,
       handle,
-      cell: RefCell::new(Some(fs_file)),
+      file: Some(Arc::new(fs_file)),
       cell_async_task_queue: Default::default(),
       maybe_path,
     }
   }
 
+  fn shared_file(&self) -> &Arc<StdFile> {
+    self.file.as_ref().unwrap()
+  }
+
   fn with_sync<F, R>(&self, action: F) -> FsResult<R>
   where
-    F: FnOnce(&mut StdFile) -> FsResult<R>,
+    F: FnOnce(&mut &StdFile) -> FsResult<R>,
   {
-    match self.cell.try_borrow_mut() {
-      Ok(mut cell) if cell.is_some() => action(cell.as_mut().unwrap()),
-      _ => Err(fs::FsError::FileBusy),
-    }
-  }
-
-  /// Gets the file for use off the current thread, cloning it when possible so
-  /// that the cell stays usable, and otherwise taking it out of the cell.
-  ///
-  /// The returned flag indicates whether the file was taken out and so must be
-  /// handed back with [`Self::return_file_from_task`] when the work is done.
-  fn take_file_for_task(&self) -> (StdFile, bool) {
-    let mut cell = self.cell.borrow_mut();
-    match cell.as_mut().unwrap().try_clone().ok() {
-      Some(value) => (value, false),
-      None => (cell.take().unwrap(), true),
-    }
-  }
-
-  fn return_file_from_task(&self, file: StdFile, did_take: bool) {
-    if did_take {
-      self.cell.borrow_mut().replace(file);
-    }
+    let mut file: &StdFile = self.shared_file();
+    action(&mut file)
   }
 
   fn with_inner_blocking_task<F, R: 'static + Send>(
@@ -971,23 +961,22 @@ impl StdFileResourceInner {
     action: F,
   ) -> impl Future<Output = R> + '_
   where
-    F: FnOnce(&mut StdFile) -> R + Send + 'static,
+    F: FnOnce(&mut &StdFile) -> R + Send + 'static,
   {
     // we want to restrict this to one async action at a time
     let acquire_fut = self.cell_async_task_queue.acquire();
     async move {
       let permit = acquire_fut.await;
-      // we take the value out of the cell, use it on a blocking task,
-      // then put it back into the cell when we're done
-      let (mut cell_value, did_take) = self.take_file_for_task();
-      let (cell_value, result) = spawn_blocking(move || {
-        let result = action(&mut cell_value);
-        (cell_value, result)
+      // the blocking task works on the same file, not on a duplicate of its
+      // descriptor: a `dup` and a `close` per operation cost more than the
+      // rest of the hand-off
+      let file = self.shared_file().clone();
+      let result = spawn_blocking(move || {
+        let mut file: &StdFile = &file;
+        action(&mut file)
       })
       .await
       .unwrap();
-
-      self.return_file_from_task(cell_value, did_take);
 
       drop(permit); // explicit for clarity
       result
@@ -1037,9 +1026,7 @@ impl StdFileResourceInner {
     let acquire_fut = self.cell_async_task_queue.acquire();
     async move {
       let permit = acquire_fut.await;
-      // we clone the file (or take it out if cloning fails), lock it, then put
-      // it back into the cell when we're done
-      let (file, did_take) = self.take_file_for_task();
+      let file = self.shared_file().clone();
 
       let try_result = if exclusive {
         file.try_lock()
@@ -1052,20 +1039,17 @@ impl StdFileResourceInner {
       // just means "fall back to the blocking wait", which reports a genuine
       // error if there is one.
       let result = if try_result.is_ok() {
-        self.return_file_from_task(file, did_take);
         Ok(())
       } else {
-        let (file, result) = spawn_unpooled_blocking(move || {
-          let result = if exclusive {
+        spawn_unpooled_blocking(move || {
+          if exclusive {
             file.lock()
           } else {
             file.lock_shared()
-          };
-          (file, result)
+          }
         })
-        .await;
-        self.return_file_from_task(file, did_take);
-        result.map_err(Into::into)
+        .await
+        .map_err(Into::into)
       };
 
       drop(permit); // explicit for clarity
@@ -1679,17 +1663,13 @@ impl crate::fs::File for StdFileResourceInner {
   }
 
   fn try_clone_inner(self: Rc<Self>) -> FsResult<Rc<dyn fs::File>> {
-    let inner: &Option<_> = &self.cell.borrow();
-    match inner {
-      Some(inner) => Ok(Rc::new(StdFileResourceInner {
-        kind: self.kind.clone(),
-        cell: RefCell::new(Some(inner.try_clone()?)),
-        cell_async_task_queue: Default::default(),
-        handle: self.handle,
-        maybe_path: self.maybe_path.clone(),
-      })),
-      None => Err(FsError::FileBusy),
-    }
+    Ok(Rc::new(StdFileResourceInner {
+      kind: self.kind.clone(),
+      file: Some(Arc::new(self.shared_file().try_clone()?)),
+      cell_async_task_queue: Default::default(),
+      handle: self.handle,
+      maybe_path: self.maybe_path.clone(),
+    }))
   }
 
   fn as_stdio(self: Rc<Self>) -> FsResult<StdStdio> {

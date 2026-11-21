@@ -102,6 +102,65 @@
   registerErrorClass("TypeError", TypeError);
   registerErrorClass("URIError", URIError);
 
+  // What a CallSite predicate returned, as a bit of the frame's flags. Anything
+  // but a boolean makes the flags negative, and the frame is then read (and
+  // reported) by `JsStackFrame::from_callsite_object`.
+  function callSiteFlag(value, bit) {
+    return value === true ? bit : value === false ? 0 : -1024;
+  }
+
+  // Reads what the default stack trace formatter (`format_stack_trace` in
+  // error.rs) prints of every call site of a trace, in one call from Rust: a
+  // call from Rust into each CallSite method costs several times the method.
+  // `info` has 8 preset slots per call site; the layout and the flags are
+  // `callsite_info` in error.rs, keep the two in sync. `getTypeName` and
+  // `getMethodName` (a search of the receiver's prototype chain) are only
+  // printed for a method call, `getPromiseIndex` for a `Promise.all` frame
+  // and `getEvalOrigin` for an eval frame.
+  function callSiteInfo(callSites, info) {
+    const length = callSites.length;
+    let previousFileName;
+    for (let i = 0, slot = 0; i < length; i++, slot += 8) {
+      const callSite = callSites[i];
+      const fileName = callSite.getFileName();
+      info[slot + 1] = callSite.getLineNumber();
+      info[slot + 2] = callSite.getColumnNumber();
+      info[slot + 3] = callSite.getFunctionName();
+      const isToplevel = callSite.isToplevel();
+      const flags = (isToplevel == null ? 2 : callSiteFlag(isToplevel, 1)) +
+        callSiteFlag(callSite.isEval(), 4) +
+        callSiteFlag(callSite.isNative(), 8) +
+        callSiteFlag(callSite.isConstructor(), 16) +
+        callSiteFlag(callSite.isAsync(), 32) +
+        callSiteFlag(callSite.isPromiseAll(), 64);
+      if (flags < 0) {
+        info[slot] = fileName;
+        info[slot + 4] = flags;
+        previousFileName = undefined;
+        continue;
+      }
+      if (typeof fileName === "string" && fileName === previousFileName) {
+        // the frames of one function after another of the same file: its
+        // name is read once
+        info[slot + 4] = flags + 128;
+      } else {
+        info[slot] = fileName;
+        info[slot + 4] = flags;
+        previousFileName = fileName;
+      }
+      if ((flags & 17) === 0) {
+        // neither top level nor a constructor: a method call
+        info[slot + 5] = callSite.getTypeName();
+        info[slot + 6] = callSite.getMethodName();
+      }
+      if ((flags & 64) !== 0) {
+        info[slot + 7] = callSite.getPromiseIndex();
+      } else if ((flags & 4) !== 0) {
+        info[slot + 7] = callSite.getEvalOrigin();
+      }
+    }
+  }
+
   function buildCustomError(className, message, additionalProperties) {
     let error;
     try {
@@ -604,6 +663,7 @@
     setBuildInfo,
     registerErrorBuilder,
     buildCustomError,
+    callSiteInfo,
     registerErrorClass,
     errorConstructors,
     setUpAsyncStub,

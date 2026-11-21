@@ -897,6 +897,317 @@ fn parse_eval_origin(
   ))
 }
 
+fn is_wasm_file_name(file_name: Option<&str>) -> bool {
+  file_name.is_some_and(|f| f.starts_with("wasm://"))
+}
+
+/// Applies the source map to a call site's location. For wasm frames the
+/// location is returned as is: source maps don't apply to wasm, and V8 returns
+/// the function index via getLineNumber() and the byte offset via
+/// getColumnNumber().
+fn source_mapped_location<'s, 'i>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  file_name: Option<String>,
+  line_number: Option<i64>,
+  column_number: Option<i64>,
+  is_wasm: bool,
+) -> (Option<String>, Option<i64>, Option<i64>) {
+  if is_wasm {
+    return (file_name, line_number, column_number);
+  }
+  match (file_name, line_number, column_number) {
+    (Some(f), Some(l), Some(c)) => {
+      let state = JsRuntime::state_from(scope);
+      let mut source_mapper = state.source_mapper.borrow_mut();
+      let (file_name, line_num, col_num) =
+        apply_source_map(&mut source_mapper, f.into(), l, c);
+      (Some(file_name.into_owned()), Some(line_num), Some(col_num))
+    }
+    (f, l, c) => (f, l, c),
+  }
+}
+
+/// Applies the source map to the location inside an eval origin string.
+fn source_mapped_eval_origin<'s, 'i>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  eval_origin: String,
+) -> String {
+  let Some((before, (file, line, col), after)) =
+    parse_eval_origin(&eval_origin)
+  else {
+    return eval_origin;
+  };
+  let state = JsRuntime::state_from(scope);
+  let mut source_mapper = state.source_mapper.borrow_mut();
+  let (file, line, col) =
+    apply_source_map(&mut source_mapper, file.into(), line, col);
+  format!("{before}{file}:{line}:{col}{after}")
+}
+
+/// The layout of the array `Deno.core.callSiteInfo` (01_core.js) fills: `SLOTS`
+/// values per call site, in the order of the constants below. Keep the two in
+/// sync.
+mod callsite_info {
+  pub const SLOTS: u32 = 8;
+
+  pub const FILE_NAME: u32 = 0;
+  pub const LINE_NUMBER: u32 = 1;
+  pub const COLUMN_NUMBER: u32 = 2;
+  pub const FUNCTION_NAME: u32 = 3;
+  /// A bit set of the `FLAG_*` values, or a negative number when one of the
+  /// call site's predicates did not return a boolean.
+  pub const FLAGS: u32 = 4;
+  /// Read only for a method call (neither top level nor a constructor).
+  pub const TYPE_NAME: u32 = 5;
+  /// Read only for a method call.
+  pub const METHOD_NAME: u32 = 6;
+  /// `getPromiseIndex()` of a `Promise.all` frame, `getEvalOrigin()` of an
+  /// eval frame, unset otherwise.
+  pub const EXTRA: u32 = 7;
+
+  pub const FLAG_TOP_LEVEL: i32 = 1;
+  /// `isToplevel()` returned null or undefined.
+  pub const FLAG_TOP_LEVEL_UNKNOWN: i32 = 1 << 1;
+  pub const FLAG_EVAL: i32 = 1 << 2;
+  pub const FLAG_NATIVE: i32 = 1 << 3;
+  pub const FLAG_CONSTRUCTOR: i32 = 1 << 4;
+  pub const FLAG_ASYNC: i32 = 1 << 5;
+  pub const FLAG_PROMISE_ALL: i32 = 1 << 6;
+  /// `getFileName()` returned the same string as for the previous call site
+  /// (whose `FILE_NAME` slot, or the one before it, holds it).
+  pub const FLAG_SAME_FILE_NAME: i32 = 1 << 7;
+}
+
+/// Reads what [`format_stack_trace`] needs from every call site of a trace
+/// with one call into JavaScript (`Deno.core.callSiteInfo`), instead of one
+/// call from Rust per `CallSite` method per frame. Returns `None` when the
+/// reader is not available or threw; the caller then reads each call site
+/// with [`JsStackFrame::from_callsite_object`].
+fn collect_callsite_info<'s, 'i>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  callsites: v8::Local<'s, v8::Array>,
+) -> Option<v8::Local<'s, v8::Array>> {
+  let len = callsites.length();
+  if len == 0 {
+    return None;
+  }
+  let cb = JsRuntime::state_from(scope)
+    .callsite_info_cb
+    .borrow()
+    .clone()?;
+  let cb = v8::Local::new(scope, &cb);
+  let undefined: v8::Local<v8::Value> = v8::undefined(scope).into();
+  // Every slot exists as an own element, so the reader's stores never reach
+  // `Array.prototype`.
+  let slots = vec![undefined; (len * callsite_info::SLOTS) as usize];
+  let info = v8::Array::new_with_elements(scope, &slots);
+  v8::tc_scope!(let tc_scope, scope);
+  cb.call(tc_scope, undefined, &[callsites.into(), info.into()])?;
+  Some(info)
+}
+
+/// A value [`collect_callsite_info`] read that is not of the type V8's own
+/// `CallSite` method returns; such a frame is read again by
+/// [`JsStackFrame::from_callsite_object`], which reports it.
+struct UnexpectedCallSiteValue;
+
+/// Reads a string a call site method returned into `buf`; `false` for null
+/// or undefined.
+fn callsite_info_string<'s, 'i>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  value: v8::Local<'s, v8::Value>,
+  buf: &mut String,
+) -> Result<bool, UnexpectedCallSiteValue> {
+  if value.is_null_or_undefined() {
+    return Ok(false);
+  }
+  match value.try_cast::<v8::String>() {
+    Ok(s) => {
+      s.write_utf8_into(scope, buf);
+      Ok(true)
+    }
+    Err(_) => Err(UnexpectedCallSiteValue),
+  }
+}
+
+fn callsite_info_int(
+  value: v8::Local<v8::Value>,
+) -> Result<Option<i64>, UnexpectedCallSiteValue> {
+  if value.is_null_or_undefined() {
+    return Ok(None);
+  }
+  match value.try_cast::<v8::Int32>() {
+    Ok(n) => Ok(Some(n.value() as i64)),
+    Err(_) => Err(UnexpectedCallSiteValue),
+  }
+}
+
+/// The strings of the call site [`write_callsite_info_frame`] is printing,
+/// kept across the frames of a trace so that each is read into the same
+/// allocation.
+#[derive(Default)]
+struct CallSiteStrings {
+  /// What `getFileName()` returned, before source mapping; `None` for null
+  /// or undefined. Kept for the next call site when it is of the same file.
+  file_name: Option<String>,
+  function_name: String,
+  type_name: String,
+  method_name: String,
+  eval_origin: String,
+}
+
+/// Appends call site `index` of the trace [`collect_callsite_info`] read to
+/// `result`, exactly as [`format_frame`] prints the `JsStackFrame` that
+/// [`JsStackFrame::from_callsite_object`] makes of it. Of the call site it
+/// reads what `format_frame` prints and nothing else: the type and method name
+/// only of a method call, the eval origin only of an eval frame and the
+/// promise index only of a `Promise.all` frame. Nothing is appended when it
+/// fails.
+fn write_callsite_info_frame<'s, 'i>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  state: &crate::runtime::JsRuntimeState,
+  maybe_initial_cwd: Option<&Arc<Url>>,
+  info: v8::Local<'s, v8::Array>,
+  index: u32,
+  strings: &mut CallSiteStrings,
+  result: &mut String,
+) -> Result<(), UnexpectedCallSiteValue> {
+  use callsite_info::*;
+
+  let base = index * SLOTS;
+  macro_rules! slot {
+    ($slot: ident) => {
+      info
+        .get_index(scope, base + $slot)
+        .ok_or(UnexpectedCallSiteValue)?
+    };
+  }
+
+  let flags = slot!(FLAGS)
+    .try_cast::<v8::Int32>()
+    .map_err(|_| UnexpectedCallSiteValue)?
+    .value();
+  if flags < 0 {
+    // A frame read method by method next: the file name here is no longer the
+    // previous call site's.
+    strings.file_name = None;
+    return Err(UnexpectedCallSiteValue);
+  }
+  let is_top_level = if flags & FLAG_TOP_LEVEL_UNKNOWN != 0 {
+    None
+  } else {
+    Some(flags & FLAG_TOP_LEVEL != 0)
+  };
+  let is_eval = flags & FLAG_EVAL != 0;
+  let is_constructor = flags & FLAG_CONSTRUCTOR != 0;
+  let is_promise_all = flags & FLAG_PROMISE_ALL != 0;
+
+  if flags & FLAG_SAME_FILE_NAME != 0 {
+    if strings.file_name.is_none() {
+      // The previous call site's file name was not kept (see above).
+      return Err(UnexpectedCallSiteValue);
+    }
+  } else {
+    let mut file_name = strings.file_name.take().unwrap_or_default();
+    if callsite_info_string(scope, slot!(FILE_NAME), &mut file_name)? {
+      strings.file_name = Some(file_name);
+    }
+  }
+  let raw_line_number = callsite_info_int(slot!(LINE_NUMBER))?;
+  let raw_column_number = callsite_info_int(slot!(COLUMN_NUMBER))?;
+  let has_function_name = callsite_info_string(
+    scope,
+    slot!(FUNCTION_NAME),
+    &mut strings.function_name,
+  )?;
+  let (has_type_name, has_method_name) =
+    if is_top_level.unwrap_or_default() || is_constructor {
+      (false, false)
+    } else {
+      (
+        callsite_info_string(scope, slot!(TYPE_NAME), &mut strings.type_name)?,
+        callsite_info_string(
+          scope,
+          slot!(METHOD_NAME),
+          &mut strings.method_name,
+        )?,
+      )
+    };
+  let promise_index = if is_promise_all {
+    callsite_info_int(slot!(EXTRA))?
+  } else {
+    None
+  };
+  let has_eval_origin = is_eval
+    && !is_promise_all
+    && callsite_info_string(scope, slot!(EXTRA), &mut strings.eval_origin)?;
+
+  // Everything is read: from here on this cannot fail.
+  let raw_file_name = strings.file_name.as_deref();
+  let is_wasm = is_wasm_file_name(raw_file_name);
+  // The same steps as `source_mapped_location` / `source_mapped_eval_origin`.
+  let (file_name, line_number, column_number) =
+    match (raw_file_name, raw_line_number, raw_column_number) {
+      (Some(f), Some(l), Some(c)) if !is_wasm => {
+        let mut source_mapper = state.source_mapper.borrow_mut();
+        let (file_name, line_num, col_num) =
+          apply_source_map(&mut source_mapper, Cow::Borrowed(f), l, c);
+        (Some(file_name), Some(line_num), Some(col_num))
+      }
+      (f, l, c) => (f.map(Cow::Borrowed), l, c),
+    };
+  let eval_origin = if is_wasm || !has_eval_origin {
+    None
+  } else {
+    Some(source_mapped_eval_origin(
+      scope,
+      std::mem::take(&mut strings.eval_origin),
+    ))
+  };
+
+  let frame = FrameView {
+    type_name: has_type_name.then_some(strings.type_name.as_str()),
+    function_name: has_function_name.then_some(strings.function_name.as_str()),
+    method_name: has_method_name.then_some(strings.method_name.as_str()),
+    file_name: file_name.as_deref(),
+    line_number,
+    column_number,
+    eval_origin: eval_origin.as_deref(),
+    is_top_level,
+    is_eval,
+    is_native: flags & FLAG_NATIVE != 0,
+    is_constructor,
+    is_async: flags & FLAG_ASYNC != 0,
+    is_promise_all,
+    is_wasm,
+    promise_index,
+  };
+  write_stack_frame_line(state, maybe_initial_cwd, &frame, result);
+  Ok(())
+}
+
+/// Appends a frame's line of a `.stack` string to `result`.
+fn write_stack_frame_line(
+  state: &crate::runtime::JsRuntimeState,
+  maybe_initial_cwd: Option<&Arc<Url>>,
+  frame: &FrameView<'_>,
+  result: &mut String,
+) {
+  // No JavaScript runs while the cache is borrowed.
+  let mut file_names = state.stack_file_names.borrow_mut();
+  let file_name_parts = frame
+    .file_name
+    .filter(|file_name| !file_name.is_empty() && !frame.is_native)
+    .map(|file_name| file_names.get(file_name, maybe_initial_cwd));
+  *result += "\n    at ";
+  write_frame::<NoAnsiColors>(
+    result,
+    frame,
+    maybe_initial_cwd.map(|cwd| &**cwd),
+    file_name_parts,
+  );
+}
+
 impl JsStackFrame {
   pub fn from_location(
     file_name: Option<String>,
@@ -950,52 +1261,23 @@ impl JsStackFrame {
     }
 
     let raw_file_name = call!(GET_FILE_NAME : Option<String>);
-    let is_wasm = raw_file_name
-      .as_deref()
-      .map(|f| f.starts_with("wasm://"))
-      .unwrap_or(false);
-
-    // For wasm frames, skip source map application — source maps don't apply to wasm.
-    // V8 returns the function index via getLineNumber() and byte offset via getColumnNumber().
-    let (file_name, line_number, column_number) = if is_wasm {
-      (
-        raw_file_name,
-        call!(GET_LINE_NUMBER),
-        call!(GET_COLUMN_NUMBER),
-      )
-    } else {
-      let state = JsRuntime::state_from(scope);
-      let mut source_mapper = state.source_mapper.borrow_mut();
-      // apply source map
-      match (
-        raw_file_name,
-        call!(GET_LINE_NUMBER),
-        call!(GET_COLUMN_NUMBER),
-      ) {
-        (Some(f), Some(l), Some(c)) => {
-          let (file_name, line_num, col_num) =
-            apply_source_map(&mut source_mapper, f.into(), l, c);
-          (Some(file_name.into_owned()), Some(line_num), Some(col_num))
-        }
-        (f, l, c) => (f, l, c),
-      }
-    };
+    let is_wasm = is_wasm_file_name(raw_file_name.as_deref());
+    let raw_line_number = call!(GET_LINE_NUMBER);
+    let raw_column_number = call!(GET_COLUMN_NUMBER);
+    let (file_name, line_number, column_number) = source_mapped_location(
+      scope,
+      raw_file_name,
+      raw_line_number,
+      raw_column_number,
+      is_wasm,
+    );
 
     // apply source map to the eval origin, if the error originates from `eval`ed code
     let eval_origin = if is_wasm {
       None
     } else {
-      call!(GET_EVAL_ORIGIN: Option<String>).and_then(|o| {
-        let Some((before, (file, line, col), after)) = parse_eval_origin(&o)
-        else {
-          return Some(o);
-        };
-        let state = JsRuntime::state_from(scope);
-        let mut source_mapper = state.source_mapper.borrow_mut();
-        let (file, line, col) =
-          apply_source_map(&mut source_mapper, file.into(), line, col);
-        Some(format!("{before}{file}:{line}:{col}{after}"))
-      })
+      call!(GET_EVAL_ORIGIN: Option<String>)
+        .map(|o| source_mapped_eval_origin(scope, o))
     };
 
     Some(Self {
@@ -1057,7 +1339,15 @@ fn get_property<'s, 'i>(
   object: v8::Local<'s, v8::Object>,
   key: FastStaticString,
 ) -> Option<v8::Local<'s, v8::Value>> {
-  let key = key.v8_string(scope).unwrap();
+  // Internalized, as a property lookup needs it: an external string would be
+  // registered, looked up in the string table and turned into a thin string
+  // on every call.
+  let key = v8::String::new_from_one_byte(
+    scope,
+    key.as_bytes(),
+    v8::NewStringType::Internalized,
+  )
+  .unwrap();
   object.get(scope, key.into())
 }
 
@@ -1736,6 +2026,65 @@ impl<'a> FileNameParts<'a> {
         Cow::Owned(s) => Cow::Owned(s),
       },
     }
+  }
+}
+
+/// The file names of stack frames as [`format_file_name`] splits them, kept
+/// per runtime: a trace names the same few files over and over, and each split
+/// parses the name as a URL and makes it relative to the working directory.
+#[derive(Default)]
+pub(crate) struct StackFileNames {
+  /// The working directory the entries were split against.
+  initial_cwd: Option<Arc<Url>>,
+  entries: Vec<(String, FileNameParts<'static>)>,
+  index: HashMap<String, usize>,
+  /// The entry of the last lookup: consecutive frames are mostly of one file,
+  /// and comparing the names is cheaper than hashing one.
+  last: usize,
+}
+
+impl StackFileNames {
+  const MAX_ENTRIES: usize = 256;
+
+  fn get(
+    &mut self,
+    file_name: &str,
+    initial_cwd: Option<&Arc<Url>>,
+  ) -> &FileNameParts<'static> {
+    let same_cwd = match (&self.initial_cwd, initial_cwd) {
+      (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
+      (None, None) => true,
+      _ => false,
+    };
+    if !same_cwd {
+      self.entries.clear();
+      self.index.clear();
+      self.initial_cwd = initial_cwd.cloned();
+    }
+    if self
+      .entries
+      .get(self.last)
+      .is_none_or(|(name, _)| name != file_name)
+    {
+      self.last = match self.index.get(file_name) {
+        Some(index) => *index,
+        None => {
+          if self.entries.len() >= Self::MAX_ENTRIES {
+            self.entries.clear();
+            self.index.clear();
+          }
+          let parts =
+            format_file_name(file_name, initial_cwd.map(|cwd| &**cwd))
+              .into_owned();
+          self.entries.push((file_name.to_owned(), parts));
+          self
+            .index
+            .insert(file_name.to_owned(), self.entries.len() - 1);
+          self.entries.len() - 1
+        }
+      };
+    }
+    &self.entries[self.last].1
   }
 }
 
@@ -2470,10 +2819,32 @@ pub fn format_stack_trace<'s, 'i>(
   }
 
   // format each stack frame
-  for i in 0..callsites.length() {
-    let callsite = callsites.get_index(scope, i).unwrap().cast::<v8::Object>();
+  let callsite_info = collect_callsite_info(scope, callsites);
+  let mut strings = CallSiteStrings::default();
+  let len = callsites.length();
+  result.reserve(len as usize * 96);
+  for i in 0..len {
+    if let Some(info) = callsite_info
+      && write_callsite_info_frame(
+        scope,
+        &state,
+        maybe_initial_cwd.as_ref(),
+        info,
+        i,
+        &mut strings,
+        &mut result,
+      )
+      .is_ok()
+    {
+      continue;
+    }
+    // No reader, or a call site answered with a value of another type than
+    // V8's own: read this one method by method.
     v8::tc_scope!(let tc_scope, scope);
-
+    let callsite = callsites
+      .get_index(tc_scope, i)
+      .unwrap()
+      .cast::<v8::Object>();
     let Some(frame) = JsStackFrame::from_callsite_object(tc_scope, callsite)
     else {
       let exc = tc_scope
@@ -2491,12 +2862,12 @@ pub fn format_stack_trace<'s, 'i>(
       }
       break;
     };
-    write!(
-      result,
-      "\n    at {}",
-      format_frame::<NoAnsiColors>(&frame, maybe_initial_cwd.as_deref())
-    )
-    .unwrap();
+    write_stack_frame_line(
+      &state,
+      maybe_initial_cwd.as_ref(),
+      &(&frame).into(),
+      &mut result,
+    );
   }
 
   let result = v8::String::new(scope, &result).unwrap();
@@ -2554,46 +2925,130 @@ impl ErrorFormat for NoAnsiColors {
   }
 }
 
+/// A stack frame as the formatters read it: [`JsStackFrame`] with its strings
+/// borrowed, so that [`format_stack_trace`] can print a frame straight from
+/// what it read of the call site, without building a `JsStackFrame`.
+struct FrameView<'a> {
+  type_name: Option<&'a str>,
+  function_name: Option<&'a str>,
+  method_name: Option<&'a str>,
+  file_name: Option<&'a str>,
+  line_number: Option<i64>,
+  column_number: Option<i64>,
+  eval_origin: Option<&'a str>,
+  is_top_level: Option<bool>,
+  is_eval: bool,
+  is_native: bool,
+  is_constructor: bool,
+  is_async: bool,
+  is_promise_all: bool,
+  is_wasm: bool,
+  promise_index: Option<i64>,
+}
+
+impl<'a> From<&'a JsStackFrame> for FrameView<'a> {
+  fn from(frame: &'a JsStackFrame) -> Self {
+    Self {
+      type_name: frame.type_name.as_deref(),
+      function_name: frame.function_name.as_deref(),
+      method_name: frame.method_name.as_deref(),
+      file_name: frame.file_name.as_deref(),
+      line_number: frame.line_number,
+      column_number: frame.column_number,
+      eval_origin: frame.eval_origin.as_deref(),
+      is_top_level: frame.is_top_level,
+      is_eval: frame.is_eval,
+      is_native: frame.is_native,
+      is_constructor: frame.is_constructor,
+      is_async: frame.is_async,
+      is_promise_all: frame.is_promise_all,
+      is_wasm: frame.is_wasm,
+      promise_index: frame.promise_index,
+    }
+  }
+}
+
+/// Formats `n` in decimal into `buf`, as `n.to_string()` without the
+/// allocation.
+fn fmt_decimal(n: i64, buf: &mut [u8; 20]) -> &str {
+  let mut rest = n.unsigned_abs();
+  let mut start = buf.len();
+  loop {
+    start -= 1;
+    buf[start] = b'0' + (rest % 10) as u8;
+    rest /= 10;
+    if rest == 0 {
+      break;
+    }
+  }
+  if n < 0 {
+    start -= 1;
+    buf[start] = b'-';
+  }
+  // only ASCII digits and '-' were written to `buf[start..]`
+  std::str::from_utf8(&buf[start..]).unwrap()
+}
+
 pub fn format_location<F: ErrorFormat>(
   frame: &JsStackFrame,
   maybe_initial_cwd: Option<&Url>,
 ) -> String {
+  let mut result = String::new();
+  write_location::<F>(&mut result, &frame.into(), maybe_initial_cwd, None);
+  result
+}
+
+/// Appends what [`format_location`] returns to `result`. `file_name_parts` is
+/// the frame's file name already split by [`format_file_name`], when the
+/// caller has it (see [`StackFileNames`]).
+fn write_location<F: ErrorFormat>(
+  result: &mut String,
+  frame: &FrameView<'_>,
+  maybe_initial_cwd: Option<&Url>,
+  file_name_parts: Option<&FileNameParts<'_>>,
+) {
   use ErrorElement::*;
   let in_extension_code = frame
     .file_name
-    .as_ref()
     .map(|f| f.starts_with("ext:") || f.starts_with("node:"))
     .unwrap_or(false);
   if frame.is_native {
-    return F::fmt_element(NativeFrame, in_extension_code, "native")
-      .to_string();
+    *result += &F::fmt_element(NativeFrame, in_extension_code, "native");
+    return;
   }
-  let mut result = String::new();
-  let file_name = frame.file_name.as_deref().unwrap_or("");
+  let file_name = frame.file_name.unwrap_or("");
   if !file_name.is_empty() {
-    let parts = format_file_name(file_name, maybe_initial_cwd);
+    let formatted;
+    let parts = match file_name_parts {
+      Some(parts) => parts,
+      None => {
+        formatted = format_file_name(file_name, maybe_initial_cwd);
+        &formatted
+      }
+    };
     if let Some(working_dir_path) = &parts.working_dir_path {
-      result +=
+      *result +=
         &F::fmt_element(WorkingDirPath, in_extension_code, working_dir_path);
-      result += &F::fmt_element(
+      *result += &F::fmt_element(
         FileName,
         in_extension_code,
         parts.file_name.trim_start_matches("./"),
       )
     } else {
-      result += &F::fmt_element(FileName, in_extension_code, &parts.file_name)
+      *result += &F::fmt_element(FileName, in_extension_code, &parts.file_name)
     }
   } else {
     if frame.is_eval {
-      let eval_origin = frame.eval_origin.as_ref().unwrap();
+      let eval_origin = frame.eval_origin.unwrap();
       let formatted_eval_origin =
         format_eval_origin(eval_origin, maybe_initial_cwd);
-      result +=
+      *result +=
         &F::fmt_element(EvalOrigin, in_extension_code, &formatted_eval_origin);
-      result += &F::fmt_element(PlainText, in_extension_code, ", ");
+      *result += &F::fmt_element(PlainText, in_extension_code, ", ");
     }
-    result += &F::fmt_element(Anonymous, in_extension_code, "<anonymous>");
+    *result += &F::fmt_element(Anonymous, in_extension_code, "<anonymous>");
   }
+  let mut digits = [0; 20];
   if frame.is_wasm {
     // W3C WebAssembly Web API spec format:
     // {url}:wasm-function[{funcIndex}]:0x{pcOffset}
@@ -2602,49 +3057,62 @@ pub fn format_location<F: ErrorFormat>(
     if let Some(line_number) = frame.line_number {
       let func_index = line_number - 1;
       let wasm_func = format!("wasm-function[{func_index}]");
-      result += &F::fmt_element(PlainText, in_extension_code, ":");
-      result += &F::fmt_element(LineNumber, in_extension_code, &wasm_func);
+      *result += &F::fmt_element(PlainText, in_extension_code, ":");
+      *result += &F::fmt_element(LineNumber, in_extension_code, &wasm_func);
     }
     if let Some(column_number) = frame.column_number {
       // V8's getColumnNumber() is 1-based, but wasm byte offsets are 0-based
       let pc_offset = format!("0x{:x}", column_number - 1);
-      result += &F::fmt_element(PlainText, in_extension_code, ":");
-      result += &F::fmt_element(ColumnNumber, in_extension_code, &pc_offset);
+      *result += &F::fmt_element(PlainText, in_extension_code, ":");
+      *result += &F::fmt_element(ColumnNumber, in_extension_code, &pc_offset);
     }
   } else if let Some(line_number) = frame.line_number {
-    result += &F::fmt_element(PlainText, in_extension_code, ":");
-    result +=
-      &F::fmt_element(LineNumber, in_extension_code, &line_number.to_string());
+    *result += &F::fmt_element(PlainText, in_extension_code, ":");
+    *result += &F::fmt_element(
+      LineNumber,
+      in_extension_code,
+      fmt_decimal(line_number, &mut digits),
+    );
     if let Some(column_number) = frame.column_number {
-      result += &F::fmt_element(PlainText, in_extension_code, ":");
-      result += &F::fmt_element(
+      *result += &F::fmt_element(PlainText, in_extension_code, ":");
+      *result += &F::fmt_element(
         ColumnNumber,
         in_extension_code,
-        &column_number.to_string(),
+        fmt_decimal(column_number, &mut digits),
       );
     }
   }
-  result
 }
 
 pub fn format_frame<F: ErrorFormat>(
   frame: &JsStackFrame,
   maybe_initial_cwd: Option<&Url>,
 ) -> String {
+  let mut result = String::new();
+  write_frame::<F>(&mut result, &frame.into(), maybe_initial_cwd, None);
+  result
+}
+
+/// Appends what [`format_frame`] returns to `result`; `file_name_parts` as in
+/// [`write_location`].
+fn write_frame<F: ErrorFormat>(
+  result: &mut String,
+  frame: &FrameView<'_>,
+  maybe_initial_cwd: Option<&Url>,
+  file_name_parts: Option<&FileNameParts<'_>>,
+) {
   use ErrorElement::*;
   let in_extension_code = frame
     .file_name
-    .as_ref()
     .map(|f| f.starts_with("ext:") || f.starts_with("node:"))
     .unwrap_or(false);
   let is_method_call =
     !(frame.is_top_level.unwrap_or_default() || frame.is_constructor);
-  let mut result = String::new();
   if frame.is_async {
-    result += &F::fmt_element(PlainText, in_extension_code, "async ");
+    *result += &F::fmt_element(PlainText, in_extension_code, "async ");
   }
   if frame.is_promise_all {
-    result += &F::fmt_element(
+    *result += &F::fmt_element(
       PromiseAll,
       in_extension_code,
       &format!(
@@ -2652,59 +3120,58 @@ pub fn format_frame<F: ErrorFormat>(
         frame.promise_index.unwrap_or_default()
       ),
     );
-    return result;
+    return;
   }
   if is_method_call {
     let mut formatted_method = String::new();
-    if let Some(function_name) = &frame.function_name {
-      if let Some(type_name) = &frame.type_name
+    if let Some(function_name) = frame.function_name {
+      if let Some(type_name) = frame.type_name
         && !function_name.starts_with(type_name)
       {
-        write!(formatted_method, "{type_name}.").unwrap();
+        formatted_method += type_name;
+        formatted_method += ".";
       }
       formatted_method += function_name;
-      if let Some(method_name) = &frame.method_name
+      if let Some(method_name) = frame.method_name
         && !function_name.ends_with(method_name)
       {
-        write!(formatted_method, " [as {method_name}]").unwrap();
+        formatted_method += " [as ";
+        formatted_method += method_name;
+        formatted_method += "]";
       }
     } else {
-      if let Some(type_name) = &frame.type_name {
-        write!(formatted_method, "{type_name}.").unwrap();
+      if let Some(type_name) = frame.type_name {
+        formatted_method += type_name;
+        formatted_method += ".";
       }
-      if let Some(method_name) = &frame.method_name {
+      if let Some(method_name) = frame.method_name {
         formatted_method += method_name
       } else {
         formatted_method += "<anonymous>";
       }
     }
-    result +=
+    *result +=
       F::fmt_element(FunctionName, in_extension_code, &formatted_method)
         .as_ref();
   } else if frame.is_constructor {
-    result += &F::fmt_element(PlainText, in_extension_code, "new ");
-    if let Some(function_name) = &frame.function_name {
-      write!(
-        result,
-        "{}",
-        F::fmt_element(FunctionName, in_extension_code, function_name)
-      )
-      .unwrap();
+    *result += &F::fmt_element(PlainText, in_extension_code, "new ");
+    if let Some(function_name) = frame.function_name {
+      *result +=
+        F::fmt_element(FunctionName, in_extension_code, function_name).as_ref();
     } else {
-      result +=
+      *result +=
         F::fmt_element(Anonymous, in_extension_code, "<anonymous>").as_ref();
     }
-  } else if let Some(function_name) = &frame.function_name {
-    result +=
+  } else if let Some(function_name) = frame.function_name {
+    *result +=
       F::fmt_element(FunctionName, in_extension_code, function_name).as_ref();
   } else {
-    result += &format_location::<F>(frame, maybe_initial_cwd);
-    return result;
+    write_location::<F>(result, frame, maybe_initial_cwd, file_name_parts);
+    return;
   }
-  result += &F::fmt_element(PlainText, in_extension_code, " (");
-  result += &format_location::<F>(frame, maybe_initial_cwd);
-  result += &F::fmt_element(PlainText, in_extension_code, ")");
-  result
+  *result += &F::fmt_element(PlainText, in_extension_code, " (");
+  write_location::<F>(result, frame, maybe_initial_cwd, file_name_parts);
+  *result += &F::fmt_element(PlainText, in_extension_code, ")");
 }
 
 pub fn throw_error_one_byte_info(
@@ -2782,6 +3249,75 @@ pub fn throw_invalid_this_error_one_byte<'s, 'i>(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn fmt_decimal_is_to_string() {
+    for n in [
+      0,
+      1,
+      -1,
+      9,
+      10,
+      42,
+      -305,
+      2147483647,
+      -2147483648,
+      i64::MAX,
+      i64::MIN,
+    ] {
+      assert_eq!(fmt_decimal(n, &mut [0; 20]), n.to_string());
+    }
+  }
+
+  // The cache answers exactly what `format_file_name` does, whichever entry
+  // was asked for last, across evictions and a change of working directory.
+  #[test]
+  fn stack_file_names_cache_is_format_file_name() {
+    fn assert_same(
+      cache: &mut StackFileNames,
+      file_name: &str,
+      cwd: Option<&Arc<Url>>,
+    ) {
+      let expected = format_file_name(file_name, cwd.map(|cwd| &**cwd));
+      let actual = cache.get(file_name, cwd);
+      assert_eq!(actual.working_dir_path, expected.working_dir_path);
+      assert_eq!(actual.file_name, expected.file_name);
+    }
+
+    let cwd = Arc::new(Url::parse("file:///work/dir/").unwrap());
+    let other_cwd = Arc::new(Url::parse("file:///work/").unwrap());
+    let names = [
+      "file:///work/dir/main.ts",
+      "file:///work/dir/a%20b/c.js",
+      "file:///work/other.js",
+      "file:///elsewhere/%E2%9C%93.js",
+      "node:internal/modules/cjs/loader",
+      "ext:core/01_core.js",
+      "data:text/javascript,1",
+      "https://example.com/mod.ts",
+      "/not/a/url.js",
+      "wasm://wasm/1234abcd",
+      "",
+    ];
+    let mut cache = StackFileNames::default();
+    for cwd in [Some(&cwd), Some(&other_cwd), None, Some(&cwd)] {
+      for name in names {
+        assert_same(&mut cache, name, cwd);
+        assert_same(&mut cache, name, cwd);
+      }
+      for name in names.iter().rev() {
+        assert_same(&mut cache, name, cwd);
+      }
+    }
+    // past the capacity the cache starts over
+    for i in 0..StackFileNames::MAX_ENTRIES * 2 + 3 {
+      let name = format!("file:///work/dir/{i}.js");
+      assert_same(&mut cache, &name, Some(&cwd));
+      assert_same(&mut cache, names[0], Some(&cwd));
+    }
+    assert!(cache.entries.len() <= StackFileNames::MAX_ENTRIES);
+    assert_eq!(cache.entries.len(), cache.index.len());
+  }
 
   // denext: the permission-denied note hook changes nothing unless the CLI
   // installs it (it does only under --kernel-sandbox=enforce, and the hook
