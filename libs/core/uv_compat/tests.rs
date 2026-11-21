@@ -1784,6 +1784,104 @@ async fn tcp_connect_returns_ealready() {
   .await;
 }
 
+// ========== TCP connect: immediate errors are synchronous ==========
+
+/// Like libuv's `uv__tcp_connect`, an error connect(2) reports at once is
+/// the return value of `uv_tcp_connect` and the callback never runs, so a
+/// caller (happy eyeballs in `node:net`) sees it before any timer it sets.
+/// TCP to a multicast address is refused by the stack on Linux and macOS.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn tcp_connect_immediate_error_is_synchronous() {
+  run_test(async |runtime, uv_loop| {
+    unsafe extern "C" fn must_not_run(_: *mut uv_connect_t, status: i32) {
+      panic!("connect callback ran with status {status}");
+    }
+
+    let mut client = std::mem::MaybeUninit::<uv_tcp_t>::uninit();
+    let client_ptr = client.as_mut_ptr();
+    let mut req = std::mem::MaybeUninit::<uv_connect_t>::uninit();
+    unsafe {
+      uv_tcp_init(uv_loop, client_ptr);
+      let mut addr = std::mem::MaybeUninit::<sockaddr_in>::uninit();
+      let ip = std::ffi::CString::new("224.0.0.1").unwrap();
+      uv_ip4_addr(ip.as_ptr(), 10, addr.as_mut_ptr());
+
+      let status = uv_tcp_connect(
+        req.as_mut_ptr(),
+        client_ptr,
+        addr.as_ptr() as *const c_void,
+        Some(must_not_run),
+      );
+      assert!(status < 0, "expected a synchronous error, got {status}");
+      assert_ne!(status, UV_EALREADY);
+    }
+    for _ in 0..5 {
+      tick(runtime).await;
+    }
+    unsafe {
+      uv_close(client_ptr as *mut uv_handle_t, None);
+    }
+    tick(runtime).await;
+  })
+  .await;
+}
+
+/// ECONNREFUSED stays asynchronous, as libuv defers it to the callback
+/// (its `delayed_error`), even where loopback refuses at once.
+#[tokio::test(flavor = "current_thread")]
+async fn tcp_connect_refused_is_reported_by_callback() {
+  run_test(async |runtime, uv_loop| {
+    // A port nothing listens on: bind, read it, close.
+    let port = {
+      let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+      l.local_addr().unwrap().port()
+    };
+
+    let status_cell = Rc::new(Cell::new(1));
+    let status_ptr = Rc::into_raw(status_cell.clone());
+    unsafe extern "C" fn on_connect(req: *mut uv_connect_t, status: i32) {
+      let cell = unsafe { Rc::from_raw((*req).data as *const Cell<i32>) };
+      cell.set(status);
+      let _ = Rc::into_raw(cell);
+    }
+
+    let mut client = std::mem::MaybeUninit::<uv_tcp_t>::uninit();
+    let client_ptr = client.as_mut_ptr();
+    let mut req = std::mem::MaybeUninit::<uv_connect_t>::uninit();
+    let req_ptr = req.as_mut_ptr();
+    unsafe {
+      uv_tcp_init(uv_loop, client_ptr);
+      (*req_ptr).data = status_ptr as *mut c_void;
+      let mut addr = std::mem::MaybeUninit::<sockaddr_in>::uninit();
+      let ip = std::ffi::CString::new("127.0.0.1").unwrap();
+      uv_ip4_addr(ip.as_ptr(), port as i32, addr.as_mut_ptr());
+      assert_ok(uv_tcp_connect(
+        req_ptr,
+        client_ptr,
+        addr.as_ptr() as *const c_void,
+        Some(on_connect),
+      ));
+    }
+    assert_eq!(status_cell.get(), 1, "callback ran inside uv_tcp_connect");
+    // Windows retries a refused SYN for about two seconds.
+    for _ in 0..1000 {
+      tick(runtime).await;
+      if status_cell.get() != 1 {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(status_cell.get(), UV_ECONNREFUSED);
+    unsafe {
+      uv_close(client_ptr as *mut uv_handle_t, None);
+      Rc::from_raw(status_ptr);
+    }
+    tick(runtime).await;
+  })
+  .await;
+}
+
 // ========== TCP shutdown returns UV_EALREADY on duplicate ==========
 
 #[tokio::test(flavor = "current_thread")]

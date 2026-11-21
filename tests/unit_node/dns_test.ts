@@ -470,3 +470,57 @@ Deno.test("[node/dns] resolve('') fails with ENODATA", async () => {
   assertEquals(rejected.code, "ENODATA");
   assertEquals(rejected.syscall, "queryA");
 });
+
+// A one-answer DNS server in another process, so it answers while this
+// process's event loop is blocked.
+const ONE_ANSWER_DNS_SERVER = `
+import dgram from "node:dgram";
+const sock = dgram.createSocket("udp4");
+sock.on("message", (q, peer) => {
+  const res = new Uint8Array(q.length + 16);
+  res.set(q);
+  res[2] = 0x81; res[3] = 0x80; // a response; recursion desired + available
+  res[6] = 0; res[7] = 1; // ANCOUNT = 1
+  res[10] = 0; res[11] = 0; // ARCOUNT = 0
+  res.set([0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 1, 2, 3, 4], q.length);
+  sock.send(res, peer.port, peer.address);
+});
+sock.bind(0, "127.0.0.1", () => console.log(sock.address().port));
+`;
+
+// A Resolver's per-attempt `timeout` runs from the send, as in c-ares. It was
+// a JS timer started before the query went out, which fired ahead of the op's
+// completion: a starved process (blocked here for longer than the timeout)
+// reported ETIMEOUT for a query not yet sent, or already answered.
+Deno.test("[node/dns] a Resolver timeout is not spent while the event loop is blocked", async () => {
+  const child = new Deno.Command(Deno.execPath(), {
+    args: ["eval", ONE_ANSWER_DNS_SERVER],
+    stdout: "piped",
+    stderr: "inherit",
+  }).spawn();
+  try {
+    const reader = child.stdout.getReader();
+    const { value } = await reader.read();
+    reader.releaseLock();
+    const port = Number(new TextDecoder().decode(value).trim());
+
+    const resolver = new dns.Resolver({ timeout: 100, tries: 1 });
+    resolver.setServers([`127.0.0.1:${port}`]);
+    const result = new Promise<[string | null, string[]]>((resolve) =>
+      resolver.resolve4(
+        "example.org",
+        (err, addresses) =>
+          resolve([err ? err.code ?? String(err) : null, addresses]),
+      )
+    );
+    const until = performance.now() + 400;
+    while (performance.now() < until) {
+      // Busy: the event loop is blocked past the timeout.
+    }
+    assertEquals(await result, [null, ["1.2.3.4"]]);
+  } finally {
+    child.kill();
+    await child.stdout.cancel();
+    await child.status;
+  }
+});

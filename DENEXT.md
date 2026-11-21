@@ -19085,7 +19085,6 @@ where the changes are discussed.
        `.6` adds a test that drops the first INIT ACK);
        `ext/webrtc`'s unit tests.
      - Node tests enabled: none; `node:` has no WebRTC API.
-
 478. **`fix(node)`: one owner for a pipe descriptor opened twice, and a handle
      sent right behind a message** (runtime;
      `libs/core/uv_compat/{pipe,tcp}.rs`, `libs/core/uv_compat.rs`,
@@ -19254,6 +19253,86 @@ where the changes are discussed.
        unacknowledged `NODE_HANDLE` of item 478: a reply handle read together
        with an ack on Linux) and `parallel/test-runner-worker-id.js` on macOS.
 
+481. **`fix`: happy eyeballs, `node:dns` timeouts and `AbortSignal.any()`
+     timers on a starved CPU** (runtime and tests; `libs/core/uv_compat{.rs,
+     /tcp.rs,/tests.rs}`, `ext/net/ops.rs`,
+     `ext/node/polyfills/internal_binding/cares_wrap.ts`,
+     `ext/web/03_abort_signal.js`, `tests/unit_node/{net_test,dns_test}.ts`,
+     `tests/unit/timers_test.ts`). From the denext.28 hunt's class (c)
+     node_compat failures, Linux at one CPU and below:
+     - `node:net` happy eyeballs (`autoSelectFamily`): `uv_tcp_connect`
+       issues the non-blocking `connect(2)` itself, as libuv's
+       `uv__tcp_connect` does, so an error the kernel reports at once
+       (ENETUNREACH for IPv6 in a container without it, EAFNOSUPPORT,
+       EHOSTUNREACH) is the call's return value and the next address is
+       tried in the resolver's order. The connect ran in a future first
+       polled on a later loop turn: on a starved CPU the 10 ms attempt
+       timer, due in the timers phase ahead of the I/O phase, reported the
+       attempt as a timeout and the event order broke
+       (`internet/test-net-autoselectfamily-events-failure.js`: 8.8.8.8 tried
+       where 2001:4860:4860::8888's failure was expected). ECONNREFUSED stays
+       a callback on the next turn, libuv's `delayed_error`. On Windows,
+       WSAENETUNREACH, WSAEHOSTUNREACH and WSAEAFNOSUPPORT map to their libuv
+       codes instead of EINVAL (the code that test's Windows entry names;
+       not verified on Windows yet).
+     - `node:dns` `Resolver({ timeout })`: the per-attempt timeout is the
+       op's request timeout, which hickory starts when the query is sent and
+       which reads an answer that has arrived before it checks the timer,
+       as c-ares times a query. It was a JS timer started before the query
+       went out (hickory sends from its background task on a later turn) and
+       due in the timers phase ahead of the op's completion: a starved
+       process reported ETIMEOUT for a query not sent yet, or already
+       answered (`parallel/test-dns-resolveany-bad-ancount.js`: one query of
+       two reached the server; 12 of 60 cold runs under `taskpolicy -b`
+       reached none). A timeout over 1 s is no longer cut short by hickory's
+       own 1 s timer, and with a timeout hickory makes one attempt per try on
+       the system resolver path too.
+     - `AbortSignal.any()`: once the signal aborts, its listeners no longer
+       keep its other `AbortSignal.timeout()` sources' timers refed; a
+       removed listener (on the signal or on a timeout source) unrefs a
+       source's timer only when no unaborted dependent still listens.
+       `AbortSignal.any([AbortSignal.timeout(9000),
+       AbortSignal.timeout(110000)])` held the process 110 s after it aborted
+       (`deno run` of `parallel/test-abort-controller-any-timeout.js`; Node.js
+       exits at 9 s).
+     - Measured, not fixed (time budgets): `wasi/test-wasi-pthread.js` (the
+       fixture gives a thread's worker 1 s to load while the main thread
+       waits; a debug worker loads in ~40 ms idle and over 1 s at 16 runs on
+       the efficiency cores, and the failed `pthread_create` is the
+       "unreachable"), `parallel/test-abort-controller-any-timeout.js` (waits
+       9 s by design in a 10 s budget), `parallel/test-buffer-constructor-
+       node-modules-paths.js` (13 child processes in series; each starts
+       faster than Node's), `parallel/test-webcrypto-digest-turboshake-
+       rfc.js` (TurboSHAKE over 24 MB takes 54 ms on a debug build, Node.js
+       93 ms; the rest is the test's JS) and
+       `parallel/test-webcrypto-sign-verify.js` (two RSA-4096 key
+       generations, 0.4 to 2.8 s each with the pure-Rust `rsa` crate, 0.06 to
+       0.6 s in Node.js; a passing run is reported "ignored" because the
+       harness, like Node's `tools/test.py`, takes the Ed448 sub-case's
+       `printSkipMessage()` line for a skip, while a timed-out run is a
+       flake).
+     - User-facing note: a `node:net` connect the kernel refuses at once
+       fails synchronously, as in Node.js; a `node:dns` Resolver timeout runs
+       from the send; an aborted `AbortSignal.any()` no longer keeps the
+       process alive through its other timeouts.
+     - Tests: new `deno_core` tests (an immediate connect error is
+       synchronous; ECONNREFUSED comes from the callback), a `node:net` test
+       that blocks the loop past the attempt timer, a `node:dns` test that
+       blocks the loop past the timeout with the server in another process,
+       and three `AbortSignal` timer tests (each fails before the fix);
+       `test-net-autoselectfamily-events-failure.js` with
+       `NODE_TEST_INET6_IP=fe80::1` (refused at once on macOS) under
+       `taskpolicy -b` at 16 in parallel: 34 of 48 failed before (18 with the
+       hunt's message), none of 108 after;
+       `test-dns-resolveany-bad-ancount.js`: none of 108 failed after (48
+       under `taskpolicy -b`, 60 at 16 in parallel), and the new `node:dns`
+       test fails before; `uv_compat`'s tests whole,
+       `tests/unit_node/{net,dns}_test.ts`,
+       `tests/unit/{timers,abort_controller,event_target}_test.ts` and 316
+       `node:net` / `node:dns` / `dgram` node_compat tests against the train
+       (same results).
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -19264,7 +19343,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-480) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-481) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
