@@ -54,6 +54,7 @@ const {
   op_get_env_no_permission_check,
   op_node_in_npm_package,
   op_node_ipc_buffer_constructor,
+  op_node_ipc_close_received_fd,
   op_node_ipc_read_advanced,
   op_node_ipc_read_json,
   op_node_ipc_ref,
@@ -2628,6 +2629,8 @@ function nodeExitCode(code: number): number {
   return isWindows && code < 0 ? code >>> 0 : code;
 }
 
+function nop() {}
+
 function rawFdFromTcpHandle(tcpHandle) {
   if (typeof tcpHandle.fdForIpc !== "function") {
     notImplemented("ChildProcess.send with handle on this platform");
@@ -2674,14 +2677,30 @@ function getIpcHandleInfo(handle, options, target) {
     ) {
       message.socketListKey = getSocketListSend(target, handle.server).key;
     }
+    const rawFd = rawFdFromTcpHandle(inner);
+    if (closeAfterSend) {
+      // Match Node's handleConversion["net.Socket"].send: the socket gives
+      // its native handle up to the send (`socket._handle = null`, reads
+      // dropped, no idle timeout), so sending the same socket again finds no
+      // handle and sends the message alone instead of a second copy.
+      inner.onread = nop;
+      handle._handle = null;
+      handle.setTimeout(0);
+    }
     return {
-      rawFd: rawFdFromTcpHandle(inner),
+      rawFd,
       message,
       closeAfterSend,
       close() {
         handle.parser = null;
         handle._httpMessage = null;
         handle.destroy();
+        // The socket no longer holds `inner` (see above), so its destroy()
+        // leaves it open: close it here, as Node's postSend closes the
+        // handle once the receiver acknowledged it.
+        if (closeAfterSend) {
+          inner.close();
+        }
       },
     };
   }
@@ -2947,6 +2966,16 @@ function setupChannel(
   // first out.
   const receivedRawFds = [];
 
+  // Close the received descriptors no NODE_HANDLE message claimed. Only a
+  // peer that attaches a descriptor to a plain message leaves one behind;
+  // once the channel is torn down nothing will claim it, and it would stay
+  // open (and registered for adoption) until the process exits.
+  function closeUnmatchedRawFds() {
+    while (receivedRawFds.length > 0) {
+      op_node_ipc_close_received_fd(ArrayPrototypeShift(receivedRawFds));
+    }
+  }
+
   function sendHandleAck() {
     const queueOk = [true];
     control.refCounted();
@@ -3038,6 +3067,7 @@ function setupChannel(
   // is what made `test-cluster-send-deadlock` time out: the worker forwards
   // its sockets back, then disconnects before the ACKs land.
   function cleanupPendingHandles() {
+    closeUnmatchedRawFds();
     const info = pendingHandleInfo;
     pendingHandleInfo = null;
     if (info && info.closeAfterSend) {
@@ -3193,7 +3223,14 @@ function setupChannel(
             }
             // Acknowledge receipt so the sender can close its local copy.
             sendHandleAck();
-            const handle = createIpcHandle(msg, rawFd);
+            let handle;
+            try {
+              handle = createIpcHandle(msg, rawFd);
+            } catch (err) {
+              // No wrap adopted the descriptor; don't leave it open.
+              op_node_ipc_close_received_fd(rawFd);
+              throw err;
+            }
             if (
               msg.socketListKey &&
               ObjectPrototypeIsPrototypeOf(Socket.prototype, handle)
@@ -3235,6 +3272,10 @@ function setupChannel(
         return;
       }
       nextTick(() => target.emit("error", err));
+    } finally {
+      // Nothing reads the channel any more, so no NODE_HANDLE message will
+      // claim a descriptor still waiting for one.
+      closeUnmatchedRawFds();
     }
   }
 

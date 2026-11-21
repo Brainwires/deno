@@ -870,6 +870,32 @@ mod impl_ {
     }
   }
 
+  /// denext: close a descriptor the channel received (`SCM_RIGHTS`) that no
+  /// handle adopted. The JS side calls it on channel teardown for each
+  /// descriptor still waiting for its `NODE_HANDLE` message (a peer that sent
+  /// one with a plain message), and when building the handle failed. Only a
+  /// descriptor still registered as adoptable is closed, so a number a wrap
+  /// already owns, or one this isolate never received, is left alone.
+  #[op2(fast)]
+  pub fn op_node_ipc_close_received_fd(
+    state: &mut OpState,
+    #[smi] fd: i32,
+  ) -> bool {
+    let table = state.borrow_mut::<deno_io::FdTable>();
+    if !table.is_uv_adoptable(fd) {
+      return false;
+    }
+    table.remove(fd);
+    #[cfg(unix)]
+    {
+      // SAFETY: the descriptor was received for this isolate and no wrap
+      // adopted it (it is still registered as adoptable), so nothing else
+      // owns it.
+      unsafe { libc::close(fd) };
+    }
+    true
+  }
+
   /// Value signaling that the other end ipc channel has closed.
   ///
   /// Node reserves objects of this form (`{ "cmd": "NODE_<something>"`)
