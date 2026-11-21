@@ -1,5 +1,5 @@
 {
-  "$comment": "The e2e checks expected to be n/a, per <target>/<backend>/<variant> and area (run.ts): any other n/a fails the run (P7). Taken from the runtime runs of rc.5, rc.6 and ee49f60f0, which agree. When a check stops being n/a, run.ts says so: drop it here. A check may only be added with the reason it cannot run on that runner. origin's backpressure check on the Arm64 Windows webview leg (the x64 leg has run it on every run since mid-November, so it is no longer listed there): WebView2 reads a custom-scheme response ahead into its own memory at a pace that varies run to run (under 64 MiB, or 86 MB on an Arm64 runner while the page had read 1.1 MB), so laufey's high-water mark cannot be observed there; the app (apps/origin) reports n/a only for a valid measurement that read ahead, and a flood that never ran is still a failure. webview's \"web view permission requests\" on aarch64-apple-darwin/webview: WKWebView hands the embedder capture requests only, and the mac-arm pool's macOS VMs have no audio input device, so getUserMedia is refused (OverconstrainedError) before any request is raised.",
+  "$comment": "The e2e checks expected to be n/a, per <target>/<backend>/<variant> and area (run.ts): any other n/a fails the run (P7). Taken from the runtime runs of rc.5, rc.6 and ee49f60f0, which agree. When a check stops being n/a, run.ts says so: drop it here. A check may only be added with the reason it cannot run on that runner. origin's backpressure check on the Arm64 Windows webview leg (the x64 leg has run it on every run since mid-November, so it is no longer listed there): WebView2 reads a custom-scheme response ahead into its own memory at a pace that varies run to run (under 64 MiB, or 86 MB on an Arm64 runner while the page had read 1.1 MB), so laufey's high-water mark cannot be observed there; the app (apps/origin) reports n/a only for a valid measurement that read ahead, and a flood that never ran is still a failure. webview's \"web view permission requests\" on aarch64-apple-darwin/webview: WKWebView hands the embedder capture requests only, and the mac-arm pool's macOS VMs have no audio input device, so getUserMedia is refused (OverconstrainedError) before any request is raised. menus's \"a live notification fires show\" and \"getScheduled() lists it…\" on x86_64-apple-darwin/webview: the hosted macos-15 runner's notification center now and then refuses the ad-hoc signed app outright (requestPermission denied and every post failing with UNErrorDomain Code=1, on a runtime that passed on the same image the run before); the app (apps/menus) reports n/a only for a post macOS closed without a show while permission is denied, and a post that goes through and still never shows is a failure.",
   "aarch64-apple-darwin/webview/default": {
     "deeplink": [
       "install from the .msi"
@@ -80,8 +80,10 @@
       "a click on a notification while the app is not running launches it",
       "launch: a click on an action button fires action (not click)",
       "launch: a click on the body fires click",
+      "launch: a live notification fires show",
       "launch: a notification the user dismisses fires close",
-      "launch: a scheduled notification's click is a notificationresponse"
+      "launch: a scheduled notification's click is a notificationresponse",
+      "launch: getScheduled() lists it with its title, body, time, data and actions"
     ],
     "origin": [
       "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1",

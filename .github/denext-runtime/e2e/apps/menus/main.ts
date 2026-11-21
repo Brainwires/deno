@@ -513,6 +513,9 @@ await r.step("notifications", async () => {
     )) instanceof TypeError,
   );
 
+  // Set when macOS refused to post the live notification (below): the
+  // scheduled ones are refused the same way.
+  let osRefused = false;
   if (!caps.show) {
     r.na(
       "a live notification: show / click / action / close",
@@ -531,7 +534,27 @@ await r.step("notifications", async () => {
     let aClosedAt = 0;
     a.addEventListener("close", () => (aClosedAt ||= Date.now()));
     const shown = await once(a, "show", 10000);
-    r.check("a live notification fires show", shown !== null);
+    // macOS's notification center can refuse an ad-hoc signed app outright:
+    // requestPermission() answers denied and every addNotificationRequest
+    // fails with UNErrorDomain Code=1 ("Notifications are not allowed for
+    // this application"), which laufey reports by closing the notification
+    // without a show. A hosted macos-15 runner does this to the occasional
+    // run (the same runtime source, image and app passed the run before);
+    // the CEF leg gets denied too, yet its posts go through, so only a post
+    // the OS closed unshown counts as refused.
+    osRefused = OS === "darwin" && shown === null && aClosedAt > 0 &&
+      perm === "denied";
+    if (osRefused) {
+      r.na(
+        "a live notification fires show",
+        "macOS's notification center refused to post for this ad-hoc signed app (requestPermission: denied, and the post closed without a show: UNErrorDomain Code=1)",
+      );
+    } else {
+      r.check("a live notification fires show", shown !== null, {
+        closedAt: aClosedAt,
+        permission: perm,
+      });
+    }
     r.check(
       "data stays on the object",
       JSON.stringify(a.data) === '{"n":1}',
@@ -692,15 +715,22 @@ await r.step("notifications", async () => {
     }, 5000);
     const mine = list.find((n: any) => n.tag === "e2e-later");
     r.set("scheduled", list);
-    r.check(
-      "getScheduled() lists it with its title, body, time, data and actions",
-      mine && mine.title === "E2E later" && mine.body === "later" &&
-        mine.at instanceof Date &&
-        Math.abs(mine.at.getTime() - at) < 2000 &&
-        JSON.stringify(mine.data) === '{"k":"v"}' &&
-        mine.actions?.[0]?.action === "snooze",
-      mine,
-    );
+    if (osRefused && list.length === 0) {
+      r.na(
+        "getScheduled() lists it with its title, body, time, data and actions",
+        "macOS's notification center refused to post for this ad-hoc signed app (the live notification closed without a show), so it holds no pending request either",
+      );
+    } else {
+      r.check(
+        "getScheduled() lists it with its title, body, time, data and actions",
+        mine && mine.title === "E2E later" && mine.body === "later" &&
+          mine.at instanceof Date &&
+          Math.abs(mine.at.getTime() - at) < 2000 &&
+          JSON.stringify(mine.data) === '{"k":"v"}' &&
+          mine.actions?.[0]?.action === "snooze",
+        mine ?? { scheduled: list.length, permission: perm },
+      );
+    }
     r.mark("cancel");
     desktop.notifications.cancel("e2e-later");
     desktop.notifications.cancel(auto);
