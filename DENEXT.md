@@ -19086,6 +19086,48 @@ where the changes are discussed.
        `ext/webrtc`'s unit tests.
      - Node tests enabled: none; `node:` has no WebRTC API.
 
+478. **`fix(core)`: an eagerly completed op's promise is the runtime's own**
+     (runtime; `libs/core/{00_infra,rebuild_async_stubs}.js`,
+     `libs/core_testing/unit/ops_async_test.ts`,
+     `tests/unit_node/async_hooks_test.ts`). The denext.28 hunt's class-c
+     `node:async_hooks` failures (`test-async-hooks-enable-recursive`,
+     `async-hooks/test-enable-in-init`, `async-hooks/test-disable-in-init`,
+     3-6 runs in 80): an init hook ran once more than Node.js runs it, for a
+     PROMISE. An async op hands back the promise `setPromise()` makes while
+     it is pending, created inside `isCreatingInternalPromise()` so that
+     `node:async_hooks` leaves it out, but an op whose result was ready on its
+     first poll (or that failed to dispatch) returned a plain
+     `Promise.resolve()` / `Promise.reject()` from the async stub, unmarked.
+     Its creator frame is core's stub, which the hook's stack check reads as
+     JS running a promise job, so it was reported as a user PROMISE. A
+     blocking op such as `fs.access()`'s `lstat` is sometimes done before the
+     first poll, so the extra init came and went with timing (about 1 in 1000
+     calls on an idle Mac); enabling a hook inside `init` only made it count
+     twice. The stub now makes both promises in the internal scope. Upstream
+     has the same stub; its `node:async_hooks` has no PROMISE resources.
+     - User-facing note: `node:async_hooks` no longer reports a PROMISE for
+       Node callback APIs (`fs`, `dns`, ...) whose op completed at once.
+     - Tests: a `deno_core` unit test that an eagerly resolved and an eagerly
+       rejected op promise are both made in the internal scope (fails before
+       the fix); a `node:async_hooks` unit test that 2000 concurrent
+       `fs.access()` calls report 2000 FSREQCALLBACKs and no PROMISE (5 of 6
+       runs failed before, 0 of 16 after); the three Node tests 60 times each
+       (4 failures in 60 before, 0 in 180 after) and the 138 configured
+       async-hooks / AsyncLocalStorage tests, unchanged.
+     - The node:test findings of the same hunt are not runtime bugs:
+       `test-runner-worker-id`'s "Worker ID n should be used 3 times, got 4"
+       asserts an even spread that holds only while every file takes as long
+       as the others (Node.js v26.13 fails it too, 5 of 120 runs under load;
+       the pool hands a freed id to the next file, as Node.js's does); the
+       timeouts of `test-runner-{cli-concurrency,tag-filter-cli,
+       test-rerun-failures,worker-id}` and `test-output-junit-reporter` are
+       spawn-heavy tests whose passing times rise to the 10 s budget on the
+       oversubscribed hunt host (CPU time equals wall time locally, no idle
+       wait); and `test-runner-enqueue-file-syntax-error`'s one silent
+       failure fell in the run whose leak tests were OOM-killed (60 of 60 pass
+       under 20-way load).
+     - Node tests enabled: none (the three already run).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -19096,7 +19138,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-477) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-478) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
