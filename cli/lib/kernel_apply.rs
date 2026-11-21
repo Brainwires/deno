@@ -516,6 +516,9 @@ pub fn decide_desktop(
   }
   let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
   let mut ctx = compiled_context(mode, start.exec_strict, cwd);
+  // only a baked enforce / broker scrubs the environment, never one `auto`
+  // chose (D5)
+  ctx.requested = resolution.requested;
   // a desktop app never forks a supervisor of its own (its process hosts
   // the web engine): what only the broker would hold stays a rule the OS
   // can't hold, never a Mode B plan nothing runs
@@ -888,6 +891,9 @@ pub fn start_compiled(
   }
   let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
   let mut ctx = compiled_context(mode, start.exec_strict, cwd);
+  // only a baked enforce / broker scrubs the environment, never one `auto`
+  // chose (D5)
+  ctx.requested = resolution.requested;
   // a headless compiled program forks its own supervisor where a rule
   // needs the broker (never a desktop app: `start_desktop` leaves this
   // off, so what only the broker holds stays a rule the OS can't hold

@@ -602,8 +602,9 @@ pub enum ImplicitNeed {
   OriginData,
   /// `--cpu-prof` / `--heap-prof` folders: written for the user.
   Profiles,
-  /// `deno test --junit-path=<file>`: the report written for the user
-  /// (created before the sandbox applies, so a rule can name it).
+  /// `deno test --junit-path=<file>`, the `DENO_AUDIT_PERMISSIONS` log:
+  /// a report written for the user (created before the sandbox applies, so
+  /// a rule can name it).
   TestReport,
 }
 
@@ -1075,6 +1076,12 @@ pub struct Context {
   /// The effective requested mode (`auto` once enforcement ships, `warn`,
   /// `enforce`, `broker`). Decides the shape and env scrubbing.
   pub mode: KernelSandboxMode,
+  /// The mode the run asked for, before `auto` chose one
+  /// (`ModeResolution::requested`; `mode` by default). The environment is
+  /// scrubbed only when this is an explicit `enforce` / `broker` (a baked
+  /// one included: a strict desktop package), never for an `enforce` that
+  /// `auto` chose (D5, decision O12: it changes what children inherit).
+  pub requested: KernelSandboxMode,
   /// Relative grant paths resolve against this.
   pub cwd: PathBuf,
   pub exe: Option<PathBuf>,
@@ -1109,7 +1116,8 @@ pub struct Context {
   pub origin_data: Vec<PathBuf>,
   /// The `--cpu-prof` / `--heap-prof` folders the run writes.
   pub profile_dirs: Vec<PathBuf>,
-  /// Report files the run writes for the user (`deno test --junit-path`).
+  /// Report files the run writes for the user (`deno test --junit-path`,
+  /// the `DENO_AUDIT_PERMISSIONS` log).
   pub report_files: Vec<PathBuf>,
   /// `auto` enforces the deny rules alone (D1 / D2,
   /// `ModeResolution::deny_ceiling`): the grant passed in is
@@ -1128,6 +1136,7 @@ impl Context {
     Self {
       caps,
       mode,
+      requested: mode,
       cwd,
       exe: None,
       home: None,
@@ -3098,6 +3107,7 @@ impl<'a> Compiler<'a> {
     // enforce re-executes on Linux and macOS: the new image gets only what
     // the grant names
     let scrub = self.ctx().mode.fails_closed()
+      && self.ctx().requested.fails_closed()
       && (matches!(self.os(), TargetOs::Linux | TargetOs::Macos)
         || self.shape == Shape::ModeB);
     let rule = match &self.opts().allow_env {

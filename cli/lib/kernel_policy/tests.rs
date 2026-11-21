@@ -1239,6 +1239,29 @@ fn sys_and_env_rows() {
   ]);
 }
 
+/// D5 (decision O12): an `enforce` that `auto` chose (R4, a compiled
+/// program with no mode baked) leaves the environment as it is; only an
+/// explicit or baked enforce / broker scrubs it.
+#[test]
+fn auto_chosen_enforce_keeps_the_environment() {
+  let options = PermissionsOptions {
+    allow_env: s(&["PORT"]),
+    ..Default::default()
+  };
+  for caps in [linux(Some(6)), macos()] {
+    let mut chosen = ctx(caps, Enforce);
+    chosen.requested = Auto;
+    let c = compile_in(&options, &chosen);
+    assert_eq!(c.policy.env_scrub, None, "{:?}", caps.os);
+    assert!(has_gap(&c, GapClass::Env, GapResolution::Documented));
+    // an explicit enforce or broker scrubs it, as before
+    for explicit in [Enforce, Broker] {
+      let c = compile_in(&options, &ctx(caps, explicit));
+      assert!(c.policy.env_scrub.is_some(), "{:?} {explicit:?}", caps.os);
+    }
+  }
+}
+
 #[test]
 fn metadata_and_windows_rows() {
   run_rows(vec![
