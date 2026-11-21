@@ -675,6 +675,7 @@ pub async fn compile_binary(
     crate::sandbox::CompileKind {
       desktop: is_desktop,
       target: compile_flags.target.as_deref(),
+      quiet: false,
     },
   )?;
   let module_graph_creator = factory.module_graph_creator().await?;

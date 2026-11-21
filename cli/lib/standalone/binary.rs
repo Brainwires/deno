@@ -192,6 +192,15 @@ pub struct Metadata {
   /// (DENEXT.md items 449 and 901).
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub kernel_sandbox_exec_strict: bool,
+  /// denext: the web engine `deno desktop` packaged the app for (`--backend`
+  /// / deno.json `desktop.backend`): the OS web view or CEF. A packaged
+  /// desktop app's kernel sandbox depends on it (`kernel_desktop`: CEF on
+  /// macOS gets headless guarantees only). Desktop builds only; `None` in a
+  /// binary from a CLI that predates the field, where the host's own engine
+  /// (when it tells the runtime) or the OS web view is assumed (DENEXT.md
+  /// item 483).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub desktop_engine: Option<crate::kernel_sandbox::Engine>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]

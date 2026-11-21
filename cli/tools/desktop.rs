@@ -651,6 +651,10 @@ async fn compile_desktop(
   let mut temp_flags = flags.clone();
   temp_flags.subcommand = DenoSubcommand::Compile(compile_flags.clone());
   temp_flags.internal.is_desktop = true;
+  // denext (DENEXT.md item 483): the engine the app is packaged for is
+  // recorded in the binary: whether the kernel sandbox can hold the app's
+  // own process depends on it.
+  temp_flags.internal.desktop_backend = desktop_flags.backend.clone();
   // The binary `run_desktop_hmr` launches below is a development build: only
   // its runtime honours the development switches it is given in the
   // environment (see `Metadata::desktop_dev`).
