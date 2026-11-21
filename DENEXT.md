@@ -19656,8 +19656,15 @@ where the changes are discussed.
          listener destroyed the client's TLS socket while the client's last
          write still looked pending, and the write failed with ECANCELED
          (parallel/test-http2-client-jsstream-destroy.js, 40 of 40). The loop
-         now completes such TCP writes before it reads from any handle and after
-         each handle's callbacks.
+         now completes such TCP and pipe writes before it reads from any handle
+         and after each handle's callbacks: one pass each time, as libuv's
+         `uv__run_pending`. A write that such a callback makes, and that also
+         completes on the spot, waits for the next iteration; completed in the
+         same pass, a callback that always writes again
+         (`function w() { socket.write(chunk, w) }` on a TLS socket whose peer
+         keeps up) held the loop in its I/O phase and no timer fired. A pipe
+         handle's own poll fired write callbacks from inside its write loop,
+         with the same effect, and now collects them first, as TCP does.
        - `WebSocket`: a close frame without a status code (and a read cancelled
          by `Deno.serve`'s shutdown, reported the same way) was answered with a
          close frame carrying code 1005, which is never sent (RFC 6455, 7.4.1).
@@ -19688,6 +19695,31 @@ where the changes are discussed.
        / `Deno.DatagramConn` only (`node:net` and `node:dgram` have their own)
        and stay eager: a queued connection or datagram is returned without a
        loop turn.
+     - Also `async(deferred)`: the 20 `*_async` ops of `ext/node_crypto` (key
+       generation, pbkdf2, scrypt, hkdf, argon2, `randomFill`, the prime ops),
+       jobs of libuv's thread pool in Node.js. `crypto.randomBytes(n, cb)`
+       answered from `process.nextTick`, and `crypto.scrypt` with a zero key
+       length and `crypto.diffieHellman(options, cb)` called back during the
+       call; all three now complete through the loop. `crypto.randomInt(n, cb)`
+       called back during the call and now answers from `process.nextTick`, as
+       Node.js does. `node:dgram`: the first datagram of a burst is delivered by
+       the loop and up to 31 more that are already queued follow at once (libuv
+       reads 32 per readiness event); every queued datagram used to be received
+       from the microtask of the one before, with no loop turn while the socket
+       had one. Left eager on purpose: `op_node_udp_send` (Node.js sends with
+       `uv_udp_try_send` and calls back from `process.nextTick`) and the IPC
+       channel's read ops (Node.js handles every message of a read in one go,
+       and the channel is torn down when the child exits: one message per loop
+       turn would lose the messages still queued).
+     - **A wake made during an iteration that returned `Poll::Ready` was
+       dropped.** The held-back wake was delivered only when the iteration
+       returned `Poll::Pending`. A caller that keeps polling a loop that has
+       nothing left to wait for (a `node:worker_threads` worker idle in its
+       `message` listener, the REPL, the pump of a module load) then never
+       learned of work announced only by that wake: a V8 task posted from
+       another thread (an `Atomics.waitAsync` resolution, a
+       `FinalizationRegistry` cleanup), an inspector message, a `uv_async_send`.
+       The task is now woken in that case too.
      - User-facing note: I/O progresses between consecutive immediates, and an
        async `node:fs` / `node:dns` callback never runs before the timers due in
        the phase that made the call. `Deno.stat()`, `Deno.readFile()`,
@@ -19801,6 +19833,76 @@ where the changes are discussed.
        side by side keep their caches, and another version's copy goes once it
        has gone unused for 7 days.
 
+488. **`fix`: collectable `node:vm` scripts, a cheap `v8.queryObjects` count,
+     and node_compat deadlines that follow CPU starvation** (runtime and tests;
+     `ext/node/ops/vm.rs`, `ext/node/polyfills/vm.js`,
+     `libs/core/runtime/host_defined_options.rs`, `ext/node/ops/v8.rs`,
+     `ext/node/polyfills/v8.ts`, `tests/node_compat/mod.rs`,
+     `tests/util/lib/test_runner.rs`, `tests/util/lib/process.rs`).
+     - **`importModuleDynamically` leaked its script.** A `vm.Script`,
+       `compileFunction` or `SourceTextModule` compiled with the option kept its
+       callback (whose closure holds the script) as a `v8::Global` in a
+       per-runtime table nothing removed. The host-defined options now hold a
+       Symbol that `node:vm` maps to the callback in a WeakMap through one
+       dispatcher, as Node.js's module registries do, so the callback lives as
+       long as the compiled code.
+     - **`v8.queryObjects(ctor, { format: "count" })`** counts the objects whose
+       prototype chain holds `ctor.prototype` (as Node.js does) instead of
+       matching the constructor name, and reads only the fields it needs from
+       the heap snapshot instead of parsing it into a JSON tree.
+     - **Harness deadlines.** A test's deadline moves out by the time the test
+       was starved of CPU (Linux pressure stall information, the load average
+       elsewhere). The CPU-per-test scale factor and the starved time share one
+       allowance of 8 times the written timeout (they used to compound to 64
+       times). A timed-out test shows what it printed, and the output of a test
+       that exited is waited for 2 s at most, so a process that left the test's
+       process group with a pipe open cannot hang the run.
+     - Tests: `tests/unit_node/vm_test.ts`, `tests/unit_node/v8_test.ts`,
+       `extended_timeout_*` and `output_capture_*` in `tests/util/lib`.
+     - Node tests enabled: none; es-module/test-vm-contextified-script-leak.js
+       stops early again instead of compiling all 2048 scripts.
+
+489. **`perf(node)`: a `node -e` child and `deno test` load fewer builtin
+     modules** (runtime; `libs/node_shim/lib.rs`,
+     `ext/node/polyfills/01_require.js`, `ext/node/polyfills/_http_agent.js`,
+     `ext/node/polyfills/http.ts`, `ext/node/polyfills/https.ts`).
+     - A child started as `node -e <code>` / `-p` gets Node's builtin modules as
+       globals that load on first use (accessors that replace themselves, as
+       Node's `addBuiltinLibsToObject`), where the wrapper evaluated about 220
+       polyfill scripts before the string ran: 218 -> 97 lazy scripts for
+       `node -e 0`, 78 ms -> 37 ms per child (release).
+     - `closeIdleConnections()`, which `deno test` calls after every test, no
+       longer loads `node:http` / `node:https` (and `node:tls`, `fetch`, the
+       streams) to look for an agent: the modules that hold a global agent say
+       when they are loaded. The HTTP agent is `node:_http_agent`'s, which
+       `node:https` and `node:_http_client` load without `node:http`, so the
+       mark is that module's (`internals.__nodeHttpAgentLoaded`).
+     - Tests: `tests/specs/test/node_idle_connections_no_http_load`,
+       `tests/unit_node/child_process_test.ts`.
+     - Node tests enabled: none (test-buffer-constructor-node-modules-paths.js,
+       test-trace-exit.js and test-domain-abort-on-uncaught.js run 20 to 35%
+       faster in a debug build).
+
+490. **`perf`: a stack trace formatted from one read of its call sites, and file
+     operations that share the descriptor** (runtime; `libs/core/error.rs`,
+     `libs/core/00_infra.js`, `libs/core/source_map.rs`, `ext/io/lib.rs`).
+     - The default `error.stack` formatter reads a whole trace with one call of
+       `Deno.core.callSiteInfo` (the CallSite methods called from JavaScript,
+       only the ones a frame prints) where it made 14 `v8::Function::call`s per
+       frame from Rust, and prints each frame straight into the result. File
+       names are split once per runtime (`StackFileNames`: at most 256 names of
+       at most 1 KiB; a longer one, such as a `data:` URL, is split for the
+       frame and not kept). The output is unchanged, a lone surrogate in a
+       function name included (U+FFFD). `Error.prepareStackTrace` overrides do
+       not use the reader. 3000 stacks of 10 CommonJS frames: 140-160 ms ->
+       27-33 ms (release-lite, macOS arm64).
+     - An async operation on a file hands its blocking task a reference to the
+       file (`Arc<File>`) where it duplicated the descriptor and closed the
+       duplicate: two system calls fewer per operation.
+     - Tests: `stack_format_*` in `libs/core/runtime/tests/error.rs`,
+       `stack_file_names_cache_*` in `libs/core/error.rs`.
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -19811,7 +19913,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-486) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-490) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
