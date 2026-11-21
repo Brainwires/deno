@@ -114,8 +114,19 @@ What it does:
   (`denext-ci-linux-arm64`, the x64 job seccomp profile so AF_VSOCK works as in
   the gate's test jobs, a 4-CPU quota), one worker, the trees in Docker volumes:
   no test binary runs on macOS itself, so nothing can raise a firewall or
-  privacy dialog. Each busy runner job on the host takes two workers' room, and
-  a run waits while memory is under 4 GB or the disk under 35 GB.
+  privacy dialog. A run waits while memory is under 4 GB or the disk under 35
+  GB.
+- **Schedules by CPU cost**, so the gate's container sees a gate runner's
+  contention rather than an over-subscribed host's: a run costs the CPUs its
+  tests keep busy at once (a harness run its `FILE_TEST_RUNNER_PARALLELISM` test
+  files, each a process wanting a CPU of its own, as `node_compat`, `unit`,
+  `unit_node`, `specs` and `integration` run them; a lib test binary its
+  `--test-threads`, else the gate container's 3), capped by its container's
+  `--cpus`. The runs in flight cost at most the host's CPUs (the Docker VM's on
+  the mini) minus what each busy runner job reserves (its `--cpus`: 3 on
+  biscuits, 4 on the mini), with at least one run going; `--workers` stays the
+  cap on containers. On an 8-CPU biscuits with no runner busy that is four
+  `normal` runs of two tests each, not the six (twelve tests) it was.
 - **Constrains the CPU** (`--profiles`, default `normal,cpu1,cpu0.5`): besides
   the gate's own container (`normal`, `--reps` times), every unit also runs
   `--constrained-reps` times (default 3) in the same container capped at
@@ -123,10 +134,14 @@ What it does:
   parallelism, so timing races that an idle many-core machine hides surface
   reliably. A `+hog` suffix (`cpu1+hog`), or `--hog` for every constrained
   profile, adds a busy loop inside the container. Failures carry their profile
-  in the report (`[cpu1]`); a capped run counts half its CPUs against the worker
-  budget, so it still runs while runner jobs are busy. (A capped container's
-  `navigator.hardwareConcurrency` follows the cap while `os.cpus()` still lists
-  the host's CPUs, so a test comparing the two is expected to fail there.)
+  in the report (`[cpu1]`); a capped run costs its cap (one or half a CPU), so
+  it still runs while runner jobs are busy, and stays constrained on purpose:
+  the `node_compat` harness scales its per-test timeouts by the CPU each running
+  test gets (factor 2 at `cpu1`, 4 at `cpu0.5` with two tests at once, 1 in the
+  gate's container), so a test that is only slow there no longer times out,
+  while a hang still does. (A capped container's `navigator.hardwareConcurrency`
+  follows the cap while `os.cpus()` still lists the host's CPUs, so a test
+  comparing the two is expected to fail there.)
 - **Reports** every test that failed at least once: in how many repetitions, how
   (`failed`; `retried`: the harness's CI retry passed it, which a gate run
   survives but which is still a flake; `crashed`: a test binary died without

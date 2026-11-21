@@ -49,6 +49,22 @@ Each test entry can include the following optional configuration properties:
   platform or this build lacks the feature by design, with the reason. A string
   applies to every platform.
 
+- **`timeoutMs`** (integer): Overrides the per-test timeout (default 10 s, 20 s
+  on macOS). Only for tests that are legitimately slow, never for a hang.
+
+- **`sequential`** (boolean): Runs the test with the `sequential/` and `pummel/`
+  tests, one at a time. Only for memory-heavy tests (leak tests that fill the
+  heap on purpose) whose peak beside other tests gets the container killed for
+  memory, taking its neighbours with it.
+
+The runner scales every per-test timeout (the default and `timeoutMs`) by the
+CPU each running test gets, as Node's `tools/test.py` and
+`common.platformTimeout` do: the CPUs available (the cgroup's `cpu.max` or CFS
+quota when there is one, else the host's CPU count) divided by the number of
+tests running at once. With a CPU or more per test the factor is 1 and the
+timeouts are as written; below that it is `1 / CPU per test`, at most 8, so a
+hang still fails. The runner prints the factor once at the start.
+
 A test that skips itself is reported as skipped, never as passed: Node's
 `common.skip()` prints `1..0 # Skipped: <reason>` and exits 0, and the runner
 reads that line as Node's own runner does. A test run under `deno test` (one

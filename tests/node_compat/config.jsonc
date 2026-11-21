@@ -304,7 +304,9 @@
     "es-module/test-typescript-module.mjs": {},
     "es-module/test-typescript.mjs": {},
     "es-module/test-vm-compile-function-lineoffset.js": {},
-    "es-module/test-vm-source-text-module-leak.js": {},
+    "es-module/test-vm-source-text-module-leak.js": {
+      "sequential": true
+    },
     "es-module/test-wasm-memory-out-of-bound.js": {},
     "es-module/test-wasm-simple.js": {},
     "ffi/test-ffi-weakref-calls.js": {},
@@ -418,7 +420,9 @@
     "parallel/test-module-setsourcemapssupport.js": {},
     "parallel/test-module-main-preserve-symlinks-fail.js": {},
     "parallel/test-module-main-fail.js": {},
-    "parallel/test-abort-controller-any-timeout.js": {},
+    "parallel/test-abort-controller-any-timeout.js": {
+      "timeoutMs": 30000
+    },
     "parallel/test-abortcontroller-internal.js": {
       "ignore": true,
       "reason": "Tests Node.js internal modules (require('internal/...')) which are not exposed in Deno"
@@ -3317,7 +3321,9 @@
     "parallel/test-perf-hooks-timerify-histogram-async.mjs": {},
     "parallel/test-perf-hooks-timerify-histogram-sync.mjs": {},
     "parallel/test-performance-global.js": {},
-    "parallel/test-performance-many-marks.js": {},
+    "parallel/test-performance-many-marks.js": {
+      "timeoutMs": 30000
+    },
     "parallel/test-performance-measure.js": {},
     "parallel/test-performanceobserver-gc.js": {},
     "parallel/test-performanceobserver.js": {},
@@ -4892,7 +4898,9 @@
       "ignore": true,
       "reason": "Medium gap: an unrecognized algorithm name is a WebIDL TypeError here, Node's NotSupportedError 'Unrecognized algorithm name'"
     },
-    "parallel/test-webcrypto-digest-turboshake-rfc.js": {},
+    "parallel/test-webcrypto-digest-turboshake-rfc.js": {
+      "timeoutMs": 30000
+    },
     "parallel/test-webcrypto-encap-decap-ml-kem.js": {
       "ignore": true,
       "reason": "Requires Node internals (getCryptoKeyHandle from internal/crypto/keys with --expose-internals); ML-KEM KeyObjects and WebCrypto encapsulation work"
@@ -6479,6 +6487,7 @@
     "parallel/test-util-sigint-watchdog.js": {},
     "parallel/test-v8-serialize-leak.js": {
       "timeoutMs": 30000,
+      "sequential": true,
       "darwin": false,
       "windows": false,
       "linuxAarch64": false,

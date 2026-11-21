@@ -930,6 +930,8 @@ interface DockerProfile {
   ipv6Sysctl: boolean;
   testCpus: number; // --cpus of a test container
   testParallelism: number; // FILE_TEST_RUNNER_PARALLELISM
+  hostCpus: number; // the CPUs the containers share (the host, the VM)
+  runnerCpus: number; // what one busy runner job on the host reserves
   volume?: string; // the commit's volume (Docker Desktop)
   cacheVolume?: string;
   where: string;
@@ -1204,6 +1206,39 @@ async function spawnLogged(
   return timedOut ? 124 : status.code;
 }
 
+/** The CPUs a run keeps busy at once (see the scheduler in main): a
+ * harness's test parallelism, a lib test binary's --test-threads (else the
+ * gate container's CPUs), capped by the container's --cpus. Native runs on
+ * the host cost 1 (one suite at a time). */
+function runCost(
+  t: Pick<Task, "kind" | "exes" | "env" | "profile">,
+  ex: Pick<Executor, "kind"> & { prof?: DockerProfile },
+): number {
+  if (ex.kind !== "docker" || !ex.prof) return 1;
+  const cap = t.profile.cpus ?? ex.prof.testCpus;
+  let demand: number;
+  if (t.kind === "harness") {
+    demand = Number(t.env.FILE_TEST_RUNNER_PARALLELISM) ||
+      ex.prof.testParallelism;
+  } else {
+    const threads = t.exes.flatMap((e) => e.args)
+      .map((a) => a.match(/^--test-threads=(\d+)$/)?.[1])
+      .find(Boolean);
+    demand = threads ? Number(threads) : JOB.cpus;
+  }
+  return Math.min(cap, Math.max(1, demand));
+}
+
+/** The CPUs the hunt's runs may cost at once: the host's, minus what each
+ * busy runner job reserves (its --cpus), never below one run's room. */
+function cpuBudget(
+  hostCpus: number,
+  runners: number,
+  runnerCpus: number,
+): number {
+  return Math.max(1, hostCpus - runners * runnerCpus);
+}
+
 async function makeExecutor(
   o: Options,
   p: Paths,
@@ -1242,6 +1277,8 @@ async function makeExecutor(
       ipv6Sysctl: false,
       testCpus: cpus,
       testParallelism: Math.max(1, cpus - 1),
+      hostCpus: vmCpus,
+      runnerCpus: cpus,
       volume: p.volume,
       cacheVolume: "flake-hunt-cache",
       where: `Docker Desktop, linux ${Deno.build.arch}`,
@@ -1270,6 +1307,8 @@ async function makeExecutor(
     ipv6Sysctl: true,
     testCpus: nproc,
     testParallelism: Math.max(1, JOB.cpus - 1),
+    hostCpus: nproc,
+    runnerCpus: JOB.cpus,
     where: `linux ${Deno.build.arch}`,
   }, dns);
 }
@@ -2390,15 +2429,21 @@ async function main() {
   const results: TaskResult[] = [];
   const free = Array.from({ length: ex.slots }, (_, i) => i);
   const inFlight = new Set<Promise<void>>();
-  // a run's share of the worker budget: a capped (constrained) run uses at
-  // most its CPUs, so it costs half of them; a run in the gate's container
-  // may use every CPU and costs one
-  const cost = (t: Task) => t.profile.cpus ? t.profile.cpus / 2 : 1;
+  // a run's CPU cost: what its tests keep busy at once (a harness runs
+  // FILE_TEST_RUNNER_PARALLELISM test files side by side, each a process
+  // wanting a CPU of its own as on a gate runner; a lib test binary its test
+  // threads), capped by the container's --cpus. The runs in flight cost at
+  // most the host's CPUs minus what the busy runner jobs reserve, so the
+  // gate's container (`normal`) sees a gate runner's contention, not an
+  // over-subscribed host's; a constrained run costs its cap and stays
+  // constrained (the harness's timeout scale factor covers that)
+  const cost = (t: Task) => runCost(t, ex);
   let load = 0;
   const t0 = Date.now();
   let next = 0;
   const allowed = async () => {
-    if (ex.kind !== "docker") return ex.slots;
+    if (ex.kind !== "docker") return Infinity;
+    const prof = (ex as DockerExecutor).prof;
     // the runner job containers only (not their service or dind sidecars):
     // denext-ci-linux-x64-<slot>-<time> on biscuits,
     // denext-ci-linux-arm64-<slot>-<time> in Docker Desktop
@@ -2415,8 +2460,7 @@ async function main() {
     );
     const runners = r.stdout.split("\n")
       .filter((n) => /^denext-ci-linux-[a-z0-9]+-\d+-\d+$/.test(n)).length;
-    // each busy runner job takes two of our workers' room
-    return Math.max(1, ex.slots - 2 * runners);
+    return cpuBudget(prof.hostCpus, runners, prof.runnerCpus);
   };
   await Deno.mkdir(`${p.runDir}/logs`, { recursive: true });
   while (next < tasks.length || inFlight.size > 0) {
