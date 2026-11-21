@@ -1117,6 +1117,12 @@ pub struct Context {
   /// list applies, and a deny the OS can't hold that way is a documented
   /// Deno-only rule, never a refusal (decision O4).
   pub deny_ceiling: bool,
+  /// `auto` chose the mode (`ModeResolution::auto_chosen`); it wasn't
+  /// requested by name. Plan D5: the environment is scrubbed only under an
+  /// enforce asked for by name (and a strict desktop package), never one
+  /// `auto` chose: env stays Deno's checks there (a documented gap), so an
+  /// unattended run keeps the variables the runtime and its tools read.
+  pub auto_chosen: bool,
 }
 
 impl Context {
@@ -1147,6 +1153,7 @@ impl Context {
       profile_dirs: Vec::new(),
       report_files: Vec::new(),
       deny_ceiling: false,
+      auto_chosen: false,
     }
   }
 }
@@ -3097,7 +3104,9 @@ impl<'a> Compiler<'a> {
     }
     // enforce re-executes on Linux and macOS: the new image gets only what
     // the grant names
+    // (only under an enforce asked for by name, never one `auto` chose: D5)
     let scrub = self.ctx().mode.fails_closed()
+      && !self.ctx().auto_chosen
       && (matches!(self.os(), TargetOs::Linux | TargetOs::Macos)
         || self.shape == Shape::ModeB);
     let rule = match &self.opts().allow_env {

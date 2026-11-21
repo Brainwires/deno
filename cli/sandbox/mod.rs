@@ -751,6 +751,9 @@ pub fn check_run(
   };
   let mut ctx = ctx;
   ctx.deny_ceiling = ceiling;
+  // D5: no env scrub under an enforce `auto` chose (both images decide the
+  // same, so their plans still compare)
+  ctx.auto_chosen = resolution.auto_chosen;
   // a ceiling the OS holds none of here (Linux without an overmount, or
   // denies the kernel never holds) applies nothing: no re-exec, no folder
   // made; its denies are reported as Deno's checks only
@@ -805,6 +808,18 @@ pub fn check_run(
     if !fatal.is_empty() {
       degraded =
         Some(format!("{} rule(s) the OS can't hold here", fatal.len()));
+      resolution.mode = KernelSandboxMode::Warn;
+    } else if skipped_npmrcs(cli_options, &ctx, &compiled)
+      .iter()
+      .any(|path| npmrc_sets_registries(path))
+    {
+      // the confined image treats the `.npmrc` it can't read as absent,
+      // so it would look for this run's packages under another registry
+      // than the one this image resolved them from (item 425)
+      degraded = Some(
+        "an .npmrc sets a package registry, which the confined run can't read"
+          .to_string(),
+      );
       resolution.mode = KernelSandboxMode::Warn;
     }
   }
@@ -1127,6 +1142,49 @@ fn skipped_npmrcs(
   out
 }
 
+/// Whether the `.npmrc` at `path` changes where packages come from (a
+/// registry, a scope's registry or a registry host replacement other than
+/// what the environment alone gives): a process that treats it as absent
+/// resolves packages, the lockfile's tarball URLs and the cache folders
+/// differently. A file this image can't read counts as absent here too.
+fn npmrc_sets_registries(path: &std::path::Path) -> bool {
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "the real .npmrc, as discovery reads it"
+  )]
+  let Ok(source) = std::fs::read_to_string(path) else {
+    return false;
+  };
+  npmrc_source_sets_registries(&crate::sys::CliSys::default(), &source)
+}
+
+fn npmrc_source_sets_registries(
+  sys: &impl sys_traits::EnvVar,
+  source: &str,
+) -> bool {
+  use deno_npmrc::NpmRegistryUrl;
+  // one that doesn't parse: discovery fails on it here, and wouldn't there
+  let Ok(npmrc) = deno_npmrc::NpmRc::parse(sys, source) else {
+    return true;
+  };
+  if npmrc.replace_registry_host.is_some() {
+    return true;
+  }
+  let env_url = NpmRegistryUrl::for_npm(sys);
+  let Ok(resolved) = npmrc.as_resolved(&env_url) else {
+    return true;
+  };
+  if resolved.default_config.registry_url != env_url.url {
+    return true;
+  }
+  let jsr_url = NpmRegistryUrl::for_jsr(sys).url;
+  resolved.scopes.iter().any(|(scope, config)| {
+    config.registry_url != env_url.url
+      && !(scope.trim_start_matches('@') == "jsr"
+        && config.registry_url == jsr_url)
+  })
+}
+
 pub fn render_report(
   resolution: &ModeResolution,
   caps: &Capabilities,
@@ -1430,5 +1488,29 @@ mod coverage_tests {
       enforce_covers(&DenoSubcommand::Bench(BenchFlags::default())),
       EnforceCoverage::AfterSetup
     );
+  }
+}
+
+#[cfg(test)]
+mod npmrc_tests {
+  use sys_traits::impls::InMemorySys;
+
+  use super::npmrc_source_sets_registries;
+
+  /// An `.npmrc` the confined image can't read moves `auto` to warn only
+  /// when it changes where packages come from (item 425): a token alone,
+  /// or the default registry spelled out, doesn't.
+  #[test]
+  fn npmrc_registries_move_auto_to_warn() {
+    let sys = InMemorySys::default();
+    let sets = |source: &str| npmrc_source_sets_registries(&sys, source);
+    assert!(!sets(""));
+    assert!(!sets("//registry.npmjs.org/:_authToken=secret\n"));
+    assert!(!sets(
+      "registry=https://registry.npmjs.org/\n//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\n"
+    ));
+    assert!(!sets("@jsr:registry=https://npm.jsr.io/\n"));
+    assert!(sets("registry=http://localhost:4261/\n"));
+    assert!(sets("@denotest:registry=http://localhost:4261/\n"));
   }
 }
