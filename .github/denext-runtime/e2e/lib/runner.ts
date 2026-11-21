@@ -232,6 +232,48 @@ export async function adhocSign(artifact: string) {
   await must("codesign", ["--force", "--deep", "--sign", "-", artifact]);
 }
 
+const LSREGISTER =
+  "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+
+/** The bundles registerBundle() registered, for unregisterBundles(). */
+const registeredBundles = new Set<string>();
+
+/**
+ * macOS: register a packaged bundle with LaunchServices, as installing an
+ * app (or the Finder seeing it) does. The harness starts apps by exec'ing
+ * the binary, which registers nothing, and usernoted judges notification
+ * authorization by the bundle LaunchServices knows: a hosted runner has
+ * refused an unregistered ad-hoc signed app outright now and then
+ * (UNErrorDomain Code=1, "Notifications are not allowed for this
+ * application", on requestAuthorization and every post). Apps that declare
+ * deep links are left out: the deeplink area registers and unregisters its
+ * own bundles, and its checks are about who LaunchServices picks as the
+ * scheme's handler. unregisterBundles() drops them again so a runner's
+ * LaunchServices database doesn't collect every run's bundles.
+ */
+async function registerBundle(spec: AppSpec, artifact: string) {
+  if (OS !== "darwin" || !artifact.endsWith(".app")) return;
+  if (spec.deepLinks?.length || spec.appJson?.deepLinks) return;
+  const r = await sh(LSREGISTER, ["-f", artifact], { timeoutMs: 60_000 });
+  if (r.code !== 0) {
+    log(`lsregister -f ${artifact} exited ${r.code}: ${r.out.trim()}`);
+    return;
+  }
+  registeredBundles.add(artifact);
+}
+
+/** macOS: unregister the bundles registerBundle() registered (run.ts calls
+ * this after each area, before it deletes the area's builds). */
+export async function unregisterBundles() {
+  for (const artifact of registeredBundles) {
+    const r = await sh(LSREGISTER, ["-u", artifact], { timeoutMs: 60_000 });
+    if (r.code !== 0) {
+      log(`lsregister -u ${artifact} exited ${r.code}: ${r.out.trim()}`);
+    }
+  }
+  registeredBundles.clear();
+}
+
 export async function packageApp(env: Env, spec: AppSpec): Promise<Packaged> {
   const buildDir = path(
     env.workDir,
@@ -312,6 +354,7 @@ export async function packageApp(env: Env, spec: AppSpec): Promise<Packaged> {
     );
   }
   await adhocSign(artifact);
+  await registerBundle(spec, artifact);
   return { spec, artifact, exe, buildDir };
 }
 
