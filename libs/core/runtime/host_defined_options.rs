@@ -22,8 +22,10 @@ pub mod host_defined_options_kind {
   /// `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING`.
   pub const VM_DYNAMIC_IMPORT_MISSING: u32 = 1;
   /// Script created by `node:vm` with a user-provided
-  /// `importModuleDynamically` callback. Index 1 stores the per-runtime
-  /// callback registry key.
+  /// `importModuleDynamically` callback. Index 1 stores the script's
+  /// callback key, a `Symbol` that the embedder's dispatcher (see
+  /// [`super::register_vm_dynamic_import_dispatcher`]) maps to the callback
+  /// weakly, so the callback lives exactly as long as the compiled code.
   pub const VM_DYNAMIC_IMPORT_CALLBACK: u32 = 2;
 }
 
@@ -103,22 +105,55 @@ pub fn read_host_defined_options_key(
   Some(int.value())
 }
 
-/// Store a `node:vm` dynamic import trampoline in this runtime and return its
-/// host-defined-options key.
-pub fn register_vm_dynamic_import_callback(
+/// Build a host-defined-options PrimitiveArray with the given kind tag and a
+/// `Symbol` key at [`HOST_DEFINED_OPTIONS_KEY_INDEX`].
+pub fn create_host_defined_options_with_kind_and_symbol<'s>(
+  scope: &mut PinScope<'s, '_>,
+  kind: u32,
+  key: v8::Local<'s, v8::Symbol>,
+) -> v8::Local<'s, v8::Data> {
+  let arr = v8::PrimitiveArray::new(scope, 2);
+  let kind_value = v8::Integer::new_from_unsigned(scope, kind);
+  arr.set(scope, HOST_DEFINED_OPTIONS_KIND_INDEX, kind_value.into());
+  arr.set(scope, HOST_DEFINED_OPTIONS_KEY_INDEX, key.into());
+  arr.into()
+}
+
+/// Read the `Symbol` key from a host-defined-options value.
+pub fn read_host_defined_options_symbol<'s>(
+  scope: &mut PinScope<'s, '_>,
+  host_defined_options: v8::Local<'s, v8::Data>,
+) -> Option<v8::Local<'s, v8::Symbol>> {
+  // SAFETY: see `read_host_defined_options_kind`.
+  let arr: v8::Local<v8::PrimitiveArray> = unsafe {
+    std::mem::transmute::<v8::Local<v8::Data>, v8::Local<v8::PrimitiveArray>>(
+      host_defined_options,
+    )
+  };
+  if arr.length() <= HOST_DEFINED_OPTIONS_KEY_INDEX {
+    return None;
+  }
+  let primitive = arr.get(scope, HOST_DEFINED_OPTIONS_KEY_INDEX);
+  let value: v8::Local<v8::Value> = primitive.into();
+  v8::Local::<v8::Symbol>::try_from(value).ok()
+}
+
+/// Set the function that `import()` in a `node:vm` script compiled with an
+/// `importModuleDynamically` callback calls, as
+/// `dispatcher(key, specifier, importAttributes)`, where `key` is the
+/// script's host-defined-options `Symbol`. The embedder keeps the callbacks
+/// in a `WeakMap` keyed by that symbol, as Node.js does: the compiled code
+/// holds the key, so a callback (and the script object its closure
+/// captures) is collected with the code. A per-runtime table of strong
+/// references leaked every such script. Subsequent calls replace the
+/// dispatcher.
+pub fn register_vm_dynamic_import_dispatcher(
   scope: &mut PinScope<'_, '_>,
-  callback: v8::Local<v8::Function>,
-) -> u32 {
+  dispatcher: v8::Local<v8::Function>,
+) {
   let state = JsRuntime::state_from(scope);
-  let id = state.next_vm_dynamic_import_callback_id.get();
-  state
-    .next_vm_dynamic_import_callback_id
-    .set(id.checked_add(1).unwrap_or(1));
-  state
-    .vm_dynamic_import_callbacks
-    .borrow_mut()
-    .insert(id, v8::Global::new(scope, callback));
-  id
+  *state.vm_dynamic_import_dispatcher.borrow_mut() =
+    Some(v8::Global::new(scope, dispatcher));
 }
 
 /// Register a fallback for V8's host-initialize-import-meta callback that

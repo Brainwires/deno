@@ -29,6 +29,12 @@ mod report;
 /// Global counter for generating unique test serial IDs
 static TEST_SERIAL_ID: AtomicUsize = AtomicUsize::new(0);
 
+/// denext: where the deadlines read the CPU contention they cannot predict
+/// from (see `test_util::test_runner::CpuContention`); set in `main`.
+static CPU_CONTENTION: std::sync::OnceLock<
+  test_util::test_runner::CpuContention,
+> = std::sync::OnceLock::new();
+
 const RUN_ARGS: &[&str] = &["run", "-A", "--quiet", "--unsafe-proto"];
 
 const TEST_ARGS: &[&str] =
@@ -238,13 +244,18 @@ fn main() {
   );
   let sequential_timeout_factor =
     test_util::test_runner::timeout_scale_factor(cpus.count, 1);
+  // and a test's deadline moves out by the time it is starved of CPU by
+  // anything else on the host (sibling containers, other harnesses)
+  let contention = CPU_CONTENTION
+    .get_or_init(|| test_util::test_runner::CpuContention::detect(cpus.count));
   test_util::eprintln!(
-    "node_compat: {:.2} CPU(s) ({}), {} test(s) at once: timeout factor {:.2} ({:.2} for the sequential tests)",
+    "node_compat: {:.2} CPU(s) ({}), {} test(s) at once: timeout factor {:.2} ({:.2} for the sequential tests); starved time from {}",
     cpus.count,
     cpus.source,
     parallelism.max_parallelism().get(),
     timeout_factor,
     sequential_timeout_factor,
+    contention.describe(),
   );
   let flaky_test_tracker = Arc::new(FlakyTestTracker::default());
 
@@ -879,6 +890,8 @@ impl TestSetup {
   }
 
   fn run_piped(&self) -> (bool, String, Option<i32>) {
+    use std::io::Read;
+
     let mut cmd = util::deno_cmd().disable_diagnostic_logging();
     cmd = cmd.current_dir(&self.test_suite_path);
     for arg in &self.args {
@@ -888,25 +901,99 @@ impl TestSetup {
       cmd = cmd.env(key, value);
     }
 
-    let child = cmd.piped_output().spawn().unwrap();
-    match child.wait_with_output_and_timeout(self.timeout) {
-      Ok(output) => {
-        let success = output.status.success();
-        let exit_code = output.status.code();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut output_str = format!("{}\n{}", stdout, stderr);
+    let contention = CPU_CONTENTION
+      .get()
+      .unwrap_or(&test_util::test_runner::CpuContention::None);
+    let mark = contention.mark();
+    let mut child = cmd.piped_output().spawn().unwrap();
+    // denext: the output is read as it comes, so a test that times out
+    // still shows what it printed (a hang is told from slowness), even when
+    // a grandchild keeps the pipes open after the kill
+    let capture = |pipe: Option<Box<dyn Read + Send>>| {
+      let buf = Arc::new(Mutex::new(Vec::new()));
+      let reader = pipe.map(|mut pipe| {
+        let buf = buf.clone();
+        util::print::spawn_thread(move || {
+          let mut chunk = [0u8; 8192];
+          while let Ok(n) = pipe.read(&mut chunk) {
+            if n == 0 {
+              break;
+            }
+            buf.lock().unwrap().extend_from_slice(&chunk[..n]);
+          }
+        })
+      });
+      (buf, reader)
+    };
+    let (stdout, stdout_reader) = capture(
+      child
+        .stdout
+        .take()
+        .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let (stderr, stderr_reader) = capture(
+      child
+        .stderr
+        .take()
+        .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    util::print::spawn_thread(move || {
+      let _ = tx.send(child.wait());
+    });
+
+    // the written (CPU-scaled) timeout plus the time the test was starved
+    // of CPU, re-read at each deadline until it holds
+    let status = loop {
+      let deadline = contention.deadline(&mark, self.timeout);
+      let now = std::time::Instant::now();
+      if now >= deadline {
+        break None;
+      }
+      match rx.recv_timeout(deadline - now) {
+        Ok(status) => break Some(status),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break None,
+      }
+    };
+    let output_of = |buf: &Arc<Mutex<Vec<u8>>>| {
+      String::from_utf8_lossy(&buf.lock().unwrap()).into_owned()
+    };
+
+    match status {
+      Some(Ok(status)) => {
+        for reader in [stdout_reader, stderr_reader].into_iter().flatten() {
+          let _ = reader.join();
+        }
+        let success = status.success();
+        let exit_code = status.code();
+        let mut output_str =
+          format!("{}\n{}", output_of(&stdout), output_of(&stderr));
         // denext: how a failed run ended, so a process that died without a
         // word (a signal, an abort) is told apart from one that exited
         if !success {
-          output_str
-            .push_str(&format!("\n[{}]", describe_status(&output.status)));
+          output_str.push_str(&format!("\n[{}]", describe_status(&status)));
         }
         (success, output_str, exit_code)
       }
-      Err(_) => {
-        let output_str =
-          format!("Test timed out after {}ms", self.timeout.as_millis());
+      Some(Err(err)) => {
+        (false, format!("Failed to wait for the test: {err}"), None)
+      }
+      None => {
+        _ = util::process::kill(pid);
+        // what was printed before the kill (and in a moment after it)
+        let _ = rx.recv_timeout(Duration::from_secs(2));
+        let elapsed = mark.elapsed();
+        let starved = contention.starved_since(&mark);
+        let output_str = format!(
+          "Test timed out after {}ms (written timeout {}ms, {}ms of it starved of CPU)\n--- output before the timeout ---\n{}\n{}",
+          elapsed.as_millis(),
+          self.timeout.as_millis(),
+          starved.as_millis(),
+          output_of(&stdout),
+          output_of(&stderr),
+        );
         (false, output_str, None)
       }
     }

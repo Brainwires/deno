@@ -462,6 +462,172 @@ pub fn scale_timeout(timeout: Duration, factor: f64) -> Duration {
   Duration::from_millis((timeout.as_millis() as f64 * factor).round() as u64)
 }
 
+// denext: CPU contention the harness cannot predict. The scale factor above
+// sees only this process's quota and its own parallelism; sibling
+// containers, other harnesses and runner jobs on the same host starve the
+// tests just as well (the flake hunt runs six gate containers on an 8-CPU
+// host, each with the whole host as its quota: factor 1, and tests that need
+// a few seconds of CPU timed out at 10 s). So a test's deadline also moves
+// out by the time its CPU was taken away while it ran, measured where the
+// kernel reports it:
+//
+// - Linux: pressure stall information (`cpu.pressure` of this process's
+//   cgroup, else `/proc/pressure/cpu`): `some total=` counts the
+//   microseconds in which a runnable task of the cgroup waited for a CPU.
+// - elsewhere on unix: the 1-minute load average against the CPU count, as
+//   the share of time a runnable thread waits (1 - CPUs / load when the
+//   load is higher than the CPUs).
+//
+// The allowance is capped with the scale factor (`MAX_TIMEOUT_SCALE` times
+// the written timeout in all), so a real hang still fails.
+
+/// Where the harness reads CPU contention from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CpuContention {
+  /// A pressure-stall file (`cpu.pressure` / `/proc/pressure/cpu`).
+  Pressure(std::path::PathBuf),
+  /// The load average against this many CPUs.
+  LoadAverage(f64),
+  /// No source: deadlines are not extended.
+  None,
+}
+
+/// The contention reading at a test's start.
+#[derive(Debug, Clone, Copy)]
+pub struct ContentionMark {
+  started: Instant,
+  stall_us: Option<u64>,
+}
+
+impl ContentionMark {
+  /// The time since the mark.
+  pub fn elapsed(&self) -> Duration {
+    self.started.elapsed()
+  }
+}
+
+impl CpuContention {
+  /// The best source on this host for `cpus` CPUs.
+  pub fn detect(cpus: f64) -> Self {
+    #[cfg(target_os = "linux")]
+    if let Some(path) = pressure_file() {
+      return Self::Pressure(path);
+    }
+    if load_average().is_some() {
+      return Self::LoadAverage(cpus);
+    }
+    Self::None
+  }
+
+  pub fn describe(&self) -> String {
+    match self {
+      Self::Pressure(path) => format!("cpu pressure ({})", path.display()),
+      Self::LoadAverage(cpus) => format!("load average over {cpus:.2} CPU(s)"),
+      Self::None => "none".to_string(),
+    }
+  }
+
+  pub fn mark(&self) -> ContentionMark {
+    ContentionMark {
+      started: Instant::now(),
+      stall_us: match self {
+        Self::Pressure(path) => read_pressure_some_total(path),
+        _ => None,
+      },
+    }
+  }
+
+  /// The CPU-starved time since `mark`.
+  pub fn starved_since(&self, mark: &ContentionMark) -> Duration {
+    match self {
+      Self::Pressure(path) => {
+        match (mark.stall_us, read_pressure_some_total(path)) {
+          (Some(start), Some(now)) => {
+            Duration::from_micros(now.saturating_sub(start))
+          }
+          _ => Duration::ZERO,
+        }
+      }
+      Self::LoadAverage(cpus) => load_average()
+        .map_or(Duration::ZERO, |load| {
+          mark.started.elapsed().mul_f64(starved_share(*cpus, load))
+        }),
+      Self::None => Duration::ZERO,
+    }
+  }
+
+  /// When a test that started at `mark` with `timeout` times out: `timeout`
+  /// plus the time it was starved of CPU, at most `MAX_TIMEOUT_SCALE` times
+  /// `timeout`.
+  pub fn deadline(&self, mark: &ContentionMark, timeout: Duration) -> Instant {
+    mark.started + extended_timeout(timeout, self.starved_since(mark))
+  }
+}
+
+/// `timeout` plus `starved`, capped at `MAX_TIMEOUT_SCALE` times `timeout`.
+pub fn extended_timeout(timeout: Duration, starved: Duration) -> Duration {
+  (timeout + starved).min(timeout.mul_f64(MAX_TIMEOUT_SCALE))
+}
+
+/// The share of time a runnable thread waits for a CPU when the run queue
+/// averages `load` on `cpus` CPUs.
+pub fn starved_share(cpus: f64, load: f64) -> f64 {
+  if cpus.is_nan() || load.is_nan() || cpus <= 0.0 || load <= cpus {
+    return 0.0;
+  }
+  1.0 - cpus / load
+}
+
+/// The `total=` of a pressure file's `some` line (microseconds).
+pub fn parse_pressure_some_total(text: &str) -> Option<u64> {
+  text
+    .lines()
+    .find(|line| line.starts_with("some "))?
+    .split_whitespace()
+    .find_map(|field| field.strip_prefix("total="))?
+    .parse()
+    .ok()
+}
+
+fn read_pressure_some_total(path: &std::path::Path) -> Option<u64> {
+  parse_pressure_some_total(&std::fs::read_to_string(path).ok()?)
+}
+
+/// This process's cgroup v2 `cpu.pressure`, else the host's.
+#[cfg(target_os = "linux")]
+fn pressure_file() -> Option<std::path::PathBuf> {
+  use std::path::Path;
+  let cgroup = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+  let (v2, _) = parse_proc_self_cgroup(&cgroup);
+  let base = Path::new("/sys/fs/cgroup");
+  let candidates = cgroup_dirs(base, v2.unwrap_or("/"))
+    .into_iter()
+    .take(1)
+    .map(|dir| dir.join("cpu.pressure"))
+    .chain(std::iter::once(
+      Path::new("/proc/pressure/cpu").to_path_buf(),
+    ));
+  for path in candidates {
+    if read_pressure_some_total(&path).is_some() {
+      return Some(path);
+    }
+  }
+  None
+}
+
+#[cfg(unix)]
+fn load_average() -> Option<f64> {
+  let mut load = [0f64; 3];
+  // SAFETY: getloadavg writes at most `nelem` doubles into the buffer.
+  let n = unsafe { libc::getloadavg(load.as_mut_ptr(), 1) };
+  (n >= 1 && load[0].is_finite()).then_some(load[0])
+}
+
+#[cfg(not(unix))]
+fn load_average() -> Option<f64> {
+  None
+}
+
 /// A cgroup v2 `cpu.max` (`"<quota> <period>"`, or `"max <period>"` for no
 /// quota) as CPUs.
 #[cfg_attr(
@@ -1188,6 +1354,52 @@ mod test {
       scale_timeout(Duration::from_millis(30_000), MAX_TIMEOUT_SCALE),
       Duration::from_millis(240_000)
     );
+  }
+
+  #[test]
+  fn pressure_some_total_parses() {
+    let text = "some avg10=28.84 avg60=39.40 avg300=50.36 total=12615243934\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n";
+    assert_eq!(parse_pressure_some_total(text), Some(12_615_243_934));
+    assert_eq!(parse_pressure_some_total("full avg10=0 total=5\n"), None);
+    assert_eq!(parse_pressure_some_total("some avg10=0\n"), None);
+    assert_eq!(parse_pressure_some_total(""), None);
+  }
+
+  #[test]
+  fn starved_share_follows_the_load() {
+    assert_eq!(starved_share(8.0, 4.0), 0.0);
+    assert_eq!(starved_share(8.0, 8.0), 0.0);
+    assert_eq!(starved_share(8.0, 16.0), 0.5);
+    assert_eq!(starved_share(18.0, 36.0), 0.5);
+    assert_eq!(starved_share(0.0, 16.0), 0.0);
+    assert_eq!(starved_share(8.0, f64::NAN), 0.0);
+  }
+
+  #[test]
+  fn extended_timeout_is_capped() {
+    let t = Duration::from_secs(10);
+    assert_eq!(extended_timeout(t, Duration::ZERO), t);
+    assert_eq!(
+      extended_timeout(t, Duration::from_secs(7)),
+      Duration::from_secs(17)
+    );
+    assert_eq!(
+      extended_timeout(t, Duration::from_secs(500)),
+      t.mul_f64(MAX_TIMEOUT_SCALE)
+    );
+  }
+
+  #[test]
+  fn contention_without_a_source_keeps_the_deadline() {
+    let none = CpuContention::None;
+    let mark = none.mark();
+    let t = Duration::from_millis(250);
+    assert_eq!(none.starved_since(&mark), Duration::ZERO);
+    assert_eq!(none.deadline(&mark, t), mark.started + t);
+    // a pressure file that cannot be read adds nothing either
+    let missing = CpuContention::Pressure("/nonexistent/cpu.pressure".into());
+    let mark = missing.mark();
+    assert_eq!(missing.starved_since(&mark), Duration::ZERO);
   }
 
   #[test]
