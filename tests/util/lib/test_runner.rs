@@ -556,17 +556,33 @@ impl CpuContention {
     }
   }
 
-  /// When a test that started at `mark` with `timeout` times out: `timeout`
-  /// plus the time it was starved of CPU, at most `MAX_TIMEOUT_SCALE` times
-  /// `timeout`.
-  pub fn deadline(&self, mark: &ContentionMark, timeout: Duration) -> Instant {
-    mark.started + extended_timeout(timeout, self.starved_since(mark))
+  /// When a test that started at `mark` times out: `timeout` (the written
+  /// timeout, `written`, scaled by the CPU per test) plus the time it was
+  /// starved of CPU, at most `MAX_TIMEOUT_SCALE` times `written` in all.
+  pub fn deadline(
+    &self,
+    mark: &ContentionMark,
+    timeout: Duration,
+    written: Duration,
+  ) -> Instant {
+    mark.started + extended_timeout(timeout, self.starved_since(mark), written)
   }
 }
 
-/// `timeout` plus `starved`, capped at `MAX_TIMEOUT_SCALE` times `timeout`.
-pub fn extended_timeout(timeout: Duration, starved: Duration) -> Duration {
-  (timeout + starved).min(timeout.mul_f64(MAX_TIMEOUT_SCALE))
+/// `timeout` (the `written` timeout after scaling) plus `starved`, capped at
+/// `MAX_TIMEOUT_SCALE` times `written`: the scale factor and the starved
+/// time share one allowance. Capped at that multiple of the scaled timeout,
+/// the two compounded to 64 times the written one.
+pub fn extended_timeout(
+  timeout: Duration,
+  starved: Duration,
+  written: Duration,
+) -> Duration {
+  (timeout + starved)
+    .min(written.mul_f64(MAX_TIMEOUT_SCALE))
+    // never less than the scaled timeout (a caller's `timeout` is at most
+    // `MAX_TIMEOUT_SCALE` times `written`, so this only guards the contract)
+    .max(timeout)
 }
 
 /// The share of time a runnable thread waits for a CPU when the run queue
@@ -1378,14 +1394,38 @@ mod test {
   #[test]
   fn extended_timeout_is_capped() {
     let t = Duration::from_secs(10);
-    assert_eq!(extended_timeout(t, Duration::ZERO), t);
+    assert_eq!(extended_timeout(t, Duration::ZERO, t), t);
     assert_eq!(
-      extended_timeout(t, Duration::from_secs(7)),
+      extended_timeout(t, Duration::from_secs(7), t),
       Duration::from_secs(17)
     );
     assert_eq!(
-      extended_timeout(t, Duration::from_secs(500)),
+      extended_timeout(t, Duration::from_secs(500), t),
       t.mul_f64(MAX_TIMEOUT_SCALE)
+    );
+  }
+
+  #[test]
+  fn extended_timeout_cap_does_not_compound_with_the_scale_factor() {
+    let written = Duration::from_secs(10);
+    let cap = written.mul_f64(MAX_TIMEOUT_SCALE);
+    // scaled 4 times: the starved time adds up to the same cap, not to 8
+    // times the scaled timeout
+    let scaled = scale_timeout(written, 4.0);
+    assert_eq!(
+      extended_timeout(scaled, Duration::from_secs(15), written),
+      Duration::from_secs(55)
+    );
+    assert_eq!(
+      extended_timeout(scaled, Duration::from_secs(500), written),
+      cap
+    );
+    // scaled all the way: no allowance is left for the starved time
+    let scaled = scale_timeout(written, MAX_TIMEOUT_SCALE);
+    assert_eq!(scaled, cap);
+    assert_eq!(
+      extended_timeout(scaled, Duration::from_secs(500), written),
+      cap
     );
   }
 
@@ -1395,7 +1435,7 @@ mod test {
     let mark = none.mark();
     let t = Duration::from_millis(250);
     assert_eq!(none.starved_since(&mark), Duration::ZERO);
-    assert_eq!(none.deadline(&mark, t), mark.started + t);
+    assert_eq!(none.deadline(&mark, t, t), mark.started + t);
     // a pressure file that cannot be read adds nothing either
     let missing = CpuContention::Pressure("/nonexistent/cpu.pressure".into());
     let mark = missing.mark();

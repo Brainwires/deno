@@ -856,6 +856,8 @@ struct TestSetup {
   args: Vec<String>,
   env_vars: HashMap<String, String>,
   timeout: Duration,
+  /// denext: the timeout as written, before scaling by the CPU per test
+  written_timeout: Duration,
   /// denext: a fresh DENO_DIR for this test instead of the shared one
   isolated_deno_dir: bool,
 }
@@ -952,6 +954,7 @@ impl TestSetup {
           10_000
         },
       ));
+    let written_timeout = timeout;
     // denext: scaled by the CPU per running test (1 when uncontended)
     let timeout =
       test_util::test_runner::scale_timeout(timeout, timeout_factor);
@@ -965,12 +968,15 @@ impl TestSetup {
       args,
       env_vars,
       timeout,
+      written_timeout,
       isolated_deno_dir,
     }
   }
 
   fn run_piped(&self) -> (bool, String, Option<i32>) {
-    use std::io::Read;
+    /// How long the rest of a test's output is waited for once the test
+    /// has exited.
+    const OUTPUT_END_GRACE: Duration = Duration::from_secs(2);
 
     let mut cmd = match SHARED_DENO_DIR.get() {
       Some(shared) if !self.isolated_deno_dir => {
@@ -998,41 +1004,17 @@ impl TestSetup {
     // denext: the output is read as it comes, so a test that times out
     // still shows what it printed (a hang is told from slowness), even when
     // a grandchild keeps the pipes open after the kill
-    let capture = |pipe: Option<Box<dyn Read + Send>>| {
-      let buf = Arc::new(Mutex::new(Vec::new()));
-      let reader = pipe.map(|mut pipe| {
-        let buf = buf.clone();
-        util::print::spawn_thread(move || {
-          let mut chunk = [0u8; 8192];
-          while let Ok(n) = pipe.read(&mut chunk) {
-            if n == 0 {
-              break;
-            }
-            buf.lock().unwrap().extend_from_slice(&chunk[..n]);
-          }
-        })
-      });
-      (buf, reader)
-    };
-    let (stdout, stdout_reader) = capture(
-      child
-        .stdout
-        .take()
-        .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
-    let (stderr, stderr_reader) = capture(
-      child
-        .stderr
-        .take()
-        .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
+    let stdout = util::process::OutputCapture::new(child.stdout.take());
+    let stderr = util::process::OutputCapture::new(child.stderr.take());
     let tree = util::process::ProcessTree::new(&child);
     let rx = tree.wait_in_thread(child);
 
     // the written (CPU-scaled) timeout plus the time the test was starved
-    // of CPU, re-read at each deadline until it holds
+    // of CPU (8 times the written timeout in all, at most), re-read at each
+    // deadline until it holds
     let status = loop {
-      let deadline = contention.deadline(&mark, self.timeout);
+      let deadline =
+        contention.deadline(&mark, self.timeout, self.written_timeout);
       let now = std::time::Instant::now();
       if now >= deadline {
         break None;
@@ -1043,19 +1025,19 @@ impl TestSetup {
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break None,
       }
     };
-    let output_of = |buf: &Arc<Mutex<Vec<u8>>>| {
-      String::from_utf8_lossy(&buf.lock().unwrap()).into_owned()
-    };
-
     match status {
       Some(Ok(status)) => {
-        for reader in [stdout_reader, stderr_reader].into_iter().flatten() {
-          let _ = reader.join();
-        }
+        // denext: the tree was killed before the status was sent, so the
+        // pipes are at their end, unless a process that left the tree's
+        // process group (a `detached: true` grandchild) still holds one:
+        // the rest of the output is waited for only this long, where a
+        // join of the reader threads waited for that process to end
+        let end_by = std::time::Instant::now() + OUTPUT_END_GRACE;
+        stdout.wait_for_end(end_by);
+        stderr.wait_for_end(end_by);
         let success = status.success();
         let exit_code = status.code();
-        let mut output_str =
-          format!("{}\n{}", output_of(&stdout), output_of(&stderr));
+        let mut output_str = format!("{}\n{}", stdout.text(), stderr.text());
         // denext: how a failed run ended, so a process that died without a
         // word (a signal, an abort) is told apart from one that exited
         if !success {
@@ -1073,12 +1055,13 @@ impl TestSetup {
         let elapsed = mark.elapsed();
         let starved = contention.starved_since(&mark);
         let output_str = format!(
-          "Test timed out after {}ms (written timeout {}ms, {}ms of it starved of CPU)\n--- output before the timeout ---\n{}\n{}",
+          "Test timed out after {}ms (written timeout {}ms, {}ms scaled, {}ms of the run starved of CPU)\n--- output before the timeout ---\n{}\n{}",
           elapsed.as_millis(),
+          self.written_timeout.as_millis(),
           self.timeout.as_millis(),
           starved.as_millis(),
-          output_of(&stdout),
-          output_of(&stderr),
+          stdout.text(),
+          stderr.text(),
         );
         (false, output_str, None)
       }

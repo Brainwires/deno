@@ -346,6 +346,58 @@ pub fn kill_process_trees_on_signal() {
   }
 }
 
+/// What a child wrote to one of its output pipes, read on a thread as it
+/// comes: a run that times out still shows what it printed, and a process
+/// that outlives the child with the pipe open (one that left the child's
+/// process group, which [`ProcessTree`] does not kill on unix) cannot hold
+/// the reader of the output up.
+pub struct OutputCapture {
+  buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+  /// Disconnected once the pipe is at its end.
+  done: std::sync::mpsc::Receiver<()>,
+}
+
+impl OutputCapture {
+  /// Starts reading `pipe`; with no pipe the capture is empty and at its
+  /// end.
+  pub fn new<R>(pipe: Option<R>) -> Self
+  where
+    R: std::io::Read + Send + 'static,
+  {
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (done_tx, done) = std::sync::mpsc::channel::<()>();
+    if let Some(mut pipe) = pipe {
+      let buf = buf.clone();
+      crate::print::spawn_thread(move || {
+        let _done = done_tx;
+        let mut chunk = [0u8; 8192];
+        while let Ok(n) = pipe.read(&mut chunk) {
+          if n == 0 {
+            break;
+          }
+          buf.lock().unwrap().extend_from_slice(&chunk[..n]);
+        }
+      });
+    }
+    Self { buf, done }
+  }
+
+  /// Waits for the end of the pipe, until `deadline` at the latest, and
+  /// returns whether it came.
+  pub fn wait_for_end(&self, deadline: std::time::Instant) -> bool {
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    matches!(
+      self.done.recv_timeout(left),
+      Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+    )
+  }
+
+  /// What was read so far.
+  pub fn text(&self) -> String {
+    String::from_utf8_lossy(&self.buf.lock().unwrap()).into_owned()
+  }
+}
+
 #[cfg(all(test, unix))]
 mod process_tree_tests {
   use std::io::BufRead;
@@ -424,6 +476,36 @@ mod process_tree_tests {
     let status = rx.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
     assert!(status.success());
     assert!(gone_within(grandchild, Duration::from_secs(10)));
+  }
+
+  /// A process that outlives the child with its stdout open does not hold
+  /// up the reader of the child's output past the deadline it gives.
+  #[test]
+  fn output_capture_does_not_wait_for_a_pipe_held_open() {
+    let mut child = Command::new("sh")
+      .args(["-c", "sleep 600 & echo $!"])
+      .stdout(Stdio::piped())
+      .spawn()
+      .unwrap();
+    let capture = OutputCapture::new(child.stdout.take());
+    assert!(child.wait().unwrap().success());
+
+    let start = Instant::now();
+    assert!(!capture.wait_for_end(start + Duration::from_millis(300)));
+    assert!(start.elapsed() < Duration::from_secs(10));
+    // What the child printed is there all the same.
+    let holder = capture.text().trim().parse::<i32>().unwrap();
+    assert!(alive(holder));
+
+    // The pipe ends with its last holder.
+    // SAFETY: the pid of the `sleep` this test started
+    unsafe { libc::kill(holder, libc::SIGKILL) };
+    assert!(capture.wait_for_end(Instant::now() + Duration::from_secs(10)));
+
+    // No pipe: at its end from the start.
+    let none = OutputCapture::new(None::<std::process::ChildStdout>);
+    assert!(none.wait_for_end(Instant::now()));
+    assert_eq!(none.text(), "");
   }
 
   /// A harness that ends (or panics) kills the trees still running.
