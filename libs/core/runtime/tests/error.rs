@@ -87,6 +87,10 @@ async function asyncFrames() {
 async function viaPromiseAll() {
   return (await Promise.all([null, asyncFrames()]))[1];
 }
+// A method whose name is `name`, which a frame of its trace prints.
+function named(name) {
+  return { [name]() { return new Error("named").stack; } }[name];
+}
 async function stacks() {
   const error = new TypeError("typed");
   error.name = "";
@@ -109,6 +113,12 @@ async function stacks() {
     noMessage.stack,
     Reflect.apply(plain, 7, []),
     plain.call(null),
+    // Names that are not well-formed UTF-16: a lone surrogate reads as
+    // U+FFFD, in a short name and in one long enough for the SIMD transcoder.
+    named("\ud800")(),
+    named("a\udc00b")(),
+    named("x".repeat(100) + "\ud800\u00e9\u4e2d")(),
+    named("\ud83d\ude00 \u00e9")(),
   ];
 }
 "#;
@@ -140,7 +150,7 @@ async fn format_stacks(with_reader: bool) -> Vec<String> {
 async fn stack_format_same_with_and_without_callsite_reader() {
   let with_reader = format_stacks(true).await;
   let without_reader = format_stacks(false).await;
-  assert_eq!(with_reader.len(), 17);
+  assert_eq!(with_reader.len(), 21);
   for stack in &with_reader {
     assert!(stack.contains("\n    at "), "no frames in {stack:?}");
   }
@@ -150,6 +160,14 @@ async fn stack_format_same_with_and_without_callsite_reader() {
   assert!(with_reader[8].contains("eval at stacks (stack_shapes.js:"));
   assert!(with_reader[11].contains("at async stacks (stack_shapes.js:"));
   assert!(with_reader[12].contains("at async Promise.all (index 1)"));
+  // What the conversion to a Rust `String` always made of a lone surrogate.
+  assert!(with_reader[17].contains("at \u{FFFD} (stack_shapes.js:"));
+  assert!(with_reader[18].contains("at a\u{FFFD}b (stack_shapes.js:"));
+  assert!(with_reader[19].contains(&format!(
+    "at {}\u{FFFD}\u{e9}\u{4e2d} (stack_shapes.js:",
+    "x".repeat(100)
+  )));
+  assert!(with_reader[20].contains("at \u{1F600} \u{e9} (stack_shapes.js:"));
   pretty_assertions::assert_eq!(with_reader, without_reader);
 }
 

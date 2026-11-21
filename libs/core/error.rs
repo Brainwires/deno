@@ -1204,7 +1204,7 @@ fn write_stack_frame_line(
     result,
     frame,
     maybe_initial_cwd.map(|cwd| &**cwd),
-    file_name_parts,
+    file_name_parts.as_ref().map(StackFileName::parts),
   );
 }
 
@@ -2043,14 +2043,42 @@ pub(crate) struct StackFileNames {
   last: usize,
 }
 
+/// A file name as [`StackFileNames::get`] answers it.
+pub(crate) enum StackFileName<'a> {
+  Cached(&'a FileNameParts<'static>),
+  /// A name too long to keep, split for this frame.
+  Split(FileNameParts<'a>),
+}
+
+impl StackFileName<'_> {
+  fn parts(&self) -> &FileNameParts<'_> {
+    match self {
+      Self::Cached(parts) => parts,
+      Self::Split(parts) => parts,
+    }
+  }
+}
+
 impl StackFileNames {
   const MAX_ENTRIES: usize = 256;
 
-  fn get(
-    &mut self,
-    file_name: &str,
+  /// The longest file name that is kept, in bytes. The entries are bounded
+  /// in number, so this bounds what the cache holds (each name twice and
+  /// its parts: under 1 MiB in all): the name of a `data:` module is the
+  /// whole module, megabytes of it, and is split for each frame instead.
+  const MAX_FILE_NAME_LEN: usize = 1024;
+
+  fn get<'a>(
+    &'a mut self,
+    file_name: &'a str,
     initial_cwd: Option<&Arc<Url>>,
-  ) -> &FileNameParts<'static> {
+  ) -> StackFileName<'a> {
+    if file_name.len() > Self::MAX_FILE_NAME_LEN {
+      return StackFileName::Split(format_file_name(
+        file_name,
+        initial_cwd.map(|cwd| &**cwd),
+      ));
+    }
     let same_cwd = match (&self.initial_cwd, initial_cwd) {
       (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
       (None, None) => true,
@@ -2084,7 +2112,7 @@ impl StackFileNames {
         }
       };
     }
-    &self.entries[self.last].1
+    StackFileName::Cached(&self.entries[self.last].1)
   }
 }
 
@@ -3280,6 +3308,7 @@ mod tests {
     ) {
       let expected = format_file_name(file_name, cwd.map(|cwd| &**cwd));
       let actual = cache.get(file_name, cwd);
+      let actual = actual.parts();
       assert_eq!(actual.working_dir_path, expected.working_dir_path);
       assert_eq!(actual.file_name, expected.file_name);
     }
@@ -3317,6 +3346,49 @@ mod tests {
     }
     assert!(cache.entries.len() <= StackFileNames::MAX_ENTRIES);
     assert_eq!(cache.entries.len(), cache.index.len());
+  }
+
+  // The cache bounds its bytes as well as its entries: a name over the
+  // limit (the name of a `data:` module is the whole module) is split for
+  // the frame and not kept.
+  #[test]
+  fn stack_file_names_cache_does_not_keep_long_names() {
+    let cwd = Arc::new(Url::parse("file:///work/dir/").unwrap());
+    let mut cache = StackFileNames::default();
+    let kept = format!(
+      "file:///work/dir/{}.js",
+      "a".repeat(StackFileNames::MAX_FILE_NAME_LEN - 20)
+    );
+    assert_eq!(kept.len(), StackFileNames::MAX_FILE_NAME_LEN);
+    assert!(matches!(
+      cache.get(&kept, Some(&cwd)),
+      StackFileName::Cached(_)
+    ));
+    assert_eq!(cache.entries.len(), 1);
+
+    let long_names = [
+      format!("data:text/javascript,{}", "1;".repeat(1 << 20)),
+      format!("file:///work/dir/{}.js", "a".repeat(2000)),
+      format!("file:///work/dir/a%20b/{}.js", "%E2%9C%93".repeat(200)),
+    ];
+    for name in &long_names {
+      assert!(name.len() > StackFileNames::MAX_FILE_NAME_LEN);
+      for _ in 0..2 {
+        let expected = format_file_name(name, Some(&cwd));
+        let actual = cache.get(name, Some(&cwd));
+        assert!(matches!(actual, StackFileName::Split(_)));
+        let actual = actual.parts();
+        assert_eq!(actual.working_dir_path, expected.working_dir_path);
+        assert_eq!(actual.file_name, expected.file_name);
+      }
+    }
+    assert_eq!(cache.entries.len(), 1);
+    assert_eq!(cache.index.len(), 1);
+    // The entry of the last lookup is still the one that was kept.
+    assert!(matches!(
+      cache.get(&kept, Some(&cwd)),
+      StackFileName::Cached(_)
+    ));
   }
 
   // denext: the permission-denied note hook changes nothing unless the CLI
