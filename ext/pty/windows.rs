@@ -28,6 +28,8 @@ use deno_process::PreparedRun;
 use deno_process::ProcessError;
 use tokio::net::windows::named_pipe::NamedPipeServer;
 use tokio::sync::oneshot;
+use windows_sys::Wdk::System::Threading::NtQueryInformationProcess;
+use windows_sys::Wdk::System::Threading::ProcessBasicInformation;
 use windows_sys::Win32::Foundation::BOOLEAN;
 use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
@@ -38,6 +40,7 @@ use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 use windows_sys::Win32::Foundation::LocalFree;
+use windows_sys::Win32::Foundation::TRUE;
 use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows_sys::Win32::Security::Authorization::SDDL_REVISION_1;
 use windows_sys::Win32::Security::PSECURITY_DESCRIPTOR;
@@ -49,6 +52,7 @@ use windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING;
 use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_INBOUND;
 use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_OUTBOUND;
 use windows_sys::Win32::System::Console::COORD;
+use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
 use windows_sys::Win32::System::Pipes::CreateNamedPipeW;
@@ -60,11 +64,13 @@ use windows_sys::Win32::System::Threading::CREATE_UNICODE_ENVIRONMENT;
 use windows_sys::Win32::System::Threading::CreateProcessW;
 use windows_sys::Win32::System::Threading::DeleteProcThreadAttributeList;
 use windows_sys::Win32::System::Threading::EXTENDED_STARTUPINFO_PRESENT;
+use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 use windows_sys::Win32::System::Threading::GetExitCodeProcess;
 use windows_sys::Win32::System::Threading::INFINITE;
 use windows_sys::Win32::System::Threading::InitializeProcThreadAttributeList;
 use windows_sys::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST;
+use windows_sys::Win32::System::Threading::PROCESS_BASIC_INFORMATION;
 use windows_sys::Win32::System::Threading::PROCESS_INFORMATION;
 use windows_sys::Win32::System::Threading::RegisterWaitForSingleObject;
 use windows_sys::Win32::System::Threading::STARTF_USESTDHANDLES;
@@ -517,6 +523,66 @@ impl Drop for AttributeList {
   }
 }
 
+/// Whether this process ignores Ctrl+C: the `CONSOLE_IGNORE_CTRL_C` bit of
+/// its process parameters' `ConsoleFlags` (what `SetConsoleCtrlHandler(NULL,
+/// …)` sets and clears; Windows has no call that reads it). `ConsoleFlags`
+/// follows `ConsoleHandle`, the second pointer-sized slot past the four
+/// leading `ULONG`s, on every architecture.
+fn ignores_ctrl_c() -> bool {
+  // SAFETY: a plain C struct that NtQueryInformationProcess fills.
+  let mut basic: PROCESS_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+  let mut length = 0u32;
+  // SAFETY: the buffer is a PROCESS_BASIC_INFORMATION of the given size.
+  let status = unsafe {
+    NtQueryInformationProcess(
+      GetCurrentProcess(),
+      ProcessBasicInformation,
+      &mut basic as *mut PROCESS_BASIC_INFORMATION as *mut c_void,
+      std::mem::size_of::<PROCESS_BASIC_INFORMATION>() as u32,
+      &mut length,
+    )
+  };
+  if status < 0 || basic.PebBaseAddress.is_null() {
+    return false;
+  }
+  // SAFETY: this process's PEB and its process parameters stay mapped for
+  // the life of the process; the flag word is read, never written.
+  unsafe {
+    let parameters = (*basic.PebBaseAddress).ProcessParameters;
+    if parameters.is_null() {
+      return false;
+    }
+    let flags = std::ptr::read_volatile(std::ptr::addr_of!(
+      (*parameters).Reserved2[1]
+    ) as *const u32);
+    flags & 1 != 0
+  }
+}
+
+/// denext: Ctrl+C typed in the terminal (0x03 on the ConPTY's input) raises
+/// CTRL_C_EVENT for the console's processes, but a process that ignores
+/// Ctrl+C never sees it, and that is inherited: a Deno started with
+/// CREATE_NEW_PROCESS_GROUP or under `SetConsoleCtrlHandler(NULL, TRUE)` (an
+/// ssh session's process, a CI runner's step) passed it to the shell and
+/// every command the shell ran, which Ctrl+C then could not stop. The child
+/// is created with this process's flag cleared and the flag set again once
+/// `CreateProcessW` returns. In between, a Ctrl+C on this process's own
+/// console would reach it; the lock keeps concurrent spawns from restoring
+/// the flag under one another.
+fn with_ctrl_c_processed<T>(create: impl FnOnce() -> T) -> T {
+  static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+  let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+  if !ignores_ctrl_c() {
+    return create();
+  }
+  // SAFETY: a NULL handler only clears and sets the ignore flag.
+  unsafe { SetConsoleCtrlHandler(None, FALSE) };
+  let result = create();
+  // SAFETY: as above.
+  unsafe { SetConsoleCtrlHandler(None, TRUE) };
+  result
+}
+
 pub fn spawn(
   run: PreparedRun,
   args: &[String],
@@ -571,7 +637,7 @@ pub fn spawn(
   let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
   // SAFETY: every pointer names a NUL-terminated buffer that outlives the
   // call; no handle is inherited (the console attribute carries the pty).
-  let ok = unsafe {
+  let ok = with_ctrl_c_processed(|| unsafe {
     CreateProcessW(
       program.as_ptr(),
       line.as_mut_ptr(),
@@ -584,7 +650,7 @@ pub fn spawn(
       &startup.StartupInfo,
       &mut info,
     )
-  };
+  });
   if ok == FALSE {
     let err = io::Error::last_os_error();
     return Err(

@@ -19944,7 +19944,15 @@ where the changes are discussed.
        refuses to pass to a child; and every `actions/attest-build-provenance`
        step in `denext_runtime.yml` is tried once more after 30 s when it fails,
        as Sigstore's transparency log sometimes answers 404 for an entry it has
-       just written.
+       just written. On Windows, `dgram`'s `reusePort` and `{ fd }` refusals
+       carry ERROR_NOT_SUPPORTED, so they report ENOTSUP as libuv does (an
+       `ErrorKind::Unsupported` without an OS error number was reported as
+       ENOSYS); and `Deno.openPty` creates its child with this process's
+       ignore-Ctrl+C flag cleared (set again right after), since a Deno started
+       with Ctrl+C ignored (CREATE_NEW_PROCESS_GROUP; Windows OpenSSH sessions
+       and the GitHub-hosted runner's steps are) passed the flag on to the shell
+       and every command it ran, so Ctrl+C typed into the terminal stopped
+       nothing.
      - Node tests enabled: none.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,

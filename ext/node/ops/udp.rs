@@ -689,13 +689,22 @@ pub async fn op_node_udp_send(
 }
 
 /// The error libuv gives for an option the platform lacks (ENOTSUP), so
-/// the polyfill reports it under that code.
+/// the polyfill reports it under that code. It carries the OS error number
+/// because the error code is derived from it: an `ErrorKind::Unsupported`
+/// without one is reported as ENOSYS. On Windows libuv's UV_ENOTSUP is
+/// ERROR_NOT_SUPPORTED, which deno_error maps to ENOTSUP.
 fn not_supported_error() -> std::io::Error {
   #[cfg(unix)]
   {
     std::io::Error::from_raw_os_error(libc::ENOTSUP)
   }
-  #[cfg(not(unix))]
+  #[cfg(windows)]
+  {
+    std::io::Error::from_raw_os_error(
+      windows_sys::Win32::Foundation::ERROR_NOT_SUPPORTED as i32,
+    )
+  }
+  #[cfg(not(any(unix, windows)))]
   {
     std::io::Error::new(
       std::io::ErrorKind::Unsupported,
@@ -874,11 +883,9 @@ pub fn op_node_udp_open(
   }
   #[cfg(not(unix))]
   {
+    // libuv's Windows IPC passes only TCP handles (ENOTSUP otherwise).
     let _ = (state, fd);
-    Err(NodeUdpError::Io(std::io::Error::new(
-      std::io::ErrorKind::Unsupported,
-      "UDP socket IPC handle passing is not supported on this platform",
-    )))
+    Err(NodeUdpError::Io(not_supported_error()))
   }
 }
 
