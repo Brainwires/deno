@@ -1555,9 +1555,9 @@ impl Inner {
     }
     self.task_queue.queue_task(Box::new(|ls: LanguageServer| {
       spawn(async move {
-        if let Err(err) = ls
-          .cache(vec![], module.specifier.as_ref().clone(), false)
-          .await
+        if let Err(err) =
+          Box::pin(ls.cache(vec![], module.specifier.as_ref().clone(), false))
+            .await
         {
           lsp_warn!(
             "Failed to cache \"{}\" on save: {:#}",
@@ -3885,8 +3885,7 @@ impl tower_lsp::LanguageServer for LanguageServer {
       let Arguments(specifiers, referrer, options) =
         serde_json::from_value(json!(params.arguments))
           .map_err(|err| LspError::invalid_params(err.to_string()))?;
-      self
-        .cache(specifiers, referrer, options.force_global_cache)
+      Box::pin(self.cache(specifiers, referrer, options.force_global_cache))
         .await
     } else if params.command == "deno.reloadImportRegistries" {
       *self.did_change_batch_queue.borrow_mut() = None;

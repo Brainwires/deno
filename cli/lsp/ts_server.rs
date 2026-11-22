@@ -771,9 +771,10 @@ impl TsServer {
         let CompletionItemData::TsGo(data) = data else {
           return Ok(item);
         };
-        ts_server
-          .resolve_completion_item(item, data, &snapshot, token)
-          .await
+        Box::pin(
+          ts_server.resolve_completion_item(item, data, &snapshot, token),
+        )
+        .await
       }
       Self::Js(ts_server) => {
         let CompletionItemData::TsJs(data) = data else {

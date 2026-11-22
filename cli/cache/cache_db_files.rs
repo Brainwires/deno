@@ -410,7 +410,7 @@ mod tests {
           "PRAGMA journal_mode=WAL; CREATE TABLE t(v); INSERT INTO t VALUES (1);",
         )
         .unwrap();
-      println!("holder ready");
+      writeln!(std::io::stdout(), "holder ready").unwrap();
       std::io::stdout().flush().unwrap();
       // hold it until the parent closes stdin
       let mut line = String::new();

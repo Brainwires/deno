@@ -1069,7 +1069,7 @@ mod tests {
     let seeds: Vec<(u16, Vec<u8>)> = samples().iter().map(encode).collect();
     for i in 0..200_000u32 {
       let (kind, mut payload) = seeds[i as usize % seeds.len()].clone();
-      let kind = if rng.next() % 16 == 0 {
+      let kind = if rng.next().is_multiple_of(16) {
         0x0100 + (rng.next() % 0x100) as u16
       } else {
         kind
