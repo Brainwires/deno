@@ -528,8 +528,9 @@ fn compile_cache_key_pipe() -> Option<std::os::fd::OwnedFd> {
     )
   };
   for fd in fds {
-    // close-on-exec until the re-exec, which keeps only the read end (and
-    // clears the flag on it)
+    // close-on-exec: nothing this image starts inherits either end; the
+    // read end is let through the re-exec alone, right before it
+    // ([`pass_compile_cache_key_on_exec`])
     // SAFETY: a valid descriptor
     unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
   }
@@ -538,6 +539,27 @@ fn compile_cache_key_pipe() -> Option<std::os::fd::OwnedFd> {
   write.write_all(&key).ok()?;
   drop(write);
   Some(read)
+}
+
+/// Lets the compile cache key's read end ([`compile_cache_key_pipe`])
+/// through the exec that follows: the re-exec keeps the descriptors its
+/// `keep` names with their flags as they are (the policy carrier is never
+/// close-on-exec), so this one, close-on-exec until now, would be closed by
+/// it and the confined image would find no key. Called right before each
+/// exec, after which the image before the re-exec runs nothing; when the
+/// exec fails, the descriptor is closed with its owner.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn pass_compile_cache_key_on_exec(fd: Option<i32>) {
+  let Some(fd) = fd else {
+    return;
+  };
+  // SAFETY: changing the flags of a descriptor this image owns
+  unsafe {
+    let flags = libc::fcntl(fd, libc::F_GETFD);
+    if flags >= 0 {
+      libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+    }
+  }
 }
 
 /// A `deno` started inside a brokered run (it applies no plan of its own:
@@ -1400,6 +1422,7 @@ pub async fn apply_pending_with_entries(
   if plan.broker.is_some() {
     let env =
       reexec_env(plan, deno_dir.as_deref(), carrier_fd, compile_cache_key_fd);
+    pass_compile_cache_key_on_exec(compile_cache_key_fd);
     let err = exec_supervisor(plan, env, "/proc/self/exe".into(), None, keep);
     drop(carrier);
     bail!("--kernel-sandbox=broker: starting the supervisor failed: {err}");
@@ -1408,6 +1431,7 @@ pub async fn apply_pending_with_entries(
   {
     let env =
       reexec_env(plan, deno_dir.as_deref(), carrier_fd, compile_cache_key_fd);
+    pass_compile_cache_key_on_exec(compile_cache_key_fd);
     let err = deno_sandbox::enforce_linux::reexec(plan, env, keep);
     drop(carrier);
     bail!(
@@ -1438,11 +1462,13 @@ pub async fn apply_pending_with_entries(
       } else {
         None
       };
+      pass_compile_cache_key_on_exec(compile_cache_key_fd);
       let err = exec_supervisor(plan, env, exe.clone(), fallback, keep);
       drop(carrier);
       bail!("--kernel-sandbox=broker: starting the supervisor failed: {err}");
     }
     if !uses_sandbox_exec_fallback() {
+      pass_compile_cache_key_on_exec(compile_cache_key_fd);
       let err = deno_sandbox::macos::reexec_self(plan, &exe, env, keep);
       drop(carrier);
       bail!(
@@ -1455,6 +1481,7 @@ pub async fn apply_pending_with_entries(
       bail!("--kernel-sandbox=enforce: the runtime's path is not UTF-8");
     };
     let profile = deno_sandbox::seatbelt::with_self_exec(&profile, exe);
+    pass_compile_cache_key_on_exec(compile_cache_key_fd);
     let err =
       deno_sandbox::macos::reexec_under_sandbox_exec(&profile, plan, env, keep);
     drop(carrier);
