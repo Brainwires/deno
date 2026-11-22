@@ -2332,7 +2332,10 @@ fn allow_all_has_no_socket_gap() {
 /// every socket in Deno too, so they have no Unix socket gap either and
 /// `enforce` (what `auto` chooses) starts in Mode A: the fatal gap made
 /// `auto` start a broker that held nothing and slowed every child of the
-/// run. A write deny keeps the gap.
+/// run. A write deny keeps the gap in Mode A (Deno refuses a socket under
+/// the deny; the kernel's "every socket" doesn't), and the broker closes
+/// it: `enforce` starts Mode B, which decides each Unix socket by Deno's
+/// rules, so no Unix gap is left there.
 #[test]
 fn unscoped_files_and_net_have_no_socket_gap() {
   let all = Some(Vec::new());
@@ -2360,8 +2363,22 @@ fn unscoped_files_and_net_have_no_socket_gap() {
   };
   let c = ctx(linux(Some(6)).built(), Enforce);
   let set = ImplicitSet::build(&with_deny, &c);
+  let mode_a = Compiler::new(&with_deny, &set, &c, Shape::ModeA).run();
+  assert!(
+    mode_a.gaps.iter().any(|g| g.class == GapClass::Unix
+      && g.is_fatal_under_enforce()
+      && g.exact_with == Some(ExactWith::Broker)),
+    "{:?}",
+    mode_a.gaps
+  );
   let p = KernelPolicy::compile(&with_deny, &set, &c);
-  assert!(p.gaps.iter().any(|g| g.class == GapClass::Unix));
+  assert_eq!(p.policy.shape, Shape::ModeB);
+  assert_eq!(p.policy.unix, UnixPolicy::Open);
+  assert!(
+    !p.gaps.iter().any(|g| g.class == GapClass::Unix),
+    "{:?}",
+    p.gaps
+  );
 }
 
 /// denext.30 R4 triage: the `Deno.cron` scheduler socket the operator names
