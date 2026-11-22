@@ -77,6 +77,7 @@ const cases = {
   op_desktop_take_launch_targets: () => ops.op_desktop_take_launch_targets(),
   op_desktop_subscribe_launch_events: () =>
     ops.op_desktop_subscribe_launch_events("openurl"),
+  op_desktop_browser_links: () => ops.op_desktop_browser_links(),
   op_desktop_get_scheme_owner: () => ops.op_desktop_get_scheme_owner("myapp"),
   op_desktop_register_scheme: () =>
     ops.op_desktop_register_scheme("myapp", true),

@@ -127,6 +127,10 @@ fn deny_ceiling_prompt_changes_nothing_linux() {
   context
     .new_command()
     .env("DENO_INTERNAL_KERNEL_SANDBOX_STAGE", "r4")
+    // `cat` inherits the environment: a runner's LD_LIBRARY_PATH would need
+    // a full --allow-run to spawn it
+    .env("LD_LIBRARY_PATH", "")
+    .env("LD_PRELOAD", "")
     .args_vec([
       "run",
       "--quiet",
@@ -188,18 +192,24 @@ console.log("done");
     .run()
     .skip_output_check()
     .assert_exit_code(0);
-  context.new_command().name(&exe).with_pty(|mut console| {
-    console.expect("deno compile --kernel-sandbox=off");
-    console.expect("env HOME: NotCapable");
-    console.expect("env PATH: NotCapable");
-    console.expect("net: denied");
-    console.expect("done");
-    let output = console.all_output();
-    assert_eq!(
-      output.matches("deno compile --kernel-sandbox=off").count(),
-      1,
-      "{output}"
-    );
-    assert!(!output.contains("Allow?"), "{output}");
-  });
+  // (an argument: a pty command with none is taken for the REPL, whose
+  // banner the pty waits for)
+  context
+    .new_command()
+    .name(&exe)
+    .args_vec(["prompt"])
+    .with_pty(|mut console| {
+      console.expect("deno compile --kernel-sandbox=off");
+      console.expect("env HOME: NotCapable");
+      console.expect("env PATH: NotCapable");
+      console.expect("net: denied");
+      console.expect("done");
+      let output = console.all_output();
+      assert_eq!(
+        output.matches("deno compile --kernel-sandbox=off").count(),
+        1,
+        "{output}"
+      );
+      assert!(!output.contains("Allow?"), "{output}");
+    });
 }

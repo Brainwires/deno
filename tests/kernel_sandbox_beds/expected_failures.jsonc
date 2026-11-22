@@ -1259,12 +1259,6 @@
         ],
         "reason": "the TTY rule (P6, audit K4): opening a new pseudo-terminal (/dev/ptmx, /dev/pts/N) is refused under enforce; only the standard streams' own terminals are allowed"
       },
-      "specs::kernel_sandbox::deny_only::allow_all_deny_untouched_linux": {
-        "os": [
-          "linux"
-        ],
-        "reason": "to triage: stage-independent (the spec pins r4 itself); the outer script now prints the child's values and stderr on a mismatch"
-      },
       "specs::kernel_sandbox::enforce::default_unaffected": {
         "os": [
           "linux"

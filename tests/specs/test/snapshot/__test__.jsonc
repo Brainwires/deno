@@ -86,14 +86,20 @@
       ]
     },
     "custom_dir_requires_permissions": {
-      "args": "test --update-snapshots custom_dir_test.ts",
+      // (unconfined: under the kernel sandbox's R4, --update-snapshots
+      // makes `auto` a warn run, whose notice this output doesn't hold;
+      // kernel_sandbox::test_bench pins that)
+      "args": "test --kernel-sandbox=off --update-snapshots custom_dir_test.ts",
       "exitCode": 1,
       "output": "custom_dir_no_permission.out"
     },
     "custom_dir_with_permissions": {
       "steps": [
         {
-          "args": "test --allow-read --allow-write --update-snapshots custom_dir_test.ts",
+          // (unconfined: under the kernel sandbox's R4, --update-snapshots
+          // makes `auto` a warn run, whose notice this output doesn't hold;
+          // kernel_sandbox::test_bench pins that)
+          "args": "test --kernel-sandbox=off --allow-read --allow-write --update-snapshots custom_dir_test.ts",
           "exitCode": 0,
           "output": "custom_dir_update.out"
         },

@@ -1196,13 +1196,20 @@ print("supervisor-file-size", r(lambda: os.truncate("/dev/fd/" + held, 0)))
       assert!(out.lines().any(|l| l == line), "missing {line:?} in\n{out}");
     }
     if !python.is_empty() {
-      for line in [
-        "supervisor-pipe refused",
-        "supervisor-file refused",
-        "supervisor-file-owner refused",
-      ] {
+      for line in ["supervisor-pipe refused", "supervisor-file-owner refused"] {
         assert!(out.lines().any(|l| l == line), "missing {line:?} in\n{out}");
       }
+      // `/proc/self/fd/N` resolved by the supervisor: refused at the magic
+      // link when the process resolving it holds a descriptor N, ENOENT when
+      // it holds none (the supervisor needn't be the process that opened
+      // `held`: run 44969626250); either way the file isn't reached
+      assert!(
+        out
+          .lines()
+          .any(|l| l == "supervisor-file refused"
+            || l == "supervisor-file error 2"),
+        "chmod through the supervisor's descriptor in\n{out}"
+      );
       // Landlock (ABI 3+) or the supervisor holds truncate: refused, or the
       // caller's own ENOENT (it has no such descriptor), never done
       assert!(
