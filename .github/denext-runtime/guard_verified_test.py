@@ -253,6 +253,49 @@ class Decide(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("14", reason)
 
+    def test_a_targeted_run_never_verifies_even_on_every_leg(self):
+        # A dispatch with `only` on all six legs passes a job on each (the
+        # build at least), but ran only the selected tests.
+        targeted = dict(
+            run(16, "workflow_dispatch", "train/denext28"),
+            display_title="denext tests (targeted: unit:pty_test on"
+            " linux,linux-arm,macos,macos-x64,windows,windows-arm)",
+        )
+        ok, reason = guard.decide(
+            guard.TESTS, SHA, OWN, [targeted], table({16: full_tests_jobs()})
+        )
+        self.assertFalse(ok, reason)
+        going = dict(targeted, status="in_progress", conclusion=None)
+        self.assertEqual(guard.awaited(guard.TESTS, SHA, OWN, [going]), [])
+
+    def test_a_red_targeted_run_does_not_force_a_full_run(self):
+        red = dict(
+            run(17, "workflow_dispatch", "pretest/x", "failure"),
+            display_title="denext tests (targeted: specs:foo on windows)",
+        )
+        runs = [red, run(13, "workflow_dispatch", "rel/x")]
+        ok, reason = guard.decide(
+            guard.TESTS, SHA, OWN, runs, table({13: full_tests_jobs()})
+        )
+        self.assertTrue(ok, reason)
+        self.assertIn("13", reason)
+
+    def test_a_push_titled_like_a_targeted_run_still_counts(self):
+        # A push's title is its commit message: never the targeted signal.
+        push = dict(
+            run(18, "push", "rel/x", "failure"),
+            display_title="denext tests (targeted: x on linux)",
+        )
+        ok, reason = guard.decide(
+            guard.TESTS,
+            SHA,
+            OWN,
+            [push, run(13, "workflow_dispatch", "rel/x")],
+            table({13: full_tests_jobs()}),
+        )
+        self.assertFalse(ok)
+        self.assertIn("18", reason)
+
     def test_another_commit_never_verifies(self):
         runs = [run(15, "push", "denext-runtime-v3.0.0-denext.18", sha="other")]
         ok, _ = guard.decide(guard.RUNTIME, SHA, OWN, runs, table({}))

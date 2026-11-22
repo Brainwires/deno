@@ -230,3 +230,50 @@ units run here) and `units` (each carried unit's label with the `runId` and
 vetted it. On the mini a hook refuses to dispatch the `denext tests` workflow
 unless the marker of the exact commit the ref points at exists
 (`denext-internal` `ops/release/gate-guard-hook.py`).
+
+## denext/targeted_test.ts
+
+A targeted `denext tests` run (DENEXT.md item 496): only the named tests,
+filtered, on the named OS legs, after each leg's debug build. It is for checking
+one fix in minutes instead of the full ~3 h matrix, and never for a release: the
+tag gate and the verified-SHA guard leave a targeted run out, so it vouches for
+nothing and a red one blocks nothing.
+
+```sh
+# push HEAD to a throwaway pretest/targeted-<sha12>-<time> branch and dispatch
+deno run --allow-run=git,gh tools/denext/targeted_test.ts --os linux,windows \
+  specs:kernel_sandbox::policy::config unit:pty_test
+# another commit, every leg, a lib test; print the commands only
+deno run --allow-run=git,gh tools/denext/targeted_test.ts --commit fix/x --dry-run \
+  --os linux,linux-arm,macos,macos-x64,windows,windows-arm \
+  libs:deno_permissions:kernel_broker::net
+# the same by hand
+git push origin <sha>:refs/heads/pretest/<name>
+gh workflow run denext_tests.yml -R Brainwires/deno --ref pretest/<name> \
+  -f only='specs:kernel_sandbox::policy::config unit:pty_test' -f os=linux,windows
+```
+
+- **Items** (`only`, separated by spaces or newlines), each
+  `<suite>[:<filter>]`: `specs`, `unit`, `unit_node`, `integration` and
+  `node_compat` run `cargo test -p <suite>_tests --test <suite> -- <filter>` in
+  one job per item (unsharded; the harness runs every test whose name contains
+  the filter, and with no filter the whole suite). For `node_compat`, a filter
+  also selects tests `config.jsonc` does not enable. `libs:<crate>[:<filter>]`
+  runs `cargo test --locked --lib -p <crate> -p deno_v8 [-- <filter>]`
+  (`deno_core`, `serde_v8` and `deno_ops` without `deno_v8`). All lib items run
+  in the leg's one `test libs` job, one after another. The crate must be one the
+  full run's lib steps test. A filter takes letters, digits and
+  `_ . : / @ + = -` (not first).
+- **Legs** (`os`, comma-separated, no spaces): `linux` (ubuntu-22.04),
+  `linux-arm`, `macos` (macos-15), `macos-x64`, `windows` (windows-2022) and
+  `windows-arm`. Any suite runs on any leg here, including the ones the full run
+  tests on Linux alone.
+- **Skipped**: lint, cargo audit, every suite and shard not named, the macOS
+  LaunchServices test, and the webrtc mDNS test. The `full`, `macos` and
+  `windows` inputs are ignored; `macos_runner` still applies.
+- **Where**: a `pretest/*` branch, not the release candidate's own branch. The
+  gate ignores the run either way, but this keeps the candidate's run list the
+  release's. No workflow runs on a push to `pretest/*`, and the Windows pools
+  serve it. Delete the branch afterwards (`git push origin --delete <branch>`).
+- `.github/denext-runtime/targeted_tests.py` holds the syntax and the plan each
+  leg runs. `targeted_tests_test.py` checks them against the workflows.

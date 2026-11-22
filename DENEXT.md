@@ -19955,6 +19955,69 @@ where the changes are discussed.
        nothing.
      - Node tests enabled: none.
 
+492. **`ci(denext)`: a targeted `denext tests` run checks one fix in minutes**
+     (CI; `.github/workflows/denext_tests.yml`, `denext_tests_os.yml`,
+     `.github/denext-runtime/targeted_tests.py`, `tag_gate.py`,
+     `guard_verified.py`, their tests, `tools/denext/targeted_test.ts`,
+     `tools/README.md`). Checking whether a fix took meant a full
+     `denext
+     tests` run: about 65 jobs on six legs and about three hours,
+     once per fix. A dispatch with the new `only` input runs only the named
+     tests, on the legs the new `os` input names:
+     - `only` is a list of `<suite>[:<filter>]` items separated by spaces or
+       newlines: `specs:kernel_sandbox::policy::config`, `unit:pty_test`,
+       `unit_node:dgram_test`, `integration:<filter>`, `node_compat:<file>`, and
+       `libs:<crate>[:<filter>]` (`libs:deno_permissions:kernel_broker::net`). A
+       test item runs `cargo test -p <package> --test <suite> -- <filter>` (the
+       harness's substring filter, in one job, unsharded; with no filter the
+       suite runs whole). A lib item runs
+       `cargo test --locked --lib -p
+       <crate> -p deno_v8 [-- <filter>]`
+       (deno_v8 for its `v8` feature, as in `Test libs`; deno_core, serde_v8 and
+       deno_ops alone, as in `Test core
+       libs`) in the leg's one
+       `test libs` job. `os` takes `linux`, `linux-arm`, `macos`, `macos-x64`,
+       `windows` and `windows-arm`, comma-separated (default `linux`). The
+       `full`, `macos` and `windows` inputs are ignored; `macos_runner` still
+       applies.
+     - Each selected leg runs its `targeted plan` job (which checks `only`), its
+       debug build (the same build job and artifact), and then only the selected
+       jobs, on the runners the leg's picker chooses for those suites. Lint,
+       cargo audit, the other suites and shards, the macOS LaunchServices test
+       and the webrtc mDNS test are skipped. A `targeted run marker` job checks
+       both inputs and lists what each leg runs. The run's title (`run-name`) is
+       `denext tests (targeted: <only> on <os>)`, and it has a concurrency group
+       of its own, so it neither waits behind nor replaces a pending full
+       dispatch of the same ref.
+     - The release gate and the verified-SHA guard leave a targeted run out: it
+       never vouches (even on all six legs, where each leg has a passed build
+       job), a red one blocks nothing, and one still going is not waited for.
+       They recognise one by its event and title together: a `workflow_dispatch`
+       whose title starts with `denext tests (targeted:`. A dispatch's title can
+       come only from the workflow file's `run-name` and the inputs. A push's
+       title is its commit message, so a push is never taken as targeted. The
+       title is on the run from its creation, so the check also works for a run
+       with no jobs.
+     - With `only` empty, every changed condition reduces to its old form: each
+       is `(old)` or `inputs.only == '' && (old)` with the targeted branch
+       false. `run-name` evaluates to `''`, for which GitHub keeps the event's
+       default title. A push or a full or OS-picked dispatch runs the same jobs
+       with the same commands as before. The only visible difference is that the
+       new `targeted run marker` and `targeted plan` jobs show as skipped.
+     - `tools/denext/targeted_test.ts` pushes the commit to a throwaway
+       `pretest/targeted-<sha12>-<time>` branch (the Windows pools serve
+       `pretest/*`, and no workflow runs on a push to one) and dispatches there.
+       That keeps the release candidate's own run list free of diagnostics,
+       although the gate ignores them.
+     - User-facing note: none; CI only.
+     - Tests: `targeted_tests_test.py` (the syntax and its refusals, the plan,
+       and that its suite, crate and leg lists match the workflows),
+       `tag_gate_test.py` and `guard_verified_test.py` (a targeted run never
+       vouches, even on every leg; a red or running one does not block or hold a
+       tag; a push titled like one still counts), all run by the lint job;
+       `tools/denext/targeted_test_test.ts` (the dispatcher).
+     - Node tests enabled: none, because this is CI only.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

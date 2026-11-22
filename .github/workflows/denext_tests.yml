@@ -16,7 +16,8 @@
 #          engine_staleness_test.py, audit_ignores_test.py,
 #          glibc_ceiling_test.py, self_binding_test.py, denort_pins_test.py,
 #          linux_needed_test.py, toolchain_info_test.py, plan_matrix_test.py,
-#          apt_install_test.py, guard_verified_test.py, setup_cache_test.py)
+#          apt_install_test.py, guard_verified_test.py, setup_cache_test.py,
+#          targeted_tests_test.py)
 #          and the bare-assertion guard over the release scripts
 #          (assert_guard.py and its test).
 # - cargo-audit: RustSec advisories against Cargo.lock; .cargo/audit.toml
@@ -71,11 +72,35 @@
 # Linux-only run never vouches for a release, and refuses a commit that has
 # any failed run at all.
 #
+# Targeted runs (DENEXT.md item 496): a dispatch with `only` runs ONLY the
+# selected tests, filtered, on the legs `os` names (each leg's debug build,
+# then one job per selected test item and one `test libs` job for the lib
+# items), and skips every other job: lint, cargo audit, the other suites and
+# shards, the webrtc mDNS test. `full`, `macos` and `windows` are ignored;
+# `macos_runner` still applies. For checking one fix in minutes, not for a
+# release: tag_gate.py and guard_verified.py leave a targeted run out (its
+# title, from run-name, says `targeted`), so it never vouches and a red one
+# blocks nothing. The syntax (.github/denext-runtime/targeted_tests.py):
+#   gh workflow run denext_tests.yml --ref pretest/<name> \
+#     -f only='specs:kernel_sandbox::policy::config unit:pty_test' -f os=linux,windows
+# items `<suite>[:<filter>]` separated by spaces or newlines (unit,
+# unit_node, specs, integration, node_compat; `libs:<crate>[:<filter>]`), and
+# `os` comma-separated from linux, linux-arm, macos, macos-x64, windows,
+# windows-arm. tools/denext/targeted_test.ts pushes a throwaway pretest/*
+# branch at a commit and dispatches it, so the candidate's own run list stays
+# the release's. With `only` empty every job condition below reduces to its
+# form before item 496: a push or a full / OS-picked dispatch runs exactly as
+# it did.
+#
 # The test harness asks Deno's "hashy" service whether a test input hash
 # already passed and PUTs one when it did (tests/util/lib/hash.rs). That is
 # Deno's infrastructure, not ours: every job resolves its host to 127.0.0.1,
 # so the harness always runs the tests and never reports back.
 name: denext tests
+# A targeted run's title says so (tag_gate.py's TARGETED_TITLE). Any other run
+# gets '' here, which GitHub replaces with the event's default title (the
+# commit message of a push, the workflow's name for a dispatch), as before.
+run-name: "${{ (github.event_name == 'workflow_dispatch' && inputs.only != '') && format('denext tests (targeted: {0} on {1})', inputs.only, inputs.os) || '' }}"
 
 on:
   push:
@@ -113,6 +138,14 @@ on:
           - pool
           - github
         default: pool
+      only:
+        description: 'Targeted run: only these tests, space-separated <suite>[:<filter>] items (unit, unit_node, specs, integration, node_compat, libs:<crate>[:<filter>]), e.g. specs:kernel_sandbox::policy::config unit:pty_test. Empty: the normal run. Ignores full / macos / windows; never counts for a release'
+        type: string
+        default: ''
+      os:
+        description: 'With only: the legs, comma-separated, no spaces: linux, linux-arm, macos, macos-x64, windows, windows-arm'
+        type: string
+        default: linux
 
 permissions:
   contents: read
@@ -124,8 +157,10 @@ permissions:
 # 354): its group carries the run id, so no later push or dispatch shares it,
 # and cancel-in-progress is off for it. GitHub shows a cancelled run as a red X
 # on the default branch, and a release fast-forwards that branch.
+# A targeted run (`only`) has a group of its own too (its run id): it neither
+# waits behind nor replaces a pending full dispatch of the same ref.
 concurrency:
-  group: denext-tests-${{ github.ref }}-${{ github.event_name }}${{ (github.event_name == 'push' && github.ref == 'refs/heads/development-denext') && format('-{0}', github.run_id) || '' }}
+  group: denext-tests-${{ github.ref }}-${{ github.event_name }}${{ (github.event_name == 'push' && github.ref == 'refs/heads/development-denext') && format('-{0}', github.run_id) || '' }}${{ (github.event_name == 'workflow_dispatch' && inputs.only != '') && format('-targeted-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/heads/main' && github.ref != 'refs/heads/development-denext' }}
 
 env:
@@ -229,10 +264,34 @@ jobs:
             echo "verified=false" >>"$GITHUB_OUTPUT"
           fi
 
+  # A targeted run (`only`, see the header): checks `only` and `os` and lists
+  # what each leg runs. Nothing needs it; each leg's `targeted plan` checks
+  # `only` again before its build. tag_gate.py reads the run's title, not
+  # this job (a run that never started has no jobs).
+  targeted:
+    name: targeted run marker
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.only != '') }}
+    runs-on: ${{ fromJSON(vars.RUNNER_LINUX_X64 || '"ubuntu-latest"') }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github/denext-runtime/targeted_tests.py
+          sparse-checkout-cone-mode: false
+      - name: Check only and os
+        env:
+          ONLY: ${{ inputs.only }}
+          OS: ${{ inputs.os }}
+        run: |
+          set -euo pipefail
+          python3 -I .github/denext-runtime/targeted_tests.py check | tee -a "$GITHUB_STEP_SUMMARY"
+
   lint:
     name: lint / ${{ matrix.os }}
     needs: [runners, guard]
-    if: ${{ !cancelled() && needs.guard.result == 'success' && needs.guard.outputs.verified != 'true' }}
+    if: ${{ !cancelled() && needs.guard.result == 'success' && needs.guard.outputs.verified != 'true' && !(github.event_name == 'workflow_dispatch' && inputs.only != '') }}
     # The macos-15 entry on our macos-arm64 pool, the ubuntu-22.04 one on the
     # Ubuntu 22.04 Linux pool (its image carries the setup action's packages),
     # the windows-2022 one on the win-x64 pools (on the refs they serve), each
@@ -279,6 +338,10 @@ jobs:
       - name: tag_gate_test.py
         if: runner.os == 'Linux'
         run: python3 -I .github/denext-runtime/tag_gate_test.py
+      # The targeted-run selector (`only` / `os`, the legs' targeted plan).
+      - name: targeted_tests_test.py
+        if: runner.os == 'Linux'
+        run: python3 -I .github/denext-runtime/targeted_tests_test.py
       # The verified-SHA guard (each push-triggered workflow's guard job).
       - name: guard_verified_test.py
         if: runner.os == 'Linux'
@@ -354,7 +417,7 @@ jobs:
   cargo-audit:
     name: cargo audit
     needs: [runners, guard]
-    if: ${{ !cancelled() && needs.guard.result == 'success' && needs.guard.outputs.verified != 'true' }}
+    if: ${{ !cancelled() && needs.guard.result == 'success' && needs.guard.outputs.verified != 'true' && !(github.event_name == 'workflow_dispatch' && inputs.only != '') }}
     # In guard's runner once guard ends (runners: our linux-x64 pool, or
     # ubuntu-24.04 when guard overflowed), else ubuntu-22.04.
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').audit || 'ubuntu-22.04' }}
@@ -385,13 +448,15 @@ jobs:
   macos:
     name: macos-15
     needs: guard
-    if: ${{ needs.guard.outputs.verified != 'true' && (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.macos)) }}
+    if: ${{ needs.guard.outputs.verified != 'true' && (((github.event_name == 'workflow_dispatch' && inputs.only != '') && contains(format(',{0},', inputs.os), ',macos,')) || (!(github.event_name == 'workflow_dispatch' && inputs.only != '') && (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.macos)))) }}
     uses: ./.github/workflows/denext_tests_os.yml
     permissions:
       contents: read
       actions: read # the leg's pickers read the repository's queued / running jobs
     with:
       os: macos-15
+      # A targeted run's `only` (see the header), else ''.
+      only: ${{ github.event_name == 'workflow_dispatch' && inputs.only || '' }}
       # unit_node + node_compat (2 shards) too.
       node_suites: true
       # Every job of the leg (the build too) on the mac-arm pool while it has
@@ -404,7 +469,7 @@ jobs:
   windows:
     name: windows-2022
     needs: guard
-    if: ${{ needs.guard.outputs.verified != 'true' && (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.windows)) }}
+    if: ${{ needs.guard.outputs.verified != 'true' && (((github.event_name == 'workflow_dispatch' && inputs.only != '') && contains(format(',{0},', inputs.os), ',windows,')) || (!(github.event_name == 'workflow_dispatch' && inputs.only != '') && (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.windows)))) }}
     # The build, libs, specs and node_compat take the fast host (windows-x64-fast: the MacBook's
     # VM, never brain), unit_node and unit the win-x64 pools (the MacBook's VM and brain, 4 threads
     # / 8 GB each; LLVM's libclang for bindgen on both since 2026-11-17), while they have a free
@@ -415,6 +480,8 @@ jobs:
       actions: read # the leg's pickers read the repository's queued / running jobs
     with:
       os: windows-2022
+      # A targeted run's `only` (see the header), else ''.
+      only: ${{ github.event_name == 'workflow_dispatch' && inputs.only || '' }}
       node_suites: true
       # The Windows pools are not widened (ops/runners/allowlist.json): they
       # serve only push / dispatch runs of these refs, and a job they refuse
@@ -424,7 +491,7 @@ jobs:
   linux:
     name: ubuntu-22.04
     needs: guard
-    if: ${{ needs.guard.outputs.verified != 'true' }}
+    if: ${{ needs.guard.outputs.verified != 'true' && (!(github.event_name == 'workflow_dispatch' && inputs.only != '') || contains(format(',{0},', inputs.os), ',linux,')) }}
     # Every job of the leg (build, libs, each test job) on the Ubuntu 22.04
     # Linux pool (RUNNER_LINUX_X64_2204, biscuits: the glibc floor of the
     # image, every package the setup action names baked in, so nothing is
@@ -437,6 +504,8 @@ jobs:
       actions: read # the leg's pickers read the repository's queued / running jobs
     with:
       os: ubuntu-22.04
+      # A targeted run's `only` (see the header), else ''.
+      only: ${{ github.event_name == 'workflow_dispatch' && inputs.only || '' }}
       pick_all: true
       pick_pool: linux-x64-2204
 
@@ -445,13 +514,15 @@ jobs:
   macos-x64:
     name: macos-15-intel
     needs: guard
-    if: ${{ needs.guard.outputs.verified != 'true' && (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) }}
+    if: ${{ needs.guard.outputs.verified != 'true' && (((github.event_name == 'workflow_dispatch' && inputs.only != '') && contains(format(',{0},', inputs.os), ',macos-x64,')) || (!(github.event_name == 'workflow_dispatch' && inputs.only != '') && (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)))) }}
     uses: ./.github/workflows/denext_tests_os.yml
     permissions:
       contents: read
       actions: read # the leg's pickers read the repository's queued / running jobs
     with:
       os: macos-15-intel
+      # A targeted run's `only` (see the header), else ''.
+      only: ${{ github.event_name == 'workflow_dispatch' && inputs.only || '' }}
       libs_only: true
       # Plus unit_node + node_compat (2 shards).
       node_suites: true
@@ -464,13 +535,15 @@ jobs:
   linux-arm64:
     name: ubuntu-22.04-arm
     needs: guard
-    if: ${{ needs.guard.outputs.verified != 'true' && (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) }}
+    if: ${{ needs.guard.outputs.verified != 'true' && (((github.event_name == 'workflow_dispatch' && inputs.only != '') && contains(format(',{0},', inputs.os), ',linux-arm,')) || (!(github.event_name == 'workflow_dispatch' && inputs.only != '') && (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)))) }}
     uses: ./.github/workflows/denext_tests_os.yml
     permissions:
       contents: read
       actions: read # the called workflow's runner-pick jobs read the repository's jobs
     with:
       os: ubuntu-22.04-arm
+      # A targeted run's `only` (see the header), else ''.
+      only: ${{ github.event_name == 'workflow_dispatch' && inputs.only || '' }}
       libs_only: true
       # The build and libs on the linux-arm64 pool (Docker on the mini, 6 CPUs,
       # 6 GB + 2 GB swap) while it has a free slot, else GitHub's
@@ -485,13 +558,15 @@ jobs:
   windows-arm64:
     name: windows-11-arm
     needs: guard
-    if: ${{ needs.guard.outputs.verified != 'true' && (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)) }}
+    if: ${{ needs.guard.outputs.verified != 'true' && (((github.event_name == 'workflow_dispatch' && inputs.only != '') && contains(format(',{0},', inputs.os), ',windows-arm,')) || (!(github.event_name == 'workflow_dispatch' && inputs.only != '') && (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full)))) }}
     uses: ./.github/workflows/denext_tests_os.yml
     permissions:
       contents: read
       actions: read # the leg's pickers read the repository's queued / running jobs
     with:
       os: windows-11-arm
+      # A targeted run's `only` (see the header), else ''.
+      only: ${{ github.event_name == 'workflow_dispatch' && inputs.only || '' }}
       libs_and_unit: true
       # Plus unit_node + node_compat (2 shards). Every job on the win-arm64
       # pool (RUNNER_WINDOWS_ARM) while it has a free slot, else

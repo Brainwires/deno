@@ -19,6 +19,20 @@ A `denext-runtime-v*` tag publishes only when, for the tagged commit:
   the commit (a minute on the verified-SHA guard) was in progress when the
   3.0.0-denext.27 tag build looked, and that refusal cost the release four
   hours. Waiting changes no verdict: the run must still end, and end green;
+- a TARGETED `denext tests` run (a dispatch with `only`: the selected tests
+  on the selected OS legs, a diagnostic for one fix) is left out entirely:
+  it never vouches (it lacks most of the suites, whatever legs it ran on),
+  a red one doesn't block the tag, and one still going is not waited for.
+  The signal is the run's event and display title together (`is_targeted`):
+  `workflow_dispatch` and a title starting with TARGETED_TITLE (the
+  workflow's `run-name`, set only when `only` is not empty). For a dispatch
+  the title can come from nothing but `run-name` in the workflow file at
+  the commit and the inputs (a push's title is its commit message, which is
+  why a push never counts as targeted, whatever its message says), and the
+  API returns it with the run itself from the moment it is created, so it
+  holds for a queued, cancelled or failed run that has no jobs, where a
+  marker job (`targeted run marker`) would not exist yet. The marker job is
+  for people reading the run; the gate does not read it;
 - the commit is on development-denext, on the release branch rel/<version>
   or on its train branch (train/<version>, or train/<prerelease without
   dots>: train/denext22 for 3.0.0-denext.22, train/rc6 for 3.0.0-rc.6): a
@@ -93,6 +107,17 @@ REQUIRED_LEGS = (
     "windows-11-arm",
 )
 RED = ("failure", "timed_out", "startup_failure")
+# The start of a targeted run's display title (denext_tests.yml's run-name:
+# `denext tests (targeted: <only> on <os>)`).
+TARGETED_TITLE = "denext tests (targeted: "
+
+
+def is_targeted(event, display_title):
+    """Whether a `denext tests` run is a targeted dispatch (see the module
+    docstring): a `workflow_dispatch` whose title is the targeted run-name."""
+    return event == "workflow_dispatch" and (display_title or "").startswith(
+        TARGETED_TITLE
+    )
 # A run (or attempt) GitHub concludes `failure` with no job that failed or
 # timed out lost its jobs to the runner pool ("not acquired by Runner of type
 # hosted"): GitHub cancels them and marks the run failed. No test failed, so it
@@ -203,7 +228,8 @@ def evaluate(runs, legs_of, contained_in):
     runs: every `denext tests` run of the commit, each a dict with `id`,
       `status`, `conclusion` and `attempts` (the conclusions of its earlier
       attempts, oldest first; empty for a run never re-run), and `stuck`
-      when it never started (`is_stuck`): such a run is left out.
+      when it never started (`is_stuck`), or `targeted` for a targeted
+      dispatch (`is_targeted`): such a run is left out.
     legs_of: run id -> the OS legs that have a passed job in that run.
     contained_in: branch name -> whether it contains the commit.
     Returns (full_run_id or None, [errors]).
@@ -215,7 +241,13 @@ def evaluate(runs, legs_of, contained_in):
                 f"denext tests run {r['id']} is stuck in the queue with no"
                 " jobs: not counted"
             )
-    runs = [r for r in runs if not r.get("stuck")]
+    for r in runs:
+        if r.get("targeted") and not r.get("stuck"):
+            print(
+                f"denext tests run {r['id']} is a targeted run (a diagnostic"
+                " dispatch with `only`): not counted"
+            )
+    runs = [r for r in runs if not r.get("stuck") and not r.get("targeted")]
     pending = [r["id"] for r in runs if r["status"] != "completed"]
     if pending:
         errors.append(
@@ -350,11 +382,14 @@ def pending_wait(value):
 
 def pending_runs(runs):
     """The ids of the runs that hold the release because they are still
-    going (`evaluate`'s rule: not completed, and not stuck in the queue)."""
+    going (`evaluate`'s rule: not completed, not stuck in the queue and not
+    a targeted run)."""
     return [
         r["id"]
         for r in runs
-        if not r.get("stuck") and r["status"] != "completed"
+        if not r.get("stuck")
+        and not r.get("targeted")
+        and r["status"] != "completed"
     ]
 
 
@@ -400,10 +435,16 @@ def gh_runs(repo, sha):
             f"repos/{repo}/actions/workflows/{WORKFLOW}/runs"
             f"?head_sha={sha}&per_page=100",
             "--jq",
-            ".workflow_runs[] | {id, status, conclusion, run_attempt, created_at}",
+            ".workflow_runs[] | {id, status, conclusion, run_attempt,"
+            " created_at, event, display_title}",
         ]
     ):
         run = json.loads(line)
+        if is_targeted(run.get("event"), run.get("display_title")):
+            # Left out by `evaluate`: its attempts and jobs are not read.
+            run["targeted"] = True
+            runs.append(run)
+            continue
         if run["status"] == "queued":
             count = int(
                 gh_lines(
