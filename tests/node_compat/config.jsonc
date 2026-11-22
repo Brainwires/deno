@@ -6986,6 +6986,7 @@
       "reason": "Stress test: 10,000 structuredClone(createHistogram()) calls, 2.0 s on an Apple M-series debug build; over the 10 s default on the slower Windows x64 runner"
     },
     "pummel/test-timers.js": {},
+    "pummel/test-tls-server-large-request.js": {},
     "pummel/test-tls-throttle.js": {
       "ignore": true,
       "reason": "times out on all platforms"
