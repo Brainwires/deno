@@ -35,6 +35,8 @@ const calls = {
   "fs.rename": (cb) => fs.rename(denied, "renamed.txt", cb),
   "fs.link": (cb) => fs.link(denied, "linked.txt", cb),
   "fs.chmod": (cb) => fs.chmod(denied, 0o644, cb),
+  // macOS only, as in Node (no O_SYMLINK elsewhere, so `fs.lchmod` is
+  // undefined): run by name, see __test__.jsonc.
   "fs.lchmod": (cb) => fs.lchmod(denied, 0o644, cb),
   "fs.chown": (cb) => fs.chown(denied, 0, 0, cb),
   "fs.lchown": (cb) => fs.lchown(denied, 0, 0, cb),
@@ -91,7 +93,8 @@ function check(name) {
 
 (async () => {
   const only = process.argv.slice(2);
-  for (const name of only.length ? only : Object.keys(calls)) {
+  const all = Object.keys(calls).filter((name) => name !== "fs.lchmod");
+  for (const name of only.length ? only : all) {
     console.log(await check(name));
   }
 })();

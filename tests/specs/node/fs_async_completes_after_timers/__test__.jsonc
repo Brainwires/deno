@@ -3,6 +3,27 @@
   // another timer that is due in the same timers phase. The calls fail
   // without reaching a thread (a denied path or host, a closed descriptor),
   // which is when their results used to be delivered early.
-  "args": "run --no-prompt --allow-read --allow-write --allow-net --deny-read=denied.txt --deny-write=denied.txt --deny-net=denied.invalid,127.0.0.1 main.cjs",
-  "output": "main.out"
+  "tests": {
+    "all": {
+      "args": "run --no-prompt --allow-read --allow-write --allow-net --deny-read=denied.txt --deny-write=denied.txt --deny-net=denied.invalid,127.0.0.1 main.cjs",
+      "output": "main.out"
+    },
+    // `fs.lchmod` exists only on macOS, as in Node.
+    "lchmod": {
+      "if": "mac",
+      "args": "run --no-prompt --allow-read --allow-write --deny-read=denied.txt --deny-write=denied.txt main.cjs fs.lchmod",
+      "output": "lchmod.out"
+    },
+    // Elsewhere it is undefined, as in Node: calling it throws a TypeError.
+    "lchmod_absent_linux": {
+      "if": "linux",
+      "args": "run --no-prompt --allow-read --allow-write --deny-read=denied.txt --deny-write=denied.txt main.cjs fs.lchmod",
+      "output": "lchmod_absent.out"
+    },
+    "lchmod_absent_windows": {
+      "if": "windows",
+      "args": "run --no-prompt --allow-read --allow-write --deny-read=denied.txt --deny-write=denied.txt main.cjs fs.lchmod",
+      "output": "lchmod_absent.out"
+    }
+  }
 }

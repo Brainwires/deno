@@ -20,7 +20,6 @@ fs.unlink: after the second timer
 fs.rename: after the second timer
 fs.link: after the second timer
 fs.chmod: after the second timer
-fs.lchmod: after the second timer
 fs.chown: after the second timer
 fs.lchown: after the second timer
 fs.utimes: after the second timer
