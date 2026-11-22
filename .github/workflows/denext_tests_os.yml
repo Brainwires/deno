@@ -152,11 +152,27 @@ jobs:
           for b in deno denort test_server; do cp "target/debug/$b$ext" out/; done
           tar -cf bins.tar -C out .
           ls -la out
+      # GitHub's artifact store sometimes stalls on this upload ("Upload
+      # progress stalled") though the build passed: one retry, replacing any
+      # partial artifact.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: upload_bins
+        continue-on-error: true
         with:
           name: debug-bins-${{ inputs.os }}
           path: bins.tar
           retention-days: 3
+      - name: Wait before retrying the upload
+        if: steps.upload_bins.outcome == 'failure'
+        shell: bash
+        run: sleep 30
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.upload_bins.outcome == 'failure'
+        with:
+          name: debug-bins-${{ inputs.os }}
+          path: bins.tar
+          retention-days: 3
+          overwrite: true
 
   # As upstream's `test libs` job: the lib tests start target/debug/test_server
   # (the file fetcher, http_util, installer and LSP registry tests), so they

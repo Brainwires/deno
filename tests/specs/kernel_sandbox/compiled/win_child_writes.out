@@ -1,2 +1,3 @@
 child wrote inside\child.txt: true
+hint: a child process exited with code 1 inside the kernel sandbox; children inherit the file and network rules, so it may have been refused something (see --kernel-sandbox-report)
 child wrote child_outside.txt: false
