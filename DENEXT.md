@@ -20017,7 +20017,7 @@ where the changes are discussed.
        388, 389, 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409,
        410, 411, 412, 415, 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438,
        439, 441, 446, 447, 448, 449, 450, 452, 455, 457, 460-468, 470, 472-479,
-       484, 486-489, 491, 492) are what the prebuilt `libdenort` carries. The
+       484, 486-489, 491-495) are what the prebuilt `libdenort` carries. The
        CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
        `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too,
        but a stock CLI does not run them; denext's own launcher provides that
@@ -20107,6 +20107,59 @@ where the changes are discussed.
      synchronous JavaScript past the timeout is given up on.
      - Tests: `coverage::tests::waits_for_ending_workers_only`; integration
        `coverage::{worker_coverage1, worker_coverage2, worker_coverage3}`.
+     - Node tests enabled: none.
+
+493. **`fix(node)`: a path server's `readableAll` / `writableAll` add to the
+     socket's mode** (runtime; upstream bug; denext.30 CI triage;
+     `ext/node/ops/pipe_wrap.rs`). The Unix half of `PipeWrap.fchmod` set the
+     bound socket's mode to the requested bits instead of adding them, as
+     libuv's `uv_pipe_chmod` does, so a `server.listen()` with `readableAll`
+     alone left the socket at `0444`. Linux refuses `connect()` to a Unix socket
+     without write permission, so the server's own account could no longer reach
+     it (`EACCES`); macOS doesn't check, which hid it there. The op now `stat`s
+     the socket, returns at once when the bits are already set, and otherwise
+     `chmod`s it to the current mode with them added; a failed `stat` / `chmod`
+     returns the negated errno (libuv's code) instead of `-1`. The Windows half
+     (item 484's DACL) is unchanged.
+     - Tests: `unit_node::net_test` ("a path server listens with readableAll and
+       writableAll").
+     - Node tests enabled: none new.
+
+494. **`fix(node)`: Node's compile cache reads the user id without
+     `--allow-sys=uid`** (runtime; denext-only; denext.30 CI triage;
+     `ext/node/ops/compile_cache.rs`, `ext/node/polyfills/01_require.js`). The
+     compile cache (item 240) tags its directory with the user id and checks
+     that each entry is owned by it, as Node's `CompileCacheHandler` does with
+     `uv_os_getuid`, but it asked `process.getuid()`, which needs
+     `--allow-sys=uid`. Without that grant `module.enableCompileCache()` threw
+     `NotCapable` instead of returning a status, and an entry read was refused
+     silently. `op_node_compile_cache_uid` reads the id without a permission
+     check (`null` on Windows, where `process.getuid` is undefined), and both
+     the tag and the owner check use it. A program that can read the cache
+     directory already sees the same id as the owner of the files the runtime
+     writes there.
+     - Tests: `kernel_sandbox::enforce::compile_cache_key_handed_over` (item
+       490's spec, the first compile cache run without `-A`).
+     - Node tests enabled: none new.
+
+495. **`fix(permissions)`: a `/proc/<pid>/environ` read needs every permission,
+     said explicitly** (runtime; upstream bug kept strict; denext.30 CI triage;
+     `runtime/permissions/lib.rs`). Upstream's special-file check sent a path
+     ending in `/environ` to `--allow-env` (`check_env_all`), but it tested
+     `Path::ends_with("/environ")`, which matches whole components: it held for
+     the path `/environ` alone, and every `/proc/<pid>/environ` fell through to
+     the "requires all access" check. denext keeps that result on purpose and
+     now says it: the branch matches the file name `environ` and calls
+     `check_has_all_permissions`. `--allow-env` would reach another process's
+     block too, say an installer's tokens from a lifecycle script whose own
+     environment was scrubbed (item 83's jail, whose probe expects its own
+     environ to stay unreadable). So `--allow-read --allow-env`, and `-A` next
+     to a deny (item 491), don't read any environ; `-A` alone does.
+     - Tests: `runtime/permissions` `check_open_proc_sys_classes` (environ under
+       `--allow-read --allow-env` for `self`, `thread-self`, the own pid and pid
+       1, and under `-A`); spec
+       `permission::proc_sys_classes::allow_all_deny_read` (its expected output
+       now says `NotCapable` for `/proc/self/environ`).
      - Node tests enabled: none.
 
 The laufey backend hosts are built from
