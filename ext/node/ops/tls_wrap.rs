@@ -2677,16 +2677,29 @@ impl TLSWrap {
         }
       }
       if pending_eof {
-        let onread_clone = inner.onread.clone();
-        let state = inner.stream_base_state.clone();
-        unsafe {
-          do_emit_read(
-            &ctx,
-            onread_clone.as_ref(),
-            state.as_ref(),
-            UV_EOF as isize,
-            None,
-          );
+        // SAFETY: inner_ptr is live; the data callback above may have run
+        // JS, so no reference into the wrap is held across it.
+        let onread_clone = unsafe { (*inner_ptr).onread.clone() };
+        if onread_clone.is_none() {
+          // The data's consumer stopped reading again (a paused stream's
+          // push returned false): keep the EOF for the next read_start, as
+          // `dispatch_clear_out_callbacks` does. Emitted to no callback it
+          // was lost, and the socket never ended.
+          unsafe {
+            (*inner_ptr).pending_eof = true;
+            (*inner_ptr).has_buffered_cleartext = true;
+          }
+        } else {
+          let state = unsafe { (*inner_ptr).stream_base_state.clone() };
+          unsafe {
+            do_emit_read(
+              &ctx,
+              onread_clone.as_ref(),
+              state.as_ref(),
+              UV_EOF as isize,
+              None,
+            );
+          }
         }
       }
     }
