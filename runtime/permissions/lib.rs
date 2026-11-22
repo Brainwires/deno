@@ -9537,6 +9537,7 @@ mod tests {
   /// granted roots still open, the rest doesn't.
   #[test]
   #[cfg(unix)]
+  #[allow(clippy::disallowed_methods, reason = "a real directory tree")]
   fn a_global_ignore_or_deny_leaves_the_granted_roots_open() {
     set_prompter(Box::new(TestPrompter));
     let tmp = tempfile::tempdir().unwrap();
@@ -9577,6 +9578,7 @@ mod tests {
   /// does, but not the granted paths beneath it: their opens still succeed.
   #[test]
   #[cfg(unix)]
+  #[allow(clippy::disallowed_methods, reason = "a real directory tree")]
   fn a_prompt_denied_ancestor_leaves_the_grant_beneath_it_open() {
     set_prompter(Box::new(TestPrompter));
     let prompt_value = PERMISSION_PROMPT_STUB_VALUE_SETTER.lock();
@@ -9622,6 +9624,7 @@ mod tests {
   /// change to the permissions makes new scopes.
   #[test]
   #[cfg(unix)]
+  #[allow(clippy::disallowed_methods, reason = "a real directory tree")]
   fn check_open_hands_out_the_open_scope() {
     set_prompter(Box::new(TestPrompter));
     let tmp = tempfile::tempdir().unwrap();

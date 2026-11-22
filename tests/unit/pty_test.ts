@@ -733,8 +733,8 @@ Deno.test(
   { permissions: { run: true, read: true }, ignore: !isWindows },
   async function ptySpawnsPowerShellOnWindows() {
     // PowerShell 7 (`pwsh`) and Windows PowerShell (`powershell.exe`), each
-    // where it is installed: both run on the terminal and see its size
-    let ran = 0;
+    // where it is installed: both run on the terminal and see its size (one
+    // that is not installed is passed over).
     for (const cmd of ["pwsh.exe", "powershell.exe"]) {
       let pty: Deno.Pty;
       try {
@@ -754,12 +754,10 @@ Deno.test(
         if (err instanceof Deno.errors.NotFound) continue;
         throw err;
       }
-      ran++;
       const output = plainText(await readAll(pty.readable));
       assertStringIncludes(output, "width=110;ok", cmd);
       assertEquals((await pty.status).code, 0, cmd);
     }
-    if (ran === 0) console.log("no PowerShell on this machine: skipped");
   },
 );
 
@@ -783,10 +781,8 @@ Deno.test(
     } catch (err) {
       if (!(err instanceof Deno.errors.NotFound)) throw err;
     }
-    if (distros === "") {
-      console.log("no WSL distribution on this machine: skipped");
-      return;
-    }
+    // No WSL distribution on this machine: nothing to check.
+    if (distros === "") return;
     const pty = Deno.openPty({
       cmd: "wsl.exe",
       args: ["-e", "sh", "-c", "echo wsl-pty-$((40 + 2))"],

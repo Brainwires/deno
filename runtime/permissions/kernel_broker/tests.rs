@@ -845,7 +845,7 @@ fn random_request(rng: &mut Rng, bed: &Bed, vocab: &[PathBuf]) -> Request {
   };
   let flag = |rng: &mut Rng| rng.below(2) == 0;
   match rng.below(11) {
-    0 | 1 | 2 => loop {
+    0..=2 => loop {
       if let Some(flags) = OpenFlags::from_bits(rng.below(256) as u32) {
         break Request::Open {
           path: path(rng),

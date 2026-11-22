@@ -101,6 +101,7 @@ const {
   ObjectDefineProperty,
   ObjectGetOwnPropertyDescriptor,
   ObjectFreeze,
+  ObjectKeys,
   ObjectPrototypeIsPrototypeOf,
   Promise,
   PromisePrototypeThen,
@@ -2493,8 +2494,11 @@ function plainStats(value) {
   if (value === null || typeof value !== "object") return value;
   if (ArrayIsArray(value)) return ArrayPrototypeMap(value, plainStats);
   const out = {};
-  // The op's objects have no prototype: this sees their own members only.
-  for (const key in value) out[key] = plainStats(value[key]);
+  const keys = ObjectKeys(value);
+  for (let i = 0; i < keys.length; ++i) {
+    const key = keys[i];
+    out[key] = plainStats(value[key]);
+  }
   return out;
 }
 

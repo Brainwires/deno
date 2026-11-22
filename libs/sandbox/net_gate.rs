@@ -282,14 +282,15 @@ mod tests {
     if res == 0 { 0 } else { errno() }
   }
 
+  /// The attempts a gated child makes: each reports its errno (0 on
+  /// success) through the callback.
+  type Attempts<'a> = dyn Fn(&mut dyn FnMut(i32)) + 'a;
+
   /// Forks a child that installs the notifying filter for `connect`, hands
   /// its listener over, then runs `attempts` (async-signal-safe only) and
   /// writes their errnos to a pipe. Returns the errnos as the gate's
   /// supervisor saw them through.
-  fn run_gated(
-    gate: &ConnectGate,
-    attempts: &dyn Fn(&mut dyn FnMut(i32)),
-  ) -> Vec<i32> {
+  fn run_gated(gate: &ConnectGate, attempts: &Attempts<'_>) -> Vec<i32> {
     let program = notify_program(&connect_syscalls());
     let mut pair = [0; 2];
     let mut out = [0; 2];
@@ -350,8 +351,8 @@ mod tests {
       scope.spawn(|| serve(gate, listener, &stop));
       let mut bytes = Vec::new();
       std::fs::File::from(reader).read_to_end(&mut bytes).unwrap();
-      for chunk in bytes.chunks_exact(4) {
-        results.push(i32::from_ne_bytes(chunk.try_into().unwrap()));
+      for chunk in bytes.as_chunks::<4>().0 {
+        results.push(i32::from_ne_bytes(*chunk));
       }
       stop.store(true, Ordering::Relaxed);
     });
@@ -443,6 +444,7 @@ mod tests {
   /// Whether to skip a test that needs supervision (saying so). With
   /// `DENO_SANDBOX_TEST_REQUIRE_SUPERVISION` set (the kernel matrix), a
   /// host that can't supervise fails the test instead.
+  #[allow(clippy::print_stderr, reason = "test code: a skip note")]
   fn skip_without_supervision() -> bool {
     if supervision_works() {
       return false;

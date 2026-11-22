@@ -1202,6 +1202,10 @@ pub(crate) mod tests {
     }
   }
 
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "a test knob read from the test process's environment"
+  )]
   pub(crate) fn fuzz_iterations(default: usize) -> usize {
     std::env::var("DENO_BROKER_FUZZ_ITERS")
       .ok()
