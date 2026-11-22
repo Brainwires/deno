@@ -327,6 +327,9 @@ pub fn startup() {
     Ok(None) => {}
     Err(err) => refuse_at_startup(&err),
   }
+  // (after the supervisor: the worker it starts is the image that reads it)
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  let compile_cache_key_fd = take_compile_cache_key_fd();
   #[cfg(target_os = "linux")]
   {
     let result =
@@ -389,6 +392,12 @@ pub fn startup() {
   }
   if confined_at_startup() {
     deno_lib::util::logger::suppress_already_printed(printed);
+    // the compile cache key the image before this one loaded (only an
+    // image confined at startup takes a descriptor the variable names)
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(fd) = compile_cache_key_fd {
+      use_compile_cache_key_fd(fd);
+    }
     // the workspace's glob members as the image before this one found them
     // (this one can't list the folders their globs walk)
     if let Some(plan) = applied_plan() {
@@ -439,6 +448,96 @@ fn parse_printed(value: &str) -> Vec<u64> {
     .take(1024)
     .filter_map(|f| u64::from_str_radix(f, 16).ok())
     .collect()
+}
+
+/// The variable naming the descriptor that holds Node's compile cache key
+/// (`deno_node::ops::compile_cache`) for the image after a re-exec: that
+/// image can't read `<DENO_DIR>/node_compile_cache.key` (the plan grants
+/// DENO_DIR's cache folders only, read-only), and an implicit read of it
+/// would reach what the confined program starts too, which could then forge
+/// cache entries another run accepts. So the image before the re-exec loads
+/// the key, writes it into a pipe whose read end only the re-executed image
+/// keeps, and that image reads it and closes the descriptor first thing,
+/// before any user code (or a child) could. Set only by [`reexec_env`] (one
+/// this process inherited is dropped there) and removed from the
+/// environment at startup.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const COMPILE_CACHE_KEY_FD_ENV_VAR: &str =
+  "DENO_INTERNAL_NODE_COMPILE_CACHE_KEY_FD";
+
+/// Takes [`COMPILE_CACHE_KEY_FD_ENV_VAR`] out of the environment and parses
+/// it; the descriptor is read only once this process is known to be the
+/// confined image ([`use_compile_cache_key_fd`]).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn take_compile_cache_key_fd() -> Option<i32> {
+  #[allow(clippy::disallowed_methods, reason = "the process's own environment")]
+  let value = std::env::var_os(COMPILE_CACHE_KEY_FD_ENV_VAR)?;
+  // SAFETY: called from `startup`, first thing in `main`, while the process
+  // has one thread
+  unsafe { std::env::remove_var(COMPILE_CACHE_KEY_FD_ENV_VAR) };
+  value.to_str()?.parse::<i32>().ok().filter(|fd| *fd > 2)
+}
+
+/// Reads the compile cache key from the pipe `fd` names and closes it. A
+/// descriptor that isn't a pipe is left alone; a short read hands over
+/// nothing (the compile cache then runs without its key: disabled).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn use_compile_cache_key_fd(fd: i32) {
+  use std::io::Read;
+  use std::os::fd::FromRawFd;
+
+  use deno_runtime::deno_node::ops::compile_cache;
+
+  // SAFETY: an all-zero stat is a valid out parameter
+  let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+  // SAFETY: fstat only writes `stat`; a closed fd fails with EBADF
+  if unsafe { libc::fstat(fd, &mut stat) } != 0
+    || stat.st_mode & libc::S_IFMT != libc::S_IFIFO
+  {
+    return;
+  }
+  // SAFETY: the image before this one left this pipe for this image alone;
+  // it is owned (and closed) here, before anything else opens a descriptor
+  let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+  let mut key = [0u8; compile_cache::HANDOVER_KEY_LEN];
+  if file.read_exact(&mut key).is_ok() {
+    compile_cache::use_handed_over_key(key);
+  }
+}
+
+/// The read end of a pipe holding Node's compile cache key, for the image
+/// after the re-exec ([`COMPILE_CACHE_KEY_FD_ENV_VAR`]); `None` when the key
+/// can't be loaded (the confined run's compile cache is then disabled, as
+/// it would be anyway).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn compile_cache_key_pipe() -> Option<std::os::fd::OwnedFd> {
+  use std::io::Write;
+  use std::os::fd::FromRawFd;
+
+  let key = deno_runtime::deno_node::ops::compile_cache::key_for_handover()?;
+  let mut fds = [0i32; 2];
+  // SAFETY: `fds` holds the two descriptors pipe() writes
+  if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+    return None;
+  }
+  // SAFETY: both were just created and are owned here
+  let (read, write) = unsafe {
+    (
+      std::os::fd::OwnedFd::from_raw_fd(fds[0]),
+      std::os::fd::OwnedFd::from_raw_fd(fds[1]),
+    )
+  };
+  for fd in fds {
+    // close-on-exec until the re-exec, which keeps only the read end (and
+    // clears the flag on it)
+    // SAFETY: a valid descriptor
+    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+  }
+  // (32 bytes: well under any pipe buffer, so the write never blocks)
+  let mut write = std::fs::File::from(write);
+  write.write_all(&key).ok()?;
+  drop(write);
+  Some(read)
 }
 
 /// A `deno` started inside a brokered run (it applies no plan of its own:
@@ -988,6 +1087,7 @@ fn reexec_env(
   plan: &EnforcePlan,
   deno_dir: Option<&Path>,
   carrier_fd: i32,
+  compile_cache_key_fd: Option<i32>,
 ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
   use deno_sandbox::inherit::POLICY_ENV_VAR;
   #[allow(clippy::disallowed_methods, reason = "the process's own environment")]
@@ -1001,6 +1101,7 @@ fn reexec_env(
     })
     // only this image says what it printed
     .filter(|(k, _)| k != PRINTED_ENV_VAR)
+    .filter(|(k, _)| k != COMPILE_CACHE_KEY_FD_ENV_VAR)
     .collect();
   if let Some(dir) = deno_dir {
     env.retain(|(k, _)| k != "DENO_DIR");
@@ -1009,6 +1110,9 @@ fn reexec_env(
   // the carrier of the layers this run's children inherit (it replaces one
   // this process inherited: the new one holds those layers too)
   env.push((POLICY_ENV_VAR.into(), carrier_fd.to_string().into()));
+  if let Some(fd) = compile_cache_key_fd {
+    env.push((COMPILE_CACHE_KEY_FD_ENV_VAR.into(), fd.to_string().into()));
+  }
   // what this image printed, which the next one doesn't print again
   let printed = deno_lib::util::logger::printed_record_fingerprints();
   if !printed.is_empty() {
@@ -1273,7 +1377,16 @@ pub async fn apply_pending_with_entries(
     carrier.as_raw_fd()
   };
   #[cfg(any(target_os = "linux", target_os = "macos"))]
-  let keep = |fd: i32| fd == carrier_fd || keep_fd(fd);
+  let compile_cache_key = compile_cache_key_pipe();
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  let compile_cache_key_fd = compile_cache_key.as_ref().map(|fd| {
+    use std::os::fd::AsRawFd;
+    fd.as_raw_fd()
+  });
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  let keep = |fd: i32| {
+    fd == carrier_fd || Some(fd) == compile_cache_key_fd || keep_fd(fd)
+  };
   // what this image printed (the type check's `Check`, downloads, warnings)
   // must reach the terminal: the exec discards anything still buffered
   // (item 451)
@@ -1285,14 +1398,16 @@ pub async fn apply_pending_with_entries(
   }
   #[cfg(target_os = "linux")]
   if plan.broker.is_some() {
-    let env = reexec_env(plan, deno_dir.as_deref(), carrier_fd);
+    let env =
+      reexec_env(plan, deno_dir.as_deref(), carrier_fd, compile_cache_key_fd);
     let err = exec_supervisor(plan, env, "/proc/self/exe".into(), None, keep);
     drop(carrier);
     bail!("--kernel-sandbox=broker: starting the supervisor failed: {err}");
   }
   #[cfg(target_os = "linux")]
   {
-    let env = reexec_env(plan, deno_dir.as_deref(), carrier_fd);
+    let env =
+      reexec_env(plan, deno_dir.as_deref(), carrier_fd, compile_cache_key_fd);
     let err = deno_sandbox::enforce_linux::reexec(plan, env, keep);
     drop(carrier);
     bail!(
@@ -1312,7 +1427,8 @@ pub async fn apply_pending_with_entries(
       .map_err(|err| {
         deno_core::anyhow::anyhow!("--kernel-sandbox=enforce: {err}")
       })?;
-    let env = reexec_env(plan, deno_dir.as_deref(), carrier_fd);
+    let env =
+      reexec_env(plan, deno_dir.as_deref(), carrier_fd, compile_cache_key_fd);
     if plan.broker.is_some() {
       let fallback = if uses_sandbox_exec_fallback() {
         let Some(exe) = exe.to_str() else {

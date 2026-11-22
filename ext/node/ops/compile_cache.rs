@@ -73,8 +73,10 @@ pub fn op_node_compile_cache_default_dir() -> Option<String> {
   Some(deno_dir()?.join(DEFAULT_DIR).to_string_lossy().into_owned())
 }
 
+/// The per-user key, once resolved (or handed over: [`use_handed_over_key`]).
+static KEY: OnceLock<Option<[u8; KEY_LEN]>> = OnceLock::new();
+
 fn key() -> Option<&'static [u8; KEY_LEN]> {
-  static KEY: OnceLock<Option<[u8; KEY_LEN]>> = OnceLock::new();
   KEY
     .get_or_init(|| {
       let dir = deno_dir()?;
@@ -82,6 +84,26 @@ fn key() -> Option<&'static [u8; KEY_LEN]> {
     })
     .as_ref()
 }
+
+/// The per-user key, loaded (or created) now, for the kernel sandbox's
+/// re-exec to hand to the confined image: that image can't read
+/// `<DENO_DIR>/node_compile_cache.key` (DENO_DIR is read-only there, and only
+/// its cache folders), and the key must not be readable to what the
+/// confined program starts either, so it reaches that image alone, in a
+/// descriptor it reads and closes before any user code runs.
+pub fn key_for_handover() -> Option<[u8; KEY_LEN]> {
+  key().copied()
+}
+
+/// Uses `key`, which the image before a kernel sandbox re-exec loaded
+/// ([`key_for_handover`]), instead of reading the key file. Call it before
+/// any compile cache op runs; it does nothing once the key is resolved.
+pub fn use_handed_over_key(key: [u8; KEY_LEN]) {
+  let _ = KEY.set(Some(key));
+}
+
+/// The key's length in bytes.
+pub const HANDOVER_KEY_LEN: usize = KEY_LEN;
 
 #[allow(
   clippy::disallowed_methods,

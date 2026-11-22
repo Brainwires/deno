@@ -47,6 +47,20 @@
       "args": "run --quiet --allow-ffi --allow-read=inside --allow-write=inside files.ts",
       "output": "files.out"
     },
+    // Node's compile cache works in a confined run: its per-user key (in
+    // DENO_DIR, which the grant doesn't cover) reaches the confined image
+    // alone, handed over by the image before the re-exec, never as a read
+    // the program or its children could make
+    "compile_cache_key_handed_over": {
+      "if": "kernelSandboxEnforce",
+      "steps": [
+        { "args": "run --quiet -A setup_cc.ts", "output": "" },
+        {
+          "args": "run --quiet --kernel-sandbox=enforce --allow-read=cc --allow-write=cc compile_cache.mjs",
+          "output": "compile cache: ENABLED\n"
+        }
+      ]
+    },
     // the project's deno.json / package.json sit in an ancestor folder
     // outside --allow-read: discovery reads them again in Linux's
     // re-executed image (the compared policy holds exactly that set), and
