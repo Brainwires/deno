@@ -6151,7 +6151,7 @@ fn linux_special_read_sys_kind_resolved(
 /// ([`SysDescriptor::is_named_only`]); a bare `--allow-sys` grants the
 /// system-information classes only.
 /// - Everything else (`mem`, `root`, `cwd`, `exe`, `fd/*`, `map_files`,
-///   `environ` (which the caller sends to `--allow-env`), `/proc/sys`, the
+///   `environ` (which the caller holds to every permission), `/proc/sys`, the
 ///   rest of `/sys`, devices) → `None`.
 fn linux_special_read_sys_kind(
   path: &Path,
@@ -7500,8 +7500,16 @@ impl PermissionsContainer {
         || path.starts_with("/proc")
         || path.starts_with("/sys")
       {
-        if path.ends_with("/environ") {
-          self.check_env_all()?;
+        // denext: a process's environment block is a control surface: it
+        // takes every permission with no deny, as any other. (Upstream's
+        // `path.ends_with("/environ")` sent it to `--allow-env`, but
+        // `Path::ends_with` matches whole components, so it held for the
+        // path `/environ` alone and every `/proc/<pid>/environ` fell through
+        // to the check below.) Kept that way on purpose: `--allow-env`
+        // would reach another process's block too, say an installer's
+        // tokens from a lifecycle script whose own environment was scrubbed.
+        if path.file_name() == Some(OsStr::new("environ")) {
+          self.check_has_all_permissions(&path)?;
         } else if path.starts_with("/proc/pressure/") {
           // Allow /proc/pressure/* files with just --allow-read since they are
           // read-only system monitoring files that only expose performance metrics
@@ -10902,8 +10910,36 @@ mod tests {
       .unwrap(),
       PathBuf::from("/proc/cpuinfo")
     );
-    // environ: all of --allow-env, as before.
+    // environ: every permission with no deny; all of --allow-env (or -A
+    // next to a deny) isn't enough.
     assert!(read(&every, "/proc/self/environ").is_err());
+    let parser = || {
+      runtime_descriptor_parser::RuntimePermissionDescriptorParser::new(
+        sys_traits::impls::RealSys,
+      )
+    };
+    let read_and_env = PermissionsContainer::new(
+      Arc::new(parser()),
+      Permissions::from_options(
+        &parser(),
+        &PermissionsOptions {
+          allow_read: Some(vec![]),
+          allow_env: Some(vec![]),
+          prompt: false,
+          ..Default::default()
+        },
+      )
+      .unwrap(),
+    );
+    for path in [
+      "/proc/self/environ".to_string(),
+      "/proc/thread-self/environ".to_string(),
+      format!("{own}/environ"),
+      "/proc/1/environ".to_string(),
+    ] {
+      assert!(read(&read_and_env, &path).is_err(), "{path}");
+      assert!(read(&allow_all, &path).is_ok(), "all: {path}");
+    }
     // A path that doesn't exist resolves to nothing: no class.
     assert!(read(&every, "/proc/self/denext-no-such-file").is_err());
     // /proc/self and /proc/thread-self resolve into this process's entries.

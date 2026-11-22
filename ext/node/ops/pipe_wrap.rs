@@ -500,9 +500,32 @@ impl PipeWrap {
           Ok(p) => p,
           Err(_) => return uv_compat::UV_EINVAL,
         };
+        // As libuv's uv_pipe_chmod: the bits are added to the socket's
+        // mode, never set in its place. Linux needs write permission on a
+        // Unix socket to connect to it, so `readableAll` alone must not
+        // take the owner's write bit away.
+        // (a libuv error on Unix is the negated errno)
+        let last_errno_as_uv = || {
+          -std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EINVAL)
+        };
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: c_path is a valid null-terminated C string and stat a
+        // buffer of the right size.
+        if unsafe { libc::stat(c_path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+          return last_errno_as_uv();
+        }
+        // SAFETY: stat() succeeded, so the buffer is initialized.
+        let current = unsafe { stat.assume_init() }.st_mode;
+        let desired = mode as libc::mode_t;
+        if current & desired == desired {
+          return 0;
+        }
+        let updated = (current | desired) & 0o7777;
         // SAFETY: c_path is a valid null-terminated C string.
-        if unsafe { libc::chmod(c_path.as_ptr(), mode as libc::mode_t) } != 0 {
-          return -1;
+        if unsafe { libc::chmod(c_path.as_ptr(), updated) } != 0 {
+          return last_errno_as_uv();
         }
         0
       } else {

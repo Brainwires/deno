@@ -46,7 +46,8 @@
     },
     // -A grants them, and a deny beside it that doesn't name them leaves
     // them granted (as upstream, -A --deny-read=x keeps every other grant);
-    // a control surface still needs every permission with no deny
+    // a control surface (/proc/self/environ among them) still needs every
+    // permission with no deny
     "allow_all_deny_read": {
       "if": "linux",
       "args": "run --no-prompt -A --deny-read=denext-no-such-secret probe.ts",

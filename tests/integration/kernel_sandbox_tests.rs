@@ -148,6 +148,11 @@ fn deny_ceiling_prompt_changes_nothing_linux() {
       console.expect("Deno requests read access to \"/proc/self/status\"");
       console.human_delay();
       console.write_line_raw("y");
+      // the process information /proc/self/status exposes takes its own
+      // --allow-sys name (a named-only one: its prompt is yes or no)
+      console.expect("Deno requests sys access to \"processInfo\"");
+      console.human_delay();
+      console.write_line_raw("y");
       console.expect(format!("no_new_privs: {own}"));
       console.expect("done");
     });

@@ -17,6 +17,7 @@ import {
   op_node_compile_cache_default_dir,
   op_node_compile_cache_key_available,
   op_node_compile_cache_mac,
+  op_node_compile_cache_uid,
   op_node_compile_cache_untrusted_dir,
   op_node_compile_cache_verify,
   op_node_compile_cjs_function,
@@ -2538,8 +2539,10 @@ function compileCacheVersionTag() {
   let tag = `${process.version}-${process.arch}-${
     uint32ToHex(op_v8_cached_data_version_tag())
   }`;
-  const uid = process.getuid?.();
-  if (uid !== undefined) {
+  // (the runtime's own read, as Node's: `process.getuid()` would need
+  // --allow-sys=uid)
+  const uid = op_node_compile_cache_uid();
+  if (uid !== null) {
     tag += `-${uid}`;
   }
   return tag;
@@ -2672,8 +2675,8 @@ function compileCacheReadFile(entry) {
     // denext: only a regular file the current user owns (no symlink, FIFO
     // or device), on top of the directory check.
     const stat = compileCacheFs().lstatSync(entry.cacheFilename);
-    const uid = process.getuid?.();
-    if (!stat.isFile() || (uid !== undefined && stat.uid !== uid)) {
+    const uid = op_node_compile_cache_uid();
+    if (!stat.isFile() || (uid !== null && stat.uid !== uid)) {
       compileCacheDebug(" not a regular file owned by the current user\n");
       return;
     }

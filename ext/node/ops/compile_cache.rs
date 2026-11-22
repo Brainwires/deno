@@ -277,6 +277,26 @@ pub fn op_node_compile_cache_key_available() -> bool {
   key().is_some()
 }
 
+/// The current user's id, for the cache directory's tag and the owner check
+/// on each entry (`uv_os_getuid` in Node's `CompileCacheHandler`). Node's
+/// compile cache reads it internally, so `enableCompileCache()` must not
+/// need `--allow-sys=uid`: a program that can read the cache directory sees
+/// the same id as the owner of the files the runtime writes there. `None`
+/// on Windows, as `process.getuid` is undefined there.
+#[op2]
+#[smi]
+pub fn op_node_compile_cache_uid() -> Option<u32> {
+  #[cfg(unix)]
+  {
+    // SAFETY: getuid() takes no arguments and cannot fail.
+    Some(unsafe { libc::getuid() })
+  }
+  #[cfg(not(unix))]
+  {
+    None
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;

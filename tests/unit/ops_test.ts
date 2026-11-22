@@ -1,13 +1,13 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-// denext fork (Brainwires/deno): 98 more than upstream's 44, the
+// denext fork (Brainwires/deno): 99 more than upstream's 44, the
 // `Deno.desktop` ops the fork adds to NOT_IMPORTED_OPS in 99_main.js (launch
 // targets and events, browser links, scheme registration, passkeys, the rich clipboard, drag
 // out, file dialogs, message boxes, shortcuts, launch at login, DevTools, menus, scheduled
 // notifications, delivered notifications, share, user activity, screens,
 // the window order and the pointer,
 // window capabilities, tray capabilities, window levels, speech, platform
-// features, title bar
+// features, opening an external URL, title bar
 // preferences, the secure store, the system stats, quit /
 // close, auth sessions, runOnMainThread, Deno.desktop.updater, will-navigate,
 // the app-wide menu, embedded web views (their downloads and permission
@@ -17,10 +17,10 @@
 // removeImportedOps() like upstream's own desktop ops.
 // Plus 9 for Vitest compatibility (`deno test`, item 23):
 // op_test_set_import_meta_proto and the eight op_vitest_* ops.
-const EXPECTED_OP_COUNT = 151;
+const EXPECTED_OP_COUNT = 152;
 // The main scope minus WORKER_EXCLUDED_OPS in 99_main.js: upstream strips the
 // two text-clipboard ops from workers, and the fork strips every new
-// main-scope-only desktop op (91), the native classes that need the
+// main-scope-only desktop op (92), the native classes that need the
 // desktop backend (BrowserWindow, Dock, Tray, Notification) and the three
 // Deno.autoUpdate ops (DENEXT.md item 433), leaving upstream's 20 minus
 // those 7, plus op_desktop_screens, op_desktop_window_capabilities,

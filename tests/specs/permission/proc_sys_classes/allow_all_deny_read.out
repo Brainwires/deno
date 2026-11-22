@@ -9,5 +9,5 @@
 /proc/self/mem: NotCapable
 /proc/self/root/etc/hostname: NotCapable
 /proc/self/../1/mem: NotCapable
-/proc/self/environ: read
+/proc/self/environ: NotCapable
 readDir /proc: read
