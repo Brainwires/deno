@@ -25,7 +25,10 @@ attempt(
 );
 attempt("remove in the deny", () => Deno.removeSync("bout/keep/kept.txt"));
 // native code: the kernel alone
-check("native create in the deny", libc.symbols.creat(cstr("bout/keep/n"), 0o600));
+check(
+  "native create in the deny",
+  libc.symbols.creat(cstr("bout/keep/n"), 0o600),
+);
 check(
   "native create in an existing folder",
   libc.symbols.creat(cstr("bout/sub/n"), 0o600),

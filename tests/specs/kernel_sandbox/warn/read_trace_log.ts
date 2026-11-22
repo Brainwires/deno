@@ -12,5 +12,11 @@ const read = records.find((r) =>
   r.type === "wouldDeny" && r.class === "read" &&
   String(r.target).endsWith("outside.txt")
 );
-console.log(`the child's read: ${read?.source} ${read?.op} by ${read?.process?.name}`);
-console.log(`the grant: ${read?.grant?.flag}=…${String(read?.grant?.value).endsWith("outside.txt")}`);
+console.log(
+  `the child's read: ${read?.source} ${read?.op} by ${read?.process?.name}`,
+);
+console.log(
+  `the grant: ${read?.grant?.flag}=…${
+    String(read?.grant?.value).endsWith("outside.txt")
+  }`,
+);

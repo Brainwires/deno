@@ -4093,7 +4093,10 @@ fn lsp_large_doc_changes() {
   // build on a loaded runner needs well over 15 s for the whole session
   // (the server start included), so 15 s failed without a regression.
   let elapsed = client.duration().as_millis();
-  assert!(elapsed <= 60_000, "large document changes took {elapsed} ms");
+  assert!(
+    elapsed <= 60_000,
+    "large document changes took {elapsed} ms"
+  );
 }
 
 #[test(timeout = 300)]

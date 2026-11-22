@@ -24,7 +24,9 @@ for (const [fd, inode] of parts) {
   // struct stat: st_dev, then st_ino (8 bytes each on x86_64 and aarch64)
   if (new DataView(st.buffer).getBigUint64(8, true) === BigInt(inode)) kept++;
 }
-console.log(`the parent's dial has ${parts.length} descriptors: ${parts.length === 3}`);
+console.log(
+  `the parent's dial has ${parts.length} descriptors: ${parts.length === 3}`,
+);
 console.log(`of them, still open here: ${kept}`);
 // its own grant holds: no write, whatever the parent's broker would answer
 try {

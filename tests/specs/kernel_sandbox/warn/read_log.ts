@@ -6,6 +6,13 @@ for (const r of lines) {
   if (r.type === "run") {
     console.log("run", r.v, typeof r.pid, r.observer, typeof r.policy);
   } else if (r.class !== "startup") {
-    console.log(r.type, r.v, r.class, r.source, r.target, r.grant ?? "no grant");
+    console.log(
+      r.type,
+      r.v,
+      r.class,
+      r.source,
+      r.target,
+      r.grant ?? "no grant",
+    );
   }
 }

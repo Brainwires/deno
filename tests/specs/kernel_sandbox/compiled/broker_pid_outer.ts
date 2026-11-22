@@ -38,7 +38,9 @@ async function start(what: string) {
 {
   const { child, line, rest } = await start("wait");
   const parent = Number(await line());
-  console.log(`the program is a child of the launched PID: ${parent === child.pid}`);
+  console.log(
+    `the program is a child of the launched PID: ${parent === child.pid}`,
+  );
   child.kill("SIGTERM");
   const status = await child.status;
   console.log(await rest());

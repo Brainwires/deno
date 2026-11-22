@@ -19,7 +19,10 @@ console.log(
   }`,
 );
 await attempt("connect to the granted host", async () => {
-  const conn = await Deno.connect({ hostname: "localhost", port: Number(port) });
+  const conn = await Deno.connect({
+    hostname: "localhost",
+    port: Number(port),
+  });
   await conn.write(new TextEncoder().encode("ping"));
   const buf = new Uint8Array(4);
   await conn.read(buf);

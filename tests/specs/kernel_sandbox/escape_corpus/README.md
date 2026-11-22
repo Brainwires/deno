@@ -119,18 +119,19 @@ another address (`net.retarget`: the host connects to the granted listener
 through the broker first, so the probes hold such a socket). Without the broker
 the run says the two were skipped.
 
-The deny ceiling (`deny-ceiling`, under `--expect=enforce` too): `-A
---deny-read=<outside> --deny-write=<outside>` with no `--kernel-sandbox`, `auto`
-at R4 (`DENO_INTERNAL_KERNEL_SANDBOX_STAGE=r4`). Only the denies are enforced
-and nothing else changes (`expectDenyCeiling`): on macOS (an allow-default
-Seatbelt profile with the denies) `fs.read`, `fs.write`, `fs.meta` and
-`fs.symlink` must be held, `fs.link`, `fs.proc`, `proc.ptrace`, `fd.inherited`
-and `sys.info` may go either way, and every other cell must be open as granted
-(a held network, exec, IPC, signal or environment cell means the ceiling changed
-something else). On Linux the denies are Deno's checks only until an overmount
-exists (decision O4), so every cell must be as without a sandbox (a held one
-means a seccomp list or no-new-privileges was applied). The nested vectors don't
-run in it.
+The deny ceiling (`deny-ceiling`, under `--expect=enforce` too):
+`-A
+--deny-read=<outside> --deny-write=<outside>` with no `--kernel-sandbox`,
+`auto` at R4 (`DENO_INTERNAL_KERNEL_SANDBOX_STAGE=r4`). Only the denies are
+enforced and nothing else changes (`expectDenyCeiling`): on macOS (an
+allow-default Seatbelt profile with the denies) `fs.read`, `fs.write`, `fs.meta`
+and `fs.symlink` must be held, `fs.link`, `fs.proc`, `proc.ptrace`,
+`fd.inherited` and `sys.info` may go either way, and every other cell must be
+open as granted (a held network, exec, IPC, signal or environment cell means the
+ceiling changed something else). On Linux the denies are Deno's checks only
+until an overmount exists (decision O4), so every cell must be as without a
+sandbox (a held one means a seccomp list or no-new-privileges was applied). The
+nested vectors don't run in it.
 
 ## Kernel matrix
 

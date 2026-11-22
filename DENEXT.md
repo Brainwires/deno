@@ -18014,9 +18014,10 @@ where the changes are discussed.
        `dtls-setup` 3), codecs, parameters and msid 11. Two that passed fail:
        `supported-stats`' `tcpType` (a UDP candidate has none; it was
        `"Unspecified"`) and `playoutId` (it was `""`, an id that named nothing;
-       "All references resolve" passes instead). With the ICE restart fix: 2,080, and
-       2,463 (73.8%) with the runner's `--dom-shim`. The run with `wpt.ts` on
-       Linux and the expectation files are refreshed once, on the merged train.
+       "All references resolve" passes instead). With the ICE restart fix:
+       2,080, and 2,463 (73.8%) with the runner's `--dom-shim`. The run with
+       `wpt.ts` on Linux and the expectation files are refreshed once, on the
+       merged train.
      - **Known gaps left:** a transferable `RTCDataChannel` (48 subtests;
        Firefox and Safari); `getHeaderExtensionsToNegotiate` (21; Chrome); the
        identity provider API (17; Firefox); `stop()`'s stopping / stopped steps
@@ -18164,12 +18165,12 @@ where the changes are discussed.
      API 60 (`window_z_order`, `pointer_state`); `runtime/ops/desktop.rs`,
      `cli/rt_desktop/lib.rs`, `cli/rt/desktop.rs`, `runtime/js/99_main.js`,
      `cli/tsc/dts/lib.deno.desktop.d.ts`). An app with several windows had to
-     guess both:
-     which window is in front from the order the windows were focused in (wrong
-     for a window raised without focus, an always-on-top window, another app's
-     window in between), and during a drag from one window to another where the
-     pointer is, from page pointer capture and hand-calibrated window frames (a
-     page hears the pointer only relative to its own window).
+     guess both: which window is in front from the order the windows were
+     focused in (wrong for a window raised without focus, an always-on-top
+     window, another app's window in between), and during a drag from one window
+     to another where the pointer is, from page pointer capture and
+     hand-calibrated window frames (a page hears the pointer only relative to
+     its own window).
      - `Deno.desktop.windowOrder()`: the `windowId`s of the app's on-screen
        windows as the OS stacks them, front to back. Not listed: a hidden or
        minimized window, one on another Space / virtual desktop / workspace, an
@@ -18229,15 +18230,14 @@ where the changes are discussed.
 465. **`fix(process)`: a spawn that fails closes its IPC channel**
      (`desktop/d28-qutty-2`; runtime; `ext/process/lib.rs`,
      `tests/unit_node/child_process_test.ts`). `create_command` adds the
-     parent's end of
-     a Node IPC channel (`stdio: [..., "ipc"]`, `fork()`) to the resource table
-     before the program is started. When the start failed (a missing program, a
-     refused one, and the first attempt of the `ENOEXEC` shell retry), the op
-     returned the error and nothing ever closed that resource: JavaScript never
-     learned its id. Each failed spawn left the channel and its descriptors open
-     for the life of the process (a supervisor retrying a helper that is not
-     there leaks one per attempt). Both spawn ops (`op_spawn_child`,
-     `op_node_spawn_child`) now close it on failure.
+     parent's end of a Node IPC channel (`stdio: [..., "ipc"]`, `fork()`) to the
+     resource table before the program is started. When the start failed (a
+     missing program, a refused one, and the first attempt of the `ENOEXEC`
+     shell retry), the op returned the error and nothing ever closed that
+     resource: JavaScript never learned its id. Each failed spawn left the
+     channel and its descriptors open for the life of the process (a supervisor
+     retrying a helper that is not there leaks one per attempt). Both spawn ops
+     (`op_spawn_child`, `op_node_spawn_child`) now close it on failure.
      - Found by the resource sanitizer of a denext test (a detached sidecar
        whose executable does not exist). The test here spawns a missing program
        with an IPC channel three times under the unit runner's resource
@@ -18249,87 +18249,84 @@ where the changes are discussed.
      denext-only; opt-in: `--kernel-sandbox=broker`, and `enforce` where the
      broker closes a gap; `auto` unchanged;
      `runtime/permissions/kernel_broker/{mod,protocol,transport,server,fs,
-     client,tests}.rs`, `libs/sandbox/{supervise,plan,enforce_linux}.rs`,
-     `cli/sandbox/{enforce,policy,mod}.rs`). Mode B of the kernel sandbox
-     (item 422's model, item 425's enforcer), file side. Plan phase P8a.
-     - Why. Landlock rights only add down a tree, so a write deny inside a
-       write allow (`--allow-write=out --deny-write=out/keep`) can't be held
-       by the kernel alone: until now `enforce` refused to start on it and
-       `broker` wasn't built.
-     - The shape: exec, then fork, then restrict. The first image (flags
-       parsed, policy compiled, graph loaded) re-executes itself as the
-       supervisor image with a hand-over in a sealed descriptor
+     client,tests}.rs`,
+     `libs/sandbox/{supervise,plan,enforce_linux}.rs`,
+     `cli/sandbox/{enforce,policy,mod}.rs`). Mode B of the kernel sandbox (item
+     422's model, item 425's enforcer), file side. Plan phase P8a.
+     - Why. Landlock rights only add down a tree, so a write deny inside a write
+       allow (`--allow-write=out --deny-write=out/keep`) can't be held by the
+       kernel alone: until now `enforce` refused to start on it and `broker`
+       wasn't built.
+     - The shape: exec, then fork, then restrict. The first image (flags parsed,
+       policy compiled, graph loaded) re-executes itself as the supervisor image
+       with a hand-over in a sealed descriptor
        (`DENO_INTERNAL_KERNEL_SUPERVISE_FD`). That image has one thread and
-       loads no engine, module or configuration; first thing in `main` it
-       makes a socket pair and forks. The child re-executes once more as the
-       confined worker (the plan in its sealed descriptor exactly as under
-       `enforce`, plus its end of the channel,
-       `DENO_INTERNAL_KERNEL_BROKER_FD`); the parent stays as the supervisor:
-       it serves the channel, passes on signals a process sent it (one the
-       terminal made already reached the worker's process group), reaps, and
-       exits as the worker exited (its code, or the same signal). The
-       supervisor keeps the PID the program was started with. It is not
-       dumpable (Linux; `PT_DENY_ATTACH` on macOS), a child subreaper on
-       Linux (what the worker orphans ends with it), and the worker dies with
+       loads no engine, module or configuration; first thing in `main` it makes
+       a socket pair and forks. The child re-executes once more as the confined
+       worker (the plan in its sealed descriptor exactly as under `enforce`,
+       plus its end of the channel, `DENO_INTERNAL_KERNEL_BROKER_FD`); the
+       parent stays as the supervisor: it serves the channel, passes on signals
+       a process sent it (one the terminal made already reached the worker's
+       process group), reaps, and exits as the worker exited (its code, or the
+       same signal). The supervisor keeps the PID the program was started with.
+       It is not dumpable (Linux; `PT_DENY_ATTACH` on macOS), a child subreaper
+       on Linux (what the worker orphans ends with it), and the worker dies with
        it (`PR_SET_PDEATHSIG`; on macOS the worker keeps running confined with
        every brokered operation refused).
      - The kernel's side on Linux: a write allow that holds a broker-held deny
        gets no write rule of its own; every entry beside the way to the deny
        gets one (`LinuxPlan::expand_write`, the read expansion's walk and its
-       limits; the entries are measured by the first image and checked
-       against the roots by the worker, `EnforcePlan::expanded_write`). So the
-       kernel refuses changes directly in the folders that lead to the deny,
-       and in folders made after the sandbox applied: native code and child
-       processes get that fail-closed view. Deno's own operations there are
-       asked of the broker.
-     - The broker is an authority: it holds the run's own read and write
-       grants and denies (`EnforcePlan::broker`, part of the plan the worker
-       compares with the one it compiles itself; the user's grants, never
-       the implicit set), resolves every path itself with the race-safe opens
-       (item 467's library: beneath an allow root, outside every deny,
-       decided on the object opened), acts itself and hands back only
-       descriptors it checked. It never enters `/proc`, `/sys` or `/dev`
-       (resolved by the broker those would name the broker's own objects),
-       hands out only regular files, folders and FIFOs, never waits on an
-       open, and creating a symlink takes the whole read and write permission
-       as Deno's check does. A recursive removal or a rename of a folder that
-       holds a denied path is refused.
+       limits; the entries are measured by the first image and checked against
+       the roots by the worker, `EnforcePlan::expanded_write`). So the kernel
+       refuses changes directly in the folders that lead to the deny, and in
+       folders made after the sandbox applied: native code and child processes
+       get that fail-closed view. Deno's own operations there are asked of the
+       broker.
+     - The broker is an authority: it holds the run's own read and write grants
+       and denies (`EnforcePlan::broker`, part of the plan the worker compares
+       with the one it compiles itself; the user's grants, never the implicit
+       set), resolves every path itself with the race-safe opens (item 467's
+       library: beneath an allow root, outside every deny, decided on the object
+       opened), acts itself and hands back only descriptors it checked. It never
+       enters `/proc`, `/sys` or `/dev` (resolved by the broker those would name
+       the broker's own objects), hands out only regular files, folders and
+       FIFOs, never waits on an open, and creating a symlink takes the whole
+       read and write permission as Deno's check does. A recursive removal or a
+       rename of a folder that holds a denied path is refused.
      - The protocol (`kernel_broker::protocol`, the definition the network
-       operations will build on): frames of a 16-byte header (`DKB2`, kind,
-       id, length at most 16 KiB) and a payload of fixed fields with nothing
-       after them; paths are absolute and already normal or the frame is
-       malformed. Operations: `Hello`, `Channel`, `Received`, `Open`,
-       `Mkdir`, `Remove` (a file, a folder, a tree), `Rename`, `Symlink`,
-       `Link`, `Chmod`, `Chown`, `Utime`, `Truncate`; kinds `0x0100`-`0x01ff`
-       are reserved for the network. Responses: `Ok` (at most one
-       descriptor, as `SCM_RIGHTS`), `Denied`, `Errno`, `Unsupported`,
-       `Invalid`, `Hello`, `Data`. One request at a time per channel;
-       concurrency is more channels (`Channel`, capped at 64 by the broker,
-       16 used by the client). No descriptor ever travels toward the broker
-       and no request refers to another, so the broker keeps no state per
-       requester. A malformed frame gets `Invalid` and closes that channel;
-       an unknown kind gets `Unsupported` and the channel stays. A descriptor
-       is acknowledged (`Received`) before the channel does anything else,
-       and the broker keeps its copy open until then (on macOS a descriptor
-       closed by its sender before it is received can arrive dead).
+       operations will build on): frames of a 16-byte header (`DKB2`, kind, id,
+       length at most 16 KiB) and a payload of fixed fields with nothing after
+       them; paths are absolute and already normal or the frame is malformed.
+       Operations: `Hello`, `Channel`, `Received`, `Open`, `Mkdir`, `Remove` (a
+       file, a folder, a tree), `Rename`, `Symlink`, `Link`, `Chmod`, `Chown`,
+       `Utime`, `Truncate`; kinds `0x0100`-`0x01ff` are reserved for the
+       network. Responses: `Ok` (at most one descriptor, as `SCM_RIGHTS`),
+       `Denied`, `Errno`, `Unsupported`, `Invalid`, `Hello`, `Data`. One request
+       at a time per channel; concurrency is more channels (`Channel`, capped at
+       64 by the broker, 16 used by the client). No descriptor ever travels
+       toward the broker and no request refers to another, so the broker keeps
+       no state per requester. A malformed frame gets `Invalid` and closes that
+       channel; an unknown kind gets `Unsupported` and the channel stays. A
+       descriptor is acknowledged (`Received`) before the channel does anything
+       else, and the broker keeps its copy open until then (on macOS a
+       descriptor closed by its sender before it is received can arrive dead).
      - Not yet (the network side, phase P8b): hosts, name resolution, Unix
-       sockets by path on Linux, module fetches after start. A policy that
-       needs them still carries a fatal gap (`BROKER_NET_BUILT`), so
-       `broker` and `enforce` refuse to start on it. Compiled programs
-       (`denort`) don't start a supervisor yet. Child processes don't get the
-       broker (the kernel's fail-closed view is theirs).
-     - User-facing: `--kernel-sandbox=broker` now runs; on Linux
-       `--deny-write` inside `--allow-write` is held exactly for Deno's
-       operations and fail-closed for native code and children (they can't
-       create, rename or remove directly in the allowed folder or in folders
-       made after start); the process the shell sees is the supervisor.
-     - Tests: `deno_permissions`' `kernel_broker::protocol::tests` (round
-       trips, every field check, `fuzz_request_parser`,
-       `fuzz_response_parser`), `kernel_broker::transport::tests`,
-       `kernel_broker::tests` (the deny inside the allow for every
-       operation, links, the kernel's trees, channels,
-       `model_no_request_sequence_leaves_the_policy`, `fuzz_live_server`
-       checked frame by frame against the protocol's rules;
+       sockets by path on Linux, module fetches after start. A policy that needs
+       them still carries a fatal gap (`BROKER_NET_BUILT`), so `broker` and
+       `enforce` refuse to start on it. Compiled programs (`denort`) don't start
+       a supervisor yet. Child processes don't get the broker (the kernel's
+       fail-closed view is theirs).
+     - User-facing: `--kernel-sandbox=broker` now runs; on Linux `--deny-write`
+       inside `--allow-write` is held exactly for Deno's operations and
+       fail-closed for native code and children (they can't create, rename or
+       remove directly in the allowed folder or in folders made after start);
+       the process the shell sees is the supervisor.
+     - Tests: `deno_permissions`' `kernel_broker::protocol::tests` (round trips,
+       every field check, `fuzz_request_parser`, `fuzz_response_parser`),
+       `kernel_broker::transport::tests`, `kernel_broker::tests` (the deny
+       inside the allow for every operation, links, the kernel's trees,
+       channels, `model_no_request_sequence_leaves_the_policy`,
+       `fuzz_live_server` checked frame by frame against the protocol's rules;
        `DENO_BROKER_FUZZ_ITERS` scales the fuzzers); `deno_sandbox`'s plan
        tests; `sandbox::policy::tests`; spec `kernel_sandbox::broker`.
      - Node tests enabled: none (no Node API changes).
@@ -18338,36 +18335,36 @@ where the changes are discussed.
      (runtime; Unix; `runtime/permissions/{lib,checked_open}.rs`,
      `ext/fs/{scoped,std_fs,lib}.rs`). Plan phase P7b: the race-safe opens of
      item 421's library are now what the real file system uses.
-     - Why. `check_open` resolves a path and the operation then opened the
-       name again: a symlink swapped in between (by the program, another
-       process, another user who can write a folder on the way) was followed
-       with no new check.
+     - Why. `check_open` resolves a path and the operation then opened the name
+       again: a symlink swapped in between (by the program, another process,
+       another user who can write a folder on the way) was followed with no new
+       check.
      - A checked path now carries the scope its access was granted under
        (`CheckedPath::open_scope`): the allow roots and denies of the read
-       permission, the write permission or both, as paths (each scope as
-       written and resolved), derived once and kept until a prompt's answer
-       or a revoke changes them. None when nothing narrows the access, under
-       a permission broker, and for `/dev`, Linux `/proc` and `/sys` (their
-       own check decides those; they are opened by name).
+       permission, the write permission or both, as paths (each scope as written
+       and resolved), derived once and kept until a prompt's answer or a revoke
+       changes them. None when nothing narrows the access, under a permission
+       broker, and for `/dev`, Linux `/proc` and `/sys` (their own check decides
+       those; they are opened by name).
      - With a scope, `RealFs` goes through `ext/fs/scoped.rs`: opens (and so
        `readFile`, `writeFile`, `open`, every `node:fs` open), `truncate`,
        `mkdir` (each level of a recursive one), `remove` (a tree is removed
-       level by level through descriptors, no link entered), `rename`,
-       `link`, `symlink`, `rmdir`, `chmod` / `chown` / `utime` (through an
-       open descriptor: `fchmod`, `fchown`, `futimens`), `lchown` / `lutime`
-       (`*at` on the checked folder), `stat` / `lstat`, `readDir`,
-       `readLink`. A path that leads outside the scope or into a deny is
-       `NotCapable`.
+       level by level through descriptors, no link entered), `rename`, `link`,
+       `symlink`, `rmdir`, `chmod` / `chown` / `utime` (through an open
+       descriptor: `fchmod`, `fchown`, `futimens`), `lchown` / `lutime` (`*at`
+       on the checked folder), `stat` / `lstat`, `readDir`, `readLink`. A path
+       that leads outside the scope or into a deny is `NotCapable`.
      - Still by name after the check (the next phase): `realpath`, `statfs`,
-       `exists`, `chdir`, `copyFile`, `cp`, `lchmod`; on macOS the last step
-       of `lstat` and of a `stat` of a file that can't be opened; Windows;
-       the consumers outside `ext/fs` (SQLite, `watchFs`, `dlopen`,
-       `Deno.Command`'s `cwd`, TLS files).
-     - Behaviour changes: a recursive `mkdir` no longer creates missing
-       folders above the write scope; a file root (`--allow-read=/etc/hosts`)
-       and a scope reached through a link work in the library; `chmod` and
-       `utime` no longer need the path forms the kernel sandbox refuses.
-     - Tests: `checked_open::tests::{a_file_root_is_that_one_name,
+       `exists`, `chdir`, `copyFile`, `cp`, `lchmod`; on macOS the last step of
+       `lstat` and of a `stat` of a file that can't be opened; Windows; the
+       consumers outside `ext/fs` (SQLite, `watchFs`, `dlopen`, `Deno.Command`'s
+       `cwd`, TLS files).
+     - Behaviour changes: a recursive `mkdir` no longer creates missing folders
+       above the write scope; a file root (`--allow-read=/etc/hosts`) and a
+       scope reached through a link work in the library; `chmod` and `utime` no
+       longer need the path forms the kernel sandbox refuses.
+     - Tests:
+       `checked_open::tests::{a_file_root_is_that_one_name,
        custom_flags_keep_the_options_in_charge,
        a_path_only_open_follows_links_like_any_other,
        remove_dir_all_never_enters_a_link, roots_intersect_to_the_inner_one}`
@@ -18376,10 +18373,10 @@ where the changes are discussed.
        grant).
 
 468. **`feat(permissions)`: the kernel sandbox's network route: one seam for
-     every socket, the broker's network authority, and `connect` answered by
-     the supervisor** (CLI and runtime; denext-only; opt-in, as item 425;
-     `libs/net_route` (new crate
-     `deno_net_route`), `libs/sandbox/{net_authority,net_gate,notify,lib}.rs`,
+     every socket, the broker's network authority, and `connect` answered by the
+     supervisor** (CLI and runtime; denext-only; opt-in, as item 425;
+     `libs/net_route` (new crate `deno_net_route`),
+     `libs/sandbox/{net_authority,net_gate,notify,lib}.rs`,
      `cli/sandbox/{net_broker,mod}.rs`, `cli/factory.rs`,
      `libs/core/uv_compat/tcp.rs`,
      `ext/net/{routed,ops,ops_tls,ops_unix,tcp,resolve_addr,
@@ -18388,11 +18385,10 @@ where the changes are discussed.
      `ext/webrtc/{peer,net}.rs`, `libs/inspector_server/lib.rs`,
      `runtime/permissions/kernel_broker/{net,client,protocol,mod}.rs`,
      `cli/sandbox/{enforce,policy}.rs`, `libs/sandbox/{plan,enforce_linux}.rs`).
-     The network
-     half of Mode B (`--kernel-sandbox=broker`, and `enforce` with a host-scoped
-     `--allow-net`): no kernel can scope a socket by host, so a process held to
-     such a grant makes no IP socket of its own and asks the broker outside the
-     sandbox for every one.
+     The network half of Mode B (`--kernel-sandbox=broker`, and `enforce` with a
+     host-scoped `--allow-net`): no kernel can scope a socket by host, so a
+     process held to such a grant makes no IP socket of its own and asks the
+     broker outside the sandbox for every one.
      - The seam. `deno_net_route` (no dependencies, so `deno_core` and every
        extension take it) holds the broker's operations as one trait,
        `NetRoute`: `resolve`, `connect_tcp`, `bind_tcp`, `open_udp`,
@@ -18441,24 +18437,23 @@ where the changes are discussed.
        a name server the grant names (what `Deno.resolveDns` already requires)
        is an operation instead: one datagram out, the first one back, on a
        socket that never leaves the broker.
-     - `connect` answered by the supervisor (Linux,
-       `deno_sandbox::net_gate`). Two things undo a broker policy if `connect`
-       is left to the kernel: a TCP socket the broker connected can be pointed
-       at another address (`connect` to `AF_UNSPEC` dissolves the association;
-       Landlock refuses the next connect only from ABI 4, by port), and "only
-       the children's proxy" can't be said to the kernel (Landlock names a port,
-       not an address, and has no TCP rules before Linux 6.7; a network
-       namespace needs unprivileged user namespaces). A `ConnectGate` answers
-       the `connect` notifications of the confined tree's seccomp filter: it
-       copies the caller's address once, refuses everything but the addresses
-       it lists (`EACCES`: every other address, `AF_UNSPEC`, Unix sockets,
-       unknown families) and makes a listed connection itself on its own
-       duplicate of the caller's socket, so the address checked is the address
-       connected and the kernel never reads the caller's memory again. With it
-       a host-scoped grant is exact on every kernel that has seccomp user
-       notification and `pidfd_getfd` (Linux 5.9), with or without Landlock's
-       network rules. On macOS the same is the profile's
-       `localhost:<proxy port>` rule.
+     - `connect` answered by the supervisor (Linux, `deno_sandbox::net_gate`).
+       Two things undo a broker policy if `connect` is left to the kernel: a TCP
+       socket the broker connected can be pointed at another address (`connect`
+       to `AF_UNSPEC` dissolves the association; Landlock refuses the next
+       connect only from ABI 4, by port), and "only the children's proxy" can't
+       be said to the kernel (Landlock names a port, not an address, and has no
+       TCP rules before Linux 6.7; a network namespace needs unprivileged user
+       namespaces). A `ConnectGate` answers the `connect` notifications of the
+       confined tree's seccomp filter: it copies the caller's address once,
+       refuses everything but the addresses it lists (`EACCES`: every other
+       address, `AF_UNSPEC`, Unix sockets, unknown families) and makes a listed
+       connection itself on its own duplicate of the caller's socket, so the
+       address checked is the address connected and the kernel never reads the
+       caller's memory again. With it a host-scoped grant is exact on every
+       kernel that has seccomp user notification and `pidfd_getfd` (Linux 5.9),
+       with or without Landlock's network rules. On macOS the same is the
+       profile's `localhost:<proxy port>` rule.
      - Over the broker (item 466's supervisor and protocol). The network
        operations are the protocol's reserved kinds `0x0100`-`0x0106`
        (`deno_permissions::kernel_broker::net`: `Resolve`, `ConnectTcp`,
@@ -18476,12 +18471,12 @@ where the changes are discussed.
      - The kernel side of a broker-held network. The confined tree has no IP
        socket (`socket(2)` refused), and on Linux `listen` and `connect` are
        refused outright (`SeccompPlan::refuse_connect`): its sockets arrive
-       connected or listening, so it never connects one, and a socket the
-       broker handed over can't be dissolved and pointed elsewhere. Native
-       code and child processes therefore have no network at all under a
-       host-scoped grant (fail closed; the allow-listing proxy for children,
-       with `connect` answered by the supervisor instead of refused, is the
-       gate above and not wired yet). On macOS the profile denies all network.
+       connected or listening, so it never connects one, and a socket the broker
+       handed over can't be dissolved and pointed elsewhere. Native code and
+       child processes therefore have no network at all under a host-scoped
+       grant (fail closed; the allow-listing proxy for children, with `connect`
+       answered by the supervisor instead of refused, is the gate above and not
+       wired yet). On macOS the profile denies all network.
      - The policy model. `BROKER_NET_BUILT`: a host name in `--allow-net`
        compiles to Mode B on Linux and on macOS (no kernel scopes by host; the
        macOS port-only rule for names is gone), with no fatal gap, so `enforce`
@@ -18491,38 +18486,40 @@ where the changes are discussed.
        no deny) stays the process's own. `deno info --json` →
        `kernelSandbox.brokerBuilt` / `brokerNetBuilt` say what this runtime's
        broker holds.
-     - Not carried by the broker (each fails under a broker-held network,
-       none is an escape): a module fetched after start, npm auto-install, the
-       OpenTelemetry exporter, `Deno.cron`'s control socket, the deploy
-       tunnel, `node:net` named pipes, abstract Unix sockets, UDP sockets
-       under a host-scoped grant, and any network of child processes.
-     - `DENO_INTERNAL_KERNEL_NET_ROUTE=in-process` (internal; any other value
-       is ignored with a warning) installs the authority as a route inside the
+     - Not carried by the broker (each fails under a broker-held network, none
+       is an escape): a module fetched after start, npm auto-install, the
+       OpenTelemetry exporter, `Deno.cron`'s control socket, the deploy tunnel,
+       `node:net` named pipes, abstract Unix sockets, UDP sockets under a
+       host-scoped grant, and any network of child processes.
+     - `DENO_INTERNAL_KERNEL_NET_ROUTE=in-process` (internal; any other value is
+       ignored with a warning) installs the authority as a route inside the
        process itself: no boundary, so it confines nothing and can only narrow
        (the authority holds the run's own grant). It is how the suites drive
        every routed path and the authority's decisions without a supervisor.
-     - User-facing note: `--kernel-sandbox=enforce` (and `broker`) now runs
-       with a host name in `--allow-net`: the program's sockets are made by
-       the supervising broker, which holds the grant exactly (names resolved
-       by the broker, no answer inside the machine or its network unless the
-       grant names that address); native code and child processes have no
-       network; UDP is refused under such a grant.
+     - User-facing note: `--kernel-sandbox=enforce` (and `broker`) now runs with
+       a host name in `--allow-net`: the program's sockets are made by the
+       supervising broker, which holds the grant exactly (names resolved by the
+       broker, no answer inside the machine or its network unless the grant
+       names that address); native code and child processes have no network; UDP
+       is refused under such a grant.
      - Tests (the broker): `deno_permissions`'s
        `kernel_broker::net::tests::{requests_round_trip, answers_round_trip,
        malformed_payloads_are_refused, fuzzed_payloads_never_panic,
-       the_route_reaches_the_authority_through_the_broker}`; `deno_sandbox`'s
+       the_route_reaches_the_authority_through_the_broker}`;
+       `deno_sandbox`'s
        `enforce_linux::tests::seccomp_program_refuses_connect_under_a_net_broker`;
-       the CLI's `sandbox::policy::tests::the_broker_holds_what_mode_a_cant`
-       and the updated `net_rows`; spec `kernel_sandbox::broker`
-       (`host_scoped_network`: under `--kernel-sandbox=broker
-       --allow-net=localhost:<p>,...` the program's `Deno.connect`, `fetch`,
-       `node:net`, `node:http`, `Deno.listen` and `node:net` server work
-       through the supervisor, another spelling of an address and a UDP socket
-       are refused by it, native `connect` to the granted port is refused) and
-       `kernel_sandbox::policy` (`broker_runs`; `deno info --json` has
-       `brokerBuilt` / `brokerNetBuilt`). `kernel_sandbox::enforce`'s
-       `inexpressible_refused` is gone: `enforce` takes the broker for a write
-       deny inside a write allow.
+       the CLI's `sandbox::policy::tests::the_broker_holds_what_mode_a_cant` and
+       the updated `net_rows`; spec `kernel_sandbox::broker`
+       (`host_scoped_network`: under
+       `--kernel-sandbox=broker
+       --allow-net=localhost:<p>,...` the
+       program's `Deno.connect`, `fetch`, `node:net`, `node:http`, `Deno.listen`
+       and `node:net` server work through the supervisor, another spelling of an
+       address and a UDP socket are refused by it, native `connect` to the
+       granted port is refused) and `kernel_sandbox::policy` (`broker_runs`;
+       `deno info --json` has `brokerBuilt` / `brokerNetBuilt`).
+       `kernel_sandbox::enforce`'s `inexpressible_refused` is gone: `enforce`
+       takes the broker for a write deny inside a write allow.
      - Tests: `deno_net_route`'s `unrouted_callers_get_nothing`,
        `a_prebound_listener_is_handed_out_again_and_again`,
        `a_refusal_is_permission_denied`; `deno_sandbox`'s
@@ -18551,8 +18548,8 @@ where the changes are discussed.
        spec `kernel_sandbox::net_route` (under the in-process route:
        `Deno.connect`, `fetch`, `node:dns`, `node:net`, `node:http`,
        `Deno.listen` and a `node:net` server work for what the grant names; the
-       authority refuses another spelling of an address and a UDP socket under
-       a host-scoped grant; an unscoped grant gets its UDP socket; an invalid
+       authority refuses another spelling of an address and a UDP socket under a
+       host-scoped grant; an unscoped grant gets its UDP socket; an invalid
        value of the variable is ignored).
      - Node tests enabled: none; no Node API changes.
 
@@ -18565,33 +18562,32 @@ where the changes are discussed.
      (`--allow-net-listen=127.0.0.1:8000,localhost:9000`, `0.0.0.0:8080`; not a
      name, a subnet, a bare host or port 0) is bound, listening, by the
      re-executed image before it applies its plan, and each listener is handed
-     to the operation that listens on that address (`Deno.listen`,
-     `Deno.serve`, `node:net`, the libuv surface). `localhost` binds both
-     loopback addresses. Only the listen-direction flag: an `--allow-net` entry
-     is as often a server to connect to (`--allow-net=localhost:5432`), whose
-     port the process must not take at startup, so a grant with `--allow-net`
-     addresses keeps its port rules.
+     to the operation that listens on that address (`Deno.listen`, `Deno.serve`,
+     `node:net`, the libuv surface). `localhost` binds both loopback addresses.
+     Only the listen-direction flag: an `--allow-net` entry is as often a server
+     to connect to (`--allow-net=localhost:5432`), whose port the process must
+     not take at startup, so a grant with `--allow-net` addresses keeps its port
+     rules.
      - The kernel policy then has no bind side: with no connect grant the
        confined process has no IP socket at all (`net: denied`), on every
        kernel. Before, a listen port needed Landlock's TCP rules (ABI 4, Linux
        6.7): on an older kernel it was a fail-open gap and `enforce` refused to
        start, and on a newer one any address on the port could be bound.
-     - The address stays bound for the life of the process: every listener on
-       it gets a duplicate of the one socket, so listening again after a close
+     - The address stays bound for the life of the process: every listener on it
+       gets a duplicate of the one socket, so listening again after a close
        works, as do several listeners (`reusePort`, `deno serve --parallel`); a
        client that connects while nothing accepts waits instead of being
        refused. An address that can't be bound at startup (in use, no IPv6)
        doesn't stop the run: listening there reports that error. UDP on those
        addresses is refused. The report lists them
-       (`listeners: bound before the sandbox applies: ...`) and the policy has
-       a `documented` note saying so.
+       (`listeners: bound before the sandbox applies: ...`) and the policy has a
+       `documented` note saying so.
      - Not with `--inspect` (the inspector's port keeps its port rule), not
        under a broker policy (the broker binds), not on macOS (Seatbelt holds
        bind ports).
      - User-facing note: under `--kernel-sandbox=enforce` on Linux, a server
-       that only listens on addresses the grant names runs on every kernel
-       with no network access of its own; those addresses are bound from
-       startup.
+       that only listens on addresses the grant names runs on every kernel with
+       no network access of its own; those addresses are bound from startup.
      - Tests: the CLI's
        `sandbox::policy::tests::listeners_are_bound_before_confinement`;
        `deno_net_route`'s `a_prebound_listener_is_handed_out_again_and_again`;
@@ -18604,16 +18600,15 @@ where the changes are discussed.
      `PermissionsContainer::check_opened(file, access, api)` makes the check
      `check_open` makes of a path, of the object an open descriptor holds (its
      path as the kernel reports it: `F_GETPATH`, `/proc/self/fd`). An operation
-     that can't open through the race-safe opens checks its path, opens it,
-     then calls this before it reads anything: a symlink swapped in between
-     the check and the open leads to a file that is refused. For reads only (an
-     open that creates or truncates has changed the file already). A file
-     unlinked since it was opened is refused; where the system can't report a
-     descriptor's path (Linux without `/proc`, Windows) nothing more is
-     checked. Used by `Deno.connectTls({ certFile })` and `Deno.SQL`'s file
-     reads; the list of path operations that stay checked by name, each with
-     its reason, is the second table of
-     `tests/specs/kernel_sandbox/escape_corpus/COVERAGE.md`.
+     that can't open through the race-safe opens checks its path, opens it, then
+     calls this before it reads anything: a symlink swapped in between the check
+     and the open leads to a file that is refused. For reads only (an open that
+     creates or truncates has changed the file already). A file unlinked since
+     it was opened is refused; where the system can't report a descriptor's path
+     (Linux without `/proc`, Windows) nothing more is checked. Used by
+     `Deno.connectTls({ certFile })` and `Deno.SQL`'s file reads; the list of
+     path operations that stay checked by name, each with its reason, is the
+     second table of `tests/specs/kernel_sandbox/escape_corpus/COVERAGE.md`.
      - User-facing note: none (a race closed).
      - Tests: `deno_permissions`'s `check_opened_checks_where_the_file_is`.
      - Node tests enabled: none; no Node API changes.
@@ -18623,10 +18618,12 @@ where the changes are discussed.
      (dissolve a connected TCP socket's association and connect it to a port no
      grant names; it uses a socket it can make, else one it was handed), and,
      where the runtime has the broker, two configurations under
-     `--expect=enforce`: `net-host` (`--allow-net=example.com:<port>,
-     localhost:<port>`) and `net-host-run` (the same with a run list, the child
-     vector). Every IP cell must be held in both on every column. Without the
-     broker the run says they were skipped.
+     `--expect=enforce`: `net-host`
+     (`--allow-net=example.com:<port>,
+     localhost:<port>`) and
+     `net-host-run` (the same with a run list, the child vector). Every IP cell
+     must be held in both on every column. Without the broker the run says they
+     were skipped.
      - Node tests enabled: none; tests only.
 
 472. **`feat(permissions)`: the kernel sandbox's warn mode, the rollout stages
@@ -18870,12 +18867,12 @@ where the changes are discussed.
      - With items 466-472 (the denext.28 train). The policy-model and
        plan-translation changes of the broker, the network route and warn mode
        were written against `cli/sandbox/{policy,enforce}.rs`; they live in
-       `cli/lib/kernel_{policy,plan}.rs` now, and `cli/sandbox` re-exports
-       them. Item 472's rule that a mode `auto` chose never refuses to start
-       holds for a compiled program too: `kernel_apply::start_compiled` runs it
-       off where the runtime has no enforcer for the OS and prints `warn`'s line
-       where enforce can't hold the grant, and `check_compiled` lets such a
-       program through. An explicit baked `enforce` still refuses.
+       `cli/lib/kernel_{policy,plan}.rs` now, and `cli/sandbox` re-exports them.
+       Item 472's rule that a mode `auto` chose never refuses to start holds for
+       a compiled program too: `kernel_apply::start_compiled` runs it off where
+       the runtime has no enforcer for the OS and prints `warn`'s line where
+       enforce can't hold the grant, and `check_compiled` lets such a program
+       through. An explicit baked `enforce` still refuses.
      - Node tests enabled: none; no Node API changes.
 
 474. **`feat(permissions)`: Windows' small tier for compiled programs: a job
@@ -18930,8 +18927,8 @@ where the changes are discussed.
        `windows_default_unaffected`, `windows_no_children`,
        `windows_child_inherits`).
      - Node tests enabled: none; no Node API changes.
-475. **laufey v0.9.0 and webrtc-rs-rtc `0.21.1+brainwires.4`** (`ee1feb7`
-     and `c16bfdef`; laufey API 60; runtime 3.0.0-denext.28;
+475. **laufey v0.9.0 and webrtc-rs-rtc `0.21.1+brainwires.4`** (`ee1feb7` and
+     `c16bfdef`; laufey API 60; runtime 3.0.0-denext.28;
      `cli/rt_desktop/Cargo.toml`, `Cargo.toml`, `Cargo.lock`,
      `.github/workflows/denext_runtime.yml`,
      `.github/denext-runtime/fetch_dictionaries.py`). The pins of items 460 to
@@ -18945,20 +18942,19 @@ where the changes are discussed.
        the Linux CEF backend compiles again (API 60's capability check came
        before its X11 helper); WebView2: a RESUME of an app-decided download
        that comes before WebView2's asynchronous pause has taken effect is
-       applied once it has (it was lost, and the download stayed paused);
-       the native e2e's custom-scheme WebSocket probe waits on the socket's
-       events, and its pointer, focus and drop checks use a point of the test
-       window no other window covers; CI keeps Windows' "finish setting up
-       your device" prompt off the Windows runners.
-     - webrtc-rs-rtc `6d7b5f0b..c16bfdef` (`release/0.21.1-brainwires.4`,
-       merged into `master`, tag `v0.21.1+brainwires.4`): the release of
+       applied once it has (it was lost, and the download stayed paused); the
+       native e2e's custom-scheme WebSocket probe waits on the socket's events,
+       and its pointer, focus and drop checks use a point of the test window no
+       other window covers; CI keeps Windows' "finish setting up your device"
+       prompt off the Windows runners.
+     - webrtc-rs-rtc `6d7b5f0b..c16bfdef` (`release/0.21.1-brainwires.4`, merged
+       into `master`, tag `v0.21.1+brainwires.4`): the release of
        `webrtc/d28-wpt` (item 460's engine side: `a=msid` per stream,
        `set_associable_with_remote_offer`, `a=inactive` pauses, the selected
        pair's candidates in the stats, an ICE restart that keeps the previous
        pair's path), with no code change over it.
-     - User-facing note: on Windows (WebView2), pausing a download and
-       resuming it at once leaves it running; otherwise none beyond items 460
-       to 463.
+     - User-facing note: on Windows (WebView2), pausing a download and resuming
+       it at once leaves it running; otherwise none beyond items 460 to 463.
      - Tests: laufey's full CI on `train/laufey-0.9.0` and its tag; the desktop
        window and runtime workflows run on the new pin; the WebRTC unit and WPT
        suites of `denext tests`.
@@ -18970,268 +18966,266 @@ where the changes are discussed.
      `ext/os/40_signals.js`, `runtime/permissions/{lib,checked_open}.rs`,
      `runtime/ops/desktop.rs`, `cli/lib/kernel_policy.rs`,
      `cli/sandbox/enforce.rs`, `ext/napi`, `ext/node/ops/fs.rs`,
-     `tests/util/server`,
-     `tests/unit/{timers_test,pty_test,signal_test}.ts`,
-     `cli/sandbox/warn.rs`,
-     `.github/workflows/denext_runtime.yml`). The hunt (item 459) on the
-     train's candidate, Linux, at one CPU and below:
-     - `Deno.readDir`: a `next()` while another of the same iterator is
-       pending rejects with `Busy` at once. The only check was the op's
-       `try_lock` on the directory stream, which sees an overlap only while
-       the first call holds it across an await; a call served from tokio's
-       buffered batch, a first call done before the others were polled, or a
-       directory listed whole under a scoped grant (item 467) let every call
-       through, and upstream's `readDirConcurrentNextRejectsWithBusy` failed
-       2 runs in 5. Upstream has the same race.
+     `tests/util/server`, `tests/unit/{timers_test,pty_test,signal_test}.ts`,
+     `cli/sandbox/warn.rs`, `.github/workflows/denext_runtime.yml`). The hunt
+     (item 459) on the train's candidate, Linux, at one CPU and below:
+     - `Deno.readDir`: a `next()` while another of the same iterator is pending
+       rejects with `Busy` at once. The only check was the op's `try_lock` on
+       the directory stream, which sees an overlap only while the first call
+       holds it across an await; a call served from tokio's buffered batch, a
+       first call done before the others were polled, or a directory listed
+       whole under a scoped grant (item 467) let every call through, and
+       upstream's `readDirConcurrentNextRejectsWithBusy` failed 2 runs in 5.
+       Upstream has the same race.
      - Timers: a due timer runs only while the event loop is alive, as libuv
        runs a loop's timers. When every pending timer is unref'd and nothing
-       else keeps the loop running, they don't fire and the process ends,
-       as in Node.js; before, an unref'd timer that was already due when the
-       main module finished (a slow or starved main module) fired once
-       (`unrefTimer`, 1 run in 5). Upstream's event loop has the same order.
-     - Signals: the listeners run once per delivery. The native side counts
-       each delivery, but its channel only says "changed", so the listeners
-       ran once per wakeup and deliveries that arrived while the event loop
-       wasn't polling (a busy or starved JS thread) were lost; a listener
-       counting its signals waited for them forever
-       (`multipleSignalListenerTest` hung 2 runs in 5). Node.js calls a
-       listener for each signal received. Upstream's loop has the same
-       once-per-wakeup shape.
+       else keeps the loop running, they don't fire and the process ends, as in
+       Node.js; before, an unref'd timer that was already due when the main
+       module finished (a slow or starved main module) fired once (`unrefTimer`,
+       1 run in 5). Upstream's event loop has the same order.
+     - Signals: the listeners run once per delivery. The native side counts each
+       delivery, but its channel only says "changed", so the listeners ran once
+       per wakeup and deliveries that arrived while the event loop wasn't
+       polling (a busy or starved JS thread) were lost; a listener counting its
+       signals waited for them forever (`multipleSignalListenerTest` hung 2 runs
+       in 5). Node.js calls a listener for each signal received. Upstream's loop
+       has the same once-per-wakeup shape.
      - Scoped file access (item 467's race-safe opens): a grant root that
-       doesn't exist yet (`--allow-write=./subdir/`, `--allow-write=
-       node_modules`, a file to be written) is that one name in its folder
-       until it exists, so it can be made and a recursive mkdir go on
-       beneath it; it failed every operation beneath it with NotFound. The
-       open scope follows the query's precedence: a prompt denial (node:fs.cp
-       asks for the folders above `--allow-read=.`) refuses only that path
-       and its ancestors, not the granted paths beneath it, and a global
-       ignore or deny (`"ignore": true`, `--deny-read` with no list) leaves
-       the granted roots open; both made every later open in the grant fail.
-     - Kernel sandbox: on Linux a confining parent is this runtime's
-       sandbox, told by its seccomp marker; no-new-privileges and a seccomp
-       filter alone are any hardened container's, inside which `auto` never
-       enforced and the harnesses' forced enforce was dropped. A compiled
-       program never compiles a Mode B policy (it runs no broker): a Linux
-       write deny inside a write allow is again a rule it can't hold (warned
-       at `deno compile`, refused at start), and a host-scoped `--allow-net`
-       no longer compiles to no network at all.
-     - Desktop: `createWebView()`'s op accepts item 461's `downloads: "app"`
-       and `permissions: "app"` (only the JavaScript layer had them; every
-       packaged e2e threw `invalid`); laufey still refuses "app" where
+       doesn't exist yet (`--allow-write=./subdir/`,
+       `--allow-write=
+       node_modules`, a file to be written) is that one
+       name in its folder until it exists, so it can be made and a recursive
+       mkdir go on beneath it; it failed every operation beneath it with
+       NotFound. The open scope follows the query's precedence: a prompt denial
+       (node:fs.cp asks for the folders above `--allow-read=.`) refuses only
+       that path and its ancestors, not the granted paths beneath it, and a
+       global ignore or deny (`"ignore": true`, `--deny-read` with no list)
+       leaves the granted roots open; both made every later open in the grant
+       fail.
+     - Kernel sandbox: on Linux a confining parent is this runtime's sandbox,
+       told by its seccomp marker; no-new-privileges and a seccomp filter alone
+       are any hardened container's, inside which `auto` never enforced and the
+       harnesses' forced enforce was dropped. A compiled program never compiles
+       a Mode B policy (it runs no broker): a Linux write deny inside a write
+       allow is again a rule it can't hold (warned at `deno compile`, refused at
+       start), and a host-scoped `--allow-net` no longer compiles to no network
+       at all.
+     - Desktop: `createWebView()`'s op accepts item 461's `downloads: "app"` and
+       `permissions: "app"` (only the JavaScript layer had them; every packaged
+       e2e threw `invalid`); laufey still refuses "app" where
        `webViewCapabilities()` says the engine lacks it. The inert-ops spec
        counts the merged 116 desktop ops.
-     - Node-API: `napi_cancel_async_work` reports a cancel that lost the race
-       to the worker (`napi_generic_failure`, as Node's uv_cancel does);
-       it answered `napi_ok` and `complete` then ran with `napi_ok`.
+     - Node-API: `napi_cancel_async_work` reports a cancel that lost the race to
+       the worker (`napi_generic_failure`, as Node's uv_cancel does); it
+       answered `napi_ok` and `complete` then ran with `napi_ok`.
      - `node:fs`: a read on an fd (`fs.read`, `FileHandle.readFile`) never
-       resolves in the microtask checkpoint that started it (the op is
-       deferred, like its write sibling), so ticks queued before it run
-       first and an abort signal is seen between reads, as in Node.js.
+       resolves in the microtask checkpoint that started it (the op is deferred,
+       like its write sibling), so ticks queued before it run first and an abort
+       signal is seen between reads, as in Node.js.
      - The test server answers 500 for a testdata file it couldn't read (a
        loaded machine) instead of a 404 the CLI reported as a missing module.
-     - `node:child_process`: a ChildProcess starts with `connected` false,
-       as in Node.js; only the IPC channel's setup set it, so a spawn that
-       failed before the channel existed (a missing program or `cwd`) left it
-       undefined (item 465's test failed every run on Linux, and the same
-       spawns give undefined on macOS).
-     - `node:fs` `watchFile`: the poll's stat is synchronous. An async stat
-       is an op the watcher can't cancel, so `unwatchFile()` during a poll
-       left it running past the stop, which the test sanitizer reported as a
-       leak ("watchFile honors bigint option", 1 run in 5); the only awaited
-       step now is the interval sleep, which `stop()` aborts. The first stat
-       still runs after `watchFile` has added its listener, so the initial
-       change for a missing file arrives as in Node.js. Upstream has the
-       same code.
-     - Tests that measured the machine, not the code: the test_util
-       semaphore test starts its clock with the permit held (a late thread
-       measured less than the hold), and `os.cpus()`'s test asserts what
-       Node.js guarantees (every CPU listed; the usable parallelism, which a
-       cgroup quota lowers, at most that).
-     - Tests whose premise the train changed: warn mode's fatal-gap test
-       (a host-scoped grant under enforce is the broker's since item 468,
-       so it takes a rule enforce still refuses), and item 462's foreground
-       test (its grant names `env: ["PATH"]`, which it reads, and the shell's
-       `argv[0]` is the path the runtime resolved, as `Deno.Command` execs).
+     - `node:child_process`: a ChildProcess starts with `connected` false, as in
+       Node.js; only the IPC channel's setup set it, so a spawn that failed
+       before the channel existed (a missing program or `cwd`) left it undefined
+       (item 465's test failed every run on Linux, and the same spawns give
+       undefined on macOS).
+     - `node:fs` `watchFile`: the poll's stat is synchronous. An async stat is
+       an op the watcher can't cancel, so `unwatchFile()` during a poll left it
+       running past the stop, which the test sanitizer reported as a leak
+       ("watchFile honors bigint option", 1 run in 5); the only awaited step now
+       is the interval sleep, which `stop()` aborts. The first stat still runs
+       after `watchFile` has added its listener, so the initial change for a
+       missing file arrives as in Node.js. Upstream has the same code.
+     - Tests that measured the machine, not the code: the test_util semaphore
+       test starts its clock with the permit held (a late thread measured less
+       than the hold), and `os.cpus()`'s test asserts what Node.js guarantees
+       (every CPU listed; the usable parallelism, which a cgroup quota lowers,
+       at most that).
+     - Tests whose premise the train changed: warn mode's fatal-gap test (a
+       host-scoped grant under enforce is the broker's since item 468, so it
+       takes a rule enforce still refuses), and item 462's foreground test (its
+       grant names `env: ["PATH"]`, which it reads, and the shell's `argv[0]` is
+       the path the runtime resolved, as `Deno.Command` execs).
      - CI: the runtime build seeds the prebuilt V8 after the Rust cache
-       restores; on a partial key match the cache's pre-clean deleted the
-       seeded `gn_out` and a cached build failed to link `rusty_v8`.
+       restores; on a partial key match the cache's pre-clean deleted the seeded
+       `gn_out` and a cached build failed to link `rusty_v8`.
      - User-facing note: `Deno.readDir`'s iterator rejects an overlapping
-       `next()` every time, an unref'd timer no longer fires when nothing
-       keeps the process alive, a signal listener runs for every signal
-       delivered, and a stopped `watchFile` leaves no work behind.
+       `next()` every time, an unref'd timer no longer fires when nothing keeps
+       the process alive, a signal listener runs for every signal delivered, and
+       a stopped `watchFile` leaves no work behind.
      - Tests: `readDirConcurrentNextRejectsWithBusy`, the `unrefTimer` tests,
-       `multipleSignalListenerTest` and the `watchFile` tests 30 times plain
-       and 30 under `taskpolicy -b` on macOS; a new signal test that delivers
-       two signals while the JS thread is busy (one call before); a new
-       `unrefTimer` test whose main module outlasts its timer;
+       `multipleSignalListenerTest` and the `watchFile` tests 30 times plain and
+       30 under `taskpolicy -b` on macOS; a new signal test that delivers two
+       signals while the JS thread is busy (one call before); a new `unrefTimer`
+       test whose main module outlasts its timer;
        `tests/unit/{timers_test,pty_test,read_dir_test,signal_test}.ts`,
        `tests/unit_node/{timers_test,_fs/_fs_watch_test}.ts` and `deno_core`'s
        timer tests whole.
      - Node tests enabled: none.
 
-477. **`fix(ext/webrtc)`: WebRTC hardening** (runtime; `ext/webrtc/{peer.rs,
-     01_webrtc.js,tests.rs}`, `Cargo.toml`, `Cargo.lock`). webrtc-rs-rtc
-     `0.21.1+brainwires.6` (`cdcd6717`, from `0.21.1+brainwires.4`; `.5`
-     plus the fix for a data channel that never opened after a lost SCTP
-     INIT ACK, which `.5`'s one-association limit made fatal):
-     hardening across DTLS, SCTP and data channels, SRTP / SRTCP, SDP, ICE and
-     RTP (bounds on the state a peer can make the stack hold, stricter protocol
-     state handling); no public API change beyond additions (`cargo
-     semver-checks`: no semver update required). On the Deno side, a bound on
-     the wildcard socket's route cache and a 1 MiB cap on a session
+477. **`fix(ext/webrtc)`: WebRTC hardening** (runtime;
+     `ext/webrtc/{peer.rs,
+     01_webrtc.js,tests.rs}`, `Cargo.toml`,
+     `Cargo.lock`). webrtc-rs-rtc `0.21.1+brainwires.6` (`cdcd6717`, from
+     `0.21.1+brainwires.4`; `.5` plus the fix for a data channel that never
+     opened after a lost SCTP INIT ACK, which `.5`'s one-association limit made
+     fatal): hardening across DTLS, SCTP and data channels, SRTP / SRTCP, SDP,
+     ICE and RTP (bounds on the state a peer can make the stack hold, stricter
+     protocol state handling); no public API change beyond additions
+     (`cargo
+     semver-checks`: no semver update required). On the Deno side,
+     a bound on the wildcard socket's route cache and a 1 MiB cap on a session
      description. Details follow in advisories.
      - User-facing note: a session description over 1 MiB is refused.
-     - Tests: webrtc-rs-rtc's workspace with `--all-features` (2330 pass;
-       `.6` adds a test that drops the first INIT ACK);
-       `ext/webrtc`'s unit tests.
+     - Tests: webrtc-rs-rtc's workspace with `--all-features` (2330 pass; `.6`
+       adds a test that drops the first INIT ACK); `ext/webrtc`'s unit tests.
      - Node tests enabled: none; `node:` has no WebRTC API.
 
 478. **`feat(ext/webrtc)`: WebRTC WPT-100: the next round of the
-     web-platform-tests, in ten streams** (`webrtc/wpt-100`; runtime and
-     tests; `ext/webrtc/{01_webrtc.js,03_encoded_transform.js,05_transfer.js,
+     web-platform-tests, in ten streams** (`webrtc/wpt-100`; runtime and tests;
+     `ext/webrtc/{01_webrtc.js,03_encoded_transform.js,05_transfer.js,
      06_identity.js,lib.rs,peer.rs,media.rs,media_sink.rs,ice_transport.rs,
      header_extensions.rs,encoded_frames.rs}`,
      `runtime/js/{11_workers.js,98_global_scope_shared.js,
-     98_global_scope_window.js,99_main.js}`, `runtime/ops/worker_host.rs`,
-     `cli/tsc/dts/lib.deno_webrtc.d.ts`, `tests/wpt/**`,
-     `tests/unit/webrtc_*_test.ts`, `Cargo.toml`). Item 460's comparison left
-     875 of the 3,338 `webrtc*` subtests at WPT `71b58bb19` failing with the
-     runner's document environment; this item takes the 663 that need no real
-     encoder (the plan's Phase 1). The WPT suite moves to `71b58bb19`, the
-     revision the browser numbers are defined at. Every pass is the unmodified
-     upstream test; subtests that pass only through the runner's media sink
-     elements are reported on their own line.
+     98_global_scope_window.js,99_main.js}`,
+     `runtime/ops/worker_host.rs`, `cli/tsc/dts/lib.deno_webrtc.d.ts`,
+     `tests/wpt/**`, `tests/unit/webrtc_*_test.ts`, `Cargo.toml`). Item 460's
+     comparison left 875 of the 3,338 `webrtc*` subtests at WPT `71b58bb19`
+     failing with the runner's document environment; this item takes the 663
+     that need no real encoder (the plan's Phase 1). The WPT suite moves to
+     `71b58bb19`, the revision the browser numbers are defined at. Every pass is
+     the unmodified upstream test; subtests that pass only through the runner's
+     media sink elements are reported on their own line.
      - **Harness:** the runner's document environment is the default for the
        WebRTC and Media Capture directories, the test file's own markup is
        instantiated (with named access on `window`), the runner's
-       `testdriver-vendor.js` answers `set_permission` for capture,
-       `--no-hosts` runs without `/etc/hosts` entries or sudo, a test file
-       that runs out of time reports `TIMEOUT`, Python 3.11 and newer are
-       accepted, and `mediacapture-streams` is a tracked, non-gating suite.
+       `testdriver-vendor.js` answers `set_permission` for capture, `--no-hosts`
+       runs without `/etc/hosts` entries or sudo, a test file that runs out of
+       time reports `TIMEOUT`, Python 3.11 and newer are accepted, and
+       `mediacapture-streams` is a tracked, non-gating suite.
        `tests/wpt/README.md` documents the tiers (T0, T1, T1m), the honesty
        rules and the environment's features.
-     - **Transceivers:** the `stop()` lifecycle (stopping, stopped, removal,
-       the track's end) and `RTCRtpTransceiver.stopped`; a parameterless
+     - **Transceivers:** the `stop()` lifecycle (stopping, stopped, removal, the
+       track's end) and `RTCRtpTransceiver.stopped`; a parameterless
        `setLocalDescription()` uses `[[LastCreatedOffer]]` /
        `[[LastCreatedAnswer]]` while still valid (a generation counter that
        every change a new description would show moves on); an answer's
        directions intersect the offer with the transceiver's own; sender and
        receiver `transport` stay `null` until a description assigns one;
-       `setRemoteDescription` orders transceivers before
-       `signalingstatechange` and rejects one msid on two media sections;
-       `addTrack` or a sending direction on a remote offer's transceiver gives
-       it a sender; DTMF playout stops with a receive-only direction; a
-       receiver track unmutes when RTP resumes after a remote pause; the
-       ops' `InvalidModificationError` is a `DOMException` (one builder in
-       `99_main.js`). Engine: stopped transceivers in offers and answers,
-       m-line recycling, remote sections without `a=mid`.
+       `setRemoteDescription` orders transceivers before `signalingstatechange`
+       and rejects one msid on two media sections; `addTrack` or a sending
+       direction on a remote offer's transceiver gives it a sender; DTMF playout
+       stops with a receive-only direction; a receiver track unmutes when RTP
+       resumes after a remote pause; the ops' `InvalidModificationError` is a
+       `DOMException` (one builder in `99_main.js`). Engine: stopped
+       transceivers in offers and answers, m-line recycling, remote sections
+       without `a=mid`.
      - **ICE and DTLS:** `new RTCIceTransport()` (webrtc-ice's standalone
        transport, nine ops in `ice_transport.rs`); `getSelectedCandidatePair()`
-       is the ICE agent's pair, and a peer-reflexive remote candidate hides
-       its address (in the stats too); a gathered candidate joins the local
+       is the ICE agent's pair, and a peer-reflexive remote candidate hides its
+       address (in the stats too); a gathered candidate joins the local
        description with its `icecandidate` event, and finished gathering fires
-       the empty end-of-candidates candidate first; rolling back the first
-       offer takes the gathering state back to `new`; an ICE restart on a
-       connected transport doesn't go back to `checking`; ICE stuck in
-       `checking` with remote candidates still to come is `disconnected`;
-       `icecandidateerror` without a local address has port 0.
+       the empty end-of-candidates candidate first; rolling back the first offer
+       takes the gathering state back to `new`; an ICE restart on a connected
+       transport doesn't go back to `checking`; ICE stuck in `checking` with
+       remote candidates still to come is `disconnected`; `icecandidateerror`
+       without a local address has port 0.
      - **Codecs and simulcast:** `getParameters().codecs` come from the
        negotiated m-sections; `RTCRtpEncodingParameters.codec`,
        `encodingComplexity`, `scalabilityMode` and the transaction rules;
        simulcast encodings follow `a=rid` / `a=simulcast`; an answer's
        m-sections must have the offer's media types, and a remote RTP section
        with payload type 64 to 95 is an `InvalidAccessError`; an
-       `EncodedMediaTrack`'s preferences list RTX and FEC. Engine: unknown
-       media types answered rejected, static audio payload types, each
-       simulcast layer's first alternative, codec preferences that keep only
-       the repair formats they list, and the default AV1 codec's `profile=0`
-       fmtp (it said VP9's `profile-id`).
+       `EncodedMediaTrack`'s preferences list RTX and FEC. Engine: unknown media
+       types answered rejected, static audio payload types, each simulcast
+       layer's first alternative, codec preferences that keep only the repair
+       formats they list, and the default AV1 codec's `profile=0` fmtp (it said
+       VP9's `profile-id`).
      - **Header extensions and SDP rules:** RTP header extension control on
        `RTCRtpTransceiver` (`getHeaderExtensionsToNegotiate`,
        `setHeaderExtensionsToNegotiate`, `getNegotiatedHeaderExtensions`);
        `rtpHeaderEncryptionPolicy` (Cryptex, RFC 9335, in the engine),
-       `alwaysNegotiateDataChannels`, `targetLatency` and OAuth ICE
-       credentials in `RTCConfiguration`; the RFC 8834 header extensions, with
-       the audio level measured from the frame's PCM and the capture time on
-       what a sender writes (`header_extensions.rs`); remote descriptions
-       without a DTLS fingerprint (SDES), without cryptex under `require`,
-       with remapped extension ids or with directions the offer doesn't allow
-       are refused. Engine: `tlsVersion` is `"FEFD"`.
-     - **Data channels:** a transferable `RTCDataChannel` (`05_transfer.js`,
-       a proxy over a `MessagePort` to the realm that owns it);
-       `RTCCertificate` is serializable, for a window only;
-       `RTCDataChannel.priority` (webrtc-priority, carried in the DCEP OPEN by
-       the engine); a remote channel's `open` is a task after `datachannel`;
-       `[[MaxMessageSize]]` follows each answer and `send()` checks it;
-       encoded frame data takes no resizable buffer, and a transferred one is
-       not copied. Engine: an exhausted partially reliable loss is abandoned
-       in Fast Recovery; an empty message counts as 0 bytes received.
+       `alwaysNegotiateDataChannels`, `targetLatency` and OAuth ICE credentials
+       in `RTCConfiguration`; the RFC 8834 header extensions, with the audio
+       level measured from the frame's PCM and the capture time on what a sender
+       writes (`header_extensions.rs`); remote descriptions without a DTLS
+       fingerprint (SDES), without cryptex under `require`, with remapped
+       extension ids or with directions the offer doesn't allow are refused.
+       Engine: `tlsVersion` is `"FEFD"`.
+     - **Data channels:** a transferable `RTCDataChannel` (`05_transfer.js`, a
+       proxy over a `MessagePort` to the realm that owns it); `RTCCertificate`
+       is serializable, for a window only; `RTCDataChannel.priority`
+       (webrtc-priority, carried in the DCEP OPEN by the engine); a remote
+       channel's `open` is a task after `datachannel`; `[[MaxMessageSize]]`
+       follows each answer and `send()` checks it; encoded frame data takes no
+       resizable buffer, and a transferred one is not copied. Engine: an
+       exhausted partially reliable loss is abandoned in Fast Recovery; an empty
+       message counts as 0 bytes received.
      - **Stats:** stats objects are ordinary dictionaries and exist from the
        moment webrtc-stats creates them; transport stats carry the ICE and DTLS
-       state and the ICE role from the start; a stopped transceiver's RTP
-       stream stats end with the negotiation; `outbound-rtp` `active` follows
-       the encoding and `encodingIndex` is video only; `inbound-rtp`
+       state and the ICE role from the start; a stopped transceiver's RTP stream
+       stats end with the negotiation; `outbound-rtp` `active` follows the
+       encoding and `encodingIndex` is video only; `inbound-rtp`
        `trackIdentifier` is the receiver track's id.
      - **Media sink:** `Deno.webrtc.readFrames()` hands out a remote track's
-       received frames (`media_sink.rs`, two ops) and `getSettings()` has
-       their coded size; the WPT runner's `<video>` / `<audio>` elements
+       received frames (`media_sink.rs`, two ops) and `getSettings()` has their
+       coded size; the WPT runner's `<video>` / `<audio>` elements
        (`tests/wpt/runner/media_env.js`) are fed only by those frames; a remote
        track mutes when its RTP stops and unmutes when it resumes; a receiver
        track the user agent ends fires `ended` in a queued task. Engine: VP9
        non-flexible mode with the scalability structure, whole H.264 / H.265
-       access units, Ogg packets by the segment table, the `SettingEngine`
-       mid generator.
+       access units, Ogg packets by the segment table, the `SettingEngine` mid
+       generator.
      - **Encoded transform:** `RTCRtpSender` / `RTCRtpReceiver`
-       `createEncodedStreams()`; `RTCEncodedVideoFrame` /
-       `RTCEncodedAudioFrame` `timestamp`; frame metadata `frameId`,
-       `dependencies`, `audioLevel` (a sender's the level measured from the
-       frame's PCM, absent without one) and capture times;
-       `generateKeyFrame` / `sendKeyFrameRequest` follow the spec's checks; a
-       transformed sender's frames start once the connection is up; a script
-       transformer writes back only its own frames, in order; a transform once
-       attached stays its first owner's. SFrame's dropped `…Encrypter` names
-       are not aliased.
+       `createEncodedStreams()`; `RTCEncodedVideoFrame` / `RTCEncodedAudioFrame`
+       `timestamp`; frame metadata `frameId`, `dependencies`, `audioLevel` (a
+       sender's the level measured from the frame's PCM, absent without one) and
+       capture times; `generateKeyFrame` / `sendKeyFrameRequest` follow the
+       spec's checks; a transformed sender's frames start once the connection is
+       up; a script transformer writes back only its own frames, in order; a
+       transform once attached stays its first owner's. SFrame's dropped
+       `…Encrypter` names are not aliased.
      - **Identity:** Identity for WebRTC (`06_identity.js`): the IdP proxy at
-       `https://<domain>/.well-known/idp-proxy/<protocol>` runs in an
-       internal permissionless script worker (`runtime/js/11_workers.js`,
+       `https://<domain>/.well-known/idp-proxy/<protocol>` runs in an internal
+       permissionless script worker (`runtime/js/11_workers.js`,
        `runtime/ops/worker_host.rs`); `setIdentityProvider`,
-       `getIdentityAssertion`, `peerIdentity`, `idpLoginUrl`,
-       `idpErrorInfo`, the `a=identity` line on created descriptions and its
-       validation on remote ones; `RTCConfiguration.peerIdentity`; `RTCError`'s
-       `idp-*` details and `httpRequestStatusCode`.
+       `getIdentityAssertion`, `peerIdentity`, `idpLoginUrl`, `idpErrorInfo`,
+       the `a=identity` line on created descriptions and its validation on
+       remote ones; `RTCConfiguration.peerIdentity`; `RTCError`'s `idp-*`
+       details and `httpRequestStatusCode`.
      - Engine: Brainwires/webrtc-rs-rtc `wpt100/integration` (d24baa50) on
        `webrtc/d28-wpt`, `FORK.md` rows for each change; released in
        `0.22.0+brainwires.1` (item 479).
-     - Not done: no `crossOriginIsolated` global (the subtests that need it
-       stay failing); canvas capture, pixel checks, encoder scaling, SVC and
+     - Not done: no `crossOriginIsolated` global (the subtests that need it stay
+       failing); canvas capture, pixel checks, encoder scaling, SVC and
        `AudioContext` wait for real codecs (Phase 2).
-     - Tests: `tests/unit/webrtc_{ice,codecs,hdrext,datachannel,stats,
-       transform,identity}_test.ts`; engine tests per crate (`rtc-srtp`
-       Cryptex vectors, `rtc-sctp` Fast Recovery, `rtc-media` readers,
-       `rtc-rtp` VP9).
+     - Tests:
+       `tests/unit/webrtc_{ice,codecs,hdrext,datachannel,stats,
+       transform,identity}_test.ts`;
+       engine tests per crate (`rtc-srtp` Cryptex vectors, `rtc-sctp` Fast
+       Recovery, `rtc-media` readers, `rtc-rtp` VP9).
      - Node tests enabled: none; no Node API changes.
 
 479. **`fix(ext/webrtc)`: webrtc-rs-rtc `0.22.0+brainwires.1`** (runtime;
-     `Cargo.toml`, `Cargo.lock`, `ext/webrtc/{01_webrtc.js,media.rs}`).
-     The conformance release (`f36d9b2c`, from `0.21.1+brainwires.6` and
-     item 478's `wpt100/integration`): upstream's 0.22.0 with the fork's
-     work on SCTP and data channels, JSEP, ICE / TURN / mDNS, DTLS, SRTP,
-     RTP / RTCP and the interceptors, and the statistics report, each claim
-     a row of the engine's `docs/conformance.md`. The engine's public API
-     changed (its CHANGELOG lists the breaking changes); `ext/webrtc` uses
-     none of the changed Rust items, and its stats repairs that the engine
-     now does itself are gone (the certificate as base64 DER, a codec's
-     `transportId`, `encodingIndex` for video only, remote RTP stream
-     objects from their first RTCP report, members without a value left
-     out). The default codecs no longer offer ULPFEC, which the engine
-     neither encodes nor decodes, so an `EncodedMediaTrack`'s codec
+     `Cargo.toml`, `Cargo.lock`, `ext/webrtc/{01_webrtc.js,media.rs}`). The
+     conformance release (`f36d9b2c`, from `0.21.1+brainwires.6` and item 478's
+     `wpt100/integration`): upstream's 0.22.0 with the fork's work on SCTP and
+     data channels, JSEP, ICE / TURN / mDNS, DTLS, SRTP, RTP / RTCP and the
+     interceptors, and the statistics report, each claim a row of the engine's
+     `docs/conformance.md`. The engine's public API changed (its CHANGELOG lists
+     the breaking changes); `ext/webrtc` uses none of the changed Rust items,
+     and its stats repairs that the engine now does itself are gone (the
+     certificate as base64 DER, a codec's `transportId`, `encodingIndex` for
+     video only, remote RTP stream objects from their first RTCP report, members
+     without a value left out). The default codecs no longer offer ULPFEC, which
+     the engine neither encodes nor decodes, so an `EncodedMediaTrack`'s codec
      preferences list RTX only.
-     - User-facing note: stats members the engine cannot measure are now
-       omitted instead of reported as 0 or `""`; ICE drops remote candidates
-       on unspecified, multicast, broadcast or port-0 addresses, and checks
-       a loopback or link-local remote address only from a local candidate
-       of the same scope; a remote mDNS name must be `<uuid>.local` (other
-       `.local` names are ignored); `video/ulpfec` is no longer in
+     - User-facing note: stats members the engine cannot measure are now omitted
+       instead of reported as 0 or `""`; ICE drops remote candidates on
+       unspecified, multicast, broadcast or port-0 addresses, and checks a
+       loopback or link-local remote address only from a local candidate of the
+       same scope; a remote mDNS name must be `<uuid>.local` (other `.local`
+       names are ignored); `video/ulpfec` is no longer in
        `RTCRtpSender.getCapabilities("video")`.
      - Tests: webrtc-rs-rtc's workspace with `--all-features` (2746 pass);
        `ext/webrtc`'s unit tests and the WebRTC WPT run.
@@ -19240,52 +19234,51 @@ where the changes are discussed.
 480. **`fix(ext/webrtc)`: webrtc-rs-rtc `0.22.0+brainwires.2`** (runtime;
      `Cargo.toml`, `Cargo.lock`). The engine's fix release (`f0ebf8f2`): a
      sender whose encodings leave the codec to negotiation, as every
-     `RTCRtpSender` here does, is now sent with its first negotiated media
-     codec and bound to the interceptors, so it sends RTCP sender reports,
-     answers NACKs (over RTX, which explicit encodings now get) and feeds
-     TWCC; before, none of that ran for media the runtime sent. Its
-     outbound stream registers that codec, so `codecId`, `rtxSsrc`, the
-     remote-inbound `jitter` / `roundTripTime` and `remote-outbound-rtp`
-     appear. A rejected m= section in a remote offer gets a stopped
-     transceiver (no `track` event), as JSEP and W3C require.
-     - User-facing note: lost video packets are retransmitted; the stats
-       members above are reported; `getTransceivers()` lists a stopped
-       transceiver for each rejected section of a remote offer.
+     `RTCRtpSender` here does, is now sent with its first negotiated media codec
+     and bound to the interceptors, so it sends RTCP sender reports, answers
+     NACKs (over RTX, which explicit encodings now get) and feeds TWCC; before,
+     none of that ran for media the runtime sent. Its outbound stream registers
+     that codec, so `codecId`, `rtxSsrc`, the remote-inbound `jitter` /
+     `roundTripTime` and `remote-outbound-rtp` appear. A rejected m= section in
+     a remote offer gets a stopped transceiver (no `track` event), as JSEP and
+     W3C require.
+     - User-facing note: lost video packets are retransmitted; the stats members
+       above are reported; `getTransceivers()` lists a stopped transceiver for
+       each rejected section of a remote offer.
      - Tests: the engine's rtc-to-rtc tests (sender reports, NACK over RTX,
        stats) and its workspace; `ext/webrtc`'s unit tests and the WebRTC WPT
        run.
      - Node tests enabled: none; `node:` has no WebRTC API.
 
 481. **`fix(ext/webrtc)`: webrtc-rs-rtc `0.22.0+brainwires.3`** (runtime;
-     `Cargo.toml`, `Cargo.lock`, `ext/webrtc/{media.rs,peer.rs}`). The
-     engine's next fix release (`29e3e7ef`): a renegotiation that changes a
-     sender's effective codec binds the sender again (its NACK buffer and the
-     TWCC send side start over; no RTCP BYE); a stopped transceiver whose m=
-     section an answer leaves rejected is removed from the set (W3C
-     webrtc-pc 4.4.1.6), and a rejected section in a remote description
-     stops an existing transceiver; the RTX SSRC is left out when RTX isn't
-     negotiated; `write_rtp` falls back to the negotiated payload type; RTCP
-     XR receiver reference time / DLRR reports give `remote-outbound-rtp`
-     its `roundTripTime`, `totalRoundTripTime` and
-     `roundTripTimeMeasurements`, and the default offers carry
-     `a=rtcp-fb:<pt> rrtr` on video. New API: `take_removed_transceivers()`,
-     the transceivers removed since the last call, by the index each had
-     then. `ext/webrtc` keys each engine transceiver index to a stable key;
-     after every local or remote description (and rollback, which the
-     engine now reports the same way, replacing the runtime's own guess at
-     which transceivers a rollback removes) it drops the removed keys and
-     their per-transceiver state, so the later transceivers keep their
-     senders, receivers and stats. `media_stack()` turns on send-side
+     `Cargo.toml`, `Cargo.lock`, `ext/webrtc/{media.rs,peer.rs}`). The engine's
+     next fix release (`29e3e7ef`): a renegotiation that changes a sender's
+     effective codec binds the sender again (its NACK buffer and the TWCC send
+     side start over; no RTCP BYE); a stopped transceiver whose m= section an
+     answer leaves rejected is removed from the set (W3C webrtc-pc 4.4.1.6), and
+     a rejected section in a remote description stops an existing transceiver;
+     the RTX SSRC is left out when RTX isn't negotiated; `write_rtp` falls back
+     to the negotiated payload type; RTCP XR receiver reference time / DLRR
+     reports give `remote-outbound-rtp` its `roundTripTime`,
+     `totalRoundTripTime` and `roundTripTimeMeasurements`, and the default
+     offers carry `a=rtcp-fb:<pt> rrtr` on video. New API:
+     `take_removed_transceivers()`, the transceivers removed since the last
+     call, by the index each had then. `ext/webrtc` keys each engine transceiver
+     index to a stable key; after every local or remote description (and
+     rollback, which the engine now reports the same way, replacing the
+     runtime's own guess at which transceivers a rollback removes) it drops the
+     removed keys and their per-transceiver state, so the later transceivers
+     keep their senders, receivers and stats. `media_stack()` turns on send-side
      congestion control (`configure_congestion_control` with GCC over TWCC):
      transport-wide sequence numbers on what is sent, the estimate from the
-     feedback, and a pacer at that rate (a bounded queue the driver drains
-     at the engine's `poll_timeout`; writes never wait on it); the estimate
-     is the candidate pair's `availableOutgoingBitrate` and the outbound
-     streams' `targetBitrate`.
+     feedback, and a pacer at that rate (a bounded queue the driver drains at
+     the engine's `poll_timeout`; writes never wait on it); the estimate is the
+     candidate pair's `availableOutgoingBitrate` and the outbound streams'
+     `targetBitrate`.
      - User-facing note: `getTransceivers()` no longer lists a stopped
        transceiver once an answer rejects its section; media is paced to a
-       bandwidth estimate (starting at 300 kb/s and following the remote's
-       TWCC feedback); the stats members above are reported.
+       bandwidth estimate (starting at 300 kb/s and following the remote's TWCC
+       feedback); the stats members above are reported.
      - Tests: `tests/unit/webrtc_test.ts`
        (`webrtcRejectedSectionRemovesStoppedTransceiver`,
        `webrtcLaterTransceiverWorksAfterEarlierRemoved`); the engine's
@@ -19295,44 +19288,43 @@ where the changes are discussed.
 482. **`feat(ext/webrtc)`: webrtc-rs-rtc `0.22.0+brainwires.4`, ECN / L4S**
      (runtime; `Cargo.toml`, `Cargo.lock`, `ext/webrtc/Cargo.toml`,
      `ext/webrtc/{ecn.rs,lib.rs,media.rs,net.rs,peer.rs,tests.rs}`). The
-     engine's ECN release (`a10b2f7d`): `TransportContext::ecn` carries each datagram's ECN
-     codepoint both ways (the one it arrived with into `handle_read`, the
-     one to send with out of `poll_write`), `SettingEngineBuilder::with_ecn`
-     marks the RTP (RTX included) of a stream that negotiated `ack ccfb`
-     ECT(1), and `configure_congestion_control_feedback` negotiates RFC 8888
-     feedback and reports each packet with the codepoint it arrived with.
-     Its statistics: `inbound-rtp` `packetsReceivedWithEct1` /
-     `packetsReceivedWithCe` (with ECN on) and `packetsReportedAsLost` /
-     `packetsReportedAsLostButRecovered` (with `ccfb`), `outbound-rtp`
-     `packetsSentWithEct1` (with ECN on), and `remote-inbound-rtp`
-     `packetsReceivedWithEct1`, `packetsReceivedWithCe`,
+     engine's ECN release (`a10b2f7d`): `TransportContext::ecn` carries each
+     datagram's ECN codepoint both ways (the one it arrived with into
+     `handle_read`, the one to send with out of `poll_write`),
+     `SettingEngineBuilder::with_ecn` marks the RTP (RTX included) of a stream
+     that negotiated `ack ccfb` ECT(1), and
+     `configure_congestion_control_feedback` negotiates RFC 8888 feedback and
+     reports each packet with the codepoint it arrived with. Its statistics:
+     `inbound-rtp` `packetsReceivedWithEct1` / `packetsReceivedWithCe` (with ECN
+     on) and `packetsReportedAsLost` / `packetsReportedAsLostButRecovered` (with
+     `ccfb`), `outbound-rtp` `packetsSentWithEct1` (with ECN on), and
+     `remote-inbound-rtp` `packetsReceivedWithEct1`, `packetsReceivedWithCe`,
      `packetsReportedAsLost`, `packetsReportedAsLostButRecovered` and
      `packetsWithBleachedEct1Marking` from the reports received.
-     `ext/webrtc/ecn.rs` does the socket half with `quinn-udp` (already in
-     the tree under quinn): on the connection's UDP sockets and a shared
-     port's, every datagram is read with its `IP_TOS` / `IPV6_TCLASS`
-     control message (`IP_RECVTOS` / `IPV6_RECVTCLASS`; `IP_RECVECN` /
-     `IPV6_RECVECN` through `WSARecvMsg` on Windows) and sent with the
-     engine's codepoint as a per-datagram `IP_TOS` / `IPV6_TCLASS` (Windows
-     `IP_ECN` / `IPV6_ECN`) control message, so no socket option follows the
-     codepoint. Each connection turns the engine's ECN on where the platform
-     does both (Linux, Android, macOS, iOS, FreeBSD, and Windows with
-     `WSARecvMsg`, which a probe socket checks); a socket whose setup fails
-     keeps the plain path. `quinn-udp` also forbids IP fragmentation on those
-     sockets, as QUIC does (the engine's datagrams stay under its 1200-byte
-     MTU), and Linux's UDP GRO, which it turns on, is turned back off. ICE-TCP
-     and TURN relays carry no codepoint. `media_stack()` adds
-     `configure_congestion_control_feedback` beside GCC over TWCC (kept as
-     the congestion controller): offers carry `a=rtcp-fb:<pt> ack ccfb`; a
-     peer that doesn't answer it, as browsers don't unless Chrome's field
-     trial is on, negotiates without it and nothing is marked for that
-     stream; where both are negotiated the send history keeps one record
-     per packet, so the estimator takes each packet once.
-     - User-facing note: offers list `ack ccfb` feedback on every codec;
-       between two Deno peers (or with a browser that answers it) video and
-       audio RTP go out ECT(1) on UDP, and the ECN and RFC 8888 statistics
-       above are reported; on a platform without per-datagram ECN the ECN
-       members are absent.
+     `ext/webrtc/ecn.rs` does the socket half with `quinn-udp` (already in the
+     tree under quinn): on the connection's UDP sockets and a shared port's,
+     every datagram is read with its `IP_TOS` / `IPV6_TCLASS` control message
+     (`IP_RECVTOS` / `IPV6_RECVTCLASS`; `IP_RECVECN` / `IPV6_RECVECN` through
+     `WSARecvMsg` on Windows) and sent with the engine's codepoint as a
+     per-datagram `IP_TOS` / `IPV6_TCLASS` (Windows `IP_ECN` / `IPV6_ECN`)
+     control message, so no socket option follows the codepoint. Each connection
+     turns the engine's ECN on where the platform does both (Linux, Android,
+     macOS, iOS, FreeBSD, and Windows with `WSARecvMsg`, which a probe socket
+     checks); a socket whose setup fails keeps the plain path. `quinn-udp` also
+     forbids IP fragmentation on those sockets, as QUIC does (the engine's
+     datagrams stay under its 1200-byte MTU), and Linux's UDP GRO, which it
+     turns on, is turned back off. ICE-TCP and TURN relays carry no codepoint.
+     `media_stack()` adds `configure_congestion_control_feedback` beside GCC
+     over TWCC (kept as the congestion controller): offers carry
+     `a=rtcp-fb:<pt> ack ccfb`; a peer that doesn't answer it, as browsers don't
+     unless Chrome's field trial is on, negotiates without it and nothing is
+     marked for that stream; where both are negotiated the send history keeps
+     one record per packet, so the estimator takes each packet once.
+     - User-facing note: offers list `ack ccfb` feedback on every codec; between
+       two Deno peers (or with a browser that answers it) video and audio RTP go
+       out ECT(1) on UDP, and the ECN and RFC 8888 statistics above are
+       reported; on a platform without per-datagram ECN the ECN members are
+       absent.
      - Tests: `tests/unit/webrtc_test.ts` (`webrtcEcnMarksVideoEct1`); the
        engine's `ecn_l4s_rtc2rtc` and workspace; the WebRTC WPT run
        (`webrtc-stats/supported-stats.https.html`).
@@ -19343,29 +19335,27 @@ where the changes are discussed.
      `cli/standalone/binary.rs`, `cli/rt_desktop/{lib.rs,app_origin.rs}`,
      `cli/rt/desktop.rs`, `runtime/ops/desktop.rs`, `runtime/js/99_main.js`,
      `libs/config/deno_json/mod.rs`, `cli/schemas/config-file.v1.json`,
-     `cli/tsc/dts/lib.deno.desktop.d.ts`). A desktop app that declares itself
-     a web browser, with `desktop.app.browser: true` in deno.json or
+     `cli/tsc/dts/lib.deno.desktop.d.ts`). A desktop app that declares itself a
+     web browser, with `desktop.app.browser: true` in deno.json or
      `"browser": true` in an embedded `.deno-desktop/app.json`, now receives
      `http` and `https` links the way it receives its deep links: in
      `Deno.desktop.launchUrls` at a cold start, as `"openurl"` events (macOS)
-     and in a `"secondinstance"` event's `urls` (a later launch forwarded by
-     the single-instance lock). Before, the runtime dropped every link whose
-     scheme was not a declared deep link, so a browser app never saw the web
-     links the OS opened with it. Opened HTML and XHTML files keep reaching
-     the open-file path (`launchFiles`, `"openfile"`), cold and warm,
-     including a Linux launcher's `%u`, which passes them as `file:` URLs.
-     `Deno.desktop.browserLinks` (`boolean`) says whether the runtime
-     delivers web links to the app: `true` for a browser app in its main
-     scope, `false` otherwise (no flag, a worker, outside a desktop app).
-     `http` and `https` stay refused in `desktop.app.deepLinks`, and the
-     runtime never registers them for the app (`registerScheme` refuses
-     them): the OS lists a browser app from what its packaging declares, and
-     only the user makes it the default browser. Every other scheme is still
-     dropped unless declared.
-     - User-facing note: set `desktop.app.browser` and the app's
-       `"openurl"` / `launchUrls` / `"secondinstance"` handlers get the web
-       links the OS sends it; check `Deno.desktop.browserLinks` before relying
-       on it.
+     and in a `"secondinstance"` event's `urls` (a later launch forwarded by the
+     single-instance lock). Before, the runtime dropped every link whose scheme
+     was not a declared deep link, so a browser app never saw the web links the
+     OS opened with it. Opened HTML and XHTML files keep reaching the open-file
+     path (`launchFiles`, `"openfile"`), cold and warm, including a Linux
+     launcher's `%u`, which passes them as `file:` URLs.
+     `Deno.desktop.browserLinks` (`boolean`) says whether the runtime delivers
+     web links to the app: `true` for a browser app in its main scope, `false`
+     otherwise (no flag, a worker, outside a desktop app). `http` and `https`
+     stay refused in `desktop.app.deepLinks`, and the runtime never registers
+     them for the app (`registerScheme` refuses them): the OS lists a browser
+     app from what its packaging declares, and only the user makes it the
+     default browser. Every other scheme is still dropped unless declared.
+     - User-facing note: set `desktop.app.browser` and the app's `"openurl"` /
+       `launchUrls` / `"secondinstance"` handlers get the web links the OS sends
+       it; check `Deno.desktop.browserLinks` before relying on it.
      - Tests: `launch_args` (`browser_apps_also_accept_http_and_https`,
        `file_url_arguments_become_paths`), `app_origin`
        (`app_config_file_browser`), `rt_desktop::app_origin`
@@ -19377,178 +19367,178 @@ where the changes are discussed.
      `ext/node/ops/pipe_wrap.rs`,
      `ext/node/polyfills/internal_binding/pipe_wrap.ts`,
      `tests/unit_node/net_test.ts`). A `node:net` server on a pipe path
-     (`net.createServer().listen("\\\\.\\pipe\\name")`, the local IPC of
-     a Windows program and what denext's `listenLocalIpc` uses there) created
-     its pipe with no security attributes, so the pipe took Windows' default
-     descriptor, which also lets every other local account open it for
-     reading. Every instance is now created with an explicit descriptor
+     (`net.createServer().listen("\\\\.\\pipe\\name")`, the local IPC of a
+     Windows program and what denext's `listenLocalIpc` uses there) created its
+     pipe with no security attributes, so the pipe took Windows' default
+     descriptor, which also lets every other local account open it for reading.
+     Every instance is now created with an explicit descriptor
      (`create_win_pipe_instance`):
      - **The descriptor.** In SDDL,
-       `O:<user>D:P(A;;0x1f01ff;;;<user>)(A;;0x1f01ff;;;SY)`: owned by the
-       user of the process's token, with a protected DACL (nothing inherited)
-       of two ACEs, `FILE_ALL_ACCESS` for that user and for LocalSystem.
-       Administrators have no ACE: an elevated process of the same user
-       carries the user's SID and matches the first one, and an administrator
-       of another account is not a party to the program's IPC. A descriptor
-       that can't be built fails the listen; the pipe is never created with
-       the default one instead.
+       `O:<user>D:P(A;;0x1f01ff;;;<user>)(A;;0x1f01ff;;;SY)`: owned by the user
+       of the process's token, with a protected DACL (nothing inherited) of two
+       ACEs, `FILE_ALL_ACCESS` for that user and for LocalSystem. Administrators
+       have no ACE: an elevated process of the same user carries the user's SID
+       and matches the first one, and an administrator of another account is not
+       a party to the program's IPC. A descriptor that can't be built fails the
+       listen; the pipe is never created with the default one instead.
      - **One owner per name.** The first instance a server creates carries
-       `FILE_FLAG_FIRST_PIPE_INSTANCE` (it already did), so `listen` on a
-       name another process serves fails with `EADDRINUSE` and the server
-       never becomes one more instance of a pipe it doesn't own. The
-       instances `uv_pipe_accept` creates afterwards, on the same handle,
-       don't carry it. With the DACL above, no other account can add an
-       instance of the server's pipe either (`FILE_CREATE_PIPE_INSTANCE`).
+       `FILE_FLAG_FIRST_PIPE_INSTANCE` (it already did), so `listen` on a name
+       another process serves fails with `EADDRINUSE` and the server never
+       becomes one more instance of a pipe it doesn't own. The instances
+       `uv_pipe_accept` creates afterwards, on the same handle, don't carry it.
+       With the DACL above, no other account can add an instance of the server's
+       pipe either (`FILE_CREATE_PIPE_INSTANCE`).
      - **Local only.** `PIPE_REJECT_REMOTE_CLIENTS` on every instance (tokio's
        default, now set explicitly).
-     - **`readableAll` / `writableAll`.** `server.listen({ path, readableAll,
-       writableAll })` was a no-op on Windows. It now does what libuv's
-       `uv_pipe_chmod` does (`uv_pipe_chmod` in `pipe.rs`; the instances are
-       opened with `WRITE_DAC` for it): the pipe's DACL is replaced with the
-       one above plus an ACE for Everyone, `(A;;0x120189;;;WD)` for
-       `readableAll` (`FILE_GENERIC_READ | FILE_WRITE_ATTRIBUTES`),
-       `(A;;0x120196;;;WD)` for `writableAll` (`FILE_GENERIC_WRITE |
-       FILE_READ_ATTRIBUTES`), `(A;;0x12019f;;;WD)` for both. As in Node,
-       `writableAll` includes the right to create instances of the pipe
-       (`FILE_GENERIC_WRITE` holds `FILE_CREATE_PIPE_INSTANCE`, and a client
-       that opens with `GENERIC_WRITE`, as Node's and tokio's do, needs it):
-       use it only for a pipe every local account is meant to share.
+     - **`readableAll` / `writableAll`.**
+       `server.listen({ path, readableAll,
+       writableAll })` was a no-op on
+       Windows. It now does what libuv's `uv_pipe_chmod` does (`uv_pipe_chmod`
+       in `pipe.rs`; the instances are opened with `WRITE_DAC` for it): the
+       pipe's DACL is replaced with the one above plus an ACE for Everyone,
+       `(A;;0x120189;;;WD)` for `readableAll`
+       (`FILE_GENERIC_READ | FILE_WRITE_ATTRIBUTES`), `(A;;0x120196;;;WD)` for
+       `writableAll` (`FILE_GENERIC_WRITE |
+       FILE_READ_ATTRIBUTES`),
+       `(A;;0x12019f;;;WD)` for both. As in Node, `writableAll` includes the
+       right to create instances of the pipe (`FILE_GENERIC_WRITE` holds
+       `FILE_CREATE_PIPE_INSTANCE`, and a client that opens with
+       `GENERIC_WRITE`, as Node's and tokio's do, needs it): use it only for a
+       pipe every local account is meant to share.
      - **Stricter than Node, on purpose.** Node (libuv) creates the pipe with
        the default descriptor unless one of the two options is set. Here the
-       default is the user and LocalSystem only, so a server that other
-       accounts must reach (a service a per-user client talks to) has to say
-       so with `readableAll` / `writableAll`. Clients are unchanged: they
-       connect as before, and a client of the same account always can.
-     - User-facing note: on Windows a `node:net` pipe server is reachable by
-       its own account and LocalSystem only; pass `readableAll` / `writableAll`
-       to `listen()` to open it to other accounts. A pipe name another
-       process already serves fails `listen()` with `EADDRINUSE`.
+       default is the user and LocalSystem only, so a server that other accounts
+       must reach (a service a per-user client talks to) has to say so with
+       `readableAll` / `writableAll`. Clients are unchanged: they connect as
+       before, and a client of the same account always can.
+     - User-facing note: on Windows a `node:net` pipe server is reachable by its
+       own account and LocalSystem only; pass `readableAll` / `writableAll` to
+       `listen()` to open it to other accounts. A pipe name another process
+       already serves fails `listen()` with `EADDRINUSE`.
      - Tests: `libs/core/uv_compat/pipe_security.rs` (Windows: the SDDL, the
        built descriptor's owner, protection and ACEs, the descriptor read back
-       from a live pipe with `GetSecurityInfo`, a refused second first
-       instance, the Everyone ACE added and removed by the chmod, a later
-       instance sharing the first one's descriptor);
-       `tests/unit_node/net_test.ts` (`a second server on a served named pipe
-       fails with EADDRINUSE`, `a path server listens with readableAll and
+       from a live pipe with `GetSecurityInfo`, a refused second first instance,
+       the Everyone ACE added and removed by the chmod, a later instance sharing
+       the first one's descriptor); `tests/unit_node/net_test.ts`
+       (`a second server on a served named pipe
+       fails with EADDRINUSE`,
+       `a path server listens with readableAll and
        writableAll`).
      - Node tests enabled: none new; `parallel/test-net-server-listen-path.js`
        (already enabled) now exercises the chmod on Windows.
 
-485. **`fix(pty)`: a Windows pty kill ends the process tree; detached
-     children leave their parent's job** (runtime, behavior change on
-     Windows; `ext/pty/{Cargo.toml,windows.rs}`,
+485. **`fix(pty)`: a Windows pty kill ends the process tree; detached children
+     leave their parent's job** (runtime, behavior change on Windows;
+     `ext/pty/{Cargo.toml,windows.rs}`,
      `runtime/subprocess_windows/src/process.rs`, `cli/util/job_object.rs`,
      `cli/tsc/dts/lib.deno_pty.d.ts`, `tests/unit/pty_test.ts`).
      - The pty child runs in a job object of its own. It is created
        `CREATE_SUSPENDED`, assigned with `AssignProcessToJobObject` and only
-       then resumed, so nothing it starts can run outside the job. `kill`
-       (and the kill when the runtime drops an unreaped child) is
-       `TerminateJobObject(job, 1)`: the child and every process it started
-       end with exit code 1. Before, `TerminateProcess` ended the child alone
-       and a shell's `ping` (or a dev server) kept running. The status is
-       still `GetExitCodeProcess` of the child. The job is not kill-on-close:
-       a child that exits by itself leaves what it started running, as
-       before, and the job handle is closed with the child's resource. It
-       allows explicit breakaway (`JOB_OBJECT_LIMIT_BREAKAWAY_OK`, not the
-       silent kind), so a `detached: true` child started inside the terminal
-       outlives a kill, as a `setsid` daemon outlives a Unix terminal. Where
-       no job can be made or assigned (a sandbox whose job refuses nesting)
-       the child still starts and a kill ends it alone.
+       then resumed, so nothing it starts can run outside the job. `kill` (and
+       the kill when the runtime drops an unreaped child) is
+       `TerminateJobObject(job, 1)`: the child and every process it started end
+       with exit code 1. Before, `TerminateProcess` ended the child alone and a
+       shell's `ping` (or a dev server) kept running. The status is still
+       `GetExitCodeProcess` of the child. The job is not kill-on-close: a child
+       that exits by itself leaves what it started running, as before, and the
+       job handle is closed with the child's resource. It allows explicit
+       breakaway (`JOB_OBJECT_LIMIT_BREAKAWAY_OK`, not the silent kind), so a
+       `detached: true` child started inside the terminal outlives a kill, as a
+       `setsid` daemon outlives a Unix terminal. Where no job can be made or
+       assigned (a sandbox whose job refuses nesting) the child still starts and
+       a kill ends it alone.
      - `Deno.Command` with `detached: true` on Windows adds
-       `CREATE_BREAKAWAY_FROM_JOB` when the job this process is immediately
-       in allows breakaway (`IsProcessInJob` + `QueryInformationJobObject`).
-       That job is usually the runtime's own kill-on-close job, which it
-       joins at its first non-detached spawn; a detached child used to
-       inherit it and die when the runtime exited. An outer job that refuses
-       breakaway fails the spawn with `ERROR_ACCESS_DENIED`, and the spawn is
-       retried without the flag (the child then stays in the jobs, as
-       before).
+       `CREATE_BREAKAWAY_FROM_JOB` when the job this process is immediately in
+       allows breakaway (`IsProcessInJob` + `QueryInformationJobObject`). That
+       job is usually the runtime's own kill-on-close job, which it joins at its
+       first non-detached spawn; a detached child used to inherit it and die
+       when the runtime exited. An outer job that refuses breakaway fails the
+       spawn with `ERROR_ACCESS_DENIED`, and the spawn is retried without the
+       flag (the child then stays in the jobs, as before).
      - `deno desktop --hmr` / `--inspect`'s kill-on-close job
        (`cli/util/job_object.rs`) now allows explicit breakaway too: CEF /
-       WebView2 helpers and a dev server never ask, so they still end with
-       the run, while a detached sidecar outlives it, which is what
-       `detached` asks for.
+       WebView2 helpers and a dev server never ask, so they still end with the
+       run, while a detached sidecar outlives it, which is what `detached` asks
+       for.
      - `PtyForegroundProcess.cwd` (and so `ptyInfo`'s cwd) can be `null` on
-       Windows for an elevated or protected process: reading another
-       process's working directory needs `PROCESS_VM_READ`, which such a
-       process refuses. No change; documented here.
-     - `lib.deno_pty.d.ts` no longer says Windows is unsupported; `kill`'s
-       doc says it ends the tree on Windows.
+       Windows for an elevated or protected process: reading another process's
+       working directory needs `PROCESS_VM_READ`, which such a process refuses.
+       No change; documented here.
+     - `lib.deno_pty.d.ts` no longer says Windows is unsupported; `kill`'s doc
+       says it ends the tree on Windows.
      - User-facing note: on Windows, `pty.kill()` and disposing a pty end the
        programs the child started too; a `detached: true` child outlives the
        runtime even after a non-detached spawn.
      - Tests: `tests/unit/pty_test.ts`, Windows only:
        `ptyKillEndsTheProcessTreeOnWindows`,
        `ptyResizeIsVisibleToTheChildOnWindows`, `ptyUtf8RoundTripOnWindows`,
-       `ptyVtOutputPassesThroughOnWindows`, `ptySpawnsPowerShellOnWindows`
-       (each of `pwsh.exe` / `powershell.exe` where installed),
+       `ptyVtOutputPassesThroughOnWindows`, `ptySpawnsPowerShellOnWindows` (each
+       of `pwsh.exe` / `powershell.exe` where installed),
        `ptySpawnsWslOnWindows` (only with a WSL distribution) and
        `ptyEnvAndCwdOnWindows`; `deno_subprocess_windows`'s
        `detached_child_breaks_away_from_the_global_job`; `cli`'s
        `dropping_the_job_kills_the_child` also checks the breakaway limit.
-     - Node tests enabled: none (`node:child_process`'s `detached` runs on
-       the same spawn, but no node_compat test checks job membership).
+     - Node tests enabled: none (`node:child_process`'s `detached` runs on the
+       same spawn, but no node_compat test checks job membership).
 486. **`feat(desktop)`: desktop path tokens in `unix:` net grants; the update
      helper doesn't wait for surviving detached sidecars** (runtime;
      `cli/rt/run.rs`, `runtime/ops/desktop_update/swap.rs`).
      - A desktop app's baked `--allow-net` / `--allow-net-connect` /
        `--allow-net-listen` value (and the matching `--deny-*`) of the form
-       `unix:$DENO_DESKTOP_DATA/...` or `unix:$DENO_DESKTOP_CACHE/...` names
-       a Unix socket in the app's data or cache folder: at launch the runtime
-       takes off `unix:`, expands the rest exactly as items 190 and 191 expand
-       a read / write / run value (`expand_desktop_path_entry`: no folder, a
-       `..` component, or the token followed by anything but a separator
-       can't be expanded) and puts `unix:` back. The same rules as there: an
-       allow entry that can't be expanded is dropped, never widened, and a
-       list left empty becomes no grant (`None`, never `Some(vec![])`, which
-       allows everything); a deny entry that can't be expanded stays as it
-       was. A net value without `unix:`, or with the token anywhere but right
-       after it, is left alone. This lets denext bake a scoped grant for a
-       sidecar's or the app's own control socket instead of an unscoped
-       `--allow-net`.
+       `unix:$DENO_DESKTOP_DATA/...` or `unix:$DENO_DESKTOP_CACHE/...` names a
+       Unix socket in the app's data or cache folder: at launch the runtime
+       takes off `unix:`, expands the rest exactly as items 190 and 191 expand a
+       read / write / run value (`expand_desktop_path_entry`: no folder, a `..`
+       component, or the token followed by anything but a separator can't be
+       expanded) and puts `unix:` back. The same rules as there: an allow entry
+       that can't be expanded is dropped, never widened, and a list left empty
+       becomes no grant (`None`, never `Some(vec![])`, which allows everything);
+       a deny entry that can't be expanded stays as it was. A net value without
+       `unix:`, or with the token anywhere but right after it, is left alone.
+       This lets denext bake a scoped grant for a sidecar's or the app's own
+       control socket instead of an unscoped `--allow-net`.
      - denext gates on it by runtime version, as it does the data and cache
        tokens (`supportsDesktopDataToken`): this is the first runtime that
        expands the tokens in `unix:` net values. An older runtime reads
-       `unix:$DENO_DESKTOP_DATA/x.sock` as a relative socket path, which the
-       net descriptor parser refuses.
-     - The full-app update helper's wait for processes running from the
-       install (Linux; `wait_for_processes_in`, up to 60 s) leaves out a
-       detached sidecar the app let go running across the update: a process
-       whose `/proc/<pid>/environ` holds the whole entry
-       `DENEXT_SIDECAR_DETACHED=1`, which only denext's detached sidecar
-       launcher sets (on the sidecar itself; the sidecar removes it from its
-       own environment at start, so its children don't inherit it, while
-       `/proc/<pid>/environ`, the block `execve` was given, keeps it). The app
-       stops every other detached sidecar before it starts the helper, so one
-       still running is one with `detached.keepAcrossUpdates` or a
-       `detached.version`. It outlives the app by design, and waiting for it
-       only held every such update for the whole 60 s. A process whose
-       environment can't be read (another user's, a non-dumpable one) is
-       waited for, as before. Not a trust decision: any process of the user
-       could carry the marker, and all it gains is not being waited for; on
-       Linux the swap renames the install whether or not something runs from
-       it. The scan takes its `/proc` root as an argument so the tests run it
-       over a stand-in tree.
-     - Why the environment and not a list of pids in the update state: no
-       such list exists (denext's `installAppUpdateAndRelaunch` passes only
-       `force`), the state file is as writable by the user's processes as a
-       process's own environment, and the marker also covers an instance the
-       app didn't start in this run (a launch of another installed version, a
-       reattached one) without the app reading pids it never authenticated.
-     - macOS: the helper never waits for processes running from the install
-       (an app bundle is swapped by `renamex_np` whatever runs from it), so a
+       `unix:$DENO_DESKTOP_DATA/x.sock` as a relative socket path, which the net
+       descriptor parser refuses.
+     - The full-app update helper's wait for processes running from the install
+       (Linux; `wait_for_processes_in`, up to 60 s) leaves out a detached
+       sidecar the app let go running across the update: a process whose
+       `/proc/<pid>/environ` holds the whole entry `DENEXT_SIDECAR_DETACHED=1`,
+       which only denext's detached sidecar launcher sets (on the sidecar
+       itself; the sidecar removes it from its own environment at start, so its
+       children don't inherit it, while `/proc/<pid>/environ`, the block
+       `execve` was given, keeps it). The app stops every other detached sidecar
+       before it starts the helper, so one still running is one with
+       `detached.keepAcrossUpdates` or a `detached.version`. It outlives the app
+       by design, and waiting for it only held every such update for the whole
+       60 s. A process whose environment can't be read (another user's, a
+       non-dumpable one) is waited for, as before. Not a trust decision: any
+       process of the user could carry the marker, and all it gains is not being
+       waited for; on Linux the swap renames the install whether or not
+       something runs from it. The scan takes its `/proc` root as an argument so
+       the tests run it over a stand-in tree.
+     - Why the environment and not a list of pids in the update state: no such
+       list exists (denext's `installAppUpdateAndRelaunch` passes only `force`),
+       the state file is as writable by the user's processes as a process's own
+       environment, and the marker also covers an instance the app didn't start
+       in this run (a launch of another installed version, a reattached one)
+       without the app reading pids it never authenticated.
+     - macOS: the helper never waits for processes running from the install (an
+       app bundle is swapped by `renamex_np` whatever runs from it), so a
        surviving sidecar needs nothing there. Windows: unchanged. A running
        process locks its executable's folder, so a sidecar running from the
        install would make the swap fail; denext stops every detached sidecar
        before a Windows update (its docs say so). Letting one survive needs it
        to run from a per-version copy outside the install, not done here.
      - User-facing note: on Linux an update with a surviving detached sidecar
-       swaps as soon as the app's own processes have left, instead of after
-       60 s.
+       swaps as soon as the app's own processes have left, instead of after 60
+       s.
      - Tests: `denort`'s `desktop_path_tokens_expand_in_unix_socket_net_grants`,
        `desktop_unix_socket_net_tokens_never_widen_a_grant`,
-       `desktop_path_tokens_expand_in_unix_socket_net_denials`;
-       `deno_runtime`'s `the_detached_sidecar_marker_is_a_whole_environ_entry`,
+       `desktop_path_tokens_expand_in_unix_socket_net_denials`; `deno_runtime`'s
+       `the_detached_sidecar_marker_is_a_whole_environ_entry`,
        `the_install_scan_leaves_out_detached_sidecars` (a stand-in `/proc`,
        every Unix host) and `a_detached_sidecar_does_not_hold_the_wait_linux`
        (the real `/proc`).
@@ -19561,24 +19551,24 @@ where the changes are discussed.
      `cli/lib/{kernel_sandbox,kernel_policy,kernel_plan,kernel_apply}.rs`,
      `cli/sandbox/{mod,enforce}.rs`, `cli/tools/{test,bench}/mod.rs`,
      `cli/rt/run.rs`, `libs/sandbox/{plan,seatbelt}.rs`,
-     `runtime/permissions/prompter.rs`). Plan D1, D2 and D4, and the R4 row
-     for `test` / `bench` (plan O5).
+     `runtime/permissions/prompter.rs`). Plan D1, D2 and D4, and the R4 row for
+     `test` / `bench` (plan O5).
      - Deny ceilings (D1, D2). A `--deny-*` is a ceiling no prompt can lift, so
-       from R4 `auto` enforces a run's deny rules even while a prompt can
-       widen the rest (a terminal, prompting on), and does the same for `-A`
-       with denies, terminal or not. Nothing else changes: the policy is
-       compiled from `kernel_policy::deny_ceiling_options` (every allow
-       unscoped, every deny kept; `Context::deny_ceiling`,
-       `KernelPolicy::deny_ceiling`), with no seccomp program, no
-       no-new-privileges, no environment scrub and no read expansion, and Mode
-       A only. The prompt stays (`ModeResolution::fixed` is false;
-       `ModeReason::AutoDenyCeiling`; `ModeResolution::deny_ceiling`). An
-       explicit `enforce` with `-A` and denies keeps enforce's full policy; an
-       explicit `warn`, `DENO_KERNEL_SANDBOX=off|warn`, `--watch`, HMR,
-       `denext dev` and a permission broker win as before.
-     - macOS holds a ceiling with an allow-default Seatbelt profile that
-       refuses the read and write denies (and keeps the re-allows and the
-       marker pair, so a nested `deno` finds the handed-down policy):
+       from R4 `auto` enforces a run's deny rules even while a prompt can widen
+       the rest (a terminal, prompting on), and does the same for `-A` with
+       denies, terminal or not. Nothing else changes: the policy is compiled
+       from `kernel_policy::deny_ceiling_options` (every allow unscoped, every
+       deny kept; `Context::deny_ceiling`, `KernelPolicy::deny_ceiling`), with
+       no seccomp program, no no-new-privileges, no environment scrub and no
+       read expansion, and Mode A only. The prompt stays
+       (`ModeResolution::fixed` is false; `ModeReason::AutoDenyCeiling`;
+       `ModeResolution::deny_ceiling`). An explicit `enforce` with `-A` and
+       denies keeps enforce's full policy; an explicit `warn`,
+       `DENO_KERNEL_SANDBOX=off|warn`, `--watch`, HMR, `denext dev` and a
+       permission broker win as before.
+     - macOS holds a ceiling with an allow-default Seatbelt profile that refuses
+       the read and write denies (and keeps the re-allows and the marker pair,
+       so a nested `deno` finds the handed-down policy):
        `seatbelt::deny_only_profile`, `MacosPlan::deny_only`; the probe is the
        first read deny. A child the prompt allowed, `sudo` included, runs.
      - Linux would need an overmount in a user namespace (Landlock needs
@@ -19588,47 +19578,47 @@ where the changes are discussed.
        (decision O4), and a ceiling that holds nothing applies nothing (no
        re-exec, no folder made; `KernelPolicy::deny_ceiling_held`,
        `ModeReason::DenyCeilingDenoOnly`). Every fail-open gap of a ceiling is
-       documented instead, so `auto` never falls back to warn's line for one.
-       A command enforce doesn't cover (`eval`, a program from stdin, `repl`)
+       documented instead, so `auto` never falls back to warn's line for one. A
+       command enforce doesn't cover (`eval`, a program from stdin, `repl`)
        leaves its ceiling to Deno's checks the same way.
      - `deno test` / `deno bench` (`EnforceCoverage::AfterSetup`). The plan
-       applies after the type check and the coverage folder (made when the
-       plan is prepared), before any test or bench code runs, instead of
-       refusing to start. The process re-executes as for `run`, and the
-       confined image runs exactly the modules the image before it found,
-       filtered (`--changed`, `--related`) and type-checked:
-       `EnforcePlan::entries` (`PlanEntry`), handed over with the plan and not
-       part of its equality; the confined image checks each against its own
-       include patterns and the discovery predicate, so a hand-over can't widen
-       what it reads or runs, and never walks folders it can't list or starts
-       git. A doc-test source the graph doesn't hold (a Markdown file) is among
-       the module files the confined image may read. The JUnit report
-       (`--junit-path`, not `-`) is created before the re-exec and written
-       through the implicit set (`ImplicitNeed::TestReport`). The kernel holds
-       the top-level grant; `Deno.test({ permissions })` and per-bench
-       permissions stay API-level. A worker made before the plan applies (a
-       Vitest config run while finding the tests) still refuses
-       (`enforce::guard_user_code`).
-     - The refused-prompt line (review D4). A compiled program whose baked
-       grant the kernel enforces refused every prompt silently. Where one could
-       have been shown (`prompter::can_prompt`, the shared rule the mode
-       decision and `TtyPrompter` use), `denort` now installs
+       applies after the type check and the coverage folder (made when the plan
+       is prepared), before any test or bench code runs, instead of refusing to
+       start. The process re-executes as for `run`, and the confined image runs
+       exactly the modules the image before it found, filtered (`--changed`,
+       `--related`) and type-checked: `EnforcePlan::entries` (`PlanEntry`),
+       handed over with the plan and not part of its equality; the confined
+       image checks each against its own include patterns and the discovery
+       predicate, so a hand-over can't widen what it reads or runs, and never
+       walks folders it can't list or starts git. A doc-test source the graph
+       doesn't hold (a Markdown file) is among the module files the confined
+       image may read. The JUnit report (`--junit-path`, not `-`) is created
+       before the re-exec and written through the implicit set
+       (`ImplicitNeed::TestReport`). The kernel holds the top-level grant;
+       `Deno.test({ permissions })` and per-bench permissions stay API-level. A
+       worker made before the plan applies (a Vitest config run while finding
+       the tests) still refuses (`enforce::guard_user_code`).
+     - The refused-prompt line (review D4). A compiled program whose baked grant
+       the kernel enforces refused every prompt silently. Where one could have
+       been shown (`prompter::can_prompt`, the shared rule the mode decision and
+       `TtyPrompter` use), `denort` now installs
        `prompter::KernelSandboxPrompter`: every prompt is refused, and the first
        refusal in the process prints one line naming the access and
-       `deno compile --kernel-sandbox=off`. With no terminal, prompting is off as
-       before.
+       `deno compile --kernel-sandbox=off`. With no terminal, prompting is off
+       as before.
      - Not in this item: the overmount (Linux deny ceilings stay Deno-only, and
        the plan's "one re-exec, at most 30 ms" for an interactive Linux run has
-       nothing to measure until it exists); Mode B under `auto` (WP-B);
-       packaged desktop apps (WP-C); the flip (WP-D).
-     - User-facing note (once `auto` reaches R4): `--deny-read` /
-       `--deny-write` now hold against native code and children on macOS even
-       in an interactive run, and with `-A`; nothing else about such a run
-       changes. `deno test` and `deno bench` run under `--kernel-sandbox=enforce`
-       (and `auto`) instead of refusing, with coverage and JUnit files written.
-       A compiled program that would have prompted says once that its
-       permissions are fixed and how to rebuild it with prompts.
-     - Tests: `kernel_sandbox::tests::{deny_only_matrix, prompt_mode_denies,
+       nothing to measure until it exists); Mode B under `auto` (WP-B); packaged
+       desktop apps (WP-C); the flip (WP-D).
+     - User-facing note (once `auto` reaches R4): `--deny-read` / `--deny-write`
+       now hold against native code and children on macOS even in an interactive
+       run, and with `-A`; nothing else about such a run changes. `deno test`
+       and `deno bench` run under `--kernel-sandbox=enforce` (and `auto`)
+       instead of refusing, with coverage and JUnit files written. A compiled
+       program that would have prompted says once that its permissions are fixed
+       and how to rebuild it with prompts.
+     - Tests:
+       `kernel_sandbox::tests::{deny_only_matrix, prompt_mode_denies,
        auto_stage_matrix_deny_only_prompt}`,
        `sandbox::coverage_tests::test_and_bench_are_covered_after_setup`,
        `kernel_policy::tests::{deny_ceiling_options_keep_only_the_denies,
@@ -19638,120 +19628,123 @@ where the changes are discussed.
        test_report_files_are_implicit}`,
        `seatbelt::tests::deny_only_profile_refuses_only_the_denies`,
        `prompter::tests::{kernel_sandbox_prompter_refuses_and_names_the_switch,
-       can_prompt_needs_prompting_on}`; specs `kernel_sandbox::deny_only` (`-A`
-       with denies: native code and a child refused only the denied folder on
-       macOS, Deno-only and no seccomp / no-new-privileges added on Linux, the
-       report, the break-glass variable) and `kernel_sandbox::test_bench` (a
-       native read outside the grant refused inside `deno test`, explicit and
-       under `auto` at R4; coverage and JUnit written; `Deno.test({ permissions
-       })` unchanged; discovered modules and a Markdown doc test from the
-       hand-over; `deno bench`); integration
+       can_prompt_needs_prompting_on}`;
+       specs `kernel_sandbox::deny_only` (`-A` with denies: native code and a
+       child refused only the denied folder on macOS, Deno-only and no seccomp /
+       no-new-privileges added on Linux, the report, the break-glass variable)
+       and `kernel_sandbox::test_bench` (a native read outside the grant refused
+       inside `deno test`, explicit and under `auto` at R4; coverage and JUnit
+       written; `Deno.test({ permissions
+       })` unchanged; discovered
+       modules and a Markdown doc test from the hand-over; `deno bench`);
+       integration
        `kernel_sandbox::{deny_ceiling_prompt_grants_outside_the_deny_macos,
        deny_ceiling_prompt_changes_nothing_linux, compiled_prompt_refused_line}`
-       (pseudo-terminal runs); the escape corpus's `deny-ceiling`
-       configuration (`expectDenyCeiling`). `enforce`'s `test_refused` spec is
-       gone (`deno test` no longer refuses).
+       (pseudo-terminal runs); the escape corpus's `deny-ceiling` configuration
+       (`expectDenyCeiling`). `enforce`'s `test_refused` spec is gone
+       (`deno test` no longer refuses).
      - Node tests enabled: none; no Node API changes.
 
-488. **`feat(permissions)`: the kernel sandbox's broker by itself: `auto`
-     takes the supervisor, a compiled program runs its own, children of a
-     brokered run reach it, and Linux gets a warn observer** (CLI and runtime;
-     denext-only; opt-in as before: `AUTO_STAGE` is unchanged, so `auto` still
-     applies nothing; `cli/lib/{kernel_sandbox,kernel_apply,kernel_policy,
+488. **`feat(permissions)`: the kernel sandbox's broker by itself: `auto` takes
+     the supervisor, a compiled program runs its own, children of a brokered run
+     reach it, and Linux gets a warn observer** (CLI and runtime; denext-only;
+     opt-in as before: `AUTO_STAGE` is unchanged, so `auto` still applies
+     nothing;
+     `cli/lib/{kernel_sandbox,kernel_apply,kernel_policy,
      kernel_supervise,kernel_net_broker}.rs`,
      `cli/sandbox/{mod,enforce,warn,net_broker}.rs`, `cli/rt/{kernel,lib}.rs`,
      `libs/sandbox/{supervise,trace,would_deny,notify,lib}.rs`,
      `runtime/permissions/kernel_broker/{dial,client,mod}.rs`,
-     `ext/io/inherited_fds.rs`). The denext.30 train's package for Mode B
-     (items 466 and 468): what was reachable only by writing
-     `--kernel-sandbox=broker` (or an `enforce` the broker closes a gap for)
-     becomes what `auto` chooses, in `deno` and in `denort`.
-     - `auto` chooses the broker. The mode is decided before a policy exists,
-       so it is decided twice: from the flags, then again once the policy
-       `enforce` compiles is known to have the broker's shape with nothing left
-       that can't be held (`ModeInputs::policy_needs_supervisor`, set by
+     `ext/io/inherited_fds.rs`). The denext.30 train's package for Mode B (items
+     466 and 468): what was reachable only by writing `--kernel-sandbox=broker`
+     (or an `enforce` the broker closes a gap for) becomes what `auto` chooses,
+     in `deno` and in `denort`.
+     - `auto` chooses the broker. The mode is decided before a policy exists, so
+       it is decided twice: from the flags, then again once the policy `enforce`
+       compiles is known to have the broker's shape with nothing left that can't
+       be held (`ModeInputs::policy_needs_supervisor`, set by
        `cli/sandbox::check_run` and `kernel_apply::start_compiled`). Where
-       `auto` would have enforced it then applies `broker`
-       (`AutoPlan::Broker`, `ModeResolution::needs_supervisor`) and the run
-       starts under the supervisor; before, a host-scoped `--allow-net` or a
-       write deny inside a write allow on Linux was "a rule the OS can't hold"
-       only in the sense that `auto` never asked for the broker. A run the
-       stage only warns about (R3, no terminal) still warns, and records
-       `broker` as what would apply. Nothing that keeps `auto` off changes
-       (a prompt, plain `-A`, `--watch`, `off`). The policy is compiled as
-       `enforce` compiles it, in both images: an explicit `broker` holds every
-       scoped rule through the broker, which nobody asked for here. A grant no
-       mode holds (no Landlock, a seccomp filter that can't be installed, a
-       command `enforce` doesn't cover) still falls back to `warn`: a mode
-       `auto` chose never refuses to start.
-     - What goes to the supervisor, unchanged from the policy model: a name in
-       a network grant on Linux and macOS, `--deny-net`, a write deny inside a
-       write allow on Linux, Unix sockets by path on Linux, and a port list on
-       a kernel without Landlock's TCP rules. A grant of IP literals or
+       `auto` would have enforced it then applies `broker` (`AutoPlan::Broker`,
+       `ModeResolution::needs_supervisor`) and the run starts under the
+       supervisor; before, a host-scoped `--allow-net` or a write deny inside a
+       write allow on Linux was "a rule the OS can't hold" only in the sense
+       that `auto` never asked for the broker. A run the stage only warns about
+       (R3, no terminal) still warns, and records `broker` as what would apply.
+       Nothing that keeps `auto` off changes (a prompt, plain `-A`, `--watch`,
+       `off`). The policy is compiled as `enforce` compiles it, in both images:
+       an explicit `broker` holds every scoped rule through the broker, which
+       nobody asked for here. A grant no mode holds (no Landlock, a seccomp
+       filter that can't be installed, a command `enforce` doesn't cover) still
+       falls back to `warn`: a mode `auto` chose never refuses to start.
+     - What goes to the supervisor, unchanged from the policy model: a name in a
+       network grant on Linux and macOS, `--deny-net`, a write deny inside a
+       write allow on Linux, Unix sockets by path on Linux, and a port list on a
+       kernel without Landlock's TCP rules. A grant of IP literals or
        `localhost` with ports stays Mode A (the kernel holds the ports, and the
        report says any address on them is reachable): no supervisor, no extra
-       process. That is also the fallback the plan keeps for the startup
-       budget (60 ms for Mode B's two execs): nothing has to move if the
-       budget fails, because port-only grants never took the supervisor.
-     - A compiled program runs its own supervisor. `deno compile
-       --kernel-sandbox=broker` is accepted for Linux and macOS targets (still
-       refused for Windows and for a desktop app, whose compiled programs run
-       none), and a program compiled with `enforce` takes the broker by itself
-       where its grant needs it, as the CLI does; neither is "a rule the OS
-       can't hold" any more (`Context::compiled_supervisor`). `denort` has no
-       first image to leave (its grant is baked, its modules embedded), so it
-       doesn't exec: inside `kernel::startup`, with one thread, before the
-       JavaScript engine exists and before any embedded module is loaded, it
-       forks (`deno_sandbox::supervise::fork_worker`,
+       process. That is also the fallback the plan keeps for the startup budget
+       (60 ms for Mode B's two execs): nothing has to move if the budget fails,
+       because port-only grants never took the supervisor.
+     - A compiled program runs its own supervisor.
+       `deno compile
+       --kernel-sandbox=broker` is accepted for Linux and
+       macOS targets (still refused for Windows and for a desktop app, whose
+       compiled programs run none), and a program compiled with `enforce` takes
+       the broker by itself where its grant needs it, as the CLI does; neither
+       is "a rule the OS can't hold" any more (`Context::compiled_supervisor`).
+       `denort` has no first image to leave (its grant is baked, its modules
+       embedded), so it doesn't exec: inside `kernel::startup`, with one thread,
+       before the JavaScript engine exists and before any embedded module is
+       loaded, it forks (`deno_sandbox::supervise::fork_worker`,
        `kernel_supervise::fork_supervised`). The parent is the supervisor and
        never returns from `startup`; the child confines itself in place and is
        the program. The fork is refused, before anything happens, when the
        process isn't single-threaded (Linux: `/proc/self/task`; macOS:
        `pthread_is_threaded_np`, since the child goes on without an exec) or
        when it could not confine itself anyway (macOS, inside another Seatbelt
-       sandbox): `auto` then runs the program with Deno's checks and says why,
-       a mode baked by name refuses to start. The broker's network authority
-       moved to `deno_lib` for this (`kernel_net_broker`; `deno_sandbox`'s
-       `proxy` feature is now in `denort` too).
+       sandbox): `auto` then runs the program with Deno's checks and says why, a
+       mode baked by name refuses to start. The broker's network authority moved
+       to `deno_lib` for this (`kernel_net_broker`; `deno_sandbox`'s `proxy`
+       feature is now in `denort` too).
      - The supervisor as the process a launcher watches. It keeps the PID the
        program was started with (the CLI by `execve`, `denort` by being the
        fork's parent), exits with the program's exit code or by the signal that
        killed it, and passes on the signals a process sends it. As PID 1 of a
        container it has a handler for every signal it passes on (the kernel
        delivers an init only what it handles), reaps what it is handed, and
-       exits `128 + signal` when the program died of a signal an init can't
-       die of. New: after the fork it closes every descriptor but stdio and
-       its channel. It used to keep what the first image kept for the worker
-       (a socket a service manager passed, a parent's pipe), so a pipe the
-       program closed never reached its end while the run lasted.
+       exits `128 + signal` when the program died of a signal an init can't die
+       of. New: after the fork it closes every descriptor but stdio and its
+       channel. It used to keep what the first image kept for the worker (a
+       socket a service manager passed, a parent's pipe), so a pipe the program
+       closed never reached its end while the run lasted.
      - Children of a brokered run reach the same broker. Before, a `deno` or
        `denort` started by a brokered program met the kernel's refusals alone
-       (no socket under a host-scoped grant, no change directly in a folder
-       that holds a write deny). Now the worker leaves the processes it starts
-       a dial (`kernel_broker::dial`, named in
-       `DENO_INTERNAL_KERNEL_BROKER_DIAL`, beside the policy carrier of item
-       449 and pinned for children the same way): a channel of the broker used
-       only to ask for another channel, and a pipe holding one byte, the
-       token, that says whose turn it is. A child reads the token, asks for a
-       channel of its own, gives the token back (`Dial::connect`), and installs
-       that channel as its broker; the network route too, when the broker
-       answers that it serves the network (`kernel_supervise::
-       adopt_inherited_dial`). It works through a shell or another program in
-       between, since the descriptors are inherited rather than passed to a
-       program the parent recognizes. The protocol is unchanged: no descriptor
-       travels toward the broker, and the broker keeps no state per asker.
-       What bounds it:
-       - The broker answers every channel against the one policy it holds,
-         the run's own. A child gets through the dial what native code in its
-         parent could already ask for; its own checks come first, against its
-         grant intersected with the inherited one.
+       (no socket under a host-scoped grant, no change directly in a folder that
+       holds a write deny). Now the worker leaves the processes it starts a dial
+       (`kernel_broker::dial`, named in `DENO_INTERNAL_KERNEL_BROKER_DIAL`,
+       beside the policy carrier of item 449 and pinned for children the same
+       way): a channel of the broker used only to ask for another channel, and a
+       pipe holding one byte, the token, that says whose turn it is. A child
+       reads the token, asks for a channel of its own, gives the token back
+       (`Dial::connect`), and installs that channel as its broker; the network
+       route too, when the broker answers that it serves the network
+       (`kernel_supervise::
+       adopt_inherited_dial`). It works through a
+       shell or another program in between, since the descriptors are inherited
+       rather than passed to a program the parent recognizes. The protocol is
+       unchanged: no descriptor travels toward the broker, and the broker keeps
+       no state per asker. What bounds it:
+       - The broker answers every channel against the one policy it holds, the
+         run's own. A child gets through the dial what native code in its parent
+         could already ask for; its own checks come first, against its grant
+         intersected with the inherited one.
        - A process that applies a kernel sandbox of its own gives the dial up
          first: the CLI drops the variable from the re-executed image's
          environment and never keeps the descriptors across the exec, the
-         confined image closes anything the variable still names before it
-         does anything else, and `denort` closes it before it applies its
-         sandbox. Its own grant may be narrower than the one the inherited
-         broker answers for.
+         confined image closes anything the variable still names before it does
+         anything else, and `denort` closes it before it applies its sandbox.
+         Its own grant may be narrower than the one the inherited broker answers
+         for.
        - The variable is never trusted alone: the dial is taken only where the
          kernel-verified carrier of a confined ancestor was accepted, each
          descriptor must be of its kind (a socket, two ends of a pipe) and the
@@ -19770,237 +19763,236 @@ where the changes are discussed.
          or `broker` by name applies its own layer and gives the dial up.
        - The supervisor serves up to 1024 channels (it served 64): a control
          channel and up to 16 working ones per process that takes the dial.
-     - Linux gets a warn observer (`Observer::SupervisorTrace`, reserved in
-       item 472). Landlock has no permissive mode, so nothing in the kernel
-       says what native code and children would be refused. Under a
+     - Linux gets a warn observer (`Observer::SupervisorTrace`, reserved in item
+       472). Landlock has no permissive mode, so nothing in the kernel says what
+       native code and children would be refused. Under a
        `--kernel-sandbox=warn` asked for by name, on `run` and `serve`, the
        process re-executes as a supervisor (the broker's shape:
-       `supervise::run_traced`) and the run starts again beneath it,
-       unconfined, under a seccomp filter that hands its opens, the calls that
-       make, remove or rename a name, `execve`, and `connect` / `bind` to the
-       supervisor. `deno_sandbox::trace::Tracer` resolves each call's path as
-       the caller would, asks `would_deny::TracePolicy` (the `enforce` plan of
-       the same grant, each rule as written and as it resolves) and reports
-       what would be refused with the program and the grant; every call then
-       continues as it was made. Reports start where `enforce` would confine
-       the process (the run opens a sentinel path once its graph is loaded),
-       the shared caches are silent, and under a broker plan this runtime's
-       own sockets and its changes in a folder with a write deny are not
-       reported (the broker makes them under `enforce`). The supervisor prints
-       its lines and its own summary, and appends to the warn log. Processes
-       the run leaves behind keep running: a forked observer answers their
-       calls until the last one is gone.
+       `supervise::run_traced`) and the run starts again beneath it, unconfined,
+       under a seccomp filter that hands its opens, the calls that make, remove
+       or rename a name, `execve`, and `connect` / `bind` to the supervisor.
+       `deno_sandbox::trace::Tracer` resolves each call's path as the caller
+       would, asks `would_deny::TracePolicy` (the `enforce` plan of the same
+       grant, each rule as written and as it resolves) and reports what would be
+       refused with the program and the grant; every call then continues as it
+       was made. Reports start where `enforce` would confine the process (the
+       run opens a sentinel path once its graph is loaded), the shared caches
+       are silent, and under a broker plan this runtime's own sockets and its
+       changes in a folder with a write deny are not reported (the broker makes
+       them under `enforce`). The supervisor prints its lines and its own
+       summary, and appends to the warn log. Processes the run leaves behind
+       keep running: a forked observer answers their calls until the last one is
+       gone.
      - Known gaps. The observer is for a `warn` asked for by name only, and
        `DENO_KERNEL_SANDBOX_WARN_OBSERVE=0` turns it off: its filter sets
        no-new-privileges (setuid programs in the tree don't elevate, as under
        `enforce`), a program in the tree that installs a seccomp
-       user-notification listener of its own fails with `EBUSY` (a filter
-       chain holds one), every traced call waits for the supervisor, and it
-       reports from the caller's memory, so it is an observer and never a
-       boundary. It reports a UDP `connect` by port like a TCP one, a child's
-       read of its own `/proc/self` (refused under `enforce` too), and can't
-       tell a native connect inside this runtime's own process from the
-       runtime's under a broker plan. Under the supervisor: a signal sent to
-       the whole process group or control group by a process (`kill -TERM
-       -<pgid>`, systemd's default `KillMode=control-group`) reaches the
-       program twice; `SIGTSTP` sent to the supervisor's PID alone isn't passed
-       on; `sd_notify` from the program needs `NotifyAccess=all` (it is not
-       the main PID); the program's own PID is not the one the launcher holds.
-       A program that brings its own broker inside a brokered run has no
-       network (its supervisor is confined by the outer sandbox). A second
-       `deno` reached through a shell while the first holds the token waits
-       for it; a holder killed with the token leaves later askers without a
-       broker. A supervisor that can't fork after the exec ends the run with
-       an error even under `auto`.
+       user-notification listener of its own fails with `EBUSY` (a filter chain
+       holds one), every traced call waits for the supervisor, and it reports
+       from the caller's memory, so it is an observer and never a boundary. It
+       reports a UDP `connect` by port like a TCP one, a child's read of its own
+       `/proc/self` (refused under `enforce` too), and can't tell a native
+       connect inside this runtime's own process from the runtime's under a
+       broker plan. Under the supervisor: a signal sent to the whole process
+       group or control group by a process (`kill -TERM
+       -<pgid>`,
+       systemd's default `KillMode=control-group`) reaches the program twice;
+       `SIGTSTP` sent to the supervisor's PID alone isn't passed on; `sd_notify`
+       from the program needs `NotifyAccess=all` (it is not the main PID); the
+       program's own PID is not the one the launcher holds. A program that
+       brings its own broker inside a brokered run has no network (its
+       supervisor is confined by the outer sandbox). A second `deno` reached
+       through a shell while the first holds the token waits for it; a holder
+       killed with the token leaves later askers without a broker. A supervisor
+       that can't fork after the exec ends the run with an error even under
+       `auto`.
      - User-facing note: none yet for a default run (`auto` applies nothing
-       until the stage moves). `deno compile --kernel-sandbox=broker` now
-       builds for Linux and macOS, and a program compiled with `enforce` holds
-       a host-scoped `--allow-net` and a write deny inside a write allow
-       instead of refusing to start; a `deno` started by a program under
-       `--kernel-sandbox=broker` now has its parent's network and file grant
-       in full; `--kernel-sandbox=warn` on Linux now reports what native code
-       and child processes would be refused.
-     - Tests: `deno_lib`'s `kernel_sandbox::tests::{
+       until the stage moves). `deno compile --kernel-sandbox=broker` now builds
+       for Linux and macOS, and a program compiled with `enforce` holds a
+       host-scoped `--allow-net` and a write deny inside a write allow instead
+       of refusing to start; a `deno` started by a program under
+       `--kernel-sandbox=broker` now has its parent's network and file grant in
+       full; `--kernel-sandbox=warn` on Linux now reports what native code and
+       child processes would be refused.
+     - Tests: `deno_lib`'s
+       `kernel_sandbox::tests::{
        auto_stage_matrix_broker_closable, auto_stage_matrix_broker_rows}`,
        `kernel_apply::tests::{
        a_compiled_policy_takes_the_broker_where_it_has_a_supervisor,
-       a_dev_build_is_off}` and the extended
+       a_dev_build_is_off}`
+       and the extended
        `kernel_policy::tests::a_compiled_program_has_no_broker`;
        `deno_sandbox`'s `would_deny::trace_tests::*` and (Linux)
        `trace::tests::{a_traced_child_reads_and_is_reported,
        the_traced_variable_names_the_run_and_its_state,
-       the_traced_list_has_each_call_once}`; `deno_permissions`'
+       the_traced_list_has_each_call_once}`;
+       `deno_permissions`'
        `kernel_broker::tests::{a_dial_gives_each_asker_a_channel_of_its_own,
        a_dial_is_used_by_one_asker_at_a_time,
        a_dial_whose_token_is_lost_times_out_and_gives_no_channel,
-       a_dial_value_that_names_something_else_is_refused}` (the broker's
-       fuzzers are unchanged: the protocol is); specs
+       a_dial_value_that_names_something_else_is_refused}`
+       (the broker's fuzzers are unchanged: the protocol is); specs
        `kernel_sandbox::broker::{auto_host_scoped,
        auto_write_deny_inside_allow, auto_write_deny_report,
        supervisor_keeps_pid_status_and_signals, supervisor_as_pid_1}`,
        `kernel_sandbox::compiled::{broker_write_deny_inside_allow,
        broker_host_scoped, broker_baked_by_name,
-       broker_exit_code_and_signals}` (replacing `inexpressible_refused`),
+       broker_exit_code_and_signals}`
+       (replacing `inexpressible_refused`),
        `kernel_sandbox::children::{brokered_child_shares_supervisor,
        brokered_child_that_confines_itself}`,
        `kernel_sandbox::warn::{linux_trace_reports_child_read,
-       linux_trace_off}` and the updated
-       `kernel_sandbox::policy::compile_refuses_broker` (a Windows target).
-       `supervisor_as_pid_1` runs where `unshare` can make a PID namespace
-       without privileges (the new `kernelSandboxPidNamespace` condition).
+       linux_trace_off}`
+       and the updated `kernel_sandbox::policy::compile_refuses_broker` (a
+       Windows target). `supervisor_as_pid_1` runs where `unshare` can make a
+       PID namespace without privileges (the new `kernelSandboxPidNamespace`
+       condition).
      - Node tests enabled: none; no Node API changes.
 
-489. **`feat(kernel)`: the kernel sandbox for packaged desktop apps**
-     (runtime, CLI; `cli/lib/{kernel_desktop,kernel_apply,kernel_sandbox}.rs`,
+489. **`feat(kernel)`: the kernel sandbox for packaged desktop apps** (runtime,
+     CLI; `cli/lib/{kernel_desktop,kernel_apply,kernel_sandbox}.rs`,
      `cli/rt/{kernel_desktop,run}.rs`, `cli/rt_desktop/{kernel_start,lib}.rs`,
      `libs/sandbox/{seatbelt,enforce_linux,outside,lib}.rs`,
      `runtime/ops/desktop.rs`, `runtime/ops/desktop_update/swap.rs`,
      `cli/sandbox/mod.rs`, `cli/standalone/binary.rs`,
      `cli/lib/standalone/binary.rs`, `cli/tools/{compile,desktop}.rs`,
-     `libs/cli_parser/src/flags.rs`; denext.30's WP-C). A desktop app's
-     process hosts its web engine, so the sandbox a compiled program applies
-     in place (item 473) needs three things there: the engine must be able
-     to run inside it, it must apply before the engine starts a thread, and
-     what an app does through the system (open a link, swap its install)
-     must still work.
+     `libs/cli_parser/src/flags.rs`; denext.30's WP-C). A desktop app's process
+     hosts its web engine, so the sandbox a compiled program applies in place
+     (item 473) needs three things there: the engine must be able to run inside
+     it, it must apply before the engine starts a thread, and what an app does
+     through the system (open a link, swap its install) must still work.
      - **Mode.** `RunKind::DesktopPackaged { strict, engine }` resolves as a
        compiled program: only the baked mode counts (no flag, environment,
-       deno.json or terminal), a development build is off, plain `-A` is
-       off. `strict` (`desktop.permissions: "strict"`) is carried as a baked
-       `enforce`: there is no second switch, and it is the only way a
-       desktop app is confined (the R4 decision, below): `auto` applies
-       nothing to an app that isn't strict, at any stage
-       (`ModeReason::DesktopNotStrict`; the harnesses' raise-only
-       `DENO_INTERNAL_KERNEL_SANDBOX_STAGE` is read and changes nothing
-       there). `deno compile` / `deno desktop` take
-       `--kernel-sandbox=enforce` and `auto` for a desktop app on every
-       target (`broker` is refused), record the engine in the binary
-       (`Metadata::desktop_engine`, from `--backend` / `desktop.backend`),
-       and say what the package gets for its target and engine.
+       deno.json or terminal), a development build is off, plain `-A` is off.
+       `strict` (`desktop.permissions: "strict"`) is carried as a baked
+       `enforce`: there is no second switch, and it is the only way a desktop
+       app is confined (the R4 decision, below): `auto` applies nothing to an
+       app that isn't strict, at any stage (`ModeReason::DesktopNotStrict`; the
+       harnesses' raise-only `DENO_INTERNAL_KERNEL_SANDBOX_STAGE` is read and
+       changes nothing there). `deno compile` / `deno desktop` take
+       `--kernel-sandbox=enforce` and `auto` for a desktop app on every target
+       (`broker` is refused), record the engine in the binary
+       (`Metadata::desktop_engine`, from `--backend` / `desktop.backend`), and
+       say what the package gets for its target and engine.
      - **Engines** (`kernel_desktop::engine_nests`). Confined in place:
        WKWebView on macOS, WebKitGTK on Linux, CEF on Linux where Chromium's
-       namespace sandbox works. Reported `headless-only`, the app's own
-       process left unconfined: CEF on macOS (its helpers apply their own
-       Seatbelt profile and macOS stacks no second one, experiment E1); CEF
-       on a Linux machine with only Chromium's setuid helper (`no_new_privs`
-       would disable it and leave web content unsandboxed, E2); any Linux
-       app whose host started its engine before the runtime was called; an
-       app with a scoped grant and no identifier (its engine's folders can't
-       be named). `none`: Windows (no enforcer for desktop apps), `off`, a
-       development build, `-A`, `auto` (an app that isn't strict). An engine that can't
-       nest is never a refusal to start, also under a baked `enforce`: the
-       app starts, one line on stderr says its own process is not confined,
-       and the probe says why. A rule the OS can't hold and a failed apply
-       still refuse under `enforce`, as for a compiled program. A fork of the app (a worker, a sidecar) is held
-       by the app's sandbox, which it inherits, and confines itself like a
+       namespace sandbox works. Reported `headless-only`, the app's own process
+       left unconfined: CEF on macOS (its helpers apply their own Seatbelt
+       profile and macOS stacks no second one, experiment E1); CEF on a Linux
+       machine with only Chromium's setuid helper (`no_new_privs` would disable
+       it and leave web content unsandboxed, E2); any Linux app whose host
+       started its engine before the runtime was called; an app with a scoped
+       grant and no identifier (its engine's folders can't be named). `none`:
+       Windows (no enforcer for desktop apps), `off`, a development build, `-A`,
+       `auto` (an app that isn't strict). An engine that can't nest is never a
+       refusal to start, also under a baked `enforce`: the app starts, one line
+       on stderr says its own process is not confined, and the probe says why. A
+       rule the OS can't hold and a failed apply still refuse under `enforce`,
+       as for a compiled program. A fork of the app (a worker, a sidecar) is
+       held by the app's sandbox, which it inherits, and confines itself like a
        compiled program where the app is headless-only.
      - **Before the engine.** The runtime library exports
-       `laufey_runtime_prestart(engine, *exit_code)`; a host that knows it
-       calls it first thing in `main`, before the single-instance check, the
-       toolkit and the engine. Everything that must precede the sandbox
-       happens there (a pending UI update, the update watchdog, a
-       self-extracting app's files, the working directory), then
-       `kernel_apply::start_desktop_with` decides and applies. A host that
-       doesn't call it (the pinned laufey 0.9.0) starts the runtime as
-       before and the same startup runs from `laufey_runtime_start`: macOS
-       still confines the process there (a Seatbelt profile holds every
-       thread at once; the environment is then not scrubbed, since removing
-       variables under running threads is a race), Linux reports the app
-       headless-only (Landlock holds only threads made afterwards, and
-       `apply_self` refuses a process with more than one). The host half is
-       laufey's branch `kernel30/prestart` (one optional call in the Linux
-       and macOS WebView hosts and the Linux CEF host; no API version
-       change): until the pin moves to it, Linux desktop apps are
-       headless-only.
+       `laufey_runtime_prestart(engine, *exit_code)`; a host that knows it calls
+       it first thing in `main`, before the single-instance check, the toolkit
+       and the engine. Everything that must precede the sandbox happens there (a
+       pending UI update, the update watchdog, a self-extracting app's files,
+       the working directory), then `kernel_apply::start_desktop_with` decides
+       and applies. A host that doesn't call it (the pinned laufey 0.9.0) starts
+       the runtime as before and the same startup runs from
+       `laufey_runtime_start`: macOS still confines the process there (a
+       Seatbelt profile holds every thread at once; the environment is then not
+       scrubbed, since removing variables under running threads is a race),
+       Linux reports the app headless-only (Landlock holds only threads made
+       afterwards, and `apply_self` refuses a process with more than one). The
+       host half is laufey's branch `kernel30/prestart` (one optional call in
+       the Linux and macOS WebView hosts and the Linux CEF host; no API version
+       change): until the pin moves to it, Linux desktop apps are headless-only.
      - **macOS: the desktop Seatbelt profile** (`seatbelt::desktop_profile`).
        Allow by default (the window server, the GPU, the pasteboard, the
        keychain, AppKit's services), then what the grant doesn't cover: file
-       contents outside the read scope and writes outside the write scope
-       (the cli profile's order: allows, denies, re-allows), code mapped
-       from outside the load scope, the system and the install, programs
-       without a run grant, IP sockets per the plan (no network grant: the
-       loopback interface only), Unix sockets but the plan's and the system
-       log's, and always `lsopen`, `appleevent-send` and `job-creation`.
-       Mach services, sysctl reads and signals are not narrowed.
+       contents outside the read scope and writes outside the write scope (the
+       cli profile's order: allows, denies, re-allows), code mapped from outside
+       the load scope, the system and the install, programs without a run grant,
+       IP sockets per the plan (no network grant: the loopback interface only),
+       Unix sockets but the plan's and the system log's, and always `lsopen`,
+       `appleevent-send` and `job-creation`. Mach services, sysctl reads and
+       signals are not narrowed.
      - **Linux: the desktop variant** (`enforce_linux::DesktopVariant`,
-       `kernel_desktop::desktop_plan`). The plan of the grant plus: Unix
-       sockets and route netlink, no abstract-socket scope, no
-       signal-to-self rule, `execve` of the engine's helper programs only
-       (WebKitGTK's and GStreamer's folders, the install) when there is no
-       run grant; under CEF, `clone` / `unshare` may make user, PID and
-       network namespaces (every other namespace flag, `setns` and the rest
-       of the attack-surface list stay refused) and `/proc` is writable
-       (the id maps of each new process). Before a CEF app commits, a forked
-       child applies the same plan and takes Chromium's first steps
-       (`trial_engine_namespaces`: the namespaces, the id maps, a nested
-       user namespace, `chroot`); if that fails the app is headless-only,
-       never confined with web content less contained than before.
-     - **The engine's paths** (`kernel_desktop::engine_paths`) are added to
-       the kernel's grant only, never to Deno's checks: system fonts,
-       themes and toolkit data, GPU devices, the session's runtime folder,
-       the temp folder, the app's own data and cache folders (created
-       first), and per engine the WebKit / HTTP storage / saved-state
-       folders named after the app identifier (macOS) or the per-user font,
-       shader and certificate caches (Linux). The network is not narrowed
-       by host in a desktop app: any network grant leaves the kernel's
-       network open and is reported (host rules need the broker, which
-       can't hold a process hosting an engine); with no network grant macOS
-       keeps the app to loopback, Linux can't.
-     - **The outside helper** (`deno_sandbox::outside`). Forked right before
-       the sandbox applies, it stays unconfined and does only what it was
-       configured with before the fork: run the system opener with one
-       `http:`, `https:` or `mailto:` URL of printable ASCII (checked in the
-       helper; only for an app whose run grant names the opener), and start
-       the updater's swap helper for this install in its two modes (every
-       argument, the working directory and the environment fixed at the
-       fork). After the fork it only makes system calls on memory that
-       exists. `Deno.desktop.openExternal(url)` uses it (and runs the
-       opener directly in an app that isn't confined);
-       `desktop_update::swap::spawn_helper` goes through it in a confined
-       app.
-     - **The R4 decision: only a strict package is kernel-enforced** (the
-       train lead's, at the merge into `train/denext30`). A desktop app
-       that doesn't bake strict permissions resolves to `off` under `auto`
-       at every stage, preview, R3 and R4 alike, with
-       `ModeReason::DesktopNotStrict`, `would_apply: off` and the probe's
-       `kernelSandbox: "none"` (its reason says the app isn't packaged
-       strict). Why: such an app starts the system's openers (`open`,
-       `osascript`, `xdg-open`) for `openPath`, `revealInFileManager` and
-       the auth session's browser, and inside the sandbox only `http:`,
-       `https:` and `mailto:` links have a way out (the outside helper), so
-       a default-on sandbox would break what it does. The `AUTO_STAGE`
-       flip therefore changes nothing for desktop apps that aren't strict;
-       `-A` with denies gets no deny ceiling there either. A baked `warn`
-       or `off` applies as baked, and `deno compile` / `deno desktop` say
-       at build time that a baked `auto` applies nothing to a desktop app.
-       In the mode decision this is rule 7 (`kernel_sandbox_mode`'s doc
-       lists the order: subcommand, requested mode, off / development
-       build, plain `-A`, an unfixed set, the D1 deny ceiling, this rule,
-       `auto` by stage, an explicit mode; then the second decision with
-       the compiled policy, which takes the broker and never applies to a
-       desktop app: `Context::compiled_supervisor` stays false there).
+       `kernel_desktop::desktop_plan`). The plan of the grant plus: Unix sockets
+       and route netlink, no abstract-socket scope, no signal-to-self rule,
+       `execve` of the engine's helper programs only (WebKitGTK's and
+       GStreamer's folders, the install) when there is no run grant; under CEF,
+       `clone` / `unshare` may make user, PID and network namespaces (every
+       other namespace flag, `setns` and the rest of the attack-surface list
+       stay refused) and `/proc` is writable (the id maps of each new process).
+       Before a CEF app commits, a forked child applies the same plan and takes
+       Chromium's first steps (`trial_engine_namespaces`: the namespaces, the id
+       maps, a nested user namespace, `chroot`); if that fails the app is
+       headless-only, never confined with web content less contained than
+       before.
+     - **The engine's paths** (`kernel_desktop::engine_paths`) are added to the
+       kernel's grant only, never to Deno's checks: system fonts, themes and
+       toolkit data, GPU devices, the session's runtime folder, the temp folder,
+       the app's own data and cache folders (created first), and per engine the
+       WebKit / HTTP storage / saved-state folders named after the app
+       identifier (macOS) or the per-user font, shader and certificate caches
+       (Linux). The network is not narrowed by host in a desktop app: any
+       network grant leaves the kernel's network open and is reported (host
+       rules need the broker, which can't hold a process hosting an engine);
+       with no network grant macOS keeps the app to loopback, Linux can't.
+     - **The outside helper** (`deno_sandbox::outside`). Forked right before the
+       sandbox applies, it stays unconfined and does only what it was configured
+       with before the fork: run the system opener with one `http:`, `https:` or
+       `mailto:` URL of printable ASCII (checked in the helper; only for an app
+       whose run grant names the opener), and start the updater's swap helper
+       for this install in its two modes (every argument, the working directory
+       and the environment fixed at the fork). After the fork it only makes
+       system calls on memory that exists. `Deno.desktop.openExternal(url)` uses
+       it (and runs the opener directly in an app that isn't confined);
+       `desktop_update::swap::spawn_helper` goes through it in a confined app.
+     - **The R4 decision: only a strict package is kernel-enforced** (the train
+       lead's, at the merge into `train/denext30`). A desktop app that doesn't
+       bake strict permissions resolves to `off` under `auto` at every stage,
+       preview, R3 and R4 alike, with `ModeReason::DesktopNotStrict`,
+       `would_apply: off` and the probe's `kernelSandbox: "none"` (its reason
+       says the app isn't packaged strict). Why: such an app starts the system's
+       openers (`open`, `osascript`, `xdg-open`) for `openPath`,
+       `revealInFileManager` and the auth session's browser, and inside the
+       sandbox only `http:`, `https:` and `mailto:` links have a way out (the
+       outside helper), so a default-on sandbox would break what it does. The
+       `AUTO_STAGE` flip therefore changes nothing for desktop apps that aren't
+       strict; `-A` with denies gets no deny ceiling there either. A baked
+       `warn` or `off` applies as baked, and `deno compile` / `deno desktop` say
+       at build time that a baked `auto` applies nothing to a desktop app. In
+       the mode decision this is rule 7 (`kernel_sandbox_mode`'s doc lists the
+       order: subcommand, requested mode, off / development build, plain `-A`,
+       an unfixed set, the D1 deny ceiling, this rule, `auto` by stage, an
+       explicit mode; then the second decision with the compiled policy, which
+       takes the broker and never applies to a desktop app:
+       `Context::compiled_supervisor` stays false there).
      - **The probe.** `Deno.desktop.platformFeatures()` gains
        `kernelSandbox: "kernel" | "headless-only" | "none"` and
-       `kernelSandboxReason` (its `sandbox` key was taken: the Chromium
-       sandbox web content runs in).
-     - User-facing note: a desktop app packaged with
-       `--kernel-sandbox=enforce` is held by the kernel on macOS (WebView)
-       and, with a host that calls the runtime first, on Linux (WebView, and
-       CEF where Chromium's namespace sandbox works); elsewhere it runs as
-       before and `platformFeatures().kernelSandbox` says `headless-only`
-       or `none` with the reason. Inside the sandbox a child `open` /
-       `osascript` opens nothing: use `Deno.desktop.openExternal`.
+       `kernelSandboxReason` (its `sandbox` key was taken: the Chromium sandbox
+       web content runs in).
+     - User-facing note: a desktop app packaged with `--kernel-sandbox=enforce`
+       is held by the kernel on macOS (WebView) and, with a host that calls the
+       runtime first, on Linux (WebView, and CEF where Chromium's namespace
+       sandbox works); elsewhere it runs as before and
+       `platformFeatures().kernelSandbox` says `headless-only` or `none` with
+       the reason. Inside the sandbox a child `open` / `osascript` opens
+       nothing: use `Deno.desktop.openExternal`.
      - Known gaps: the full-app updater stages next to the install, which a
        scoped write grant doesn't cover (staging is refused there; the swap
        itself is routed outside); Linux leaves the session bus, every Unix
-       socket the user can reach and the network open; macOS leaves WebKit's
-       XPC processes outside the profile and narrows no mach service;
-       Windows has no enforcer for desktop apps; `sys` narrowing is not
-       applied in a desktop app.
-     - Tests: `kernel_sandbox::tests::{auto_stage_matrix_desktop_packaged,
+       socket the user can reach and the network open; macOS leaves WebKit's XPC
+       processes outside the profile and narrows no mach service; Windows has no
+       enforcer for desktop apps; `sys` narrowing is not applied in a desktop
+       app.
+     - Tests:
+       `kernel_sandbox::tests::{auto_stage_matrix_desktop_packaged,
        desktop_packaged_reads_only_the_baked_mode}`;
-       `kernel_desktop::tests` (the engine table, the packaged guarantee,
-       the engine paths, the grant, the desktop plan); `kernel_apply::tests`
+       `kernel_desktop::tests` (the engine table, the packaged guarantee, the
+       engine paths, the grant, the desktop plan); `kernel_apply::tests`
        (`a_desktop_app_that_applies_nothing_reports_none`,
        `macos_cef_is_headless_only_and_starts`); `deno_sandbox`:
        `seatbelt::tests::desktop_profile_*`,
@@ -20008,27 +20000,27 @@ where the changes are discussed.
        `outside::tests`; the desktop e2e area `kernelsandbox`
        (`.github/denext-runtime/e2e`, fork-CLI areas): the probe per leg,
        `strict_native_write_refused`, `open_external_still_works`,
-       `macos_cef_headless_only_reported`, `linux_cef_setuid_only_reported`
-       and a row each for file dialogs, notifications, the tray, deep
-       links, the secure store and sidecars (the updater's swap is noted,
-       not run: see the gap); `tests/specs/run/desktop_ops_inert`
-       (`op_desktop_open_external`), `tests/specs/check/desktop_types`.
-     - Node tests enabled: none.
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
-306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
-390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
-416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-479, 484, 486-489) are what the prebuilt
-`libdenort` carries. The CLI-side parts (for example writing
-`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
-in the branch too, but a stock CLI does not run them; denext's own launcher
-provides that environment.
+       `macos_cef_headless_only_reported`, `linux_cef_setuid_only_reported` and
+       a row each for file dialogs, notifications, the tray, deep links, the
+       secure store and sidecars (the updater's swap is noted, not run: see the
+       gap); `tests/specs/run/desktop_ops_inert` (`op_desktop_open_external`),
+       `tests/specs/check/desktop_types`.
+     - Node tests enabled: none. The runtime-side parts (1-3, 5-22, 24, 25, 27,
+       32-37, 41-45, 50, 52, 60-62, 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97,
+       99-102, 104, 105, 109, 110, 113, 118, 119, 126, 127, 129, 136, 137,
+       144-148, 150, 153, 158-160, 162, 164-167, 169-174, 176, 178, 180,
+       182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207, 209-215, 217,
+       218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240, 243-245,
+       247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304, 306-310,
+       312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
+       350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387,
+       388, 389, 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409,
+       410, 411, 412, 415, 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438,
+       439, 441, 446, 447, 448, 449, 450, 452, 455, 457, 460-468, 470, 472-479,
+       484, 486-489) are what the prebuilt `libdenort` carries. The CLI-side
+       parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into
+       a packaged app's launchers) are in the branch too, but a stock CLI does
+       not run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
@@ -20620,14 +20612,14 @@ in the job summary, never skipped silently. Areas:
   manifest's version), the accepted sequence recorded, an unwritable install,
   1.0.0 -> 2.0.0 relaunch and confirm, a 3.0.0 trial that never confirms rolled
   back and refused (and kept in the rejected set).
-- **kernelsandbox** (fork CLI) — a strict package (`--kernel-sandbox=enforce`,
-  a scoped grant) on this leg's engine (item 489): what the probe says holds
-  the app and why, against what the engine, the OS and the host make of it; a
-  native write through FFI inside and outside the grant, refused exactly when
-  the app is kernel-held; `Deno.desktop.openExternal` (on macOS the browser
-  must come for the link, and for a child's `open` it must not); and one row
-  each for a file dialog, a notification, the tray, a launch deep link, the
-  secure store and a fork of the app.
+- **kernelsandbox** (fork CLI) — a strict package (`--kernel-sandbox=enforce`, a
+  scoped grant) on this leg's engine (item 489): what the probe says holds the
+  app and why, against what the engine, the OS and the host make of it; a native
+  write through FFI inside and outside the grant, refused exactly when the app
+  is kernel-held; `Deno.desktop.openExternal` (on macOS the browser must come
+  for the link, and for a child's `open` it must not); and one row each for a
+  file dialog, a notification, the tray, a launch deep link, the secure store
+  and a fork of the app.
 - **Node-API** stays in `launch.sh`.
 
 What a hosted runner cannot do, reported `n/a` with the reason:

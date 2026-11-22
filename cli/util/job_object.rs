@@ -95,10 +95,9 @@ impl KillOnCloseJob {
 
 #[cfg(test)]
 mod tests {
+  use std::os::windows::io::AsRawHandle;
   use std::process::Stdio;
   use std::time::Duration;
-
-  use std::os::windows::io::AsRawHandle;
 
   use windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_BREAKAWAY_OK;
   use windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;

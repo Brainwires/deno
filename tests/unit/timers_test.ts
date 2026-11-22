@@ -564,7 +564,8 @@ Deno.test({
 // main module made the 1 ms timer of "unrefTimer" due before the first
 // iteration; this one waits it out on purpose.
 Deno.test({
-  name: "unrefTimer - an unref'd timer already due at the end of the main module",
+  name:
+    "unrefTimer - an unref'd timer already due at the end of the main module",
   permissions: { run: true, read: true },
   fn: async () => {
     const [statusCode, output] = await execCode(`

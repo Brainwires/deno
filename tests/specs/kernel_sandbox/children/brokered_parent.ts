@@ -47,10 +47,15 @@ if (mode === "narrower") {
     deno,
   ]);
   // the parent's own operations are untouched by its children's
-  const conn = await Deno.connect({ hostname: "localhost", port: Number(port) });
+  const conn = await Deno.connect({
+    hostname: "localhost",
+    port: Number(port),
+  });
   await conn.write(new TextEncoder().encode("self"));
   const buf = new Uint8Array(4);
   await conn.read(buf);
   conn.close();
-  console.log(`parent: connect after its children: ${new TextDecoder().decode(buf)}`);
+  console.log(
+    `parent: connect after its children: ${new TextDecoder().decode(buf)}`,
+  );
 }

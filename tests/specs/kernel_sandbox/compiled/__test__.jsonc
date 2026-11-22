@@ -284,7 +284,10 @@
           "args": "compile --quiet --kernel-sandbox=broker --allow-run --allow-read=inside --output prog_bpid broker_pid_inner.ts",
           "output": ""
         },
-        { "args": "run --quiet -A broker_pid_outer.ts", "output": "broker_pid.out" }
+        {
+          "args": "run --quiet -A broker_pid_outer.ts",
+          "output": "broker_pid.out"
+        }
       ]
     }
   }
