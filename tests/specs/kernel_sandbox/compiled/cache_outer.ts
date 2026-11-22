@@ -5,7 +5,11 @@
 // never in the temp folder's shared file an unconfined run of a program
 // with the same name reads.
 const name = "p9_cache_prog";
-const temp = Deno.realPathSync(Deno.env.get("TMPDIR") ?? "/tmp");
+// the temp folder the runtime uses (TMPDIR, else the OS's own: macOS's
+// per-user folder when TMPDIR is unset), found from where it makes one
+const probe = Deno.makeTempDirSync();
+const temp = Deno.realPathSync(probe.slice(0, probe.lastIndexOf("/")));
+Deno.removeSync(probe);
 const base = `${temp}/deno-compile-${name}.sandboxed`;
 const shared = `${temp}/deno-compile-${name}.cache`;
 for (const path of [base, shared]) {
