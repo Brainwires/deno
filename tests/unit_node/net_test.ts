@@ -472,3 +472,103 @@ Deno.test("[node/net] a path server keeps accepting past four open connections",
     if (dir) await Deno.remove(dir, { recursive: true });
   }
 });
+
+// A Windows named pipe has one owner (DENEXT.md item 484): the first
+// instance is created with FILE_FLAG_FIRST_PIPE_INSTANCE, so a second server
+// on a name that is already served fails with EADDRINUSE instead of becoming
+// one more instance of that pipe, and the first server keeps its clients.
+Deno.test({
+  name:
+    "[node/net] a second server on a served named pipe fails with EADDRINUSE",
+  ignore: Deno.build.os !== "windows",
+}, async () => {
+  const ipcPath = `\\\\.\\pipe\\deno-test-${crypto.randomUUID()}`;
+  const first = net.createServer((socket) => {
+    socket.on("error", () => {});
+    socket.on("data", (chunk) => socket.write(chunk));
+  });
+  const listening = Promise.withResolvers<void>();
+  first.once("error", listening.reject);
+  first.listen(ipcPath, listening.resolve);
+  await listening.promise;
+
+  const second = net.createServer(() => {
+    throw new Error("the second server must never get a connection");
+  });
+  const clients: net.Socket[] = [];
+  const echo = (text: string) => {
+    const done = Promise.withResolvers<void>();
+    const client = net.connect(ipcPath);
+    clients.push(client);
+    client.once("error", done.reject);
+    client.once("connect", () => client.write(text));
+    client.once("data", (chunk) => {
+      assertEquals(String(chunk), text);
+      done.resolve();
+    });
+    return done.promise;
+  };
+  try {
+    const refused = Promise.withResolvers<NodeJS.ErrnoException>();
+    second.once("error", refused.resolve);
+    second.once(
+      "listening",
+      () => refused.reject(new Error("the second listen succeeded")),
+    );
+    second.listen(ipcPath);
+    const err = await refused.promise;
+    assertEquals(err.code, "EADDRINUSE");
+    assertEquals(second.listening, false);
+
+    // The first server still answers, before and after its first accept
+    // (the accept creates the pipe's next instance).
+    await echo("one");
+    await echo("two");
+  } finally {
+    for (const client of clients) client.destroy();
+    await new Promise((resolve) => first.close(resolve));
+  }
+});
+
+// `readableAll` / `writableAll` change who may open the path (a mode on a
+// Unix socket, an ACE for Everyone on a Windows named pipe; item 484). The
+// server listens and serves its own account either way; what the pipe's
+// DACL then holds is checked in libs/core/uv_compat/pipe_security.rs.
+Deno.test("[node/net] a path server listens with readableAll and writableAll", async () => {
+  const dir = Deno.build.os === "windows"
+    ? undefined
+    : await Deno.makeTempDir();
+  const options = [
+    { readableAll: true },
+    { writableAll: true },
+    { readableAll: true, writableAll: true },
+  ];
+  try {
+    for (const [i, option] of options.entries()) {
+      const ipcPath = Deno.build.os === "windows"
+        ? `\\\\.\\pipe\\deno-test-${crypto.randomUUID()}`
+        : path.join(dir!, `s${i}.sock`);
+      const server = net.createServer((socket) => {
+        socket.on("error", () => {});
+        socket.on("data", (chunk) => socket.write(chunk));
+      });
+      const listening = Promise.withResolvers<void>();
+      server.once("error", listening.reject);
+      server.listen({ path: ipcPath, ...option }, listening.resolve);
+      await listening.promise;
+      const client = net.connect(ipcPath);
+      try {
+        const echoed = Promise.withResolvers<string>();
+        client.once("error", echoed.reject);
+        client.once("connect", () => client.write("hello"));
+        client.once("data", (chunk) => echoed.resolve(String(chunk)));
+        assertEquals(await echoed.promise, "hello");
+      } finally {
+        client.destroy();
+        await new Promise((resolve) => server.close(resolve));
+      }
+    }
+  } finally {
+    if (dir) await Deno.remove(dir, { recursive: true });
+  }
+});

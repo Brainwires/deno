@@ -853,6 +853,9 @@ enum LaunchEventKind {
   OpenFile,
   SecondInstance,
   NotificationResponse,
+  /// A Windows jump-list task's launch (`Deno.dock`'s "menuclick"), from the
+  /// app's own arguments or a second instance's.
+  DockMenuClick,
 }
 
 impl LaunchEventKind {
@@ -862,6 +865,7 @@ impl LaunchEventKind {
       "openfile" => Some(Self::OpenFile),
       "secondinstance" => Some(Self::SecondInstance),
       "notificationresponse" => Some(Self::NotificationResponse),
+      "dockmenuclick" => Some(Self::DockMenuClick),
       _ => None,
     }
   }
@@ -879,10 +883,15 @@ struct LaunchInboxState {
   pending_files: std::collections::VecDeque<String>,
   pending_second_instances: std::collections::VecDeque<DesktopEvent>,
   pending_notification_responses: std::collections::VecDeque<DesktopEvent>,
+  pending_dock_items: std::collections::VecDeque<String>,
   subscribed_urls: bool,
   subscribed_files: bool,
   subscribed_second_instances: bool,
   subscribed_notification_responses: bool,
+  /// A browser app (`desktop.app.browser`): http / https links are
+  /// delivered too (`Deno.desktop.browserLinks`).
+  browser_links: bool,
+  subscribed_dock_items: bool,
 }
 
 /// Deep links, opened files and second-instance launches on their way to
@@ -938,6 +947,17 @@ impl DesktopLaunchInbox {
       launch_files,
       ..Default::default()
     })))
+  }
+
+  /// Record that http / https links are delivered (a browser app), for
+  /// `Deno.desktop.browserLinks`.
+  pub fn set_browser_links(&self, on: bool) {
+    self.lock().browser_links = on;
+  }
+
+  /// Whether http / https links are delivered (a browser app).
+  pub fn browser_links(&self) -> bool {
+    self.lock().browser_links
   }
 
   fn lock(&self) -> std::sync::MutexGuard<'_, LaunchInboxState> {
@@ -1037,6 +1057,20 @@ impl DesktopLaunchInbox {
     }
   }
 
+  /// A Windows jump-list task chosen: its dock menu item's id, from the app's
+  /// own launch arguments (the task started it) or a second instance's that
+  /// laufey did not turn into the click itself (the app had not set its dock
+  /// menu yet). Held until the app listens to `Deno.dock`'s "menuclick", then
+  /// delivered as that click. Untrusted input, like any launch argument.
+  pub fn dock_menu_click(&self, id: String) {
+    let mut state = self.lock();
+    if state.subscribed_dock_items {
+      send_launch_event(&state, DesktopEvent::DockMenuClick { id });
+    } else {
+      push_bounded(&mut state.pending_dock_items, id, "dockmenuclick");
+    }
+  }
+
   /// The launch snapshot: the process's own deep links and files, plus the
   /// URLs, files and notification responses delivered so far that no
   /// listener has taken. Empty after the first call.
@@ -1108,6 +1142,14 @@ impl DesktopLaunchInbox {
       LaunchEventKind::NotificationResponse => {
         state.subscribed_notification_responses = true;
         state.pending_notification_responses.drain(..).collect()
+      }
+      LaunchEventKind::DockMenuClick => {
+        state.subscribed_dock_items = true;
+        state
+          .pending_dock_items
+          .drain(..)
+          .map(|id| DesktopEvent::DockMenuClick { id })
+          .collect()
       }
     }
   }
@@ -2239,6 +2281,14 @@ pub struct MenuCapabilitiesInfo {
   /// `getApplicationMenu()` / `Deno.dock.getMenu()` read the native menu
   /// back (laufey API 59).
   pub snapshot: bool,
+  /// `Deno.dock.setMenu()` shows the menu: the macOS Dock menu, or the
+  /// Windows jump list's tasks.
+  pub dock_menu: bool,
+  /// The dock menu is a Windows jump list: flat (submenus inlined between
+  /// separators), without disabled items or checkmarks; choosing a task
+  /// starts the app, and its "menuclick" reaches the running app (with the
+  /// single-instance lock) or the one it started.
+  pub jump_list: bool,
 }
 
 /// `Deno.desktop.notifications.capabilities()` (laufey API 41).
@@ -3503,7 +3553,7 @@ pub trait DesktopApi: Send + Sync + 'static {
     SecretOutcome::Unsupported
   }
 
-  /// What holds this app's process (DENEXT.md item 488): `"kernel"` (the
+  /// What holds this app's process (DENEXT.md item 489): `"kernel"` (the
   /// kernel sandbox holds it, its native code and its children to the baked
   /// grant), `"headless-only"` (its web engine can't run inside the sandbox
   /// here, so the app's own process isn't confined) or `"none"`, with the
@@ -5616,6 +5666,16 @@ fn op_desktop_take_launch_targets(
     .unwrap_or_default()
 }
 
+/// `Deno.desktop.browserLinks`: whether the runtime delivers http / https
+/// links to this app (a browser app, `desktop.app.browser`). `false` outside
+/// a desktop app's main scope, where no launch delivery runs.
+#[op2(fast)]
+fn op_desktop_browser_links(state: &mut OpState) -> bool {
+  state
+    .try_borrow::<DesktopLaunchInbox>()
+    .is_some_and(|inbox| inbox.browser_links())
+}
+
 /// Subscribe to one kind of launch event (`"openurl"`, `"openfile"`,
 /// `"secondinstance"`), returning the events buffered for it; see
 /// [`DesktopLaunchInbox`].
@@ -7321,7 +7381,7 @@ async fn op_desktop_platform_features(
   if !env_allowed {
     redact_desktop_hint(&mut features);
   }
-  // denext (DENEXT.md item 488): what holds the app's own process. The
+  // denext (DENEXT.md item 489): what holds the app's own process. The
   // backend's `sandbox` is another thing (the Chromium sandbox web content
   // runs in), so this has its own keys.
   if let Some(obj) = features.as_object_mut() {
@@ -7369,7 +7429,7 @@ pub const EXTERNAL_OPENER: &str = if cfg!(target_os = "macos") {
   "xdg-open"
 };
 
-/// `Deno.desktop.openExternal(url)` (DENEXT.md item 488): opens a link in
+/// `Deno.desktop.openExternal(url)` (DENEXT.md item 489): opens a link in
 /// the user's browser (or a `mailto:` in their mail program). `false`
 /// outside a desktop app and when the system's opener could not be started.
 /// It runs that opener, so it needs the run permission for it (`open`,
@@ -8570,6 +8630,7 @@ deno_core::extension!(
     op_desktop_recv_event,
     op_desktop_take_launch_targets,
     op_desktop_subscribe_launch_events,
+    op_desktop_browser_links,
     op_desktop_get_scheme_owner,
     op_desktop_register_scheme,
     op_desktop_passkey_capabilities,
@@ -9953,6 +10014,25 @@ mod tests {
     )
   }
 
+  #[test]
+  fn launch_inbox_browser_links_flag() {
+    let (inbox, _rx) = inbox_with_channel(vec![], vec![]);
+    assert!(!inbox.browser_links());
+    inbox.set_browser_links(true);
+    assert!(inbox.browser_links());
+    // A clone (the handlers' copy) sees the same flag.
+    let clone = inbox.clone();
+    assert!(clone.browser_links());
+    inbox.set_browser_links(false);
+    assert!(!clone.browser_links());
+    // Reading it leaves the launch snapshot in place.
+    let (inbox, _rx) =
+      inbox_with_channel(vec!["https://a.test/".into()], vec![]);
+    inbox.set_browser_links(true);
+    assert!(inbox.browser_links());
+    assert_eq!(inbox.take_launch_targets().urls, vec!["https://a.test/"]);
+  }
+
   fn drain(rx: &mut super::DesktopEventReceiver) -> Vec<String> {
     let mut out = Vec::new();
     while let Some(ev) = rx.0.try_recv() {
@@ -10002,6 +10082,33 @@ mod tests {
     assert_eq!(drain(&mut rx).len(), 1);
     // Unknown types subscribe to nothing.
     assert!(inbox.subscribe("click").is_empty());
+  }
+
+  #[test]
+  fn launch_inbox_holds_jump_list_tasks_until_the_dock_listens() {
+    let (inbox, mut rx) = inbox_with_channel(vec![], vec![]);
+    inbox.dock_menu_click("cold".into());
+    inbox.dock_menu_click("early".into());
+    assert!(drain(&mut rx).is_empty());
+    // Other kinds don't take them.
+    assert!(inbox.subscribe("secondinstance").is_empty());
+    assert!(inbox.take_launch_targets().urls.is_empty());
+    let pending = inbox.subscribe("dockmenuclick");
+    assert_eq!(
+      pending
+        .into_iter()
+        .map(|e| serde_json::to_value(e).unwrap())
+        .collect::<Vec<_>>(),
+      vec![
+        json!({ "kind": "dockMenuClick", "id": "cold" }),
+        json!({ "kind": "dockMenuClick", "id": "early" }),
+      ]
+    );
+    assert!(inbox.subscribe("dockmenuclick").is_empty());
+    inbox.dock_menu_click("warm".into());
+    let sent = drain(&mut rx);
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].contains("\"warm\""), "{sent:?}");
   }
 
   #[test]
@@ -10144,6 +10251,8 @@ mod tests {
         "tooltips": false,
         "destructive": false,
         "snapshot": false,
+        "dockMenu": false,
+        "jumpList": false,
       })
     );
     assert_eq!(

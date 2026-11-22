@@ -290,7 +290,7 @@ impl CompileKind<'_> {
 /// a warning (the program would refuse to start there; what the machine it
 /// runs on lacks is only known at startup).
 ///
-/// A desktop app (DENEXT.md item 488) takes `enforce` and `auto` on every
+/// A desktop app (DENEXT.md item 489) takes `enforce` and `auto` on every
 /// target. Under `enforce` (a strict package) its startup confines the
 /// app's own process where its web engine can run inside the sandbox and
 /// reports the app headless-only (or `none`) where it can't, so no desktop

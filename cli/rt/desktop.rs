@@ -31,6 +31,7 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_recv_event,
     op_desktop_take_launch_targets,
     op_desktop_subscribe_launch_events,
+    op_desktop_browser_links,
     op_desktop_get_scheme_owner,
     op_desktop_register_scheme,
     op_desktop_passkey_capabilities,
@@ -1833,6 +1834,39 @@ pub const DESKTOP_JS: &str = r#"
   Object.setPrototypeOf(OrigDock.prototype, nativeDockConstructor.prototype);
   Deno.Dock = OrigDock;
 
+  function dispatchDockMenuClick(id) {
+    for (const d of docks) {
+      d.dispatchEvent(new CustomEvent("menuclick", { detail: { id } }));
+    }
+  }
+  // Windows jump-list tasks that reached the runtime as launches (the task
+  // started the app, or came from before the app set its dock menu): the
+  // launch inbox holds them until the first "menuclick" listener (or
+  // onmenuclick) on a Dock, then they are clicks like any other.
+  let dockMenuClicksSubscribed = false;
+  function subscribeDockMenuClicks() {
+    if (dockMenuClicksSubscribed) return;
+    dockMenuClicksSubscribed = true;
+    const pending = op_desktop_subscribe_launch_events("dockmenuclick");
+    if (pending.length > 0) {
+      // After the current task, as with Deno.desktop's launch events.
+      queueMicrotask(() => {
+        for (const ev of pending) dispatchDockMenuClick(ev.id);
+      });
+    }
+  }
+  const dockAddEventListener = EventTarget.prototype.addEventListener;
+  Object.defineProperty(DockPrototype, "addEventListener", {
+    value: function addEventListener(type, listener, options) {
+      dockAddEventListener.call(this, type, listener, options);
+      if (listener != null && String(type) === "menuclick") {
+        subscribeDockMenuClicks();
+      }
+    },
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
   internals.defineEventHandler(DockPrototype, "menuclick");
   internals.defineEventHandler(DockPrototype, "reopen");
   // Menu read-back (laufey API 59): the native menu's items as the OS holds
@@ -1980,6 +2014,14 @@ pub const DESKTOP_JS: &str = r#"
     // "notificationresponse": the click that launched it (laufey API 41).
     launchNotificationResponses: {
       get() { return getLaunchTargets().notifications; },
+      configurable: true,
+      enumerable: true,
+    },
+    // A browser app (desktop.app.browser): http / https links arrive like
+    // deep links ("openurl", launchUrls, "secondinstance"). Read live: it
+    // never takes the launch snapshot.
+    browserLinks: {
+      get() { return op_desktop_browser_links(); },
       configurable: true,
       enumerable: true,
     },
@@ -3048,7 +3090,7 @@ pub const DESKTOP_JS: &str = r#"
       enumerable: true,
     },
     // Opens an http:, https: or mailto: URL in the user's browser or mail
-    // program (DENEXT.md item 488): true when the system's opener was
+    // program (DENEXT.md item 489): true when the system's opener was
     // started. Needs the run permission for that opener, and works in an
     // app the kernel sandbox holds, where a child process can't open
     // anything outside it.
@@ -4247,11 +4289,7 @@ pub const DESKTOP_JS: &str = r#"
             break;
           }
           case "dockMenuClick": {
-            for (const d of docks) {
-              d.dispatchEvent(new CustomEvent("menuclick", {
-                detail: { id: ev.id },
-              }));
-            }
+            dispatchDockMenuClick(ev.id);
             break;
           }
           case "dockReopen": {
@@ -5293,8 +5331,47 @@ mod tests {
     assert!(DESKTOP_JS.contains("internals.defineEventHandler(desktop, type)"));
     // The launch snapshot is taken once, lazily.
     assert!(DESKTOP_JS.contains("op_desktop_take_launch_targets()"));
+    assert!(
+      DESKTOP_JS.contains("get() { return op_desktop_browser_links(); },")
+    );
     assert!(DESKTOP_JS.contains("launchUrls:"));
     assert!(DESKTOP_JS.contains("launchFiles:"));
+  }
+
+  #[test]
+  fn desktop_js_delivers_jump_list_tasks_as_dock_clicks() {
+    // The first "menuclick" listener on a Dock drains the launch inbox's
+    // jump-list tasks, which then dispatch like a live dock menu click.
+    let sub = DESKTOP_JS
+      .split("function subscribeDockMenuClicks() {")
+      .nth(1)
+      .unwrap();
+    let sub = &sub[..sub.find("\n  }").unwrap()];
+    assert!(
+      sub.contains("op_desktop_subscribe_launch_events(\"dockmenuclick\")")
+    );
+    assert!(sub.contains("dispatchDockMenuClick(ev.id)"));
+    assert!(
+      DESKTOP_JS
+        .contains("if (listener != null && String(type) === \"menuclick\") {")
+    );
+    // Defined before the on… handler, which adds its listener through it.
+    let add = DESKTOP_JS
+      .find("Object.defineProperty(DockPrototype, \"addEventListener\"")
+      .unwrap();
+    let handler = DESKTOP_JS
+      .find("internals.defineEventHandler(DockPrototype, \"menuclick\")")
+      .unwrap();
+    assert!(add < handler);
+    let live = DESKTOP_JS
+      .split("case \"dockMenuClick\": {")
+      .nth(1)
+      .unwrap();
+    assert!(
+      live
+        .trim_start()
+        .starts_with("dispatchDockMenuClick(ev.id);")
+    );
   }
 
   #[test]
@@ -5370,7 +5447,7 @@ mod tests {
 
   #[test]
   fn desktop_js_installs_open_external() {
-    // DENEXT.md item 488: Deno.desktop.openExternal(url).
+    // DENEXT.md item 489: Deno.desktop.openExternal(url).
     for needle in [
       "openExternal: {",
       "value: function openExternal(url) {",

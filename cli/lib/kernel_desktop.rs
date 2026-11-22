@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 //! denext: the kernel sandbox of a packaged desktop app (DENEXT.md item
-//! 488): what is decided before anything is applied.
+//! 489): what is decided before anything is applied.
 //!
 //! A desktop app's process hosts a web engine, so whether the kernel sandbox
 //! can hold it depends on the engine and the machine, not only on the mode:

@@ -1,5 +1,5 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-// A packaged desktop app under the kernel sandbox (DENEXT.md item 488):
+// A packaged desktop app under the kernel sandbox (DENEXT.md item 489):
 // packaged strict (`--kernel-sandbox=enforce`, a scoped grant) with the
 // fork's CLI, launched on this leg's engine. What the app must report
 // follows from the engine, the OS and the host:

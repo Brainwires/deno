@@ -547,7 +547,7 @@ const DESKTOP_UNIX_SOCKETS: &[&str] = &["/private/var/run/syslog"];
 
 /// The Seatbelt profile of a packaged desktop app whose web engine is the
 /// OS web view (WKWebView), applied to the app's own process (DENEXT.md
-/// item 488). Unlike [`cli_profile`] it allows by default: the window
+/// item 489). Unlike [`cli_profile`] it allows by default: the window
 /// server, the GPU, the pasteboard, the keychain and AppKit's services stay
 /// reachable (a deny-default profile for a windowed process would have to
 /// list them all). What it refuses is what the grant doesn't cover, for
@@ -1047,7 +1047,7 @@ mod tests {
     ));
   }
 
-  // DENEXT.md item 488: the desktop profile allows by default and refuses
+  // DENEXT.md item 489: the desktop profile allows by default and refuses
   // what the grant doesn't cover, in the cli profile's order (allows, then
   // denies, then re-allows), with the three ways out through the system
   // always refused

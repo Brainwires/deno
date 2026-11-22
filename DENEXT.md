@@ -19338,7 +19338,223 @@ where the changes are discussed.
        (`webrtc-stats/supported-stats.https.html`).
      - Node tests enabled: none; `node:` has no WebRTC API.
 
-486. **`feat(permissions)`: the kernel sandbox's deny ceilings, `deno test` /
+483. **`feat(desktop)`: a browser app receives http / https links** (runtime;
+     `cli/lib/standalone/{launch_args.rs,app_origin.rs,binary.rs}`,
+     `cli/standalone/binary.rs`, `cli/rt_desktop/{lib.rs,app_origin.rs}`,
+     `cli/rt/desktop.rs`, `runtime/ops/desktop.rs`, `runtime/js/99_main.js`,
+     `libs/config/deno_json/mod.rs`, `cli/schemas/config-file.v1.json`,
+     `cli/tsc/dts/lib.deno.desktop.d.ts`). A desktop app that declares itself
+     a web browser, with `desktop.app.browser: true` in deno.json or
+     `"browser": true` in an embedded `.deno-desktop/app.json`, now receives
+     `http` and `https` links the way it receives its deep links: in
+     `Deno.desktop.launchUrls` at a cold start, as `"openurl"` events (macOS)
+     and in a `"secondinstance"` event's `urls` (a later launch forwarded by
+     the single-instance lock). Before, the runtime dropped every link whose
+     scheme was not a declared deep link, so a browser app never saw the web
+     links the OS opened with it. Opened HTML and XHTML files keep reaching
+     the open-file path (`launchFiles`, `"openfile"`), cold and warm,
+     including a Linux launcher's `%u`, which passes them as `file:` URLs.
+     `Deno.desktop.browserLinks` (`boolean`) says whether the runtime
+     delivers web links to the app: `true` for a browser app in its main
+     scope, `false` otherwise (no flag, a worker, outside a desktop app).
+     `http` and `https` stay refused in `desktop.app.deepLinks`, and the
+     runtime never registers them for the app (`registerScheme` refuses
+     them): the OS lists a browser app from what its packaging declares, and
+     only the user makes it the default browser. Every other scheme is still
+     dropped unless declared.
+     - User-facing note: set `desktop.app.browser` and the app's
+       `"openurl"` / `launchUrls` / `"secondinstance"` handlers get the web
+       links the OS sends it; check `Deno.desktop.browserLinks` before relying
+       on it.
+     - Tests: `launch_args` (`browser_apps_also_accept_http_and_https`,
+       `file_url_arguments_become_paths`), `app_origin`
+       (`app_config_file_browser`), `rt_desktop::app_origin`
+       (`app_browser_from_metadata_or_app_json`).
+     - Node tests enabled: none; Node has no desktop API.
+484. **`fix(node/net)`: a Windows named-pipe server's pipe belongs to the
+     account that created it** (security; runtime;
+     `libs/core/uv_compat/{pipe.rs,pipe_security.rs}`, `libs/core/Cargo.toml`,
+     `ext/node/ops/pipe_wrap.rs`,
+     `ext/node/polyfills/internal_binding/pipe_wrap.ts`,
+     `tests/unit_node/net_test.ts`). A `node:net` server on a pipe path
+     (`net.createServer().listen("\\\\.\\pipe\\name")`, the local IPC of
+     a Windows program and what denext's `listenLocalIpc` uses there) created
+     its pipe with no security attributes, so the pipe took Windows' default
+     descriptor, which also lets every other local account open it for
+     reading. Every instance is now created with an explicit descriptor
+     (`create_win_pipe_instance`):
+     - **The descriptor.** In SDDL,
+       `O:<user>D:P(A;;0x1f01ff;;;<user>)(A;;0x1f01ff;;;SY)`: owned by the
+       user of the process's token, with a protected DACL (nothing inherited)
+       of two ACEs, `FILE_ALL_ACCESS` for that user and for LocalSystem.
+       Administrators have no ACE: an elevated process of the same user
+       carries the user's SID and matches the first one, and an administrator
+       of another account is not a party to the program's IPC. A descriptor
+       that can't be built fails the listen; the pipe is never created with
+       the default one instead.
+     - **One owner per name.** The first instance a server creates carries
+       `FILE_FLAG_FIRST_PIPE_INSTANCE` (it already did), so `listen` on a
+       name another process serves fails with `EADDRINUSE` and the server
+       never becomes one more instance of a pipe it doesn't own. The
+       instances `uv_pipe_accept` creates afterwards, on the same handle,
+       don't carry it. With the DACL above, no other account can add an
+       instance of the server's pipe either (`FILE_CREATE_PIPE_INSTANCE`).
+     - **Local only.** `PIPE_REJECT_REMOTE_CLIENTS` on every instance (tokio's
+       default, now set explicitly).
+     - **`readableAll` / `writableAll`.** `server.listen({ path, readableAll,
+       writableAll })` was a no-op on Windows. It now does what libuv's
+       `uv_pipe_chmod` does (`uv_pipe_chmod` in `pipe.rs`; the instances are
+       opened with `WRITE_DAC` for it): the pipe's DACL is replaced with the
+       one above plus an ACE for Everyone, `(A;;0x120189;;;WD)` for
+       `readableAll` (`FILE_GENERIC_READ | FILE_WRITE_ATTRIBUTES`),
+       `(A;;0x120196;;;WD)` for `writableAll` (`FILE_GENERIC_WRITE |
+       FILE_READ_ATTRIBUTES`), `(A;;0x12019f;;;WD)` for both. As in Node,
+       `writableAll` includes the right to create instances of the pipe
+       (`FILE_GENERIC_WRITE` holds `FILE_CREATE_PIPE_INSTANCE`, and a client
+       that opens with `GENERIC_WRITE`, as Node's and tokio's do, needs it):
+       use it only for a pipe every local account is meant to share.
+     - **Stricter than Node, on purpose.** Node (libuv) creates the pipe with
+       the default descriptor unless one of the two options is set. Here the
+       default is the user and LocalSystem only, so a server that other
+       accounts must reach (a service a per-user client talks to) has to say
+       so with `readableAll` / `writableAll`. Clients are unchanged: they
+       connect as before, and a client of the same account always can.
+     - User-facing note: on Windows a `node:net` pipe server is reachable by
+       its own account and LocalSystem only; pass `readableAll` / `writableAll`
+       to `listen()` to open it to other accounts. A pipe name another
+       process already serves fails `listen()` with `EADDRINUSE`.
+     - Tests: `libs/core/uv_compat/pipe_security.rs` (Windows: the SDDL, the
+       built descriptor's owner, protection and ACEs, the descriptor read back
+       from a live pipe with `GetSecurityInfo`, a refused second first
+       instance, the Everyone ACE added and removed by the chmod, a later
+       instance sharing the first one's descriptor);
+       `tests/unit_node/net_test.ts` (`a second server on a served named pipe
+       fails with EADDRINUSE`, `a path server listens with readableAll and
+       writableAll`).
+     - Node tests enabled: none new; `parallel/test-net-server-listen-path.js`
+       (already enabled) now exercises the chmod on Windows.
+
+485. **`fix(pty)`: a Windows pty kill ends the process tree; detached
+     children leave their parent's job** (runtime, behavior change on
+     Windows; `ext/pty/{Cargo.toml,windows.rs}`,
+     `runtime/subprocess_windows/src/process.rs`, `cli/util/job_object.rs`,
+     `cli/tsc/dts/lib.deno_pty.d.ts`, `tests/unit/pty_test.ts`).
+     - The pty child runs in a job object of its own. It is created
+       `CREATE_SUSPENDED`, assigned with `AssignProcessToJobObject` and only
+       then resumed, so nothing it starts can run outside the job. `kill`
+       (and the kill when the runtime drops an unreaped child) is
+       `TerminateJobObject(job, 1)`: the child and every process it started
+       end with exit code 1. Before, `TerminateProcess` ended the child alone
+       and a shell's `ping` (or a dev server) kept running. The status is
+       still `GetExitCodeProcess` of the child. The job is not kill-on-close:
+       a child that exits by itself leaves what it started running, as
+       before, and the job handle is closed with the child's resource. It
+       allows explicit breakaway (`JOB_OBJECT_LIMIT_BREAKAWAY_OK`, not the
+       silent kind), so a `detached: true` child started inside the terminal
+       outlives a kill, as a `setsid` daemon outlives a Unix terminal. Where
+       no job can be made or assigned (a sandbox whose job refuses nesting)
+       the child still starts and a kill ends it alone.
+     - `Deno.Command` with `detached: true` on Windows adds
+       `CREATE_BREAKAWAY_FROM_JOB` when the job this process is immediately
+       in allows breakaway (`IsProcessInJob` + `QueryInformationJobObject`).
+       That job is usually the runtime's own kill-on-close job, which it
+       joins at its first non-detached spawn; a detached child used to
+       inherit it and die when the runtime exited. An outer job that refuses
+       breakaway fails the spawn with `ERROR_ACCESS_DENIED`, and the spawn is
+       retried without the flag (the child then stays in the jobs, as
+       before).
+     - `deno desktop --hmr` / `--inspect`'s kill-on-close job
+       (`cli/util/job_object.rs`) now allows explicit breakaway too: CEF /
+       WebView2 helpers and a dev server never ask, so they still end with
+       the run, while a detached sidecar outlives it, which is what
+       `detached` asks for.
+     - `PtyForegroundProcess.cwd` (and so `ptyInfo`'s cwd) can be `null` on
+       Windows for an elevated or protected process: reading another
+       process's working directory needs `PROCESS_VM_READ`, which such a
+       process refuses. No change; documented here.
+     - `lib.deno_pty.d.ts` no longer says Windows is unsupported; `kill`'s
+       doc says it ends the tree on Windows.
+     - User-facing note: on Windows, `pty.kill()` and disposing a pty end the
+       programs the child started too; a `detached: true` child outlives the
+       runtime even after a non-detached spawn.
+     - Tests: `tests/unit/pty_test.ts`, Windows only:
+       `ptyKillEndsTheProcessTreeOnWindows`,
+       `ptyResizeIsVisibleToTheChildOnWindows`, `ptyUtf8RoundTripOnWindows`,
+       `ptyVtOutputPassesThroughOnWindows`, `ptySpawnsPowerShellOnWindows`
+       (each of `pwsh.exe` / `powershell.exe` where installed),
+       `ptySpawnsWslOnWindows` (only with a WSL distribution) and
+       `ptyEnvAndCwdOnWindows`; `deno_subprocess_windows`'s
+       `detached_child_breaks_away_from_the_global_job`; `cli`'s
+       `dropping_the_job_kills_the_child` also checks the breakaway limit.
+     - Node tests enabled: none (`node:child_process`'s `detached` runs on
+       the same spawn, but no node_compat test checks job membership).
+486. **`feat(desktop)`: desktop path tokens in `unix:` net grants; the update
+     helper doesn't wait for surviving detached sidecars** (runtime;
+     `cli/rt/run.rs`, `runtime/ops/desktop_update/swap.rs`).
+     - A desktop app's baked `--allow-net` / `--allow-net-connect` /
+       `--allow-net-listen` value (and the matching `--deny-*`) of the form
+       `unix:$DENO_DESKTOP_DATA/...` or `unix:$DENO_DESKTOP_CACHE/...` names
+       a Unix socket in the app's data or cache folder: at launch the runtime
+       takes off `unix:`, expands the rest exactly as items 190 and 191 expand
+       a read / write / run value (`expand_desktop_path_entry`: no folder, a
+       `..` component, or the token followed by anything but a separator
+       can't be expanded) and puts `unix:` back. The same rules as there: an
+       allow entry that can't be expanded is dropped, never widened, and a
+       list left empty becomes no grant (`None`, never `Some(vec![])`, which
+       allows everything); a deny entry that can't be expanded stays as it
+       was. A net value without `unix:`, or with the token anywhere but right
+       after it, is left alone. This lets denext bake a scoped grant for a
+       sidecar's or the app's own control socket instead of an unscoped
+       `--allow-net`.
+     - denext gates on it by runtime version, as it does the data and cache
+       tokens (`supportsDesktopDataToken`): this is the first runtime that
+       expands the tokens in `unix:` net values. An older runtime reads
+       `unix:$DENO_DESKTOP_DATA/x.sock` as a relative socket path, which the
+       net descriptor parser refuses.
+     - The full-app update helper's wait for processes running from the
+       install (Linux; `wait_for_processes_in`, up to 60 s) leaves out a
+       detached sidecar the app let go running across the update: a process
+       whose `/proc/<pid>/environ` holds the whole entry
+       `DENEXT_SIDECAR_DETACHED=1`, which only denext's detached sidecar
+       launcher sets (on the sidecar itself; the sidecar removes it from its
+       own environment at start, so its children don't inherit it, while
+       `/proc/<pid>/environ`, the block `execve` was given, keeps it). The app
+       stops every other detached sidecar before it starts the helper, so one
+       still running is one with `detached.keepAcrossUpdates` or a
+       `detached.version`. It outlives the app by design, and waiting for it
+       only held every such update for the whole 60 s. A process whose
+       environment can't be read (another user's, a non-dumpable one) is
+       waited for, as before. Not a trust decision: any process of the user
+       could carry the marker, and all it gains is not being waited for; on
+       Linux the swap renames the install whether or not something runs from
+       it. The scan takes its `/proc` root as an argument so the tests run it
+       over a stand-in tree.
+     - Why the environment and not a list of pids in the update state: no
+       such list exists (denext's `installAppUpdateAndRelaunch` passes only
+       `force`), the state file is as writable by the user's processes as a
+       process's own environment, and the marker also covers an instance the
+       app didn't start in this run (a launch of another installed version, a
+       reattached one) without the app reading pids it never authenticated.
+     - macOS: the helper never waits for processes running from the install
+       (an app bundle is swapped by `renamex_np` whatever runs from it), so a
+       surviving sidecar needs nothing there. Windows: unchanged. A running
+       process locks its executable's folder, so a sidecar running from the
+       install would make the swap fail; denext stops every detached sidecar
+       before a Windows update (its docs say so). Letting one survive needs it
+       to run from a per-version copy outside the install, not done here.
+     - User-facing note: on Linux an update with a surviving detached sidecar
+       swaps as soon as the app's own processes have left, instead of after
+       60 s.
+     - Tests: `denort`'s `desktop_path_tokens_expand_in_unix_socket_net_grants`,
+       `desktop_unix_socket_net_tokens_never_widen_a_grant`,
+       `desktop_path_tokens_expand_in_unix_socket_net_denials`;
+       `deno_runtime`'s `the_detached_sidecar_marker_is_a_whole_environ_entry`,
+       `the_install_scan_leaves_out_detached_sidecars` (a stand-in `/proc`,
+       every Unix host) and `a_detached_sidecar_does_not_hold_the_wait_linux`
+       (the real `/proc`).
+     - Node tests enabled: none.
+
+487. **`feat(permissions)`: the kernel sandbox's deny ceilings, `deno test` /
      `deno bench` under enforcement, and a compiled program's refused-prompt
      line** (CLI and runtime; denext-only; denext.30 WP-A; `AUTO_STAGE`
      unchanged, so what `auto` does by default is unchanged until the flip;
@@ -19437,7 +19653,7 @@ where the changes are discussed.
        gone (`deno test` no longer refuses).
      - Node tests enabled: none; no Node API changes.
 
-487. **`feat(permissions)`: the kernel sandbox's broker by itself: `auto`
+488. **`feat(permissions)`: the kernel sandbox's broker by itself: `auto`
      takes the supervisor, a compiled program runs its own, children of a
      brokered run reach it, and Linux gets a warn observer** (CLI and runtime;
      denext-only; opt-in as before: `AUTO_STAGE` is unchanged, so `auto` still
@@ -19634,7 +19850,7 @@ where the changes are discussed.
        without privileges (the new `kernelSandboxPidNamespace` condition).
      - Node tests enabled: none; no Node API changes.
 
-488. **`feat(kernel)`: the kernel sandbox for packaged desktop apps**
+489. **`feat(kernel)`: the kernel sandbox for packaged desktop apps**
      (runtime, CLI; `cli/lib/{kernel_desktop,kernel_apply,kernel_sandbox}.rs`,
      `cli/rt/{kernel_desktop,run}.rs`, `cli/rt_desktop/{kernel_start,lib}.rs`,
      `libs/sandbox/{seatbelt,enforce_linux,outside,lib}.rs`,
@@ -19808,7 +20024,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-479, 486-488) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-479, 484, 486-489) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
@@ -20405,7 +20621,7 @@ in the job summary, never skipped silently. Areas:
   1.0.0 -> 2.0.0 relaunch and confirm, a 3.0.0 trial that never confirms rolled
   back and refused (and kept in the rejected set).
 - **kernelsandbox** (fork CLI) — a strict package (`--kernel-sandbox=enforce`,
-  a scoped grant) on this leg's engine (item 488): what the probe says holds
+  a scoped grant) on this leg's engine (item 489): what the probe says holds
   the app and why, against what the engine, the OS and the host make of it; a
   native write through FFI inside and outside the grant, refused exactly when
   the app is kernel-held; `Deno.desktop.openExternal` (on macOS the browser

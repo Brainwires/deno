@@ -4,7 +4,7 @@
 //! (DENEXT.md items 425 and 901): the machine's mechanisms, the context
 //! pieces read from the process, a compiled program's startup
 //! ([`start_compiled`]) and a packaged desktop app's ([`start_desktop`],
-//! item 488).
+//! item 489).
 //!
 //! A compiled program applies its sandbox in-process, with no re-exec: its
 //! grant is baked, its modules are embedded, and it has fetched nothing, so
@@ -460,7 +460,7 @@ fn fatal_list<'a>(
 }
 
 // ---------------------------------------------------------------------------
-// A packaged desktop app's startup (DENEXT.md item 488)
+// A packaged desktop app's startup (DENEXT.md item 489)
 // ---------------------------------------------------------------------------
 
 /// The outside helper a confined desktop app keeps for what must happen
@@ -1558,7 +1558,7 @@ mod tests {
     assert_eq!(supervised.fatal_gaps().count(), 0, "{:?}", supervised.gaps);
   }
 
-  // DENEXT.md item 488: a desktop app whose mode applies nothing reports
+  // DENEXT.md item 489: a desktop app whose mode applies nothing reports
   // `none` with the reason, and a development build is off whatever is
   // baked
   #[test]

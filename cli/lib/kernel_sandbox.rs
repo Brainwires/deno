@@ -234,7 +234,7 @@ pub enum RunKind {
   /// sandbox on this machine is not this module's question:
   /// `kernel_apply::start_desktop` answers it and reports the app as
   /// kernel-held or headless-only
-  /// (DENEXT.md item 488).
+  /// (DENEXT.md item 489).
   DesktopPackaged { strict: bool, engine: Engine },
   /// Anything that isn't a user-code runtime (`install`, `cache`, `compile`,
   /// `fmt`, `lint`, `check`, `task`, `lsp`, …). npm lifecycle scripts keep the
@@ -358,7 +358,7 @@ pub enum ModeReason {
   /// A packaged desktop app whose own process isn't confined: its web
   /// engine can't run inside the kernel sandbox on this machine (or this OS
   /// has no enforcer for desktop apps), so the app has the headless
-  /// guarantees only (DENEXT.md item 488).
+  /// guarantees only (DENEXT.md item 489).
   DesktopEngine,
   /// A packaged desktop app that doesn't bake strict permissions
   /// (`desktop.permissions: "strict"`, a baked `enforce`): `auto` applies
@@ -366,7 +366,7 @@ pub enum ModeReason {
   /// `xdg-open` for `openPath`, `revealInFileManager` and the auth
   /// session's browser, and only http / https / mailto links have a way
   /// out of the sandbox (the outside helper), so confining it by default
-  /// would break what it does (DENEXT.md item 488, the R4 decision).
+  /// would break what it does (DENEXT.md item 489, the R4 decision).
   DesktopNotStrict,
   /// The process runs inside an npm lifecycle script's jail
   /// (`DENO_INTERNAL_LIFECYCLE_JAIL`): the jail is its confinement (the OS

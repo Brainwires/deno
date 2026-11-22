@@ -214,6 +214,25 @@ pub fn resolve_allowed_navigation_origins(
     .unwrap_or_default()
 }
 
+/// Whether the app is a browser app (`desktop.app.browser`), which also
+/// receives `http` / `https` links: the metadata's `app_browser` (deno.json),
+/// or `"browser": true` in the nearest [`APP_CONFIG_FILE`]. Either one turns
+/// it on, since a packager may write only the file. An app.json that does not
+/// parse was already refused by [`resolve_app_config`].
+pub fn resolve_app_browser(
+  metadata_browser: bool,
+  root: &Path,
+  entrypoint_key: &str,
+  read_file: impl Fn(&Path) -> Option<Vec<u8>>,
+) -> bool {
+  metadata_browser
+    || find_app_config_file(root, entrypoint_key, read_file)
+      .ok()
+      .flatten()
+      .and_then(|(_, config)| config.browser)
+      .unwrap_or(false)
+}
+
 /// The desktop capabilities the app's packaging baked in: the nearest
 /// [`APP_CONFIG_FILE`]'s `capabilities`, mapped to the ones this runtime
 /// knows (unknown names are logged and ignored: a newer packager may bake
@@ -364,6 +383,18 @@ mod tests {
     assert!(
       resolve_allowed_navigation_origins(root, "main.ts", bad).is_empty()
     );
+  }
+
+  #[test]
+  fn app_browser_from_metadata_or_app_json() {
+    let root = Path::new("/vfs");
+    let on = reader(&[(".deno-desktop/app.json", r#"{ "browser": true }"#)]);
+    let off = reader(&[(".deno-desktop/app.json", r#"{ "browser": false }"#)]);
+    assert!(resolve_app_browser(false, root, "main.ts", &on));
+    assert!(!resolve_app_browser(false, root, "main.ts", &off));
+    assert!(!resolve_app_browser(false, root, "main.ts", reader(&[])));
+    assert!(resolve_app_browser(true, root, "main.ts", &off));
+    assert!(resolve_app_browser(true, root, "main.ts", reader(&[])));
   }
 
   #[test]

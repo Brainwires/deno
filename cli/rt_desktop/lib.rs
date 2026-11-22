@@ -2564,6 +2564,8 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       tooltips: c.tooltips(),
       destructive: c.destructive(),
       snapshot: c.snapshot(),
+      dock_menu: c.dock_menu(),
+      jump_list: c.jump_list(),
     }
   }
 
@@ -3460,7 +3462,7 @@ fn prestart(engine: std::ffi::c_int) -> Result<(), i32> {
 }
 
 /// The host's first call, at the top of its `main`: before it starts its
-/// web engine, a thread, or anything else (DENEXT.md item 488). The kernel
+/// web engine, a thread, or anything else (DENEXT.md item 489). The kernel
 /// sandbox of a packaged app is decided and applied here, in place.
 /// `engine` is the host's own engine (1: the OS web view, 2: CEF; anything
 /// else: not said). Returns 1 to go on starting the app, or 0 with
@@ -3608,6 +3610,17 @@ laufey::main!(|| {
   // The updater's relaunch markers are not launch targets.
   let (launch_argv, app_updated_from, app_rolled_back_from) =
     deno_runtime::ops::desktop_update::split_launch_markers(&launch_argv);
+  // A Windows jump-list task that started the app: its dock menu item, which
+  // reaches the app as `Deno.dock`'s "menuclick" (through the launch inbox),
+  // not as a launch argument (nor one an update relaunch repeats).
+  let launch_dock_item =
+    deno_lib::standalone::launch_args::dock_item_from_args(&launch_argv)
+      .map(str::to_string);
+  let launch_argv = if launch_dock_item.is_some() {
+    Vec::new()
+  } else {
+    launch_argv
+  };
   #[allow(
     clippy::disallowed_methods,
     reason = "the launch directory, before the runtime (and its sys) exists"
@@ -3709,7 +3722,7 @@ laufey::main!(|| {
     }
   }
 
-  // denext (DENEXT.md item 488): the kernel sandbox. A host that calls the
+  // denext (DENEXT.md item 489): the kernel sandbox. A host that calls the
   // prestart applied it before its engine started; one that doesn't gets
   // it here, where macOS can still confine the process and Linux reports
   // the app headless-only. A refusal (a baked enforce the OS can't hold)
@@ -3807,8 +3820,26 @@ laufey::main!(|| {
       data.vfs.read_file_all(file).ok().map(|b| b.into_owned())
     },
   );
+  // A browser app (`desktop.app.browser`) also receives http / https links:
+  // the metadata's flag, else `"browser": true` in the embedded app.json.
+  let app_browser = app_origin::resolve_app_browser(
+    data.metadata.app_browser,
+    &data.root_path,
+    &data.metadata.entrypoint_key,
+    |path| {
+      let file = data.vfs.file_entry(path).ok()?;
+      data.vfs.read_file_all(file).ok().map(|b| b.into_owned())
+    },
+  );
   let app_origin = app_config.origin;
   let deep_links = app_config.deep_links;
+  // The schemes of the links delivered to the app: its deep links, plus
+  // http / https for a browser app. Scheme registration (and
+  // getSchemeOwner / registerScheme) keeps to the deep links alone.
+  let link_schemes = deno_lib::standalone::launch_args::accepted_link_schemes(
+    &deep_links,
+    app_browser,
+  );
   // `LAUFEY_APP_ID` (the per-app web data directory, and the key of the
   // single-instance lock) is the backend's launch configuration: the host
   // reads it, or "appId" from `laufey-launch.json` next to the executable,
@@ -3827,12 +3858,13 @@ laufey::main!(|| {
   }
 
   // Deep links and files in the launch arguments: a URL with one of the
-  // app's registered schemes, or an existing path. Anything else (flags,
-  // the host's own `--runtime <path>`) is ignored.
+  // app's registered schemes (or http / https for a browser app), or an
+  // existing path. Anything else (flags, the host's own `--runtime <path>`)
+  // is ignored.
   let launch_targets = deno_lib::standalone::launch_args::parse_launch_args(
     &launch_argv,
     launch_cwd.as_deref(),
-    &deep_links,
+    &link_schemes,
     path_exists,
   );
   log::debug!(
@@ -3900,8 +3932,11 @@ laufey::main!(|| {
         ws_relay_listener,
         LaunchConfig {
           deep_links,
+          link_schemes,
+          browser_links: app_browser,
           identifier: app_config.identifier,
           targets: launch_targets,
+          dock_item: launch_dock_item,
           initial_window: app_config.initial_window,
           display_name: app_config.name,
           app_update,
@@ -3995,10 +4030,17 @@ fn path_exists(path: &std::path::Path) -> bool {
 struct LaunchConfig {
   /// The app's normalized deep-link schemes.
   deep_links: Vec<String>,
+  /// The schemes of the links delivered to the app: `deep_links`, plus
+  /// http / https for a browser app (`accepted_link_schemes`).
+  link_schemes: Vec<String>,
+  /// A browser app (`desktop.app.browser`): `Deno.desktop.browserLinks`.
+  browser_links: bool,
   /// `desktop.app.identifier`, validated.
   identifier: Option<String>,
   /// The deep links and files in this process's own arguments.
   targets: deno_lib::standalone::launch_args::LaunchTargets,
+  /// The dock menu item of the Windows jump-list task that started the app.
+  dock_item: Option<String>,
   /// `desktop.initialWindow` (metadata, else the embedded app.json).
   initial_window: deno_lib::standalone::binary::InitialWindowConfig,
   /// `name` from the embedded app.json (`desktop.app.name`): the title of
@@ -4014,10 +4056,11 @@ struct LaunchConfig {
 }
 
 /// Register the backend's open-URL and second-instance handlers, feeding
-/// `inbox`. Registered at runtime start: the backend buffers deliveries made
-/// before that (a launch link, a launch forwarded early) and flushes them into
-/// these handlers synchronously here, and `inbox` holds them until the app
-/// listens.
+/// `inbox`. `deep_links` are the link schemes delivered (the deep links,
+/// plus http / https for a browser app). Registered at runtime start: the
+/// backend buffers deliveries made before that (a launch link, a launch
+/// forwarded early) and flushes them into these handlers synchronously here,
+/// and `inbox` holds them until the app listens.
 fn register_launch_handlers(
   inbox: &denort::desktop::DesktopLaunchInbox,
   deep_links: Arc<Vec<String>>,
@@ -4060,8 +4103,17 @@ fn register_launch_handlers(
   // A later launch of the app, forwarded by laufey's single-instance lock
   // (a no-op unless the lock is on). Classified with the same rules as this
   // process's own arguments, relative paths against the forwarded directory.
+  // A Windows jump-list task's launch is the dock menu's click instead:
+  // laufey delivers it as that itself once the app set its dock menu, so one
+  // reaching here is a task from before (the jump list outlives the app).
   let second_inbox = inbox.clone();
   laufey::on_second_instance(move |args, cwd| {
+    if let Some(id) =
+      deno_lib::standalone::launch_args::dock_item_from_args(args)
+    {
+      second_inbox.dock_menu_click(id.to_string());
+      return;
+    }
     let cwd_path = (!cwd.is_empty()).then(|| std::path::Path::new(cwd));
     let targets = deno_lib::standalone::launch_args::parse_launch_args(
       args,
@@ -4170,7 +4222,7 @@ fn run_headless_worker() {
       }
     };
     let dev = dev_switches::init(data.metadata.desktop_dev);
-    // denext (DENEXT.md item 488): a fork of the app is held by the app's
+    // denext (DENEXT.md item 489): a fork of the app is held by the app's
     // kernel sandbox when the app has one (inherited), and confines itself
     // like a compiled program when the app's own process can't be confined
     // (done already when the host called the prestart).
@@ -4624,14 +4676,16 @@ async fn run_desktop(
   // getSchemeOwner / registerScheme, and the startup pass below). A dev run
   // executes a development host, not the packaged app, so it writes nothing.
   let scheme_registrar = Arc::new(scheme_registration::SchemeRegistrar::new(
-    launch.deep_links.clone(),
+    launch.deep_links,
     launch.identifier.clone(),
     app_name.clone(),
     dev.hmr_dir.is_some() || dev.dev_url.is_some(),
   ));
-  let launch_deep_links = Arc::new(launch.deep_links);
+  let launch_link_schemes = Arc::new(launch.link_schemes);
+  let browser_links = launch.browser_links;
   let app_update = launch.app_update;
   let baked_capabilities = launch.baked_capabilities;
+  let launch_dock_item = launch.dock_item;
   let launch_urls = launch.targets.urls;
   let launch_files: Vec<String> = launch
     .targets
@@ -4779,7 +4833,11 @@ async fn run_desktop(
         launch_urls,
         launch_files,
       );
-      register_launch_handlers(&launch_inbox, launch_deep_links);
+      launch_inbox.set_browser_links(browser_links);
+      register_launch_handlers(&launch_inbox, launch_link_schemes);
+      if let Some(id) = launch_dock_item {
+        launch_inbox.dock_menu_click(id);
+      }
       state.put(launch_inbox);
 
       // Register the declared schemes nobody handles (and refresh this

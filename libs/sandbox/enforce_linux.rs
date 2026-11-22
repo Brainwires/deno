@@ -699,7 +699,7 @@ pub const ENGINE_NAMESPACE_FLAGS: u32 = 0x1000_0000 // NEWUSER
   | 0x4000_0000; // NEWNET
 
 /// What a packaged desktop app's process needs that a headless program's
-/// plan refuses (DENEXT.md item 488): its web engine lives in the confined
+/// plan refuses (DENEXT.md item 489): its web engine lives in the confined
 /// process and starts its own helper processes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DesktopVariant {

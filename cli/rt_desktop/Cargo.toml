@@ -88,9 +88,11 @@ denort = { path = "../rt", default-features = false }
 # Brainwires/laufey fork's development-denext or a release branch cut from it
 # (release/0.8.1 for v0.8.1, train/laufey-0.8.2 for v0.8.2,
 # train/laufey-0.9.0 for v0.9.0).
+# ab06b219: Windows jump lists (laufey PR #4), plus dock_menu()/jump_list()
+# capability accessors and dock_item_from_args.
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "6c11683164fb50c63eb3efaedc4835a22886d737" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "ab06b219cf38f864cdcb1ad953c6821340303cff" }
 libsui.workspace = true
 
 bytes.workspace = true

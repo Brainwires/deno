@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 //! denext: what a packaged desktop app's kernel-sandbox startup needs from
-//! the binary (DENEXT.md item 488): the baked grant as the runtime applies
+//! the binary (DENEXT.md item 489): the baked grant as the runtime applies
 //! it, and the folders its web engine keeps its data in. The decision and
 //! the sandbox itself are `deno_lib::kernel_apply::start_desktop_with`'s;
 //! `denort_desktop` calls it when the app's host calls the runtime, before

@@ -64,7 +64,7 @@ export interface Env {
 export const FORK_CLI_AREAS: ReadonlySet<string> = new Set([
   "sidecarint",
   // `--kernel-sandbox` for a desktop app and the engine baked into the
-  // binary are the fork CLI's (DENEXT.md item 488).
+  // binary are the fork CLI's (DENEXT.md item 489).
   "kernelsandbox",
 ]);
 

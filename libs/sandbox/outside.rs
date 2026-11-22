@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-//! The outside helper of a kernel-confined desktop app (DENEXT.md item 488).
+//! The outside helper of a kernel-confined desktop app (DENEXT.md item 489).
 //!
 //! A packaged desktop app's process confines itself in place
 //! (`deno_lib::kernel_apply::start_desktop`), and everything it starts

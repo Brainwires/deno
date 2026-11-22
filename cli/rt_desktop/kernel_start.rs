@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 //! denext: the kernel-sandbox startup of a packaged desktop app (DENEXT.md
-//! item 488).
+//! item 489).
 //!
 //! A desktop app's process hosts its web engine, and the sandbox is applied
 //! in place: on Linux it holds only threads made afterwards, so it must be

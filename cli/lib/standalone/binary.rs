@@ -153,6 +153,13 @@ pub struct Metadata {
   /// binary from a CLI that predates the field. Desktop builds only.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub app_deep_links: Option<Vec<String>>,
+  /// deno.json `desktop.app.browser`: the app may be the system's web
+  /// browser, so the runtime also delivers `http` / `https` links to it
+  /// (see [`super::launch_args::accepted_link_schemes`]). `"browser": true`
+  /// in an embedded `.deno-desktop/app.json` turns it on as well. Absent
+  /// (`false`) otherwise. Desktop builds only.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub app_browser: bool,
   /// Initial desktop window options from deno.json `desktop.initialWindow`.
   /// `None` when deno.json leaves it unset (or the CLI predates the key):
   /// the runtime then falls back to `initialWindow` in an embedded
@@ -198,7 +205,7 @@ pub struct Metadata {
   /// macOS gets headless guarantees only). Desktop builds only; `None` in a
   /// binary from a CLI that predates the field, where the host's own engine
   /// (when it tells the runtime) or the OS web view is assumed (DENEXT.md
-  /// item 488).
+  /// item 489).
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub desktop_engine: Option<crate::kernel_sandbox::Engine>,
 }

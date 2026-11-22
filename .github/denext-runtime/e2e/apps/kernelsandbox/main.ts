@@ -1,5 +1,5 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-// e2e: a packaged desktop app under the kernel sandbox (DENEXT.md item 488).
+// e2e: a packaged desktop app under the kernel sandbox (DENEXT.md item 489).
 // The runner packages it with `--kernel-sandbox=enforce` and a scoped grant
 // (strict), tells it what this leg's engine and host make of that
 // (`expect`), and each launch reports:

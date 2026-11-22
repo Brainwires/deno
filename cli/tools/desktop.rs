@@ -651,7 +651,7 @@ async fn compile_desktop(
   let mut temp_flags = flags.clone();
   temp_flags.subcommand = DenoSubcommand::Compile(compile_flags.clone());
   temp_flags.internal.is_desktop = true;
-  // denext (DENEXT.md item 488): the engine the app is packaged for is
+  // denext (DENEXT.md item 489): the engine the app is packaged for is
   // recorded in the binary: whether the kernel sandbox can hold the app's
   // own process depends on it.
   temp_flags.internal.desktop_backend = desktop_flags.backend.clone();

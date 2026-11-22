@@ -3,6 +3,8 @@
 // Drop-in replacement for libuv integrated with deno_core's event loop.
 
 mod pipe;
+#[cfg(windows)]
+mod pipe_security;
 mod stream;
 mod tcp;
 mod tty;
