@@ -34,8 +34,10 @@
   allow(unused_imports, dead_code, reason = "no Mode A enforcer on this OS")
 )]
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -50,6 +52,9 @@ use deno_lib::kernel_plan::uses_sandbox_exec_fallback;
 use deno_runtime::deno_permissions::PermissionsOptions;
 use deno_runtime::deno_permissions::kernel_sandbox_state;
 use deno_sandbox::plan::EnforcePlan;
+use sys_traits::BaseFsReadDir;
+use sys_traits::boxed::BoxedFsDirEntry;
+use sys_traits::boxed::FsReadDirBoxed;
 
 use super::inherit;
 use super::policy::CompiledPolicy;
@@ -136,21 +141,160 @@ static VERIFY_MODULES: OnceLock<Vec<PathBuf>> = OnceLock::new();
 /// let the program read may lie inside one.
 static READ_DENIES: OnceLock<Vec<PathBuf>> = OnceLock::new();
 
+/// The first of `files` that lies inside a read deny (`denies`, each as
+/// written and resolved), as written or resolved.
+fn module_inside_a_deny<'a>(
+  files: &'a [PathBuf],
+  denies: &[PathBuf],
+) -> Option<&'a PathBuf> {
+  files.iter().find(|file| {
+    let resolved = resolve_prefix(file).full();
+    denies
+      .iter()
+      .any(|d| file.starts_with(d) || resolved.starts_with(d))
+  })
+}
+
 /// Refuses module files that lie inside a read deny (the module rules are
 /// added beside the read scope, so a deny there would not hold).
 fn check_module_files(files: &[PathBuf]) -> Result<(), AnyError> {
   let Some(denies) = READ_DENIES.get() else {
     return Ok(());
   };
-  for file in files {
-    let resolved = resolve_prefix(file).full();
-    if denies
-      .iter()
-      .any(|d| file.starts_with(d) || resolved.starts_with(d))
-    {
+  if let Some(file) = module_inside_a_deny(files, denies) {
+    bail!(
+      "--kernel-sandbox=enforce refuses to start: the module {} lies inside a --deny-read path",
+      file.display()
+    );
+  }
+  Ok(())
+}
+
+/// The notice of a run whose `auto`-chosen enforce is dropped because the
+/// program's module `file` lies inside a read deny (the main module of
+/// `deno run --deny-read=dir dir/main.ts` needs no read grant, but the
+/// kernel can't let the run read it and keep the deny).
+fn module_inside_a_deny_notice(file: &Path) -> String {
+  format!(
+    "the kernel sandbox isn't applied to this run: the module {} lies inside a --deny-read path, which the sandbox can't hold while the program loads it (Deno's permission checks still apply)",
+    file.display()
+  )
+}
+
+/// The listed folders of the plan this process started under: each must be
+/// a folder this run's own module graph listed ([`apply_pending`] checks
+/// once the graph is loaded).
+static VERIFY_LISTED: OnceLock<Vec<PathBuf>> = OnceLock::new();
+
+/// The folders the module graphs this process built listed to expand a
+/// dynamic import or `require()` built from a template (`import("./" +
+/// name)`: deno_graph lists the folder and its subfolders for the modules
+/// it could name), recorded by [`ListedDirsRecorder`]. The image before the
+/// re-exec hands them over ([`EnforcePlan::listed_dirs`]) so the confined
+/// image can list them too and expands the template to the same modules.
+static LISTED_DIRS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+/// The file system the CLI's module graphs list folders through: the real
+/// one, recording each folder it lists ([`LISTED_DIRS`]). deno_graph lists
+/// folders only to expand template imports.
+pub struct ListedDirsRecorder<T: FsReadDirBoxed>(pub T);
+
+impl<T: FsReadDirBoxed> BaseFsReadDir for ListedDirsRecorder<T> {
+  type ReadDirEntry = BoxedFsDirEntry;
+
+  fn base_fs_read_dir(
+    &self,
+    path: &Path,
+  ) -> std::io::Result<
+    Box<dyn Iterator<Item = std::io::Result<Self::ReadDirEntry>>>,
+  > {
+    let entries = self.0.fs_read_dir_boxed(path)?;
+    // only a folder that listed: one that didn't expands to nothing in
+    // either image
+    record_listed_dir(path);
+    Ok(entries)
+  }
+}
+
+fn record_listed_dir(path: &Path) {
+  if path.is_absolute() {
+    LISTED_DIRS
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .insert(path.to_path_buf());
+  }
+}
+
+/// The folders recorded so far ([`LISTED_DIRS`]), sorted.
+fn listed_dirs() -> Vec<PathBuf> {
+  LISTED_DIRS
+    .lock()
+    .unwrap_or_else(|e| e.into_inner())
+    .iter()
+    .cloned()
+    .collect()
+}
+
+/// Whether `dir` is a read deny or lies inside one, as written or resolved
+/// (`denies`: the policy's read denies, each as written and resolved).
+fn inside_a_deny(dir: &Path, denies: &[PathBuf]) -> bool {
+  let resolved = resolve_prefix(dir).full();
+  denies
+    .iter()
+    .any(|d| dir.starts_with(d) || resolved.starts_with(d))
+}
+
+/// The policy's read denies, each as written and resolved.
+pub(super) fn resolved_read_denies(compiled: &CompiledPolicy) -> Vec<PathBuf> {
+  compiled
+    .policy
+    .fs
+    .deny_read
+    .iter()
+    .flat_map(|d| [d.path.clone(), resolve_prefix(&d.path).full()])
+    .collect()
+}
+
+/// The listed folders the image before the re-exec hands over: the
+/// recorded ones ([`LISTED_DIRS`]) the plan can carry (UTF-8), except a
+/// read deny or a folder inside one, whose listing the kernel keeps
+/// refusing (the program's checks refuse it too).
+fn listed_dirs_to_hand_over(denies: &[PathBuf]) -> Vec<PathBuf> {
+  handable_listed_dirs(listed_dirs(), denies)
+}
+
+/// Of `dirs`, the listed folders a plan carries and the kernel may let the
+/// run list: UTF-8, and not a read deny or inside one (`denies`).
+pub(super) fn handable_listed_dirs(
+  dirs: Vec<PathBuf>,
+  denies: &[PathBuf],
+) -> Vec<PathBuf> {
+  dirs
+    .into_iter()
+    .filter(|dir| dir.to_str().is_some())
+    .filter(|dir| !inside_a_deny(dir, denies))
+    .collect()
+}
+
+/// The confined image: each listed folder handed over must be one its own
+/// module graph listed (`own`, sorted), plain (absolute, no `..`) and
+/// outside the read denies; anything else would let the kernel list a
+/// folder this run doesn't need.
+fn check_listed_dirs(
+  handed_over: &[PathBuf],
+  own: &[PathBuf],
+  denies: &[PathBuf],
+) -> Result<(), AnyError> {
+  use std::path::Component;
+  for dir in handed_over {
+    let plain = dir.is_absolute()
+      && dir
+        .components()
+        .all(|c| matches!(c, Component::RootDir | Component::Normal(_)));
+    if !plain || inside_a_deny(dir, denies) || own.binary_search(dir).is_err() {
       bail!(
-        "--kernel-sandbox=enforce refuses to start: the module {} lies inside a --deny-read path",
-        file.display()
+        "--kernel-sandbox=enforce refuses to continue: {} was handed over as a folder this program's module graph lists, but it isn't one",
+        dir.display()
       );
     }
   }
@@ -504,9 +648,10 @@ fn macos_profile(plan: &EnforcePlan) -> Result<String, String> {
   ))
 }
 
-/// A plan's macOS part with the program's module files readable: what the
-/// enforce profile is written from, and warn mode's reporting profile
-/// (item 472).
+/// A plan's macOS part with the program's module files readable and the
+/// folders its graph listed listable (a literal filter on a folder is its
+/// listing, never a file beneath it): what the enforce profile is written
+/// from, and warn mode's reporting profile (item 472).
 #[cfg(target_os = "macos")]
 pub(super) fn macos_plan_with_modules(
   plan: &EnforcePlan,
@@ -516,7 +661,8 @@ pub(super) fn macos_plan_with_modules(
   };
   let mut macos = macos.clone();
   if let deno_sandbox::plan::SbScope::Filters { filters } = &mut macos.read {
-    for file in &plan.module_files {
+    // a literal on a folder lists its entries and reads none of them
+    for file in plan.module_files.iter().chain(&plan.listed_dirs) {
       let file = resolve_prefix(file).full();
       if let Some(text) = file.to_str() {
         filters.push(deno_sandbox::plan::SbFilter::Literal(text.to_string()));
@@ -682,15 +828,7 @@ pub fn prepare(
     options,
     ctx.inspector_port,
   );
-  let _ = READ_DENIES.set(
-    compiled
-      .policy
-      .fs
-      .deny_read
-      .iter()
-      .flat_map(|d| [d.path.clone(), resolve_prefix(&d.path).full()])
-      .collect(),
-  );
+  let _ = READ_DENIES.set(resolved_read_denies(compiled));
   #[cfg(target_os = "linux")]
   {
     if let Some(applied) = deno_sandbox::enforce_linux::applied_plan() {
@@ -703,6 +841,7 @@ pub fn prepare(
         check_broker(&plan)?;
         check_handed_down(options, &ctx.cwd, &plan)?;
         let _ = VERIFY_MODULES.set(applied.module_files.clone());
+        let _ = VERIFY_LISTED.set(applied.listed_dirs.clone());
         start_enforcing();
         return Ok(());
       }
@@ -724,6 +863,7 @@ pub fn prepare(
         check_broker(&plan)?;
         check_handed_down(options, &ctx.cwd, &plan)?;
         let _ = VERIFY_MODULES.set(inherited.module_files.clone());
+        let _ = VERIFY_LISTED.set(inherited.listed_dirs.clone());
         start_enforcing();
         return Ok(());
       }
@@ -1021,7 +1161,8 @@ pub async fn apply_pending_with_entries(
     // a graph that doesn't load is the run's own error to report: no
     // observer then (it would report the program's modules)
     if let Ok(files) = graph_module_files(factory, roots).await {
-      super::warn::apply_observer(files);
+      // (with the folders the graph load listed, which enforce lists)
+      super::warn::apply_observer(files, listed_dirs());
     }
     return Ok(());
   }
@@ -1046,6 +1187,13 @@ pub async fn apply_pending_with_entries(
         stray.display()
       );
     }
+    // ... and each listed folder one its own graph listed (the graph load
+    // above listed them again, under the plan's listing rules)
+    check_listed_dirs(
+      VERIFY_LISTED.get().map(|d| &d[..]).unwrap_or(&[]),
+      &listed_dirs(),
+      READ_DENIES.get().map(|d| &d[..]).unwrap_or(&[]),
+    )?;
     // the point where the image before this one re-executed: what is
     // printed from here on, this image prints first
     deno_lib::util::logger::end_already_printed();
@@ -1075,6 +1223,28 @@ pub async fn apply_pending_with_entries(
   plan.module_files.dedup();
   plan.entries = entries.to_vec();
   plan.member_configs = deno_config::workspace::collected_member_configs();
+  // the folders the graph load listed for template imports: the confined
+  // image can't list a folder its grant doesn't cover, so its graph would
+  // expand the template to fewer modules than these files and refuse
+  plan.listed_dirs =
+    listed_dirs_to_hand_over(READ_DENIES.get().map(|d| &d[..]).unwrap_or(&[]));
+  if AUTO_CHOSEN.load(Ordering::Relaxed)
+    && let Some(file) = module_inside_a_deny(
+      &plan.module_files,
+      READ_DENIES.get().map(|d| &d[..]).unwrap_or(&[]),
+    )
+  {
+    // a mode `auto` chose never refuses to start: as for a path the plan
+    // can't carry, the run goes on with Deno's checks only, and says so;
+    // an explicit enforce refuses below
+    DROPPED.store(true, Ordering::Relaxed);
+    log::warn!(
+      "{} {}",
+      crate::colors::yellow("Warning"),
+      module_inside_a_deny_notice(file)
+    );
+    return Ok(());
+  }
   check_module_files(&plan.module_files)?;
   if let Some(file) = unhandable_module(&plan.module_files) {
     // a mode `auto` chose never refuses to start: the run goes on with
@@ -1267,6 +1437,102 @@ mod tests {
     // `deno run main:foo` is the task `main:foo`
     assert!(!runtime_loads_scheme("main"));
     assert!(!runtime_loads_scheme("ext"));
+  }
+
+  /// The module graph's file system records each folder it lists (a
+  /// template import's expansion), never one that didn't list; the hand-over
+  /// leaves out a read deny and what lies inside it.
+  #[test]
+  fn listed_dirs_are_recorded_and_handed_over() {
+    use sys_traits::FsDirEntry as _;
+    use sys_traits::boxed::FsReadDirBoxed as _;
+    let root = std::env::temp_dir()
+      .join(format!("deno-listed-dirs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("lib/secret")).unwrap();
+    let sys = crate::sys::CliSys::default();
+    let recorder = ListedDirsRecorder(sys);
+    let names: Vec<_> = recorder
+      .fs_read_dir_boxed(&root.join("lib"))
+      .unwrap()
+      .map(|e| e.unwrap().path().into_owned())
+      .collect();
+    assert_eq!(names, vec![root.join("lib/secret")]);
+    let empty = recorder
+      .fs_read_dir_boxed(&root.join("lib/secret"))
+      .unwrap();
+    assert_eq!(empty.count(), 0);
+    assert!(recorder.fs_read_dir_boxed(&root.join("missing")).is_err());
+    let recorded = listed_dirs();
+    assert!(recorded.contains(&root.join("lib")));
+    assert!(recorded.contains(&root.join("lib/secret")));
+    assert!(!recorded.contains(&root.join("missing")));
+    let handed = listed_dirs_to_hand_over(&[root.join("lib/secret")]);
+    assert!(handed.contains(&root.join("lib")));
+    assert!(!handed.contains(&root.join("lib/secret")));
+    let _ = std::fs::remove_dir_all(&root);
+  }
+
+  /// A module inside a read deny is found, as written; `auto`'s notice
+  /// names it (an explicit enforce refuses through [`check_module_files`]).
+  #[cfg(unix)]
+  #[test]
+  fn module_inside_a_deny_is_found() {
+    let files =
+      vec![PathBuf::from("/w/main.ts"), PathBuf::from("/w/hidden/a.ts")];
+    assert_eq!(module_inside_a_deny(&files, &[]), None);
+    assert_eq!(
+      module_inside_a_deny(&files, &[PathBuf::from("/w/hidden")]),
+      Some(&files[1])
+    );
+    assert_eq!(
+      module_inside_a_deny(&files, &[PathBuf::from("/w/hid")]),
+      None
+    );
+    let notice = module_inside_a_deny_notice(&files[1]);
+    assert!(notice.contains("/w/hidden/a.ts lies inside a --deny-read path"));
+    assert!(notice.contains("Deno's permission checks still apply"));
+  }
+
+  /// warn's observer lets the run list the folders enforce hands over, by
+  /// the same rule: never a read deny or a folder inside one.
+  #[cfg(unix)]
+  #[test]
+  fn observed_listed_dirs_match_the_hand_over() {
+    let dirs = vec![
+      PathBuf::from("/w/lib"),
+      PathBuf::from("/w/lib/secret"),
+      PathBuf::from("/w/lib/secret/inner"),
+      PathBuf::from("/w/src"),
+    ];
+    assert_eq!(
+      handable_listed_dirs(dirs.clone(), &[PathBuf::from("/w/lib/secret")]),
+      vec![PathBuf::from("/w/lib"), PathBuf::from("/w/src")]
+    );
+    assert_eq!(handable_listed_dirs(dirs.clone(), &[]), dirs);
+  }
+
+  /// The confined image accepts only listed folders its own graph listed,
+  /// plain and outside the read denies.
+  #[cfg(unix)]
+  #[test]
+  fn handed_over_listed_dirs_are_checked() {
+    let own = vec![PathBuf::from("/w"), PathBuf::from("/w/src")];
+    let denies = vec![PathBuf::from("/w/src")];
+    assert!(check_listed_dirs(&[], &own, &denies).is_ok());
+    assert!(check_listed_dirs(&own[..1], &own, &denies).is_ok());
+    for bad in [
+      "/w/src",       // a deny
+      "/w/other",     // not listed by this graph
+      "/w/../etc",    // not plain
+      "w",            // relative
+      "/w/src/inner", // inside a deny (and not listed)
+    ] {
+      let err = check_listed_dirs(&[PathBuf::from(bad)], &own, &denies)
+        .unwrap_err()
+        .to_string();
+      assert!(err.contains("isn't one"), "{bad}: {err}");
+    }
   }
 
   #[test]

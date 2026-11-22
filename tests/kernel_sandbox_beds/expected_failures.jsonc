@@ -399,7 +399,7 @@
         "os": [
           "linux"
         ],
-        "reason": "to fix (item 425 hand-over): the confined image's static graph differs from the first image's (a linked or typed remote module); P5 second pass"
+        "reason": "by design: the forced mode is an explicit enforce, which refuses a main module inside a --deny-read (the --deny-read=outside lib/mod.cjs steps); an auto-chosen enforce runs it with Deno's checks only and a notice, and the stage-r4 bed passes the whole spec (the linked packages' node_modules folders are in the implicit set, template-import folders are handed over)"
       },
       "specs::npm::byonm_run_npm::not_in_deps": {
         "os": [

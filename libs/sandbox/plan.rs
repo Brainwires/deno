@@ -101,6 +101,14 @@ pub struct EnforcePlan {
   /// images discover are (the policy reads them).
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub member_configs: Vec<PathBuf>,
+  /// The folders the first image's module graph listed to expand a dynamic
+  /// import or `require()` built from a template (`import("./" + name)`):
+  /// listable to the confined image (their entries, never the files'
+  /// contents), so its graph expands the template to the same modules. Not
+  /// part of the equality; the new image checks that its own graph listed
+  /// each of them.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub listed_dirs: Vec<PathBuf>,
 }
 
 /// A module a test or bench run runs ([`EnforcePlan::entries`]).
@@ -161,6 +169,7 @@ impl EnforcePlan {
       expanded_write: Vec::new(),
       entries: Vec::new(),
       member_configs: Vec::new(),
+      listed_dirs: Vec::new(),
       ..self.clone()
     }
   }
@@ -517,6 +526,7 @@ mod tests {
       expanded_write: Vec::new(),
       entries: Vec::new(),
       member_configs: Vec::new(),
+      listed_dirs: Vec::new(),
     }
   }
 

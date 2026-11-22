@@ -1047,6 +1047,10 @@ impl ModuleGraphBuilder {
     );
     let maybe_reporter = self.maybe_reporter.as_deref();
     let mut locker = self.lockfile.as_ref().map(|l| l.as_deno_graph_locker());
+    // the folders a template import's expansion lists are recorded: the
+    // kernel sandbox lets its confined image list them too (item 425)
+    let file_system =
+      crate::sandbox::enforce::ListedDirsRecorder(self.sys.clone());
 
     macro_rules! build_options {
       ($npm_resolver:expr, $resolver:expr) => {
@@ -1056,7 +1060,7 @@ impl ModuleGraphBuilder {
           is_dynamic: options.is_dynamic,
           passthrough_jsr_specifiers: false,
           executor: Default::default(),
-          file_system: &self.sys,
+          file_system: &file_system,
           jsr_metadata_store: None,
           jsr_url_provider: &CliJsrUrlProvider,
           jsr_version_resolver: Cow::Borrowed(

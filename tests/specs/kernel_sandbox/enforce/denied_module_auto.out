@@ -1,0 +1,2 @@
+[WILDCARD]Warning the kernel sandbox isn't applied to this run: the module [WILDCARD]greet.ts lies inside a --deny-read path, which the sandbox can't hold while the program loads it (Deno's permission checks still apply)
+hello from a denied folder

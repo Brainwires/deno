@@ -1074,6 +1074,13 @@ impl ImplicitSet {
         ImplicitAccess::ReadMap,
       );
     }
+    // the node_modules folders the project's linked packages resolve to
+    // (a workspace member's own, a pnpm store outside the project): Deno
+    // exempts a file whose real path is in a node_modules folder from its
+    // read checks, so the kernel lets the run read these too
+    for dir in &ctx.linked_node_modules {
+      add(dir, ImplicitNeed::NodeModules, ImplicitAccess::ReadMap);
+    }
     // the vendor folder stands in for DENO_DIR's remote cache: the first
     // image vendors the static graph, the confined one reads it
     if !ctx.compiled
@@ -1114,6 +1121,11 @@ pub struct Context {
   pub deno_dir: Option<PathBuf>,
   pub config_files: Vec<PathBuf>,
   pub node_modules: Option<PathBuf>,
+  /// The `node_modules` folders outside [`Self::node_modules`] that its
+  /// linked packages (symlinks and junctions in it) resolve to, as
+  /// `kernel_apply::linked_node_modules` finds them: never one inside a
+  /// read deny.
+  pub linked_node_modules: Vec<PathBuf>,
   /// The project's vendor folder (deno.json `"vendor": true`).
   pub vendor_dir: Option<PathBuf>,
   /// The folders deno.json `links` names.
@@ -1178,6 +1190,7 @@ impl Context {
       deno_dir: None,
       config_files: Vec::new(),
       node_modules: None,
+      linked_node_modules: Vec::new(),
       vendor_dir: None,
       link_dirs: Vec::new(),
       audit_file: None,

@@ -156,6 +156,154 @@ pub fn runtime_unix_sockets(cwd: &Path) -> Vec<PathBuf> {
     .collect()
 }
 
+/// How deep [`linked_node_modules`] follows links: from the project's
+/// `node_modules`, through the folders its links resolve to, and theirs.
+const LINKED_NODE_MODULES_DEPTH: usize = 3;
+/// The most folders [`linked_node_modules`] adds.
+const LINKED_NODE_MODULES_MAX: usize = 64;
+/// The most entries [`linked_node_modules`] looks at in one folder (a
+/// `@scope` folder included); a larger folder is left unscanned.
+const NODE_MODULES_ENTRIES_MAX: usize = 8192;
+
+/// The `node_modules` folders outside the project's `node_modules` that its
+/// linked packages resolve to. Deno exempts a file whose real path lies in
+/// a `node_modules` folder from its read checks, so a package linked in
+/// from elsewhere (a workspace member, a pnpm store outside the project)
+/// reads its dependencies from a folder the kernel must let the run read
+/// too; never any `node_modules` anywhere.
+///
+/// For each symlink or junction in `node_modules` (top level and `@scope/*`,
+/// sorted by name), its real path is taken; the folder it resolves to is
+/// the nearest ancestor named `node_modules` (a pnpm store's root when the
+/// real path lies in one's `.pnpm` folder, so its packages' sibling links
+/// resolve too), plus the package's own `node_modules`. A folder found is
+/// scanned the same way, up to [`LINKED_NODE_MODULES_DEPTH`] folders deep
+/// and [`LINKED_NODE_MODULES_MAX`] folders in all.
+///
+/// `denies` are the read denies (absolute): a link whose path or real path
+/// lies inside one isn't followed, and a folder inside one isn't added. A
+/// folder already inside one scanned is left out. The result is sorted, and
+/// the same in the image the sandbox confines (it lists only folders the
+/// policy lets it read, and resolves links, which Landlock doesn't hold and
+/// Seatbelt allows as metadata).
+pub fn linked_node_modules(
+  node_modules: &Path,
+  denies: &[PathBuf],
+) -> Vec<PathBuf> {
+  use std::collections::VecDeque;
+  let denies: Vec<PathBuf> = denies
+    .iter()
+    .flat_map(|d| {
+      let real = std::fs::canonicalize(d)
+        .unwrap_or_else(|_| crate::kernel_inherit::resolve_prefix(d).full());
+      [d.clone(), real]
+    })
+    .collect();
+  let denied = |p: &Path| denies.iter().any(|d| p.starts_with(d));
+  let Ok(root) = std::fs::canonicalize(node_modules) else {
+    return Vec::new();
+  };
+  if denied(node_modules) || denied(&root) {
+    return Vec::new();
+  }
+  let mut scanned = vec![root.clone()];
+  let mut found = Vec::new();
+  let mut queue = VecDeque::from([(root, 0usize)]);
+  'scan: while let Some((folder, depth)) = queue.pop_front() {
+    for link in links_in_node_modules(&folder) {
+      if denied(&link) {
+        continue;
+      }
+      let Ok(real) = std::fs::canonicalize(&link) else {
+        continue;
+      };
+      if denied(&real) || !real.is_dir() {
+        continue;
+      }
+      for dir in node_modules_resolved_from(&real) {
+        if denied(&dir) || scanned.iter().any(|s| dir.starts_with(s)) {
+          continue;
+        }
+        if found.len() >= LINKED_NODE_MODULES_MAX {
+          break 'scan;
+        }
+        scanned.push(dir.clone());
+        found.push(dir.clone());
+        if depth + 1 < LINKED_NODE_MODULES_DEPTH {
+          queue.push_back((dir, depth + 1));
+        }
+      }
+    }
+  }
+  found.sort();
+  found
+}
+
+/// The links (symlinks, junctions) directly in `folder` and in its
+/// `@scope` folders, sorted; hidden entries (`.bin`, `.pnpm`) are skipped.
+fn links_in_node_modules(folder: &Path) -> Vec<PathBuf> {
+  fn names(folder: &Path) -> Vec<std::ffi::OsString> {
+    let Ok(read) = std::fs::read_dir(folder) else {
+      return Vec::new();
+    };
+    let mut names = Vec::new();
+    for entry in read.flatten() {
+      if names.len() >= NODE_MODULES_ENTRIES_MAX {
+        return Vec::new();
+      }
+      names.push(entry.file_name());
+    }
+    names.sort();
+    names
+  }
+  let is_link = |p: &Path| {
+    std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
+  };
+  let mut links = Vec::new();
+  for name in names(folder) {
+    let text = name.to_string_lossy();
+    if text.starts_with('.') {
+      continue;
+    }
+    let path = folder.join(&name);
+    if is_link(&path) {
+      links.push(path);
+    } else if text.starts_with('@') && path.is_dir() {
+      for inner in names(&path) {
+        let inner = path.join(inner);
+        if is_link(&inner) {
+          links.push(inner);
+        }
+      }
+    }
+  }
+  links
+}
+
+/// The `node_modules` folders a package at `real` (a real path) resolves
+/// its dependencies from: the nearest ancestor named `node_modules` (the
+/// store's root when it lies in a pnpm store's `.pnpm` folder), and the
+/// package's own `node_modules`.
+fn node_modules_resolved_from(real: &Path) -> Vec<PathBuf> {
+  let named = |p: &Path, name: &str| p.file_name().is_some_and(|n| n == name);
+  let mut out = Vec::new();
+  let store = real.ancestors().find_map(|a| {
+    a.parent()
+      .filter(|parent| named(a, ".pnpm") && named(parent, "node_modules"))
+  });
+  if let Some(store) =
+    store.or_else(|| real.ancestors().find(|a| named(a, "node_modules")))
+  {
+    out.push(store.to_path_buf());
+  }
+  if let Ok(own) = std::fs::canonicalize(real.join("node_modules"))
+    && own.is_dir()
+  {
+    out.push(own);
+  }
+  out
+}
+
 /// Creates a cache overlay folder, the user's alone (0700, its parent too),
 /// in the image that isn't confined yet. A failure leaves it absent: the
 /// policy then has no overlay and the caches stay in memory.
@@ -1265,6 +1413,67 @@ fn apply_in_place(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(unix)]
+  fn link(target: &Path, at: &Path) {
+    std::os::unix::fs::symlink(target, at).unwrap();
+  }
+
+  /// The node_modules folders the project's linked packages resolve to:
+  /// a linked package's own and the one it lies in, a pnpm store's root,
+  /// scoped links, links of the folders found; never the project's own
+  /// again, a folder inside a read deny, or what a denied link leads to.
+  #[cfg(unix)]
+  #[test]
+  fn linked_node_modules_follow_the_project_links() {
+    let root = scratch("linked_nm");
+    let nm = root.join("app/node_modules");
+    let mkdir = |p: &Path| std::fs::create_dir_all(p).unwrap();
+    mkdir(&nm.join(".pnpm/a@1/node_modules/a"));
+    mkdir(&nm.join("@scope"));
+    // a workspace member with its own dependencies
+    mkdir(&root.join("packages/ui/node_modules/dep"));
+    // a package inside another node_modules folder
+    mkdir(&root.join("shared/node_modules/lib"));
+    // a pnpm store outside the project
+    mkdir(&root.join("store/node_modules/.pnpm/b@1/node_modules/b"));
+    // a chain: the member's own node_modules links on to another folder
+    mkdir(&root.join("deep/node_modules/z"));
+    mkdir(&root.join("secret/node_modules"));
+    mkdir(&root.join("hidden/node_modules"));
+    link(&nm.join(".pnpm/a@1/node_modules/a"), &nm.join("a"));
+    link(&root.join("packages/ui"), &nm.join("@scope/ui"));
+    link(&root.join("shared/node_modules/lib"), &nm.join("lib"));
+    link(
+      &root.join("store/node_modules/.pnpm/b@1/node_modules/b"),
+      &nm.join("b"),
+    );
+    link(
+      &root.join("deep/node_modules/z"),
+      &root.join("packages/ui/node_modules/z"),
+    );
+    link(&root.join("secret"), &nm.join("secret"));
+    link(&root.join("hidden"), &nm.join(".hidden"));
+    let found = linked_node_modules(&nm, &[root.join("secret")]);
+    assert_eq!(
+      found,
+      vec![
+        root.join("deep/node_modules"),
+        root.join("packages/ui/node_modules"),
+        root.join("shared/node_modules"),
+        root.join("store/node_modules"),
+      ]
+    );
+    // a deny on the link itself covers what it leads to
+    let found = linked_node_modules(&nm, &[nm.join("@scope/ui")]);
+    assert!(!found.contains(&root.join("packages/ui/node_modules")));
+    assert!(!found.contains(&root.join("deep/node_modules")));
+    // ... and a deny on the project's node_modules leaves nothing
+    assert!(linked_node_modules(&nm, &[root.join("app")]).is_empty());
+    // no node_modules: nothing
+    assert!(linked_node_modules(&root.join("missing"), &[]).is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+  }
 
   fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir()

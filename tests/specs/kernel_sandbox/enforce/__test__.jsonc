@@ -119,6 +119,15 @@
       "output": "denied_module.out",
       "exitCode": 1
     },
+    // ... but an enforce `auto` chose never refuses to start: the run goes
+    // on with Deno's checks only, and says why
+    "module_inside_deny_auto_falls_back": {
+      "if": "kernelSandboxEnforce",
+      "cwd": "modules",
+      "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r4" },
+      "args": "run --deny-read=hidden main.ts",
+      "output": "denied_module_auto.out"
+    },
     // P3 (b): an --allow-run child inherits the rules; a failing child
     // gets one hint line
     "child_inherits": {

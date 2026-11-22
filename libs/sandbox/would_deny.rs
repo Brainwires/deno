@@ -982,6 +982,12 @@ pub struct TracePolicy {
   pub read: Option<Vec<PathBuf>>,
   /// As [`Self::read`], for writes.
   pub write: Option<Vec<PathBuf>>,
+  /// The folders the run's module graph listed
+  /// ([`crate::plan::EnforcePlan::listed_dirs`]): the kernel would let the
+  /// tree list them and the folders beneath them (Landlock's READ_DIR holds
+  /// the hierarchy), never read a file there.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub list: Vec<PathBuf>,
   /// Under a broker plan: what Deno's own write rule allows (`None`:
   /// everything) and denies. The runtime's own processes ask the broker for
   /// what the kernel refuses them there, so for them a write is refused
@@ -1089,6 +1095,11 @@ impl TracePolicy {
     let broker = plan.broker.as_ref();
     Some(Self {
       read: linux.handled.read.then(|| rules(false)),
+      list: if linux.handled.read {
+        with_real(plan.listed_dirs.clone())
+      } else {
+        Vec::new()
+      },
       write: linux.handled.write.then(|| rules(true)),
       // (the broker's lists hold each path as written and resolved)
       broker_write: broker.map(|b| BrokerWrite {
@@ -1123,6 +1134,15 @@ impl TracePolicy {
       return None;
     }
     Some(WouldDeny::read(path).from_source(Source::Os))
+  }
+
+  /// Listing the folder at `path` (resolved, absolute): as reading it, or
+  /// a folder at or beneath one the module graph listed ([`Self::list`]).
+  pub fn list_event(&self, path: &Path) -> Option<WouldDeny> {
+    if covers(&self.list, path) {
+      return None;
+    }
+    self.read_event(path)
   }
 
   /// Writing, creating, removing or renaming at `path` (resolved,
@@ -1263,6 +1283,7 @@ mod trace_tests {
       expanded_write: Vec::new(),
       entries: Vec::new(),
       member_configs: Vec::new(),
+      listed_dirs: Vec::new(),
     }
   }
 
@@ -1296,6 +1317,19 @@ mod trace_tests {
     );
     // a sibling whose name only starts like a root isn't beneath it
     assert!(p.read_event(Path::new("/project/a")).is_some());
+    // a folder the module graph listed: it and its subfolders list, as
+    // under enforce, but no file in them reads
+    let mut listed = plan.clone();
+    listed.listed_dirs = vec!["/w/lib".into()];
+    let l = TracePolicy::from_plan(&listed, Vec::new()).unwrap();
+    assert!(l.list_event(Path::new("/w/lib")).is_none());
+    assert!(l.list_event(Path::new("/w/lib/sub")).is_none());
+    assert!(l.list_event(Path::new("/w/proj")).is_some());
+    assert!(l.read_event(Path::new("/w/lib/a.js")).is_some());
+    assert!(l.list_event(Path::new("/proj")).is_none());
+    assert!(p.list_event(Path::new("/w/lib")).is_some());
+    let json = serde_json::to_string(&l).unwrap();
+    assert_eq!(serde_json::from_str::<TracePolicy>(&json).unwrap(), l);
     // writes
     assert!(p.write_event(Path::new("/proj/out/a"), false).is_none());
     assert!(p.write_event(Path::new("/proj/a"), false).is_some());
