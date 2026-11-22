@@ -1978,6 +1978,34 @@ impl TLSWrapInner {
     // when the uv_write completes asynchronously.
   }
 
+  /// Writes the pending encrypted output to the underlying uv stream with
+  /// `uv_try_write`, without queueing a write, and returns whether all of
+  /// it went out. Whatever was written is removed from `pending_enc_out`;
+  /// the rest is left for `enc_out_uv`.
+  fn try_write_enc_out(&mut self) -> bool {
+    let UnderlyingStream::Uv { stream } = self.underlying else {
+      return false;
+    };
+    if stream.is_null() || self.pending_enc_out.is_empty() {
+      return false;
+    }
+    // SAFETY: called from `enc_write_cb`, a write callback of this very
+    // stream, which `enc_out_uv` then writes to the same way;
+    // `uv_try_write` reads the slice only during the call and runs no
+    // callback.
+    let n = unsafe { uv_compat::uv_try_write(stream, &self.pending_enc_out) };
+    if n <= 0 {
+      return false;
+    }
+    let n = n as usize;
+    if n >= self.pending_enc_out.len() {
+      self.pending_enc_out.clear();
+      return true;
+    }
+    self.pending_enc_out.drain(..n);
+    false
+  }
+
   /// Finalizer-safe cleanup that does NOT invoke JS callbacks.
   /// Called from `TLSWrap::destroy_ssl` and from cppgc `Drop`.
   fn teardown(&mut self) {
@@ -2122,10 +2150,28 @@ unsafe extern "C" fn enc_write_cb(req: *mut uv_write_t, status: i32) {
         // pending cleartext, drain the next chunk now. Without
         // this the remaining bytes are never fed to rustls and the
         // peer never receives the full body ("socket hang up").
+        //
+        // The chunks go out with `uv_try_write` for as long as the stream
+        // takes them whole, so that splitting one cleartext write into
+        // chunks costs no loop iterations: Node's TLSWrap writes all of a
+        // write's records with one uv_write, whose callback runs as the
+        // last byte goes out. A chunk written with its own `uv_write` from
+        // a pending-phase callback completes in the next pass of the
+        // pending phase (it is written on the spot), after other handles
+        // are read: a peer in the same process could read the last chunk
+        // and act on it before the cleartext write's callback ran.
         if (*ptr).pending_cleartext.len() > (*ptr).pending_cleartext_offset {
           (*ptr).clear_in();
         }
-        let enc_action = (*ptr).enc_out_collect();
+        let mut enc_action = (*ptr).enc_out_collect();
+        while matches!(enc_action, EncOutAction::WriteUv)
+          && (*ptr).try_write_enc_out()
+        {
+          if (*ptr).pending_cleartext.len() > (*ptr).pending_cleartext_offset {
+            (*ptr).clear_in();
+          }
+          enc_action = (*ptr).enc_out_collect();
+        }
         // enc_write_cb runs from the libuv event loop, not an op, so the
         // completion callback fires synchronously (WriteCompletion::Sync) to
         // match Node's write-callback timing. See `do_enc_out_action`.
