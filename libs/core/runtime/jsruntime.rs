@@ -2869,6 +2869,13 @@ impl JsRuntime {
 ///   [`LoopWaker::REACTOR_POLL_SLICE`]: a run of short async ops polls for
 ///   I/O that often, not once per op (a non-blocking `kevent` costs about
 ///   20 us on macOS).
+/// - A wake made between iterations outside any task's poll goes to the
+///   task at once. It is the scheduler's own (its drivers dispatching their
+///   events, or the wakers it deferred being woken: a tokio timer armed once
+///   an iteration spent its coop budget leaves one there), right after its
+///   I/O poll, and the scheduler wakes its deferred wakers with its list of
+///   them borrowed, so deferring another one from there would panic. (Or it
+///   is made by the future a `block_on` polls, which is not a task either.)
 ///
 /// The other wakes reach the task at once: one made after the executor
 /// parked since the last iteration (the loop waited and something arrived:
@@ -3002,6 +3009,9 @@ impl LoopWaker {
 
   /// Wakes the task that polls the loop: after the executor's next I/O poll
   /// while the reactor could have events for the loop, else at once.
+  ///
+  /// From a task's poll only (the loop's own, at the end of an iteration, or
+  /// another task's), where the scheduler takes a deferred wake.
   fn wake_task(&self, task: &Waker) {
     if self.reactor_may_have_events.load(Ordering::Relaxed) {
       self.last_reactor_poll.store(Self::now(), Ordering::Relaxed);
@@ -3053,6 +3063,14 @@ impl std::task::Wake for LoopWaker {
           )
         {
           // Another task's wake, soon after an I/O poll.
+          task.wake();
+        } else if tokio::task::try_id().is_none() {
+          // Not from a task's poll: from the scheduler, which wakes the
+          // wakers it deferred (and dispatches its drivers' events) right
+          // after it polled its drivers, so the poll has happened. It wakes
+          // the deferred ones with its list of them borrowed: a wake
+          // deferred from there panics (`RefCell already borrowed`).
+          // (Or from a `block_on` future, which is no task either.)
           task.wake();
         } else {
           self.wake_task(&task);
@@ -4111,6 +4129,17 @@ mod loop_waker_tests {
 
   #[tokio::test]
   async fn a_wake_on_the_executor_thread_waits_for_the_reactor_poll() {
+    // From a task's poll (the loop's own runs in one, and so do those of the
+    // other tasks that wake it).
+    tokio::spawn(
+      a_wake_on_the_executor_thread_waits_for_the_reactor_poll_in_a_task(),
+    )
+    .await
+    .unwrap();
+  }
+
+  async fn a_wake_on_the_executor_thread_waits_for_the_reactor_poll_in_a_task()
+  {
     let task = Arc::new(CountingWaker(AtomicUsize::new(0)));
     let task_waker = Waker::from(task.clone());
     let loop_waker = Arc::new(LoopWaker::default());
@@ -4165,6 +4194,40 @@ mod loop_waker_tests {
         });
     })
     .join()
+    .unwrap();
+  }
+
+  // tokio's current-thread scheduler wakes the wakers it deferred (those of
+  // `yield_now`, and of every tokio resource polled once a task's coop budget
+  // is spent) with its list of them borrowed, so a wake made from one may not
+  // defer another. A JS timer armed once an iteration had spent the budget
+  // left its tokio sleep's waker there, which wakes the loop's: the loop's
+  // wake then deferred itself from inside the list, and `RefCell already
+  // borrowed` ended the process. That wake comes right after the
+  // scheduler's I/O poll, so it goes to the task at once.
+  #[tokio::test]
+  async fn a_wake_from_the_schedulers_deferred_wakers_goes_to_the_task() {
+    tokio::spawn(async {
+      let task = Arc::new(CountingWaker(AtomicUsize::new(0)));
+      let task_waker = Waker::from(task.clone());
+      let loop_waker = Arc::new(LoopWaker::default());
+      let waker = Waker::from(loop_waker.clone());
+
+      // Between iterations, with the reactor maybe holding events for the
+      // loop and no I/O poll asked for yet: from a task's poll the wake
+      // would be handed to the scheduler.
+      assert!(loop_waker.begin_poll(&task_waker));
+      assert!(!loop_waker.end_poll());
+      // A resource polled under the loop's waker leaves it with the
+      // scheduler, as `yield_now` does.
+      let deferred = std::pin::pin!(tokio::task::yield_now());
+      assert!(deferred.poll(&mut Context::from_waker(&waker)).is_pending());
+      assert_eq!(task.0.load(Ordering::SeqCst), 0);
+      // The scheduler polls its drivers and wakes the deferred wakers.
+      tokio::task::yield_now().await;
+      assert_eq!(task.0.load(Ordering::SeqCst), 1);
+    })
+    .await
     .unwrap();
   }
 

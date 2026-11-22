@@ -2317,6 +2317,48 @@ async fn test_nexttick_before_queue_microtask() {
   runtime.run_event_loop(Default::default()).await.unwrap();
 }
 
+// A JS timer armed after a few hundred async op calls in one iteration, each
+// of which got something from a tokio resource on its first poll (as a
+// blocking task's handle does once the thread has answered), which spends the
+// task's tokio coop budget. The timer's tokio sleep, polled when it is armed,
+// then left its waker with the scheduler, which wakes it (and through it the
+// event loop) with its list of deferred wakers borrowed. With async ops
+// outstanding and no wake while the iteration ran (the ops had more to wait
+// for), the event loop's waker deferred another wake from there: `RefCell
+// already borrowed`, and the process ended.
+#[tokio::test]
+async fn timer_armed_after_the_coop_budget_is_spent() {
+  #[op2]
+  async fn op_async_ready_then_sleep() {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tx.send(()).unwrap();
+    rx.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
+
+  deno_core::extension!(test_ext, ops = [op_async_ready_then_sleep]);
+
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![test_ext::init()],
+    ..Default::default()
+  });
+  runtime
+    .execute_script(
+      "timer_armed_after_the_coop_budget_is_spent.js",
+      r#"
+      const { op_async_ready_then_sleep } = Deno.core.ops;
+      // In a timers phase, whose poll of the timer registered the loop's
+      // waker with it.
+      Deno.core.createTimer(() => {
+        for (let i = 0; i < 300; i++) op_async_ready_then_sleep();
+        Deno.core.createTimer(() => {}, 5, undefined, false, true, false);
+      }, 1, undefined, false, true, false);
+      "#,
+    )
+    .unwrap();
+  runtime.run_event_loop(Default::default()).await.unwrap();
+}
+
 // Test that foreground tasks are delivered even when the isolate is
 // registered without a tokio handle (what a release build does with a
 // `JsRuntime` created outside tokio; a debug build refuses to create one, so
