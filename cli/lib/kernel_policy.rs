@@ -891,11 +891,15 @@ const SYS_FILES: &[(&str, &str)] = &[
 const SYS_NAMED_ONLY: &[&str] = &["processInfo", "processes"];
 
 /// Whether `--allow-sys` grants `name` (unscoped grants every name but the
-/// named-only ones).
+/// named-only ones, which `--allow-all` grants too, as Deno's checks do: a
+/// deny beside `-A` that doesn't name them leaves them granted, and one that
+/// does is Deno's to hold).
 fn sys_granted(options: &PermissionsOptions, name: &str) -> bool {
   match &options.allow_sys {
     None => false,
-    Some(list) if list.is_empty() => !SYS_NAMED_ONLY.contains(&name),
+    Some(list) if list.is_empty() => {
+      !SYS_NAMED_ONLY.contains(&name) || options_allow_all(options)
+    }
     Some(list) => list.iter().any(|n| n == name),
   }
 }
@@ -3095,7 +3099,10 @@ impl<'a> Compiler<'a> {
           GapResolution::Documented,
           Some(ExactWith::Never),
         );
-        if granted("processes") {
+        // (under -A, with or without denies, the read scope is the whole
+        // filesystem: nothing narrower than the grant to report, as for
+        // --allow-env's environ below)
+        if granted("processes") && !self.deny_only && !self.allow_all {
           self.gap(
             GapClass::Sys,
             "--allow-sys=processes",

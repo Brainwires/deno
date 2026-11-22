@@ -43,6 +43,22 @@
     "query_unscoped": {
       "args": "run --no-prompt --allow-sys query.ts",
       "output": "query_unscoped.out"
+    },
+    // -A grants them, and a deny beside it that doesn't name them leaves
+    // them granted (as upstream, -A --deny-read=x keeps every other grant);
+    // a control surface still needs every permission with no deny
+    "allow_all_deny_read": {
+      "if": "linux",
+      "args": "run --no-prompt -A --deny-read=denext-no-such-secret probe.ts",
+      "output": "allow_all_deny_read.out"
+    },
+    "query_allow_all_deny_read": {
+      "args": "run --no-prompt -A --deny-read=denext-no-such-secret query.ts",
+      "output": "query_allow_all.out"
+    },
+    "query_allow_all_deny_named": {
+      "args": "run --no-prompt -A --deny-sys=processes query.ts",
+      "output": "query_allow_all_deny_named.out"
     }
   }
 }

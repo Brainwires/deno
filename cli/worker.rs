@@ -110,6 +110,10 @@ impl CliMainWorker {
       cbs.push(Box::new(move || {
         if let Some(mut cc) = coverage_for_exit.borrow_mut().take() {
           let _ = cc.stop_collecting();
+          // denext: and the coverage of the workers it terminated
+          deno_runtime::coverage::wait_for_terminated_worker_flushes(
+            deno_runtime::coverage::WORKER_FLUSH_TIMEOUT,
+          );
         }
       }));
       cbs.push(Box::new(move || {
@@ -220,6 +224,12 @@ impl CliMainWorker {
 
     if let Some(mut coverage_collector) = coverage_cell.borrow_mut().take() {
       coverage_collector.stop_collecting()?;
+      // denext: a worker the program terminated writes its coverage on its
+      // own thread once it sees the request: the process waits for it
+      // before it ends
+      deno_runtime::coverage::wait_for_terminated_worker_flushes(
+        deno_runtime::coverage::WORKER_FLUSH_TIMEOUT,
+      );
     }
     if let Some(mut cpu_profiler) = profiler_cell.borrow_mut().take() {
       cpu_profiler.stop_profiling()?;

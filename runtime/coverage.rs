@@ -6,7 +6,13 @@ use std::fs;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::LazyLock;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicI32;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
 
 use deno_core::InspectorSessionKind;
 use deno_core::JsRuntime;
@@ -182,6 +188,101 @@ fn is_transpiled(url: &str) -> bool {
       .any(|ext| path.ends_with(ext))
 }
 
+/// denext: how long the process waits, as it ends, for the coverage of the
+/// web workers it terminated ([`wait_for_terminated_worker_flushes`]).
+pub const WORKER_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// denext: the web workers whose coverage is still to be written, each with
+/// the flags that say it is ending (asked to terminate by its parent, or
+/// closed from within). `worker.terminate()` only asks: the worker's own
+/// thread writes its coverage once its event loop sees the request, and a
+/// process that ended first lost it.
+struct WorkerFlushes {
+  entries: std::sync::Mutex<Vec<WorkerFlushEntry>>,
+  idle: std::sync::Condvar,
+}
+
+struct WorkerFlushEntry {
+  id: u64,
+  ending: [Arc<AtomicBool>; 2],
+}
+
+static WORKER_FLUSHES: LazyLock<WorkerFlushes> =
+  LazyLock::new(|| WorkerFlushes {
+    entries: std::sync::Mutex::new(Vec::new()),
+    idle: std::sync::Condvar::new(),
+  });
+
+static NEXT_WORKER_FLUSH_ID: AtomicU64 = AtomicU64::new(0);
+
+/// denext: a web worker's coverage still to be written, held by the worker's
+/// thread from the collector's start until it has written it (or ends
+/// without), see [`wait_for_terminated_worker_flushes`].
+pub struct WorkerFlushGuard(u64);
+
+impl Drop for WorkerFlushGuard {
+  fn drop(&mut self) {
+    let flushes = &*WORKER_FLUSHES;
+    let mut entries = flushes
+      .entries
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    entries.retain(|entry| entry.id != self.0);
+    drop(entries);
+    flushes.idle.notify_all();
+  }
+}
+
+/// denext: registers a web worker's coverage as pending; `termination` and
+/// `closed` are the worker's flags that it was asked to end and that it
+/// ended.
+pub fn register_worker_flush(
+  termination: Arc<AtomicBool>,
+  closed: Arc<AtomicBool>,
+) -> WorkerFlushGuard {
+  let id = NEXT_WORKER_FLUSH_ID.fetch_add(1, Ordering::Relaxed);
+  WORKER_FLUSHES
+    .entries
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner())
+    .push(WorkerFlushEntry {
+      id,
+      ending: [termination, closed],
+    });
+  WorkerFlushGuard(id)
+}
+
+/// denext: waits, for at most `timeout`, until every web worker that is
+/// ending has written its coverage. A worker still running (one the program
+/// didn't terminate, left behind by `Deno.exit()`) isn't waited for, nor is
+/// one stuck in synchronous JavaScript past the timeout. Returns whether
+/// none was left.
+pub fn wait_for_terminated_worker_flushes(timeout: Duration) -> bool {
+  let flushes = &*WORKER_FLUSHES;
+  let deadline = Instant::now() + timeout;
+  let mut entries = flushes
+    .entries
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner());
+  loop {
+    let ending = entries
+      .iter()
+      .any(|entry| entry.ending.iter().any(|flag| flag.load(Ordering::SeqCst)));
+    if !ending {
+      return true;
+    }
+    let now = Instant::now();
+    if now >= deadline {
+      return false;
+    }
+    entries = flushes
+      .idle
+      .wait_timeout(entries, deadline - now)
+      .unwrap_or_else(|poisoned| poisoned.into_inner())
+      .0;
+  }
+}
+
 pub struct CoverageCollector {
   pub state: CoverageCollectorState,
   session: LocalInspectorSession,
@@ -352,6 +453,51 @@ mod cdp {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  // denext: the process waits only for the workers that are ending, until
+  // they have written their coverage or the timeout passes.
+  #[test]
+  fn waits_for_ending_workers_only() {
+    let running = register_worker_flush(
+      Arc::new(AtomicBool::new(false)),
+      Arc::new(AtomicBool::new(false)),
+    );
+    // a running worker isn't waited for
+    let start = Instant::now();
+    assert!(wait_for_terminated_worker_flushes(Duration::from_secs(5)));
+    assert!(start.elapsed() < Duration::from_secs(5));
+
+    let termination = Arc::new(AtomicBool::new(true));
+    let ending = register_worker_flush(
+      termination.clone(),
+      Arc::new(AtomicBool::new(false)),
+    );
+    // an ending worker that never writes: the timeout ends the wait
+    assert!(!wait_for_terminated_worker_flushes(Duration::from_millis(
+      20
+    )));
+    // one that writes ends it
+    let writer = std::thread::spawn(move || {
+      std::thread::sleep(Duration::from_millis(50));
+      drop(ending);
+    });
+    assert!(wait_for_terminated_worker_flushes(Duration::from_secs(30)));
+    writer.join().unwrap();
+    // closed from within counts as ending too
+    let closed = register_worker_flush(
+      Arc::new(AtomicBool::new(false)),
+      Arc::new(AtomicBool::new(true)),
+    );
+    assert!(!wait_for_terminated_worker_flushes(Duration::from_millis(
+      20
+    )));
+    drop(closed);
+    assert!(wait_for_terminated_worker_flushes(Duration::from_millis(
+      20
+    )));
+    drop(running);
+    drop(termination);
+  }
 
   #[test]
   fn transpiled_modules_are_told_by_extension() {

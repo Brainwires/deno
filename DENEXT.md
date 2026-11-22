@@ -20017,10 +20017,97 @@ where the changes are discussed.
        388, 389, 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409,
        410, 411, 412, 415, 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438,
        439, 441, 446, 447, 448, 449, 450, 452, 455, 457, 460-468, 470, 472-479,
-       484, 486-489) are what the prebuilt `libdenort` carries. The CLI-side
-       parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into
-       a packaged app's launchers) are in the branch too, but a stock CLI does
-       not run them; denext's own launcher provides that environment.
+       484, 486-489, 491, 492) are what the prebuilt `libdenort` carries. The
+       CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
+       `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too,
+       but a stock CLI does not run them; denext's own launcher provides that
+       environment.
+
+490. **`fix(kernel)`: a confined run's Node compile cache gets its key from the
+     image before the re-exec** (CLI and runtime; denext-only; denext.30
+     stage-R4 triage; `cli/sandbox/enforce.rs`,
+     `ext/node/ops/compile_cache.rs`). Node's compile cache (item 240) signs its
+     entries with the per-user key `<DENO_DIR>/node_compile_cache.key`. A kernel
+     sandbox plan grants DENO_DIR's cache folders only, read-only, so the
+     confined image couldn't read (or create) the key, and under R4 every
+     `module.enableCompileCache()` / `NODE_COMPILE_CACHE` failed with "Cannot
+     read or create the compile cache key". The key isn't added to the implicit
+     read set: that set reaches what the confined program starts too, which
+     could then forge entries another run accepts.
+     - **The hand-over.** On Linux and macOS the image before the re-exec loads
+       (or creates) the key (`compile_cache::key_for_handover`) and writes its
+       32 bytes into a pipe whose read end only the re-executed image keeps,
+       named by `DENO_INTERNAL_NODE_COMPILE_CACHE_KEY_FD`
+       (`enforce::compile_cache_key_pipe`). The confined image takes the
+       variable out of its environment at startup, reads the key, closes the
+       descriptor before any user code or child runs, and uses it
+       (`compile_cache::use_handed_over_key`) only when it is confined at
+       startup; any other process ignores and drops it. The supervisor of a
+       brokered run passes the descriptor to its worker untouched.
+     - A run whose key can't be loaded hands nothing over: the cache stays
+       disabled, as it was before for a key that can't be read.
+     - Tests: `kernel_sandbox::enforce::compile_cache_key_handed_over` (spec:
+       `setup_cc.ts` makes the key, then `compile_cache.mjs` under
+       `--kernel-sandbox=enforce` with a grant to the cache folder only gets
+       `ENABLED` from `module.enableCompileCache()`).
+     - Node tests enabled: none new;
+       `parallel/test-compile-cache-permission-allowed.js` passes again under
+       the R4 beds.
+
+491. **`fix(permissions)`: `-A` next to a deny keeps the named-only sys names**
+     (runtime and CLI; denext-only; denext.30 follow-up;
+     `runtime/permissions/lib.rs`, `cli/lib/kernel_policy.rs`). `processInfo`
+     and `processes` (the Linux `/proc` reads of item 432's classes) are granted
+     only by a grant that names them or by `--allow-all`, and "by `--allow-all`"
+     was `Permissions::all_granted()`, which is false as soon as any deny or
+     ignore rule exists. So `-A --deny-read=x` (or any `--deny-*`) refused
+     `Deno.readTextFile("/proc/self/status")` and the queries, requests and
+     worker grants of the two names. Upstream (2.9.8) keeps every permission but
+     what a deny names under `-A`; the named-only names now do the same.
+     - `Permissions::all_allowed_unscoped` (every permission granted unscoped,
+       whatever denies sit beside the grants) replaces `all_granted` in
+       `check_sys`, `query_sys`, `request_sys` and a worker's sys grant, and
+       `UnaryPermission::<SysDescriptor>::named_only_state_under_allow_all`
+       still lets a deny or ignore that names the name (or all of sys), and a
+       prompt's denial, hold it (`-A --deny-sys=processes` refuses `processes`
+       and keeps `processInfo`). A revoked grant ends it, as before.
+     - `all_granted` itself is unchanged, as upstream: a "requires all access"
+       control surface (`/proc/self/mem`, `/dev/*`) still needs every permission
+       with no deny, and so does the `check_open` fast path.
+     - The kernel policy's `sys_granted` counts `-A` as granting the two names
+       too (as Deno's checks do); the fail-closed "--allow-sys=processes" gap is
+       not raised under `-A` (with or without denies), where the read scope is
+       the whole filesystem, as for `--allow-env`'s environ gap.
+     - Tests: `runtime/permissions`
+       `sys_process_names_under_allow_all_with_denies`;
+       `kernel_policy::tests::allow_all_with_denies_keeps_the_named_only_sys_names`;
+       specs
+       `permission::proc_sys_classes::{allow_all_deny_read,
+       query_allow_all_deny_read, query_allow_all_deny_named}`;
+       `kernel_sandbox::deny_only::allow_all_deny_untouched_linux` reads
+       `/proc/self/status` itself again (the stage-R4 triage had routed it
+       through `cat`).
+     - Node tests enabled: none; no Node API changes.
+
+492. **`fix(coverage)`: the process waits for a terminated worker's coverage**
+     (runtime and CLI; `runtime/coverage.rs`, `runtime/web_worker.rs`,
+     `cli/worker.rs`, `cli/tools/test/mod.rs`). `worker.terminate()` only asks:
+     the worker's own thread writes its coverage once its event loop sees the
+     request, and a process that ended first (its own coverage written, nothing
+     else to wait for) lost it (`coverage::worker_coverage2`, whose `worker2.js`
+     went missing). Each web worker with a coverage collector now registers its
+     pending write (`coverage::register_worker_flush`, held until
+     `run_web_worker` returns) with its termination and closed flags, and
+     `deno run` (both the normal end and `Deno.exit()`'s callback) and
+     `deno test` (each module) wait, after writing their own coverage, until
+     every worker that is ending has written its own
+     (`coverage::wait_for_terminated_worker_flushes`, at most
+     `WORKER_FLUSH_TIMEOUT`, 5 s). A worker still running (not terminated, or
+     left behind by `Deno.exit()`) isn't waited for, and one stuck in
+     synchronous JavaScript past the timeout is given up on.
+     - Tests: `coverage::tests::waits_for_ending_workers_only`; integration
+       `coverage::{worker_coverage1, worker_coverage2, worker_coverage3}`.
+     - Node tests enabled: none.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

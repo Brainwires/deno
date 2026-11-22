@@ -1221,6 +1221,16 @@ pub async fn run_web_worker(
 ) -> Result<(), CoreError> {
   worker.setup_memory_trim_handler();
   let mut maybe_coverage_collector = worker.maybe_setup_coverage_collector();
+  // denext: a terminated worker writes its coverage on this thread once its
+  // event loop sees the request; the process waits for it as it ends
+  // (`coverage::wait_for_terminated_worker_flushes`). Held until this
+  // function returns, after the coverage is written on every path.
+  let _coverage_flush = maybe_coverage_collector.as_ref().map(|_| {
+    crate::coverage::register_worker_flush(
+      worker.internal_handle.termination_signal.clone(),
+      worker.internal_handle.has_terminated.clone(),
+    )
+  });
   let mut maybe_cpu_profiler = worker.maybe_setup_cpu_profiler();
   let mut maybe_heap_profiler = worker.maybe_setup_heap_profiler();
 

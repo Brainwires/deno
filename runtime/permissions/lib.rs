@@ -5112,6 +5112,37 @@ impl UnaryPermission<SysDescriptor> {
       })
   }
 
+  /// denext: the state of a named-only name when every permission is granted
+  /// unscoped ([`Permissions::all_allowed_unscoped`], `--allow-all`): granted
+  /// unless a deny or ignore rule (naming it, or the whole of sys) or a
+  /// prompt's denial holds it. `-A --deny-read=x` leaves sys alone.
+  fn named_only_state_under_allow_all(
+    &self,
+    kind: &SysDescriptor,
+  ) -> PermissionState {
+    for item in self.descriptors.iter() {
+      match item {
+        UnaryPermissionDesc::FlagDenied(v) if kind.matches_deny(v) => {
+          return PermissionState::Denied;
+        }
+        UnaryPermissionDesc::FlagIgnored(v) if kind.matches_deny(v) => {
+          return PermissionState::Ignored;
+        }
+        UnaryPermissionDesc::PromptDenied(v) if kind.stronger_than_deny(v) => {
+          return PermissionState::Denied;
+        }
+        _ => {}
+      }
+    }
+    if self.flag_ignored_global {
+      PermissionState::Ignored
+    } else if self.flag_denied_global || self.prompt_denied_global {
+      PermissionState::Denied
+    } else {
+      PermissionState::Granted
+    }
+  }
+
   /// denext: a prompt for a named-only sys name offers yes or no (no "allow
   /// all sys", which wouldn't grant it) and names the flag that does.
   fn prompt_named_only(
@@ -5400,6 +5431,37 @@ impl Permissions {
       && self.ffi.is_allow_all()
       && self.import.is_allow_all()
       && self.midi.is_allow_all()
+  }
+
+  /// denext: every permission granted unscoped (`--allow-all`, or each
+  /// `--allow-*` flag bare), whatever deny or ignore rules sit beside the
+  /// grants. As upstream, `-A --deny-read=x` keeps every permission but what
+  /// the deny names, so the named-only sys names `-A` grants
+  /// ([`SysDescriptor::is_named_only`]) stay granted next to a deny that
+  /// doesn't name them. [`Self::all_granted`] (no deny anywhere) stays the
+  /// test for "all permissions" (`check_has_all_permissions`), as upstream.
+  fn all_allowed_unscoped(&self) -> bool {
+    let net_granted = self.net.granted_global
+      || (self.net_connect.granted_global && self.net_listen.granted_global);
+    !has_broker()
+      && self.read.granted_global
+      && self.write.granted_global
+      && net_granted
+      && self.env.granted_global
+      && self.sys.granted_global
+      && self.run.granted_global
+      && self.ffi.granted_global
+      && self.import.granted_global
+      && self.midi.granted_global
+  }
+
+  /// denext: whether `--allow-all` grants the named-only sys name `kind`
+  /// ([`Self::all_allowed_unscoped`] and no rule holding the name).
+  fn allow_all_grants_named_only(&self, kind: &SysDescriptor) -> bool {
+    kind.is_named_only()
+      && self.all_allowed_unscoped()
+      && self.sys.named_only_state_under_allow_all(kind)
+        == PermissionState::Granted
   }
 
   fn disable_prompting(&mut self) {
@@ -6355,13 +6417,17 @@ impl PermissionsContainer {
         self.descriptor_parser.parse_sys_descriptor(text)?,
       ))
     };
-    worker_perms.sys = if inner.all_granted() {
+    worker_perms.sys = if inner.all_allowed_unscoped() {
       // denext: under --allow-all a worker may also be given the sys names
-      // a bare grant leaves out (`SysDescriptor::is_named_only`). Nothing
-      // prompts here, so the parent's own state needs no update.
+      // a bare grant leaves out (`SysDescriptor::is_named_only`), but not
+      // one a deny holds. Nothing prompts here, so the parent's own state
+      // needs no update.
       let mut parent_sys = inner.sys.clone();
       for name in ["processInfo", "processes"] {
-        parent_sys.insert_granted(Some(&SysDescriptor(name.to_string())));
+        let desc = SysDescriptor(name.to_string());
+        if inner.allow_all_grants_named_only(&desc) {
+          parent_sys.insert_granted(Some(&desc));
+        }
       }
       parent_sys
         .create_child_permissions(child_permissions_arg.sys, parse_sys)?
@@ -7239,8 +7305,9 @@ impl PermissionsContainer {
   ) -> Result<(), PermissionCheckError> {
     let kind = self.descriptor_parser.parse_sys_descriptor(kind)?;
     let mut inner = self.inner.lock();
-    // denext: `--allow-all` grants the names a bare --allow-sys leaves out.
-    if kind.is_named_only() && inner.all_granted() {
+    // denext: `--allow-all` grants the names a bare --allow-sys leaves out
+    // (next to a deny that doesn't name them, too).
+    if inner.allow_all_grants_named_only(&kind) {
       return Ok(());
     }
     inner.sys.check(&kind, Some(api_name))?;
@@ -8263,7 +8330,9 @@ impl PermissionsContainer {
     let inner = self.inner.lock();
     let permission = &inner.sys;
     let named_only = kind.as_ref().is_some_and(|kind| kind.is_named_only());
-    if named_only && inner.all_granted()
+    if kind
+      .as_ref()
+      .is_some_and(|kind| inner.allow_all_grants_named_only(kind))
       || !named_only && permission.is_allow_all()
     {
       return Ok(PermissionState::Granted);
@@ -8681,8 +8750,9 @@ impl PermissionsContainer {
       .map(|kind| self.descriptor_parser.parse_sys_descriptor(kind))
       .transpose()?;
     let mut inner = self.inner.lock();
-    if kind.as_ref().is_some_and(|kind| kind.is_named_only())
-      && inner.all_granted()
+    if kind
+      .as_ref()
+      .is_some_and(|kind| inner.allow_all_grants_named_only(kind))
     {
       return Ok(PermissionState::Granted);
     }
@@ -10474,6 +10544,160 @@ mod tests {
       PermissionState::Granted
     );
     assert_eq!(bare.query_sys(None).unwrap(), PermissionState::Granted);
+  }
+
+  // denext: `-A` next to a deny keeps every grant the deny doesn't name, as
+  // upstream does, so the process names `-A` grants stay granted; a deny
+  // that names them (or the whole of sys) still holds.
+  #[test]
+  fn sys_process_names_under_allow_all_with_denies() {
+    set_prompter(Box::new(TestPrompter));
+    let parser = TestPermissionDescriptorParser;
+    let all = |extra: PermissionsOptions| {
+      let opts = PermissionsOptions {
+        allow_env: Some(vec![]),
+        allow_net: Some(vec![]),
+        allow_ffi: Some(vec![]),
+        allow_read: Some(vec![]),
+        allow_run: Some(vec![]),
+        allow_sys: Some(vec![]),
+        allow_write: Some(vec![]),
+        allow_import: Some(vec![]),
+        allow_midi: Some(vec![]),
+        prompt: false,
+        ..extra
+      };
+      PermissionsContainer::new(
+        Arc::new(TestPermissionDescriptorParser),
+        Permissions::from_options(&parser, &opts).unwrap(),
+      )
+    };
+    let child = |name: &str| {
+      let mut child = ChildPermissionsArg::none();
+      child.sys = ChildUnaryPermissionArg::GrantedList(vec![name.to_string()]);
+      child
+    };
+    for (label, extra) in [
+      (
+        "deny-read",
+        PermissionsOptions {
+          deny_read: Some(svec!["/secret"]),
+          ..Default::default()
+        },
+      ),
+      (
+        "deny-net",
+        PermissionsOptions {
+          deny_net: Some(svec!["169.254.169.254"]),
+          ..Default::default()
+        },
+      ),
+      (
+        "deny-env",
+        PermissionsOptions {
+          deny_env: Some(vec![]),
+          ..Default::default()
+        },
+      ),
+      (
+        "deny-sys=hostname",
+        PermissionsOptions {
+          deny_sys: Some(svec!["hostname"]),
+          ..Default::default()
+        },
+      ),
+    ] {
+      let perms = all(extra);
+      assert!(!perms.inner.lock().all_granted(), "{label}");
+      for name in ["processInfo", "processes"] {
+        assert!(perms.check_sys(name, "test").is_ok(), "{label}: {name}");
+        assert_eq!(
+          perms.query_sys(Some(name)).unwrap(),
+          PermissionState::Granted,
+          "{label}: {name}"
+        );
+        assert_eq!(
+          perms.request_sys(Some(name)).unwrap(),
+          PermissionState::Granted,
+          "{label}: {name}"
+        );
+        let worker = perms.create_child_permissions(child(name)).unwrap();
+        assert!(worker.check_sys(name, "test").is_ok(), "{label}: {name}");
+      }
+      // What a deny names stays denied.
+      if label == "deny-sys=hostname" {
+        assert!(perms.check_sys("hostname", "test").is_err());
+      }
+      // "All permissions" still means no deny anywhere, as upstream.
+      assert!(
+        perms
+          .check_has_all_permissions(Path::new("/dev/x"))
+          .is_err(),
+        "{label}"
+      );
+    }
+    // A deny naming a process name, or the whole of sys, still holds it.
+    for (label, deny_sys) in [
+      ("named", svec!["processInfo", "processes"]),
+      ("global", vec![]),
+    ] {
+      let perms = all(PermissionsOptions {
+        deny_sys: Some(deny_sys),
+        ..Default::default()
+      });
+      for name in ["processInfo", "processes"] {
+        assert!(perms.check_sys(name, "test").is_err(), "{label}: {name}");
+        assert_eq!(
+          perms.query_sys(Some(name)).unwrap(),
+          PermissionState::Denied,
+          "{label}: {name}"
+        );
+        assert_eq!(
+          perms.request_sys(Some(name)).unwrap(),
+          PermissionState::Denied,
+          "{label}: {name}"
+        );
+        assert!(
+          perms.create_child_permissions(child(name)).is_err(),
+          "{label}: {name}"
+        );
+      }
+    }
+    // An ignore of the name holds it too.
+    let ignored = all(PermissionsOptions {
+      deny_read: Some(svec!["/secret"]),
+      ..Default::default()
+    });
+    ignored.inner.lock().sys.descriptors.insert(
+      UnaryPermissionDesc::FlagIgnored(SysDescriptor(
+        "processInfo".to_string(),
+      )),
+    );
+    assert!(ignored.check_sys("processInfo", "test").is_err());
+    assert!(ignored.check_sys("processes", "test").is_ok());
+    // Not every permission unscoped: the names need naming, deny or not.
+    let partial = PermissionsContainer::new(
+      Arc::new(TestPermissionDescriptorParser),
+      Permissions::from_options(
+        &parser,
+        &PermissionsOptions {
+          allow_read: Some(vec![]),
+          allow_sys: Some(vec![]),
+          deny_read: Some(svec!["/secret"]),
+          prompt: false,
+          ..Default::default()
+        },
+      )
+      .unwrap(),
+    );
+    assert!(partial.check_sys("processInfo", "test").is_err());
+    // A revoked grant ends it.
+    let revoked = all(PermissionsOptions {
+      deny_read: Some(svec!["/secret"]),
+      ..Default::default()
+    });
+    revoked.revoke_read(None).unwrap();
+    assert!(revoked.check_sys("processInfo", "test").is_err());
   }
 
   // denext: a class holds only when the resolved path is in it too.

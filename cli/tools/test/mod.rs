@@ -1034,6 +1034,11 @@ async fn test_specifier_inner(
   // a blocking local inspector session, so waiting first would hang forever.
   if let Some(mut coverage_collector) = coverage_collector.take() {
     coverage_collector.stop_collecting()?;
+    // denext: a worker the module terminated writes its coverage on its own
+    // thread once it sees the request: wait for it before the process ends
+    deno_runtime::coverage::wait_for_terminated_worker_flushes(
+      deno_runtime::coverage::WORKER_FLUSH_TIMEOUT,
+    );
   }
   if flush_on_signal.take().is_some_and(|participant| {
     let signalled = participant.is_signalled();

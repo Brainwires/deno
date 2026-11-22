@@ -2033,6 +2033,46 @@ fn sys_names_grant_their_proc_files() {
   assert!(!read(&mac).contains(&PathBuf::from("/proc/meminfo")));
 }
 
+/// `-A` grants the named-only sys names, next to a deny that doesn't name
+/// them too (as Deno's checks do): not a "bare --allow-sys", and nothing
+/// narrower than the grant to report or refuse.
+#[test]
+fn allow_all_with_denies_keeps_the_named_only_sys_names() {
+  let bare = PermissionsOptions {
+    allow_sys: all(),
+    ..Default::default()
+  };
+  let deny_read = PermissionsOptions {
+    deny_read: s(&["/home/me/.ssh"]),
+    ..allow_all()
+  };
+  for name in SYS_NAMED_ONLY {
+    assert!(!sys_granted(&bare, name), "{name}");
+    assert!(sys_granted(&allow_all(), name), "{name}");
+    assert!(sys_granted(&deny_read, name), "{name}");
+  }
+  assert!(sys_granted(&deny_read, "loadavg"));
+  for mode in [Auto, Enforce] {
+    let c = compile(&deny_read, linux(Some(6)), mode);
+    assert!(c.policy.deny_only, "{mode:?}");
+    assert!(
+      !c.gaps.iter().any(|g| g.rule.contains("processes")),
+      "{mode:?}: {:#?}",
+      c.gaps
+    );
+  }
+  // the ceiling's grant is -A with the denies: the same
+  let options = PermissionsOptions {
+    allow_read: s(&["/project"]),
+    deny_read: s(&["/home/me/.ssh"]),
+    prompt: true,
+    ..Default::default()
+  };
+  let c = ceiling(&options, linux(Some(6)));
+  assert!(!c.gaps.iter().any(|g| g.rule.contains("processes")));
+  assert_eq!(c.fatal_gaps().count(), 0, "{:#?}", c.gaps);
+}
+
 /// A scratch folder (not canonicalized: on macOS the temp folder is itself
 /// reached through a symlink) holding `real/` and `link -> real`.
 fn aliased_tree(name: &str) -> PathBuf {

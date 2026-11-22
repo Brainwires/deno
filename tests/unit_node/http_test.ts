@@ -4998,7 +4998,11 @@ Deno.test("[node/http] proxied request authority is validated and canonicalized"
     req.on("error", () => {});
     assertEquals(req.path, "http://localhost/g");
     assertEquals(req.getHeader("host"), "localhost");
-    const closed = once(req, "close");
+    // (not `events.once`, which rejects on the "socket hang up" error the
+    // destroy emits first unless the refused connection beat it)
+    const closed = new Promise<void>((resolve) =>
+      req.once("close", () => resolve())
+    );
     req.destroy();
     await closed;
 
