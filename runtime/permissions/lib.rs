@@ -6591,7 +6591,14 @@ impl PermissionsContainer {
 
   /// denext: `path`, checked for `access_kind`, with the scope its
   /// operation opens it in (see [`CheckedPath::open_scope`]).
-  #[cfg_attr(not(unix), allow(unused_mut, unused_variables))]
+  #[cfg_attr(
+    not(unix),
+    allow(
+      unused_mut,
+      unused_variables,
+      reason = "the open scope is narrowed on unix only"
+    )
+  )]
   fn with_open_scope<'a>(
     &self,
     mut path: CheckedPath<'a>,

@@ -35,4 +35,14 @@ ignore = [
   # (.github/denext-runtime/audit_ignores.py fails the cargo-audit job when
   # it does).
   "RUSTSEC-2026-0418",
+  # url 2.5.7 (RUSTSEC-2026-0592): `Url::origin()` overflows the stack on
+  # nested `blob:` URLs. Fixed here, not by a version: `url` is
+  # libs/vendor/url ([patch.crates-io] in Cargo.toml), 2.5.7 with the fix
+  # from url 2.5.9 backported to src/origin.rs. 2.5.9 itself percent-encodes
+  # `^` in URL paths, which breaks `npm:` / `jsr:` specifiers such as
+  # `npm:/preact@^10/hooks` (DENEXT.md, item 491). cargo audit matches on the
+  # version alone and still reports the vendored copy.
+  # .github/denext-runtime/audit_ignores.py fails the cargo-audit job once
+  # `url` comes from a registry again or the vendored file loses the fix.
+  "RUSTSEC-2026-0592",
 ]

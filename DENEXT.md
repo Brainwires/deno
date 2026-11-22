@@ -19924,12 +19924,28 @@ where the changes are discussed.
      origin is taken only for `http`, `https` and `file`, and any other inner
      scheme, `blob` included, is an opaque origin, as the URL Standard says.
      `blob:ws://…` and `blob:blob:https://…` now have an opaque origin
-     (`"null"`) where they had a tuple one. `cargo audit` reports no
-     RUSTSEC-2026-0592 and nothing ignores it. Remove the vendored copy once the
+     (`"null"`) where they had a tuple one. `cargo audit` matches on the
+     version alone and still reports the vendored 2.5.7, so `.cargo/audit.toml`
+     ignores RUSTSEC-2026-0592 under a condition `audit_ignores.py` checks: the
+     cargo-audit job fails once `url` comes from a registry again or
+     `libs/vendor/url/src/origin.rs` no longer carries the backport. Remove the
+     vendored copy once the
      specifier parsers accept the percent-encoded form and `url_test.ts` / the
      WPT expectations take 2.5.9's WHATWG behaviour.
      - Tests: `object_url_origin_of_a_nested_blob_location` in
-       `ext/web/blob.rs`.
+       `ext/web/blob.rs`; `audit_ignores_test.py`'s `Vendored` cases (the
+       vendored copy with the backport passes, a registry `url`, no `url`, a
+       missing or unmarked `origin.rs` fail, no ignore means no failure).
+     - Also in this round, for the release gate: the Windows-only
+       `cfg_attr(not(unix), allow(…))` on `with_open_scope` in
+       `runtime/permissions/lib.rs` names its reason (clippy's
+       `allow_attributes_without_reason`); `kernel_sandbox/warn/child.ts`
+       spawns `cat` with `clearEnv` and a fixed PATH, since a GitHub-hosted
+       macOS runner sets `DYLD_FALLBACK_LIBRARY_PATH`, which a scoped
+       `--allow-run` refuses to pass to a child; and every
+       `actions/attest-build-provenance` step in `denext_runtime.yml` is
+       tried once more after 30 s when it fails, as Sigstore's transparency
+       log sometimes answers 404 for an entry it has just written.
      - Node tests enabled: none.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
