@@ -616,19 +616,14 @@ fn pressure_file() -> Option<std::path::PathBuf> {
   let cgroup = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
   let (v2, _) = parse_proc_self_cgroup(&cgroup);
   let base = Path::new("/sys/fs/cgroup");
-  let candidates = cgroup_dirs(base, v2.unwrap_or("/"))
+  let mut candidates = cgroup_dirs(base, v2.unwrap_or("/"))
     .into_iter()
     .take(1)
     .map(|dir| dir.join("cpu.pressure"))
     .chain(std::iter::once(
       Path::new("/proc/pressure/cpu").to_path_buf(),
     ));
-  for path in candidates {
-    if read_pressure_some_total(&path).is_some() {
-      return Some(path);
-    }
-  }
-  None
+  candidates.find(|path| read_pressure_some_total(path).is_some())
 }
 
 #[cfg(unix)]
