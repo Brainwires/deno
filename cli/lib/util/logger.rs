@@ -118,6 +118,10 @@ fn take_already_printed(fingerprint: u64) -> bool {
   match handed.iter().position(|f| *f == fingerprint) {
     Some(index) => {
       handed.swap_remove(index);
+      if handed.is_empty() {
+        // nothing left to hide
+        SUPPRESSING.store(false, Ordering::Relaxed);
+      }
       true
     }
     None => false,
@@ -154,13 +158,17 @@ pub fn suppress_already_printed(fingerprints: Vec<u64>) {
 }
 
 /// The image after the re-exec reached the point where the image before it
-/// re-executed: everything from here on is its own.
+/// re-executed: what it prints from here on is its own, except a record the
+/// image before printed that this one hasn't repeated yet, which is still
+/// hidden once. Some startup diagnostics come later in this image than in
+/// the one before it (a config file's ignored compiler options: printed
+/// while type-checking there, while transpiling here); the image before
+/// printed nothing but its startup, so nothing of this image's own is lost.
 pub fn end_already_printed() {
-  SUPPRESSING.store(false, Ordering::Relaxed);
-  ALREADY_PRINTED
-    .lock()
-    .unwrap_or_else(|e| e.into_inner())
-    .clear();
+  let handed = ALREADY_PRINTED.lock().unwrap_or_else(|e| e.into_inner());
+  if handed.is_empty() {
+    SUPPRESSING.store(false, Ordering::Relaxed);
+  }
 }
 
 /// The WebRTC engine's records (the `rtc` and `rtc_*` crates) are shown at
@@ -395,9 +403,18 @@ mod tests {
     assert!(take_already_printed(warn));
     // a second record with the same text is this image's own
     assert!(!take_already_printed(warn));
+    // past the point where the image before re-executed, a record it
+    // printed that this image hasn't repeated yet is still hidden, once
     suppress_already_printed(vec![warn, warn]);
+    assert!(take_already_printed(warn));
     end_already_printed();
+    assert!(take_already_printed(warn));
     assert!(!take_already_printed(warn));
+    // with nothing left, suppression ends
+    suppress_already_printed(vec![other]);
+    assert!(take_already_printed(other));
+    end_already_printed();
+    assert!(!SUPPRESSING.load(Ordering::Relaxed));
   }
 
   #[test]

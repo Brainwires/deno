@@ -2316,6 +2316,137 @@ fn allow_all_has_no_socket_gap() {
   assert!(p.gaps.iter().any(|g| g.class == GapClass::Unix));
 }
 
+/// denext.30 R4 triage: unscoped read, write and net (short of `-A`) allow
+/// every socket in Deno too, so they have no Unix socket gap either and
+/// `enforce` (what `auto` chooses) starts in Mode A: the fatal gap made
+/// `auto` start a broker that held nothing and slowed every child of the
+/// run. A write deny keeps the gap.
+#[test]
+fn unscoped_files_and_net_have_no_socket_gap() {
+  let all = Some(Vec::new());
+  let options = PermissionsOptions {
+    allow_read: all.clone(),
+    allow_write: all.clone(),
+    allow_net: all.clone(),
+    allow_env: all.clone(),
+    allow_run: all,
+    ..Default::default()
+  };
+  // (before ABI 6 abstract sockets are a gap of their own)
+  for abi in [6, 7] {
+    let c = ctx(linux(Some(abi)).built(), Enforce);
+    let set = ImplicitSet::build(&options, &c);
+    let p = KernelPolicy::compile(&options, &set, &c);
+    assert_eq!(p.policy.shape, Shape::ModeA, "ABI {abi}");
+    assert_eq!(p.policy.unix, UnixPolicy::Open);
+    assert_eq!(p.fatal_gaps().count(), 0, "ABI {abi}: {:?}", p.gaps);
+    assert!(!p.gaps.iter().any(|g| g.class == GapClass::Unix));
+  }
+  let with_deny = PermissionsOptions {
+    deny_write: s(&["/etc"]),
+    ..options
+  };
+  let c = ctx(linux(Some(6)).built(), Enforce);
+  let set = ImplicitSet::build(&with_deny, &c);
+  let p = KernelPolicy::compile(&with_deny, &set, &c);
+  assert!(p.gaps.iter().any(|g| g.class == GapClass::Unix));
+}
+
+/// denext.30 R4 triage: the `Deno.cron` scheduler socket the operator names
+/// (`DENO_UNSTABLE_CRON_SOCK=unix:<path>`) is the runtime's own connection,
+/// which Deno's checks don't gate: a run with no network grant still
+/// reaches it (it was refused, and `Deno.cron` never registered), held as
+/// a named socket (by path on macOS and under the broker; on Linux Mode A
+/// only by opening AF_UNIX, a broker-closable gap).
+#[test]
+fn cron_socket_is_the_runtimes_own() {
+  let sock = PathBuf::from("/run/cron.sock");
+  let options = PermissionsOptions::default();
+  let with_sock = |caps, mode| {
+    let mut c = ctx(caps, mode);
+    c.runtime_unix_sockets = vec![sock.clone()];
+    compile_in(&options, &c)
+  };
+  // without the variable: no socket at all
+  assert_eq!(
+    compile(&options, linux(Some(6)).built(), Enforce)
+      .policy
+      .unix,
+    UnixPolicy::Denied
+  );
+  let mac = with_sock(macos().built(), Enforce);
+  assert_eq!(
+    mac.policy.unix,
+    UnixPolicy::Paths {
+      paths: vec![sock.clone()]
+    }
+  );
+  // Linux: by path where the broker holds it, else by opening AF_UNIX
+  // with a gap the broker closes (never refused)
+  let on_linux = with_sock(linux(Some(6)).built(), Enforce);
+  match &on_linux.policy.unix {
+    UnixPolicy::Paths { paths } => assert_eq!(paths, &vec![sock.clone()]),
+    UnixPolicy::Open => {
+      let g = gap(&on_linux, GapClass::Unix);
+      assert_eq!(g.resolution, GapResolution::FailOpen);
+      assert_eq!(g.exact_with, Some(ExactWith::Broker));
+    }
+    other => panic!("the cron socket is refused: {other:?}"),
+  }
+  if BROKER_NET_BUILT {
+    let linux_b = with_sock(linux(Some(6)).built(), Broker);
+    assert_eq!(
+      linux_b.policy.unix,
+      UnixPolicy::Paths {
+        paths: vec![sock.clone()]
+      }
+    );
+  }
+}
+
+/// denext.30 R4 triage: with no IP socket possible, a Unix socket the
+/// grant listens on may listen (listen(2) was refused outright, so
+/// `--allow-net-listen=unix:<path>` failed with EPERM under the broker
+/// `auto` starts); a connect-only Unix grant still refuses it, and so does
+/// any grant that leaves IP sockets possible.
+#[test]
+fn unix_listen_grant_may_listen() {
+  for (options, refused) in [
+    (
+      PermissionsOptions {
+        allow_net_listen: s(&["unix:/run/b.sock"]),
+        ..Default::default()
+      },
+      false,
+    ),
+    (
+      PermissionsOptions {
+        allow_net: s(&["unix:/run/b.sock"]),
+        ..Default::default()
+      },
+      false,
+    ),
+    (
+      PermissionsOptions {
+        allow_net_connect: s(&["unix:/run/a.sock"]),
+        ..Default::default()
+      },
+      true,
+    ),
+    (
+      PermissionsOptions {
+        allow_net_connect: s(&["example.com:443"]),
+        allow_net_listen: s(&["unix:/run/b.sock"]),
+        ..Default::default()
+      },
+      true,
+    ),
+  ] {
+    let c = compile(&options, linux(Some(6)).built(), Broker);
+    assert_eq!(c.policy.syscalls.refuse_listen, refused, "{options:?}");
+  }
+}
+
 /// A deny ceiling (D1 / D2, WP-A of denext.30) compiled for `options` on
 /// `caps`, as `check_run` does: the ceiling's grant, the context flag, and
 /// the mode `auto` chose (enforce).

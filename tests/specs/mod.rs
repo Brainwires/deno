@@ -67,6 +67,9 @@ struct MultiTestMetaData {
   pub timeout: Option<u64>,
 }
 
+/// A step's deadline when its test sets no `timeout` (seconds).
+const DEFAULT_STEP_TIMEOUT_SECS: u64 = 300;
+
 impl MultiTestMetaData {
   pub fn into_collected_tests(
     mut self,
@@ -733,10 +736,12 @@ fn run_step(
     }
     None => command,
   };
-  let command = match metadata.timeout {
-    Some(secs) => command.timeout(std::time::Duration::from_secs(secs)),
-    None => command,
-  };
+  // denext: every step has a deadline (the documented default when the test
+  // names none), so a hang fails that test instead of the whole suite's job
+  // (a spec waiting on a child the kernel sandbox refused ran 4 hours)
+  let command = command.timeout(std::time::Duration::from_secs(
+    metadata.timeout.unwrap_or(DEFAULT_STEP_TIMEOUT_SECS),
+  ));
   let output = command.run();
 
   let step_output = {

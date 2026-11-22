@@ -37,6 +37,7 @@ use deno_core::anyhow::bail;
 use deno_core::error::AnyError;
 use deno_core::serde_json;
 pub use deno_lib::kernel_apply::detect_capabilities;
+use deno_lib::kernel_apply::runtime_unix_sockets;
 use deno_lib::kernel_apply::std_stream_ttys;
 use deno_lib::kernel_apply::tls_files;
 /// The policy model, shared with `denort` (`deno_lib::kernel_policy`).
@@ -702,6 +703,7 @@ fn context_for(
     .or(flags.inspect_brk)
     .or(flags.inspect_wait)
     .map(|addr| addr.port());
+  ctx.runtime_unix_sockets = runtime_unix_sockets(cli_options.initial_cwd());
   ctx.tty_parent = std::io::stdin().is_terminal();
   ctx.ttys = std_stream_ttys();
   ctx.exec_strict = flags.permissions.kernel_sandbox_exec_strict;

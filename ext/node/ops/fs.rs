@@ -3966,10 +3966,18 @@ pub(crate) fn compile_cache_untrusted_dir(dir: &Path) -> Option<String> {
     Ok(canonical) => canonical,
     Err(err) => return Some(format!("'{}': {err}", dir.display())),
   };
+  // denext: on Linux an `O_PATH` descriptor is enough for `fstat` and needs
+  // no read access to the folder, so the walk works under the kernel
+  // sandbox, whose Landlock rules refuse opening a folder outside the read
+  // grant for reading (the ancestors of a granted cache folder usually are).
+  #[cfg(any(target_os = "linux", target_os = "android"))]
+  let walk_flags = libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_PATH;
+  #[cfg(not(any(target_os = "linux", target_os = "android")))]
+  let walk_flags = libc::O_NOFOLLOW | libc::O_DIRECTORY;
   for ancestor in canonical.ancestors() {
     let metadata = match std::fs::OpenOptions::new()
       .read(true)
-      .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+      .custom_flags(walk_flags)
       .open(ancestor)
       .and_then(|file| file.metadata())
     {
