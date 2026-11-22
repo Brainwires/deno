@@ -471,22 +471,24 @@ Deno.test("vm contextified sandbox survives detached function after gc", async (
 // Regression test: every Script compiled with an `importModuleDynamically`
 // callback stayed alive for good (the runtime kept the callback, whose
 // closure holds the Script, in a table of strong references). The callback
-// now lives as long as the compiled code, as in Node.js. A heap snapshot,
-// which `queryObjects` takes, first collects all available garbage.
+// now lives as long as the compiled code, as in Node.js. Runs in a subprocess
+// for `--expose-gc`: the collection has to be one that V8 runs from a task,
+// which does not scan the native stack conservatively (a stale stack word
+// kept a script or two alive now and then). See the script for the
+// registry, which has to stay reachable until its callbacks have run.
 Deno.test("vm Script with importModuleDynamically is collectable", async () => {
-  let finalized = 0;
-  const registry = new FinalizationRegistry(() => {
-    finalized++;
+  const command = new Deno.Command(Deno.execPath(), {
+    args: [
+      "run",
+      "--quiet",
+      "--v8-flags=--expose-gc",
+      "tests/unit_node/testdata/vm_import_module_dynamically_collectable.ts",
+    ],
+    stdout: "piped",
+    stderr: "piped",
   });
-  for (let i = 0; i < 1000; i++) {
-    registry.register(
-      new Script(`"${i}";`, { importModuleDynamically() {} } as never),
-      i,
-    );
-  }
-  assertEquals(v8.queryObjects(Script, { format: "count" }), 0);
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  assertEquals(finalized, 1000);
+  const { code, stderr } = await command.output();
+  assertEquals(code, 0, new TextDecoder().decode(stderr));
 });
 
 Deno.test("vm dynamic import callbacks still run after gc", async () => {
