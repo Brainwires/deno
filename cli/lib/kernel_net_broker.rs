@@ -435,6 +435,7 @@ mod tests {
   fn unix_sockets_by_direction() {
     // (no symlink on the way: the grant and the checked path match as
     // written)
+    #[allow(clippy::disallowed_methods, reason = "a real folder for the test")]
     let dir = std::env::temp_dir().canonicalize().unwrap();
     let a = dir.join("deno-kernel-net-broker-a.sock");
     let b = dir.join("deno-kernel-net-broker-b.sock");

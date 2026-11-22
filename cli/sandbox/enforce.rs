@@ -417,13 +417,7 @@ fn take_printed_handover() -> Vec<u64> {
   };
   // SAFETY: called first thing in `main` (from `startup`), while the process
   // has one thread
-  #[allow(
-    clippy::disallowed_methods,
-    reason = "the process's own environment"
-  )]
-  unsafe {
-    std::env::remove_var(PRINTED_ENV_VAR)
-  };
+  unsafe { std::env::remove_var(PRINTED_ENV_VAR) };
   value.to_str().map(parse_printed).unwrap_or_default()
 }
 
