@@ -96,6 +96,7 @@ exclude = [
   "libs/vendor/dprint-core",
   "libs/vendor/sys_traits",
   "libs/vendor/tokio-postgres",
+  "libs/vendor/url",
 ]
 
 [workspace.package]
@@ -765,4 +766,11 @@ dprint-core = { path = "libs/vendor/dprint-core" }
 # (DENEXT.md item 357).
 sys_traits = { path = "libs/vendor/sys_traits" }
 tokio-postgres = { path = "libs/vendor/tokio-postgres" }
+# url 2.5.7 (the version upstream Deno pins) with the RUSTSEC-2026-0592 fix
+# from 2.5.9 backported: Url::origin() of a blob: URL takes the inner URL's
+# origin only for http, https and file, so nested blob: URLs no longer overflow
+# the stack. 2.5.9 also percent-encodes ^ in paths, which breaks the
+# `npm:/pkg@^1/` and `jsr:/@scope/pkg@^1/` specifiers deno_semver and
+# deno_graph parse (DENEXT.md item 491). Remove when those parse the encoded form.
+url = { path = "libs/vendor/url" }
 v8 = { git = "https://github.com/Brainwires/rusty_v8", rev = "f72a5f53280688d3101ab6f82e4f7b5ccf528ecd" }

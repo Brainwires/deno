@@ -500,4 +500,38 @@ mod tests {
     assert!(store.remove_part(&id).is_some());
     assert!(store.get_part(&id).is_none());
   }
+
+  /// RUSTSEC-2026-0592: the origin of a `blob:` URL is its inner URL's only
+  /// for http, https and file, so nested `blob:` prefixes neither recurse nor
+  /// overflow the stack (they did once per prefix in url 2.5.8 and earlier).
+  #[test]
+  fn object_url_origin_of_a_nested_blob_location() {
+    let store = BlobStore::default();
+    let object_url = |location: &str| {
+      let blob = Blob {
+        media_type: String::new(),
+        parts: Vec::new(),
+      };
+      let url =
+        store.insert_object_url(blob, Some(Url::parse(location).unwrap()));
+      url.as_str().rsplit_once('/').unwrap().0.to_string()
+    };
+
+    assert_eq!(
+      object_url("blob:https://example.com/a"),
+      "blob:https://example.com"
+    );
+    assert_eq!(object_url("blob:ws://example.com/a"), "blob:null");
+    assert_eq!(object_url("blob:blob:https://example.com/a"), "blob:null");
+
+    // Run on a thread with a small stack: 10,000 prefixes overflowed 2 MiB.
+    let nested = format!("{}https://example.com/", "blob:".repeat(10_000));
+    let origin = std::thread::Builder::new()
+      .stack_size(256 * 1024)
+      .spawn(move || Url::parse(&nested).unwrap().origin())
+      .unwrap()
+      .join()
+      .unwrap();
+    assert!(!origin.is_tuple());
+  }
 }

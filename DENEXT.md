@@ -19903,6 +19903,35 @@ where the changes are discussed.
        `stack_file_names_cache_*` in `libs/core/error.rs`.
      - Node tests enabled: none.
 
+491. **`fix(deps)`: RUSTSEC-2026-0592 — url 2.5.7 with the nested `blob:` origin
+     fix backported** (`Cargo.toml`, `Cargo.lock`, `libs/vendor/url`). url 2.5.8
+     and earlier computed the origin of a `blob:` URL by parsing its path and
+     calling `Url::origin()` on the result whatever its scheme, so a URL of
+     thousands of nested `blob:` prefixes overflowed the stack and aborted the
+     process (the Rust side's origins: `--location`, object URLs, redirect
+     checks in the module loader; the JavaScript `URL.prototype.origin` is
+     computed in `ext/web/00_url.js` and does not call it). 2.5.9 fixes it, but
+     the same release also follows newer URL Standard text that Deno's
+     specifiers are not ready for: `^` and `` ` `` in a hierarchical path are
+     percent-encoded, so `npm:/preact@^10.19.6/hooks` and `jsr:/@std/assert@^1/`
+     (import maps, `deno outdated`, the lockfile, the LSP's auto-imports) reach
+     deno_semver as `@%5E10.19.6` and fail to parse; and a `file:` URL with a
+     host and a drive letter keeps the host (`file://foo/C:` stays
+     `file://foo/C:`, which `tests/unit/url_test.ts` asserts the other way).
+     Upstream Deno still pins 2.5.7. So 2.5.7 is vendored in `libs/vendor/url`
+     (patched through `[patch.crates-io]`, its test targets dropped) with only
+     the advisory's change from 2.5.9 (servo/rust-url#1186): the inner URL's
+     origin is taken only for `http`, `https` and `file`, and any other inner
+     scheme, `blob` included, is an opaque origin, as the URL Standard says.
+     `blob:ws://…` and `blob:blob:https://…` now have an opaque origin
+     (`"null"`) where they had a tuple one. `cargo audit` reports no
+     RUSTSEC-2026-0592 and nothing ignores it. Remove the vendored copy once the
+     specifier parsers accept the percent-encoded form and `url_test.ts` / the
+     WPT expectations take 2.5.9's WHATWG behaviour.
+     - Tests: `object_url_origin_of_a_nested_blob_location` in
+       `ext/web/blob.rs`.
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -19913,7 +19942,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-490) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
