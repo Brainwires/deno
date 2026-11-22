@@ -2868,14 +2868,14 @@ impl JsRuntime {
 ///   takes the poll unless one was made in the last
 ///   [`LoopWaker::REACTOR_POLL_SLICE`]: a run of short async ops polls for
 ///   I/O that often, not once per op (a non-blocking `kevent` costs about
-///   20 us on macOS).
+///   20 us on macOS). A waker hands nothing to the scheduler itself: it
+///   spawns a task that does ([`LoopWaker::wake_task_from_a_waker`]).
 /// - A wake made between iterations outside any task's poll goes to the
 ///   task at once. It is the scheduler's own (its drivers dispatching their
 ///   events, or the wakers it deferred being woken: a tokio timer armed once
 ///   an iteration spent its coop budget leaves one there), right after its
-///   I/O poll, and the scheduler wakes its deferred wakers with its list of
-///   them borrowed, so deferring another one from there would panic. (Or it
-///   is made by the future a `block_on` polls, which is not a task either.)
+///   I/O poll. (Or it is made by the future a `block_on` polls, which is not
+///   a task either.)
 ///
 /// The other wakes reach the task at once: one made after the executor
 /// parked since the last iteration (the loop waited and something arrived:
@@ -3010,19 +3010,73 @@ impl LoopWaker {
   /// Wakes the task that polls the loop: after the executor's next I/O poll
   /// while the reactor could have events for the loop, else at once.
   ///
-  /// From a task's poll only (the loop's own, at the end of an iteration, or
-  /// another task's), where the scheduler takes a deferred wake.
+  /// From the loop's own poll only (the end of an iteration), where the
+  /// scheduler takes a deferred wake. A waker uses
+  /// [`LoopWaker::wake_task_from_a_waker`].
   fn wake_task(&self, task: &Waker) {
     if self.reactor_may_have_events.load(Ordering::Relaxed) {
       self.last_reactor_poll.store(Self::now(), Ordering::Relaxed);
-      // The deferred wake of `tokio::task::yield_now`: its first poll hands
-      // the waker to the scheduler, which wakes it after it has polled its
-      // drivers without blocking. On a thread that is not running a tokio
-      // scheduler it wakes the waker at once.
-      let yield_now = std::pin::pin!(tokio::task::yield_now());
-      let _ = yield_now.poll(&mut Context::from_waker(task));
+      Self::wake_after_reactor_poll(task);
     } else {
       task.wake_by_ref();
+    }
+  }
+
+  /// The deferred wake of `tokio::task::yield_now`: its first poll hands the
+  /// waker to the scheduler, which wakes it after it has polled its drivers
+  /// without blocking. On a thread that is not running a tokio scheduler it
+  /// wakes the waker at once.
+  ///
+  /// Only from the poll of a task (or of a `block_on` future), never from a
+  /// waker: the scheduler wakes the wakers it deferred with its list of them
+  /// borrowed, so deferring one from a wake it makes there panics (`RefCell
+  /// already borrowed`).
+  fn wake_after_reactor_poll(task: &Waker) {
+    let yield_now = std::pin::pin!(tokio::task::yield_now());
+    let _ = yield_now.poll(&mut Context::from_waker(task));
+  }
+
+  /// [`LoopWaker::wake_task`] for a waker, which cannot tell where it is
+  /// called from. In the poll of another task the scheduler would take a
+  /// deferred wake, but the scheduler also calls wakers while it wakes the
+  /// ones it deferred (a tokio timer armed once an iteration spent its coop
+  /// budget leaves its waker there, which wakes the loop's), where deferring
+  /// another one panics. `tokio::task::try_id` does not tell the two apart:
+  /// it names a task there too when the scheduler runs inside another
+  /// runtime's task, as `deno test` runs each file's runtime inside a
+  /// `spawn_blocking` task.
+  ///
+  /// So the wake is handed to the scheduler from a task spawned for it,
+  /// whose poll is a place the scheduler takes it from. Spawning is what
+  /// every wake of a task does (it puts a task on the run queue), so it is
+  /// safe wherever a waker may be called.
+  fn wake_task_from_a_waker(&self, task: Waker) {
+    if !self.reactor_may_have_events.load(Ordering::Relaxed) {
+      return task.wake();
+    }
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+      // No tokio runtime on this thread: `yield_now` would wake at once.
+      return task.wake();
+    };
+    self.last_reactor_poll.store(Self::now(), Ordering::Relaxed);
+    let mut wake = WakeOnDrop(Some(task));
+    drop(runtime.spawn(async move {
+      if let Some(task) = wake.0.take() {
+        Self::wake_after_reactor_poll(&task);
+      }
+    }));
+  }
+}
+
+/// Wakes the task if it is dropped with the waker still in it: a runtime
+/// that shuts down drops the tasks it never polled, and the wake one of them
+/// carried must not be lost with it.
+struct WakeOnDrop(Option<Waker>);
+
+impl Drop for WakeOnDrop {
+  fn drop(&mut self) {
+    if let Some(task) = self.0.take() {
+      task.wake();
     }
   }
 }
@@ -3067,13 +3121,13 @@ impl std::task::Wake for LoopWaker {
         } else if tokio::task::try_id().is_none() {
           // Not from a task's poll: from the scheduler, which wakes the
           // wakers it deferred (and dispatches its drivers' events) right
-          // after it polled its drivers, so the poll has happened. It wakes
-          // the deferred ones with its list of them borrowed: a wake
-          // deferred from there panics (`RefCell already borrowed`).
+          // after it polled its drivers, so the poll has happened.
           // (Or from a `block_on` future, which is no task either.)
           task.wake();
         } else {
-          self.wake_task(&task);
+          // From another task's poll, or from the scheduler again, when it
+          // runs inside a task of another runtime.
+          self.wake_task_from_a_waker(task);
         }
       }
     }
@@ -4229,6 +4283,82 @@ mod loop_waker_tests {
     })
     .await
     .unwrap();
+  }
+
+  // The same wake, on a scheduler that runs inside a task of another
+  // runtime: `deno test` runs each file's current-thread runtime inside a
+  // `spawn_blocking` task of its multi-thread one. `tokio::task::try_id`
+  // names that outer task while the inner scheduler wakes its deferred
+  // wakers, so the loop's waker took the wake for one made in a task's poll
+  // and deferred it from inside the borrowed list: `RefCell already
+  // borrowed` in `unit_node::async_hooks_test`, every run.
+  #[test]
+  fn a_wake_from_the_deferred_wakers_of_a_nested_scheduler_reaches_the_task() {
+    let outer = tokio::runtime::Builder::new_multi_thread()
+      .worker_threads(2)
+      .build()
+      .unwrap();
+    let woken = outer.block_on(async {
+      tokio::task::spawn_blocking(|| {
+        // The outer task's id stays current on this thread for as long as
+        // the inner runtime runs, between its tasks' polls too.
+        assert!(tokio::task::try_id().is_some());
+        let inner = tokio::runtime::Builder::new_current_thread()
+          .enable_all()
+          .build()
+          .unwrap();
+        inner.block_on(async {
+          tokio::spawn(async {
+            let task = Arc::new(CountingWaker(AtomicUsize::new(0)));
+            let task_waker = Waker::from(task.clone());
+            let loop_waker = Arc::new(LoopWaker::default());
+            let waker = Waker::from(loop_waker.clone());
+
+            assert!(loop_waker.begin_poll(&task_waker));
+            assert!(!loop_waker.end_poll());
+            // Left with the scheduler under the loop's waker, as a tokio
+            // sleep polled once the coop budget is spent leaves it.
+            let deferred = std::pin::pin!(tokio::task::yield_now());
+            assert!(
+              deferred.poll(&mut Context::from_waker(&waker)).is_pending()
+            );
+            assert_eq!(task.0.load(Ordering::SeqCst), 0);
+            // The scheduler wakes its deferred wakers, the loop's among
+            // them.
+            tokio::task::yield_now().await;
+            // The wake reaches the task, through one more I/O poll at most.
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+            task.0.load(Ordering::SeqCst)
+          })
+          .await
+          .unwrap()
+        })
+      })
+      .await
+      .unwrap()
+    });
+    assert_eq!(woken, 1);
+  }
+
+  // A wake that was handed to a task which its runtime drops unpolled is
+  // delivered as the task is dropped.
+  #[test]
+  fn a_wake_handed_to_a_runtime_that_shuts_down_reaches_the_task() {
+    let task = Arc::new(CountingWaker(AtomicUsize::new(0)));
+    let task_waker = Waker::from(task.clone());
+    let loop_waker = Arc::new(LoopWaker::default());
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+      .build()
+      .unwrap();
+    runtime.block_on(async {
+      loop_waker.wake_task_from_a_waker(task_waker);
+    });
+    // Spawned, and not polled yet.
+    assert_eq!(task.0.load(Ordering::SeqCst), 0);
+    drop(runtime);
+    assert_eq!(task.0.load(Ordering::SeqCst), 1);
   }
 
   #[test]
