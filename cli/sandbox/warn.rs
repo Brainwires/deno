@@ -86,6 +86,9 @@ struct Pending {
   quiet: Vec<String>,
   /// Paths this process reads itself that an enforced run doesn't.
   own_quiet: Vec<PathBuf>,
+  /// The policy's read denies, as written and resolved: the listed folders
+  /// inside one aren't listable under enforce.
+  read_denies: Vec<PathBuf>,
 }
 
 static PENDING: OnceLock<Pending> = OnceLock::new();
@@ -356,6 +359,7 @@ pub fn start(run: WarnRun) {
     policy,
     quiet,
     own_quiet: run.skipped_npmrcs,
+    read_denies: super::enforce::resolved_read_denies(run.compiled),
   });
 }
 
@@ -372,16 +376,19 @@ pub fn is_pending() -> bool {
 /// beneath it and, back here, tells the supervisor its user code starts).
 /// Never an error: an observer that can't be applied is said once, and the
 /// run goes on.
-pub fn apply_observer(module_files: Vec<PathBuf>) {
+pub fn apply_observer(module_files: Vec<PathBuf>, listed_dirs: Vec<PathBuf>) {
   let Some(pending) = PENDING.get() else {
     return;
   };
+  // the folders enforce would let the run list, as it hands them over
+  let listed_dirs =
+    super::enforce::handable_listed_dirs(listed_dirs, &pending.read_denies);
   if observer_applied() {
     return;
   }
   #[cfg(target_os = "macos")]
   {
-    let applied = apply_seatbelt_report(pending, module_files);
+    let applied = apply_seatbelt_report(pending, module_files, listed_dirs);
     let (observer, tag, since) = match applied {
       Ok((tag, since)) => (Observer::SeatbeltReport, Some(tag), Some(since)),
       Err(why) => {
@@ -425,6 +432,7 @@ pub fn apply_observer(module_files: Vec<PathBuf>) {
     }
     let mut plan = pending.plan.clone();
     plan.module_files = module_files;
+    plan.listed_dirs = listed_dirs;
     // silent, as on macOS: the shared caches (an enforced run keeps its own
     // in the overlay) and what this process reads that an enforced run
     // never opens
@@ -460,7 +468,7 @@ pub fn apply_observer(module_files: Vec<PathBuf>) {
   }
   #[cfg(not(any(target_os = "macos", target_os = "linux")))]
   {
-    let _ = (pending, module_files);
+    let _ = (pending, module_files, listed_dirs);
   }
 }
 
@@ -479,6 +487,7 @@ kill "$L" 2>/dev/null"#;
 fn apply_seatbelt_report(
   pending: &Pending,
   module_files: Vec<PathBuf>,
+  listed_dirs: Vec<PathBuf>,
 ) -> Result<(String, u64), String> {
   use std::io::BufRead;
   if deno_sandbox::macos::is_sandboxed() != Some(false) {
@@ -491,6 +500,7 @@ fn apply_seatbelt_report(
   }
   let mut plan = pending.plan.clone();
   plan.module_files = module_files;
+  plan.listed_dirs = listed_dirs;
   let macos = super::enforce::macos_plan_with_modules(&plan)?;
   let now = std::time::SystemTime::now()
     .duration_since(std::time::UNIX_EPOCH)

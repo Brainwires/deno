@@ -399,7 +399,14 @@ impl Tracer {
     match self.real_path(c.tid, dirfd, &path, follow, Name::Object) {
       Some(real) => {
         if reads {
-          self.report(c.tid, self.policy.read_event(&real), "open");
+          // a folder opened to list it needs only Landlock's READ_DIR,
+          // which the folders the module graph listed have
+          let event = if std::fs::metadata(&real).is_ok_and(|m| m.is_dir()) {
+            self.policy.list_event(&real)
+          } else {
+            self.policy.read_event(&real)
+          };
+          self.report(c.tid, event, "open");
         }
         if writes {
           self.report(c.tid, self.policy.write_event(&real, runtime), "open");

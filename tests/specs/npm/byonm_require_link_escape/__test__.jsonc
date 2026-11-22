@@ -70,15 +70,17 @@
       // The main module through a link (lib -> outside) resolves to its real
       // path (DENEXT.md item 395), so it runs exactly as naming
       // outside/mod.cjs does: the main module needs no read grant, and
-      // --deny-read=outside refuses both or neither.
+      // --deny-read=outside refuses both or neither. (Where `auto` would
+      // enforce, a main module inside a deny leaves the kernel sandbox off
+      // with a one-line notice.)
       "if": "unix",
       "args": "run --deny-read=outside lib/mod.cjs",
-      "output": "outside/mod.cjs ran\n"
+      "output": "[WILDCARD]outside/mod.cjs ran\n"
     },
     {
       "if": "unix",
       "args": "run --deny-read=outside outside/mod.cjs",
-      "output": "outside/mod.cjs ran\n"
+      "output": "[WILDCARD]outside/mod.cjs ran\n"
     }
   ]
 }

@@ -971,6 +971,18 @@ pub fn check_run(
   };
   let mut ctx = ctx;
   ctx.deny_ceiling = ceiling;
+  // the node_modules folders the project's linked packages resolve to, as
+  // both images find them (never one inside a read deny)
+  if let Some(node_modules) = &ctx.node_modules {
+    let denies: Vec<PathBuf> = [&options.deny_read, &options.ignore_read]
+      .into_iter()
+      .flatten()
+      .flatten()
+      .map(|p| ctx.cwd.join(p))
+      .collect();
+    ctx.linked_node_modules =
+      deno_lib::kernel_apply::linked_node_modules(node_modules, &denies);
+  }
   // an `enforce` `auto` chose doesn't scrub the environment (D5): only an
   // explicit (or the harness's forced) enforce / broker does
   ctx.requested = resolution.requested;

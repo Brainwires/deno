@@ -399,7 +399,7 @@
         "os": [
           "linux"
         ],
-        "reason": "to fix: a node_modules folder outside the project's (other/node_modules, read through a computed require) is exempt from Deno's read checks but not in the kernel's implicit set (PermissionDenied), and a main module inside a --deny-read refuses to start; the template-import listing this entry first named is handed over now (listed_dirs)"
+        "reason": "by design: the forced mode is an explicit enforce, which refuses a main module inside a --deny-read (the --deny-read=outside lib/mod.cjs steps); an auto-chosen enforce runs it with Deno's checks only and a notice, and the stage-r4 bed passes the whole spec (the linked packages' node_modules folders are in the implicit set, template-import folders are handed over)"
       },
       "specs::npm::byonm_run_npm::not_in_deps": {
         "os": [

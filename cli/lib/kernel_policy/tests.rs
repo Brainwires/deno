@@ -1381,6 +1381,7 @@ fn implicit_set_follows_the_grant() {
       deno_dir: Some(PathBuf::from("/home/me/.cache/deno")),
       config_files: vec![PathBuf::from("/project/deno.json")],
       node_modules: Some(PathBuf::from("/project/node_modules")),
+      linked_node_modules: vec![PathBuf::from("/packages/ui/node_modules")],
       vendor_dir: Some(PathBuf::from("/project/vendor")),
       link_dirs: vec![PathBuf::from("/linked")],
       audit_file: Some(PathBuf::from("/project/audit.jsonl")),
@@ -1412,6 +1413,17 @@ fn implicit_set_follows_the_grant() {
   assert!(has(&full, "/home/me/.cache/deno/npm"));
   assert!(has(&full, "/project/deno.json"));
   assert!(has(&full, "/project/node_modules"));
+  // a node_modules folder a linked package resolves to is read and mapped
+  // as the project's own is
+  assert!(
+    full
+      .entries
+      .iter()
+      .any(|e| e.path == Path::new("/packages/ui/node_modules")
+        && e.need == ImplicitNeed::NodeModules
+        && e.access == ImplicitAccess::ReadMap)
+  );
+  assert!(!has(&none, "/packages/ui/node_modules"));
   // a compiled program reads no DENO_DIR caches
   let compiled = ImplicitSet::build(
     &PermissionsOptions::default(),
