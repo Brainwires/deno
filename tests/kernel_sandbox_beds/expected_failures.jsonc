@@ -399,7 +399,7 @@
         "os": [
           "linux"
         ],
-        "reason": "to fix (item 425 hand-over): the confined image's static graph differs from the first image's (a linked or typed remote module); P5 second pass"
+        "reason": "to fix: a node_modules folder outside the project's (other/node_modules, read through a computed require) is exempt from Deno's read checks but not in the kernel's implicit set (PermissionDenied), and a main module inside a --deny-read refuses to start; the template-import listing this entry first named is handed over now (listed_dirs)"
       },
       "specs::npm::byonm_run_npm::not_in_deps": {
         "os": [

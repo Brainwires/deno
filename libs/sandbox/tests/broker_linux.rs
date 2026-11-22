@@ -318,6 +318,7 @@ mod linux {
       expanded_write: expanded(&out, &deny),
       entries: Vec::new(),
       member_configs: Vec::new(),
+      listed_dirs: Vec::new(),
     };
     let policy = FsPolicy {
       read: None,

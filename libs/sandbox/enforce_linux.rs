@@ -234,6 +234,24 @@ fn add_path_rule(
 /// A read rule on a regular file only (a module file): anything else at
 /// that path gets nothing.
 fn add_file_read_rule(ruleset: &OwnedFd, path: &Path) -> Result<(), String> {
+  add_rule_on_kind(ruleset, path, libc::S_IFREG, ACCESS_FS_READ_FILE)
+}
+
+/// A listing rule on a folder only (a folder the module graph listed to
+/// expand a template import): its entries can be listed, no file read.
+/// Anything else at that path gets nothing.
+fn add_dir_list_rule(ruleset: &OwnedFd, path: &Path) -> Result<(), String> {
+  add_rule_on_kind(ruleset, path, libc::S_IFDIR, ACCESS_FS_READ_DIR)
+}
+
+/// A rule granting `access` on the object at `path` when it is of `kind`
+/// (`S_IFREG`, `S_IFDIR`); nothing when it is gone or of another kind.
+fn add_rule_on_kind(
+  ruleset: &OwnedFd,
+  path: &Path,
+  kind: libc::mode_t,
+  access: u64,
+) -> Result<(), String> {
   let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
     return Ok(());
   };
@@ -249,12 +267,12 @@ fn add_file_read_rule(ruleset: &OwnedFd, path: &Path) -> Result<(), String> {
   let mut st: libc::stat = unsafe { std::mem::zeroed() };
   // SAFETY: a valid descriptor and out parameter
   if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0
-    || st.st_mode & libc::S_IFMT != libc::S_IFREG
+    || st.st_mode & libc::S_IFMT != kind
   {
     return Ok(());
   }
   let attr = PathBeneathAttr {
-    allowed_access: ACCESS_FS_READ_FILE,
+    allowed_access: access,
     parent_fd: fd.as_raw_fd(),
   };
   // SAFETY: a valid ruleset fd and attribute
@@ -425,12 +443,13 @@ fn add_port_rule(
 
 /// Builds the Landlock ruleset for `plan` at `abi`, plus a read rule on
 /// each regular file in `module_files` and on each `expanded` entry (no
-/// symlinks in its resolution); `None` when the plan handles nothing
-/// Landlock holds.
+/// symlinks in its resolution), and a listing rule on each folder in
+/// `listed_dirs`; `None` when the plan handles nothing Landlock holds.
 pub fn build_ruleset(
   plan: &LinuxPlan,
   abi: u32,
   module_files: &[std::path::PathBuf],
+  listed_dirs: &[std::path::PathBuf],
   expanded: &[std::path::PathBuf],
   expanded_write: &[std::path::PathBuf],
 ) -> Result<Option<OwnedFd>, String> {
@@ -486,6 +505,13 @@ pub fn build_ruleset(
     for file in module_files {
       add_file_read_rule(&ruleset, file)?;
     }
+  }
+  if fs & ACCESS_FS_READ_DIR != 0 {
+    for dir in listed_dirs {
+      add_dir_list_rule(&ruleset, dir)?;
+    }
+  }
+  if fs & ACCESS_FS_READ_FILE != 0 {
     for entry in expanded {
       add_expanded_rule(&ruleset, entry, READ_RIGHTS & fs)?;
     }
@@ -1038,6 +1064,7 @@ pub fn apply_self_variant(
       linux,
       abi,
       &plan.module_files,
+      &plan.listed_dirs,
       &plan.expanded,
       &plan.expanded_write,
     )?,
@@ -1590,8 +1617,10 @@ mod tests {
       expanded_write: Vec::new(),
       entries: Vec::new(),
       member_configs: Vec::new(),
+      listed_dirs: vec!["/w/lib".into()],
     };
     assert_eq!(plan.without_measured_lists().module_files.len(), 0);
+    assert_eq!(plan.without_measured_lists().listed_dirs.len(), 0);
     let bytes = plan.to_bytes().unwrap();
     assert_eq!(EnforcePlan::from_bytes(&bytes).unwrap(), plan);
     assert!(plan.keeps_env("PATH"));
@@ -2019,6 +2048,106 @@ mod tests {
     unsafe { libc::close(listener) };
   }
 
+  // A folder the module graph listed (a template import's expansion) can be
+  // listed under the plan, and nothing more: no file in it can be read, a
+  // folder the plan doesn't name can't be listed, and a listed path that
+  // isn't a folder grants nothing. (Landlock's rights cover the hierarchy
+  // beneath a rule: a subfolder of a listed folder lists too, and still
+  // reads no file.)
+  #[test]
+  fn listed_dirs_list_and_read_nothing() {
+    let Ok(abi) = landlock_abi() else {
+      return; // a kernel without Landlock can't measure this
+    };
+    let root = std::env::temp_dir()
+      .join(format!("deno-sandbox-listed-dirs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("listed/sub")).unwrap();
+    std::fs::create_dir_all(root.join("other")).unwrap();
+    std::fs::write(root.join("listed/mod.js"), "export {};\n").unwrap();
+    std::fs::write(root.join("other/mod.js"), "export {};\n").unwrap();
+    let plan = LinuxPlan {
+      handled: Handled {
+        read: true,
+        write: false,
+        exec: false,
+      },
+      rules: Vec::new(),
+      ..linux(SeccompPlan::default(), NetPlan::Open)
+    };
+    let ruleset = build_ruleset(
+      &plan,
+      abi,
+      &[],
+      &[root.join("listed"), root.join("other/mod.js")],
+      &[],
+      &[],
+    )
+    .unwrap()
+    .expect("a read-handling plan builds a ruleset");
+    let c =
+      |p: &str| CString::new(root.join(p).as_os_str().as_bytes()).unwrap();
+    let (listed, sub, file, other, other_file) = (
+      c("listed"),
+      c("listed/sub"),
+      c("listed/mod.js"),
+      c("other"),
+      c("other/mod.js"),
+    );
+    // SAFETY: fork; the child runs only raw syscalls and _exit
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0);
+    if pid == 0 {
+      // SAFETY: the child's only thread, then _exit
+      unsafe {
+        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+          || libc::syscall(
+            SYS_LANDLOCK_RESTRICT_SELF,
+            ruleset.as_raw_fd(),
+            0u32,
+          ) != 0
+        {
+          libc::_exit(2);
+        }
+        let opens = |path: &CString, flags: i32| {
+          let fd = libc::open(path.as_ptr(), flags | libc::O_CLOEXEC);
+          if fd >= 0 {
+            libc::close(fd);
+          }
+          fd >= 0
+        };
+        let dir = libc::O_RDONLY | libc::O_DIRECTORY;
+        let code = if !opens(&listed, dir) {
+          3
+        } else if !opens(&sub, dir) {
+          4
+        } else if opens(&file, libc::O_RDONLY) {
+          5
+        } else if opens(&other, dir) {
+          6
+        } else if opens(&other_file, libc::O_RDONLY) {
+          7
+        } else {
+          0
+        };
+        libc::_exit(code);
+      }
+    }
+    let mut status = 0;
+    // SAFETY: waiting for the child just forked
+    unsafe { libc::waitpid(pid, &mut status, 0) };
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(libc::WIFEXITED(status));
+    match libc::WEXITSTATUS(status) {
+      // a host that can't restrict itself can't measure this
+      2 => {}
+      code => assert_eq!(
+        code, 0,
+        "3/4: the listed folder (or its subfolder) didn't list; 5: a file in it read; 6: an unlisted folder listed; 7: a listed file path read"
+      ),
+    }
+  }
+
   #[test]
   fn sealed_memfd_hand_over() {
     let plan = EnforcePlan {
@@ -2036,6 +2165,7 @@ mod tests {
       expanded_write: Vec::new(),
       entries: Vec::new(),
       member_configs: Vec::new(),
+      listed_dirs: Vec::new(),
     };
     let fd = seal_plan(&plan.to_bytes().unwrap()).unwrap();
     // sealed: no more writes
