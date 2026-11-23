@@ -2537,9 +2537,12 @@ fn laufey_archive_name(backend: &str, target: &str) -> String {
   } else {
     "tar.gz"
   };
-  // The `raw` backend ships under the `winit` archive name upstream.
+  // The `raw` backend ships under the `winit` archive name upstream; `gpui`
+  // (denext's native tree host, laufey API 61) as `laufey-gpui-*`, from a
+  // Brainwires/laufey release.
   let archive_backend = match backend {
     "raw" => "winit",
+    "gpui" => "gpui",
     other => other,
   };
   format!("laufey-{archive_backend}-{target}.{ext}")
@@ -2728,6 +2731,8 @@ fn locate_backend_binary(
       let stem = match backend {
         "cef" => "laufey",
         "raw" => "laufey_winit",
+        // A plain executable like laufey_winit, on macOS too.
+        "gpui" => "laufey_gpui",
         _ => "laufey_webview",
       };
       let exe = if is_windows {
@@ -2743,10 +2748,11 @@ fn locate_backend_binary(
 
 /// Find the backend's `.app` bundle inside an extracted archive directory.
 ///
-/// The raw backend (`laufey_winit`) ships as a bare binary, not a bundle, so
-/// the first call for it wraps the binary in a minimal `laufey_winit.app`
-/// (see [`create_winit_app_bundle`]). Errors creating that bundle are
-/// returned rather than reported as "not found".
+/// The raw backend (`laufey_winit`) and the gpui backend (`laufey_gpui`)
+/// ship as bare binaries, not bundles, so the first call for one wraps the
+/// binary in a minimal `<stem>.app` (see [`create_bare_host_app_bundle`]).
+/// Errors creating that bundle are returned rather than reported as "not
+/// found".
 fn locate_app_bundle(
   dir: &Path,
   backend: &str,
@@ -2754,49 +2760,62 @@ fn locate_app_bundle(
   let name = match backend {
     "cef" => "laufey.app",
     "raw" => "laufey_winit.app",
+    "gpui" => "laufey_gpui.app",
     _ => "laufey_webview.app",
   };
   let p = dir.join(name);
   if p.exists() {
     return Ok(Some(p));
   }
-  if backend == "raw" && dir.join("laufey_winit").is_file() {
-    create_winit_app_bundle(dir, &p)?;
+  let bare = match backend {
+    "raw" => Some("laufey_winit"),
+    "gpui" => Some("laufey_gpui"),
+    _ => None,
+  };
+  if let Some(stem) = bare
+    && dir.join(stem).is_file()
+  {
+    create_bare_host_app_bundle(dir, &p, stem)?;
     return Ok(Some(p));
   }
   Ok(None)
 }
 
-/// Wrap the bare `laufey_winit` binary in `dir` in a minimal `.app` at
-/// `bundle`. The packaging step only needs `CFBundleExecutable` from it: it
-/// copies the bundle as the app shell and writes its own Info.plist.
+/// Wrap the bare host binary `stem` (`laufey_winit`, `laufey_gpui`) in `dir`
+/// in a minimal `.app` at `bundle`. The packaging step only needs
+/// `CFBundleExecutable` from it: it copies the bundle as the app shell and
+/// writes its own Info.plist.
 ///
 /// `dir` is the shared backend cache, so the bundle is assembled in a sibling
 /// tempdir and renamed into place. A concurrent `deno desktop` never sees a
 /// half-written bundle, and if one wins the rename, its bundle is used.
-fn create_winit_app_bundle(dir: &Path, bundle: &Path) -> Result<(), AnyError> {
-  const INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+fn create_bare_host_app_bundle(
+  dir: &Path,
+  bundle: &Path,
+  stem: &str,
+) -> Result<(), AnyError> {
+  let info_plist = format!(
+    r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>CFBundleExecutable</key><string>laufey_winit</string></dict></plist>
-"#;
+<plist version="1.0"><dict><key>CFBundleExecutable</key><string>{stem}</string></dict></plist>
+"#
+  );
   let staging = tempfile::Builder::new()
-    .prefix(".staging-laufey_winit.app-")
+    .prefix(&format!(".staging-{stem}.app-"))
     .tempdir_in(dir)
     .with_context(|| format!("failed to stage tempdir in {}", dir.display()))?;
   let macos_dir = staging.path().join("Contents/MacOS");
   std::fs::create_dir_all(&macos_dir)
     .with_context(|| format!("failed to create {}", macos_dir.display()))?;
-  let binary = dir.join("laufey_winit");
-  std::fs::copy(&binary, macos_dir.join("laufey_winit")).with_context(
-    || {
-      format!(
-        "failed to copy {} into the laufey_winit.app bundle",
-        binary.display()
-      )
-    },
-  )?;
-  std::fs::write(staging.path().join("Contents/Info.plist"), INFO_PLIST)
-    .context("failed to write the laufey_winit.app Info.plist")?;
+  let binary = dir.join(stem);
+  std::fs::copy(&binary, macos_dir.join(stem)).with_context(|| {
+    format!(
+      "failed to copy {} into the {stem}.app bundle",
+      binary.display()
+    )
+  })?;
+  std::fs::write(staging.path().join("Contents/Info.plist"), info_plist)
+    .with_context(|| format!("failed to write the {stem}.app Info.plist"))?;
 
   let staging_path = staging.into_path();
   if let Err(e) = std::fs::rename(&staging_path, bundle) {
@@ -2805,7 +2824,7 @@ fn create_winit_app_bundle(dir: &Path, bundle: &Path) -> Result<(), AnyError> {
     // created the bundle, so use theirs.
     if !bundle.exists() {
       return Err(deno_core::anyhow::anyhow!(
-        "failed to rename the laufey_winit.app bundle into {}: {e}",
+        "failed to rename the {stem}.app bundle into {}: {e}",
         bundle.display()
       ));
     }
@@ -2852,6 +2871,14 @@ fn locate_dev_backend_binary(laufey: &Path, backend: &str) -> Option<PathBuf> {
       exe("target/release/laufey_winit"),
       exe("target/debug/laufey_winit"),
     ],
+    // `backends/gpui`, a laufey workspace member (or, built on its own, its
+    // own target directory).
+    "gpui" => vec![
+      exe("target/release/laufey_gpui"),
+      exe("target/debug/laufey_gpui"),
+      exe("backends/gpui/target/release/laufey_gpui"),
+      exe("backends/gpui/target/debug/laufey_gpui"),
+    ],
     _ => vec![
       laufey.join(
         "result-1/Applications/laufey_webview.app/Contents/MacOS/laufey_webview",
@@ -2874,7 +2901,8 @@ fn locate_dev_app_bundle(laufey: &Path, backend: &str) -> Option<PathBuf> {
       laufey.join("cef/build/Release/laufey.app"),
       laufey.join("cef/build/laufey.app"),
     ],
-    "raw" => return None,
+    // Bare binaries: the bundle is made from the binary when packaging.
+    "raw" | "gpui" => return None,
     _ => vec![
       laufey.join("result-1/Applications/laufey_webview.app"),
       laufey.join("result/Applications/laufey_webview.app"),
@@ -4115,8 +4143,10 @@ fn reject_backend_file_collision(
 /// - `raw` does the same as `cef` (laufey `find_colocated_runtime`,
 ///   `backend-winit-common/src/lib.rs`); its only `libruntime.dylib` lookup is
 ///   relative to the working directory, which is `/` under LaunchServices.
+/// - `gpui` is modelled on the winit host (`backends/gpui`) and finds its
+///   runtime the same way.
 fn macos_runtime_dylib_name(backend: &str, laufey_exe_stem: &str) -> String {
-  if backend == "cef" || backend == "raw" {
+  if backend == "cef" || backend == "raw" || backend == "gpui" {
     format!("{laufey_exe_stem}.dylib")
   } else {
     "libruntime.dylib".to_string()
@@ -5245,6 +5275,23 @@ const WINIT_RUNTIME_DEPS: &[(&str, &str)] = &[
   ("libxkbcommon-x11.so.0", "libxkbcommon-x11-0"),
 ];
 
+/// The GPUI (`gpui`) backend's runtime dependencies, in the same form: GPUI
+/// draws through Vulkan (blade), takes the keyboard from libxkbcommon on
+/// both Wayland and X11, talks to the display server over libxcb /
+/// libwayland-client, and finds and rasterizes fonts with fontconfig and
+/// FreeType. No GTK and no web engine: `laufey_gpui` has no tray, menus or
+/// dialogs. To be checked against the first `laufey_gpui` build's
+/// `DT_NEEDED` (and its `dlopen`s: the Vulkan loader is loaded at run time).
+const GPUI_RUNTIME_DEPS: &[(&str, &str)] = &[
+  ("libvulkan.so.1", "libvulkan1"),
+  ("libxkbcommon.so.0", "libxkbcommon0"),
+  ("libxkbcommon-x11.so.0", "libxkbcommon-x11-0"),
+  ("libxcb.so.1", "libxcb1"),
+  ("libwayland-client.so.0", "libwayland-client0"),
+  ("libfontconfig.so.1", "libfontconfig1"),
+  ("libfreetype.so.6", "libfreetype6"),
+];
+
 /// The runtime dependencies of the backend the app was built with (the
 /// `--backend` flag or `desktop.backend`, `webview` when neither is set):
 /// a `.deb` / `.rpm` declares those of the engine it ships, never CEF's for
@@ -5255,6 +5302,7 @@ fn linux_runtime_deps(
   match desktop_flags.backend.as_deref().unwrap_or("webview") {
     "cef" => CEF_RUNTIME_DEPS,
     "raw" => WINIT_RUNTIME_DEPS,
+    "gpui" => GPUI_RUNTIME_DEPS,
     _ => WEBVIEW_RUNTIME_DEPS,
   }
 }
@@ -8267,6 +8315,11 @@ mod tests {
       macos_runtime_dylib_name("raw", "laufey_winit"),
       "laufey_winit.dylib"
     );
+    // The gpui host finds its runtime as the winit host does.
+    assert_eq!(
+      macos_runtime_dylib_name("gpui", "laufey_gpui"),
+      "laufey_gpui.dylib"
+    );
   }
 
   // --- laufey_archive_name / laufey_release_url ---
@@ -8291,6 +8344,11 @@ mod tests {
     assert_eq!(
       laufey_archive_name("raw", "x86_64-unknown-linux-gnu"),
       "laufey-winit-x86_64-unknown-linux-gnu.tar.gz"
+    );
+    // `gpui` keeps its own name (a Brainwires/laufey release archive).
+    assert_eq!(
+      laufey_archive_name("gpui", "aarch64-apple-darwin"),
+      "laufey-gpui-aarch64-apple-darwin.tar.gz"
     );
   }
 
@@ -10071,6 +10129,66 @@ def456  other.zip
   }
 
   #[test]
+  fn locate_dev_backend_gpui_paths() {
+    // denext's gpui host (`backends/gpui`), a bare `laufey_gpui` like
+    // laufey_winit: in the laufey workspace's target directory, or in the
+    // crate's own when it was built on its own.
+    let tmp = tempfile::tempdir().unwrap();
+    assert!(locate_dev_backend_binary(tmp.path(), "gpui").is_none());
+    let own = tmp.path().join(format!(
+      "backends/gpui/target/debug/laufey_gpui{}",
+      std::env::consts::EXE_SUFFIX
+    ));
+    std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+    std::fs::write(&own, b"binary").unwrap();
+    assert_eq!(
+      locate_dev_backend_binary(tmp.path(), "gpui").as_deref(),
+      Some(own.as_path())
+    );
+    // The workspace build wins.
+    let workspace = tmp.path().join(format!(
+      "target/release/laufey_gpui{}",
+      std::env::consts::EXE_SUFFIX
+    ));
+    std::fs::create_dir_all(workspace.parent().unwrap()).unwrap();
+    std::fs::write(&workspace, b"binary").unwrap();
+    assert_eq!(
+      locate_dev_backend_binary(tmp.path(), "gpui").as_deref(),
+      Some(workspace.as_path())
+    );
+    assert!(locate_dev_app_bundle(tmp.path(), "gpui").is_none());
+  }
+
+  #[test]
+  fn locate_app_bundle_creates_gpui_bundle() {
+    // Like raw: the gpui host ships as a bare binary, wrapped on first use.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("gpui/aarch64-apple-darwin");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("laufey_gpui"), b"binary").unwrap();
+    let bundle = locate_app_bundle(&dir, "gpui")
+      .unwrap()
+      .expect("expected a synthetic .app bundle");
+    assert_eq!(bundle, dir.join("laufey_gpui.app"));
+    assert_eq!(
+      std::fs::read(bundle.join("Contents/MacOS/laufey_gpui")).unwrap(),
+      b"binary"
+    );
+    let plist =
+      std::fs::read_to_string(bundle.join("Contents/Info.plist")).unwrap();
+    assert!(
+      plist
+        .contains("<key>CFBundleExecutable</key><string>laufey_gpui</string>"),
+      "{plist}"
+    );
+    // And the archive's binary is found as laufey_gpui on every OS.
+    assert_eq!(
+      locate_backend_binary(&dir, "gpui", "aarch64-unknown-linux-gnu"),
+      Some(dir.join("laufey_gpui"))
+    );
+  }
+
+  #[test]
   fn locate_dev_app_bundle_skips_winit() {
     // winit don't ship as .app bundles. locate_dev_app_bundle
     // must short-circuit to None for those, never touching the
@@ -11168,6 +11286,12 @@ def456  other.zip
       ),
       (Some("cef"), "libnss3", "libnss3.so", None),
       (Some("raw"), "libxdo3", "libxdo.so.3", Some("libnss3")),
+      (
+        Some("gpui"),
+        "libvulkan1",
+        "libvulkan.so.1",
+        Some("libnss3"),
+      ),
     ];
     for (backend, deb_pkg, soname, absent) in cases {
       let mut flags = empty_desktop_flags();

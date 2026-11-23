@@ -5846,6 +5846,18 @@ fn desktop_backend_explicit() {
 }
 
 #[test]
+fn desktop_backend_gpui() {
+  // denext: the native tree host (laufey API 61).
+  let r =
+    flags_from_vec(svec!["deno", "desktop", "--backend", "gpui", "main.tsx"]);
+  let flags = r.unwrap();
+  let DenoSubcommand::Desktop(desktop) = flags.subcommand else {
+    panic!("expected desktop subcommand");
+  };
+  assert_eq!(desktop.backend.as_deref(), Some("gpui"));
+}
+
+#[test]
 fn desktop_exclude_unused_npm() {
   let r = flags_from_vec(svec!["deno", "desktop", "main.tsx"]);
   let DenoSubcommand::Desktop(desktop) = r.unwrap().subcommand else {
