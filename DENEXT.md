@@ -20018,6 +20018,28 @@ where the changes are discussed.
        `tools/denext/targeted_test_test.ts` (the dispatcher).
      - Node tests enabled: none, because this is CI only.
 
+493. **`fix(cli)`: a JSR package's `data:` and `blob:` modules may not import
+     non-JSR remote modules either** (port of denoland/deno#36463, as carried by
+     theende/ende 65a10a7ad1; `cli/module_loader.rs`). The loader refuses an
+     `http(s)` import from a JSR module unless it points at JSR, but it judged
+     that by the immediate referrer's URL alone. A JSR module could import a
+     `data:` or `blob:` module whose own imports then reached any remote URL,
+     sidestepping the rule. The loader now remembers, per loader, the inline
+     modules imported from JSR (and from such inline modules, so a chain of
+     them keeps the mark) and applies the same check to their imports.
+     Self-contained `data:` modules, inline modules from non-JSR code and
+     `import.meta.resolve` behave as before; a resolution-only call does not
+     mark anything.
+     - User-facing note: a JSR package that reached a non-JSR `http(s)` module
+       through a `data:` or `blob:` module now fails with "JSR packages cannot
+       import non-JSR remote modules", as a direct import does.
+     - Tests: `tests/specs/jsr/import_inline_url` (a `data:` hop, a `blob:` hop
+       and a chain of two `data:` modules blocked; benign static and dynamic
+       `data:` imports, non-JSR inline modules and a `data:` URL from
+       `import.meta.resolve` imported by non-JSR code still run), with the
+       `@denotest/import-inline-url` registry fixture.
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
