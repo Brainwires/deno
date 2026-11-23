@@ -251,11 +251,17 @@ pub enum RunKind {
 ///   namespace sandbox (or only the setuid helper) decides how far the
 ///   kernel sandbox can nest; on macOS a CEF app gets headless guarantees
 ///   only.
+/// - [`Engine::Gpui`]: no web engine. laufey's GPUI host draws the app's
+///   native tree itself (Metal on macOS, Vulkan on Linux), in the app's
+///   own process, with no helper process: its profile is the OS's
+///   toolkit, fonts and GPU, without a web engine's folders and helpers
+///   (`kernel_desktop::engine_paths`; DENEXT.md item 5NN).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Engine {
   Webview,
   Cef,
+  Gpui,
 }
 
 impl Engine {
@@ -263,14 +269,16 @@ impl Engine {
     match self {
       Self::Webview => "webview",
       Self::Cef => "cef",
+      Self::Gpui => "gpui",
     }
   }
 
   /// `deno desktop --backend` / deno.json `desktop.backend`: `cef` is
-  /// Chromium, everything else the OS web view.
+  /// Chromium, `gpui` the GPUI host, everything else the OS web view.
   pub fn from_backend(backend: Option<&str>) -> Self {
     match backend {
       Some("cef") => Self::Cef,
+      Some("gpui") => Self::Gpui,
       _ => Self::Webview,
     }
   }
@@ -1767,6 +1775,12 @@ mod tests {
     assert_eq!(Engine::from_backend(Some("cef")), Engine::Cef);
     assert_eq!(Engine::from_backend(Some("webview")), Engine::Webview);
     assert_eq!(Engine::from_backend(None), Engine::Webview);
+    // gpui gets its own engine (and its own profile); a backend this
+    // runtime doesn't name keeps the OS web view's profile, never none.
+    assert_eq!(Engine::from_backend(Some("gpui")), Engine::Gpui);
+    assert_eq!(Engine::Gpui.as_str(), "gpui");
+    assert_eq!(Engine::from_backend(Some("raw")), Engine::Webview);
+    assert_eq!(Engine::from_backend(Some("unknown")), Engine::Webview);
   }
 
   /// `auto_stage_matrix`'s denext.30 row: a policy only the broker can hold

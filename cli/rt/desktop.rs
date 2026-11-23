@@ -94,6 +94,7 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_window_order,
     op_desktop_pointer,
     op_desktop_window_capabilities,
+    op_desktop_native_tree_commit,
     op_desktop_tray_capabilities,
     op_desktop_window_level_code,
     op_desktop_speak,
@@ -890,6 +891,9 @@ pub const DESKTOP_JS: &str = r#"
   internals.defineEventHandler(BrowserWindowPrototype, "dragover");
   internals.defineEventHandler(BrowserWindowPrototype, "dragleave");
   internals.defineEventHandler(BrowserWindowPrototype, "drop");
+  // An event of the window's native tree (laufey API 61): the host's JSON
+  // text as the detail (Deno.desktop.nativeTree).
+  internals.defineEventHandler(BrowserWindowPrototype, "nativetree");
 
   // Window chrome (laufey API 38). Each returns whether this backend / OS
   // applied it (see Deno.desktop.windowCapabilities()).
@@ -974,6 +978,30 @@ pub const DESKTOP_JS: &str = r#"
     }
     return this[privateToolbarStyle](raw);
   };
+  // The window's native tree (laufey API 61, the gpui backend): a retained
+  // tree of native primitives the renderer mutates with "NTB1" batches.
+  // One object per window. commit() throws NotSupported where the backend
+  // has none (windowCapabilities().nativeTree is null), a TypeError for a
+  // malformed batch (nothing of it applied) and BadResource once the window
+  // is closed.
+  const nativeTrees = new WeakMap(); // window -> its nativeTree object
+  Object.defineProperty(BrowserWindowPrototype, "nativeTree", {
+    get() {
+      let tree = nativeTrees.get(this);
+      if (tree === undefined) {
+        const windowId = this.windowId;
+        tree = Object.freeze({
+          commit(batch) {
+            op_desktop_native_tree_commit(windowId, batch);
+          },
+        });
+        nativeTrees.set(this, tree);
+      }
+      return tree;
+    },
+    configurable: true,
+    enumerable: true,
+  });
   // Embedded web views (laufey API 58): a native child view of one window,
   // above its page at `bounds` (CSS pixels from the top-left of the page
   // viewport), showing an http(s) page with none of the app's bridge,
@@ -2998,6 +3026,16 @@ pub const DESKTOP_JS: &str = r#"
       configurable: true,
       enumerable: true,
     },
+    // This runtime knows the native tree (laufey API 61):
+    // BrowserWindow.nativeTree, its "nativetree" event and
+    // windowCapabilities().nativeTree. Whether this backend has one is
+    // windowCapabilities().nativeTree.
+    nativeTree: {
+      value: true,
+      writable: false,
+      configurable: true,
+      enumerable: true,
+    },
     // The app's own application menu, owned by no window (laufey API 56):
     // macOS shows it whenever the key window has no menu of its own and
     // with every window closed. Where a menu bar belongs to its window
@@ -4397,6 +4435,15 @@ pub const DESKTOP_JS: &str = r#"
             }
             break;
           }
+          case "nativeTree": {
+            // laufey API 61: the host's JSON text, parsed by the renderer.
+            const target = windows.get(ev.windowId);
+            if (!target) break;
+            target.dispatchEvent(
+              new CustomEvent("nativetree", { detail: ev.json }),
+            );
+            break;
+          }
           case "webView": {
             // laufey API 58: an event of an embedded web view, its detail
             // the backend's JSON; "closed" is the last one.
@@ -5146,6 +5193,29 @@ mod tests {
     ] {
       assert!(DESKTOP_JS.contains(api), "{api}");
     }
+  }
+
+  #[test]
+  fn desktop_js_installs_the_native_tree() {
+    // laufey API 61: the feature flag denext probes, read-only true.
+    assert!(DESKTOP_JS.contains("nativeTree: {\n      value: true,"));
+    // One nativeTree object per window, committing through the op.
+    assert!(DESKTOP_JS.contains(
+      "Object.defineProperty(BrowserWindowPrototype, \"nativeTree\", {"
+    ));
+    assert!(DESKTOP_JS.contains("const nativeTrees = new WeakMap();"));
+    assert!(
+      DESKTOP_JS.contains("op_desktop_native_tree_commit(windowId, batch);")
+    );
+    // The host's events reach the window's "nativetree" listeners as text.
+    assert!(DESKTOP_JS.contains("case \"nativeTree\": {"));
+    assert!(
+      DESKTOP_JS
+        .contains("new CustomEvent(\"nativetree\", { detail: ev.json })")
+    );
+    assert!(DESKTOP_JS.contains(
+      "internals.defineEventHandler(BrowserWindowPrototype, \"nativetree\")"
+    ));
   }
 
   #[test]

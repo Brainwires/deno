@@ -869,6 +869,27 @@ fn laufey_macos_hidden_mode(order_out: bool) -> laufey::MacosHiddenMode {
   }
 }
 
+/// `windowCapabilities().nativeTree` (laufey API 61): the batch format the
+/// backend's native tree takes, `None` where it has none (every backend but
+/// gpui, and every backend while the `native-tree` feature is off).
+#[cfg(feature = "native-tree")]
+fn native_tree_capability(
+  c: &laufey::WindowCapabilities,
+) -> Option<deno_runtime::ops::desktop::NativeTreeCapabilityInfo> {
+  c.native_tree().map(|tree| {
+    deno_runtime::ops::desktop::NativeTreeCapabilityInfo {
+      version: tree.version,
+    }
+  })
+}
+
+#[cfg(not(feature = "native-tree"))]
+fn native_tree_capability<T>(
+  _c: &T,
+) -> Option<deno_runtime::ops::desktop::NativeTreeCapabilityInfo> {
+  None
+}
+
 impl denort::desktop::DesktopApi for WefDesktopApi {
   fn create_window(
     &self,
@@ -1304,6 +1325,37 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       // The stacking order and the pointer (laufey API 60).
       window_order: c.z_order(),
       pointer: c.pointer_state(),
+      // The native tree (laufey API 61): the gpui backend's.
+      native_tree: native_tree_capability(&c),
+    }
+  }
+
+  fn native_tree_commit(
+    &self,
+    window_id: u32,
+    batch: &[u8],
+  ) -> Result<(), deno_runtime::ops::desktop::NativeTreeCommitError> {
+    #[cfg(feature = "native-tree")]
+    {
+      use deno_runtime::ops::desktop::NativeTreeCommitError;
+      laufey::NativeTree::commit(&laufey::Window::from_id(window_id), batch)
+        .map_err(|e| match e {
+          laufey::NativeTreeError::Unsupported => {
+            NativeTreeCommitError::Unsupported
+          }
+          laufey::NativeTreeError::Malformed => {
+            NativeTreeCommitError::Malformed
+          }
+          laufey::NativeTreeError::NoWindow => NativeTreeCommitError::NoWindow,
+          laufey::NativeTreeError::Other(code) => {
+            NativeTreeCommitError::Other(code)
+          }
+        })
+    }
+    #[cfg(not(feature = "native-tree"))]
+    {
+      let _ = (window_id, batch);
+      Err(deno_runtime::ops::desktop::NativeTreeCommitError::Unsupported)
     }
   }
 
@@ -3464,8 +3516,8 @@ fn prestart(engine: std::ffi::c_int) -> Result<(), i32> {
 /// The host's first call, at the top of its `main`: before it starts its
 /// web engine, a thread, or anything else (DENEXT.md item 489). The kernel
 /// sandbox of a packaged app is decided and applied here, in place.
-/// `engine` is the host's own engine (1: the OS web view, 2: CEF; anything
-/// else: not said). Returns 1 to go on starting the app, or 0 with
+/// `engine` is the host's own engine (1: the OS web view, 2: CEF, 3: GPUI;
+/// anything else: not said). Returns 1 to go on starting the app, or 0 with
 /// `*exit_code` set when the process must exit instead (the app refuses to
 /// start under its baked mode, or an update is being rolled back).
 ///
@@ -4759,6 +4811,22 @@ async fn run_desktop(
         laufey::on_title_bar_preferences_changed(move || {
           let _ = title_bar_tx.try_send(
             deno_runtime::ops::desktop::DesktopEvent::TitleBarPreferencesChanged,
+          );
+        });
+      }
+
+      // A window's native tree events (laufey API 61): BrowserWindow
+      // "nativetree". One handler for every window; the host calls it on
+      // its UI thread and coalesces scroll and pointer moves per frame.
+      #[cfg(feature = "native-tree")]
+      {
+        let tree_tx = event_tx.0.clone();
+        let _ = laufey::NativeTree::on_event(move |window_id, json| {
+          let _ = tree_tx.try_send(
+            deno_runtime::ops::desktop::DesktopEvent::NativeTree {
+              window_id,
+              json: json.to_string(),
+            },
           );
         });
       }

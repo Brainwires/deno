@@ -10,6 +10,7 @@
 //! | --- | --- | --- |
 //! | the OS web view | WKWebView: confined (its web content, network and GPU processes are XPC services outside the profile) | WebKitGTK: confined, when the host calls the runtime before it starts a thread |
 //! | CEF | **headless-only**: Chromium's helpers apply their own Seatbelt profile and macOS doesn't stack one | confined where Chromium's namespace sandbox works; **headless-only** where only its setuid helper would (`no_new_privs` disables it) |
+//! | GPUI (no web engine) | confined (Metal's shader compiler is an XPC service outside the profile) | confined, when the host calls the runtime before it starts a thread (`laufey_gpui` does) |
 //!
 //! Windows has no enforcer for desktop apps (`none`).
 //!
@@ -128,6 +129,9 @@ pub fn engine_nests(facts: &EngineFacts) -> Result<(), NotNested> {
       "CEF on macOS: Chromium's helper processes apply their own Seatbelt profile and macOS doesn't stack a second one, so the app's own process isn't confined",
     ),
     (TargetOs::Macos, Engine::Webview) => Ok(()),
+    // no web engine and no helper process: a Seatbelt profile holds every
+    // thread of the process at once
+    (TargetOs::Macos, Engine::Gpui) => Ok(()),
     (TargetOs::Linux, _) if !facts.single_threaded => not(
       DesktopSandbox::HeadlessOnly,
       "the app's host started its web engine before the runtime could confine the process (this host doesn't call the runtime first), and Linux confines only threads made afterwards",
@@ -165,6 +169,14 @@ pub fn packaged_guarantee(
     (TargetOs::Linux, Engine::Cef) => (
       DesktopSandbox::Kernel,
       "the app's process is confined in place where Chromium's namespace sandbox is available; on a machine with only its setuid helper (Ubuntu 23.10 and later by default) the app's own process is not confined (headless guarantees only)",
+    ),
+    (TargetOs::Macos, Engine::Gpui) => (
+      DesktopSandbox::Kernel,
+      "the app's process is confined in place (GPUI: no web engine); Metal's shader compiler is an XPC service outside the profile",
+    ),
+    (TargetOs::Linux, Engine::Gpui) => (
+      DesktopSandbox::Kernel,
+      "the app's process is confined in place (GPUI: no web engine) by a host that calls the runtime before it starts a thread",
     ),
     _ => (
       DesktopSandbox::None,
@@ -245,6 +257,20 @@ const LINUX_HELPER_DIRS: &[&str] = &[
 
 /// The engine's paths for `os` and `engine` (pure: nothing is checked for
 /// existence).
+///
+/// [`Engine::Gpui`] has no web engine. It keeps the OS toolkit's own reads
+/// (AppKit and CoreText on macOS; the display server, fonts and cursor
+/// themes on Linux) and the GPU, and drops what only a web engine needs:
+/// WebKit's and Chromium's data folders, the keychain (the GPUI host has no
+/// secure store), spelling dictionaries, GTK, dconf, GStreamer and
+/// PulseAudio, the sound devices, and the web engines' helper programs.
+/// What GPUI adds is narrow: on macOS, Metal's shader cache in the app's
+/// own folder of the per-user cache (`<user folder>/C/<app id>`), never the
+/// whole per-user folder the web view gets. On Linux, no shared shader
+/// cache (`~/.cache/mesa_shader_cache`, `~/.nv`) is writable: Mesa and
+/// NVIDIA then run without a disk cache (slower first frames, nothing
+/// else), rather than one app writing a cache every GPU client of the user
+/// loads.
 pub fn engine_paths(
   os: TargetOs,
   engine: Engine,
@@ -252,10 +278,13 @@ pub fn engine_paths(
 ) -> EnginePaths {
   let mut paths = EnginePaths::default();
   let abs = |p: &&str| PathBuf::from(*p);
+  // a web engine (WebKit, Chromium) rather than the GPUI host
+  let web = engine != Engine::Gpui;
   match os {
     TargetOs::Macos => {
       // system files AppKit, CoreText, ColorSync and WebKit read (the
-      // frameworks themselves are in the runtime's implicit set)
+      // frameworks themselves are in the runtime's implicit set); GPUI
+      // goes through the same AppKit and CoreText, so it reads them too
       paths.read.extend(
         [
           "/Library",
@@ -270,6 +299,8 @@ pub fn engine_paths(
       );
       if let Some(home) = &dirs.home {
         let library = home.join("Library");
+        // AppKit's preferences, fonts, keyboard layouts and input methods
+        // (IME), colors and key bindings, for every engine
         for name in [
           "Preferences",
           "Fonts",
@@ -277,55 +308,77 @@ pub fn engine_paths(
           "Input Methods",
           "Colors",
           "ColorSync",
-          "Spelling",
-          "Dictionaries",
           "KeyBindings",
         ] {
           paths.read.push(library.join(name));
         }
-        // the login keychain's file is read and written by the app's own
-        // process (the items stay protected by securityd)
-        paths.write.push(library.join("Keychains"));
+        if web {
+          // WebKit's spell checking
+          for name in ["Spelling", "Dictionaries"] {
+            paths.read.push(library.join(name));
+          }
+          // the login keychain's file is read and written by the app's own
+          // process (the items stay protected by securityd)
+          paths.write.push(library.join("Keychains"));
+        }
         if let Some(id) = &dirs.app_id {
-          paths.write.extend([
-            library.join("Caches").join(id),
-            library.join("WebKit").join(id),
-            library.join("HTTPStorages").join(id),
-            library
-              .join("HTTPStorages")
-              .join(format!("{id}.binarycookies")),
-            library.join("Cookies").join(format!("{id}.binarycookies")),
+          if web {
+            paths.write.extend([
+              library.join("Caches").join(id),
+              library.join("WebKit").join(id),
+              library.join("HTTPStorages").join(id),
+              library
+                .join("HTTPStorages")
+                .join(format!("{id}.binarycookies")),
+              library.join("Cookies").join(format!("{id}.binarycookies")),
+            ]);
+          }
+          // AppKit's window restoration, for every engine
+          paths.write.push(
             library
               .join("Saved Application State")
               .join(format!("{id}.savedState")),
-          ]);
+          );
         }
       }
-      paths.write.extend(dirs.user_folder.clone());
+      if web {
+        paths.write.extend(dirs.user_folder.clone());
+      } else if let (Some(user_folder), Some(id)) =
+        (&dirs.user_folder, &dirs.app_id)
+      {
+        // Metal's shader cache: `<DARWIN_USER_CACHE_DIR>/<bundle id>/
+        // com.apple.metal`, the app's own folder of the per-user cache (the
+        // packaged app's bundle id is its identifier). The temp folder is
+        // granted below like every engine's.
+        paths.write.push(user_folder.join("C").join(id));
+      }
     }
     TargetOs::Linux => {
       // toolkits, fonts, themes, GPU and device enumeration
       paths.read.extend(
-        [
-          "/usr",
-          "/etc",
-          "/sys",
-          "/proc",
-          "/run/udev",
-          "/run/dbus",
-          "/var/cache/fontconfig",
-          "/var/lib/dbus",
-          "/tmp/.X11-unix",
-          "/tmp/.ICE-unix",
-          "/dev/dma_heap",
-        ]
-        .iter()
-        .map(abs),
+        ["/usr", "/etc", "/sys", "/proc", "/var/cache/fontconfig"]
+          .iter()
+          .map(abs),
       );
+      // the X11 socket folder and DMA-BUF heaps (GPU buffers), for every
+      // engine
+      paths
+        .read
+        .extend(["/tmp/.X11-unix", "/dev/dma_heap"].iter().map(abs));
+      if web {
+        // udev's device database, the system bus, the session manager's
+        // ICE sockets (GTK, GStreamer, WebKit's helpers)
+        paths.read.extend(
+          ["/run/udev", "/run/dbus", "/var/lib/dbus", "/tmp/.ICE-unix"]
+            .iter()
+            .map(abs),
+        );
+      }
+      // the GPU (Mesa's DRM nodes, udmabuf, NVIDIA's nodes), for every
+      // engine
       paths.write.extend(
         [
           "/dev/dri",
-          "/dev/snd",
           "/dev/udmabuf",
           "/dev/nvidiactl",
           "/dev/nvidia0",
@@ -336,6 +389,11 @@ pub fn engine_paths(
         .iter()
         .map(abs),
       );
+      if web {
+        // sound (WebKit's and Chromium's media)
+        paths.write.push(PathBuf::from("/dev/snd"));
+      }
+      // the Wayland and session bus sockets
       paths.write.extend(dirs.runtime_dir.clone());
       paths.read.extend(dirs.xauthority.clone());
       if let Some(home) = &dirs.home {
@@ -345,37 +403,42 @@ pub fn engine_paths(
           .data_home
           .clone()
           .unwrap_or(home.join(".local").join("share"));
-        for name in [
-          "fontconfig",
-          "gtk-3.0",
-          "gtk-4.0",
-          "dconf",
-          "pulse",
-          "ibus",
-          "user-dirs.dirs",
-          "mimeapps.list",
-          "kdeglobals",
-        ] {
-          paths.read.push(config.join(name));
-        }
-        for name in ["fonts", "icons", "themes", "mime", "glib-2.0"] {
+        // fonts and cursor themes, for every engine
+        paths.read.push(config.join("fontconfig"));
+        for name in ["fonts", "icons"] {
           paths.read.push(data.join(name));
         }
-        for name in
-          [".fonts", ".fonts.conf", ".icons", ".themes", ".Xauthority"]
-        {
+        for name in [".fonts", ".fonts.conf", ".icons", ".Xauthority"] {
           paths.read.push(home.join(name));
         }
-        for name in [
-          "fontconfig",
-          "mesa_shader_cache",
-          "mesa_shader_cache_db",
-          "nvidia",
-          "gstreamer-1.0",
-        ] {
-          paths.write.push(cache.join(name));
+        paths.write.push(cache.join("fontconfig"));
+        if web {
+          for name in [
+            "gtk-3.0",
+            "gtk-4.0",
+            "dconf",
+            "pulse",
+            "ibus",
+            "user-dirs.dirs",
+            "mimeapps.list",
+            "kdeglobals",
+          ] {
+            paths.read.push(config.join(name));
+          }
+          for name in ["themes", "mime", "glib-2.0"] {
+            paths.read.push(data.join(name));
+          }
+          paths.read.push(home.join(".themes"));
+          for name in [
+            "mesa_shader_cache",
+            "mesa_shader_cache_db",
+            "nvidia",
+            "gstreamer-1.0",
+          ] {
+            paths.write.push(cache.join(name));
+          }
+          paths.write.push(home.join(".nv"));
         }
-        paths.write.push(home.join(".nv"));
         if engine == Engine::Cef {
           // Chromium's certificate database
           paths.write.push(home.join(".pki"));
@@ -387,12 +450,16 @@ pub fn engine_paths(
         // rule on /proc/self names this process's entry alone)
         paths.write.push(PathBuf::from("/proc"));
       }
-      for base in LINUX_LIBEXEC_BASES {
-        for helper in LINUX_HELPER_DIRS {
-          paths.exec.push(Path::new(base).join(helper));
+      if web {
+        for base in LINUX_LIBEXEC_BASES {
+          for helper in LINUX_HELPER_DIRS {
+            paths.exec.push(Path::new(base).join(helper));
+          }
         }
       }
-      // CEF's helper processes are the executable itself, started again
+      // CEF's helper processes are the executable itself, started again;
+      // every engine's app starts itself again for its workers, sidecars
+      // and the updater's helper
       paths.exec.extend(dirs.install.clone());
     }
     _ => return paths,
@@ -521,6 +588,10 @@ pub fn desktop_grant(
 pub fn standing_residuals(os: TargetOs, engine: Engine) -> Vec<String> {
   let mut out = Vec::new();
   match os {
+    TargetOs::Macos if engine == Engine::Gpui => {
+      out.push("GPU: Metal's shader compiler is an XPC service outside the app's profile, and the GPU (IOKit) is not narrowed".to_string());
+      out.push("mach services, sysctl reads and signals are not narrowed (AppKit and Metal use them)".to_string());
+    }
     TargetOs::Macos => {
       out.push("web engine: WebKit's web content, network and GPU processes are XPC services outside the app's profile; native code can drive the web view to fetch what the web view may reach".to_string());
       out.push("mach services, sysctl reads and signals are not narrowed (AppKit and WebKit use them)".to_string());
@@ -971,6 +1042,167 @@ mod tests {
       engine_paths(TargetOs::Windows, Engine::Cef, &d),
       EnginePaths::default()
     );
+  }
+
+  /// The gpui host (DENEXT.md item 5NN) gets its own profile: confined on
+  /// both OSes, with the toolkit, fonts and GPU, none of a web engine's
+  /// folders or helpers, and Metal's shader cache only in the app's own
+  /// folder of the per-user cache. It is a strict subset of the web
+  /// view's.
+  #[test]
+  fn gpui_gets_its_own_profile() {
+    use TargetOs::*;
+    let p = |s: &str| PathBuf::from(s);
+    // the engine table and what a package is told
+    assert_eq!(engine_nests(&facts(Macos, Engine::Gpui)), Ok(()));
+    assert_eq!(engine_nests(&facts(Linux, Engine::Gpui)), Ok(()));
+    assert_eq!(
+      engine_nests(&EngineFacts {
+        single_threaded: false,
+        ..facts(Linux, Engine::Gpui)
+      })
+      .unwrap_err()
+      .sandbox,
+      DesktopSandbox::HeadlessOnly
+    );
+    assert_eq!(
+      engine_nests(&facts(Windows, Engine::Gpui))
+        .unwrap_err()
+        .sandbox,
+      DesktopSandbox::None
+    );
+    for os in [Macos, Linux] {
+      let (sandbox, line) = packaged_guarantee(os, Engine::Gpui);
+      assert_eq!(sandbox, DesktopSandbox::Kernel, "{os:?}");
+      assert!(line.contains("GPUI"), "{line}");
+    }
+    assert!(
+      standing_residuals(Macos, Engine::Gpui)
+        .iter()
+        .all(|r| !r.contains("WebKit"))
+    );
+
+    // macOS
+    let d = EngineDirs {
+      home: Some("/Users/u".into()),
+      app_id: Some("com.acme.app".into()),
+      data: Some("/Users/u/Library/Application Support/com.acme.app".into()),
+      cache: Some("/Users/u/Library/Caches/com.acme.app".into()),
+      temp: Some("/private/var/folders/ab/cd/T".into()),
+      user_folder: Some("/private/var/folders/ab/cd".into()),
+      install: Some("/Applications/Acme.app".into()),
+      ..Default::default()
+    };
+    let gpui = engine_paths(Macos, Engine::Gpui, &d);
+    for read in [
+      "/Library",
+      "/Users/u/Library/Fonts",
+      "/Users/u/Library/Input Methods",
+      "/Applications/Acme.app",
+    ] {
+      assert!(gpui.read.contains(&p(read)), "{read}");
+    }
+    for write in [
+      // Metal's shader cache, in the app's own folder only
+      "/private/var/folders/ab/cd/C/com.acme.app",
+      "/private/var/folders/ab/cd/T",
+      "/Users/u/Library/Saved Application State/com.acme.app.savedState",
+      "/Users/u/Library/Application Support/com.acme.app",
+    ] {
+      assert!(gpui.write.contains(&p(write)), "{write}");
+    }
+    for absent in [
+      // never the whole per-user folder, nor its shared cache
+      "/private/var/folders/ab/cd",
+      "/private/var/folders/ab/cd/C",
+      "/Users/u/Library/Keychains",
+      "/Users/u/Library/WebKit/com.acme.app",
+      "/Users/u/Library/HTTPStorages/com.acme.app",
+    ] {
+      assert!(!gpui.write.contains(&p(absent)), "{absent}");
+    }
+    assert!(!gpui.read.contains(&p("/Users/u/Library/Spelling")));
+    assert!(gpui.exec.is_empty());
+    // without an identifier there is no Metal cache folder to name
+    let anonymous = engine_paths(
+      Macos,
+      Engine::Gpui,
+      &EngineDirs {
+        app_id: None,
+        ..d.clone()
+      },
+    );
+    assert!(
+      !anonymous
+        .write
+        .iter()
+        .any(|w| w.starts_with("/private/var/folders/ab/cd/C"))
+    );
+
+    // Linux
+    let gpui = engine_paths(Linux, Engine::Gpui, &dirs());
+    for read in [
+      "/usr",
+      "/sys",
+      "/tmp/.X11-unix",
+      "/home/u/.config/fontconfig",
+      "/home/u/.local/share/fonts",
+      "/home/u/.icons",
+      "/run/user/1000/xauth",
+    ] {
+      assert!(gpui.read.contains(&p(read)), "{read}");
+    }
+    for write in [
+      "/dev/dri",
+      "/dev/nvidiactl",
+      "/run/user/1000",
+      "/home/u/.cache/fontconfig",
+      "/home/u/.cache/com.acme.app",
+    ] {
+      assert!(gpui.write.contains(&p(write)), "{write}");
+    }
+    for absent in [
+      "/dev/snd",
+      "/proc",
+      "/home/u/.cache/mesa_shader_cache",
+      "/home/u/.cache/gstreamer-1.0",
+      "/home/u/.nv",
+      "/home/u/.pki",
+    ] {
+      assert!(!gpui.write.contains(&p(absent)), "{absent}");
+    }
+    for absent in [
+      "/run/dbus",
+      "/home/u/.config/gtk-3.0",
+      "/home/u/.config/dconf",
+    ] {
+      assert!(!gpui.read.contains(&p(absent)), "{absent}");
+    }
+    // no web engine helpers; the app may still start itself again
+    assert_eq!(gpui.exec, vec![p("/opt/acme")]);
+
+    // strictly narrower than the web view's, on both OSes
+    for (os, d) in [(Macos, d.clone()), (Linux, dirs())] {
+      let web = engine_paths(os, Engine::Webview, &d);
+      let gpui = engine_paths(os, Engine::Gpui, &d);
+      let covered = |path: &PathBuf, list: &[PathBuf]| {
+        list.iter().any(|w| path.starts_with(w))
+      };
+      for path in &gpui.read {
+        assert!(covered(path, &web.read), "{os:?} read {path:?}");
+      }
+      for path in &gpui.write {
+        assert!(covered(path, &web.write), "{os:?} write {path:?}");
+      }
+      for path in &gpui.exec {
+        assert!(covered(path, &web.exec), "{os:?} exec {path:?}");
+      }
+      assert!(
+        gpui.read.len() + gpui.write.len() + gpui.exec.len()
+          < web.read.len() + web.write.len() + web.exec.len(),
+        "{os:?}"
+      );
+    }
   }
 
   fn grant(read: &[&str]) -> PermissionsOptions {

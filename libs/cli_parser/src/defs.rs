@@ -3361,7 +3361,7 @@ pub static DESKTOP_SUBCOMMAND: CommandDef = CommandDef {
       .long("backend")
       .action(ArgAction::Set)
       .num_args(NumArgs::Exact(1))
-      .value_parser(ValueParser::Choices(&["webview", "cef", "raw"]))
+      .value_parser(ValueParser::Choices(&["webview", "cef", "raw", "gpui"]))
 .help("Backend to use for the desktop app"),
     ArgDef::new("engine")
       .long("engine")
