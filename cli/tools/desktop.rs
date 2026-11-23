@@ -11271,7 +11271,7 @@ def456  other.zip
     let app_dir = fake_linux_app_dir(tmp.path(), "MyApp");
     // (backend, a Debian package it needs, a soname its .rpm requires, a
     // package it must not name; None: CEF, which must not name WebKitGTK)
-    let cases: [(Option<&str>, &str, &str, Option<&str>); 4] = [
+    let cases: [(Option<&str>, &str, &str, Option<&str>); 5] = [
       (
         None,
         "libwebkit2gtk-4.1-0",
