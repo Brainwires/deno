@@ -2,6 +2,7 @@ native read outside the deny: ok
 native read of the deny: refused
 native create in the deny: refused
 native create elsewhere: ok
+hint: a child process exited with code 1 inside the kernel sandbox; children inherit the file and network rules, so it may have been refused something (see --kernel-sandbox-report); grant the child's access to this program, or turn it off for the run with --kernel-sandbox=off, or in deno.json with "permissions": { "kernelSandbox": "off" }
 child read of the deny: refused
 child read elsewhere: ok
 native socket: ok

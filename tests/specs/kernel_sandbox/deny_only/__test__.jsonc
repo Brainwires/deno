@@ -13,7 +13,8 @@
   },
   "tests": {
     // -A --deny-read: native code and a child are refused the denied folder
-    // and nothing else
+    // and nothing else (the refused child's exit gets the run's one child
+    // hint, as any child the kernel refuses does)
     "allow_all_deny_mac": {
       "if": "kernelSandboxEnforceMac",
       "args": "run --quiet -A --deny-read=secret --deny-write=secret ceiling.ts",
