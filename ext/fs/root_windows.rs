@@ -623,10 +623,12 @@ impl Root {
     if options.read || !(options.write || options.append) {
       access |= FILE_GENERIC_READ;
     }
-    if options.write {
-      access |= FILE_GENERIC_WRITE;
-    } else if options.append {
+    // append wins over write, as std's `OpenOptions` has it: without
+    // `FILE_WRITE_DATA` every write lands at the end of the file
+    if options.append {
       access |= FILE_GENERIC_WRITE & !FILE_WRITE_DATA;
+    } else if options.write {
+      access |= FILE_GENERIC_WRITE;
     }
     let disposition = if options.create_new {
       FILE_CREATE
@@ -639,7 +641,11 @@ impl Root {
     // itself would lose its data before it is refused
     let handle = self.open_final(p, access, disposition, 0, false)?;
     let file = std::fs::File::from(handle);
-    if options.truncate && !options.create_new && options.write {
+    if options.truncate
+      && !options.create_new
+      && options.write
+      && !options.append
+    {
       file.set_len(0)?;
     }
     Ok(file)
@@ -891,6 +897,32 @@ mod tests {
     let mut f = b.root.open(&b.p(rel, OpenAccessKind::Write), &opts)?;
     f.write_all(data.as_bytes())?;
     Ok(())
+  }
+
+  /// `Deno.Root.writeFile(…, { append: true })` passes write and append
+  /// together: the bytes go to the end, never over the start.
+  #[test]
+  fn append_with_write_appends() {
+    use std::io::Write;
+    let b = bed();
+    write(&b, "a.txt", "hello").unwrap();
+    let opts = OpenOptions {
+      read: false,
+      write: true,
+      create: true,
+      truncate: false,
+      append: true,
+      create_new: false,
+      custom_flags: None,
+      mode: None,
+    };
+    let mut f = b
+      .root
+      .open(&b.p("a.txt", OpenAccessKind::Write), &opts)
+      .unwrap();
+    f.write_all(b" world").unwrap();
+    drop(f);
+    assert_eq!(read(&b, "a.txt").unwrap(), "hello world");
   }
 
   #[test]
