@@ -256,7 +256,7 @@ Deno.test("fakeVideoRtpTimestampsAdvanceAt90kHz", async () => {
     await new Promise((resolve) => setTimeout(resolve, 2000));
     const second = await source();
     const rate =
-      ((second.rtpTimestamp - first.rtpTimestamp + 0xffffffff) % 0xffffffff) /
+      ((second.rtpTimestamp - first.rtpTimestamp + 2 ** 32) % 2 ** 32) /
       (second.timestamp - first.timestamp) * 1000;
     assert(
       Math.abs(rate - 90000) <= 9000,

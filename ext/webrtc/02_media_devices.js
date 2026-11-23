@@ -26,6 +26,7 @@ const {
   ArrayPrototypeMap,
   ArrayPrototypePush,
   ArrayPrototypeSlice,
+  MathFloor,
   MathMax,
   MathMin,
   NumberIsFinite,
@@ -55,6 +56,7 @@ const { defineEventHandler, EventTarget } = core.loadExtScript(
 const { clearInterval, setInterval, unrefTimer } = core.loadExtScript(
   "ext:deno_web/02_timers.js",
 );
+const { performance } = core.loadExtScript("ext:deno_web/15_performance.js");
 const webrtc = core.loadExtScript("ext:deno_webrtc/01_webrtc.js");
 const { MediaStream, MediaStreamTrack } = webrtc;
 const {
@@ -411,10 +413,17 @@ function trackInfo(track) {
   return WeakMapPrototypeGet(trackSettings, track);
 }
 
+// The most frames one tick writes to catch up with the capture clock (half a
+// second of media); a longer stall drops the rest, as a camera drops frames.
+const MAX_CATCH_UP_MS = 500;
+
 // A capture source: what a getUserMedia() call's track (and its clones)
 // share. While some peer connection sends one of its tracks, it writes a
 // frame of its clip to each such sender every frame interval; with none it
-// stops, so an unused track costs nothing.
+// stops, so an unused track costs nothing. The frames follow the capture
+// clock, not the timer: a tick that comes late (a busy or slow host
+// stretches an interval) writes every frame that fell due since the last
+// one, so the media's RTP clock keeps pace with real time.
 function createSource(device) {
   const source = {
     tracks: new SafeSet(),
@@ -423,6 +432,10 @@ function createSource(device) {
     device: null,
   };
   let timer = null;
+  let frameMs = 0;
+  // the capture clock: when the source started, and the frames written since
+  let started = 0;
+  let written = 0;
   const stop = () => {
     if (timer !== null) {
       clearInterval(timer);
@@ -430,6 +443,17 @@ function createSource(device) {
     }
   };
   const tick = () => {
+    const due = MathFloor((performance.now() - started) / frameMs) - written;
+    if (due <= 0) return;
+    const cap = MathMax(1, MathFloor(MAX_CATCH_UP_MS / frameMs));
+    // a stall longer than the cap: those frames are dropped
+    written += due;
+    for (let i = 0; i < MathMin(due, cap); ++i) {
+      if (!writeFrame()) return;
+    }
+  };
+  // One frame to each fed sender; false once the source has stopped.
+  const writeFrame = () => {
     // Senders of closed connections are gone for good.
     SetPrototypeForEach(source.senders, (sender) => {
       if (sender[_pc][_state].closed) {
@@ -438,7 +462,7 @@ function createSource(device) {
     });
     if (source.senders.size === 0 || source.tracks.size === 0) {
       stop();
-      return;
+      return false;
     }
     eachFedSender(source, (pc, key, sender) => {
       const track = firstLiveTrack(source);
@@ -456,6 +480,7 @@ function createSource(device) {
         return false;
       }
     });
+    return true;
   };
   source.device = {
     capabilities: () => capabilitiesOf(device),
@@ -496,8 +521,10 @@ function createSource(device) {
     ended: stop,
     attached: () => {
       if (timer !== null) return;
-      const ms = device.trackKind === "audio" ? 20 : 1000 / 30;
-      timer = setInterval(tick, ms);
+      frameMs = device.trackKind === "audio" ? 20 : 1000 / 30;
+      started = performance.now();
+      written = 0;
+      timer = setInterval(tick, frameMs);
       unrefTimer(timer);
     },
   };
