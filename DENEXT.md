@@ -20018,7 +20018,7 @@ where the changes are discussed.
        `tools/denext/targeted_test_test.ts` (the dispatcher).
      - Node tests enabled: none, because this is CI only.
 
-493. **`fix(cli)`: a JSR package's `data:` and `blob:` modules may not import
+5NN. **`fix(cli)`: a JSR package's `data:` and `blob:` modules may not import
      non-JSR remote modules either** (port of denoland/deno#36463, as carried by
      theende/ende 65a10a7ad1; `cli/module_loader.rs`). The loader refuses an
      `http(s)` import from a JSR module unless it points at JSR, but it judged
@@ -20040,7 +20040,7 @@ where the changes are discussed.
        `@denotest/import-inline-url` registry fixture.
      - Node tests enabled: none; no Node API changes.
 
-494. **`fix(deps)`: RUSTSEC-2023-0071 — rsa 0.10, the constant-time
+5NN. **`fix(deps)`: RUSTSEC-2023-0071 — rsa 0.10, the constant-time
      rewrite** (`Cargo.toml`, `Cargo.lock`, `.cargo/audit.toml`, `ext/crypto`,
      `ext/node_crypto`). rsa 0.9's private-key arithmetic (num-bigint-dig) was
      not constant-time, so the timing of RSA decryption and signing could leak
@@ -20096,7 +20096,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491) are what the prebuilt
+449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 5NN) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
