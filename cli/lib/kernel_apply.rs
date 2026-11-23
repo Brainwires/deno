@@ -1196,19 +1196,25 @@ pub fn start_compiled(
       ),
     ));
   }
-  let Some(mut plan) = plan else {
+  let Some(plan) = plan else {
     if auto {
       return Ok(fall_back("no plan for this OS".to_string()));
     }
     return Err(refuse(mode, "no plan for this OS"));
   };
+  // Only the supervising broker's platforms fill in its network rules; elsewhere the plan stays
+  // as built (a `mut` binding would be unused there, which clippy -D warnings refuses on Windows).
   #[cfg(any(target_os = "linux", target_os = "macos"))]
-  crate::kernel_supervise::fill_broker_net(
-    &mut plan,
-    &compiled,
-    options,
-    ctx.inspector_port,
-  );
+  let plan = {
+    let mut plan = plan;
+    crate::kernel_supervise::fill_broker_net(
+      &mut plan,
+      &compiled,
+      options,
+      ctx.inspector_port,
+    );
+    plan
+  };
   let mut layers = kernel_inherit::inherited_layers().to_vec();
   layers.push(kernel_inherit::layer_for(
     options,
