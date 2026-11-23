@@ -467,7 +467,9 @@ fn strip_verbatim(path: Vec<u16>) -> PathBuf {
 }
 
 impl Root {
-  pub fn open_dir(path: &CheckedPathBuf) -> FsResult<Self> {
+  /// `_requested` (the path as the caller gave it) is the Unix root's
+  /// alias for absolute links inside it; no link is followed here.
+  pub fn open_dir(path: &CheckedPathBuf, _requested: &Path) -> FsResult<Self> {
     let checked = path.as_checked_path();
     let file = std::fs::OpenOptions::new()
       .access_mode(
@@ -835,7 +837,8 @@ mod tests {
     std::fs::create_dir(&outside).unwrap();
     std::fs::write(outside.join("secret.txt"), "outside").unwrap();
     let root =
-      Root::open_dir(&CheckedPathBuf::unsafe_new(root_dir.clone())).unwrap();
+      Root::open_dir(&CheckedPathBuf::unsafe_new(root_dir.clone()), &root_dir)
+        .unwrap();
     Bed {
       _tmp: tmp,
       root_dir,

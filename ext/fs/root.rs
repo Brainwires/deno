@@ -229,7 +229,9 @@ fn root_open(
     Some(api_name),
   )?;
   let checked = checked.as_owned();
-  Ok((PathBuf::from(path), imp::Root::open_dir(&checked)?))
+  let given = PathBuf::from(path);
+  let root = imp::Root::open_dir(&checked, &given)?;
+  Ok((given, root))
 }
 
 fn add_root(
@@ -278,10 +280,12 @@ pub async fn op_fs_root_open_async(
       Some("Deno.openRoot()"),
     )?
     .as_owned();
-  let root = spawn_blocking(move || imp::Root::open_dir(&checked))
+  let given = PathBuf::from(path);
+  let requested = given.clone();
+  let root = spawn_blocking(move || imp::Root::open_dir(&checked, &requested))
     .await
     .map_err(|e| FsOpsErrorKind::Other(JsErrorBox::from_err(e)).into_box())??;
-  Ok(add_root(&mut state.borrow_mut(), PathBuf::from(path), root))
+  Ok(add_root(&mut state.borrow_mut(), given, root))
 }
 
 /// Runs `f` on the blocking pool (an open may wait: a FIFO).
@@ -929,11 +933,13 @@ mod unix {
     /// The directory's real path when it was opened: the spelling every
     /// path in the root's scope is given in.
     path: PathBuf,
-    /// The path it was opened by, made absolute, where that differs (a
-    /// symlink on the way, macOS's `/var` for `/private/var`): an absolute
-    /// symlink inside the root that names it the old way still resolves
-    /// beneath the root.
-    alias: Option<PathBuf>,
+    /// The other spellings of it, where they differ: the path the caller
+    /// opened it by, made absolute, and the path the permission check
+    /// returned (canonicalized when a scope is checked). A symlink on the way
+    /// (macOS's `/var` for `/private/var`) makes them differ, and an
+    /// absolute symlink inside the root that names the root the way the
+    /// caller did still resolves beneath it. Each opens through `fd` only.
+    aliases: Vec<PathBuf>,
     fd: Arc<OwnedFd>,
   }
 
@@ -963,7 +969,7 @@ mod unix {
       clippy::disallowed_methods,
       reason = "the root's own directory, after its permission check"
     )]
-    pub fn open_dir(path: &CheckedPathBuf) -> FsResult<Self> {
+    pub fn open_dir(path: &CheckedPathBuf, requested: &Path) -> FsResult<Self> {
       let checked = path.as_checked_path();
       // the root itself: as the check granted it (race-safely when the
       // grant is scoped), links on the way followed, as Go's `OpenRoot`
@@ -981,16 +987,25 @@ mod unix {
         }
       };
       let fd = OwnedFd::from(file);
-      let given = std::path::absolute(&*checked)?;
+      // the permission check hands back the path canonicalized when it
+      // checks a scope (`/private/var/…`), so the caller's own spelling
+      // (`/var/…`, from `Deno.makeTempDir()`) is kept beside it
+      let checked = std::path::absolute(&*checked)?;
+      let requested = std::path::absolute(requested)?;
       let path = match opened_path(fd.as_fd()) {
         OpenedPath::At(path) => path,
         // no `/proc`: the path as checked, made absolute
-        _ => given.clone(),
+        _ => checked.clone(),
       };
-      let alias = (given != path).then_some(given);
+      let mut aliases = Vec::new();
+      for alias in [requested, checked] {
+        if alias != path && !aliases.contains(&alias) {
+          aliases.push(alias);
+        }
+      }
       Ok(Self {
         path,
-        alias,
+        aliases,
         fd: Arc::new(fd),
       })
     }
@@ -1017,7 +1032,7 @@ mod unix {
         rel.push(&c);
       }
       let mut paths = vec![self.path.clone()];
-      paths.extend(self.alias.clone());
+      paths.extend(self.aliases.iter().cloned());
       let scope = OpenScope::with_open_root(
         paths,
         self.fd.clone(),
@@ -1136,6 +1151,62 @@ mod unix {
     pub fn read_link(&self, p: &Prepared) -> FsResult<PathBuf> {
       crate::scoped::read_link(&p.scope, &p.abs)
         .map_err(|e| map_scope_err(e, p, &self.path))
+    }
+  }
+
+  #[cfg(test)]
+  mod tests {
+    use std::io::Read;
+    use std::sync::Arc;
+
+    use deno_permissions::CheckedPathBuf;
+    use deno_permissions::OpenAccessKind;
+    use deno_permissions::PermissionsContainer;
+    use deno_permissions::RuntimePermissionDescriptorParser;
+
+    use super::Root;
+    use crate::OpenOptions;
+
+    fn read(root: &Root, name: &str) -> Result<String, String> {
+      let perms = PermissionsContainer::allow_all(Arc::new(
+        RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys),
+      ));
+      let p = root
+        .prepare(&perms, vec![name.into()], OpenAccessKind::Read, "test")
+        .map_err(|e| e.to_string())?;
+      let mut file = root
+        .open(&p, &OpenOptions::read())
+        .map_err(|e| e.to_string())?;
+      let mut text = String::new();
+      file.read_to_string(&mut text).unwrap();
+      Ok(text)
+    }
+
+    /// The permission check hands back a canonicalized path when it checks
+    /// a scope; an absolute link inside the root that names the root the
+    /// way the caller opened it (through a link: macOS's `/var`) still
+    /// resolves beneath it, and one that leaves it is still refused.
+    #[test]
+    fn an_absolute_link_by_the_callers_spelling_stays_inside() {
+      let tmp = tempfile::tempdir().unwrap();
+      let real = tmp.path().join("real");
+      std::fs::create_dir(&real).unwrap();
+      std::fs::write(real.join("f.txt"), "inside").unwrap();
+      std::fs::write(tmp.path().join("secret.txt"), "outside").unwrap();
+      let link = tmp.path().join("link");
+      std::os::unix::fs::symlink(&real, &link).unwrap();
+      std::os::unix::fs::symlink(link.join("f.txt"), real.join("abs")).unwrap();
+      std::os::unix::fs::symlink(
+        link.join("..").join("secret.txt"),
+        real.join("out"),
+      )
+      .unwrap();
+      let canonical = std::fs::canonicalize(&real).unwrap();
+      let root =
+        Root::open_dir(&CheckedPathBuf::unsafe_new(canonical), &link).unwrap();
+      assert_eq!(read(&root, "f.txt").unwrap(), "inside");
+      assert_eq!(read(&root, "abs").unwrap(), "inside");
+      assert!(read(&root, "out").is_err());
     }
   }
 }
