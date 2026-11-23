@@ -69,7 +69,7 @@ fn rsasve_decapsulate(
   }
   let precision = key.n_bits_precision();
   let c = BoxedUint::from_be_slice(ciphertext, precision).ok()?;
-  if &c >= key.n().as_ref() {
+  if c >= key.n().as_ref() {
     return None;
   }
   let z =

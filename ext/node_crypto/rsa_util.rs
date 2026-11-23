@@ -194,10 +194,10 @@ pub(crate) fn pkcs1_private_key_document(
 /// A PKCS#1 `RSAPublicKey` wrapped in an `rsaEncryption`
 /// SubjectPublicKeyInfo, as pkcs1 0.7's `Document::from_pkcs1_der` gave it.
 pub(crate) fn pkcs1_public_key_document(der: &[u8]) -> spki::Result<Document> {
-  Ok(Document::try_from(SubjectPublicKeyInfoRef {
+  Document::try_from(SubjectPublicKeyInfoRef {
     algorithm: RSA_ALGORITHM_ID,
     subject_public_key: der::asn1::BitStringRef::from_bytes(der)?,
-  })?)
+  })
 }
 
 /// rsa 0.9's check of a key's AlgorithmIdentifier: `rsaEncryption` with NULL
