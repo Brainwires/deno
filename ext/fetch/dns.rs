@@ -13,9 +13,6 @@ use std::vec;
 
 use deno_permissions::PermissionCheckError;
 use deno_permissions::PermissionsContainer;
-
-use crate::deny_addresses::AddressDeniedError;
-use crate::deny_addresses::AddressDenyList;
 use http::Uri;
 use http::uri::Scheme;
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -25,6 +22,9 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tower::Service;
+
+use crate::deny_addresses::AddressDeniedError;
+use crate::deny_addresses::AddressDenyList;
 
 #[derive(Clone, Debug)]
 pub struct Resolver {

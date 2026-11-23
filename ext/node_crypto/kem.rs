@@ -17,12 +17,11 @@ use rsa::hazmat::rsa_decrypt_and_check;
 use rsa::hazmat::rsa_encrypt;
 use rsa::traits::PublicKeyParts as _;
 
-use crate::rsa_util::uint_to_be_bytes_padded;
-
 use crate::keys::AsymmetricPrivateKey;
 use crate::keys::AsymmetricPublicKey;
 use crate::keys::KeyObjectHandle;
 use crate::pqc::PqcError;
+use crate::rsa_util::uint_to_be_bytes_padded;
 
 #[derive(ToV8)]
 pub struct Encapsulated {

@@ -63,14 +63,13 @@ use deno_io::fs::FsError;
 use deno_permissions::OpenAccessKind;
 use deno_permissions::PermissionsContainer;
 
+#[cfg(unix)]
+use self::unix as imp;
 use crate::OpenOptions;
 use crate::interface::FsDirEntry;
 use crate::ops::FsOpsError;
 use crate::ops::FsOpsErrorKind;
 use crate::ops::SerializableStat;
-
-#[cfg(unix)]
-use self::unix as imp;
 #[cfg(windows)]
 use crate::root_windows as imp;
 
