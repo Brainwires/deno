@@ -469,7 +469,11 @@ async function clippy() {
       )
       .filter((feature) =>
         !feature.endsWith("/quickjs") &&
-        !feature.startsWith("deno_v8/v8_enable_")
+        !feature.startsWith("deno_v8/v8_enable_") &&
+        // denort_desktop/native-tree needs laufey API 61, which the pinned laufey
+        // rev does not have yet (cli/rt_desktop/Cargo.toml's TODO(gpui/b1));
+        // lint it again once the pin moves.
+        feature !== "denort_desktop/native-tree"
       )
       .sort();
 
