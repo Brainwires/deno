@@ -324,11 +324,16 @@ pub fn refuses_read(path: &Path) -> bool {
     )
   }
   // (sandbox_check answers non-zero for a path that doesn't exist, sandbox
-  // or not; metadata stays readable under the cli profile)
+  // or not, so the path must be there: its metadata reads under the cli
+  // profile, while a deny ceiling's `(deny file-read* …)` refuses that too,
+  // with Seatbelt's `EPERM`, which a missing path never gives)
   #[cfg(target_os = "macos")]
   {
-    std::fs::symlink_metadata(path).is_ok()
-      && crate::macos::refuses_read(path) == Some(true)
+    let present = match std::fs::symlink_metadata(path) {
+      Ok(_) => true,
+      Err(err) => err.raw_os_error() == Some(libc::EPERM),
+    };
+    present && crate::macos::refuses_read(path) == Some(true)
   }
 }
 
