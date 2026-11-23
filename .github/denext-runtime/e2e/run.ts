@@ -33,6 +33,7 @@ import {
   path,
   rm,
   short,
+  unregisterBundles,
 } from "./lib/runner.ts";
 import { baselineKey, compareNa, type NaBaseline } from "./lib/na_baseline.ts";
 
@@ -174,6 +175,9 @@ for (const area of areas) {
       }
     }
   }
+  // macOS: drop the area's bundles from LaunchServices (registered when
+  // packaged, lib/runner.ts registerBundle) before deleting them.
+  await unregisterBundles();
   // Keep the disk in check: CEF apps are large.
   await rm(path(env.workDir, "build", area));
   const builds = await Array.fromAsync(Deno.readDir(path(env.workDir, "build")))
