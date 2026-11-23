@@ -21087,7 +21087,8 @@ where the changes are discussed.
      `cli/rt_desktop/lib.rs`, `cli/rt_desktop/Cargo.toml`,
      `runtime/js/99_main.js`, `cli/tsc/dts/lib.deno.desktop.d.ts`,
      `cli/tools/desktop.rs`, `libs/cli_parser/src/defs.rs`,
-     `cli/schemas/config-file.v1.json`). The B1 plan of thalora-web-browser
+     `cli/schemas/config-file.v1.json`, `cli/lib/kernel_sandbox.rs`,
+     `cli/lib/kernel_desktop.rs`, `cli/rt_desktop/kernel_start.rs`). The B1 plan of thalora-web-browser
      (`docs/B1_NATIVE_TREE.md` there): a window can host a retained tree of
      native primitives (View, Text, Image, ScrollView, TextInput, Pressable)
      that a renderer (denext's `denext/gpui`) mutates in batches, drawn by
@@ -21124,6 +21125,24 @@ where the changes are discussed.
        `.deb` / `.rpm` declares GPUI's own Linux libraries: Vulkan,
        xkbcommon, xcb, wayland-client, fontconfig and FreeType. These are to
        be checked against the first `laufey_gpui` build.
+     - The kernel sandbox (item 489) knows the engine: `Engine::Gpui`
+       (`desktop.backend: "gpui"` when packaged, or the host's
+       `laufey_runtime_prestart(3)`; no laufey host passes 3 for anything
+       else). It is confined on macOS and Linux (on Linux when the host calls
+       the runtime before it starts a thread, as `laufey_gpui` does), with a
+       profile of its own that is a strict subset of the web view's. It
+       keeps AppKit's / CoreText's reads, fonts, input methods, cursor
+       themes, the display server's sockets and the GPU device nodes. It
+       drops the web engines' data folders, the keychain, spelling,
+       GTK / dconf / GStreamer / PulseAudio, `/dev/snd` and the WebKitGTK
+       helpers; the app's own install stays executable for its
+       self-launches. Metal's shader cache is writable only in the app's own
+       folder of the per-user cache (`<DARWIN_USER_CACHE_DIR>/<app id>`), not
+       the whole per-user folder the web view gets. On Linux, no shared
+       shader cache (`~/.cache/mesa_shader_cache`, `~/.nv`) is writable, so
+       Mesa and NVIDIA run without a disk cache. An engine the runtime
+       doesn't know (another prestart value) still fails closed: the
+       package's baked engine, else the web view's profile, never none.
      - Until the laufey pin moves to a Brainwires/laufey rev with API 61
        (branch `feat/native-tree-gpui`), the laufey calls sit behind
        `denort_desktop`'s `native-tree` feature, which is off by default.
@@ -21143,7 +21162,10 @@ where the changes are discussed.
        `archive_name_raw_aliases_to_winit` and the Linux package dependency
        test in `cli/tools/desktop.rs`; `desktop_backend_gpui` in
        `libs/cli_parser`; the `desktop_ops_inert` spec (the op throws
-       `NotSupported` outside a desktop app) and `ops_test.ts`'s op count.
+       `NotSupported` outside a desktop app) and `ops_test.ts`'s op count;
+       `gpui_gets_its_own_profile` in `cli/lib/kernel_desktop.rs`, the gpui
+       and unknown-backend cases in `kernel_sandbox.rs`'s `Engine::from_backend`
+       test, `the_host_names_its_engine` in `kernel_start.rs`.
      - Node tests enabled: none.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,

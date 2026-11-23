@@ -3516,8 +3516,8 @@ fn prestart(engine: std::ffi::c_int) -> Result<(), i32> {
 /// The host's first call, at the top of its `main`: before it starts its
 /// web engine, a thread, or anything else (DENEXT.md item 489). The kernel
 /// sandbox of a packaged app is decided and applied here, in place.
-/// `engine` is the host's own engine (1: the OS web view, 2: CEF; anything
-/// else: not said). Returns 1 to go on starting the app, or 0 with
+/// `engine` is the host's own engine (1: the OS web view, 2: CEF, 3: GPUI;
+/// anything else: not said). Returns 1 to go on starting the app, or 0 with
 /// `*exit_code` set when the process must exit instead (the app refuses to
 /// start under its baked mode, or an update is being rolled back).
 ///

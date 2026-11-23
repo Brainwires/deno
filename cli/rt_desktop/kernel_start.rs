@@ -54,11 +54,21 @@ static HOST_ENGINE: OnceLock<Option<Engine>> = OnceLock::new();
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 /// The engine argument of `laufey_runtime_prestart`: 1 the OS web view, 2
-/// CEF, anything else unknown.
+/// CEF, 3 the GPUI host (laufey's `LAUFEY_ENGINE_*`), anything else
+/// unknown. An unknown engine (a newer host, or one that doesn't call the
+/// prestart) is never "no sandbox": [`startup`] takes the engine baked
+/// into the package, else the OS web view's profile.
+///
+/// 3 = gpui is confirmed by the fork's owner on the condition that no
+/// laufey host already passes 3: upstream littledivy/laufey has no
+/// `LAUFEY_ENGINE_*` at all, and Brainwires/laufey's `laufey.h` defines
+/// only WEBVIEW 1 and CEF 2 (the winit host doesn't call the prestart). The
+/// GPUI host must define `LAUFEY_ENGINE_GPUI 3` to match.
 pub fn host_engine(value: std::ffi::c_int) -> Option<Engine> {
   match value {
     1 => Some(Engine::Webview),
     2 => Some(Engine::Cef),
+    3 => Some(Engine::Gpui),
     _ => None,
   }
 }
@@ -343,7 +353,8 @@ mod tests {
   fn the_host_names_its_engine() {
     assert_eq!(host_engine(1), Some(Engine::Webview));
     assert_eq!(host_engine(2), Some(Engine::Cef));
-    for unknown in [0, 3, -1] {
+    assert_eq!(host_engine(3), Some(Engine::Gpui));
+    for unknown in [0, 4, -1] {
       assert_eq!(host_engine(unknown), None);
     }
   }
