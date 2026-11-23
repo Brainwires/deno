@@ -21,6 +21,15 @@ quickjs = ["deno_core/quickjs", "denort/quickjs", "v8/quickjs"]
 v8 = ["deno_core/v8", "denort/v8", "v8/v8"]
 # denext: crash reports carry `deno_panic`'s stack trace (release builds).
 panic-trace = ["deno_runtime/panic-trace", "denort/panic-trace"]
+# denext: the native tree (laufey API 61, the `gpui` backend):
+# `BrowserWindow.nativeTree.commit()` and its events reach laufey's
+# `NativeTree`. Off until the laufey pin below moves to a Brainwires/laufey
+# rev that has it (branch `feat/native-tree-gpui`); without it every backend
+# reports no native tree.
+# TODO(gpui/b1): bump the laufey rev to feat/native-tree-gpui once it is
+# pushed (API 61: also move lib.rs's `LAUFEY_API_VERSION == 60` guard to 61),
+# then make this unconditional (drop the feature and its cfgs).
+native-tree = []
 
 [build-dependencies]
 deno_runtime.workspace = true
