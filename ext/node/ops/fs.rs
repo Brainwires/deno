@@ -3932,7 +3932,6 @@ pub fn op_node_compile_cache_untrusted_dir(
 )]
 pub(crate) fn compile_cache_untrusted_dir(dir: &Path) -> Option<String> {
   use std::os::unix::fs::MetadataExt;
-  use std::os::unix::fs::OpenOptionsExt;
 
   // SAFETY: geteuid has no preconditions and cannot fail.
   let uid = unsafe { libc::geteuid() };
@@ -3980,21 +3979,8 @@ pub(crate) fn compile_cache_untrusted_dir(dir: &Path) -> Option<String> {
     Ok(canonical) => canonical,
     Err(err) => return Some(format!("'{}': {err}", dir.display())),
   };
-  // denext: on Linux an `O_PATH` descriptor is enough for `fstat` and needs
-  // no read access to the folder, so the walk works under the kernel
-  // sandbox, whose Landlock rules refuse opening a folder outside the read
-  // grant for reading (the ancestors of a granted cache folder usually are).
-  #[cfg(any(target_os = "linux", target_os = "android"))]
-  let walk_flags = libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_PATH;
-  #[cfg(not(any(target_os = "linux", target_os = "android")))]
-  let walk_flags = libc::O_NOFOLLOW | libc::O_DIRECTORY;
   for ancestor in canonical.ancestors() {
-    let metadata = match std::fs::OpenOptions::new()
-      .read(true)
-      .custom_flags(walk_flags)
-      .open(ancestor)
-      .and_then(|file| file.metadata())
-    {
+    let metadata = match canonical_ancestor_metadata(ancestor) {
       Ok(metadata) => metadata,
       Err(err) => return Some(format!("'{}': {err}", ancestor.display())),
     };
@@ -4029,6 +4015,46 @@ pub(crate) fn compile_cache_untrusted_dir(dir: &Path) -> Option<String> {
     return Some(format!("'{}' is writable by other users", dir.display()));
   }
   None
+}
+
+/// The metadata of a folder on the canonical path of a compile cache
+/// directory, which must be a folder and not a symlink (one swapped in since
+/// the path was canonicalized is refused).
+///
+/// denext: read without opening the folder for reading, so the walk works
+/// under the kernel sandbox, which refuses reading a folder outside the read
+/// grant (the ancestors of a granted cache folder usually are) but not its
+/// metadata. Linux: an `O_PATH | O_NOFOLLOW` descriptor (`fstat` needs no
+/// read access, and Landlock doesn't mediate it). Elsewhere (macOS, whose
+/// Seatbelt profile refuses `file-read-data` but allows
+/// `file-read-metadata`): `lstat`, the folder required.
+#[cfg(unix)]
+#[allow(
+  clippy::disallowed_methods,
+  reason = "requires real fs: see compile_cache_untrusted_dir"
+)]
+fn canonical_ancestor_metadata(
+  ancestor: &Path,
+) -> std::io::Result<std::fs::Metadata> {
+  #[cfg(any(target_os = "linux", target_os = "android"))]
+  {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+      .read(true)
+      .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_PATH)
+      .open(ancestor)
+      .and_then(|file| file.metadata())
+  }
+  #[cfg(not(any(target_os = "linux", target_os = "android")))]
+  {
+    let metadata = std::fs::symlink_metadata(ancestor)?;
+    if !metadata.is_dir() {
+      // what the `O_NOFOLLOW | O_DIRECTORY` open of a symlink or a file
+      // fails with
+      return Err(std::io::Error::from_raw_os_error(libc::ENOTDIR));
+    }
+    Ok(metadata)
+  }
 }
 
 /// Whether `gid` is the private group of the user `uid`: the user's primary
