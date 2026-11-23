@@ -20018,6 +20018,83 @@ where the changes are discussed.
        `tools/denext/targeted_test_test.ts` (the dispatcher).
      - Node tests enabled: none, because this is CI only.
 
+493. **`feat(fs)`: `Deno.openRoot`, a directory handle nothing in it can
+     escape** (`feat/d31-hardening`; runtime; `ext/fs/root.rs`,
+     `ext/fs/root_windows.rs`, `ext/fs/30_fs.js`, `ext/fs/{lib,ops,scoped}.rs`,
+     `runtime/permissions/{lib,checked_open}.rs`, `runtime/js/90_deno_ns.js`,
+     `cli/tsc/dts/lib.deno.ns.d.ts`). Go 1.24's `os.Root` for Deno:
+     `using root = await Deno.openRoot(dir)` (or `Deno.openRootSync`) returns a
+     `Deno.Root` with `open` / `create`, `readFile` / `readTextFile`,
+     `writeFile` / `writeTextFile`, `stat` / `lstat`, `mkdir`, `remove`,
+     `rename`, `readDir`, `symlink` and `readLink` (each with its `*Sync` twin),
+     `path`, `close()` and `[Symbol.dispose]`. Stable under `Deno`, as every API
+     the fork adds (item 259).
+     - **The rule.** A path given to a root is a string relative to it. An
+       absolute one (on Windows also `C:x`, `\x`, UNC) is refused; `..` is
+       resolved lexically before anything is opened and refused where it would
+       climb above the root (`a/../b` is `b`). The root's directory is held open
+       and never looked up by its name again: moving it, or replacing its path
+       with a link, changes nothing. Anything that would leave the root is
+       `Deno.errors.NotCapable` ("escapes from the root" before an open, "leads
+       outside the root or into a denied path" from one). The root itself can't
+       be removed or renamed through it.
+     - **Unix**: item 421's race-safe opens with the root's own descriptor as
+       the scope's only root (`OpenScope::with_open_root`), through
+       `ext/fs/scoped.rs` exactly as a scoped `Deno.open` goes (item 467).
+       Linux: `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` where the
+       kernel has it, else (and on macOS) the `O_NOFOLLOW` component walk; a
+       symlink is followed only when its target, checked as a new path, stays
+       beneath the root, and the walk restarts from the root's descriptor (the
+       root is known by its real path and by the path it was opened by, both on
+       that descriptor, so an absolute link spelled through macOS's `/var` still
+       resolves inside). A recursive `mkdir` creates each level in the scope
+       (never a by-name `is_dir`); a recursive `remove` never enters a link.
+     - **Windows**: each component is opened with `NtCreateFile` relative to the
+       previous component's handle with `FILE_OPEN_REPARSE_POINT`, so no
+       symlink, junction or mount point is ever followed: one on the way (or as
+       the target of an open or a `stat`) is refused. A truncating open opens
+       first and truncates after the reparse check; `remove` marks the handle it
+       opened for deletion (POSIX semantics where the file system has them), a
+       recursive one listing through the directory handle; `rename` is
+       `NtSetInformationFile(FileRenameInformation)` relative to the destination
+       folder's handle; `readDir` is `FileFullDirectoryInfo` on the handle.
+       `symlink` and `readLink` throw `NotSupported` there.
+     - **Permissions.** Opening a root checks read on its path (the root itself
+       is opened as `Deno.open` opens a checked path, links on the way
+       followed). Inside it: on Unix no further allow, but every op is held to
+       the read / write denies as they are at the op
+       (`PermissionsContainer::open_denies`; the object an open reaches is
+       checked, links followed); on Windows each op's path (the root's current
+       location joined with the components) is checked as `Deno.open` checks a
+       path, which is exact there because no link is followed. A write (an open
+       for writing, `writeFile`, `mkdir`, `remove`, `rename`, `symlink`) checks
+       write on the directory's current location (`F_GETPATH`, `/proc/self/fd`,
+       `GetFinalPathNameByHandleW`), so a root moved after it was opened writes
+       only where writing is allowed; a directory that has no path any more
+       refuses writes.
+     - Not covered: the files a `deno compile` program embeds (a root opens the
+       real file system); `..` is lexical, as the permission checks resolve it
+       (`link/../x` is `x`, not `x` beside the link's target); under
+       `--kernel-sandbox=broker` an op the kernel refuses is asked of the broker
+       by path (item 466), as for a scoped `Deno.open`; macOS's last step of
+       `lstat` is by name in the checked folder (item 467).
+     - Tests: unit `root_test.ts` (normal operation sync and async; `../x`,
+       `a/../../x`, absolute and Windows-prefixed paths refused for every op; a
+       rename in or out refused; links out, absolute and relative, refused for
+       reads, writes, `stat`, `readDir` and a recursive `mkdir`; `lstat` of the
+       link; a recursive remove leaving a link's target alone; a link that stays
+       inside followed (Unix) or refused (Windows); the root's path swapped for
+       a link out after the open; a worker swapping a folder for a link out
+       while the root reads through it, never reading outside; writes need
+       write, opening needs read; `close()` and the constructor); `root::tests`
+       (relative path resolution, Windows prefixes); `root_windows::tests`
+       (files, folders, rename, a recursive remove with a read-only file,
+       junctions out and inside never followed, the root's path swapped for a
+       junction).
+     - User-facing note: `Deno.openRoot(dir)` gives a handle whose paths can't
+       leave `dir`, for untrusted names (uploads, archive entries).
+     - Node tests enabled: none, because this is a Deno API.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -20028,8 +20105,8 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491) are what the prebuilt
-`libdenort` carries. The CLI-side parts (for example writing
+449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493) are what the
+prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.

@@ -6677,6 +6677,24 @@ impl PermissionsContainer {
     Some(scope)
   }
 
+  /// denext: the denies an access of `access_kind` is held to, as paths
+  /// (each scope as written and resolved): those of the read permission,
+  /// the write permission or both, as they are now. For an operation held to
+  /// a directory it opened itself (`Deno.openRoot`), whose allow is that
+  /// directory.
+  #[cfg(unix)]
+  pub fn open_denies(&self, access_kind: OpenAccessKind) -> Vec<PathBuf> {
+    let inner = self.inner.lock();
+    let mut denies = Vec::new();
+    if access_kind.is_read() {
+      denies.extend(inner.read.scope_paths().1);
+    }
+    if access_kind.is_write() {
+      denies.extend(inner.write.scope_paths().1);
+    }
+    denies
+  }
+
   /// The grant half of `check_open()`: the read / write allow and deny
   /// scopes, for the path as given and as resolved. The special-file check
   /// on the returned descriptor is the caller's.

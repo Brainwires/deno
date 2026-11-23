@@ -2,6 +2,9 @@
 
 mod interface;
 mod ops;
+mod root;
+#[cfg(windows)]
+mod root_windows;
 #[cfg(unix)]
 mod scoped;
 mod std_fs;
@@ -25,6 +28,7 @@ pub use crate::ops::check_fd_metadata_write;
 pub use crate::ops::check_metadata_write;
 pub use crate::ops::check_remove_link;
 use crate::ops::*;
+use crate::root::*;
 pub use crate::std_fs::RealFs;
 pub use crate::std_fs::open_options_for_checked_path;
 
@@ -104,6 +108,29 @@ deno_core::extension!(deno_fs,
     op_fs_futime_sync,
     op_fs_futime_async,
 
+    // denext: Deno.openRoot()
+    op_fs_root_open_sync,
+    op_fs_root_open_async,
+    op_fs_root_file_open_sync,
+    op_fs_root_file_open_async,
+    op_fs_root_read_file_sync,
+    op_fs_root_read_file_async,
+    op_fs_root_write_file_sync,
+    op_fs_root_write_file_async,
+    op_fs_root_stat_sync,
+    op_fs_root_stat_async,
+    op_fs_root_mkdir_sync,
+    op_fs_root_mkdir_async,
+    op_fs_root_remove_sync,
+    op_fs_root_remove_async,
+    op_fs_root_rename_sync,
+    op_fs_root_rename_async,
+    op_fs_root_read_dir_sync,
+    op_fs_root_read_dir_async,
+    op_fs_root_symlink_sync,
+    op_fs_root_symlink_async,
+    op_fs_root_read_link_sync,
+    op_fs_root_read_link_async,
   ],
   lazy_loaded_js = [ "30_fs.js" ],
   options = {

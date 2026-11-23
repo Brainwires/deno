@@ -125,6 +125,28 @@ impl OpenScope {
     })
   }
 
+  /// denext: a scope of one root whose directory is already open
+  /// (`Deno.openRoot`): `fd` is the directory, `paths` the absolute paths it
+  /// is known by (its location when it was opened, then other spellings of
+  /// it, such as the path it was opened by before `/var` resolved to
+  /// `/private/var`), each a root that opens through `fd`. The root is never
+  /// opened by a path again, so a directory moved, or swapped for a link,
+  /// after `fd` was opened doesn't move the scope: every open goes through
+  /// `fd`.
+  pub fn with_open_root(
+    paths: Vec<PathBuf>,
+    fd: Arc<OwnedFd>,
+    deny: Vec<PathBuf>,
+  ) -> io::Result<Self> {
+    let mut scope = Self::new(Some(paths), deny)?;
+    if let Some(roots) = &mut scope.roots {
+      for root in roots {
+        *root.fd.get_mut() = Some(fd.clone());
+      }
+    }
+    Ok(scope)
+  }
+
   /// A scope that allows nothing.
   pub fn nothing() -> Self {
     Self {
