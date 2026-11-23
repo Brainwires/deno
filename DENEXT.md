@@ -21475,6 +21475,21 @@ where the changes are discussed.
        plugin case Ende dropped).
      - Node tests enabled: none.
 
+5NN. **`fix(upgrade)`: `deno upgrade` refuses to overwrite a dpkg-installed
+     executable** (port of theende/ende bccc4c174e, MIT; issue
+     denoland/deno#37099, no upstream PR; `cli/tools/upgrade.rs`).
+     `sudo deno upgrade` on an apt-installed binary overwrote the packaged file,
+     so dpkg kept reporting the old version and apt offered the same "upgrade"
+     again. On Linux the running executable is looked up in the dpkg file lists
+     (`/var/lib/dpkg/info/*.list`, following symlinks for merged-/usr systems)
+     and, if a package owns it, the upgrade stops with a message naming the
+     package. `--output` still writes anywhere. denext's builds refuse
+     `deno upgrade` before this check, so it matters only for a build without
+     the denext marker.
+     - Tests: `upgrade.rs`'s `find_dpkg_owner_matches_listed_exe` and
+       `find_dpkg_owner_follows_symlinked_dirs`.
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
