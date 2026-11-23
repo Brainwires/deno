@@ -923,6 +923,30 @@ declare namespace Deno {
      * is taken as non-GET. See
      * {@linkcode Deno.desktop.navigationEvents}. */
     willnavigate: CustomEvent<WillNavigateDetail>;
+    /** **denext extension** (Brainwires/deno, not upstream Deno): an event
+     * of the window's native tree ({@linkcode BrowserWindow.nativeTree}).
+     * `detail` is the backend's JSON text, one object
+     * `{"node": id, "type": ...}` (`press`, `layout`, `scroll`, `changeText`,
+     * …), for the renderer to parse. Fires only on a backend with a native
+     * tree (`gpui`), for the nodes and event kinds the batches subscribed
+     * to. */
+    nativetree: CustomEvent<string>;
+  }
+
+  /** **denext extension** (Brainwires/deno, not upstream Deno): a window's
+   * native tree, a retained tree of native primitives (View, Text, Image,
+   * ScrollView, TextInput, Pressable) that a renderer mutates in batches,
+   * in place of a web page. Only the `gpui` backend has one
+   * ({@linkcode Deno.desktop.WindowCapabilities.nativeTree}). */
+  interface BrowserWindowNativeTree {
+    /** Apply one batch (the "NTB1" format) to the window's tree. The backend
+     * copies it and applies it whole on its UI thread before the next frame;
+     * a window's batches apply in commit order. Throws
+     * `Deno.errors.NotSupported` where the backend has no native tree, a
+     * `TypeError` for a malformed batch (none of it is applied; the tree
+     * stays at the last good state) and `Deno.errors.BadResource` once the
+     * window is closed. */
+    commit(batch: Uint8Array): void;
   }
 
   /** Detail of a {@linkcode BrowserWindow} `"willnavigate"` event. */
@@ -1244,6 +1268,13 @@ declare namespace Deno {
      * `windowCapabilities().toolbarStyle`). While it is not `"automatic"`,
      * `setTitleBarStyle("hidden")` returns `false`. */
     setToolbarStyle(style: ToolbarStyle): boolean;
+    /** **denext extension** (Brainwires/deno, not upstream Deno): the
+     * window's native tree (the same object each time). Its events are the
+     * window's `"nativetree"` events. Check
+     * `Deno.desktop.windowCapabilities().nativeTree` before committing:
+     * every backend but `gpui` throws `NotSupported`. Absent on runtimes
+     * without it ({@linkcode Deno.desktop.nativeTree}). */
+    readonly nativeTree: BrowserWindowNativeTree;
     /** Show an http(s) page in a native child view of this window, above
      * its page at `options.bounds` (see {@linkcode WebView}). Throws a
      * {@linkcode WebViewError}: `unsupported` (no engine here, see
@@ -2686,6 +2717,12 @@ declare namespace Deno {
        * Wayland client learns where the pointer is only inside its own
        * windows). */
       pointer: boolean;
+      /** **denext extension** (Brainwires/deno, not upstream Deno):
+       * {@linkcode BrowserWindow.nativeTree} works, and the batch format
+       * version it takes (`1`: "NTB1"); `null` on a backend without a
+       * native tree (every backend but `gpui`). Absent on runtimes that
+       * don't know the native tree. */
+      nativeTree?: { version: number } | null;
     }
 
     /** The pointer, as {@linkcode pointer} reports it. */
@@ -4222,6 +4259,14 @@ declare namespace Deno {
     /** `true`: each {@linkcode Deno.BrowserWindow} fires a cancelable
      * `"willnavigate"` before its navigation guard decides. */
     export const navigationEvents: true;
+
+    /** **denext extension** (Brainwires/deno, not upstream Deno): `true`:
+     * this runtime knows the native tree ({@linkcode BrowserWindow.nativeTree},
+     * its `"nativetree"` event and {@linkcode WindowCapabilities.nativeTree}).
+     * Absent on upstream Deno and older runtimes, so
+     * `Deno.desktop.nativeTree === true` feature-probes the API; whether
+     * this backend has a tree is `windowCapabilities().nativeTree`. */
+    export const nativeTree: true;
 
     /** Set the app's own application menu, owned by no window, so it can be
      * updated after every window closed (a tray app, one kept running).

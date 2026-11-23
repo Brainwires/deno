@@ -581,6 +581,14 @@ pub enum DesktopEvent {
     event: String,
     detail: String,
   },
+  /// An event of a window's native tree (laufey API 61, the `gpui`
+  /// backend): `json` is the host's one JSON object
+  /// (`{"node":id,"type":...}`), passed through unparsed. DESKTOP_JS hands
+  /// it to the window's "nativetree" listeners as the `CustomEvent`'s
+  /// detail, and the renderer parses it. Always delivered: the host already
+  /// coalesces scroll and pointer moves to one per frame per node.
+  #[serde(rename_all = "camelCase")]
+  NativeTree { window_id: u32, json: String },
 }
 
 /// How many events may wait in the desktop event queue before the ones that
@@ -1697,6 +1705,52 @@ pub struct WindowCapabilitiesInfo {
   /// `Deno.desktop.pointer()` answers (laufey API 60): macOS, Windows, Linux
   /// on X11. A Wayland client learns the pointer only inside its surfaces.
   pub pointer: bool,
+  /// `BrowserWindow.nativeTree.commit()` works (laufey API 61): the batch
+  /// format the backend takes, `null` where it has no native tree (every
+  /// backend but `gpui`).
+  pub native_tree: Option<NativeTreeCapabilityInfo>,
+}
+
+/// `windowCapabilities().nativeTree`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeTreeCapabilityInfo {
+  /// The batch format version (`1`: "NTB1").
+  pub version: u32,
+}
+
+/// Why a backend did not take a native tree batch
+/// ([`DesktopApi::native_tree_commit`]; laufey's `NativeTreeError`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeTreeCommitError {
+  /// The backend has no native tree.
+  Unsupported,
+  /// The batch doesn't decode; none of it was applied and the tree stays
+  /// at the last good state.
+  Malformed,
+  /// No such window (closed).
+  NoWindow,
+  /// A code this runtime doesn't know.
+  Other(i32),
+}
+
+/// The exception `BrowserWindow.nativeTree.commit()` throws for `error`.
+fn native_tree_commit_error(error: NativeTreeCommitError) -> JsErrorBox {
+  match error {
+    NativeTreeCommitError::Unsupported => JsErrorBox::new(
+      "NotSupported",
+      "this backend has no native tree (see Deno.desktop.windowCapabilities().nativeTree)",
+    ),
+    NativeTreeCommitError::Malformed => JsErrorBox::type_error(
+      "malformed native tree batch: none of it was applied",
+    ),
+    NativeTreeCommitError::NoWindow => {
+      JsErrorBox::new("BadResource", "the window is closed")
+    }
+    NativeTreeCommitError::Other(code) => {
+      JsErrorBox::generic(format!("native tree commit failed ({code})"))
+    }
+  }
 }
 
 /// `Deno.desktop.pointer()` (laufey API 60, DENEXT.md item 463): where the
@@ -3090,6 +3144,17 @@ pub trait DesktopApi: Send + Sync + 'static {
 
   fn window_capabilities(&self) -> WindowCapabilitiesInfo {
     WindowCapabilitiesInfo::default()
+  }
+  /// Apply one native tree batch to the window's tree (laufey API 61): the
+  /// backend copies it and applies it whole on its UI thread before the
+  /// next frame, in commit order. The default is a backend with no native
+  /// tree.
+  fn native_tree_commit(
+    &self,
+    _window_id: u32,
+    _batch: &[u8],
+  ) -> Result<(), NativeTreeCommitError> {
+    Err(NativeTreeCommitError::Unsupported)
   }
   fn set_window_state(&self, _window_id: u32, _action: WindowAction) {}
   fn get_window_state(&self, _window_id: u32) -> WindowStateInfo {
@@ -5865,6 +5930,25 @@ fn op_desktop_window_capabilities(
     .unwrap_or_default()
 }
 
+/// `BrowserWindow.nativeTree.commit(batch)` (laufey API 61): one "NTB1"
+/// batch for the window's native tree. Throws `NotSupported` where the
+/// backend has none (and outside a desktop app), a `TypeError` for a
+/// malformed batch (the tree stays at the last good state) and
+/// `BadResource` for a closed window.
+#[op2(fast)]
+fn op_desktop_native_tree_commit(
+  state: &mut OpState,
+  #[smi] window_id: u32,
+  #[buffer] batch: &[u8],
+) -> Result<(), JsErrorBox> {
+  let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() else {
+    return Err(native_tree_commit_error(NativeTreeCommitError::Unsupported));
+  };
+  api
+    .native_tree_commit(window_id, batch)
+    .map_err(native_tree_commit_error)
+}
+
 /// `BrowserWindow.createWebView()`'s work: validate, then ask the backend.
 fn create_webview_outcome(
   api: &dyn DesktopApi,
@@ -8529,6 +8613,7 @@ deno_core::extension!(
     op_desktop_window_order,
     op_desktop_pointer,
     op_desktop_window_capabilities,
+    op_desktop_native_tree_commit,
     op_desktop_tray_capabilities,
     op_desktop_window_level_code,
     op_desktop_speak,
@@ -11242,6 +11327,46 @@ mod tests {
     assert_eq!(
       super::LOGIN_ITEM_STATES,
       ["enabled", "disabled", "requires-approval", "not-supported"]
+    );
+  }
+
+  #[test]
+  fn native_tree_wire_format_and_errors() {
+    use deno_error::JsErrorClass;
+
+    use super::NativeTreeCommitError;
+    // laufey API 61: null unless the backend has a native tree.
+    let none =
+      serde_json::to_value(super::WindowCapabilitiesInfo::default()).unwrap();
+    assert_eq!(none["nativeTree"], json!(null));
+    let gpui = serde_json::to_value(super::WindowCapabilitiesInfo {
+      native_tree: Some(super::NativeTreeCapabilityInfo { version: 1 }),
+      ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(gpui["nativeTree"], json!({ "version": 1 }));
+    // The event keeps the host's JSON as text, for the renderer to parse.
+    assert_eq!(
+      serde_json::to_value(DesktopEvent::NativeTree {
+        window_id: 4,
+        json: r#"{"node":3,"type":"press","x":1,"y":2}"#.into(),
+      })
+      .unwrap(),
+      json!({
+        "kind": "nativeTree",
+        "windowId": 4,
+        "json": r#"{"node":3,"type":"press","x":1,"y":2}"#,
+      })
+    );
+    let class = |e| super::native_tree_commit_error(e).get_class().to_string();
+    assert_eq!(class(NativeTreeCommitError::Unsupported), "NotSupported");
+    assert_eq!(class(NativeTreeCommitError::Malformed), "TypeError");
+    assert_eq!(class(NativeTreeCommitError::NoWindow), "BadResource");
+    assert_eq!(class(NativeTreeCommitError::Other(-9)), "Error");
+    assert!(
+      super::native_tree_commit_error(NativeTreeCommitError::Other(-9))
+        .get_message()
+        .contains("-9")
     );
   }
 
