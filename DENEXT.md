@@ -20018,7 +20018,7 @@ where the changes are discussed.
        `tools/denext/targeted_test_test.ts` (the dispatcher).
      - Node tests enabled: none, because this is CI only.
 
-478. **`feat(ext/webrtc)`: WebRTC WPT-100: the next round of the
+493. **`feat(ext/webrtc)`: WebRTC WPT-100: the next round of the
      web-platform-tests, in ten streams** (`webrtc/wpt-100`; runtime and tests;
      `ext/webrtc/{01_webrtc.js,03_encoded_transform.js,05_transfer.js,
      06_identity.js,lib.rs,peer.rs,media.rs,media_sink.rs,ice_transport.rs,
@@ -20132,7 +20132,7 @@ where the changes are discussed.
        details and `httpRequestStatusCode`.
      - Engine: Brainwires/webrtc-rs-rtc `wpt100/integration` (d24baa50) on
        `webrtc/d28-wpt`, `FORK.md` rows for each change; released in
-       `0.22.0+brainwires.1` (item 479).
+       `0.22.0+brainwires.1` (item 494).
      - Not done: no `crossOriginIsolated` global (the subtests that need it stay
        failing); canvas capture, pixel checks, encoder scaling, SVC and
        `AudioContext` wait for real codecs (Phase 2).
@@ -20143,9 +20143,9 @@ where the changes are discussed.
        Recovery, `rtc-media` readers, `rtc-rtp` VP9).
      - Node tests enabled: none; no Node API changes.
 
-479. **`fix(ext/webrtc)`: webrtc-rs-rtc `0.22.0+brainwires.1`** (runtime;
+494. **`fix(ext/webrtc)`: webrtc-rs-rtc `0.22.0+brainwires.1`** (runtime;
      `Cargo.toml`, `Cargo.lock`, `ext/webrtc/{01_webrtc.js,media.rs}`). The
-     conformance release (`f36d9b2c`, from `0.21.1+brainwires.6` and item 478's
+     conformance release (`f36d9b2c`, from `0.21.1+brainwires.6` and item 493's
      `wpt100/integration`): upstream's 0.22.0 with the fork's work on SCTP and
      data channels, JSEP, ICE / TURN / mDNS, DTLS, SRTP, RTP / RTCP and the
      interceptors, and the statistics report, each claim a row of the engine's
@@ -20168,7 +20168,7 @@ where the changes are discussed.
        `ext/webrtc`'s unit tests and the WebRTC WPT run.
      - Node tests enabled: none; `node:` has no WebRTC API.
 
-480. **`fix(ext/webrtc)`: webrtc-rs-rtc `0.22.0+brainwires.2`** (runtime;
+495. **`fix(ext/webrtc)`: webrtc-rs-rtc `0.22.0+brainwires.2`** (runtime;
      `Cargo.toml`, `Cargo.lock`). The engine's fix release (`f0ebf8f2`): a
      sender whose encodings leave the codec to negotiation, as every
      `RTCRtpSender` here does, is now sent with its first negotiated media codec
@@ -20187,7 +20187,7 @@ where the changes are discussed.
        run.
      - Node tests enabled: none; `node:` has no WebRTC API.
 
-481. **`fix(ext/webrtc)`: webrtc-rs-rtc `0.22.0+brainwires.3`** (runtime;
+496. **`fix(ext/webrtc)`: webrtc-rs-rtc `0.22.0+brainwires.3`** (runtime;
      `Cargo.toml`, `Cargo.lock`, `ext/webrtc/{media.rs,peer.rs}`). The engine's
      next fix release (`29e3e7ef`): a renegotiation that changes a sender's
      effective codec binds the sender again (its NACK buffer and the TWCC send
@@ -20222,7 +20222,7 @@ where the changes are discussed.
        workspace; the WebRTC WPT run.
      - Node tests enabled: none; `node:` has no WebRTC API.
 
-482. **`feat(ext/webrtc)`: webrtc-rs-rtc `0.22.0+brainwires.4`, ECN / L4S**
+497. **`feat(ext/webrtc)`: webrtc-rs-rtc `0.22.0+brainwires.4`, ECN / L4S**
      (runtime; `Cargo.toml`, `Cargo.lock`, `ext/webrtc/Cargo.toml`,
      `ext/webrtc/{ecn.rs,lib.rs,media.rs,net.rs,peer.rs,tests.rs}`). The
      engine's ECN release (`a10b2f7d`): `TransportContext::ecn` carries each
@@ -20267,7 +20267,7 @@ where the changes are discussed.
        (`webrtc-stats/supported-stats.https.html`).
      - Node tests enabled: none; `node:` has no WebRTC API.
 
-483. **`feat(desktop)`: a browser app receives http / https links** (runtime;
+498. **`feat(desktop)`: a browser app receives http / https links** (runtime;
      `cli/lib/standalone/{launch_args.rs,app_origin.rs,binary.rs}`,
      `cli/standalone/binary.rs`, `cli/rt_desktop/{lib.rs,app_origin.rs}`,
      `cli/rt/desktop.rs`, `runtime/ops/desktop.rs`, `runtime/js/99_main.js`,
@@ -20298,7 +20298,7 @@ where the changes are discussed.
        (`app_config_file_browser`), `rt_desktop::app_origin`
        (`app_browser_from_metadata_or_app_json`).
      - Node tests enabled: none; Node has no desktop API.
-484. **`fix(node/net)`: a Windows named-pipe server's pipe belongs to the
+499. **`fix(node/net)`: a Windows named-pipe server's pipe belongs to the
      account that created it** (security; runtime;
      `libs/core/uv_compat/{pipe.rs,pipe_security.rs}`, `libs/core/Cargo.toml`,
      `ext/node/ops/pipe_wrap.rs`,
@@ -20364,7 +20364,7 @@ where the changes are discussed.
      - Node tests enabled: none new; `parallel/test-net-server-listen-path.js`
        (already enabled) now exercises the chmod on Windows.
 
-485. **`fix(pty)`: a Windows pty kill ends the process tree; detached children
+500. **`fix(pty)`: a Windows pty kill ends the process tree; detached children
      leave their parent's job** (runtime, behavior change on Windows;
      `ext/pty/{Cargo.toml,windows.rs}`,
      `runtime/subprocess_windows/src/process.rs`, `cli/util/job_object.rs`,
@@ -20417,7 +20417,7 @@ where the changes are discussed.
        `dropping_the_job_kills_the_child` also checks the breakaway limit.
      - Node tests enabled: none (`node:child_process`'s `detached` runs on the
        same spawn, but no node_compat test checks job membership).
-486. **`feat(desktop)`: desktop path tokens in `unix:` net grants; the update
+501. **`feat(desktop)`: desktop path tokens in `unix:` net grants; the update
      helper doesn't wait for surviving detached sidecars** (runtime;
      `cli/rt/run.rs`, `runtime/ops/desktop_update/swap.rs`).
      - A desktop app's baked `--allow-net` / `--allow-net-connect` /
@@ -20481,7 +20481,7 @@ where the changes are discussed.
        (the real `/proc`).
      - Node tests enabled: none.
 
-487. **`feat(permissions)`: the kernel sandbox's deny ceilings, `deno test` /
+502. **`feat(permissions)`: the kernel sandbox's deny ceilings, `deno test` /
      `deno bench` under enforcement, and a compiled program's refused-prompt
      line** (CLI and runtime; denext-only; denext.30 WP-A; `AUTO_STAGE`
      unchanged, so what `auto` does by default is unchanged until the flip;
@@ -20582,7 +20582,7 @@ where the changes are discussed.
        (`deno test` no longer refuses).
      - Node tests enabled: none; no Node API changes.
 
-488. **`feat(permissions)`: the kernel sandbox's broker by itself: `auto` takes
+503. **`feat(permissions)`: the kernel sandbox's broker by itself: `auto` takes
      the supervisor, a compiled program runs its own, children of a brokered run
      reach it, and Linux gets a warn observer** (CLI and runtime; denext-only;
      opt-in as before: `AUTO_STAGE` is unchanged, so `auto` still applies
@@ -20786,7 +20786,7 @@ where the changes are discussed.
        condition).
      - Node tests enabled: none; no Node API changes.
 
-489. **`feat(kernel)`: the kernel sandbox for packaged desktop apps** (runtime,
+504. **`feat(kernel)`: the kernel sandbox for packaged desktop apps** (runtime,
      CLI; `cli/lib/{kernel_desktop,kernel_apply,kernel_sandbox}.rs`,
      `cli/rt/{kernel_desktop,run}.rs`, `cli/rt_desktop/{kernel_start,lib}.rs`,
      `libs/sandbox/{seatbelt,enforce_linux,outside,lib}.rs`,
@@ -20944,7 +20944,7 @@ where the changes are discussed.
        `tests/specs/check/desktop_types`.
      - Node tests enabled: none.
 
-490. **`fix(kernel)`: a confined run's Node compile cache gets its key from the
+505. **`fix(kernel)`: a confined run's Node compile cache gets its key from the
      image before the re-exec** (CLI and runtime; denext-only; denext.30
      stage-R4 triage; `cli/sandbox/enforce.rs`,
      `ext/node/ops/compile_cache.rs`). Node's compile cache (item 240) signs its
@@ -20975,7 +20975,7 @@ where the changes are discussed.
        `parallel/test-compile-cache-permission-allowed.js` passes again under
        the R4 beds.
 
-491. **`fix(permissions)`: `-A` next to a deny keeps the named-only sys names**
+506. **`fix(permissions)`: `-A` next to a deny keeps the named-only sys names**
      (runtime and CLI; denext-only; denext.30 follow-up;
      `runtime/permissions/lib.rs`, `cli/lib/kernel_policy.rs`). `processInfo`
      and `processes` (the Linux `/proc` reads of item 432's classes) are granted
@@ -21010,7 +21010,7 @@ where the changes are discussed.
        through `cat`).
      - Node tests enabled: none; no Node API changes.
 
-492. **`fix(coverage)`: the process waits for a terminated worker's coverage**
+507. **`fix(coverage)`: the process waits for a terminated worker's coverage**
      (runtime and CLI; `runtime/coverage.rs`, `runtime/web_worker.rs`,
      `cli/worker.rs`, `cli/tools/test/mod.rs`). `worker.terminate()` only asks:
      the worker's own thread writes its coverage once its event loop sees the
@@ -21030,7 +21030,7 @@ where the changes are discussed.
        `coverage::{worker_coverage1, worker_coverage2, worker_coverage3}`.
      - Node tests enabled: none.
 
-493. **`fix(node)`: a path server's `readableAll` / `writableAll` add to the
+508. **`fix(node)`: a path server's `readableAll` / `writableAll` add to the
      socket's mode** (runtime; upstream bug; denext.30 CI triage;
      `ext/node/ops/pipe_wrap.rs`). The Unix half of `PipeWrap.fchmod` set the
      bound socket's mode to the requested bits instead of adding them, as
@@ -21041,12 +21041,12 @@ where the changes are discussed.
      the socket, returns at once when the bits are already set, and otherwise
      `chmod`s it to the current mode with them added; a failed `stat` / `chmod`
      returns the negated errno (libuv's code) instead of `-1`. The Windows half
-     (item 484's DACL) is unchanged.
+     (item 499's DACL) is unchanged.
      - Tests: `unit_node::net_test` ("a path server listens with readableAll and
        writableAll").
      - Node tests enabled: none new.
 
-494. **`fix(node)`: Node's compile cache reads the user id without
+509. **`fix(node)`: Node's compile cache reads the user id without
      `--allow-sys=uid`** (runtime; denext-only; denext.30 CI triage;
      `ext/node/ops/compile_cache.rs`, `ext/node/polyfills/01_require.js`). The
      compile cache (item 240) tags its directory with the user id and checks
@@ -21060,10 +21060,10 @@ where the changes are discussed.
      directory already sees the same id as the owner of the files the runtime
      writes there.
      - Tests: `kernel_sandbox::enforce::compile_cache_key_handed_over` (item
-       490's spec, the first compile cache run without `-A`).
+       505's spec, the first compile cache run without `-A`).
      - Node tests enabled: none new.
 
-495. **`fix(permissions)`: a `/proc/<pid>/environ` read needs every permission,
+510. **`fix(permissions)`: a `/proc/<pid>/environ` read needs every permission,
      said explicitly** (runtime; upstream bug kept strict; denext.30 CI triage;
      `runtime/permissions/lib.rs`). Upstream's special-file check sent a path
      ending in `/environ` to `--allow-env` (`check_env_all`), but it tested
@@ -21075,7 +21075,7 @@ where the changes are discussed.
      block too, say an installer's tokens from a lifecycle script whose own
      environment was scrubbed (item 83's jail, whose probe expects its own
      environ to stay unreadable). So `--allow-read --allow-env`, and `-A` next
-     to a deny (item 491), don't read any environ; `-A` alone does.
+     to a deny (item 506), don't read any environ; `-A` alone does.
      - Tests: `runtime/permissions` `check_open_proc_sys_classes` (environ under
        `--allow-read --allow-env` for `self`, `thread-self`, the own pid and pid
        1, and under `-A`); spec
@@ -21093,11 +21093,11 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-495) are what the prebuilt
-`libdenort` carries. The CLI-side parts (for example writing
-`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
-in the branch too, but a stock CLI does not run them; denext's own launcher
-provides that environment.
+449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
+506-510) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+launchers) are in the branch too, but a stock CLI does not run them; denext's
+own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
@@ -21690,7 +21690,7 @@ in the job summary, never skipped silently. Areas:
   1.0.0 -> 2.0.0 relaunch and confirm, a 3.0.0 trial that never confirms rolled
   back and refused (and kept in the rejected set).
 - **kernelsandbox** (fork CLI) — a strict package (`--kernel-sandbox=enforce`, a
-  scoped grant) on this leg's engine (item 489): what the probe says holds the
+  scoped grant) on this leg's engine (item 504): what the probe says holds the
   app and why, against what the engine, the OS and the host make of it; a native
   write through FFI inside and outside the grant, refused exactly when the app
   is kernel-held; `Deno.desktop.openExternal` (on macOS the browser must come
