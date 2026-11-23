@@ -1155,6 +1155,10 @@ mod unix {
   }
 
   #[cfg(test)]
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "a real folder with real links for the root to open"
+  )]
   mod tests {
     use std::io::Read;
     use std::sync::Arc;
