@@ -114,8 +114,19 @@ What it does:
   (`denext-ci-linux-arm64`, the x64 job seccomp profile so AF_VSOCK works as in
   the gate's test jobs, a 4-CPU quota), one worker, the trees in Docker volumes:
   no test binary runs on macOS itself, so nothing can raise a firewall or
-  privacy dialog. Each busy runner job on the host takes two workers' room, and
-  a run waits while memory is under 4 GB or the disk under 35 GB.
+  privacy dialog. A run waits while memory is under 4 GB or the disk under 35
+  GB.
+- **Schedules by CPU cost**, so the gate's container sees a gate runner's
+  contention rather than an over-subscribed host's: a run costs the CPUs its
+  tests keep busy at once (a harness run its `FILE_TEST_RUNNER_PARALLELISM` test
+  files, each a process wanting a CPU of its own, as `node_compat`, `unit`,
+  `unit_node`, `specs` and `integration` run them; a lib test binary its
+  `--test-threads`, else the gate container's 3), capped by its container's
+  `--cpus`. The runs in flight cost at most the host's CPUs (the Docker VM's on
+  the mini) minus what each busy runner job reserves (its `--cpus`: 3 on
+  biscuits, 4 on the mini), with at least one run going; `--workers` stays the
+  cap on containers. On an 8-CPU biscuits with no runner busy that is four
+  `normal` runs of two tests each, not the six (twelve tests) it was.
 - **Constrains the CPU** (`--profiles`, default `normal,cpu1,cpu0.5`): besides
   the gate's own container (`normal`, `--reps` times), every unit also runs
   `--constrained-reps` times (default 3) in the same container capped at
@@ -123,10 +134,14 @@ What it does:
   parallelism, so timing races that an idle many-core machine hides surface
   reliably. A `+hog` suffix (`cpu1+hog`), or `--hog` for every constrained
   profile, adds a busy loop inside the container. Failures carry their profile
-  in the report (`[cpu1]`); a capped run counts half its CPUs against the worker
-  budget, so it still runs while runner jobs are busy. (A capped container's
-  `navigator.hardwareConcurrency` follows the cap while `os.cpus()` still lists
-  the host's CPUs, so a test comparing the two is expected to fail there.)
+  in the report (`[cpu1]`); a capped run costs its cap (one or half a CPU), so
+  it still runs while runner jobs are busy, and stays constrained on purpose:
+  the `node_compat` harness scales its per-test timeouts by the CPU each running
+  test gets (factor 2 at `cpu1`, 4 at `cpu0.5` with two tests at once, 1 in the
+  gate's container), so a test that is only slow there no longer times out,
+  while a hang still does. (A capped container's `navigator.hardwareConcurrency`
+  follows the cap while `os.cpus()` still lists the host's CPUs, so a test
+  comparing the two is expected to fail there.)
 - **Reports** every test that failed at least once: in how many repetitions, how
   (`failed`; `retried`: the harness's CI retry passed it, which a gate run
   survives but which is still a flake; `crashed`: a test binary died without
@@ -152,11 +167,113 @@ the crate). It always adds the known-flaky list (`KNOWN_FLAKY` in the script:
 tests that flaked in a gate before) at `--flaky-reps` (default 30). `--suite`
 adds whole suites; `--mode full` runs every suite in full.
 
+**Carry-forward.** A re-hunt never retests what an earlier hunt vetted. By
+default (`--carry auto`) a run carries from the newest finished run (every host
+done, exit 0 or 1, every host's share present) whose candidate is an ancestor of
+the new one; `--carry <run-id>` names it, `--no-carry` runs everything. With
+`--host`, the machine that starts the hunt finds that run on the hosts (and in
+its own `~/flake-hunt/runs`), merges their results and hands each host
+`runs/<id>/carry.json`. When the earlier run qualified for the marker and no
+`--mode` or `--suite` is given, its selection is adopted, so re-running the bare
+command after a fix keeps the marker's coverage. Each host then builds the
+selection as usual and drops every unit (a lib test binary, a test file of
+`unit` / `unit_node`, a shard, a filtered run; `units` in `report.json`) that:
+
+- ran in the earlier run (or was carried by it) with at least as many
+  repetitions, and the earlier run had the same profiles and at least the same
+  `--constrained-reps`;
+- finished with no failure, or with failures that all name a test (`failed`,
+  `retried`): those tests then run on their own at `--flaky-reps` and the rest
+  of the unit carries. A crash, a timeout or a dirty tree reruns the whole unit;
+- is not affected by the diff from the commit its result came from (a result
+  carried twice keeps its first commit) to the candidate.
+
+The diff rule, per changed file (`classifyFile` / `unitAffected` in the script):
+
+- **Nothing**: Markdown at the top level, `doc/`, `.github/` Markdown and issue
+  templates, workflows other than `denext_tests*.yml`, `tools/*.md`, the hunt
+  itself and the lint / format scripts, `.dprint.json`, `.gitignore`. A change
+  that is formatting only (whitespace between tokens and trailing commas outside
+  string literals, in Rust, JS/TS and JSON outside `tests/` and `testdata/`:
+  what rustfmt and dprint change) counts as no change. Markdown a crate holds
+  counts as the crate's (a `build.rs` reads one).
+- **One test**: `tests/unit/<x>_test.ts` (and its snapshot) the units of
+  `unit::<x>_test`; a `tests/unit_node/` test file its file; a `tests/specs/`
+  file inside a spec directory that spec; `tests/integration/<x>_tests.rs` that
+  module. A unit filtered to other tests keeps its result; a carried shard keeps
+  its other tests' results and the touched test runs on its own.
+- **One suite**: any other file under `tests/unit/`, `tests/unit_node/`,
+  `tests/specs/`, `tests/integration/`, and anything under `tests/node_compat/`.
+- **A crate and everything built from it**: a file inside a workspace crate
+  (Rust, JS, `Cargo.toml`, `build.rs`, fixtures). The crate and every crate that
+  depends on it (any kind of dependency, from `cargo metadata`) lose their lib
+  test results; when one of them is something the harness suites run or are
+  built from (`deno`, `denort`, `test_server`, the crates under `tests/` and all
+  they depend on), every harness unit loses its result too. In practice a change
+  under `libs/`, `ext/`, `runtime/` or `cli/` reruns every harness suite and the
+  lib tests of the crates above it, while the lib tests of unrelated crates
+  carry.
+- **Everything**: `Cargo.lock`, the root `Cargo.toml`, `rust-toolchain.toml`,
+  `denext_tests_os.yml` (the test arguments), the rest of `.github/` (the
+  prebuilt V8 pin), shared test inputs (`tests/testdata/`, `tests/util/`,
+  `tests/registry/`, …) and any path in no crate.
+
 **The release marker.** A clean run that is full, or fast with at least
 `--suite libs,unit`, writes `~/.denext-runners/flake-hunt/<full sha>.ok` on the
 machine that started it (with `--host biscuits`: the Mac mini), a JSON record of
 the mode, suites, repetitions, hosts and times. A run removes that commit's old
-marker when it starts and writes nothing when it finds a flake. On the mini a
-hook refuses to dispatch the `denext tests` workflow unless the marker of the
-exact commit the ref points at exists (`denext-internal`
-`ops/release/gate-guard-hook.py`).
+marker when it starts and writes nothing when it finds a flake. A run that
+carried writes the marker for its own candidate when its own part is clean; the
+record then also holds `carry`: `from` (the runs results came from), `ran` (the
+units run here) and `units` (each carried unit's label with the `runId` and
+`sha` its result came from), so every unit behind the marker names the run that
+vetted it. On the mini a hook refuses to dispatch the `denext tests` workflow
+unless the marker of the exact commit the ref points at exists
+(`denext-internal` `ops/release/gate-guard-hook.py`).
+
+## denext/targeted_test.ts
+
+A targeted `denext tests` run (DENEXT.md item 496): only the named tests,
+filtered, on the named OS legs, after each leg's debug build. It is for checking
+one fix in minutes instead of the full ~3 h matrix, and never for a release: the
+tag gate and the verified-SHA guard leave a targeted run out, so it vouches for
+nothing and a red one blocks nothing.
+
+```sh
+# push HEAD to a throwaway pretest/targeted-<sha12>-<time> branch and dispatch
+deno run --allow-run=git,gh tools/denext/targeted_test.ts --os linux,windows \
+  specs:kernel_sandbox::policy::config unit:pty_test
+# another commit, every leg, a lib test; print the commands only
+deno run --allow-run=git,gh tools/denext/targeted_test.ts --commit fix/x --dry-run \
+  --os linux,linux-arm,macos,macos-x64,windows,windows-arm \
+  libs:deno_permissions:kernel_broker::net
+# the same by hand
+git push origin <sha>:refs/heads/pretest/<name>
+gh workflow run denext_tests.yml -R Brainwires/deno --ref pretest/<name> \
+  -f only='specs:kernel_sandbox::policy::config unit:pty_test' -f os=linux,windows
+```
+
+- **Items** (`only`, separated by spaces or newlines), each
+  `<suite>[:<filter>]`: `specs`, `unit`, `unit_node`, `integration` and
+  `node_compat` run `cargo test -p <suite>_tests --test <suite> -- <filter>` in
+  one job per item (unsharded; the harness runs every test whose name contains
+  the filter, and with no filter the whole suite). For `node_compat`, a filter
+  also selects tests `config.jsonc` does not enable. `libs:<crate>[:<filter>]`
+  runs `cargo test --locked --lib -p <crate> -p deno_v8 [-- <filter>]`
+  (`deno_core`, `serde_v8` and `deno_ops` without `deno_v8`). All lib items run
+  in the leg's one `test libs` job, one after another. The crate must be one the
+  full run's lib steps test. A filter takes letters, digits and
+  `_ . : / @ + = -` (not first).
+- **Legs** (`os`, comma-separated, no spaces): `linux` (ubuntu-22.04),
+  `linux-arm`, `macos` (macos-15), `macos-x64`, `windows` (windows-2022) and
+  `windows-arm`. Any suite runs on any leg here, including the ones the full run
+  tests on Linux alone.
+- **Skipped**: lint, cargo audit, every suite and shard not named, the macOS
+  LaunchServices test, and the webrtc mDNS test. The `full`, `macos` and
+  `windows` inputs are ignored; `macos_runner` still applies.
+- **Where**: a `pretest/*` branch, not the release candidate's own branch. The
+  gate ignores the run either way, but this keeps the candidate's run list the
+  release's. No workflow runs on a push to `pretest/*`, and the Windows pools
+  serve it. Delete the branch afterwards (`git push origin --delete <branch>`).
+- `.github/denext-runtime/targeted_tests.py` holds the syntax and the plan each
+  leg runs. `targeted_tests_test.py` checks them against the workflows.

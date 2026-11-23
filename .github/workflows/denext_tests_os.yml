@@ -25,6 +25,10 @@ on:
         description: Pick a runner for EVERY job of the leg (libs and each test job), not only the node_suites ones; the pool takes them while it has free slots, the os image the overflow. The build is picked on every leg with a pick_pool
         type: boolean
         default: false
+      only:
+        description: 'A targeted run (denext_tests.yml''s `only`, .github/denext-runtime/targeted_tests.py): only these tests, after the build. Empty: the whole leg, as before'
+        type: string
+        default: ''
       pick_pool:
         description: 'The pool the picked jobs prefer, as a pick-runners pool name (macos-arm64, macos-x64, windows-x64, windows-arm64, linux-x64-2204): each picked job runs there while it has a free slot, else on the os image. The action reads the pool''s RUNNER_* variable and DENEXT_POOL_HEALTH. Empty: every job on the os image'
         type: string
@@ -50,6 +54,37 @@ env:
 # caller's) take the os image; the action never puts a fork's code on our
 # runners. The only job pinned to our hardware is webrtc-mdns (see there).
 jobs:
+  # A targeted run (`only`): which test jobs and lib tests the leg runs
+  # (.github/denext-runtime/targeted_tests.py plan). Skipped otherwise, and
+  # every job below that reads it then takes the form it had before
+  # (`inputs.only == ''`). An invalid `only` fails it, and the build with it.
+  plan:
+    name: targeted plan
+    if: ${{ inputs.only != '' }}
+    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || fromJSON(vars.RUNNER_LINUX_X64 || '"ubuntu-latest"') }}
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      tests: ${{ steps.plan.outputs.tests }}
+      libs: ${{ steps.plan.outputs.libs }}
+      keys: ${{ steps.plan.outputs.keys }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github/denext-runtime/targeted_tests.py
+          sparse-checkout-cone-mode: false
+      - id: plan
+        env:
+          ONLY: ${{ inputs.only }}
+        run: |
+          set -euo pipefail
+          # On an invalid item it prints the reason (and nothing reaches the
+          # outputs).
+          out=$(python3 -I .github/denext-runtime/targeted_tests.py plan) || { printf '%s\n' "$out"; exit 1; }
+          printf '%s\n' "$out" | tee -a "$GITHUB_OUTPUT"
+
   # The leg's build (every leg with a pick_pool) and, on the Linux x64 leg,
   # webrtc-mdns: picked before the build starts. Never fails the leg: on any
   # error the build takes the os image (the action's own fallback, or the `||`
@@ -77,14 +112,16 @@ jobs:
           # with lld (the setup action), where GNU ld was OOM-killed. The
           # Windows x64 build asks for the fast host (windows-x64-fast, the
           # MacBook's VM): on brain (an i3) it is the leg's long pole.
-          jobs: ${{ format('{0} {1}', inputs.pick_pool != '' && format('build={0}@{1}', inputs.pick_pool == 'windows-x64' && 'windows-x64-fast' || inputs.pick_pool, inputs.os) || '', inputs.os == 'ubuntu-22.04' && 'mdns=linux-x64!' || '') }}
+          jobs: ${{ format('{0} {1}', inputs.pick_pool != '' && format('build={0}@{1}', inputs.pick_pool == 'windows-x64' && 'windows-x64-fast' || inputs.pick_pool, inputs.os) || '', inputs.os == 'ubuntu-22.04' && inputs.only == '' && 'mdns=linux-x64!' || '') }}
           vars: ${{ toJSON(vars) }}
 
   build:
     name: build debug
-    needs: build-runner
+    needs: [build-runner, plan]
     # build-runner is skipped on a leg that picks nothing: run regardless.
-    if: ${{ !cancelled() }}
+    # plan is skipped unless the run is targeted; when it is, an invalid
+    # `only` (plan failed) builds nothing.
+    if: ${{ !cancelled() && (inputs.only == '' || needs.plan.result == 'success') }}
     runs-on: ${{ fromJSON(needs.build-runner.outputs.plan || '{}').build || inputs.os }}
     timeout-minutes: 240
     defaults:
@@ -115,24 +152,41 @@ jobs:
           for b in deno denort test_server; do cp "target/debug/$b$ext" out/; done
           tar -cf bins.tar -C out .
           ls -la out
+      # GitHub's artifact store sometimes stalls on this upload ("Upload
+      # progress stalled") though the build passed: one retry, replacing any
+      # partial artifact.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: upload_bins
+        continue-on-error: true
         with:
           name: debug-bins-${{ inputs.os }}
           path: bins.tar
           retention-days: 3
+      - name: Wait before retrying the upload
+        if: steps.upload_bins.outcome == 'failure'
+        shell: bash
+        run: sleep 30
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.upload_bins.outcome == 'failure'
+        with:
+          name: debug-bins-${{ inputs.os }}
+          path: bins.tar
+          retention-days: 3
+          overwrite: true
 
   # As upstream's `test libs` job: the lib tests start target/debug/test_server
   # (the file fetcher, http_util, installer and LSP registry tests), so they
   # run against the build job's binary.
   libs:
     name: test libs
-    needs: [build, test-runner]
+    needs: [build, test-runner, plan]
     # test-runner is skipped on a leg that picks nothing: run regardless, but
     # only after a passed build. Its crates' build scripts run bindgen, which
     # needs libclang: the Windows pool hosts have LLVM at C:\Program Files\LLVM
     # (win-x64 and brain since 2026-11-17, ops/runners/windows-x64/
     # install-llvm-x64.sh; run 43372954581 on brain failed without it).
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    # A targeted run: only when `only` names lib tests (plan's `libs`).
+    if: ${{ !cancelled() && needs.build.result == 'success' && (inputs.only == '' || needs.plan.outputs.libs != '') }}
     # Picked on a pick_all leg and on a Windows leg (test-runner lists `libs`
     # there).
     runs-on: ${{ fromJSON(needs.test-runner.outputs.plan || '{}').libs || inputs.os }}
@@ -175,6 +229,7 @@ jobs:
       # feature in, and deno_v8 then refuses to compile.
       - name: Test libs
         id: libs
+        if: inputs.only == ''
         run: cargo test --locked --lib -p deno -p denort -p node_shim -p bsdiff_helper -p deno_lib -p denort_desktop -p deno_snapshots -p deno_bundle_runtime -p deno_cache -p deno_canvas -p deno_cron -p deno_crypto -p deno_fetch -p deno_ffi -p deno_fs -p deno_http -p deno_image -p deno_io -p deno_kv -p deno_napi -p napi_sym -p deno_net -p deno_node -p deno_node_crypto -p deno_node_sqlite -p deno_sql -p deno_pty -p denort_helper -p deno_signals -p deno_telemetry -p deno_url -p deno_web -p deno_webgpu -p deno_webidl -p deno_webrtc -p deno_websocket -p deno_webstorage -p deno_cache_dir -p deno_cli_parser -p deno_config -p deno_crypto_provider -p deno_v8 -p deno_dotenv -p eszip -p deno_http_h1 -p deno_inspector_server -p deno_lockfile -p deno_maybe_sync -p napi_sys -p node_resolver -p deno_npm -p deno_npm_cache -p deno_npm_installer -p deno_npmrc -p deno_package_json -p deno_print -p deno_resolver -p deno_sandbox -p deno_runtime -p deno_features -p deno_permissions -p deno_subprocess_windows -p deno_os -p deno_process -p deno_html_rewriter -p deno_tls -p test_util
       # A test that aborts (SIGABRT, a V8 fatal error) takes the whole test
       # binary down with no name and no backtrace, as the arm64 and macOS lib
@@ -195,6 +250,7 @@ jobs:
       # snapshot_test_lock() only keeps two of them apart. They run on their
       # own afterwards, on one thread.
       - name: Test core libs
+        if: inputs.only == ''
         run: >-
           cargo test --locked --lib -p deno_core -p serde_v8 -p deno_ops --
           --skip runtime::tests::snapshot::
@@ -202,6 +258,7 @@ jobs:
           --skip modules::tests::dynamic_imports_snapshot
           --skip modules::tests::import_meta_snapshot
       - name: Test core libs (snapshot-creating tests, one thread)
+        if: inputs.only == ''
         run: >-
           cargo test --locked --lib -p deno_core -- --test-threads=1
           runtime::tests::snapshot::
@@ -212,10 +269,41 @@ jobs:
       # resolves to it; `#[ignore]`d because it writes the user's LaunchServices
       # database, which is exactly what a hosted macOS runner is for.
       - name: LaunchServices scheme registration (ignored test, macOS)
-        if: runner.os == 'macOS'
+        if: inputs.only == '' && runner.os == 'macOS'
         # The same crate set as above (deno_v8 needs the feature set it brings
         # in, and the build is reused); the filter selects the one test.
         run: cargo test --locked --lib -p deno -p denort -p node_shim -p bsdiff_helper -p deno_lib -p denort_desktop -p deno_snapshots -p deno_bundle_runtime -p deno_cache -p deno_canvas -p deno_cron -p deno_crypto -p deno_fetch -p deno_ffi -p deno_fs -p deno_http -p deno_image -p deno_io -p deno_kv -p deno_napi -p napi_sym -p deno_net -p deno_node -p deno_node_crypto -p deno_node_sqlite -p deno_sql -p deno_pty -p denort_helper -p deno_signals -p deno_telemetry -p deno_url -p deno_web -p deno_webgpu -p deno_webidl -p deno_webrtc -p deno_websocket -p deno_webstorage -p deno_cache_dir -p deno_cli_parser -p deno_config -p deno_crypto_provider -p deno_v8 -p deno_dotenv -p eszip -p deno_http_h1 -p deno_inspector_server -p deno_lockfile -p deno_maybe_sync -p napi_sys -p node_resolver -p deno_npm -p deno_npm_cache -p deno_npm_installer -p deno_npmrc -p deno_package_json -p deno_print -p deno_resolver -p deno_sandbox -p deno_runtime -p deno_features -p deno_permissions -p deno_subprocess_windows -p deno_os -p deno_process -p deno_html_rewriter -p deno_tls -p test_util -- --ignored --exact scheme_registration::tests::macos_register_bundle_with_launch_services
+      # A targeted run (`only`): each `libs:<crate>[:<filter>]` item, one
+      # after another (targeted_tests.py lib_command): the crate with deno_v8
+      # for its `v8` feature (see `Test libs`), the op layer's crates alone
+      # (see `Test core libs`), and libtest's substring filter. Every item
+      # runs; the step fails when any did.
+      - name: Test libs (targeted)
+        if: inputs.only != ''
+        env:
+          LIBS: ${{ needs.plan.outputs.libs }}
+        run: |
+          set -uo pipefail
+          set -f
+          failed=()
+          for item in $LIBS; do
+            crate=${item%%:*}
+            filter=
+            case "$item" in *:*) filter=${item#*:} ;; esac
+            args=(cargo test --locked --lib -p "$crate")
+            case "$crate" in
+              deno_core | serde_v8 | deno_ops | deno_v8) ;;
+              *) args+=(-p deno_v8) ;;
+            esac
+            if [ -n "$filter" ]; then args+=(-- "$filter"); fi
+            echo "::group::${args[*]}"
+            if ! "${args[@]}"; then failed+=("$item"); fi
+            echo "::endgroup::"
+          done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "::error::targeted lib tests failed: ${failed[*]}"
+            exit 1
+          fi
 
   # WebRTC mDNS end to end (DENEXT.md item 370): two connections on this
   # host's LAN address, one publishing its host candidates under `.local`
@@ -227,12 +315,13 @@ jobs:
   # an interface with multicast): never the GitHub image, where multicast is
   # untested, and never a fork's pull request (a self-hosted runner never takes
   # untrusted code). It builds just the crate's lib tests, beside the leg.
+  # Not in a targeted run (`only`).
   # Pinned to our linux-x64 pool through build-runner (`mdns=linux-x64!`), so
   # its slot counts against the build's pick on the same hosts.
   webrtc-mdns:
     name: webrtc mdns (ignored test, Linux pool)
     needs: build-runner
-    if: ${{ !cancelled() && inputs.os == 'ubuntu-22.04' && !(startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) }}
+    if: ${{ !cancelled() && inputs.os == 'ubuntu-22.04' && inputs.only == '' && !(startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) }}
     runs-on: ${{ fromJSON(needs.build-runner.outputs.plan || '{}').mdns || fromJSON('["self-hosted","denext-linux-x64"]') }}
     timeout-minutes: 90
     defaults:
@@ -266,7 +355,7 @@ jobs:
   # an unhealthy pool, and the action then overflows that pool's jobs.
   test-runner:
     name: pick runners
-    needs: build
+    needs: [build, plan]
     if: ${{ !cancelled() && (inputs.node_suites || inputs.pick_all) && inputs.pick_pool != '' && needs.build.result == 'success' }}
     # Our Linux x64 pool, as denext_tests.yml's `pick runners` (see there); a
     # fork's pull request, or RUNNER_LINUX_X64 unset: GitHub's ubuntu-latest.
@@ -287,6 +376,8 @@ jobs:
           NODE_SUITES: ${{ inputs.node_suites }}
           LIBS_ONLY: ${{ inputs.libs_only }}
           LIBS_AND_UNIT: ${{ inputs.libs_and_unit }}
+          # A targeted run: the keys of its jobs (plan), else ''.
+          TARGETED_KEYS: ${{ needs.plan.outputs.keys }}
         run: |
           set -euo pipefail
           # The `pick` keys of the test matrix below (and libs) this leg runs,
@@ -319,6 +410,9 @@ jobs:
             if [ "$NODE_SUITES" = true ]; then keys+=(unit_node); fi
             if [ "$PICK_ALL" = true ] && [ "$suites" = true ]; then keys+=(unit); fi
           fi
+          # A targeted run picks for its own jobs (`<suite>_t<n>`, `libs`),
+          # with the same pool choices by suite as below.
+          if [ -n "$TARGETED_KEYS" ]; then read -ra keys <<<"$TARGETED_KEYS"; fi
           jobs=""
           # The long specs shards (70 min on win-x64, 80-85 on win-x64-brain, an i3)
           # ask for the fast Windows host only: windows-x64-fast is the label
@@ -360,16 +454,17 @@ jobs:
   # on the os image.
   test:
     name: test ${{ matrix.suite }}${{ matrix.shard_label }}
-    needs: [build, test-runner]
+    needs: [build, test-runner, plan]
     # test-runner is skipped on a leg that picks nothing: run regardless, but
-    # only after a passed build.
-    if: ${{ !cancelled() && needs.build.result == 'success' && (!inputs.libs_only || inputs.node_suites) }}
+    # only after a passed build. A targeted run (`only`): only when it names
+    # test items, on any leg (plan's `tests`), each its own matrix entry.
+    if: ${{ !cancelled() && needs.build.result == 'success' && ((inputs.only == '' && (!inputs.libs_only || inputs.node_suites)) || (inputs.only != '' && needs.plan.outputs.tests == 'true')) }}
     runs-on: ${{ matrix.pick && fromJSON(needs.test-runner.outputs.plan || '{}')[matrix.pick] || inputs.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.os == 'ubuntu-22.04' && '[{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":"","pick":"unit"},{"suite":"specs","package":"specs_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"specs_0"},{"suite":"specs","package":"specs_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"specs_1"},{"suite":"integration","package":"integration_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"integration_0"},{"suite":"integration","package":"integration_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"integration_1"},{"suite":"unit_node","package":"unit_node_tests","shard":"","shard_total":"","shard_label":"","pick":"unit_node"},{"suite":"node_compat","package":"node_compat_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"node_compat_0"},{"suite":"node_compat","package":"node_compat_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"node_compat_1"}]' || format('[{0}{1}{2}]', inputs.libs_and_unit && '{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":"","pick":"unit"}' || (!inputs.libs_only && '{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":"","pick":"unit"},{"suite":"specs","package":"specs_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"specs_0"},{"suite":"specs","package":"specs_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"specs_1"}' || ''), ((inputs.libs_and_unit || !inputs.libs_only) && inputs.node_suites) && ',' || '', inputs.node_suites && '{"suite":"node_compat","package":"node_compat_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"node_compat_0"},{"suite":"node_compat","package":"node_compat_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"node_compat_1"},{"suite":"unit_node","package":"unit_node_tests","shard":"","shard_total":"","shard_label":"","pick":"unit_node"}' || '')) }}
+        include: ${{ fromJSON(inputs.only != '' && needs.plan.outputs.matrix || (inputs.os == 'ubuntu-22.04' && '[{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":"","pick":"unit"},{"suite":"specs","package":"specs_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"specs_0"},{"suite":"specs","package":"specs_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"specs_1"},{"suite":"integration","package":"integration_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"integration_0"},{"suite":"integration","package":"integration_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"integration_1"},{"suite":"unit_node","package":"unit_node_tests","shard":"","shard_total":"","shard_label":"","pick":"unit_node"},{"suite":"node_compat","package":"node_compat_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"node_compat_0"},{"suite":"node_compat","package":"node_compat_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"node_compat_1"}]' || format('[{0}{1}{2}]', inputs.libs_and_unit && '{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":"","pick":"unit"}' || (!inputs.libs_only && '{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":"","pick":"unit"},{"suite":"specs","package":"specs_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"specs_0"},{"suite":"specs","package":"specs_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"specs_1"}' || ''), ((inputs.libs_and_unit || !inputs.libs_only) && inputs.node_suites) && ',' || '', inputs.node_suites && '{"suite":"node_compat","package":"node_compat_tests","shard":"0","shard_total":"2","shard_label":" (1/2)","pick":"node_compat_0"},{"suite":"node_compat","package":"node_compat_tests","shard":"1","shard_total":"2","shard_label":" (2/2)","pick":"node_compat_1"},{"suite":"unit_node","package":"unit_node_tests","shard":"","shard_total":"","shard_label":"","pick":"unit_node"}' || ''))) }}
     defaults:
       run:
         shell: bash
@@ -411,12 +506,15 @@ jobs:
       - name: Build ffi (debug)
         if: matrix.suite == 'specs' || matrix.suite == 'integration'
         run: cargo build -p test_ffi
-      # Upstream's `Test (debug)` step.
+      # Upstream's `Test (debug)` step. A targeted run's entry passes its
+      # filter (the harness's first argument after `--`); every other entry
+      # has none, and the command is upstream's.
       - name: Test (debug)
         env:
           CI_SHARD_INDEX: ${{ matrix.shard }}
           CI_SHARD_TOTAL: ${{ matrix.shard_total }}
-        run: cargo test -p ${{ matrix.package }} --test ${{ matrix.suite }}
+          TEST_FILTER: ${{ matrix.filter }}
+        run: cargo test -p ${{ matrix.package }} --test ${{ matrix.suite }} ${TEST_FILTER:+-- "$TEST_FILTER"}
       - name: Ensure no git changes
         run: |
           if [[ -n "$(git status --porcelain)" ]]; then
@@ -427,7 +525,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: test-results-${{ inputs.os }}-${{ matrix.suite }}${{ matrix.shard_total && format('-shard-{0}', matrix.shard) || '' }}
+          name: test-results-${{ inputs.os }}-${{ matrix.suite }}${{ matrix.shard_total && format('-shard-{0}', matrix.shard) || '' }}${{ matrix.target || '' }}
           path: target/test_results_${{ matrix.suite }}.json
           if-no-files-found: ignore
           retention-days: 7

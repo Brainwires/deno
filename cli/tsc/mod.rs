@@ -58,6 +58,43 @@ pub use self::diagnostics::Diagnostics;
 pub use self::diagnostics::Position;
 pub use self::js::TscConstants;
 
+/// denext: the extension transpiler for the TSC isolates (`tsc::js` and the
+/// LSP's). An `hmr` build has no startup snapshot, so the snapshot's
+/// extensions are evaluated from source, and their TypeScript ESM (such as
+/// `ext:deno_bundle_runtime/bundle.ts`) has to be transpiled first, as the
+/// main worker does; without it every type check in such a build panicked
+/// with a SyntaxError while creating the isolate. A snapshot build never
+/// evaluates those files, so it takes none.
+#[allow(
+  clippy::type_complexity,
+  reason = "deno_core's ExtensionTranspiler alias is not exported"
+)]
+pub fn tsc_extension_transpiler() -> Option<
+  std::rc::Rc<
+    dyn Fn(
+      deno_core::ModuleName,
+      deno_core::ModuleCodeString,
+    ) -> Result<
+      (
+        deno_core::ModuleCodeString,
+        Option<deno_core::SourceMapData>,
+      ),
+      deno_error::JsErrorBox,
+    >,
+  >,
+> {
+  #[cfg(feature = "hmr")]
+  {
+    Some(std::rc::Rc::new(|specifier, source| {
+      deno_runtime::transpile::maybe_transpile_source(specifier, source)
+    }))
+  }
+  #[cfg(not(feature = "hmr"))]
+  {
+    None
+  }
+}
+
 pub fn get_types_declaration_file_text() -> String {
   concat_lib_texts(&[
     "deno.ns",

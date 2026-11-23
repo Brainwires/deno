@@ -864,7 +864,8 @@ where the changes are discussed.
     `gen/` (keyed by the source, the transpile options and the `deno_ast`
     version, which both builds share; a module the Vitest transform changes is
     emitted under another key, so its emit is the one exception the two builds
-    overwrite). `deno clean` removes both copies. Tests:
+    overwrite). `deno clean` removes both copies. Since item 487 each name is a
+    base the runtime version is appended to. Tests:
     `version_keyed_caches_are_the_forks_own` in
     `libs/resolver/cache/deno_dir.rs`; the integration tests that inspect the
     type-check and code caches (`tests/integration/jsr_tests.rs`,
@@ -19080,6 +19081,942 @@ where the changes are discussed.
      - Tests: webrtc-rs-rtc's workspace with `--all-features` (2330 pass; `.6`
        adds a test that drops the first INIT ACK); `ext/webrtc`'s unit tests.
      - Node tests enabled: none; `node:` has no WebRTC API.
+478. **`fix(node)`: one owner for a pipe descriptor opened twice, and a handle
+     sent right behind a message** (runtime;
+     `libs/core/uv_compat/{pipe,tcp}.rs`, `libs/core/uv_compat.rs`,
+     `ext/node/ops/pipe_wrap.rs`,
+     `ext/node/polyfills/internal/child_process.ts`). Two more findings of the
+     flake hunt (item 459) on the train's candidate, both in how `node:net` and
+     `node:child_process` hold descriptors.
+     - **Descriptor ownership** (`parallel/test-net-connect-options-fd.js`, 4
+       runs in 80): `new Pipe()`, `bind()`, then `net.Socket({ fd: pipe.fd })`
+       opens the bound pipe's descriptor in a second handle, which libuv allows
+       for a handle that is not active yet. Both handles then held the number as
+       their own, so it was closed by each of them: by the socket's stream and
+       by the first handle's `close()`, in whichever order the test reached
+       them. Under load the first handle closed before the socket, and the debug
+       build stopped on the standard library's check of an owned descriptor. A
+       descriptor now has one owner, the handle that opened it last. Opening it
+       revokes the earlier handle's claim (`RawFdClaim`, per thread): that
+       handle keeps reporting the number through `fd`, as libuv does, but its
+       `close()`, `listen()` and `connect()` leave the descriptor alone
+       (`listen()` answers `EBADF`, `connect()` uses a new socket), and
+       `Pipe.close()` no longer drops the `FdTable` entry of a number it does
+       not own.
+     - The same rule for a descriptor an active handle drives: `uv_pipe_open`,
+       `uv_pipe_open_listener`, `uv_tcp_open` and `uv_tcp_open_listener` answer
+       `UV_EEXIST` when a pipe or TCP handle the loop polls already holds the
+       descriptor in a stream, listener or bound socket (libuv's
+       `uv__fd_exists`). The TCP opens also check that the reactor takes the
+       descriptor before they move it into a socket, so a refused open leaves it
+       with the caller, which `fd_adopt::finish` assumes when it closes the dup
+       it made. `TTY` never closes the descriptor it wraps and `dgram`'s open
+       has a single owner; neither changed.
+     - **A handle sent right behind a message**
+       (`parallel/test-cluster-send-handle-twice.js`: about 1 s, or a hang until
+       the timeout, 10 runs in 80): the kernel delivers a descriptor with the
+       read that reaches the first byte of the message it was sent with. On
+       Linux that read also returns the messages queued in front of it, and the
+       channel's reader gave the descriptor to the first message of the read.
+       cluster's worker writes `{ ack }` and then the socket back to back, so
+       when the primary read both at once the `NODE_HANDLE` message arrived with
+       no descriptor, was never acknowledged, and the worker held every later
+       send back for good; the descriptor stayed open in the primary, unused.
+       The channel now keeps received descriptors in arrival order and gives
+       each `NODE_HANDLE` message the oldest one: both arrive in sending order,
+       one descriptor per message. macOS starts a new read at a descriptor, so
+       it paired them correctly before.
+     - Not covered: a descriptor two isolates of one process open (claims are
+       per thread, and only a process-wide grant lets an isolate open a
+       descriptor it was not given).
+     - User-facing note: `handle.close()` on a pipe whose `fd` was passed to
+       `net.Socket({ fd })` no longer closes the socket's descriptor; opening
+       the descriptor of a listening or connected socket in a second handle
+       fails with `EEXIST`; a handle sent with `process.send()` / `child.send()`
+       right after another message always arrives.
+     - Tests: `pipe_open_of_a_bound_pipe_fd_has_one_owner`,
+       `pipe_close_after_its_fd_was_reopened_spares_a_reused_number`,
+       `pipe_open_refuses_the_fd_of_an_active_handle` and
+       `tcp_open_refuses_the_fd_of_an_active_handle` in deno_core; "a bound pipe
+       whose fd a socket opened no longer owns it" in
+       `tests/unit_node/net_test.ts` (both close orders, ten rounds, the number
+       handed to a file in between); "a handle sent right after a message
+       arrives with it" in `tests/unit_node/child_process_test.ts` (eight
+       rounds, the parent off its event loop while the child writes both
+       messages, so Linux reads them together every round).
+     - Node tests enabled: none; `parallel/test-net-connect-options-fd.js` and
+       `parallel/test-cluster-send-handle-twice.js` were enabled and flaky.
+479. **`fix(core)`: an eagerly completed op's promise is the runtime's own**
+     (runtime; `libs/core/{00_infra,rebuild_async_stubs}.js`,
+     `libs/core_testing/unit/ops_async_test.ts`,
+     `tests/unit_node/async_hooks_test.ts`). The denext.28 hunt's class-c
+     `node:async_hooks` failures (`test-async-hooks-enable-recursive`,
+     `async-hooks/test-enable-in-init`, `async-hooks/test-disable-in-init`, 3-6
+     runs in 80): an init hook ran once more than Node.js runs it, for a
+     PROMISE. An async op hands back the promise `setPromise()` makes while it
+     is pending, created inside `isCreatingInternalPromise()` so that
+     `node:async_hooks` leaves it out, but an op whose result was ready on its
+     first poll (or that failed to dispatch) returned a plain
+     `Promise.resolve()` / `Promise.reject()` from the async stub, unmarked. Its
+     creator frame is core's stub, which the hook's stack check reads as JS
+     running a promise job, so it was reported as a user PROMISE. A blocking op
+     such as `fs.access()`'s `lstat` is sometimes done before the first poll, so
+     the extra init came and went with timing (about 1 in 1000 calls on an idle
+     Mac); enabling a hook inside `init` only made it count twice. The stub now
+     makes both promises in the internal scope. Upstream has the same stub; its
+     `node:async_hooks` has no PROMISE resources.
+     - User-facing note: `node:async_hooks` no longer reports a PROMISE for Node
+       callback APIs (`fs`, `dns`, ...) whose op completed at once.
+     - Tests: a `deno_core` unit test that an eagerly resolved and an eagerly
+       rejected op promise are both made in the internal scope (fails before the
+       fix); a `node:async_hooks` unit test that 2000 concurrent `fs.access()`
+       calls report 2000 FSREQCALLBACKs and no PROMISE (5 of 6 runs failed
+       before, 0 of 16 after); the three Node tests 60 times each (4 failures in
+       60 before, 0 in 180 after) and the 138 configured async-hooks /
+       AsyncLocalStorage tests, unchanged.
+     - The node:test findings of the same hunt are not runtime bugs:
+       `test-runner-worker-id`'s "Worker ID n should be used 3 times, got 4"
+       asserts an even spread that holds only while every file takes as long as
+       the others (Node.js v26.13 fails it too, 5 of 120 runs under load; the
+       pool handed a freed id to the next file, as Node.js's does; item 480
+       makes the share even); the timeouts of
+       `test-runner-{cli-concurrency,tag-filter-cli,
+       test-rerun-failures,worker-id}`
+       and `test-output-junit-reporter` are spawn-heavy tests whose passing
+       times rise to the 10 s budget on the oversubscribed hunt host (CPU time
+       equals wall time locally, no idle wait); and
+       `test-runner-enqueue-file-syntax-error`'s one silent failure fell in the
+       run whose leak tests were OOM-killed (60 of 60 pass under 20-way load).
+     - Node tests enabled: none (the three already run).
+
+480. **`fix(node)`: follow-ups of the denext.28 IPC and async_hooks fixes**
+     (runtime; `ext/node/polyfills/internal/{child_process,async_hooks}.ts`,
+     `ext/node/polyfills/internal/test/file_runner.ts`, `ext/node/ops/ipc.rs`,
+     `libs/core/{00_primordials,00_infra}.js`). What items 478 and 479 left
+     behind.
+     - **The same socket sent twice**: `process.send(msg, socket)` kept the
+       socket's handle, so a second send of the same socket transferred a second
+       copy of the descriptor. As in Node.js
+       (`handleConversion["net.Socket"].send`), the first send now takes the
+       handle (`socket._handle = null`, reads dropped, no idle timeout) unless
+       `keepOpen` is set, and closes it once the receiver acknowledges; a second
+       send finds no handle and sends the message alone.
+     - **A stray received descriptor**: a descriptor a peer attaches to a plain
+       message waits in the receive queue for a `NODE_HANDLE` message that never
+       comes (item 478 pairs them in order), and stayed open, registered as
+       adoptable, until the process exited. Channel teardown (disconnect, end of
+       the channel, the reader stopping) now closes every descriptor still
+       waiting (`op_node_ipc_close_received_fd`, which closes only a descriptor
+       still registered as adoptable), and so does a `NODE_HANDLE` message whose
+       handle could not be built.
+     - **Primordials' promises**: `PromisePrototypeCatch`, `SafePromiseAll`,
+       `SafePromiseAllSettled`, `SafePromiseAny`, `SafePromiseRace`,
+       `SafePromisePrototypeFinally` and `SafePromise` are arrow functions in
+       `ext:core/00_primordials.js`, so the promise a polyfill made through one
+       had a core frame as its creator, which `node:async_hooks` reads as the
+       event loop running a user promise job: `crypto.pbkdf2()` reported a
+       PROMISE per call besides its PBKDF2REQUEST. The internal promise scope's
+       counter now lives in 00_primordials.js (00_infra.js takes it over) and
+       those helpers make their promises inside it, and the creator check passes
+       primordials frames through to their caller. The audit of core's other
+       scripts (`01_core.js`, `02_timers.js`, `00_infra.js`, the generated async
+       stubs, the Rust-made promises) found no other promise made outside the
+       scope.
+     - **Worker IDs share the files evenly**: `NODE_TEST_WORKER_ID` (1 to the
+       concurrency, one file at a time per ID, reused) followed which worker
+       freed first, so a slow file left the other IDs serving most of the files
+       and `parallel/test-runner-worker-id` (9 files, concurrency 3, each ID 3
+       times) failed under load, on Node.js too. Each ID now runs floor(files /
+       concurrency) files and the first ones to need it one more; a worker that
+       has run its share stops, so the last files may wait for a busy ID while
+       another is idle. `--test-concurrency` stays the most files run at once.
+     - User-facing note: a socket sent with `process.send()` / `child.send()` no
+       longer has a `_handle` afterwards (as in Node.js) and a second send of it
+       carries no handle; `node:test` may run fewer files at once near the end
+       of a run whose files take very different times.
+     - Tests: "a socket sent twice goes with the first message only" and "a
+       stray descriptor from the peer is closed when the channel goes away" (the
+       peer is a child sending a pipe's write end with its own `sendmsg()`) in
+       `tests/unit_node/child_process_test.ts`; "polyfill promises through
+       primordials are no promises" (`crypto.pbkdf2()`) in
+       `tests/unit_node/async_hooks_test.ts`; a `deno_core` unit test that the
+       primordials' helpers make internal promises; the `worker_id_even_share`
+       spec (one slow file of nine). Each of the four runtime tests fails on the
+       previous build.
+     - Node tests enabled: `parallel/test-cluster-send-deadlock.js` (not on
+       Windows, like the other socket-passing tests; its timeout was the
+       unacknowledged `NODE_HANDLE` of item 478: a reply handle read together
+       with an ack on Linux) and `parallel/test-runner-worker-id.js` on macOS.
+
+481. **`fix`: happy eyeballs, `node:dns` timeouts and `AbortSignal.any()` timers
+     on a starved CPU** (runtime and tests;
+     `libs/core/uv_compat{.rs,
+     /tcp.rs,/tests.rs}`, `ext/net/ops.rs`,
+     `ext/node/polyfills/internal_binding/cares_wrap.ts`,
+     `ext/web/03_abort_signal.js`, `tests/unit_node/{net_test,dns_test}.ts`,
+     `tests/unit/timers_test.ts`). From the denext.28 hunt's class (c)
+     node_compat failures, Linux at one CPU and below:
+     - `node:net` happy eyeballs (`autoSelectFamily`): `uv_tcp_connect` issues
+       the non-blocking `connect(2)` itself, as libuv's `uv__tcp_connect` does,
+       so an error the kernel reports at once (ENETUNREACH for IPv6 in a
+       container without it, EAFNOSUPPORT, EHOSTUNREACH) is the call's return
+       value and the next address is tried in the resolver's order. The connect
+       ran in a future first polled on a later loop turn: on a starved CPU the
+       10 ms attempt timer, due in the timers phase ahead of the I/O phase,
+       reported the attempt as a timeout and the event order broke
+       (`internet/test-net-autoselectfamily-events-failure.js`: 8.8.8.8 tried
+       where 2001:4860:4860::8888's failure was expected). ECONNREFUSED stays a
+       callback on the next turn, libuv's `delayed_error`. On Windows,
+       WSAENETUNREACH, WSAEHOSTUNREACH and WSAEAFNOSUPPORT map to their libuv
+       codes instead of EINVAL (the code that test's Windows entry names; not
+       verified on Windows yet).
+     - `node:dns` `Resolver({ timeout })`: the per-attempt timeout is the op's
+       request timeout, which hickory starts when the query is sent and which
+       reads an answer that has arrived before it checks the timer, as c-ares
+       times a query. It was a JS timer started before the query went out
+       (hickory sends from its background task on a later turn) and due in the
+       timers phase ahead of the op's completion: a starved process reported
+       ETIMEOUT for a query not sent yet, or already answered
+       (`parallel/test-dns-resolveany-bad-ancount.js`: one query of two reached
+       the server; 12 of 60 cold runs under `taskpolicy -b` reached none). A
+       timeout over 1 s is no longer cut short by hickory's own 1 s timer, and
+       with a timeout hickory makes one attempt per try on the system resolver
+       path too.
+     - `AbortSignal.any()`: once the signal aborts, its listeners no longer keep
+       its other `AbortSignal.timeout()` sources' timers refed; a removed
+       listener (on the signal or on a timeout source) unrefs a source's timer
+       only when no unaborted dependent still listens.
+       `AbortSignal.any([AbortSignal.timeout(9000),
+       AbortSignal.timeout(110000)])`
+       held the process 110 s after it aborted (`deno run` of
+       `parallel/test-abort-controller-any-timeout.js`; Node.js exits at 9 s).
+     - Measured, not fixed (time budgets): `wasi/test-wasi-pthread.js` (the
+       fixture gives a thread's worker 1 s to load while the main thread waits;
+       a debug worker loads in ~40 ms idle and over 1 s at 16 runs on the
+       efficiency cores, and the failed `pthread_create` is the "unreachable"),
+       `parallel/test-abort-controller-any-timeout.js` (waits 9 s by design in a
+       10 s budget),
+       `parallel/test-buffer-constructor-
+       node-modules-paths.js` (13
+       child processes in series; each starts faster than Node's),
+       `parallel/test-webcrypto-digest-turboshake-
+       rfc.js` (TurboSHAKE
+       over 24 MB takes 54 ms on a debug build, Node.js 93 ms; the rest is the
+       test's JS) and `parallel/test-webcrypto-sign-verify.js` (two RSA-4096 key
+       generations, 0.4 to 2.8 s each with the pure-Rust `rsa` crate, 0.06 to
+       0.6 s in Node.js; a passing run is reported "ignored" because the
+       harness, like Node's `tools/test.py`, takes the Ed448 sub-case's
+       `printSkipMessage()` line for a skip, while a timed-out run is a flake).
+     - User-facing note: a `node:net` connect the kernel refuses at once fails
+       synchronously, as in Node.js; a `node:dns` Resolver timeout runs from the
+       send; an aborted `AbortSignal.any()` no longer keeps the process alive
+       through its other timeouts.
+     - Tests: new `deno_core` tests (an immediate connect error is synchronous;
+       ECONNREFUSED comes from the callback), a `node:net` test that blocks the
+       loop past the attempt timer, a `node:dns` test that blocks the loop past
+       the timeout with the server in another process, and three `AbortSignal`
+       timer tests (each fails before the fix);
+       `test-net-autoselectfamily-events-failure.js` with
+       `NODE_TEST_INET6_IP=fe80::1` (refused at once on macOS) under
+       `taskpolicy -b` at 16 in parallel: 34 of 48 failed before (18 with the
+       hunt's message), none of 108 after; `test-dns-resolveany-bad-ancount.js`:
+       none of 108 failed after (48 under `taskpolicy -b`, 60 at 16 in
+       parallel), and the new `node:dns` test fails before; `uv_compat`'s tests
+       whole, `tests/unit_node/{net,dns}_test.ts`,
+       `tests/unit/{timers,abort_controller,event_target}_test.ts` and 316
+       `node:net` / `node:dns` / `dgram` node_compat tests against the train
+       (same results).
+     - Node tests enabled: none.
+
+482. **`fix`: node:fs watch and stream races the denext.28 flake hunt found**
+     (runtime; `runtime/ops/fs_events.rs`, `ext/node/ops/fs.rs`). From the
+     hunt's class c (real bugs, not slowness), on Linux:
+     - `fs.watch()` and `Deno.watchFs()` with `recursive: true`: what is made in
+       a new directory right after it is reported, and as created. inotify has
+       no recursive watch, and notify's backend reports a new directory's
+       `Create` to the handler before it adds the directory's watch (once the
+       batch it read is handled), so a file made in the directory before that
+       was never reported and one whose write came after was reported only as
+       modified: test-fs-watch-recursive-add-file-to-new-folder.js timed out or
+       saw `'change' !== 'rename'`, 13 runs in 30 on a loaded Linux host. A new
+       directory under a recursive watch is now read on a helper thread once the
+       backend has added its watch (a `configure` call, which the backend's
+       event loop answers after that batch, is the barrier); every entry found
+       is a `create` event for the recursive watchers, and the events under the
+       directory are held back until then, so a modify never overtakes the
+       create and a create inotify did report is not repeated. Node.js's
+       recursive watcher on Linux reads a new directory the same way
+       (`lib/internal/fs/recursive_watch.js`). macOS and Windows watch
+       recursively natively and are unchanged.
+     - `fs.open()` completes through the loop (its op is deferred, like item
+       476's read): an open the blocking thread finished before its first poll
+       resolved in the microtask checkpoint that started it, which in a timers
+       phase is the one between two timer lists, so a `createReadStream()` made
+       in one timer read the file before another timer due in the same phase had
+       written to it. test-fs-read-stream-pos.js ended a stream with no data (a
+       `data` listener called 0 times), 4 runs in 90 at 6 in parallel on a
+       loaded Linux host; Node.js's open never completes before the phase's
+       timers ran.
+     - Already fixed by item 476's deferred read (the hunt's failures were all
+       on a candidate without it): test-fs-promises-file-handle-readFile.js
+       ("Missing expected rejection (AbortError): tick-N") and
+       test-stream-readable-async-iterators.js (`ERR_ASSERTION` instead of
+       `ERR_STREAM_PREMATURE_CLOSE`: the stream's EOF read resolved before the
+       loop body closed it).
+     - Time budget, not stalls: test-file-write-stream4.js copies
+       `process.execPath` (the 627 MB debug binary) through a read and a write
+       stream at `cp`'s speed (2.0-2.8 s against `cp`'s 2.1 s on the loaded
+       host), and test-fs-watch-recursive-linux-parallel-remove.js spends about
+       3.3 s of CPU (a child making and removing a file 10000 times, the parent
+       logging ~30000 events) in 1.9 s; both finish every run and time out only
+       on a CPU-limited runner.
+     - User-facing note: a recursive watch on Linux reports the contents of a
+       new directory (a `create` for each entry made before the directory was
+       watched), and `fs.open()`'s callback never runs before the timers due in
+       the phase that called it.
+     - Tests: a new `fs_events` unit test (Linux) that makes a directory with a
+       nested one and writes a file in it 50 times and wants each first reported
+       as created (fails at run 7 without the scan; 30 of 30 with it under six
+       CPU hogs, aarch64 Linux). On aarch64 Linux (Docker, six parallel loops
+       beside six CPU hogs): add-file-to-new-folder 150 of 150 (13 of 30 failed
+       on train HEAD on the loaded x86_64 host), read-stream-pos,
+       file-handle-readFile and readable-async-iterators 120 of 120 each, every
+       other `test-fs-watch-recursive-*` 10 of 10, `tests/unit_node/_fs/`,
+       `fs_test.ts` and `tests/unit/fs_events_test.ts` whole. On macOS, in
+       parallel loops: add-file-to-new-folder and read-stream-pos 178 of 178
+       each (some beside eight CPU hogs), file-handle-readFile and
+       readable-async-iterators 80 of 80.
+     - Node tests enabled: none (all were enabled and flaky).
+
+483. **`perf(ext/crypto,ext/node_crypto)`: RSA keys generated in aws-lc**
+     (runtime; `ext/crypto/generate_key.rs`, `ext/node_crypto/keys.rs`,
+     `Cargo.toml`). WebCrypto `generateKey` and `node:crypto`
+     `generateKeyPair[Sync]` (`rsa` and `rsa-pss`) generate a 2048, 3072, 4096
+     or 8192-bit key with e = 65537 with aws-lc-rs (`rsa::KeyPair::generate`,
+     already a dependency) instead of the pure-Rust `rsa` crate's prime search:
+     the key comes back as PKCS#8 and is parsed into the `rsa` crate's
+     `RsaPrivateKey`, so export, import, sign, encrypt and JWK use it unchanged.
+     Every other size or exponent (Node takes any odd exponent and any size)
+     keeps the pure-Rust path. RSA-4096 went from 0.4–2.8 s a key (OpenSSL in
+     Node: 0.06–0.6 s) to about a quarter of a second in release, which made
+     node_compat `test-webcrypto-sign-verify.js` slow and flaky under load.
+     `debug` builds now compile `aws-lc-sys` / `aws-lc-rs` at opt-level 3 (as
+     `num-bigint-dig`, `sha2`, `keccak`): their C code was built at `OPT_LEVEL`
+     0, about four times slower; the override does not touch the pure-Rust path,
+     which never calls aws-lc.
+     - User-facing note: none beyond speed; keys and their encodings are the
+       same.
+     - Tests: `tests/unit/webcrypto_test.ts`
+       (`generateRsaKeyRoundTripBothGenerators`) and
+       `tests/unit_node/crypto/crypto_key_test.ts` ("RSA keygen round-trips
+       through both generators"): keys from both generators (2048 / 3072 bits
+       with e = 65537; 1024 bits; e = 3; e = 65539) export, re-import, sign /
+       verify and encrypt / decrypt, sync and async.
+     - Node tests enabled: none; `test-webcrypto-sign-verify.js` and the
+       `test-crypto-keygen*` files already ran and now finish faster.
+
+484. **`fix(ext/node_crypto,tests)`: older bugs found beside the RSA keygen
+     work** (runtime and tests; `ext/node_crypto/keys.rs`,
+     `ext/node/polyfills/internal/crypto/keygen.ts`, `tests/node_compat/`,
+     `Cargo.toml`).
+     - An invalid RSA public exponent: `generateKeyPair[Sync]('rsa-pss')`
+       panicked on one (an `unwrap()` on the pure-Rust generator's error) and
+       `'rsa'` threw a plain `Error` from the op. Both now throw what Node built
+       on BoringSSL throws (the TLS library `process.features` reports): a
+       synchronous `RangeError` `ERR_OUT_OF_RANGE` "publicExponent is invalid"
+       for an exponent that is even or below 3, from the sync and the callback
+       API alike; the op refuses the same exponents with the same error, and a
+       failed prime search is an error, not a panic.
+     - RSA-PSS keys export as PKCS#8
+       (`"exporting RSA-PSS private key as PKCS#8
+       is not supported yet"`
+       before), PEM, DER and encrypted: the id-RSASSA-PSS AlgorithmIdentifier
+       around the PKCS#1 RSAPrivateKey, with the key's RSASSA-PSS-params when it
+       has restrictions. The SPKI export dropped those params; it now writes
+       them too. The params are written as OpenSSL does: a field at its default
+       (SHA-1, MGF1 with SHA-1, salt length 20) is left out, so an all-default
+       key carries an empty SEQUENCE, and the hash AlgorithmIdentifiers carry
+       the NULL parameters RFC 4055 section 2.1 requires (byte for byte what
+       Node 26 on OpenSSL 4.1 writes; Node's own older fixtures, written without
+       the NULLs, still import).
+     - Importing RSASSA-PSS-params without a maskGenAlgorithm took MGF1's hash
+       from `hashAlgorithm`; RFC 4055's default is MGF1 with SHA-1, which Node
+       reports (a sha384 key with MGF1-SHA-1 read back as MGF1-SHA-384).
+     - node_compat harness: a `1..0 # Skipped:` line counted the whole test as
+       skipped even when `common.printSkipMessage()` printed it for one case and
+       the test ran and passed the rest. The harness now preloads
+       `tests/node_compat/skip_probe_preload.mjs` into every `deno run` test; it
+       marks a run whose `process.exit()` came from `common.skip()` (that
+       function on the stack when `process.reallyExit()` runs, since
+       `common.skip()` exits right after printing), and only such a run is a
+       skip, reported with the reason of its last skip line. node:test files
+       keep the "exited before any test ran" rule. Reclassified from skipped to
+       passed (each printed the line for an unsupported case only and passes),
+       18 tests: `test-crypto-cipheriv-decipheriv.js`,
+       `test-crypto-getcipherinfo.js`, `test-crypto-hash.js`,
+       `test-crypto-key-objects-raw.js`,
+       `test-crypto-keygen-async-elliptic-curve-jwk-ec.js`,
+       `test-crypto-keygen-async-elliptic-curve-jwk.js`,
+       `test-crypto-keygen-eddsa.js`, `test-crypto-keygen-raw.js`,
+       `test-crypto-pqc-key-objects-ml-dsa.js`,
+       `test-crypto-pqc-sign-verify-ml-dsa.js`, `test-crypto-rsa-dsa.js`,
+       `test-https-options-boolean-check.js`, `test-tls-getprotocol.js`,
+       `test-tls-no-cert-required.js`, `test-tls-options-boolean-check.js`,
+       `test-webcrypto-derivebits.js`, `test-webcrypto-sign-verify.js` and
+       `pummel/test-crypto-dh-keys.js`. Still skipped (they exit through
+       `common.skip()`): `test-crypto-sign-verify.js`, `test-intl.js`,
+       `test-tls-no-sslv3.js`, `test-tls-server-verify.js`.
+     - The root `Cargo.toml` passes dprint again (`libs/net_route` /
+       `deno_net_route` were out of order; no change in meaning).
+     - User-facing note: an invalid RSA exponent throws Node's error instead of
+       crashing the process (`rsa-pss`); RSA-PSS keys export as PKCS#8 and their
+       SPKI keeps the restrictions.
+     - Tests: `tests/unit_node/crypto/crypto_key_test.ts` ("RSA keygen refuses
+       an invalid public exponent", "RSA-PSS keys export as PKCS#8 and SPKI as
+       Node does" against keys Node generated,
+       `tests/unit_node/crypto/generate_rsa_pss_fixtures.mjs` →
+       `testdata/rsa_pss/`, "generated RSA-PSS keys export their parameters";
+       "RSA keygen round-trips through both generators" now round-trips RSA-PSS
+       through PKCS#8 / SPKI too); `tests/unit_node/crypto/` whole.
+     - Node tests enabled: `test-crypto-keygen.js` (5 of 5 runs). No node_compat
+       test exports an RSA-PSS key as PKCS#8 under BoringSSL: the RSA-PSS keygen
+       files skip themselves and `test-crypto-key-objects.js` runs its RSA-PSS
+       part only on OpenSSL.
+
+485. **`fix`: what the denext.28 node_compat flake work left over** (runtime;
+     `runtime/ops/fs_events.rs`, `ext/node/polyfills/dgram.ts`,
+     `ext/node/polyfills/internal/child_process.ts`,
+     `ext/node/polyfills/internal/cluster/shared_handle.ts`,
+     `ext/node/polyfills/internal_binding/udp_wrap.ts`, `ext/node/ops/udp.rs`,
+     `runtime/js/99_main.js`, `cli/tsc/mod.rs`, `cli/lsp/tsc.rs`,
+     `tests/util/lib/test_runner.rs`). Bugs the hunt of items 476-482 found
+     beside the ones it fixed.
+     - **A non-recursive watch beside a recursive one**: every `Deno.watchFs()`
+       / `fs.watch()` of a runtime shares one notify backend, and each watcher
+       picked its events by a canonical-path prefix, so
+       `Deno.watchFs(dir + "/sub", { recursive: false })` beside
+       `Deno.watchFs(dir)` was handed the recursive watch's events for
+       `sub/nested/...`. A non-recursive watcher now passes on only its own path
+       and that directory's direct children (a child's parent, not the child's
+       resolved path, is compared, so a symlink in the directory still counts);
+       `ignore` paths still cover everything below them. The Linux new-directory
+       scan (item 482) already reported its synthesized creates to recursive
+       watchers only.
+     - **Overlapping watches on Linux**: inotify watches inodes, and notify's
+       backend keeps one watch per directory, so watches of overlapping paths
+       shared it. Closing a recursive `Deno.watchFs(dir)` removed the watch of
+       `dir/sub` that a non-recursive watch of `dir/sub` still had (that watcher
+       went silent: `watchFsNonRecursiveBesideRecursiveAncestor` hung, its first
+       watcher closing), closing the non-recursive one took `dir/sub` out of the
+       recursive watch, and opening it marked `dir/sub` non-recursive, so
+       directories made there later went unwatched. After a watch is removed, or
+       a non-recursive one added, every remaining watch overlapping its path is
+       applied again on Linux, the recursive ones last. Other backends watch
+       each path on their own.
+     - **UDP in a cluster**: a worker's `dgram` bind never asked the primary for
+       the socket (`SharedHandle` answered ENOTSUP for UDP), so each worker
+       bound a port of its own: parallel/test-cluster-dgram-1.js sent to a port
+       no worker shared and timed out, and -2's workers were never closed by
+       `cluster.disconnect()`. As in Node.js, a worker's non-exclusive `bind()`
+       (an address, or `{ fd }`) now goes through `cluster._getServer()`: the
+       primary binds the socket once (`dgram._createSocketHandle`) and sends it
+       to every worker binding the same address as a raw UDP wrap
+       (`handleConversion["dgram.Native"]`, which `process.send()` also accepts
+       now), each worker reading its own copy. The socket closes with the last
+       worker.
+     - **`reusePort`**: the dgram option was ignored. A `reusePort` socket now
+       binds with Linux's `SO_REUSEPORT` (and is exclusive in a cluster worker,
+       as in Node.js); elsewhere the bind fails with ENOTSUP, as libuv does, so
+       Node's reusePort tests skip themselves there.
+     - **A datagram to `0.0.0.0` / `::`** goes to the loopback address of its
+       family, as Linux does in the kernel and libuv does on Windows. macOS
+       sends it to the primary interface's address, which a host firewall
+       dropping traffic to that address refuses with EHOSTUNREACH (Node.js fails
+       test-cluster-dgram-1.js the same way on such a host). A failed send also
+       reports the OS error's code instead of UNKNOWN.
+     - **Type checking in an `hmr` build**: `cargo build --features hmr` has no
+       startup snapshot, so the TSC isolates (`tsc::js`, the LSP's) evaluate the
+       snapshot's extensions from source. They had no extension transpiler
+       (`Uncaught SyntaxError` at `ext:deno_bundle_runtime/bundle.ts:18:31`, a
+       panic on every `deno test` / `deno check` that type-checked with the JS
+       compiler), and `runtime/js/99_main.js`'s `removeImportedOps()` then
+       deleted the compiler's own ops from `core.ops`
+       (`op_tsc_constants is not a
+       function`); a snapshot build evaluates
+       that module before those ops exist. The isolates now take the runtime's
+       transpiler in such a build, and the compiler's ops are on the list
+       `removeImportedOps()` keeps.
+     - **test-child-process-pass-fd.js on macOS**: 80 forked children take about
+       1 s on the mini (debug build) and 26-29 s at twelve copies at once beside
+       14 CPU hogs; it was disabled upstream (#34184). At a load average above
+       100 (two VMs and two cargo builds beside twelve copies) 4 of 144 runs
+       hung with one child alive after the parent's `kill()`; that never came
+       back in 960 later runs (both the train before this branch and with it),
+       so the cause is unknown.
+     - The time budget's cgroup helpers (`tests/util/lib/test_runner.rs`) give
+       their `allow(dead_code)` a reason, for
+       `clippy::allow_attributes_without_reason`.
+     - parallel/test-inspector-ip-detection.js hangs at "Testing /json/list" on
+       the mini with Node.js too: every TCP connection from the host to one of
+       its own non-loopback addresses is dropped there (the application
+       firewall's "block all incoming connections" in stealth mode, and the pf
+       policy that makes it explicit), so the test's connection to its LAN
+       address never completes. Environmental; a VM runner is unaffected.
+     - User-facing note: a non-recursive `Deno.watchFs()` / `fs.watch()` reports
+       only its directory's direct children whatever else is watched;
+       `node:cluster` shares UDP sockets with its workers; `dgram`'s `reusePort`
+       works on Linux (ENOTSUP elsewhere); a datagram sent to `0.0.0.0` goes to
+       loopback.
+     - Tests: `fs_events` unit tests (a non-recursive watcher beside a recursive
+       one, with removed paths; a non-recursive file watch) and
+       `watchFsNonRecursiveBesideRecursiveAncestor` and
+       `watchFsOverlappingWatchersCloseIndependently` (hangs on the train binary
+       on Linux) in `tests/unit/fs_events_test.ts` (fails on the train binary 3
+       of 3, passes 20 of 20); `udp` unit test for the loopback rewrite;
+       `tests/unit_node/dgram_test.ts` "a send to 0.0.0.0 reaches a local
+       socket" and "reusePort"; `tsc::js` test that a build without a snapshot
+       gives the TSC isolate a transpiler. macOS: the four cluster UDP tests 60
+       of 60 each (four in parallel), the harness 5 of 5;
+       test-child-process-pass-fd.js 20 of 20 alone, 15 of 15 in the harness, 18
+       of 18 at six at once; `tests/unit_node/_fs/` whole under the `hmr` build.
+       On aarch64 Linux (Docker): `tests/unit/fs_events_test.ts` whole, the
+       non-recursive test 20 of 20, `dgram_test.ts`, every enabled
+       `test-fs-watch*` node test, the seven cluster / reuseport UDP tests,
+       test-cluster-dgram-reuse / -ipv6only / child-index-dgram and
+       test-child-process-pass-fd.js 10 of 10 each.
+     - Node tests enabled: parallel/test-cluster-dgram-1.js, -2.js, -bind-fd.js,
+       -reuseport.js, test-cluster-disconnect-unshared-udp.js,
+       test-dgram-reuseport.js, test-child-process-dgram-reuseport.js, and
+       sequential/test-child-process-pass-fd.js on macOS.
+
+486. **`fix`: the event loop polls for I/O between iterations, and async fs /
+     dns results are delivered by the loop** (runtime;
+     `libs/core/runtime/jsruntime.rs`, `libs/core/event_loop.rs`,
+     `libs/core/uv_compat.rs`, `libs/core/uv_compat/stream.rs`,
+     `libs/core/uv_compat/tcp.rs`, `runtime/tokio_util.rs`, `ext/fs/ops.rs`,
+     `ext/node/ops/fs.rs`, `ext/node/ops/dns.rs`, `ext/net/ops.rs`,
+     `ext/websocket/01_websocket.js`). Two places where the loop's phases
+     differed from libuv's.
+     - **I/O was polled once in 61 iterations.** A wake of the event loop went
+       straight to its task, which put the task back on the executor's run
+       queue, and tokio's current-thread scheduler polls its I/O driver only
+       when that queue is empty or after `event_interval` (61) task polls. A
+       loop that was woken again by the time an iteration returned (a chain of
+       immediates or ticks, a stream of I/O, async ops completing through the op
+       driver's task) saw socket and pipe readiness once in up to 61 iterations;
+       libuv polls for I/O on every iteration, with a zero timeout when it has
+       more to do. Beside a `setImmediate` chain that burns 5 ms a turn, an echo
+       on an open `node:net` socket took 122 immediates (617 ms; 2 and 12 ms in
+       Node.js) and one on a `Deno.Conn` 118; with `DENO_TOKIO_EVENT_INTERVAL=1`
+       both took 2, which is what pinned the cause.
+       sequential/test-gc-http-client.js created 648 requests before the first
+       response (Node.js about 72), which overflows macOS's 128-connection
+       listen backlog: `connect ECONNRESET`, every run.
+     - The loop's iterations now run under a waker of their own (`LoopWaker`),
+       which decides how a wake reaches the task. While the reactor could have
+       something for the loop (an async op or an external op is outstanding, or
+       a native stream handle exists, ref'd or not), a wake with no I/O poll
+       since the last iteration is handed to the scheduler, as
+       `tokio::task::yield_now` does, which wakes the task after it has polled
+       its drivers without blocking. A wake that arrives while an iteration runs
+       (the loop asking for another one) always goes that way, so I/O is polled
+       between two consecutive immediates, as in libuv; until the next iteration
+       nothing else wakes the task ahead of that poll. A wake made between
+       iterations by another task (the op driver's) takes the poll at most once
+       in 250 us, so a run of short async ops does not pay one per op, and one
+       made by the driver itself costs nothing (its wakes go out when its poll
+       returns). The rest reach the task at once: a wake after the executor
+       parked since the last iteration (the usual case: the loop waited and
+       something arrived; `deno_core::event_loop::reactor_polled()`, which the
+       runtime calls from tokio's `on_thread_unpark`, counts those), one from
+       another thread (a worker's scheduler must not hold it), one outside a
+       tokio runtime, and every wake while nothing is outstanding in the
+       reactor. Timers were never starved (a due timer is seen on the next poll)
+       and are not counted as reactor work.
+     - Cost: a non-blocking I/O poll per self-woken iteration, which is what
+       libuv pays. On the mini (macOS, load average 20 to 45 during the runs,
+       where a zero-timeout `kevent` alone measured 20 to 28 us): a pure
+       `setImmediate` chain is unchanged (0.7 to 1.5 us a turn before and after:
+       nothing is outstanding in the reactor); the same chain with an idle
+       socket open goes from 0.6 to 2 us a turn to 17 to 33 us, which is
+       Node.js's figure on the same machine (17 to 28 us); an `ab -k -c 50`
+       keep-alive benchmark is within noise (`node:http` median 9.0k before,
+       8.8k after over 8 alternating pairs; `Deno.serve` 42.7k and 44.2k; a
+       `node:http` handler that answers from `setImmediate` 11.9k and 11.3k);
+       awaited `Deno.stat()` / `Deno.readFile()` / `fs.stat()` in a loop are
+       within noise (17 to 59 us before, 18 to 59 us after per stat).
+     - **Two older bugs that prompt I/O exposed** (each fails on the train
+       before this item with `DENO_TOKIO_EVENT_INTERVAL=1`):
+       - The callback of a write that `uv_write` finished on the spot ran when
+         its handle's turn came in the ready queue, which could be after a peer
+         in the same process had read the data. libuv runs it in the pending
+         phase, before the next I/O poll (Node.js completes a plain socket's
+         write at once and a TLS socket's from an immediate), so a write's
+         callback always precedes the peer's read. An HTTP/2 server's `request`
+         listener destroyed the client's TLS socket while the client's last
+         write still looked pending, and the write failed with ECANCELED
+         (parallel/test-http2-client-jsstream-destroy.js, 40 of 40). The loop
+         now completes such TCP and pipe writes before it reads from any handle
+         and after each handle's callbacks: one pass each time, as libuv's
+         `uv__run_pending`. A write that such a callback makes, and that also
+         completes on the spot, waits for the next iteration; completed in the
+         same pass, a callback that always writes again
+         (`function w() { socket.write(chunk, w) }` on a TLS socket whose peer
+         keeps up) held the loop in its I/O phase and no timer fired. A pipe
+         handle's own poll fired write callbacks from inside its write loop,
+         with the same effect, and now collects them first, as TCP does.
+       - `WebSocket`: a close frame without a status code (and a read cancelled
+         by `Deno.serve`'s shutdown, reported the same way) was answered with a
+         close frame carrying code 1005, which is never sent (RFC 6455, 7.4.1).
+         The peer failed the connection with "Invalid close code" (an `error`
+         event, close 1006) when it read the answer, which it did whenever it
+         had not called `close()` itself by then (`websocketWriteLock` in
+         `tests/unit/websocket_test.ts`, every run). The answer now has no code.
+     - **An async op that was ready on its first poll resolved in the microtask
+       checkpoint of the call.** In a timers phase that is the checkpoint
+       between two timer lists, so the callback of an `fs` call made in one
+       timer ran before another timer due in the same phase; libuv delivers a
+       thread-pool result in the poll phase, after them. Items 476 and 482
+       deferred `fs.read` / `fs.write` / `fs.open` for this; every other async
+       op behind `node:fs` and `node:dns` was still eager. An op is ready on its
+       first poll when it fails before reaching a thread (a permission check, a
+       closed descriptor: every time), when the file system answers without one
+       (a compiled program's embedded files), and when the blocking thread
+       finishes first (a busy machine: `fs.stat` and `fs.readdir` in a timer ran
+       before the second timer in 4 to 9 of 300 rounds at twelve copies beside
+       twelve CPU hogs, in 48 of 48 runs).
+     - Now `async(deferred)` (the work still starts at the call; only the result
+       is delivered by the loop): the other 21 async ops of `ext/node/ops/fs.rs`
+       (exists, statfs, lutimes, lchown, lchmod, mkdtemp, rmdir, the descriptor
+       ops and `fs.cp`'s), `op_node_getaddrinfo` and `op_node_getnameinfo`, all
+       34 async ops of `ext/fs/ops.rs`, which `node:fs` is built on (`fs.stat`
+       is `Deno.stat`), and `op_dns_resolve` (`node:dns`'s resolver). The other
+       16 async ops of `ext/net/ops.rs` back `Deno.listen()` / `Deno.connect()`
+       / `Deno.DatagramConn` only (`node:net` and `node:dgram` have their own)
+       and stay eager: a queued connection or datagram is returned without a
+       loop turn.
+     - Also `async(deferred)`: the 20 `*_async` ops of `ext/node_crypto` (key
+       generation, pbkdf2, scrypt, hkdf, argon2, `randomFill`, the prime ops),
+       jobs of libuv's thread pool in Node.js. `crypto.randomBytes(n, cb)`
+       answered from `process.nextTick`, and `crypto.scrypt` with a zero key
+       length and `crypto.diffieHellman(options, cb)` called back during the
+       call; all three now complete through the loop. `crypto.randomInt(n, cb)`
+       called back during the call and now answers from `process.nextTick`, as
+       Node.js does. `node:dgram`: the first datagram of a burst is delivered by
+       the loop and up to 31 more that are already queued follow at once (libuv
+       reads 32 per readiness event); every queued datagram used to be received
+       from the microtask of the one before, with no loop turn while the socket
+       had one. Left eager on purpose: `op_node_udp_send` (Node.js sends with
+       `uv_udp_try_send` and calls back from `process.nextTick`) and the IPC
+       channel's read ops (Node.js handles every message of a read in one go,
+       and the channel is torn down when the child exits: one message per loop
+       turn would lose the messages still queued).
+     - **A wake made during an iteration that returned `Poll::Ready` was
+       dropped.** The held-back wake was delivered only when the iteration
+       returned `Poll::Pending`. A caller that keeps polling a loop that has
+       nothing left to wait for (a `node:worker_threads` worker idle in its
+       `message` listener, the REPL, the pump of a module load) then never
+       learned of work announced only by that wake: a V8 task posted from
+       another thread (an `Atomics.waitAsync` resolution, a
+       `FinalizationRegistry` cleanup), an inspector message, a `uv_async_send`.
+       The task is now woken in that case too.
+     - User-facing note: I/O progresses between consecutive immediates, and an
+       async `node:fs` / `node:dns` callback never runs before the timers due in
+       the phase that made the call. `Deno.stat()`, `Deno.readFile()`,
+       `Deno.resolveDns()` and the rest of the `Deno` file-system API resolve
+       through the loop every time: a call that fails its permission check, or
+       reads a compiled program's embedded file, no longer continues in the
+       microtask checkpoint of the call (one loop turn later; the order against
+       a promise chain made after the call changes, as it already did for a real
+       file).
+     - Tests: `tests/unit_node/timers_test.ts` "socket I/O progresses between
+       consecutive immediates" (122 immediates before, 2 after) and "a due timer
+       runs between consecutive immediates"; `tests/unit/timers_test.ts`
+       `ioAndTimersProgressBetweenImmediates` (`Deno.Conn`: 118 before);
+       `tests/specs/node/fs_async_completes_after_timers` (41 `node:fs` /
+       `node:dns` calls that fail before reaching a thread, each made in a timer
+       beside a second one: 33 ran before the second timer, none do);
+       `deno_core` unit tests of the waker. On macOS (release-lite, against the
+       train before this item): the real `fs.stat` / `fs.readdir` race 0 early
+       in 48 runs each under the same load; sequential/test-gc-http-client.js
+       passes (90 requests, 4.2 s); test-http2-client-jsstream-destroy.js 30 of
+       30; `tests/unit/` and `tests/unit_node/` whole, and the node_compat tests
+       named test-timers*, test-fs*, test-net*, test-dns*, test-http*, test-gc*,
+       test-child-process*, test-stream*, test-dgram*, test-tls* and test-pipe*
+       (about 2,100) with the same results as before except these, which now
+       pass: sequential/test-gc-http-client.js, -onerror.js,
+       parallel/test-gc-net-timeout.js and sequential/test-pipe.js. Three runs
+       of the test-http* set each had one to six other tests fail that passed
+       before (a different set each run, six of them 20 s timeouts started
+       together); none failed alone (20 to 60 runs each), and test-http2-pipe.js
+       fails as often before this item.
+     - Node tests enabled: parallel/test-gc-net-timeout.js (12 of 12; it failed
+       12 of 12 before). sequential/test-gc-http-client.js was enabled and
+       failed on macOS.
+
+487. **`perf(cache)`: cache databases per runtime version, and a shared DENO_DIR
+     and killed process trees in the node_compat harness** (CLI and tests;
+     `cli/cache/cache_db.rs`, `cli/cache/cache_db_files.rs`,
+     `libs/resolver/cache/deno_dir.rs`, `tests/node_compat/mod.rs`,
+     `tests/util/lib/process.rs`, `tests/util/lib/builders.rs`).
+     - **One file per version.** Each DENO_DIR cache database (the V8 code
+       cache, the module-info, node-analysis, fast-check, type-check and
+       fmt/lint incremental caches) was one file that a CLI of another version
+       wiped on open (`CacheDBConfiguration::on_version_change`). Item 28 kept
+       the fork apart from stock Deno, but denext runtimes of different versions
+       (project pins, dev builds) still alternated on one file, so every switch
+       deleted and rebuilt it (the report that started this measured
+       `run empty.cjs` at 35 ms warm and 71 ms right after another version ran,
+       on a 485 MB code cache). On the mini (debug builds, alternating with a
+       3.0.0-denext.27 release, load average 20-30): `run empty.cjs` 69 ms warm
+       and 134 ms right after the other version before, 83 and 81 ms after;
+       `test/common/index.js` 137 and 189 ms before, 117 and 127 ms after.
+       `CacheDB::from_path` now opens `<name>_<version>` (the version with
+       anything outside `[A-Za-z0-9.+-]` replaced by `_`, always starting with a
+       digit), so versions never wipe each other; `on_version_change` still
+       guards a file whose stored version differs.
+     - **Pruning.** When a version's database is created, or when it was last
+       marked used more than a day ago (its modification time is then set, by
+       path, so at most one write a day), the other versions' files of that
+       cache, and the unversioned ones of earlier builds, whose newest
+       modification time among the database and its `-wal` / `-shm` / `-journal`
+       files is 7 days old or more are removed, the database first. The running
+       version's files are never touched, and a database another process has
+       open is kept: on Unix an `F_GETLK` probe of the database and its `-shm`
+       (every connection to a WAL database holds a read lock there); on Windows
+       the removal of an open file fails. The upkeep runs on the eager-init
+       thread after the connection opens, outside its lock.
+     - **node_compat: one DENO_DIR per run.** Each test got a fresh DENO_DIR
+       (`util::deno_cmd()`), so each built a V8 code cache of `test/common/` and
+       its own file that nothing read again. The run now shares one, created and
+       warmed (one run of `test/common/index.js`) before the tests and removed
+       at the end; the cache databases are SQLite in WAL mode and rusqlite waits
+       up to 5 s on a lock, so parallel tests share them safely. A test whose
+       `env` sets `DENO_DIR`, or marked `"isolatedDenoDir": true`, gets its own;
+       `DENO_NODE_COMPAT_FRESH_DENO_DIR=1` restores a fresh one for every test.
+       Measured with the same binaries (debug, 8 tests at once, load average
+       20-30): the 340 `test-fs-*` tests took 54 s of CPU on the shared
+       directory and 77 s on fresh ones (about 68 ms per test, half of it system
+       time creating and removing the directories and databases), the 72
+       `test-buffer*` tests 17 and 22 s.
+     - **node_compat: process trees.** A test that timed out was killed alone,
+       so its children survived it and the harness (five `fixtures/loop.js`
+       processes ran for 5.5 h). Each test now leads a process group of its own
+       (Unix) or runs in a kill-on-close job object (Windows): `ProcessTree`
+       kills the whole tree on a timeout, and also when the test's own process
+       exits, before it is reaped (a zombie leader keeps the group id from being
+       reused), so leftovers never outlive a test or hold its output pipes. The
+       groups no longer get the terminal's Ctrl+C, so the harness kills every
+       live tree on SIGINT / SIGTERM / SIGHUP and when `main` ends or unwinds. A
+       grandchild that starts a session of its own (`detached: true`) still
+       escapes on Unix.
+     - Tests: `versions_alternate_without_wiping` in `cli/cache/cache_db.rs`;
+       `version_tags_and_paths`, `groups_of_a_cache`,
+       `prunes_only_stale_files_of_other_versions`,
+       `marks_used_once_a_day_and_prunes_then` and
+       `keeps_a_database_another_process_holds` (a second process holds a stale
+       database open) in `cli/cache/cache_db_files.rs`;
+       `timeout_kills_the_grandchild`, `exit_kills_a_leftover_grandchild` and
+       `kill_all_kills_live_trees` in `tests/util/lib/process.rs`; the
+       integration tests that inspect the code and type-check caches look for
+       the versioned files. The whole node_compat suite on macOS (debug, 8 at
+       once), before and after: no test that passed before fails after; the four
+       tests that failed or skipped in one run only pass alone under both
+       harnesses (load flakes); the run before left a `fixtures/loop.js` process
+       behind (from parallel/test-inspector-ip-detection.js), the run after
+       none. A first version of `ProcessTree` waited for the leader without
+       closing its stdin first (as `Child::wait` does), which hung
+       parallel/test-worker-no-stdin-stdout-interaction.js (a worker reading
+       stdin); the waiter now closes it first.
+     - User-facing note: `DENO_DIR` holds one copy of each cache database per
+       runtime version (`v8_code_cache_v2_denext_<version>`, …); runtimes used
+       side by side keep their caches, and another version's copy goes once it
+       has gone unused for 7 days.
+
+488. **`fix`: collectable `node:vm` scripts, a cheap `v8.queryObjects` count,
+     and node_compat deadlines that follow CPU starvation** (runtime and tests;
+     `ext/node/ops/vm.rs`, `ext/node/polyfills/vm.js`,
+     `libs/core/runtime/host_defined_options.rs`, `ext/node/ops/v8.rs`,
+     `ext/node/polyfills/v8.ts`, `tests/node_compat/mod.rs`,
+     `tests/util/lib/test_runner.rs`, `tests/util/lib/process.rs`).
+     - **`importModuleDynamically` leaked its script.** A `vm.Script`,
+       `compileFunction` or `SourceTextModule` compiled with the option kept its
+       callback (whose closure holds the script) as a `v8::Global` in a
+       per-runtime table nothing removed. The host-defined options now hold a
+       Symbol that `node:vm` maps to the callback in a WeakMap through one
+       dispatcher, as Node.js's module registries do, so the callback lives as
+       long as the compiled code.
+     - **`v8.queryObjects(ctor, { format: "count" })`** counts the objects whose
+       prototype chain holds `ctor.prototype` (as Node.js does) instead of
+       matching the constructor name, and reads only the fields it needs from
+       the heap snapshot instead of parsing it into a JSON tree.
+     - **Harness deadlines.** A test's deadline moves out by the time the test
+       was starved of CPU (Linux pressure stall information, the load average
+       elsewhere). The CPU-per-test scale factor and the starved time share one
+       allowance of 8 times the written timeout (they used to compound to 64
+       times). A timed-out test shows what it printed, and the output of a test
+       that exited is waited for 2 s at most, so a process that left the test's
+       process group with a pipe open cannot hang the run.
+     - Tests: `tests/unit_node/vm_test.ts`, `tests/unit_node/v8_test.ts`,
+       `extended_timeout_*` and `output_capture_*` in `tests/util/lib`.
+     - Node tests enabled: none; es-module/test-vm-contextified-script-leak.js
+       stops early again instead of compiling all 2048 scripts.
+
+489. **`perf(node)`: a `node -e` child and `deno test` load fewer builtin
+     modules** (runtime; `libs/node_shim/lib.rs`,
+     `ext/node/polyfills/01_require.js`, `ext/node/polyfills/_http_agent.js`,
+     `ext/node/polyfills/http.ts`, `ext/node/polyfills/https.ts`).
+     - A child started as `node -e <code>` / `-p` gets Node's builtin modules as
+       globals that load on first use (accessors that replace themselves, as
+       Node's `addBuiltinLibsToObject`), where the wrapper evaluated about 220
+       polyfill scripts before the string ran: 218 -> 97 lazy scripts for
+       `node -e 0`, 78 ms -> 37 ms per child (release).
+     - `closeIdleConnections()`, which `deno test` calls after every test, no
+       longer loads `node:http` / `node:https` (and `node:tls`, `fetch`, the
+       streams) to look for an agent: the modules that hold a global agent say
+       when they are loaded. The HTTP agent is `node:_http_agent`'s, which
+       `node:https` and `node:_http_client` load without `node:http`, so the
+       mark is that module's (`internals.__nodeHttpAgentLoaded`).
+     - Tests: `tests/specs/test/node_idle_connections_no_http_load`,
+       `tests/unit_node/child_process_test.ts`.
+     - Node tests enabled: none (test-buffer-constructor-node-modules-paths.js,
+       test-trace-exit.js and test-domain-abort-on-uncaught.js run 20 to 35%
+       faster in a debug build).
+
+490. **`perf`: a stack trace formatted from one read of its call sites, and file
+     operations that share the descriptor** (runtime; `libs/core/error.rs`,
+     `libs/core/00_infra.js`, `libs/core/source_map.rs`, `ext/io/lib.rs`).
+     - The default `error.stack` formatter reads a whole trace with one call of
+       `Deno.core.callSiteInfo` (the CallSite methods called from JavaScript,
+       only the ones a frame prints) where it made 14 `v8::Function::call`s per
+       frame from Rust, and prints each frame straight into the result. File
+       names are split once per runtime (`StackFileNames`: at most 256 names of
+       at most 1 KiB; a longer one, such as a `data:` URL, is split for the
+       frame and not kept). The output is unchanged, a lone surrogate in a
+       function name included (U+FFFD). `Error.prepareStackTrace` overrides do
+       not use the reader. 3000 stacks of 10 CommonJS frames: 140-160 ms ->
+       27-33 ms (release-lite, macOS arm64).
+     - An async operation on a file hands its blocking task a reference to the
+       file (`Arc<File>`) where it duplicated the descriptor and closed the
+       duplicate: two system calls fewer per operation.
+     - Tests: `stack_format_*` in `libs/core/runtime/tests/error.rs`,
+       `stack_file_names_cache_*` in `libs/core/error.rs`.
+     - Node tests enabled: none.
+
+491. **`fix(deps)`: RUSTSEC-2026-0592 — url 2.5.7 with the nested `blob:` origin
+     fix backported** (`Cargo.toml`, `Cargo.lock`, `libs/vendor/url`). url 2.5.8
+     and earlier computed the origin of a `blob:` URL by parsing its path and
+     calling `Url::origin()` on the result whatever its scheme, so a URL of
+     thousands of nested `blob:` prefixes overflowed the stack and aborted the
+     process (the Rust side's origins: `--location`, object URLs, redirect
+     checks in the module loader; the JavaScript `URL.prototype.origin` is
+     computed in `ext/web/00_url.js` and does not call it). 2.5.9 fixes it, but
+     the same release also follows newer URL Standard text that Deno's
+     specifiers are not ready for: `^` and `` ` `` in a hierarchical path are
+     percent-encoded, so `npm:/preact@^10.19.6/hooks` and `jsr:/@std/assert@^1/`
+     (import maps, `deno outdated`, the lockfile, the LSP's auto-imports) reach
+     deno_semver as `@%5E10.19.6` and fail to parse; and a `file:` URL with a
+     host and a drive letter keeps the host (`file://foo/C:` stays
+     `file://foo/C:`, which `tests/unit/url_test.ts` asserts the other way).
+     Upstream Deno still pins 2.5.7. So 2.5.7 is vendored in `libs/vendor/url`
+     (patched through `[patch.crates-io]`, its test targets dropped) with only
+     the advisory's change from 2.5.9 (servo/rust-url#1186): the inner URL's
+     origin is taken only for `http`, `https` and `file`, and any other inner
+     scheme, `blob` included, is an opaque origin, as the URL Standard says.
+     `blob:ws://…` and `blob:blob:https://…` now have an opaque origin
+     (`"null"`) where they had a tuple one. `cargo audit` matches on the version
+     alone and still reports the vendored 2.5.7, so `.cargo/audit.toml` ignores
+     RUSTSEC-2026-0592 under a condition `audit_ignores.py` checks: the
+     cargo-audit job fails once `url` comes from a registry again or
+     `libs/vendor/url/src/origin.rs` no longer carries the backport. Remove the
+     vendored copy once the specifier parsers accept the percent-encoded form
+     and `url_test.ts` / the WPT expectations take 2.5.9's WHATWG behaviour.
+     - Tests: `object_url_origin_of_a_nested_blob_location` in
+       `ext/web/blob.rs`; `audit_ignores_test.py`'s `Vendored` cases (the
+       vendored copy with the backport passes, a registry `url`, no `url`, a
+       missing or unmarked `origin.rs` fail, no ignore means no failure).
+     - Also in this round, for the release gate: the Windows-only
+       `cfg_attr(not(unix), allow(…))` on `with_open_scope` in
+       `runtime/permissions/lib.rs` names its reason (clippy's
+       `allow_attributes_without_reason`); `kernel_sandbox/warn/child.ts` spawns
+       `cat` with `clearEnv` and a fixed PATH, since a GitHub-hosted macOS
+       runner sets `DYLD_FALLBACK_LIBRARY_PATH`, which a scoped `--allow-run`
+       refuses to pass to a child; and every `actions/attest-build-provenance`
+       step in `denext_runtime.yml` is tried once more after 30 s when it fails,
+       as Sigstore's transparency log sometimes answers 404 for an entry it has
+       just written. On Windows, `dgram`'s `reusePort` and `{ fd }` refusals
+       carry ERROR_NOT_SUPPORTED, so they report ENOTSUP as libuv does (an
+       `ErrorKind::Unsupported` without an OS error number was reported as
+       ENOSYS); and `Deno.openPty` creates its child with this process's
+       ignore-Ctrl+C flag cleared (set again right after), since a Deno started
+       with Ctrl+C ignored (CREATE_NEW_PROCESS_GROUP; Windows OpenSSH sessions
+       and the GitHub-hosted runner's steps are) passed the flag on to the shell
+       and every command it ran, so Ctrl+C typed into the terminal stopped
+       nothing.
+     - Node tests enabled: none.
+
+492. **`ci(denext)`: a targeted `denext tests` run checks one fix in minutes**
+     (CI; `.github/workflows/denext_tests.yml`, `denext_tests_os.yml`,
+     `.github/denext-runtime/targeted_tests.py`, `tag_gate.py`,
+     `guard_verified.py`, their tests, `tools/denext/targeted_test.ts`,
+     `tools/README.md`). Checking whether a fix took meant a full
+     `denext
+     tests` run: about 65 jobs on six legs and about three hours,
+     once per fix. A dispatch with the new `only` input runs only the named
+     tests, on the legs the new `os` input names:
+     - `only` is a list of `<suite>[:<filter>]` items separated by spaces or
+       newlines: `specs:kernel_sandbox::policy::config`, `unit:pty_test`,
+       `unit_node:dgram_test`, `integration:<filter>`, `node_compat:<file>`, and
+       `libs:<crate>[:<filter>]` (`libs:deno_permissions:kernel_broker::net`). A
+       test item runs `cargo test -p <package> --test <suite> -- <filter>` (the
+       harness's substring filter, in one job, unsharded; with no filter the
+       suite runs whole). A lib item runs
+       `cargo test --locked --lib -p
+       <crate> -p deno_v8 [-- <filter>]`
+       (deno_v8 for its `v8` feature, as in `Test libs`; deno_core, serde_v8 and
+       deno_ops alone, as in `Test core
+       libs`) in the leg's one
+       `test libs` job. `os` takes `linux`, `linux-arm`, `macos`, `macos-x64`,
+       `windows` and `windows-arm`, comma-separated (default `linux`). The
+       `full`, `macos` and `windows` inputs are ignored; `macos_runner` still
+       applies.
+     - Each selected leg runs its `targeted plan` job (which checks `only`), its
+       debug build (the same build job and artifact), and then only the selected
+       jobs, on the runners the leg's picker chooses for those suites. Lint,
+       cargo audit, the other suites and shards, the macOS LaunchServices test
+       and the webrtc mDNS test are skipped. A `targeted run marker` job checks
+       both inputs and lists what each leg runs. The run's title (`run-name`) is
+       `denext tests (targeted: <only> on <os>)`, and it has a concurrency group
+       of its own, so it neither waits behind nor replaces a pending full
+       dispatch of the same ref.
+     - The release gate and the verified-SHA guard leave a targeted run out: it
+       never vouches (even on all six legs, where each leg has a passed build
+       job), a red one blocks nothing, and one still going is not waited for.
+       They recognise one by its event and title together: a `workflow_dispatch`
+       whose title starts with `denext tests (targeted:`. A dispatch's title can
+       come only from the workflow file's `run-name` and the inputs. A push's
+       title is its commit message, so a push is never taken as targeted. The
+       title is on the run from its creation, so the check also works for a run
+       with no jobs.
+     - With `only` empty, every changed condition reduces to its old form: each
+       is `(old)` or `inputs.only == '' && (old)` with the targeted branch
+       false. `run-name` evaluates to `''`, for which GitHub keeps the event's
+       default title. A push or a full or OS-picked dispatch runs the same jobs
+       with the same commands as before. The only visible difference is that the
+       new `targeted run marker` and `targeted plan` jobs show as skipped.
+     - `tools/denext/targeted_test.ts` pushes the commit to a throwaway
+       `pretest/targeted-<sha12>-<time>` branch (the Windows pools serve
+       `pretest/*`, and no workflow runs on a push to one) and dispatches there.
+       That keeps the release candidate's own run list free of diagnostics,
+       although the gate ignores them.
+     - User-facing note: none; CI only.
+     - Tests: `targeted_tests_test.py` (the syntax and its refusals, the plan,
+       and that its suite, crate and leg lists match the workflows),
+       `tag_gate_test.py` and `guard_verified_test.py` (a targeted run never
+       vouches, even on every leg; a red or running one does not block or hold a
+       tag; a push titled like one still counts), all run by the lint job;
+       `tools/denext/targeted_test_test.ts` (the dispatcher).
+     - Node tests enabled: none, because this is CI only.
 
 478. **`feat(ext/webrtc)`: WebRTC WPT-100: the next round of the
      web-platform-tests, in ten streams** (`webrtc/wpt-100`; runtime and tests;
@@ -20005,23 +20942,7 @@ where the changes are discussed.
        secure store and sidecars (the updater's swap is noted, not run: see the
        gap); `tests/specs/run/desktop_ops_inert` (`op_desktop_open_external`),
        `tests/specs/check/desktop_types`.
-     - Node tests enabled: none. The runtime-side parts (1-3, 5-22, 24, 25, 27,
-       32-37, 41-45, 50, 52, 60-62, 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97,
-       99-102, 104, 105, 109, 110, 113, 118, 119, 126, 127, 129, 136, 137,
-       144-148, 150, 153, 158-160, 162, 164-167, 169-174, 176, 178, 180,
-       182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207, 209-215, 217,
-       218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240, 243-245,
-       247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304, 306-310,
-       312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
-       350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387,
-       388, 389, 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409,
-       410, 411, 412, 415, 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438,
-       439, 441, 446, 447, 448, 449, 450, 452, 455, 457, 460-468, 470, 472-479,
-       484, 486-489, 491-495) are what the prebuilt `libdenort` carries. The
-       CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
-       `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too,
-       but a stock CLI does not run them; denext's own launcher provides that
-       environment.
+     - Node tests enabled: none.
 
 490. **`fix(kernel)`: a confined run's Node compile cache gets its key from the
      image before the re-exec** (CLI and runtime; denext-only; denext.30
@@ -20161,6 +21082,22 @@ where the changes are discussed.
        `permission::proc_sys_classes::allow_all_deny_read` (its expected output
        now says `NotCapable` for `/proc/self/environ`).
      - Node tests enabled: none.
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
+64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
+118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
+169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
+209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
+243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-304,
+306-310, 312, 314, 315, 320-322, 326-328, 332-334, 336, 337, 339, 340, 342, 348,
+350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
+390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
+416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
+449, 450, 452, 455, 457, 460-468, 470, 472-495) are what the prebuilt
+`libdenort` carries. The CLI-side parts (for example writing
+`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
+in the branch too, but a stock CLI does not run them; denext's own launcher
+provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

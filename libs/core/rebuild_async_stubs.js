@@ -11,12 +11,12 @@ function __TEMPLATE__(__ARGS_PARAM__) {
     // deno-fmt-ignore
     const maybeResult = __OP__.call(this, __ARGS__);
     if (maybeResult !== undefined) {
-      return PromiseResolve(maybeResult);
+      return resolveOpPromise(maybeResult);
     }
   } catch (err) {
     __ERR__;
     ErrorCaptureStackTrace(err, __TEMPLATE__);
-    return PromiseReject(err);
+    return rejectOpPromise(err);
   }
   if (isLeakTracingEnabled) {
     submitLeakTrace(id);

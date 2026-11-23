@@ -1,0 +1,11 @@
+crypto.randomBytes: after the second timer
+crypto.randomFill: after the second timer
+crypto.scrypt (no key): after the second timer
+crypto.diffieHellman: after the second timer
+crypto.pbkdf2: after the second timer
+crypto.scrypt: after the second timer
+crypto.hkdf: after the second timer
+crypto.generateKey: after the second timer
+crypto.generateKeyPair: after the second timer
+crypto.checkPrime: after the second timer
+crypto.generatePrime: after the second timer

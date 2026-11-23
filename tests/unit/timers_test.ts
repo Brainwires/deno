@@ -983,6 +983,72 @@ Deno.test({
   },
 });
 
+// An aborted AbortSignal.any() never fires again: its listeners must not keep
+// its other timeout sources (and the event loop) alive. Node exits here.
+Deno.test({
+  name: "AbortSignal.any() of timeouts releases the later timer once aborted",
+  permissions: { run: true, read: true },
+  fn: async () => {
+    const [statusCode, output] = await execCode(`
+      const signal = AbortSignal.any([
+        AbortSignal.timeout(100),
+        AbortSignal.timeout(2000),
+      ]);
+      signal.addEventListener("abort", () => console.log("aborted"));
+
+      Deno.unrefTimer(
+        setTimeout(() => console.log("Unexpected: Unref timer"), 1500)
+      );
+    `);
+    assertEquals(statusCode, 0);
+    assertEquals(output, "aborted\n");
+  },
+});
+
+// The same with a once listener (as `events.once()` adds), which the event
+// target drops without going through removeEventListener.
+Deno.test({
+  name: "AbortSignal.any() of timeouts with a once listener releases the timer",
+  permissions: { run: true, read: true },
+  fn: async () => {
+    const [statusCode, output] = await execCode(`
+      const signal = AbortSignal.any([
+        AbortSignal.timeout(100),
+        AbortSignal.timeout(2000),
+      ]);
+      signal.addEventListener("abort", () => console.log("aborted"), {
+        once: true,
+      });
+
+      Deno.unrefTimer(
+        setTimeout(() => console.log("Unexpected: Unref timer"), 1500)
+      );
+    `);
+    assertEquals(statusCode, 0);
+    assertEquals(output, "aborted\n");
+  },
+});
+
+// A listener removed from a timeout source leaves the timer refed while an
+// AbortSignal.any() over it still listens.
+Deno.test({
+  name:
+    "AbortSignal.timeout() stays refed for a listening AbortSignal.any() after its own listener goes",
+  permissions: { run: true, read: true },
+  fn: async () => {
+    const [statusCode, output] = await execCode(`
+      const timeout = AbortSignal.timeout(500);
+      const signal = AbortSignal.any([timeout]);
+      signal.addEventListener("abort", () => console.log("aborted"));
+      const own = () => {};
+      timeout.addEventListener("abort", own);
+      timeout.removeEventListener("abort", own);
+    `);
+    assertEquals(statusCode, 0);
+    assertEquals(output, "aborted\n");
+  },
+});
+
 Deno.test({
   name: "AbortSignal.timeout() with large delay does not abort immediately",
   fn: async () => {
@@ -1044,4 +1110,64 @@ Deno.test({
   fn: () => {
     AbortSignal.timeout(2000);
   },
+});
+
+// A chain of immediates used to starve the reactor, which was polled once in
+// 61 loop iterations: a `Deno.Conn` echo took about 118 immediates. A due
+// timer is checked beside it (timers were not starved).
+Deno.test(async function ioAndTimersProgressBetweenImmediates() {
+  const listener = Deno.listen({ hostname: "127.0.0.1", port: 0 });
+  const echo = (async () => {
+    const conn = await listener.accept();
+    const buf = new Uint8Array(16);
+    while (true) {
+      const n = await conn.read(buf);
+      if (n === null) break;
+      await conn.write(buf.subarray(0, n));
+    }
+    conn.close();
+  })();
+  const client = await Deno.connect({
+    hostname: "127.0.0.1",
+    port: (listener.addr as Deno.NetAddr).port,
+  });
+
+  let ticks = 0;
+  let done = false;
+  const chain = () => {
+    ticks++;
+    const end = performance.now() + 5;
+    while (performance.now() < end);
+    if (!done) setImmediate(chain);
+  };
+  setImmediate(chain);
+
+  const echoTicks: number[] = [];
+  const timerTicks: number[] = [];
+  try {
+    const buf = new Uint8Array(16);
+    for (let i = 0; i < 5; i++) {
+      let start = ticks;
+      await client.write(new Uint8Array([1]));
+      await client.read(buf);
+      echoTicks.push(ticks - start);
+
+      start = ticks;
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      timerTicks.push(ticks - start);
+    }
+  } finally {
+    done = true;
+    client.close();
+    await echo;
+    listener.close();
+  }
+  assert(
+    Math.max(...echoTicks) <= 16,
+    `an echo took ${echoTicks} immediates; it should take a few`,
+  );
+  assert(
+    Math.max(...timerTicks) <= 8,
+    `a 1 ms timer took ${timerTicks} immediates; it should take one or two`,
+  );
 });

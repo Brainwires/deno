@@ -30,6 +30,11 @@ are dispatched from either: 3.0.0-denext.22 ran on `train/denext22`).
 And never when any run of this workflow on the commit failed, timed out or
 failed to start (tag_gate.py's RED): the full run goes ahead and shows it.
 
+A targeted `denext tests` run (a dispatch with `only`, tag_gate.py's
+`is_targeted`: the selected tests on the selected legs, a diagnostic) is left
+out as the release gate leaves it out: it never vouches, even when it ran on
+every leg, a red one doesn't count, and one still going is not waited for.
+
 Two cases of a run that is still going (3.0.0-denext.27: the branch was
 pushed with the tag, four minutes before the train's own runtime run of the
 commit ended, and a second full build of it held the one Intel Mac slot for
@@ -163,11 +168,14 @@ def may_vouch(workflow, run):
 
 
 def others(sha, own_run, runs):
-    """The commit's runs of the workflow, this run left out."""
+    """The commit's runs of the workflow, this run and every targeted run
+    (tag_gate.py's `is_targeted`) left out."""
     return [
         r
         for r in runs
-        if r.get("head_sha") == sha and str(r.get("id")) != str(own_run or "")
+        if r.get("head_sha") == sha
+        and str(r.get("id")) != str(own_run or "")
+        and not tag_gate.is_targeted(r.get("event"), r.get("display_title"))
     ]
 
 
@@ -245,7 +253,8 @@ def gh_runs(repo, workflow, sha):
                 f"?head_sha={sha}&per_page=100",
                 "--jq",
                 ".workflow_runs[]"
-                " | {id, event, head_branch, head_sha, status, conclusion}",
+                " | {id, event, head_branch, head_sha, status, conclusion,"
+                " display_title}",
             ]
         )
     ]

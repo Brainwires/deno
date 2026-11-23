@@ -27,6 +27,8 @@ use super::stream::uv_alloc_cb;
 use super::stream::uv_buf_t;
 use super::stream::uv_read_cb;
 use super::stream::uv_stream_t;
+use super::stream::uv_write_cb;
+use super::stream::uv_write_t;
 use super::tcp::WritePending;
 use super::tcp::io_error_to_uv;
 use super::uv_handle_t;
@@ -48,6 +50,10 @@ pub struct uv_pipe_t {
   /// their descriptors through Tokio wrappers.
   #[cfg(unix)]
   pub(crate) internal_fd: Option<RawFd>,
+  /// denext: this handle's claim on `internal_fd` (see [`RawFdClaim`]).
+  /// Revoked once another handle of the thread opens the same descriptor.
+  #[cfg(unix)]
+  pub(crate) internal_fd_claim: Option<std::rc::Rc<RawFdClaim>>,
   /// A non-owning reactor registration for `internal_fd`.
   #[cfg(unix)]
   pub(crate) internal_async_fd: Option<tokio::io::unix::AsyncFd<RawFdWrapper>>,
@@ -169,6 +175,56 @@ impl uv_pipe_t {
       })
   }
 
+  /// denext: the descriptor this handle closes when it is closed: [`fd`]
+  /// unless another handle has since opened the raw descriptor and so owns
+  /// it now (see [`RawFdClaim`]). `fd` still reports the number then, as
+  /// libuv does, but it is only an alias.
+  ///
+  /// [`fd`]: uv_pipe_t::fd
+  #[cfg(unix)]
+  pub fn owned_fd(&self) -> Option<RawFd> {
+    if self.internal_stream.is_none()
+      && self.internal_listener.is_none()
+      && self.internal_fd.is_some()
+      && self.raw_fd_claim_revoked()
+    {
+      return None;
+    }
+    self.fd()
+  }
+
+  #[cfg(unix)]
+  fn raw_fd_claim_revoked(&self) -> bool {
+    self
+      .internal_fd_claim
+      .as_ref()
+      .is_some_and(|claim| claim.revoked.get())
+  }
+
+  /// denext: the descriptor a Tokio stream, listener or pending connect of
+  /// this handle owns, if any.
+  #[cfg(unix)]
+  pub(crate) fn tokio_owned_fd(&self) -> Option<RawFd> {
+    use std::os::unix::io::AsRawFd;
+
+    self
+      .internal_stream
+      .as_ref()
+      .map(|stream| stream.as_raw_fd())
+      .or_else(|| {
+        self
+          .internal_listener
+          .as_ref()
+          .map(|listener| listener.as_raw_fd())
+      })
+      .or_else(|| {
+        self
+          .internal_connect
+          .as_ref()
+          .and_then(|pending| pending.raw_fd)
+      })
+  }
+
   /// Get the bind path if one was set.
   pub fn bind_path(&self) -> Option<&str> {
     self.internal_bind_path.as_deref()
@@ -244,6 +300,106 @@ impl std::os::unix::io::AsRawFd for RawFdWrapper {
   }
 }
 
+/// denext: which pipe handle owns a raw descriptor (`internal_fd`).
+///
+/// libuv lets a second handle open the descriptor of a handle that is not
+/// yet active: `new Pipe()`, `bind()`, then `net.Socket({ fd: pipe.fd })`,
+/// which is what `test-net-connect-options-fd` does. Both handles then hold
+/// the same number, and with libuv each closes it (the second close fails
+/// with EBADF, or closes whatever reused the number). Here a descriptor has
+/// one owner: the handle that opened it last. Opening a descriptor revokes
+/// the claim of the handle that held it, which keeps reporting the number
+/// (`fd`) but no longer closes it or hands it to a stream or listener.
+///
+/// Claims are per thread, like the handles of a loop. A handle freed without
+/// `uv_close` leaves a dead `Weak` behind, which the next claim on that
+/// number replaces.
+#[cfg(unix)]
+pub(crate) struct RawFdClaim {
+  revoked: std::cell::Cell<bool>,
+}
+
+#[cfg(unix)]
+thread_local! {
+  static RAW_FD_CLAIMS: std::cell::RefCell<
+    std::collections::HashMap<RawFd, std::rc::Weak<RawFdClaim>>,
+  > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// denext: make `pipe` the owner of the raw descriptor `fd`, revoking the
+/// claim of the handle that owned it until now.
+///
+/// # Safety
+/// `pipe` must be a valid pointer to an initialized `uv_pipe_t`.
+#[cfg(unix)]
+unsafe fn claim_raw_fd(pipe: *mut uv_pipe_t, fd: RawFd) {
+  let claim = std::rc::Rc::new(RawFdClaim {
+    revoked: std::cell::Cell::new(false),
+  });
+  let previous = RAW_FD_CLAIMS
+    .try_with(|claims| {
+      claims
+        .borrow_mut()
+        .insert(fd, std::rc::Rc::downgrade(&claim))
+    })
+    .ok()
+    .flatten();
+  if let Some(previous) = previous.and_then(|previous| previous.upgrade()) {
+    previous.revoked.set(true);
+  }
+  // SAFETY: the caller guarantees `pipe` is valid.
+  unsafe {
+    (*pipe).internal_fd = Some(fd);
+    (*pipe).internal_fd_claim = Some(claim);
+  }
+}
+
+/// denext: take the raw descriptor out of `pipe`. Returns it only when the
+/// handle still owns it; a handle whose claim was revoked just forgets the
+/// number.
+///
+/// # Safety
+/// `pipe` must be a valid pointer to an initialized `uv_pipe_t`.
+#[cfg(unix)]
+unsafe fn release_raw_fd(pipe: *mut uv_pipe_t) -> Option<RawFd> {
+  // SAFETY: the caller guarantees `pipe` is valid.
+  let (fd, claim) = unsafe {
+    (
+      (*pipe).internal_fd.take()?,
+      (*pipe).internal_fd_claim.take(),
+    )
+  };
+  let Some(claim) = claim else {
+    return Some(fd);
+  };
+  let _ = RAW_FD_CLAIMS.try_with(|claims| {
+    let mut claims = claims.borrow_mut();
+    if claims
+      .get(&fd)
+      .is_some_and(|current| current.as_ptr() == std::rc::Rc::as_ptr(&claim))
+    {
+      claims.remove(&fd);
+    }
+  });
+  (!claim.revoked.get()).then_some(fd)
+}
+
+/// denext: libuv's `uv__fd_exists` for `uv_pipe_open`: whether an active
+/// handle of the pipe's loop already drives `fd`.
+///
+/// # Safety
+/// `pipe` must be a valid pointer to an initialized `uv_pipe_t`.
+#[cfg(unix)]
+unsafe fn fd_exists_in_loop(pipe: *mut uv_pipe_t, fd: RawFd) -> bool {
+  // SAFETY: the caller guarantees `pipe` is valid; a non-null `loop_` was
+  // set by `uv_pipe_init` from an initialized loop.
+  unsafe {
+    let loop_ = (*pipe).loop_;
+    !loop_.is_null()
+      && super::get_inner(loop_).fd_exists(fd, pipe as *const c_void)
+  }
+}
+
 pub fn new_pipe(ipc: bool) -> uv_pipe_t {
   uv_pipe_t {
     r#type: uv_handle_type::UV_NAMED_PIPE,
@@ -252,6 +408,8 @@ pub fn new_pipe(ipc: bool) -> uv_pipe_t {
     flags: 0,
     #[cfg(unix)]
     internal_fd: None,
+    #[cfg(unix)]
+    internal_fd_claim: None,
     #[cfg(unix)]
     internal_async_fd: None,
     #[cfg(windows)]
@@ -315,11 +473,19 @@ pub unsafe fn uv_pipe_init(
 /// # Safety
 /// `pipe` must be a valid pointer to an initialized `uv_pipe_t`.
 /// `fd` must be a valid OS file descriptor. Ownership of the fd transfers
-/// to the pipe handle -- closing the handle closes the fd.
+/// to the pipe handle -- closing the handle closes the fd. If another pipe
+/// handle of the thread held the descriptor (a bound pipe whose `fd` was
+/// passed here), it stops owning it: see [`RawFdClaim`]. A descriptor an
+/// active handle of the loop drives through a stream or a listener is
+/// refused with `UV_EEXIST`, as libuv does.
 #[cfg(unix)]
 pub unsafe fn uv_pipe_open(pipe: *mut uv_pipe_t, fd: c_int) -> c_int {
   if fd < 0 {
     return UV_EBADF;
+  }
+  // SAFETY: the caller guarantees `pipe` is valid.
+  if unsafe { fd_exists_in_loop(pipe, fd) } {
+    return super::UV_EEXIST;
   }
 
   // Set non-blocking mode.
@@ -332,7 +498,7 @@ pub unsafe fn uv_pipe_open(pipe: *mut uv_pipe_t, fd: c_int) -> c_int {
   }
 
   unsafe {
-    (*pipe).internal_fd = Some(fd);
+    claim_raw_fd(pipe, fd);
     // Create AsyncFd eagerly so the reactor tracks this fd from the
     // start. This avoids edge-triggered readiness races where creating
     // AsyncFd lazily can miss events that fired before registration.
@@ -532,6 +698,10 @@ pub unsafe fn uv_pipe_open_listener(pipe: *mut uv_pipe_t, fd: c_int) -> c_int {
   if fd < 0 {
     return UV_EBADF;
   }
+  // SAFETY: the caller guarantees `pipe` is valid.
+  if unsafe { fd_exists_in_loop(pipe, fd) } {
+    return super::UV_EEXIST;
+  }
   unsafe {
     // Set non-blocking mode (tokio's `from_std` requires it).
     let flags = libc::fcntl(fd, libc::F_GETFL);
@@ -543,7 +713,7 @@ pub unsafe fn uv_pipe_open_listener(pipe: *mut uv_pipe_t, fd: c_int) -> c_int {
     }
     // Record the fd so uv_pipe_listen can adopt it. Crucially, do not create
     // an AsyncFd here (see the doc comment above).
-    (*pipe).internal_fd = Some(fd);
+    claim_raw_fd(pipe, fd);
   }
   0
 }
@@ -680,7 +850,7 @@ pub unsafe fn uv_pipe_bind(pipe: *mut uv_pipe_t, path: &str) -> c_int {
         return io_error_to_uv(&err);
       }
 
-      (*pipe).internal_fd = Some(fd);
+      claim_raw_fd(pipe, fd);
     }
 
     // Record the bound path only after the bind succeeds. libuv stores the
@@ -708,6 +878,10 @@ pub unsafe fn uv_pipe_listen(
       Some(fd) => fd,
       None => return super::UV_EINVAL,
     };
+    // Another handle opened this descriptor since and owns it now.
+    if (*pipe).raw_fd_claim_revoked() {
+      return UV_EBADF;
+    }
 
     // Start listening on the raw socket.
     let backlog = if _backlog > 0 { _backlog } else { 128 };
@@ -724,10 +898,8 @@ pub unsafe fn uv_pipe_listen(
     // Transfer ownership to the Tokio listener. From this point onward,
     // dropping either the std or Tokio wrapper closes the descriptor.
     use std::os::unix::io::FromRawFd;
-    let fd = (*pipe)
-      .internal_fd
-      .take()
-      .expect("pipe descriptor disappeared before listen");
+    let fd =
+      release_raw_fd(pipe).expect("pipe descriptor disappeared before listen");
     let std_listener = std::os::unix::net::UnixListener::from_raw_fd(fd);
     let listener = match tokio::net::UnixListener::from_std(std_listener) {
       Ok(l) => l,
@@ -797,14 +969,14 @@ pub unsafe fn uv_pipe_connect(
 
   // If the pipe has a pre-bound fd (from uv_pipe_bind), transfer it to a
   // std UnixStream captured by the connect future. The future then owns the
-  // descriptor until it either becomes a Tokio stream or is dropped.
+  // descriptor until it either becomes a Tokio stream or is dropped. A
+  // descriptor another handle has opened since is that handle's: this one
+  // connects a fresh socket instead.
   let bound_stream = unsafe {
     use std::os::unix::io::FromRawFd;
 
     (*pipe).internal_async_fd = None;
-    (*pipe)
-      .internal_fd
-      .take()
+    release_raw_fd(pipe)
       .map(|fd| std::os::unix::net::UnixStream::from_raw_fd(fd))
   };
   // std / Tokio refuse a path longer than `sun_path`; the kernel may still
@@ -1399,7 +1571,9 @@ pub(crate) unsafe fn close_pipe(pipe: *mut uv_pipe_t) {
       (*pipe).internal_listener = None;
       (*pipe).internal_backlog.clear();
 
-      if let Some(fd) = (*pipe).internal_fd.take() {
+      // Only the owner closes: a handle whose descriptor another handle
+      // opened since (see `RawFdClaim`) leaves it alone.
+      if let Some(fd) = release_raw_fd(pipe) {
         libc::close(fd);
       }
     }
@@ -1669,6 +1843,36 @@ unsafe fn maybe_spawn_win_read(pipe_ptr: *mut uv_pipe_t) {
   }
 }
 
+/// Fires the callbacks of the writes at the head of the handle's queue that
+/// `uv_write` already wrote in full, and returns whether there were any (see
+/// `UvLoopInner::complete_written_writes`).
+///
+/// ### Safety
+/// `pipe_ptr` must be a live, initialized handle.
+pub(crate) unsafe fn complete_written_writes(pipe_ptr: *mut uv_pipe_t) -> bool {
+  let mut completed_writes: Vec<(*mut uv_write_t, Option<uv_write_cb>, c_int)> =
+    Vec::new();
+  // SAFETY: caller contract.
+  unsafe {
+    while let Some(status) = (*pipe_ptr)
+      .internal_write_queue
+      .front()
+      .and_then(|pw| pw.status)
+    {
+      let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
+      completed_writes.push((pw.req, pw.cb, status));
+    }
+    let any = !completed_writes.is_empty();
+    // No outstanding borrows on the handle: a callback may queue a write.
+    for (req, cb, status) in completed_writes {
+      if let Some(cb) = cb {
+        cb(req, status);
+      }
+    }
+    any
+  }
+}
+
 /// Poll a Windows pipe handle for connects, accepts, reads, and writes.
 #[cfg(windows)]
 pub(crate) unsafe fn poll_pipe_handle(
@@ -1748,13 +1952,23 @@ pub(crate) unsafe fn poll_pipe_handle(
     }
 
     // 3. Poll writes.
+    //    Two phases, as for TCP and as libuv's uv__write() and
+    //    uv__write_callbacks(): the loop writes and collects the completed
+    //    writes, and their callbacks run after it. A callback may write
+    //    again; that write is queued (the handle is marked ready) and is
+    //    polled on the next iteration. Fired from inside the loop, a callback
+    //    that always wrote again kept the loop here for as long as the peer
+    //    read faster than it wrote.
+    let mut completed_writes: Vec<(
+      *mut uv_write_t,
+      Option<uv_write_cb>,
+      c_int,
+    )> = Vec::new();
     while let Some(pw) = (*pipe_ptr).internal_write_queue.front() {
       if let Some(status) = pw.status {
         any_work = true;
         let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
-        if let Some(cb) = pw.cb {
-          cb(pw.req, status);
-        }
+        completed_writes.push((pw.req, pw.cb, status));
         continue;
       }
       // Try writing to whichever pipe type we have.
@@ -1764,9 +1978,7 @@ pub(crate) unsafe fn poll_pipe_handle(
         if s.is_empty() {
           let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
           any_work = true;
-          if let Some(cb) = pw.cb {
-            cb(pw.req, 0);
-          }
+          completed_writes.push((pw.req, pw.cb, 0));
           continue;
         }
         s
@@ -1810,9 +2022,7 @@ pub(crate) unsafe fn poll_pipe_handle(
           };
           if drained {
             let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
-            if let Some(cb) = pw.cb {
-              cb(pw.req, 0);
-            }
+            completed_writes.push((pw.req, pw.cb, 0));
           }
         }
         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1820,10 +2030,14 @@ pub(crate) unsafe fn poll_pipe_handle(
         }
         Err(ref e) => {
           let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
-          if let Some(cb) = pw.cb {
-            cb(pw.req, io_error_to_uv(e));
-          }
+          completed_writes.push((pw.req, pw.cb, io_error_to_uv(e)));
         }
+      }
+    }
+    // No outstanding borrows on the handle: a callback may queue a write.
+    for (req, cb, status) in completed_writes {
+      if let Some(cb) = cb {
+        cb(req, status);
       }
     }
 
@@ -2096,14 +2310,24 @@ pub(crate) unsafe fn poll_pipe_handle(
     }
 
     // 3. Poll writes.
+    //    Two phases, as for TCP and as libuv's uv__write() and
+    //    uv__write_callbacks(): the loop writes and collects the completed
+    //    writes, and their callbacks run after it. A callback may write
+    //    again; that write is queued (the handle is marked ready) and is
+    //    polled on the next iteration. Fired from inside the loop, a callback
+    //    that always wrote again kept the loop here for as long as the peer
+    //    read faster than it wrote.
+    let mut completed_writes: Vec<(
+      *mut uv_write_t,
+      Option<uv_write_cb>,
+      c_int,
+    )> = Vec::new();
     while let Some(pw) = (*pipe_ptr).internal_write_queue.front() {
       // If already completed synchronously, just fire the callback.
       if let Some(status) = pw.status {
         any_work = true;
         let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
-        if let Some(cb) = pw.cb {
-          cb(pw.req, status);
-        }
+        completed_writes.push((pw.req, pw.cb, status));
         continue;
       }
       // When iovecs are set, walk them one head-at-a-time; otherwise
@@ -2115,9 +2339,7 @@ pub(crate) unsafe fn poll_pipe_handle(
           // Fully drained — pop and fire callback.
           let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
           any_work = true;
-          if let Some(cb) = pw.cb {
-            cb(pw.req, 0);
-          }
+          completed_writes.push((pw.req, pw.cb, 0));
           continue;
         }
         s
@@ -2195,9 +2417,7 @@ pub(crate) unsafe fn poll_pipe_handle(
           };
           if drained {
             let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
-            if let Some(cb) = pw.cb {
-              cb(pw.req, 0);
-            }
+            completed_writes.push((pw.req, pw.cb, 0));
           }
         }
         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -2222,10 +2442,14 @@ pub(crate) unsafe fn poll_pipe_handle(
         }
         Err(ref e) => {
           let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
-          if let Some(cb) = pw.cb {
-            cb(pw.req, io_error_to_uv(e));
-          }
+          completed_writes.push((pw.req, pw.cb, io_error_to_uv(e)));
         }
+      }
+    }
+    // No outstanding borrows on the handle: a callback may queue a write.
+    for (req, cb, status) in completed_writes {
+      if let Some(cb) = cb {
+        cb(req, status);
       }
     }
 

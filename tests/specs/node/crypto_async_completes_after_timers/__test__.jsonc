@@ -1,0 +1,8 @@
+{
+  // A `node:crypto` call that takes a callback never completes before
+  // another timer that is due in the same timers phase, also when its result
+  // is ready at once (`--seed` makes the random bytes of `randomFill` ready
+  // on the op's first poll).
+  "args": "run --seed 1 main.cjs",
+  "output": "main.out"
+}

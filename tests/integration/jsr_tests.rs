@@ -20,7 +20,16 @@ fn fast_check_cache() {
   let test_context = TestContextBuilder::for_jsr().use_temp_cwd().build();
   let deno_dir = test_context.deno_dir();
   let temp_dir = test_context.temp_dir();
-  let type_check_cache_path = deno_dir.path().join("check_cache_v2_denext");
+  // denext: one file per runtime version (`check_cache_v2_denext_<version>`)
+  let remove_type_check_cache = || {
+    for entry in std::fs::read_dir(deno_dir.path()).unwrap() {
+      let path = entry.unwrap().path();
+      let name = path.file_name().unwrap().to_string_lossy();
+      if name.starts_with("check_cache_v2_denext_") {
+        std::fs::remove_file(&path).unwrap();
+      }
+    }
+  };
 
   temp_dir.write(
     "main.ts",
@@ -38,7 +47,7 @@ fn fast_check_cache() {
     .run()
     .skip_output_check();
 
-  type_check_cache_path.remove_file();
+  remove_type_check_cache();
   let check_debug_cmd = test_context
     .new_command()
     .args("check --log-level=debug main.ts");
@@ -70,7 +79,7 @@ fn fast_check_cache() {
   assert_contains!(output.combined_output(), "Already type checked");
 
   // now validated
-  type_check_cache_path.remove_file();
+  remove_type_check_cache();
   let output = check_debug_cmd.run();
   let building_fast_check_msg = "Building fast check graph";
   assert_contains!(output.combined_output(), building_fast_check_msg);
@@ -85,7 +94,7 @@ fn fast_check_cache() {
   check_debug_cmd.run().skip_output_check();
 
   // ensure the cache still picks it up for this file
-  type_check_cache_path.remove_file();
+  remove_type_check_cache();
   let output = check_debug_cmd.run();
   assert_contains!(output.combined_output(), building_fast_check_msg);
   assert_contains!(
@@ -120,7 +129,7 @@ error: Type checking failed.
   );
 
   // finally ensure it uses the cache
-  type_check_cache_path.remove_file();
+  remove_type_check_cache();
   let output = check_debug_cmd.run();
   assert_contains!(output.combined_output(), building_fast_check_msg);
   assert_contains!(

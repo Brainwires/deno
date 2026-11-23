@@ -29,7 +29,72 @@ mod report;
 /// Global counter for generating unique test serial IDs
 static TEST_SERIAL_ID: AtomicUsize = AtomicUsize::new(0);
 
+/// denext: where the deadlines read the CPU contention they cannot predict
+/// from (see `test_util::test_runner::CpuContention`); set in `main`.
+static CPU_CONTENTION: std::sync::OnceLock<
+  test_util::test_runner::CpuContention,
+> = std::sync::OnceLock::new();
+
 const RUN_ARGS: &[&str] = &["run", "-A", "--quiet", "--unsafe-proto"];
+
+/// denext: the DENO_DIR the tests of one run share. Each test used to get a
+/// fresh one (`util::deno_cmd()`), so every test built a V8 code cache for
+/// `test/common/` and its own file that nothing read again, and created and
+/// removed the directory and its databases (about 68 ms of CPU per test in a
+/// debug build, half of it system time). The cache databases are SQLite in
+/// WAL mode (rusqlite waits up to 5 s on a lock), so the tests' processes
+/// share them safely. `"isolatedDenoDir": true` in config.jsonc, or
+/// `DENO_NODE_COMPAT_FRESH_DENO_DIR=1` for the whole run, gives each test a
+/// fresh one again. Set in `main`, which removes it at the end.
+static SHARED_DENO_DIR: std::sync::OnceLock<util::TempDir> =
+  std::sync::OnceLock::new();
+
+/// denext: kills the tests' process trees still running when `main` ends,
+/// a failure's unwinding included.
+struct KillProcessTreesOnDrop;
+
+impl Drop for KillProcessTreesOnDrop {
+  fn drop(&mut self) {
+    test_util::process::kill_all_process_trees();
+  }
+}
+
+/// Creates the run's shared DENO_DIR and warms it (one run of
+/// `test/common/index.js`, so the parallel tests start on a code cache of the
+/// common modules and on existing databases); removes it when dropped.
+struct SharedDenoDir(Option<util::TempDir>);
+
+impl SharedDenoDir {
+  fn create() -> Self {
+    if std::env::var_os("DENO_NODE_COMPAT_FRESH_DENO_DIR").is_some() {
+      return Self(None);
+    }
+    let dir = util::new_deno_dir();
+    let warm = util::deno_cmd_with_deno_dir(&dir)
+      .disable_diagnostic_logging()
+      .current_dir(tests_path().join("node_compat/runner/suite"))
+      .args_vec(RUN_ARGS)
+      .arg("test/common/index.js")
+      .env("NODE_SKIP_FLAG_CHECK", "1")
+      .env("NO_COLOR", "1")
+      .piped_output()
+      .output();
+    if let Err(err) = warm {
+      test_util::eprintln!("node_compat: warming the shared DENO_DIR: {err}");
+    }
+    _ = SHARED_DENO_DIR.set(dir.clone());
+    Self(Some(dir))
+  }
+}
+
+impl Drop for SharedDenoDir {
+  fn drop(&mut self) {
+    if let Some(dir) = self.0.take() {
+      // the static's clone keeps the directory alive; remove it by hand
+      _ = std::fs::remove_dir_all(dir.path());
+    }
+  }
+}
 
 const TEST_ARGS: &[&str] =
   &["test", "-A", "--quiet", "--unsafe-proto", "--no-check"];
@@ -102,6 +167,12 @@ struct TestConfig {
   /// and copy multi-gigabyte buffers), never to paper over a hang.
   #[serde(rename = "timeoutMs")]
   timeout_ms: Option<u64>,
+  /// denext: runs the test with the sequential tests, one at a time, though
+  /// it is not under `sequential/` or `pummel/`: a memory-heavy test (a leak
+  /// test that fills the heap on purpose) whose peak beside others' gets the
+  /// container killed for memory, taking its neighbours with it.
+  #[serde(default)]
+  sequential: bool,
   /// denext: the platforms where the test is expected to skip itself
   /// (`common.skip()`) because the platform or this build lacks the feature
   /// by design, with the reason. A bare string applies to every platform.
@@ -109,6 +180,12 @@ struct TestConfig {
   /// counted as a pass, expected or not.
   #[serde(rename = "expectedSkip")]
   expected_skip: Option<ExpectedSkip>,
+  /// denext: runs the test on a fresh, empty DENO_DIR of its own instead of
+  /// the run's shared one (see [`SharedDenoDir`]). For a test whose outcome
+  /// depends on what is (not) in DENO_DIR. A test whose `env` sets
+  /// `DENO_DIR` gets that one.
+  #[serde(rename = "isolatedDenoDir", default)]
+  isolated_deno_dir: bool,
 }
 
 /// denext: `expectedSkip` in config.jsonc: one reason for every platform, or
@@ -200,20 +277,60 @@ fn main() {
     return;
   }
 
+  // denext: one DENO_DIR for the run (removed at the end, a failure's
+  // unwinding included)
+  let _shared_deno_dir = SharedDenoDir::create();
+  // denext: each test leads a process group of its own (so a timeout kills
+  // its grandchildren too); those groups no longer get the terminal's
+  // Ctrl+C, so the harness kills them on a signal and when it ends
+  test_util::process::kill_process_trees_on_signal();
+  let _kill_trees = KillProcessTreesOnDrop;
+
   // Partition into sequential and parallel tests.
   //
   // `pummel/` is upstream Node's stress suite: several of its tests allocate
   // multi-gigabyte buffers or spin the CPU deliberately. Running a handful of
   // them concurrently starves a CI runner badly enough that the machine stops
   // responding, so they get the same one-at-a-time treatment as `sequential/`.
+  //
+  // denext: a test marked `"sequential": true` in config.jsonc (a
+  // memory-heavy leak test) runs with them too.
   const SEQUENTIAL_TEST_DIRS: &[&str] = &["sequential/", "pummel/"];
   let (sequential_category, parallel_category) = category.partition(|test| {
     SEQUENTIAL_TEST_DIRS
       .iter()
       .any(|dir| test.data.test_path.starts_with(dir))
+      || config
+        .tests
+        .get(&test.data.test_path)
+        .is_some_and(|c| c.sequential)
   });
 
   let parallelism = Parallelism::default();
+
+  // denext: the per-test timeouts scale with the CPU each running test gets
+  // (as Node's test.py and common.platformTimeout do): 1 on a runner with a
+  // CPU or more per test, longer where tests share one, never unbounded.
+  let cpus = test_util::test_runner::AvailableCpus::detect();
+  let timeout_factor = test_util::test_runner::timeout_scale_factor(
+    cpus.count,
+    parallelism.max_parallelism().get(),
+  );
+  let sequential_timeout_factor =
+    test_util::test_runner::timeout_scale_factor(cpus.count, 1);
+  // and a test's deadline moves out by the time it is starved of CPU by
+  // anything else on the host (sibling containers, other harnesses)
+  let contention = CPU_CONTENTION
+    .get_or_init(|| test_util::test_runner::CpuContention::detect(cpus.count));
+  test_util::eprintln!(
+    "node_compat: {:.2} CPU(s) ({}), {} test(s) at once: timeout factor {:.2} ({:.2} for the sequential tests); starved time from {}",
+    cpus.count,
+    cpus.source,
+    parallelism.max_parallelism().get(),
+    timeout_factor,
+    sequential_timeout_factor,
+    contention.describe(),
+  );
   let flaky_test_tracker = Arc::new(FlakyTestTracker::default());
 
   // Shared state for collecting results
@@ -247,7 +364,15 @@ fn main() {
           test_config.is_some_and(|c| c.flaky) || all_tests_flaky,
           &flaky_test_tracker,
           None,
-          || run_test(&cli_args, test, test_config, &results),
+          || {
+            run_test(
+              &cli_args,
+              test,
+              test_config,
+              &results,
+              sequential_timeout_factor,
+            )
+          },
         )
       }
     },
@@ -275,7 +400,7 @@ fn main() {
           test_config.is_some_and(|c| c.flaky) || all_tests_flaky,
           &flaky_test_tracker,
           Some(&parallelism),
-          || run_test(&cli_args, test, test_config, &results),
+          || run_test(&cli_args, test, test_config, &results, timeout_factor),
         )
       }
     },
@@ -731,6 +856,10 @@ struct TestSetup {
   args: Vec<String>,
   env_vars: HashMap<String, String>,
   timeout: Duration,
+  /// denext: the timeout as written, before scaling by the CPU per test
+  written_timeout: Duration,
+  /// denext: a fresh DENO_DIR for this test instead of the shared one
+  isolated_deno_dir: bool,
 }
 
 impl TestSetup {
@@ -738,6 +867,7 @@ impl TestSetup {
     cli_args: &CliArgs,
     data: &NodeCompatTestData,
     test_config: Option<&TestConfig>,
+    timeout_factor: f64,
   ) -> Self {
     let test_suite_path = tests_path().join("node_compat/runner/suite");
     let test_path = format!("test/{}", data.test_path);
@@ -781,6 +911,17 @@ impl TestSetup {
         args.push(arg.clone());
       }
     }
+    // denext: tells a whole-test `common.skip()` from a one-case
+    // `common.printSkipMessage()` (see self_skip_reason). `deno test` hides
+    // the skip line anyway, so node:test files go without it.
+    if !uses_node_test {
+      args.push("--preload".to_string());
+      args.push(
+        tests_path()
+          .join("node_compat/skip_probe_preload.mjs")
+          .to_string(),
+      );
+    }
     if cli_args.inspect_brk {
       args.push("--inspect-brk".to_string());
     }
@@ -813,6 +954,13 @@ impl TestSetup {
           10_000
         },
       ));
+    let written_timeout = timeout;
+    // denext: scaled by the CPU per running test (1 when uncontended)
+    let timeout =
+      test_util::test_runner::scale_timeout(timeout, timeout_factor);
+
+    let isolated_deno_dir = test_config.is_some_and(|c| c.isolated_deno_dir)
+      || env_vars.contains_key("DENO_DIR");
 
     TestSetup {
       test_suite_path,
@@ -820,11 +968,26 @@ impl TestSetup {
       args,
       env_vars,
       timeout,
+      written_timeout,
+      isolated_deno_dir,
     }
   }
 
   fn run_piped(&self) -> (bool, String, Option<i32>) {
-    let mut cmd = util::deno_cmd().disable_diagnostic_logging();
+    /// How long the rest of a test's output is waited for once the test
+    /// has exited.
+    const OUTPUT_END_GRACE: Duration = Duration::from_secs(2);
+
+    let mut cmd = match SHARED_DENO_DIR.get() {
+      Some(shared) if !self.isolated_deno_dir => {
+        util::deno_cmd_with_deno_dir(shared)
+      }
+      _ => util::deno_cmd(),
+    }
+    .disable_diagnostic_logging()
+    // denext: the test and everything it starts form one tree, killed on
+    // a timeout and when the test ends (see `util::process::ProcessTree`)
+    .own_process_group();
     cmd = cmd.current_dir(&self.test_suite_path);
     for arg in &self.args {
       cmd = cmd.arg(arg);
@@ -833,25 +996,73 @@ impl TestSetup {
       cmd = cmd.env(key, value);
     }
 
-    let child = cmd.piped_output().spawn().unwrap();
-    match child.wait_with_output_and_timeout(self.timeout) {
-      Ok(output) => {
-        let success = output.status.success();
-        let exit_code = output.status.code();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut output_str = format!("{}\n{}", stdout, stderr);
+    let contention = CPU_CONTENTION
+      .get()
+      .unwrap_or(&test_util::test_runner::CpuContention::None);
+    let mark = contention.mark();
+    let mut child = cmd.piped_output().spawn().unwrap();
+    // denext: the output is read as it comes, so a test that times out
+    // still shows what it printed (a hang is told from slowness), even when
+    // a grandchild keeps the pipes open after the kill
+    let stdout = util::process::OutputCapture::new(child.stdout.take());
+    let stderr = util::process::OutputCapture::new(child.stderr.take());
+    let tree = util::process::ProcessTree::new(&child);
+    let rx = tree.wait_in_thread(child);
+
+    // the written (CPU-scaled) timeout plus the time the test was starved
+    // of CPU (8 times the written timeout in all, at most), re-read at each
+    // deadline until it holds
+    let status = loop {
+      let deadline =
+        contention.deadline(&mark, self.timeout, self.written_timeout);
+      let now = std::time::Instant::now();
+      if now >= deadline {
+        break None;
+      }
+      match rx.recv_timeout(deadline - now) {
+        Ok(status) => break Some(status),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break None,
+      }
+    };
+    match status {
+      Some(Ok(status)) => {
+        // denext: the tree was killed before the status was sent, so the
+        // pipes are at their end, unless a process that left the tree's
+        // process group (a `detached: true` grandchild) still holds one:
+        // the rest of the output is waited for only this long, where a
+        // join of the reader threads waited for that process to end
+        let end_by = std::time::Instant::now() + OUTPUT_END_GRACE;
+        stdout.wait_for_end(end_by);
+        stderr.wait_for_end(end_by);
+        let success = status.success();
+        let exit_code = status.code();
+        let mut output_str = format!("{}\n{}", stdout.text(), stderr.text());
         // denext: how a failed run ended, so a process that died without a
         // word (a signal, an abort) is told apart from one that exited
         if !success {
-          output_str
-            .push_str(&format!("\n[{}]", describe_status(&output.status)));
+          output_str.push_str(&format!("\n[{}]", describe_status(&status)));
         }
         (success, output_str, exit_code)
       }
-      Err(_) => {
-        let output_str =
-          format!("Test timed out after {}ms", self.timeout.as_millis());
+      Some(Err(err)) => {
+        (false, format!("Failed to wait for the test: {err}"), None)
+      }
+      None => {
+        tree.kill();
+        // what was printed before the kill (and in a moment after it)
+        let _ = rx.recv_timeout(Duration::from_secs(2));
+        let elapsed = mark.elapsed();
+        let starved = contention.starved_since(&mark);
+        let output_str = format!(
+          "Test timed out after {}ms (written timeout {}ms, {}ms scaled, {}ms of the run starved of CPU)\n--- output before the timeout ---\n{}\n{}",
+          elapsed.as_millis(),
+          self.written_timeout.as_millis(),
+          self.timeout.as_millis(),
+          starved.as_millis(),
+          stdout.text(),
+          stderr.text(),
+        );
         (false, output_str, None)
       }
     }
@@ -931,21 +1142,32 @@ impl TestSetup {
   }
 }
 
+/// Written to stderr by skip_probe_preload.mjs when the test exited through
+/// `common.skip()`.
+const COMMON_SKIP_MARKER: &str =
+  "denext-node-compat: exited through common.skip()";
+
 /// denext: why a test that exited 0 skipped itself, if it did.
 ///
-/// Node's `common.skip(msg)` prints `1..0 # Skipped: <msg>` and exits 0, and
-/// Node's own runner (tools/test.py) reports any test whose output carries
-/// that line as skipped, not passed. A test run under `deno test` (one that
-/// imports `node:test`) has its pre-test output hidden by `--quiet`, so the
-/// line never shows: there a file that exited before any test ran (`0 passed
-/// | 0 failed` after Deno's "called `Deno.exit(0)` from outside any test"
-/// note) skipped itself.
+/// Node's `common.skip(msg)` prints `1..0 # Skipped: <msg>` and exits 0.
+/// `common.printSkipMessage(msg)` prints the same line for one case of a
+/// test that goes on to run (and pass) the others, so the line alone does not
+/// make a skip: the run counts as one only when skip_probe_preload.mjs saw
+/// the process exit through `common.skip()`. A test run under `deno test`
+/// (one that imports `node:test`) has its pre-test output hidden by
+/// `--quiet`, so the line never shows: there a file that exited before any
+/// test ran (`0 passed | 0 failed` after Deno's "called `Deno.exit(0)` from
+/// outside any test" note) skipped itself.
 fn self_skip_reason(output: &str, uses_node_test: bool) -> Option<String> {
   static SKIP_LINE: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| {
       Regex::new(r"(?m)^1\.\.0 # Skipped:[ \t]*(.*?)\r?$").unwrap()
     });
-  if let Some(captures) = SKIP_LINE.captures(output) {
+  // common.skip() prints its line and exits at once, so the last skip line
+  // is the one it printed.
+  if output.contains(COMMON_SKIP_MARKER)
+    && let Some(captures) = SKIP_LINE.captures_iter(output).last()
+  {
     let message = captures.get(1).map(|m| m.as_str().trim()).unwrap_or("");
     return Some(if message.is_empty() {
       "(no reason given)".to_string()
@@ -1005,6 +1227,7 @@ fn run_test(
   test: &CollectedTest<NodeCompatTestData>,
   test_config: Option<&TestConfig>,
   results: &Arc<Mutex<HashMap<String, CollectedResult>>>,
+  timeout_factor: f64,
 ) -> TestResult {
   let data = &test.data;
 
@@ -1037,7 +1260,7 @@ fn run_test(
     return TestResult::Ignored;
   }
 
-  let setup = TestSetup::new(cli_args, data, test_config);
+  let setup = TestSetup::new(cli_args, data, test_config, timeout_factor);
 
   let (success, output_text, exit_code) = if is_pseudo_tty_test {
     setup.run_pty()

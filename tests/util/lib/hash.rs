@@ -5,8 +5,6 @@ use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
 
-use crate::eprintln;
-
 /// A fast hasher for computing a combined hash of file contents.
 /// Uses xxhash64 for speed.
 pub struct InputHasher(twox_hash::XxHash64);
@@ -79,9 +77,6 @@ fn collect_entries_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
   }
 }
 
-// repo at https://github.com/denoland/hashy
-const HASHY_URL: &str = "https://hashy.deno.deno.net";
-
 pub enum CiHashStatus {
   /// Not on CI — always run tests.
   Run,
@@ -96,32 +91,16 @@ pub struct CiHashPending {
 }
 
 impl CiHashPending {
-  /// Mark the hash as known-good after tests pass.
+  /// Mark the hash as known-good after tests pass. A no-op in this fork:
+  /// results are never sent to upstream's hashy service (see
+  /// `check_ci_hash`).
   pub fn commit(self) {
-    let url = format!("{}/hashes/{}", HASHY_URL, self.key);
-    match std::process::Command::new("curl")
-      .args(["-sf", "-X", "PUT", "--max-time", "5", &url])
-      .output()
-    {
-      Ok(output) if output.status.success() => {
-        eprintln!("hashy: committed hash {}", self.key);
-      }
-      Ok(output) => {
-        eprintln!(
-          "hashy: failed to commit hash {} (exit code {:?})",
-          self.key,
-          output.status.code()
-        );
-      }
-      Err(e) => {
-        eprintln!("hashy: failed to run curl: {e}");
-      }
-    }
+    let _ = self.key;
   }
 }
 
-/// Check if tests can be skipped on CI by comparing input hashes
-/// against the hashy service.
+/// Upstream asks Deno's hashy service here whether tests can be skipped. This
+/// fork never does: it always returns [`CiHashStatus::Run`].
 ///
 /// `name` is used for the hash key and log messages (e.g. "specs",
 /// "unit"). `configure` receives an `InputHasher` to add whatever files/dirs
@@ -145,50 +124,12 @@ impl CiHashPending {
 /// }
 /// ```
 pub fn check_ci_hash(
-  name: &str,
-  configure: impl FnOnce(&mut InputHasher),
+  _name: &str,
+  _configure: impl FnOnce(&mut InputHasher),
 ) -> CiHashStatus {
-  if !*crate::IS_CI {
-    return CiHashStatus::Run;
-  }
-
-  let start = std::time::Instant::now();
-  let mut hasher = InputHasher::new_with_cli_args();
-  configure(&mut hasher);
-  let hash = format!("{:016x}", hasher.finish());
-  let key = format!("{name}_{hash}");
-
-  eprintln!("ci hash took {}ms", start.elapsed().as_millis());
-
-  // On main/tag builds, always run tests but still commit on success
-  // to seed the cache for PR builds.
-  if is_main_or_tag() {
-    eprintln!("hashy: main/tag build, running tests (will commit on success)");
-    return CiHashStatus::RunThenCommit(CiHashPending { key });
-  }
-
-  let url = format!("{}/hashes/{}", HASHY_URL, key);
-  match std::process::Command::new("curl")
-    .args(["-sf", "--max-time", "5", &url])
-    .output()
-  {
-    Ok(output) if output.status.success() => {
-      eprintln!("hashy: {name} hash found ({key}), skipping");
-      CiHashStatus::Skip
-    }
-    Ok(_) => {
-      eprintln!("hashy: {name} hash not found ({key}), will run tests");
-      CiHashStatus::RunThenCommit(CiHashPending { key })
-    }
-    Err(e) => {
-      eprintln!("hashy: failed to check hash, running tests: {e}");
-      CiHashStatus::Run
-    }
-  }
-}
-
-fn is_main_or_tag() -> bool {
-  std::env::var("GITHUB_REF")
-    .map(|r| r == "refs/heads/main" || r.starts_with("refs/tags/"))
-    .unwrap_or(false)
+  // denext fork: never consult or seed upstream Deno's hashy service
+  // (hashy.deno.deno.net). A hit there would skip our tests on the strength
+  // of someone else's cache, and a commit would send our input hashes to an
+  // outside server. Every suite always runs.
+  CiHashStatus::Run
 }

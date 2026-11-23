@@ -2,13 +2,14 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
-const { op_node_fill_random } = core.ops;
+const { op_node_fill_random, op_void_async_deferred } = core.ops;
 const {
   Error,
   ErrorPrototype,
   MathMin,
   NumberIsNaN,
   ObjectPrototypeIsPrototypeOf,
+  PromisePrototypeThen,
 } = primordials;
 
 const { Buffer, kMaxLength } = core.loadExtScript(
@@ -92,30 +93,38 @@ function randomBytes(
     emitInit(asyncId, "RANDOMBYTESREQUEST", triggerAsyncId, resource);
 
     const process = lazyProcess().default;
-    process.nextTick(() => {
-      emitBefore(asyncId, triggerAsyncId, resource);
-      try {
+    // The request's result arrives through the event loop, as from libuv's
+    // thread pool (a deferred op is delivered by the loop, never in the
+    // microtask checkpoint of the call): after the `process.nextTick`
+    // callbacks of the caller and the timers that are due. The callback then
+    // runs from the tick queue, which reports what it throws as an uncaught
+    // exception.
+    PromisePrototypeThen(op_void_async_deferred(), () => {
+      process.nextTick(() => {
+        emitBefore(asyncId, triggerAsyncId, resource);
         try {
-          if (err) {
-            cb(err);
-          } else {
-            cb(null, bytes);
+          try {
+            if (err) {
+              cb(err);
+            } else {
+              cb(null, bytes);
+            }
+          } catch (callbackErr) {
+            // If there's an active domain, emit error to it
+            if (process.domain && process.domain.listenerCount("error") > 0) {
+              process.domain.emit("error", callbackErr);
+            } else {
+              // As Node's MakeCallback: the uncaught exception is handled while
+              // the request is still the current resource; its `after` is
+              // emitted once that is done (process._fatalException).
+              throw callbackErr;
+            }
           }
-        } catch (callbackErr) {
-          // If there's an active domain, emit error to it
-          if (process.domain && process.domain.listenerCount("error") > 0) {
-            process.domain.emit("error", callbackErr);
-          } else {
-            // As Node's MakeCallback: the uncaught exception is handled while
-            // the request is still the current resource; its `after` is
-            // emitted once that is done (process._fatalException).
-            throw callbackErr;
-          }
+          emitAfter(asyncId);
+        } finally {
+          emitDestroy(asyncId);
         }
-        emitAfter(asyncId);
-      } finally {
-        emitDestroy(asyncId);
-      }
+      });
     });
   } else {
     return generateRandomBytes(size);

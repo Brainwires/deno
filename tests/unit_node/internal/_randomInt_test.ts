@@ -16,13 +16,16 @@ Deno.test("[node/crypto.randomInt] Two Params: Max and Min", () => {
   assert(between(randomInt(40, 120), 40, 120));
 });
 
-Deno.test("[node/crypto.randomInt] Max and Callback", () => {
+Deno.test("[node/crypto.randomInt] Max and Callback", async () => {
+  const { promise, resolve } = Promise.withResolvers<number | undefined>();
   let called = false;
   randomInt(3, (_err, val) => {
     called = true;
-    assert(between(val as number, 0, 3));
+    resolve(val);
   });
-  assert(called);
+  // As in Node.js, the callback runs after the call returns.
+  assert(!called);
+  assert(between((await promise) as number, 0, 3));
 });
 
 Deno.test("[node/crypto.randomInt] Min, Max and Callback", () => {

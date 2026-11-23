@@ -128,7 +128,9 @@ pub enum Argon2AsyncError {
 /// The async form copies its inputs (as Node's async job does) and runs on
 /// the blocking pool, off the event loop.
 #[allow(clippy::too_many_arguments, reason = "mirrors Node's Argon2Job")]
-#[op2]
+// `async(deferred)`, as every `*_async` op of this crate: see
+// `op_node_check_prime_async`.
+#[op2(async(deferred), fast)]
 pub async fn op_node_argon2_async(
   #[buffer(copy)] pass: Vec<u8>,
   #[buffer(copy)] salt: Vec<u8>,

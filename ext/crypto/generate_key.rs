@@ -84,17 +84,51 @@ fn generate_key_rsa(
     return Err(GenerateKeyError::BadPublicExponent);
   }
 
-  let mut rng = rand::rngs::OsRng;
-
-  let private_key =
-    RsaPrivateKey::new_with_exp(&mut rng, modulus_length as usize, &exponent)
-      .map_err(|_| GenerateKeyError::FailedRSAKeyGeneration)?;
+  let private_key = match generate_rsa_aws_lc(modulus_length, &exponent) {
+    Some(key) => key,
+    None => {
+      let mut rng = rand::rngs::OsRng;
+      RsaPrivateKey::new_with_exp(&mut rng, modulus_length as usize, &exponent)
+        .map_err(|_| GenerateKeyError::FailedRSAKeyGeneration)?
+    }
+  };
 
   let private_key = private_key
     .to_pkcs1_der()
     .map_err(|_| GenerateKeyError::FailedRSAKeySerialization)?;
 
   Ok(private_key.as_bytes().to_vec())
+}
+
+/// Generates the key with aws-lc (OpenSSL-speed prime search) when it
+/// supports the request: 2048, 3072, 4096 or 8192 bits with e = 65537.
+/// `None` sends every other size and exponent to the pure-Rust `rsa` path.
+/// The key comes back as PKCS#8 and is parsed into the `rsa` crate's type,
+/// so export, sign, encrypt and JWK use it as before.
+fn generate_rsa_aws_lc(
+  modulus_length: u32,
+  exponent: &BigUint,
+) -> Option<RsaPrivateKey> {
+  use aws_lc_rs::encoding::AsDer;
+  use aws_lc_rs::rsa::KeySize;
+  use rsa::pkcs8::DecodePrivateKey;
+  use rsa::traits::PublicKeyParts;
+
+  if *exponent != *PUB_EXPONENT_2 {
+    return None;
+  }
+  let size = match modulus_length {
+    2048 => KeySize::Rsa2048,
+    3072 => KeySize::Rsa3072,
+    4096 => KeySize::Rsa4096,
+    8192 => KeySize::Rsa8192,
+    _ => return None,
+  };
+  let pair = aws_lc_rs::rsa::KeyPair::generate(size).ok()?;
+  let der = pair.as_der().ok()?;
+  let key = RsaPrivateKey::from_pkcs8_der(der.as_ref()).ok()?;
+  (key.e() == exponent && key.n().bits() == modulus_length as usize)
+    .then_some(key)
 }
 
 fn generate_key_ec_p521() -> Result<Vec<u8>, GenerateKeyError> {

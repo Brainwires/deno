@@ -572,3 +572,153 @@ Deno.test("[node/net] a path server listens with readableAll and writableAll", a
     if (dir) await Deno.remove(dir, { recursive: true });
   }
 });
+
+// denext: `net.Socket({ fd: pipe.fd })` on a bound pipe opens the descriptor
+// in a second handle (Node's test-net-connect-options-fd). Both handles
+// report the number, but only the socket's owns it: closing the first handle
+// must neither close the descriptor under the socket, nor, once the socket
+// has closed it, close whatever was given the number since.
+Deno.test({
+  name: "[node/net] a bound pipe whose fd a socket opened no longer owns it",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const { Pipe, constants } = require("internal/test/binding")
+      .internalBinding("pipe_wrap");
+    const fs = require("node:fs");
+    // A short directory: a unix socket path is at most ~100 bytes.
+    const dir = await Deno.makeTempDir({ dir: "/tmp", prefix: "nfd" });
+    const serverPath = path.join(dir, "s");
+    const server = net.createServer((socket) => socket.pipe(socket));
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(serverPath, resolve);
+    });
+
+    const open = async (name: string) => {
+      const handle = new Pipe(constants.SOCKET);
+      assert(handle.bind(path.join(dir, name)) >= 0);
+      const fd: number = handle.fd;
+      assert(fd > 2);
+      const socket = new net.Socket({ fd, readable: true, writable: true });
+      await new Promise<void>((resolve, reject) => {
+        socket.once("error", reject);
+        socket.connect({ path: serverPath }, resolve);
+      });
+      // deno-lint-ignore no-explicit-any
+      assertEquals((socket as any)._handle.fd, fd);
+      assertEquals(handle.fd, fd);
+      return { handle, socket, fd };
+    };
+    const echo = (socket: net.Socket, text: string) =>
+      new Promise<string>((resolve, reject) => {
+        // A socket whose descriptor was closed under it never answers.
+        const timer = setTimeout(
+          () => reject(new Error("no echo: the socket lost its descriptor")),
+          10_000,
+        );
+        socket.once("error", reject);
+        socket.once("data", (chunk) => {
+          clearTimeout(timer);
+          resolve(String(chunk));
+        });
+        socket.write(text);
+      });
+    const closed = (socket: net.Socket) =>
+      new Promise<void>((resolve) => {
+        socket.once("close", () => resolve());
+        socket.destroy();
+      });
+
+    try {
+      for (let round = 0; round < 10; round++) {
+        // The first handle is closed while the socket is in use.
+        const a = await open(`a${round}`);
+        a.handle.close();
+        assertEquals(await echo(a.socket, `ping ${round}`), `ping ${round}`);
+        await closed(a.socket);
+
+        // The socket closes first and the number goes to a file.
+        const b = await open(`b${round}`);
+        await closed(b.socket);
+        const files: number[] = [];
+        while (files.length < 16 && files.at(-1) !== b.fd) {
+          files.push(fs.openSync(serverPath + ".txt", "a+"));
+        }
+        b.handle.close();
+        for (const file of files) {
+          // Throws EBADF if the handle closed a number it no longer owns.
+          fs.fstatSync(file);
+          fs.closeSync(file);
+        }
+      }
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+// Happy eyeballs (`autoSelectFamily`): a connect the stack refuses at once is
+// the attempt's synchronous result, as libuv returns it from
+// `uv_tcp_connect`, so the next address is tried in order however late the
+// process gets the CPU back. It used to arrive on a later loop turn, behind
+// the attempt timer, and was reported as a timeout. TCP to a multicast address
+// is refused at once on Linux and macOS (EAFNOSUPPORT / ENETUNREACH).
+Deno.test({
+  name:
+    "[node/net] autoSelectFamily: an attempt refused at once fails before its attempt timer",
+  ignore: Deno.build.os === "windows",
+}, async () => {
+  const closed = net.createServer();
+  await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
+  const { port } = closed.address() as net.AddressInfo;
+  await new Promise((resolve) => closed.close(resolve));
+
+  const events: string[] = [];
+  const done = Promise.withResolvers<void>();
+  const socket = net.createConnection({
+    host: "example.org",
+    port,
+    // Answers from the check phase (after I/O), so the first attempt's
+    // connect is next polled after the timers phase of the next tick, where
+    // the attempt timer is due once the loop has been blocked past it.
+    // deno-lint-ignore no-explicit-any
+    lookup: ((_host: string, _opts: unknown, cb: any) =>
+      setImmediate(() =>
+        cb(null, [
+          { address: "224.0.0.1", family: 4 },
+          { address: "127.0.0.1", family: 4 },
+        ])
+      )) as unknown as net.LookupFunction,
+    autoSelectFamily: true,
+    autoSelectFamilyAttemptTimeout: 10,
+  });
+  socket.on("connectionAttempt", (address) => {
+    events.push(`attempt ${address}`);
+    if (address === "224.0.0.1") {
+      // Block the loop past the attempt timer before any I/O is polled.
+      process.nextTick(() => {
+        const until = performance.now() + 50;
+        while (performance.now() < until) {
+          // busy
+        }
+      });
+    }
+  });
+  socket.on("connectionAttemptFailed", (address) => {
+    events.push(`failed ${address}`);
+  });
+  socket.on("connectionAttemptTimeout", (address) => {
+    events.push(`timeout ${address}`);
+  });
+  socket.on("error", () => done.resolve());
+  socket.on("connect", () => done.resolve());
+  await done.promise;
+  socket.destroy();
+  assertEquals(events, [
+    "attempt 224.0.0.1",
+    "failed 224.0.0.1",
+    "attempt 127.0.0.1",
+    "failed 127.0.0.1",
+  ]);
+});

@@ -1053,7 +1053,13 @@ Deno.test(
       rows: 24,
     });
     await readUntil(pty.readable, "ready");
-    const fg = await foregroundUntil(pty, (fg) => fg?.name === "sleep");
+    // Linux renames the process (comm) during exec before it lays out the
+    // new argv, so for a moment the name is `sleep` and the command line is
+    // still empty (argv null): wait for both.
+    const fg = await foregroundUntil(
+      pty,
+      (fg) => fg?.name === "sleep" && fg.argv !== null,
+    );
     assertEquals(fg?.pid, pty.pid);
     assertEquals(fg?.pgid, pty.pid);
     assertEquals(fg?.argv, ["sleep", "300"]);

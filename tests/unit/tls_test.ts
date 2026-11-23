@@ -829,6 +829,14 @@ async function tlsWithTcpFailureTestImpl(
 
       await tcpForwardingPromise1;
 
+      // Stop forwarding tlsConn1's output before the failure: on corrupt
+      // input tlsConn1 sends a fatal alert before its reads and writes
+      // reject, and a forwarder still running could hand that alert to
+      // tlsConn2 (an InvalidData there) in the same event loop turn as
+      // those rejections, before it was interrupted.
+      tcpForwardingInterruptDeferred2.resolve();
+      await tcpForwardingPromise2;
+
       switch (failureMode) {
         case "corruption":
           await sendBytes(tcpConn1, 0xff, 1 << 14 /* 16 kB */);
@@ -841,8 +849,6 @@ async function tlsWithTcpFailureTestImpl(
       }
       await tlsTrafficPromise1;
 
-      tcpForwardingInterruptDeferred2.resolve();
-      await tcpForwardingPromise2;
       await tcpConn2.closeWrite();
       await tlsTrafficPromise2;
 

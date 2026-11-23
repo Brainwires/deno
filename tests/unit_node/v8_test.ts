@@ -255,6 +255,28 @@ Deno.test({
   },
 });
 
+// As in Node.js, an object counts when the constructor's prototype is on its
+// prototype chain: subclass instances and subclass prototypes too.
+Deno.test({
+  name: "queryObjects counts the prototype chain",
+  fn() {
+    class QueryObjectsBase {}
+    class QueryObjectsDerived extends QueryObjectsBase {}
+    const keep = [
+      new QueryObjectsBase(),
+      new QueryObjectsDerived(),
+      new QueryObjectsDerived(),
+    ];
+    // the base instance, the two derived ones and QueryObjectsDerived.prototype
+    assertEquals(v8.queryObjects(QueryObjectsBase, { format: "count" }), 4);
+    assertEquals(v8.queryObjects(QueryObjectsDerived, { format: "count" }), 2);
+    // a function without a prototype object has no instances
+    const bound = (() => {}).bind(null);
+    assertEquals(v8.queryObjects(bound, { format: "count" }), 0);
+    assertEquals(keep.length, 3);
+  },
+});
+
 Deno.test({
   name: "queryObjects validates the constructor argument",
   fn() {

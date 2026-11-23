@@ -393,33 +393,28 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
       // Always create a cancel handle so cancel() can abort in-flight ops.
       const cancelRid = core.createCancelHandle();
       this.#cancelRids.add(cancelRid);
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      // Whether this attempt was aborted by its own timeout timer (rather than
-      // by an explicit cancel()). The op is not given a timeout, so the manual
-      // timer below is what enforces the per-attempt `timeout`; when it fires
-      // the op throws `Interrupted`, which must be treated as a timeout and
-      // retried, exactly like the `TimedOut` hickory raises when it wins first.
-      let timedOut = false;
+      // The per-attempt `timeout` is the op's request timeout, as c-ares
+      // times from the send: a timer here started before the query went out
+      // and fired in the timers phase ahead of the op's completion, so on a
+      // starved CPU it expired queries that had not been sent yet, or whose
+      // answer had already arrived. The op reports `TimedOut`, retried below.
+      let attemptTimeoutMs: number | undefined;
+      if (this.#timeout >= 0) {
+        // c-ares doubles timeout on each retry, capped by maxTimeout
+        let currentTimeout = this.#timeout * MathPow(2, attempt);
+        if (this.#maxTimeout >= 0) {
+          currentTimeout = MathMin(currentTimeout, this.#maxTimeout);
+        }
+        attemptTimeoutMs = MathMin(currentTimeout, 0xffffffff);
+      }
 
       try {
-        if (this.#timeout >= 0) {
-          // c-ares doubles timeout on each retry, capped by maxTimeout
-          let currentTimeout = this.#timeout * MathPow(2, attempt);
-          if (this.#maxTimeout >= 0) {
-            currentTimeout = MathMin(currentTimeout, this.#maxTimeout);
-          }
-          timer = setTimeout(() => {
-            timedOut = true;
-            this.#cancelRids.delete(cancelRid);
-            core.tryClose(cancelRid);
-          }, currentTimeout);
-        }
-
         const res = await op_dns_resolve({
           query,
           recordType,
           options: resolveOptions,
           cancelRid,
+          attemptTimeoutMs,
         }, /* useEdns0 */ false);
         if (ttl) {
           ret = res;
@@ -431,13 +426,7 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
         if (
           ObjectPrototypeIsPrototypeOf(Deno.errors.Interrupted.prototype, e)
         ) {
-          if (timedOut) {
-            // Our own timeout timer aborted the op - this is a timeout, so
-            // retry with the next (longer) timeout if attempts remain.
-            if (attempt < tries - 1) continue;
-          }
-          // Either the attempts are exhausted or this was an explicit cancel();
-          // in both cases stop and report a timeout.
+          // An explicit cancel(): stop and report a timeout, as c-ares does.
           code = "ETIMEOUT";
         } else if (
           ObjectPrototypeIsPrototypeOf(Deno.errors.TimedOut.prototype, e)
@@ -479,7 +468,6 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
         }
         return { code, ret };
       } finally {
-        if (timer !== undefined) clearTimeout(timer);
         this.#cancelRids.delete(cancelRid);
         core.tryClose(cancelRid);
       }

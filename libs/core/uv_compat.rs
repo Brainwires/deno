@@ -17,6 +17,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::ffi::CStr;
 use std::ffi::c_int;
@@ -82,6 +83,9 @@ uv_errno!(UV_ETIMEDOUT, libc::ETIMEDOUT, -4039);
 uv_errno!(UV_EACCES, libc::EACCES, -4092);
 uv_errno!(UV_EPERM, libc::EPERM, -4048);
 uv_errno!(UV_EEXIST, libc::EEXIST, -4075);
+uv_errno!(UV_ENETUNREACH, libc::ENETUNREACH, -4062);
+uv_errno!(UV_EHOSTUNREACH, libc::EHOSTUNREACH, -4065);
+uv_errno!(UV_EAFNOSUPPORT, libc::EAFNOSUPPORT, -4094);
 pub const UV_EOF: i32 = -4095;
 
 pub fn uv_error_message(err: c_int) -> Option<&'static CStr> {
@@ -106,6 +110,9 @@ pub fn uv_error_message(err: c_int) -> Option<&'static CStr> {
     x if x == UV_EACCES => c"permission denied",
     x if x == UV_EPERM => c"operation not permitted",
     x if x == UV_EEXIST => c"file already exists",
+    x if x == UV_ENETUNREACH => c"network is unreachable",
+    x if x == UV_EHOSTUNREACH => c"host is unreachable",
+    x if x == UV_EAFNOSUPPORT => c"address family not supported",
     x if x == UV_EOF => c"end of file",
     _ => return None,
   };
@@ -164,6 +171,10 @@ pub(crate) fn io_error_to_uv(err: &std::io::Error) -> c_int {
           10057 => UV_ENOTCONN,     // WSAENOTCONN
           10038 => UV_ENOTSOCK,     // WSAENOTSOCK
           10035 => UV_EAGAIN,       // WSAEWOULDBLOCK
+          // A connect the stack refuses at once, as libuv translates it.
+          10051 => UV_ENETUNREACH,  // WSAENETUNREACH
+          10065 => UV_EHOSTUNREACH, // WSAEHOSTUNREACH
+          10047 => UV_EAFNOSUPPORT, // WSAEAFNOSUPPORT
           _ => UV_EINVAL,
         };
       }
@@ -267,7 +278,12 @@ pub(crate) struct UvLoopInner {
   prepare_handles: RefCell<Vec<*mut uv_prepare_t>>,
   check_handles: RefCell<Vec<*mut uv_check_t>>,
   tcp_handles: RefCell<Vec<*mut uv_tcp_t>>,
+  /// The TCP handles with a write that `uv_write` wrote in full on the spot
+  /// and whose callback has yet to run (see `complete_written_writes`).
+  pub(crate) written_tcp: RefCell<Vec<Arc<waker::TcpHandleWaker>>>,
   pipe_handles: RefCell<Vec<*mut uv_pipe_t>>,
+  /// The same for pipe handles.
+  pub(crate) written_pipe: RefCell<Vec<Arc<waker::PipeHandleWaker>>>,
   tty_handles: RefCell<Vec<*mut uv_tty_t>>,
   waker: RefCell<Option<Waker>>,
   closing_handles: RefCell<VecDeque<(*mut uv_handle_t, Option<uv_close_cb>)>>,
@@ -281,6 +297,24 @@ pub(crate) struct UvLoopInner {
   pub(crate) shared: std::sync::Arc<waker::LoopShared>,
 }
 
+/// The handles one pass of `UvLoopInner::complete_written_writes` has
+/// visited. A handle is listed once per write and is visited once: its first
+/// visit completes every write that is complete, and a second one would
+/// complete the writes that the callbacks of the first made.
+struct VisitedHandles(Option<HashSet<usize>>);
+
+impl VisitedHandles {
+  /// For a list of `listed` handles. One entry (the usual case) needs no
+  /// set.
+  fn new(listed: usize) -> Self {
+    Self((listed > 1).then(|| HashSet::with_capacity(listed)))
+  }
+
+  fn first_visit(&mut self, ptr: usize) -> bool {
+    self.0.as_mut().is_none_or(|visited| visited.insert(ptr))
+  }
+}
+
 impl UvLoopInner {
   fn new() -> Self {
     let origin = Instant::now();
@@ -292,7 +326,9 @@ impl UvLoopInner {
       prepare_handles: RefCell::new(Vec::with_capacity(8)),
       check_handles: RefCell::new(Vec::with_capacity(8)),
       tcp_handles: RefCell::new(Vec::with_capacity(8)),
+      written_tcp: RefCell::new(Vec::new()),
       pipe_handles: RefCell::new(Vec::with_capacity(4)),
+      written_pipe: RefCell::new(Vec::new()),
       tty_handles: RefCell::new(Vec::with_capacity(4)),
       waker: RefCell::new(None),
       closing_handles: RefCell::new(VecDeque::with_capacity(16)),
@@ -360,6 +396,14 @@ impl UvLoopInner {
       deadline,
       Duration::from_millis(deadline.saturating_sub(self.now_ms())),
     ))
+  }
+
+  /// Whether any stream handle (TCP, pipe or TTY) exists, ref'd or not:
+  /// what the reactor may have readiness for.
+  pub(crate) fn has_io_handles(&self) -> bool {
+    !self.tcp_handles.borrow().is_empty()
+      || !self.pipe_handles.borrow().is_empty()
+      || !self.tty_handles.borrow().is_empty()
   }
 
   pub(crate) fn has_alive_handles(&self) -> bool {
@@ -568,6 +612,73 @@ impl UvLoopInner {
     }
   }
 
+  /// Fires the callbacks of the TCP and pipe writes that `uv_write` wrote in
+  /// full on the spot, and returns whether there were any: libuv's pending
+  /// phase.
+  ///
+  /// libuv queues the callback of such a write for the next iteration and
+  /// runs it before that iteration polls for I/O (Node.js completes a plain
+  /// socket's write at once, and a TLS socket's from an immediate), so the
+  /// callback of a write always runs before a peer in the same process
+  /// reads what was written. Fired only when the handle's turn came in the
+  /// ready queue, it ran after the peer's read whenever the peer's handle
+  /// was polled first, and the peer acted on the data while the write still
+  /// looked pending: an HTTP/2 server's `request` listener destroyed the
+  /// client's TLS socket, whose last write then failed with ECANCELED
+  /// (test-http2-client-jsstream-destroy.js, once I/O was polled between
+  /// iterations). [`Self::run_io`] therefore runs this before it reads from
+  /// any handle, and after each handle's callbacks.
+  ///
+  /// One pass over the writes that were complete when the call started, as
+  /// libuv's `uv__run_pending` makes one pass over its queue: a callback may
+  /// write again, and a write that also completes on the spot waits for the
+  /// next call (the handle is marked ready, which wakes the loop). Completed
+  /// in the same call, a callback that always writes again (`function w() {
+  /// socket.write(chunk, w) }`) kept the loop here for as long as the peer
+  /// read faster than it wrote, and no timer or other handle ran. Such a
+  /// write is still completed before the peer's handle is read: the
+  /// readiness it causes reaches the loop through the I/O poll between two
+  /// iterations, and the next call of [`Self::run_io`] starts here.
+  fn complete_written_writes(&self) -> bool {
+    let mut any = false;
+
+    let written = std::mem::take(&mut *self.written_tcp.borrow_mut());
+    if !written.is_empty() {
+      let mut visited = VisitedHandles::new(written.len());
+      for handle_waker in written {
+        // Zero once the handle is torn down (its queue went with it).
+        let ptr = handle_waker.live_ptr();
+        if ptr == 0 || !visited.first_visit(ptr) {
+          continue;
+        }
+        // SAFETY: ptr is non-zero, so the handle has not been detached.
+        any |= unsafe { tcp::complete_written_writes(ptr as *mut uv_tcp_t) };
+      }
+    }
+
+    let written = std::mem::take(&mut *self.written_pipe.borrow_mut());
+    if !written.is_empty() {
+      let mut visited = VisitedHandles::new(written.len());
+      for handle_waker in written {
+        let ptr = handle_waker.live_ptr();
+        if ptr == 0 || !visited.first_visit(ptr) {
+          continue;
+        }
+        // SAFETY: ptr is non-zero, so the handle has not been detached.
+        any |= unsafe { pipe::complete_written_writes(ptr as *mut uv_pipe_t) };
+      }
+    }
+
+    any
+  }
+
+  /// Whether a write that `uv_write` wrote in full still waits for its
+  /// callback.
+  fn has_written_writes(&self) -> bool {
+    !self.written_tcp.borrow().is_empty()
+      || !self.written_pipe.borrow().is_empty()
+  }
+
   /// Poll all TCP handles for I/O readiness and fire callbacks.
   ///
   /// Uses direct polling via tokio's `poll_accept`/`try_read`/`try_write`.
@@ -618,6 +729,12 @@ impl UvLoopInner {
       // destruction, so the atomic load is always safe.
       let mut tcp_ready: VecDeque<Arc<waker::TcpHandleWaker>> =
         std::mem::take(&mut *self.shared.ready_tcp.lock().unwrap());
+      // Pending phase: the callbacks of the writes `uv_write` completed on
+      // the spot run before any handle is read, and again after each
+      // handle's callbacks, which may have written (see
+      // `complete_written_writes`): once per handle, so the number of
+      // passes is bounded by the handles that were ready.
+      any_work |= self.complete_written_writes();
       while let Some(handle_waker) = tcp_ready.pop_front() {
         handle_waker.reset_queued();
         let ptr = handle_waker.live_ptr();
@@ -633,6 +750,7 @@ impl UvLoopInner {
         let mut cx = Context::from_waker(&waker);
         // SAFETY: tcp_ptr is live per the ptr check above.
         any_work |= unsafe { tcp::poll_tcp_handle(tcp_ptr, &mut cx) };
+        any_work |= self.complete_written_writes();
       }
 
       // --- pipe ---
@@ -653,6 +771,7 @@ impl UvLoopInner {
         let mut cx = Context::from_waker(&waker);
         // SAFETY: pipe_ptr is live.
         any_work |= unsafe { pipe::poll_pipe_handle(pipe_ptr, &mut cx) };
+        any_work |= self.complete_written_writes();
       }
 
       // --- TTY ---
@@ -673,6 +792,13 @@ impl UvLoopInner {
         let mut cx = Context::from_waker(&waker);
         // SAFETY: tty_ptr is live.
         any_work |= unsafe { tty::poll_tty_handle(tty_ptr, &mut cx) };
+      }
+
+      // A callback of the last pass wrote again: the next iteration
+      // completes that write. Its handle was marked ready, which woke the
+      // loop unless the handle was already queued; this covers that case.
+      if self.has_written_writes() {
+        self.shared.loop_waker.wake();
       }
 
       any_work
@@ -860,6 +986,41 @@ impl UvLoopInner {
 
       tcp.flags &= !UV_HANDLE_ACTIVE;
     }
+  }
+
+  /// denext: libuv's `uv__fd_exists`: whether a pipe or TCP handle the loop
+  /// polls, other than `except`, drives `fd` through a Tokio stream, listener
+  /// or pending connect. Opening `fd` in a second handle would give the
+  /// descriptor two owners, each closing it.
+  #[cfg(unix)]
+  pub(crate) fn fd_exists(
+    &self,
+    fd: std::os::unix::io::RawFd,
+    except: *const c_void,
+  ) -> bool {
+    // A list that is being changed (an open issued from inside a poll) is
+    // skipped: the check is a guard, and the open then proceeds as before.
+    if let Ok(handles) = self.pipe_handles.try_borrow() {
+      for &handle in handles.iter() {
+        // SAFETY: Handle pointers in pipe_handles are kept valid by the C caller until uv_close.
+        if handle as *const c_void != except
+          && unsafe { (*handle).tokio_owned_fd() } == Some(fd)
+        {
+          return true;
+        }
+      }
+    }
+    if let Ok(handles) = self.tcp_handles.try_borrow() {
+      for &handle in handles.iter() {
+        // SAFETY: Handle pointers in tcp_handles are kept valid by the C caller until uv_close.
+        if handle as *const c_void != except
+          && unsafe { (*handle).tokio_owned_fd() } == Some(fd)
+        {
+          return true;
+        }
+      }
+    }
+    false
   }
 
   fn stop_pipe(&self, handle: *mut uv_pipe_t) {

@@ -80,6 +80,51 @@ class Check(unittest.TestCase):
         self.assertEqual(ai.check(AUDIT_WITHOUT, lock("1.6.0")), [])
 
 
+AUDIT_URL = """\
+[advisories]
+ignore = [
+  "RUSTSEC-2026-0592",
+]
+"""
+URL_PATH = '[[package]]\nname = "url"\nversion = "2.5.7"\ndependencies = [\n "idna",\n]\n'
+URL_REGISTRY = (
+    '[[package]]\nname = "url"\nversion = "2.5.7"\n'
+    'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+)
+ORIGIN = "// Backported from url 2.5.9 (RUSTSEC-2026-0592): ...\n"
+
+
+def files(**contents):
+    return lambda path: contents.get(path)
+
+
+class Vendored(unittest.TestCase):
+    PATH = "libs/vendor/url/src/origin.rs"
+
+    def test_vendored_copy_with_the_backport_passes(self):
+        self.assertEqual(ai.check_vendored(AUDIT_URL, URL_PATH, files(**{self.PATH: ORIGIN})), [])
+
+    def test_registry_url_fails(self):
+        for lock_text in (URL_REGISTRY, URL_PATH + URL_REGISTRY):
+            errors = ai.check_vendored(AUDIT_URL, lock_text, files(**{self.PATH: ORIGIN}))
+            self.assertEqual(len(errors), 1)
+            self.assertIn("RUSTSEC-2026-0592", errors[0])
+            self.assertIn("crates.io-index", errors[0])
+
+    def test_no_url_package_fails(self):
+        errors = ai.check_vendored(AUDIT_URL, lock(), files(**{self.PATH: ORIGIN}))
+        self.assertEqual(len(errors), 1)
+        self.assertIn("no such package", errors[0])
+
+    def test_missing_or_unmarked_vendored_file_fails(self):
+        self.assertIn("is missing", ai.check_vendored(AUDIT_URL, URL_PATH, files())[0])
+        unmarked = ai.check_vendored(AUDIT_URL, URL_PATH, files(**{self.PATH: "fn origin() {}"}))
+        self.assertIn("no longer names RUSTSEC-2026-0592", unmarked[0])
+
+    def test_no_ignore_no_failure(self):
+        self.assertEqual(ai.check_vendored(AUDIT_WITHOUT, URL_REGISTRY, files()), [])
+
+
 class Script(unittest.TestCase):
     def run_script(self, audit, lock_text):
         with tempfile.TemporaryDirectory() as d:

@@ -584,7 +584,8 @@ mod tests {
       .args(["/c", "exit"])
       .spawn();
     assert!(spawned.is_err(), "a child started under the process limit");
-    println!("child-ok");
+    // the parent reads this marker from the child's stdout
+    std::io::Write::write_all(&mut std::io::stdout(), b"child-ok\n").unwrap();
   }
 
   #[test]
@@ -615,7 +616,8 @@ mod tests {
       .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
       .spawn();
     assert!(breakaway.is_err(), "a child broke away from the job");
-    println!("child-ok");
+    // the parent reads this marker from the child's stdout
+    std::io::Write::write_all(&mut std::io::stdout(), b"child-ok\n").unwrap();
   }
 
   #[test]
@@ -681,7 +683,8 @@ mod tests {
       .output()
       .unwrap();
     assert!(!outside.join("child.txt").exists(), "{child:?}");
-    println!("child-ok");
+    // the parent reads this marker from the child's stdout
+    std::io::Write::write_all(&mut std::io::stdout(), b"child-ok\n").unwrap();
   }
 
   #[test]

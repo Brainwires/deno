@@ -209,9 +209,15 @@ class AbortSignal extends EventTarget {
     if (this[sourceSignals] !== null) {
       for (const weakRef of new SafeSetIterator(this[sourceSignals])) {
         const sourceSignal = WeakRefPrototypeDeref(weakRef);
-        if (sourceSignal !== undefined && sourceSignal[activeDependents]) {
+        if (sourceSignal === undefined) continue;
+        if (sourceSignal[activeDependents]) {
           SetPrototypeDelete(sourceSignal[activeDependents], this);
         }
+        // An aborted signal never fires again, so its listeners no longer
+        // keep another source's timer (and the event loop) alive: the
+        // timer of `AbortSignal.any([timeout(10), timeout(60000)])` would
+        // hold the process for a minute after the signal aborted.
+        unrefTimerSourceIfIdle(sourceSignal);
       }
     }
   }
@@ -279,7 +285,8 @@ class AbortSignal extends EventTarget {
     FunctionPrototypeApply(super.removeEventListener, this, arguments);
     if (listenerCount(this, "abort") === 0) {
       if (this[timerId] !== null) {
-        core.unrefTimer(this[timerId]);
+        // A dependent signal may still be listening for this timer.
+        unrefTimerSourceIfIdle(this);
       } else if (this[sourceSignals] !== null) {
         for (const weakRef of new SafeSetIterator(this[sourceSignals])) {
           const sourceSignal = WeakRefPrototypeDeref(weakRef);
@@ -289,30 +296,9 @@ class AbortSignal extends EventTarget {
           if (sourceSignal[activeDependents]) {
             SetPrototypeDelete(sourceSignal[activeDependents], this);
           }
-          if (sourceSignal[timerId] !== null) {
-            // Timer source: stop refing the event loop only if no other
-            // dependent of this timer still has listeners.
-            let allInactive = true;
-            if (sourceSignal[dependentSignals] !== null) {
-              for (
-                const depRef of new SafeSetIterator(
-                  sourceSignal[dependentSignals],
-                )
-              ) {
-                const dep = WeakRefPrototypeDeref(depRef);
-                if (
-                  dep !== undefined && dep !== this &&
-                  listenerCount(dep, "abort") > 0
-                ) {
-                  allInactive = false;
-                  break;
-                }
-              }
-            }
-            if (allInactive) {
-              core.unrefTimer(sourceSignal[timerId]);
-            }
-          }
+          // Timer source: stop refing the event loop only if nothing else
+          // still listens for it.
+          unrefTimerSourceIfIdle(sourceSignal);
         }
       }
     }
@@ -382,6 +368,28 @@ webidl.converters["sequence<AbortSignal>"] = webidl.createSequenceConverter(
 
 function newSignal() {
   return new AbortSignal(illegalConstructorKey);
+}
+
+/**
+ * Unref the timer of an `AbortSignal.timeout()` source once nothing that can
+ * still fire listens for it: neither the source itself nor a dependent
+ * (`AbortSignal.any()`) signal that is not aborted yet.
+ */
+function unrefTimerSourceIfIdle(sourceSignal) {
+  if (sourceSignal[timerId] === null) return;
+  if (listenerCount(sourceSignal, "abort") > 0) return;
+  if (sourceSignal[dependentSignals] !== null) {
+    for (const depRef of new SafeSetIterator(sourceSignal[dependentSignals])) {
+      const dep = WeakRefPrototypeDeref(depRef);
+      if (
+        dep !== undefined && dep[abortReason] === undefined &&
+        listenerCount(dep, "abort") > 0
+      ) {
+        return;
+      }
+    }
+  }
+  core.unrefTimer(sourceSignal[timerId]);
 }
 
 function createDependentAbortSignal(signals, prefix) {

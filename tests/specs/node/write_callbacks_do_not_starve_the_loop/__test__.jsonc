@@ -1,0 +1,9 @@
+{
+  // A write callback that always writes again does not keep the event loop
+  // inside one I/O phase while the peer (another process) reads faster than
+  // the writes are made: a write that a write callback makes, and that also
+  // completes on the spot, is completed by a later iteration, so a timer
+  // still fires.
+  "args": "run -A main.cjs",
+  "output": "main.out"
+}

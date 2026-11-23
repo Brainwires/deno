@@ -513,6 +513,9 @@ pub struct TestCommandBuilder {
   split_output: bool,
   show_output: bool,
   timeout: Option<std::time::Duration>,
+  /// denext: `spawn()` makes the command lead a process group of its own
+  /// (Unix), so [`crate::process::ProcessTree`] can kill everything it starts.
+  own_process_group: bool,
 }
 
 impl TestCommandBuilder {
@@ -534,7 +537,17 @@ impl TestCommandBuilder {
       args_vec: Default::default(),
       show_output: false,
       timeout: None,
+      own_process_group: false,
     }
+  }
+
+  /// denext: the spawned command leads a process group of its own on Unix
+  /// (`setpgid(0, 0)`), for [`crate::process::ProcessTree`]. It no longer
+  /// gets the terminal's Ctrl+C, so the caller kills the group when it is
+  /// done or interrupted ([`crate::process::kill_process_trees_on_signal`]).
+  pub fn own_process_group(mut self) -> Self {
+    self.own_process_group = true;
+    self
   }
 
   pub fn name(mut self, name: impl AsRef<OsStr>) -> Self {
@@ -967,6 +980,11 @@ impl TestCommandBuilder {
     let envs = self.build_envs(&cwd);
     command.envs(envs);
     command.stdin(Stdio::piped());
+    #[cfg(unix)]
+    if self.own_process_group {
+      use std::os::unix::process::CommandExt;
+      command.process_group(0);
+    }
     command
   }
 

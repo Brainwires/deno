@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 // Copyright Joyent and Node contributors. All rights reserved. MIT license.
 
-import { core, primordials } from "ext:core/mod.js";
+import { core, internals, primordials } from "ext:core/mod.js";
 import { op_get_env_no_permission_check } from "ext:core/ops";
 import * as net from "node:net";
 import httpProxy from "node:_http_proxy";
@@ -831,6 +831,12 @@ export let globalAgent = new Agent({
 export function setGlobalAgent(agent) {
   globalAgent = agent;
 }
+
+// `closeIdleConnections` (node:module) destroys the global agent once this
+// module is loaded, and never loads it to look. The agent lives here, not in
+// `node:http`: `node:https`, `node:_http_client` and `node:_http_agent` reach
+// it without `node:http`.
+internals.__nodeHttpAgentLoaded = true;
 
 export default {
   Agent,

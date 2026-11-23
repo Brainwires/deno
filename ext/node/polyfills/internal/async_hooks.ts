@@ -727,8 +727,9 @@ function promiseFromRuntimeOrPolyfill(): boolean {
   const limit = Error.stackTraceLimit;
   // deno-lint-ignore deno-internal/prefer-primordials -- as above
   Error.prepareStackTrace = creatorIsInternal;
+  // room for a few primordials frames above the creator's (see below)
   // deno-lint-ignore deno-internal/prefer-primordials -- as above
-  Error.stackTraceLimit = 6;
+  Error.stackTraceLimit = 9;
   try {
     const holder: { stack?: unknown } = {};
     ErrorCaptureStackTrace(holder);
@@ -752,6 +753,11 @@ function creatorIsInternal(_error: unknown, callSites: any[]): boolean {
   for (let i = 3; i < callSites.length; i++) {
     const fileName = callSites[i].getFileName();
     if (typeof fileName === "string") {
+      // The primordials' helpers are passed through like builtins: the code
+      // that called one made the promise. (Those that make promises do so in
+      // the internal promise scope, so this only attributes a new helper
+      // that forgot to.)
+      if (fileName === "ext:core/00_primordials.js") continue;
       // Not core's frames: they are the event loop running a promise job (a
       // reaction to a user promise is the user's).
       return StringPrototypeStartsWith(fileName, "ext:") &&

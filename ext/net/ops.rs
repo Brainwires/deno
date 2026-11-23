@@ -1195,6 +1195,13 @@ pub struct ResolveAddrArgs {
   #[from_v8(serde)]
   record_type: RecordType,
   options: Option<ResolveDnsOption>,
+  /// Per-attempt timeout in milliseconds (`node:dns` `Resolver({ timeout })`).
+  /// It becomes hickory's request timeout, whose timer starts when the query
+  /// is sent and which reads an answer that has arrived before it checks the
+  /// timer: c-ares's timeout. A timer started by the caller instead also
+  /// counted the time the query waited to be sent, and fired ahead of an
+  /// answer already received when the process got the CPU back.
+  attempt_timeout_ms: Option<u32>,
 }
 
 #[derive(FromV8)]
@@ -1400,7 +1407,14 @@ async fn resolve_lookup<P: ConnectionProvider>(
   lookup.map_err(map_resolve_error)
 }
 
-#[op2(stack_trace)]
+// `async(deferred)`: this backs `node:dns`'s resolver (c-ares in Node.js,
+// whose answers arrive in the poll phase), so a result that is ready on the
+// first poll (an early failure, an answer the resolver already has) is
+// delivered by the loop like any other. The other async ops of this file back `Deno.listen()`,
+// `Deno.connect()` and `Deno.DatagramConn` only (`node:net` and `node:dgram`
+// have their own) and stay eager: a queued connection or datagram is returned
+// without a loop turn.
+#[op2(async(deferred), stack_trace)]
 pub async fn op_dns_resolve(
   state: Rc<RefCell<OpState>>,
   #[scoped] args: ResolveAddrArgs,
@@ -1411,7 +1425,10 @@ pub async fn op_dns_resolve(
     record_type,
     options,
     cancel_rid,
+    attempt_timeout_ms,
   } = args;
+  let attempt_timeout =
+    attempt_timeout_ms.map(|ms| std::time::Duration::from_millis(ms.into()));
 
   // Parse the query name up front. `Resolver::lookup` performs the same
   // conversion internally, but the resulting `ProtoErrorKind::Msg` is
@@ -1459,7 +1476,11 @@ pub async fn op_dns_resolve(
   // that hickory's background connection tasks clean up quickly after
   // cancellation (they are not aborted by the cancel handle itself).
   if cancel_rid.is_some() {
-    opts.timeout = std::time::Duration::from_secs(1);
+    // A per-attempt timeout is hickory's request timeout (see
+    // `ResolveAddrArgs::attempt_timeout_ms`).
+    opts.timeout = attempt_timeout
+      .map(|t| t.max(std::time::Duration::from_millis(1)))
+      .unwrap_or(std::time::Duration::from_secs(1));
     // For the connected-UDP path (an explicit name server), perform a single
     // attempt with no internal retry. hickory's `RetryDnsHandle` reports the
     // *last* attempt's error, so a refused server can surface `ECONNREFUSED`
@@ -1469,7 +1490,13 @@ pub async fn op_dns_resolve(
     // error and only times out when no real error occurred. The `node:dns`
     // layer already retries, so dropping the redundant internal retry both
     // fixes the error reporting and avoids a wasted, rate-limited retry.
-    opts.attempts = if has_custom_name_server { 0 } else { 1 };
+    // With a per-attempt timeout the caller retries (`tries`), so hickory
+    // makes one attempt there too and the timeout bounds it.
+    opts.attempts = if has_custom_name_server || attempt_timeout.is_some() {
+      0
+    } else {
+      1
+    };
   }
 
   {

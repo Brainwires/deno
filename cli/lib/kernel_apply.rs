@@ -1475,6 +1475,8 @@ mod tests {
     let _ = std::fs::remove_dir_all(&root);
   }
 
+  // only the unix tests use a scratch folder
+  #[cfg(unix)]
   fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir()
       .join(format!("deno_kernel_apply_{name}_{}", std::process::id()));

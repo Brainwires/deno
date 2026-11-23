@@ -65,7 +65,10 @@ impl<TSys: DenoDirSys> DenoDirProvider<TSys> {
 /// it (`CacheDBConfiguration::on_version_change`), so alternating the two
 /// binaries threw away each one's type-check, code, fast-check, analysis and
 /// fmt/lint incremental caches on every switch. The fork keeps its own copy
-/// of each instead (see DENEXT.md, "Caches of their own").
+/// of each instead (see DENEXT.md, "Caches of their own"). The paths below
+/// are each cache's base name: the CLI opens `<path>_<runtime version>`, one
+/// file per version, so denext runtimes of different versions don't wipe
+/// each other's either (`cli/cache/cache_db_files.rs`).
 pub const DENEXT_CACHE_SUFFIX: &str = "_denext";
 
 /// denext: the DENO_DIR folder holding the kernel sandbox's policy-keyed
@@ -289,7 +292,7 @@ mod test {
       assert_eq!(path.parent(), Some(root.as_path()));
       path.file_name().unwrap().to_string_lossy().into_owned()
     };
-    // the SQLite caches a different CLI version wipes
+    // the SQLite caches (base names: the CLI adds the runtime version)
     assert_eq!(
       [
         name(dir.code_cache_db_file_path()),

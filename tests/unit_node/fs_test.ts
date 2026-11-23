@@ -65,7 +65,7 @@ import {
   WriteStream,
 } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { readFile as readFileCallback } from "node:fs";
+import { open as openCallback, readFile as readFileCallback } from "node:fs";
 import {
   constants as fsPromiseConstants,
   copyFile,
@@ -2411,3 +2411,44 @@ Deno.test("[node/fs] paths named like a DOS device are files", async () => {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+// A `read` that throws instead of calling back (an `fs` option's, or
+// `fs.read` refusing an argument) is the stream's error, as in Node.js, where
+// `Readable.read()` catches what the synchronous `_read` throws. It used to
+// reject the promise the async `_read` returns: an unhandled rejection, with
+// the stream left open.
+Deno.test(
+  "[node/fs] ReadStream: a read that throws is the stream's error",
+  async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "read-throws-"));
+    const file = join(tmp, "file.txt");
+    writeFileSync(file, "content");
+    try {
+      const thrown = new Error("read threw");
+      let closed = 0;
+      const stream = createReadStream(file, {
+        fs: {
+          open: openCallback,
+          read() {
+            throw thrown;
+          },
+          close(fd: number, cb: (err: Error | null) => void) {
+            closed++;
+            close(fd, cb);
+          },
+        },
+      });
+      const errors: unknown[] = [];
+      stream.on("error", (err) => errors.push(err));
+      stream.on("data", () => fail("no data was read"));
+      await new Promise<void>((resolve) => stream.on("close", () => resolve()));
+      assertEquals(errors.length, 1);
+      assert(errors[0] === thrown);
+      assert(stream.destroyed);
+      // The descriptor is closed: no read was in flight to wait for.
+      assertEquals(closed, 1);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  },
+);

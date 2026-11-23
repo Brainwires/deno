@@ -403,6 +403,360 @@ fn run_with_parallelism(
   result.with_duration(duration.elapsed())
 }
 
+// denext: per-test timeouts scaled by the CPU each running test gets, as
+// Node's own tools/test.py scales its timeouts and `common.platformTimeout`
+// lengthens a test's waits on a slow machine. A runner with at least one CPU
+// per test keeps the timeouts as written (factor 1); a test that shares a CPU
+// (a container capped below the harness's parallelism, an over-subscribed
+// host's quota) gets a longer one, at most `MAX_TIMEOUT_SCALE` times as long,
+// so a real hang still fails.
+
+/// The longest a scaled timeout gets, relative to the written one.
+pub const MAX_TIMEOUT_SCALE: f64 = 8.0;
+
+/// The CPUs this process may use, and where the number came from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AvailableCpus {
+  pub count: f64,
+  /// `"cgroup cpu quota"` or `"host CPUs"`.
+  pub source: &'static str,
+}
+
+impl AvailableCpus {
+  /// The cgroup's CPU quota (v2 `cpu.max`, else v1's CFS quota, the tightest
+  /// along the cgroup's ancestors) when there is one, at most the host's CPU
+  /// count (which counts the CPU affinity mask), else the host's CPU count.
+  pub fn detect() -> Self {
+    let host = std::thread::available_parallelism()
+      .map(|n| n.get())
+      .unwrap_or(1) as f64;
+    match cgroup_cpu_quota() {
+      Some(quota) if quota <= host => Self {
+        count: quota,
+        source: "cgroup cpu quota",
+      },
+      _ => Self {
+        count: host,
+        source: "host CPUs",
+      },
+    }
+  }
+}
+
+/// How much longer a test's timeout is when `parallelism` tests share
+/// `available_cpus`: clamp(1 / min(1, CPU per test), 1, MAX_TIMEOUT_SCALE).
+pub fn timeout_scale_factor(available_cpus: f64, parallelism: usize) -> f64 {
+  let per_test = available_cpus / parallelism.max(1) as f64;
+  if !per_test.is_finite() || per_test <= 0.0 {
+    return MAX_TIMEOUT_SCALE;
+  }
+  (1.0 / per_test.min(1.0)).clamp(1.0, MAX_TIMEOUT_SCALE)
+}
+
+/// `timeout` scaled by `factor` (whole milliseconds; a factor of 1 leaves it
+/// exactly as it was).
+pub fn scale_timeout(timeout: Duration, factor: f64) -> Duration {
+  if factor <= 1.0 {
+    return timeout;
+  }
+  Duration::from_millis((timeout.as_millis() as f64 * factor).round() as u64)
+}
+
+// denext: CPU contention the harness cannot predict. The scale factor above
+// sees only this process's quota and its own parallelism; sibling
+// containers, other harnesses and runner jobs on the same host starve the
+// tests just as well (the flake hunt runs six gate containers on an 8-CPU
+// host, each with the whole host as its quota: factor 1, and tests that need
+// a few seconds of CPU timed out at 10 s). So a test's deadline also moves
+// out by the time its CPU was taken away while it ran, measured where the
+// kernel reports it:
+//
+// - Linux: pressure stall information (`cpu.pressure` of this process's
+//   cgroup, else `/proc/pressure/cpu`): `some total=` counts the
+//   microseconds in which a runnable task of the cgroup waited for a CPU.
+// - elsewhere on unix: the 1-minute load average against the CPU count, as
+//   the share of time a runnable thread waits (1 - CPUs / load when the
+//   load is higher than the CPUs).
+//
+// The allowance is capped with the scale factor (`MAX_TIMEOUT_SCALE` times
+// the written timeout in all), so a real hang still fails.
+
+/// Where the harness reads CPU contention from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CpuContention {
+  /// A pressure-stall file (`cpu.pressure` / `/proc/pressure/cpu`).
+  Pressure(std::path::PathBuf),
+  /// The load average against this many CPUs.
+  LoadAverage(f64),
+  /// No source: deadlines are not extended.
+  None,
+}
+
+/// The contention reading at a test's start.
+#[derive(Debug, Clone, Copy)]
+pub struct ContentionMark {
+  started: Instant,
+  stall_us: Option<u64>,
+}
+
+impl ContentionMark {
+  /// The time since the mark.
+  pub fn elapsed(&self) -> Duration {
+    self.started.elapsed()
+  }
+}
+
+impl CpuContention {
+  /// The best source on this host for `cpus` CPUs.
+  pub fn detect(cpus: f64) -> Self {
+    #[cfg(target_os = "linux")]
+    if let Some(path) = pressure_file() {
+      return Self::Pressure(path);
+    }
+    if load_average().is_some() {
+      return Self::LoadAverage(cpus);
+    }
+    Self::None
+  }
+
+  pub fn describe(&self) -> String {
+    match self {
+      Self::Pressure(path) => format!("cpu pressure ({})", path.display()),
+      Self::LoadAverage(cpus) => format!("load average over {cpus:.2} CPU(s)"),
+      Self::None => "none".to_string(),
+    }
+  }
+
+  pub fn mark(&self) -> ContentionMark {
+    ContentionMark {
+      started: Instant::now(),
+      stall_us: match self {
+        Self::Pressure(path) => read_pressure_some_total(path),
+        _ => None,
+      },
+    }
+  }
+
+  /// The CPU-starved time since `mark`.
+  pub fn starved_since(&self, mark: &ContentionMark) -> Duration {
+    match self {
+      Self::Pressure(path) => {
+        match (mark.stall_us, read_pressure_some_total(path)) {
+          (Some(start), Some(now)) => {
+            Duration::from_micros(now.saturating_sub(start))
+          }
+          _ => Duration::ZERO,
+        }
+      }
+      Self::LoadAverage(cpus) => load_average()
+        .map_or(Duration::ZERO, |load| {
+          mark.started.elapsed().mul_f64(starved_share(*cpus, load))
+        }),
+      Self::None => Duration::ZERO,
+    }
+  }
+
+  /// When a test that started at `mark` times out: `timeout` (the written
+  /// timeout, `written`, scaled by the CPU per test) plus the time it was
+  /// starved of CPU, at most `MAX_TIMEOUT_SCALE` times `written` in all.
+  pub fn deadline(
+    &self,
+    mark: &ContentionMark,
+    timeout: Duration,
+    written: Duration,
+  ) -> Instant {
+    mark.started + extended_timeout(timeout, self.starved_since(mark), written)
+  }
+}
+
+/// `timeout` (the `written` timeout after scaling) plus `starved`, capped at
+/// `MAX_TIMEOUT_SCALE` times `written`: the scale factor and the starved
+/// time share one allowance. Capped at that multiple of the scaled timeout,
+/// the two compounded to 64 times the written one.
+pub fn extended_timeout(
+  timeout: Duration,
+  starved: Duration,
+  written: Duration,
+) -> Duration {
+  (timeout + starved)
+    .min(written.mul_f64(MAX_TIMEOUT_SCALE))
+    // never less than the scaled timeout (a caller's `timeout` is at most
+    // `MAX_TIMEOUT_SCALE` times `written`, so this only guards the contract)
+    .max(timeout)
+}
+
+/// The share of time a runnable thread waits for a CPU when the run queue
+/// averages `load` on `cpus` CPUs.
+pub fn starved_share(cpus: f64, load: f64) -> f64 {
+  if cpus.is_nan() || load.is_nan() || cpus <= 0.0 || load <= cpus {
+    return 0.0;
+  }
+  1.0 - cpus / load
+}
+
+/// The `total=` of a pressure file's `some` line (microseconds).
+pub fn parse_pressure_some_total(text: &str) -> Option<u64> {
+  text
+    .lines()
+    .find(|line| line.starts_with("some "))?
+    .split_whitespace()
+    .find_map(|field| field.strip_prefix("total="))?
+    .parse()
+    .ok()
+}
+
+fn read_pressure_some_total(path: &std::path::Path) -> Option<u64> {
+  parse_pressure_some_total(&std::fs::read_to_string(path).ok()?)
+}
+
+/// This process's cgroup v2 `cpu.pressure`, else the host's.
+#[cfg(target_os = "linux")]
+fn pressure_file() -> Option<std::path::PathBuf> {
+  use std::path::Path;
+  let cgroup = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+  let (v2, _) = parse_proc_self_cgroup(&cgroup);
+  let base = Path::new("/sys/fs/cgroup");
+  let mut candidates = cgroup_dirs(base, v2.unwrap_or("/"))
+    .into_iter()
+    .take(1)
+    .map(|dir| dir.join("cpu.pressure"))
+    .chain(std::iter::once(
+      Path::new("/proc/pressure/cpu").to_path_buf(),
+    ));
+  candidates.find(|path| read_pressure_some_total(path).is_some())
+}
+
+#[cfg(unix)]
+fn load_average() -> Option<f64> {
+  let mut load = [0f64; 3];
+  // SAFETY: getloadavg writes at most `nelem` doubles into the buffer.
+  let n = unsafe { libc::getloadavg(load.as_mut_ptr(), 1) };
+  (n >= 1 && load[0].is_finite()).then_some(load[0])
+}
+
+#[cfg(not(unix))]
+fn load_average() -> Option<f64> {
+  None
+}
+
+/// A cgroup v2 `cpu.max` (`"<quota> <period>"`, or `"max <period>"` for no
+/// quota) as CPUs.
+#[cfg_attr(
+  not(target_os = "linux"),
+  allow(dead_code, reason = "cgroup CPU limits are read on Linux only")
+)]
+fn parse_cgroup_v2_cpu_max(text: &str) -> Option<f64> {
+  let mut parts = text.split_whitespace();
+  let quota = parts.next()?;
+  let period = parts.next().map_or(Some(100_000.0), |p| p.parse().ok())?;
+  cpus_from_quota(quota.parse().ok()?, period)
+}
+
+/// A cgroup v1 `cpu.cfs_quota_us` / `cpu.cfs_period_us` pair as CPUs (a
+/// quota of -1 is none).
+#[cfg_attr(
+  not(target_os = "linux"),
+  allow(dead_code, reason = "cgroup CPU limits are read on Linux only")
+)]
+fn parse_cgroup_v1_cfs(quota: &str, period: &str) -> Option<f64> {
+  cpus_from_quota(quota.trim().parse().ok()?, period.trim().parse().ok()?)
+}
+
+#[cfg_attr(
+  not(target_os = "linux"),
+  allow(dead_code, reason = "cgroup CPU limits are read on Linux only")
+)]
+fn cpus_from_quota(quota: f64, period: f64) -> Option<f64> {
+  (quota > 0.0 && period > 0.0).then(|| quota / period)
+}
+
+/// `/proc/self/cgroup`'s cgroup v2 path (the `0::<path>` line) and its
+/// cgroup v1 path for the `cpu` controller.
+#[cfg_attr(
+  not(target_os = "linux"),
+  allow(dead_code, reason = "cgroup CPU limits are read on Linux only")
+)]
+fn parse_proc_self_cgroup(text: &str) -> (Option<&str>, Option<&str>) {
+  let mut v2 = None;
+  let mut v1 = None;
+  for line in text.lines() {
+    let mut fields = line.splitn(3, ':');
+    let (Some(id), Some(controllers), Some(path)) =
+      (fields.next(), fields.next(), fields.next())
+    else {
+      continue;
+    };
+    if id == "0" && controllers.is_empty() {
+      v2 = Some(path);
+    } else if controllers.split(',').any(|c| c == "cpu") {
+      v1 = Some(path);
+    }
+  }
+  (v2, v1)
+}
+
+/// The directories from `base`/`path` up to `base` (a path that escapes the
+/// mount, as a cgroup namespace's `/..` does, starts at `base`).
+#[cfg(target_os = "linux")]
+fn cgroup_dirs(base: &std::path::Path, path: &str) -> Vec<std::path::PathBuf> {
+  let rel = path.trim_start_matches('/');
+  let start = if rel.split('/').any(|c| c == "..") {
+    base.to_path_buf()
+  } else {
+    base.join(rel)
+  };
+  start
+    .ancestors()
+    .take_while(|dir| dir.starts_with(base))
+    .map(|dir| dir.to_path_buf())
+    .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_cpu_quota() -> Option<f64> {
+  use std::path::Path;
+  let read = |p: &Path| std::fs::read_to_string(p).ok();
+  let min = |a: Option<f64>, b: Option<f64>| match (a, b) {
+    (Some(a), Some(b)) => Some(a.min(b)),
+    (a, b) => a.or(b),
+  };
+  let cgroup = read(Path::new("/proc/self/cgroup")).unwrap_or_default();
+  let (v2, v1) = parse_proc_self_cgroup(&cgroup);
+  let mut quota = None;
+  let base = Path::new("/sys/fs/cgroup");
+  if base.join("cgroup.controllers").exists() {
+    for dir in cgroup_dirs(base, v2.unwrap_or("/")) {
+      let q =
+        read(&dir.join("cpu.max")).and_then(|t| parse_cgroup_v2_cpu_max(&t));
+      quota = min(quota, q);
+    }
+    return quota;
+  }
+  for base in ["/sys/fs/cgroup/cpu,cpuacct", "/sys/fs/cgroup/cpu"] {
+    let base = Path::new(base);
+    if !base.exists() {
+      continue;
+    }
+    for dir in cgroup_dirs(base, v1.unwrap_or("/")) {
+      let q = match (
+        read(&dir.join("cpu.cfs_quota_us")),
+        read(&dir.join("cpu.cfs_period_us")),
+      ) {
+        (Some(q), Some(p)) => parse_cgroup_v1_cfs(&q, &p),
+        _ => None,
+      };
+      quota = min(quota, q);
+    }
+    break;
+  }
+  quota
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cgroup_cpu_quota() -> Option<f64> {
+  None
+}
+
 pub struct TestTimeoutHolder {
   _tx: std::sync::mpsc::Sender<()>,
 }
@@ -977,6 +1331,170 @@ mod test {
       text.len() - "[... 10 bytes cut]\n".len(),
       FLAKY_OUTPUT_LIMIT
     );
+  }
+
+  // denext: the timeout scale factor and the cgroup readings behind it.
+  #[test]
+  fn timeout_scale_factor_follows_the_cpu_per_test() {
+    // an uncontended runner: at least one CPU per test keeps the timeouts
+    assert_eq!(timeout_scale_factor(4.0, 3), 1.0);
+    assert_eq!(timeout_scale_factor(3.0, 2), 1.0);
+    assert_eq!(timeout_scale_factor(2.0, 1), 1.0);
+    assert_eq!(timeout_scale_factor(1.0, 1), 1.0);
+    assert_eq!(timeout_scale_factor(64.0, 63), 1.0);
+    // the hunt's constrained containers (--cpus=1 / 0.5, two tests at once)
+    assert_eq!(timeout_scale_factor(1.0, 2), 2.0);
+    assert_eq!(timeout_scale_factor(0.5, 2), 4.0);
+    assert_eq!(timeout_scale_factor(0.5, 1), 2.0);
+    assert_eq!(timeout_scale_factor(1.5, 2), 4.0 / 3.0);
+    // never more than MAX_TIMEOUT_SCALE: a hang still fails
+    assert_eq!(timeout_scale_factor(0.25, 8), MAX_TIMEOUT_SCALE);
+    assert_eq!(timeout_scale_factor(0.0, 2), MAX_TIMEOUT_SCALE);
+    assert_eq!(timeout_scale_factor(f64::NAN, 2), MAX_TIMEOUT_SCALE);
+    // a parallelism of 0 counts as 1
+    assert_eq!(timeout_scale_factor(0.5, 0), 2.0);
+  }
+
+  #[test]
+  fn scale_timeout_keeps_factor_one_exact() {
+    let t = Duration::from_millis(10_000);
+    assert_eq!(scale_timeout(t, 1.0), t);
+    assert_eq!(scale_timeout(t, 2.0), Duration::from_millis(20_000));
+    assert_eq!(scale_timeout(t, 4.0 / 3.0), Duration::from_millis(13_333));
+    assert_eq!(
+      scale_timeout(Duration::from_millis(30_000), MAX_TIMEOUT_SCALE),
+      Duration::from_millis(240_000)
+    );
+  }
+
+  #[test]
+  fn pressure_some_total_parses() {
+    let text = "some avg10=28.84 avg60=39.40 avg300=50.36 total=12615243934\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n";
+    assert_eq!(parse_pressure_some_total(text), Some(12_615_243_934));
+    assert_eq!(parse_pressure_some_total("full avg10=0 total=5\n"), None);
+    assert_eq!(parse_pressure_some_total("some avg10=0\n"), None);
+    assert_eq!(parse_pressure_some_total(""), None);
+  }
+
+  #[test]
+  fn starved_share_follows_the_load() {
+    assert_eq!(starved_share(8.0, 4.0), 0.0);
+    assert_eq!(starved_share(8.0, 8.0), 0.0);
+    assert_eq!(starved_share(8.0, 16.0), 0.5);
+    assert_eq!(starved_share(18.0, 36.0), 0.5);
+    assert_eq!(starved_share(0.0, 16.0), 0.0);
+    assert_eq!(starved_share(8.0, f64::NAN), 0.0);
+  }
+
+  #[test]
+  fn extended_timeout_is_capped() {
+    let t = Duration::from_secs(10);
+    assert_eq!(extended_timeout(t, Duration::ZERO, t), t);
+    assert_eq!(
+      extended_timeout(t, Duration::from_secs(7), t),
+      Duration::from_secs(17)
+    );
+    assert_eq!(
+      extended_timeout(t, Duration::from_secs(500), t),
+      t.mul_f64(MAX_TIMEOUT_SCALE)
+    );
+  }
+
+  #[test]
+  fn extended_timeout_cap_does_not_compound_with_the_scale_factor() {
+    let written = Duration::from_secs(10);
+    let cap = written.mul_f64(MAX_TIMEOUT_SCALE);
+    // scaled 4 times: the starved time adds up to the same cap, not to 8
+    // times the scaled timeout
+    let scaled = scale_timeout(written, 4.0);
+    assert_eq!(
+      extended_timeout(scaled, Duration::from_secs(15), written),
+      Duration::from_secs(55)
+    );
+    assert_eq!(
+      extended_timeout(scaled, Duration::from_secs(500), written),
+      cap
+    );
+    // scaled all the way: no allowance is left for the starved time
+    let scaled = scale_timeout(written, MAX_TIMEOUT_SCALE);
+    assert_eq!(scaled, cap);
+    assert_eq!(
+      extended_timeout(scaled, Duration::from_secs(500), written),
+      cap
+    );
+  }
+
+  #[test]
+  fn contention_without_a_source_keeps_the_deadline() {
+    let none = CpuContention::None;
+    let mark = none.mark();
+    let t = Duration::from_millis(250);
+    assert_eq!(none.starved_since(&mark), Duration::ZERO);
+    assert_eq!(none.deadline(&mark, t, t), mark.started + t);
+    // a pressure file that cannot be read adds nothing either
+    let missing = CpuContention::Pressure("/nonexistent/cpu.pressure".into());
+    let mark = missing.mark();
+    assert_eq!(missing.starved_since(&mark), Duration::ZERO);
+  }
+
+  #[test]
+  fn cgroup_quotas_parse() {
+    assert_eq!(parse_cgroup_v2_cpu_max("max 100000\n"), None);
+    assert_eq!(parse_cgroup_v2_cpu_max("50000 100000\n"), Some(0.5));
+    assert_eq!(parse_cgroup_v2_cpu_max("300000 100000"), Some(3.0));
+    assert_eq!(parse_cgroup_v2_cpu_max("200000"), Some(2.0));
+    assert_eq!(parse_cgroup_v2_cpu_max(""), None);
+    assert_eq!(parse_cgroup_v2_cpu_max("garbage 100000"), None);
+    assert_eq!(parse_cgroup_v1_cfs("-1\n", "100000\n"), None);
+    assert_eq!(parse_cgroup_v1_cfs("100000\n", "100000\n"), Some(1.0));
+    assert_eq!(parse_cgroup_v1_cfs("25000", "50000"), Some(0.5));
+    assert_eq!(parse_cgroup_v1_cfs("1000", "0"), None);
+  }
+
+  #[test]
+  fn proc_self_cgroup_parses() {
+    assert_eq!(parse_proc_self_cgroup("0::/\n"), (Some("/"), None));
+    assert_eq!(
+      parse_proc_self_cgroup("0::/system.slice/docker-abc.scope\n"),
+      (Some("/system.slice/docker-abc.scope"), None)
+    );
+    assert_eq!(
+      parse_proc_self_cgroup(
+        "12:memory:/docker/abc\n4:cpu,cpuacct:/docker/abc\n1:name=systemd:/x\n"
+      ),
+      (None, Some("/docker/abc"))
+    );
+    assert_eq!(parse_proc_self_cgroup(""), (None, None));
+  }
+
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn cgroup_dirs_walk_up_to_the_mount() {
+    use std::path::Path;
+    use std::path::PathBuf;
+    let base = Path::new("/sys/fs/cgroup");
+    assert_eq!(
+      cgroup_dirs(base, "/"),
+      vec![PathBuf::from("/sys/fs/cgroup")]
+    );
+    assert_eq!(
+      cgroup_dirs(base, "/a/b"),
+      vec![
+        PathBuf::from("/sys/fs/cgroup/a/b"),
+        PathBuf::from("/sys/fs/cgroup/a"),
+        PathBuf::from("/sys/fs/cgroup"),
+      ]
+    );
+    assert_eq!(
+      cgroup_dirs(base, "/../../x"),
+      vec![PathBuf::from("/sys/fs/cgroup")]
+    );
+  }
+
+  #[test]
+  fn available_cpus_is_positive() {
+    let cpus = AvailableCpus::detect();
+    assert!(cpus.count > 0.0);
   }
 
   #[test]

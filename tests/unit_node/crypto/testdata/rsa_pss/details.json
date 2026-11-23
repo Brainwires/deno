@@ -1,0 +1,41 @@
+{
+  "unrestricted": {
+    "modulusLength": 1024,
+    "publicExponent": 65537
+  },
+  "defaults": {
+    "modulusLength": 1024,
+    "hashAlgorithm": "sha1",
+    "mgf1HashAlgorithm": "sha1",
+    "saltLength": 20,
+    "publicExponent": 65537
+  },
+  "sha256": {
+    "modulusLength": 1024,
+    "hashAlgorithm": "sha256",
+    "mgf1HashAlgorithm": "sha256",
+    "saltLength": 32,
+    "publicExponent": 65537
+  },
+  "sha512_sha256_16": {
+    "modulusLength": 1024,
+    "hashAlgorithm": "sha512",
+    "mgf1HashAlgorithm": "sha256",
+    "saltLength": 16,
+    "publicExponent": 65537
+  },
+  "sha384_mgf1_sha1_0": {
+    "modulusLength": 1024,
+    "hashAlgorithm": "sha384",
+    "mgf1HashAlgorithm": "sha1",
+    "saltLength": 0,
+    "publicExponent": 65537
+  },
+  "salt32": {
+    "modulusLength": 1024,
+    "hashAlgorithm": "sha1",
+    "mgf1HashAlgorithm": "sha1",
+    "saltLength": 32,
+    "publicExponent": 65537
+  }
+}

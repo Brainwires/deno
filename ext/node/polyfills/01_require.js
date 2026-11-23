@@ -5213,9 +5213,21 @@ preEnableTraceEvents();
 //   still pending; only matter when those features are actively used and
 //   are tracked as follow-ups, not regressions for ordinary programs.
 
+// `deno test` calls this after every test. Reading `nativeModuleExports`
+// loads the module, so a test file that never used `node:http` / `node:https`
+// used to load both here (and `node:tls`, `fetch` and the streams with them)
+// only to find no agent: each module that holds a global agent says when it
+// has been loaded (`internals.__nodeHttpAgentLoaded` / `__nodeHttpsLoaded`),
+// and one that hasn't has no global agent to destroy. The HTTP agent is
+// `node:_http_agent`'s (`http.globalAgent` reads it), which `node:https`,
+// `node:_http_client` and a `require("_http_agent")` load without
+// `node:http`: going by `node:http` left the connections of an agent used
+// only that way open.
 function closeIdleConnections() {
   try {
-    const http = nativeModuleExports["http"];
+    const http = internals.__nodeHttpAgentLoaded
+      ? nativeModuleExports["_http_agent"]
+      : undefined;
     if (http?.globalAgent) {
       http.globalAgent.destroy();
     }
@@ -5223,7 +5235,9 @@ function closeIdleConnections() {
     // Ignore
   }
   try {
-    const https = nativeModuleExports["https"];
+    const https = internals.__nodeHttpsLoaded
+      ? nativeModuleExports["https"]
+      : undefined;
     if (https?.globalAgent) {
       https.globalAgent.destroy();
     }

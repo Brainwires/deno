@@ -34,6 +34,19 @@ use util::assert_not_contains;
 
 const CODE_CACHE_DB_FILE_NAME: &str = "v8_code_cache_v2_denext";
 
+/// Whether the code cache database exists: denext names it per runtime
+/// version, `v8_code_cache_v2_denext_<version>`.
+fn code_cache_db_exists(deno_dir: &TempDir) -> bool {
+  let prefix = format!("{CODE_CACHE_DB_FILE_NAME}_");
+  std::fs::read_dir(deno_dir.path()).unwrap().any(|entry| {
+    let name = entry.unwrap().file_name();
+    let name = name.to_string_lossy();
+    name.starts_with(&prefix)
+      && !name.ends_with("-wal")
+      && !name.ends_with("-shm")
+  })
+}
+
 // tests to ensure that when `--location` is set, all code shares the same
 // localStorage cache based on the origin of the location URL.
 #[test]
@@ -3265,8 +3278,7 @@ fn code_cache_test() {
     assert_not_contains!(output.stderr(), "V8 code cache hit");
 
     // Check that the code cache database exists.
-    let code_cache_path = deno_dir.path().join(CODE_CACHE_DB_FILE_NAME);
-    assert!(code_cache_path.exists());
+    assert!(code_cache_db_exists(deno_dir));
   }
 
   // 2nd run with cache.
@@ -3374,8 +3386,7 @@ fn code_cache_npm_test() {
     assert_not_contains!(output.stderr(), "V8 code cache hit");
 
     // Check that the code cache database exists.
-    let code_cache_path = deno_dir.path().join(CODE_CACHE_DB_FILE_NAME);
-    assert!(code_cache_path.exists());
+    assert!(code_cache_db_exists(deno_dir));
   }
 
   // 2nd run with cache.
@@ -3421,8 +3432,7 @@ fn code_cache_npm_with_require_test() {
     assert_not_contains!(output.stderr(), "V8 code cache hit");
 
     // Check that the code cache database exists.
-    let code_cache_path = deno_dir.path().join(CODE_CACHE_DB_FILE_NAME);
-    assert!(code_cache_path.exists());
+    assert!(code_cache_db_exists(deno_dir));
   }
 
   // 2nd run with cache.

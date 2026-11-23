@@ -197,6 +197,59 @@ class Evaluate(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("no successful full", errors[0])
 
+    def targeted(self, id, conclusion="success", status="completed"):
+        return dict(run(id, conclusion, status), targeted=True)
+
+    def test_a_targeted_run_never_vouches_even_on_every_leg(self):
+        full, errors = gate.evaluate(
+            [self.targeted(8)], legs({8: ALL_LEGS}), ON_DEV
+        )
+        self.assertIsNone(full)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("no successful full", errors[0])
+
+    def test_a_red_targeted_run_does_not_block_the_tag(self):
+        runs = [
+            self.targeted(8, "failure"),
+            dict(self.targeted(9, "success"), attempts=["timed_out"]),
+            run(10),
+        ]
+        full, errors = gate.evaluate(runs, legs({10: ALL_LEGS}), ON_DEV)
+        self.assertEqual(errors, [])
+        self.assertEqual(full, 10)
+
+    def test_a_targeted_run_in_progress_is_not_waited_for(self):
+        runs = [self.targeted(8, None, "in_progress"), run(10)]
+        self.assertEqual(gate.pending_runs(runs), [])
+        full, errors = gate.evaluate(runs, legs({10: ALL_LEGS}), ON_DEV)
+        self.assertEqual(errors, [])
+        self.assertEqual(full, 10)
+
+    def test_is_targeted(self):
+        title = "denext tests (targeted: specs:kernel_sandbox on linux,windows)"
+        self.assertTrue(gate.is_targeted("workflow_dispatch", title))
+        # A push's title is its commit message: never the signal.
+        self.assertFalse(gate.is_targeted("push", title))
+        self.assertFalse(gate.is_targeted("pull_request", title))
+        # A full or OS-picked dispatch keeps the workflow's name.
+        self.assertFalse(gate.is_targeted("workflow_dispatch", "denext tests"))
+        self.assertFalse(gate.is_targeted("workflow_dispatch", None))
+        self.assertFalse(gate.is_targeted(None, title))
+
+    def test_the_workflow_run_name_carries_the_targeted_title(self):
+        # denext_tests.yml's run-name is what is_targeted reads.
+        path = os.path.join(
+            HERE, "..", "workflows", "denext_tests.yml"
+        )
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        line = next(
+            (l for l in text.splitlines() if l.startswith("run-name:")), ""
+        )
+        self.assertIn(
+            f"'{gate.TARGETED_TITLE}{{0}} on {{1}})'", line, line
+        )
+
     def test_is_stuck(self):
         now = datetime(2026, 11, 5, 18, 0, tzinfo=timezone.utc)
         old, fresh = "2026-11-04T17:02:01Z", "2026-11-05T17:30:00Z"
@@ -608,6 +661,36 @@ class Script(unittest.TestCase):
         result = self.gate(answers)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("still in progress for this commit: 10", result.stdout)
+
+    def test_a_red_targeted_dispatch_does_not_block(self):
+        answers = self.base()
+        answers[RUNS] = (
+            '{"id":10,"status":"completed","conclusion":"failure","run_attempt":2,'
+            '"event":"workflow_dispatch",'
+            '"display_title":"denext tests (targeted: unit:pty_test on windows)"}\n'
+            '{"id":11,"status":"completed","conclusion":"success","run_attempt":1}\n'
+        )
+        # No attempt or job of run 10 is read (the fake gh refuses any call
+        # it has no answer for).
+        result = self.gate(answers)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("run 10 is a targeted run", result.stdout)
+        self.assertIn("full_run=11", result.stdout)
+
+    def test_a_red_push_titled_like_a_targeted_run_still_blocks(self):
+        answers = self.base()
+        answers[RUNS] = (
+            '{"id":10,"status":"completed","conclusion":"failure","run_attempt":1,'
+            '"event":"push",'
+            '"display_title":"denext tests (targeted: x on linux)"}\n'
+            '{"id":11,"status":"completed","conclusion":"success","run_attempt":1}\n'
+        )
+        answers[f"repos/{REPO}/actions/runs/10/attempts/1/jobs?per_page=100"] = (
+            "failure\n"
+        )
+        result = self.gate(answers)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("::error::denext tests failed on this commit: 10", result.stdout)
 
     def test_refuses_an_unmerged_commit(self):
         answers = self.base()

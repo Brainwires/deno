@@ -15,6 +15,8 @@ const {
   NumberIsSafeInteger,
 } = primordials;
 
+const lazyProcess = core.createLazyLoader("node:process");
+
 // Largest integer that can be expressed in 6 bytes, mirrors Node's RAND_MAX
 // in lib/internal/crypto/random.js.
 const RAND_MAX = 0xFFFF_FFFF_FFFF;
@@ -81,7 +83,9 @@ function randomInt(
   const result = op_node_random_int(min, MathFloor(max as number));
 
   if (!isSync) {
-    callback!(null, result);
+    // Never during the call: Node.js answers from `process.nextTick` (its
+    // cache of random bytes is refilled on the thread pool).
+    lazyProcess().default.nextTick(callback!, undefined, result);
     return;
   }
 

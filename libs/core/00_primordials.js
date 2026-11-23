@@ -525,11 +525,27 @@
     },
   );
 
+  // denext: depth of runtime code creating promises it keeps to itself.
+  // `core.isCreatingInternalPromise()` (00_infra.js, which takes this object
+  // over) reads it, so that `node:async_hooks` leaves those promises out. The
+  // promise helpers below are runtime code whatever calls them (only the
+  // runtime's own scripts can reach primordials), so every promise they make
+  // is counted here instead of being attributed by the caller's stack frames:
+  // a frame of this file read as core's own made a promise the polyfills
+  // created through `PromisePrototypeCatch` or `SafePromiseAll` look like
+  // JS's.
+  const internalPromiseScope = { depth: 0 };
+
   const SafePromise = makeSafe(
     Promise,
     class SafePromise extends Promise {
       constructor(executor) {
-        super(executor);
+        internalPromiseScope.depth++;
+        try {
+          super(executor);
+        } finally {
+          internalPromiseScope.depth--;
+        }
       }
     },
   );
@@ -540,8 +556,25 @@
   primordials.TypedArrayPrototypeToString = (thisArray) =>
     TypedArrayPrototypeJoin(thisArray);
 
-  primordials.PromisePrototypeCatch = (thisPromise, onRejected) =>
-    PromisePrototypeThen(thisPromise, undefined, onRejected);
+  primordials.PromisePrototypeCatch = (thisPromise, onRejected) => {
+    internalPromiseScope.depth++;
+    try {
+      return PromisePrototypeThen(thisPromise, undefined, onRejected);
+    } finally {
+      internalPromiseScope.depth--;
+    }
+  };
+
+  // Runs `executor` in a new Promise made in the internal promise scope; the
+  // promises it makes synchronously are counted too.
+  const newInternalPromise = (executor) => {
+    internalPromiseScope.depth++;
+    try {
+      return new Promise(executor);
+    } finally {
+      internalPromiseScope.depth--;
+    }
+  };
 
   const arrayToSafePromiseIterable = (array) =>
     new SafeArrayIterator(
@@ -566,7 +599,7 @@
   primordials.SafePromiseAll = (values) =>
     // Wrapping on a new Promise is necessary to not expose the SafePromise
     // prototype to user-land.
-    new Promise((a, b) =>
+    newInternalPromise((a, b) =>
       SafePromise.all(arrayToSafePromiseIterable(values)).then(a, b)
     );
 
@@ -580,7 +613,7 @@
   primordials.SafePromiseAllSettled = (values) =>
     // Wrapping on a new Promise is necessary to not expose the SafePromise
     // prototype to user-land.
-    new Promise((a, b) =>
+    newInternalPromise((a, b) =>
       SafePromise.allSettled(arrayToSafePromiseIterable(values)).then(a, b)
     );
 
@@ -597,7 +630,7 @@
   primordials.SafePromiseAny = (values) =>
     // Wrapping on a new Promise is necessary to not expose the SafePromise
     // prototype to user-land.
-    new Promise((a, b) =>
+    newInternalPromise((a, b) =>
       SafePromise.any(arrayToSafePromiseIterable(values)).then(a, b)
     );
 
@@ -611,7 +644,7 @@
   primordials.SafePromiseRace = (values) =>
     // Wrapping on a new Promise is necessary to not expose the SafePromise
     // prototype to user-land.
-    new Promise((a, b) =>
+    newInternalPromise((a, b) =>
       SafePromise.race(arrayToSafePromiseIterable(values)).then(a, b)
     );
 
@@ -627,7 +660,7 @@
   primordials.SafePromisePrototypeFinally = (thisPromise, onFinally) =>
     // Wrapping on a new Promise is necessary to not expose the SafePromise
     // prototype to user-land.
-    new Promise((a, b) =>
+    newInternalPromise((a, b) =>
       new SafePromise((a, b) => PromisePrototypeThen(thisPromise, a, b))
         .finally(onFinally)
         .then(a, b)
@@ -709,4 +742,6 @@
   // Provide bootstrap namespace
   globalThis.__bootstrap ??= {};
   globalThis.__bootstrap.primordials = primordials;
+  // Taken over (and removed from here) by 00_infra.js.
+  globalThis.__bootstrap.internalPromiseScope = internalPromiseScope;
 })();

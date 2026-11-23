@@ -79,6 +79,54 @@ impl WakeRef for LoggingWaker {
   }
 }
 
+/// A wake made while an iteration runs is held back until the iteration
+/// returns. It reaches the task even when the iteration returns
+/// `Poll::Ready`: the caller may go on waiting (a worker idle in
+/// `onmessage`), and the wake may stand for work the iteration did not see
+/// (a V8 foreground task posted from another thread).
+#[tokio::test]
+async fn a_wake_during_an_iteration_that_returns_ready_reaches_the_task() {
+  #[op2]
+  async fn op_async_yield() {
+    tokio::task::yield_now().await;
+  }
+
+  #[op2(fast)]
+  fn op_wake_loop(state: &mut OpState) {
+    state.waker.wake();
+  }
+
+  deno_core::extension!(test_ext, ops = [op_async_yield, op_wake_loop]);
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![test_ext::init()],
+    ..Default::default()
+  });
+  runtime
+    .execute_script(
+      "a.js",
+      "Deno.core.ops.op_async_yield().then(() => Deno.core.ops.op_wake_loop());",
+    )
+    .unwrap();
+
+  let logging_waker = Arc::new(LoggingWaker::default());
+  let waker = logging_waker.clone().into_waker();
+  let mut polls = 0;
+  loop {
+    logging_waker.woken.store(false, Ordering::SeqCst);
+    let res = runtime
+      .poll_event_loop(&mut Context::from_waker(&waker), Default::default());
+    polls += 1;
+    assert!(polls < 100);
+    if matches!(res, Poll::Ready(Ok(()))) {
+      // The iteration that ran `op_wake_loop` is the one that found nothing
+      // left to do.
+      assert!(logging_waker.woken.load(Ordering::SeqCst));
+      break;
+    }
+    tokio::task::yield_now().await;
+  }
+}
+
 /// This is a reproduction for a very obscure bug where the Deno runtime locks up we end up polling
 /// an empty JoinSet and attempt to resolve ops after-the-fact. There's a small footgun in the JoinSet
 /// API where polling it while empty returns Ready(None), which means that it never holds on to the
@@ -2263,6 +2311,48 @@ async fn test_nexttick_before_queue_microtask() {
           throw new Error("expected 'tick,microtask,then' but got '" + result + "'");
         }
       })();
+      "#,
+    )
+    .unwrap();
+  runtime.run_event_loop(Default::default()).await.unwrap();
+}
+
+// A JS timer armed after a few hundred async op calls in one iteration, each
+// of which got something from a tokio resource on its first poll (as a
+// blocking task's handle does once the thread has answered), which spends the
+// task's tokio coop budget. The timer's tokio sleep, polled when it is armed,
+// then left its waker with the scheduler, which wakes it (and through it the
+// event loop) with its list of deferred wakers borrowed. With async ops
+// outstanding and no wake while the iteration ran (the ops had more to wait
+// for), the event loop's waker deferred another wake from there: `RefCell
+// already borrowed`, and the process ended.
+#[tokio::test]
+async fn timer_armed_after_the_coop_budget_is_spent() {
+  #[op2]
+  async fn op_async_ready_then_sleep() {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tx.send(()).unwrap();
+    rx.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
+
+  deno_core::extension!(test_ext, ops = [op_async_ready_then_sleep]);
+
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    extensions: vec![test_ext::init()],
+    ..Default::default()
+  });
+  runtime
+    .execute_script(
+      "timer_armed_after_the_coop_budget_is_spent.js",
+      r#"
+      const { op_async_ready_then_sleep } = Deno.core.ops;
+      // In a timers phase, whose poll of the timer registered the loop's
+      // waker with it.
+      Deno.core.createTimer(() => {
+        for (let i = 0; i < 300; i++) op_async_ready_then_sleep();
+        Deno.core.createTimer(() => {}, 5, undefined, false, true, false);
+      }, 1, undefined, false, true, false);
       "#,
     )
     .unwrap();

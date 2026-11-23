@@ -221,7 +221,17 @@ pub fn op_fs_open_sync(
   Ok(rid)
 }
 
-#[op2(stack_trace)]
+// Every async op of this file is `async(deferred)`: its result is delivered
+// by the event loop, never returned from the call. An op that is ready on its
+// first poll (it failed a permission check, the file system answered without
+// a thread, or the blocking thread finished first on a busy machine) would
+// otherwise resolve in the microtask checkpoint that made the call, which in
+// a timers phase is the one between two timer lists. `node:fs` is built on
+// these ops, and libuv delivers a thread-pool result in the poll phase, after
+// every timer due in the phase that started it; `Deno.stat()` and the rest
+// now complete at the same point every time, instead of earlier when a race
+// was won. The work still starts at the call: only the delivery is deferred.
+#[op2(async(deferred), stack_trace)]
 #[smi]
 pub async fn op_fs_open_async(
   state: Rc<RefCell<OpState>>,
@@ -283,7 +293,7 @@ pub fn op_fs_mkdir_sync(
   Ok(())
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), stack_trace)]
 pub async fn op_fs_mkdir_async(
   state: Rc<RefCell<OpState>>,
   #[string] path: String,
@@ -364,7 +374,7 @@ pub fn op_fs_chmod_sync(
 }
 
 #[cfg(unix)]
-#[op2(stack_trace)]
+#[op2(async(deferred), fast, stack_trace)]
 pub async fn op_fs_chmod_async(
   state: Rc<RefCell<OpState>>,
   #[string] path: String,
@@ -395,7 +405,7 @@ pub async fn op_fs_chmod_async(
 }
 
 #[cfg(not(unix))]
-#[op2(stack_trace)]
+#[op2(async(deferred), fast, stack_trace)]
 pub async fn op_fs_chmod_async(
   state: Rc<RefCell<OpState>>,
   #[string] path: String,
@@ -452,7 +462,7 @@ pub fn op_fs_chown_sync(
   Ok(())
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), stack_trace)]
 pub async fn op_fs_chown_async(
   state: Rc<RefCell<OpState>>,
   #[string] path: String,
@@ -570,7 +580,7 @@ pub fn op_fs_fchmod_sync(
   Ok(())
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), fast, stack_trace)]
 pub async fn op_fs_fchmod_async(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
@@ -611,7 +621,7 @@ pub fn op_fs_fchown_sync(
   Ok(())
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), stack_trace)]
 pub async fn op_fs_fchown_async(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
@@ -670,7 +680,7 @@ pub fn op_fs_remove_sync(
   Ok(())
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), fast, stack_trace)]
 pub async fn op_fs_remove_async(
   state: Rc<RefCell<OpState>>,
   #[string] path: String,
@@ -738,7 +748,7 @@ pub fn op_fs_copy_file_sync(
   Ok(())
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), fast, stack_trace)]
 pub async fn op_fs_copy_file_async(
   state: Rc<RefCell<OpState>>,
   #[string] from: String,
@@ -787,7 +797,7 @@ pub fn op_fs_stat_sync(
   Ok(())
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), fast, stack_trace)]
 pub async fn op_fs_stat_async(
   state: Rc<RefCell<OpState>>,
   #[string] path: String,
@@ -830,7 +840,7 @@ pub fn op_fs_lstat_sync(
   Ok(())
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), fast, stack_trace)]
 pub async fn op_fs_lstat_async(
   state: Rc<RefCell<OpState>>,
   #[string] path: String,
@@ -874,7 +884,7 @@ pub fn op_fs_realpath_sync(
   Ok(path_string)
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), fast, stack_trace)]
 #[string]
 pub async fn op_fs_realpath_async(
   state: Rc<RefCell<OpState>>,
@@ -920,7 +930,7 @@ pub fn op_fs_read_dir_sync(
   Ok(entries)
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), fast, stack_trace)]
 pub async fn op_fs_read_dir_async(
   state: Rc<RefCell<OpState>>,
   #[string] path: String,
@@ -950,7 +960,7 @@ pub async fn op_fs_read_dir_async(
   )
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), fast, stack_trace)]
 pub async fn op_fs_read_dir_async_next(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
@@ -996,7 +1006,7 @@ pub fn op_fs_rename_sync(
   Ok(())
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), fast, stack_trace)]
 pub async fn op_fs_rename_async(
   state: Rc<RefCell<OpState>>,
   #[string] oldpath: String,
@@ -1059,7 +1069,7 @@ pub fn op_fs_link_sync(
   Ok(())
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), fast, stack_trace)]
 pub async fn op_fs_link_async(
   state: Rc<RefCell<OpState>>,
   #[string] oldpath: String,
@@ -1153,7 +1163,7 @@ pub fn op_fs_symlink_sync(
   Ok(())
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), stack_trace)]
 pub async fn op_fs_symlink_async(
   state: Rc<RefCell<OpState>>,
   #[string] oldpath: String,
@@ -1209,7 +1219,7 @@ pub fn op_fs_read_link_sync(
   Ok(target_string)
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), fast, stack_trace)]
 #[string]
 pub async fn op_fs_read_link_async(
   state: Rc<RefCell<OpState>>,
@@ -1256,7 +1266,7 @@ pub fn op_fs_truncate_sync(
   Ok(())
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), fast, stack_trace)]
 pub async fn op_fs_truncate_async(
   state: Rc<RefCell<OpState>>,
   #[string] path: String,
@@ -1305,7 +1315,7 @@ pub fn op_fs_utime_sync(
   Ok(())
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), fast, stack_trace)]
 pub async fn op_fs_utime_async(
   state: Rc<RefCell<OpState>>,
   #[string] path: String,
@@ -1378,7 +1388,7 @@ pub fn op_fs_make_temp_dir_sync(
   .context("tmpdir")
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), stack_trace)]
 #[string]
 pub async fn op_fs_make_temp_dir_async(
   state: Rc<RefCell<OpState>>,
@@ -1466,7 +1476,7 @@ pub fn op_fs_make_temp_file_sync(
   .context("tmpfile")
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), stack_trace)]
 #[string]
 pub async fn op_fs_make_temp_file_async(
   state: Rc<RefCell<OpState>>,
@@ -1674,7 +1684,7 @@ pub fn op_fs_write_file_sync(
   Ok(())
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), stack_trace)]
 #[allow(clippy::too_many_arguments, reason = "op")]
 pub async fn op_fs_write_file_async(
   state: Rc<RefCell<OpState>>,
@@ -1771,7 +1781,7 @@ pub fn op_fs_read_file_sync(
 }
 
 /// `max_len`: as in `op_fs_read_file_sync`.
-#[op2(stack_trace)]
+#[op2(async(deferred), stack_trace)]
 pub async fn op_fs_read_file_async(
   state: Rc<RefCell<OpState>>,
   #[string] path: String,
@@ -1856,7 +1866,7 @@ pub fn op_fs_read_file_text_sync(
   })
 }
 
-#[op2(stack_trace)]
+#[op2(async(deferred), stack_trace)]
 pub async fn op_fs_read_file_text_async(
   state: Rc<RefCell<OpState>>,
   #[string] path: String,
@@ -1927,7 +1937,7 @@ pub fn op_fs_seek_sync(
   Ok(cursor)
 }
 
-#[op2]
+#[op2(async(deferred), fast)]
 #[number]
 pub async fn op_fs_seek_async(
   state: Rc<RefCell<OpState>>,
@@ -1953,7 +1963,7 @@ pub fn op_fs_file_sync_data_sync(
   Ok(())
 }
 
-#[op2]
+#[op2(async(deferred), fast)]
 pub async fn op_fs_file_sync_data_async(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
@@ -1975,7 +1985,7 @@ pub fn op_fs_file_sync_sync(
   Ok(())
 }
 
-#[op2]
+#[op2(async(deferred), fast)]
 pub async fn op_fs_file_sync_async(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
@@ -2009,7 +2019,7 @@ pub fn op_fs_file_stat_sync(
   Ok(())
 }
 
-#[op2]
+#[op2(async(deferred), fast)]
 pub async fn op_fs_file_stat_async(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
@@ -2042,7 +2052,7 @@ pub fn op_fs_flock_sync(
   Ok(())
 }
 
-#[op2]
+#[op2(async(deferred), fast)]
 pub async fn op_fs_flock_async(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
@@ -2065,7 +2075,7 @@ pub fn op_fs_flock_try_sync(
   Ok(file.try_lock_sync(exclusive)?)
 }
 
-#[op2]
+#[op2(async(deferred), fast)]
 pub async fn op_fs_flock_try_async(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
@@ -2087,7 +2097,7 @@ pub fn op_fs_funlock_sync(
   Ok(())
 }
 
-#[op2]
+#[op2(async(deferred), fast)]
 pub async fn op_fs_funlock_async(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
@@ -2110,7 +2120,7 @@ pub fn op_fs_ftruncate_sync(
   Ok(())
 }
 
-#[op2]
+#[op2(async(deferred), fast)]
 pub async fn op_fs_file_truncate_async(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
@@ -2143,7 +2153,7 @@ pub fn op_fs_futime_sync(
   Ok(())
 }
 
-#[op2]
+#[op2(async(deferred), fast)]
 pub async fn op_fs_futime_async(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,

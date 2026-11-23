@@ -304,7 +304,9 @@
     "es-module/test-typescript-module.mjs": {},
     "es-module/test-typescript.mjs": {},
     "es-module/test-vm-compile-function-lineoffset.js": {},
-    "es-module/test-vm-source-text-module-leak.js": {},
+    "es-module/test-vm-source-text-module-leak.js": {
+      "sequential": true
+    },
     "es-module/test-wasm-memory-out-of-bound.js": {},
     "es-module/test-wasm-simple.js": {},
     "ffi/test-ffi-weakref-calls.js": {},
@@ -418,7 +420,9 @@
     "parallel/test-module-setsourcemapssupport.js": {},
     "parallel/test-module-main-preserve-symlinks-fail.js": {},
     "parallel/test-module-main-fail.js": {},
-    "parallel/test-abort-controller-any-timeout.js": {},
+    "parallel/test-abort-controller-any-timeout.js": {
+      "timeoutMs": 30000
+    },
     "parallel/test-abortcontroller-internal.js": {
       "ignore": true,
       "reason": "Tests Node.js internal modules (require('internal/...')) which are not exposed in Deno"
@@ -605,6 +609,7 @@
     "parallel/test-child-process-default-options.js": {},
     "parallel/test-child-process-detached.js": {},
     "parallel/test-child-process-destroy.js": {},
+    "parallel/test-child-process-dgram-reuseport.js": {},
     "parallel/test-child-process-disconnect.js": {},
     "parallel/test-child-process-double-pipe.js": {},
     "parallel/test-child-process-env.js": {},
@@ -810,8 +815,12 @@
     "parallel/test-cluster-call-and-destroy.js": { "windows": false },
     "parallel/test-cluster-child-index-dgram.js": { "windows": false },
     "parallel/test-cluster-child-index-net.js": { "windows": false },
+    "parallel/test-cluster-dgram-1.js": {},
+    "parallel/test-cluster-dgram-2.js": {},
+    "parallel/test-cluster-dgram-bind-fd.js": {},
     "parallel/test-cluster-dgram-ipv6only.js": { "windows": false },
     "parallel/test-cluster-dgram-reuse.js": { "windows": false },
+    "parallel/test-cluster-dgram-reuseport.js": {},
     "parallel/test-cluster-disconnect-before-exit.js": { "windows": false },
     "parallel/test-cluster-disconnect-exitedAfterDisconnect-race.js": {
       "windows": false
@@ -820,6 +829,7 @@
     "parallel/test-cluster-disconnect-leak.js": { "windows": false },
     "parallel/test-cluster-disconnect-race.js": { "windows": false },
     "parallel/test-cluster-disconnect-unshared-tcp.js": { "windows": false },
+    "parallel/test-cluster-disconnect-unshared-udp.js": {},
     "parallel/test-cluster-disconnect-with-no-workers.js": { "windows": false },
     "parallel/test-cluster-disconnect.js": { "windows": false },
     "parallel/test-cluster-eaccess.js": { "windows": false },
@@ -850,8 +860,8 @@
     "parallel/test-cluster-rr-handle-ref-unref.js": { "windows": false },
     "parallel/test-cluster-rr-ref.js": { "windows": false },
     "parallel/test-cluster-send-deadlock.js": {
-      "ignore": true,
-      "reason": "Flaky on debug Linux: times out (10s) intermittently from a mutual handle-send / disconnect race. The IPC handle fixes in this PR (eager derivation + teardown cleanup) reduce but do not eliminate it; not reproducible outside debug Linux. Tracked in denoland/deno#34180."
+      "windows": false,
+      "reason": "net.Socket IPC handle passing uses SCM_RIGHTS, not yet implemented on Windows"
     },
     "parallel/test-cluster-send-handle-twice.js": {
       "windows": false,
@@ -1071,10 +1081,7 @@
       "ignore": true,
       "reason": "Larger gap: compares OpenSSL error decoration (code, library, reason) between sync and async jobs for every operation; most node:crypto errors here carry no OpenSSL library / reason"
     },
-    "parallel/test-crypto-keygen.js": {
-      "ignore": true,
-      "reason": "Node 26 BoringSSL branch expects a synchronous RangeError 'publicExponent is invalid' for invalid RSA publicExponent which Deno validates asynchronously in the op"
-    },
+    "parallel/test-crypto-keygen.js": {},
     "parallel/test-crypto-keyobject-no-own-symbols.js": {
       "ignore": true,
       "reason": "Larger gap: KeyObject has own symbol properties (kKeyType, kHandle); Node keeps that state in private fields"
@@ -1387,6 +1394,7 @@
     "parallel/test-dgram-oob-buffer.js": {},
     "parallel/test-dgram-recv-error.js": {},
     "parallel/test-dgram-ref.js": {},
+    "parallel/test-dgram-reuseport.js": {},
     "parallel/test-dgram-send-address-types.js": {},
     "parallel/test-dgram-send-bad-arguments.js": {},
     "parallel/test-dgram-send-callback-buffer-empty-address.js": {},
@@ -3318,7 +3326,9 @@
     "parallel/test-perf-hooks-timerify-histogram-async.mjs": {},
     "parallel/test-perf-hooks-timerify-histogram-sync.mjs": {},
     "parallel/test-performance-global.js": {},
-    "parallel/test-performance-many-marks.js": {},
+    "parallel/test-performance-many-marks.js": {
+      "timeoutMs": 30000
+    },
     "parallel/test-performance-measure.js": {},
     "parallel/test-performanceobserver-gc.js": {},
     "parallel/test-performanceobserver.js": {},
@@ -4902,7 +4912,9 @@
       "ignore": true,
       "reason": "Medium gap: an unrecognized algorithm name is a WebIDL TypeError here, Node's NotSupportedError 'Unrecognized algorithm name'"
     },
-    "parallel/test-webcrypto-digest-turboshake-rfc.js": {},
+    "parallel/test-webcrypto-digest-turboshake-rfc.js": {
+      "timeoutMs": 30000
+    },
     "parallel/test-webcrypto-encap-decap-ml-kem.js": {
       "ignore": true,
       "reason": "Requires Node internals (getCryptoKeyHandle from internal/crypto/keys with --expose-internals); ML-KEM KeyObjects and WebCrypto encapsulation work"
@@ -5960,31 +5972,6 @@
       "linuxAarch64": false,
       "reason": "err.syscall is undefined on linux-aarch64"
     },
-    "parallel/test-cluster-dgram-1.js": {
-      "linux": false,
-      "darwin": false,
-      "reason": "times out"
-    },
-    "parallel/test-cluster-dgram-2.js": {
-      "linux": false,
-      "darwin": false,
-      "reason": "times out"
-    },
-    "parallel/test-cluster-dgram-bind-fd.js": {
-      "linux": false,
-      "darwin": false,
-      "reason": "times out"
-    },
-    "parallel/test-cluster-dgram-reuseport.js": {
-      "linux": false,
-      "darwin": false,
-      "reason": "times out"
-    },
-    "parallel/test-cluster-disconnect-unshared-udp.js": {
-      "linux": false,
-      "darwin": false,
-      "reason": "times out"
-    },
     "parallel/test-cluster-http-pipe.js": {},
     "parallel/test-cluster-net-server-drop-connection.js": {},
     "parallel/test-common-gc.js": {},
@@ -6122,6 +6109,7 @@
     },
     "parallel/test-fs-write.js": {},
     "parallel/test-fs-writefile-with-fd.js": {},
+    "parallel/test-gc-net-timeout.js": {},
     "parallel/test-gc-tls-external-memory.js": {},
     "parallel/test-http-agent-abort-controller.js": {},
     "parallel/test-http-autoselectfamily.js": {},
@@ -6486,6 +6474,7 @@
     "parallel/test-util-sigint-watchdog.js": {},
     "parallel/test-v8-serialize-leak.js": {
       "timeoutMs": 30000,
+      "sequential": true,
       "darwin": false,
       "windows": false,
       "linuxAarch64": false,
@@ -7007,6 +6996,7 @@
       "reason": "Stress test: 10,000 structuredClone(createHistogram()) calls, 2.0 s on an Apple M-series debug build; over the 10 s default on the slower Windows x64 runner"
     },
     "pummel/test-timers.js": {},
+    "pummel/test-tls-server-large-request.js": {},
     "pummel/test-tls-throttle.js": {
       "ignore": true,
       "reason": "times out on all platforms"
@@ -7110,7 +7100,6 @@
     "sequential/test-child-process-pass-fd.js": {
       "timeoutMs": 30000,
       "windows": false,
-      "darwin": false,
       "reason": "times out"
     },
     "sequential/test-cluster-inspect-brk.js": {},

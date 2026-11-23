@@ -49,12 +49,38 @@ Each test entry can include the following optional configuration properties:
   platform or this build lacks the feature by design, with the reason. A string
   applies to every platform.
 
+- **`timeoutMs`** (integer): Overrides the per-test timeout (default 10 s, 20 s
+  on macOS). Only for tests that are legitimately slow, never for a hang.
+
+- **`isolatedDenoDir`** (boolean): Runs the test on a fresh, empty `DENO_DIR` of
+  its own. The tests of a run otherwise share one (created and warmed at the
+  start, removed at the end), so each reuses the code cache of `test/common/`
+  instead of building one; a test whose `env` sets `DENO_DIR` uses that.
+  `DENO_NODE_COMPAT_FRESH_DENO_DIR=1` gives every test a fresh one.
+
+- **`sequential`** (boolean): Runs the test with the `sequential/` and `pummel/`
+  tests, one at a time. Only for memory-heavy tests (leak tests that fill the
+  heap on purpose) whose peak beside other tests gets the container killed for
+  memory, taking its neighbours with it.
+
+The runner scales every per-test timeout (the default and `timeoutMs`) by the
+CPU each running test gets, as Node's `tools/test.py` and
+`common.platformTimeout` do: the CPUs available (the cgroup's `cpu.max` or CFS
+quota when there is one, else the host's CPU count) divided by the number of
+tests running at once. With a CPU or more per test the factor is 1 and the
+timeouts are as written; below that it is `1 / CPU per test`, at most 8, so a
+hang still fails. The runner prints the factor once at the start.
+
 A test that skips itself is reported as skipped, never as passed: Node's
-`common.skip()` prints `1..0 # Skipped: <reason>` and exits 0, and the runner
-reads that line as Node's own runner does. A test run under `deno test` (one
-that imports `node:test`) has its pre-test output hidden by `--quiet`, so there
-a file that exits before any test ran counts as skipped. A skip never fails CI;
-`expectedSkip` only labels it in the report as by design.
+`common.skip()` prints `1..0 # Skipped: <reason>` and exits 0.
+`common.printSkipMessage()` prints the same line for one case of a test that
+goes on to run the rest, so the runner preloads `skip_probe_preload.mjs`, which
+marks a run that exited through `common.skip()`; only that run counts as
+skipped, and a test that printed the line for one case and passed the others
+counts as passed. A test run under `deno test` (one that imports `node:test`)
+has its pre-test output hidden by `--quiet`, so there a file that exits before
+any test ran counts as skipped. A skip never fails CI; `expectedSkip` only
+labels it in the report as by design.
 
 ### Examples
 

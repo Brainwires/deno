@@ -2334,3 +2334,234 @@ Deno.test("[node/child_process] a failed spawn with an IPC channel leaves no res
     assertEquals(child.connected, false);
   }
 });
+
+// denext: a handle sent right behind a plain message (DENEXT.md item 478).
+// On Linux one read of the channel returns both messages and the handle's
+// descriptor, which the reader gave to the first message: the handle message
+// arrived without it and was never acknowledged, so the sender held every
+// later send back for good (cluster's worker sends `{ ack }` and then a
+// socket: test-cluster-send-handle-twice hung). Each round the parent stays
+// off its event loop while the child writes both messages, so they are read
+// together.
+Deno.test({
+  name:
+    "[node/child_process] a handle sent right after a message arrives with it",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const script = path.join(
+      path.dirname(path.fromFileUrl(import.meta.url)),
+      "testdata",
+      "child_process_ipc_handle_after_message.js",
+    );
+    const rounds = 8;
+    const done = withTimeout<void>(30_000);
+    const exited = Promise.withResolvers<void>();
+    const child = CP.fork(script, [], { stdio: "inherit" });
+    child.once("exit", () => exited.resolve());
+    child.once("error", done.reject);
+    const idle = new Int32Array(new SharedArrayBuffer(4));
+    const received: string[] = [];
+    const go = (round: number) => {
+      child.send({ round }, (err) => {
+        if (err) {
+          done.reject(err);
+          return;
+        }
+        // The message is written. Block this thread while the child answers.
+        Atomics.wait(idle, 0, 0, 100);
+      });
+    };
+    // deno-lint-ignore no-explicit-any
+    child.on("message", (message: any, handle?: net.Server) => {
+      try {
+        if (message === "ready") {
+          go(0);
+        } else if (message.plain !== undefined) {
+          assertEquals(handle, undefined);
+          received.push(`plain ${message.plain}`);
+        } else {
+          assert(handle instanceof net.Server);
+          assert(handle.address() !== null);
+          handle.close();
+          received.push(`handle ${message.handle}`);
+          if (message.handle + 1 < rounds) {
+            go(message.handle + 1);
+          } else {
+            child.send("done");
+            done.resolve();
+          }
+        }
+      } catch (err) {
+        done.reject(err);
+      }
+    });
+    try {
+      await done.promise;
+      await exited.promise;
+    } finally {
+      child.kill();
+    }
+    assertEquals(
+      received,
+      Array.from({ length: rounds }, (_, i) => [`plain ${i}`, `handle ${i}`])
+        .flat(),
+    );
+  },
+});
+
+// denext: the same socket sent twice. Like Node, the first send takes the
+// socket's native handle (`socket._handle = null`), so the second finds none
+// and sends its message alone; the child got a second copy of the descriptor
+// before.
+Deno.test({
+  name:
+    "[node/child_process] a socket sent twice goes with the first message only",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const script = path.join(
+      path.dirname(path.fromFileUrl(import.meta.url)),
+      "testdata",
+      "child_process_ipc_socket_sent_twice.js",
+    );
+    const server = net.createServer();
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const { port } = server.address() as net.AddressInfo;
+    const accepted = once(server, "connection");
+    const client = net.connect(port, "127.0.0.1");
+    const [socket] = await accepted as [net.Socket];
+    const answer = new Promise<string>((resolve, reject) => {
+      let data = "";
+      client.setEncoding("utf8");
+      client.on("data", (chunk) => data += chunk);
+      client.on("end", () => resolve(data));
+      client.on("error", reject);
+    });
+    const done = withTimeout<void>(30_000);
+    const exited = Promise.withResolvers<number | null>();
+    const child = CP.fork(script, [], { stdio: "inherit" });
+    child.once("exit", (code) => exited.resolve(code));
+    child.once("error", done.reject);
+    // deno-lint-ignore no-explicit-any
+    const reports: any[] = [];
+    // deno-lint-ignore no-explicit-any
+    child.on("message", (message: any) => {
+      if (message === "ready") {
+        child.send("first", socket);
+        // deno-lint-ignore no-explicit-any
+        assertEquals((socket as any)._handle, null);
+        child.send("second", socket);
+        return;
+      }
+      reports.push(message);
+      if (message.message === "second") {
+        done.resolve();
+      }
+    });
+    try {
+      await done.promise;
+      assertEquals(await exited.promise, 0);
+      assertEquals(reports, [
+        { message: "first", handle: true },
+        { message: "second", handle: false },
+      ]);
+      // The child's copy answers; the connection ends once the child closed
+      // it and the parent closed its own after the child acknowledged it.
+      assertEquals(await answer, "from child");
+    } finally {
+      child.kill();
+      client.destroy();
+      server.close();
+    }
+  },
+});
+
+// denext: a descriptor a misbehaving peer attaches to a plain message is
+// never claimed by a NODE_HANDLE message. It stayed open, registered for
+// adoption, until the process exited; channel teardown now closes it.
+Deno.test({
+  name:
+    "[node/child_process] a stray descriptor from the peer is closed when the channel goes away",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const script = path.join(
+      path.dirname(path.fromFileUrl(import.meta.url)),
+      "testdata",
+      "child_process_ipc_stray_fd.js",
+    );
+    const done = withTimeout<void>(30_000);
+    const exited = Promise.withResolvers<number | null>();
+    const child = CP.fork(script, [], {
+      stdio: ["inherit", "pipe", "inherit", "ipc"],
+    });
+    let output = "";
+    child.stdout!.setEncoding("utf8");
+    child.stdout!.on("data", (chunk) => output += chunk);
+    child.once("exit", (code) => exited.resolve(code));
+    child.once("error", done.reject);
+    // deno-lint-ignore no-explicit-any
+    const messages: any[] = [];
+    // deno-lint-ignore no-explicit-any
+    child.on("message", (message: any, handle?: unknown) => {
+      messages.push([message, handle]);
+      if (message === "sent") {
+        child.disconnect();
+        done.resolve();
+      }
+    });
+    try {
+      await done.promise;
+      assertEquals(await exited.promise, 0);
+      assertEquals(output, "stray descriptor closed\n");
+      assertEquals(messages, [
+        [{ stray: true }, undefined],
+        ["sent", undefined],
+      ]);
+    } finally {
+      child.kill();
+    }
+  },
+});
+
+// denext: `node -e` exposes the builtin modules as globals. They load on first
+// use, as Node's do, instead of all being evaluated before the string runs.
+Deno.test(function spawnSyncEvalBuiltinGlobalsAreLazy() {
+  const code = `
+    const d = Object.getOwnPropertyDescriptor(globalThis, "zlib");
+    const out = [typeof d.get, d.enumerable];
+    out.push(typeof fs.readFileSync, fs === require("fs"));
+    out.push(Object.getOwnPropertyDescriptor(globalThis, "fs").get() === fs);
+    var http = 5;
+    out.push(http);
+    const net = require("net");
+    out.push(typeof net.connect);
+    os = 7;
+    out.push(os, Object.getOwnPropertyDescriptor(globalThis, "os").writable);
+    function url() {}
+    out.push(typeof url, console === require("console"));
+    out.push(typeof Object.getOwnPropertyDescriptor(globalThis, "zlib").get);
+    console.log(JSON.stringify(out));
+  `;
+  const ret = spawnSync(Deno.execPath(), ["-e", code], {
+    encoding: "utf8",
+  });
+  assertEquals(ret.stderr, "");
+  assertEquals(
+    JSON.parse(ret.stdout),
+    [
+      "function",
+      false,
+      "function",
+      true,
+      true,
+      5,
+      "function",
+      7,
+      true,
+      "function",
+      true,
+      "function",
+    ],
+  );
+  assertEquals(ret.status, 0);
+});

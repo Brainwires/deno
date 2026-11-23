@@ -2,7 +2,7 @@
 // deno-lint-ignore-file no-explicit-any
 
 (function () {
-const { core, primordials } = __bootstrap;
+const { core, internals, primordials } = __bootstrap;
 const { ArrayPrototypeSlice, ArrayPrototypeSort } = primordials;
 
 const {
@@ -75,6 +75,11 @@ function setMaxIdleHTTPParsers(max: number) {
   validateInteger(max, "max", 1);
   parsers.max = max;
 }
+
+// Says that this module is loaded, for a check that must not load it to
+// look. (`closeIdleConnections` in node:module goes by the agent's module,
+// `internals.__nodeHttpAgentLoaded`, which is loaded without this one too.)
+internals.__nodeHttpLoaded = true;
 
 return {
   _connectionListener,

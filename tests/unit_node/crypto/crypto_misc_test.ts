@@ -2,6 +2,7 @@
 import {
   checkPrime,
   randomFillSync,
+  randomInt,
   randomUUID,
   timingSafeEqual,
 } from "node:crypto";
@@ -83,4 +84,21 @@ Deno.test("[node/crypto.timingSafeEqual] RangeError on Buffer with different byt
 
 Deno.test("checkPrime calls a throwing callback once; the throw is uncaught", async () => {
   await assertCallbackThrowUncaughtOnce((cb) => checkPrime(7n, cb));
+});
+
+// Node.js answers from `process.nextTick`; the callback used to run during
+// the call.
+Deno.test("[node/crypto.randomInt] the callback never runs during the call", async () => {
+  const { promise, resolve } = Promise.withResolvers<number | undefined>();
+  let returned = false;
+  let duringCall = false;
+  randomInt(10, (err, n) => {
+    duringCall = !returned;
+    assertEquals(err, undefined);
+    resolve(n);
+  });
+  returned = true;
+  const n = await promise;
+  assert(!duringCall);
+  assert(typeof n === "number" && n >= 0 && n < 10);
 });

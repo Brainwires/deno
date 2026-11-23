@@ -567,8 +567,12 @@ impl PipeWrap {
     {
       let pipe = self.pipe_ptr();
       if !pipe.is_null() {
+        // Only for a descriptor this wrap still owns. A bound pipe whose fd
+        // another wrap opened since (`net.Socket({ fd: pipe.fd })`) keeps
+        // reporting the number, but the entry is that wrap's, or by now
+        // belongs to whatever reused the number.
         // SAFETY: pipe is valid (null-checked above).
-        if let Some(fd) = unsafe { &*pipe }.fd() {
+        if let Some(fd) = unsafe { &*pipe }.owned_fd() {
           op_state
             .borrow_mut()
             .borrow_mut::<deno_io::FdTable>()

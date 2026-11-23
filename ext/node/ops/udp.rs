@@ -71,10 +71,18 @@ pub fn op_node_udp_bind(
   #[smi] port: u16,
   reuse_address: bool,
   ipv6_only: bool,
+  reuse_port: bool,
 ) -> Result<(ResourceId, String, u16), NodeUdpError> {
   state
     .borrow_mut::<PermissionsContainer>()
     .check_net_listen(&(hostname, Some(port)), "dgram.createSocket()")?;
+  // denext: `reusePort` (UV_UDP_REUSEPORT) load-balances datagrams across
+  // the sockets bound to a port, which only Linux's SO_REUSEPORT does; libuv
+  // refuses it with ENOTSUP everywhere else (macOS's SO_REUSEPORT is
+  // BSD's address sharing, which `reuseAddr` already uses there).
+  if reuse_port && !cfg!(any(target_os = "linux", target_os = "android")) {
+    return Err(NodeUdpError::Io(not_supported_error()));
+  }
 
   let addr = deno_net::resolve_addr::resolve_addr_sync(hostname, port)?
     .next()
@@ -99,7 +107,7 @@ pub fn op_node_udp_bind(
     connect: None,
     host: None,
     reuse_address,
-    reuse_port: false,
+    reuse_port,
     ipv6_only: (addr.is_ipv6() && ipv6_only).then_some(true),
   })
   .transpose()?
@@ -119,6 +127,10 @@ pub fn op_node_udp_bind(
           unix,
           not(any(target_os = "android", target_os = "linux"))
         ))]
+        sock.set_reuse_port(true)?;
+      }
+      #[cfg(any(target_os = "android", target_os = "linux"))]
+      if reuse_port {
         sock.set_reuse_port(true)?;
       }
       if addr.is_ipv6() && ipv6_only {
@@ -629,6 +641,10 @@ pub fn op_node_udp_leave_source_specific(
   )
 }
 
+// Not `async(deferred)`: Node.js sends with `uv_udp_try_send` first, and a
+// datagram that goes out at once (the usual case) has its callback run from
+// `process.nextTick`, ahead of the loop. A result that is ready on the first
+// poll is the same case here.
 #[op2]
 #[smi]
 pub async fn op_node_udp_send(
@@ -650,10 +666,11 @@ pub async fn op_node_udp_send(
     .resource_table
     .get::<NodeUdpSocketResource>(rid)?;
 
-  let addr: SocketAddr =
+  let addr: SocketAddr = loopback_if_unspecified(
     deno_net::resolve_addr::resolve_addr_sync(&hostname, port)?
       .next()
-      .ok_or(NodeUdpError::NoResolvedAddress)?;
+      .ok_or(NodeUdpError::NoResolvedAddress)?,
+  );
   {
     state
       .borrow_mut()
@@ -671,6 +688,49 @@ pub async fn op_node_udp_send(
   Ok(nwritten)
 }
 
+/// The error libuv gives for an option the platform lacks (ENOTSUP), so
+/// the polyfill reports it under that code. It carries the OS error number
+/// because the error code is derived from it: an `ErrorKind::Unsupported`
+/// without one is reported as ENOSYS. On Windows libuv's UV_ENOTSUP is
+/// ERROR_NOT_SUPPORTED, which deno_error maps to ENOTSUP.
+fn not_supported_error() -> std::io::Error {
+  #[cfg(unix)]
+  {
+    std::io::Error::from_raw_os_error(libc::ENOTSUP)
+  }
+  #[cfg(windows)]
+  {
+    std::io::Error::from_raw_os_error(
+      windows_sys::Win32::Foundation::ERROR_NOT_SUPPORTED as i32,
+    )
+  }
+  #[cfg(not(any(unix, windows)))]
+  {
+    std::io::Error::new(
+      std::io::ErrorKind::Unsupported,
+      "operation not supported on socket",
+    )
+  }
+}
+
+/// denext: a datagram sent to the unspecified address (`0.0.0.0` / `::`)
+/// goes to the loopback address of its family, as Linux does in the kernel
+/// and libuv does on Windows. macOS sends it to the host's primary interface
+/// address instead, where a host firewall that drops traffic to that address
+/// (the application firewall's "block all incoming connections", pf) refuses
+/// it with EHOSTUNREACH. A socket's own `address()` is a natural destination:
+/// a cluster's shared socket bound to `0.0.0.0` is announced to the primary
+/// with that address, and parallel/test-cluster-dgram-1.js sends to it.
+fn loopback_if_unspecified(mut addr: SocketAddr) -> SocketAddr {
+  if addr.ip().is_unspecified() {
+    addr.set_ip(match addr {
+      SocketAddr::V4(_) => std::net::Ipv4Addr::LOCALHOST.into(),
+      SocketAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
+    });
+  }
+  addr
+}
+
 #[derive(serde::Serialize)]
 pub struct RecvResult {
   pub nread: usize,
@@ -678,12 +738,42 @@ pub struct RecvResult {
   pub port: u16,
 }
 
-#[op2]
+/// Receives the first datagram of a burst (see `UDP_RECV_BURST` in
+/// `udp_wrap.ts`).
+///
+/// `async(deferred)`: libuv reads datagrams in the poll phase, so one that is
+/// already queued when the call is made is delivered by the loop, like one
+/// that arrives later: after `process.nextTick` callbacks and the timers that
+/// are due. Delivered at once, every queued datagram was received from the
+/// microtask of the one before, and a socket that was sent to faster than it
+/// read kept the loop from everything else.
+#[op2(async(deferred))]
 #[serde]
 pub async fn op_node_udp_recv(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
-  #[buffer] mut buf: JsBuffer,
+  #[buffer] buf: JsBuffer,
+) -> Result<RecvResult, NodeUdpError> {
+  udp_recv(state, rid, buf).await
+}
+
+/// Receives a later datagram of a burst: one that is already queued is
+/// returned at once, as libuv reads up to 32 datagrams for one readiness
+/// event before it goes back to the loop.
+#[op2]
+#[serde]
+pub async fn op_node_udp_recv_queued(
+  state: Rc<RefCell<OpState>>,
+  #[smi] rid: ResourceId,
+  #[buffer] buf: JsBuffer,
+) -> Result<RecvResult, NodeUdpError> {
+  udp_recv(state, rid, buf).await
+}
+
+async fn udp_recv(
+  state: Rc<RefCell<OpState>>,
+  rid: ResourceId,
+  mut buf: JsBuffer,
 ) -> Result<RecvResult, NodeUdpError> {
   let resource = state
     .borrow()
@@ -793,16 +883,32 @@ pub fn op_node_udp_open(
   }
   #[cfg(not(unix))]
   {
+    // libuv's Windows IPC passes only TCP handles (ENOTSUP otherwise).
     let _ = (state, fd);
-    Err(NodeUdpError::Io(std::io::Error::new(
-      std::io::ErrorKind::Unsupported,
-      "UDP socket IPC handle passing is not supported on this platform",
-    )))
+    Err(NodeUdpError::Io(not_supported_error()))
   }
 }
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn sends_to_the_unspecified_address_go_to_loopback() {
+    use std::net::SocketAddr;
+    let to = |s: &str| super::loopback_if_unspecified(s.parse().unwrap());
+    assert_eq!(
+      to("0.0.0.0:41234"),
+      "127.0.0.1:41234".parse::<SocketAddr>().unwrap()
+    );
+    assert_eq!(
+      to("[::]:41234"),
+      "[::1]:41234".parse::<SocketAddr>().unwrap()
+    );
+    assert_eq!(
+      to("10.1.2.3:7"),
+      "10.1.2.3:7".parse::<SocketAddr>().unwrap()
+    );
+  }
+
   #[cfg(unix)]
   #[test]
   fn ipv6_interface_resolution_handles_if_nametoindex_failure() {

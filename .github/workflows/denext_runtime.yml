@@ -1091,7 +1091,21 @@ jobs:
       # Maintainers symbolicate crash traces with these
       # (symbolicate.py): attested like the archives they describe.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: attest_1
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        # Sigstore's transparency log sometimes answers 404 for an entry it
+        # has just written: one retry below, after a pause.
+        continue-on-error: true
+        with:
+          subject-path: symbols/*.tar.gz
+
+      - name: Wait before retrying the attestation
+        if: (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch') && steps.attest_1.outcome == 'failure'
+        shell: bash
+        run: sleep 30
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch') && steps.attest_1.outcome == 'failure'
         with:
           subject-path: symbols/*.tar.gz
 
@@ -1370,7 +1384,21 @@ jobs:
         run: bash .github/denext-runtime/collect_symbols.sh "denort-symbols-$VERSION-$TARGET" symbols ${{ runner.os == 'Windows' && 'denort.exe' || 'denort' }}
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: attest_2
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        # Sigstore's transparency log sometimes answers 404 for an entry it
+        # has just written: one retry below, after a pause.
+        continue-on-error: true
+        with:
+          subject-path: symbols/*.tar.gz
+
+      - name: Wait before retrying the attestation
+        if: (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch') && steps.attest_2.outcome == 'failure'
+        shell: bash
+        run: sleep 30
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch') && steps.attest_2.outcome == 'failure'
         with:
           subject-path: symbols/*.tar.gz
 
@@ -1401,6 +1429,20 @@ jobs:
             --require rustc --require cargo ${pkgs[@]+"${pkgs[@]}"}
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: attest_3
+        # Sigstore's transparency log sometimes answers 404 for an entry it
+        # has just written: one retry below, after a pause.
+        continue-on-error: true
+        with:
+          subject-path: dist/*.zip
+
+      - name: Wait before retrying the attestation
+        if: steps.attest_3.outcome == 'failure'
+        shell: bash
+        run: sleep 30
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: steps.attest_3.outcome == 'failure'
         with:
           subject-path: dist/*.zip
 
@@ -1735,7 +1777,21 @@ jobs:
         run: bash .github/denext-runtime/collect_symbols.sh "deno-symbols-$VERSION-$TARGET" symbols ${{ runner.os == 'Windows' && 'deno.exe' || 'deno' }}
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: attest_4
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        # Sigstore's transparency log sometimes answers 404 for an entry it
+        # has just written: one retry below, after a pause.
+        continue-on-error: true
+        with:
+          subject-path: symbols/*.tar.gz
+
+      - name: Wait before retrying the attestation
+        if: (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch') && steps.attest_4.outcome == 'failure'
+        shell: bash
+        run: sleep 30
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch') && steps.attest_4.outcome == 'failure'
         with:
           subject-path: symbols/*.tar.gz
 
@@ -1844,6 +1900,22 @@ jobs:
           } >>"$GITHUB_STEP_SUMMARY"
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: attest_5
+        # Sigstore's transparency log sometimes answers 404 for an entry it
+        # has just written: one retry below, after a pause.
+        continue-on-error: true
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+      - name: Wait before retrying the attestation
+        if: steps.attest_5.outcome == 'failure'
+        shell: bash
+        run: sleep 30
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: steps.attest_5.outcome == 'failure'
         with:
           subject-path: |
             dist/*.tar.gz
@@ -2183,6 +2255,22 @@ jobs:
           } >>"$GITHUB_STEP_SUMMARY"
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: attest_6
+        # Sigstore's transparency log sometimes answers 404 for an entry it
+        # has just written: one retry below, after a pause.
+        continue-on-error: true
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+      - name: Wait before retrying the attestation
+        if: steps.attest_6.outcome == 'failure'
+        shell: bash
+        run: sleep 30
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: steps.attest_6.outcome == 'failure'
         with:
           subject-path: |
             dist/*.tar.gz
@@ -2477,7 +2565,24 @@ jobs:
       # which for a reused build (tag_reuse.py) is an earlier dispatch on
       # another ref. The signatures are in the files (signed where built).
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: attest_7
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v')
+        # Sigstore's transparency log sometimes answers 404 for an entry it
+        # has just written: one retry below, after a pause.
+        continue-on-error: true
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            symbols/*.tar.gz
+
+      - name: Wait before retrying the attestation
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v')) && steps.attest_7.outcome == 'failure'
+        shell: bash
+        run: sleep 30
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v')) && steps.attest_7.outcome == 'failure'
         with:
           subject-path: |
             dist/*.tar.gz

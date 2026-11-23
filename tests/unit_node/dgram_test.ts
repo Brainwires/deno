@@ -358,3 +358,111 @@ Deno.test("[node/dgram] large recvBufferSize and sendBufferSize do not throw", a
   });
   await promise;
 });
+
+// denext: a datagram sent to the unspecified address goes to loopback, as on
+// Linux (macOS sends it to the primary interface's address, which a host
+// firewall may drop); a cluster worker's shared socket is announced to the
+// primary bound to `0.0.0.0`.
+Deno.test("[node/dgram] a send to 0.0.0.0 reaches a local socket", {
+  permissions: { net: true },
+}, async () => {
+  const receiver = createSocket("udp4");
+  const sender = createSocket("udp4");
+  const { promise, resolve, reject } = Promise.withResolvers<string>();
+  receiver.on("message", (msg) => resolve(msg.toString()));
+  receiver.bind(0, "0.0.0.0", () => {
+    sender.send("hi", receiver.address().port, "0.0.0.0", (err) => {
+      if (err) reject(err);
+    });
+  });
+  try {
+    assertEquals(await promise, "hi");
+  } finally {
+    sender.close();
+    receiver.close();
+  }
+});
+
+// denext: `reusePort` is Linux's load-balancing SO_REUSEPORT; elsewhere the
+// bind fails with ENOTSUP, as in Node (libuv).
+Deno.test("[node/dgram] reusePort", {
+  permissions: { net: true },
+}, async () => {
+  const options = { type: "udp4", reusePort: true } as const;
+  const first = createSocket(options);
+  const bound = Promise.withResolvers<NodeJS.ErrnoException | null>();
+  first.once("error", (err) => bound.resolve(err));
+  first.bind(0, "127.0.0.1", () => bound.resolve(null));
+  const err = await bound.promise;
+  if (Deno.build.os !== "linux") {
+    assertEquals(err?.code, "ENOTSUP");
+    first.close();
+    return;
+  }
+  assertEquals(err, null);
+  const second = createSocket(options);
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  second.once("error", reject);
+  second.bind(first.address().port, "127.0.0.1", () => resolve());
+  try {
+    await promise;
+    assertEquals(second.address().port, first.address().port);
+  } finally {
+    second.close();
+    first.close();
+  }
+});
+
+// denext: libuv reads at most 32 datagrams for one readiness event and then
+// returns to the loop. Every queued datagram used to be received from the
+// microtask of the one before, so a socket that always had one queued kept
+// the loop from its timers, immediates and other handles.
+Deno.test("[node/dgram] queued datagrams are received in bursts", {
+  permissions: { net: true },
+}, async () => {
+  const total = 100;
+  const receiver = createSocket("udp4");
+  await new Promise<void>((resolve) => receiver.bind(0, "127.0.0.1", resolve));
+  const port = receiver.address().port;
+  const sender = Deno.listenDatagram({
+    transport: "udp",
+    hostname: "127.0.0.1",
+    port: 0,
+  });
+  try {
+    let received = 0;
+    let receivedBeforeImmediate = -1;
+    const all = Promise.withResolvers<void>();
+    receiver.on("message", () => {
+      received++;
+      if (received === 1) {
+        // The check phase of the iteration that delivers this datagram.
+        setImmediate(() => {
+          receivedBeforeImmediate = received;
+        });
+      }
+      if (received === total) all.resolve();
+    });
+
+    // Each datagram leaves during its `send()` call; all of them are queued
+    // in the receiver's socket by the time this turn ends.
+    const sends = [];
+    const addr = { transport: "udp", hostname: "127.0.0.1", port } as const;
+    for (let i = 0; i < total; i++) {
+      sends.push(sender.send(new Uint8Array([i]), addr));
+    }
+    const end = performance.now() + 50;
+    while (performance.now() < end);
+
+    await Promise.all(sends);
+    await all.promise;
+    assertEquals(received, total);
+    assert(
+      receivedBeforeImmediate >= 1 && receivedBeforeImmediate <= 32,
+      `${receivedBeforeImmediate} datagrams were received before the loop's check phase`,
+    );
+  } finally {
+    sender.close();
+    await new Promise<void>((resolve) => receiver.close(resolve));
+  }
+});

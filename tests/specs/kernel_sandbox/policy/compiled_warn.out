@@ -1,2 +1,3 @@
 Warning kernel sandbox (warn, preview): nothing is refused; [WILDCARD] rule(s) would be held by Deno's checks only.
-hello
+[WILDCARD]hello
+[WILDCARD]

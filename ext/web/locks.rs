@@ -1,6 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -121,14 +122,16 @@ fn release_lock(state: &mut LockState, id: u64) {
   }
 }
 
-fn cancel_request(state: &mut LockState, id: u64) {
+/// Removes a queued request, rejecting it. Returns whether it was queued.
+fn cancel_request(state: &mut LockState, id: u64) -> bool {
   for queue in state.queues.values_mut() {
     if let Some(pos) = queue.iter().position(|r| r.id == id) {
       let req = queue.remove(pos).unwrap();
       let _ = req.tx.send(false);
-      return;
+      return true;
     }
   }
+  false
 }
 
 /// Whether `client_id` currently holds any lock. Used at worker teardown to
@@ -231,12 +234,24 @@ impl Resource for HeldLockResource {
 struct PendingLockResource {
   rx: RefCell<Option<oneshot::Receiver<bool>>>,
   id: u64,
+  // Set by `op_lock_manager_await_lock` once it has taken a granted lock
+  // over (it adds a `HeldLockResource` for the id).
+  handed_off: Cell<bool>,
 }
 
 impl Drop for PendingLockResource {
   fn drop(&mut self) {
+    if self.handed_off.get() {
+      return;
+    }
     let mut state = LOCK_STATE.lock().unwrap();
-    cancel_request(&mut state, self.id);
+    // A request that is no longer queued was granted while nobody awaited
+    // it: the client's runtime is being torn down (a terminated worker whose
+    // request was granted before its `JsRuntime` dropped). Nothing will ever
+    // release that lock, so release it here.
+    if !cancel_request(&mut state, self.id) {
+      release_lock(&mut state, self.id);
+    }
   }
 }
 
@@ -326,6 +341,7 @@ pub fn op_lock_manager_request(
       let rid = state.resource_table.add(PendingLockResource {
         rx: RefCell::new(Some(rx)),
         id,
+        handed_off: Cell::new(false),
       });
       LockRequestResult { status: 1, rid }
     }
@@ -350,12 +366,16 @@ pub async fn op_lock_manager_await_lock(
 
   let granted = rx.await.unwrap_or(false);
 
-  // Clean up the pending resource (Drop will no-op since request
-  // is already resolved or cancelled in global state)
-  let _ = state
+  // Clean up the pending resource. A granted lock is handed over to the
+  // `HeldLockResource` below, so its Drop must not release it; a cancelled
+  // request is no longer queued or held, so its Drop finds nothing to do.
+  if let Ok(pending) = state
     .borrow_mut()
     .resource_table
-    .take::<PendingLockResource>(rid);
+    .take::<PendingLockResource>(rid)
+  {
+    pending.handed_off.set(granted);
+  }
 
   if granted {
     let resource = {
@@ -472,4 +492,93 @@ pub fn op_lock_manager_query() -> Query {
     }
   }
   Query { held, pending }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn lock_state() -> std::sync::MutexGuard<'static, LockState> {
+    LOCK_STATE
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner())
+  }
+
+  fn is_held(name: &str) -> bool {
+    lock_state().held.iter().any(|h| h.name == name)
+  }
+
+  /// Holds `name` for client "a" and queues a request of client "b" behind
+  /// it. Returns the held lock's id and b's pending resource.
+  fn held_and_queued(name: &str) -> (u64, PendingLockResource) {
+    let mut ls = lock_state();
+    ls.counter += 1;
+    let held_id = ls.counter;
+    ls.held.push(HeldLock {
+      name: name.to_string(),
+      mode: LockMode::Exclusive,
+      id: held_id,
+      client_id: "a".to_string(),
+      broken_tx: None,
+    });
+    ls.counter += 1;
+    let id = ls.counter;
+    let (tx, rx) = oneshot::channel();
+    ls.queues
+      .entry(name.to_string())
+      .or_default()
+      .push_back(PendingRequest {
+        name: name.to_string(),
+        mode: LockMode::Exclusive,
+        id,
+        client_id: "b".to_string(),
+        tx,
+      });
+    (
+      held_id,
+      PendingLockResource {
+        rx: RefCell::new(Some(rx)),
+        id,
+        handed_off: Cell::new(false),
+      },
+    )
+  }
+
+  // A terminated worker's request granted before its runtime dropped (no
+  // `op_lock_manager_await_lock` takes it over) must not keep the lock.
+  #[test]
+  fn dropping_a_granted_unclaimed_request_releases_the_lock() {
+    let name = "locks-test-granted-unclaimed";
+    let (held_id, pending) = held_and_queued(name);
+    release_lock(&mut lock_state(), held_id);
+    // Granted to b while nobody awaits it.
+    assert!(is_held(name));
+    drop(pending);
+    assert!(!is_held(name));
+  }
+
+  #[test]
+  fn dropping_a_queued_request_cancels_it() {
+    let name = "locks-test-queued";
+    let (held_id, pending) = held_and_queued(name);
+    drop(pending);
+    release_lock(&mut lock_state(), held_id);
+    assert!(!is_held(name));
+    assert!(lock_state().queues.get(name).is_none_or(|q| q.is_empty()));
+  }
+
+  // The resource `op_lock_manager_await_lock` drops once it has taken a
+  // granted lock over leaves that lock held.
+  #[test]
+  fn dropping_a_handed_off_request_keeps_the_lock() {
+    let name = "locks-test-handed-off";
+    let (held_id, pending) = held_and_queued(name);
+    release_lock(&mut lock_state(), held_id);
+    let id = pending.id;
+    pending.handed_off.set(true);
+    drop(pending);
+    assert!(is_held(name));
+    release_lock(&mut lock_state(), id);
+    assert!(!is_held(name));
+  }
 }

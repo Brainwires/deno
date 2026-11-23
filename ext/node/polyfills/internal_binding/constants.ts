@@ -201,6 +201,7 @@ let os: {
   };
   UV_UDP_IPV6ONLY: number;
   UV_UDP_REUSEADDR: number;
+  UV_UDP_REUSEPORT: number;
 };
 
 const buildOs = op_node_build_os();
@@ -208,6 +209,7 @@ if (buildOs === "darwin") {
   os = {
     UV_UDP_IPV6ONLY: 2,
     UV_UDP_REUSEADDR: 4,
+    UV_UDP_REUSEPORT: 64,
     dlopen: {
       RTLD_LAZY: 1,
       RTLD_NOW: 2,
@@ -341,6 +343,7 @@ if (buildOs === "darwin") {
   os = {
     UV_UDP_IPV6ONLY: 2,
     UV_UDP_REUSEADDR: 4,
+    UV_UDP_REUSEPORT: 64,
     dlopen: {
       RTLD_LAZY: 1,
       RTLD_NOW: 2,
@@ -478,6 +481,7 @@ if (buildOs === "darwin") {
   os = {
     UV_UDP_IPV6ONLY: 2,
     UV_UDP_REUSEADDR: 4,
+    UV_UDP_REUSEPORT: 64,
     dlopen: {},
     errno: {
       E2BIG: 7,

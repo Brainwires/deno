@@ -882,9 +882,15 @@ class WebSocket extends EventTarget {
 
           if (prevState === OPEN) {
             try {
+              // 1005 stands for a close frame without a status code and is
+              // never sent (RFC 6455, 7.4.1): such a frame is answered with
+              // one that has no code either. Echoed as 1005, the peer failed
+              // the connection ("Invalid close code", close 1006) once it
+              // read the answer, which it did whenever it had not started
+              // its own close() by then.
               await op_ws_close(
                 rid,
-                code,
+                code === 1005 ? undefined : code,
                 reason,
               );
             } catch {

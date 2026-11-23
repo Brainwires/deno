@@ -11,6 +11,7 @@ const {
   ArrayPrototypeIncludes,
   ArrayPrototypeIndexOf,
   ArrayPrototypeMap,
+  ArrayPrototypeShift,
   DataViewPrototypeGetBuffer,
   DataViewPrototypeGetByteLength,
   DataViewPrototypeGetByteOffset,
@@ -53,6 +54,7 @@ const {
   op_get_env_no_permission_check,
   op_node_in_npm_package,
   op_node_ipc_buffer_constructor,
+  op_node_ipc_close_received_fd,
   op_node_ipc_read_advanced,
   op_node_ipc_read_json,
   op_node_ipc_ref,
@@ -2469,6 +2471,9 @@ const IPC_HANDLE_NET_SERVER = "net.Server";
 // (SharedHandle). Mirrors Node's `handleConversion["net.Native"]`.
 const IPC_HANDLE_NET_NATIVE = "net.Native";
 const IPC_HANDLE_DGRAM_SOCKET = "dgram.Socket";
+// node:cluster's SharedHandle sends the primary's raw UDP wrap to each worker
+// that binds the same address. Mirrors Node's `handleConversion["dgram.Native"]`.
+const IPC_HANDLE_DGRAM_NATIVE = "dgram.Native";
 const NODE_SOCKET_GET_COUNT = "NODE_SOCKET_GET_COUNT";
 const NODE_SOCKET_COUNT = "NODE_SOCKET_COUNT";
 const NODE_SOCKET_NOTIFY_CLOSE = "NODE_SOCKET_NOTIFY_CLOSE";
@@ -2627,6 +2632,8 @@ function nodeExitCode(code: number): number {
   return isWindows && code < 0 ? code >>> 0 : code;
 }
 
+function nop() {}
+
 function rawFdFromTcpHandle(tcpHandle) {
   if (typeof tcpHandle.fdForIpc !== "function") {
     notImplemented("ChildProcess.send with handle on this platform");
@@ -2673,14 +2680,30 @@ function getIpcHandleInfo(handle, options, target) {
     ) {
       message.socketListKey = getSocketListSend(target, handle.server).key;
     }
+    const rawFd = rawFdFromTcpHandle(inner);
+    if (closeAfterSend) {
+      // Match Node's handleConversion["net.Socket"].send: the socket gives
+      // its native handle up to the send (`socket._handle = null`, reads
+      // dropped, no idle timeout), so sending the same socket again finds no
+      // handle and sends the message alone instead of a second copy.
+      inner.onread = nop;
+      handle._handle = null;
+      handle.setTimeout(0);
+    }
     return {
-      rawFd: rawFdFromTcpHandle(inner),
+      rawFd,
       message,
       closeAfterSend,
       close() {
         handle.parser = null;
         handle._httpMessage = null;
         handle.destroy();
+        // The socket no longer holds `inner` (see above), so its destroy()
+        // leaves it open: close it here, as Node's postSend closes the
+        // handle once the receiver acknowledged it.
+        if (closeAfterSend) {
+          inner.close();
+        }
       },
     };
   }
@@ -2739,6 +2762,28 @@ function getIpcHandleInfo(handle, options, target) {
       // SharedHandle each manage their own lifecycle (the former closes the
       // client wrap after the worker ACKs; the latter shares the listening
       // wrap across workers).
+      closeAfterSend: false,
+      close() {
+        handle.close();
+      },
+    };
+  }
+
+  if (ObjectPrototypeIsPrototypeOf(lazyUdpWrap().UDP.prototype, handle)) {
+    const rawFd = handle.fdForIpc();
+    if (rawFd < 0) {
+      throw new ERR_INVALID_HANDLE_TYPE();
+    }
+    return {
+      rawFd,
+      message: {
+        cmd: "NODE_HANDLE",
+        type: IPC_HANDLE_DGRAM_NATIVE,
+        msg: undefined,
+      },
+      // Node's handleConversion["dgram.Native"] has no postSend: the
+      // primary's SharedHandle keeps the socket until its last worker
+      // closes it.
       closeAfterSend: false,
       close() {
         handle.close();
@@ -2850,6 +2895,17 @@ function createIpcHandle(message, rawFd) {
     // takes ownership.
     return tcp;
   }
+  if (message.type === IPC_HANDLE_DGRAM_NATIVE) {
+    const udp = new (lazyUdpWrap().UDP)();
+    const err = udp.open(rawFd);
+    if (err !== 0) {
+      udp.close();
+      throw errnoException(err, "open");
+    }
+    // Match Node's handleConversion["dgram.Native"].got: the raw wrap goes
+    // to the listener (cluster's shared(), then dgram's replaceHandle()).
+    return udp;
+  }
   if (message.type === IPC_HANDLE_DGRAM_SOCKET) {
     const udp = new (lazyUdpWrap().UDP)();
     const err = udp.open(rawFd);
@@ -2935,6 +2991,26 @@ function setupChannel(
   let pendingHandleInfo = null;
   let handleQueue = null;
   const receivedSocketLists = new SafeMap();
+  // denext: descriptors received (SCM_RIGHTS) and not yet matched to their
+  // NODE_HANDLE message. The kernel hands a descriptor over with the read
+  // that reaches the first byte of the message it was sent with, and on
+  // Linux that read also returns the messages queued in front of it. So the
+  // read op can report the descriptor on an earlier message than the
+  // NODE_HANDLE it belongs to (cluster's worker writes `{ ack }` and then a
+  // handle back to back). Descriptors and NODE_HANDLE messages both arrive
+  // in sending order, one descriptor per message, so they pair up first in,
+  // first out.
+  const receivedRawFds = [];
+
+  // Close the received descriptors no NODE_HANDLE message claimed. Only a
+  // peer that attaches a descriptor to a plain message leaves one behind;
+  // once the channel is torn down nothing will claim it, and it would stay
+  // open (and registered for adoption) until the process exits.
+  function closeUnmatchedRawFds() {
+    while (receivedRawFds.length > 0) {
+      op_node_ipc_close_received_fd(ArrayPrototypeShift(receivedRawFds));
+    }
+  }
 
   function sendHandleAck() {
     const queueOk = [true];
@@ -3027,6 +3103,7 @@ function setupChannel(
   // is what made `test-cluster-send-deadlock` time out: the worker forwards
   // its sockets back, then disconnects before the ACKs land.
   function cleanupPendingHandles() {
+    closeUnmatchedRawFds();
     const info = pendingHandleInfo;
     pendingHandleInfo = null;
     if (info && info.closeAfterSend) {
@@ -3160,7 +3237,9 @@ function setupChannel(
         core.unrefOpPromise(prom);
         const read = await prom;
         const msg = read[0];
-        const rawFd = read[1];
+        if (typeof read[1] === "number") {
+          ArrayPrototypePush(receivedRawFds, read[1]);
+        }
         if (isInternal(msg)) {
           const cmd = internalCmdName(msg);
           if (cmd === "CLOSE") {
@@ -3173,13 +3252,21 @@ function setupChannel(
               target.disconnect();
             }
             return;
-          } else if (cmd === "HANDLE" && typeof rawFd === "number") {
+          } else if (cmd === "HANDLE" && receivedRawFds.length > 0) {
+            const rawFd = ArrayPrototypeShift(receivedRawFds);
             if (serialization === "json") {
               restorePrototype(msg);
             }
             // Acknowledge receipt so the sender can close its local copy.
             sendHandleAck();
-            const handle = createIpcHandle(msg, rawFd);
+            let handle;
+            try {
+              handle = createIpcHandle(msg, rawFd);
+            } catch (err) {
+              // No wrap adopted the descriptor; don't leave it open.
+              op_node_ipc_close_received_fd(rawFd);
+              throw err;
+            }
             if (
               msg.socketListKey &&
               ObjectPrototypeIsPrototypeOf(Socket.prototype, handle)
@@ -3221,6 +3308,10 @@ function setupChannel(
         return;
       }
       nextTick(() => target.emit("error", err));
+    } finally {
+      // Nothing reads the channel any more, so no NODE_HANDLE message will
+      // claim a descriptor still waiting for one.
+      closeUnmatchedRawFds();
     }
   }
 
@@ -3305,7 +3396,8 @@ function setupChannel(
         !ObjectPrototypeIsPrototypeOf(NetServer.prototype, handle) &&
         !ObjectPrototypeIsPrototypeOf(DgramSocket.prototype, handle) &&
         !ObjectPrototypeIsPrototypeOf(TCP.prototype, handle) &&
-        !ObjectPrototypeIsPrototypeOf(Pipe.prototype, handle)
+        !ObjectPrototypeIsPrototypeOf(Pipe.prototype, handle) &&
+        !ObjectPrototypeIsPrototypeOf(lazyUdpWrap().UDP.prototype, handle)
       ) {
         throw new ERR_INVALID_HANDLE_TYPE();
       }

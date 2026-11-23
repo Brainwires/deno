@@ -1331,8 +1331,8 @@ fn host_import_module_with_vm_dynamic_import_callback<'s, 'i>(
   let resolver = v8::PromiseResolver::new(scope).unwrap();
   let promise = resolver.get_promise(scope);
 
-  let Some(callback_id) =
-    crate::runtime::host_defined_options::read_host_defined_options_key(
+  let Some(callback_key) =
+    crate::runtime::host_defined_options::read_host_defined_options_symbol(
       scope,
       host_defined_options,
     )
@@ -1355,24 +1355,20 @@ fn host_import_module_with_vm_dynamic_import_callback<'s, 'i>(
   }
 
   v8::tc_scope!(let tc_scope, scope);
-  let callback = {
+  let dispatcher = {
     let state = JsRuntime::state_from(tc_scope);
-    state
-      .vm_dynamic_import_callbacks
-      .borrow()
-      .get(&callback_id)
-      .cloned()
+    state.vm_dynamic_import_dispatcher.borrow().clone()
   };
 
-  let Some(callback) = callback else {
+  let Some(dispatcher) = dispatcher else {
     let exception = vm_dynamic_import_callback_missing_exception(tc_scope);
     resolver.reject(tc_scope, exception);
     return promise;
   };
 
-  let callback = v8::Local::new(tc_scope, callback);
+  let callback = v8::Local::new(tc_scope, dispatcher);
   let recv = v8::undefined(tc_scope).into();
-  let args = [specifier.into(), attributes_obj.into()];
+  let args = [callback_key.into(), specifier.into(), attributes_obj.into()];
   match callback.call(tc_scope, recv, &args) {
     Some(value) => {
       resolver.resolve(tc_scope, value);

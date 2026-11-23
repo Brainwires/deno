@@ -270,15 +270,21 @@ impl<'a> Reader<'a> {
     Ok(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
   }
 
+  /// Windows: the same rules, with an absolute path the OS's own (a drive or
+  /// UNC root), so a relative path is refused here too.
   #[cfg(not(unix))]
   fn path(&mut self) -> Result<PathBuf, NetProtocolError> {
     let bytes = self.bytes()?;
     if bytes.is_empty() || bytes.len() > MAX_PATH || bytes.contains(&0) {
       return Err(NetProtocolError::Field("path"));
     }
-    String::from_utf8(bytes.to_vec())
+    let path = String::from_utf8(bytes.to_vec())
       .map(PathBuf::from)
-      .map_err(|_| NetProtocolError::Field("path"))
+      .map_err(|_| NetProtocolError::Field("path"))?;
+    if !path.is_absolute() {
+      return Err(NetProtocolError::Field("path"));
+    }
+    Ok(path)
   }
 
   fn end(self) -> Result<(), NetProtocolError> {
@@ -717,6 +723,15 @@ mod unix {
 mod tests {
   use super::*;
 
+  /// An absolute socket path on this OS (a drive root on Windows).
+  fn sock_path() -> PathBuf {
+    PathBuf::from(if cfg!(windows) {
+      r"C:\run\app.sock"
+    } else {
+      "/run/app.sock"
+    })
+  }
+
   fn samples() -> Vec<NetRequest> {
     let v4: SocketAddr = "93.184.216.34:443".parse().unwrap();
     let v6: SocketAddr = "[2001:db8::1%7]:8443".parse().unwrap();
@@ -761,11 +776,9 @@ mod tests {
         timeout: Duration::from_millis(5000),
         payload: vec![1, 2, 3, 4],
       },
-      NetRequest::ConnectUnix {
-        path: PathBuf::from("/run/app.sock"),
-      },
+      NetRequest::ConnectUnix { path: sock_path() },
       NetRequest::BindUnix {
-        path: PathBuf::from("/run/app.sock"),
+        path: sock_path(),
         datagram: true,
       },
     ]

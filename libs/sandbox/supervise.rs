@@ -560,6 +560,17 @@ fn tie_to_supervisor(
   }
 }
 
+/// Prints a fatal error for the user just before the process exits. The
+/// supervisor and its forked child have no logger set up, so stderr is the
+/// only channel.
+#[allow(
+  clippy::print_stderr,
+  reason = "fatal start-up errors go to the user before exit; no logger here"
+)]
+fn fatal_note(message: std::fmt::Arguments<'_>) {
+  eprintln!("{message}");
+}
+
 /// Runs the supervisor: forks; the child calls `exec_worker` with the
 /// number of its end of the channel (it re-executes as the confined
 /// worker and returns only an error); this process serves the other end
@@ -570,7 +581,9 @@ pub fn run(
   serve: impl FnOnce(OwnedFd) -> io::Result<()>,
 ) -> ! {
   let fail = |what: &str, err: io::Error| -> ! {
-    eprintln!("kernel sandbox: the supervisor can't start: {what}: {err}");
+    fatal_note(format_args!(
+      "kernel sandbox: the supervisor can't start: {what}: {err}"
+    ));
     std::process::exit(1);
   };
   let (ours, theirs) = match channel() {
@@ -589,7 +602,9 @@ pub fn run(
     drop(ours);
     tie_to_supervisor(supervisor);
     let err = exec_worker(theirs.as_raw_fd());
-    eprintln!("kernel sandbox: re-executing under the sandbox failed: {err}");
+    fatal_note(format_args!(
+      "kernel sandbox: re-executing under the sandbox failed: {err}"
+    ));
     // SAFETY: ending the forked child without running the parent's exit
     // handlers
     unsafe { libc::_exit(126) };

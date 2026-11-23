@@ -32,6 +32,8 @@ use notify::RecursiveMode;
 use notify::Watcher;
 use notify::event::AccessKind;
 use notify::event::AccessMode;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use notify::event::CreateKind;
 use notify::event::Event as NotifyEvent;
 use notify::event::ModifyKind;
 use tokio::sync::mpsc;
@@ -97,9 +99,7 @@ impl FsEventsResource {
       *count = count.saturating_sub(1);
       if *count == 0 {
         watched_paths.remove(&key);
-        // Best-effort: ignore errors (e.g. the watcher already lost track of
-        // the path because the path was deleted).
-        let _ = watcher.unwatch(path);
+        unwatch_shared(&mut watcher, &watched_paths, path);
       }
     }
   }
@@ -199,6 +199,11 @@ struct WatchSender {
   /// The permissions of the runtime that opened the watch, which every
   /// reported path is checked against (see [`WatchSender::readable_event`]).
   permissions: Option<PermissionsContainer>,
+  /// Whether the watch is recursive. A non-recursive watcher is told only
+  /// about its watched paths and their direct children (see
+  /// [`event_matches_watched_paths`]); only recursive watchers are told
+  /// about what the inotify new-directory scan finds in a new directory.
+  recursive: bool,
 }
 
 impl WatchSender {
@@ -325,21 +330,49 @@ fn canonicalize_path(path: &Path) -> Option<PathBuf> {
 /// Check if `event_path` (or its canonicalized form) matches one of the
 /// watched paths. The watched paths are pre-canonicalized to avoid
 /// repeated syscalls in the hot path.
+///
+/// denext: with `recursive` an event anywhere below a watched directory
+/// matches; without it only the watched path itself and its direct
+/// children do. The notify backend is shared by every watcher of the
+/// runtime, so a non-recursive watch whose directory is also under a
+/// recursive watch (`Deno.watchFs(root)` beside
+/// `Deno.watchFs(root + "/sub", { recursive: false })`) is handed the
+/// recursive watch's nested events, and a prefix match passed them on.
 fn event_matches_watched_paths(
   event_path: &Path,
   paths: &[PathBuf],
   canonical_paths: &[Option<PathBuf>],
+  recursive: bool,
 ) -> bool {
-  // Canonicalize the event path at most once per call.
+  // Canonicalize the event path (and, for a non-recursive watch, its
+  // parent) at most once per call.
   let canonical_event_path = canonicalize_path(event_path);
+  let mut canonical_parent: Option<Option<PathBuf>> = None;
   for (path, canonical_path) in paths.iter().zip(canonical_paths.iter()) {
     if same_file::is_same_file(event_path, path).unwrap_or(false) {
       return true;
     }
-    if matches!(
-      (&canonical_event_path, canonical_path),
-      (Some(ce), Some(cp)) if ce.starts_with(cp)
-    ) {
+    let Some(cp) = canonical_path else {
+      continue;
+    };
+    if recursive {
+      if canonical_event_path
+        .as_ref()
+        .is_some_and(|ce| ce.starts_with(cp))
+      {
+        return true;
+      }
+      continue;
+    }
+    if canonical_event_path.as_ref() == Some(cp) {
+      return true;
+    }
+    // A direct child: its parent is the watched directory. The parent is
+    // compared rather than the canonical event path, so a symlink in the
+    // directory counts as its child wherever it leads.
+    let parent = canonical_parent
+      .get_or_insert_with(|| event_path.parent().and_then(canonicalize_path));
+    if parent.as_ref() == Some(cp) {
       return true;
     }
   }
@@ -351,11 +384,13 @@ fn event_matches_watched_paths(
 /// `event_matches_watched_paths` will fail for removed files (canonicalize
 /// and is_same_file don't work on non-existent paths). On macOS with
 /// FSEvents, remove events may arrive as generic events for a path that
-/// no longer exists.
+/// no longer exists. Without `recursive`, only a removed direct child (or
+/// the watched path itself) matches.
 fn removed_event_matches_watched_paths(
   event_path: &Path,
   paths: &[PathBuf],
   canonical_paths: &[Option<PathBuf>],
+  recursive: bool,
 ) -> bool {
   if !is_file_removed(event_path) {
     return false;
@@ -374,11 +409,13 @@ fn removed_event_matches_watched_paths(
     {
       return true;
     }
-    // Check if the removed file's parent is within a watched directory.
-    if matches!(
-      (&canonical_parent, canonical_path),
-      (Some(cp_event), Some(cp_watched)) if cp_event.starts_with(cp_watched)
-    ) {
+    // Check if the removed file's parent is within (non-recursive: is) a
+    // watched directory.
+    if let (Some(cp_event), Some(cp_watched)) =
+      (&canonical_parent, canonical_path)
+      && (cp_event == cp_watched
+        || (recursive && cp_event.starts_with(cp_watched)))
+    {
       return true;
     }
   }
@@ -440,6 +477,7 @@ fn make_watch_sender(
   sender: mpsc::Sender<Result<FsEvent, NotifyError>>,
   overflowed: Arc<AtomicBool>,
   permissions: Option<PermissionsContainer>,
+  recursive: bool,
 ) -> WatchSender {
   let canonical_paths = paths.iter().map(|p| canonicalize_path(p)).collect();
   let canonical_ignore = ignore.iter().map(|p| canonicalize_path(p)).collect();
@@ -452,6 +490,7 @@ fn make_watch_sender(
     sender,
     overflowed,
     permissions,
+    recursive,
   }
 }
 
@@ -479,21 +518,29 @@ fn dispatch(ws: &WatchSender, res: &Result<FsEvent, NotifyError>) {
       if !ws.ignore.is_empty()
         && !event.paths.is_empty()
         && event.paths.iter().all(|event_path| {
+          // An ignored directory is ignored with everything below it.
           event_matches_watched_paths(
             event_path,
             &ws.ignore,
             &ws.canonical_ignore,
+            true,
           ) || removed_event_matches_watched_paths(
             event_path,
             &ws.ignore,
             &ws.canonical_ignore,
+            true,
           )
         })
       {
         return;
       }
       if event.paths.iter().any(|event_path| {
-        event_matches_watched_paths(event_path, &ws.paths, &ws.canonical_paths)
+        event_matches_watched_paths(
+          event_path,
+          &ws.paths,
+          &ws.canonical_paths,
+          ws.recursive,
+        )
       }) {
         if let Some(event) = ws.readable_event(event) {
           ws.send_or_record_overflow(Ok(event));
@@ -503,6 +550,7 @@ fn dispatch(ws: &WatchSender, res: &Result<FsEvent, NotifyError>) {
           event_path,
           &ws.paths,
           &ws.canonical_paths,
+          ws.recursive,
         )
       }) {
         let remove_event = FsEvent {
@@ -536,15 +584,43 @@ fn ensure_watcher(
 
   let senders: Arc<Mutex<Vec<WatchSender>>> = Arc::new(Mutex::new(Vec::new()));
   let sender_clone = senders.clone();
+  #[cfg(any(target_os = "linux", target_os = "android"))]
+  let scanner = Arc::new(new_dir_scan::NewDirScanner::new(senders.clone()));
+  #[cfg(any(target_os = "linux", target_os = "android"))]
+  let mut scan_queue = new_dir_scan::ScanQueue::new(scanner.clone());
   let watcher: RecommendedWatcher = Watcher::new(
     move |res: Result<NotifyEvent, NotifyError>| {
+      #[cfg(any(target_os = "linux", target_os = "android"))]
+      let new_dir = match &res {
+        Ok(NotifyEvent {
+          kind: EventKind::Create(CreateKind::Folder),
+          paths,
+          ..
+        }) if paths.len() == 1 => Some(paths[0].clone()),
+        _ => None,
+      };
       let res2 = match res {
         Ok(event) if is_ignored_notify_event(&event) => return,
         Ok(event) => Ok(FsEvent::from(event)),
         Err(e) => Err(e),
       };
+      #[cfg(any(target_os = "linux", target_os = "android"))]
+      {
+        // Held back while a new directory above its path waits for its scan,
+        // so the scan's events come first.
+        if scan_queue.hold_back(&res2) {
+          if let Some(dir) = new_dir {
+            scan_queue.add(dir);
+          }
+          return;
+        }
+      }
       for ws in sender_clone.lock().iter() {
         dispatch(ws, &res2);
+      }
+      #[cfg(any(target_os = "linux", target_os = "android"))]
+      if let Some(dir) = new_dir {
+        scan_queue.add(dir);
       }
     },
     // denext: don't walk into symlinked directories while setting up a
@@ -564,12 +640,261 @@ fn ensure_watcher(
     watched_paths: Mutex::new(HashMap::new()),
     next_id: AtomicU64::new(0),
   });
+  #[cfg(any(target_os = "linux", target_os = "android"))]
+  scanner.set_watcher(&inner);
 
   state.put::<WatcherState>(WatcherState {
     inner: inner.clone(),
   });
 
   Ok(inner)
+}
+
+/// denext: what a recursive inotify watch misses in a new directory.
+///
+/// inotify has no recursive watch: notify's backend reports a new directory's
+/// `Create` event to the handler and only then, once the batch it read is
+/// handled, adds a watch on the directory (`add_watch` after `handle_event` in
+/// notify's `inotify.rs`). Whatever is created in the directory before that
+/// watch exists is never reported, and a file whose creation fell before the
+/// watch but whose write fell after is reported only as modified. `mkdir` and
+/// a write into the new directory right after it (node:fs's
+/// test-fs-watch-recursive-add-file-to-new-folder.js) lost the file's event
+/// (a timeout) or saw `change` instead of `rename`, many runs in a hundred on
+/// a loaded Linux machine. Node.js's own recursive watcher on Linux reads a
+/// new directory when it appears and reports each entry it hasn't seen as
+/// `rename` (lib/internal/fs/recursive_watch.js).
+///
+/// Here a new directory under a recursive watch is read on a helper thread
+/// once the backend has added its watch: a configure call is answered by the
+/// backend's event loop after it finished the batch that reported the
+/// directory, so by then the watch exists and everything created later is
+/// reported by inotify. Each entry found is delivered as a `create` event to
+/// the recursive watchers. Until then the events under the directory are
+/// held back, so a modify inotify saw never overtakes the `create` the read
+/// found; a `create` inotify reported in that window is not repeated.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod new_dir_scan {
+  use std::collections::HashSet;
+  use std::path::Path;
+  use std::path::PathBuf;
+  use std::sync::Arc;
+  use std::sync::OnceLock;
+  use std::sync::Weak;
+
+  use deno_core::parking_lot::Mutex;
+  use notify::Error as NotifyError;
+  use notify::Watcher;
+
+  use super::FsEvent;
+  use super::WatchSender;
+  use super::WatcherInner;
+  use super::dispatch;
+
+  /// At most this many entries are read from one new directory tree; a
+  /// larger tree is mostly created after its watch anyway.
+  const MAX_SCANNED_ENTRIES: usize = 16 * 1024;
+
+  struct PendingDir {
+    dir: PathBuf,
+    /// Events under `dir` that arrived before its scan was delivered.
+    held: Vec<FsEvent>,
+  }
+
+  pub(super) struct NewDirScanner {
+    senders: Arc<Mutex<Vec<WatchSender>>>,
+    pending: Mutex<Vec<PendingDir>>,
+    watcher: OnceLock<Weak<WatcherInner>>,
+  }
+
+  impl NewDirScanner {
+    pub(super) fn new(senders: Arc<Mutex<Vec<WatchSender>>>) -> Self {
+      Self {
+        senders,
+        pending: Mutex::new(Vec::new()),
+        watcher: OnceLock::new(),
+      }
+    }
+
+    pub(super) fn set_watcher(&self, inner: &Arc<WatcherInner>) {
+      let _ = self.watcher.set(Arc::downgrade(inner));
+    }
+
+    fn has_recursive_watcher(&self) -> bool {
+      self.senders.lock().iter().any(|ws| ws.recursive)
+    }
+
+    /// Holds `res` back when one of its paths is inside a directory waiting
+    /// for its scan (the deepest such directory, whose scan comes last).
+    fn hold_back(&self, res: &Result<FsEvent, NotifyError>) -> bool {
+      let Ok(event) = res else {
+        return false;
+      };
+      let mut pending = self.pending.lock();
+      if pending.is_empty() {
+        return false;
+      }
+      let inside = |dir: &Path| {
+        event
+          .paths
+          .iter()
+          .any(|path| path != dir && path.starts_with(dir))
+      };
+      let Some(pd) = pending
+        .iter_mut()
+        .filter(|pd| inside(&pd.dir))
+        .max_by_key(|pd| pd.dir.components().count())
+      else {
+        return false;
+      };
+      pd.held.push(event.clone());
+      true
+    }
+
+    /// Waits until the backend's event loop has handled every event it read
+    /// before this call, and so added the watches of the directories they
+    /// reported. notify's inotify backend answers `configure` from its event
+    /// loop and applies nothing (the configuration it was created with is
+    /// passed again regardless).
+    fn barrier(&self) {
+      let Some(inner) = self.watcher.get().and_then(Weak::upgrade) else {
+        return;
+      };
+      let _ = inner
+        .watcher
+        .lock()
+        .configure(notify::Config::default().with_follow_symlinks(false));
+    }
+
+    fn scan_and_deliver(&self, dir: &Path) {
+      let skip: Vec<PathBuf> = self
+        .pending
+        .lock()
+        .iter()
+        .filter(|pd| pd.dir != dir && pd.dir.starts_with(dir))
+        .map(|pd| pd.dir.clone())
+        .collect();
+      let mut found = Vec::new();
+      scan(dir, &skip, &mut found);
+
+      let mut pending = self.pending.lock();
+      let held = match pending.iter().position(|pd| pd.dir == dir) {
+        Some(i) => pending.remove(i).held,
+        None => Vec::new(),
+      };
+      let reported: HashSet<&Path> = held
+        .iter()
+        .filter(|event| event.kind == "create")
+        .flat_map(|event| event.paths.iter().map(PathBuf::as_path))
+        .collect();
+      let senders = self.senders.lock();
+      for path in found {
+        if reported.contains(path.as_path()) {
+          continue;
+        }
+        let event = Ok(FsEvent {
+          kind: "create",
+          paths: vec![path],
+          flag: None,
+        });
+        for ws in senders.iter().filter(|ws| ws.recursive) {
+          dispatch(ws, &event);
+        }
+      }
+      for event in held {
+        let event = Ok(event);
+        for ws in senders.iter() {
+          dispatch(ws, &event);
+        }
+      }
+    }
+  }
+
+  /// Every entry below `dir`, depth first, not following symlinks and not
+  /// entering the directories in `skip` (which get their own scan).
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "always using real fs with watcher"
+  )]
+  fn scan(dir: &Path, skip: &[PathBuf], found: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+      return;
+    };
+    for entry in entries.flatten() {
+      if found.len() >= MAX_SCANNED_ENTRIES {
+        return;
+      }
+      let path = entry.path();
+      let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+      found.push(path.clone());
+      if is_dir && !skip.contains(&path) {
+        scan(&path, skip, found);
+      }
+    }
+  }
+
+  /// The backend thread's side: owned by the watcher callback, so the helper
+  /// thread ends when the watcher (and with it the callback) is dropped.
+  pub(super) struct ScanQueue {
+    scanner: Arc<NewDirScanner>,
+    sender: Option<std::sync::mpsc::Sender<PathBuf>>,
+    spawn_failed: bool,
+  }
+
+  impl ScanQueue {
+    pub(super) fn new(scanner: Arc<NewDirScanner>) -> Self {
+      Self {
+        scanner,
+        sender: None,
+        spawn_failed: false,
+      }
+    }
+
+    pub(super) fn hold_back(&self, res: &Result<FsEvent, NotifyError>) -> bool {
+      self.scanner.hold_back(res)
+    }
+
+    /// Queues the scan of `dir`, a directory the backend just reported as
+    /// created, when a recursive watcher may want its contents.
+    pub(super) fn add(&mut self, dir: PathBuf) {
+      if self.spawn_failed || !self.scanner.has_recursive_watcher() {
+        return;
+      }
+      if self.sender.is_none() {
+        let (sender, receiver) = std::sync::mpsc::channel::<PathBuf>();
+        let scanner = self.scanner.clone();
+        let spawned = std::thread::Builder::new()
+          .name("deno-fs-events-scan".into())
+          .spawn(move || {
+            while let Ok(first) = receiver.recv() {
+              let mut dirs = vec![first];
+              while let Ok(dir) = receiver.try_recv() {
+                dirs.push(dir);
+              }
+              scanner.barrier();
+              for dir in dirs {
+                scanner.scan_and_deliver(&dir);
+              }
+            }
+          });
+        if spawned.is_err() {
+          self.spawn_failed = true;
+          return;
+        }
+        self.sender = Some(sender);
+      }
+      self.scanner.pending.lock().push(PendingDir {
+        dir: dir.clone(),
+        held: Vec::new(),
+      });
+      if let Some(sender) = &self.sender
+        && sender.send(dir.clone()).is_err()
+      {
+        // The helper is gone: deliver what was held instead of keeping it.
+        self.scanner.scan_and_deliver(&dir);
+      }
+    }
+  }
 }
 
 /// Make `path` absolute and collapse `.` / `..` segments so that paths
@@ -663,6 +988,7 @@ fn open_fs_events_resource(
     sender,
     overflowed.clone(),
     permissions,
+    recursive,
   ));
 
   let recursive_mode = if recursive {
@@ -696,8 +1022,12 @@ fn open_fs_events_resource(
         rollback_partial_open(&inner, id, &watched);
         return Err(FsEventsError::Notify(JsNotifyError(e)));
       }
+      let added = *count == 0;
       *count += 1;
       watched.push((path.clone(), recursive_mode));
+      if added && recursive_mode == RecursiveMode::NonRecursive {
+        restore_overlapping_watches(&mut watcher, &watched_paths, path);
+      }
     }
   }
 
@@ -711,6 +1041,58 @@ fn open_fs_events_resource(
   };
   let rid = state.resource_table.add(resource);
   Ok(rid)
+}
+
+/// denext: removes `path`'s watch from the shared backend, then restores
+/// what that took from the watches still registered (see
+/// [`restore_overlapping_watches`]).
+fn unwatch_shared(
+  watcher: &mut RecommendedWatcher,
+  watched_paths: &HashMap<(PathBuf, RecursiveMode), usize>,
+  path: &Path,
+) {
+  // Best-effort: ignore errors (e.g. the watcher already lost track of the
+  // path because the path was deleted).
+  let _ = watcher.unwatch(path);
+  restore_overlapping_watches(watcher, watched_paths, path);
+}
+
+/// denext: inotify watches inodes, not (path, mode) pairs: notify's backend
+/// keeps one watch per directory, so watches on overlapping paths share it.
+/// Unwatching a recursive `dir` removed the watch of `dir/sub` that a
+/// non-recursive watch of `dir/sub` still needed (that watcher went silent),
+/// unwatching `dir/sub` took a directory out of a recursive watch of `dir`,
+/// and watching `dir/sub` non-recursively marked its directory
+/// non-recursive, so directories made in it later were no longer watched for
+/// the recursive watch. Every remaining registered watch overlapping `path`
+/// is applied again, the recursive ones last so their directories stay
+/// recursive (events are still matched per watcher, see
+/// [`event_matches_watched_paths`]). Other backends watch each path on its
+/// own and are left alone (re-adding a path on Windows would add a second
+/// `ReadDirectoryChangesW` request, denoland/deno#27742).
+#[cfg_attr(
+  not(any(target_os = "linux", target_os = "android")),
+  allow(
+    unused_variables,
+    reason = "only inotify shares a watch between overlapping paths"
+  )
+)]
+fn restore_overlapping_watches(
+  watcher: &mut RecommendedWatcher,
+  watched_paths: &HashMap<(PathBuf, RecursiveMode), usize>,
+  path: &Path,
+) {
+  #[cfg(any(target_os = "linux", target_os = "android"))]
+  {
+    let mut overlapping: Vec<&(PathBuf, RecursiveMode)> = watched_paths
+      .keys()
+      .filter(|(p, _)| p.starts_with(path) || path.starts_with(p))
+      .collect();
+    overlapping.sort_by_key(|(_, mode)| *mode == RecursiveMode::Recursive);
+    for (p, mode) in overlapping {
+      let _ = watcher.watch(p, *mode);
+    }
+  }
 }
 
 /// Undo the `senders` push and any `watch` calls we performed before
@@ -732,7 +1114,7 @@ fn rollback_partial_open(
       *count = count.saturating_sub(1);
       if *count == 0 {
         watched_paths.remove(&key);
-        let _ = watcher.unwatch(path);
+        unwatch_shared(&mut watcher, &watched_paths, path);
       }
     }
   }
@@ -931,6 +1313,7 @@ mod tests {
         Some(vec![]),
         Some(vec![secret.to_string_lossy().into_owned()]),
       )),
+      true,
     );
     let err = |paths: Vec<PathBuf>| {
       Err(NotifyError {
@@ -956,6 +1339,121 @@ mod tests {
       Ok(Err(e)) => assert!(e.paths.is_empty()),
       other => panic!("expected an error, got {other:?}"),
     }
+  }
+
+  fn watch_sender_for(
+    path: &Path,
+    recursive: bool,
+  ) -> (WatchSender, mpsc::Receiver<Result<FsEvent, NotifyError>>) {
+    let (sender, receiver) = mpsc::channel(16);
+    let ws = make_watch_sender(
+      0,
+      vec![path.to_path_buf()],
+      vec![],
+      sender,
+      Arc::new(AtomicBool::new(false)),
+      None,
+      recursive,
+    );
+    (ws, receiver)
+  }
+
+  fn received_paths(
+    receiver: &mut mpsc::Receiver<Result<FsEvent, NotifyError>>,
+  ) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    while let Ok(res) = receiver.try_recv() {
+      paths.extend(res.unwrap().paths);
+    }
+    paths
+  }
+
+  // denext: the notify backend is shared, so a recursive watch on an
+  // ancestor makes it report nested paths to every watcher; a non-recursive
+  // watcher passes on only its directory and the directory's direct children
+  #[allow(clippy::disallowed_methods, reason = "test fixtures on disk")]
+  #[test]
+  fn non_recursive_watcher_gets_only_direct_children() {
+    let dir = test_util::TempDir::new();
+    let root = canonicalize_path(dir.path().as_path()).unwrap();
+    let sub = root.join("sub");
+    let nested = sub.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let direct = sub.join("direct.txt");
+    let deep = nested.join("deep.txt");
+    let sibling = root.join("sibling.txt");
+    std::fs::write(&direct, b"x").unwrap();
+    std::fs::write(&deep, b"x").unwrap();
+    std::fs::write(&sibling, b"x").unwrap();
+    // removed paths take the removed-file path through the matcher
+    let gone_direct = sub.join("gone.txt");
+    let gone_deep = nested.join("gone.txt");
+
+    let (recursive, mut recursive_rx) = watch_sender_for(&root, true);
+    let (flat, mut flat_rx) = watch_sender_for(&sub, false);
+    for path in [
+      &sub,
+      &direct,
+      &nested,
+      &deep,
+      &sibling,
+      &gone_direct,
+      &gone_deep,
+    ] {
+      let event = Ok(FsEvent {
+        kind: "modify",
+        paths: vec![path.clone()],
+        flag: None,
+      });
+      dispatch(&recursive, &event);
+      dispatch(&flat, &event);
+    }
+
+    assert_eq!(
+      received_paths(&mut recursive_rx),
+      vec![
+        sub.clone(),
+        direct.clone(),
+        nested.clone(),
+        deep.clone(),
+        sibling.clone(),
+        gone_direct.clone(),
+        gone_deep.clone(),
+      ]
+    );
+    assert_eq!(
+      received_paths(&mut flat_rx),
+      vec![
+        sub.clone(),
+        direct.clone(),
+        nested.clone(),
+        gone_direct.clone()
+      ]
+    );
+  }
+
+  // a non-recursive watch on a file gets the file's events, not a sibling's
+  #[allow(clippy::disallowed_methods, reason = "test fixtures on disk")]
+  #[test]
+  fn non_recursive_file_watcher_gets_only_the_file() {
+    let dir = test_util::TempDir::new();
+    let root = canonicalize_path(dir.path().as_path()).unwrap();
+    let file = root.join("file.txt");
+    let other = root.join("other.txt");
+    std::fs::write(&file, b"x").unwrap();
+    std::fs::write(&other, b"x").unwrap();
+    let (flat, mut flat_rx) = watch_sender_for(&file, false);
+    for path in [&file, &other, &root] {
+      dispatch(
+        &flat,
+        &Ok(FsEvent {
+          kind: "modify",
+          paths: vec![path.clone()],
+          flag: None,
+        }),
+      );
+    }
+    assert_eq!(received_paths(&mut flat_rx), vec![file]);
   }
 
   // https://github.com/denoland/deno/issues/36937
@@ -1004,5 +1502,65 @@ mod tests {
       .unwrap()
       .close();
     assert_eq!(inner.watched_paths.lock().get(&key), None);
+  }
+
+  // denext: inotify adds a new directory's watch only after reporting the
+  // directory, so what is made in it right away was lost or reported only as
+  // modified. The scan of the new directory reports it, and as created before
+  // anything inotify saw.
+  #[cfg(any(target_os = "linux", target_os = "android"))]
+  #[allow(clippy::disallowed_methods, reason = "test fixtures on disk")]
+  #[test]
+  fn recursive_watch_reports_what_a_new_directory_got_before_its_watch() {
+    use std::time::Duration;
+    use std::time::Instant;
+
+    use tokio::sync::mpsc::error::TryRecvError;
+
+    let dir = test_util::TempDir::new();
+    let root =
+      normalize_watch_path(canonicalize_path(dir.path().as_path()).unwrap());
+    let mut state = OpState::new(None);
+    let rid =
+      open_fs_events_resource(&mut state, vec![root.clone()], vec![], true)
+        .unwrap();
+    let resource = state.resource_table.get::<FsEventsResource>(rid).unwrap();
+    let mut receiver = RcRef::map(&resource, |r| &r.receiver)
+      .try_borrow_mut()
+      .unwrap();
+
+    for i in 0..50 {
+      let new_dir = root.join(format!("dir-{i}"));
+      let nested = new_dir.join("nested");
+      std::fs::create_dir_all(&nested).unwrap();
+      let file = nested.join("file.txt");
+      std::fs::write(&file, "x").unwrap();
+
+      let mut first_kinds: HashMap<PathBuf, &'static str> = HashMap::new();
+      let deadline = Instant::now() + Duration::from_secs(10);
+      while !first_kinds.contains_key(&file)
+        || !first_kinds.contains_key(&nested)
+      {
+        match receiver.try_recv() {
+          Ok(Ok(event)) => {
+            for path in event.paths {
+              first_kinds.entry(path).or_insert(event.kind);
+            }
+          }
+          Ok(Err(err)) => panic!("run {i}: watcher error {err:?}"),
+          Err(TryRecvError::Empty) => {
+            assert!(
+              Instant::now() < deadline,
+              "run {i}: no event for {} (got {first_kinds:?})",
+              file.display()
+            );
+            std::thread::sleep(Duration::from_millis(1));
+          }
+          Err(TryRecvError::Disconnected) => panic!("run {i}: disconnected"),
+        }
+      }
+      assert_eq!(first_kinds[&nested], "create", "run {i}");
+      assert_eq!(first_kinds[&file], "create", "run {i}");
+    }
   }
 }

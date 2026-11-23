@@ -578,3 +578,90 @@ Deno.test(
     }
   },
 );
+
+// denext: every watcher of a runtime shares one notify backend, so a
+// recursive watch on an ancestor has the backend report nested paths to a
+// non-recursive watcher of a subdirectory too. The non-recursive watcher must
+// pass on only its directory's direct children.
+Deno.test(
+  { permissions: { read: true, write: true } },
+  async function watchFsNonRecursiveBesideRecursiveAncestor() {
+    const testDir = await makeTempDir();
+    const sub = testDir + "/sub";
+    const nested = sub + "/nested";
+    Deno.mkdirSync(nested, { recursive: true });
+    await delay(100);
+
+    using recursive = Deno.watchFs(testDir);
+    using flat = Deno.watchFs(sub, { recursive: false });
+
+    const deepFile = nested + "/deep.txt";
+    const directFile = sub + "/direct.txt";
+
+    // The recursive watcher sees the nested file; once it has, the backend
+    // has reported it, so a later direct-child event on the flat watcher
+    // proves the nested one was dropped rather than still in flight.
+    const sawDeep = (async () => {
+      for await (const event of recursive) {
+        if (event.paths.some((p) => p.endsWith("deep.txt"))) return;
+      }
+    })();
+    const flatPaths: string[] = [];
+    const sawDirect = (async () => {
+      for await (const event of flat) {
+        flatPaths.push(...event.paths);
+        if (event.paths.some((p) => p.endsWith("direct.txt"))) return;
+      }
+    })();
+
+    Deno.writeFileSync(deepFile, new Uint8Array([1]));
+    await sawDeep;
+    Deno.writeFileSync(directFile, new Uint8Array([1]));
+    await sawDirect;
+
+    for (const path of flatPaths) {
+      assert(
+        !path.includes("deep.txt"),
+        `non-recursive watcher received a nested path: ${path}`,
+      );
+    }
+  },
+);
+
+// denext: watches on overlapping paths share the backend's watch of a
+// directory on Linux (inotify), so closing a recursive watcher of an
+// ancestor, or opening and closing a non-recursive one inside it, must leave
+// the other watcher's events intact.
+Deno.test(
+  { permissions: { read: true, write: true } },
+  async function watchFsOverlappingWatchersCloseIndependently() {
+    const testDir = await makeTempDir();
+    const sub = testDir + "/sub";
+    Deno.mkdirSync(sub);
+    await delay(100);
+
+    async function next(watcher: Deno.FsWatcher, name: string) {
+      for await (const event of watcher) {
+        if (event.paths.some((p) => p.endsWith(name))) return;
+      }
+    }
+
+    // The recursive watcher of the ancestor closes first.
+    const flat = Deno.watchFs(sub, { recursive: false });
+    Deno.watchFs(testDir).close();
+    const sawFirst = next(flat, "first.txt");
+    Deno.writeFileSync(sub + "/first.txt", new Uint8Array([1]));
+    await sawFirst;
+    flat.close();
+
+    // The non-recursive watcher inside it closes first, and a directory made
+    // in `sub` afterwards is still watched for the recursive one.
+    using recursive = Deno.watchFs(testDir);
+    Deno.watchFs(sub, { recursive: false }).close();
+    Deno.mkdirSync(sub + "/later");
+    await delay(200);
+    const sawSecond = next(recursive, "second.txt");
+    Deno.writeFileSync(sub + "/later/second.txt", new Uint8Array([1]));
+    await sawSecond;
+  },
+);

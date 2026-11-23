@@ -752,6 +752,32 @@ const NOT_IMPORTED_OPS = [
   "op_lint_create_serialized_ast",
   "op_is_cancelled",
 
+  // denext: read from `core.ops` by the TypeScript compiler isolates
+  // (cli/tsc/97_ts_host.js, 98_lsp.js, 99_main_compiler.js; their extension
+  // runs after this module). A snapshot build evaluates this module before
+  // they are registered; a build without a snapshot (`--features hmr`)
+  // evaluates it in those isolates, and removing them broke every type check.
+  // `op_is_cancelled` is listed above.
+  "op_create_hash",
+  "op_emit",
+  "op_exit_span",
+  "op_is_node_file",
+  "op_libs",
+  "op_load",
+  "op_log_event",
+  "op_lsp_release_memory",
+  "op_make_span",
+  "op_poll_requests",
+  "op_project_version",
+  "op_release",
+  "op_remap_specifier",
+  "op_resolve",
+  "op_resolve_jsx_import_source",
+  "op_respond",
+  "op_script_names",
+  "op_script_version",
+  "op_tsc_constants",
+
   // Related to `Deno.test()` API
   "op_test_event_step_result_failed",
   "op_test_event_step_result_ignored",

@@ -4628,8 +4628,11 @@ const poisonTlsRootCa = Deno.readTextFileSync(
 
 /** A raw HTTP/1.1 server on its own thread (a Worker has its own event loop),
  * so it keeps writing while this thread blocks. It answers every request with
- * its path as the body and, 50 ms after the first request on a connection and
- * unasked, writes a second response "POISON" (`X-Poisoned: true`). */
+ * its path as the body, and `poison()` makes it write an unasked response
+ * "POISON" (`X-Poisoned: true`) on the connection it last answered. The test
+ * sends that only once the socket is where it wants it (pooled, or its
+ * response read): a fixed delay raced the client under load, the poison
+ * arriving before the socket was pooled and the read guard destroying it. */
 async function startPoisoningServer(
   tlsOptions?: { cert: string; key: string },
 ) {
@@ -4649,8 +4652,11 @@ const response = (body, poisoned = false) =>
       (poisoned ? "X-Poisoned: true\\r\\n" : "") +
       "Content-Length: " + body.length + "\\r\\n\\r\\n" + body,
   );
+let lastConn;
+self.onmessage = () => {
+  lastConn?.write(response("POISON", true)).catch(() => {});
+};
 async function serve(conn) {
-  let requests = 0;
   let buffered = "";
   const chunk = new Uint8Array(4096);
   try {
@@ -4663,12 +4669,7 @@ async function serve(conn) {
         const path = buffered.split(" ", 2)[1];
         buffered = buffered.slice(end + 4);
         await conn.write(response(path));
-        if (++requests === 1) {
-          setTimeout(
-            () => conn.write(response("POISON", true)).catch(() => {}),
-            50,
-          );
-        }
+        lastConn = conn;
       }
     }
   } catch {
@@ -4686,7 +4687,27 @@ for await (const conn of listener) serve(conn);
     worker.onerror = (event) => reject(new Error(event.message));
   });
   URL.revokeObjectURL(url);
-  return { port, close: () => worker.terminate() };
+  return {
+    port,
+    poison: () => worker.postMessage("poison"),
+    close: () => worker.terminate(),
+  };
+}
+
+/** Resolves with the next socket the agent pools: the agent's own "free"
+ * listener (added in its constructor) has run by then. The deadline is only a
+ * safety net against a hang. */
+function nextFreeSocket(agent: http.Agent): Promise<Socket> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("timed out waiting for the socket to be pooled")),
+      30_000,
+    );
+    agent.once("free", (socket: Socket) => {
+      clearTimeout(timer);
+      resolve(socket);
+    });
+  });
 }
 
 async function waitFor(check: () => boolean, what: string) {
@@ -4805,15 +4826,15 @@ Deno.test({
     const options = { host: "127.0.0.1", port: server.port, agent };
     const name = agent.getName(options);
     try {
+      const pooled = nextFreeSocket(agent);
       const first = await poisonGet(http, { ...options, path: "/request1" });
       assertEquals(first.body, "/request1");
-      await waitFor(
-        () => agent.freeSockets[name]?.length === 1,
-        "the socket to be pooled",
-      );
+      assertEquals(await pooled, first.socket);
+      assertEquals(agent.freeSockets[name]?.length, 1);
       const freeSocket = agent.freeSockets[name]![0];
       assertEquals(freeSocket, first.socket);
 
+      server.poison();
       spinUntilPendingRead(freeSocket);
       // Same tick: the loop has not polled since the data arrived.
       const second = poisonGet(http, { ...options, path: "/request2" });
@@ -4854,6 +4875,7 @@ Deno.test({
           res.on("data", (chunk) => body += chunk);
           res.on("end", () => {
             // The socket is released to the queued request on the next tick.
+            server.poison();
             spinUntilPendingRead(socket);
             resolve({
               body,
@@ -4906,14 +4928,14 @@ Deno.test({
     };
     const name = agent.getName(options);
     try {
+      const pooled = nextFreeSocket(agent);
       const first = await poisonGet(https, { ...options, path: "/request1" });
       assertEquals(first.body, "/request1");
-      await waitFor(
-        () => agent.freeSockets[name]?.length === 1,
-        "the socket to be pooled",
-      );
+      assertEquals(await pooled, first.socket);
+      assertEquals(agent.freeSockets[name]?.length, 1);
       const freeSocket = agent.freeSockets[name]![0];
 
+      server.poison();
       spinUntilPendingRead(freeSocket);
       const second = poisonGet(https, { ...options, path: "/request2" });
       assertEquals(freeSocket.destroyed, true);
@@ -4995,16 +5017,17 @@ Deno.test("[node/http] proxied request authority is validated and canonicalized"
       path: "/g",
       headers: { Host: "localhost:80" },
     });
-    req.on("error", () => {});
+    // Destroyed before it has a socket, the request emits Node's "socket hang
+    // up" and then "close". `events.once(req, "close")` would reject on that
+    // error, so collect it and wait for "close" with a plain listener.
+    const errors: Array<Error & { code?: string }> = [];
+    req.on("error", (err) => errors.push(err));
+    const closed = new Promise<void>((resolve) => req.on("close", resolve));
     assertEquals(req.path, "http://localhost/g");
     assertEquals(req.getHeader("host"), "localhost");
-    // (not `events.once`, which rejects on the "socket hang up" error the
-    // destroy emits first unless the refused connection beat it)
-    const closed = new Promise<void>((resolve) =>
-      req.once("close", () => resolve())
-    );
     req.destroy();
     await closed;
+    assertEquals(errors.map((err) => err.code), ["ECONNRESET"]);
 
     const options = { agent, host: "localhost", port: 3000, path: "/x" };
     for (
