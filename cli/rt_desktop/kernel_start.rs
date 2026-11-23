@@ -259,7 +259,10 @@ pub fn startup(data: &StandaloneData, worker: bool) -> Result<(), String> {
     residuals: grant.residuals.clone(),
     blocked,
     stage,
-    ..Default::default()
+    // named, not `..Default::default()`: on Windows every field is already
+    // given and clippy refuses a struct update that fills nothing
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    outside: None,
   };
   #[cfg(any(target_os = "linux", target_os = "macos"))]
   if applies && !worker {

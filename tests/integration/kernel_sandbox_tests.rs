@@ -40,6 +40,7 @@ fn enforce_available() -> bool {
 /// A program that reads a file Deno asks for (the prompt grants it), then
 /// tries the denied path from native code and from a child, then says
 /// whether no-new-privileges is set (Linux).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const DENY_CEILING_PROGRAM: &str = r#"
 const isMac = Deno.build.os === "darwin";
 const libc = Deno.dlopen(isMac ? "/usr/lib/libSystem.B.dylib" : "libc.so.6", {
@@ -64,6 +65,7 @@ if (!isMac) {
 console.log("done");
 "#;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn deny_ceiling_context() -> util::TestContext {
   let context = TestContextBuilder::new().use_temp_cwd().build();
   let dir = context.temp_dir();

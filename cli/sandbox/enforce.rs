@@ -931,18 +931,23 @@ pub fn prepare(
       fatal.join("\n")
     );
   }
-  let Some(mut plan) = plan else {
+  let Some(plan) = plan else {
     bail!("--kernel-sandbox=enforce refuses to start: no plan for this OS");
   };
   // the broker's copy of the network grant, as the flags wrote it (both
-  // images run this with the same options, so the plans still compare)
+  // images run this with the same options, so the plans still compare);
+  // only the broker's platforms fill it, so the binding is mutable only there
   #[cfg(any(target_os = "linux", target_os = "macos"))]
-  deno_lib::kernel_supervise::fill_broker_net(
-    &mut plan,
-    compiled,
-    options,
-    ctx.inspector_port,
-  );
+  let plan = {
+    let mut plan = plan;
+    deno_lib::kernel_supervise::fill_broker_net(
+      &mut plan,
+      compiled,
+      options,
+      ctx.inspector_port,
+    );
+    plan
+  };
   let _ = READ_DENIES.set(resolved_read_denies(compiled));
   #[cfg(target_os = "linux")]
   {
