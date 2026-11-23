@@ -13,6 +13,9 @@ use std::vec;
 
 use deno_permissions::PermissionCheckError;
 use deno_permissions::PermissionsContainer;
+
+use crate::deny_addresses::AddressDeniedError;
+use crate::deny_addresses::AddressDenyList;
 use http::Uri;
 use http::uri::Scheme;
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -222,6 +225,8 @@ pub struct PermissionedHttpConnector {
   permissions: Option<PermissionsContainer>,
   deny_check_kind: ResolvedDenyCheckKind,
   connect_timeout: Option<std::time::Duration>,
+  /// denext: `Deno.createHttpClient({ denyAddresses })`.
+  deny_addresses: Option<Arc<AddressDenyList>>,
 }
 
 impl PermissionedHttpConnector {
@@ -237,7 +242,18 @@ impl PermissionedHttpConnector {
       permissions,
       deny_check_kind,
       connect_timeout: None,
+      deny_addresses: None,
     }
+  }
+
+  /// denext: refuses every connection to an address in `deny` (see
+  /// [`crate::deny_addresses`]).
+  pub fn with_deny_addresses(
+    mut self,
+    deny: Option<Arc<AddressDenyList>>,
+  ) -> Self {
+    self.deny_addresses = deny.filter(|deny| !deny.is_empty());
+    self
   }
 
   /// Gives up on a TCP connect after `timeout` (`None`: the OS's own).
@@ -482,109 +498,153 @@ impl Service<Uri> for PermissionedHttpConnector {
   fn call(&mut self, uri: Uri) -> Self::Future {
     let this = self.clone();
     Box::pin(async move {
-      let routed = deno_net_route::route().is_some();
-      let Some(permissions) = &this.permissions else {
-        if routed {
-          // denext: no permissions to check here, but the broker checks
-          // its own: the destination must be in the network grant.
-          let Some((bare_host, port)) = bare_host_and_port(&uri) else {
-            return Err(
-              io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "missing host in URI",
-              )
+      let deny = this.deny_addresses.clone();
+      let stream = this.connect(uri).await?;
+      // denext: the address the socket really reached, checked before a
+      // byte is written to it (the addresses were checked before the
+      // connect too; this holds whatever chose among them)
+      if let Some(deny) = &deny {
+        let peer = stream.inner().peer_addr()?;
+        deny.check(peer).map_err(address_denied)?;
+      }
+      Ok(stream)
+    })
+  }
+}
+
+/// denext: a refusal of `denyAddresses`, as the connector's error.
+fn address_denied(err: AddressDeniedError) -> BoxError {
+  io::Error::new(io::ErrorKind::PermissionDenied, err).into()
+}
+
+/// denext: refuses when any of `addrs` is in `deny` (with `port`, the
+/// destination's).
+fn check_deny_addresses(
+  deny: Option<&AddressDenyList>,
+  addrs: impl IntoIterator<Item = IpAddr>,
+  port: u16,
+) -> Result<(), BoxError> {
+  let Some(deny) = deny else {
+    return Ok(());
+  };
+  for ip in addrs {
+    deny
+      .check(SocketAddr::new(ip, port))
+      .map_err(address_denied)?;
+  }
+  Ok(())
+}
+
+impl PermissionedHttpConnector {
+  async fn connect(self, uri: Uri) -> Result<TokioIo<TcpStream>, BoxError> {
+    let this = self;
+    let deny = this.deny_addresses.as_deref();
+    let routed = deno_net_route::route().is_some();
+    let Some(permissions) = &this.permissions else {
+      if routed || deny.is_some() {
+        // denext: no permissions to check here, but the broker checks
+        // its own: the destination must be in the network grant.
+        let Some((bare_host, port)) = bare_host_and_port(&uri) else {
+          return Err(
+            io::Error::new(io::ErrorKind::InvalidInput, "missing host in URI")
               .into(),
-            );
-          };
-          let (addrs, host) = match bare_host.parse::<IpAddr>() {
-            Ok(ip) => (vec![SocketAddr::new(ip, port)], None),
-            Err(_) => {
-              let name =
-                Name::from_str(bare_host).map_err(|e| -> BoxError {
-                  io::Error::new(io::ErrorKind::InvalidInput, e.to_string())
-                    .into()
-                })?;
-              let addrs = this
-                .resolver
-                .clone()
-                .call(name)
-                .await
-                .map_err(|e| -> BoxError { DnsError(e).into() })?
-                .map(|addr| SocketAddr::new(addr.ip(), port))
-                .collect();
-              (addrs, Some(bare_host))
-            }
-          };
-          return routed_connect(
-            &addrs,
-            host,
-            this.local_address,
-            this.connect_timeout,
-          )
-          .await
-          .map_err(Into::into);
+          );
+        };
+        let (addrs, host) = match bare_host.parse::<IpAddr>() {
+          Ok(ip) => (vec![SocketAddr::new(ip, port)], None),
+          Err(_) => {
+            let name = Name::from_str(bare_host).map_err(|e| -> BoxError {
+              io::Error::new(io::ErrorKind::InvalidInput, e.to_string()).into()
+            })?;
+            let addrs = this
+              .resolver
+              .clone()
+              .call(name)
+              .await
+              .map_err(|e| -> BoxError { DnsError(e).into() })?
+              .map(|addr| SocketAddr::new(addr.ip(), port))
+              .collect();
+            (addrs, Some(bare_host))
+          }
+        };
+        check_deny_addresses(deny, addrs.iter().map(|a| a.ip()), port)?;
+        if !routed {
+          // connect to exactly the addresses that were checked
+          let mut connector =
+            this.http_connector(Resolver::custom(Arc::new(PreResolved(addrs))));
+          return connector.call(uri).await.map_err(Into::into);
         }
-        let mut connector = this.http_connector(this.resolver.clone());
-        return connector.call(uri).await.map_err(Into::into);
-      };
-
-      let Some((bare_host, port)) = bare_host_and_port(&uri) else {
-        return Err(
-          io::Error::new(io::ErrorKind::InvalidInput, "missing host in URI")
-            .into(),
-        );
-      };
-      if let Ok(ip) = bare_host.parse::<IpAddr>() {
-        // IP literal: `HttpConnector` connects to it directly without
-        // consulting the resolver.
-        check_resolved(permissions, this.deny_check_kind, &ip, port)?;
-        if routed {
-          return routed_connect(
-            &[SocketAddr::new(ip, port)],
-            None,
-            this.local_address,
-            this.connect_timeout,
-          )
-          .await
-          .map_err(Into::into);
-        }
-        let mut connector = this.http_connector(this.resolver.clone());
-        return connector.call(uri).await.map_err(Into::into);
-      }
-
-      let name = Name::from_str(bare_host).map_err(|e| -> BoxError {
-        io::Error::new(io::ErrorKind::InvalidInput, e.to_string()).into()
-      })?;
-      let addrs: Vec<SocketAddr> = this
-        .resolver
-        .clone()
-        .call(name)
-        .await
-        .map_err(|e| -> BoxError { DnsError(e).into() })?
-        .collect();
-      for addr in &addrs {
-        check_resolved(permissions, this.deny_check_kind, &addr.ip(), port)?;
-      }
-
-      if routed {
-        let addrs: Vec<SocketAddr> = addrs
-          .iter()
-          .map(|addr| SocketAddr::new(addr.ip(), port))
-          .collect();
         return routed_connect(
           &addrs,
-          Some(bare_host),
+          host,
           this.local_address,
           this.connect_timeout,
         )
         .await
         .map_err(Into::into);
       }
+      let mut connector = this.http_connector(this.resolver.clone());
+      return connector.call(uri).await.map_err(Into::into);
+    };
 
-      let mut connector =
-        this.http_connector(Resolver::custom(Arc::new(PreResolved(addrs))));
-      connector.call(uri).await.map_err(Into::into)
-    })
+    let Some((bare_host, port)) = bare_host_and_port(&uri) else {
+      return Err(
+        io::Error::new(io::ErrorKind::InvalidInput, "missing host in URI")
+          .into(),
+      );
+    };
+    if let Ok(ip) = bare_host.parse::<IpAddr>() {
+      // IP literal: `HttpConnector` connects to it directly without
+      // consulting the resolver.
+      check_resolved(permissions, this.deny_check_kind, &ip, port)?;
+      check_deny_addresses(deny, [ip], port)?;
+      if routed {
+        return routed_connect(
+          &[SocketAddr::new(ip, port)],
+          None,
+          this.local_address,
+          this.connect_timeout,
+        )
+        .await
+        .map_err(Into::into);
+      }
+      let mut connector = this.http_connector(this.resolver.clone());
+      return connector.call(uri).await.map_err(Into::into);
+    }
+
+    let name = Name::from_str(bare_host).map_err(|e| -> BoxError {
+      io::Error::new(io::ErrorKind::InvalidInput, e.to_string()).into()
+    })?;
+    let addrs: Vec<SocketAddr> = this
+      .resolver
+      .clone()
+      .call(name)
+      .await
+      .map_err(|e| -> BoxError { DnsError(e).into() })?
+      .collect();
+    for addr in &addrs {
+      check_resolved(permissions, this.deny_check_kind, &addr.ip(), port)?;
+    }
+    check_deny_addresses(deny, addrs.iter().map(|a| a.ip()), port)?;
+
+    if routed {
+      let addrs: Vec<SocketAddr> = addrs
+        .iter()
+        .map(|addr| SocketAddr::new(addr.ip(), port))
+        .collect();
+      return routed_connect(
+        &addrs,
+        Some(bare_host),
+        this.local_address,
+        this.connect_timeout,
+      )
+      .await
+      .map_err(Into::into);
+    }
+
+    let mut connector =
+      this.http_connector(Resolver::custom(Arc::new(PreResolved(addrs))));
+    connector.call(uri).await.map_err(Into::into)
   }
 }
 
@@ -616,6 +676,25 @@ pub trait CheckDst {
     &self,
     uri: Uri,
   ) -> Pin<Box<dyn Future<Output = Result<(), BoxError>> + Send>>;
+
+  /// denext: a destination reached through an HTTP(S) or SOCKS proxy,
+  /// checked against the client's `denyAddresses`: its name is resolved
+  /// here and every address checked, and a name that doesn't resolve here
+  /// is refused (the proxy would resolve it on its own and go wherever it
+  /// leads). Residual risk as for [`CheckDst`]: the proxy repeats the
+  /// lookup and may get another answer.
+  fn check_dst_addresses(
+    &self,
+    uri: Uri,
+  ) -> Pin<Box<dyn Future<Output = Result<(), BoxError>> + Send>>;
+
+  /// denext: the connector for the hop to a proxy itself, which the
+  /// client's `denyAddresses` don't govern: a proxy is the developer's or
+  /// the operator's configuration (a local one on a loopback address is
+  /// common), not a destination a request names.
+  fn for_proxy_hop(&self) -> Self
+  where
+    Self: Sized;
 }
 
 impl CheckDst for PermissionedHttpConnector {
@@ -657,6 +736,44 @@ impl CheckDst for PermissionedHttpConnector {
       }
       Ok(())
     })
+  }
+
+  fn check_dst_addresses(
+    &self,
+    uri: Uri,
+  ) -> Pin<Box<dyn Future<Output = Result<(), BoxError>> + Send>> {
+    let this = self.clone();
+    Box::pin(async move {
+      let Some(deny) = this.deny_addresses.as_deref() else {
+        return Ok(());
+      };
+      let Some((bare_host, port)) = bare_host_and_port(&uri) else {
+        return Ok(());
+      };
+      if let Ok(ip) = bare_host.parse::<IpAddr>() {
+        return check_deny_addresses(Some(deny), [ip], port);
+      }
+      let addrs: Vec<IpAddr> = match Name::from_str(bare_host) {
+        Ok(name) => match this.resolver.clone().call(name).await {
+          Ok(addrs) => addrs.map(|addr| addr.ip()).collect(),
+          Err(_) => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+      };
+      if addrs.is_empty() {
+        return Err(address_denied(AddressDeniedError::Unresolved {
+          host: bare_host.to_string(),
+          port,
+        }));
+      }
+      check_deny_addresses(Some(deny), addrs, port)
+    })
+  }
+
+  fn for_proxy_hop(&self) -> Self {
+    let mut hop = self.clone();
+    hop.deny_addresses = None;
+    hop
   }
 }
 
@@ -730,6 +847,93 @@ mod tests {
       self.0.lock().unwrap().push(name.as_str().to_string());
       Box::pin(async { Ok(vec![].into_iter()) })
     }
+  }
+
+  fn deny(entries: &[&str]) -> Option<Arc<AddressDenyList>> {
+    Some(Arc::new(
+      AddressDenyList::parse(
+        &entries.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+      )
+      .unwrap(),
+    ))
+  }
+
+  // denext: a name that resolves to a denied address is refused before
+  // anything connects to it.
+  #[tokio::test]
+  async fn deny_addresses_refuse_a_resolved_address_before_connecting() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    for permissions in [
+      None,
+      Some(PermissionsContainer::allow_all(Arc::new(
+        deno_permissions::RuntimePermissionDescriptorParser::new(
+          sys_traits::impls::RealSys,
+        ),
+      ))),
+    ] {
+      let mut connector = PermissionedHttpConnector::new(
+        Resolver::custom(Arc::new(DebugResolver(addr))),
+        None,
+        permissions,
+        ResolvedDenyCheckKind::Net,
+      )
+      .with_deny_addresses(deny(&["127.0.0.0/8"]));
+      let uri =
+        Uri::from_str(&format!("http://example.com:{}", addr.port())).unwrap();
+      let err = connector.call(uri).await.unwrap_err();
+      let denied = crate::deny_addresses::find_address_denied_error(&*err)
+        .expect("a denyAddresses refusal");
+      assert!(denied.to_string().contains("127.0.0.0/8"), "{denied}");
+    }
+    let accepted =
+      tokio::time::timeout(Duration::from_millis(100), listener.accept()).await;
+    assert!(accepted.is_err(), "nothing may connect to a denied address");
+  }
+
+  // A resolver whose answer changes after the first lookup (DNS rebinding).
+  #[derive(Debug)]
+  struct RebindingResolver {
+    first: SocketAddr,
+    later: SocketAddr,
+    calls: std::sync::atomic::AtomicUsize,
+  }
+
+  impl Resolve for RebindingResolver {
+    fn resolve(&self, _name: Name) -> Resolving {
+      let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+      let addr = if n == 0 { self.first } else { self.later };
+      Box::pin(async move { Ok(vec![addr].into_iter()) })
+    }
+  }
+
+  // denext: the connection goes to exactly the addresses that were checked;
+  // no second lookup can rebind the name to a denied one.
+  #[tokio::test]
+  async fn deny_addresses_connect_to_the_checked_addresses_only() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+      let _accepted = listener.accept().await;
+      std::future::pending::<()>().await;
+    });
+    let resolver = Arc::new(RebindingResolver {
+      first: addr,
+      later: "10.0.0.1:1".parse().unwrap(),
+      calls: Default::default(),
+    });
+    let mut connector = PermissionedHttpConnector::new(
+      Resolver::custom(resolver.clone()),
+      None,
+      None,
+      ResolvedDenyCheckKind::Net,
+    )
+    .with_deny_addresses(deny(&["10.0.0.0/8"]));
+    let uri =
+      Uri::from_str(&format!("http://example.com:{}", addr.port())).unwrap();
+    let io = connector.call(uri).await.unwrap();
+    assert_eq!(io.inner().peer_addr().unwrap(), addr);
+    assert_eq!(resolver.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
   }
 
   #[tokio::test]

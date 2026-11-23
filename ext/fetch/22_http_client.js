@@ -7,6 +7,8 @@ const { loadTlsKeyPair } = core.loadExtScript("ext:deno_net/02_tls.js");
 
 const { internalRidSymbol } = core;
 const {
+  ArrayIsArray,
+  ArrayPrototypePush,
   JSONStringify,
   ObjectAssign,
   ObjectDefineProperty,
@@ -102,6 +104,28 @@ function createHttpClient(options) {
       throw new TypeError(
         "Invalid value for 'userAgent' option: expected a string, 'false' or 'null'",
       );
+    }
+  }
+  if (ObjectHasOwn(options, "denyAddresses")) {
+    const denyAddresses = options.denyAddresses;
+    if (denyAddresses === undefined) {
+      delete options.denyAddresses;
+    } else if (!ArrayIsArray(denyAddresses)) {
+      throw new TypeError(
+        "Invalid value for 'denyAddresses' option: expected an array of strings",
+      );
+    } else {
+      const entries = [];
+      for (let i = 0; i < denyAddresses.length; ++i) {
+        const entry = denyAddresses[i];
+        if (typeof entry !== "string") {
+          throw new TypeError(
+            `Invalid value for 'denyAddresses' option: entry ${i} is not a string`,
+          );
+        }
+        ArrayPrototypePush(entries, entry);
+      }
+      options.denyAddresses = entries;
     }
   }
   let cookieJar;

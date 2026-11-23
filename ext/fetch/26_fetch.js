@@ -653,8 +653,13 @@ async function mainFetch(req, recursive, terminator, inspectorCtx = null) {
     // `resp.error` is `[detail, cause]`, where `detail` is the full reqwest
     // message and `cause` is the underlying transport error detail. Mirror
     // Node's shape: `TypeError: "fetch failed"` with the detail in `.cause`.
-    const cause = resp.error[1];
-    throw new TypeError("fetch failed", { cause: new Error(cause) });
+    const cause = new Error(resp.error[1]);
+    // denext: a transport failure with a code of its own
+    // (`ERR_ADDRESS_DENIED`: refused by the client's `denyAddresses`)
+    if (resp.errorCode !== null && resp.errorCode !== undefined) {
+      cause.code = resp.errorCode;
+    }
+    throw new TypeError("fetch failed", { cause });
   }
   if (terminator.aborted) {
     // op_fetch_send resolved successfully, so the FetchResponseResource is already in

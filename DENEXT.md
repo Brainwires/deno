@@ -20095,6 +20095,54 @@ where the changes are discussed.
        leave `dir`, for untrusted names (uploads, archive entries).
      - Node tests enabled: none, because this is a Deno API.
 
+494. **`feat(fetch)`: `Deno.createHttpClient({ denyAddresses })`, a runtime SSRF
+     guard** (`feat/d31-hardening`; runtime; `ext/fetch/deny_addresses.rs`,
+     `ext/fetch/{dns,proxy,lib}.rs`, `ext/fetch/{22_http_client,26_fetch}.js`,
+     `cli/tsc/dts/lib.deno.ns.d.ts`; the new `CreateHttpClientOptions` field in
+     `ext/kv/remote.rs`, `ext/websocket/lib.rs`, `ext/fetch/tests.rs`).
+     - `denyAddresses: string[]` takes CIDR ranges, single addresses (`[::1]`
+       too) and the presets `"loopback"` (`127.0.0.0/8`, `::1`, and `0.0.0.0/8`
+       and `::`, which reach the host), `"private"` (RFC 1918, `100.64.0.0/10`,
+       `fc00::/7`), `"link-local"` (`169.254.0.0/16`, `fe80::/10`) and
+       `"metadata"` (`169.254.169.254`, `fd00:ec2::254`, `100.100.100.200`). An
+       IPv4-mapped address (and a mapped range) is compared as the IPv4 address
+       it carries. Anything else is a `TypeError` from `createHttpClient`.
+     - **Addresses, not names.** `PermissionedHttpConnector` resolves a name
+       itself, refuses when any address is denied, connects only to the
+       addresses it checked (a client with no permissions to check now takes the
+       same pre-resolved path when it has a deny list), and checks the connected
+       socket's `peer_addr()` before a byte is written. DNS rebinding between
+       the check and the connect can't move it; every redirect hop and every
+       happy-eyeballs address goes through the same connector.
+     - **Proxies (the choice).** The hop to the proxy itself is not checked
+       (`CheckDst::for_proxy_hop`): a proxy is configuration, often on loopback.
+       The destination of an HTTP(S) or SOCKS proxy is resolved locally and
+       checked, and a name that doesn't resolve locally is refused (the proxy
+       would go wherever its own lookup leads); a proxy that resolves the name
+       differently is the residual risk, as for item 80's IP denies. A `tcp`,
+       `unix` or `vsock` transport connects to no address by the URL's name, so
+       nothing more is checked.
+     - The error: `fetch()` rejects with `TypeError("fetch failed")` whose
+       `cause.code` is `ERR_ADDRESS_DENIED` (the new `errorCode` of
+       `op_fetch_send`'s response, set when the connector's `AddressDeniedError`
+       is in the error chain); the message names the address and the range.
+     - Tests: unit `fetch_test.ts` `fetchCustomClientDenyAddresses` (a denied
+       literal by range and preset, an allowed address, `localhost` resolving to
+       a denied address, a mapped literal, a redirect to a denied address, an
+       empty list), `fetchCustomClientDenyAddressesThroughAProxy` (the proxy hop
+       on loopback allowed, a denied destination and an unresolvable one refused
+       before the proxy is asked), `createHttpClientDenyAddressesInvalid`;
+       `deny_addresses::tests` (parsing, presets, mapped addresses);
+       `dns::tests::deny_addresses_refuse_a_resolved_address_before_connecting`
+       (nothing connects; with and without permissions) and
+       `deny_addresses_connect_to_the_checked_addresses_only` (a resolver that
+       rebinds after the first lookup is asked once).
+     - User-facing note:
+       `Deno.createHttpClient({ denyAddresses: ["loopback",
+       "private", "link-local", "metadata"] })`
+       makes a client that can't be pointed at internal services.
+     - Node tests enabled: none, because this is a Deno API.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -20105,7 +20153,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 350, 351, 353, 355-361, 363-366, 368-371, 373, 374, 376-381, 386, 387, 388, 389,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
-449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493) are what the
+449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

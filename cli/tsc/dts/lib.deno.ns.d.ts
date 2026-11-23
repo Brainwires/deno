@@ -7267,6 +7267,55 @@ declare namespace Deno {
      *
      * @default {undefined} (the default `Deno/<version>`) */
     userAgent?: string | false | null;
+    /**
+     * **denext extension** (Brainwires/deno, not upstream Deno): IP address
+     * ranges this client never connects to, a guard against server-side
+     * request forgery (a URL from a user that leads to a service inside the
+     * network, or to a cloud metadata endpoint).
+     *
+     * Each entry is a CIDR range (`"10.0.0.0/8"`, `"fc00::/7"`), a single
+     * address (`"192.0.2.1"`, `"::1"`) or a preset:
+     * - `"loopback"`: `127.0.0.0/8`, `::1`, and `0.0.0.0/8` and `::`, which
+     *   reach the host itself on Linux and macOS;
+     * - `"private"`: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
+     *   `100.64.0.0/10` (carrier-grade NAT) and `fc00::/7`;
+     * - `"link-local"`: `169.254.0.0/16` and `fe80::/10`;
+     * - `"metadata"`: `169.254.169.254`, `fd00:ec2::254` and
+     *   `100.100.100.200`.
+     *
+     * ```ts
+     * const client = Deno.createHttpClient({
+     *   denyAddresses: ["loopback", "private", "link-local", "metadata"],
+     * });
+     * await fetch(userSuppliedUrl, { client });
+     * ```
+     *
+     * The check is on the address a connection goes to, never on the name:
+     * the client resolves a name itself, refuses it when any address it
+     * resolves to is denied, connects only to the addresses it checked (so
+     * DNS rebinding between a check and the connect can't move it), and
+     * checks the connected socket's peer address again before sending
+     * anything. It holds for every connection the client makes: each
+     * redirect hop, each address happy eyeballs tries. An IPv4-mapped IPv6
+     * address (`::ffff:127.0.0.1`) is compared as the IPv4 address it
+     * carries.
+     *
+     * Through a proxy (the `proxy` option or `HTTP(S)_PROXY`), the hop to the
+     * proxy itself is not checked (a proxy is configuration, often on a
+     * loopback address). The destination of an HTTP(S) or SOCKS proxy is
+     * resolved locally and checked, and a name that doesn't resolve locally
+     * is refused, since the proxy would go wherever its own lookup leads; a
+     * proxy that resolves the name differently is not caught. A `tcp`,
+     * `unix` or `vsock` transport connects to no address by the URL's name,
+     * so nothing more is checked for it.
+     *
+     * A refused connection fails the `fetch()` with a `TypeError` ("fetch
+     * failed") whose `cause` has `code` `"ERR_ADDRESS_DENIED"`. An entry
+     * that is none of the above throws a `TypeError` here.
+     *
+     * This works on top of `--allow-net` / `--deny-net`, never instead.
+     */
+    denyAddresses?: string[];
   }
 
   /**

@@ -1439,6 +1439,148 @@ Deno.test(
   },
 );
 
+// denext: `Deno.createHttpClient({ denyAddresses })`.
+async function assertAddressDenied(promise: Promise<unknown>) {
+  const err = await assertRejects(() => promise, TypeError, "fetch failed");
+  const cause = (err as TypeError).cause as Error & { code?: string };
+  assertEquals(cause.code, "ERR_ADDRESS_DENIED", String(cause));
+  assertStringIncludes(cause.message, "denyAddresses");
+}
+
+Deno.test(
+  { permissions: { net: true } },
+  async function fetchCustomClientDenyAddresses() {
+    const started = Promise.withResolvers<number>();
+    await using _server = Deno.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      onListen: ({ port }) => started.resolve(port),
+    }, (request) => {
+      const { pathname } = new URL(request.url);
+      if (pathname === "/redirect") {
+        // 127.0.0.2 is refused before anything connects to it
+        return Response.redirect(`http://127.0.0.2:${port}/`, 302);
+      }
+      return new Response("ok");
+    });
+    const port = await started.promise;
+
+    // a denied literal address is refused, by range and by preset
+    for (const denyAddresses of [["127.0.0.0/8"], ["loopback"]]) {
+      using client = Deno.createHttpClient({ denyAddresses });
+      await assertAddressDenied(fetch(`http://127.0.0.1:${port}/`, { client }));
+    }
+
+    // an address outside the ranges connects
+    {
+      using client = Deno.createHttpClient({
+        denyAddresses: ["10.0.0.0/8", "private", "metadata"],
+      });
+      const res = await fetch(`http://127.0.0.1:${port}/`, { client });
+      assertEquals(await res.text(), "ok");
+    }
+
+    // a name that resolves to a denied address is refused: the check is on
+    // the address, not the name
+    {
+      using client = Deno.createHttpClient({ denyAddresses: ["loopback"] });
+      await assertAddressDenied(fetch(`http://localhost:${port}/`, { client }));
+    }
+
+    // an IPv4-mapped IPv6 literal is the IPv4 address it carries
+    {
+      using client = Deno.createHttpClient({ denyAddresses: ["127.0.0.1"] });
+      await assertAddressDenied(
+        fetch(`http://[::ffff:127.0.0.1]:${port}/`, { client }),
+      );
+    }
+
+    // a redirect hop is a new connection, checked as the first one was
+    {
+      using client = Deno.createHttpClient({ denyAddresses: ["127.0.0.2"] });
+      await assertAddressDenied(
+        fetch(`http://127.0.0.1:${port}/redirect`, { client }),
+      );
+      // the same client still reaches the allowed address
+      const res = await fetch(`http://127.0.0.1:${port}/`, { client });
+      assertEquals(await res.text(), "ok");
+    }
+
+    // an empty list denies nothing
+    {
+      using client = Deno.createHttpClient({ denyAddresses: [] });
+      const res = await fetch(`http://127.0.0.1:${port}/`, { client });
+      assertEquals(await res.text(), "ok");
+    }
+  },
+);
+
+Deno.test(
+  { permissions: { net: true } },
+  async function fetchCustomClientDenyAddressesThroughAProxy() {
+    // a forward proxy on loopback: it answers every request itself
+    let proxied = 0;
+    const started = Promise.withResolvers<number>();
+    await using _proxy = Deno.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      onListen: ({ port }) => started.resolve(port),
+    }, () => {
+      proxied++;
+      return new Response("from the proxy");
+    });
+    const proxy = { url: `http://127.0.0.1:${await started.promise}` };
+
+    // the hop to the proxy (on loopback) is not checked; the destination
+    // (a documentation address nothing connects to) is, and passes
+    {
+      using client = Deno.createHttpClient({
+        proxy,
+        denyAddresses: ["loopback"],
+      });
+      const res = await fetch("http://192.0.2.1/", { client });
+      assertEquals(await res.text(), "from the proxy");
+    }
+    {
+      using client = Deno.createHttpClient({
+        proxy,
+        denyAddresses: ["10.0.0.0/8"],
+      });
+      await assertAddressDenied(fetch("http://10.1.2.3/", { client }));
+      // a name that doesn't resolve here can't be checked: refused
+      await assertAddressDenied(
+        fetch("http://denext-deny-addresses.invalid/", { client }),
+      );
+    }
+    assertEquals(proxied, 1);
+  },
+);
+
+Deno.test(function createHttpClientDenyAddressesInvalid() {
+  assertThrows(
+    () => Deno.createHttpClient({ denyAddresses: ["intranet"] }),
+    TypeError,
+    "Invalid entry in 'denyAddresses'",
+  );
+  assertThrows(
+    () => Deno.createHttpClient({ denyAddresses: ["10.0.0.0/33"] }),
+    TypeError,
+    "Invalid entry in 'denyAddresses'",
+  );
+  assertThrows(
+    // deno-lint-ignore no-explicit-any
+    () => Deno.createHttpClient({ denyAddresses: "loopback" as any }),
+    TypeError,
+    "expected an array of strings",
+  );
+  assertThrows(
+    // deno-lint-ignore no-explicit-any
+    () => Deno.createHttpClient({ denyAddresses: [1 as any] }),
+    TypeError,
+    "entry 0 is not a string",
+  );
+});
+
 // Regression test for https://github.com/denoland/deno/issues/29347
 // `Deno.createHttpClient` used to scribble `caCerts` and `proxy.transport`
 // onto the caller's options object, so reusing a single options object

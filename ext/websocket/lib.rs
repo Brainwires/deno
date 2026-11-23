@@ -473,6 +473,7 @@ fn create_client_from_websocket_options(
       client_builder_hook: options.client_builder_hook,
       http2_max_header_list_size: None,
       connect_timeout: None,
+      deny_addresses: None,
     },
   )
 }

@@ -659,6 +659,16 @@ where
       // check against the real destination too, so an IP-level `--deny-net`
       // rule still applies to requests routed through a proxy.
       let check_dst = self.http.check_dst(orig_dst.clone());
+      // denext: `denyAddresses` hold for the destination of an HTTP(S) or
+      // SOCKS proxy (resolved here), never for the hop to the proxy; a
+      // `tcp`, `unix` or `vsock` transport connects to no destination by
+      // the URL's name, so there is nothing more to check for those
+      let check_dst_addresses = match &intercept.target {
+        Target::Http { .. } | Target::Https { .. } | Target::Socks { .. } => {
+          Some(self.http.check_dst_addresses(orig_dst.clone()))
+        }
+        _ => None,
+      };
       let proxying: Self::Future = match intercept.target {
         Target::Http {
           dst: proxy_dst,
@@ -679,8 +689,10 @@ where
           {
             return Box::pin(async move { Err(err) });
           }
-          let mut connector =
-            HttpsConnector::from((self.http.clone(), self.tls_proxy.clone()));
+          let mut connector = HttpsConnector::from((
+            self.http.for_proxy_hop(),
+            self.tls_proxy.clone(),
+          ));
           let connecting = connector.call(proxy_dst);
           let tls = TlsConnector::from(self.tls.clone());
           Box::pin(async move {
@@ -785,8 +797,10 @@ where
           hostname: host,
           port,
         } => {
-          let mut connector =
-            HttpsConnector::from((self.http.clone(), self.tls_proxy.clone()));
+          let mut connector = HttpsConnector::from((
+            self.http.for_proxy_hop(),
+            self.tls_proxy.clone(),
+          ));
           let Ok(uri) = format!("http://{}:{}", host, port).parse() else {
             return Box::pin(async {
               Err("failed to parse tcp proxy uri".into())
@@ -856,6 +870,9 @@ where
       };
       return Box::pin(async move {
         check_dst.await?;
+        if let Some(check_dst_addresses) = check_dst_addresses {
+          check_dst_addresses.await?;
+        }
         proxying.await
       });
     }
