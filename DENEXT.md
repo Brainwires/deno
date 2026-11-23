@@ -20018,6 +20018,70 @@ where the changes are discussed.
        `tools/denext/targeted_test_test.ts` (the dispatcher).
      - Node tests enabled: none, because this is CI only.
 
+5NN. **`feat(desktop)`: the native tree, and the `gpui` backend that hosts it**
+     (runtime and CLI; `runtime/ops/desktop.rs`, `cli/rt/desktop.rs`,
+     `cli/rt_desktop/lib.rs`, `cli/rt_desktop/Cargo.toml`,
+     `runtime/js/99_main.js`, `cli/tsc/dts/lib.deno.desktop.d.ts`,
+     `cli/tools/desktop.rs`, `libs/cli_parser/src/defs.rs`,
+     `cli/schemas/config-file.v1.json`). The B1 plan of thalora-web-browser
+     (`docs/B1_NATIVE_TREE.md` there): a window can host a retained tree of
+     native primitives (View, Text, Image, ScrollView, TextInput, Pressable)
+     that a renderer (denext's `denext/gpui`) mutates in batches, drawn by
+     laufey's new GPUI host instead of a web view. laufey API 61, a
+     backend-generic and additive capability; only `gpui` has it.
+     - `BrowserWindow.nativeTree.commit(batch)` hands one "NTB1" batch (a
+       `Uint8Array`) to `op_desktop_native_tree_commit(windowId, batch)`, then
+       `DesktopApi::native_tree_commit`, then laufey's `NativeTree::commit`.
+       The host copies the batch and applies it whole on its UI thread before
+       the next frame, in commit order. A backend without a tree throws
+       `NotSupported` (also the trait's default and the answer outside a
+       desktop app), a batch that doesn't decode throws a `TypeError` (none of
+       it applied), a closed window `BadResource`.
+     - The host's events (`{"node":id,"type":...}`, JSON) come through the one
+       event queue as `DesktopEvent::NativeTree { window_id, json }`: laufey's
+       `NativeTree::on_event` handler, registered once with the other global
+       handlers. DESKTOP_JS dispatches them as the window's `"nativetree"`
+       `CustomEvent`, the JSON text as its detail, for the renderer to parse.
+       They are always delivered: the host already coalesces scroll and
+       pointer moves to one per frame per node.
+     - `windowCapabilities().nativeTree` is `{ version: 1 }` on a backend with
+       a tree and `null` elsewhere. `Deno.desktop.nativeTree` is a read-only
+       `true`, so denext can tell this runtime from a stock or older one, where
+       it is absent.
+     - `--backend gpui` / `desktop.backend: "gpui"` (the schema enum too). Its
+       host is the plain executable `laufey_gpui[.exe]`, modelled on the
+       winit host, so every backend site treats it as `raw`: archive
+       `laufey-gpui-<target>`, the macOS `.app` made around the bare binary
+       on first use (`create_bare_host_app_bundle`, which now wraps
+       `laufey_winit` too), the co-located `laufey_gpui.dylib` runtime on
+       macOS, `<app>.dll` on Windows, none of CEF's scheme or working-folder
+       environment, and no dev bundle under `LAUFEY_DEV_DIR` (the binary is
+       found in `target/{release,debug}` or `backends/gpui/target/…`). A
+       `.deb` / `.rpm` declares GPUI's own Linux libraries: Vulkan,
+       xkbcommon, xcb, wayland-client, fontconfig and FreeType. These are to
+       be checked against the first `laufey_gpui` build.
+     - Until the laufey pin moves to a Brainwires/laufey rev with API 61
+       (branch `feat/native-tree-gpui`), the laufey calls sit behind
+       `denort_desktop`'s `native-tree` feature, which is off by default.
+       Without it, every backend reports no tree. No Brainwires/laufey
+       release has a `laufey-gpui-*` archive yet (and the CLI refuses the
+       released hosts, `RELEASED_LAUFEY_INCOMPATIBLE`), so a gpui app runs
+       only with `LAUFEY_DEV_DIR`.
+     - User-facing note: `deno desktop --backend gpui` and
+       `BrowserWindow.nativeTree`, for denext's native renderer;
+       feature-probe with `Deno.desktop.nativeTree` and
+       `windowCapabilities().nativeTree`.
+     - Tests: `native_tree_wire_format_and_errors` in
+       `runtime/ops/desktop.rs`; `desktop_js_installs_the_native_tree` in
+       `cli/rt/desktop.rs`; `locate_dev_backend_gpui_paths`,
+       `locate_app_bundle_creates_gpui_bundle` and the gpui cases of
+       `macos_runtime_dylib_name_is_backend_specific`,
+       `archive_name_raw_aliases_to_winit` and the Linux package dependency
+       test in `cli/tools/desktop.rs`; `desktop_backend_gpui` in
+       `libs/cli_parser`; the `desktop_ops_inert` spec (the op throws
+       `NotSupported` outside a desktop app) and `ops_test.ts`'s op count.
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
