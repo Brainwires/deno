@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-import { core } from "ext:core/mod.js";
+import { core, primordials } from "ext:core/mod.js";
 import {
   ImageBitmapRenderingContext,
   OffscreenCanvas,
@@ -12,6 +12,7 @@ import {
 const {
   ObjectDefineProperty,
   ObjectPrototypeIsPrototypeOf,
+  SymbolToStringTag,
 } = primordials;
 const { Blob } = core.loadExtScript("ext:deno_web/09_file.js");
 const { DOMException, DOMExceptionPrototype } = core.loadExtScript(
@@ -44,5 +45,20 @@ core.registerTransferableResource(
 );
 
 op_init_canvas(Blob);
+
+ObjectDefineProperty(ImageBitmapRenderingContext.prototype, SymbolToStringTag, {
+  __proto__: null,
+  value: "ImageBitmapRenderingContext",
+  writable: false,
+  enumerable: false,
+  configurable: true,
+});
+ObjectDefineProperty(OffscreenCanvas.prototype, SymbolToStringTag, {
+  __proto__: null,
+  value: "OffscreenCanvas",
+  writable: false,
+  enumerable: false,
+  configurable: true,
+});
 
 export { ImageBitmapRenderingContext, OffscreenCanvas };
