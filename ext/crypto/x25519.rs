@@ -83,10 +83,10 @@ pub(crate) fn export_spki_x25519(
 }
 
 pub(crate) fn export_pkcs8_x25519(pkey: &[u8]) -> Result<Vec<u8>, X25519Error> {
-  use rsa::pkcs1::der::Encode;
-  let pk_info = rsa::pkcs8::PrivateKeyInfo {
+  use der::Encode;
+  let pk_info = pkcs8::PrivateKeyInfo {
     public_key: None,
-    algorithm: rsa::pkcs8::AlgorithmIdentifierRef {
+    algorithm: pkcs8::AlgorithmIdentifierRef {
       oid: X25519_OID,
       parameters: None,
     },

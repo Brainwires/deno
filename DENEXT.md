@@ -21292,6 +21292,71 @@ where the changes are discussed.
        `the_host_names_its_engine` in `kernel_start.rs`.
      - Node tests enabled: none.
 
+514. **`fix(cli)`: a JSR package's `data:` and `blob:` modules may not import
+     non-JSR remote modules either** (port of denoland/deno#36463, as carried by
+     theende/ende 65a10a7ad1; `cli/module_loader.rs`). The loader refuses an
+     `http(s)` import from a JSR module unless it points at JSR, but it judged
+     that by the immediate referrer's URL alone. A JSR module could import a
+     `data:` or `blob:` module whose own imports then reached any remote URL,
+     sidestepping the rule. The loader now remembers, per loader, the inline
+     modules imported from JSR (and from such inline modules, so a chain of them
+     keeps the mark) and applies the same check to their imports. Self-contained
+     `data:` modules, inline modules from non-JSR code and `import.meta.resolve`
+     behave as before; a resolution-only call does not mark anything.
+     - User-facing note: a JSR package that reached a non-JSR `http(s)` module
+       through a `data:` or `blob:` module now fails with "JSR packages cannot
+       import non-JSR remote modules", as a direct import does.
+     - Tests: `tests/specs/jsr/import_inline_url` (a `data:` hop, a `blob:` hop
+       and a chain of two `data:` modules blocked; benign static and dynamic
+       `data:` imports, non-JSR inline modules and a `data:` URL from
+       `import.meta.resolve` imported by non-JSR code still run), with the
+       `@denotest/import-inline-url` registry fixture.
+     - Node tests enabled: none; no Node API changes.
+
+515. **`fix(deps)`: RUSTSEC-2023-0071 — rsa 0.10, the constant-time rewrite**
+     (`Cargo.toml`, `Cargo.lock`, `.cargo/audit.toml`, `ext/crypto`,
+     `ext/node_crypto`). rsa 0.9's private-key arithmetic (num-bigint-dig) was
+     not constant-time, so the timing of RSA decryption and signing could leak
+     the key (the Marvin attack); WebCrypto RSA-OAEP / RSA-PSS /
+     RSASSA-PKCS1-v1_5 and `node:crypto`'s `privateDecrypt`, `privateEncrypt`,
+     `sign` and RSASVE `decapsulate` all used it, and `.cargo/audit.toml`
+     carried the advisory as an accepted risk. rsa 0.10.0 (2026-11-08) moves to
+     crypto-bigint with constant-time modular exponentiation, blinds every
+     private operation with the OS generator, and decrypts PKCS#1 v1.5 with
+     implicit rejection; the advisory lists `>= 0.10.0` as patched, so the
+     ignore is gone. The migration keeps behaviour as it was:
+     - rsa 0.10 refuses a modulus under 1024 bits when it generates or decodes a
+       public key. WebCrypto and `node:crypto` keep accepting smaller keys (Node
+       generates and uses 512-bit keys): public keys are built with
+       `new_with_size_limits`, generation uses the `hazmat`
+       `new_with_exp_unchecked`. The upper bound is 8192 bits for WebCrypto (rsa
+       0.10's default; rsa 0.9 stopped decoding public keys at 4096, although
+       WebCrypto generated 8192-bit keys) and 16384 bits for `node:crypto`
+       (OpenSSL's limit).
+     - `node:crypto` still parses keys with pkcs8 0.10 / spki 0.7, and rsa 0.10
+       speaks pkcs1 0.8 / pkcs8 0.11 / spki 0.8: `ext/node_crypto/rsa_util.rs`
+       decodes RSA keys from those types with rsa 0.9's rules (`rsaEncryption`
+       with NULL parameters) and errors, and wraps PKCS#1 keys in PKCS#8 / SPKI
+       as pkcs1 0.7 did. WebCrypto's non-RSA key code (X25519, Ed25519, X448,
+       ML-KEM, ML-DSA, SLH-DSA) reached pkcs8 0.10 and der 0.7 through rsa's
+       re-exports and now names them directly.
+     - rsa 0.10's PSS and OAEP schemes take digest 0.11 hashers. WebCrypto uses
+       the 0.11 SHA-1 / SHA-2 / SHA-3 crates; `node:crypto` wraps its digest
+       0.10 hashers (`Digest011`), so OAEP keeps every digest Node takes
+       (BLAKE2, SM3, MD4 and MD5-SHA1 included), and builds the PKCS#1 v1.5
+       DigestInfo prefix from the hasher's OID. OAEP labels are passed as bytes
+       (rsa 0.10 takes any byte string) instead of preloading the label digest.
+     - User-facing note: `crypto.privateDecrypt` with `RSA_PKCS1_PADDING`
+       returns a deterministic synthetic plaintext for a ciphertext with bad
+       padding, as OpenSSL 3.2 and later do for Node, instead of throwing. Keys
+       whose two primes differ in size by more than rsa 0.10's half-modulus
+       bound are refused on decoding.
+     - Tests: `rsa_util.rs`'s `pkcs1v15_prefix_matches_rsa_crate`,
+       `digest011_matches_digest010` and `small_keys_still_decode` (a 512-bit
+       key through every decoder); `tests/unit/webcrypto_test.ts` and the
+       `node_compat` crypto suites unchanged.
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -21303,10 +21368,10 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513) are what the prebuilt `libdenort` carries. The CLI-side
-parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
-packaged app's launchers) are in the branch too, but a stock CLI does not run
-them; denext's own launcher provides that environment.
+506-510, 511, 512, 513, 515) are what the prebuilt `libdenort` carries. The
+CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
+into a packaged app's launchers) are in the branch too, but a stock CLI does not
+run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

@@ -90,10 +90,10 @@ pub(crate) fn export_spki_x448(pubkey: &[u8]) -> Result<Vec<u8>, X448Error> {
 }
 
 pub(crate) fn export_pkcs8_x448(pkey: &[u8]) -> Result<Vec<u8>, X448Error> {
-  use rsa::pkcs1::der::Encode;
-  let pk_info = rsa::pkcs8::PrivateKeyInfo {
+  use der::Encode;
+  let pk_info = pkcs8::PrivateKeyInfo {
     public_key: None,
-    algorithm: rsa::pkcs8::AlgorithmIdentifierRef {
+    algorithm: pkcs8::AlgorithmIdentifierRef {
       oid: X448_OID,
       parameters: None,
     },

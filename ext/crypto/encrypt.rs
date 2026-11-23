@@ -21,8 +21,6 @@ use aws_lc_rs::aead::UnboundKey;
 use ctr::Ctr32BE;
 use ctr::Ctr64BE;
 use ctr::Ctr128BE;
-use rand::rngs::OsRng;
-use rsa::pkcs1::DecodeRsaPublicKey;
 
 use crate::shared::*;
 
@@ -71,12 +69,9 @@ pub(crate) fn encrypt_rsa_oaep(
   data: &[u8],
 ) -> Result<Vec<u8>, EncryptError> {
   let public_key = key.as_rsa_public_key()?;
-  let public_key = rsa::RsaPublicKey::from_pkcs1_der(&public_key)
+  let public_key = rsa_public_key_from_pkcs1_der(&public_key)
     .map_err(|_| SharedError::FailedDecodePublicKey)?;
-  let mut rng = OsRng;
-  let padding = rsa_oaep_padding(hash, &label);
-  let encrypted = public_key
-    .encrypt(&mut rng, padding, data)
+  let encrypted = rsa_oaep_encrypt(&public_key, hash, &label, data)
     .map_err(|_| EncryptError::Failed)?;
   Ok(encrypted)
 }

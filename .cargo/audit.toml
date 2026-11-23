@@ -8,11 +8,6 @@
 
 [advisories]
 ignore = [
-  # rsa 0.9.x: Marvin timing side channel in PKCS#1 v1.5 decryption. No fixed
-  # release exists (upstream Deno carries the same crate). Accepted risk, not
-  # unreachable: WebCrypto RSA-OAEP and node:crypto privateDecrypt use it.
-  # Revisit when rsa 0.10 is released.
-  "RUSTSEC-2023-0071",
   # libz-sys <= 1.1.30 (RUSTSEC-2026-0418): a build-time leak, not runtime
   # code. The system-zlib probe in its build script (`zlib_installed`) prints
   # the compiler command, and cc 1.6.0 or later puts the whole build

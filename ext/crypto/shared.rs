@@ -7,25 +7,17 @@ use deno_core::ToV8;
 use deno_core::convert::Uint8Array;
 use elliptic_curve::sec1::ToSec1Point;
 use p256::pkcs8::DecodePrivateKey;
-use rsa::RsaPrivateKey;
+use rsa::PrivateKey as RsaPrivateKey;
 use rsa::pkcs1::DecodeRsaPrivateKey;
 use rsa::pkcs1::EncodeRsaPublicKey;
 use serde::Deserialize;
 use serde::Serialize;
-use sha1::Sha1;
-use sha2::Digest;
-use sha2::Sha256;
-use sha2::Sha384;
-use sha2::Sha512;
-use sha3::Sha3_256;
-use sha3::Sha3_384;
-use sha3::Sha3_512;
 
 pub const RSA_ENCRYPTION_OID: const_oid::ObjectIdentifier =
   const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1");
 
 /// `id-ecPublicKey` (RFC 5480). Kept on const-oid 0.9 (the `spki` 0.7 /
-/// `pkcs8` 0.10 codec this crate shares with `rsa` 0.9).
+/// `pkcs8` 0.10 codec this crate's key import and export use).
 pub const ID_EC_PUBLIC_KEY_OID: const_oid::ObjectIdentifier =
   const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
 pub const ID_SECP256R1_OID: const_oid::ObjectIdentifier =
@@ -53,31 +45,83 @@ pub enum ShaHash {
   Sha3_512,
 }
 
-fn rsa_oaep_padding_for_digest<D>(label: &[u8]) -> rsa::Oaep
-where
-  D: Digest + sha2::digest::DynDigest + Default + Send + Sync + 'static,
-{
-  let mut digest = D::default();
-  Digest::update(&mut digest, label);
+/// The largest RSA modulus a public key may have, in bits (rsa 0.10's
+/// default; 0.9 stopped decoding public keys at 4096).
+pub(crate) const RSA_MAX_MODULUS_BITS: usize = rsa::PublicKey::MAX_SIZE;
 
-  // `rsa::Oaep` only accepts string labels. Preloading the label bytes into
-  // the label digest and passing an empty label preserves arbitrary bytes.
-  rsa::Oaep {
-    digest: Box::new(digest),
-    mgf_digest: Box::<D>::default(),
-    label: None,
+/// Decodes a PKCS#1 `RSAPublicKey`. rsa 0.10's own decoder refuses a modulus
+/// under 1024 bits; WebCrypto keeps accepting smaller keys, as it did on rsa
+/// 0.9, so the size check here only bounds the modulus from above. Every other
+/// check (an odd modulus, the public exponent's range) is the crate's.
+pub(crate) fn rsa_public_key_from_pkcs1_der(
+  der: &[u8],
+) -> rsa::pkcs1::Result<rsa::PublicKey> {
+  use rsa::pkcs1::der::Decode;
+  let key = rsa::pkcs1::RsaPublicKeyRef::from_der(der)?;
+  let n = rsa::BoxedUint::from_be_slice_vartime(key.modulus.as_bytes());
+  let e = rsa::BoxedUint::from_be_slice_vartime(key.public_exponent.as_bytes());
+  rsa::PublicKey::new_with_size_limits(n, e, 0..=RSA_MAX_MODULUS_BITS)
+    .map_err(|_| rsa::pkcs1::Error::KeyMalformed)
+}
+
+/// RSA-OAEP encryption with `hash` for both the label digest and MGF1.
+/// rsa 0.10's `Oaep` is generic over its digest, so the digest is picked here.
+pub(crate) fn rsa_oaep_encrypt(
+  key: &rsa::PublicKey,
+  hash: ShaHash,
+  label: &[u8],
+  data: &[u8],
+) -> rsa::Result<Vec<u8>> {
+  fn encrypt<D>(
+    key: &rsa::PublicKey,
+    label: &[u8],
+    data: &[u8],
+  ) -> rsa::Result<Vec<u8>>
+  where
+    D: rsa_digest::Digest + rsa_digest::FixedOutputReset,
+  {
+    key.encrypt(
+      &mut rsa_getrandom::SysRng,
+      rsa::Oaep::<D>::new_with_label(label),
+      data,
+    )
+  }
+  match hash {
+    ShaHash::Sha1 => encrypt::<rsa_sha1::Sha1>(key, label, data),
+    ShaHash::Sha256 => encrypt::<rsa_sha2::Sha256>(key, label, data),
+    ShaHash::Sha384 => encrypt::<rsa_sha2::Sha384>(key, label, data),
+    ShaHash::Sha512 => encrypt::<rsa_sha2::Sha512>(key, label, data),
+    ShaHash::Sha3_256 => encrypt::<rsa_sha3::Sha3_256>(key, label, data),
+    ShaHash::Sha3_384 => encrypt::<rsa_sha3::Sha3_384>(key, label, data),
+    ShaHash::Sha3_512 => encrypt::<rsa_sha3::Sha3_512>(key, label, data),
   }
 }
 
-pub(crate) fn rsa_oaep_padding(hash: ShaHash, label: &[u8]) -> rsa::Oaep {
+/// RSA-OAEP decryption, the counterpart of [`rsa_oaep_encrypt`].
+pub(crate) fn rsa_oaep_decrypt(
+  key: &RsaPrivateKey,
+  hash: ShaHash,
+  label: &[u8],
+  data: &[u8],
+) -> rsa::Result<Vec<u8>> {
+  fn decrypt<D>(
+    key: &RsaPrivateKey,
+    label: &[u8],
+    data: &[u8],
+  ) -> rsa::Result<Vec<u8>>
+  where
+    D: rsa_digest::Digest + rsa_digest::FixedOutputReset,
+  {
+    key.decrypt(rsa::Oaep::<D>::new_with_label(label), data)
+  }
   match hash {
-    ShaHash::Sha1 => rsa_oaep_padding_for_digest::<Sha1>(label),
-    ShaHash::Sha256 => rsa_oaep_padding_for_digest::<Sha256>(label),
-    ShaHash::Sha384 => rsa_oaep_padding_for_digest::<Sha384>(label),
-    ShaHash::Sha512 => rsa_oaep_padding_for_digest::<Sha512>(label),
-    ShaHash::Sha3_256 => rsa_oaep_padding_for_digest::<Sha3_256>(label),
-    ShaHash::Sha3_384 => rsa_oaep_padding_for_digest::<Sha3_384>(label),
-    ShaHash::Sha3_512 => rsa_oaep_padding_for_digest::<Sha3_512>(label),
+    ShaHash::Sha1 => decrypt::<rsa_sha1::Sha1>(key, label, data),
+    ShaHash::Sha256 => decrypt::<rsa_sha2::Sha256>(key, label, data),
+    ShaHash::Sha384 => decrypt::<rsa_sha2::Sha384>(key, label, data),
+    ShaHash::Sha512 => decrypt::<rsa_sha2::Sha512>(key, label, data),
+    ShaHash::Sha3_256 => decrypt::<rsa_sha3::Sha3_256>(key, label, data),
+    ShaHash::Sha3_384 => decrypt::<rsa_sha3::Sha3_384>(key, label, data),
+    ShaHash::Sha3_512 => decrypt::<rsa_sha3::Sha3_512>(key, label, data),
   }
 }
 

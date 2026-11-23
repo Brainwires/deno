@@ -4,10 +4,9 @@ use aws_lc_rs::rand::SecureRandom;
 use aws_lc_rs::signature::EcdsaKeyPair;
 use elliptic_curve::Generate as _;
 use elliptic_curve::pkcs8::EncodePrivateKey;
-use num_traits::FromPrimitive;
 use once_cell::sync::Lazy;
-use rsa::BigUint;
-use rsa::RsaPrivateKey;
+use rsa::BoxedUint;
+use rsa::PrivateKey as RsaPrivateKey;
 use rsa::pkcs1::EncodeRsaPrivateKey;
 
 use crate::shared::*;
@@ -41,10 +40,9 @@ pub enum GenerateKeyError {
 }
 
 // Allowlist for RSA public exponents.
-static PUB_EXPONENT_1: Lazy<BigUint> =
-  Lazy::new(|| BigUint::from_u64(3).unwrap());
-static PUB_EXPONENT_2: Lazy<BigUint> =
-  Lazy::new(|| BigUint::from_u64(65537).unwrap());
+static PUB_EXPONENT_1: Lazy<BoxedUint> = Lazy::new(|| BoxedUint::from(3u64));
+static PUB_EXPONENT_2: Lazy<BoxedUint> =
+  Lazy::new(|| BoxedUint::from(65537u64));
 
 /// Rust-callable view of the RSA keygen path. Returns raw PKCS#1 DER
 /// bytes ready to feed [`crate::shared::RawKeyData::Private`].
@@ -79,7 +77,7 @@ fn generate_key_rsa(
   modulus_length: u32,
   public_exponent: &[u8],
 ) -> Result<Vec<u8>, GenerateKeyError> {
-  let exponent = BigUint::from_bytes_be(public_exponent);
+  let exponent = BoxedUint::from_be_slice_vartime(public_exponent);
   if exponent != *PUB_EXPONENT_1 && exponent != *PUB_EXPONENT_2 {
     return Err(GenerateKeyError::BadPublicExponent);
   }
@@ -87,9 +85,14 @@ fn generate_key_rsa(
   let private_key = match generate_rsa_aws_lc(modulus_length, &exponent) {
     Some(key) => key,
     None => {
-      let mut rng = rand::rngs::OsRng;
-      RsaPrivateKey::new_with_exp(&mut rng, modulus_length as usize, &exponent)
-        .map_err(|_| GenerateKeyError::FailedRSAKeyGeneration)?
+      // The unchecked constructor: rsa 0.10 refuses to generate a modulus
+      // under 1024 bits, which WebCrypto allowed on rsa 0.9.
+      RsaPrivateKey::new_with_exp_unchecked(
+        &mut rsa_getrandom::SysRng,
+        modulus_length as usize,
+        exponent,
+      )
+      .map_err(|_| GenerateKeyError::FailedRSAKeyGeneration)?
     }
   };
 
@@ -107,7 +110,7 @@ fn generate_key_rsa(
 /// so export, sign, encrypt and JWK use it as before.
 fn generate_rsa_aws_lc(
   modulus_length: u32,
-  exponent: &BigUint,
+  exponent: &BoxedUint,
 ) -> Option<RsaPrivateKey> {
   use aws_lc_rs::encoding::AsDer;
   use aws_lc_rs::rsa::KeySize;
@@ -127,8 +130,7 @@ fn generate_rsa_aws_lc(
   let pair = aws_lc_rs::rsa::KeyPair::generate(size).ok()?;
   let der = pair.as_der().ok()?;
   let key = RsaPrivateKey::from_pkcs8_der(der.as_ref()).ok()?;
-  (key.e() == exponent && key.n().bits() == modulus_length as usize)
-    .then_some(key)
+  (key.e() == exponent && key.n().bit_width() == modulus_length).then_some(key)
 }
 
 fn generate_key_ec_p521() -> Result<Vec<u8>, GenerateKeyError> {

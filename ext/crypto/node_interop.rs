@@ -223,8 +223,8 @@ fn export_okp_pkcs8(
   oid: &const_oid::ObjectIdentifier,
   inner_len_byte: u8,
 ) -> Result<Vec<u8>, CryptoError> {
-  use rsa::pkcs8 as pk8;
-  use rsa::pkcs8::der::Encode;
+  use der::Encode;
+  use pkcs8 as pk8;
   // CurvePrivateKey ::= OCTET STRING. The PKCS#8 wrapper provides:
   //   [0x04, inner_len, ...raw bytes].
   let inner_len = raw.bytes().len() as u8;

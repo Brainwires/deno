@@ -77,12 +77,8 @@ pub(crate) fn decrypt_rsa_oaep(
 ) -> Result<Vec<u8>, DecryptError> {
   let key = key.as_rsa_private_key()?;
 
-  let private_key = rsa::RsaPrivateKey::from_pkcs1_der(key)?;
-  let padding = rsa_oaep_padding(hash, &label);
-
-  private_key
-    .decrypt(padding, data)
-    .map_err(DecryptError::Rsa)
+  let private_key = rsa::PrivateKey::from_pkcs1_der(key)?;
+  rsa_oaep_decrypt(&private_key, hash, &label, data).map_err(DecryptError::Rsa)
 }
 
 pub(crate) fn decrypt_aes_cbc(

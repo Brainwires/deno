@@ -131,8 +131,8 @@ enum Pkcs8Inner {
 /// for anything that is not a well-formed `ML-DSA-PrivateKey` CHOICE; the
 /// caller then defers to aws-lc for authoritative validation.
 fn classify_pkcs8_inner(pkcs8: &[u8]) -> Option<Pkcs8Inner> {
-  use rsa::pkcs1::der::Decode;
-  let pk_info = rsa::pkcs8::PrivateKeyInfo::from_der(pkcs8).ok()?;
+  use der::Decode;
+  let pk_info = pkcs8::PrivateKeyInfo::from_der(pkcs8).ok()?;
   let inner = pk_info.private_key;
   match inner.first().copied()? {
     // `seed [0] IMPLICIT OCTET STRING (SIZE(32))`. aws-lc emits the primitive
@@ -170,8 +170,8 @@ fn classify_pkcs8_inner(pkcs8: &[u8]) -> Option<Pkcs8Inner> {
 /// 32-byte seed, otherwise `None`. Used to recover the seed for
 /// round-tripping; signing and verifying still work without it.
 fn extract_seed_from_pkcs8(pkcs8: &[u8]) -> Option<Vec<u8>> {
-  use rsa::pkcs1::der::Decode;
-  let pk_info = rsa::pkcs8::PrivateKeyInfo::from_der(pkcs8).ok()?;
+  use der::Decode;
+  let pk_info = pkcs8::PrivateKeyInfo::from_der(pkcs8).ok()?;
   let inner = pk_info.private_key;
   // Case 1: `seed [0] IMPLICIT OCTET STRING` -> primitive tag 0x80 (the form
   // aws-lc emits, like ML-KEM); tolerate the constructed 0xA0 too.

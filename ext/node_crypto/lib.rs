@@ -33,17 +33,13 @@ use rand::Rng;
 use rand::distributions::Distribution;
 use rand::distributions::Uniform;
 use rand::rngs::StdRng;
-use rsa::Oaep;
 use rsa::Pkcs1v15Encrypt;
-use rsa::RsaPrivateKey;
-use rsa::RsaPublicKey;
+use rsa::PrivateKey as RsaPrivateKey;
+use rsa::PublicKey as RsaPublicKey;
 use rsa::hazmat::rsa_decrypt_and_check;
 use rsa::hazmat::rsa_encrypt;
-use rsa::pkcs1::DecodeRsaPrivateKey;
-use rsa::pkcs1::DecodeRsaPublicKey;
-use rsa::pkcs8::DecodePrivateKey;
-use rsa::pkcs8::DecodePublicKey;
 use rsa::traits::PublicKeyParts;
+use rsa_util::Digest011;
 
 pub mod argon2_kdf;
 pub mod brainpool;
@@ -58,6 +54,7 @@ pub(crate) mod md5_sha1;
 pub(crate) mod pkcs3;
 pub mod pqc;
 pub(crate) mod primes;
+mod rsa_util;
 pub mod sign;
 pub mod x509;
 
@@ -399,23 +396,119 @@ fn pkcs1v15_type1_unpad(
   Ok(em[sep + 1..].to_vec())
 }
 
-fn create_oaep(
+/// The OAEP digest named `hash` (SHA-1 by default), for both the label
+/// digest and MGF1, as Node uses it.
+macro_rules! with_oaep_digest {
+  ($hash:expr, fn <$type:ident>() $body:block) => {{
+    let hash = $hash.unwrap_or("sha1");
+    digest::match_fixed_digest!(hash, fn <OaepDigest010>() {
+      type $type = Digest011<OaepDigest010>;
+      $body
+    }, _ => {
+      return Err(PrivateEncryptDecryptError::InvalidDigest);
+    })
+  }};
+}
+
+/// RSA-OAEP encryption with the public half of a key.
+fn oaep_encrypt(
+  key: &RsaPublicKey,
   hash: Option<&str>,
   label: Option<&[u8]>,
-) -> Result<Oaep, PrivateEncryptDecryptError> {
-  let hash = hash.unwrap_or("sha1");
-  let mut oaep = digest::match_fixed_digest!(hash, fn <D>() {
-    Oaep::new::<D>()
-  }, _ => {
-    return Err(PrivateEncryptDecryptError::InvalidDigest);
-  });
-  if let Some(label) = label {
-    // The rsa crate stores the label as String but only uses
-    // .as_bytes() on it, so the UTF-8 invariant is not relied upon.
-    // SAFETY: label bytes are only ever hashed, never interpreted as text.
-    oaep.label = Some(unsafe { String::from_utf8_unchecked(label.to_vec()) });
-  }
-  Ok(oaep)
+  msg: &[u8],
+) -> Result<Vec<u8>, PrivateEncryptDecryptError> {
+  let label = label.unwrap_or_default();
+  let encrypted = with_oaep_digest!(hash, fn <D>() {
+    key.encrypt(
+      &mut rsa_getrandom::SysRng,
+      rsa::Oaep::<D>::new_with_label(label),
+      msg,
+    )
+  })?;
+  Ok(encrypted)
+}
+
+/// RSA-OAEP decryption.
+fn oaep_decrypt(
+  key: &RsaPrivateKey,
+  hash: Option<&str>,
+  label: Option<&[u8]>,
+  msg: &[u8],
+) -> Result<Vec<u8>, PrivateEncryptDecryptError> {
+  let label = label.unwrap_or_default();
+  with_oaep_digest!(hash, fn <D>() {
+    key.decrypt(rsa::Oaep::<D>::new_with_label(label), msg)
+  })
+  .map_err(|_| PrivateEncryptDecryptError::OaepDecodingError)
+}
+
+/// Decodes the private key of `op_node_private_encrypt` /
+/// `op_node_private_decrypt`: PKCS#8 or PKCS#1, PEM or DER.
+fn rsa_private_key_from_pem_or_der(
+  key: &[u8],
+) -> Result<RsaPrivateKey, PrivateEncryptDecryptError> {
+  Ok(match std::str::from_utf8(key) {
+    Ok(pem) => rsa_util::private_key_from_pkcs8_pem(pem)
+      .or_else(|_| rsa_util::private_key_from_pkcs1_pem(pem))?,
+    Err(_) => rsa_util::private_key_from_pkcs8_der(key)
+      .or_else(|_| rsa_util::private_key_from_pkcs1_der(key))?,
+  })
+}
+
+/// Decodes the key of `op_node_public_encrypt` / `op_node_public_decrypt`:
+/// an SPKI or PKCS#1 public key, the public half of a PKCS#8 or PKCS#1
+/// private key, or (PEM only) a certificate's key.
+fn rsa_public_key_from_pem_or_der(
+  key: &[u8],
+) -> Result<RsaPublicKey, PrivateEncryptDecryptError> {
+  Ok(match std::str::from_utf8(key) {
+    Ok(pem) => rsa_util::public_key_from_spki_pem(pem)
+      .or_else(|_| rsa_util::public_key_from_pkcs1_pem(pem))
+      .map_err(pkcs8::Error::from)
+      .or_else(|_| {
+        rsa_util::private_key_from_pkcs8_pem(pem)
+          .or_else(|_| rsa_util::private_key_from_pkcs1_pem(pem))
+          .map(|k| k.to_public_key())
+      })
+      .or_else(|_| rsa_pub_key_from_cert_pem(pem))
+      .map_err(|e| PrivateEncryptDecryptError::Spki(e.into()))?,
+    Err(_) => rsa_util::public_key_from_spki_der(key)
+      .or_else(|_| {
+        rsa_util::public_key_from_pkcs1_der(key)
+          .map_err(|_| spki::Error::KeyMalformed)
+      })
+      .or_else(|_| {
+        rsa_util::private_key_from_pkcs8_der(key)
+          .or_else(|_| rsa_util::private_key_from_pkcs1_der(key))
+          .map(|k| k.to_public_key())
+          .map_err(spki::Error::from)
+      })?,
+  })
+}
+
+/// The raw RSA private-key operation on a big-endian integer, padded to the
+/// key size.
+fn rsa_raw_private(
+  key: &RsaPrivateKey,
+  input: &[u8],
+) -> Result<Vec<u8>, PrivateEncryptDecryptError> {
+  let int = rsa::BoxedUint::from_be_slice(input, key.n_bits_precision())
+    .map_err(|_| rsa::Error::Decryption)?;
+  let result =
+    rsa_decrypt_and_check(key, Some(&mut rsa_getrandom::SysRng), &int)?;
+  Ok(rsa_util::uint_to_be_bytes_padded(&result, key.size()))
+}
+
+/// The raw RSA public-key operation on a big-endian integer, padded to the
+/// key size.
+fn rsa_raw_public(
+  key: &RsaPublicKey,
+  input: &[u8],
+) -> Result<Vec<u8>, PrivateEncryptDecryptError> {
+  let int = rsa::BoxedUint::from_be_slice(input, key.n_bits_precision())
+    .map_err(|_| rsa::Error::Decryption)?;
+  let result = rsa_encrypt(key, &int)?;
+  Ok(rsa_util::uint_to_be_bytes_padded(&result, key.size()))
 }
 
 #[op2]
@@ -426,34 +519,24 @@ pub fn op_node_private_encrypt(
   #[string] oaep_hash: Option<String>,
   #[serde] oaep_label: Option<JsBuffer>,
 ) -> Result<Uint8Array, PrivateEncryptDecryptError> {
-  let key = match std::str::from_utf8(&key) {
-    Ok(pem) => RsaPrivateKey::from_pkcs8_pem(pem)
-      .or_else(|_| rsa::pkcs1::DecodeRsaPrivateKey::from_pkcs1_pem(pem))
-      .map_err(|e| PrivateEncryptDecryptError::Pkcs8(e.into()))?,
-    Err(_) => RsaPrivateKey::from_pkcs8_der(&key).or_else(|_| {
-      RsaPrivateKey::from_pkcs1_der(&key).map_err(pkcs8::Error::from)
-    })?,
-  };
+  let key = rsa_private_key_from_pem_or_der(&key)?;
 
   let k = key.size();
-  let mut rng = rand::thread_rng();
   match padding {
     1 => {
       // PKCS1 type 1 padding + raw RSA private key operation
       let em = pkcs1v15_type1_pad(&msg, k)?;
-      let int = num_bigint_dig::BigUint::from_bytes_be(&em);
-      let result = rsa_decrypt_and_check(&key, Some(&mut rng), &int)?;
-      let mut result_bytes = result.to_bytes_be();
-      // Left-pad with zeros to key size
-      while result_bytes.len() < k {
-        result_bytes.insert(0, 0);
-      }
-      Ok(result_bytes.into())
+      Ok(rsa_raw_private(&key, &em)?.into())
     }
-    4 => {
-      let oaep = create_oaep(oaep_hash.as_deref(), oaep_label.as_deref())?;
-      Ok(key.as_ref().encrypt(&mut rng, oaep, &msg)?.into())
-    }
+    4 => Ok(
+      oaep_encrypt(
+        key.as_ref(),
+        oaep_hash.as_deref(),
+        oaep_label.as_deref(),
+        &msg,
+      )?
+      .into(),
+    ),
     _ => Err(PrivateEncryptDecryptError::UnknownPadding),
   }
 }
@@ -466,45 +549,27 @@ pub fn op_node_private_decrypt(
   #[string] oaep_hash: Option<String>,
   #[serde] oaep_label: Option<JsBuffer>,
 ) -> Result<Uint8Array, PrivateEncryptDecryptError> {
-  let key = match std::str::from_utf8(&key) {
-    Ok(pem) => {
-      if pem.contains("Proc-Type: 4,ENCRYPTED")
-        || pem
-          .trim_start()
-          .starts_with("-----BEGIN ENCRYPTED PRIVATE KEY-----")
-      {
-        return Err(PrivateEncryptDecryptError::EncryptedKeyRequiresPassphrase);
-      }
-      RsaPrivateKey::from_pkcs8_pem(pem)
-        .or_else(|_| rsa::pkcs1::DecodeRsaPrivateKey::from_pkcs1_pem(pem))
-        .map_err(|e| PrivateEncryptDecryptError::Pkcs8(e.into()))?
-    }
-    Err(_) => RsaPrivateKey::from_pkcs8_der(&key).or_else(|_| {
-      RsaPrivateKey::from_pkcs1_der(&key).map_err(pkcs8::Error::from)
-    })?,
-  };
+  if let Ok(pem) = std::str::from_utf8(&key)
+    && (pem.contains("Proc-Type: 4,ENCRYPTED")
+      || pem
+        .trim_start()
+        .starts_with("-----BEGIN ENCRYPTED PRIVATE KEY-----"))
+  {
+    return Err(PrivateEncryptDecryptError::EncryptedKeyRequiresPassphrase);
+  }
+  let key = rsa_private_key_from_pem_or_der(&key)?;
 
-  let k = key.size();
-  let mut rng = rand::thread_rng();
   match padding {
+    // rsa 0.10 decrypts PKCS#1 v1.5 with implicit rejection: a ciphertext
+    // with bad padding yields a deterministic synthetic plaintext, not an
+    // error, as OpenSSL 3.2 and later do for Node.
     1 => Ok(key.decrypt(Pkcs1v15Encrypt, &msg)?.into()),
-    3 => {
-      // RSA_NO_PADDING: raw private-key exponentiation
-      let int = BigUint::from_bytes_be(&msg);
-      let result = rsa_decrypt_and_check(&key, Some(&mut rng), &int)?;
-      let mut result_bytes = result.to_bytes_be();
-      while result_bytes.len() < k {
-        result_bytes.insert(0, 0);
-      }
-      Ok(result_bytes.into())
-    }
-    4 => {
-      let oaep = create_oaep(oaep_hash.as_deref(), oaep_label.as_deref())?;
-      key
-        .decrypt(oaep, &msg)
-        .map(|v| v.into())
-        .map_err(|_| PrivateEncryptDecryptError::OaepDecodingError)
-    }
+    // RSA_NO_PADDING: raw private-key exponentiation
+    3 => Ok(rsa_raw_private(&key, &msg)?.into()),
+    4 => Ok(
+      oaep_decrypt(&key, oaep_hash.as_deref(), oaep_label.as_deref(), &msg)?
+        .into(),
+    ),
     _ => Err(PrivateEncryptDecryptError::UnknownPadding),
   }
 }
@@ -519,7 +584,7 @@ fn rsa_pub_key_from_cert_pem(pem: &str) -> Result<RsaPublicKey, pkcs8::Error> {
         .map_err(|_| pkcs8::Error::KeyMalformed)?;
     cert.tbs_certificate.subject_pki.raw.to_vec()
   };
-  RsaPublicKey::from_public_key_der(&spki_der)
+  rsa_util::public_key_from_spki_der(&spki_der)
     .map_err(|_| pkcs8::Error::KeyMalformed)
 }
 
@@ -527,7 +592,10 @@ fn rsa_pub_key_from_cert_pem(pem: &str) -> Result<RsaPublicKey, pkcs8::Error> {
 pub fn op_node_validate_oaep_hash(
   #[string] hash: &str,
 ) -> Result<(), PrivateEncryptDecryptError> {
-  create_oaep(Some(hash), None).map(|_| ())
+  with_oaep_digest!(Some(hash), fn <D>() {
+    let _ = std::marker::PhantomData::<D>;
+  });
+  Ok(())
 }
 
 #[op2]
@@ -538,54 +606,22 @@ pub fn op_node_public_encrypt(
   #[string] oaep_hash: Option<String>,
   #[serde] oaep_label: Option<JsBuffer>,
 ) -> Result<Uint8Array, PrivateEncryptDecryptError> {
-  let key = match std::str::from_utf8(&key) {
-    Ok(pem) => RsaPublicKey::from_public_key_pem(pem)
-      .or_else(|_| rsa::pkcs1::DecodeRsaPublicKey::from_pkcs1_pem(pem))
-      .or_else(|_| {
-        RsaPrivateKey::from_pkcs8_pem(pem)
-          .or_else(|_| {
-            rsa::pkcs1::DecodeRsaPrivateKey::from_pkcs1_pem(pem)
-              .map_err(pkcs8::Error::from)
-          })
-          .map(|k| k.to_public_key())
-      })
-      .or_else(|_| rsa_pub_key_from_cert_pem(pem))
-      .map_err(|e| PrivateEncryptDecryptError::Spki(e.into()))?,
-    Err(_) => RsaPublicKey::from_public_key_der(&key)
-      .or_else(|_| {
-        RsaPublicKey::from_pkcs1_der(&key).map_err(spki::Error::from)
-      })
-      .or_else(|_| {
-        RsaPrivateKey::from_pkcs8_der(&key)
-          .or_else(|_| {
-            RsaPrivateKey::from_pkcs1_der(&key).map_err(pkcs8::Error::from)
-          })
-          .map(|k| k.to_public_key())
-          .map_err(spki::Error::from)
-      })?,
-  };
+  let key = rsa_public_key_from_pem_or_der(&key)?;
 
   let k = key.size();
-  let mut rng = rand::thread_rng();
   match padding {
-    1 => Ok(key.encrypt(&mut rng, Pkcs1v15Encrypt, &msg)?.into()),
+    1 => Ok(key.pkcs1v15_encrypt(&msg)?.into()),
     3 => {
       // RSA_NO_PADDING: raw public-key exponentiation, zero-pad input to key size
       let mut padded = vec![0u8; k];
       let copy_len = msg.len().min(k);
       padded[k - copy_len..].copy_from_slice(&msg[msg.len() - copy_len..]);
-      let int = BigUint::from_bytes_be(&padded);
-      let result = rsa_encrypt(&key, &int)?;
-      let mut result_bytes = result.to_bytes_be();
-      while result_bytes.len() < k {
-        result_bytes.insert(0, 0);
-      }
-      Ok(result_bytes.into())
+      Ok(rsa_raw_public(&key, &padded)?.into())
     }
-    4 => {
-      let oaep = create_oaep(oaep_hash.as_deref(), oaep_label.as_deref())?;
-      Ok(key.encrypt(&mut rng, oaep, &msg)?.into())
-    }
+    4 => Ok(
+      oaep_encrypt(&key, oaep_hash.as_deref(), oaep_label.as_deref(), &msg)?
+        .into(),
+    ),
     _ => Err(PrivateEncryptDecryptError::UnknownPadding),
   }
 }
@@ -596,44 +632,13 @@ pub fn op_node_public_decrypt(
   #[serde] msg: StringOrBuffer,
   #[smi] padding: u32,
 ) -> Result<Uint8Array, PrivateEncryptDecryptError> {
-  let key = match std::str::from_utf8(&key) {
-    Ok(pem) => RsaPublicKey::from_public_key_pem(pem)
-      .or_else(|_| rsa::pkcs1::DecodeRsaPublicKey::from_pkcs1_pem(pem))
-      .or_else(|_| {
-        RsaPrivateKey::from_pkcs8_pem(pem)
-          .or_else(|_| {
-            rsa::pkcs1::DecodeRsaPrivateKey::from_pkcs1_pem(pem)
-              .map_err(pkcs8::Error::from)
-          })
-          .map(|k| k.to_public_key())
-      })
-      .or_else(|_| rsa_pub_key_from_cert_pem(pem))
-      .map_err(|e| PrivateEncryptDecryptError::Spki(e.into()))?,
-    Err(_) => RsaPublicKey::from_public_key_der(&key)
-      .or_else(|_| {
-        RsaPublicKey::from_pkcs1_der(&key).map_err(spki::Error::from)
-      })
-      .or_else(|_| {
-        RsaPrivateKey::from_pkcs8_der(&key)
-          .or_else(|_| {
-            RsaPrivateKey::from_pkcs1_der(&key).map_err(pkcs8::Error::from)
-          })
-          .map(|k| k.to_public_key())
-          .map_err(spki::Error::from)
-      })?,
-  };
+  let key = rsa_public_key_from_pem_or_der(&key)?;
 
   let k = key.size();
   match padding {
     1 => {
       // Raw RSA with public key, then remove PKCS1 type 1 padding
-      let int = num_bigint_dig::BigUint::from_bytes_be(&msg);
-      let result = rsa_encrypt(&key, &int)?;
-      let mut em = result.to_bytes_be();
-      // Left-pad with zeros to key size
-      while em.len() < k {
-        em.insert(0, 0);
-      }
+      let em = rsa_raw_public(&key, &msg)?;
       Ok(pkcs1v15_type1_unpad(&em, k)?.into())
     }
     4 => {

@@ -21,6 +21,7 @@ use yoke::Yoke;
 use yoke::Yokeable;
 
 use crate::keys::KeyObjectHandle;
+use crate::rsa_util::Digest011;
 
 enum CertificateSources {
   Der(Box<[u8]>),
@@ -1167,16 +1168,28 @@ pub enum X509VerifyError {
   UnsupportedEcCurve,
 }
 
+/// Verify an RSASSA-PKCS1-v1_5 signature over `tbs` hashed with `D`.
+fn verify_rsa_pkcs1v15<D>(key: &rsa::PublicKey, tbs: &[u8], sig: &[u8]) -> bool
+where
+  D: digest::Digest + const_oid::AssociatedOid,
+{
+  key
+    .verify(
+      crate::rsa_util::pkcs1v15_sign_scheme::<D>(),
+      &D::digest(tbs),
+      sig,
+    )
+    .is_ok()
+}
+
 /// Verify an RSA-PSS signature. Parses the hash algorithm from the
 /// RSASSA-PSS-params in the certificate's signature algorithm.
 fn verify_rsa_pss(
-  rsa_key: &rsa::RsaPublicKey,
+  rsa_key: &rsa::PublicKey,
   sig_alg: &x509_parser::x509::AlgorithmIdentifier,
   tbs_raw: &[u8],
   sig_value: &[u8],
 ) -> Result<bool, X509VerifyError> {
-  use rsa::signature::Verifier;
-
   // Parse the hash algorithm OID from the RSA-PSS parameters.
   // RSASSA-PSS-params ::= SEQUENCE {
   //   hashAlgorithm [0] AlgorithmIdentifier DEFAULT sha1,
@@ -1207,32 +1220,28 @@ fn verify_rsa_pss(
 
   let hash_alg = hash_oid.as_deref().unwrap_or("1.3.14.3.2.26"); // SHA-1 default
 
-  let sig = rsa::pss::Signature::try_from(sig_value)
-    .map_err(|_| X509VerifyError::ParseFailed)?;
+  fn verify<D>(key: &rsa::PublicKey, tbs: &[u8], sig: &[u8]) -> bool
+  where
+    D: digest::FixedOutputReset + Default,
+    D::OutputSize: rsa_digest::array::ArraySize,
+  {
+    key.pss_verify::<Digest011<D>>(tbs, sig).is_ok()
+  }
 
   let result = match hash_alg {
     // id-sha1
-    "1.3.14.3.2.26" => {
-      let verifier = rsa::pss::VerifyingKey::<sha1::Sha1>::new(rsa_key.clone());
-      verifier.verify(tbs_raw, &sig).is_ok()
-    }
+    "1.3.14.3.2.26" => verify::<sha1::Sha1>(rsa_key, tbs_raw, sig_value),
     // id-sha256
     "2.16.840.1.101.3.4.2.1" => {
-      let verifier =
-        rsa::pss::VerifyingKey::<sha2::Sha256>::new(rsa_key.clone());
-      verifier.verify(tbs_raw, &sig).is_ok()
+      verify::<sha2::Sha256>(rsa_key, tbs_raw, sig_value)
     }
     // id-sha384
     "2.16.840.1.101.3.4.2.2" => {
-      let verifier =
-        rsa::pss::VerifyingKey::<sha2::Sha384>::new(rsa_key.clone());
-      verifier.verify(tbs_raw, &sig).is_ok()
+      verify::<sha2::Sha384>(rsa_key, tbs_raw, sig_value)
     }
     // id-sha512
     "2.16.840.1.101.3.4.2.3" => {
-      let verifier =
-        rsa::pss::VerifyingKey::<sha2::Sha512>::new(rsa_key.clone());
-      verifier.verify(tbs_raw, &sig).is_ok()
+      verify::<sha2::Sha512>(rsa_key, tbs_raw, sig_value)
     }
     _ => false,
   };
@@ -1265,40 +1274,22 @@ pub fn op_node_x509_verify(
   // Verify based on key type and signature algorithm
   match &*public_key {
     AsymmetricPublicKey::Rsa(rsa_key) => {
-      use rsa::signature::Verifier;
-
       let result = match sig_alg_oid.as_str() {
         // sha1WithRSAEncryption
         "1.2.840.113549.1.1.5" => {
-          let verifier =
-            rsa::pkcs1v15::VerifyingKey::<sha1::Sha1>::new(rsa_key.clone());
-          let sig = rsa::pkcs1v15::Signature::try_from(sig_value)
-            .map_err(|_| X509VerifyError::ParseFailed)?;
-          verifier.verify(tbs_raw, &sig).is_ok()
+          verify_rsa_pkcs1v15::<sha1::Sha1>(rsa_key, tbs_raw, sig_value)
         }
         // sha256WithRSAEncryption
         "1.2.840.113549.1.1.11" => {
-          let verifier =
-            rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new(rsa_key.clone());
-          let sig = rsa::pkcs1v15::Signature::try_from(sig_value)
-            .map_err(|_| X509VerifyError::ParseFailed)?;
-          verifier.verify(tbs_raw, &sig).is_ok()
+          verify_rsa_pkcs1v15::<sha2::Sha256>(rsa_key, tbs_raw, sig_value)
         }
         // sha384WithRSAEncryption
         "1.2.840.113549.1.1.12" => {
-          let verifier =
-            rsa::pkcs1v15::VerifyingKey::<sha2::Sha384>::new(rsa_key.clone());
-          let sig = rsa::pkcs1v15::Signature::try_from(sig_value)
-            .map_err(|_| X509VerifyError::ParseFailed)?;
-          verifier.verify(tbs_raw, &sig).is_ok()
+          verify_rsa_pkcs1v15::<sha2::Sha384>(rsa_key, tbs_raw, sig_value)
         }
         // sha512WithRSAEncryption
         "1.2.840.113549.1.1.13" => {
-          let verifier =
-            rsa::pkcs1v15::VerifyingKey::<sha2::Sha512>::new(rsa_key.clone());
-          let sig = rsa::pkcs1v15::Signature::try_from(sig_value)
-            .map_err(|_| X509VerifyError::ParseFailed)?;
-          verifier.verify(tbs_raw, &sig).is_ok()
+          verify_rsa_pkcs1v15::<sha2::Sha512>(rsa_key, tbs_raw, sig_value)
         }
         // id-RSASSA-PSS
         "1.2.840.113549.1.1.10" => verify_rsa_pss(
@@ -1312,45 +1303,31 @@ pub fn op_node_x509_verify(
       Ok(result)
     }
     AsymmetricPublicKey::RsaPss(rsa_pss_key) => {
-      use rsa::signature::Verifier;
-
       let result = match sig_alg_oid.as_str() {
         // sha1WithRSAEncryption
-        "1.2.840.113549.1.1.5" => {
-          let verifier = rsa::pkcs1v15::VerifyingKey::<sha1::Sha1>::new(
-            rsa_pss_key.key.clone(),
-          );
-          let sig = rsa::pkcs1v15::Signature::try_from(sig_value)
-            .map_err(|_| X509VerifyError::ParseFailed)?;
-          verifier.verify(tbs_raw, &sig).is_ok()
-        }
+        "1.2.840.113549.1.1.5" => verify_rsa_pkcs1v15::<sha1::Sha1>(
+          &rsa_pss_key.key,
+          tbs_raw,
+          sig_value,
+        ),
         // sha256WithRSAEncryption
-        "1.2.840.113549.1.1.11" => {
-          let verifier = rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new(
-            rsa_pss_key.key.clone(),
-          );
-          let sig = rsa::pkcs1v15::Signature::try_from(sig_value)
-            .map_err(|_| X509VerifyError::ParseFailed)?;
-          verifier.verify(tbs_raw, &sig).is_ok()
-        }
+        "1.2.840.113549.1.1.11" => verify_rsa_pkcs1v15::<sha2::Sha256>(
+          &rsa_pss_key.key,
+          tbs_raw,
+          sig_value,
+        ),
         // sha384WithRSAEncryption
-        "1.2.840.113549.1.1.12" => {
-          let verifier = rsa::pkcs1v15::VerifyingKey::<sha2::Sha384>::new(
-            rsa_pss_key.key.clone(),
-          );
-          let sig = rsa::pkcs1v15::Signature::try_from(sig_value)
-            .map_err(|_| X509VerifyError::ParseFailed)?;
-          verifier.verify(tbs_raw, &sig).is_ok()
-        }
+        "1.2.840.113549.1.1.12" => verify_rsa_pkcs1v15::<sha2::Sha384>(
+          &rsa_pss_key.key,
+          tbs_raw,
+          sig_value,
+        ),
         // sha512WithRSAEncryption
-        "1.2.840.113549.1.1.13" => {
-          let verifier = rsa::pkcs1v15::VerifyingKey::<sha2::Sha512>::new(
-            rsa_pss_key.key.clone(),
-          );
-          let sig = rsa::pkcs1v15::Signature::try_from(sig_value)
-            .map_err(|_| X509VerifyError::ParseFailed)?;
-          verifier.verify(tbs_raw, &sig).is_ok()
-        }
+        "1.2.840.113549.1.1.13" => verify_rsa_pkcs1v15::<sha2::Sha512>(
+          &rsa_pss_key.key,
+          tbs_raw,
+          sig_value,
+        ),
         // id-RSASSA-PSS
         "1.2.840.113549.1.1.10" => verify_rsa_pss(
           &rsa_pss_key.key,
