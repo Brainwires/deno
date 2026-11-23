@@ -21385,6 +21385,35 @@ where the changes are discussed.
      - Node tests enabled: none known; `node:worker_threads` messages use the
        same serializer.
 
+5NN. **`fix(ext/web)`: `structuredClone` clones the geometry interfaces,
+     `ImageData` and `ImageBitmap`, and transfers `ImageBitmap` and
+     `OffscreenCanvas`** (port of theende/ende 8faeab2af2, MIT, Ende's rework of
+     denoland/deno#37113; issue denoland/deno#37106; `ext/web/16_image_data.js`,
+     `ext/web/17_geometry.js`, `ext/web/13_message_port.js`, `ext/image`,
+     `ext/canvas`, `libs/core/ops_builtin_v8.rs`). These interfaces are
+     `[Serializable]` (and the last two `[Transferable]`), but `structuredClone`
+     and `postMessage` turned them into `{}`, and transferring an `ImageBitmap`
+     or an `OffscreenCanvas` threw. They now round-trip as the same interface
+     with the same values, nested and into a worker; a transfer moves the pixels
+     and detaches the source, and a closed or transferred bitmap can't be cloned
+     or transferred again. An `OffscreenCanvas` with a rendering context can't
+     be transferred (`InvalidStateError`, per HTML). A worker that hasn't loaded
+     the defining module registers the deserializers up front and loads it on
+     demand; a clone keeps an `ImageBitmap`'s color type (16-bit stays 16-bit).
+     - User-facing note: `ImageBitmap` is `Transferable` in the types too.
+     - Tests: `structured_clone_test.ts`'s
+       `structuredClone geometry
+       interfaces`,
+       `structuredClone ImageData and ImageBitmap`,
+       `structuredClone keeps a 16-bit ImageBitmap's depth`, the
+       `OffscreenCanvas` transfer tests and the worker round trips (all fail on
+       3.0.0-denext.25); WPT `css/geometry/structured-serialization.html` and
+       the `OffscreenCanvas` / non-transferable platform object cases of the
+       structured-clone, messagechannel and worker suites (expectations
+       updated). Ende's change to its global-interface sweep test is left out:
+       that test belongs to an Ende commit not carried here.
+     - Node tests enabled: none known.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -21396,10 +21425,10 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 5NN) are what the prebuilt `libdenort` carries. The
-CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
-into a packaged app's launchers) are in the branch too, but a stock CLI does not
-run them; denext's own launcher provides that environment.
+506-510, 511, 512, 513, 515, 5NN, 5NN) are what the prebuilt `libdenort`
+carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
+`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
+stock CLI does not run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
