@@ -188,6 +188,7 @@ async fn run_test_client_with_resolver(
       client_builder_hook: None,
       http2_max_header_list_size: None,
       connect_timeout: None,
+      deny_addresses: None,
     },
   )
   .unwrap();
@@ -292,6 +293,7 @@ async fn test_import_client_denies_host_resolving_to_denied_ip() {
       client_builder_hook: None,
       http2_max_header_list_size: None,
       connect_timeout: None,
+      deny_addresses: None,
     },
   )
   .unwrap();
@@ -400,6 +402,7 @@ async fn test_http_proxy_denies_destination_resolving_to_denied_ip() {
       client_builder_hook: None,
       http2_max_header_list_size: None,
       connect_timeout: None,
+      deny_addresses: None,
     },
   )
   .unwrap();
@@ -459,6 +462,7 @@ fn proxied_client(
       client_builder_hook: None,
       http2_max_header_list_size: None,
       connect_timeout: None,
+      deny_addresses: None,
     },
   )
   .unwrap()
@@ -848,6 +852,7 @@ fn create_http_test_client() -> crate::Client {
       client_builder_hook: None,
       http2_max_header_list_size: None,
       connect_timeout: None,
+      deny_addresses: None,
       permissions: None,
       resolved_deny_check_kind: Default::default(),
     },

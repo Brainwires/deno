@@ -1,6 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 pub mod cookies;
+pub mod deny_addresses;
 pub mod dns;
 mod fs_fetch_handler;
 mod proxy;
@@ -376,6 +377,7 @@ pub fn create_client_from_options(
       client_builder_hook: options.client_builder_hook,
       http2_max_header_list_size: None,
       connect_timeout: None,
+      deny_addresses: None,
     },
   )
 }
@@ -654,6 +656,9 @@ pub struct FetchResponse {
   /// In the tuple, the first element is an error message and the second one is
   /// an error cause.
   pub error: Option<(String, String)>,
+  /// denext: the `code` of the error cause, when the transport failure has
+  /// one (`ERR_ADDRESS_DENIED`: a `denyAddresses` refusal).
+  pub error_code: Option<String>,
 }
 
 #[op2]
@@ -692,8 +697,11 @@ pub async fn op_fetch_send(
           .and_then(std::error::Error::source)
           .map(|src| src.to_string())
           .unwrap_or_else(|| err.to_string());
+        let error_code = deny_addresses::find_address_denied_error(err_src)
+          .map(|_| deny_addresses::ADDRESS_DENIED_CODE.to_string());
         return Ok(FetchResponse {
           error: Some((err.to_string(), cause)),
+          error_code,
           ..Default::default()
         });
       }
@@ -743,6 +751,7 @@ pub async fn op_fetch_send(
     content_length,
     body_decoded,
     error: None,
+    error_code: None,
   })
 }
 
@@ -1182,6 +1191,8 @@ pub struct CreateHttpClientArgs {
   /// client adds no `User-Agent` when a request sets none.
   #[from_v8(default)]
   omit_user_agent: bool,
+  /// denext: the address ranges this client refuses to connect to.
+  deny_addresses: Option<Vec<String>>,
 }
 
 #[op2(stack_trace)]
@@ -1271,6 +1282,14 @@ pub fn op_fetch_custom_client(
     None
   };
 
+  let deny_addresses = match args.deny_addresses {
+    Some(entries) => Some(Arc::new(
+      deny_addresses::AddressDenyList::parse(&entries)
+        .map_err(HttpClientCreateError::InvalidDenyAddress)?,
+    )),
+    None => None,
+  };
+
   let mut client = create_http_client(
     &options.user_agent,
     CreateHttpClientOptions {
@@ -1303,6 +1322,7 @@ pub fn op_fetch_custom_client(
       client_builder_hook: options.client_builder_hook,
       http2_max_header_list_size: args.http2_max_header_list_size,
       connect_timeout: None,
+      deny_addresses,
     },
   )?;
   if let Some(user_agent) = user_agent_override {
@@ -1342,6 +1362,9 @@ pub struct CreateHttpClientOptions {
   /// `HttpConnector::set_connect_timeout`, split across the addresses a name
   /// resolves to). `None`, the default, waits for the OS.
   pub connect_timeout: Option<std::time::Duration>,
+  /// denext: every connection to an address in these ranges is refused
+  /// (`Deno.createHttpClient({ denyAddresses })`, [`deny_addresses`]).
+  pub deny_addresses: Option<Arc<deny_addresses::AddressDenyList>>,
 }
 
 impl Default for CreateHttpClientOptions {
@@ -1363,6 +1386,7 @@ impl Default for CreateHttpClientOptions {
       client_builder_hook: None,
       http2_max_header_list_size: None,
       connect_timeout: None,
+      deny_addresses: None,
     }
   }
 }
@@ -1389,6 +1413,10 @@ pub enum HttpClientCreateError {
   UnixProxyNotSupportedOnWindows,
   #[error("Vsock proxy is not supported on this platform")]
   VsockProxyNotSupported,
+  #[error(
+    "Invalid entry in 'denyAddresses': {0:?} is not an IP address, a CIDR range or one of \"loopback\", \"private\", \"link-local\", \"metadata\""
+  )]
+  InvalidDenyAddress(String),
 }
 
 /// Default `SETTINGS_MAX_HEADER_LIST_SIZE` advertised to HTTP/2 servers. Matches
@@ -1444,7 +1472,8 @@ pub fn create_http_client(
     options.permissions,
     options.resolved_deny_check_kind,
   )
-  .with_connect_timeout(options.connect_timeout);
+  .with_connect_timeout(options.connect_timeout)
+  .with_deny_addresses(options.deny_addresses);
 
   let user_agent = user_agent.parse::<HeaderValue>().map_err(|_| {
     HttpClientCreateError::InvalidUserAgent(user_agent.to_string())

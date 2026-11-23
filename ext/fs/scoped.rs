@@ -74,7 +74,7 @@ fn not_capable(path: &Path) -> FsError {
   )
 }
 
-fn fs_error(err: CheckedOpenError) -> FsError {
+pub(crate) fn fs_error(err: CheckedOpenError) -> FsError {
   match err {
     CheckedOpenError::NotCapable(path) => not_capable(&path),
     CheckedOpenError::Io { source, .. } => FsError::Io(source),

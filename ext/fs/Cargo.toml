@@ -36,6 +36,7 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+sys_traits = { workspace = true, features = ["libc", "real", "winapi"] }
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dependencies]
