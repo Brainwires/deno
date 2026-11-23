@@ -497,14 +497,19 @@ pub fn cli_profile(plan: &MacosPlan) -> String {
 /// The profile of a deny ceiling (D1 / D2, `plan.deny_only`): everything is
 /// allowed by default, as with no sandbox, and only the read and write
 /// denies are refused (the last matching rule wins), then the re-allows the
-/// denies must not swallow. Nothing else changes: no terminal, mach,
+/// denies must not swallow. File metadata stays readable everywhere, as in
+/// [`cli_profile`] (a rule for one operation outranks a `file-read*` one):
+/// resolving a path stats it, so the image after a re-exec resolves a denied
+/// path to the filter the image before it wrote, and a measured probe is
+/// told apart from a missing one. Nothing else changes: no terminal, mach,
 /// LaunchServices, process or network rule, since a prompt may allow any of
 /// it; children inherit the profile. The marker pair says a kernel sandbox
 /// of this runtime holds the process, so a `deno` it starts finds the
 /// handed-down policy instead of applying a second profile (macOS can't
 /// stack one).
 pub fn deny_only_profile(plan: &MacosPlan) -> String {
-  let mut p = String::from("(version 1)\n(allow default)\n");
+  let mut p =
+    String::from("(version 1)\n(allow default)\n(allow file-read-metadata)\n");
   if !plan.deny_read.is_empty() {
     p.push_str(&format!(
       "(deny file-read* {})\n",
@@ -1216,7 +1221,7 @@ mod tests {
     assert_eq!(
       p,
       concat!(
-        "(version 1)\n(allow default)\n",
+        "(version 1)\n(allow default)\n(allow file-read-metadata)\n",
         "(deny file-read* (subpath \"/w/.env\"))\n",
         "(deny file-write* (literal \"/w/out/keep\"))\n",
         "(allow file-read* (literal \"/w/.env/deno.json\"))\n",

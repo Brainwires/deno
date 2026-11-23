@@ -20507,7 +20507,10 @@ where the changes are discussed.
        the read and write denies (and keeps the re-allows and the marker pair,
        so a nested `deno` finds the handed-down policy):
        `seatbelt::deny_only_profile`, `MacosPlan::deny_only`; the probe is the
-       first read deny. A child the prompt allowed, `sudo` included, runs.
+       first read deny. File metadata stays readable, as under the full cli
+       profile, so the image after the re-exec resolves a denied path to the
+       same filter (and measures the probe) as the image before it. A child the
+       prompt allowed, `sudo` included, runs.
      - Linux would need an overmount in a user namespace (Landlock needs
        no-new-privileges, and an expansion freezes folders a prompt may let the
        program write), which isn't built (`OVERMOUNT_BUILT`): each deny is a
