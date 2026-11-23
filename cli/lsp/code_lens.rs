@@ -632,12 +632,22 @@ pub async fn resolve_code_lens(
     })?;
   match data.source {
     CodeLensSource::Implementations => {
-      resolve_implementation_code_lens(code_lens, data, language_server, token)
-        .await
+      Box::pin(resolve_implementation_code_lens(
+        code_lens,
+        data,
+        language_server,
+        token,
+      ))
+      .await
     }
     CodeLensSource::References => {
-      resolve_references_code_lens(code_lens, data, language_server, token)
-        .await
+      Box::pin(resolve_references_code_lens(
+        code_lens,
+        data,
+        language_server,
+        token,
+      ))
+      .await
     }
   }
 }

@@ -4026,7 +4026,8 @@ impl tower_lsp::LanguageServer for LanguageServer {
 
   async fn notebook_did_save(&self, params: DidSaveNotebookDocumentParams) {
     self.init_flag.wait_raised().await;
-    self.inner.read().await.notebook_did_save(params).await
+    let inner = self.inner.read().await;
+    Box::pin(inner.notebook_did_save(params)).await
   }
 
   async fn notebook_did_close(&self, params: DidCloseNotebookDocumentParams) {
@@ -4140,7 +4141,8 @@ impl tower_lsp::LanguageServer for LanguageServer {
     token: CancellationToken,
   ) -> LspResult<Option<CodeActionResponse>> {
     self.init_flag.wait_raised().await;
-    self.inner.read().await.code_action(params, &token).await
+    let inner = self.inner.read().await;
+    Box::pin(inner.code_action(params, &token)).await
   }
 
   async fn code_action_resolve(
