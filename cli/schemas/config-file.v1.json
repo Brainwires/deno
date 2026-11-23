@@ -356,8 +356,8 @@
         },
         "backend": {
           "type": "string",
-          "description": "Backend to use for the desktop app.",
-          "enum": ["webview", "cef"]
+          "description": "Backend to use for the desktop app. \"gpui\" (denext extension) hosts no web view: the app draws native primitives through BrowserWindow.nativeTree.",
+          "enum": ["webview", "cef", "gpui"]
         },
         "output": {
           "type": "object",
