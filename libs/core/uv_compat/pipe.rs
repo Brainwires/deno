@@ -1270,25 +1270,25 @@ pub unsafe fn uv_pipe_accept(
 
       // Create a new server instance for the next connection, and
       // queue up its connect future so we notice the next client.
-      if let Some(ref path) = (*server).internal_bind_path {
-        if let Ok(new_server) = create_win_pipe_instance(
+      if let Some(ref path) = (*server).internal_bind_path
+        && let Ok(new_server) = create_win_pipe_instance(
           path.as_str(),
           false,
           (*server).internal_win_everyone,
-        ) {
-          let new_server = std::sync::Arc::new(new_server);
-          let fut_server = new_server.clone();
-          let connect_fut = Box::pin(async move { fut_server.connect().await });
-          (*server).internal_win_server = Some(new_server);
-          (*server).internal_win_connect_fut = Some(connect_fut);
-          (*server).flags |= UV_HANDLE_ACTIVE;
+        )
+      {
+        let new_server = std::sync::Arc::new(new_server);
+        let fut_server = new_server.clone();
+        let connect_fut = Box::pin(async move { fut_server.connect().await });
+        (*server).internal_win_server = Some(new_server);
+        (*server).internal_win_connect_fut = Some(connect_fut);
+        (*server).flags |= UV_HANDLE_ACTIVE;
 
-          // Wake the event loop so it polls the new connect future.
-          // Without this, the loop never notices the next client
-          // attaching to the named pipe (same pattern as uv_pipe_listen).
-          if let Some(w) = (*server).internal_waker.as_ref() {
-            w.mark_ready();
-          }
+        // Wake the event loop so it polls the new connect future.
+        // Without this, the loop never notices the next client
+        // attaching to the named pipe (same pattern as uv_pipe_listen).
+        if let Some(w) = (*server).internal_waker.as_ref() {
+          w.mark_ready();
         }
       }
       0
