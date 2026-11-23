@@ -15,11 +15,12 @@ use digest::Digest;
 use digest::FixedOutputReset;
 use ed25519_dalek::pkcs8::BitStringRef;
 use elliptic_curve::Generate as _;
+// rsa 0.10's crypto-bigint, which elliptic-curve 0.14 re-exports as `bigint`.
+use elliptic_curve::bigint::ConcatenatingMul as _;
 use elliptic_curve::pkcs8::EncodePrivateKey as _;
 use hmac::Hmac;
 use hmac::Mac;
 use num_bigint::BigInt;
-use num_traits::FromPrimitive as _;
 use p12::AlgorithmIdentifier as Pkcs12AlgorithmIdentifier;
 use p12::CertBag as Pkcs12CertBag;
 use p12::ContentInfo as Pkcs12ContentInfo;
@@ -34,12 +35,11 @@ use pkcs8::PrivateKeyInfo;
 use pkcs8::SecretDocument;
 use rand::RngCore as _;
 use rand::thread_rng;
-use rsa::RsaPrivateKey;
-use rsa::RsaPublicKey;
-use rsa::pkcs1::DecodeRsaPrivateKey as _;
-use rsa::pkcs1::DecodeRsaPublicKey;
+use rsa::PrivateKey as RsaPrivateKey;
+use rsa::PublicKey as RsaPublicKey;
 use rsa::pkcs1::EncodeRsaPrivateKey as _;
-use rsa::pkcs1::EncodeRsaPublicKey;
+use rsa::pkcs1::EncodeRsaPublicKey as _;
+use rsa::pkcs8::spki::EncodePublicKey as _;
 use rsa::traits::PrivateKeyParts;
 use rsa::traits::PublicKeyParts;
 use sec1::DecodeEcPrivateKey as _;
@@ -72,6 +72,9 @@ use super::pkcs3::DhParameter;
 use super::pqc;
 use super::pqc::PqcAlg;
 use super::primes::Prime;
+use super::rsa_util;
+use super::rsa_util::RSA_PRIVATE_KEY_PEM_LABEL;
+use super::rsa_util::RSA_PUBLIC_KEY_PEM_LABEL;
 
 #[derive(Clone)]
 pub enum KeyObjectHandle {
@@ -170,7 +173,7 @@ pub struct DhPrivateKey {
 
 #[derive(Clone)]
 pub enum AsymmetricPublicKey {
-  Rsa(rsa::RsaPublicKey),
+  Rsa(rsa::PublicKey),
   RsaPss(RsaPssPublicKey),
   Dsa(dsa::VerifyingKey),
   Ec(EcPublicKey),
@@ -185,7 +188,7 @@ pub enum AsymmetricPublicKey {
 
 #[derive(Clone)]
 pub struct RsaPssPublicKey {
-  pub key: rsa::RsaPublicKey,
+  pub key: rsa::PublicKey,
   pub details: Option<RsaPssDetails>,
 }
 
@@ -458,23 +461,23 @@ impl PartialEq for KeyObjectHandle {
 }
 
 // https://oidref.com/
-const ID_SHA1_OID: rsa::pkcs8::ObjectIdentifier =
-  rsa::pkcs8::ObjectIdentifier::new_unwrap("1.3.14.3.2.26");
-const ID_SHA224_OID: rsa::pkcs8::ObjectIdentifier =
-  rsa::pkcs8::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.4");
-const ID_SHA256_OID: rsa::pkcs8::ObjectIdentifier =
-  rsa::pkcs8::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.1");
-const ID_SHA384_OID: rsa::pkcs8::ObjectIdentifier =
-  rsa::pkcs8::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.2");
-const ID_SHA512_OID: rsa::pkcs8::ObjectIdentifier =
-  rsa::pkcs8::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.3");
-const ID_SHA512_224_OID: rsa::pkcs8::ObjectIdentifier =
-  rsa::pkcs8::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.5");
-const ID_SHA512_256_OID: rsa::pkcs8::ObjectIdentifier =
-  rsa::pkcs8::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.6");
+const ID_SHA1_OID: pkcs8::ObjectIdentifier =
+  pkcs8::ObjectIdentifier::new_unwrap("1.3.14.3.2.26");
+const ID_SHA224_OID: pkcs8::ObjectIdentifier =
+  pkcs8::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.4");
+const ID_SHA256_OID: pkcs8::ObjectIdentifier =
+  pkcs8::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.1");
+const ID_SHA384_OID: pkcs8::ObjectIdentifier =
+  pkcs8::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.2");
+const ID_SHA512_OID: pkcs8::ObjectIdentifier =
+  pkcs8::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.3");
+const ID_SHA512_224_OID: pkcs8::ObjectIdentifier =
+  pkcs8::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.5");
+const ID_SHA512_256_OID: pkcs8::ObjectIdentifier =
+  pkcs8::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.6");
 
-const ID_MFG1: rsa::pkcs8::ObjectIdentifier =
-  rsa::pkcs8::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.8");
+const ID_MFG1: pkcs8::ObjectIdentifier =
+  pkcs8::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.8");
 pub const ID_SECP224R1_OID: const_oid::ObjectIdentifier =
   const_oid::ObjectIdentifier::new_unwrap("1.3.132.0.33");
 pub const ID_SECP256R1_OID: const_oid::ObjectIdentifier =
@@ -515,32 +518,30 @@ pub const DH_KEY_AGREEMENT_OID: const_oid::ObjectIdentifier =
 //   trailerField       [3] TrailerField     DEFAULT trailerFieldBC
 // }
 pub struct RsaPssParameters<'a> {
-  pub hash_algorithm: Option<rsa::pkcs8::AlgorithmIdentifierRef<'a>>,
-  pub mask_gen_algorithm: Option<rsa::pkcs8::AlgorithmIdentifierRef<'a>>,
+  pub hash_algorithm: Option<pkcs8::AlgorithmIdentifierRef<'a>>,
+  pub mask_gen_algorithm: Option<pkcs8::AlgorithmIdentifierRef<'a>>,
   pub salt_length: Option<u32>,
 }
 
 // Context-specific tag number for hashAlgorithm.
-const HASH_ALGORITHM_TAG: rsa::pkcs8::der::TagNumber =
-  rsa::pkcs8::der::TagNumber::new(0);
+const HASH_ALGORITHM_TAG: pkcs8::der::TagNumber = pkcs8::der::TagNumber::new(0);
 
 // Context-specific tag number for maskGenAlgorithm.
-const MASK_GEN_ALGORITHM_TAG: rsa::pkcs8::der::TagNumber =
-  rsa::pkcs8::der::TagNumber::new(1);
+const MASK_GEN_ALGORITHM_TAG: pkcs8::der::TagNumber =
+  pkcs8::der::TagNumber::new(1);
 
 // Context-specific tag number for saltLength.
-const SALT_LENGTH_TAG: rsa::pkcs8::der::TagNumber =
-  rsa::pkcs8::der::TagNumber::new(2);
+const SALT_LENGTH_TAG: pkcs8::der::TagNumber = pkcs8::der::TagNumber::new(2);
 
-impl<'a> TryFrom<rsa::pkcs8::der::asn1::AnyRef<'a>> for RsaPssParameters<'a> {
-  type Error = rsa::pkcs8::der::Error;
+impl<'a> TryFrom<pkcs8::der::asn1::AnyRef<'a>> for RsaPssParameters<'a> {
+  type Error = pkcs8::der::Error;
 
   fn try_from(
-    any: rsa::pkcs8::der::asn1::AnyRef<'a>,
-  ) -> rsa::pkcs8::der::Result<RsaPssParameters<'a>> {
+    any: pkcs8::der::asn1::AnyRef<'a>,
+  ) -> pkcs8::der::Result<RsaPssParameters<'a>> {
     any.sequence(|decoder| {
       let hash_algorithm = decoder
-        .context_specific::<rsa::pkcs8::AlgorithmIdentifierRef>(
+        .context_specific::<pkcs8::AlgorithmIdentifierRef>(
           HASH_ALGORITHM_TAG,
           pkcs8::der::TagMode::Explicit,
         )?
@@ -548,7 +549,7 @@ impl<'a> TryFrom<rsa::pkcs8::der::asn1::AnyRef<'a>> for RsaPssParameters<'a> {
         .transpose()?;
 
       let mask_gen_algorithm = decoder
-        .context_specific::<rsa::pkcs8::AlgorithmIdentifierRef>(
+        .context_specific::<pkcs8::AlgorithmIdentifierRef>(
           MASK_GEN_ALGORITHM_TAG,
           pkcs8::der::TagMode::Explicit,
         )?
@@ -869,7 +870,7 @@ trait RsaPublicKeyExt: Sized {
   /// fallback once the strict parser has already rejected the input:
   ///
   /// ```ignore
-  /// RsaPublicKey::from_pkcs1_der(der)
+  /// rsa_util::public_key_from_pkcs1_der(der)
   ///   .or_else(|err| RsaPublicKey::from_pkcs1_der_lenient(der).ok_or(err))
   /// ```
   fn from_pkcs1_der_lenient(der: &[u8]) -> Option<Self>;
@@ -889,7 +890,7 @@ impl RsaPublicKeyExt for RsaPublicKey {
       return None;
     }
 
-    RsaPublicKey::new(n, e).ok()
+    rsa_util::public_key_new(n, e).ok()
   }
 }
 
@@ -897,7 +898,7 @@ fn read_lenient_positive_integer(
   der: &[u8],
   pos: &mut usize,
   limit: usize,
-) -> Option<rsa::BigUint> {
+) -> Option<rsa::BoxedUint> {
   let end = read_der_tag_and_len(der, pos, 0x02)?;
   if end > limit || end == *pos {
     return None;
@@ -908,7 +909,7 @@ fn read_lenient_positive_integer(
   // Reject all-zero payloads: a valid RSA modulus or public exponent is
   // strictly positive, and BigUint::from_bytes_be(&[]) would produce 0.
   let first_non_zero = payload.iter().position(|&byte| byte != 0)?;
-  Some(rsa::BigUint::from_bytes_be(&payload[first_non_zero..]))
+  Some(rsa_util::uint(&payload[first_non_zero..]))
 }
 
 fn read_der_tag_and_len(der: &[u8], pos: &mut usize, tag: u8) -> Option<usize> {
@@ -1063,8 +1064,10 @@ impl KeyObjectHandle {
           parse_legacy_encrypted_pem(pem, passphrase)?
         {
           match label {
-            "RSA PRIVATE KEY" => SecretDocument::from_pkcs1_der(&decrypted)
-              .map_err(|_| AsymmetricPrivateKeyError::InvalidPkcs1PrivateKey)?,
+            "RSA PRIVATE KEY" => rsa_util::pkcs1_private_key_document(
+              &decrypted,
+            )
+            .map_err(|_| AsymmetricPrivateKeyError::InvalidPkcs1PrivateKey)?,
             "EC PRIVATE KEY" => SecretDocument::from_sec1_der(&decrypted)
               .map_err(|_| AsymmetricPrivateKeyError::InvalidSec1PrivateKey)?,
             "PRIVATE KEY" => SecretDocument::from_pkcs8_der(&decrypted)
@@ -1105,8 +1108,8 @@ impl KeyObjectHandle {
                   );
                 }
                 PrivateKeyInfo::PEM_LABEL => doc,
-                rsa::pkcs1::RsaPrivateKey::PEM_LABEL => {
-                  SecretDocument::from_pkcs1_der(doc.as_bytes()).map_err(
+                RSA_PRIVATE_KEY_PEM_LABEL => {
+                  rsa_util::pkcs1_private_key_document(doc.as_bytes()).map_err(
                     |_| AsymmetricPrivateKeyError::InvalidPkcs1PrivateKey,
                   )?
                 }
@@ -1135,9 +1138,9 @@ impl KeyObjectHandle {
               return Err(AsymmetricPrivateKeyError::EncryptedPrivateKeyRequiresPassphraseToDecrypt);
             }
             PrivateKeyInfo::PEM_LABEL => doc,
-            rsa::pkcs1::RsaPrivateKey::PEM_LABEL => {
+            RSA_PRIVATE_KEY_PEM_LABEL => {
               let pkcs1_der = doc.as_bytes();
-              SecretDocument::from_pkcs1_der(pkcs1_der).map_err(|_| {
+              rsa_util::pkcs1_private_key_document(pkcs1_der).map_err(|_| {
                 AsymmetricPrivateKeyError::InvalidPkcs1PrivateKey
               })?
             }
@@ -1201,7 +1204,7 @@ impl KeyObjectHandle {
           if passphrase.is_some() {
             return Err(AsymmetricPrivateKeyError::Pkcs1PrivateKeyDoesNotSupportEncryptionWithPassphrase);
           }
-          SecretDocument::from_pkcs1_der(key)
+          rsa_util::pkcs1_private_key_document(key)
             .map_err(|_| AsymmetricPrivateKeyError::InvalidPkcs1PrivateKey)?
         }
         "sec1" => {
@@ -1232,14 +1235,14 @@ impl KeyObjectHandle {
     let private_key = match alg {
       RSA_ENCRYPTION_OID => {
         let private_key =
-          rsa::RsaPrivateKey::from_pkcs1_der(pk_info.private_key)
+          rsa_util::private_key_from_pkcs1_der(pk_info.private_key)
             .map_err(|_| AsymmetricPrivateKeyError::InvalidPkcs1PrivateKey)?;
         AsymmetricPrivateKey::Rsa(private_key)
       }
       RSASSA_PSS_OID => {
         let details = parse_rsa_pss_params(pk_info.algorithm.parameters)?;
         let private_key =
-          rsa::RsaPrivateKey::from_pkcs1_der(pk_info.private_key)
+          rsa_util::private_key_from_pkcs1_der(pk_info.private_key)
             .map_err(|_| AsymmetricPrivateKeyError::InvalidPkcs1PrivateKey)?;
         AsymmetricPrivateKey::RsaPss(RsaPssPrivateKey {
           key: private_key,
@@ -1339,9 +1342,9 @@ impl KeyObjectHandle {
 
     let key = match spki.parsed()? {
       PublicKey::RSA(key) => {
-        let public_key = RsaPublicKey::new(
-          rsa::BigUint::from_bytes_be(key.modulus),
-          rsa::BigUint::from_bytes_be(key.exponent),
+        let public_key = rsa_util::public_key_new(
+          rsa_util::uint(key.modulus),
+          rsa_util::uint(key.exponent),
         )?;
         AsymmetricPublicKey::Rsa(public_key)
       }
@@ -1444,11 +1447,11 @@ impl KeyObjectHandle {
     let n_bytes = BASE64_URL_SAFE_NO_PAD.decode(jwk.n.as_bytes())?;
     let e_bytes = BASE64_URL_SAFE_NO_PAD.decode(jwk.e.as_bytes())?;
 
-    let n = rsa::BigUint::from_bytes_be(&n_bytes);
-    let e = rsa::BigUint::from_bytes_be(&e_bytes);
+    let n = rsa_util::uint(&n_bytes);
+    let e = rsa_util::uint(&e_bytes);
 
     if is_public {
-      let public_key = RsaPublicKey::new(n, e)?;
+      let public_key = rsa_util::public_key_new(n, e)?;
 
       Ok(KeyObjectHandle::AsymmetricPublic(AsymmetricPublicKey::Rsa(
         public_key,
@@ -1461,11 +1464,11 @@ impl KeyObjectHandle {
       let q_bytes = BASE64_URL_SAFE_NO_PAD
         .decode(jwk.q.ok_or(RsaJwkError::InvalidJwk)?.as_bytes())?;
 
-      let d = rsa::BigUint::from_bytes_be(&d_bytes);
-      let p = rsa::BigUint::from_bytes_be(&p_bytes);
-      let q = rsa::BigUint::from_bytes_be(&q_bytes);
+      let d = rsa_util::uint(&d_bytes);
+      let p = rsa_util::uint(&p_bytes);
+      let q = rsa_util::uint(&q_bytes);
 
-      let modulus = &p * &q;
+      let modulus = p.concatenating_mul(&q);
       if modulus != n {
         return Err(RsaJwkError::InvalidJwk);
       }
@@ -1789,14 +1792,14 @@ impl KeyObjectHandle {
 
         match label.as_str() {
           SubjectPublicKeyInfoRef::PEM_LABEL => document,
-          rsa::pkcs1::RsaPublicKey::PEM_LABEL => {
-            Document::from_pkcs1_der(document.as_bytes())
+          RSA_PUBLIC_KEY_PEM_LABEL => {
+            rsa_util::pkcs1_public_key_document(document.as_bytes())
               .map_err(|_| AsymmetricPublicKeyError::InvalidPkcs1PublicKey)?
           }
           EncryptedPrivateKeyInfo::PEM_LABEL
           | PrivateKeyInfo::PEM_LABEL
           | sec1::EcPrivateKey::PEM_LABEL
-          | rsa::pkcs1::RsaPrivateKey::PEM_LABEL
+          | RSA_PRIVATE_KEY_PEM_LABEL
           | "DSA PRIVATE KEY" => {
             let handle = KeyObjectHandle::new_asymmetric_private_key_from_js(
               key, format, typ, passphrase,
@@ -1829,7 +1832,7 @@ impl KeyObjectHandle {
         }
       }
       "der" => match typ {
-        "pkcs1" => Document::from_pkcs1_der(key)
+        "pkcs1" => rsa_util::pkcs1_public_key_document(key)
           .map_err(|_| AsymmetricPublicKeyError::InvalidPkcs1PublicKey)?,
         "spki" => Document::from_public_key_der(key)
           .map_err(|_| AsymmetricPublicKeyError::InvalidSpkiPublicKey)?,
@@ -1854,9 +1857,10 @@ impl KeyObjectHandle {
           .subject_public_key
           .as_bytes()
           .ok_or(AsymmetricPublicKeyError::InvalidSpkiPublicKey)?;
-        let public_key = RsaPublicKey::from_pkcs1_der(der).or_else(|err| {
-          RsaPublicKey::from_pkcs1_der_lenient(der).ok_or(err)
-        })?;
+        let public_key =
+          rsa_util::public_key_from_pkcs1_der(der).or_else(|err| {
+            RsaPublicKey::from_pkcs1_der_lenient(der).ok_or(err)
+          })?;
         AsymmetricPublicKey::Rsa(public_key)
       }
       RSASSA_PSS_OID => {
@@ -1865,9 +1869,10 @@ impl KeyObjectHandle {
           .subject_public_key
           .as_bytes()
           .ok_or(AsymmetricPublicKeyError::InvalidSpkiPublicKey)?;
-        let public_key = RsaPublicKey::from_pkcs1_der(der).or_else(|err| {
-          RsaPublicKey::from_pkcs1_der_lenient(der).ok_or(err)
-        })?;
+        let public_key =
+          rsa_util::public_key_from_pkcs1_der(der).or_else(|err| {
+            RsaPublicKey::from_pkcs1_der_lenient(der).ok_or(err)
+          })?;
         AsymmetricPublicKey::RsaPss(RsaPssPublicKey {
           key: public_key,
           details,
@@ -2177,10 +2182,10 @@ fn parse_rsa_pss_params(
         // value is a SEQUENCE. Decode the SEQUENCE to extract the hash OID.
         let mgf1_hash_oid = mgf1_params_any
           .sequence(|reader| {
-            let oid = rsa::pkcs8::ObjectIdentifier::decode(reader)?;
+            let oid = pkcs8::ObjectIdentifier::decode(reader)?;
             // Consume optional parameters (e.g. NULL) without failing
             while !reader.is_finished() {
-              rsa::pkcs8::der::asn1::AnyRef::decode(reader)?;
+              pkcs8::der::asn1::AnyRef::decode(reader)?;
             }
             Ok(oid)
           })
@@ -2221,7 +2226,7 @@ fn parse_rsa_pss_params(
 }
 
 impl RsaPssHashAlgorithm {
-  fn oid(&self) -> rsa::pkcs8::ObjectIdentifier {
+  fn oid(&self) -> pkcs8::ObjectIdentifier {
     match self {
       RsaPssHashAlgorithm::Sha1 => ID_SHA1_OID,
       RsaPssHashAlgorithm::Sha224 => ID_SHA224_OID,
@@ -2240,16 +2245,14 @@ impl RsaPssHashAlgorithm {
 /// are all defaults carries an empty SEQUENCE, and the hash
 /// AlgorithmIdentifiers carry the NULL parameters RFC 4055 section 2.1
 /// requires.
-fn rsa_pss_params_der(
-  details: &RsaPssDetails,
-) -> rsa::pkcs8::der::Result<Vec<u8>> {
-  use rsa::pkcs8::der::TagMode;
-  use rsa::pkcs8::der::asn1::ContextSpecific;
-  use rsa::pkcs8::der::asn1::Null;
+fn rsa_pss_params_der(details: &RsaPssDetails) -> pkcs8::der::Result<Vec<u8>> {
+  use pkcs8::der::TagMode;
+  use pkcs8::der::asn1::ContextSpecific;
+  use pkcs8::der::asn1::Null;
 
   let null = AnyRef::from(Null);
   let hash_identifier =
-    |hash: RsaPssHashAlgorithm| rsa::pkcs8::AlgorithmIdentifierRef {
+    |hash: RsaPssHashAlgorithm| pkcs8::AlgorithmIdentifierRef {
       oid: hash.oid(),
       parameters: Some(null),
     };
@@ -2269,7 +2272,7 @@ fn rsa_pss_params_der(
     let field = ContextSpecific {
       tag_number: MASK_GEN_ALGORITHM_TAG,
       tag_mode: TagMode::Explicit,
-      value: rsa::pkcs8::AlgorithmIdentifierRef {
+      value: pkcs8::AlgorithmIdentifierRef {
         oid: ID_MFG1,
         parameters: Some(AnyRef::try_from(mgf1_hash.as_slice())?),
       },
@@ -2293,8 +2296,8 @@ fn rsa_pss_params_der(
 /// key has restrictions (`params` holds their DER), none otherwise.
 fn rsa_pss_algorithm_identifier(
   params: Option<&[u8]>,
-) -> rsa::pkcs8::der::Result<rsa::pkcs8::AlgorithmIdentifierRef<'_>> {
-  Ok(rsa::pkcs8::AlgorithmIdentifierRef {
+) -> pkcs8::der::Result<pkcs8::AlgorithmIdentifierRef<'_>> {
+  Ok(pkcs8::AlgorithmIdentifierRef {
     oid: RSASSA_PSS_OID,
     parameters: params.map(AnyRef::try_from).transpose()?,
   })
@@ -2420,8 +2423,8 @@ impl AsymmetricPublicKey {
 
         let jwk = deno_core::serde_json::json!({
             "kty": "RSA",
-            "n": bytes_to_b64(&n.to_bytes_be()),
-            "e": bytes_to_b64(&e.to_bytes_be()),
+            "n": bytes_to_b64(&rsa_util::uint_to_be_bytes(n.as_ref())),
+            "e": bytes_to_b64(&rsa_util::uint_to_be_bytes(e)),
         });
         Ok(jwk)
       }
@@ -2512,7 +2515,7 @@ impl AsymmetricPublicKey {
             };
 
             let spki = SubjectPublicKeyInfoRef {
-              algorithm: rsa::pkcs8::AlgorithmIdentifierRef {
+              algorithm: pkcs8::AlgorithmIdentifierRef {
                 oid: EC_OID,
                 parameters: Some(asn1::AnyRef::from(&oid)),
               },
@@ -2527,7 +2530,7 @@ impl AsymmetricPublicKey {
           }
           AsymmetricPublicKey::X25519(key) => {
             let spki = SubjectPublicKeyInfoRef {
-              algorithm: rsa::pkcs8::AlgorithmIdentifierRef {
+              algorithm: pkcs8::AlgorithmIdentifierRef {
                 oid: X25519_OID,
                 parameters: None,
               },
@@ -2542,7 +2545,7 @@ impl AsymmetricPublicKey {
           }
           AsymmetricPublicKey::Ed25519(key) => {
             let spki = SubjectPublicKeyInfoRef {
-              algorithm: rsa::pkcs8::AlgorithmIdentifierRef {
+              algorithm: pkcs8::AlgorithmIdentifierRef {
                 oid: ED25519_OID,
                 parameters: None,
               },
@@ -2557,7 +2560,7 @@ impl AsymmetricPublicKey {
           }
           AsymmetricPublicKey::X448(key) => {
             let spki = SubjectPublicKeyInfoRef {
-              algorithm: rsa::pkcs8::AlgorithmIdentifierRef {
+              algorithm: pkcs8::AlgorithmIdentifierRef {
                 oid: X448_OID,
                 parameters: None,
               },
@@ -2573,7 +2576,7 @@ impl AsymmetricPublicKey {
           AsymmetricPublicKey::Ed448(key) => {
             let bytes = key.to_bytes();
             let spki = SubjectPublicKeyInfoRef {
-              algorithm: rsa::pkcs8::AlgorithmIdentifierRef {
+              algorithm: pkcs8::AlgorithmIdentifierRef {
                 oid: ED448_OID,
                 parameters: None,
               },
@@ -2595,7 +2598,7 @@ impl AsymmetricPublicKey {
               .map_err(|_| AsymmetricPublicKeyDerError::InvalidDhPublicKey)?;
             let params = key.params.to_der().unwrap();
             let spki = SubjectPublicKeyInfoRef {
-              algorithm: rsa::pkcs8::AlgorithmIdentifierRef {
+              algorithm: pkcs8::AlgorithmIdentifierRef {
                 oid: DH_KEY_AGREEMENT_OID,
                 parameters: Some(AnyRef::new(Tag::Sequence, &params).unwrap()),
               },
@@ -2661,19 +2664,22 @@ fn rsa_private_to_jwk(key: &RsaPrivateKey) -> deno_core::serde_json::Value {
 
   let mut obj = deno_core::serde_json::json!({
       "kty": "RSA",
-      "n": bytes_to_b64(&n.to_bytes_be()),
-      "e": bytes_to_b64(&e.to_bytes_be()),
-      "d": bytes_to_b64(&d.to_bytes_be()),
-      "p": bytes_to_b64(&p.to_bytes_be()),
-      "q": bytes_to_b64(&q.to_bytes_be()),
-      "dp": dp.map(|dp| bytes_to_b64(&dp.to_bytes_be())),
-      "dq": dq.map(|dq| bytes_to_b64(&dq.to_bytes_be())),
-      "qi": qi.map(|qi| bytes_to_b64(&qi.to_bytes_be())),
+      "n": bytes_to_b64(&rsa_util::uint_to_be_bytes(n.as_ref())),
+      "e": bytes_to_b64(&rsa_util::uint_to_be_bytes(e)),
+      "d": bytes_to_b64(&rsa_util::uint_to_be_bytes(d)),
+      "p": bytes_to_b64(&rsa_util::uint_to_be_bytes(p.as_ref())),
+      "q": bytes_to_b64(&rsa_util::uint_to_be_bytes(q.as_ref())),
+      "dp": dp.map(|dp| bytes_to_b64(&rsa_util::uint_to_be_bytes(dp))),
+      "dq": dq.map(|dq| bytes_to_b64(&rsa_util::uint_to_be_bytes(dq))),
+      "qi": qi.map(|qi| bytes_to_b64(&rsa_util::uint_to_be_bytes(&qi))),
   });
 
   if !oth.is_empty() {
     obj["oth"] = deno_core::serde_json::json!(
-      oth.iter().map(|o| o.to_bytes_be()).collect::<Vec<_>>()
+      oth
+        .iter()
+        .map(|o| rsa_util::uint_to_be_bytes(o.as_ref()))
+        .collect::<Vec<_>>()
     );
   }
 
@@ -2854,7 +2860,7 @@ impl AsymmetricPrivateKey {
             let sec1 = brainpool_sec1_der(key, false)?;
             let curve_oid = key.curve.oid();
             let info = PrivateKeyInfo {
-              algorithm: rsa::pkcs8::AlgorithmIdentifierRef {
+              algorithm: pkcs8::AlgorithmIdentifierRef {
                 oid: EC_OID,
                 parameters: Some(asn1::AnyRef::from(&curve_oid)),
               },
@@ -2885,7 +2891,7 @@ impl AsymmetricPrivateKey {
               .map_err(|_| AsymmetricPrivateKeyDerError::InvalidX25519PrivateKey)?;
 
             let private_key = PrivateKeyInfo {
-              algorithm: rsa::pkcs8::AlgorithmIdentifierRef {
+              algorithm: pkcs8::AlgorithmIdentifierRef {
                 oid: X25519_OID,
                 parameters: None,
               },
@@ -2906,7 +2912,7 @@ impl AsymmetricPrivateKey {
               .map_err(|_| AsymmetricPrivateKeyDerError::InvalidEd25519PrivateKey)?;
 
             let private_key = PrivateKeyInfo {
-              algorithm: rsa::pkcs8::AlgorithmIdentifierRef {
+              algorithm: pkcs8::AlgorithmIdentifierRef {
                 oid: ED25519_OID,
                 parameters: None,
               },
@@ -2926,7 +2932,7 @@ impl AsymmetricPrivateKey {
               .map_err(|_| AsymmetricPrivateKeyDerError::InvalidX448PrivateKey)?;
 
             let private_key = PrivateKeyInfo {
-              algorithm: rsa::pkcs8::AlgorithmIdentifierRef {
+              algorithm: pkcs8::AlgorithmIdentifierRef {
                 oid: X448_OID,
                 parameters: None,
               },
@@ -2947,7 +2953,7 @@ impl AsymmetricPrivateKey {
               .map_err(|_| AsymmetricPrivateKeyDerError::InvalidEd448PrivateKey)?;
 
             let private_key = PrivateKeyInfo {
-              algorithm: rsa::pkcs8::AlgorithmIdentifierRef {
+              algorithm: pkcs8::AlgorithmIdentifierRef {
                 oid: ED448_OID,
                 parameters: None,
               },
@@ -2969,7 +2975,7 @@ impl AsymmetricPrivateKey {
               .map_err(|_| AsymmetricPrivateKeyDerError::InvalidDhPrivateKey)?;
             let params = key.params.to_der().unwrap();
             let private_key = PrivateKeyInfo {
-              algorithm: rsa::pkcs8::AlgorithmIdentifierRef {
+              algorithm: pkcs8::AlgorithmIdentifierRef {
                 oid: DH_KEY_AGREEMENT_OID,
                 parameters: Some(AnyRef::new(Tag::Sequence, &params).unwrap()),
               },
@@ -3187,19 +3193,21 @@ pub fn op_node_get_asymmetric_key_details(
   match handle {
     KeyObjectHandle::AsymmetricPrivate(private_key) => match private_key {
       AsymmetricPrivateKey::Rsa(key) => {
-        let modulus_length = key.n().bits();
-        let public_exponent =
-          BigInt::from_bytes_be(num_bigint::Sign::Plus, &key.e().to_bytes_be());
+        let modulus_length = key.n().bit_width() as usize;
+        let public_exponent = BigInt::from_bytes_be(
+          num_bigint::Sign::Plus,
+          &rsa_util::uint_to_be_bytes(key.e()),
+        );
         Ok(AsymmetricKeyDetails::Rsa {
           modulus_length,
           public_exponent: public_exponent.into(),
         })
       }
       AsymmetricPrivateKey::RsaPss(key) => {
-        let modulus_length = key.key.n().bits();
+        let modulus_length = key.key.n().bit_width() as usize;
         let public_exponent = BigInt::from_bytes_be(
           num_bigint::Sign::Plus,
-          &key.key.e().to_bytes_be(),
+          &rsa_util::uint_to_be_bytes(key.key.e()),
         );
         let public_exponent = public_exponent.into();
         let details = match key.details {
@@ -3246,19 +3254,21 @@ pub fn op_node_get_asymmetric_key_details(
     },
     KeyObjectHandle::AsymmetricPublic(public_key) => match public_key {
       AsymmetricPublicKey::Rsa(key) => {
-        let modulus_length = key.n().bits();
-        let public_exponent =
-          BigInt::from_bytes_be(num_bigint::Sign::Plus, &key.e().to_bytes_be());
+        let modulus_length = key.n().bit_width() as usize;
+        let public_exponent = BigInt::from_bytes_be(
+          num_bigint::Sign::Plus,
+          &rsa_util::uint_to_be_bytes(key.e()),
+        );
         Ok(AsymmetricKeyDetails::Rsa {
           modulus_length,
           public_exponent: public_exponent.into(),
         })
       }
       AsymmetricPublicKey::RsaPss(key) => {
-        let modulus_length = key.key.n().bits();
+        let modulus_length = key.key.n().bit_width() as usize;
         let public_exponent = BigInt::from_bytes_be(
           num_bigint::Sign::Plus,
-          &key.key.e().to_bytes_be(),
+          &rsa_util::uint_to_be_bytes(key.key.e()),
         );
         let public_exponent = public_exponent.into();
         let details = match key.details {
@@ -3422,7 +3432,8 @@ fn generate_rsa_aws_lc(
     der.as_ref(),
   )
   .ok()?;
-  (key.e() == &rsa::BigUint::from(65537u32) && key.n().bits() == modulus_length)
+  (key.e() == &rsa::BoxedUint::from(65537u64)
+    && key.n().bit_width() as usize == modulus_length)
     .then_some(key)
 }
 
@@ -3488,10 +3499,15 @@ fn generate_rsa_private_key(
   if let Some(key) = generate_rsa_aws_lc(modulus_length, public_exponent) {
     return Ok(key);
   }
-  let exponent = rsa::BigUint::from_usize(public_exponent)
-    .ok_or(GenerateRsaKeyError::InvalidPublicExponent)?;
-  RsaPrivateKey::new_with_exp(&mut thread_rng(), modulus_length, &exponent)
-    .map_err(|e| GenerateRsaKeyError::Generate(e.to_string()))
+  let exponent = rsa::BoxedUint::from(public_exponent as u64);
+  // The unchecked constructor: rsa 0.10 refuses to generate a modulus under
+  // 1024 bits, which Node (and node:crypto on rsa 0.9) allows.
+  RsaPrivateKey::new_with_exp_unchecked(
+    &mut rsa_getrandom::SysRng,
+    modulus_length,
+    exponent,
+  )
+  .map_err(|e| GenerateRsaKeyError::Generate(e.to_string()))
 }
 
 fn generate_rsa_pss(

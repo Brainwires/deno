@@ -27,6 +27,7 @@ curve25519-dalek.workspace = true
 deno_core.workspace = true
 deno_crypto_provider.workspace = true
 deno_error.workspace = true
+der = { workspace = true, features = ["alloc", "oid"] }
 ecdsa.workspace = true
 elliptic-curve = { workspace = true, features = ["std", "pem", "arithmetic"] }
 fips203 = { workspace = true, features = ["ml-kem-512", "ml-kem-768", "ml-kem-1024"] }
@@ -38,8 +39,14 @@ once_cell.workspace = true
 p256 = { workspace = true, features = ["ecdh", "ecdsa"] }
 p384 = { workspace = true, features = ["ecdsa"] }
 p521.workspace = true
+pkcs8 = { workspace = true, features = ["alloc", "pem"] }
 rand.workspace = true
 rsa.workspace = true
+rsa_digest.workspace = true
+rsa_getrandom.workspace = true
+rsa_sha1.workspace = true
+rsa_sha2.workspace = true
+rsa_sha3.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
 sha1.workspace = true

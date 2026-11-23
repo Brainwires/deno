@@ -11,11 +11,13 @@
 use deno_core::ToV8;
 use deno_core::convert::Uint8Array;
 use deno_core::op2;
-use num_bigint_dig::BigUint;
 use rand::RngCore as _;
+use rsa::BoxedUint;
 use rsa::hazmat::rsa_decrypt_and_check;
 use rsa::hazmat::rsa_encrypt;
 use rsa::traits::PublicKeyParts as _;
+
+use crate::rsa_util::uint_to_be_bytes_padded;
 
 use crate::keys::AsymmetricPrivateKey;
 use crate::keys::AsymmetricPublicKey;
@@ -28,21 +30,13 @@ pub struct Encapsulated {
   ciphertext: Uint8Array,
 }
 
-fn left_pad(mut bytes: Vec<u8>, len: usize) -> Vec<u8> {
-  if bytes.len() < len {
-    let mut padded = vec![0u8; len - bytes.len()];
-    padded.append(&mut bytes);
-    bytes = padded;
-  }
-  bytes
-}
-
 /// RSASVE-GENERATE: a random `1 < z < n - 1`, `c = z^e mod n`.
-fn rsasve_encapsulate(key: &rsa::RsaPublicKey) -> Option<(Vec<u8>, Vec<u8>)> {
-  let n = key.n();
+fn rsasve_encapsulate(key: &rsa::PublicKey) -> Option<(Vec<u8>, Vec<u8>)> {
+  let precision = key.n_bits_precision();
   let n_len = key.size();
-  let n_minus_1 = n - BigUint::from(1u8);
-  let bits = n.bits();
+  let one = BoxedUint::one_with_precision(precision);
+  let n_minus_1 = key.n().as_ref().wrapping_sub(&one);
+  let bits = key.n().bit_width() as usize;
   let mut rng = rand::thread_rng();
   let mut buf = vec![0u8; n_len];
   for _ in 0..128 {
@@ -51,14 +45,14 @@ fn rsasve_encapsulate(key: &rsa::RsaPublicKey) -> Option<(Vec<u8>, Vec<u8>)> {
     if excess > 0 {
       buf[0] &= 0xff >> excess;
     }
-    let z = BigUint::from_bytes_be(&buf);
-    if z <= BigUint::from(1u8) || z >= n_minus_1 {
+    let z = BoxedUint::from_be_slice(&buf, precision).ok()?;
+    if z <= one || z >= n_minus_1 {
       continue;
     }
     let c = rsa_encrypt(key, &z).ok()?;
     return Some((
-      left_pad(z.to_bytes_be(), n_len),
-      left_pad(c.to_bytes_be(), n_len),
+      uint_to_be_bytes_padded(&z, n_len),
+      uint_to_be_bytes_padded(&c, n_len),
     ));
   }
   None
@@ -66,24 +60,26 @@ fn rsasve_encapsulate(key: &rsa::RsaPublicKey) -> Option<(Vec<u8>, Vec<u8>)> {
 
 /// RSASVE-RECOVER: `z = c^d mod n`, checked to be in `(1, n - 1)`.
 fn rsasve_decapsulate(
-  key: &rsa::RsaPrivateKey,
+  key: &rsa::PrivateKey,
   ciphertext: &[u8],
 ) -> Option<Vec<u8>> {
   let n_len = key.size();
   if ciphertext.len() != n_len {
     return None;
   }
-  let c = BigUint::from_bytes_be(ciphertext);
-  if &c >= key.n() {
+  let precision = key.n_bits_precision();
+  let c = BoxedUint::from_be_slice(ciphertext, precision).ok()?;
+  if &c >= key.n().as_ref() {
     return None;
   }
-  let mut rng = rand::thread_rng();
-  let z = rsa_decrypt_and_check(key, Some(&mut rng), &c).ok()?;
-  let n_minus_1 = key.n() - BigUint::from(1u8);
-  if z <= BigUint::from(1u8) || z >= n_minus_1 {
+  let z =
+    rsa_decrypt_and_check(key, Some(&mut rsa_getrandom::SysRng), &c).ok()?;
+  let one = BoxedUint::one_with_precision(precision);
+  let n_minus_1 = key.n().as_ref().wrapping_sub(&one);
+  if z <= one || z >= n_minus_1 {
     return None;
   }
-  Some(left_pad(z.to_bytes_be(), n_len))
+  Some(uint_to_be_bytes_padded(&z, n_len))
 }
 
 pub fn encapsulate(
@@ -167,14 +163,14 @@ mod tests {
 
   #[test]
   fn rsasve_round_trip() {
-    let mut rng = rand::thread_rng();
-    let private = rsa::RsaPrivateKey::new(&mut rng, 1024).unwrap();
+    let mut rng = rsa_getrandom::SysRng;
+    let private = rsa::PrivateKey::new(&mut rng, 1024).unwrap();
     let public = private.to_public_key();
     let (z, c) = rsasve_encapsulate(&public).unwrap();
     assert_eq!(z.len(), 128);
     assert_eq!(c.len(), 128);
     assert_eq!(rsasve_decapsulate(&private, &c).unwrap(), z);
-    let other = rsa::RsaPrivateKey::new(&mut rng, 1024).unwrap();
+    let other = rsa::PrivateKey::new(&mut rng, 1024).unwrap();
     assert_ne!(rsasve_decapsulate(&other, &c), Some(z));
   }
 }

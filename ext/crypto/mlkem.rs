@@ -4,7 +4,6 @@ use aws_lc_rs::kem;
 use deno_core::convert::Uint8Array;
 use fips203::traits::KeyGen;
 use fips203::traits::SerDes;
-use rsa::pkcs8;
 use serde::Deserialize;
 use serde::Serialize;
 use spki::der::Decode;

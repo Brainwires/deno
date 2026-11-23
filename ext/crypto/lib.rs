@@ -25,23 +25,12 @@ use p521::ecdsa::SigningKey as P521SigningKey;
 use p521::ecdsa::VerifyingKey as P521VerifyingKey;
 pub use rand;
 use rand::SeedableRng;
-use rand::rngs::OsRng;
 use rand::rngs::StdRng;
-use rsa::Pss;
-use rsa::RsaPrivateKey;
-use rsa::RsaPublicKey;
+use rsa::PrivateKey as RsaPrivateKey;
+use rsa::PublicKey as RsaPublicKey;
 use rsa::pkcs1::DecodeRsaPrivateKey;
-use rsa::pkcs1::DecodeRsaPublicKey;
-use rsa::signature::SignatureEncoding;
-use rsa::signature::Signer;
-use rsa::signature::Verifier;
-use rsa::traits::SignatureScheme;
 use serde::Deserialize;
-use sha1::Sha1;
 use sha2::Digest;
-use sha2::Sha256;
-use sha2::Sha384;
-use sha2::Sha512;
 use sha3::Sha3_256;
 use sha3::Sha3_384;
 use sha3::Sha3_512;
@@ -154,7 +143,7 @@ pub enum CryptoError {
   ),
   #[class(generic)]
   #[error(transparent)]
-  Der(#[from] rsa::pkcs1::der::Error),
+  Der(#[from] der::Error),
   #[class(type)]
   #[error("Missing argument hash")]
   MissingArgumentHash,
@@ -182,11 +171,6 @@ pub enum CryptoError {
   #[class(generic)]
   #[error(transparent)]
   P256Ecdsa(#[from] p256::ecdsa::Error),
-  /// `signature` 2.x error, from the `rsa` 0.9 signature paths (the EC
-  /// crates use `signature` 3.x, `P256Ecdsa` above).
-  #[class(generic)]
-  #[error(transparent)]
-  RsaSignature(#[from] rsa::signature::Error),
   #[class(type)]
   #[error("Unexpected error decoding private key")]
   DecodePrivateKey,
@@ -337,6 +321,37 @@ where
   signing_key.sign_prehash(prehash)
 }
 
+/// RSASSA-PSS over `data` hashed with `D`, which is also the MGF1 digest.
+fn rsa_pss_sign<D>(
+  key: &RsaPrivateKey,
+  salt_len: usize,
+  data: &[u8],
+) -> Result<Vec<u8>, rsa::Error>
+where
+  D: rsa_digest::Digest + rsa_digest::FixedOutputReset,
+{
+  key.sign(rsa::Pss::<D>::new_with_salt(salt_len), &D::digest(data))
+}
+
+/// Verifies an RSASSA-PSS signature made by [`rsa_pss_sign`].
+fn rsa_pss_verify<D>(
+  key: &RsaPublicKey,
+  salt_len: usize,
+  data: &[u8],
+  signature: &[u8],
+) -> bool
+where
+  D: rsa_digest::Digest + rsa_digest::FixedOutputReset,
+{
+  key
+    .verify(
+      rsa::Pss::<D>::new_with_salt(salt_len),
+      &D::digest(data),
+      signature,
+    )
+    .is_ok()
+}
+
 /// Synchronous per-algorithm sign dispatch. Called from
 /// [`crate::subtle_sign::run`] inside `spawn_blocking`; the op-layer
 /// wrapper that previously fronted this for the JS shim has been
@@ -351,28 +366,22 @@ pub(crate) fn sign_key_sync(
 
     let signature = match algorithm {
       Algorithm::RsassaPkcs1v15 => {
-        use rsa::pkcs1v15::SigningKey;
         let private_key = RsaPrivateKey::from_pkcs1_der(&key.data)?;
         match args.hash.ok_or_else(|| CryptoError::MissingArgumentHash)? {
           CryptoHash::Sha1 => {
-            let signing_key = SigningKey::<Sha1>::new(private_key);
-            signing_key.sign(data)
+            private_key.pkcs1v15_sign::<rsa_sha1::Sha1>(data)?
           }
           CryptoHash::Sha256 => {
-            let signing_key = SigningKey::<Sha256>::new(private_key);
-            signing_key.sign(data)
+            private_key.pkcs1v15_sign::<rsa_sha2::Sha256>(data)?
           }
           CryptoHash::Sha384 => {
-            let signing_key = SigningKey::<Sha384>::new(private_key);
-            signing_key.sign(data)
+            private_key.pkcs1v15_sign::<rsa_sha2::Sha384>(data)?
           }
           CryptoHash::Sha512 => {
-            let signing_key = SigningKey::<Sha512>::new(private_key);
-            signing_key.sign(data)
+            private_key.pkcs1v15_sign::<rsa_sha2::Sha512>(data)?
           }
           _ => return Err(CryptoError::UnsupportedAlgorithm),
         }
-        .to_vec()
       }
       Algorithm::RsaPss => {
         let private_key = RsaPrivateKey::from_pkcs1_der(&key.data)?;
@@ -382,31 +391,21 @@ pub(crate) fn sign_key_sync(
           .ok_or_else(|| CryptoError::MissingArgumentSaltLength)?
           as usize;
 
-        let mut rng = OsRng;
         match args.hash.ok_or_else(|| CryptoError::MissingArgumentHash)? {
           CryptoHash::Sha1 => {
-            let signing_key = Pss::new_with_salt::<Sha1>(salt_len);
-            let hashed = Sha1::digest(data);
-            signing_key.sign(Some(&mut rng), &private_key, &hashed)?
+            rsa_pss_sign::<rsa_sha1::Sha1>(&private_key, salt_len, data)?
           }
           CryptoHash::Sha256 => {
-            let signing_key = Pss::new_with_salt::<Sha256>(salt_len);
-            let hashed = Sha256::digest(data);
-            signing_key.sign(Some(&mut rng), &private_key, &hashed)?
+            rsa_pss_sign::<rsa_sha2::Sha256>(&private_key, salt_len, data)?
           }
           CryptoHash::Sha384 => {
-            let signing_key = Pss::new_with_salt::<Sha384>(salt_len);
-            let hashed = Sha384::digest(data);
-            signing_key.sign(Some(&mut rng), &private_key, &hashed)?
+            rsa_pss_sign::<rsa_sha2::Sha384>(&private_key, salt_len, data)?
           }
           CryptoHash::Sha512 => {
-            let signing_key = Pss::new_with_salt::<Sha512>(salt_len);
-            let hashed = Sha512::digest(data);
-            signing_key.sign(Some(&mut rng), &private_key, &hashed)?
+            rsa_pss_sign::<rsa_sha2::Sha512>(&private_key, salt_len, data)?
           }
           _ => return Err(CryptoError::UnsupportedAlgorithm),
         }
-        .to_vec()
       }
       Algorithm::Ecdsa => {
         let hash = args.hash.ok_or_else(|| CryptoError::MissingArgumentHash)?;
@@ -567,27 +566,21 @@ pub(crate) fn verify_key_sync(
 
     let verification = match algorithm {
       Algorithm::RsassaPkcs1v15 => {
-        use rsa::pkcs1v15::Signature;
-        use rsa::pkcs1v15::VerifyingKey;
         let public_key = read_rsa_public_key(key)?;
-        let signature: Signature = (&*args.signature).try_into()?;
+        let signature = args.signature.as_ref();
         match args.hash.ok_or_else(|| CryptoError::MissingArgumentHash)? {
-          CryptoHash::Sha1 => {
-            let verifying_key = VerifyingKey::<Sha1>::new(public_key);
-            verifying_key.verify(data, &signature).is_ok()
-          }
-          CryptoHash::Sha256 => {
-            let verifying_key = VerifyingKey::<Sha256>::new(public_key);
-            verifying_key.verify(data, &signature).is_ok()
-          }
-          CryptoHash::Sha384 => {
-            let verifying_key = VerifyingKey::<Sha384>::new(public_key);
-            verifying_key.verify(data, &signature).is_ok()
-          }
-          CryptoHash::Sha512 => {
-            let verifying_key = VerifyingKey::<Sha512>::new(public_key);
-            verifying_key.verify(data, &signature).is_ok()
-          }
+          CryptoHash::Sha1 => public_key
+            .pkcs1v15_verify::<rsa_sha1::Sha1>(data, signature)
+            .is_ok(),
+          CryptoHash::Sha256 => public_key
+            .pkcs1v15_verify::<rsa_sha2::Sha256>(data, signature)
+            .is_ok(),
+          CryptoHash::Sha384 => public_key
+            .pkcs1v15_verify::<rsa_sha2::Sha384>(data, signature)
+            .is_ok(),
+          CryptoHash::Sha512 => public_key
+            .pkcs1v15_verify::<rsa_sha2::Sha512>(data, signature)
+            .is_ok(),
           _ => return Err(CryptoError::UnsupportedAlgorithm),
         }
       }
@@ -601,26 +594,30 @@ pub(crate) fn verify_key_sync(
           as usize;
 
         match args.hash.ok_or_else(|| CryptoError::MissingArgumentHash)? {
-          CryptoHash::Sha1 => {
-            let pss = Pss::new_with_salt::<Sha1>(salt_len);
-            let hashed = Sha1::digest(data);
-            pss.verify(&public_key, &hashed, signature).is_ok()
-          }
-          CryptoHash::Sha256 => {
-            let pss = Pss::new_with_salt::<Sha256>(salt_len);
-            let hashed = Sha256::digest(data);
-            pss.verify(&public_key, &hashed, signature).is_ok()
-          }
-          CryptoHash::Sha384 => {
-            let pss = Pss::new_with_salt::<Sha384>(salt_len);
-            let hashed = Sha384::digest(data);
-            pss.verify(&public_key, &hashed, signature).is_ok()
-          }
-          CryptoHash::Sha512 => {
-            let pss = Pss::new_with_salt::<Sha512>(salt_len);
-            let hashed = Sha512::digest(data);
-            pss.verify(&public_key, &hashed, signature).is_ok()
-          }
+          CryptoHash::Sha1 => rsa_pss_verify::<rsa_sha1::Sha1>(
+            &public_key,
+            salt_len,
+            data,
+            signature,
+          ),
+          CryptoHash::Sha256 => rsa_pss_verify::<rsa_sha2::Sha256>(
+            &public_key,
+            salt_len,
+            data,
+            signature,
+          ),
+          CryptoHash::Sha384 => rsa_pss_verify::<rsa_sha2::Sha384>(
+            &public_key,
+            salt_len,
+            data,
+            signature,
+          ),
+          CryptoHash::Sha512 => rsa_pss_verify::<rsa_sha2::Sha512>(
+            &public_key,
+            salt_len,
+            data,
+            signature,
+          ),
           _ => return Err(CryptoError::UnsupportedAlgorithm),
         }
       }
@@ -940,7 +937,7 @@ fn read_rsa_public_key(key_data: KeyData) -> Result<RsaPublicKey, CryptoError> {
     KeyType::Private => {
       RsaPrivateKey::from_pkcs1_der(&key_data.data)?.to_public_key()
     }
-    KeyType::Public => RsaPublicKey::from_pkcs1_der(&key_data.data)?,
+    KeyType::Public => shared::rsa_public_key_from_pkcs1_der(&key_data.data)?,
     KeyType::Secret => unreachable!("unexpected KeyType::Secret"),
   };
   Ok(public_key)

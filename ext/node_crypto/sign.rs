@@ -1,6 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 use core::ops::Add;
 
+use dsa::signature::hazmat::PrehashVerifier as _;
 use ecdsa::EcdsaCurve;
 use ecdsa::der::MaxOverhead;
 use ecdsa::der::MaxSize;
@@ -8,10 +9,7 @@ use ecdsa::signature::hazmat::PrehashSigner as _;
 use ecdsa::signature::hazmat::PrehashVerifier as _;
 use elliptic_curve::FieldBytesSize;
 use elliptic_curve::array::ArraySize;
-use rand::rngs::OsRng;
-use rsa::signature::hazmat::PrehashVerifier as _;
 use rsa::traits::PublicKeyParts as _;
-use rsa::traits::SignatureScheme as _;
 use spki::der::Decode;
 
 use super::keys::AsymmetricPrivateKey;
@@ -22,6 +20,8 @@ use super::keys::KeyObjectHandle;
 use super::keys::RsaPssHashAlgorithm;
 use crate::digest::match_fixed_digest;
 use crate::digest::match_fixed_digest_with_oid;
+use crate::rsa_util::Digest011;
+use crate::rsa_util::pkcs1v15_sign_scheme;
 
 /// OpenSSL RSA_PKCS1_PADDING constant value.
 const RSA_PKCS1_PADDING: u32 = 1;
@@ -237,44 +237,98 @@ fn resolve_pss_salt_length<D: digest::Digest>(
   }
 }
 
-fn new_pss_scheme(
+/// RSASSA-PSS over the prehashed `digest` with the hash named `digest_type`
+/// (also the MGF1 hash) and the salt length Node's options resolve to.
+fn rsa_pss_sign(
+  key: &rsa::PrivateKey,
   digest_type: &str,
   pss_salt_length: Option<i32>,
-  key_size_bits: Option<usize>,
-) -> Result<rsa::pss::Pss, KeyObjectHandlePrehashedSignAndVerifyError> {
-  let pss = match_fixed_digest_with_oid!(
+  digest: &[u8],
+) -> Result<Vec<u8>, KeyObjectHandlePrehashedSignAndVerifyError> {
+  let key_size_bits = Some(key.n().bit_width() as usize);
+  let signature = match_fixed_digest_with_oid!(
     digest_type,
     fn <D>(algorithm: Option<RsaPssHashAlgorithm>) {
       let _: Option<RsaPssHashAlgorithm> = algorithm;
       let salt_len = resolve_pss_salt_length::<D>(pss_salt_length, key_size_bits);
-      rsa::pss::Pss::new_with_salt::<D>(salt_len)
+      key.sign(rsa::Pss::<Digest011<D>>::new_with_salt(salt_len), digest)
     },
     _ => {
       return Err(KeyObjectHandlePrehashedSignAndVerifyError::DigestNotAllowedForRsaPssSignature(digest_type.to_string()));
     }
   );
-  Ok(pss)
+  signature.map_err(|_| {
+    KeyObjectHandlePrehashedSignAndVerifyError::FailedToSignDigestWithRsaPss
+  })
+}
+
+/// Verifies an RSASSA-PSS signature over the prehashed `digest`, the
+/// counterpart of [`rsa_pss_sign`].
+fn rsa_pss_verify(
+  key: &rsa::PublicKey,
+  digest_type: &str,
+  pss_salt_length: Option<i32>,
+  digest: &[u8],
+  signature: &[u8],
+) -> Result<bool, KeyObjectHandlePrehashedSignAndVerifyError> {
+  let key_size_bits = Some(key.n().bit_width() as usize);
+  let verified = match_fixed_digest_with_oid!(
+    digest_type,
+    fn <D>(algorithm: Option<RsaPssHashAlgorithm>) {
+      let _: Option<RsaPssHashAlgorithm> = algorithm;
+      let salt_len = resolve_pss_salt_length::<D>(pss_salt_length, key_size_bits);
+      key.verify(
+        rsa::Pss::<Digest011<D>>::new_with_salt(salt_len),
+        digest,
+        signature,
+      )
+    },
+    _ => {
+      return Err(KeyObjectHandlePrehashedSignAndVerifyError::DigestNotAllowedForRsaPssSignature(digest_type.to_string()));
+    }
+  );
+  Ok(verified.is_ok())
+}
+
+/// The PKCS#1 v1.5 signature scheme for the hash named `digest_type`
+/// (`md5-sha1` carries no DigestInfo, as in TLS 1.1).
+fn rsa_pkcs1v15_scheme(
+  digest_type: &str,
+) -> Result<rsa::Pkcs1v15Sign, KeyObjectHandlePrehashedSignAndVerifyError> {
+  if digest_type == "md5-sha1" {
+    return Ok(rsa::Pkcs1v15Sign::new_unprefixed());
+  }
+  Ok(match_fixed_digest_with_oid!(
+    digest_type,
+    fn <D>() {
+      pkcs1v15_sign_scheme::<D>()
+    },
+    _ => {
+      return Err(KeyObjectHandlePrehashedSignAndVerifyError::DigestNotAllowedForRsaSignature(digest_type.to_string()))
+    }
+  ))
 }
 
 /// Recover the PSS salt length from a signature using AUTO detection.
 /// Performs the RSA raw operation (sig^e mod n) to get the encoded message,
 /// then parses the PSS structure to find the salt length.
-fn recover_pss_salt_len<D>(key: &rsa::RsaPublicKey, sig: &[u8]) -> Option<usize>
+fn recover_pss_salt_len<D>(key: &rsa::PublicKey, sig: &[u8]) -> Option<usize>
 where
   D: digest::Digest,
 {
   use rsa::traits::PublicKeyParts;
 
   let h_len = <D as digest::Digest>::output_size();
-  let key_bits = key.n().bits();
+  let key_bits = key.n().bit_width() as usize;
   let em_bits = key_bits - 1;
   let em_len = em_bits.div_ceil(8);
   let key_len = key_bits.div_ceil(8);
 
   // Compute em = sig^e mod n (raw RSA public key operation)
-  let sig_bn = rsa::BigUint::from_bytes_be(sig);
+  let sig_bn =
+    rsa::BoxedUint::from_be_slice(sig, key.n_bits_precision()).ok()?;
   let em_bn = rsa::hazmat::rsa_encrypt(key, &sig_bn).ok()?;
-  let em_be = em_bn.to_bytes_be();
+  let em_be = crate::rsa_util::uint_to_be_bytes(&em_bn);
 
   // Pad em to key_len bytes (big-endian, left-pad with zeros)
   if em_be.len() > key_len {
@@ -359,32 +413,14 @@ impl KeyObjectHandle {
         }
 
         if padding == Some(RSA_PKCS1_PSS_PADDING) {
-          let pss = new_pss_scheme(
-            digest_type,
-            pss_salt_length,
-            Some(key.n().bits()),
-          )?;
-          let signature = pss
-            .sign(Some(&mut OsRng), key, digest)
-            .map_err(|_| KeyObjectHandlePrehashedSignAndVerifyError::FailedToSignDigestWithRsaPss)?;
+          let signature =
+            rsa_pss_sign(key, digest_type, pss_salt_length, digest)?;
           return Ok(signature.into());
         }
 
-        let signer = if digest_type == "md5-sha1" {
-          rsa::pkcs1v15::Pkcs1v15Sign::new_unprefixed()
-        } else {
-          match_fixed_digest_with_oid!(
-            digest_type,
-            fn <D>() {
-              rsa::pkcs1v15::Pkcs1v15Sign::new::<D>()
-            },
-            _ => {
-              return Err(KeyObjectHandlePrehashedSignAndVerifyError::DigestNotAllowedForRsaSignature(digest_type.to_string()))
-            }
-          )
-        };
+        let signer = rsa_pkcs1v15_scheme(digest_type)?;
 
-        let signature = signer.sign(Some(&mut OsRng), key, digest).map_err(
+        let signature = key.sign(signer, digest).map_err(
           |e| {
             if e == rsa::Error::MessageTooLong {
               KeyObjectHandlePrehashedSignAndVerifyError::DigestTooBigForRsaKey
@@ -424,7 +460,7 @@ impl KeyObjectHandle {
           );
         }
 
-        let pss = match_fixed_digest_with_oid!(
+        let signature = match_fixed_digest_with_oid!(
           digest_type,
           fn <D>(algorithm: Option<RsaPssHashAlgorithm>) {
             if let Some(hash_algorithm) = hash_algorithm.take()
@@ -437,7 +473,7 @@ impl KeyObjectHandle {
             // Resolve salt length: explicit pss_salt_length takes priority,
             // then key details, then default (digest length)
             let resolved = if pss_salt_length.is_some() {
-              let r = resolve_pss_salt_length::<D>(pss_salt_length, Some(key.key.n().bits()));
+              let r = resolve_pss_salt_length::<D>(pss_salt_length, Some(key.key.n().bit_width() as usize));
               // Enforce key's minimum salt length
               if let Some(min_salt) = salt_length && r < min_salt {
                 return Err(KeyObjectHandlePrehashedSignAndVerifyError::PssSaltLenTooSmall);
@@ -448,14 +484,13 @@ impl KeyObjectHandle {
             } else {
               <D as digest::Digest>::output_size()
             };
-            rsa::pss::Pss::new_with_salt::<D>(resolved)
+            key.key.sign(rsa::Pss::<Digest011<D>>::new_with_salt(resolved), digest)
           },
           _ => {
             return Err(KeyObjectHandlePrehashedSignAndVerifyError::DigestNotAllowedForRsaPssSignature(digest_type.to_string()));
           }
         );
-        let signature = pss
-          .sign(Some(&mut OsRng), &key.key, digest)
+        let signature = signature
           .map_err(|_| KeyObjectHandlePrehashedSignAndVerifyError::FailedToSignDigestWithRsaPss)?;
         Ok(signature.into())
       }
@@ -591,29 +626,18 @@ impl KeyObjectHandle {
             pss_salt_length
           };
 
-          let pss = new_pss_scheme(
+          return rsa_pss_verify(
+            key,
             digest_type,
             effective_salt_length,
-            Some(key.n().bits()),
-          )?;
-          return Ok(pss.verify(key, digest, signature).is_ok());
+            digest,
+            signature,
+          );
         }
 
-        let signer = if digest_type == "md5-sha1" {
-          rsa::pkcs1v15::Pkcs1v15Sign::new_unprefixed()
-        } else {
-          match_fixed_digest_with_oid!(
-            digest_type,
-            fn <D>() {
-              rsa::pkcs1v15::Pkcs1v15Sign::new::<D>()
-            },
-            _ => {
-              return Err(KeyObjectHandlePrehashedSignAndVerifyError::DigestNotAllowedForRsaSignature(digest_type.to_string()))
-            }
-          )
-        };
+        let signer = rsa_pkcs1v15_scheme(digest_type)?;
 
-        Ok(signer.verify(key, digest, signature).is_ok())
+        Ok(key.verify(signer, digest, signature).is_ok())
       }
       AsymmetricPublicKey::RsaPss(key) => {
         if padding == Some(RSA_PKCS1_PADDING) {
@@ -628,7 +652,7 @@ impl KeyObjectHandle {
           hash_algorithm = Some(details.hash_algorithm);
           salt_length = Some(details.salt_length as usize);
         }
-        let pss = match_fixed_digest_with_oid!(
+        let verified = match_fixed_digest_with_oid!(
           digest_type,
           fn <D>(algorithm: Option<RsaPssHashAlgorithm>) {
             if let Some(hash_algorithm) = hash_algorithm.take()
@@ -639,19 +663,23 @@ impl KeyObjectHandle {
                 });
               }
             let resolved = if pss_salt_length.is_some() {
-              resolve_pss_salt_length::<D>(pss_salt_length, Some(key.key.n().bits()))
+              resolve_pss_salt_length::<D>(pss_salt_length, Some(key.key.n().bit_width() as usize))
             } else if let Some(sl) = salt_length {
               sl
             } else {
               <D as digest::Digest>::output_size()
             };
-            rsa::pss::Pss::new_with_salt::<D>(resolved)
+            key.key.verify(
+              rsa::Pss::<Digest011<D>>::new_with_salt(resolved),
+              digest,
+              signature,
+            )
           },
           _ => {
             return Err(KeyObjectHandlePrehashedSignAndVerifyError::DigestNotAllowedForRsaPssSignature(digest_type.to_string()));
           }
         );
-        Ok(pss.verify(&key.key, digest, signature).is_ok())
+        Ok(verified.is_ok())
       }
       AsymmetricPublicKey::Dsa(key) => {
         let sig = if dsa_signature_encoding == 0 {

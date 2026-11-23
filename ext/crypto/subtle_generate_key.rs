@@ -873,11 +873,10 @@ fn read_hash_name<'s>(
 
 fn public_exponent_from_pkcs1(pkcs1_der: &[u8]) -> Vec<u8> {
   use rsa::pkcs1::DecodeRsaPrivateKey;
-  rsa::RsaPrivateKey::from_pkcs1_der(pkcs1_der)
+  rsa::PrivateKey::from_pkcs1_der(pkcs1_der)
     .map(|k| {
       use rsa::traits::PublicKeyParts;
-      let e = k.e();
-      e.to_bytes_be()
+      k.e().to_be_bytes_trimmed_vartime().into_vec()
     })
     .unwrap_or_else(|_| vec![1, 0, 1])
 }

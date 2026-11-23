@@ -16,7 +16,7 @@ pub enum Ed25519Error {
   FailedExport,
   #[class(generic)]
   #[error(transparent)]
-  Der(#[from] rsa::pkcs1::der::Error),
+  Der(#[from] der::Error),
   #[class(generic)]
   #[error(transparent)]
   KeyRejected(#[from] aws_lc_rs::error::KeyRejected),
@@ -87,10 +87,10 @@ pub(crate) fn export_spki_ed25519(
 pub(crate) fn export_pkcs8_ed25519(
   pkey: &[u8],
 ) -> Result<Vec<u8>, Ed25519Error> {
-  use rsa::pkcs1::der::Encode;
-  let pk_info = rsa::pkcs8::PrivateKeyInfo {
+  use der::Encode;
+  let pk_info = pkcs8::PrivateKeyInfo {
     public_key: None,
-    algorithm: rsa::pkcs8::AlgorithmIdentifierRef {
+    algorithm: pkcs8::AlgorithmIdentifierRef {
       oid: ED25519_OID,
       parameters: None,
     },

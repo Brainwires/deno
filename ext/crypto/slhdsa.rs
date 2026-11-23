@@ -1,11 +1,10 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use deno_error::JsErrorBox;
+use der::Decode;
 use fips205::traits::SerDes;
 use fips205::traits::Signer;
 use fips205::traits::Verifier;
-use rsa::pkcs8;
-use rsa::pkcs8::der::Decode;
 use spki::der::Encode;
 use spki::der::asn1::BitString;
 

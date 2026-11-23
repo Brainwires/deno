@@ -5,9 +5,10 @@ use deno_core::JsBuffer;
 use deno_core::ToV8;
 use deno_core::convert::Uint8Array;
 use p256::pkcs8::EncodePrivateKey;
+use pkcs8::PrivateKeyInfo;
 use rsa::pkcs1::UintRef;
-use rsa::pkcs8::PrivateKeyInfo;
-use rsa::pkcs8::der::Encode;
+use rsa::pkcs1::der::Decode as _;
+use rsa::pkcs1::der::Encode as _;
 use serde::Deserialize;
 use spki::der::Decode;
 
@@ -80,7 +81,10 @@ pub enum ImportKeyError {
   #[error(transparent)]
   Spki(#[from] spki::Error),
   #[error(transparent)]
-  Der(#[from] rsa::pkcs1::der::Error),
+  Der(#[from] der::Error),
+  /// The `der` 0.8 error of rsa 0.10's PKCS#1 codec.
+  #[error(transparent)]
+  Pkcs1Der(#[from] rsa::pkcs1::der::Error),
 }
 
 #[derive(Deserialize)]
@@ -285,7 +289,7 @@ fn import_key_rsa_jwk(
       jwt_b64_int_or_err!(modulus, &n, InvalidModulus);
       jwt_b64_int_or_err!(public_exponent, &e, InvalidPublicExponent);
 
-      let public_key = rsa::pkcs1::RsaPublicKey {
+      let public_key = rsa::pkcs1::RsaPublicKeyRef {
         modulus,
         public_exponent,
       };
@@ -324,7 +328,7 @@ fn import_key_rsa_jwk(
       jwt_b64_int_or_err!(exponent2, &dq, InvalidSecondCRTExponent);
       jwt_b64_int_or_err!(coefficient, &qi, InvalidCRTCoefficient);
 
-      let private_key = rsa::pkcs1::RsaPrivateKey {
+      let private_key = rsa::pkcs1::RsaPrivateKeyRef {
         modulus,
         public_exponent,
         private_exponent,
@@ -372,7 +376,7 @@ fn import_key_rsassa(
       }
 
       // 8-9.
-      let public_key = rsa::pkcs1::RsaPublicKey::from_der(
+      let public_key = rsa::pkcs1::RsaPublicKeyRef::from_der(
         pk_info.subject_public_key.raw_bytes(),
       )?;
 
@@ -380,7 +384,7 @@ fn import_key_rsassa(
 
       if bytes_consumed
         != rsa::pkcs1::der::Length::new(
-          pk_info.subject_public_key.raw_bytes().len() as u16,
+          pk_info.subject_public_key.raw_bytes().len() as u32,
         )
       {
         return Err(ImportKeyError::PublicKeyTooLong);
@@ -411,12 +415,12 @@ fn import_key_rsassa(
 
       // 8-9.
       let private_key =
-        rsa::pkcs1::RsaPrivateKey::from_der(pk_info.private_key)?;
+        rsa::pkcs1::RsaPrivateKeyRef::from_der(pk_info.private_key)?;
 
       let bytes_consumed = private_key.encoded_len()?;
 
       if bytes_consumed
-        != rsa::pkcs1::der::Length::new(pk_info.private_key.len() as u16)
+        != rsa::pkcs1::der::Length::new(pk_info.private_key.len() as u32)
       {
         return Err(ImportKeyError::PrivateKeyTooLong);
       }
@@ -456,7 +460,7 @@ fn import_key_rsapss(
       }
 
       // 8-9.
-      let public_key = rsa::pkcs1::RsaPublicKey::from_der(
+      let public_key = rsa::pkcs1::RsaPublicKeyRef::from_der(
         pk_info.subject_public_key.raw_bytes(),
       )?;
 
@@ -464,7 +468,7 @@ fn import_key_rsapss(
 
       if bytes_consumed
         != rsa::pkcs1::der::Length::new(
-          pk_info.subject_public_key.raw_bytes().len() as u16,
+          pk_info.subject_public_key.raw_bytes().len() as u32,
         )
       {
         return Err(ImportKeyError::PublicKeyTooLong);
@@ -495,12 +499,12 @@ fn import_key_rsapss(
 
       // 8-9.
       let private_key =
-        rsa::pkcs1::RsaPrivateKey::from_der(pk_info.private_key)?;
+        rsa::pkcs1::RsaPrivateKeyRef::from_der(pk_info.private_key)?;
 
       let bytes_consumed = private_key.encoded_len()?;
 
       if bytes_consumed
-        != rsa::pkcs1::der::Length::new(pk_info.private_key.len() as u16)
+        != rsa::pkcs1::der::Length::new(pk_info.private_key.len() as u32)
       {
         return Err(ImportKeyError::PrivateKeyTooLong);
       }
@@ -540,7 +544,7 @@ fn import_key_rsaoaep(
       }
 
       // 8-9.
-      let public_key = rsa::pkcs1::RsaPublicKey::from_der(
+      let public_key = rsa::pkcs1::RsaPublicKeyRef::from_der(
         pk_info.subject_public_key.raw_bytes(),
       )?;
 
@@ -548,7 +552,7 @@ fn import_key_rsaoaep(
 
       if bytes_consumed
         != rsa::pkcs1::der::Length::new(
-          pk_info.subject_public_key.raw_bytes().len() as u16,
+          pk_info.subject_public_key.raw_bytes().len() as u32,
         )
       {
         return Err(ImportKeyError::PublicKeyTooLong);
@@ -579,12 +583,12 @@ fn import_key_rsaoaep(
 
       // 8-9.
       let private_key =
-        rsa::pkcs1::RsaPrivateKey::from_der(pk_info.private_key)?;
+        rsa::pkcs1::RsaPrivateKeyRef::from_der(pk_info.private_key)?;
 
       let bytes_consumed = private_key.encoded_len()?;
 
       if bytes_consumed
-        != rsa::pkcs1::der::Length::new(pk_info.private_key.len() as u16)
+        != rsa::pkcs1::der::Length::new(pk_info.private_key.len() as u32)
       {
         return Err(ImportKeyError::PrivateKeyTooLong);
       }
