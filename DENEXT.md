@@ -21458,6 +21458,23 @@ where the changes are discussed.
        3.0.0-denext.25).
      - Node tests enabled: none.
 
+5NN. **`fix(lint)`: lint plugin specifiers resolve through the import map**
+     (port of theende/ende e722926a34, MIT, a cherry-pick of upstream commit
+     0821f5c3ca71 for denoland/deno#37085; `libs/config/workspace/mod.rs`,
+     `cli/tools/lint/mod.rs`, `cli/lsp/lint.rs`, `cli/args/mod.rs`). A plugin
+     configured as `"lint": { "plugins": ["lume/lint.ts"] }` was always read as
+     a local path, even when the workspace import map mapped `lume/` elsewhere.
+     Plugin specifiers and `!` exclusions now resolve through the workspace's
+     merged import map in the CLI, watch mode and the language server, and the
+     resolved URLs are deduplicated. An unmapped bare specifier still resolves
+     as a path without a leading `./`; a blocked (null) import map entry is an
+     error instead of a fallback to a path.
+     - Tests: `tests/specs/lint/lint_plugin_import_map` (an `imports` map in
+       deno.json and an external `importMap`), and the
+       `test_lint_plugins_import_map_*` config tests (with the upstream `npm:`
+       plugin case Ende dropped).
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

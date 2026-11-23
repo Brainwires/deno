@@ -128,8 +128,11 @@ pub async fn lint(
       &workspace_lint_options,
       maybe_tsgolint_bin,
     );
-    let paths_with_options_batches =
-      resolve_paths_with_options_batches(cli_options, &lint_flags)?;
+    let paths_with_options_batches = resolve_paths_with_options_batches(
+      cli_options,
+      &lint_flags,
+      factory.workspace_resolver().await?.maybe_import_map(),
+    )?;
     for paths_with_options in paths_with_options_batches {
       linter
         .lint_files(
@@ -158,8 +161,11 @@ async fn lint_with_watch_inner(
   let factory = CliFactory::from_flags(flags);
   let cli_options = factory.cli_options()?;
   let _ = watcher_communicator.watch_paths(cli_options.watch_paths());
-  let mut paths_with_options_batches =
-    resolve_paths_with_options_batches(cli_options, &lint_flags)?;
+  let mut paths_with_options_batches = resolve_paths_with_options_batches(
+    cli_options,
+    &lint_flags,
+    factory.workspace_resolver().await?.maybe_import_map(),
+  )?;
   for paths_with_options in &mut paths_with_options_batches {
     _ = watcher_communicator.watch_paths(
       file_watcher::watch_paths_for_file_patterns(
@@ -251,9 +257,10 @@ struct PathsWithOptions {
 fn resolve_paths_with_options_batches(
   cli_options: &CliOptions,
   lint_flags: &LintFlags,
+  maybe_import_map: Option<&import_map::ImportMap>,
 ) -> Result<Vec<PathsWithOptions>, AnyError> {
-  let members_lint_options =
-    cli_options.resolve_lint_options_for_members(lint_flags)?;
+  let members_lint_options = cli_options
+    .resolve_lint_options_for_members(lint_flags, maybe_import_map)?;
   let mut paths_with_options_batches =
     Vec::with_capacity(members_lint_options.len());
   for (dir, lint_options) in members_lint_options {
