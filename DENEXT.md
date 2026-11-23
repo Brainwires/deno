@@ -21360,6 +21360,31 @@ where the changes are discussed.
        `node_compat` crypto suites unchanged.
      - Node tests enabled: none.
 
+5NN. **`fix(ext/web)`: `structuredClone` rejects nested non-serializable
+     platform objects** (port of theende/ende 6c63caf627, MIT, from
+     denoland/deno#37112; issue denoland/deno#37108;
+     `ext/web/13_message_port.js`, `libs/core/ops_builtin_v8.rs`, the marked
+     interfaces' modules). `structuredClone` and `postMessage` rejected a
+     non-serializable platform object (URL, Headers, Request, ...) only as the
+     top-level value: nested in another object it was cloned as `{}`, and many
+     interfaces (Event, EventTarget, TextEncoder/TextDecoder, FormData,
+     URLPattern, the compression and queuing-strategy classes, PerformanceEntry
+     / Observer, Crypto, SubtleCrypto, MessageChannel) weren't marked at all.
+     The marker is now the registry symbol `Deno.nonSerializable`, which the V8
+     serializer delegate checks, so a marked object anywhere in the value throws
+     a `DataCloneError`. It is checked after the transfer list (Ende's change to
+     the upstream PR): a `MessagePort` is an `EventTarget` and must still be
+     transferred, nested or not.
+     - User-facing note: `structuredClone({ e: new Event("x") })` and the like
+       throw `DataCloneError` instead of returning `{ e: {} }`.
+     - Tests: `structured_clone_test.ts`'s
+       `structuredClone rejects
+       non-serializable platform objects` and
+       the nested `MessagePort` transfer cases (the first fails on
+       3.0.0-denext.25).
+     - Node tests enabled: none known; `node:worker_threads` messages use the
+       same serializer.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -21371,7 +21396,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515) are what the prebuilt `libdenort` carries. The
+506-510, 511, 512, 513, 515, 5NN) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.
