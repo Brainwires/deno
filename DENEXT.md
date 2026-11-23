@@ -21446,6 +21446,18 @@ where the changes are discussed.
        3.0.0-denext.25).
      - Node tests enabled: none.
 
+5NN. **`fix(ext/web)`: the global scope interfaces' `Symbol.toStringTag` is a
+     data property** (port of theende/ende 0b43d97ae3, MIT, Ende's follow-up to
+     denoland/deno#37125; issue denoland/deno#37107;
+     `ext/web/04_global_interfaces.js`). `Window`, `WorkerGlobalScope` and
+     `DedicatedWorkerGlobalScope` defined the tag as a getter; Web IDL makes it
+     a non-writable, non-enumerable, configurable data property.
+     `Object.prototype.toString.call(globalThis)` is unchanged.
+     - Tests: `globals_test.ts`'s `windowPrototypeHasToStringTag` and
+       `workerGlobalScopePrototypesHaveToStringTag` (both fail on
+       3.0.0-denext.25).
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -21457,7 +21469,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 5NN, 5NN, 5NN, 5NN) are what the prebuilt
+506-510, 511, 512, 513, 515, 5NN, 5NN, 5NN, 5NN, 5NN) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
