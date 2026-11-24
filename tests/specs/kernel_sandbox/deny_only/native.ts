@@ -13,6 +13,7 @@ export const libc = Deno.dlopen(
     close: { parameters: ["i32"], result: "i32" },
     unlink: { parameters: ["buffer"], result: "i32" },
     rename: { parameters: ["buffer", "buffer"], result: "i32" },
+    mkdir: { parameters: ["buffer", "u32"], result: "i32" },
     chmod: { parameters: ["buffer", "u32"], result: "i32" },
     truncate: { parameters: ["buffer", "i64"], result: "i32" },
     utimes: { parameters: ["buffer", "pointer"], result: "i32" },

@@ -211,8 +211,8 @@ pub struct EngineDirs {
   /// runtime library, the engine's resources and helper programs).
   pub install: Option<PathBuf>,
   /// Linux: `$XDG_RUNTIME_DIR` (the Wayland, D-Bus, PipeWire and
-  /// accessibility sockets, dconf's shared memory, the single-instance
-  /// lock).
+  /// accessibility sockets; dconf's shared memory, PulseAudio's and
+  /// WebKitGTK's own folders).
   pub runtime_dir: Option<PathBuf>,
   /// Linux: `$XAUTHORITY`.
   pub xauthority: Option<PathBuf>,
@@ -265,12 +265,25 @@ const LINUX_HELPER_DIRS: &[&str] = &[
 /// secure store), spelling dictionaries, GTK, dconf, GStreamer and
 /// PulseAudio, the sound devices, and the web engines' helper programs.
 /// What GPUI adds is narrow: on macOS, Metal's shader cache in the app's
-/// own folder of the per-user cache (`<user folder>/C/<app id>`), never the
-/// whole per-user folder the web view gets. On Linux, no shared shader
-/// cache (`~/.cache/mesa_shader_cache`, `~/.nv`) is writable: Mesa and
-/// NVIDIA then run without a disk cache (slower first frames, nothing
-/// else), rather than one app writing a cache every GPU client of the user
-/// loads.
+/// own folder of the per-user cache (`<user folder>/C/<app id>`).
+///
+/// For every engine the write grant stays in the app's own places: on
+/// macOS the app's folder of the per-user cache and the temp folder, never
+/// the per-user folder whole; on Linux no shared shader cache
+/// (`~/.cache/mesa_shader_cache`, `~/.nv`) is writable (Mesa and NVIDIA
+/// then run without a disk cache: slower first frames, nothing else, rather
+/// than one app writing a cache every GPU client of the user loads),
+/// Chromium's shared certificate database (`~/.pki`) and GStreamer's
+/// registry are read only, and `$XDG_RUNTIME_DIR` is read with only the
+/// toolkits' own folders written.
+///
+/// Not narrowed here: a Unix socket is connected to whatever the file
+/// rules say (Landlock holds no rule for it; the plan's socket policy does),
+/// so the session bus stays reachable on Linux, and with it what the
+/// session's services do for a caller: `systemd --user` starts a program
+/// outside the sandbox on request (`StartTransientUnit`). A confined Linux
+/// desktop app is held for files, programs it starts itself and the
+/// network, not against the session's services.
 pub fn engine_paths(
   os: TargetOs,
   engine: Engine,
@@ -341,15 +354,15 @@ pub fn engine_paths(
           );
         }
       }
-      if web {
-        paths.write.extend(dirs.user_folder.clone());
-      } else if let (Some(user_folder), Some(id)) =
-        (&dirs.user_folder, &dirs.app_id)
-      {
-        // Metal's shader cache: `<DARWIN_USER_CACHE_DIR>/<bundle id>/
-        // com.apple.metal`, the app's own folder of the per-user cache (the
-        // packaged app's bundle id is its identifier). The temp folder is
-        // granted below like every engine's.
+      if let (Some(user_folder), Some(id)) = (&dirs.user_folder, &dirs.app_id) {
+        // The app's own folder of the per-user cache,
+        // `<DARWIN_USER_CACHE_DIR>/<bundle id>` (the packaged app's bundle
+        // id is its identifier): Metal's shader cache (`com.apple.metal`)
+        // and WebKit's and CFNetwork's caches, for every engine. The temp
+        // folder (`T`) is granted below like every engine's. Never the
+        // per-user folder whole: `0` and the rest of `C` hold every other
+        // app's caches and the per-user daemons' state (the LaunchServices
+        // database among them).
         paths.write.push(user_folder.join("C").join(id));
       }
     }
@@ -393,8 +406,19 @@ pub fn engine_paths(
         // sound (WebKit's and Chromium's media)
         paths.write.push(PathBuf::from("/dev/snd"));
       }
-      // the Wayland and session bus sockets
-      paths.write.extend(dirs.runtime_dir.clone());
+      // `$XDG_RUNTIME_DIR`: read (the Wayland, session bus, PipeWire and
+      // accessibility sockets are connected to, the display's authority
+      // files read), never written whole: it also holds the systemd user
+      // manager's runtime units and other programs' sockets and state.
+      // Written beneath it: what the toolkits keep there themselves
+      // (dconf's shared memory, PulseAudio's runtime files, WebKitGTK's
+      // own folder), for a web engine.
+      paths.read.extend(dirs.runtime_dir.clone());
+      if web && let Some(runtime_dir) = &dirs.runtime_dir {
+        for name in ["dconf", "pulse", "webkitgtk"] {
+          paths.write.push(runtime_dir.join(name));
+        }
+      }
       paths.read.extend(dirs.xauthority.clone());
       if let Some(home) = &dirs.home {
         let config = dirs.config_home.clone().unwrap_or(home.join(".config"));
@@ -429,19 +453,19 @@ pub fn engine_paths(
             paths.read.push(data.join(name));
           }
           paths.read.push(home.join(".themes"));
-          for name in [
-            "mesa_shader_cache",
-            "mesa_shader_cache_db",
-            "nvidia",
-            "gstreamer-1.0",
-          ] {
-            paths.write.push(cache.join(name));
-          }
-          paths.write.push(home.join(".nv"));
+          // GStreamer's plugin registry is read; without write it is not
+          // updated (plugins are scanned again at each start). No shared
+          // GPU shader cache (`mesa_shader_cache`, `nvidia`, `~/.nv`) is
+          // written, as for the GPUI host: every GPU client of the user
+          // loads what is in them.
+          paths.read.push(cache.join("gstreamer-1.0"));
         }
         if engine == Engine::Cef {
-          // Chromium's certificate database
-          paths.write.push(home.join(".pki"));
+          // Chromium's certificate database (NSS, which the user's
+          // browsers share): the authorities and client certificates the
+          // user added are read; Chromium can't open it for writing and
+          // goes on without a persistent database of its own
+          paths.read.push(home.join(".pki"));
         }
       }
       if engine == Engine::Cef {
@@ -942,7 +966,9 @@ mod tests {
     }
     for write in [
       "/tmp",
-      "/run/user/1000",
+      "/run/user/1000/dconf",
+      "/run/user/1000/pulse",
+      "/run/user/1000/webkitgtk",
       "/dev/dri",
       "/home/u/.local/share/com.acme.app",
       "/home/u/.cache/com.acme.app",
@@ -956,10 +982,33 @@ mod tests {
     assert!(!webview.write.contains(&p("/home/u")));
     // /proc is written only under Chromium, whose sandbox maps ids there
     assert!(!webview.write.contains(&p("/proc")));
-    assert!(!webview.write.contains(&p("/home/u/.pki")));
+    assert!(!webview.read.contains(&p("/home/u/.pki")));
     let cef = engine_paths(TargetOs::Linux, Engine::Cef, &dirs());
     assert!(cef.write.contains(&p("/proc")));
-    assert!(cef.write.contains(&p("/home/u/.pki")));
+    // the write grant stays in the app's own places: the runtime folder is
+    // read (its sockets, the authority files), with the toolkits' own
+    // folders written; the shared certificate database and GStreamer's
+    // registry are read; no shared shader cache is written
+    let gpui = engine_paths(TargetOs::Linux, Engine::Gpui, &dirs());
+    for paths in [&webview, &cef, &gpui] {
+      assert!(paths.read.contains(&p("/run/user/1000")));
+      for shared in [
+        "/run/user/1000",
+        "/run/user/1000/systemd",
+        "/home/u/.pki",
+        "/home/u/.nv",
+        "/home/u/.cache",
+        "/home/u/.cache/mesa_shader_cache",
+        "/home/u/.cache/mesa_shader_cache_db",
+        "/home/u/.cache/nvidia",
+        "/home/u/.cache/gstreamer-1.0",
+      ] {
+        assert!(!paths.write.contains(&p(shared)), "{shared}");
+      }
+    }
+    assert!(cef.read.contains(&p("/home/u/.pki")));
+    assert!(webview.read.contains(&p("/home/u/.cache/gstreamer-1.0")));
+    assert!(!gpui.write.iter().any(|w| w.starts_with("/run/user/1000")));
     // the helper programs: WebKitGTK's, and the executable's own folder
     assert!(webview.exec.contains(&p("/usr/libexec/webkit2gtk-4.1")));
     assert!(
@@ -1013,9 +1062,20 @@ mod tests {
       "/Users/u/Library/Caches/com.acme.app",
       "/Users/u/Library/Saved Application State/com.acme.app.savedState",
       "/Users/u/Library/Application Support/com.acme.app",
-      "/private/var/folders/ab/cd",
+      "/private/var/folders/ab/cd/C/com.acme.app",
+      "/private/var/folders/ab/cd/T",
     ] {
       assert!(paths.write.contains(&p(write)), "{write}");
+    }
+    // of the per-user folder only the app's own cache folder and the temp
+    // folder: never the folder whole, the other apps' caches or the
+    // per-user daemons' state
+    for shared in [
+      "/private/var/folders/ab/cd",
+      "/private/var/folders/ab/cd/C",
+      "/private/var/folders/ab/cd/0",
+    ] {
+      assert!(!paths.write.contains(&p(shared)), "{shared}");
     }
     assert!(paths.exec.is_empty());
     // never the Library folder whole, nor another app's web data
@@ -1036,6 +1096,13 @@ mod tests {
         .write
         .iter()
         .any(|w| w.starts_with("/Users/u/Library/WebKit"))
+    );
+    assert!(
+      !anonymous
+        .write
+        .iter()
+        .any(|w| w.starts_with("/private/var/folders/ab/cd/C")
+          || w == &p("/private/var/folders/ab/cd"))
     );
     // no enforcer, no paths
     assert_eq!(

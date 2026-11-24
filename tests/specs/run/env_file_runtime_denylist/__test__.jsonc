@@ -1,0 +1,17 @@
+{
+  "tempDir": true,
+  "tests": {
+    // denext: an env file can't set the variables the runtime's own files,
+    // sockets and confinement are read from (the audit log, the coverage
+    // folder, the cron socket, the dev server, jail and broker markers):
+    // each is ignored with a warning, as Deno's tunnel variables are, and
+    // the program's own variables still load. (The certificate variables
+    // are refused the same way; a CI machine may set those itself, and a
+    // variable the environment already has is skipped before this, so the
+    // unit test covers them.)
+    "runtime_vars_ignored": {
+      "args": "run --allow-env --allow-read=. --env-file=runtime.env main.ts",
+      "output": "main.out"
+    }
+  }
+}

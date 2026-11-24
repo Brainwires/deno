@@ -144,9 +144,10 @@ pub fn find_native_tsc(
 }
 
 /// Run the native `tsc` at `tsc_path` against `tsconfig_path` and capture its
-/// output. `--pretty false` yields the stable
-/// `path(line,col): error TS####: message` format; `--diagnostics` appends a
-/// stats block.
+/// output. `--pretty true` yields a `path:line:col - error TS####: message`
+/// header per diagnostic, followed by the source lines with the span
+/// underlined and any related information (colored; see
+/// [`parse_tsc_pretty_diagnostics`]); `--diagnostics` appends a stats block.
 pub async fn run_native_tsc(
   tsc_path: &Path,
   tsconfig_path: &Path,

@@ -1,0 +1,17 @@
+{
+  "tempDir": true,
+  "tests": {
+    // denext: a process with no-new-privileges and a seccomp filter that are
+    // not this runtime's kernel sandbox (what a hardened container gives
+    // every process: Kubernetes' `allowPrivilegeEscalation: false`) is not
+    // confined by it: an `.npmrc` it can't read is an error, as with no
+    // sandbox, never a registry mapping dropped with a warning. The file is
+    // made unreadable with its mode, which root ignores, so the check needs
+    // a user that isn't root (the script says so otherwise).
+    "unreadable_npmrc_is_an_error": {
+      "if": "linux",
+      "args": "run --quiet -A main.ts",
+      "output": "main.out"
+    }
+  }
+}

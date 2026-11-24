@@ -29,6 +29,12 @@ pub(crate) const STALE_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub(crate) const LAST_USED_REFRESH: Duration =
   Duration::from_secs(24 * 60 * 60);
 
+/// A version's database that has gone unused this long is opened under the
+/// upkeep lock ([`lock_for_long_unused_open`]): a day short of
+/// [`STALE_AFTER`], so a database another version may prune is never opened
+/// without it.
+const OPEN_UNDER_LOCK_AFTER: Duration = Duration::from_secs(6 * 24 * 60 * 60);
+
 /// SQLite's side files of a database file.
 const SIDE_FILE_SUFFIXES: &[&str] = &["-wal", "-shm", "-journal"];
 
@@ -120,11 +126,65 @@ pub(crate) fn maintain_versioned_files(
   prune_stale_versions(base, current, now);
 }
 
+/// The upkeep lock of the cache `base`: the file `<base>.lock` beside its
+/// databases, locked by the OS (released when the handle closes or the
+/// process ends). Pruning holds it exclusively; a version opening a database
+/// of its own that has gone unused long enough to be pruned holds it shared
+/// until its connection is open. So a database is never removed while the
+/// version that owns it is between finding the file and holding SQLite's
+/// own locks on it, where the check for those locks can't see it: a
+/// connection opened on a file removed in that moment would go on with a
+/// database no later connection shares.
+pub(crate) struct UpkeepLock {
+  _file: std::fs::File,
+}
+
+fn upkeep_lock_file(base: &Path) -> Option<std::fs::File> {
+  let mut name = base.file_name()?.to_os_string();
+  name.push(".lock");
+  std::fs::OpenOptions::new()
+    .read(true)
+    .write(true)
+    .create(true)
+    .truncate(false)
+    .open(base.with_file_name(name))
+    .ok()
+}
+
+/// Before this version's database `current` (of the cache `base`) is
+/// opened: when the file exists and was last marked used
+/// [`OPEN_UNDER_LOCK_AFTER`] or more before `now`, takes the upkeep lock
+/// (waiting for a pruning pass to finish; they are short) and marks the file
+/// used. The caller opens its connection and then drops the lock. `None`
+/// when the file is new, missing or recently used, or the lock can't be had
+/// (a DENO_DIR that can't be written): the open goes on without it.
+pub(crate) fn lock_for_long_unused_open(
+  base: &Path,
+  current: &Path,
+  now: SystemTime,
+) -> Option<UpkeepLock> {
+  let modified = std::fs::metadata(current).ok()?.modified().ok()?;
+  let long_unused = now
+    .duration_since(modified)
+    .is_ok_and(|age| age >= OPEN_UNDER_LOCK_AFTER);
+  if !long_unused {
+    return None;
+  }
+  let file = upkeep_lock_file(base)?;
+  file.lock_shared().ok()?;
+  // (by path, as in `maintain_versioned_files`)
+  let _ = sys_traits::impls::RealSys.fs_set_file_times(current, now, now);
+  Some(UpkeepLock { _file: file })
+}
+
 /// Removes the other versions' files of the cache `base` (and the
 /// unversioned ones of earlier builds) whose last use, the newest
 /// modification time among a database's files, is [`STALE_AFTER`] or more
 /// before `now`. `current` (this version's) is never touched, nor is a
-/// database another process holds a lock on.
+/// database another process holds a lock on. The whole pass holds the
+/// cache's [`UpkeepLock`]; when it can't be taken at once (a version is
+/// opening a long-unused database, or another pass runs) nothing is removed
+/// this time.
 pub(crate) fn prune_stale_versions(
   base: &Path,
   current: &Path,
@@ -137,6 +197,17 @@ pub(crate) fn prune_stale_versions(
   ) else {
     return;
   };
+  let Some(lock) = upkeep_lock_file(base) else {
+    return;
+  };
+  if lock.try_lock().is_err() {
+    log::debug!(
+      "Not pruning the versions of cache database '{}': its upkeep lock is held",
+      base.display()
+    );
+    return;
+  }
+  let _lock = UpkeepLock { _file: lock };
   let Ok(entries) = std::fs::read_dir(dir) else {
     return;
   };
@@ -346,6 +417,8 @@ mod tests {
       left,
       [
         "other_cache_0.9",
+        // the cache's upkeep lock
+        "test_cache.lock",
         "test_cache2",
         "test_cache_1.0",
         "test_cache_1.0-wal",
@@ -388,6 +461,51 @@ mod tests {
     touch(&other, now - 8 * DAY);
     maintain_versioned_files(&base, &current, true, now);
     assert!(!other.exists());
+  }
+
+  /// A version's database that went unused long enough to be pruned is
+  /// opened under the cache's upkeep lock and marked used; while the lock is
+  /// held no pruning pass removes anything, and the next one does. A new,
+  /// missing or recently used database is opened without it.
+  #[test]
+  fn a_long_unused_database_is_opened_under_the_upkeep_lock() {
+    let temp = TempDir::new();
+    let dir = temp.path().as_path().to_path_buf();
+    let now = SystemTime::now();
+    let base = dir.join("test_cache");
+    let modified = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap();
+    // version 1.0 opens its database, unused for eight days
+    let opening = versioned_path(&base, "1.0");
+    touch(&opening, now - 8 * DAY);
+    let held = lock_for_long_unused_open(&base, &opening, now)
+      .expect("a long-unused database is opened under the lock");
+    assert!(
+      now.duration_since(modified(&opening)).unwrap_or_default()
+        < Duration::from_secs(5)
+    );
+    // meanwhile version 2.0 prunes: nothing goes, not even another stale
+    // version's files
+    let current = versioned_path(&base, "2.0");
+    let stale = versioned_path(&base, "0.9");
+    touch(&current, now);
+    touch(&stale, now - 8 * DAY);
+    prune_stale_versions(&base, &current, now);
+    assert!(stale.exists() && opening.exists());
+    // the connection is open: the lock goes, and the next pass prunes what
+    // is still stale
+    drop(held);
+    prune_stale_versions(&base, &current, now);
+    assert!(!stale.exists());
+    assert!(opening.exists() && current.exists());
+
+    // no lock for a database used within the last days, or a new one
+    touch(&opening, now - 5 * DAY);
+    let before = modified(&opening);
+    assert!(lock_for_long_unused_open(&base, &opening, now).is_none());
+    assert_eq!(modified(&opening), before);
+    let missing = versioned_path(&base, "3.0");
+    assert!(lock_for_long_unused_open(&base, &missing, now).is_none());
+    assert!(!missing.exists());
   }
 
   /// A stale database another process still has open is kept, and removed

@@ -20,6 +20,14 @@
       "args": "run --quiet -A --deny-read=secret --deny-write=secret ceiling.ts",
       "output": "ceiling_mac.out"
     },
+    // macOS: the denied paths and the folders above them stay where they
+    // are for native code (a rename, a folder made or moved into place),
+    // and what lies beside them is free
+    "denies_stay_in_place_mac": {
+      "if": "kernelSandboxEnforceMac",
+      "args": "run --quiet -A --deny-read=secret,box/inner --deny-write=held/inner,gone/inner in_place.ts",
+      "output": "in_place_mac.out"
+    },
     // Linux: the denies are Deno's checks only; native code isn't held
     "allow_all_deny_linux": {
       "if": "kernelSandboxEnforceLinux",

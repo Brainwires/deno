@@ -21992,6 +21992,280 @@ worker; failed on these before). - Node tests enabled: none.
      - Tests: `deno_permissions` `check_specifier_checks_where_a_link_leads`;
        unit `root_test.ts` `rootLinksStayInsideUnderScopedGrants` (an import in
        a worker with a scoped read).
+
+518. **`fix(permissions)`: a scoped grant's folder that is removed and made
+     again is the grant's folder again** (runtime; Unix;
+     `runtime/permissions/checked_open.rs`). Follow-up to item 467, whose
+     race-safe opens keep each allow root's descriptor: it was opened once and
+     kept for the life of the scope, so after a recursive `Deno.remove("out")`
+     and `Deno.mkdir("out")` under `--allow-write=out` every later operation in
+     `out` failed with NotFound until the process restarted (the descriptor
+     named the removed folder), and a root replaced by a rename (another program
+     moving a new folder into place) kept serving the old tree. Item 467 said
+     behaviour was unchanged for paths inside the grant; for these it was not.
+     - The descriptor is still kept, with the place it was found at (its own
+       path: `F_GETPATH`, `/proc/self/fd/N`) and its device and inode. Each use
+       compares that with what the root's path names now (one `stat`). The inode
+       can't be reused while the descriptor is open, so a difference means
+       another object is at the path.
+     - Then the root is opened by its path again, and the new descriptor is
+       taken only when it is found at the same place as the first one (a new
+       folder where the old one was), or at a place the scope reaches anyway (in
+       one of its roots, outside its denies: a root that is a link to a release
+       folder under another granted folder, switched to the next release), the
+       rule a link met inside a root is already held to. A root that now leads
+       anywhere else (it, or a folder above it, became a link, or a link's
+       target changed) keeps the descriptor it had, as before; with none kept
+       (the root was gone in between) it is out of reach until its path leads
+       back. So the reopen can't move a scope: what the kept descriptor was for
+       (a root swapped for a link between the check and the open) holds as it
+       did.
+     - A root gone from its path drops its descriptor and is the one name in its
+       folder again, as a root that doesn't exist yet (item 476), so it can be
+       made again.
+     - Not reopened: a directory handed in already open (`Deno.openRoot`, item
+       511), and a root whose first descriptor has no path to compare a later
+       one with (Linux without `/proc`): those keep the first descriptor.
+     - Unchanged: a scope that is itself a link the user owns names the link,
+       not its target, and a scope's resolved location is resolved once when the
+       grant is parsed (items 286, 467), so a link swapped to a target no grant
+       names is refused by the path check before anything is opened.
+     - Tests:
+       `checked_open::tests::{a_root_removed_and_made_again_is_the_root,
+       a_root_replaced_by_a_rename_is_the_root,
+       a_root_that_leads_elsewhere_later_stays_in_the_scope,
+       an_open_root_is_never_opened_again}`
+       (both strategies: `openat2` and the component walk).
+     - Node tests enabled: none.
+
+519. **`fix(permissions)`: on macOS a deny keeps the object it names in place**
+     (CLI and runtime; macOS; `libs/sandbox/seatbelt.rs`). Seatbelt matches the
+     path an access names when it is made, so a deny rule is about a name. The
+     profiles that write deny rules (the cli profile of item 425, the deny
+     ceiling of item 502, the desktop profile of item 504 and the lifecycle
+     jail's of item 124) now also keep what the name holds where it is, with one
+     set of rules (`keep_in_place`) after the re-allows:
+     - nothing under a read deny is removed or renamed (`file-write-unlink`;
+       Seatbelt has one operation for both, so native code and a child can't
+       delete a read-denied file either, and `Deno.remove()` of one fails with
+       the OS error where the profile applies), and nothing under a read or
+       write deny gets a second name (`file-link`). The paths allowed again
+       inside a deny (the runtime's own entries) are left out with
+       `require-not`, so the cache's renames and hard links go on;
+     - each folder above a deny, by itself (`literal`, or the cut regex of a
+       case-folded path), is not removed, renamed or replaced
+       (`file-write-unlink`: a rename away, a rename or an exchange onto it).
+       `Deno.rename()` already refuses these for a write deny (item 224);
+     - a folder above a write deny is not created (`file-write-create`). One
+       that exists is unaffected (making it again fails with "exists" before the
+       rule is asked). One that doesn't exist when the profile applies can't be
+       made while it holds (Seatbelt has one operation for `mkdir` and for a
+       folder moved into place, and the rule is about the name): make the folder
+       before the run. A folder above a read deny can be made.
+     - A rule for one operation outranks a `file-write*` one whatever the order,
+       so the rules hold inside a write scope. What lies beside a denied path,
+       and beside the folders above it, isn't matched. With no deny the profiles
+       are unchanged. Warn mode's reporting profile reports the new rules as it
+       does the others.
+     - Checked against `sandbox-exec` on macOS 27 with the system tools: the
+       rule shapes compile (`require-all` / `require-not`, `literal`, `regex`)
+       and behave as described; an existing folder above a write deny still
+       answers `EEXIST` to `mkdir`.
+     - Tests:
+       `seatbelt::tests::{folders_above_a_filter,
+       profiles_keep_denies_in_place, profile_keeps_read_denies_in_place}`,
+       the updated `deny_only_profile_refuses_only_the_denies`;
+       `tests/specs/kernel_sandbox/deny_only` `denies_stay_in_place_mac`.
+     - Node tests enabled: none.
+
+520. **`fix(cli)`: an env file can't set the runtime's own file, socket and
+     confinement variables** (CLI; `cli/util/env.rs`,
+     `cli/lib/kernel_apply.rs`). Upstream's env-file deny-list (Deno's tunnel
+     variables: an env file configures the program, not Deno) gains the
+     variables that name what the runtime itself opens or connects to whatever
+     the program was granted, and the ones that say what the process runs under:
+     `DENO_AUDIT_PERMISSIONS`, `DENO_COVERAGE_DIR`, `DENO_CERT`,
+     `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
+     `DENO_UNSTABLE_CRON_SOCK`, `DENEXT_DEV_TOKEN`,
+     `DENO_INTERNAL_LIFECYCLE_JAIL` and `DENO_PERMISSION_BROKER_PATH`. The
+     kernel sandbox's policy and its `auto` mode are built from them as they are
+     from the command line, so they count only as the environment the run was
+     started with had them, like `DENO_KERNEL_SANDBOX` (item 420). Each is
+     ignored with the existing warning, in `--env-file` and in a watched reload.
+     - User-facing note: a certificate named only in an env file
+       (`DENO_CERT=ca.pem` in `.env`) is no longer used; set the variable in the
+       environment, or pass `--cert`.
+     - The certificate entries of the kernel policy are files: what `DENO_CERT`,
+       `NODE_EXTRA_CA_CERTS` and `SSL_CERT_FILE` name is added only when it is a
+       file (a folder named there is no certificate file and adds nothing);
+       `SSL_CERT_DIR` still lists folders.
+     - Tests:
+       `util::env::tests::env_files_cannot_set_the_runtime_control_variables`,
+       `kernel_apply::tests::tls_files_are_files_and_the_cert_dirs`,
+       `tests/specs/run/env_file_runtime_denylist`.
+     - Node tests enabled: none.
+
+521. **`fix(kernel)`: a confined desktop app writes its own folders, not the
+     shared ones** (runtime; macOS and Linux; `cli/lib/kernel_desktop.rs`).
+     Follow-up to item 504's engine paths, which are added to the kernel's grant
+     whatever the app was granted.
+     - macOS: a web-view app was granted the whole per-user folder
+       (`/private/var/folders/xx/yyyy`: `0`, `C` and `T`), where every other app
+       keeps its caches and the per-user daemons their state (the LaunchServices
+       database among them). Every engine now gets the app's own folder of the
+       per-user cache (`C/<app identifier>`: Metal's, WebKit's and CFNetwork's
+       caches) and the temp folder (`T`), as the GPUI host already did.
+     - Linux: `$XDG_RUNTIME_DIR` is read (its sockets are connected to, the
+       display's authority files read) and written only in the toolkits' own
+       folders (`dconf`, `pulse`, `webkitgtk`, for a web engine): the folder
+       also holds the systemd user manager's runtime units and other programs'
+       sockets and state. Chromium's certificate database (`~/.pki`, the NSS
+       database the user's browsers share) and GStreamer's registry
+       (`~/.cache/gstreamer-1.0`) are read only: Chromium goes on without a
+       persistent database of its own, GStreamer scans its plugins at each
+       start. No shared shader cache (`~/.cache/mesa_shader_cache`,
+       `mesa_shader_cache_db`, `nvidia`, `~/.nv`) is written by a web engine
+       either, as for the GPUI host: slower first frames, nothing else.
+     - What this does not hold (unchanged, now said in
+       `kernel_desktop::engine_paths`): Landlock has no rule for connecting to a
+       Unix socket, so on Linux the session bus stays reachable, and
+       `systemd --user` on it starts a program outside the sandbox on request
+       (`StartTransientUnit`). A confined Linux desktop app is held for files,
+       the programs it starts itself and the network, not against the session's
+       services. On macOS the mach services stay reachable (item 504's guarantee
+       matrix).
+     - Tests: `kernel_desktop::tests::{linux_engine_paths, macos_engine_paths}`
+       (the shared folders are not in the write grant of any engine; the
+       toolkits' own are).
+     - Node tests enabled: none.
+
+522. **`fix(kernel)`: the outside helper takes a `mailto:` URL's addressing and
+     text fields only** (runtime; `libs/sandbox/outside.rs`). The helper that
+     opens links for a confined desktop app (item 504) runs outside the sandbox
+     and handed any `mailto:` query to the mail program; mail programs have
+     honoured fields beyond RFC 6068's (`attach=<file>` adds a file of the
+     user's to the draft). A `mailto:` URL's query may now set only `to`, `cc`,
+     `bcc`, `subject` and `body` (any case, written plainly: a name with a
+     percent-escape is refused whatever it decodes to, as is a pair with no
+     `=`); anything else is refused like any other URL the helper doesn't take.
+     `http(s)` URLs are unchanged.
+     - Tests:
+       `outside::tests::only_web_and_mail_urls_of_plain_ascii_are_external`
+       (extended).
+     - Node tests enabled: none.
+
+523. **`perf(runtime)`: on Linux a watcher opened or closed inside a recursive
+     watch no longer walks that watch's whole tree** (runtime; Linux and
+     Android; `runtime/ops/fs_events.rs`). Follow-up to item 485's overlapping
+     watches (inotify keeps one watch and one "recursive" mark per directory,
+     shared by every watch that overlaps it): after each open of a non-recursive
+     watcher and each close of any watcher, every remaining watch overlapping
+     the path was applied again, and for a recursive one notify walks its whole
+     tree and adds a watch per directory, inside the synchronous open / close on
+     the JS thread. A program with one recursive watch over a project and a
+     library that opens a watcher per directory paid for the project's whole
+     tree at every open and close; a failed walk (the watch limit) was dropped
+     silently.
+     - What an open or a close takes from the backend lies at its path or
+       beneath it, so only that is asked for again (`backend_steps_after_watch`,
+       `backend_steps_to_unwatch`): a non-recursive watcher opened inside a
+       recursive watch puts the recursive mark back by watching its own path
+       recursively; a non-recursive watcher of a directory a recursive watch
+       still holds closes without unwatching it (the directory's watch is the
+       recursive one's too); a recursive watcher closes by unwatching, applying
+       again the watches still registered at or beneath it, then its path for a
+       recursive watch above. Nothing above the path is walked.
+     - A restore that hits the watch limit is handed to every watcher as an
+       error, as the backend does when it can't add a new directory.
+     - Other backends are unchanged (each path is watched on its own).
+     - Tests:
+       `fs_events::tests::{a_watch_inside_a_recursive_one_asks_for_its_own_path_only,
+       an_unwatch_asks_for_nothing_above_its_path}`;
+       `tests/unit/fs_events_test.ts`
+       `watchFsRecursiveKeepsItsTreeAcrossNestedWatchers` beside item 485's
+       `watchFsOverlappingWatchersCloseIndependently` and
+       `watchFsNonRecursiveBesideRecursiveAncestor`.
+     - Node tests enabled: none (`fs.watch` shares the watcher; behaviour is
+       unchanged).
+
+524. **`fix(cache)`: pruning another version's cache database can't cross the
+     moment that version opens it** (CLI;
+     `cli/cache/{cache_db_files,
+     cache_db}.rs`). Follow-up to the
+     per-version cache databases: a pruning pass checks that no other process
+     holds a lock on a stale database and then removes its files, and a version
+     opening that database between the two (after finding the file, before
+     SQLite holds its locks) went on with a database whose files were gone,
+     which no later connection shares.
+     - Each cache has an upkeep lock, the file `<base>.lock` beside its
+       databases, locked by the OS (`File::try_lock` / `lock_shared`; released
+       when the handle closes or the process ends). A pruning pass holds it
+       exclusively from its directory scan to its last removal, and removes
+       nothing when it can't take it at once. A version whose own database went
+       unused for six days or more (a day short of the pruning age, so there is
+       no gap) takes it shared before it opens the connection, marks the file
+       used, and drops it once the connection is open: by then SQLite's own
+       locks show, and the file is no longer stale. A database used within the
+       last days is opened without the lock, as before: one `stat` the open
+       already made decides.
+     - Older runtimes don't take the lock; between one of them and this one the
+       moment is as it was.
+     - Tests:
+       `cache_db_files::tests::a_long_unused_database_is_opened_under_the_upkeep_lock`;
+       `prunes_only_stale_files_of_other_versions` now lists the lock file.
+     - Node tests enabled: none.
+
+525. **`fix(permissions)`: only this runtime's kernel sandbox makes an
+     unreadable `.npmrc` count as absent** (CLI; `cli/sandbox/enforce.rs`,
+     `libs/resolver/npmrc.rs`). A process the kernel sandbox confines treats an
+     `.npmrc` it can't read as absent (item 425: the policy never makes it
+     readable). A child of a confined process was recognised by the kernel's
+     report alone: on Linux no-new-privileges with a seccomp filter, on macOS
+     any Seatbelt sandbox. Those are any hardened container's and any sandboxed
+     app's too (Kubernetes' `allowPrivilegeEscalation: false`), so with the
+     kernel sandbox off, an `.npmrc` such a process couldn't read was skipped
+     with a warning that named the kernel sandbox, and a private registry
+     mapping was dropped. The mark now takes the plan the process applied or the
+     sandbox's own marker (`deno_sandbox::inherit::kernel_reports_marked`, which
+     `auto` already used on Linux); anything else leaves the read an error, as
+     with no sandbox. The lifecycle jail's own rule is unchanged.
+     - Tests: `tests/specs/npm/npmrc_unreadable_in_container` (Linux; a process
+       with no-new-privileges and an allow-all seccomp filter runs
+       `deno install` beside an unreadable `.npmrc`; needs a user that isn't
+       root).
+     - Node tests enabled: none.
+
+526. **`perf(permissions)`: `deno test` / `deno bench` with the kernel sandbox
+     off skip the sandbox's coverage check** (CLI; `cli/sandbox/mod.rs`).
+     `check_run` worked out how much of the command `enforce` covers (for `test`
+     and `bench`: the workspace's test options and every member's permission
+     options) before it returned for a run whose mode is off and that asked for
+     no report. The return now comes first; nothing else changes (the result was
+     only read for a mode `auto` chose, and for `warn`'s notice).
+     - Tests: none of its own (no behaviour changes; `kernel_sandbox`'s
+       `test_bench` specs cover the modes that still compute it).
+     - Node tests enabled: none.
+
+527. **`fix(fetch)`: `denyAddresses`' `"metadata"` preset names Azure's
+     WireServer and Oracle Cloud's endpoint** (runtime;
+     `ext/fetch/deny_addresses.rs`, `cli/tsc/dts/lib.deno.ns.d.ts`). Item 512's
+     preset held `169.254.169.254`, `fd00:ec2::254` and `100.100.100.200`;
+     `168.63.129.16` (a public-range address no other preset holds) and
+     `192.0.0.192` are added, and the declaration lists the addresses.
+     - Tests: `deny_addresses::tests::the_metadata_preset_names_each_endpoint`.
+     - Node tests enabled: none.
+
+528. **`fix(permissions)`: Windows finds the folders it never labels from the
+     system, not only the environment** (runtime; Windows;
+     `libs/sandbox/windows.rs`). The small tier refuses to label a write root
+     Low when it is, or holds, the user's profile, or lies in the Windows or
+     program folders. Those were read from `USERPROFILE`, `SystemRoot`,
+     `ProgramFiles`, `ProgramFiles(x86)` and `ProgramData`, which whoever starts
+     the program sets. The known folders of the process's user
+     (`SHGetKnownFolderPath`) are asked too, and a path either source places in
+     such a folder is refused.
+     - Tests: `windows::tests::wide_folders_are_the_systems_own` beside
+       `wide_roots_are_never_labelled`.
      - Node tests enabled: none.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
@@ -22020,6 +22294,12 @@ stock CLI does not run them; denext's own launcher provides that environment.
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.
+
+506-510, 511, 512, 513, 515, 518, 519, 521, 522, 523, 527, 528) are what the
+prebuilt `libdenort` carries. The CLI-side parts (for example writing
+`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
+in the branch too, but a stock CLI does not run them; denext's own launcher
+provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

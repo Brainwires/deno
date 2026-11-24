@@ -353,7 +353,7 @@ pub fn startup() {
         .and_then(|plan| plan.broker.as_ref()),
     );
     if deno_sandbox::enforce_linux::applied_plan().is_some()
-      || kernel_reports_confined()
+      || deno_sandbox::inherit::kernel_reports_marked()
     {
       mark_confined();
     }
@@ -381,7 +381,7 @@ pub fn startup() {
       }
       Ok(None) => {
         take_broker(None);
-        if kernel_reports_confined() {
+        if deno_sandbox::inherit::kernel_reports_marked() {
           mark_confined();
         }
       }
@@ -825,30 +825,31 @@ fn apply_inherited_macos(plan: &EnforcePlan) -> Result<(), String> {
   Ok(())
 }
 
-/// Tells the config loaders this process runs confined: an unreadable
-/// `.npmrc` then counts as absent, as the policy never makes it readable
+/// Tells the config loaders this process runs confined by this runtime's
+/// kernel sandbox: an unreadable `.npmrc` then counts as absent, as the
+/// policy never makes it readable
 /// (`deno_resolver::npmrc::set_kernel_confined`). Decided from the plan this
-/// process applied or the kernel's own report, never from a variable a
-/// parent could set; nothing in the environment says so either.
+/// process applied or, for a child of a confined process, the sandbox's own
+/// marker as the kernel reports it
+/// (`deno_sandbox::inherit::kernel_reports_marked`), never from a variable a
+/// parent could set; nothing in the environment says so either. Being
+/// confined by something else is not enough: no-new-privileges with a seccomp
+/// filter is any hardened container's (Kubernetes'
+/// `allowPrivilegeEscalation: false`), and a Seatbelt profile any sandboxed
+/// app's; an `.npmrc` such a process can't read is an error, as it is with
+/// no sandbox, and never a registry mapping dropped with a warning that
+/// names the kernel sandbox.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn mark_confined() {
   deno_resolver::npmrc::set_kernel_confined();
 }
 
-/// Whether the kernel reports this process as confined without a plan of
-/// its own: a child of a confined process (Linux: no-new-privileges and a
-/// seccomp filter, which a sandboxed parent hands every child; macOS: a
-/// Seatbelt sandbox).
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// Whether the kernel reports this process as sandboxed without a plan of
+/// its own (macOS: any Seatbelt sandbox, which a second profile can't be
+/// stacked under).
+#[cfg(target_os = "macos")]
 fn kernel_reports_confined() -> bool {
-  #[cfg(target_os = "linux")]
-  {
-    deno_sandbox::enforce_linux::status_confined()
-  }
-  #[cfg(target_os = "macos")]
-  {
-    deno_sandbox::macos::is_sandboxed() == Some(true)
-  }
+  deno_sandbox::macos::is_sandboxed() == Some(true)
 }
 
 fn refuse_at_startup(err: &str) -> ! {

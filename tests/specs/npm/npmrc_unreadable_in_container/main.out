@@ -1,0 +1,3 @@
+no-new-privileges and a seccomp filter: true
+.npmrc treated as absent: false
+.npmrc reported unreadable: true

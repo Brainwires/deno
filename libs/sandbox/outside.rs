@@ -60,7 +60,11 @@ const STATUS_FAILED: u8 = 3;
 /// `https:` or `mailto:` URL of at most [`MAX_URL`] bytes, made only of
 /// printable ASCII with none of the characters a URL must percent-encode
 /// (so it is one argument whatever reads it, and never an option: it starts
-/// with its scheme). No allocation: the helper calls it after the fork.
+/// with its scheme). A `mailto:` URL's query may set only the fields a
+/// message is addressed and written with ([`MAILTO_FIELDS`]): mail programs
+/// have taken other fields too (`attach=<file>` adds a file of the user's to
+/// the draft), and the helper runs outside the sandbox. No allocation: the
+/// helper calls it after the fork.
 pub fn valid_external_url(url: &[u8]) -> bool {
   fn has_prefix(url: &[u8], prefix: &[u8]) -> bool {
     url.len() > prefix.len() && url[..prefix.len()].eq_ignore_ascii_case(prefix)
@@ -74,12 +78,48 @@ pub fn valid_external_url(url: &[u8]) -> bool {
   {
     return false;
   }
+  if has_prefix(url, b"mailto:") && !valid_mailto_query(url) {
+    return false;
+  }
   url.iter().all(|b| {
     matches!(b, 0x21..=0x7e)
       && !matches!(
         b,
         b'"' | b'<' | b'>' | b'\\' | b'^' | b'`' | b'{' | b'|' | b'}'
       )
+  })
+}
+
+/// The header fields a `mailto:` URL's query may set (RFC 6068's examples:
+/// who the message goes to and what it says).
+const MAILTO_FIELDS: &[&[u8]] = &[b"to", b"cc", b"bcc", b"subject", b"body"];
+
+/// Whether the query of a `mailto:` URL (what follows its first `?`, if
+/// anything) is `name=value` pairs joined by `&` whose names are all in
+/// [`MAILTO_FIELDS`], written plainly (any case): a name with a
+/// percent-escape in it is not one of them, whatever it decodes to, and
+/// neither is a pair with no `=`.
+fn valid_mailto_query(url: &[u8]) -> bool {
+  let Some(at) = url.iter().position(|b| *b == b'?') else {
+    return true;
+  };
+  let query = &url[at + 1..];
+  // a fragment is not part of the query
+  let query = match query.iter().position(|b| *b == b'#') {
+    Some(end) => &query[..end],
+    None => query,
+  };
+  if query.is_empty() {
+    return true;
+  }
+  query.split(|b| *b == b'&').all(|pair| {
+    let Some(eq) = pair.iter().position(|b| *b == b'=') else {
+      return false;
+    };
+    let name = &pair[..eq];
+    MAILTO_FIELDS
+      .iter()
+      .any(|field| name.eq_ignore_ascii_case(field))
   })
 }
 
@@ -472,6 +512,13 @@ mod tests {
       "http://127.0.0.1:8080/",
       "HTTPS://EXAMPLE.COM",
       "mailto:someone@example.com?subject=hi",
+      "mailto:someone@example.com",
+      "mailto:someone@example.com?",
+      "mailto:a@example.com?cc=b@example.com&BCC=c@example.com&Subject=hi&body=a%20b%3Dc",
+      "mailto:?to=a@example.com&body=see?attach=x",
+      "mailto:a@example.com?subject=hi#attach=x",
+      // only mail URLs are held to the fields
+      "https://example.com/?attach=/etc/passwd",
     ] {
       assert!(valid_external_url(ok.as_bytes()), "{ok}");
     }
@@ -493,6 +540,16 @@ mod tests {
       "https://example.com/{a|b}",
       "https://exämple.com/",
       " https://example.com/",
+      // a mail URL sets only the fields a message is written with
+      "mailto:a@example.com?attach=/home/u/.ssh/id_ed25519",
+      "mailto:a@example.com?subject=hi&attach=/etc/passwd",
+      "mailto:a@example.com?Attachment=/etc/passwd",
+      "mailto:a@example.com?%61ttach=/etc/passwd",
+      "mailto:a@example.com?subject",
+      "mailto:a@example.com?subject=hi&",
+      "mailto:a@example.com?&subject=hi",
+      "mailto:a@example.com?=x",
+      "MAILTO:a@example.com?in-reply-to=%3Cx%3E",
     ] {
       assert!(!valid_external_url(bad.as_bytes()), "{bad:?}");
     }
