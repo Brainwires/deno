@@ -19,6 +19,12 @@
 //! candidates beyond `127.0.0.1`) are gathered only with
 //! `--allow-sys=networkInterfaces`, the permission `Deno.networkInterfaces()`
 //! needs.
+//!
+//! denext, for an embedder that runs web pages (README.md, "Embedding for
+//! web pages"): the extension loads without `deno_net`'s; an address deny
+//! list in the `OpState` (`deno_fetch::deny_addresses::EmbedderDenyList`)
+//! holds for remote candidates, STUN/TURN servers and every datagram; and
+//! [`EmbedderIceOptions`] can force the relay policy.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -34,6 +40,8 @@ use deno_core::Resource;
 use deno_core::ResourceId;
 use deno_core::op2;
 use deno_core::v8;
+use deno_fetch::deny_addresses::AddressDenyList;
+use deno_fetch::deny_addresses::EmbedderDenyList;
 use deno_net::DefaultTlsOptions;
 use deno_net::UnsafelyIgnoreCertificateErrors;
 use deno_permissions::PermissionsContainer;
@@ -116,9 +124,35 @@ pub fn set_engine_log_level(name: &str) -> Result<(), WebRtcError> {
   Ok(())
 }
 
+/// denext: an embedder's ICE policy for a whole runtime, put in its
+/// `OpState` (`state.put(EmbedderIceOptions { .. })`) before any script
+/// runs. Scripts can neither read nor change it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EmbedderIceOptions {
+  /// Every `RTCPeerConnection` and `RTCIceTransport` gathers as with
+  /// `iceTransportPolicy: "relay"`, whatever its configuration says: no
+  /// host or server-reflexive candidate is signalled, so the machine's
+  /// addresses (private ones included) never reach the page. The related
+  /// address of a relay candidate (the local socket's) is written as
+  /// `0.0.0.0` / `::`, and an `icecandidateerror` names no local address.
+  /// A connection then needs a TURN server.
+  pub force_relay: bool,
+}
+
+impl EmbedderIceOptions {
+  fn force_relay(state: &OpState) -> bool {
+    state
+      .try_borrow::<EmbedderIceOptions>()
+      .is_some_and(|options| options.force_relay)
+  }
+}
+
+// denext: `deno_net` is a crate dependency (its resolver and routed connect,
+// and the TLS options the runtime may have put in the state), not an
+// extension one: a runtime without `deno_net`'s ops can load this one.
 deno_core::extension!(
   deno_webrtc,
-  deps = [deno_web, deno_net],
+  deps = [deno_web],
   ops = [
     op_webrtc_pc_create,
     op_webrtc_pc_create_offer,
@@ -305,12 +339,28 @@ pub enum WebRtcError {
   Resource(#[from] deno_core::error::ResourceError),
 }
 
-/// The runtime's permissions as a [`NetGuard`].
-struct PermissionsGuard(RefCell<PermissionsContainer>);
+/// The runtime's permissions as a [`NetGuard`], with the embedder's address
+/// deny list when the runtime has one.
+struct PermissionsGuard {
+  permissions: RefCell<PermissionsContainer>,
+  deny: Option<Arc<AddressDenyList>>,
+}
+
+impl PermissionsGuard {
+  fn new(state: &OpState, permissions: PermissionsContainer) -> Self {
+    Self {
+      permissions: RefCell::new(permissions),
+      deny: EmbedderDenyList::from_state(state),
+    }
+  }
+}
 
 impl NetGuard for PermissionsGuard {
   fn connect(&self, addr: SocketAddr) -> Result<(), String> {
-    let mut perms = self.0.borrow_mut();
+    if let Some(text) = peer::address_denied(self.deny.as_deref(), addr) {
+      return Err(text);
+    }
+    let mut perms = self.permissions.borrow_mut();
     let ip = addr.ip().to_string();
     perms
       .check_net_connect(&(ip.as_str(), Some(addr.port())), API_NAME)
@@ -321,7 +371,7 @@ impl NetGuard for PermissionsGuard {
   }
 
   fn listen(&self, ip: IpAddr) -> Result<(), String> {
-    let mut perms = self.0.borrow_mut();
+    let mut perms = self.permissions.borrow_mut();
     let host = ip.to_string();
     perms
       .check_net_listen(&(host.as_str(), None), API_NAME)
@@ -330,10 +380,14 @@ impl NetGuard for PermissionsGuard {
 
   fn interfaces(&self) -> Result<(), String> {
     self
-      .0
+      .permissions
       .borrow()
       .check_sys("networkInterfaces", API_NAME)
       .map_err(|e| e.to_string())
+  }
+
+  fn deny_list(&self) -> Option<&AddressDenyList> {
+    self.deny.as_deref()
   }
 }
 
@@ -441,11 +495,12 @@ fn op_webrtc_pc_create(
       "The Deno.webrtc.Network is closed".to_string(),
     ));
   }
-  let guard = Rc::new(PermissionsGuard(RefCell::new(permissions)));
+  let guard = Rc::new(PermissionsGuard::new(state, permissions));
   let peer = Peer::new(
     PeerOptions {
       ice_servers: specs,
       relay_only: config.ice_transport_policy == "relay",
+      force_relay: EmbedderIceOptions::force_relay(state),
       tls,
       certificates,
       bundle_policy,
@@ -461,10 +516,14 @@ fn op_webrtc_pc_create(
 fn tls_config(
   state: &OpState,
 ) -> Result<Arc<rustls::ClientConfig>, WebRtcError> {
-  let root_cert_store = state
-    .borrow::<DefaultTlsOptions>()
-    .root_cert_store()
-    .map_err(|e| WebRtcError::Operation(e.to_string()))?;
+  // denext: `deno_net`'s extension puts the options in the state; a runtime
+  // without it (and that put none itself) gets the default root store.
+  let root_cert_store = match state.try_borrow::<DefaultTlsOptions>() {
+    Some(options) => options
+      .root_cert_store()
+      .map_err(|e| WebRtcError::Operation(e.to_string()))?,
+    None => None,
+  };
   let unsafely_ignore_certificate_errors = state
     .try_borrow::<UnsafelyIgnoreCertificateErrors>()
     .and_then(|it| it.0.clone());
@@ -1342,7 +1401,7 @@ fn op_webrtc_ice_create(
   state: &mut OpState,
 ) -> Result<ResourceId, WebRtcError> {
   let permissions = state.borrow::<PermissionsContainer>().clone();
-  let guard = Rc::new(PermissionsGuard(RefCell::new(permissions)));
+  let guard = Rc::new(PermissionsGuard::new(state, permissions));
   let transport = ice_transport::IceTransport::new(guard)?;
   Ok(state.resource_table.add(IceTransportResource(transport)))
 }
@@ -1369,7 +1428,7 @@ fn op_webrtc_ice_gather(
   let transport = ice_transport(state, rid)?;
   let mut permissions = state.borrow::<PermissionsContainer>().clone();
   ice_server_specs(&mut permissions, &ice_servers)?;
-  transport.gather(relay_only)
+  transport.gather(relay_only || EmbedderIceOptions::force_relay(state))
 }
 
 #[op2(fast)]
@@ -1448,7 +1507,7 @@ fn op_webrtc_network_create(
 ) -> Result<ResourceId, WebRtcError> {
   let options = net::NetworkOptions::parse(arg)?;
   let permissions = state.borrow::<PermissionsContainer>().clone();
-  let guard = PermissionsGuard(RefCell::new(permissions));
+  let guard = PermissionsGuard::new(state, permissions);
   let network = net::Network::new(options, &guard)?;
   Ok(state.resource_table.add(NetworkResource(network)))
 }

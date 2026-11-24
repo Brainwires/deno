@@ -297,6 +297,20 @@ impl IceTransport {
     let value = value.strip_prefix("candidate:").unwrap_or(value);
     let parsed = rtc::ice::candidate::unmarshal_candidate(value)
       .map_err(|e| WebRtcError::Operation(format!("Invalid candidate: {e}")))?;
+    // denext: under the embedder's address deny list the agent only gets a
+    // candidate with a literal address that is not denied (see
+    // `filter_remote_candidate`); the others are dropped, reported as
+    // accepted.
+    if let Some(deny) = self.guard.deny_list()
+      && !crate::peer::classify_remote_candidate(value, true, true).is_ok_and(
+        |candidate| {
+          crate::peer::filter_remote_candidate(candidate, Some(deny))
+            != crate::peer::RemoteCandidate::Ignore
+        },
+      )
+    {
+      return Ok(());
+    }
     self
       .core
       .borrow_mut()
