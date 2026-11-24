@@ -411,11 +411,13 @@ fn run_test_inner(
   let run_fn = || {
     let context =
       test_context_from_metadata(metadata, cwd, diagnostic_logger.clone());
+    let mut ran_a_step = false;
     for step in metadata
       .steps
       .iter()
       .filter(|s| should_run(s.if_cond.as_deref()))
     {
+      ran_a_step = true;
       let run_func = || {
         TestResult::from_maybe_panic_or_result(AssertUnwindSafe(|| {
           run_step(step, metadata, cwd, &context);
@@ -433,7 +435,13 @@ fn run_test_inner(
         return result;
       }
     }
-    TestResult::Passed { duration: None }
+    // denext: a test whose every step's `if` is false here ran nothing; it
+    // is reported as ignored, as a test-level `if` is, never as passed
+    if ran_a_step {
+      TestResult::Passed { duration: None }
+    } else {
+      TestResult::Ignored
+    }
   };
   run_maybe_flaky_test(
     &test.name,
@@ -620,36 +628,102 @@ fn pid_namespace_available() -> bool {
 
 /// Whether `--kernel-sandbox=enforce` can run on this machine, and whether
 /// it holds TCP port rules: `deno info --json`'s `kernelSandbox`.
+///
+/// On CI, Linux and macOS have an enforcer: there a runtime that reports
+/// none (or, on Linux, no Landlock ABI 4 or seccomp; anywhere, no broker
+/// with its network side) fails every kernel-sandbox spec instead of
+/// switching them off. A leg whose machine truly has none sets
+/// `DENO_TEST_NO_KERNEL_ENFORCER` to the reason; its specs are then reported
+/// as ignored.
 fn kernel_sandbox_caps() -> (bool, bool) {
-  static CAPS: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
-  *CAPS.get_or_init(|| {
-    if !cfg!(unix) {
-      return (false, false);
+  static CAPS: std::sync::OnceLock<Result<(bool, bool), String>> =
+    std::sync::OnceLock::new();
+  let caps = CAPS.get_or_init(|| {
+    let probed = probe_kernel_sandbox();
+    if !kernel_enforcer_expected() {
+      return Ok(probed.map_or((false, false), |c| (c.enforce, c.net_ports)));
     }
-    let Ok(output) = std::process::Command::new(test_util::deno_exe_path())
-      .args(["info", "--json"])
-      .output()
-    else {
-      return (false, false);
+    let missing = match probed {
+      Err(why) => Some(why),
+      Ok(c) if !c.enforce || !c.net_ports || !c.broker_net => Some(c.report),
+      Ok(c) => return Ok((c.enforce, c.net_ports)),
     };
-    let Ok(info) = serde_json::from_slice::<serde_json::Value>(&output.stdout)
-    else {
-      return (false, false);
-    };
-    let ks = &info["kernelSandbox"];
-    let caps = &ks["capabilities"];
-    if ks["enforcerBuilt"] != serde_json::Value::Bool(true) {
-      return (false, false);
-    }
-    if cfg!(target_os = "linux") {
-      let abi = ks["landlockAbi"].as_u64();
-      let enforce =
-        abi.is_some() && caps["seccomp"] == serde_json::Value::Bool(true);
-      (enforce, enforce && abi.is_some_and(|abi| abi >= 4))
-    } else {
-      let enforce = caps["seatbelt"] == serde_json::Value::Bool(true);
-      (enforce, enforce)
-    }
+    Err(format!(
+      "CI on {}: --kernel-sandbox=enforce (with port rules and the broker's \
+       network side) must be available, but {}. If this machine truly has \
+       no kernel enforcer, set DENO_TEST_NO_KERNEL_ENFORCER=<reason> on the \
+       job.",
+      std::env::consts::OS,
+      missing.unwrap_or_default()
+    ))
+  });
+  match caps {
+    Ok(caps) => *caps,
+    Err(message) => panic!("{message}"),
+  }
+}
+
+/// Whether this run must find a kernel enforcer: CI on Linux or macOS,
+/// unless the job says its machine has none.
+fn kernel_enforcer_expected() -> bool {
+  *IS_CI
+    && cfg!(any(target_os = "linux", target_os = "macos"))
+    && std::env::var_os("DENO_TEST_NO_KERNEL_ENFORCER")
+      .is_none_or(|v| v.is_empty())
+}
+
+/// What the runtime under test reports about its kernel sandbox.
+struct KernelSandboxCaps {
+  /// `--kernel-sandbox=enforce` can run
+  enforce: bool,
+  /// ... and holds TCP port rules
+  net_ports: bool,
+  /// the supervising broker is built with its network side
+  broker_net: bool,
+  /// the fields these were read from, for a failure message
+  report: String,
+}
+
+/// `deno info --json`'s `kernelSandbox`; `Err` says why it can't be read.
+fn probe_kernel_sandbox() -> Result<KernelSandboxCaps, String> {
+  if !cfg!(unix) {
+    return Err("there is no kernel enforcer on this OS".to_string());
+  }
+  let output = std::process::Command::new(test_util::deno_exe_path())
+    .args(["info", "--json"])
+    .output()
+    .map_err(|e| format!("`deno info --json` didn't start: {e}"))?;
+  let info = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+    .map_err(|e| format!("`deno info --json` printed no JSON: {e}"))?;
+  let ks = &info["kernelSandbox"];
+  let caps = &ks["capabilities"];
+  let yes = serde_json::Value::Bool(true);
+  let built = ks["enforcerBuilt"] == yes;
+  let broker_net = ks["brokerBuilt"] == yes && ks["brokerNetBuilt"] == yes;
+  let mut report = format!(
+    "the runtime reports enforcerBuilt: {}, brokerBuilt: {}, \
+     brokerNetBuilt: {}",
+    ks["enforcerBuilt"], ks["brokerBuilt"], ks["brokerNetBuilt"]
+  );
+  let (enforce, net_ports) = if cfg!(target_os = "linux") {
+    let abi = ks["landlockAbi"].as_u64();
+    report.push_str(&format!(
+      ", landlockAbi: {}, capabilities.seccomp: {} (enforce needs a \
+       Landlock ABI and seccomp, port rules ABI 4 or later)",
+      ks["landlockAbi"], caps["seccomp"]
+    ));
+    let enforce = built && abi.is_some() && caps["seccomp"] == yes;
+    (enforce, enforce && abi.is_some_and(|abi| abi >= 4))
+  } else {
+    report.push_str(&format!(", capabilities.seatbelt: {}", caps["seatbelt"]));
+    let enforce = built && caps["seatbelt"] == yes;
+    (enforce, enforce)
+  };
+  Ok(KernelSandboxCaps {
+    enforce,
+    net_ports,
+    broker_net,
+    report,
   })
 }
 

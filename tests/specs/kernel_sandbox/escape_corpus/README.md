@@ -103,7 +103,11 @@ machine's column (macOS, or Linux by Landlock ABI):
 cell as coarser, Deno-only or by design. Where Linux can't hold a configuration
 exactly (`--kernel-sandbox=enforce` refuses to start), its checks come back as
 `crash` and the run fails: that is a broken expectation, not a pass. Without
-Landlock (or without an enforcer for the OS) the run is skipped with the reason.
+Landlock (or without an enforcer for the OS) the run is skipped with the reason,
+except under `CI` (unless `DENO_TEST_NO_KERNEL_ENFORCER` names why the machine
+has none), where it fails: the spec runner (`tests/specs/mod.rs`) requires an
+enforcer, port rules and the broker's network side on Linux and macOS CI legs,
+and reports `corpus_enforce` as ignored, not passed, where there is none.
 `ENOSYS` from `io_uring_setup` and `clone3` counts as held (the kernel sandbox
 answers so on purpose); the baseline turns it into `host` on a kernel that lacks
 them.

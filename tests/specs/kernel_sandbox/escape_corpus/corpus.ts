@@ -65,6 +65,10 @@ let column: Column | undefined;
 // only then can a host-scoped grant be held, and the net-host
 // configurations run
 let brokerBuilt = false;
+// CI legs (Linux, macOS) must have an enforcer and its broker; a leg that
+// truly has none says why in DENO_TEST_NO_KERNEL_ENFORCER (tests/specs/mod.rs)
+const enforcerRequired = !!Deno.env.get("CI") &&
+  !Deno.env.get("DENO_TEST_NO_KERNEL_ENFORCER");
 if (expect === "enforce") {
   const info = JSON.parse(
     new TextDecoder().decode(
@@ -78,6 +82,13 @@ if (expect === "enforce") {
     ? "no Landlock on this kernel"
     : undefined;
   if (why) {
+    // on CI (Linux and macOS have an enforcer there) a missing enforcer is
+    // a failure, never a pass; the spec is gated on kernelSandboxEnforce,
+    // which fails such a leg first
+    if (enforcerRequired) {
+      console.error(`corpus: FAILED: --expect=enforce on CI, but ${why}`);
+      Deno.exit(1);
+    }
     console.log(`kernel-sandbox corpus: skipped: ${why}`);
     console.log(`corpus: ok (--expect=enforce skipped: ${why})`);
     Deno.exit(0);
@@ -284,6 +295,12 @@ type Row = {
 };
 const rows: Row[] = [];
 if (expect === "enforce" && !brokerBuilt) {
+  if (enforcerRequired) {
+    console.error(
+      "corpus: FAILED: --expect=enforce on CI, but the runtime reports no supervising broker for the network (brokerNetBuilt)",
+    );
+    Deno.exit(1);
+  }
   console.log(
     "net-host, net-host-run (a host-scoped network grant): skipped, the supervising broker isn't built into this runtime",
   );
