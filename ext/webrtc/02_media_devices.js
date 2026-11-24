@@ -679,6 +679,15 @@ function getMediaDevices() {
   return mediaDevices ??= new MediaDevices(illegalConstructorKey);
 }
 
+// Not [Serializable]: structuredClone throws a DataCloneError.
+{
+  const { markNotSerializable } = core.loadExtScript(
+    "ext:deno_web/13_message_port.js",
+  );
+  markNotSerializable(OverconstrainedError.prototype);
+  markNotSerializable(MediaDeviceInfo.prototype);
+}
+
 return {
   InputDeviceInfo,
   MediaDeviceInfo,

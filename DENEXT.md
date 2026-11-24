@@ -21602,6 +21602,28 @@ as before. - Tests: `console_test.ts`'s `consoleInspectInterfacePrototypes` and
 `consoleInspectInterfacePrototypesInWorker` (failed on these before). - Node
 tests enabled: none.
 
+5NN. **`fix(ext/webrtc,ext/midi)`: the fork's non-serializable WebRTC, media and
+MIDI interfaces refuse `structuredClone`** (fork; follows the port of
+theende/ende 8e05435521; `ext/webrtc/01_webrtc.js`,
+`ext/webrtc/02_media_devices.js`, `ext/webrtc/03_encoded_transform.js`,
+`ext/webrtc/04_sframe.js`, `ext/webrtc/06_identity.js`, `ext/midi/01_midi.js`).
+The clone sweep found interfaces that aren't `[Serializable]` in their specs but
+cloned as `{}`: `RTCSessionDescription`, `RTCIceCandidate`,
+`RTCIceCandidatePair`, `RTCError`, `RTCStatsReport`, `RTCRtpSender` /
+`RTCRtpReceiver` / `RTCRtpTransceiver`, `RTCRtpScriptTransform`,
+`RTCRtpSFrameEncryptor`, `SFrameEncryptorStream`, `RTCIdentityAssertion`,
+`OverconstrainedError`, `MediaDeviceInfo` / `InputDeviceInfo` and `MIDIInputMap`
+/ `MIDIOutputMap`. They are marked like the Web platform interfaces and throw
+`DataCloneError`. `RTCEncodedVideoFrame` / `RTCEncodedAudioFrame` are
+`[Serializable]` and stay cloneable; the sweep lists them, and skips Node's
+`Buffer` and the WebGPU constant namespaces, which aren't interfaces. -
+User-facing note: `structuredClone(new RTCError(...))` and
+`structuredClone(new OverconstrainedError(...))` throw `DataCloneError` (neither
+is `[Serializable]`) instead of returning a plain `DOMException`. - Tests:
+`structured_clone_test.ts`'s
+`structuredClone rejects every non-serializable interface` (main scope and
+worker; failed on these before). - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -21614,10 +21636,10 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
 506-510, 511, 512, 513, 515, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN,
-5NN, 5NN, 5NN) are what the prebuilt `libdenort` carries. The CLI-side parts
-(for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged
-app's launchers) are in the branch too, but a stock CLI does not run them;
-denext's own launcher provides that environment.
+5NN, 5NN, 5NN, 5NN) are what the prebuilt `libdenort` carries. The CLI-side
+parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
+packaged app's launchers) are in the branch too, but a stock CLI does not run
+them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

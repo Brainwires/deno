@@ -7911,6 +7911,21 @@ const identityHooks = core.loadExtScript("ext:deno_webrtc/06_identity.js")
     RTCPeerConnectionPrototype,
   });
 
+// Not [Serializable]: structuredClone throws a DataCloneError.
+{
+  const { markNotSerializable } = core.loadExtScript(
+    "ext:deno_web/13_message_port.js",
+  );
+  markNotSerializable(RTCSessionDescription.prototype);
+  markNotSerializable(RTCIceCandidate.prototype);
+  markNotSerializable(RTCError.prototype);
+  markNotSerializable(RTCStatsReport.prototype);
+  markNotSerializable(RTCIceCandidatePair.prototype);
+  markNotSerializable(RTCRtpSender.prototype);
+  markNotSerializable(RTCRtpReceiver.prototype);
+  markNotSerializable(RTCRtpTransceiver.prototype);
+}
+
 return {
   MediaStream,
   MediaStreamTrack,

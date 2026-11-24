@@ -802,6 +802,15 @@ function requestMIDIAccess(options = undefined) {
 // for tests/unit/midi_test.ts, which can't reach a port everywhere
 internals.midiValidateMessages = validateMessages;
 
+// Not [Serializable]: structuredClone throws a DataCloneError.
+{
+  const { markNotSerializable } = core.loadExtScript(
+    "ext:deno_web/13_message_port.js",
+  );
+  markNotSerializable(MIDIInputMap.prototype);
+  markNotSerializable(MIDIOutputMap.prototype);
+}
+
 return {
   MIDIAccess,
   MIDIConnectionEvent,

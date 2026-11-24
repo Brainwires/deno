@@ -699,14 +699,31 @@ function clonableInterfaces() {
     "File",
     "GPUPipelineError",
     "QuotaExceededError",
+    // WebRTC Encoded Transform: [Serializable], branded on the prototype.
+    "RTCEncodedAudioFrame",
+    "RTCEncodedVideoFrame",
     "WebSocketError",
     "WebTransportError",
+  ]);
+  // Not interfaces: Node's `Buffer` (a Uint8Array subclass, cloned as a
+  // Uint8Array as in Node) and the WebGPU constant namespaces (classes here).
+  const notInterfaces = new Set([
+    "Buffer",
+    "GPUBufferUsage",
+    "GPUColorWrite",
+    "GPUMapMode",
+    "GPUShaderStage",
+    "GPUTextureUsage",
   ]);
   const clonable = [];
   for (const name of Object.getOwnPropertyNames(globalThis)) {
     // Interface names are capitalized; functions like `fetch` aren't.
     if (!/^[A-Z]/.test(name)) continue;
-    if (ecmascript.has(name) || serializable.has(name)) continue;
+    if (
+      ecmascript.has(name) || serializable.has(name) || notInterfaces.has(name)
+    ) {
+      continue;
+    }
     let value;
     try {
       // deno-lint-ignore no-explicit-any
