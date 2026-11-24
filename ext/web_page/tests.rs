@@ -300,12 +300,12 @@ async fn fetch_is_confined() {
   let mut options = options("<p>fetch</p>");
   // Allowed by name, and still refused: loopback is on the default deny
   // list, which is checked where the connection is made.
-  options.net_allow = vec!["127.0.0.1:1".to_string()];
+  options.net_allow = vec!["127.0.0.1:2".to_string()];
   let mut page = PageRuntime::new(options).unwrap();
   run(
     &mut page,
     r#"globalThis.denied = "pending";
-      fetch("http://127.0.0.1:1/").then(
+      fetch("http://127.0.0.1:2/").then(
         () => { denied = "resolved"; },
         (e) => {
           denied = [e instanceof TypeError, String(e.cause && e.cause.code)];
