@@ -136,8 +136,9 @@ pub fn discover_npmrc_from_home<TSys: EnvVar + EnvHomeDir + FsRead>(
 static KERNEL_CONFINED: std::sync::atomic::AtomicBool =
   std::sync::atomic::AtomicBool::new(false);
 
-/// denext: marks this process as confined by the OS: a kernel sandbox plan
-/// it applied, or (a child of a confined process) the kernel's own report.
+/// denext: marks this process as confined by this runtime's kernel sandbox:
+/// a plan it applied, or (a child of a confined process) the sandbox's
+/// marker as the kernel reports it.
 /// An unreadable `.npmrc` then counts as absent, as the policy never makes
 /// it readable. Set by the CLI from what the kernel says, never from the
 /// environment, so nothing a parent sets can change it; it can only make a

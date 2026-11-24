@@ -21579,6 +21579,27 @@ where the changes are discussed.
        `prunes_only_stale_files_of_other_versions` now lists the lock file.
      - Node tests enabled: none.
 
+525. **`fix(permissions)`: only this runtime's kernel sandbox makes an
+     unreadable `.npmrc` count as absent** (CLI; `cli/sandbox/enforce.rs`,
+     `libs/resolver/npmrc.rs`). A process the kernel sandbox confines treats
+     an `.npmrc` it can't read as absent (item 425: the policy never makes it
+     readable). A child of a confined process was recognised by the kernel's
+     report alone: on Linux no-new-privileges with a seccomp filter, on macOS
+     any Seatbelt sandbox. Those are any hardened container's and any
+     sandboxed app's too (Kubernetes' `allowPrivilegeEscalation: false`), so
+     with the kernel sandbox off, an `.npmrc` such a process couldn't read
+     was skipped with a warning that named the kernel sandbox, and a private
+     registry mapping was dropped. The mark now takes the plan the process
+     applied or the sandbox's own marker
+     (`deno_sandbox::inherit::kernel_reports_marked`, which `auto` already
+     used on Linux); anything else leaves the read an error, as with no
+     sandbox. The lifecycle jail's own rule is unchanged.
+     - Tests: `tests/specs/npm/npmrc_unreadable_in_container` (Linux; a
+       process with no-new-privileges and an allow-all seccomp filter runs
+       `deno install` beside an unreadable `.npmrc`; needs a user that isn't
+       root).
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
