@@ -68,21 +68,22 @@ that is `open` where its cell says `kernel` is an escape.
 
 `--expect=enforce` runs host.ts under `--kernel-sandbox=enforce` in the
 configurations the kernel sandbox holds by itself (a name in `--allow-net` is
-held by the broker: the `net-host` configurations below): `files` (`--allow-read/write/ffi=<work>`, no
-network, no run), `net-all` (the same plus `--allow-net`), `run` (plus
-`--allow-run=<work>/probe`, the child vector) and `nested` (a run list that
-names the runtime and the launchers too). Under `--expect=enforce` a fifth
-vector, `nested`, runs: the confined host starts `deno run -A host.ts ffi`,
-which inherits the host's grant (the policy handed down) and drives the FFI
-vector; its checks are expected as for a run list, and it must run where
-`nested` lets it start. Two more vectors start that deno through a launcher that
-drops the policy's carrier: `nested-env` through `env -i` (the variable cleared,
-the descriptor still open: the nested deno finds it again, so it is expected as
-`nested`) and `nested-closed` through a shell that closes the descriptor (the
-nested deno knows a kernel sandbox of the runtime holds it, by its marker, but
-not the grant: it refuses every permission, so every check is `n/a`, and each
-must say `grants unknown`). `expect.ts` derives what each check may be from this
-machine's column (macOS, or Linux by Landlock ABI):
+held by the broker: the `net-host` configurations below): `files`
+(`--allow-read/write/ffi=<work>`, no network, no run), `net-all` (the same plus
+`--allow-net`), `run` (plus `--allow-run=<work>/probe`, the child vector) and
+`nested` (a run list that names the runtime and the launchers too). Under
+`--expect=enforce` a fifth vector, `nested`, runs: the confined host starts
+`deno run -A host.ts ffi`, which inherits the host's grant (the policy handed
+down) and drives the FFI vector; its checks are expected as for a run list, and
+it must run where `nested` lets it start. Two more vectors start that deno
+through a launcher that drops the policy's carrier: `nested-env` through
+`env -i` (the variable cleared, the descriptor still open: the nested deno finds
+it again, so it is expected as `nested`) and `nested-closed` through a shell
+that closes the descriptor (the nested deno knows a kernel sandbox of the
+runtime holds it, by its marker, but not the grant: it refuses every permission,
+so every check is `n/a`, and each must say `grants unknown`). `expect.ts`
+derives what each check may be from this machine's column (macOS, or Linux by
+Landlock ABI):
 
 | cell                                                   | macOS  | Linux ABI 1 | ABI 2-3 | ABI 4-5 | ABI 6+ |
 | ------------------------------------------------------ | ------ | ----------- | ------- | ------- | ------ |

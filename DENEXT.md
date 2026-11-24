@@ -21846,7 +21846,6 @@ is `[Serializable]`) instead of returning a plain `DOMException`. - Tests:
 `structuredClone rejects every non-serializable interface` (main scope and
 worker; failed on these before). - Node tests enabled: none.
 
-
 516. **`fix(node/net)`: on Windows, a named-pipe socket that ends reaches its
      peer as EOF** (runtime; `libs/core/uv_compat/pipe.rs`; tests say item 5NN
      until the train numbers it). A Windows named pipe has no half-close, and
@@ -21919,7 +21918,7 @@ worker; failed on these before). - Node tests enabled: none.
        holding a descriptor in flight; stock Deno 2.9.8 fails it every time on
        macOS).
 
-516. **`fix(core)`: a 1 ms timer fires after 1 ms, not on the next timer-wheel
+519. **`fix(core)`: a 1 ms timer fires after 1 ms, not on the next timer-wheel
      tick** (runtime; `libs/core/{reactor_tokio.rs,web_timeout.rs}`,
      `libs/core/runtime/jsruntime.rs`, `libs/core/Cargo.toml`). The user timer
      (`UserTimer`, behind `setTimeout` / `setInterval` and the uv timer wake-up)
@@ -21957,7 +21956,7 @@ worker; failed on these before). - Node tests enabled: none.
        (`expiry_delay_tests`), `tests/unit/timers_test.ts`
        (`chainedOneMillisecondTimersTakeAboutOneMillisecond`).
 
-516. **`fix(sandbox)`: loader variables an env file sets are held back across
+520. **`fix(sandbox)`: loader variables an env file sets are held back across
      the kernel sandbox's re-exec** (cli; `cli/util/env.rs`,
      `cli/sandbox/enforce.rs`, `cli/lib.rs`). The variables the dynamic loader
      and libc read when a program starts (`LD_*`, `DYLD_*`, `GCONV_PATH`,
@@ -21981,7 +21980,7 @@ worker; failed on these before). - Node tests enabled: none.
        the kernel sandbox).
      - Node tests enabled: none.
 
-517. **`fix(permissions)`: a dynamic `file:` import checks the resolved path, as
+521. **`fix(permissions)`: a dynamic `file:` import checks the resolved path, as
      a read does** (runtime; `runtime/permissions/lib.rs`).
      `PermissionsContainer::check_specifier` checked a dynamic `import()` of a
      `file:` URL against the read permission by the path as written.
