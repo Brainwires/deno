@@ -21231,7 +21231,16 @@ where the changes are discussed.
        `fc00::/7`), `"link-local"` (`169.254.0.0/16`, `fe80::/10`) and
        `"metadata"` (`169.254.169.254`, `fd00:ec2::254`, `100.100.100.200`). An
        IPv4-mapped address (and a mapped range) is compared as the IPv4 address
-       it carries. Anything else is a `TypeError` from `createHttpClient`.
+       it carries. An IPv6 address that a translator or a tunnel turns back into
+       IPv4 is refused when the address it carries is denied too (`embedded_v4`:
+       NAT64's `64:ff9b::/96` and, in `64:ff9b:1::/48`, both the last 32 bits
+       and RFC 6052's `/48` position; 6to4 `2002::/16`; Teredo `2001::/32`,
+       inverted; IPv4-compatible `::a.b.c.d` and IPv4-translated
+       `::ffff:0:a.b.c.d`), the forms `libs/sandbox`'s `is_internal` knows:
+       before, on a NAT64 network `http://[64:ff9b::a00:5]/` reached `10.0.0.5`
+       past `"private"`. A range listed in such a form still denies as written;
+       `::` and `::1` are IPv6's own. Anything else is a `TypeError` from
+       `createHttpClient`.
      - **Addresses, not names.** `PermissionedHttpConnector` resolves a name
        itself, refuses when any address is denied, connects only to the
        addresses it checked (a client with no permissions to check now takes the
@@ -21257,7 +21266,9 @@ where the changes are discussed.
        empty list), `fetchCustomClientDenyAddressesThroughAProxy` (the proxy hop
        on loopback allowed, a denied destination and an unresolvable one refused
        before the proxy is asked), `createHttpClientDenyAddressesInvalid`;
-       `deny_addresses::tests` (parsing, presets, mapped addresses);
+       `deny_addresses::tests` (parsing, presets, mapped addresses,
+       `an_address_that_carries_an_ipv4_address_is_that_address_too`); the unit
+       test's NAT64, IPv4-translated, IPv4-compatible, 6to4 and Teredo literals;
        `dns::tests::deny_addresses_refuse_a_resolved_address_before_connecting`
        (nothing connects; with and without permissions) and
        `deny_addresses_connect_to_the_checked_addresses_only` (a resolver that

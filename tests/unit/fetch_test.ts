@@ -1495,6 +1495,27 @@ Deno.test(
       );
     }
 
+    // ... and so is every other IPv6 form that carries one: NAT64 (the
+    // well-known and the local-use prefix), IPv4-translated,
+    // IPv4-compatible, 6to4 and Teredo (the address inverted)
+    {
+      using client = Deno.createHttpClient({ denyAddresses: ["127.0.0.1"] });
+      for (
+        const literal of [
+          "64:ff9b::7f00:1",
+          "64:ff9b:1::7f00:1",
+          "::ffff:0:7f00:1",
+          "::7f00:1",
+          "2002:7f00:1::1",
+          "2001::80ff:fffe",
+        ]
+      ) {
+        await assertAddressDenied(
+          fetch(`http://[${literal}]:${port}/`, { client }),
+        );
+      }
+    }
+
     // a redirect hop is a new connection, checked as the first one was
     {
       using client = Deno.createHttpClient({ denyAddresses: ["127.0.0.2"] });
@@ -2646,8 +2667,8 @@ Deno.test(
 
 Deno.test("fetch async iterable", async () => {
   const iterable = (async function* () {
-  yield new Uint8Array([1, 2, 3, 4, 5]);
-  yield new Uint8Array([6, 7, 8, 9, 10]);
+    yield new Uint8Array([1, 2, 3, 4, 5]);
+    yield new Uint8Array([6, 7, 8, 9, 10]);
   })();
   const res = new Response(iterable);
   const actual = await res.bytes();
@@ -2657,8 +2678,8 @@ Deno.test("fetch async iterable", async () => {
 
 Deno.test("fetch iterable", async () => {
   const iterable = (function* () {
-  yield new Uint8Array([1, 2, 3, 4, 5]);
-  yield new Uint8Array([6, 7, 8, 9, 10]);
+    yield new Uint8Array([1, 2, 3, 4, 5]);
+    yield new Uint8Array([6, 7, 8, 9, 10]);
   })();
   const res = new Response(iterable);
   const actual = await res.bytes();

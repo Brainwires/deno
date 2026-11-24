@@ -7301,7 +7301,11 @@ declare namespace Deno {
      * anything. It holds for every connection the client makes: each
      * redirect hop, each address happy eyeballs tries. An IPv4-mapped IPv6
      * address (`::ffff:127.0.0.1`) is compared as the IPv4 address it
-     * carries.
+     * carries, and an IPv6 address that a translator or a tunnel turns back
+     * into IPv4 (NAT64 `64:ff9b::/96` and `64:ff9b:1::/48`, 6to4
+     * `2002::/16`, Teredo `2001::/32`, the IPv4-compatible and
+     * IPv4-translated forms) is refused when the IPv4 address it carries is
+     * denied, as well as when a listed range holds the address itself.
      *
      * Through a proxy (the `proxy` option or `HTTP(S)_PROXY`), the hop to the
      * proxy itself is not checked (a proxy is configuration, often on a
