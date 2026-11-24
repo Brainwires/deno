@@ -2240,8 +2240,11 @@ declare namespace Deno {
     readDirSync(path: string): IteratorObject<DirEntry>;
     /** Creates `path` (relative to the root) as a symlink to `target`.
      * `target` is stored as given; following the link from the root later
-     * is held to the root like any other path. Unix only: throws
-     * `Deno.errors.NotSupported` on Windows. */
+     * is held to the root like any other path. With unscoped read and write
+     * permissions `target` may be anything, as for {@linkcode Deno.symlink};
+     * with a scoped grant it must be relative and stay beneath the root when
+     * followed from the link's folder, else `Deno.errors.NotCapable` is
+     * thrown. Unix only: throws `Deno.errors.NotSupported` on Windows. */
     symlink(target: string | URL, path: string): Promise<void>;
     /** The synchronous {@linkcode Deno.Root.symlink}. */
     symlinkSync(target: string | URL, path: string): void;

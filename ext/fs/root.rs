@@ -97,6 +97,20 @@ pub(crate) fn outside_error(path: &str, root: &Path) -> FsError {
   ))
 }
 
+/// A link whose target would lead outside the root, made without the
+/// unscoped grants a link to anywhere takes.
+#[cfg(unix)]
+pub(crate) fn target_error(target: &Path, path: &str, root: &Path) -> FsError {
+  FsError::Io(io::Error::new(
+    io::ErrorKind::PermissionDenied,
+    RootEscape(format!(
+      "The target \"{}\" of the link \"{path}\" leads outside the root \"{}\" or into a denied path: a link to anywhere requires unscoped --allow-read and --allow-write permissions, because a link's target is only resolved when the link is traversed",
+      target.display(),
+      root.display()
+    )),
+  ))
+}
+
 /// The payload of [`outside_error`], so the op reports it as `NotCapable`
 /// rather than as an OS error.
 #[derive(Debug)]
@@ -805,6 +819,23 @@ pub async fn op_fs_root_read_dir_async(
   .await
 }
 
+/// A link's path, and what its target is held to (decided on the JS
+/// thread, with the permissions as they are now).
+fn prepare_symlink(
+  root: &FsRoot,
+  permissions: &PermissionsContainer,
+  path: &str,
+  api_name: &str,
+) -> Result<(imp::Prepared, imp::LinkTargets), FsOpsError> {
+  let prepared =
+    root.prepare(permissions, path, OpenAccessKind::WriteNoFollow, api_name)?;
+  let targets = root
+    .inner
+    .link_targets(permissions, api_name)
+    .map_err(|err| op_error(err, "symlink", path))?;
+  Ok((prepared, targets))
+}
+
 #[op2(fast, stack_trace)]
 pub fn op_fs_root_symlink_sync(
   state: &mut OpState,
@@ -813,15 +844,15 @@ pub fn op_fs_root_symlink_sync(
   #[string] path: &str,
 ) -> Result<(), FsOpsError> {
   let root = get_root(state, rid)?;
-  let prepared = root.prepare(
+  let (prepared, targets) = prepare_symlink(
+    &root,
     state.borrow::<PermissionsContainer>(),
     path,
-    OpenAccessKind::WriteNoFollow,
     "Deno.Root.symlinkSync()",
   )?;
   root
     .inner
-    .symlink(Path::new(target), &prepared)
+    .symlink(Path::new(target), &prepared, &targets)
     .map_err(|e| op_error(e, "symlink", path))
 }
 
@@ -832,21 +863,21 @@ pub async fn op_fs_root_symlink_async(
   #[string] target: String,
   #[string] path: String,
 ) -> Result<(), FsOpsError> {
-  let (root, prepared) = {
+  let (root, prepared, targets) = {
     let state = state.borrow();
     let root = get_root(&state, rid)?;
-    let prepared = root.prepare(
+    let (prepared, targets) = prepare_symlink(
+      &root,
       state.borrow::<PermissionsContainer>(),
       &path,
-      OpenAccessKind::WriteNoFollow,
       "Deno.Root.symlink()",
     )?;
-    (root, prepared)
+    (root, prepared, targets)
   };
   blocking(move || {
     root
       .inner
-      .symlink(Path::new(&target), &prepared)
+      .symlink(Path::new(&target), &prepared, &targets)
       .map_err(|e| op_error(e, "symlink", &path))
   })
   .await
@@ -943,6 +974,14 @@ mod unix {
     /// caller did still resolves beneath it. Each opens through `fd` only.
     aliases: Vec<PathBuf>,
     fd: Arc<OwnedFd>,
+  }
+
+  /// What a link's target is held to ([`Root::link_targets`]).
+  pub enum LinkTargets {
+    /// Unscoped read and write: any target, as `Deno.symlink()` stores.
+    Any,
+    /// The target must stay beneath the root; the scope it is followed in.
+    Beneath(OpenScope),
   }
 
   /// One operation's path, with the scope it is opened in.
@@ -1182,9 +1221,107 @@ mod unix {
         .map_err(|e| map_scope_err(e, p, &self.path))
     }
 
-    pub fn symlink(&self, target: &Path, p: &Prepared) -> FsResult<()> {
-      crate::scoped::symlink(&p.scope, target, &p.abs)
-        .map_err(|e| map_scope_err(e, p, &self.path))
+    /// What the target of a link made now is held to. A link's target is a
+    /// string the kernel resolves when the link is followed, by anything
+    /// that opens the link's name, not only by this root: `Deno.symlink()`
+    /// takes unscoped read and write for that reason, and with both a root
+    /// stores any target too. With a scoped (or partly denied) grant the
+    /// target must stay beneath the root, the rule `node:wasi`'s
+    /// `path_symlink` has for a preopen (DENEXT.md item 224).
+    pub fn link_targets(
+      &self,
+      permissions: &PermissionsContainer,
+      api_name: &str,
+    ) -> FsResult<LinkTargets> {
+      if permissions.query_read_all() && permissions.query_write_all() {
+        return Ok(LinkTargets::Any);
+      }
+      Ok(LinkTargets::Beneath(self.scope(
+        permissions,
+        OpenAccessKind::ReadWrite,
+        None,
+        api_name,
+      )?))
+    }
+
+    pub fn symlink(
+      &self,
+      target: &Path,
+      p: &Prepared,
+      targets: &LinkTargets,
+    ) -> FsResult<()> {
+      let result = match targets {
+        LinkTargets::Any => crate::scoped::symlink(&p.scope, target, &p.abs),
+        LinkTargets::Beneath(scope) => {
+          crate::scoped::symlink_checked(&p.scope, target, &p.abs, |folder| {
+            if self.target_stays_beneath(scope, folder, target) {
+              Ok(())
+            } else {
+              Err(super::target_error(target, &p.rel, &self.path))
+            }
+          })
+        }
+      };
+      result.map_err(|e| map_scope_err(e, p, &self.path))
+    }
+
+    /// Whether a link made in `folder` (where the kernel says the link's
+    /// folder is now) with `target` leads, when it is followed, to a place
+    /// beneath the root:
+    ///
+    /// - the target is relative, and its `..` all lead it (after a name a
+    ///   `..` is resolved from wherever that name leads, which can't be
+    ///   told from the text);
+    /// - counted from the link's real folder, the leading `..` don't climb
+    ///   above the root;
+    /// - where the target exists, following it in `scope` (the root, outside
+    ///   the read and write denies) is not refused: no link on its way
+    ///   leads out or into a denied path. A target that doesn't resolve (a
+    ///   missing tail) is beneath the root by the two rules above.
+    ///
+    /// `false` where the folder's or the root's place can't be told.
+    fn target_stays_beneath(
+      &self,
+      scope: &OpenScope,
+      folder: Option<&Path>,
+      target: &Path,
+    ) -> bool {
+      use std::path::Component;
+      let (Some(folder), OpenedPath::At(root)) =
+        (folder, opened_path(self.fd.as_fd()))
+      else {
+        return false;
+      };
+      let Ok(folder) = folder.strip_prefix(&root) else {
+        return false;
+      };
+      // the place the target names, relative to the root
+      let mut place: Vec<&std::ffi::OsStr> = folder.iter().collect();
+      // after a name, a `..` is not the text's to resolve
+      let mut named = false;
+      for component in target.components() {
+        match component {
+          Component::CurDir => {}
+          Component::ParentDir if !named => {
+            if place.pop().is_none() {
+              return false;
+            }
+          }
+          Component::Normal(name) => {
+            named = true;
+            place.push(name);
+          }
+          Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+            return false;
+          }
+        }
+      }
+      let mut abs = self.path.clone();
+      abs.extend(place);
+      !matches!(
+        crate::scoped::stat(scope, &abs),
+        Err(FsError::PermissionCheck(_))
+      )
     }
 
     pub fn read_link(&self, p: &Prepared) -> FsResult<PathBuf> {
@@ -1271,6 +1408,91 @@ mod unix {
       )
       .unwrap();
       PermissionsContainer::new(Arc::new(parser), perms)
+    }
+
+    /// With grants scoped to the root's folder a link's target stays
+    /// beneath the root; with unscoped read and write it is any string.
+    #[test]
+    fn a_link_made_with_scoped_grants_stays_beneath_the_root() {
+      let tmp = tempfile::tempdir().unwrap();
+      let base = std::fs::canonicalize(tmp.path()).unwrap();
+      let dir = base.join("root");
+      std::fs::create_dir_all(dir.join("sub")).unwrap();
+      std::fs::write(dir.join("f.txt"), "inside").unwrap();
+      std::fs::write(base.join("secret.txt"), "outside").unwrap();
+      // links that were there before: to the root itself, and out
+      std::os::unix::fs::symlink("..", dir.join("sub/up")).unwrap();
+      std::os::unix::fs::symlink("..", dir.join("out")).unwrap();
+
+      let parser =
+        RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys);
+      let scoped = Permissions::from_options(
+        &parser,
+        &PermissionsOptions {
+          allow_read: Some(vec![dir.display().to_string()]),
+          allow_write: Some(vec![dir.display().to_string()]),
+          prompt: false,
+          ..Default::default()
+        },
+      )
+      .unwrap();
+      let scoped = PermissionsContainer::new(Arc::new(parser), scoped);
+      let root =
+        Root::open_dir(&CheckedPathBuf::unsafe_new(dir.clone()), &dir).unwrap();
+      let link = |perms: &PermissionsContainer, target: &str, path: &str| {
+        let p = root.prepare(
+          perms,
+          components(Path::new(path)),
+          OpenAccessKind::WriteNoFollow,
+          "test",
+        )?;
+        let targets = root.link_targets(perms, "test")?;
+        root.symlink(Path::new(target), &p, &targets)
+      };
+
+      let secret = base.join("secret.txt");
+      for (target, path) in [
+        ("../secret.txt", "a"),
+        (secret.to_str().unwrap(), "b"),
+        ("sub/../../secret.txt", "c"),
+        ("../../secret.txt", "sub/d"),
+        // `sub/up` is the root: from there `..` is outside
+        ("../secret.txt", "sub/up/e"),
+        // through a link that leads out
+        ("out/secret.txt", "f"),
+      ] {
+        let err = link(&scoped, target, path).unwrap_err();
+        assert_eq!(
+          err.kind(),
+          std::io::ErrorKind::PermissionDenied,
+          "{target}: {err}"
+        );
+        assert!(
+          std::fs::symlink_metadata(dir.join(path)).is_err(),
+          "{target}"
+        );
+      }
+      for (target, path) in [
+        ("f.txt", "h"),
+        ("./f.txt", "i"),
+        ("../f.txt", "sub/j"),
+        ("missing/later.txt", "k"),
+        (".", "l"),
+        ("../f.txt", "sub/up/sub/m"),
+      ] {
+        link(&scoped, target, path).unwrap();
+        assert_eq!(
+          std::fs::read_link(dir.join(path)).unwrap(),
+          Path::new(target)
+        );
+      }
+
+      // unscoped read and write: any target, as `Deno.symlink()` stores
+      let all = PermissionsContainer::allow_all(Arc::new(
+        RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys),
+      ));
+      link(&all, "../secret.txt", "n").unwrap();
+      assert!(read(&root, "n").is_err());
     }
 
     fn components(path: &Path) -> Vec<OsString> {

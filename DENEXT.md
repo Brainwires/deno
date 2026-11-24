@@ -21154,6 +21154,19 @@ where the changes are discussed.
        refuses it now (name `dev/null` instead), and on Linux it needs `/proc`
        mounted (the object each open reached is read back). Windows already
        checks each path as `Deno.open` does.
+     - **A link's target.** `Deno.symlink()` takes unscoped read and write,
+       because a target is a string the kernel resolves when the link is
+       followed, by anything that opens the link's name (item 224). With both
+       unscoped `Root.symlink` stores any target, as before. With a scoped grant
+       (or a denied part) the target must stay beneath the root, the rule
+       `node:wasi`'s `path_symlink` has for a preopen
+       (`unix::Root::link_targets`, `target_stays_beneath`,
+       `scoped::symlink_checked`): it is relative, its `..` all lead it and,
+       counted from the folder the link is really made in (the kernel's name for
+       the descriptor the link is made through), don't climb above the root, and
+       where it exists, following it inside the root (outside the read and write
+       denies and the kernel's trees) is not refused. Anything else is
+       `NotCapable` and no link is made.
      - Not covered: the files a `deno compile` program embeds (a root opens the
        real file system); `..` is lexical, as the permission checks resolve it
        (`link/../x` is `x`, not `x` beside the link's target); under
@@ -21173,12 +21186,17 @@ where the changes are discussed.
        `proc/self/environ`, `proc/<pid>/environ`, `proc/self/mem` and
        `proc/self/root` for `lstat`, opens, reads and writes, by name, through
        `..`, through a file link and a folder link, a root opened on
-       `/proc/self/root` or `/dev` refused, `dev/null` read); `root::tests`
-       (relative path resolution, Windows prefixes); `root::unix::tests`
-       (`the_kernel_trees_keep_the_special_file_rule`); `root_windows::tests`
-       (files, folders, rename, a recursive remove with a read-only file,
-       junctions out and inside never followed, the root's path swapped for a
-       junction).
+       `/proc/self/root` or `/dev` refused, `dev/null` read; in a worker with
+       read and write scoped to the root's folder, links whose target is
+       absolute, climbs out (also from a folder reached through a link to the
+       root), has a `..` after a name or goes through a link out refused and not
+       made, links that stay inside made); `root::tests` (relative path
+       resolution, Windows prefixes); `root::unix::tests`
+       (`the_kernel_trees_keep_the_special_file_rule`,
+       `a_link_made_with_scoped_grants_stays_beneath_the_root`);
+       `root_windows::tests` (files, folders, rename, a recursive remove with a
+       read-only file, junctions out and inside never followed, the root's path
+       swapped for a junction).
      - User-facing note: `Deno.openRoot(dir)` gives a handle whose paths can't
        leave `dir`, for untrusted names (uploads, archive entries).
      - Node tests enabled: none, because this is a Deno API.

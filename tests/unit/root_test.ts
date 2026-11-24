@@ -378,6 +378,105 @@ Deno.test(
 
 Deno.test(
   { ignore: windows, permissions: { read: true, write: true } },
+  async function rootLinksStayInsideUnderScopedGrants() {
+    using b = bed();
+    const secret = join(b.outside, "secret.txt");
+    Deno.mkdirSync(join(b.root, "sub"));
+    Deno.writeTextFileSync(join(b.root, "f.txt"), "inside");
+    // links that were there before: one that stays inside (to the root
+    // itself), one that leads out
+    Deno.symlinkSync("..", join(b.root, "sub", "up"));
+    Deno.symlinkSync("../outside", join(b.root, "out"));
+
+    // [target, path]: each would lead out of the root when followed
+    const refused = [
+      ["../outside/secret.txt", "a"],
+      [secret, "b"],
+      ["sub/../../outside/secret.txt", "c"],
+      ["../../outside/secret.txt", "sub/d"],
+      // `sub/up` is the root: from there `..` is outside
+      ["../outside/secret.txt", "sub/up/e"],
+      // through a link that leads out
+      ["out/secret.txt", "f"],
+    ];
+    const allowed = [
+      ["f.txt", "h"],
+      ["./f.txt", "i"],
+      ["../f.txt", "sub/j"],
+      ["missing/later.txt", "k"],
+      [".", "l"],
+    ];
+    // a program with grants scoped to the root's folder: a link to anywhere
+    // takes unscoped read and write, as `Deno.symlink()` does
+    const code = `
+      const [dir, refused, allowed] = ${
+      JSON.stringify([b.root, refused, allowed])
+    };
+      const result = { refused: [], allowed: [], byName: "" };
+      const root = Deno.openRootSync(dir);
+      let n = 0;
+      for (const [target, path] of refused) {
+        try {
+          if (n++ % 2) root.symlinkSync(target, path);
+          else await root.symlink(target, path);
+          result.refused.push("made");
+        } catch (err) {
+          result.refused.push(err.name);
+        }
+      }
+      for (const [target, path] of allowed) {
+        try {
+          if (n++ % 2) root.symlinkSync(target, path);
+          else await root.symlink(target, path);
+          result.allowed.push("made");
+        } catch (err) {
+          result.allowed.push(err.name + ": " + err.message);
+        }
+      }
+      try {
+        Deno.symlinkSync("f.txt", dir + "/m");
+        result.byName = "made";
+      } catch (err) {
+        result.byName = err.name;
+      }
+      root.close();
+      self.postMessage(result);
+    `;
+    const worker = new Worker(
+      URL.createObjectURL(new Blob([code], { type: "text/javascript" })),
+      {
+        type: "module",
+        deno: { permissions: { read: [b.root], write: [b.root] } },
+      },
+    );
+    const result = await new Promise<{
+      refused: string[];
+      allowed: string[];
+      byName: string;
+    }>((resolve, reject) => {
+      worker.onmessage = (e) => resolve(e.data);
+      worker.onerror = (e) => reject(e.error ?? new Error(e.message));
+    });
+    worker.terminate();
+
+    assertEquals(result.refused, refused.map(() => "NotCapable"));
+    for (const [, path] of refused) {
+      assertThrows(
+        () => Deno.lstatSync(join(b.root, path)),
+        Deno.errors.NotFound,
+      );
+    }
+    assertEquals(result.allowed, allowed.map(() => "made"));
+    for (const [target, path] of allowed) {
+      assertEquals(Deno.readLinkSync(join(b.root, path)), target);
+    }
+    assertEquals(result.byName, "NotCapable");
+    assertEquals(Deno.readTextFileSync(secret), "outside");
+  },
+);
+
+Deno.test(
+  { ignore: windows, permissions: { read: true, write: true } },
   async function rootHoldsTheKernelTreesToTheSpecialFileRule() {
     // unscoped read and write, and nothing else: what `Deno.open()` asks
     // every permission for by name, it asks for through a root too

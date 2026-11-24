@@ -439,6 +439,9 @@ pub struct Root {
 
 /// One operation's path: its components beneath the root (the permission
 /// check was made on the path they spell).
+/// What a link's target is held to: nothing here, where no link is made.
+pub struct LinkTargets;
+
 pub struct Prepared {
   components: Vec<OsString>,
   abs: PathBuf,
@@ -800,7 +803,20 @@ impl Root {
     )
   }
 
-  pub fn symlink(&self, _target: &Path, _p: &Prepared) -> FsResult<()> {
+  pub fn link_targets(
+    &self,
+    _permissions: &PermissionsContainer,
+    _api_name: &str,
+  ) -> FsResult<LinkTargets> {
+    Ok(LinkTargets)
+  }
+
+  pub fn symlink(
+    &self,
+    _target: &Path,
+    _p: &Prepared,
+    _targets: &LinkTargets,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
