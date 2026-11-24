@@ -1,0 +1,2 @@
+warning (test keys): this Deno ([WILDCARD]) is a revoked denext runtime: a test revocation; https://example.com/advisory. Run `denext runtime install` for the safe release (fixed in 3.0.0-denext.999); DENEXT_ALLOW_REVOKED_RUNTIME=[WILDCARD] silences this.
+ran

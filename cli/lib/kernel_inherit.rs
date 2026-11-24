@@ -697,7 +697,7 @@ fn net_within(inner: &str, outer: &str) -> bool {
   ih == oh && (op.is_none() || ip == op)
 }
 
-fn clamp_net(
+pub(crate) fn clamp_net(
   child: Option<Vec<String>>,
   parent: &Option<Vec<String>>,
 ) -> Option<Vec<String>> {

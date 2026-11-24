@@ -1,0 +1,62 @@
+{
+  // denext (DENEXT.md item 5NN): DENO_NARROW_PERMISSIONS holds a compiled
+  // program to less than its baked grant, never more
+  "tempDir": true,
+  "envs": { "NARROW_TEST": "x" },
+  "steps": [{
+    "if": "unix",
+    "args": "compile --output=main --no-prompt --allow-read --allow-env main.ts",
+    "output": "[WILDCARD]"
+  }, {
+    "if": "unix",
+    "commandName": "./main",
+    "args": [],
+    "output": "data/a.txt read\nother/b.txt read\nNARROW_TEST x\n"
+  }, {
+    // narrowed: reads only under data/, and the variable denied
+    "if": "unix",
+    "commandName": "./main",
+    "args": [],
+    "envs": {
+      "NARROW_TEST": "x",
+      "DENO_NARROW_PERMISSIONS": "--allow-read=data --deny-env=NARROW_TEST"
+    },
+    "output": "data/a.txt read\nother/b.txt NotCapable\nNARROW_TEST NotCapable\n"
+  }, {
+    // a blank value changes nothing
+    "if": "unix",
+    "commandName": "./main",
+    "args": [],
+    "envs": { "NARROW_TEST": "x", "DENO_NARROW_PERMISSIONS": " " },
+    "output": "data/a.txt read\nother/b.txt read\nNARROW_TEST x\n"
+  }, {
+    // anything that could widen refuses to start
+    "if": "unix",
+    "commandName": "./main",
+    "args": [],
+    "envs": { "DENO_NARROW_PERMISSIONS": "--allow-all" },
+    "exitCode": 1,
+    "output": "error: DENO_NARROW_PERMISSIONS: --allow-all: it would grant everything; this variable can only narrow the baked permissions. [WILDCARD]\n"
+  }, {
+    "if": "unix",
+    "commandName": "./main",
+    "args": [],
+    "envs": { "DENO_NARROW_PERMISSIONS": "--allow-read=data --frobnicate" },
+    "exitCode": 1,
+    "output": "error: DENO_NARROW_PERMISSIONS: --frobnicate: not a permission flag[WILDCARD]\n"
+  }, {
+    // a narrow bake stays narrow whatever the variable lists
+    "if": "unix",
+    "args": "compile --output=narrow --no-prompt --allow-read=data main.ts",
+    "output": "[WILDCARD]"
+  }, {
+    "if": "unix",
+    "commandName": "./narrow",
+    "args": [],
+    "envs": {
+      "NARROW_TEST": "x",
+      "DENO_NARROW_PERMISSIONS": "--allow-read=. --allow-env"
+    },
+    "output": "data/a.txt read\nother/b.txt NotCapable\nNARROW_TEST NotCapable\n"
+  }]
+}

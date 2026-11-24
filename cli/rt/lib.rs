@@ -140,7 +140,16 @@ pub fn main() {
   // nothing of its own yet. A self-extracting program's files are written
   // first (its extraction folder is readable under the sandbox, never
   // writable).
-  let standalone = extract_standalone(Cow::Owned(args)).and_then(|data| {
+  let standalone = extract_standalone(Cow::Owned(args)).and_then(|mut data| {
+    // denext (DENEXT.md item 5NN): `DENO_NARROW_PERMISSIONS` holds the
+    // program to less than its baked grant (never more), before the kernel
+    // sandbox and the permission checks see it; a value it can't honour
+    // refuses to start
+    if let Err(err) = deno_lib::narrow_permissions::apply_from_env(
+      &mut data.metadata.permissions,
+    ) {
+      exit_with_message(&err, 1);
+    }
     if data.metadata.self_extracting.is_some() {
       binary::extract_vfs_to_disk(&data.vfs, &data.root_path)?;
     }
