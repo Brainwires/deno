@@ -1,33 +1,20 @@
 {
-  "RTCConfiguration-alwaysNegotiateDataChannels.html": {
-    "expectedFailures": [
-      "alwaysNegotiateDataChannels defaults to false",
-      "alwaysNegotiateDataChannels is returned by getConfiguration",
-      "alwaysNegotiateDataChannels creates a datachannel m-line",
-      "setConfiguration can modify alwaysNegotiateDataChannels from false to true",
-      "setConfiguration can modify alwaysNegotiateDataChannels from false to true after createOffer",
-      "setConfiguration can modify alwaysNegotiateDataChannels from true to false after createOffer",
-      "setConfiguration can modify alwaysNegotiateDataChannels from false to true after negotiation",
-      "setConfiguration can modify alwaysNegotiateDataChannels from true to false after negotiation"
-    ]
-  },
-  "RTCConfiguration-rtpHeaderEncryptionPolicy.html": {
-    "expectedFailures": [
-      "rtpHeaderEncryptionPolicy defaults to \"negotiate\"",
-      "rtpHeaderEncryptionPolicy is returned by getConfiguration",
-      "rtpHeaderEncryptionPolicy \"require\" fails if cryptex is not negotiated"
-    ]
-  },
-  "RTCOAuthCredential.html": false,
+  "RTCConfiguration-alwaysNegotiateDataChannels.html": true,
+  "RTCConfiguration-rtpHeaderEncryptionPolicy.html": true,
+  "RTCOAuthCredential.html": true,
   "RTCRtpCorruptionDetection-headerExtensionControl.html": false,
   "RTCRtpEncodingParameters-scaleResolutionDownTo.https.html": false,
   "RTCRtpParameters-adaptivePtime.html": true,
-  "RTCRtpParameters-encodingComplexity-stream.https.html": true,
+  "RTCRtpParameters-encodingComplexity-stream.https.html": false,
   "RTCRtpParameters-encodingComplexity.html": true,
-  "RTCRtpSender-setParameters-keyFrame.html": true,
+  "RTCRtpSender-setParameters-keyFrame.html": {
+    "expectedFailures": [
+      "setParameters() second argument can be used to trigger keyFrame generation (simulcast)"
+    ]
+  },
   "RTCRtpSynchronizationSource-captureTimestamp.html": false,
   "RTCRtpSynchronizationSource-senderCaptureTimeOffset.html": false,
-  "RTCRtpTransceiver-headerExtensionControl.html": false,
+  "RTCRtpTransceiver-headerExtensionControl.html": true,
   "targetLatency.html": true,
   "transfer-datachannel-service-worker.https.html": false
 }

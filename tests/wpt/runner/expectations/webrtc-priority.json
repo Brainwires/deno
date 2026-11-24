@@ -1,4 +1,4 @@
 {
-  "RTCPeerConnection-ondatachannel.html": false,
+  "RTCPeerConnection-ondatachannel.html": true,
   "RTCRtpParameters-encodings.html": true
 }

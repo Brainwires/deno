@@ -1,71 +1,83 @@
 {
-  "RTCEncodedFrame-copy-construction.https.html": false,
-  "RTCEncodedFrame-shared-buffer.https.html": true,
+  "RTCEncodedFrame-copy-construction.https.html": {
+    "expectedFailures": [
+      "RTCEncodedVideoFrame cannot be serialized for storage on main thread.",
+      "RTCEncodedVideoFrame clone works with buffer from a different window",
+      "RTCEncodedVideoFrame copy c'tor works with buffer from a different window",
+      "RTCEncodedAudioFrame cannot be serialized for storage on main thread.",
+      "RTCEncodedAudioFrame clone works with buffer from a different window",
+      "RTCEncodedAudioFrame copy c'tor works with buffer from a different window"
+    ]
+  },
+  "RTCEncodedFrame-shared-buffer.https.html": false,
   "RTCRtpScriptTransform-bad-chunk.https.html": true,
-  "RTCRtpScriptTransform-encoded-transform.https.html": false,
-  "RTCRtpScriptTransform-late-transform.https.html": true,
+  "RTCRtpScriptTransform-encoded-transform.https.html": true,
+  "RTCRtpScriptTransform-late-transform.https.html": {
+    "expectedFailures": [
+      "video passes through untransformed once the sender transform is cleared"
+    ]
+  },
   "RTCRtpScriptTransform-padding.https.html": true,
-  "RTCRtpScriptTransform-sender-worker-single-frame.https.html": false,
+  "RTCRtpScriptTransform-sender-worker-single-frame.https.html": true,
   "RTCRtpScriptTransform-write-rules.https.html": true,
   "idlharness.https.window.html?exclude=.*SFrame.*": {
     "expectedFailures": [
-      "RTCEncodedVideoFrame interface: existence and properties of interface object",
-      "RTCEncodedVideoFrame must be primary interface of idlTestObjects.videoFrame",
-      "Stringification of idlTestObjects.videoFrame",
-      "RTCEncodedVideoFrame interface: idlTestObjects.videoFrame must inherit property \"type\" with the proper type",
-      "RTCEncodedVideoFrame interface: idlTestObjects.videoFrame must inherit property \"data\" with the proper type",
-      "RTCEncodedVideoFrame interface: idlTestObjects.videoFrame must inherit property \"getMetadata()\" with the proper type",
-      "RTCEncodedAudioFrame interface: existence and properties of interface object",
-      "RTCEncodedAudioFrame must be primary interface of idlTestObjects.audioFrame",
-      "Stringification of idlTestObjects.audioFrame",
-      "RTCEncodedAudioFrame interface: idlTestObjects.audioFrame must inherit property \"data\" with the proper type",
-      "RTCEncodedAudioFrame interface: idlTestObjects.audioFrame must inherit property \"getMetadata()\" with the proper type",
-      "RTCRtpScriptTransform interface: existence and properties of interface object",
-      "idl_test setup"
+      "RTCEncodedVideoFrame interface: idlTestObjects.videoFrame must inherit property \"type\" with the proper type"
     ]
   },
-  "idlharness.https.window.html?include=.*SFrame.*": {
-    "expectedFailures": [
-      "RTCRtpSFrameEncryptor interface: existence and properties of interface object",
-      "RTCRtpSFrameDecryptor interface: existence and properties of interface object",
-      "RTCRtpSFrameDecryptor interface: attribute onerror",
-      "SFrameEncryptorStream interface: existence and properties of interface object",
-      "SFrameDecryptorStream interface: existence and properties of interface object",
-      "SFrameDecryptorStream interface: attribute onerror",
-      "SFrameTransformErrorEvent interface: existence and properties of interface object",
-      "idl_test setup"
-    ]
-  },
-  "script-audio-transform.https.html": false,
-  "script-change-transform.https.html": false,
+  "idlharness.https.window.html?include=.*SFrame.*": true,
+  "script-audio-transform.https.html": true,
+  "script-change-transform.https.html": true,
   "script-late-transform.https.html": false,
-  "script-metadata-transform.https.html": false,
-  "script-transform-generateKeyFrame-simulcast.https.html": false,
-  "script-transform-generateKeyFrame.https.html": false,
-  "script-transform-sendKeyFrameRequest.https.html": false,
-  "script-transform.https.html": false,
-  "script-write-twice-transform.https.html": false,
+  "script-metadata-transform.https.html": true,
+  "script-transform-generateKeyFrame-simulcast.https.html": true,
+  "script-transform-generateKeyFrame.https.html": true,
+  "script-transform-sendKeyFrameRequest.https.html": true,
+  "script-transform.https.html": true,
+  "script-write-twice-transform.https.html": true,
   "sframe-keys.https.html": false,
   "sframe-transform-buffer-source.html": false,
   "sframe-transform-in-worker.https.html": false,
   "sframe-transform-readable.html": false,
   "sframe-transform.html": false,
   "tentative": {
-    "RTCEncodedAudioFrame-audiolevel.html": false,
+    "RTCEncodedAudioFrame-audiolevel.html": true,
     "RTCEncodedAudioFrame-clone.https.html": false,
     "RTCEncodedAudioFrame-constructor.html": false,
     "RTCEncodedAudioFrame-metadata.https.html": false,
     "RTCEncodedAudioFrame-receive-cloned.https.html": false,
     "RTCEncodedAudioFrame-send-incoming.https.html": false,
     "RTCEncodedFrame-timestamps.html": false,
-    "RTCEncodedVideoFrame-clone.https.html": false,
+    "RTCEncodedVideoFrame-clone.https.html": true,
     "RTCEncodedVideoFrame-constructor.html": false,
-    "RTCEncodedVideoFrame-metadata.https.html": false,
-    "RTCPeerConnection-insertable-streams-audio.https.html": false,
+    "RTCEncodedVideoFrame-metadata.https.html": {
+      "expectedFailures": [
+        "[VP8] setMetadata() carries over codec-specific properties"
+      ]
+    },
+    "RTCPeerConnection-insertable-streams-audio.https.html": {
+      "expectedFailures": [
+        "Frames flow correctly using insertable streams",
+        "Frames flow correctly using insertable streams when receiver starts negotiation",
+        "Frames flow correctly using insertable streams with param",
+        "Frames flow correctly using insertable streams when receiver starts negotiation with param",
+        "Enqueuing the same frame twice fails",
+        "Encoded frames serialize and deserialize into a deep clone",
+        "Modifying rtp timestamp"
+      ]
+    },
     "RTCPeerConnection-insertable-streams-errors.https.html": false,
     "RTCPeerConnection-insertable-streams-simulcast.https.html": false,
     "RTCPeerConnection-insertable-streams-video-frames.https.html": false,
-    "RTCPeerConnection-insertable-streams-video.https.html": false,
+    "RTCPeerConnection-insertable-streams-video.https.html": {
+      "expectedFailures": [
+        "Frames flow correctly using insertable streams",
+        "Frames flow correctly using insertable streams when receiver starts negotiation",
+        "Frames flow correctly using insertable streams with param",
+        "Frames flow correctly using insertable streams when receiver starts negotiation with param",
+        "Encoded frames serialize and deserialize into a deep clone"
+      ]
+    },
     "RTCPeerConnection-insertable-streams-worker.https.html": false
   }
 }
