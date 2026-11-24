@@ -28,6 +28,29 @@ use crate::sys::CliSys;
 const ENV_FILE_DENYLIST: &[&str] =
   &["DENO_CONNECTED", "DENO_DEPLOY_TUNNEL_ENDPOINT"];
 
+/// denext: more of Deno's own control variables an env file can't set. They
+/// name what the runtime itself opens or connects to whatever the program
+/// was granted (its permission audit log, its coverage folder, its
+/// certificate files and folders, the `Deno.cron` scheduler's socket), or say
+/// what the process runs under (a `denext dev` server, a lifecycle-script
+/// jail, a permission broker). The kernel sandbox's policy and its `auto`
+/// mode are built from them, as they are from the command line, so they count
+/// only as the environment the user started the run with had them
+/// (`DENO_KERNEL_SANDBOX` is read before env files for the same reason,
+/// DENEXT.md item 420).
+const ENV_FILE_DENYLIST_DENEXT: &[&str] = &[
+  "DENO_AUDIT_PERMISSIONS",
+  "DENO_COVERAGE_DIR",
+  "DENO_CERT",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "DENO_UNSTABLE_CRON_SOCK",
+  "DENEXT_DEV_TOKEN",
+  "DENO_INTERNAL_LIFECYCLE_JAIL",
+  "DENO_PERMISSION_BROKER_PATH",
+];
+
 /// Whether `key` is a Deno-internal control variable that must not be set from
 /// an env file. The comparison is ASCII case-insensitive because environment
 /// variable lookups are case-insensitive on Windows.
@@ -35,6 +58,7 @@ fn is_denied_env_file_key(key: &OsStr) -> bool {
   match key.to_str() {
     Some(key) => ENV_FILE_DENYLIST
       .iter()
+      .chain(ENV_FILE_DENYLIST_DENEXT)
       .any(|denied| key.eq_ignore_ascii_case(denied)),
     None => false,
   }
@@ -416,5 +440,46 @@ pub fn handle_dotenv_not_found(specifier: &str, log_level: Option<log::Level>) {
       colors::yellow("Warning"),
       specifier,
     )
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  // denext: the variables the runtime's own files, sockets and confinement
+  // are read from can't come from an env file, in any letter case; the
+  // program's own variables (and the ones that only name its folders) can.
+  #[test]
+  fn env_files_cannot_set_the_runtime_control_variables() {
+    for name in [
+      "DENO_CONNECTED",
+      "DENO_DEPLOY_TUNNEL_ENDPOINT",
+      "DENO_AUDIT_PERMISSIONS",
+      "DENO_COVERAGE_DIR",
+      "DENO_CERT",
+      "NODE_EXTRA_CA_CERTS",
+      "SSL_CERT_FILE",
+      "SSL_CERT_DIR",
+      "DENO_UNSTABLE_CRON_SOCK",
+      "DENEXT_DEV_TOKEN",
+      "DENO_INTERNAL_LIFECYCLE_JAIL",
+      "DENO_PERMISSION_BROKER_PATH",
+    ] {
+      assert!(is_denied_env_file_key(OsStr::new(name)), "{name}");
+      let lower = name.to_ascii_lowercase();
+      assert!(is_denied_env_file_key(OsStr::new(&lower)), "{lower}");
+    }
+    for name in [
+      "PORT",
+      "DATABASE_URL",
+      "MY_DENO_CERT",
+      "DENO_CERT_FILE",
+      "DENO_DIR",
+      "NO_COLOR",
+      "",
+    ] {
+      assert!(!is_denied_env_file_key(OsStr::new(name)), "{name}");
+    }
   }
 }

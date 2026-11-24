@@ -21445,6 +21445,33 @@ where the changes are discussed.
        `tests/specs/kernel_sandbox/deny_only` `denies_stay_in_place_mac`.
      - Node tests enabled: none.
 
+520. **`fix(cli)`: an env file can't set the runtime's own file, socket and
+     confinement variables** (CLI; `cli/util/env.rs`,
+     `cli/lib/kernel_apply.rs`). Upstream's env-file deny-list (Deno's tunnel
+     variables: an env file configures the program, not Deno) gains the
+     variables that name what the runtime itself opens or connects to whatever
+     the program was granted, and the ones that say what the process runs
+     under: `DENO_AUDIT_PERMISSIONS`, `DENO_COVERAGE_DIR`, `DENO_CERT`,
+     `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
+     `DENO_UNSTABLE_CRON_SOCK`, `DENEXT_DEV_TOKEN`,
+     `DENO_INTERNAL_LIFECYCLE_JAIL` and `DENO_PERMISSION_BROKER_PATH`. The
+     kernel sandbox's policy and its `auto` mode are built from them as they
+     are from the command line, so they count only as the environment the run
+     was started with had them, like `DENO_KERNEL_SANDBOX` (item 420). Each is
+     ignored with the existing warning, in `--env-file` and in a watched
+     reload.
+     - User-facing note: a certificate named only in an env file
+       (`DENO_CERT=ca.pem` in `.env`) is no longer used; set the variable in
+       the environment, or pass `--cert`.
+     - The certificate entries of the kernel policy are files: what
+       `DENO_CERT`, `NODE_EXTRA_CA_CERTS` and `SSL_CERT_FILE` name is added
+       only when it is a file (a folder named there is no certificate file and
+       adds nothing); `SSL_CERT_DIR` still lists folders.
+     - Tests: `util::env::tests::env_files_cannot_set_the_runtime_control_variables`,
+       `kernel_apply::tests::tls_files_are_files_and_the_cert_dirs`,
+       `tests/specs/run/env_file_runtime_denylist`.
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

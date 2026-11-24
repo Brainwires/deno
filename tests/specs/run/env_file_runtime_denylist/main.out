@@ -1,0 +1,15 @@
+[WILDLINE]Ignoring 'DENO_AUDIT_PERMISSIONS' from environment file '[WILDLINE]
+[WILDLINE]Ignoring 'DENO_COVERAGE_DIR' from environment file '[WILDLINE]
+[WILDLINE]Ignoring 'DENO_UNSTABLE_CRON_SOCK' from environment file '[WILDLINE]
+[WILDLINE]Ignoring 'DENEXT_DEV_TOKEN' from environment file '[WILDLINE]
+[WILDLINE]Ignoring 'DENO_INTERNAL_LIFECYCLE_JAIL' from environment file '[WILDLINE]
+[WILDLINE]Ignoring 'DENO_PERMISSION_BROKER_PATH' from environment file '[WILDLINE]
+DENO_AUDIT_PERMISSIONS: undefined
+DENO_COVERAGE_DIR: undefined
+DENO_UNSTABLE_CRON_SOCK: undefined
+DENEXT_DEV_TOKEN: undefined
+DENO_INTERNAL_LIFECYCLE_JAIL: undefined
+DENO_PERMISSION_BROKER_PATH: undefined
+audit.jsonl exists: false
+cov exists: false
+APP_SETTING: ok

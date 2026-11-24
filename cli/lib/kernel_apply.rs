@@ -118,22 +118,33 @@ pub fn std_stream_ttys() -> Vec<PathBuf> {
 }
 
 /// The certificate files and folders the environment names (read only with
-/// network; each variable is kept through the environment scrub).
+/// network; each variable is kept through the environment scrub): the file
+/// `DENO_CERT`, `NODE_EXTRA_CA_CERTS` and `SSL_CERT_FILE` each name, when it
+/// is a file (a folder, or anything else, named there is no certificate
+/// file and adds nothing), and the folders `SSL_CERT_DIR` lists.
 pub fn tls_files() -> Vec<PathBuf> {
-  let mut out: Vec<PathBuf> = [
-    "DENO_CERT",
-    "NODE_EXTRA_CA_CERTS",
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
-  ]
-  .iter()
-  .filter_map(std::env::var_os)
-  .flat_map(|v| {
-    // SSL_CERT_DIR may list several folders
-    std::env::split_paths(&v).collect::<Vec<_>>()
-  })
-  .filter(|p| p.is_absolute())
-  .collect();
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "the files the real file system holds"
+  )]
+  tls_files_from(|name| std::env::var_os(name), |path| path.is_file())
+}
+
+fn tls_files_from(
+  var: impl Fn(&str) -> Option<std::ffi::OsString>,
+  is_file: impl Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
+  let mut out: Vec<PathBuf> =
+    ["DENO_CERT", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE"]
+      .iter()
+      .filter_map(|name| var(name))
+      .map(PathBuf::from)
+      .filter(|p| p.is_absolute() && is_file(p))
+      .collect();
+  // SSL_CERT_DIR may list several folders
+  if let Some(dirs) = var("SSL_CERT_DIR") {
+    out.extend(std::env::split_paths(&dirs).filter(|p| p.is_absolute()));
+  }
   out.sort();
   out.dedup();
   out
@@ -1483,6 +1494,47 @@ mod tests {
 
   // only the unix tests use a scratch folder
   #[cfg(unix)]
+  /// The certificate variables name files (a folder there adds nothing);
+  /// only `SSL_CERT_DIR` names folders. Relative paths are left out.
+  #[test]
+  fn tls_files_are_files_and_the_cert_dirs() {
+    let abs = |s: &str| {
+      if cfg!(windows) {
+        PathBuf::from(format!("C:\\{}", s.replace('/', "\\")))
+      } else {
+        PathBuf::from(format!("/{s}"))
+      }
+    };
+    let (file, dir, dir2) = (abs("ca/one.pem"), abs("ca/store"), abs("ca/b"));
+    let is_file = |p: &Path| p == file;
+    let joined = std::env::join_paths([&dir, &dir2]).unwrap();
+    let files = |pairs: &[(&str, std::ffi::OsString)]| {
+      let pairs = pairs.to_vec();
+      tls_files_from(
+        move |name| {
+          pairs
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.clone())
+        },
+        is_file,
+      )
+    };
+    for name in ["DENO_CERT", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE"] {
+      assert_eq!(files(&[(name, file.clone().into())]), vec![file.clone()]);
+      // a folder, or a list, is no certificate file
+      assert!(files(&[(name, dir.clone().into())]).is_empty(), "{name}");
+      assert!(files(&[(name, joined.clone())]).is_empty(), "{name}");
+      assert!(files(&[(name, "one.pem".into())]).is_empty(), "{name}");
+    }
+    let mut both = vec![dir2.clone(), dir.clone()];
+    both.sort();
+    assert_eq!(files(&[("SSL_CERT_DIR", joined.clone())]), both);
+    assert!(files(&[("SSL_CERT_DIR", "store".into())]).is_empty());
+    assert!(files(&[("OTHER_CERT", file.clone().into())]).is_empty());
+    assert!(files(&[]).is_empty());
+  }
+
   fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir()
       .join(format!("deno_kernel_apply_{name}_{}", std::process::id()));
