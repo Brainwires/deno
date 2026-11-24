@@ -1113,9 +1113,23 @@ Deno.test(
     assertEquals(running.pgid, null);
     assertEquals(running.argv?.slice(1), ["-n", "300", "127.0.0.1"]);
 
-    // Ctrl+C ends it: the shell again
-    await write(pty, "\x03");
-    await foregroundUntil(pty, (fg) => fg?.pid === pty.pid);
+    // Ctrl+C ends it: the shell again. A console delivers Ctrl+C only to a
+    // process that has attached its handler; one sent while ping is still
+    // starting is lost (as when typed), so it is sent again until the shell
+    // is back
+    const ctrlCDeadline = Date.now() + 60_000;
+    let fg = pty.foreground();
+    while (fg?.pid !== pty.pid) {
+      if (Date.now() > ctrlCDeadline) {
+        throw new Error(`Ctrl+C never ended ping: ${JSON.stringify(fg)}`);
+      }
+      await write(pty, "\x03");
+      const sent = Date.now();
+      while (fg?.pid !== pty.pid && Date.now() - sent < 2_000) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        fg = pty.foreground();
+      }
+    }
 
     await write(pty, "exit\r");
     await pty.status;
