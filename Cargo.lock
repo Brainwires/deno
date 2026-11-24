@@ -4267,6 +4267,7 @@ dependencies = [
  "hyper-util",
  "once_cell",
  "sha1 0.10.6",
+ "sys_traits",
  "thiserror 2.0.21",
  "tokio",
 ]

@@ -256,6 +256,17 @@ impl PermissionedHttpConnector {
     self
   }
 
+  /// denext: adds `deny` to the addresses this connector refuses.
+  pub(crate) fn add_deny_addresses(&mut self, deny: &Arc<AddressDenyList>) {
+    if deny.is_empty() {
+      return;
+    }
+    self.deny_addresses = Some(match &self.deny_addresses {
+      Some(own) => own.with(deny),
+      None => deny.clone(),
+    });
+  }
+
   /// Gives up on a TCP connect after `timeout` (`None`: the OS's own).
   pub fn with_connect_timeout(
     mut self,
@@ -934,6 +945,40 @@ mod tests {
     let io = connector.call(uri).await.unwrap();
     assert_eq!(io.inner().peer_addr().unwrap(), addr);
     assert_eq!(resolver.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+  }
+
+  // denext: a list added later (the embedder's, for `Client::connect`)
+  // denies along with the one the connector was made with.
+  #[tokio::test]
+  async fn deny_addresses_added_to_a_connector_are_refused_too() {
+    let resolver = Arc::new(DebugResolver("192.0.2.9:80".parse().unwrap()));
+    let mut connector = PermissionedHttpConnector::new(
+      Resolver::custom(resolver),
+      None,
+      None,
+      ResolvedDenyCheckKind::Net,
+    )
+    .with_deny_addresses(deny(&["10.0.0.0/8"]));
+    connector.add_deny_addresses(&deny(&["192.0.2.0/24"]).unwrap());
+    for target in ["http://10.1.2.3/", "http://example.com/"] {
+      let err = connector
+        .call(Uri::from_str(target).unwrap())
+        .await
+        .unwrap_err();
+      assert!(
+        crate::deny_addresses::find_address_denied_error(&*err).is_some(),
+        "{target}: {err}"
+      );
+    }
+    // an empty list changes nothing
+    let mut connector = PermissionedHttpConnector::new(
+      Resolver::default(),
+      None,
+      None,
+      ResolvedDenyCheckKind::Net,
+    );
+    connector.add_deny_addresses(&Arc::new(AddressDenyList::default()));
+    assert!(connector.deny_addresses.is_none());
   }
 
   #[tokio::test]
