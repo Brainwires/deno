@@ -381,6 +381,52 @@ impl BiPipeWrite {
 }
 
 impl BiPipeWrite {
+  /// denext: writes what the socket takes now, without waiting, as libuv's
+  /// `uv_try_write` does for a pipe write: returns how many bytes of `buf`
+  /// went out (0 when the socket is full, or on an error, which the queued
+  /// write that follows reports). A message written here is in the peer's
+  /// queue before this call returns, so a process that exits right after it
+  /// (a child's `process.send()` and then `process.exit()`) still delivers
+  /// it. Unix only (a raw `send` on the non-blocking socket, which doesn't
+  /// wait for the reactor to have seen it writable); 0 on Windows.
+  pub fn try_write_now(&self, buf: &[u8]) -> usize {
+    #[cfg(unix)]
+    {
+      use std::os::fd::AsRawFd;
+      let fd = self.inner.stream().as_raw_fd();
+      #[cfg(any(target_os = "linux", target_os = "android"))]
+      let flags = libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL;
+      #[cfg(not(any(target_os = "linux", target_os = "android")))]
+      let flags = libc::MSG_DONTWAIT;
+      let mut written = 0;
+      while written < buf.len() {
+        let rest = &buf[written..];
+        // SAFETY: `fd` is this half's open socket and `rest` a valid slice.
+        let n =
+          unsafe { libc::send(fd, rest.as_ptr().cast(), rest.len(), flags) };
+        if n > 0 {
+          written += n as usize;
+          continue;
+        }
+        if n < 0
+          && std::io::Error::last_os_error().kind()
+            == std::io::ErrorKind::Interrupted
+        {
+          continue;
+        }
+        break;
+      }
+      written
+    }
+    #[cfg(not(unix))]
+    {
+      let _ = buf;
+      0
+    }
+  }
+}
+
+impl BiPipeWrite {
   /// Writes all of `buf`, returning only once the OS has completed the write:
   /// the bytes are in the pipe and survive this process exiting right after.
   ///

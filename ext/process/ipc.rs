@@ -284,6 +284,15 @@ impl IpcJsonStreamResource {
     write_with_optional_fd(&mut write_half, msg, raw_fd, &this.sent_handles)
       .await
   }
+
+  /// denext: writes what the socket takes of `msg` now (see
+  /// [`BiPipeWrite::try_write_now`]); 0 while another write holds the half.
+  /// Only for a message with nothing queued in front of it.
+  pub fn try_write_now(self: &Rc<Self>, msg: &[u8]) -> usize {
+    RcRef::map(self.clone(), |r| &r.write_half)
+      .try_borrow_mut()
+      .map_or(0, |write_half| write_half.try_write_now(msg))
+  }
 }
 
 // Initial capacity of the buffered reader and the JSON backing buffer.
@@ -565,6 +574,15 @@ impl IpcAdvancedStreamResource {
     write_with_optional_fd(&mut write_half, msg, raw_fd, &this.sent_handles)
       .await
   }
+
+  /// denext: writes what the socket takes of `msg` now (see
+  /// [`BiPipeWrite::try_write_now`]); 0 while another write holds the half.
+  /// Only for a message with nothing queued in front of it.
+  pub fn try_write_now(self: &Rc<Self>, msg: &[u8]) -> usize {
+    RcRef::map(self.clone(), |r| &r.write_half)
+      .try_borrow_mut()
+      .map_or(0, |write_half| write_half.try_write_now(msg))
+  }
 }
 
 impl deno_core::Resource for IpcAdvancedStreamResource {
@@ -759,6 +777,30 @@ mod tests {
     child.await??;
 
     Ok(())
+  }
+
+  // denext: a message written with `try_write_now` is in the peer's queue
+  // when the call returns, with no future polled (a child that sends and
+  // exits at once still delivers it); a write already holding the half
+  // makes it write nothing (it never jumps ahead of a queued one).
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn unix_ipc_try_write_now_is_in_the_peers_queue() {
+    use std::io::Read;
+
+    let (ipc, peer) = pair().await;
+    let msg = b"{\"hello\":1}\n";
+    assert_eq!(ipc.try_write_now(msg), msg.len());
+    let mut peer = peer.into_std().unwrap();
+    let mut buf = [0u8; 64];
+    let n = peer.read(&mut buf).unwrap();
+    assert_eq!(&buf[..n], msg);
+
+    let held = RcRef::map(ipc.clone(), |r| &r.write_half)
+      .try_borrow_mut()
+      .unwrap();
+    assert_eq!(ipc.try_write_now(msg), 0);
+    drop(held);
   }
 
   #[tokio::test]
