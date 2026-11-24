@@ -8,5 +8,7 @@ grandchild through sh: connect to the granted host: ping
 grandchild through sh: create directly in the folder with the deny: made by a child
 grandchild through sh: connect to a port the grant doesn't name: NotCapable
 grandchild through sh: create in the deny: NotCapable
+native child: runs: true
+native child: holds 0 of the dial's 3 descriptors
 parent: connect after its children: self
 parent exited with 0

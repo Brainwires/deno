@@ -20685,6 +20685,23 @@ where the changes are discussed.
          anything else, and `denort` closes it before it applies its sandbox.
          Its own grant may be narrower than the one the inherited broker answers
          for.
+       - The dial is for the children the runtime starts for the program
+         (`Deno.Command`, `node:child_process`), and for what those start. Its
+         descriptors are close-on-exec (`Dial::create`), and `ext/process`
+         clears the flag in each child it starts, between the fork and the exec
+         (`deno_process::pin_child_fd`); a `deno` that inherited them sets the
+         flag again before anything else (`Dial::keep_from_children`) and pins
+         them for its own children. A process started any other way never holds
+         them. That matters for a jailed npm lifecycle script, which the CLI
+         starts itself and confines more narrowly than the run (no network,
+         writes beneath its package): with the dial it could have asked the
+         run's broker for a socket or a file in the run's grant. Native code
+         that starts a process itself hands it no dial either. Tests:
+         `kernel_broker::tests::a_dial_gives_each_asker_a_channel_of_its_own`
+         (close-on-exec, and set again by `keep_from_children`); spec
+         `kernel_sandbox::children::brokered_child_shares_supervisor` (a child
+         of `system()` holds none of the three descriptors, the `Deno.Command`
+         children and the one through `sh` still reach the broker).
        - The variable is never trusted alone: the dial is taken only where the
          kernel-verified carrier of a confined ancestor was accepted, each
          descriptor must be of its kind (a socket, two ends of a pipe) and the

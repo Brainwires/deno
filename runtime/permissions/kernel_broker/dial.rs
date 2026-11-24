@@ -5,8 +5,11 @@
 //!
 //! A broker channel carries one request at a time and belongs to one
 //! process, so a child can't share its parent's. The confined program
-//! instead leaves three descriptors open for everything it starts, named in
-//! [`DIAL_ENV_VAR`]:
+//! instead leaves three descriptors open for the processes it starts
+//! through `Deno.Command` and `node:child_process` (they are close-on-exec,
+//! and the flag is cleared for those children alone: a process started any
+//! other way, such as a jailed npm lifecycle script, doesn't get them),
+//! named in [`DIAL_ENV_VAR`]:
 //!
 //! - a channel of the broker that nobody uses for anything but asking for
 //!   another channel ([`Request::Channel`](super::protocol::Request));
@@ -97,26 +100,29 @@ fn set_cloexec(fd: i32, on: bool) -> io::Result<()> {
 /// The lowest number a dial's descriptor gets.
 const FIRST_DIAL_FD: libc::c_int = 100;
 
-/// `fd` again at [`FIRST_DIAL_FD`] or above, not close-on-exec (the
-/// original is closed).
+/// `fd` again at [`FIRST_DIAL_FD`] or above, close-on-exec (the original
+/// is closed).
 fn move_up(fd: OwnedFd) -> io::Result<OwnedFd> {
   // SAFETY: duplicating a descriptor this function owns; owned once valid
   let moved = unsafe {
-    let moved = libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD, FIRST_DIAL_FD);
+    let moved =
+      libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, FIRST_DIAL_FD);
     if moved < 0 {
       return Err(io::Error::last_os_error());
     }
     OwnedFd::from_raw_fd(moved)
   };
-  set_cloexec(moved.as_raw_fd(), false)?;
   Ok(moved)
 }
 
 impl Dial {
   /// Makes the dial for the processes this one starts: a fresh channel of
-  /// `client`'s broker and the token's pipe, none of them close-on-exec.
-  /// Call while the process has one thread (the descriptors are meant to be
-  /// inherited by every child; a child started meanwhile would get half).
+  /// `client`'s broker and the token's pipe, all close-on-exec. A child
+  /// gets them only where the code that starts it clears that flag for it
+  /// (`deno_process::pin_child_fd`: the children of `Deno.Command` and
+  /// `node:child_process`); a process started any other way, such as a
+  /// jailed npm lifecycle script, whose confinement is narrower than the
+  /// run's, never holds the dial.
   pub fn create(client: &BrokerClient) -> io::Result<Self> {
     let channel = client.channel()?;
     let mut pipe = [0 as libc::c_int; 2];
@@ -306,6 +312,14 @@ impl Dial {
     // fails the next asker too, and a held token would only make it wait
     self.give_token();
     result
+  }
+
+  /// Marks the dial's descriptors close-on-exec in this process: a process
+  /// that inherited the dial got them open across its own exec, and keeps
+  /// them from the children it doesn't hand the dial to itself. `false`
+  /// when a descriptor's flags can't be set.
+  pub fn keep_from_children(&self) -> bool {
+    self.fds().iter().all(|fd| set_cloexec(*fd, true).is_ok())
   }
 
   /// Closes the dial's descriptors in this process (a process that applies

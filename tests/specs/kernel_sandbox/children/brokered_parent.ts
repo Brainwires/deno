@@ -46,6 +46,24 @@ if (mode === "narrower") {
     `"$0" run --quiet -A brokered_child.ts ${port} ${otherPort} bout/grandchild.txt`,
     deno,
   ]);
+  // the way to the broker is for the children this runtime starts
+  // (`Deno.Command`, above): its descriptors are close-on-exec, so a child
+  // started any other way (here by native code, `system()`) holds none
+  const libc = Deno.dlopen(
+    Deno.build.os === "darwin" ? "libSystem.dylib" : "libc.so.6",
+    { system: { parameters: ["buffer"], result: "i32" } },
+  );
+  const system = (command: string) =>
+    libc.symbols.system(new TextEncoder().encode(command + "\0"));
+  const dial = (Deno.env.get("DENO_INTERNAL_KERNEL_BROKER_DIAL") ?? "")
+    .split(",").map((part) => Number(part.split(":")[0]));
+  // a wait status: the exit code is its second byte
+  console.log(`native child: runs: ${(system("exit 7") >> 8) === 7}`);
+  // `: <&N` fails where N is not an open descriptor
+  const held = dial.filter((fd) => system(`: <&${fd}`) === 0).length;
+  console.log(
+    `native child: holds ${held} of the dial's ${dial.length} descriptors`,
+  );
   // the parent's own operations are untouched by its children's
   const conn = await Deno.connect({
     hostname: "localhost",
