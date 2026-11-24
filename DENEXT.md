@@ -21360,6 +21360,49 @@ where the changes are discussed.
        `node_compat` crypto suites unchanged.
      - Node tests enabled: none.
 
+5NN. **`fix(node/net)`: on Windows, a named-pipe socket that ends reaches its
+     peer as EOF** (runtime; `libs/core/uv_compat/pipe.rs`). A Windows named
+     pipe has no half-close, and `uv_shutdown` on one only reported success: the
+     pipe stayed open, so a peer that kept reading never saw the end. A server
+     that answered with `socket.end()` and closed itself (the usual pattern, and
+     `async-hooks/test-pipeconnectwrap.js` and `test-graph.pipeconnect.js`)
+     waited for the client's EOF, the client for the server's, and the process
+     never exited. libuv's answer, now copied: once a named pipe has shut down,
+     a read that waits 50 ms with no data (`eof_timer` in `win/pipe.c`) closes
+     the pipe, which the peer reads as EOF, and reports EOF on this end; each
+     read that brings data restarts the timer, and stopping the read stops it.
+     - User-facing note: on Windows, `socket.end()` on a named-pipe connection
+       ends it for the peer too, as in Node.
+     - Tests: unit_node `net_test.ts` "a path socket's end() reaches a quiet
+       peer as EOF" (a server `end()`s and closes while its client says
+       nothing; both sockets must close, on every OS).
+     - Node tests enabled: `async-hooks/test-pipeconnectwrap.js` and
+       `async-hooks/test-graph.pipeconnect.js` on Windows.
+
+5NN. **`fix(node/child_process)`: on Windows, a large write to an extra stdio
+     pipe right before the writer exits arrives whole** (runtime;
+     `libs/core/uv_compat/pipe.rs`, `ext/io/bi_pipe.rs`). Item 358 made the IPC
+     channel wait for its pipe writes to complete; every other named-pipe
+     writer still reported a write done as soon as tokio (mio) had queued the
+     overlapped `WriteFile`. A child that wrote more than the pipe's 64 KiB
+     buffer to an extra `stdio` pipe (`new net.Socket({ fd: 3 })`) and then
+     ended had nothing keeping it alive, and its exit cancelled the rest: the
+     parent read part of the data. As libuv does, a write request on a named
+     pipe now completes only once its `WriteFile` has: the pipe's write
+     readiness is cleared when the write is handed to mio, and the request's
+     callback runs when mio makes the pipe writable again (the write's
+     completion), so the pending request keeps the handle, and the process,
+     alive. `uv_try_write` on a named pipe returns `UV_EAGAIN`, as libuv's does,
+     so every write takes that path, and a shutdown waits for the write in
+     flight. `deno_io`'s `BiPipeResource` writes with `write_all_completed` on
+     Windows too, as the IPC channel does.
+     - User-facing note: on Windows, a large write to an extra `stdio` pipe just
+       before a process exits is no longer cut short.
+     - Tests: unit_node `child_process_test.ts`
+       "extraStdioLargeWriteThenExitArrivesWhole" (a child writes 1 MB to fd 3
+       and ends while the parent keeps its thread busy for 1.5 s).
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
