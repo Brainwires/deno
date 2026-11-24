@@ -2470,3 +2470,105 @@ Deno.test("webrtcEcnMarksVideoEct1", async () => {
   b.close();
   track.stop();
 });
+
+/** An SDP without congestion feedback: no transport-wide sequence number
+ * extension, no `transport-cc` and no `ack ccfb` feedback. */
+function withoutCongestionFeedback(sdp: string): string {
+  return sdp
+    .split("\r\n")
+    .filter((line) =>
+      !/^a=extmap:\d+(\/\w+)? .*transport-wide-cc/.test(line) &&
+      !/^a=rtcp-fb:\S+ (transport-cc|ack ccfb)$/.test(line)
+    )
+    .join("\r\n");
+}
+
+// A remote that negotiates no congestion feedback (no TWCC, no RFC 8888)
+// never reports on what it receives, so there is no estimate to pace at:
+// what is written goes out at the rate it is written, well above the
+// congestion controller's 300 kb/s start (paced at 2.5 times that), and
+// arrives in full. The stats report no estimate.
+Deno.test("webrtcWithoutCongestionFeedbackIsNotPaced", async () => {
+  const a = new RTCPeerConnection();
+  const b = new RTCPeerConnection();
+  const track = new Deno.webrtc.EncodedMediaTrack({
+    kind: "video",
+    mimeType: "video/VP8",
+  });
+  a.addTransceiver(track, { direction: "sendonly" });
+  const gotTrack = once<RTCTrackEvent>(b, "track");
+  const toB = trickle(a, b);
+  const toA = trickle(b, a);
+  await a.setLocalDescription();
+  await b.setRemoteDescription({
+    type: "offer",
+    sdp: withoutCongestionFeedback(a.localDescription!.sdp),
+  });
+  toB();
+  await b.setLocalDescription();
+  await a.setRemoteDescription(b.localDescription!);
+  toA();
+  const answer = b.localDescription!.sdp;
+  assert(!/transport-wide-cc|transport-cc|ack ccfb/.test(answer), answer);
+  const { receiver } = await gotTrack;
+  await Promise.all([connected(a), connected(b)]);
+  let received = 0;
+  const reader = Deno.webrtc.readRtp(receiver, { highWaterMark: 8192 })
+    .getReader();
+  const reading = (async () => {
+    while (true) {
+      const { done } = await reader.read();
+      if (done) return;
+      received++;
+    }
+  })();
+  // About 3.5 Mb/s for two seconds (0.4 packets of 1112 bytes per ms),
+  // kept up to the clock however often the timer fires.
+  const packet = new Uint8Array(12 + 1100);
+  packet[0] = 0x80;
+  packet[1] = 96;
+  packet[12] = 0x10; // VP8 payload descriptor: start of partition 0
+  let written = 0;
+  let seq = 0;
+  await new Promise<void>((resolve) => {
+    const start = Date.now();
+    const interval = setInterval(() => {
+      const elapsed = Math.min(Date.now() - start, 2000);
+      while (seq < elapsed * 0.4) {
+        packet[2] = (seq >> 8) & 0xff;
+        packet[3] = seq & 0xff;
+        new DataView(packet.buffer).setUint32(4, seq * 3000);
+        seq++;
+        written += track.writeRtp(packet);
+      }
+      if (elapsed >= 2000) {
+        clearInterval(interval);
+        resolve();
+      }
+    }, 10);
+  });
+  assertEquals(written, 800);
+  // At the initial pacing rate (750 kb/s) this would take over 9 s.
+  const deadline = Date.now() + 3000;
+  while (received < written * 0.95 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert(
+    received >= written * 0.95,
+    `received ${received} of ${written} packets`,
+  );
+  const stats = [...(await a.getStats()).values()];
+  const transport = stats.find((s) => s.type === "transport");
+  const pair = stats.find((s) => s.id === transport?.selectedCandidatePairId);
+  assert(pair, "the selected candidate pair");
+  assert(
+    !("availableOutgoingBitrate" in pair),
+    `availableOutgoingBitrate = ${pair.availableOutgoingBitrate}`,
+  );
+  assertEquals(pair.packetsDiscardedOnSend, 0);
+  await reader.cancel();
+  await reading;
+  a.close();
+  b.close();
+  track.stop();
+});

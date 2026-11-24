@@ -17,15 +17,22 @@
 //! JavaScript uses instead.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use bytes::Bytes;
 use rtc::interceptor::Attribute;
+use rtc::interceptor::AttributedPacket;
+use rtc::interceptor::CONGESTION_CONTROL_DEFAULT_PRUNE_HORIZON;
 use rtc::interceptor::GCC_INITIAL_BITRATE;
 use rtc::interceptor::Gcc;
 use rtc::interceptor::Interceptor;
 use rtc::interceptor::PacerBuilder;
 use rtc::interceptor::PacerInterceptor;
+use rtc::interceptor::Packet;
 use rtc::interceptor::Registry;
 use rtc::interceptor::Slot;
 use rtc::interceptor::StreamInfo;
@@ -40,16 +47,21 @@ use rtc::peer_connection::configuration::media_engine::MediaEngine;
 use rtc::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
 use rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+use rtc::rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport;
+use rtc::rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
 use rtc::rtp::packetizer::Packetizer;
 use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
 use rtc::rtp_transceiver::RTCRtpTransceiverInit;
+use rtc::rtp_transceiver::rtp_sender::RTCP_FB_ACK_CCFB;
 use rtc::rtp_transceiver::rtp_sender::RTCRtpCodec;
 use rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
 use rtc::rtp_transceiver::rtp_sender::RTCRtpCodingParameters;
 use rtc::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters;
 use rtc::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability;
 use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtc::rtp_transceiver::rtp_sender::TYPE_RTCP_FB_ACK;
 use rtc::sansio::Protocol;
+use rtc::shared::marshal::MarshalSize;
 use rtc::shared::marshal::Unmarshal;
 use serde::Deserialize;
 use serde::Serialize;
@@ -68,6 +80,14 @@ const RTP_MTU: usize = 1200;
 /// TWCC, with a pacer) and RFC 8888 congestion control feedback (`ack
 /// ccfb`), which carries ECN.
 pub fn media_stack() -> Result<(MediaEngine, Registry), WebRtcError> {
+  media_stack_counting(Arc::default())
+}
+
+/// [`media_stack`], with the pacer counting the packets its full queue
+/// refuses into `refusals` (a connection's `getStats()` reports them).
+pub(crate) fn media_stack_counting(
+  refusals: Arc<PacerRefusals>,
+) -> Result<(MediaEngine, Registry), WebRtcError> {
   let mut media_engine = MediaEngine::default();
   media_engine
     .register_default_codecs()
@@ -101,18 +121,15 @@ pub fn media_stack() -> Result<(MediaEngine, Registry), WebRtcError> {
       .map_err(crate::peer::rtc_err)?;
   // Send-side congestion control: transport-wide sequence numbers on what
   // leaves, GCC over the TWCC feedback that comes back, and a pacer at its
-  // estimate. The estimate is the candidate pair's
-  // `availableOutgoingBitrate` and the outbound streams' `targetBitrate`.
-  // The defaults already negotiate TWCC (`transport-cc` feedback and the
-  // header extension, deduplicated here) and record arrivals for the remote
-  // side; this takes the receiver's slot with the same recorder. The pacer
-  // only queues (bounded, refusing past its limit as congestion would), and
-  // the driver releases from it at the engine's `poll_timeout`, so writes
-  // never wait on it. It paces at PACING_FACTOR times the estimate
-  // ([`FactorPacer`]), as libwebrtc does: what is written here comes at the
-  // rate its source has (a clip, an encoded transform, `writeFrame`), not one
-  // an encoder fits to the estimate, and pacing at the estimate itself would
-  // queue (and delay) everything such a source sends above it.
+  // estimate. The defaults already negotiate TWCC (`transport-cc` feedback and
+  // the header extension, deduplicated here) and record arrivals for the
+  // remote side; this takes the receiver's slot with the same recorder. The
+  // pacer only queues (bounded), and the driver releases from it at the
+  // engine's `poll_timeout`, so writes never wait on it. It paces at
+  // PACING_FACTOR times the estimate, and only while the remote's congestion
+  // feedback is in use: see [`FactorPacer`] for when it lets packets straight
+  // through instead, what the stats report then, and how a packet its full
+  // queue refuses is counted.
   let registry = configure_congestion_control(
     registry,
     Gcc::default(),
@@ -120,14 +137,7 @@ pub fn media_stack() -> Result<(MediaEngine, Registry), WebRtcError> {
     &mut media_engine,
   )
   .map_err(crate::peer::rtc_err)?
-  .with(
-    Slot::Pacer,
-    FactorPacer(
-      PacerBuilder::new()
-        .with_target_bitrate(GCC_INITIAL_BITRATE * PACING_FACTOR)
-        .build(),
-    ),
-  );
+  .with(Slot::Pacer, FactorPacer::new(refusals));
   // RFC 8888 feedback beside TWCC: `a=rtcp-fb:<pt> ack ccfb` on every codec
   // and the recorder that reports each received packet with the ECN
   // codepoint it arrived with. A stream sends ECT(1) (L4S) only once `ack
@@ -148,14 +158,134 @@ pub fn media_stack() -> Result<(MediaEngine, Registry), WebRtcError> {
 /// sender to the estimate, which is the encoder's job in a browser.
 pub const PACING_FACTOR: f64 = 2.5;
 
-/// The engine's pacer at [`PACING_FACTOR`] times the estimate. The engine
-/// paces at the estimate itself (it adds no headroom of its own) and hands
-/// the same number to the stats, so the estimate stays what
-/// `availableOutgoingBitrate` and `targetBitrate` report; only the rate this
-/// pacer releases at is scaled, each time an estimate goes past it.
-pub(crate) struct FactorPacer(pub(crate) PacerInterceptor);
+/// How long the pacer keeps pacing without congestion feedback: from the
+/// first packet of a stream that negotiated it, and from each report after
+/// that. It is the congestion controller's own horizon
+/// (`DEFAULT_PRUNE_HORIZON`, 2 s): past it the send history has written off
+/// every packet the remote had not reported, so no report can still bring
+/// the estimate up to date, and holding packets at it would cap the
+/// connection at a number nothing measures. Remotes send TWCC every 50 to
+/// 250 ms (libwebrtc) and RFC 8888 reports about once per round trip, so
+/// this is eight reports or more: a few lost ones never trip it.
+pub const FEEDBACK_TIMEOUT: std::time::Duration =
+  CONGESTION_CONTROL_DEFAULT_PRUNE_HORIZON;
+
+/// The engine pacer's rate while [`FactorPacer`] is not pacing: high enough
+/// that what it still holds from before (packets queued while it was) goes
+/// at the next wake-up.
+const UNPACED_BITRATE: f64 = 1e9;
+
+/// The packets (and their bytes) a connection's pacer refused because its
+/// queue was full. Shared with the connection (`MediaState`), whose
+/// `getStats()` adds them to the selected candidate pair's
+/// `packetsDiscardedOnSend` / `bytesDiscardedOnSend`.
+#[derive(Default, Debug)]
+pub struct PacerRefusals {
+  packets: AtomicU64,
+  bytes: AtomicU64,
+}
+
+impl PacerRefusals {
+  /// The packets refused so far, and their bytes.
+  pub fn get(&self) -> (u64, u64) {
+    (
+      self.packets.load(Ordering::Relaxed),
+      self.bytes.load(Ordering::Relaxed),
+    )
+  }
+
+  fn add(&self, bytes: usize) {
+    self.packets.fetch_add(1, Ordering::Relaxed);
+    self.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+  }
+}
+
+/// The pacer slot: the engine's pacer at [`PACING_FACTOR`] times the
+/// congestion controller's estimate, while the remote's congestion feedback
+/// is in use, and a pass-through otherwise.
+///
+/// - **Which packets.** Those of a local stream (its RTX and FEC SSRCs
+///   included) that negotiated feedback: the transport-wide sequence number
+///   extension (TWCC) or `ack ccfb` (RFC 8888). A stream that negotiated
+///   neither is never paced: the remote will not report on it, so the
+///   estimate never moves and pacing would hold it at the initial rate
+///   (GCC's 300 kb/s, so 750 kb/s here) for the life of the connection.
+/// - **When.** While reports keep coming: TWCC or RFC 8888 feedback (or an
+///   estimate the controller made from one) went past within
+///   [`FEEDBACK_TIMEOUT`]. Before the first report the window runs from
+///   the first packet of a negotiated stream, at the initial rate, as a
+///   browser starts; a remote that negotiated feedback but sends none, or
+///   whose reports stop, gets pass-through once it passes, and pacing at the
+///   estimate again with its next report. What was queued then goes at
+///   once, and later packets of a stream wait behind it, so a stream's
+///   packets keep their order.
+/// - **Stats.** The estimate reaches `availableOutgoingBitrate` and
+///   `targetBitrate` only while it paces: from the first report (the
+///   initial rate until the controller moves it) to when reports stop, and
+///   again from the next one. Without feedback `availableOutgoingBitrate` is
+///   absent and `targetBitrate` is 0, as before any estimate: nothing is
+///   estimated, and nothing but the source and the path limits the rate.
+/// - **A full queue.** The engine pacer refuses a packet past its limit, as
+///   a congested path would drop it, without an error to its caller (the
+///   write reaches it later, from the driver). Each refusal is counted
+///   ([`PacerRefusals`]) and logged once per run of them.
+///
+/// The engine paces at the estimate itself (it adds no headroom of its own)
+/// and hands the same number to the stats, so the estimate stays what the
+/// stats report; only the rate this pacer releases at is scaled.
+pub(crate) struct FactorPacer {
+  pacer: PacerInterceptor,
+  /// The SSRCs (primary, RTX, FEC) of each bound local stream that
+  /// negotiated congestion feedback, by its primary SSRC.
+  negotiated: HashMap<u32, Vec<u32>>,
+  /// The controller's latest estimate (GCC's initial one before any).
+  estimate: f64,
+  /// When the last report (or estimate) came by.
+  last_feedback: Option<Instant>,
+  /// Before any report: when a negotiated stream's first packet went out.
+  waiting_since: Option<Instant>,
+  /// Whether packets of negotiated streams are paced now.
+  paced: bool,
+  /// Whether the stats hold an estimate this pacer let through.
+  estimate_reported: bool,
+  /// Packets let straight through, behind what the engine pacer releases.
+  passed: VecDeque<TaggedPacket>,
+  /// Attribute carriers for the stats (an estimate withdrawn).
+  carriers: VecDeque<TaggedPacket>,
+  refusals: Arc<PacerRefusals>,
+  /// In a run of refusals (logged at its first).
+  refusing: bool,
+}
 
 impl FactorPacer {
+  pub(crate) fn new(refusals: Arc<PacerRefusals>) -> Self {
+    Self::with_pacer(
+      PacerBuilder::new()
+        .with_target_bitrate(GCC_INITIAL_BITRATE * PACING_FACTOR)
+        .build(),
+      refusals,
+    )
+  }
+
+  pub(crate) fn with_pacer(
+    pacer: PacerInterceptor,
+    refusals: Arc<PacerRefusals>,
+  ) -> Self {
+    Self {
+      pacer,
+      negotiated: HashMap::new(),
+      estimate: GCC_INITIAL_BITRATE,
+      last_feedback: None,
+      waiting_since: None,
+      paced: true,
+      estimate_reported: false,
+      passed: VecDeque::new(),
+      carriers: VecDeque::new(),
+      refusals,
+      refusing: false,
+    }
+  }
+
   /// The estimate a packet on the read leg carries (the congestion
   /// controller attaches it to the feedback that produced it).
   fn estimate(msg: &TaggedPacket) -> Option<f64> {
@@ -168,6 +298,84 @@ impl FactorPacer {
       _ => None,
     }
   }
+
+  /// Whether an inbound packet is congestion feedback: a TWCC or an RFC
+  /// 8888 report.
+  fn is_feedback(msg: &TaggedPacket) -> bool {
+    let Packet::Rtcp(packets) = &msg.message.packet else {
+      return false;
+    };
+    packets.iter().any(|p| {
+      let p = p.as_any();
+      p.is::<TransportLayerCc>() || p.is::<CcFeedbackReport>()
+    })
+  }
+
+  /// Whether a stream negotiated feedback the remote reports it with.
+  fn negotiates_feedback(info: &StreamInfo) -> bool {
+    info
+      .rtp_header_extensions
+      .iter()
+      .any(|e| e.uri == rtc::sdp::extmap::TRANSPORT_CC_URI)
+      || info
+        .rtcp_feedback
+        .iter()
+        .any(|f| f.typ == TYPE_RTCP_FB_ACK && f.parameter == RTCP_FB_ACK_CCFB)
+  }
+
+  fn is_negotiated(&self, ssrc: u32) -> bool {
+    self.negotiated.values().any(|ssrcs| ssrcs.contains(&ssrc))
+  }
+
+  /// Whether negotiated streams are to be paced at `now`.
+  fn pacing(&self, now: Instant) -> bool {
+    if self.negotiated.is_empty() {
+      return false;
+    }
+    match self.last_feedback.or(self.waiting_since) {
+      Some(since) => now.saturating_duration_since(since) < FEEDBACK_TIMEOUT,
+      None => true,
+    }
+  }
+
+  /// The rate the engine pacer releases at now.
+  fn rate(&self) -> f64 {
+    if self.paced {
+      self.estimate * PACING_FACTOR
+    } else {
+      UNPACED_BITRATE
+    }
+  }
+
+  /// Starts or stops pacing as feedback came or stopped.
+  fn update(&mut self, now: Instant) {
+    let paced = self.pacing(now);
+    if paced == self.paced {
+      return;
+    }
+    self.paced = paced;
+    let rate = self.rate();
+    self.pacer.pacer_mut().set_target_bitrate(rate);
+    if !paced && self.estimate_reported {
+      // The stats stop reporting an estimate nothing is paced at.
+      self.estimate_reported = false;
+      let mut message = AttributedPacket::new(Packet::Rtcp(Vec::new()));
+      message.add(Attribute::TargetBitrateChanged {
+        bits_per_second: 0.0,
+      });
+      self.carriers.push_back(TaggedPacket {
+        now,
+        transport: Default::default(),
+        message,
+      });
+    }
+  }
+
+  /// The engine pacer's target rate.
+  #[cfg(test)]
+  pub(crate) fn target_bitrate(&self) -> f64 {
+    self.pacer.pacer().target_bitrate()
+  }
 }
 
 impl rtc::sansio::Protocol<TaggedPacket, TaggedPacket, ()> for FactorPacer {
@@ -177,68 +385,124 @@ impl rtc::sansio::Protocol<TaggedPacket, TaggedPacket, ()> for FactorPacer {
   type Error = rtc::shared::error::Error;
   type Time = Instant;
 
-  fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+  fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
     let estimate = Self::estimate(&msg);
-    // The engine's pacer follows the estimate as it goes past; the scaled
-    // rate replaces what it set.
-    self.0.handle_read(msg)?;
+    let feedback = estimate.is_some() || Self::is_feedback(&msg);
     if let Some(bits_per_second) = estimate {
-      self
-        .0
-        .pacer_mut()
-        .set_target_bitrate(bits_per_second * PACING_FACTOR);
+      self.estimate = bits_per_second;
     }
+    if feedback {
+      self.last_feedback = Some(msg.now);
+    }
+    self.update(msg.now);
+    if feedback && self.paced {
+      if estimate.is_none() && !self.estimate_reported {
+        // Pacing (again) at an estimate the stats don't hold: the first
+        // report, or the first since reports stopped.
+        msg.message.add(Attribute::TargetBitrateChanged {
+          bits_per_second: self.estimate,
+        });
+      }
+      self.estimate_reported = true;
+    }
+    // The engine's pacer follows an estimate going past; the scaled rate
+    // (or the pass-through's) replaces what it set.
+    self.pacer.handle_read(msg)?;
+    let rate = self.rate();
+    self.pacer.pacer_mut().set_target_bitrate(rate);
     Ok(())
   }
 
   fn poll_read(&mut self) -> Option<TaggedPacket> {
-    self.0.poll_read()
+    self.pacer.poll_read().or_else(|| self.carriers.pop_front())
   }
 
   fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
-    self.0.handle_write(msg)
+    let Packet::Rtp(rtp) = &msg.message.packet else {
+      // RTCP: the engine's pacer passes it straight on.
+      return self.pacer.handle_write(msg);
+    };
+    let bytes = rtp.marshal_size();
+    if !self.is_negotiated(rtp.header.ssrc) {
+      self.passed.push_back(msg);
+      return Ok(());
+    }
+    if self.last_feedback.is_none() && self.waiting_since.is_none() {
+      self.waiting_since = Some(msg.now);
+    }
+    self.update(msg.now);
+    if !self.paced && self.pacer.queued() == 0 {
+      self.passed.push_back(msg);
+      return Ok(());
+    }
+    let refused = self.pacer.dropped();
+    self.pacer.handle_write(msg)?;
+    if self.pacer.dropped() > refused {
+      self.refusals.add(bytes);
+      if !self.refusing {
+        self.refusing = true;
+        log::warn!(
+          "webrtc: the pacer's queue is full ({} packets); refusing RTP until it drains",
+          self.pacer.queued()
+        );
+      }
+    } else {
+      self.refusing = false;
+    }
+    Ok(())
   }
 
   fn poll_write(&mut self) -> Option<TaggedPacket> {
-    self.0.poll_write()
+    // What the engine pacer releases was written before anything still let
+    // through here.
+    self.pacer.poll_write().or_else(|| self.passed.pop_front())
   }
 
   fn handle_event(&mut self, evt: ()) -> Result<(), Self::Error> {
-    self.0.handle_event(evt)
+    self.pacer.handle_event(evt)
   }
 
   fn poll_event(&mut self) -> Option<()> {
-    self.0.poll_event()
+    self.pacer.poll_event()
   }
 
   fn handle_timeout(&mut self, now: Instant) -> Result<(), Self::Error> {
-    self.0.handle_timeout(now)
+    self.update(now);
+    self.pacer.handle_timeout(now)
   }
 
   fn poll_timeout(&mut self) -> Option<Instant> {
-    self.0.poll_timeout()
+    self.pacer.poll_timeout()
   }
 
   fn close(&mut self) -> Result<(), Self::Error> {
-    self.0.close()
+    self.pacer.close()
   }
 }
 
 impl Interceptor for FactorPacer {
   fn bind_local_stream(&mut self, info: &StreamInfo) {
-    self.0.bind_local_stream(info);
+    if Self::negotiates_feedback(info) {
+      let ssrcs = std::iter::once(info.ssrc)
+        .chain(info.ssrc_rtx)
+        .chain(info.ssrc_fec)
+        .collect();
+      self.negotiated.insert(info.ssrc, ssrcs);
+    }
+    self.pacer.bind_local_stream(info);
   }
 
   fn unbind_local_stream(&mut self, info: &StreamInfo) {
-    self.0.unbind_local_stream(info);
+    self.negotiated.remove(&info.ssrc);
+    self.pacer.unbind_local_stream(info);
   }
 
   fn bind_remote_stream(&mut self, info: &StreamInfo) {
-    self.0.bind_remote_stream(info);
+    self.pacer.bind_remote_stream(info);
   }
 
   fn unbind_remote_stream(&mut self, info: &StreamInfo) {
-    self.0.unbind_remote_stream(info);
+    self.pacer.unbind_remote_stream(info);
   }
 }
 
@@ -840,6 +1104,8 @@ pub struct MediaState {
   pub sent_video: HashMap<u32, SentVideo>,
   /// The complete video frames each inbound RTP stream (by SSRC) brought.
   pub received_video: HashMap<u32, ReceivedVideo>,
+  /// What this connection's pacer refused ([`FactorPacer`]).
+  pub pacer_refusals: Arc<PacerRefusals>,
 }
 
 /// What an outbound video stream's frames were, as they reached its sender:
@@ -2264,40 +2530,130 @@ fn codec_params_json(c: &RTCRtpCodecParameters) -> serde_json::Value {
 
 #[cfg(test)]
 mod factor_pacer_tests {
+  use std::sync::Arc;
+  use std::time::Duration;
   use std::time::Instant;
 
+  use bytes::Bytes;
   use rtc::interceptor::Attribute;
   use rtc::interceptor::AttributedPacket;
   use rtc::interceptor::GCC_INITIAL_BITRATE;
+  use rtc::interceptor::Interceptor;
   use rtc::interceptor::PacerBuilder;
   use rtc::interceptor::Packet;
+  use rtc::interceptor::RTCPFeedback;
+  use rtc::interceptor::RTPHeaderExtension;
+  use rtc::interceptor::StreamInfo;
   use rtc::interceptor::TaggedPacket;
+  use rtc::rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport;
+  use rtc::rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
   use rtc::sansio::Protocol;
   use rtc::shared::TransportContext;
+  use rtc::shared::marshal::MarshalSize;
 
+  use super::FEEDBACK_TIMEOUT;
   use super::FactorPacer;
   use super::PACING_FACTOR;
+  use super::PacerRefusals;
 
-  fn feedback(estimate: Option<f64>) -> TaggedPacket {
-    let mut message = AttributedPacket::new(Packet::Rtcp(vec![Box::new(
-      rtc::rtcp::receiver_report::ReceiverReport::default(),
-    )]));
+  const SSRC: u32 = 1234;
+
+  fn rtcp(
+    now: Instant,
+    packet: Box<dyn rtc::rtcp::Packet>,
+    estimate: Option<f64>,
+  ) -> TaggedPacket {
+    let mut message = AttributedPacket::new(Packet::Rtcp(vec![packet]));
     if let Some(bits_per_second) = estimate {
       message.add(Attribute::TargetBitrateChanged { bits_per_second });
     }
     TaggedPacket {
-      now: Instant::now(),
+      now,
       transport: TransportContext::default(),
       message,
     }
   }
 
-  fn pacer() -> FactorPacer {
-    FactorPacer(
-      PacerBuilder::new()
-        .with_target_bitrate(GCC_INITIAL_BITRATE * PACING_FACTOR)
-        .build(),
+  /// A receiver report: not congestion feedback, but the estimate the
+  /// controller attaches makes it one.
+  fn feedback(estimate: Option<f64>) -> TaggedPacket {
+    rtcp(
+      Instant::now(),
+      Box::new(rtc::rtcp::receiver_report::ReceiverReport::default()),
+      estimate,
     )
+  }
+
+  fn twcc(now: Instant, estimate: Option<f64>) -> TaggedPacket {
+    rtcp(now, Box::new(TransportLayerCc::default()), estimate)
+  }
+
+  fn ccfb(now: Instant) -> TaggedPacket {
+    rtcp(now, Box::new(CcFeedbackReport::default()), None)
+  }
+
+  fn rtp(now: Instant, ssrc: u32, seq: u16) -> TaggedPacket {
+    TaggedPacket {
+      now,
+      transport: TransportContext::default(),
+      message: AttributedPacket::new(Packet::Rtp(rtc::rtp::packet::Packet {
+        header: rtc::rtp::Header {
+          version: 2,
+          sequence_number: seq,
+          ssrc,
+          ..Default::default()
+        },
+        payload: Bytes::from(vec![0u8; 1000]),
+      })),
+    }
+  }
+
+  /// A stream that negotiated the transport-wide sequence number (TWCC).
+  fn twcc_stream(ssrc: u32) -> StreamInfo {
+    StreamInfo {
+      ssrc,
+      rtp_header_extensions: vec![RTPHeaderExtension {
+        uri: rtc::sdp::extmap::TRANSPORT_CC_URI.to_string(),
+        id: 5,
+      }],
+      ..Default::default()
+    }
+  }
+
+  /// A stream that negotiated RFC 8888 feedback (`ack ccfb`) only.
+  fn ccfb_stream(ssrc: u32) -> StreamInfo {
+    StreamInfo {
+      ssrc,
+      rtcp_feedback: vec![RTCPFeedback {
+        typ: "ack".to_string(),
+        parameter: "ccfb".to_string(),
+      }],
+      ..Default::default()
+    }
+  }
+
+  fn pacer() -> FactorPacer {
+    FactorPacer::new(Arc::default())
+  }
+
+  /// Writes `count` RTP packets at `now` and returns how many came straight
+  /// out (unpaced), without a timeout releasing them.
+  fn write(p: &mut FactorPacer, now: Instant, ssrc: u32, count: u16) -> usize {
+    for seq in 0..count {
+      p.handle_write(rtp(now, ssrc, seq)).unwrap();
+    }
+    drain(p)
+  }
+
+  fn drain(p: &mut FactorPacer) -> usize {
+    std::iter::from_fn(|| p.poll_write()).count()
+  }
+
+  /// The estimates the packets read through it carry to the stats.
+  fn reported(p: &mut FactorPacer) -> Vec<f64> {
+    std::iter::from_fn(|| p.poll_read())
+      .filter_map(|out| FactorPacer::estimate(&out))
+      .collect()
   }
 
   // A congestion controller estimate paces at PACING_FACTOR times it, and the
@@ -2306,28 +2662,205 @@ mod factor_pacer_tests {
   #[test]
   fn paces_at_the_factor_times_the_estimate() {
     let mut p = pacer();
-    assert_eq!(
-      p.0.pacer().target_bitrate(),
-      GCC_INITIAL_BITRATE * PACING_FACTOR
-    );
+    p.bind_local_stream(&twcc_stream(SSRC));
+    assert_eq!(p.target_bitrate(), GCC_INITIAL_BITRATE * PACING_FACTOR);
     p.handle_read(feedback(Some(400_000.0))).unwrap();
-    assert_eq!(p.0.pacer().target_bitrate(), 400_000.0 * PACING_FACTOR);
-    let out = p.poll_read().expect("the feedback goes on");
-    assert!(matches!(
-      out.message.get(&Attribute::TargetBitrateChanged {
-        bits_per_second: 0.0
-      }),
-      Some(Attribute::TargetBitrateChanged { bits_per_second })
-        if *bits_per_second == 400_000.0
-    ));
+    assert_eq!(p.target_bitrate(), 400_000.0 * PACING_FACTOR);
+    assert_eq!(reported(&mut p), vec![400_000.0]);
   }
 
   // Feedback without an estimate leaves the rate alone.
   #[test]
   fn keeps_the_rate_without_an_estimate() {
     let mut p = pacer();
+    p.bind_local_stream(&twcc_stream(SSRC));
     p.handle_read(feedback(Some(500_000.0))).unwrap();
     p.handle_read(feedback(None)).unwrap();
-    assert_eq!(p.0.pacer().target_bitrate(), 500_000.0 * PACING_FACTOR);
+    assert_eq!(p.target_bitrate(), 500_000.0 * PACING_FACTOR);
+  }
+
+  // A stream that negotiated neither TWCC nor `ack ccfb` is not paced: the
+  // remote never reports on it, so the estimate would never leave its
+  // initial value (PR-02: every such connection was held near 750 kb/s).
+  // Its packets come straight out, however fast they are written.
+  #[test]
+  fn passes_a_stream_without_feedback_through() {
+    let mut p = pacer();
+    p.bind_local_stream(&StreamInfo {
+      ssrc: SSRC,
+      ..Default::default()
+    });
+    let now = Instant::now();
+    assert_eq!(write(&mut p, now, SSRC, 500), 500);
+    // Seconds later, still nothing held.
+    assert_eq!(write(&mut p, now + Duration::from_secs(10), SSRC, 500), 500);
+    assert_eq!(p.refusals.get(), (0, 0));
+    // No estimate reaches the stats.
+    assert!(reported(&mut p).is_empty());
+  }
+
+  // An unbound SSRC (no stream negotiated anything) passes through too.
+  #[test]
+  fn passes_an_unbound_stream_through() {
+    let mut p = pacer();
+    assert_eq!(write(&mut p, Instant::now(), SSRC, 100), 100);
+  }
+
+  // A stream that negotiated TWCC is paced from its first packet, at the
+  // initial rate: the packets wait for the pacer's budget.
+  #[test]
+  fn paces_a_stream_that_negotiated_twcc() {
+    let mut p = pacer();
+    p.bind_local_stream(&twcc_stream(SSRC));
+    let now = Instant::now();
+    assert_eq!(write(&mut p, now, SSRC, 100), 0);
+    p.handle_timeout(now).unwrap();
+    let released = drain(&mut p);
+    assert!(released > 0 && released < 100, "released {released}");
+  }
+
+  // RFC 8888 feedback (`ack ccfb`) counts as congestion feedback too.
+  #[test]
+  fn paces_a_stream_that_negotiated_ccfb() {
+    let mut p = pacer();
+    p.bind_local_stream(&ccfb_stream(SSRC));
+    let now = Instant::now();
+    assert_eq!(write(&mut p, now, SSRC, 10), 0);
+    // An RFC 8888 report keeps it paced past the feedback timeout.
+    let later = now + FEEDBACK_TIMEOUT - Duration::from_millis(100);
+    p.handle_read(ccfb(later)).unwrap();
+    assert_eq!(
+      write(&mut p, later + Duration::from_millis(500), SSRC, 10),
+      0
+    );
+  }
+
+  // Only the negotiated stream is paced: another stream of the same
+  // connection that negotiated nothing passes beside it.
+  #[test]
+  fn paces_only_the_negotiated_streams() {
+    let mut p = pacer();
+    p.bind_local_stream(&twcc_stream(SSRC));
+    p.bind_local_stream(&StreamInfo {
+      ssrc: SSRC + 1,
+      ..Default::default()
+    });
+    let now = Instant::now();
+    assert_eq!(write(&mut p, now, SSRC, 10), 0);
+    assert_eq!(write(&mut p, now, SSRC + 1, 10), 10);
+  }
+
+  // While reports keep coming, it keeps pacing, however long the call.
+  #[test]
+  fn keeps_pacing_while_feedback_arrives() {
+    let mut p = pacer();
+    p.bind_local_stream(&twcc_stream(SSRC));
+    let start = Instant::now();
+    for i in 0..20 {
+      let now = start + Duration::from_millis(250) * i;
+      p.handle_read(twcc(now, None)).unwrap();
+      assert_eq!(write(&mut p, now, SSRC, 5), 0, "at {i}");
+      p.handle_timeout(now).unwrap();
+      drain(&mut p);
+    }
+  }
+
+  // Negotiated, but no report within FEEDBACK_TIMEOUT of the first packet:
+  // what was held goes at the next wake-up and later packets pass straight
+  // through; the next report resumes pacing at its estimate.
+  #[test]
+  fn falls_back_without_feedback_then_resumes() {
+    let mut p = pacer();
+    p.bind_local_stream(&twcc_stream(SSRC));
+    let start = Instant::now();
+    assert_eq!(write(&mut p, start, SSRC, 100), 0);
+    let before = start + FEEDBACK_TIMEOUT - Duration::from_millis(1);
+    assert_eq!(write(&mut p, before, SSRC, 1), 0, "still paced");
+    let after = start + FEEDBACK_TIMEOUT;
+    p.handle_timeout(after).unwrap();
+    assert_eq!(drain(&mut p), 101, "the held packets all go");
+    assert_eq!(write(&mut p, after, SSRC, 200), 200);
+    // A report: paced again, at its estimate.
+    let resumed = after + Duration::from_secs(5);
+    p.handle_read(twcc(resumed, Some(400_000.0))).unwrap();
+    assert_eq!(p.target_bitrate(), 400_000.0 * PACING_FACTOR);
+    assert_eq!(write(&mut p, resumed, SSRC, 10), 0);
+    // And reports that stop after that fall back the same way.
+    let stopped = resumed + FEEDBACK_TIMEOUT;
+    p.handle_timeout(stopped).unwrap();
+    assert_eq!(drain(&mut p), 10);
+    assert_eq!(write(&mut p, stopped, SSRC, 10), 10);
+  }
+
+  // A packet written while the held ones haven't gone yet waits behind them,
+  // so the stream keeps its order.
+  #[test]
+  fn keeps_a_streams_order_when_falling_back() {
+    let mut p = pacer();
+    p.bind_local_stream(&twcc_stream(SSRC));
+    let start = Instant::now();
+    assert_eq!(write(&mut p, start, SSRC, 50), 0);
+    let after = start + FEEDBACK_TIMEOUT;
+    p.handle_write(rtp(after, SSRC, 50)).unwrap();
+    p.handle_timeout(after).unwrap();
+    let order: Vec<u16> = std::iter::from_fn(|| p.poll_write())
+      .map(|out| match out.message.packet {
+        Packet::Rtp(rtp) => rtp.header.sequence_number,
+        _ => unreachable!("only RTP was written"),
+      })
+      .collect();
+    assert_eq!(order, (0..=50).collect::<Vec<_>>());
+  }
+
+  // The stats hold an estimate only while it paces at one: the initial
+  // estimate with the first report, the controller's after that, none once
+  // reports stop (`availableOutgoingBitrate` absent, `targetBitrate` 0), and
+  // the last one again with the next report.
+  #[test]
+  fn reports_an_estimate_only_while_pacing() {
+    let mut p = pacer();
+    p.bind_local_stream(&twcc_stream(SSRC));
+    let start = Instant::now();
+    write(&mut p, start, SSRC, 1);
+    assert!(reported(&mut p).is_empty(), "nothing before a report");
+    let first = start + Duration::from_millis(100);
+    p.handle_read(twcc(first, None)).unwrap();
+    assert_eq!(reported(&mut p), vec![GCC_INITIAL_BITRATE]);
+    p.handle_read(twcc(first, Some(500_000.0))).unwrap();
+    assert_eq!(reported(&mut p), vec![500_000.0]);
+    p.handle_read(twcc(first, None)).unwrap();
+    assert!(reported(&mut p).is_empty(), "unchanged: nothing new");
+    p.handle_timeout(first + FEEDBACK_TIMEOUT).unwrap();
+    let carrier = p.poll_read().expect("the estimate is withdrawn");
+    assert!(
+      matches!(&carrier.message.packet, Packet::Rtcp(packets) if packets.is_empty())
+    );
+    assert_eq!(FactorPacer::estimate(&carrier), Some(0.0));
+    assert!(p.poll_read().is_none());
+    let back = first + FEEDBACK_TIMEOUT * 2;
+    p.handle_read(twcc(back, None)).unwrap();
+    assert_eq!(reported(&mut p), vec![500_000.0]);
+  }
+
+  // A packet the full queue refuses is counted, with its bytes, for the
+  // candidate pair's `packetsDiscardedOnSend` / `bytesDiscardedOnSend`.
+  #[test]
+  fn counts_what_a_full_queue_refuses() {
+    let refusals = Arc::new(PacerRefusals::default());
+    let mut p = FactorPacer::with_pacer(
+      PacerBuilder::new()
+        .with_target_bitrate(GCC_INITIAL_BITRATE * PACING_FACTOR)
+        .with_queue_limit(4)
+        .build(),
+      refusals.clone(),
+    );
+    p.bind_local_stream(&twcc_stream(SSRC));
+    let now = Instant::now();
+    assert_eq!(write(&mut p, now, SSRC, 10), 0);
+    let size = match &rtp(now, SSRC, 0).message.packet {
+      Packet::Rtp(rtp) => rtp.marshal_size() as u64,
+      _ => unreachable!("an RTP packet"),
+    };
+    assert_eq!(refusals.get(), (6, 6 * size));
   }
 }
