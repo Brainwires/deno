@@ -3759,18 +3759,9 @@ impl JsRuntime {
     if expiry_ms != 0.0 {
       let next_expiry = expiry_ms.abs();
       let current_now = context_state.user_timer.now();
-      let delay_ms = if next_expiry > current_now {
-        (next_expiry - current_now) as u64
-      } else {
-        0
-      };
       context_state
         .user_timer
-        .schedule(std::time::Duration::from_millis(if delay_ms > 0 {
-          delay_ms
-        } else {
-          1
-        }));
+        .schedule(expiry_delay(next_expiry, current_now));
 
       if expiry_ms > 0.0 {
         context_state.user_timer.ref_timer();
@@ -4137,6 +4128,21 @@ fn mark_as_loaded_from_fs_during_snapshot(
   }
 }
 
+/// How long from `now` until the user timer list due at `expiry` (both in
+/// the user timer's milliseconds), rounded up to the microsecond: neither
+/// truncated to whole milliseconds (which woke the loop before the timer was
+/// due, and cost another wake-up after it) nor raised to the next one, and
+/// never short of the expiry by a floating-point error (JavaScript would
+/// find the timer not yet due); zero when it is already due.
+fn expiry_delay(expiry: f64, now: f64) -> std::time::Duration {
+  let delay = expiry - now;
+  if delay > 0.0 && delay.is_finite() {
+    std::time::Duration::from_micros((delay * 1000.0).ceil() as u64)
+  } else {
+    std::time::Duration::ZERO
+  }
+}
+
 #[cfg(test)]
 mod loop_waker_tests {
   use super::*;
@@ -4408,5 +4414,40 @@ mod loop_waker_tests {
     waker.wake_by_ref();
     assert_eq!(task.0.load(Ordering::SeqCst), 0);
     assert!(loop_waker.end_poll());
+  }
+}
+
+#[cfg(test)]
+mod expiry_delay_tests {
+  use std::time::Duration;
+
+  use super::expiry_delay;
+
+  // The delay to a timer list's expiry is kept to the microsecond, never
+  // short of it: neither truncated to whole milliseconds (1.7 ms became 1 ms,
+  // a wake-up before the timer was due) nor raised to one (0.3 ms became
+  // 1 ms).
+  #[test]
+  fn is_the_exact_time_to_the_expiry() {
+    for (expiry, now, micros) in [
+      (101.7, 100.0, 1700),
+      (100.3, 100.0, 300),
+      (105.0, 100.0, 5000),
+    ] {
+      let delay = expiry_delay(expiry, now);
+      let expected = Duration::from_micros(micros);
+      assert!(
+        delay >= expected && delay - expected <= Duration::from_micros(1),
+        "{expiry} - {now}: {delay:?}"
+      );
+    }
+  }
+
+  // An expiry already reached is due now.
+  #[test]
+  fn is_zero_once_due() {
+    assert_eq!(expiry_delay(100.0, 100.0), Duration::ZERO);
+    assert_eq!(expiry_delay(99.0, 100.0), Duration::ZERO);
+    assert_eq!(expiry_delay(f64::NAN, 100.0), Duration::ZERO);
   }
 }

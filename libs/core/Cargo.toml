@@ -73,6 +73,8 @@ deno_ast.workspace = true
 paste.workspace = true
 pretty_assertions.workspace = true
 rstest.workspace = true
+# The paused clock, for the timer tests (reactor_tokio.rs).
+tokio = { workspace = true, features = ["test-util"] }
 twox-hash.workspace = true
 unicycle = "0.10.2"
 

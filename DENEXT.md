@@ -21360,6 +21360,43 @@ where the changes are discussed.
        `node_compat` crypto suites unchanged.
      - Node tests enabled: none.
 
+516. **`fix(core)`: a 1 ms timer fires after 1 ms, not on the next timer-wheel
+     tick** (runtime; `libs/core/{reactor_tokio.rs,web_timeout.rs}`,
+     `libs/core/runtime/jsruntime.rs`, `libs/core/Cargo.toml`). The user timer
+     (`UserTimer`, behind `setTimeout` / `setInterval` and the uv timer wake-up)
+     set a tokio `sleep_until(deadline)`. tokio's wheel counts whole
+     milliseconds since the runtime started and rounds a deadline up to the end
+     of its millisecond, and the driver parks for the whole milliseconds between
+     that tick and the one it is in, from the moment it parks: a 1 ms timer set
+     at `n + f` ms landed on tick `n + 2` and fired about 2 ms after it was set,
+     so a chain of `setTimeout(f, 1)` took about 2 ms a hop where Node.js
+     (libuv's whole-millisecond loop clock) takes about 1. `TokioTimer` now
+     hands the wheel its deadline less that rounding (999,999 ns), which puts it
+     on the tick the deadline is in, so the driver parks 1 ms and wakes at the
+     deadline; where that wakes it before the deadline (the driver parked after
+     the millisecond had turned, or woke at the tick for something else), the
+     timer re-arms at the deadline itself and completes only then, so no timer
+     fires before its delay (`MutableSleep::poll_ready` polls it on a wake-up
+     instead of taking the wake-up as the deadline). The delay to the next timer
+     list's expiry is passed to the user timer to the microsecond, rounded up
+     (`expiry_delay`), where it was truncated to whole milliseconds (a 1.7 ms
+     wait woke at 1 ms and needed a second wake-up) with a 1 ms floor. Windows
+     is unchanged in kind: a wait there lasts until the next system timer tick
+     (about 15.6 ms unless a process raises the timer resolution, which neither
+     Node.js nor this runtime does), so a chained 1 ms timer takes a tick, as in
+     Node.js.
+     - User-facing note: chained short timers run about twice as fast on Linux
+       and macOS (a `setTimeout(f, 1)` chain takes about 1 ms a hop, as in
+       Node.js); no timer fires earlier than its delay.
+     - Tests: `libs/core/reactor_tokio.rs`
+       (`a_one_millisecond_timer_fires_after_one_millisecond`,
+       `chained_one_millisecond_timers_take_one_millisecond_each`,
+       `a_timer_never_fires_before_its_deadline`, `reset_moves_the_deadline`, on
+       tokio's paused clock), `libs/core/runtime/jsruntime.rs`
+       (`expiry_delay_tests`), `tests/unit/timers_test.ts`
+       (`chainedOneMillisecondTimersTakeAboutOneMillisecond`).
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

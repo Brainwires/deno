@@ -1171,3 +1171,43 @@ Deno.test(async function ioAndTimersProgressBetweenImmediates() {
     `a 1 ms timer took ${timerTicks} immediates; it should take one or two`,
   );
 });
+
+// A chain of 1 ms timers, each set from the previous one's callback (as
+// common/prof.js in Node.js's tests does), takes about 1 ms a hop, as in
+// Node.js: never less than the 1 ms asked for, and not a timer wheel tick
+// more (the wheel rounded each deadline up to the end of its millisecond and
+// the hop took 2 ms or more). The median hop is compared, not the total, so
+// a few hops a loaded runner stretches don't fail it: 1.75 ms leaves the
+// expected ~1.1 ms more than half a millisecond of headroom per hop while
+// staying under the 2 ms floor of the rounding it catches. On Windows a wait
+// lasts until the next system timer tick (about 15.6 ms unless a process
+// raises the resolution, which Node.js doesn't either), so only the lower
+// bound is checked there.
+Deno.test(async function chainedOneMillisecondTimersTakeAboutOneMillisecond() {
+  const hops: number[] = [];
+  let last = performance.now();
+  await new Promise<void>((resolve) => {
+    const hop = () => {
+      const now = performance.now();
+      hops.push(now - last);
+      last = now;
+      if (hops.length === 200) resolve();
+      else setTimeout(hop, 1);
+    };
+    last = performance.now();
+    setTimeout(hop, 1);
+  });
+  const sorted = hops.toSorted((a, b) => a - b);
+  // A hop starts before `setTimeout` is called, so it is at least the 1 ms
+  // (less floating-point error).
+  assert(sorted[0] >= 0.999, `a 1 ms timer fired after ${sorted[0]} ms`);
+  if (Deno.build.os !== "windows") {
+    const median = sorted[sorted.length >> 1];
+    assert(
+      median < 1.75,
+      `the median hop took ${median.toFixed(3)} ms; hops: ${
+        hops.map((h) => h.toFixed(2)).join(" ")
+      }`,
+    );
+  }
+});
