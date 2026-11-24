@@ -377,8 +377,9 @@ mod tests {
   // candidate off this host, from a loopback socket: `EINVAL` on Linux)
   // leaves the socket's ECN as it was: the next marked datagram still
   // arrives marked. Through `quinn-udp` that failure turned the socket's
-  // IPv4 marks off for good.
-  #[cfg(unix)]
+  // IPv4 marks off for good. Linux is where the kernel refuses such a send
+  // with EINVAL (the case this guards).
+  #[cfg(target_os = "linux")]
   #[tokio::test]
   async fn a_refused_unmarked_send_keeps_the_marks() {
     use std::net::Ipv4Addr;
