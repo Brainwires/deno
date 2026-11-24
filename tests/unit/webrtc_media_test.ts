@@ -506,6 +506,52 @@ Deno.test("sframeDecryptorReportsErrors", async () => {
   await er.cancel();
 });
 
+// One bit of the ciphertext or of the tag flipped, under the right key: the
+// frame fails authentication, and the untouched frame still decrypts.
+Deno.test("sframeFlippedBitFailsAuthentication", async () => {
+  const key = await baseKey(crypto.getRandomValues(new Uint8Array(16)));
+  for (
+    const cipherSuite of [
+      "AES_128_CTR_HMAC_SHA256_80",
+      "AES_128_GCM_SHA256_128",
+    ] as const
+  ) {
+    const encryptor = new SFrameEncryptorStream({ cipherSuite });
+    await encryptor.setEncryptionKey(key, 7);
+    const ew = encryptor.writable.getWriter();
+    const er = encryptor.readable.getReader();
+    const plain = Uint8Array.from({ length: 32 }, (_, i) => i + 1);
+    const [, first] = await Promise.all([ew.write(plain), er.read()]);
+    const encrypted = new Uint8Array(first.value as ArrayBuffer);
+
+    const decryptor = new SFrameDecryptorStream({ cipherSuite });
+    await decryptor.addDecryptionKey(key, 7);
+    const errors: string[] = [];
+    decryptor.onerror = (e) =>
+      errors.push((e as SFrameTransformErrorEvent).errorType);
+    const dw = decryptor.writable.getWriter();
+    const dr = decryptor.readable.getReader();
+    const roundTrip = async (chunk: Uint8Array) =>
+      (await Promise.all([dw.write(chunk), dr.read()]))[1].value;
+    // a byte of the ciphertext, and the tag's last byte
+    for (const at of [encrypted.length - 1 - 16, encrypted.length - 1]) {
+      const flipped = encrypted.slice();
+      flipped[at] ^= 0x01;
+      await roundTrip(flipped);
+    }
+    assertEquals(errors, ["authentication", "authentication"], cipherSuite);
+    assertEquals(
+      new Uint8Array(await roundTrip(encrypted) as ArrayBuffer),
+      plain,
+      cipherSuite,
+    );
+    await ew.close();
+    await er.cancel();
+    await dw.close();
+    await dr.cancel();
+  }
+});
+
 Deno.test("sframeTransformsAttachOnce", async () => {
   const pc = new RTCPeerConnection();
   try {
