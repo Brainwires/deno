@@ -195,6 +195,19 @@ impl NetDecider for PermissionsDecider {
       .check_net_unix_socket_listen(&resolved, Some(API_NAME))
       .is_ok()
   }
+
+  fn unix_place(&self, path: &Path) -> bool {
+    // the file half of the two checks above, for where the socket is
+    self
+      .permissions
+      .lock()
+      .check_open(
+        Cow::Borrowed(path),
+        OpenAccessKind::ReadWriteNoFollow,
+        Some(API_NAME),
+      )
+      .is_ok()
+  }
 }
 
 /// The network authority of a run with these permission options.

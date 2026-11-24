@@ -18469,6 +18469,25 @@ where the changes are discussed.
        loads, and refuses to start if the broker doesn't serve the network
        features. `BrokerClient::request_raw` carries a kind outside the file
        operations' `Request`.
+     - A Unix socket is connected or bound where it was checked (Linux, macOS;
+       `NetAuthority::connect_unix` / `bind_unix`, `held_name`). The check names
+       a path, and a connect by that name follows whatever links are on it then,
+       so a link swapped in after the check led to another socket. The authority
+       now opens the folder that holds the name first, and the path the kernel
+       gives that folder, with the name, must pass the file check too
+       (`NetDecider::unix_place`: read and write, where the socket is; the
+       network grant named it as given). A name that is a link is followed
+       there, one hop at a time (8 at most), each place checked the same way. On
+       Linux the socket is then pinned (`O_PATH | O_NOFOLLOW`) and connected
+       through `/proc/self/fd/<n>`, so nothing put in its place afterwards is
+       followed. macOS has no connect by descriptor: the name is connected by
+       the folder's real path and must be the same socket afterwards (a swap
+       that puts the same socket back in between is not seen). A bind is by the
+       path as given (the address the socket reports) and the socket must then
+       be in the folder that was checked; if the folder was swapped in between,
+       the request is refused and the socket closed, and its file stays where
+       the swap put it. Abstract names have no file and go as before; so do
+       other Unix systems.
      - The kernel side of a broker-held network. The confined tree has no IP
        socket (`socket(2)` refused), and on Linux `listen` and `connect` are
        refused outright (`SeccompPlan::refuse_connect`): its sockets arrive
@@ -18524,7 +18543,8 @@ where the changes are discussed.
      - Tests: `deno_net_route`'s `unrouted_callers_get_nothing`,
        `a_prebound_listener_is_handed_out_again_and_again`,
        `a_refusal_is_permission_denied`; `deno_sandbox`'s
-       `net_authority::tests::{only_granted_names_resolve,
+       `net_authority::tests::{a_unix_socket_is_connected_where_it_was_checked,
+       a_unix_socket_is_bound_where_it_was_checked, only_granted_names_resolve,
        a_granted_name_cannot_be_rebound_inside,
        an_internal_answer_needs_the_address_in_the_grant,
        localhost_leads_to_loopback_only, connects_to_exactly_what_was_checked,
