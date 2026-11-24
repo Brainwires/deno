@@ -996,6 +996,52 @@ function initGPU() {
   }
 }
 
+// Not [Serializable] (GPUPipelineError is, as a DOMException, and GPUDevice
+// is an EventTarget): structuredClone throws a DataCloneError.
+{
+  const { markNotSerializable } = core.loadExtScript(
+    "ext:deno_web/13_message_port.js",
+  );
+  for (
+    const iface of new SafeArrayIterator([
+      GPU,
+      GPUAdapter,
+      GPUAdapterInfo,
+      GPUBindGroup,
+      GPUBindGroupLayout,
+      GPUBuffer,
+      GPUCanvasContext,
+      GPUCommandBuffer,
+      GPUCommandEncoder,
+      GPUCompilationInfo,
+      GPUCompilationMessage,
+      GPUComputePassEncoder,
+      GPUComputePipeline,
+      GPUDeviceLostInfo,
+      GPUError,
+      GPUInternalError,
+      GPUOutOfMemoryError,
+      GPUPipelineLayout,
+      GPUQuerySet,
+      GPUQueue,
+      GPURenderBundle,
+      GPURenderBundleEncoder,
+      GPURenderPassEncoder,
+      GPURenderPipeline,
+      GPUSampler,
+      GPUShaderModule,
+      GPUSupportedFeatures,
+      GPUSupportedLimits,
+      GPUTexture,
+      GPUTextureView,
+      GPUValidationError,
+      WGSLLanguageFeatures,
+    ])
+  ) {
+    markNotSerializable(iface.prototype);
+  }
+}
+
 export {
   denoNsWebGPU,
   GPU,

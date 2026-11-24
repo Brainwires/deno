@@ -580,6 +580,175 @@ Deno.test("structuredClone transfer list iterator done is ToBoolean", () => {
   assertEquals(buffer.byteLength, 0);
 });
 
+Deno.test("structuredClone rejects more non-serializable platform objects", async () => {
+  let readableController!: ReadableStreamDefaultController;
+  new ReadableStream({ start: (c) => void (readableController = c) });
+  let byteController!: ReadableByteStreamController;
+  new ReadableStream({
+    type: "bytes",
+    start: (c) => void (byteController = c),
+  });
+  let transformController!: TransformStreamDefaultController;
+  new TransformStream({ start: (c) => void (transformController = c) });
+  let writableController!: WritableStreamDefaultController;
+  new WritableStream({ start: (c) => void (writableController = c) });
+  const canvas = new OffscreenCanvas(1, 1);
+  // The Web Locks API has no type declarations.
+  const { locks } = navigator as unknown as {
+    locks: { request(name: string, callback: (lock: unknown) => void): void };
+  };
+  let lock: unknown;
+  await locks.request("structured_clone_test", (l) => {
+    lock = l;
+  });
+  const values: [string, unknown][] = [
+    ["AbortController", new AbortController()],
+    ["Navigator", navigator],
+    ["NavigatorUAData", navigator.userAgentData],
+    ["Location", location],
+    ["OffscreenCanvas", canvas],
+    ["ImageBitmapRenderingContext", canvas.getContext("bitmaprenderer")],
+    ["CacheStorage", caches],
+    ["LockManager", locks],
+    ["Lock", lock],
+    ["GPU", navigator.gpu],
+    ["ReadableStreamDefaultReader", new ReadableStream().getReader()],
+    [
+      "ReadableStreamBYOBReader",
+      new ReadableStream({ type: "bytes" }).getReader({ mode: "byob" }),
+    ],
+    ["ReadableStreamDefaultController", readableController],
+    ["ReadableByteStreamController", byteController],
+    ["TransformStreamDefaultController", transformController],
+    ["WritableStreamDefaultController", writableController],
+    ["WritableStreamDefaultWriter", new WritableStream().getWriter()],
+  ];
+  const cloned = [];
+  for (const [name, value] of values) {
+    for (const wrapped of [value, { value }]) {
+      try {
+        structuredClone(wrapped);
+        cloned.push(name);
+      } catch (error) {
+        assertEquals((error as DOMException).name, "DataCloneError", name);
+      }
+    }
+  }
+  assertEquals(cloned, []);
+});
+
+// Every interface on the global must reject cloning, except the [Serializable]
+// ones and the ECMAScript built-ins. Objects inheriting from a marked
+// prototype are rejected, so `Object.create(X.prototype)` stands in for an
+// instance. Sweeps the global, so an interface added later is covered.
+function clonableInterfaces() {
+  const ecmascript = new Set([
+    "AggregateError",
+    "Array",
+    "ArrayBuffer",
+    "AsyncDisposableStack",
+    "BigInt",
+    "BigInt64Array",
+    "BigUint64Array",
+    "Boolean",
+    "DataView",
+    "Date",
+    "DisposableStack",
+    "Error",
+    "EvalError",
+    "FinalizationRegistry",
+    "Float16Array",
+    "Float32Array",
+    "Float64Array",
+    "Function",
+    "Int16Array",
+    "Int32Array",
+    "Int8Array",
+    "Iterator",
+    "Map",
+    "Number",
+    "Object",
+    "Promise",
+    "RangeError",
+    "ReferenceError",
+    "RegExp",
+    "Set",
+    "SharedArrayBuffer",
+    "String",
+    "SuppressedError",
+    "Symbol",
+    "SyntaxError",
+    "TypeError",
+    "URIError",
+    "Uint16Array",
+    "Uint32Array",
+    "Uint8Array",
+    "Uint8ClampedArray",
+    "WeakMap",
+    "WeakRef",
+    "WeakSet",
+  ]);
+  // [Serializable] in their specs, and not checked against their prototype.
+  // The geometry interfaces, ImageData and ImageBitmap aren't listed: they
+  // check that the value is a real instance, so an Object.create() one must
+  // throw. Their instances are round-tripped by the tests below.
+  const serializable = new Set([
+    "Blob",
+    "CryptoKey",
+    "DOMException",
+    "File",
+    "GPUPipelineError",
+    "QuotaExceededError",
+    "WebSocketError",
+    "WebTransportError",
+  ]);
+  const clonable = [];
+  for (const name of Object.getOwnPropertyNames(globalThis)) {
+    // Interface names are capitalized; functions like `fetch` aren't.
+    if (!/^[A-Z]/.test(name)) continue;
+    if (ecmascript.has(name) || serializable.has(name)) continue;
+    let value;
+    try {
+      // deno-lint-ignore no-explicit-any
+      value = (globalThis as any)[name];
+    } catch {
+      continue;
+    }
+    if (typeof value !== "function" || typeof value.prototype !== "object") {
+      continue;
+    }
+    try {
+      structuredClone(Object.create(value.prototype));
+      clonable.push(name);
+    } catch {
+      // Rejected, as it should be.
+    }
+  }
+  return clonable.sort();
+}
+
+Deno.test("structuredClone rejects every non-serializable interface", () => {
+  assertEquals(clonableInterfaces(), []);
+});
+
+Deno.test("structuredClone rejects every non-serializable interface in a worker", async () => {
+  const source = `${clonableInterfaces.toString()}
+    postMessage(clonableInterfaces());`;
+  const worker = new Worker(
+    `data:application/javascript,${encodeURIComponent(source)}`,
+    { type: "module" },
+  );
+  const clonable = await new Promise((resolve, reject) => {
+    worker.onmessage = (event) => resolve(event.data);
+    worker.onerror = (event) => {
+      event.preventDefault();
+      reject(new Error(event.message));
+    };
+  });
+  worker.terminate();
+  assertEquals(clonable, []);
+});
+
 // A fresh worker hasn't loaded the modules of the geometry interfaces,
 // ImageData and ImageBitmap, so this also checks that it can deserialize
 // them. The worker reports what it received and posts the values back.

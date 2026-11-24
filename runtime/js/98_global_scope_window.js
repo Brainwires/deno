@@ -347,4 +347,12 @@ const mainRuntimeGlobalProperties = {
   MIDIPort: core.propNonEnumerableLazyLoaded((m) => m.MIDIPort, lazyMidi),
 };
 
+// Not [Serializable]: structuredClone throws a DataCloneError.
+{
+  const { markNotSerializable } = core.loadExtScript(
+    "ext:deno_web/13_message_port.js",
+  );
+  markNotSerializable(Navigator.prototype);
+}
+
 export { mainRuntimeGlobalProperties, memoizeLazy };
