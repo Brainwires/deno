@@ -4,7 +4,8 @@
 //!
 //! A [`PageRuntime`] is a plain `deno_core::JsRuntime` composed of the web
 //! extensions only (`deno_webidl`, `deno_web`, `deno_fetch`,
-//! `deno_webstorage`, `deno_crypto`) plus this crate's own, which binds
+//! `deno_webstorage`, `deno_crypto`, `deno_websocket`, `deno_webrtc`,
+//! `deno_canvas_offscreen`, `deno_image`) plus this crate's own, which binds
 //! Thalora's engine-neutral DOM ([`thalora_dom`]) to V8. There is no
 //! `deno_runtime` worker, no `Deno` namespace and no Node: see the README
 //! for the security model.
@@ -12,10 +13,16 @@
 //! This is not a Deno API. Nothing in `deno` or `denort` depends on it;
 //! Thalora links it by git revision.
 
+use std::sync::Arc;
+
+use deno_fetch::deny_addresses::AddressDenyList;
+use deno_fetch::deny_addresses::EmbedderDenyList;
+
 mod dom_ops;
 mod host_ops;
 #[cfg(test)]
 mod op_allowlist;
+mod op_policy;
 mod page;
 #[cfg(test)]
 mod tests;
@@ -40,7 +47,17 @@ pub use thalora_dom::NodeId;
 
 deno_core::extension!(
   deno_web_page,
-  deps = [deno_webidl, deno_web, deno_fetch, deno_webstorage, deno_crypto],
+  deps = [
+    deno_webidl,
+    deno_web,
+    deno_fetch,
+    deno_webstorage,
+    deno_crypto,
+    deno_websocket,
+    deno_webrtc,
+    deno_canvas_offscreen,
+    deno_image
+  ],
   ops = [
     dom_ops::op_web_page_document_node,
     dom_ops::op_web_page_node_relative,
@@ -94,13 +111,27 @@ deno_core::extension!(
     host: host_ops::PageHost,
     permissions: deno_permissions::PermissionsContainer,
     client: deno_fetch::Client,
+    deny_addresses: Option<Arc<AddressDenyList>>,
+    ice: deno_webrtc::EmbedderIceOptions,
   },
+  // Takes the implementation of the ops a page must not have away
+  // (`op_policy.rs`). It sees every op of the runtime, not only this
+  // extension's.
+  middleware = op_policy::middleware,
   state = |state, options| {
     state.put(options.dom);
     state.put(options.host);
-    // `deno_fetch`'s ops take the permissions from the op state, and use a
-    // client found there before building one of their own.
+    // The ops of `deno_fetch`, `deno_websocket` and `deno_webrtc` take the
+    // permissions from the op state, and `deno_fetch` and `deno_websocket`
+    // use a client found there before building one of their own.
     state.put(options.permissions);
     state.put(options.client);
+    // The page client's deny list again, for what does not connect through
+    // that client's connector: the connector `WebSocket` makes, and ICE
+    // (remote candidates, STUN and TURN servers, every datagram sent).
+    if let Some(list) = options.deny_addresses {
+      state.put(EmbedderDenyList(list));
+    }
+    state.put(options.ice);
   },
 );

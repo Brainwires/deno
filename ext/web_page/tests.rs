@@ -17,6 +17,7 @@ use crate::PageOptions;
 use crate::PageRuntime;
 use crate::op_allowlist::ALLOWED_OPS;
 use crate::op_allowlist::PAGE_OPS;
+use crate::op_policy::DISABLED_OPS;
 
 const PAGE_URL: &str = "https://example.test/dir/page.html";
 
@@ -32,6 +33,15 @@ fn page(html: &str) -> PageRuntime {
 
 fn eval(page: &mut PageRuntime, source: &str) -> Value {
   page.evaluate_json(source.to_string()).unwrap()
+}
+
+async fn eval_async(
+  page: &mut PageRuntime,
+  source: &str,
+) -> Result<Value, PageError> {
+  page
+    .evaluate_json_async(source.to_string(), Duration::from_secs(20))
+    .await
 }
 
 fn run(page: &mut PageRuntime, source: &str) {
@@ -187,6 +197,34 @@ async fn op_table_is_the_allowlist() {
     missing.is_empty(),
     "ops missing from the table: {missing:?}"
   );
+
+  // Every disabled op is a registered one (a renamed op would otherwise
+  // come back enabled). That each one throws is checked by the bootstrap of
+  // every page, this one included.
+  let stale: Vec<&str> = DISABLED_OPS
+    .iter()
+    .copied()
+    .filter(|name| !registered.contains(name) || !allowed.contains(name))
+    .collect();
+  assert!(
+    stale.is_empty(),
+    "disabled ops that do not exist: {stale:?}"
+  );
+  // The `Deno.webrtc` server ops and the ones that reach the process.
+  for name in [
+    "op_webrtc_network_create",
+    "op_webrtc_set_log_level",
+    "op_webrtc_sender_write_rtp",
+    "op_webrtc_sender_write_frame",
+    "op_webrtc_receiver_read_rtp",
+    "op_webrtc_fake_media_devices",
+    "op_panic",
+    "op_eval_context",
+  ] {
+    assert!(DISABLED_OPS.contains(&name), "{name} is not disabled");
+  }
+  // `op_print` is replaced, not disabled: it writes to the page's console.
+  assert!(!DISABLED_OPS.contains(&"op_print"));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -205,7 +243,11 @@ async fn no_deno_no_node_no_ops() {
         Object.getOwnPropertyNames(globalThis)
           .filter((name) => /^op_|^Deno$|bootstrap/i.test(name)).length,
         typeof fetch, typeof setTimeout, typeof URL, typeof crypto.randomUUID(),
-        typeof WebSocket, typeof Worker, typeof RTCPeerConnection,
+        typeof Worker, typeof SharedWorker, typeof caches,
+        // What the web extensions have for Deno programs only.
+        typeof RTCIdentityAssertion, typeof RTCRtpScriptTransform,
+        typeof SFrameEncryptorStream, typeof navigator.mediaDevices,
+        typeof navigator.gpu,
       ]"#,
     ),
     json!([
@@ -229,6 +271,11 @@ async fn no_deno_no_node_no_ops() {
       "function",
       "function",
       "string",
+      "undefined",
+      "undefined",
+      "undefined",
+      "undefined",
+      "undefined",
       "undefined",
       "undefined",
       "undefined",
@@ -740,4 +787,327 @@ async fn bad_options_are_refused() {
     PageRuntime::new(bad_deny),
     Err(PageError::InvalidOptions(_))
   ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn websocket_is_confined() {
+  let mut options = options("<p>websocket</p>");
+  // Allowed by name, and still refused: the deny list holds for the
+  // connector a WebSocket makes, as it does for fetch.
+  options.net_allow = vec!["127.0.0.1:1".to_string()];
+  let mut page = PageRuntime::new(options).unwrap();
+  run(
+    &mut page,
+    r#"globalThis.events = [];
+      {
+        const ws = new WebSocket("ws://127.0.0.1:1/");
+        ws.onerror = (e) => events.push([
+          "error",
+          e.error instanceof DOMException,
+          e.error.name,
+          String(e.error.cause && e.error.cause.code),
+        ]);
+        ws.onclose = (e) => events.push(["close", e.code, ws.readyState]);
+      }
+      globalThis.stream = "pending";
+      new WebSocketStream("ws://127.0.0.1:1/").opened.then(
+        () => { stream = "opened"; },
+        (e) => { stream = [e instanceof DOMException, String(e.cause && e.cause.code)]; },
+      );"#,
+  );
+  assert_eq!(
+    page.run_until_idle(Duration::from_secs(20)).await.unwrap(),
+    Idle::Quiescent
+  );
+  assert_eq!(
+    eval(&mut page, "events"),
+    json!([
+      ["error", true, "NetworkError", "ERR_ADDRESS_DENIED"],
+      ["close", 1006, 3]
+    ])
+  );
+  assert_eq!(
+    eval(&mut page, "stream"),
+    json!([true, "ERR_ADDRESS_DENIED"])
+  );
+
+  // A host outside `net_allow` is refused before anything connects, and the
+  // interface is the browser's: no request headers, no client, no
+  // dispatcher (whose options would turn certificate checks off).
+  assert_eq!(
+    eval(
+      &mut page,
+      r#"(() => {
+        const caught = (f) => {
+          try { f(); return "no error"; } catch (e) { return e.name; }
+        };
+        return [
+          caught(() => new WebSocket("ws://not-allowed.example/")),
+          caught(() => new WebSocket("ws://127.0.0.1:1/", { headers: { "x-a": "b" } })),
+          caught(() => new WebSocket("ws://127.0.0.1:1/", {
+            dispatcher: {
+              [Symbol.for("Deno.internal.node.undici.dispatcherOptions")]: {
+                unsafelyIgnoreCertificateErrors: true,
+              },
+            },
+          })),
+          caught(() => new WebSocket("ws://127.0.0.1:1/", ["a", "a"])),
+          WebSocket.name, WebSocket.OPEN, WebSocket.prototype.constructor === WebSocket,
+          Object.getOwnPropertyDescriptor(globalThis, "WebSocket").get === undefined,
+          typeof CloseEvent, typeof MessageEvent, typeof WebSocketError,
+        ];
+      })()"#,
+    ),
+    json!([
+      "NotCapable",
+      "TypeError",
+      "TypeError",
+      "SyntaxError",
+      "WebSocket",
+      1,
+      true,
+      true,
+      "function",
+      "function",
+      "function",
+    ])
+  );
+  let _ = page.run_until_idle(Duration::from_secs(20)).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn webrtc_negotiates_without_the_server_extension() {
+  let mut page = page("<p>webrtc</p>");
+  // No network is needed for an offer: nothing is gathered until
+  // `setLocalDescription()`.
+  assert_eq!(
+    eval_async(
+      &mut page,
+      r#"const pc = new RTCPeerConnection();
+          const channel = pc.createDataChannel("data");
+          const offer = await pc.createOffer();
+          const result = [
+            pc instanceof RTCPeerConnection && pc instanceof EventTarget,
+            channel instanceof RTCDataChannel,
+            channel.label,
+            offer.type,
+            offer.sdp.includes("m=application"),
+            pc.signalingState,
+          ];
+          pc.close();
+          return result;"#,
+    )
+    .await
+    .unwrap(),
+    json!([true, true, "data", "offer", true, "stable"])
+  );
+
+  // The interfaces are data properties, as in a browser; `Deno.webrtc` and
+  // the interfaces only Deno programs get are not there.
+  assert_eq!(
+    eval(
+      &mut page,
+      r#"[
+        typeof RTCSessionDescription, typeof RTCIceCandidate,
+        typeof RTCCertificate, typeof RTCRtpSender, typeof MediaStream,
+        typeof RTCPeerConnection.generateCertificate,
+        Object.getOwnPropertyDescriptor(globalThis, "RTCPeerConnection").get === undefined,
+        Object.getOwnPropertyDescriptor(globalThis, "RTCPeerConnection").enumerable,
+        typeof Deno,
+        Object.getOwnPropertyNames(globalThis)
+          .filter((name) => /EncodedMediaTrack|RtcNetwork|createNetwork/.test(name)).length,
+      ]"#,
+    ),
+    json!([
+      "function",
+      "function",
+      "function",
+      "function",
+      "function",
+      "function",
+      true,
+      false,
+      "undefined",
+      0,
+    ])
+  );
+
+  // WebRTC Identity needs a worker for the identity provider: a clean
+  // NotSupportedError, not a failure to load `deno_runtime`'s worker module.
+  assert_eq!(
+    eval_async(
+      &mut page,
+      r#"const pc = new RTCPeerConnection();
+          const result = [];
+          try {
+            pc.setIdentityProvider("idp.example");
+            result.push("no error");
+          } catch (e) {
+            result.push([e instanceof DOMException, e.name]);
+          }
+          const outcome = (promise) => promise.then(
+            () => "resolved",
+            (e) => [e instanceof DOMException, e.name],
+          );
+          result.push(await outcome(pc.peerIdentity));
+          result.push(await outcome(pc.getIdentityAssertion()));
+          pc.close();
+          return result;"#,
+    )
+    .await
+    .unwrap(),
+    json!([
+      [true, "NotSupportedError"],
+      [true, "NotSupportedError"],
+      [true, "NotSupportedError"]
+    ])
+  );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn offscreen_canvas_has_no_gpu() {
+  let mut page = page("<p>canvas</p>");
+  assert_eq!(
+    eval(
+      &mut page,
+      r#"(() => {
+        const canvas = new OffscreenCanvas(4, 2);
+        const context = canvas.getContext("bitmaprenderer");
+        return [
+          context instanceof ImageBitmapRenderingContext,
+          context.canvas === canvas,
+          canvas.width, canvas.height,
+          new OffscreenCanvas(1, 1).getContext("webgpu"),
+          typeof navigator.gpu, typeof GPUDevice,
+          typeof createImageBitmap, typeof ImageBitmap, typeof ImageData,
+        ];
+      })()"#,
+    ),
+    json!([
+      true,
+      true,
+      4,
+      2,
+      null,
+      "undefined",
+      "undefined",
+      "function",
+      "function",
+      "function",
+    ])
+  );
+
+  // createImageBitmap(): from pixels, and an op's error as a DOMException.
+  assert_eq!(
+    eval_async(
+      &mut page,
+        r#"const bitmap = await createImageBitmap(new ImageData(3, 2));
+          const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+          const broken = await createImageBitmap(new Blob([png])).then(
+            () => "resolved",
+            (e) => [e instanceof DOMException, e.name],
+          );
+          return [bitmap instanceof ImageBitmap, bitmap.width, bitmap.height, broken];"#,
+    )
+    .await
+      .unwrap(),
+    json!([true, 3, 2, [true, "InvalidStateError"]])
+  );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn evaluate_json_async_awaits() {
+  let mut page = page(r#"<p id="p">async</p>"#);
+
+  // Top-level await, as an expression (with or without the `;`).
+  assert_eq!(
+    eval_async(&mut page, "await Promise.resolve(42)")
+      .await
+      .unwrap(),
+    json!(42)
+  );
+  assert_eq!(
+    eval_async(
+      &mut page,
+      "await new Promise((r) => setTimeout(() => r('late'), 20));"
+    )
+    .await
+    .unwrap(),
+    json!("late")
+  );
+  assert_eq!(
+    eval_async(&mut page, "await Promise.resolve('c') // a comment")
+      .await
+      .unwrap(),
+    json!("c")
+  );
+  // Statements: the value is what `return` gives.
+  assert_eq!(
+    eval_async(
+      &mut page,
+      "const a = await Promise.resolve(40); const b = await (async () => 2)(); return a + b;"
+    )
+    .await
+    .unwrap(),
+    json!(42)
+  );
+  // No `await`: a classic script, whose completion value is awaited when
+  // it is a promise, and whose declarations are the page's.
+  assert_eq!(
+    eval_async(&mut page, "var kept = 7; Promise.resolve(kept + 1)")
+      .await
+      .unwrap(),
+    json!(8)
+  );
+  assert_eq!(eval(&mut page, "kept"), json!(7));
+  assert_eq!(
+    eval_async(&mut page, r#"document.getElementById("p")"#)
+      .await
+      .unwrap(),
+    json!(r#"<p id="p">async</p>"#)
+  );
+  // The word in a string is not the keyword.
+  assert_eq!(
+    eval_async(&mut page, "var word = 'await'; word.length")
+      .await
+      .unwrap(),
+    json!(5)
+  );
+
+  // A rejection and a throw are the caller's errors.
+  for source in [
+    "await Promise.reject(new RangeError('rejected'))",
+    "await 1; throw new RangeError('rejected')",
+  ] {
+    match eval_async(&mut page, source).await {
+      Err(PageError::Js(info)) => {
+        assert!(info.message.contains("RangeError: rejected"), "{info:?}")
+      }
+      other => panic!("expected a JavaScript error, got {other:?}"),
+    }
+  }
+  match eval_async(&mut page, "await (;").await {
+    Err(PageError::Js(info)) => {
+      assert!(info.message.contains("SyntaxError"), "{info:?}")
+    }
+    other => panic!("expected a syntax error, got {other:?}"),
+  }
+
+  // A promise nothing will settle, and one that is too late.
+  assert!(matches!(
+    eval_async(&mut page, "await new Promise(() => {})").await,
+    Err(PageError::Stalled)
+  ));
+  assert!(matches!(
+    page
+      .evaluate_json_async(
+        "await new Promise((r) => setTimeout(r, 60000))".to_string(),
+        Duration::from_millis(100),
+      )
+      .await,
+    Err(PageError::Timeout)
+  ));
+  // The page is still usable.
+  assert_eq!(eval(&mut page, "1 + 1"), json!(2));
+  assert!(page.take_uncaught_errors().is_empty());
 }
