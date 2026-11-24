@@ -283,6 +283,39 @@ const STATS_EPOCH_FIELDS: [&str; 5] = [
   "estimatedPlayoutTimestamp",
 ];
 
+/// Adds the packets the pacer's full queue refused
+/// ([`crate::media::FactorPacer`]) to the selected candidate pair's
+/// `packetsDiscardedOnSend` / `bytesDiscardedOnSend`, beside the
+/// `availableOutgoingBitrate` that pacer follows: like a packet the socket
+/// refused, it never left. The count is the connection's (one pacer).
+pub(crate) fn add_pacer_refusals(
+  stats: &mut [serde_json::Value],
+  (packets, bytes): (u64, u64),
+) {
+  if packets == 0 {
+    return;
+  }
+  let Some(selected) = stats
+    .iter()
+    .find(|s| s["type"] == "transport")
+    .and_then(|s| s["selectedCandidatePairId"].as_str())
+    .map(str::to_owned)
+  else {
+    return;
+  };
+  for s in stats.iter_mut() {
+    if s["type"] == "candidate-pair" && s["id"] == selected.as_str() {
+      for (key, n) in [
+        ("packetsDiscardedOnSend", packets),
+        ("bytesDiscardedOnSend", bytes),
+      ] {
+        let before = s[key].as_u64().unwrap_or(0);
+        s[key] = (before + n).into();
+      }
+    }
+  }
+}
+
 /// One stats dictionary with its epoch fields made relative to `wall_ms`, the
 /// wall clock (milliseconds since the epoch) when the report was asked for:
 /// JavaScript adds the Performance time of that moment, so the timestamps are
@@ -2406,7 +2439,9 @@ impl Peer {
       .with_certificates(options.certificates.clone())
       .with_bundle_policy(options.bundle_policy)
       .build();
-    let (media_engine, registry) = crate::media::media_stack()?;
+    let pacer_refusals = Arc::<crate::media::PacerRefusals>::default();
+    let (media_engine, registry) =
+      crate::media::media_stack_counting(pacer_refusals.clone())?;
     // Messages up to 256 KiB, as browsers take (the engine's own default is
     // RFC 8841's 64 KiB); the connection's maxMessageSize is the smaller of
     // this and the peer's.
@@ -2537,7 +2572,10 @@ impl Peer {
         failed: false,
         recv_tx,
         recv_rx: Some(recv_rx),
-        media: MediaState::default(),
+        media: MediaState {
+          pacer_refusals,
+          ..Default::default()
+        },
         transforms: Default::default(),
         sinks: Default::default(),
         remote_known: false,
@@ -3127,33 +3165,33 @@ impl Peer {
       core.refresh_media_stats(now);
       let report = core.pc.get_stats(now, selector);
       use RTCStatsReportEntry as E;
-      Ok(
-        report
-          .iter()
-          .filter_map(|entry| {
-            match entry {
-              E::PeerConnection(s) => serde_json::to_value(s),
-              E::Transport(s) => serde_json::to_value(s),
-              E::IceCandidatePair(s) => serde_json::to_value(s),
-              E::LocalCandidate(s) => serde_json::to_value(s),
-              E::RemoteCandidate(s) => serde_json::to_value(s),
-              E::Certificate(s) => serde_json::to_value(s),
-              E::Codec(s) => serde_json::to_value(s),
-              E::DataChannel(s) => serde_json::to_value(s),
-              E::InboundRtp(s) => serde_json::to_value(s),
-              E::OutboundRtp(s) => serde_json::to_value(s),
-              E::RemoteInboundRtp(s) => serde_json::to_value(s),
-              E::RemoteOutboundRtp(s) => serde_json::to_value(s),
-              E::AudioSource(s) => serde_json::to_value(s),
-              E::VideoSource(s) => serde_json::to_value(s),
-              E::AudioPlayout(s) => serde_json::to_value(s),
-              _ => return None,
-            }
-            .ok()
-            .map(|stats| epoch_fields_relative(stats, wall_ms))
-          })
-          .collect(),
-      )
+      let mut stats: Vec<serde_json::Value> = report
+        .iter()
+        .filter_map(|entry| {
+          match entry {
+            E::PeerConnection(s) => serde_json::to_value(s),
+            E::Transport(s) => serde_json::to_value(s),
+            E::IceCandidatePair(s) => serde_json::to_value(s),
+            E::LocalCandidate(s) => serde_json::to_value(s),
+            E::RemoteCandidate(s) => serde_json::to_value(s),
+            E::Certificate(s) => serde_json::to_value(s),
+            E::Codec(s) => serde_json::to_value(s),
+            E::DataChannel(s) => serde_json::to_value(s),
+            E::InboundRtp(s) => serde_json::to_value(s),
+            E::OutboundRtp(s) => serde_json::to_value(s),
+            E::RemoteInboundRtp(s) => serde_json::to_value(s),
+            E::RemoteOutboundRtp(s) => serde_json::to_value(s),
+            E::AudioSource(s) => serde_json::to_value(s),
+            E::VideoSource(s) => serde_json::to_value(s),
+            E::AudioPlayout(s) => serde_json::to_value(s),
+            _ => return None,
+          }
+          .ok()
+          .map(|stats| epoch_fields_relative(stats, wall_ms))
+        })
+        .collect();
+      add_pacer_refusals(&mut stats, core.media.pacer_refusals.get());
+      Ok(stats)
     })
   }
 

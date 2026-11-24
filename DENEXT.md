@@ -20211,14 +20211,49 @@ where the changes are discussed.
      feedback, and a pacer at that rate (a bounded queue the driver drains at
      the engine's `poll_timeout`; writes never wait on it); the estimate is the
      candidate pair's `availableOutgoingBitrate` and the outbound streams'
-     `targetBitrate`.
+     `targetBitrate`. The pacer slot holds `FactorPacer` (`media.rs`), which
+     releases at `PACING_FACTOR` (2.5, libwebrtc's) times the estimate, and only
+     while the remote's congestion feedback is in use: a local stream (with its
+     RTX and FEC SSRCs) is paced only if it negotiated the transport-wide
+     sequence number extension or `ack ccfb`, and only while TWCC or RFC 8888
+     reports keep arriving. Before the first report the window runs from the
+     stream's first packet, at the initial rate; `FEEDBACK_TIMEOUT` (2 s, the
+     congestion controller's own send-history horizon, past which no report can
+     still update the estimate; 8 or more report intervals) without one, packets
+     pass straight through (what was held goes at the next wake-up, and the
+     stream keeps its order) until the next report resumes pacing at its
+     estimate. Without it, a peer that never negotiated or never sent feedback
+     was held at 750 kb/s for the whole call. The estimate reaches the stats
+     only while it is paced at: without feedback `availableOutgoingBitrate` is
+     absent and `targetBitrate` 0 (the pacer sends an attribute carrier with a
+     zero estimate when reports stop, and attaches the estimate again to the
+     next report). A packet the pacer's full queue refuses is counted
+     (`PacerRefusals`, shared with the connection's `MediaState`) into the
+     selected candidate pair's `packetsDiscardedOnSend` / `bytesDiscardedOnSend`
+     and logged (a warning at the start of each run of refusals). Audio streams
+     are never paced (a small, steady rate that would otherwise wait behind a
+     video key frame in the one queue; libwebrtc sends it first), and the queue
+     is bounded in time as well as by its 4,096 packets: once the oldest held
+     packet has waited, the pacer releases at what lets the queue out by
+     `QUEUE_TIME_LIMIT` (2 s, libwebrtc's `kMaxExpectedQueueLength`) when that
+     is faster than 2.5 times the estimate, so a source above a low estimate is
+     delayed 2 s at most instead of by however long its backlog takes at the
+     estimate.
      - User-facing note: `getTransceivers()` no longer lists a stopped
        transceiver once an answer rejects its section; media is paced to a
        bandwidth estimate (starting at 300 kb/s and following the remote's TWCC
-       feedback); the stats members above are reported.
+       or RFC 8888 feedback) while that feedback arrives, and sent at the rate
+       it is written when the remote negotiates none or stops sending it; audio
+       is not paced, and paced video waits 2 s at most;
+       `availableOutgoingBitrate` / `targetBitrate` report the estimate while
+       media is paced at it, and media the pacer drops counts in the candidate
+       pair's `packetsDiscardedOnSend` / `bytesDiscardedOnSend`.
      - Tests: `tests/unit/webrtc_test.ts`
        (`webrtcRejectedSectionRemovesStoppedTransceiver`,
-       `webrtcLaterTransceiverWorksAfterEarlierRemoved`); the engine's
+       `webrtcLaterTransceiverWorksAfterEarlierRemoved`,
+       `webrtcWithoutCongestionFeedbackIsNotPaced`); `ext/webrtc` unit tests
+       (`media::factor_pacer_tests`,
+       `tests::pacer_refusals_are_the_selected_pairs_discards`); the engine's
        workspace; the WebRTC WPT run.
      - Node tests enabled: none; `node:` has no WebRTC API.
 
@@ -20248,15 +20283,21 @@ where the changes are discussed.
      turns the engine's ECN on where the platform does both (Linux, Android,
      macOS, iOS, FreeBSD, and Windows with `WSARecvMsg`, which a probe socket
      checks); a socket whose setup fails keeps the plain path. `quinn-udp` also
-     forbids IP fragmentation on those sockets, as QUIC does (the engine's
-     datagrams stay under its 1200-byte MTU), and Linux's UDP GRO, which it
-     turns on, is turned back off. ICE-TCP and TURN relays carry no codepoint.
-     `media_stack()` adds `configure_congestion_control_feedback` beside GCC
-     over TWCC (kept as the congestion controller): offers carry
-     `a=rtcp-fb:<pt> ack ccfb`; a peer that doesn't answer it, as browsers don't
-     unless Chrome's field trial is on, negotiates without it and nothing is
-     marked for that stream; where both are negotiated the send history keeps
-     one record per packet, so the estimator takes each packet once.
+     forbids IP fragmentation on those sockets, as QUIC does; those options
+     (`IP_DONTFRAG` / `IPV6_DONTFRAG`, Linux's `IP_MTU_DISCOVER` /
+     `IPV6_MTU_DISCOVER`, Windows' `IP_DONTFRAGMENT`) are put back as the socket
+     had them, since WebRTC has no path MTU discovery of its own and a datagram
+     sized for the engine's 1200-byte MTU, grown by SRTP, a TURN header and the
+     IP / UDP headers, would be dropped rather than fragmented on a path with a
+     smaller MTU (test: `ecn::tests::setup_keeps_the_fragmentation_options`);
+     Linux's UDP GRO, which it turns on, is turned back off. ICE-TCP and TURN
+     relays carry no codepoint. `media_stack()` adds
+     `configure_congestion_control_feedback` beside GCC over TWCC (kept as the
+     congestion controller): offers carry `a=rtcp-fb:<pt> ack ccfb`; a peer that
+     doesn't answer it, as browsers don't unless Chrome's field trial is on,
+     negotiates without it and nothing is marked for that stream; where both are
+     negotiated the send history keeps one record per packet, so the estimator
+     takes each packet once.
      - User-facing note: offers list `ack ccfb` feedback on every codec; between
        two Deno peers (or with a browser that answers it) video and audio RTP go
        out ECT(1) on UDP, and the ECN and RFC 8888 statistics above are

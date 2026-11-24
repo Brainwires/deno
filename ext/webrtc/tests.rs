@@ -1303,3 +1303,33 @@ fn sent_video_counts_what_the_frames_show() {
     0.0
   );
 }
+
+// The packets a connection's pacer refused (a full queue) are the selected
+// candidate pair's `packetsDiscardedOnSend` / `bytesDiscardedOnSend`, added to
+// what the engine counted; another pair's are left alone.
+#[test]
+fn pacer_refusals_are_the_selected_pairs_discards() {
+  use serde_json::json;
+  let mut stats = vec![
+    json!({ "type": "transport", "id": "T", "selectedCandidatePairId": "P1" }),
+    json!({
+      "type": "candidate-pair",
+      "id": "P1",
+      "packetsDiscardedOnSend": 1,
+      "bytesDiscardedOnSend": 100,
+    }),
+    json!({
+      "type": "candidate-pair",
+      "id": "P2",
+      "packetsDiscardedOnSend": 0,
+      "bytesDiscardedOnSend": 0,
+    }),
+  ];
+  crate::peer::add_pacer_refusals(&mut stats, (0, 0));
+  assert_eq!(stats[1]["packetsDiscardedOnSend"], 1);
+  crate::peer::add_pacer_refusals(&mut stats, (3, 3036));
+  assert_eq!(stats[1]["packetsDiscardedOnSend"], 4);
+  assert_eq!(stats[1]["bytesDiscardedOnSend"], 3136);
+  assert_eq!(stats[2]["packetsDiscardedOnSend"], 0);
+  assert_eq!(stats[2]["bytesDiscardedOnSend"], 0);
+}
