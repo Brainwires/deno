@@ -1242,7 +1242,11 @@ pub fn deny_ceiling_options(
     allow_env: all.clone(),
     allow_run: all.clone(),
     allow_ffi: all.clone(),
-    allow_sys: all,
+    allow_sys: all.clone(),
+    // not the kernel's to hold, but the layer the run's children inherit
+    // is made from this grant: a `deno` they start keeps the MIDI access
+    // its own flags give it, as it keeps every other
+    allow_midi: all,
     ..options.clone()
   }
 }

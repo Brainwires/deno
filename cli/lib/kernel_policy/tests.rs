@@ -2615,6 +2615,7 @@ fn deny_ceiling_options_keep_only_the_denies() {
   assert_eq!(c.deny_read, options.deny_read);
   assert_eq!(c.ignore_env, options.ignore_env);
   assert_eq!(c.allow_net_connect, None);
+  assert_eq!(c.allow_midi, all());
   assert!(c.prompt);
 }
 
