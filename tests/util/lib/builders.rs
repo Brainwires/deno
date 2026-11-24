@@ -719,6 +719,10 @@ impl TestCommandBuilder {
     // environment here for the pty tests or else I get dns errors
     if !self.env_clear {
       for (key, value) in std::env::vars() {
+        // what the test removed stays removed
+        if self.envs_remove.contains(&key) {
+          continue;
+        }
         envs.entry(key).or_insert(value);
       }
     }

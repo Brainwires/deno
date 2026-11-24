@@ -110,6 +110,12 @@ fn deny_ceiling_prompt_grants_outside_the_deny_macos() {
   context
     .new_command()
     .env("DENO_INTERNAL_KERNEL_SANDBOX_STAGE", "r4")
+    // a CI image's loader variables (GitHub's macOS runners set
+    // DYLD_FALLBACK_LIBRARY_PATH) would make the scoped `--allow-run=cat`
+    // child need full run permission; this test is about the deny, not them
+    .env_remove("DYLD_FALLBACK_LIBRARY_PATH")
+    .env_remove("DYLD_LIBRARY_PATH")
+    .env_remove("DYLD_INSERT_LIBRARIES")
     .args_vec([
       "run",
       "--quiet",
