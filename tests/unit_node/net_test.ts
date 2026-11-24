@@ -575,6 +575,106 @@ Deno.test({
   }
 });
 
+// A pipe client can verify its server's user (DENEXT.md item 552): the
+// connected socket names the process that serves the pipe, the account that
+// process runs as and the pipe's owner, next to this process's own account.
+// The lookups themselves, and what a failed one answers, are checked in
+// libs/core/uv_compat/pipe_security.rs.
+Deno.test({
+  name:
+    "[node/net] Deno.pipeServerIdentity names a named pipe's server as this process and user",
+  ignore: Deno.build.os !== "windows",
+}, async () => {
+  const ipcPath = `\\\\.\\pipe\\deno-test-${crypto.randomUUID()}`;
+  const accepted = Promise.withResolvers<net.Socket>();
+  const server = net.createServer((socket) => {
+    socket.on("error", () => {});
+    accepted.resolve(socket);
+  });
+  const listening = Promise.withResolvers<void>();
+  server.once("error", listening.reject);
+  server.listen(ipcPath, listening.resolve);
+  await listening.promise;
+
+  const client = net.connect(ipcPath);
+  try {
+    const connected = Promise.withResolvers<void>();
+    client.once("error", connected.reject);
+    client.once("connect", connected.resolve);
+    await connected.promise;
+
+    const identity = Deno.pipeServerIdentity(client);
+    assert(identity !== null);
+    assertEquals(identity.pid, Deno.pid);
+    assert(
+      /^S-1-5-\d+(-\d+)*$/.test(identity.currentUserSid ?? ""),
+      `${identity.currentUserSid}`,
+    );
+    assertEquals(identity.userSid, identity.currentUserSid);
+    assertEquals(identity.ownerSid, identity.currentUserSid);
+    assertEquals(Object.keys(identity).sort(), [
+      "currentUserSid",
+      "ownerSid",
+      "pid",
+      "userSid",
+    ]);
+
+    // The server's end of the connection has no pipe server.
+    assertEquals(Deno.pipeServerIdentity(await accepted.promise), null);
+  } finally {
+    client.destroy();
+    await new Promise((resolve) => server.close(resolve));
+  }
+  // A destroyed socket has no handle left to ask.
+  assertEquals(Deno.pipeServerIdentity(client), null);
+});
+
+Deno.test("[node/net] Deno.pipeServerIdentity is null for what is not a Windows named pipe client", async () => {
+  // @ts-expect-error not an object
+  assertEquals(Deno.pipeServerIdentity(undefined), null);
+  assertEquals(Deno.pipeServerIdentity({}), null);
+  assertEquals(Deno.pipeServerIdentity({ _handle: {} }), null);
+  assertEquals(Deno.pipeServerIdentity(new net.Socket()), null);
+
+  // A TCP connection.
+  const tcp = net.createServer((socket) => socket.on("error", () => {}));
+  await new Promise<void>((resolve) => tcp.listen(0, "127.0.0.1", resolve));
+  const { port } = tcp.address() as net.AddressInfo;
+  const tcpClient = net.connect(port, "127.0.0.1");
+  try {
+    await new Promise<void>((resolve, reject) => {
+      tcpClient.once("error", reject);
+      tcpClient.once("connect", resolve);
+    });
+    assertEquals(Deno.pipeServerIdentity(tcpClient), null);
+  } finally {
+    tcpClient.destroy();
+    await new Promise((resolve) => tcp.close(resolve));
+  }
+
+  // A Unix socket: its file's permissions say who may connect.
+  if (Deno.build.os === "windows") return;
+  const dir = await Deno.makeTempDir();
+  const unix = net.createServer((socket) => socket.on("error", () => {}));
+  try {
+    const ipcPath = path.join(dir, "s.sock");
+    await new Promise<void>((resolve) => unix.listen(ipcPath, resolve));
+    const unixClient = net.connect(ipcPath);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        unixClient.once("error", reject);
+        unixClient.once("connect", resolve);
+      });
+      assertEquals(Deno.pipeServerIdentity(unixClient), null);
+    } finally {
+      unixClient.destroy();
+    }
+  } finally {
+    await new Promise((resolve) => unix.close(resolve));
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 // `readableAll` / `writableAll` change who may open the path (a mode on a
 // Unix socket, an ACE for Everyone on a Windows named pipe; item 484). The
 // server listens and serves its own account either way; what the pipe's

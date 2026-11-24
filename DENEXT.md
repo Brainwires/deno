@@ -22292,6 +22292,52 @@ where the changes are discussed.
        `wide_roots_are_never_labelled`.
      - Node tests enabled: none.
 
+552. **`feat(node/net)`: `Deno.pipeServerIdentity`, a pipe client can verify its
+     server's user** (runtime; Windows;
+     `libs/core/uv_compat/{pipe.rs,pipe_security.rs}`,
+     `ext/node/ops/pipe_wrap.rs`, `runtime/js/90_deno_ns.js`,
+     `cli/tsc/dts/lib.deno.ns.d.ts`). A `node:net` server of this runtime owns
+     its Windows named pipe (item 484: the first instance, a descriptor that
+     names the account it runs as), but a client had no way to ask who serves
+     the pipe it connected to. `Deno.pipeServerIdentity(socket)` answers for a
+     `node:net` socket connected to a named pipe:
+     `{ pid, userSid, ownerSid, currentUserSid }`.
+     - `pid` is `GetNamedPipeServerProcessId` on the client's handle; `userSid`
+       the token user of that process (`OpenProcess` with
+       `PROCESS_QUERY_LIMITED_INFORMATION`, `OpenProcessToken` with
+       `TOKEN_QUERY`, `GetTokenInformation(TokenUser)`); `ownerSid` the owner in
+       the pipe's security descriptor (`GetSecurityInfo`), which does not depend
+       on the server's process id still naming the same process;
+       `currentUserSid` this process's token user. SIDs are strings
+       (`ConvertSidToStringSidW`).
+     - A lookup that fails (the server's process can't be opened or has exited,
+       the descriptor can't be read) leaves its field `null`. `null` is "not
+       known": no field is ever filled in from another.
+     - The call returns `null` when there is no pipe server to name: a never
+       connected or closed socket, the server's end of a connection, a TCP or
+       TLS socket, a pipe opened from a descriptor, and every OS other than
+       Windows. It takes no permission (it reports on a connection the program
+       holds) and makes no new `windows-sys` feature necessary.
+     - The handle method behind it is `PipeWrap.prototype.getServerIdentity`
+       (`uv_pipe_server_identity` in `uv_compat`, not a libuv function).
+     - User-facing note: on Windows, a `node:net` client of a named pipe can
+       check that the pipe is served and owned by the account it runs as itself,
+       with `Deno.pipeServerIdentity(socket)`.
+     - Tests: `uv_compat::pipe_security::tests`
+       `a_pipe_client_reports_this_process_as_its_server`,
+       `a_pipe_readable_by_everyone_is_still_owned_by_its_server`,
+       `the_server_end_of_a_pipe_has_no_server_identity`,
+       `a_handle_that_is_no_pipe_has_no_server_identity`,
+       `process_user_sid_of_this_process_is_the_current_user`,
+       `process_user_sid_fails_for_a_process_that_cannot_be_opened`,
+       `a_server_process_that_cannot_be_opened_is_unknown` and
+       `a_server_identity_names_another_user_as_another_user` (Windows);
+       `tests/unit_node/net_test.ts` "Deno.pipeServerIdentity names a named
+       pipe's server as this process and user" (Windows) and
+       "Deno.pipeServerIdentity is null for what is not a Windows named pipe
+       client".
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -22303,11 +22349,21 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 517, 518-538 and the runtime parts of 540-551) are
-what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
-`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
-in the branch too, but a stock CLI does not run them; denext's own launcher
-provides that environment.
+506-510, 511, 512, 513, 515, 517, 518-538, 552 and the runtime parts of 540-551)
+are what the prebuilt `libdenort` carries. The CLI-side parts (for example
+writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+launchers) are in the branch too, but a stock CLI does not run them; denext's
+own launcher provides that environment.
+
+506-510, 511, 512, 513, 515, 516, 517, 518) are what the prebuilt `libdenort`
+carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
+`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
+stock CLI does not run them; denext's own launcher provides that environment.
+
+506-510, 511, 512, 513, 515, 517) are what the prebuilt `libdenort` carries. The
+CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
+into a packaged app's launchers) are in the branch too, but a stock CLI does not
+run them; denext's own launcher provides that environment.
 
 506-510, 511, 512, 513, 515, 518, 519, 521, 522, 523, 527, 528) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
