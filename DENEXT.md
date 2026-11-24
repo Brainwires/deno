@@ -21612,6 +21612,16 @@ where the changes are discussed.
        `test_bench` specs cover the modes that still compute it).
      - Node tests enabled: none.
 
+527. **`fix(fetch)`: `denyAddresses`' `"metadata"` preset names Azure's
+     WireServer and Oracle Cloud's endpoint** (runtime;
+     `ext/fetch/deny_addresses.rs`, `cli/tsc/dts/lib.deno.ns.d.ts`). Item
+     512's preset held `169.254.169.254`, `fd00:ec2::254` and
+     `100.100.100.200`; `168.63.129.16` (a public-range address no other
+     preset holds) and `192.0.0.192` are added, and the declaration lists the
+     addresses.
+     - Tests: `deny_addresses::tests::the_metadata_preset_names_each_endpoint`.
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -21623,7 +21633,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 518, 519, 521, 522, 523) are what the prebuilt `libdenort` carries. The
+506-510, 511, 512, 513, 515, 518, 519, 521, 522, 523, 527) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.

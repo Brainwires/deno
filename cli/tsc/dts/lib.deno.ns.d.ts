@@ -7280,8 +7280,10 @@ declare namespace Deno {
      * - `"private"`: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
      *   `100.64.0.0/10` (carrier-grade NAT) and `fc00::/7`;
      * - `"link-local"`: `169.254.0.0/16` and `fe80::/10`;
-     * - `"metadata"`: `169.254.169.254`, `fd00:ec2::254` and
-     *   `100.100.100.200`.
+     * - `"metadata"`: the cloud instance metadata endpoints
+     *   `169.254.169.254`, `fd00:ec2::254`, `100.100.100.200`,
+     *   `168.63.129.16` (Azure's WireServer) and `192.0.0.192` (Oracle
+     *   Cloud).
      *
      * ```ts
      * const client = Deno.createHttpClient({

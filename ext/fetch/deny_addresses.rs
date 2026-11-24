@@ -67,11 +67,15 @@ fn preset(name: &str) -> Option<Vec<IpNet>> {
       v6([0xfe80, 0, 0, 0, 0, 0, 0, 0], 10),
     ],
     // the cloud instance metadata services: AWS, GCP, Azure, OpenStack and
-    // DigitalOcean on 169.254.169.254, AWS's IPv6 endpoint, Alibaba Cloud
+    // DigitalOcean on 169.254.169.254, AWS's IPv6 endpoint, Alibaba Cloud,
+    // Azure's WireServer (a public-range address: no other preset holds it)
+    // and Oracle Cloud's
     "metadata" => vec![
       v4(169, 254, 169, 254, 32),
       v6([0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254], 128),
       v4(100, 100, 100, 200, 32),
+      v4(168, 63, 129, 16, 32),
+      v4(192, 0, 0, 192, 32),
     ],
     _ => return None,
   })
@@ -281,5 +285,25 @@ mod tests {
     );
     let found = find_address_denied_error(&err).unwrap();
     assert!(found.to_string().starts_with(ADDRESS_DENIED_CODE));
+  }
+
+  // denext: the metadata preset names every provider's endpoint, the ones
+  // outside the link-local range too, and nothing beside them.
+  #[test]
+  fn the_metadata_preset_names_each_endpoint() {
+    let deny = list(&["metadata"]);
+    for endpoint in [
+      "169.254.169.254",
+      "fd00:ec2::254",
+      "100.100.100.200",
+      "168.63.129.16",
+      "192.0.0.192",
+      "::ffff:168.63.129.16",
+    ] {
+      assert!(deny.denied(ip(endpoint)).is_some(), "{endpoint}");
+    }
+    for other in ["168.63.129.17", "192.0.0.191", "192.0.0.1", "168.63.0.1"] {
+      assert!(deny.denied(ip(other)).is_none(), "{other}");
+    }
   }
 }
