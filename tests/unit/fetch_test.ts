@@ -1556,6 +1556,40 @@ Deno.test(
   },
 );
 
+Deno.test(
+  { permissions: { net: true } },
+  async function fetchCustomClientDenyAddressesThroughASocksProxy() {
+    // a listener standing in for the SOCKS proxy: a destination the client
+    // refuses never gets as far as a connection to it
+    const listener = Deno.listen({ hostname: "127.0.0.1", port: 0 });
+    let connections = 0;
+    const accepting = (async () => {
+      for await (const conn of listener) {
+        connections++;
+        conn.close();
+      }
+    })();
+    const { port } = listener.addr as Deno.NetAddr;
+    try {
+      for (const scheme of ["socks5", "socks5h"]) {
+        using client = Deno.createHttpClient({
+          proxy: { url: `${scheme}://127.0.0.1:${port}` },
+          denyAddresses: ["10.0.0.0/8"],
+        });
+        await assertAddressDenied(fetch("http://10.1.2.3/", { client }));
+        // a name that doesn't resolve here can't be checked: refused
+        await assertAddressDenied(
+          fetch("http://denext-deny-addresses.invalid/", { client }),
+        );
+      }
+      assertEquals(connections, 0);
+    } finally {
+      listener.close();
+      await accepting.catch(() => {});
+    }
+  },
+);
+
 Deno.test(function createHttpClientDenyAddressesInvalid() {
   assertThrows(
     () => Deno.createHttpClient({ denyAddresses: ["intranet"] }),
