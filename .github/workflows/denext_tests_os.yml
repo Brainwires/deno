@@ -358,8 +358,19 @@ jobs:
           DENO_WEBRTC_LOOPBACK_ONLY: '1'
         run: >-
           ./tests/wpt/wpt.ts run --no-hosts --quiet --binary=target/debug/deno
+          --wptreport=wptreport-webrtc.json
           -- webrtc webrtc-encoded-transform webrtc-extensions webrtc-ice
           webrtc-identity webrtc-priority webrtc-stats webrtc-svc
+      # Every subtest's status and message, the expected failures' too (the
+      # log has `--quiet`'s unexpected results only): what a triage reads.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        with:
+          name: wptreport-webrtc-${{ inputs.os }}
+          path: wptreport-webrtc.json
+          if-no-files-found: ignore
+          retention-days: 7
 
   # WebRTC mDNS end to end (DENEXT.md item 370): two connections on this
   # host's LAN address, one publishing its host candidates under `.local`
