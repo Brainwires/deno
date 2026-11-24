@@ -12,6 +12,7 @@ pub mod kernel_sandbox;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod kernel_supervise;
 pub mod loader;
+pub mod narrow_permissions;
 pub mod npm;
 pub mod resource_limits;
 pub mod shared;

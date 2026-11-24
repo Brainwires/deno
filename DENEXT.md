@@ -21412,6 +21412,47 @@ where the changes are discussed.
        keys refusing it, a tampered payload).
      - Node tests enabled: none.
 
+517. **`feat(compile)`: `DENO_NARROW_PERMISSIONS` holds a compiled program to
+     less than its baked permissions** (`cli/lib/narrow_permissions.rs`,
+     `cli/rt/lib.rs`, `cli/lib/kernel_inherit.rs`; code comments say item 5NN
+     until the train numbers it). A `deno compile`d program runs with the
+     permissions baked into it, and whoever ran it could not ask for less. The
+     variable takes permission flags in the CLI's syntax, whitespace-separated
+     (`"…"` / `'…'` quote a token with spaces, `,,` is a literal comma in a path
+     list, `:8000` expands as on the command line):
+     - `--allow-<kind>=<list>` keeps only the part of the baked grant the list
+       covers: the intersection the kernel sandbox already uses for an
+       ancestor's grants (`kernel_inherit::clamp`), so a baked
+       `--allow-read=data/sub` stays `data/sub` under `--allow-read=data`, a
+       baked unscoped grant becomes the list, and a disjoint list removes the
+       kind. A bare `--allow-<kind>`, or a kind not named, stays as baked.
+       `--allow-net` holds both directions, `--allow-net-connect` /
+       `--allow-net-listen` one each; several flags of a kind add up (a bare one
+       beside a listed one adds nothing, as on the command line).
+     - `--deny-<kind>[=<list>]` adds denies (bare: the whole kind).
+     - Prompting is off under a narrowing (a prompt could grant back what it
+       removed); `--no-prompt` is accepted.
+     - Kinds: `read`, `write`, `ffi`, `net`, `net-connect`, `net-listen`, `env`,
+       `run`, `sys`, `midi`, and `-R` `-W` `-N` `-E` `-S`.
+     - Refused, and the program does not start (exit 1,
+       `error: DENO_NARROW_PERMISSIONS: <flag>: <why>`): `--allow-all` / `-A`,
+       `--ignore-*`, `--allow-import` / `--deny-import` / `-I` (a compiled
+       program loads no remote modules), any other flag, an empty list entry, an
+       unterminated quote, a value that isn't UTF-8. A blank value changes
+       nothing.
+     - It is applied in `denort`'s `main` right after the metadata is read,
+       before the baked kernel sandbox (`kernel::startup`) and the permission
+       checks see the grant, so an `enforce` program's kernel policy is the
+       narrowed grant too; the program's own embedded files stay readable. A
+       Deno Desktop app (`libdenort`, its own entry) does not read it.
+     - Tests: `narrow_permissions.rs` unit tests (the syntax, every refusal,
+       intersection with an unscoped and a scoped bake, a wider list never
+       widening, a disjoint list, one network direction, denies only adding);
+       `tests/specs/compile/narrow_permissions` (Unix: a narrowed read and a
+       denied variable, a blank value, `--allow-all` and an unknown flag
+       refused, a narrow bake staying narrow under a wide list).
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -21535,6 +21576,21 @@ only.
   unscoped read and write, so scoped code can't create a link, but an existing
   one (or one a subprocess, an archive or a checkout creates) is followed. Allow
   scopes that resolve links are in progress on a separate branch.
+
+### Narrowing a compiled program
+
+A `deno compile`d program runs with the permissions baked into it. Whoever runs
+it can hold it to less with `DENO_NARROW_PERMISSIONS`, permission flags in the
+CLI's syntax that can only narrow (item 517):
+
+```sh
+DENO_NARROW_PERMISSIONS="--allow-read=./data --allow-net=api.example.com --deny-env=AWS_SECRET_ACCESS_KEY" ./app
+```
+
+Each `--allow-<kind>=<list>` intersects the baked grant of that kind with the
+list (a kind not named stays as baked), each `--deny-<kind>` adds a deny, and
+prompting is off. A flag that could widen (`-A`, `--ignore-*`) or that it
+doesn't know refuses to start the program.
 
 ### Network permissions and proxies
 
