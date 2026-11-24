@@ -5,7 +5,8 @@
 // every way from page JavaScript to the ops (`Deno`, `__bootstrap`).
 //
 // Everything is installed eagerly, as plain data properties. Nothing is
-// loaded lazily once a page script has run, so no extension script is ever
+// loaded lazily once a page script has run (the modules the extensions
+// would load on first use are loaded here), so no extension script is ever
 // evaluated in a realm a page has already tampered with, and a page sees no
 // accessor where a browser has a value.
 
@@ -23,9 +24,12 @@ const {
   FunctionPrototypeCall,
   JSONStringify,
   ObjectDefineProperties,
+  ObjectDefineProperty,
   ObjectFreeze,
   ObjectKeys,
   ObjectSetPrototypeOf,
+  Proxy,
+  ReflectConstruct,
   ReflectHas,
   String,
   Symbol,
@@ -33,6 +37,23 @@ const {
 } = primordials;
 
 const info = op_web_page_bootstrap_info();
+
+// The ops the extension's middleware took the implementation of
+// (`op_policy.rs`): each one throws `op is disabled` whatever it is called
+// with. Checked here, for every page, because nothing can call an op once
+// this module has run.
+for (let i = 0; i < info.disabledOps.length; i++) {
+  const name = info.disabledOps[i];
+  let disabled = false;
+  try {
+    core.ops[name]();
+  } catch (error) {
+    disabled = error?.message === "op is disabled";
+  }
+  if (!disabled) {
+    throw new TypeError(`deno_web_page: ${name} is not disabled`);
+  }
+}
 
 // `26_fetch.js` reads the tracing hooks of `deno_telemetry`, and loads that
 // extension when they are missing. A page context has no telemetry: these
@@ -100,6 +121,121 @@ const fetch = core.loadExtScript("ext:deno_fetch/26_fetch.js");
 const eventSource = core.loadExtScript("ext:deno_fetch/27_eventsource.js");
 const webStorage = core.loadExtScript("ext:deno_webstorage/01_webstorage.js");
 const crypto = core.loadExtScript("ext:deno_crypto/00_crypto.js");
+const webSocket = core.createLazyLoader(
+  "ext:deno_websocket/01_websocket.js",
+)();
+const webSocketStream = core.createLazyLoader(
+  "ext:deno_websocket/02_websocketstream.js",
+)();
+const image = core.createLazyLoader("ext:deno_image/01_image.js")();
+const canvas = core.createLazyLoader("ext:deno_canvas/01_canvas.js")();
+// WebRTC Identity runs an identity provider's script in a worker, and a
+// page runtime has no workers: with this set, `06_identity.js` answers
+// `NotSupportedError` instead of loading `deno_runtime`'s worker module.
+internals.webrtcIdentityUnavailable = true;
+const webrtc = core.loadExtScript("ext:deno_webrtc/01_webrtc.js");
+// `01_webrtc.js` loads these two on first use (a `transform` set on a sender
+// or a receiver, a transferred data channel). Loaded here, they are in
+// deno_core's cache: no extension script is evaluated once a page script
+// has run.
+const encodedTransform = core.loadExtScript(
+  "ext:deno_webrtc/03_encoded_transform.js",
+);
+const webrtcTransfer = core.loadExtScript("ext:deno_webrtc/05_transfer.js");
+
+// What `structuredClone()` and `postMessage()` need to know about the WebRTC
+// objects, as `deno_runtime` registers it (98_global_scope_shared.js).
+core.registerCloneableResource(
+  "RTCEncodedVideoFrame",
+  (data) => encodedTransform.deserializeFrame(data),
+);
+core.registerCloneableResource(
+  "RTCEncodedAudioFrame",
+  (data) => encodedTransform.deserializeFrame(data),
+);
+core.registerCloneableResource(
+  "RTCCertificate",
+  (data) => webrtc.deserializeCertificate(data),
+);
+core.registerTransferableResource(
+  "RTCDataChannel",
+  (channel) => webrtcTransfer.transferSteps(channel),
+  (rid) => webrtcTransfer.transferReceivingSteps(rid),
+);
+
+// --- WebSocket: the constructors a browser has ------------------------------------
+//
+// `deno_websocket`'s constructors take more than a browser's: request
+// headers, a `Deno.HttpClient`, and an undici dispatcher whose options (found
+// under a `Symbol.for()` key any script can make) turn certificate
+// verification off or add trusted roots. A page gets the standard
+// arguments: these wrappers pass nothing else on. They are proxies, so the
+// interface object keeps its name, its constants and its prototype, and
+// `new.target` reaches the real constructor for a subclass.
+
+function pageConstructor(Interface, standardArguments) {
+  const wrapper = new Proxy(Interface, {
+    __proto__: null,
+    construct(target, args, newTarget) {
+      return ReflectConstruct(target, standardArguments(args), newTarget);
+    },
+  });
+  ObjectDefineProperty(Interface.prototype, "constructor", {
+    __proto__: null,
+    value: wrapper,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  return wrapper;
+}
+
+// `new WebSocket(url, protocols)`: a string or a sequence of strings. An
+// object that is not iterable is a TypeError here, never a dictionary.
+const WebSocket = pageConstructor(webSocket.WebSocket, (args) => {
+  if (args.length < 2 || args[1] === undefined) {
+    return args.length < 1 ? [] : [args[0]];
+  }
+  const prefix = "Failed to construct 'WebSocket'";
+  let protocols = args[1];
+  if (
+    (typeof protocols === "object" && protocols !== null) ||
+    typeof protocols === "function"
+  ) {
+    protocols = webidl.converters["sequence<DOMString>"](
+      protocols,
+      prefix,
+      "Argument 2",
+    );
+  } else {
+    protocols = webidl.converters.DOMString(protocols, prefix, "Argument 2");
+  }
+  return [args[0], protocols];
+});
+
+// `new WebSocketStream(url, { protocols, signal })`.
+const WebSocketStream = pageConstructor(
+  webSocketStream.WebSocketStream,
+  (args) => {
+    if (args.length < 2) {
+      return args;
+    }
+    const options = args[1];
+    if (
+      options === null ||
+      (typeof options !== "object" && typeof options !== "function")
+    ) {
+      // `undefined` and `null` are the empty dictionary; anything else is
+      // the constructor's TypeError.
+      return [args[0], options];
+    }
+    return [args[0], {
+      __proto__: null,
+      protocols: options.protocols,
+      signal: options.signal,
+    }];
+  },
+);
 
 // The errors ops throw by class name. `dom_ops.rs` names the first eight;
 // the rest are the ones the web extensions use.
@@ -272,10 +408,16 @@ ObjectDefineProperties(globalThis, {
     FileReader: fileReader.FileReader,
     FormData: formData.FormData,
     Headers: headers.Headers,
+    ImageBitmap: image.ImageBitmap,
+    ImageBitmapRenderingContext: canvas.ImageBitmapRenderingContext,
     ImageData: imageData.ImageData,
+    MediaStream: webrtc.MediaStream,
+    MediaStreamTrack: webrtc.MediaStreamTrack,
+    MediaStreamTrackEvent: webrtc.MediaStreamTrackEvent,
     MessageChannel: messagePort.MessageChannel,
     MessageEvent: event.MessageEvent,
     MessagePort: messagePort.MessagePort,
+    OffscreenCanvas: canvas.OffscreenCanvas,
     Performance: performance.Performance,
     PerformanceEntry: performance.PerformanceEntry,
     PerformanceMark: performance.PerformanceMark,
@@ -293,6 +435,28 @@ ObjectDefineProperties(globalThis, {
     ReadableStreamDefaultReader: streams.ReadableStreamDefaultReader,
     Request: request.Request,
     Response: response.Response,
+    RTCCertificate: webrtc.RTCCertificate,
+    RTCDataChannel: webrtc.RTCDataChannel,
+    RTCDataChannelEvent: webrtc.RTCDataChannelEvent,
+    RTCDtlsTransport: webrtc.RTCDtlsTransport,
+    RTCDTMFSender: webrtc.RTCDTMFSender,
+    RTCDTMFToneChangeEvent: webrtc.RTCDTMFToneChangeEvent,
+    RTCEncodedAudioFrame: encodedTransform.RTCEncodedAudioFrame,
+    RTCEncodedVideoFrame: encodedTransform.RTCEncodedVideoFrame,
+    RTCError: webrtc.RTCError,
+    RTCErrorEvent: webrtc.RTCErrorEvent,
+    RTCIceCandidate: webrtc.RTCIceCandidate,
+    RTCIceTransport: webrtc.RTCIceTransport,
+    RTCPeerConnection: webrtc.RTCPeerConnection,
+    RTCPeerConnectionIceErrorEvent: webrtc.RTCPeerConnectionIceErrorEvent,
+    RTCPeerConnectionIceEvent: webrtc.RTCPeerConnectionIceEvent,
+    RTCRtpReceiver: webrtc.RTCRtpReceiver,
+    RTCRtpSender: webrtc.RTCRtpSender,
+    RTCRtpTransceiver: webrtc.RTCRtpTransceiver,
+    RTCSctpTransport: webrtc.RTCSctpTransport,
+    RTCSessionDescription: webrtc.RTCSessionDescription,
+    RTCStatsReport: webrtc.RTCStatsReport,
+    RTCTrackEvent: webrtc.RTCTrackEvent,
     Storage: webStorage.Storage,
     SubtleCrypto: crypto.SubtleCrypto,
     TextDecoder: encoding.TextDecoder,
@@ -304,6 +468,9 @@ ObjectDefineProperties(globalThis, {
     URL: url.URL,
     URLPattern: urlPattern.URLPattern,
     URLSearchParams: url.URLSearchParams,
+    WebSocket,
+    WebSocketError: webSocketStream.WebSocketError,
+    WebSocketStream,
     Window: globalInterfaces.Window,
     WritableStream: streams.WritableStream,
     WritableStreamDefaultController: streams.WritableStreamDefaultController,
@@ -352,6 +519,7 @@ ObjectDefineProperties(globalThis, {
   btoa: core.propWritable(base64.btoa),
   clearInterval: core.propWritable(timers.clearInterval),
   clearTimeout: core.propWritable(timers.clearTimeout),
+  createImageBitmap: core.propWritable(image.createImageBitmap),
   crypto: core.propGetterOnly(() => crypto.crypto),
   fetch: core.propWritable(fetch.fetch),
   performance: core.propWritable(performance.performance),

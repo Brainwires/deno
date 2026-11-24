@@ -3,17 +3,20 @@
 //! `PageRuntime`: one page context.
 
 use std::cell::RefCell;
+use std::future::Future;
 use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::task::Poll;
 use std::time::Duration;
 
 use deno_core::JsRuntime;
 use deno_core::PollEventLoopOptions;
 use deno_core::RuntimeOptions;
+use deno_core::error::CoreError;
 use deno_core::error::CoreErrorKind;
 use deno_core::error::JsError;
 use deno_core::v8;
@@ -43,8 +46,8 @@ pub const DEFAULT_DENY_ADDRESSES: &[&str] =
 /// applies to the addresses they resolve to).
 pub const NET_ALLOW_ANY: &str = "*";
 
-/// The longest script `execute_script` and `evaluate_json` take, in bytes
-/// (V8 cannot hold a longer string).
+/// The longest script `execute_script`, `evaluate_json` and
+/// `evaluate_json_async` take, in bytes (V8 cannot hold a longer string).
 const MAX_SOURCE_BYTES: usize = 256 * 1024 * 1024;
 
 /// How many uncaught errors are kept until the host takes them.
@@ -68,8 +71,16 @@ pub struct PageOptions {
   /// The addresses the page's connections refuse, as `denyAddresses`
   /// entries (classes or CIDR blocks), checked after DNS resolution and on
   /// every redirect. `None` is [`DEFAULT_DENY_ADDRESSES`]; an empty list
-  /// lifts the check (test builds with loopback servers).
+  /// lifts the check (test builds with loopback servers). The list holds
+  /// for `fetch()`, `WebSocket` and WebRTC alike.
   pub deny_addresses: Option<Vec<String>>,
+  /// Every `RTCPeerConnection` gathers as with `iceTransportPolicy:
+  /// "relay"`, whatever the page configures: no host or server-reflexive
+  /// candidate is signalled, so the machine's addresses (the private ones
+  /// included) never reach the page or its peer. A connection then needs a
+  /// TURN server. `true` by default; `false` gives a page the candidates a
+  /// browser gives it, when the permissions let it gather any.
+  pub webrtc_force_relay: bool,
   /// The profile's storage directory. `localStorage` lives in a
   /// subdirectory named after the page's origin; `None`, or an opaque
   /// origin, leaves `localStorage` unavailable.
@@ -83,8 +94,8 @@ pub struct PageOptions {
 }
 
 impl PageOptions {
-  /// Options for `html` at `url`: no network, the default deny list, no
-  /// storage, no heap limit.
+  /// Options for `html` at `url`: no network, the default deny list, WebRTC
+  /// through relays only, no storage, no heap limit.
   pub fn new(url: Url, html: impl Into<String>) -> Self {
     Self {
       url,
@@ -92,6 +103,7 @@ impl PageOptions {
       user_agent: String::new(),
       net_allow: Vec::new(),
       deny_addresses: None,
+      webrtc_force_relay: true,
       storage_dir: None,
       heap_limit_bytes: None,
       seed: None,
@@ -163,6 +175,14 @@ pub enum PageError {
   /// The event loop failed for a reason other than a JavaScript error.
   #[error("The page's event loop failed: {0}")]
   Runtime(String),
+  /// The promise `evaluate_json_async` awaited had not settled when its
+  /// budget ran out. The page keeps running: the promise may settle later.
+  #[error("The promise did not settle within the budget")]
+  Timeout,
+  /// The promise `evaluate_json_async` awaited is pending and nothing is
+  /// left to run (no op, timer or task) that could settle it.
+  #[error("The promise is pending and nothing is left to run")]
+  Stalled,
 }
 
 /// How `run_until_idle` ended.
@@ -350,7 +370,7 @@ impl PageRuntime {
         root_cert_store: Some(deno_tls::create_default_root_cert_store()),
         permissions: Some(permissions.clone()),
         resolved_deny_check_kind: deno_fetch::dns::ResolvedDenyCheckKind::Net,
-        deny_addresses,
+        deny_addresses: deny_addresses.clone(),
         ..Default::default()
       },
     )
@@ -360,6 +380,7 @@ impl PageRuntime {
     let host = PageHost::new(BootstrapInfo {
       url: options.url.to_string(),
       user_agent: options.user_agent.clone(),
+      disabled_ops: crate::op_policy::DISABLED_OPS,
     });
     let storage_dir = options
       .storage_dir
@@ -385,11 +406,21 @@ impl PageRuntime {
         }),
         deno_webstorage::deno_webstorage::init(storage_dir),
         deno_crypto::deno_crypto::init(options.seed),
+        deno_websocket::deno_websocket::init(),
+        deno_webrtc::deno_webrtc::init(),
+        deno_image::deno_image::init(),
+        // `OffscreenCanvas` without the GPU extension: `deno_canvas` itself
+        // requires `deno_webgpu`.
+        deno_canvas::deno_canvas_offscreen::init(),
         crate::deno_web_page::init(
           PageDom(dom.clone()),
           host,
           permissions,
           client,
+          deny_addresses,
+          deno_webrtc::EmbedderIceOptions {
+            force_relay: options.webrtc_force_relay,
+          },
         ),
       ],
       create_params,
@@ -443,21 +474,51 @@ impl PageRuntime {
   /// Evaluates a script and returns its completion value as JSON:
   /// `undefined` becomes `null`, and a value JSON cannot express (a
   /// function, a symbol, a cyclic object, a BigInt) becomes its string form.
-  /// A promise is not awaited.
+  /// A promise is not awaited: that is
+  /// [`PageRuntime::evaluate_json_async`].
   pub fn evaluate_json(
     &mut self,
     source: String,
   ) -> Result<serde_json::Value, PageError> {
     let value = self.run_script("<evaluate>", source)?;
-    let text = match self.call_hook(
-      Hook::Serialize,
-      &[HookArg::Value(&value)],
-      Want::Text,
-    )? {
-      HookValue::Text(Some(text)) => text,
-      _ => return Ok(serde_json::Value::Null),
-    };
-    Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text)))
+    self.json_of(&value)
+  }
+
+  /// Evaluates a script that may wait, and returns what it evaluates to as
+  /// [`PageRuntime::evaluate_json`] does: a promise the script completes
+  /// with is awaited, pumping the event loop, and `await` can be written at
+  /// the top level (`await fetch("/api").then((r) => r.json())`).
+  ///
+  /// A script without the word `await` runs as a classic script, as
+  /// `evaluate_json` runs it. One with it runs as the body of an async
+  /// function: as `return (script)` when it is one expression (a trailing
+  /// `;` is dropped), otherwise as the function's statements, where the
+  /// value is what a `return` statement gives (and `undefined` without
+  /// one) and `var` and function declarations are local. A script that has
+  /// the word but is a valid classic script and not one expression (`await`
+  /// in a string, or `await (x)` at the start of a statement, which a
+  /// classic script reads as a call) runs as the classic script.
+  ///
+  /// Fails with [`PageError::Js`] when the script throws or the promise
+  /// rejects, [`PageError::Timeout`] when the promise has not settled after
+  /// `budget`, and [`PageError::Stalled`] when it is pending with nothing
+  /// left to run. An uncaught error in another task does not end the wait:
+  /// it is kept for [`PageRuntime::take_uncaught_errors`]. As in
+  /// [`PageRuntime::run_until_idle`], the budget is checked between tasks.
+  pub async fn evaluate_json_async(
+    &mut self,
+    source: String,
+    budget: Duration,
+  ) -> Result<serde_json::Value, PageError> {
+    self.ensure_alive()?;
+    if source.len() > MAX_SOURCE_BYTES {
+      return Err(PageError::SourceTooLarge);
+    }
+    let deadline = tokio::time::Instant::now() + budget;
+    let script = self.awaiting_script(source);
+    let value = self.run_script("<evaluate>", script)?;
+    let value = self.settle(value, deadline).await?;
+    self.json_of(&value)
   }
 
   /// Pumps the event loop until nothing is pending (ops, timers, tasks) or
@@ -483,13 +544,7 @@ impl PageRuntime {
       match result {
         Err(_elapsed) => return Ok(Idle::BudgetExhausted),
         Ok(Ok(())) => return Ok(Idle::Quiescent),
-        Ok(Err(err)) => match err.into_kind() {
-          CoreErrorKind::Js(js_error) => match self.classify(*js_error) {
-            PageError::Js(info) => self.record_uncaught(info),
-            fatal => return Err(fatal),
-          },
-          other => return Err(PageError::Runtime(other.to_string())),
-        },
+        Ok(Err(err)) => self.absorb_loop_error(err)?,
       }
     }
   }
@@ -665,6 +720,123 @@ impl PageRuntime {
       Ok(())
     } else {
       Err(PageError::InvalidNode)
+    }
+  }
+
+  /// An error the event loop stopped with: an uncaught JavaScript error is
+  /// recorded and the loop can be pumped again; anything else is fatal.
+  fn absorb_loop_error(&mut self, error: CoreError) -> Result<(), PageError> {
+    match error.into_kind() {
+      CoreErrorKind::Js(js_error) => match self.classify(*js_error) {
+        PageError::Js(info) => {
+          self.record_uncaught(info);
+          Ok(())
+        }
+        fatal => Err(fatal),
+      },
+      other => Err(PageError::Runtime(other.to_string())),
+    }
+  }
+
+  /// The JSON form of a JavaScript value (the `serialize` hook).
+  fn json_of(
+    &mut self,
+    value: &v8::Global<v8::Value>,
+  ) -> Result<serde_json::Value, PageError> {
+    let text = match self.call_hook(
+      Hook::Serialize,
+      &[HookArg::Value(value)],
+      Want::Text,
+    )? {
+      HookValue::Text(Some(text)) => text,
+      _ => return Ok(serde_json::Value::Null),
+    };
+    Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text)))
+  }
+
+  /// Whether `source` is a syntactically valid classic script. Nothing
+  /// runs.
+  fn compiles(&mut self, source: &str) -> bool {
+    deno_core::scope!(scope, self.runtime);
+    v8::tc_scope!(let scope, scope);
+    let Some(code) = v8::String::new(scope, source) else {
+      return false;
+    };
+    v8::Script::compile(scope, code, None).is_some()
+  }
+
+  /// The script `evaluate_json_async` runs for `source`: `source` itself,
+  /// or `source` as the body of an async function when it uses `await` (see
+  /// there for the rule). Only compiles, to choose.
+  fn awaiting_script(&mut self, source: String) -> String {
+    if !source.contains("await") {
+      return source;
+    }
+    // The line breaks keep a `//` comment at the end of the script from
+    // swallowing what follows it.
+    let expression = format!(
+      "(async () => {{ return (\n{}\n); }})()",
+      source.trim_end_matches(|c: char| c == ';' || c.is_whitespace())
+    );
+    if self.compiles(&expression) {
+      return expression;
+    }
+    if self.compiles(&source) {
+      return source;
+    }
+    let statements = format!("(async () => {{\n{source}\n}})()");
+    if self.compiles(&statements) {
+      return statements;
+    }
+    // Not a script in any form: its own syntax error is the one to report.
+    source
+  }
+
+  /// Waits for `value` to settle when it is a promise, pumping the event
+  /// loop until `deadline`; any other value is returned as it is.
+  async fn settle(
+    &mut self,
+    value: v8::Global<v8::Value>,
+    deadline: tokio::time::Instant,
+  ) -> Result<v8::Global<v8::Value>, PageError> {
+    enum Step {
+      Settled(Result<v8::Global<v8::Value>, Box<JsError>>),
+      Idle,
+      LoopError(CoreError),
+    }
+
+    let mut settled = Box::pin(self.runtime.resolve(value));
+    // The reactions `resolve` added run as microtasks: a promise that had
+    // already settled is seen here, without a turn of the event loop.
+    self.checkpoint()?;
+    loop {
+      let step = tokio::time::timeout_at(
+        deadline,
+        std::future::poll_fn(|cx| {
+          if let Poll::Ready(result) = settled.as_mut().poll(cx) {
+            return Poll::Ready(Step::Settled(result));
+          }
+          match self
+            .runtime
+            .poll_event_loop(cx, PollEventLoopOptions::default())
+          {
+            Poll::Ready(Ok(())) => match settled.as_mut().poll(cx) {
+              Poll::Ready(result) => Poll::Ready(Step::Settled(result)),
+              Poll::Pending => Poll::Ready(Step::Idle),
+            },
+            Poll::Ready(Err(error)) => Poll::Ready(Step::LoopError(error)),
+            Poll::Pending => Poll::Pending,
+          }
+        }),
+      )
+      .await;
+      match step {
+        Err(_elapsed) => return Err(PageError::Timeout),
+        Ok(Step::Settled(Ok(value))) => return Ok(value),
+        Ok(Step::Settled(Err(error))) => return Err(self.classify(*error)),
+        Ok(Step::Idle) => return Err(PageError::Stalled),
+        Ok(Step::LoopError(error)) => self.absorb_loop_error(error)?,
+      }
     }
   }
 

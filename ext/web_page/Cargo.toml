@@ -21,14 +21,18 @@ default = ["v8"]
 v8 = ["deno_core/v8"]
 
 [dependencies]
+deno_canvas.workspace = true
 deno_core.workspace = true
 deno_crypto.workspace = true
 deno_error.workspace = true
 deno_fetch.workspace = true
+deno_image.workspace = true
 deno_permissions.workspace = true
 deno_tls.workspace = true
 deno_web.workspace = true
 deno_webidl.workspace = true
+deno_webrtc.workspace = true
+deno_websocket.workspace = true
 deno_webstorage.workspace = true
 # Not used here: deno_crypto derives `std::error::Error` wrappers around
 # `der::Error` and `spki::Error` without asking for their `std` features, which

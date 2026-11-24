@@ -147,6 +147,8 @@ impl NavigationWire {
 pub(crate) struct BootstrapInfo {
   pub url: String,
   pub user_agent: String,
+  /// The ops the bootstrap checks are disabled (`op_policy.rs`).
+  pub disabled_ops: &'static [&'static str],
 }
 
 /// The functions `99_page_main.js` hands to the host. They are closures over
@@ -232,22 +234,45 @@ pub fn op_web_page_console(
   #[string] message: &str,
   level: u32,
 ) {
-  let host = state.borrow_mut::<PageHost>();
-  let mut end = message.len().min(MAX_CONSOLE_MESSAGE_BYTES);
-  while !message.is_char_boundary(end) {
-    end -= 1;
-  }
-  let text = message[..end].trim_end_matches('\n').to_string();
   let level = match level {
     0 => ConsoleLevel::Debug,
     1 => ConsoleLevel::Info,
     2 => ConsoleLevel::Warn,
     _ => ConsoleLevel::Error,
   };
+  push_console(state.borrow_mut::<PageHost>(), message, level);
+}
+
+fn push_console(host: &mut PageHost, message: &str, level: ConsoleLevel) {
+  let mut end = message.len().min(MAX_CONSOLE_MESSAGE_BYTES);
+  while !message.is_char_boundary(end) {
+    end -= 1;
+  }
+  let text = message[..end].trim_end_matches('\n').to_string();
   if host.console.len() >= MAX_CONSOLE_MESSAGES {
     host.console.pop_front();
   }
   host.console.push_back(ConsoleMessage { level, text });
+}
+
+/// What `op_print` is in a page runtime (`op_policy.rs`): deno_core's own
+/// writes to the process's stdout or stderr, this one to the page's console.
+/// It is not registered under its own name.
+#[op2(fast)]
+pub fn op_web_page_print(
+  state: &mut OpState,
+  #[string] message: &str,
+  is_err: bool,
+) {
+  push_console(
+    state.borrow_mut::<PageHost>(),
+    message,
+    if is_err {
+      ConsoleLevel::Error
+    } else {
+      ConsoleLevel::Info
+    },
+  );
 }
 
 #[op2]

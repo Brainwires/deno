@@ -5,12 +5,15 @@
 //! extension into the page runtime (and with it file system, process,
 //! listening socket, FFI, ... ops) cannot happen unnoticed.
 //!
-//! The list is every `op_*` of deno_core's built-in table and of the five
-//! web extensions a page runtime is made of, then this crate's own. The
-//! built-in table has ops a page must never call (`op_print`, `op_panic`,
-//! `op_eval_context`, the resource ops): they are registered in every
-//! `JsRuntime`, and unreachable here like all the others, since page
-//! JavaScript has no reference to any op.
+//! The list is every `op_*` of deno_core's built-in table and of the web
+//! extensions a page runtime is made of, then this crate's own. Page
+//! JavaScript has no reference to any of them. Some are registered and must
+//! still not work in a page (`op_panic`, the `Deno.webrtc` server ops, ...):
+//! those are `op_policy::DISABLED_OPS`, whose implementation the extension's
+//! op middleware replaces with one that throws. They keep their names in
+//! the op table, so they are listed here too; the test checks that every
+//! disabled op is one of these, and the bootstrap of every page checks that
+//! each one throws.
 //!
 //! Members of cppgc objects (`Crypto`, `SubtleCrypto`, `DOMRect`, ...) are
 //! in `op_names()` too, under their method names. They are bound to their
@@ -230,6 +233,100 @@ pub(crate) const WEBSTORAGE_OPS: &[&str] = &["op_webstorage_iterate_keys"];
 pub(crate) const CRYPTO_OPS: &[&str] =
   &["op_crypto_random_uuid_batch", "op_crypto_is_seeded"];
 
+/// `deno_websocket`'s ops (`ext/websocket/lib.rs`).
+pub(crate) const WEBSOCKET_OPS: &[&str] = &[
+  "op_ws_check_permission_and_cancel_handle",
+  "op_ws_create",
+  "op_ws_close",
+  "op_ws_next_event",
+  "op_ws_get_buffer",
+  "op_ws_get_buffer_as_string",
+  "op_ws_get_error",
+  "op_ws_send_binary",
+  "op_ws_send_binary_ab",
+  "op_ws_send_text",
+  "op_ws_send_binary_async",
+  "op_ws_send_text_async",
+  "op_ws_send_ping",
+  "op_ws_get_buffered_amount",
+];
+
+/// `deno_webrtc`'s ops (`ext/webrtc/lib.rs`). The ones behind `Deno.webrtc`
+/// and the fake capture devices are disabled (`op_policy.rs`).
+pub(crate) const WEBRTC_OPS: &[&str] = &[
+  "op_webrtc_pc_create",
+  "op_webrtc_pc_create_offer",
+  "op_webrtc_pc_create_answer",
+  "op_webrtc_pc_set_local_description",
+  "op_webrtc_pc_set_remote_description",
+  "op_webrtc_pc_add_ice_candidate",
+  "op_webrtc_pc_descriptions",
+  "op_webrtc_pc_create_data_channel",
+  "op_webrtc_pc_next_events",
+  "op_webrtc_pc_get_stats",
+  "op_webrtc_pc_close",
+  "op_webrtc_pc_max_message_size",
+  "op_webrtc_dc_send",
+  "op_webrtc_dc_id",
+  "op_webrtc_dc_set_low_threshold",
+  "op_webrtc_dc_close",
+  "op_webrtc_generate_certificate",
+  "op_webrtc_certificate_to_pem",
+  "op_webrtc_certificate_from_pem",
+  "op_webrtc_certificate_drop",
+  "op_webrtc_capabilities",
+  "op_webrtc_pc_add_transceiver",
+  "op_webrtc_pc_attach_track",
+  "op_webrtc_pc_transceivers",
+  "op_webrtc_transceiver_set_direction",
+  "op_webrtc_transceiver_stop",
+  "op_webrtc_transceiver_set_codec_preferences",
+  "op_webrtc_sender_set_paused",
+  "op_webrtc_sender_set_streams",
+  "op_webrtc_sender_parameters",
+  "op_webrtc_receiver_parameters",
+  "op_webrtc_receiver_sources",
+  "op_webrtc_sender_write_rtp",
+  "op_webrtc_sender_write_frame",
+  "op_webrtc_sender_write_fake",
+  "op_webrtc_sender_fake_frame",
+  "op_webrtc_sender_reserve_frame",
+  "op_webrtc_sender_write_frame_at",
+  "op_webrtc_receiver_transform",
+  "op_webrtc_fake_media_devices",
+  "op_webrtc_receiver_read_rtp",
+  "op_webrtc_receiver_request_key_frame",
+  "op_webrtc_sender_send_dtmf",
+  "op_webrtc_pc_selected_pair",
+  "op_webrtc_pc_set_ice_servers",
+  "op_webrtc_network_create",
+  "op_webrtc_network_addresses",
+  "op_webrtc_network_tcp_addresses",
+  "op_webrtc_network_close",
+  "op_webrtc_set_log_level",
+  "op_webrtc_data_globals",
+  "op_webrtc_pc_ice_selected_pair",
+  "op_webrtc_ice_create",
+  "op_webrtc_ice_local_parameters",
+  "op_webrtc_ice_gather",
+  "op_webrtc_ice_start",
+  "op_webrtc_ice_add_remote_candidate",
+  "op_webrtc_ice_selected_pair",
+  "op_webrtc_ice_stop",
+  "op_webrtc_ice_next_events",
+  "op_webrtc_transceiver_set_header_extensions",
+  "op_webrtc_pc_set_negotiation_options",
+  "op_webrtc_receiver_read_frames",
+  "op_webrtc_receiver_muted",
+];
+
+/// `deno_image`'s op (`ext/image/lib.rs`); `ImageBitmap` is a cppgc object.
+pub(crate) const IMAGE_OPS: &[&str] = &["op_create_image_bitmap"];
+
+/// `deno_canvas_offscreen`'s op (`ext/canvas/lib.rs`); `OffscreenCanvas` and
+/// `ImageBitmapRenderingContext` are cppgc objects.
+pub(crate) const CANVAS_OPS: &[&str] = &["op_init_canvas"];
+
 /// This crate's ops (`lib.rs`).
 pub(crate) const PAGE_OPS: &[&str] = &[
   "op_web_page_document_node",
@@ -279,5 +376,9 @@ pub(crate) const ALLOWED_OPS: &[&[&str]] = &[
   FETCH_OPS,
   WEBSTORAGE_OPS,
   CRYPTO_OPS,
+  WEBSOCKET_OPS,
+  WEBRTC_OPS,
+  IMAGE_OPS,
+  CANVAS_OPS,
   PAGE_OPS,
 ];

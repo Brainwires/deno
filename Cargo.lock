@@ -4223,14 +4223,18 @@ dependencies = [
 name = "deno_web_page"
 version = "0.1.0"
 dependencies = [
+ "deno_canvas",
  "deno_core",
  "deno_crypto",
  "deno_error",
  "deno_fetch",
+ "deno_image",
  "deno_permissions",
  "deno_tls",
  "deno_web",
  "deno_webidl",
+ "deno_webrtc",
+ "deno_websocket",
  "deno_webstorage",
  "der 0.7.9",
  "serde",
