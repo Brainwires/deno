@@ -21426,9 +21426,9 @@ where the changes are discussed.
      - a folder above a write deny is not created (`file-write-create`). One
        that exists is unaffected (making it again fails with "exists" before the
        rule is asked). One that doesn't exist when the profile applies can't be
-       made while it holds: Seatbelt can't tell `mkdir` from a folder moved into
-       place, and a moved folder brings its own content to the denied name. Make
-       the folder before the run. A folder above a read deny can be made.
+       made while it holds (Seatbelt has one operation for `mkdir` and for a
+       folder moved into place, and the rule is about the name): make the folder
+       before the run. A folder above a read deny can be made.
      - A rule for one operation outranks a `file-write*` one whatever the order,
        so the rules hold inside a write scope. What lies beside a denied path,
        and beside the folders above it, isn't matched. With no deny the profiles

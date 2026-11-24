@@ -307,9 +307,9 @@ fn filters_except(filters: &[SbFilter], except: &[SbFilter]) -> String {
 /// - a folder above a write deny is not created either
 ///   (`file-write-create`): one that exists is untouched by that (making
 ///   it again fails with "exists" before the rule is asked), and one that
-///   doesn't exist when the profile applies can't be made while it holds,
-///   since a folder moved into its place would bring its own content to
-///   the denied name. A folder above a read deny can be made.
+///   doesn't exist when the profile applies can't be made while it holds
+///   (Seatbelt has one operation for making a folder and for moving one
+///   into place). A folder above a read deny can be made.
 ///
 /// A rule for one operation outranks a `file-write*` one whatever the
 /// order, so these hold inside a write scope and after a re-allow. What
