@@ -53,6 +53,7 @@ use windows_sys::Win32::Security::TOKEN_MANDATORY_LABEL;
 use windows_sys::Win32::Security::TOKEN_QUERY;
 use windows_sys::Win32::Security::TokenIntegrityLevel;
 use windows_sys::Win32::Security::WinLowLabelSid;
+use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
 use windows_sys::Win32::System::JobObjects::CreateJobObjectW;
 use windows_sys::Win32::System::JobObjects::IsProcessInJob;
@@ -64,6 +65,13 @@ use windows_sys::Win32::System::JobObjects::QueryInformationJobObject;
 use windows_sys::Win32::System::JobObjects::SetInformationJobObject;
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::Win32::System::Threading::OpenProcessToken;
+use windows_sys::Win32::UI::Shell::FOLDERID_Profile;
+use windows_sys::Win32::UI::Shell::FOLDERID_ProgramData;
+use windows_sys::Win32::UI::Shell::FOLDERID_ProgramFiles;
+use windows_sys::Win32::UI::Shell::FOLDERID_ProgramFilesX86;
+use windows_sys::Win32::UI::Shell::FOLDERID_Windows;
+use windows_sys::Win32::UI::Shell::SHGetKnownFolderPath;
+use windows_sys::core::GUID;
 
 use crate::plan::WindowsPlan;
 
@@ -427,6 +435,13 @@ pub fn label_low(path: &Path) -> Result<(), String> {
 /// refused (a write grant that wide can't be held by this tier; the caller
 /// refuses to start, naming it).
 pub fn refuses_label(path: &Path) -> Option<&'static str> {
+  refuses_label_among(path, &WideFolders::of_this_process())
+}
+
+fn refuses_label_among(
+  path: &Path,
+  folders: &WideFolders,
+) -> Option<&'static str> {
   // lower case, backslashes, and without the verbatim prefix a
   // canonicalized path carries (`\\?\C:\x`, `\\?\UNC\server\share`)
   let norm = |p: &Path| {
@@ -444,37 +459,111 @@ pub fn refuses_label(path: &Path) -> Option<&'static str> {
   if is_root {
     return Some("a drive root");
   }
-  let holds = |var: &str| {
-    std::env::var_os(var)
-      .filter(|v| !v.is_empty())
-      .map(|v| norm(Path::new(&v)))
-      .is_some_and(|dir| {
-        let dir = dir.trim_end_matches('\\');
-        // the folder itself, or one that holds it
-        dir == target || dir.starts_with(&format!("{target}\\"))
-      })
+  let at_or_above = |dirs: &[String]| {
+    // the folder itself, or one that holds it
+    dirs
+      .iter()
+      .any(|dir| dir == target || dir.starts_with(&format!("{target}\\")))
   };
-  let inside = |var: &str| {
-    std::env::var_os(var)
-      .filter(|v| !v.is_empty())
-      .map(|v| norm(Path::new(&v)))
-      .is_some_and(|dir| {
-        let dir = dir.trim_end_matches('\\');
-        target == dir || target.starts_with(&format!("{dir}\\"))
-      })
+  let inside = |dirs: &[String]| {
+    dirs
+      .iter()
+      .any(|dir| target == dir || target.starts_with(&format!("{dir}\\")))
   };
-  if holds("USERPROFILE") {
+  let normed = |dirs: &[PathBuf]| -> Vec<String> {
+    dirs
+      .iter()
+      .map(|dir| norm(dir).trim_end_matches('\\').to_string())
+      .filter(|dir| !dir.is_empty())
+      .collect()
+  };
+  let (profile, windows, programs) = (
+    normed(&folders.profile),
+    normed(&folders.windows),
+    normed(&folders.programs),
+  );
+  if at_or_above(&profile) {
     return Some("the user's profile folder (or a folder that holds it)");
   }
-  if holds("SystemRoot") || inside("SystemRoot") {
+  if at_or_above(&windows) || inside(&windows) {
     return Some("the Windows folder");
   }
-  for var in ["ProgramFiles", "ProgramFiles(x86)", "ProgramData"] {
-    if holds(var) || inside(var) {
-      return Some("a system-wide program folder");
-    }
+  if at_or_above(&programs) || inside(&programs) {
+    return Some("a system-wide program folder");
   }
   None
+}
+
+/// The folders [`refuses_label`] holds a path against.
+#[derive(Debug, Default)]
+struct WideFolders {
+  /// The user's profile folder.
+  profile: Vec<PathBuf>,
+  /// The Windows folder.
+  windows: Vec<PathBuf>,
+  /// Program Files (both) and ProgramData.
+  programs: Vec<PathBuf>,
+}
+
+impl WideFolders {
+  /// Where the folders are, as the system says (the known folders of the
+  /// process's user, which no variable moves) and as the environment names
+  /// them (`USERPROFILE`, `SystemRoot`, `ProgramFiles`, ...; whoever starts
+  /// the program sets those): a path either one places in such a folder is
+  /// refused.
+  fn of_this_process() -> Self {
+    let env = |name: &str| {
+      std::env::var_os(name)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+    };
+    let all = |known: &[&GUID], names: &[&str]| -> Vec<PathBuf> {
+      known
+        .iter()
+        .filter_map(|id| known_folder(id))
+        .chain(names.iter().filter_map(|name| env(name)))
+        .collect()
+    };
+    Self {
+      profile: all(&[&FOLDERID_Profile], &["USERPROFILE"]),
+      windows: all(&[&FOLDERID_Windows], &["SystemRoot"]),
+      programs: all(
+        &[
+          &FOLDERID_ProgramFiles,
+          &FOLDERID_ProgramFilesX86,
+          &FOLDERID_ProgramData,
+        ],
+        &["ProgramFiles", "ProgramFiles(x86)", "ProgramData"],
+      ),
+    }
+  }
+}
+
+/// The path of a known folder (`SHGetKnownFolderPath`), or `None` when the
+/// system has none for it.
+fn known_folder(id: &GUID) -> Option<PathBuf> {
+  use std::os::windows::ffi::OsStringExt;
+  let mut wide: *mut u16 = std::ptr::null_mut();
+  // SAFETY: a valid folder id and out pointer; no flags, the process's own
+  // token
+  let hr =
+    unsafe { SHGetKnownFolderPath(id, 0, std::ptr::null_mut(), &mut wide) };
+  let path = if hr >= 0 && !wide.is_null() {
+    let mut len = 0;
+    // SAFETY: the call returned a NUL-terminated string
+    while unsafe { *wide.add(len) } != 0 {
+      len += 1;
+    }
+    // SAFETY: `len` units before the terminator
+    let units = unsafe { std::slice::from_raw_parts(wide, len) };
+    Some(PathBuf::from(std::ffi::OsString::from_wide(units)))
+  } else {
+    None
+  };
+  // SAFETY: the string is the caller's to free, whatever the result (a null
+  // pointer is allowed)
+  unsafe { CoTaskMemFree(wide.cast()) };
+  path.filter(|p| !p.as_os_str().is_empty())
 }
 
 /// What [`apply`] did.
@@ -710,5 +799,41 @@ mod tests {
     assert!(refuses_label(&verbatim).is_some());
     assert!(refuses_label(&profile.join("Documents")).is_none());
     assert!(refuses_label(&std::env::temp_dir().join("x")).is_none());
+  }
+
+  // denext: the wide folders are the ones the system knows, wherever the
+  // environment says they are.
+  #[test]
+  fn wide_folders_are_the_systems_own() {
+    // the system has a path for each
+    for id in [&FOLDERID_Profile, &FOLDERID_Windows, &FOLDERID_ProgramFiles] {
+      let folder = known_folder(id).expect("a known folder");
+      assert!(folder.is_absolute(), "{}", folder.display());
+      assert!(refuses_label(&folder).is_some(), "{}", folder.display());
+    }
+    // and they are refused whatever else names other places
+    let folders = WideFolders {
+      profile: vec![r"D:\People\me".into(), r"E:\elsewhere".into()],
+      windows: vec![r"D:\OS".into()],
+      programs: vec![r"D:\Apps".into()],
+    };
+    for (path, refused) in [
+      (r"D:\People\me", true),
+      (r"d:\people", true),
+      (r"\\?\D:\People\me\", true),
+      (r"E:\elsewhere", true),
+      (r"D:\People\me\Documents", false),
+      (r"D:\OS", true),
+      (r"D:\OS\System32", true),
+      (r"D:\Apps\Tool", true),
+      (r"D:\Data", false),
+      (r"D:\", true),
+    ] {
+      assert_eq!(
+        refuses_label_among(Path::new(path), &folders).is_some(),
+        refused,
+        "{path}"
+      );
+    }
   }
 }
