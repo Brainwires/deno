@@ -1268,6 +1268,17 @@ fn applied_plan() -> Option<&'static EnforcePlan> {
   }
 }
 
+/// Whether this process is the image a deny ceiling re-executed (D1 / D2):
+/// the plan it started confined by refuses only the run's denies. Read from
+/// that plan, which the image before this one decided, handed over and this
+/// one applied (or found applied) before anything else ran; never worked
+/// out again from the flags, the environment or the terminals. Only macOS
+/// holds a ceiling today (Linux applies none, so no image there starts
+/// under one).
+pub fn started_under_a_deny_ceiling() -> bool {
+  applied_plan().is_some_and(|plan| plan.is_deny_ceiling())
+}
+
 pub use deno_sandbox::plan::PlanEntry;
 
 /// The image after the re-exec of a `deno test` / `deno bench`: the modules

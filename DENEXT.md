@@ -20574,6 +20574,27 @@ where the changes are discussed.
        profile, so the image after the re-exec resolves a denied path to the
        same filter (and measures the probe) as the image before it. A child the
        prompt allowed, `sudo` included, runs.
+     - The image a ceiling re-executes keeps its prompt. That image inherits the
+       layer the one before it handed down for its children, which is its own,
+       and `kernel_inherit::clamp` turns prompting off for any process with a
+       layer. With the prompt off it decided `enforce` for the whole grant at
+       R4, compiled another plan than the one it started under, and refused to
+       start ("the sandbox this process started under isn't the one this run
+       compiles"): every interactive D1 run on macOS, found the first time the
+       pseudo-terminal test ran on macOS. The CLI now clamps with
+       `kernel_inherit::clamp_under`: when the plan the process started under is
+       a deny ceiling's (`EnforcePlan::is_deny_ceiling`, read by
+       `enforce::started_under_a_deny_ceiling` from the plan the image before it
+       decided and handed over, never worked out again from the flags, the
+       environment or the terminals) and the one inherited layer refuses nothing
+       but its denies (`GrantLayer::refuses_only_its_denies`), prompting stays
+       as the run set it. Both images then decide the same mode, and the prompt
+       the ceiling promises is asked. A child of that process, a layer that
+       scopes any allow, a second layer and unknown grants keep prompting off,
+       as before. Linux applies no ceiling, so no image there starts under one.
+       The harness's marker (item 553) was not the cause: both profiles keep
+       file metadata readable, inside a read deny too, so both images find the
+       same marker.
      - Linux would need an overmount in a user namespace (Landlock needs
        no-new-privileges, and an expansion freezes folders a prompt may let the
        program write), which isn't built (`OVERMOUNT_BUILT`): each deny is a
@@ -20631,9 +20652,13 @@ where the changes are discussed.
        test_report_files_are_implicit}`,
        `seatbelt::tests::deny_only_profile_refuses_only_the_denies`,
        `prompter::tests::{kernel_sandbox_prompter_refuses_and_names_the_switch,
-       can_prompt_needs_prompting_on}`;
-       specs `kernel_sandbox::deny_only` (`-A` with denies: native code and a
-       child refused only the denied folder on macOS, Deno-only and no seccomp /
+       can_prompt_needs_prompting_on}`,
+       `kernel_inherit::tests::{own_deny_ceiling_keeps_the_grant_and_the_prompt,
+       prompt_is_off_outside_an_own_deny_ceiling,
+       both_images_of_a_deny_ceiling_decide_alike}`,
+       `seatbelt::tests::only_a_deny_only_plan_is_a_deny_ceiling`; specs
+       `kernel_sandbox::deny_only` (`-A` with denies: native code and a child
+       refused only the denied folder on macOS, Deno-only and no seccomp /
        no-new-privileges added on Linux, the report, the break-glass variable)
        and `kernel_sandbox::test_bench` (a native read outside the grant refused
        inside `deno test`, explicit and under `auto` at R4; coverage and JUnit
