@@ -1,0 +1,18 @@
+// A forked child that sends a message and exits at once: the parent gets the
+// message before 'close', every time (Node emits 'close' only once stdio and
+// the IPC channel have ended). Many children, several at a time, so a race
+// between the exit and the channel's last message shows.
+{
+  "tests": {
+    "json_serialization": {
+      "args": "run -A main.mjs json",
+      "output": "main.out",
+      "exitCode": 0
+    },
+    "advanced_serialization": {
+      "args": "run -A main.mjs advanced",
+      "output": "main.out",
+      "exitCode": 0
+    }
+  }
+}
