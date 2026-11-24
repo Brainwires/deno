@@ -21361,134 +21361,118 @@ where the changes are discussed.
      - Node tests enabled: none.
 
 5NN. **`fix(ext/web)`: `structuredClone` rejects nested non-serializable
-     platform objects** (port of theende/ende 6c63caf627, MIT, from
-     denoland/deno#37112; issue denoland/deno#37108;
-     `ext/web/13_message_port.js`, `libs/core/ops_builtin_v8.rs`, the marked
-     interfaces' modules). `structuredClone` and `postMessage` rejected a
-     non-serializable platform object (URL, Headers, Request, ...) only as the
-     top-level value: nested in another object it was cloned as `{}`, and many
-     interfaces (Event, EventTarget, TextEncoder/TextDecoder, FormData,
-     URLPattern, the compression and queuing-strategy classes, PerformanceEntry
-     / Observer, Crypto, SubtleCrypto, MessageChannel) weren't marked at all.
-     The marker is now the registry symbol `Deno.nonSerializable`, which the V8
-     serializer delegate checks, so a marked object anywhere in the value throws
-     a `DataCloneError`. It is checked after the transfer list (Ende's change to
-     the upstream PR): a `MessagePort` is an `EventTarget` and must still be
-     transferred, nested or not.
-     - User-facing note: `structuredClone({ e: new Event("x") })` and the like
-       throw `DataCloneError` instead of returning `{ e: {} }`.
-     - Tests: `structured_clone_test.ts`'s
-       `structuredClone rejects
-       non-serializable platform objects` and
-       the nested `MessagePort` transfer cases (the first fails on
-       3.0.0-denext.25).
-     - Node tests enabled: none known; `node:worker_threads` messages use the
-       same serializer.
+platform objects** (port of theende/ende 6c63caf627, MIT, from
+denoland/deno#37112; issue denoland/deno#37108; `ext/web/13_message_port.js`,
+`libs/core/ops_builtin_v8.rs`, the marked interfaces' modules).
+`structuredClone` and `postMessage` rejected a non-serializable platform object
+(URL, Headers, Request, ...) only as the top-level value: nested in another
+object it was cloned as `{}`, and many interfaces (Event, EventTarget,
+TextEncoder/TextDecoder, FormData, URLPattern, the compression and
+queuing-strategy classes, PerformanceEntry / Observer, Crypto, SubtleCrypto,
+MessageChannel) weren't marked at all. The marker is now the registry symbol
+`Deno.nonSerializable`, which the V8 serializer delegate checks, so a marked
+object anywhere in the value throws a `DataCloneError`. It is checked after the
+transfer list (Ende's change to the upstream PR): a `MessagePort` is an
+`EventTarget` and must still be transferred, nested or not. - User-facing note:
+`structuredClone({ e: new Event("x") })` and the like throw `DataCloneError`
+instead of returning `{ e: {} }`. - Tests: `structured_clone_test.ts`'s
+`structuredClone rejects
+       non-serializable platform objects` and the
+nested `MessagePort` transfer cases (the first fails on 3.0.0-denext.25). - Node
+tests enabled: none known; `node:worker_threads` messages use the same
+serializer.
 
 5NN. **`fix(ext/web)`: `structuredClone` clones the geometry interfaces,
-     `ImageData` and `ImageBitmap`, and transfers `ImageBitmap` and
-     `OffscreenCanvas`** (port of theende/ende 8faeab2af2, MIT, Ende's rework of
-     denoland/deno#37113; issue denoland/deno#37106; `ext/web/16_image_data.js`,
-     `ext/web/17_geometry.js`, `ext/web/13_message_port.js`, `ext/image`,
-     `ext/canvas`, `libs/core/ops_builtin_v8.rs`). These interfaces are
-     `[Serializable]` (and the last two `[Transferable]`), but `structuredClone`
-     and `postMessage` turned them into `{}`, and transferring an `ImageBitmap`
-     or an `OffscreenCanvas` threw. They now round-trip as the same interface
-     with the same values, nested and into a worker; a transfer moves the pixels
-     and detaches the source, and a closed or transferred bitmap can't be cloned
-     or transferred again. An `OffscreenCanvas` with a rendering context can't
-     be transferred (`InvalidStateError`, per HTML). A worker that hasn't loaded
-     the defining module registers the deserializers up front and loads it on
-     demand; a clone keeps an `ImageBitmap`'s color type (16-bit stays 16-bit).
-     - User-facing note: `ImageBitmap` is `Transferable` in the types too.
-     - Tests: `structured_clone_test.ts`'s
-       `structuredClone geometry
+`ImageData` and `ImageBitmap`, and transfers `ImageBitmap` and
+`OffscreenCanvas`** (port of theende/ende 8faeab2af2, MIT, Ende's rework of
+denoland/deno#37113; issue denoland/deno#37106; `ext/web/16_image_data.js`,
+`ext/web/17_geometry.js`, `ext/web/13_message_port.js`, `ext/image`,
+`ext/canvas`, `libs/core/ops_builtin_v8.rs`). These interfaces are
+`[Serializable]` (and the last two `[Transferable]`), but `structuredClone` and
+`postMessage` turned them into `{}`, and transferring an `ImageBitmap` or an
+`OffscreenCanvas` threw. They now round-trip as the same interface with the same
+values, nested and into a worker; a transfer moves the pixels and detaches the
+source, and a closed or transferred bitmap can't be cloned or transferred again.
+An `OffscreenCanvas` with a rendering context can't be transferred
+(`InvalidStateError`, per HTML). A worker that hasn't loaded the defining module
+registers the deserializers up front and loads it on demand; a clone keeps an
+`ImageBitmap`'s color type (16-bit stays 16-bit). - User-facing note:
+`ImageBitmap` is `Transferable` in the types too. - Tests:
+`structured_clone_test.ts`'s `structuredClone geometry
        interfaces`,
-       `structuredClone ImageData and ImageBitmap`,
-       `structuredClone keeps a 16-bit ImageBitmap's depth`, the
-       `OffscreenCanvas` transfer tests and the worker round trips (all fail on
-       3.0.0-denext.25); WPT `css/geometry/structured-serialization.html` and
-       the `OffscreenCanvas` / non-transferable platform object cases of the
-       structured-clone, messagechannel and worker suites (expectations
-       updated). Ende's change to its global-interface sweep test is left out:
-       that test belongs to an Ende commit not carried here.
-     - Node tests enabled: none known.
+`structuredClone ImageData and ImageBitmap`,
+`structuredClone keeps a 16-bit ImageBitmap's depth`, the `OffscreenCanvas`
+transfer tests and the worker round trips (all fail on 3.0.0-denext.25); WPT
+`css/geometry/structured-serialization.html` and the `OffscreenCanvas` /
+non-transferable platform object cases of the structured-clone, messagechannel
+and worker suites (expectations updated). Ende's change to its global-interface
+sweep test is left out: that test belongs to an Ende commit not carried here. -
+Node tests enabled: none known.
 
 5NN. **`fix(ext/web)`: `Symbol.toStringTag` lives on the interface prototypes**
-     (port of theende/ende b34bf4f063, MIT, from denoland/deno#37125; part of
-     issue denoland/deno#37107; `ext/web/02_event.js`,
-     `runtime/js/11_workers.js`, `ext/web/01_broadcast_channel.js`,
-     `ext/fetch/27_eventsource.js`, `runtime/js/98_global_scope_window.js`).
-     `CustomEvent`, `ErrorEvent`, `MessageEvent`, `ProgressEvent`,
-     `PromiseRejectionEvent` and `Worker` set the tag as an own field of every
-     instance; it is now a non-writable, non-enumerable property of the
-     prototype, as Web IDL requires, and `BroadcastChannel`, `CloseEvent`,
-     `EventSource` and `Navigator` get the tag they lacked.
-     - User-facing note: `Object.prototype.toString.call(new CloseEvent("x"))`
-       is `[object CloseEvent]`; instances no longer carry an own
-       `Symbol.toStringTag`.
-     - Tests: `event_test.ts`'s `interfacePrototypesHaveToStringTag` (fails on
-       3.0.0-denext.25).
-     - Node tests enabled: none.
+(port of theende/ende b34bf4f063, MIT, from denoland/deno#37125; part of issue
+denoland/deno#37107; `ext/web/02_event.js`, `runtime/js/11_workers.js`,
+`ext/web/01_broadcast_channel.js`, `ext/fetch/27_eventsource.js`,
+`runtime/js/98_global_scope_window.js`). `CustomEvent`, `ErrorEvent`,
+`MessageEvent`, `ProgressEvent`, `PromiseRejectionEvent` and `Worker` set the
+tag as an own field of every instance; it is now a non-writable, non-enumerable
+property of the prototype, as Web IDL requires, and `BroadcastChannel`,
+`CloseEvent`, `EventSource` and `Navigator` get the tag they lacked. -
+User-facing note: `Object.prototype.toString.call(new CloseEvent("x"))` is
+`[object CloseEvent]`; instances no longer carry an own `Symbol.toStringTag`. -
+Tests: `event_test.ts`'s `interfacePrototypesHaveToStringTag` (fails on
+3.0.0-denext.25). - Node tests enabled: none.
 
 5NN. **`fix(ext)`: `Symbol.toStringTag` on the remaining interface prototypes**
-     (port of theende/ende 336dd588b5, MIT; issue denoland/deno#37107, no
-     upstream PR; `ext/canvas`, `ext/image`, `ext/webgpu/01_webgpu.js`,
-     `ext/webstorage`, `runtime/js/97_navigator_user_agent_data.js`,
-     `runtime/js/98_global_scope_worker.js`). `ImageBitmap`,
-     `ImageBitmapRenderingContext`, `OffscreenCanvas`, `Storage`,
-     `WorkerNavigator`, `NavigatorUAData` and the WebGPU interfaces (`GPUError`
-     and its subclasses included) had no tag, so their instances reported
-     `[object Object]` or a parent interface.
-     - Tests: `globals_test.ts`'s `interfacePrototypesHaveToStringTag` and
-       `workerInterfacePrototypesHaveToStringTag`, `webgpu_test.ts`'s
-       `webgpuInterfacePrototypesHaveToStringTag` (no GPU needed; all fail on
-       3.0.0-denext.25).
-     - Node tests enabled: none.
+(port of theende/ende 336dd588b5, MIT; issue denoland/deno#37107, no upstream
+PR; `ext/canvas`, `ext/image`, `ext/webgpu/01_webgpu.js`, `ext/webstorage`,
+`runtime/js/97_navigator_user_agent_data.js`,
+`runtime/js/98_global_scope_worker.js`). `ImageBitmap`,
+`ImageBitmapRenderingContext`, `OffscreenCanvas`, `Storage`, `WorkerNavigator`,
+`NavigatorUAData` and the WebGPU interfaces (`GPUError` and its subclasses
+included) had no tag, so their instances reported `[object Object]` or a parent
+interface. - Tests: `globals_test.ts`'s `interfacePrototypesHaveToStringTag` and
+`workerInterfacePrototypesHaveToStringTag`, `webgpu_test.ts`'s
+`webgpuInterfacePrototypesHaveToStringTag` (no GPU needed; all fail on
+3.0.0-denext.25). - Node tests enabled: none.
 
 5NN. **`fix(ext/web)`: the global scope interfaces' `Symbol.toStringTag` is a
-     data property** (port of theende/ende 0b43d97ae3, MIT, Ende's follow-up to
-     denoland/deno#37125; issue denoland/deno#37107;
-     `ext/web/04_global_interfaces.js`). `Window`, `WorkerGlobalScope` and
-     `DedicatedWorkerGlobalScope` defined the tag as a getter; Web IDL makes it
-     a non-writable, non-enumerable, configurable data property.
-     `Object.prototype.toString.call(globalThis)` is unchanged.
-     - Tests: `globals_test.ts`'s `windowPrototypeHasToStringTag` and
-       `workerGlobalScopePrototypesHaveToStringTag` (both fail on
-       3.0.0-denext.25).
-     - Node tests enabled: none.
+data property** (port of theende/ende 0b43d97ae3, MIT, Ende's follow-up to
+denoland/deno#37125; issue denoland/deno#37107;
+`ext/web/04_global_interfaces.js`). `Window`, `WorkerGlobalScope` and
+`DedicatedWorkerGlobalScope` defined the tag as a getter; Web IDL makes it a
+non-writable, non-enumerable, configurable data property.
+`Object.prototype.toString.call(globalThis)` is unchanged. - Tests:
+`globals_test.ts`'s `windowPrototypeHasToStringTag` and
+`workerGlobalScopePrototypesHaveToStringTag` (both fail on 3.0.0-denext.25). -
+Node tests enabled: none.
 
 5NN. **`fix(lint)`: lint plugin specifiers resolve through the import map**
-     (port of theende/ende e722926a34, MIT, a cherry-pick of upstream commit
-     0821f5c3ca71 for denoland/deno#37085; `libs/config/workspace/mod.rs`,
-     `cli/tools/lint/mod.rs`, `cli/lsp/lint.rs`, `cli/args/mod.rs`). A plugin
-     configured as `"lint": { "plugins": ["lume/lint.ts"] }` was always read as
-     a local path, even when the workspace import map mapped `lume/` elsewhere.
-     Plugin specifiers and `!` exclusions now resolve through the workspace's
-     merged import map in the CLI, watch mode and the language server, and the
-     resolved URLs are deduplicated. An unmapped bare specifier still resolves
-     as a path without a leading `./`; a blocked (null) import map entry is an
-     error instead of a fallback to a path.
-     - Tests: `tests/specs/lint/lint_plugin_import_map` (an `imports` map in
-       deno.json and an external `importMap`), and the
-       `test_lint_plugins_import_map_*` config tests (with the upstream `npm:`
-       plugin case Ende dropped).
-     - Node tests enabled: none.
+(port of theende/ende e722926a34, MIT, a cherry-pick of upstream commit
+0821f5c3ca71 for denoland/deno#37085; `libs/config/workspace/mod.rs`,
+`cli/tools/lint/mod.rs`, `cli/lsp/lint.rs`, `cli/args/mod.rs`). A plugin
+configured as `"lint": { "plugins": ["lume/lint.ts"] }` was always read as a
+local path, even when the workspace import map mapped `lume/` elsewhere. Plugin
+specifiers and `!` exclusions now resolve through the workspace's merged import
+map in the CLI, watch mode and the language server, and the resolved URLs are
+deduplicated. An unmapped bare specifier still resolves as a path without a
+leading `./`; a blocked (null) import map entry is an error instead of a
+fallback to a path. - Tests: `tests/specs/lint/lint_plugin_import_map` (an
+`imports` map in deno.json and an external `importMap`), and the
+`test_lint_plugins_import_map_*` config tests (with the upstream `npm:` plugin
+case Ende dropped). - Node tests enabled: none.
 
 5NN. **`fix(upgrade)`: `deno upgrade` refuses to overwrite a dpkg-installed
-     executable** (port of theende/ende bccc4c174e, MIT; issue
-     denoland/deno#37099, no upstream PR; `cli/tools/upgrade.rs`).
-     `sudo deno upgrade` on an apt-installed binary overwrote the packaged file,
-     so dpkg kept reporting the old version and apt offered the same "upgrade"
-     again. On Linux the running executable is looked up in the dpkg file lists
-     (`/var/lib/dpkg/info/*.list`, following symlinks for merged-/usr systems)
-     and, if a package owns it, the upgrade stops with a message naming the
-     package. `--output` still writes anywhere. denext's builds refuse
-     `deno upgrade` before this check, so it matters only for a build without
-     the denext marker.
-     - Tests: `upgrade.rs`'s `find_dpkg_owner_matches_listed_exe` and
-       `find_dpkg_owner_follows_symlinked_dirs`.
-     - Node tests enabled: none.
+executable** (port of theende/ende bccc4c174e, MIT; issue denoland/deno#37099,
+no upstream PR; `cli/tools/upgrade.rs`). `sudo deno upgrade` on an apt-installed
+binary overwrote the packaged file, so dpkg kept reporting the old version and
+apt offered the same "upgrade" again. On Linux the running executable is looked
+up in the dpkg file lists (`/var/lib/dpkg/info/*.list`, following symlinks for
+merged-/usr systems) and, if a package owns it, the upgrade stops with a message
+naming the package. `--output` still writes anywhere. denext's builds refuse
+`deno upgrade` before this check, so it matters only for a build without the
+denext marker. - Tests: `upgrade.rs`'s `find_dpkg_owner_matches_listed_exe` and
+`find_dpkg_owner_follows_symlinked_dirs`. - Node tests enabled: none.
 
 5NN. **`fix(ext/web)`: inspecting an AbortSignal, AbortController, Blob or File
 prototype doesn't throw** (port of theende/ende 7dfd1f8248, MIT, from
@@ -21603,6 +21587,21 @@ replacing it with "could not deserialize value". - Tests:
 and the matching `structured_clone_test.ts` case (both crashed the process
 before). - Node tests enabled: none.
 
+5NN. **`fix(ext/webrtc,ext/node)`: inspecting the fork's WebRTC, media and
+`Buffer` prototypes doesn't throw** (fork; follows the port of
+denoland/deno#36511; `ext/webrtc/01_webrtc.js`,
+`ext/webrtc/02_media_devices.js`, `ext/webrtc/03_encoded_transform.js`,
+`ext/node/polyfills/internal/buffer.mjs`). The interface-prototype sweep found
+inspect hooks that read internal state on a prototype or an `Object.create()`
+object: `RTCPeerConnection`, `RTCDataChannel`, `MediaStreamTrack`,
+`RTCEncodedVideoFrame` / `RTCEncodedAudioFrame` and `MediaDeviceInfo` /
+`InputDeviceInfo` threw "Illegal invocation" or a TypeError, and Node's `Buffer`
+inspect read `TypedArray.prototype.length`. They now print `X {}` for an object
+without the WebIDL brand (a non-Uint8Array for `Buffer`); real instances print
+as before. - Tests: `console_test.ts`'s `consoleInspectInterfacePrototypes` and
+`consoleInspectInterfacePrototypesInWorker` (failed on these before). - Node
+tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -21615,10 +21614,10 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
 506-510, 511, 512, 513, 515, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN,
-5NN, 5NN) are what the prebuilt `libdenort` carries. The CLI-side parts (for
-example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
-launchers) are in the branch too, but a stock CLI does not run them; denext's
-own launcher provides that environment.
+5NN, 5NN, 5NN) are what the prebuilt `libdenort` carries. The CLI-side parts
+(for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged
+app's launchers) are in the branch too, but a stock CLI does not run them;
+denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

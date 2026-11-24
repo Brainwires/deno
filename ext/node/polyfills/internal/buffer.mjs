@@ -839,6 +839,10 @@ const SPACER_PATTERN = new SafeRegExp(/(.{2})/g);
 Buffer.prototype[customInspectSymbol] =
   Buffer.prototype.inspect =
     function inspect(_, ctx) {
+      // `Object.create(Buffer.prototype)` has no bytes to show.
+      if (!isUint8Array(this)) {
+        return `${this.constructor.name} {}`;
+      }
       let str = "";
       str = StringPrototypeTrim(
         StringPrototypeReplace(

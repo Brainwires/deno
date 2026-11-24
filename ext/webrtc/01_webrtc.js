@@ -1101,6 +1101,10 @@ class RTCDataChannel extends EventTarget {
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
+    // A prototype or an `Object.create()` object has no internal state.
+    if (this[webidl.brand] !== webidl.brand) {
+      return `${this.constructor.name} ${inspect({}, inspectOptions)}`;
+    }
     return `${this.constructor.name} ${
       inspect({
         label: this.label,
@@ -1464,6 +1468,10 @@ class MediaStreamTrack extends EventTarget {
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
+    // A prototype or an `Object.create()` object has no internal state.
+    if (this[webidl.brand] !== webidl.brand) {
+      return `${this.constructor.name} ${inspect({}, inspectOptions)}`;
+    }
     return `${this.constructor.name} ${
       inspect({
         kind: this.kind,
@@ -5935,6 +5943,10 @@ class RTCPeerConnection extends EventTarget {
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
+    // A prototype or an `Object.create()` object has no internal state.
+    if (this[webidl.brand] !== webidl.brand) {
+      return `${this.constructor.name} ${inspect({}, inspectOptions)}`;
+    }
     return `${this.constructor.name} ${
       inspect({
         signalingState: this.signalingState,
