@@ -21400,6 +21400,30 @@ where the changes are discussed.
        `node_compat` crypto suites unchanged.
      - Node tests enabled: none.
 
+516. **`fix(sandbox)`: loader variables an env file sets are held back across
+     the kernel sandbox's re-exec** (cli; `cli/util/env.rs`,
+     `cli/sandbox/enforce.rs`, `cli/lib.rs`). The variables the dynamic loader
+     and libc read when a program starts (`LD_*`, `DYLD_*`, `GCONV_PATH`,
+     `GLIBC_TUNABLES`, `LOCPATH`, `MALLOC_*`) are for the program when
+     `--env-file` sets them: it reads them and its children inherit them. An
+     image the runtime re-executes itself as is started without them: the
+     confined image of `enforce`, the supervisor and the worker of `broker`, and
+     `warn`'s tracing supervisor with the run beneath it. The confined image
+     sets them again where the env files are loaded otherwise (they are carried
+     in `DENO_INTERNAL_ENV_FILE_LOADER_VARIABLES`, which is removed then; a
+     scrubbed environment keeps only the names it lists, as before), so
+     `Deno.env` and child processes see the environment they see without the
+     kernel sandbox. A variable that was in the environment the process was
+     started with is passed on as before; so is everything else an env file
+     sets.
+     - Tests: `util::env::tests` (`loader_variables_are_named`,
+       `the_reexecuted_image_starts_without_an_env_files_loader_variables`,
+       `a_carrier_holds_loader_variables_only`);
+       `tests/specs/kernel_sandbox/implicit` (`env_file_loader_variables`,
+       `env_file_loader_variables_no_sandbox`: the same output with and without
+       the kernel sandbox).
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

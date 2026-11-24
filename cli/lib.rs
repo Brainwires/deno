@@ -1164,6 +1164,11 @@ async fn resolve_flags_and_init(
     };
     load_env_variables_from_env_files(&cwd, files, flags.log_level);
   }
+  // ... and it sets the loader variables that image loaded from them, which
+  // it was started without
+  if sandbox::enforce::confined_at_startup() {
+    crate::util::env::restore_env_file_loader_variables();
+  }
 
   let sys = crate::sys::CliSys::default();
 

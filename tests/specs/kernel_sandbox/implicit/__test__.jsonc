@@ -42,6 +42,18 @@
       "args": "run --quiet --kernel-sandbox=enforce --env-file=env --allow-env=GREETING --import-map=map.json env_and_map.ts",
       "output": "from the env file\nhello from the import map\n"
     },
+    // the loader's variables an env file sets: the program has them either
+    // way; the re-executed image itself starts without them
+    "env_file_loader_variables": {
+      "if": "kernelSandboxEnforce",
+      "args": "run --quiet --kernel-sandbox=enforce --env-file=env_loader --allow-env env_loader.ts",
+      "output": "env_loader.out"
+    },
+    "env_file_loader_variables_no_sandbox": {
+      "if": "unix",
+      "args": "run --quiet --kernel-sandbox=off --env-file=env_loader --allow-env env_loader.ts",
+      "output": "env_loader.out"
+    },
     "cpu_profile_folder_is_written": {
       "if": "kernelSandboxEnforce",
       "steps": [
