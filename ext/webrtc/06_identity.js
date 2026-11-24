@@ -22,7 +22,7 @@
 /// <reference path="../../core/internal.d.ts" />
 
 (function () {
-const { core, primordials } = __bootstrap;
+const { core, internals: runtimeInternals, primordials } = __bootstrap;
 const {
   op_base64_encode_from_buffer,
   op_webrtc_pc_create_answer,
@@ -97,6 +97,24 @@ const IDP_REPORTED_DETAILS = [
 const MULTIPLE = Symbol("several a=identity values");
 
 function noop() {}
+
+// denext: an IdP proxy runs in a worker (`callIdp`), which is
+// `deno_runtime`'s. A runtime made without it (ext/web_page: one that runs
+// web pages on a plain `JsRuntime`) sets `internals.webrtcIdentityUnavailable`
+// before it loads WebRTC: there `setIdentityProvider()` throws,
+// `getIdentityAssertion()` and `peerIdentity` reject and a remote
+// description's `a=identity` fails to validate, all with a
+// `NotSupportedError`, and no IdP proxy is fetched. Deno never sets it.
+function identityUnavailable() {
+  return runtimeInternals.webrtcIdentityUnavailable === true;
+}
+
+function identityNotSupported() {
+  return new DOMException(
+    "WebRTC identity is not supported: this runtime has no worker to run an identity provider in",
+    "NotSupportedError",
+  );
+}
 
 function operationError(message) {
   return new DOMException(message, "OperationError");
@@ -619,6 +637,7 @@ function installIdentity(internals) {
   // callback promised. An error the IdP reports sets the connection's
   // idpErrorInfo / idpLoginUrl.
   function callIdp(id, domain, protocol, request) {
+    if (identityUnavailable()) return PromiseReject(identityNotSupported());
     return new Promise((resolve, reject) => {
       let worker = null;
       let loaded = false;
@@ -1167,6 +1186,7 @@ function installIdentity(internals) {
   const members = {
     setIdentityProvider(provider, options = undefined) {
       webidl.assertBranded(this, RTCPeerConnectionPrototype);
+      if (identityUnavailable()) throw identityNotSupported();
       const prefix =
         "Failed to execute 'setIdentityProvider' on 'RTCPeerConnection'";
       webidl.requiredArguments(arguments.length, 1, prefix);
@@ -1206,6 +1226,7 @@ function installIdentity(internals) {
     getIdentityAssertion() {
       const branded = brandError(this, RTCPeerConnectionPrototype);
       if (branded !== null) return PromiseReject(branded);
+      if (identityUnavailable()) return PromiseReject(identityNotSupported());
       return new Promise((resolve, reject) => {
         // "queue a task to run the following steps".
         setTimeout(() => {
@@ -1236,6 +1257,12 @@ function installIdentity(internals) {
 
     get peerIdentity() {
       webidl.assertBranded(this, RTCPeerConnectionPrototype);
+      if (identityUnavailable()) {
+        // Not an unhandled rejection when nobody reads it.
+        const rejected = PromiseReject(identityNotSupported());
+        PromisePrototypeThen(rejected, undefined, noop);
+        return rejected;
+      }
       return peerRecord(identityOf(this)).promise;
     },
 
