@@ -1157,6 +1157,13 @@ pub struct Context {
   pub compiled_supervisor: bool,
   /// `--kernel-sandbox-exec=strict` (plan D3's opt-in).
   pub exec_strict: bool,
+  /// Linux: a supervising process answers the run's exec system calls
+  /// (`deno_sandbox::exec_gate`), so a strict exec scope holds the files a
+  /// call may name, not only the files that carry an execute rule. Set
+  /// where the run has a supervisor and the gate was measured to work
+  /// (`kernel_apply::exec_gate_capability`); without it a strict scope is
+  /// held by the path rules alone, and the policy says so.
+  pub exec_gate: bool,
   /// The policy-keyed cache overlay (`DENO_DIR/sandboxed/<hash>`; a compiled
   /// program's own cache folder), set once the policy without it is hashed.
   pub cache_overlay: Option<PathBuf>,
@@ -1205,6 +1212,7 @@ impl Context {
       compiled: false,
       compiled_supervisor: false,
       exec_strict: false,
+      exec_gate: false,
       cache_overlay: None,
       coverage_dir: None,
       tls_files: Vec::new(),
@@ -1404,6 +1412,13 @@ pub struct FsRules {
   /// programs, their `#!` interpreters and ELF loaders.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub exec_programs: Vec<PathBuf>,
+  /// Linux, with a supervising process that answers exec system calls
+  /// ([`Context::exec_gate`]): the files among [`Self::exec_programs`] a
+  /// call may name (canonical): the programs themselves, never an
+  /// interpreter or a loader the kernel opens on its own. `None`: no such
+  /// supervisor; the execute rules alone hold the scope.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub exec_gate: Option<Vec<PathBuf>>,
   /// Where executable code may be loaded from (Seatbelt
   /// `file-map-executable`; on Linux the read scope bounds it).
   pub map_exec: PathScope,
@@ -1681,6 +1696,14 @@ fn net_allowed(options: &PermissionsOptions) -> bool {
 
 /// The rule a "broker not built" gap names.
 const BROKER_RULE: &str = "--kernel-sandbox (broker)";
+
+/// What a strict exec scope holds (the documented rule of
+/// `--kernel-sandbox-exec=strict`).
+const STRICT_EXEC_DETAIL: &str = "the whole process tree may start only these programs and their interpreters; a program that starts others (git runs ssh, a compiler its assembler) needs them listed too";
+
+/// Added to [`STRICT_EXEC_DETAIL`] on Linux where no supervising process
+/// answers the run's exec calls ([`Context::exec_gate`]).
+pub const STRICT_EXEC_PATH_ONLY: &str = "exec targets limited by path only (no supervising process answers exec calls in this run)";
 
 /// The broker gap's opening words.
 const BROKER_NOT_BUILT: &str =
@@ -2082,7 +2105,7 @@ impl<'a> Compiler<'a> {
     let write = self.carve(write, &write_denies, GapClass::Write);
     let deny_read = self.deny_read(&read, &write);
     let deny_write = self.deny_write(&write);
-    let (exec, exec_programs) = self.exec();
+    let (exec, exec_programs, exec_gate) = self.exec();
     let map_exec = self.map_exec(&read, &write);
     let (net, refuse_listen, vsock) = self.net();
     let unix = self.unix(&read, &write);
@@ -2215,6 +2238,7 @@ impl<'a> Compiler<'a> {
           deny_write,
           exec,
           exec_programs,
+          exec_gate,
           map_exec,
         },
         net,
@@ -2523,10 +2547,13 @@ impl<'a> Compiler<'a> {
     denies
   }
 
-  fn exec(&mut self) -> (ExecScope, Vec<PathBuf>) {
+  /// The exec scope, the files that carry an execute rule under a strict
+  /// one, and the files an exec call may name where a supervising process
+  /// answers them ([`FsRules::exec_gate`]).
+  fn exec(&mut self) -> (ExecScope, Vec<PathBuf>, Option<Vec<PathBuf>>) {
     let strict = self.ctx().exec_strict;
     match &self.opts().allow_run {
-      None => (ExecScope::None, Vec::new()),
+      None => (ExecScope::None, Vec::new(), None),
       Some(list) if list.is_empty() && strict => {
         self.gap(
           GapClass::Run,
@@ -2535,7 +2562,7 @@ impl<'a> Compiler<'a> {
           GapResolution::FailOpen,
           Some(ExactWith::Never),
         );
-        (ExecScope::Unrestricted, Vec::new())
+        (ExecScope::Unrestricted, Vec::new(), None)
       }
       Some(list) => {
         if let Some(deny) = &self.opts().deny_run {
@@ -2548,21 +2575,30 @@ impl<'a> Compiler<'a> {
           );
         }
         if list.is_empty() {
-          return (ExecScope::Unrestricted, Vec::new());
+          return (ExecScope::Unrestricted, Vec::new(), None);
         }
         if strict {
-          let programs = self.exec_closure(list);
+          let (programs, targets) = self.exec_closure(list);
+          // Linux: the execute rules also cover the interpreters and
+          // loaders the kernel opens itself; which file a call names is
+          // held by the supervising process, where the run has one
+          let gate = self.os() == TargetOs::Linux && self.ctx().exec_gate;
+          let detail = if gate || self.os() != TargetOs::Linux {
+            STRICT_EXEC_DETAIL.to_string()
+          } else {
+            format!("{STRICT_EXEC_DETAIL}; {STRICT_EXEC_PATH_ONLY}")
+          };
           self.gap(
             GapClass::Run,
             format!(
               "--kernel-sandbox-exec=strict --allow-run={}",
               list.join(",")
             ),
-            "the whole process tree may start only these programs and their interpreters; a program that starts others (git runs ssh, a compiler its assembler) needs them listed too",
+            detail,
             GapResolution::Documented,
             None,
           );
-          return (ExecScope::Listed, programs);
+          return (ExecScope::Listed, programs, gate.then_some(targets));
         }
         self.gap(
           GapClass::Run,
@@ -2571,16 +2607,17 @@ impl<'a> Compiler<'a> {
           GapResolution::Documented,
           None,
         );
-        (ExecScope::Unrestricted, Vec::new())
+        (ExecScope::Unrestricted, Vec::new(), None)
       }
     }
   }
 
   /// The files the run list needs to execute: each entry found as Deno
   /// finds it (a path against the working directory, a name on `PATH`),
-  /// then its interpreters ([`deno_sandbox::exec::program_closure`]).
+  /// then its interpreters ([`deno_sandbox::exec::program_closure_parts`]):
+  /// every file, and those an exec call names.
   #[cfg(unix)]
-  fn exec_closure(&self, list: &[String]) -> Vec<PathBuf> {
+  fn exec_closure(&self, list: &[String]) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let path = std::env::var_os("PATH");
     let programs: Vec<PathBuf> = list
       .iter()
@@ -2593,12 +2630,14 @@ impl<'a> Compiler<'a> {
           .find(|p| p.is_file())
       })
       .collect();
-    deno_sandbox::exec::program_closure(&programs, path.as_deref())
+    let closure =
+      deno_sandbox::exec::program_closure_parts(&programs, path.as_deref());
+    (closure.files, closure.targets)
   }
 
   #[cfg(not(unix))]
-  fn exec_closure(&self, _list: &[String]) -> Vec<PathBuf> {
-    Vec::new()
+  fn exec_closure(&self, _list: &[String]) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    (Vec::new(), Vec::new())
   }
 
   fn map_exec(&mut self, read: &PathScope, write: &PathScope) -> PathScope {

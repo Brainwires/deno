@@ -30,6 +30,14 @@ pub const MAX_EXPANDED: usize = 20_000;
 /// (it can only narrow) and must equal the plan the new image compiles.
 pub const PLAN_FD_ENV_VAR: &str = "DENO_INTERNAL_KERNEL_PLAN_FD";
 
+/// Names the confined image's end of the channel to the supervisor that
+/// answers its exec system calls (Linux, [`LinuxPlan::exec_gate`]): the
+/// image hands the listener of its filter over it as it applies the plan.
+/// Like the plan's variable it is never trusted on its own: a plan with a
+/// gate refuses to apply without the channel, and a channel no plan asks
+/// for is closed.
+pub const EXEC_GATE_FD_ENV_VAR: &str = "DENO_INTERNAL_KERNEL_EXEC_GATE_FD";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EnforcePlan {
@@ -258,6 +266,13 @@ impl EnforcePlan {
     Ok(plan)
   }
 
+  /// The files an exec system call may name, where a supervising process
+  /// answers those calls ([`LinuxPlan::exec_gate`]); `None`: the plan has
+  /// no such supervisor.
+  pub fn exec_gate(&self) -> Option<&[PathBuf]> {
+    self.linux.as_ref().and_then(|l| l.exec_gate.as_deref())
+  }
+
   /// Whether the variable `name` stays in a scrubbed environment.
   pub fn keeps_env(&self, name: &str) -> bool {
     match &self.env_keep {
@@ -415,6 +430,14 @@ pub struct LinuxPlan {
   pub scope_signal: bool,
   pub scope_abstract_unix: bool,
   pub seccomp: SeccompPlan,
+  /// A strict exec scope under a supervising process: `execve` and
+  /// `execveat` are handed to it (seccomp user notification), and it lets
+  /// a call through only when the file the call names is one of these
+  /// (canonical; each also carries an execute rule). The image refuses to
+  /// apply the plan without the channel to that process. `None`: exec calls
+  /// are the kernel's alone.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub exec_gate: Option<Vec<PathBuf>>,
 }
 
 /// A Seatbelt path filter, already validated as UTF-8 and quoted when the
@@ -513,6 +536,7 @@ mod tests {
         scope_signal: false,
         scope_abstract_unix: false,
         seccomp: SeccompPlan::default(),
+        exec_gate: None,
       }),
       macos: None,
       windows: None,

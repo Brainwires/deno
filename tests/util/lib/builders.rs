@@ -1091,6 +1091,17 @@ impl TestCommandBuilder {
         nodejs_org_mirror_unset_url(),
       );
     }
+    // denext (DENEXT.md item 5NN): the kernel sandbox's harness switches
+    // (DENO_INTERNAL_KERNEL_SANDBOX_FORCE / _STAGE, which a test or a bed
+    // sets) take effect only with the harness's marker file: every command
+    // a suite starts names this process's, and what that command starts
+    // inherits it. A test that asserts the switches alone do nothing sets
+    // the variable itself (empty).
+    if !envs.contains_key(KERNEL_SANDBOX_HARNESS_ENV_VAR)
+      && let Some(marker) = kernel_sandbox_harness_marker()
+    {
+      envs.insert(KERNEL_SANDBOX_HARNESS_ENV_VAR.to_string(), marker);
+    }
     if !envs.contains_key("PATH") {
       let path = std::env::var_os("PATH").unwrap_or_default();
       let path = std::env::split_paths(&path);
@@ -1565,4 +1576,52 @@ mod tests {
     output.assert_exit_code(0);
     assert_eq!(output.combined_output(), "done\n");
   }
+}
+
+/// The variable that names the kernel sandbox harness's marker file (the
+/// runtime's `KERNEL_SANDBOX_HARNESS_ENV_VAR`).
+const KERNEL_SANDBOX_HARNESS_ENV_VAR: &str =
+  "DENO_INTERNAL_KERNEL_SANDBOX_HARNESS";
+
+/// This test process's marker file for the kernel sandbox's harness
+/// switches (DENEXT.md item 5NN), made on first use in the temp folder:
+/// `deno-kernel-sandbox-harness-<pid>-<nanoseconds>`, removed by no one but
+/// a later test process (markers older than a day are swept here). `None`:
+/// the temp folder can't be written (the switches then do nothing, and the
+/// tests that use them say so).
+fn kernel_sandbox_harness_marker() -> Option<String> {
+  static MARKER: std::sync::OnceLock<Option<String>> =
+    std::sync::OnceLock::new();
+  MARKER
+    .get_or_init(|| {
+      const PREFIX: &str = "deno-kernel-sandbox-harness-";
+      // canonical: the path is compared between the images of one run
+      let dir = std::env::temp_dir().canonicalize().ok()?;
+      let day = std::time::Duration::from_secs(24 * 60 * 60);
+      if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+          let stale = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(PREFIX))
+            && entry
+              .metadata()
+              .and_then(|meta| meta.modified())
+              .ok()
+              .and_then(|modified| modified.elapsed().ok())
+              .is_some_and(|age| age > day);
+          if stale {
+            let _ = std::fs::remove_file(entry.path());
+          }
+        }
+      }
+      let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+      let marker = dir.join(format!("{PREFIX}{}-{nanos}", std::process::id()));
+      std::fs::write(&marker, "").ok()?;
+      marker.to_str().map(|marker| marker.to_string())
+    })
+    .clone()
 }

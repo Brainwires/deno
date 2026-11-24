@@ -1270,6 +1270,7 @@ mod trace_tests {
         scope_signal: false,
         scope_abstract_unix: false,
         seccomp,
+        exec_gate: None,
       }),
       macos: None,
       windows: None,

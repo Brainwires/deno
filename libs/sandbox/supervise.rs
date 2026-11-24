@@ -35,6 +35,12 @@
 //! forks in place ([`fork_worker`]): the child goes on as the confined
 //! worker, the parent is the supervisor. No exec at all.
 //!
+//! The same supervisor, with or without a broker, answers the exec system
+//! calls of a strict exec scope on Linux ([`run_with_gate`],
+//! [`fork_worker_with_gate`], [`crate::exec_gate`]): the worker hands the
+//! listener of its filter over a channel of its own as it applies its plan.
+//! A run that needs no broker and has no such scope has no supervisor.
+//!
 //! The same shape, with a tracer where the broker is, is the Linux observer
 //! of an explicit `--kernel-sandbox=warn` ([`run_traced`],
 //! [`crate::trace`]): the supervisor sees the tree's system calls, reports
@@ -496,22 +502,24 @@ fn close_other_fds(keep: &[i32]) {
   }
 }
 
-/// The supervisor's half after the fork: serves the channel with `serve`
-/// (which starts the broker and returns), passes signals on, reaps, and
-/// exits as the worker `pid` exited. `adopt`: what the worker orphans ends
-/// with the supervisor (a sandbox's supervisor; an observer leaves the
-/// processes a run left behind running, as they would without it).
+/// The supervisor's half after the fork: serves its channels (`ours`, the
+/// only descriptors it keeps besides stdio) with `serve` (which starts the
+/// broker and returns), passes signals on, reaps, and exits as the worker
+/// `pid` exited. `adopt`: what the worker orphans ends with the supervisor
+/// (a sandbox's supervisor; an observer leaves the processes a run left
+/// behind running, as they would without it).
 fn supervise_worker(
   pid: libc::pid_t,
-  ours: OwnedFd,
+  ours: Vec<OwnedFd>,
   adopt: bool,
-  serve: impl FnOnce(OwnedFd) -> io::Result<()>,
+  serve: impl FnOnce(Vec<OwnedFd>) -> io::Result<()>,
   before_exit: impl FnOnce(),
 ) -> ! {
   WORKER.store(pid, Ordering::SeqCst);
   harden(adopt);
   forward_signals();
-  close_other_fds(&[ours.as_raw_fd()]);
+  let keep: Vec<i32> = ours.iter().map(|fd| fd.as_raw_fd()).collect();
+  close_other_fds(&keep);
   if let Err(err) = serve(ours) {
     // SAFETY: the worker can't run without its broker
     unsafe { libc::kill(pid, libc::SIGKILL) };
@@ -610,7 +618,101 @@ pub fn run(
     unsafe { libc::_exit(126) };
   }
   drop(theirs);
-  supervise_worker(pid, ours, true, serve, || {})
+  supervise_worker(pid, vec![ours], true, one_channel(serve), || {})
+}
+
+/// `serve` for the supervisor's one channel.
+fn one_channel(
+  serve: impl FnOnce(OwnedFd) -> io::Result<()>,
+) -> impl FnOnce(Vec<OwnedFd>) -> io::Result<()> {
+  move |ours| match ours.into_iter().next() {
+    Some(ours) => serve(ours),
+    None => Err(io::Error::other("the supervisor has no channel")),
+  }
+}
+
+/// `serve` for the supervisor of a gated worker: the broker's channel when
+/// there is one, then the exec gate's.
+#[cfg(target_os = "linux")]
+fn gated_channels(
+  broker: bool,
+  serve: impl FnOnce(Option<OwnedFd>, OwnedFd) -> io::Result<()>,
+) -> impl FnOnce(Vec<OwnedFd>) -> io::Result<()> {
+  move |ours| {
+    let mut ours = ours.into_iter();
+    let broker = if broker { ours.next() } else { None };
+    match ours.next() {
+      Some(gate) => serve(broker, gate),
+      None => Err(io::Error::other("the supervisor has no channel")),
+    }
+  }
+}
+
+/// [`run`] for a worker whose exec system calls the supervisor answers
+/// (Linux, [`crate::exec_gate`]), with a broker (`broker`) or without one.
+/// The child calls `exec_worker` with the numbers of its ends of the
+/// broker's channel (when there is one) and the gate's (it names them in
+/// the worker's environment and re-executes; it returns only an error);
+/// this process serves the other ends with `serve` (which starts the
+/// broker and the gate's thread and returns), then waits and exits as the
+/// worker did. Call while the process has one thread.
+#[cfg(target_os = "linux")]
+pub fn run_with_gate(
+  broker: bool,
+  exec_worker: impl FnOnce(Option<i32>, i32) -> io::Error,
+  serve: impl FnOnce(Option<OwnedFd>, OwnedFd) -> io::Result<()>,
+) -> ! {
+  let fail = |what: &str, err: io::Error| -> ! {
+    fatal_note(format_args!(
+      "kernel sandbox: the supervisor can't start: {what}: {err}"
+    ));
+    std::process::exit(1);
+  };
+  let broker_pair = if broker {
+    match channel() {
+      Ok(pair) => Some(pair),
+      Err(err) => fail("the broker channel", err),
+    }
+  } else {
+    None
+  };
+  let (gate_ours, gate_theirs) = match channel() {
+    Ok(pair) => pair,
+    Err(err) => fail("the exec channel", err),
+  };
+  let (broker_ours, broker_theirs) = match broker_pair {
+    Some((ours, theirs)) => (Some(ours), Some(theirs)),
+    None => (None, None),
+  };
+  for fd in broker_ours.iter().chain([&gate_ours]) {
+    // SAFETY: our ends are the supervisor's alone
+    unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+  }
+  let supervisor = std::process::id() as libc::pid_t;
+  // SAFETY: the process has one thread, so the child is an ordinary process
+  let pid = unsafe { libc::fork() };
+  if pid < 0 {
+    fail("fork", io::Error::last_os_error());
+  }
+  if pid == 0 {
+    drop(broker_ours);
+    drop(gate_ours);
+    tie_to_supervisor(supervisor);
+    let err = exec_worker(
+      broker_theirs.as_ref().map(|fd| fd.as_raw_fd()),
+      gate_theirs.as_raw_fd(),
+    );
+    fatal_note(format_args!(
+      "kernel sandbox: re-executing under the sandbox failed: {err}"
+    ));
+    // SAFETY: ending the forked child without running the parent's exit
+    // handlers
+    unsafe { libc::_exit(126) };
+  }
+  drop(broker_theirs);
+  drop(gate_theirs);
+  let ours: Vec<OwnedFd> = broker_ours.into_iter().chain([gate_ours]).collect();
+  supervise_worker(pid, ours, true, gated_channels(broker, serve), || {})
 }
 
 /// The threads of this process (Linux), when they can be counted.
@@ -672,7 +774,60 @@ pub fn fork_worker(
     return Ok(theirs);
   }
   drop(theirs);
-  supervise_worker(pid, ours, true, serve, || {})
+  supervise_worker(pid, vec![ours], true, one_channel(serve), || {})
+}
+
+/// [`fork_worker`] for a program whose exec system calls the supervisor
+/// answers (Linux, [`crate::exec_gate`]), with a broker (`broker`) or
+/// without one: **returns in the child**, the worker, with its ends of the
+/// broker's channel (when there is one) and the gate's (close-on-exec);
+/// the parent serves the other ends with `serve` (as [`run_with_gate`]'s)
+/// and never returns. The same conditions as [`fork_worker`]; an `Err`
+/// means nothing happened.
+#[cfg(target_os = "linux")]
+pub fn fork_worker_with_gate(
+  broker: bool,
+  serve: impl FnOnce(Option<OwnedFd>, OwnedFd) -> io::Result<()>,
+) -> io::Result<(Option<OwnedFd>, OwnedFd)> {
+  match thread_count() {
+    Some(1) | None => {}
+    Some(threads) => {
+      return Err(io::Error::other(format!(
+        "the process has {threads} threads; the supervisor must fork while it has one"
+      )));
+    }
+  }
+  let (broker_ours, broker_theirs) = if broker {
+    let (ours, theirs) = channel()?;
+    (Some(ours), Some(theirs))
+  } else {
+    (None, None)
+  };
+  let (gate_ours, gate_theirs) = channel()?;
+  for fd in broker_ours
+    .iter()
+    .chain(&broker_theirs)
+    .chain([&gate_ours, &gate_theirs])
+  {
+    // SAFETY: each end belongs to one process alone
+    unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+  }
+  let supervisor = std::process::id() as libc::pid_t;
+  // SAFETY: the process has one thread, so the child is an ordinary process
+  let pid = unsafe { libc::fork() };
+  if pid < 0 {
+    return Err(io::Error::last_os_error());
+  }
+  if pid == 0 {
+    drop(broker_ours);
+    drop(gate_ours);
+    tie_to_supervisor(supervisor);
+    return Ok((broker_theirs, gate_theirs));
+  }
+  drop(broker_theirs);
+  drop(gate_theirs);
+  let ours: Vec<OwnedFd> = broker_ours.into_iter().chain([gate_ours]).collect();
+  supervise_worker(pid, ours, true, gated_channels(broker, serve), || {})
 }
 
 /// Runs the tracing supervisor of an explicit `--kernel-sandbox=warn`
@@ -761,7 +916,7 @@ pub fn run_traced(
   };
   // not a subreaper, and nothing is ended with the run: an observer leaves
   // what the run left behind as it would be without it
-  supervise_worker(pid, ours, false, serve, || {
+  supervise_worker(pid, vec![ours], false, one_channel(serve), || {
     stop.store(true, Ordering::SeqCst);
     let listener = reader
       .borrow_mut()

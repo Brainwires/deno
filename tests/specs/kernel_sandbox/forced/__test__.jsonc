@@ -28,6 +28,27 @@
       "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_FORCE": "on" },
       "args": "run main.ts",
       "output": "forced_invalid.out"
+    },
+    // item 5NN: the switch takes effect only with the harness's marker file
+    // (the spec runner names its own for every command; these take it away).
+    // Without one the run is as with no switch at all, and says so once.
+    "switch_without_the_marker_is_ignored": {
+      "envs": {
+        "DENO_INTERNAL_KERNEL_SANDBOX_FORCE": "enforce",
+        "DENO_INTERNAL_KERNEL_SANDBOX_HARNESS": ""
+      },
+      "args": "run -A --kernel-sandbox-report main.ts",
+      "output": "forced_unmarked.out"
+    },
+    // a marker variable that stayed behind with the switch names a file
+    // that isn't there
+    "switch_with_a_missing_marker_is_ignored": {
+      "envs": {
+        "DENO_INTERNAL_KERNEL_SANDBOX_FORCE": "enforce",
+        "DENO_INTERNAL_KERNEL_SANDBOX_HARNESS": "/nowhere/deno-kernel-sandbox-harness-left-behind"
+      },
+      "args": "run -A --kernel-sandbox-report main.ts",
+      "output": "forced_unmarked.out"
     }
   }
 }

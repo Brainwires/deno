@@ -205,9 +205,18 @@ pub fn startup(data: &StandaloneData, worker: bool) -> Result<(), String> {
   // like every other runtime. It changes nothing here today: only a strict
   // package (a baked enforce) is confined, and `auto` leaves an app that
   // isn't strict alone at every stage (`ModeReason::DesktopNotStrict`)
+  // (only with the harness's marker file, as everywhere)
   let stage = deno_lib::kernel_sandbox::AutoStage::parse(
     std::env::var(deno_lib::kernel_sandbox::KERNEL_SANDBOX_STAGE_ENV_VAR)
       .ok()
+      .filter(|_| {
+        deno_lib::kernel_sandbox::harness_marked(
+          std::env::var_os(
+            deno_lib::kernel_sandbox::KERNEL_SANDBOX_HARNESS_ENV_VAR,
+          )
+          .as_deref(),
+        )
+      })
       .as_deref(),
   )
   .ok()

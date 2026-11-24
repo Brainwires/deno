@@ -154,16 +154,43 @@ pub fn check_broker(plan: &EnforcePlan) -> Result<(), String> {
   }
 }
 
+/// Whether `plan` runs under a supervising process: for its broker, or
+/// (Linux) to answer the exec system calls of a strict exec scope.
+pub fn needs_supervisor(plan: &EnforcePlan) -> bool {
+  plan.broker.is_some() || plan.exec_gate().is_some()
+}
+
 /// A compiled program's supervisor, in place: forks; **returns in the
-/// child**, the worker, with its end of the broker channel; the parent
-/// serves `plan`'s broker and exits as the worker exits (it never
-/// returns). Call first thing in `main`, while the process has one thread
-/// and before it confines itself. `Err`: nothing was forked.
-pub fn fork_supervised(plan: &EnforcePlan) -> Result<OwnedFd, String> {
-  let Some(broker) = plan.broker.clone() else {
-    return Err("the plan has no broker policy".to_string());
+/// child**, the worker, with its end of the broker channel when the plan
+/// has a broker; the parent serves `plan`'s broker, answers the worker's
+/// exec system calls where the plan hands them over (Linux; the worker's
+/// channel for those is kept for the plan's application,
+/// `deno_sandbox::exec_gate::hand_channel`), and exits as the worker exits
+/// (it never returns). Call first thing in `main`, while the process has
+/// one thread and before it confines itself. `Err`: nothing was forked.
+pub fn fork_supervised(plan: &EnforcePlan) -> Result<Option<OwnedFd>, String> {
+  let broker = plan.broker.clone();
+  #[cfg(target_os = "linux")]
+  if let Some(files) = plan.exec_gate().map(|files| files.to_vec()) {
+    let (channel, gate) = deno_sandbox::supervise::fork_worker_with_gate(
+      broker.is_some(),
+      move |sock, gate| {
+        deno_sandbox::exec_gate::spawn_gate(gate, &files)?;
+        match (&broker, sock) {
+          (Some(broker), Some(sock)) => serve_broker(broker, sock),
+          _ => Ok(()),
+        }
+      },
+    )
+    .map_err(|err| err.to_string())?;
+    deno_sandbox::exec_gate::hand_channel(gate);
+    return Ok(channel);
+  }
+  let Some(broker) = broker else {
+    return Err("the plan needs no supervisor".to_string());
   };
   deno_sandbox::supervise::fork_worker(move |sock| serve_broker(&broker, sock))
+    .map(Some)
     .map_err(|err| err.to_string())
 }
 

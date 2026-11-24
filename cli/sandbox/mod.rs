@@ -107,9 +107,27 @@ fn env_override_warned() -> Option<KernelSandboxMode> {
   }
 }
 
+/// Says once which harness switches are set here without the harness's
+/// marker, and so have no effect (item 5NN).
+fn warn_harness_switches_ignored() {
+  let ignored = deno_lib::kernel_sandbox::harness_switches_ignored();
+  if ignored.is_empty() {
+    return;
+  }
+  static WARN: Once = Once::new();
+  WARN.call_once(|| {
+    log::warn!(
+      "{} {} is ignored: a test harness's switch, and no harness started this process",
+      crate::colors::yellow("Warning"),
+      ignored.join(" and "),
+    );
+  });
+}
+
 /// The harnesses' rollout stage (`DENO_INTERNAL_KERNEL_SANDBOX_STAGE`, item
 /// 957); a value that isn't one is ignored with a warning.
 fn stage_override_warned() -> Option<AutoStage> {
+  warn_harness_switches_ignored();
   match deno_lib::kernel_sandbox::stage_override() {
     Ok(stage) => stage,
     Err(value) => {
@@ -479,6 +497,7 @@ fn under_denext_dev() -> bool {
 /// for a child of a confined process (its parent's sandbox already holds it;
 /// nesting is the subprocess policy's).
 fn forced_for(subcommand: &DenoSubcommand) -> Option<ForcedEnforce> {
+  warn_harness_switches_ignored();
   let forced = match deno_lib::kernel_sandbox::forced() {
     Ok(forced) => forced?,
     Err(value) => {
@@ -707,6 +726,10 @@ fn context_for(
   ctx.tty_parent = std::io::stdin().is_terminal();
   ctx.ttys = std_stream_ttys();
   ctx.exec_strict = flags.permissions.kernel_sandbox_exec_strict;
+  // the run's supervisor answers a strict scope's exec calls where that
+  // works (Linux, measured; asked only for a strict scope)
+  ctx.exec_gate =
+    ctx.exec_strict && deno_lib::kernel_apply::exec_gate_capability();
   ctx.coverage_dir = cli_options.coverage_dir();
   ctx.profile_dirs = cli_options
     .cpu_prof_dir()
@@ -1502,13 +1525,19 @@ pub fn render_report(
       ExecScope::Unrestricted =>
         "any readable program (children inherit these rules)".to_string(),
       ExecScope::Listed => format!(
-        "only {} (strict, for the whole process tree)",
+        "only {} (strict, for the whole process tree{})",
         p.fs
           .exec_programs
           .iter()
           .map(|p| p.display().to_string())
           .collect::<Vec<_>>()
-          .join(", ")
+          .join(", "),
+        // Linux without a supervising process for the run's exec calls
+        if p.os == TargetOs::Linux && p.fs.exec_gate.is_none() {
+          "; exec targets limited by path only"
+        } else {
+          ""
+        }
       ),
     }
   )
@@ -1786,5 +1815,58 @@ mod npmrc_tests {
     assert!(!sets("@jsr:registry=https://npm.jsr.io/\n"));
     assert!(sets("registry=http://localhost:4261/\n"));
     assert!(sets("@denotest:registry=http://localhost:4261/\n"));
+  }
+}
+
+#[cfg(all(test, unix))]
+mod exec_report_tests {
+  use deno_runtime::deno_permissions::PermissionsOptions;
+
+  use super::*;
+
+  /// The report of a strict run list on Linux, with a supervising process
+  /// for its exec calls (`gate`) or without one.
+  fn report(gate: bool) -> String {
+    let options = PermissionsOptions {
+      allow_run: Some(vec!["sh".to_string()]),
+      ..Default::default()
+    };
+    let mut caps = Capabilities::none(TargetOs::Linux);
+    caps.landlock_abi = Some(6);
+    caps.seccomp = true;
+    caps.enforcer_built = true;
+    let mut ctx =
+      Context::new(caps, KernelSandboxMode::Enforce, PathBuf::from("/project"));
+    ctx.exec_strict = true;
+    ctx.exec_gate = gate;
+    let implicit = ImplicitSet::build(&options, &ctx);
+    let compiled = KernelPolicy::compile(&options, &implicit, &ctx);
+    let resolution = kernel_sandbox_mode(&ModeInputs {
+      kind: Some(RunKind::Run),
+      ..Default::default()
+    })
+    .unwrap();
+    render_report(&resolution, &ctx.caps, &compiled, &[])
+  }
+
+  /// DENEXT.md item 5NN: where no supervising process answers the run's
+  /// exec calls (the capability, given here), the report says what holds a
+  /// strict scope, on the `exec:` line and in the rule's own line.
+  #[test]
+  fn a_strict_scope_says_what_holds_it() {
+    let without = report(false);
+    assert!(
+      without.contains(
+        "(strict, for the whole process tree; exec targets limited by path only)"
+      ),
+      "{without}"
+    );
+    assert!(without.contains(policy::STRICT_EXEC_PATH_ONLY), "{without}");
+    let with = report(true);
+    assert!(
+      with.contains("(strict, for the whole process tree)"),
+      "{with}"
+    );
+    assert!(!with.contains("by path only"), "{with}");
   }
 }

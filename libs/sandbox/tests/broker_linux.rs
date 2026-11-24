@@ -305,6 +305,7 @@ mod linux {
           unix_sockets: false,
           ..Default::default()
         },
+        exec_gate: None,
       }),
       macos: None,
       windows: None,

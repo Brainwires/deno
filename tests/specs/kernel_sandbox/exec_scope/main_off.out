@@ -1,0 +1,12 @@
+sh: ok
+[WILDCARD]sh, helper: ok
+[WILDCARD]helper: ok
+[WILDCARD]helper, itself by descriptor: ok
+[WILDCARD]helper, itself again: ok
+[WILDCARD]sh, path: ran other
+[WILDCARD]sh, loader: ran other
+[WILDCARD]helper, path: ran other
+[WILDCARD]helper, loader: ran other
+[WILDCARD]helper, memory file: ran other
+[WILDCARD]helper, memory file by name: ran other
+[WILDCARD]helper, descriptor: ran other
