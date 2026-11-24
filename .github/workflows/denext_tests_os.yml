@@ -515,6 +515,14 @@ jobs:
           CI_SHARD_TOTAL: ${{ matrix.shard_total }}
           TEST_FILTER: ${{ matrix.filter }}
         run: cargo test -p ${{ matrix.package }} --test ${{ matrix.suite }} ${TEST_FILTER:+-- "$TEST_FILTER"}
+      # The kernel sandbox's integration tests (a pseudo-terminal: the deny
+      # ceiling's prompt, a compiled program's refused prompt) on macOS arm64,
+      # whose leg has no integration suite: after the first specs shard, on
+      # its runner (test_ffi is built). On CI they fail, not skip, without an
+      # enforcer.
+      - name: Kernel sandbox integration tests (macOS)
+        if: inputs.only == '' && inputs.os == 'macos-15' && matrix.suite == 'specs' && matrix.shard == '0'
+        run: cargo test -p integration_tests --test integration -- kernel_sandbox::
       - name: Ensure no git changes
         run: |
           if [[ -n "$(git status --porcelain)" ]]; then
