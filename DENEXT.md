@@ -21405,6 +21405,46 @@ where the changes are discussed.
        the component walk).
      - Node tests enabled: none.
 
+519. **`fix(permissions)`: on macOS a deny keeps the object it names in place**
+     (CLI and runtime; macOS; `libs/sandbox/seatbelt.rs`). Seatbelt matches the
+     path an access names when it is made, so a deny rule is about a name. The
+     profiles that write deny rules (the cli profile of item 425, the deny
+     ceiling of item 502, the desktop profile of item 504 and the lifecycle
+     jail's of item 124) now also keep what the name holds where it is, with
+     one set of rules (`keep_in_place`) after the re-allows:
+     - nothing under a read deny is removed or renamed (`file-write-unlink`;
+       Seatbelt has one operation for both, so native code and a child can't
+       delete a read-denied file either, and `Deno.remove()` of one fails with
+       the OS error where the profile applies), and nothing under a read or
+       write deny gets a second name (`file-link`). The paths allowed again
+       inside a deny (the runtime's own entries) are left out with
+       `require-not`, so the cache's renames and hard links go on;
+     - each folder above a deny, by itself (`literal`, or the cut regex of a
+       case-folded path), is not removed, renamed or replaced
+       (`file-write-unlink`: a rename away, a rename or an exchange onto it).
+       `Deno.rename()` already refuses these for a write deny (item 224);
+     - a folder above a write deny is not created (`file-write-create`). One
+       that exists is unaffected (making it again fails with "exists" before
+       the rule is asked). One that doesn't exist when the profile applies
+       can't be made while it holds: Seatbelt can't tell `mkdir` from a folder
+       moved into place, and a moved folder brings its own content to the
+       denied name. Make the folder before the run. A folder above a read deny
+       can be made.
+     - A rule for one operation outranks a `file-write*` one whatever the
+       order, so the rules hold inside a write scope. What lies beside a
+       denied path, and beside the folders above it, isn't matched. With no
+       deny the profiles are unchanged. Warn mode's reporting profile reports
+       the new rules as it does the others.
+     - Checked against `sandbox-exec` on macOS 27 with the system tools: the
+       rule shapes compile (`require-all` / `require-not`, `literal`, `regex`)
+       and behave as described; an existing folder above a write deny still
+       answers `EEXIST` to `mkdir`.
+     - Tests: `seatbelt::tests::{folders_above_a_filter,
+       profiles_keep_denies_in_place, profile_keeps_read_denies_in_place}`,
+       the updated `deny_only_profile_refuses_only_the_denies`;
+       `tests/specs/kernel_sandbox/deny_only` `denies_stay_in_place_mac`.
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -21416,7 +21456,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 518) are what the prebuilt `libdenort` carries. The
+506-510, 511, 512, 513, 515, 518, 519) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.

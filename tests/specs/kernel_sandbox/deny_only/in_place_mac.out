@@ -1,0 +1,12 @@
+native rename of a read deny: refused
+native rename out of a read deny: refused
+native rename of the folder above a read deny: refused
+native rename beside a read deny: ok
+native read of the deny: refused
+native read of the deny beneath a folder: refused
+native rename of the folder above a write deny: refused
+native create beside a write deny: ok
+native create in the write deny: refused
+native mkdir of a missing folder above a write deny: refused
+native rename onto a missing folder above a write deny: refused
+native mkdir beside it: ok

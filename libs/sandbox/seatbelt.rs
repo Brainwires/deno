@@ -129,6 +129,12 @@ pub fn profile_with_home_read(
   if home_read.is_some() {
     p.push_str(&format!("(deny {HOME_READ_OPS} {denied})\n"));
   }
+  // and they stay where they are (see `keep_in_place`)
+  let deny_filters: Vec<SbFilter> = deny_read
+    .iter()
+    .map(|path| SbFilter::Subpath(path.to_string_lossy().into_owned()))
+    .collect();
+  keep_in_place(&mut p, &deny_filters, &[], &[], &[]);
   p.push_str("(allow file-write*");
   for root in write_roots {
     p.push_str(&format!(" (subpath {})", quote(root)));
@@ -236,6 +242,128 @@ fn filters_text(filters: &[SbFilter]) -> String {
     .join(" ")
 }
 
+/// The folders above the path `filter` names, nearest first, each as a
+/// filter for that folder alone (never `/`). A regex is cut at its
+/// separators when it has the shape `deny_filter` writes (`^/a/b(/|$)`,
+/// where no part holds a `/`); any other regex has none.
+fn folders_above(filter: &SbFilter) -> Vec<SbFilter> {
+  let mut out = Vec::new();
+  match filter {
+    SbFilter::Subpath(path) | SbFilter::Literal(path) => {
+      let mut path = path.trim_end_matches('/');
+      while let Some(at) = path.rfind('/') {
+        path = &path[..at];
+        if path.is_empty() {
+          break;
+        }
+        out.push(SbFilter::Literal(path.to_string()));
+      }
+    }
+    SbFilter::Regex(regex) => {
+      let Some(body) = regex
+        .strip_prefix('^')
+        .and_then(|r| r.strip_suffix("(/|$)"))
+        .filter(|body| body.starts_with('/'))
+      else {
+        return out;
+      };
+      let mut body = body;
+      while let Some(at) = body.rfind('/') {
+        body = &body[..at];
+        if body.is_empty() {
+          break;
+        }
+        out.push(SbFilter::Regex(format!("^{body}$")));
+      }
+    }
+  }
+  out
+}
+
+/// `filters`, but for what `except` matches.
+fn filters_except(filters: &[SbFilter], except: &[SbFilter]) -> String {
+  if except.is_empty() {
+    filters_text(filters)
+  } else {
+    format!(
+      "(require-all (require-any {}) (require-not (require-any {})))",
+      filters_text(filters),
+      filters_text(except)
+    )
+  }
+}
+
+/// The rules that keep a deny on the object it names. Seatbelt matches the
+/// path an access names when it is made, so a deny follows the name, and
+/// what the name holds must stay there:
+///
+/// - nothing under a read deny is removed or renamed (one operation,
+///   `file-write-unlink`: the profile can't tell a rename from a removal),
+///   and nothing under a read or write deny gets a second name
+///   (`file-link`); the paths allowed again inside a deny are left out;
+/// - the folders above a deny, each by itself, are not removed, renamed or
+///   replaced (`file-write-unlink` on the folder: a rename away, a rename
+///   or an exchange onto it);
+/// - a folder above a write deny is not created either
+///   (`file-write-create`): one that exists is untouched by that (making
+///   it again fails with "exists" before the rule is asked), and one that
+///   doesn't exist when the profile applies can't be made while it holds,
+///   since a folder moved into its place would bring its own content to
+///   the denied name. A folder above a read deny can be made.
+///
+/// A rule for one operation outranks a `file-write*` one whatever the
+/// order, so these hold inside a write scope and after a re-allow. What
+/// lies beside a denied path, and beside the folders above it, is not
+/// matched.
+fn keep_in_place(
+  p: &mut String,
+  deny_read: &[SbFilter],
+  deny_write: &[SbFilter],
+  reallow_read: &[SbFilter],
+  reallow_write: &[SbFilter],
+) {
+  if !deny_read.is_empty() {
+    p.push_str(&format!(
+      "(deny file-write-unlink {})\n",
+      filters_except(deny_read, reallow_read)
+    ));
+    p.push_str(&format!(
+      "(deny file-link {})\n",
+      filters_except(deny_read, reallow_read)
+    ));
+  }
+  if !deny_write.is_empty() {
+    p.push_str(&format!(
+      "(deny file-link {})\n",
+      filters_except(deny_write, reallow_write)
+    ));
+  }
+  let above = |filters: &[SbFilter]| {
+    let mut out: Vec<SbFilter> =
+      filters.iter().flat_map(folders_above).collect();
+    out.sort();
+    out.dedup();
+    out
+  };
+  let above_write = above(deny_write);
+  let mut above_any = above(deny_read);
+  above_any.extend(above_write.iter().cloned());
+  above_any.sort();
+  above_any.dedup();
+  if !above_any.is_empty() {
+    p.push_str(&format!(
+      "(deny file-write-unlink {})\n",
+      filters_text(&above_any)
+    ));
+  }
+  if !above_write.is_empty() {
+    p.push_str(&format!(
+      "(deny file-write-create {})\n",
+      filters_text(&above_write)
+    ));
+  }
+}
+
 /// `(allow <op>)` for every path, `(allow <op> <filters>)` for a scope, or
 /// nothing for an empty one.
 fn allow_scope(p: &mut String, op: &str, scope: &SbScope) {
@@ -288,7 +416,8 @@ const CLI_MACH_ALLOW: &[&str] = &[
 /// readable everywhere (path resolution needs it on every ancestor; a file's
 /// existence and size are visible, which the gaps document); the read and write scopes; then the exact denies;
 /// then the re-allows the denies must not swallow (the last matching rule
-/// wins). Code maps only from the load scope, the runtime and the system
+/// wins); then the rules that keep each deny on what it names
+/// ([`keep_in_place`]). Code maps only from the load scope, the runtime and the system
 /// libraries. No LaunchServices, AppleEvents or launchd job submission.
 pub fn cli_profile(plan: &MacosPlan) -> String {
   if plan.deny_only {
@@ -325,6 +454,13 @@ pub fn cli_profile(plan: &MacosPlan) -> String {
       filters_text(&plan.reallow_write)
     ));
   }
+  keep_in_place(
+    &mut p,
+    &plan.deny_read,
+    &plan.deny_write,
+    &plan.reallow_read,
+    &plan.reallow_write,
+  );
   // the terminals: every one refused but those the plan names (the
   // controlling terminal, the standard streams' own), never ioctl-able
   for op in ["file-read*", "file-write*"] {
@@ -497,7 +633,8 @@ pub fn cli_profile(plan: &MacosPlan) -> String {
 /// The profile of a deny ceiling (D1 / D2, `plan.deny_only`): everything is
 /// allowed by default, as with no sandbox, and only the read and write
 /// denies are refused (the last matching rule wins), then the re-allows the
-/// denies must not swallow. File metadata stays readable everywhere, as in
+/// denies must not swallow, then the rules that keep each deny on what it
+/// names ([`keep_in_place`]). File metadata stays readable everywhere, as in
 /// [`cli_profile`] (a rule for one operation outranks a `file-read*` one):
 /// resolving a path stats it, so the image after a re-exec resolves a denied
 /// path to the filter the image before it wrote, and a measured probe is
@@ -534,6 +671,13 @@ pub fn deny_only_profile(plan: &MacosPlan) -> String {
       filters_text(&plan.reallow_write)
     ));
   }
+  keep_in_place(
+    &mut p,
+    &plan.deny_read,
+    &plan.deny_write,
+    &plan.reallow_read,
+    &plan.reallow_write,
+  );
   p.push_str(&format!(
     "(deny sysctl-read (with no-report) (sysctl-name {}))\n",
     quote_str(MARKER_SYSCTL_DENIED)
@@ -560,8 +704,9 @@ const DESKTOP_UNIX_SOCKETS: &[&str] = &["/private/var/run/syslog"];
 ///
 /// - file contents outside the read scope and writes outside the write
 ///   scope (a scope that is `All` refuses nothing), then the exact denies,
-///   then the re-allows (the last matching rule wins); file metadata stays
-///   readable everywhere;
+///   then the re-allows (the last matching rule wins), then the rules that
+///   keep each deny on what it names ([`keep_in_place`]); file metadata
+///   stays readable everywhere;
 /// - mapping code from outside the load scope;
 /// - running programs without a run grant;
 /// - IP sockets per the plan (with no network grant: the loopback
@@ -613,6 +758,13 @@ pub fn desktop_profile(plan: &MacosPlan) -> String {
       filters_text(&plan.reallow_write)
     ));
   }
+  keep_in_place(
+    &mut p,
+    &plan.deny_read,
+    &plan.deny_write,
+    &plan.reallow_read,
+    &plan.reallow_write,
+  );
   // the terminals, as in the cli profile: only the plan's own, never
   // ioctl-able (an app started from a shell must not type into it)
   for op in ["file-read*", "file-write*"] {
@@ -1225,6 +1377,11 @@ mod tests {
         "(deny file-read* (subpath \"/w/.env\"))\n",
         "(deny file-write* (literal \"/w/out/keep\"))\n",
         "(allow file-read* (literal \"/w/.env/deno.json\"))\n",
+        "(deny file-write-unlink (require-all (require-any (subpath \"/w/.env\")) (require-not (require-any (literal \"/w/.env/deno.json\")))))\n",
+        "(deny file-link (require-all (require-any (subpath \"/w/.env\")) (require-not (require-any (literal \"/w/.env/deno.json\")))))\n",
+        "(deny file-link (literal \"/w/out/keep\"))\n",
+        "(deny file-write-unlink (literal \"/w\") (literal \"/w/out\"))\n",
+        "(deny file-write-create (literal \"/w\") (literal \"/w/out\"))\n",
         "(deny sysctl-read (with no-report) (sysctl-name \"kern.singleuser\"))\n",
       )
     );
@@ -1448,5 +1605,165 @@ mod tests {
       .find("(allow process-exec (literal \"/opt/deno\"))")
       .unwrap();
     assert!(deny < own, "{p}");
+  }
+
+  /// The folders above a filter's path, each as itself (never a subpath,
+  /// never `/`); a case-folded regex is cut at its separators.
+  #[test]
+  fn folders_above_a_filter() {
+    let lit = |s: &str| SbFilter::Literal(s.to_string());
+    assert_eq!(
+      folders_above(&SbFilter::Subpath("/a/b c/d".into())),
+      vec![lit("/a/b c"), lit("/a")]
+    );
+    assert_eq!(folders_above(&lit("/a/f.txt")), vec![lit("/a")]);
+    assert_eq!(
+      folders_above(&SbFilter::Subpath("/a/b/".into())),
+      vec![lit("/a")]
+    );
+    assert!(folders_above(&lit("/a")).is_empty());
+    assert!(folders_above(&SbFilter::Subpath("/".into())).is_empty());
+    assert_eq!(
+      folders_above(&SbFilter::Regex("^/a/b\\.c/[dD][eE]/[fF](/|$)".into())),
+      vec![
+        SbFilter::Regex("^/a/b\\.c/[dD][eE]$".into()),
+        SbFilter::Regex("^/a/b\\.c$".into()),
+        SbFilter::Regex("^/a$".into()),
+      ]
+    );
+    // a regex of another shape names no folder
+    for other in ["^/dev/ttys[0-9]+$", "/a/b(/|$)", "^a/b(/|$)"] {
+      assert!(folders_above(&SbFilter::Regex(other.into())).is_empty());
+    }
+  }
+
+  /// Every profile with denies keeps them on what they name: nothing under
+  /// a read deny is removed or renamed, nothing under a deny is linked, the
+  /// folders above a deny are not removed, renamed or replaced, and those
+  /// above a write deny are not created. The rules name the denied paths
+  /// and each folder above by itself, so what lies beside them is free.
+  #[test]
+  fn profiles_keep_denies_in_place() {
+    let mut plan = cli_plan();
+    plan.deny_read = vec![
+      SbFilter::Subpath("/w/.env".into()),
+      SbFilter::Regex("^/w/new/[kK](/|$)".into()),
+    ];
+    plan.deny_write = vec![SbFilter::Subpath("/w/out/keep/x".into())];
+    plan.reallow_read = vec![];
+    plan.reallow_write = vec![SbFilter::Subpath("/w/out/keep/x/tmp".into())];
+    let read = "(subpath \"/w/.env\") (regex #\"^/w/new/[kK](/|$)\")";
+    let write = "(require-all (require-any (subpath \"/w/out/keep/x\")) (require-not (require-any (subpath \"/w/out/keep/x/tmp\"))))";
+    let rules = [
+      format!("(deny file-write-unlink {read})\n"),
+      format!("(deny file-link {read})\n"),
+      format!("(deny file-link {write})\n"),
+      // above the read denies: /w, ^/w/new$, ^/w$; above the write deny:
+      // /w/out/keep, /w/out, /w
+      "(deny file-write-unlink (literal \"/w\") (literal \"/w/out\") (literal \"/w/out/keep\") (regex #\"^/w$\") (regex #\"^/w/new$\"))\n".to_string(),
+      "(deny file-write-create (literal \"/w\") (literal \"/w/out\") (literal \"/w/out/keep\"))\n".to_string(),
+    ];
+    let ceiling = MacosPlan {
+      deny_only: true,
+      ..plan.clone()
+    };
+    for (name, p) in [
+      ("cli", cli_profile(&plan)),
+      ("ceiling", cli_profile(&ceiling)),
+      ("desktop", desktop_profile(&plan)),
+    ] {
+      // in this order, after the re-allow
+      let mut at = p
+        .find("(allow file-write* (subpath \"/w/out/keep/x/tmp\"))\n")
+        .unwrap_or_else(|| panic!("{name}: no re-allow\n{p}"));
+      for rule in &rules {
+        let found = p[at..].find(rule.as_str()).unwrap_or_else(|| {
+          panic!("{name}: missing or out of order: {rule}\n{p}")
+        });
+        at += found + rule.len();
+      }
+      // nothing else names these operations, and no rule of theirs takes a
+      // folder above a deny with what is beneath it
+      for line in p.lines().filter(|l| {
+        l.contains("file-write-unlink")
+          || l.contains("file-write-create")
+          || l.contains("file-link")
+      }) {
+        assert!(rules.iter().any(|r| r.trim_end() == line), "{name}: {line}");
+        assert!(line.starts_with("(deny "), "{name}: {line}");
+        for above in ["\"/w\")", "\"/w/out\")", "\"/w/out/keep\")"] {
+          assert!(!line.contains(&format!("(subpath {above}")), "{line}");
+        }
+      }
+    }
+    // warn's reporting profile reports them, and refuses nothing
+    let r = cli_report_profile(&plan, "t", &[]).unwrap();
+    assert!(
+      r.contains(&format!(
+        "(allow (with report) (with message \"t\") file-write-unlink {read})\n"
+      )),
+      "{r}"
+    );
+    assert!(!r.contains("(deny "), "{r}");
+    // no denies: none of it
+    let mut none = cli_plan();
+    none.deny_read.clear();
+    none.deny_write.clear();
+    none.reallow_read.clear();
+    let ceiling = MacosPlan {
+      deny_only: true,
+      ..none.clone()
+    };
+    for p in [
+      cli_profile(&none),
+      cli_profile(&ceiling),
+      desktop_profile(&none),
+    ] {
+      for op in ["file-write-unlink", "file-write-create", "file-link"] {
+        assert!(!p.contains(op), "{op} in\n{p}");
+      }
+    }
+    // a read deny alone: its folders can still be made
+    none.deny_read = vec![SbFilter::Subpath("/w/a/b".into())];
+    let p = cli_profile(&none);
+    assert!(
+      p.contains(
+        "(deny file-write-unlink (literal \"/w\") (literal \"/w/a\"))\n"
+      ),
+      "{p}"
+    );
+    assert!(!p.contains("file-write-create"), "{p}");
+  }
+
+  /// A jailed script's read denies stay in place too; the profile's write
+  /// roots and their hard links are as they were.
+  #[test]
+  fn profile_keeps_read_denies_in_place() {
+    let p = profile(
+      &[PathBuf::from("/proj/node_modules")],
+      &[PathBuf::from("/home/u/.ssh"), PathBuf::from("/proj/.npmrc")],
+      OsNet::Denied,
+    );
+    let denied = "(subpath \"/home/u/.ssh\") (subpath \"/proj/.npmrc\")";
+    let unlink = p
+      .find(&format!("(deny file-write-unlink {denied})\n"))
+      .unwrap_or_else(|| panic!("{p}"));
+    assert!(p.contains(&format!("(deny file-link {denied})\n")), "{p}");
+    assert!(
+      p.contains(
+        "(deny file-write-unlink (literal \"/home\") (literal \"/home/u\") (literal \"/proj\"))\n"
+      ),
+      "{p}"
+    );
+    assert!(!p.contains("file-write-create"), "{p}");
+    // the allows come after
+    let allow = p.find("(allow file-write* ").unwrap();
+    let link = p
+      .find("(allow file-link (subpath \"/proj/node_modules\"))")
+      .unwrap();
+    assert!(unlink < allow && unlink < link, "{p}");
+    // no denies (a test's profile): no rule
+    let p = profile(&[PathBuf::from("/proj")], &[], OsNet::Denied);
+    assert!(!p.contains("file-write-unlink"), "{p}");
   }
 }
