@@ -177,6 +177,50 @@ Deno.test("structuredClone still transfers a nested MessagePort", async () => {
   c.port2.close();
 });
 
+Deno.test("postMessage reports a nested MessagePort missing from the transfer list", () => {
+  // A transferable in the message but not in the transfer list keeps its own
+  // message (Node's workerData relies on it), not the non-serializable one.
+  const a = new MessageChannel();
+  const b = new MessageChannel();
+  try {
+    assertThrows(
+      () => b.port1.postMessage({ port: a.port1 }),
+      DOMException,
+      "Object that needs transfer was found in message but not listed in transferList",
+    );
+    assertThrows(
+      () => b.port1.postMessage({ port: a.port1 }, []),
+      DOMException,
+      "Object that needs transfer was found in message but not listed in transferList",
+    );
+  } finally {
+    for (const port of [a.port1, a.port2, b.port1, b.port2]) port.close();
+  }
+});
+
+Deno.test("structuredClone clones the prototype of a non-serializable subclass", () => {
+  // A subclass's prototype inherits the non-serializable marker but isn't a
+  // platform object, so it clones as an ordinary object, nested or not;
+  // instances of the subclass are still rejected.
+  class MockResponse extends Response {}
+  class MockTarget extends EventTarget {}
+  for (const Class of [MockResponse, MockTarget]) {
+    assertEquals(structuredClone(Class.prototype), {});
+    assertEquals(structuredClone({ value: Class.prototype }), { value: {} });
+    assertEquals(structuredClone([Class.prototype]), [{}]);
+    for (const value of [new Class(), Object.create(Class.prototype)]) {
+      assertEquals(
+        assertThrows(() => structuredClone(value), DOMException).name,
+        "DataCloneError",
+      );
+      assertEquals(
+        assertThrows(() => structuredClone({ value }), DOMException).name,
+        "DataCloneError",
+      );
+    }
+  }
+});
+
 Deno.test("structuredClone geometry interfaces", () => {
   const values = [
     new DOMPointReadOnly(1, 2, 3, 4),
