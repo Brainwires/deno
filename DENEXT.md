@@ -21472,6 +21472,41 @@ where the changes are discussed.
        `tests/specs/run/env_file_runtime_denylist`.
      - Node tests enabled: none.
 
+521. **`fix(kernel)`: a confined desktop app writes its own folders, not the
+     shared ones** (runtime; macOS and Linux; `cli/lib/kernel_desktop.rs`).
+     Follow-up to item 504's engine paths, which are added to the kernel's
+     grant whatever the app was granted.
+     - macOS: a web-view app was granted the whole per-user folder
+       (`/private/var/folders/xx/yyyy`: `0`, `C` and `T`), where every other
+       app keeps its caches and the per-user daemons their state (the
+       LaunchServices database among them). Every engine now gets the app's
+       own folder of the per-user cache (`C/<app identifier>`: Metal's,
+       WebKit's and CFNetwork's caches) and the temp folder (`T`), as the GPUI
+       host already did.
+     - Linux: `$XDG_RUNTIME_DIR` is read (its sockets are connected to, the
+       display's authority files read) and written only in the toolkits' own
+       folders (`dconf`, `pulse`, `webkitgtk`, for a web engine): the folder
+       also holds the systemd user manager's runtime units and other programs'
+       sockets and state. Chromium's certificate database (`~/.pki`, the NSS
+       database the user's browsers share) and GStreamer's registry
+       (`~/.cache/gstreamer-1.0`) are read only: Chromium goes on without a
+       persistent database of its own, GStreamer scans its plugins at each
+       start. No shared shader cache (`~/.cache/mesa_shader_cache`,
+       `mesa_shader_cache_db`, `nvidia`, `~/.nv`) is written by a web engine
+       either, as for the GPUI host: slower first frames, nothing else.
+     - What this does not hold (unchanged, now said in
+       `kernel_desktop::engine_paths`): Landlock has no rule for connecting to
+       a Unix socket, so on Linux the session bus stays reachable, and
+       `systemd --user` on it starts a program outside the sandbox on request
+       (`StartTransientUnit`). A confined Linux desktop app is held for files,
+       the programs it starts itself and the network, not against the
+       session's services. On macOS the mach services stay reachable (item
+       504's guarantee matrix).
+     - Tests: `kernel_desktop::tests::{linux_engine_paths, macos_engine_paths}`
+       (the shared folders are not in the write grant of any engine; the
+       toolkits' own are).
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -21483,7 +21518,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 518, 519) are what the prebuilt `libdenort` carries. The
+506-510, 511, 512, 513, 515, 518, 519, 521) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.
