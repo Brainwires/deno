@@ -21551,6 +21551,21 @@ worker), which expects every capitalized global to refuse cloning unless it is
 an ECMAScript built-in or `[Serializable]`, so a new interface has to be
 classified. - Node tests enabled: none.
 
+5NN. **`fix(ext/web)`: `QuotaExceededError` and `WebSocketError` survive
+`structuredClone`** (port of theende/ende 316bddd9db, MIT; no upstream PR;
+`ext/web/01_dom_exception.js`, `ext/web/13_message_port.js`,
+`ext/websocket/02_websocketstream.js`). Both are `[Serializable]` and add their
+own fields to DOMException's serialization steps, but a clone came back as a
+plain DOMException without `quota`, `requested`, `closeCode` or `reason`.
+DOMException's serialization now lets a subclass set the serialized type and add
+its fields, and each subclass registers a deserializer that rebuilds it with the
+original stack; WebSocketError's lazily loaded module is loaded by the message
+port module when one arrives. - Tests: `structured_clone_test.ts`'s DOMException
+subclass tests (cloned directly and through a fresh worker); WPT
+`structuredclone_0.html`'s two QuotaExceededError cases (expectations updated).
+
+- Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -21562,11 +21577,11 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN) are
-what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
-`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
-in the branch too, but a stock CLI does not run them; denext's own launcher
-provides that environment.
+506-510, 511, 512, 513, 515, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN)
+are what the prebuilt `libdenort` carries. The CLI-side parts (for example
+writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+launchers) are in the branch too, but a stock CLI does not run them; denext's
+own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
