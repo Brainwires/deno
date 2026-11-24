@@ -21566,6 +21566,16 @@ subclass tests (cloned directly and through a fresh worker); WPT
 
 - Node tests enabled: none.
 
+5NN. **`fix(dts)`: `WebSocketCloseInfo`'s close code is `closeCode`** (port of
+theende/ende fd187f65a3, MIT; no upstream PR;
+`cli/tsc/dts/lib.deno.unstable.d.ts`). The type declared `code`, but the
+WebSocketStream spec and the runtime use `closeCode` (`close()` reads it,
+`closed` resolves with `{ closeCode, reason }`, `WebSocketError` takes it), so
+type-checked code had to cast, and `info.code` type-checked but was always
+`undefined`. - Tests: `tests/specs/check/websocket_close_info` (closes a stream,
+reads `closed`, constructs a `WebSocketError`); the structured clone test drops
+its cast. - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
