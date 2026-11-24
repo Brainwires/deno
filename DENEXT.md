@@ -21140,6 +21140,20 @@ where the changes are discussed.
        `GetFinalPathNameByHandleW`), so a root moved after it was opened writes
        only where writing is allowed; a directory that has no path any more
        refuses writes.
+     - **The kernel's own trees** (`/dev`, and on Linux `/proc` and `/sys`:
+       `checked_open::KERNEL_TREES`). By name they are held to the special-file
+       rule (`check_special_file`: `/dev/null` needs no grant,
+       `/proc/<pid>/environ` and `/proc/self/mem` every permission), and a Unix
+       root holds them to the same one (`unix::Root::scope`): a path that names
+       one of them (`proc/self/environ` in a root on `/`, anything in a root
+       opened on one) is checked as `Deno.open()` checks it, and a root the
+       trees lie beneath takes them as denies for every other path, so a link in
+       the root that leads into one is refused where it is followed, as a link
+       out of the root is. With every permission granted nothing is held back.
+       Without it, a root on `/` followed a link to `/dev/null` before and
+       refuses it now (name `dev/null` instead), and on Linux it needs `/proc`
+       mounted (the object each open reached is read back). Windows already
+       checks each path as `Deno.open` does.
      - Not covered: the files a `deno compile` program embeds (a root opens the
        real file system); `..` is lexical, as the permission checks resolve it
        (`link/../x` is `x`, not `x` beside the link's target); under
@@ -21154,8 +21168,14 @@ where the changes are discussed.
        inside followed (Unix) or refused (Windows); the root's path swapped for
        a link out after the open; a worker swapping a folder for a link out
        while the root reads through it, never reading outside; writes need
-       write, opening needs read; `close()` and the constructor); `root::tests`
-       (relative path resolution, Windows prefixes); `root_windows::tests`
+       write, opening needs read; `close()` and the constructor; with unscoped
+       read and write only, a root on `/` refusing `dev/stdin`,
+       `proc/self/environ`, `proc/<pid>/environ`, `proc/self/mem` and
+       `proc/self/root` for `lstat`, opens, reads and writes, by name, through
+       `..`, through a file link and a folder link, a root opened on
+       `/proc/self/root` or `/dev` refused, `dev/null` read); `root::tests`
+       (relative path resolution, Windows prefixes); `root::unix::tests`
+       (`the_kernel_trees_keep_the_special_file_rule`); `root_windows::tests`
        (files, folders, rename, a recursive remove with a read-only file,
        junctions out and inside never followed, the root's path swapped for a
        junction).

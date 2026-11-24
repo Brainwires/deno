@@ -921,10 +921,12 @@ mod unix {
   use deno_permissions::OpenAccessKind;
   use deno_permissions::PermissionsContainer;
   use deno_permissions::checked_open::CheckedOpenOptions;
+  use deno_permissions::checked_open::KERNEL_TREES;
   use deno_permissions::checked_open::OpenScope;
   use deno_permissions::checked_open::OpenedPath;
   use deno_permissions::checked_open::open_checked;
   use deno_permissions::checked_open::opened_path;
+  use deno_permissions::checked_open::opens_by_name;
 
   use crate::OpenOptions;
   use crate::interface::FsDirEntry;
@@ -1018,12 +1020,55 @@ mod unix {
       }
     }
 
+    /// The scope an operation of `access` is opened in: the root's
+    /// descriptor, outside the denies. `named` is the path the operation
+    /// names, when it names one.
+    ///
+    /// The kernel's own trees (`/dev`, Linux's `/proc` and `/sys`) are not
+    /// places in the file system, and a by-name open is held to rules of
+    /// their own there (`check_special_file`: most of `/proc` takes every
+    /// permission). A root is held to the same ones: a path that names one
+    /// of the trees is checked as `Deno.open()` checks it, and a root the
+    /// trees lie beneath (one opened on `/`) takes them as denies for every
+    /// other path, so a link in the root that leads into one is refused as
+    /// a link out of the root is. Nothing changes with every permission
+    /// granted, which is what the special-file check asks for at most.
+    fn scope(
+      &self,
+      permissions: &PermissionsContainer,
+      access: OpenAccessKind,
+      named: Option<&Path>,
+      api_name: &str,
+    ) -> FsResult<OpenScope> {
+      let mut paths = vec![self.path.clone()];
+      paths.extend(self.aliases.iter().cloned());
+      let mut denies = permissions.open_denies(access);
+      if !permissions.has_all_permissions() {
+        if let Some(named) = named.filter(|named| opens_by_name(named)) {
+          let _ = permissions.check_open(
+            std::borrow::Cow::Borrowed(named),
+            access,
+            Some(api_name),
+          )?;
+        } else {
+          denies.extend(
+            KERNEL_TREES
+              .iter()
+              .map(Path::new)
+              .filter(|tree| paths.iter().any(|root| tree.starts_with(root)))
+              .map(Path::to_path_buf),
+          );
+        }
+      }
+      Ok(OpenScope::with_open_root(paths, self.fd.clone(), denies)?)
+    }
+
     pub fn prepare(
       &self,
       permissions: &PermissionsContainer,
       components: Vec<OsString>,
       access: OpenAccessKind,
-      _api_name: &str,
+      api_name: &str,
     ) -> FsResult<Prepared> {
       let mut abs = self.path.clone();
       let mut rel = PathBuf::new();
@@ -1031,13 +1076,7 @@ mod unix {
         abs.push(&c);
         rel.push(&c);
       }
-      let mut paths = vec![self.path.clone()];
-      paths.extend(self.aliases.iter().cloned());
-      let scope = OpenScope::with_open_root(
-        paths,
-        self.fd.clone(),
-        permissions.open_denies(access),
-      )?;
+      let scope = self.scope(permissions, access, Some(&abs), api_name)?;
       Ok(Prepared {
         abs,
         rel: rel.to_string_lossy().into_owned(),
@@ -1160,12 +1199,16 @@ mod unix {
     reason = "a real folder with real links for the root to open"
   )]
   mod tests {
+    use std::ffi::OsString;
     use std::io::Read;
+    use std::path::Path;
     use std::sync::Arc;
 
     use deno_permissions::CheckedPathBuf;
     use deno_permissions::OpenAccessKind;
+    use deno_permissions::Permissions;
     use deno_permissions::PermissionsContainer;
+    use deno_permissions::PermissionsOptions;
     use deno_permissions::RuntimePermissionDescriptorParser;
 
     use super::Root;
@@ -1211,6 +1254,99 @@ mod unix {
       assert_eq!(read(&root, "f.txt").unwrap(), "inside");
       assert_eq!(read(&root, "abs").unwrap(), "inside");
       assert!(read(&root, "out").is_err());
+    }
+
+    /// Unscoped read and write, and nothing else.
+    fn read_write_only() -> PermissionsContainer {
+      let parser =
+        RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys);
+      let perms = Permissions::from_options(
+        &parser,
+        &PermissionsOptions {
+          allow_read: Some(vec![]),
+          allow_write: Some(vec![]),
+          prompt: false,
+          ..Default::default()
+        },
+      )
+      .unwrap();
+      PermissionsContainer::new(Arc::new(parser), perms)
+    }
+
+    fn components(path: &Path) -> Vec<OsString> {
+      path
+        .components()
+        .filter_map(|c| match c {
+          std::path::Component::Normal(name) => Some(name.to_os_string()),
+          _ => None,
+        })
+        .collect()
+    }
+
+    /// A root on `/` holds the kernel's trees to the special-file rule a
+    /// by-name open has: a path that names one is checked as `Deno.open()`
+    /// checks it, and a link that leads into one is refused.
+    #[test]
+    fn the_kernel_trees_keep_the_special_file_rule() {
+      let perms = read_write_only();
+      let slash = Path::new("/");
+      let root =
+        Root::open_dir(&CheckedPathBuf::unsafe_new(slash.to_path_buf()), slash)
+          .unwrap();
+      let prepare = |path: &Path, access| {
+        root.prepare(&perms, components(path), access, "test")
+      };
+
+      // no grant by name, none here
+      let null = prepare(Path::new("/dev/null"), OpenAccessKind::Read).unwrap();
+      root.open(&null, &OpenOptions::read()).unwrap();
+
+      // every permission by name, every permission here
+      let mut refused = vec!["/dev/stdin"];
+      if cfg!(target_os = "linux") {
+        refused.extend(["/proc/self/environ", "/proc/self/mem"]);
+      }
+      let tmp = tempfile::tempdir().unwrap();
+      let dir = std::fs::canonicalize(tmp.path()).unwrap();
+      for (i, path) in refused.into_iter().enumerate() {
+        for access in [
+          OpenAccessKind::Read,
+          OpenAccessKind::ReadNoFollow,
+          OpenAccessKind::ReadWrite,
+        ] {
+          assert!(prepare(Path::new(path), access).is_err(), "{path}");
+        }
+        // ... and through a link in the root: the name is no tree's, so it
+        // prepares, and the open is refused where the link leads
+        let link = dir.join(format!("link{i}"));
+        std::os::unix::fs::symlink(path, &link).unwrap();
+        let p = prepare(&link, OpenAccessKind::Read).unwrap();
+        let err = root.open(&p, &OpenOptions::read()).unwrap_err();
+        assert_eq!(
+          err.kind(),
+          std::io::ErrorKind::PermissionDenied,
+          "{path}: {err}"
+        );
+      }
+      // a link to a folder of one, the file named after it
+      let devices = dir.join("devices");
+      std::os::unix::fs::symlink("/dev", &devices).unwrap();
+      let p =
+        prepare(&devices.join("stdin"), OpenAccessKind::ReadNoFollow).unwrap();
+      assert!(root.stat(&p, false).is_err());
+
+      // with every permission nothing is held back
+      let all = PermissionsContainer::allow_all(Arc::new(
+        RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys),
+      ));
+      root
+        .prepare(
+          &all,
+          components(Path::new("/dev/stdin")),
+          OpenAccessKind::ReadNoFollow,
+          "test",
+        )
+        .unwrap();
     }
   }
 }

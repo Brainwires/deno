@@ -7085,6 +7085,20 @@ impl PermissionsContainer {
     Ok(())
   }
 
+  /// denext: whether write access is granted everywhere, without asking
+  /// (the write twin of [`Self::query_read_all`]).
+  #[inline(always)]
+  pub fn query_write_all(&self) -> bool {
+    self.inner.lock().write.query(None) == PermissionState::Granted
+  }
+
+  /// denext: whether every permission is granted (`--allow-all`), without
+  /// an error to build: what [`Self::check_has_all_permissions`] asks.
+  #[inline(always)]
+  pub fn has_all_permissions(&self) -> bool {
+    self.inner.lock().all_granted()
+  }
+
   /// Checks the creation of a symlink at `link` pointing to `target`
   /// (`Deno.symlink()`, `node:fs.symlink`). That takes unscoped read and
   /// write, since a link's target is only resolved when it is traversed;

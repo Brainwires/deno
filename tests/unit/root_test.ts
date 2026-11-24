@@ -377,6 +377,118 @@ Deno.test(
 );
 
 Deno.test(
+  { ignore: windows, permissions: { read: true, write: true } },
+  async function rootHoldsTheKernelTreesToTheSpecialFileRule() {
+    // unscoped read and write, and nothing else: what `Deno.open()` asks
+    // every permission for by name, it asks for through a root too
+    using b = bed();
+    using root = await Deno.openRoot("/");
+    const beneath = (path: string) => path.replace(/^\/+/, "");
+
+    // needs no grant by name, so none here
+    assertEquals(root.readFileSync("dev/null").length, 0);
+    assertEquals((await root.readFile("dev/null")).length, 0);
+
+    const refused = ["dev/stdin"];
+    if (Deno.build.os === "linux") {
+      refused.push(
+        "proc/self/environ",
+        `proc/${Deno.pid}/environ`,
+        "proc/self/mem",
+        "proc/self/root",
+        "tmp/../proc/self/environ",
+      );
+    }
+    for (const path of refused) {
+      assertThrows(() => Deno.lstatSync("/" + path), Deno.errors.NotCapable);
+      assertThrows(
+        () => root.lstatSync(path),
+        Deno.errors.NotCapable,
+        undefined,
+        path,
+      );
+      await assertRejects(
+        () => root.lstat(path),
+        Deno.errors.NotCapable,
+        undefined,
+        path,
+      );
+      assertThrows(
+        () => root.openSync(path),
+        Deno.errors.NotCapable,
+        undefined,
+        path,
+      );
+      await assertRejects(
+        () => root.open(path, { read: true, write: true }),
+        Deno.errors.NotCapable,
+        undefined,
+        path,
+      );
+      assertThrows(
+        () => root.readFileSync(path),
+        Deno.errors.NotCapable,
+        undefined,
+        path,
+      );
+      assertThrows(
+        () => root.writeFileSync(path, new Uint8Array([0])),
+        Deno.errors.NotCapable,
+        undefined,
+        path,
+      );
+      // a link in the root that leads there is refused as a link out is
+      const link = join(b.root, path.replaceAll(/[^a-z]/g, "_"));
+      Deno.symlinkSync("/" + path.replace("tmp/../", ""), link);
+      assertThrows(
+        () => root.readFileSync(beneath(link)),
+        Deno.errors.NotCapable,
+        undefined,
+        path,
+      );
+      await assertRejects(
+        () => root.open(beneath(link), { write: true }),
+        Deno.errors.NotCapable,
+        undefined,
+        path,
+      );
+    }
+    // a folder link, with the tree's file named after it
+    Deno.symlinkSync("/dev", join(b.root, "devices"));
+    assertThrows(
+      () => root.lstatSync(beneath(join(b.root, "devices", "stdin"))),
+      Deno.errors.NotCapable,
+    );
+
+    if (Deno.build.os === "linux") {
+      assertThrows(
+        () => root.readDirSync("proc/self/fd"),
+        Deno.errors.NotCapable,
+      );
+      // nor is a root opened on one of them a way in
+      await assertRejects(
+        () => Deno.openRoot("/proc/self/root"),
+        Deno.errors.NotCapable,
+      );
+      assertThrows(
+        () => Deno.openRootSync("/proc/self/root"),
+        Deno.errors.NotCapable,
+      );
+    }
+    await assertRejects(() => Deno.openRoot("/dev"), Deno.errors.NotCapable);
+  },
+);
+
+Deno.test(
+  { ignore: windows },
+  function rootReachesTheKernelTreesWithEveryPermission() {
+    using root = Deno.openRootSync("/");
+    assertEquals(root.readFileSync("dev/null").length, 0);
+    assert(root.lstatSync("dev/stdin") !== null);
+  },
+);
+
+Deno.test(
   { permissions: { read: true, write: false } },
   async function rootWritesNeedWriteAccess() {
     using root = await Deno.openRoot(".");
