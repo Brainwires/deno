@@ -24,6 +24,11 @@ use deno_webgpu::canvas::ContextData;
 
 pub struct BlobHandle(pub v8::Global<v8::Function>);
 
+/// denext: in the state of a runtime that registered `deno_canvas_offscreen`
+/// (no `deno_webgpu` extension): an `OffscreenCanvas` has no `"webgpu"`
+/// context there.
+pub struct NoWebGpuContext;
+
 pub type CreateCanvasContext =
   for<'s> fn(
     instance: Option<deno_webgpu::Instance>,
@@ -198,6 +203,7 @@ impl OffscreenCanvas {
 
   fn get_context<'s>(
     &self,
+    state: Rc<RefCell<OpState>>,
     #[this] this: v8::Global<v8::Object>,
     scope: &mut v8::PinScope<'s, '_>,
     #[webidl] context_id: String,
@@ -210,9 +216,16 @@ impl OffscreenCanvas {
       ));
     }
     if self.active_context.get().is_none() {
+      // denext: read now, so that the state is not borrowed while the
+      // context is created (converting `options` can run script)
+      let no_webgpu = state.borrow().has::<NoWebGpuContext>();
       let create_context: CreateCanvasContext = match context_id.as_str() {
         super::bitmaprenderer::CONTEXT_ID => super::bitmaprenderer::create as _,
-        deno_webgpu::canvas::CONTEXT_ID => deno_webgpu::canvas::create as _,
+        // denext: not without `deno_webgpu`'s extension (falls through to
+        // "not supported": null)
+        deno_webgpu::canvas::CONTEXT_ID if !no_webgpu => {
+          deno_webgpu::canvas::create as _
+        }
         // https://html.spec.whatwg.org/multipage/canvas.html#dom-offscreencanvas-getcontext
         // step 1: if the user agent does not support the requested context,
         // then return null.
