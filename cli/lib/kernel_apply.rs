@@ -1578,6 +1578,7 @@ mod tests {
     assert!(files(&[]).is_empty());
   }
 
+  #[cfg(unix)]
   fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir()
       .join(format!("deno_kernel_apply_{name}_{}", std::process::id()));
