@@ -155,7 +155,10 @@ async function alive(pid: number): Promise<boolean> {
   try {
     const stat = await Deno.readTextFile(`/proc/${pid}/stat`);
     // The state follows the parenthesised command name.
-    const state = stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3);
+    const state = stat.slice(
+      stat.lastIndexOf(")") + 2,
+      stat.lastIndexOf(")") + 3,
+    );
     return state !== "Z" && state !== "X";
   } catch {
     return false;
