@@ -307,13 +307,25 @@ mod impl_ {
       queue_ok.set_index(scope, 0, v);
     }
     let raw_fd = raw_fd_to_option(raw_fd);
+    // denext: with nothing queued in front of it, a message without a
+    // handle is written now as far as the socket takes it (libuv's
+    // uv_try_write): sent before an exit that follows at once.
+    let written = if old == 0 && raw_fd.is_none() {
+      stream.try_write_now(&serialized)
+    } else {
+      0
+    };
     Ok(async move {
       let cancel = stream.cancel.clone();
-      let result = stream
-        .clone()
-        .write_msg_bytes(&serialized, raw_fd)
-        .or_cancel(cancel)
-        .await;
+      let result = if written < serialized.len() {
+        stream
+          .clone()
+          .write_msg_bytes(&serialized[written..], raw_fd)
+          .or_cancel(cancel)
+          .await
+      } else {
+        Ok(Ok(()))
+      };
       // adjust count even on error
       stream
         .queued_bytes
@@ -513,13 +525,25 @@ mod impl_ {
       queue_ok.set_index(scope, 0, v);
     }
     let raw_fd = raw_fd_to_option(raw_fd);
+    // denext: with nothing queued in front of it, a message without a
+    // handle is written now as far as the socket takes it (libuv's
+    // uv_try_write): sent before an exit that follows at once.
+    let written = if old == 0 && raw_fd.is_none() {
+      stream.try_write_now(&serialized)
+    } else {
+      0
+    };
     Ok(async move {
       let cancel = stream.cancel.clone();
-      let result = stream
-        .clone()
-        .write_msg_bytes(&serialized, raw_fd)
-        .or_cancel(cancel)
-        .await;
+      let result = if written < serialized.len() {
+        stream
+          .clone()
+          .write_msg_bytes(&serialized[written..], raw_fd)
+          .or_cancel(cancel)
+          .await
+      } else {
+        Ok(Ok(()))
+      };
       // adjust count even on error
       stream
         .queued_bytes
