@@ -14,7 +14,11 @@
 
 mod dom_ops;
 mod host_ops;
+#[cfg(test)]
+mod op_allowlist;
 mod page;
+#[cfg(test)]
+mod tests;
 
 pub use host_ops::ConsoleLevel;
 pub use host_ops::ConsoleMessage;
