@@ -141,6 +141,21 @@ const _dispatched = Symbol("[[dispatched]]");
 const _isTrusted = Symbol("[[isTrusted]]");
 const _path = Symbol("[[path]]");
 
+// denext: the keys of an Event's internal slots, for an embedder's extension
+// that dispatches events along a tree of its own (ext/web_page: the DOM
+// Standard's dispatch over nodes, which `dispatch()` below does not do).
+// Only this module's result carries them; nothing here uses the object.
+const eventSlots = ObjectFreeze({
+  __proto__: null,
+  attributes: _attributes,
+  canceledFlag: _canceledFlag,
+  stopPropagationFlag: _stopPropagationFlag,
+  stopImmediatePropagationFlag: _stopImmediatePropagationFlag,
+  inPassiveListener: _inPassiveListener,
+  dispatched: _dispatched,
+  path: _path,
+});
+
 const EMPTY_EVENT_INIT = ObjectFreeze(ObjectSetPrototypeOf({}, null));
 
 class Event {
@@ -1743,6 +1758,7 @@ return {
   dispatch,
   ErrorEvent,
   Event,
+  eventSlots,
   eventTargetData,
   EventTarget,
   EventTargetPrototype,
