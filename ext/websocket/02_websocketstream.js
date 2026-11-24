@@ -18,6 +18,8 @@ const {
   ArrayPrototypeJoin,
   ArrayPrototypeMap,
   DateNow,
+  Error,
+  ObjectDefineProperty,
   ObjectPrototypeIsPrototypeOf,
   PromisePrototypeCatch,
   PromisePrototypeThen,
@@ -96,6 +98,26 @@ const _opened = Symbol("[[opened]]");
 const _closed = Symbol("[[closed]]");
 const _earlyClose = Symbol("[[earlyClose]]");
 const _closeSent = Symbol("[[closeSent]]");
+// denext: a connection the embedder's address deny list refused (the
+// `cause_code` of the op's error) has the code on its `cause`, where a
+// `fetch()` refused by a client's `denyAddresses` has it:
+// `error.cause.code === "ERR_ADDRESS_DENIED"`.
+function setConnectErrorCause(error, opError) {
+  const code = opError?.cause_code;
+  if (typeof code !== "string") {
+    return;
+  }
+  const cause = new Error(opError.message);
+  cause.code = code;
+  ObjectDefineProperty(error, "cause", {
+    __proto__: null,
+    value: cause,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
 class WebSocketStream {
   [_rid];
 
@@ -376,7 +398,9 @@ class WebSocketStream {
             err = options.signal.reason;
           } else {
             core.tryClose(cancelRid);
-            err = new WebSocketError(err.message);
+            const opError = err;
+            err = new WebSocketError(opError.message);
+            setConnectErrorCause(err, opError);
           }
           this[_opened].reject(err);
           this[_closed].reject(err);

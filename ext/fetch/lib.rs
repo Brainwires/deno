@@ -340,7 +340,13 @@ pub fn get_or_create_client_from_state(
   } else {
     let permissions = state.borrow::<PermissionsContainer>().clone();
     let options = state.borrow::<Options>();
-    let client = create_client_from_options(options, Some(permissions))?;
+    // denext: the runtime's default client denies what the embedder's
+    // deny list denies
+    let client = create_client_from_options_denying(
+      options,
+      Some(permissions),
+      deny_addresses::EmbedderDenyList::from_state(state),
+    )?;
     state.put::<Client>(client.clone());
     Ok(client)
   }
@@ -349,6 +355,14 @@ pub fn get_or_create_client_from_state(
 pub fn create_client_from_options(
   options: &Options,
   permissions: Option<PermissionsContainer>,
+) -> Result<Client, HttpClientCreateError> {
+  create_client_from_options_denying(options, permissions, None)
+}
+
+fn create_client_from_options_denying(
+  options: &Options,
+  permissions: Option<PermissionsContainer>,
+  deny_addresses: Option<Arc<deny_addresses::AddressDenyList>>,
 ) -> Result<Client, HttpClientCreateError> {
   create_http_client(
     &options.user_agent,
@@ -377,7 +391,7 @@ pub fn create_client_from_options(
       client_builder_hook: options.client_builder_hook,
       http2_max_header_list_size: None,
       connect_timeout: None,
-      deny_addresses: None,
+      deny_addresses,
     },
   )
 }
@@ -1289,6 +1303,9 @@ pub fn op_fetch_custom_client(
     )),
     None => None,
   };
+  // denext: with the embedder's deny list added, when the runtime has one
+  let deny_addresses =
+    deny_addresses::EmbedderDenyList::added_to(state, deny_addresses);
 
   let mut client = create_http_client(
     &options.user_agent,
@@ -1798,6 +1815,21 @@ pub enum ClientConnectError {
 }
 
 impl Client {
+  /// denext: this client with `deny` added to the addresses the connections
+  /// [`Client::connect`] opens refuse (see [`deny_addresses`]), whatever the
+  /// client was made with: a name is resolved here and refused when any of
+  /// its addresses is denied, the connection goes to the checked addresses
+  /// only, the connected peer is checked again, and the destination behind
+  /// an HTTP(S) or SOCKS proxy is checked as for `fetch()`. The requests
+  /// the client itself sends keep the connector it was made with.
+  pub fn with_connect_deny_addresses(
+    mut self,
+    deny: &Arc<deny_addresses::AddressDenyList>,
+  ) -> Self {
+    self.connector.http.add_deny_addresses(deny);
+    self
+  }
+
   pub async fn connect(
     &self,
     uri: Uri,

@@ -32,3 +32,6 @@ once_cell.workspace = true
 sha1.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+sys_traits = { workspace = true, features = ["libc", "real", "winapi"] }

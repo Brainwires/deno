@@ -30,6 +30,9 @@ use deno_fetch::HttpClientCreateError;
 use deno_fetch::HttpClientResource;
 use deno_fetch::Options as FetchOptions;
 use deno_fetch::create_http_client;
+use deno_fetch::deny_addresses::ADDRESS_DENIED_CODE;
+use deno_fetch::deny_addresses::EmbedderDenyList;
+use deno_fetch::deny_addresses::find_address_denied_error;
 use deno_fetch::get_or_create_client_from_state;
 use deno_net::raw::NetworkStream;
 use deno_permissions::PermissionCheckError;
@@ -102,9 +105,30 @@ pub enum WebsocketError {
   #[class("DOMExceptionNetworkError")]
   #[error("failed to connect to WebSocket: {0}")]
   ConnectionFailed(#[from] HandshakeError),
+  /// denext: the connection was refused because an address it would go to
+  /// is in the embedder's deny list
+  /// ([`deno_fetch::deny_addresses::EmbedderDenyList`]). JavaScript puts
+  /// `cause_code` on the error's `cause`, as `fetch()` has it.
+  #[class("DOMExceptionNetworkError")]
+  #[error("failed to connect to WebSocket: {0}")]
+  #[property("cause_code" = ADDRESS_DENIED_CODE)]
+  AddressDenied(HandshakeError),
   #[class(inherit)]
   #[error(transparent)]
   Canceled(#[from] deno_core::Canceled),
+}
+
+/// A failed connect or handshake as the op's error: [`AddressDenied`] when
+/// the connector refused an address for the embedder's deny list.
+///
+/// [`AddressDenied`]: WebsocketError::AddressDenied
+fn connection_failed(err: HandshakeError) -> WebsocketError {
+  if let HandshakeError::Connect(ClientConnectError::Connector(source)) = &err
+    && find_address_denied_error(&**source).is_some()
+  {
+    return WebsocketError::AddressDenied(err);
+  }
+  WebsocketError::ConnectionFailed(err)
 }
 
 pub struct WsCancelResource(Rc<CancelHandle>);
@@ -523,7 +547,7 @@ async fn op_ws_create_inner(
   unsafely_ignore_certificate_errors: bool,
   client_rid: Option<u32>,
 ) -> Result<CreateResponse, WebsocketError> {
-  let (client, allow_host) = {
+  let (client, allow_host, deny) = {
     let mut s = state.borrow_mut();
     s.borrow_mut::<PermissionsContainer>()
       .check_net_connect_url(
@@ -533,7 +557,7 @@ async fn op_ws_create_inner(
       .expect(
         "Permission check should have been done in op_ws_check_permission",
       );
-    if let Some(rid) = client_rid {
+    let (client, allow_host) = if let Some(rid) = client_rid {
       let r = s.resource_table.get::<HttpClientResource>(rid)?;
       (r.client.clone(), r.allow_host)
     } else if ca_certs.is_some() || unsafely_ignore_certificate_errors {
@@ -550,7 +574,16 @@ async fn op_ws_create_inner(
       )
     } else {
       (get_or_create_client_from_state(&mut s)?, false)
-    }
+    };
+    (client, allow_host, EmbedderDenyList::from_state(&s))
+  };
+  // denext: the embedder's address deny list holds for the connection
+  // whichever client opens it (a `Deno.HttpClient`, one made here for
+  // `caCerts`, the runtime's default one, or one the embedder put in the
+  // state), as a client's own `denyAddresses` hold for `fetch()`.
+  let client = match deny {
+    Some(deny) => client.with_connect_deny_addresses(&deny),
+    None => client,
   };
 
   let cancel_resource = if let Some(cancel_rid) = cancel_handle {
@@ -571,7 +604,7 @@ async fn op_ws_create_inner(
   let handshake = Box::pin(handshake_websocket(
     client, allow_host, uri, &protocols, headers,
   ))
-  .map_err(WebsocketError::ConnectionFailed);
+  .map_err(connection_failed);
   let (stream, response) = match cancel_resource {
     Some(rc) => handshake.try_or_cancel(rc).await?,
     None => handshake.await?,
@@ -1247,6 +1280,181 @@ mod tests {
       .unwrap();
     assert_eq!(frame.opcode, OpCode::Pong);
     assert_eq!(&*frame.payload, b"ping");
+  }
+
+  /// An `OpState` as `op_ws_create` needs it: every permission, the fetch
+  /// options and, with `deny`, the embedder's address deny list.
+  fn connect_state(deny: Option<&[&str]>) -> Rc<RefCell<OpState>> {
+    let mut state = OpState::new(None);
+    state.put(PermissionsContainer::allow_all(std::sync::Arc::new(
+      deno_permissions::RuntimePermissionDescriptorParser::new(
+        sys_traits::impls::RealSys,
+      ),
+    )));
+    state.put(FetchOptions::default());
+    if let Some(entries) = deny {
+      let entries: Vec<String> =
+        entries.iter().map(|s| s.to_string()).collect();
+      state.put(EmbedderDenyList(std::sync::Arc::new(
+        deno_fetch::deny_addresses::AddressDenyList::parse(&entries).unwrap(),
+      )));
+    }
+    Rc::new(RefCell::new(state))
+  }
+
+  async fn connect(
+    state: &Rc<RefCell<OpState>>,
+    url: String,
+    ca_certs: Option<Vec<String>>,
+  ) -> Result<CreateResponse, WebsocketError> {
+    op_ws_create_inner(
+      state.clone(),
+      "new WebSocket()".to_string(),
+      url,
+      String::new(),
+      None,
+      None,
+      ca_certs,
+      false,
+      None,
+    )
+    .await
+  }
+
+  /// A server on loopback that answers each connection's WebSocket
+  /// handshake and counts the connections it accepted.
+  async fn handshake_server() -> (
+    std::net::SocketAddr,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+  ) {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = accepted.clone();
+    tokio::spawn(async move {
+      loop {
+        let Ok((mut socket, _)) = listener.accept().await else {
+          return;
+        };
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        tokio::spawn(async move {
+          let mut request = Vec::new();
+          while !request.ends_with(b"\r\n\r\n") {
+            let Ok(byte) = socket.read_u8().await else {
+              return;
+            };
+            request.push(byte);
+          }
+          let request = String::from_utf8_lossy(&request).to_string();
+          let Some(key) = request.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name
+              .eq_ignore_ascii_case("sec-websocket-key")
+              .then(|| value.trim().to_string())
+          }) else {
+            return;
+          };
+          let response = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+            sec_websocket_accept(&key)
+          );
+          let _ = socket.write_all(response.as_bytes()).await;
+          // keep the connection open for the client
+          let _ = socket.read_u8().await;
+        });
+      }
+    });
+    (addr, accepted)
+  }
+
+  // denext: with the embedder's address deny list in the op state, a
+  // WebSocket to a denied address is refused before anything connects,
+  // whichever client the op picks, and the error carries the code.
+  #[tokio::test]
+  async fn embedder_deny_list_refuses_a_denied_address() {
+    use deno_error::JsErrorClass;
+    use deno_error::PropertyValue;
+
+    let (addr, accepted) = handshake_server().await;
+    let state = connect_state(Some(&["loopback"]));
+    for (url, ca_certs) in [
+      (format!("ws://127.0.0.1:{}/", addr.port()), None),
+      // a name that resolves to a denied address
+      (format!("ws://localhost:{}/", addr.port()), None),
+      // an IPv4-mapped literal
+      (format!("ws://[::ffff:7f00:1]:{}/", addr.port()), None),
+      // the client made for `caCerts` (it has no deny list of its own)
+      (format!("ws://127.0.0.1:{}/", addr.port()), Some(vec![])),
+      // TLS: both the HTTP/1.1 and the HTTP/2 attempt are refused
+      (format!("wss://127.0.0.1:{}/", addr.port()), None),
+    ] {
+      let err = match connect(&state, url.clone(), ca_certs).await {
+        Ok(_) => panic!("{url}: connected to a denied address"),
+        Err(err) => err,
+      };
+      assert!(
+        matches!(err, WebsocketError::AddressDenied(_)),
+        "{url}: {err}"
+      );
+      assert_eq!(err.get_class(), "DOMExceptionNetworkError", "{url}");
+      assert!(
+        err.get_additional_properties().any(|(key, value)| {
+          key == "cause_code"
+            && matches!(value, PropertyValue::String(code) if code == ADDRESS_DENIED_CODE)
+        }),
+        "{url}: no cause_code"
+      );
+      assert!(
+        err.to_string().contains(ADDRESS_DENIED_CODE),
+        "{url}: {err}"
+      );
+    }
+    assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(state.borrow().resource_table.names().next().is_none());
+  }
+
+  // denext: without the embedder's list (Deno), and with one that doesn't
+  // deny the address, the connection is made as before.
+  #[tokio::test]
+  async fn no_embedder_deny_list_connects_as_before() {
+    let (addr, accepted) = handshake_server().await;
+    for (n, deny) in [None, Some(&["10.0.0.0/8", "metadata"][..])]
+      .into_iter()
+      .enumerate()
+    {
+      let state = connect_state(deny);
+      let created =
+        connect(&state, format!("ws://127.0.0.1:{}/", addr.port()), None)
+          .await
+          .unwrap_or_else(|err| panic!("{deny:?}: {err}"));
+      assert_eq!(created.status, 101);
+      assert!(
+        state
+          .borrow()
+          .resource_table
+          .get::<ServerWebSocket>(created.rid)
+          .is_ok()
+      );
+      assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), n + 1);
+    }
+  }
+
+  // denext: any other connect failure stays a `ConnectionFailed`.
+  #[tokio::test]
+  async fn a_refused_connection_is_not_an_address_denial() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let state = connect_state(Some(&["10.0.0.0/8"]));
+    let err =
+      match connect(&state, format!("ws://127.0.0.1:{port}/"), None).await {
+        Ok(_) => panic!("connected to a closed port"),
+        Err(err) => err,
+      };
+    assert!(matches!(err, WebsocketError::ConnectionFailed(_)), "{err}");
   }
 
   /// Returns the size of the future produced by `f` without constructing any

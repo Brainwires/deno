@@ -11,6 +11,10 @@
 //! the first request, each redirect hop (a new request on the same client),
 //! every address happy eyeballs tries, and pooled connections (checked when
 //! they were opened).
+//!
+//! An embedder (a runtime for web pages, which has no `Deno` namespace to
+//! make such a client with) sets the same guard for a whole runtime by
+//! putting an [`EmbedderDenyList`] in its `OpState`.
 
 use std::fmt;
 use std::net::IpAddr;
@@ -18,7 +22,9 @@ use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::Arc;
 
+use deno_core::OpState;
 use ipnet::IpNet;
 use ipnet::Ipv4Net;
 use ipnet::Ipv6Net;
@@ -31,6 +37,45 @@ pub const ADDRESS_DENIED_CODE: &str = "ERR_ADDRESS_DENIED";
 #[derive(Debug, Default)]
 pub struct AddressDenyList {
   nets: Vec<IpNet>,
+}
+
+/// denext: an embedder's deny list for a whole runtime, put in its `OpState`
+/// (`state.put(EmbedderDenyList(Arc::new(list)))`) before any script runs.
+/// With one there,
+///
+/// - the runtime's default `fetch()` client and every client
+///   `Deno.createHttpClient()` makes deny its ranges (added to the client's
+///   own `denyAddresses`),
+/// - `WebSocket` and `WebSocketStream` connect through a connector that
+///   denies them, whichever client they were given (`deno_websocket`),
+/// - `RTCPeerConnection` and `RTCIceTransport` drop remote candidates in
+///   them, refuse STUN/TURN servers that resolve to them and send no
+///   datagram to them (`deno_webrtc`).
+///
+/// Without one nothing changes. Scripts can neither read nor replace it.
+#[derive(Clone, Debug)]
+pub struct EmbedderDenyList(pub Arc<AddressDenyList>);
+
+impl EmbedderDenyList {
+  /// The embedder's list in `state`, when it has one that denies anything.
+  pub fn from_state(state: &OpState) -> Option<Arc<AddressDenyList>> {
+    state
+      .try_borrow::<EmbedderDenyList>()
+      .map(|list| list.0.clone())
+      .filter(|list| !list.is_empty())
+  }
+
+  /// `own` (a client's `denyAddresses`) with the embedder's list in `state`
+  /// added.
+  pub fn added_to(
+    state: &OpState,
+    own: Option<Arc<AddressDenyList>>,
+  ) -> Option<Arc<AddressDenyList>> {
+    match (Self::from_state(state), own) {
+      (Some(embedder), Some(own)) => Some(own.with(&embedder)),
+      (embedder, own) => embedder.or(own),
+    }
+  }
 }
 
 fn v4(a: u8, b: u8, c: u8, d: u8, prefix: u8) -> IpNet {
@@ -179,6 +224,21 @@ impl AddressDenyList {
 
   pub fn is_empty(&self) -> bool {
     self.nets.is_empty()
+  }
+
+  /// A list that denies what `self` or `other` denies (`self` itself when
+  /// they are the same list or `other` is empty).
+  pub fn with(self: &Arc<Self>, other: &Arc<Self>) -> Arc<Self> {
+    if Arc::ptr_eq(self, other) || other.is_empty() {
+      return self.clone();
+    }
+    let mut nets = self.nets.clone();
+    for net in &other.nets {
+      if !nets.contains(net) {
+        nets.push(*net);
+      }
+    }
+    Arc::new(Self { nets })
   }
 
   /// The range that denies `ip`, if one does: a range that holds the
@@ -377,6 +437,43 @@ mod tests {
     for allowed in ["172.32.0.1", "8.8.8.8", "2606:4700::1111", "127.0.0.1"] {
       assert!(deny.denied(ip(allowed)).is_none(), "{allowed}");
     }
+  }
+
+  #[test]
+  fn two_lists_deny_what_either_denies() {
+    let own = Arc::new(list(&["10.0.0.0/8"]));
+    let embedder = Arc::new(list(&["loopback", "10.0.0.0/8"]));
+    let both = own.with(&embedder);
+    assert!(both.denied(ip("10.1.2.3")).is_some());
+    assert!(both.denied(ip("127.0.0.1")).is_some());
+    assert!(both.denied(ip("8.8.8.8")).is_none());
+    assert!(own.denied(ip("127.0.0.1")).is_none());
+    assert!(Arc::ptr_eq(&own.with(&own), &own));
+    assert!(Arc::ptr_eq(
+      &own.with(&Arc::new(AddressDenyList::default())),
+      &own
+    ));
+  }
+
+  #[test]
+  fn the_embedder_list_is_read_from_the_op_state() {
+    let mut state = OpState::new(None);
+    assert!(EmbedderDenyList::from_state(&state).is_none());
+    let own = Arc::new(list(&["10.0.0.0/8"]));
+    let kept = EmbedderDenyList::added_to(&state, Some(own.clone())).unwrap();
+    assert!(Arc::ptr_eq(&kept, &own));
+    // an empty list is no list
+    state.put(EmbedderDenyList(Arc::new(AddressDenyList::default())));
+    assert!(EmbedderDenyList::from_state(&state).is_none());
+    state.put(EmbedderDenyList(Arc::new(list(&["loopback"]))));
+    let embedder = EmbedderDenyList::from_state(&state).unwrap();
+    assert!(embedder.denied(ip("127.0.0.1")).is_some());
+    let both = EmbedderDenyList::added_to(&state, Some(own)).unwrap();
+    assert!(both.denied(ip("10.1.2.3")).is_some());
+    assert!(both.denied(ip("::1")).is_some());
+    let alone = EmbedderDenyList::added_to(&state, None).unwrap();
+    assert!(alone.denied(ip("10.1.2.3")).is_none());
+    assert!(alone.denied(ip("127.0.0.1")).is_some());
   }
 
   #[test]
