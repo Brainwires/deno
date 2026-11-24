@@ -3183,8 +3183,7 @@ mod tests {
     assert!(wait_for_processes_in(&dir, Duration::from_millis(300)));
     elsewhere.kill().unwrap();
     elsewhere.wait().unwrap();
-    let mut child =
-      std::process::Command::new(&sleep).arg("2").spawn().unwrap();
+    let mut child = spawn_retrying(std::process::Command::new(&sleep).arg("2"));
     assert!(!wait_for_processes_in(&dir, Duration::from_millis(300)));
     assert!(!wait_for_processes_in(&link, Duration::from_millis(300)));
     let started = Instant::now();
@@ -3194,8 +3193,7 @@ mod tests {
     child.wait().unwrap();
     // A process whose executable was deleted ("<path> (deleted)") still
     // counts.
-    let mut child =
-      std::process::Command::new(&sleep).arg("2").spawn().unwrap();
+    let mut child = spawn_retrying(std::process::Command::new(&sleep).arg("2"));
     std::thread::sleep(Duration::from_millis(100));
     std::fs::remove_file(&sleep).unwrap();
     assert!(!wait_for_processes_in(&dir, Duration::from_millis(300)));
@@ -3299,18 +3297,16 @@ mod tests {
     std::fs::create_dir(&dir).unwrap();
     let sleep = dir.join("sleep");
     std::fs::copy(which_sleep(), &sleep).unwrap();
-    let mut sidecar = std::process::Command::new(&sleep)
-      .arg("30")
-      .env("DENEXT_SIDECAR_DETACHED", "1")
-      .spawn()
-      .unwrap();
+    let mut sidecar = spawn_retrying(
+      std::process::Command::new(&sleep)
+        .arg("30")
+        .env("DENEXT_SIDECAR_DETACHED", "1"),
+    );
     let started = Instant::now();
     assert!(wait_for_processes_in(&dir, Duration::from_secs(10)));
     assert!(started.elapsed() < Duration::from_secs(5));
-    let mut plain = std::process::Command::new(&sleep)
-      .arg("30")
-      .spawn()
-      .unwrap();
+    let mut plain =
+      spawn_retrying(std::process::Command::new(&sleep).arg("30"));
     assert!(!wait_for_processes_in(&dir, Duration::from_millis(300)));
     plain.kill().unwrap();
     plain.wait().unwrap();
@@ -3351,7 +3347,7 @@ mod tests {
           Ok(())
         });
       }
-      cmd.spawn().unwrap()
+      spawn_retrying(&mut cmd)
     };
     let mut own = spawn(Stdio::piped());
     let mut other = spawn(Stdio::null());
@@ -3416,6 +3412,28 @@ mod tests {
     let fds: Vec<&str> = listing.split_whitespace().collect();
     assert!(fds.contains(&"1"), "{fds:?}");
     assert!(!fds.contains(&fd.to_string().as_str()), "{fds:?}");
+  }
+
+  /// Spawns a just-written executable. Another test thread that forks while
+  /// the copy's write descriptor is open leaves it open in the child for a
+  /// moment, so the exec fails `ETXTBSY` ("Text file busy"); retry that
+  /// (bounded, like `ext/process`'s spawn) instead of failing the test.
+  #[cfg(target_os = "linux")]
+  fn spawn_retrying(cmd: &mut std::process::Command) -> std::process::Child {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut delay = Duration::from_millis(1);
+    loop {
+      match cmd.spawn() {
+        Err(e)
+          if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+            && Instant::now() < deadline =>
+        {
+          std::thread::sleep(delay);
+          delay = (delay * 2).min(Duration::from_millis(250));
+        }
+        other => return other.unwrap(),
+      }
+    }
   }
 
   #[cfg(target_os = "linux")]
