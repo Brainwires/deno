@@ -245,18 +245,32 @@ ObjectDefineProperty(GPUAdapterInfoPrototype, privateCustomInspect, {
   },
 });
 
+// A subclass prototype or `Object.create(X.prototype)` inherits from the
+// prototype but has no set behind it, so iterating it throws.
+function inspectSetlike(self, prototype, inspect, inspectOptions) {
+  let values = {};
+  if (ObjectPrototypeIsPrototypeOf(prototype, self)) {
+    try {
+      // deno-lint-ignore deno-internal/prefer-primordials
+      values = [...self];
+    } catch {
+      // Not a real instance: show it like the prototype.
+    }
+  }
+  return `${self.constructor.name} ${inspect(values, inspectOptions)}`;
+}
+
 const GPUSupportedFeaturesPrototype = GPUSupportedFeatures.prototype;
 webidl.setlikeObjectWrap(GPUSupportedFeaturesPrototype, true);
 ObjectDefineProperty(GPUSupportedFeaturesPrototype, privateCustomInspect, {
   __proto__: null,
   value(inspect, inspectOptions) {
-    if (ObjectPrototypeIsPrototypeOf(GPUSupportedFeaturesPrototype, this)) {
-      return `${this.constructor.name} ${
-        // deno-lint-ignore deno-internal/prefer-primordials
-        inspect([...this], inspectOptions)}`;
-    } else {
-      return `${this.constructor.name} ${inspect({}, inspectOptions)}`;
-    }
+    return inspectSetlike(
+      this,
+      GPUSupportedFeaturesPrototype,
+      inspect,
+      inspectOptions,
+    );
   },
 });
 
@@ -265,13 +279,12 @@ webidl.setlikeObjectWrap(WGSLLanguageFeaturesPrototype, true);
 ObjectDefineProperty(WGSLLanguageFeaturesPrototype, privateCustomInspect, {
   __proto__: null,
   value(inspect, inspectOptions) {
-    if (ObjectPrototypeIsPrototypeOf(WGSLLanguageFeaturesPrototype, this)) {
-      return `${this.constructor.name} ${
-        // deno-lint-ignore deno-internal/prefer-primordials
-        inspect([...this], inspectOptions)}`;
-    } else {
-      return `${this.constructor.name} ${inspect({}, inspectOptions)}`;
-    }
+    return inspectSetlike(
+      this,
+      WGSLLanguageFeaturesPrototype,
+      inspect,
+      inspectOptions,
+    );
   },
 });
 
