@@ -35,6 +35,7 @@ members = [
   "ext/telemetry",
   "ext/url",
   "ext/web",
+  "ext/web_page",
   "ext/webgpu",
   "ext/webidl",
   "ext/webrtc",
@@ -155,6 +156,7 @@ deno_sql = { version = "0.1.0", path = "./ext/sql" }
 deno_telemetry = { version = "0.82.0", path = "./ext/telemetry" }
 deno_tls = { version = "0.247.0", path = "./ext/tls" }
 deno_web = { version = "0.291.0", path = "./ext/web" }
+deno_web_page = { version = "0.1.0", path = "./ext/web_page" }
 deno_webgpu = { version = "0.227.0", path = "./ext/webgpu" }
 deno_webidl = { version = "0.260.0", path = "./ext/webidl" }
 deno_webrtc = { version = "0.1.0", path = "./ext/webrtc" }
@@ -394,6 +396,12 @@ tar = "=0.4.46"
 tempfile = "3.4.0"
 termcolor = "1.1.3"
 testing_macros = "1.0.0"
+# Page runtime (ext/web_page, DENEXT.md item 5NN): Thalora's engine-neutral
+# live DOM (html5ever tree, DOM-standard mutation, `selectors` matching; MIT,
+# no JS-engine types), which `deno_web_page` binds to V8. Pinned by commit,
+# like `rtc` above; only ext/web_page depends on it, and nothing in deno or
+# denort depends on ext/web_page.
+thalora-dom = { git = "https://github.com/Brainwires/thalora-web-browser", rev = "412eba29b98c3022c12fd9992eec28852b9b96de" }
 thiserror = "2.0.12"
 tokio = { version = "1.53.3", features = ["full"] }
 tokio-eld = "0.3"

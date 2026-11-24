@@ -1,0 +1,45 @@
+# Copyright 2018-2026 the Deno authors. MIT license.
+
+[package]
+name = "deno_web_page"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+readme = "README.md"
+repository.workspace = true
+description = "Page runtime for hostile web content: a web-only JsRuntime with a DOM bound to thalora-dom"
+
+[lib]
+path = "lib.rs"
+
+[features]
+# Like the workspace binaries, the embedder selects the JavaScript engine. A
+# page runtime only exists on V8, and nothing in the workspace depends on
+# this crate, so the default is on.
+default = ["v8"]
+v8 = ["deno_core/v8"]
+
+[dependencies]
+deno_core.workspace = true
+deno_crypto.workspace = true
+deno_error.workspace = true
+deno_fetch.workspace = true
+deno_permissions.workspace = true
+deno_tls.workspace = true
+deno_web.workspace = true
+deno_webidl.workspace = true
+deno_webstorage.workspace = true
+# Not used here: deno_crypto derives `std::error::Error` wrappers around
+# `der::Error` and `spki::Error` without asking for their `std` features, which
+# in a deno build another crate of the graph turns on. This crate's graph has
+# no such crate, so it asks for them itself.
+der = { workspace = true, features = ["std"] }
+serde.workspace = true
+serde_json.workspace = true
+spki = { workspace = true, features = ["std"] }
+sys_traits = { workspace = true, features = ["libc", "real", "winapi"] }
+thalora-dom.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
