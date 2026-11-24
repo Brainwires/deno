@@ -1064,6 +1064,34 @@ pub fn stage_override() -> Result<Option<AutoStage>, String> {
   AutoStage::parse(STAGE.get().and_then(|v| v.as_deref()))
 }
 
+/// Why an image that started confined by a plan the image before it handed
+/// over (`confined`) must not go on, if it must not: it runs only when it
+/// decides a mode that fails closed for the run (`mode`) and has accepted
+/// that plan as the one it compiles itself (`accepted`: the comparison,
+/// the measurement and the module checks that follow from it). Any other
+/// outcome (`off`, `warn`, `auto`, or a plan never compared) would leave
+/// the process under a sandbox nothing checked against this run, so it
+/// refuses to start: the two images of a run decide alike or not at all.
+/// `None` for a process no plan was handed to, whatever it decides. Pure.
+pub fn confined_image_refusal(
+  confined: bool,
+  mode: KernelSandboxMode,
+  accepted: bool,
+) -> Option<String> {
+  if !confined || (mode.fails_closed() && accepted) {
+    return None;
+  }
+  Some(if mode.fails_closed() {
+    format!(
+      "--kernel-sandbox={mode} refuses to start: this process started under a kernel sandbox the starting process handed over, and never checked it against the one this run compiles"
+    )
+  } else {
+    format!(
+      "--kernel-sandbox=enforce refuses to start: this process started under a kernel sandbox the starting process handed over, but decides `{mode}` for this run, so the sandbox it runs under would go unchecked. Both processes must decide the same mode: something they decide from (the flags, the environment, deno.json, the terminal) differs between them."
+    )
+  })
+}
+
 #[cfg(test)]
 mod tests {
   use KernelSandboxMode::*;
@@ -1080,6 +1108,39 @@ mod tests {
 
   fn resolve(inputs: &ModeInputs) -> ModeResolution {
     kernel_sandbox_mode(inputs).unwrap()
+  }
+
+  // an image a plan was handed to runs only when it enforces and accepted
+  // that plan; a process no plan was handed to is never refused
+  #[test]
+  fn confined_image_runs_only_enforcing_an_accepted_plan() {
+    for mode in [Off, Warn, Auto, Enforce, Broker] {
+      for accepted in [false, true] {
+        assert_eq!(
+          confined_image_refusal(false, mode, accepted),
+          None,
+          "{mode} {accepted}"
+        );
+        let refusal = confined_image_refusal(true, mode, accepted);
+        let runs = matches!(mode, Enforce | Broker) && accepted;
+        assert_eq!(refusal.is_none(), runs, "{mode} {accepted}");
+        if let Some(why) = refusal {
+          assert!(why.contains("refuses to start"), "{why}");
+        }
+      }
+    }
+    // the mode it decided instead is named
+    let why = confined_image_refusal(true, Off, false).unwrap();
+    assert!(why.contains("decides `off`"), "{why}");
+    let why = confined_image_refusal(true, Warn, true).unwrap();
+    assert!(why.contains("decides `warn`"), "{why}");
+    // enforcing, but the plan was never compared
+    let why = confined_image_refusal(true, Enforce, false).unwrap();
+    assert!(
+      why.starts_with("--kernel-sandbox=enforce refuses to start")
+        && why.contains("never checked"),
+      "{why}"
+    );
   }
 
   // denext (DENEXT.md item 553): the harness switches need the harness's
