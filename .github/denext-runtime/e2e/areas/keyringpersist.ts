@@ -113,7 +113,10 @@ class Keyring {
       await this.stop();
       const exited = this.spawn(unlocked);
       const w = this.child!.stdin.getWriter();
-      if (unlocked) await w.write(new TextEncoder().encode(PASSWORD));
+      // A daemon that already exited has closed its stdin.
+      if (unlocked) {
+        await w.write(new TextEncoder().encode(PASSWORD)).catch(() => {});
+      }
       await w.close().catch(() => {});
       for (let i = 0; i < 100 && !exited.done; i++) {
         state = await this.locked();
