@@ -3,11 +3,5 @@
   "RTCRtpParameters-scalability-h264.html": false,
   "RTCRtpParameters-scalability-vp8.html": false,
   "RTCRtpParameters-scalability-vp9.html": false,
-  "RTCRtpParameters-scalability.html": {
-    "expectedFailures": [
-      "Setting and updating scalabilityMode to a legal value should be accepted",
-      "Setting a scalability mode to nonsense throws an exception",
-      "L3T3 on VP8 should return something other than L3T3"
-    ]
-  }
+  "RTCRtpParameters-scalability.html": true
 }

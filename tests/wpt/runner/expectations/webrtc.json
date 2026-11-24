@@ -1,5 +1,12 @@
 {
-  "RTCCertificate-postMessage-to-workers.https.html": true,
+  "RTCCertificate-postMessage-to-workers.https.html": {
+    "expectedFailures": [
+      "A plain object can be posted to a shared worker",
+      "RTCCertificate cannot be posted to a shared worker",
+      "A plain object can be posted to a service worker",
+      "RTCCertificate cannot be posted to a service worker"
+    ]
+  },
   "RTCCertificate-postMessage.html": false,
   "RTCCertificate.html": true,
   "RTCConfiguration-bundlePolicy.html": {
@@ -13,35 +20,12 @@
   "RTCConfiguration-iceServers.html?interop-2026": true,
   "RTCConfiguration-iceServers.html?rest": true,
   "RTCConfiguration-iceTransportPolicy.html?interop-2026": true,
-  "RTCConfiguration-iceTransportPolicy.html?rest": false,
+  "RTCConfiguration-iceTransportPolicy.html?rest": true,
   "RTCConfiguration-rtcpMuxPolicy.html": true,
   "RTCConfiguration-validation.html": true,
-  "RTCDTMFSender-insertDTMF.https.html": {
-    "expectedFailures": [
-      "insertDTMF() should succeed if tones contains valid DTMF characters",
-      "insertDTMF() should throw InvalidCharacterError if tones contains invalid DTMF characters",
-      "insertDTMF() should throw InvalidStateError if transceiver.currentDirection is recvonly",
-      "insertDTMF() should throw InvalidStateError if transceiver.currentDirection is inactive",
-      "insertDTMF() should set toneBuffer to provided tones normalized, with old tones overridden",
-      "insertDTMF() after remove and close should reject"
-    ]
-  },
-  "RTCDTMFSender-ontonechange-long.https.html": false,
-  "RTCDTMFSender-ontonechange.https.html": {
-    "expectedFailures": [
-      "insertDTMF('') should not fire any tonechange event, including for '' tone",
-      "insertDTMF() with default duration and intertoneGap should fire tonechange events at the expected time",
-      "insertDTMF() with explicit duration and intertoneGap should fire tonechange events at the expected time",
-      "insertDTMF() with duration less than 40 should be clamped to 40",
-      "insertDTMF() with interToneGap less than 30 should be clamped to 30",
-      "insertDTMF with comma should delay next tonechange event for a constant 2000ms",
-      "insertDTMF() with transceiver stopped in the middle should stop future tonechange events from firing",
-      "Calling insertDTMF() in the middle of tonechange events should cause future tonechanges to be updated to new tones",
-      "Calling insertDTMF() multiple times in the middle of tonechange events should cause future tonechanges to be updated the last provided tones",
-      "Calling insertDTMF('') in the middle of tonechange events should stop future tonechange events from firing",
-      "Setting transceiver.currentDirection to recvonly in the middle of tonechange events should stop future tonechange events from firing"
-    ]
-  },
+  "RTCDTMFSender-insertDTMF.https.html": true,
+  "RTCDTMFSender-ontonechange-long.https.html": true,
+  "RTCDTMFSender-ontonechange.https.html": true,
   "RTCDataChannel-GC.html": true,
   "RTCDataChannel-binaryType.window.html": true,
   "RTCDataChannel-bufferedAmount.html": true,
@@ -70,22 +54,29 @@
       "close() causes the other end's DTLS transport to close"
     ]
   },
-  "RTCError.html?interop-2026": true,
+  "RTCError.html?interop-2026": {
+    "expectedFailures": [
+      "RTCError httpRequestStatusCode should not be supported."
+    ]
+  },
   "RTCError.html?rest": false,
   "RTCIceCandidate-constructor.html": true,
-  "RTCIceConnectionState-candidate-pair.https.html": false,
+  "RTCIceConnectionState-candidate-pair.https.html": true,
   "RTCIceTransport-peer-reflexive-remote.html": true,
   "RTCIceTransport.html?interop-2026": true,
   "RTCIceTransport.html?rest": {
     "expectedFailures": [
       "Two connected iceTransports should have matching local/remote candidates returned",
-      "RTCIceTransport should not transition to \"checking\" until after the answer is set _and_ the first remote candidate is received",
       "RTCIceTransport should transition to \"closed\" if the underlying transport is closed because the answer used bundle"
     ]
   },
-  "RTCPeerConnection-GC.https.html": false,
+  "RTCPeerConnection-GC.https.html": {
+    "expectedFailures": [
+      "GC does not collect a peer connection pipe rendering to a video element"
+    ]
+  },
   "RTCPeerConnection-SLD-SRD-timing.https.html": true,
-  "RTCPeerConnection-add-track-no-deadlock.https.html": false,
+  "RTCPeerConnection-add-track-no-deadlock.https.html": true,
   "RTCPeerConnection-addIceCandidate-connectionSetup.html": true,
   "RTCPeerConnection-addIceCandidate-timing.https.html": true,
   "RTCPeerConnection-addIceCandidate.html?interop-2026": true,
@@ -96,412 +87,182 @@
       "TCP addIceCandidate aimed at port 8001 accepted"
     ]
   },
-  "RTCPeerConnection-addTrack.https.html": false,
-  "RTCPeerConnection-addTransceiver-renegotiation.https.html": false,
+  "RTCPeerConnection-addTrack.https.html": true,
+  "RTCPeerConnection-addTransceiver-renegotiation.https.html": true,
   "RTCPeerConnection-addTransceiver.https.html?interop-2026": true,
-  "RTCPeerConnection-addTransceiver.https.html?rest": {
-    "expectedFailures": [
-      "addTransceiver('audio') should return an audio transceiver",
-      "addTransceiver('video') should return a video transceiver",
-      "addTransceiver(track) should have result with sender.track be given track",
-      "addTransceiver(track) multiple times should create multiple transceivers"
-    ]
-  },
+  "RTCPeerConnection-addTransceiver.https.html?rest": true,
   "RTCPeerConnection-canTrickleIceCandidates.html": true,
-  "RTCPeerConnection-candidate-in-sdp.https.html": false,
+  "RTCPeerConnection-candidate-in-sdp.https.html": true,
   "RTCPeerConnection-capture-video.https.html": false,
   "RTCPeerConnection-certificateStats.https.html": false,
   "RTCPeerConnection-connectionState.https.html": {
     "expectedFailures": [
-      "connectionState remains new when not adding remote ice candidates",
-      "connectionState transitions to connected via connecting",
-      "when adding a datachannel to an existing unbundled connected PC, it should go through a connecting state",
-      "Closing a PeerConnection should not fire connectionstatechange event"
+      "when adding a datachannel to an existing unbundled connected PC, it should go through a connecting state"
     ]
   },
   "RTCPeerConnection-constructor.html": true,
   "RTCPeerConnection-createAnswer.html": true,
   "RTCPeerConnection-createDataChannel.html?interop-2026": true,
-  "RTCPeerConnection-createDataChannel.html?rest": {
-    "expectedFailures": [
-      "addTrack, then creating datachannel, should negotiate properly",
-      "addTrack, then creating datachannel, should negotiate properly when max-bundle is used",
-      "Renegotiation with audio/video and datachannel should work properly",
-      "addTrack, then creating negotiated datachannel, should negotiate properly",
-      "addTrack, then creating negotiated datachannel, should negotiate properly when max-bundle is used",
-      "Renegotiation with audio/video and negotiated datachannel should work properly"
-    ]
-  },
+  "RTCPeerConnection-createDataChannel.html?rest": true,
   "RTCPeerConnection-createOffer.html?interop-2026": true,
   "RTCPeerConnection-createOffer.html?rest": true,
   "RTCPeerConnection-description-attributes-timing.https.html": true,
   "RTCPeerConnection-description-candidate-replaced.https.html": true,
-  "RTCPeerConnection-explicit-rollback-iceGatheringState.html": false,
+  "RTCPeerConnection-explicit-rollback-iceGatheringState.html": true,
   "RTCPeerConnection-generateCertificate.html": {
     "expectedFailures": [
       "generateCertificate({modulusLength: 1024}) with RSASSA-PKCS1-v1_5 parameters should succeed"
     ]
   },
-  "RTCPeerConnection-getStats-timestamp.https.html": {
-    "expectedFailures": [
-      "RTCRemoteInboundRtpStats.timestamp is expressed as Performance time"
-    ]
-  },
-  "RTCPeerConnection-getStats.https.html?interop-2026": {
-    "expectedFailures": [
-      "getStats() with track not added to connection should reject with InvalidAccessError",
-      "getStats() track with stream returns peer-connection and outbound-rtp stats",
-      "getStats() track without stream returns peer-connection and outbound-rtp stats",
-      "getStats() audio contains outbound-rtp stats",
-      "getStats() video contains outbound-rtp stats",
-      "getStats() on track associated with RTCRtpSender should return stats report containing outbound-rtp stats",
-      "getStats() on track associated with RTCRtpReceiver should return stats report containing inbound-rtp stats",
-      "getStats() audio contains inbound-rtp stats",
-      "getStats() audio contains candidate-pair stats",
-      "getStats(track) should not work if multiple senders have the same track"
-    ]
-  },
-  "RTCPeerConnection-getStats.https.html?rest": {
-    "expectedFailures": [
-      "getStats() with track added via addTrack should succeed",
-      "getStats() with track added via addTransceiver should succeed"
-    ]
-  },
+  "RTCPeerConnection-getStats-timestamp.https.html": true,
+  "RTCPeerConnection-getStats.https.html?interop-2026": true,
+  "RTCPeerConnection-getStats.https.html?rest": true,
   "RTCPeerConnection-getTransceivers.html": true,
-  "RTCPeerConnection-helper-test.html": true,
-  "RTCPeerConnection-iceConnectionState-disconnected.https.html": false,
-  "RTCPeerConnection-iceConnectionState.https.html": {
+  "RTCPeerConnection-helper-test.html": {
     "expectedFailures": [
-      "connection with audio track should eventually have connected connection state",
-      "connection with audio and video tracks should eventually have connected connection state",
-      "ICE can connect in a recvonly usecase",
-      "iceConnectionState changes at the right time, with bundle policy balanced",
-      "iceConnectionState changes at the right time, with bundle policy max-bundle",
-      "iceConnectionState changes at the right time, with bundle policy max-compat",
-      "Responder ICE connection state behaves as expected",
-      "Closing a PeerConnection should not fire iceconnectionstatechange event",
-      "iceConnectionState can go to checking without explictly calling addIceCandidate",
-      "ICE restart does not result in a transition back to checking"
+      "A test video track transmits at least 40 Kbits/sec of data at 480x360 size"
     ]
   },
+  "RTCPeerConnection-iceConnectionState-disconnected.https.html": false,
+  "RTCPeerConnection-iceConnectionState.https.html": true,
   "RTCPeerConnection-iceGatheringState.html?interop-2026": {
     "expectedFailures": [
       "renegotiation that closes all transports should result in ICE gathering state \"new\""
     ]
   },
-  "RTCPeerConnection-iceGatheringState.html?rest": {
+  "RTCPeerConnection-iceGatheringState.html?rest": true,
+  "RTCPeerConnection-mandatory-getStats.https.html": {
     "expectedFailures": [
-      "gathering state and candidate callbacks should fire in the correct order"
+      "RTCInboundRtpStreamStats's framesDecoded",
+      "RTCInboundRtpStreamStats's framesDropped",
+      "RTCInboundRtpStreamStats's totalAudioEnergy",
+      "RTCInboundRtpStreamStats's totalSamplesDuration",
+      "RTCInboundRtpStreamStats's packetsDiscarded",
+      "RTCAudioSourceStats's totalAudioEnergy",
+      "RTCAudioSourceStats's totalSamplesDuration"
     ]
   },
-  "RTCPeerConnection-mandatory-getStats.https.html": false,
-  "RTCPeerConnection-ondatachannel.html": {
-    "expectedFailures": [
-      "Open event should not be raised when closing the channel in the datachannel event",
-      "Open event should not be raised when sending and immediately closing the channel in the datachannel event"
-    ]
-  },
-  "RTCPeerConnection-onicecandidateerror.https.html": false,
-  "RTCPeerConnection-onnegotiationneeded.html": false,
-  "RTCPeerConnection-onsignalingstatechanged.https.html": {
-    "expectedFailures": [
-      "Negotiation methods fire signalingstatechange events",
-      "Closing a PeerConnection should not fire signalingstatechange event"
-    ]
-  },
-  "RTCPeerConnection-ontrack.https.html": {
-    "expectedFailures": [
-      "addTrack() should cause remote connection to fire ontrack when setRemoteDescription()",
-      "Using offerToReceiveAudio and offerToReceiveVideo should only cause a audio track event to fire, if audio was the only type negotiated",
-      "Using offerToReceiveAudio and offerToReceiveVideo should only cause a video track event to fire, if video was the only type negotiated"
-    ]
-  },
-  "RTCPeerConnection-operations.https.html?interop-2026": {
-    "expectedFailures": [
-      "createAnswer uses operations chain",
-      "setLocalDescription uses operations chain",
-      "addIceCandidate uses operations chain",
-      "replaceTrack uses operations chain",
-      "pc.getStats does NOT use the operations chain",
-      "sender.getStats does NOT use the operations chain",
-      "receiver.getStats does NOT use the operations chain"
-    ]
-  },
-  "RTCPeerConnection-operations.https.html?rest": {
-    "expectedFailures": [
-      "createOffer uses operations chain",
-      "Negotiationneeded only fires once operations chain is empty",
-      "setParameters does NOT use the operations chain"
-    ]
-  },
+  "RTCPeerConnection-ondatachannel.html": true,
+  "RTCPeerConnection-onicecandidateerror.https.html": true,
+  "RTCPeerConnection-onnegotiationneeded.html": true,
+  "RTCPeerConnection-onsignalingstatechanged.https.html": true,
+  "RTCPeerConnection-ontrack.https.html": true,
+  "RTCPeerConnection-operations.https.html?interop-2026": true,
+  "RTCPeerConnection-operations.https.html?rest": true,
   "RTCPeerConnection-perfect-negotiation-stress-glare-linear.https.html": false,
   "RTCPeerConnection-perfect-negotiation-stress-glare.https.html": false,
   "RTCPeerConnection-perfect-negotiation.https.html": false,
   "RTCPeerConnection-plan-b-is-not-supported.html": true,
   "RTCPeerConnection-pranswer-description-types.html": true,
   "RTCPeerConnection-relay-canvas.https.html": false,
-  "RTCPeerConnection-remote-track-currentTime.https.html": false,
-  "RTCPeerConnection-remote-track-mute.https.html": false,
-  "RTCPeerConnection-remote-track-properties.https.html?interop-2026": false,
-  "RTCPeerConnection-remote-track-properties.https.html?rest": false,
-  "RTCPeerConnection-removeTrack.https.html": false,
+  "RTCPeerConnection-remote-track-currentTime.https.html": true,
+  "RTCPeerConnection-remote-track-mute.https.html": true,
+  "RTCPeerConnection-remote-track-properties.https.html?interop-2026": true,
+  "RTCPeerConnection-remote-track-properties.https.html?rest": true,
+  "RTCPeerConnection-removeTrack.https.html": true,
   "RTCPeerConnection-restartIce-onnegotiationneeded.https.html": true,
   "RTCPeerConnection-restartIce.https.html": {
     "expectedFailures": [
-      "restartIce() has no effect on initial negotiation",
-      "restartIce() causes fresh ufrags",
-      "restartIce() is satisfied by remote ICE restart",
-      "restartIce() trumps {iceRestart: false}",
       "restartIce() survives remote offer containing partial restart",
-      "restartIce() has no effect on initial negotiation (perfect negotiation)",
-      "restartIce() causes fresh ufrags (perfect negotiation)",
-      "restartIce() works in have-local-offer (perfect negotiation)",
-      "restartIce() works in initial have-local-offer (perfect negotiation)",
-      "restartIce() works in have-remote-offer (perfect negotiation)",
-      "restartIce() survives remote offer (perfect negotiation)",
-      "restartIce() is satisfied by remote ICE restart (perfect negotiation)",
-      "restartIce() trumps {iceRestart: false} (perfect negotiation)",
-      "restartIce() survives rollback (perfect negotiation)",
       "restartIce() survives remote offer containing partial restart (perfect negotiation)"
     ]
   },
-  "RTCPeerConnection-setDescription-transceiver.html": {
-    "expectedFailures": [
-      "setRemoteDescription(rollback) should remove newly created transceiver from transceiver list"
-    ]
-  },
-  "RTCPeerConnection-setLocalDescription-answer.html": {
-    "expectedFailures": [
-      "setLocalDescription() with answer not created by own createAnswer() should reject with InvalidModificationError"
-    ]
-  },
-  "RTCPeerConnection-setLocalDescription-offer.html?interop-2026": false,
-  "RTCPeerConnection-setLocalDescription-offer.html?rest": {
-    "expectedFailures": [
-      "Set created offer other than last offer should reject with InvalidModificationError"
-    ]
-  },
+  "RTCPeerConnection-setDescription-transceiver.html": true,
+  "RTCPeerConnection-setLocalDescription-answer.html": true,
+  "RTCPeerConnection-setLocalDescription-offer.html?interop-2026": true,
+  "RTCPeerConnection-setLocalDescription-offer.html?rest": true,
   "RTCPeerConnection-setLocalDescription-parameterless.https.html?interop-2026": true,
-  "RTCPeerConnection-setLocalDescription-parameterless.https.html?rest": {
-    "expectedFailures": [
-      "Parameterless SLD() uses [[LastCreatedOffer]] if it is still valid",
-      "Parameterless SLD() uses [[LastCreatedAnswer]] if it is still valid",
-      "Parameterless SLD() never settles if closed while pending"
-    ]
-  },
+  "RTCPeerConnection-setLocalDescription-parameterless.https.html?rest": true,
   "RTCPeerConnection-setLocalDescription-pranswer-parameterless.html": true,
   "RTCPeerConnection-setLocalDescription-pranswer.html": true,
   "RTCPeerConnection-setLocalDescription-rollback.html": true,
-  "RTCPeerConnection-setLocalDescription.html": {
-    "expectedFailures": [
-      "Calling createOffer() and setLocalDescription() again after one round of local-offer/remote-answer should succeed",
-      "Switching role from answerer to offerer after going back to stable state should succeed"
-    ]
-  },
+  "RTCPeerConnection-setLocalDescription.html": true,
   "RTCPeerConnection-setRemoteDescription-answer.html": true,
-  "RTCPeerConnection-setRemoteDescription-nomsid.html": false,
-  "RTCPeerConnection-setRemoteDescription-offer.html?interop-2026": false,
-  "RTCPeerConnection-setRemoteDescription-offer.html?rest": {
-    "expectedFailures": [
-      "setRemoteDescription(offer) with invalid SDP should reject with RTCError",
-      "setRemoteDescription(offer) from have-local-offer is glare-proof",
-      "setRemoteDescription(invalidOffer) from have-local-offer does not undo rollback",
-      "setRemoteDescription(section with duplicate msid) rejects"
-    ]
-  },
+  "RTCPeerConnection-setRemoteDescription-nomsid.html": true,
+  "RTCPeerConnection-setRemoteDescription-offer.html?interop-2026": true,
+  "RTCPeerConnection-setRemoteDescription-offer.html?rest": true,
   "RTCPeerConnection-setRemoteDescription-pranswer.html": true,
-  "RTCPeerConnection-setRemoteDescription-replaceTrack.https.html": false,
-  "RTCPeerConnection-setRemoteDescription-rollback.html?interop-2026": false,
-  "RTCPeerConnection-setRemoteDescription-rollback.html?rest": {
-    "expectedFailures": [
-      "local offer created before setRemoteDescription(remote offer) with different transceiver level assignments then rollback should still be usable",
-      "rollback of a remote offer should keep a transceiver",
-      "rollback of a remote offer should keep a transceiver created by addtrack",
-      "rollback of a remote offer should keep a transceiver without tracks",
-      "explicit rollback of local offer should remove transceivers and transport",
-      "when using addTransceiver, implicit rollback of a local offer should visit stable state, but not fire negotiationneeded until we settle in stable",
-      "when using addTrack, implicit rollback of a local offer should visit stable state, but not fire negotiationneeded",
-      "rollback of a remote offer to negotiated stable state should enable applying of a local offer",
-      "rollback of a local offer to negotiated stable state should enable applying of a remote offer",
-      "rollback a local offer with audio direction change to negotiated stable state and then add video receiver",
-      "onremovetrack fires during remote rollback",
-      "rollback of a remote offer with stream changes"
-    ]
-  },
-  "RTCPeerConnection-setRemoteDescription-simulcast.https.html": false,
-  "RTCPeerConnection-setRemoteDescription-tracks.https.html": false,
-  "RTCPeerConnection-setRemoteDescription.html": {
-    "expectedFailures": [
-      "Calling setRemoteDescription() again after one round of remote-offer/local-answer should succeed",
-      "Switching role from offerer to answerer after going back to stable state should succeed",
-      "Closing on setRemoteDescription() neither resolves nor rejects",
-      "Closing on rollback neither resolves nor rejects"
-    ]
-  },
-  "RTCPeerConnection-transceivers.https.html": {
-    "expectedFailures": [
-      "addTrack: creates a transceiver for the sender",
-      "addTrack: \"transceiver == {sender,receiver}\"",
-      "addTrack: transceiver.sender is associated with the track",
-      "addTrack: transceiver.receiver has its own track",
-      "addTrack: transceiver.receiver's track is muted",
-      "addTrack: transceiver is not associated with an m-section",
-      "addTrack: transceiver is not stopped",
-      "addTrack: transceiver's direction is sendrecv",
-      "addTrack: transceiver's currentDirection is null",
-      "setLocalDescription(offer): transceiver gets associated with an m-section",
-      "setLocalDescription(offer): transceiver.mid matches the offer SDP",
-      "setRemoteDescription(offer): ontrack fires with a track",
-      "setRemoteDescription(offer): ontrack's stream.id is the same as stream.id",
-      "setRemoteDescription(offer): ontrack fires with a transceiver.",
-      "setRemoteDescription(offer): transceiver.mid is the same on both ends",
-      "setRemoteDescription(offer): \"transceiver == {sender,receiver}\"",
-      "setRemoteDescription(offer): transceiver.direction is recvonly",
-      "setRemoteDescription(offer): transceiver.currentDirection is null",
-      "setRemoteDescription(offer): transceiver.stopped is false",
-      "setLocalDescription(answer): transceiver.currentDirection is recvonly",
-      "setLocalDescription(answer): transceiver.currentDirection is sendonly",
-      "addTransceiver(track): creates a transceiver for the track",
-      "addTransceiver(track): \"transceiver == {sender,receiver}\"",
-      "addTransceiver(track, init): initialize direction to inactive",
-      "addTransceiver(track, init): initialize sendEncodings[0].active to false",
-      "addTransceiver(0 streams): ontrack fires with no stream",
-      "addTransceiver(1 stream): ontrack fires with corresponding stream",
-      "addTransceiver(2 streams): ontrack fires with corresponding two streams",
-      "addTrack(0 streams): ontrack fires with no stream",
-      "addTrack(1 stream): ontrack fires with corresponding stream",
-      "addTrack(2 streams): ontrack fires with corresponding two streams",
-      "addTransceiver('audio'): creates a transceiver with direction sendrecv",
-      "addTransceiver('audio'): transceiver.receiver.track.kind == 'audio'",
-      "addTransceiver('video'): transceiver.receiver.track.kind == 'video'",
-      "addTransceiver('audio'): transceiver.sender.track == null",
-      "addTransceiver('audio'): transceiver.currentDirection is null",
-      "addTransceiver('audio'): transceiver.stopped is false",
-      "addTrack reuses reusable transceivers",
-      "addTransceiver does not reuse reusable transceivers",
-      "Can setup two-way call using a single transceiver",
-      "Closing the PC stops the transceivers",
-      "Changing transceiver direction to 'sendrecv' makes ontrack fire",
-      "transceiver.sender.track does not revert to an old state"
-    ]
-  },
-  "RTCPeerConnection-transport-stats.https.html": false,
-  "RTCPeerConnection-video-element-loadedmetadata-event.html": false,
+  "RTCPeerConnection-setRemoteDescription-replaceTrack.https.html": true,
+  "RTCPeerConnection-setRemoteDescription-rollback.html?interop-2026": true,
+  "RTCPeerConnection-setRemoteDescription-rollback.html?rest": true,
+  "RTCPeerConnection-setRemoteDescription-simulcast.https.html": true,
+  "RTCPeerConnection-setRemoteDescription-tracks.https.html": true,
+  "RTCPeerConnection-setRemoteDescription.html": true,
+  "RTCPeerConnection-transceivers.https.html": true,
+  "RTCPeerConnection-transport-stats.https.html": true,
+  "RTCPeerConnection-video-element-loadedmetadata-event.html": true,
   "RTCPeerConnection-videoDetectorTest.html": false,
   "RTCPeerConnectionIceErrorEvent.html": true,
   "RTCPeerConnectionIceEvent-constructor.html": true,
   "RTCRtpEncodingParameters-codec-opus-stereo.https.html": false,
   "RTCRtpParameters-codec.html?interop-2026": false,
-  "RTCRtpParameters-codec.html?rest": {
-    "expectedFailures": [
-      "Stats output-rtp should match the selected mixed codecs in simulcast usecase on a video sender"
-    ]
-  },
-  "RTCRtpParameters-codecs.html?interop-2026": {
-    "expectedFailures": [
-      "RTCRtpReceiver.getParameters() codecs should match local SDP (audio, answerer)"
-    ]
-  },
+  "RTCRtpParameters-codec.html?rest": false,
+  "RTCRtpParameters-codecs.html?interop-2026": true,
   "RTCRtpParameters-codecs.html?rest": {
     "expectedFailures": [
-      "RTCRtpSender.getParameters() should have codecs after negotiation (audio)",
-      "RTCRtpReceiver.getParameters() codecs should match local SDP (audio, offerer)",
-      "RTCRtpSender.getParameters() should have codecs after negotiation (video)",
-      "RTCRtpReceiver.getParameters() codecs should match local SDP (video, offerer)",
-      "RTCRtpSender.getParameters() codecs should match remote SDP (audio, no fmtp checks, offerer)",
-      "RTCRtpSender.getParameters() codecs should match remote SDP (audio, no fmtp checks, answerer)",
-      "RTCRtpSender.getParameters() codecs should match remote SDP (audio, with fmtp checks, offerer)",
-      "RTCRtpSender.getParameters() codecs should match remote SDP (audio, with fmtp checks, answerer)",
       "RTCRtpSender.getParameters() codecs should match remote SDP (video, minimal fmtp checks, offerer)",
       "RTCRtpSender.getParameters() codecs should match remote SDP (video, minimal fmtp checks, answerer)",
       "RTCRtpSender.getParameters() codecs should match remote SDP (video, with fmtp checks, offerer)",
       "RTCRtpSender.getParameters() codecs should match remote SDP (video, with fmtp checks, answerer)"
     ]
   },
-  "RTCRtpParameters-encodings.html?interop-2026": {
-    "expectedFailures": [
-      "addTransceiver(video) should auto-set scaleResolutionDownBy to 1 when some encodings have it, but not all",
-      "addTransceiver(audio) with multiple encodings should result in one encoding with no properties other than active",
-      "sender.getParameters() should return sendEncodings set by addTransceiver()"
-    ]
-  },
-  "RTCRtpParameters-encodings.html?rest": {
-    "expectedFailures": [
-      "addTransceiver with a ridiculous number of encodings should truncate the list",
-      "sender.setParameters() with encodings unset should reject with TypeError"
-    ]
-  },
+  "RTCRtpParameters-encodings.html?interop-2026": true,
+  "RTCRtpParameters-encodings.html?rest": true,
   "RTCRtpParameters-headerExtensions.html": true,
   "RTCRtpParameters-maxFramerate.html": true,
   "RTCRtpParameters-rtcp.html": true,
-  "RTCRtpParameters-transactionId.html?interop-2026": {
-    "expectedFailures": [
-      "sender.setParameters() with transaction ID unset should reject with TypeError"
-    ]
-  },
-  "RTCRtpParameters-transactionId.html?rest": {
-    "expectedFailures": [
-      "sender.getParameters() should return the same transaction ID if called back-to-back without relinquishing the event loop, even if there is an intervening call to setParameters",
-      "sender.getParameters() should return the same transaction ID if called back-to-back without relinquishing the event loop, even if the microtask queue runs",
-      "setParameters() when the event loop has been relinquished since the last getParameters() should reject with InvalidStateError"
-    ]
-  },
+  "RTCRtpParameters-transactionId.html?interop-2026": true,
+  "RTCRtpParameters-transactionId.html?rest": true,
   "RTCRtpReceiver-audio-jitterBufferTarget-stats.https.html": false,
   "RTCRtpReceiver-getCapabilities.html": true,
-  "RTCRtpReceiver-getContributingSources.https.html": false,
-  "RTCRtpReceiver-getParameters.html?interop-2026": {
+  "RTCRtpReceiver-getContributingSources.https.html": true,
+  "RTCRtpReceiver-getParameters.html?interop-2026": true,
+  "RTCRtpReceiver-getParameters.html?rest": true,
+  "RTCRtpReceiver-getStats.https.html?interop-2026": true,
+  "RTCRtpReceiver-getStats.https.html?rest": true,
+  "RTCRtpReceiver-getSynchronizationSources.https.html": {
     "expectedFailures": [
-      "getParameters() surfaces codecs on two-way receiver at the right time"
+      "[audio-only] RTCRtpSynchronizationSource.audioLevel is a number [0, 1]"
     ]
   },
-  "RTCRtpReceiver-getParameters.html?rest": true,
-  "RTCRtpReceiver-getStats.https.html?interop-2026": false,
-  "RTCRtpReceiver-getStats.https.html?rest": false,
-  "RTCRtpReceiver-getSynchronizationSources.https.html": false,
   "RTCRtpReceiver-jitterBufferTarget.html": true,
   "RTCRtpReceiver-track-settings.tentative.html": false,
   "RTCRtpReceiver-video-anyCodec.html": false,
   "RTCRtpReceiver-video-jitterBufferTarget-stats.html": false,
   "RTCRtpReceiver.https.html": {
     "expectedFailures": [
-      "RTCRtpReceiver should have a null transport after sRD(offer)",
       "RTCRtpReceivers that do not necessarily share a bundle transport should not have the same transport object"
     ]
   },
   "RTCRtpSender-encode-same-track-twice.https.html": false,
   "RTCRtpSender-getCapabilities.html": true,
-  "RTCRtpSender-getParameters.html": false,
-  "RTCRtpSender-getStats.https.html": false,
-  "RTCRtpSender-replaceTrack.https.html": false,
+  "RTCRtpSender-getParameters.html": true,
+  "RTCRtpSender-getStats.https.html": true,
+  "RTCRtpSender-replaceTrack.https.html": {
+    "expectedFailures": [
+      "ReplaceTrack transmits the new track not the old track",
+      "ReplaceTrack null -> new track transmits the new track"
+    ]
+  },
   "RTCRtpSender-setParameters.html?interop-2026": true,
-  "RTCRtpSender-setParameters.html?rest": {
+  "RTCRtpSender-setParameters.html?rest": true,
+  "RTCRtpSender-setStreams.https.html": true,
+  "RTCRtpSender-transport.https.html": {
     "expectedFailures": [
-      "setParameters() with already used parameters should work if the event loop has not been relinquished"
+      "RTCRtpSender/receiver.transport at the right time, with bundle policy balanced",
+      "RTCRtpSender/receiver/SCTP transport at the right time, with bundle policy balanced",
+      "RTCRtpSender/receiver.transport at the right time, with bundle policy max-compat",
+      "RTCRtpSender/receiver/SCTP transport at the right time, with bundle policy max-compat"
     ]
   },
-  "RTCRtpSender-setStreams.https.html": {
-    "expectedFailures": [
-      "setStreams causes streams to be reported via ontrack on callee",
-      "setStreams can be used to reconstruct a stream with a track on the remote side",
-      "Adding streams and changing direction causes new streams to be reported via ontrack on callee",
-      "Adding streams to an active transceiver causes new streams to be reported via ontrack on callee"
-    ]
-  },
-  "RTCRtpSender-transport.https.html": false,
   "RTCRtpSender.https.html": {
     "expectedFailures": [
-      "RTCRtpSender should have a null transport after sRD(offer)",
       "RTCRtpSenders that do not necessarily share a bundle transport should not have the same transport object"
     ]
   },
-  "RTCRtpTransceiver-direction.html": {
-    "expectedFailures": [
-      "setting direction should change transceiver.direction independent of transceiver.currentDirection"
-    ]
-  },
+  "RTCRtpTransceiver-direction.html": true,
   "RTCRtpTransceiver-setCodecPreferences.html?interop-2026": {
     "expectedFailures": [
-      "setCodecPreferences() can remove rtx",
       "setCodecPreferences() filters on receiver and prefers receiver order"
     ]
   },
@@ -511,342 +272,139 @@
       "setCodecPreferences() can remove ulpfec"
     ]
   },
-  "RTCRtpTransceiver-stop.html": {
-    "expectedFailures": [
-      "A transceiver added and stopped before the initial offer generation should not trigger an offer m-section generation",
-      "During renegotiation, adding and stopping a transceiver should not trigger a renegotiated offer m-section generation",
-      "If a transceiver is stopped, transceivers, senders and receivers should disappear after offer/answer",
-      "If a transceiver is stopped, transceivers should end up in state stopped"
-    ]
-  },
-  "RTCRtpTransceiver-stopping.https.html?interop-2026": false,
-  "RTCRtpTransceiver-stopping.https.html?rest": false,
-  "RTCRtpTransceiver.https.html?interop-2026": {
-    "expectedFailures": [
-      "checkCurrentDirection",
-      "checkLocalRollback",
-      "checkMsectionReuse",
-      "checkRemoteRollback",
-      "checkStop",
-      "checkStopAfterCreateAnswer",
-      "checkStopAfterCreateOffer",
-      "checkStopAfterSetLocalAnswer",
-      "checkStopAfterSetLocalOffer",
-      "checkStopAfterSetRemoteOffer"
-    ]
-  },
+  "RTCRtpTransceiver-stop.html": true,
+  "RTCRtpTransceiver-stopping.https.html?interop-2026": true,
+  "RTCRtpTransceiver-stopping.https.html?rest": true,
+  "RTCRtpTransceiver.https.html?interop-2026": true,
   "RTCRtpTransceiver.https.html?rest": {
     "expectedFailures": [
-      "checkAddTransceiverWithTrack",
-      "checkAddTransceiverWithAddTrack",
-      "checkAddTransceiverWithSetRemoteOfferSending",
-      "checkAddTransceiverWithSetRemoteOfferNoSend",
-      "checkNoMidOffer",
-      "checkNoMidAnswer",
-      "checkSendrecvWithNoSendTrack",
-      "checkSendrecvWithTracklessStream",
-      "checkAddTransceiverNoTrackDoesntPair",
-      "checkAddTransceiverWithTrackDoesntPair",
-      "checkAddTransceiverThenReplaceTrackDoesntPair",
-      "checkAddTransceiverThenAddTrackPairs",
-      "checkAddTrackPairs",
-      "checkReplaceTrackNullDoesntPreventPairing",
-      "checkRemoveAndReadd",
-      "checkAddTrackExistingTransceiverThenRemove",
-      "checkRemoveTrackNegotiation",
-      "checkStopAfterClose",
-      "checkRollbackAndSetRemoteOfferWithDifferentType",
-      "checkStopAfterCreateOfferWithReusedMsection",
-      "checkAddIceCandidateToStoppedTransceiver",
-      "checkBundleTagRejected",
-      "track with audio gets unmuted when setting the transceiver direction to 'sendrecv' after 'inactive'",
-      "track with video gets unmuted when packets flow.",
-      "track with video gets muted when setting the transceiver direction to 'inactive'",
-      "track with video gets unmuted when setting the transceiver direction to 'sendrecv' after 'inactive'",
-      "track with video stays muted when setting the transceiver direction to 'sendrecv' after 'inactive' but no packets flow"
+      "checkNoMidOffer"
     ]
   },
   "RTCSctpTransport-constructor.html": true,
-  "RTCSctpTransport-events.html": false,
+  "RTCSctpTransport-events.html": true,
   "RTCSctpTransport-maxChannels.html?interop-2026": true,
-  "RTCSctpTransport-maxChannels.html?rest": {
-    "expectedFailures": [
-      "Sctp transport has null maxChannels and 65536 maxMessageSize in have-remote-offer after rollback"
-    ]
-  },
-  "RTCSctpTransport-maxMessageSize.html": {
-    "expectedFailures": [
-      "Renegotiate max-message-size with various values provided by the remote peer",
-      "datachannel.send throws range error when trying to send a message greater than max-message-size"
-    ]
-  },
+  "RTCSctpTransport-maxChannels.html?rest": true,
+  "RTCSctpTransport-maxMessageSize.html": true,
   "RTCTrackEvent-constructor.html": true,
   "RTCTrackEvent-fire.html": {
     "expectedFailures": [
-      "When a=msid is absent, the track should still be associated with a stream",
-      "Source-level msid should be ignored if media-level msid is present",
-      "Source-level msid should be parsed if media-level msid is absent",
-      "stream ids should be found even if msid-semantic is absent",
-      "a=msid:- should result in a track event with no streams",
-      "Duplicate a=msid should result in a track event with one stream",
-      "Applying a remote description with removed msid should trigger firing a removetrack event on the corresponding stream",
-      "Applying a remote description with a new msid should trigger firing an event with populated streams"
+      "Source-level msid should be parsed if media-level msid is absent"
     ]
   },
-  "RollbackEvents.https.html": false,
+  "RollbackEvents.https.html": true,
   "back-forward-cache-with-closed-webrtc-connection-ccns.https.tentative.window.html": false,
   "back-forward-cache-with-closed-webrtc-connection.https.window.html": false,
   "back-forward-cache-with-open-webrtc-connection-ccns.https.tentative.window.html": false,
   "back-forward-cache-with-open-webrtc-connection.https.window.html": false,
-  "getstats.html": false,
+  "getstats.html": true,
   "historical.html?interop-2026": true,
   "historical.html?rest": true,
-  "idlharness.https.window.html?exclude=(RTCSessionDescription|RTCPeerConnectionIceErrorEvent|RTCRtpReceiver|RTCDtlsTransport|RTCIceTransport|RTCDTMFToneChangeEvent|RTCError|RTCErrorEvent)": {
-    "expectedFailures": [
-      "Test driver for asyncInitMediaStreamTrack",
-      "Test driver for asyncInitTransports",
-      "RTCPeerConnection interface: existence and properties of interface object",
-      "RTCPeerConnection interface: operation setRemoteDescription(RTCSessionDescriptionInit)",
-      "RTCPeerConnection interface: attribute onnegotiationneeded",
-      "RTCPeerConnection interface: attribute onicecandidate",
-      "RTCPeerConnection interface: attribute onicecandidateerror",
-      "RTCPeerConnection interface: attribute onsignalingstatechange",
-      "RTCPeerConnection interface: attribute oniceconnectionstatechange",
-      "RTCPeerConnection interface: attribute onicegatheringstatechange",
-      "RTCPeerConnection interface: attribute onconnectionstatechange",
-      "RTCPeerConnection interface: operation setRemoteDescription(RTCSessionDescriptionInit, VoidFunction, RTCPeerConnectionErrorCallback)",
-      "RTCPeerConnection interface: attribute ontrack",
-      "RTCPeerConnection interface: attribute ondatachannel",
-      "RTCIceCandidate interface: existence and properties of interface object",
-      "RTCPeerConnectionIceEvent interface: existence and properties of interface object",
-      "RTCCertificate interface: existence and properties of interface object",
-      "RTCRtpSender interface: existence and properties of interface object",
-      "RTCRtpSender interface: operation setParameters(RTCRtpSendParameters, optional RTCSetParameterOptions)",
-      "RTCRtpSender interface: operation replaceTrack(MediaStreamTrack?)",
-      "RTCRtpSender interface: operation getStats()",
-      "RTCRtpTransceiver interface: existence and properties of interface object",
-      "RTCRtpTransceiver interface: calling setCodecPreferences(sequence<RTCRtpCodec>) on new RTCPeerConnection().addTransceiver('audio') with too few arguments must throw TypeError",
-      "RTCIceCandidatePair interface: existence and properties of interface object",
-      "RTCIceCandidatePair must be primary interface of idlTestObjects.iceCandidatePair",
-      "Stringification of idlTestObjects.iceCandidatePair",
-      "RTCIceCandidatePair interface: idlTestObjects.iceCandidatePair must inherit property \"local\" with the proper type",
-      "RTCIceCandidatePair interface: idlTestObjects.iceCandidatePair must inherit property \"remote\" with the proper type",
-      "RTCTrackEvent interface: existence and properties of interface object",
-      "RTCSctpTransport interface: existence and properties of interface object",
-      "RTCSctpTransport interface: attribute maxChannels",
-      "RTCSctpTransport interface: attribute onstatechange",
-      "RTCDataChannel interface: existence and properties of interface object",
-      "RTCDataChannel interface: attribute onopen",
-      "RTCDataChannel interface: attribute onbufferedamountlow",
-      "RTCDataChannel interface: attribute onerror",
-      "RTCDataChannel interface: attribute onclosing",
-      "RTCDataChannel interface: attribute onclose",
-      "RTCDataChannel interface: attribute onmessage",
-      "RTCDataChannelEvent interface: existence and properties of interface object",
-      "RTCDTMFSender interface: existence and properties of interface object",
-      "RTCDTMFSender interface: attribute ontonechange",
-      "RTCStatsReport interface: existence and properties of interface object",
-      "RTCStatsReport interface: maplike<DOMString, object>"
-    ]
-  },
+  "idlharness.https.window.html?exclude=(RTCSessionDescription|RTCPeerConnectionIceErrorEvent|RTCRtpReceiver|RTCDtlsTransport|RTCIceTransport|RTCDTMFToneChangeEvent|RTCError|RTCErrorEvent)": true,
   "idlharness.https.window.html?include=(RTCSessionDescription|RTCPeerConnectionIceErrorEvent|RTCRtpReceiver|RTCDtlsTransport|RTCIceTransport|RTCDTMFToneChangeEvent|RTCError|RTCErrorEvent)": {
     "expectedFailures": [
-      "Test driver for asyncInitMediaStreamTrack",
-      "Test driver for asyncInitTransports",
-      "RTCSessionDescription interface: existence and properties of interface object",
-      "RTCSessionDescription interface object length",
-      "RTCPeerConnectionIceErrorEvent interface: existence and properties of interface object",
-      "RTCPeerConnectionIceErrorEvent interface object length",
-      "RTCRtpReceiver interface: existence and properties of interface object",
-      "RTCRtpReceiver interface: operation getStats()",
-      "RTCRtpReceiver interface: new RTCPeerConnection().addTransceiver('audio').receiver must inherit property \"jitterBufferTarget\" with the proper type",
-      "RTCDtlsTransport interface: existence and properties of interface object",
-      "RTCDtlsTransport interface: attribute onstatechange",
-      "RTCDtlsTransport interface: attribute onerror",
-      "RTCIceTransport interface: existence and properties of interface object",
-      "RTCIceTransport interface: attribute onstatechange",
-      "RTCIceTransport interface: attribute ongatheringstatechange",
-      "RTCIceTransport interface: attribute onselectedcandidatepairchange",
-      "RTCDTMFToneChangeEvent interface: existence and properties of interface object",
-      "RTCError interface: existence and properties of interface object",
-      "RTCError interface object length",
-      "RTCErrorEvent interface: existence and properties of interface object",
-      "RTCErrorEvent interface object length"
+      "RTCIceTransport interface: existence and properties of interface object"
     ]
   },
   "legacy": {
-    "RTCPeerConnection-createOffer-offerToReceive.optional.html": {
-      "expectedFailures": [
-        "offerToReceiveAudio option should be ignored if a non-stopped \"sendrecv\" transceiver exists",
-        "offerToReceiveAudio set to false with a track should create a \"sendonly\" transceiver",
-        "subsequent offerToReceiveAudio set to false with a track should change the direction to \"sendonly\"",
-        "offerToReceiveVideo option should be ignored if a non-stopped \"sendrecv\" transceiver exists",
-        "offerToReceiveVideo set to false with a track should create a \"sendonly\" transceiver",
-        "subsequent offerToReceiveVideo set to false with a track should change the direction to \"sendonly\""
-      ]
-    },
-    "RTCRtpTransceiver-with-OfferToReceive-options.optional.https.html": false,
-    "munge-dont.html": {
-      "expectedFailures": [
-        "Rejects SDP munging between createOffer and setLocalDescription",
-        "Rejects SDP munging between createAnswer and setLocalDescription"
-      ]
-    },
+    "RTCPeerConnection-createOffer-offerToReceive.optional.html": true,
+    "RTCRtpTransceiver-with-OfferToReceive-options.optional.https.html": true,
+    "munge-dont.html": true,
     "onaddstream.https.html": false,
-    "simplecall_callbacks.optional.https.html": false
+    "simplecall_callbacks.optional.https.html": true
   },
-  "no-media-call.html": false,
-  "outbound-rtp-encoding-index.https.html": {
-    "expectedFailures": [
-      "encodingIndex is undefined for audio streams"
-    ]
-  },
-  "promises-call.html": false,
+  "no-media-call.html": true,
+  "outbound-rtp-encoding-index.https.html": true,
+  "promises-call.html": true,
   "protocol": {
     "RTCPeerConnection-payloadTypes.html": true,
-    "additional-codecs.html": false,
+    "additional-codecs.html": true,
     "av1-profile-asymmetry.https.html": false,
     "bundle.https.html?interop-2026": false,
-    "bundle.https.html?rest": {
-      "expectedFailures": [
-        "not negotiating BUNDLE creates two separate ice and dtls transports",
-        "max-bundle with an offer without bundle only negotiates the first m-line"
-      ]
-    },
-    "candidate-exchange.https.html?interop-2026": false,
-    "candidate-exchange.https.html?rest": {
-      "expectedFailures": [
-        "Selected candidate pair exposes local host fields and hides remote prflx fields"
-      ]
-    },
+    "bundle.https.html?rest": false,
+    "candidate-exchange.https.html?interop-2026": true,
+    "candidate-exchange.https.html?rest": true,
     "codecs-filtered-by-direction.https.html": true,
     "codecs-subsequent-offer.https.html": false,
-    "crypto-suite.https.html": {
-      "expectedFailures": [
-        "tlsVersion is acceptable on data-only",
-        "tlsVersion is acceptable on video-only"
-      ]
-    },
-    "direction.html": false,
+    "crypto-suite.https.html": true,
+    "direction.html": true,
     "dtls-certificates.html": true,
     "dtls-close.html": true,
-    "dtls-fingerprint-validation.html": false,
-    "dtls-setup.https.html": {
+    "dtls-fingerprint-validation.html": true,
+    "dtls-setup.https.html": true,
+    "h264-fmtp-modifies-level.https.html": {
       "expectedFailures": [
-        "PC with setup=actpass should have a dtlsRole of client",
-        "PC with setup=active should have a dtlsRole of server",
-        "PC with setup=passive should have a dtlsRole of client"
+        "Level 2.0 alone limits the sent video to level 2.0",
+        "Level 3.1 with max-fs/max-mbps lowered limits video to level 2.0 sizes"
       ]
     },
-    "h264-fmtp-modifies-level.https.html": true,
-    "h264-profile-levels.https.html?interop-2026": false,
-    "h264-profile-levels.https.html?rest": false,
+    "h264-profile-levels.https.html?interop-2026": true,
+    "h264-profile-levels.https.html?rest": {
+      "expectedFailures": [
+        "Level 1 H264 video is appropriately constrained",
+        "Level 2 H264 video is appropriately constrained",
+        "Level 1.1 H264 video is appropriately constrained",
+        "Level 1.2 H264 video is appropriately constrained",
+        "Level 1.3 H264 video is appropriately constrained",
+        "Level 2.1 H264 video is appropriately constrained",
+        "Level 2.2 H264 video is appropriately constrained"
+      ]
+    },
     "h264-unidirectional-codec-offer.https.html": false,
     "h265-level-id.https.html": false,
     "h265-loopback.https.html": false,
     "handover-datachannel.html": false,
     "handover.html": true,
-    "ice-state.https.html": false,
+    "ice-state.https.html": true,
     "ice-ufragpwd.html": true,
     "jsep-initial-offer.https.html": true,
     "missing-fields.html": false,
-    "msid-generate.html": {
-      "expectedFailures": [
-        "AddTrack without a stream produces MSID with no stream ID",
-        "AddTrack with a stream produces MSID with a stream ID",
-        "AddTrack with two streams produces two MSID lines",
-        "AddTrack with the stream twice produces single MSID with a stream ID",
-        "AddTransceiver without a stream produces MSID with no stream ID",
-        "AddTransceiver with a stream produces MSID with a stream ID",
-        "AddTransceiver with two streams produces two MSID lines",
-        "AddTransceiver with the stream twice produces single MSID with a stream ID",
-        "SetStreams with a stream produces MSID with a stream ID",
-        "SetStreams with two streams produces two MSID lines",
-        "SetStreams with the stream twice produces single MSID with a stream ID"
-      ]
-    },
-    "msid-parse.html": {
-      "expectedFailures": [
-        "Description with no msid produces a track with a stream"
-      ]
-    },
+    "msid-generate.html": true,
+    "msid-parse.html": true,
     "pt-no-bundle.html": false,
-    "rtp-clockrate.html": false,
+    "rtp-clockrate.html": true,
     "rtp-demuxing.html": false,
-    "rtp-extension-support.html": {
-      "expectedFailures": [
-        "RTP header extension urn:ietf:params:rtp-hdrext:ssrc-audio-level is present in offer",
-        "RTP header extension urn:3gpp:video-orientation is present in offer",
-        "RTP header extension reassignment causes failure"
-      ]
-    },
-    "rtp-headerextensions.html": {
-      "expectedFailures": [
-        "MID header extension is supported.",
-        "Audio level header extension is supported.",
-        "Video orientation header extension is supported.",
-        "Negotiates the subset of supported extensions offered",
-        "Supports two-byte header extensions"
-      ]
-    },
-    "rtp-payloadtypes.html?interop-2026": false,
+    "rtp-extension-support.html": true,
+    "rtp-headerextensions.html": true,
+    "rtp-payloadtypes.html?interop-2026": true,
     "rtp-payloadtypes.html?rest": true,
-    "rtx-codecs.https.html": {
-      "expectedFailures": [
-        "Self-negotiated answer should have sensible RTX parameters",
-        "A remote offer generates sensible RTX references in answer",
-        "A remote offer with duplicate codecs generates sensible RTX references in answer"
-      ]
-    },
+    "rtx-codecs.https.html": true,
     "sctp-format.html": true,
-    "sdes-dont-dont-dont.html": {
-      "expectedFailures": [
-        "rejects a remote offer that only includes SDES and no DTLS fingerprint"
-      ]
-    },
-    "simulcast-answer.html": {
-      "expectedFailures": [
-        "Using the ~rid SDP syntax in a remote offer does not control the local encodings active flag"
-      ]
-    },
+    "sdes-dont-dont-dont.html": true,
+    "simulcast-answer.html": true,
     "simulcast-offer.html": true,
     "split.https.html": false,
     "transceiver-direction-match.html": false,
-    "transceiver-mline-recycling.html": false,
-    "unknown-media-types-negotiation.html": true,
-    "unknown-mediatypes.html": false,
-    "video-codecs.https.html": {
+    "transceiver-mline-recycling.html": true,
+    "unknown-media-types-negotiation.html": {
       "expectedFailures": [
-        "H.264 and VP8 should be negotiated after handshake",
-        "All H.264 codecs MUST include profile-level-id"
+        "A recycled m= section does not reuse the mid of the m= section it replaced"
       ]
     },
-    "vp8-fmtp.html": false
+    "unknown-mediatypes.html": true,
+    "video-codecs.https.html": true,
+    "vp8-fmtp.html": true
   },
-  "receiver-track-live.https.html": false,
+  "receiver-track-live.https.html": true,
   "recvonly-transceiver-can-become-sendrecv.https.html": true,
   "rtp-stats-lifetime.https.html": {
     "expectedFailures": [
-      "RTCOutboundRtpStreamStats exists after returning to stable",
-      "RTCInboundRtpStreamStats are created by packet reception",
-      "RTCOutboundRtpStreamStats remain in pc.getStats() after sender.replaceTrack(null)",
-      "RTCOutboundRtpStreamStats remain in sender.getStats() after sender.replaceTrack(null)",
       "RTCInboundRtpStreamStats exists for early media"
     ]
   },
   "simplecall-no-ssrcs.https.html": false,
-  "simplecall.https.html": false,
+  "simplecall.https.html": true,
   "simulcast": {
     "av1.https.html": false,
     "basic.https.html": false,
     "getStats.https.html": false,
     "h264.https.html": false,
-    "negotiation-encodings.https.html?interop-2026": false,
-    "negotiation-encodings.https.html?rest": false,
-    "rid-manipulation.html": false,
+    "negotiation-encodings.https.html?interop-2026": true,
+    "negotiation-encodings.https.html?rest": true,
+    "rid-manipulation.html": true,
     "screenshare.https.html": false,
     "setParameters-active.https.html": false,
-    "setParameters-encodings.https.html": false,
+    "setParameters-encodings.https.html": true,
     "setParameters-maxFramerate.https.html": false,
     "vp8.https.html": false,
     "vp9-scalability-mode.https.html": false,

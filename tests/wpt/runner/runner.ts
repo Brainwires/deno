@@ -121,12 +121,18 @@ export async function runSingleTest(
 ): Promise<TestResult> {
   const abort = new AbortController();
   let backstop: number | undefined;
+  // The subtests the file reported, kept here too: a file the backstop stops
+  // still names the ones that finished, so the one it hung in can be told.
+  const reported: TestCaseResult[] = [];
   try {
     return await Promise.race([
       runSingleTestInner(
         url,
         _options,
-        reporter,
+        (result) => {
+          reported.push(result);
+          reporter(result);
+        },
         inspectBrk,
         timeouts,
         abort.signal,
@@ -136,7 +142,7 @@ export async function runSingleTest(
           // Stop the test process too, not only the wait for it.
           abort.abort();
           resolve({
-            cases: [],
+            cases: reported.slice(),
             harnessStatus: null,
             duration: fileTimeout,
             status: 1,

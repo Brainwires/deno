@@ -1,37 +1,22 @@
 {
-  "RTCPeerConnection-constructor.html": false,
-  "RTCPeerConnection-getIdentityAssertion.sub.https.html": false,
+  "RTCPeerConnection-constructor.html": true,
+  "RTCPeerConnection-getIdentityAssertion.sub.https.html": {
+    "expectedFailures": [
+      "getIdentityAssertion() should load IdP proxy and return assertion generated",
+      "getIdentityAssertion() should succeed if mock-idp.js return different domain and protocol in assertion",
+      "getIdentityAssertion() should reject with RTCError('idp-execution-failure') if mock-idp.js throws error",
+      "getIdentityAssertion() should reject with RTCError('idp-bad-script-failure') if IdP proxy script do not register its callback",
+      "getIdentityAssertion() should reject with OperationError if mock-idp.js return invalid result",
+      "getIdentityAssertion() should reject with RTCError('idp-need-login') when mock-idp.js requires login",
+      "setIdentityProvider() with no peerIdentity provided should use peerIdentity value from getConfiguration()",
+      "Calling setIdentityProvider() multiple times should reset identity assertions",
+      "createOffer() should return SDP containing identity assertion string if identity provider is set"
+    ]
+  },
   "RTCPeerConnection-peerIdentity.https.html": false,
   "idlharness.https.window.html": {
     "expectedFailures": [
-      "RTCIdentityAssertion interface: existence and properties of interface object",
-      "RTCIdentityAssertion interface object length",
-      "RTCIdentityAssertion interface object name",
-      "RTCIdentityAssertion interface: existence and properties of interface prototype object",
-      "RTCIdentityAssertion interface: existence and properties of interface prototype object's \"constructor\" property",
-      "RTCIdentityAssertion interface: existence and properties of interface prototype object's @@unscopables property",
-      "RTCIdentityAssertion interface: attribute idp",
-      "RTCIdentityAssertion interface: attribute name",
-      "RTCIdentityAssertion must be primary interface of new RTCIdentityAssertion('idp', 'name')",
-      "Stringification of new RTCIdentityAssertion('idp', 'name')",
-      "RTCIdentityAssertion interface: new RTCIdentityAssertion('idp', 'name') must inherit property \"idp\" with the proper type",
-      "RTCIdentityAssertion interface: new RTCIdentityAssertion('idp', 'name') must inherit property \"name\" with the proper type",
-      "RTCPeerConnection interface: operation setIdentityProvider(DOMString, optional RTCIdentityProviderOptions)",
-      "RTCPeerConnection interface: operation getIdentityAssertion()",
-      "RTCPeerConnection interface: attribute peerIdentity",
-      "RTCPeerConnection interface: attribute idpLoginUrl",
-      "RTCPeerConnection interface: attribute idpErrorInfo",
-      "RTCPeerConnection interface: new RTCPeerConnection() must inherit property \"setIdentityProvider(DOMString, optional RTCIdentityProviderOptions)\" with the proper type",
-      "RTCPeerConnection interface: calling setIdentityProvider(DOMString, optional RTCIdentityProviderOptions) on new RTCPeerConnection() with too few arguments must throw TypeError",
-      "RTCPeerConnection interface: new RTCPeerConnection() must inherit property \"getIdentityAssertion()\" with the proper type",
-      "RTCPeerConnection interface: new RTCPeerConnection() must inherit property \"peerIdentity\" with the proper type",
-      "RTCPeerConnection interface: new RTCPeerConnection() must inherit property \"idpLoginUrl\" with the proper type",
-      "RTCPeerConnection interface: new RTCPeerConnection() must inherit property \"idpErrorInfo\" with the proper type",
-      "RTCError interface: attribute httpRequestStatusCode",
-      "MediaStreamTrack interface: attribute isolated",
-      "MediaStreamTrack interface: attribute onisolationchange",
-      "MediaStreamTrack interface: track must inherit property \"isolated\" with the proper type",
-      "MediaStreamTrack interface: track must inherit property \"onisolationchange\" with the proper type"
+      "RTCPeerConnection interface: attribute peerIdentity"
     ]
   }
 }

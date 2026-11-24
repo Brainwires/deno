@@ -876,6 +876,20 @@ function reportVariation(
     if (result.stderr) {
       console.log(`test stderr:\n${result.stderr}\n`);
     }
+    // A file that ran out of time: the subtests that finished first, passed
+    // ones too (`--quiet` printed none of those), so the log shows which
+    // subtest it was still in.
+    if (result.timedOut && result.cases.length > 0) {
+      console.log(`subtests that finished before the timeout:\n`);
+      for (const case_ of result.cases) {
+        console.log(
+          `        ${JSON.stringify(case_.name)} ${
+            case_.passed ? "ok" : "failed"
+          }`,
+        );
+      }
+      console.log("");
+    }
 
     const expectFail = expectation === false;
     const failReason = result.timedOut
