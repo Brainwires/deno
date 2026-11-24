@@ -97,10 +97,7 @@
       "reason": "Windows: a server listening without a host binds 0.0.0.0 only (net.ts keeps Windows off the dual-stack :: bind), so the test's connection to [::1] is refused"
     },
     "async-hooks/test-graph.pipe.js": {},
-    "async-hooks/test-graph.pipeconnect.js": {
-      "windows": false,
-      "reason": "Windows: hangs until the runner's timeout (a named-pipe server and client connect under async hooks, like async-hooks/test-pipeconnectwrap.js); the cause is not diagnosed yet"
-    },
+    "async-hooks/test-graph.pipeconnect.js": {},
     "async-hooks/test-graph.shutdown.js": {},
     "async-hooks/test-graph.statwatcher.js": {},
     "async-hooks/test-graph.tcp.js": {
@@ -115,10 +112,7 @@
     "async-hooks/test-improper-order.js": {},
     "async-hooks/test-improper-unwind.js": {},
     "async-hooks/test-late-hook-enable.js": {},
-    "async-hooks/test-pipeconnectwrap.js": {
-      "windows": false,
-      "reason": "Windows: hangs until the runner's timeout (a named-pipe server, client connect and close under async hooks); the cause is not diagnosed yet"
-    },
+    "async-hooks/test-pipeconnectwrap.js": {},
     "async-hooks/test-pipewrap.js": {},
     "async-hooks/test-querywrap.js": {},
     "async-hooks/test-queue-microtask.js": {},

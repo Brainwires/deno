@@ -473,6 +473,51 @@ Deno.test("[node/net] a path server keeps accepting past four open connections",
   }
 });
 
+// A server socket on a local IPC path that calls end() while its client
+// says nothing: the client reads EOF and both sockets close (DENEXT.md item
+// 5NN). A Windows named pipe has no half-close; as libuv does, the end that
+// shut down closes the pipe once the peer has been quiet for 50 ms. Before,
+// the pipe stayed open and neither side ever saw the end.
+Deno.test("[node/net] a path socket's end() reaches a quiet peer as EOF", async () => {
+  const dir = Deno.build.os === "windows"
+    ? undefined
+    : await Deno.makeTempDir();
+  const ipcPath = Deno.build.os === "windows"
+    ? `\\\\.\\pipe\\deno-test-${crypto.randomUUID()}`
+    : path.join(dir!, "s.sock");
+  const serverSideClosed = Promise.withResolvers<void>();
+  const server = net.createServer((socket) => {
+    socket.on("error", serverSideClosed.reject);
+    socket.on("close", () => serverSideClosed.resolve());
+    socket.end("bye");
+    server.close();
+  });
+  const listening = Promise.withResolvers<void>();
+  server.once("error", listening.reject);
+  server.listen(ipcPath, listening.resolve);
+  await listening.promise;
+
+  const clientClosed = Promise.withResolvers<string>();
+  const client = net.connect(ipcPath);
+  let received = "";
+  client.setEncoding("utf8");
+  client.on("data", (chunk) => received += chunk);
+  client.on("error", clientClosed.reject);
+  client.on("close", () => clientClosed.resolve(received));
+  const timeout = setTimeout(() => {
+    clientClosed.reject(new Error("the client never read EOF"));
+    serverSideClosed.reject(new Error("the server socket never closed"));
+  }, 10_000);
+  try {
+    assertEquals(await clientClosed.promise, "bye");
+    await serverSideClosed.promise;
+  } finally {
+    clearTimeout(timeout);
+    client.destroy();
+    if (dir) await Deno.remove(dir, { recursive: true });
+  }
+});
+
 // A Windows named pipe has one owner (DENEXT.md item 484): the first
 // instance is created with FILE_FLAG_FIRST_PIPE_INSTANCE, so a second server
 // on a name that is already served fails with EADDRINUSE instead of becoming

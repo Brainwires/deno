@@ -21717,6 +21717,80 @@ is `[Serializable]`) instead of returning a plain `DOMException`. - Tests:
 `structuredClone rejects every non-serializable interface` (main scope and
 worker; failed on these before). - Node tests enabled: none.
 
+
+516. **`fix(node/net)`: on Windows, a named-pipe socket that ends reaches its
+     peer as EOF** (runtime; `libs/core/uv_compat/pipe.rs`; tests say item 5NN
+     until the train numbers it). A Windows named pipe has no half-close, and
+     `uv_shutdown` on one only reported success: the pipe stayed open, so a peer
+     that kept reading never saw the end. A server that answered with
+     `socket.end()` and closed itself (the usual pattern, and
+     `async-hooks/test-pipeconnectwrap.js` and `test-graph.pipeconnect.js`)
+     waited for the client's EOF, the client for the server's, and the process
+     never exited. libuv's answer, now copied: once a named pipe has shut down,
+     a read that waits 50 ms with no data (`eof_timer` in `win/pipe.c`) closes
+     the pipe, which the peer reads as EOF, and reports EOF on this end; each
+     read that brings data restarts the timer, and stopping the read stops it.
+     - User-facing note: on Windows, `socket.end()` on a named-pipe connection
+       ends it for the peer too, as in Node.
+     - Tests: unit_node `net_test.ts` "a path socket's end() reaches a quiet
+       peer as EOF" (a server `end()`s and closes while its client says nothing;
+       both sockets must close, on every OS).
+     - Node tests enabled: `async-hooks/test-pipeconnectwrap.js` and
+       `async-hooks/test-graph.pipeconnect.js` on Windows.
+
+517. **`fix(node/child_process)`: on Windows, a large write to an extra stdio
+     pipe right before the writer exits arrives whole** (runtime;
+     `libs/core/uv_compat/pipe.rs`, `ext/io/bi_pipe.rs`; tests say item 5NN
+     until the train numbers it). Item 358 made the IPC channel wait for its
+     pipe writes to complete; every other named-pipe writer still reported a
+     write done as soon as tokio (mio) had queued the overlapped `WriteFile`. A
+     child that wrote more than the pipe's 64 KiB buffer to an extra `stdio`
+     pipe (`new net.Socket({ fd: 3 })`) and then ended had nothing keeping it
+     alive, and its exit cancelled the rest: the parent read part of the data.
+     As libuv does, a write request on a named pipe now completes only once its
+     `WriteFile` has: the pipe's write readiness is cleared when the write is
+     handed to mio, and the request's callback runs when mio makes the pipe
+     writable again (the write's completion), so the pending request keeps the
+     handle, and the process, alive. `uv_try_write` on a named pipe returns
+     `UV_EAGAIN`, as libuv's does, so every write takes that path, and a
+     shutdown waits for the write in flight. `deno_io`'s `BiPipeResource` writes
+     with `write_all_completed` on Windows too, as the IPC channel does.
+     - User-facing note: on Windows, a large write to an extra `stdio` pipe just
+       before a process exits is no longer cut short.
+     - Tests: unit_node `child_process_test.ts`
+       "extraStdioLargeWriteThenExitArrivesWhole" (a child writes 1 MB to fd 3
+       and ends while the parent keeps its thread busy for 1.5 s).
+     - Node tests enabled: none.
+
+518. **`fix(node/child_process)`: on macOS, a socket sent to a child and closed
+     at once reaches the child open** (runtime; `ext/process/ipc.rs`,
+     `ext/node/ops/ipc.rs`, `ext/node/polyfills/internal/child_process.ts`;
+     tests say item 5NN until the train numbers it).
+     `child.send(msg, socket,
+     { keepOpen: true })` followed by
+     `socket.destroy()` left the message in flight as the socket's only
+     reference: the sender closed its duplicate right after `sendmsg`. macOS's
+     collector for descriptors in flight (run whenever a Unix socket that holds
+     one is closed, by any process) counts such a socket as unreachable and
+     flushes its receive side, so the child's first read on it was an end of
+     stream: the socket ended, the peer saw the connection close, and the
+     child's reply failed with `EPIPE`.
+     `specs::node::child_process_ipc_handle::destroy_before_ack_*` failed this
+     way under load on macOS (a run of 200 concurrent repeats failed 195), and a
+     reproduction outside Deno, with Python's `socket` module, shows the same
+     kernel behaviour. The sender now keeps its copy of each descriptor it sent
+     until the peer's `NODE_HANDLE_ACK` (`op_node_ipc_release_sent_handle`), or
+     until the channel closes, as Node's `postSend` keeps the handle open until
+     the acknowledgement.
+     - User-facing note: on macOS, a socket or server sent to a child process
+       and then closed in the parent no longer reaches the child half closed.
+     - Tests: spec `node/child_process_ipc_handle` `in_flight_collector_json`
+       and `in_flight_collector_advanced` (the parent sends a socket and
+       destroys it before the child reads its channel, then closes a channel
+       holding a descriptor in flight; stock Deno 2.9.8 fails it every time on
+       macOS).
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -21733,6 +21807,11 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
 packaged app's launchers) are in the branch too, but a stock CLI does not run
 them; denext's own launcher provides that environment.
+
+506-510, 511, 512, 513, 515, 516, 517, 518) are what the prebuilt `libdenort`
+carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
+`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
+stock CLI does not run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

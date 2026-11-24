@@ -94,6 +94,16 @@ case "$TARGET" in
           exit 1
         }
         export E2E_KEYRING_DIR="$work/keyring"
+        # Only the daemons session.sh and the keyringpersist area start may
+        # own the name: while one is restarted the name is briefly unowned,
+        # and a call then (with auto-start) made the bus activate the host's
+        # gnome-keyring, which took the name, so the area's daemon exited
+        # ("another secret service is running") and the step failed.
+        mkdir -p "$work/xdg/dbus-1/services"
+        for svc in org.freedesktop.secrets org.freedesktop.impl.portal.Secret org.gnome.keyring; do
+          printf '[D-BUS Service]\nName=%s\nExec=/bin/false\n' "$svc" >"$work/xdg/dbus-1/services/$svc.service"
+        done
+        export XDG_DATA_DIRS="$work/xdg:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
         ;;
       *)
         echo "E2E_SECRET_SERVICE: masked or locked, not $E2E_SECRET_SERVICE" >&2

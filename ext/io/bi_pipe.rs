@@ -93,6 +93,15 @@ impl BiPipeResource {
     data: &[u8],
   ) -> Result<usize, std::io::Error> {
     let mut wr = RcRef::map(self, |r| &r.write_half).borrow_mut().await;
+    // denext: on Windows a tokio named-pipe write is done once it is queued,
+    // and a process that exits (or closes the pipe) right after a write
+    // larger than the pipe's buffer loses its tail. Write it the way the IPC
+    // channel does: the op resolves once the bytes are in the pipe.
+    #[cfg(windows)]
+    if wr.raw_handle.is_some() {
+      wr.write_all_completed(data).await?;
+      return Ok(data.len());
+    }
     let nwritten = wr.write(data).await?;
     wr.flush().await?;
     Ok(nwritten)

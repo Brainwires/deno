@@ -944,6 +944,25 @@ mod impl_ {
     Ok(IpcJsonReadResult { msg, raw_fd })
   }
 
+  /// denext: the peer acknowledged the oldest handle this end sent
+  /// (`NODE_HANDLE_ACK`): close the copy of its descriptor held until then
+  /// (see `deno_process::ipc::SentHandles`). Whether one was held.
+  #[op2(fast)]
+  pub fn op_node_ipc_release_sent_handle(
+    state: &mut OpState,
+    #[smi] rid: ResourceId,
+    serialization_json: bool,
+  ) -> Result<bool, deno_core::error::ResourceError> {
+    Ok(if serialization_json {
+      let stream = state.resource_table.get::<IpcJsonStreamResource>(rid)?;
+      stream.sent_handles.release_oldest()
+    } else {
+      let stream =
+        state.resource_table.get::<IpcAdvancedStreamResource>(rid)?;
+      stream.sent_handles.release_oldest()
+    })
+  }
+
   #[op2(fast)]
   pub fn op_node_ipc_ref(
     state: &mut OpState,

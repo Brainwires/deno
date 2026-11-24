@@ -79,6 +79,32 @@ pub struct uv_pipe_t {
   /// `EVERYONE_WRITE` (`readableAll` / `writableAll`), 0 for nobody.
   #[cfg(windows)]
   pub(crate) internal_win_everyone: u8,
+  /// denext: a named pipe has no half-close, so after a shutdown completes
+  /// the pipe stays open and the peer never reads EOF. libuv's answer, which
+  /// this copies: once this end has shut down, a read that waits
+  /// [`WIN_EOF_TIMEOUT`] with no data closes the pipe (the peer then reads
+  /// EOF) and reports EOF here (`eof_timer` in libuv's `win/pipe.c`).
+  #[cfg(windows)]
+  pub(crate) internal_win_shut_down: bool,
+  /// The running EOF timer; see `internal_win_shut_down`. Armed only while
+  /// reading, restarted by each read that brings data.
+  #[cfg(windows)]
+  pub(crate) internal_win_eof_timer:
+    Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+  /// denext: a named-pipe write (tokio's, through mio) is done as far as
+  /// `try_write` says once the overlapped `WriteFile` is queued, but the
+  /// bytes are in the pipe only when it completes: a process that exits
+  /// before then has the write cancelled and the peer loses the tail of a
+  /// large final write. As libuv does, a write request completes only when
+  /// its `WriteFile` does. This is set while a `WriteFile` is in flight; mio
+  /// makes the pipe writable again when it completes.
+  #[cfg(windows)]
+  pub(crate) internal_win_write_in_flight: bool,
+  /// The write requests fully handed to mio whose `WriteFile` hasn't
+  /// completed yet; their callbacks run once it has.
+  #[cfg(windows)]
+  pub(crate) internal_win_unconfirmed:
+    Vec<(*mut uv_write_t, Option<uv_write_cb>)>,
   /// Pending `NamedPipeServer::connect()` future. When ready, a client
   /// has connected and the connection callback should fire.
   #[cfg(windows)]
@@ -422,6 +448,14 @@ pub fn new_pipe(ipc: bool) -> uv_pipe_t {
     internal_win_client: None,
     #[cfg(windows)]
     internal_win_everyone: 0,
+    #[cfg(windows)]
+    internal_win_shut_down: false,
+    #[cfg(windows)]
+    internal_win_eof_timer: None,
+    #[cfg(windows)]
+    internal_win_write_in_flight: false,
+    #[cfg(windows)]
+    internal_win_unconfirmed: Vec::new(),
     #[cfg(windows)]
     internal_win_connect_fut: None,
     #[cfg(windows)]
@@ -1484,23 +1518,14 @@ pub(crate) unsafe fn try_write_pipe(
     }
     #[cfg(windows)]
     {
-      if let Some(ref client) = (*pipe).internal_win_client {
-        return match client.try_write(data) {
-          Ok(n) => n as c_int,
-          Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-            super::UV_EAGAIN
-          }
-          Err(ref e) => io_error_to_uv(e),
-        };
-      }
-      if let Some(ref server) = (*pipe).internal_win_server {
-        return match server.try_write(data) {
-          Ok(n) => n as c_int,
-          Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-            super::UV_EAGAIN
-          }
-          Err(ref e) => io_error_to_uv(e),
-        };
+      // denext: as libuv's `uv_try_write` does for a named pipe: a write
+      // there completes only when its `WriteFile` does (see
+      // `internal_win_write_in_flight`), which a synchronous try can't wait
+      // for, so it goes through `uv_write`'s queue.
+      if (*pipe).internal_win_client.is_some()
+        || (*pipe).internal_win_server.is_some()
+      {
+        return super::UV_EAGAIN;
       }
       if let Some(handle) = (*pipe).internal_handle {
         use std::io::Write;
@@ -1548,6 +1573,17 @@ pub(crate) unsafe fn close_pipe(pipe: *mut uv_pipe_t) {
     }
     (*pipe).internal_bind_path = None;
 
+    // denext: libuv aborts the writes in flight first, then the queued ones.
+    #[cfg(windows)]
+    {
+      (*pipe).internal_win_write_in_flight = false;
+      for (req, cb) in std::mem::take(&mut (*pipe).internal_win_unconfirmed) {
+        if let Some(cb) = cb {
+          cb(req, super::UV_ECANCELED);
+        }
+      }
+    }
+
     // Cancel pending writes.
     while let Some(pw) = (*pipe).internal_write_queue.pop_front() {
       if let Some(cb) = pw.cb {
@@ -1583,6 +1619,7 @@ pub(crate) unsafe fn close_pipe(pipe: *mut uv_pipe_t) {
       if let Some(read) = (*pipe).internal_pending_read.take() {
         read.cancel();
       }
+      (*pipe).internal_win_eof_timer = None;
       if let Some(retry) = (*pipe).internal_win_connect_retry.take() {
         retry.abort();
       }
@@ -1671,6 +1708,14 @@ pub(crate) unsafe fn read_start_pipe(
     (*pipe).internal_read_cb = read_cb;
     (*pipe).internal_reading = true;
     (*pipe).flags |= UV_HANDLE_ACTIVE;
+    // denext: libuv starts the EOF timer with each read it queues after a
+    // shutdown.
+    if (*pipe).internal_win_shut_down
+      && ((*pipe).internal_win_server.is_some()
+        || (*pipe).internal_win_client.is_some())
+    {
+      arm_win_eof_timer(pipe);
+    }
 
     let inner = super::get_inner((*pipe).loop_);
     let mut handles = inner.pipe_handles.borrow_mut();
@@ -1690,8 +1735,30 @@ pub(crate) unsafe fn read_stop_pipe(pipe: *mut uv_pipe_t) -> c_int {
     (*pipe).internal_reading = false;
     // denext: a pending read of a raw handle keeps going: its result is
     // delivered by the next `read_start` (see `WinPipeRead`).
+    // libuv stops the EOF timer with the read.
+    (*pipe).internal_win_eof_timer = None;
   }
   0
+}
+
+/// denext: how long a named pipe that has shut down waits, while reading,
+/// for the peer's data before it closes (libuv's `eof_timeout`).
+#[cfg(windows)]
+const WIN_EOF_TIMEOUT: std::time::Duration =
+  std::time::Duration::from_millis(50);
+
+/// denext: (re)starts the EOF timer of a named pipe that has shut down; see
+/// `uv_pipe_t::internal_win_shut_down`.
+#[cfg(windows)]
+unsafe fn arm_win_eof_timer(pipe: *mut uv_pipe_t) {
+  // SAFETY: the caller passes a valid pipe.
+  unsafe {
+    (*pipe).internal_win_eof_timer =
+      Some(Box::pin(tokio::time::sleep(WIN_EOF_TIMEOUT)));
+    if let Some(w) = (*pipe).internal_waker.as_ref() {
+      w.mark_ready();
+    }
+  }
 }
 
 #[cfg(windows)]
@@ -1873,6 +1940,32 @@ pub(crate) unsafe fn complete_written_writes(pipe_ptr: *mut uv_pipe_t) -> bool {
   }
 }
 
+/// denext: `try_write` on a tokio named pipe that also clears the pipe's
+/// write readiness, so that the pipe reads writable again only once mio has
+/// completed the `WriteFile` this starts (see
+/// `uv_pipe_t::internal_win_write_in_flight`). A successful `try_write`
+/// leaves the readiness it found set; the enclosing `try_io` clears it, but
+/// only if no event has come in since it looked, so a completion that
+/// arrives meanwhile is kept.
+#[cfg(windows)]
+macro_rules! try_write_tracked {
+  ($io:expr, $buf:expr) => {{
+    let mut written = None;
+    let result = $io.try_io(tokio::io::Interest::WRITABLE, || {
+      written = Some($io.try_write($buf)?);
+      Err::<(), std::io::Error>(std::io::ErrorKind::WouldBlock.into())
+    });
+    match written {
+      Some(n) => Ok(n),
+      None => Err(
+        result
+          .err()
+          .unwrap_or_else(|| std::io::ErrorKind::WouldBlock.into()),
+      ),
+    }
+  }};
+}
+
 /// Poll a Windows pipe handle for connects, accepts, reads, and writes.
 #[cfg(windows)]
 pub(crate) unsafe fn poll_pipe_handle(
@@ -1964,12 +2057,37 @@ pub(crate) unsafe fn poll_pipe_handle(
       Option<uv_write_cb>,
       c_int,
     )> = Vec::new();
+    // denext: the named pipe's `WriteFile` in flight has completed once mio
+    // makes the pipe writable again (see `internal_win_write_in_flight`);
+    // the requests it carried complete with it.
+    if (*pipe_ptr).internal_win_write_in_flight {
+      let done = if let Some(ref server) = (*pipe_ptr).internal_win_server {
+        server.poll_write_ready(cx).is_ready()
+      } else if let Some(ref client) = (*pipe_ptr).internal_win_client {
+        client.poll_write_ready(cx).is_ready()
+      } else {
+        true
+      };
+      if done {
+        (*pipe_ptr).internal_win_write_in_flight = false;
+        any_work = true;
+        for (req, cb) in
+          std::mem::take(&mut (*pipe_ptr).internal_win_unconfirmed)
+        {
+          completed_writes.push((req, cb, 0));
+        }
+      }
+    }
     while let Some(pw) = (*pipe_ptr).internal_write_queue.front() {
       if let Some(status) = pw.status {
         any_work = true;
         let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
         completed_writes.push((pw.req, pw.cb, status));
         continue;
+      }
+      // One `WriteFile` in flight at a time, as mio allows.
+      if (*pipe_ptr).internal_win_write_in_flight {
+        break;
       }
       // Try writing to whichever pipe type we have.
       let remaining: &[u8] = if let Some(ref iov) = pw.iovecs {
@@ -1997,21 +2115,25 @@ pub(crate) unsafe fn poll_pipe_handle(
       if let Some(ref client) = (*pipe_ptr).internal_win_client {
         let _ = client.poll_write_ready(cx);
       }
+      let named = (*pipe_ptr).internal_handle.is_none();
       let write_result = if let Some(ref handle) = (*pipe_ptr).internal_handle {
         let mut file = std::fs::File::from_raw_handle(*handle);
         let r = file.write(remaining);
         let _ = std::os::windows::io::IntoRawHandle::into_raw_handle(file);
         r
       } else if let Some(ref server) = (*pipe_ptr).internal_win_server {
-        server.try_write(remaining)
+        try_write_tracked!(server, remaining)
       } else if let Some(ref client) = (*pipe_ptr).internal_win_client {
-        client.try_write(remaining)
+        try_write_tracked!(client, remaining)
       } else {
         break;
       };
       match write_result {
         Ok(n) => {
           any_work = true;
+          if named {
+            (*pipe_ptr).internal_win_write_in_flight = true;
+          }
           let pw = (*pipe_ptr).internal_write_queue.front_mut().unwrap();
           let drained = if let Some(ref mut iov) = pw.iovecs {
             iov.advance(n);
@@ -2022,7 +2144,11 @@ pub(crate) unsafe fn poll_pipe_handle(
           };
           if drained {
             let pw = (*pipe_ptr).internal_write_queue.pop_front().unwrap();
-            completed_writes.push((pw.req, pw.cb, 0));
+            if named {
+              (*pipe_ptr).internal_win_unconfirmed.push((pw.req, pw.cb));
+            } else {
+              completed_writes.push((pw.req, pw.cb, 0));
+            }
           }
         }
         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -2142,6 +2268,9 @@ pub(crate) unsafe fn poll_pipe_handle(
               }
               Ok(n) => {
                 any_work = true;
+                if (*pipe_ptr).internal_win_eof_timer.is_some() {
+                  arm_win_eof_timer(pipe_ptr);
+                }
                 read_cb(pipe_ptr as *mut uv_stream_t, n as isize, &buf);
               }
               Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -2163,13 +2292,50 @@ pub(crate) unsafe fn poll_pipe_handle(
 
     // 5. Process deferred shutdown.
     if (*pipe_ptr).internal_write_queue.is_empty()
+      && !(*pipe_ptr).internal_win_write_in_flight
       && (*pipe_ptr).internal_shutdown.is_some()
     {
       let pending = (*pipe_ptr).internal_shutdown.take().unwrap();
-      // Named pipe shutdown: just drop the write side.
-      // The reader will see EOF.
+      // denext: a named pipe can't shut down one direction. As libuv does,
+      // the shutdown completes now and the EOF timer closes the pipe once
+      // the peer has gone quiet (see `internal_win_shut_down`).
+      if (*pipe_ptr).internal_win_server.is_some()
+        || (*pipe_ptr).internal_win_client.is_some()
+      {
+        (*pipe_ptr).internal_win_shut_down = true;
+        if (*pipe_ptr).internal_reading {
+          arm_win_eof_timer(pipe_ptr);
+        }
+      }
       if let Some(cb) = pending.cb {
         cb(pending.req, 0);
+      }
+      any_work = true;
+    }
+
+    // denext: the EOF timer after a shutdown (libuv's `eof_timer_cb`): the
+    // peer sent nothing for `WIN_EOF_TIMEOUT`, so close the pipe, which the
+    // peer reads as EOF, and report EOF here.
+    if (*pipe_ptr).internal_reading
+      && let Some(ref mut timer) = (*pipe_ptr).internal_win_eof_timer
+      && timer.as_mut().poll(cx).is_ready()
+    {
+      (*pipe_ptr).internal_win_eof_timer = None;
+      (*pipe_ptr).internal_reading = false;
+      // Dropping the last reference closes the handle; mio still completes
+      // the writes in flight first.
+      (*pipe_ptr).internal_win_connect_fut = None;
+      (*pipe_ptr).internal_win_server = None;
+      (*pipe_ptr).internal_win_client = None;
+      let alloc_cb = (*pipe_ptr).internal_alloc_cb;
+      let read_cb = (*pipe_ptr).internal_read_cb;
+      if let (Some(alloc_cb), Some(read_cb)) = (alloc_cb, read_cb) {
+        let mut buf = uv_buf_t {
+          base: std::ptr::null_mut(),
+          len: 0,
+        };
+        alloc_cb(pipe_ptr as *mut uv_handle_t, 65536, &mut buf);
+        read_cb(pipe_ptr as *mut uv_stream_t, UV_EOF as isize, &buf);
       }
       any_work = true;
     }
@@ -2180,6 +2346,7 @@ pub(crate) unsafe fn poll_pipe_handle(
     // opened-but-idle pipe (e.g. process.stdout) would keep the
     // event loop alive forever.
     let has_pending_work = !(*pipe_ptr).internal_write_queue.is_empty()
+      || (*pipe_ptr).internal_win_write_in_flight
       || (*pipe_ptr).internal_reading
       || (*pipe_ptr).internal_connect.is_some()
       || (*pipe_ptr).internal_win_connect_fut.is_some()
@@ -2215,7 +2382,9 @@ pub(crate) unsafe fn poll_pipe_handle(
         needs_requeue = true;
       }
     }
-    if !(*pipe_ptr).internal_write_queue.is_empty() {
+    if !(*pipe_ptr).internal_write_queue.is_empty()
+      || (*pipe_ptr).internal_win_write_in_flight
+    {
       if let Some(ref server) = (*pipe_ptr).internal_win_server
         && matches!(server.poll_write_ready(cx), Poll::Ready(_))
       {

@@ -24,6 +24,18 @@
       "output": "main.out",
       "exitCode": 0
     },
+    "in_flight_collector_json": {
+      "if": "unix",
+      "args": "run -A in_flight_collector.mjs json",
+      "output": "in_flight_collector.out",
+      "exitCode": 0
+    },
+    "in_flight_collector_advanced": {
+      "if": "unix",
+      "args": "run -A in_flight_collector.mjs advanced",
+      "output": "in_flight_collector.out",
+      "exitCode": 0
+    },
     "server_json": {
       "if": "unix",
       "args": "run -A server_main.mjs json",

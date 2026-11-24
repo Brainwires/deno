@@ -1585,6 +1585,48 @@ Deno.test(async function forkLargeMessageThenExitArrivesWhole() {
   }
 });
 
+// A child writes 1 MB to an extra stdio pipe (fd 3) and ends; its event loop
+// is then empty and it exits. The parent doesn't read until the child has had
+// time to exit, so the write can't finish before then. On Windows a named-pipe
+// write was reported done while its `WriteFile` was still queued, nothing
+// kept the child alive, and its exit cancelled the rest: the parent got part
+// of the data (DENEXT.md item 5NN). It must arrive whole, as with libuv.
+Deno.test(async function extraStdioLargeWriteThenExitArrivesWhole() {
+  const size = 1_000_000;
+  const file = await Deno.makeTempFile({ suffix: ".mjs" });
+  await Deno.writeTextFile(
+    file,
+    `import { Buffer } from "node:buffer";
+import { Socket } from "node:net";
+import process from "node:process";
+const socket = new Socket({ fd: 3, readable: false, writable: true });
+socket.on("error", (err) => {
+  console.error(err);
+  process.exitCode = 1;
+});
+socket.end(Buffer.alloc(${size}, "x"));
+`,
+  );
+  try {
+    const closed = withTimeout<number | null>(30_000);
+    const child = CP.spawn(Deno.execPath(), ["run", "-A", file], {
+      stdio: ["ignore", "inherit", "inherit", "pipe"],
+    });
+    let received = 0;
+    child.stdio[3]!.on("data", (chunk: Buffer) => received += chunk.length);
+    child.on("close", (code) => closed.resolve(code));
+    // Keep this thread from reading the pipe for a while.
+    const end = Date.now() + 1500;
+    while (Date.now() < end) {
+      // busy
+    }
+    assertEquals(await closed.promise, 0);
+    assertEquals(received, size);
+  } finally {
+    await Deno.remove(file);
+  }
+});
+
 // While Deno's own `node` is on PATH for its children
 // (DENO_NODE_SHIM_ACTIVE), a shell command is checked for starting that
 // `node` on an npm script. On Windows the check lowercased the program name
