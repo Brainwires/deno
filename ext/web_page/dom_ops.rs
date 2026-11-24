@@ -184,6 +184,9 @@ const REL_PREVIOUS_ELEMENT_SIBLING: u32 = 8;
 const REL_NEXT_ELEMENT_SIBLING: u32 = 9;
 const REL_ROOT: u32 = 10;
 const REL_TEMPLATE_CONTENTS: u32 = 11;
+/// The node itself: resolves a handle the host passed in (`00_dom.js`
+/// `REL_SELF`).
+const REL_SELF: u32 = 12;
 
 // Well-known nodes `op_web_page_document_node` answers. Kept in step with
 // `DOC_*` in `00_dom.js`.
@@ -268,6 +271,7 @@ pub fn op_web_page_node_relative(
       Ok(_) => Ok(None),
       Err(err) => Err(err),
     },
+    REL_SELF => doc.data(id).map(|_| Some(id)),
     _ => Ok(None),
   }
   .map_err(dom_err)?;

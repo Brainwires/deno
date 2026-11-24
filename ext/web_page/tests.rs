@@ -307,7 +307,10 @@ async fn fetch_is_confined() {
     r#"globalThis.denied = "pending";
       fetch("http://127.0.0.1:1/").then(
         () => { denied = "resolved"; },
-        (e) => { denied = [e instanceof TypeError, String(e.cause && e.cause.code)]; },
+        (e) => {
+          denied = [e instanceof TypeError, String(e.cause && e.cause.code)];
+          globalThis.deniedDetail = `${e.name}: ${e.message} / cause: ${e.cause}`;
+        },
       );
       globalThis.notAllowed = "pending";
       fetch("http://not-allowed.example/").then(
@@ -326,7 +329,9 @@ async fn fetch_is_confined() {
   );
   assert_eq!(
     eval(&mut page, "denied"),
-    json!([true, "ERR_ADDRESS_DENIED"])
+    json!([true, "ERR_ADDRESS_DENIED"]),
+    "{}",
+    eval(&mut page, "globalThis.deniedDetail ?? null")
   );
   assert_eq!(eval(&mut page, "notAllowed"), json!("NotCapable"));
   assert_eq!(eval(&mut page, "fileScheme"), json!("rejected"));
