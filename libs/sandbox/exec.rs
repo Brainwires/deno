@@ -6,9 +6,12 @@
 //! runs), and on Linux an ELF program's `PT_INTERP` (the dynamic loader,
 //! which the kernel opens for execution too); on macOS, the shell `/bin/sh`
 //! launches. Followed a few levels deep, canonical paths (the kernel checks
-//! the file it reaches, not the link). Other launchers aren't followed: the
-//! developer tools in macOS's `/usr/bin` (git, python3, clang) start the
-//! real tool through xcrun, which a strict list must name too.
+//! the file it reaches, not the link). Of those files, the ones an `exec`
+//! system call names are told apart ([`ProgramClosure::targets`]): the kernel
+//! opens an interpreter and a loader itself while it loads the file a call
+//! named. Other launchers aren't followed: the developer tools in macOS's
+//! `/usr/bin` (git, python3, clang) start the real tool through xcrun, which
+//! a strict list must name too.
 
 #![allow(
   clippy::disallowed_methods,
@@ -31,48 +34,88 @@ pub fn program_closure(
   programs: &[PathBuf],
   path: Option<&OsStr>,
 ) -> Vec<PathBuf> {
-  let mut out = Vec::new();
+  program_closure_parts(programs, path).files
+}
+
+/// What a program list needs ([`program_closure_parts`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProgramClosure {
+  /// Every file the kernel opens for execution: [`program_closure`].
+  pub files: Vec<PathBuf>,
+  /// The files among them that an `exec` system call names: the programs
+  /// themselves, and the program an `env` interpreter line runs (`env`
+  /// starts it with a call of its own). A `#!` interpreter and an ELF
+  /// loader are not among them: the kernel opens those itself while it
+  /// loads the file the call named.
+  pub targets: Vec<PathBuf>,
+}
+
+/// [`program_closure`] with the files an `exec` system call names told
+/// apart ([`ProgramClosure::targets`]); both lists are canonical and sorted.
+pub fn program_closure_parts(
+  programs: &[PathBuf],
+  path: Option<&OsStr>,
+) -> ProgramClosure {
+  let mut out = ProgramClosure::default();
   for program in programs {
-    visit(program, path, 0, &mut out);
+    visit(program, path, 0, true, &mut out);
   }
-  out.sort();
-  out.dedup();
+  out.files.sort();
+  out.files.dedup();
+  out.targets.sort();
+  out.targets.dedup();
   out
 }
 
+/// `target`: an `exec` system call names this file (see
+/// [`ProgramClosure::targets`]).
 fn visit(
   program: &Path,
   path: Option<&OsStr>,
   depth: usize,
-  out: &mut Vec<PathBuf>,
+  target: bool,
+  out: &mut ProgramClosure,
 ) {
   let Ok(real) = std::fs::canonicalize(program) else {
     return;
   };
-  if out.contains(&real) || depth > MAX_DEPTH {
+  if depth > MAX_DEPTH {
     return;
   }
-  out.push(real.clone());
+  // a file reached first as an interpreter may be a program of the list too
+  if target && !out.targets.contains(&real) {
+    out.targets.push(real.clone());
+  }
+  if out.files.contains(&real) {
+    return;
+  }
+  out.files.push(real.clone());
   // macOS's /bin/sh is a launcher that executes the shell
   // /private/var/select/sh names (bash, dash or zsh)
   #[cfg(target_os = "macos")]
   if real == Path::new("/bin/sh") {
-    visit(Path::new("/private/var/select/sh"), path, depth + 1, out);
+    visit(
+      Path::new("/private/var/select/sh"),
+      path,
+      depth + 1,
+      true,
+      out,
+    );
   }
   let Ok(head) = read_head(&real) else {
     return;
   };
   if let Some((interpreter, arg)) = shebang(&head) {
-    visit(&interpreter, path, depth + 1, out);
+    visit(&interpreter, path, depth + 1, false, out);
     // `#!/usr/bin/env node`: env executes the program it names
     if interpreter.file_name() == Some(OsStr::new("env"))
       && let Some(name) = arg
       && let Some(found) = find_on_path(&name, path)
     {
-      visit(&found, path, depth + 1, out);
+      visit(&found, path, depth + 1, true, out);
     }
   } else if let Some(loader) = elf_interpreter(&real) {
-    visit(&loader, path, depth + 1, out);
+    visit(&loader, path, depth + 1, false, out);
   }
 }
 
@@ -252,6 +295,53 @@ mod tests {
     }
     // a missing program: nothing
     assert!(program_closure(&[dir.join("missing")], None).is_empty());
+    std::fs::remove_dir_all(&dir).unwrap();
+  }
+
+  #[test]
+  fn targets_are_the_files_a_call_names() {
+    let dir = std::env::temp_dir()
+      .join(format!("deno-exec-targets-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sh = std::fs::canonicalize("/bin/sh").unwrap();
+    let script = dir.join("tool");
+    std::fs::write(&script, "#!/bin/sh\necho hi\n").unwrap();
+    let real_script = std::fs::canonicalize(&script).unwrap();
+    // a script: the kernel opens its interpreter, no call names it
+    let parts = program_closure_parts(std::slice::from_ref(&script), None);
+    assert!(parts.files.contains(&sh), "{parts:?}");
+    assert!(parts.targets.contains(&real_script), "{parts:?}");
+    #[cfg(target_os = "linux")]
+    assert_eq!(parts.targets, vec![real_script.clone()]);
+    // every target is one of the files
+    assert!(parts.targets.iter().all(|t| parts.files.contains(t)));
+    // ... unless the list names the interpreter too, in either order
+    for programs in [
+      vec![script.clone(), PathBuf::from("/bin/sh")],
+      vec![PathBuf::from("/bin/sh"), script.clone()],
+    ] {
+      let parts = program_closure_parts(&programs, None);
+      assert!(parts.targets.contains(&sh), "{parts:?}");
+      assert!(parts.targets.contains(&real_script), "{parts:?}");
+    }
+    // a script through env: env starts the program it names with a call
+    // of its own
+    let via_env = dir.join("via-env");
+    std::fs::write(&via_env, "#!/usr/bin/env sh\n").unwrap();
+    let path = std::env::var_os("PATH");
+    let parts =
+      program_closure_parts(std::slice::from_ref(&via_env), path.as_deref());
+    if let Ok(env) = std::fs::canonicalize("/usr/bin/env")
+      && let Some(found) = find_on_path("sh", path.as_deref())
+      && let Ok(found) = std::fs::canonicalize(found)
+    {
+      assert!(parts.files.contains(&env), "{parts:?}");
+      assert!(parts.targets.contains(&found), "{parts:?}");
+      // (one file under both names where a multi-call binary provides them)
+      if env != found {
+        assert!(!parts.targets.contains(&env), "{parts:?}");
+      }
+    }
     std::fs::remove_dir_all(&dir).unwrap();
   }
 

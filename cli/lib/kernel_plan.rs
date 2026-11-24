@@ -696,6 +696,7 @@ pub mod linux {
         netlink_route: p.sys.netlink_route,
         vsock: p.syscalls.vsock,
       },
+      exec_gate: p.fs.exec_gate.clone(),
     };
     Ok((
       plan,

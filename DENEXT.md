@@ -17071,13 +17071,15 @@ where the changes are discussed.
        interpreter, through `/usr/bin/env` the program it names, an ELF
        program's loader, on macOS the shell the `/bin/sh` launcher starts),
        Landlock `EXECUTE` rules on those files on Linux and `process-exec`
-       literals on macOS. The developer tools in macOS's `/usr/bin` (git,
-       python3, clang) start the real tool through xcrun, which a strict list
-       names too (`/Library/Developer/CommandLineTools/usr/bin/git`). Without
-       it, a run list keeps item 425's rule (any readable program, the
-       protection being that every child inherits the file and network rules),
-       and its documented gap names the opt-in. With an unscoped `--allow-run`
-       there is nothing to list: a fail-open gap, so `enforce` refuses.
+       literals on macOS. On Linux the file an exec call names is held by the
+       run's supervisor as well (item 5NN). The developer tools in macOS's
+       `/usr/bin` (git, python3, clang) start the real tool through xcrun, which
+       a strict list names too
+       (`/Library/Developer/CommandLineTools/usr/bin/git`). Without it, a run
+       list keeps item 425's rule (any readable program, the protection being
+       that every child inherits the file and network rules), and its documented
+       gap names the opt-in. With an unscoped `--allow-run` there is nothing to
+       list: a fail-open gap, so `enforce` refuses.
      - The child-failure hint (item 425) also shows inside a sandbox a process
        inherited (a nested `deno`), and for a child killed by `SIGABRT` (macOS's
        dyld refusing a library) or `SIGSYS` (a seccomp kill), not for signals a
@@ -22266,6 +22268,73 @@ worker; failed on these before). - Node tests enabled: none.
      such a folder is refused.
      - Tests: `windows::tests::wide_folders_are_the_systems_own` beside
        `wide_roots_are_never_labelled`.
+     - Node tests enabled: none.
+5NN. **`fix(sandbox)`: a strict exec scope on Linux answers exec calls in the
+     run's supervisor** (CLI + runtime; Linux; `libs/sandbox/exec_gate.rs`,
+     `exec.rs`, `supervise.rs`, `enforce_linux.rs`, `plan.rs`;
+     `cli/lib/kernel_policy.rs`, `kernel_plan.rs`, `kernel_apply.rs`,
+     `kernel_supervise.rs`; `cli/sandbox/enforce.rs`, `mod.rs`). Under
+     `--kernel-sandbox-exec=strict` (item 449) the execute rules name files, and
+     the kernel opens more files for execution than the one a call names (a
+     script's `#!` interpreter, a program's loader), so those carry a rule too.
+     Which file an `execve` / `execveat` call itself may name is now held as
+     well, by a supervising process:
+     - The policy tells the two apart (`exec::program_closure_parts`): every
+       file with an execute rule, and the files a call may name (the run list's
+       programs, and the program an `env` interpreter line starts). The plan
+       carries the second list (`LinuxPlan.execGate`).
+     - A run with such a plan has a supervisor, the one `broker` has, with or
+       without a broker: the first image re-executes as the supervisor image,
+       which forks the confined worker (`supervise::run_with_gate`; a compiled
+       program forks in place, `fork_worker_with_gate`). It keeps the PID the
+       program was started with, passes signals on, exits as the worker exits,
+       and ends what the worker orphaned.
+     - The worker installs a seccomp filter that hands `execve` and `execveat`
+       to the supervisor (user notification) as it applies its plan, before its
+       own seccomp program, and sends the listener over a channel of its own
+       (`DENO_INTERNAL_KERNEL_EXEC_GATE_FD`); it refuses to apply a plan that
+       asks for the supervisor without that channel. The filter is inherited by
+       everything the run starts.
+     - The supervisor resolves the file each call names as the caller would
+       reach it (its root, working directory or directory descriptor; the
+       descriptor itself for `AT_EMPTY_PATH`; the caller's own `/proc/self/exe`
+       and `/proc/self/fd/<n>`), and lets the call continue only when that file
+       is one of the list, by device and inode. Anything else is `EACCES`, as is
+       a call it can't read or resolve. The Landlock rules still apply to
+       whatever the kernel then opens.
+     - What changes for a strict run: a script's interpreter (or a loader) no
+       longer starts by its own name unless the run list names it; a program
+       that made itself non-dumpable starts nothing; programs the run left in
+       the background end with it.
+     - Where no such supervisor works, the scope is held by the execute rules
+       alone, as before, and the run says so: the documented rule of
+       `--kernel-sandbox-report` and the report's `exec:` line read "exec
+       targets limited by path only", and an enforced run prints one warning.
+       That is the case where a seccomp listener can't be installed (measured
+       once, with a forked child whose exec call the runtime must receive, read
+       and let continue: a kernel or an outer profile without user
+       notification, a listener already in the filter chain such as a `deno`
+       started inside another strict run or under the `warn` observer, a ptrace
+       policy that keeps the child's memory out of reach), and in a packaged
+       desktop app, which has no supervisor.
+     - The answer is made from the caller's memory; native code that changes
+       its own argument while its call is in flight stays inside the files the
+       execute rules allow. The scope bounds which programs start, not what
+       native code already running does in its own address space.
+     - Tests: `deno_sandbox`'s
+       `exec::tests::targets_are_the_files_a_call_names`,
+       `exec_gate::tests::{the_callers_own_proc_links_are_named_word_for_word,
+       a_call_continues_only_for_a_listed_file,
+       an_interpreter_the_kernel_opens_is_not_a_target,
+       a_descriptor_is_held_to_the_file_it_is,
+       a_program_starts_itself_again_only_when_listed,
+       a_gated_process_starts_listed_programs_only,
+       the_probe_answers_the_same_twice,
+       a_variable_that_names_no_socket_is_never_ignored}`; `deno_lib`'s
+       `kernel_policy::tests::strict_exec_names_the_files_a_call_may_name`;
+       specs `kernel_sandbox/exec_scope` (`strict_exec_call_forms`,
+       `exec_call_forms_without_strict`; they build two small C programs) and
+       the existing `kernel_sandbox/children` `strict_exec`.
      - Node tests enabled: none.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,

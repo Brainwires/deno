@@ -605,11 +605,48 @@ fn take_broker(expected: Option<&deno_sandbox::plan::BrokerPlan>) {
 
 /// The supervisor image: starts the broker for the plan's policy, forks
 /// the worker (which re-executes under the plan exactly as `enforce` does,
-/// with its end of the broker channel) and exits as the worker exits.
+/// with its end of the broker channel) and exits as the worker exits. On
+/// Linux it also answers the worker's exec system calls where the plan
+/// hands them over (a strict exec scope, `deno_sandbox::exec_gate`), with
+/// or without a broker.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn supervise(handoff: deno_sandbox::supervise::Handoff) -> ! {
   use deno_sandbox::supervise::BROKER_FD_ENV_VAR;
 
+  #[cfg(target_os = "linux")]
+  if let Some(files) = handoff.plan.exec_gate().map(|files| files.to_vec()) {
+    use deno_sandbox::plan::EXEC_GATE_FD_ENV_VAR;
+    let broker = handoff.plan.broker.clone();
+    let exec_worker = |broker_fd: Option<i32>,
+                       gate_fd: i32|
+     -> std::io::Error {
+      let mut env = handoff.env_os();
+      env.retain(|(k, _)| k != BROKER_FD_ENV_VAR && k != EXEC_GATE_FD_ENV_VAR);
+      if let Some(broker_fd) = broker_fd {
+        env.push((BROKER_FD_ENV_VAR.into(), broker_fd.to_string().into()));
+      }
+      env.push((EXEC_GATE_FD_ENV_VAR.into(), gate_fd.to_string().into()));
+      // everything this image holds is what the first image kept for the
+      // worker, and the channels
+      deno_sandbox::enforce_linux::reexec(&handoff.plan, env, |_| true)
+    };
+    let serve = move |sock: Option<std::os::fd::OwnedFd>,
+                      gate: std::os::fd::OwnedFd|
+          -> std::io::Result<()> {
+      deno_sandbox::exec_gate::spawn_gate(gate, &files)?;
+      match (&broker, sock) {
+        (Some(broker), Some(sock)) => {
+          deno_lib::kernel_supervise::serve_broker(broker, sock)
+        }
+        _ => Ok(()),
+      }
+    };
+    deno_sandbox::supervise::run_with_gate(
+      handoff.plan.broker.is_some(),
+      exec_worker,
+      serve,
+    )
+  }
   let Some(broker) = handoff.plan.broker.clone() else {
     refuse_at_startup("the supervisor's hand-over has no broker policy");
   };
@@ -939,6 +976,19 @@ pub fn prepare(
   let Some(plan) = plan else {
     bail!("--kernel-sandbox=enforce refuses to start: no plan for this OS");
   };
+  // a strict exec scope with no supervising process for its exec calls
+  // (Linux) runs, held by the path rules alone, and says so each time
+  // (the image after the re-exec doesn't repeat it)
+  if compiled.policy.os == super::policy::TargetOs::Linux
+    && compiled.policy.fs.exec == super::policy::ExecScope::Listed
+    && compiled.policy.fs.exec_gate.is_none()
+  {
+    log::warn!(
+      "{} --kernel-sandbox-exec=strict: {}",
+      crate::colors::yellow("Warning"),
+      super::policy::STRICT_EXEC_PATH_ONLY
+    );
+  }
   // the broker's copy of the network grant, as the flags wrote it (both
   // images run this with the same options, so the plans still compare);
   // only the broker's platforms fill it, so the binding is mutable only there
@@ -963,6 +1013,13 @@ pub fn prepare(
       if applied.without_measured_lists() == plan.without_measured_lists()
         && deno_sandbox::enforce_linux::status_confined()
       {
+        // a plan that hands exec calls to its supervisor runs only with
+        // this process's filter for them in place
+        if plan.exec_gate().is_some() && !deno_sandbox::exec_gate::installed() {
+          bail!(
+            "--kernel-sandbox=enforce refuses to start: the supervisor of this run's exec scope isn't in place"
+          );
+        }
         check_broker(&plan)?;
         check_handed_down(options, &ctx.cwd, &plan)?;
         let _ = VERIFY_MODULES.set(applied.module_files.clone());
@@ -1134,6 +1191,8 @@ fn reexec_env(
     })
     // only this image says what it printed
     .filter(|(k, _)| k != PRINTED_ENV_VAR)
+    // only a supervisor names the channel for the new image's exec calls
+    .filter(|(k, _)| k != deno_sandbox::plan::EXEC_GATE_FD_ENV_VAR)
     .filter(|(k, _)| k != COMPILE_CACHE_KEY_FD_ENV_VAR)
     .collect();
   // the loader's and libc's variables an env file set are for the program,
@@ -1436,14 +1495,21 @@ pub async fn apply_pending_with_entries(
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
   }
+  // a broker, or a strict exec scope whose exec calls a supervisor answers:
+  // the supervisor image first, which starts the confined one
   #[cfg(target_os = "linux")]
-  if plan.broker.is_some() {
+  if deno_lib::kernel_supervise::needs_supervisor(plan) {
+    let mode = if plan.broker.is_some() {
+      "broker"
+    } else {
+      "enforce"
+    };
     let env =
       reexec_env(plan, deno_dir.as_deref(), carrier_fd, compile_cache_key_fd);
     pass_compile_cache_key_on_exec(compile_cache_key_fd);
     let err = exec_supervisor(plan, env, "/proc/self/exe".into(), None, keep);
     drop(carrier);
-    bail!("--kernel-sandbox=broker: starting the supervisor failed: {err}");
+    bail!("--kernel-sandbox={mode}: starting the supervisor failed: {err}");
   }
   #[cfg(target_os = "linux")]
   {

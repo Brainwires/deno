@@ -707,6 +707,10 @@ fn context_for(
   ctx.tty_parent = std::io::stdin().is_terminal();
   ctx.ttys = std_stream_ttys();
   ctx.exec_strict = flags.permissions.kernel_sandbox_exec_strict;
+  // the run's supervisor answers a strict scope's exec calls where that
+  // works (Linux, measured; asked only for a strict scope)
+  ctx.exec_gate =
+    ctx.exec_strict && deno_lib::kernel_apply::exec_gate_capability();
   ctx.coverage_dir = cli_options.coverage_dir();
   ctx.profile_dirs = cli_options
     .cpu_prof_dir()
@@ -1502,13 +1506,19 @@ pub fn render_report(
       ExecScope::Unrestricted =>
         "any readable program (children inherit these rules)".to_string(),
       ExecScope::Listed => format!(
-        "only {} (strict, for the whole process tree)",
+        "only {} (strict, for the whole process tree{})",
         p.fs
           .exec_programs
           .iter()
           .map(|p| p.display().to_string())
           .collect::<Vec<_>>()
-          .join(", ")
+          .join(", "),
+        // Linux without a supervising process for the run's exec calls
+        if p.os == TargetOs::Linux && p.fs.exec_gate.is_none() {
+          "; exec targets limited by path only"
+        } else {
+          ""
+        }
       ),
     }
   )
@@ -1786,5 +1796,58 @@ mod npmrc_tests {
     assert!(!sets("@jsr:registry=https://npm.jsr.io/\n"));
     assert!(sets("registry=http://localhost:4261/\n"));
     assert!(sets("@denotest:registry=http://localhost:4261/\n"));
+  }
+}
+
+#[cfg(all(test, unix))]
+mod exec_report_tests {
+  use deno_runtime::deno_permissions::PermissionsOptions;
+
+  use super::*;
+
+  /// The report of a strict run list on Linux, with a supervising process
+  /// for its exec calls (`gate`) or without one.
+  fn report(gate: bool) -> String {
+    let options = PermissionsOptions {
+      allow_run: Some(vec!["sh".to_string()]),
+      ..Default::default()
+    };
+    let mut caps = Capabilities::none(TargetOs::Linux);
+    caps.landlock_abi = Some(6);
+    caps.seccomp = true;
+    caps.enforcer_built = true;
+    let mut ctx =
+      Context::new(caps, KernelSandboxMode::Enforce, PathBuf::from("/project"));
+    ctx.exec_strict = true;
+    ctx.exec_gate = gate;
+    let implicit = ImplicitSet::build(&options, &ctx);
+    let compiled = KernelPolicy::compile(&options, &implicit, &ctx);
+    let resolution = kernel_sandbox_mode(&ModeInputs {
+      kind: Some(RunKind::Run),
+      ..Default::default()
+    })
+    .unwrap();
+    render_report(&resolution, &ctx.caps, &compiled, &[])
+  }
+
+  /// DENEXT.md item 5NN: where no supervising process answers the run's
+  /// exec calls (the capability, given here), the report says what holds a
+  /// strict scope, on the `exec:` line and in the rule's own line.
+  #[test]
+  fn a_strict_scope_says_what_holds_it() {
+    let without = report(false);
+    assert!(
+      without.contains(
+        "(strict, for the whole process tree; exec targets limited by path only)"
+      ),
+      "{without}"
+    );
+    assert!(without.contains(policy::STRICT_EXEC_PATH_ONLY), "{without}");
+    let with = report(true);
+    assert!(
+      with.contains("(strict, for the whole process tree)"),
+      "{with}"
+    );
+    assert!(!with.contains("by path only"), "{with}");
   }
 }

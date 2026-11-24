@@ -982,6 +982,78 @@ fn strict_exec_lists_the_programs() {
   assert!(c.policy.syscalls.refuse_exec);
 }
 
+// denext (DENEXT.md item 5NN): where a supervising process answers the run's
+// exec calls, the policy names the files a call may name; where none does
+// (the capability, given here), the strict scope's rule says what holds it
+#[cfg(unix)]
+#[test]
+#[allow(
+  clippy::disallowed_methods,
+  reason = "the real /bin/sh the closure resolves"
+)]
+fn strict_exec_names_the_files_a_call_may_name() {
+  let options = PermissionsOptions {
+    allow_run: s(&["sh"]),
+    ..Default::default()
+  };
+  let sh = std::fs::canonicalize("/bin/sh").unwrap();
+  let mut strict = ctx(linux(Some(6)), KernelSandboxMode::Enforce);
+  strict.exec_strict = true;
+  // no supervising process for exec calls: the path rules alone, and the
+  // documented rule says so; the run still starts
+  let c = compile_in(&options, &strict);
+  assert_eq!(c.policy.fs.exec, ExecScope::Listed);
+  assert_eq!(c.policy.fs.exec_gate, None);
+  let g = gap(&c, GapClass::Run);
+  assert_eq!(g.resolution, GapResolution::Documented);
+  assert!(g.detail.contains("only these programs"), "{}", g.detail);
+  assert!(
+    g.detail.contains("exec targets limited by path only"),
+    "{}",
+    g.detail
+  );
+  assert!(c.fatal_gaps().next().is_none(), "{:?}", c.gaps);
+  // with one: the programs themselves, each among the files that carry an
+  // execute rule, and nothing more is said
+  strict.exec_gate = true;
+  let c = compile_in(&options, &strict);
+  assert_eq!(c.policy.fs.exec, ExecScope::Listed);
+  let targets = c.policy.fs.exec_gate.clone().expect("a gate");
+  assert!(targets.contains(&sh), "{targets:?}");
+  assert!(
+    targets
+      .iter()
+      .all(|t| c.policy.fs.exec_programs.contains(t)),
+    "{c:?}"
+  );
+  // (the loader the kernel opens for a dynamically linked program carries
+  // a rule and is no call's to name)
+  #[cfg(target_os = "linux")]
+  if let Some(loader) = deno_sandbox::exec::elf_interpreter(&sh) {
+    let loader = std::fs::canonicalize(loader).unwrap();
+    assert!(c.policy.fs.exec_programs.contains(&loader), "{c:?}");
+    assert!(!targets.contains(&loader), "{targets:?}");
+  }
+  let g = gap(&c, GapClass::Run);
+  assert!(g.detail.contains("only these programs"), "{}", g.detail);
+  assert!(!g.detail.contains("by path only"), "{}", g.detail);
+  // without a strict scope, or with nothing listed, there is nothing to
+  // answer
+  let mut loose = strict.clone();
+  loose.exec_strict = false;
+  assert_eq!(compile_in(&options, &loose).policy.fs.exec_gate, None);
+  let none = compile_in(&PermissionsOptions::default(), &strict);
+  assert_eq!(none.policy.fs.exec_gate, None);
+  // macOS has no such supervisor, and its rule is as it was
+  let mut mac = ctx(macos(), KernelSandboxMode::Enforce);
+  mac.exec_strict = true;
+  mac.exec_gate = true;
+  let c = compile_in(&options, &mac);
+  assert_eq!(c.policy.fs.exec, ExecScope::Listed);
+  assert_eq!(c.policy.fs.exec_gate, None);
+  assert!(!gap(&c, GapClass::Run).detail.contains("by path only"));
+}
+
 #[test]
 fn run_and_ffi_rows() {
   run_rows(vec![
@@ -1708,6 +1780,7 @@ fn policy_hash_is_stable() {
       deny_write: vec![],
       exec: ExecScope::None,
       exec_programs: vec![],
+      exec_gate: None,
       map_exec: PathScope::Paths { paths: vec![] },
     },
     net: NetPolicy::Denied,

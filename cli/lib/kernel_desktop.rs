@@ -1364,6 +1364,7 @@ mod tests {
           signal_self: true,
           ..Default::default()
         },
+        exec_gate: None,
       }),
       macos: None,
       windows: None,

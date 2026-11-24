@@ -87,6 +87,26 @@ pub fn detect_capabilities() -> Capabilities {
   caps
 }
 
+/// Whether a supervising process can answer this process's exec system
+/// calls (Linux, `deno_sandbox::exec_gate`), for [`Context::exec_gate`]: in
+/// an image a plan was applied to at startup, whether that plan's gate is
+/// installed (so it compiles the plan it runs under); else measured, once.
+/// Asked only for a strict exec scope (the measurement forks a child).
+pub fn exec_gate_capability() -> bool {
+  #[cfg(target_os = "linux")]
+  {
+    if deno_sandbox::enforce_linux::applied_plan().is_some() {
+      deno_sandbox::exec_gate::installed()
+    } else {
+      deno_sandbox::exec_gate::available()
+    }
+  }
+  #[cfg(not(target_os = "linux"))]
+  {
+    false
+  }
+}
+
 /// The terminals the standard streams are (`ttyname` of fds 0 to 2),
 /// deduplicated.
 pub fn std_stream_ttys() -> Vec<PathBuf> {
@@ -700,6 +720,9 @@ pub fn decide_desktop(
   // the web engine): what only the broker would hold stays a rule the OS
   // can't hold, never a Mode B plan nothing runs
   ctx.compiled_supervisor = false;
+  // ... and nothing answers its exec calls (`Context::exec_gate` stays
+  // off): a strict exec scope is held by the path rules alone there, which
+  // the policy says
   // a desktop app has its own enforcers: none on Windows (the small tier
   // is a compiled program's)
   ctx.caps = detect_capabilities();
@@ -1076,6 +1099,9 @@ pub fn start_compiled(
   // off, so what only the broker holds stays a rule the OS can't hold
   // there)
   ctx.compiled_supervisor = cfg!(any(target_os = "linux", target_os = "macos"));
+  // ... and where a strict exec scope's exec calls can be answered by that
+  // supervisor (Linux, measured)
+  ctx.exec_gate = start.exec_strict && exec_gate_capability();
   if mode == KernelSandboxMode::Broker && !ctx.compiled_supervisor {
     return Err(refuse(
       mode,
@@ -1248,22 +1274,39 @@ pub fn start_compiled(
     format: kernel_inherit::CARRIER_FORMAT,
     layers,
   };
-  // Mode B: the supervisor first. From here on this is the worker (the
+  // a strict exec scope with no supervising process for its exec calls
+  // (Linux) runs, held by the path rules alone, and says so each time
+  if compiled.policy.os == TargetOs::Linux
+    && compiled.policy.fs.exec == crate::kernel_policy::ExecScope::Listed
+    && compiled.policy.fs.exec_gate.is_none()
+  {
+    #[allow(clippy::print_stderr, reason = "the strict scope's one line")]
+    {
+      eprintln!(
+        "Warning --kernel-sandbox-exec=strict: {}",
+        crate::kernel_policy::STRICT_EXEC_PATH_ONLY
+      );
+    }
+  }
+  // Mode B, or a strict exec scope whose exec calls a supervisor answers
+  // (Linux): the supervisor first. From here on this is the worker (the
   // process that called is the supervisor and never comes back); a fork
   // that can't be made leaves the one process as it was
   #[cfg(any(target_os = "linux", target_os = "macos"))]
-  let channel = if plan.broker.is_some() && can_apply_in_place() {
+  let channel = if crate::kernel_supervise::needs_supervisor(&plan)
+    && can_apply_in_place()
+  {
     match crate::kernel_supervise::fork_supervised(&plan) {
-      Ok(channel) => Some(channel),
+      Ok(channel) => channel,
       Err(why) if auto => {
         return Ok(fall_back(format!(
-          "the supervising broker can't start: {why}"
+          "the sandbox's supervisor can't start: {why}"
         )));
       }
       Err(why) => {
         return Err(refuse(
           mode,
-          format!("the supervising broker can't start: {why}"),
+          format!("the sandbox's supervisor can't start: {why}"),
         ));
       }
     }

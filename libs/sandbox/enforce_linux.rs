@@ -1036,6 +1036,9 @@ pub fn apply_self_variant(
   };
   // the expanded entries must belong to the plan's own expansions
   plan.check_expanded()?;
+  // the channel to a supervisor that answers exec calls, if one was left:
+  // taken whether or not the plan uses it (one nobody compiled is closed)
+  let gate_channel = crate::exec_gate::take_channel()?;
   match thread_count() {
     Some(1) => {}
     Some(threads) => {
@@ -1078,6 +1081,19 @@ pub fn apply_self_variant(
   unsafe {
     if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
       return Err(format!("no_new_privs: {}", io::Error::last_os_error()));
+    }
+    // a plan whose exec calls a supervising process answers applies only
+    // with that process listening: the filter that hands them over goes in
+    // first, its listener to the supervisor
+    if linux.exec_gate.is_some() {
+      let Some(channel) = gate_channel else {
+        return Err(
+          "the plan hands exec calls to a supervising process, and this process has no channel to one"
+            .to_string(),
+        );
+      };
+      crate::exec_gate::install(channel)
+        .map_err(|err| format!("the exec filter: {err}"))?;
     }
     if let Some(ruleset) = &ruleset
       && libc::syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset.as_raw_fd(), 0u32)
@@ -1580,6 +1596,7 @@ mod tests {
       scope_signal: false,
       scope_abstract_unix: false,
       seccomp,
+      exec_gate: None,
     }
   }
 

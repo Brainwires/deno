@@ -1115,7 +1115,7 @@ fn openat2(
   Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
 }
 
-fn fstat(fd: &OwnedFd) -> Option<libc::stat> {
+pub(crate) fn fstat(fd: &OwnedFd) -> Option<libc::stat> {
   // SAFETY: a zeroed stat the kernel fills
   let mut st: libc::stat = unsafe { std::mem::zeroed() };
   // SAFETY: a valid descriptor (O_PATH included) with AT_EMPTY_PATH

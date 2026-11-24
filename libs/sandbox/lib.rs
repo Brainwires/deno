@@ -34,7 +34,9 @@
 //!   breakaway, kill on close, a process limit) and a lowered integrity
 //!   level with the write roots labelled Low.
 //! - [`exec`]: the files a program list needs to execute (a strict exec
-//!   scope: the programs, their `#!` interpreters, the ELF loader).
+//!   scope: the programs, their `#!` interpreters, the ELF loader), and
+//!   [`exec_gate`]: `execve` / `execveat` answered by the supervisor
+//!   (Linux), which holds that scope to the files a call may name.
 //! - [`inherit`]: the carrier that hands a confined process's policy to the
 //!   `deno` processes it starts (Linux and macOS).
 //! - [`supervise`]: the supervisor of `--kernel-sandbox=broker`: the
@@ -52,6 +54,8 @@
 pub mod enforce_linux;
 #[cfg(unix)]
 pub mod exec;
+#[cfg(target_os = "linux")]
+pub mod exec_gate;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod inherit;
 #[cfg(target_os = "linux")]

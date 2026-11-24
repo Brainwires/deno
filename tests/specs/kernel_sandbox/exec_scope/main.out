@@ -1,0 +1,12 @@
+sh: ok
+[WILDCARD]sh, helper: ok
+[WILDCARD]helper: ok
+[WILDCARD]helper, itself by descriptor: ok
+[WILDCARD]helper, itself again: ok
+[WILDCARD]sh, path: refused
+[WILDCARD]sh, loader: refused
+[WILDCARD]helper, path: refused
+[WILDCARD]helper, loader: refused
+[WILDCARD]helper, memory file: refused
+[WILDCARD]helper, memory file by name: refused
+[WILDCARD]helper, descriptor: refused
