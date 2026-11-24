@@ -3,7 +3,11 @@
 (function () {
 const { core, primordials } = __bootstrap;
 const { op_fetch_custom_client } = core.ops;
-const { loadTlsKeyPair } = core.loadExtScript("ext:deno_net/02_tls.js");
+// denext: loaded when a client is created, not with this module. A runtime
+// without `deno_net`'s extension (ext/web_page) loads this module for
+// `HttpClientPrototype` (23_request.js, the `WebSocket` constructor) and
+// creates no client from script.
+const loadTls = () => core.loadExtScript("ext:deno_net/02_tls.js");
 
 const { internalRidSymbol } = core;
 const {
@@ -149,7 +153,10 @@ function createHttpClient(options) {
     options.cookieJarRid = cookieJar[internalRidSymbol];
     delete options.cookieJar;
   }
-  const keyPair = loadTlsKeyPair("Deno.createHttpClient", options);
+  const keyPair = loadTls().loadTlsKeyPair(
+    "Deno.createHttpClient",
+    options,
+  );
   return new HttpClient(
     op_fetch_custom_client(
       options,
