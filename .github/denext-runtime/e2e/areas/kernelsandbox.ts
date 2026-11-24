@@ -26,6 +26,7 @@
 import {
   type AreaReport,
   clearResults,
+  DIR,
   type Env,
   exists,
   launchAndCollect,
@@ -36,7 +37,6 @@ import {
   sleep,
   writeParams,
 } from "../lib/runner.ts";
-import { e2eDir } from "../apps/_shared/e2e.ts";
 
 /** Whether the laufey host of this runtime calls the runtime before it
  * starts its engine: it looks the entry point up by name, so the name is
@@ -149,7 +149,12 @@ export async function run(env: Env, rep: AreaReport) {
     );
     return;
   }
-  const dir = e2eDir();
+  // This run's results directory, the one packageApp bakes into the app
+  // (RUN_DIR) and the app writes its result to: the grant must cover it. The
+  // runner's own `e2eDir()` is not it (no RUN_DIR in the source tree, so
+  // `~/.denext-e2e`), and a strict app granted that folder is refused its
+  // first write, the result file.
+  const dir = DIR;
   const home = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? "";
   const identifier = `dev.denext.e2e${env.nonce}.kernelsandbox`;
   const scheme = `e2eks${env.nonce}`;
