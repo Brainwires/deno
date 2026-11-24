@@ -21490,6 +21490,18 @@ where the changes are discussed.
        `find_dpkg_owner_follows_symlinked_dirs`.
      - Node tests enabled: none.
 
+5NN. **`fix(ext/web)`: inspecting an AbortSignal, AbortController, Blob or File
+prototype doesn't throw** (port of theende/ende 7dfd1f8248, MIT, from
+denoland/deno#37101; `ext/web/03_abort_signal.js`, `ext/web/09_file.js`).
+Inspecting an uninitialized subclass prototype or `Object.create(X.prototype)`
+threw "Illegal invocation": the inspect hook took prototype ancestry as leave to
+evaluate getters that also need the WebIDL brand. The hooks now require the
+brand too, so prototypes show accessors while instances (subclass instances
+included) show values. - Tests: `console_test.ts`'s
+`consoleInspectAbortSignalPrototype`, `consoleInspectAbortControllerPrototype`,
+`consoleInspectBlobPrototype` and `consoleInspectFilePrototype`. - Node tests
+enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -21501,7 +21513,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 5NN, 5NN, 5NN, 5NN, 5NN) are what the prebuilt
+506-510, 511, 512, 513, 515, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
