@@ -89,19 +89,28 @@ impl FsEventsResource {
     if watched.is_empty() {
       return;
     }
-    let mut watched_paths = self.inner.watched_paths.lock();
-    let mut watcher = self.inner.watcher.lock();
-    for (path, mode) in &watched {
-      let key = (path.clone(), *mode);
-      let Some(count) = watched_paths.get_mut(&key) else {
-        continue;
-      };
-      *count = count.saturating_sub(1);
-      if *count == 0 {
-        watched_paths.remove(&key);
-        unwatch_shared(&mut watcher, &watched_paths, path);
+    let mut failed = Vec::new();
+    {
+      let mut watched_paths = self.inner.watched_paths.lock();
+      let mut watcher = self.inner.watcher.lock();
+      for (path, mode) in &watched {
+        let key = (path.clone(), *mode);
+        let Some(count) = watched_paths.get_mut(&key) else {
+          continue;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+          watched_paths.remove(&key);
+          failed.extend(unwatch_shared(
+            &mut watcher,
+            &watched_paths,
+            path,
+            *mode,
+          ));
+        }
       }
     }
+    report_backend_errors(&self.inner.senders, failed);
   }
 }
 
@@ -1005,6 +1014,7 @@ fn open_fs_events_resource(
   // duplicate ReadDirectoryChangesW operations whose callbacks all
   // fire on every change.
   let mut watched = Vec::with_capacity(resolved_paths.len());
+  let mut failed = Vec::new();
   {
     let mut watched_paths = inner.watched_paths.lock();
     let mut watcher = inner.watcher.lock();
@@ -1025,11 +1035,15 @@ fn open_fs_events_resource(
       let added = *count == 0;
       *count += 1;
       watched.push((path.clone(), recursive_mode));
-      if added && recursive_mode == RecursiveMode::NonRecursive {
-        restore_overlapping_watches(&mut watcher, &watched_paths, path);
+      if added && SHARES_BACKEND_WATCHES {
+        failed.extend(apply_backend_steps(
+          &mut watcher,
+          backend_steps_after_watch(&watched_paths, path, recursive_mode),
+        ));
       }
     }
   }
+  report_backend_errors(&inner.senders, failed);
 
   let resource = FsEventsResource {
     receiver: AsyncRefCell::new(receiver),
@@ -1043,56 +1057,180 @@ fn open_fs_events_resource(
   Ok(rid)
 }
 
-/// denext: removes `path`'s watch from the shared backend, then restores
-/// what that took from the watches still registered (see
-/// [`restore_overlapping_watches`]).
+/// denext: whether the backend shares one watch between overlapping paths.
+/// inotify watches inodes, not (path, mode) pairs: notify's backend keeps one
+/// watch (and one "recursive" mark) per directory, so watches on overlapping
+/// paths share it. Other backends watch each path on its own and are left
+/// alone (re-adding a path on Windows would add a second
+/// `ReadDirectoryChangesW` request, denoland/deno#27742).
+const SHARES_BACKEND_WATCHES: bool =
+  cfg!(any(target_os = "linux", target_os = "android"));
+
+/// denext: one request to the shared backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BackendStep {
+  Watch(PathBuf, RecursiveMode),
+  Unwatch(PathBuf),
+}
+
+/// Whether a registered recursive watch holds `path` (at it or above it).
+fn held_by_a_recursive_watch(
+  registered: &HashMap<(PathBuf, RecursiveMode), usize>,
+  path: &Path,
+) -> bool {
+  registered
+    .keys()
+    .any(|(p, mode)| *mode == RecursiveMode::Recursive && path.starts_with(p))
+}
+
+/// denext: what a backend that shares watches is asked for after `path` was
+/// registered and watched with `mode` (`registered` holds it). Watching
+/// `dir/sub` non-recursively marks its directory non-recursive, so
+/// directories made in it later would no longer be watched for a recursive
+/// watch at or above it: the mark is put back by watching `path` itself
+/// recursively. That walks what lies beneath `path` and nothing else: never
+/// the recursive watch's whole tree, which a program that opens a watcher
+/// per directory under one recursive watch paid for at every open.
+fn backend_steps_after_watch(
+  registered: &HashMap<(PathBuf, RecursiveMode), usize>,
+  path: &Path,
+  mode: RecursiveMode,
+) -> Vec<BackendStep> {
+  if mode == RecursiveMode::NonRecursive
+    && held_by_a_recursive_watch(registered, path)
+  {
+    vec![BackendStep::Watch(
+      path.to_path_buf(),
+      RecursiveMode::Recursive,
+    )]
+  } else {
+    Vec::new()
+  }
+}
+
+/// denext: what a backend that shares watches is asked for when the last
+/// registration of `path` with `mode` goes (`registered` no longer holds
+/// it; `is_dir`: `path` is a directory now).
+///
+/// - A non-recursive watch of a directory a recursive watch still holds:
+///   nothing. The directory's watch is the recursive one's too, and
+///   unwatching it would take the directory, and (marked recursive) all
+///   beneath it, out of that watch.
+/// - Any other non-recursive watch: unwatched. Its mark is non-recursive,
+///   so nothing else goes with it.
+/// - A recursive watch: unwatched, which removes the watch of everything
+///   beneath `path`; then the watches still registered at or beneath it are
+///   applied again (the non-recursive ones first, so the recursive ones
+///   leave their directories marked recursive), and when a recursive watch
+///   above still holds `path`, `path` is watched recursively again for it.
+///
+/// Nothing above `path` is walked: what a removal takes from the backend
+/// lies at `path` or beneath it.
+fn backend_steps_to_unwatch(
+  registered: &HashMap<(PathBuf, RecursiveMode), usize>,
+  path: &Path,
+  mode: RecursiveMode,
+  is_dir: bool,
+) -> Vec<BackendStep> {
+  let held = held_by_a_recursive_watch(registered, path);
+  if mode == RecursiveMode::NonRecursive {
+    if held && is_dir {
+      return Vec::new();
+    }
+    return vec![BackendStep::Unwatch(path.to_path_buf())];
+  }
+  let mut steps = vec![BackendStep::Unwatch(path.to_path_buf())];
+  let mut beneath: Vec<&(PathBuf, RecursiveMode)> = registered
+    .keys()
+    .filter(|(p, _)| p.starts_with(path))
+    .collect();
+  beneath.sort_by(|(a, a_mode), (b, b_mode)| {
+    (*a_mode == RecursiveMode::Recursive, a)
+      .cmp(&(*b_mode == RecursiveMode::Recursive, b))
+  });
+  steps.extend(
+    beneath
+      .into_iter()
+      .map(|(p, mode)| BackendStep::Watch(p.clone(), *mode)),
+  );
+  if held {
+    steps.push(BackendStep::Watch(
+      path.to_path_buf(),
+      RecursiveMode::Recursive,
+    ));
+  }
+  steps
+}
+
+/// Runs `steps`. Errors are ignored (a path that was deleted, a watch the
+/// backend already dropped) but the one that leaves a watcher without
+/// events it expects: the watch limit, which is returned for
+/// [`report_backend_errors`].
+fn apply_backend_steps(
+  watcher: &mut RecommendedWatcher,
+  steps: Vec<BackendStep>,
+) -> Vec<NotifyError> {
+  let mut failed = Vec::new();
+  for step in steps {
+    match step {
+      BackendStep::Unwatch(path) => {
+        let _ = watcher.unwatch(&path);
+      }
+      BackendStep::Watch(path, mode) => {
+        if let Err(err) = watcher.watch(&path, mode)
+          && matches!(err.kind, notify::ErrorKind::MaxFilesWatch)
+        {
+          failed.push(err);
+        }
+      }
+    }
+  }
+  failed
+}
+
+/// Hands every watcher the errors of [`apply_backend_steps`], as the
+/// backend does when it reaches the watch limit while adding a new
+/// directory: part of some watcher's tree is no longer watched.
+fn report_backend_errors(
+  senders: &Mutex<Vec<WatchSender>>,
+  failed: Vec<NotifyError>,
+) {
+  if failed.is_empty() {
+    return;
+  }
+  let senders = senders.lock();
+  for err in failed {
+    let res = Err(err);
+    for ws in senders.iter() {
+      dispatch(ws, &res);
+    }
+  }
+}
+
+/// denext: removes the watch of `path` with `mode` from the shared backend
+/// once its last registration is gone, keeping what the watches still
+/// registered need ([`backend_steps_to_unwatch`]).
 fn unwatch_shared(
   watcher: &mut RecommendedWatcher,
   watched_paths: &HashMap<(PathBuf, RecursiveMode), usize>,
   path: &Path,
-) {
-  // Best-effort: ignore errors (e.g. the watcher already lost track of the
-  // path because the path was deleted).
-  let _ = watcher.unwatch(path);
-  restore_overlapping_watches(watcher, watched_paths, path);
-}
-
-/// denext: inotify watches inodes, not (path, mode) pairs: notify's backend
-/// keeps one watch per directory, so watches on overlapping paths share it.
-/// Unwatching a recursive `dir` removed the watch of `dir/sub` that a
-/// non-recursive watch of `dir/sub` still needed (that watcher went silent),
-/// unwatching `dir/sub` took a directory out of a recursive watch of `dir`,
-/// and watching `dir/sub` non-recursively marked its directory
-/// non-recursive, so directories made in it later were no longer watched for
-/// the recursive watch. Every remaining registered watch overlapping `path`
-/// is applied again, the recursive ones last so their directories stay
-/// recursive (events are still matched per watcher, see
-/// [`event_matches_watched_paths`]). Other backends watch each path on its
-/// own and are left alone (re-adding a path on Windows would add a second
-/// `ReadDirectoryChangesW` request, denoland/deno#27742).
-#[cfg_attr(
-  not(any(target_os = "linux", target_os = "android")),
-  allow(
-    unused_variables,
-    reason = "only inotify shares a watch between overlapping paths"
-  )
-)]
-fn restore_overlapping_watches(
-  watcher: &mut RecommendedWatcher,
-  watched_paths: &HashMap<(PathBuf, RecursiveMode), usize>,
-  path: &Path,
-) {
-  #[cfg(any(target_os = "linux", target_os = "android"))]
-  {
-    let mut overlapping: Vec<&(PathBuf, RecursiveMode)> = watched_paths
-      .keys()
-      .filter(|(p, _)| p.starts_with(path) || path.starts_with(p))
-      .collect();
-    overlapping.sort_by_key(|(_, mode)| *mode == RecursiveMode::Recursive);
-    for (p, mode) in overlapping {
-      let _ = watcher.watch(p, *mode);
-    }
+  mode: RecursiveMode,
+) -> Vec<NotifyError> {
+  if !SHARES_BACKEND_WATCHES {
+    // Best-effort: ignore errors (e.g. the watcher already lost track of
+    // the path because the path was deleted).
+    let _ = watcher.unwatch(path);
+    return Vec::new();
   }
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "always using real fs with watcher"
+  )]
+  let is_dir = path.is_dir();
+  apply_backend_steps(
+    watcher,
+    backend_steps_to_unwatch(watched_paths, path, mode, is_dir),
+  )
 }
 
 /// Undo the `senders` push and any `watch` calls we performed before
@@ -1114,7 +1252,8 @@ fn rollback_partial_open(
       *count = count.saturating_sub(1);
       if *count == 0 {
         watched_paths.remove(&key);
-        unwatch_shared(&mut watcher, &watched_paths, path);
+        // (the open failed: its error is the one reported)
+        unwatch_shared(&mut watcher, &watched_paths, path, *mode);
       }
     }
   }
@@ -1174,6 +1313,127 @@ async fn op_fs_events_poll(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn registered(
+    watches: &[(&str, RecursiveMode)],
+  ) -> HashMap<(PathBuf, RecursiveMode), usize> {
+    watches
+      .iter()
+      .map(|(path, mode)| ((PathBuf::from(path), *mode), 1))
+      .collect()
+  }
+
+  fn watch(path: &str, mode: RecursiveMode) -> BackendStep {
+    BackendStep::Watch(PathBuf::from(path), mode)
+  }
+
+  // denext: a watcher opened inside a recursive watch puts the recursive
+  // mark back on its own directory; it never walks the recursive watch's
+  // tree again.
+  #[test]
+  fn a_watch_inside_a_recursive_one_asks_for_its_own_path_only() {
+    use RecursiveMode::NonRecursive;
+    use RecursiveMode::Recursive;
+    let all = registered(&[
+      ("/proj", Recursive),
+      ("/proj/src", NonRecursive),
+      ("/proj/src/a", NonRecursive),
+      ("/other", NonRecursive),
+    ]);
+    let after =
+      |path: &str, mode| backend_steps_after_watch(&all, Path::new(path), mode);
+    assert_eq!(
+      after("/proj/src", NonRecursive),
+      vec![watch("/proj/src", Recursive)]
+    );
+    assert_eq!(
+      after("/proj/src/a", NonRecursive),
+      vec![watch("/proj/src/a", Recursive)]
+    );
+    // no recursive watch holds it: nothing to put back
+    assert_eq!(after("/other", NonRecursive), vec![]);
+    // a recursive watch marks its own tree
+    assert_eq!(after("/proj", Recursive), vec![]);
+    // the same path watched both ways
+    let both = registered(&[("/proj", Recursive), ("/proj", NonRecursive)]);
+    assert_eq!(
+      backend_steps_after_watch(&both, Path::new("/proj"), NonRecursive),
+      vec![watch("/proj", Recursive)]
+    );
+  }
+
+  // denext: closing a watcher asks the backend only for what lies at its
+  // path and beneath it.
+  #[test]
+  fn an_unwatch_asks_for_nothing_above_its_path() {
+    use RecursiveMode::NonRecursive;
+    use RecursiveMode::Recursive;
+    let unwatch = |path: &str| BackendStep::Unwatch(PathBuf::from(path));
+    // (the registrations left after the one that goes)
+    let left = registered(&[
+      ("/proj", Recursive),
+      ("/proj/src/a", NonRecursive),
+      ("/proj/src/a/deep", Recursive),
+      ("/proj/src/b", NonRecursive),
+      ("/proj/docs", NonRecursive),
+    ]);
+    let steps = |path: &str, mode, is_dir| {
+      backend_steps_to_unwatch(&left, Path::new(path), mode, is_dir)
+    };
+    // a directory the recursive watch still holds keeps its watch
+    assert_eq!(steps("/proj/src", NonRecursive, true), vec![]);
+    // a file's own watch goes, and nothing with it
+    assert_eq!(
+      steps("/proj/src/main.ts", NonRecursive, false),
+      vec![unwatch("/proj/src/main.ts")]
+    );
+    // a recursive watch inside the recursive one: what it took with it is
+    // applied again (non-recursive first), then its path for the one above
+    assert_eq!(
+      steps("/proj/src", Recursive, true),
+      vec![
+        unwatch("/proj/src"),
+        watch("/proj/src/a", NonRecursive),
+        watch("/proj/src/b", NonRecursive),
+        watch("/proj/src/a/deep", Recursive),
+        watch("/proj/src", Recursive),
+      ]
+    );
+    // the recursive root is never part of a restore
+    for (path, mode, is_dir) in [
+      ("/proj/src", NonRecursive, true),
+      ("/proj/src", NonRecursive, false),
+      ("/proj/src", Recursive, true),
+      ("/proj/src/a/deep/x", NonRecursive, true),
+      ("/proj/docs/guide", Recursive, true),
+    ] {
+      for step in steps(path, mode, is_dir) {
+        let touched = match &step {
+          BackendStep::Watch(p, _) | BackendStep::Unwatch(p) => p,
+        };
+        assert!(touched.starts_with(path), "{path}: {step:?}");
+      }
+    }
+    // nothing recursive holds it: the watch goes; a recursive one takes
+    // those beneath it, which are applied again
+    let alone = registered(&[
+      ("/a/sub", NonRecursive),
+      ("/a/sub/x", Recursive),
+      ("/b", Recursive),
+    ]);
+    assert_eq!(
+      backend_steps_to_unwatch(&alone, Path::new("/a"), NonRecursive, true),
+      vec![unwatch("/a")]
+    );
+    assert_eq!(
+      backend_steps_to_unwatch(&alone, Path::new("/a"), Recursive, true),
+      vec![
+        unwatch("/a"),
+        watch("/a/sub", NonRecursive),
+        watch("/a/sub/x", Recursive),
+      ]
+    );
+  }
 
   fn notify_event(kind: EventKind) -> NotifyEvent {
     NotifyEvent {

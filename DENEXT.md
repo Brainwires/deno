@@ -21521,6 +21521,40 @@ where the changes are discussed.
        (extended).
      - Node tests enabled: none.
 
+523. **`perf(runtime)`: on Linux a watcher opened or closed inside a recursive
+     watch no longer walks that watch's whole tree** (runtime; Linux and
+     Android; `runtime/ops/fs_events.rs`). Follow-up to item 485's overlapping
+     watches (inotify keeps one watch and one "recursive" mark per directory,
+     shared by every watch that overlaps it): after each open of a
+     non-recursive watcher and each close of any watcher, every remaining
+     watch overlapping the path was applied again, and for a recursive one
+     notify walks its whole tree and adds a watch per directory, inside the
+     synchronous open / close on the JS thread. A program with one recursive
+     watch over a project and a library that opens a watcher per directory
+     paid for the project's whole tree at every open and close; a failed walk
+     (the watch limit) was dropped silently.
+     - What an open or a close takes from the backend lies at its path or
+       beneath it, so only that is asked for again
+       (`backend_steps_after_watch`, `backend_steps_to_unwatch`): a
+       non-recursive watcher opened inside a recursive watch puts the
+       recursive mark back by watching its own path recursively; a
+       non-recursive watcher of a directory a recursive watch still holds
+       closes without unwatching it (the directory's watch is the recursive
+       one's too); a recursive watcher closes by unwatching, applying again
+       the watches still registered at or beneath it, then its path for a
+       recursive watch above. Nothing above the path is walked.
+     - A restore that hits the watch limit is handed to every watcher as an
+       error, as the backend does when it can't add a new directory.
+     - Other backends are unchanged (each path is watched on its own).
+     - Tests: `fs_events::tests::{a_watch_inside_a_recursive_one_asks_for_its_own_path_only,
+       an_unwatch_asks_for_nothing_above_its_path}`;
+       `tests/unit/fs_events_test.ts`
+       `watchFsRecursiveKeepsItsTreeAcrossNestedWatchers` beside item 485's
+       `watchFsOverlappingWatchersCloseIndependently` and
+       `watchFsNonRecursiveBesideRecursiveAncestor`.
+     - Node tests enabled: none (`fs.watch` shares the watcher; behaviour is
+       unchanged).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -21532,7 +21566,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 518, 519, 521, 522) are what the prebuilt `libdenort` carries. The
+506-510, 511, 512, 513, 515, 518, 519, 521, 522, 523) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.

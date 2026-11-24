@@ -665,3 +665,60 @@ Deno.test(
     await sawSecond;
   },
 );
+
+// denext: watchers opened and closed on the directories inside a recursive
+// watch (one per directory, as a watcher library does) leave it whole: the
+// directories they were on, and directories made in them afterwards, are
+// still watched for it, and so is the tree of a recursive watcher inside it
+// that closed.
+Deno.test(
+  { permissions: { read: true, write: true } },
+  async function watchFsRecursiveKeepsItsTreeAcrossNestedWatchers() {
+    const testDir = await makeTempDir();
+    const dirs = ["a", "a/b", "a/b/c", "d"].map((d) => `${testDir}/${d}`);
+    for (const dir of dirs) Deno.mkdirSync(dir, { recursive: true });
+    await delay(100);
+
+    // (not `for await`: leaving that loop closes the watcher)
+    async function next(watcher: Deno.FsWatcher, name: string) {
+      const events = watcher[Symbol.asyncIterator]();
+      while (true) {
+        const { value, done } = await events.next();
+        if (done) throw new Error(`the watcher closed before ${name}`);
+        if (value.paths.some((p) => p.endsWith(name))) return;
+      }
+    }
+
+    using recursive = Deno.watchFs(testDir);
+    // one non-recursive watcher per directory, and a recursive one inside
+    const nested = dirs.map((dir) => Deno.watchFs(dir, { recursive: false }));
+    const inner = Deno.watchFs(`${testDir}/a/b`);
+
+    // while they are open the recursive watcher sees a new directory's file
+    Deno.mkdirSync(`${testDir}/a/b/c/new1`);
+    await delay(200);
+    const sawOpen = next(recursive, "open.txt");
+    Deno.writeFileSync(`${testDir}/a/b/c/new1/open.txt`, new Uint8Array([1]));
+    await sawOpen;
+
+    // the inner recursive watcher sees its own tree, and closes
+    const sawInner = next(inner, "inner.txt");
+    Deno.writeFileSync(`${testDir}/a/b/c/inner.txt`, new Uint8Array([1]));
+    await sawInner;
+    inner.close();
+    for (const watcher of nested) watcher.close();
+
+    // after they closed: an existing directory, and one made now
+    const sawExisting = next(recursive, "existing.txt");
+    Deno.writeFileSync(`${testDir}/a/b/c/existing.txt`, new Uint8Array([1]));
+    await sawExisting;
+    Deno.mkdirSync(`${testDir}/a/b/new2`);
+    await delay(200);
+    const sawLater = next(recursive, "later.txt");
+    Deno.writeFileSync(`${testDir}/a/b/new2/later.txt`, new Uint8Array([1]));
+    await sawLater;
+    const sawSibling = next(recursive, "sibling.txt");
+    Deno.writeFileSync(`${testDir}/d/sibling.txt`, new Uint8Array([1]));
+    await sawSibling;
+  },
+);
