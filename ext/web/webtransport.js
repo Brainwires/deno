@@ -9,7 +9,9 @@ import {
   webtransportResetReason,
 } from "ext:deno_net/03_quic.js";
 const { assert } = core.loadExtScript("ext:deno_web/00_infra.js");
-const { DOMException } = core.loadExtScript("ext:deno_web/01_dom_exception.js");
+const { DOMException, serializeSubclass, setClonedStack } = core.loadExtScript(
+  "ext:deno_web/01_dom_exception.js",
+);
 const { URLPrototype } = core.loadExtScript("ext:deno_web/00_url.js");
 const {
   getReadableStreamResourceBacking,
@@ -1065,12 +1067,32 @@ class WebTransportError extends DOMException {
     return this.#streamErrorCode;
   }
 
+  // https://w3c.github.io/webtransport/#webtransporterror-serialization
+  [serializeSubclass](data) {
+    data.type = "WebTransportError";
+    data.source = this.#source;
+    data.streamErrorCode = this.#streamErrorCode;
+  }
+
   static {
     getWebTransportErrorCode = (error) => error.#streamErrorCode;
   }
 }
 webidl.configureInterface(WebTransportError);
 const WebTransportErrorPrototype = WebTransportError.prototype;
+
+// Registered as a cloneable resource by ext:deno_web/13_message_port.js, so a
+// realm that hasn't loaded this module can receive one.
+function deserializeWebTransportError(data) {
+  return setClonedStack(
+    new WebTransportError(data.message, {
+      __proto__: null,
+      source: data.source,
+      streamErrorCode: data.streamErrorCode,
+    }),
+    data,
+  );
+}
 
 webidl.converters.WebTransportSendGroup = webidl.createInterfaceConverter(
   "WebTransportSendGroup",
@@ -1196,7 +1218,19 @@ webidl.converters.WebTransportErrorOptions = webidl.createDictionaryConverter(
   ],
 );
 
+// Not [Serializable]: structuredClone throws a DataCloneError.
+{
+  const { markNotSerializable } = core.loadExtScript(
+    "ext:deno_web/13_message_port.js",
+  );
+  markNotSerializable(WebTransport.prototype);
+  markNotSerializable(WebTransportBidirectionalStream.prototype);
+  markNotSerializable(WebTransportDatagramDuplexStream.prototype);
+  markNotSerializable(WebTransportSendGroup.prototype);
+}
+
 export {
+  deserializeWebTransportError,
   upgradeWebTransport,
   WebTransport,
   WebTransportBidirectionalStream,

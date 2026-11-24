@@ -169,7 +169,8 @@ class URLSearchParams {
             err.code = "ERR_INVALID_TUPLE";
             throw err;
           }
-          if (res.done === true) break;
+          // IteratorComplete is ToBoolean(done), not `done === true`.
+          if (res.done) break;
           const pair = res.value;
           if (
             (typeof pair !== "object" && typeof pair !== "function") ||
@@ -434,7 +435,12 @@ class URLSearchParams {
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
-    webidl.assertBranded(this, URLSearchParamsPrototype, "URLSearchParams");
+    if (
+      !ObjectPrototypeIsPrototypeOf(URLSearchParamsPrototype, this) ||
+      this[webidl.brand] !== webidl.brand
+    ) {
+      return "URLSearchParams {}";
+    }
     if (
       typeof inspectOptions?.depth === "number" && inspectOptions.depth < 0
     ) {

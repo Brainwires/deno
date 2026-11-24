@@ -110,6 +110,11 @@ fn run_test(test: &CollectedTest) -> TestResult {
   if test.name.ends_with("::webrtc_test") {
     deno = deno.env("DENO_WEBRTC_LOOPBACK_ONLY", "1");
   }
+  // Its peers too: gathering on every interface of a host with many (Docker
+  // bridges, VPNs) timed the channel tests out waiting for `datachannel`.
+  if test.name.ends_with("::webrtc_datachannel_test") {
+    deno = deno.env("DENO_WEBRTC_LOOPBACK_ONLY", "1");
+  }
   // wpt100:ice
   if test.name.ends_with("::webrtc_ice_test") {
     deno = deno.env("DENO_WEBRTC_LOOPBACK_ONLY", "1");

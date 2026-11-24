@@ -23,6 +23,7 @@ const {
   ArrayPrototypeIncludes,
   ArrayPrototypePush,
   Float64Array,
+  FunctionPrototypeCall,
   ObjectDefineProperty,
   ObjectFreeze,
   ObjectHasOwn,
@@ -46,6 +47,7 @@ const {
   TypeErrorPrototype,
   Uint8Array,
   WeakMapPrototypeGet,
+  WeakMapPrototypeHas,
   WeakMapPrototypeSet,
 } = primordials;
 const {
@@ -68,6 +70,7 @@ function getCreateFilteredInspectProxy() {
 
 const {
   defineEventHandler,
+  Event,
   EventTarget,
   MessageEvent,
   setEventTargetData,
@@ -524,6 +527,17 @@ class MessagePort extends _MessagePortBase {
     // see the matching state. Falls back to the filtered inspect proxy
     // (which produces the WHATWG-style `{ onmessage, onmessageerror }`
     // shape) for the actual rendering.
+    if (!WeakMapPrototypeHas(messagePortIds, this)) {
+      // A prototype or `Object.create(MessagePort.prototype)`: no port state.
+      return inspect(
+        getCreateFilteredInspectProxy()({
+          object: this,
+          evaluate: false,
+          keys: ["onmessage", "onmessageerror"],
+        }),
+        inspectOptions,
+      );
+    }
     return inspect(
       getCreateFilteredInspectProxy()({
         object: {
@@ -587,18 +601,82 @@ function opCreateEntangledMessagePort() {
  */
 const emptyTransferables = ObjectFreeze([]);
 
-// The web-streams transferable resources (ReadableStream/WritableStream/
-// TransformStream) are registered as a side effect of evaluating
-// ext:deno_web/06_streams.js, which is lazy. A realm (e.g. a worker) that
-// receives a transferred stream may not have loaded that module yet, so on a
-// miss force-load it (loadExtScript is idempotent) before resolving.
+// The streams, ImageBitmap, OffscreenCanvas, ImageData and the geometry
+// interfaces are defined in lazily loaded modules, which register the
+// streams', ImageBitmap's and OffscreenCanvas's transfer steps. A realm (e.g. a
+// worker) that receives one may not have loaded its module yet, so it is
+// loaded on demand (the loaders are idempotent).
+const loadImage = core.createLazyLoader("ext:deno_image/01_image.js");
+const loadCanvas = core.createLazyLoader("ext:deno_canvas/01_canvas.js");
+const loadWebSocketStream = core.createLazyLoader(
+  "ext:deno_websocket/02_websocketstream.js",
+);
+const loadWebTransport = core.createLazyLoader("ext:deno_web/webtransport.js");
+const loadWebGPU = core.createLazyLoader("ext:deno_webgpu/01_webgpu.js");
+const loadImageData = () => core.loadExtScript("ext:deno_web/16_image_data.js");
+const loadGeometry = () => core.loadExtScript("ext:deno_web/17_geometry.js");
+
 function resolveTransferableResource(type) {
   let resource = core.getTransferableResource(type);
   if (resource === undefined) {
-    core.loadExtScript("ext:deno_web/06_streams.js");
+    switch (type) {
+      case "ReadableStream":
+      case "WritableStream":
+      case "TransformStream":
+        core.loadExtScript("ext:deno_web/06_streams.js");
+        break;
+      case "ImageBitmap":
+        loadImage();
+        break;
+      case "OffscreenCanvas":
+        loadCanvas();
+        break;
+    }
     resource = core.getTransferableResource(type);
   }
   return resource;
+}
+
+// The deserializers of the [Serializable] ones (and of WebSocketError,
+// WebTransportError and GPUPipelineError, whose modules are lazily loaded too)
+// are registered here, not by their modules, so that a realm can receive one
+// before loading its module.
+{
+  const geometryTypes = [
+    "DOMMatrix",
+    "DOMMatrixReadOnly",
+    "DOMPoint",
+    "DOMPointReadOnly",
+    "DOMQuad",
+    "DOMRect",
+    "DOMRectReadOnly",
+  ];
+  for (let i = 0; i < geometryTypes.length; i++) {
+    core.registerCloneableResource(
+      geometryTypes[i],
+      (data) => loadGeometry().deserializeGeometry(data),
+    );
+  }
+  core.registerCloneableResource(
+    "ImageData",
+    (data) => loadImageData().deserializeImageData(data),
+  );
+  core.registerCloneableResource(
+    "ImageBitmap",
+    (data) => loadImage().deserializeImageBitmap(data),
+  );
+  core.registerCloneableResource(
+    "WebSocketError",
+    (data) => loadWebSocketStream().deserializeWebSocketError(data),
+  );
+  core.registerCloneableResource(
+    "WebTransportError",
+    (data) => loadWebTransport().deserializeWebTransportError(data),
+  );
+  core.registerCloneableResource(
+    "GPUPipelineError",
+    (data) => loadWebGPU().deserializeGPUPipelineError(data),
+  );
 }
 
 function deserializeJsMessageData(messageData) {
@@ -919,6 +997,7 @@ function serializeJsMessageData(data, transferables) {
   // `data` don't run and nothing is transferred when the list is invalid.
   // https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializewithtransfer
   const hostObjects = [];
+  const transferTypes = [];
   const transferredArrayBuffers = [];
   const seenTransferables = new SafeSet();
   for (let i = 0, j = 0; i < transferables.length; i++) {
@@ -942,10 +1021,14 @@ function serializeJsMessageData(data, transferables) {
       }
       j++;
       ArrayPrototypePush(transferredArrayBuffers, t);
-    } else if (t[core.hostObjectBrand]) {
-      ArrayPrototypePush(hostObjects, t);
+      transferTypes[i] = undefined;
     } else {
-      throw new DOMException("Value not transferable", "DataCloneError");
+      const type = getHostObjectTransferType(t);
+      if (type === undefined || !core.getTransferableResource(type)) {
+        throw new DOMException("Value not transferable", "DataCloneError");
+      }
+      ArrayPrototypePush(hostObjects, t);
+      transferTypes[i] = type;
     }
   }
 
@@ -962,8 +1045,8 @@ function serializeJsMessageData(data, transferables) {
   let arrayBufferI = 0;
   for (let i = 0; i < transferables.length; ++i) {
     const transferable = transferables[i];
-    if (transferable[core.hostObjectBrand]) {
-      const type = transferable[core.hostObjectBrand];
+    const type = transferTypes[i];
+    if (type !== undefined) {
       const rid = core.getTransferableResource(type).send(transferable);
       if (typeof rid === "number") {
         ArrayPrototypePush(serializedTransferables, {
@@ -993,6 +1076,19 @@ function serializeJsMessageData(data, transferables) {
   };
 }
 
+// The transfer type of a platform object: its host object brand, or, for a
+// [Serializable] one whose brand is a function, the type that function
+// returns.
+function getHostObjectTransferType(value) {
+  if (value === null || typeof value !== "object") return undefined;
+  const brand = value[core.hostObjectBrand];
+  if (typeof brand === "function") {
+    const data = FunctionPrototypeCall(brand, value);
+    return typeof data?.type === "string" ? data.type : undefined;
+  }
+  return typeof brand === "string" ? brand : undefined;
+}
+
 webidl.converters.StructuredSerializeOptions = webidl
   .createDictionaryConverter(
     "StructuredSerializeOptions",
@@ -1018,8 +1114,10 @@ webidl.converters.StructuredSerializeOptions = webidl
 // Each non-serializable class installs this symbol on its prototype via
 // `markNotSerializable()`. The descriptor is non-enumerable and
 // non-configurable so it can't be hidden, deleted, or overridden on the
-// instance.
-const kNotSerializable = Symbol("[[NotSerializable]]");
+// instance. It is a registry symbol so that the serializer in
+// libs/core/ops_builtin_v8.rs can reject marked objects nested in a value.
+const kNotSerializable = SymbolFor("Deno.nonSerializable");
+markNotSerializable(MessageChannel.prototype);
 
 function markNotSerializable(target) {
   ObjectDefineProperty(target, kNotSerializable, {
@@ -1030,6 +1128,9 @@ function markNotSerializable(target) {
     configurable: false,
   });
 }
+
+markNotSerializable(Event.prototype);
+markNotSerializable(EventTarget.prototype);
 
 // Per-instance "uncloneable" marker used by `worker_threads.markAsUncloneable`.
 // Unlike `kNotSerializable`, this is settable on individual objects (not just
@@ -1130,11 +1231,9 @@ function structuredClone(value, options) {
     "Argument 2",
   );
 
-  // NOTE: This only catches non-serializable types at the top level.
-  // Nested non-serializable objects (e.g. { x: new Response() }) will
-  // still silently serialize as {} because V8's ValueSerializer doesn't
-  // know about Web API platform types. Fixing this fully requires a
-  // custom V8 serializer delegate in C++/Rust.
+  // NOTE: This only checks the top level. Nested non-serializable objects
+  // (e.g. { x: new Response() }) are rejected by the serializer, which sees
+  // the same `kNotSerializable` registry symbol.
   // Skip the check when the value itself is in the transfer list, since
   // transferring is not the same as serializing.
   if (

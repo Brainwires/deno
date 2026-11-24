@@ -36,6 +36,7 @@ use crate::factory::CliFactory;
 use crate::http_util::HttpClient;
 use crate::http_util::HttpClientProvider;
 use crate::util::archive;
+use crate::util::fs::canonicalize_path;
 use crate::util::progress_bar::ProgressBar;
 use crate::util::progress_bar::ProgressBarStyle;
 
@@ -1026,6 +1027,9 @@ pub async fn upgrade(
     denext_upgrade_refusal(version::DENO_VERSION_INFO.denext())
   {
     bail!(refusal);
+  }
+  if upgrade_flags.output.is_none() && cfg!(target_os = "linux") {
+    ensure_not_installed_by_dpkg(Path::new(DPKG_INFO_DIR))?;
   }
   if let Some(pr_number) = upgrade_flags.pr {
     return upgrade_from_pr(pr_number, &upgrade_flags);
@@ -2035,6 +2039,58 @@ fn kill_running_deno_lsp_processes() {
     .stdout(get_pipe())
     .stderr(get_pipe())
     .output();
+}
+
+const DPKG_INFO_DIR: &str = "/var/lib/dpkg/info";
+
+/// Refuses an in-place upgrade of an executable that a Debian package
+/// installed: dpkg would keep reporting the packaged version and offer the
+/// "upgrade" again (denoland/deno#37099). `--output` writes elsewhere.
+fn ensure_not_installed_by_dpkg(dpkg_info_dir: &Path) -> Result<(), AnyError> {
+  let current_exe_path = std::env::current_exe()
+    .context("failed to get the path of the current executable")?;
+  if let Some(package) = find_dpkg_owner(dpkg_info_dir, &current_exe_path) {
+    bail!(
+      concat!(
+        "{} was installed by the system package manager (dpkg package '{}').\n",
+        "Upgrade it with your package manager (for example `sudo apt upgrade`), ",
+        "or pass --output to install the new version elsewhere."
+      ),
+      current_exe_path.display(),
+      package,
+    );
+  }
+  Ok(())
+}
+
+/// Returns the dpkg package whose file list (`<package>.list` in
+/// `dpkg_info_dir`) contains `exe_path`, following symlinks so that
+/// `/bin/deno` and `/usr/bin/deno` match on merged-/usr systems.
+fn find_dpkg_owner(dpkg_info_dir: &Path, exe_path: &Path) -> Option<String> {
+  let file_name = exe_path.file_name()?;
+  let canonical_exe =
+    canonicalize_path(exe_path).unwrap_or_else(|_| exe_path.to_path_buf());
+  for entry in fs::read_dir(dpkg_info_dir).ok()?.flatten() {
+    let list_path = entry.path();
+    if list_path.extension().is_none_or(|ext| ext != "list") {
+      continue;
+    }
+    let Ok(text) = fs::read_to_string(&list_path) else {
+      continue;
+    };
+    let owns_exe = text.lines().map(Path::new).any(|listed| {
+      listed.file_name() == Some(file_name)
+        && (listed == exe_path
+          || canonicalize_path(listed).is_ok_and(|p| p == canonical_exe))
+    });
+    if owns_exe {
+      let stem = list_path.file_stem()?.to_string_lossy();
+      // Multi-arch packages are listed as `<package>:<arch>.list`.
+      let package = stem.split(':').next().unwrap_or(&stem);
+      return Some(package.to_string());
+    }
+  }
+  None
 }
 
 fn set_exe_permissions(
@@ -3614,6 +3670,52 @@ mod test {
       url_step2.to_string().contains("/download/v2.7.12/"),
       "step 2 should fetch from v2.7.12 release"
     );
+  }
+
+  #[test]
+  fn find_dpkg_owner_matches_listed_exe() {
+    let root = tempfile::TempDir::new().unwrap();
+    let info_dir = root.path().join("info");
+    let bin_dir = root.path().join("usr/bin");
+    fs::create_dir_all(&info_dir).unwrap();
+    fs::create_dir_all(&bin_dir).unwrap();
+    let exe = bin_dir.join("deno");
+    fs::write(&exe, "").unwrap();
+    let other = bin_dir.join("other");
+    fs::write(&other, "").unwrap();
+    fs::write(info_dir.join("unrelated.list"), "/usr/share/doc\n").unwrap();
+    fs::write(info_dir.join("deno.md5sums"), exe.to_str().unwrap()).unwrap();
+    fs::write(
+      info_dir.join("deno:amd64.list"),
+      format!("/.\n{}\n", exe.display()),
+    )
+    .unwrap();
+
+    assert_eq!(find_dpkg_owner(&info_dir, &exe).as_deref(), Some("deno"));
+    assert_eq!(find_dpkg_owner(&info_dir, &other), None);
+    assert_eq!(find_dpkg_owner(&root.path().join("missing"), &exe), None);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn find_dpkg_owner_follows_symlinked_dirs() {
+    // On merged-/usr systems dpkg may list `/bin/deno` while the running
+    // executable resolves to `/usr/bin/deno`.
+    let root = tempfile::TempDir::new().unwrap();
+    let info_dir = root.path().join("info");
+    let usr_bin = root.path().join("usr/bin");
+    fs::create_dir_all(&info_dir).unwrap();
+    fs::create_dir_all(&usr_bin).unwrap();
+    std::os::unix::fs::symlink(&usr_bin, root.path().join("bin")).unwrap();
+    let exe = usr_bin.join("deno");
+    fs::write(&exe, "").unwrap();
+    fs::write(
+      info_dir.join("deno.list"),
+      format!("{}\n", root.path().join("bin/deno").display()),
+    )
+    .unwrap();
+
+    assert_eq!(find_dpkg_owner(&info_dir, &exe).as_deref(), Some("deno"));
   }
 
   #[test]

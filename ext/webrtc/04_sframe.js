@@ -779,6 +779,15 @@ function isSFrameTransform(value, side) {
     : ObjectPrototypeIsPrototypeOf(RTCRtpSFrameDecryptorPrototype, value);
 }
 
+// Not [Serializable]: structuredClone throws a DataCloneError.
+{
+  const { markNotSerializable } = core.loadExtScript(
+    "ext:deno_web/13_message_port.js",
+  );
+  markNotSerializable(SFrameEncryptorStream.prototype);
+  markNotSerializable(RTCRtpSFrameEncryptor.prototype);
+}
+
 return {
   RTCRtpSFrameDecryptor,
   RTCRtpSFrameEncryptor,

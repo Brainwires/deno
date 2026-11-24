@@ -3,6 +3,9 @@
 (function () {
 const { core, primordials } = __bootstrap;
 const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
+const { markNotSerializable } = core.loadExtScript(
+  "ext:deno_web/13_message_port.js",
+);
 const {
   Blob,
   BlobPrototype,
@@ -264,7 +267,10 @@ class FormData {
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
-    if (ObjectPrototypeIsPrototypeOf(FormDataPrototype, this)) {
+    if (
+      ObjectPrototypeIsPrototypeOf(FormDataPrototype, this) &&
+      this[webidl.brand] === webidl.brand
+    ) {
       return `${this.constructor.name} ${
         inspect(ObjectFromEntries(this), inspectOptions)
       }`;
@@ -641,6 +647,7 @@ function formDataFromEntries(entries) {
 
 webidl.converters["FormData"] = webidl
   .createInterfaceConverter("FormData", FormDataPrototype);
+markNotSerializable(FormDataPrototype);
 
 return {
   FormData,

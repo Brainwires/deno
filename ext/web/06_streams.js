@@ -6427,7 +6427,7 @@ class ReadableStream {
     const isBranded = ObjectPrototypeIsPrototypeOf(
       ReadableStreamPrototype,
       this,
-    );
+    ) && this[webidl.brand] === webidl.brand;
     const view = {
       locked: isBranded ? this.locked : undefined,
       state: isBranded ? this[_state] : undefined,
@@ -6606,7 +6606,7 @@ class ReadableStreamDefaultReader {
         evaluate: ObjectPrototypeIsPrototypeOf(
           ReadableStreamDefaultReaderPrototype,
           this,
-        ),
+        ) && this[webidl.brand] === webidl.brand,
         keys: ["closed"],
       }),
       inspectOptions,
@@ -6793,7 +6793,7 @@ class ReadableStreamBYOBReader {
         evaluate: ObjectPrototypeIsPrototypeOf(
           ReadableStreamBYOBReaderPrototype,
           this,
-        ),
+        ) && this[webidl.brand] === webidl.brand,
         keys: ["closed"],
       }),
       inspectOptions,
@@ -7738,7 +7738,7 @@ class WritableStreamDefaultWriter {
         evaluate: ObjectPrototypeIsPrototypeOf(
           WritableStreamDefaultWriterPrototype,
           this,
-        ),
+        ) && this[webidl.brand] === webidl.brand,
         keys: [
           "closed",
           "desiredSize",
@@ -8318,6 +8318,16 @@ internals.writableStreamForRid = writableStreamForRid;
   markNotSerializable(ReadableStream.prototype);
   markNotSerializable(WritableStream.prototype);
   markNotSerializable(TransformStream.prototype);
+  markNotSerializable(ByteLengthQueuingStrategy.prototype);
+  markNotSerializable(CountQueuingStrategy.prototype);
+  markNotSerializable(ReadableStreamDefaultReader.prototype);
+  markNotSerializable(ReadableStreamBYOBReader.prototype);
+  markNotSerializable(ReadableStreamBYOBRequest.prototype);
+  markNotSerializable(ReadableStreamDefaultController.prototype);
+  markNotSerializable(ReadableByteStreamController.prototype);
+  markNotSerializable(TransformStreamDefaultController.prototype);
+  markNotSerializable(WritableStreamDefaultController.prototype);
+  markNotSerializable(WritableStreamDefaultWriter.prototype);
 }
 
 const kNodeWebStreamsState = SymbolFor("nodejs.webstreams.kState");

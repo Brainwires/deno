@@ -542,6 +542,13 @@ function installIdentity(internals) {
   }
   webidl.configureInterface(RTCIdentityAssertion);
   const RTCIdentityAssertionPrototype = RTCIdentityAssertion.prototype;
+  // Not [Serializable]: structuredClone throws a DataCloneError.
+  {
+    const { markNotSerializable } = core.loadExtScript(
+      "ext:deno_web/13_message_port.js",
+    );
+    markNotSerializable(RTCIdentityAssertion.prototype);
+  }
 
   // --- per-connection state ------------------------------------------------
 

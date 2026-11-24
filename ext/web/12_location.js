@@ -369,6 +369,10 @@ ObjectDefineProperties(WorkerLocation.prototype, {
   [SymbolFor("Deno.privateCustomInspect")]: {
     __proto__: null,
     value: function (inspect, inspectOptions) {
+      // A prototype or `Object.create(WorkerLocation.prototype)` has no URL.
+      if (WeakMapPrototypeGet(workerLocationUrls, this) == null) {
+        return `${this.constructor.name} ${inspect({}, inspectOptions)}`;
+      }
       return `${this.constructor.name} ${
         inspect({
           hash: this.hash,
@@ -435,6 +439,15 @@ const workerLocationDescriptor = {
   configurable: true,
   enumerable: true,
 };
+
+// Not [Serializable]: structuredClone throws a DataCloneError.
+{
+  const { markNotSerializable } = core.loadExtScript(
+    "ext:deno_web/13_message_port.js",
+  );
+  markNotSerializable(Location.prototype);
+  markNotSerializable(WorkerLocation.prototype);
+}
 
 return {
   getLocationHref,

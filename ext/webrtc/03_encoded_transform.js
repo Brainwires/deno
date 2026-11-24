@@ -215,6 +215,10 @@ class RTCEncodedVideoFrame {
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
+    // A prototype or an `Object.create()` object has no internal state.
+    if (this[webidl.brand] !== webidl.brand) {
+      return `${this.constructor.name} ${inspect({}, inspectOptions)}`;
+    }
     return `RTCEncodedVideoFrame ${
       inspect({
         type: this[_type],
@@ -279,6 +283,10 @@ class RTCEncodedAudioFrame {
   }
 
   [SymbolFor("Deno.privateCustomInspect")](inspect, inspectOptions) {
+    // A prototype or an `Object.create()` object has no internal state.
+    if (this[webidl.brand] !== webidl.brand) {
+      return `${this.constructor.name} ${inspect({}, inspectOptions)}`;
+    }
     return `RTCEncodedAudioFrame ${
       inspect({
         byteLength: ArrayBufferPrototypeGetByteLength(this[_data]),
@@ -1224,6 +1232,14 @@ function receiveTransform(message, dispatch) {
   setIsTrusted(event, true);
   dispatch(event);
   return true;
+}
+
+// Not [Serializable]: structuredClone throws a DataCloneError.
+{
+  const { markNotSerializable } = core.loadExtScript(
+    "ext:deno_web/13_message_port.js",
+  );
+  markNotSerializable(RTCRtpScriptTransform.prototype);
 }
 
 return {

@@ -10,6 +10,7 @@ import { core, primordials } from "ext:core/mod.js";
 import { op_bootstrap_user_agent } from "ext:core/ops";
 const {
   ArrayPrototypeMap,
+  ObjectDefineProperty,
   ObjectFreeze,
   ObjectPrototypeIsPrototypeOf,
   PromiseReject,
@@ -19,6 +20,7 @@ const {
   StringPrototypeSlice,
   StringPrototypeStartsWith,
   SymbolFor,
+  SymbolToStringTag,
 } = primordials;
 
 const console = core.loadExtScript("ext:deno_web/01_console.js");
@@ -199,7 +201,22 @@ class NavigatorUAData {
   }
 }
 const NavigatorUADataPrototype = NavigatorUAData.prototype;
+ObjectDefineProperty(NavigatorUADataPrototype, SymbolToStringTag, {
+  __proto__: null,
+  value: "NavigatorUAData",
+  writable: false,
+  enumerable: false,
+  configurable: true,
+});
 
 const navigatorUAData = webidl.createBranded(NavigatorUAData);
+
+// Not [Serializable]: structuredClone throws a DataCloneError.
+{
+  const { markNotSerializable } = core.loadExtScript(
+    "ext:deno_web/13_message_port.js",
+  );
+  markNotSerializable(NavigatorUAData.prototype);
+}
 
 export { NavigatorUAData, navigatorUAData };

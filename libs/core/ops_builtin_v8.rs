@@ -635,6 +635,7 @@ struct SerializeDeserialize<'a> {
   error_callback: Option<v8::Local<'a, v8::Function>>,
   for_storage: bool,
   host_object_brand: Option<v8::Local<'a, v8::Symbol>>,
+  non_serializable_brand: Option<v8::Local<'a, v8::Symbol>>,
   deserializers: Option<v8::Local<'a, v8::Object>>,
   // Out-of-band `SharedArrayBuffer` transfer used by `BroadcastChannel`. Unlike
   // the shared `SharedArrayBufferStore` (which hands an id to a single taker),
@@ -727,6 +728,11 @@ impl v8::ValueSerializerImpl for SerializeDeserialize<'_> {
     scope: &mut v8::PinScope<'s, 'i>,
     object: v8::Local<'s, v8::Object>,
   ) -> Option<bool> {
+    if let Some(symbol) = self.non_serializable_brand
+      && object.has(scope, symbol.into())?
+    {
+      return Some(true);
+    }
     match self.host_object_brand {
       Some(symbol) => object.has(scope, symbol.into()),
       _ => Some(false),
@@ -739,15 +745,6 @@ impl v8::ValueSerializerImpl for SerializeDeserialize<'_> {
     object: v8::Local<'s, v8::Object>,
     value_serializer: &dyn v8::ValueSerializerHelper,
   ) -> Option<bool> {
-    if let Some(host_object_brand) = self.host_object_brand {
-      let value = object.get(scope, host_object_brand.into())?;
-      if let Ok(func) = value.try_cast::<v8::Function>() {
-        let result = func.call(scope, object.into(), &[])?;
-        value_serializer.write_uint32(u32::MAX);
-        value_serializer.write_value(scope.get_current_context(), result);
-        return Some(true);
-      }
-    }
     if let Some(host_objects) = self.host_objects {
       for i in 0..host_objects.length() {
         let value = host_objects.get_index(scope, i).unwrap();
@@ -757,7 +754,31 @@ impl v8::ValueSerializerImpl for SerializeDeserialize<'_> {
         }
       }
     }
-    let message = v8::String::new(scope, "Unsupported object type").unwrap();
+    // A serializable host object (its brand is a function returning its
+    // serialized data) is cloned unless it is in the transfer list, as an
+    // ImageBitmap can be.
+    if let Some(host_object_brand) = self.host_object_brand {
+      let value = object.get(scope, host_object_brand.into())?;
+      if let Ok(func) = value.try_cast::<v8::Function>() {
+        let result = func.call(scope, object.into(), &[])?;
+        value_serializer.write_uint32(u32::MAX);
+        value_serializer.write_value(scope.get_current_context(), result);
+        return Some(true);
+      }
+    }
+    // A platform object that isn't serializable is rejected here, after the
+    // transfer list: a transferable one (MessagePort is an EventTarget, and
+    // EventTarget is marked) must still be transferred.
+    let non_serializable = match self.non_serializable_brand {
+      Some(symbol) => object.has(scope, symbol.into())?,
+      None => false,
+    };
+    let message = if non_serializable {
+      "Cannot clone object of unsupported type."
+    } else {
+      "Unsupported object type"
+    };
+    let message = v8::String::new(scope, message).unwrap();
     self.throw_data_clone_error(scope, message);
     None
   }
@@ -831,11 +852,23 @@ impl v8::ValueDeserializerImpl for SerializeDeserialize<'_> {
           .unwrap();
         let ty = object.get(scope, key.into())?;
         let func = deserializers.get(scope, ty)?;
+        let Ok(func) = func.try_cast::<v8::Function>() else {
+          let message = format!(
+            "Cannot deserialize an object of type \"{}\": it has no \
+             deserializer",
+            ty.to_rust_string_lossy(scope)
+          );
+          let message = v8::String::new(scope, &message).unwrap();
+          <Self as v8::ValueSerializerImpl>::throw_data_clone_error(
+            self, scope, message,
+          );
+          return None;
+        };
         let recv = v8::null(scope).into();
         let scope =
           std::pin::pin!(v8::AllowJavascriptExecutionScope::new(scope));
         let scope = &mut scope.init();
-        let res = func.cast::<v8::Function>().call(scope, recv, &[value])?;
+        let res = func.call(scope, recv, &[value])?;
         return res.to_object(scope);
       }
     } else if let Some(host_objects) = self.host_objects {
@@ -889,12 +922,17 @@ pub fn op_serialize<'s, 'i>(
   let key = v8_static_strings::HOST_OBJECT.v8_string(scope).unwrap();
   let symbol = v8::Symbol::for_key(scope, key);
   let host_object_brand = Some(symbol);
+  let key = v8_static_strings::NON_SERIALIZABLE
+    .v8_string(scope)
+    .unwrap();
+  let non_serializable_brand = Some(v8::Symbol::for_key(scope, key));
 
   let serialize_deserialize = Box::new(SerializeDeserialize {
     host_objects,
     error_callback,
     for_storage,
     host_object_brand,
+    non_serializable_brand,
     deserializers: None,
     broadcast_shared_array_buffers: None,
   });
@@ -1025,6 +1063,7 @@ pub fn op_deserialize<'s, 'i>(
     error_callback: None,
     for_storage,
     host_object_brand,
+    non_serializable_brand: None,
     deserializers,
     broadcast_shared_array_buffers: None,
   });
@@ -1068,7 +1107,15 @@ pub fn op_deserialize<'s, 'i>(
     }
   }
 
+  v8::tc_scope!(let scope, scope);
+
   let value = value_deserializer.read_value(scope.get_current_context());
+  if scope.has_caught() || scope.has_terminated() {
+    // The deserializer threw (a data clone error, say); keep its exception.
+    scope.rethrow();
+    // Dummy value, discarded because an error was thrown.
+    return Ok(v8::undefined(scope).into());
+  }
   match value {
     Some(deserialized) => Ok(deserialized),
     None => Err(JsErrorBox::range_error("could not deserialize value")),
@@ -1090,12 +1137,17 @@ pub fn serialize_broadcast<'s, 'i>(
   let key = v8_static_strings::HOST_OBJECT.v8_string(scope).unwrap();
   let symbol = v8::Symbol::for_key(scope, key);
   let broadcast = Rc::new(RefCell::new(Vec::new()));
+  let key = v8_static_strings::NON_SERIALIZABLE
+    .v8_string(scope)
+    .unwrap();
+  let non_serializable_brand = Some(v8::Symbol::for_key(scope, key));
 
   let serialize_deserialize = Box::new(SerializeDeserialize {
     host_objects: None,
     error_callback,
     for_storage: false,
     host_object_brand: Some(symbol),
+    non_serializable_brand,
     deserializers: None,
     broadcast_shared_array_buffers: Some(broadcast.clone()),
   });
@@ -1139,6 +1191,7 @@ pub fn deserialize_broadcast<'s, 'i>(
     error_callback: None,
     for_storage: false,
     host_object_brand: Some(symbol),
+    non_serializable_brand: None,
     deserializers,
     broadcast_shared_array_buffers: Some(Rc::new(RefCell::new(
       shared_array_buffers,
@@ -1153,7 +1206,16 @@ pub fn deserialize_broadcast<'s, 'i>(
     return Err(JsErrorBox::range_error("could not deserialize value"));
   }
 
-  match value_deserializer.read_value(scope.get_current_context()) {
+  v8::tc_scope!(let scope, scope);
+
+  let value = value_deserializer.read_value(scope.get_current_context());
+  if scope.has_caught() || scope.has_terminated() {
+    // The deserializer threw (a data clone error, say); keep its exception.
+    scope.rethrow();
+    // Dummy value, discarded because an error was thrown.
+    return Ok(v8::undefined(scope).into());
+  }
+  match value {
     Some(deserialized) => Ok(deserialized),
     None => Err(JsErrorBox::range_error("could not deserialize value")),
   }
@@ -1170,12 +1232,17 @@ pub fn op_structured_clone<'s, 'i>(
   let key = v8_static_strings::HOST_OBJECT.v8_string(scope).unwrap();
   let symbol = v8::Symbol::for_key(scope, key);
   let host_object_brand = Some(symbol);
+  let key = v8_static_strings::NON_SERIALIZABLE
+    .v8_string(scope)
+    .unwrap();
+  let non_serializable_brand = Some(v8::Symbol::for_key(scope, key));
 
   let serialize_deserialize = Box::new(SerializeDeserialize {
     host_objects: None,
     error_callback: None,
     for_storage: false,
     host_object_brand,
+    non_serializable_brand,
     deserializers: None,
     broadcast_shared_array_buffers: None,
   });
@@ -1204,6 +1271,7 @@ pub fn op_structured_clone<'s, 'i>(
     for_storage: false,
     host_object_brand,
     deserializers,
+    non_serializable_brand: None,
     broadcast_shared_array_buffers: None,
   });
   let value_deserializer =
@@ -1216,6 +1284,12 @@ pub fn op_structured_clone<'s, 'i>(
   }
 
   let value = value_deserializer.read_value(scope.get_current_context());
+  if scope.has_caught() || scope.has_terminated() {
+    // The deserializer threw (a data clone error, say); keep its exception.
+    scope.rethrow();
+    // Dummy value, discarded because an error was thrown.
+    return Ok(v8::undefined(scope).into());
+  }
   match value {
     Some(deserialized) => Ok(deserialized),
     None => Err(JsErrorBox::range_error("could not deserialize value")),

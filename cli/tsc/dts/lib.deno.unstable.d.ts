@@ -4988,7 +4988,7 @@ interface WebSocketConnection {
  * @experimental
  */
 interface WebSocketCloseInfo {
-  code?: number;
+  closeCode?: number;
   reason?: string;
 }
 

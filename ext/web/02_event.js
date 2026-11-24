@@ -1226,12 +1226,16 @@ class ErrorEvent extends Event {
       inspectOptions,
     );
   }
-
-  // TODO(lucacasonato): remove when this interface is spec aligned
-  [SymbolToStringTag] = "ErrorEvent";
 }
 
 const ErrorEventPrototype = ErrorEvent.prototype;
+ObjectDefineProperty(ErrorEventPrototype, SymbolToStringTag, {
+  __proto__: null,
+  value: "ErrorEvent",
+  writable: false,
+  enumerable: false,
+  configurable: true,
+});
 
 defineEnumerableProps(ErrorEvent, [
   "message",
@@ -1291,6 +1295,15 @@ class CloseEvent extends Event {
     );
   }
 }
+
+const CloseEventPrototype = CloseEvent.prototype;
+ObjectDefineProperty(CloseEventPrototype, SymbolToStringTag, {
+  __proto__: null,
+  value: "CloseEvent",
+  writable: false,
+  enumerable: false,
+  configurable: true,
+});
 
 // Lazy reference to MessagePort.prototype - 13_message_port.js depends on
 // this module, so the script can't be loaded at definition time without
@@ -1445,10 +1458,16 @@ class MessageEvent extends Event {
       inspectOptions,
     );
   }
-
-  // TODO(lucacasonato): remove when this interface is spec aligned
-  [SymbolToStringTag] = "MessageEvent";
 }
+
+const MessageEventPrototype = MessageEvent.prototype;
+ObjectDefineProperty(MessageEventPrototype, SymbolToStringTag, {
+  __proto__: null,
+  value: "MessageEvent",
+  writable: false,
+  enumerable: false,
+  configurable: true,
+});
 
 class CustomEvent extends Event {
   #detail = null;
@@ -1481,10 +1500,16 @@ class CustomEvent extends Event {
       inspectOptions,
     );
   }
-
-  // TODO(lucacasonato): remove when this interface is spec aligned
-  [SymbolToStringTag] = "CustomEvent";
 }
+
+const CustomEventPrototype = CustomEvent.prototype;
+ObjectDefineProperty(CustomEventPrototype, SymbolToStringTag, {
+  __proto__: null,
+  value: "CustomEvent",
+  writable: false,
+  enumerable: false,
+  configurable: true,
+});
 
 ReflectDefineProperty(CustomEvent.prototype, "detail", {
   __proto__: null,
@@ -1517,10 +1542,16 @@ class ProgressEvent extends Event {
       inspectOptions,
     );
   }
-
-  // TODO(lucacasonato): remove when this interface is spec aligned
-  [SymbolToStringTag] = "ProgressEvent";
 }
+
+const ProgressEventPrototype = ProgressEvent.prototype;
+ObjectDefineProperty(ProgressEventPrototype, SymbolToStringTag, {
+  __proto__: null,
+  value: "ProgressEvent",
+  writable: false,
+  enumerable: false,
+  configurable: true,
+});
 
 class PromiseRejectionEvent extends Event {
   #promise = null;
@@ -1570,12 +1601,16 @@ class PromiseRejectionEvent extends Event {
       inspectOptions,
     );
   }
-
-  // TODO(lucacasonato): remove when this interface is spec aligned
-  [SymbolToStringTag] = "PromiseRejectionEvent";
 }
 
 const PromiseRejectionEventPrototype = PromiseRejectionEvent.prototype;
+ObjectDefineProperty(PromiseRejectionEventPrototype, SymbolToStringTag, {
+  __proto__: null,
+  value: "PromiseRejectionEvent",
+  writable: false,
+  enumerable: false,
+  configurable: true,
+});
 
 defineEnumerableProps(PromiseRejectionEvent, [
   "promise",

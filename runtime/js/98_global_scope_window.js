@@ -17,6 +17,8 @@ const {
   SymbolFor,
   StringPrototypeToUpperCase,
   StringPrototypeSlice,
+  ObjectDefineProperty,
+  SymbolToStringTag,
 } = primordials;
 
 const location = core.loadExtScript("ext:deno_web/12_location.js");
@@ -249,6 +251,13 @@ ObjectDefineProperties(Navigator.prototype, {
   },
 });
 const NavigatorPrototype = Navigator.prototype;
+ObjectDefineProperty(NavigatorPrototype, SymbolToStringTag, {
+  __proto__: null,
+  value: "Navigator",
+  writable: false,
+  enumerable: false,
+  configurable: true,
+});
 
 const mainRuntimeGlobalProperties = {
   Location: location.locationConstructorDescriptor,
@@ -337,5 +346,13 @@ const mainRuntimeGlobalProperties = {
   ),
   MIDIPort: core.propNonEnumerableLazyLoaded((m) => m.MIDIPort, lazyMidi),
 };
+
+// Not [Serializable]: structuredClone throws a DataCloneError.
+{
+  const { markNotSerializable } = core.loadExtScript(
+    "ext:deno_web/13_message_port.js",
+  );
+  markNotSerializable(Navigator.prototype);
+}
 
 export { mainRuntimeGlobalProperties, memoizeLazy };

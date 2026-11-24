@@ -47,8 +47,10 @@ const {
   ObjectFreeze,
   ObjectPrototypeIsPrototypeOf,
   ObjectSetPrototypeOf,
+  SafeArrayIterator,
   Symbol,
   SymbolFor,
+  SymbolToStringTag,
 } = primordials;
 
 // Shared default for omitted options, which are only read. `undefined` would
@@ -62,7 +64,9 @@ const {
   EventTargetPrototype,
   setEventTargetData,
 } = core.loadExtScript("ext:deno_web/02_event.js");
-const { DOMException } = core.loadExtScript("ext:deno_web/01_dom_exception.js");
+const { DOMException, serializeSubclass, setClonedStack } = core.loadExtScript(
+  "ext:deno_web/01_dom_exception.js",
+);
 const { createFilteredInspectProxy } = core.loadExtScript(
   "ext:deno_web/01_console.js",
 );
@@ -164,8 +168,26 @@ class GPUPipelineError extends DOMException {
     webidl.assertBranded(this, GPUPipelineErrorPrototype);
     return this.#reason;
   }
+
+  // https://gpuweb.github.io/gpuweb/#gpupipelineerror (serialization steps)
+  [serializeSubclass](data) {
+    data.type = "GPUPipelineError";
+    data.reason = this.#reason;
+  }
 }
 const GPUPipelineErrorPrototype = GPUPipelineError.prototype;
+
+// Registered as a cloneable resource by ext:deno_web/13_message_port.js, so a
+// realm that hasn't loaded this module can receive one.
+function deserializeGPUPipelineError(data) {
+  return setClonedStack(
+    new GPUPipelineError(data.message, {
+      __proto__: null,
+      reason: data.reason,
+    }),
+    data,
+  );
+}
 
 class GPUUncapturedErrorEvent extends Event {
   #error;
@@ -243,18 +265,32 @@ ObjectDefineProperty(GPUAdapterInfoPrototype, privateCustomInspect, {
   },
 });
 
+// A subclass prototype or `Object.create(X.prototype)` inherits from the
+// prototype but has no set behind it, so iterating it throws.
+function inspectSetlike(self, prototype, inspect, inspectOptions) {
+  let values = {};
+  if (ObjectPrototypeIsPrototypeOf(prototype, self)) {
+    try {
+      // deno-lint-ignore deno-internal/prefer-primordials
+      values = [...self];
+    } catch {
+      // Not a real instance: show it like the prototype.
+    }
+  }
+  return `${self.constructor.name} ${inspect(values, inspectOptions)}`;
+}
+
 const GPUSupportedFeaturesPrototype = GPUSupportedFeatures.prototype;
 webidl.setlikeObjectWrap(GPUSupportedFeaturesPrototype, true);
 ObjectDefineProperty(GPUSupportedFeaturesPrototype, privateCustomInspect, {
   __proto__: null,
   value(inspect, inspectOptions) {
-    if (ObjectPrototypeIsPrototypeOf(GPUSupportedFeaturesPrototype, this)) {
-      return `${this.constructor.name} ${
-        // deno-lint-ignore deno-internal/prefer-primordials
-        inspect([...this], inspectOptions)}`;
-    } else {
-      return `${this.constructor.name} ${inspect({}, inspectOptions)}`;
-    }
+    return inspectSetlike(
+      this,
+      GPUSupportedFeaturesPrototype,
+      inspect,
+      inspectOptions,
+    );
   },
 });
 
@@ -263,13 +299,12 @@ webidl.setlikeObjectWrap(WGSLLanguageFeaturesPrototype, true);
 ObjectDefineProperty(WGSLLanguageFeaturesPrototype, privateCustomInspect, {
   __proto__: null,
   value(inspect, inspectOptions) {
-    if (ObjectPrototypeIsPrototypeOf(WGSLLanguageFeaturesPrototype, this)) {
-      return `${this.constructor.name} ${
-        // deno-lint-ignore deno-internal/prefer-primordials
-        inspect([...this], inspectOptions)}`;
-    } else {
-      return `${this.constructor.name} ${inspect({}, inspectOptions)}`;
-    }
+    return inspectSetlike(
+      this,
+      WGSLLanguageFeaturesPrototype,
+      inspect,
+      inspectOptions,
+    );
   },
 });
 
@@ -873,6 +908,56 @@ ObjectDefineProperty(GPUQuerySetPrototype, privateCustomInspect, {
   },
 });
 
+// https://webidl.spec.whatwg.org/#interface-prototype-object
+for (
+  const iface of new SafeArrayIterator([
+    GPU,
+    GPUAdapter,
+    GPUAdapterInfo,
+    GPUBindGroup,
+    GPUBindGroupLayout,
+    GPUBuffer,
+    GPUCanvasContext,
+    GPUCommandBuffer,
+    GPUCommandEncoder,
+    GPUCompilationInfo,
+    GPUCompilationMessage,
+    GPUComputePassEncoder,
+    GPUComputePipeline,
+    GPUDevice,
+    GPUDeviceLostInfo,
+    GPUError,
+    GPUExternalTexture,
+    GPUInternalError,
+    GPUOutOfMemoryError,
+    GPUPipelineError,
+    GPUPipelineLayout,
+    GPUQuerySet,
+    GPUQueue,
+    GPURenderBundle,
+    GPURenderBundleEncoder,
+    GPURenderPassEncoder,
+    GPURenderPipeline,
+    GPUSampler,
+    GPUShaderModule,
+    GPUSupportedFeatures,
+    GPUSupportedLimits,
+    GPUTexture,
+    GPUTextureView,
+    GPUUncapturedErrorEvent,
+    GPUValidationError,
+    WGSLLanguageFeatures,
+  ])
+) {
+  ObjectDefineProperty(iface.prototype, SymbolToStringTag, {
+    __proto__: null,
+    value: iface.name,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
 // Converters
 
 webidl.converters["GPUPipelineErrorReason"] = webidl.createEnumConverter(
@@ -931,8 +1016,55 @@ function initGPU() {
   }
 }
 
+// Not [Serializable] (GPUPipelineError is, and GPUDevice is an EventTarget):
+// structuredClone throws a DataCloneError.
+{
+  const { markNotSerializable } = core.loadExtScript(
+    "ext:deno_web/13_message_port.js",
+  );
+  for (
+    const iface of new SafeArrayIterator([
+      GPU,
+      GPUAdapter,
+      GPUAdapterInfo,
+      GPUBindGroup,
+      GPUBindGroupLayout,
+      GPUBuffer,
+      GPUCanvasContext,
+      GPUCommandBuffer,
+      GPUCommandEncoder,
+      GPUCompilationInfo,
+      GPUCompilationMessage,
+      GPUComputePassEncoder,
+      GPUComputePipeline,
+      GPUDeviceLostInfo,
+      GPUError,
+      GPUInternalError,
+      GPUOutOfMemoryError,
+      GPUPipelineLayout,
+      GPUQuerySet,
+      GPUQueue,
+      GPURenderBundle,
+      GPURenderBundleEncoder,
+      GPURenderPassEncoder,
+      GPURenderPipeline,
+      GPUSampler,
+      GPUShaderModule,
+      GPUSupportedFeatures,
+      GPUSupportedLimits,
+      GPUTexture,
+      GPUTextureView,
+      GPUValidationError,
+      WGSLLanguageFeatures,
+    ])
+  ) {
+    markNotSerializable(iface.prototype);
+  }
+}
+
 export {
   denoNsWebGPU,
+  deserializeGPUPipelineError,
   GPU,
   gpu,
   GPUAdapter,

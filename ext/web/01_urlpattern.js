@@ -31,6 +31,9 @@ const {
 } = primordials;
 
 const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
+const { markNotSerializable } = core.loadExtScript(
+  "ext:deno_web/13_message_port.js",
+);
 
 // Lazy-load createFilteredInspectProxy from console
 let _createFilteredInspectProxy;
@@ -486,6 +489,8 @@ webidl.converters.URLPatternOptions = webidl
       defaultValue: false,
     },
   ]);
+
+markNotSerializable(URLPattern.prototype);
 
 return { URLPattern, urlPatternSettings };
 })();
