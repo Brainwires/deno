@@ -233,3 +233,167 @@ Deno.test("webrtcTrackIsolationAttributes", () => {
   )!;
   assert(handler.get !== undefined && handler.set !== undefined);
 });
+
+// The IdP proxy is remote code: its worker runs with no permission at all,
+// whatever the page has (this test runs with -A). Each probe must be
+// refused, and the assertion it returns must still reach the page.
+Deno.test("webrtcIdentityProviderWorkerHasNoPermissions", async () => {
+  const cert = Deno.readTextFileSync("tests/testdata/tls/localhost.crt");
+  const key = Deno.readTextFileSync("tests/testdata/tls/localhost.key");
+  const readPath = Deno.realPathSync("tests/testdata/tls/localhost.crt");
+  const dir = Deno.makeTempDirSync({ prefix: "webrtc-idp-" });
+  const writePath = `${dir}/written-by-idp.txt`;
+  const modulePath = `${dir}/module.js`;
+  Deno.writeTextFileSync(modulePath, "export const loaded = true;\n");
+  // The page itself may do each of these (so a refusal below is the
+  // worker's own): it reads the module it offers the IdP.
+  assertEquals(Deno.readTextFileSync(modulePath).length > 0, true);
+  const { promise: listening, resolve: onListen } = Promise.withResolvers<
+    number
+  >();
+  let proxyLoads = 0;
+  let otherRequests = 0;
+  const server = Deno.serve({
+    hostname: "localhost",
+    port: 0,
+    cert,
+    key,
+    onListen: ({ port }) => onListen(port),
+  }, (request) => {
+    const { pathname } = new URL(request.url);
+    if (pathname !== "/.well-known/idp-proxy/idp.js") {
+      otherRequests++;
+      return new Response("not for the IdP", { status: 200 });
+    }
+    proxyLoads++;
+    return new Response(idpProxy, {
+      headers: { "content-type": "application/javascript" },
+    });
+  });
+  const port = await listening;
+  const paths = JSON.stringify({
+    read: readPath,
+    write: writePath,
+    ffi: `${dir}/libnothing.so`,
+    module: new URL(
+      `file://${Deno.build.os === "windows" ? "/" : ""}${
+        modulePath.replaceAll("\\", "/")
+      }`,
+    ).href,
+    url: `https://localhost:${port}/from-the-idp`,
+    port,
+  });
+  // A classic script, run by the proxy's worker; each probe reports the
+  // error's name and message, or "allowed".
+  const idpProxy = `
+    var paths = ${paths};
+    function describe(error) {
+      return {
+        name: error && error.name ? String(error.name) : typeof error,
+        message: error && error.message ? String(error.message) : String(error),
+      };
+    }
+    async function probe(fn) {
+      try {
+        await fn();
+        return { name: "allowed", message: "" };
+      } catch (error) {
+        return describe(error);
+      }
+    }
+    rtcIdentityProvider.register({
+      async generateAssertion(contents, origin, options) {
+        var probes = {
+          read: await probe(function () {
+            return Deno.readTextFileSync(paths.read);
+          }),
+          write: await probe(function () {
+            Deno.writeTextFileSync(paths.write, "x");
+          }),
+          fetch: await probe(function () {
+            return fetch(paths.url).then(function (r) { return r.text(); });
+          }),
+          connect: await probe(function () {
+            return Deno.connect({ hostname: "127.0.0.1", port: paths.port })
+              .then(function (conn) { conn.close(); });
+          }),
+          env: await probe(function () {
+            return Deno.env.get("PATH");
+          }),
+          run: await probe(function () {
+            return new Deno.Command("deno", { args: ["--version"] })
+              .outputSync();
+          }),
+          ffi: await probe(function () {
+            return Deno.dlopen(paths.ffi, {});
+          }),
+          sys: await probe(function () {
+            return Deno.hostname();
+          }),
+          importFile: await probe(function () {
+            return import(paths.module);
+          }),
+        };
+        return {
+          idp: { domain: location.host, protocol: "idp.js" },
+          assertion: JSON.stringify(probes),
+        };
+      },
+      validateAssertion(assertion, origin) {
+        return { identity: "nobody@localhost", contents: "" };
+      },
+    });
+  `;
+  const pc = new RTCPeerConnection();
+  try {
+    pc.setIdentityProvider(`localhost:${port}`, { protocol: "idp.js" });
+    // The assertion still completes: base64 of { idp, assertion }.
+    const value = await pc.getIdentityAssertion();
+    const { idp, assertion } = JSON.parse(atob(value));
+    assertEquals(idp, { domain: `localhost:${port}`, protocol: "idp.js" });
+    const probes = JSON.parse(assertion) as Record<
+      string,
+      { name: string; message: string }
+    >;
+    for (
+      const name of [
+        "read",
+        "write",
+        "fetch",
+        "connect",
+        "env",
+        "run",
+        "ffi",
+        "sys",
+      ]
+    ) {
+      assertEquals(
+        probes[name].name,
+        "NotCapable",
+        `the IdP worker's ${name} probe: ${JSON.stringify(probes[name])}`,
+      );
+    }
+    // A file: module is refused too (no read permission, and a remote
+    // script may not load a local module).
+    assert(
+      probes.importFile.name !== "allowed",
+      `the IdP worker imported a file: module: ${
+        JSON.stringify(probes.importFile)
+      }`,
+    );
+    assertEquals(proxyLoads, 1);
+    // the refused fetch never reached the server
+    assertEquals(otherRequests, 0);
+    let written = true;
+    try {
+      Deno.statSync(writePath);
+    } catch {
+      written = false;
+    }
+    assertEquals(written, false, "the IdP worker wrote a file");
+  } finally {
+    pc.close();
+    await server.shutdown();
+    Deno.removeSync(dir, { recursive: true });
+  }
+});
