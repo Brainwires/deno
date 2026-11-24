@@ -58,6 +58,7 @@ const {
   op_node_ipc_read_advanced,
   op_node_ipc_read_json,
   op_node_ipc_ref,
+  op_node_ipc_release_sent_handle,
   op_node_ipc_unref,
   op_node_ipc_write_advanced,
   op_node_ipc_write_json,
@@ -3025,6 +3026,13 @@ function setupChannel(
   function onHandleAck() {
     const info = pendingHandleInfo;
     pendingHandleInfo = null;
+    // The peer holds the descriptor now: close the copy kept open while it
+    // was in flight (see `SentHandles` in ext/process/ipc.rs).
+    try {
+      op_node_ipc_release_sent_handle(ipc, serialization === "json");
+    } catch {
+      // The channel is already closed; closing it released the copy.
+    }
     if (info && info.closeAfterSend) {
       info.close();
     }

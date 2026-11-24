@@ -51,6 +51,43 @@ fn into_raw_fd_i32(fd: ReceivedRawFd) -> i32 {
   fd
 }
 
+/// denext: the descriptors this end sent with a handle (`SCM_RIGHTS`), each
+/// kept open until the peer acknowledges it (`NODE_HANDLE_ACK`, see
+/// `op_node_ipc_release_sent_handle`) or the channel goes away.
+///
+/// A descriptor whose only reference is the one in flight can be torn down
+/// on macOS before the peer takes it: the kernel's in-flight descriptor
+/// collector counts such a socket as unreachable and flushes its receive
+/// side, so the peer's first read on it is an end of stream (a TCP socket
+/// sent with `keepOpen` and destroyed at once then reached the child half
+/// closed, and the child's reply failed with `EPIPE`). Holding the sender's
+/// copy until the acknowledgement keeps the descriptor referenced, as
+/// Node's `postSend` keeps the handle open until then.
+#[derive(Default)]
+pub struct SentHandles {
+  #[cfg(unix)]
+  fds: std::cell::RefCell<std::collections::VecDeque<std::os::fd::OwnedFd>>,
+}
+
+impl SentHandles {
+  #[cfg(unix)]
+  fn hold(&self, fd: std::os::fd::OwnedFd) {
+    self.fds.borrow_mut().push_back(fd);
+  }
+
+  /// Closes the oldest descriptor still held; whether there was one.
+  pub fn release_oldest(&self) -> bool {
+    #[cfg(unix)]
+    {
+      self.fds.borrow_mut().pop_front().is_some()
+    }
+    #[cfg(not(unix))]
+    {
+      false
+    }
+  }
+}
+
 /// Tracks whether the IPC resources is currently
 /// refed, and allows refing/unrefing it.
 pub struct IpcRefTracker {
@@ -122,6 +159,11 @@ async fn write_with_optional_fd(
     allow(unused_variables, reason = "fd transfer is unix-only")
   )]
   raw_fd: Option<i32>,
+  #[cfg_attr(
+    not(unix),
+    allow(unused_variables, reason = "fd transfer is unix-only")
+  )]
+  sent: &SentHandles,
 ) -> Result<(), io::Error> {
   #[cfg(unix)]
   if let Some(raw_fd) = raw_fd {
@@ -129,11 +171,13 @@ async fn write_with_optional_fd(
     use std::os::fd::FromRawFd;
 
     // `raw_fd` is an owned dup created for this IPC transfer. `sendmsg` attaches
-    // it to the first bytes written, then this scope closes our local copy.
+    // it to the first bytes written; once sent, our copy is held until the
+    // peer acknowledges it (see `SentHandles`), and closed at once otherwise.
     // SAFETY: callers pass an owned fd returned by `fdForIpc`; this function
-    // assumes ownership and closes it after the send attempt.
+    // assumes ownership.
     let raw_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw_fd) };
     let nwritten = write_half.send_with_fd(msg, raw_fd.as_raw_fd()).await?;
+    sent.hold(raw_fd);
     if nwritten < msg.len() {
       // The fd has already been delivered with the first sendmsg. If the rest
       // of the frame fails, the reader must close the received fd while
@@ -158,6 +202,8 @@ pub struct IpcJsonStreamResource {
   pub cancel: Rc<CancelHandle>,
   pub queued_bytes: AtomicUsize,
   pub ref_tracker: IpcRefTracker,
+  /// See [`SentHandles`].
+  pub sent_handles: SentHandles,
 }
 
 impl deno_core::Resource for IpcJsonStreamResource {
@@ -189,6 +235,7 @@ impl IpcJsonStreamResource {
       cancel: Default::default(),
       queued_bytes: Default::default(),
       ref_tracker,
+      sent_handles: Default::default(),
     })
   }
 
@@ -204,6 +251,7 @@ impl IpcJsonStreamResource {
       cancel: Default::default(),
       queued_bytes: Default::default(),
       ref_tracker,
+      sent_handles: Default::default(),
     }
   }
 
@@ -219,6 +267,7 @@ impl IpcJsonStreamResource {
       cancel: Default::default(),
       queued_bytes: Default::default(),
       ref_tracker,
+      sent_handles: Default::default(),
     }
   }
 
@@ -230,8 +279,10 @@ impl IpcJsonStreamResource {
     msg: &[u8],
     raw_fd: Option<i32>,
   ) -> Result<(), io::Error> {
+    let this = self.clone();
     let mut write_half = RcRef::map(self, |r| &r.write_half).borrow_mut().await;
-    write_with_optional_fd(&mut write_half, msg, raw_fd).await
+    write_with_optional_fd(&mut write_half, msg, raw_fd, &this.sent_handles)
+      .await
   }
 }
 
@@ -470,6 +521,8 @@ pub struct IpcAdvancedStreamResource {
   pub cancel: Rc<CancelHandle>,
   pub queued_bytes: AtomicUsize,
   pub ref_tracker: IpcRefTracker,
+  /// See [`SentHandles`].
+  pub sent_handles: SentHandles,
 }
 
 impl IpcAdvancedStreamResource {
@@ -495,6 +548,7 @@ impl IpcAdvancedStreamResource {
       cancel: Default::default(),
       queued_bytes: Default::default(),
       ref_tracker,
+      sent_handles: Default::default(),
     })
   }
 
@@ -506,8 +560,10 @@ impl IpcAdvancedStreamResource {
     msg: &[u8],
     raw_fd: Option<i32>,
   ) -> Result<(), io::Error> {
+    let this = self.clone();
     let mut write_half = RcRef::map(self, |r| &r.write_half).borrow_mut().await;
-    write_with_optional_fd(&mut write_half, msg, raw_fd).await
+    write_with_optional_fd(&mut write_half, msg, raw_fd, &this.sent_handles)
+      .await
   }
 }
 
