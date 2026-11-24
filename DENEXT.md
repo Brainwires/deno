@@ -21360,6 +21360,83 @@ where the changes are discussed.
        `node_compat` crypto suites unchanged.
      - Node tests enabled: none.
 
+516. **`feat(ext)`: an embedder's address deny list for `WebSocket` and WebRTC,
+     and extensions a page runtime can load without `deno_net`'s ops or a GPU**
+     (`thalora/web-page-net`; runtime; `ext/fetch/deny_addresses.rs`,
+     `ext/fetch/{dns,lib}.rs`, `ext/websocket/lib.rs`,
+     `ext/websocket/{01_websocket,02_websocketstream}.js`,
+     `ext/webrtc/{lib,peer,ice_transport}.rs`, `ext/canvas/{lib,canvas}.rs`, the
+     three READMEs). For a runtime that runs untrusted page script on a plain
+     `deno_core` `JsRuntime` (no `Deno` namespace, so no
+     `Deno.createHttpClient({ denyAddresses })`, item 512). Nothing changes for
+     Deno: every part is off until an embedder puts a value in the `OpState` or
+     registers the other extension.
+     - **`deno_fetch::deny_addresses::EmbedderDenyList`** (a tuple struct over
+       `Arc<AddressDenyList>`), put in the `OpState` before any script runs. The
+       runtime's default `fetch()` client and every `Deno.createHttpClient()`
+       client deny its ranges (added to the client's own `denyAddresses`;
+       `AddressDenyList::with`).
+     - **`WebSocket` / `WebSocketStream`**: `op_ws_create` connected through
+       whichever client it picked (a `Deno.HttpClient`, the one it makes for
+       `caCerts`, which had no deny list, or the default one), so the list did
+       not reach it. It now adds the list to the connector of that client
+       (`Client::with_connect_deny_addresses`), which is item 512's: the name
+       resolved once, refused when any address is denied, the connection to the
+       checked addresses only, the peer address checked after the connect, and
+       behind an HTTP(S) or SOCKS proxy the destination resolved and checked
+       (the hop to the proxy is not). The refusal is
+       `WebsocketError::AddressDenied`: a `NetworkError` `DOMException` whose
+       `cause.code` is `"ERR_ADDRESS_DENIED"`, on the `error` event's `error`
+       and on `WebSocketStream`'s `opened` rejection.
+     - **WebRTC**: `NetGuard::deny_list()`. A remote candidate whose address is
+       denied (in a description, from `addIceCandidate`, from
+       `RTCIceTransport.addRemoteCandidate`) is dropped before the ICE agent
+       sees it and the call succeeds (`peer::filter_remote_candidate`); a STUN
+       or TURN server is refused when any address its name resolves to is denied
+       (`icecandidateerror`, text `ERR_ADDRESS_DENIED: ...`), and a TCP or TLS
+       TURN connection's peer address is checked again; the send-side gate
+       refuses every datagram to a denied address (peer-reflexive addresses and
+       TURN-relayed data included). **mDNS (the choice):** under the list every
+       remote `.local` candidate is dropped unresolved and the default
+       resolve-only mDNS mode is off: resolving sends a name the page chose to
+       the local network and answers with a LAN address.
+     - **Local addresses (documented, with an opt-in).** Host candidates carry
+       the interface addresses, private ones included, when the permissions
+       allow listing interfaces and listening on the wildcard address; nothing
+       hides them by default. `deno_webrtc::EmbedderIceOptions` with
+       `force_relay: true` in the `OpState` forces `iceTransportPolicy: "relay"`
+       on every connection and on `setConfiguration`, writes a relay candidate's
+       related address as `0.0.0.0` / `::`, and leaves local addresses out of
+       `icecandidateerror`.
+     - **`deno_webrtc` without `deno_net`'s extension.** It used two Rust
+       helpers of the crate (`resolve_addr`, `routed::connect_tcp_stream`) and
+       the `DefaultTlsOptions` the extension puts in the state, no op and no
+       JavaScript: the extension dependency is gone (`deps = [deno_web]`), and
+       `turns:` uses the default root store when the state has no
+       `DefaultTlsOptions`.
+     - **`deno_canvas_offscreen`**, registered in place of `deno_canvas`:
+       `OffscreenCanvas` and `ImageBitmapRenderingContext` without the
+       `deno_webgpu` extension and without `Deno.UnsafeWindowSurface`;
+       `getContext("webgpu")` answers `null` there. `deno_canvas` itself is
+       unchanged. The crate still links `deno_webgpu`, and `deno_image`'s
+       extension (`createImageBitmap`, `ImageBitmap`) still names `deno_webgpu`
+       as a dependency although it uses nothing of it.
+     - Tests: `deny_addresses::tests` (`two_lists_deny_what_either_denies`,
+       `the_embedder_list_is_read_from_the_op_state`), `dns::tests`
+       (`deny_addresses_added_to_a_connector_are_refused_too`); `deno_websocket`
+       `embedder_deny_list_refuses_a_denied_address` (a literal, `localhost`, a
+       mapped literal, the `caCerts` client and `wss:`; nothing connects),
+       `no_embedder_deny_list_connects_as_before`,
+       `a_refused_connection_is_not_an_address_denial`; `deno_webrtc`
+       `deny_list_filters_remote_candidates`,
+       `deny_list_drops_remote_candidates_before_the_engine`,
+       `forced_relay_signals_no_local_candidate`,
+       `permissions_guard_holds_the_embedder_deny_list`; `deno_canvas`
+       `the_offscreen_extension_needs_no_webgpu`. No `tests/unit` change:
+       nothing a Deno program can observe changed.
+     - User-facing note: none for Deno programs.
+     - Node tests enabled: none; no Node API changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
