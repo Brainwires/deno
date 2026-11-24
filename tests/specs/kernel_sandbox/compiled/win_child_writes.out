@@ -1,3 +1,3 @@
 child wrote inside\child.txt: true
-hint: a child process exited with code 1 inside the kernel sandbox; children inherit the file and network rules, so it may have been refused something (see --kernel-sandbox-report)
+hint: a child process exited with code 1 inside the kernel sandbox; children inherit the file and network rules, so it may have been refused something (see --kernel-sandbox-report); grant the child's access to this program, or rebuild the program with `deno compile --kernel-sandbox=off` to turn it off
 child wrote child_outside.txt: false
