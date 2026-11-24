@@ -71,6 +71,8 @@ use bytes::BytesMut;
 use deno_core::CancelFuture;
 use deno_core::CancelHandle;
 use deno_core::ToJsBuffer;
+use deno_fetch::deny_addresses::ADDRESS_DENIED_CODE;
+use deno_fetch::deny_addresses::AddressDenyList;
 use rtc::data_channel::RTCDataChannelId;
 use rtc::data_channel::RTCDataChannelInit;
 use rtc::data_channel::RTCDataChannelState;
@@ -191,6 +193,28 @@ pub trait NetGuard {
   /// candidates)? (`--allow-sys=networkInterfaces`, as
   /// `Deno.networkInterfaces()`.)
   fn interfaces(&self) -> Result<(), String>;
+  /// denext: the embedder's address deny list
+  /// (`deno_fetch::deny_addresses::EmbedderDenyList`), when the runtime has
+  /// one. `connect` refuses an address in it, which keeps every datagram
+  /// and every STUN/TURN server away from it; with the list itself a
+  /// connection also drops the remote candidates in it before the engine
+  /// sees them (and every `.local` one, see [`filter_remote_candidate`]) and
+  /// refuses a server whose name resolves to any denied address.
+  fn deny_list(&self) -> Option<&AddressDenyList> {
+    None
+  }
+}
+
+/// denext: why `addr` is refused under the embedder's address deny list
+/// (the text of a [`NetGuard::connect`] refusal), when it is in it.
+pub fn address_denied(
+  deny: Option<&AddressDenyList>,
+  addr: SocketAddr,
+) -> Option<String> {
+  let net = deny?.denied(addr.ip())?;
+  Some(format!(
+    "{ADDRESS_DENIED_CODE}: {addr} is in {net}, which the embedder's address deny list denies"
+  ))
 }
 
 /// How a STUN/TURN client reaches its server.
@@ -308,6 +332,11 @@ pub struct PeerOptions {
   pub ice_servers: Vec<IceServerSpec>,
   /// `iceTransportPolicy: "relay"`: only relay candidates are signalled.
   pub relay_only: bool,
+  /// denext: the embedder's `EmbedderIceOptions::force_relay`: the policy
+  /// is `relay` whatever the configuration says, and what would still name
+  /// a local address is hidden (a relay candidate's related address, the
+  /// address of a gathering error).
+  pub force_relay: bool,
   /// For `turns:` servers: the runtime's TLS client configuration (its root
   /// store, `--unsafely-ignore-certificate-errors`).
   pub tls: Option<Arc<rustls::ClientConfig>>,
@@ -838,6 +867,34 @@ pub fn classify_remote_candidate(
   }
 }
 
+/// denext: a classified remote candidate under the embedder's address deny
+/// list (`deny`; without one the candidate is returned as it is). A
+/// candidate whose address is denied is skipped (reported as accepted, as a
+/// browser does with a candidate it cannot use) before the engine can pair
+/// it, so no connectivity check is ever formed for it. So is every mDNS
+/// `.local` candidate: resolving it asks the local network about a name the
+/// remote description chose, the answer is a LAN address (which the usual
+/// deny list refuses anyway), and nothing about a name tells what it would
+/// resolve to. Such a peer is still reached as a peer-reflexive candidate
+/// when its own checks arrive from an address that is not denied.
+pub fn filter_remote_candidate(
+  candidate: RemoteCandidate,
+  deny: Option<&AddressDenyList>,
+) -> RemoteCandidate {
+  let Some(deny) = deny else {
+    return candidate;
+  };
+  match candidate {
+    RemoteCandidate::Udp(addr) | RemoteCandidate::Tcp(addr)
+      if deny.denied(addr.ip()).is_some() =>
+    {
+      RemoteCandidate::Ignore
+    }
+    RemoteCandidate::Mdns => RemoteCandidate::Ignore,
+    candidate => candidate,
+  }
+}
+
 /// A host candidate's `<name>.local` address (RFC 6762 names; WebRTC's are
 /// `<uuid>.local`).
 fn is_mdns_name(address: &str) -> bool {
@@ -1270,6 +1327,8 @@ impl Core {
     error_code: u16,
     error_text: String,
   ) {
+    // denext: `base` is a local address, which a forced relay policy hides
+    let base = base.filter(|_| !self.options.force_relay);
     self.events.push_back(JsEvent::IceCandidateError {
       address: base.map(|b| b.ip().to_string()),
       port: base.map(|b| b.port()),
@@ -1893,11 +1952,25 @@ impl Core {
       }
     }
     for (url, base, relay) in relays {
+      // denext: the related address is the local socket's; a forced relay
+      // policy keeps it from the engine, so that no candidate, description
+      // or stats entry names it (`0.0.0.0` / `::`, port 0, as browsers
+      // write a hidden one)
+      let related = if self.options.force_relay {
+        let any: IpAddr = if base.is_ipv4() {
+          Ipv4Addr::UNSPECIFIED.into()
+        } else {
+          Ipv6Addr::UNSPECIFIED.into()
+        };
+        SocketAddr::new(any, 0)
+      } else {
+        base
+      };
       let line = candidate_line(
         CandidateRelayConfig {
           base_config: base_config(relay),
-          rel_addr: base.ip().to_string(),
-          rel_port: base.port(),
+          rel_addr: related.ip().to_string(),
+          rel_port: related.port(),
           url: Some(url.clone()),
         }
         .new_candidate_relay(),
@@ -2399,9 +2472,10 @@ impl Core {
 
 impl Peer {
   pub fn new(
-    options: PeerOptions,
+    mut options: PeerOptions,
     guard: Rc<dyn NetGuard>,
   ) -> Result<Rc<Self>, WebRtcError> {
+    options.relay_only |= options.force_relay;
     let config = RTCConfigurationBuilder::new()
       .with_certificates(options.certificates.clone())
       .with_bundle_policy(options.bundle_policy)
@@ -2437,6 +2511,11 @@ impl Peer {
     let mut mdns_note = None;
     let mdns_mode = match net.map(|n| n.mdns).unwrap_or_default() {
       MdnsMode::Off => MdnsMode::Off,
+      // denext: under the embedder's address deny list remote `.local`
+      // candidates are dropped unresolved (`filter_remote_candidate`), so a
+      // connection that would only resolve them has no use for mDNS (one on
+      // an `mdns: true` network still publishes its own names).
+      MdnsMode::Resolve if guard.deny_list().is_some() => MdnsMode::Off,
       wanted => match mdns_permitted(&*guard) {
         Ok(()) => wanted,
         Err(why) => {
@@ -2660,7 +2739,7 @@ impl Peer {
   ) {
     let mut core = self.core.borrow_mut();
     core.options.ice_servers = specs;
-    core.options.relay_only = relay_only;
+    core.options.relay_only = relay_only || core.options.force_relay;
     if tls.is_some() {
       core.options.tls = tls;
     }
@@ -2797,7 +2876,10 @@ impl Peer {
     };
     for line in sdp.split_inclusive('\n') {
       if let Some(value) = line.trim_end().strip_prefix("a=candidate:") {
-        match classify_remote_candidate(value, tcp, mdns)? {
+        match filter_remote_candidate(
+          classify_remote_candidate(value, tcp, mdns)?,
+          self.guard.deny_list(),
+        ) {
           RemoteCandidate::Ignore => continue,
           RemoteCandidate::Udp(addr) | RemoteCandidate::Tcp(addr) => {
             self.guard.connect(addr).map_err(WebRtcError::Permission)?;
@@ -2875,7 +2957,10 @@ impl Peer {
       let core = self.core.borrow();
       (core.ice_tcp(), core.mdns_mode != MdnsMode::Off)
     };
-    let addr = match classify_remote_candidate(&candidate, tcp, mdns)? {
+    let addr = match filter_remote_candidate(
+      classify_remote_candidate(&candidate, tcp, mdns)?,
+      self.guard.deny_list(),
+    ) {
       RemoteCandidate::Ignore => return Ok(()),
       RemoteCandidate::Mdns => {
         if !self.core.borrow_mut().resolves_mdns() {
@@ -3710,6 +3795,14 @@ async fn connect_stream(
   let tcp = deno_net::routed::connect_tcp_stream(server, Some(&spec.host))
     .await
     .map_err(|e| format!("Could not connect to {}: {e}", spec.url))?;
+  // denext: the address the stream really reached, before a byte is
+  // written to it
+  if let Some(deny) = peer.guard.deny_list() {
+    let reached = tcp.peer_addr().map_err(|e| e.to_string())?;
+    if let Some(text) = address_denied(Some(deny), reached) {
+      return Err(text);
+    }
+  }
   let _ = tcp.set_nodelay(true);
   let local = tcp.local_addr().map_err(|e| e.to_string())?;
   let (writer_tx, writer_rx) = mpsc::unbounded_channel();
@@ -3774,6 +3867,16 @@ async fn add_server(peer: Rc<Peer>, spec: IceServerSpec) {
         return;
       }
     };
+  // denext: under the embedder's address deny list a server is refused
+  // when any address its name resolved to is denied (as a `fetch()` client
+  // with `denyAddresses` refuses a name), not only the one picked below.
+  if let Some(text) = resolved
+    .iter()
+    .find_map(|addr| address_denied(peer.guard.deny_list(), *addr))
+  {
+    finish(&peer, Some(text));
+    return;
+  }
   // A family the connection has a socket for (UDP), or any (TCP/TLS).
   let server = {
     let core = peer.core.borrow();
@@ -3990,6 +4093,10 @@ impl Peer {
 
   pub(crate) fn mdns_open_for_tests(&self) -> bool {
     self.core.borrow().mdns_socket.is_some()
+  }
+
+  pub(crate) fn relay_only_for_tests(&self) -> bool {
+    self.core.borrow().options.relay_only
   }
 }
 

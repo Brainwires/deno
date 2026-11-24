@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::rc::Rc;
 use std::time::Duration;
 
+use deno_fetch::deny_addresses::AddressDenyList;
 use rtc::data_channel::RTCDataChannelInit;
 
 use crate::IceServerSpec;
@@ -21,9 +22,11 @@ use crate::peer::MAX_ROUTES;
 use crate::peer::MAX_SDP_BYTES;
 use crate::peer::RemoteCandidate;
 use crate::peer::Via;
+use crate::peer::address_denied;
 use crate::peer::candidate_address;
 use crate::peer::classify_remote_candidate;
 use crate::peer::epoch_fields_relative;
+use crate::peer::filter_remote_candidate;
 
 /// Loopback only: interface enumeration is refused, so host candidates are
 /// `127.0.0.1` alone and the test is the same on every machine.
@@ -412,6 +415,243 @@ fn remote_candidate_classes() {
   assert_eq!(class(named_passive, true, true), RemoteCandidate::Mdns);
   assert_eq!(class(named_passive, false, true), RemoteCandidate::Ignore);
   assert!(classify_remote_candidate("candidate:garbage", true, true).is_err());
+}
+
+fn deny_list(entries: &[&str]) -> AddressDenyList {
+  AddressDenyList::parse(
+    &entries.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+  )
+  .unwrap()
+}
+
+// denext: the embedder's address deny list, on parsed candidates: a denied
+// literal address and every `.local` name are dropped; the rest is kept.
+#[test]
+fn deny_list_filters_remote_candidates() {
+  let deny = deny_list(&["loopback", "private", "link-local", "metadata"]);
+  let filtered = |c: &str, tcp: bool| {
+    filter_remote_candidate(
+      classify_remote_candidate(c, tcp, true).unwrap(),
+      Some(&deny),
+    )
+  };
+  let addr = |a: &str| a.parse::<SocketAddr>().unwrap();
+  for denied in [
+    "candidate:1 1 udp 1 10.0.0.1 5 typ host",
+    "candidate:1 1 udp 1 192.168.1.20 50000 typ host",
+    "candidate:1 1 udp 1 172.16.4.4 50000 typ srflx raddr 0.0.0.0 rport 0",
+    "candidate:1 1 udp 1 127.0.0.1 5 typ host",
+    "candidate:1 1 udp 1 0.0.0.0 5 typ host",
+    "candidate:1 1 udp 1 169.254.169.254 80 typ host",
+    "candidate:1 1 udp 1 100.64.0.1 5 typ host",
+    "candidate:1 1 udp 1 ::1 5 typ host",
+    "candidate:1 1 udp 1 fd00::1 5 typ host",
+    "candidate:1 1 udp 1 fe80::1 5 typ host",
+    // an IPv4-mapped address is the IPv4 address it carries
+    "candidate:1 1 udp 1 ::ffff:10.0.0.1 5 typ host",
+    "candidate:1 1 udp 1 [::ffff:127.0.0.1] 5 typ host",
+    "a=candidate:1 1 UDP 1 10.0.0.1 5 typ relay raddr 1.2.3.4 rport 9",
+    // ICE over TCP
+    "candidate:1 1 tcp 1 10.0.0.1 5000 typ host tcptype passive",
+    // a `.local` name is never resolved under the list
+    "candidate:1 1 udp 1 0a1b2c3d-0000-4000-8000-000000000001.local 5 typ host",
+    "candidate:1 1 tcp 1 0a1b2c3d-0000-4000-8000-000000000001.local 5000 typ host tcptype passive",
+  ] {
+    assert_eq!(filtered(denied, true), RemoteCandidate::Ignore, "{denied}");
+  }
+  assert_eq!(
+    filtered("candidate:1 1 udp 1 203.0.113.7 5 typ srflx", false),
+    RemoteCandidate::Udp(addr("203.0.113.7:5"))
+  );
+  assert_eq!(
+    filtered("candidate:1 1 udp 1 2001:db8::7 5 typ host", false),
+    RemoteCandidate::Udp(addr("[2001:db8::7]:5"))
+  );
+  assert_eq!(
+    filtered(
+      "candidate:1 1 tcp 1 203.0.113.7 5000 typ host tcptype passive",
+      true
+    ),
+    RemoteCandidate::Tcp(addr("203.0.113.7:5000"))
+  );
+  // Without a list nothing is filtered.
+  assert_eq!(
+    filter_remote_candidate(RemoteCandidate::Udp(addr("10.0.0.1:5")), None),
+    RemoteCandidate::Udp(addr("10.0.0.1:5"))
+  );
+  assert_eq!(
+    filter_remote_candidate(RemoteCandidate::Tcp(addr("127.0.0.1:9")), None),
+    RemoteCandidate::Tcp(addr("127.0.0.1:9"))
+  );
+  assert_eq!(
+    filter_remote_candidate(RemoteCandidate::Mdns, None),
+    RemoteCandidate::Mdns
+  );
+  // The refusal names the address, the range and the code `fetch()` uses.
+  let text = address_denied(Some(&deny), addr("10.1.2.3:3478")).unwrap();
+  assert!(
+    text.starts_with("ERR_ADDRESS_DENIED: 10.1.2.3:3478"),
+    "{text}"
+  );
+  assert!(text.contains("10.0.0.0/8"), "{text}");
+  assert!(address_denied(Some(&deny), addr("203.0.113.7:3478")).is_none());
+  assert!(address_denied(None, addr("10.1.2.3:3478")).is_none());
+}
+
+/// Loopback only, like [`LoopbackGuard`], under an address deny list.
+struct DenyGuard(AddressDenyList);
+
+impl NetGuard for DenyGuard {
+  fn connect(&self, addr: SocketAddr) -> Result<(), String> {
+    match address_denied(Some(&self.0), addr) {
+      Some(text) => Err(text),
+      None => Ok(()),
+    }
+  }
+  fn listen(&self, _ip: IpAddr) -> Result<(), String> {
+    Ok(())
+  }
+  fn interfaces(&self) -> Result<(), String> {
+    Err("no interface enumeration in tests".to_string())
+  }
+  fn deny_list(&self) -> Option<&AddressDenyList> {
+    Some(&self.0)
+  }
+}
+
+// denext: under the embedder's deny list a denied remote candidate (in the
+// description or trickled) is dropped before the engine sees it, and the
+// call succeeds; the candidates that are not denied stay.
+#[tokio::test]
+async fn deny_list_drops_remote_candidates_before_the_engine() {
+  let a = Peer::new(
+    PeerOptions::default(),
+    Rc::new(DenyGuard(deny_list(&["private", "link-local", "metadata"]))),
+  )
+  .unwrap();
+  let b = new_peer();
+  let mut eb = Vec::new();
+  b.create_data_channel("x", reliable()).unwrap();
+  let offer = b.create_offer(false).unwrap();
+  b.set_local_description("offer", offer).unwrap();
+  wait_for(&b, &mut eb, gathered).await;
+  let (_, sdp) = b.local_description().unwrap();
+  assert!(sdp.contains(" 127.0.0.1 "), "{sdp}");
+  // The offer with two candidates in denied ranges and a `.local` one
+  // added next to its own.
+  let mut offered = String::new();
+  let mut added = false;
+  for line in sdp.split_inclusive('\n') {
+    offered.push_str(line);
+    if !added && line.starts_with("a=candidate:") {
+      added = true;
+      offered
+        .push_str("a=candidate:7 1 udp 2130706431 10.0.0.7 40007 typ host\r\n");
+      offered.push_str(
+        "a=candidate:8 1 udp 1694498815 ::ffff:192.168.1.8 40008 typ srflx raddr 0.0.0.0 rport 0\r\n",
+      );
+      offered.push_str(
+        "a=candidate:9 1 udp 2130706431 0a1b2c3d-0000-4000-8000-000000000009.local 40009 typ host\r\n",
+      );
+    }
+  }
+  assert!(added, "{sdp}");
+  a.set_remote_description("offer", offered).unwrap();
+  // Trickled: dropped and reported as accepted, never a rejection.
+  for candidate in [
+    "candidate:10 1 udp 2130706431 10.0.0.10 40010 typ host",
+    "candidate:11 1 udp 2130706431 169.254.169.254 80 typ host",
+    "candidate:12 1 udp 2130706431 0a1b2c3d-0000-4000-8000-000000000012.local 40012 typ host",
+  ] {
+    a.add_ice_candidate(
+      candidate.to_string(),
+      Some("0".to_string()),
+      Some(0),
+      None,
+    )
+    .unwrap();
+  }
+  let (_, remote) = a.remote_description().unwrap();
+  assert!(remote.contains(" 127.0.0.1 "), "{remote}");
+  for dropped in [
+    "10.0.0.7",
+    "192.168.1.8",
+    "10.0.0.10",
+    "169.254.169.254",
+    ".local",
+  ] {
+    assert!(!remote.contains(dropped), "{dropped} is in {remote}");
+  }
+  a.close();
+  b.close();
+}
+
+// denext: the embedder's forced relay policy: nothing that names a local
+// address is signalled, whatever the configuration asks for.
+#[tokio::test]
+async fn forced_relay_signals_no_local_candidate() {
+  let a = Peer::new(
+    PeerOptions {
+      force_relay: true,
+      ..Default::default()
+    },
+    Rc::new(LoopbackGuard { refuse: None }),
+  )
+  .unwrap();
+  let mut ea = Vec::new();
+  a.create_data_channel("x", reliable()).unwrap();
+  let offer = a.create_offer(false).unwrap();
+  a.set_local_description("offer", offer).unwrap();
+  wait_for(&a, &mut ea, gathered).await;
+  assert!(
+    !ea.iter().any(|e| matches!(e, JsEvent::IceCandidate { .. })),
+    "{ea:#?}"
+  );
+  let (_, sdp) = a.local_description().unwrap();
+  assert!(!sdp.contains("a=candidate:"), "{sdp}");
+  // `setConfiguration` can't turn the policy back to `all`.
+  a.set_ice_servers(Vec::new(), false, None);
+  assert!(a.relay_only_for_tests());
+  a.close();
+}
+
+// denext: the runtime's guard refuses what the embedder's list denies
+// before it asks the permissions, and reads the forced relay policy.
+#[test]
+fn permissions_guard_holds_the_embedder_deny_list() {
+  use deno_fetch::deny_addresses::EmbedderDenyList;
+
+  let permissions = || {
+    deno_permissions::PermissionsContainer::allow_all(std::sync::Arc::new(
+      deno_permissions::RuntimePermissionDescriptorParser::new(
+        sys_traits::impls::RealSys,
+      ),
+    ))
+  };
+  let addr = |a: &str| a.parse::<SocketAddr>().unwrap();
+  let mut state = deno_core::OpState::new(None);
+  let guard = crate::PermissionsGuard::new(&state, permissions());
+  assert!(guard.deny_list().is_none());
+  guard.connect(addr("127.0.0.1:3478")).unwrap();
+  assert!(!crate::EmbedderIceOptions::force_relay(&state));
+
+  state.put(EmbedderDenyList(std::sync::Arc::new(deny_list(&[
+    "loopback", "private",
+  ]))));
+  state.put(crate::EmbedderIceOptions { force_relay: true });
+  let guard = crate::PermissionsGuard::new(&state, permissions());
+  assert!(guard.deny_list().is_some());
+  for denied in [
+    "127.0.0.1:3478",
+    "[::1]:3478",
+    "192.168.0.1:9",
+    "10.0.0.1:1",
+  ] {
+    let text = guard.connect(addr(denied)).unwrap_err();
+    assert!(text.starts_with("ERR_ADDRESS_DENIED"), "{denied}: {text}");
+  }
+  guard.connect(addr("203.0.113.7:3478")).unwrap();
+  assert!(crate::EmbedderIceOptions::force_relay(&state));
 }
 
 #[test]

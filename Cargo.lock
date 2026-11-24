@@ -4276,6 +4276,7 @@ dependencies = [
  "bytes",
  "deno_core",
  "deno_error",
+ "deno_fetch",
  "deno_net",
  "deno_net_route",
  "deno_permissions",
@@ -4290,6 +4291,7 @@ dependencies = [
  "serde",
  "serde_json",
  "socket2 0.5.5",
+ "sys_traits",
  "thiserror 2.0.21",
  "tokio",
 ]
@@ -4314,6 +4316,7 @@ dependencies = [
  "hyper-util",
  "once_cell",
  "sha1 0.10.6",
+ "sys_traits",
  "thiserror 2.0.21",
  "tokio",
 ]

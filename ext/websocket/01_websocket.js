@@ -35,6 +35,7 @@ const {
   Error,
   ErrorPrototypeToString,
   ObjectDefineProperties,
+  ObjectDefineProperty,
   ObjectPrototypeIsPrototypeOf,
   PromisePrototypeCatch,
   PromisePrototypeThen,
@@ -256,6 +257,26 @@ function emitWebSocketFrameError(ws, errorMessage) {
   } catch {
     // never let inspector instrumentation break a real WebSocket
   }
+}
+
+// denext: a connection the embedder's address deny list refused (the
+// `cause_code` of the op's error) has the code on its `cause`, where a
+// `fetch()` refused by a client's `denyAddresses` has it:
+// `error.cause.code === "ERR_ADDRESS_DENIED"`.
+function setConnectErrorCause(error, opError) {
+  const code = opError?.cause_code;
+  if (typeof code !== "string") {
+    return;
+  }
+  const cause = new Error(opError.message);
+  cause.code = code;
+  ObjectDefineProperty(error, "cause", {
+    __proto__: null,
+    value: cause,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
 }
 
 class WebSocket extends EventTarget {
@@ -566,6 +587,7 @@ class WebSocket extends EventTarget {
       },
       (err) => {
         this[_readyState] = CLOSED;
+        setConnectErrorCause(err, err);
 
         const errorEv = new ErrorEvent(
           "error",

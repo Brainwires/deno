@@ -21360,68 +21360,152 @@ where the changes are discussed.
        `node_compat` crypto suites unchanged.
      - Node tests enabled: none.
 
-5NN. **`feat(ext/web_page)`: page runtime for Thalora (hostile web JS on V8,
-`thalora-dom` binding)** (`thalora/web-page`; `ext/web_page/` (new crate
-`deno_web_page`): `lib.rs`, `page.rs`, `dom_ops.rs`, `host_ops.rs`,
-`op_allowlist.rs`, `tests.rs`, `00_dom.js`, `01_events.js`, `02_html.js`,
-`03_window.js`, `99_page_main.js`, `README.md`; `Cargo.toml`, `Cargo.lock`).
-Delivery step 2 of Thalora's A3 design note (`docs/A3_V8_DESIGN.md` in
-Brainwires/thalora-web-browser). **Not wired into `deno` or `denort`**: nothing
-in `runtime/` or `cli/` depends on the crate, the prebuilt `libdenort` does not
-carry it, and it is not a Deno API. Thalora consumes it by git revision of this
-branch. - **What it is.** `PageRuntime::new(PageOptions)`: a plain
-`deno_core::JsRuntime` of `deno_webidl`, `deno_web`, `deno_fetch`,
-`deno_webstorage`, `deno_crypto` and `deno_web_page`, with a DOM over
-`thalora_dom::Document` (an html5ever tree, DOM-standard mutation, `selectors`;
-no JS-engine types), kept in the op state and shared with the host
-(`with_document`). No `deno_runtime` worker, no `Deno` namespace, no Node. The
-host runs scripts (`execute_script`, `evaluate_json`), pumps the loop
-(`run_until_idle` with a budget), acts as the user (`click`, `set_value`), fires
-the lifecycle events and reads the console, the uncaught errors and the
-navigations the page asked for; the runtime never navigates and never fetches a
-script itself. - **Security.** Page JavaScript is hostile, so: no privileged op
-is registered (a test holds the op table against an allowlist);
-`globalThis.Deno` and `__bootstrap` are deleted before the first page script,
-every web global is installed eagerly so no extension script is evaluated
-afterwards, and deno_core refuses `import("ext:…")` from a page. Network is a
-`PermissionsContainer` from parsed descriptors (net for the host's allowlist,
-everything else denied, no prompt) plus the page's only HTTP client, built with
-item 512's `denyAddresses` (`loopback`, `private`, `link-local`, `metadata` by
-default) and put in the op state before `deno_fetch` would build its own.
-`localStorage` is a directory per origin under the host's storage directory. One
-isolate per page; `heap_limit_bytes` with a near-heap-limit callback ends the
-page instead of the process (`PageError::OutOfMemory`); `terminate_handle()`
-gives a watchdog `terminate_execution`. The console goes to a bounded buffer,
-never to stdout. The V8 sandbox stays off, so the process is the boundary (the
-design note's row f). - **Left out**: `deno_websocket` and `deno_webrtc` (their
-connections do not pass the fetch connector, so `denyAddresses` would not hold:
-an SSRF hole; `deno_webrtc` also needs `deno_net` and its listening-socket ops),
-`deno_canvas` (needs `deno_webgpu`). They return once they honour the deny list.
+516. **`feat(ext)`: an embedder's address deny list for `WebSocket` and WebRTC,
+     and extensions a page runtime can load without `deno_net`'s ops or a GPU**
+     (`thalora/web-page-net`; runtime; `ext/fetch/deny_addresses.rs`,
+     `ext/fetch/{dns,lib}.rs`, `ext/websocket/lib.rs`,
+     `ext/websocket/{01_websocket,02_websocketstream}.js`,
+     `ext/webrtc/{lib,peer,ice_transport}.rs`, `ext/canvas/{lib,canvas}.rs`, the
+     three READMEs). For a runtime that runs untrusted page script on a plain
+     `deno_core` `JsRuntime` (no `Deno` namespace, so no
+     `Deno.createHttpClient({ denyAddresses })`, item 512). Nothing changes for
+     Deno: every part is off until an embedder puts a value in the `OpState` or
+     registers the other extension.
+     - **`deno_fetch::deny_addresses::EmbedderDenyList`** (a tuple struct over
+       `Arc<AddressDenyList>`), put in the `OpState` before any script runs. The
+       runtime's default `fetch()` client and every `Deno.createHttpClient()`
+       client deny its ranges (added to the client's own `denyAddresses`;
+       `AddressDenyList::with`).
+     - **`WebSocket` / `WebSocketStream`**: `op_ws_create` connected through
+       whichever client it picked (a `Deno.HttpClient`, the one it makes for
+       `caCerts`, which had no deny list, or the default one), so the list did
+       not reach it. It now adds the list to the connector of that client
+       (`Client::with_connect_deny_addresses`), which is item 512's: the name
+       resolved once, refused when any address is denied, the connection to the
+       checked addresses only, the peer address checked after the connect, and
+       behind an HTTP(S) or SOCKS proxy the destination resolved and checked
+       (the hop to the proxy is not). The refusal is
+       `WebsocketError::AddressDenied`: a `NetworkError` `DOMException` whose
+       `cause.code` is `"ERR_ADDRESS_DENIED"`, on the `error` event's `error`
+       and on `WebSocketStream`'s `opened` rejection.
+     - **WebRTC**: `NetGuard::deny_list()`. A remote candidate whose address is
+       denied (in a description, from `addIceCandidate`, from
+       `RTCIceTransport.addRemoteCandidate`) is dropped before the ICE agent
+       sees it and the call succeeds (`peer::filter_remote_candidate`); a STUN
+       or TURN server is refused when any address its name resolves to is denied
+       (`icecandidateerror`, text `ERR_ADDRESS_DENIED: ...`), and a TCP or TLS
+       TURN connection's peer address is checked again; the send-side gate
+       refuses every datagram to a denied address (peer-reflexive addresses and
+       TURN-relayed data included). **mDNS (the choice):** under the list every
+       remote `.local` candidate is dropped unresolved and the default
+       resolve-only mDNS mode is off: resolving sends a name the page chose to
+       the local network and answers with a LAN address.
+     - **Local addresses (documented, with an opt-in).** Host candidates carry
+       the interface addresses, private ones included, when the permissions
+       allow listing interfaces and listening on the wildcard address; nothing
+       hides them by default. `deno_webrtc::EmbedderIceOptions` with
+       `force_relay: true` in the `OpState` forces `iceTransportPolicy: "relay"`
+       on every connection and on `setConfiguration`, writes a relay candidate's
+       related address as `0.0.0.0` / `::`, and leaves local addresses out of
+       `icecandidateerror`.
+     - **`deno_webrtc` without `deno_net`'s extension.** It used two Rust
+       helpers of the crate (`resolve_addr`, `routed::connect_tcp_stream`) and
+       the `DefaultTlsOptions` the extension puts in the state, no op and no
+       JavaScript: the extension dependency is gone (`deps = [deno_web]`), and
+       `turns:` uses the default root store when the state has no
+       `DefaultTlsOptions`.
+     - **`deno_canvas_offscreen`**, registered in place of `deno_canvas`:
+       `OffscreenCanvas` and `ImageBitmapRenderingContext` without the
+       `deno_webgpu` extension and without `Deno.UnsafeWindowSurface`;
+       `getContext("webgpu")` answers `null` there. `deno_canvas` itself is
+       unchanged. The crate still links `deno_webgpu`, and `deno_image`'s
+       extension (`createImageBitmap`, `ImageBitmap`) still names `deno_webgpu`
+       as a dependency although it uses nothing of it.
+     - Tests: `deny_addresses::tests` (`two_lists_deny_what_either_denies`,
+       `the_embedder_list_is_read_from_the_op_state`), `dns::tests`
+       (`deny_addresses_added_to_a_connector_are_refused_too`); `deno_websocket`
+       `embedder_deny_list_refuses_a_denied_address` (a literal, `localhost`, a
+       mapped literal, the `caCerts` client and `wss:`; nothing connects),
+       `no_embedder_deny_list_connects_as_before`,
+       `a_refused_connection_is_not_an_address_denial`; `deno_webrtc`
+       `deny_list_filters_remote_candidates`,
+       `deny_list_drops_remote_candidates_before_the_engine`,
+       `forced_relay_signals_no_local_candidate`,
+       `permissions_guard_holds_the_embedder_deny_list`; `deno_canvas`
+       `the_offscreen_extension_needs_no_webgpu`. No `tests/unit` change:
+       nothing a Deno program can observe changed.
+     - User-facing note: none for Deno programs.
+     - Node tests enabled: none; no Node API changes.
 
-- **The binding.** A node crosses as two `u32`s, the halves of
-  `NodeId::to_bits()` (arena index, generation); node-returning ops write into a
-  shared `Uint32Array`. Traversal and read ops are fast calls; the ops a page
-  can make fail are `#[op2(nofast)]`, because an error leaving a fast call is
-  built without JavaScript and a `DOMException` class only has a JavaScript
-  builder. One wrapper per live node, never freed in this cut (README). Events
-  propagate along the tree to the window over `deno_web`'s `Event` and listener
-  lists, with the dispatch written out in `00_dom.js`: `deno_web`'s `dispatch()`
-  returns early for a target with no listener and treats a Window parent as a
-  retargeted target. It reads the Event's internal slots off a probe event
-  (their symbols are private to `02_event.js`) and fails the bootstrap if one is
-  missing. - `deno_crypto` did not build outside a graph that turns on `der/std`
-  and `spki/std` for it; `ext/web_page/Cargo.toml` asks for both. -
-  `thalora-dom` is a git dependency pinned by revision (like `rtc`), MIT; it
-  adds `html5ever` 0.40, `selectors` 0.43 and `cssparser` 0.38 to `Cargo.lock`
-  next to the versions already there. - Hand-written DOM core, enough for
-  Thalora's MCP tools (evaluate, click, type, wait, read); a WebIDL generator
-  replaces the interface shells later. Collections are snapshots, there is no
-  layout, no `MutationObserver` and no `document.cookie` yet (README). - Tests:
-  `ext/web_page/tests.rs` (DOM round trip and the Rust-side view, the op
-  allowlist, no `Deno` / `require` / `process`, fetch confinement, timers and
-  the watchdog, click default actions and form submission, `DOMException`s,
-  event propagation, uncaught errors, JSON evaluation, origin-keyed storage, the
-  heap limit). - Node tests enabled: none, because this is not a Node API.
+517. **`feat(ext/web_page)`: page runtime for Thalora (hostile web JS on V8,
+     `thalora-dom` binding)** (`thalora/web-page`; `ext/web_page/` (new crate
+     `deno_web_page`): `lib.rs`, `page.rs`, `dom_ops.rs`, `host_ops.rs`,
+     `op_allowlist.rs`, `tests.rs`, `00_dom.js`, `01_events.js`, `02_html.js`,
+     `03_window.js`, `99_page_main.js`, `README.md`; `Cargo.toml`,
+     `Cargo.lock`). Delivery step 2 of Thalora's A3 design note
+     (`docs/A3_V8_DESIGN.md` in Brainwires/thalora-web-browser). **Not wired
+     into `deno` or `denort`**: nothing in `runtime/` or `cli/` depends on the
+     crate, the prebuilt `libdenort` does not carry it, and it is not a Deno
+     API. Thalora consumes it by git revision of this branch.
+     - **What it is.** `PageRuntime::new(PageOptions)`: a plain
+       `deno_core::JsRuntime` of `deno_webidl`, `deno_web`, `deno_fetch`,
+       `deno_webstorage`, `deno_crypto` and `deno_web_page`, with a DOM over
+       `thalora_dom::Document` (an html5ever tree, DOM-standard mutation,
+       `selectors`; no JS-engine types), kept in the op state and shared with
+       the host (`with_document`). No `deno_runtime` worker, no `Deno`
+       namespace, no Node. The host runs scripts (`execute_script`,
+       `evaluate_json`), pumps the loop (`run_until_idle` with a budget), acts
+       as the user (`click`, `set_value`), fires the lifecycle events and reads
+       the console, the uncaught errors and the navigations the page asked for;
+       the runtime never navigates and never fetches a script itself.
+     - **Security.** Page JavaScript is hostile, so: no privileged op is
+       registered (a test holds the op table against an allowlist);
+       `globalThis.Deno` and `__bootstrap` are deleted before the first page
+       script, every web global is installed eagerly so no extension script is
+       evaluated afterwards, and deno_core refuses `import("ext:…")` from a
+       page. Network is a `PermissionsContainer` from parsed descriptors (net
+       for the host's allowlist, everything else denied, no prompt) plus the
+       page's only HTTP client, built with item 512's `denyAddresses`
+       (`loopback`, `private`, `link-local`, `metadata` by default) and put in
+       the op state before `deno_fetch` would build its own. `localStorage` is a
+       directory per origin under the host's storage directory. One isolate per
+       page; `heap_limit_bytes` with a near-heap-limit callback ends the page
+       instead of the process (`PageError::OutOfMemory`); `terminate_handle()`
+       gives a watchdog `terminate_execution`. The console goes to a bounded
+       buffer, never to stdout. The V8 sandbox stays off, so the process is the
+       boundary (the design note's row f).
+     - **Left out**: `deno_websocket` and `deno_webrtc` (their connections do
+       not pass the fetch connector, so `denyAddresses` would not hold: an SSRF
+       hole; `deno_webrtc` also needs `deno_net` and its listening-socket ops),
+       `deno_canvas` (needs `deno_webgpu`). They return once they honour the
+       deny list.
+     - **The binding.** A node crosses as two `u32`s, the halves of
+       `NodeId::to_bits()` (arena index, generation); node-returning ops write
+       into a shared `Uint32Array`. Traversal and read ops are fast calls; the
+       ops a page can make fail are `#[op2(nofast)]`, because an error leaving a
+       fast call is built without JavaScript and a `DOMException` class only has
+       a JavaScript builder. One wrapper per live node, never freed in this cut
+       (README). Events propagate along the tree to the window over `deno_web`'s
+       `Event` and listener lists, with the dispatch written out in `00_dom.js`:
+       `deno_web`'s `dispatch()` returns early for a target with no listener and
+       treats a Window parent as a retargeted target. It reads the Event's
+       internal slots off a probe event (their symbols are private to
+       `02_event.js`) and fails the bootstrap if one is missing.
+     - `deno_crypto` did not build outside a graph that turns on `der/std` and
+       `spki/std` for it; `ext/web_page/Cargo.toml` asks for both. -
+       `thalora-dom` is a git dependency pinned by revision (like `rtc`), MIT;
+       it adds `html5ever` 0.40, `selectors` 0.43 and `cssparser` 0.38 to
+       `Cargo.lock` next to the versions already there.
+     - Hand-written DOM core, enough for Thalora's MCP tools (evaluate, click,
+       type, wait, read); a WebIDL generator replaces the interface shells
+       later. Collections are snapshots, there is no layout, no
+       `MutationObserver` and no `document.cookie` yet (README).
+     - Tests: `ext/web_page/tests.rs` (DOM round trip and the Rust-side view,
+       the op allowlist, no `Deno` / `require` / `process`, fetch confinement,
+       timers and the watchdog, click default actions and form submission,
+       `DOMException`s, event propagation, uncaught errors, JSON evaluation,
+       origin-keyed storage, the heap limit).
+     - Node tests enabled: none, because this is not a Node API.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
