@@ -21360,6 +21360,51 @@ where the changes are discussed.
        `node_compat` crypto suites unchanged.
      - Node tests enabled: none.
 
+518. **`fix(permissions)`: a scoped grant's folder that is removed and made
+     again is the grant's folder again** (runtime; Unix;
+     `runtime/permissions/checked_open.rs`). Follow-up to item 467, whose
+     race-safe opens keep each allow root's descriptor: it was opened once and
+     kept for the life of the scope, so after `Deno.remove("out", { recursive:
+     true })` and `Deno.mkdir("out")` under `--allow-write=out` every later
+     operation in `out` failed with NotFound until the process restarted (the
+     descriptor named the removed folder), and a root replaced by a rename
+     (another program moving a new folder into place) kept serving the old
+     tree. Item 467 said behaviour was unchanged for paths inside the grant;
+     for these it was not.
+     - The descriptor is still kept, with the place it was found at (its own
+       path: `F_GETPATH`, `/proc/self/fd/N`) and its device and inode. Each
+       use compares that with what the root's path names now (one `stat`). The
+       inode can't be reused while the descriptor is open, so a difference
+       means another object is at the path.
+     - Then the root is opened by its path again, and the new descriptor is
+       taken only when it is found at the same place as the first one (a new
+       folder where the old one was), or at a place the scope reaches anyway
+       (in one of its roots, outside its denies: a root that is a link to a
+       release folder under another granted folder, switched to the next
+       release), the rule a link met inside a root is already held to. A root
+       that now leads anywhere else (it, or a folder above it, became a link,
+       or a link's target changed) keeps the descriptor it had, as before; with
+       none kept (the root was gone in between) it is out of reach until its
+       path leads back. So the reopen can't move a scope: what the kept
+       descriptor was for (a root swapped for a link between the check and the
+       open) holds as it did.
+     - A root gone from its path drops its descriptor and is the one name in
+       its folder again, as a root that doesn't exist yet (item 476), so it
+       can be made again.
+     - Not reopened: a directory handed in already open (`Deno.openRoot`,
+       item 511), and a root whose first descriptor has no path to compare a
+       later one with (Linux without `/proc`): those keep the first descriptor.
+     - Unchanged: a scope that is itself a link the user owns names the link,
+       not its target, and a scope's resolved location is resolved once when
+       the grant is parsed (items 286, 467), so a link swapped to a target no
+       grant names is refused by the path check before anything is opened.
+     - Tests: `checked_open::tests::{a_root_removed_and_made_again_is_the_root,
+       a_root_replaced_by_a_rename_is_the_root,
+       a_root_that_leads_elsewhere_later_stays_in_the_scope,
+       an_open_root_is_never_opened_again}` (both strategies: `openat2` and
+       the component walk).
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -21371,7 +21416,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515) are what the prebuilt `libdenort` carries. The
+506-510, 511, 512, 513, 515, 518) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.

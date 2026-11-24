@@ -18,8 +18,22 @@
 //!
 //! How a path is opened:
 //!
-//! - Each allow root is opened once (by its path, as the grant names it) and
-//!   the descriptor kept, so a root swapped later doesn't move the scope.
+//! - Each allow root is opened by its path, as the grant names it, and the
+//!   descriptor kept with the place it was found at (the descriptor's own
+//!   path), so a root swapped later doesn't move the scope. Each use compares
+//!   the kept descriptor with what the root's path names now (device and
+//!   inode); when they differ (the folder was removed and made again, or
+//!   replaced by a rename) the root is opened again, and the new descriptor
+//!   is taken only when it is found at the same place as the first one (a
+//!   new folder where the old one was) or at a place the scope reaches
+//!   anyway (in one of its roots, outside its denies: a root that is a link
+//!   to a release folder under another root, switched to the next release),
+//!   the rule a link met inside a root is held to. A root that now leads
+//!   anywhere else (it, or a folder above it, became a link, or a link's
+//!   target changed) keeps the descriptor it had. A root gone from its path
+//!   is the one name in its folder again, as a root that doesn't exist yet.
+//!   Where a descriptor's path can't be told (no `/proc`), the first
+//!   descriptor is kept as it is.
 //! - Linux 5.6+: `openat2(root, rel, RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)`
 //!   (plus `RESOLVE_NO_SYMLINKS` for [`Symlinks::Never`]), which refuses `..`
 //!   and symlinks that leave the root atomically. It is used only when no
@@ -85,7 +99,48 @@ pub struct OpenScope {
 struct Root {
   path: PathBuf,
   /// Opened on first use; a root that doesn't exist yet is tried again.
-  fd: Mutex<Option<Arc<OwnedFd>>>,
+  state: Mutex<RootState>,
+}
+
+#[derive(Default)]
+struct RootState {
+  fd: Option<OpenedRoot>,
+  /// Where the root's directory was when it was first opened by its path
+  /// (the descriptor's own path). Kept when the directory goes away: only a
+  /// directory found at this place becomes the root again. `None` until the
+  /// first open, and where a descriptor's path can't be told.
+  place: Option<PathBuf>,
+  /// Never opened by its path (again): [`OpenScope::with_open_root`], and a
+  /// root whose first descriptor had no path to compare a later one with.
+  pinned: bool,
+}
+
+struct OpenedRoot {
+  fd: Arc<OwnedFd>,
+  /// The directory's device and inode, which no other object takes while
+  /// `fd` is open.
+  id: FileId,
+}
+
+type FileId = (libc::dev_t, libc::ino_t);
+
+/// The device and inode of what `path` names (links followed, as a root is
+/// opened), or the error.
+fn path_id(path: &Path) -> io::Result<FileId> {
+  let c = cstr(path.as_os_str())?;
+  // SAFETY: zeroed is a valid stat; the call fills it
+  let mut st: libc::stat = unsafe { std::mem::zeroed() };
+  // SAFETY: a valid C string and stat buffer
+  cvt(unsafe { libc::stat(c.as_ptr(), &mut st) })?;
+  Ok((st.st_dev, st.st_ino))
+}
+
+fn fd_id(fd: BorrowedFd<'_>) -> io::Result<FileId> {
+  // SAFETY: zeroed is a valid stat; the call fills it
+  let mut st: libc::stat = unsafe { std::mem::zeroed() };
+  // SAFETY: a valid descriptor and stat buffer
+  cvt(unsafe { libc::fstat(fd.as_raw_fd(), &mut st) })?;
+  Ok((st.st_dev, st.st_ino))
 }
 
 impl OpenScope {
@@ -110,7 +165,7 @@ impl OpenScope {
           .map(|p| {
             Ok(Root {
               path: absolute(p)?,
-              fd: Mutex::new(None),
+              state: Mutex::new(RootState::default()),
             })
           })
           .collect::<io::Result<Vec<_>>>()?,
@@ -140,8 +195,14 @@ impl OpenScope {
   ) -> io::Result<Self> {
     let mut scope = Self::new(Some(paths), deny)?;
     if let Some(roots) = &mut scope.roots {
+      // the id is never read: a pinned root isn't compared with its path
+      let id = fd_id(fd.as_fd()).unwrap_or_default();
       for root in roots {
-        *root.fd.get_mut() = Some(fd.clone());
+        *root.state.get_mut() = RootState {
+          fd: Some(OpenedRoot { fd: fd.clone(), id }),
+          place: None,
+          pinned: true,
+        };
       }
     }
     Ok(scope)
@@ -181,9 +242,20 @@ impl OpenScope {
       .filter(|r| path.starts_with(&r.path))
       .max_by_key(|r| r.path.as_os_str().len())
       .ok_or_else(not_capable)?;
-    let mut fd = root.fd.lock();
-    if let Some(fd) = &*fd {
-      return Ok((root.path.clone(), fd.clone()));
+    let mut state = root.state.lock();
+    if let Some(kept) = &state.fd {
+      // Still what the path names (or nothing says otherwise: a path that
+      // can't be read now keeps the descriptor)?
+      let moved = !state.pinned
+        && match path_id(&root.path) {
+          Ok(id) => id != kept.id,
+          Err(err) => {
+            matches!(err.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR))
+          }
+        };
+      if !moved {
+        return Ok((root.path.clone(), kept.fd.clone()));
+      }
     }
     let opened = match open_root(&root.path) {
       Ok(opened) => opened,
@@ -198,13 +270,56 @@ impl OpenScope {
       Err(err)
         if matches!(err.raw_os_error(), Some(libc::ENOTDIR | libc::ENOENT)) =>
       {
+        // (a root that was open and is gone: its descriptor names a
+        // removed directory, nothing can be reached through it)
+        if !state.pinned {
+          state.fd = None;
+        }
         let parent = root.path.parent().ok_or_else(not_capable)?;
         let dir = open_root(parent).map_err(io_err(path))?;
         return Ok((parent.to_path_buf(), dir));
       }
+      // the path can't be opened now: the descriptor kept, if any, stays
+      Err(err) => {
+        return match &state.fd {
+          Some(kept) => Ok((root.path.clone(), kept.fd.clone())),
+          None => Err(io_err(path)(err)),
+        };
+      }
+    };
+    let place = fd_path(opened.as_fd());
+    if let Some(first) = &state.place {
+      // Opened before: the path was followed again (its links too), so what
+      // it leads to now is the root only when it is where the root was, or
+      // somewhere this scope reaches by another root (as a link's target is
+      // checked on the walk). A directory anywhere else is not what was
+      // granted; the descriptor kept, if any, goes on being the root, and
+      // with none the root is out of reach until its path leads back.
+      let reached = place.as_ref().is_some_and(|place| {
+        place == first
+          || roots.iter().any(|r| place.starts_with(&r.path))
+            && !self.is_denied(place)
+      });
+      if !reached {
+        return match &state.fd {
+          Some(kept) => Ok((root.path.clone(), kept.fd.clone())),
+          None => Err(not_capable()),
+        };
+      }
+    } else {
+      // The first open. With no place to hold a later descriptor to, this
+      // one is kept for good.
+      state.pinned = place.is_none();
+      state.place = place;
+    }
+    let id = match fd_id(opened.as_fd()) {
+      Ok(id) => id,
       Err(err) => return Err(io_err(path)(err)),
     };
-    *fd = Some(opened.clone());
+    state.fd = Some(OpenedRoot {
+      fd: opened.clone(),
+      id,
+    });
     Ok((root.path.clone(), opened))
   }
 
@@ -2395,5 +2510,198 @@ mod tests {
         Err(CheckedOpenError::NotCapable(_))
       ));
     }
+  }
+
+  /// Both strategies for the given roots.
+  fn both(roots: &[&Path]) -> Vec<OpenScope> {
+    let roots = || Some(roots.iter().map(|r| r.to_path_buf()).collect());
+    let mut out = vec![
+      OpenScope::new(roots(), Vec::new())
+        .unwrap()
+        .force_component_walk(true),
+    ];
+    if cfg!(target_os = "linux") {
+      out.push(OpenScope::new(roots(), Vec::new()).unwrap());
+    }
+    out
+  }
+
+  // denext: a root's descriptor is kept, and compared with what the root's
+  // path names at each use. The "empty the output folder" pattern: the root
+  // is removed and made again; what is made in the new folder is found, and
+  // nothing outside it is.
+  #[test]
+  fn a_root_removed_and_made_again_is_the_root() {
+    let t = tree();
+    let read = CheckedOpenOptions::new().read(true);
+    for scope in scopes(&t, vec![]) {
+      // (the tree is shared by the two strategies)
+      fs::create_dir_all(t.allowed.join("dir")).unwrap();
+      fs::write(t.allowed.join("dir/f"), "checked").unwrap();
+      // the root is opened and kept
+      let f = open_checked(&scope, &t.allowed.join("dir/f"), &read).unwrap();
+      assert_eq!(read_all(f), "checked");
+      // removed through the scope; while it is gone it is the one name in
+      // its folder, and nothing beneath it is found
+      parent_checked(&scope, &t.allowed)
+        .unwrap()
+        .remove_dir_all()
+        .unwrap();
+      assert!(!t.allowed.exists());
+      let err =
+        open_checked(&scope, &t.allowed.join("dir/f"), &read).unwrap_err();
+      assert_eq!(
+        err.io_error().and_then(|e| e.raw_os_error()),
+        Some(libc::ENOENT),
+        "{err}"
+      );
+      assert!(matches!(
+        parent_checked(&scope, &t.base.join("other")),
+        Err(CheckedOpenError::NotCapable(_))
+      ));
+      // made again through the scope, then written and read beneath it
+      parent_checked(&scope, &t.allowed)
+        .unwrap()
+        .mkdir(0o755)
+        .unwrap();
+      parent_checked(&scope, &t.allowed.join("sub"))
+        .unwrap()
+        .mkdir(0o755)
+        .unwrap();
+      let made = open_checked(
+        &scope,
+        &t.allowed.join("sub/new"),
+        &CheckedOpenOptions::new().write(true).create_new(true),
+      )
+      .unwrap();
+      drop(made);
+      assert!(t.allowed.join("sub/new").is_file());
+      fs::write(t.allowed.join("sub/new"), "fresh").unwrap();
+      let f = open_checked(&scope, &t.allowed.join("sub/new"), &read).unwrap();
+      assert_eq!(read_all(f), "fresh");
+      // still held to the root
+      let err =
+        open_checked(&scope, &t.outside.join("dir/f"), &read).unwrap_err();
+      assert!(err.is_not_capable(), "{err}");
+      symlink(&t.outside, t.allowed.join("out")).unwrap();
+      let err =
+        open_checked(&scope, &t.allowed.join("out/f"), &read).unwrap_err();
+      assert!(err.is_not_capable(), "{err}");
+    }
+  }
+
+  // denext: a root replaced by a rename (another program moves the old
+  // folder aside and a new one into its place): the new folder is the root.
+  #[test]
+  fn a_root_replaced_by_a_rename_is_the_root() {
+    let t = tree();
+    let read = CheckedOpenOptions::new().read(true);
+    for (i, scope) in scopes(&t, vec![]).into_iter().enumerate() {
+      let f = open_checked(&scope, &t.allowed.join("dir/f"), &read).unwrap();
+      let before = read_all(f);
+      let next = t.base.join(format!("next-{i}"));
+      fs::create_dir_all(next.join("dir")).unwrap();
+      fs::write(next.join("dir/f"), format!("next-{i}")).unwrap();
+      fs::rename(&t.allowed, t.base.join(format!("old-{i}"))).unwrap();
+      fs::rename(&next, &t.allowed).unwrap();
+      let f = open_checked(&scope, &t.allowed.join("dir/f"), &read).unwrap();
+      let after = read_all(f);
+      assert_ne!(before, after);
+      assert_eq!(after, format!("next-{i}"));
+      // the folder moved aside is no longer in the scope
+      let err = open_checked(
+        &scope,
+        &t.base.join(format!("old-{i}")).join("dir/f"),
+        &read,
+      )
+      .unwrap_err();
+      assert!(err.is_not_capable(), "{err}");
+    }
+  }
+
+  // denext: a root that is a link. Its descriptor follows the link to a new
+  // target only where the scope reaches that target by another root (a
+  // "current" link beside a granted releases folder); a link switched to a
+  // place outside the scope keeps the descriptor the root had, as does a
+  // root swapped for a link.
+  #[test]
+  fn a_root_that_leads_elsewhere_later_stays_in_the_scope() {
+    let t = tree();
+    let read = CheckedOpenOptions::new().read(true);
+    let releases = t.base.join("releases");
+    for v in ["1", "2"] {
+      fs::create_dir_all(releases.join(v)).unwrap();
+      fs::write(releases.join(v).join("f"), v).unwrap();
+    }
+    let current = t.base.join("current");
+    let point = |target: &Path| {
+      let _ = fs::remove_file(&current);
+      symlink(target, &current).unwrap();
+    };
+    let get = |scope: &OpenScope| {
+      open_checked(scope, &current.join("f"), &read).map(read_all)
+    };
+
+    // the releases are granted too: the link is followed to the next one,
+    // and not to a place no root holds
+    for scope in both(&[&current, &releases]) {
+      point(&releases.join("1"));
+      assert_eq!(get(&scope).unwrap(), "1");
+      point(&releases.join("2"));
+      assert_eq!(get(&scope).unwrap(), "2");
+      point(&t.outside);
+      assert_eq!(get(&scope).unwrap(), "2");
+    }
+
+    // only the link is granted: where it led when it was first opened is
+    // the root for good
+    for scope in both(&[&current]) {
+      point(&releases.join("1"));
+      assert_eq!(get(&scope).unwrap(), "1");
+      point(&releases.join("2"));
+      assert_eq!(get(&scope).unwrap(), "1");
+      point(&t.outside);
+      assert_eq!(get(&scope).unwrap(), "1");
+    }
+
+    // a real folder swapped for a link out of the scope: the folder it was
+    // stays the root, wherever it went
+    for (i, scope) in scopes(&t, vec![]).into_iter().enumerate() {
+      if i > 0 {
+        fs::remove_file(&t.allowed).unwrap();
+        fs::rename(t.base.join("allowed.moved"), &t.allowed).unwrap();
+      }
+      let f = open_checked(&scope, &t.allowed.join("dir/f"), &read).unwrap();
+      assert_eq!(read_all(f), "checked");
+      swap_to_link(&t.base, "allowed", &t.outside);
+      let f = open_checked(&scope, &t.allowed.join("dir/f"), &read).unwrap();
+      assert_eq!(read_all(f), "checked");
+      // gone and back as a link out of the scope, with no descriptor kept:
+      // out of reach
+      fs::remove_file(&t.allowed).unwrap();
+      let _ = open_checked(&scope, &t.allowed.join("dir/f"), &read);
+      symlink(&t.outside, &t.allowed).unwrap();
+      let err =
+        open_checked(&scope, &t.allowed.join("dir/f"), &read).unwrap_err();
+      assert!(err.is_not_capable(), "{err}");
+    }
+  }
+
+  // denext: a directory opened as a root by the caller (`Deno.openRoot`) is
+  // never opened by a path again, whatever its path names later.
+  #[test]
+  fn an_open_root_is_never_opened_again() {
+    let t = tree();
+    let read = CheckedOpenOptions::new().read(true);
+    let fd = open_root(&t.allowed).unwrap();
+    let scope =
+      OpenScope::with_open_root(vec![t.allowed.clone()], fd, Vec::new())
+        .unwrap()
+        .force_component_walk(true);
+    fs::rename(&t.allowed, t.base.join("aside")).unwrap();
+    fs::create_dir_all(t.allowed.join("dir")).unwrap();
+    fs::write(t.allowed.join("dir/f"), "another").unwrap();
+    let f = open_checked(&scope, &t.allowed.join("dir/f"), &read).unwrap();
+    assert_eq!(read_all(f), "checked");
   }
 }
