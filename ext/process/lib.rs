@@ -1239,6 +1239,8 @@ fn create_command(
       }
     }
 
+    inherit_pinned_child_fds(&mut command);
+
     let detached = args.detached;
     let should_clear_groups = should_clear_supplementary_groups(uid, gid);
     if detached || !fds_to_dup.is_empty() || should_clear_groups {
@@ -1942,6 +1944,53 @@ pub fn pin_child_env_var(key: OsString, value: OsString) {
   let mut pinned = PINNED_CHILD_ENV.lock().unwrap();
   if !pinned.iter().any(|(k, _)| *k == key) {
     pinned.push((key, value));
+  }
+}
+
+/// denext: descriptors every child process this crate starts inherits
+/// (`Deno.Command`, `node:child_process`), and no other child does: they
+/// stay close-on-exec in this process, and the flag is cleared in each such
+/// child between the fork and the exec. The kernel sandbox's broker dial
+/// is kept this way, so a process started by other code (a jailed npm
+/// lifecycle script, whose confinement is narrower than this run's) never
+/// gets it.
+#[cfg(unix)]
+static PINNED_CHILD_FDS: std::sync::Mutex<Vec<i32>> =
+  std::sync::Mutex::new(Vec::new());
+
+/// Pins `fd` into every child this crate starts (see [`PINNED_CHILD_FDS`]).
+/// The caller keeps it open and close-on-exec.
+#[cfg(unix)]
+pub fn pin_child_fd(fd: i32) {
+  let mut pinned = PINNED_CHILD_FDS.lock().unwrap();
+  if !pinned.contains(&fd) {
+    pinned.push(fd);
+  }
+}
+
+/// The pinned descriptors (see [`PINNED_CHILD_FDS`]).
+#[cfg(unix)]
+pub fn pinned_child_fds() -> Vec<i32> {
+  PINNED_CHILD_FDS.lock().unwrap().clone()
+}
+
+/// Has the child of `command` keep the pinned descriptors across its exec.
+#[cfg(unix)]
+fn inherit_pinned_child_fds(command: &mut Command) {
+  let fds = pinned_child_fds();
+  if fds.is_empty() {
+    return;
+  }
+  // SAFETY: `fcntl` is async-signal-safe, and the closure allocates nothing
+  // (the list was copied before the fork)
+  unsafe {
+    command.pre_exec(move || {
+      for &fd in &fds {
+        // one that is closed by now is simply not inherited
+        libc::fcntl(fd, libc::F_SETFD, 0);
+      }
+      Ok(())
+    });
   }
 }
 

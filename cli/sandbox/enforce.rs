@@ -692,6 +692,10 @@ pub(super) fn exec_trace_supervisor(
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
   }
+  // neither the supervisor image nor the run beneath it is started with
+  // the loader variables an env file set: the run loads its env files
+  // again, as this image did
+  crate::util::env::remove_env_file_loader_variables();
   let handoff = deno_sandbox::supervise::Handoff {
     plan: plan.clone(),
     env: std::env::vars_os()
@@ -1108,8 +1112,9 @@ pub fn is_pending() -> bool {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 /// The environment the re-executed image gets: scrubbed to the plan's list
-/// when it has one, with `DENO_DIR` pinned to the one this image resolved
-/// (so both compile the same policy).
+/// when it has one, the loader variables an env file set held back, with
+/// `DENO_DIR` pinned to the one this image resolved (so both compile the
+/// same policy).
 fn reexec_env(
   plan: &EnforcePlan,
   deno_dir: Option<&Path>,
@@ -1118,7 +1123,7 @@ fn reexec_env(
 ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
   use deno_sandbox::inherit::POLICY_ENV_VAR;
   #[allow(clippy::disallowed_methods, reason = "the process's own environment")]
-  let mut env: Vec<_> = std::env::vars_os()
+  let env: Vec<_> = std::env::vars_os()
     .filter(|(k, _)| k.to_str().is_some_and(|k| plan.keeps_env(k)))
     .filter(|(k, _)| k != POLICY_ENV_VAR)
     // a dial this process inherited is not the new image's: it confines
@@ -1130,6 +1135,13 @@ fn reexec_env(
     .filter(|(k, _)| k != PRINTED_ENV_VAR)
     .filter(|(k, _)| k != COMPILE_CACHE_KEY_FD_ENV_VAR)
     .collect();
+  // the loader's and libc's variables an env file set are for the program,
+  // not for this runtime: the new image starts without them, as this one
+  // did, and sets them again where this one loaded the env files
+  let mut env = crate::util::env::hold_env_file_loader_variables(
+    env,
+    &crate::util::env::env_file_loader_variables(),
+  );
   if let Some(dir) = deno_dir {
     env.retain(|(k, _)| k != "DENO_DIR");
     env.push(("DENO_DIR".into(), dir.as_os_str().to_os_string()));
@@ -1512,6 +1524,10 @@ fn exec_supervisor(
   keep: impl Fn(i32) -> bool,
 ) -> std::io::Error {
   use std::os::unix::ffi::OsStringExt;
+  // the supervisor image is started with this process's environment: the
+  // loader variables an env file set are not for it either (`env`, the
+  // worker's, holds them back already)
+  crate::util::env::remove_env_file_loader_variables();
   let handoff = deno_sandbox::supervise::Handoff {
     plan: plan.clone(),
     env: env

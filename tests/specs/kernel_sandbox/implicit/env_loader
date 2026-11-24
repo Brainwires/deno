@@ -1,0 +1,7 @@
+GREETING=from the env file
+LD_PRELOAD=/denext-test/not-a-library.so
+LD_AUDIT=/denext-test/not-an-auditor.so
+DYLD_INSERT_LIBRARIES=/denext-test/not-a-library.dylib
+GCONV_PATH=/denext-test/gconv
+LOCPATH=/denext-test/locale
+MALLOC_PERTURB_=1

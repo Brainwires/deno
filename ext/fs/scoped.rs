@@ -328,6 +328,25 @@ pub fn symlink(scope: &OpenScope, target: &Path, link: &Path) -> FsResult<()> {
   or_broker(result, link, |broker| broker.symlink(target, link))
 }
 
+/// As [`symlink`], for a link whose target is held to a rule that depends
+/// on where the link really is: `check` gets the folder the link is made in
+/// as the kernel names it now (`None` when it can't be told: no `/proc`, a
+/// folder removed meanwhile), and the link is made in that same folder, by
+/// its descriptor, only when `check` passes.
+pub fn symlink_checked(
+  scope: &OpenScope,
+  target: &Path,
+  link: &Path,
+  check: impl FnOnce(Option<&Path>) -> FsResult<()>,
+) -> FsResult<()> {
+  let parent = parent_checked(scope, link).map_err(fs_error)?;
+  let entry = parent.real_path();
+  check(entry.as_deref().and_then(Path::parent))?;
+  or_broker(io_step(link, parent.symlink(target)), link, |broker| {
+    broker.symlink(target, link)
+  })
+}
+
 /// An open descriptor of the object at `path` (links followed) to change
 /// its metadata through: read-only, or write-only for a file that can't be
 /// read. Never waits (a FIFO).

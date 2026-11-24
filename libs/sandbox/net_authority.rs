@@ -114,6 +114,15 @@ pub trait NetDecider: Send + Sync + 'static {
   fn unix_listen(&self, path: &Path) -> bool {
     self.unix(path)
   }
+  /// Deno's file check alone (read and write) for the place a socket's
+  /// name really is: the folder that holds it as the kernel names it, with
+  /// the name, or the place a link leads to. The network grant named the
+  /// socket by the path as it was given; the file grant holds where the
+  /// socket is. A decider that doesn't tell the two apart answers as for a
+  /// connect.
+  fn unix_place(&self, path: &Path) -> bool {
+    self.unix(path)
+  }
 }
 
 /// Resolves a name to its addresses (the system's resolver, or a test's).
@@ -476,10 +485,41 @@ impl NetAuthority {
   }
 
   /// A Unix stream socket connected to `path`.
+  ///
+  /// The check names a path and a connect follows the links on it, so the
+  /// socket that is connected is the one that was checked (Linux, macOS):
+  /// the folder that holds the name is opened first and the path the kernel
+  /// gives that folder, with the name, must be in the file grant too
+  /// ([`NetDecider::unix_place`]); a name
+  /// that is a link is followed here, one hop at a time, each place it
+  /// leads to checked the same way. On Linux the socket is then pinned
+  /// (`O_PATH | O_NOFOLLOW`) and connected through its descriptor, so
+  /// nothing swapped in afterwards is followed. macOS has no such connect:
+  /// there the name is connected by the folder's real path and must still
+  /// be the same socket afterwards (a swap that puts the same socket back
+  /// in between is not seen).
   pub fn connect_unix(&self, path: &Path) -> io::Result<OwnedFd> {
     if !self.decider.unix(path) {
+      return Err(not_granted(path));
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if !is_abstract(path) {
+      let checked = path;
+      let mut path = path.to_path_buf();
+      for _ in 0..MAX_SOCKET_LINKS {
+        let held = held_name::HeldName::open(&path)?;
+        if held.real() != checked && !self.decider.unix_place(held.real()) {
+          return Err(not_granted(held.real()));
+        }
+        match held.link_target()? {
+          // a relative target is the folder's (`join` takes an absolute
+          // one as it is)
+          Some(target) => path = held.folder().join(target),
+          None => return Ok(held.connect()?.into()),
+        }
+      }
       return Err(refused(format_args!(
-        "the socket {} is not in the grant",
+        "the socket {} is behind too many links",
         path.display()
       )));
     }
@@ -488,18 +528,256 @@ impl NetAuthority {
 
   /// A Unix socket bound to `path`: a listening stream socket, or a
   /// datagram one.
+  ///
+  /// As for a connect, the folder that holds the name is opened first and
+  /// its real path, with the name, must be in the file grant (Linux, macOS). The
+  /// socket is bound by the path as given (the address it reports), and
+  /// must then be in that folder: a folder swapped in between leaves the
+  /// request refused and the socket closed (its file stays where the swap
+  /// put it).
   pub fn bind_unix(&self, path: &Path, datagram: bool) -> io::Result<OwnedFd> {
     if !self.decider.unix_listen(path) {
-      return Err(refused(format_args!(
-        "the socket {} is not in the grant",
-        path.display()
-      )));
+      return Err(not_granted(path));
     }
-    Ok(if datagram {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let held = if is_abstract(path) {
+      None
+    } else {
+      let held = held_name::HeldName::open(path)?;
+      if held.real() != path && !self.decider.unix_place(held.real()) {
+        return Err(not_granted(held.real()));
+      }
+      Some(held)
+    };
+    let socket: OwnedFd = if datagram {
       std::os::unix::net::UnixDatagram::bind(path)?.into()
     } else {
       std::os::unix::net::UnixListener::bind(path)?.into()
-    })
+    };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(held) = held
+      && !held.is_socket()
+    {
+      return Err(refused(format_args!(
+        "the socket {} was not made in the folder that was checked",
+        path.display()
+      )));
+    }
+    Ok(socket)
+  }
+}
+
+fn not_granted(path: &Path) -> io::Error {
+  refused(format_args!(
+    "the socket {} is not in the grant",
+    path.display()
+  ))
+}
+
+/// The most links a socket's name is followed through.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const MAX_SOCKET_LINKS: usize = 8;
+
+/// Whether `path` is a name in Linux's abstract namespace (a leading NUL):
+/// no file, nothing to follow.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn is_abstract(path: &Path) -> bool {
+  use std::os::unix::ffi::OsStrExt;
+  path.as_os_str().as_bytes().first() == Some(&0)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod held_name {
+  //! A socket's name in the folder that holds it, with the folder open:
+  //! what was checked is what is connected or bound.
+
+  use std::ffi::CString;
+  use std::fs::File;
+  use std::io;
+  use std::os::fd::AsRawFd;
+  use std::os::unix::ffi::OsStrExt;
+  use std::os::unix::net::UnixStream;
+  use std::path::Path;
+  use std::path::PathBuf;
+
+  use deno_net_route::refused;
+
+  pub struct HeldName {
+    dir: File,
+    name: CString,
+    /// The folder as the kernel names the open descriptor.
+    folder: PathBuf,
+    /// `folder` with the name.
+    real: PathBuf,
+  }
+
+  /// Where the open folder is, as the kernel names it.
+  #[cfg_attr(
+    target_os = "linux",
+    allow(
+      clippy::disallowed_methods,
+      reason = "the kernel's name for a descriptor this process holds"
+    )
+  )]
+  fn folder_path(dir: &File) -> io::Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+      let path =
+        std::fs::read_link(format!("/proc/self/fd/{}", dir.as_raw_fd()))?;
+      // a folder removed meanwhile reads back as `<path> (deleted)`, and
+      // nothing that isn't absolute is a place
+      if !path.is_absolute()
+        || path.as_os_str().as_bytes().ends_with(b" (deleted)")
+      {
+        return Err(io::Error::from(io::ErrorKind::NotFound));
+      }
+      Ok(path)
+    }
+    #[cfg(target_os = "macos")]
+    {
+      use std::os::unix::ffi::OsStringExt;
+      let mut buf = vec![0u8; libc::PATH_MAX as usize];
+      // SAFETY: F_GETPATH writes at most PATH_MAX bytes into the buffer
+      if unsafe {
+        libc::fcntl(dir.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr())
+      } != 0
+      {
+        return Err(io::Error::last_os_error());
+      }
+      let len = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+      buf.truncate(len);
+      Ok(PathBuf::from(std::ffi::OsString::from_vec(buf)))
+    }
+  }
+
+  impl HeldName {
+    pub fn open(path: &Path) -> io::Result<Self> {
+      let invalid = || io::Error::from(io::ErrorKind::InvalidInput);
+      let name = path.file_name().ok_or_else(invalid)?;
+      let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+      };
+      // the folder, links on the way followed: the descriptor is the place
+      let dir = File::open(parent)?;
+      if !dir.metadata()?.is_dir() {
+        return Err(io::Error::from(io::ErrorKind::NotADirectory));
+      }
+      let folder = folder_path(&dir)?;
+      let real = folder.join(name);
+      let name = CString::new(name.as_bytes()).map_err(|_| invalid())?;
+      Ok(Self {
+        dir,
+        name,
+        folder,
+        real,
+      })
+    }
+
+    pub fn real(&self) -> &Path {
+      &self.real
+    }
+
+    pub fn folder(&self) -> &Path {
+      &self.folder
+    }
+
+    /// `lstat` of the name in the open folder.
+    fn stat(&self) -> io::Result<libc::stat> {
+      // SAFETY: a zeroed stat is a valid out parameter
+      let mut st: libc::stat = unsafe { std::mem::zeroed() };
+      // SAFETY: an open descriptor, a C string and an out parameter
+      let res = unsafe {
+        libc::fstatat(
+          self.dir.as_raw_fd(),
+          self.name.as_ptr(),
+          &mut st,
+          libc::AT_SYMLINK_NOFOLLOW,
+        )
+      };
+      if res != 0 {
+        return Err(io::Error::last_os_error());
+      }
+      Ok(st)
+    }
+
+    pub fn is_socket(&self) -> bool {
+      self
+        .stat()
+        .is_ok_and(|st| st.st_mode & libc::S_IFMT == libc::S_IFSOCK)
+    }
+
+    /// The target of the name when it is a symlink.
+    pub fn link_target(&self) -> io::Result<Option<PathBuf>> {
+      use std::os::unix::ffi::OsStringExt;
+      if self.stat()?.st_mode & libc::S_IFMT != libc::S_IFLNK {
+        return Ok(None);
+      }
+      let mut buf = vec![0u8; libc::PATH_MAX as usize];
+      // SAFETY: an open descriptor, a C string and a buffer of that length
+      let len = unsafe {
+        libc::readlinkat(
+          self.dir.as_raw_fd(),
+          self.name.as_ptr(),
+          buf.as_mut_ptr() as *mut libc::c_char,
+          buf.len(),
+        )
+      };
+      if len < 0 {
+        return Err(io::Error::last_os_error());
+      }
+      buf.truncate(len as usize);
+      Ok(Some(PathBuf::from(std::ffi::OsString::from_vec(buf))))
+    }
+
+    fn changed(&self) -> io::Error {
+      refused(format_args!(
+        "the socket {} changed while it was being connected",
+        self.real.display()
+      ))
+    }
+
+    /// Connects to the socket the name is, never through a link put in
+    /// its place: the object is pinned and connected by its descriptor.
+    #[cfg(target_os = "linux")]
+    pub fn connect(&self) -> io::Result<UnixStream> {
+      use std::os::fd::FromRawFd;
+      use std::os::fd::OwnedFd;
+      // SAFETY: an open descriptor and a C string; owned once valid
+      let pinned = unsafe {
+        let fd = libc::openat(
+          self.dir.as_raw_fd(),
+          self.name.as_ptr(),
+          libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        );
+        if fd < 0 {
+          return Err(io::Error::last_os_error());
+        }
+        OwnedFd::from_raw_fd(fd)
+      };
+      // a link swapped in since the name was looked at is pinned as a link
+      if File::from(pinned.try_clone()?)
+        .metadata()?
+        .file_type()
+        .is_symlink()
+      {
+        return Err(self.changed());
+      }
+      UnixStream::connect(format!("/proc/self/fd/{}", pinned.as_raw_fd()))
+    }
+
+    /// Connects by the folder's real path, and checks that the name is
+    /// still the socket it was.
+    #[cfg(target_os = "macos")]
+    pub fn connect(&self) -> io::Result<UnixStream> {
+      let identity = |st: &libc::stat| (st.st_dev, st.st_ino, st.st_mode);
+      let before = self.stat()?;
+      let stream = UnixStream::connect(&self.real)?;
+      match self.stat() {
+        Ok(after) if identity(&after) == identity(&before) => Ok(stream),
+        _ => Err(self.changed()),
+      }
+    }
   }
 }
 
@@ -977,5 +1255,128 @@ mod tests {
       })
       .unwrap();
     refused_with(route.resolve("example.com"), "not in the network grant");
+  }
+
+  /// A grant of Unix socket paths, each matched as written.
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  fn sockets(paths: &[&Path]) -> NetAuthority {
+    let lists = Lists {
+      allow: paths
+        .iter()
+        .map(|p| (p.to_str().unwrap().to_string(), None))
+        .collect(),
+      ..Default::default()
+    };
+    authority(lists, &[])
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "a real folder with real sockets and links"
+  )]
+  fn a_unix_socket_is_connected_where_it_was_checked() {
+    use std::os::unix::fs::symlink;
+    use std::os::unix::net::UnixListener;
+    let tmp = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(tmp.path()).unwrap();
+    let granted = base.join("granted");
+    let outside = base.join("outside");
+    std::fs::create_dir(&granted).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    let inside = UnixListener::bind(granted.join("in.sock")).unwrap();
+    let other = UnixListener::bind(outside.join("out.sock")).unwrap();
+    inside.set_nonblocking(true).unwrap();
+    other.set_nonblocking(true).unwrap();
+    // a name in the granted folder that is a link to the socket outside,
+    // a folder in it that is a link to the folder outside, and a link that
+    // stays with a granted name
+    symlink(outside.join("out.sock"), granted.join("link.sock")).unwrap();
+    symlink(&outside, granted.join("dir")).unwrap();
+    symlink("in.sock", granted.join("alias.sock")).unwrap();
+    symlink("alias.sock", granted.join("alias2.sock")).unwrap();
+
+    let a = sockets(&[
+      &granted.join("in.sock"),
+      &granted.join("link.sock"),
+      &granted.join("dir/out.sock"),
+      &granted.join("alias.sock"),
+      &granted.join("alias2.sock"),
+    ]);
+    // the socket itself, and through links to a granted place
+    for name in ["in.sock", "alias.sock", "alias2.sock"] {
+      a.connect_unix(&granted.join(name)).unwrap();
+      inside.accept().unwrap();
+    }
+    // a granted name that leads to a socket outside the grant: through a
+    // link as the name, and through a link as its folder
+    for name in ["link.sock", "dir/out.sock"] {
+      refused_with(a.connect_unix(&granted.join(name)), "not in the grant");
+    }
+    assert_eq!(
+      other.accept().unwrap_err().kind(),
+      io::ErrorKind::WouldBlock,
+      "nothing reached the socket outside"
+    );
+    // a name the grant doesn't hold, and one that isn't there
+    refused_with(
+      a.connect_unix(&outside.join("out.sock")),
+      "not in the grant",
+    );
+    let missing = granted.join("missing.sock");
+    assert_eq!(
+      sockets(&[&missing])
+        .connect_unix(&missing)
+        .unwrap_err()
+        .kind(),
+      io::ErrorKind::NotFound
+    );
+    // a link to itself ends
+    symlink("loop.sock", granted.join("loop.sock")).unwrap();
+    let looped = granted.join("loop.sock");
+    refused_with(sockets(&[&looped]).connect_unix(&looped), "too many links");
+  }
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "a real folder with real sockets and links"
+  )]
+  fn a_unix_socket_is_bound_where_it_was_checked() {
+    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::fs::symlink;
+    let tmp = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(tmp.path()).unwrap();
+    let granted = base.join("granted");
+    let outside = base.join("outside");
+    std::fs::create_dir(&granted).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    symlink(&outside, granted.join("dir")).unwrap();
+
+    let a =
+      sockets(&[&granted.join("new.sock"), &granted.join("dir/new.sock")]);
+    // a granted name whose folder is a link out of the grant: nothing is
+    // made there
+    for datagram in [false, true] {
+      refused_with(
+        a.bind_unix(&granted.join("dir/new.sock"), datagram),
+        "not in the grant",
+      );
+      assert!(std::fs::symlink_metadata(outside.join("new.sock")).is_err());
+    }
+    // the granted name itself
+    let _listener = a.bind_unix(&granted.join("new.sock"), false).unwrap();
+    assert!(
+      std::fs::symlink_metadata(granted.join("new.sock"))
+        .unwrap()
+        .file_type()
+        .is_socket()
+    );
+    refused_with(
+      a.bind_unix(&granted.join("other.sock"), false),
+      "not in the grant",
+    );
   }
 }

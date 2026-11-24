@@ -204,6 +204,8 @@ pub fn offer_dial() {
   if let Ok(dial) = Dial::create(client) {
     for fd in dial.fds() {
       deno_runtime::deno_io::exclude_inherited_fd(fd);
+      // close-on-exec here; the children `Deno.Command` starts keep it
+      deno_runtime::deno_process::pin_child_fd(fd);
     }
     pin_for_children(&dial.env_value());
     let _ = OFFERED.set(dial);
@@ -245,10 +247,17 @@ pub fn adopt_inherited_dial(confined: bool) -> bool {
   let Some(value) = std::env::var_os(DIAL_ENV_VAR) else {
     return false;
   };
+  let dial = value.to_str().map(Dial::from_env_value);
+  // inherited open across this process's exec: from here on only the
+  // children this process hands the dial to get it (below), whether or not
+  // it takes the dial itself
+  if let Some(Ok(dial)) = &dial {
+    dial.keep_from_children();
+  }
   if !confined || kernel_broker::client::get().is_some() {
     return false;
   }
-  let Some(Ok(dial)) = value.to_str().map(Dial::from_env_value) else {
+  let Some(Ok(dial)) = dial else {
     // not a dial (a program in between closed it): nothing to keep
     // SAFETY: called while the process has one thread (the top of `main`)
     unsafe { std::env::remove_var(DIAL_ENV_VAR) };
@@ -256,6 +265,7 @@ pub fn adopt_inherited_dial(confined: bool) -> bool {
   };
   for fd in dial.fds() {
     deno_runtime::deno_io::exclude_inherited_fd(fd);
+    deno_runtime::deno_process::pin_child_fd(fd);
   }
   let Ok(channel) = dial.connect() else {
     return false;

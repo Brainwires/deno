@@ -40,6 +40,131 @@ fn is_denied_env_file_key(key: &OsStr) -> bool {
   }
 }
 
+/// Whether `name` is a variable the dynamic loader or libc reads when a
+/// program starts: `LD_*` and `DYLD_*`, `GCONV_PATH`, `GLIBC_TUNABLES`,
+/// `LOCPATH` and `MALLOC_*`.
+pub fn is_loader_variable(name: &OsStr) -> bool {
+  let Some(name) = name.to_str() else {
+    return false;
+  };
+  ["LD_", "DYLD_", "MALLOC_"]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
+    || matches!(name, "GCONV_PATH" | "GLIBC_TUNABLES" | "LOCPATH")
+}
+
+/// The loader variables ([`is_loader_variable`]) the env files set at
+/// startup.
+static ENV_FILE_LOADER_VARIABLES: Mutex<Vec<OsString>> = Mutex::new(Vec::new());
+
+/// The loader variables the env files set at startup, which were not in the
+/// environment this process was started with. They are for the program (it
+/// reads them, its children inherit them), not for this runtime: an image
+/// the runtime re-executes itself as is started without them and sets them
+/// again once it runs ([`hold_env_file_loader_variables`],
+/// [`restore_env_file_loader_variables`]).
+#[cfg_attr(
+  not(any(target_os = "linux", target_os = "macos")),
+  allow(dead_code, reason = "only the kernel sandbox's re-exec uses it")
+)]
+pub fn env_file_loader_variables() -> Vec<OsString> {
+  ENV_FILE_LOADER_VARIABLES.lock().unwrap().clone()
+}
+
+/// The variable that carries the held loader variables to the re-executed
+/// image: a JSON array of `[name, value]` pairs.
+pub const HELD_LOADER_VARIABLES_ENV_VAR: &str =
+  "DENO_INTERNAL_ENV_FILE_LOADER_VARIABLES";
+
+/// `env` for an image this runtime re-executes itself as: the loader
+/// variables in `from_env_files` are taken out and carried in
+/// [`HELD_LOADER_VARIABLES_ENV_VAR`] instead (a carrier already in `env` is
+/// dropped), so the image starts without them.
+#[cfg_attr(
+  not(any(target_os = "linux", target_os = "macos")),
+  allow(dead_code, reason = "only the kernel sandbox's re-exec uses it")
+)]
+pub fn hold_env_file_loader_variables(
+  env: Vec<(OsString, OsString)>,
+  from_env_files: &[OsString],
+) -> Vec<(OsString, OsString)> {
+  let mut held: Vec<(String, String)> = Vec::new();
+  let mut env: Vec<_> = env
+    .into_iter()
+    .filter(|(name, value)| {
+      if name == HELD_LOADER_VARIABLES_ENV_VAR {
+        return false;
+      }
+      if !is_loader_variable(name) || !from_env_files.contains(name) {
+        return true;
+      }
+      // an env file's names and values are text
+      if let (Some(name), Some(value)) = (name.to_str(), value.to_str()) {
+        held.push((name.to_string(), value.to_string()));
+      }
+      false
+    })
+    .collect();
+  if !held.is_empty()
+    && let Ok(carried) = deno_core::serde_json::to_string(&held)
+  {
+    env.push((HELD_LOADER_VARIABLES_ENV_VAR.into(), carried.into()));
+  }
+  env
+}
+
+/// Takes the loader variables the env files set out of this process's
+/// environment, for an image that is started with the environment as it is
+/// (the supervisor, which reads none of it).
+#[cfg_attr(
+  not(any(target_os = "linux", target_os = "macos")),
+  allow(dead_code, reason = "only the kernel sandbox's re-exec uses it")
+)]
+pub fn remove_env_file_loader_variables() {
+  let names = env_file_loader_variables();
+  if names.is_empty() {
+    return;
+  }
+  let process_env = deno_os::ProcessEnvGuard::lock();
+  for name in names {
+    process_env.remove_var(&name);
+  }
+}
+
+/// The loader variables a carrier holds (`None`: no carrier, or not one).
+/// Only loader variables are taken from it.
+fn held_loader_variables(carried: &str) -> Option<Vec<(String, String)>> {
+  let held: Vec<(String, String)> =
+    deno_core::serde_json::from_str(carried).ok()?;
+  Some(
+    held
+      .into_iter()
+      .filter(|(name, _)| is_loader_variable(OsStr::new(name)))
+      .collect(),
+  )
+}
+
+/// In the re-executed image: sets the loader variables the image before
+/// held back ([`hold_env_file_loader_variables`]), where the environment
+/// doesn't have them, and removes the carrier. Runs where the env files
+/// are loaded otherwise, before any thread starts.
+pub fn restore_env_file_loader_variables() {
+  let process_env = deno_os::ProcessEnvGuard::lock();
+  let Some(carried) = process_env.var_os(HELD_LOADER_VARIABLES_ENV_VAR) else {
+    return;
+  };
+  process_env.remove_var(HELD_LOADER_VARIABLES_ENV_VAR);
+  for (name, value) in carried
+    .to_str()
+    .and_then(held_loader_variables)
+    .unwrap_or_default()
+  {
+    if process_env.var_os(&name).is_none() {
+      process_env.set_var(&name, &value);
+    }
+  }
+}
+
 pub fn handle_denied_env_file_key(
   key: &OsStr,
   file_path: &Path,
@@ -371,6 +496,12 @@ pub fn load_env_variables_from_env_files(
       }
 
       process_env.set_var(&key_os, value);
+      if is_loader_variable(&key_os) {
+        ENV_FILE_LOADER_VARIABLES
+          .lock()
+          .unwrap()
+          .push(key_os.clone());
+      }
       loaded_keys.insert(key_os);
     }
   }
@@ -416,5 +547,107 @@ pub fn handle_dotenv_not_found(specifier: &str, log_level: Option<log::Level>) {
       colors::yellow("Warning"),
       specifier,
     )
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+    pairs
+      .iter()
+      .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+      .collect()
+  }
+
+  #[test]
+  fn loader_variables_are_named() {
+    for name in [
+      "LD_PRELOAD",
+      "LD_AUDIT",
+      "LD_LIBRARY_PATH",
+      "DYLD_INSERT_LIBRARIES",
+      "DYLD_LIBRARY_PATH",
+      "GCONV_PATH",
+      "GLIBC_TUNABLES",
+      "LOCPATH",
+      "MALLOC_CHECK_",
+      "MALLOC_ARENA_MAX",
+    ] {
+      assert!(is_loader_variable(OsStr::new(name)), "{name}");
+    }
+    for name in ["PATH", "LDFLAGS", "LD", "MY_LD_PRELOAD", "ld_preload", "TZ"] {
+      assert!(!is_loader_variable(OsStr::new(name)), "{name}");
+    }
+  }
+
+  #[test]
+  fn the_reexecuted_image_starts_without_an_env_files_loader_variables() {
+    let from_env_files: Vec<OsString> = [
+      "LD_PRELOAD",
+      "GCONV_PATH",
+      "GREETING",
+      "DYLD_INSERT_LIBRARIES",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    let out = hold_env_file_loader_variables(
+      env(&[
+        ("PATH", "/bin"),
+        ("LD_PRELOAD", "/proj/a.so"),
+        // set where the process was started, not by an env file
+        ("LD_LIBRARY_PATH", "/opt/lib"),
+        ("GCONV_PATH", "/proj/gconv"),
+        ("DYLD_INSERT_LIBRARIES", "/proj/a.dylib"),
+        // an env file's, but no loader variable
+        ("GREETING", "hello"),
+        // a carrier from somewhere else is not passed on
+        (HELD_LOADER_VARIABLES_ENV_VAR, r#"[["LD_AUDIT","/x.so"]]"#),
+      ]),
+      &from_env_files,
+    );
+    let (carriers, rest): (Vec<_>, Vec<_>) = out
+      .into_iter()
+      .partition(|(name, _)| name == HELD_LOADER_VARIABLES_ENV_VAR);
+    assert_eq!(
+      rest,
+      env(&[
+        ("PATH", "/bin"),
+        ("LD_LIBRARY_PATH", "/opt/lib"),
+        ("GREETING", "hello"),
+      ])
+    );
+    assert_eq!(carriers.len(), 1);
+    assert_eq!(
+      held_loader_variables(carriers[0].1.to_str().unwrap()).unwrap(),
+      vec![
+        ("LD_PRELOAD".to_string(), "/proj/a.so".to_string()),
+        ("GCONV_PATH".to_string(), "/proj/gconv".to_string()),
+        (
+          "DYLD_INSERT_LIBRARIES".to_string(),
+          "/proj/a.dylib".to_string()
+        ),
+      ]
+    );
+
+    // nothing held: no carrier, and one that was there is gone
+    let out = hold_env_file_loader_variables(
+      env(&[("PATH", "/bin"), (HELD_LOADER_VARIABLES_ENV_VAR, "[]")]),
+      &from_env_files,
+    );
+    assert_eq!(out, env(&[("PATH", "/bin")]));
+  }
+
+  #[test]
+  fn a_carrier_holds_loader_variables_only() {
+    assert_eq!(
+      held_loader_variables(r#"[["LD_PRELOAD","a"],["PATH","/evil"]]"#)
+        .unwrap(),
+      vec![("LD_PRELOAD".to_string(), "a".to_string())]
+    );
+    assert!(held_loader_variables("not json").is_none());
+    assert!(held_loader_variables(r#"{"LD_PRELOAD":"a"}"#).is_none());
   }
 }

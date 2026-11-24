@@ -1171,11 +1171,27 @@ fn a_dial_gives_each_asker_a_channel_of_its_own() {
   let bed = Bed::new();
   let live = start(&bed.policy());
   let dial = OwnedDial(Dial::create(&live.client).unwrap());
-  // the descriptors are for every child: none is close-on-exec
-  for fd in dial.0.fds() {
+  // the descriptors are close-on-exec: a child holds them only where the
+  // code that starts it clears the flag for it
+  let close_on_exec = |fd: i32| {
     // SAFETY: flags of an open descriptor
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    assert_eq!(flags & libc::FD_CLOEXEC, 0);
+    assert!(flags >= 0);
+    flags & libc::FD_CLOEXEC != 0
+  };
+  for fd in dial.0.fds() {
+    assert!(close_on_exec(fd), "{fd}");
+  }
+  // a process that inherited them (the flag cleared across its exec) sets
+  // it again
+  for fd in dial.0.fds() {
+    // SAFETY: flags of an open descriptor
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) }, 0);
+    assert!(!close_on_exec(fd));
+  }
+  assert!(dial.0.keep_from_children());
+  for fd in dial.0.fds() {
+    assert!(close_on_exec(fd), "{fd}");
   }
   // what a child reads from its environment names the same dial
   let value = dial.0.env_value();

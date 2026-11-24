@@ -90,6 +90,48 @@ fn canonical(ip: IpAddr) -> IpAddr {
   }
 }
 
+/// The IPv4 addresses an IPv6 address carries, where a connection to it
+/// can end up at one: the forms a translator or a tunnel turns back into
+/// IPv4 on the way.
+///
+/// - IPv4-compatible `::a.b.c.d` (deprecated, still parsed and routed by
+///   some stacks) and IPv4-translated `::ffff:0:a.b.c.d` (SIIT, RFC 7915);
+/// - NAT64: the well-known prefix `64:ff9b::/96` (RFC 6052), and in the
+///   local-use prefix `64:ff9b:1::/48` (RFC 8215) the address in the last
+///   32 bits (a `/96` inside it) and the one RFC 6052 puts after a `/48`
+///   (bits 48-63 and 72-87). Which of the two a network uses can't be told
+///   from the address, so both are taken;
+/// - 6to4 `2002:a.b.c.d::/48` (RFC 3056);
+/// - Teredo `2001::/32` (RFC 4380): the client's address, stored inverted
+///   in the last 32 bits.
+///
+/// `::` and `::1` are not here (they are IPv6's own unspecified and
+/// loopback addresses), and the IPv4-mapped form is [`canonical`]'s.
+fn embedded_v4(v6: Ipv6Addr) -> Vec<Ipv4Addr> {
+  let s = v6.segments();
+  let v4 = |hi: u16, lo: u16| Ipv4Addr::from(((hi as u32) << 16) | lo as u32);
+  if s[..6] == [0; 6] {
+    return if s[6] == 0 && s[7] <= 1 {
+      Vec::new()
+    } else {
+      vec![v4(s[6], s[7])]
+    };
+  }
+  if s[..6] == [0, 0, 0, 0, 0xffff, 0] || s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+    return vec![v4(s[6], s[7])];
+  }
+  if s[..3] == [0x64, 0xff9b, 1] {
+    return vec![v4(s[6], s[7]), v4(s[3], (s[4] << 8) | (s[5] >> 8))];
+  }
+  if s[0] == 0x2002 {
+    return vec![v4(s[1], s[2])];
+  }
+  if s[0] == 0x2001 && s[1] == 0 {
+    return vec![v4(!s[6], !s[7])];
+  }
+  Vec::new()
+}
+
 impl AddressDenyList {
   /// Parses `denyAddresses`: CIDR ranges (`10.0.0.0/8`, `fc00::/7`), single
   /// addresses (`192.0.2.1`, `::1`, `[::1]`) and the presets `"loopback"`,
@@ -135,10 +177,20 @@ impl AddressDenyList {
     self.nets.is_empty()
   }
 
-  /// The range that denies `ip`, if one does.
+  /// The range that denies `ip`, if one does: a range that holds the
+  /// address itself, or one that holds an IPv4 address it carries
+  /// ([`embedded_v4`]: NAT64, 6to4, Teredo, the IPv4-compatible and
+  /// IPv4-translated forms), which is where a connection to it can go.
   pub fn denied(&self, ip: IpAddr) -> Option<IpNet> {
     let ip = canonical(ip);
-    self.nets.iter().find(|net| net.contains(&ip)).copied()
+    let find =
+      |ip: IpAddr| self.nets.iter().find(|net| net.contains(&ip)).copied();
+    find(ip).or_else(|| match ip {
+      IpAddr::V6(v6) => embedded_v4(v6)
+        .into_iter()
+        .find_map(|v4| find(IpAddr::V4(v4))),
+      IpAddr::V4(_) => None,
+    })
   }
 
   /// `Ok` when `addr` may be connected to.
@@ -240,6 +292,67 @@ mod tests {
     assert!(deny.denied(ip("10.9.9.9")).is_some());
     let deny = list(&["::ffff:10.0.0.1"]);
     assert!(deny.denied(ip("10.0.0.1")).is_some());
+  }
+
+  #[test]
+  fn an_address_that_carries_an_ipv4_address_is_that_address_too() {
+    let deny = list(&["private", "127.0.0.0/8", "metadata"]);
+    for denied in [
+      // NAT64, the well-known prefix: 10.0.0.5, 127.0.0.1, 169.254.169.254
+      "64:ff9b::a00:5",
+      "64:ff9b::10.0.0.5",
+      "64:ff9b::7f00:1",
+      "64:ff9b::a9fe:a9fe",
+      // NAT64, the local-use prefix: in the last 32 bits, and after a /48
+      "64:ff9b:1::a00:5",
+      "64:ff9b:1:ffff:ffff:ffff:c0a8:101",
+      "64:ff9b:1:a00:0:500::",
+      // IPv4-translated (SIIT) and IPv4-compatible
+      "::ffff:0:10.0.0.5",
+      "::ffff:0:127.0.0.1",
+      "::10.0.0.5",
+      "::127.0.0.1",
+      "::169.254.169.254",
+      // 6to4
+      "2002:a00:5::1",
+      "2002:7f00:1::",
+      "2002:c0a8:101:1234::1",
+      // Teredo: the client's address inverted (10.0.0.5, 192.168.1.1)
+      "2001:0:4136:e378:8000:63bf:f5ff:fffa",
+      "2001::3f57:fefe",
+    ] {
+      assert!(deny.denied(ip(denied)).is_some(), "{denied}");
+    }
+    for allowed in [
+      // the same forms around a public address (8.8.8.8, 1.1.1.1)
+      "64:ff9b::808:808",
+      "64:ff9b:1::808:808",
+      "::ffff:0:8.8.8.8",
+      "::8.8.8.8",
+      "2002:808:808::1",
+      "2001::f7f7:f7f7",
+      // not a carrier: documentation and a public address
+      "2001:db8::a00:5",
+      "2606:4700::a00:5",
+    ] {
+      assert!(deny.denied(ip(allowed)).is_none(), "{allowed}");
+    }
+    // the error names the IPv4 range that the carried address is in
+    assert_eq!(
+      deny.denied(ip("64:ff9b::a00:5")).unwrap().to_string(),
+      "10.0.0.0/8"
+    );
+
+    // IPv6's own `::` and `::1` are not IPv4-compatible `0.0.0.0` / `0.0.0.1`
+    let deny = list(&["0.0.0.0/8"]);
+    assert!(deny.denied(ip("::")).is_none());
+    assert!(deny.denied(ip("::1")).is_none());
+    assert!(deny.denied(ip("::0.0.0.2")).is_some());
+    // a range given in a carrier's own IPv6 form still denies as written
+    let deny = list(&["64:ff9b::/96", "2002::/16"]);
+    assert!(deny.denied(ip("64:ff9b::808:808")).is_some());
+    assert!(deny.denied(ip("2002:808:808::1")).is_some());
+    assert!(deny.denied(ip("8.8.8.8")).is_none());
   }
 
   #[test]

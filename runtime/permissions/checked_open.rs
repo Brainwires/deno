@@ -286,10 +286,18 @@ pub fn intersect_roots(
 /// name. A path elsewhere that leads there through a symlink is refused by
 /// a scoped open unless the scope covers the place it leads to.
 pub fn opens_by_name(path: &Path) -> bool {
-  path.starts_with("/dev")
-    || cfg!(any(target_os = "linux", target_os = "android"))
-      && (path.starts_with("/proc") || path.starts_with("/sys"))
+  KERNEL_TREES.iter().any(|tree| path.starts_with(tree))
 }
+
+/// The kernel's own trees ([`opens_by_name`]): the places Deno's
+/// special-file check decides. A scope that reaches them without that check
+/// (a `Deno.openRoot` on `/`) takes them as denies.
+pub const KERNEL_TREES: &[&str] =
+  if cfg!(any(target_os = "linux", target_os = "android")) {
+    &["/dev", "/proc", "/sys"]
+  } else {
+    &["/dev"]
+  };
 
 /// What an open does with symlinks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

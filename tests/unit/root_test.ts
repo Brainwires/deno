@@ -320,16 +320,27 @@ Deno.test(
     };
       let stop = false;
       self.onmessage = () => { stop = true; };
+      // swaps that went all the way: the link out stood where the folder was
       let swaps = 0;
-      while (!stop && swaps < 20000) {
+      for (let tries = 0; !stop && tries < 20000; tries++) {
+        let moved = false;
         try {
           Deno.renameSync(sub, real);
+          moved = true;
           Deno.symlinkSync(outside, sub, { type: windows ? "junction" : "dir" });
           Deno.removeSync(sub);
-          Deno.renameSync(real, sub);
+          swaps++;
         } catch { /* a read holds a handle (Windows): try again */ }
-        swaps++;
-        if (swaps % 64 === 0) await new Promise((r) => setTimeout(r, 0));
+        // the folder goes back however far the swap got
+        for (let i = 0; moved && i < 1000; i++) {
+          try {
+            Deno.renameSync(real, sub);
+            moved = false;
+          } catch {
+            try { Deno.removeSync(sub); } catch { /* no link left */ }
+          }
+        }
+        if (tries % 64 === 63) await new Promise((r) => setTimeout(r, 0));
       }
       self.postMessage(swaps);
     `;
@@ -340,30 +351,40 @@ Deno.test(
     const done = new Promise<number>((resolve) => {
       worker.onmessage = (e) => resolve(e.data);
     });
+    // what each read returned, when it was not the file inside: anything
+    // here was read from outside the root
+    const escaped: string[] = [];
     let inside = 0;
+    let swaps = 0;
+    // a refusal (the link), or a read caught between the swap's steps (the
+    // name gone, a link where the walk wanted a folder, a link gone again
+    // before the walk read it: EINVAL) is fine; anything that isn't an
+    // error is not
+    const refusal = (err: unknown) => assert(err instanceof Error, String(err));
     try {
-      for (let i = 0; i < 2000; i++) {
+      // at least 2000 reads, and on until one got through to the folder
+      // (the worker stops swapping after its 20000 tries)
+      for (let i = 0; i < 2000 || (inside === 0 && i < 200000); i++) {
+        let text: string | undefined;
         try {
-          const text = await root.readTextFile("sub/secret.txt");
-          assertEquals(text, "inside", "read outside the root");
-          inside++;
+          text = await root.readTextFile("sub/secret.txt");
         } catch (err) {
-          // refused (the link), or caught between the swap's steps: the
-          // name gone, a link where the walk wanted a folder, or a link gone
-          // again before the walk read it (EINVAL). Any refusal is fine;
-          // reading the outside file is not.
-          assert(err instanceof Error, String(err));
+          refusal(err);
+        }
+        if (text === "inside") inside++;
+        else if (text !== undefined) escaped.push(text);
+        // the same race for a write: it lands in the folder or nowhere
+        try {
+          await root.writeTextFile("sub/written.txt", "from the root");
+        } catch (err) {
+          refusal(err);
         }
       }
     } finally {
       worker.postMessage("stop");
-      await done;
+      swaps = await done;
       worker.terminate();
     }
-    assertEquals(
-      Deno.readTextFileSync(join(b.outside, "secret.txt")),
-      "outside",
-    );
     // tidy the bed if the worker stopped half way through a swap
     try {
       Deno.statSync(join(b.root, "sub.real"));
@@ -372,7 +393,248 @@ Deno.test(
       } catch { /* none */ }
       Deno.renameSync(join(b.root, "sub.real"), join(b.root, "sub"));
     } catch { /* already back */ }
-    assert(inside >= 0);
+
+    assertEquals(escaped, [], "read outside the root");
+    assertEquals(
+      [...Deno.readDirSync(b.outside)].map((entry) => entry.name),
+      ["secret.txt"],
+      "wrote outside the root",
+    );
+    assertEquals(
+      Deno.readTextFileSync(join(b.outside, "secret.txt")),
+      "outside",
+    );
+    // the race was run: the link out stood in the folder's place, and the
+    // root read through the folder
+    assert(swaps > 0, "the worker never swapped the folder for the link");
+    assert(inside > 0, "no read reached the folder");
+  },
+);
+
+Deno.test(
+  { ignore: windows, permissions: { read: true, write: true } },
+  async function rootLinksStayInsideUnderScopedGrants() {
+    using b = bed();
+    const secret = join(b.outside, "secret.txt");
+    Deno.mkdirSync(join(b.root, "sub"));
+    Deno.writeTextFileSync(join(b.root, "f.txt"), "inside");
+    // links that were there before: one that stays inside (to the root
+    // itself), one that leads out
+    Deno.symlinkSync("..", join(b.root, "sub", "up"));
+    Deno.symlinkSync("../outside", join(b.root, "out"));
+    Deno.writeTextFileSync(join(b.outside, "secret.json"), '{"secret":true}');
+    Deno.symlinkSync("../outside/secret.json", join(b.root, "out.json"));
+
+    // [target, path]: each would lead out of the root when followed
+    const refused = [
+      ["../outside/secret.txt", "a"],
+      [secret, "b"],
+      ["sub/../../outside/secret.txt", "c"],
+      ["../../outside/secret.txt", "sub/d"],
+      // `sub/up` is the root: from there `..` is outside
+      ["../outside/secret.txt", "sub/up/e"],
+      // through a link that leads out
+      ["out/secret.txt", "f"],
+    ];
+    const allowed = [
+      ["f.txt", "h"],
+      ["./f.txt", "i"],
+      ["../f.txt", "sub/j"],
+      ["missing/later.txt", "k"],
+      [".", "l"],
+    ];
+    // a program with grants scoped to the root's folder: a link to anywhere
+    // takes unscoped read and write, as `Deno.symlink()` does
+    const code = `
+      const [dir, refused, allowed, json] = ${
+      JSON.stringify([
+        b.root,
+        refused,
+        allowed,
+        new URL("file://" + join(b.root, "out.json")).href,
+      ])
+    };
+      const result = { refused: [], allowed: [], byName: "", imported: "" };
+      const root = Deno.openRootSync(dir);
+      let n = 0;
+      for (const [target, path] of refused) {
+        try {
+          if (n++ % 2) root.symlinkSync(target, path);
+          else await root.symlink(target, path);
+          result.refused.push("made");
+        } catch (err) {
+          result.refused.push(err.name);
+        }
+      }
+      for (const [target, path] of allowed) {
+        try {
+          if (n++ % 2) root.symlinkSync(target, path);
+          else await root.symlink(target, path);
+          result.allowed.push("made");
+        } catch (err) {
+          result.allowed.push(err.name + ": " + err.message);
+        }
+      }
+      try {
+        Deno.symlinkSync("f.txt", dir + "/m");
+        result.byName = "made";
+      } catch (err) {
+        result.byName = err.name;
+      }
+      // a dynamic import is checked by its resolved path, as a read is
+      try {
+        const mod = await import(json, { with: { type: "json" } });
+        result.imported = JSON.stringify(mod.default);
+      } catch {
+        result.imported = "refused";
+      }
+      root.close();
+      self.postMessage(result);
+    `;
+    const worker = new Worker(
+      URL.createObjectURL(new Blob([code], { type: "text/javascript" })),
+      {
+        type: "module",
+        deno: { permissions: { read: [b.root], write: [b.root] } },
+      },
+    );
+    const result = await new Promise<{
+      refused: string[];
+      allowed: string[];
+      byName: string;
+      imported: string;
+    }>((resolve, reject) => {
+      worker.onmessage = (e) => resolve(e.data);
+      worker.onerror = (e) => reject(e.error ?? new Error(e.message));
+    });
+    worker.terminate();
+
+    assertEquals(result.refused, refused.map(() => "NotCapable"));
+    for (const [, path] of refused) {
+      assertThrows(
+        () => Deno.lstatSync(join(b.root, path)),
+        Deno.errors.NotFound,
+      );
+    }
+    assertEquals(result.allowed, allowed.map(() => "made"));
+    for (const [target, path] of allowed) {
+      assertEquals(Deno.readLinkSync(join(b.root, path)), target);
+    }
+    assertEquals(result.byName, "NotCapable");
+    assertEquals(result.imported, "refused");
+    assertEquals(Deno.readTextFileSync(secret), "outside");
+  },
+);
+
+Deno.test(
+  { ignore: windows, permissions: { read: true, write: true } },
+  async function rootHoldsTheKernelTreesToTheSpecialFileRule() {
+    // unscoped read and write, and nothing else: what `Deno.open()` asks
+    // every permission for by name, it asks for through a root too
+    using b = bed();
+    using root = await Deno.openRoot("/");
+    const beneath = (path: string) => path.replace(/^\/+/, "");
+
+    // needs no grant by name, so none here
+    assertEquals(root.readFileSync("dev/null").length, 0);
+    assertEquals((await root.readFile("dev/null")).length, 0);
+
+    const refused = ["dev/stdin"];
+    if (Deno.build.os === "linux") {
+      refused.push(
+        "proc/self/environ",
+        `proc/${Deno.pid}/environ`,
+        "proc/self/mem",
+        "proc/self/root",
+        "tmp/../proc/self/environ",
+      );
+    }
+    for (const path of refused) {
+      assertThrows(() => Deno.lstatSync("/" + path), Deno.errors.NotCapable);
+      assertThrows(
+        () => root.lstatSync(path),
+        Deno.errors.NotCapable,
+        undefined,
+        path,
+      );
+      await assertRejects(
+        () => root.lstat(path),
+        Deno.errors.NotCapable,
+        undefined,
+        path,
+      );
+      assertThrows(
+        () => root.openSync(path),
+        Deno.errors.NotCapable,
+        undefined,
+        path,
+      );
+      await assertRejects(
+        () => root.open(path, { read: true, write: true }),
+        Deno.errors.NotCapable,
+        undefined,
+        path,
+      );
+      assertThrows(
+        () => root.readFileSync(path),
+        Deno.errors.NotCapable,
+        undefined,
+        path,
+      );
+      assertThrows(
+        () => root.writeFileSync(path, new Uint8Array([0])),
+        Deno.errors.NotCapable,
+        undefined,
+        path,
+      );
+      // a link in the root that leads there is refused as a link out is
+      const link = join(b.root, path.replaceAll(/[^a-z]/g, "_"));
+      Deno.symlinkSync("/" + path.replace("tmp/../", ""), link);
+      assertThrows(
+        () => root.readFileSync(beneath(link)),
+        Deno.errors.NotCapable,
+        undefined,
+        path,
+      );
+      await assertRejects(
+        () => root.open(beneath(link), { write: true }),
+        Deno.errors.NotCapable,
+        undefined,
+        path,
+      );
+    }
+    // a folder link, with the tree's file named after it
+    Deno.symlinkSync("/dev", join(b.root, "devices"));
+    assertThrows(
+      () => root.lstatSync(beneath(join(b.root, "devices", "stdin"))),
+      Deno.errors.NotCapable,
+    );
+
+    if (Deno.build.os === "linux") {
+      assertThrows(
+        () => root.readDirSync("proc/self/fd"),
+        Deno.errors.NotCapable,
+      );
+      // nor is a root opened on one of them a way in
+      await assertRejects(
+        () => Deno.openRoot("/proc/self/root"),
+        Deno.errors.NotCapable,
+      );
+      assertThrows(
+        () => Deno.openRootSync("/proc/self/root"),
+        Deno.errors.NotCapable,
+      );
+    }
+    await assertRejects(() => Deno.openRoot("/dev"), Deno.errors.NotCapable);
+  },
+);
+
+Deno.test(
+  { ignore: windows },
+  function rootReachesTheKernelTreesWithEveryPermission() {
+    using root = Deno.openRootSync("/");
+    assertEquals(root.readFileSync("dev/null").length, 0);
+    assert(root.lstatSync("dev/stdin") !== null);
   },
 );
 

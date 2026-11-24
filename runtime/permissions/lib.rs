@@ -6506,11 +6506,34 @@ impl PermissionsContainer {
           .read
           .check(
             // a file: specifier will always go to absolute
-            &PathQueryDescriptor::new_known_absolute(Cow::Owned(path))
+            &PathQueryDescriptor::new_known_absolute(Cow::Borrowed(&path))
               .into_read(),
             Some("import()"),
           )
-          .map_err(ignored_to_not_found)
+          .map_err(ignored_to_not_found)?;
+        // denext: the module is then read by name, links followed: the
+        // resolved path is checked too, as `check_open` checks a read's
+        // (`check_resolved_path`). A path that doesn't resolve is left to
+        // the load, which reports it.
+        drop(inner);
+        if let Ok(query) = self
+          .descriptor_parser
+          .parse_path_query(Cow::Borrowed(&path))
+        {
+          let given = query.path.to_path_buf();
+          if let Ok(resolved) =
+            self.descriptor_parser.parse_special_file_descriptor(query)
+            && resolved.canonicalized
+          {
+            self.check_resolved_path(
+              &given,
+              &resolved.path,
+              OpenAccessKind::Read,
+              Some("import()"),
+            )?;
+          }
+        }
+        Ok(())
       }
       "data" => Ok(()),
       "blob" => Ok(()),
@@ -7083,6 +7106,20 @@ impl PermissionsContainer {
   ) -> Result<(), PermissionCheckError> {
     self.inner.lock().write.check_all(Some(api_name))?;
     Ok(())
+  }
+
+  /// denext: whether write access is granted everywhere, without asking
+  /// (the write twin of [`Self::query_read_all`]).
+  #[inline(always)]
+  pub fn query_write_all(&self) -> bool {
+    self.inner.lock().write.query(None) == PermissionState::Granted
+  }
+
+  /// denext: whether every permission is granted (`--allow-all`), without
+  /// an error to build: what [`Self::check_has_all_permissions`] asks.
+  #[inline(always)]
+  pub fn has_all_permissions(&self) -> bool {
+    self.inner.lock().all_granted()
   }
 
   /// Checks the creation of a symlink at `link` pointing to `target`
@@ -11112,6 +11149,71 @@ mod tests {
     perms
       .check_opened(&reader, OpenAccessKind::Read, Some("api"))
       .unwrap();
+
+    let _ = std::fs::remove_dir_all(&base);
+  }
+
+  // denext: a dynamic `file:` import is read by name, links followed: its
+  // resolved path is checked as a read's is.
+  #[cfg(unix)]
+  #[test]
+  #[allow(clippy::disallowed_methods, reason = "a real directory tree")]
+  fn check_specifier_checks_where_a_link_leads() {
+    use sys_traits::EnvTempDir;
+    set_prompter(Box::new(TestPrompter));
+    let sys = sys_traits::impls::RealSys;
+    let base = sys.env_temp_dir().unwrap().join(format!(
+      "deno_permissions_check_specifier_{}",
+      std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("allowed/denied")).unwrap();
+    std::fs::create_dir_all(base.join("outside")).unwrap();
+    let base = std::fs::canonicalize(&base).unwrap();
+    let allowed = base.join("allowed");
+    std::fs::write(allowed.join("mod.js"), "").unwrap();
+    std::fs::write(allowed.join("denied/mod.js"), "").unwrap();
+    std::fs::write(base.join("outside/secret.json"), "{}").unwrap();
+    std::os::unix::fs::symlink(
+      base.join("outside/secret.json"),
+      allowed.join("out.json"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("../outside", allowed.join("dir")).unwrap();
+    std::os::unix::fs::symlink("denied/mod.js", allowed.join("hidden.js"))
+      .unwrap();
+    std::os::unix::fs::symlink("mod.js", allowed.join("inside.js")).unwrap();
+
+    let parser =
+      runtime_descriptor_parser::RuntimePermissionDescriptorParser::new(sys);
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_read: Some(vec![allowed.display().to_string()]),
+        deny_read: Some(vec![allowed.join("denied").display().to_string()]),
+        prompt: false,
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    let perms = PermissionsContainer::new(Arc::new(parser), perms);
+    let check = |path: PathBuf, kind| {
+      perms.check_specifier(&Url::from_file_path(path).unwrap(), kind)
+    };
+    let dynamic = CheckSpecifierKind::Dynamic;
+
+    check(allowed.join("mod.js"), dynamic).unwrap();
+    // a link that stays in the scope, and a name that doesn't exist (the
+    // load reports that)
+    check(allowed.join("inside.js"), dynamic).unwrap();
+    check(allowed.join("missing.js"), dynamic).unwrap();
+    // a link out of the scope: the file, and a folder on the way
+    assert!(check(allowed.join("out.json"), dynamic).is_err());
+    assert!(check(allowed.join("dir/secret.json"), dynamic).is_err());
+    // a link into a denied folder
+    assert!(check(allowed.join("hidden.js"), dynamic).is_err());
+    // a static import is the graph's, checked when it was built
+    check(allowed.join("out.json"), CheckSpecifierKind::Static).unwrap();
 
     let _ = std::fs::remove_dir_all(&base);
   }

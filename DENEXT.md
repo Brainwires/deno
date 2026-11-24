@@ -18469,6 +18469,25 @@ where the changes are discussed.
        loads, and refuses to start if the broker doesn't serve the network
        features. `BrokerClient::request_raw` carries a kind outside the file
        operations' `Request`.
+     - A Unix socket is connected or bound where it was checked (Linux, macOS;
+       `NetAuthority::connect_unix` / `bind_unix`, `held_name`). The check names
+       a path, and a connect by that name follows whatever links are on it then,
+       so a link swapped in after the check led to another socket. The authority
+       now opens the folder that holds the name first, and the path the kernel
+       gives that folder, with the name, must pass the file check too
+       (`NetDecider::unix_place`: read and write, where the socket is; the
+       network grant named it as given). A name that is a link is followed
+       there, one hop at a time (8 at most), each place checked the same way. On
+       Linux the socket is then pinned (`O_PATH | O_NOFOLLOW`) and connected
+       through `/proc/self/fd/<n>`, so nothing put in its place afterwards is
+       followed. macOS has no connect by descriptor: the name is connected by
+       the folder's real path and must be the same socket afterwards (a swap
+       that puts the same socket back in between is not seen). A bind is by the
+       path as given (the address the socket reports) and the socket must then
+       be in the folder that was checked; if the folder was swapped in between,
+       the request is refused and the socket closed, and its file stays where
+       the swap put it. Abstract names have no file and go as before; so do
+       other Unix systems.
      - The kernel side of a broker-held network. The confined tree has no IP
        socket (`socket(2)` refused), and on Linux `listen` and `connect` are
        refused outright (`SeccompPlan::refuse_connect`): its sockets arrive
@@ -18524,7 +18543,8 @@ where the changes are discussed.
      - Tests: `deno_net_route`'s `unrouted_callers_get_nothing`,
        `a_prebound_listener_is_handed_out_again_and_again`,
        `a_refusal_is_permission_denied`; `deno_sandbox`'s
-       `net_authority::tests::{only_granted_names_resolve,
+       `net_authority::tests::{a_unix_socket_is_connected_where_it_was_checked,
+       a_unix_socket_is_bound_where_it_was_checked, only_granted_names_resolve,
        a_granted_name_cannot_be_rebound_inside,
        an_internal_answer_needs_the_address_in_the_grant,
        localhost_leads_to_loopback_only, connects_to_exactly_what_was_checked,
@@ -20726,6 +20746,23 @@ where the changes are discussed.
          anything else, and `denort` closes it before it applies its sandbox.
          Its own grant may be narrower than the one the inherited broker answers
          for.
+       - The dial is for the children the runtime starts for the program
+         (`Deno.Command`, `node:child_process`), and for what those start. Its
+         descriptors are close-on-exec (`Dial::create`), and `ext/process`
+         clears the flag in each child it starts, between the fork and the exec
+         (`deno_process::pin_child_fd`); a `deno` that inherited them sets the
+         flag again before anything else (`Dial::keep_from_children`) and pins
+         them for its own children. A process started any other way never holds
+         them. That matters for a jailed npm lifecycle script, which the CLI
+         starts itself and confines more narrowly than the run (no network,
+         writes beneath its package): with the dial it could have asked the
+         run's broker for a socket or a file in the run's grant. Native code
+         that starts a process itself hands it no dial either. Tests:
+         `kernel_broker::tests::a_dial_gives_each_asker_a_channel_of_its_own`
+         (close-on-exec, and set again by `keep_from_children`); spec
+         `kernel_sandbox::children::brokered_child_shares_supervisor` (a child
+         of `system()` holds none of the three descriptors, the `Deno.Command`
+         children and the one through `sh` still reach the broker).
        - The variable is never trusted alone: the dial is taken only where the
          kernel-verified carrier of a confined ancestor was accepted, each
          descriptor must be of its kind (a socket, two ends of a pipe) and the
@@ -21181,6 +21218,33 @@ where the changes are discussed.
        `GetFinalPathNameByHandleW`), so a root moved after it was opened writes
        only where writing is allowed; a directory that has no path any more
        refuses writes.
+     - **The kernel's own trees** (`/dev`, and on Linux `/proc` and `/sys`:
+       `checked_open::KERNEL_TREES`). By name they are held to the special-file
+       rule (`check_special_file`: `/dev/null` needs no grant,
+       `/proc/<pid>/environ` and `/proc/self/mem` every permission), and a Unix
+       root holds them to the same one (`unix::Root::scope`): a path that names
+       one of them (`proc/self/environ` in a root on `/`, anything in a root
+       opened on one) is checked as `Deno.open()` checks it, and a root the
+       trees lie beneath takes them as denies for every other path, so a link in
+       the root that leads into one is refused where it is followed, as a link
+       out of the root is. With every permission granted nothing is held back.
+       Without it, a root on `/` followed a link to `/dev/null` before and
+       refuses it now (name `dev/null` instead), and on Linux it needs `/proc`
+       mounted (the object each open reached is read back). Windows already
+       checks each path as `Deno.open` does.
+     - **A link's target.** `Deno.symlink()` takes unscoped read and write,
+       because a target is a string the kernel resolves when the link is
+       followed, by anything that opens the link's name (item 224). With both
+       unscoped `Root.symlink` stores any target, as before. With a scoped grant
+       (or a denied part) the target must stay beneath the root, the rule
+       `node:wasi`'s `path_symlink` has for a preopen
+       (`unix::Root::link_targets`, `target_stays_beneath`,
+       `scoped::symlink_checked`): it is relative, its `..` all lead it and,
+       counted from the folder the link is really made in (the kernel's name for
+       the descriptor the link is made through), don't climb above the root, and
+       where it exists, following it inside the root (outside the read and write
+       denies and the kernel's trees) is not refused. Anything else is
+       `NotCapable` and no link is made.
      - Not covered: the files a `deno compile` program embeds (a root opens the
        real file system); `..` is lexical, as the permission checks resolve it
        (`link/../x` is `x`, not `x` beside the link's target); under
@@ -21194,12 +21258,25 @@ where the changes are discussed.
        link; a recursive remove leaving a link's target alone; a link that stays
        inside followed (Unix) or refused (Windows); the root's path swapped for
        a link out after the open; a worker swapping a folder for a link out
-       while the root reads through it, never reading outside; writes need
-       write, opening needs read; `close()` and the constructor); `root::tests`
-       (relative path resolution, Windows prefixes); `root_windows::tests`
-       (files, folders, rename, a recursive remove with a read-only file,
-       junctions out and inside never followed, the root's path swapped for a
-       junction).
+       while the root reads and writes through it: the test fails on any read
+       that returns the outside file and on anything written beside it, and
+       checks that the swaps and the reads through the folder both happened;
+       writes need write, opening needs read; `close()` and the constructor;
+       with unscoped read and write only, a root on `/` refusing `dev/stdin`,
+       `proc/self/environ`, `proc/<pid>/environ`, `proc/self/mem` and
+       `proc/self/root` for `lstat`, opens, reads and writes, by name, through
+       `..`, through a file link and a folder link, a root opened on
+       `/proc/self/root` or `/dev` refused, `dev/null` read; in a worker with
+       read and write scoped to the root's folder, links whose target is
+       absolute, climbs out (also from a folder reached through a link to the
+       root), has a `..` after a name or goes through a link out refused and not
+       made, links that stay inside made); `root::tests` (relative path
+       resolution, Windows prefixes); `root::unix::tests`
+       (`the_kernel_trees_keep_the_special_file_rule`,
+       `a_link_made_with_scoped_grants_stays_beneath_the_root`);
+       `root_windows::tests` (files, folders, rename, a recursive remove with a
+       read-only file, junctions out and inside never followed, the root's path
+       swapped for a junction).
      - User-facing note: `Deno.openRoot(dir)` gives a handle whose paths can't
        leave `dir`, for untrusted names (uploads, archive entries).
      - Node tests enabled: none, because this is a Deno API.
@@ -21215,7 +21292,16 @@ where the changes are discussed.
        `fc00::/7`), `"link-local"` (`169.254.0.0/16`, `fe80::/10`) and
        `"metadata"` (`169.254.169.254`, `fd00:ec2::254`, `100.100.100.200`). An
        IPv4-mapped address (and a mapped range) is compared as the IPv4 address
-       it carries. Anything else is a `TypeError` from `createHttpClient`.
+       it carries. An IPv6 address that a translator or a tunnel turns back into
+       IPv4 is refused when the address it carries is denied too (`embedded_v4`:
+       NAT64's `64:ff9b::/96` and, in `64:ff9b:1::/48`, both the last 32 bits
+       and RFC 6052's `/48` position; 6to4 `2002::/16`; Teredo `2001::/32`,
+       inverted; IPv4-compatible `::a.b.c.d` and IPv4-translated
+       `::ffff:0:a.b.c.d`), the forms `libs/sandbox`'s `is_internal` knows:
+       before, on a NAT64 network `http://[64:ff9b::a00:5]/` reached `10.0.0.5`
+       past `"private"`. A range listed in such a form still denies as written;
+       `::` and `::1` are IPv6's own. Anything else is a `TypeError` from
+       `createHttpClient`.
      - **Addresses, not names.** `PermissionedHttpConnector` resolves a name
        itself, refuses when any address is denied, connects only to the
        addresses it checked (a client with no permissions to check now takes the
@@ -21241,7 +21327,9 @@ where the changes are discussed.
        empty list), `fetchCustomClientDenyAddressesThroughAProxy` (the proxy hop
        on loopback allowed, a denied destination and an unresolvable one refused
        before the proxy is asked), `createHttpClientDenyAddressesInvalid`;
-       `deny_addresses::tests` (parsing, presets, mapped addresses);
+       `deny_addresses::tests` (parsing, presets, mapped addresses,
+       `an_address_that_carries_an_ipv4_address_is_that_address_too`); the unit
+       test's NAT64, IPv4-translated, IPv4-compatible, 6to4 and Teredo literals;
        `dns::tests::deny_addresses_refuse_a_resolved_address_before_connecting`
        (nothing connects; with and without permissions) and
        `deny_addresses_connect_to_the_checked_addresses_only` (a resolver that
@@ -21868,6 +21956,43 @@ worker; failed on these before). - Node tests enabled: none.
        tokio's paused clock), `libs/core/runtime/jsruntime.rs`
        (`expiry_delay_tests`), `tests/unit/timers_test.ts`
        (`chainedOneMillisecondTimersTakeAboutOneMillisecond`).
+
+516. **`fix(sandbox)`: loader variables an env file sets are held back across
+     the kernel sandbox's re-exec** (cli; `cli/util/env.rs`,
+     `cli/sandbox/enforce.rs`, `cli/lib.rs`). The variables the dynamic loader
+     and libc read when a program starts (`LD_*`, `DYLD_*`, `GCONV_PATH`,
+     `GLIBC_TUNABLES`, `LOCPATH`, `MALLOC_*`) are for the program when
+     `--env-file` sets them: it reads them and its children inherit them. An
+     image the runtime re-executes itself as is started without them: the
+     confined image of `enforce`, the supervisor and the worker of `broker`, and
+     `warn`'s tracing supervisor with the run beneath it. The confined image
+     sets them again where the env files are loaded otherwise (they are carried
+     in `DENO_INTERNAL_ENV_FILE_LOADER_VARIABLES`, which is removed then; a
+     scrubbed environment keeps only the names it lists, as before), so
+     `Deno.env` and child processes see the environment they see without the
+     kernel sandbox. A variable that was in the environment the process was
+     started with is passed on as before; so is everything else an env file
+     sets.
+     - Tests: `util::env::tests` (`loader_variables_are_named`,
+       `the_reexecuted_image_starts_without_an_env_files_loader_variables`,
+       `a_carrier_holds_loader_variables_only`);
+       `tests/specs/kernel_sandbox/implicit` (`env_file_loader_variables`,
+       `env_file_loader_variables_no_sandbox`: the same output with and without
+       the kernel sandbox).
+     - Node tests enabled: none.
+
+517. **`fix(permissions)`: a dynamic `file:` import checks the resolved path, as
+     a read does** (runtime; `runtime/permissions/lib.rs`).
+     `PermissionsContainer::check_specifier` checked a dynamic `import()` of a
+     `file:` URL against the read permission by the path as written.
+     `check_open`, which every file read goes through, also checks the path with
+     its links resolved (`check_resolved_path`, items 69 and 286); a dynamic
+     import now does the same when the read permission is scoped or has a deny.
+     A path that doesn't resolve is left to the load, which reports it. Static
+     imports, and runs with unscoped read and no deny, are unchanged.
+     - Tests: `deno_permissions` `check_specifier_checks_where_a_link_leads`;
+       unit `root_test.ts` `rootLinksStayInsideUnderScopedGrants` (an import in
+       a worker with a scoped read).
      - Node tests enabled: none.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
@@ -21891,6 +22016,11 @@ them; denext's own launcher provides that environment.
 carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
+
+506-510, 511, 512, 513, 515, 517) are what the prebuilt `libdenort` carries. The
+CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
+into a packaged app's launchers) are in the branch too, but a stock CLI does not
+run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
