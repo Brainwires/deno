@@ -1,8 +1,9 @@
 // denext (DENEXT.md items 422, 425): the kernel sandbox, an opt-in preview.
 // `auto` (the default) applies nothing; `warn` reports; `enforce` applies the
 // policy on Linux and macOS (../enforce) and refuses to start elsewhere;
-// `broker` is enforce under a supervising broker (../broker); a rule only its
-// unbuilt network side could hold refuses to start. `--kernel-sandbox-report`
+// `broker` is enforce under a supervising broker (../broker), which also
+// holds the rules the kernel can't (a host-scoped network grant, a write deny
+// inside a write allow). `--kernel-sandbox-report`
 // prints the mode, the policy and its gaps, then runs the program.
 {
   "tempDir": true,

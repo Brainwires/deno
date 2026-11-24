@@ -112,7 +112,11 @@ fn run_test(test: &CollectedTest) -> TestResult {
   }
   // Its peers too: gathering on every interface of a host with many (Docker
   // bridges, VPNs) timed the channel tests out waiting for `datachannel`.
-  if test.name.ends_with("::webrtc_datachannel_test") {
+  // The codec and identity tests make peers too.
+  if test.name.ends_with("::webrtc_datachannel_test")
+    || test.name.ends_with("::webrtc_codecs_test")
+    || test.name.ends_with("::webrtc_identity_test")
+  {
     deno = deno.env("DENO_WEBRTC_LOOPBACK_ONLY", "1");
   }
   // wpt100:ice
@@ -174,8 +178,11 @@ fn run_test(test: &CollectedTest) -> TestResult {
     deno = deno.arg("--unstable-worker-options");
   }
 
-  // Some tests require the root CA cert file to be loaded.
-  if test.name.ends_with("::websocket_test") {
+  // Some tests require the root CA cert file to be loaded (denext: the
+  // identity test serves its IdP proxy over https from localhost).
+  if test.name.ends_with("::websocket_test")
+    || test.name.ends_with("::webrtc_identity_test")
+  {
     deno = deno.arg(format!(
       "--cert={}",
       util::testdata_path()

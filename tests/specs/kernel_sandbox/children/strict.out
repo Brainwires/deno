@@ -1,2 +1,3 @@
 sh builtin: exit 0
 [WILDCARD]sh starts cat: refused
+[WILDCARD]sh starts env cat: refused

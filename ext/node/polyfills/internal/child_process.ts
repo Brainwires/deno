@@ -724,14 +724,17 @@ class ChildProcess extends EventEmitter {
           this.#emitExit();
           await this.#_waitForChildStreamsToClose();
           this.#closePipes();
-          // The child is gone, so the IPC channel can never carry another
-          // message. Tear it down here rather than in `kill()`: a signal does
-          // not necessarily terminate the child, but an exit always ends the
-          // channel. Without this the read loop never observes the EOF (its
-          // pending read is unref'd, so the event loop can drain first) and
-          // 'close' would never be emitted for a killed forked child.
+          // The child is gone, so the IPC channel carries no new message,
+          // but the messages it sent before exiting may still be unread:
+          // disconnecting here dropped them, and 'close' could come before
+          // a message the child sent last (denext). As in Node, the channel
+          // ends when the read loop reaches its end, which disconnects it
+          // ('close' waits for that 'disconnect'). The pending read is
+          // unref'd, so the channel is ref'd until then: otherwise the event
+          // loop could drain first and 'close' would never be emitted for a
+          // killed forked child.
           if (this[kCanDisconnect]) {
-            this.disconnect?.();
+            this.channel?.[kControlReadToEnd]();
           }
           maybeClose(this);
           nextTick(flushStdio, this);
@@ -2392,6 +2395,7 @@ function spawnSync(
 }
 
 const kControlDisconnect = Symbol("kControlDisconnect");
+const kControlReadToEnd = Symbol("kControlReadToEnd");
 const kPendingMessages = Symbol("kPendingMessages");
 
 // controls refcounting for the IPC channel
@@ -2400,6 +2404,8 @@ class Control extends EventEmitter {
   #refs = 0;
   #refExplicitlySet = false;
   #connected = true;
+  // denext: the child exited; the channel stays ref'd until its end is read
+  #readingToEnd = false;
   [kPendingMessages] = [];
   #serialization;
   constructor(channel, serialization) {
@@ -2415,14 +2421,24 @@ class Control extends EventEmitter {
   }
 
   #unref() {
-    if (this.#connected) {
+    if (this.#connected && !this.#readingToEnd) {
       op_node_ipc_unref(this.#channel, this.#serialization === "json");
     }
   }
 
   [kControlDisconnect]() {
+    this.#readingToEnd = false;
     this.#unref();
     this.#connected = false;
+  }
+
+  // denext: the child has exited. What it sent before exiting may still be
+  // in the channel, behind the end of the channel: keep the event loop alive
+  // until the read loop reaches that end (it disconnects there, and 'close'
+  // follows 'disconnect'), whatever the counted and explicit refs say.
+  [kControlReadToEnd]() {
+    this.#ref();
+    this.#readingToEnd = true;
   }
 
   refCounted() {
@@ -3252,10 +3268,11 @@ function setupChannel(
           const cmd = internalCmdName(msg);
           if (cmd === "CLOSE") {
             // Channel closed. The end of the channel can be read after the
-            // channel was already disconnected: the child's exit disconnects
-            // it (see the exit handler), and its EOF read may resolve in the
-            // same turn, after that. A second disconnect() would throw
-            // ERR_IPC_DISCONNECTED and surface as an 'error' on the child.
+            // channel was already disconnected (a disconnect() whose EOF read
+            // resolves in the same turn, after it). A second disconnect()
+            // would throw ERR_IPC_DISCONNECTED and surface as an 'error' on
+            // the child. An exited child's channel is disconnected here
+            // (see the exit handler).
             if (target.connected) {
               target.disconnect();
             }
@@ -3309,10 +3326,19 @@ function setupChannel(
       // RST, surfacing here as ECONNRESET. Node treats an IPC channel teardown
       // as a disconnect, never as a process `error`, so we follow suit and tear
       // down cleanly instead of emitting an uncaught error.
-      if (isInterruptedError(err) || isChannelClosedError(err)) {
+      if (
+        isInterruptedError(err) || isChannelClosedError(err) ||
+        isBrokenPipeError(err)
+      ) {
         // Channel torn down from under us; release any handles awaiting an
         // ACK that will now never arrive so they don't keep us alive.
         cleanupPendingHandles();
+        // denext: a channel that went away on its own (not through
+        // disconnect()) is disconnected here, as at its end: an exited
+        // child's 'close' waits for that.
+        if (target.connected) {
+          target.disconnect();
+        }
         return;
       }
       nextTick(() => target.emit("error", err));

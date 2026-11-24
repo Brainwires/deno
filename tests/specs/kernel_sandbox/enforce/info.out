@@ -2,4 +2,6 @@
 [WILDCARD]
     "enforced": false,
     "enforcerBuilt": true,
+    "brokerBuilt": true,
+    "brokerNetBuilt": true,
 [WILDCARD]

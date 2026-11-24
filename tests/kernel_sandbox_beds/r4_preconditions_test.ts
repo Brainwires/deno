@@ -92,11 +92,12 @@ Deno.test("the evidence file's problems", () => {
       "3": { evidence: "run 2" },
       "8": { evidence: "rc", recorded: "2027-01-10", url: "x" },
     }, ids),
+    // integer-like keys iterate in ascending order, whatever the literal's
     [
-      '"9" is no precondition\'s id',
       '"1" is empty',
       '"3" has no ISO 8601 recorded date',
       '"8" has unknown keys: url',
+      '"9" is no precondition\'s id',
     ],
   );
 });

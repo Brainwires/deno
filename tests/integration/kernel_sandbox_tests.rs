@@ -10,8 +10,29 @@ use test_util::test;
 use util::TestContextBuilder;
 
 /// Whether `--kernel-sandbox=enforce` can run here (`deno info --json`), as
-/// the specs' `kernelSandboxEnforce` condition decides it.
+/// the specs' `kernelSandboxEnforce` condition decides it. On CI on Linux
+/// and macOS, which have an enforcer, a runtime that reports none fails the
+/// test instead of skipping it, unless the job sets
+/// `DENO_TEST_NO_KERNEL_ENFORCER` to the reason its machine has none.
 fn enforce_available() -> bool {
+  let available = probe_enforce();
+  if !available
+    && *util::IS_CI
+    && cfg!(any(target_os = "linux", target_os = "macos"))
+    && std::env::var_os("DENO_TEST_NO_KERNEL_ENFORCER")
+      .is_none_or(|v| v.is_empty())
+  {
+    panic!(
+      "CI on {}: --kernel-sandbox=enforce must be available, but `deno info \
+       --json` reports none. If this machine truly has no kernel enforcer, \
+       set DENO_TEST_NO_KERNEL_ENFORCER=<reason> on the job.",
+      std::env::consts::OS
+    );
+  }
+  available
+}
+
+fn probe_enforce() -> bool {
   if !cfg!(unix) {
     return false;
   }

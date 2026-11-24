@@ -67,8 +67,8 @@ expectation derived from `probes.ts` and diffs the output against it; a probe
 that is `open` where its cell says `kernel` is an escape.
 
 `--expect=enforce` runs host.ts under `--kernel-sandbox=enforce` in the
-configurations the kernel sandbox can hold (a name in `--allow-net` needs the
-broker, which isn't built yet): `files` (`--allow-read/write/ffi=<work>`, no
+configurations the kernel sandbox holds by itself (a name in `--allow-net` is
+held by the broker: the `net-host` configurations below): `files` (`--allow-read/write/ffi=<work>`, no
 network, no run), `net-all` (the same plus `--allow-net`), `run` (plus
 `--allow-run=<work>/probe`, the child vector) and `nested` (a run list that
 names the runtime and the launchers too). Under `--expect=enforce` a fifth
@@ -103,7 +103,11 @@ machine's column (macOS, or Linux by Landlock ABI):
 cell as coarser, Deno-only or by design. Where Linux can't hold a configuration
 exactly (`--kernel-sandbox=enforce` refuses to start), its checks come back as
 `crash` and the run fails: that is a broken expectation, not a pass. Without
-Landlock (or without an enforcer for the OS) the run is skipped with the reason.
+Landlock (or without an enforcer for the OS) the run is skipped with the reason,
+except under `CI` (unless `DENO_TEST_NO_KERNEL_ENFORCER` names why the machine
+has none), where it fails: the spec runner (`tests/specs/mod.rs`) requires an
+enforcer, port rules and the broker's network side on Linux and macOS CI legs,
+and reports `corpus_enforce` as ignored, not passed, where there is none.
 `ENOSYS` from `io_uring_setup` and `clone3` counts as held (the kernel sandbox
 answers so on purpose); the baseline turns it into `host` on a kernel that lacks
 them.

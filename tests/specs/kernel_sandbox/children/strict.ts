@@ -12,3 +12,8 @@ console.log(`sh builtin: exit ${sh("echo hi")}`);
 console.log(
   `sh starts cat: ${sh("cat inside/a.txt") === 0 ? "ok" : "refused"}`,
 );
+// an indirect start: the shell starts env (not on the list), which would
+// start cat
+console.log(
+  `sh starts env cat: ${sh("env cat inside/a.txt") === 0 ? "ok" : "refused"}`,
+);

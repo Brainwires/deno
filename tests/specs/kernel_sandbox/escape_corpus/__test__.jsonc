@@ -10,9 +10,10 @@
     },
     // --kernel-sandbox=enforce: every kernel cell held, the network none /
     // all and exec decided by the configuration, the rest as documented
-    // (expect.ts). Skipped, saying why, where no enforcer or Landlock exists.
+    // (expect.ts). Reported as ignored where no enforcer or Landlock exists;
+    // on a Linux or macOS CI leg a missing enforcer fails (../../mod.rs).
     "corpus_enforce": {
-      "if": "unix",
+      "if": "kernelSandboxEnforce",
       "args": "run -A --quiet corpus.ts --expect=enforce",
       "output": "[WILDCARD]kernel-sandbox corpus: [WILDCARD]\ncorpus: ok [WILDCARD]"
     },
