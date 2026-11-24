@@ -60,14 +60,12 @@ const {
   ArrayPrototypePush,
   ArrayPrototypeSlice,
   ArrayPrototypeSplice,
-  Error,
   Function,
   FunctionPrototypeCall,
   MapPrototypeGet,
   MapPrototypeSet,
   ObjectDefineProperty,
   ObjectGetOwnPropertyDescriptors,
-  ObjectGetOwnPropertySymbols,
   ObjectPrototypeIsPrototypeOf,
   Proxy,
   ReflectHas,
@@ -88,7 +86,6 @@ const {
   StringPrototypeTrim,
   Symbol,
   SymbolIterator,
-  SymbolPrototypeGetDescription,
   SafeRegExp,
   TypeError,
   Uint32Array,
@@ -861,45 +858,15 @@ function htmlLocalName(node) {
 // instead of a plain ancestor). So the DOM Standard's dispatch is written
 // out here, over `deno_web`'s own Event objects and listener lists. That
 // needs the Event's internal slots, which `02_event.js` keeps under
-// module-private symbols; they are read off a probe event once. If
-// `02_event.js` renames one, the bootstrap fails here rather than events
-// misbehaving quietly.
+// module-private symbols and hands to extension scripts as `eventSlots`.
 
-const eventSlots = (() => {
-  const wanted = {
-    __proto__: null,
-    "[[attributes]]": "attributes",
-    "[[canceledFlag]]": "canceled",
-    "[[stopPropagationFlag]]": "stopPropagation",
-    "[[stopImmediatePropagationFlag]]": "stopImmediatePropagation",
-    "[[inPassiveListener]]": "inPassiveListener",
-    "[[dispatched]]": "dispatched",
-    "[[path]]": "path",
-  };
-  const slots = { __proto__: null };
-  const symbols = ObjectGetOwnPropertySymbols(new Event("probe"));
-  let found = 0;
-  for (let i = 0; i < symbols.length; i++) {
-    const name = wanted[SymbolPrototypeGetDescription(symbols[i])];
-    if (name !== undefined && slots[name] === undefined) {
-      slots[name] = symbols[i];
-      found++;
-    }
-  }
-  if (found !== 7) {
-    throw new Error(
-      "deno_web_page: the internal slots of deno_web's Event have changed",
-    );
-  }
-  return slots;
-})();
-const kAttributes = eventSlots.attributes;
-const kCanceled = eventSlots.canceled;
-const kStopPropagation = eventSlots.stopPropagation;
-const kStopImmediatePropagation = eventSlots.stopImmediatePropagation;
-const kInPassiveListener = eventSlots.inPassiveListener;
-const kDispatched = eventSlots.dispatched;
-const kPath = eventSlots.path;
+const kAttributes = event.eventSlots.attributes;
+const kCanceled = event.eventSlots.canceledFlag;
+const kStopPropagation = event.eventSlots.stopPropagationFlag;
+const kStopImmediatePropagation = event.eventSlots.stopImmediatePropagationFlag;
+const kInPassiveListener = event.eventSlots.inPassiveListener;
+const kDispatched = event.eventSlots.dispatched;
+const kPath = event.eventSlots.path;
 
 const CAPTURING_PHASE = 1;
 const AT_TARGET = 2;
