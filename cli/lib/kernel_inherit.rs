@@ -847,6 +847,7 @@ impl GrantLayer {
       && all(&self.run)
       && all(&self.env)
       && all(&self.sys)
+      && all(&self.midi)
   }
 }
 
@@ -1461,6 +1462,35 @@ mod tests {
     let mut o = first.clone();
     clamp_under(&mut o, &[], &cwd, true);
     assert_eq!(o, first);
+  }
+
+  // a `deno` a deny ceiling's process starts keeps what its own flags
+  // grant, MIDI included (the ceiling's layer scopes nothing), and gains
+  // the ceiling's denies
+  #[test]
+  fn child_of_a_deny_ceiling_keeps_its_own_grants() {
+    let cwd = tmp();
+    // the parent ran without --allow-midi
+    let layer = ceiling_layer(&prompting_run(), &cwd);
+    assert_eq!(layer.midi, Some(vec![]));
+    let mut child = opts();
+    child.allow_midi = s(&["devices"]);
+    child.allow_read = s(&["a"]);
+    child.allow_sys = s(&["hostname"]);
+    let own = child.clone();
+    clamp_under(&mut child, std::slice::from_ref(&layer), &cwd, false);
+    assert_eq!(child.allow_midi, own.allow_midi);
+    assert_eq!(child.allow_read, own.allow_read);
+    assert_eq!(child.allow_sys, own.allow_sys);
+    assert_eq!(layer.deny_read.len(), 1);
+    assert_eq!(
+      child.deny_read,
+      Some(vec![layer.deny_read[0].to_string_lossy().into_owned()])
+    );
+    // what it didn't ask for it doesn't get
+    let mut plain = opts();
+    clamp_under(&mut plain, std::slice::from_ref(&layer), &cwd, false);
+    assert_eq!(plain.allow_midi, None);
   }
 
   // both images of a deny ceiling's run decide the same mode at R4 (the

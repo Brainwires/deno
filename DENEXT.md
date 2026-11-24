@@ -20595,6 +20595,25 @@ where the changes are discussed.
        The harness's marker (item 553) was not the cause: both profiles keep
        file metadata readable, inside a read deny too, so both images find the
        same marker.
+     - A ceiling's grant has MIDI unscoped too. `deny_ceiling_options` left
+       `allow_midi` as the run wrote it, so the layer a ceiling hands its
+       children refused MIDI unless the parent had `--allow-midi`, and a `deno`
+       started beneath it lost the MIDI access its own flags gave it (every
+       other grant it kept). The kernel holds no MIDI rule;
+       `GrantLayer::refuses_only_its_denies` counts it.
+     - An image a plan was handed to refuses to start unless it enforces it. Had
+       the re-executed image decided `off` or `warn` instead (any input the two
+       images decide from differing between them), it never reached
+       `enforce::prepare`, and ran under the handed-over sandbox with the plan
+       never compared with its own, the probe never measured again and the
+       module files never checked. `sandbox::check_run` now ends with
+       `kernel_sandbox::confined_image_refusal`: a process that started confined
+       by a handed-over plan (`enforce::confined_at_startup`, Linux and macOS)
+       goes on only with a mode that fails closed and that plan accepted
+       (`enforce::accepted_handed_over_plan`, set where `prepare`'s comparison
+       passes); otherwise it fails closed, naming the mode it decided. A process
+       no plan was handed to is never refused. A compiled program applies its
+       sandbox in place and has no second image.
      - Linux would need an overmount in a user namespace (Landlock needs
        no-new-privileges, and an expansion freezes folders a prompt may let the
        program write), which isn't built (`OVERMOUNT_BUILT`): each deny is a
@@ -20655,10 +20674,12 @@ where the changes are discussed.
        can_prompt_needs_prompting_on}`,
        `kernel_inherit::tests::{own_deny_ceiling_keeps_the_grant_and_the_prompt,
        prompt_is_off_outside_an_own_deny_ceiling,
-       both_images_of_a_deny_ceiling_decide_alike}`,
-       `seatbelt::tests::only_a_deny_only_plan_is_a_deny_ceiling`; specs
-       `kernel_sandbox::deny_only` (`-A` with denies: native code and a child
-       refused only the denied folder on macOS, Deno-only and no seccomp /
+       both_images_of_a_deny_ceiling_decide_alike,
+       child_of_a_deny_ceiling_keeps_its_own_grants}`,
+       `seatbelt::tests::only_a_deny_only_plan_is_a_deny_ceiling`,
+       `kernel_sandbox::tests::confined_image_runs_only_enforcing_an_accepted_plan`;
+       specs `kernel_sandbox::deny_only` (`-A` with denies: native code and a
+       child refused only the denied folder on macOS, Deno-only and no seccomp /
        no-new-privileges added on Linux, the report, the break-glass variable)
        and `kernel_sandbox::test_bench` (a native read outside the grant refused
        inside `deno test`, explicit and under `auto` at R4; coverage and JUnit

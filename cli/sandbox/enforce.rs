@@ -942,7 +942,20 @@ pub fn confined_by_a_parent() -> bool {
   }
 }
 
+/// Whether [`prepare`] accepted the plan this process started under as the
+/// one this run compiles (equal, measured, its hand-down checked).
+static ACCEPTED: std::sync::atomic::AtomicBool =
+  std::sync::atomic::AtomicBool::new(false);
+
+/// Whether this image accepted the plan handed over to it
+/// ([`prepare`]'s comparison passed). False in a process no plan was handed
+/// to.
+pub fn accepted_handed_over_plan() -> bool {
+  ACCEPTED.load(Ordering::Relaxed)
+}
+
 fn start_enforcing() {
+  ACCEPTED.store(true, Ordering::Relaxed);
   kernel_sandbox_state::set_enforcing();
   deno_core::error::set_permission_denied_note(permission_denied_note);
 }

@@ -934,7 +934,30 @@ fn policy_mode(resolution: &ModeResolution) -> KernelSandboxMode {
 /// instead of falling back to `warn`. A policy the broker can't hold either
 /// (no Landlock, a seccomp filter that can't be installed, a rule no mode
 /// holds) still falls back: a mode `auto` chose never refuses to start.
+///
+/// An image that started confined by a handed-over plan goes on only when
+/// this check ends enforcing with that plan accepted
+/// (`kernel_sandbox::confined_image_refusal`): one that decides `off` or
+/// `warn` would run under a sandbox nothing compared with this run.
 pub fn check_run(
+  cli_options: &CliOptions,
+  options: &PermissionsOptions,
+  deno_dir: Option<PathBuf>,
+  node_modules: Option<PathBuf>,
+) -> Result<ModeResolution, AnyError> {
+  let resolution = decide_run(cli_options, options, deno_dir, node_modules)?;
+  if let Some(why) = deno_lib::kernel_sandbox::confined_image_refusal(
+    enforce::confined_at_startup(),
+    resolution.mode,
+    enforce::accepted_handed_over_plan(),
+  ) {
+    bail!("{why}");
+  }
+  Ok(resolution)
+}
+
+/// [`check_run`] before its last word on an image a plan was handed to.
+fn decide_run(
   cli_options: &CliOptions,
   options: &PermissionsOptions,
   deno_dir: Option<PathBuf>,
