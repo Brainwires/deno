@@ -59,8 +59,10 @@ if (mode === "narrower") {
     .split(",").map((part) => Number(part.split(":")[0]));
   // a wait status: the exit code is its second byte
   console.log(`native child: runs: ${(system("exit 7") >> 8) === 7}`);
-  // `: <&N` fails where N is not an open descriptor
-  const held = dial.filter((fd) => system(`: <&${fd}`) === 0).length;
+  // `/dev/fd/N` exists only for an open descriptor (Linux and macOS); a
+  // redirection like `<&N` can't name one above 9 in every `sh` (dash)
+  const held = dial.filter((fd) => system(`[ -e /dev/fd/${fd} ]`) === 0)
+    .length;
   console.log(
     `native child: holds ${held} of the dial's ${dial.length} descriptors`,
   );
