@@ -44,7 +44,19 @@ impl<Tmr: ReactorTimer + 'static> MutableSleep<Tmr> {
     self.wake_state.external_waker.register(cx.waker());
 
     if self.wake_state.ready.swap(false, Ordering::AcqRel) {
-      return Poll::Ready(());
+      // The timer woke us, which it may do before its deadline (the tokio
+      // reactor sets the wheel within the deadline's millisecond): it is due
+      // when it completes, and polling it again waits (registered) if not.
+      let sleep = unsafe { self.sleep.get().as_mut().unwrap_unchecked() };
+      let Some(sleep) = sleep else {
+        return Poll::Ready(());
+      };
+      if Pin::new(sleep)
+        .poll(&mut Context::from_waker(&self.internal_waker))
+        .is_ready()
+      {
+        return Poll::Ready(());
+      }
     }
 
     // We do a manual deadline check here. The timer wheel may not immediately

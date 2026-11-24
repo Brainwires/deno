@@ -2157,40 +2157,16 @@
       "ignore": true,
       "reason": "Node.js snapshot/heap profiling features (--build-snapshot, --heap-prof, --heapsnapshot-near-heap-limit) are not implemented in Deno"
     },
-    "parallel/test-heap-prof-basic.js": {
-      "timeoutMs": 30000,
-      "reason": "Runs common/prof.js's workload: 256 chained setTimeout(fn, 1) calls, each bounded below by the OS timer tick (~15.6 ms on Windows, coarser in the Windows ARM VM; Node pays it too), so ~4.4 s on Windows x64 and ~9.5 s on the Windows ARM VM against the 10 s default"
-    },
-    "parallel/test-heap-prof-dir-absolute.js": {
-      "timeoutMs": 30000,
-      "reason": "Runs common/prof.js's workload: 256 chained setTimeout(fn, 1) calls, each bounded below by the OS timer tick (~15.6 ms on Windows, coarser in the Windows ARM VM; Node pays it too), so ~4.4 s on Windows x64 and ~9.5 s on the Windows ARM VM against the 10 s default"
-    },
-    "parallel/test-heap-prof-dir-name.js": {
-      "timeoutMs": 30000,
-      "reason": "Runs common/prof.js's workload: 256 chained setTimeout(fn, 1) calls, each bounded below by the OS timer tick (~15.6 ms on Windows, coarser in the Windows ARM VM; Node pays it too), so ~4.4 s on Windows x64 and ~9.5 s on the Windows ARM VM against the 10 s default"
-    },
-    "parallel/test-heap-prof-dir-relative.js": {
-      "timeoutMs": 30000,
-      "reason": "Runs common/prof.js's workload: 256 chained setTimeout(fn, 1) calls, each bounded below by the OS timer tick (~15.6 ms on Windows, coarser in the Windows ARM VM; Node pays it too), so ~4.4 s on Windows x64 and ~9.5 s on the Windows ARM VM against the 10 s default"
-    },
+    "parallel/test-heap-prof-basic.js": {},
+    "parallel/test-heap-prof-dir-absolute.js": {},
+    "parallel/test-heap-prof-dir-name.js": {},
+    "parallel/test-heap-prof-dir-relative.js": {},
     "parallel/test-heap-prof-exec-argv.js": {},
-    "parallel/test-heap-prof-exit.js": {
-      "timeoutMs": 30000,
-      "reason": "Runs common/prof.js's workload: 256 chained setTimeout(fn, 1) calls, each bounded below by the OS timer tick (~15.6 ms on Windows, coarser in the Windows ARM VM; Node pays it too), so ~4.4 s on Windows x64 and ~9.5 s on the Windows ARM VM against the 10 s default"
-    },
-    "parallel/test-heap-prof-interval.js": {
-      "timeoutMs": 30000,
-      "reason": "Runs common/prof.js's workload: 256 chained setTimeout(fn, 1) calls, each bounded below by the OS timer tick (~15.6 ms on Windows, coarser in the Windows ARM VM; Node pays it too), so ~4.4 s on Windows x64 and ~9.5 s on the Windows ARM VM against the 10 s default"
-    },
+    "parallel/test-heap-prof-exit.js": {},
+    "parallel/test-heap-prof-interval.js": {},
     "parallel/test-heap-prof-invalid-args.js": {},
-    "parallel/test-heap-prof-loop-drained.js": {
-      "timeoutMs": 30000,
-      "reason": "Runs common/prof.js's workload: 256 chained setTimeout(fn, 1) calls, each bounded below by the OS timer tick (~15.6 ms on Windows, coarser in the Windows ARM VM; Node pays it too), so ~4.4 s on Windows x64 and ~9.5 s on the Windows ARM VM against the 10 s default"
-    },
-    "parallel/test-heap-prof-name.js": {
-      "timeoutMs": 30000,
-      "reason": "Runs common/prof.js's workload: 256 chained setTimeout(fn, 1) calls, each bounded below by the OS timer tick (~15.6 ms on Windows, coarser in the Windows ARM VM; Node pays it too), so ~4.4 s on Windows x64 and ~9.5 s on the Windows ARM VM against the 10 s default"
-    },
+    "parallel/test-heap-prof-loop-drained.js": {},
+    "parallel/test-heap-prof-name.js": {},
     "parallel/test-heap-prof-sigint.js": {
       "windows": false,
       "reason": "Windows: process.kill(process.pid, 'SIGINT') ends the process at once (TerminateProcess), so the heap profile is never written"
