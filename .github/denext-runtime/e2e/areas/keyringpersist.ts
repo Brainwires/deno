@@ -86,7 +86,15 @@ class Keyring {
         Deno.kill(pid, "SIGTERM");
       } catch { /* gone */ }
     }
-    for (let i = 0; i < 100 && await this.ownerPid(); i++) {
+    // Gone means the process has exited, not only that it gave the name
+    // up: a daemon that is still shutting down answers on its control
+    // socket, and the next one started on the same files defers to it and
+    // exits ("another secret service is running").
+    for (
+      let i = 0;
+      i < 100 && (await this.ownerPid() || (pid && await alive(pid)));
+      i++
+    ) {
       await new Promise((r) => setTimeout(r, 100));
     }
     if (this.child) {
@@ -97,7 +105,33 @@ class Keyring {
 
   /** Restart it; true when its default collection then reads `unlocked`. */
   async restart(unlocked: boolean): Promise<boolean> {
-    await this.stop();
+    const want = unlocked ? "b false" : "b true";
+    let state = "";
+    // A daemon that finds another secret service exits at once; start it
+    // again (the other one is stopped first) rather than fail the step.
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await this.stop();
+      const exited = this.spawn(unlocked);
+      const w = this.child!.stdin.getWriter();
+      if (unlocked) await w.write(new TextEncoder().encode(PASSWORD));
+      await w.close().catch(() => {});
+      for (let i = 0; i < 100 && !exited.done; i++) {
+        state = await this.locked();
+        if (state === want) return true;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      if (!exited.done) break;
+      log(
+        `  keyring: the daemon exited at start (attempt ${attempt}), Locked is "${state}"`,
+      );
+    }
+    log(`  keyring: Locked is "${state}", wanted "${want}"`);
+    return false;
+  }
+
+  /** Starts a daemon on this keyring's files; `done` turns true when it
+   * exits. */
+  spawn(unlocked: boolean): { done: boolean } {
     const args = ["--foreground", "--components=secrets"];
     if (unlocked) args.push("--unlock");
     this.child = new Deno.Command("gnome-keyring-daemon", {
@@ -110,17 +144,20 @@ class Keyring {
       stdout: "null",
       stderr: "null",
     }).spawn();
-    const w = this.child.stdin.getWriter();
-    if (unlocked) await w.write(new TextEncoder().encode(PASSWORD));
-    await w.close();
-    const want = unlocked ? "b false" : "b true";
-    let state = "";
-    for (let i = 0; i < 100; i++) {
-      state = await this.locked();
-      if (state === want) return true;
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    log(`  keyring: Locked is "${state}", wanted "${want}"`);
+    const exited = { done: false };
+    this.child.status.then(() => exited.done = true, () => exited.done = true);
+    return exited;
+  }
+}
+
+/** Whether `pid` is a live process (a zombie, already exited, isn't). */
+async function alive(pid: number): Promise<boolean> {
+  try {
+    const stat = await Deno.readTextFile(`/proc/${pid}/stat`);
+    // The state follows the parenthesised command name.
+    const state = stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3);
+    return state !== "Z" && state !== "X";
+  } catch {
     return false;
   }
 }
