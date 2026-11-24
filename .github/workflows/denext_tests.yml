@@ -406,6 +406,17 @@ jobs:
       - name: toolchain_info_test.py
         if: runner.os == 'Linux'
         run: python3 -I .github/denext-runtime/toolchain_info_test.py
+      # The release tooling's own tests: the R4 preconditions and soak
+      # counters (tests/kernel_sandbox_beds) and tools/denext's flake hunt and
+      # targeted test helpers. Pure logic, no network but jsr:@std.
+      - name: release tooling tests
+        if: runner.os == 'Linux'
+        run: >-
+          deno test --no-prompt --allow-read --allow-write --allow-env
+          tests/kernel_sandbox_beds/r4_preconditions_test.ts
+          tests/kernel_sandbox_beds/soak_test.ts
+          tools/denext/flake_hunt_test.ts
+          tools/denext/targeted_test_test.ts
       - name: lint.js
         env:
           GITHUB_TOKEN: ${{ github.token }}
