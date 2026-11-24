@@ -1533,7 +1533,7 @@
         "kernelSandbox": {
           "type": "string",
           "enum": ["off", "warn", "auto", "enforce", "broker"],
-          "description": "The kernel sandbox mode for every run in this project (preview; --kernel-sandbox overrides it). \"auto\" (the default) applies nothing yet and reports what it would apply; \"warn\" only reports; \"enforce\" applies the policy on Linux and macOS and refuses to start when a rule can't be held by the OS (and on other systems); \"broker\" will add a supervising process for the rules only it can hold, and refuses to start until it is built in; \"off\" disables the kernel layer. Not a permission set."
+          "description": "The kernel sandbox mode for every run in this project (preview; --kernel-sandbox overrides it). \"auto\" (the default) applies nothing yet and reports what it would apply; \"warn\" only reports; \"enforce\" applies the policy on Linux and macOS and refuses to start when a rule can't be held by the OS (and on other systems); \"broker\" runs the program under a supervising process that holds the rules only it can (Linux and macOS; \"enforce\" uses it for those rules too, a host-scoped network grant among them); \"off\" disables the kernel layer. Not a permission set."
         }
       },
       "additionalProperties": { "$ref": "#/$defs/permissionSet" }

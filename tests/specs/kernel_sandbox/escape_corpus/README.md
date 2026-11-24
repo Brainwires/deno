@@ -67,8 +67,8 @@ expectation derived from `probes.ts` and diffs the output against it; a probe
 that is `open` where its cell says `kernel` is an escape.
 
 `--expect=enforce` runs host.ts under `--kernel-sandbox=enforce` in the
-configurations the kernel sandbox can hold (a name in `--allow-net` needs the
-broker, which isn't built yet): `files` (`--allow-read/write/ffi=<work>`, no
+configurations the kernel sandbox holds by itself (a name in `--allow-net` is
+held by the broker: the `net-host` configurations below): `files` (`--allow-read/write/ffi=<work>`, no
 network, no run), `net-all` (the same plus `--allow-net`), `run` (plus
 `--allow-run=<work>/probe`, the child vector) and `nested` (a run list that
 names the runtime and the launchers too). Under `--expect=enforce` a fifth
