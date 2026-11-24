@@ -422,6 +422,8 @@ Deno.test(
     // itself), one that leads out
     Deno.symlinkSync("..", join(b.root, "sub", "up"));
     Deno.symlinkSync("../outside", join(b.root, "out"));
+    Deno.writeTextFileSync(join(b.outside, "secret.json"), '{"secret":true}');
+    Deno.symlinkSync("../outside/secret.json", join(b.root, "out.json"));
 
     // [target, path]: each would lead out of the root when followed
     const refused = [
@@ -444,10 +446,15 @@ Deno.test(
     // a program with grants scoped to the root's folder: a link to anywhere
     // takes unscoped read and write, as `Deno.symlink()` does
     const code = `
-      const [dir, refused, allowed] = ${
-      JSON.stringify([b.root, refused, allowed])
+      const [dir, refused, allowed, json] = ${
+      JSON.stringify([
+        b.root,
+        refused,
+        allowed,
+        new URL("file://" + join(b.root, "out.json")).href,
+      ])
     };
-      const result = { refused: [], allowed: [], byName: "" };
+      const result = { refused: [], allowed: [], byName: "", imported: "" };
       const root = Deno.openRootSync(dir);
       let n = 0;
       for (const [target, path] of refused) {
@@ -474,6 +481,13 @@ Deno.test(
       } catch (err) {
         result.byName = err.name;
       }
+      // a dynamic import is checked by its resolved path, as a read is
+      try {
+        const mod = await import(json, { with: { type: "json" } });
+        result.imported = JSON.stringify(mod.default);
+      } catch {
+        result.imported = "refused";
+      }
       root.close();
       self.postMessage(result);
     `;
@@ -488,6 +502,7 @@ Deno.test(
       refused: string[];
       allowed: string[];
       byName: string;
+      imported: string;
     }>((resolve, reject) => {
       worker.onmessage = (e) => resolve(e.data);
       worker.onerror = (e) => reject(e.error ?? new Error(e.message));
@@ -506,6 +521,7 @@ Deno.test(
       assertEquals(Deno.readLinkSync(join(b.root, path)), target);
     }
     assertEquals(result.byName, "NotCapable");
+    assertEquals(result.imported, "refused");
     assertEquals(Deno.readTextFileSync(secret), "outside");
   },
 );
