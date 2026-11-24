@@ -1,0 +1,2 @@
+save inside the grant throws NotCapable
+save outside the grant throws NotCapable

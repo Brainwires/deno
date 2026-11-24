@@ -25,8 +25,16 @@
     "output": "sys.out",
     "exitCode": 0
   }, {
+    "args": "run webview_save.js",
+    "output": "webview_save_denied.out",
+    "exitCode": 0
+  }, {
+    "args": "run --allow-write=granted webview_save.js",
+    "output": "webview_save.out",
+    "exitCode": 0
+  }, {
     "args": "run --allow-read=. files.js",
-    "output": "ffi.js files.js main.js sys.js\n",
+    "output": "ffi.js files.js main.js sys.js webview_save.js\n",
     "exitCode": 0
   }]
 }
