@@ -21180,9 +21180,11 @@ where the changes are discussed.
        link; a recursive remove leaving a link's target alone; a link that stays
        inside followed (Unix) or refused (Windows); the root's path swapped for
        a link out after the open; a worker swapping a folder for a link out
-       while the root reads through it, never reading outside; writes need
-       write, opening needs read; `close()` and the constructor; with unscoped
-       read and write only, a root on `/` refusing `dev/stdin`,
+       while the root reads and writes through it: the test fails on any read
+       that returns the outside file and on anything written beside it, and
+       checks that the swaps and the reads through the folder both happened;
+       writes need write, opening needs read; `close()` and the constructor;
+       with unscoped read and write only, a root on `/` refusing `dev/stdin`,
        `proc/self/environ`, `proc/<pid>/environ`, `proc/self/mem` and
        `proc/self/root` for `lstat`, opens, reads and writes, by name, through
        `..`, through a file link and a folder link, a root opened on

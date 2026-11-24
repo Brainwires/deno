@@ -320,16 +320,27 @@ Deno.test(
     };
       let stop = false;
       self.onmessage = () => { stop = true; };
+      // swaps that went all the way: the link out stood where the folder was
       let swaps = 0;
-      while (!stop && swaps < 20000) {
+      for (let tries = 0; !stop && tries < 20000; tries++) {
+        let moved = false;
         try {
           Deno.renameSync(sub, real);
+          moved = true;
           Deno.symlinkSync(outside, sub, { type: windows ? "junction" : "dir" });
           Deno.removeSync(sub);
-          Deno.renameSync(real, sub);
+          swaps++;
         } catch { /* a read holds a handle (Windows): try again */ }
-        swaps++;
-        if (swaps % 64 === 0) await new Promise((r) => setTimeout(r, 0));
+        // the folder goes back however far the swap got
+        for (let i = 0; moved && i < 1000; i++) {
+          try {
+            Deno.renameSync(real, sub);
+            moved = false;
+          } catch {
+            try { Deno.removeSync(sub); } catch { /* no link left */ }
+          }
+        }
+        if (tries % 64 === 63) await new Promise((r) => setTimeout(r, 0));
       }
       self.postMessage(swaps);
     `;
@@ -340,30 +351,40 @@ Deno.test(
     const done = new Promise<number>((resolve) => {
       worker.onmessage = (e) => resolve(e.data);
     });
+    // what each read returned, when it was not the file inside: anything
+    // here was read from outside the root
+    const escaped: string[] = [];
     let inside = 0;
+    let swaps = 0;
+    // a refusal (the link), or a read caught between the swap's steps (the
+    // name gone, a link where the walk wanted a folder, a link gone again
+    // before the walk read it: EINVAL) is fine; anything that isn't an
+    // error is not
+    const refusal = (err: unknown) => assert(err instanceof Error, String(err));
     try {
-      for (let i = 0; i < 2000; i++) {
+      // at least 2000 reads, and on until one got through to the folder
+      // (the worker stops swapping after its 20000 tries)
+      for (let i = 0; i < 2000 || (inside === 0 && i < 200000); i++) {
+        let text: string | undefined;
         try {
-          const text = await root.readTextFile("sub/secret.txt");
-          assertEquals(text, "inside", "read outside the root");
-          inside++;
+          text = await root.readTextFile("sub/secret.txt");
         } catch (err) {
-          // refused (the link), or caught between the swap's steps: the
-          // name gone, a link where the walk wanted a folder, or a link gone
-          // again before the walk read it (EINVAL). Any refusal is fine;
-          // reading the outside file is not.
-          assert(err instanceof Error, String(err));
+          refusal(err);
+        }
+        if (text === "inside") inside++;
+        else if (text !== undefined) escaped.push(text);
+        // the same race for a write: it lands in the folder or nowhere
+        try {
+          await root.writeTextFile("sub/written.txt", "from the root");
+        } catch (err) {
+          refusal(err);
         }
       }
     } finally {
       worker.postMessage("stop");
-      await done;
+      swaps = await done;
       worker.terminate();
     }
-    assertEquals(
-      Deno.readTextFileSync(join(b.outside, "secret.txt")),
-      "outside",
-    );
     // tidy the bed if the worker stopped half way through a swap
     try {
       Deno.statSync(join(b.root, "sub.real"));
@@ -372,7 +393,21 @@ Deno.test(
       } catch { /* none */ }
       Deno.renameSync(join(b.root, "sub.real"), join(b.root, "sub"));
     } catch { /* already back */ }
-    assert(inside >= 0);
+
+    assertEquals(escaped, [], "read outside the root");
+    assertEquals(
+      [...Deno.readDirSync(b.outside)].map((entry) => entry.name),
+      ["secret.txt"],
+      "wrote outside the root",
+    );
+    assertEquals(
+      Deno.readTextFileSync(join(b.outside, "secret.txt")),
+      "outside",
+    );
+    // the race was run: the link out stood in the folder's place, and the
+    // root read through the folder
+    assert(swaps > 0, "the worker never swapped the folder for the link");
+    assert(inside > 0, "no read reached the folder");
   },
 );
 
