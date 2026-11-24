@@ -1216,19 +1216,22 @@ mod tests {
       "/home/u/.local/share/fonts",
       "/home/u/.icons",
       "/run/user/1000/xauth",
+      // the runtime folder is read: its Wayland socket is connected to, and
+      // nothing in it is written (item 544)
+      "/run/user/1000",
     ] {
       assert!(gpui.read.contains(&p(read)), "{read}");
     }
     for write in [
       "/dev/dri",
       "/dev/nvidiactl",
-      "/run/user/1000",
       "/home/u/.cache/fontconfig",
       "/home/u/.cache/com.acme.app",
     ] {
       assert!(gpui.write.contains(&p(write)), "{write}");
     }
     for absent in [
+      "/run/user/1000",
       "/dev/snd",
       "/proc",
       "/home/u/.cache/mesa_shader_cache",
