@@ -176,6 +176,9 @@ export async function run(env: Env, rep: AreaReport) {
       `--allow-read=${dir},$DENO_DESKTOP_DATA`,
       `--allow-write=${dir},$DENO_DESKTOP_DATA`,
       "--allow-env",
+      // notifications and the secure store need it, as denext's packaging
+      // bakes for those capabilities; it reaches no file
+      "--allow-sys",
       "--allow-ffi",
       `--allow-run=${opener}`,
     ],
