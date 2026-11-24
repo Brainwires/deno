@@ -305,6 +305,59 @@ jobs:
             exit 1
           fi
 
+  # The WPT WebRTC suites against their expectation files
+  # (tests/wpt/runner/expectations/webrtc*.json): an unexpected result, a
+  # pass or a failure, fails the job (the runner's own rule; `update` writes
+  # the expectations). The Linux x64 leg only, not in a targeted run. On the
+  # leg's pool (test-runner's `wpt_webrtc` key) while it has a slot, else the
+  # image. --no-hosts: the runner proxies the WPT host names, no /etc/hosts
+  # entry; DENO_WEBRTC_LOOPBACK_ONLY: peers gather on 127.0.0.1 only. The
+  # WPT server needs Python 3.11 or newer, which ubuntu-22.04 lacks.
+  wpt-webrtc:
+    name: test wpt (webrtc)
+    needs: [build, test-runner]
+    if: ${{ !cancelled() && needs.build.result == 'success' && inputs.os == 'ubuntu-22.04' && inputs.only == '' }}
+    runs-on: ${{ fromJSON(needs.test-runner.outputs.plan || '{}').wpt_webrtc || inputs.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Configure git
+        run: git config --global core.symlinks true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          submodules: false
+      - name: Clone submodule ./tests/wpt/suite
+        run: git submodule update --init --depth=1 -- ./tests/wpt/suite
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: ${{ env.TOOLS_DENO_VERSION }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: debug-bins-${{ inputs.os }}
+      - name: Unpack binaries
+        run: |
+          set -euo pipefail
+          mkdir -p target/debug
+          tar -xf bins.tar -C target/debug
+          rm bins.tar
+          chmod +x target/debug/* || true
+          target/debug/deno --version
+      - name: WPT setup
+        run: ./tests/wpt/wpt.ts setup --no-hosts
+      - name: WPT WebRTC suites
+        env:
+          DENO_WEBRTC_LOOPBACK_ONLY: '1'
+        run: >-
+          ./tests/wpt/wpt.ts run --no-hosts --quiet --binary=target/debug/deno
+          -- webrtc webrtc-encoded-transform webrtc-extensions webrtc-ice
+          webrtc-identity webrtc-priority webrtc-stats webrtc-svc
+
   # WebRTC mDNS end to end (DENEXT.md item 370): two connections on this
   # host's LAN address, one publishing its host candidates under `.local`
   # names and the other resolving them over IPv4 multicast on port 5353. The
@@ -397,7 +450,7 @@ jobs:
           if [ "$LIBS_ONLY" != true ] && [ "$LIBS_AND_UNIT" != true ]; then suites=true; fi
           keys=()
           if [ "$OS" = ubuntu-22.04 ]; then
-            keys=(libs integration_0 integration_1 node_compat_0 node_compat_1 specs_0 specs_1 unit_node unit)
+            keys=(libs integration_0 integration_1 node_compat_0 node_compat_1 specs_0 specs_1 unit_node wpt_webrtc unit)
           elif [[ "$OS" == windows* ]]; then
             if [ "$suites" = true ]; then keys+=(specs_0 specs_1); fi
             keys+=(libs)
@@ -522,7 +575,7 @@ jobs:
       # enforcer.
       - name: Kernel sandbox integration tests (macOS)
         if: inputs.only == '' && inputs.os == 'macos-15' && matrix.suite == 'specs' && matrix.shard == '0'
-        run: cargo test -p integration_tests --test integration -- kernel_sandbox::
+        run: cargo test -p integration_tests --test integration -- 'kernel_sandbox::'
       - name: Ensure no git changes
         run: |
           if [[ -n "$(git status --porcelain)" ]]; then
