@@ -21,10 +21,15 @@
 //! remote's feedback reports as bleached).
 //!
 //! `quinn-udp` also forbids IP fragmentation on the socket (`IP_DONTFRAG` /
-//! `IP_MTU_DISCOVER` probe mode, as QUIC does): the engine's datagrams stay
-//! under its 1200-byte RTP / SCTP MTU, so this changes nothing on a working
-//! path. Linux's UDP GRO, which `quinn-udp` turns on, is turned back off: a
-//! coalesced read would need a buffer 64 datagrams long.
+//! `IPV6_DONTFRAG`, Linux's `IP_MTU_DISCOVER` probe mode, as QUIC does, whose
+//! own path MTU discovery copes with it). WebRTC has none: a datagram the
+//! engine sizes for its 1200-byte RTP / SCTP MTU grows with SRTP, a TURN
+//! header and the IP and UDP headers, and on a path whose MTU is smaller
+//! (a tunnel, a VPN) it would be dropped instead of fragmented, so the
+//! connection could connect and then carry nothing. Those options are put
+//! back as the socket had them ([`FRAGMENTATION`]). Linux's UDP GRO, which
+//! `quinn-udp` turns on, is turned back off: a coalesced read would need a
+//! buffer 64 datagrams long.
 
 use std::io;
 use std::io::IoSliceMut;
@@ -147,10 +152,146 @@ trait RawSocket: std::os::windows::io::AsSocket {}
 #[cfg(windows)]
 impl<S: std::os::windows::io::AsSocket> RawSocket for S {}
 
+/// The socket options (level, name) through which `quinn-udp` forbids IP
+/// fragmentation; [`setup`] keeps the values the socket had.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const FRAGMENTATION: &[(i32, i32)] = &[
+  (libc::IPPROTO_IP, libc::IP_MTU_DISCOVER),
+  (libc::IPPROTO_IPV6, libc::IPV6_MTU_DISCOVER),
+  (libc::IPPROTO_IPV6, libc::IPV6_DONTFRAG),
+];
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+const FRAGMENTATION: &[(i32, i32)] = &[
+  (libc::IPPROTO_IP, libc::IP_DONTFRAG),
+  (libc::IPPROTO_IPV6, libc::IPV6_DONTFRAG),
+];
+#[cfg(windows)]
+const FRAGMENTATION: &[(i32, i32)] = &[
+  (
+    windows_sys::Win32::Networking::WinSock::IPPROTO_IP,
+    windows_sys::Win32::Networking::WinSock::IP_DONTFRAGMENT,
+  ),
+  (
+    windows_sys::Win32::Networking::WinSock::IPPROTO_IPV6,
+    windows_sys::Win32::Networking::WinSock::IPV6_DONTFRAG,
+  ),
+];
+#[cfg(not(any(
+  target_os = "linux",
+  target_os = "android",
+  target_os = "macos",
+  target_os = "ios",
+  target_os = "freebsd",
+  windows
+)))]
+const FRAGMENTATION: &[(i32, i32)] = &[];
+
+/// The values of the [`FRAGMENTATION`] options on `socket`, in order (`None`
+/// for one the socket doesn't have, an IPv6 option on an IPv4 socket).
+fn fragmentation<S: RawSocket>(socket: &S) -> Vec<Option<i32>> {
+  FRAGMENTATION
+    .iter()
+    .map(|&(level, name)| get_option(socket, level, name))
+    .collect()
+}
+
+#[cfg(unix)]
+fn get_option<S: RawSocket>(socket: &S, level: i32, name: i32) -> Option<i32> {
+  use std::os::fd::AsRawFd;
+  let mut value: libc::c_int = 0;
+  let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+  // SAFETY: a valid fd for the call's duration, and a c_int buffer of the
+  // size passed.
+  let rc = unsafe {
+    libc::getsockopt(
+      socket.as_fd().as_raw_fd(),
+      level,
+      name,
+      &mut value as *mut libc::c_int as *mut libc::c_void,
+      &mut len,
+    )
+  };
+  (rc == 0).then_some(value)
+}
+
+#[cfg(unix)]
+fn set_option<S: RawSocket>(socket: &S, level: i32, name: i32, value: i32) {
+  use std::os::fd::AsRawFd;
+  // SAFETY: a valid fd for the call's duration, and a c_int value of the
+  // size passed.
+  let rc = unsafe {
+    libc::setsockopt(
+      socket.as_fd().as_raw_fd(),
+      level,
+      name,
+      &value as *const libc::c_int as *const libc::c_void,
+      std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+    )
+  };
+  if rc != 0 {
+    log::debug!(
+      "webrtc: restoring socket option {level}/{name}: {}",
+      io::Error::last_os_error()
+    );
+  }
+}
+
+#[cfg(windows)]
+fn get_option<S: RawSocket>(socket: &S, level: i32, name: i32) -> Option<i32> {
+  use std::os::windows::io::AsRawSocket;
+  let mut value: i32 = 0;
+  let mut len = std::mem::size_of::<i32>() as i32;
+  // SAFETY: a valid socket for the call's duration, and an i32 buffer of the
+  // size passed.
+  let rc = unsafe {
+    windows_sys::Win32::Networking::WinSock::getsockopt(
+      socket.as_socket().as_raw_socket() as _,
+      level,
+      name,
+      &mut value as *mut i32 as _,
+      &mut len,
+    )
+  };
+  (rc == 0).then_some(value)
+}
+
+#[cfg(windows)]
+fn set_option<S: RawSocket>(socket: &S, level: i32, name: i32, value: i32) {
+  use std::os::windows::io::AsRawSocket;
+  // SAFETY: a valid socket for the call's duration, and an i32 value of the
+  // size passed.
+  let rc = unsafe {
+    windows_sys::Win32::Networking::WinSock::setsockopt(
+      socket.as_socket().as_raw_socket() as _,
+      level,
+      name,
+      &value as *const i32 as _,
+      std::mem::size_of::<i32>() as i32,
+    )
+  };
+  if rc != 0 {
+    log::debug!(
+      "webrtc: restoring socket option {level}/{name}: {}",
+      io::Error::last_os_error()
+    );
+  }
+}
+
 /// The ECN state for `socket`, or `None` when the platform refuses part of
-/// it (logged; the socket keeps the plain path).
+/// it (logged; the socket keeps the plain path). The socket's fragmentation
+/// options are as they were before ([`FRAGMENTATION`]).
 fn setup<S: RawSocket>(socket: &S) -> Option<UdpSocketState> {
-  let state = match UdpSocketState::new(socket.into()) {
+  let fragmentation_before = fragmentation(socket);
+  let state = UdpSocketState::new(socket.into());
+  for (&(level, name), before) in FRAGMENTATION.iter().zip(fragmentation_before)
+  {
+    if let Some(value) = before
+      && get_option(socket, level, name) != Some(value)
+    {
+      set_option(socket, level, name, value);
+    }
+  }
+  let state = match state {
     Ok(state) => state,
     Err(e) => {
       log::debug!("webrtc: ECN unavailable on a socket: {e}");
@@ -203,4 +344,21 @@ pub(crate) fn supported() -> bool {
       Err(_) => cfg!(not(windows)),
     }
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  // The ECN setup leaves the socket's IP fragmentation options as they were:
+  // `quinn-udp` forbids fragmentation, which drops what a path with a small
+  // MTU would otherwise carry fragmented.
+  #[test]
+  fn setup_keeps_the_fragmentation_options() {
+    let socket =
+      std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let before = fragmentation(&socket);
+    let _ = setup(&socket);
+    assert_eq!(fragmentation(&socket), before);
+  }
 }

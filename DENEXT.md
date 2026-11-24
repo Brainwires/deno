@@ -20283,15 +20283,21 @@ where the changes are discussed.
      turns the engine's ECN on where the platform does both (Linux, Android,
      macOS, iOS, FreeBSD, and Windows with `WSARecvMsg`, which a probe socket
      checks); a socket whose setup fails keeps the plain path. `quinn-udp` also
-     forbids IP fragmentation on those sockets, as QUIC does (the engine's
-     datagrams stay under its 1200-byte MTU), and Linux's UDP GRO, which it
-     turns on, is turned back off. ICE-TCP and TURN relays carry no codepoint.
-     `media_stack()` adds `configure_congestion_control_feedback` beside GCC
-     over TWCC (kept as the congestion controller): offers carry
-     `a=rtcp-fb:<pt> ack ccfb`; a peer that doesn't answer it, as browsers don't
-     unless Chrome's field trial is on, negotiates without it and nothing is
-     marked for that stream; where both are negotiated the send history keeps
-     one record per packet, so the estimator takes each packet once.
+     forbids IP fragmentation on those sockets, as QUIC does; those options
+     (`IP_DONTFRAG` / `IPV6_DONTFRAG`, Linux's `IP_MTU_DISCOVER` /
+     `IPV6_MTU_DISCOVER`, Windows' `IP_DONTFRAGMENT`) are put back as the socket
+     had them, since WebRTC has no path MTU discovery of its own and a datagram
+     sized for the engine's 1200-byte MTU, grown by SRTP, a TURN header and the
+     IP / UDP headers, would be dropped rather than fragmented on a path with a
+     smaller MTU (test: `ecn::tests::setup_keeps_the_fragmentation_options`);
+     Linux's UDP GRO, which it turns on, is turned back off. ICE-TCP and TURN
+     relays carry no codepoint. `media_stack()` adds
+     `configure_congestion_control_feedback` beside GCC over TWCC (kept as the
+     congestion controller): offers carry `a=rtcp-fb:<pt> ack ccfb`; a peer that
+     doesn't answer it, as browsers don't unless Chrome's field trial is on,
+     negotiates without it and nothing is marked for that stream; where both are
+     negotiated the send history keeps one record per packet, so the estimator
+     takes each packet once.
      - User-facing note: offers list `ack ccfb` feedback on every codec; between
        two Deno peers (or with a browser that answers it) video and audio RTP go
        out ECT(1) on UDP, and the ECN and RFC 8888 statistics above are
