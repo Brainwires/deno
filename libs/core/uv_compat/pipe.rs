@@ -1129,7 +1129,7 @@ pub unsafe fn uv_pipe_connect(
 }
 
 /// Who serves a Windows named pipe a client is connected to (DENEXT.md item
-/// 5NN); see [`uv_pipe_server_identity`]. A `None` field could not be read:
+/// 552); see [`uv_pipe_server_identity`]. A `None` field could not be read:
 /// it is "not known", never "the same as another field".
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PipeServerIdentity {

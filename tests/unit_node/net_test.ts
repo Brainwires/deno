@@ -475,7 +475,7 @@ Deno.test("[node/net] a path server keeps accepting past four open connections",
 
 // A server socket on a local IPC path that calls end() while its client
 // says nothing: the client reads EOF and both sockets close (DENEXT.md item
-// 5NN). A Windows named pipe has no half-close; as libuv does, the end that
+// 535). A Windows named pipe has no half-close; as libuv does, the end that
 // shut down closes the pipe once the peer has been quiet for 50 ms. Before,
 // the pipe stayed open and neither side ever saw the end.
 Deno.test("[node/net] a path socket's end() reaches a quiet peer as EOF", async () => {
