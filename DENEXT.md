@@ -21360,6 +21360,58 @@ where the changes are discussed.
        `node_compat` crypto suites unchanged.
      - Node tests enabled: none.
 
+516. **`feat(cli)`: the `deno` CLI checks denext's revoked-runtimes list at
+     startup** (`cli/revocation_check.rs`, `cli/lib.rs`; code comments say item
+     5NN until the train numbers it). denext keeps a signed list of runtime
+     releases maintainers pulled after release
+     (`src/build/runtime-revocations.ts`) and checks it before it runs a pinned
+     runtime, but a `deno` that `denext runtime link` put on `PATH`, or that is
+     run directly, never asked. The CLI now reads denext's cached copy,
+     `<DENO_DIR>/denext-deno/revocations.json` (`DENO_DIR`, else the platform
+     cache folder from absolute `LOCALAPPDATA` / `XDG_CACHE_HOME` / `HOME` /
+     `USERPROFILE`, as denext's `deno-cache-dir.ts` resolves it), and when the
+     list revokes this build (component `cli`, this version, this target triple
+     or every target) prints one line to stderr naming the reason, the advisory
+     and the fixed release, with the fix (`denext runtime install`).
+     - The check is denext's: the envelope `{ signed, signature | signatures }`
+       is verified (ECDSA P-256 / SHA-256 over
+       `"denext-runtime-revocations-v1\n" + signed`, raw r‖s) against the two
+       public keys compiled in (a copy of denext's `runtime-revocation-keys.ts`)
+       before the payload is parsed. A list that expired, is dated more than a
+       day ahead (`issuedAt` or `sequence`), has a `sequence` below the floor
+       compiled in (denext's `RUNTIME_REVOCATION_MIN_SEQUENCE`, 1795192910),
+       another `schema`, or a malformed known entry is ignored; entries of
+       unknown components are skipped. Reason and advisory are printed with
+       control characters removed, so the notice stays one plain line.
+     - At most once a day per version: the CLI records the notice in
+       `revocations.noticed` beside the list (`<version>` and the Unix time).
+     - It never touches the network (denext refreshes the list), never fails and
+       never blocks: no list is one failed `open`, a list is read only up to 64
+       KiB, and any error is silence. It runs synchronously in `main` before the
+       runtime starts; `DENO_STARTUP_PHASES` shows it as
+       `after revocation check`. Only the `deno` CLI checks; `denort` and
+       compiled programs don't.
+     - Switches: `DENEXT_REVOCATION_CHECK=0` turns it off (denext's own switch);
+       `DENEXT_ALLOW_REVOKED_RUNTIME=<this version>` silences it for that
+       version; `DENEXT_REVOCATION_NOTICED` (which denext sets on the processes
+       it starts once it said the revocation) keeps a child quiet.
+       `DENO_TESTING_REVOCATION_KEYS_FILE` (a JSON array of base64 SPKI keys)
+       verifies with test keys instead, for the spec test; a notice from such a
+       list starts `warning (test keys):`.
+     - The compiled-in keys and floor are copies: rotating a key in denext, or
+       raising its floor, needs the same change here (`PUBLIC_KEYS` and
+       `MIN_SEQUENCE` in `cli/revocation_check.rs`).
+     - Tests: `revocation_check.rs` unit tests (a fresh P-256 key signs lists: a
+       hit, the `signatures` form, another key, the compiled-in keys and a
+       tampered payload, other versions / components / targets, expired,
+       future-dated and replayed lists, malformed lists and envelopes, the
+       notice line, the once-a-day marker, the cache folder);
+       `tests/specs/run/revocation_check` (a list revoking the running build,
+       signed by a test key: the notice, its once-a-day marker,
+       `DENEXT_REVOCATION_CHECK=0`, `DENEXT_REVOCATION_NOTICED`, the compiled-in
+       keys refusing it, a tampered payload).
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

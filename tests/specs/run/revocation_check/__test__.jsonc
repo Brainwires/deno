@@ -1,0 +1,64 @@
+{
+  // denext (DENEXT.md item 5NN): the CLI says, once a day, when denext's
+  // cached and signed revoked-runtimes list revokes this build
+  "tempDir": true,
+  "steps": [{
+    "args": "run --allow-read --allow-write sign.ts",
+    "output": ""
+  }, {
+    "args": ["eval", "console.log('ran')"],
+    "envs": {
+      "DENO_DIR": "deno_dir",
+      "DENO_TESTING_REVOCATION_KEYS_FILE": "keys.json"
+    },
+    "output": "notice.out"
+  }, {
+    // once a day
+    "args": ["eval", "console.log('ran')"],
+    "envs": {
+      "DENO_DIR": "deno_dir",
+      "DENO_TESTING_REVOCATION_KEYS_FILE": "keys.json"
+    },
+    "output": "ran\n"
+  }, {
+    "args": [
+      "eval",
+      "Deno.removeSync('deno_dir/denext-deno/revocations.noticed')"
+    ],
+    "output": ""
+  }, {
+    // denext's switch turns it off
+    "args": ["eval", "console.log('ran')"],
+    "envs": {
+      "DENO_DIR": "deno_dir",
+      "DENO_TESTING_REVOCATION_KEYS_FILE": "keys.json",
+      "DENEXT_REVOCATION_CHECK": "0"
+    },
+    "output": "ran\n"
+  }, {
+    // a child of a denext that said it already stays quiet
+    "args": ["eval", "console.log('ran')"],
+    "envs": {
+      "DENO_DIR": "deno_dir",
+      "DENO_TESTING_REVOCATION_KEYS_FILE": "keys.json",
+      "DENEXT_REVOCATION_NOTICED": "1"
+    },
+    "output": "ran\n"
+  }, {
+    // the compiled-in keys never verify a test key's list
+    "args": ["eval", "console.log('ran')"],
+    "envs": { "DENO_DIR": "deno_dir" },
+    "output": "ran\n"
+  }, {
+    "args": "run --allow-read --allow-write tamper.ts",
+    "output": ""
+  }, {
+    // a payload the signature does not cover is ignored
+    "args": ["eval", "console.log('ran')"],
+    "envs": {
+      "DENO_DIR": "deno_dir",
+      "DENO_TESTING_REVOCATION_KEYS_FILE": "keys.json"
+    },
+    "output": "ran\n"
+  }]
+}
