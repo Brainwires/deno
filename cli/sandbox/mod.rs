@@ -921,6 +921,13 @@ pub fn check_run(
   let mut resolution = kernel_sandbox_mode(&inputs)?;
   let report = cli_options.flags().permissions.kernel_sandbox_report
     && inputs.kind != Some(RunKind::NotARuntime);
+  // off, and no report asked for: nothing below applies. Decided before
+  // the coverage of the command is worked out (for `deno test` / `deno
+  // bench` that resolves the workspace's test options and each member's
+  // permissions, which a run with no sandbox has no use for)
+  if resolution.mode == KernelSandboxMode::Off && !report {
+    return Ok(resolution);
+  }
   // a mode `auto` chose never refuses to start (item 472): where enforce
   // can't hold the grant, the run is a warn one, and says why
   let (covered, uncovered) = coverage_with(

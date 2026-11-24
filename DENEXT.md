@@ -21600,6 +21600,18 @@ where the changes are discussed.
        root).
      - Node tests enabled: none.
 
+526. **`perf(permissions)`: `deno test` / `deno bench` with the kernel sandbox
+     off skip the sandbox's coverage check** (CLI; `cli/sandbox/mod.rs`).
+     `check_run` worked out how much of the command `enforce` covers (for
+     `test` and `bench`: the workspace's test options and every member's
+     permission options) before it returned for a run whose mode is off and
+     that asked for no report. The return now comes first; nothing else
+     changes (the result was only read for a mode `auto` chose, and for
+     `warn`'s notice).
+     - Tests: none of its own (no behaviour changes; `kernel_sandbox`'s
+       `test_bench` specs cover the modes that still compute it).
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
