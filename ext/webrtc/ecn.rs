@@ -112,18 +112,29 @@ impl EcnUdpSocket {
 
   /// Sends one datagram with `ecn` (`None`: Not-ECT) without waiting: a full
   /// send buffer is a `WouldBlock` error, as with `try_send_to`.
+  ///
+  /// A Not-ECT datagram takes the plain `send_to`: it needs no control
+  /// message (nothing sets the socket's own TOS, so it leaves as Not-ECT),
+  /// and it is what goes to addresses nobody has answered from yet, an ICE
+  /// check to every candidate the remote names. `sendmsg` to one the socket
+  /// can't send to (Linux: a loopback socket to an off-host address, port 0)
+  /// is `EINVAL`, which `quinn-udp` takes for a kernel that refuses its
+  /// control messages: it then leaves the `IP_TOS` message out of every later
+  /// IPv4 datagram of the socket, so the marks stop for good, and logs that
+  /// it halts segmentation offload. Marked datagrams (a negotiated stream's
+  /// RTP) go to the selected pair's address only, which has answered.
   pub(crate) fn try_send_to_ecn(
     &self,
     data: &[u8],
     to: SocketAddr,
     ecn: Option<EcnCodepoint>,
   ) -> io::Result<()> {
-    let Some(state) = &self.state else {
+    let (Some(state), Some(ecn)) = (&self.state, ecn.and_then(to_quinn)) else {
       return self.socket.try_send_to(data, to).map(|_| ());
     };
     let transmit = Transmit {
       destination: to,
-      ecn: ecn.and_then(to_quinn),
+      ecn: Some(ecn),
       contents: data,
       segment_size: None,
       src_ip: None,
@@ -360,5 +371,55 @@ mod tests {
     let before = fragmentation(&socket);
     let _ = setup(&socket);
     assert_eq!(fragmentation(&socket), before);
+  }
+
+  // A datagram to an address the socket can't send to (an ICE check to a
+  // candidate off this host, from a loopback socket: `EINVAL` on Linux)
+  // leaves the socket's ECN as it was: the next marked datagram still
+  // arrives marked. Through `quinn-udp` that failure turned the socket's
+  // IPv4 marks off for good.
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn a_refused_unmarked_send_keeps_the_marks() {
+    use std::net::Ipv4Addr;
+    use std::time::Duration;
+
+    let bind = || UdpSocket::bind((Ipv4Addr::LOCALHOST, 0));
+    let sender = EcnUdpSocket::new(bind().await.unwrap());
+    let receiver = EcnUdpSocket::new(bind().await.unwrap());
+    let (Some(state), Some(_)) = (&sender.state, &receiver.state) else {
+      // No per-datagram ECN here: nothing to keep.
+      return;
+    };
+    let offload = state.max_gso_segments();
+    sender.writable().await.unwrap();
+
+    // TEST-NET-3 (RFC 5737), as WPT's failing candidate. Whether the send
+    // fails is the platform's business; what it leaves behind is the test.
+    let off_host = SocketAddr::from((Ipv4Addr::new(203, 0, 113, 100), 10100));
+    let _ = sender.try_send_to_ecn(b"check", off_host, None);
+    let port_zero = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let _ = sender.try_send_to_ecn(b"check", port_zero, None);
+    assert_eq!(state.max_gso_segments(), offload);
+
+    sender.writable().await.unwrap();
+    sender
+      .try_send_to_ecn(
+        b"media",
+        receiver.local_addr().unwrap(),
+        Some(EcnCodepoint::Ect1),
+      )
+      .unwrap();
+    let mut buf = [0u8; 16];
+    let (len, from, ecn) = tokio::time::timeout(
+      Duration::from_secs(5),
+      receiver.recv_from(&mut buf),
+    )
+    .await
+    .expect("the marked datagram arrives")
+    .unwrap();
+    assert_eq!(&buf[..len], b"media");
+    assert_eq!(from, sender.local_addr().unwrap());
+    assert_eq!(ecn, Some(EcnCodepoint::Ect1));
   }
 }
