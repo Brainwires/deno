@@ -21384,7 +21384,9 @@ where the changes are discussed.
      is unchanged in kind: a wait there lasts until the next system timer tick
      (about 15.6 ms unless a process raises the timer resolution, which neither
      Node.js nor this runtime does), so a chained 1 ms timer takes a tick, as in
-     Node.js.
+     Node.js. The eight node_compat heap-prof tests that chain 256 such timers
+     (`common/prof.js`) are back on the default timeout, without the 30 s
+     `timeoutMs` they had been given for it.
      - User-facing note: chained short timers run about twice as fast on Linux
        and macOS (a `setTimeout(f, 1)` chain takes about 1 ms a hop, as in
        Node.js); no timer fires earlier than its delay.
