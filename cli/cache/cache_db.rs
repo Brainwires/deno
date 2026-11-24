@@ -377,6 +377,19 @@ impl CacheDB {
       if let Some(path) = &self.path {
         self.created.store(!path.exists(), Ordering::Relaxed);
       }
+      // denext: a database of this version that went unused long enough
+      // for another version to prune it is opened under the cache's upkeep
+      // lock, so it isn't removed while this connection opens
+      let _upkeep = match (&self.base_path, &self.path) {
+        (Some(base_path), Some(path)) => {
+          super::cache_db_files::lock_for_long_unused_open(
+            base_path,
+            path,
+            SystemTime::now(),
+          )
+        }
+        _ => None,
+      };
       match self.open_connection() {
         Ok(conn) => conn,
         Err(e) => ConnectionState::Error(e.into()),

@@ -21555,6 +21555,30 @@ where the changes are discussed.
      - Node tests enabled: none (`fs.watch` shares the watcher; behaviour is
        unchanged).
 
+524. **`fix(cache)`: pruning another version's cache database can't cross the
+     moment that version opens it** (CLI; `cli/cache/{cache_db_files,
+     cache_db}.rs`). Follow-up to the per-version cache databases: a pruning
+     pass checks that no other process holds a lock on a stale database and
+     then removes its files, and a version opening that database between the
+     two (after finding the file, before SQLite holds its locks) went on with
+     a database whose files were gone, which no later connection shares.
+     - Each cache has an upkeep lock, the file `<base>.lock` beside its
+       databases, locked by the OS (`File::try_lock` / `lock_shared`; released
+       when the handle closes or the process ends). A pruning pass holds it
+       exclusively from its directory scan to its last removal, and removes
+       nothing when it can't take it at once. A version whose own database
+       went unused for six days or more (a day short of the pruning age, so
+       there is no gap) takes it shared before it opens the connection, marks
+       the file used, and drops it once the connection is open: by then
+       SQLite's own locks show, and the file is no longer stale. A database
+       used within the last days is opened without the lock, as before: one
+       `stat` the open already made decides.
+     - Older runtimes don't take the lock; between one of them and this one
+       the moment is as it was.
+     - Tests: `cache_db_files::tests::a_long_unused_database_is_opened_under_the_upkeep_lock`;
+       `prunes_only_stale_files_of_other_versions` now lists the lock file.
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
