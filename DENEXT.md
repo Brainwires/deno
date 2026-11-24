@@ -17072,7 +17072,7 @@ where the changes are discussed.
        program's loader, on macOS the shell the `/bin/sh` launcher starts),
        Landlock `EXECUTE` rules on those files on Linux and `process-exec`
        literals on macOS. On Linux the file an exec call names is held by the
-       run's supervisor as well (item 5NN). The developer tools in macOS's
+       run's supervisor as well (item 552). The developer tools in macOS's
        `/usr/bin` (git, python3, clang) start the real tool through xcrun, which
        a strict list names too
        (`/Library/Developer/CommandLineTools/usr/bin/git`). Without it, a run
@@ -22293,7 +22293,7 @@ where the changes are discussed.
      - Tests: `windows::tests::wide_folders_are_the_systems_own` beside
        `wide_roots_are_never_labelled`.
      - Node tests enabled: none.
-5NN. **`fix(sandbox)`: a strict exec scope on Linux answers exec calls in the
+552. **`fix(sandbox)`: a strict exec scope on Linux answers exec calls in the
      run's supervisor** (CLI + runtime; Linux; `libs/sandbox/exec_gate.rs`,
      `exec.rs`, `supervise.rs`, `enforce_linux.rs`, `plan.rs`;
      `cli/lib/kernel_policy.rs`, `kernel_plan.rs`, `kernel_apply.rs`,
@@ -22336,13 +22336,13 @@ where the changes are discussed.
        targets limited by path only", and an enforced run prints one warning.
        That is the case where a seccomp listener can't be installed (measured
        once, with a forked child whose exec call the runtime must receive, read
-       and let continue: a kernel or an outer profile without user
-       notification, a listener already in the filter chain such as a `deno`
-       started inside another strict run or under the `warn` observer, a ptrace
-       policy that keeps the child's memory out of reach), and in a packaged
-       desktop app, which has no supervisor.
-     - The answer is made from the caller's memory; native code that changes
-       its own argument while its call is in flight stays inside the files the
+       and let continue: a kernel or an outer profile without user notification,
+       a listener already in the filter chain such as a `deno` started inside
+       another strict run or under the `warn` observer, a ptrace policy that
+       keeps the child's memory out of reach), and in a packaged desktop app,
+       which has no supervisor.
+     - The answer is made from the caller's memory; native code that changes its
+       own argument while its call is in flight stays inside the files the
        execute rules allow. The scope bounds which programs start, not what
        native code already running does in its own address space.
      - Tests: `deno_sandbox`'s
@@ -22354,13 +22354,14 @@ where the changes are discussed.
        a_program_starts_itself_again_only_when_listed,
        a_gated_process_starts_listed_programs_only,
        the_probe_answers_the_same_twice,
-       a_variable_that_names_no_socket_is_never_ignored}`; `deno_lib`'s
+       a_variable_that_names_no_socket_is_never_ignored}`;
+       `deno_lib`'s
        `kernel_policy::tests::strict_exec_names_the_files_a_call_may_name`;
        specs `kernel_sandbox/exec_scope` (`strict_exec_call_forms`,
        `exec_call_forms_without_strict`; they build two small C programs) and
        the existing `kernel_sandbox/children` `strict_exec`.
      - Node tests enabled: none.
-5NN. **`fix(cli)`: the kernel sandbox's harness switches need the harness's
+553. **`fix(cli)`: the kernel sandbox's harness switches need the harness's
      marker file** (CLI; `cli/lib/kernel_sandbox.rs`, `kernel_plan.rs`,
      `cli/lib.rs`, `cli/sandbox/mod.rs`, `cli/rt_desktop/kernel_start.rs`;
      `tests/util/lib/builders.rs`, the kernel beds).
@@ -22381,21 +22382,21 @@ where the changes are discussed.
        readable inside the kernel sandbox, and the marker's variable is kept
        through the environment scrub and compared like the other configuration
        variables.
-     - The test utilities make one marker per test process and name it for
-       every command they start (a test takes it away with an empty value); the
-       kernel beds' workflow makes one per job; `tests/npm_matrix/run.ts`
-       forwards it; `tests/kernel_sandbox_beds/README.md` has the three lines
-       for a local bed.
+     - The test utilities make one marker per test process and name it for every
+       command they start (a test takes it away with an empty value); the kernel
+       beds' workflow makes one per job; `tests/npm_matrix/run.ts` forwards it;
+       `tests/kernel_sandbox_beds/README.md` has the three lines for a local
+       bed.
      - Tests: `deno_lib`'s
        `kernel_sandbox::tests::{harness_switches_need_the_marker,
-       the_harness_marker_is_a_file_that_exists}`; specs `kernel_sandbox/forced`
-       (`switch_without_the_marker_is_ignored`,
+       the_harness_marker_is_a_file_that_exists}`;
+       specs `kernel_sandbox/forced` (`switch_without_the_marker_is_ignored`,
        `switch_with_a_missing_marker_is_ignored`) and `kernel_sandbox/warn`
        (`stage_without_the_marker_is_ignored`); every existing spec that sets a
        switch runs unchanged with the marker the runner names.
      - Node tests enabled: none.
 
-552. **`feat(node/net)`: `Deno.pipeServerIdentity`, a pipe client can verify its
+554. **`feat(node/net)`: `Deno.pipeServerIdentity`, a pipe client can verify its
      server's user** (runtime; Windows;
      `libs/core/uv_compat/{pipe.rs,pipe_security.rs}`,
      `ext/node/ops/pipe_wrap.rs`, `runtime/js/90_deno_ns.js`,
@@ -22452,7 +22453,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 517, 518-538, 552 and the runtime parts of 540-551)
+506-510, 511, 512, 513, 515, 517, 518-538, 554 and the runtime parts of 540-551)
 are what the prebuilt `libdenort` carries. The CLI-side parts (for example
 writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's

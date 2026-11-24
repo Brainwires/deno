@@ -1143,7 +1143,7 @@ async fn resolve_flags_and_init(
   );
   // denext: the test harnesses' forced enforce (DENEXT.md item 451) and
   // rollout stage (item 472), read at the same point. They take effect only
-  // with the harness's marker file (item 5NN): a variable that stayed
+  // with the harness's marker file (item 553): a variable that stayed
   // behind in an environment changes nothing
   deno_lib::kernel_sandbox::snapshot_harness_switches(
     std::env::var(deno_lib::kernel_sandbox::KERNEL_SANDBOX_FORCE_ENV_VAR).ok(),

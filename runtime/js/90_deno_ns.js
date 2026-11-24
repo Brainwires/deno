@@ -90,7 +90,7 @@ import { bundle } from "ext:deno_bundle_runtime/bundle.ts";
 
 const { ObjectDefineProperty, Float64Array } = primordials;
 
-// denext: Deno.pipeServerIdentity() (DENEXT.md item 552). `connection` is a
+// denext: Deno.pipeServerIdentity() (DENEXT.md item 554). `connection` is a
 // `node:net` socket; its handle answers for a connected Windows named-pipe
 // client, and anything else has no pipe server to name.
 function pipeServerIdentity(connection) {

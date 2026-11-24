@@ -575,7 +575,7 @@ Deno.test({
   }
 });
 
-// A pipe client can verify its server's user (DENEXT.md item 552): the
+// A pipe client can verify its server's user (DENEXT.md item 554): the
 // connected socket names the process that serves the pipe, the account that
 // process runs as and the pipe's owner, next to this process's own account.
 // The lookups themselves, and what a failed one answers, are checked in

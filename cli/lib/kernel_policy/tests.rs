@@ -982,7 +982,7 @@ fn strict_exec_lists_the_programs() {
   assert!(c.policy.syscalls.refuse_exec);
 }
 
-// denext (DENEXT.md item 5NN): where a supervising process answers the run's
+// denext (DENEXT.md item 552): where a supervising process answers the run's
 // exec calls, the policy names the files a call may name; where none does
 // (the capability, given here), the strict scope's rule says what holds it
 #[cfg(unix)]

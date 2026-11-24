@@ -119,7 +119,7 @@ jobs:
           fetch-depth: 1
           submodules: false
       # the switches below take effect only with the harness's marker file
-      # (DENEXT.md item 5NN); the test utilities name their own, this one is
+      # (DENEXT.md item 553); the test utilities name their own, this one is
       # for every other `deno` the job starts
       - name: Mark this job as a kernel sandbox bed
         run: |
@@ -170,7 +170,7 @@ jobs:
           fetch-depth: 1
           submodules: false
       # the switches below take effect only with the harness's marker file
-      # (DENEXT.md item 5NN); the test utilities name their own, this one is
+      # (DENEXT.md item 553); the test utilities name their own, this one is
       # for every other `deno` the job starts
       - name: Mark this job as a kernel sandbox bed
         run: |
@@ -225,7 +225,7 @@ jobs:
           fetch-depth: 1
           submodules: false
       # the switches below take effect only with the harness's marker file
-      # (DENEXT.md item 5NN); the test utilities name their own, this one is
+      # (DENEXT.md item 553); the test utilities name their own, this one is
       # for every other `deno` the job starts
       - name: Mark this job as a kernel sandbox bed
         run: |
@@ -279,7 +279,7 @@ jobs:
           fetch-depth: 1
           submodules: false
       # the switches below take effect only with the harness's marker file
-      # (DENEXT.md item 5NN); the test utilities name their own, this one is
+      # (DENEXT.md item 553); the test utilities name their own, this one is
       # for every other `deno` the job starts
       - name: Mark this job as a kernel sandbox bed
         run: |

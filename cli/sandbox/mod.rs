@@ -108,7 +108,7 @@ fn env_override_warned() -> Option<KernelSandboxMode> {
 }
 
 /// Says once which harness switches are set here without the harness's
-/// marker, and so have no effect (item 5NN).
+/// marker, and so have no effect (item 553).
 fn warn_harness_switches_ignored() {
   let ignored = deno_lib::kernel_sandbox::harness_switches_ignored();
   if ignored.is_empty() {
@@ -1849,7 +1849,7 @@ mod exec_report_tests {
     render_report(&resolution, &ctx.caps, &compiled, &[])
   }
 
-  /// DENEXT.md item 5NN: where no supervising process answers the run's
+  /// DENEXT.md item 552: where no supervising process answers the run's
   /// exec calls (the capability, given here), the report says what holds a
   /// strict scope, on the `exec:` line and in the rule's own line.
   #[test]

@@ -1082,7 +1082,7 @@ mod tests {
     kernel_sandbox_mode(inputs).unwrap()
   }
 
-  // denext (DENEXT.md item 5NN): the harness switches need the harness's
+  // denext (DENEXT.md item 553): the harness switches need the harness's
   // marker file
   #[test]
   fn harness_switches_need_the_marker() {

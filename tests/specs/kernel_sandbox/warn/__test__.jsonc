@@ -146,7 +146,7 @@
       "args": "run main.ts",
       "output": "stage_invalid.out"
     },
-    // item 5NN: without the harness's marker file the stage switch does
+    // item 553: without the harness's marker file the stage switch does
     // nothing (the run is the shipped stage's: nothing applied), and says so
     "stage_without_the_marker_is_ignored": {
       "envs": {

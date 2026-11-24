@@ -271,7 +271,7 @@ pub(crate) fn server_identity_from(
 }
 
 /// Who serves the named pipe the client handle `handle` is connected to
-/// (DENEXT.md item 552): the server's process id, the user its process runs
+/// (DENEXT.md item 554): the server's process id, the user its process runs
 /// as, the pipe's owner, and this process's own user. Fails only when the
 /// handle has no pipe server (it is not the client end of a named pipe).
 ///

@@ -167,7 +167,7 @@ unsafe extern "C" fn connect_cb(req: *mut UvConnect, status: i32) {
 }
 
 /// What `PipeWrap.prototype.getServerIdentity` returns: who serves the
-/// Windows named pipe a client is connected to (DENEXT.md item 552). A
+/// Windows named pipe a client is connected to (DENEXT.md item 554). A
 /// `null` field could not be read.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -492,7 +492,7 @@ impl PipeWrap {
   }
 
   /// denext: who serves the Windows named pipe this handle is connected to
-  /// as a client; `Deno.pipeServerIdentity()` (DENEXT.md item 552). `null`
+  /// as a client; `Deno.pipeServerIdentity()` (DENEXT.md item 554). `null`
   /// for any other handle, and on every other OS.
   #[serde]
   fn get_server_identity(&self) -> Option<PipeServerIdentity> {

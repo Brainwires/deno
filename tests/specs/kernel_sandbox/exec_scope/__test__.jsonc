@@ -1,4 +1,4 @@
-// denext (DENEXT.md items 449, 5NN): --kernel-sandbox-exec=strict on Linux.
+// denext (DENEXT.md items 449, 552): --kernel-sandbox-exec=strict on Linux.
 // The run list's programs start, by path, by descriptor and by their own
 // /proc name; every other form of an exec call is refused for the whole
 // process tree, whatever file it names. Needs a C compiler (`cc`, or $CC).
