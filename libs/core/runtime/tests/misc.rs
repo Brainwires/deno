@@ -2487,3 +2487,44 @@ async fn shared_info_memory_belongs_to_the_backing_store() {
   // SAFETY: `store` keeps the 3 x u32 alive.
   assert_eq!(unsafe { data.add(IMM_IDX_REF_COUNT).read() }, 1);
 }
+
+/// A cloned host object whose type has no registered deserializer can't be
+/// deserialized: a data clone error (a TypeError in core, which
+/// `structuredClone` turns into a "DataCloneError" DOMException).
+#[tokio::test]
+async fn structured_clone_without_a_deserializer() {
+  let mut runtime = JsRuntime::new(Default::default());
+  let value_global = runtime
+    .execute_script(
+      "a.js",
+      r#"
+        const value = {
+          [Deno.core.hostObjectBrand]: () => ({ type: "NoSuchType" }),
+        };
+        const deserializers = { __proto__: null };
+        const results = [];
+        for (const clone of [
+          () => Deno.core.structuredClone(value, deserializers),
+          () =>
+            Deno.core.deserialize(Deno.core.serialize(value), { deserializers }),
+        ]) {
+          try {
+            clone();
+            results.push("cloned");
+          } catch (e) {
+            results.push(`${e.constructor.name}: ${e.message}`);
+          }
+        }
+        results.join("\n");
+      "#,
+    )
+    .unwrap();
+  deno_core::scope!(scope, runtime);
+  let value = v8::Local::new(scope, &value_global);
+  let error = "TypeError: Cannot deserialize an object of type \"NoSuchType\": \
+               it has no deserializer";
+  assert_eq!(
+    value.to_rust_string_lossy(scope),
+    format!("{error}\n{error}")
+  );
+}

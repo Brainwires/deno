@@ -21588,6 +21588,21 @@ registers and that load the lazily loaded module on demand. - Tests:
 classes, cloned directly and echoed by a fresh worker. - Node tests enabled:
 none.
 
+5NN. **`fix(core)`: a cloned host object with no deserializer is a
+`DataCloneError`, not a crash** (port of theende/ende e38838e065, MIT; no
+upstream PR; `libs/core/ops_builtin_v8.rs`). When a cloned host object's type
+had no registered deserializer, `read_host_object` cast `undefined` to a
+function and panicked inside V8's callback. User code can make any object a host
+object of any type through the `Symbol.for("Deno.core.hostObject")` brand, so
+`structuredClone()` of such an object crashed the process. It now throws a data
+clone error (a TypeError in core, which `structuredClone` turns into a
+`DataCloneError`), and the deserializing ops (structured clone, deserialize and
+the broadcast channel's) rethrow an exception a deserializer threw instead of
+replacing it with "could not deserialize value". - Tests:
+`libs/core/runtime/tests/misc.rs`'s `structured_clone_without_a_deserializer`
+and the matching `structured_clone_test.ts` case (both crashed the process
+before). - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -21600,8 +21615,8 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
 506-510, 511, 512, 513, 515, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN,
-5NN) are what the prebuilt `libdenort` carries. The CLI-side parts (for example
-writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+5NN, 5NN) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.
 
