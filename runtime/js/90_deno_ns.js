@@ -90,6 +90,17 @@ import { bundle } from "ext:deno_bundle_runtime/bundle.ts";
 
 const { ObjectDefineProperty, Float64Array } = primordials;
 
+// denext: Deno.pipeServerIdentity() (DENEXT.md item 5NN). `connection` is a
+// `node:net` socket; its handle answers for a connected Windows named-pipe
+// client, and anything else has no pipe server to name.
+function pipeServerIdentity(connection) {
+  const handle = connection?._handle;
+  if (typeof handle?.getServerIdentity !== "function") {
+    return null;
+  }
+  return handle.getServerIdentity() ?? null;
+}
+
 let cookiesScript;
 function loadCookies() {
   // 27_cookies.js is a `lazy_loaded_js` classic script, so it is loaded via
@@ -211,6 +222,8 @@ const denoNs = {
   },
   // denext: takes the main module's import.meta (the op checks it).
   disarmResourceLimits: op_disarm_resource_limits,
+  // denext: who serves a connected Windows named pipe.
+  pipeServerIdentity,
   mkdirSync: fs.mkdirSync,
   mkdir: fs.mkdir,
   chdir: fs.chdir,

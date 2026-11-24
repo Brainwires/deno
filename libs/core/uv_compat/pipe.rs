@@ -1128,6 +1128,54 @@ pub unsafe fn uv_pipe_connect(
   0
 }
 
+/// Who serves a Windows named pipe a client is connected to (DENEXT.md item
+/// 5NN); see [`uv_pipe_server_identity`]. A `None` field could not be read:
+/// it is "not known", never "the same as another field".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PipeServerIdentity {
+  /// The id of the process that created the pipe instance this client is
+  /// connected to (`GetNamedPipeServerProcessId`).
+  pub pid: u32,
+  /// The SID of the account that process runs as, when this process may
+  /// query it.
+  pub user_sid: Option<String>,
+  /// The SID that owns the pipe (its security descriptor's owner). A process
+  /// can make a pipe owned by its own account only, unless it holds a
+  /// privilege that administrators have.
+  pub owner_sid: Option<String>,
+  /// The SID of the account this process runs as.
+  pub current_user_sid: Option<String>,
+}
+
+/// Who serves the Windows named pipe `pipe` is connected to as a client.
+/// `None` for a handle that is not a connected named-pipe client (a server's
+/// accepted connection, a listening or unconnected handle, a pipe opened
+/// from a descriptor), and on every other OS. Not a libuv function.
+///
+/// # Safety
+/// `pipe` must be a valid pointer to an initialized `uv_pipe_t`.
+pub unsafe fn uv_pipe_server_identity(
+  pipe: *const uv_pipe_t,
+) -> Option<PipeServerIdentity> {
+  #[cfg(windows)]
+  {
+    use std::os::windows::io::AsRawHandle;
+
+    // SAFETY: `pipe` is valid (caller); the client's handle is open while
+    // the handle holds it.
+    unsafe {
+      let client = (*pipe).internal_win_client.as_ref()?;
+      super::pipe_security::pipe_server_identity(client.as_raw_handle() as _)
+        .ok()
+    }
+  }
+  #[cfg(not(windows))]
+  {
+    let _ = pipe;
+    None
+  }
+}
+
 /// Creates one instance of the pipe a server listens on (DENEXT.md item
 /// 484).
 ///

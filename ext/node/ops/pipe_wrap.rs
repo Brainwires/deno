@@ -166,6 +166,18 @@ unsafe extern "C" fn connect_cb(req: *mut UvConnect, status: i32) {
   });
 }
 
+/// What `PipeWrap.prototype.getServerIdentity` returns: who serves the
+/// Windows named pipe a client is connected to (DENEXT.md item 5NN). A
+/// `null` field could not be read.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PipeServerIdentity {
+  pid: u32,
+  user_sid: Option<String>,
+  owner_sid: Option<String>,
+  current_user_sid: Option<String>,
+}
+
 // -- PipeWrap struct --
 
 #[derive(CppgcInherits)]
@@ -477,6 +489,25 @@ impl PipeWrap {
       // SAFETY: pipe is valid (null-checked above).
       unsafe { uv_compat::uv_pipe_set_pending_instances(pipe, instances) };
     }
+  }
+
+  /// denext: who serves the Windows named pipe this handle is connected to
+  /// as a client; `Deno.pipeServerIdentity()` (DENEXT.md item 5NN). `null`
+  /// for any other handle, and on every other OS.
+  #[serde]
+  fn get_server_identity(&self) -> Option<PipeServerIdentity> {
+    let pipe = self.pipe_ptr();
+    if pipe.is_null() {
+      return None;
+    }
+    // SAFETY: pipe is valid (null-checked above).
+    let identity = unsafe { uv_compat::uv_pipe_server_identity(pipe) }?;
+    Some(PipeServerIdentity {
+      pid: identity.pid,
+      user_sid: identity.user_sid,
+      owner_sid: identity.owner_sid,
+      current_user_sid: identity.current_user_sid,
+    })
   }
 
   /// Change permissions on the bound pipe path. Takes already-translated

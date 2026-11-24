@@ -420,6 +420,68 @@ declare namespace Deno {
   export function disarmResourceLimits(importMeta: ImportMeta): boolean;
 
   /**
+   * **denext extension** (Brainwires/deno, not upstream Deno): who serves a
+   * Windows named pipe, as {@linkcode Deno.pipeServerIdentity} reports it.
+   *
+   * A field that is `null` could not be read. Take `null` as "not known",
+   * never as a match with another field.
+   *
+   * @category Network
+   */
+  export interface PipeServerIdentity {
+    /** The id of the process that created the pipe instance the connection
+     * is to (`GetNamedPipeServerProcessId`). */
+    pid: number;
+    /** The SID (`S-1-5-21-…`) of the account that process runs as, or `null`
+     * when this process may not query it (for example a process of another
+     * account, which only an elevated process may open) or it has exited. */
+    userSid: string | null;
+    /** The SID that owns the pipe (the owner in its security descriptor), or
+     * `null` when it could not be read. Windows lets a process create a pipe
+     * owned by its own account only, unless it holds a privilege that
+     * administrators have, and a `node:net` server of this runtime always
+     * creates its pipe owned by the account it runs as. */
+    ownerSid: string | null;
+    /** The SID of the account this process runs as, or `null` when it could
+     * not be read. */
+    currentUserSid: string | null;
+  }
+
+  /**
+   * **denext extension** (Brainwires/deno, not upstream Deno): lets a pipe
+   * client verify its server's user. For a `node:net` socket connected to a
+   * Windows named pipe (`net.connect("\\\\.\\pipe\\name")`), returns the
+   * process that serves the pipe, the account that process runs as, the
+   * account that owns the pipe, and the account this process runs as:
+   *
+   * ```ts
+   * import net from "node:net";
+   *
+   * const socket = net.connect("\\\\.\\pipe\\my-app");
+   * socket.once("connect", () => {
+   *   const id = Deno.pipeServerIdentity(socket);
+   *   const mine = id !== null && id.currentUserSid !== null &&
+   *     id.userSid === id.currentUserSid && id.ownerSid === id.currentUserSid;
+   *   if (!mine) socket.destroy(); // not served by this user, or not known
+   * });
+   * ```
+   *
+   * Call it once the socket has connected. It returns `null` when there is
+   * no pipe server to name: for a socket that was never connected or has
+   * closed, for the server's end of a connection, for a socket that is not a
+   * named pipe, and on every OS other than Windows (where a Unix socket's
+   * file permissions do this job).
+   *
+   * It needs no permission: it reports on a connection the program already
+   * holds.
+   *
+   * @category Network
+   */
+  export function pipeServerIdentity(
+    connection: object,
+  ): PipeServerIdentity | null;
+
+  /**
    * Get the `hostname` of the machine the Deno process is running on.
    *
    * ```ts

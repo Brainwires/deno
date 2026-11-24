@@ -20,11 +20,13 @@ use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Security::ACL;
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+use windows_sys::Win32::Security::Authorization::GetSecurityInfo;
 use windows_sys::Win32::Security::Authorization::SE_KERNEL_OBJECT;
 use windows_sys::Win32::Security::Authorization::SetSecurityInfo;
 use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
 use windows_sys::Win32::Security::GetSecurityDescriptorDacl;
 use windows_sys::Win32::Security::GetTokenInformation;
+use windows_sys::Win32::Security::OWNER_SECURITY_INFORMATION;
 use windows_sys::Win32::Security::PROTECTED_DACL_SECURITY_INFORMATION;
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Security::TOKEN_QUERY;
@@ -35,8 +37,13 @@ use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
 use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_WRITE;
 use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_ATTRIBUTES;
+use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
+use windows_sys::Win32::System::Threading::OpenProcess;
 use windows_sys::Win32::System::Threading::OpenProcessToken;
+use windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION;
+
+use super::pipe::PipeServerIdentity;
 
 /// `readableAll`: Everyone may open the pipe for reading.
 pub(crate) const EVERYONE_READ: u8 = 1;
@@ -111,28 +118,33 @@ pub(crate) unsafe fn sid_to_string(sid: *mut c_void) -> io::Result<String> {
   }
 }
 
-/// Closes a token handle on drop.
-struct TokenHandle(HANDLE);
+/// Closes a token or process handle on drop.
+struct OwnedHandle(HANDLE);
 
-impl Drop for TokenHandle {
+impl Drop for OwnedHandle {
   fn drop(&mut self) {
-    // SAFETY: the handle came from `OpenProcessToken` and is closed once.
+    // SAFETY: the handle came from `OpenProcessToken` / `OpenProcess` and is
+    // closed once.
     unsafe {
       CloseHandle(self.0);
     }
   }
 }
 
-/// The SID of the account the process runs as (its primary token's user).
-pub(crate) fn current_user_sid() -> io::Result<String> {
+/// The SID of the account `process` (a handle with at least
+/// `PROCESS_QUERY_LIMITED_INFORMATION`) runs as: its primary token's user.
+///
+/// # Safety
+/// `process` must be an open process handle.
+unsafe fn process_handle_user_sid(process: HANDLE) -> io::Result<String> {
   // SAFETY: plain Win32 calls; every buffer is sized by the call before it
   // and outlives its use.
   unsafe {
     let mut token: HANDLE = std::ptr::null_mut();
-    if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+    if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
       return Err(io::Error::last_os_error());
     }
-    let token = TokenHandle(token);
+    let token = OwnedHandle(token);
 
     let mut len = 0u32;
     if GetTokenInformation(
@@ -162,6 +174,121 @@ pub(crate) fn current_user_sid() -> io::Result<String> {
     }
     let user = &*(buf.as_ptr() as *const TOKEN_USER);
     sid_to_string(user.User.Sid)
+  }
+}
+
+/// The SID of the account the process runs as (its primary token's user).
+pub(crate) fn current_user_sid() -> io::Result<String> {
+  // SAFETY: the pseudo-handle of the current process is always valid.
+  unsafe { process_handle_user_sid(GetCurrentProcess()) }
+}
+
+/// The SID of the account the process `pid` runs as. Fails when there is no
+/// such process, or when this process may not query it or its token (a
+/// process of another session's account, a protected process).
+pub(crate) fn process_user_sid(pid: u32) -> io::Result<String> {
+  // SAFETY: OpenProcess takes any pid; the handle it returns is closed by
+  // `OwnedHandle`.
+  unsafe {
+    let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+    if process.is_null() {
+      return Err(io::Error::last_os_error());
+    }
+    let process = OwnedHandle(process);
+    process_handle_user_sid(process.0)
+  }
+}
+
+/// The id of the process that created the pipe instance the client handle
+/// `handle` is connected to (`GetNamedPipeServerProcessId`). Fails for a
+/// handle that is not the client end of a named pipe.
+///
+/// # Safety
+/// `handle` must be an open handle.
+unsafe fn pipe_server_pid(handle: HANDLE) -> io::Result<u32> {
+  let mut pid = 0u32;
+  // SAFETY: `handle` is open (caller); `pid` outlives the call.
+  if unsafe { GetNamedPipeServerProcessId(handle, &mut pid) } == 0 {
+    return Err(io::Error::last_os_error());
+  }
+  Ok(pid)
+}
+
+/// The owner of the pipe `handle` is an instance of, from the pipe's security
+/// descriptor. The handle needs `READ_CONTROL`, which a client opened for
+/// reading has.
+///
+/// # Safety
+/// `handle` must be an open handle.
+unsafe fn pipe_owner_sid(handle: HANDLE) -> io::Result<String> {
+  // SAFETY: `handle` is open (caller); `owner` points into `descriptor`,
+  // which is freed after the SID is copied out.
+  unsafe {
+    let mut owner: *mut c_void = std::ptr::null_mut();
+    let mut descriptor: *mut c_void = std::ptr::null_mut();
+    let status = GetSecurityInfo(
+      handle,
+      SE_KERNEL_OBJECT,
+      OWNER_SECURITY_INFORMATION,
+      &mut owner,
+      std::ptr::null_mut(),
+      std::ptr::null_mut(),
+      std::ptr::null_mut(),
+      &mut descriptor,
+    );
+    if status != 0 {
+      return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let sid = if owner.is_null() {
+      Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "the pipe's security descriptor has no owner",
+      ))
+    } else {
+      sid_to_string(owner)
+    };
+    LocalFree(descriptor as _);
+    sid
+  }
+}
+
+/// Puts a pipe's server identity together from its lookups. A lookup that
+/// failed is `None` (not known): a caller comparing SIDs must take `None` as
+/// "could not tell", never as a match, so no failure here is ever filled in
+/// with another lookup's answer.
+pub(crate) fn server_identity_from(
+  pid: u32,
+  server_user: impl FnOnce(u32) -> io::Result<String>,
+  owner: io::Result<String>,
+  current_user: io::Result<String>,
+) -> PipeServerIdentity {
+  PipeServerIdentity {
+    pid,
+    user_sid: server_user(pid).ok(),
+    owner_sid: owner.ok(),
+    current_user_sid: current_user.ok(),
+  }
+}
+
+/// Who serves the named pipe the client handle `handle` is connected to
+/// (DENEXT.md item 5NN): the server's process id, the user its process runs
+/// as, the pipe's owner, and this process's own user. Fails only when the
+/// handle has no pipe server (it is not the client end of a named pipe).
+///
+/// # Safety
+/// `handle` must be an open handle.
+pub(crate) unsafe fn pipe_server_identity(
+  handle: HANDLE,
+) -> io::Result<PipeServerIdentity> {
+  // SAFETY: `handle` is open (caller).
+  unsafe {
+    let pid = pipe_server_pid(handle)?;
+    Ok(server_identity_from(
+      pid,
+      process_user_sid,
+      pipe_owner_sid(handle),
+      current_user_sid(),
+    ))
   }
 }
 
@@ -552,5 +679,138 @@ mod tests {
     let want = expected(&user, everyone_access(EVERYONE_READ));
     assert_eq!(describe_pipe(first.as_raw_handle() as HANDLE), want);
     assert_eq!(describe_pipe(second.as_raw_handle() as HANDLE), want);
+  }
+
+  /// A client of the pipe `name`, opened as `uv_pipe_connect` opens it.
+  fn connect(
+    name: &str,
+  ) -> io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    tokio::net::windows::named_pipe::ClientOptions::new().open(name)
+  }
+
+  #[tokio::test(flavor = "current_thread")]
+  async fn a_pipe_client_reports_this_process_as_its_server() {
+    let user = current_user_sid().unwrap();
+    let name = pipe_name();
+    let _server = listen(&name, 0).unwrap();
+    let client = connect(&name).unwrap();
+    // SAFETY: `client` is an open pipe handle.
+    let identity =
+      unsafe { pipe_server_identity(client.as_raw_handle() as HANDLE) }
+        .unwrap();
+    assert_eq!(
+      identity,
+      PipeServerIdentity {
+        pid: std::process::id(),
+        user_sid: Some(user.clone()),
+        owner_sid: Some(user.clone()),
+        current_user_sid: Some(user),
+      }
+    );
+  }
+
+  #[tokio::test(flavor = "current_thread")]
+  async fn a_pipe_readable_by_everyone_is_still_owned_by_its_server() {
+    let user = current_user_sid().unwrap();
+    let name = pipe_name();
+    let _server = listen(&name, EVERYONE_READ | EVERYONE_WRITE).unwrap();
+    let client = connect(&name).unwrap();
+    // SAFETY: `client` is an open pipe handle.
+    let identity =
+      unsafe { pipe_server_identity(client.as_raw_handle() as HANDLE) }
+        .unwrap();
+    assert_eq!(identity.owner_sid, Some(user.clone()));
+    assert_eq!(identity.user_sid, Some(user));
+  }
+
+  #[tokio::test(flavor = "current_thread")]
+  async fn the_server_end_of_a_pipe_has_no_server_identity() {
+    let name = pipe_name();
+    let server = listen(&name, 0).unwrap();
+    let _client = connect(&name).unwrap();
+    // SAFETY: `server` is an open pipe handle.
+    let result =
+      unsafe { pipe_server_identity(server.as_raw_handle() as HANDLE) };
+    assert!(result.is_err(), "{result:?}");
+  }
+
+  #[test]
+  fn a_handle_that_is_no_pipe_has_no_server_identity() {
+    // SAFETY: the pseudo-handle of the current process is a valid handle,
+    // and not a pipe.
+    let result = unsafe { pipe_server_identity(GetCurrentProcess()) };
+    assert!(result.is_err(), "{result:?}");
+  }
+
+  #[test]
+  fn process_user_sid_of_this_process_is_the_current_user() {
+    assert_eq!(
+      process_user_sid(std::process::id()).unwrap(),
+      current_user_sid().unwrap()
+    );
+  }
+
+  #[test]
+  fn process_user_sid_fails_for_a_process_that_cannot_be_opened() {
+    // Process id 0 (the idle process) can never be opened.
+    assert!(process_user_sid(0).is_err());
+  }
+
+  #[test]
+  fn a_server_process_that_cannot_be_opened_is_unknown() {
+    let denied = || io::Error::from_raw_os_error(5); // ERROR_ACCESS_DENIED
+    let me = "S-1-5-21-1-2-3-1001".to_string();
+    let identity = server_identity_from(
+      4321,
+      |pid| {
+        assert_eq!(pid, 4321);
+        Err(denied())
+      },
+      Ok(me.clone()),
+      Ok(me.clone()),
+    );
+    // Not known: never this process's user, never the pipe's owner.
+    assert_eq!(
+      identity,
+      PipeServerIdentity {
+        pid: 4321,
+        user_sid: None,
+        owner_sid: Some(me.clone()),
+        current_user_sid: Some(me.clone()),
+      }
+    );
+
+    // Each lookup fails by itself.
+    let identity = server_identity_from(
+      4321,
+      |_| Ok(me.clone()),
+      Err(denied()),
+      Ok(me.clone()),
+    );
+    assert_eq!(identity.user_sid, Some(me.clone()));
+    assert_eq!(identity.owner_sid, None);
+    assert_eq!(identity.current_user_sid, Some(me.clone()));
+
+    let identity = server_identity_from(
+      4321,
+      |_| Ok(me.clone()),
+      Ok(me.clone()),
+      Err(denied()),
+    );
+    assert_eq!(identity.user_sid, Some(me.clone()));
+    assert_eq!(identity.owner_sid, Some(me));
+    assert_eq!(identity.current_user_sid, None);
+  }
+
+  #[test]
+  fn a_server_identity_names_another_user_as_another_user() {
+    let identity = server_identity_from(
+      7,
+      |_| Ok("S-1-5-21-1-2-3-1002".to_string()),
+      Ok("S-1-5-21-1-2-3-1002".to_string()),
+      Ok("S-1-5-21-1-2-3-1001".to_string()),
+    );
+    assert_ne!(identity.user_sid, identity.current_user_sid);
+    assert_ne!(identity.owner_sid, identity.current_user_sid);
   }
 }
