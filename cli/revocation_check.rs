@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-//! denext (DENEXT.md item 5NN): the `deno` CLI checks denext's signed
+//! denext (DENEXT.md item 516): the `deno` CLI checks denext's signed
 //! revoked-runtimes list at startup.
 //!
 //! denext (`src/build/runtime-revocations.ts`) keeps a signed list of

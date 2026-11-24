@@ -1590,7 +1590,7 @@ Deno.test(async function forkLargeMessageThenExitArrivesWhole() {
 // time to exit, so the write can't finish before then. On Windows a named-pipe
 // write was reported done while its `WriteFile` was still queued, nothing
 // kept the child alive, and its exit cancelled the rest: the parent got part
-// of the data (DENEXT.md item 5NN). It must arrive whole, as with libuv.
+// of the data (DENEXT.md item 536). It must arrive whole, as with libuv.
 Deno.test(async function extraStdioLargeWriteThenExitArrivesWhole() {
   const size = 1_000_000;
   const file = await Deno.makeTempFile({ suffix: ".mjs" });

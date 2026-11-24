@@ -4,7 +4,7 @@
 // Unix socket holding one is closed) counts such a socket as unreachable and
 // flushes its receive side: the child read an end of stream, ended the
 // socket and its reply failed with EPIPE. The sender now keeps its copy until
-// the child acknowledges the handle (DENEXT.md item 5NN).
+// the child acknowledges the handle (DENEXT.md item 537).
 import { fork } from "node:child_process";
 import net from "node:net";
 import process from "node:process";

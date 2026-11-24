@@ -227,7 +227,7 @@ const cases = {
   op_desktop_window_order: () => ops.op_desktop_window_order(),
   op_desktop_pointer: () => ops.op_desktop_pointer(),
   op_desktop_window_capabilities: () => ops.op_desktop_window_capabilities(),
-  // laufey API 61 (the native tree, DENEXT.md item 5NN).
+  // laufey API 61 (the native tree, DENEXT.md item 513).
   op_desktop_native_tree_commit: () =>
     ops.op_desktop_native_tree_commit(1, new Uint8Array(16)),
   // laufey API 50 (DENEXT.md item 183).

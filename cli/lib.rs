@@ -1001,7 +1001,7 @@ pub fn main() {
   // pointing at this binary), translate the Node.js CLI args to Deno args.
   // Done here, before any threads are spawned, because it may set env vars.
   let args = node_compat_shim::maybe_rewrite_node_arg0(args);
-  // denext (DENEXT.md item 5NN): when denext's cached, signed
+  // denext (DENEXT.md item 516): when denext's cached, signed
   // revoked-runtimes list revokes this build, say so once a day (no network,
   // one failed open on a machine without the list, silent on any error)
   revocation_check::check_at_startup(deno_lib::version::DENO_VERSION_INFO.deno);

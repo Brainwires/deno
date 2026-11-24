@@ -1111,7 +1111,7 @@ mod tests {
     );
   }
 
-  /// The gpui host (DENEXT.md item 5NN) gets its own profile: confined on
+  /// The gpui host (DENEXT.md item 513) gets its own profile: confined on
   /// both OSes, with the toolkit, fonts and GPU, none of a web engine's
   /// folders or helpers, and Metal's shader cache only in the app's own
   /// folder of the per-user cache. It is a strict subset of the web

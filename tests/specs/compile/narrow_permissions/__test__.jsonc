@@ -1,5 +1,5 @@
 {
-  // denext (DENEXT.md item 5NN): DENO_NARROW_PERMISSIONS holds a compiled
+  // denext (DENEXT.md item 517): DENO_NARROW_PERMISSIONS holds a compiled
   // program to less than its baked grant, never more
   "tempDir": true,
   "envs": { "NARROW_TEST": "x" },

@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-//! denext (DENEXT.md item 5NN): `DENO_NARROW_PERMISSIONS`, permission flags
+//! denext (DENEXT.md item 517): `DENO_NARROW_PERMISSIONS`, permission flags
 //! that can only narrow a compiled program's baked grant.
 //!
 //! A `deno compile`d program runs with the permissions baked into it; the

@@ -141,7 +141,7 @@ pub fn main() {
   // first (its extraction folder is readable under the sandbox, never
   // writable).
   let standalone = extract_standalone(Cow::Owned(args)).and_then(|mut data| {
-    // denext (DENEXT.md item 5NN): `DENO_NARROW_PERMISSIONS` holds the
+    // denext (DENEXT.md item 517): `DENO_NARROW_PERMISSIONS` holds the
     // program to less than its baked grant (never more), before the kernel
     // sandbox and the permission checks see it; a value it can't honour
     // refuses to start

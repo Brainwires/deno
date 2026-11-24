@@ -255,7 +255,7 @@ pub enum RunKind {
 ///   native tree itself (Metal on macOS, Vulkan on Linux), in the app's
 ///   own process, with no helper process: its profile is the OS's
 ///   toolkit, fonts and GPU, without a web engine's folders and helpers
-///   (`kernel_desktop::engine_paths`; DENEXT.md item 5NN).
+///   (`kernel_desktop::engine_paths`; DENEXT.md item 544).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Engine {

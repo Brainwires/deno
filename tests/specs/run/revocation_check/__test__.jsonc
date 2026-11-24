@@ -1,5 +1,5 @@
 {
-  // denext (DENEXT.md item 5NN): the CLI says, once a day, when denext's
+  // denext (DENEXT.md item 516): the CLI says, once a day, when denext's
   // cached and signed revoked-runtimes list revokes this build
   "tempDir": true,
   "steps": [{

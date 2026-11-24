@@ -21490,9 +21490,8 @@ where the changes are discussed.
      - Node tests enabled: none.
 
 516. **`feat(cli)`: the `deno` CLI checks denext's revoked-runtimes list at
-     startup** (`cli/revocation_check.rs`, `cli/lib.rs`; code comments say item
-     5NN until the train numbers it). denext keeps a signed list of runtime
-     releases maintainers pulled after release
+     startup** (`cli/revocation_check.rs`, `cli/lib.rs`). denext keeps a signed
+     list of runtime releases maintainers pulled after release
      (`src/build/runtime-revocations.ts`) and checks it before it runs a pinned
      runtime, but a `deno` that `denext runtime link` put on `PATH`, or that is
      run directly, never asked. The CLI now reads denext's cached copy,
@@ -21543,12 +21542,11 @@ where the changes are discussed.
 
 517. **`feat(compile)`: `DENO_NARROW_PERMISSIONS` holds a compiled program to
      less than its baked permissions** (`cli/lib/narrow_permissions.rs`,
-     `cli/rt/lib.rs`, `cli/lib/kernel_inherit.rs`; code comments say item 5NN
-     until the train numbers it). A `deno compile`d program runs with the
-     permissions baked into it, and whoever ran it could not ask for less. The
-     variable takes permission flags in the CLI's syntax, whitespace-separated
-     (`"…"` / `'…'` quote a token with spaces, `,,` is a literal comma in a path
-     list, `:8000` expands as on the command line):
+     `cli/rt/lib.rs`, `cli/lib/kernel_inherit.rs`). A `deno compile`d program
+     runs with the permissions baked into it, and whoever ran it could not ask
+     for less. The variable takes permission flags in the CLI's syntax,
+     whitespace-separated (`"…"` / `'…'` quote a token with spaces, `,,` is a
+     literal comma in a path list, `:8000` expands as on the command line):
      - `--allow-<kind>=<list>` keeps only the part of the baked grant the list
        covers: the intersection the kernel sandbox already uses for an
        ancestor's grants (`kernel_inherit::clamp`), so a baked
@@ -21582,286 +21580,303 @@ where the changes are discussed.
        refused, a narrow bake staying narrow under a wide list).
      - Node tests enabled: none.
 
-5NN. **`fix(ext/web)`: `structuredClone` rejects nested non-serializable
-platform objects** (port of theende/ende 6c63caf627, MIT, from
-denoland/deno#37112; issue denoland/deno#37108; `ext/web/13_message_port.js`,
-`libs/core/ops_builtin_v8.rs`, the marked interfaces' modules).
-`structuredClone` and `postMessage` rejected a non-serializable platform object
-(URL, Headers, Request, ...) only as the top-level value: nested in another
-object it was cloned as `{}`, and many interfaces (Event, EventTarget,
-TextEncoder/TextDecoder, FormData, URLPattern, the compression and
-queuing-strategy classes, PerformanceEntry / Observer, Crypto, SubtleCrypto,
-MessageChannel) weren't marked at all. The marker is now the registry symbol
-`Deno.nonSerializable`, which the V8 serializer delegate checks, so a marked
-object anywhere in the value throws a `DataCloneError`. It is checked after the
-transfer list (Ende's change to the upstream PR): a `MessagePort` is an
-`EventTarget` and must still be transferred, nested or not. - User-facing note:
-`structuredClone({ e: new Event("x") })` and the like throw `DataCloneError`
-instead of returning `{ e: {} }`. - Tests: `structured_clone_test.ts`'s
-`structuredClone rejects
+518. **`fix(ext/web)`: `structuredClone` rejects nested non-serializable
+     platform objects** (port of theende/ende 6c63caf627, MIT, from
+     denoland/deno#37112; issue denoland/deno#37108;
+     `ext/web/13_message_port.js`, `libs/core/ops_builtin_v8.rs`, the marked
+     interfaces' modules). `structuredClone` and `postMessage` rejected a
+     non-serializable platform object (URL, Headers, Request, ...) only as the
+     top-level value: nested in another object it was cloned as `{}`, and many
+     interfaces (Event, EventTarget, TextEncoder/TextDecoder, FormData,
+     URLPattern, the compression and queuing-strategy classes, PerformanceEntry
+     / Observer, Crypto, SubtleCrypto, MessageChannel) weren't marked at all.
+     The marker is now the registry symbol `Deno.nonSerializable`, which the V8
+     serializer delegate checks, so a marked object anywhere in the value throws
+     a `DataCloneError`. It is checked after the transfer list (Ende's change to
+     the upstream PR): a `MessagePort` is an `EventTarget` and must still be
+     transferred, nested or not. - User-facing note:
+     `structuredClone({ e: new Event("x") })` and the like throw
+     `DataCloneError` instead of returning `{ e: {} }`. - Tests:
+     `structured_clone_test.ts`'s
+     `structuredClone rejects
        non-serializable platform objects` and the
-nested `MessagePort` transfer cases (the first fails on 3.0.0-denext.25). - Node
-tests enabled: none known; `node:worker_threads` messages use the same
-serializer. Two Node behaviours kept on top of the port: a transferable host
-object (a `MessagePort`) in the message but not in the transfer list keeps
-Node's error ("Object that needs transfer was found in message but not listed in
-transferList") rather than the non-serializable one, and a prototype object that
-only inherits the marker (a subclass's `prototype`, such as the one of
-`class MockResponse extends Response {}`) clones as an ordinary object, nested
-too, as the top-level check already allowed. Tests: the unit tests named
-"postMessage reports a nested MessagePort missing from the transfer list" and
-"structuredClone clones the prototype of a non-serializable subclass", and
-Node's `test-worker-workerdata-messageport.js` and
-`test-worker-message-mark-as-uncloneable.js`.
+     nested `MessagePort` transfer cases (the first fails on 3.0.0-denext.25). -
+     Node tests enabled: none known; `node:worker_threads` messages use the same
+     serializer. Two Node behaviours kept on top of the port: a transferable
+     host object (a `MessagePort`) in the message but not in the transfer list
+     keeps Node's error ("Object that needs transfer was found in message but
+     not listed in transferList") rather than the non-serializable one, and a
+     prototype object that only inherits the marker (a subclass's `prototype`,
+     such as the one of `class MockResponse extends Response {}`) clones as an
+     ordinary object, nested too, as the top-level check already allowed. Tests:
+     the unit tests named "postMessage reports a nested MessagePort missing from
+     the transfer list" and "structuredClone clones the prototype of a
+     non-serializable subclass", and Node's
+     `test-worker-workerdata-messageport.js` and
+     `test-worker-message-mark-as-uncloneable.js`.
 
-5NN. **`fix(ext/web)`: `structuredClone` clones the geometry interfaces,
-`ImageData` and `ImageBitmap`, and transfers `ImageBitmap` and
-`OffscreenCanvas`** (port of theende/ende 8faeab2af2, MIT, Ende's rework of
-denoland/deno#37113; issue denoland/deno#37106; `ext/web/16_image_data.js`,
-`ext/web/17_geometry.js`, `ext/web/13_message_port.js`, `ext/image`,
-`ext/canvas`, `libs/core/ops_builtin_v8.rs`). These interfaces are
-`[Serializable]` (and the last two `[Transferable]`), but `structuredClone` and
-`postMessage` turned them into `{}`, and transferring an `ImageBitmap` or an
-`OffscreenCanvas` threw. They now round-trip as the same interface with the same
-values, nested and into a worker; a transfer moves the pixels and detaches the
-source, and a closed or transferred bitmap can't be cloned or transferred again.
-An `OffscreenCanvas` with a rendering context can't be transferred
-(`InvalidStateError`, per HTML). A worker that hasn't loaded the defining module
-registers the deserializers up front and loads it on demand; a clone keeps an
-`ImageBitmap`'s color type (16-bit stays 16-bit). - User-facing note:
-`ImageBitmap` is `Transferable` in the types too. - Tests:
-`structured_clone_test.ts`'s `structuredClone geometry
+519. **`fix(ext/web)`: `structuredClone` clones the geometry interfaces,
+     `ImageData` and `ImageBitmap`, and transfers `ImageBitmap` and
+     `OffscreenCanvas`** (port of theende/ende 8faeab2af2, MIT, Ende's rework of
+     denoland/deno#37113; issue denoland/deno#37106; `ext/web/16_image_data.js`,
+     `ext/web/17_geometry.js`, `ext/web/13_message_port.js`, `ext/image`,
+     `ext/canvas`, `libs/core/ops_builtin_v8.rs`). These interfaces are
+     `[Serializable]` (and the last two `[Transferable]`), but `structuredClone`
+     and `postMessage` turned them into `{}`, and transferring an `ImageBitmap`
+     or an `OffscreenCanvas` threw. They now round-trip as the same interface
+     with the same values, nested and into a worker; a transfer moves the pixels
+     and detaches the source, and a closed or transferred bitmap can't be cloned
+     or transferred again. An `OffscreenCanvas` with a rendering context can't
+     be transferred (`InvalidStateError`, per HTML). A worker that hasn't loaded
+     the defining module registers the deserializers up front and loads it on
+     demand; a clone keeps an `ImageBitmap`'s color type (16-bit stays
+     16-bit). - User-facing note: `ImageBitmap` is `Transferable` in the types
+     too. - Tests: `structured_clone_test.ts`'s
+     `structuredClone geometry
        interfaces`,
-`structuredClone ImageData and ImageBitmap`,
-`structuredClone keeps a 16-bit ImageBitmap's depth`, the `OffscreenCanvas`
-transfer tests and the worker round trips (all fail on 3.0.0-denext.25); WPT
-`css/geometry/structured-serialization.html` and the `OffscreenCanvas` /
-non-transferable platform object cases of the structured-clone, messagechannel
-and worker suites (expectations updated). Ende's change to its global-interface
-sweep test is left out: that test belongs to an Ende commit not carried here. -
-Node tests enabled: none known.
+     `structuredClone ImageData and ImageBitmap`,
+     `structuredClone keeps a 16-bit ImageBitmap's depth`, the `OffscreenCanvas`
+     transfer tests and the worker round trips (all fail on 3.0.0-denext.25);
+     WPT `css/geometry/structured-serialization.html` and the `OffscreenCanvas`
+     / non-transferable platform object cases of the structured-clone,
+     messagechannel and worker suites (expectations updated). Ende's change to
+     its global-interface sweep test is left out: that test belongs to an Ende
+     commit not carried here. - Node tests enabled: none known.
 
-5NN. **`fix(ext/web)`: `Symbol.toStringTag` lives on the interface prototypes**
-(port of theende/ende b34bf4f063, MIT, from denoland/deno#37125; part of issue
-denoland/deno#37107; `ext/web/02_event.js`, `runtime/js/11_workers.js`,
-`ext/web/01_broadcast_channel.js`, `ext/fetch/27_eventsource.js`,
-`runtime/js/98_global_scope_window.js`). `CustomEvent`, `ErrorEvent`,
-`MessageEvent`, `ProgressEvent`, `PromiseRejectionEvent` and `Worker` set the
-tag as an own field of every instance; it is now a non-writable, non-enumerable
-property of the prototype, as Web IDL requires, and `BroadcastChannel`,
-`CloseEvent`, `EventSource` and `Navigator` get the tag they lacked. -
-User-facing note: `Object.prototype.toString.call(new CloseEvent("x"))` is
-`[object CloseEvent]`; instances no longer carry an own `Symbol.toStringTag`. -
-Tests: `event_test.ts`'s `interfacePrototypesHaveToStringTag` (fails on
-3.0.0-denext.25). - Node tests enabled: none.
+520. **`fix(ext/web)`: `Symbol.toStringTag` lives on the interface prototypes**
+     (port of theende/ende b34bf4f063, MIT, from denoland/deno#37125; part of
+     issue denoland/deno#37107; `ext/web/02_event.js`,
+     `runtime/js/11_workers.js`, `ext/web/01_broadcast_channel.js`,
+     `ext/fetch/27_eventsource.js`, `runtime/js/98_global_scope_window.js`).
+     `CustomEvent`, `ErrorEvent`, `MessageEvent`, `ProgressEvent`,
+     `PromiseRejectionEvent` and `Worker` set the tag as an own field of every
+     instance; it is now a non-writable, non-enumerable property of the
+     prototype, as Web IDL requires, and `BroadcastChannel`, `CloseEvent`,
+     `EventSource` and `Navigator` get the tag they lacked. - User-facing note:
+     `Object.prototype.toString.call(new CloseEvent("x"))` is
+     `[object CloseEvent]`; instances no longer carry an own
+     `Symbol.toStringTag`. - Tests: `event_test.ts`'s
+     `interfacePrototypesHaveToStringTag` (fails on 3.0.0-denext.25). - Node
+     tests enabled: none.
 
-5NN. **`fix(ext)`: `Symbol.toStringTag` on the remaining interface prototypes**
-(port of theende/ende 336dd588b5, MIT; issue denoland/deno#37107, no upstream
-PR; `ext/canvas`, `ext/image`, `ext/webgpu/01_webgpu.js`, `ext/webstorage`,
-`runtime/js/97_navigator_user_agent_data.js`,
-`runtime/js/98_global_scope_worker.js`). `ImageBitmap`,
-`ImageBitmapRenderingContext`, `OffscreenCanvas`, `Storage`, `WorkerNavigator`,
-`NavigatorUAData` and the WebGPU interfaces (`GPUError` and its subclasses
-included) had no tag, so their instances reported `[object Object]` or a parent
-interface. - Tests: `globals_test.ts`'s `interfacePrototypesHaveToStringTag` and
-`workerInterfacePrototypesHaveToStringTag`, `webgpu_test.ts`'s
-`webgpuInterfacePrototypesHaveToStringTag` (no GPU needed; all fail on
-3.0.0-denext.25). - Node tests enabled: none.
+521. **`fix(ext)`: `Symbol.toStringTag` on the remaining interface prototypes**
+     (port of theende/ende 336dd588b5, MIT; issue denoland/deno#37107, no
+     upstream PR; `ext/canvas`, `ext/image`, `ext/webgpu/01_webgpu.js`,
+     `ext/webstorage`, `runtime/js/97_navigator_user_agent_data.js`,
+     `runtime/js/98_global_scope_worker.js`). `ImageBitmap`,
+     `ImageBitmapRenderingContext`, `OffscreenCanvas`, `Storage`,
+     `WorkerNavigator`, `NavigatorUAData` and the WebGPU interfaces (`GPUError`
+     and its subclasses included) had no tag, so their instances reported
+     `[object Object]` or a parent interface. - Tests: `globals_test.ts`'s
+     `interfacePrototypesHaveToStringTag` and
+     `workerInterfacePrototypesHaveToStringTag`, `webgpu_test.ts`'s
+     `webgpuInterfacePrototypesHaveToStringTag` (no GPU needed; all fail on
+     3.0.0-denext.25). - Node tests enabled: none.
 
-5NN. **`fix(ext/web)`: the global scope interfaces' `Symbol.toStringTag` is a
-data property** (port of theende/ende 0b43d97ae3, MIT, Ende's follow-up to
-denoland/deno#37125; issue denoland/deno#37107;
-`ext/web/04_global_interfaces.js`). `Window`, `WorkerGlobalScope` and
-`DedicatedWorkerGlobalScope` defined the tag as a getter; Web IDL makes it a
-non-writable, non-enumerable, configurable data property.
-`Object.prototype.toString.call(globalThis)` is unchanged. - Tests:
-`globals_test.ts`'s `windowPrototypeHasToStringTag` and
-`workerGlobalScopePrototypesHaveToStringTag` (both fail on 3.0.0-denext.25). -
-Node tests enabled: none.
+522. **`fix(ext/web)`: the global scope interfaces' `Symbol.toStringTag` is a
+     data property** (port of theende/ende 0b43d97ae3, MIT, Ende's follow-up to
+     denoland/deno#37125; issue denoland/deno#37107;
+     `ext/web/04_global_interfaces.js`). `Window`, `WorkerGlobalScope` and
+     `DedicatedWorkerGlobalScope` defined the tag as a getter; Web IDL makes it
+     a non-writable, non-enumerable, configurable data property.
+     `Object.prototype.toString.call(globalThis)` is unchanged. - Tests:
+     `globals_test.ts`'s `windowPrototypeHasToStringTag` and
+     `workerGlobalScopePrototypesHaveToStringTag` (both fail on
+     3.0.0-denext.25). - Node tests enabled: none.
 
-5NN. **`fix(lint)`: lint plugin specifiers resolve through the import map**
-(port of theende/ende e722926a34, MIT, a cherry-pick of upstream commit
-0821f5c3ca71 for denoland/deno#37085; `libs/config/workspace/mod.rs`,
-`cli/tools/lint/mod.rs`, `cli/lsp/lint.rs`, `cli/args/mod.rs`). A plugin
-configured as `"lint": { "plugins": ["lume/lint.ts"] }` was always read as a
-local path, even when the workspace import map mapped `lume/` elsewhere. Plugin
-specifiers and `!` exclusions now resolve through the workspace's merged import
-map in the CLI, watch mode and the language server, and the resolved URLs are
-deduplicated. An unmapped bare specifier still resolves as a path without a
-leading `./`; a blocked (null) import map entry is an error instead of a
-fallback to a path. - Tests: `tests/specs/lint/lint_plugin_import_map` (an
-`imports` map in deno.json and an external `importMap`), and the
-`test_lint_plugins_import_map_*` config tests (with the upstream `npm:` plugin
-case Ende dropped). - Node tests enabled: none.
+523. **`fix(lint)`: lint plugin specifiers resolve through the import map**
+     (port of theende/ende e722926a34, MIT, a cherry-pick of upstream commit
+     0821f5c3ca71 for denoland/deno#37085; `libs/config/workspace/mod.rs`,
+     `cli/tools/lint/mod.rs`, `cli/lsp/lint.rs`, `cli/args/mod.rs`). A plugin
+     configured as `"lint": { "plugins": ["lume/lint.ts"] }` was always read as
+     a local path, even when the workspace import map mapped `lume/` elsewhere.
+     Plugin specifiers and `!` exclusions now resolve through the workspace's
+     merged import map in the CLI, watch mode and the language server, and the
+     resolved URLs are deduplicated. An unmapped bare specifier still resolves
+     as a path without a leading `./`; a blocked (null) import map entry is an
+     error instead of a fallback to a path. - Tests:
+     `tests/specs/lint/lint_plugin_import_map` (an `imports` map in deno.json
+     and an external `importMap`), and the `test_lint_plugins_import_map_*`
+     config tests (with the upstream `npm:` plugin case Ende dropped). - Node
+     tests enabled: none.
 
-5NN. **`fix(upgrade)`: `deno upgrade` refuses to overwrite a dpkg-installed
-executable** (port of theende/ende bccc4c174e, MIT; issue denoland/deno#37099,
-no upstream PR; `cli/tools/upgrade.rs`). `sudo deno upgrade` on an apt-installed
-binary overwrote the packaged file, so dpkg kept reporting the old version and
-apt offered the same "upgrade" again. On Linux the running executable is looked
-up in the dpkg file lists (`/var/lib/dpkg/info/*.list`, following symlinks for
-merged-/usr systems) and, if a package owns it, the upgrade stops with a message
-naming the package. `--output` still writes anywhere. denext's builds refuse
-`deno upgrade` before this check, so it matters only for a build without the
-denext marker. - Tests: `upgrade.rs`'s `find_dpkg_owner_matches_listed_exe` and
-`find_dpkg_owner_follows_symlinked_dirs`. - Node tests enabled: none.
+524. **`fix(upgrade)`: `deno upgrade` refuses to overwrite a dpkg-installed
+     executable** (port of theende/ende bccc4c174e, MIT; issue
+     denoland/deno#37099, no upstream PR; `cli/tools/upgrade.rs`).
+     `sudo deno upgrade` on an apt-installed binary overwrote the packaged file,
+     so dpkg kept reporting the old version and apt offered the same "upgrade"
+     again. On Linux the running executable is looked up in the dpkg file lists
+     (`/var/lib/dpkg/info/*.list`, following symlinks for merged-/usr systems)
+     and, if a package owns it, the upgrade stops with a message naming the
+     package. `--output` still writes anywhere. denext's builds refuse
+     `deno upgrade` before this check, so it matters only for a build without
+     the denext marker. - Tests: `upgrade.rs`'s
+     `find_dpkg_owner_matches_listed_exe` and
+     `find_dpkg_owner_follows_symlinked_dirs`. - Node tests enabled: none.
 
-5NN. **`fix(ext/web)`: inspecting an AbortSignal, AbortController, Blob or File
-prototype doesn't throw** (port of theende/ende 7dfd1f8248, MIT, from
-denoland/deno#37101; `ext/web/03_abort_signal.js`, `ext/web/09_file.js`).
-Inspecting an uninitialized subclass prototype or `Object.create(X.prototype)`
-threw "Illegal invocation": the inspect hook took prototype ancestry as leave to
-evaluate getters that also need the WebIDL brand. The hooks now require the
-brand too, so prototypes show accessors while instances (subclass instances
-included) show values. - Tests: `console_test.ts`'s
-`consoleInspectAbortSignalPrototype`, `consoleInspectAbortControllerPrototype`,
-`consoleInspectBlobPrototype` and `consoleInspectFilePrototype`. - Node tests
-enabled: none.
+525. **`fix(ext/web)`: inspecting an AbortSignal, AbortController, Blob or File
+     prototype doesn't throw** (port of theende/ende 7dfd1f8248, MIT, from
+     denoland/deno#37101; `ext/web/03_abort_signal.js`, `ext/web/09_file.js`).
+     Inspecting an uninitialized subclass prototype or
+     `Object.create(X.prototype)` threw "Illegal invocation": the inspect hook
+     took prototype ancestry as leave to evaluate getters that also need the
+     WebIDL brand. The hooks now require the brand too, so prototypes show
+     accessors while instances (subclass instances included) show values. -
+     Tests: `console_test.ts`'s `consoleInspectAbortSignalPrototype`,
+     `consoleInspectAbortControllerPrototype`, `consoleInspectBlobPrototype` and
+     `consoleInspectFilePrototype`. - Node tests enabled: none.
 
-5NN. **`fix(ext/web)`: inspecting an interface prototype doesn't throw** (port
-of theende/ende ebd4941f2b, MIT; issue denoland/deno#36511, no upstream PR;
-`ext/web/01_console.js`, `ext/web/00_url.js`, `ext/web/06_streams.js`,
-`ext/web/12_location.js`, `ext/web/13_message_port.js`,
-`ext/fetch/20_headers.js`, `ext/fetch/21_formdata.js`,
-`ext/webgpu/01_webgpu.js`). Inspecting a subclass prototype or
-`Object.create(X.prototype)` threw for some 80 interfaces (URL, the streams,
-Request, Response, TextEncoder / TextDecoder, DOMException, the geometry types,
-every WebGPU interface, ...), and some base prototypes threw too; the stream
-readers and writers also left an unhandled rejection from their `closed` /
-`ready` getters. `createFilteredInspectProxy` now shows a getter's accessor when
-evaluating it throws, and the hooks that evaluate promise getters or don't use
-the proxy (Headers, FormData, URLSearchParams, ReadableStream, MessagePort,
-WorkerLocation, the WebGPU setlike types) check the WebIDL brand or the instance
-state first. Real instances print as before. - Tests: `console_test.ts`'s
-`consoleInspectInterfacePrototypes` and
-`consoleInspectInterfacePrototypesInWorker` (a sweep of every interface on the
-global) and `consoleInspectBrandedInstancesStillShowValues`. - Node tests
-enabled: none.
+526. **`fix(ext/web)`: inspecting an interface prototype doesn't throw** (port
+     of theende/ende ebd4941f2b, MIT; issue denoland/deno#36511, no upstream PR;
+     `ext/web/01_console.js`, `ext/web/00_url.js`, `ext/web/06_streams.js`,
+     `ext/web/12_location.js`, `ext/web/13_message_port.js`,
+     `ext/fetch/20_headers.js`, `ext/fetch/21_formdata.js`,
+     `ext/webgpu/01_webgpu.js`). Inspecting a subclass prototype or
+     `Object.create(X.prototype)` threw for some 80 interfaces (URL, the
+     streams, Request, Response, TextEncoder / TextDecoder, DOMException, the
+     geometry types, every WebGPU interface, ...), and some base prototypes
+     threw too; the stream readers and writers also left an unhandled rejection
+     from their `closed` / `ready` getters. `createFilteredInspectProxy` now
+     shows a getter's accessor when evaluating it throws, and the hooks that
+     evaluate promise getters or don't use the proxy (Headers, FormData,
+     URLSearchParams, ReadableStream, MessagePort, WorkerLocation, the WebGPU
+     setlike types) check the WebIDL brand or the instance state first. Real
+     instances print as before. - Tests: `console_test.ts`'s
+     `consoleInspectInterfacePrototypes` and
+     `consoleInspectInterfacePrototypesInWorker` (a sweep of every interface on
+     the global) and `consoleInspectBrandedInstancesStillShowValues`. - Node
+     tests enabled: none.
 
-5NN. **`fix(ext/webidl)`: a sequence conversion stops on any truthy `done`**
-(port of theende/ende 6cb5eefc5f, MIT; no upstream PR;
-`ext/webidl/00_webidl.js`, `ext/web/00_url.js`). Converting an iterable to a Web
-IDL sequence stopped only on `done === true`; IteratorComplete is
-ToBoolean(done), so a result with `done: 1` was taken as a value and iteration
-ran past the end. That affected every `sequence<>` argument (Headers init, Blob
-and File parts, the `structuredClone` transfer list, ...), and the
-URLSearchParams constructor had its own copy of the check. - Tests:
-`numberDoneIterable` in `test_util.ts`, used by `headers_test.ts`,
-`url_search_params_test.ts`, `blob_test.ts` and `structured_clone_test.ts`'s
-`structuredClone transfer list iterator done is ToBoolean`. - Node tests
-enabled: none.
+527. **`fix(ext/webidl)`: a sequence conversion stops on any truthy `done`**
+     (port of theende/ende 6cb5eefc5f, MIT; no upstream PR;
+     `ext/webidl/00_webidl.js`, `ext/web/00_url.js`). Converting an iterable to
+     a Web IDL sequence stopped only on `done === true`; IteratorComplete is
+     ToBoolean(done), so a result with `done: 1` was taken as a value and
+     iteration ran past the end. That affected every `sequence<>` argument
+     (Headers init, Blob and File parts, the `structuredClone` transfer list,
+     ...), and the URLSearchParams constructor had its own copy of the check. -
+     Tests: `numberDoneIterable` in `test_util.ts`, used by `headers_test.ts`,
+     `url_search_params_test.ts`, `blob_test.ts` and
+     `structured_clone_test.ts`'s
+     `structuredClone transfer list iterator done is ToBoolean`. - Node tests
+     enabled: none.
 
-5NN. **`fix(ext/web)`: more platform objects refuse `structuredClone`** (port of
-theende/ende 8e05435521, MIT; issue denoland/deno#37108, no upstream PR;
-`ext/cache`, `ext/canvas`, `ext/web`, `ext/webgpu`, `ext/websocket`,
-`ext/webstorage`, `runtime/js`). CacheStorage, Cache, LockManager, Lock,
-AbortController, Location / WorkerLocation, Navigator / WorkerNavigator /
-NavigatorUAData, Storage, the stream readers, writers and controllers,
-WebSocketStream, the WebTransport interfaces, the canvas contexts and every
-WebGPU interface are marked like URL and Headers, so they throw `DataCloneError`
-at the top level and nested in a value. `deno_webstorage` now depends on
-`deno_web` for the marker. - Tests: `structured_clone_test.ts`'s
-`structuredClone rejects more non-serializable platform objects` and the sweep
-`structuredClone rejects every non-serializable interface` (main scope and
-worker), which expects every capitalized global to refuse cloning unless it is
-an ECMAScript built-in or `[Serializable]`, so a new interface has to be
-classified. - Node tests enabled: none.
+528. **`fix(ext/web)`: more platform objects refuse `structuredClone`** (port of
+     theende/ende 8e05435521, MIT; issue denoland/deno#37108, no upstream PR;
+     `ext/cache`, `ext/canvas`, `ext/web`, `ext/webgpu`, `ext/websocket`,
+     `ext/webstorage`, `runtime/js`). CacheStorage, Cache, LockManager, Lock,
+     AbortController, Location / WorkerLocation, Navigator / WorkerNavigator /
+     NavigatorUAData, Storage, the stream readers, writers and controllers,
+     WebSocketStream, the WebTransport interfaces, the canvas contexts and every
+     WebGPU interface are marked like URL and Headers, so they throw
+     `DataCloneError` at the top level and nested in a value. `deno_webstorage`
+     now depends on `deno_web` for the marker. - Tests:
+     `structured_clone_test.ts`'s
+     `structuredClone rejects more non-serializable platform objects` and the
+     sweep `structuredClone rejects every non-serializable interface` (main
+     scope and worker), which expects every capitalized global to refuse cloning
+     unless it is an ECMAScript built-in or `[Serializable]`, so a new interface
+     has to be classified. - Node tests enabled: none.
 
-5NN. **`fix(ext/web)`: `QuotaExceededError` and `WebSocketError` survive
-`structuredClone`** (port of theende/ende 316bddd9db, MIT; no upstream PR;
-`ext/web/01_dom_exception.js`, `ext/web/13_message_port.js`,
-`ext/websocket/02_websocketstream.js`). Both are `[Serializable]` and add their
-own fields to DOMException's serialization steps, but a clone came back as a
-plain DOMException without `quota`, `requested`, `closeCode` or `reason`.
-DOMException's serialization now lets a subclass set the serialized type and add
-its fields, and each subclass registers a deserializer that rebuilds it with the
-original stack; WebSocketError's lazily loaded module is loaded by the message
-port module when one arrives. - Tests: `structured_clone_test.ts`'s DOMException
-subclass tests (cloned directly and through a fresh worker); WPT
-`structuredclone_0.html`'s two QuotaExceededError cases (expectations updated).
+529. **`fix(ext/web)`: `QuotaExceededError` and `WebSocketError` survive
+     `structuredClone`** (port of theende/ende 316bddd9db, MIT; no upstream PR;
+     `ext/web/01_dom_exception.js`, `ext/web/13_message_port.js`,
+     `ext/websocket/02_websocketstream.js`). Both are `[Serializable]` and add
+     their own fields to DOMException's serialization steps, but a clone came
+     back as a plain DOMException without `quota`, `requested`, `closeCode` or
+     `reason`. DOMException's serialization now lets a subclass set the
+     serialized type and add its fields, and each subclass registers a
+     deserializer that rebuilds it with the original stack; WebSocketError's
+     lazily loaded module is loaded by the message port module when one
+     arrives. - Tests: `structured_clone_test.ts`'s DOMException subclass tests
+     (cloned directly and through a fresh worker); WPT
+     `structuredclone_0.html`'s two QuotaExceededError cases (expectations
+     updated).
 
 - Node tests enabled: none.
 
-5NN. **`fix(dts)`: `WebSocketCloseInfo`'s close code is `closeCode`** (port of
-theende/ende fd187f65a3, MIT; no upstream PR;
-`cli/tsc/dts/lib.deno.unstable.d.ts`). The type declared `code`, but the
-WebSocketStream spec and the runtime use `closeCode` (`close()` reads it,
-`closed` resolves with `{ closeCode, reason }`, `WebSocketError` takes it), so
-type-checked code had to cast, and `info.code` type-checked but was always
-`undefined`. - Tests: `tests/specs/check/websocket_close_info` (closes a stream,
-reads `closed`, constructs a `WebSocketError`); the structured clone test drops
-its cast. - Node tests enabled: none.
+530. **`fix(dts)`: `WebSocketCloseInfo`'s close code is `closeCode`** (port of
+     theende/ende fd187f65a3, MIT; no upstream PR;
+     `cli/tsc/dts/lib.deno.unstable.d.ts`). The type declared `code`, but the
+     WebSocketStream spec and the runtime use `closeCode` (`close()` reads it,
+     `closed` resolves with `{ closeCode, reason }`, `WebSocketError` takes it),
+     so type-checked code had to cast, and `info.code` type-checked but was
+     always `undefined`. - Tests: `tests/specs/check/websocket_close_info`
+     (closes a stream, reads `closed`, constructs a `WebSocketError`); the
+     structured clone test drops its cast. - Node tests enabled: none.
 
-5NN. **`fix(ext)`: `WebTransportError` and `GPUPipelineError` survive
-`structuredClone`** (port of theende/ende dd58815ef5, MIT; no upstream PR;
-`ext/web/webtransport.js`, `ext/webgpu/01_webgpu.js`,
-`ext/web/13_message_port.js`). Both are `[Serializable]` DOMException subclasses
-whose serialization steps add `source` / `streamErrorCode` (WebTransport) and
-`reason` (WebGPU), but a clone came back as a plain DOMException. They use the
-subclass hook of the previous item, with deserializers the message port module
-registers and that load the lazily loaded module on demand. - Tests:
-`structured_clone_test.ts`'s DOMException subclass tests now include both
-classes, cloned directly and echoed by a fresh worker. - Node tests enabled:
-none.
+531. **`fix(ext)`: `WebTransportError` and `GPUPipelineError` survive
+     `structuredClone`** (port of theende/ende dd58815ef5, MIT; no upstream PR;
+     `ext/web/webtransport.js`, `ext/webgpu/01_webgpu.js`,
+     `ext/web/13_message_port.js`). Both are `[Serializable]` DOMException
+     subclasses whose serialization steps add `source` / `streamErrorCode`
+     (WebTransport) and `reason` (WebGPU), but a clone came back as a plain
+     DOMException. They use the subclass hook of the previous item, with
+     deserializers the message port module registers and that load the lazily
+     loaded module on demand. - Tests: `structured_clone_test.ts`'s DOMException
+     subclass tests now include both classes, cloned directly and echoed by a
+     fresh worker. - Node tests enabled: none.
 
-5NN. **`fix(core)`: a cloned host object with no deserializer is a
-`DataCloneError`, not a crash** (port of theende/ende e38838e065, MIT; no
-upstream PR; `libs/core/ops_builtin_v8.rs`). When a cloned host object's type
-had no registered deserializer, `read_host_object` cast `undefined` to a
-function and panicked inside V8's callback. User code can make any object a host
-object of any type through the `Symbol.for("Deno.core.hostObject")` brand, so
-`structuredClone()` of such an object crashed the process. It now throws a data
-clone error (a TypeError in core, which `structuredClone` turns into a
-`DataCloneError`), and the deserializing ops (structured clone, deserialize and
-the broadcast channel's) rethrow an exception a deserializer threw instead of
-replacing it with "could not deserialize value". - Tests:
-`libs/core/runtime/tests/misc.rs`'s `structured_clone_without_a_deserializer`
-and the matching `structured_clone_test.ts` case (both crashed the process
-before). - Node tests enabled: none.
+532. **`fix(core)`: a cloned host object with no deserializer is a
+     `DataCloneError`, not a crash** (port of theende/ende e38838e065, MIT; no
+     upstream PR; `libs/core/ops_builtin_v8.rs`). When a cloned host object's
+     type had no registered deserializer, `read_host_object` cast `undefined` to
+     a function and panicked inside V8's callback. User code can make any object
+     a host object of any type through the `Symbol.for("Deno.core.hostObject")`
+     brand, so `structuredClone()` of such an object crashed the process. It now
+     throws a data clone error (a TypeError in core, which `structuredClone`
+     turns into a `DataCloneError`), and the deserializing ops (structured
+     clone, deserialize and the broadcast channel's) rethrow an exception a
+     deserializer threw instead of replacing it with "could not deserialize
+     value". - Tests: `libs/core/runtime/tests/misc.rs`'s
+     `structured_clone_without_a_deserializer` and the matching
+     `structured_clone_test.ts` case (both crashed the process before). - Node
+     tests enabled: none.
 
-5NN. **`fix(ext/webrtc,ext/node)`: inspecting the fork's WebRTC, media and
-`Buffer` prototypes doesn't throw** (fork; follows the port of
-denoland/deno#36511; `ext/webrtc/01_webrtc.js`,
-`ext/webrtc/02_media_devices.js`, `ext/webrtc/03_encoded_transform.js`,
-`ext/node/polyfills/internal/buffer.mjs`). The interface-prototype sweep found
-inspect hooks that read internal state on a prototype or an `Object.create()`
-object: `RTCPeerConnection`, `RTCDataChannel`, `MediaStreamTrack`,
-`RTCEncodedVideoFrame` / `RTCEncodedAudioFrame` and `MediaDeviceInfo` /
-`InputDeviceInfo` threw "Illegal invocation" or a TypeError, and Node's `Buffer`
-inspect read `TypedArray.prototype.length`. They now print `X {}` for an object
-without the WebIDL brand (a non-Uint8Array for `Buffer`); real instances print
-as before. - Tests: `console_test.ts`'s `consoleInspectInterfacePrototypes` and
-`consoleInspectInterfacePrototypesInWorker` (failed on these before). - Node
-tests enabled: none.
+533. **`fix(ext/webrtc,ext/node)`: inspecting the fork's WebRTC, media and
+     `Buffer` prototypes doesn't throw** (fork; follows the port of
+     denoland/deno#36511; `ext/webrtc/01_webrtc.js`,
+     `ext/webrtc/02_media_devices.js`, `ext/webrtc/03_encoded_transform.js`,
+     `ext/node/polyfills/internal/buffer.mjs`). The interface-prototype sweep
+     found inspect hooks that read internal state on a prototype or an
+     `Object.create()` object: `RTCPeerConnection`, `RTCDataChannel`,
+     `MediaStreamTrack`, `RTCEncodedVideoFrame` / `RTCEncodedAudioFrame` and
+     `MediaDeviceInfo` / `InputDeviceInfo` threw "Illegal invocation" or a
+     TypeError, and Node's `Buffer` inspect read `TypedArray.prototype.length`.
+     They now print `X {}` for an object without the WebIDL brand (a
+     non-Uint8Array for `Buffer`); real instances print as before. - Tests:
+     `console_test.ts`'s `consoleInspectInterfacePrototypes` and
+     `consoleInspectInterfacePrototypesInWorker` (failed on these before). -
+     Node tests enabled: none.
 
-5NN. **`fix(ext/webrtc,ext/midi)`: the fork's non-serializable WebRTC, media and
-MIDI interfaces refuse `structuredClone`** (fork; follows the port of
-theende/ende 8e05435521; `ext/webrtc/01_webrtc.js`,
-`ext/webrtc/02_media_devices.js`, `ext/webrtc/03_encoded_transform.js`,
-`ext/webrtc/04_sframe.js`, `ext/webrtc/06_identity.js`, `ext/midi/01_midi.js`).
-The clone sweep found interfaces that aren't `[Serializable]` in their specs but
-cloned as `{}`: `RTCSessionDescription`, `RTCIceCandidate`,
-`RTCIceCandidatePair`, `RTCError`, `RTCStatsReport`, `RTCRtpSender` /
-`RTCRtpReceiver` / `RTCRtpTransceiver`, `RTCRtpScriptTransform`,
-`RTCRtpSFrameEncryptor`, `SFrameEncryptorStream`, `RTCIdentityAssertion`,
-`OverconstrainedError`, `MediaDeviceInfo` / `InputDeviceInfo` and `MIDIInputMap`
-/ `MIDIOutputMap`. They are marked like the Web platform interfaces and throw
-`DataCloneError`. `RTCEncodedVideoFrame` / `RTCEncodedAudioFrame` are
-`[Serializable]` and stay cloneable; the sweep lists them, and skips Node's
-`Buffer` and the WebGPU constant namespaces, which aren't interfaces. -
-User-facing note: `structuredClone(new RTCError(...))` and
-`structuredClone(new OverconstrainedError(...))` throw `DataCloneError` (neither
-is `[Serializable]`) instead of returning a plain `DOMException`. - Tests:
-`structured_clone_test.ts`'s
-`structuredClone rejects every non-serializable interface` (main scope and
-worker; failed on these before). - Node tests enabled: none.
+534. **`fix(ext/webrtc,ext/midi)`: the fork's non-serializable WebRTC, media and
+     MIDI interfaces refuse `structuredClone`** (fork; follows the port of
+     theende/ende 8e05435521; `ext/webrtc/01_webrtc.js`,
+     `ext/webrtc/02_media_devices.js`, `ext/webrtc/03_encoded_transform.js`,
+     `ext/webrtc/04_sframe.js`, `ext/webrtc/06_identity.js`,
+     `ext/midi/01_midi.js`). The clone sweep found interfaces that aren't
+     `[Serializable]` in their specs but cloned as `{}`:
+     `RTCSessionDescription`, `RTCIceCandidate`, `RTCIceCandidatePair`,
+     `RTCError`, `RTCStatsReport`, `RTCRtpSender` / `RTCRtpReceiver` /
+     `RTCRtpTransceiver`, `RTCRtpScriptTransform`, `RTCRtpSFrameEncryptor`,
+     `SFrameEncryptorStream`, `RTCIdentityAssertion`, `OverconstrainedError`,
+     `MediaDeviceInfo` / `InputDeviceInfo` and `MIDIInputMap` / `MIDIOutputMap`.
+     They are marked like the Web platform interfaces and throw
+     `DataCloneError`. `RTCEncodedVideoFrame` / `RTCEncodedAudioFrame` are
+     `[Serializable]` and stay cloneable; the sweep lists them, and skips Node's
+     `Buffer` and the WebGPU constant namespaces, which aren't interfaces. -
+     User-facing note: `structuredClone(new RTCError(...))` and
+     `structuredClone(new OverconstrainedError(...))` throw `DataCloneError`
+     (neither is `[Serializable]`) instead of returning a plain
+     `DOMException`. - Tests: `structured_clone_test.ts`'s
+     `structuredClone rejects every non-serializable interface` (main scope and
+     worker; failed on these before). - Node tests enabled: none.
 
-516. **`fix(node/net)`: on Windows, a named-pipe socket that ends reaches its
-     peer as EOF** (runtime; `libs/core/uv_compat/pipe.rs`; tests say item 5NN
-     until the train numbers it). A Windows named pipe has no half-close, and
-     `uv_shutdown` on one only reported success: the pipe stayed open, so a peer
-     that kept reading never saw the end. A server that answered with
-     `socket.end()` and closed itself (the usual pattern, and
+535. **`fix(node/net)`: on Windows, a named-pipe socket that ends reaches its
+     peer as EOF** (runtime; `libs/core/uv_compat/pipe.rs`). A Windows named
+     pipe has no half-close, and `uv_shutdown` on one only reported success: the
+     pipe stayed open, so a peer that kept reading never saw the end. A server
+     that answered with `socket.end()` and closed itself (the usual pattern, and
      `async-hooks/test-pipeconnectwrap.js` and `test-graph.pipeconnect.js`)
      waited for the client's EOF, the client for the server's, and the process
      never exited. libuv's answer, now copied: once a named pipe has shut down,
@@ -21876,23 +21891,23 @@ worker; failed on these before). - Node tests enabled: none.
      - Node tests enabled: `async-hooks/test-pipeconnectwrap.js` and
        `async-hooks/test-graph.pipeconnect.js` on Windows.
 
-517. **`fix(node/child_process)`: on Windows, a large write to an extra stdio
+536. **`fix(node/child_process)`: on Windows, a large write to an extra stdio
      pipe right before the writer exits arrives whole** (runtime;
-     `libs/core/uv_compat/pipe.rs`, `ext/io/bi_pipe.rs`; tests say item 5NN
-     until the train numbers it). Item 358 made the IPC channel wait for its
-     pipe writes to complete; every other named-pipe writer still reported a
-     write done as soon as tokio (mio) had queued the overlapped `WriteFile`. A
-     child that wrote more than the pipe's 64 KiB buffer to an extra `stdio`
-     pipe (`new net.Socket({ fd: 3 })`) and then ended had nothing keeping it
-     alive, and its exit cancelled the rest: the parent read part of the data.
-     As libuv does, a write request on a named pipe now completes only once its
-     `WriteFile` has: the pipe's write readiness is cleared when the write is
-     handed to mio, and the request's callback runs when mio makes the pipe
-     writable again (the write's completion), so the pending request keeps the
-     handle, and the process, alive. `uv_try_write` on a named pipe returns
-     `UV_EAGAIN`, as libuv's does, so every write takes that path, and a
-     shutdown waits for the write in flight. `deno_io`'s `BiPipeResource` writes
-     with `write_all_completed` on Windows too, as the IPC channel does.
+     `libs/core/uv_compat/pipe.rs`, `ext/io/bi_pipe.rs`). Item 358 made the IPC
+     channel wait for its pipe writes to complete; every other named-pipe writer
+     still reported a write done as soon as tokio (mio) had queued the
+     overlapped `WriteFile`. A child that wrote more than the pipe's 64 KiB
+     buffer to an extra `stdio` pipe (`new net.Socket({ fd: 3 })`) and then
+     ended had nothing keeping it alive, and its exit cancelled the rest: the
+     parent read part of the data. As libuv does, a write request on a named
+     pipe now completes only once its `WriteFile` has: the pipe's write
+     readiness is cleared when the write is handed to mio, and the request's
+     callback runs when mio makes the pipe writable again (the write's
+     completion), so the pending request keeps the handle, and the process,
+     alive. `uv_try_write` on a named pipe returns `UV_EAGAIN`, as libuv's does,
+     so every write takes that path, and a shutdown waits for the write in
+     flight. `deno_io`'s `BiPipeResource` writes with `write_all_completed` on
+     Windows too, as the IPC channel does.
      - User-facing note: on Windows, a large write to an extra `stdio` pipe just
        before a process exits is no longer cut short.
      - Tests: unit_node `child_process_test.ts`
@@ -21900,10 +21915,9 @@ worker; failed on these before). - Node tests enabled: none.
        and ends while the parent keeps its thread busy for 1.5 s).
      - Node tests enabled: none.
 
-518. **`fix(node/child_process)`: on macOS, a socket sent to a child and closed
+537. **`fix(node/child_process)`: on macOS, a socket sent to a child and closed
      at once reaches the child open** (runtime; `ext/process/ipc.rs`,
-     `ext/node/ops/ipc.rs`, `ext/node/polyfills/internal/child_process.ts`;
-     tests say item 5NN until the train numbers it).
+     `ext/node/ops/ipc.rs`, `ext/node/polyfills/internal/child_process.ts`).
      `child.send(msg, socket,
      { keepOpen: true })` followed by
      `socket.destroy()` left the message in flight as the socket's only
@@ -21928,7 +21942,7 @@ worker; failed on these before). - Node tests enabled: none.
        holding a descriptor in flight; stock Deno 2.9.8 fails it every time on
        macOS).
 
-519. **`fix(core)`: a 1 ms timer fires after 1 ms, not on the next timer-wheel
+538. **`fix(core)`: a 1 ms timer fires after 1 ms, not on the next timer-wheel
      tick** (runtime; `libs/core/{reactor_tokio.rs,web_timeout.rs}`,
      `libs/core/runtime/jsruntime.rs`, `libs/core/Cargo.toml`). The user timer
      (`UserTimer`, behind `setTimeout` / `setInterval` and the uv timer wake-up)
@@ -21966,7 +21980,7 @@ worker; failed on these before). - Node tests enabled: none.
        (`expiry_delay_tests`), `tests/unit/timers_test.ts`
        (`chainedOneMillisecondTimersTakeAboutOneMillisecond`).
 
-520. **`fix(sandbox)`: loader variables an env file sets are held back across
+539. **`fix(sandbox)`: loader variables an env file sets are held back across
      the kernel sandbox's re-exec** (cli; `cli/util/env.rs`,
      `cli/sandbox/enforce.rs`, `cli/lib.rs`). The variables the dynamic loader
      and libc read when a program starts (`LD_*`, `DYLD_*`, `GCONV_PATH`,
@@ -21990,7 +22004,7 @@ worker; failed on these before). - Node tests enabled: none.
        the kernel sandbox).
      - Node tests enabled: none.
 
-521. **`fix(permissions)`: a dynamic `file:` import checks the resolved path, as
+540. **`fix(permissions)`: a dynamic `file:` import checks the resolved path, as
      a read does** (runtime; `runtime/permissions/lib.rs`).
      `PermissionsContainer::check_specifier` checked a dynamic `import()` of a
      `file:` URL against the read permission by the path as written.
@@ -22003,7 +22017,7 @@ worker; failed on these before). - Node tests enabled: none.
        unit `root_test.ts` `rootLinksStayInsideUnderScopedGrants` (an import in
        a worker with a scoped read).
 
-518. **`fix(permissions)`: a scoped grant's folder that is removed and made
+541. **`fix(permissions)`: a scoped grant's folder that is removed and made
      again is the grant's folder again** (runtime; Unix;
      `runtime/permissions/checked_open.rs`). Follow-up to item 467, whose
      race-safe opens keep each allow root's descriptor: it was opened once and
@@ -22048,7 +22062,7 @@ worker; failed on these before). - Node tests enabled: none.
        (both strategies: `openat2` and the component walk).
      - Node tests enabled: none.
 
-519. **`fix(permissions)`: on macOS a deny keeps the object it names in place**
+542. **`fix(permissions)`: on macOS a deny keeps the object it names in place**
      (CLI and runtime; macOS; `libs/sandbox/seatbelt.rs`). Seatbelt matches the
      path an access names when it is made, so a deny rule is about a name. The
      profiles that write deny rules (the cli profile of item 425, the deny
@@ -22088,7 +22102,7 @@ worker; failed on these before). - Node tests enabled: none.
        `tests/specs/kernel_sandbox/deny_only` `denies_stay_in_place_mac`.
      - Node tests enabled: none.
 
-520. **`fix(cli)`: an env file can't set the runtime's own file, socket and
+543. **`fix(cli)`: an env file can't set the runtime's own file, socket and
      confinement variables** (CLI; `cli/util/env.rs`,
      `cli/lib/kernel_apply.rs`). Upstream's env-file deny-list (Deno's tunnel
      variables: an env file configures the program, not Deno) gains the
@@ -22115,7 +22129,7 @@ worker; failed on these before). - Node tests enabled: none.
        `tests/specs/run/env_file_runtime_denylist`.
      - Node tests enabled: none.
 
-521. **`fix(kernel)`: a confined desktop app writes its own folders, not the
+544. **`fix(kernel)`: a confined desktop app writes its own folders, not the
      shared ones** (runtime; macOS and Linux; `cli/lib/kernel_desktop.rs`).
      Follow-up to item 504's engine paths, which are added to the kernel's grant
      whatever the app was granted.
@@ -22149,7 +22163,7 @@ worker; failed on these before). - Node tests enabled: none.
        toolkits' own are).
      - Node tests enabled: none.
 
-522. **`fix(kernel)`: the outside helper takes a `mailto:` URL's addressing and
+545. **`fix(kernel)`: the outside helper takes a `mailto:` URL's addressing and
      text fields only** (runtime; `libs/sandbox/outside.rs`). The helper that
      opens links for a confined desktop app (item 504) runs outside the sandbox
      and handed any `mailto:` query to the mail program; mail programs have
@@ -22164,7 +22178,7 @@ worker; failed on these before). - Node tests enabled: none.
        (extended).
      - Node tests enabled: none.
 
-523. **`perf(runtime)`: on Linux a watcher opened or closed inside a recursive
+546. **`perf(runtime)`: on Linux a watcher opened or closed inside a recursive
      watch no longer walks that watch's whole tree** (runtime; Linux and
      Android; `runtime/ops/fs_events.rs`). Follow-up to item 485's overlapping
      watches (inotify keeps one watch and one "recursive" mark per directory,
@@ -22198,7 +22212,7 @@ worker; failed on these before). - Node tests enabled: none.
      - Node tests enabled: none (`fs.watch` shares the watcher; behaviour is
        unchanged).
 
-524. **`fix(cache)`: pruning another version's cache database can't cross the
+547. **`fix(cache)`: pruning another version's cache database can't cross the
      moment that version opens it** (CLI;
      `cli/cache/{cache_db_files,
      cache_db}.rs`). Follow-up to the
@@ -22225,7 +22239,7 @@ worker; failed on these before). - Node tests enabled: none.
        `prunes_only_stale_files_of_other_versions` now lists the lock file.
      - Node tests enabled: none.
 
-525. **`fix(permissions)`: only this runtime's kernel sandbox makes an
+548. **`fix(permissions)`: only this runtime's kernel sandbox makes an
      unreadable `.npmrc` count as absent** (CLI; `cli/sandbox/enforce.rs`,
      `libs/resolver/npmrc.rs`). A process the kernel sandbox confines treats an
      `.npmrc` it can't read as absent (item 425: the policy never makes it
@@ -22245,7 +22259,7 @@ worker; failed on these before). - Node tests enabled: none.
        root).
      - Node tests enabled: none.
 
-526. **`perf(permissions)`: `deno test` / `deno bench` with the kernel sandbox
+549. **`perf(permissions)`: `deno test` / `deno bench` with the kernel sandbox
      off skip the sandbox's coverage check** (CLI; `cli/sandbox/mod.rs`).
      `check_run` worked out how much of the command `enforce` covers (for `test`
      and `bench`: the workspace's test options and every member's permission
@@ -22256,7 +22270,7 @@ worker; failed on these before). - Node tests enabled: none.
        `test_bench` specs cover the modes that still compute it).
      - Node tests enabled: none.
 
-527. **`fix(fetch)`: `denyAddresses`' `"metadata"` preset names Azure's
+550. **`fix(fetch)`: `denyAddresses`' `"metadata"` preset names Azure's
      WireServer and Oracle Cloud's endpoint** (runtime;
      `ext/fetch/deny_addresses.rs`, `cli/tsc/dts/lib.deno.ns.d.ts`). Item 512's
      preset held `169.254.169.254`, `fd00:ec2::254` and `100.100.100.200`;
@@ -22265,7 +22279,7 @@ worker; failed on these before). - Node tests enabled: none.
      - Tests: `deny_addresses::tests::the_metadata_preset_names_each_endpoint`.
      - Node tests enabled: none.
 
-528. **`fix(permissions)`: Windows finds the folders it never labels from the
+551. **`fix(permissions)`: Windows finds the folders it never labels from the
      system, not only the environment** (runtime; Windows;
      `libs/sandbox/windows.rs`). The small tier refuses to label a write root
      Low when it is, or holds, the user's profile, or lies in the Windows or
@@ -22289,21 +22303,11 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN, 5NN,
-5NN, 5NN, 5NN, 5NN) are what the prebuilt `libdenort` carries. The CLI-side
-parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
-packaged app's launchers) are in the branch too, but a stock CLI does not run
-them; denext's own launcher provides that environment.
-
-506-510, 511, 512, 513, 515, 516, 517, 518) are what the prebuilt `libdenort`
-carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
-`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
-stock CLI does not run them; denext's own launcher provides that environment.
-
-506-510, 511, 512, 513, 515, 517) are what the prebuilt `libdenort` carries. The
-CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
-into a packaged app's launchers) are in the branch too, but a stock CLI does not
-run them; denext's own launcher provides that environment.
+506-510, 511, 512, 513, 515, 517, 518-538 and the runtime parts of 540-551) are
+what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
+`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
+in the branch too, but a stock CLI does not run them; denext's own launcher
+provides that environment.
 
 506-510, 511, 512, 513, 515, 518, 519, 521, 522, 523, 527, 528) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
