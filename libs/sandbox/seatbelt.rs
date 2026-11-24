@@ -129,12 +129,6 @@ pub fn profile_with_home_read(
   if home_read.is_some() {
     p.push_str(&format!("(deny {HOME_READ_OPS} {denied})\n"));
   }
-  // and they stay where they are (see `keep_in_place`)
-  let deny_filters: Vec<SbFilter> = deny_read
-    .iter()
-    .map(|path| SbFilter::Subpath(path.to_string_lossy().into_owned()))
-    .collect();
-  keep_in_place(&mut p, &deny_filters, &[], &[], &[]);
   p.push_str("(allow file-write*");
   for root in write_roots {
     p.push_str(&format!(" (subpath {})", quote(root)));
@@ -156,6 +150,14 @@ pub fn profile_with_home_read(
     }
     p.push_str(")\n");
   }
+  // and the denied paths stay where they are (see `keep_in_place`), after the
+  // write allows: the last rule that matches decides, so a write root that
+  // holds a denied path doesn't let it be moved or linked out
+  let deny_filters: Vec<SbFilter> = deny_read
+    .iter()
+    .map(|path| SbFilter::Subpath(path.to_string_lossy().into_owned()))
+    .collect();
+  keep_in_place(&mut p, &deny_filters, &[], &[], &[]);
   p.push_str("(allow file-ioctl)\n");
   p.push_str("(deny file-ioctl ");
   p.push_str(TTY_FILTERS);
@@ -1756,12 +1758,15 @@ mod tests {
       "{p}"
     );
     assert!(!p.contains("file-write-create"), "{p}");
-    // the allows come after
+    // the denies come after the allows: `file-link` is the same operation in
+    // both, and the last rule that matches decides (a denied path inside a
+    // write root can't be linked out)
     let allow = p.find("(allow file-write* ").unwrap();
     let link = p
       .find("(allow file-link (subpath \"/proj/node_modules\"))")
       .unwrap();
-    assert!(unlink < allow && unlink < link, "{p}");
+    let link_deny = p.find(&format!("(deny file-link {denied})\n")).unwrap();
+    assert!(unlink > allow && link_deny > link, "{p}");
     // no denies (a test's profile): no rule
     let p = profile(&[PathBuf::from("/proj")], &[], OsNet::Denied);
     assert!(!p.contains("file-write-unlink"), "{p}");

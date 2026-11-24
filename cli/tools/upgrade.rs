@@ -3672,6 +3672,9 @@ mod test {
     );
   }
 
+  // dpkg's file lists are named `<package>:<arch>.list`, a name NTFS reads
+  // as an alternate data stream; dpkg is Linux-only
+  #[cfg(unix)]
   #[test]
   fn find_dpkg_owner_matches_listed_exe() {
     let root = tempfile::TempDir::new().unwrap();
