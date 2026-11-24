@@ -21602,7 +21602,17 @@ instead of returning `{ e: {} }`. - Tests: `structured_clone_test.ts`'s
        non-serializable platform objects` and the
 nested `MessagePort` transfer cases (the first fails on 3.0.0-denext.25). - Node
 tests enabled: none known; `node:worker_threads` messages use the same
-serializer.
+serializer. Two Node behaviours kept on top of the port: a transferable host
+object (a `MessagePort`) in the message but not in the transfer list keeps
+Node's error ("Object that needs transfer was found in message but not listed in
+transferList") rather than the non-serializable one, and a prototype object that
+only inherits the marker (a subclass's `prototype`, such as the one of
+`class MockResponse extends Response {}`) clones as an ordinary object, nested
+too, as the top-level check already allowed. Tests: the unit tests named
+"postMessage reports a nested MessagePort missing from the transfer list" and
+"structuredClone clones the prototype of a non-serializable subclass", and
+Node's `test-worker-workerdata-messageport.js` and
+`test-worker-message-mark-as-uncloneable.js`.
 
 5NN. **`fix(ext/web)`: `structuredClone` clones the geometry interfaces,
 `ImageData` and `ImageBitmap`, and transfers `ImageBitmap` and

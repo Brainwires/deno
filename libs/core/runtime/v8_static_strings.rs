@@ -41,6 +41,7 @@ v8_static_strings!(
   MESSAGE = "message",
   NAME = "name",
   OPS = "ops",
+  PROTOTYPE = "prototype",
   RESOLVE = "resolve",
   SET_UP_ASYNC_STUB = "setUpAsyncStub",
   STACK = "stack",

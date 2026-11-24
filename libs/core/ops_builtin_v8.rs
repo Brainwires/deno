@@ -649,6 +649,41 @@ struct SerializeDeserialize<'a> {
     Option<Rc<RefCell<Vec<v8::SharedRef<v8::BackingStore>>>>>,
 }
 
+impl SerializeDeserialize<'_> {
+  /// Whether `object` is a platform object whose interface isn't
+  /// serializable: it carries the `Deno.nonSerializable` marker, which
+  /// classes install on their prototype. A prototype object itself (one that
+  /// is its constructor's `prototype`, such as a subclass's prototype) is not
+  /// a platform object and is cloned as an ordinary object, unless the marker
+  /// is its own property; this matches the top-level check in
+  /// ext/web/13_message_port.js.
+  fn is_non_serializable<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    object: v8::Local<'s, v8::Object>,
+  ) -> Option<bool> {
+    let Some(symbol) = self.non_serializable_brand else {
+      return Some(false);
+    };
+    if !object.has(scope, symbol.into())? {
+      return Some(false);
+    }
+    if object.has_own_property(scope, symbol.into())? {
+      return Some(true);
+    }
+    let key = v8_static_strings::CONSTRUCTOR.v8_string(scope).unwrap();
+    let constructor = object.get(scope, key.into())?;
+    if let Ok(constructor) = constructor.try_cast::<v8::Object>() {
+      let key = v8_static_strings::PROTOTYPE.v8_string(scope).unwrap();
+      let prototype = constructor.get(scope, key.into())?;
+      if prototype.strict_equals(object.into()) {
+        return Some(false);
+      }
+    }
+    Some(true)
+  }
+}
+
 impl v8::ValueSerializerImpl for SerializeDeserialize<'_> {
   #[allow(unused_variables, reason = "parameters required by trait")]
   fn throw_data_clone_error<'s, 'i>(
@@ -728,9 +763,7 @@ impl v8::ValueSerializerImpl for SerializeDeserialize<'_> {
     scope: &mut v8::PinScope<'s, 'i>,
     object: v8::Local<'s, v8::Object>,
   ) -> Option<bool> {
-    if let Some(symbol) = self.non_serializable_brand
-      && object.has(scope, symbol.into())?
-    {
+    if self.is_non_serializable(scope, object)? {
       return Some(true);
     }
     match self.host_object_brand {
@@ -768,11 +801,16 @@ impl v8::ValueSerializerImpl for SerializeDeserialize<'_> {
     }
     // A platform object that isn't serializable is rejected here, after the
     // transfer list: a transferable one (MessagePort is an EventTarget, and
-    // EventTarget is marked) must still be transferred.
-    let non_serializable = match self.non_serializable_brand {
+    // EventTarget is marked) must still be transferred. A transferable host
+    // object that isn't in the transfer list keeps the "Unsupported object
+    // type" message, which the message port layer reports as a transferable
+    // missing from the transfer list.
+    let transferable = match self.host_object_brand {
       Some(symbol) => object.has(scope, symbol.into())?,
       None => false,
     };
+    let non_serializable =
+      !transferable && self.is_non_serializable(scope, object)?;
     let message = if non_serializable {
       "Cannot clone object of unsupported type."
     } else {
