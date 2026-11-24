@@ -831,6 +831,50 @@ pub fn clamp(
   options.prompt = false;
 }
 
+impl GrantLayer {
+  /// Whether the layer refuses nothing but its denies: every allow a kernel
+  /// sandbox holds is unscoped, which is how a deny ceiling's grant is
+  /// written (`kernel_policy::deny_ceiling_options`).
+  pub fn refuses_only_its_denies(&self) -> bool {
+    fn all<T>(list: &Option<Vec<T>>) -> bool {
+      list.as_ref().is_some_and(|l| l.is_empty())
+    }
+    all(&self.read)
+      && all(&self.write)
+      && all(&self.ffi)
+      && all(&self.connect)
+      && all(&self.listen)
+      && all(&self.run)
+      && all(&self.env)
+      && all(&self.sys)
+  }
+}
+
+/// [`clamp`] for a process that may be the image its own deny ceiling
+/// re-executed (D1: `auto` enforcing a run's denies alone while a prompt
+/// can widen the rest). `own_deny_ceiling`: the plan this process started
+/// under is a deny ceiling's, as the image before it decided and handed
+/// over (never worked out again here from the flags, the environment or
+/// the terminals). The one layer it then inherited is its own, and refuses
+/// nothing but the denies ([`GrantLayer::refuses_only_its_denies`]), which
+/// no prompt lifts: prompting stays as the run set it, so this image
+/// decides the same mode as the one before it (which decided with the
+/// prompt on) and still asks. In every other process this is [`clamp`].
+pub fn clamp_under(
+  options: &mut PermissionsOptions,
+  layers: &[GrantLayer],
+  cwd: &Path,
+  own_deny_ceiling: bool,
+) {
+  let prompt = options.prompt;
+  clamp(options, layers, cwd);
+  if own_deny_ceiling
+    && matches!(layers, [own] if own.refuses_only_its_denies())
+  {
+    options.prompt = prompt;
+  }
+}
+
 fn clamp_one(options: &mut PermissionsOptions, layer: &GrantLayer, cwd: &Path) {
   let o = options;
   o.allow_read = clamp_paths(o.allow_read.take(), &layer.read, cwd);
@@ -1341,5 +1385,117 @@ mod tests {
     assert_eq!(o.allow_ffi, None);
     assert_eq!(o.allow_sys, None);
     assert!(!o.prompt);
+  }
+
+  /// The grant of `deno run --allow-ffi --allow-run=cat --deny-read=secret`
+  /// on a terminal: the rest is a prompt's to give.
+  fn prompting_run() -> PermissionsOptions {
+    let mut o = opts();
+    o.allow_ffi = Some(vec![]);
+    o.allow_run = s(&["cat"]);
+    o.deny_read = s(&["secret"]);
+    o
+  }
+
+  /// The layer the image before the re-exec hands down for `options` under
+  /// a deny ceiling (`cli/sandbox::check_run`, `enforce::carried_for`).
+  fn ceiling_layer(options: &PermissionsOptions, cwd: &Path) -> GrantLayer {
+    let layer = layer_for(
+      &crate::kernel_policy::deny_ceiling_options(options),
+      cwd,
+      Some(cwd.join("secret")),
+    );
+    assert!(layer.refuses_only_its_denies());
+    layer
+  }
+
+  // the image a deny ceiling re-executed inherits its own layer: the grant
+  // is unchanged and the prompt stays, so the grant it hands down in turn
+  // is the one it inherited
+  #[test]
+  fn own_deny_ceiling_keeps_the_grant_and_the_prompt() {
+    let cwd = tmp();
+    let first = prompting_run();
+    let layer = ceiling_layer(&first, &cwd);
+    let mut second = first.clone();
+    clamp_under(&mut second, std::slice::from_ref(&layer), &cwd, true);
+    assert_eq!(second, first);
+    assert!(second.prompt);
+    assert_eq!(ceiling_layer(&second, &cwd), layer);
+    // prompting the run turned off stays off
+    let mut quiet = first.clone();
+    quiet.prompt = false;
+    clamp_under(&mut quiet, std::slice::from_ref(&layer), &cwd, true);
+    assert!(!quiet.prompt);
+  }
+
+  // anywhere else a confined tree can't ask: a child of the ceiling's
+  // process (the plan isn't its own), a layer that scopes an allow, an
+  // ancestor's layer beside it, grants unknown
+  #[test]
+  fn prompt_is_off_outside_an_own_deny_ceiling() {
+    let cwd = tmp();
+    let first = prompting_run();
+    let layer = ceiling_layer(&first, &cwd);
+    let scoped = GrantLayer {
+      read: Some(vec![cwd.join("a")]),
+      ..layer.clone()
+    };
+    assert!(!scoped.refuses_only_its_denies());
+    assert!(!GrantLayer::default().refuses_only_its_denies());
+    for (name, layers, own_deny_ceiling) in [
+      ("a child of the ceiling", vec![layer.clone()], false),
+      ("a scoped layer", vec![scoped.clone()], true),
+      ("two layers", vec![layer.clone(), layer.clone()], true),
+      ("an ancestor's scope", vec![scoped, layer.clone()], true),
+      ("grants unknown", vec![GrantLayer::default()], true),
+    ] {
+      let mut o = first.clone();
+      clamp_under(&mut o, &layers, &cwd, own_deny_ceiling);
+      assert!(!o.prompt, "{name}");
+      let mut plain = first.clone();
+      clamp(&mut plain, &layers, &cwd);
+      assert_eq!(o, plain, "{name}");
+    }
+    // no layer: not confined, nothing changes
+    let mut o = first.clone();
+    clamp_under(&mut o, &[], &cwd, true);
+    assert_eq!(o, first);
+  }
+
+  // both images of a deny ceiling's run decide the same mode at R4 (the
+  // confined one refuses to start under a plan it wouldn't compile itself);
+  // with the prompt lost in the second, it compiled the whole grant instead
+  #[test]
+  fn both_images_of_a_deny_ceiling_decide_alike() {
+    use crate::kernel_sandbox::AutoStage;
+    use crate::kernel_sandbox::ModeInputs;
+    use crate::kernel_sandbox::RunKind;
+    use crate::kernel_sandbox::kernel_sandbox_mode;
+    let decide = |options: &PermissionsOptions| {
+      kernel_sandbox_mode(&ModeInputs {
+        kind: Some(RunKind::Run),
+        stage: Some(AutoStage::R4),
+        allow_all: crate::kernel_sandbox::options_allow_all(options),
+        has_deny: crate::kernel_sandbox::options_have_deny(options),
+        prompt: options.prompt,
+        terminals: true,
+        ..Default::default()
+      })
+      .unwrap()
+    };
+    let cwd = tmp();
+    let first = prompting_run();
+    let before = decide(&first);
+    assert!(before.deny_ceiling() && before.auto_chosen);
+    let layer = ceiling_layer(&first, &cwd);
+    let mut second = first.clone();
+    clamp_under(&mut second, std::slice::from_ref(&layer), &cwd, true);
+    assert_eq!(decide(&second), before);
+    // what the plain clamp did to it
+    let mut lost = first.clone();
+    clamp(&mut lost, std::slice::from_ref(&layer), &cwd);
+    let after = decide(&lost);
+    assert!(after.mode.fails_closed() && !after.deny_ceiling());
   }
 }

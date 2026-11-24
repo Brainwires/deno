@@ -1466,11 +1466,14 @@ impl CliOptions {
     }
     // denext: inside a kernel sandbox a confined ancestor handed down (and
     // the kernel confirmed), every deno intersects its permissions with the
-    // grants it runs under (DENEXT.md item 449)
-    crate::sandbox::inherit::clamp(
+    // grants it runs under (DENEXT.md item 449). The image a deny ceiling
+    // re-executed inherits its own layer, which refuses only the denies:
+    // its prompt stays, as the image before it decided (item 502)
+    crate::sandbox::inherit::clamp_under(
       &mut permissions_options,
       crate::sandbox::inherit::inherited_layers(),
       &self.initial_cwd,
+      crate::sandbox::enforce::started_under_a_deny_ceiling(),
     );
     Ok(permissions_options)
   }

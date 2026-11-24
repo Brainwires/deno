@@ -1354,6 +1354,41 @@ mod tests {
     }
   }
 
+  /// Only a plan whose macOS part is a deny ceiling's says so: the image it
+  /// re-executed keeps its prompt on that word alone.
+  #[test]
+  fn only_a_deny_only_plan_is_a_deny_ceiling() {
+    let plan = |macos: Option<MacosPlan>| crate::plan::EnforcePlan {
+      format: crate::plan::PLAN_FORMAT,
+      linux: None,
+      macos,
+      windows: None,
+      env_keep: None,
+      probe: None,
+      module_files: Vec::new(),
+      expanded: Vec::new(),
+      config_env: Vec::new(),
+      cache_overlay: None,
+      broker: None,
+      expanded_write: Vec::new(),
+      entries: Vec::new(),
+      member_configs: Vec::new(),
+      listed_dirs: Vec::new(),
+    };
+    assert!(!plan(None).is_deny_ceiling());
+    assert!(!plan(Some(cli_plan())).is_deny_ceiling());
+    let ceiling = plan(Some(MacosPlan {
+      deny_only: true,
+      ..cli_plan()
+    }));
+    assert!(ceiling.is_deny_ceiling());
+    // the word survives the hand-over to the next image
+    let handed: crate::plan::EnforcePlan =
+      serde_json::from_slice(&serde_json::to_vec(&ceiling).unwrap()).unwrap();
+    assert!(handed.is_deny_ceiling());
+    assert_eq!(handed, ceiling);
+  }
+
   /// A deny ceiling (D1 / D2): allow by default, the denies, the
   /// re-allows, the marker, and nothing else (no terminal, mach, process or
   /// network rule).

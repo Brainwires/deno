@@ -168,6 +168,13 @@ pub struct BrokerNet {
 }
 
 impl EnforcePlan {
+  /// Whether the plan is a deny ceiling's (D1 / D2): it refuses only the
+  /// run's denies ([`MacosPlan::deny_only`]; the only OS that holds one).
+  /// The image it re-executed reads its own decision from this.
+  pub fn is_deny_ceiling(&self) -> bool {
+    self.macos.as_ref().is_some_and(|macos| macos.deny_only)
+  }
+
   /// The plan without the lists the first image measured on the file
   /// system (module files, expanded entries): what two images compare.
   pub fn without_measured_lists(&self) -> Self {
