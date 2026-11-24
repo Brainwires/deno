@@ -205,9 +205,10 @@ Deno.test("structuredClone clones the prototype of a non-serializable subclass",
   class MockResponse extends Response {}
   class MockTarget extends EventTarget {}
   for (const Class of [MockResponse, MockTarget]) {
-    assertEquals(structuredClone(Class.prototype), {});
-    assertEquals(structuredClone({ value: Class.prototype }), { value: {} });
-    assertEquals(structuredClone([Class.prototype]), [{}]);
+    const proto: unknown = Class.prototype;
+    assertEquals(structuredClone(proto), {});
+    assertEquals(structuredClone({ value: proto }), { value: {} });
+    assertEquals(structuredClone([proto]), [{}]);
     for (const value of [new Class(), Object.create(Class.prototype)]) {
       assertEquals(
         assertThrows(() => structuredClone(value), DOMException).name,
