@@ -20230,12 +20230,21 @@ where the changes are discussed.
      next report). A packet the pacer's full queue refuses is counted
      (`PacerRefusals`, shared with the connection's `MediaState`) into the
      selected candidate pair's `packetsDiscardedOnSend` / `bytesDiscardedOnSend`
-     and logged (a warning at the start of each run of refusals).
+     and logged (a warning at the start of each run of refusals). Audio streams
+     are never paced (a small, steady rate that would otherwise wait behind a
+     video key frame in the one queue; libwebrtc sends it first), and the queue
+     is bounded in time as well as by its 4,096 packets: once the oldest held
+     packet has waited, the pacer releases at what lets the queue out by
+     `QUEUE_TIME_LIMIT` (2 s, libwebrtc's `kMaxExpectedQueueLength`) when that
+     is faster than 2.5 times the estimate, so a source above a low estimate is
+     delayed 2 s at most instead of by however long its backlog takes at the
+     estimate.
      - User-facing note: `getTransceivers()` no longer lists a stopped
        transceiver once an answer rejects its section; media is paced to a
        bandwidth estimate (starting at 300 kb/s and following the remote's TWCC
        or RFC 8888 feedback) while that feedback arrives, and sent at the rate
-       it is written when the remote negotiates none or stops sending it;
+       it is written when the remote negotiates none or stops sending it; audio
+       is not paced, and paced video waits 2 s at most;
        `availableOutgoingBitrate` / `targetBitrate` report the estimate while
        media is paced at it, and media the pacer drops counts in the candidate
        pair's `packetsDiscardedOnSend` / `bytesDiscardedOnSend`.

@@ -170,6 +170,15 @@ pub const PACING_FACTOR: f64 = 2.5;
 pub const FEEDBACK_TIMEOUT: std::time::Duration =
   CONGESTION_CONTROL_DEFAULT_PRUNE_HORIZON;
 
+/// The longest the pacer lets its queue grow, in the time it takes to drain:
+/// past it the pacer releases faster than the estimate, at what drains the
+/// queue in this time (libwebrtc's pacer queue time limit,
+/// `kMaxExpectedQueueLength`, 2 s). A source steadily above the estimate is
+/// then delayed by this much at most, rather than by however long its
+/// backlog takes at the estimate (minutes, at a low one).
+pub const QUEUE_TIME_LIMIT: std::time::Duration =
+  std::time::Duration::from_secs(2);
+
 /// The engine pacer's rate while [`FactorPacer`] is not pacing: high enough
 /// that what it still holds from before (packets queued while it was) goes
 /// at the next wake-up.
@@ -204,12 +213,18 @@ impl PacerRefusals {
 /// congestion controller's estimate, while the remote's congestion feedback
 /// is in use, and a pass-through otherwise.
 ///
-/// - **Which packets.** Those of a local stream (its RTX and FEC SSRCs
-///   included) that negotiated feedback: the transport-wide sequence number
-///   extension (TWCC) or `ack ccfb` (RFC 8888). A stream that negotiated
-///   neither is never paced: the remote will not report on it, so the
-///   estimate never moves and pacing would hold it at the initial rate
+/// - **Which packets.** Those of a local video stream (its RTX and FEC
+///   SSRCs included) that negotiated feedback: the transport-wide sequence
+///   number extension (TWCC) or `ack ccfb` (RFC 8888). A stream that
+///   negotiated neither is never paced: the remote will not report on it, so
+///   the estimate never moves and pacing would hold it at the initial rate
 ///   (GCC's 300 kb/s, so 750 kb/s here) for the life of the connection.
+///   Audio is never paced either: its rate is small and steady, and behind a
+///   video key frame in one queue it would arrive late (libwebrtc sends it
+///   ahead of video). The congestion controller still counts it.
+/// - **How fast.** At [`PACING_FACTOR`] times the estimate, or faster when
+///   the queue would take longer than [`QUEUE_TIME_LIMIT`] to drain at that:
+///   then at what drains it in that time.
 /// - **When.** While reports keep coming: TWCC or RFC 8888 feedback (or an
 ///   estimate the controller made from one) went past within
 ///   [`FEEDBACK_TIMEOUT`]. Before the first report the window runs from
@@ -235,8 +250,8 @@ impl PacerRefusals {
 /// stats report; only the rate this pacer releases at is scaled.
 pub(crate) struct FactorPacer {
   pacer: PacerInterceptor,
-  /// The SSRCs (primary, RTX, FEC) of each bound local stream that
-  /// negotiated congestion feedback, by its primary SSRC.
+  /// The SSRCs (primary, RTX, FEC) of each bound local stream it paces
+  /// ([`paces`](Self::paces)), by its primary SSRC.
   negotiated: HashMap<u32, Vec<u32>>,
   /// The controller's latest estimate (GCC's initial one before any).
   estimate: f64,
@@ -246,6 +261,13 @@ pub(crate) struct FactorPacer {
   waiting_since: Option<Instant>,
   /// Whether packets of negotiated streams are paced now.
   paced: bool,
+  /// What the engine pacer holds, oldest first (its queue is a FIFO): when
+  /// each packet was written, and its bits.
+  held: VecDeque<(Instant, f64)>,
+  /// The bits in `held`.
+  held_bits: f64,
+  /// The latest instant handed in.
+  now: Option<Instant>,
   /// Whether the stats hold an estimate this pacer let through.
   estimate_reported: bool,
   /// Packets let straight through, behind what the engine pacer releases.
@@ -278,6 +300,9 @@ impl FactorPacer {
       last_feedback: None,
       waiting_since: None,
       paced: true,
+      held: VecDeque::new(),
+      held_bits: 0.0,
+      now: None,
       estimate_reported: false,
       passed: VecDeque::new(),
       carriers: VecDeque::new(),
@@ -311,6 +336,13 @@ impl FactorPacer {
     })
   }
 
+  /// Whether a stream is paced: video that negotiated feedback the remote
+  /// reports it with.
+  fn paces(info: &StreamInfo) -> bool {
+    !info.mime_type.to_ascii_lowercase().starts_with("audio/")
+      && Self::negotiates_feedback(info)
+  }
+
   /// Whether a stream negotiated feedback the remote reports it with.
   fn negotiates_feedback(info: &StreamInfo) -> bool {
     info
@@ -338,24 +370,46 @@ impl FactorPacer {
     }
   }
 
-  /// The rate the engine pacer releases at now.
+  /// The rate the engine pacer releases at now: the scaled estimate, or,
+  /// when that is slower, what lets the queue out by the time its oldest
+  /// packet has waited [`QUEUE_TIME_LIMIT`] (libwebrtc's rule: the time left
+  /// is the limit less that wait, and at least a millisecond).
   fn rate(&self) -> f64 {
-    if self.paced {
-      self.estimate * PACING_FACTOR
-    } else {
-      UNPACED_BITRATE
+    if !self.paced {
+      return UNPACED_BITRATE;
     }
+    let paced = self.estimate * PACING_FACTOR;
+    let (Some(&(oldest, _)), Some(now)) = (self.held.front(), self.now) else {
+      return paced;
+    };
+    let left = QUEUE_TIME_LIMIT
+      .saturating_sub(now.saturating_duration_since(oldest))
+      .max(std::time::Duration::from_millis(1));
+    paced.max(self.held_bits / left.as_secs_f64())
+  }
+
+  /// Records the latest instant handed in.
+  fn observe(&mut self, now: Instant) {
+    if self.now.is_none_or(|last| now > last) {
+      self.now = Some(now);
+    }
+  }
+
+  /// Hands the engine pacer [`rate`](Self::rate).
+  fn apply_rate(&mut self) {
+    let rate = self.rate();
+    self.pacer.pacer_mut().set_target_bitrate(rate);
   }
 
   /// Starts or stops pacing as feedback came or stopped.
   fn update(&mut self, now: Instant) {
+    self.observe(now);
     let paced = self.pacing(now);
     if paced == self.paced {
       return;
     }
     self.paced = paced;
-    let rate = self.rate();
-    self.pacer.pacer_mut().set_target_bitrate(rate);
+    self.apply_rate();
     if !paced && self.estimate_reported {
       // The stats stop reporting an estimate nothing is paced at.
       self.estimate_reported = false;
@@ -408,8 +462,7 @@ impl rtc::sansio::Protocol<TaggedPacket, TaggedPacket, ()> for FactorPacer {
     // The engine's pacer follows an estimate going past; the scaled rate
     // (or the pass-through's) replaces what it set.
     self.pacer.handle_read(msg)?;
-    let rate = self.rate();
-    self.pacer.pacer_mut().set_target_bitrate(rate);
+    self.apply_rate();
     Ok(())
   }
 
@@ -448,6 +501,12 @@ impl rtc::sansio::Protocol<TaggedPacket, TaggedPacket, ()> for FactorPacer {
       }
     } else {
       self.refusing = false;
+      let bits = (bytes * 8) as f64;
+      self
+        .held
+        .push_back((self.now.unwrap_or_else(Instant::now), bits));
+      self.held_bits += bits;
+      self.apply_rate();
     }
     Ok(())
   }
@@ -455,7 +514,20 @@ impl rtc::sansio::Protocol<TaggedPacket, TaggedPacket, ()> for FactorPacer {
   fn poll_write(&mut self) -> Option<TaggedPacket> {
     // What the engine pacer releases was written before anything still let
     // through here.
-    self.pacer.poll_write().or_else(|| self.passed.pop_front())
+    if let Some(out) = self.pacer.poll_write() {
+      if matches!(out.message.packet, Packet::Rtp(_))
+        && let Some((_, bits)) = self.held.pop_front()
+      {
+        self.held_bits = if self.held.is_empty() {
+          0.0
+        } else {
+          (self.held_bits - bits).max(0.0)
+        };
+        self.apply_rate();
+      }
+      return Some(out);
+    }
+    self.passed.pop_front()
   }
 
   fn handle_event(&mut self, evt: ()) -> Result<(), Self::Error> {
@@ -468,6 +540,7 @@ impl rtc::sansio::Protocol<TaggedPacket, TaggedPacket, ()> for FactorPacer {
 
   fn handle_timeout(&mut self, now: Instant) -> Result<(), Self::Error> {
     self.update(now);
+    self.apply_rate();
     self.pacer.handle_timeout(now)
   }
 
@@ -482,7 +555,7 @@ impl rtc::sansio::Protocol<TaggedPacket, TaggedPacket, ()> for FactorPacer {
 
 impl Interceptor for FactorPacer {
   fn bind_local_stream(&mut self, info: &StreamInfo) {
-    if Self::negotiates_feedback(info) {
+    if Self::paces(info) {
       let ssrcs = std::iter::once(info.ssrc)
         .chain(info.ssrc_rtx)
         .chain(info.ssrc_fec)
@@ -2555,6 +2628,7 @@ mod factor_pacer_tests {
   use super::FactorPacer;
   use super::PACING_FACTOR;
   use super::PacerRefusals;
+  use super::QUEUE_TIME_LIMIT;
 
   const SSRC: u32 = 1234;
 
@@ -2862,5 +2936,49 @@ mod factor_pacer_tests {
       _ => unreachable!("an RTP packet"),
     };
     assert_eq!(refusals.get(), (6, 6 * size));
+  }
+
+  // A backlog drains within QUEUE_TIME_LIMIT whatever the estimate: 1,000
+  // packets (about 8 Mb) at the initial 750 kb/s would take over 10 s; the
+  // pacer releases them faster instead, while feedback keeps it pacing.
+  #[test]
+  fn drains_a_backlog_within_the_queue_time_limit() {
+    let mut p = pacer();
+    p.bind_local_stream(&twcc_stream(SSRC));
+    let start = Instant::now();
+    assert_eq!(write(&mut p, start, SSRC, 1000), 0);
+    let mut now = start;
+    let mut released = 0;
+    while released < 1000 {
+      p.handle_read(twcc(now, None)).unwrap();
+      p.handle_timeout(now).unwrap();
+      released += drain(&mut p);
+      if released == 1000 {
+        break;
+      }
+      now = p.poll_timeout().expect("a release is due").max(now);
+      assert!(
+        now <= start + QUEUE_TIME_LIMIT + Duration::from_millis(100),
+        "{released} of 1000 released after {:?}",
+        now - start
+      );
+    }
+    // Drained, it paces at the estimate again.
+    assert_eq!(p.target_bitrate(), GCC_INITIAL_BITRATE * PACING_FACTOR);
+  }
+
+  // Audio is never paced, even where it negotiated feedback: it doesn't wait
+  // behind video in the queue.
+  #[test]
+  fn does_not_pace_audio() {
+    let mut p = pacer();
+    p.bind_local_stream(&StreamInfo {
+      mime_type: "audio/opus".to_string(),
+      ..twcc_stream(SSRC)
+    });
+    p.bind_local_stream(&twcc_stream(SSRC + 1));
+    let now = Instant::now();
+    assert_eq!(write(&mut p, now, SSRC + 1, 100), 0);
+    assert_eq!(write(&mut p, now, SSRC, 50), 50);
   }
 }
