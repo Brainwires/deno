@@ -1,2 +1,3 @@
 sh builtin: exit 0
 sh starts cat: ok
+sh starts env cat: ok
