@@ -113,7 +113,8 @@ const env: Record<string, string> = {
   CI: Deno.env.get("CI") ?? "",
 };
 // DENO_INTERNAL_KERNEL_SANDBOX_FORCE: the forced kernel sandbox bed
-// (denext item 451) reaches each case's deno
+// (denext item 451) reaches each case's deno, with the bed's marker file,
+// without which the runtime ignores it (item 5NN)
 for (
   const name of [
     "DENO_DIR",
@@ -121,6 +122,7 @@ for (
     "LANG",
     "XDG_CACHE_HOME",
     "DENO_INTERNAL_KERNEL_SANDBOX_FORCE",
+    "DENO_INTERNAL_KERNEL_SANDBOX_HARNESS",
   ]
 ) {
   const value = Deno.env.get(name);

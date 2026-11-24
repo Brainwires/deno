@@ -118,6 +118,14 @@ jobs:
         with:
           fetch-depth: 1
           submodules: false
+      # the switches below take effect only with the harness's marker file
+      # (DENEXT.md item 5NN); the test utilities name their own, this one is
+      # for every other `deno` the job starts
+      - name: Mark this job as a kernel sandbox bed
+        run: |
+          marker="$RUNNER_TEMP/deno-kernel-sandbox-harness-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
+          : > "$marker"
+          echo "DENO_INTERNAL_KERNEL_SANDBOX_HARNESS=$marker" >> "$GITHUB_ENV"
       - name: Clone submodule ./tests/util/std
         run: git submodule update --init --recursive --depth=1 -- ./tests/util/std
       - uses: ./.github/denext-tests/setup
@@ -161,6 +169,14 @@ jobs:
         with:
           fetch-depth: 1
           submodules: false
+      # the switches below take effect only with the harness's marker file
+      # (DENEXT.md item 5NN); the test utilities name their own, this one is
+      # for every other `deno` the job starts
+      - name: Mark this job as a kernel sandbox bed
+        run: |
+          marker="$RUNNER_TEMP/deno-kernel-sandbox-harness-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
+          : > "$marker"
+          echo "DENO_INTERNAL_KERNEL_SANDBOX_HARNESS=$marker" >> "$GITHUB_ENV"
       - name: Clone submodules
         run: |
           git submodule update --init --recursive --depth=1 -- ./tests/util/std
@@ -208,6 +224,14 @@ jobs:
         with:
           fetch-depth: 1
           submodules: false
+      # the switches below take effect only with the harness's marker file
+      # (DENEXT.md item 5NN); the test utilities name their own, this one is
+      # for every other `deno` the job starts
+      - name: Mark this job as a kernel sandbox bed
+        run: |
+          marker="$RUNNER_TEMP/deno-kernel-sandbox-harness-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
+          : > "$marker"
+          echo "DENO_INTERNAL_KERNEL_SANDBOX_HARNESS=$marker" >> "$GITHUB_ENV"
       - name: Clone submodule ./tests/util/std
         run: git submodule update --init --recursive --depth=1 -- ./tests/util/std
       - uses: ./.github/denext-tests/setup
@@ -254,6 +278,14 @@ jobs:
         with:
           fetch-depth: 1
           submodules: false
+      # the switches below take effect only with the harness's marker file
+      # (DENEXT.md item 5NN); the test utilities name their own, this one is
+      # for every other `deno` the job starts
+      - name: Mark this job as a kernel sandbox bed
+        run: |
+          marker="$RUNNER_TEMP/deno-kernel-sandbox-harness-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
+          : > "$marker"
+          echo "DENO_INTERNAL_KERNEL_SANDBOX_HARNESS=$marker" >> "$GITHUB_ENV"
       - uses: ./.github/denext-tests/setup
         with:
           cache-key: kernel-beds-denext

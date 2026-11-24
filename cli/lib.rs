@@ -1141,14 +1141,15 @@ async fn resolve_flags_and_init(
   deno_lib::kernel_sandbox::snapshot_env_override(
     std::env::var(deno_lib::kernel_sandbox::KERNEL_SANDBOX_ENV_VAR).ok(),
   );
-  // denext: the test harnesses' forced enforce (DENEXT.md item 451), read
-  // at the same point
-  deno_lib::kernel_sandbox::snapshot_forced(
+  // denext: the test harnesses' forced enforce (DENEXT.md item 451) and
+  // rollout stage (item 472), read at the same point. They take effect only
+  // with the harness's marker file (item 5NN): a variable that stayed
+  // behind in an environment changes nothing
+  deno_lib::kernel_sandbox::snapshot_harness_switches(
     std::env::var(deno_lib::kernel_sandbox::KERNEL_SANDBOX_FORCE_ENV_VAR).ok(),
-  );
-  // denext: and the harnesses' rollout stage (DENEXT.md item 472)
-  deno_lib::kernel_sandbox::snapshot_stage(
     std::env::var(deno_lib::kernel_sandbox::KERNEL_SANDBOX_STAGE_ENV_VAR).ok(),
+    std::env::var_os(deno_lib::kernel_sandbox::KERNEL_SANDBOX_HARNESS_ENV_VAR)
+      .as_deref(),
   );
 
   // denext: a process confined by the kernel sandbox at startup doesn't load

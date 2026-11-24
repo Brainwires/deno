@@ -1,0 +1,4 @@
+Warning DENO_INTERNAL_KERNEL_SANDBOX_FORCE is ignored: a test harness's switch, and no harness started this process
+kernel sandbox (preview): [WILDLINE]; applies: off; would apply: off
+[WILDCARD]
+hello

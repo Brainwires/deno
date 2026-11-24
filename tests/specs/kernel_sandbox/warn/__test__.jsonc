@@ -145,6 +145,16 @@
       "envs": { "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "preview" },
       "args": "run main.ts",
       "output": "stage_invalid.out"
+    },
+    // item 5NN: without the harness's marker file the stage switch does
+    // nothing (the run is the shipped stage's: nothing applied), and says so
+    "stage_without_the_marker_is_ignored": {
+      "envs": {
+        "DENO_INTERNAL_KERNEL_SANDBOX_STAGE": "r4",
+        "DENO_INTERNAL_KERNEL_SANDBOX_HARNESS": ""
+      },
+      "args": "run --allow-read=. --allow-run=git main.ts",
+      "output": "stage_unmarked.out"
     }
   }
 }

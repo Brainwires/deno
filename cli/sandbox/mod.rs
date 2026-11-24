@@ -107,9 +107,27 @@ fn env_override_warned() -> Option<KernelSandboxMode> {
   }
 }
 
+/// Says once which harness switches are set here without the harness's
+/// marker, and so have no effect (item 5NN).
+fn warn_harness_switches_ignored() {
+  let ignored = deno_lib::kernel_sandbox::harness_switches_ignored();
+  if ignored.is_empty() {
+    return;
+  }
+  static WARN: Once = Once::new();
+  WARN.call_once(|| {
+    log::warn!(
+      "{} {} is ignored: a test harness's switch, and no harness started this process",
+      crate::colors::yellow("Warning"),
+      ignored.join(" and "),
+    );
+  });
+}
+
 /// The harnesses' rollout stage (`DENO_INTERNAL_KERNEL_SANDBOX_STAGE`, item
 /// 957); a value that isn't one is ignored with a warning.
 fn stage_override_warned() -> Option<AutoStage> {
+  warn_harness_switches_ignored();
   match deno_lib::kernel_sandbox::stage_override() {
     Ok(stage) => stage,
     Err(value) => {
@@ -479,6 +497,7 @@ fn under_denext_dev() -> bool {
 /// for a child of a confined process (its parent's sandbox already holds it;
 /// nesting is the subprocess policy's).
 fn forced_for(subcommand: &DenoSubcommand) -> Option<ForcedEnforce> {
+  warn_harness_switches_ignored();
   let forced = match deno_lib::kernel_sandbox::forced() {
     Ok(forced) => forced?,
     Err(value) => {

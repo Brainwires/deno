@@ -108,6 +108,9 @@ const RUNTIME_CONFIG_ENV: &[&str] = &[
   "DENO_INTERNAL_KERNEL_SANDBOX_FORCE",
   // and the harnesses' rollout stage, for the same reason (item 472)
   "DENO_INTERNAL_KERNEL_SANDBOX_STAGE",
+  // ... and the harness's marker, without which neither has an effect
+  // (item 5NN)
+  "DENO_INTERNAL_KERNEL_SANDBOX_HARNESS",
   "DENO_SERVE_ADDRESS",
   "DENO_AUTO_SERVE",
   "DENO_USE_CGROUPS",

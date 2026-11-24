@@ -16,6 +16,22 @@ An explicit `off` still wins, unfixed runs (`--watch`, HMR, `denext dev`) are
 left alone, and a child of a confined process inherits its parent's sandbox
 rather than being forced again.
 
+Both this variable and the stage one below are a harness's switches: they change
+what a release binary does with no flag in sight, so the runtime takes them only
+together with the harness's marker (DENEXT.md item 5NN):
+`DENO_INTERNAL_KERNEL_SANDBOX_HARNESS` names an existing file called
+`deno-kernel-sandbox-harness-<anything>`, by absolute path. A switch set without
+one (a variable that stayed behind in a CI image) is ignored with one notice.
+The test utilities name their own marker for every command they start
+(`tests/util/lib/builders.rs`); a bed that sets a switch for a whole shell or
+job makes one first:
+
+```sh
+marker="$(mktemp -d)/deno-kernel-sandbox-harness-$$"
+: > "$marker"
+export DENO_INTERNAL_KERNEL_SANDBOX_HARNESS="$marker"
+```
+
 ## Running a bed
 
 ```sh

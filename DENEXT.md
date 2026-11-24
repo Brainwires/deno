@@ -22336,6 +22336,40 @@ worker; failed on these before). - Node tests enabled: none.
        `exec_call_forms_without_strict`; they build two small C programs) and
        the existing `kernel_sandbox/children` `strict_exec`.
      - Node tests enabled: none.
+5NN. **`fix(cli)`: the kernel sandbox's harness switches need the harness's
+     marker file** (CLI; `cli/lib/kernel_sandbox.rs`, `kernel_plan.rs`,
+     `cli/lib.rs`, `cli/sandbox/mod.rs`, `cli/rt_desktop/kernel_start.rs`;
+     `tests/util/lib/builders.rs`, the kernel beds).
+     `DENO_INTERNAL_KERNEL_SANDBOX_FORCE` (item 451) and
+     `DENO_INTERNAL_KERNEL_SANDBOX_STAGE` (item 472) drive release binaries in
+     the specs and the beds, so they can't be debug-only; but set alone they
+     turned a run with no flag in sight into a re-executed, confined one, and a
+     variable can stay behind in a CI image.
+     - They now take effect only with `DENO_INTERNAL_KERNEL_SANDBOX_HARNESS`
+       naming, by absolute path, an existing regular file called
+       `deno-kernel-sandbox-harness-<anything>`
+       (`kernel_sandbox::harness_marked`). A marker variable that stayed behind
+       with a switch names a file that isn't there.
+     - A switch set without the marker is not read at all (`auto` stays at the
+       shipped stage, nothing is forced) and the run says once:
+       `Warning <names> is ignored: a test harness's switch, and no harness started this process`.
+     - Every image of a run checks the same file: a file's metadata stays
+       readable inside the kernel sandbox, and the marker's variable is kept
+       through the environment scrub and compared like the other configuration
+       variables.
+     - The test utilities make one marker per test process and name it for
+       every command they start (a test takes it away with an empty value); the
+       kernel beds' workflow makes one per job; `tests/npm_matrix/run.ts`
+       forwards it; `tests/kernel_sandbox_beds/README.md` has the three lines
+       for a local bed.
+     - Tests: `deno_lib`'s
+       `kernel_sandbox::tests::{harness_switches_need_the_marker,
+       the_harness_marker_is_a_file_that_exists}`; specs `kernel_sandbox/forced`
+       (`switch_without_the_marker_is_ignored`,
+       `switch_with_a_missing_marker_is_ignored`) and `kernel_sandbox/warn`
+       (`stage_without_the_marker_is_ignored`); every existing spec that sets a
+       switch runs unchanged with the marker the runner names.
+     - Node tests enabled: none.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

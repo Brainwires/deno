@@ -117,6 +117,48 @@ pub const KERNEL_SANDBOX_ENV_VAR: &str = "DENO_KERNEL_SANDBOX";
 pub const KERNEL_SANDBOX_FORCE_ENV_VAR: &str =
   "DENO_INTERNAL_KERNEL_SANDBOX_FORCE";
 
+/// Names the test harness's marker: the absolute path of a file the harness
+/// made for its run, named `deno-kernel-sandbox-harness-<anything>`. The
+/// harness switches ([`KERNEL_SANDBOX_FORCE_ENV_VAR`],
+/// [`KERNEL_SANDBOX_STAGE_ENV_VAR`]) take effect only while that file
+/// exists ([`harness_marked`]): they change what a release binary does with
+/// no flag in sight, so a variable that merely stayed behind in an
+/// environment (a CI image, a copied shell profile) must not be enough; a
+/// marker left with it names a file that isn't there. Every process of the
+/// run checks the same file (a file's metadata stays readable inside the
+/// kernel sandbox, and the variable is kept through its environment scrub),
+/// so the images of one run decide alike.
+pub const KERNEL_SANDBOX_HARNESS_ENV_VAR: &str =
+  "DENO_INTERNAL_KERNEL_SANDBOX_HARNESS";
+
+/// What the file [`KERNEL_SANDBOX_HARNESS_ENV_VAR`] names is called.
+pub const KERNEL_SANDBOX_HARNESS_FILE_PREFIX: &str =
+  "deno-kernel-sandbox-harness-";
+
+/// Whether `marker` ([`KERNEL_SANDBOX_HARNESS_ENV_VAR`]'s value) names a
+/// harness's marker file that exists: an absolute path to a regular file
+/// (not a link) whose name starts with
+/// [`KERNEL_SANDBOX_HARNESS_FILE_PREFIX`].
+#[allow(
+  clippy::disallowed_methods,
+  reason = "the harness's marker is on the real file system"
+)]
+pub fn harness_marked(marker: Option<&std::ffi::OsStr>) -> bool {
+  let Some(marker) = marker.filter(|m| !m.is_empty()) else {
+    return false;
+  };
+  let path = std::path::Path::new(marker);
+  path.is_absolute()
+    && path
+      .file_name()
+      .and_then(|name| name.to_str())
+      .is_some_and(|name| {
+        name.len() > KERNEL_SANDBOX_HARNESS_FILE_PREFIX.len()
+          && name.starts_with(KERNEL_SANDBOX_HARNESS_FILE_PREFIX)
+      })
+    && std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
+}
+
 /// The test harnesses' forced mode ([`KERNEL_SANDBOX_FORCE_ENV_VAR`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -955,6 +997,57 @@ pub fn forced() -> Result<Option<ForcedEnforce>, String> {
   ForcedEnforce::parse(FORCED.get().and_then(|v| v.as_deref()))
 }
 
+/// The harness switches that were set without the harness's marker, as
+/// the CLI found at startup ([`snapshot_harness_switches`]).
+static HARNESS_IGNORED: OnceLock<Vec<&'static str>> = OnceLock::new();
+
+/// Records the harness switches ([`snapshot_forced`], [`snapshot_stage`])
+/// as the CLI read them at startup, with the harness's marker
+/// ([`KERNEL_SANDBOX_HARNESS_ENV_VAR`]): without a marker file
+/// ([`harness_marked`]) a switch that is set is not recorded (it has no
+/// effect) and its name is kept for the caller's one notice
+/// ([`harness_switches_ignored`]). Later calls keep the first values.
+pub fn snapshot_harness_switches(
+  forced: Option<String>,
+  stage: Option<String>,
+  marker: Option<&std::ffi::OsStr>,
+) {
+  let (forced, stage, ignored) =
+    gate_harness_switches(forced, stage, || harness_marked(marker));
+  snapshot_forced(forced);
+  snapshot_stage(stage);
+  let _ = HARNESS_IGNORED.set(ignored);
+}
+
+/// The harness switches that take effect, and the names of those that are
+/// set and don't: all of them when `marked` (asked only when one is set)
+/// says the harness's marker is missing. An empty value is an unset one.
+fn gate_harness_switches(
+  forced: Option<String>,
+  stage: Option<String>,
+  marked: impl FnOnce() -> bool,
+) -> (Option<String>, Option<String>, Vec<&'static str>) {
+  let forced = forced.filter(|v| !v.is_empty());
+  let stage = stage.filter(|v| !v.is_empty());
+  if (forced.is_none() && stage.is_none()) || marked() {
+    return (forced, stage, Vec::new());
+  }
+  let mut ignored = Vec::new();
+  if forced.is_some() {
+    ignored.push(KERNEL_SANDBOX_FORCE_ENV_VAR);
+  }
+  if stage.is_some() {
+    ignored.push(KERNEL_SANDBOX_STAGE_ENV_VAR);
+  }
+  (None, None, ignored)
+}
+
+/// The harness switches set in this process's environment that have no
+/// effect, for want of the harness's marker.
+pub fn harness_switches_ignored() -> &'static [&'static str] {
+  HARNESS_IGNORED.get().map(|v| v.as_slice()).unwrap_or(&[])
+}
+
 /// `DENO_INTERNAL_KERNEL_SANDBOX_STAGE` as the CLI read it at startup.
 static STAGE: OnceLock<Option<String>> = OnceLock::new();
 
@@ -987,6 +1080,83 @@ mod tests {
 
   fn resolve(inputs: &ModeInputs) -> ModeResolution {
     kernel_sandbox_mode(inputs).unwrap()
+  }
+
+  // denext (DENEXT.md item 5NN): the harness switches need the harness's
+  // marker file
+  #[test]
+  fn harness_switches_need_the_marker() {
+    let some = |v: &str| Some(v.to_string());
+    // nothing set: the marker isn't even looked for
+    assert_eq!(
+      gate_harness_switches(None, some(""), || panic!("not asked")),
+      (None, None, Vec::new())
+    );
+    // set, marked: as they are
+    assert_eq!(
+      gate_harness_switches(some("enforce"), some("r4"), || true),
+      (some("enforce"), some("r4"), Vec::new())
+    );
+    // set, not marked: neither takes effect, each is named
+    assert_eq!(
+      gate_harness_switches(some("enforce"), some("r4"), || false),
+      (
+        None,
+        None,
+        vec![KERNEL_SANDBOX_FORCE_ENV_VAR, KERNEL_SANDBOX_STAGE_ENV_VAR]
+      )
+    );
+    assert_eq!(
+      gate_harness_switches(None, some("r4"), || false),
+      (None, None, vec![KERNEL_SANDBOX_STAGE_ENV_VAR])
+    );
+    // (an invalid value is still the caller's to report, when marked)
+    assert_eq!(
+      gate_harness_switches(some("on"), None, || true),
+      (some("on"), None, Vec::new())
+    );
+  }
+
+  #[test]
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "the marker is a real file in the temp folder"
+  )]
+  fn the_harness_marker_is_a_file_that_exists() {
+    use std::ffi::OsStr;
+    let dir = std::env::temp_dir()
+      .join(format!("deno-harness-marker-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker =
+      dir.join(format!("{KERNEL_SANDBOX_HARNESS_FILE_PREFIX}abc123"));
+    // named, not there yet (a variable that stayed behind in an image)
+    assert!(!harness_marked(Some(marker.as_os_str())));
+    std::fs::write(&marker, "").unwrap();
+    assert!(harness_marked(Some(marker.as_os_str())));
+    // unset, empty, relative, another name, a folder, the bare prefix
+    assert!(!harness_marked(None));
+    assert!(!harness_marked(Some(OsStr::new(""))));
+    assert!(!harness_marked(Some(OsStr::new(
+      "deno-kernel-sandbox-harness-abc123"
+    ))));
+    let other = dir.join("marker");
+    std::fs::write(&other, "").unwrap();
+    assert!(!harness_marked(Some(other.as_os_str())));
+    let folder =
+      dir.join(format!("{KERNEL_SANDBOX_HARNESS_FILE_PREFIX}folder"));
+    std::fs::create_dir(&folder).unwrap();
+    assert!(!harness_marked(Some(folder.as_os_str())));
+    let bare = dir.join(KERNEL_SANDBOX_HARNESS_FILE_PREFIX);
+    std::fs::write(&bare, "").unwrap();
+    assert!(!harness_marked(Some(bare.as_os_str())));
+    // a link to a marker is not one
+    #[cfg(unix)]
+    {
+      let link = dir.join(format!("{KERNEL_SANDBOX_HARNESS_FILE_PREFIX}link"));
+      std::os::unix::fs::symlink(&marker, &link).unwrap();
+      assert!(!harness_marked(Some(link.as_os_str())));
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
   }
 
   #[test]
