@@ -37,7 +37,9 @@ use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
 use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_WRITE;
 use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_ATTRIBUTES;
+use windows_sys::Win32::System::Pipes::GetNamedPipeInfo;
 use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+use windows_sys::Win32::System::Pipes::PIPE_SERVER_END;
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::Win32::System::Threading::OpenProcess;
 use windows_sys::Win32::System::Threading::OpenProcessToken;
@@ -206,6 +208,30 @@ pub(crate) fn process_user_sid(pid: u32) -> io::Result<String> {
 /// # Safety
 /// `handle` must be an open handle.
 unsafe fn pipe_server_pid(handle: HANDLE) -> io::Result<u32> {
+  // GetNamedPipeServerProcessId answers on the server end too (with the
+  // server itself), so the end is checked first: only a client's connection
+  // has a server to name
+  let mut flags = 0u32;
+  // SAFETY: `handle` is open (caller); `flags` outlives the call; the other
+  // outputs are not asked for.
+  let ok = unsafe {
+    GetNamedPipeInfo(
+      handle,
+      &mut flags,
+      std::ptr::null_mut(),
+      std::ptr::null_mut(),
+      std::ptr::null_mut(),
+    )
+  };
+  if ok == 0 {
+    return Err(io::Error::last_os_error());
+  }
+  if flags & PIPE_SERVER_END != 0 {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "the server end of a pipe has no server to name",
+    ));
+  }
   let mut pid = 0u32;
   // SAFETY: `handle` is open (caller); `pid` outlives the call.
   if unsafe { GetNamedPipeServerProcessId(handle, &mut pid) } == 0 {
