@@ -402,6 +402,9 @@ fn run_in_pty_impl(
     std::process::Command::new(program)
       .current_dir(cwd)
       .args(args)
+      // the caller's map is the whole environment (the builder merges the
+      // parent's in, minus what a test removed)
+      .env_clear()
       .envs(env_vars.unwrap_or_default())
       .pre_exec(move || {
         // Create a new session
@@ -548,6 +551,8 @@ fn create_pty(
     let cmd = std::process::Command::new(program)
       .current_dir(cwd)
       .args(args)
+      // the caller's map is the whole environment, as above
+      .env_clear()
       .envs(env_vars.unwrap_or_default())
       .pre_exec(move || {
         set_winsize(fds, PTY_ROWS_COLS.0, PTY_ROWS_COLS.1)?;
