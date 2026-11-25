@@ -20312,15 +20312,14 @@ where the changes are discussed.
      sized for the engine's 1200-byte MTU, grown by SRTP, a TURN header and the
      IP / UDP headers, would be dropped rather than fragmented on a path with a
      smaller MTU (test: `ecn::tests::setup_keeps_the_fragmentation_options`);
-     Linux's UDP GRO, which it turns on, is turned back off. A Not-ECT
-     datagram (every ICE check: the engine marks a negotiated stream's RTP
-     only) takes the plain `send_to`, not `quinn-udp`: a `sendmsg` to an
-     address the socket can't send to (Linux answers `EINVAL` for a loopback
-     socket and an off-host candidate, or port 0) made `quinn-udp` assume a
-     kernel that refuses its control messages, leave `IP_TOS` out of every
-     later IPv4 datagram of that socket (its marks gone for good) and log
-     "halting segmentation offload" at INFO, all for one unreachable candidate
-     a remote peer named (test:
+     Linux's UDP GRO, which it turns on, is turned back off. A Not-ECT datagram
+     (every ICE check: the engine marks a negotiated stream's RTP only) takes
+     the plain `send_to`, not `quinn-udp`: a `sendmsg` to an address the socket
+     can't send to (Linux answers `EINVAL` for a loopback socket and an off-host
+     candidate, or port 0) made `quinn-udp` assume a kernel that refuses its
+     control messages, leave `IP_TOS` out of every later IPv4 datagram of that
+     socket (its marks gone for good) and log "halting segmentation offload" at
+     INFO, all for one unreachable candidate a remote peer named (test:
      `ecn::tests::a_refused_unmarked_send_keeps_the_marks`). ICE-TCP and TURN
      relays carry no codepoint. `media_stack()` adds
      `configure_congestion_control_feedback` beside GCC over TWCC (kept as the
