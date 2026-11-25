@@ -439,9 +439,6 @@ pub fn resolve_prefix(path: &Path) -> ResolvedPrefix {
   loop {
     match std::fs::canonicalize(&existing) {
       Ok(canonical) => {
-        // Windows hands back a `\\?\` path; the permission paths it is
-        // compared with are the plain spelling
-        let canonical = deno_path_util::strip_unc_prefix(canonical);
         let mut tail = PathBuf::new();
         for part in rest.iter().rev() {
           tail.push(part);
@@ -545,16 +542,13 @@ fn merged(
 )]
 fn resolve_program(cwd: &Path, name: &str) -> Option<PathBuf> {
   if name.contains('/') {
-    return std::fs::canonicalize(cwd.join(name))
-      .ok()
-      .map(deno_path_util::strip_unc_prefix);
+    return std::fs::canonicalize(cwd.join(name)).ok();
   }
   let path = std::env::var_os("PATH")?;
   std::env::split_paths(&path)
     .map(|dir| dir.join(name))
     .find(|p| p.is_file())
     .and_then(|p| std::fs::canonicalize(p).ok())
-    .map(deno_path_util::strip_unc_prefix)
 }
 
 /// The layer that describes `options` (this process's final grant) for the
@@ -650,8 +644,13 @@ fn intersect<P>(
   (!out.is_empty()).then_some(out)
 }
 
+/// A resolved path as a permission entry: Windows canonical paths carry a
+/// `\\?\` prefix, and permission entries are the plain spelling Deno's own
+/// checks compare with.
 fn path_text(p: &Path) -> String {
-  p.to_string_lossy().into_owned()
+  deno_path_util::strip_unc_prefix(p.to_path_buf())
+    .to_string_lossy()
+    .into_owned()
 }
 
 fn clamp_paths(
@@ -963,7 +962,7 @@ mod tests {
       ..Default::default()
     };
     clamp(&mut o, &[l], &root);
-    assert_eq!(o.allow_read, Some(vec![inside.to_string_lossy().into()]));
+    assert_eq!(o.allow_read, Some(vec![path_text(&inside)]));
     assert_eq!(o.allow_write, None);
     assert_eq!(o.allow_net, None);
     assert_eq!(o.allow_net_connect, s(&["127.0.0.1:4545"]));
@@ -1491,7 +1490,7 @@ mod tests {
     assert_eq!(layer.deny_read.len(), 1);
     assert_eq!(
       child.deny_read,
-      Some(vec![layer.deny_read[0].to_string_lossy().into_owned()])
+      Some(vec![path_text(&layer.deny_read[0])])
     );
     // what it didn't ask for it doesn't get
     let mut plain = opts();
