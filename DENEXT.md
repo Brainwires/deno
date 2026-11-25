@@ -22511,6 +22511,69 @@ where the changes are discussed.
        client".
      - Node tests enabled: none.
 
+555. **`fix(workers)`: each worker message is its own task** (runtime;
+     `runtime/js/11_workers.js`, `runtime/js/99_main.js`). A `message` posted
+     while another was still queued could be lost: both receive loops (the
+     page's for its worker, the worker's own) dispatched a queued message one
+     microtask after the one before it, so a listener added later in that same
+     turn missed it. One microtask is enough for `onmessage` reassigned in a
+     `.then`; it is not for a `once` listener behind `Promise.race()` in an
+     async function, which is how WPT's `nextMessageOrTimeout` takes each
+     message (several microtasks). In
+     `webrtc-encoded-transform/RTCRtpScriptTransform-encoded-transform.https.html`
+     the worker's "sender written" and "receiver written" were then queued
+     together whenever the page's thread fell behind (a busy runner), the second
+     went to no listener, and the subtest failed with
+     `expected "receiver written" but got undefined`.
+     - After a dispatch the loop waits for the event loop's next turn
+       (`op_void_async_deferred`) before it takes the next message, so every
+       microtask the first one started has run: HTML's "one task per message".
+       The page's loop does so after every message, as its recv op resolves at
+       once when a message is queued; the worker's recv op is `async(lazy)`
+       already, so its loop waits only between queued messages.
+     - The drain's batch limit is gone from the page's loop: a turn per message
+       cannot starve the event loop.
+     - Not changed: `MessagePort` (`ext/web/13_message_port.js`) and
+       `node:worker_threads` (`ext/node/polyfills/worker_threads.ts`) yield one
+       microtask between queued messages in the same way.
+     - Tests: `tests/unit/worker_test.ts` "worker messages queued together reach
+       a listener re-added later" and "messages queued together for a worker
+       reach a listener re-added later" (both fail without the change).
+     - Node tests enabled: none.
+
+556. **`fix(ext/webrtc)`: a check that outruns its trickled candidate no longer
+     delays the connection by a second** (runtime; `Cargo.toml`, `Cargo.lock`;
+     webrtc-rs-rtc `fix/ice-prflx-signaled-candidate`, 2a88450a, on
+     `0.22.0+brainwires.5`). The answerer's first connectivity check is a
+     datagram; its candidate reaches the offerer through `icecandidate` and
+     `addIceCandidate()`. When the check won (about 1 connection in 20 on an
+     idle machine, more on a busy one) the offerer's ICE agent learned the
+     address as a peer-reflexive candidate, then held the signalled host
+     candidate beside it. Everything from that address was credited to the
+     peer-reflexive candidate, whose pair the controlling agent nominates only
+     after the engine's peer-reflexive acceptance wait: `connected` came 1.2 s
+     after the answer instead of 0.2 s. The same WPT file gives a transform's
+     first frame one second from `ontrack`, so those runs failed with
+     `expected "sender written" but got undefined`, on any of its eight
+     read/write subtests.
+     - The engine now replaces a peer-reflexive remote candidate with the
+       signalled candidate of the same transport address (RFC 8838 section 11):
+       one candidate per address, with the signalled type and priority and the
+       id and pairs the learned one had. A host candidate is nominated at once.
+       This is the replacement the engine's `master` has in its RFC 8445
+       checklist (13fe4c5e), alone on the release this fork pins.
+     - A peer-reflexive candidate nobody signals keeps its acceptance wait.
+     - Measured on a debug build, 200 loopback connections: 3 to 5 in 100 took
+       1.2 s before, none after (192 to 207 ms).
+     - Tests: rtc-ice
+       `test_signalled_candidate_replaces_the_peer_reflexive_one_it_duplicates`
+       (fails without the change) and
+       `test_unsignalled_peer_reflexive_candidate_keeps_its_acceptance_wait`.
+       WPT `RTCRtpScriptTransform-encoded-transform.https.html` looped with the
+       test process on one CPU: 9 of 40 runs failed before items 555 and 556 (7
+       on "sender written", 3 on "receiver written"), 0 of 120 after.
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -22522,9 +22585,9 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 517, 518-538, 554 and the runtime parts of 540-551)
-are what the prebuilt `libdenort` carries. The CLI-side parts (for example
-writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+506-510, 511, 512, 513, 515, 517, 518-538, 554-556 and the runtime parts of
+540-551) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.
 

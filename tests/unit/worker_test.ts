@@ -1024,3 +1024,75 @@ Deno.test({
     w.terminate();
   },
 });
+
+// Each message is its own task: a listener added any number of microtasks
+// after the previous message gets the next one, also when both were queued
+// before either was dispatched. The helpers are WPT's
+// (webrtc-encoded-transform/routines.js): a `once` listener behind
+// `Promise.race()` in an async function, so the next listener is added
+// several microtasks after the previous message's dispatch.
+function getNextMessage(target: EventTarget): Promise<unknown> {
+  return new Promise((resolve) =>
+    target.addEventListener(
+      "message",
+      (e) => resolve((e as MessageEvent).data),
+      { once: true },
+    )
+  );
+}
+
+// deno-lint-ignore require-await
+async function nextMessageOrTimeout(
+  target: EventTarget,
+  ms: number,
+): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    getNextMessage(target),
+    new Promise((resolve) => timer = setTimeout(resolve, ms)),
+  ]).finally(() => clearTimeout(timer));
+}
+
+Deno.test({
+  name: "worker messages queued together reach a listener re-added later",
+  fn: async function () {
+    const worker = new Worker(
+      `data:text/javascript,onmessage = () => { postMessage("a"); postMessage("b"); };`,
+      { type: "module" },
+    );
+    const first = nextMessageOrTimeout(worker, 10_000);
+    worker.postMessage("go");
+    // Both messages are queued by the time this thread takes the first.
+    const until = performance.now() + 500;
+    while (performance.now() < until);
+    assertEquals(await first, "a");
+    assertEquals(await nextMessageOrTimeout(worker, 2_000), "b");
+    // Neither was delivered twice.
+    assertEquals(await nextMessageOrTimeout(worker, 100), undefined);
+    worker.terminate();
+  },
+});
+
+Deno.test({
+  name: "messages queued together for a worker reach a listener re-added later",
+  fn: async function () {
+    const source = `${getNextMessage}
+      ${nextMessageOrTimeout}
+      (async () => {
+        const a = await nextMessageOrTimeout(self, 10_000);
+        const b = await nextMessageOrTimeout(self, 2_000);
+        postMessage([a, b]);
+      })();`;
+    const worker = new Worker(
+      `data:text/javascript,${encodeURIComponent(source)}`,
+      { type: "module" },
+    );
+    // Both are queued before the worker's script runs.
+    worker.postMessage("a");
+    worker.postMessage("b");
+    const { promise, resolve } = Promise.withResolvers<unknown>();
+    worker.onmessage = (e) => resolve(e.data);
+    assertEquals(await promise, ["a", "b"]);
+    worker.terminate();
+  },
+});

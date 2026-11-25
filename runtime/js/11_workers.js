@@ -10,6 +10,7 @@ const {
   op_host_recv_message,
   op_host_recv_message_sync,
   op_host_terminate_worker,
+  op_void_async_deferred,
 } = core.ops;
 const {
   ArrayPrototypeFilter,
@@ -20,8 +21,6 @@ const {
   ObjectFreeze,
   ObjectPrototypeIsPrototypeOf,
   ObjectSetPrototypeOf,
-  Promise,
-  queueMicrotask,
   RangeError,
   String,
   StringPrototypeStartsWith,
@@ -335,22 +334,24 @@ class Worker extends EventTarget {
       if (!this.#dispatchWorkerMessage(data)) return;
       // Drain messages already queued on the host side instead of taking the
       // async op + Promise path for each, mirroring the worker global
-      // (99_main.js) and node:worker_threads receive loops. The whole burst is
-      // processed within this event-loop turn; the batch limit prevents
-      // starving the event loop under a sustained flood.
-      for (let i = 0; i < 1000 && this.#status !== "TERMINATED"; i++) {
+      // (99_main.js) receive loop.
+      while (this.#status !== "TERMINATED") {
+        // Each message dispatch is its own task (HTML's port message queue):
+        // every microtask the previous dispatch started has run before the
+        // next one. A page that takes its next message with a listener it
+        // adds several microtasks after the previous one (a `once` listener
+        // behind `Promise.race()` in an async function, as WPT's
+        // `nextMessageOrTimeout`; `onmessage` reassigned in a `.then`, as
+        // workers/Worker-structure-message.html) has it in place, however
+        // long that chain is: yielding a fixed number of microtasks loses
+        // the message to a longer one. So after a dispatch the loop waits
+        // for the event loop's next turn before it takes another message,
+        // from here or from the op above (which resolves at once when one
+        // is queued).
+        await op_void_async_deferred();
+        if (this.#status === "TERMINATED") return;
         const syncData = op_host_recv_message_sync(this.#id);
         if (syncData === null) break;
-        // Each message dispatch is its own task. Yield a microtask before
-        // delivering this already-dequeued message so a handler that re-armed
-        // itself in a microtask after the previous dispatch (e.g. reassigning
-        // `onmessage` inside a `.then`, as WPT
-        // workers/Worker-structure-message.html does) is installed first --
-        // otherwise the message reaches the stale handler and is lost. A
-        // synchronous checkpoint can't help here: V8 won't run microtasks
-        // reentrantly while we are already inside one.
-        await new Promise((resolve) => queueMicrotask(() => resolve()));
-        if (this.#status === "TERMINATED") return;
         if (!this.#dispatchWorkerMessage(syncData)) return;
       }
     }
