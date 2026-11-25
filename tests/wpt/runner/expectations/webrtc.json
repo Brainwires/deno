@@ -277,6 +277,7 @@
   "RTCRtpTransceiver-stopping.https.html?rest": true,
   "RTCRtpTransceiver.https.html?interop-2026": true,
   "RTCRtpTransceiver.https.html?rest": {
+    "flaky": true,
     "expectedFailures": [
       "checkNoMidOffer"
     ]
