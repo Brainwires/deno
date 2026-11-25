@@ -127,8 +127,8 @@ pub(crate) fn maintain_versioned_files(
 }
 
 /// The upkeep lock of the cache `base`: the file `<base>.lock` beside its
-/// databases, locked by the OS (released when the handle closes or the
-/// process ends). Pruning holds it exclusively; a version opening a database
+/// databases, locked by the OS (unlocked when this is dropped, and released
+/// by the OS when the process ends). Pruning holds it exclusively; a version opening a database
 /// of its own that has gone unused long enough to be pruned holds it shared
 /// until its connection is open. So a database is never removed while the
 /// version that owns it is between finding the file and holding SQLite's
@@ -136,7 +136,19 @@ pub(crate) fn maintain_versioned_files(
 /// connection opened on a file removed in that moment would go on with a
 /// database no later connection shares.
 pub(crate) struct UpkeepLock {
-  _file: std::fs::File,
+  file: std::fs::File,
+}
+
+impl Drop for UpkeepLock {
+  /// Unlocks, instead of leaving it to the handle's close: the lock belongs
+  /// to the open file, which a child process this one starts on another
+  /// thread shares until it has replaced its image (the descriptor is
+  /// close-on-exec, but the copy lives from the fork to the exec). Closing
+  /// this handle alone would leave the lock held for that long, and a
+  /// pruning pass right after would find it busy and remove nothing.
+  fn drop(&mut self) {
+    _ = self.file.unlock();
+  }
 }
 
 fn upkeep_lock_file(base: &Path) -> Option<std::fs::File> {
@@ -174,7 +186,7 @@ pub(crate) fn lock_for_long_unused_open(
   file.lock_shared().ok()?;
   // (by path, as in `maintain_versioned_files`)
   let _ = sys_traits::impls::RealSys.fs_set_file_times(current, now, now);
-  Some(UpkeepLock { _file: file })
+  Some(UpkeepLock { file })
 }
 
 /// Removes the other versions' files of the cache `base` (and the
@@ -190,29 +202,99 @@ pub(crate) fn prune_stale_versions(
   current: &Path,
   now: SystemTime,
 ) {
+  let pass = prune_pass(base, current, now);
+  log::debug!(
+    "Pruning the versions of cache database '{}': {pass}",
+    base.display()
+  );
+}
+
+/// What a pruning pass did, for the debug log and the tests' messages.
+enum PrunePass {
+  /// Nothing was looked at, and why.
+  NotRun(String),
+  /// The pass ran: every other version's database found, in name order.
+  Ran(Vec<PrunedGroup>),
+}
+
+/// One database (with its side files) a pruning pass found.
+struct PrunedGroup {
+  /// The database's file name.
+  name: String,
+  /// The newest modification time among its files; `None`: unknown.
+  last_used: Option<SystemTime>,
+  /// Each of its files with its modification time (`None`: unknown, or not
+  /// a regular file).
+  files: Vec<(String, Option<SystemTime>)>,
+  outcome: PruneOutcome,
+}
+
+enum PruneOutcome {
+  Removed,
+  /// The last use is unknown.
+  KeptUnknownAge,
+  /// Used less than [`STALE_AFTER`] ago.
+  KeptRecent,
+  /// Another process holds it (or the check failed): what the check found.
+  KeptHeld(String),
+  /// Removing the database file failed.
+  KeptRemoveFailed(std::io::Error),
+}
+
+impl std::fmt::Display for PrunePass {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    let groups = match self {
+      PrunePass::NotRun(why) => return write!(f, "not run: {why}"),
+      PrunePass::Ran(groups) => groups,
+    };
+    write!(f, "ran over {} database(s)", groups.len())?;
+    for group in groups {
+      write!(f, "; '{}' ", group.name)?;
+      match &group.outcome {
+        PruneOutcome::Removed => write!(f, "removed")?,
+        PruneOutcome::KeptUnknownAge => {
+          write!(f, "kept (a file's modification time is unknown)")?
+        }
+        PruneOutcome::KeptRecent => write!(f, "kept (recently used)")?,
+        PruneOutcome::KeptHeld(why) => write!(f, "kept (held: {why})")?,
+        PruneOutcome::KeptRemoveFailed(err) => {
+          write!(f, "kept (removing it failed: {err:#})")?
+        }
+      }
+      write!(f, ", last used {:?}, files", group.last_used)?;
+      for (name, modified) in &group.files {
+        write!(f, " '{name}' modified {modified:?}")?;
+      }
+    }
+    Ok(())
+  }
+}
+
+fn prune_pass(base: &Path, current: &Path, now: SystemTime) -> PrunePass {
   let (Some(dir), Some(base_name), Some(current_name)) = (
     base.parent(),
     base.file_name().and_then(|n| n.to_str()),
     current.file_name().and_then(|n| n.to_str()),
   ) else {
-    return;
+    return PrunePass::NotRun("the cache's path has no UTF-8 name".into());
   };
   let Some(lock) = upkeep_lock_file(base) else {
-    return;
+    return PrunePass::NotRun("the upkeep lock file can't be opened".into());
   };
-  if lock.try_lock().is_err() {
-    log::debug!(
-      "Not pruning the versions of cache database '{}': its upkeep lock is held",
-      base.display()
-    );
-    return;
+  if let Err(err) = lock.try_lock() {
+    return PrunePass::NotRun(format!("the upkeep lock is held ({err})"));
   }
-  let _lock = UpkeepLock { _file: lock };
-  let Ok(entries) = std::fs::read_dir(dir) else {
-    return;
+  let _lock = UpkeepLock { file: lock };
+  let entries = match std::fs::read_dir(dir) {
+    Ok(entries) => entries,
+    Err(err) => {
+      return PrunePass::NotRun(format!("reading the directory: {err:#}"));
+    }
   };
-  // database file name -> its last use (`None`: unknown, so kept)
-  let mut groups: HashMap<String, Option<SystemTime>> = HashMap::new();
+  // database file name -> its last use (`None`: unknown, so kept) and
+  // its files
+  type Group = (Option<SystemTime>, Vec<(String, Option<SystemTime>)>);
+  let mut groups: HashMap<String, Group> = HashMap::new();
   for entry in entries.flatten() {
     let name = entry.file_name();
     let Some(name) = name.to_str() else {
@@ -229,66 +311,83 @@ pub(crate) fn prune_stale_versions(
       .ok()
       .filter(|m| m.is_file())
       .and_then(|m| m.modified().ok());
-    let last_used = groups
+    let (last_used, files) = groups
       .entry(group.to_string())
-      .or_insert(Some(SystemTime::UNIX_EPOCH));
+      .or_insert((Some(SystemTime::UNIX_EPOCH), Vec::new()));
     *last_used = match (*last_used, modified) {
       (Some(a), Some(b)) => Some(a.max(b)),
       _ => None,
     };
+    files.push((name.to_string(), modified));
   }
-  for (group, last_used) in groups {
-    let Some(last_used) = last_used else {
-      continue;
-    };
-    let stale = now
-      .duration_since(last_used)
-      .is_ok_and(|age| age >= STALE_AFTER);
-    if !stale {
-      continue;
-    }
-    let db = dir.join(&group);
-    if held_by_another_process(&db)
-      || held_by_another_process(&dir.join(format!("{group}-shm")))
-    {
-      log::debug!(
-        "Keeping stale cache database '{}': another process has it open",
-        db.display()
-      );
-      continue;
-    }
-    // the database first: where an open file can't be removed (Windows),
-    // that failing keeps its side files too
-    match std::fs::remove_file(&db) {
-      Ok(()) => {}
-      Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-      Err(err) => {
-        log::debug!(
-          "Failed removing stale cache database '{}': {err:#}",
-          db.display()
-        );
-        continue;
+  let mut groups = groups.into_iter().collect::<Vec<_>>();
+  groups.sort_by(|a, b| a.0.cmp(&b.0));
+  let pruned = groups
+    .into_iter()
+    .map(|(name, (last_used, mut files))| {
+      files.sort();
+      let outcome = prune_group(dir, &name, last_used, now);
+      PrunedGroup {
+        name,
+        last_used,
+        files,
+        outcome,
       }
-    }
-    for suffix in SIDE_FILE_SUFFIXES {
-      _ = std::fs::remove_file(dir.join(format!("{group}{suffix}")));
-    }
-    log::debug!("Removed stale cache database '{}'", db.display());
+    })
+    .collect();
+  PrunePass::Ran(pruned)
+}
+
+/// Removes the database `group` in `dir` with its side files when it is
+/// stale and no other process holds it.
+fn prune_group(
+  dir: &Path,
+  group: &str,
+  last_used: Option<SystemTime>,
+  now: SystemTime,
+) -> PruneOutcome {
+  let Some(last_used) = last_used else {
+    return PruneOutcome::KeptUnknownAge;
+  };
+  let stale = now
+    .duration_since(last_used)
+    .is_ok_and(|age| age >= STALE_AFTER);
+  if !stale {
+    return PruneOutcome::KeptRecent;
   }
+  let db = dir.join(group);
+  for path in [db.clone(), dir.join(format!("{group}-shm"))] {
+    if let Some(why) = held_by_another_process(&path) {
+      return PruneOutcome::KeptHeld(format!("'{}': {why}", path.display()));
+    }
+  }
+  // the database first: where an open file can't be removed (Windows),
+  // that failing keeps its side files too
+  match std::fs::remove_file(&db) {
+    Ok(()) => {}
+    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+    Err(err) => return PruneOutcome::KeptRemoveFailed(err),
+  }
+  for suffix in SIDE_FILE_SUFFIXES {
+    _ = std::fs::remove_file(dir.join(format!("{group}{suffix}")));
+  }
+  PruneOutcome::Removed
 }
 
 /// Whether another process holds a POSIX lock on `path` (SQLite's unix VFS
 /// locks the database while a transaction runs, and every open connection to
 /// a WAL database keeps a read lock in its `-shm` file). Locks of this
 /// process aren't reported, and it holds none on another version's files.
-/// When the check itself fails the file counts as held.
+/// When the check itself fails the file counts as held. `Some` says what was
+/// found; `None`: not held (or no such file).
 #[cfg(unix)]
-fn held_by_another_process(path: &Path) -> bool {
+fn held_by_another_process(path: &Path) -> Option<String> {
   use std::os::fd::AsRawFd;
 
   let file = match std::fs::File::open(path) {
     Ok(file) => file,
-    Err(err) => return err.kind() != std::io::ErrorKind::NotFound,
+    Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+    Err(err) => return Some(format!("opening it failed: {err:#}")),
   };
   // SAFETY: an all-zero `flock` is a valid value of the plain C struct
   let mut lock: libc::flock = unsafe { std::mem::zeroed() };
@@ -298,14 +397,19 @@ fn held_by_another_process(path: &Path) -> bool {
   lock.l_len = 0; // the whole file
   // SAFETY: `file` is open for the call and `lock` a valid `flock`
   let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut lock) };
-  rc == -1 || lock.l_type != libc::F_UNLCK as libc::c_short
+  if rc == -1 {
+    let err = std::io::Error::last_os_error();
+    return Some(format!("asking for its locks failed: {err:#}"));
+  }
+  (lock.l_type != libc::F_UNLCK as libc::c_short)
+    .then(|| format!("process {} holds a lock on it", lock.l_pid))
 }
 
 /// Windows refuses to remove a file another process has open (SQLite opens
 /// its files without `FILE_SHARE_DELETE`), which the removal handles.
 #[cfg(not(unix))]
-fn held_by_another_process(_path: &Path) -> bool {
-  false
+fn held_by_another_process(_path: &Path) -> Option<String> {
+  None
 }
 
 #[cfg(test)]
@@ -406,7 +510,7 @@ mod tests {
       touch(&dir.join(name), old);
     }
 
-    prune_stale_versions(&base, &current, now);
+    let pass = prune_pass(&base, &current, now);
 
     let mut left = std::fs::read_dir(&dir)
       .unwrap()
@@ -426,7 +530,8 @@ mod tests {
         "test_cache_2.0",
         "test_cache_2.0-wal",
         "test_cache_extra",
-      ]
+      ],
+      "{pass}"
     );
   }
 
@@ -489,14 +594,37 @@ mod tests {
     let stale = versioned_path(&base, "0.9");
     touch(&current, now);
     touch(&stale, now - 8 * DAY);
-    prune_stale_versions(&base, &current, now);
-    assert!(stale.exists() && opening.exists());
+    let pass = prune_pass(&base, &current, now);
+    assert!(
+      matches!(pass, PrunePass::NotRun(_)),
+      "a pass ran while the upkeep lock was held: {pass}"
+    );
+    assert!(stale.exists() && opening.exists(), "{pass}");
     // the connection is open: the lock goes, and the next pass prunes what
     // is still stale
     drop(held);
-    prune_stale_versions(&base, &current, now);
-    assert!(!stale.exists());
-    assert!(opening.exists() && current.exists());
+    let pass = prune_pass(&base, &current, now);
+    let PrunePass::Ran(groups) = &pass else {
+      panic!("no pass after the upkeep lock was dropped: {pass}");
+    };
+    // each database's outcome, by name: the stale one goes, the one just
+    // opened (marked used) stays, and this version's own isn't looked at
+    let outcomes = groups
+      .iter()
+      .map(|g| (g.name.as_str(), &g.outcome))
+      .collect::<Vec<_>>();
+    assert!(
+      matches!(
+        outcomes[..],
+        [
+          ("test_cache_0.9", PruneOutcome::Removed),
+          ("test_cache_1.0", PruneOutcome::KeptRecent)
+        ]
+      ),
+      "{pass}"
+    );
+    assert!(!stale.exists(), "{pass}");
+    assert!(opening.exists() && current.exists(), "{pass}");
 
     // no lock for a database used within the last days, or a new one
     touch(&opening, now - 5 * DAY);
@@ -506,6 +634,49 @@ mod tests {
     let missing = versioned_path(&base, "3.0");
     assert!(lock_for_long_unused_open(&base, &missing, now).is_none());
     assert!(!missing.exists());
+  }
+
+  /// Dropping the upkeep lock unlocks it even while a copy of its
+  /// descriptor is still open: what a child process started on another
+  /// thread holds between its fork and its exec (the lock belongs to the
+  /// open file both share, so closing one descriptor doesn't release it).
+  /// The next pruning pass runs at once.
+  #[cfg(unix)]
+  #[test]
+  fn dropping_the_upkeep_lock_unlocks_a_shared_descriptor() {
+    let temp = TempDir::new();
+    let dir = temp.path().as_path().to_path_buf();
+    let now = SystemTime::now();
+    let base = dir.join("test_cache");
+    let current = versioned_path(&base, "2.0");
+    let stale = versioned_path(&base, "0.9");
+    touch(&current, now);
+    touch(&stale, now - 8 * DAY);
+    for shared in [true, false] {
+      let file = upkeep_lock_file(&base).unwrap();
+      if shared {
+        file.lock_shared().unwrap();
+      } else {
+        file.lock().unwrap();
+      }
+      let held = UpkeepLock { file };
+      // the same open file, as a forked child has it
+      let copy = held.file.try_clone().unwrap();
+      let pass = prune_pass(&base, &current, now);
+      assert!(
+        matches!(pass, PrunePass::NotRun(_)),
+        "a pass ran while the upkeep lock was held (shared: {shared}): {pass}"
+      );
+      drop(held);
+      let pass = prune_pass(&base, &current, now);
+      assert!(
+        matches!(pass, PrunePass::Ran(_)),
+        "the dropped upkeep lock is still held through the copy of its \
+         descriptor (shared: {shared}): {pass}"
+      );
+      drop(copy);
+    }
+    assert!(!stale.exists());
   }
 
   /// A stale database another process still has open is kept, and removed
@@ -576,15 +747,18 @@ mod tests {
       }
     };
     age_all();
-    prune_stale_versions(&base, &current, now);
-    assert!(held.exists(), "removed while another process held it");
+    let pass = prune_pass(&base, &current, now);
+    assert!(
+      held.exists(),
+      "removed while another process held it: {pass}"
+    );
 
     drop(child.stdin.take());
     let status = child.wait().unwrap();
     assert!(status.success());
     age_all();
-    prune_stale_versions(&base, &current, now);
-    assert!(!held.exists());
+    let pass = prune_pass(&base, &current, now);
+    assert!(!held.exists(), "{pass}");
     assert!(!dir.join("test_cache_1.0-wal").exists());
     assert!(!dir.join("test_cache_1.0-shm").exists());
   }

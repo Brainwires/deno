@@ -22290,9 +22290,24 @@ where the changes are discussed.
        already made decides.
      - Older runtimes don't take the lock; between one of them and this one the
        moment is as it was.
+     - Dropping the lock unlocks it (`File::unlock`) instead of leaving that to
+       the handle's close. The lock belongs to the open file, and a child
+       process started on another thread shares that file from its fork to its
+       exec (the descriptor is close-on-exec, but the copy lives that long), so
+       a close alone left the lock held for that moment and a pruning pass right
+       after it found the lock busy and removed nothing. In the test binary,
+       where other tests start processes all the time, that made
+       `a_long_unused_database_is_opened_under_the_upkeep_lock` fail on a slow
+       Intel macOS runner.
+     - A pass reports what it did (`PrunePass`: not run and why, or each
+       database with its outcome, last use and files' modification times; a held
+       database with the process and file the check found, a failed removal with
+       its error). It is one debug log line, and the tests' assertion messages.
      - Tests:
-       `cache_db_files::tests::a_long_unused_database_is_opened_under_the_upkeep_lock`;
-       `prunes_only_stale_files_of_other_versions` now lists the lock file.
+       `cache_db_files::tests::a_long_unused_database_is_opened_under_the_upkeep_lock`,
+       `dropping_the_upkeep_lock_unlocks_a_shared_descriptor` (Unix; fails
+       without the unlock); `prunes_only_stale_files_of_other_versions` now
+       lists the lock file.
      - Node tests enabled: none.
 
 548. **`fix(permissions)`: only this runtime's kernel sandbox makes an
