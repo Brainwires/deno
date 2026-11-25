@@ -1488,10 +1488,7 @@ mod tests {
     assert_eq!(child.allow_read, own.allow_read);
     assert_eq!(child.allow_sys, own.allow_sys);
     assert_eq!(layer.deny_read.len(), 1);
-    assert_eq!(
-      child.deny_read,
-      Some(vec![path_text(&layer.deny_read[0])])
-    );
+    assert_eq!(child.deny_read, Some(vec![path_text(&layer.deny_read[0])]));
     // what it didn't ask for it doesn't get
     let mut plain = opts();
     clamp_under(&mut plain, std::slice::from_ref(&layer), &cwd, false);
