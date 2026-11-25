@@ -10,33 +10,86 @@ Prints the JSON list of targets on stdout. Each entry has:
 - `runner`: where the build jobs run (denort, denort bin, cli). For a macOS
   target this is the self-hosted pool its repository variable names
   (RUNNER_MACOS_ARM / RUNNER_MACOS_X64: a bare label or a JSON array), else
-  the image.
-- `gui_runner`: where the jobs that launch the packaged app run (package and
-  e2e_fork, whose smoke and e2e open windows). Launching an app needs a GUI
-  login session for the job's user. The mac-arm pool has one: its Tart guests
-  log `runner` in at the console. The mac-x64 pool has none: the MacBook runs
-  its jobs as `runner` over ssh + sudo inside `sandbox-exec`. There AppKit
-  aborts the app (`xpc_connection_set_target_uid` API misuse, SIGILL; or
-  SIGSEGV in SLSNewConnection), and the sandbox refuses to exec the setuid
-  /bin/ps the e2e runner lists processes with (EPERM). That was the denext.14
-  release failure. So x86_64-apple-darwin launches on GitHub's image unless
-  RUNNER_MACOS_X64_GUI names a pool that has a GUI session. The arm64 GUI
-  runner follows RUNNER_MACOS_ARM unless RUNNER_MACOS_ARM_GUI overrides it.
-  Never the mac-x64 pool (`denext-macos-x64`), even when RUNNER_MACOS_X64_GUI
-  names it: since 2026-11-18 its jobs are denied Accessibility, Screen
-  Recording, Input Monitoring, Camera, Microphone and Automation without a
-  prompt (the MacBook's console session is the user's; ops/runners README
-  "Permissions on mac-x64"), and the e2e posts key events through the
-  Accessibility grant. With MACOS_X64_GUI_ON_ARM=1 (or true / on / yes) and
-  an arm64 GUI pool, x86_64-apple-darwin's launch jobs run on that pool
-  instead, the x86_64 app under Rosetta 2: the Tart guests pre-grant every
-  privacy permission (ops/runners tart/provision-tcc-guest.sh).
-- `laufey_runner`: where the laufey job builds the backend hosts. For
-  x86_64-unknown-linux-gnu this is the Ubuntu 22.04 Linux pool
-  (RUNNER_LINUX_X64_2204), whose image carries every package that job
-  installs, so it downloads none; the other targets stay on the image (the
-  macOS leg `brew install`s llvm, the Windows legs use Chocolatey, which the
-  pools' images lack, and Linux arm64 has no pool).
+  the image. The Linux and Windows build jobs always take the image: a
+  release build (fat LTO, codegen-units=1) peaks above GitHub's 16 GB (the
+  aarch64 Linux legs add a 16 GB swapfile to finish), while our Windows hosts
+  have 8 GB (win-x64's VM, win-x64-brain's i3, each win-arm64 VM) and our
+  Linux job containers 3.5 GB + swap to 7 GB (biscuits) or 6 GB + 2 GB (the
+  mini); and the Linux jobs `fallocate` + `swapon` a swapfile, `mount` the
+  glibc 2.27 sysroot and `chroot` into it to run what they built, which the
+  containers refuse (no SYS_ADMIN, no SYS_CHROOT; ops/runners README).
+- `gui_runner`: where the jobs that launch the packaged app run (e2e_fork,
+  and package unless `package_runner` says otherwise: their smoke and e2e
+  open windows). Launching an app needs a GUI login session for the job's
+  user.
+  macOS: the mac-arm pool has one: its Tart guests log `runner` in at the
+  console. The mac-x64 pool has none: the MacBook runs its jobs as `runner`
+  over ssh + sudo inside `sandbox-exec`. There AppKit aborts the app
+  (`xpc_connection_set_target_uid` API misuse, SIGILL; or SIGSEGV in
+  SLSNewConnection), and the sandbox refuses to exec the setuid /bin/ps the
+  e2e runner lists processes with (EPERM). That was the denext.14 release
+  failure. The arm64 GUI runner follows RUNNER_MACOS_ARM unless
+  RUNNER_MACOS_ARM_GUI overrides it. Never the mac-x64 pool
+  (`denext-macos-x64`), even when RUNNER_MACOS_X64_GUI names it: since
+  2026-11-18 its jobs are denied Accessibility, Screen Recording, Input
+  Monitoring, Camera, Microphone and Automation without a prompt (the
+  MacBook's console session is the user's; ops/runners README "Permissions
+  on mac-x64"), and the e2e posts key events through the Accessibility
+  grant. x86_64-apple-darwin's launch jobs run on the arm64 GUI pool, the
+  x86_64 app under Rosetta 2, whenever RUNNER_MACOS_ARM_GUI or
+  RUNNER_MACOS_ARM names a pool, unless MACOS_X64_GUI_ON_ARM is 0 / false /
+  off / no. The Tart guests pre-grant every privacy permission (ops/runners
+  tart/provision-tcc-guest.sh) and already run the x86_64 cli's smoke tests
+  under Rosetta (`rosetta` below). That is the default since denext.31 (it
+  was opt-in): otherwise those two legs always ran on macos-15-intel while
+  no pool of ours could ever take them. A pool RUNNER_MACOS_X64_GUI names
+  (other than the mac-x64 pool) wins over that default;
+  MACOS_X64_GUI_ON_ARM=1 (or true / on / yes) wins over
+  RUNNER_MACOS_X64_GUI. With the default turned off and no such pool: the
+  image.
+  Linux: the launch jobs run under Xvfb (and a headless sway for the Wayland
+  variant) with their own session bus and gnome-keyring. The Ubuntu 22.04
+  pool images carry all of it (ops/runners linux/Dockerfile.2204 and
+  linux-arm64/Dockerfile: xvfb, sway, dbus-x11, gnome-keyring, gcr, xfwm4,
+  xdotool, wmctrl and the WebKitGTK / CEF runtime libraries), so
+  apt_install.sh fetches nothing; laufey's own CEF / webview window tests
+  and denext's 22.04 desktop-window entries run there already.
+  x86_64-unknown-linux-gnu launches on RUNNER_LINUX_X64_GUI, else the Ubuntu
+  22.04 pool (RUNNER_LINUX_X64_2204); aarch64-unknown-linux-gnu on
+  RUNNER_LINUX_ARM64_GUI, else the Linux arm64 pool (RUNNER_LINUX_ARM64).
+  Windows: both Windows pools run each job in the job account's console
+  session (ops/runners windows-x64/README.md "Desktop session",
+  windows/README.md). x86_64-pc-windows-msvc launches on
+  RUNNER_WINDOWS_X64_GUI, else RUNNER_WINDOWS_X64; aarch64-pc-windows-msvc
+  on RUNNER_WINDOWS_ARM_GUI, else RUNNER_WINDOWS_ARM.
+  A *_GUI variable that names a GitHub image (`ubuntu-22.04`,
+  `windows-2025`, ...) sends that target's launch jobs to the image: the
+  switch to turn a pool off for them.
+- `package_runner`: where the package job runs: `gui_runner`, except on
+  Windows, where it is the image. Its e2e installs the stock CLI's `.msi`
+  per machine (the deeplink area: `msiexec /i /qn` into Program Files),
+  which needs an administrator. GitHub's Windows images run jobs as one
+  with UAC off; our Windows pools run them as the non-admin `runner`
+  account with UAC on (ops/runners windows-x64/README.md: "No job category
+  here needs admin"), so that check would fail there. e2e_fork (the
+  sidecarint and kernelsandbox areas, no installer) takes the Windows pools.
+- `laufey_runner`: where the laufey job builds the backend hosts.
+  x86_64-unknown-linux-gnu: the Ubuntu 22.04 Linux pool
+  (RUNNER_LINUX_X64_2204); aarch64-unknown-linux-gnu: the Linux arm64 pool
+  (RUNNER_LINUX_ARM64). Both images carry every package that job installs
+  (the same Ubuntu 22.04 package list), so it downloads none. The Windows
+  legs: RUNNER_WINDOWS_X64 / RUNNER_WINDOWS_ARM. The job installs make 4.4.1
+  and ninja 1.13.2 with Chocolatey where there is one (GitHub's images); our
+  Windows pools have none, so there it unpacks the same two Chocolatey
+  packages itself (pinned SHA-256: the bytes `choco install` fetches). VS
+  Build Tools with CMake, the Windows SDK, Git Bash and PowerShell 7 are on
+  both pools. The macOS legs stay on the image: x86_64-apple-darwin's
+  because the mac-x64 pool has no Homebrew its job user can install into
+  (the leg `brew install`s llvm and ninja) and the mac-arm guests' Homebrew
+  is arm64; aarch64-apple-darwin's because the mac-arm pool's two slots are
+  the release's critical path (both macOS targets' builds and launch jobs):
+  the 5-minute laufey leg starts together with the builds and would take a
+  slot from one of them, sending a 45-120 minute build to GitHub instead.
 - `rosetta`: x86_64-apple-darwin's build jobs (denort, denort bin, cli) run
   on the arm64 pool with the x86_64 Rust toolchain: cargo, rustc and every
   build script run as x86_64 under Rosetta 2, so the build is a native x86_64
@@ -52,8 +105,7 @@ Prints the JSON list of targets on stdout. Each entry has:
   smoke tests run the x86_64 binary there under Rosetta too, which the pool's
   image has (ops provision-rosetta-guest.sh). `os` stays macos-15-intel (the
   caches and artifacts are named after it; the overflow builds there,
-  natively), and `gui_runner` is unchanged: the jobs that launch the app
-  (package, e2e_fork) stay where they were. The x86_64 legs then take the
+  natively), and `gui_runner` does not follow it (its own rule above). The x86_64 legs then take the
   arm64 pool's slots like its own, and when that pool is full they fall back
   to the mac-x64 pool (`runner_fallback`, RUNNER_MACOS_X64) while it has a
   free slot, before the image: the MacBook builds them natively, as the
@@ -64,7 +116,11 @@ Prints the JSON list of targets on stdout. Each entry has:
   pool): the second pool its build jobs try before the image.
 - `runs_on`: {job: runs-on} for this run, each job's pool above or, for the
   overflow, the image (`os`). The jobs read it first (`matrix.runs_on.cli ||
-  matrix.runner || matrix.os`).
+  matrix.runner || matrix.os`). rpm-smoke (Linux only) is not in it and
+  always takes the image (`runner`): it runs `docker run` with a bind mount
+  of the job's files, which none of our Linux pools can do (no Docker in
+  the job containers; linux-x64-docker's daemon is a sidecar that does not
+  see the job's filesystem; none on the mini's linux-arm64).
 
 The overflow. A pool has few slots (the mac-x64 pool one), and a target's legs
 on it queue behind each other: denort and denort bin start together after
@@ -92,8 +148,10 @@ variable (RUNNER_*_SLOTS, default 1). Then, the jobs in dependency order:
   pool that is merely busy. Only overflow counts: a leg with a pool that had
   no free slot. A macOS job with no pool at all (the arm64 legs while
   RUNNER_MACOS_ARM names an image, x86_64-apple-darwin's package and
-  e2e_fork, which need a GUI session the mac-x64 pool lacks, the macOS
-  laufey legs) takes the image and does not count. It never waits on a pool
+  e2e_fork with MACOS_X64_GUI_ON_ARM off, which need a GUI session the
+  mac-x64 pool lacks, the macOS laufey legs) takes the image and does not
+  count. Linux and Windows jobs never count and never wait: past their
+  pools' free slots they take the image. It never waits on a pool
   the shared picker reports blocked (POOL_BLOCKED: unhealthy, paused,
   unlisted, or stalled in the previous attempt): such a leg takes the image.
   (denext.24 run 43756144777: three pool-less arm64 legs spent the cap, and
@@ -109,10 +167,14 @@ only takes a job that would otherwise wait.
 
 Env: TARGETS ("all" or a comma-separated list of triples),
      RUNNER_MACOS_ARM, RUNNER_MACOS_X64, RUNNER_MACOS_ARM_GUI,
-     RUNNER_MACOS_X64_GUI, RUNNER_LINUX_X64_2204, MACOS_X64_ON_ARM,
-     MACOS_X64_GUI_ON_ARM (each optional),
+     RUNNER_MACOS_X64_GUI, RUNNER_LINUX_X64_2204, RUNNER_LINUX_ARM64,
+     RUNNER_WINDOWS_X64, RUNNER_WINDOWS_ARM, RUNNER_LINUX_X64_GUI,
+     RUNNER_LINUX_ARM64_GUI, RUNNER_WINDOWS_X64_GUI, RUNNER_WINDOWS_ARM_GUI,
+     MACOS_X64_ON_ARM, MACOS_X64_GUI_ON_ARM (each optional),
      RUNNER_MACOS_ARM_SLOTS, RUNNER_MACOS_X64_SLOTS,
-     RUNNER_LINUX_X64_2204_SLOTS (each optional, default 1),
+     RUNNER_LINUX_X64_2204_SLOTS, RUNNER_LINUX_ARM64_SLOTS,
+     RUNNER_WINDOWS_X64_SLOTS, RUNNER_WINDOWS_ARM_SLOTS (each optional,
+     default 1),
      POOL_FREE (the shared picker's `free` output: {label: free slots},
      optional),
      POOL_HEALTH (the organization variable DENEXT_POOL_HEALTH, optional),
@@ -146,7 +208,7 @@ JOBS = (
     ("denort", "runner", ()),
     ("denort_bin", "runner", ()),
     ("cli", "runner", ("denort_bin",)),
-    ("package", "gui_runner", ("laufey", "denort")),
+    ("package", "package_runner", ("laufey", "denort")),
     ("e2e_fork", "gui_runner", ("package", "cli")),
 )
 
@@ -155,6 +217,9 @@ SLOT_VARS = (
     ("RUNNER_MACOS_ARM", "RUNNER_MACOS_ARM_SLOTS"),
     ("RUNNER_MACOS_X64", "RUNNER_MACOS_X64_SLOTS"),
     ("RUNNER_LINUX_X64_2204", "RUNNER_LINUX_X64_2204_SLOTS"),
+    ("RUNNER_LINUX_ARM64", "RUNNER_LINUX_ARM64_SLOTS"),
+    ("RUNNER_WINDOWS_X64", "RUNNER_WINDOWS_X64_SLOTS"),
+    ("RUNNER_WINDOWS_ARM", "RUNNER_WINDOWS_ARM_SLOTS"),
 )
 
 # Labels whose jobs take the same slots (biscuits' Linux pools share one
@@ -361,18 +426,26 @@ def _flag(env, name):
     return (env.get(name) or "").strip().lower() in ("1", "true", "on", "yes")
 
 
+def _off(env, name):
+    return (env.get(name) or "").strip().lower() in ("0", "false", "off", "no")
+
+
 def x64_gui(env):
-    """Where x86_64-apple-darwin's launch jobs (package, e2e_fork) run: the
-    arm64 GUI pool under Rosetta 2 with MACOS_X64_GUI_ON_ARM, else
-    RUNNER_MACOS_X64_GUI unless that names the mac-x64 pool, else the
-    image ("")."""
+    """Where x86_64-apple-darwin's launch jobs (package, e2e_fork) run (see
+    `gui_runner` in the module docstring): the arm64 GUI pool under Rosetta 2
+    with MACOS_X64_GUI_ON_ARM on; else RUNNER_MACOS_X64_GUI unless that names
+    the mac-x64 pool; else the arm64 GUI pool unless MACOS_X64_GUI_ON_ARM is
+    off; else the image ("")."""
     arm = env.get("RUNNER_MACOS_ARM_GUI", "") or env.get("RUNNER_MACOS_ARM", "")
+    arm_pool = _label(_runner(arm, "macos-15")) is not None
     if _flag(env, "MACOS_X64_GUI_ON_ARM") and arm.strip():
         return arm
     named = env.get("RUNNER_MACOS_X64_GUI", "")
-    if named.strip() and _label(_runner(named, "macos-15-intel")) == MAC_X64_POOL:
-        return ""
-    return named
+    if named.strip() and _label(_runner(named, "macos-15-intel")) != MAC_X64_POOL:
+        return named
+    if arm_pool and not _off(env, "MACOS_X64_GUI_ON_ARM"):
+        return arm
+    return ""
 
 
 def x64_on_arm(env):
@@ -415,15 +488,33 @@ def plan(env):
         # The mac-x64 pool has no GUI session and denies the privacy
         # permissions (see the module docstring): never the mac-x64 pool here.
         "macos-15-intel": x64_gui(env),
+        # Xvfb / headless sway in the Ubuntu 22.04 job containers.
+        "ubuntu-22.04": env.get("RUNNER_LINUX_X64_GUI", "")
+        or env.get("RUNNER_LINUX_X64_2204", ""),
+        "ubuntu-22.04-arm": env.get("RUNNER_LINUX_ARM64_GUI", "")
+        or env.get("RUNNER_LINUX_ARM64", ""),
+        # The job account's console session on both Windows pools.
+        "windows-2025": env.get("RUNNER_WINDOWS_X64_GUI", "")
+        or env.get("RUNNER_WINDOWS_X64", ""),
+        "windows-11-arm": env.get("RUNNER_WINDOWS_ARM_GUI", "")
+        or env.get("RUNNER_WINDOWS_ARM", ""),
     }
     laufey = {
         "x86_64-unknown-linux-gnu": env.get("RUNNER_LINUX_X64_2204", ""),
+        "aarch64-unknown-linux-gnu": env.get("RUNNER_LINUX_ARM64", ""),
+        "x86_64-pc-windows-msvc": env.get("RUNNER_WINDOWS_X64", ""),
+        "aarch64-pc-windows-msvc": env.get("RUNNER_WINDOWS_ARM", ""),
     }
     targets = []
     for t in ALL_TARGETS:
         t = dict(t)
         t["runner"] = _runner(build.get(t["os"], ""), t["os"])
         t["gui_runner"] = _runner(gui.get(t["os"], ""), t["os"])
+        # The package job's e2e installs an .msi per machine, which needs an
+        # administrator: our Windows pools' job account is none (docstring).
+        t["package_runner"] = (
+            t["os"] if t["os"].startswith("windows") else t["gui_runner"]
+        )
         t["laufey_runner"] = _runner(laufey.get(t["target"], ""), t["os"])
         targets.append(t)
     want = [t.strip() for t in env.get("TARGETS", "all").split(",") if t.strip()]
