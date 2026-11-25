@@ -6930,7 +6930,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi 0.5.2",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7405,7 +7405,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4979f22fdb869068da03c9f7528f8297c6fd2606bc3a4affe42e6a823fdb8da4"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -9414,9 +9414,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.5",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -9982,8 +9982,8 @@ dependencies = [
 
 [[package]]
 name = "rtc"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=2a88450a864e34eae719fdf01ed503def8452cf7#2a88450a864e34eae719fdf01ed503def8452cf7"
+version = "0.22.0+brainwires.5.1"
+source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b#a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b"
 dependencies = [
  "bytes",
  "hex",
@@ -10018,8 +10018,8 @@ dependencies = [
 
 [[package]]
 name = "rtc-crypto"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=2a88450a864e34eae719fdf01ed503def8452cf7#2a88450a864e34eae719fdf01ed503def8452cf7"
+version = "0.22.0+brainwires.5.1"
+source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b#a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b"
 dependencies = [
  "aes",
  "aws-lc-rs",
@@ -10036,8 +10036,8 @@ dependencies = [
 
 [[package]]
 name = "rtc-datachannel"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=2a88450a864e34eae719fdf01ed503def8452cf7#2a88450a864e34eae719fdf01ed503def8452cf7"
+version = "0.22.0+brainwires.5.1"
+source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b#a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b"
 dependencies = [
  "bytes",
  "log",
@@ -10048,8 +10048,8 @@ dependencies = [
 
 [[package]]
 name = "rtc-dtls"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=2a88450a864e34eae719fdf01ed503def8452cf7#2a88450a864e34eae719fdf01ed503def8452cf7"
+version = "0.22.0+brainwires.5.1"
+source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b#a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b"
 dependencies = [
  "bytecheck",
  "byteorder",
@@ -10067,8 +10067,8 @@ dependencies = [
 
 [[package]]
 name = "rtc-ice"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=2a88450a864e34eae719fdf01ed503def8452cf7#2a88450a864e34eae719fdf01ed503def8452cf7"
+version = "0.22.0+brainwires.5.1"
+source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b#a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b"
 dependencies = [
  "bytes",
  "crc",
@@ -10085,8 +10085,8 @@ dependencies = [
 
 [[package]]
 name = "rtc-interceptor"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=2a88450a864e34eae719fdf01ed503def8452cf7#2a88450a864e34eae719fdf01ed503def8452cf7"
+version = "0.22.0+brainwires.5.1"
+source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b#a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b"
 dependencies = [
  "bytes",
  "log",
@@ -10100,8 +10100,8 @@ dependencies = [
 
 [[package]]
 name = "rtc-interceptor-derive"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=2a88450a864e34eae719fdf01ed503def8452cf7#2a88450a864e34eae719fdf01ed503def8452cf7"
+version = "0.22.0+brainwires.5.1"
+source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b#a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -10110,8 +10110,8 @@ dependencies = [
 
 [[package]]
 name = "rtc-mdns"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=2a88450a864e34eae719fdf01ed503def8452cf7#2a88450a864e34eae719fdf01ed503def8452cf7"
+version = "0.22.0+brainwires.5.1"
+source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b#a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b"
 dependencies = [
  "bytes",
  "log",
@@ -10122,8 +10122,8 @@ dependencies = [
 
 [[package]]
 name = "rtc-media"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=2a88450a864e34eae719fdf01ed503def8452cf7#2a88450a864e34eae719fdf01ed503def8452cf7"
+version = "0.22.0+brainwires.5.1"
+source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b#a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b"
 dependencies = [
  "byteorder",
  "bytes",
@@ -10135,8 +10135,8 @@ dependencies = [
 
 [[package]]
 name = "rtc-rtcp"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=2a88450a864e34eae719fdf01ed503def8452cf7#2a88450a864e34eae719fdf01ed503def8452cf7"
+version = "0.22.0+brainwires.5.1"
+source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b#a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b"
 dependencies = [
  "bytes",
  "rtc-shared",
@@ -10144,8 +10144,8 @@ dependencies = [
 
 [[package]]
 name = "rtc-rtp"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=2a88450a864e34eae719fdf01ed503def8452cf7#2a88450a864e34eae719fdf01ed503def8452cf7"
+version = "0.22.0+brainwires.5.1"
+source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b#a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b"
 dependencies = [
  "bytes",
  "memchr",
@@ -10156,8 +10156,8 @@ dependencies = [
 
 [[package]]
 name = "rtc-sctp"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=2a88450a864e34eae719fdf01ed503def8452cf7#2a88450a864e34eae719fdf01ed503def8452cf7"
+version = "0.22.0+brainwires.5.1"
+source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b#a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b"
 dependencies = [
  "bytes",
  "crc32c",
@@ -10171,8 +10171,8 @@ dependencies = [
 
 [[package]]
 name = "rtc-sdp"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=2a88450a864e34eae719fdf01ed503def8452cf7#2a88450a864e34eae719fdf01ed503def8452cf7"
+version = "0.22.0+brainwires.5.1"
+source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b#a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b"
 dependencies = [
  "rand 0.10.2",
  "rtc-shared",
@@ -10181,8 +10181,8 @@ dependencies = [
 
 [[package]]
 name = "rtc-shared"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=2a88450a864e34eae719fdf01ed503def8452cf7#2a88450a864e34eae719fdf01ed503def8452cf7"
+version = "0.22.0+brainwires.5.1"
+source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b#a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b"
 dependencies = [
  "bitflags 1.3.2",
  "bytes",
@@ -10197,8 +10197,8 @@ dependencies = [
 
 [[package]]
 name = "rtc-srtp"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=2a88450a864e34eae719fdf01ed503def8452cf7#2a88450a864e34eae719fdf01ed503def8452cf7"
+version = "0.22.0+brainwires.5.1"
+source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b#a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b"
 dependencies = [
  "byteorder",
  "bytes",
@@ -10210,8 +10210,8 @@ dependencies = [
 
 [[package]]
 name = "rtc-stun"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=2a88450a864e34eae719fdf01ed503def8452cf7#2a88450a864e34eae719fdf01ed503def8452cf7"
+version = "0.22.0+brainwires.5.1"
+source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b#a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -10226,8 +10226,8 @@ dependencies = [
 
 [[package]]
 name = "rtc-turn"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=2a88450a864e34eae719fdf01ed503def8452cf7#2a88450a864e34eae719fdf01ed503def8452cf7"
+version = "0.22.0+brainwires.5.1"
+source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b#a7d3aaf0340a16aed5bd8fcb6850b2aed6ab171b"
 dependencies = [
  "bytes",
  "log",
@@ -10311,7 +10311,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -11074,7 +11074,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -11187,7 +11187,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -12657,7 +12657,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

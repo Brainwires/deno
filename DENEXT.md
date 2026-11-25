@@ -22543,7 +22543,7 @@ where the changes are discussed.
 
 556. **`fix(ext/webrtc)`: a check that outruns its trickled candidate no longer
      delays the connection by a second** (runtime; `Cargo.toml`, `Cargo.lock`;
-     webrtc-rs-rtc `fix/ice-prflx-signaled-candidate`, 2a88450a, on
+     webrtc-rs-rtc release `0.22.0+brainwires.5.1`, a7d3aaf0, a patch on
      `0.22.0+brainwires.5`). The answerer's first connectivity check is a
      datagram; its candidate reaches the offerer through `icecandidate` and
      `addIceCandidate()`. When the check won (about 1 connection in 20 on an
