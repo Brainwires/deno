@@ -439,6 +439,9 @@ pub fn resolve_prefix(path: &Path) -> ResolvedPrefix {
   loop {
     match std::fs::canonicalize(&existing) {
       Ok(canonical) => {
+        // Windows hands back a `\\?\` path; the permission paths it is
+        // compared with are the plain spelling
+        let canonical = deno_path_util::strip_unc_prefix(canonical);
         let mut tail = PathBuf::new();
         for part in rest.iter().rev() {
           tail.push(part);
@@ -542,13 +545,16 @@ fn merged(
 )]
 fn resolve_program(cwd: &Path, name: &str) -> Option<PathBuf> {
   if name.contains('/') {
-    return std::fs::canonicalize(cwd.join(name)).ok();
+    return std::fs::canonicalize(cwd.join(name))
+      .ok()
+      .map(deno_path_util::strip_unc_prefix);
   }
   let path = std::env::var_os("PATH")?;
   std::env::split_paths(&path)
     .map(|dir| dir.join(name))
     .find(|p| p.is_file())
     .and_then(|p| std::fs::canonicalize(p).ok())
+    .map(deno_path_util::strip_unc_prefix)
 }
 
 /// The layer that describes `options` (this process's final grant) for the
