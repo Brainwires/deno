@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::rc::Rc;
 use std::time::Duration;
 
-use rtc::data_channel::RTCDataChannelInit;
+use rtci::data_channel::RTCDataChannelInit;
 
 use crate::IceServerSpec;
 use crate::JsEvent;
@@ -407,7 +407,8 @@ fn remote_candidate_classes() {
     class(so, true, false),
     RemoteCandidate::Tcp(addr("10.0.0.1:5001"))
   );
-  assert_eq!(class(active, true, true), RemoteCandidate::Ignore);
+  assert_eq!(class(active, true, true), RemoteCandidate::Dials);
+  assert_eq!(class(active, false, true), RemoteCandidate::Ignore);
   assert_eq!(class(untyped, true, true), RemoteCandidate::Ignore);
   assert_eq!(class(named_passive, true, true), RemoteCandidate::Mdns);
   assert_eq!(class(named_passive, false, true), RemoteCandidate::Ignore);
@@ -1030,11 +1031,11 @@ fn gathering_needs_a_live_media_section() {
 // end all inbound RTCP in its slot, NACKs and receiver reports included).
 #[test]
 fn media_chain_delivers_key_frame_requests() {
-  use rtc::interceptor::AttributedPacket;
-  use rtc::interceptor::Packet;
-  use rtc::interceptor::TaggedPacket;
-  use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
-  use rtc::sansio::Protocol;
+  use rtci::interceptor::AttributedPacket;
+  use rtci::interceptor::Packet;
+  use rtci::interceptor::TaggedPacket;
+  use rtci::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+  use rtci::sansio::Protocol;
   let (_engine, registry) = crate::media::media_stack().unwrap();
   for (slot, name) in registry.slots() {
     assert!(!name.contains("Noop"), "{slot:?} holds {name}");
@@ -1043,7 +1044,7 @@ fn media_chain_delivers_key_frame_requests() {
   chain
     .handle_read(TaggedPacket {
       now: std::time::Instant::now(),
-      transport: rtc::shared::TransportContext::default(),
+      transport: rtci::shared::TransportContext::default(),
       message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(
         PictureLossIndication {
           sender_ssrc: 1,
@@ -1244,8 +1245,8 @@ async fn oversized_descriptions_are_refused_before_the_engine() {
   assert!(crate::peer::check_sdp_size("rollback", &(exact + "v")).is_ok());
 }
 
-fn rtp_header(seq: u16, ts: u32, marker: bool) -> rtc::rtp::Header {
-  rtc::rtp::Header {
+fn rtp_header(seq: u16, ts: u32, marker: bool) -> rtci::rtp::Header {
+  rtci::rtp::Header {
     sequence_number: seq,
     timestamp: ts,
     marker,

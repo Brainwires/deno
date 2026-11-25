@@ -1,9 +1,9 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-//! One `RTCPeerConnection`: webrtc-rs's sans-I/O `rtc` engine plus the I/O
+//! One `RTCPeerConnection`: webrtc-rs's sans-I/O `rtci` engine plus the I/O
 //! that engine leaves to its host, owned here.
 //!
-//! `rtc` runs ICE, DTLS, SCTP and the data channels as state machines: it
+//! `rtci` runs ICE, DTLS, SCTP and the data channels as state machines: it
 //! never opens a socket, arms a timer or reads the clock. This module gives
 //! each peer connection
 //!
@@ -71,51 +71,51 @@ use bytes::BytesMut;
 use deno_core::CancelFuture;
 use deno_core::CancelHandle;
 use deno_core::ToJsBuffer;
-use rtc::data_channel::RTCDataChannelId;
-use rtc::data_channel::RTCDataChannelInit;
-use rtc::data_channel::RTCDataChannelState;
-use rtc::ice::mdns::MulticastDnsMode;
-use rtc::ice::tcp_type::TcpType;
-use rtc::ice::url::ProtoType;
-use rtc::ice::url::SchemeType;
-use rtc::ice::url::Url as IceUrl;
-use rtc::mdns::MDNS_DEST_ADDR;
-use rtc::mdns::MDNS_PORT;
-use rtc::peer_connection::RTCPeerConnection;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::certificate::RTCCertificate;
-use rtc::peer_connection::configuration::RTCBundlePolicy;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SctpMaxMessageSize;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::RTCDataChannelEvent;
-use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::event::RTCTrackEvent;
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::transport::CandidateConfig;
-use rtc::peer_connection::transport::CandidateHostConfig;
-use rtc::peer_connection::transport::CandidateRelayConfig;
-use rtc::peer_connection::transport::CandidateServerReflexiveConfig;
-use rtc::peer_connection::transport::RTCIceCandidate;
-use rtc::peer_connection::transport::RTCIceCandidateInit;
-use rtc::peer_connection::transport::RTCIceCandidateType;
-use rtc::peer_connection::transport::RTCSctpTransportState;
-use rtc::sansio::Protocol;
-use rtc::shared::EcnCodepoint;
-use rtc::shared::TaggedBytesMut;
-use rtc::shared::TransportContext;
-use rtc::shared::TransportProtocol;
-use rtc::shared::error::Error as RtcError;
-use rtc::shared::marshal::Marshal;
-use rtc::shared::tcp_framing::TcpFrameDecoder;
-use rtc::shared::tcp_framing::try_frame_packet;
-use rtc::statistics::StatsSelector;
-use rtc::statistics::report::RTCStatsReportEntry;
-use rtc::stun::message::TransactionId;
-use rtc::turn::client::Client as TurnClient;
-use rtc::turn::client::ClientConfig as TurnClientConfig;
-use rtc::turn::client::Event as TurnEvent;
+use rtci::data_channel::RTCDataChannelId;
+use rtci::data_channel::RTCDataChannelInit;
+use rtci::data_channel::RTCDataChannelState;
+use rtci::ice::mdns::MulticastDnsMode;
+use rtci::ice::tcp_type::TcpType;
+use rtci::ice::url::ProtoType;
+use rtci::ice::url::SchemeType;
+use rtci::ice::url::Url as IceUrl;
+use rtci::mdns::MDNS_DEST_ADDR;
+use rtci::mdns::MDNS_PORT;
+use rtci::peer_connection::RTCPeerConnection;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::certificate::RTCCertificate;
+use rtci::peer_connection::configuration::RTCBundlePolicy;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::setting_engine::SctpMaxMessageSize;
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::RTCDataChannelEvent;
+use rtci::peer_connection::event::RTCPeerConnectionEvent;
+use rtci::peer_connection::event::RTCTrackEvent;
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::transport::CandidateConfig;
+use rtci::peer_connection::transport::CandidateHostConfig;
+use rtci::peer_connection::transport::CandidateRelayConfig;
+use rtci::peer_connection::transport::CandidateServerReflexiveConfig;
+use rtci::peer_connection::transport::RTCIceCandidate;
+use rtci::peer_connection::transport::RTCIceCandidateInit;
+use rtci::peer_connection::transport::RTCIceCandidateType;
+use rtci::peer_connection::transport::RTCSctpTransportState;
+use rtci::sansio::Protocol;
+use rtci::shared::EcnCodepoint;
+use rtci::shared::TaggedBytesMut;
+use rtci::shared::TransportContext;
+use rtci::shared::TransportProtocol;
+use rtci::shared::error::Error as RtcError;
+use rtci::shared::marshal::Marshal;
+use rtci::shared::tcp_framing::TcpFrameDecoder;
+use rtci::shared::tcp_framing::try_frame_packet;
+use rtci::statistics::StatsSelector;
+use rtci::statistics::report::RTCStatsReportEntry;
+use rtci::stun::message::TransactionId;
+use rtci::turn::client::Client as TurnClient;
+use rtci::turn::client::ClientConfig as TurnClientConfig;
+use rtci::turn::client::Event as TurnEvent;
 use serde::Serialize;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -274,7 +274,7 @@ impl IceServerSpec {
 }
 
 /// The stats fields the engine writes from a `SystemInstant`, as
-/// milliseconds since the epoch (`rtc_shared::serde::instant_to_epoch`).
+/// milliseconds since the epoch (`rtci_shared::serde::instant_to_epoch`).
 const STATS_EPOCH_FIELDS: [&str; 5] = [
   "timestamp",
   "lastPacketSentTimestamp",
@@ -617,6 +617,13 @@ pub struct Core {
   /// A remote candidate is known (signalled, or a check arrived): until
   /// then ICE stays `new`, as the spec's `checking` needs one.
   remote_known: bool,
+  /// The remote side signalled an active TCP candidate in its current
+  /// generation. Its end-of-candidates is then not handed to the engine,
+  /// whose check list fails as soon as every pair it has failed and both
+  /// sides have finished (RFC 8838 section 8), even with no pair at all:
+  /// the peer's dial, which makes the pair, would come too late. The ICE
+  /// timeouts still end a connection nobody dials.
+  remote_dials: bool,
   /// The engine went `checking` before that: reported once one is.
   checking_held: bool,
   /// An ICE restart's `checking` on a connected transport was not reported
@@ -684,7 +691,7 @@ pub struct PairCandidate {
 
 impl PairCandidate {
   pub(crate) fn of(
-    c: &rtc::peer_connection::transport::RTCIceCandidate,
+    c: &rtci::peer_connection::transport::RTCIceCandidate,
   ) -> Self {
     let addr = match c.address.parse::<IpAddr>() {
       Ok(IpAddr::V6(ip)) => format!("[{ip}]:{}", c.port),
@@ -816,11 +823,16 @@ pub enum RemoteCandidate {
   /// the engine resolves it, and the address it resolves to is checked
   /// against the net permission before anything is sent there.
   Mdns,
+  /// An active TCP candidate, on a connection doing ICE over TCP: skipped
+  /// (it has no port; the peer dials our passive candidate and is learned
+  /// as a peer-reflexive one), but the remote side did signal a way in, and
+  /// its end-of-candidates is withheld from the engine (`remote_dials`).
+  Dials,
   /// Skipped and reported as accepted, as a browser does with a candidate it
   /// cannot use: TCP candidates without ICE over TCP (a `tcpPort` network),
-  /// active TCP candidates (they have no port; the peer is reached on our
-  /// passive candidate), and `.local` names when mDNS is off (such a peer
-  /// is still reached as a peer-reflexive candidate once its checks arrive).
+  /// untyped TCP candidates, and `.local` names when mDNS is off (such a
+  /// peer is still reached as a peer-reflexive candidate once its checks
+  /// arrive).
   Ignore,
 }
 
@@ -855,13 +867,12 @@ pub fn classify_remote_candidate(
     "tcp" if tcp => true,
     _ => return Ok(RemoteCandidate::Ignore),
   };
-  if is_tcp
-    && !matches!(
-      candidate_tcp_type(candidate),
-      Some(TcpType::Passive | TcpType::SimultaneousOpen)
-    )
-  {
-    return Ok(RemoteCandidate::Ignore);
+  if is_tcp {
+    match candidate_tcp_type(candidate) {
+      Some(TcpType::Passive | TcpType::SimultaneousOpen) => {}
+      Some(TcpType::Active) => return Ok(RemoteCandidate::Dials),
+      _ => return Ok(RemoteCandidate::Ignore),
+    }
   }
   match address.trim_matches(['[', ']']).parse::<IpAddr>() {
     Ok(ip) if is_tcp => Ok(RemoteCandidate::Tcp(SocketAddr::new(ip, port))),
@@ -935,7 +946,7 @@ fn bind_mdns(hosts: &[IpAddr]) -> std::io::Result<UdpSocket> {
   if !is_routed {
     socket.bind(&mdns_addr.into())?;
   }
-  let group = rtc::mdns::MDNS_MULTICAST_IPV4;
+  let group = rtci::mdns::MDNS_MULTICAST_IPV4;
   let mut joined = false;
   for ip in hosts {
     if let IpAddr::V4(iface) = ip
@@ -1066,7 +1077,7 @@ fn is_stun(data: &[u8]) -> bool {
 }
 
 fn candidate_line(
-  candidate: rtc::shared::error::Result<rtc::ice::candidate::Candidate>,
+  candidate: rtci::shared::error::Result<rtci::ice::candidate::Candidate>,
 ) -> Result<String, WebRtcError> {
   let candidate = candidate.map_err(rtc_err)?;
   Ok(
@@ -1240,7 +1251,7 @@ impl Core {
   /// bundled transport; a receiver or sender has one once it has a mid).
   fn ice_selected_pair(&mut self) -> Option<SelectedPair> {
     let to_pair =
-      |p: rtc::peer_connection::transport::RTCIceCandidatePair| SelectedPair {
+      |p: rtci::peer_connection::transport::RTCIceCandidatePair| SelectedPair {
         local: PairCandidate::of(p.local()),
         remote: PairCandidate::of(p.remote()),
       };
@@ -1995,12 +2006,19 @@ impl Core {
           self.events.push_back(JsEvent::NegotiationNeeded)
         }
         RTCPeerConnectionEvent::OnIceCandidateEvent(e) => {
+          // The engine's end-of-candidates (a "" candidate) and its null
+          // candidate: the JS side fires both itself, from the gathering
+          // state this driver ends (`maybe_complete_gathering`).
+          let Some(candidate) = e.candidate.filter(|c| !c.end_of_candidates)
+          else {
+            continue;
+          };
           if self.options.relay_only
-            && e.candidate.typ != RTCIceCandidateType::Relay
+            && candidate.typ != RTCIceCandidateType::Relay
           {
             continue;
           }
-          let Ok(init) = e.candidate.to_json() else {
+          let Ok(init) = candidate.to_json() else {
             continue;
           };
           if mid.is_none() {
@@ -2013,7 +2031,7 @@ impl Core {
             sdp_mid: mid.clone(),
             sdp_m_line_index: Some(0),
             username_fragment: ufrag,
-            url: if e.url.is_empty() { None } else { Some(e.url) },
+            url: e.url.filter(|u| !u.is_empty()),
           });
         }
         RTCPeerConnectionEvent::OnIceCandidateErrorEvent(e) => {
@@ -2450,6 +2468,12 @@ impl Peer {
     // previous generation's local candidates go with the old credentials.
     let mut settings = SettingEngineBuilder::new()
       .with_discard_local_candidates_during_ice_restart(true)
+      // A new DTLS association (a peer's new `a=tls-id`, the engine's SRTP
+      // re-keying) keeps the sockets this driver has: one per family, or a
+      // network's shared port, which can't move to new ports (RFC 8842
+      // section 5.1's new 3-tuple is left to the peer). The engine's default
+      // would refuse their addresses and wait for candidates on new ports.
+      .with_dtls_new_association_on_previous_addresses(true)
       .with_sctp_max_message_size(SctpMaxMessageSize::Bounded(
         net
           .and_then(|n| n.max_message_size)
@@ -2579,6 +2603,7 @@ impl Peer {
         transforms: Default::default(),
         sinks: Default::default(),
         remote_known: false,
+        remote_dials: false,
         sent: HashMap::new(),
         sctp_state: "",
         dtls_state: String::new(),
@@ -2829,6 +2854,7 @@ impl Peer {
     let mut kept = String::with_capacity(sdp.len());
     let mut checked = Vec::new();
     let mut named = false;
+    let mut dials = false;
     let (tcp, mut mdns) = {
       let core = self.core.borrow();
       (core.ice_tcp(), core.mdns_mode != MdnsMode::Off)
@@ -2837,6 +2863,10 @@ impl Peer {
       if let Some(value) = line.trim_end().strip_prefix("a=candidate:") {
         match classify_remote_candidate(value, tcp, mdns)? {
           RemoteCandidate::Ignore => continue,
+          RemoteCandidate::Dials => {
+            dials = true;
+            continue;
+          }
           RemoteCandidate::Udp(addr) | RemoteCandidate::Tcp(addr) => {
             self.guard.connect(addr).map_err(WebRtcError::Permission)?;
             checked.push(addr);
@@ -2854,6 +2884,13 @@ impl Peer {
     }
     let end_of_candidates =
       kept.lines().any(|l| l.trim_end() == "a=end-of-candidates");
+    // See `remote_dials`: the engine doesn't learn the generation's end.
+    if dials {
+      kept = kept
+        .split_inclusive('\n')
+        .filter(|l| l.trim_end() != "a=end-of-candidates")
+        .collect();
+    }
     let desc = Self::description(kind, kept)?;
     self.guarded(|core| {
       let ufrag_before = core.remote_ufrag();
@@ -2865,9 +2902,14 @@ impl Peer {
       if ufrag_before.is_some() && core.remote_ufrag() != ufrag_before {
         core.remote_known = false;
         core.remote_gathered = false;
+        core.remote_dials = false;
       }
       if end_of_candidates {
         core.remote_gathered = true;
+      }
+      if dials {
+        core.remote_dials = true;
+        core.remote_known = true;
       }
       for addr in checked {
         core.mark_allowed(addr);
@@ -2892,8 +2934,12 @@ impl Peer {
     if candidate.trim().is_empty() {
       // End-of-candidates: the engine checks the media section and the
       // usernameFragment and marks the remote description; then the
-      // remote's current generation is complete.
+      // remote's current generation is complete. Withheld from the engine
+      // after an active TCP candidate (see `remote_dials`).
       self.guarded(|core| {
+        if core.remote_dials {
+          return Ok(());
+        }
         core
           .pc
           .add_remote_candidate(RTCIceCandidateInit {
@@ -2902,6 +2948,7 @@ impl Peer {
             sdp_mline_index: sdp_m_line_index,
             username_fragment,
             url: None,
+            relay_protocol: None,
           })
           .map_err(rtc_err)
       })?;
@@ -2915,6 +2962,12 @@ impl Peer {
     };
     let addr = match classify_remote_candidate(&candidate, tcp, mdns)? {
       RemoteCandidate::Ignore => return Ok(()),
+      RemoteCandidate::Dials => {
+        let mut core = self.core.borrow_mut();
+        core.remote_dials = true;
+        core.remote_known = true;
+        return Ok(());
+      }
       RemoteCandidate::Mdns => {
         if !self.core.borrow_mut().resolves_mdns() {
           return Ok(());
@@ -2935,6 +2988,7 @@ impl Peer {
           sdp_mline_index: sdp_m_line_index,
           username_fragment,
           url: None,
+          relay_protocol: None,
         })
         .map_err(rtc_err)?;
       match addr {
@@ -3915,8 +3969,12 @@ async fn add_server(peer: Rc<Peer>, spec: IceServerSpec) {
     software: String::new(),
     rto_in_ms: 0,
     allocation_refresh_interval_cap: None,
+    // The default timer (RFC 8489 section 6.2.1) and every password
+    // algorithm the client implements (SHA-256, and MD5 for RFC 5389
+    // servers).
+    ..TurnClientConfig::default()
   };
-  let provider = match rtc::crypto::default_provider() {
+  let provider = match rtci::crypto::default_provider() {
     Ok(p) => p,
     Err(e) => {
       finish(&peer, Some(e.to_string()));

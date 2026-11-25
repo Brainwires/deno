@@ -50,7 +50,7 @@ use std::time::Duration;
 use bytes::BytesMut;
 use deno_core::CancelFuture;
 use deno_core::CancelHandle;
-use rtc::shared::tcp_framing::TcpFrameDecoder;
+use rtci::shared::tcp_framing::TcpFrameDecoder;
 use serde::Deserialize;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;

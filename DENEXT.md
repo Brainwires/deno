@@ -14336,7 +14336,12 @@ where the changes are discussed.
        2026-11-13 audit: 320 commits behind upstream and missing upstream's
        DTLS, ICE and H.264 crash fixes and its SCTP and data-channel fixes; this
        sync brings them in. Pre-1.0 and not externally audited: DTLS, SCTP and
-       ICE parsing are exposed to any peer that completes ICE.
+       ICE parsing are exposed to any peer that completes ICE. Since item 556
+       the engine is the fork's published crates, `rtci` 0.1 from crates.io
+       (`rtci = { version = "0.1", default-features = false, features =
+       ["crypto-aws-lc-rs"] }`):
+       the `0.22.0+brainwires.N` line renamed, with everything the git pins
+       above carried.
      - **Driver** (`peer.rs`; the engine does no I/O and reads no clock): one
        UDP socket per address family per connection, bound to `0.0.0.0` / `[::]`
        when interfaces may be listed and the wildcard may be listened on (every
@@ -14375,11 +14380,11 @@ where the changes are discussed.
        (the engine logs and drops handshake errors: ICE connected for 15 s
        without DTLS is reported as `failed`); a panic boundary (`catch_unwind`
        around every engine call: the connection reports `failed` and closes;
-       inert under the release profile's `panic = "abort"`); the engine's `rtc`
-       / `rtc_*` log targets are off by default (`cli/lib/util/logger.rs`), its
-       outcomes are events instead; from `feat/webrtc-gaps`
-       `Deno.webrtc.setLogLevel(level)` (`off`, `error`, `warn`, `info`,
-       `debug`, `trace`; process-wide) shows them on stderr as
+       inert under the release profile's `panic = "abort"`); the engine's `rtci`
+       / `rtci_*` log targets (`rtc` / `rtc_*` before item 556) are off by
+       default (`cli/lib/util/logger.rs`), its outcomes are events instead; from
+       `feat/webrtc-gaps` `Deno.webrtc.setLogLevel(level)` (`off`, `error`,
+       `warn`, `info`, `debug`, `trace`; process-wide) shows them on stderr as
        `LEVEL RS - target:line - message`, bypassing `DENO_LOG`.
      - **Permissions** (least-privilege guardrails, like every net API): the
        constructor checks each ICE server's host and port (`--allow-net` /
@@ -22543,9 +22548,12 @@ where the changes are discussed.
 
 556. **`fix(ext/webrtc)`: a check that outruns its trickled candidate no longer
      delays the connection by a second** (runtime; `Cargo.toml`, `Cargo.lock`;
-     webrtc-rs-rtc release `0.22.0+brainwires.5.1`, a7d3aaf0, a patch on
-     `0.22.0+brainwires.5`). The answerer's first connectivity check is a
-     datagram; its candidate reaches the offerer through `icecandidate` and
+     the engine from crates.io as `rtci` 0.1 (`"0.1"`, published from
+     Brainwires/rtci tag `v0.1.0`, 3bbd6cc1), the fork's `0.22.0+brainwires.N`
+     line renamed `rtc` -> `rtci`, which carries the fix below and everything in
+     `0.22.0+brainwires.6`; first pinned here as the git release
+     `0.22.0+brainwires.5.1`, a7d3aaf0). The answerer's first connectivity check
+     is a datagram; its candidate reaches the offerer through `icecandidate` and
      `addIceCandidate()`. When the check won (about 1 connection in 20 on an
      idle machine, more on a busy one) the offerer's ICE agent learned the
      address as a peer-reflexive candidate, then held the signalled host
@@ -22565,13 +22573,39 @@ where the changes are discussed.
      - A peer-reflexive candidate nobody signals keeps its acceptance wait.
      - Measured on a debug build, 200 loopback connections: 3 to 5 in 100 took
        1.2 s before, none after (192 to 207 ms).
-     - Tests: rtc-ice
+     - Tests: rtci-ice
        `test_signalled_candidate_replaces_the_peer_reflexive_one_it_duplicates`
        (fails without the change) and
        `test_unsignalled_peer_reflexive_candidate_keeps_its_acceptance_wait`.
        WPT `RTCRtpScriptTransform-encoded-transform.https.html` looped with the
        test process on one CPU: 9 of 40 runs failed before items 555 and 556 (7
        on "sender written", 3 on "receiver written"), 0 of 120 after.
+     - The move to `rtci` 0.1 (`rtc::` paths are `rtci::`; the engine's log
+       targets `rtci` / `rtci_*`, which `Deno.webrtc.setLogLevel` and
+       `cli/lib/util/logger.rs` follow) and its API changes: an `icecandidate`
+       event's candidate and URL are optional and the engine fires its own
+       end-of-candidates and null candidate, which the driver skips (the JS side
+       fires both from the gathering state); a sender's track is optional (a
+       transceiver made from a kind has none; the SSRCs come from
+       `RTCRtpSender::ssrcs`, and `replace_track` takes an `Option`);
+       `currentDirection` is an `Option`; header extensions to negotiate are a
+       list with a direction per URI, and the engine refuses to stop the mid or
+       the RFC 6464 audio level (RFC 8834 section 5.2), so those stay negotiated
+       when JavaScript stops them; `set_direction`, `set_streams` and the
+       negotiation options return errors; the TURN client config takes the
+       default retransmission timer and password algorithms;
+       `RTCIceCandidateInit` has `relay_protocol`.
+     - Behaviour changes kept out of the W3C surface: a new DTLS association
+       keeps the driver's sockets
+       (`with_dtls_new_association_on_previous_addresses`; RFC 8842's new
+       3-tuple would need sockets on new ports, which a network's shared port
+       can't have); the engine pacer under the connection's pacer has no queue
+       time limit of its own (the connection drains past 2 s instead of
+       dropping), and its first burst leaving at once is accepted; the remote
+       description's `a=end-of-candidates` (and `addIceCandidate("")`) is not
+       handed to the engine after the peer signalled an active TCP candidate,
+       whose dial is the only way in: the engine's check list would fail at once
+       with no pair (RFC 8838 section 8), before the dial.
      - Node tests enabled: none.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,

@@ -20,7 +20,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use bytes::Bytes;
-use rtc::rtp::packetizer::Depacketizer;
+use rtci::rtp::packetizer::Depacketizer;
 
 use crate::WebRtcError;
 use crate::encoded_frames::FrameAssembler;
@@ -120,7 +120,7 @@ impl Core {
   pub(crate) fn sink_packet(
     &mut self,
     key: u32,
-    packet: &rtc::rtp::Packet,
+    packet: &rtci::rtp::Packet,
     now: Instant,
   ) -> SinkOutput {
     let mut out = SinkOutput::default();
@@ -193,7 +193,7 @@ pub fn packet_coded_size(
   mime_type: &str,
   payload: &Bytes,
 ) -> Option<(u32, u32)> {
-  use rtc::rtp::codec;
+  use rtci::rtp::codec;
   match mime_type.to_ascii_lowercase().as_str() {
     "video/vp8" => {
       let mut p = codec::vp8::Vp8Packet::default();

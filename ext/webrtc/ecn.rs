@@ -39,7 +39,7 @@ use std::sync::OnceLock;
 use quinn_udp::RecvMeta;
 use quinn_udp::Transmit;
 use quinn_udp::UdpSocketState;
-use rtc::shared::EcnCodepoint;
+use rtci::shared::EcnCodepoint;
 use tokio::io::Interest;
 use tokio::net::UdpSocket;
 

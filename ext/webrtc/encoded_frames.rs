@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use bytes::Bytes;
-use rtc::rtp::packetizer::Depacketizer;
+use rtci::rtp::packetizer::Depacketizer;
 use serde::Serialize;
 
 use crate::WebRtcError;
@@ -96,7 +96,7 @@ pub struct ReceivedFrame {
 }
 
 fn depacketizer_for(mime: &str) -> Option<Box<dyn Depacketizer + Send>> {
-  use rtc::rtp::codec;
+  use rtci::rtp::codec;
   Some(match mime.to_ascii_lowercase().as_str() {
     "audio/opus" => Box::new(codec::opus::OpusPacket),
     "video/vp8" => Box::<codec::vp8::Vp8Packet>::default(),
@@ -149,7 +149,7 @@ impl FrameAssembler {
     self
   }
 
-  fn note_extensions(&mut self, header: &rtc::rtp::Header) {
+  fn note_extensions(&mut self, header: &rtci::rtp::Header) {
     let ext = &mut self.current_extensions;
     if ext.audio_level.is_none()
       && let Some(id) = self.audio_level_id
@@ -170,7 +170,7 @@ impl FrameAssembler {
   /// Takes one RTP packet; returns the frame it completes.
   pub fn push(
     &mut self,
-    header: &rtc::rtp::Header,
+    header: &rtci::rtp::Header,
     payload: &Bytes,
   ) -> Option<ReceivedFrame> {
     let mime = self.mime_type.to_ascii_lowercase();
@@ -270,7 +270,7 @@ impl Core {
   pub(crate) fn receive_for_transform(
     &mut self,
     key: u32,
-    packet: &rtc::rtp::Packet,
+    packet: &rtci::rtp::Packet,
   ) -> Option<ReceivedFrame> {
     if !self.transforms.assemblers.contains_key(&key) {
       return None;
@@ -315,8 +315,8 @@ impl Core {
 mod tests {
   use super::*;
 
-  fn header(seq: u16, ts: u32, marker: bool) -> rtc::rtp::Header {
-    rtc::rtp::Header {
+  fn header(seq: u16, ts: u32, marker: bool) -> rtci::rtp::Header {
+    rtci::rtp::Header {
       version: 2,
       sequence_number: seq,
       timestamp: ts,
@@ -399,11 +399,11 @@ mod tests {
     h.extension = true;
     h.extension_profile = 0xBEDE;
     h.extensions = vec![
-      rtc::rtp::header::Extension {
+      rtci::rtp::header::Extension {
         id: 1,
         payload: Bytes::from_static(&[0x80 | 30]),
       },
-      rtc::rtp::header::Extension {
+      rtci::rtp::header::Extension {
         id: 2,
         payload: Bytes::from(abs),
       },

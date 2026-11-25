@@ -4,7 +4,7 @@
 //! for WebRTC"): `new RTCIceTransport()`, then `gather()`, `start()`,
 //! `addRemoteCandidate()` and `stop()`, without a peer connection.
 //!
-//! The engine's sans-I/O ICE agent (`rtc::ice::Agent`) does the checks,
+//! The engine's sans-I/O ICE agent (`rtci::ice::Agent`) does the checks,
 //! nomination and role-conflict resolution (RFC 8445); this module owns the
 //! I/O around it, as peer.rs does for a connection:
 //!
@@ -41,17 +41,17 @@ use std::time::Instant;
 use bytes::BytesMut;
 use deno_core::CancelFuture;
 use deno_core::CancelHandle;
-use rtc::ice::Agent;
-use rtc::ice::AgentConfig;
-use rtc::ice::Event as AgentEvent;
-use rtc::ice::mdns::MulticastDnsMode;
-use rtc::peer_connection::transport::CandidateConfig;
-use rtc::peer_connection::transport::CandidateHostConfig;
-use rtc::peer_connection::transport::RTCIceCandidate;
-use rtc::sansio::Protocol;
-use rtc::shared::TaggedBytesMut;
-use rtc::shared::TransportContext;
-use rtc::shared::TransportProtocol;
+use rtci::ice::Agent;
+use rtci::ice::AgentConfig;
+use rtci::ice::Event as AgentEvent;
+use rtci::ice::mdns::MulticastDnsMode;
+use rtci::peer_connection::transport::CandidateConfig;
+use rtci::peer_connection::transport::CandidateHostConfig;
+use rtci::peer_connection::transport::RTCIceCandidate;
+use rtci::sansio::Protocol;
+use rtci::shared::TaggedBytesMut;
+use rtci::shared::TransportContext;
+use rtci::shared::TransportProtocol;
 use serde::Serialize;
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
@@ -134,7 +134,7 @@ impl IceTransport {
   /// at least 24 bits of ufrag and 128 of password, which the agent
   /// generates), gathering nothing until `gather()`.
   pub fn new(guard: Rc<dyn NetGuard>) -> Result<Rc<Self>, WebRtcError> {
-    let provider = rtc::crypto::default_provider()
+    let provider = rtci::crypto::default_provider()
       .map_err(|e| WebRtcError::Operation(e.to_string()))?;
     let config = AgentConfig {
       // `.local` names need the mDNS socket peer.rs opens for a connection;
@@ -295,7 +295,7 @@ impl IceTransport {
     let value = candidate.trim();
     let value = value.strip_prefix("a=").unwrap_or(value);
     let value = value.strip_prefix("candidate:").unwrap_or(value);
-    let parsed = rtc::ice::candidate::unmarshal_candidate(value)
+    let parsed = rtci::ice::candidate::unmarshal_candidate(value)
       .map_err(|e| WebRtcError::Operation(format!("Invalid candidate: {e}")))?;
     self
       .core

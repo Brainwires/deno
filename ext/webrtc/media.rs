@@ -24,45 +24,46 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use bytes::Bytes;
-use rtc::interceptor::Attribute;
-use rtc::interceptor::AttributedPacket;
-use rtc::interceptor::CONGESTION_CONTROL_DEFAULT_PRUNE_HORIZON;
-use rtc::interceptor::GCC_INITIAL_BITRATE;
-use rtc::interceptor::Gcc;
-use rtc::interceptor::Interceptor;
-use rtc::interceptor::PacerBuilder;
-use rtc::interceptor::PacerInterceptor;
-use rtc::interceptor::Packet;
-use rtc::interceptor::Registry;
-use rtc::interceptor::Slot;
-use rtc::interceptor::StreamInfo;
-use rtc::interceptor::TaggedPacket;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::CongestionFeedback;
-use rtc::peer_connection::configuration::interceptor_registry::configure_congestion_control;
-use rtc::peer_connection::configuration::interceptor_registry::configure_congestion_control_feedback;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
-use rtc::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
-use rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
-use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
-use rtc::rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport;
-use rtc::rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
-use rtc::rtp::packetizer::Packetizer;
-use rtc::rtp_transceiver::RTCRtpTransceiverDirection;
-use rtc::rtp_transceiver::RTCRtpTransceiverInit;
-use rtc::rtp_transceiver::rtp_sender::RTCP_FB_ACK_CCFB;
-use rtc::rtp_transceiver::rtp_sender::RTCRtpCodec;
-use rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
-use rtc::rtp_transceiver::rtp_sender::RTCRtpCodingParameters;
-use rtc::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters;
-use rtc::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability;
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-use rtc::rtp_transceiver::rtp_sender::TYPE_RTCP_FB_ACK;
-use rtc::sansio::Protocol;
-use rtc::shared::marshal::MarshalSize;
-use rtc::shared::marshal::Unmarshal;
+use rtci::interceptor::Attribute;
+use rtci::interceptor::AttributedPacket;
+use rtci::interceptor::CONGESTION_CONTROL_DEFAULT_PRUNE_HORIZON;
+use rtci::interceptor::GCC_INITIAL_BITRATE;
+use rtci::interceptor::Gcc;
+use rtci::interceptor::Interceptor;
+use rtci::interceptor::PacerBuilder;
+use rtci::interceptor::PacerInterceptor;
+use rtci::interceptor::Packet;
+use rtci::interceptor::Registry;
+use rtci::interceptor::Slot;
+use rtci::interceptor::StreamInfo;
+use rtci::interceptor::TaggedPacket;
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::RTCPeerConnectionBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::CongestionFeedback;
+use rtci::peer_connection::configuration::interceptor_registry::configure_congestion_control;
+use rtci::peer_connection::configuration::interceptor_registry::configure_congestion_control_feedback;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::media_engine::MediaEngine;
+use rtci::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
+use rtci::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
+use rtci::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+use rtci::rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport;
+use rtci::rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
+use rtci::rtp::packetizer::Packetizer;
+use rtci::rtp_transceiver::RTCRtpTransceiverDirection;
+use rtci::rtp_transceiver::RTCRtpTransceiverInit;
+use rtci::rtp_transceiver::rtp_sender::RTCP_FB_ACK_CCFB;
+use rtci::rtp_transceiver::rtp_sender::RTCRtpCodec;
+use rtci::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
+use rtci::rtp_transceiver::rtp_sender::RTCRtpCodingParameters;
+use rtci::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters;
+use rtci::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability;
+use rtci::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionToNegotiate;
+use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtci::rtp_transceiver::rtp_sender::TYPE_RTCP_FB_ACK;
+use rtci::sansio::Protocol;
+use rtci::shared::marshal::MarshalSize;
+use rtci::shared::marshal::Unmarshal;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -284,6 +285,10 @@ impl FactorPacer {
     Self::with_pacer(
       PacerBuilder::new()
         .with_target_bitrate(GCC_INITIAL_BITRATE * PACING_FACTOR)
+        // The queue's time limit is this pacer's (`rate`: drained faster
+        // past QUEUE_TIME_LIMIT, never discarded for its age), not the
+        // engine pacer's default, which drops what waited 2 s.
+        .with_queue_time_limit(None)
         .build(),
       refusals,
     )
@@ -348,7 +353,7 @@ impl FactorPacer {
     info
       .rtp_header_extensions
       .iter()
-      .any(|e| e.uri == rtc::sdp::extmap::TRANSPORT_CC_URI)
+      .any(|e| e.uri == rtci::sdp::extmap::TRANSPORT_CC_URI)
       || info
         .rtcp_feedback
         .iter()
@@ -432,11 +437,11 @@ impl FactorPacer {
   }
 }
 
-impl rtc::sansio::Protocol<TaggedPacket, TaggedPacket, ()> for FactorPacer {
+impl rtci::sansio::Protocol<TaggedPacket, TaggedPacket, ()> for FactorPacer {
   type Rout = TaggedPacket;
   type Wout = TaggedPacket;
   type Eout = ();
-  type Error = rtc::shared::error::Error;
+  type Error = rtci::shared::error::Error;
   type Time = Instant;
 
   fn handle_read(&mut self, mut msg: TaggedPacket) -> Result<(), Self::Error> {
@@ -591,13 +596,23 @@ impl Interceptor for FactorPacer {
 /// those have stay as they were. A sender writes the audio level and the
 /// capture time (`header_extensions.rs`); the engine reads them from
 /// received packets as any other extension.
+/// The header extensions the engine won't let a transceiver stop (RFC 8834
+/// section 5.2's mandatory-to-implement ones).
+const MANDATORY_TO_IMPLEMENT_EXTENSIONS: &[&str] = &[
+  rtci::sdp::extmap::SDES_MID_URI,
+  rtci::sdp::extmap::AUDIO_LEVEL_URI,
+];
+
 fn register_header_extensions(
   media_engine: &mut MediaEngine,
 ) -> Result<(), WebRtcError> {
   for (uri, kind) in [
-    (rtc::sdp::extmap::SDES_MID_URI, RtpCodecKind::Audio),
-    (rtc::sdp::extmap::AUDIO_LEVEL_URI, RtpCodecKind::Audio),
-    (rtc::sdp::extmap::VIDEO_ORIENTATION_URI, RtpCodecKind::Video),
+    (rtci::sdp::extmap::SDES_MID_URI, RtpCodecKind::Audio),
+    (rtci::sdp::extmap::AUDIO_LEVEL_URI, RtpCodecKind::Audio),
+    (
+      rtci::sdp::extmap::VIDEO_ORIENTATION_URI,
+      RtpCodecKind::Video,
+    ),
     (
       crate::header_extensions::ABS_CAPTURE_TIME_URI,
       RtpCodecKind::Audio,
@@ -1129,8 +1144,8 @@ pub fn frame_size(mime_type: &str, data: &[u8]) -> Option<(u16, u16)> {
 
 fn payloader_for(
   mime: &str,
-) -> Option<Box<dyn rtc::rtp::packetizer::Payloader>> {
-  use rtc::rtp::codec;
+) -> Option<Box<dyn rtci::rtp::packetizer::Payloader>> {
+  use rtci::rtp::codec;
   let mime = mime.to_ascii_lowercase();
   Some(match mime.as_str() {
     "audio/opus" => Box::<codec::opus::OpusPayloader>::default(),
@@ -1248,8 +1263,8 @@ impl SentVideo {
     self.bytes_sent = self.bytes_sent.saturating_add(data.len() as u64);
   }
 
-  fn update(&mut self, now: Instant) -> rtc::statistics::EncoderStatsUpdate {
-    rtc::statistics::EncoderStatsUpdate {
+  fn update(&mut self, now: Instant) -> rtci::statistics::EncoderStatsUpdate {
+    rtci::statistics::EncoderStatsUpdate {
       frames_encoded: Some(self.frames_encoded),
       key_frames_encoded: Some(self.key_frames_encoded),
       frames_sent: Some(self.frames_sent),
@@ -1284,7 +1299,7 @@ pub struct ReceivedVideo {
 
 impl ReceivedVideo {
   /// A received packet; returns whether it completed a frame.
-  pub fn packet(&mut self, header: &rtc::rtp::Header) -> bool {
+  pub fn packet(&mut self, header: &rtci::rtp::Header) -> bool {
     let in_sequence = self.next == Some(header.sequence_number);
     if self.timestamp != Some(header.timestamp) {
       // A new frame starts whole only right after a frame's last packet.
@@ -1332,7 +1347,7 @@ fn epoch_ms() -> f64 {
 
 impl MediaState {
   /// Records the sources of a received RTP packet.
-  pub fn saw_rtp(&mut self, key: u32, header: &rtc::rtp::Header) {
+  pub fn saw_rtp(&mut self, key: u32, header: &rtci::rtp::Header) {
     let now = epoch_ms();
     let list = self.sources.entry(key).or_default();
     let mut upsert = |source: u32, contributing: bool| {
@@ -1370,7 +1385,7 @@ impl Core {
   pub(crate) fn count_received_frame(
     &mut self,
     key: u32,
-    packet: &rtc::rtp::Packet,
+    packet: &rtci::rtp::Packet,
   ) {
     if self.media.kinds.get(&key) != Some(&RtpCodecKind::Video)
       || packet.payload.is_empty()
@@ -1389,7 +1404,7 @@ impl Core {
       let frames_received = video.frames_received;
       self.pc.update_decoder_stats(
         ssrc,
-        rtc::statistics::DecoderStatsUpdate {
+        rtci::statistics::DecoderStatsUpdate {
           frames_received: Some(frames_received),
           ..Default::default()
         },
@@ -1404,7 +1419,7 @@ impl Core {
       let frames_per_second = video.frames_per_second(now);
       self.pc.update_encoder_stats(
         *ssrc,
-        rtc::statistics::EncoderStatsUpdate {
+        rtci::statistics::EncoderStatsUpdate {
           frames_per_second: Some(frames_per_second),
           ..Default::default()
         },
@@ -1434,7 +1449,12 @@ impl Core {
         .rtp_receiver(index.into())
         .map(|r| r.track().kind())
         .filter(|k| *k != RtpCodecKind::Unspecified)
-        .or_else(|| self.pc.rtp_sender(index.into()).map(|s| s.track().kind()));
+        .or_else(|| {
+          self
+            .pc
+            .rtp_sender(index.into())
+            .and_then(|s| s.track().map(|t| t.kind()))
+        });
       if let Some(kind) = kind.filter(|k| *k != RtpCodecKind::Unspecified) {
         self.media.kinds.insert(key, kind);
       }
@@ -1551,9 +1571,14 @@ impl Core {
     let key = self.media.keys[index];
     self.media.kinds.insert(key, kind);
     if let Some(mut sender) = self.pc.rtp_sender(index.into()) {
-      sender.set_streams(msid_streams(arg.streams));
-      let id = sender.track().track_id().to_string();
-      self.media.track_keys.insert(id, key);
+      sender
+        .set_streams(msid_streams(arg.streams))
+        .map_err(crate::peer::rtc_err)?;
+      // A transceiver made from a kind has no engine track (W3C null).
+      if let Some(track) = sender.track() {
+        let id = track.track_id().to_string();
+        self.media.track_keys.insert(id, key);
+      }
     }
     // RFC 9429 section 5.10: a remote offer's new media section takes a
     // transceiver `addTrack` created, never one `addTransceiver` did.
@@ -1572,7 +1597,7 @@ impl Core {
     if direction != RTCRtpTransceiverDirection::Sendrecv
       && let Some(mut t) = self.pc.rtp_transceiver(index)
     {
-      t.set_direction(direction);
+      t.set_direction(direction).map_err(crate::peer::rtc_err)?;
     }
     Ok(key)
   }
@@ -1599,7 +1624,8 @@ impl Core {
       let has_recv = t.direction().has_recv();
       t.set_direction(RTCRtpTransceiverDirection::from_send_recv(
         true, has_recv,
-      ));
+      ))
+      .map_err(crate::peer::rtc_err)?;
       t.keep_on_rollback();
     }
     let has_sender = self
@@ -1624,7 +1650,7 @@ impl Core {
         )
         .map_err(crate::peer::rtc_err)?;
       if let Some(mut sender) = self.pc.rtp_sender(index.into()) {
-        sender.set_streams(streams);
+        sender.set_streams(streams).map_err(crate::peer::rtc_err)?;
       }
       self.media.track_keys.insert(track.id, key);
       self.media.paused.remove(&key);
@@ -1635,19 +1661,32 @@ impl Core {
         "The transceiver has no sender".to_string(),
       ));
     };
-    let codings = sender.track().codings().to_vec();
-    let old = sender.track().track_id().to_string();
+    // A sender made from a kind has no engine track: the new one takes one
+    // active encoding, unless the sender has encodings of its own (which
+    // the engine keeps, with their SSRCs).
+    let codings = sender.track().map_or_else(
+      || {
+        vec![RTCRtpEncodingParameters {
+          active: true,
+          ..Default::default()
+        }]
+      },
+      |t| t.codings().to_vec(),
+    );
+    let old = sender.track().map(|t| t.track_id().to_string());
     sender
-      .replace_track(MediaStreamTrack::new(
+      .replace_track(Some(MediaStreamTrack::new(
         stream,
         track.id.clone(),
         track.label,
         kind,
         codings,
-      ))
+      )))
       .map_err(crate::peer::rtc_err)?;
-    sender.set_streams(streams);
-    self.media.track_keys.remove(&old);
+    sender.set_streams(streams).map_err(crate::peer::rtc_err)?;
+    if let Some(old) = old {
+      self.media.track_keys.remove(&old);
+    }
     self.media.track_keys.insert(track.id, key);
     self.media.paused.remove(&key);
     Ok(())
@@ -1679,7 +1718,9 @@ impl Core {
   ) -> Result<(), WebRtcError> {
     let index = self.index_of(key)?;
     if let Some(mut sender) = self.pc.rtp_sender(index.into()) {
-      sender.set_streams(msid_streams(streams));
+      sender
+        .set_streams(msid_streams(streams))
+        .map_err(crate::peer::rtc_err)?;
     }
     Ok(())
   }
@@ -1695,7 +1736,7 @@ impl Core {
       self.ensure_sender(key);
     }
     if let Some(mut t) = self.pc.rtp_transceiver(index) {
-      t.set_direction(direction);
+      t.set_direction(direction).map_err(crate::peer::rtc_err)?;
     }
     Ok(())
   }
@@ -1760,8 +1801,37 @@ impl Core {
     uris: Vec<String>,
   ) -> Result<(), WebRtcError> {
     let index = self.index_of(key)?;
-    if let Some(mut t) = self.pc.rtp_transceiver(index) {
-      t.set_header_extensions_to_negotiate(Some(uris));
+    let Some(mut t) = self.pc.rtp_transceiver(index) else {
+      return Ok(());
+    };
+    // The engine takes the whole list with a direction per extension: the
+    // ones JavaScript names are negotiated (an extension stopped before
+    // comes back "sendrecv"), the others "stopped".
+    let mut list: Vec<RTCRtpHeaderExtensionToNegotiate> = t
+      .get_header_extensions_to_negotiate()
+      .into_iter()
+      .map(|mut e| {
+        if !uris.contains(&e.uri) {
+          e.direction = RTCRtpTransceiverDirection::Stopped;
+        } else if e.direction == RTCRtpTransceiverDirection::Stopped {
+          e.direction = RTCRtpTransceiverDirection::Sendrecv;
+        }
+        e
+      })
+      .collect();
+    if t.set_header_extensions_to_negotiate(list.clone()).is_err() {
+      // The engine refuses to stop an extension every WebRTC endpoint must
+      // implement (RFC 8834 section 5.2: the mid, and for audio the RFC 6464
+      // audio level): those stay negotiated, the rest as asked.
+      for e in &mut list {
+        if e.direction == RTCRtpTransceiverDirection::Stopped
+          && MANDATORY_TO_IMPLEMENT_EXTENSIONS.contains(&e.uri.as_str())
+        {
+          e.direction = RTCRtpTransceiverDirection::Sendrecv;
+        }
+      }
+      t.set_header_extensions_to_negotiate(list)
+        .map_err(crate::peer::rtc_err)?;
     }
     Ok(())
   }
@@ -1783,10 +1853,14 @@ impl Core {
         )));
       }
     };
-    self.pc.set_rtp_header_encryption_policy(policy);
     self
       .pc
-      .set_always_negotiate_data_channels(always_negotiate_data_channels);
+      .set_rtp_header_encryption_policy(policy)
+      .map_err(crate::peer::rtc_err)?;
+    self
+      .pc
+      .set_always_negotiate_data_channels(always_negotiate_data_channels)
+      .map_err(crate::peer::rtc_err)?;
     Ok(())
   }
 
@@ -1804,7 +1878,7 @@ impl Core {
       };
       let mid = t.mid().clone();
       let direction = direction_str(t.direction());
-      let current_direction = direction_str(t.current_direction());
+      let current_direction = t.current_direction().and_then(direction_str);
       let section = mid.as_ref().and_then(|m| remote.get(m)).cloned();
       // The remote side doesn't send on this section (now): its track is
       // muted, and the next RTP that arrives unmutes it again.
@@ -2005,12 +2079,12 @@ impl Core {
     }
     let index = self.index_of(key)?;
     let mut buf = data;
-    let mut packet = rtc::rtp::packet::Packet::unmarshal(&mut buf)
+    let mut packet = rtci::rtp::packet::Packet::unmarshal(&mut buf)
       .map_err(|e| WebRtcError::Type(format!("Not an RTP packet: {e}")))?;
     let Some(mut sender) = self.pc.rtp_sender(index.into()) else {
       return Ok(false);
     };
-    let Some(ssrc) = sender.track().ssrcs().next() else {
+    let Some(ssrc) = sender.ssrcs().next() else {
       return Ok(false);
     };
     packet.header.ssrc = ssrc;
@@ -2048,7 +2122,7 @@ impl Core {
     let Some(mut sender) = self.pc.rtp_sender(index.into()) else {
       return Ok(None);
     };
-    let Some(ssrc) = sender.track().ssrcs().next() else {
+    let Some(ssrc) = sender.ssrcs().next() else {
       return Ok(None);
     };
     let params = sender.get_parameters().clone();
@@ -2073,13 +2147,13 @@ impl Core {
           codec.rtp_codec.mime_type
         )));
       };
-      let packetizer = rtc::rtp::packetizer::new_packetizer(
+      let packetizer = rtci::rtp::packetizer::new_packetizer(
         now,
         RTP_MTU,
         codec.payload_type,
         ssrc,
         payloader,
-        Box::new(rtc::rtp::sequence::new_random_sequencer()),
+        Box::new(rtci::rtp::sequence::new_random_sequencer()),
         codec.rtp_codec.clock_rate,
       );
       let mut start = [0u8; 4];
@@ -2170,7 +2244,7 @@ impl Core {
         .find(|h| h.uri == uri)
         .and_then(|h| u8::try_from(h.id).ok())
     };
-    let level_id = extension_id(rtc::sdp::extmap::AUDIO_LEVEL_URI);
+    let level_id = extension_id(rtci::sdp::extmap::AUDIO_LEVEL_URI);
     let capture_id =
       extension_id(crate::header_extensions::ABS_CAPTURE_TIME_URI);
     if let Some(id) = level_id
@@ -2285,7 +2359,7 @@ impl Core {
     let Some(mut sender) = self.pc.rtp_sender(index.into()) else {
       return Ok(false);
     };
-    let Some(ssrc) = sender.track().ssrcs().next() else {
+    let Some(ssrc) = sender.ssrcs().next() else {
       return Ok(false);
     };
     let params = sender.get_parameters().clone();
@@ -2332,8 +2406,8 @@ impl Core {
     let packet = |seq: u16, end: bool, marker: bool, duration: u16| {
       let flags = if end { 0x80 } else { 0x00 } | 10; // volume -10 dBm0
       let d = duration.to_be_bytes();
-      rtc::rtp::packet::Packet {
-        header: rtc::rtp::Header {
+      rtci::rtp::packet::Packet {
+        header: rtci::rtp::Header {
           version: 2,
           marker,
           payload_type,
@@ -2409,7 +2483,7 @@ impl Core {
 }
 
 /// Whether an RTCP compound asks for a key frame (PLI or FIR).
-pub fn wants_key_frame(packets: &[Box<dyn rtc::rtcp::Packet>]) -> bool {
+pub fn wants_key_frame(packets: &[Box<dyn rtci::rtcp::Packet>]) -> bool {
   packets.iter().any(|p| {
     p.as_any().downcast_ref::<PictureLossIndication>().is_some()
       || p.as_any().downcast_ref::<FullIntraRequest>().is_some()
@@ -2608,21 +2682,21 @@ mod factor_pacer_tests {
   use std::time::Instant;
 
   use bytes::Bytes;
-  use rtc::interceptor::Attribute;
-  use rtc::interceptor::AttributedPacket;
-  use rtc::interceptor::GCC_INITIAL_BITRATE;
-  use rtc::interceptor::Interceptor;
-  use rtc::interceptor::PacerBuilder;
-  use rtc::interceptor::Packet;
-  use rtc::interceptor::RTCPFeedback;
-  use rtc::interceptor::RTPHeaderExtension;
-  use rtc::interceptor::StreamInfo;
-  use rtc::interceptor::TaggedPacket;
-  use rtc::rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport;
-  use rtc::rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
-  use rtc::sansio::Protocol;
-  use rtc::shared::TransportContext;
-  use rtc::shared::marshal::MarshalSize;
+  use rtci::interceptor::Attribute;
+  use rtci::interceptor::AttributedPacket;
+  use rtci::interceptor::GCC_INITIAL_BITRATE;
+  use rtci::interceptor::Interceptor;
+  use rtci::interceptor::PacerBuilder;
+  use rtci::interceptor::Packet;
+  use rtci::interceptor::RTCPFeedback;
+  use rtci::interceptor::RTPHeaderExtension;
+  use rtci::interceptor::StreamInfo;
+  use rtci::interceptor::TaggedPacket;
+  use rtci::rtcp::transport_feedbacks::cc_feedback_report::CcFeedbackReport;
+  use rtci::rtcp::transport_feedbacks::transport_layer_cc::TransportLayerCc;
+  use rtci::sansio::Protocol;
+  use rtci::shared::TransportContext;
+  use rtci::shared::marshal::MarshalSize;
 
   use super::FEEDBACK_TIMEOUT;
   use super::FactorPacer;
@@ -2634,7 +2708,7 @@ mod factor_pacer_tests {
 
   fn rtcp(
     now: Instant,
-    packet: Box<dyn rtc::rtcp::Packet>,
+    packet: Box<dyn rtci::rtcp::Packet>,
     estimate: Option<f64>,
   ) -> TaggedPacket {
     let mut message = AttributedPacket::new(Packet::Rtcp(vec![packet]));
@@ -2653,7 +2727,7 @@ mod factor_pacer_tests {
   fn feedback(estimate: Option<f64>) -> TaggedPacket {
     rtcp(
       Instant::now(),
-      Box::new(rtc::rtcp::receiver_report::ReceiverReport::default()),
+      Box::new(rtci::rtcp::receiver_report::ReceiverReport::default()),
       estimate,
     )
   }
@@ -2670,8 +2744,8 @@ mod factor_pacer_tests {
     TaggedPacket {
       now,
       transport: TransportContext::default(),
-      message: AttributedPacket::new(Packet::Rtp(rtc::rtp::packet::Packet {
-        header: rtc::rtp::Header {
+      message: AttributedPacket::new(Packet::Rtp(rtci::rtp::packet::Packet {
+        header: rtci::rtp::Header {
           version: 2,
           sequence_number: seq,
           ssrc,
@@ -2687,7 +2761,7 @@ mod factor_pacer_tests {
     StreamInfo {
       ssrc,
       rtp_header_extensions: vec![RTPHeaderExtension {
-        uri: rtc::sdp::extmap::TRANSPORT_CC_URI.to_string(),
+        uri: rtci::sdp::extmap::TRANSPORT_CC_URI.to_string(),
         id: 5,
       }],
       ..Default::default()
@@ -2705,6 +2779,12 @@ mod factor_pacer_tests {
       ..Default::default()
     }
   }
+
+  /// What leaves a paced stream at once: the engine pacer starts with one
+  /// burst in its bucket and refills it to one burst (draft-ietf-rmcat-gcc-02
+  /// section 4: the rate times 5 ms, at least one full-sized packet), which
+  /// at the initial rate is one of these packets.
+  const BURST: usize = 1;
 
   fn pacer() -> FactorPacer {
     FactorPacer::new(Arc::default())
@@ -2787,10 +2867,10 @@ mod factor_pacer_tests {
     let mut p = pacer();
     p.bind_local_stream(&twcc_stream(SSRC));
     let now = Instant::now();
-    assert_eq!(write(&mut p, now, SSRC, 100), 0);
+    assert!(write(&mut p, now, SSRC, 100) <= BURST);
     p.handle_timeout(now).unwrap();
     let released = drain(&mut p);
-    assert!(released > 0 && released < 100, "released {released}");
+    assert!(released < 100, "released {released}");
   }
 
   // RFC 8888 feedback (`ack ccfb`) counts as congestion feedback too.
@@ -2799,13 +2879,12 @@ mod factor_pacer_tests {
     let mut p = pacer();
     p.bind_local_stream(&ccfb_stream(SSRC));
     let now = Instant::now();
-    assert_eq!(write(&mut p, now, SSRC, 10), 0);
+    assert!(write(&mut p, now, SSRC, 10) <= BURST);
     // An RFC 8888 report keeps it paced past the feedback timeout.
     let later = now + FEEDBACK_TIMEOUT - Duration::from_millis(100);
     p.handle_read(ccfb(later)).unwrap();
-    assert_eq!(
-      write(&mut p, later + Duration::from_millis(500), SSRC, 10),
-      0
+    assert!(
+      write(&mut p, later + Duration::from_millis(500), SSRC, 10) <= BURST
     );
   }
 
@@ -2820,7 +2899,7 @@ mod factor_pacer_tests {
       ..Default::default()
     });
     let now = Instant::now();
-    assert_eq!(write(&mut p, now, SSRC, 10), 0);
+    assert!(write(&mut p, now, SSRC, 10) <= BURST);
     assert_eq!(write(&mut p, now, SSRC + 1, 10), 10);
   }
 
@@ -2833,7 +2912,7 @@ mod factor_pacer_tests {
     for i in 0..20 {
       let now = start + Duration::from_millis(250) * i;
       p.handle_read(twcc(now, None)).unwrap();
-      assert_eq!(write(&mut p, now, SSRC, 5), 0, "at {i}");
+      assert!(write(&mut p, now, SSRC, 5) <= BURST, "at {i}");
       p.handle_timeout(now).unwrap();
       drain(&mut p);
     }
@@ -2847,22 +2926,29 @@ mod factor_pacer_tests {
     let mut p = pacer();
     p.bind_local_stream(&twcc_stream(SSRC));
     let start = Instant::now();
-    assert_eq!(write(&mut p, start, SSRC, 100), 0);
+    let first = write(&mut p, start, SSRC, 100);
+    assert!(first <= BURST);
     let before = start + FEEDBACK_TIMEOUT - Duration::from_millis(1);
-    assert_eq!(write(&mut p, before, SSRC, 1), 0, "still paced");
+    let second = write(&mut p, before, SSRC, 1);
+    assert!(second <= BURST, "still paced");
     let after = start + FEEDBACK_TIMEOUT;
     p.handle_timeout(after).unwrap();
-    assert_eq!(drain(&mut p), 101, "the held packets all go");
+    assert_eq!(
+      drain(&mut p),
+      101 - first - second,
+      "the held packets all go"
+    );
     assert_eq!(write(&mut p, after, SSRC, 200), 200);
     // A report: paced again, at its estimate.
     let resumed = after + Duration::from_secs(5);
     p.handle_read(twcc(resumed, Some(400_000.0))).unwrap();
     assert_eq!(p.target_bitrate(), 400_000.0 * PACING_FACTOR);
-    assert_eq!(write(&mut p, resumed, SSRC, 10), 0);
+    let third = write(&mut p, resumed, SSRC, 10);
+    assert!(third <= BURST);
     // And reports that stop after that fall back the same way.
     let stopped = resumed + FEEDBACK_TIMEOUT;
     p.handle_timeout(stopped).unwrap();
-    assert_eq!(drain(&mut p), 10);
+    assert_eq!(drain(&mut p), 10 - third);
     assert_eq!(write(&mut p, stopped, SSRC, 10), 10);
   }
 
@@ -2873,7 +2959,8 @@ mod factor_pacer_tests {
     let mut p = pacer();
     p.bind_local_stream(&twcc_stream(SSRC));
     let start = Instant::now();
-    assert_eq!(write(&mut p, start, SSRC, 50), 0);
+    let first = write(&mut p, start, SSRC, 50);
+    assert!(first <= BURST);
     let after = start + FEEDBACK_TIMEOUT;
     p.handle_write(rtp(after, SSRC, 50)).unwrap();
     p.handle_timeout(after).unwrap();
@@ -2883,7 +2970,7 @@ mod factor_pacer_tests {
         _ => unreachable!("only RTP was written"),
       })
       .collect();
-    assert_eq!(order, (0..=50).collect::<Vec<_>>());
+    assert_eq!(order, (first as u16..=50).collect::<Vec<_>>());
   }
 
   // The stats hold an estimate only while it paces at one: the initial
@@ -2924,18 +3011,22 @@ mod factor_pacer_tests {
     let mut p = FactorPacer::with_pacer(
       PacerBuilder::new()
         .with_target_bitrate(GCC_INITIAL_BITRATE * PACING_FACTOR)
+        .with_queue_time_limit(None)
         .with_queue_limit(4)
         .build(),
       refusals.clone(),
     );
     p.bind_local_stream(&twcc_stream(SSRC));
     let now = Instant::now();
-    assert_eq!(write(&mut p, now, SSRC, 10), 0);
+    let released = write(&mut p, now, SSRC, 10);
+    assert!(released <= BURST);
     let size = match &rtp(now, SSRC, 0).message.packet {
       Packet::Rtp(rtp) => rtp.marshal_size() as u64,
       _ => unreachable!("an RTP packet"),
     };
-    assert_eq!(refusals.get(), (6, 6 * size));
+    // Ten written: what left at once, four queued, the rest refused.
+    let refused = (10 - released - 4) as u64;
+    assert_eq!(refusals.get(), (refused, refused * size));
   }
 
   // A backlog drains within QUEUE_TIME_LIMIT whatever the estimate: 1,000
@@ -2946,9 +3037,9 @@ mod factor_pacer_tests {
     let mut p = pacer();
     p.bind_local_stream(&twcc_stream(SSRC));
     let start = Instant::now();
-    assert_eq!(write(&mut p, start, SSRC, 1000), 0);
+    let mut released = write(&mut p, start, SSRC, 1000);
+    assert!(released <= BURST);
     let mut now = start;
-    let mut released = 0;
     while released < 1000 {
       p.handle_read(twcc(now, None)).unwrap();
       p.handle_timeout(now).unwrap();
@@ -2978,7 +3069,7 @@ mod factor_pacer_tests {
     });
     p.bind_local_stream(&twcc_stream(SSRC + 1));
     let now = Instant::now();
-    assert_eq!(write(&mut p, now, SSRC + 1, 100), 0);
+    assert!(write(&mut p, now, SSRC + 1, 100) <= BURST);
     assert_eq!(write(&mut p, now, SSRC, 50), 50);
   }
 }
