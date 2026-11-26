@@ -515,7 +515,6 @@ fn answer_probe(listener: &OwnedFd) -> bool {
 #[cfg(test)]
 mod tests {
   use std::io::Read;
-  use std::os::fd::IntoRawFd;
   use std::path::Path;
 
   use super::*;
@@ -585,6 +584,31 @@ mod tests {
     assert!(fd >= 0, "{}", io::Error::last_os_error());
     // SAFETY: just opened
     unsafe { OwnedFd::from_raw_fd(fd) }
+  }
+
+  /// Whether `fd` names an open descriptor of this process.
+  fn is_open(fd: i32) -> bool {
+    // SAFETY: F_GETFD only reads the descriptor's flags
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    flags >= 0 || io::Error::last_os_error().raw_os_error() != Some(libc::EBADF)
+  }
+
+  /// A descriptor number no thread of this process can hold while the test
+  /// runs: the soft `RLIMIT_NOFILE` limit, which the kernel never hands out
+  /// (a closed descriptor's number would be reused by another test's open).
+  fn never_open() -> i32 {
+    let mut limit = libc::rlimit {
+      rlim_cur: 0,
+      rlim_max: 0,
+    };
+    // SAFETY: an out struct
+    assert_eq!(
+      unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+      0
+    );
+    let fd = limit.rlim_cur.min(i32::MAX as libc::rlim_t) as i32;
+    assert!(!is_open(fd), "descriptor {fd} is open");
+    fd
   }
 
   /// An anonymous memory file holding a copy of `file`.
@@ -731,14 +755,14 @@ mod tests {
     assert_eq!(gate.answer(&execveat(raw, c"", empty)), REFUSED);
     let name = CString::new(format!("/proc/self/fd/{raw}")).unwrap();
     assert_eq!(gate.answer(&execve(&name)), REFUSED);
+    drop(memory);
     // a descriptor that isn't open
-    let closed = memory.into_raw_fd();
-    // SAFETY: closing the descriptor just released
-    unsafe { libc::close(closed) };
+    let closed = never_open();
     assert_eq!(
       gate.answer(&execveat(closed, c"", empty)),
       Answer::Done(Err(libc::EBADF))
     );
+    assert!(!is_open(closed), "descriptor {closed} was opened meanwhile");
   }
 
   #[test]
