@@ -185,7 +185,14 @@ function forwardEvent(channel, event) {
       break;
     }
     case "dcerror":
-      postToProxy(channel, { t: "error" });
+      postToProxy(channel, {
+        t: "error",
+        errorDetail: event.errorDetail,
+        detail: event.message,
+        sctpCauseCode: event.sctpCauseCode ?? null,
+        label: event.label ?? null,
+        id: event.id ?? null,
+      });
       break;
     case "dcsent":
       postToProxy(channel, { t: "sent", bytes: event.bytes });
@@ -290,17 +297,33 @@ function onOwnerEvent(channel, message) {
       fire(channel, new Event("close"));
       break;
     }
-    case "error":
+    case "error": {
+      const detail = message.errorDetail === "data-channel-failure"
+        ? "data-channel-failure"
+        : "sctp-failure";
+      const cause = message.sctpCauseCode === null ||
+          message.sctpCauseCode === undefined
+        ? ""
+        : ` (SCTP cause code ${message.sctpCauseCode})`;
+      const reason = message.detail ? `: ${message.detail}` : "";
       fire(
         channel,
         new RTCErrorEvent("error", {
           error: new RTCError(
-            { errorDetail: "sctp-failure" },
-            "The data channel failed",
+            {
+              errorDetail: detail,
+              sctpCauseCode: detail === "sctp-failure"
+                ? message.sctpCauseCode ?? null
+                : null,
+            },
+            `The data channel '${message.label ?? channel.label}' (id ${
+              message.id ?? channel.id ?? "unassigned"
+            }) failed${reason}${cause}`,
           ),
         }),
       );
       break;
+    }
     case "senderror":
       failChannel(channel, new TypeError(String(message.message)));
       break;

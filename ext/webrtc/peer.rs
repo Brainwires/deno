@@ -409,8 +409,18 @@ pub enum JsEvent {
   DataChannelClosing { channel: u32 },
   #[serde(rename = "dcclose")]
   DataChannelClose { channel: u32 },
-  #[serde(rename = "dcerror")]
-  DataChannelError { channel: u32 },
+  /// A data channel failed (W3C: an `error` event with an `RTCError`, then
+  /// the channel closes): the engine's `RTCError` for it
+  /// (`RTCPeerConnection::data_channel_error`), and what names the channel.
+  #[serde(rename = "dcerror", rename_all = "camelCase")]
+  DataChannelError {
+    channel: u32,
+    error_detail: String,
+    message: String,
+    sctp_cause_code: Option<u16>,
+    label: Option<String>,
+    id: Option<u16>,
+  },
   /// SCTP took `bytes` more of the channel's application data from its send
   /// queue (W3C: "when the underlying data transport sends data from its
   /// queue ... reduce [[BufferedAmount]]").
@@ -2444,9 +2454,25 @@ impl Core {
             RTCDataChannelEvent::OnClose(handle) => JsEvent::DataChannelClose {
               channel: handle as u32,
             },
-            RTCDataChannelEvent::OnError(handle) => JsEvent::DataChannelError {
-              channel: handle as u32,
-            },
+            RTCDataChannelEvent::OnError(handle) => {
+              let error = self.pc.data_channel_error(handle).cloned();
+              let channel = self.pc.data_channel(handle);
+              JsEvent::DataChannelError {
+                channel: handle as u32,
+                error_detail: error.as_ref().map_or_else(
+                  || "data-channel-failure".to_string(),
+                  |e| e.error_detail.to_string(),
+                ),
+                message: error
+                  .as_ref()
+                  .map(|e| e.message.clone())
+                  .filter(|m| !m.is_empty())
+                  .unwrap_or_default(),
+                sctp_cause_code: error.as_ref().and_then(|e| e.sctp_cause_code),
+                label: channel.as_ref().map(|c| c.label().to_string()),
+                id: channel.as_ref().and_then(|c| c.stream_id()),
+              }
+            }
             // `bufferedamountlow` follows what is sent, not what is
             // acknowledged (`track_sent`).
             _ => continue,

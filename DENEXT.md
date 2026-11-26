@@ -23106,6 +23106,12 @@ where the changes are discussed.
        "uses [[LastCreatedAnswer]]"). `createOffer()` / `createAnswer()` are not
        changed: a later offer lists the candidates gathered so far, as RFC 9429
        section 5.2.2 has it.
+     - Data channel errors: a channel's `error` event carries the engine's
+       `RTCError` for it (`RTCPeerConnection::data_channel_error`): its
+       `errorDetail` (`sctp-failure`, or `data-channel-failure` for a channel
+       that failed alone) and SCTP cause code, and a message that names the
+       channel (label, id) and what failed. It was always `sctp-failure`, "The
+       data channel failed". A transferred channel gets the same.
      - More expectations, from the full run on the train: passing now,
        `supported-stats` "outbound-rtp's totalPacketSendDelay" (rtci 0.2 reports
        it), `simplecall-no-ssrcs` and `RTCRtpTransceiver.https.html?rest`

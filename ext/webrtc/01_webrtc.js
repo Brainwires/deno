@@ -1286,6 +1286,33 @@ function drainQueue(channel) {
   }
 }
 
+// The RTCError of a data channel's failure (the engine's `dcerror`): its
+// errorDetail ("sctp-failure", or "data-channel-failure" for a channel that
+// failed alone) and SCTP cause code, and a message that says what failed
+// and which channel it was, as the engine has it.
+function dataChannelError(event, channel) {
+  const detail = event.errorDetail === "sctp-failure" ||
+      event.errorDetail === "data-channel-failure"
+    ? event.errorDetail
+    : "sctp-failure";
+  const label = event.label ?? channel?.label ?? "";
+  const id = event.id ?? channel?.id ?? null;
+  const cause = event.sctpCauseCode === null ||
+      event.sctpCauseCode === undefined
+    ? ""
+    : ` (SCTP cause code ${event.sctpCauseCode})`;
+  const reason = event.message ? `: ${event.message}` : "";
+  return new RTCError(
+    {
+      errorDetail: detail,
+      sctpCauseCode: detail === "sctp-failure"
+        ? event.sctpCauseCode ?? null
+        : null,
+    },
+    `The data channel '${label}' (id ${id ?? "unassigned"}) failed${reason}${cause}`,
+  );
+}
+
 // A queued send that could not go out (a Blob that failed to read, or one
 // over maxMessageSize): `error`, then the channel closes, as a browser does
 // when it cannot send what it already accepted.
@@ -7490,10 +7517,7 @@ function dispatchEngineEvent(pc, event) {
       fire(
         channel,
         new RTCErrorEvent("error", {
-          error: new RTCError(
-            { errorDetail: "sctp-failure" },
-            "The data channel failed",
-          ),
+          error: dataChannelError(event, channel),
         }),
       );
       break;
