@@ -121,6 +121,14 @@ pub struct FrameAssembler {
   abs_capture_time_id: Option<u8>,
   /// What the current frame's packets carried of them.
   current_extensions: FrameExtensions,
+  /// The sequence number the stream's next packet should have, across
+  /// frames (the furthest seen plus one): a packet past it means packets
+  /// were lost, even between frames.
+  expected: Option<u16>,
+  /// A video stream lost a frame (a sequence gap, a frame in the making
+  /// dropped, a payload the depacketizer refused): what follows references
+  /// it, so the stream stays broken until a key frame is put together.
+  lost: bool,
 }
 
 impl FrameAssembler {
@@ -134,7 +142,37 @@ impl FrameAssembler {
       audio_level_id: None,
       abs_capture_time_id: None,
       current_extensions: FrameExtensions::default(),
+      expected: None,
+      lost: false,
     }
+  }
+
+  /// Whether the video stream lost a frame and no key frame has repaired it
+  /// since: the receiver should ask the sender for one (a PLI).
+  pub fn needs_key_frame(&self) -> bool {
+    self.lost
+  }
+
+  /// A frame was lost: a video stream is broken until its next key frame.
+  fn lose(&mut self) {
+    if !self.audio {
+      self.lost = true;
+    }
+  }
+
+  /// Notes the packet's sequence number against the one expected; returns
+  /// whether packets before it are missing. A late packet (behind the
+  /// furthest seen) moves nothing.
+  fn note_sequence(&mut self, seq: u16) -> bool {
+    let Some(expected) = self.expected else {
+      self.expected = Some(seq.wrapping_add(1));
+      return false;
+    };
+    let ahead = seq.wrapping_sub(expected) as i16;
+    if ahead >= 0 {
+      self.expected = Some(seq.wrapping_add(1));
+    }
+    ahead > 0
   }
 
   /// The header extension ids the receiver negotiated, whose values the
@@ -178,6 +216,11 @@ impl FrameAssembler {
       return None; // AV1 or an unknown video codec.
     }
     let seq = header.sequence_number;
+    // Packets missing before this one: whatever they carried (the end of the
+    // frame in the making, or whole frames between) is lost.
+    if self.note_sequence(seq) {
+      self.lose();
+    }
     // A packet without a payload (padding, or a ULPFEC packet of a RED
     // stream, which the engine delivers emptied under the media's payload
     // type) is present and no media: it takes the sequence number the frame
@@ -185,7 +228,10 @@ impl FrameAssembler {
     if payload.is_empty() {
       match &mut self.current {
         Some((_, _, next, _)) if *next == seq => *next = seq.wrapping_add(1),
-        Some(_) => self.current = None,
+        Some(_) => {
+          self.current = None;
+          self.lose();
+        }
         None => {}
       }
       return None;
@@ -195,6 +241,7 @@ impl FrameAssembler {
       && (*ts != header.timestamp || *next != seq)
     {
       self.current = None;
+      self.lose();
     }
     let head = match &self.depacketizer {
       Some(d) => d.is_partition_head(payload),
@@ -212,6 +259,7 @@ impl FrameAssembler {
         Ok(b) => b,
         Err(_) => {
           self.current = None;
+          self.lose();
           return None;
         }
       },
@@ -235,8 +283,12 @@ impl FrameAssembler {
       return None;
     }
     let ext = self.current_extensions;
+    let key_frame = received_key_frame(&self.mime_type, &data);
+    if key_frame {
+      self.lost = false;
+    }
     Some(ReceivedFrame {
-      key_frame: received_key_frame(&self.mime_type, &data),
+      key_frame,
       width_height: crate::media::frame_size(&self.mime_type, &data),
       info: ReceivedFrameInfo {
         synchronization_source: header.ssrc,
@@ -275,6 +327,17 @@ impl Core {
       self.transforms.assemblers.remove(&key);
     }
     Ok(())
+  }
+
+  /// Whether the receiver's frames for its transform lost one that no key
+  /// frame has repaired since.
+  pub(crate) fn transform_needs_key_frame(&self, key: u32) -> bool {
+    self
+      .transforms
+      .assemblers
+      .get(&key)
+      .and_then(Option::as_ref)
+      .is_some_and(FrameAssembler::needs_key_frame)
   }
 
   /// A received RTP packet, for a receiver with a transform: the frame it
@@ -406,6 +469,52 @@ mod tests {
     assert!(a.push(&header(7, 270, false), &start).is_none());
     assert!(a.push(&header(9, 270, false), &Bytes::new()).is_none());
     assert!(a.push(&header(10, 270, true), &end).is_none());
+  }
+
+  #[test]
+  fn a_lost_frame_needs_a_key_frame_until_one_arrives() {
+    let key = Bytes::from_static(&[
+      0x10, 0, 0, 0, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0xe0, 0x01,
+    ]);
+    let delta = Bytes::from_static(&[0x10, 0x01, 0x02, 0x03]);
+    let mut a = FrameAssembler::new(96, "video/VP8");
+    assert!(a.push(&header(1, 90, true), &key).unwrap().key_frame);
+    assert!(a.push(&header(2, 180, true), &delta).is_some());
+    assert!(!a.needs_key_frame());
+    // A whole one-packet frame lost between frames: the next is delivered,
+    // but it references the lost one.
+    assert!(a.push(&header(4, 360, true), &delta).is_some());
+    assert!(a.needs_key_frame());
+    // Delta frames keep it broken.
+    assert!(a.push(&header(5, 450, true), &delta).is_some());
+    assert!(a.needs_key_frame());
+    // A late packet moves nothing back, and is no new loss once repaired.
+    assert!(a.push(&header(6, 540, true), &key).unwrap().key_frame);
+    assert!(!a.needs_key_frame());
+    assert!(a.push(&header(3, 270, true), &delta).is_some());
+    assert!(!a.needs_key_frame());
+    assert!(a.push(&header(7, 630, true), &delta).is_some());
+    assert!(!a.needs_key_frame());
+    // The end of a frame lost: the frame in the making is dropped.
+    let start = Bytes::from_static(&[0x10, 0x01, 0x02, 0x03]);
+    let end = Bytes::from_static(&[0x00, 0x04, 0x05, 0x06]);
+    assert!(a.push(&header(8, 720, false), &start).is_none());
+    assert!(a.push(&header(10, 810, true), &delta).is_some());
+    assert!(a.needs_key_frame());
+    assert!(a.push(&header(11, 900, true), &key).unwrap().key_frame);
+    assert!(!a.needs_key_frame());
+    // Its start lost: the middle of a frame is no frame.
+    assert!(a.push(&header(13, 990, true), &end).is_none());
+    assert!(a.needs_key_frame());
+  }
+
+  #[test]
+  fn audio_never_needs_a_key_frame() {
+    let mut a = FrameAssembler::new(111, "audio/opus");
+    let opus = Bytes::from_static(&[0xf8, 0xff, 0xfe]);
+    assert!(a.push(&header(1, 960, true), &opus).is_some());
+    assert!(a.push(&header(5, 4800, true), &opus).is_some());
+    assert!(!a.needs_key_frame());
   }
 
   #[test]

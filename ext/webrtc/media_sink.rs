@@ -91,11 +91,43 @@ impl Core {
     Ok(())
   }
 
+  /// Whether the receiver's frames for `readFrames()` lost one that no key
+  /// frame has repaired since.
+  pub(crate) fn sink_needs_key_frame(&self, key: u32) -> bool {
+    self
+      .sinks
+      .assemblers
+      .get(&key)
+      .and_then(Option::as_ref)
+      .is_some_and(|(_, a)| a.needs_key_frame())
+  }
+
   /// The receiver's track was muted from JavaScript (its remote side
-  /// stopped sending, by negotiation or silence): the next packet unmutes it.
-  pub(crate) fn receiver_muted(&mut self, key: u32) {
+  /// stopped sending, by negotiation or silence), or it started being
+  /// received again: the next packet unmutes it, with an event of this
+  /// `generation` (JavaScript ignores one of an older generation).
+  pub(crate) fn receiver_muted(&mut self, key: u32, generation: u32) {
+    self.media.unmute_generation.insert(key, generation);
+    self.rearm_unmute(key);
+  }
+
+  /// The next packet of the receiver unmutes its track.
+  fn rearm_unmute(&mut self, key: u32) {
     self.media.flowing.remove(&key);
     self.sinks.last_packet.remove(&key);
+  }
+
+  /// Whether this side's negotiation receives on the receiver's section:
+  /// its transceiver's `currentDirection` is `sendrecv` or `recvonly`.
+  pub(crate) fn receives_now(&mut self, key: u32) -> bool {
+    let Ok(index) = self.index_of(key) else {
+      return false;
+    };
+    self
+      .pc
+      .rtp_transceiver(index)
+      .and_then(|t| t.current_direction())
+      .is_some_and(|d| d.has_recv())
   }
 
   /// Mutes the tracks of receivers that went silent (an event each).
@@ -108,7 +140,7 @@ impl Core {
       .map(|(k, _)| *k)
       .collect();
     for key in silent {
-      self.receiver_muted(key);
+      self.rearm_unmute(key);
       self
         .events
         .push_back(JsEvent::TrackMute { transceiver: key });

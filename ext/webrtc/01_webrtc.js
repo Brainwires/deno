@@ -1499,13 +1499,21 @@ function setMuted(track, muted) {
   fire(track, new Event(muted ? "mute" : "unmute"));
 }
 
-// The receiver's next RTP packet sends a `trackunmute` event again.
+// The receiver's next RTP packet sends a `trackunmute` event again, of a new
+// generation: one still queued from before is stale and ignored.
 function rearmUnmute(receiver) {
   if (receiver === null || receiver === undefined) return;
   const pc = receiver[_pc];
   if (pc[_state].closed) return;
+  const rstate = receiver[_state];
+  const generation = (rstate.unmuteGeneration + 1) >>> 0;
   try {
-    op_webrtc_receiver_muted(pc[_rid], receiver[_transceiver][_key]);
+    op_webrtc_receiver_muted(
+      pc[_rid],
+      receiver[_transceiver][_key],
+      generation,
+    );
+    rstate.unmuteGeneration = generation;
   } catch {
     // The transceiver is gone.
   }
@@ -3422,6 +3430,9 @@ class RTCRtpReceiver {
       // [[AssociatedRemoteMediaStreams]]
       streams: [],
       receiving: false,
+      // Moves on with each mute (and each start of receiving): a
+      // `trackunmute` of an older generation was queued before it.
+      unmuteGeneration: 0,
     };
     this[_state].track = new MediaStreamTrack(illegalConstructorKey, {
       kind: transceiver[_state].kind,
@@ -4482,6 +4493,7 @@ function restoreRemoteTracks(pc) {
           streamAddRemote(before.streams[j], rstate.track);
         }
         rstate.streams = before.streams;
+        rearmUnmute(t[_state].receiver);
         rstate.receiving = true;
         ArrayPrototypePush(revived, t);
       }
@@ -6378,6 +6390,9 @@ function syncTransceivers(pc, phase) {
         // description adds streams to it ("set the associated remote
         // streams" grew addList).
         if (!rstate.receiving || added) {
+          // Received again after a remote pause: what arrived (or was
+          // queued) while it was not received can't unmute it.
+          if (!rstate.receiving) rearmUnmute(receiver);
           rstate.receiving = true;
           ArrayPrototypePush(trackEvents, [t, streams]);
         }
@@ -7180,6 +7195,10 @@ function dispatchEngineEvent(pc, event) {
       const t = transceiverFor(pc, event.transceiver);
       if (t === undefined) break;
       const receiver = t[_state].receiver;
+      // Queued before the track was muted again, or before it started being
+      // received again: a packet of an earlier media state. The newer arm
+      // sends its own event.
+      if (event.generation !== receiver[_state].unmuteGeneration) break;
       // wpt100:mediasink: a packet still in flight after the remote side
       // stopped sending (by negotiation) leaves the track muted; the next
       // packet asks again.

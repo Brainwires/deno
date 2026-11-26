@@ -1228,9 +1228,10 @@ fn op_webrtc_receiver_muted(
   state: &mut OpState,
   #[smi] rid: ResourceId,
   key: u32,
+  generation: u32,
 ) -> Result<(), WebRtcError> {
   peer(state, rid)?.media(|core| {
-    core.receiver_muted(key);
+    core.receiver_muted(key, generation);
     Ok(())
   })
 }

@@ -1179,6 +1179,10 @@ pub struct MediaState {
   pub packetizers: HashMap<u32, SenderPacketizer>,
   /// Keys whose receiver delivered its first packet (`unmute` was sent).
   pub flowing: std::collections::HashSet<u32>,
+  /// The generation JavaScript gave each receiver's last mute
+  /// (`op_webrtc_receiver_muted`); a `trackunmute` carries it, so one
+  /// queued before a newer mute is told apart.
+  pub unmute_generation: HashMap<u32, u32>,
   /// RFC 4733 state per sender: the next sequence number and timestamp.
   pub dtmf: HashMap<u32, (u16, u32)>,
   /// The SSRCs and CSRCs each receiver got packets from, for
@@ -1194,7 +1198,17 @@ pub struct MediaState {
   pub received_video: HashMap<u32, ReceivedVideo>,
   /// What this connection's pacer refused ([`FactorPacer`]).
   pub pacer_refusals: Arc<PacerRefusals>,
+  /// When each inbound stream (by SSRC) last asked its sender for a key
+  /// frame after a loss ([`KEY_FRAME_REQUEST_INTERVAL`]).
+  pub loss_key_frame_requests: HashMap<u32, Instant>,
 }
+
+/// How often a receiver whose stream lost a frame asks the sender for a key
+/// frame again while no key frame came: once per SSRC per this interval, as
+/// libwebrtc paces its repeated requests. Each delta frame after the loss
+/// would otherwise send one.
+pub const KEY_FRAME_REQUEST_INTERVAL: std::time::Duration =
+  std::time::Duration::from_millis(500);
 
 /// What an outbound video stream's frames were, as they reached its sender:
 /// encoded frames, from a fake capture device's clip, an
@@ -2464,17 +2478,42 @@ impl Core {
     let ssrcs: Vec<u32> = receiver.track().ssrcs().collect();
     let mut sent = false;
     for media_ssrc in ssrcs {
-      sent |= receiver
-        .write_rtcp(
-          Instant::now(),
-          vec![Box::new(PictureLossIndication {
-            sender_ssrc: 0,
-            media_ssrc,
-          })],
-        )
-        .is_ok();
+      sent |= write_pli(&mut receiver, media_ssrc, Instant::now());
     }
     Ok(sent)
+  }
+
+  /// A receiver's frame assembler lost a frame of the stream `media_ssrc`
+  /// and has seen no key frame since: a PLI to the remote sender (RFC 4585
+  /// section 6.3.1), at most once per [`KEY_FRAME_REQUEST_INTERVAL`] per
+  /// stream. Returns whether one was sent.
+  pub(crate) fn request_key_frame_after_loss(
+    &mut self,
+    key: u32,
+    media_ssrc: u32,
+    now: Instant,
+  ) -> bool {
+    let requests = &mut self.media.loss_key_frame_requests;
+    if requests.get(&media_ssrc).is_some_and(|last| {
+      now.saturating_duration_since(*last) < KEY_FRAME_REQUEST_INTERVAL
+    }) {
+      return false;
+    }
+    // Bounded: only streams that asked within the interval are kept.
+    requests.retain(|_, last| {
+      now.saturating_duration_since(*last) < KEY_FRAME_REQUEST_INTERVAL
+    });
+    let Ok(index) = self.index_of(key) else {
+      return false;
+    };
+    let Some(mut receiver) = self.pc.rtp_receiver(index.into()) else {
+      return false;
+    };
+    let sent = write_pli(&mut receiver, media_ssrc, now);
+    if sent {
+      self.media.loss_key_frame_requests.insert(media_ssrc, now);
+    }
+    sent
   }
 
   pub(crate) fn key_for_track(&mut self, track_id: &str) -> Option<u32> {
@@ -2495,6 +2534,24 @@ impl Core {
   pub(crate) fn key_for_receiver_index(&self, index: usize) -> Option<u32> {
     self.media.keys.get(index).copied()
   }
+}
+
+/// A PLI for the stream `media_ssrc`, written by its receiver. The sender
+/// SSRC is 0, as the engine's own requests have it.
+fn write_pli(
+  receiver: &mut rtci::rtp_transceiver::rtp_receiver::RTCRtpReceiver<'_>,
+  media_ssrc: u32,
+  now: Instant,
+) -> bool {
+  receiver
+    .write_rtcp(
+      now,
+      vec![Box::new(PictureLossIndication {
+        sender_ssrc: 0,
+        media_ssrc,
+      })],
+    )
+    .is_ok()
 }
 
 /// Whether an RTCP compound asks for a key frame (PLI or FIR).
