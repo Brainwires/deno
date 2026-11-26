@@ -10,9 +10,9 @@ capture device or codec: a local track is a `Deno.webrtc.EncodedMediaTrack` the
 program feeds.
 
 The protocol stack (ICE, DTLS, SCTP, the data channel protocol, SRTP, RTP / RTCP
-and its interceptors) is webrtc-rs's sans-I/O `rtc` crates, pinned from
-[Brainwires/webrtc-rs-rtc](https://github.com/Brainwires/webrtc-rs-rtc) (our
-fork, synced with upstream); `peer.rs` owns the UDP sockets, the ICE-TCP
+and its interceptors) is the sans-I/O `rtci` crates from crates.io
+([Brainwires/rtci](https://github.com/Brainwires/rtci), our fork of webrtc-rs's
+`rtc`, synced with upstream); `peer.rs` owns the UDP sockets, the ICE-TCP
 connections (RFC 6544, on a `Deno.webrtc.createNetwork({ tcpPort })` network),
 the mDNS socket that resolves (and, with `mdns: true`, publishes) `.local` host
 candidates, the timers and the STUN/TURN clients around it, and gates every

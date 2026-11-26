@@ -62,6 +62,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.12",
+ "zeroize",
 ]
 
 [[package]]
@@ -1381,6 +1382,7 @@ checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
 dependencies = [
  "crypto-common 0.1.6",
  "inout",
+ "zeroize",
 ]
 
 [[package]]
@@ -4237,7 +4239,7 @@ dependencies = [
  "log",
  "netif",
  "quinn-udp",
- "rtc",
+ "rtci",
  "rustls",
  "rustls-tokio-stream",
  "serde",
@@ -9123,6 +9125,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b40af805b3121feab8a3c29f04d8ad262fa8e0561883e7653e024ae4479e6de"
 
 [[package]]
+name = "precis-core"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57026eb21aa532dc7d5b29ddc666e89965d145445ceac3194483c9e094b897be"
+dependencies = [
+ "precis-tools",
+ "ucd-parse",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "precis-profiles"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53ed6b19435958c029101ce63ae26e010973fcc79aaddfda5b3afa7102602ab4"
+dependencies = [
+ "precis-core",
+ "precis-tools",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "precis-tools"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ade9e98ddb189f367494f1fa0a966a8d0d38f9a3eec4aef0f5ec035a7e0963d"
+dependencies = [
+ "regex",
+ "ucd-parse",
+]
+
+[[package]]
 name = "precomputed-hash"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9981,31 +10015,34 @@ dependencies = [
 ]
 
 [[package]]
-name = "rtc"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=8916bc3048c2b2a53788639f57e4a64a4a4b4696#8916bc3048c2b2a53788639f57e4a64a4a4b4696"
+name = "rtci"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85d19eeba6dac74e3a3612c2c3403cdeea0c31d0559bcc6fb8d5619d15463260"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "hex",
  "log",
  "pem 3.0.6",
  "rand 0.10.2",
  "rcgen",
- "rtc-crypto",
- "rtc-datachannel",
- "rtc-dtls",
- "rtc-ice",
- "rtc-interceptor",
- "rtc-mdns",
- "rtc-media",
- "rtc-rtcp",
- "rtc-rtp",
- "rtc-sctp",
- "rtc-sdp",
- "rtc-shared",
- "rtc-srtp",
- "rtc-stun",
- "rtc-turn",
+ "rtci-crypto",
+ "rtci-datachannel",
+ "rtci-dtls",
+ "rtci-ice",
+ "rtci-interceptor",
+ "rtci-mdns",
+ "rtci-media",
+ "rtci-rtcp",
+ "rtci-rtp",
+ "rtci-sctp",
+ "rtci-sdp",
+ "rtci-sframe",
+ "rtci-shared",
+ "rtci-srtp",
+ "rtci-stun",
+ "rtci-turn",
  "rustc-hash 2.1.1",
  "rustls",
  "sansio",
@@ -10017,9 +10054,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "rtc-crypto"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=8916bc3048c2b2a53788639f57e4a64a4a4b4696#8916bc3048c2b2a53788639f57e4a64a4a4b4696"
+name = "rtci-crypto"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c048fe0aefe12375fc340baa8352d9738b6efe94f65cd87d6743653be2a52e5"
 dependencies = [
  "aes",
  "aws-lc-rs",
@@ -10027,6 +10065,7 @@ dependencies = [
  "ctr",
  "hmac 0.12.1",
  "md-5 0.10.6",
+ "num-bigint",
  "rand 0.10.2",
  "sha1 0.10.6",
  "subtle",
@@ -10035,21 +10074,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "rtc-datachannel"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=8916bc3048c2b2a53788639f57e4a64a4a4b4696#8916bc3048c2b2a53788639f57e4a64a4a4b4696"
+name = "rtci-datachannel"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "001330ba58c2bc106f109f5fc5bc218fac612afb2421d7a9fa2c835dd470d1d1"
 dependencies = [
  "bytes",
  "log",
- "rtc-sctp",
- "rtc-shared",
+ "rtci-sctp",
+ "rtci-shared",
  "sansio",
 ]
 
 [[package]]
-name = "rtc-dtls"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=8916bc3048c2b2a53788639f57e4a64a4a4b4696#8916bc3048c2b2a53788639f57e4a64a4a4b4696"
+name = "rtci-dtls"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "379a7b4ce571659334fd98b15035ec75bf1d11d8ca0e47e2c7c3149f9e247024"
 dependencies = [
  "bytecheck",
  "byteorder",
@@ -10059,24 +10100,26 @@ dependencies = [
  "pem 3.0.6",
  "rcgen",
  "rkyv",
- "rtc-crypto",
- "rtc-shared",
+ "rtci-crypto",
+ "rtci-shared",
  "rustls",
  "x509-parser 0.16.0",
+ "zeroize",
 ]
 
 [[package]]
-name = "rtc-ice"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=8916bc3048c2b2a53788639f57e4a64a4a4b4696#8916bc3048c2b2a53788639f57e4a64a4a4b4696"
+name = "rtci-ice"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98f438328723b19c5719e95b2f002d292dce09bb9f6793af0d7faa68cf32579f"
 dependencies = [
  "bytes",
  "crc",
  "log",
- "rtc-crypto",
- "rtc-mdns",
- "rtc-shared",
- "rtc-stun",
+ "rtci-crypto",
+ "rtci-mdns",
+ "rtci-shared",
+ "rtci-stun",
  "sansio",
  "serde",
  "url",
@@ -10084,24 +10127,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "rtc-interceptor"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=8916bc3048c2b2a53788639f57e4a64a4a4b4696#8916bc3048c2b2a53788639f57e4a64a4a4b4696"
+name = "rtci-interceptor"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "915e0f6f91c4f5a40f57d5843ef549dbf3364879ab1b5a85d782d8a3b62fbbac"
 dependencies = [
  "bytes",
  "log",
  "rand 0.10.2",
- "rtc-interceptor-derive",
- "rtc-rtcp",
- "rtc-rtp",
- "rtc-shared",
+ "rtci-interceptor-derive",
+ "rtci-rtcp",
+ "rtci-rtp",
+ "rtci-shared",
  "sansio",
 ]
 
 [[package]]
-name = "rtc-interceptor-derive"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=8916bc3048c2b2a53788639f57e4a64a4a4b4696#8916bc3048c2b2a53788639f57e4a64a4a4b4696"
+name = "rtci-interceptor-derive"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85833bf45bb834628892f8fc1e3e7b39237440faa0a9f31a80a78276e8aa60cb"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -10109,83 +10154,103 @@ dependencies = [
 ]
 
 [[package]]
-name = "rtc-mdns"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=8916bc3048c2b2a53788639f57e4a64a4a4b4696#8916bc3048c2b2a53788639f57e4a64a4a4b4696"
+name = "rtci-mdns"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f9cde87293ebb6f7c2532459281ae1ae8330fbbbc819182ef673d1bebfd94dc"
 dependencies = [
  "bytes",
  "log",
- "rtc-shared",
+ "rtci-shared",
  "sansio",
  "socket2 0.6.4",
 ]
 
 [[package]]
-name = "rtc-media"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=8916bc3048c2b2a53788639f57e4a64a4a4b4696#8916bc3048c2b2a53788639f57e4a64a4a4b4696"
+name = "rtci-media"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d28ea3ee21d498a4fa08b668eaf910e51f1f9dd8917a285cc3ef0dfff0deee3"
 dependencies = [
  "byteorder",
  "bytes",
  "rand 0.10.2",
- "rtc-rtp",
- "rtc-shared",
+ "rtci-rtp",
+ "rtci-shared",
  "thiserror 2.0.21",
 ]
 
 [[package]]
-name = "rtc-rtcp"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=8916bc3048c2b2a53788639f57e4a64a4a4b4696#8916bc3048c2b2a53788639f57e4a64a4a4b4696"
+name = "rtci-rtcp"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6bec745d09dad841571dda9753c8745b7c7c324a93c58b0f5c1464fce397970"
 dependencies = [
  "bytes",
- "rtc-shared",
+ "rtci-shared",
 ]
 
 [[package]]
-name = "rtc-rtp"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=8916bc3048c2b2a53788639f57e4a64a4a4b4696#8916bc3048c2b2a53788639f57e4a64a4a4b4696"
+name = "rtci-rtp"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47afbb37ef79a25f3c8c66c26d097a8668a48ed805d40e44d01ec3c00cf9f64b"
 dependencies = [
  "bytes",
  "memchr",
  "rand 0.10.2",
- "rtc-shared",
+ "rtci-shared",
  "serde",
 ]
 
 [[package]]
-name = "rtc-sctp"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=8916bc3048c2b2a53788639f57e4a64a4a4b4696#8916bc3048c2b2a53788639f57e4a64a4a4b4696"
+name = "rtci-sctp"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2edc64dcabf67e145724920878cbd5963813d04c81f1bc14160175897a94cb48"
 dependencies = [
  "bytes",
  "crc32c",
  "log",
  "rand 0.10.2",
- "rtc-shared",
+ "rtci-crypto",
+ "rtci-shared",
  "rustc-hash 2.1.1",
  "slab",
  "thiserror 2.0.21",
 ]
 
 [[package]]
-name = "rtc-sdp"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=8916bc3048c2b2a53788639f57e4a64a4a4b4696#8916bc3048c2b2a53788639f57e4a64a4a4b4696"
+name = "rtci-sdp"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c5943145654020a0ab3a17e380b6df395bdfb119886b1d7e018c454ab016deb"
 dependencies = [
  "rand 0.10.2",
- "rtc-shared",
+ "rtci-shared",
  "url",
 ]
 
 [[package]]
-name = "rtc-shared"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=8916bc3048c2b2a53788639f57e4a64a4a4b4696#8916bc3048c2b2a53788639f57e4a64a4a4b4696"
+name = "rtci-sframe"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2360104461ee68b65444b87133f92b105661108f0aaa465a50ffc1c95d89885a"
+dependencies = [
+ "rtci-crypto",
+ "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
+name = "rtci-shared"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca2f7c862ed441c356eca6647d3db9ae811c73bcddda5d42bcee93e8f5462e06"
 dependencies = [
  "bitflags 1.3.2",
  "bytes",
+ "libc",
  "nix 0.31.3",
  "rand 0.10.2",
  "serde",
@@ -10196,44 +10261,49 @@ dependencies = [
 ]
 
 [[package]]
-name = "rtc-srtp"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=8916bc3048c2b2a53788639f57e4a64a4a4b4696#8916bc3048c2b2a53788639f57e4a64a4a4b4696"
+name = "rtci-srtp"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1225330d4f893b089247f7b0d3dae461f61b86a0d050aee4bc9047e555522998"
 dependencies = [
  "byteorder",
  "bytes",
- "rtc-crypto",
- "rtc-rtcp",
- "rtc-rtp",
- "rtc-shared",
+ "rtci-crypto",
+ "rtci-rtcp",
+ "rtci-rtp",
+ "rtci-shared",
+ "zeroize",
 ]
 
 [[package]]
-name = "rtc-stun"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=8916bc3048c2b2a53788639f57e4a64a4a4b4696#8916bc3048c2b2a53788639f57e4a64a4a4b4696"
+name = "rtci-stun"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bae2c40e37fd7656ded016588915cb36c8c37ef0772c11e1845255d0b2aef63"
 dependencies = [
  "base64 0.22.1",
  "bytes",
  "crc",
  "lazy_static",
+ "precis-profiles",
  "rand 0.10.2",
- "rtc-crypto",
- "rtc-shared",
+ "rtci-crypto",
+ "rtci-shared",
  "sansio",
  "url",
 ]
 
 [[package]]
-name = "rtc-turn"
-version = "0.22.0+brainwires.5"
-source = "git+https://github.com/Brainwires/webrtc-rs-rtc?rev=8916bc3048c2b2a53788639f57e4a64a4a4b4696#8916bc3048c2b2a53788639f57e4a64a4a4b4696"
+name = "rtci-turn"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bae9b829a9fdff3002ac525ce21ed4085eae8f8f040ac0893c391f4503d122a9"
 dependencies = [
  "bytes",
  "log",
- "rtc-crypto",
- "rtc-shared",
- "rtc-stun",
+ "rtci-crypto",
+ "rtci-shared",
+ "rtci-stun",
  "sansio",
 ]
 
@@ -12642,6 +12712,15 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "ucd-parse"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ce84be817ae77653b0f919d43f11ddc5bf0ca17b5bf4d80f128d80c2958b5e0"
+dependencies = [
+ "regex-lite",
+]
 
 [[package]]
 name = "ucd-trie"

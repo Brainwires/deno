@@ -171,7 +171,7 @@ pub fn end_already_printed() {
   }
 }
 
-/// The WebRTC engine's records (the `rtc` and `rtc_*` crates) are shown at
+/// The WebRTC engine's records (the `rtci` and `rtci_*` crates) are shown at
 /// the level `Deno.webrtc.setLogLevel` sets (off by default; ext/webrtc
 /// reports what matters as `RTCPeerConnection` events, DENEXT.md item 370),
 /// whatever `DENO_LOG` says, each prefixed with its level and source.
@@ -277,7 +277,7 @@ pub fn init(options: InitLoggingOptions) {
   // in the cli logger
   .filter_module("deno::lsp::performance", log::LevelFilter::Debug)
   .filter_module("rustls", log::LevelFilter::Off)
-  // WebRTC's engine (the `rtc` and `rtc_*` crates) logs every state change
+  // WebRTC's engine (the `rtci` and `rtci_*` crates) logs every state change
   // at INFO and drops errors it can't return as WARN: its records bypass
   // this filter and follow `Deno.webrtc.setLogLevel` (off by default; see
   // `engine_enabled`).
@@ -360,24 +360,27 @@ mod tests {
     let record = |target: &'static str, level| {
       log::Metadata::builder().target(target).level(level).build()
     };
-    assert!(deno_webrtc::is_engine_log_target("rtc_ice::agent"));
-    assert!(deno_webrtc::is_engine_log_target("rtc::peer_connection"));
+    assert!(deno_webrtc::is_engine_log_target("rtci_ice::agent"));
+    assert!(deno_webrtc::is_engine_log_target("rtci::peer_connection"));
     assert!(!deno_webrtc::is_engine_log_target("rtcp_like"));
     assert!(!deno_webrtc::is_engine_log_target("deno_webrtc::peer"));
     // Off by default.
     assert!(!engine_enabled(&record(
-      "rtc_ice::agent",
+      "rtci_ice::agent",
       log::Level::Error
     )));
     deno_webrtc::set_engine_log_level("debug").unwrap();
-    assert!(engine_enabled(&record("rtc_ice::agent", log::Level::Debug)));
+    assert!(engine_enabled(&record(
+      "rtci_ice::agent",
+      log::Level::Debug
+    )));
     assert!(!engine_enabled(&record(
-      "rtc_ice::agent",
+      "rtci_ice::agent",
       log::Level::Trace
     )));
     deno_webrtc::set_engine_log_level("off").unwrap();
     assert!(!engine_enabled(&record(
-      "rtc_ice::agent",
+      "rtci_ice::agent",
       log::Level::Error
     )));
     assert!(deno_webrtc::set_engine_log_level("loud").is_err());

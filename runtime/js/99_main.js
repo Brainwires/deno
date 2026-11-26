@@ -23,6 +23,7 @@ import {
   op_proto_set_attempted,
   op_set_format_exception_callback,
   op_snapshot_options,
+  op_void_async_deferred,
   op_webrtc_data_globals,
   op_worker_close,
   op_worker_get_type,
@@ -51,10 +52,8 @@ const {
   ObjectPrototype,
   ObjectPrototypeIsPrototypeOf,
   ObjectSetPrototypeOf,
-  Promise,
   PromisePrototypeThen,
   PromiseResolve,
-  queueMicrotask,
   ReflectApply,
   ReflectOwnKeys,
   String,
@@ -392,20 +391,19 @@ async function pollForMessages() {
     op_worker_maybe_wait_for_debugger();
     dispatchWorkerMessage(data);
     // Drain messages already queued on the host side instead of taking the
-    // async op + Promise path for each. The whole burst is processed within
-    // this event-loop turn; the batch limit prevents starving the event loop
+    // async op + Promise path for each. The batch limit bounds one drain
     // under a sustained flood.
     for (let i = 0; i < 1000 && !isClosing; i++) {
       const syncData = op_worker_recv_message_sync();
       if (syncData === null) break;
-      // Each message dispatch is its own task. Yield a microtask before
-      // delivering this already-dequeued message so a handler that re-armed
-      // itself in a microtask after the previous dispatch (e.g. reassigning
-      // `onmessage` inside a `.then`) is installed first -- otherwise the
-      // message reaches the stale handler and is lost. A synchronous
-      // checkpoint can't help: V8 won't run microtasks reentrantly while we
-      // are already inside one.
-      await new Promise((resolve) => queueMicrotask(() => resolve()));
+      // Each message dispatch is its own task (HTML's port message queue):
+      // every microtask the previous dispatch started has run before this
+      // one, so a handler installed any number of microtasks after the
+      // previous message (a `once` listener behind an async function,
+      // `onmessage` reassigned in a `.then`) is in place. Yielding a fixed
+      // number of microtasks loses the message to a longer chain, so the
+      // next message waits for the event loop's next turn.
+      await op_void_async_deferred();
       if (isClosing) break;
       op_worker_maybe_wait_for_debugger();
       dispatchWorkerMessage(syncData);
