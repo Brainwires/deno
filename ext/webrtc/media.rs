@@ -58,6 +58,7 @@ use rtci::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
 use rtci::rtp_transceiver::rtp_sender::RTCRtpCodingParameters;
 use rtci::rtp_transceiver::rtp_sender::RTCRtpEncodingParameters;
 use rtci::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionCapability;
+use rtci::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionEncryption;
 use rtci::rtp_transceiver::rtp_sender::RTCRtpHeaderExtensionToNegotiate;
 use rtci::rtp_transceiver::rtp_sender::RtpCodecKind;
 use rtci::rtp_transceiver::rtp_sender::TYPE_RTCP_FB_ACK;
@@ -135,6 +136,27 @@ pub(crate) fn media_stack_counting(
   let registry =
     configure_congestion_control_feedback(registry, &mut media_engine);
   register_header_extensions(&mut media_engine)?;
+  // The audio level extensions are offered in the clear only, as Chromium,
+  // WebKit and Firefox offer them (and as the 0.22 engine did): rtci 0.2's
+  // default interceptors offer each also in its RFC 6904 encrypted form
+  // (best effort), and answer an offer that has both with the encrypted one
+  // and the clear one `a=extmap:<id>/inactive`. That answer's first
+  // "inactive" is then an extmap line's, not the section's direction (WPT
+  // `protocol/direction.html` changes the first one to make an invalid
+  // answer), and every audio section carries two mappings per extension.
+  // RFC 9335 cryptex (`rtpHeaderEncryptionPolicy`) encrypts every extension
+  // and is not affected.
+  for uri in [
+    rtci::sdp::extmap::AUDIO_LEVEL_URI,
+    rtci::rtp::extension::CSRC_AUDIO_LEVEL_URI,
+  ] {
+    media_engine
+      .set_header_extension_encryption(
+        uri,
+        RTCRtpHeaderExtensionEncryption::Clear,
+      )
+      .map_err(crate::peer::rtc_err)?;
+  }
   Ok((media_engine, registry))
 }
 
@@ -749,18 +771,60 @@ pub fn capabilities(
     .with_interceptor_registry(registry)
     .build(Instant::now())
     .map_err(crate::peer::rtc_err)?;
-  pc.add_transceiver_from_kind(
-    kind_enum,
-    Some(RTCRtpTransceiverInit {
-      direction: RTCRtpTransceiverDirection::Sendrecv,
-      streams: vec![],
-      send_encodings: vec![RTCRtpEncodingParameters::default()],
-    }),
-  )
-  .map_err(crate::peer::rtc_err)?;
+  let index = pc
+    .add_transceiver_from_kind(
+      kind_enum,
+      Some(RTCRtpTransceiverInit {
+        direction: RTCRtpTransceiverDirection::Sendrecv,
+        streams: vec![],
+        send_encodings: vec![RTCRtpEncodingParameters::default()],
+      }),
+    )
+    .map_err(crate::peer::rtc_err)?;
   let offer = pc.create_offer(None).map_err(crate::peer::rtc_err)?;
+  // The codecs come from the engine's registry (its own
+  // `RTCRtpSender.getCapabilities`), not from the offer: rtci 0.2 writes an
+  // offered format's fmtp line from the first registered format that matches
+  // it (`MediaEngine::local_fmtp_line_of_codec` through
+  // `codec_parameters_fuzzy_search`), and H.264 matches on profile and
+  // packetization mode only, so the High profile levels 4.0, 4.1, 4.2 and
+  // 5.1 (payload types 118 to 121) are offered with level 5.0's
+  // `profile-level-id=640032` and read back from the offer as one codec
+  // (WPT `protocol/codecs-filtered-by-direction`: 10 capabilities against
+  // 14 offered formats).
+  let registered = pc
+    .rtp_sender(index.into())
+    .and_then(|sender| sender.get_capabilities(kind_enum));
   let _ = pc.close();
-  Ok(Some(capabilities_from_sdp(kind, &offer.sdp)))
+  let mut caps = capabilities_from_sdp(kind, &offer.sdp);
+  if let Some(registered) = registered {
+    caps.codecs = codecs_from_registry(&registered.codecs);
+  }
+  Ok(Some(caps))
+}
+
+/// The engine's registered codecs as `getCapabilities()` lists them, each
+/// once: RTX without the `apt` that ties it to one primary (the engine's
+/// list already has none), every other format with its parameters, as
+/// [`capabilities_from_sdp`] lists them.
+fn codecs_from_registry(codecs: &[RTCRtpCodec]) -> Vec<CodecArg> {
+  let mut out: Vec<CodecArg> = Vec::new();
+  for codec in codecs {
+    let mut arg = CodecArg::from_codec(codec);
+    if arg.mime_type.to_ascii_lowercase().ends_with("/rtx") {
+      arg.sdp_fmtp_line = None;
+    }
+    let duplicate = out.iter().any(|c| {
+      c.mime_type.eq_ignore_ascii_case(&arg.mime_type)
+        && c.clock_rate == arg.clock_rate
+        && c.channels == arg.channels
+        && c.sdp_fmtp_line == arg.sdp_fmtp_line
+    });
+    if !duplicate {
+      out.push(arg);
+    }
+  }
+  out
 }
 
 /// The codecs (`a=rtpmap` + `a=fmtp`) and header extensions (`a=extmap`)
@@ -804,8 +868,7 @@ pub fn capabilities_from_sdp(kind: &str, sdp: &str) -> Capabilities {
         fmtp.insert(pt.to_string(), params.to_string());
       }
     } else if let Some(value) = line.strip_prefix("a=extmap:")
-      && let Some(uri) = value.split_ascii_whitespace().nth(1)
-      && !header_extensions.iter().any(|(_, h)| h.uri == uri)
+      && let Some(uri) = extmap_uri(value)
     {
       // By id: the engine writes the lines in no particular order.
       let id = value
@@ -822,8 +885,15 @@ pub fn capabilities_from_sdp(kind: &str, sdp: &str) -> Capabilities {
     }
   }
   header_extensions.sort_by_key(|(id, _)| *id);
-  let header_extensions: Vec<HeaderExtensionCapability> =
-    header_extensions.into_iter().map(|(_, h)| h).collect();
+  // An extension offered both in the clear and encrypted (RFC 6904) is one
+  // capability.
+  let mut unique: Vec<HeaderExtensionCapability> = Vec::new();
+  for (_, h) in header_extensions {
+    if !unique.iter().any(|u| u.uri == h.uri) {
+      unique.push(h);
+    }
+  }
+  let header_extensions = unique;
   let mut out: Vec<CodecArg> = Vec::new();
   for (pt, mut codec) in codecs {
     // RTX is listed without the `apt` that ties its payload type to one
@@ -846,6 +916,23 @@ pub fn capabilities_from_sdp(kind: &str, sdp: &str) -> Capabilities {
   Capabilities {
     codecs: out,
     header_extensions,
+  }
+}
+
+/// The RFC 6904 URI that marks an `a=extmap` line as the encrypted form of
+/// the extension it names next.
+const ENCRYPT_URI: &str = "urn:ietf:params:rtp-hdrext:encrypt";
+
+/// The extension URI of an `a=extmap` value (`<id>[/<direction>] <uri>
+/// [attributes]`); of the encrypted form (`<id>
+/// urn:ietf:params:rtp-hdrext:encrypt <uri> [attributes]`, RFC 6904 section
+/// 4, which rtci 0.2 offers for the audio level extensions beside the clear
+/// one), the URI it encrypts.
+pub(crate) fn extmap_uri(value: &str) -> Option<&str> {
+  let mut tokens = value.split_ascii_whitespace().skip(1);
+  match tokens.next()? {
+    ENCRYPT_URI => tokens.next(),
+    uri => Some(uri),
   }
 }
 

@@ -23022,6 +23022,68 @@ where the changes are discussed.
        when they fail.
      - Node tests enabled: none.
 
+569. **`fix(ext/webrtc)`: the WPT WebRTC regressions on rtci 0.2** (runtime;
+     `ext/webrtc/01_webrtc.js`, `media.rs`, `peer.rs`, `tests.rs`,
+     `tests/wpt/runner/expectations/webrtc.json`). The WPT WebRTC run on the
+     train had 54 unexpected failures. Most were item 567's two causes (the
+     `encrypt` remap and payload type 110); these are the rest.
+     - Capabilities: rtci 0.2 writes an offered format's fmtp line from the
+       first registered format that matches it
+       (`MediaEngine::local_fmtp_line_of_codec` with
+       `codec_parameters_fuzzy_search`), and H.264 matches on profile and
+       packetization mode only. The High profile levels 4.0, 4.1, 4.2 and 5.1
+       (payload types 118 to 121) are therefore offered with level 5.0's
+       `profile-level-id=640032`, and `getCapabilities()`, read from an offer,
+       listed 10 video codecs where an offer has 14 formats
+       (`protocol/codecs-filtered-by-direction`). The codecs now come from the
+       engine's registry (`RTCRtpSender::get_capabilities`). The offer itself is
+       the engine's (handed to the rtci repository).
+     - RFC 6904 header extension encryption: rtci 0.2's default interceptors
+       offer the audio level extensions in the clear and encrypted (best effort)
+       and answer an offer with both with the encrypted form and the clear one
+       `a=extmap:<id>/inactive`. Browsers offer neither form encrypted, and the
+       0.22 engine did not; the driver sets them back to clear. An answer's
+       first "inactive" is again the section's direction
+       (`protocol/direction.html` changes the first one to make an invalid
+       answer). `getCapabilities()` also listed the `encrypt` URI as an
+       extension of its own; an encrypted `a=extmap` line now names the URI it
+       encrypts. RFC 9335 cryptex is not affected.
+     - ICE `completed`: rtci 0.2's agent goes `completed` once both sides have
+       ended their candidates; the driver reports it as `connected`, as the 0.22
+       engine, Chromium and WebKit do here. WPT `RTCRtpTransceiver.https.html`'s
+       `iceConnected(pc)` resolves only on `connected`, so the side it waited
+       for second, already `completed`, never resolved and the whole file timed
+       out (both variants).
+     - Rollback: rtci 0.2 applies a local rollback in any signaling state but
+       `stable`, and a remote one too. JavaScript refuses a local rollback
+       outside `have-local-offer` and a remote one outside `have-remote-offer`
+       with `InvalidStateError` (RFC 9429 section 4.1.10.2;
+       `RTCPeerConnection-setLocalDescription-rollback`,
+       `RTCPeerConnection-setRemoteDescription-rollback`).
+     - Remote descriptions: an `a=` line whose attribute name is not a token
+       (RFC 8866 section 9; `RTCPeerConnection-connectionState` hides the SSRCs
+       as `a=notssrc<n> cname:...`) is left out of what the engine is given, as
+       browsers ignore it; rtci 0.2's parser refused the whole description. A
+       repeated rid-id in `a=simulcast` is dropped for the engine, which refused
+       it (w3c/webrtc-pc#2780, `simulcast/negotiation-encodings` "Duplicate rids
+       in sRD(offer) are ignored"); `remoteDescription` keeps the line as
+       signalled.
+     - Expectations: `protocol/codecs-subsequent-offer.https.html`,
+       `rtp-stats-lifetime.https.html` and `transfer-datachannel.html` pass now
+       and are expected to (rtci 0.2's later offers list every available format,
+       RFC 9429 section 5.2.2; inbound stream stats exist from the first packet;
+       the worker and `MessagePort` message tasks of items 555 and 564).
+     - Tests: `tests.rs` `capabilities_list_every_registered_video_codec`,
+       `audio_level_extensions_are_offered_in_the_clear`,
+       `repeated_simulcast_rids_are_dropped`, `attribute_names_are_tokens`,
+       `remote_offer_with_unknown_lines_and_repeated_rids_applies`; WPT
+       `webrtc/protocol/codecs-filtered-by-direction.https.html`,
+       `webrtc/RTCRtpTransceiver.https.html`, `webrtc/protocol/direction.html`,
+       the two rollback files,
+       `webrtc/RTCPeerConnection-connectionState.https.html` and
+       `webrtc/simulcast/negotiation-encodings.https.html`.
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -23033,7 +23095,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 517, 518-538, 554-556, 560, 561, 563-568 and the
+506-510, 511, 512, 513, 515, 517, 518-538, 554-556, 560, 561, 563-569 and the
 runtime parts of 540-551) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not

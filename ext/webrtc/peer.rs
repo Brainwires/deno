@@ -672,6 +672,11 @@ pub struct Core {
   /// the engine applies only the answer it made last, so
   /// `set_local_description` hands it that one for the other.
   answer_rewrite: Option<(String, String)>,
+  /// The remote description's `a=simulcast` lines the engine was given
+  /// without a repeated rid-id, each with the line as signalled
+  /// ([`simulcast_without_repeated_rids`]): `remoteDescription` shows the
+  /// signalled one.
+  remote_simulcast_lines: Vec<(String, String)>,
 }
 
 /// One candidate of [`SelectedPair`], with the fields JavaScript needs to
@@ -1107,6 +1112,55 @@ fn bind_mdns(hosts: &[IpAddr]) -> std::io::Result<UdpSocket> {
     socket.join_multicast_v4(&group, &Ipv4Addr::UNSPECIFIED)?;
   }
   UdpSocket::from_std(socket.into())
+}
+
+/// An `a=simulcast` value (RFC 8853 section 5.1: `<direction> <alt-list>
+/// [<direction> <alt-list>]`) without the rid-ids it repeats, or `None` when
+/// it repeats none. webrtc-pc ignores a repeated rid in a remote offer
+/// (w3c/webrtc-pc#2780, WPT `simulcast/negotiation-encodings`
+/// "Duplicate rids in sRD(offer) are ignored"); rtci 0.2 refuses the
+/// description for it (RFC 8853 section 5.8).
+pub(crate) fn simulcast_without_repeated_rids(value: &str) -> Option<String> {
+  let mut seen: Vec<&str> = Vec::new();
+  let mut repeated = false;
+  let mut fields: Vec<String> = Vec::new();
+  for (i, field) in value.split(' ').enumerate() {
+    // Odd fields are the rid lists; the others the directions.
+    if i % 2 == 0 {
+      fields.push(field.to_string());
+      continue;
+    }
+    let mut alternatives: Vec<String> = Vec::new();
+    for alternative in field.split(';') {
+      let mut rids: Vec<&str> = Vec::new();
+      for rid in alternative.split(',') {
+        let id = rid.strip_prefix('~').unwrap_or(rid);
+        if seen.contains(&id) {
+          repeated = true;
+        } else {
+          seen.push(id);
+          rids.push(rid);
+        }
+      }
+      if !rids.is_empty() {
+        alternatives.push(rids.join(","));
+      }
+    }
+    fields.push(alternatives.join(";"));
+  }
+  repeated.then(|| fields.join(" "))
+}
+
+/// Whether `name` is an SDP `attribute-name`, a token (RFC 8866 section 9:
+/// `token-char = %x21 / %x23-27 / %x2A-2B / %x2D-2E / %x30-39 / %x41-5A /
+/// %x5E-7E`).
+pub(crate) fn is_attribute_name(name: &str) -> bool {
+  !name.is_empty()
+    && name.bytes().all(|b| {
+      matches!(b,
+        0x21 | 0x23..=0x27 | 0x2a..=0x2b | 0x2d..=0x2e | 0x30..=0x39
+          | 0x41..=0x5a | 0x5e..=0x7e)
+    })
 }
 
 /// Whether an `a=identity` value has RFC 8827 section 5's form, which the
@@ -2261,7 +2315,18 @@ impl Core {
           })
         }
         RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(s) => {
-          let state = s.to_string();
+          // rtci 0.2's agent goes `completed` once both sides have ended
+          // their candidates (`Agent::healthy_state`); the 0.22 engine
+          // stayed `connected`, as Chromium and WebKit do for these
+          // connections. It is reported as `connected`: WPT
+          // RTCRtpTransceiver.https.html's `iceConnected(pc)` resolves only
+          // on `connected`, so the side it waits for second, already
+          // `completed`, never resolved and the file timed out
+          // (`checkSendrecvWithNoSendTrack`, `checkStopAfterCreateAnswer`).
+          let mut state = s.to_string();
+          if state == "completed" {
+            state = "connected".to_string();
+          }
           // An ICE restart on a connected transport keeps its selected pair
           // (the engine's previous media path) until the new generation
           // selects one, so the transport stays connected: W3C webrtc-pc
@@ -2851,6 +2916,7 @@ impl Peer {
         mdns_failed: false,
         engine_nat,
         answer_rewrite: None,
+        remote_simulcast_lines: Vec::new(),
       }),
       guard,
       wake: Notify::new(),
@@ -3105,6 +3171,7 @@ impl Peer {
   ) -> Result<(), WebRtcError> {
     check_sdp_size(kind, &sdp)?;
     let mut kept = String::with_capacity(sdp.len());
+    let mut simulcast_lines = Vec::new();
     let mut checked = Vec::new();
     // A candidate kept without an address to check: a `.local` name, or an
     // active TCP candidate.
@@ -3121,6 +3188,30 @@ impl Peer {
       if let Some(value) = line.trim_end().strip_prefix("a=identity:")
         && !is_identity_value(value)
       {
+        continue;
+      }
+      // RFC 8866 section 9's `attribute-name` is a token: a line such as
+      // `a=notssrc1 cname:x` (WPT RTCPeerConnection-connectionState munges
+      // `a=ssrc:` so, to hide the SSRCs) names no attribute anyone knows,
+      // which browsers ignore as an attribute they don't understand (RFC
+      // 9429 section 5.8); rtci 0.2's parser refuses the description for it.
+      if let Some(attribute) = line.trim_end().strip_prefix("a=")
+        && !is_attribute_name(
+          attribute
+            .split_once(':')
+            .map_or(attribute, |(name, _)| name),
+        )
+      {
+        continue;
+      }
+      if let Some(value) = line.trim_end().strip_prefix("a=simulcast:")
+        && let Some(deduped) = simulcast_without_repeated_rids(value)
+      {
+        let end = &line[line.trim_end().len()..];
+        let engine_line = format!("a=simulcast:{deduped}");
+        kept.push_str(&engine_line);
+        kept.push_str(end);
+        simulcast_lines.push((engine_line, line.trim_end().to_string()));
         continue;
       }
       if let Some(value) = line.trim_end().strip_prefix("a=candidate:") {
@@ -3150,6 +3241,7 @@ impl Peer {
       let applied = core.pc.set_remote_description(Instant::now(), desc);
       core.sync_removed_transceivers();
       applied.map_err(description_err)?;
+      core.remote_simulcast_lines = simulcast_lines;
       // An ICE restart by the remote side: its candidates, and its
       // end-of-candidates, start over.
       if ufrag_before.is_some() && core.remote_ufrag() != ufrag_before {
@@ -3418,8 +3510,25 @@ impl Peer {
       };
       (d.sdp_type.to_string(), sdp)
     };
-    let remote =
-      |d: &RTCSessionDescription| (d.sdp_type.to_string(), d.sdp.clone());
+    let remote = |d: &RTCSessionDescription| {
+      let sdp = if core.remote_simulcast_lines.is_empty() {
+        d.sdp.clone()
+      } else {
+        d.sdp
+          .split_inclusive('\n')
+          .map(|line| {
+            let body = line.trim_end();
+            match core.remote_simulcast_lines.iter().find(|(e, _)| e == body) {
+              Some((_, signalled)) => {
+                format!("{signalled}{}", &line[body.len()..])
+              }
+              None => line.to_string(),
+            }
+          })
+          .collect()
+      };
+      (d.sdp_type.to_string(), sdp)
+    };
     PeerDescriptions {
       current_local: core
         .pc
