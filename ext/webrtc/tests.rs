@@ -933,9 +933,20 @@ async fn mdns_host_candidates_resolve_between_peers() {
   wait_for(&b, &mut eb, gathered).await;
   let (_, sdp) = b.local_description().unwrap();
   // B's literal host candidates are left out, so A only reaches B as the
-  // peer-reflexive source of B's checks to the name it resolved.
-  a.set_remote_description("answer", without(&sdp, |l| l.contains("typ host")))
-    .unwrap();
+  // peer-reflexive source of B's checks to the name it resolved. So is the
+  // answer's `a=end-of-candidates`, as from a peer that trickles its
+  // candidates and hasn't finished: told that a peer with no candidate is
+  // done, A fails its empty check list at once (the driver's
+  // `fail_without_pairs`, and the engine's checklist failure at
+  // end-of-candidates, RFC 8838 section 8), and whether B's first check
+  // reaches A before that is a race (won with the 0.22.0+brainwires.5
+  // engine, which had no checklist failure; rtci 0.1's RFC 8445 check list
+  // added it).
+  let answer: String = without(&sdp, |l| l.contains("typ host"))
+    .split_inclusive('\n')
+    .filter(|l| l.trim_end() != "a=end-of-candidates")
+    .collect();
+  a.set_remote_description("answer", answer).unwrap();
   wait_for(&a, &mut ea, opened).await;
   wait_for(&b, &mut eb, opened).await;
   a.send(id, true, b"via mdns").unwrap();

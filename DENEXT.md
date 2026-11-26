@@ -22754,6 +22754,21 @@ where the changes are discussed.
        over 20 loopback connections).
      - Node tests enabled: none.
 
+583. **`test(ext/webrtc)`: the mDNS test no longer races the peer's first
+     check** (`ext/webrtc/tests.rs`).
+     `mdns_host_candidates_resolve_between_peers` (ignored; CI's `webrtc-mdns`
+     job runs it) gave A an answer with B's host
+     candidates removed and its `a=end-of-candidates` kept: a peer that said
+     it has no candidates. A's check list then has no pair and fails at once
+     (`fail_without_pairs`, and since rtci 0.1 the engine's checklist failure
+     at end-of-candidates, RFC 8838 section 8), unless a check from B has
+     arrived before A applies the answer. It did with the 0.22.0+brainwires.5
+     engine; on rtci 0.2 it times out waiting for the channel. The answer now
+     leaves out the end-of-candidates too, as a peer that is still trickling,
+     so A only reaches B as the peer-reflexive source of B's checks, which the
+     test is about.
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
