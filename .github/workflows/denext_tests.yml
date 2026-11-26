@@ -17,7 +17,7 @@
 #          glibc_ceiling_test.py, self_binding_test.py, denort_pins_test.py,
 #          linux_needed_test.py, toolchain_info_test.py, plan_matrix_test.py,
 #          apt_install_test.py, guard_verified_test.py, setup_cache_test.py,
-#          targeted_tests_test.py)
+#          targeted_tests_test.py, release_upload_test.py)
 #          and the bare-assertion guard over the release scripts
 #          (assert_guard.py and its test).
 # - cargo-audit: RustSec advisories against Cargo.lock; .cargo/audit.toml
@@ -334,6 +334,10 @@ jobs:
       - name: manifest_test.py
         if: runner.os == 'Linux'
         run: python3 -I .github/denext-runtime/manifest_test.py
+      # The release upload (denext_runtime.yml's publish job).
+      - name: release_upload_test.py
+        if: runner.os == 'Linux'
+        run: python3 -I .github/denext-runtime/release_upload_test.py
       # The release tag gate (denext_runtime.yml's setup job).
       - name: tag_gate_test.py
         if: runner.os == 'Linux'
