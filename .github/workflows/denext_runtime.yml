@@ -298,8 +298,8 @@ jobs:
           # under Rosetta 2: on unless this is 0 / false / off / no.
           MACOS_X64_GUI_ON_ARM: ${{ vars.MACOS_X64_GUI_ON_ARM }}
           # The Linux and Windows pools: the laufey job (`laufey_runner`) and
-          # the launch jobs (`gui_runner`; the Windows package job stays on
-          # the image, `package_runner`). Their build jobs take the image.
+          # the launch jobs (`gui_runner`; the x64 Windows package job stays
+          # on the image, `package_runner`). Their build jobs take the image.
           RUNNER_LINUX_X64_2204: ${{ vars.RUNNER_LINUX_X64_2204 }}
           RUNNER_LINUX_ARM64: ${{ vars.RUNNER_LINUX_ARM64 }}
           RUNNER_WINDOWS_X64: ${{ vars.RUNNER_WINDOWS_X64 }}
@@ -478,9 +478,9 @@ jobs:
           # name: it names the caches and the artifacts whatever runs the job.
           # What stays on GitHub's images, and why, is in plan_matrix.py's
           # docstring: the Linux and Windows release builds (memory; the
-          # swapfile, sysroot mount and chroot), the Windows package job (its
-          # per-machine .msi install needs an administrator), the macOS
-          # laufey legs and rpm-smoke.
+          # swapfile, sysroot mount and chroot), the x64 Windows package job
+          # (its per-machine .msi install needs an elevated administrator),
+          # the macOS laufey legs and rpm-smoke.
           matrix=$(TARGETS="$TARGETS" python3 -I .github/denext-runtime/plan_matrix.py)
           linux_matrix=$(MATRIX="$matrix" python3 -c 'import json, os; print(json.dumps([t for t in json.loads(os.environ["MATRIX"]) if "-linux-" in t["target"]]))')
           {
@@ -1995,8 +1995,9 @@ jobs:
     needs: [setup, laufey, denort]
     if: ${{ !cancelled() && !inputs.cli_only && needs.setup.result == 'success' && (needs.laufey.result == 'success' || (needs.laufey.result == 'skipped' && needs.setup.outputs.reuse_laufey != '')) && (needs.denort.result == 'success' || (needs.denort.result == 'skipped' && needs.setup.outputs.reuse_denort != '')) }}
     # matrix.package_runner: this job launches the packaged app, so it needs a
-    # GUI login session (plan_matrix.py `gui_runner`; on Windows the image,
-    # as its e2e installs an .msi per machine, which needs an administrator):
+    # GUI login session (plan_matrix.py `gui_runner`; on x64 Windows the
+    # image, as its e2e installs an .msi per machine, which needs an elevated
+    # administrator, and only the win-arm64 pool's job account is one):
     # the self-hosted runner the repository variables name for that while
     # its pool has a free slot this job would not wait for
     # (matrix.runs_on.<job>, the overflow), else the image; the image on a

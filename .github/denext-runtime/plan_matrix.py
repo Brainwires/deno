@@ -66,13 +66,19 @@ Prints the JSON list of targets on stdout. Each entry has:
   `windows-2025`, ...) sends that target's launch jobs to the image: the
   switch to turn a pool off for them.
 - `package_runner`: where the package job runs: `gui_runner`, except on
-  Windows, where it is the image. Its e2e installs the stock CLI's `.msi`
-  per machine (the deeplink area: `msiexec /i /qn` into Program Files),
-  which needs an administrator. GitHub's Windows images run jobs as one
-  with UAC off; our Windows pools run them as the non-admin `runner`
-  account with UAC on (ops/runners windows-x64/README.md: "No job category
-  here needs admin"), so that check would fail there. e2e_fork (the
-  sidecarint and kernelsandbox areas, no installer) takes the Windows pools.
+  x86_64-pc-windows-msvc, where it is the image. Its e2e installs the stock
+  CLI's `.msi` per machine (the deeplink area: `msiexec /i /qn` into
+  Program Files, then a file written into that folder), which needs an
+  elevated administrator. GitHub's Windows images run jobs as one with UAC
+  off. The win-arm64 pool runs its jobs as `runner`, an administrator whose
+  job task is elevated (RunLevel Highest; since 2026-11-26, ops/runners
+  windows/README.md "Running as `runner`": every job there is a throwaway
+  overlay of the base), so aarch64-pc-windows-msvc's package job takes it
+  (RUNNER_WINDOWS_ARM_GUI, else RUNNER_WINDOWS_ARM). The x64 Windows pools
+  (win-x64, win-x64-brain) keep the non-admin `runner` account with UAC on
+  (ops/runners windows-x64/README.md: "No job category here needs admin"),
+  so that check would fail there. e2e_fork (the sidecarint and
+  kernelsandbox areas, no installer) takes both Windows pools.
 - `laufey_runner`: where the laufey job builds the backend hosts.
   x86_64-unknown-linux-gnu: the Ubuntu 22.04 Linux pool
   (RUNNER_LINUX_X64_2204); aarch64-unknown-linux-gnu: the Linux arm64 pool
@@ -511,9 +517,10 @@ def plan(env):
         t["runner"] = _runner(build.get(t["os"], ""), t["os"])
         t["gui_runner"] = _runner(gui.get(t["os"], ""), t["os"])
         # The package job's e2e installs an .msi per machine, which needs an
-        # administrator: our Windows pools' job account is none (docstring).
+        # elevated administrator: only the win-arm64 pool's job account is
+        # one (docstring), so the x64 Windows package job takes the image.
         t["package_runner"] = (
-            t["os"] if t["os"].startswith("windows") else t["gui_runner"]
+            t["os"] if t["target"] == "x86_64-pc-windows-msvc" else t["gui_runner"]
         )
         t["laufey_runner"] = _runner(laufey.get(t["target"], ""), t["os"])
         targets.append(t)

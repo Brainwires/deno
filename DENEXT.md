@@ -22648,9 +22648,14 @@ where the changes are discussed.
        Windows pools' console sessions (`RUNNER_WINDOWS_X64_GUI` /
        `RUNNER_WINDOWS_ARM_GUI`, else the build pools). A `*_GUI` variable that
        names a GitHub image turns the pool off for those jobs.
-     - The Windows package job stays on the image (a new `package_runner`
-       field): its e2e installs an `.msi` per machine, which needs an
-       administrator, and our Windows job accounts are not.
+     - The Windows package jobs (a new `package_runner` field): their e2e
+       installs an `.msi` per machine (`msiexec /i /qn` into Program Files),
+       which needs an elevated administrator. aarch64-pc-windows-msvc's runs on
+       the win-arm64 pool (`RUNNER_WINDOWS_ARM_GUI`, else `RUNNER_WINDOWS_ARM`),
+       whose job account `runner` is an administrator with an elevated job task
+       since 2026-11-26 (each job a throwaway overlay); x86_64-pc-windows-msvc's
+       stays on the image, as the x64 pools' job accounts are not
+       administrators.
      - x86_64-apple-darwin's package and e2e_fork run on the arm64 GUI pool
        under Rosetta 2 by default whenever that pool exists
        (`MACOS_X64_GUI_ON_ARM` off turns it off; it was opt-in): the mac-x64
@@ -22673,10 +22678,10 @@ where the changes are discussed.
        cap.
      - Tests: `plan_matrix_test.py` `LinuxWindowsPools` (the routing with every
        pool, the shared laufey-package-e2e slot, full / unhealthy / paused
-       pools, the GUI overrides, the Windows package job), `GuiOnArm` (the
-       default, its off spellings, the overrides, the cap) and the workflow
-       checks (the plan step's variables, laufey without Chocolatey, rpm-smoke
-       on the image).
+       pools, the GUI overrides, the Windows package jobs: arm64 on the pool,
+       x64 on the image), `GuiOnArm` (the default, its off spellings, the
+       overrides, the cap) and the workflow checks (the plan step's variables,
+       laufey without Chocolatey, rpm-smoke on the image).
      - Node tests enabled: none.
 558. **`ci(denext)`: the release upload retries safely, and a cancelled release
      run stops** (CI; `.github/denext-runtime/release_upload.sh`,

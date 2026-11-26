@@ -651,8 +651,9 @@ LINUX_WINDOWS = (
 
 class LinuxWindowsPools(unittest.TestCase):
     """The Linux and Windows pools: laufey and the launch jobs, never the
-    release builds (memory, swapfile, sysroot mount, chroot) nor the Windows
-    package job (its per-machine .msi install needs an administrator)."""
+    release builds (memory, swapfile, sysroot mount, chroot) nor the x64
+    Windows package job (its per-machine .msi install needs an elevated
+    administrator, which only the win-arm64 pool's job account is)."""
 
     def plan(self, **env):
         return by_target(plan_matrix.plan({"TARGETS": "all", **OURS, **env}))
@@ -663,7 +664,7 @@ class LinuxWindowsPools(unittest.TestCase):
             "x86_64-unknown-linux-gnu": (L2204, L2204, L2204),
             "aarch64-unknown-linux-gnu": (LARM, LARM, LARM),
             "x86_64-pc-windows-msvc": (WX64, "windows-2025", WX64),
-            "aarch64-pc-windows-msvc": (WARM, "windows-11-arm", WARM),
+            "aarch64-pc-windows-msvc": (WARM, WARM, WARM),
         }
         for name, (laufey, package, e2e) in want.items():
             t = m[name]
@@ -725,8 +726,10 @@ class LinuxWindowsPools(unittest.TestCase):
     def test_slot_variables(self):
         win = self.plan(RUNNER_WINDOWS_ARM_SLOTS="0")["aarch64-pc-windows-msvc"]
         self.assertEqual(on_pool(win), [])
+        # One slot (the default for a garbage value): laufey -> package ->
+        # e2e_fork pass it on, as on the Linux arm64 pool.
         win = self.plan(RUNNER_WINDOWS_ARM_SLOTS="x")["aarch64-pc-windows-msvc"]
-        self.assertEqual(on_pool(win), ["laufey"])
+        self.assertEqual(on_pool(win), ["e2e_fork", "laufey", "package"])
 
     def test_gui_variables_override_the_launch_jobs_only(self):
         other = '["self-hosted","denext-linux-arm64-desktop"]'
@@ -745,8 +748,22 @@ class LinuxWindowsPools(unittest.TestCase):
         self.assertEqual(m["x86_64-pc-windows-msvc"]["runs_on"]["e2e_fork"], "windows-2025")
         warm = m["aarch64-pc-windows-msvc"]
         self.assertEqual(warm["runs_on"]["e2e_fork"], "win-gui")
-        # The Windows package job stays on the image whatever is named.
+        # The arm64 Windows package job follows the GUI pool (win-arm64's job
+        # account is an elevated administrator) ...
+        self.assertEqual(warm["package_runner"], "win-gui")
+        self.assertEqual(warm["runs_on"]["package"], "win-gui")
+        # ... the x64 one stays on the image whatever is named.
+        wx = self.plan(RUNNER_WINDOWS_X64_GUI='["self-hosted","denext-windows-x64"]')["x86_64-pc-windows-msvc"]
+        self.assertEqual(wx["package_runner"], "windows-2025")
+        self.assertEqual(wx["runs_on"]["package"], "windows-2025")
+        self.assertEqual(wx["runs_on"]["e2e_fork"], WX64)
+
+    def test_the_arm64_windows_package_job_can_be_sent_to_the_image(self):
+        # An image name in RUNNER_WINDOWS_ARM_GUI turns the pool off for it.
+        warm = self.plan(RUNNER_WINDOWS_ARM_GUI="windows-11-arm")["aarch64-pc-windows-msvc"]
+        self.assertEqual(warm["package_runner"], "windows-11-arm")
         self.assertEqual(warm["runs_on"]["package"], "windows-11-arm")
+        self.assertEqual(warm["runs_on"]["laufey"], WARM)
 
     def test_linux_and_windows_never_wait_for_a_pool(self):
         # The macOS cap is for macOS: a full Linux or Windows pool sends its
