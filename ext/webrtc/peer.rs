@@ -3172,6 +3172,7 @@ impl Peer {
     check_sdp_size(kind, &sdp)?;
     let mut kept = String::with_capacity(sdp.len());
     let mut simulcast_lines = Vec::new();
+    let mut section_rids: Vec<String> = Vec::new();
     let mut checked = Vec::new();
     // A candidate kept without an address to check: a `.local` name, or an
     // active TCP candidate.
@@ -3203,6 +3204,22 @@ impl Peer {
         )
       {
         continue;
+      }
+      // A media section's rids are its own (RFC 8851 section 4).
+      if line.starts_with("m=") {
+        section_rids.clear();
+      }
+      // A second `a=rid` line for a rid-id the section declared already
+      // (WPT `simulcast/negotiation-encodings` writes one per entry of
+      // `a=simulcast:recv foo;bar;foo`): the engine is given the first one
+      // only, as the repeated rid in `a=simulcast` is dropped below; with
+      // both it negotiated no simulcast in its answer.
+      if let Some(value) = line.trim_end().strip_prefix("a=rid:") {
+        let id = value.split(' ').next().unwrap_or_default().to_string();
+        if section_rids.contains(&id) {
+          continue;
+        }
+        section_rids.push(id);
       }
       if let Some(value) = line.trim_end().strip_prefix("a=simulcast:")
         && let Some(deduped) = simulcast_without_repeated_rids(value)

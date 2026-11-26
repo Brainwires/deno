@@ -2153,9 +2153,12 @@ fn attribute_names_are_tokens() {
 // RTCPeerConnection-connectionState hides the SSRCs as `a=notssrc<n>
 // cname:...`) is applied, the line left out, as browsers ignore it; a
 // repeated simulcast rid is ignored too, and remoteDescription keeps the
-// line as signalled.
-#[test]
-fn remote_offer_with_unknown_lines_and_repeated_rids_applies() {
+// line as signalled, while the answer sends each rid once, in the offer's
+// order (WPT simulcast/negotiation-encodings "Duplicate rids in sRD(offer)
+// are ignored": one `a=rid` line per `a=simulcast` entry, the repeat
+// included).
+#[tokio::test]
+async fn remote_offer_with_unknown_lines_and_repeated_rids_applies() {
   let a = new_peer();
   a.media(|core| {
     core.add_transceiver(crate::media::TransceiverArg {
@@ -2181,12 +2184,30 @@ fn remote_offer_with_unknown_lines_and_repeated_rids_applies() {
   b.close();
   let simulcast = offer.replace(
     "a=rtcp-mux\r\n",
-    "a=rtcp-mux\r\na=rid:foo recv\r\na=rid:bar recv\r\na=simulcast:recv foo;bar;foo\r\n",
+    "a=rtcp-mux\r\na=rid:foo recv\r\na=rid:bar recv\r\na=rid:foo recv\r\na=simulcast:recv foo;bar;foo\r\n",
   );
   assert!(simulcast.contains("a=simulcast:"), "{offer}");
   let c = new_peer();
+  c.media(|core| {
+    core.add_transceiver(crate::media::TransceiverArg {
+      kind: "video".to_string(),
+      track: Some(crate::media::TrackArg {
+        id: "answer-track".to_string(),
+        label: "video".to_string(),
+      }),
+      direction: "sendrecv".to_string(),
+      streams: vec!["answer-stream".to_string()],
+      send_encodings: vec![],
+      codec: None,
+      add_track: true,
+    })
+  })
+  .unwrap();
   c.set_remote_description("offer", simulcast).unwrap();
   let shown = c.remote_description().expect("remote description").1;
   assert!(shown.contains("a=simulcast:recv foo;bar;foo"), "{shown}");
+  let answer = c.create_answer().unwrap();
+  assert!(answer.contains("a=simulcast:send foo;bar\r\n"), "{answer}");
+  assert_eq!(answer.matches("a=rid:foo send").count(), 1, "{answer}");
   c.close();
 }
