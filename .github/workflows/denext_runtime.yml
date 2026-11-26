@@ -1510,8 +1510,9 @@ jobs:
   cli:
     name: cli / ${{ matrix.target }}
     needs: [setup, denort_bin]
-    # always(): it builds on a reused denort bin (setup's reuse_denort_bin).
-    if: ${{ always() && needs.setup.result == 'success' && !needs.setup.outputs.reuse_cli && (needs.denort_bin.result == 'success' || (needs.denort_bin.result == 'skipped' && needs.setup.outputs.reuse_denort_bin != '')) }}
+    # !cancelled() (not success()): it builds on a reused denort bin (setup's
+    # reuse_denort_bin). Not always(): a cancelled run must not start it.
+    if: ${{ !cancelled() && needs.setup.result == 'success' && !needs.setup.outputs.reuse_cli && (needs.denort_bin.result == 'success' || (needs.denort_bin.result == 'skipped' && needs.setup.outputs.reuse_denort_bin != '')) }}
     # matrix.runs_on.<job>: the self-hosted runner the repository variables
     # name (matrix.runner) while its pool has a free slot this job would not
     # wait for, else the image (the overflow, plan_matrix.py); the image on a
@@ -1985,14 +1986,14 @@ jobs:
   # Assemble the archives, check them, package the smoke app with the stock
   # CLI, try to launch it, run the e2e suite (.github/denext-runtime/e2e)
   # on both backends, attest.
-  # `always()` lets it run when laufey or denort was skipped because a
+  # `!cancelled()` lets it run when laufey or denort was skipped because a
   # reuse_*_run_id supplies its artifacts. A failed laufey or denort skips it:
   # running anyway only failed in download-artifact and then in every
   # `!cancelled()` e2e step, burying the build failure under red packaging.
   package:
     name: package / ${{ matrix.target }}
     needs: [setup, laufey, denort]
-    if: ${{ always() && !inputs.cli_only && needs.setup.result == 'success' && (needs.laufey.result == 'success' || (needs.laufey.result == 'skipped' && needs.setup.outputs.reuse_laufey != '')) && (needs.denort.result == 'success' || (needs.denort.result == 'skipped' && needs.setup.outputs.reuse_denort != '')) }}
+    if: ${{ !cancelled() && !inputs.cli_only && needs.setup.result == 'success' && (needs.laufey.result == 'success' || (needs.laufey.result == 'skipped' && needs.setup.outputs.reuse_laufey != '')) && (needs.denort.result == 'success' || (needs.denort.result == 'skipped' && needs.setup.outputs.reuse_denort != '')) }}
     # matrix.package_runner: this job launches the packaged app, so it needs a
     # GUI login session (plan_matrix.py `gui_runner`; on Windows the image,
     # as its e2e installs an .msi per machine, which needs an administrator):
@@ -2352,7 +2353,7 @@ jobs:
   e2e_fork:
     name: e2e (fork CLI) / ${{ matrix.target }}
     needs: [setup, package, cli]
-    if: ${{ always() && !inputs.cli_only && (needs.cli.result == 'success' || (needs.cli.result == 'skipped' && needs.setup.outputs.reuse_cli != '')) && (needs.package.result == 'success' || needs.package.result == 'failure') }}
+    if: ${{ !cancelled() && !inputs.cli_only && (needs.cli.result == 'success' || (needs.cli.result == 'skipped' && needs.setup.outputs.reuse_cli != '')) && (needs.package.result == 'success' || needs.package.result == 'failure') }}
     # matrix.gui_runner: this job launches the packaged app, so it needs a
     # GUI login session (plan_matrix.py): the self-hosted runner the
     # repository variables name for that while its pool has a free slot this
@@ -2505,7 +2506,7 @@ jobs:
     needs: [runners, setup, package, cli, e2e_fork, rpm-smoke]
     # A `cli_only` dry run has no package or e2e_fork job: it still writes
     # (and uploads) the manifest, from the CLI archives alone.
-    if: ${{ always() && (needs.cli.result == 'success' || (needs.cli.result == 'skipped' && needs.setup.outputs.reuse_cli != '')) && ((needs.package.result == 'success' && needs.e2e_fork.result == 'success') || (inputs.cli_only && needs.package.result == 'skipped' && needs.e2e_fork.result == 'skipped')) && (needs.rpm-smoke.result == 'success' || needs.rpm-smoke.result == 'skipped') }}
+    if: ${{ !cancelled() && (needs.cli.result == 'success' || (needs.cli.result == 'skipped' && needs.setup.outputs.reuse_cli != '')) && ((needs.package.result == 'success' && needs.e2e_fork.result == 'success') || (inputs.cli_only && needs.package.result == 'skipped' && needs.e2e_fork.result == 'skipped')) && (needs.rpm-smoke.result == 'success' || needs.rpm-smoke.result == 'skipped') }}
     # Our linux-x64 pool while it has a free slot, else ubuntu-24.04 (runners).
     runs-on: ${{ fromJSON(needs.runners.outputs.plan || '{}').publish || 'ubuntu-24.04' }}
     permissions:
@@ -2728,6 +2729,10 @@ jobs:
           # 3.0.0-denext.N line is its stable line, released in full
           # (tag_gate.py is_prerelease).
           prerelease=$(python3 -I .github/denext-runtime/tag_gate.py --prerelease-flag "${TAG#denext-runtime-v}")
-          gh release create "$TAG" --repo "$REPO" --title "$TAG" \
-            --notes-file notes.md --verify-tag --latest="$latest" ${prerelease:+"$prerelease"} \
+          # A draft with the notes, then the assets in retried batches, each
+          # checked by name and size, then published (release_upload.sh,
+          # DENEXT.md item 558): one `gh release create <files>` lost the
+          # denext.30 release to a 422 on an upload GitHub had stored. A re-run
+          # reuses the tag's draft, or finds the release already complete.
+          LATEST=$latest PRERELEASE=$prerelease bash .github/denext-runtime/release_upload.sh notes.md \
             dist/*.tar.gz dist/*.zip dist/SHA256SUMS dist/manifest.json "${symbols[@]}"

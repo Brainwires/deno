@@ -22679,6 +22679,44 @@ where the changes are discussed.
        on the image).
      - Node tests enabled: none.
 
+558. **`ci(denext)`: the release upload retries safely, and a cancelled release
+     run stops** (CI; `.github/denext-runtime/release_upload.sh`,
+     `release_upload_test.py`, `.github/workflows/denext_runtime.yml`,
+     `.github/workflows/denext_tests.yml`). The denext.30 tag run's publish job
+     created the release and uploaded every asset in one
+     `gh release create ... <files>`; during a GitHub incident gh retried an
+     upload GitHub had already stored, got HTTP 422 "ReleaseAsset.name already
+     exists" and deleted its draft, so the run failed with no release. And the
+     cli, package, e2e_fork and publish jobs ran under `always()`, which ignores
+     a cancel: a cancelled run went on building and packaging.
+     - The publish job's "GitHub Release" step keeps its checks (the tag, the
+       symbols, "Latest", the pre-release flag) and hands the same files to
+       release_upload.sh: the tag's release, drafts included, is found and
+       reused, else created as a draft holding only the notes (`--verify-tag`).
+     - The files go up in batches of 8 with `gh release upload --clobber`; a
+       failed batch is retried up to 5 times (15 s backoff, doubled), each try
+       sending only the files the release does not yet hold under their name,
+       with their size, in state `uploaded`. A half-stored asset of such a name
+       is deleted first.
+     - The draft is published (notes, `make_latest`, pre-release) only once it
+       holds exactly the files, each with its size, and nothing else; else it
+       stays a draft and the job fails, naming each missing, wrong or unexpected
+       asset. Two releases of the tag are an error.
+     - A re-run that finds the release published never changes it: complete is
+       success, anything else an error.
+     - The four jobs' conditions start with `!cancelled()` instead of
+       `always()`; the rest of each is unchanged, so they still run after a
+       skipped build a reused artifact replaces, and e2e_fork still runs after a
+       failed package job. Step-level `always()` (stopping the npm matrix's
+       services, uploading test results) stays: those run during a cancel by
+       design.
+     - Tests: `release_upload_test.py` against a stand-in `gh` (the draft until
+       complete, the flags, an upload GitHub stored before failing, retries with
+       backoff, a half-stored asset, giving up as a draft, re-runs on a draft
+       and on a published release, unexpected assets, two releases of the tag,
+       file name clashes), in the lint job.
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
