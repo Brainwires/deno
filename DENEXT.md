@@ -23087,29 +23087,26 @@ where the changes are discussed.
 570. **`fix(ext/webrtc)`: bundle-only sections, data channel stats ids and
      mandatory header extensions on rtci 0.2** (runtime;
      `ext/webrtc/01_webrtc.js`, `media.rs`; tests in `tests/unit/`).
-     - A remote m= section with port zero and `a=bundle-only` is reached
-       through its BUNDLE group (RFC 8843 section 6, RFC 9429 section 5.10),
-       not rejected: the driver's section reader called it rejected, so
-       JavaScript stopped the transceiver the engine made for it and the
-       answer was `inactive` (an offerer's second audio section, under the
-       default `balanced` policy).
-     - rtci 0.2's stats objects have opaque ids. A data channel's object is
-       now the channel's by its SCTP stream id, and keeps the id the
-       channel's object had before it opened: a channel transferred to a
-       worker was listed twice, once open under the engine's id and once
-       closed under its own.
-     - `setHeaderExtensionsToNegotiate()` refuses to stop an extension the
-       user agent must implement, as webrtc-extensions has it (RFC 8834
-       section 5.2.2: the RFC 6464 audio level, for audio), with an
-       `InvalidModificationError`. The driver used to turn a stopped audio
-       level back into `sendrecv` for the engine while JavaScript reported it
-       stopped.
+     - A remote m= section with port zero and `a=bundle-only` is reached through
+       its BUNDLE group (RFC 8843 section 6, RFC 9429 section 5.10), not
+       rejected: the driver's section reader called it rejected, so JavaScript
+       stopped the transceiver the engine made for it and the answer was
+       `inactive` (an offerer's second audio section, under the default
+       `balanced` policy).
+     - rtci 0.2's stats objects have opaque ids. A data channel's object is now
+       the channel's by its SCTP stream id, and keeps the id the channel's
+       object had before it opened: a channel transferred to a worker was listed
+       twice, once open under the engine's id and once closed under its own.
+     - `setHeaderExtensionsToNegotiate()` refuses to stop an extension the user
+       agent must implement, as webrtc-extensions has it (RFC 8834 section
+       5.2.2: the RFC 6464 audio level, for audio), with an
+       `InvalidModificationError`. The driver used to turn a stopped audio level
+       back into `sendrecv` for the engine while JavaScript reported it stopped.
      - Tests: `webrtcRejectedSectionRemovesStoppedTransceiver`,
        `webrtcLaterTransceiverWorksAfterEarlierRemoved`,
        `webrtcDataChannelTransferredChannelStatsHaveItsId`,
        `webrtcHeaderExtensionsNegotiated` (now stops the RFC 6465
-       mixer-to-client level, and checks that stopping the RFC 6464 one
-       throws).
+       mixer-to-client level, and checks that stopping the RFC 6464 one throws).
      - Node tests enabled: none.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
