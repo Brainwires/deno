@@ -14,6 +14,7 @@ const {
   op_message_port_post_message_raw,
   op_message_port_recv_message,
   op_message_port_recv_message_sync,
+  op_void_async_deferred,
 } = core.ops;
 const {
   Array,
@@ -29,9 +30,7 @@ const {
   ObjectHasOwn,
   ObjectIs,
   ObjectPrototypeIsPrototypeOf,
-  Promise,
   PromiseResolve,
-  queueMicrotask,
   ReflectApply,
   SafeArrayIterator,
   SafeSet,
@@ -425,16 +424,17 @@ class MessagePort extends _MessagePortBase {
           break;
         }
         if (!dispatchPortMessageData(this, data)) return;
-        // Yield long enough for any handler-removed-itself +
-        // new-handler-attached cycle (used by `events.once`) to register
-        // a fresh listener before the next buffered message is
-        // dispatched. V8's optimized `await` can resume on a resolved
-        // promise in the same microtask checkpoint as the user's
-        // dispatch-time `resolve(...)` callback, so explicitly chain
-        // through `queueMicrotask` to put the recv-loop continuation
-        // strictly behind any user `once()` re-arm in the microtask
-        // queue.
-        await new Promise((resolve) => queueMicrotask(() => resolve()));
+        // Each message dispatch is its own task (HTML's port message queue):
+        // every microtask the previous dispatch started has run before the
+        // next one. A listener added any number of microtasks after the
+        // previous message (a `once` listener behind `Promise.race()` in an
+        // async function, as WPT's `nextMessageOrTimeout`; `events.once`
+        // re-armed in a `.then`) is in place, however long that chain is:
+        // yielding a fixed number of microtasks loses the next message to a
+        // longer one, as the recv op above resolves at once when a message
+        // is already queued. So the loop waits for the event loop's next
+        // turn before it takes another message.
+        await op_void_async_deferred();
       }
       this[_enabled] = false;
     })();
