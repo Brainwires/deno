@@ -33,6 +33,10 @@ function walk(
     const files = Deno.readDirSync(dir).toArray();
     files.sort((a, b) => a.name.localeCompare(b.name));
     for (const file of files) {
+      if (level === 0 && file.name === "locks") {
+        // DENO_DIR's lock files, which `deno clean` keeps
+        continue;
+      }
       if (file.isDirectory) {
         fn({ name: file.name, dir, level, kind: "dir" });
         walkRecursive(dir + "/" + file.name, level + 1);

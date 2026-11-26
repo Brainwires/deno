@@ -131,6 +131,9 @@ impl deno_npm_cache::NpmCacheHttpClient for CliNpmCacheHttpClient {
     maybe_registry_config: Option<&RegistryConfig>,
     maybe_packument_format: Option<NpmPackumentRequestFormat>,
   ) -> Result<NpmCacheHttpClientResponse, deno_npm_cache::DownloadError> {
+    // Only one process downloads into the package cache at a time. This does
+    // not wait on processes that only read the cache.
+    let _download_lock = crate::cache::lock::lock_download().await;
     // say when the more expensive full packument is being downloaded
     // since the same url may have just been downloaded abbreviated
     let progress_message = match maybe_packument_format {

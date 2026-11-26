@@ -22678,6 +22678,48 @@ where the changes are discussed.
        checks (the plan step's variables, laufey without Chocolatey, rpm-smoke
        on the image).
      - Node tests enabled: none.
+560. **`feat(cli)`: Cargo-style cross-process locks for `DENO_DIR`, build
+     outputs and `deno.lock`** (CLI; `libs/cache_dir/cache_lock.rs`,
+     `cli/cache/lock.rs`, `cli/lib.rs`, `cli/file_fetcher.rs`, `cli/npm.rs`,
+     `cli/tools/{clean,compile,bundle/mod,doc}.rs`, `libs/lockfile/lib.rs`,
+     `libs/resolver/{lockfile,factory}.rs`; denoland/deno#36943). Two `deno`
+     processes on one `DENO_DIR` or one output could corrupt each other: a
+     `deno clean` deleted files another process was reading, two downloads of
+     one package raced, two `deno compile -o` to one path deleted each other's
+     temp file, and the last of several concurrent `deno.lock` writers dropped
+     the others' entries.
+     - `deno_cache_dir::cache_lock` follows Cargo's `cache_lock`: a package
+       cache locker with three modes over two lock files in `DENO_DIR/locks/`
+       (`DownloadExclusive` excludes other downloads, not readers; `Shared`
+       for readers; `MutateExclusive` excludes everything), taken
+       mutate-then-download, recursive within a process, refusing out-of-order
+       requests and shared-to-exclusive upgrades; plus `lock_path` /
+       `try_lock_path` for an exclusive or shared lock on an output path
+       (lock file under `DENO_DIR/locks/artifacts/`). OS file locks (flock /
+       `LockFileEx`), released when the process exits, tried without blocking
+       first, best effort when a lock file cannot be created.
+     - Every subcommand that finishes on its own (`cache`, `check`, `test`,
+       `install`, `sync-types`, `compile`, `bundle` and `desktop` without
+       watch / HMR, …) holds `Shared` for its run; `run`, `serve`, `task`,
+       `repl`, `lsp`, `jupyter` and any `--watch` hold none; `deno clean`
+       holds `MutateExclusive` and keeps `DENO_DIR/locks`. Downloads (file
+       fetcher and npm) hold `DownloadExclusive` while they fetch.
+     - Outputs: `deno test --coverage` (not a nested one under the parent's
+       `DENO_COVERAGE_DIR`), `deno coverage` (shared), `deno compile` /
+       `desktop --output`, `deno bundle --outdir` / `--output` and
+       `deno doc --html` lock their output.
+     - `deno.lock`: a write takes an exclusive lock and, when the file changed
+       on disk since this process read or last wrote it, merges the disk
+       content in first with the git merge-conflict merge
+       (`Lockfile::merge_concurrent_write`; version 5 only).
+     - A contended lock prints Cargo's `Blocking waiting for file lock on
+       <what>` and waits.
+     - Tests: `deno_cache_dir` `cache_lock` unit tests, `deno_lockfile`
+       `merges_concurrent_write`, `cli` `cache::lock` `subcommand_lock_modes` /
+       `artifact_lock_file_is_stable`, spec `cache::concurrent_locks` (six
+       cases), and specs `clean::general` / `clean::entrypoint` updated for the
+       kept `locks` directory.
+     - Node tests enabled: none.
 
 558. **`ci(denext)`: the release upload retries safely, and a cancelled release
      run stops** (CI; `.github/denext-runtime/release_upload.sh`,
