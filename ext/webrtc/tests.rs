@@ -1547,7 +1547,11 @@ async fn a_lost_frame_asks_for_a_key_frame_until_one_comes() {
   w.lose(2);
   w.write(&a, false);
   let lost_at = std::time::Instant::now();
-  events_for(&b, &mut eb, Duration::from_millis(50)).await;
+  // However long the packet takes to arrive (a coarse timer on Windows).
+  let deadline = lost_at + Duration::from_secs(5);
+  while plis_sent(&b) == 0 && std::time::Instant::now() < deadline {
+    events_for(&b, &mut eb, Duration::from_millis(20)).await;
+  }
   assert_eq!(plis_sent(&b), 1, "one PLI for the loss");
   // The sender hears it.
   wait_for(&a, &mut ea, |e| {
@@ -1571,7 +1575,12 @@ async fn a_lost_frame_asks_for_a_key_frame_until_one_comes() {
   // past the interval too.
   let frames = media_frames(&eb, b_key).len();
   w.write(&a, true);
-  events_for(&b, &mut eb, Duration::from_millis(100)).await;
+  let deadline = std::time::Instant::now() + Duration::from_secs(5);
+  while media_frames(&eb, b_key).len() == frames
+    && std::time::Instant::now() < deadline
+  {
+    events_for(&b, &mut eb, Duration::from_millis(20)).await;
+  }
   assert_eq!(media_frames(&eb, b_key)[frames..], [true], "the key frame");
   let after_key = plis_sent(&b);
   let interval = crate::media::KEY_FRAME_REQUEST_INTERVAL;
@@ -1593,6 +1602,7 @@ async fn a_lost_frame_asks_for_a_key_frame_until_one_comes() {
 // ICE agent's next check (200 ms).
 #[tokio::test]
 #[ignore = "a measurement, not a check"]
+#[allow(clippy::print_stdout, reason = "the measurement is the output")]
 async fn dtls_after_ice_connected_delay() {
   let mut delays: Vec<(u128, u128)> = Vec::new();
   for _ in 0..20 {
@@ -1964,4 +1974,49 @@ async fn answer_to_a_narrow_offer_lists_only_its_formats() {
   b.set_local_description("offer", reoffer).unwrap();
   a.close();
   b.close();
+}
+
+// setCodecPreferences() takes what getCapabilities() lists, for audio too:
+// a mono codec there has `channels: 1`, which the engine (whose rtpmap has
+// no encoding parameter for it) holds as 0 (WPT
+// RTCRtpTransceiver-setCodecPreferences "on audio transceiver with codecs
+// returned from RTCRtpReceiver.getCapabilities('audio')").
+#[test]
+fn audio_codec_preferences_take_the_capabilities() {
+  let peer = new_peer();
+  for (kind, sender) in [
+    ("audio", false),
+    ("audio", true),
+    ("video", false),
+    ("video", true),
+  ] {
+    let codecs = crate::media::capabilities(kind, sender)
+      .unwrap()
+      .expect("capabilities")
+      .codecs;
+    assert!(
+      codecs
+        .iter()
+        .any(|c| kind == "video" || c.channels == Some(1)),
+      "{kind} lists a mono codec"
+    );
+    let mut reordered = codecs.clone();
+    reordered.reverse();
+    peer
+      .media(|core| {
+        let key = core.add_transceiver(crate::media::TransceiverArg {
+          kind: kind.to_string(),
+          track: None,
+          direction: "sendrecv".to_string(),
+          streams: vec![],
+          send_encodings: vec![],
+          codec: None,
+          add_track: false,
+        })?;
+        core.set_codec_preferences(key, codecs)?;
+        core.set_codec_preferences(key, reordered)
+      })
+      .unwrap_or_else(|e| panic!("{kind} (sender {sender}): {e:?}"));
+  }
+  peer.close();
 }

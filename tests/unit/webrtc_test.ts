@@ -874,9 +874,12 @@ Deno.test("webrtcVideoFramesEndToEnd", async () => {
 Deno.test("webrtcRtpAndKeyFrameRequests", async () => {
   const a = new RTCPeerConnection();
   const b = new RTCPeerConnection();
+  // Video: a key-frame request is a PLI, which a receiver sends only where
+  // the section negotiated `a=rtcp-fb:<pt> nack pli` (RFC 4585 section 4.2,
+  // RFC 8834 section 5.1.1); an audio section negotiates none.
   const track = new Deno.webrtc.EncodedMediaTrack({
-    kind: "audio",
-    mimeType: "audio/opus",
+    kind: "video",
+    mimeType: "video/VP8",
   });
   a.addTransceiver(track, { direction: "sendonly" });
   const gotTrack = once<RTCTrackEvent>(b, "track");
@@ -2389,7 +2392,8 @@ Deno.test("webrtcLaterTransceiverWorksAfterEarlierRemoved", async () => {
 });
 
 // ECN / L4S (DENEXT.md item 482): the offer carries RFC 8888 feedback (`ack
-// ccfb`) and, where the platform reads and writes per-datagram ECN codepoints
+// ccfb`, for every format at once: `a=rtcp-fb:* ack ccfb`, RFC 8888 section
+// 6) and, where the platform reads and writes per-datagram ECN codepoints
 // on UDP (Linux, Android, macOS, FreeBSD, Windows), video negotiated with it
 // goes out ECT(1) and the receiver counts it; elsewhere the ECN members are
 // absent from the stats.
@@ -2407,11 +2411,11 @@ Deno.test("webrtcEcnMarksVideoEct1", async () => {
   const gotTrack = once<RTCTrackEvent>(b, "track");
   await negotiate(a, b);
   assert(
-    /^a=rtcp-fb:\d+ ack ccfb\r?$/m.test(a.localDescription!.sdp),
+    /^a=rtcp-fb:(\d+|\*) ack ccfb\r?$/m.test(a.localDescription!.sdp),
     "the offer has ack ccfb",
   );
   assert(
-    /^a=rtcp-fb:\d+ ack ccfb\r?$/m.test(b.localDescription!.sdp),
+    /^a=rtcp-fb:(\d+|\*) ack ccfb\r?$/m.test(b.localDescription!.sdp),
     "the answer has ack ccfb",
   );
   const ev = await gotTrack;

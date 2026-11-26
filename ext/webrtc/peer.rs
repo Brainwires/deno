@@ -620,6 +620,10 @@ pub struct Core {
   /// A remote candidate is known (signalled, or a check arrived): until
   /// then ICE stays `new`, as the spec's `checking` needs one.
   remote_known: bool,
+  /// `collect_events` wrote RTCP (a key-frame request after a loss): the
+  /// pump goes round again so that it leaves now, not with the next
+  /// datagram or timer.
+  pub(crate) wrote_rtcp: bool,
   /// The engine went `checking` before that: reported once one is.
   checking_held: bool,
   /// An ICE restart's `checking` on a connected transport was not reported
@@ -1104,6 +1108,23 @@ fn bind_mdns(hosts: &[IpAddr]) -> std::io::Result<UdpSocket> {
     socket.join_multicast_v4(&group, &Ipv4Addr::UNSPECIFIED)?;
   }
   UdpSocket::from_std(socket.into())
+}
+
+/// Whether an `a=identity` value has RFC 8827 section 5's form, which the
+/// engine's SDP parser requires: a base64 assertion, then single-space
+/// separated extensions.
+fn is_identity_value(value: &str) -> bool {
+  let mut fields = value.split(' ');
+  let assertion = fields.next().unwrap_or_default();
+  let bytes = assertion.as_bytes();
+  let pad = bytes.iter().rev().take_while(|b| **b == b'=').count();
+  !bytes.is_empty()
+    && bytes.len().is_multiple_of(4)
+    && pad <= 2
+    && bytes[..bytes.len() - pad]
+      .iter()
+      .all(|b| b.is_ascii_alphanumeric() || *b == b'+' || *b == b'/')
+    && fields.all(|f| !f.is_empty())
 }
 
 /// Sends one mDNS message to the IPv4 group from `from`, the address the
@@ -2486,7 +2507,8 @@ impl Core {
       self.track_sent();
       // wpt100:mediasink
       self.check_silence(now);
-      if !a && !b {
+      let c = std::mem::take(&mut self.wrote_rtcp);
+      if !a && !b && !c {
         break;
       }
     }
@@ -2811,6 +2833,7 @@ impl Peer {
         transforms: Default::default(),
         sinks: Default::default(),
         remote_known: false,
+        wrote_rtcp: false,
         sent: HashMap::new(),
         sctp_state: "",
         dtls_state: String::new(),
@@ -3092,6 +3115,15 @@ impl Peer {
       (core.ice_tcp(), core.mdns_mode != MdnsMode::Off)
     };
     for line in sdp.split_inclusive('\n') {
+      // webrtc-identity: JavaScript validates the a=identity assertion
+      // (06_identity.js), and a malformed one rejects `peerIdentity`, not the
+      // description; the engine's RFC 8827 grammar would refuse the whole
+      // description, so it isn't given one it can't parse.
+      if let Some(value) = line.trim_end().strip_prefix("a=identity:")
+        && !is_identity_value(value)
+      {
+        continue;
+      }
       if let Some(value) = line.trim_end().strip_prefix("a=candidate:") {
         match classify_remote_candidate(value, tcp, mdns)? {
           RemoteCandidate::Ignore => continue,

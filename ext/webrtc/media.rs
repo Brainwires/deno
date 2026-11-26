@@ -93,26 +93,11 @@ pub(crate) fn media_stack_counting(
   media_engine
     .register_default_codecs()
     .map_err(crate::peer::rtc_err)?;
-  // RFC 4733 telephone events, for RTCDTMFSender (the engine registers
-  // none): at Opus' clock and at 8 kHz, on payload types the default video
-  // codecs don't use (they share the bundle).
-  for (payload_type, clock_rate) in [(110, 48000), (113, 8000)] {
-    media_engine
-      .register_codec(
-        RTCRtpCodecParameters {
-          rtp_codec: RTCRtpCodec {
-            mime_type: "audio/telephone-event".to_string(),
-            clock_rate,
-            channels: 0,
-            sdp_fmtp_line: "0-15".to_string(),
-            rtcp_feedback: vec![],
-          },
-          payload_type,
-        },
-        RtpCodecKind::Audio,
-      )
-      .map_err(crate::peer::rtc_err)?;
-  }
+  // The defaults register RFC 4733 telephone events (RFC 7874 section 3),
+  // at Opus' clock and at 8 kHz, for RTCDTMFSender: a second registration
+  // here would put another format on a payload type the video RTX formats
+  // use (RFC 9143 section 9.1.1 refuses one payload type with two
+  // configurations in a BUNDLE group).
   // The defaults include the fork's key-frame request interceptor, which
   // delivers inbound PLI and FIR to the application (here, an
   // `EncodedMediaTrack`'s `keyframerequest`): upstream ends them at the
@@ -464,6 +449,16 @@ impl rtci::sansio::Protocol<TaggedPacket, TaggedPacket, ()> for FactorPacer {
       }
       self.estimate_reported = true;
     }
+    if estimate.is_some() && !self.paced {
+      // Not pacing (no congestion feedback negotiated, or none for
+      // FEEDBACK_TIMEOUT): the stats report no estimate, even one the
+      // controller attached without congestion feedback (rtci 0.2 does, on a
+      // connection that negotiated none).
+      msg
+        .message
+        .attributes
+        .retain(|a| !matches!(a, Attribute::TargetBitrateChanged { .. }));
+    }
     // The engine's pacer follows an estimate going past; the scaled rate
     // (or the pass-through's) replaces what it set.
     self.pacer.handle_read(msg)?;
@@ -704,10 +699,20 @@ impl CodecArg {
   }
 
   fn to_codec(&self) -> RTCRtpCodec {
+    let audio = self.mime_type.to_ascii_lowercase().starts_with("audio/");
     RTCRtpCodec {
       mime_type: self.mime_type.clone(),
       clock_rate: self.clock_rate,
-      channels: self.channels.unwrap_or(0),
+      // A mono audio codec is the engine's 0 (no encoding parameter in its
+      // rtpmap), the reverse of `from_codec`: the engine matches a codec
+      // dictionary's channels exactly (W3C webrtc "codec dictionary
+      // match"), so `channels: 1`, which getCapabilities() and
+      // getParameters() report for PCMU, PCMA, G722, CN and
+      // telephone-event, would match none of its codecs.
+      channels: match self.channels {
+        Some(1) if audio => 0,
+        channels => channels.unwrap_or(0),
+      },
       sdp_fmtp_line: self.sdp_fmtp_line.clone().unwrap_or_default(),
       rtcp_feedback: vec![],
     }
@@ -717,7 +722,7 @@ impl CodecArg {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
-  codecs: Vec<CodecArg>,
+  pub(crate) codecs: Vec<CodecArg>,
   header_extensions: Vec<HeaderExtensionCapability>,
 }
 
@@ -729,8 +734,8 @@ pub struct HeaderExtensionCapability {
 /// `RTCRtpSender.getCapabilities(kind)` / `RTCRtpReceiver.getCapabilities`:
 /// what the media stack offers, read from the offer of a connection that is
 /// never used for anything else (the engine's codec lists are internal).
-/// Repair formats (RTX, RED, FEC) are listed once, without the `apt` that
-/// ties each RTX payload type to its primary, as browsers list them.
+/// RTX is listed once, without the `apt` that ties each RTX payload type to
+/// its primary, as browsers list it.
 pub fn capabilities(
   kind: &str,
   _sender: bool,
@@ -821,11 +826,11 @@ pub fn capabilities_from_sdp(kind: &str, sdp: &str) -> Capabilities {
     header_extensions.into_iter().map(|(_, h)| h).collect();
   let mut out: Vec<CodecArg> = Vec::new();
   for (pt, mut codec) in codecs {
-    let lower = codec.mime_type.to_ascii_lowercase();
-    let repair = lower.ends_with("/rtx")
-      || lower.ends_with("/red")
-      || lower.contains("fec");
-    if !repair {
+    // RTX is listed without the `apt` that ties its payload type to one
+    // primary. Every other format keeps its parameters, an audio RED's
+    // redundancy list (`111/111`) included, as browsers list it and as the
+    // engine registered it: setCodecPreferences() matches them exactly.
+    if !codec.mime_type.to_ascii_lowercase().ends_with("/rtx") {
       codec.sdp_fmtp_line = fmtp.get(&pt).cloned();
     }
     let duplicate = out.iter().any(|c| {
@@ -2517,6 +2522,7 @@ impl Core {
     let sent = write_pli(&mut receiver, media_ssrc, now);
     if sent {
       self.media.loss_key_frame_requests.insert(media_ssrc, now);
+      self.wrote_rtcp = true;
     }
     sent
   }
