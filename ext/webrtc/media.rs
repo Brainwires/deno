@@ -704,10 +704,20 @@ impl CodecArg {
   }
 
   fn to_codec(&self) -> RTCRtpCodec {
+    let audio = self.mime_type.to_ascii_lowercase().starts_with("audio/");
     RTCRtpCodec {
       mime_type: self.mime_type.clone(),
       clock_rate: self.clock_rate,
-      channels: self.channels.unwrap_or(0),
+      // A mono audio codec is the engine's 0 (no encoding parameter in its
+      // rtpmap), the reverse of `from_codec`: the engine matches a codec
+      // dictionary's channels exactly (W3C webrtc "codec dictionary
+      // match"), so `channels: 1`, which getCapabilities() and
+      // getParameters() report for PCMU, PCMA, G722, CN and
+      // telephone-event, would match none of its codecs.
+      channels: match self.channels {
+        Some(1) if audio => 0,
+        channels => channels.unwrap_or(0),
+      },
       sdp_fmtp_line: self.sdp_fmtp_line.clone().unwrap_or_default(),
       rtcp_feedback: vec![],
     }
@@ -717,7 +727,7 @@ impl CodecArg {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
-  codecs: Vec<CodecArg>,
+  pub(crate) codecs: Vec<CodecArg>,
   header_extensions: Vec<HeaderExtensionCapability>,
 }
 
@@ -729,8 +739,8 @@ pub struct HeaderExtensionCapability {
 /// `RTCRtpSender.getCapabilities(kind)` / `RTCRtpReceiver.getCapabilities`:
 /// what the media stack offers, read from the offer of a connection that is
 /// never used for anything else (the engine's codec lists are internal).
-/// Repair formats (RTX, RED, FEC) are listed once, without the `apt` that
-/// ties each RTX payload type to its primary, as browsers list them.
+/// RTX is listed once, without the `apt` that ties each RTX payload type to
+/// its primary, as browsers list it.
 pub fn capabilities(
   kind: &str,
   _sender: bool,
@@ -821,11 +831,11 @@ pub fn capabilities_from_sdp(kind: &str, sdp: &str) -> Capabilities {
     header_extensions.into_iter().map(|(_, h)| h).collect();
   let mut out: Vec<CodecArg> = Vec::new();
   for (pt, mut codec) in codecs {
-    let lower = codec.mime_type.to_ascii_lowercase();
-    let repair = lower.ends_with("/rtx")
-      || lower.ends_with("/red")
-      || lower.contains("fec");
-    if !repair {
+    // RTX is listed without the `apt` that ties its payload type to one
+    // primary. Every other format keeps its parameters, an audio RED's
+    // redundancy list (`111/111`) included, as browsers list it and as the
+    // engine registered it: setCodecPreferences() matches them exactly.
+    if !codec.mime_type.to_ascii_lowercase().ends_with("/rtx") {
       codec.sdp_fmtp_line = fmtp.get(&pt).cloned();
     }
     let duplicate = out.iter().any(|c| {

@@ -261,11 +261,7 @@
     ]
   },
   "RTCRtpTransceiver-direction.html": true,
-  "RTCRtpTransceiver-setCodecPreferences.html?interop-2026": {
-    "expectedFailures": [
-      "setCodecPreferences() filters on receiver and prefers receiver order"
-    ]
-  },
+  "RTCRtpTransceiver-setCodecPreferences.html?interop-2026": true,
   "RTCRtpTransceiver-setCodecPreferences.html?rest": {
     "expectedFailures": [
       "setCodecPreferences() can remove red",
