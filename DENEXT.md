@@ -22627,6 +22627,56 @@ where the changes are discussed.
        withheld end-of-candidates),
        `a_packet_without_a_payload_is_present_and_no_media`,
        `received_video_takes_packets_without_a_payload_as_present`.
+
+557. **`ci(denext)`: the release matrix sends its Linux and Windows jobs to our
+     pools first** (CI; `.github/denext-runtime/plan_matrix.py`,
+     `plan_matrix_test.py`, `.github/workflows/denext_runtime.yml`). On the
+     denext.30 tag run every pool of ours sat idle while GitHub ran each Windows
+     and Linux job; the Windows arm64 package job alone took 69 minutes there.
+     plan_matrix.py's docstring says, per target and job, where it runs and why.
+     - laufey: the Linux arm64 leg on the Linux arm64 pool
+       (`RUNNER_LINUX_ARM64`, whose Ubuntu 22.04 image has every package the leg
+       installs), the Windows legs on `RUNNER_WINDOWS_X64` /
+       `RUNNER_WINDOWS_ARM`. Without Chocolatey (our Windows pools) the job
+       unpacks the same make 4.4.1 and ninja 1.13.2 Chocolatey packages itself,
+       pinned by SHA-256 (checked against the feed's own hash) and put first on
+       PATH.
+     - The launch jobs (`gui_runner`): Linux package and e2e_fork on the Ubuntu
+       22.04 pools (Xvfb, headless sway, gnome-keyring in the image;
+       `RUNNER_LINUX_X64_GUI` / `RUNNER_LINUX_ARM64_GUI` override, else
+       `RUNNER_LINUX_X64_2204` / `RUNNER_LINUX_ARM64`), Windows e2e_fork on the
+       Windows pools' console sessions (`RUNNER_WINDOWS_X64_GUI` /
+       `RUNNER_WINDOWS_ARM_GUI`, else the build pools). A `*_GUI` variable that
+       names a GitHub image turns the pool off for those jobs.
+     - The Windows package job stays on the image (a new `package_runner`
+       field): its e2e installs an `.msi` per machine, which needs an
+       administrator, and our Windows job accounts are not.
+     - x86_64-apple-darwin's package and e2e_fork run on the arm64 GUI pool
+       under Rosetta 2 by default whenever that pool exists
+       (`MACOS_X64_GUI_ON_ARM` off turns it off; it was opt-in): the mac-x64
+       pool can never take them, and the Tart guests pre-grant every privacy
+       permission and already run the x86_64 cli's smoke tests under Rosetta. A
+       pool `RUNNER_MACOS_X64_GUI` names still wins over the default.
+     - Still on GitHub's images: the Linux and Windows release builds (a fat LTO
+       build peaks above GitHub's 16 GB, our Windows hosts have 8 GB and the
+       Linux job containers 3.5-6 GB; the Linux jobs' swapfile, sysroot mount
+       and `chroot` need capabilities the containers drop), the macOS laufey
+       legs (no Homebrew on mac-x64 for the job user; the mac-arm pool's two
+       slots are the macOS builds' critical path) and rpm-smoke (`docker run`
+       with a bind mount of the job's files).
+     - The overflow is unchanged: each pool's free slots come from the picker
+       (the setup job's pick now lists linux-arm64, windows-x64 and
+       windows-arm64), then DENEXT_POOL_HEALTH, then `RUNNER_LINUX_ARM64_SLOTS`
+       (default 1), `RUNNER_WINDOWS_X64_SLOTS` (2) and
+       `RUNNER_WINDOWS_ARM_SLOTS` (2); a full, unhealthy or paused pool sends
+       its legs to the image, and Linux and Windows legs never wait on the macOS
+       cap.
+     - Tests: `plan_matrix_test.py` `LinuxWindowsPools` (the routing with every
+       pool, the shared laufey-package-e2e slot, full / unhealthy / paused
+       pools, the GUI overrides, the Windows package job), `GuiOnArm` (the
+       default, its off spellings, the overrides, the cap) and the workflow
+       checks (the plan step's variables, laufey without Chocolatey, rpm-smoke
+       on the image).
      - Node tests enabled: none.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,

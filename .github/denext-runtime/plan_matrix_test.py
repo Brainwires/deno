@@ -22,6 +22,9 @@ POOLS = {
     "RUNNER_MACOS_X64": '["self-hosted","denext-macos-x64"]',
     # The slot tests leave the macOS cap out of the way (MacosCap tests it).
     "MACOS_CAP": "99",
+    # The tests written for x86_64's native launch path turn off its default,
+    # the arm64 pool under Rosetta 2 (GuiOnArm tests that default).
+    "MACOS_X64_GUI_ON_ARM": "0",
 }
 # POOLS, ARM and X64 must name the same pools.
 
@@ -328,9 +331,10 @@ class Overflow(unittest.TestCase):
         self.assertEqual(on_pool(x64), ["cli", "denort_bin"])
 
     def test_laufey_takes_the_linux_pool(self):
+        # And passes its slot to package and on to e2e_fork (launched there).
         lx = self.plan(RUNNER_LINUX_X64_2204=json.dumps(L2204))["x86_64-unknown-linux-gnu"]
         self.assertEqual(lx["runs_on"]["laufey"], L2204)
-        self.assertEqual(on_pool(lx), ["laufey"])
+        self.assertEqual(on_pool(lx), ["e2e_fork", "laufey", "package"])
 
     def test_health_busy_slots_overflow(self):
         h = health({"denext-macos-x64": entry(slots=1, busy=1, healthy_slots=1)})
@@ -493,7 +497,8 @@ class PoolFree(unittest.TestCase):
         lx = self.plan(POOL_FREE=json.dumps({"denext-linux-x64-2204": 0}), **env)
         self.assertEqual(on_pool(lx["x86_64-unknown-linux-gnu"]), [])
         lx = self.plan(POOL_FREE=json.dumps({"denext-linux-x64-2204": 1}), **env)
-        self.assertEqual(on_pool(lx["x86_64-unknown-linux-gnu"]), ["laufey"])
+        # one slot: laufey, then package and e2e_fork in it
+        self.assertEqual(on_pool(lx["x86_64-unknown-linux-gnu"]), ["e2e_fork", "laufey", "package"])
 
 
 class MacosCap(unittest.TestCase):
@@ -612,13 +617,218 @@ class MacosCap(unittest.TestCase):
                 "TARGETS": "all", "RUNNER_MACOS_ARM": POOLS["RUNNER_MACOS_ARM"],
                 "RUNNER_MACOS_X64": POOLS["RUNNER_MACOS_X64"],
                 "POOL_FREE": json.dumps({"denext-macos-arm64": 0, "denext-macos-x64": 0}),
-                "POOL_BLOCKED": json.dumps(["denext-macos-x64"]), "MACOS_CAP": cap}))
+                "POOL_BLOCKED": json.dumps(["denext-macos-x64"]), "MACOS_CAP": cap,
+                "MACOS_X64_GUI_ON_ARM": "0"}))
             self.assertEqual(on_pool(m["x86_64-apple-darwin"]), [], cap)
 
     def test_garbage_blocked_is_ignored(self):
         want = self.plan(POOL_FREE=self.FULL)
         for v in ("x", "{}", "[1]"):
             self.assertEqual(self.plan(POOL_FREE=self.FULL, POOL_BLOCKED=v), want, v)
+
+
+# Every pool variable that exists in the repository (2026-11-25).
+OURS = {
+    **POOLS,
+    "RUNNER_LINUX_X64_2204": json.dumps(L2204),
+    "RUNNER_LINUX_ARM64": '["self-hosted","denext-linux-arm64"]',
+    "RUNNER_WINDOWS_X64": '["self-hosted","denext-windows-x64"]',
+    "RUNNER_WINDOWS_ARM": '["self-hosted","denext-windows-arm64"]',
+    "RUNNER_MACOS_ARM_SLOTS": "2",
+    "RUNNER_WINDOWS_X64_SLOTS": "2",
+    "RUNNER_WINDOWS_ARM_SLOTS": "2",
+    "RUNNER_LINUX_X64_2204_SLOTS": "3",
+    "RUNNER_LINUX_ARM64_SLOTS": "1",
+}
+LARM = ["self-hosted", "denext-linux-arm64"]
+WX64 = ["self-hosted", "denext-windows-x64"]
+WARM = ["self-hosted", "denext-windows-arm64"]
+LINUX_WINDOWS = (
+    "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc",
+)
+
+
+class LinuxWindowsPools(unittest.TestCase):
+    """The Linux and Windows pools: laufey and the launch jobs, never the
+    release builds (memory, swapfile, sysroot mount, chroot) nor the Windows
+    package job (its per-machine .msi install needs an administrator)."""
+
+    def plan(self, **env):
+        return by_target(plan_matrix.plan({"TARGETS": "all", **OURS, **env}))
+
+    def test_routing_with_every_pool(self):
+        m = self.plan()
+        want = {
+            "x86_64-unknown-linux-gnu": (L2204, L2204, L2204),
+            "aarch64-unknown-linux-gnu": (LARM, LARM, LARM),
+            "x86_64-pc-windows-msvc": (WX64, "windows-2025", WX64),
+            "aarch64-pc-windows-msvc": (WARM, "windows-11-arm", WARM),
+        }
+        for name, (laufey, package, e2e) in want.items():
+            t = m[name]
+            self.assertEqual(t["laufey_runner"], laufey, name)
+            self.assertEqual(t["package_runner"], package, name)
+            self.assertEqual(t["gui_runner"], e2e, name)
+            self.assertEqual(t["runner"], t["os"], name)
+            for job in ("denort", "denort_bin", "cli"):
+                self.assertEqual(t["runs_on"][job], t["os"], (name, job))
+            self.assertEqual(t["runs_on"]["laufey"], laufey, name)
+            self.assertEqual(t["runs_on"]["package"], package, name)
+            self.assertEqual(t["runs_on"]["e2e_fork"], e2e, name)
+
+    def test_macos_laufey_stays_on_the_image(self):
+        m = self.plan()
+        for name in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
+            self.assertEqual(m[name]["laufey_runner"], m[name]["os"], name)
+            self.assertEqual(m[name]["runs_on"]["laufey"], m[name]["os"], name)
+
+    def test_without_the_variables_every_image(self):
+        m = by_target(plan_matrix.plan({"TARGETS": "all", **POOLS}))
+        for name in LINUX_WINDOWS:
+            t = m[name]
+            for field in ("runner", "gui_runner", "package_runner"):
+                self.assertEqual(t[field], t["os"], (name, field))
+            self.assertEqual(set(t["runs_on"].values()), {t["os"]}, name)
+
+    def test_the_linux_package_chain_shares_one_slot(self):
+        # laufey -> package -> e2e_fork pass the single linux-arm64 slot on.
+        arm = self.plan(POOL_FREE=json.dumps({"denext-linux-arm64": 1}))["aarch64-unknown-linux-gnu"]
+        self.assertEqual(on_pool(arm), ["e2e_fork", "laufey", "package"])
+
+    def test_full_or_unhealthy_pools_overflow_to_the_image(self):
+        free = json.dumps({
+            "denext-linux-x64-2204": 0, "denext-linux-arm64": 0,
+            "denext-windows-x64": 0, "denext-windows-arm64": 0,
+        })
+        m = self.plan(POOL_FREE=free)
+        for name in LINUX_WINDOWS:
+            self.assertEqual(on_pool(m[name]), [], name)
+        h = health({
+            "denext-windows-x64": entry(slots=2, ok=False),
+            "denext-windows-arm64": entry(slots=2, paused=True),
+            "denext-linux-arm64": entry(slots=1, busy=1, healthy_slots=1),
+        })
+        m = self.plan(POOL_HEALTH=h)
+        for name in ("aarch64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"):
+            self.assertEqual(on_pool(m[name]), [], name)
+        self.assertEqual(on_pool(m["x86_64-unknown-linux-gnu"]), ["e2e_fork", "laufey", "package"])
+
+    def test_one_windows_slot_goes_to_laufey_first(self):
+        # laufey starts after setup; e2e_fork (after package on the image and
+        # cli) finds no slot left in this plan and takes the image.
+        win = self.plan(POOL_FREE=json.dumps({"denext-windows-x64": 1}))["x86_64-pc-windows-msvc"]
+        self.assertEqual(on_pool(win), ["laufey"])
+        win = self.plan(POOL_FREE=json.dumps({"denext-windows-x64": 2}))["x86_64-pc-windows-msvc"]
+        self.assertEqual(on_pool(win), ["e2e_fork", "laufey"])
+
+    def test_slot_variables(self):
+        win = self.plan(RUNNER_WINDOWS_ARM_SLOTS="0")["aarch64-pc-windows-msvc"]
+        self.assertEqual(on_pool(win), [])
+        win = self.plan(RUNNER_WINDOWS_ARM_SLOTS="x")["aarch64-pc-windows-msvc"]
+        self.assertEqual(on_pool(win), ["laufey"])
+
+    def test_gui_variables_override_the_launch_jobs_only(self):
+        other = '["self-hosted","denext-linux-arm64-desktop"]'
+        m = self.plan(RUNNER_LINUX_ARM64_GUI=other, RUNNER_LINUX_X64_GUI="ubuntu-22.04",
+                      RUNNER_WINDOWS_X64_GUI="windows-2025", RUNNER_WINDOWS_ARM_GUI="win-gui")
+        arm = m["aarch64-unknown-linux-gnu"]
+        self.assertEqual(arm["gui_runner"], json.loads(other))
+        self.assertEqual(arm["package_runner"], json.loads(other))
+        self.assertEqual(arm["runs_on"]["package"], json.loads(other))
+        self.assertEqual(arm["laufey_runner"], LARM)
+        # An image name turns the pool off for the launch jobs.
+        lx = m["x86_64-unknown-linux-gnu"]
+        self.assertEqual(lx["runs_on"]["package"], "ubuntu-22.04")
+        self.assertEqual(lx["runs_on"]["e2e_fork"], "ubuntu-22.04")
+        self.assertEqual(lx["runs_on"]["laufey"], L2204)
+        self.assertEqual(m["x86_64-pc-windows-msvc"]["runs_on"]["e2e_fork"], "windows-2025")
+        warm = m["aarch64-pc-windows-msvc"]
+        self.assertEqual(warm["runs_on"]["e2e_fork"], "win-gui")
+        # The Windows package job stays on the image whatever is named.
+        self.assertEqual(warm["runs_on"]["package"], "windows-11-arm")
+
+    def test_linux_and_windows_never_wait_for_a_pool(self):
+        # The macOS cap is for macOS: a full Linux or Windows pool sends its
+        # legs to the image even at MACOS_CAP=0.
+        free = json.dumps({"denext-windows-x64": 0, "denext-linux-arm64": 0})
+        m = self.plan(POOL_FREE=free, MACOS_CAP="0")
+        self.assertEqual(on_pool(m["x86_64-pc-windows-msvc"]), [])
+        self.assertEqual(on_pool(m["aarch64-unknown-linux-gnu"]), [])
+
+    def test_a_reused_laufey_still_launches_on_the_pool(self):
+        lx = self.plan(SKIP_JOBS="laufey denort")["x86_64-unknown-linux-gnu"]
+        self.assertEqual(on_pool(lx), ["e2e_fork", "package"])
+
+
+class GuiOnArm(unittest.TestCase):
+    """x86_64-apple-darwin's launch jobs on the arm64 GUI pool under Rosetta
+    2: the default whenever that pool exists (MACOS_X64_GUI_ON_ARM off turns
+    it off)."""
+
+    def plan(self, **env):
+        base = {k: v for k, v in POOLS.items() if k != "MACOS_X64_GUI_ON_ARM"}
+        return by_target(plan_matrix.plan({"TARGETS": "all", **base, **env}))
+
+    def test_on_by_default(self):
+        x64 = self.plan(RUNNER_MACOS_ARM_SLOTS="4")["x86_64-apple-darwin"]
+        self.assertEqual(x64["gui_runner"], ARM)
+        self.assertEqual(x64["package_runner"], ARM)
+        self.assertEqual(x64["runs_on"]["package"], ARM)
+        self.assertEqual(x64["runs_on"]["e2e_fork"], ARM)
+        # The build jobs are unchanged (MACOS_X64_ON_ARM is their switch).
+        self.assertFalse(x64["rosetta"])
+        self.assertEqual(x64["runner"], X64)
+
+    def test_off_spellings(self):
+        for off in ("0", "false", "OFF", " no "):
+            x64 = self.plan(MACOS_X64_GUI_ON_ARM=off)["x86_64-apple-darwin"]
+            self.assertEqual(x64["gui_runner"], "macos-15-intel", off)
+        for on in ("", "1", "true", "maybe"):
+            x64 = self.plan(MACOS_X64_GUI_ON_ARM=on)["x86_64-apple-darwin"]
+            self.assertEqual(x64["gui_runner"], ARM, on)
+
+    def test_no_arm_pool_is_the_image(self):
+        for arm in ("", "macos-latest", "macos-15"):
+            x64 = self.plan(RUNNER_MACOS_ARM=arm)["x86_64-apple-darwin"]
+            self.assertEqual(x64["gui_runner"], "macos-15-intel", arm)
+
+    def test_the_arm_gui_variable_is_followed(self):
+        gui = '["self-hosted","denext-macos-arm64-gui"]'
+        x64 = self.plan(RUNNER_MACOS_ARM_GUI=gui)["x86_64-apple-darwin"]
+        self.assertEqual(x64["gui_runner"], json.loads(gui))
+
+    def test_a_named_x64_gui_pool_wins_over_the_default(self):
+        x64 = self.plan(RUNNER_MACOS_X64_GUI="some-gui-label")["x86_64-apple-darwin"]
+        self.assertEqual(x64["gui_runner"], "some-gui-label")
+        # ... but not over an explicit on.
+        x64 = self.plan(RUNNER_MACOS_X64_GUI="some-gui-label", MACOS_X64_GUI_ON_ARM="1")["x86_64-apple-darwin"]
+        self.assertEqual(x64["gui_runner"], ARM)
+
+    def test_the_mac_x64_pool_named_still_means_the_arm_pool(self):
+        for named in (POOLS["RUNNER_MACOS_X64"], "denext-macos-x64"):
+            x64 = self.plan(RUNNER_MACOS_X64_GUI=named)["x86_64-apple-darwin"]
+            self.assertEqual(x64["gui_runner"], ARM, named)
+            x64 = self.plan(RUNNER_MACOS_X64_GUI=named, MACOS_X64_GUI_ON_ARM="0")["x86_64-apple-darwin"]
+            self.assertEqual(x64["gui_runner"], "macos-15-intel", named)
+
+    def test_the_launch_jobs_follow_the_x64_build_slot_on_the_arm_pool(self):
+        # With the build on the arm64 pool too (MACOS_X64_ON_ARM), package
+        # takes over denort's slot there and e2e_fork package's.
+        x64 = self.plan(MACOS_X64_ON_ARM="1", RUNNER_MACOS_ARM_SLOTS="4")["x86_64-apple-darwin"]
+        self.assertEqual(on_pool(x64), ["cli", "denort", "denort_bin", "e2e_fork", "package"])
+        for job in ("denort", "denort_bin", "cli", "package", "e2e_fork"):
+            self.assertEqual(x64["runs_on"][job], ARM, job)
+
+    def test_past_the_cap_waits_on_the_arm_pool_but_never_a_blocked_one(self):
+        full = json.dumps({"denext-macos-arm64": 0, "denext-macos-x64": 0})
+        x64 = self.plan(POOL_FREE=full, MACOS_CAP="0")["x86_64-apple-darwin"]
+        self.assertEqual(x64["runs_on"]["package"], ARM)
+        self.assertEqual(x64["runs_on"]["e2e_fork"], ARM)
+        x64 = self.plan(POOL_FREE=full, MACOS_CAP="0",
+                        POOL_BLOCKED=json.dumps(["denext-macos-arm64"]))["x86_64-apple-darwin"]
+        self.assertEqual(x64["runs_on"]["package"], "macos-15-intel")
+        self.assertEqual(x64["runs_on"]["e2e_fork"], "macos-15-intel")
 
 
 def job_block(text, job):
@@ -650,10 +860,40 @@ class Workflow(unittest.TestCase):
             self.assertIn(f"{var}: ${{{{ vars.{var} }}}}", setup)
 
     def test_jobs_that_launch_the_app_use_the_gui_runner(self):
-        for job in ("package", "e2e_fork"):
+        for job, field in (("package", "package_runner"), ("e2e_fork", "gui_runner")):
             r = runs_on(job_block(self.text, job))
-            self.assertIn("matrix.gui_runner", r, job)
+            self.assertIn(f"matrix.{field}", r, job)
             self.assertNotIn("matrix.runner ", r, job)
+
+    def test_the_plan_step_passes_the_linux_and_windows_pools(self):
+        setup = job_block(self.text, "setup")
+        for var in ("RUNNER_LINUX_ARM64", "RUNNER_WINDOWS_X64", "RUNNER_WINDOWS_ARM",
+                    "RUNNER_LINUX_X64_GUI", "RUNNER_LINUX_ARM64_GUI",
+                    "RUNNER_WINDOWS_X64_GUI", "RUNNER_WINDOWS_ARM_GUI",
+                    "MACOS_X64_GUI_ON_ARM"):
+            self.assertIn(f"{var}: ${{{{ vars.{var} }}}}", setup)
+
+    def test_laufey_on_windows_works_without_chocolatey(self):
+        # Our Windows pools have no Chocolatey: the job unpacks the same
+        # pinned packages itself and puts make and ninja first on PATH.
+        job = job_block(self.text, "laufey")
+        step = job.split("- name: Install dependencies (Windows)\n", 1)[1].split("\n      - ", 1)[0]
+        self.assertIn("if command -v choco >/dev/null 2>&1; then", step)
+        self.assertIn("nupkg make 4.4.1 8b2dec73ed4c84163c4a4f9bfe658553b1e3d1fdfa8930d2aa438e030ff21f9d", step)
+        self.assertIn("nupkg ninja 1.13.2 b44ad9d0ddef594489a75b04be5bf77f50a7d92cf8fab88ea2f9f7c2a399919b", step)
+        self.assertIn('| sha256sum -c -', step)
+        self.assertIn('>>"$GITHUB_PATH"', step)
+        self.assertIn("choco_install make --version=4.4.1", step)
+        self.assertIn("choco_install ninja --version=1.13.2", step)
+
+    def test_rpm_smoke_stays_on_the_image(self):
+        # It runs `docker run -v <the job's files>`: no pool of ours can. It
+        # reads `runner`, which plan_matrix keeps the image on Linux.
+        self.assertIn("|| matrix.runner || matrix.os }}", runs_on(job_block(self.text, "rpm-smoke")))
+        env = {"TARGETS": "all", **OURS}
+        for t in plan_matrix.plan(env):
+            if "-linux-" in t["target"]:
+                self.assertEqual(t["runner"], t["os"], t["target"])
 
     def test_rosetta_builds_use_the_x86_64_toolchain(self):
         # Not --target: the snapshot build scripts must run an x86_64 V8.
@@ -713,6 +953,9 @@ class Workflow(unittest.TestCase):
             "RUNNER_MACOS_ARM": "macos-arm64",
             "RUNNER_MACOS_X64": "macos-x64",
             "RUNNER_LINUX_X64_2204": "linux-x64-2204",
+            "RUNNER_LINUX_ARM64": "linux-arm64",
+            "RUNNER_WINDOWS_X64": "windows-x64",
+            "RUNNER_WINDOWS_ARM": "windows-arm64",
         }
         self.assertEqual(names, sorted(want[var] for var, _ in plan_matrix.SLOT_VARS))
         # Before the plan step reads it.

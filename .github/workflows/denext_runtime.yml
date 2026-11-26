@@ -264,7 +264,7 @@ jobs:
       - id: pools
         uses: Brainwires/.github/actions/pick-runners@8a0cb356b969132668442f9539b75d3173d59b3e # pick-runners (ETA overflow)
         with:
-          jobs: arm=macos-arm64 x64=macos-x64 l2204=linux-x64-2204
+          jobs: arm=macos-arm64 x64=macos-x64 l2204=linux-x64-2204 larm=linux-arm64 wx64=windows-x64 warm=windows-arm64
           vars: ${{ toJSON(vars) }}
       - id: plan
         env:
@@ -282,15 +282,28 @@ jobs:
           RUNNER_MACOS_X64: ${{ vars.RUNNER_MACOS_X64 }}
           # Where the jobs that launch the app run (`gui_runner`: package,
           # e2e_fork); they need a GUI login session. See plan_matrix.py.
+          # Unset, each follows its pool below; a GitHub image name sends
+          # that target's launch jobs to the image.
           RUNNER_MACOS_ARM_GUI: ${{ vars.RUNNER_MACOS_ARM_GUI }}
           RUNNER_MACOS_X64_GUI: ${{ vars.RUNNER_MACOS_X64_GUI }}
+          RUNNER_LINUX_X64_GUI: ${{ vars.RUNNER_LINUX_X64_GUI }}
+          RUNNER_LINUX_ARM64_GUI: ${{ vars.RUNNER_LINUX_ARM64_GUI }}
+          RUNNER_WINDOWS_X64_GUI: ${{ vars.RUNNER_WINDOWS_X64_GUI }}
+          RUNNER_WINDOWS_ARM_GUI: ${{ vars.RUNNER_WINDOWS_ARM_GUI }}
           # 1: x86_64-apple-darwin's build jobs run on the arm64 pool with the
           # x86_64 toolchain under Rosetta 2 (`rosetta`, plan_matrix.py);
           # unset: the mac-x64 pool.
           MACOS_X64_ON_ARM: ${{ vars.MACOS_X64_ON_ARM }}
+          # x86_64-apple-darwin's package and e2e_fork on the arm64 GUI pool
+          # under Rosetta 2: on unless this is 0 / false / off / no.
           MACOS_X64_GUI_ON_ARM: ${{ vars.MACOS_X64_GUI_ON_ARM }}
-          # The laufey job's Linux x64 leg (`laufey_runner`).
+          # The Linux and Windows pools: the laufey job (`laufey_runner`) and
+          # the launch jobs (`gui_runner`; the Windows package job stays on
+          # the image, `package_runner`). Their build jobs take the image.
           RUNNER_LINUX_X64_2204: ${{ vars.RUNNER_LINUX_X64_2204 }}
+          RUNNER_LINUX_ARM64: ${{ vars.RUNNER_LINUX_ARM64 }}
+          RUNNER_WINDOWS_X64: ${{ vars.RUNNER_WINDOWS_X64 }}
+          RUNNER_WINDOWS_ARM: ${{ vars.RUNNER_WINDOWS_ARM }}
           # The overflow (`runs_on`, plan_matrix.py): each pool's free slots
           # from the pick above (POOL_FREE), else the fleet watchdog's
           # DENEXT_POOL_HEALTH when fresh, else its slot count; the jobs
@@ -307,6 +320,9 @@ jobs:
           RUNNER_MACOS_ARM_SLOTS: ${{ vars.RUNNER_MACOS_ARM_SLOTS || '2' }}
           RUNNER_MACOS_X64_SLOTS: ${{ vars.RUNNER_MACOS_X64_SLOTS || '1' }}
           RUNNER_LINUX_X64_2204_SLOTS: ${{ vars.RUNNER_LINUX_X64_2204_SLOTS || '3' }}
+          RUNNER_LINUX_ARM64_SLOTS: ${{ vars.RUNNER_LINUX_ARM64_SLOTS || '1' }}
+          RUNNER_WINDOWS_X64_SLOTS: ${{ vars.RUNNER_WINDOWS_X64_SLOTS || '2' }}
+          RUNNER_WINDOWS_ARM_SLOTS: ${{ vars.RUNNER_WINDOWS_ARM_SLOTS || '2' }}
           # Tag reuse (tag_reuse.py): on unless this variable is 0 / false /
           # off / no. RELEASE_VERSION: a dispatch that builds what a tag may
           # reuse (the release version, no build cache).
@@ -456,14 +472,15 @@ jobs:
           export SKIP_JOBS
 
           # Each target's runners (`runner` for the build jobs, `gui_runner`
-          # for the jobs that launch the app) and this run's pick for each job
-          # (`runs_on`: the pool while it has a slot, else the image). `os`
-          # stays the image name: it names the caches and the artifacts
-          # whatever runs the job.
-          # The other legs stay on GitHub's images (pool gaps): Linux x64 sudo
-          # apt-get / fallocate + swapon and the ubuntu-22.04 glibc floor; Windows
-          # x64 a release build on the 1-slot 4 vCPU / 8 GB VM; the arm64 Linux
-          # and Windows legs have no pool.
+          # for the jobs that launch the app, `package_runner`,
+          # `laufey_runner`) and this run's pick for each job (`runs_on`: the
+          # pool while it has a slot, else the image). `os` stays the image
+          # name: it names the caches and the artifacts whatever runs the job.
+          # What stays on GitHub's images, and why, is in plan_matrix.py's
+          # docstring: the Linux and Windows release builds (memory; the
+          # swapfile, sysroot mount and chroot), the Windows package job (its
+          # per-machine .msi install needs an administrator), the macOS
+          # laufey legs and rpm-smoke.
           matrix=$(TARGETS="$TARGETS" python3 -I .github/denext-runtime/plan_matrix.py)
           linux_matrix=$(MATRIX="$matrix" python3 -c 'import json, os; print(json.dumps([t for t in json.loads(os.environ["MATRIX"]) if "-linux-" in t["target"]]))')
           {
@@ -529,11 +546,12 @@ jobs:
     name: laufey / ${{ matrix.target }}
     needs: setup
     if: ${{ !needs.setup.outputs.reuse_laufey && !inputs.cli_only }}
-    # matrix.laufey_runner (plan_matrix.py): the Ubuntu 22.04 Linux pool for
-    # x86_64-unknown-linux-gnu (RUNNER_LINUX_X64_2204; its image carries every
-    # package below, so nothing is fetched), GitHub's image for the rest: the
-    # macOS leg `brew install`s llvm and ninja and the Windows legs use
-    # Chocolatey, which the self-hosted images do not have.
+    # matrix.laufey_runner (plan_matrix.py): the Ubuntu 22.04 Linux pools
+    # (RUNNER_LINUX_X64_2204, RUNNER_LINUX_ARM64; their images carry every
+    # package below, so nothing is fetched) and the Windows pools
+    # (RUNNER_WINDOWS_X64 / _ARM; make and ninja from the pinned Chocolatey
+    # packages where there is no Chocolatey). The macOS legs take GitHub's
+    # image (see plan_matrix.py).
     # matrix.runs_on.laufey: the pool while it has a free slot, else the
     # image (the overflow, plan_matrix.py).
     runs-on: ${{ matrix.runs_on.laufey || matrix.laufey_runner || matrix.os }}
@@ -635,8 +653,45 @@ jobs:
             done
             echo "::error::choco could not install $1"; return 1
           }
-          choco_install make --version=4.4.1
-          choco_install ninja --version=1.13.2
+          if command -v choco >/dev/null 2>&1; then
+            choco_install make --version=4.4.1
+            choco_install ninja --version=1.13.2
+          else
+            # Our Windows pools have no Chocolatey (and the job account is no
+            # administrator): the same two packages, unpacked here. The
+            # SHA-256 of each .nupkg as community.chocolatey.org serves it
+            # (its SHA-512 matches the feed's PackageHash), so these are the
+            # bytes `choco install` would use: make is ezwinports'
+            # make-4.4.1-without-guile-w32-bin, ninja the upstream
+            # ninja-win.zip (in tools/ninja-win_x32.zip).
+            tools="$RUNNER_TEMP/laufey-tools"
+            if command -v cygpath >/dev/null; then tools="$(cygpath -u "$RUNNER_TEMP")/laufey-tools"; fi
+            rm -rf "$tools"; mkdir -p "$tools"
+            nupkg() {
+              local name=$1 version=$2 sha=$3 delay=15 try
+              for try in 1 2 3 4; do
+                if curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 20 --max-time 600 \
+                  -o "$tools/$name.zip" "https://community.chocolatey.org/api/v2/package/$name/$version"; then
+                  break
+                fi
+                [ "$try" = 4 ] && { echo "::error::could not fetch the $name $version package"; return 1; }
+                echo "::warning::$name $version: try $try of 4 failed; again in ${delay}s"
+                sleep "$delay"; delay=$((delay * 2))
+              done
+              echo "$sha  $tools/$name.zip" | sha256sum -c -
+              powershell -NoProfile -Command "Expand-Archive -Path '$(cygpath -w "$tools/$name.zip")' -DestinationPath '$(cygpath -w "$tools/$name")'"
+            }
+            nupkg make 4.4.1 8b2dec73ed4c84163c4a4f9bfe658553b1e3d1fdfa8930d2aa438e030ff21f9d
+            nupkg ninja 1.13.2 b44ad9d0ddef594489a75b04be5bf77f50a7d92cf8fab88ea2f9f7c2a399919b
+            powershell -NoProfile -Command "Expand-Archive -Path '$(cygpath -w "$tools/ninja/tools/ninja-win_x32.zip")' -DestinationPath '$(cygpath -w "$tools/ninja/bin")'"
+            test -x "$tools/make/tools/install/bin/make.exe" || { echo "::error::no make.exe in the make package"; exit 1; }
+            test -x "$tools/ninja/bin/ninja.exe" || { echo "::error::no ninja.exe in the ninja package"; exit 1; }
+            # First on PATH from the next step on (ahead of VS's own ninja).
+            cygpath -w "$tools/make/tools/install/bin" >>"$GITHUB_PATH"
+            cygpath -w "$tools/ninja/bin" >>"$GITHUB_PATH"
+            "$tools/make/tools/install/bin/make.exe" --version
+            "$tools/ninja/bin/ninja.exe" --version
+          fi
           # The WebView2 SDK at a pinned version, checked against its
           # SHA-256 before use (nuget.org's flat container; the .nupkg is a zip).
           WV2_VERSION=1.0.4258.31
@@ -1938,13 +1993,15 @@ jobs:
     name: package / ${{ matrix.target }}
     needs: [setup, laufey, denort]
     if: ${{ always() && !inputs.cli_only && needs.setup.result == 'success' && (needs.laufey.result == 'success' || (needs.laufey.result == 'skipped' && needs.setup.outputs.reuse_laufey != '')) && (needs.denort.result == 'success' || (needs.denort.result == 'skipped' && needs.setup.outputs.reuse_denort != '')) }}
-    # matrix.gui_runner: this job launches the packaged app, so it needs a
-    # GUI login session (plan_matrix.py): the self-hosted runner the
-    # repository variables name for that while its pool has a free slot this
-    # job would not wait for (matrix.runs_on.<job>, the overflow), else the
-    # image; the image on a fork's pull_request / pull_request_target
-    # (self-hosted never takes a fork's code).
-    runs-on: ${{ ((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && matrix.os) || matrix.runs_on.package || matrix.gui_runner || matrix.os }}
+    # matrix.package_runner: this job launches the packaged app, so it needs a
+    # GUI login session (plan_matrix.py `gui_runner`; on Windows the image,
+    # as its e2e installs an .msi per machine, which needs an administrator):
+    # the self-hosted runner the repository variables name for that while
+    # its pool has a free slot this job would not wait for
+    # (matrix.runs_on.<job>, the overflow), else the image; the image on a
+    # fork's pull_request / pull_request_target (self-hosted never takes a
+    # fork's code).
+    runs-on: ${{ ((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && matrix.os) || matrix.runs_on.package || matrix.package_runner || matrix.os }}
     timeout-minutes: 180
     permissions:
       contents: read
