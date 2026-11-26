@@ -22716,7 +22716,7 @@ where the changes are discussed.
        file name clashes), in the lint job.
      - Node tests enabled: none.
 
-560. **`feat(cli)`: Cargo-style cross-process locks for `DENO_DIR`, build
+559. **`feat(cli)`: Cargo-style cross-process locks for `DENO_DIR`, build
      outputs and `deno.lock`** (CLI; `libs/cache_dir/cache_lock.rs`,
      `cli/cache/lock.rs`, `cli/lib.rs`, `cli/file_fetcher.rs`, `cli/npm.rs`,
      `cli/tools/{clean,compile,bundle/mod,doc}.rs`, `libs/lockfile/lib.rs`,
@@ -22728,29 +22728,30 @@ where the changes are discussed.
      the others' entries.
      - `deno_cache_dir::cache_lock` follows Cargo's `cache_lock`: a package
        cache locker with three modes over two lock files in `DENO_DIR/locks/`
-       (`DownloadExclusive` excludes other downloads, not readers; `Shared`
-       for readers; `MutateExclusive` excludes everything), taken
+       (`DownloadExclusive` excludes other downloads, not readers; `Shared` for
+       readers; `MutateExclusive` excludes everything), taken
        mutate-then-download, recursive within a process, refusing out-of-order
        requests and shared-to-exclusive upgrades; plus `lock_path` /
-       `try_lock_path` for an exclusive or shared lock on an output path
-       (lock file under `DENO_DIR/locks/artifacts/`). OS file locks (flock /
+       `try_lock_path` for an exclusive or shared lock on an output path (lock
+       file under `DENO_DIR/locks/artifacts/`). OS file locks (flock /
        `LockFileEx`), released when the process exits, tried without blocking
        first, best effort when a lock file cannot be created.
      - Every subcommand that finishes on its own (`cache`, `check`, `test`,
-       `install`, `sync-types`, `compile`, `bundle` and `desktop` without
-       watch / HMR, …) holds `Shared` for its run; `run`, `serve`, `task`,
-       `repl`, `lsp`, `jupyter` and any `--watch` hold none; `deno clean`
-       holds `MutateExclusive` and keeps `DENO_DIR/locks`. Downloads (file
-       fetcher and npm) hold `DownloadExclusive` while they fetch.
+       `install`, `sync-types`, `compile`, `bundle` and `desktop` without watch
+       / HMR, …) holds `Shared` for its run; `run`, `serve`, `task`, `repl`,
+       `lsp`, `jupyter` and any `--watch` hold none; `deno clean` holds
+       `MutateExclusive` and keeps `DENO_DIR/locks`. Downloads (file fetcher and
+       npm) hold `DownloadExclusive` while they fetch.
      - Outputs: `deno test --coverage` (not a nested one under the parent's
        `DENO_COVERAGE_DIR`), `deno coverage` (shared), `deno compile` /
        `desktop --output`, `deno bundle --outdir` / `--output` and
        `deno doc --html` lock their output.
      - `deno.lock`: a write takes an exclusive lock and, when the file changed
-       on disk since this process read or last wrote it, merges the disk
-       content in first with the git merge-conflict merge
+       on disk since this process read or last wrote it, merges the disk content
+       in first with the git merge-conflict merge
        (`Lockfile::merge_concurrent_write`; version 5 only).
-     - A contended lock prints Cargo's `Blocking waiting for file lock on
+     - A contended lock prints Cargo's
+       `Blocking waiting for file lock on
        <what>` and waits.
      - Tests: `deno_cache_dir` `cache_lock` unit tests, `deno_lockfile`
        `merges_concurrent_write`, `cli` `cache::lock` `subcommand_lock_modes` /
@@ -22759,7 +22760,7 @@ where the changes are discussed.
        kept `locks` directory.
      - Node tests enabled: none.
 
-<!-- 561-589: reserved for the other items of the denext.31 train -->
+<!-- 560-589: reserved for the other items of the denext.31 train -->
 
 590. **`fix(ext/web, ext/node)`: each `MessagePort` and `node:worker_threads`
      message is its own task** (runtime; `ext/web/13_message_port.js`,
