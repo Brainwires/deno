@@ -2526,7 +2526,14 @@ function plainStats(value) {
 // `encodingIndex` to video streams only and creates a remote stream object
 // with its first RTCP report.
 function refineStats(pc, engineEntries, now, whole) {
-  const entries = withoutRetiredStreams(pc, engineEntries);
+  // The engine's own `media-source` objects (rtci names one for each sender
+  // track) carry nothing the driver measures: a sender's media source is
+  // the one `mediaSourceStats` makes from the track, which the outbound
+  // stream's `mediaSourceId` names. Kept, each source would be listed twice.
+  const entries = ArrayPrototypeFilter(
+    withoutRetiredStreams(pc, engineEntries),
+    (e) => e.type !== "media-source",
+  );
   const ids = new SafeSet();
   let transportId = null;
   for (let i = 0; i < entries.length; ++i) {
@@ -6076,7 +6083,15 @@ function requireRtcpMux(sdp) {
     const fields = StringPrototypeSplit(StringPrototypeTrim(header), " ");
     if (fields[0] !== "audio" && fields[0] !== "video") continue;
     if (fields[1] === "0") continue;
-    if (!StringPrototypeIncludes(section, "a=rtcp-mux")) {
+    // The `a=rtcp-mux` line itself (RFC 5761 section 5.1.1), not another
+    // attribute that starts with its name (`a=rtcp-mux-only`, RFC 8858).
+    const lines = StringPrototypeSplit(section, "\n");
+    if (
+      !ArrayPrototypeSome(
+        lines,
+        (line) => StringPrototypeTrim(line) === "a=rtcp-mux",
+      )
+    ) {
       throw new DOMException(
         "setRemoteDescription: rtcpMuxPolicy is 'require', but a media section doesn't multiplex RTCP",
         "InvalidAccessError",

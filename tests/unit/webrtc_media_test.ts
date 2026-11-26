@@ -177,7 +177,10 @@ Deno.test("fakeTracksSendMedia", async () => {
     const video = sent.find((s) =>
       s.type === "media-source" && s.kind === "video"
     );
-    assert(video.width > 0 && video.height > 0 && video.framesPerSecond > 0);
+    assert(
+      video.width > 0 && video.height > 0 && video.framesPerSecond > 0,
+      JSON.stringify(sent.filter((s) => s.type === "media-source")),
+    );
     const outbound = sent.find((s) =>
       s.type === "outbound-rtp" && s.kind === "video"
     );

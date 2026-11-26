@@ -292,26 +292,25 @@ pub(crate) fn add_pacer_refusals(
   stats: &mut [serde_json::Value],
   (packets, bytes): (u64, u64),
 ) {
-  if packets == 0 {
-    return;
-  }
-  let Some(selected) = stats
+  let selected = stats
     .iter()
     .find(|s| s["type"] == "transport")
     .and_then(|s| s["selectedCandidatePairId"].as_str())
-    .map(str::to_owned)
-  else {
-    return;
-  };
+    .map(str::to_owned);
   for s in stats.iter_mut() {
-    if s["type"] == "candidate-pair" && s["id"] == selected.as_str() {
-      for (key, n) in [
-        ("packetsDiscardedOnSend", packets),
-        ("bytesDiscardedOnSend", bytes),
-      ] {
-        let before = s[key].as_u64().unwrap_or(0);
-        s[key] = (before + n).into();
-      }
+    if s["type"] != "candidate-pair" {
+      continue;
+    }
+    // The sockets are the driver's, so every pair has the members (rtci 0.2
+    // leaves them out until the application reports a discard): 0 until
+    // something is discarded.
+    let refused = selected.as_deref() == s["id"].as_str();
+    for (key, n) in [
+      ("packetsDiscardedOnSend", packets),
+      ("bytesDiscardedOnSend", bytes),
+    ] {
+      let before = s[key].as_u64().unwrap_or(0);
+      s[key] = (before + if refused { n } else { 0 }).into();
     }
   }
 }

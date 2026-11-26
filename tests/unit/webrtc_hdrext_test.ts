@@ -179,6 +179,11 @@ Deno.test("webrtcHeaderExtensionsNegotiated", async () => {
     assertEquals(
       negotiated.find((e: { uri: string }) => e.uri === level).direction,
       "stopped",
+      `answer: ${
+        pc2.localDescription!.sdp.split("\r\n").filter((l) =>
+          l.startsWith("a=extmap")
+        ).join(" | ")
+      }`,
     );
     assertEquals(
       negotiated.find((e: { uri: string }) => e.uri === MID).direction,
