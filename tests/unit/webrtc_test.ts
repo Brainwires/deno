@@ -1369,7 +1369,13 @@ Deno.test("webrtcSpecDetails", async () => {
   const mux = await assertRejects(() =>
     b.setRemoteDescription({ type: "offer", sdp: noMux })
   );
-  assertEquals((mux as DOMException).name, "InvalidAccessError");
+  assertEquals(
+    (mux as DOMException).name,
+    "InvalidAccessError",
+    `${(mux as Error).message}\nrtcp lines left: ${
+      noMux.split("\r\n").filter((l) => l.startsWith("a=rtcp")).join(" | ")
+    }`,
+  );
 
   // ICE stays "new" while no remote candidate is known.
   const noCandidates = offer.sdp!.replace(/a=candidate:[^\r\n]*\r\n/g, "");
@@ -2322,7 +2328,18 @@ async function removeFirstOfTwo() {
   }
   await negotiate(a, b);
   await Promise.all([connected(a), connected(b)]);
-  assertEquals(b.getTransceivers().length, 2);
+  const media = (sdp: string) =>
+    sdp.split("\r\n").filter((l) =>
+      /^(m=|a=(mid|bundle-only|group|msid|sendonly|recvonly|inactive))/
+        .test(l)
+    ).join(" | ");
+  assertEquals(
+    b.getTransceivers().length,
+    2,
+    `offer: ${media(a.localDescription!.sdp)}\nanswer: ${
+      media(b.localDescription!.sdp)
+    }\nb mids: ${b.getTransceivers().map((t) => t.mid).join(",")}`,
+  );
   const [stopped, kept] = b.getTransceivers();
   const [aStopped, aKept] = a.getTransceivers();
   stopped.stop();

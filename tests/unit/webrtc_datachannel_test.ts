@@ -330,7 +330,16 @@ Deno.test({
     const stats = [...(await a.getStats()).values()].filter((s) =>
       s.type === "data-channel"
     );
-    assertEquals(stats.length, 1);
+    assertEquals(
+      stats.length,
+      1,
+      JSON.stringify(stats.map((s) => ({
+        id: s.id,
+        label: s.label,
+        state: s.state,
+        dataChannelIdentifier: s.dataChannelIdentifier,
+      }))),
+    );
     assertEquals(stats[0].label, "stats-moved");
     assertEquals(stats[0].dataChannelIdentifier, open.id);
     assertEquals(stats[0].state, "open");

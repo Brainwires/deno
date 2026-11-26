@@ -23003,6 +23003,25 @@ where the changes are discussed.
        failures after a failed test there were its unclosed connections.
      - Node tests enabled: none.
 
+568. **`fix(ext/webrtc)`: stats and the rtcp-mux check on rtci 0.2** (runtime;
+     `ext/webrtc/01_webrtc.js`, `peer.rs`; tests in `tests/unit/webrtc_*.ts`).
+     - A candidate pair's `packetsDiscardedOnSend` and `bytesDiscardedOnSend`
+       are always there (0 until something is discarded): the sockets are the
+       driver's, and rtci 0.2 leaves the members out until an application
+       reports a discard.
+     - The engine names a `media-source` for each sender track
+       (`RTCMediaSource_<track>`) with nothing the driver measures in it, beside
+       the one JavaScript makes from the track (its size and frame rate), which
+       `mediaSourceId` names: the engine's is left out.
+     - rtcpMuxPolicy "require" looks for the `a=rtcp-mux` line itself, not any
+       line that starts with it (`a=rtcp-mux-only`, RFC 8858).
+     - Tests: `webrtcWithoutCongestionFeedbackIsNotPaced`,
+       `fakeTracksSendMedia`, `webrtcSpecDetails`. The assertions of
+       `webrtcDataChannelTransferredChannelStatsHaveItsId`, `removeFirstOfTwo`
+       (two tests) and `webrtcHeaderExtensionsNegotiated` name what they saw
+       when they fail.
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
