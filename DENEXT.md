@@ -22754,19 +22754,32 @@ where the changes are discussed.
        over 20 loopback connections).
      - Node tests enabled: none.
 
-583. **`test(ext/webrtc)`: the mDNS test no longer races the peer's first
-     check** (`ext/webrtc/tests.rs`).
+583. **`fix(ext/webrtc)`: an mDNS answer leaves from the address its record
+     names** (runtime; `ext/webrtc/peer.rs`, `tests.rs`).
      `mdns_host_candidates_resolve_between_peers` (ignored; CI's `webrtc-mdns`
-     job runs it) gave A an answer with B's host
-     candidates removed and its `a=end-of-candidates` kept: a peer that said
-     it has no candidates. A's check list then has no pair and fails at once
-     (`fail_without_pairs`, and since rtci 0.1 the engine's checklist failure
-     at end-of-candidates, RFC 8838 section 8), unless a check from B has
-     arrived before A applies the answer. It did with the 0.22.0+brainwires.5
-     engine; on rtci 0.2 it times out waiting for the channel. The answer now
-     leaves out the end-of-candidates too, as a peer that is still trickling,
-     so A only reaches B as the peer-reflexive source of B's checks, which the
-     test is about.
+     job runs it) failed every time on rtci 0.2 and passed on the
+     0.22.0+brainwires.5.1 engine: no `.local` name resolved, so neither side
+     had a remote candidate or a pair. Since rtci-mdns's RFC 6762 resolver
+     (in rtci 0.1 and 0.2), a resolver takes an A record only from the
+     address it names and only from an on-link source (RFC 6762 section 11),
+     and the responder sends each address's records in a message of their own
+     whose `local_addr` is that address, for the application to send on its
+     interface (section 14). The driver sent every mDNS message from its
+     wildcard socket on the default multicast interface: every answer had the
+     same IP source (on a cloud host, its public address, which is not
+     on-link), so every answer was refused.
+     - The driver now sends each mDNS message on the interface of the IPv4
+       address the engine gives (`IP_MULTICAST_IF`, so the IP source is that
+       address); a query (unspecified address) or an IPv6 record's message
+       takes the default interface. A name of a public address still doesn't
+       resolve from another process (off-link); a peer then learns it as a
+       peer-reflexive candidate.
+     - The test's answer also leaves out `a=end-of-candidates`, as from a peer
+       still trickling: with B's host candidates removed, a peer that said it
+       is done would fail A's empty check list at once (`fail_without_pairs`,
+       and the engine's checklist failure at end-of-candidates, RFC 8838
+       section 8) unless one of B's checks arrived first.
+     - Tests: `mdns_host_candidates_resolve_between_peers`, looped.
      - Node tests enabled: none.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
@@ -22780,11 +22793,11 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 517, 518-538, 554-556, 580, 581 and the runtime
-parts of 540-551) are what the prebuilt `libdenort` carries. The CLI-side parts
-(for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged
-app's launchers) are in the branch too, but a stock CLI does not run them;
-denext's own launcher provides that environment.
+506-510, 511, 512, 513, 515, 517, 518-538, 554-556, 580, 581, 583 and the
+runtime parts of 540-551) are what the prebuilt `libdenort` carries. The
+CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
+into a packaged app's launchers) are in the branch too, but a stock CLI does not
+run them; denext's own launcher provides that environment.
 
 506-510, 511, 512, 513, 515, 516, 517, 518) are what the prebuilt `libdenort`
 carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /

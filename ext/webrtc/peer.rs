@@ -959,6 +959,32 @@ fn bind_mdns(hosts: &[IpAddr]) -> std::io::Result<UdpSocket> {
   UdpSocket::from_std(socket.into())
 }
 
+/// Sends one mDNS message to the IPv4 group from `from`, the address the
+/// engine says it leaves from: an answer leaves from the address its record
+/// names (rtci-mdns aggregates records per address), on that address's
+/// interface (RFC 6762 section 14), so that its IP source is that address. A
+/// resolver takes an A record only from the address it names, and only from
+/// an on-link source (RFC 6762 section 11, the engine's hardening): sent from
+/// the wildcard socket's default multicast interface instead, every answer
+/// left from one address (a cloud host's public one, refused as off-link),
+/// and no `.local` name resolved. A message from the unspecified address (a
+/// query) or an IPv6 one (this socket is IPv4) takes the default interface.
+fn send_mdns(socket: &EcnUdpSocket, message: &[u8], from: IpAddr) {
+  let interface = match from {
+    IpAddr::V4(v4) if !v4.is_unspecified() && !v4.is_loopback() => v4,
+    _ => Ipv4Addr::UNSPECIFIED,
+  };
+  if let Err(e) =
+    socket2::SockRef::from(&**socket).set_multicast_if_v4(&interface)
+  {
+    log::debug!("webrtc: mDNS interface {interface}: {e}");
+    return;
+  }
+  if let Err(e) = socket.try_send_to(message, MDNS_DEST_ADDR) {
+    log::debug!("webrtc: mDNS send from {interface}: {e}");
+  }
+}
+
 /// Hides the base address a server-reflexive or relay candidate names
 /// (`raddr` / `rport`) when the host candidates are published under mDNS
 /// names, as browsers do: it is the host address the name stands for.
@@ -1769,10 +1795,8 @@ impl Core {
       let to = msg.transport.peer_addr;
       // mDNS queries and answers (permitted when the socket was opened).
       if to == MDNS_DEST_ADDR {
-        if let Some(socket) = &self.mdns_socket
-          && let Err(e) = socket.try_send_to(&msg.message, to)
-        {
-          log::debug!("webrtc: mDNS send: {e}");
+        if let Some(socket) = &self.mdns_socket {
+          send_mdns(socket, &msg.message, local.ip());
         }
         continue;
       }
