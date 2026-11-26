@@ -331,6 +331,8 @@ function announcedSdp(state, sdp) {
   const lines = StringPrototypeSplit(sdp, "\n");
   const out = [];
   let ufrag = "";
+  let kept = 0;
+  let hidden = 0;
   for (let i = 0; i < lines.length; ++i) {
     const line = lines[i];
     const trimmed = StringPrototypeTrim(line);
@@ -342,8 +344,10 @@ function announcedSdp(state, sdp) {
         !SetPrototypeHas(state.announced, announcedKey(ufrag, candidate)) &&
         !SetPrototypeHas(state.announced, announcedKey(null, candidate))
       ) {
+        hidden++;
         continue;
       }
+      kept++;
     } else if (
       trimmed === "a=end-of-candidates" &&
       state.iceGatheringState !== "complete"
@@ -352,7 +356,37 @@ function announcedSdp(state, sdp) {
     }
     ArrayPrototypePush(out, line);
   }
+  if (hidden > 0 && kept === 0) withoutDefaultDestination(out);
   return ArrayPrototypeJoin(out, "\n");
+}
+
+// rtci 0.2 also puts its default candidate's address and port in the m=,
+// c= and a=rtcp lines of a description it adds candidates to (RFC 8839
+// section 4.2.1.2, RFC 9143 section 7.2). With none of them announced yet,
+// the lines say "no candidates yet" again, as the description did when it
+// was created: port 9 and 0.0.0.0 (RFC 9429 section 5.2.1), so a description
+// read right after setLocalDescription() is the one createOffer() /
+// createAnswer() returned (WPT setLocalDescription-pranswer-parameterless).
+// A rejected or bundle-only section keeps its port 0.
+function withoutDefaultDestination(lines) {
+  let inMedia = false;
+  for (let i = 0; i < lines.length; ++i) {
+    const line = lines[i];
+    const end = StringPrototypeEndsWith(line, "\r") ? "\r" : "";
+    const trimmed = StringPrototypeTrim(line);
+    if (StringPrototypeStartsWith(trimmed, "m=")) {
+      inMedia = true;
+      const fields = StringPrototypeSplit(trimmed, " ");
+      if (fields.length > 1 && fields[1] !== "0") {
+        fields[1] = "9";
+        lines[i] = ArrayPrototypeJoin(fields, " ") + end;
+      }
+    } else if (inMedia && StringPrototypeStartsWith(trimmed, "c=IN ")) {
+      lines[i] = "c=IN IP4 0.0.0.0" + end;
+    } else if (StringPrototypeStartsWith(trimmed, "a=rtcp:")) {
+      lines[i] = "a=rtcp:9 IN IP4 0.0.0.0" + end;
+    }
+  }
 }
 
 // --- RTCIceCandidate -------------------------------------------------------

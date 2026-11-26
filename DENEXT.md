@@ -23095,6 +23095,17 @@ where the changes are discussed.
        write the answer ("url parse: relative URL without a base",
        `protocol/rtp-headerextensions` "Negotiates the subset of supported
        extensions offered").
+     - Local descriptions: they already showed only the candidates their
+       `icecandidate` event announced (and `a=end-of-candidates` once gathering
+       completed), but rtci 0.2 also writes its default candidate's address and
+       port into the m=, c= and a=rtcp lines of a description it adds candidates
+       to (RFC 8839 section 4.2.1.2). With none announced yet those lines say
+       "no candidates yet" again (port 9, 0.0.0.0, RFC 9429 section 5.2.1), so a
+       description read right after `setLocalDescription()` is the one
+       `createAnswer()` returned (`setLocalDescription-pranswer-parameterless`
+       "uses [[LastCreatedAnswer]]"). `createOffer()` / `createAnswer()` are not
+       changed: a later offer lists the candidates gathered so far, as RFC 9429
+       section 5.2.2 has it.
      - More expectations, from the full run on the train: passing now,
        `supported-stats` "outbound-rtp's totalPacketSendDelay" (rtci 0.2 reports
        it), `simplecall-no-ssrcs` and `RTCRtpTransceiver.https.html?rest`
