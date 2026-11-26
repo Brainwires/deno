@@ -61,7 +61,6 @@
       "outbound-rtp's psnrSum",
       "outbound-rtp's psnrMeasurements",
       "outbound-rtp's totalEncodeTime",
-      "outbound-rtp's totalPacketSendDelay",
       "outbound-rtp's qualityLimitationReason",
       "outbound-rtp's qualityLimitationDurations",
       "outbound-rtp's qualityLimitationResolutionChanges",

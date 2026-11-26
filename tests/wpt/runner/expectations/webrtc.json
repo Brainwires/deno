@@ -123,7 +123,11 @@
       "A test video track transmits at least 40 Kbits/sec of data at 480x360 size"
     ]
   },
-  "RTCPeerConnection-iceConnectionState-disconnected.https.html": false,
+  "RTCPeerConnection-iceConnectionState-disconnected.https.html": {
+    "expectedFailures": [
+      "ICE restart when ICE is disconnected results in checking, then connected"
+    ]
+  },
   "RTCPeerConnection-iceConnectionState.https.html": true,
   "RTCPeerConnection-iceGatheringState.html?interop-2026": {
     "expectedFailures": [
@@ -272,12 +276,7 @@
   "RTCRtpTransceiver-stopping.https.html?interop-2026": true,
   "RTCRtpTransceiver-stopping.https.html?rest": true,
   "RTCRtpTransceiver.https.html?interop-2026": true,
-  "RTCRtpTransceiver.https.html?rest": {
-    "flaky": true,
-    "expectedFailures": [
-      "checkNoMidOffer"
-    ]
-  },
+  "RTCRtpTransceiver.https.html?rest": true,
   "RTCSctpTransport-constructor.html": true,
   "RTCSctpTransport-events.html": true,
   "RTCSctpTransport-maxChannels.html?interop-2026": true,
@@ -348,7 +347,11 @@
       ]
     },
     "h264-unidirectional-codec-offer.https.html": false,
-    "h265-level-id.https.html": false,
+    "h265-level-id.https.html": {
+      "expectedFailures": [
+        "Offer to receive level-id=30 and set codec from getCapabilities"
+      ]
+    },
     "h265-loopback.https.html": false,
     "handover-datachannel.html": false,
     "handover.html": true,
@@ -368,7 +371,12 @@
     "rtx-codecs.https.html": true,
     "sctp-format.html": true,
     "sdes-dont-dont-dont.html": true,
-    "simulcast-answer.html": true,
+    "simulcast-answer.html": {
+      "expectedFailures": [
+        "createAnswer() with multiple send encodings should create simulcast answer",
+        "Disabling encodings locally does not change the SDP"
+      ]
+    },
     "simulcast-offer.html": true,
     "split.https.html": false,
     "transceiver-direction-match.html": false,
@@ -385,7 +393,7 @@
   "receiver-track-live.https.html": true,
   "recvonly-transceiver-can-become-sendrecv.https.html": true,
   "rtp-stats-lifetime.https.html": true,
-  "simplecall-no-ssrcs.https.html": false,
+  "simplecall-no-ssrcs.https.html": true,
   "simplecall.https.html": true,
   "simulcast": {
     "av1.https.html": false,
@@ -394,7 +402,11 @@
     "h264.https.html": false,
     "negotiation-encodings.https.html?interop-2026": true,
     "negotiation-encodings.https.html?rest": true,
-    "rid-manipulation.html": true,
+    "rid-manipulation.html": {
+      "expectedFailures": [
+        "Remote reanswer altering rids does not throw an exception."
+      ]
+    },
     "screenshare.https.html": false,
     "setParameters-active.https.html": false,
     "setParameters-encodings.https.html": true,
