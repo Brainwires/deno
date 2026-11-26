@@ -82,6 +82,7 @@ pub fn subcommand_lock_mode(flags: &Flags) -> Option<CacheLockMode> {
     | DenoSubcommand::Doc(_)
     | DenoSubcommand::Info(_)
     | DenoSubcommand::Install(_)
+    | DenoSubcommand::SyncTypes(_)
     | DenoSubcommand::Link(_)
     | DenoSubcommand::Unlink(_)
     | DenoSubcommand::Lint(_)
