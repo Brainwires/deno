@@ -22679,6 +22679,41 @@ where the changes are discussed.
        on the image).
      - Node tests enabled: none.
 
+<!-- 558-589: reserved for the other items of the denext.31 train -->
+
+590. **`fix(ext/web, ext/node)`: each `MessagePort` and `node:worker_threads`
+     message is its own task** (runtime; `ext/web/13_message_port.js`,
+     `ext/node/polyfills/worker_threads.ts`). Item 555's bug in the receive
+     loops it left alone: `MessagePort.start()`'s loop yielded one
+     `queueMicrotask` after a dispatch and took the next message from a recv op
+     that resolves at once when one is queued, so a listener added a few
+     microtasks later (a `once` listener behind `Promise.race()` in an async
+     function, WPT's `nextMessageOrTimeout`; `events.once()` awaited with more
+     work in between) missed the next message, which went to no listener. The
+     node `Worker`'s receive loop did the same, and the port a
+     `moveMessagePortToContext()` wrapper reads took queued messages with no
+     yield at all.
+     - After a dispatch each loop waits for the event loop's next turn
+       (`op_void_async_deferred`) before it takes the next message, as item 555
+       does for workers: every microtask the previous dispatch started has run.
+       The node `Worker`'s drain loses its batch limit, as the web `Worker`'s
+       did.
+     - Node (20, 24 and 26, checked): a `MessagePort` runs the microtask queue
+       after every message it emits, so a `once()` re-armed 50 microtasks later
+       gets the next one (no `setImmediate` or timer runs in between; here an
+       event-loop turn does). Node's own `Worker` drops the second of two
+       messages that arrive in one drain even for a listener re-armed in the
+       next microtask; Deno delivers it, as for a port.
+     - `BroadcastChannel` (`ext/web/01_broadcast_channel.js`) already dispatches
+       each message through `defer()` (a timer task); not changed.
+     - Tests: `tests/unit/message_channel_test.ts` "messagechannel messages
+       queued together reach a listener re-added later" and "messagechannel
+       onmessage reassigned in a promise chain gets every message";
+       `tests/unit_node/worker_threads_test.ts` "MessagePort messages queued
+       together reach once() re-armed later" and "Worker messages queued
+       together reach once() re-armed later".
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -22690,7 +22725,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 517, 518-538, 554-556 and the runtime parts of
+506-510, 511, 512, 513, 515, 517, 518-538, 554-556, 590 and the runtime parts of
 540-551) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's

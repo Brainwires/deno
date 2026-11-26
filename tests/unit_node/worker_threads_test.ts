@@ -1632,3 +1632,61 @@ Deno.test("[node/worker_threads] process IPC members in a worker without IPC", a
     await worker.terminate();
   }
 });
+
+// Each message is its own task: `events.once()` re-armed any number of
+// microtasks after the previous message gets the next one, also when both
+// were queued before either was dispatched. Node runs the microtask queue
+// after every message a MessagePort emits, so it passes there too.
+function nextMessageOrTimeout(
+  target: EventEmitter | workerThreads.MessagePort,
+  ms: number,
+): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    // deno-lint-ignore no-explicit-any
+    once(target as any, "message").then(([data]) => data),
+    new Promise((resolve) => timer = setTimeout(resolve, ms)),
+  ]).finally(() => clearTimeout(timer));
+}
+
+Deno.test("[node/worker_threads] MessagePort messages queued together reach once() re-armed later", async () => {
+  const { port1, port2 } = new workerThreads.MessageChannel();
+  port1.postMessage("a");
+  port1.postMessage("b");
+  port1.postMessage("c");
+  assertEquals(await nextMessageOrTimeout(port2, 10_000), "a");
+  assertEquals(await nextMessageOrTimeout(port2, 2_000), "b");
+  // A longer chain than any fixed number of yielded microtasks.
+  for (let i = 0; i < 50; i++) await null;
+  assertEquals(await nextMessageOrTimeout(port2, 2_000), "c");
+  port1.close();
+  port2.close();
+});
+
+// The same for a Worker's messages. Node's own Worker drops "b" here when
+// both arrive in one drain (it emits them without a microtask checkpoint in
+// between); Deno delivers each message as its own task, as for a MessagePort.
+Deno.test("[node/worker_threads] Worker messages queued together reach once() re-armed later", async () => {
+  const worker = new workerThreads.Worker(
+    `
+    const { parentPort } = require("node:worker_threads");
+    parentPort.once("message", () => {
+      parentPort.postMessage("a");
+      parentPort.postMessage("b");
+    });
+    `,
+    { eval: true },
+  );
+  try {
+    const first = nextMessageOrTimeout(worker, 10_000);
+    worker.postMessage("go");
+    // Both messages are queued by the time this thread takes the first.
+    const until = performance.now() + 500;
+    while (performance.now() < until);
+    assertEquals(await first, "a");
+    for (let i = 0; i < 50; i++) await null;
+    assertEquals(await nextMessageOrTimeout(worker, 2_000), "b");
+  } finally {
+    await worker.terminate();
+  }
+});

@@ -20,6 +20,7 @@ const {
   op_node_worker_thread_recv_message,
   op_node_worker_thread_register,
   op_node_worker_thread_set_listener_count,
+  op_void_async_deferred,
   op_worker_get_resource_limits,
   op_worker_threads_filename,
 } = core.ops;
@@ -1288,21 +1289,23 @@ class NodeWorker extends EventEmitter {
       }
       if (!this.#dispatchWorkerThreadMessage(data)) return;
       // Drain messages already queued on the host side instead of taking the
-      // async op + Promise path for each. The whole burst is processed within
-      // this event-loop turn; the batch limit prevents starving the event loop
-      // under a sustained flood.
-      for (let i = 0; i < 1000 && this.#status !== "TERMINATED"; i++) {
+      // async op + Promise path for each, as the web Worker (11_workers.js)
+      // does.
+      while (this.#status !== "TERMINATED") {
+        // Each message dispatch is its own task, as for a Node MessagePort,
+        // which runs the microtask and nextTick queues after every message it
+        // emits: every microtask the previous dispatch started has run before
+        // the next one. A listener added any number of microtasks after the previous
+        // message (`events.once(worker, "message")` awaited in an async
+        // function) is in place, however long that chain is: yielding a
+        // fixed number of microtasks loses the message to a longer one. So
+        // after a dispatch the loop waits for the event loop's next turn
+        // before it takes another message, from here or from the op above
+        // (which resolves at once when one is queued).
+        await op_void_async_deferred();
+        if (this.#status === "TERMINATED") return;
         const syncData = op_host_recv_message_sync(this.#id);
         if (syncData === null) break;
-        // Each message dispatch is its own task. Yield a microtask before
-        // delivering this already-dequeued message so a handler that re-armed
-        // itself in a microtask after the previous dispatch (e.g. an
-        // `events.once` listener that re-attaches in a `.then`) is installed
-        // first -- otherwise the message reaches the stale handler and is
-        // lost. A synchronous checkpoint can't help: V8 won't run microtasks
-        // reentrantly while we are already inside one.
-        await new Promise((resolve) => queueMicrotask(() => resolve()));
-        if (this.#status === "TERMINATED") return;
         if (!this.#dispatchWorkerThreadMessage(syncData)) return;
       }
     }
@@ -2412,9 +2415,13 @@ function moveMessagePortToContext(
           // deno-lint-ignore no-explicit-any
           (err as any).code = "ERR_MESSAGE_TARGET_CONTEXT_UNAVAILABLE";
           dispatchMessageError(err);
+          await op_void_async_deferred();
           continue;
         }
         dispatchMessage(message);
+        // One task per message, as MessagePort.start() in 13_message_port.js:
+        // the recv op resolves at once when a message is already queued.
+        await op_void_async_deferred();
       }
     })();
   };

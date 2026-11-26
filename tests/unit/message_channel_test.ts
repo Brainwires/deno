@@ -241,3 +241,82 @@ Deno.test("messagechannel clone port", async () => {
   mc.port2.close();
   mc2.port2.close();
 });
+
+// Each message is its own task: a listener added any number of microtasks
+// after the previous message gets the next one, also when both were queued
+// before either was dispatched. The helpers are WPT's
+// (webrtc-encoded-transform/routines.js): a `once` listener behind
+// `Promise.race()` in an async function, so the next listener is added
+// several microtasks after the previous message's dispatch.
+function getNextMessage(target: EventTarget): Promise<unknown> {
+  return new Promise((resolve) =>
+    target.addEventListener(
+      "message",
+      (e) => resolve((e as MessageEvent).data),
+      { once: true },
+    )
+  );
+}
+
+// deno-lint-ignore require-await
+async function nextMessageOrTimeout(
+  target: EventTarget,
+  ms: number,
+): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    getNextMessage(target),
+    new Promise((resolve) => timer = setTimeout(resolve, ms)),
+  ]).finally(() => clearTimeout(timer));
+}
+
+Deno.test("messagechannel messages queued together reach a listener re-added later", async () => {
+  const { port1, port2 } = new MessageChannel();
+  port1.postMessage("a");
+  port1.postMessage("b");
+  port1.postMessage("c");
+  const first = nextMessageOrTimeout(port2, 10_000);
+  port2.start();
+  assertEquals(await first, "a");
+  assertEquals(await nextMessageOrTimeout(port2, 2_000), "b");
+  // A longer chain than any fixed number of yielded microtasks.
+  for (let i = 0; i < 50; i++) await null;
+  assertEquals(await nextMessageOrTimeout(port2, 2_000), "c");
+  // None was delivered twice.
+  assertEquals(await nextMessageOrTimeout(port2, 100), undefined);
+  port1.close();
+  port2.close();
+});
+
+Deno.test("messagechannel onmessage reassigned in a promise chain gets every message", async () => {
+  const { port1, port2 } = new MessageChannel();
+  const received: unknown[] = [];
+  const { promise, resolve } = Promise.withResolvers<void>();
+  function arm() {
+    port2.onmessage = (e) => {
+      received.push(e.data);
+      port2.onmessage = null;
+      if (received.length === 3) {
+        resolve();
+        return;
+      }
+      // Re-arm ten microtasks later.
+      let p = Promise.resolve();
+      for (let i = 0; i < 10; i++) p = p.then(() => {});
+      p.then(arm);
+    };
+  }
+  arm();
+  port1.postMessage(1);
+  port1.postMessage(2);
+  port1.postMessage(3);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    promise,
+    new Promise((r) => timer = setTimeout(r, 5_000)),
+  ]);
+  clearTimeout(timer);
+  assertEquals(received, [1, 2, 3]);
+  port1.close();
+  port2.close();
+});
