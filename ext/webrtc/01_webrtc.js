@@ -1045,6 +1045,7 @@ class RTCDataChannel extends EventTarget {
     if (ObjectPrototypeIsPrototypeOf(BlobPrototype, data)) {
       // The byte size of a Blob is known synchronously (send() step 4).
       checkMessageSize(this, data.size);
+      checkBufferSpace(this, data.size);
       // A Blob is read first; later sends wait behind it so the order on the
       // wire is the order of the calls.
       state.queuedBytes += data.size;
@@ -1077,6 +1078,7 @@ class RTCDataChannel extends EventTarget {
     }
     checkMessageSize(this, TypedArrayPrototypeGetByteLength(bytes));
     if (state.queue.length > 0) {
+      checkBufferSpace(this, TypedArrayPrototypeGetByteLength(bytes));
       state.queuedBytes += TypedArrayPrototypeGetByteLength(bytes);
       ArrayPrototypePush(state.queue, { text, bytes });
       return;
@@ -1150,6 +1152,37 @@ function checkMessageSize(channel, size) {
   if (limit !== null && size > limit) {
     throw new TypeError(
       `Failed to execute 'send' on 'RTCDataChannel': the message (${size} bytes) is larger than the connection's maxMessageSize (${limit})`,
+    );
+  }
+}
+
+// The SCTP transport's [[MaxBufferSize]] as rtci 0.2 sets it (webrtc-pc
+// 6.1.1.2): the larger of the peer's max-message-size and the 16 MiB send
+// buffer (`SettingEngine::with_data_channel_max_buffer_size`'s default).
+const SEND_BUFFER_BYTES = 16 * 1024 * 1024;
+
+// W3C send(): data that would take bufferedAmount above the transport's
+// [[MaxBufferSize]] is an OperationError, thrown by send() itself. The
+// engine refuses such a send when it is handed one, but a Blob (and what
+// waits behind one) goes to it only once read, so its refusal came as an
+// `error` event that closed the channel (WPT
+// RTCDataChannel-send-close-blob*); it is checked here, against what is
+// already buffered and queued.
+function checkBufferSpace(channel, size) {
+  const state = channel[_state];
+  const pc = channel[_pc];
+  const sctp = pc === null ? null : pc[_state].sctp;
+  const peerMax = sctp === null || sctp === undefined
+    ? null
+    : sctp.maxMessageSize;
+  const limit = peerMax === null ? SEND_BUFFER_BYTES : MathMax(
+    SEND_BUFFER_BYTES,
+    peerMax,
+  );
+  if (state.buffered + state.queuedBytes + size > limit) {
+    throw new DOMException(
+      "Failed to execute 'send' on 'RTCDataChannel': the data channel's send buffer is full",
+      "OperationError",
     );
   }
 }
@@ -2555,6 +2588,24 @@ function refineStats(pc, engineEntries, now, whole) {
       case "local-candidate":
       case "remote-candidate":
         if (stats.relatedAddress === undefined) delete stats.relatedPort;
+        // webrtc-stats `RTCIceCandidateStats.usernameFragment`: rtci 0.2
+        // leaves a remote candidate's empty (the 0.22 engine filled it);
+        // it is the ufrag of the remote description in use, the one every
+        // remote candidate of this connection belongs to (one bundled
+        // transport).
+        if (
+          stats.type === "remote-candidate" &&
+          (stats.usernameFragment === undefined ||
+            stats.usernameFragment === "")
+        ) {
+          const slots = op_webrtc_pc_descriptions(pc[_rid]);
+          const remote = slots.currentRemote ?? slots.pendingRemote;
+          const ufrag = remote === null
+            ? null
+            : mediaSectionsOf(remote[1])[0]?.ufrag ?? null;
+          if (ufrag === null) delete stats.usernameFragment;
+          else stats.usernameFragment = ufrag;
+        }
         // wpt100:ice: a peer-reflexive remote candidate's address came from
         // the network, not from the application: webrtc-stats 8.13 leaves it
         // null unless the application signalled that address itself.

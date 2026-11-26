@@ -23076,10 +23076,47 @@ where the changes are discussed.
        and are expected to (rtci 0.2's later offers list every available format,
        RFC 9429 section 5.2.2; inbound stream stats exist from the first packet;
        the worker and `MessagePort` message tasks of items 555 and 564).
+     - Data channel send buffer: `send()` of a Blob, and of data queued behind
+       one, throws `OperationError` when it would take `bufferedAmount` above
+       the transport's `[[MaxBufferSize]]` (rtci 0.2: the larger of the peer's
+       max-message-size and 16 MiB). The engine refuses such data only once it
+       is handed it, after the Blob is read, and that refusal was an `error`
+       event that closed the channel (`RTCDataChannel-send-close-blob*`).
+     - Stats: a remote candidate's `usernameFragment`, which rtci 0.2 leaves
+       empty, is the remote description's ufrag (`supported-stats`).
+     - ICE gathering: rtci 0.2 reports gathering for a local description without
+       a live media section; the driver passes such a state on only as `new`
+       (W3C webrtc-pc 4.4.4; `RTCPeerConnection-iceGatheringState`
+       "setLocalDescription() with no transports should not cause
+       iceGatheringState to change").
+     - Header extensions: a remote `a=extmap` line whose extension is not named
+       by an absolute URI (RFC 8285 section 5) is left out of what the engine is
+       given; rtci 0.2 kept it among its negotiated extensions and failed to
+       write the answer ("url parse: relative URL without a base",
+       `protocol/rtp-headerextensions` "Negotiates the subset of supported
+       extensions offered").
+     - More expectations, from the full run on the train: passing now,
+       `supported-stats` "outbound-rtp's totalPacketSendDelay" (rtci 0.2 reports
+       it), `simplecall-no-ssrcs` and `RTCRtpTransceiver.https.html?rest`
+       (`checkNoMidOffer` passes and the file is no longer flaky since item 561
+       and the `completed` fix above); and
+       `RTCPeerConnection-iceConnectionState-disconnected` and
+       `protocol/h265-level-id`, expected to fail as files before, are expected
+       to pass but for "ICE restart when ICE is disconnected results in
+       checking, then connected" and "Offer to receive level-id=30 and set codec
+       from getCapabilities". Expected to fail until the rtci release that
+       writes a later offer's and an answer's `a=rid` lines from the
+       restrictions the last answer left (RFC 9429 section 5.2.2; fixed in rtci,
+       not yet released), and to be removed with it: `protocol/simulcast-answer`
+       "createAnswer() with multiple send encodings should create simulcast
+       answer" and "Disabling encodings locally does not change the SDP", and
+       `simulcast/rid-manipulation` "Remote reanswer altering rids does not
+       throw an exception.".
      - Tests: `tests.rs` `capabilities_list_every_registered_video_codec`,
        `audio_level_extensions_are_offered_in_the_clear`,
        `repeated_simulcast_rids_are_dropped`, `attribute_names_are_tokens`,
-       `remote_offer_with_unknown_lines_and_repeated_rids_applies`; WPT
+       `remote_offer_with_unknown_lines_and_repeated_rids_applies`,
+       `extmap_lines_name_absolute_uris`; WPT
        `webrtc/protocol/codecs-filtered-by-direction.https.html`,
        `webrtc/RTCRtpTransceiver.https.html`, `webrtc/protocol/direction.html`,
        the two rollback files,

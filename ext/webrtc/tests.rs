@@ -2211,3 +2211,21 @@ async fn remote_offer_with_unknown_lines_and_repeated_rids_applies() {
   assert_eq!(answer.matches("a=rid:foo send").count(), 1, "{answer}");
   c.close();
 }
+
+// RFC 8285 section 5: an extension is named by an absolute URI; a remote
+// `a=extmap` line that names it otherwise (WPT protocol/rtp-headerextensions
+// offers `bogus`) is not given to the engine.
+#[test]
+fn extmap_lines_name_absolute_uris() {
+  use crate::peer::extmap_names_absolute_uris as absolute;
+  assert!(absolute("1 urn:ietf:params:rtp-hdrext:sdes:mid"));
+  assert!(absolute(
+    "3/recvonly http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time"
+  ));
+  assert!(absolute(
+    "4 urn:ietf:params:rtp-hdrext:encrypt urn:ietf:params:rtp-hdrext:ssrc-audio-level vad=on"
+  ));
+  assert!(!absolute("2 bogus"));
+  assert!(!absolute("4 urn:ietf:params:rtp-hdrext:encrypt bogus"));
+  assert!(!absolute("5 1bad:scheme"));
+}

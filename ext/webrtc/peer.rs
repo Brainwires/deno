@@ -1151,6 +1151,31 @@ pub(crate) fn simulcast_without_repeated_rids(value: &str) -> Option<String> {
   repeated.then(|| fields.join(" "))
 }
 
+/// Whether an `a=extmap` value (`<id>[/<direction>] <uri> [attributes]`)
+/// names its extension by an absolute URI, and for RFC 6904's encrypted form
+/// (`urn:ietf:params:rtp-hdrext:encrypt <uri>`) the one it encrypts too.
+pub(crate) fn extmap_names_absolute_uris(value: &str) -> bool {
+  fn absolute(uri: &str) -> bool {
+    let Some((scheme, rest)) = uri.split_once(':') else {
+      return false;
+    };
+    !rest.is_empty()
+      && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+      && scheme
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+  }
+  let mut tokens = value.split_ascii_whitespace().skip(1);
+  match tokens.next() {
+    Some("urn:ietf:params:rtp-hdrext:encrypt") => {
+      tokens.next().is_none_or(absolute)
+    }
+    Some(uri) => absolute(uri),
+    // A line without a URI is malformed, which the engine judges.
+    None => true,
+  }
+}
+
 /// Whether `name` is an SDP `attribute-name`, a token (RFC 8866 section 9:
 /// `token-char = %x21 / %x23-27 / %x2A-2B / %x2D-2E / %x30-39 / %x41-5A /
 /// %x5E-7E`).
@@ -2361,9 +2386,23 @@ impl Core {
           }
         }
         RTCPeerConnectionEvent::OnIceGatheringStateChangeEvent(s) => {
-          self.events.push_back(JsEvent::IceGatheringState {
-            state: s.to_string(),
-          })
+          let state = s.to_string();
+          // W3C webrtc-pc 4.4.4 "update the ICE gathering state": with no
+          // transport to gather for (a local description without a live
+          // media section) the state stays where it is; rtci 0.2 still
+          // reports gathering for one (WPT
+          // RTCPeerConnection-iceGatheringState "setLocalDescription() with
+          // no transports should not cause iceGatheringState to change").
+          // Its `new` (transports closed) is passed on.
+          if state != "new"
+            && !self
+              .pc
+              .local_description()
+              .is_some_and(|d| has_live_media_section(&d.sdp))
+          {
+            continue;
+          }
+          self.events.push_back(JsEvent::IceGatheringState { state })
         }
         RTCPeerConnectionEvent::OnConnectionStateChangeEvent(s) => {
           let state = s.to_string();
@@ -3202,6 +3241,18 @@ impl Peer {
             .split_once(':')
             .map_or(attribute, |(name, _)| name),
         )
+      {
+        continue;
+      }
+      // An `a=extmap` line whose extension is not named by an absolute URI
+      // (RFC 8285 section 5: "The URI ... MUST be absolute") is one no
+      // endpoint understands, which an answerer leaves out (section 7, WPT
+      // `protocol/rtp-headerextensions` "Negotiates the subset of supported
+      // extensions offered" offers `bogus`). rtci 0.2 takes it into its
+      // negotiated extensions and then fails to write the answer ("url
+      // parse: relative URL without a base"), so it isn't given the line.
+      if let Some(value) = line.trim_end().strip_prefix("a=extmap:")
+        && !extmap_names_absolute_uris(value)
       {
         continue;
       }
