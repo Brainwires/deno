@@ -332,19 +332,21 @@ rstest = "0"
 # WebRTC (ext/webrtc, DENEXT.md item 370): the sans-I/O `rtci` crates (ICE,
 # DTLS, SCTP, data channels, SRTP, RTP / RTCP and interceptors, JSEP; MIT OR
 # Apache-2.0) as published on crates.io from Brainwires/rtci, our fork of
-# webrtc-rs's `rtc` (synced with upstream). `rtci` 0.1.0 is the fork's
+# webrtc-rs's `rtc` (synced with upstream). `rtci` 0.1.0 was the fork's
 # `0.22.0+brainwires.N` line renamed (`rtc` / `rtc-*` -> `rtci` / `rtci-*`;
 # crates.io ignores the `+brainwires.N` build metadata, so the version line
-# restarts at 0.1.0). It carries everything ext/webrtc was built against on
-# that line: ICE-TCP in both roles, per-address mDNS names, PLI/FIR delivery,
-# the data channel and JSEP work (DENEXT.md items 452, 460), the WPT-100
-# conformance work (items 477 to 481), ECN / L4S (item 482), and RFC 8838
-# section 11 (a signalled candidate replaces the peer-reflexive one a check
-# taught the agent first), plus `0.22.0+brainwires.6` and the conformance
-# trains after it. A semver requirement, so later 0.1.x releases come in with
+# restarted at 0.1.0); 0.2.0 (tag `v0.2.0`, ea78e88f) is its first breaking
+# release. It carries everything ext/webrtc was built against on that line:
+# ICE-TCP in both roles, per-address mDNS names, PLI/FIR delivery, the data
+# channel and JSEP work (DENEXT.md items 452, 460), the WPT-100 conformance
+# work (items 477 to 481), ECN / L4S (item 482), RFC 8838 section 11 (a
+# signalled candidate replaces the peer-reflexive one a check taught the
+# agent first), and, new in 0.2, a check list that waits at end-of-candidates
+# while a remote active TCP candidate can still dial our passive one (item
+# 556). A semver requirement, so later 0.2.x releases come in with
 # `cargo update -p rtci`. On the aws-lc-rs crypto provider, the one Deno's
 # rustls already uses. Pre-1.0 and not externally audited.
-rtci = { version = "0.1", default-features = false, features = ["crypto-aws-lc-rs"] }
+rtci = { version = "0.2", default-features = false, features = ["crypto-aws-lc-rs"] }
 rusqlite = { version = "0.41.1", features = ["unlock_notify", "bundled", "session", "modern_sqlite", "limits", "backup", "fallible_uint"] } # "modern_sqlite": need sqlite >= 3.49.0 for some db configs; "fallible_uint": ToSql for u64/usize (needed when crates like deno_cache are published/built standalone, not just feature-unified via denokv_sqlite)
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "std", "tls12", "aws_lc_rs"] }
 rustls-pemfile = "2"

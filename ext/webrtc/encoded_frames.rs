@@ -178,6 +178,18 @@ impl FrameAssembler {
       return None; // AV1 or an unknown video codec.
     }
     let seq = header.sequence_number;
+    // A packet without a payload (padding, or a ULPFEC packet of a RED
+    // stream, which the engine delivers emptied under the media's payload
+    // type) is present and no media: it takes the sequence number the frame
+    // in the making expects and starts nothing.
+    if payload.is_empty() {
+      match &mut self.current {
+        Some((_, _, next, _)) if *next == seq => *next = seq.wrapping_add(1),
+        Some(_) => self.current = None,
+        None => {}
+      }
+      return None;
+    }
     // A packet of another frame, or a gap: what was being built is lost.
     if let Some((ts, _, next, _)) = &self.current
       && (*ts != header.timestamp || *next != seq)
@@ -372,6 +384,28 @@ mod tests {
     assert!(a.push(&header(4, 180, false), &start).is_none());
     let end = Bytes::from_static(&[0x00, 0x02, 0x03, 0x04]);
     assert!(a.push(&header(6, 180, true), &end).is_none());
+  }
+
+  #[test]
+  fn a_packet_without_a_payload_is_present_and_no_media() {
+    // rtci 0.2 delivers a RED stream's ULPFEC packet emptied, with a
+    // sequence number of the media stream: inside a frame it is no gap.
+    let mut a = FrameAssembler::new(96, "video/VP8");
+    let start = Bytes::from_static(&[0x10, 0x01, 0x02, 0x03]);
+    assert!(a.push(&header(1, 90, false), &start).is_none());
+    assert!(a.push(&header(2, 5000, false), &Bytes::new()).is_none());
+    let end = Bytes::from_static(&[0x00, 0x04, 0x05, 0x06]);
+    let f = a.push(&header(3, 90, true), &end).unwrap();
+    assert_eq!(f.data, vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
+    assert_eq!(f.info.sequence_number, 1);
+    // Between frames it starts nothing, and the next frame is whole.
+    assert!(a.push(&header(4, 90, true), &Bytes::new()).is_none());
+    assert!(a.push(&header(5, 180, false), &start).is_none());
+    assert!(a.push(&header(6, 180, true), &end).is_some());
+    // After a gap it is no repair: the frame in the making is lost.
+    assert!(a.push(&header(7, 270, false), &start).is_none());
+    assert!(a.push(&header(9, 270, false), &Bytes::new()).is_none());
+    assert!(a.push(&header(10, 270, true), &end).is_none());
   }
 
   #[test]

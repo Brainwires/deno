@@ -14337,11 +14337,11 @@ where the changes are discussed.
        DTLS, ICE and H.264 crash fixes and its SCTP and data-channel fixes; this
        sync brings them in. Pre-1.0 and not externally audited: DTLS, SCTP and
        ICE parsing are exposed to any peer that completes ICE. Since item 556
-       the engine is the fork's published crates, `rtci` 0.1 from crates.io
-       (`rtci = { version = "0.1", default-features = false, features =
-       ["crypto-aws-lc-rs"] }`):
-       the `0.22.0+brainwires.N` line renamed, with everything the git pins
-       above carried.
+       the engine is the fork's published crates, `rtci` 0.2 from crates.io
+       (`rtci = { version = "0.2", default-features = false, features =
+       ["crypto-aws-lc-rs"] }`;
+       tag `v0.2.0`, ea78e88f): the `0.22.0+brainwires.N` line renamed (first
+       published as 0.1), with everything the git pins above carried.
      - **Driver** (`peer.rs`; the engine does no I/O and reads no clock): one
        UDP socket per address family per connection, bound to `0.0.0.0` / `[::]`
        when interfaces may be listed and the wildcard may be listened on (every
@@ -22548,12 +22548,13 @@ where the changes are discussed.
 
 556. **`fix(ext/webrtc)`: a check that outruns its trickled candidate no longer
      delays the connection by a second** (runtime; `Cargo.toml`, `Cargo.lock`;
-     the engine from crates.io as `rtci` 0.1 (`"0.1"`, published from
-     Brainwires/rtci tag `v0.1.0`, 3bbd6cc1), the fork's `0.22.0+brainwires.N`
+     the engine from crates.io as `rtci` 0.2 (`"0.2"`, published from
+     Brainwires/rtci tag `v0.2.0`, ea78e88f), the fork's `0.22.0+brainwires.N`
      line renamed `rtc` -> `rtci`, which carries the fix below and everything in
      `0.22.0+brainwires.6`; first pinned here as the git release
-     `0.22.0+brainwires.5.1`, a7d3aaf0). The answerer's first connectivity check
-     is a datagram; its candidate reaches the offerer through `icecandidate` and
+     `0.22.0+brainwires.5.1`, a7d3aaf0, then as `rtci` 0.1, tag `v0.1.0`,
+     3bbd6cc1). The answerer's first connectivity check is a datagram; its
+     candidate reaches the offerer through `icecandidate` and
      `addIceCandidate()`. When the check won (about 1 connection in 20 on an
      idle machine, more on a busy one) the offerer's ICE agent learned the
      address as a peer-reflexive candidate, then held the signalled host
@@ -22601,11 +22602,31 @@ where the changes are discussed.
        3-tuple would need sockets on new ports, which a network's shared port
        can't have); the engine pacer under the connection's pacer has no queue
        time limit of its own (the connection drains past 2 s instead of
-       dropping), and its first burst leaving at once is accepted; the remote
-       description's `a=end-of-candidates` (and `addIceCandidate("")`) is not
-       handed to the engine after the peer signalled an active TCP candidate,
-       whose dial is the only way in: the engine's check list would fail at once
-       with no pair (RFC 8838 section 8), before the dial.
+       dropping), and its first burst leaving at once is accepted.
+     - The move to `rtci` 0.2: a remote active TCP candidate is handed to the
+       engine (unchecked by the net permission: nothing is sent to its
+       placeholder port 9; the peer dials our passive candidate), and so is the
+       peer's end-of-candidates: the engine's check list no longer fails at
+       end-of-candidates while such a candidate (with our passive TCP candidate
+       of its family) or an unresolved `.local` name can still reach us; the
+       checking timeout ends a connection nobody dials. A ULPFEC packet of a RED
+       stream now reaches the driver as an RTP packet without a payload under
+       the media's payload type: the frame assemblers (encoded transforms, media
+       sinks) and `framesReceived` take a packet without a payload, padding
+       included, as present and no media, so its sequence number is no gap;
+       `Deno.webrtc.readRtp` delivers it as it is. The engine's own key-frame
+       requests (the NACK responder giving a video stream up, a PLI with sender
+       SSRC 0) arrive as inbound PLIs do and become the sender's
+       `keyframerequest`; the default pacer's flush at a capacity collapse needs
+       a queue time limit, which the connection's pacer leaves unset, so it
+       never flushes. Nothing else in the driver changed: its configuration
+       literals already end in `..Default::default()`, it uses no
+       `SampleBuilder`, stream driver or `GccInterceptorBuilder`. Tests:
+       `ice_tcp_offerer_listens_answerer_dials` and
+       `ice_tcp_offerer_dials_answerer_listens` (fail on 0.1 without the
+       withheld end-of-candidates),
+       `a_packet_without_a_payload_is_present_and_no_media`,
+       `received_video_takes_packets_without_a_payload_as_present`.
      - Node tests enabled: none.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,

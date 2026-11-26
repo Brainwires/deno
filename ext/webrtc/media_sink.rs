@@ -194,6 +194,10 @@ pub fn packet_coded_size(
   payload: &Bytes,
 ) -> Option<(u32, u32)> {
   use rtci::rtp::codec;
+  // Padding, or an emptied ULPFEC packet: no media to size.
+  if payload.is_empty() {
+    return None;
+  }
   match mime_type.to_ascii_lowercase().as_str() {
     "video/vp8" => {
       let mut p = codec::vp8::Vp8Packet::default();

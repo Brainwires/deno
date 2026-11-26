@@ -617,13 +617,6 @@ pub struct Core {
   /// A remote candidate is known (signalled, or a check arrived): until
   /// then ICE stays `new`, as the spec's `checking` needs one.
   remote_known: bool,
-  /// The remote side signalled an active TCP candidate in its current
-  /// generation. Its end-of-candidates is then not handed to the engine,
-  /// whose check list fails as soon as every pair it has failed and both
-  /// sides have finished (RFC 8838 section 8), even with no pair at all:
-  /// the peer's dial, which makes the pair, would come too late. The ICE
-  /// timeouts still end a connection nobody dials.
-  remote_dials: bool,
   /// The engine went `checking` before that: reported once one is.
   checking_held: bool,
   /// An ICE restart's `checking` on a connected transport was not reported
@@ -823,11 +816,13 @@ pub enum RemoteCandidate {
   /// the engine resolves it, and the address it resolves to is checked
   /// against the net permission before anything is sent there.
   Mdns,
-  /// An active TCP candidate, on a connection doing ICE over TCP: skipped
-  /// (it has no port; the peer dials our passive candidate and is learned
-  /// as a peer-reflexive one), but the remote side did signal a way in, and
-  /// its end-of-candidates is withheld from the engine (`remote_dials`).
-  Dials,
+  /// An active TCP candidate, on a connection doing ICE over TCP: handed
+  /// to the engine unchecked, since nothing is sent to it (its port is RFC
+  /// 6544's placeholder 9; the peer dials our passive candidate). The
+  /// engine's check list then waits at end-of-candidates for that dial
+  /// rather than failing with no pair (RFC 8838 section 8), until its
+  /// checking timeout.
+  Active,
   /// Skipped and reported as accepted, as a browser does with a candidate it
   /// cannot use: TCP candidates without ICE over TCP (a `tcpPort` network),
   /// untyped TCP candidates, and `.local` names when mDNS is off (such a
@@ -870,7 +865,7 @@ pub fn classify_remote_candidate(
   if is_tcp {
     match candidate_tcp_type(candidate) {
       Some(TcpType::Passive | TcpType::SimultaneousOpen) => {}
-      Some(TcpType::Active) => return Ok(RemoteCandidate::Dials),
+      Some(TcpType::Active) => return Ok(RemoteCandidate::Active),
       _ => return Ok(RemoteCandidate::Ignore),
     }
   }
@@ -2603,7 +2598,6 @@ impl Peer {
         transforms: Default::default(),
         sinks: Default::default(),
         remote_known: false,
-        remote_dials: false,
         sent: HashMap::new(),
         sctp_state: "",
         dtls_state: String::new(),
@@ -2853,8 +2847,9 @@ impl Peer {
     check_sdp_size(kind, &sdp)?;
     let mut kept = String::with_capacity(sdp.len());
     let mut checked = Vec::new();
-    let mut named = false;
-    let mut dials = false;
+    // A candidate kept without an address to check: a `.local` name, or an
+    // active TCP candidate.
+    let mut unchecked = false;
     let (tcp, mut mdns) = {
       let core = self.core.borrow();
       (core.ice_tcp(), core.mdns_mode != MdnsMode::Off)
@@ -2863,10 +2858,7 @@ impl Peer {
       if let Some(value) = line.trim_end().strip_prefix("a=candidate:") {
         match classify_remote_candidate(value, tcp, mdns)? {
           RemoteCandidate::Ignore => continue,
-          RemoteCandidate::Dials => {
-            dials = true;
-            continue;
-          }
+          RemoteCandidate::Active => unchecked = true,
           RemoteCandidate::Udp(addr) | RemoteCandidate::Tcp(addr) => {
             self.guard.connect(addr).map_err(WebRtcError::Permission)?;
             checked.push(addr);
@@ -2876,7 +2868,7 @@ impl Peer {
               mdns = false;
               continue;
             }
-            named = true;
+            unchecked = true;
           }
         }
       }
@@ -2884,13 +2876,6 @@ impl Peer {
     }
     let end_of_candidates =
       kept.lines().any(|l| l.trim_end() == "a=end-of-candidates");
-    // See `remote_dials`: the engine doesn't learn the generation's end.
-    if dials {
-      kept = kept
-        .split_inclusive('\n')
-        .filter(|l| l.trim_end() != "a=end-of-candidates")
-        .collect();
-    }
     let desc = Self::description(kind, kept)?;
     self.guarded(|core| {
       let ufrag_before = core.remote_ufrag();
@@ -2902,19 +2887,14 @@ impl Peer {
       if ufrag_before.is_some() && core.remote_ufrag() != ufrag_before {
         core.remote_known = false;
         core.remote_gathered = false;
-        core.remote_dials = false;
       }
       if end_of_candidates {
         core.remote_gathered = true;
       }
-      if dials {
-        core.remote_dials = true;
-        core.remote_known = true;
-      }
       for addr in checked {
         core.mark_allowed(addr);
       }
-      if named {
+      if unchecked {
         core.remote_known = true;
       }
       Ok(())
@@ -2934,12 +2914,8 @@ impl Peer {
     if candidate.trim().is_empty() {
       // End-of-candidates: the engine checks the media section and the
       // usernameFragment and marks the remote description; then the
-      // remote's current generation is complete. Withheld from the engine
-      // after an active TCP candidate (see `remote_dials`).
+      // remote's current generation is complete.
       self.guarded(|core| {
-        if core.remote_dials {
-          return Ok(());
-        }
         core
           .pc
           .add_remote_candidate(RTCIceCandidateInit {
@@ -2962,12 +2938,7 @@ impl Peer {
     };
     let addr = match classify_remote_candidate(&candidate, tcp, mdns)? {
       RemoteCandidate::Ignore => return Ok(()),
-      RemoteCandidate::Dials => {
-        let mut core = self.core.borrow_mut();
-        core.remote_dials = true;
-        core.remote_known = true;
-        return Ok(());
-      }
+      RemoteCandidate::Active => None,
       RemoteCandidate::Mdns => {
         if !self.core.borrow_mut().resolves_mdns() {
           return Ok(());

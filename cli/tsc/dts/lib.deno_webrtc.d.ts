@@ -1807,7 +1807,10 @@ declare namespace Deno {
     /**
      * Reads the RTP packets a receiver gets (header included), one chunk
      * per packet. Real-time media doesn't wait: a packet that arrives while
-     * `highWaterMark` packets (256) are queued is dropped.
+     * `highWaterMark` packets (256) are queued is dropped. A packet without
+     * a payload carries no media: padding, or a ULPFEC packet of a RED
+     * stream, delivered with its payload removed under the media's payload
+     * type (its sequence number is the stream's).
      *
      * @category WebRTC
      */

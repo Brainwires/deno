@@ -1298,7 +1298,20 @@ pub struct ReceivedVideo {
 }
 
 impl ReceivedVideo {
-  /// A received packet; returns whether it completed a frame.
+  /// A received packet without a payload: padding, or a ULPFEC packet of a
+  /// RED stream (the engine delivers it emptied). It carries no frame but
+  /// takes a sequence number of the stream, so the next packet is still in
+  /// sequence after it; one that comes after a gap leaves the next frame
+  /// uncounted, as its start may be what was lost.
+  pub fn empty(&mut self, header: &rtci::rtp::Header) {
+    if self.next != Some(header.sequence_number) {
+      self.broken = true;
+      self.ended = false;
+    }
+    self.next = Some(header.sequence_number.wrapping_add(1));
+  }
+
+  /// A received packet with a payload; returns whether it completed a frame.
   pub fn packet(&mut self, header: &rtci::rtp::Header) -> bool {
     let in_sequence = self.next == Some(header.sequence_number);
     if self.timestamp != Some(header.timestamp) {
@@ -1387,9 +1400,7 @@ impl Core {
     key: u32,
     packet: &rtci::rtp::Packet,
   ) {
-    if self.media.kinds.get(&key) != Some(&RtpCodecKind::Video)
-      || packet.payload.is_empty()
-    {
+    if self.media.kinds.get(&key) != Some(&RtpCodecKind::Video) {
       return;
     }
     let ssrc = packet.header.ssrc;
@@ -1400,6 +1411,10 @@ impl Core {
       return;
     }
     let video = streams.entry(ssrc).or_default();
+    if packet.payload.is_empty() {
+      video.empty(&packet.header);
+      return;
+    }
     if video.packet(&packet.header) {
       let frames_received = video.frames_received;
       self.pc.update_decoder_stats(
