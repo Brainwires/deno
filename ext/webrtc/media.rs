@@ -613,13 +613,6 @@ impl Interceptor for FactorPacer {
 /// those have stay as they were. A sender writes the audio level and the
 /// capture time (`header_extensions.rs`); the engine reads them from
 /// received packets as any other extension.
-/// The header extensions the engine won't let a transceiver stop (RFC 8834
-/// section 5.2's mandatory-to-implement ones).
-const MANDATORY_TO_IMPLEMENT_EXTENSIONS: &[&str] = &[
-  rtci::sdp::extmap::SDES_MID_URI,
-  rtci::sdp::extmap::AUDIO_LEVEL_URI,
-];
-
 fn register_header_extensions(
   media_engine: &mut MediaEngine,
 ) -> Result<(), WebRtcError> {
@@ -992,7 +985,7 @@ pub struct RemoteSection {
   pub direction: String,
   /// The `a=msid` stream ids (`-` dropped).
   pub streams: Vec<String>,
-  /// Port 0: the section was rejected.
+  /// Port 0 without `a=bundle-only`: the section was rejected.
   pub rejected: bool,
   pub kind: String,
   /// The layers of the section's `a=simulcast` `recv` list (RFC 8853): the
@@ -1075,6 +1068,11 @@ pub fn sections(sdp: &str) -> HashMap<String, RemoteSection> {
     } else if matches!(attr, "sendrecv" | "sendonly" | "recvonly" | "inactive")
     {
       section.direction = attr.to_string();
+    } else if attr == "bundle-only" {
+      // RFC 8843 section 6 / RFC 9429 section 5.10: port zero with
+      // `a=bundle-only` is a section reached through its BUNDLE group, not a
+      // rejected one.
+      section.rejected = false;
     }
   }
   flush(&mut current, has_msid);
@@ -1928,7 +1926,7 @@ impl Core {
     // The engine takes the whole list with a direction per extension: the
     // ones JavaScript names are negotiated (an extension stopped before
     // comes back "sendrecv"), the others "stopped".
-    let mut list: Vec<RTCRtpHeaderExtensionToNegotiate> = t
+    let list: Vec<RTCRtpHeaderExtensionToNegotiate> = t
       .get_header_extensions_to_negotiate()
       .into_iter()
       .map(|mut e| {
@@ -1940,20 +1938,11 @@ impl Core {
         e
       })
       .collect();
-    if t.set_header_extensions_to_negotiate(list.clone()).is_err() {
-      // The engine refuses to stop an extension every WebRTC endpoint must
-      // implement (RFC 8834 section 5.2: the mid, and for audio the RFC 6464
-      // audio level): those stay negotiated, the rest as asked.
-      for e in &mut list {
-        if e.direction == RTCRtpTransceiverDirection::Stopped
-          && MANDATORY_TO_IMPLEMENT_EXTENSIONS.contains(&e.uri.as_str())
-        {
-          e.direction = RTCRtpTransceiverDirection::Sendrecv;
-        }
-      }
-      t.set_header_extensions_to_negotiate(list)
-        .map_err(crate::peer::rtc_err)?;
-    }
+    // JavaScript refuses to stop an extension every WebRTC endpoint must
+    // implement (webrtc-extensions; RFC 8834 section 5.2), as the engine
+    // does: what reaches here is what the engine takes.
+    t.set_header_extensions_to_negotiate(list)
+      .map_err(|e| WebRtcError::InvalidModification(e.to_string()))?;
     Ok(())
   }
 

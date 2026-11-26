@@ -2596,13 +2596,25 @@ function refineStats(pc, engineEntries, now, whole) {
         // channel transferred to a worker is detached here (readyState
         // "closed", so its `id` reads no further), and its id is the one
         // the engine assigned.
+        //
+        // rtci 0.2 gives its stats objects opaque ids, so the engine's
+        // object is the channel's by its SCTP stream id (unique on the
+        // connection), and takes the id the channel's object has before it
+        // opens (`addChannelStats`): one object, one id, for the channel's
+        // life (webrtc-stats 5).
         MapPrototypeForEach(pc[_channels], (channel, handle) => {
-          if (`RTCDataChannel_${handle}` !== stats.id) return;
           let streamId = channel.id;
           if (streamId === null && channel[_transferPort] !== undefined) {
             const id = op_webrtc_dc_id(pc[_rid], handle);
             if (id >= 0) streamId = id;
           }
+          const own = `RTCDataChannel_${handle}`;
+          const same = stats.id === own ||
+            (streamId !== null && stats.dataChannelIdentifier === streamId);
+          if (!same) return;
+          SetPrototypeDelete(ids, stats.id);
+          stats.id = own;
+          SetPrototypeAdd(ids, own);
           if (streamId === null) delete stats.dataChannelIdentifier;
           else stats.dataChannelIdentifier = streamId;
         });
@@ -3716,6 +3728,7 @@ function pushHeaderExtensions(pc, offer) {
 // The `a=extmap` lines of each media section, by mid: id and direction
 // (sendrecv when unstated) per URI.
 const ENCRYPT_URI = "urn:ietf:params:rtp-hdrext:encrypt";
+const AUDIO_LEVEL_EXTENSION = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
 
 function extmapsOf(sdp) {
   const out = new SafeMap();
@@ -4017,6 +4030,18 @@ class RTCRtpTransceiver {
       ) {
         throw new DOMException(
           `${prefix}: '${uri}' is mandatory and must be 'sendrecv'`,
+          "InvalidModificationError",
+        );
+      }
+      // webrtc-extensions setHeaderExtensionsToNegotiate: an extension the
+      // user agent must implement can't be "stopped" (RFC 8834 section
+      // 5.2.2: the RFC 6464 audio level, for audio).
+      if (
+        direction === "stopped" && this[_state].kind === "audio" &&
+        uri === AUDIO_LEVEL_EXTENSION
+      ) {
+        throw new DOMException(
+          `${prefix}: '${uri}' must be implemented and can't be stopped`,
           "InvalidModificationError",
         );
       }

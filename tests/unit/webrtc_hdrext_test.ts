@@ -170,7 +170,21 @@ Deno.test("webrtcHeaderExtensionsNegotiated", async () => {
     // deno-lint-ignore no-explicit-any
     const t2 = pc2.getTransceivers()[0] as any;
     const list = t2.getHeaderExtensionsToNegotiate();
-    const level = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
+    // webrtc-extensions setHeaderExtensionsToNegotiate: an extension the
+    // user agent must implement can't be stopped (RFC 8834 section 5.2.2:
+    // the RFC 6464 client-to-mixer audio level, for audio).
+    const mandatory = list.map((e: object) => ({ ...e }));
+    mandatory.find((e: { uri: string }) =>
+      e.uri === "urn:ietf:params:rtp-hdrext:ssrc-audio-level"
+    ).direction = "stopped";
+    assertThrows(
+      () => t2.setHeaderExtensionsToNegotiate(mandatory),
+      DOMException,
+      "can't be stopped",
+    );
+    // The RFC 6465 mixer-to-client audio level isn't: stopped, the answer
+    // leaves it out.
+    const level = "urn:ietf:params:rtp-hdrext:csrc-audio-level";
     list.find((e: { uri: string }) => e.uri === level).direction = "stopped";
     t2.setHeaderExtensionsToNegotiate(list);
     await pc2.setLocalDescription();
