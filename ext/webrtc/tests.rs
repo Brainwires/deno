@@ -1661,3 +1661,307 @@ async fn dtls_after_ice_connected_delay() {
     answerer[answerer.len() - 1]
   );
 }
+
+/// The format tokens of each m= line of `sdp`, in order.
+fn section_formats(sdp: &str) -> Vec<Vec<String>> {
+  sdp
+    .lines()
+    .filter_map(|l| l.trim_end().strip_prefix("m="))
+    .map(|m| {
+      m.split_ascii_whitespace()
+        .skip(3)
+        .map(str::to_string)
+        .collect()
+    })
+    .collect()
+}
+
+/// The payload types of `a=<attr>:<pt>` lines of each m-section of `sdp`.
+fn section_attribute_formats(sdp: &str, attr: &str) -> Vec<Vec<String>> {
+  let prefix = format!("a={attr}:");
+  let mut out: Vec<Vec<String>> = Vec::new();
+  for line in sdp.lines() {
+    let line = line.trim_end();
+    if line.starts_with("m=") {
+      out.push(Vec::new());
+    } else if let Some(rest) = line.strip_prefix(prefix.as_str())
+      && let Some(last) = out.last_mut()
+      && let Some(pt) = rest.split_ascii_whitespace().next()
+    {
+      last.push(pt.to_string());
+    }
+  }
+  out
+}
+
+/// `sdp` with only the formats named in `keep` (codec names, any case) in
+/// its audio and video sections, plus the retransmission formats that repair
+/// them, as an offer from a browser that supports fewer codecs is.
+fn offer_with_only(sdp: &str, keep: &[&str]) -> String {
+  // Pass 1: per section, the kept payload types.
+  let mut kept: Vec<Vec<String>> = Vec::new();
+  let mut rtx: Vec<Vec<(String, String)>> = Vec::new();
+  for line in sdp.lines() {
+    let line = line.trim_end();
+    if line.starts_with("m=") {
+      kept.push(Vec::new());
+      rtx.push(Vec::new());
+    } else if let Some(rest) = line.strip_prefix("a=rtpmap:")
+      && let Some((pt, codec)) = rest.split_once(' ')
+      && let Some(name) = codec.split('/').next()
+      && keep.iter().any(|k| k.eq_ignore_ascii_case(name))
+    {
+      kept.last_mut().unwrap().push(pt.to_string());
+    } else if let Some(rest) = line.strip_prefix("a=fmtp:")
+      && let Some((pt, params)) = rest.split_once(' ')
+      && let Some(apt) = params
+        .split(';')
+        .find_map(|p| p.trim().strip_prefix("apt="))
+    {
+      rtx
+        .last_mut()
+        .unwrap()
+        .push((pt.to_string(), apt.trim().to_string()));
+    }
+  }
+  for (kept, rtx) in kept.iter_mut().zip(&rtx) {
+    let repairs: Vec<String> = rtx
+      .iter()
+      .filter(|(_, apt)| kept.contains(apt))
+      .map(|(pt, _)| pt.clone())
+      .collect();
+    kept.extend(repairs);
+  }
+  // Pass 2: rewrite the audio / video sections.
+  let mut out = String::new();
+  let mut index: Option<usize> = None;
+  let mut media = false;
+  for line in sdp.split_inclusive('\n') {
+    let text = line.trim_end();
+    if let Some(m) = text.strip_prefix("m=") {
+      let i = index.map_or(0, |i| i + 1);
+      index = Some(i);
+      let fields: Vec<&str> = m.split_ascii_whitespace().collect();
+      media = matches!(fields[0], "audio" | "video");
+      if media {
+        let formats: Vec<&str> = fields[3..]
+          .iter()
+          .copied()
+          .filter(|f| kept[i].iter().any(|k| k == f))
+          .collect();
+        out.push_str(&format!(
+          "m={} {} {} {}\r\n",
+          fields[0],
+          fields[1],
+          fields[2],
+          formats.join(" ")
+        ));
+        continue;
+      }
+    } else if media
+      && let Some(i) = index
+      && let Some((_, rest)) = text
+        .split_once(':')
+        .filter(|(a, _)| matches!(*a, "a=rtpmap" | "a=fmtp" | "a=rtcp-fb"))
+      && let Some(pt) = rest.split_ascii_whitespace().next()
+      && pt != "*"
+      && !kept[i].iter().any(|k| k == pt)
+    {
+      continue;
+    }
+    out.push_str(line);
+  }
+  out
+}
+
+// DENEXT.md item 565, the WebKit case: an offer with VP8 alone, which the
+// peer later leaves for VP9 (payload type 98) if our answer listed it. The
+// engine's answer appended VP9 (and its RTX) and PCMU, which its receiver
+// would drop as not negotiated; the answer as signalled lists only what the
+// offer had, so the peer can never switch to them.
+#[test]
+fn answer_lists_only_the_offered_formats() {
+  let offer = "v=0\r\n\
+o=- 1 2 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+a=group:BUNDLE 0 1 2\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+a=mid:0\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+a=fmtp:111 minptime=10;useinbandfec=1\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96 97\r\n\
+a=mid:1\r\n\
+a=rtpmap:96 VP8/90000\r\n\
+a=rtcp-fb:96 nack\r\n\
+a=rtpmap:97 rtx/90000\r\n\
+a=fmtp:97 apt=96\r\n\
+m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+a=mid:2\r\n\
+a=sctp-port:5000\r\n";
+  let answer = "v=0\r\n\
+o=- 3 2 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+a=group:BUNDLE 0 1 2\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111 0\r\n\
+a=mid:0\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+a=fmtp:111 minptime=10;useinbandfec=1\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96 97 98 99\r\n\
+a=mid:1\r\n\
+a=rtpmap:96 VP8/90000\r\n\
+a=rtcp-fb:96 nack\r\n\
+a=rtcp-fb:* ack ccfb\r\n\
+a=rtpmap:97 rtx/90000\r\n\
+a=fmtp:97 apt=96\r\n\
+a=rtpmap:98 VP9/90000\r\n\
+a=fmtp:98 profile-id=0\r\n\
+a=rtcp-fb:98 nack pli\r\n\
+a=rtpmap:99 rtx/90000\r\n\
+a=fmtp:99 apt=98\r\n\
+m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+a=mid:2\r\n\
+a=sctp-port:5000\r\n";
+  let filtered = crate::peer::answer_with_offered_formats(answer, offer);
+  let expected = "v=0\r\n\
+o=- 3 2 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+a=group:BUNDLE 0 1 2\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+a=mid:0\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+a=fmtp:111 minptime=10;useinbandfec=1\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96 97\r\n\
+a=mid:1\r\n\
+a=rtpmap:96 VP8/90000\r\n\
+a=rtcp-fb:96 nack\r\n\
+a=rtcp-fb:* ack ccfb\r\n\
+a=rtpmap:97 rtx/90000\r\n\
+a=fmtp:97 apt=96\r\n\
+m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+a=mid:2\r\n\
+a=sctp-port:5000\r\n";
+  assert_eq!(filtered, expected);
+  // Nothing to drop: the answer is returned as it is.
+  assert_eq!(
+    crate::peer::answer_with_offered_formats(expected, offer),
+    expected
+  );
+  // An RTX format the offer listed whose primary it did not goes too.
+  let offer_rtx_only = offer.replace(
+    "m=video 9 UDP/TLS/RTP/SAVPF 96 97\r\n",
+    "m=video 9 UDP/TLS/RTP/SAVPF 96 97 99\r\n",
+  );
+  assert_eq!(
+    section_formats(&crate::peer::answer_with_offered_formats(
+      answer,
+      &offer_rtx_only
+    ))[1],
+    vec!["96", "97"]
+  );
+  // A section count that does not match the offer's: left as it is.
+  let fewer = offer.split("m=application").next().unwrap();
+  assert_eq!(
+    crate::peer::answer_with_offered_formats(answer, fewer),
+    answer
+  );
+}
+
+// DENEXT.md item 565 end to end: a VP8-only, Opus-only offer gets an answer,
+// a local description and receiver parameters with those formats (and VP8's
+// RTX) alone; the engine applies the answer handed out, and a later offer
+// from the answerer is not filtered.
+#[tokio::test]
+async fn answer_to_a_narrow_offer_lists_only_its_formats() {
+  let a = new_peer();
+  let b = new_peer();
+  for kind in ["audio", "video"] {
+    a.media(|core| {
+      core.add_transceiver(crate::media::TransceiverArg {
+        kind: kind.to_string(),
+        track: Some(crate::media::TrackArg {
+          id: format!("{kind}-track"),
+          label: kind.to_string(),
+        }),
+        direction: "sendrecv".to_string(),
+        streams: vec!["stream".to_string()],
+        send_encodings: vec![],
+        codec: None,
+        add_track: true,
+      })
+    })
+    .unwrap();
+  }
+  let full = a.create_offer(false).unwrap();
+  assert!(
+    full.contains(" VP9/90000"),
+    "the engine offers more than VP8: {full}"
+  );
+  let offer = offer_with_only(&full, &["opus", "VP8"]);
+  let offered = section_formats(&offer);
+  assert_eq!(offered.len(), 2, "{offer}");
+  assert!(offered.iter().all(|f| !f.is_empty()), "{offer}");
+  b.set_remote_description("offer", offer.clone()).unwrap();
+  let answer = b.create_answer().unwrap();
+  let check = |sdp: &str| {
+    let formats = section_formats(sdp);
+    assert_eq!(formats.len(), offered.len(), "{sdp}");
+    for (i, section) in formats.iter().enumerate() {
+      assert!(!section.is_empty(), "{sdp}");
+      for f in section {
+        assert!(offered[i].contains(f), "{f} was not offered: {sdp}");
+      }
+      for attr in ["rtpmap", "fmtp", "rtcp-fb"] {
+        for pt in &section_attribute_formats(sdp, attr)[i] {
+          assert!(
+            pt == "*" || offered[i].contains(pt),
+            "a={attr}:{pt} was not offered: {sdp}"
+          );
+        }
+      }
+    }
+    for codec in ["VP9/", "H264/", "AV1/", "PCMU/", "PCMA/", "G722/"] {
+      assert!(!sdp.contains(codec), "{codec} in {sdp}");
+    }
+    assert!(sdp.contains(" VP8/90000"), "{sdp}");
+    assert!(sdp.contains(" opus/48000"), "{sdp}");
+  };
+  check(&answer);
+  // The engine compares the answer it is given with the one it made.
+  b.set_local_description("answer", answer.clone()).unwrap();
+  let (kind, local) = b.local_description().unwrap();
+  assert_eq!(kind, "answer");
+  check(&local);
+  assert_eq!(section_formats(&local), section_formats(&answer));
+  let current = b.descriptions().current_local.unwrap().1;
+  check(&current);
+  // The receivers are prepared for the answer's formats.
+  let keys: Vec<u32> = b
+    .media(|core| Ok(core.transceivers()))
+    .unwrap()
+    .into_iter()
+    .map(|t| t.key)
+    .collect();
+  assert_eq!(keys.len(), 2);
+  for (i, key) in keys.into_iter().enumerate() {
+    let params = b.media(|core| core.receiver_parameters(key)).unwrap();
+    let codecs = params["codecs"].as_array().cloned().unwrap_or_default();
+    assert!(!codecs.is_empty(), "{params}");
+    for c in codecs {
+      let pt = c["payloadType"].as_u64().unwrap().to_string();
+      assert!(
+        offered.iter().any(|s| s.contains(&pt)),
+        "receiver {i} lists {pt}, not offered: {params}"
+      );
+    }
+  }
+  // Offers are not filtered: the answerer's own offer is the engine's, and
+  // the engine takes it.
+  let reoffer = b.create_offer(false).unwrap();
+  b.set_local_description("offer", reoffer).unwrap();
+  a.close();
+  b.close();
+}

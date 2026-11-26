@@ -22884,6 +22884,49 @@ where the changes are discussed.
        together reach once() re-armed later".
      - Node tests enabled: none.
 
+565. **`fix(ext/webrtc)`: an answer lists only the payload formats the offer
+     listed** (runtime; `ext/webrtc/peer.rs`, `media.rs`). A workaround, to be
+     removed once an rtci release ships the receiver fix. Since rtci 0.1 (rtci
+     606bb2fa, "jsep: answers list the formats the offer lacks after the offered
+     ones (RFC 9429 5.3.1)"; the `0.22.0+brainwires.5.1` line did not) the
+     engine's answer appends the media formats it supports that the offer
+     lacked, but its receiver drops media on those payload types as not
+     negotiated, against RFC 3264 section 6.1 (the offerer may send any format
+     the answer lists). WebKit, offered VP8 alone, switched to VP9 (payload type
+     98) mid-call, and the rest of the call's video was dropped.
+     - `create_answer` hands out the engine's answer without the formats the
+       remote offer's matching m-section (by position) did not list: the m= line
+       keeps the rest in the answer's order, and the dropped formats' `a=rtpmap`
+       / `a=fmtp` / `a=rtcp-fb` lines go, with any retransmission format whose
+       `apt` names a dropped one. RTX, RED and FEC formats stay only where the
+       offer listed them. Non-RTP sections, a section that would be left without
+       a format and an answer whose section count differs from the offer's are
+       not changed.
+     - The engine applies only the answer it made last (it compares the text),
+       so `set_local_description` gives it its own answer for the one handed
+       out; the engine's local description keeps the extra formats, and
+       `localDescription` / `currentLocalDescription` /
+       `pendingLocalDescription` and `RTCRtpReceiver.getParameters()` read it
+       through the same filter (against the current or pending remote offer), so
+       JavaScript sees exactly the answer it signalled. A description JavaScript
+       edited is handed over as written, as before.
+     - Why not codec preferences: rtci honours RFC 9429 section 5.3.1's "MUST
+       exclude any codecs not present in the codec preferences" (it adds no
+       formats to the answer of a transceiver with application preferences), but
+       the engine API cannot undo them afterwards (an empty list also resets the
+       sender's codecs and the payload types a remote description gave), and
+       while set they narrow this side's later offers to the earlier offer's
+       formats.
+     - Offers are not changed. With application codec preferences the engine
+       adds no format to the answer, so the filter normally has nothing to drop
+       there.
+     - Tests: `tests.rs` `answer_lists_only_the_offered_formats` (the WebKit
+       shape: a VP8-only, Opus-only offer; the engine's VP9 + RTX and PCMU
+       additions go) and `answer_to_a_narrow_offer_lists_only_its_formats` (two
+       loopback peers: the answer, the applied local description and the
+       receivers' parameters name only the offered formats).
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -22895,7 +22938,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 517, 518-538, 554-556, 560, 561, 564 and the
+506-510, 511, 512, 513, 515, 517, 518-538, 554-556, 560, 561, 564, 565 and the
 runtime parts of 540-551) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
