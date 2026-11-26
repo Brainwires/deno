@@ -2020,3 +2020,173 @@ fn audio_codec_preferences_take_the_capabilities() {
   }
   peer.close();
 }
+
+// getCapabilities() lists each registered codec, the H.264 High profile
+// levels included, though rtci 0.2 offers those with level 5.0's fmtp line
+// (WPT protocol/codecs-filtered-by-direction: a sendonly or recvonly offer
+// lists as many formats as getCapabilities() has codecs).
+#[test]
+fn capabilities_list_every_registered_video_codec() {
+  let codecs = crate::media::capabilities("video", true)
+    .unwrap()
+    .expect("capabilities")
+    .codecs;
+  for level in ["640028", "640029", "64002a", "640032", "640033"] {
+    assert!(
+      codecs.iter().any(|c| c
+        .sdp_fmtp_line
+        .as_deref()
+        .is_some_and(|f| f.contains(&format!("profile-level-id={level}")))),
+      "H.264 {level}: {codecs:?}"
+    );
+  }
+  let rtx: Vec<_> = codecs
+    .iter()
+    .filter(|c| c.mime_type.eq_ignore_ascii_case("video/rtx"))
+    .collect();
+  assert_eq!(rtx.len(), 1, "RTX once: {codecs:?}");
+  assert_eq!(rtx[0].sdp_fmtp_line, None, "RTX without apt");
+  // An offer lists one format per non-repair capability.
+  let peer = new_peer();
+  peer
+    .media(|core| {
+      core.add_transceiver(crate::media::TransceiverArg {
+        kind: "video".to_string(),
+        track: None,
+        direction: "sendonly".to_string(),
+        streams: vec![],
+        send_encodings: vec![],
+        codec: None,
+        add_track: false,
+      })
+    })
+    .unwrap();
+  let offer = peer.create_offer(false).unwrap();
+  let offered = offer
+    .lines()
+    .filter(|l| l.starts_with("a=rtpmap:") && !l.contains(" rtx/"))
+    .count();
+  let primaries = codecs
+    .iter()
+    .filter(|c| !c.mime_type.eq_ignore_ascii_case("video/rtx"))
+    .count();
+  assert_eq!(offered, primaries, "{offer}");
+  peer.close();
+}
+
+// The audio level extensions are offered in the clear only, as browsers
+// offer them, and getCapabilities() never lists RFC 6904's `encrypt` URI as
+// an extension of its own.
+#[test]
+fn audio_level_extensions_are_offered_in_the_clear() {
+  let peer = new_peer();
+  peer
+    .media(|core| {
+      core.add_transceiver(crate::media::TransceiverArg {
+        kind: "audio".to_string(),
+        track: None,
+        direction: "sendrecv".to_string(),
+        streams: vec![],
+        send_encodings: vec![],
+        codec: None,
+        add_track: false,
+      })
+    })
+    .unwrap();
+  let offer = peer.create_offer(false).unwrap();
+  assert!(
+    !offer.contains("urn:ietf:params:rtp-hdrext:encrypt"),
+    "{offer}"
+  );
+  assert!(offer.contains("urn:ietf:params:rtp-hdrext:ssrc-audio-level"));
+  peer.close();
+  let caps = serde_json::to_value(
+    crate::media::capabilities("audio", false)
+      .unwrap()
+      .expect("capabilities"),
+  )
+  .unwrap();
+  let uris: Vec<&str> = caps["headerExtensions"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .filter_map(|h| h["uri"].as_str())
+    .collect();
+  assert!(
+    !uris.contains(&"urn:ietf:params:rtp-hdrext:encrypt"),
+    "{uris:?}"
+  );
+  assert_eq!(
+    crate::media::extmap_uri(
+      "4 urn:ietf:params:rtp-hdrext:encrypt urn:ietf:params:rtp-hdrext:ssrc-audio-level vad=on"
+    ),
+    Some("urn:ietf:params:rtp-hdrext:ssrc-audio-level")
+  );
+  assert_eq!(
+    crate::media::extmap_uri("1/sendonly urn:ietf:params:rtp-hdrext:sdes:mid"),
+    Some("urn:ietf:params:rtp-hdrext:sdes:mid")
+  );
+}
+
+#[test]
+fn repeated_simulcast_rids_are_dropped() {
+  use crate::peer::simulcast_without_repeated_rids as dedupe;
+  assert_eq!(dedupe("recv foo;bar;baz"), None);
+  assert_eq!(dedupe("recv foo;bar;foo").as_deref(), Some("recv foo;bar"));
+  assert_eq!(dedupe("recv a,~b;b;c").as_deref(), Some("recv a,~b;c"));
+  assert_eq!(
+    dedupe("send x;y recv z;x").as_deref(),
+    Some("send x;y recv z")
+  );
+}
+
+#[test]
+fn attribute_names_are_tokens() {
+  use crate::peer::is_attribute_name;
+  assert!(is_attribute_name("ssrc"));
+  assert!(is_attribute_name("x-google-flag"));
+  assert!(!is_attribute_name("notssrc2526472737 cname"));
+  assert!(!is_attribute_name(""));
+}
+
+// A remote offer whose attribute name is not a token (WPT
+// RTCPeerConnection-connectionState hides the SSRCs as `a=notssrc<n>
+// cname:...`) is applied, the line left out, as browsers ignore it; a
+// repeated simulcast rid is ignored too, and remoteDescription keeps the
+// line as signalled.
+#[test]
+fn remote_offer_with_unknown_lines_and_repeated_rids_applies() {
+  let a = new_peer();
+  a.media(|core| {
+    core.add_transceiver(crate::media::TransceiverArg {
+      kind: "video".to_string(),
+      track: Some(crate::media::TrackArg {
+        id: "video-track".to_string(),
+        label: "video".to_string(),
+      }),
+      direction: "sendrecv".to_string(),
+      streams: vec!["stream".to_string()],
+      send_encodings: vec![],
+      codec: None,
+      add_track: true,
+    })
+  })
+  .unwrap();
+  let offer = a.create_offer(false).unwrap();
+  a.close();
+  let munged = offer.replace("a=ssrc:", "a=notssrc");
+  assert!(munged.contains("a=notssrc"), "{offer}");
+  let b = new_peer();
+  b.set_remote_description("offer", munged).unwrap();
+  b.close();
+  let simulcast = offer.replace(
+    "a=rtcp-mux\r\n",
+    "a=rtcp-mux\r\na=rid:foo recv\r\na=rid:bar recv\r\na=simulcast:recv foo;bar;foo\r\n",
+  );
+  assert!(simulcast.contains("a=simulcast:"), "{offer}");
+  let c = new_peer();
+  c.set_remote_description("offer", simulcast).unwrap();
+  let shown = c.remote_description().expect("remote description").1;
+  assert!(shown.contains("a=simulcast:recv foo;bar;foo"), "{shown}");
+  c.close();
+}

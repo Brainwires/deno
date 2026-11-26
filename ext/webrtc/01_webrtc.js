@@ -5102,6 +5102,15 @@ class RTCPeerConnection extends EventTarget {
           "Nothing to roll back in signaling state 'stable'",
         );
       }
+      // RFC 9429 section 4.1.10.2: a local rollback undoes a local offer
+      // ("have-local-offer"); a remote offer is rolled back by
+      // setRemoteDescription. rtci 0.2 applies a local rollback in any
+      // state but "stable", which the 0.22 engine refused.
+      if (type === "rollback" && signaling !== "have-local-offer") {
+        throw invalidState(
+          `Cannot roll back a local description in signaling state '${signaling}'`,
+        );
+      }
       if (
         (type === "answer" || type === "pranswer") &&
         signaling !== "have-remote-offer" &&
@@ -5186,6 +5195,14 @@ class RTCPeerConnection extends EventTarget {
       if (type === "rollback" && signaling === "stable") {
         throw invalidState(
           "Nothing to roll back in signaling state 'stable'",
+        );
+      }
+      // RFC 9429 section 4.1.10.2: a remote rollback undoes a remote offer
+      // ("have-remote-offer"); rtci 0.2 applies one in any state but
+      // "stable".
+      if (type === "rollback" && signaling !== "have-remote-offer") {
+        throw invalidState(
+          `Cannot roll back a remote description in signaling state '${signaling}'`,
         );
       }
       if (

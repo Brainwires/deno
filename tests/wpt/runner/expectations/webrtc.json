@@ -322,7 +322,7 @@
     "candidate-exchange.https.html?interop-2026": true,
     "candidate-exchange.https.html?rest": true,
     "codecs-filtered-by-direction.https.html": true,
-    "codecs-subsequent-offer.https.html": false,
+    "codecs-subsequent-offer.https.html": true,
     "crypto-suite.https.html": true,
     "direction.html": true,
     "dtls-certificates.html": true,
@@ -384,11 +384,7 @@
   },
   "receiver-track-live.https.html": true,
   "recvonly-transceiver-can-become-sendrecv.https.html": true,
-  "rtp-stats-lifetime.https.html": {
-    "expectedFailures": [
-      "RTCInboundRtpStreamStats exists for early media"
-    ]
-  },
+  "rtp-stats-lifetime.https.html": true,
   "simplecall-no-ssrcs.https.html": false,
   "simplecall.https.html": true,
   "simulcast": {
@@ -408,5 +404,5 @@
     "vp9.https.html": false
   },
   "toJSON.html": true,
-  "transfer-datachannel.html": false
+  "transfer-datachannel.html": true
 }
