@@ -23067,7 +23067,10 @@ where the changes are discussed.
        repeated rid-id in `a=simulcast` is dropped for the engine, which refused
        it (w3c/webrtc-pc#2780, `simulcast/negotiation-encodings` "Duplicate rids
        in sRD(offer) are ignored"); `remoteDescription` keeps the line as
-       signalled.
+       signalled. A second `a=rid` line for a rid-id the section declared
+       already (the test writes one per `a=simulcast` entry) is left out for the
+       engine too, which otherwise answered without simulcast; that line is not
+       in `remoteDescription`.
      - Expectations: `protocol/codecs-subsequent-offer.https.html`,
        `rtp-stats-lifetime.https.html` and `transfer-datachannel.html` pass now
        and are expected to (rtci 0.2's later offers list every available format,
