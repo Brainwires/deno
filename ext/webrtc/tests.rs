@@ -1547,7 +1547,11 @@ async fn a_lost_frame_asks_for_a_key_frame_until_one_comes() {
   w.lose(2);
   w.write(&a, false);
   let lost_at = std::time::Instant::now();
-  events_for(&b, &mut eb, Duration::from_millis(50)).await;
+  // However long the packet takes to arrive (a coarse timer on Windows).
+  let deadline = lost_at + Duration::from_secs(5);
+  while plis_sent(&b) == 0 && std::time::Instant::now() < deadline {
+    events_for(&b, &mut eb, Duration::from_millis(20)).await;
+  }
   assert_eq!(plis_sent(&b), 1, "one PLI for the loss");
   // The sender hears it.
   wait_for(&a, &mut ea, |e| {
@@ -1571,7 +1575,12 @@ async fn a_lost_frame_asks_for_a_key_frame_until_one_comes() {
   // past the interval too.
   let frames = media_frames(&eb, b_key).len();
   w.write(&a, true);
-  events_for(&b, &mut eb, Duration::from_millis(100)).await;
+  let deadline = std::time::Instant::now() + Duration::from_secs(5);
+  while media_frames(&eb, b_key).len() == frames
+    && std::time::Instant::now() < deadline
+  {
+    events_for(&b, &mut eb, Duration::from_millis(20)).await;
+  }
   assert_eq!(media_frames(&eb, b_key)[frames..], [true], "the key frame");
   let after_key = plis_sent(&b);
   let interval = crate::media::KEY_FRAME_REQUEST_INTERVAL;
@@ -1593,6 +1602,7 @@ async fn a_lost_frame_asks_for_a_key_frame_until_one_comes() {
 // ICE agent's next check (200 ms).
 #[tokio::test]
 #[ignore = "a measurement, not a check"]
+#[allow(clippy::print_stdout, reason = "the measurement is the output")]
 async fn dtls_after_ice_connected_delay() {
   let mut delays: Vec<(u128, u128)> = Vec::new();
   for _ in 0..20 {

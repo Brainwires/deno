@@ -93,26 +93,11 @@ pub(crate) fn media_stack_counting(
   media_engine
     .register_default_codecs()
     .map_err(crate::peer::rtc_err)?;
-  // RFC 4733 telephone events, for RTCDTMFSender (the engine registers
-  // none): at Opus' clock and at 8 kHz, on payload types the default video
-  // codecs don't use (they share the bundle).
-  for (payload_type, clock_rate) in [(110, 48000), (113, 8000)] {
-    media_engine
-      .register_codec(
-        RTCRtpCodecParameters {
-          rtp_codec: RTCRtpCodec {
-            mime_type: "audio/telephone-event".to_string(),
-            clock_rate,
-            channels: 0,
-            sdp_fmtp_line: "0-15".to_string(),
-            rtcp_feedback: vec![],
-          },
-          payload_type,
-        },
-        RtpCodecKind::Audio,
-      )
-      .map_err(crate::peer::rtc_err)?;
-  }
+  // The defaults register RFC 4733 telephone events (RFC 7874 section 3),
+  // at Opus' clock and at 8 kHz, for RTCDTMFSender: a second registration
+  // here would put another format on a payload type the video RTX formats
+  // use (RFC 9143 section 9.1.1 refuses one payload type with two
+  // configurations in a BUNDLE group).
   // The defaults include the fork's key-frame request interceptor, which
   // delivers inbound PLI and FIR to the application (here, an
   // `EncodedMediaTrack`'s `keyframerequest`): upstream ends them at the
@@ -463,6 +448,16 @@ impl rtci::sansio::Protocol<TaggedPacket, TaggedPacket, ()> for FactorPacer {
         });
       }
       self.estimate_reported = true;
+    }
+    if estimate.is_some() && !self.paced {
+      // Not pacing (no congestion feedback negotiated, or none for
+      // FEEDBACK_TIMEOUT): the stats report no estimate, even one the
+      // controller attached without congestion feedback (rtci 0.2 does, on a
+      // connection that negotiated none).
+      msg
+        .message
+        .attributes
+        .retain(|a| !matches!(a, Attribute::TargetBitrateChanged { .. }));
     }
     // The engine's pacer follows an estimate going past; the scaled rate
     // (or the pass-through's) replaces what it set.
@@ -2522,6 +2517,7 @@ impl Core {
     let sent = write_pli(&mut receiver, media_ssrc, now);
     if sent {
       self.media.loss_key_frame_requests.insert(media_ssrc, now);
+      self.wrote_rtcp = true;
     }
     sent
   }

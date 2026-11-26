@@ -22801,6 +22801,44 @@ where the changes are discussed.
      - Test: `audio_codec_preferences_take_the_capabilities`.
      - Node tests enabled: none.
 
+585. **`fix(ext/webrtc)`: the Deno unit tests on rtci 0.2** (runtime;
+     `ext/webrtc/01_webrtc.js`, `media.rs`, `peer.rs`, `tests.rs`,
+     `tests/unit/webrtc_test.ts`). The move to rtci 0.1 and 0.2 ran only the
+     Rust lib tests; the `tests/unit/webrtc_*.ts` suite then failed on five
+     engine changes.
+     - RFC 6904 encrypted header extensions: the engine offers
+       `a=extmap:<id> urn:ietf:params:rtp-hdrext:encrypt <uri>` beside the
+       clear mapping. JavaScript read the `encrypt` URI as the extension, so
+       every encrypted mapping looked like one extension with several ids and
+       the next remote description was refused as remapped (RFC 8285 section
+       6). An encrypted line is now its inner URI, marked encrypted; a mapping
+       is a URI in one form, and the negotiated list reads the clear form
+       first.
+     - Telephone events: the engine registers RFC 4733 `telephone-event` at
+       48 kHz and 8 kHz itself (RFC 7874 section 3). The driver's second
+       registration put one on payload type 110, which video RTX uses, and a
+       BUNDLE group with both was refused (RFC 9143 section 9.1.1). The
+       driver no longer registers them.
+     - `a=identity`: the engine's SDP parser takes only RFC 8827's form (a
+       base64 assertion). A malformed assertion rejects `peerIdentity`
+       (webrtc-identity), not the description, so the driver leaves such a
+       line out of what the engine is given.
+     - Key-frame requests on audio: the engine sends RTCP feedback only where
+       the section negotiated it (RFC 4585 section 4.2), and an audio section
+       negotiates no `nack pli`; `webrtcRtpAndKeyFrameRequests` uses video.
+       RFC 8888 feedback is signalled as `a=rtcp-fb:* ack ccfb` (section 6);
+       `webrtcEcnMarksVideoEct1` takes the wildcard.
+     - Stats without congestion feedback: the connection's pacer now keeps an
+       estimate the controller attaches while nothing is paced out of
+       `availableOutgoingBitrate`, as documented for `FactorPacer`.
+     - A key-frame request written while events are collected leaves in the
+       same driver pass. `a_lost_frame_asks_for_a_key_frame_until_one_comes`
+       waits for the packet after the loss however long it takes (it failed
+       on Windows' coarse timer), and the DTLS measurement test may print.
+     - Tests: the `tests/unit/webrtc_*.ts` files named in the report; the
+       leak failures after a failed test there were its unclosed connections.
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -22812,8 +22850,8 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 517, 518-538, 554-556, 580, 581, 583, 584 and
-the runtime parts of 540-551) are what the prebuilt `libdenort` carries. The
+506-510, 511, 512, 513, 515, 517, 518-538, 554-556, 580, 581, 583-585 and the
+runtime parts of 540-551) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.

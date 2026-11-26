@@ -3708,6 +3708,8 @@ function pushHeaderExtensions(pc, offer) {
 
 // The `a=extmap` lines of each media section, by mid: id and direction
 // (sendrecv when unstated) per URI.
+const ENCRYPT_URI = "urn:ietf:params:rtp-hdrext:encrypt";
+
 function extmapsOf(sdp) {
   const out = new SafeMap();
   const lines = StringPrototypeSplit(sdp, "\n");
@@ -3729,10 +3731,15 @@ function extmapsOf(sdp) {
       const fields = StringPrototypeSplit(StringPrototypeSlice(line, 9), " ");
       if (fields.length < 2) continue;
       const idDir = StringPrototypeSplit(fields[0], "/");
+      // RFC 6904 section 4: `urn:ietf:params:rtp-hdrext:encrypt <uri>` is
+      // the encrypted form of the extension it names next, a mapping of its
+      // own beside the clear one.
+      const encrypted = fields[1] === ENCRYPT_URI && fields.length > 2;
       ArrayPrototypePush(current.extensions, {
         id: NumberParseInt(idDir[0], 10),
         direction: idDir[1] ?? "sendrecv",
-        uri: fields[1],
+        uri: encrypted ? fields[2] : fields[1],
+        encrypted,
       });
     }
   }
@@ -3756,7 +3763,11 @@ function headerExtensionsNegotiated(pc, sdp, remote) {
       (e) => {
         const found = section.rejected
           ? undefined
-          : ArrayPrototypeFind(section.extensions, (x) => x.uri === e.uri);
+          : (ArrayPrototypeFind(
+            section.extensions,
+            (x) => x.uri === e.uri && !x.encrypted,
+          ) ??
+            ArrayPrototypeFind(section.extensions, (x) => x.uri === e.uri));
         let direction = found === undefined ? "stopped" : found.direction;
         if (found !== undefined && remote) {
           direction = reverseDirection(direction);
@@ -6143,9 +6154,12 @@ function requireStableExtensionIds(pc, sdp) {
       if (before === undefined || before.rejected) continue;
       for (let i = 0; i < section.extensions.length; ++i) {
         const e = section.extensions[i];
+        // A mapping is a URI in its clear or encrypted form.
         const clash = ArrayPrototypeSome(
           before.extensions,
-          (b) => (b.uri === e.uri) !== (b.id === e.id),
+          (b) =>
+            (b.uri === e.uri && b.encrypted === e.encrypted) !==
+              (b.id === e.id),
         );
         if (clash) {
           throw new DOMException(
