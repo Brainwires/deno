@@ -22887,11 +22887,19 @@ where the changes are discussed.
        event-loop turn does). Node's own `Worker` drops the second of two
        messages that arrive in one drain even for a listener re-armed in the
        next microtask; Deno delivers it, as for a port.
+     - `MessagePort.close()` dispatches only the messages queued when it was
+       called (it takes them all off the queue first), as Node's drain takes the
+       messages queued when it starts. With a message now waiting a turn in the
+       queue, a port feeding itself through its peer
+       (`test-worker-message-port-infinite-message-loop.js`, closed from a
+       timer) kept close()'s drain dispatching the message each handler posted,
+       forever. Messages posted during the drain are dropped with the port.
      - `BroadcastChannel` (`ext/web/01_broadcast_channel.js`) already dispatches
        each message through `defer()` (a timer task); not changed.
      - Tests: `tests/unit/message_channel_test.ts` "messagechannel messages
        queued together reach a listener re-added later" and "messagechannel
-       onmessage reassigned in a promise chain gets every message";
+       onmessage reassigned in a promise chain gets every message" and
+       "messagechannel close() of a self-feeding port ends";
        `tests/unit_node/worker_threads_test.ts` "MessagePort messages queued
        together reach once() re-armed later" and "Worker messages queued
        together reach once() re-armed later".
