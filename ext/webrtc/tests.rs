@@ -933,9 +933,20 @@ async fn mdns_host_candidates_resolve_between_peers() {
   wait_for(&b, &mut eb, gathered).await;
   let (_, sdp) = b.local_description().unwrap();
   // B's literal host candidates are left out, so A only reaches B as the
-  // peer-reflexive source of B's checks to the name it resolved.
-  a.set_remote_description("answer", without(&sdp, |l| l.contains("typ host")))
-    .unwrap();
+  // peer-reflexive source of B's checks to the name it resolved. So is the
+  // answer's `a=end-of-candidates`, as from a peer that trickles its
+  // candidates and hasn't finished: told that a peer with no candidate is
+  // done, A fails its empty check list at once (the driver's
+  // `fail_without_pairs`, and the engine's checklist failure at
+  // end-of-candidates, RFC 8838 section 8), and whether B's first check
+  // reaches A before that is a race (won with the 0.22.0+brainwires.5
+  // engine, which had no checklist failure; rtci 0.1's RFC 8445 check list
+  // added it).
+  let answer: String = without(&sdp, |l| l.contains("typ host"))
+    .split_inclusive('\n')
+    .filter(|l| l.trim_end() != "a=end-of-candidates")
+    .collect();
+  a.set_remote_description("answer", answer).unwrap();
   wait_for(&a, &mut ea, opened).await;
   wait_for(&b, &mut eb, opened).await;
   a.send(id, true, b"via mdns").unwrap();
@@ -1350,4 +1361,303 @@ fn pacer_refusals_are_the_selected_pairs_discards() {
   assert_eq!(stats[1]["bytesDiscardedOnSend"], 3136);
   assert_eq!(stats[2]["packetsDiscardedOnSend"], 0);
   assert_eq!(stats[2]["bytesDiscardedOnSend"], 0);
+}
+
+fn connected(e: &JsEvent) -> bool {
+  matches!(e, JsEvent::ConnectionState { state } if state == "connected")
+}
+
+/// `a` sends video to `b` (one sendonly transceiver with a track), full
+/// (non-trickle) descriptions; returns both peers once both are connected,
+/// with `a`'s and `b`'s transceiver keys and the negotiated VP8 payload type.
+async fn connect_video() -> (Rc<Peer>, Rc<Peer>, u32, u32, u8) {
+  let a = new_peer();
+  let b = new_peer();
+  let mut ea = Vec::new();
+  let mut eb = Vec::new();
+  let a_key = a
+    .media(|core| {
+      core.add_transceiver(crate::media::TransceiverArg {
+        kind: "video".to_string(),
+        track: Some(crate::media::TrackArg {
+          id: "video-track".to_string(),
+          label: "video".to_string(),
+        }),
+        direction: "sendonly".to_string(),
+        streams: vec!["stream".to_string()],
+        send_encodings: vec![],
+        codec: None,
+        add_track: true,
+      })
+    })
+    .unwrap();
+  let offer = a.create_offer(false).unwrap();
+  a.set_local_description("offer", offer).unwrap();
+  wait_for(&a, &mut ea, gathered).await;
+  let (_, sdp) = a.local_description().unwrap();
+  b.set_remote_description("offer", sdp).unwrap();
+  let answer = b.create_answer().unwrap();
+  b.set_local_description("answer", answer).unwrap();
+  wait_for(&b, &mut eb, gathered).await;
+  let (_, sdp) = b.local_description().unwrap();
+  let vp8 = sdp
+    .lines()
+    .find_map(|l| {
+      let rest = l.strip_prefix("a=rtpmap:")?;
+      let (pt, codec) = rest.split_once(' ')?;
+      codec
+        .eq_ignore_ascii_case("VP8/90000")
+        .then(|| pt.parse::<u8>().ok())?
+    })
+    .expect("the answer has VP8");
+  a.set_remote_description("answer", sdp).unwrap();
+  wait_for(&a, &mut ea, connected).await;
+  wait_for(&b, &mut eb, connected).await;
+  let b_key = b
+    .media(|core| Ok(core.transceivers()))
+    .unwrap()
+    .into_iter()
+    .find(|t| t.kind == "video")
+    .expect("b has the video transceiver")
+    .key;
+  (a, b, a_key, b_key, vp8)
+}
+
+/// One-packet VP8 frames written to a sender, in RTP sequence.
+struct Vp8Writer {
+  key: u32,
+  payload_type: u8,
+  seq: u16,
+  timestamp: u32,
+}
+
+impl Vp8Writer {
+  fn write(&mut self, peer: &Rc<Peer>, key_frame: bool) {
+    // The VP8 payload descriptor (S=1), then a key frame's tag and start
+    // code (640x480) or a delta frame's tag (bit 0 set).
+    let payload: &[u8] = if key_frame {
+      &[0x10, 0, 0, 0, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0xe0, 0x01]
+    } else {
+      &[0x10, 0x01, 0x02, 0x03, 0x04]
+    };
+    let packet = rtci::rtp::packet::Packet {
+      header: rtci::rtp::Header {
+        version: 2,
+        marker: true,
+        payload_type: self.payload_type,
+        sequence_number: self.seq,
+        timestamp: self.timestamp,
+        ..Default::default()
+      },
+      payload: bytes::Bytes::copy_from_slice(payload),
+    };
+    let bytes = rtci::shared::marshal::Marshal::marshal(&packet).unwrap();
+    let key = self.key;
+    peer.media(|core| core.write_rtp(key, &bytes)).unwrap();
+    self.seq = self.seq.wrapping_add(1);
+    self.timestamp = self.timestamp.wrapping_add(3000);
+  }
+
+  /// The next packet's sequence number skips `n`: they are lost on the way.
+  fn lose(&mut self, n: u16) {
+    self.seq = self.seq.wrapping_add(n);
+    self.timestamp = self.timestamp.wrapping_add(3000 * u32::from(n));
+  }
+}
+
+/// The PLIs a receiver sent for its video stream (`inbound-rtp` `pliCount`).
+fn plis_sent(peer: &Rc<Peer>) -> u64 {
+  peer
+    .stats(None)
+    .unwrap()
+    .iter()
+    .find(|s| s["type"] == "inbound-rtp" && s["kind"] == "video")
+    .and_then(|s| s["pliCount"].as_u64())
+    .unwrap_or(0)
+}
+
+/// Collects `peer`'s events for `duration`.
+async fn events_for(
+  peer: &Rc<Peer>,
+  seen: &mut Vec<JsEvent>,
+  duration: Duration,
+) {
+  let _ = tokio::time::timeout(duration, async {
+    loop {
+      match peer.next_events().await {
+        Some(batch) => seen.extend(batch),
+        None => return,
+      }
+    }
+  })
+  .await;
+}
+
+fn media_frames(events: &[JsEvent], key: u32) -> Vec<bool> {
+  events
+    .iter()
+    .filter_map(|e| match e {
+      JsEvent::MediaFrame {
+        transceiver,
+        key_frame,
+        ..
+      } if *transceiver == key => Some(*key_frame),
+      _ => None,
+    })
+    .collect()
+}
+
+// A receiver whose frames lose one to a sequence gap asks the sender for a
+// key frame (a PLI), the sender hears it as `keyframerequest`, the requests
+// repeat at most once per KEY_FRAME_REQUEST_INTERVAL while the stream stays
+// broken, and stop once a key frame repairs it.
+#[tokio::test]
+async fn a_lost_frame_asks_for_a_key_frame_until_one_comes() {
+  let (a, b, a_key, b_key, pt) = connect_video().await;
+  b.media(|core| core.receiver_read_frames(b_key, true))
+    .unwrap();
+  let mut w = Vp8Writer {
+    key: a_key,
+    payload_type: pt,
+    seq: 1000,
+    timestamp: 90_000,
+  };
+  let mut ea = Vec::new();
+  let mut eb = Vec::new();
+  // A key frame reaches the receiver (the first packets may beat the
+  // receiver's binding: write until one does).
+  for _ in 0..50 {
+    w.write(&a, true);
+    events_for(&b, &mut eb, Duration::from_millis(40)).await;
+    if media_frames(&eb, b_key).contains(&true) {
+      break;
+    }
+  }
+  assert!(
+    media_frames(&eb, b_key).contains(&true),
+    "a key frame arrived"
+  );
+  // Frames in sequence: nothing is asked for.
+  for _ in 0..5 {
+    w.write(&a, false);
+    events_for(&b, &mut eb, Duration::from_millis(20)).await;
+  }
+  assert_eq!(plis_sent(&b), 0, "no PLI while every frame arrives");
+  // Two packets lost: the next delta frame can't be decoded.
+  w.lose(2);
+  w.write(&a, false);
+  let lost_at = std::time::Instant::now();
+  events_for(&b, &mut eb, Duration::from_millis(50)).await;
+  assert_eq!(plis_sent(&b), 1, "one PLI for the loss");
+  // The sender hears it.
+  wait_for(&a, &mut ea, |e| {
+    matches!(e, JsEvent::KeyFrameRequest { transceiver } if *transceiver == a_key)
+  })
+  .await;
+  // More delta frames, still broken: the requests are paced.
+  for _ in 0..10 {
+    w.write(&a, false);
+    events_for(&b, &mut eb, Duration::from_millis(20)).await;
+  }
+  let paced = 1
+    + (lost_at.elapsed().as_millis()
+      / crate::media::KEY_FRAME_REQUEST_INTERVAL.as_millis()) as u64;
+  let sent = plis_sent(&b);
+  assert!(
+    (1..=paced).contains(&sent),
+    "{sent} PLIs, at most {paced} by the interval"
+  );
+  // The key frame repairs the stream; later delta frames ask for nothing,
+  // past the interval too.
+  let frames = media_frames(&eb, b_key).len();
+  w.write(&a, true);
+  events_for(&b, &mut eb, Duration::from_millis(100)).await;
+  assert_eq!(media_frames(&eb, b_key)[frames..], [true], "the key frame");
+  let after_key = plis_sent(&b);
+  let interval = crate::media::KEY_FRAME_REQUEST_INTERVAL;
+  let until = std::time::Instant::now() + interval + interval / 2;
+  while std::time::Instant::now() < until {
+    w.write(&a, false);
+    events_for(&b, &mut eb, Duration::from_millis(30)).await;
+  }
+  assert_eq!(plis_sent(&b), after_key, "no PLI once repaired");
+  a.close();
+  b.close();
+}
+
+// Measures how long after ICE connects the DTLS handshake completes, on
+// loopback (a few round trips of well under a millisecond each). Run it
+// with `--ignored --nocapture`; it prints the delay per side over 20
+// connections. Without the engine's first-flight timeout (rtci's
+// `DtlsHandler::poll_timeout`) the DTLS client's ClientHello waits for the
+// ICE agent's next check (200 ms).
+#[tokio::test]
+#[ignore = "a measurement, not a check"]
+async fn dtls_after_ice_connected_delay() {
+  let mut delays: Vec<(u128, u128)> = Vec::new();
+  for _ in 0..20 {
+    let a = new_peer();
+    let b = new_peer();
+    a.create_data_channel("chat", reliable()).unwrap();
+    let mut ea = Vec::new();
+    let mut eb = Vec::new();
+    let offer = a.create_offer(false).unwrap();
+    a.set_local_description("offer", offer).unwrap();
+    wait_for(&a, &mut ea, gathered).await;
+    let (_, sdp) = a.local_description().unwrap();
+    b.set_remote_description("offer", sdp).unwrap();
+    let answer = b.create_answer().unwrap();
+    b.set_local_description("answer", answer).unwrap();
+    wait_for(&b, &mut eb, gathered).await;
+    let (_, sdp) = b.local_description().unwrap();
+    a.set_remote_description("answer", sdp).unwrap();
+    // Each side's events, stamped as they arrive.
+    let mut ice: [Option<std::time::Instant>; 2] = [None, None];
+    let mut dtls: [Option<std::time::Instant>; 2] = [None, None];
+    let ice_up = |e: &JsEvent| matches!(e, JsEvent::IceConnectionState { state } if state == "connected" || state == "completed");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while dtls.iter().any(Option::is_none)
+      && std::time::Instant::now() < deadline
+    {
+      let (side, batch) = tokio::select! {
+        batch = a.next_events() => (0, batch),
+        batch = b.next_events() => (1, batch),
+      };
+      let now = std::time::Instant::now();
+      for e in batch.unwrap_or_default() {
+        if ice_up(&e) && ice[side].is_none() {
+          ice[side] = Some(now);
+        }
+        if connected(&e) && dtls[side].is_none() {
+          dtls[side] = Some(now);
+        }
+      }
+    }
+    let delay = |side: usize| {
+      dtls[side]
+        .zip(ice[side])
+        .map(|(d, i)| d.saturating_duration_since(i).as_millis())
+        .unwrap_or(u128::MAX)
+    };
+    delays.push((delay(0), delay(1)));
+    a.close();
+    b.close();
+  }
+  let mut offerer: Vec<u128> = delays.iter().map(|d| d.0).collect();
+  let mut answerer: Vec<u128> = delays.iter().map(|d| d.1).collect();
+  offerer.sort_unstable();
+  answerer.sort_unstable();
+  println!("ICE connected -> DTLS connected, ms (min / median / max):");
+  println!(
+    "  offerer  {} / {} / {}",
+    offerer[0],
+    offerer[offerer.len() / 2],
+    offerer[offerer.len() - 1]
+  );
+  println!(
+    "  answerer {} / {} / {}",
+    answerer[0],
+    answerer[answerer.len() / 2],
+    answerer[answerer.len() - 1]
+  );
 }

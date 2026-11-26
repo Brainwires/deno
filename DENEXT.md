@@ -22760,9 +22760,93 @@ where the changes are discussed.
        kept `locks` directory.
      - Node tests enabled: none.
 
-<!-- 560-589: reserved for the other items of the denext.31 train -->
+560. **`fix(ext/webrtc)`: a receiver that loses a video frame asks for a key
+     frame** (runtime; `ext/webrtc/encoded_frames.rs`, `media.rs`,
+     `media_sink.rs`, `peer.rs`). The frame assemblers (an encoded transform's,
+     a `readFrames()` reader's) dropped a frame on a sequence gap and never told
+     the sender, so the stream stayed undecodable until the sender's next
+     scheduled key frame. rtci 0.2's NACK responder gives old repairs up, so
+     gaps last more often than before.
+     - A video assembler is broken from the moment it loses a frame (packets
+       missing before the one that arrived, whole frames between included, a
+       frame in the making dropped, a payload the depacketizer refuses) until it
+       puts a key frame together. Delivery is unchanged: the frames after the
+       loss are still handed out. Audio is never broken.
+     - While a receiver's assembler is broken, each packet of the stream asks
+       for a key frame: a PLI (RFC 4585 section 6.3.1, sender SSRC 0 as the
+       engine's own) for the packet's SSRC, at most once per 500 ms per SSRC
+       (`KEY_FRAME_REQUEST_INTERVAL`), written by the receiver (so the engine
+       refuses it where `nack pli` wasn't negotiated, and counts it in
+       `inbound-rtp` `pliCount`).
+     - The sender side already wires through: an inbound PLI or FIR is delivered
+       past the interceptors (`media_chain_delivers_key_frame_requests`) and
+       becomes the sender's `keyframerequest` (`wants_key_frame`, which also
+       restarts a fake device's clip on its key frame).
+     - Tests: `encoded_frames.rs`
+       `a_lost_frame_needs_a_key_frame_until_one_arrives`,
+       `audio_never_needs_a_key_frame`; `tests.rs`
+       `a_lost_frame_asks_for_a_key_frame_until_one_comes` (two loopback peers:
+       sequence gap, one PLI, the sender's `keyframerequest`, paced repeats,
+       none once a key frame came).
+     - Node tests enabled: none.
 
-590. **`fix(ext/web, ext/node)`: each `MessagePort` and `node:worker_threads`
+561. **`fix(ext/webrtc)`: an unmute queued from an earlier media state no longer
+     unmutes a remote track** (runtime; `ext/webrtc/01_webrtc.js`, `lib.rs`,
+     `media_sink.rs`, `peer.rs`). WPT `RTCRtpTransceiver.https.html?rest` "track
+     with video gets unmuted when setting the transceiver direction to
+     'sendrecv' after 'inactive'" timed out now and then (the expectation was
+     marked `flaky`): its `unmute` fired while `exchangeOfferAnswer` was still
+     running, before the test listened, and the packets that came later fired
+     none. A packet the remote sent before it went inactive (held in its pacer's
+     queue, or read late by our driver) arrived after the second offer made the
+     receiver receive again; the `trackunmute` it raised, or one raised earlier
+     and still queued, then unmuted the track.
+     - A receiver's mute has a generation: JavaScript moves it on with each mute
+       and each time the receiver starts receiving again
+       (`op_webrtc_receiver_muted` takes it), `trackunmute` carries the one it
+       was raised under, and an older one is ignored.
+     - A packet unmutes only while this side's negotiation receives on the
+       section (the transceiver's `currentDirection` has `recv`): one read while
+       a renegotiation is still under way raises nothing, and the next one after
+       it does.
+     - Not changed: the remote's pacer still sends what it queued before the
+       direction changed (the engine pacer has no per-stream purge); a packet
+       from it that arrives after this side's answer is applied can still unmute
+       early.
+     - Tests: WPT `webrtc/RTCRtpTransceiver.https.html?rest`, looped.
+     - Node tests enabled: none.
+
+562. **`test(ext/webrtc)`: the DTLS ClientHello's delay after ICE connects is
+     measured** (`ext/webrtc/tests.rs`). The DTLS client's ClientHello leaves up
+     to 200 ms after ICE selects a pair: rtci's `DtlsHandler`
+     (`src/peer_connection/handler/dtls.rs`) starts the handshake on the
+     selected-pair event without queuing the first flight ("goes out with the
+     next read or timeout"), and its `poll_timeout` reports only the endpoint's
+     retransmission timer, so the flight waits for the next datagram or for the
+     ICE agent's next check (`DEFAULT_CHECK_INTERVAL`, 200 ms). The driver
+     sleeps until the engine's `poll_timeout`, as it should; the fix belongs in
+     the engine (handed to the rtci repository: a first-flight deadline at once
+     in `poll_timeout`, cleared when `handle_timeout` flushes it).
+     - Test: `dtls_after_ice_connected_delay` (ignored, a measurement: the delay
+       from `connected` ICE to a `connected` connection on each side over 20
+       loopback connections).
+     - Node tests enabled: none.
+
+563. **`test(ext/webrtc)`: the mDNS test no longer races the peer's first
+     check** (`ext/webrtc/tests.rs`).
+     `mdns_host_candidates_resolve_between_peers` (ignored; CI's `webrtc-mdns`
+     job runs it) gave A an answer with B's host candidates removed and its
+     `a=end-of-candidates` kept: a peer that said it has no candidates. A's
+     check list then has no pair and fails at once (`fail_without_pairs`, and
+     since rtci 0.1 the engine's checklist failure at end-of-candidates, RFC
+     8838 section 8), unless a check from B has arrived before A applies the
+     answer. It did with the 0.22.0+brainwires.5 engine; on rtci 0.2 it times
+     out waiting for the channel. The answer now leaves out the
+     end-of-candidates too, as a peer that is still trickling, so A only reaches
+     B as the peer-reflexive source of B's checks, which the test is about.
+     - Node tests enabled: none.
+
+564. **`fix(ext/web, ext/node)`: each `MessagePort` and `node:worker_threads`
      message is its own task** (runtime; `ext/web/13_message_port.js`,
      `ext/node/polyfills/worker_threads.ts`). Item 555's bug in the receive
      loops it left alone: `MessagePort.start()`'s loop yielded one
@@ -22806,11 +22890,11 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 517, 518-538, 554-556, 590 and the runtime parts of
-540-551) are what the prebuilt `libdenort` carries. The CLI-side parts (for
-example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
-launchers) are in the branch too, but a stock CLI does not run them; denext's
-own launcher provides that environment.
+506-510, 511, 512, 513, 515, 517, 518-538, 554-556, 560, 561, 564 and the
+runtime parts of 540-551) are what the prebuilt `libdenort` carries. The
+CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
+into a packaged app's launchers) are in the branch too, but a stock CLI does not
+run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

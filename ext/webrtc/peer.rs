@@ -422,9 +422,11 @@ pub enum JsEvent {
     text: bool,
     data: Payload,
   },
-  /// A receiver's first RTP packet: its track unmutes.
+  /// A receiver's first RTP packet since JavaScript last muted its track:
+  /// the track unmutes, unless JavaScript muted it again (or started
+  /// receiving again) since, which `generation` tells.
   #[serde(rename = "trackunmute")]
-  TrackUnmute { transceiver: u32 },
+  TrackUnmute { transceiver: u32, generation: u32 },
   /// An RTP packet for a `Deno.webrtc.readRtp()` reader (header included).
   #[serde(rename = "rtp")]
   Rtp { transceiver: u32, data: Payload },
@@ -2158,10 +2160,19 @@ impl Core {
           let Some(key) = self.key_for_track(&track_id) else {
             continue;
           };
-          if self.media.flowing.insert(key) {
-            self
-              .events
-              .push_back(JsEvent::TrackUnmute { transceiver: key });
+          // A packet unmutes only once this side's negotiation receives on
+          // the section (`currentDirection`): one the remote sent before it
+          // stopped (a pacer's queue, a datagram read late) and that is read
+          // while a renegotiation is still under way is no media of the new
+          // state.
+          if !self.media.flowing.contains(&key) && self.receives_now(key) {
+            self.media.flowing.insert(key);
+            let generation =
+              self.media.unmute_generation.get(&key).copied().unwrap_or(0);
+            self.events.push_back(JsEvent::TrackUnmute {
+              transceiver: key,
+              generation,
+            });
           }
           self.media.saw_rtp(key, &packet.header);
           self.count_received_frame(key, &packet);
@@ -2194,6 +2205,13 @@ impl Core {
               height: frame.width_height.map(|(_, h)| h),
               info: frame.info,
             });
+          }
+          // A frame assembler that lost a frame stays broken until a key
+          // frame: ask the sender for one (rate-limited per stream).
+          if self.sink_needs_key_frame(key)
+            || self.transform_needs_key_frame(key)
+          {
+            self.request_key_frame_after_loss(key, packet.header.ssrc, now);
           }
           if self.media.reading.contains(&key)
             && let Ok(bytes) = packet.marshal()
