@@ -502,14 +502,27 @@ class MessagePort extends _MessagePortBase {
       // (regression test #22762). Without this, messages buffered after
       // the current async recv resolved but before our handler called
       // close() would be silently dropped.
+      //
+      // Only the messages queued when close() was called are dispatched, as
+      // Node's drain takes the messages queued when it starts: a handler
+      // that posts to this port again (a port feeding itself through its
+      // entangled peer, test-worker-message-port-infinite-message-loop)
+      // would otherwise keep this loop going forever. Messages posted during
+      // the drain go with the resource below.
+      const queued = [];
       try {
-        while (getMessagePortId(this) === portId) {
+        while (true) {
           const data = op_message_port_recv_message_sync(portId);
           if (data === null) break;
-          if (!dispatchPortMessageData(this, data)) break;
+          ArrayPrototypePush(queued, data);
         }
       } catch {
         // recv failed (already canceled / closed); fall through.
+      }
+      for (let i = 0; i < queued.length; i++) {
+        // A handler that re-entered close() has torn the port down.
+        if (getMessagePortId(this) !== portId) break;
+        if (!dispatchPortMessageData(this, queued[i])) break;
       }
       // The dispatch may have closed the port via a user handler that
       // re-entered close(); only tear down the resource if we still own it.

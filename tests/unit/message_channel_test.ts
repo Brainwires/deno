@@ -320,3 +320,32 @@ Deno.test("messagechannel onmessage reassigned in a promise chain gets every mes
   port1.close();
   port2.close();
 });
+
+// A port that feeds itself through its peer still yields to timers, and its
+// close() dispatches only the messages queued when it was called (Node's
+// test-worker-message-port-infinite-message-loop.js).
+Deno.test("messagechannel close() of a self-feeding port ends", async () => {
+  const { port1, port2 } = new MessageChannel();
+  let count = 0;
+  const { promise, resolve } = Promise.withResolvers<void>();
+  port1.onmessage = () => {
+    if (count === 0) {
+      setTimeout(() => {
+        port1.close();
+        resolve();
+      }, 0);
+    }
+    // Bounded, so that a close() that keeps draining fails instead of
+    // spinning forever.
+    if (count < 20_000) port2.postMessage(0);
+    count++;
+  };
+  port2.postMessage(0);
+  await promise;
+  const atClose = count;
+  assert(atClose < 10_000, `hit ${atClose} loop iterations`);
+  // Nothing is dispatched after close() returned.
+  await new Promise((r) => setTimeout(r, 50));
+  assertEquals(count, atClose);
+  port2.close();
+});
