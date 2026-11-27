@@ -677,6 +677,11 @@ pub struct Core {
   /// reads and writes on are the sockets' own. Off with mDNS names (the
   /// engine can't map a name), where the public address is signalled here.
   engine_nat: bool,
+  /// The last answer `create_answer` made, as handed to JavaScript and as
+  /// the engine made it, when they differ ([`answer_with_offered_formats`]):
+  /// the engine applies only the answer it made last, so
+  /// `set_local_description` hands it that one for the other.
+  answer_rewrite: Option<(String, String)>,
   /// The remote description's `a=simulcast` lines the engine was given
   /// without a repeated rid-id, each with the line as signalled
   /// ([`simulcast_without_repeated_rids`]): `remoteDescription` shows the
@@ -786,6 +791,147 @@ pub(crate) fn has_live_media_section(sdp: &str) -> bool {
     let port = section.split_ascii_whitespace().nth(1);
     port != Some("0") || section.contains("a=bundle-only")
   })
+}
+
+/// `answer` with only the payload formats `offer` listed in each RTP media
+/// section (DENEXT.md item 565). The engine's answer adds the formats it
+/// supports that the offer lacked after the offered ones (RFC 9429 section
+/// 5.3.1, which RFC 3264 section 6.1 allows), but its receiver drops media on
+/// a payload type the offer did not list as not negotiated: a peer that
+/// switches to one of them mid-call (WebKit's VP8 -> VP9 after a VP8-only
+/// offer) loses the rest of the call's media. So the answer lists none.
+///
+/// Sections pair by position (RFC 3264 section 6: an answer has the offer's
+/// m-lines in its order). In a section that loses formats, the m= line keeps
+/// the rest in the answer's order, and the `a=rtpmap` / `a=fmtp` /
+/// `a=rtcp-fb` lines of the dropped ones go; a retransmission format (RFC
+/// 4588) whose `apt` names a dropped format goes with it. A section the
+/// filter would leave without a format, a non-RTP section, and an answer
+/// whose section count differs from the offer's are left as they are. The
+/// line endings are kept.
+pub(crate) fn answer_with_offered_formats(answer: &str, offer: &str) -> String {
+  // (proto, formats) of each m= line.
+  fn m_line(line: &str) -> Option<(&str, Vec<&str>)> {
+    let mut fields = line.strip_prefix("m=")?.split_ascii_whitespace();
+    let _kind = fields.next()?;
+    let _port = fields.next()?;
+    let proto = fields.next()?;
+    Some((proto, fields.collect()))
+  }
+  fn body(line: &str) -> &str {
+    line.trim_end_matches(['\r', '\n'])
+  }
+  // The payload type a per-format attribute (`a=<name>:<pt> ...`) is for.
+  fn format_of<'a>(line: &'a str, names: &[&str]) -> Option<&'a str> {
+    let value = line.strip_prefix("a=")?;
+    let (name, rest) = value.split_once(':')?;
+    if !names.contains(&name) {
+      return None;
+    }
+    rest.split_ascii_whitespace().next()
+  }
+  let offered: Vec<Option<HashSet<&str>>> = offer
+    .lines()
+    .filter_map(|l| m_line(body(l)))
+    .map(|(proto, formats)| {
+      proto
+        .contains("RTP")
+        .then(|| formats.into_iter().collect::<HashSet<&str>>())
+    })
+    .collect();
+  // Each answer section's formats and retransmission `apt`s.
+  struct Section<'a> {
+    rtp: bool,
+    formats: Vec<&'a str>,
+    apt: HashMap<&'a str, &'a str>,
+  }
+  let mut sections: Vec<Section> = Vec::new();
+  for line in answer.lines() {
+    let line = body(line);
+    if let Some((proto, formats)) = m_line(line) {
+      sections.push(Section {
+        rtp: proto.contains("RTP"),
+        formats,
+        apt: HashMap::new(),
+      });
+      continue;
+    }
+    let Some(section) = sections.last_mut() else {
+      continue;
+    };
+    if let Some(pt) = format_of(line, &["fmtp"])
+      && let Some(params) = line.split_once(' ').map(|(_, p)| p)
+      && let Some(apt) = params
+        .split(';')
+        .find_map(|p| p.trim().strip_prefix("apt="))
+    {
+      section.apt.insert(pt, apt.trim());
+    }
+  }
+  if sections.len() != offered.len() {
+    return answer.to_string();
+  }
+  // Per section, the formats to drop (empty: the section stays as it is).
+  let dropped: Vec<HashSet<&str>> = sections
+    .iter()
+    .zip(&offered)
+    .map(|(section, offered)| {
+      let Some(offered) = offered.as_ref().filter(|_| section.rtp) else {
+        return HashSet::new();
+      };
+      let mut kept: Vec<&str> = section
+        .formats
+        .iter()
+        .copied()
+        .filter(|f| offered.contains(f))
+        .collect();
+      let primaries: HashSet<&str> = kept.iter().copied().collect();
+      kept.retain(|f| {
+        section.apt.get(f).is_none_or(|apt| primaries.contains(apt))
+      });
+      if kept.is_empty() || kept.len() == section.formats.len() {
+        return HashSet::new();
+      }
+      section
+        .formats
+        .iter()
+        .copied()
+        .filter(|f| !kept.contains(f))
+        .collect()
+    })
+    .collect();
+  if dropped.iter().all(HashSet::is_empty) {
+    return answer.to_string();
+  }
+  let mut out = String::with_capacity(answer.len());
+  let mut index: Option<usize> = None;
+  for line in answer.split_inclusive('\n') {
+    let text = body(line);
+    let ending = &line[text.len()..];
+    if m_line(text).is_some() {
+      let i = index.map_or(0, |i| i + 1);
+      index = Some(i);
+      let drop = &dropped[i];
+      if !drop.is_empty() {
+        let fields: Vec<&str> = text.split_ascii_whitespace().collect();
+        let kept: Vec<&str> = fields[..3]
+          .iter()
+          .copied()
+          .chain(fields[3..].iter().copied().filter(|f| !drop.contains(f)))
+          .collect();
+        out.push_str(&kept.join(" "));
+        out.push_str(ending);
+        continue;
+      }
+    } else if let Some(i) = index
+      && let Some(pt) = format_of(text, &["rtpmap", "fmtp", "rtcp-fb"])
+      && dropped[i].contains(pt)
+    {
+      continue;
+    }
+    out.push_str(line);
+  }
+  out
 }
 
 /// An engine error applying a description: a type the signaling state
@@ -1268,6 +1414,30 @@ fn stream_frame_len(buf: &[u8]) -> Option<usize> {
 }
 
 impl Core {
+  /// A local description as it was signalled: a local answer or pranswer
+  /// without the payload formats its offer did not list (DENEXT.md item 565;
+  /// the engine holds the answer it made). The offer is the current remote
+  /// description for the current local one, the pending one for a pending
+  /// local one (`pending`).
+  pub(crate) fn as_signalled(
+    &self,
+    mut desc: RTCSessionDescription,
+    pending: bool,
+  ) -> RTCSessionDescription {
+    if !matches!(desc.sdp_type, RTCSdpType::Answer | RTCSdpType::Pranswer) {
+      return desc;
+    }
+    let offer = if pending {
+      self.pc.pending_remote_description()
+    } else {
+      self.pc.current_remote_description()
+    };
+    if let Some(offer) = offer.filter(|o| o.sdp_type == RTCSdpType::Offer) {
+      desc.sdp = answer_with_offered_formats(&desc.sdp, &offer.sdp);
+    }
+    desc
+  }
+
   /// The local description's first media section id, for candidates the
   /// engine reports without one (W3C: `sdpMid` of the bundled section).
   fn first_mid(&self) -> Option<String> {
@@ -2818,6 +2988,7 @@ impl Peer {
         mdns_socket: mdns_socket.clone(),
         mdns_failed: false,
         engine_nat,
+        answer_rewrite: None,
         remote_simulcast_lines: Vec::new(),
       }),
       guard,
@@ -2950,11 +3121,21 @@ impl Peer {
     self.core.borrow().selected_tcp
   }
 
-  /// The engine's answer. It lists the formats this side supports that the
-  /// offer lacked after the offered ones (RFC 9429 section 5.3.1), and the
-  /// receiver takes media on them (RFC 3264 section 6.1; DENEXT.md item 571).
+  /// The engine's answer without the payload formats the remote offer did
+  /// not list (DENEXT.md item 565, [`answer_with_offered_formats`]).
   pub fn create_answer(&self) -> Result<String, WebRtcError> {
-    self.guarded(|core| Ok(core.pc.create_answer(None).map_err(rtc_err)?.sdp))
+    self.guarded(|core| {
+      let created = core.pc.create_answer(None).map_err(rtc_err)?.sdp;
+      let signalled = match core.pc.remote_description() {
+        Some(offer) if offer.sdp_type == RTCSdpType::Offer => {
+          answer_with_offered_formats(&created, &offer.sdp)
+        }
+        _ => created.clone(),
+      };
+      core.answer_rewrite =
+        (signalled != created).then(|| (signalled.clone(), created));
+      Ok(signalled)
+    })
   }
 
   fn description(
@@ -2981,6 +3162,16 @@ impl Peer {
     sdp: String,
   ) -> Result<(), WebRtcError> {
     check_sdp_size(kind, &sdp)?;
+    // The answer `create_answer` handed out: the engine compares it with the
+    // one it made (DENEXT.md item 565).
+    let sdp = match &self.core.borrow().answer_rewrite {
+      Some((signalled, created))
+        if matches!(kind, "answer" | "pranswer") && *signalled == sdp =>
+      {
+        created.clone()
+      }
+      _ => sdp,
+    };
     // Gathering starts with the first description that has a transport to
     // gather for (W3C: an m-section that isn't rejected).
     let has_transport = has_live_media_section(&sdp);
@@ -3441,8 +3632,16 @@ impl Peer {
       (d.sdp_type.to_string(), sdp)
     };
     PeerDescriptions {
-      current_local: core.pc.current_local_description().map(local),
-      pending_local: core.pc.pending_local_description().map(local),
+      current_local: core
+        .pc
+        .current_local_description()
+        .map(|d| core.as_signalled(d, false))
+        .map(local),
+      pending_local: core
+        .pc
+        .pending_local_description()
+        .map(|d| core.as_signalled(d, true))
+        .map(local),
       current_remote: core.pc.current_remote_description().map(remote),
       pending_remote: core.pc.pending_remote_description().map(remote),
     }

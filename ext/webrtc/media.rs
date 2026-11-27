@@ -2033,12 +2033,17 @@ impl Core {
     local: bool,
   ) -> Option<(String, Vec<(u8, CodecArg)>)> {
     let mid = self.pc.rtp_transceiver(index)?.mid().clone()?;
+    // The local one as signalled (DENEXT.md item 565): a receiver is
+    // prepared for the formats its answer listed.
     let sdp = if local {
-      self
-        .pc
-        .current_local_description()
-        .or_else(|| self.pc.pending_local_description())
-        .map(|d| d.sdp)
+      match self.pc.current_local_description() {
+        Some(d) => Some(self.as_signalled(d, false)),
+        None => self
+          .pc
+          .pending_local_description()
+          .map(|d| self.as_signalled(d, true)),
+      }
+      .map(|d| d.sdp)
     } else {
       self
         .pc
