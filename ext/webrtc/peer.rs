@@ -2673,7 +2673,15 @@ impl Peer {
       // which the UDP sockets carry both ways where the platform lets them
       // (`crate::ecn`). Over ICE-TCP and TURN relays nothing is marked on
       // the wire, which the remote's feedback reports as bleached.
-      .with_ecn(crate::ecn::supported());
+      .with_ecn(crate::ecn::supported())
+      // A bundle-only section of an initial offer (every section but the
+      // first under `max-bundle`, a second section of one media type under
+      // `balanced`) in the form browsers take: `a=rtcp-mux` and the group's
+      // ICE credentials in it (rtci's `Chrome` profile value). Chromium,
+      // WebKit and Firefox refuse the RFC 9143 / RFC 9429 section 5.2.1 form
+      // ("rtcp-mux must be enabled when BUNDLE is enabled."), and this side
+      // offers to browsers.
+      .with_bundle_only_sections_in_browser_form(true);
     if let Some(net) = net {
       settings = settings.with_lite(net.ice_lite);
       if let Some((disconnected, failed, keep_alive)) = net.ice_timeouts {
