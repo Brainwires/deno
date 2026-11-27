@@ -2310,7 +2310,6 @@ fn sending_codec_follows_the_negotiated_list() {
       rtcp_feedback: vec![],
     },
     payload_type: pt,
-    ..Default::default()
   };
   let mut params = RTCRtpSendParameters::default();
   params.rtp_parameters.codecs = vec![
