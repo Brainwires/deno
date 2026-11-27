@@ -22906,15 +22906,16 @@ where the changes are discussed.
      - Node tests enabled: none.
 
 565. **`fix(ext/webrtc)`: an answer lists only the payload formats the offer
-     listed** (runtime; `ext/webrtc/peer.rs`, `media.rs`). A workaround, to be
-     removed once an rtci release ships the receiver fix. Since rtci 0.1 (rtci
-     606bb2fa, "jsep: answers list the formats the offer lacks after the offered
-     ones (RFC 9429 5.3.1)"; the `0.22.0+brainwires.5.1` line did not) the
-     engine's answer appends the media formats it supports that the offer
-     lacked, but its receiver drops media on those payload types as not
-     negotiated, against RFC 3264 section 6.1 (the offerer may send any format
-     the answer lists). WebKit, offered VP8 alone, switched to VP9 (payload type
-     98) mid-call, and the rest of the call's video was dropped.
+     listed** (runtime; `ext/webrtc/peer.rs`, `media.rs`). Removed with rtci
+     0.2.1 (item 571), whose receiver takes the formats its answer added; what
+     follows is what it was. Since rtci 0.1 (rtci 606bb2fa, "jsep: answers list
+     the formats the offer lacks after the offered ones (RFC 9429 5.3.1)"; the
+     `0.22.0+brainwires.5.1` line did not) the engine's answer appends the media
+     formats it supports that the offer lacked, but its receiver drops media on
+     those payload types as not negotiated, against RFC 3264 section 6.1 (the
+     offerer may send any format the answer lists). WebKit, offered VP8 alone,
+     switched to VP9 (payload type 98) mid-call, and the rest of the call's
+     video was dropped.
      - `create_answer` hands out the engine's answer without the formats the
        remote offer's matching m-section (by position) did not list: the m= line
        keeps the rest in the answer's order, and the dropped formats' `a=rtpmap`
@@ -23037,13 +23038,15 @@ where the changes are discussed.
        listed 10 video codecs where an offer has 14 formats
        (`protocol/codecs-filtered-by-direction`). The codecs now come from the
        engine's registry (`RTCRtpSender::get_capabilities`). The offer itself is
-       the engine's (handed to the rtci repository).
+       the engine's (handed to the rtci repository; fixed in rtci 0.2.1, where
+       the registry stays the source, item 571).
      - RFC 6904 header extension encryption: rtci 0.2's default interceptors
        offer the audio level extensions in the clear and encrypted (best effort)
        and answer an offer with both with the encrypted form and the clear one
        `a=extmap:<id>/inactive`. Browsers offer neither form encrypted, and the
-       0.22 engine did not; the driver sets them back to clear. An answer's
-       first "inactive" is again the section's direction
+       0.22 engine did not; the driver sets them back to clear (since rtci 0.2.1
+       through `DefaultInterceptorOptions::audio_level_encryption`, item 571).
+       An answer's first "inactive" is again the section's direction
        (`protocol/direction.html` changes the first one to make an invalid
        answer). `getCapabilities()` also listed the `encrypt` URI as an
        extension of its own; an encrypted `a=extmap` line now names the URI it
@@ -23124,11 +23127,11 @@ where the changes are discussed.
        from getCapabilities". Expected to fail until the rtci release that
        writes a later offer's and an answer's `a=rid` lines from the
        restrictions the last answer left (RFC 9429 section 5.2.2; fixed in rtci,
-       not yet released), and to be removed with it: `protocol/simulcast-answer`
-       "createAnswer() with multiple send encodings should create simulcast
-       answer" and "Disabling encodings locally does not change the SDP", and
-       `simulcast/rid-manipulation` "Remote reanswer altering rids does not
-       throw an exception.".
+       released in rtci 0.2.1, which item 571 expects them to pass on):
+       `protocol/simulcast-answer` "createAnswer() with multiple send encodings
+       should create simulcast answer" and "Disabling encodings locally does not
+       change the SDP", and `simulcast/rid-manipulation` "Remote reanswer
+       altering rids does not throw an exception.".
      - Tests: `tests.rs` `capabilities_list_every_registered_video_codec`,
        `audio_level_extensions_are_offered_in_the_clear`,
        `repeated_simulcast_rids_are_dropped`, `attribute_names_are_tokens`,
@@ -23166,6 +23169,63 @@ where the changes are discussed.
        mixer-to-client level, and checks that stopping the RFC 6464 one throws).
      - Node tests enabled: none.
 
+571. **`fix(ext/webrtc)`: rtci 0.2.1** (runtime; `Cargo.lock`,
+     `ext/webrtc/media.rs`, `peer.rs`, `tests.rs`,
+     `tests/wpt/runner/expectations/webrtc.json`). The 19 rtci crates move to
+     the 0.2.1 patch release (`Cargo.toml` keeps `rtci = "0.2"`; only the rtci
+     entries of `Cargo.lock` change).
+     - Removed, item 565's answer filter: rtci 0.2.1's receiver takes media on
+       the formats its own answer added after the offered ones (RFC 3264 section
+       6.1, RFC 9429 section 5.3.1; what it still drops is counted by
+       `RTCPeerConnection::unnegotiated_payload_type_rtp_packets()`). The answer
+       is handed out, applied and read back (`localDescription`, the receivers'
+       parameters) as the engine made it.
+     - Replaced, item 569's audio level override: the audio level extensions are
+       offered in the clear through the engine's
+       `DefaultInterceptorOptions::audio_level_encryption` (`Clear`, the
+       `Chrome` profile's value, what browsers offer) instead of a `MediaEngine`
+       override after the default interceptors.
+     - Kept: `getCapabilities()` reads the codecs from the engine's registry
+       (W3C webrtc-pc 5.2, what this side supports, and no detour through an
+       offer); 0.2.1 gives each payload type its own fmtp, so an offer would now
+       list the same, but the registry is the direct source.
+     - Kept: ICE `completed` reported as `connected` (item 569), as agreed with
+       the rtci owners.
+     - Kept: the mDNS test without the answer's `a=end-of-candidates` (item 563)
+       and the driver's `fail_without_pairs`. rtci-ice 0.2.1 has no RFC 8863 PAC
+       timer: its check list still fails at end-of-candidates with no pair (RFC
+       8838 section 8) unless an unpaired remote candidate can still reach it,
+       so the test's race is unchanged. RFC 8863 section 4 has an agent wait up
+       to the PAC timer even then; the driver's rule should go with the engine's
+       once the engine has PAC. WPT `RTCPeerConnection-addTcpIceCandidate.html`
+       "... port 8001 accepted" (failure within 1 s without end-of-candidates,
+       which RFC 8863 does not allow) stays expected to fail.
+     - Kept: item 561's unmute generation and `currentDirection` rule. Neither
+       rtci 0.2.1's pacer nor the driver's `FactorPacer` drops a stream's queued
+       media when it goes inactive.
+     - Kept: the repeated-rid and repeated `a=rid` filtering of item 569:
+       rtci-sdp is unchanged in 0.2.1, and 0.2.1's rid fix is a later offer's
+       restrictions (RFC 9429 section 5.2.2), which makes WPT
+       `simulcast/simulcast-answer.html` and `simulcast/rid-manipulation.html`
+       expected to pass. There is no driver workaround for the msid appdata or
+       header extension re-bind fixes.
+     - New: bundle-only sections of an initial offer in the form browsers take
+       (`with_bundle_only_sections_in_browser_form(true)`, `a=rtcp-mux` and the
+       group's ICE credentials in them): with the RFC form, no browser takes an
+       rtci `max-bundle` offer with more than one section, nor a `balanced` one
+       with two sections of one media type.
+     - Upgrade notes: the engine holds no TURN allocation here (the driver's own
+       rtci-turn clients relay), so the loop after `close()` has no engine
+       release transactions to run; the SCTP handshake timers take the RFC 9260
+       back-off (the default); a header-extension change in a renegotiation
+       re-binds the streams in the engine.
+     - Tests: `tests.rs` `media_on_a_format_the_answer_added_is_received`
+       (replaces `answer_lists_only_the_offered_formats` and
+       `answer_to_a_narrow_offer_lists_only_its_formats`); WPT
+       `webrtc/simulcast/simulcast-answer.html`,
+       `webrtc/simulcast/rid-manipulation.html`.
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -23177,7 +23237,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 517, 518-538, 554-556, 560, 561, 563-570 and the
+506-510, 511, 512, 513, 515, 517, 518-538, 554-556, 560, 561, 563-571 and the
 runtime parts of 540-551) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
