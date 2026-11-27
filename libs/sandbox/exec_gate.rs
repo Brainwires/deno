@@ -602,10 +602,8 @@ mod tests {
       rlim_max: 0,
     };
     // SAFETY: an out struct
-    assert_eq!(
-      unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
-      0
-    );
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) };
+    assert_eq!(rc, 0);
     let fd = limit.rlim_cur.min(i32::MAX as libc::rlim_t) as i32;
     assert!(!is_open(fd), "descriptor {fd} is open");
     fd
