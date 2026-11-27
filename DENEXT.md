@@ -23270,6 +23270,60 @@ where the changes are discussed.
        alone, on the answer's payload type).
      - Node tests enabled: none.
 
+573. **`fix(ext/webrtc)`: a sender sends the format negotiation picked, and an
+     `EncodedMediaTrack` only its own** (runtime; `ext/webrtc/media.rs`,
+     `lib.rs`, `01_webrtc.js`, `tests.rs`). rtci has no encoder: what the
+     driver cuts into RTP packets is the format it sends, and the engine's
+     `RTCRtpSender::write_rtp` rewrites a packet whose payload type is not
+     negotiated to its encoding's format, so a packet cut for another format
+     leaves labelled as that one, a silent media corruption that the engine's
+     stats (derived from the payload type) do not show.
+     - The format is `media.rs` `sending_codec`, read from the engine sender's
+       parameters for every frame (the fake camera and microphone, encoded
+       transforms, `writeFrame`, `writeRtp`), so each applied description
+       switches the packetizer and the fake device's clip: the codec the
+       first encoding names (`RTCRtpEncodingParameters.codec`, which the
+       engine removes when an answer does not negotiate it, webrtc-pc
+       4.4.1.6), else the first media format of the negotiated list (not a
+       repair format, comfort noise or telephone events), in the remote m=
+       line's order. The driver used to take the list's first format and
+       ignore the encoding's codec. An answer that leads with another codec
+       than the offerer's preferences and offer (WPT
+       `protocol/additional-codecs.html`: H.264 on payload type 63) has that
+       codec encoded; it already was for the fake devices, which re-read the
+       list per frame.
+     - An `EncodedMediaTrack`'s frames are in its codec (the sender's track
+       is passed down by `op_webrtc_sender_set_track_codec` on every track
+       change): they go out only on the negotiated format that is that codec
+       (same name, clock rate and channels; the same `a=fmtp`, else the same
+       bitstream parameters: H.264 / H.265 `packetization-mode`, VP9
+       `profile-id`, AV1 `profile`), and nothing goes out while it is not
+       negotiated. `writeRtp`'s packet with a payload type that is not
+       negotiated takes that format's (it took the engine's first format's).
+       Before, an answer that negotiated H.264 for a VP8 track had its VP8
+       frames cut by the H.264 packetizer and sent as H.264 (the engine drops
+       the encoding's VP8 codec after such an answer).
+     - Kept, item 565's answer filter: it is not about what is encoded. The
+       engine narrows an offerer with application codec preferences to the
+       preferred formats the answer lists (rtci's
+       `set_codec_preferences_from_remote_description`, which falls back to
+       the whole engine only when none matches), and its unfiltered answer to
+       the WPT's offer appends VP8 on a free payload type after H.264
+       (`answer_payload_types`, RFC 9429 section 5.3.1). Applied as is, the
+       VP8-preferring offerer would negotiate VP8 alone and send it, where the
+       WPT expects H.264 (`sender_codecs_are_the_offered_ones_the_answer_accepted`
+       shows the narrowing). With the filter the answer lists H.264 only, no
+       preference matches, and the sender negotiates H.264. To drop with an
+       engine that, applying an answer, sends the answer's first format it
+       supports whatever the local preferences.
+     - Tests: `tests.rs` `sender_encodes_the_codec_the_answer_leads_with` (the
+       WPT's offer and answer between two peers: the fake camera's packets
+       that arrive are H.264 NAL units on 63, and the receiver's inbound codec
+       is H.264), `encoded_track_sends_nothing_in_a_codec_the_answer_did_not_take`
+       (a VP8 `EncodedMediaTrack` given that answer: `writeFrame` and
+       `writeRtp` send nothing) and `sending_codec_follows_the_negotiated_list`.
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -23281,7 +23335,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 517, 518-538, 554-556, 560, 561, 563-572 and the
+506-510, 511, 512, 513, 515, 517, 518-538, 554-556, 560, 561, 563-573 and the
 runtime parts of 540-551) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
