@@ -2059,12 +2059,16 @@ impl Core {
     key: u32,
   ) -> Result<serde_json::Value, WebRtcError> {
     let index = self.index_of(key)?;
-    // webrtc-pc 5.2 getParameters(): the codecs negotiated for sending, in
-    // the remote description's order with its payload types and fmtp lines
-    // (RFC 9429 5.3.1: the answerer sends what the offer lists), those this
-    // stack can send; a retransmission format with the primary it repairs.
-    let remote_codecs = self
-      .negotiated_section_codecs(index, false)
+    // webrtc-pc 5.2 getParameters(): the codecs negotiated for sending. The
+    // set is the engine's own (its sender's codecs: what this side offered
+    // that the answer accepted, or the formats of a remote offer this side
+    // can send), which a remote answer listing formats beyond the offer
+    // does not widen (DENEXT.md item 572); each is written as the remote
+    // description has it (its payload type and fmtp line, RFC 9429 5.3.1),
+    // in the remote m= line's order of preference.
+    let remote_section = self.negotiated_section_codecs(index, false);
+    let remote_codecs = remote_section
+      .clone()
       .map(|(kind, codecs)| sendable_codecs(&kind, codecs));
     let Some(mut sender) = self.pc.rtp_sender(index.into()) else {
       // A transceiver a remote offer made has no engine sender until it
@@ -2082,11 +2086,21 @@ impl Core {
       });
     };
     let params = sender.get_parameters().clone();
-    let codecs: Vec<serde_json::Value> = match remote_codecs {
-      Some(codecs) => codecs
+    let codecs = match remote_codecs {
+      // The engine holds no send codecs for a transceiver negotiated not
+      // to send; getParameters() lists what the remote side would take all
+      // the same (WPT RTCRtpParameters-codecs "should have codecs after
+      // negotiation", a recvonly answerer).
+      Some(codecs) if params.rtp_parameters.codecs.is_empty() => codecs
         .iter()
         .map(|(pt, c)| section_codec_json(*pt, c))
         .collect(),
+      Some(_) => negotiated_send_codecs(
+        &params.rtp_parameters.codecs,
+        remote_section
+          .as_ref()
+          .map_or(&[][..], |(_, c)| c.as_slice()),
+      ),
       None => params
         .rtp_parameters
         .codecs
@@ -2819,6 +2833,37 @@ fn sendable_codecs(
       }
     })
     .collect()
+}
+
+/// The engine sender's codecs (`engine`, in the remote description's
+/// payload types) as `getParameters()` lists them: each written as the
+/// remote m-section (`section`) has it, in that section's order, and any the
+/// section does not name after them as the engine holds them.
+fn negotiated_send_codecs(
+  engine: &[RTCRtpCodecParameters],
+  section: &[(u8, CodecArg)],
+) -> Vec<serde_json::Value> {
+  let in_engine = |pt: u8, c: &CodecArg| {
+    engine.iter().any(|e| {
+      e.payload_type == pt
+        && e.rtp_codec.mime_type.eq_ignore_ascii_case(&c.mime_type)
+    })
+  };
+  let mut out: Vec<serde_json::Value> = section
+    .iter()
+    .filter(|(pt, c)| in_engine(*pt, c))
+    .map(|(pt, c)| section_codec_json(*pt, c))
+    .collect();
+  for e in engine {
+    let listed = section.iter().any(|(pt, c)| {
+      *pt == e.payload_type
+        && e.rtp_codec.mime_type.eq_ignore_ascii_case(&c.mime_type)
+    });
+    if !listed {
+      out.push(codec_params_json(e));
+    }
+  }
+  out
 }
 
 fn codec_params_json(c: &RTCRtpCodecParameters) -> serde_json::Value {

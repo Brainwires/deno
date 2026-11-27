@@ -1976,6 +1976,98 @@ async fn answer_to_a_narrow_offer_lists_only_its_formats() {
   b.close();
 }
 
+// DENEXT.md item 572: an answer that lists formats beyond the offer (as
+// rtci's own answers do, RFC 9429 5.3.1) does not widen the codecs a sender
+// reports. The offerer set VP8 alone as its codec preference; the answer it
+// is given adds VP9, and sender getParameters() lists the engine's
+// negotiated codecs (VP8, with the answer's payload type), not VP9 (WPT
+// protocol/h265-level-id "Offer to send H265, answer to receive level-id=30
+// results in level-id=30", which counts them).
+#[tokio::test]
+async fn sender_codecs_are_the_offered_ones_the_answer_accepted() {
+  let a = new_peer();
+  let b = new_peer();
+  let vp8 = crate::media::capabilities("video", true)
+    .unwrap()
+    .expect("capabilities")
+    .codecs
+    .into_iter()
+    .find(|c| c.mime_type.eq_ignore_ascii_case("video/VP8"))
+    .expect("VP8");
+  let key = a
+    .media(|core| {
+      let key = core.add_transceiver(crate::media::TransceiverArg {
+        kind: "video".to_string(),
+        track: Some(crate::media::TrackArg {
+          id: "video-track".to_string(),
+          label: "video".to_string(),
+        }),
+        direction: "sendonly".to_string(),
+        streams: vec!["stream".to_string()],
+        send_encodings: vec![],
+        codec: None,
+        add_track: true,
+      })?;
+      core.set_codec_preferences(key, vec![vp8])?;
+      Ok(key)
+    })
+    .unwrap();
+  let offer = a.create_offer(false).unwrap();
+  assert!(!offer.contains(" VP9/90000"), "{offer}");
+  a.set_local_description("offer", offer.clone()).unwrap();
+  b.set_remote_description("offer", offer).unwrap();
+  let answer = b.create_answer().unwrap();
+  b.set_local_description("answer", answer.clone()).unwrap();
+  assert!(!answer.contains(" VP9/90000"), "{answer}");
+  // The answer as another stack writes it: VP9 on a payload type of its own.
+  let pt = (96u8..=127)
+    .find(|pt| {
+      !answer.contains(&format!("a=rtpmap:{pt} "))
+        && !answer.contains(&format!("a=fmtp:{pt} "))
+    })
+    .expect("a free payload type");
+  let mut widened = String::new();
+  let mut in_video = false;
+  for line in answer.split_inclusive("\r\n") {
+    let bare = line.trim_end();
+    if bare.starts_with("m=") {
+      in_video = bare.starts_with("m=video");
+      if in_video {
+        widened.push_str(&format!("{bare} {pt}\r\n"));
+        continue;
+      }
+    }
+    widened.push_str(line);
+    if in_video && bare.starts_with("a=mid:") {
+      widened.push_str(&format!(
+        "a=rtpmap:{pt} VP9/90000\r\na=fmtp:{pt} profile-id=0\r\n"
+      ));
+    }
+  }
+  assert!(
+    widened.contains(&format!("a=rtpmap:{pt} VP9/90000")),
+    "{widened}"
+  );
+  a.set_remote_description("answer", widened.clone()).unwrap();
+  let answered = section_formats(&widened)[0].clone();
+  let params = a.media(|core| core.sender_parameters(key)).unwrap();
+  let codecs = params["codecs"].as_array().cloned().unwrap_or_default();
+  assert!(
+    codecs.iter().any(|c| c["mimeType"]
+      .as_str()
+      .is_some_and(|m| m.eq_ignore_ascii_case("video/VP8"))),
+    "{params}"
+  );
+  for c in &codecs {
+    let mime = c["mimeType"].as_str().unwrap_or_default();
+    assert!(!mime.eq_ignore_ascii_case("video/VP9"), "{params}");
+    let codec_pt = c["payloadType"].as_u64().unwrap().to_string();
+    assert!(answered.contains(&codec_pt), "{codec_pt}: {params}");
+  }
+  a.close();
+  b.close();
+}
+
 // setCodecPreferences() takes what getCapabilities() lists, for audio too:
 // a mono codec there has `channels: 1`, which the engine (whose rtpmap has
 // no encoding parameter for it) holds as 0 (WPT

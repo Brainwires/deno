@@ -23232,6 +23232,44 @@ where the changes are discussed.
        `protocol/codecs-filtered-by-direction.https.html` pass.
      - Node tests enabled: none.
 
+572. **`fix(ext/webrtc)`: a sender's getParameters() codecs are the engine's
+     negotiated ones** (runtime; `ext/webrtc/media.rs`, `tests.rs`).
+     `RTCRtpSender.getParameters().codecs` (and the `codec` stats object of an
+     `outbound-rtp` stream, which is its first entry) listed every format of the
+     remote description's m-section this stack can send. An answer that lists
+     formats beyond the offer (rtci's own answers do, RFC 9429 section 5.3.1;
+     item 565 trims ours) made the offerer report them: an offer of H.265 alone
+     answered with 14 formats reported 14 codecs, where W3C webrtc-pc 5.2 has
+     the codecs negotiated for sending, which rtci's sender holds (the offered
+     formats the answer accepted, one H.265 with the answer's `level-id`).
+     - The sender's codecs are the engine sender's
+       (`RTCRtpSender::get_parameters()`), each written as the remote m-section
+       has it (its payload type and verbatim `a=fmtp`, absent where the SDP has
+       none) and in that m= line's order of preference; one the section does
+       not name follows as the engine holds it.
+     - Unchanged: a transceiver a remote offer made, which has no engine sender
+       yet, and one the engine holds no send codecs for (negotiated not to
+       send), report the sendable formats of the remote section as before (WPT
+       `RTCRtpParameters-codecs.html?rest` "should have codecs after
+       negotiation"); before a remote description, the engine's codecs.
+     - Unchanged: `RTCRtpReceiver.getParameters().codecs` stay the local
+       description's m-section (webrtc-pc 5.3; WPT `RTCRtpParameters-codecs`
+       "should match local SDP" compares them entry for entry, the offerer's
+       formats the answer did not accept included, which the engine's receiver
+       does not list).
+     - Kept, item 565's answer filter: the engine narrows a sender with
+       application codec preferences to the preferred formats the answer
+       lists, so an answer that also lists formats the offer lacked would have
+       the offerer send a preferred one instead of the answer's first. WPT
+       `protocol/additional-codecs.html` (offer VP8 alone, the answer lists
+       H.264 instead, H.264 is sent) needs the answer to list H.264 only, and
+       `RTCRtpTransceiver-setCodecPreferences.html?interop-2026` "filters on
+       receiver and prefers receiver order" passes with it (item 566).
+     - Test: `tests.rs` `sender_codecs_are_the_offered_ones_the_answer_accepted`
+       (a VP8-preferring offerer given an answer that adds VP9 reports VP8
+       alone, on the answer's payload type).
+     - Node tests enabled: none.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -23243,7 +23281,7 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 390, 392, 393, 394, 397, 398, 401, 403, 404, 407, 408, 409, 410, 411, 412, 415,
 416, 418, 422, 426, 429, 430, 431, 432, 433-436, 438, 439, 441, 446, 447, 448,
 449, 450, 452, 455, 457, 460-468, 470, 472-486, 488-491, 493, 494, 499, 501-504,
-506-510, 511, 512, 513, 515, 517, 518-538, 554-556, 560, 561, 563-571 and the
+506-510, 511, 512, 513, 515, 517, 518-538, 554-556, 560, 561, 563-572 and the
 runtime parts of 540-551) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
