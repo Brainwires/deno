@@ -23205,10 +23205,13 @@ where the changes are discussed.
        media when it goes inactive.
      - Kept: the repeated-rid and repeated `a=rid` filtering of item 569:
        rtci-sdp is unchanged in 0.2.1, and 0.2.1's rid fix is a later offer's
-       restrictions (RFC 9429 section 5.2.2), which makes WPT
-       `simulcast/simulcast-answer.html` and `simulcast/rid-manipulation.html`
-       expected to pass. There is no driver workaround for the msid appdata or
-       header extension re-bind fixes.
+       restrictions (RFC 9429 section 5.2.2). WPT
+       `protocol/simulcast-answer.html` (the answer of a multi-encoding sender
+       carries no `a=rid` / `a=simulcast`) and `simulcast/rid-manipulation.html`
+       (a re-answer that alters the rids is refused) still fail on 0.2.1 and
+       stay expected failures until an rtci release fixes the answer path. There
+       is no driver workaround for the msid appdata or header extension re-bind
+       fixes.
      - New: bundle-only sections of an initial offer in the form browsers take
        (`with_bundle_only_sections_in_browser_form(true)`, `a=rtcp-mux` and the
        group's ICE credentials in them): with the RFC form, no browser takes an
@@ -23222,8 +23225,8 @@ where the changes are discussed.
      - Tests: `tests.rs` `media_on_a_format_the_answer_added_is_received`
        (replaces `answer_lists_only_the_offered_formats` and
        `answer_to_a_narrow_offer_lists_only_its_formats`); WPT
-       `webrtc/simulcast/simulcast-answer.html`,
-       `webrtc/simulcast/rid-manipulation.html`.
+       `RTCPeerConnection-createDataChannel.html?rest` and
+       `protocol/codecs-filtered-by-direction.https.html` pass.
      - Node tests enabled: none.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
