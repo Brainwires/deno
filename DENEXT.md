@@ -22906,16 +22906,16 @@ where the changes are discussed.
      - Node tests enabled: none.
 
 565. **`fix(ext/webrtc)`: an answer lists only the payload formats the offer
-     listed** (runtime; `ext/webrtc/peer.rs`, `media.rs`). Removed with rtci
-     0.2.1 (item 571), whose receiver takes the formats its answer added; what
-     follows is what it was. Since rtci 0.1 (rtci 606bb2fa, "jsep: answers list
-     the formats the offer lacks after the offered ones (RFC 9429 5.3.1)"; the
-     `0.22.0+brainwires.5.1` line did not) the engine's answer appends the media
-     formats it supports that the offer lacked, but its receiver drops media on
-     those payload types as not negotiated, against RFC 3264 section 6.1 (the
-     offerer may send any format the answer lists). WebKit, offered VP8 alone,
-     switched to VP9 (payload type 98) mid-call, and the rest of the call's
-     video was dropped.
+     listed** (runtime; `ext/webrtc/peer.rs`, `media.rs`). Kept with rtci 0.2.1
+     (item 571): its receiver now takes the formats its answer added, but
+     browsers answer with the offered formats only, which WPT checks. Since rtci
+     0.1 (rtci 606bb2fa, "jsep: answers list the formats the offer lacks after
+     the offered ones (RFC 9429 5.3.1)"; the `0.22.0+brainwires.5.1` line did
+     not) the engine's answer appends the media formats it supports that the
+     offer lacked, but its receiver drops media on those payload types as not
+     negotiated, against RFC 3264 section 6.1 (the offerer may send any format
+     the answer lists). WebKit, offered VP8 alone, switched to VP9 (payload
+     type 98) mid-call, and the rest of the call's video was dropped.
      - `create_answer` hands out the engine's answer without the formats the
        remote offer's matching m-section (by position) did not list: the m= line
        keeps the rest in the answer's order, and the dropped formats' `a=rtpmap`
@@ -23174,12 +23174,15 @@ where the changes are discussed.
      `tests/wpt/runner/expectations/webrtc.json`). The 19 rtci crates move to
      the 0.2.1 patch release (`Cargo.toml` keeps `rtci = "0.2"`; only the rtci
      entries of `Cargo.lock` change).
-     - Removed, item 565's answer filter: rtci 0.2.1's receiver takes media on
-       the formats its own answer added after the offered ones (RFC 3264 section
+     - Kept, item 565's answer filter: rtci 0.2.1's receiver takes media on the
+       formats its own answer added after the offered ones (RFC 3264 section
        6.1, RFC 9429 section 5.3.1; what it still drops is counted by
-       `RTCPeerConnection::unnegotiated_payload_type_rtp_packets()`). The answer
-       is handed out, applied and read back (`localDescription`, the receivers'
-       parameters) as the engine made it.
+       `RTCPeerConnection::unnegotiated_payload_type_rtp_packets()`), so the
+       filter no longer prevents lost media; it keeps the answer to what
+       browsers send, the offered formats only. Without it WPT
+       `protocol/h265-level-id.https.html` "Offer to send H265, answer to
+       receive level-id=30" sees 14 codecs in an answer to an offer of one. To
+       drop it when the engine can answer with the offered formats alone.
      - Replaced, item 569's audio level override: the audio level extensions are
        offered in the clear through the engine's
        `DefaultInterceptorOptions::audio_level_encryption` (`Clear`, the
