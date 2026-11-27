@@ -371,7 +371,12 @@
     "rtx-codecs.https.html": true,
     "sctp-format.html": true,
     "sdes-dont-dont-dont.html": true,
-    "simulcast-answer.html": true,
+    "simulcast-answer.html": {
+      "expectedFailures": [
+        "createAnswer() with multiple send encodings should create simulcast answer",
+        "Disabling encodings locally does not change the SDP"
+      ]
+    },
     "simulcast-offer.html": true,
     "split.https.html": false,
     "transceiver-direction-match.html": false,
@@ -397,7 +402,11 @@
     "h264.https.html": false,
     "negotiation-encodings.https.html?interop-2026": true,
     "negotiation-encodings.https.html?rest": true,
-    "rid-manipulation.html": true,
+    "rid-manipulation.html": {
+      "expectedFailures": [
+        "Remote reanswer altering rids does not throw an exception."
+      ]
+    },
     "screenshare.https.html": false,
     "setParameters-active.https.html": false,
     "setParameters-encodings.https.html": true,
