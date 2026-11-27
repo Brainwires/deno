@@ -40,9 +40,10 @@ use rtci::interceptor::TaggedPacket;
 use rtci::media_stream::MediaStreamTrack;
 use rtci::peer_connection::RTCPeerConnectionBuilder;
 use rtci::peer_connection::configuration::interceptor_registry::CongestionFeedback;
+use rtci::peer_connection::configuration::interceptor_registry::DefaultInterceptorOptions;
 use rtci::peer_connection::configuration::interceptor_registry::configure_congestion_control;
 use rtci::peer_connection::configuration::interceptor_registry::configure_congestion_control_feedback;
-use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors_with_options;
 use rtci::peer_connection::configuration::media_engine::MediaEngine;
 use rtci::peer_connection::cryptex::RTCRtpHeaderEncryptionPolicy;
 use rtci::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
@@ -103,9 +104,27 @@ pub(crate) fn media_stack_counting(
   // delivers inbound PLI and FIR to the application (here, an
   // `EncodedMediaTrack`'s `keyframerequest`): upstream ends them at the
   // chain's terminus.
-  let registry =
-    register_default_interceptors(Registry::new(), &mut media_engine)
-      .map_err(crate::peer::rtc_err)?;
+  // The audio level extensions (RFC 6464, RFC 6465) are offered in the
+  // clear only, as Chromium, WebKit and Firefox offer them (and as the 0.22
+  // engine did; rtci's `Chrome` profile value of
+  // `audio_level_encryption`). The default, best effort, offers each also in
+  // its RFC 6904 encrypted form and answers an offer that has both with the
+  // encrypted one and the clear one `a=extmap:<id>/inactive`: that answer's
+  // first "inactive" is then an extmap line's, not the section's direction
+  // (WPT `protocol/direction.html` changes the first one to make an invalid
+  // answer), and every audio section carries two mappings per extension.
+  // Answering, the engine still takes the encrypted form an offer has (RFC
+  // 6904 section 4.1). RFC 9335 cryptex (`rtpHeaderEncryptionPolicy`)
+  // encrypts every extension and is not affected.
+  let mut options =
+    DefaultInterceptorOptions::for_profile(media_engine.behaviour_profile());
+  options.audio_level_encryption = RTCRtpHeaderExtensionEncryption::Clear;
+  let (registry, _handles) = register_default_interceptors_with_options(
+    Registry::new(),
+    &mut media_engine,
+    &options,
+  )
+  .map_err(crate::peer::rtc_err)?;
   // Send-side congestion control: transport-wide sequence numbers on what
   // leaves, GCC over the TWCC feedback that comes back, and a pacer at its
   // estimate. The defaults already negotiate TWCC (`transport-cc` feedback and
@@ -136,27 +155,6 @@ pub(crate) fn media_stack_counting(
   let registry =
     configure_congestion_control_feedback(registry, &mut media_engine);
   register_header_extensions(&mut media_engine)?;
-  // The audio level extensions are offered in the clear only, as Chromium,
-  // WebKit and Firefox offer them (and as the 0.22 engine did): rtci 0.2's
-  // default interceptors offer each also in its RFC 6904 encrypted form
-  // (best effort), and answer an offer that has both with the encrypted one
-  // and the clear one `a=extmap:<id>/inactive`. That answer's first
-  // "inactive" is then an extmap line's, not the section's direction (WPT
-  // `protocol/direction.html` changes the first one to make an invalid
-  // answer), and every audio section carries two mappings per extension.
-  // RFC 9335 cryptex (`rtpHeaderEncryptionPolicy`) encrypts every extension
-  // and is not affected.
-  for uri in [
-    rtci::sdp::extmap::AUDIO_LEVEL_URI,
-    rtci::rtp::extension::CSRC_AUDIO_LEVEL_URI,
-  ] {
-    media_engine
-      .set_header_extension_encryption(
-        uri,
-        RTCRtpHeaderExtensionEncryption::Clear,
-      )
-      .map_err(crate::peer::rtc_err)?;
-  }
   Ok((media_engine, registry))
 }
 
