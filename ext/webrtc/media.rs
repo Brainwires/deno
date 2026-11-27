@@ -774,15 +774,13 @@ pub fn capabilities(
     .map_err(crate::peer::rtc_err)?;
   let offer = pc.create_offer(None).map_err(crate::peer::rtc_err)?;
   // The codecs come from the engine's registry (its own
-  // `RTCRtpSender.getCapabilities`), not from the offer: rtci 0.2 writes an
-  // offered format's fmtp line from the first registered format that matches
-  // it (`MediaEngine::local_fmtp_line_of_codec` through
-  // `codec_parameters_fuzzy_search`), and H.264 matches on profile and
-  // packetization mode only, so the High profile levels 4.0, 4.1, 4.2 and
-  // 5.1 (payload types 118 to 121) are offered with level 5.0's
-  // `profile-level-id=640032` and read back from the offer as one codec
-  // (WPT `protocol/codecs-filtered-by-direction`: 10 capabilities against
-  // 14 offered formats).
+  // `RTCRtpSender.getCapabilities`, W3C webrtc-pc 5.2: what this side can
+  // send and receive), not read back from an offer. rtci 0.2.0 wrote every
+  // H.264 High format of an offer with level 5.0's fmtp line, so an offer
+  // read back merged them (WPT `protocol/codecs-filtered-by-direction`);
+  // since 0.2.1 each payload type carries its own fmtp (rtci jsep-83), and
+  // the registry stays the direct source. The offer gives the header
+  // extensions.
   let registered = pc
     .rtp_sender(index.into())
     .and_then(|sender| sender.get_capabilities(kind_enum));
