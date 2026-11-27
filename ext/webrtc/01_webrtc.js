@@ -1309,7 +1309,9 @@ function dataChannelError(event, channel) {
         ? event.sctpCauseCode ?? null
         : null,
     },
-    `The data channel '${label}' (id ${id ?? "unassigned"}) failed${reason}${cause}`,
+    `The data channel '${label}' (id ${
+      id ?? "unassigned"
+    }) failed${reason}${cause}`,
   );
 }
 
@@ -3893,13 +3895,11 @@ function headerExtensionsNegotiated(pc, sdp, remote) {
     const negotiated = ArrayPrototypeMap(
       ts.headerExtensionsToNegotiate,
       (e) => {
-        const found = section.rejected
-          ? undefined
-          : (ArrayPrototypeFind(
-            section.extensions,
-            (x) => x.uri === e.uri && !x.encrypted,
-          ) ??
-            ArrayPrototypeFind(section.extensions, (x) => x.uri === e.uri));
+        const found = section.rejected ? undefined : (ArrayPrototypeFind(
+          section.extensions,
+          (x) => x.uri === e.uri && !x.encrypted,
+        ) ??
+          ArrayPrototypeFind(section.extensions, (x) => x.uri === e.uri));
         let direction = found === undefined ? "stopped" : found.direction;
         if (found !== undefined && remote) {
           direction = reverseDirection(direction);
