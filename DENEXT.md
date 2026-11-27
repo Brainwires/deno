@@ -23225,10 +23225,9 @@ where the changes are discussed.
        release transactions to run; the SCTP handshake timers take the RFC 9260
        back-off (the default); a header-extension change in a renegotiation
        re-binds the streams in the engine.
-     - Tests: `tests.rs` `media_on_a_format_the_answer_added_is_received`
-       (replaces `answer_lists_only_the_offered_formats` and
-       `answer_to_a_narrow_offer_lists_only_its_formats`); WPT
-       `RTCPeerConnection-createDataChannel.html?rest` and
+     - Tests: item 565's `answer_lists_only_the_offered_formats` and
+       `answer_to_a_narrow_offer_lists_only_its_formats` stay with the filter;
+       WPT `RTCPeerConnection-createDataChannel.html?rest` and
        `protocol/codecs-filtered-by-direction.https.html` pass.
      - Node tests enabled: none.
 
