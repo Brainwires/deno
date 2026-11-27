@@ -92,6 +92,7 @@ use rtci::peer_connection::event::RTCDataChannelEvent;
 use rtci::peer_connection::event::RTCPeerConnectionEvent;
 use rtci::peer_connection::event::RTCTrackEvent;
 use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::sdp::RTCSdpType;
 use rtci::peer_connection::sdp::RTCSessionDescription;
 use rtci::peer_connection::transport::CandidateConfig;
 use rtci::peer_connection::transport::CandidateHostConfig;
