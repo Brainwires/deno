@@ -1686,24 +1686,6 @@ fn section_formats(sdp: &str) -> Vec<Vec<String>> {
     .collect()
 }
 
-/// The payload types of `a=<attr>:<pt>` lines of each m-section of `sdp`.
-fn section_attribute_formats(sdp: &str, attr: &str) -> Vec<Vec<String>> {
-  let prefix = format!("a={attr}:");
-  let mut out: Vec<Vec<String>> = Vec::new();
-  for line in sdp.lines() {
-    let line = line.trim_end();
-    if line.starts_with("m=") {
-      out.push(Vec::new());
-    } else if let Some(rest) = line.strip_prefix(prefix.as_str())
-      && let Some(last) = out.last_mut()
-      && let Some(pt) = rest.split_ascii_whitespace().next()
-    {
-      last.push(pt.to_string());
-    }
-  }
-  out
-}
-
 /// `sdp` with only the formats named in `keep` (codec names, any case) in
 /// its audio and video sections, plus the retransmission formats that repair
 /// them, as an offer from a browser that supports fewer codecs is.
@@ -1784,119 +1766,28 @@ fn offer_with_only(sdp: &str, keep: &[&str]) -> String {
   out
 }
 
-// DENEXT.md item 565, the WebKit case: an offer with VP8 alone, which the
-// peer later leaves for VP9 (payload type 98) if our answer listed it. The
-// engine's answer appended VP9 (and its RTX) and PCMU, which its receiver
-// would drop as not negotiated; the answer as signalled lists only what the
-// offer had, so the peer can never switch to them.
-#[test]
-fn answer_lists_only_the_offered_formats() {
-  let offer = "v=0\r\n\
-o=- 1 2 IN IP4 127.0.0.1\r\n\
-s=-\r\n\
-t=0 0\r\n\
-a=group:BUNDLE 0 1 2\r\n\
-m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
-a=mid:0\r\n\
-a=rtpmap:111 opus/48000/2\r\n\
-a=fmtp:111 minptime=10;useinbandfec=1\r\n\
-m=video 9 UDP/TLS/RTP/SAVPF 96 97\r\n\
-a=mid:1\r\n\
-a=rtpmap:96 VP8/90000\r\n\
-a=rtcp-fb:96 nack\r\n\
-a=rtpmap:97 rtx/90000\r\n\
-a=fmtp:97 apt=96\r\n\
-m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
-a=mid:2\r\n\
-a=sctp-port:5000\r\n";
-  let answer = "v=0\r\n\
-o=- 3 2 IN IP4 127.0.0.1\r\n\
-s=-\r\n\
-t=0 0\r\n\
-a=group:BUNDLE 0 1 2\r\n\
-m=audio 9 UDP/TLS/RTP/SAVPF 111 0\r\n\
-a=mid:0\r\n\
-a=rtpmap:111 opus/48000/2\r\n\
-a=fmtp:111 minptime=10;useinbandfec=1\r\n\
-a=rtpmap:0 PCMU/8000\r\n\
-m=video 9 UDP/TLS/RTP/SAVPF 96 97 98 99\r\n\
-a=mid:1\r\n\
-a=rtpmap:96 VP8/90000\r\n\
-a=rtcp-fb:96 nack\r\n\
-a=rtcp-fb:* ack ccfb\r\n\
-a=rtpmap:97 rtx/90000\r\n\
-a=fmtp:97 apt=96\r\n\
-a=rtpmap:98 VP9/90000\r\n\
-a=fmtp:98 profile-id=0\r\n\
-a=rtcp-fb:98 nack pli\r\n\
-a=rtpmap:99 rtx/90000\r\n\
-a=fmtp:99 apt=98\r\n\
-m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
-a=mid:2\r\n\
-a=sctp-port:5000\r\n";
-  let filtered = crate::peer::answer_with_offered_formats(answer, offer);
-  let expected = "v=0\r\n\
-o=- 3 2 IN IP4 127.0.0.1\r\n\
-s=-\r\n\
-t=0 0\r\n\
-a=group:BUNDLE 0 1 2\r\n\
-m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
-a=mid:0\r\n\
-a=rtpmap:111 opus/48000/2\r\n\
-a=fmtp:111 minptime=10;useinbandfec=1\r\n\
-m=video 9 UDP/TLS/RTP/SAVPF 96 97\r\n\
-a=mid:1\r\n\
-a=rtpmap:96 VP8/90000\r\n\
-a=rtcp-fb:96 nack\r\n\
-a=rtcp-fb:* ack ccfb\r\n\
-a=rtpmap:97 rtx/90000\r\n\
-a=fmtp:97 apt=96\r\n\
-m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
-a=mid:2\r\n\
-a=sctp-port:5000\r\n";
-  assert_eq!(filtered, expected);
-  // Nothing to drop: the answer is returned as it is.
-  assert_eq!(
-    crate::peer::answer_with_offered_formats(expected, offer),
-    expected
-  );
-  // An RTX format the offer listed whose primary it did not goes too.
-  let offer_rtx_only = offer.replace(
-    "m=video 9 UDP/TLS/RTP/SAVPF 96 97\r\n",
-    "m=video 9 UDP/TLS/RTP/SAVPF 96 97 99\r\n",
-  );
-  assert_eq!(
-    section_formats(&crate::peer::answer_with_offered_formats(
-      answer,
-      &offer_rtx_only
-    ))[1],
-    vec!["96", "97"]
-  );
-  // A section count that does not match the offer's: left as it is.
-  let fewer = offer.split("m=application").next().unwrap();
-  assert_eq!(
-    crate::peer::answer_with_offered_formats(answer, fewer),
-    answer
-  );
-}
-
-// DENEXT.md item 565 end to end: a VP8-only, Opus-only offer gets an answer,
-// a local description and receiver parameters with those formats (and VP8's
-// RTX) alone; the engine applies the answer handed out, and a later offer
-// from the answerer is not filtered.
+// DENEXT.md items 565 and 571, the WebKit case: an offer with VP8 alone,
+// answered with the engine's other formats (VP9 among them) after the offered
+// ones (RFC 9429 section 5.3.1). The offerer may send on any format the answer
+// lists (RFC 3264 section 6.1), as WebKit does when it moves from VP8 to VP9
+// mid-call, and since rtci 0.2.1 the answerer's receiver takes that media: it
+// is not counted as an unnegotiated payload type. The answer is handed out and
+// applied as the engine made it.
 #[tokio::test]
-async fn answer_to_a_narrow_offer_lists_only_its_formats() {
+async fn media_on_a_format_the_answer_added_is_received() {
   let a = new_peer();
   let b = new_peer();
-  for kind in ["audio", "video"] {
-    a.media(|core| {
+  let mut ea = Vec::new();
+  let mut eb = Vec::new();
+  let a_key = a
+    .media(|core| {
       core.add_transceiver(crate::media::TransceiverArg {
-        kind: kind.to_string(),
+        kind: "video".to_string(),
         track: Some(crate::media::TrackArg {
-          id: format!("{kind}-track"),
-          label: kind.to_string(),
+          id: "video-track".to_string(),
+          label: "video".to_string(),
         }),
-        direction: "sendrecv".to_string(),
+        direction: "sendonly".to_string(),
         streams: vec!["stream".to_string()],
         send_encodings: vec![],
         codec: None,
@@ -1904,74 +1795,78 @@ async fn answer_to_a_narrow_offer_lists_only_its_formats() {
       })
     })
     .unwrap();
-  }
-  let full = a.create_offer(false).unwrap();
-  assert!(
-    full.contains(" VP9/90000"),
-    "the engine offers more than VP8: {full}"
-  );
-  let offer = offer_with_only(&full, &["opus", "VP8"]);
-  let offered = section_formats(&offer);
-  assert_eq!(offered.len(), 2, "{offer}");
-  assert!(offered.iter().all(|f| !f.is_empty()), "{offer}");
-  b.set_remote_description("offer", offer.clone()).unwrap();
+  let offer = a.create_offer(false).unwrap();
+  a.set_local_description("offer", offer).unwrap();
+  wait_for(&a, &mut ea, gathered).await;
+  let (_, full) = a.local_description().unwrap();
+  assert!(full.contains(" VP9/90000"), "the engine offers VP9: {full}");
+  // b sees an offer with VP8 (and its RTX) alone.
+  let narrow = offer_with_only(&full, &["VP8"]);
+  let offered = section_formats(&narrow);
+  assert_eq!(offered.len(), 1, "{narrow}");
+  assert!(!narrow.contains(" VP9/90000"), "{narrow}");
+  b.set_remote_description("offer", narrow).unwrap();
   let answer = b.create_answer().unwrap();
-  let check = |sdp: &str| {
-    let formats = section_formats(sdp);
-    assert_eq!(formats.len(), offered.len(), "{sdp}");
-    for (i, section) in formats.iter().enumerate() {
-      assert!(!section.is_empty(), "{sdp}");
-      for f in section {
-        assert!(offered[i].contains(f), "{f} was not offered: {sdp}");
-      }
-      for attr in ["rtpmap", "fmtp", "rtcp-fb"] {
-        for pt in &section_attribute_formats(sdp, attr)[i] {
-          assert!(
-            pt == "*" || offered[i].contains(pt),
-            "a={attr}:{pt} was not offered: {sdp}"
-          );
-        }
-      }
-    }
-    for codec in ["VP9/", "H264/", "AV1/", "PCMU/", "PCMA/", "G722/"] {
-      assert!(!sdp.contains(codec), "{codec} in {sdp}");
-    }
-    assert!(sdp.contains(" VP8/90000"), "{sdp}");
-    assert!(sdp.contains(" opus/48000"), "{sdp}");
-  };
-  check(&answer);
-  // The engine compares the answer it is given with the one it made.
+  // The offered formats first, in the offer's order, then the added ones.
+  let answered = &section_formats(&answer)[0];
+  assert_eq!(&answered[..offered[0].len()], &offered[0][..], "{answer}");
+  let vp9: u8 = answer
+    .lines()
+    .find_map(|l| {
+      let rest = l.trim_end().strip_prefix("a=rtpmap:")?;
+      let (pt, codec) = rest.split_once(' ')?;
+      codec
+        .eq_ignore_ascii_case("VP9/90000")
+        .then(|| pt.parse::<u8>().ok())?
+    })
+    .unwrap_or_else(|| panic!("the answer adds VP9: {answer}"));
+  assert!(
+    !offered[0].contains(&vp9.to_string()),
+    "VP9 was not offered: {answer}"
+  );
+  // The engine takes the answer it made, unchanged.
   b.set_local_description("answer", answer.clone()).unwrap();
-  let (kind, local) = b.local_description().unwrap();
+  wait_for(&b, &mut eb, gathered).await;
+  let (kind, sdp) = b.local_description().unwrap();
   assert_eq!(kind, "answer");
-  check(&local);
-  assert_eq!(section_formats(&local), section_formats(&answer));
-  let current = b.descriptions().current_local.unwrap().1;
-  check(&current);
-  // The receivers are prepared for the answer's formats.
-  let keys: Vec<u32> = b
-    .media(|core| Ok(core.transceivers()))
-    .unwrap()
-    .into_iter()
-    .map(|t| t.key)
-    .collect();
-  assert_eq!(keys.len(), 2);
-  for (i, key) in keys.into_iter().enumerate() {
-    let params = b.media(|core| core.receiver_parameters(key)).unwrap();
-    let codecs = params["codecs"].as_array().cloned().unwrap_or_default();
-    assert!(!codecs.is_empty(), "{params}");
-    for c in codecs {
-      let pt = c["payloadType"].as_u64().unwrap().to_string();
-      assert!(
-        offered.iter().any(|s| s.contains(&pt)),
-        "receiver {i} lists {pt}, not offered: {params}"
-      );
+  assert_eq!(section_formats(&sdp), section_formats(&answer));
+  a.set_remote_description("answer", sdp).unwrap();
+  wait_for(&a, &mut ea, connected).await;
+  wait_for(&b, &mut eb, connected).await;
+  // a sends on the payload type b's answer added.
+  let mut w = Vp8Writer {
+    key: a_key,
+    payload_type: vp9,
+    seq: 1000,
+    timestamp: 90_000,
+  };
+  let received = |peer: &Rc<Peer>| {
+    peer
+      .stats(None)
+      .unwrap()
+      .iter()
+      .find(|s| s["type"] == "inbound-rtp" && s["kind"] == "video")
+      .and_then(|s| s["packetsReceived"].as_u64())
+      .unwrap_or(0)
+  };
+  // The first packets may beat the receiver's binding: write until some
+  // arrive, then a few more.
+  for _ in 0..50 {
+    w.write(&a, true);
+    events_for(&b, &mut eb, Duration::from_millis(40)).await;
+    if received(&b) > 0 {
+      break;
     }
   }
-  // Offers are not filtered: the answerer's own offer is the engine's, and
-  // the engine takes it.
-  let reoffer = b.create_offer(false).unwrap();
-  b.set_local_description("offer", reoffer).unwrap();
+  for _ in 0..5 {
+    w.write(&a, true);
+    events_for(&b, &mut eb, Duration::from_millis(20)).await;
+  }
+  assert!(received(&b) > 0, "media on the added format arrived");
+  let unnegotiated = b
+    .media(|core| Ok(core.pc.unnegotiated_payload_type_rtp_packets()))
+    .unwrap();
+  assert_eq!(unnegotiated, 0, "no packet was dropped as not negotiated");
   a.close();
   b.close();
 }
