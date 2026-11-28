@@ -23244,8 +23244,8 @@ where the changes are discussed.
      - The sender's codecs are the engine sender's
        (`RTCRtpSender::get_parameters()`), each written as the remote m-section
        has it (its payload type and verbatim `a=fmtp`, absent where the SDP has
-       none) and in that m= line's order of preference; one the section does
-       not name follows as the engine holds it.
+       none) and in that m= line's order of preference; one the section does not
+       name follows as the engine holds it.
      - Unchanged: a transceiver a remote offer made, which has no engine sender
        yet, and one the engine holds no send codecs for (negotiated not to
        send), report the sendable formats of the remote section as before (WPT
@@ -23257,9 +23257,9 @@ where the changes are discussed.
        formats the answer did not accept included, which the engine's receiver
        does not list).
      - Kept, item 565's answer filter: the engine narrows a sender with
-       application codec preferences to the preferred formats the answer
-       lists, so an answer that also lists formats the offer lacked would have
-       the offerer send a preferred one instead of the answer's first. WPT
+       application codec preferences to the preferred formats the answer lists,
+       so an answer that also lists formats the offer lacked would have the
+       offerer send a preferred one instead of the answer's first. WPT
        `protocol/additional-codecs.html` (offer VP8 alone, the answer lists
        H.264 instead, H.264 is sent) needs the answer to list H.264 only, and
        `RTCRtpTransceiver-setCodecPreferences.html?interop-2026` "filters on
@@ -23271,8 +23271,8 @@ where the changes are discussed.
 
 573. **`fix(ext/webrtc)`: a sender sends the format negotiation picked, and an
      `EncodedMediaTrack` only its own** (runtime; `ext/webrtc/media.rs`,
-     `lib.rs`, `01_webrtc.js`, `tests.rs`). rtci has no encoder: what the
-     driver cuts into RTP packets is the format it sends, and the engine's
+     `lib.rs`, `01_webrtc.js`, `tests.rs`). rtci has no encoder: what the driver
+     cuts into RTP packets is the format it sends, and the engine's
      `RTCRtpSender::write_rtp` rewrites a packet whose payload type is not
      negotiated to its encoding's format, so a packet cut for another format
      leaves labelled as that one, a silent media corruption that the engine's
@@ -23280,47 +23280,47 @@ where the changes are discussed.
      - The format is `media.rs` `sending_codec`, read from the engine sender's
        parameters for every frame (the fake camera and microphone, encoded
        transforms, `writeFrame`, `writeRtp`), so each applied description
-       switches the packetizer and the fake device's clip: the codec the
-       first encoding names (`RTCRtpEncodingParameters.codec`, which the
-       engine removes when an answer does not negotiate it, webrtc-pc
-       4.4.1.6), else the first media format of the negotiated list (not a
-       repair format, comfort noise or telephone events), in the remote m=
-       line's order. The driver used to take the list's first format and
-       ignore the encoding's codec. An answer that leads with another codec
-       than the offerer's preferences and offer (WPT
-       `protocol/additional-codecs.html`: H.264 on payload type 63) has that
-       codec encoded; it already was for the fake devices, which re-read the
-       list per frame.
-     - An `EncodedMediaTrack`'s frames are in its codec (the sender's track
-       is passed down by `op_webrtc_sender_set_track_codec` on every track
-       change): they go out only on the negotiated format that is that codec
-       (same name, clock rate and channels; the same `a=fmtp`, else the same
-       bitstream parameters: H.264 / H.265 `packetization-mode`, VP9
-       `profile-id`, AV1 `profile`), and nothing goes out while it is not
-       negotiated. `writeRtp`'s packet with a payload type that is not
-       negotiated takes that format's (it took the engine's first format's).
-       Before, an answer that negotiated H.264 for a VP8 track had its VP8
-       frames cut by the H.264 packetizer and sent as H.264 (the engine drops
-       the encoding's VP8 codec after such an answer).
+       switches the packetizer and the fake device's clip: the codec the first
+       encoding names (`RTCRtpEncodingParameters.codec`, which the engine
+       removes when an answer does not negotiate it, webrtc-pc 4.4.1.6), else
+       the first media format of the negotiated list (not a repair format,
+       comfort noise or telephone events), in the remote m= line's order. The
+       driver used to take the list's first format and ignore the encoding's
+       codec. An answer that leads with another codec than the offerer's
+       preferences and offer (WPT `protocol/additional-codecs.html`: H.264 on
+       payload type 63) has that codec encoded; it already was for the fake
+       devices, which re-read the list per frame.
+     - An `EncodedMediaTrack`'s frames are in its codec (the sender's track is
+       passed down by `op_webrtc_sender_set_track_codec` on every track change):
+       they go out only on the negotiated format that is that codec (same name,
+       clock rate and channels; the same `a=fmtp`, else the same bitstream
+       parameters: H.264 / H.265 `packetization-mode`, VP9 `profile-id`, AV1
+       `profile`), and nothing goes out while it is not negotiated. `writeRtp`'s
+       packet with a payload type that is not negotiated takes that format's (it
+       took the engine's first format's). Before, an answer that negotiated
+       H.264 for a VP8 track had its VP8 frames cut by the H.264 packetizer and
+       sent as H.264 (the engine drops the encoding's VP8 codec after such an
+       answer).
      - Kept, item 565's answer filter: it is not about what is encoded. The
        engine narrows an offerer with application codec preferences to the
        preferred formats the answer lists (rtci's
-       `set_codec_preferences_from_remote_description`, which falls back to
-       the whole engine only when none matches), and its unfiltered answer to
-       the WPT's offer appends VP8 on a free payload type after H.264
+       `set_codec_preferences_from_remote_description`, which falls back to the
+       whole engine only when none matches), and its unfiltered answer to the
+       WPT's offer appends VP8 on a free payload type after H.264
        (`answer_payload_types`, RFC 9429 section 5.3.1). Applied as is, the
        VP8-preferring offerer would negotiate VP8 alone and send it, where the
-       WPT expects H.264 (`sender_codecs_are_the_offered_ones_the_answer_accepted`
-       shows the narrowing). With the filter the answer lists H.264 only, no
-       preference matches, and the sender negotiates H.264. To drop with an
-       engine that, applying an answer, sends the answer's first format it
-       supports whatever the local preferences.
+       WPT expects H.264
+       (`sender_codecs_are_the_offered_ones_the_answer_accepted` shows the
+       narrowing). With the filter the answer lists H.264 only, no preference
+       matches, and the sender negotiates H.264. To drop with an engine that,
+       applying an answer, sends the answer's first format it supports whatever
+       the local preferences.
      - Tests: `tests.rs` `sender_encodes_the_codec_the_answer_leads_with` (the
-       WPT's offer and answer between two peers: the fake camera's packets
-       that arrive are H.264 NAL units on 63, and the receiver's inbound codec
-       is H.264), `encoded_track_sends_nothing_in_a_codec_the_answer_did_not_take`
-       (a VP8 `EncodedMediaTrack` given that answer: `writeFrame` and
-       `writeRtp` send nothing) and `sending_codec_follows_the_negotiated_list`.
+       WPT's offer and answer between two peers: the fake camera's packets that
+       arrive are H.264 NAL units on 63, and the receiver's inbound codec is
+       H.264), `encoded_track_sends_nothing_in_a_codec_the_answer_did_not_take`
+       (a VP8 `EncodedMediaTrack` given that answer: `writeFrame` and `writeRtp`
+       send nothing) and `sending_codec_follows_the_negotiated_list`.
      - Node tests enabled: none.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
