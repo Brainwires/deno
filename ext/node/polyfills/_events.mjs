@@ -93,7 +93,7 @@ const {
 const { spliceOne } = core.loadExtScript("ext:deno_node/_utils.ts");
 const { nextTick } = core.loadExtScript("ext:deno_node/_process/process.ts");
 const {
-  eventTargetData,
+  getEventTargetData,
   kResistStopImmediatePropagation,
 } = core.loadExtScript("ext:deno_web/02_event.js");
 
@@ -909,7 +909,7 @@ function getEventListeners(emitterOrTarget, type) {
     return emitterOrTarget.listeners(type);
   }
   if (ObjectPrototypeIsPrototypeOf(EventTarget.prototype, emitterOrTarget)) {
-    return emitterOrTarget[eventTargetData]?.listeners?.[type]?.map((
+    return getEventTargetData(emitterOrTarget)?.listeners?.[type]?.map((
       listener,
     ) => listener.callback) || [];
   }
@@ -1019,7 +1019,7 @@ function eventTargetAgnosticAddListener(emitter, name, listener, flags) {
 const kEventsGetter = {
   __proto__: null,
   get() {
-    const data = this[eventTargetData];
+    const data = getEventTargetData(this);
     if (!data) {
       return new SafeMap();
     }

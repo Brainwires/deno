@@ -22592,8 +22592,8 @@ where the changes are discussed.
      `thalora-dom` binding)** (`thalora/web-page`; `ext/web_page/` (new crate
      `deno_web_page`): `lib.rs`, `page.rs`, `dom_ops.rs`, `host_ops.rs`,
      `op_policy.rs`, `op_allowlist.rs`, `tests.rs`, `00_dom.js`, `01_events.js`,
-     `02_html.js`, `03_window.js`, `99_page_main.js`, `README.md`;
-     `ext/web/02_event.js`, `ext/fetch/22_http_client.js`,
+     `02_html.js`, `03_window.js`, `04_hardening.js`, `99_page_main.js`,
+     `README.md`; `ext/web/02_event.js`, `ext/fetch/22_http_client.js`,
      `ext/webrtc/06_identity.js`; `Cargo.toml`, `Cargo.lock`). Delivery step 2
      of Thalora's A3 design note (`docs/A3_V8_DESIGN.md` in
      Brainwires/thalora-web-browser). **Not wired into `deno` or `denort`**:
@@ -22691,15 +22691,35 @@ where the changes are discussed.
        module for `HttpClientPrototype`: a runtime without `deno_net`'s
        extension could load neither. The TLS helper is now loaded when a client
        is created.
-     - **`ext/web/02_event.js`** (behaviour unchanged): the module's result has
-       `eventSlots`, a frozen object of the symbols of an Event's internal slots
-       (attributes, the three flags, `inPassiveListener`, `dispatched`, `path`).
-       `00_dom.js` read them off a probe event by their descriptions; it now
-       takes them from there. Not `[[isTrusted]]`: see the gap below.
-     - **Known gap: `isTrusted`.** `deno_web` keeps an event's trust in an own
-       symbol property, so a page script can forge `isTrusted` for another
-       script of the page; `02_event.js` has no place for it scripts cannot
-       reach. No host decision rests on the flag (README).
+     - **`ext/web/02_event.js`**: item 557. `00_dom.js` dispatches along the
+       tree over the Event's internal slots and the listener lists, which it
+       gets from that module's `eventInternals` and `getEventTargetData()`.
+     - **Events a page cannot forge** (`04_hardening.js`, with item 557). The
+       module runs with the bootstrap, before any page script. It turns item
+       557's `enableUnforgeableEvents()` on: `isTrusted` is an own,
+       non-configurable accessor of every event, as the DOM Standard
+       ([LegacyUnforgeable]) and Chrome have it, so no own property, class
+       field, subclass or prototype shadows it; `dispatchEvent()` refuses what
+       is not an event (a `Proxy` of one, an object inheriting from one) and an
+       event on its way, and takes the trust of every event, so a trusted event
+       a listener received cannot be replayed or retargeted.
+       `Node.prototype.dispatchEvent` checks the same brand. The runtime's own
+       events go through item 557's `dispatchTrusted()` (the window's `load`,
+       `error`, `unhandledrejection` and `rejectionhandled` here; `00_dom.js`
+       registers its tree dispatch with `setNodeDispatcher()`), so a page that
+       replaces `dispatchEvent` on an object or a prototype is never handed one
+       (test `trusted_events_bypass_a_replaced_dispatch_event`). It then removes
+       what `deno_web` has for Deno and a browser does not have:
+       `Symbol.for("Deno.privateCustomInspect")` on `EventTarget`, `Event`,
+       `CustomEvent`, `ErrorEvent`, `CloseEvent`, `MessageEvent`,
+       `ProgressEvent` and `PromiseRejectionEvent`,
+       `EventTarget.prototype.getParent`, `Event.prototype.initialized` and the
+       prototype's `isTrusted`; makes the members of those prototypes enumerable
+       and `NONE` / `CAPTURING_PHASE` / `AT_TARGET` / `BUBBLING_PHASE`
+       constants. Nothing of the extensions reads what is removed; the page's
+       console prints an event as a plain object. Left (README): the other
+       `deno_web` interfaces keep their Web IDL brand and state in own symbol
+       properties and `Deno.inspect`'s hook on their prototypes.
      - **The binding.** A node crosses as two `u32`s, the halves of
        `NodeId::to_bits()` (arena index, generation); node-returning ops write
        into a shared `Uint32Array`. Traversal and read ops are fast calls; the
@@ -22710,7 +22730,7 @@ where the changes are discussed.
        `Event` and listener lists, with the dispatch written out in `00_dom.js`:
        `deno_web`'s `dispatch()` returns early for a target with no listener and
        treats a Window parent as a retargeted target. It works on the Event's
-       internal slots, through `02_event.js`'s `eventSlots`.
+       internal slots, through `02_event.js`'s `eventInternals` (item 557).
      - `deno_crypto` did not build outside a graph that turns on `der/std` and
        `spki/std` for it; `ext/web_page/Cargo.toml` asks for both. -
        `thalora-dom` is a git dependency pinned by revision (like `rtc`), MIT;
@@ -22728,9 +22748,103 @@ where the changes are discussed.
        network, the identity `NotSupportedError`),
        `offscreen_canvas_has_no_gpu`, `evaluate_json_async_awaits`, timers and
        the watchdog, click default actions and form submission, `DOMException`s,
-       event propagation, uncaught errors, JSON evaluation, origin-keyed
-       storage, the heap limit).
+       event propagation, `is_trusted_cannot_be_forged` (own symbols,
+       `defineProperty` on the event and on the prototype, a class field, a
+       subclass, `Reflect.construct`, `setPrototypeOf`, an heir, a `Proxy`, a
+       structured clone, a second dispatch and one on the way; host clicks and
+       an `abort` are trusted, script dispatches are not),
+       `event_interfaces_look_like_a_browsers` (the descriptor of `isTrusted`,
+       the member lists and enumerability of `EventTarget`, `Event` and
+       `CustomEvent`, the phase constants, no `Deno.inspect` hook, no listener
+       or handler among a target's own properties), uncaught errors, JSON
+       evaluation, origin-keyed storage, the heap limit).
      - Node tests enabled: none, because this is not a Node API.
+
+557. **`fix(ext/web)`: an Event's internal state and an EventTarget's listeners
+     are private** (`thalora/web-page-trusted-events`; `ext/web/02_event.js`,
+     `ext/node/polyfills/_events.mjs`, `tests/unit/event_test.ts`,
+     `tests/unit/event_target_test.ts`; consumers in `ext/web_page/`, item 556).
+     `deno_web` kept an event's slots (`[[isTrusted]]`, `[[attributes]]`: type,
+     target, phase; the canceled, stop-propagation, passive-listener and
+     dispatch flags; the path) in own symbol-keyed properties of the event, and
+     a target's listener lists and `on*` handlers in own symbol-keyed properties
+     of the target. `Object.getOwnPropertySymbols()` lists them, so any script
+     could set `isTrusted`, the phase or the target of an event, and read,
+     reorder or remove the listeners another script added. Harmless where every
+     script is the program's; a forgery where scripts do not trust each other (a
+     page, item 556).
+     - **Storage.** The slots are private fields of `class Event` (`#isTrusted`,
+       `#attributes`, …); the module's helpers (`setIsTrusted`, `setTarget`, the
+       dispatch) are closures made in the class's static block. Listener data
+       and event handlers are two module-private `WeakMap`s keyed by target. An
+       event and a target have no own symbol property of this module left (a
+       target keeps its Web IDL brand).
+     - **For extension scripts** (the module's result): `eventSlots` (the
+       symbols; added by item 556) is replaced by `eventInternals`, a frozen
+       object of functions (`isEvent`, `getAttributes`, `getCanceled`,
+       `getDispatched` / `setDispatched`, `setPath`, `getStopPropagation` /
+       `setStopPropagation`, `getStopImmediatePropagation` /
+       `setStopImmediatePropagation`, `setInPassiveListener`); the
+       `eventTargetData` symbol is replaced by `getEventTargetData(target)`
+       (`node:events`' `getEventListeners()` and the `kEvents` getter it puts on
+       an `AbortSignal` use it). `setIsTrusted`, `setTarget`,
+       `setEventTargetData`, `listenerCount`, `defineEventHandler` and
+       `dispatch` are unchanged.
+     - **`enableUnforgeableEvents()`** (new, one way; Deno never calls it, item
+       556's page runtime does): every event gets `isTrusted` as an own,
+       non-configurable accessor ([LegacyUnforgeable], which Deno does not do
+       for its cost), the getter throws on what is not an event, and
+       `dispatchEvent()` checks the dispatch flag before its no-listener
+       shortcut and clears `isTrusted`, always (the DOM Standard's step).
+     - **`dispatchTrusted(target, event)`** (new): how an extension dispatches
+       an event of its own. In Deno it is `target.dispatchEvent(event)`, the
+       same property lookup as before, so a program's override of
+       `dispatchEvent` (subclass, instance, prototype) is called as it was and
+       `isTrusted` is what the call site set. With `enableUnforgeableEvents()`
+       it runs the dispatch itself without reading a property of the target, and
+       marks the event trusted: a script that replaces `dispatchEvent` was
+       handed the extensions' trusted events before their dispatch and could
+       send them on, still trusted. `setNodeDispatcher(isNode, dispatchNode)`
+       (one call, by the embedder's extension script) names the targets that are
+       dispatched at by the embedder's algorithm instead (item 556's nodes);
+       `unforgeableEventsEnabled()` is for `AbortSignal`, whose
+       `super.dispatchEvent()` stays as it is in Deno. Call sites moved, all of
+       them events the extension itself made: `reportException()` (the global's
+       `error`), `FileReader` (8), `BroadcastChannel`, `AbortSignal`,
+       `MessagePort` / `messageerror` (2), `WebSocket` (14; its `message` events
+       already used the module's `dispatch()`), `EventSource` (4), and
+       `ext/webrtc`'s two `fire()` helpers, the SFrame `error` and
+       `keyframerequest`. `receiveTransform()`'s callback is `99_main.js`'s and
+       is unchanged.
+     - **What a Deno program can observe.** (1)
+       `Reflect.ownKeys(new Event("x"))` is `[]`, and a target with listeners or
+       `on*` handlers has no property for them. (2) The getters and methods of
+       an event, and `dispatchEvent()`, need a real event: a `Proxy` around an
+       event, or an object whose prototype is an event, worked through the
+       symbols and is now a `TypeError`, as in browsers. Likewise the listeners
+       and `on*` handlers of a target belong to that object: added through a
+       `Proxy` of a target, they are the proxy's, and an event the runtime
+       dispatches at the target does not reach them (it did). (3)
+       `dispatchEvent(x)` with something that is not an Event always throws
+       `TypeError: Failed to execute 'dispatchEvent' on 'EventTarget': parameter 1 is not of type 'Event'.`;
+       it threw a `TypeError` about a missing property, or an
+       `InvalidStateError` when the target had a listener for `x.type`. (4)
+       `Event.prototype`'s `isTrusted` accessor is configurable (so that item
+       556 can remove it), and returns `undefined` instead of throwing when
+       called on `undefined` or `null`. (5) A frozen `EventTarget` takes
+       listeners (adding one threw). `Deno.inspect()` of an event or a target is
+       unchanged.
+     - Tests: `tests/unit/event_test.ts` `eventStateIsNotInOwnProperties`,
+       `tests/unit/event_target_test.ts` `listenersAreNotOwnProperties`,
+       `dispatchEventTakesOnlyEvents`; item 556's `is_trusted_cannot_be_forged`
+       for `enableUnforgeableEvents()`, and its
+       `trusted_events_bypass_a_replaced_dispatch_event` for
+       `dispatchTrusted()`.
+     - User-facing note: an event can no longer be wrapped in a `Proxy` (or used
+       as a prototype) and passed to `dispatchEvent()`; listeners added through
+       a `Proxy` of an event target are not called for events the runtime
+       dispatches at the target itself.
+     - Node tests enabled: none; `node:events` behaves as before.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

@@ -464,3 +464,50 @@ Deno.test(function eventTargetIgnoresSignalOnPollutedObjectPrototype() {
     delete (Object.prototype as any).signal;
   }
 });
+
+// denext: the listeners and the `on*` handlers of a target are not own
+// symbol-keyed properties of it.
+Deno.test(function listenersAreNotOwnProperties() {
+  const target = new EventTarget();
+  const controller = new AbortController();
+  const signal = controller.signal;
+  const before = [Reflect.ownKeys(target), Reflect.ownKeys(signal)];
+
+  let count = 0;
+  target.addEventListener("foo", () => count++);
+  signal.addEventListener("abort", () => count++);
+  signal.onabort = () => count++;
+  assertEquals([Reflect.ownKeys(target), Reflect.ownKeys(signal)], before);
+
+  target.dispatchEvent(new Event("foo"));
+  controller.abort();
+  assertEquals(count, 3);
+});
+
+// denext: what is not an Event is refused by name, whether or not the target
+// has a listener for it.
+Deno.test(function dispatchEventTakesOnlyEvents() {
+  const target = new EventTarget();
+  const event = new Event("foo");
+  const notEvents = [
+    null,
+    undefined,
+    { type: "foo" },
+    Object.create(event),
+    new Proxy(event, {}),
+  ];
+  for (const listening of [false, true]) {
+    if (listening) {
+      target.addEventListener("foo", () => {});
+    }
+    for (const notEvent of notEvents) {
+      assertThrows(
+        // deno-lint-ignore no-explicit-any
+        () => target.dispatchEvent(notEvent as any),
+        TypeError,
+        "parameter 1 is not of type 'Event'",
+      );
+    }
+  }
+  assertEquals(target.dispatchEvent(event), true);
+});

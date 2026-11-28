@@ -1118,3 +1118,623 @@ async fn evaluate_json_async_awaits() {
   assert_eq!(eval(&mut page, "1 + 1"), json!(2));
   assert!(page.take_uncaught_errors().is_empty());
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn is_trusted_cannot_be_forged() {
+  let mut page = page(
+    r#"<button id="b">b</button>
+      <label id="l" for="c">l</label><input type="checkbox" id="c">"#,
+  );
+  run(
+    &mut page,
+    r#"globalThis.seen = [];
+      globalThis.kept = [];
+      globalThis.inFlight = null;
+      globalThis.b = document.getElementById("b");
+      b.addEventListener("click", (e) => {
+        seen.push(e.isTrusted);
+        if (!e.isTrusted) {
+          return;
+        }
+        kept.push(e);
+        // A trusted event cannot be sent anywhere else while it is on its
+        // way: not to a node, and not to a target without listeners (which
+        // would only have changed its `target`).
+        const attempts = [];
+        for (const target of [document.body, window, new EventTarget()]) {
+          try {
+            target.dispatchEvent(e);
+            attempts.push("dispatched");
+          } catch (error) {
+            attempts.push(error.name);
+          }
+        }
+        inFlight = [attempts, e.target === b, e.isTrusted];
+      });
+      // What a listener of `target` sees of `isTrusted` when a script
+      // dispatches `ev` there, or the name of what `dispatchEvent` threw.
+      globalThis.observe = (target, ev, type = "click") => {
+        let seen = "not delivered";
+        const listener = (e) => {
+          seen = e.isTrusted;
+        };
+        target.addEventListener(type, listener);
+        try {
+          target.dispatchEvent(ev);
+        } catch (error) {
+          seen = error.name;
+        }
+        target.removeEventListener(type, listener);
+        return seen;
+      };"#,
+  );
+
+  // The host's clicks are trusted, a script's are not.
+  let button = by_id(&page, "b");
+  for _ in 0..4 {
+    page.click(button).unwrap();
+  }
+  assert_eq!(eval(&mut page, "seen"), json!([true, true, true, true]));
+  assert_eq!(
+    eval(&mut page, "inFlight"),
+    json!([
+      [
+        "InvalidStateError",
+        "InvalidStateError",
+        "InvalidStateError"
+      ],
+      true,
+      true
+    ])
+  );
+  assert_eq!(
+    eval(
+      &mut page,
+      r#"seen.length = 0;
+        b.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        b.dispatchEvent(new PointerEvent("click"));
+        b.dispatchEvent(new Event("click"));
+        b.click();
+        seen"#,
+    ),
+    json!([false, false, false, false])
+  );
+  // A label passes the trust of its click on to its control's, both ways.
+  run(
+    &mut page,
+    r#"seen.length = 0;
+      document.getElementById("c").addEventListener(
+        "click", (e) => seen.push(e.isTrusted));"#,
+  );
+  page.click(by_id(&page, "l")).unwrap();
+  assert_eq!(
+    eval(&mut page, r#"document.getElementById("l").click(); seen"#),
+    json!([true, false])
+  );
+
+  // The event's own state: nothing to list, nothing to redefine.
+  assert_eq!(
+    eval(
+      &mut page,
+      r#"(() => {
+        const out = {};
+        const name = (f) => {
+          try {
+            return f();
+          } catch (error) {
+            return error.name;
+          }
+        };
+        const ev = new Event("click");
+        out.symbols = [ev, kept[0], new MouseEvent("click"), new CustomEvent("x")]
+          .map((e) => Object.getOwnPropertySymbols(e).length);
+        out.ownKeys = Reflect.ownKeys(ev);
+        out.defineValue = name(() => {
+          Object.defineProperty(ev, "isTrusted", { value: true });
+          return "defined";
+        });
+        out.defineGetter = name(() => {
+          Object.defineProperty(ev, "isTrusted", { get: () => true });
+          return "defined";
+        });
+        out.reflectDefine = Reflect.defineProperty(ev, "isTrusted", { value: true });
+        out.assign = name(() => {
+          ev.isTrusted = true;
+          return ev.isTrusted;
+        });
+        out.strictAssign = name(() => {
+          "use strict";
+          ev.isTrusted = true;
+          return "assigned";
+        });
+        out.delete = Reflect.deleteProperty(ev, "isTrusted");
+        out.after = [ev.isTrusted, observe(b, ev), observe(window, ev)];
+        return out;
+      })()"#,
+    ),
+    json!({
+      "symbols": [0, 0, 0, 0],
+      "ownKeys": ["isTrusted"],
+      "defineValue": "TypeError",
+      "defineGetter": "TypeError",
+      "reflectDefine": false,
+      "assign": false,
+      "strictAssign": "TypeError",
+      "delete": false,
+      "after": [false, false, false],
+    })
+  );
+
+  // The prototype, a subclass, another prototype, an heir, a Proxy, a clone.
+  assert_eq!(
+    eval(
+      &mut page,
+      r#"(() => {
+        const out = {};
+        const name = (f) => {
+          try {
+            return f();
+          } catch (error) {
+            return error.name;
+          }
+        };
+
+        Object.defineProperty(Event.prototype, "isTrusted", {
+          get: () => true,
+          configurable: true,
+        });
+        out.prototype = [
+          new Event("click").isTrusted,
+          new MouseEvent("click").isTrusted,
+          observe(b, new Event("click")),
+          observe(window, new Event("click")),
+        ];
+        delete Event.prototype.isTrusted;
+
+        class Forged extends Event {
+          get isTrusted() {
+            return true;
+          }
+        }
+        const forged = new Forged("click");
+        out.subclass = [forged.isTrusted, observe(b, forged)];
+        // A class field is defined on the event, where the accessor is.
+        out.field = name(() => {
+          new (class extends Event {
+            isTrusted = true;
+          })("click");
+          return "constructed";
+        });
+        const made = Reflect.construct(Event, ["click"], function () {});
+        out.construct = [
+          Object.getOwnPropertyDescriptor(made, "isTrusted").configurable,
+          made.isTrusted,
+        ];
+
+        const swapped = new Event("click");
+        Object.setPrototypeOf(swapped, { isTrusted: true });
+        out.setPrototypeOf = [swapped.isTrusted, observe(b, swapped)];
+
+        // An object that inherits from a trusted event is not an event.
+        const heir = Object.create(kept[0]);
+        out.heir = [
+          name(() => heir.isTrusted),
+          observe(b, heir),
+          observe(window, heir),
+        ];
+        const adopted = { type: "click" };
+        Object.setPrototypeOf(adopted, Event.prototype);
+        out.adopted = [observe(b, adopted), observe(window, adopted)];
+
+        // A Proxy answers what it likes, as in a browser, and is not an
+        // event either: no listener is ever handed one.
+        const proxy = new Proxy(kept[0], {
+          get: (target, key) =>
+            key === "isTrusted" ? true : Reflect.get(target, key),
+        });
+        out.proxy = [
+          proxy.isTrusted,
+          observe(b, proxy),
+          observe(window, proxy),
+          observe(new EventTarget(), proxy),
+        ];
+        return out;
+      })()"#,
+    ),
+    json!({
+      "prototype": [false, false, false, false],
+      "subclass": [false, false],
+      "field": "TypeError",
+      "construct": [false, false],
+      "setPrototypeOf": [false, false],
+      "heir": ["TypeError", "TypeError", "TypeError"],
+      "adopted": ["TypeError", "TypeError"],
+      "proxy": [true, "TypeError", "TypeError", "TypeError"],
+    })
+  );
+  // A structured clone of an event, where there is one (a browser has
+  // none), is a plain object.
+  let clone = eval(
+    &mut page,
+    r#"(() => {
+      let clone;
+      try {
+        clone = structuredClone(kept[0]);
+      } catch {
+        return "not cloned";
+      }
+      if (clone instanceof Event) {
+        return "an event";
+      }
+      return [observe(b, clone), observe(window, clone)];
+    })()"#,
+  );
+  assert!(
+    clone == json!("not cloned") || clone == json!(["TypeError", "TypeError"]),
+    "{clone}"
+  );
+
+  // A trusted event a script received is trusted once: sent again, to a
+  // node, the window or any other target, it is a script's event.
+  assert_eq!(
+    eval(
+      &mut page,
+      r#"[
+        kept.map((e) => e.isTrusted),
+        observe(b, kept[0]),
+        observe(window, kept[1]),
+        observe(new EventTarget(), kept[2]),
+        (() => {
+          // Without a listener there, too.
+          new EventTarget().dispatchEvent(kept[3]);
+          return kept[3].isTrusted;
+        })(),
+        kept.map((e) => e.isTrusted),
+      ]"#,
+    ),
+    json!([
+      [true, true, true, true],
+      false,
+      false,
+      false,
+      false,
+      [false, false, false, false]
+    ])
+  );
+
+  // What the web extensions dispatch is trusted as in a browser, once.
+  assert_eq!(
+    eval(
+      &mut page,
+      r#"(() => {
+        const controller = new AbortController();
+        let abort = null;
+        controller.signal.addEventListener("abort", (e) => {
+          abort = e;
+        });
+        controller.abort();
+        return [abort.isTrusted, observe(window, abort, "abort"), abort.isTrusted];
+      })()"#,
+    ),
+    json!([true, false, false])
+  );
+  assert!(page.take_uncaught_errors().is_empty());
+}
+
+// The runtime's own events never pass through a `dispatchEvent` a page can
+// replace: on the object, on its interface's prototype or on
+// `EventTarget.prototype`. A page that replaces them is handed nothing, the
+// listeners still get the event, trusted, and what a script dispatches
+// itself never is.
+#[tokio::test(flavor = "current_thread")]
+async fn trusted_events_bypass_a_replaced_dispatch_event() {
+  let mut options = options(r#"<div id="d"><button id="b">b</button></div>"#);
+  // Allowed by name and refused by the deny list: an `error` and a `close`.
+  options.net_allow = vec!["127.0.0.1:1".to_string()];
+  let mut page = PageRuntime::new(options).unwrap();
+  run(
+    &mut page,
+    r#"globalThis.captured = [];
+      globalThis.seen = [];
+      globalThis.realDispatch = EventTarget.prototype.dispatchEvent;
+      const capture = (where) =>
+        function (event) {
+          captured.push([where, event.type, event.isTrusted]);
+          // What a page would do with one: send it to the window.
+          Reflect.apply(realDispatch, window, [event]);
+          return true;
+        };
+      const replace = (object, where) => {
+        Object.defineProperty(object, "dispatchEvent", {
+          value: capture(where),
+          writable: true,
+          configurable: true,
+        });
+      };
+      replace(EventTarget.prototype, "EventTarget.prototype");
+      replace(Node.prototype, "Node.prototype");
+      replace(WebSocket.prototype, "WebSocket.prototype");
+      replace(AbortSignal.prototype, "AbortSignal.prototype");
+      replace(window, "window");
+      replace(document, "document");
+      const record = (name) => (e) => {
+        seen.push([name, e.type, e.isTrusted, e.target === e.currentTarget]);
+      };
+      // A listener of the window would see a captured event sent there.
+      for (
+        const type of [
+          "open", "message", "close", "abort", "click", "unhandledrejection",
+        ]
+      ) {
+        window.addEventListener(type, (e) => {
+          if (e.target === window) {
+            seen.push(["window", e.type, e.isTrusted, true]);
+          }
+        });
+      }
+      window.addEventListener("error", (e) => {
+        if (e instanceof ErrorEvent || e.target === window) {
+          seen.push(["window", e.type, e.isTrusted, e.target === window]);
+        }
+      });
+
+      const ws = new WebSocket("ws://127.0.0.1:1/");
+      replace(ws, "a WebSocket");
+      ws.addEventListener("error", record("ws"));
+      ws.onclose = record("ws");
+
+      const timeout = AbortSignal.timeout(1);
+      replace(timeout, "a timeout signal");
+      timeout.addEventListener("abort", record("timeout"));
+      const controller = new AbortController();
+      replace(controller.signal, "a signal");
+      controller.signal.onabort = record("signal");
+      controller.abort();
+
+      globalThis.b = document.getElementById("b");
+      replace(b, "a button");
+      b.addEventListener("click", record("button"));
+
+      // The window's own events: an uncaught error, an unhandled rejection.
+      setTimeout(() => {
+        throw new Error("from a timer");
+      }, 0);
+      Promise.reject(new Error("from a promise"));
+      // Keeps the loop alive for the timeout signal, whose timer does not.
+      setTimeout(() => {}, 300);"#,
+  );
+  page.click(by_id(&page, "b")).unwrap();
+  assert_eq!(
+    page.run_until_idle(Duration::from_secs(20)).await.unwrap(),
+    Idle::Quiescent
+  );
+  assert_eq!(eval(&mut page, "captured"), json!([]));
+  let mut seen = eval(&mut page, "seen")
+    .as_array()
+    .unwrap()
+    .iter()
+    .map(|entry| entry.to_string())
+    .collect::<Vec<_>>();
+  seen.sort();
+  assert_eq!(
+    seen,
+    [
+      r#"["button","click",true,true]"#,
+      r#"["signal","abort",true,true]"#,
+      r#"["timeout","abort",true,true]"#,
+      r#"["window","error",true,true]"#,
+      r#"["window","unhandledrejection",true,true]"#,
+      r#"["ws","close",true,true]"#,
+      r#"["ws","error",true,true]"#,
+    ]
+  );
+
+  // The replaced methods are what a script's own call reaches, and the real
+  // one never dispatches a trusted event: not a new one, and not one a
+  // listener was given.
+  assert_eq!(
+    eval(
+      &mut page,
+      r#"(() => {
+        captured.length = 0;
+        seen.length = 0;
+        b.dispatchEvent(new Event("click"));
+        const own = captured.map((entry) => entry[0]);
+        let kept = null;
+        const signal = AbortSignal.abort();
+        const controller = new AbortController();
+        controller.signal.addEventListener("abort", (e) => {
+          kept = e;
+        });
+        controller.abort();
+        const target = new EventTarget();
+        let replayed = null;
+        target.addEventListener("abort", (e) => {
+          replayed = e.isTrusted;
+        });
+        const before = kept.isTrusted;
+        Reflect.apply(realDispatch, target, [kept]);
+        return [own, signal.aborted, before, replayed, kept.isTrusted];
+      })()"#,
+    ),
+    json!([["a button"], true, true, false, false])
+  );
+  let _ = page.take_console_messages();
+  assert!(page.take_uncaught_errors().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn event_interfaces_look_like_a_browsers() {
+  let mut page = page(r#"<button id="b">b</button>"#);
+
+  // `isTrusted` is [LegacyUnforgeable]: an own accessor of the event, the
+  // same function for every event, and not a member of the prototype.
+  assert_eq!(
+    eval(
+      &mut page,
+      r#"(() => {
+        const d = Object.getOwnPropertyDescriptor(new Event("x"), "isTrusted");
+        const other = Object.getOwnPropertyDescriptor(
+          new MouseEvent("y"),
+          "isTrusted",
+        );
+        let illegal;
+        try {
+          illegal = d.get.call({});
+        } catch (error) {
+          illegal = error.name;
+        }
+        return {
+          keys: Object.keys(d).sort(),
+          get: typeof d.get,
+          set: d.set === undefined,
+          enumerable: d.enumerable,
+          configurable: d.configurable,
+          name: d.get.name,
+          shared: d.get === other.get,
+          illegal,
+          onPrototype: "isTrusted" in Event.prototype,
+          value: new Event("x").isTrusted,
+        };
+      })()"#,
+    ),
+    json!({
+      "keys": ["configurable", "enumerable", "get", "set"],
+      "get": "function",
+      "set": true,
+      "enumerable": true,
+      "configurable": false,
+      "name": "get isTrusted",
+      "shared": true,
+      "illegal": "TypeError",
+      "onPrototype": false,
+      "value": false,
+    })
+  );
+
+  // No member a browser does not have, and none of `Deno.inspect`'s hooks.
+  assert_eq!(
+    eval(
+      &mut page,
+      r#"(() => {
+        const standard = {
+          EventTarget: ["addEventListener", "dispatchEvent", "removeEventListener"],
+          Event: [
+            "AT_TARGET", "BUBBLING_PHASE", "CAPTURING_PHASE", "NONE", "bubbles",
+            "cancelBubble", "cancelable", "composed", "composedPath",
+            "currentTarget", "defaultPrevented", "eventPhase", "initEvent",
+            "preventDefault", "returnValue", "srcElement",
+            "stopImmediatePropagation", "stopPropagation", "target",
+            "timeStamp", "type",
+          ],
+          CustomEvent: ["detail", "initCustomEvent"],
+        };
+        const out = { extra: [], notEnumerable: [], symbols: [], hooks: [] };
+        for (const [name, members] of Object.entries(standard)) {
+          const prototype = globalThis[name].prototype;
+          for (const key of Object.getOwnPropertyNames(prototype)) {
+            if (key === "constructor") {
+              continue;
+            }
+            if (!members.includes(key)) {
+              out.extra.push(`${name}.${key}`);
+            }
+            if (!Object.getOwnPropertyDescriptor(prototype, key).enumerable) {
+              out.notEnumerable.push(`${name}.${key}`);
+            }
+          }
+          for (const symbol of Object.getOwnPropertySymbols(prototype)) {
+            if (symbol !== Symbol.toStringTag) {
+              out.symbols.push(`${name}.${String(symbol)}`);
+            }
+          }
+        }
+        const hook = Symbol.for("Deno.privateCustomInspect");
+        for (
+          const name of [
+            "EventTarget", "Event", "CustomEvent", "ErrorEvent", "CloseEvent",
+            "MessageEvent", "ProgressEvent", "PromiseRejectionEvent", "UIEvent",
+            "MouseEvent", "PointerEvent", "KeyboardEvent", "InputEvent",
+            "FocusEvent", "SubmitEvent", "Window", "Node", "HTMLElement",
+          ]
+        ) {
+          if (hook in globalThis[name].prototype) {
+            out.hooks.push(name);
+          }
+        }
+        out.initialized = "initialized" in new Event("x");
+        out.getParent = Object.getOwnPropertyNames(EventTarget.prototype)
+          .includes("getParent");
+        out.phase = Object.getOwnPropertyDescriptor(Event.prototype, "AT_TARGET");
+        out.phases = [
+          new Event("x").NONE,
+          new Event("x").CAPTURING_PHASE,
+          Event.AT_TARGET,
+          new MouseEvent("x").BUBBLING_PHASE,
+        ];
+        return out;
+      })()"#,
+    ),
+    json!({
+      "extra": [],
+      "notEnumerable": [],
+      "symbols": [],
+      "hooks": [],
+      "initialized": false,
+      "getParent": false,
+      "phase": {
+        "value": 2,
+        "writable": false,
+        "enumerable": true,
+        "configurable": false,
+      },
+      "phases": [0, 1, 2, 3],
+    })
+  );
+
+  // Listeners and event handlers are not properties of their target.
+  assert_eq!(
+    eval(
+      &mut page,
+      r#"(() => {
+        const symbols = (target) => Object.getOwnPropertySymbols(target).length;
+        // A target, and an event handler it has (`on…`).
+        const targets = [
+          [document.getElementById("b"), "click"],
+          [document, "click"],
+          [window, "click"],
+          [new EventTarget(), null],
+          [new AbortController().signal, "abort"],
+        ];
+        const before = targets.map(([target]) => symbols(target));
+        let calls = 0;
+        for (const [target, handler] of targets) {
+          target.addEventListener("ping", () => calls++);
+          target.dispatchEvent(new Event("ping"));
+          if (handler !== null) {
+            target["on" + handler] = () => calls++;
+            target.dispatchEvent(new Event(handler));
+          }
+        }
+        const after = targets.map(([target]) => symbols(target));
+        return [calls, before.every((count, i) => count === after[i])];
+      })()"#,
+    ),
+    json!([9, true])
+  );
+
+  // The dispatch still works on what was removed from sight.
+  let button = by_id(&page, "b");
+  run(
+    &mut page,
+    r#"globalThis.log = [];
+      document.getElementById("b").addEventListener("click", (e) => {
+        log.push(e.isTrusted, e.eventPhase === Event.AT_TARGET, e instanceof PointerEvent);
+      });
+      console.log(new Event("logged"));"#,
+  );
+  page.click(button).unwrap();
+  assert_eq!(eval(&mut page, "log"), json!([true, true, true]));
+  assert!(console_text(&mut page).contains("Event"));
+  assert!(page.take_uncaught_errors().is_empty());
+}

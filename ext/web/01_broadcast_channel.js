@@ -31,6 +31,7 @@ const { createFilteredInspectProxy } = core.loadExtScript(
 );
 const {
   defineEventHandler,
+  dispatchTrusted,
   EventTarget,
   setIsTrusted,
   setTarget,
@@ -100,7 +101,7 @@ function dispatch(source, name, data, sabId) {
       });
       setIsTrusted(event, true);
       setTarget(event, channel);
-      channel.dispatchEvent(event);
+      dispatchTrusted(channel, event);
     };
 
     defer(go);

@@ -20,6 +20,7 @@ import * as dom from "ext:deno_web_page/00_dom.js";
 import * as uiEvents from "ext:deno_web_page/01_events.js";
 import * as html from "ext:deno_web_page/02_html.js";
 import * as windowObjects from "ext:deno_web_page/03_window.js";
+import "ext:deno_web_page/04_hardening.js";
 const {
   FunctionPrototypeCall,
   JSONStringify,
@@ -608,14 +609,15 @@ core.setUnhandledPromiseRejectionHandler((promise, reason) => {
     promise,
     reason,
   });
-  globalThis.dispatchEvent(rejection);
+  event.dispatchTrusted(globalThis, rejection);
   if (!rejection.defaultPrevented) {
     op_web_page_console("Uncaught (in promise) " + describe(reason), 3);
   }
   return true;
 });
 core.setHandledPromiseRejectionHandler((promise, reason) => {
-  globalThis.dispatchEvent(
+  event.dispatchTrusted(
+    globalThis,
     new event.PromiseRejectionEvent("rejectionhandled", { promise, reason }),
   );
 });
@@ -647,8 +649,6 @@ function serialize(value) {
   }
 }
 
-const windowDispatch = event.EventTarget.prototype.dispatchEvent;
-
 function fireAtDocument(type, bubbles) {
   const ev = new event.Event(type, { bubbles });
   event.setIsTrusted(ev, true);
@@ -665,8 +665,7 @@ function lifecycle(stage) {
     dom.setReadyState("complete");
     fireAtDocument("readystatechange", false);
     const ev = new event.Event("load");
-    event.setIsTrusted(ev, true);
-    FunctionPrototypeCall(windowDispatch, globalThis, ev);
+    event.dispatchTrusted(globalThis, ev);
   }
   return true;
 }

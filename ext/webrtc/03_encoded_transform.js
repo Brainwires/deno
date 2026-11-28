@@ -64,8 +64,13 @@ const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
 const { DOMException } = core.loadExtScript(
   "ext:deno_web/01_dom_exception.js",
 );
-const { defineEventHandler, Event, EventTarget, setIsTrusted } = core
-  .loadExtScript("ext:deno_web/02_event.js");
+const {
+  defineEventHandler,
+  dispatchTrusted,
+  Event,
+  EventTarget,
+  setIsTrusted,
+} = core.loadExtScript("ext:deno_web/02_event.js");
 const { ReadableStream, WritableStream } = core.loadExtScript(
   "ext:deno_web/06_streams.js",
 );
@@ -92,7 +97,7 @@ const _consumed = Symbol("[[consumed]]");
 
 function fire(target, event) {
   setIsTrusted(event, true);
-  target.dispatchEvent(event);
+  dispatchTrusted(target, event);
 }
 
 function invalidState(message) {
@@ -575,7 +580,7 @@ function generateKeyFrame(state, id, rid) {
       // asked for the key frame, as at a remote PLI.
       const event = new Event("keyframerequest");
       setIsTrusted(event, true);
-      track.dispatchEvent(event);
+      dispatchTrusted(track, event);
       reply(state, id);
       return;
     }
