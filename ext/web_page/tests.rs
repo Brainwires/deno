@@ -1116,3 +1116,979 @@ async fn evaluate_json_async_awaits() {
   assert_eq!(eval(&mut page, "1 + 1"), json!(2));
   assert!(page.take_uncaught_errors().is_empty());
 }
+
+// --- the same-origin policy of the page's requests ---------------------------
+//
+// `deno_fetch`'s web-origin mode (`ext/fetch/cors.rs`), which a page runtime
+// turns on with the origin of `PageOptions::url`. The servers are in the
+// test: three ports of 127.0.0.1, which are three origins. The first is the
+// page's.
+
+/// A request a test server received.
+#[derive(Debug, Clone)]
+struct Seen {
+  method: String,
+  target: String,
+  /// Names in lowercase.
+  headers: Vec<(String, String)>,
+  body: String,
+}
+
+impl Seen {
+  fn header(&self, name: &str) -> Option<&str> {
+    self
+      .headers
+      .iter()
+      .find(|(header, _)| header == name)
+      .map(|(_, value)| value.as_str())
+  }
+}
+
+type SeenLog = std::sync::Arc<std::sync::Mutex<Vec<Seen>>>;
+
+/// The response to a request, which its query describes: `status` and `h`
+/// (a header line, any number of them) and `body`, or for an `OPTIONS`
+/// request `pstatus` and `ph`. A preflight nothing was said about gets a
+/// 200 without CORS headers, which fails it.
+fn test_response(method: &str, target: &str) -> String {
+  let query = target.split_once('?').map(|(_, query)| query).unwrap_or("");
+  let params: Vec<(String, String)> =
+    url::form_urlencoded::parse(query.as_bytes())
+      .into_owned()
+      .collect();
+  let preflight = method == "OPTIONS";
+  let (status_key, header_key) = if preflight {
+    ("pstatus", "ph")
+  } else {
+    ("status", "h")
+  };
+  let value = |key: &str| {
+    params
+      .iter()
+      .find(|(name, _)| name == key)
+      .map(|(_, value)| value.as_str())
+  };
+  let status = value(status_key).unwrap_or("200");
+  let body = if preflight {
+    ""
+  } else {
+    value("body").unwrap_or("")
+  };
+  let mut response = format!(
+    "HTTP/1.1 {status} Status\r\nConnection: close\r\nContent-Length: {}\r\n",
+    body.len()
+  );
+  for (name, line) in &params {
+    if name == header_key {
+      response.push_str(line);
+      response.push_str("\r\n");
+    }
+  }
+  response.push_str("\r\n");
+  response.push_str(body);
+  response
+}
+
+async fn answer_test_request(mut socket: tokio::net::TcpStream, log: SeenLog) {
+  use tokio::io::AsyncReadExt;
+  use tokio::io::AsyncWriteExt;
+
+  let mut received = Vec::new();
+  let mut chunk = [0u8; 4096];
+  let head_end = loop {
+    if let Some(at) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+      break at + 4;
+    }
+    match socket.read(&mut chunk).await {
+      Ok(0) | Err(_) => return,
+      Ok(read) => received.extend_from_slice(&chunk[..read]),
+    }
+  };
+  let head = String::from_utf8_lossy(&received[..head_end]).to_string();
+  let mut lines = head.split("\r\n");
+  let mut request_line = lines.next().unwrap_or_default().split(' ');
+  let method = request_line.next().unwrap_or_default().to_string();
+  let target = request_line.next().unwrap_or_default().to_string();
+  let headers: Vec<(String, String)> = lines
+    .filter_map(|line| line.split_once(':'))
+    .map(|(name, value)| {
+      (name.trim().to_ascii_lowercase(), value.trim().to_string())
+    })
+    .collect();
+  let length = headers
+    .iter()
+    .find(|(name, _)| name == "content-length")
+    .and_then(|(_, value)| value.parse::<usize>().ok())
+    .unwrap_or(0);
+  while received.len() < head_end + length {
+    match socket.read(&mut chunk).await {
+      Ok(0) | Err(_) => break,
+      Ok(read) => received.extend_from_slice(&chunk[..read]),
+    }
+  }
+  let body = String::from_utf8_lossy(&received[head_end..]).to_string();
+  let response = test_response(&method, &target);
+  log.lock().unwrap().push(Seen {
+    method,
+    target,
+    headers,
+    body,
+  });
+  let _ = socket.write_all(response.as_bytes()).await;
+  let _ = socket.shutdown().await;
+}
+
+/// A server on a loopback port that answers one request per connection and
+/// records it.
+async fn test_server(log: SeenLog) -> u16 {
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let port = listener.local_addr().unwrap().port();
+  tokio::spawn(async move {
+    loop {
+      let Ok((socket, _)) = listener.accept().await else {
+        return;
+      };
+      tokio::spawn(answer_test_request(socket, log.clone()));
+    }
+  });
+  port
+}
+
+/// What the test pages have: `u(port, params)` (the URL of a response, see
+/// `test_response`), `probe(url, init)` (what a page learns from a fetch)
+/// and `ACAO(value)`.
+const CORS_HELPERS: &str = r#"
+globalThis.u = (port, params = {}) => {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    for (const item of [].concat(value)) query.append(key, item);
+  }
+  return `http://127.0.0.1:${port}/r?${query}`;
+};
+globalThis.probe = async (url, init) => {
+  try {
+    const response = await fetch(url, init);
+    return {
+      type: response.type,
+      status: response.status,
+      ok: response.ok,
+      statusText: response.statusText,
+      url: response.url,
+      redirected: response.redirected,
+      headers: [...response.headers.keys()],
+      body: await response.text(),
+    };
+  } catch (error) {
+    return {
+      error: `${error.name}: ${error.message}`,
+      cause: error.cause === undefined ? null : String(error.cause),
+    };
+  }
+};
+globalThis.ACAO = (value) => `Access-Control-Allow-Origin: ${value}`;
+"#;
+
+struct CorsPage {
+  page: PageRuntime,
+  log: SeenLog,
+  /// The page's origin, `null` for an opaque one.
+  origin: String,
+  /// The URL of the page's origin, `/` included.
+  origin_url: String,
+  page_url: String,
+  same: u16,
+  other: u16,
+}
+
+impl CorsPage {
+  /// A page at `/dir/page.html` of the first of three servers, or at `url`.
+  async fn new(url: Option<&str>) -> Self {
+    let log = SeenLog::default();
+    let same = test_server(log.clone()).await;
+    let other = test_server(log.clone()).await;
+    let third = test_server(log.clone()).await;
+    let origin = match url {
+      Some(_) => "null".to_string(),
+      None => format!("http://127.0.0.1:{same}"),
+    };
+    let page_url = match url {
+      Some(url) => url.to_string(),
+      None => format!("{origin}/dir/page.html?q=1#fragment"),
+    };
+    let mut options =
+      PageOptions::new(Url::parse(&page_url).unwrap(), "<p>cors</p>");
+    options.user_agent = "TestAgent/1.0".to_string();
+    options.net_allow = [same, other, third]
+      .iter()
+      .map(|port| format!("127.0.0.1:{port}"))
+      .collect();
+    // The servers are on loopback.
+    options.deny_addresses = Some(Vec::new());
+    let mut page = PageRuntime::new(options).unwrap();
+    run(
+      &mut page,
+      &format!(
+        "globalThis.SAME = {same}; globalThis.OTHER = {other}; \
+         globalThis.THIRD = {third}; globalThis.ORIGIN = '{origin}';\n\
+         {CORS_HELPERS}"
+      ),
+    );
+    Self {
+      page,
+      log,
+      origin_url: format!("{origin}/"),
+      origin,
+      page_url,
+      same,
+      other,
+    }
+  }
+
+  async fn eval(&mut self, source: &str) -> Value {
+    eval_async(&mut self.page, source)
+      .await
+      .unwrap_or_else(|error| panic!("{source}: {error}"))
+  }
+
+  /// The requests the servers received for the response `id`, in order.
+  fn seen(&self, id: &str) -> Vec<Seen> {
+    let wanted = format!("id={id}");
+    self
+      .log
+      .lock()
+      .unwrap()
+      .iter()
+      .filter(|seen| seen.target.split(['?', '&']).any(|part| part == wanted))
+      .cloned()
+      .collect()
+  }
+
+  fn methods(&self, id: &str) -> Vec<String> {
+    self.seen(id).into_iter().map(|seen| seen.method).collect()
+  }
+}
+
+/// What a page gets when the policy refuses: no detail.
+fn blocked() -> Value {
+  json!({ "error": "TypeError: Failed to fetch", "cause": null })
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fetch_shares_cross_origin_responses_by_cors_only() {
+  let mut t = CorsPage::new(None).await;
+
+  // Same origin: a basic response, readable, without `Set-Cookie`.
+  assert_eq!(
+    t.eval(
+      r#"const url = u(SAME, { id: "same", body: "hello", h: ["Set-Cookie: s=1", "X-Secret: 1"] });
+        const r = await probe(url);
+        return [r.type, r.status, r.ok, r.body, r.url === url, r.redirected,
+          r.headers.includes("x-secret"), r.headers.includes("set-cookie")];"#
+    )
+    .await,
+    json!(["basic", 200, true, "hello", true, false, true, false])
+  );
+  let seen = t.seen("same");
+  assert_eq!(seen.len(), 1);
+  assert_eq!(seen[0].method, "GET");
+  assert_eq!(seen[0].header("origin"), None);
+  // The referrer of a same-origin request is the document URL, without its
+  // fragment.
+  assert_eq!(
+    seen[0].header("referer"),
+    Some(t.page_url.trim_end_matches("#fragment"))
+  );
+  assert_eq!(
+    seen[0].header("host"),
+    Some(format!("127.0.0.1:{}", t.same).as_str())
+  );
+  assert_eq!(seen[0].header("user-agent"), Some("TestAgent/1.0"));
+
+  // Another origin without `Access-Control-Allow-Origin`: the request is
+  // made, with the page's origin, and nothing of the response is the
+  // page's. The reason goes to the console, which a page cannot read.
+  let _ = t.page.take_console_messages();
+  assert_eq!(
+    t.eval(r#"await probe(u(OTHER, { id: "noacao", body: "secret", h: ["X-Secret: 1"] }))"#)
+      .await,
+    blocked()
+  );
+  let seen = t.seen("noacao");
+  assert_eq!(seen.len(), 1);
+  assert_eq!(seen[0].header("origin"), Some(t.origin.as_str()));
+  assert_eq!(seen[0].header("referer"), Some(t.origin_url.as_str()));
+  assert_eq!(
+    seen[0].header("host"),
+    Some(format!("127.0.0.1:{}", t.other).as_str())
+  );
+  let console = console_text(&mut t.page);
+  assert!(
+    console.contains("has been blocked")
+      && console.contains("Access-Control-Allow-Origin"),
+    "{console}"
+  );
+  assert!(!console.contains("secret"), "{console}");
+
+  // The exact origin, or `*`: a CORS response, with the safelisted headers
+  // only.
+  assert_eq!(
+    t.eval(
+      r#"const url = u(OTHER, { id: "exact", body: "shared",
+          h: [ACAO(ORIGIN), "X-Secret: 1", "Set-Cookie: s=1", "Content-Type: text/plain"] });
+        const r = await probe(url);
+        return [r.type, r.status, r.body, r.url === url, r.redirected, r.headers];"#
+    )
+    .await,
+    json!([
+      "cors",
+      200,
+      "shared",
+      true,
+      false,
+      ["content-length", "content-type"]
+    ])
+  );
+  assert_eq!(
+    t.eval(
+      r#"const r = await probe(u(OTHER, { id: "star", body: "shared", h: [ACAO("*")] }));
+        return [r.type, r.body, r.headers];"#
+    )
+    .await,
+    json!(["cors", "shared", ["content-length"]])
+  );
+  // Another origin's name, or the page's origin written another way, is
+  // not it.
+  for acao in [
+    "http://127.0.0.1:1",
+    "http://localhost",
+    "null",
+    "HTTP://127.0.0.1",
+  ] {
+    assert_eq!(
+      t.eval(&format!(
+        r#"await probe(u(OTHER, {{ id: "wrong", body: "secret", h: [ACAO("{acao}")] }}))"#
+      ))
+      .await,
+      blocked(),
+      "{acao}"
+    );
+  }
+  assert_eq!(
+    t.eval(
+      r#"await probe(u(OTHER, { id: "slash", body: "secret", h: [ACAO(ORIGIN + "/")] }))"#
+    )
+    .await,
+    blocked()
+  );
+
+  // With credentials: `*` is not enough, and neither is the origin without
+  // `Access-Control-Allow-Credentials: true`.
+  assert_eq!(
+    t.eval(
+      r#"await probe(u(OTHER, { id: "cred-star", body: "secret", h: [ACAO("*"), "Access-Control-Allow-Credentials: true"] }),
+        { credentials: "include" })"#
+    )
+    .await,
+    blocked()
+  );
+  assert_eq!(
+    t.eval(
+      r#"await probe(u(OTHER, { id: "cred-origin", body: "secret", h: [ACAO(ORIGIN)] }),
+        { credentials: "include" })"#
+    )
+    .await,
+    blocked()
+  );
+  assert_eq!(
+    t.eval(
+      r#"const r = await probe(u(OTHER, { id: "cred-ok", body: "mine",
+          h: [ACAO(ORIGIN), "Access-Control-Allow-Credentials: true"] }),
+          { credentials: "include" });
+        return [r.type, r.body];"#
+    )
+    .await,
+    json!(["cors", "mine"])
+  );
+  // There is no cookie store: no request carried a cookie.
+  assert!(
+    t.log
+      .lock()
+      .unwrap()
+      .iter()
+      .all(|seen| seen.header("cookie").is_none()
+        && seen.header("authorization").is_none())
+  );
+
+  // `Access-Control-Expose-Headers` names what else a page may read; `*`
+  // is everything, unless the request has credentials.
+  assert_eq!(
+    t.eval(
+      r#"const r = await probe(u(OTHER, { id: "expose", body: "x",
+          h: [ACAO("*"), "Access-Control-Expose-Headers: X-Shown, Set-Cookie", "X-Shown: 1", "X-Secret: 1", "Set-Cookie: s=1"] }));
+        return r.headers;"#
+    )
+    .await,
+    json!(["content-length", "x-shown"])
+  );
+  assert_eq!(
+    t.eval(
+      r#"const r = await probe(u(OTHER, { id: "expose-star", body: "x",
+          h: [ACAO("*"), "Access-Control-Expose-Headers: *", "X-Shown: 1", "Set-Cookie: s=1"] }));
+        return [r.headers.includes("x-shown"), r.headers.includes("set-cookie")];"#
+    )
+    .await,
+    json!([true, false])
+  );
+  assert_eq!(
+    t.eval(
+      r#"const r = await probe(u(OTHER, { id: "expose-cred", body: "x",
+          h: [ACAO(ORIGIN), "Access-Control-Allow-Credentials: true", "Access-Control-Expose-Headers: *", "X-Shown: 1"] }),
+          { credentials: "include" });
+        return r.headers;"#
+    )
+    .await,
+    json!(["content-length"])
+  );
+
+  // A `data:` URL is the page's own, whatever the mode.
+  assert_eq!(
+    t.eval(
+      r#"const r = await probe("data:text/plain,inline", { mode: "same-origin" });
+        return [r.type, r.body];"#
+    )
+    .await,
+    json!(["basic", "inline"])
+  );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fetch_preflights_what_is_not_a_simple_request() {
+  let mut t = CorsPage::new(None).await;
+
+  // A method and a header that are not safelisted: an `OPTIONS` request
+  // first, which says what is coming and carries none of it. Its answer is
+  // cached for `Access-Control-Max-Age`.
+  assert_eq!(
+    t.eval(
+      r#"const url = u(OTHER, { id: "pf", body: "done", h: [ACAO("*")],
+          ph: [ACAO("*"), "Access-Control-Allow-Methods: PUT", "Access-Control-Allow-Headers: X-Custom", "Access-Control-Max-Age: 60"] });
+        const init = { method: "PUT", headers: { "X-Custom": "1" }, body: "data" };
+        const first = await probe(url, init);
+        const second = await probe(url, init);
+        return [first.type, first.body, second.type, second.body];"#
+    )
+    .await,
+    json!(["cors", "done", "cors", "done"])
+  );
+  let seen = t.seen("pf");
+  assert_eq!(t.methods("pf"), ["OPTIONS", "PUT", "PUT"]);
+  let preflight = &seen[0];
+  assert_eq!(
+    preflight.header("access-control-request-method"),
+    Some("PUT")
+  );
+  assert_eq!(
+    preflight.header("access-control-request-headers"),
+    Some("x-custom")
+  );
+  assert_eq!(preflight.header("origin"), Some(t.origin.as_str()));
+  assert_eq!(preflight.header("referer"), Some(t.origin_url.as_str()));
+  assert_eq!(preflight.header("x-custom"), None);
+  assert_eq!(preflight.header("cookie"), None);
+  assert_eq!(preflight.body, "");
+  let request = &seen[1];
+  assert_eq!(request.header("x-custom"), Some("1"));
+  assert_eq!(request.header("origin"), Some(t.origin.as_str()));
+  assert_eq!(request.body, "data");
+
+  // A content type that is not a form's.
+  assert_eq!(
+    t.eval(
+      r#"const r = await probe(u(OTHER, { id: "pf-json", body: "ok", h: [ACAO("*")],
+          ph: [ACAO("*"), "Access-Control-Allow-Headers: content-type"] }),
+          { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        return [r.type, r.body];"#
+    )
+    .await,
+    json!(["cors", "ok"])
+  );
+  assert_eq!(t.methods("pf-json"), ["OPTIONS", "POST"]);
+  assert_eq!(
+    t.seen("pf-json")[0].header("access-control-request-headers"),
+    Some("content-type")
+  );
+
+  // A preflight that does not allow the request: the request is never
+  // made.
+  for (id, preflight, init) in [
+    // no CORS headers at all
+    (
+      "pf-none",
+      "[]",
+      r#"{ method: "PUT", headers: { "X-Custom": "1" } }"#,
+    ),
+    // the method is not allowed
+    (
+      "pf-method",
+      r#"[ACAO("*"), "Access-Control-Allow-Methods: DELETE", "Access-Control-Allow-Headers: x-custom"]"#,
+      r#"{ method: "PUT", headers: { "X-Custom": "1" } }"#,
+    ),
+    // the header is not allowed
+    (
+      "pf-header",
+      r#"[ACAO("*"), "Access-Control-Allow-Methods: PUT"]"#,
+      r#"{ method: "PUT", headers: { "X-Custom": "1" } }"#,
+    ),
+    // `Authorization` is not covered by `*`
+    (
+      "pf-authorization",
+      r#"[ACAO("*"), "Access-Control-Allow-Headers: *"]"#,
+      r#"{ headers: { "Authorization": "Bearer token" } }"#,
+    ),
+    // with credentials, `*` covers nothing
+    (
+      "pf-credentials",
+      r#"[ACAO(ORIGIN), "Access-Control-Allow-Credentials: true", "Access-Control-Allow-Methods: *", "Access-Control-Allow-Headers: *"]"#,
+      r#"{ method: "PUT", headers: { "X-Custom": "1" }, credentials: "include" }"#,
+    ),
+  ] {
+    assert_eq!(
+      t.eval(&format!(
+        r#"await probe(u(OTHER, {{ id: "{id}", body: "secret", h: [ACAO("*"), "Access-Control-Allow-Credentials: true"], ph: {preflight} }}), {init})"#
+      ))
+      .await,
+      blocked(),
+      "{id}"
+    );
+    assert_eq!(t.methods(id), ["OPTIONS"], "{id}");
+  }
+  // A status that is not an ok status.
+  assert_eq!(
+    t.eval(
+      r#"await probe(u(OTHER, { id: "pf-status", body: "secret", h: [ACAO("*")], pstatus: "404",
+          ph: [ACAO("*"), "Access-Control-Allow-Methods: PUT"] }), { method: "PUT" })"#
+    )
+    .await,
+    blocked()
+  );
+  assert_eq!(t.methods("pf-status"), ["OPTIONS"]);
+
+  // With credentials, named by name.
+  assert_eq!(
+    t.eval(
+      r#"const r = await probe(u(OTHER, { id: "pf-named", body: "ok",
+          h: [ACAO(ORIGIN), "Access-Control-Allow-Credentials: true"],
+          ph: [ACAO(ORIGIN), "Access-Control-Allow-Credentials: true", "Access-Control-Allow-Methods: PUT", "Access-Control-Allow-Headers: x-custom"] }),
+          { method: "PUT", headers: { "X-Custom": "1" }, credentials: "include" });
+        return [r.type, r.body];"#
+    )
+    .await,
+    json!(["cors", "ok"])
+  );
+  assert_eq!(t.methods("pf-named"), ["OPTIONS", "PUT"]);
+
+  // A preflight passed and the response itself is not shared: still
+  // nothing.
+  assert_eq!(
+    t.eval(
+      r#"await probe(u(OTHER, { id: "pf-then-none", body: "secret",
+          ph: [ACAO("*"), "Access-Control-Allow-Methods: PUT"] }), { method: "PUT" })"#
+    )
+    .await,
+    blocked()
+  );
+  assert_eq!(t.methods("pf-then-none"), ["OPTIONS", "PUT"]);
+
+  // The page's own origin needs none, and a request that is not a GET
+  // says where it comes from.
+  assert_eq!(
+    t.eval(
+      r#"const r = await probe(u(SAME, { id: "same-put", body: "ok" }),
+          { method: "PUT", headers: { "X-Custom": "1" }, body: "data" });
+        return [r.type, r.body];"#
+    )
+    .await,
+    json!(["basic", "ok"])
+  );
+  assert_eq!(t.methods("same-put"), ["PUT"]);
+  assert_eq!(
+    t.seen("same-put")[0].header("origin"),
+    Some(t.origin.as_str())
+  );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fetch_modes_and_redirects_follow_the_origin() {
+  let mut t = CorsPage::new(None).await;
+
+  // no-cors: the request is made and the response is opaque.
+  assert_eq!(
+    t.eval(
+      r#"await probe(u(OTHER, { id: "nocors", body: "secret", h: ["X-Secret: 1"] }), { mode: "no-cors" })"#
+    )
+    .await,
+    json!({
+      "type": "opaque",
+      "status": 0,
+      "ok": false,
+      "statusText": "",
+      "url": "",
+      "redirected": false,
+      "headers": [],
+      "body": "",
+    })
+  );
+  assert_eq!(t.methods("nocors"), ["GET"]);
+  // ...and is not preflighted, whatever the page asked to send: only the
+  // safelisted headers go.
+  assert_eq!(
+    t.eval(
+      r#"const r = await probe(u(OTHER, { id: "nocors-post", body: "secret" }),
+          { mode: "no-cors", method: "POST", headers: { "X-Custom": "1", "Content-Type": "application/json", "Accept": "text/x" }, body: "{}" });
+        return r.type;"#
+    )
+    .await,
+    json!("opaque")
+  );
+  let seen = t.seen("nocors-post");
+  assert_eq!(t.methods("nocors-post"), ["POST"]);
+  assert_eq!(seen[0].header("x-custom"), None);
+  // (the content type is the body's own, which is a safelisted one)
+  assert_eq!(
+    seen[0].header("content-type"),
+    Some("text/plain;charset=UTF-8")
+  );
+  assert_eq!(seen[0].header("accept"), Some("text/x"));
+  assert_eq!(seen[0].header("origin"), Some(t.origin.as_str()));
+
+  // same-origin: another origin is refused before anything is sent.
+  assert_eq!(
+    t.eval(
+      r#"await probe(u(OTHER, { id: "so-other", body: "secret", h: [ACAO("*")] }), { mode: "same-origin" })"#
+    )
+    .await,
+    blocked()
+  );
+  assert!(t.seen("so-other").is_empty());
+  assert_eq!(
+    t.eval(
+      r#"const r = await probe(u(SAME, { id: "so-same", body: "mine" }), { mode: "same-origin" });
+        return [r.type, r.body];"#
+    )
+    .await,
+    json!(["basic", "mine"])
+  );
+
+  // A redirect to another origin: the rules of that origin from there on.
+  assert_eq!(
+    t.eval(
+      r#"const target = u(OTHER, { id: "hop2", body: "far", h: [ACAO(ORIGIN)] });
+        const r = await probe(u(SAME, { id: "hop1", status: "302", h: ["Location: " + target] }));
+        return [r.type, r.body, r.redirected, r.url === target];"#
+    )
+    .await,
+    json!(["cors", "far", true, true])
+  );
+  assert_eq!(t.seen("hop2")[0].header("origin"), Some(t.origin.as_str()));
+  assert_eq!(
+    t.eval(
+      r#"const target = u(OTHER, { id: "hop2-none", body: "secret" });
+        return await probe(u(SAME, { id: "hop1-none", status: "302", h: ["Location: " + target] }));"#
+    )
+    .await,
+    blocked()
+  );
+  assert_eq!(t.methods("hop2-none"), ["GET"]);
+
+  // A redirect from another origin to a third taints the request's
+  // origin: it is `null` from there on, which the last server has to name.
+  assert_eq!(
+    t.eval(
+      r#"const target = u(THIRD, { id: "taint2", body: "tainted", h: [ACAO("null")] });
+        const r = await probe(u(OTHER, { id: "taint1", status: "302", h: [ACAO(ORIGIN), "Location: " + target] }));
+        return [r.type, r.body, r.redirected, r.url === target];"#
+    )
+    .await,
+    json!(["cors", "tainted", true, true])
+  );
+  assert_eq!(
+    t.seen("taint1")[0].header("origin"),
+    Some(t.origin.as_str())
+  );
+  assert_eq!(t.seen("taint2")[0].header("origin"), Some("null"));
+  assert_eq!(
+    t.eval(
+      r#"const target = u(THIRD, { id: "taint4", body: "secret", h: [ACAO(ORIGIN)] });
+        return await probe(u(OTHER, { id: "taint3", status: "302", h: [ACAO(ORIGIN), "Location: " + target] }));"#
+    )
+    .await,
+    blocked()
+  );
+  // ...and back to the page's own origin, which is another origin's to
+  // answer for now.
+  assert_eq!(
+    t.eval(
+      r#"const target = u(SAME, { id: "back2", body: "secret" });
+        return await probe(u(OTHER, { id: "back1", status: "302", h: [ACAO(ORIGIN), "Location: " + target] }));"#
+    )
+    .await,
+    blocked()
+  );
+  assert_eq!(t.seen("back2")[0].header("origin"), Some("null"));
+
+  // The redirect response is another origin's too: without CORS headers
+  // it is not followed.
+  assert_eq!(
+    t.eval(
+      r#"const target = u(THIRD, { id: "unshared2", body: "secret", h: [ACAO("*")] });
+        return await probe(u(OTHER, { id: "unshared1", status: "302", h: ["Location: " + target] }));"#
+    )
+    .await,
+    blocked()
+  );
+  assert!(t.seen("unshared2").is_empty());
+
+  // same-origin mode stops at the hop that leaves the origin.
+  assert_eq!(
+    t.eval(
+      r#"const target = u(OTHER, { id: "leave2", body: "secret", h: [ACAO("*")] });
+        return await probe(u(SAME, { id: "leave1", status: "302", h: ["Location: " + target] }), { mode: "same-origin" });"#
+    )
+    .await,
+    blocked()
+  );
+  assert_eq!(t.methods("leave1"), ["GET"]);
+  assert!(t.seen("leave2").is_empty());
+
+  // Credentials in the URL of a cross-origin redirect: a network error.
+  assert_eq!(
+    t.eval(
+      r#"const target = `http://user:pw@127.0.0.1:${OTHER}/r?id=userinfo2&h=${encodeURIComponent(ACAO("*"))}`;
+        return await probe(u(SAME, { id: "userinfo1", status: "302", h: ["Location: " + target] }));"#
+    )
+    .await,
+    blocked()
+  );
+  assert!(t.seen("userinfo2").is_empty());
+
+  // redirect "manual": an opaque-redirect response, nothing followed;
+  // "error": a network error.
+  assert_eq!(
+    t.eval(
+      r#"const target = u(SAME, { id: "manual2", body: "secret" });
+        const url = u(SAME, { id: "manual1", status: "302", h: ["Location: " + target, "X-Secret: 1"] });
+        const r = await probe(url, { redirect: "manual" });
+        return [r.type, r.status, r.headers, r.body, r.redirected, r.url === url];"#
+    )
+    .await,
+    json!(["opaqueredirect", 0, [], "", false, true])
+  );
+  assert!(t.seen("manual2").is_empty());
+  assert_eq!(
+    t.eval(
+      r#"const target = u(SAME, { id: "error2", body: "secret" });
+        return await probe(u(SAME, { id: "error1", status: "302", h: ["Location: " + target] }), { redirect: "error" });"#
+    )
+    .await,
+    blocked()
+  );
+  assert!(t.seen("error2").is_empty());
+  // A no-cors request has to follow redirects.
+  assert_eq!(
+    t.eval(
+      r#"await probe(u(OTHER, { id: "nocors-manual" }), { mode: "no-cors", redirect: "manual" })"#
+    )
+    .await,
+    blocked()
+  );
+  assert!(t.seen("nocors-manual").is_empty());
+  // A same-origin redirect stays basic.
+  assert_eq!(
+    t.eval(
+      r#"const target = u(SAME, { id: "stay2", body: "near" });
+        const r = await probe(u(SAME, { id: "stay1", status: "302", h: ["Location: " + target] }));
+        return [r.type, r.body, r.redirected, r.url === target];"#
+    )
+    .await,
+    json!(["basic", "near", true, true])
+  );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_page_cannot_set_the_headers_a_browser_sets() {
+  let mut t = CorsPage::new(None).await;
+
+  // Forbidden request headers are dropped (the request stays a simple one:
+  // no preflight), and the server sees the browser's.
+  assert_eq!(
+    t.eval(
+      r#"const r = await probe(u(OTHER, { id: "forbidden", body: "ok", h: [ACAO("*")] }), {
+          headers: {
+            "Host": "evil.example",
+            "Cookie": "session=stolen",
+            "Origin": "https://evil.example",
+            "Referer": "https://evil.example/",
+            "Sec-Fetch-Site": "same-origin",
+            "Proxy-Authorization": "Basic x",
+            "Via": "evil",
+            "X-HTTP-Method-Override": "TRACE",
+          },
+        });
+        return [r.type, r.body];"#
+    )
+    .await,
+    json!(["cors", "ok"])
+  );
+  let seen = t.seen("forbidden");
+  assert_eq!(t.methods("forbidden"), ["GET"]);
+  assert_eq!(
+    seen[0].header("host"),
+    Some(format!("127.0.0.1:{}", t.other).as_str())
+  );
+  assert_eq!(seen[0].header("cookie"), None);
+  assert_eq!(seen[0].header("origin"), Some(t.origin.as_str()));
+  assert_eq!(seen[0].header("referer"), Some(t.origin_url.as_str()));
+  assert_eq!(seen[0].header("sec-fetch-site"), None);
+  assert_eq!(seen[0].header("proxy-authorization"), None);
+  assert_eq!(seen[0].header("via"), None);
+  assert_eq!(seen[0].header("x-http-method-override"), None);
+
+  // What `Request` and `Headers` show a page.
+  assert_eq!(
+    eval(
+      &mut t.page,
+      r#"(() => {
+        const caught = (f) => {
+          try { f(); return "no error"; } catch (e) { return e.name; }
+        };
+        const url = u(OTHER);
+        const request = new Request(url, { headers: { "Cookie": "a=b", "X-Custom": "1" } });
+        request.headers.set("Host", "evil.example");
+        request.headers.append("Sec-Fetch-Mode", "navigate");
+        request.headers.delete("X-Custom");
+        const noCors = new Request(url, {
+          mode: "no-cors",
+          headers: { "X-Custom": "1", "Accept": "text/x", "Content-Type": "application/json" },
+        });
+        noCors.headers.append("Content-Language", "de");
+        noCors.headers.append("Range", "bytes=0-");
+        const response = new Response("x");
+        response.headers.append("Set-Cookie", "a=b");
+        response.headers.append("X-Custom", "1");
+        return [
+          [...request.headers.keys()], request.mode, request.credentials,
+          [...noCors.headers.keys()],
+          [...response.headers.keys()],
+          // A `Headers` of its own has no guard.
+          new Headers({ "Cookie": "a=b" }).has("cookie"),
+          caught(() => new Request(url, { method: "TRACE" })),
+          caught(() => new Request(url, { method: "connect" })),
+          caught(() => new Request(url, { method: "TRACK" })),
+          caught(() => new Request(url, { mode: "navigate" })),
+          caught(() => new Request(url, { mode: "no-cors", method: "PUT" })),
+          caught(() => new Request("http://user:pw@127.0.0.1:1/")),
+          new Request(url, { referrer: "https://elsewhere.example/" }).referrer,
+          new Request(url, { referrer: "/other" }).referrer === ORIGIN + "/other",
+        ];
+      })()"#,
+    ),
+    json!([
+      [],
+      "cors",
+      "same-origin",
+      ["accept", "content-language"],
+      ["content-type", "x-custom"],
+      true,
+      "TypeError",
+      "TypeError",
+      "TypeError",
+      "TypeError",
+      "TypeError",
+      "TypeError",
+      "about:client",
+      true,
+    ])
+  );
+  assert_eq!(
+    t.eval(r#"await probe(u(SAME, { id: "trace" }), { method: "TRACE" })"#)
+      .await["error"]
+      .as_str()
+      .map(|error| error.starts_with("TypeError")),
+    Some(true)
+  );
+  assert!(t.seen("trace").is_empty());
+
+  // The referrer policy and an explicit referrer of the page's own origin.
+  assert_eq!(
+    t.eval(
+      r#"await probe(u(OTHER, { id: "no-referrer", h: [ACAO("*")] }), { referrerPolicy: "no-referrer" });
+        await probe(u(OTHER, { id: "unsafe-url", h: [ACAO("*")] }), { referrerPolicy: "unsafe-url", referrer: "/elsewhere?x=1#f" });
+        await probe(u(OTHER, { id: "empty-referrer", h: [ACAO("*")] }), { referrer: "" });
+        return true;"#
+    )
+    .await,
+    json!(true)
+  );
+  assert_eq!(t.seen("no-referrer")[0].header("referer"), None);
+  assert_eq!(
+    t.seen("unsafe-url")[0].header("referer"),
+    Some(format!("{}/elsewhere?x=1", t.origin).as_str())
+  );
+  assert_eq!(t.seen("empty-referrer")[0].header("referer"), None);
+
+  // A WebSocket handshake says where it comes from. (The server answers it
+  // as any other request, so the connection fails: what it was sent is the
+  // point.)
+  run(
+    &mut t.page,
+    r#"globalThis.socketEvents = [];
+      {
+        const ws = new WebSocket(`ws://127.0.0.1:${OTHER}/r?id=socket`);
+        ws.onerror = () => socketEvents.push("error");
+        ws.onclose = () => socketEvents.push("close");
+      }"#,
+  );
+  let _ = t.page.run_until_idle(Duration::from_secs(20)).await;
+  assert_eq!(eval(&mut t.page, "socketEvents"), json!(["error", "close"]));
+  let seen = t.seen("socket");
+  assert_eq!(seen.len(), 1);
+  assert_eq!(seen[0].header("origin"), Some(t.origin.as_str()));
+  assert_eq!(
+    seen[0].header("upgrade").map(str::to_ascii_lowercase),
+    Some("websocket".to_string())
+  );
+  assert_eq!(seen[0].header("cookie"), None);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_page_without_a_tuple_origin_is_null() {
+  let mut t = CorsPage::new(Some("data:text/html,<p>opaque</p>")).await;
+  assert_eq!(eval(&mut t.page, "origin"), json!("null"));
+
+  // Every HTTP origin is another origin, to which the page is `null` and
+  // has no referrer.
+  assert_eq!(
+    t.eval(
+      r#"const r = await probe(u(SAME, { id: "named", body: "for null", h: [ACAO("null")] }));
+        return [r.type, r.body];"#
+    )
+    .await,
+    json!(["cors", "for null"])
+  );
+  let seen = t.seen("named");
+  assert_eq!(seen[0].header("origin"), Some("null"));
+  assert_eq!(seen[0].header("referer"), None);
+  assert_eq!(
+    t.eval(r#"await probe(u(SAME, { id: "unnamed", body: "secret" }))"#)
+      .await,
+    blocked()
+  );
+  assert_eq!(
+    t.eval(
+      r#"await probe(u(SAME, { id: "same-origin", body: "secret", h: [ACAO("*")] }), { mode: "same-origin" })"#
+    )
+    .await,
+    blocked()
+  );
+  assert!(t.seen("same-origin").is_empty());
+}

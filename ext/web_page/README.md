@@ -91,14 +91,15 @@ uncaught error in another task while waiting does not end the wait.
 
 Page JavaScript is hostile. What contains it:
 
-|   | Boundary                | Status           | How                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| - | ----------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| a | No privileged ops       | by construction  | Only `deno_webidl`, `deno_web`, `deno_fetch`, `deno_webstorage`, `deno_crypto`, `deno_websocket`, `deno_webrtc`, `deno_image`, `deno_canvas_offscreen` and this crate are composed. No file system, environment, FFI, subprocess, listening socket, KV, GPU or OS op is registered, and the registered ops a page has no use for are disabled (below). `tests.rs` holds the op table against `op_allowlist.rs`.                                                                                                                                                       |
-| b | Network                 | enforced         | A real `PermissionsContainer` built from parsed descriptors: net for `net_allow` only, everything else denied, no prompt. On top of it, one deny list (`deny_addresses`; default `loopback`, `private`, `link-local`, `metadata`) for every way out: the page's only HTTP client checks it on the resolved address of every connection and redirect, `WebSocket` connects through a connector that does the same, and ICE drops remote candidates in it, refuses STUN and TURN servers that resolve into it and sends no datagram to it. `file:` fetches are refused. |
-| c | Storage                 | origin-scoped    | `localStorage` is a directory per origin under the host's `storage_dir` (`std::fs`, never a virtual file system); an opaque origin has none. `sessionStorage` is in memory, per page.                                                                                                                                                                                                                                                                                                                                                                                 |
-| d | Isolation between pages | per-page isolate | One isolate per `PageRuntime`. `BroadcastChannel` and blob URLs are per page too.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| e | Memory and CPU per page | built            | `heap_limit_bytes` sets V8's heap limit; the near-heap-limit callback ends the page (`PageError::OutOfMemory`), not the process. `terminate_handle()` lets a watchdog end a long task.                                                                                                                                                                                                                                                                                                                                                                                |
-| f | V8 sandbox              | **off**          | The fork's V8 is built without `v8_enable_sandbox`. A V8 memory-corruption bug in page JavaScript is a compromise of the process, so the process is the boundary: standalone Thalora runs confined (`deno_sandbox`), and inside a denext app pages run in a separate confined page process. In-process page isolates next to an app's backend are not supported.                                                                                                                                                                                                      |
+|   | Boundary                | Status             | How                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| - | ----------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| a | No privileged ops       | by construction    | Only `deno_webidl`, `deno_web`, `deno_fetch`, `deno_webstorage`, `deno_crypto`, `deno_websocket`, `deno_webrtc`, `deno_image`, `deno_canvas_offscreen` and this crate are composed. No file system, environment, FFI, subprocess, listening socket, KV, GPU or OS op is registered, and the registered ops a page has no use for are disabled (below). `tests.rs` holds the op table against `op_allowlist.rs`.                                                                                                                                                       |
+| b | Network                 | enforced           | A real `PermissionsContainer` built from parsed descriptors: net for `net_allow` only, everything else denied, no prompt. On top of it, one deny list (`deny_addresses`; default `loopback`, `private`, `link-local`, `metadata`) for every way out: the page's only HTTP client checks it on the resolved address of every connection and redirect, `WebSocket` connects through a connector that does the same, and ICE drops remote candidates in it, refuses STUN and TURN servers that resolve into it and sends no datagram to it. `file:` fetches are refused. |
+| c | Storage                 | origin-scoped      | `localStorage` is a directory per origin under the host's `storage_dir` (`std::fs`, never a virtual file system); an opaque origin has none. `sessionStorage` is in memory, per page.                                                                                                                                                                                                                                                                                                                                                                                 |
+| d | Isolation between pages | per-page isolate   | One isolate per `PageRuntime`. `BroadcastChannel` and blob URLs are per page too.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| e | Memory and CPU per page | built              | `heap_limit_bytes` sets V8's heap limit; the near-heap-limit callback ends the page (`PageError::OutOfMemory`), not the process. `terminate_handle()` lets a watchdog end a long task.                                                                                                                                                                                                                                                                                                                                                                                |
+| f | V8 sandbox              | **off**            | The fork's V8 is built without `v8_enable_sandbox`. A V8 memory-corruption bug in page JavaScript is a compromise of the process, so the process is the boundary: standalone Thalora runs confined (`deno_sandbox`), and inside a denext app pages run in a separate confined page process. In-process page isolates next to an app's backend are not supported.                                                                                                                                                                                                      |
+| g | Other origins           | same-origin policy | The page's requests follow the Fetch Standard for the origin of `PageOptions::url`: CORS and its preflight, request modes, forbidden request headers, `Origin` and `Referer`, filtered responses (below). No cookies yet.                                                                                                                                                                                                                                                                                                                                             |
 
 How page JavaScript is kept from the ops (a):
 
@@ -133,6 +134,76 @@ How page JavaScript is kept from the ops (a):
     the standard has.
 - The page's `console` writes to a bounded buffer the host drains, never to the
   process's stdout or stderr (Thalora speaks MCP on stdio).
+
+## The same-origin policy of a page's requests
+
+A page has an origin, the one of `PageOptions::url` (an opaque origin, sent as
+`null` and same origin with nothing, for a `data:`, `about:` or `file:` URL),
+and its requests follow the [Fetch Standard](https://fetch.spec.whatwg.org/) for
+it. `PageRuntime` puts a `deno_fetch::EmbedderWebOrigin` in the op state, which
+turns on `deno_fetch`'s web-origin mode (`ext/fetch/cors.rs`); the bootstrap
+fails the runtime if `fetch` is not in it. `net_allow` and the deny list are
+checked as before, on every request the policy lets out, the preflight included.
+
+- **Requests.** `mode` is `cors` (the default), `same-origin` or `no-cors`;
+  `credentials` is `same-origin` by default. `CONNECT`, `TRACE` and `TRACK` are
+  a `TypeError`, a URL with credentials is one in `new Request()`, and so is a
+  `no-cors` request with a method other than `GET`, `HEAD` or `POST`. The
+  headers a browser sets itself cannot be set: `Host`, `Cookie`, `Origin`,
+  `Referer`, `Content-Length`, `Sec-*`, `Proxy-*` and the rest of the standard's
+  forbidden request headers are dropped by the `Headers` of a `Request`, and
+  again when the request is made. A `no-cors` request keeps its safelisted
+  headers only.
+- **`Origin` and `Referer`.** Every cross-origin request and every same-origin
+  request that is not a `GET` or `HEAD` carries `Origin`. `Referer` follows
+  `referrer` and `referrerPolicy`, by default `strict-origin-when-cross-origin`:
+  the document URL to the page's own origin, its origin to another one, nothing
+  from `https:` to `http:`.
+- **Reading a response.** A same-origin response is `basic` (everything but
+  `Set-Cookie`). A cross-origin one is read only when it passes the CORS check:
+  `Access-Control-Allow-Origin` is the page's origin, or `*` for a request
+  without credentials, and with credentials (`credentials: "include"`)
+  `Access-Control-Allow-Credentials: true` too. Its type is `cors` and a page
+  sees the CORS-safelisted response headers and those
+  `Access-Control-Expose-Headers` names. A `no-cors` request to another origin
+  is sent and its response is `opaque`: status 0, no headers, no body, no URL.
+- **Preflight.** A cross-origin `cors` request with a method or a header that is
+  not safelisted is preceded by an `OPTIONS` request
+  (`Access-Control-Request-Method`, `-Headers`, no credentials, no body). The
+  request is only made when the answer passes the CORS check, has an ok status
+  and allows the method and every header name (`*` covers them for a request
+  without credentials, never `Authorization`). Answers are cached per origin and
+  URL for `Access-Control-Max-Age` seconds, 5 by default and at most 7200.
+- **Redirects.** Each hop is checked like a first request. `same-origin` mode
+  stops at a hop to another origin; a `cors` request that was redirected from
+  another origin to yet another one (or back) has the origin `null` from there
+  on; credentials in the URL of a cross-origin redirect are a network error;
+  `redirect: "manual"` gives an `opaqueredirect` response and follows nothing.
+- **`EventSource`** is a `cors` request (`withCredentials` makes it one with
+  credentials) and takes no request headers. **`WebSocket`** and
+  `WebSocketStream` send the page's `Origin` with the handshake; there is no
+  CORS for a WebSocket, the server decides by that header.
+- **What a page learns when the policy refuses.** `TypeError: Failed to fetch`,
+  for every reason alike. The reason is written to the page's console
+  (`take_console_messages()`, level error), which a page cannot read. A request
+  the policy let out and the network refused (`net_allow`, the deny list, a
+  connection error) fails as before, with its `cause`.
+
+### Credentials: none yet
+
+There is no cookie store and no HTTP authentication cache, so a request never
+carries cookies or an `Authorization` the page did not set, whatever its
+credentials mode, and `Set-Cookie` is dropped. The credentials mode is still
+followed where the standard makes it decide something else: the CORS check (`*`,
+`Access-Control-Allow-Credentials`), the wildcards of a preflight answer and of
+`Access-Control-Expose-Headers`, the preflight cache.
+
+TODO: Thalora's cookie store. `cors.rs` has the two places it plugs into,
+`attach_credentials()` (the `Cookie` header of a request made with credentials,
+on every hop, never on a preflight) and `store_response_credentials()` (the
+`Set-Cookie` headers of its response, before they are filtered away). The store
+is the embedder's and comes in with the `EmbedderWebOrigin`; `document.cookie`
+reads the same one.
 
 ## What a page gets from the web extensions, and what it does not
 
@@ -247,8 +318,15 @@ Not yet:
   click and the host's `click()`, and a label only passes the flag of its click
   on to the click it sends its control. Closing it takes a change to
   `deno_web`'s `Event` (trust in a slot scripts cannot reach).
-- No same-origin policy: `fetch()` and `WebSocket` do no CORS or origin check
-  and send no cookies. The network boundary is `net_allow` and the deny list.
+- No cookies and no HTTP authentication: no request carries a credential the
+  page did not write itself (see the same-origin policy above for what the
+  credentials mode still decides). `document.cookie` is not there.
+- Of the same-origin policy, not yet: mixed content blocking (an `https:` page
+  can fetch `http:`), CSP, `Cross-Origin-Resource-Policy`,
+  `X-Content-Type-Options: nosniff`, subresource integrity, the `Sec-Fetch-*`
+  request headers, the request `cache` modes and `keepalive`. A page's own
+  navigation (`history.pushState()`) does not change the URL its referrer is
+  taken from.
 - Dialogs have no user: `alert()` returns, `confirm()` is `false`, `prompt()` is
   `null`.
 
@@ -258,8 +336,12 @@ Not yet:
 trip and Rust-side visibility, the op allowlist and the disabled ops, no `Deno`
 / `require` / `process` and no `ext:` imports, fetch and WebSocket confinement
 (`ERR_ADDRESS_DENIED`, the permission error, `file:`, the browser's WebSocket
-constructor), an `RTCPeerConnection` offer and WebRTC Identity's
-`NotSupportedError`, `OffscreenCanvas` without a GPU and `createImageBitmap()`,
-timers and the watchdog, click default actions and form submission,
-`DOMException`s, event propagation and lifecycle, uncaught errors, JSON
-evaluation with and without `await`, origin-keyed storage, the heap limit.
+constructor), the same-origin policy against three loopback servers (CORS with
+and without credentials, exposed headers, the preflight and its cache, `no-cors`
+and `same-origin`, redirects across origins, forbidden headers, `Origin` on
+requests and WebSocket handshakes, a page with an opaque origin), an
+`RTCPeerConnection` offer and WebRTC Identity's `NotSupportedError`,
+`OffscreenCanvas` without a GPU and `createImageBitmap()`, timers and the
+watchdog, click default actions and form submission, `DOMException`s, event
+propagation and lifecycle, uncaught errors, JSON evaluation with and without
+`await`, origin-keyed storage, the heap limit.

@@ -22696,6 +22696,23 @@ where the changes are discussed.
        (attributes, the three flags, `inPassiveListener`, `dispatched`, `path`).
        `00_dom.js` read them off a probe event by their descriptions; it now
        takes them from there. Not `[[isTrusted]]`: see the gap below.
+     - **The same-origin policy** (`thalora/web-page-cors`, with the
+       `deno_fetch` item that follows this one): `PageRuntime` puts
+       `deno_fetch::EmbedderWebOrigin::new(options.url)` in the op state
+       (extension option `web_origin`), with a reporter that writes the reason
+       of every refusal to the page's console
+       (`host_ops::report_blocked_request`, level error). The page's `fetch()`,
+       `Request`, `Headers`, `EventSource` and `WebSocket` then follow the Fetch
+       Standard for that origin, an opaque one (`null`) for a `data:`, `about:`
+       or `file:` URL. The bootstrap fails the runtime when
+       `fetch.webOriginMode()` is not `true`, as it does for an op that is not
+       disabled. `net_allow` and the deny list are unchanged and checked on
+       every request the policy lets out, the preflight included; a request the
+       network refuses fails as before (`NotCapable`, `cause.code`
+       `ERR_ADDRESS_DENIED`). There is no cookie store yet: no request carries a
+       credential the page did not write, and the README names the two hooks in
+       `cors.rs` it plugs into. Not yet: mixed content, CSP, CORP, nosniff, SRI,
+       `Sec-Fetch-*` (README).
      - **Known gap: `isTrusted`.** `deno_web` keeps an event's trust in an own
        symbol property, so a page script can forge `isTrusted` for another
        script of the page; `02_event.js` has no place for it scripts cannot
@@ -22729,8 +22746,119 @@ where the changes are discussed.
        `offscreen_canvas_has_no_gpu`, `evaluate_json_async_awaits`, timers and
        the watchdog, click default actions and form submission, `DOMException`s,
        event propagation, uncaught errors, JSON evaluation, origin-keyed
-       storage, the heap limit).
+       storage, the heap limit). For the same-origin policy, against three
+       loopback servers in the test (three ports, three origins) that record
+       what they were sent: `fetch_shares_cross_origin_responses_by_cors_only`
+       (basic, no `Access-Control-Allow-Origin`, the exact origin and `*`,
+       credentials, exposed headers, the console line),
+       `fetch_preflights_what_is_not_a_simple_request` (the `OPTIONS` request
+       and what it carries, its cache, five answers that do not allow the
+       request and after which the request is never made, a status that is not
+       ok), `fetch_modes_and_redirects_follow_the_origin` (`no-cors` and
+       `opaque`, `same-origin`, redirects to and between other origins and the
+       `null` origin, `manual` and `error`, credentials in a location),
+       `a_page_cannot_set_the_headers_a_browser_sets` (forbidden request headers
+       and methods, the guards of `Request` and `Headers`, the referrer policy,
+       `Origin` on a WebSocket handshake),
+       `a_page_without_a_tuple_origin_is_null`.
      - Node tests enabled: none, because this is not a Node API.
+
+557. **`feat(ext/fetch)`: an embedder's web-origin mode (CORS)**
+     (`thalora/web-page-cors`; runtime; `ext/fetch/cors.rs` (new),
+     `ext/fetch/lib.rs`,
+     `ext/fetch/{20_headers,23_request,26_fetch,27_eventsource}.js`,
+     `ext/websocket/lib.rs`, `ext/fetch/README.md`). Deno's `fetch()` is a
+     server's: a request has no origin, every response is readable, and the
+     headers a browser reserves for itself can be set. A runtime that runs web
+     pages (item 556) needs the browser's. **Nothing changes for Deno**: the
+     mode is on when an embedder put a `deno_fetch::EmbedderWebOrigin` in the
+     `OpState`, which no Deno runtime does; `20_headers.js` asks once per realm
+     (`op_fetch_web_mode`), and every other change is behind that flag (one
+     comparison in `Headers`' `append`, `set` and `delete`, the flag's getter in
+     the `Request` constructor, `mainFetch` and `httpRedirectFetch`). Seven ops
+     are added to `deno_fetch`'s table (`op_fetch_web_*`); like the extension's
+     other ops they are not among the ops `Deno[Deno.internal].core.ops` keeps
+     (`tests/unit/ops_test.ts`' count is unchanged).
+     - **Where the rules are.** In Rust (`cors.rs`), as functions of the request
+       (method, URL list, header list, mode, credentials mode, redirect mode,
+       referrer and policy, response tainting so far) and of a response's header
+       list, so they are unit-tested without a runtime. `26_fetch.js` calls them
+       where the standard has the step and builds the filtered response:
+       `op_fetch_web_request` at the top of `mainFetch`, so on every hop of a
+       redirect chain and for `EventSource` too (main fetch steps 7 to 11:
+       referrer, the response tainting the mode gives the current URL or a
+       network error; the header list to send; whether a preflight is due);
+       `op_fetch_web_preflight` (the CORS-preflight fetch, sent from Rust
+       through the runtime's client, so under the same permission check and
+       address deny list, cancelable by the request's signal);
+       `op_fetch_web_response` when a response arrived, before anything of it is
+       used (the CORS check, redirect responses included, and the header list
+       the page may see); `op_fetch_web_redirect` in `httpRedirectFetch`
+       (credentials in a location; the redirect's `Referrer-Policy`);
+       `op_fetch_web_failed` (the preflight cache forgets a request that
+       failed). `op_fetch_web_header_blocked` answers the `Headers` guards.
+     - **Requests.** Modes `cors` (default), `same-origin`, `no-cors`;
+       credentials mode `same-origin` by default. Forbidden request headers (the
+       standard's list, `Sec-` and `Proxy-` prefixes, a method override naming a
+       forbidden method) are ignored by a request's `Headers` and dropped again
+       from the list that is sent; a `no-cors` request keeps its
+       no-CORS-safelisted headers and has a CORS-safelisted method. `Origin` on
+       every request whose tainting is `cors` and on every other request that is
+       not `GET` or `HEAD` (hidden as `null` by the referrer policy where the
+       standard says so); `Referer` by "determine request's referrer", default
+       policy `strict-origin-when-cross-origin`, a referrer of another origin
+       being the client's. In `new Request()`: a URL with credentials and a
+       `no-cors` request with another method are `TypeError`s.
+     - **Responses.** `basic` (without `Set-Cookie`, `Set-Cookie2`), `cors`
+       after the CORS check (`Access-Control-Allow-Origin` byte for byte the
+       serialized origin, or `*` unless the credentials mode is `include`, then
+       also `Access-Control-Allow-Credentials: true`; the CORS-safelisted
+       response headers and the `Access-Control-Expose-Headers` names, `*`
+       unless `include`), `opaque` (a cross-origin `no-cors` request: status 0,
+       no headers, body, URL), `opaqueredirect` (`redirect: "manual"`). A
+       network error is `TypeError: Failed to fetch` with no detail; the reason
+       goes to `EmbedderWebOrigin::with_blocked_reporter`'s function.
+     - **Preflight.** For a `cors`-tainted request with a method or a header
+       name that is not safelisted (CORS-unsafe request-header names, the 128
+       byte and 1024 byte limits included). The answer has to pass the CORS
+       check with the request's credentials mode, have an ok status, and allow
+       the method and the names (`Access-Control-Allow-Methods`, `-Headers`; `*`
+       only without credentials, and never for `Authorization`). The cache
+       (`PreflightCache`, in the `OpState`, so per runtime) is keyed by
+       serialized origin and URL, an entry per method or header name, with the
+       credentials flag; `Access-Control-Max-Age`, 5 seconds without one, at
+       most 7200 (Chrome's limit); 1024 entries.
+     - **Redirects.** Every hop is a main fetch. A request's origin is `null`
+       once its URL list crossed origins from another origin (redirect-tainted);
+       credentials in the location of a cross-origin redirect of a `cors`
+       request, or of any redirect once the tainting is `cors`, are a network
+       error; a location that is not a URL is one too (Deno throws the URL
+       parser's error). A redirect status without a location is the response.
+     - **`EventSource`** in the mode is a `cors` request without the
+       unsafe-request flag, with credentials for `withCredentials`, and without
+       Deno's `headers` option. **`WebSocket`** (`op_ws_create`): the handshake
+       carries `Origin` (`EmbedderWebOrigin::websocket_headers`), and none of
+       the forbidden headers.
+     - **Credentials (the choice).** No cookie store and no authentication
+       cache: nothing is attached, URL credentials are dropped, and the
+       credentials mode decides only what the standard makes it decide besides.
+       `attach_credentials()` and `store_response_credentials()` in `cors.rs`
+       are the hook (TODO, for Thalora's cookie store).
+     - **Not implemented**: mixed content, CSP, `Cross-Origin-Resource-Policy`,
+       `X-Content-Type-Options: nosniff`, subresource integrity, `Sec-Fetch-*`,
+       the `cache` modes, `keepalive`, the 401/407 authentication prompts,
+       `Timing-Allow-Origin`, the range-request rule of opaque responses,
+       service workers.
+     - Tests: `cors::tests` (forbidden methods and headers, the safelists, the
+       `Headers` guards, list extraction, the CORS check, the response filters,
+       the preflight rules, the preflight cache, redirect-tainted origins,
+       referrers, requests by mode, redirect hops, opaque origins, the WebSocket
+       headers, the op state); `deno_websocket`
+       `a_web_page_handshake_carries_its_origin` (a tuple origin, `null`, and
+       none without the opt-in); item 556's page tests. No `tests/unit` change:
+       nothing a Deno program can observe changed.
+     - User-facing note: none for Deno programs.
+     - Node tests enabled: none; no Node API changes.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

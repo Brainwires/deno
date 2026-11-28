@@ -57,7 +57,12 @@ const MAX_UNCAUGHT_ERRORS: usize = 256;
 #[derive(Debug, Clone)]
 pub struct PageOptions {
   /// The document URL: `location`, `document.URL`, the base of relative
-  /// URLs and the origin web storage is keyed by.
+  /// URLs, the origin web storage is keyed by, and the origin of the page's
+  /// requests: `fetch()`, `EventSource` and `WebSocket` follow the
+  /// same-origin policy for it (CORS, forbidden request headers, `Origin`
+  /// and `Referer`). A URL without a tuple origin (`data:`, `about:`,
+  /// `file:`) gives the page an opaque origin, which is same origin with
+  /// nothing and is sent as `null`.
   pub url: Url,
   /// The markup the document is parsed from.
   pub html: String,
@@ -421,6 +426,10 @@ impl PageRuntime {
           deno_webrtc::EmbedderIceOptions {
             force_relay: options.webrtc_force_relay,
           },
+          // The origin of the document URL (an opaque one, serialized
+          // `null`, for `data:`, `about:`, `file:` and the like).
+          deno_fetch::EmbedderWebOrigin::new(options.url.clone())
+            .with_blocked_reporter(crate::host_ops::report_blocked_request),
         ),
       ],
       create_params,
