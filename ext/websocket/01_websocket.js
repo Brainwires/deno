@@ -21,6 +21,7 @@ import {
   op_ws_send_binary_ab,
   op_ws_send_ping,
   op_ws_send_text,
+  op_ws_web_report,
 } from "ext:core/ops";
 const {
   ArrayBufferIsView,
@@ -39,6 +40,7 @@ const {
   ObjectPrototypeIsPrototypeOf,
   PromisePrototypeCatch,
   PromisePrototypeThen,
+  PromiseReject,
   RegExpPrototypeExec,
   SafeSet,
   SetPrototypeGetSize,
@@ -82,6 +84,9 @@ const {
 } = core.loadExtScript("ext:deno_fetch/20_headers.js");
 const { HttpClientPrototype } = core.loadExtScript(
   "ext:deno_fetch/22_http_client.js",
+);
+const { webErrorDetail, webOriginMode } = core.loadExtScript(
+  "ext:deno_fetch/26_fetch.js",
 );
 
 const kNodeUndiciDispatcherOptions = SymbolFor(
@@ -280,6 +285,17 @@ function setConnectErrorCause(error, opError) {
   });
 }
 
+// denext: in an embedder's web-origin mode a page's WebSocket fails as a
+// browser's does: a plain `error` event (no message, no error, no cause),
+// then `close` with code 1006 and no reason. What went wrong (`detail`,
+// when there is something to tell) goes to the embedder.
+function webConnectionFailed(ws, detail) {
+  if (detail !== undefined) {
+    op_ws_web_report(ws[_url], detail);
+  }
+  dispatchTrusted(ws, new Event("error"));
+}
+
 class WebSocket extends EventTarget {
   constructor(url, initOrProtocols) {
     super();
@@ -447,11 +463,20 @@ class WebSocket extends EventTarget {
       );
     }
 
-    const cancelRid = op_ws_check_permission_and_cancel_handle(
-      "WebSocket.abort()",
-      this[_url],
-      true,
-    );
+    // denext: in web-origin mode a URL the permissions refuse fails the
+    // connection (below) instead of throwing, as any other failure does
+    let cancelRid;
+    let refused = null;
+    try {
+      cancelRid = op_ws_check_permission_and_cancel_handle(
+        "WebSocket.abort()",
+        this[_url],
+        true,
+      );
+    } catch (err) {
+      if (!webOriginMode()) throw err;
+      refused = err;
+    }
 
     this[_cancelHandle] = cancelRid;
 
@@ -514,7 +539,7 @@ class WebSocket extends EventTarget {
     }
 
     PromisePrototypeThen(
-      op_ws_create(
+      refused !== null ? PromiseReject(refused) : op_ws_create(
         "new WebSocket()",
         wsURL.href,
         ArrayPrototypeJoin(protocols, ", "),
@@ -569,8 +594,12 @@ class WebSocket extends EventTarget {
             () => {
               this[_readyState] = CLOSED;
 
-              const errEvent = new ErrorEvent("error");
-              dispatchTrusted(this, errEvent);
+              if (webOriginMode()) {
+                webConnectionFailed(this);
+              } else {
+                const errEvent = new ErrorEvent("error");
+                dispatchTrusted(this, errEvent);
+              }
 
               emitWebSocketClosed(this);
               const event = new CloseEvent("close", { code: 1006 });
@@ -588,13 +617,22 @@ class WebSocket extends EventTarget {
       },
       (err) => {
         this[_readyState] = CLOSED;
-        setConnectErrorCause(err, err);
+        if (webOriginMode()) {
+          webConnectionFailed(
+            this,
+            ObjectPrototypeIsPrototypeOf(core.InterruptedPrototype, err)
+              ? undefined
+              : webErrorDetail(err),
+          );
+        } else {
+          setConnectErrorCause(err, err);
 
-        const errorEv = new ErrorEvent(
-          "error",
-          { error: err, message: ErrorPrototypeToString(err) },
-        );
-        dispatchTrusted(this, errorEv);
+          const errorEv = new ErrorEvent(
+            "error",
+            { error: err, message: ErrorPrototypeToString(err) },
+          );
+          dispatchTrusted(this, errorEv);
+        }
 
         if (this[_cancelHandle]) {
           core.tryClose(this[_cancelHandle]);
@@ -787,11 +825,15 @@ class WebSocket extends EventTarget {
           this[_readyState] = CLOSED;
           this[_clearCloseHandshakeTimeout]();
 
-          const errorEv = new ErrorEvent("error", {
-            error: err,
-            message: ErrorPrototypeToString(err),
-          });
-          dispatchTrusted(this, errorEv);
+          if (webOriginMode()) {
+            webConnectionFailed(this, webErrorDetail(err));
+          } else {
+            const errorEv = new ErrorEvent("error", {
+              error: err,
+              message: ErrorPrototypeToString(err),
+            });
+            dispatchTrusted(this, errorEv);
+          }
 
           emitWebSocketClosed(this);
           const closeEv = new CloseEvent("close", { code: 1006 });
@@ -879,12 +921,16 @@ class WebSocket extends EventTarget {
 
           const message = op_ws_get_error(rid);
           emitWebSocketFrameError(this, message);
-          const error = new Error(message);
-          const errorEv = new ErrorEvent("error", {
-            error,
-            message,
-          });
-          dispatchTrusted(this, errorEv);
+          if (webOriginMode()) {
+            webConnectionFailed(this, message);
+          } else {
+            const error = new Error(message);
+            const errorEv = new ErrorEvent("error", {
+              error,
+              message,
+            });
+            dispatchTrusted(this, errorEv);
+          }
 
           emitWebSocketClosed(this);
           const closeEv = new CloseEvent("close", { code: 1006 });
@@ -1001,10 +1047,14 @@ class WebSocket extends EventTarget {
                   );
                   this[_readyState] = CLOSED;
 
-                  const errEvent = new ErrorEvent("error", {
-                    message: reason,
-                  });
-                  dispatchTrusted(this, errEvent);
+                  if (webOriginMode()) {
+                    webConnectionFailed(this, reason);
+                  } else {
+                    const errEvent = new ErrorEvent("error", {
+                      message: reason,
+                    });
+                    dispatchTrusted(this, errEvent);
+                  }
 
                   const event = new CloseEvent("close", {
                     wasClean: false,

@@ -220,6 +220,7 @@ pub(crate) const FETCH_OPS: &[&str] = &[
   "op_fetch_web_response",
   "op_fetch_web_redirect",
   "op_fetch_web_failed",
+  "op_fetch_web_report",
   "op_cookie_jar_new",
   "op_cookie_jar_cookie_header",
   "op_cookie_jar_get_cookies",
@@ -256,6 +257,7 @@ pub(crate) const WEBSOCKET_OPS: &[&str] = &[
   "op_ws_send_text_async",
   "op_ws_send_ping",
   "op_ws_get_buffered_amount",
+  "op_ws_web_report",
 ];
 
 /// `deno_webrtc`'s ops (`ext/webrtc/lib.rs`). The ones behind `Deno.webrtc`

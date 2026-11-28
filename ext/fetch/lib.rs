@@ -192,6 +192,7 @@ deno_core::extension!(deno_fetch,
     cors::op_fetch_web_response,
     cors::op_fetch_web_redirect,
     cors::op_fetch_web_failed,
+    cors::op_fetch_web_report,
   ],
   lazy_loaded_js = [
     "20_headers.js",

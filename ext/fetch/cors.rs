@@ -121,9 +121,10 @@ impl EmbedderWebOrigin {
     }
   }
 
-  /// Calls `report` with the reason whenever a request is refused or a
-  /// response is withheld from the page (what a browser writes to its
-  /// console; the page itself only gets `TypeError: Failed to fetch`).
+  /// Calls `report` with the reason whenever a request is refused, a
+  /// response is withheld from the page or a connection fails (what a
+  /// browser writes to its console; the page itself only gets
+  /// `TypeError: Failed to fetch`, or a plain `error` event).
   pub fn with_blocked_reporter(
     mut self,
     report: fn(&mut OpState, &str),
@@ -168,9 +169,19 @@ impl EmbedderWebOrigin {
     self.origin.is_tuple().then_some(&self.url)
   }
 
-  fn report_blocked(&self, state: &mut OpState, url: &str, reason: &str) {
+  /// Hands `message` to the embedder's reporter (see
+  /// [`with_blocked_reporter`](Self::with_blocked_reporter)), when it has
+  /// one: what a browser writes to its console about a request the page
+  /// only learns failed.
+  pub fn report(&self, state: &mut OpState, message: &str) {
     if let Some(report) = self.on_blocked {
-      report(
+      report(state, message);
+    }
+  }
+
+  fn report_blocked(&self, state: &mut OpState, url: &str, reason: &str) {
+    if self.on_blocked.is_some() {
+      self.report(
         state,
         &format!(
           "Access to fetch at '{url}' from origin '{}' has been blocked: {reason}",
@@ -1899,6 +1910,21 @@ pub fn op_fetch_web_failed(
   let request = WebRequest::parse(args)?;
   let origin = serialize_request_origin(&request.urls, &web.origin);
   preflight_cache(state).clear(&origin, request.current_url().as_str());
+  Ok(())
+}
+
+/// A request failed for a reason the page does not learn (a transport
+/// error, the address deny list, a permission, a network error of the fetch
+/// algorithm): `fetch()` rejects with `TypeError: Failed to fetch`, and the
+/// embedder is told why.
+#[op2(fast)]
+pub fn op_fetch_web_report(
+  state: &mut OpState,
+  #[string] url: &str,
+  #[string] detail: &str,
+) -> Result<(), WebOriginError> {
+  let web = web_origin(state)?;
+  web.report(state, &format!("Failed to fetch '{url}': {detail}"));
   Ok(())
 }
 

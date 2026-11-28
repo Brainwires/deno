@@ -22731,12 +22731,18 @@ where the changes are discussed.
        or `file:` URL. The bootstrap fails the runtime when
        `fetch.webOriginMode()` is not `true`, as it does for an op that is not
        disabled. `net_allow` and the deny list are unchanged and checked on
-       every request the policy lets out, the preflight included; a request the
-       network refuses fails as before (`NotCapable`, `cause.code`
-       `ERR_ADDRESS_DENIED`). There is no cookie store yet: no request carries a
-       credential the page did not write, and the README names the two hooks in
-       `cors.rs` it plugs into. Not yet: mixed content, CSP, CORP, nosniff, SRI,
-       `Sec-Fetch-*` (README).
+       every request the policy lets out, the preflight included. A failure
+       tells the page nothing of why, as in a browser (no telling "refused" from
+       "denied" from "down"): `fetch()` rejects with
+       `TypeError: Failed to fetch` and no `cause`, `EventSource` fires a plain
+       `error`, `WebSocket` a plain `Event("error")` and `close` 1006 without a
+       reason (a URL outside `net_allow` too, instead of a thrown `NotCapable`),
+       `WebSocketStream` a `WebSocketError` with Chrome's message; the reason
+       (`ERR_ADDRESS_DENIED`, the permission error, the transport error) goes to
+       the same console (item 558). There is no cookie store yet: no request
+       carries a credential the page did not write, and the README names the two
+       hooks in `cors.rs` it plugs into. Not yet: mixed content, CSP, CORP,
+       nosniff, SRI, `Sec-Fetch-*` (README).
      - **The binding.** A node crosses as two `u32`s, the halves of
        `NodeId::to_bits()` (arena index, generation); node-returning ops write
        into a shared `Uint32Array`. Traversal and read ops are fast calls; the
@@ -22759,8 +22765,13 @@ where the changes are discussed.
        `MutationObserver` and no `document.cookie` yet (README).
      - Tests: `ext/web_page/tests.rs` (DOM round trip and the Rust-side view,
        the op allowlist and the disabled ops, no `Deno` / `require` / `process`,
-       fetch confinement, `websocket_is_confined` (`ERR_ADDRESS_DENIED` for
-       `WebSocket` and `WebSocketStream`, the browser's constructor),
+       `fetch_is_confined` and `websocket_is_confined` (the deny list, a host
+       outside `net_allow` and `file:` fail alike for the page,
+       `Failed to
+       fetch`, a plain `error` event and `close` 1006, a
+       `WebSocketError`, while the console has `ERR_ADDRESS_DENIED` and
+       `NotCapable`; an invalid URL, a forbidden method and an abort keep their
+       errors; the browser's constructor),
        `webrtc_negotiates_without_the_server_extension` (an offer with no
        network, the identity `NotSupportedError`),
        `offscreen_canvas_has_no_gpu`, `evaluate_json_async_awaits`, timers and
@@ -22882,17 +22893,21 @@ where the changes are discussed.
      (`thalora/web-page-cors`; runtime; `ext/fetch/cors.rs` (new),
      `ext/fetch/lib.rs`,
      `ext/fetch/{20_headers,23_request,26_fetch,27_eventsource}.js`,
-     `ext/websocket/lib.rs`, `ext/fetch/README.md`). Deno's `fetch()` is a
-     server's: a request has no origin, every response is readable, and the
-     headers a browser reserves for itself can be set. A runtime that runs web
-     pages (item 556) needs the browser's. **Nothing changes for Deno**: the
-     mode is on when an embedder put a `deno_fetch::EmbedderWebOrigin` in the
-     `OpState`, which no Deno runtime does; `20_headers.js` asks once per realm
-     (`op_fetch_web_mode`), and every other change is behind that flag (one
-     comparison in `Headers`' `append`, `set` and `delete`, the flag's getter in
-     the `Request` constructor, `mainFetch` and `httpRedirectFetch`). Seven ops
-     are added to `deno_fetch`'s table (`op_fetch_web_*`); like the extension's
-     other ops they are not among the ops `Deno[Deno.internal].core.ops` keeps
+     `ext/websocket/lib.rs`,
+     `ext/websocket/{01_websocket,02_websocketstream}.js`,
+     `ext/fetch/README.md`). Deno's `fetch()` is a server's: a request has no
+     origin, every response is readable, and the headers a browser reserves for
+     itself can be set. A runtime that runs web pages (item 556) needs the
+     browser's. **Nothing changes for Deno**: the mode is on when an embedder
+     put a `deno_fetch::EmbedderWebOrigin` in the `OpState`, which no Deno
+     runtime does; `20_headers.js` asks once per realm (`op_fetch_web_mode`),
+     and every other change is behind that flag (one comparison in `Headers`'
+     `append`, `set` and `delete`, the flag's getter in the `Request`
+     constructor, `mainFetch` and `httpRedirectFetch`, the failure paths of
+     `fetch()`, `EventSource`, `WebSocket` and `WebSocketStream`). Eight ops are
+     added to `deno_fetch`'s table (`op_fetch_web_*`) and one to
+     `deno_websocket`'s (`op_ws_web_report`); like the extensions' other ops
+     they are not among the ops `Deno[Deno.internal].core.ops` keeps
      (`tests/unit/ops_test.ts`' count is unchanged).
      - **Where the rules are.** In Rust (`cors.rs`), as functions of the request
        (method, URL list, header list, mode, credentials mode, redirect mode,
@@ -22933,6 +22948,32 @@ where the changes are discussed.
        no headers, body, URL), `opaqueredirect` (`redirect: "manual"`). A
        network error is `TypeError: Failed to fetch` with no detail; the reason
        goes to `EmbedderWebOrigin::with_blocked_reporter`'s function.
+     - **Failures are opaque.** Not only the policy's: every rejection of a
+       page's `fetch()` that is not an abort (a transport error, the address
+       deny list's `ERR_ADDRESS_DENIED`, a `NotCapable` permission error, a
+       network error of the algorithm such as a bad port or too many redirects)
+       is `TypeError: Failed to fetch` without a `cause`, and the real error
+       (name, message, code, its cause's message and code) goes to the reporter
+       (`op_fetch_web_report`: `Failed to fetch '<url>':
+       <detail>`; a
+       refusal the policy reported already is not reported twice). What
+       `fetch()` rejects with before anything is sent (an invalid URL, a
+       forbidden method) keeps its error, an abort its reason. `EventSource`
+       reports its failures the same way and fires a plain `error`. A
+       `WebSocket` that fails (the connection, a protocol error, a failed close;
+       a URL outside the permissions, which Deno throws for in the constructor)
+       fires a plain `Event("error")`, as Chrome does, and `close` 1006 without
+       a reason; `WebSocketStream`'s `opened` and `closed` reject with a
+       `WebSocketError` of Chrome's message
+       (`WebSocket closed
+       before handshake complete.`,
+       `WebSocket was not cleanly closed.`) and no `cause`; the detail goes to
+       the reporter (`op_ws_web_report`:
+       `WebSocket connection to '<url>' failed: <detail>`,
+       `EmbedderWebOrigin::report`). Without the opt-in Deno's shapes are
+       unchanged (`TypeError: fetch failed` with `cause.code`, `NotCapable`
+       thrown, `ErrorEvent`s; `tests/unit/fetch_test.ts` and `websocket_test.ts`
+       hold them).
      - **Preflight.** For a `cors`-tainted request with a method or a header
        name that is not safelisted (CORS-unsafe request-header names, the 128
        byte and 1024 byte limits included). The answer has to pass the CORS

@@ -184,11 +184,32 @@ checked as before, on every request the policy lets out, the preflight included.
   credentials) and takes no request headers. **`WebSocket`** and
   `WebSocketStream` send the page's `Origin` with the handshake; there is no
   CORS for a WebSocket, the server decides by that header.
-- **What a page learns when the policy refuses.** `TypeError: Failed to fetch`,
-  for every reason alike. The reason is written to the page's console
-  (`take_console_messages()`, level error), which a page cannot read. A request
-  the policy let out and the network refused (`net_allow`, the deny list, a
-  connection error) fails as before, with its `cause`.
+- **What a page learns when a request fails: nothing of why.** A page must not
+  tell "the host is up and refused" from "denied" from "down" (network probing),
+  so every failure looks alike, as in a browser:
+  - `fetch()` rejects with `TypeError: Failed to fetch`, no `cause`, whether the
+    policy refused, `net_allow` or the deny list refused (`ERR_ADDRESS_DENIED`),
+    or the connection failed. What a browser rejects with before anything is
+    sent keeps its message (an invalid URL, a forbidden method, a `Request` that
+    cannot be constructed), and an abort its reason.
+  - `EventSource` fires a plain `error` event.
+  - `WebSocket` fires a plain `Event("error")` (no `ErrorEvent`, no message, no
+    `cause`), then `close` with code 1006 and no reason. A URL outside
+    `net_allow` fails the same way instead of throwing.
+  - `WebSocketStream`'s `opened` and `closed` reject with a `WebSocketError`
+    whose message is Chrome's: `WebSocket closed before handshake complete.` (or
+    `WebSocket was not cleanly closed.` once open).
+
+  The reason is written to the page's console (`take_console_messages()`, level
+  error), which a page cannot read:
+  `Access to fetch at '<url>' from
+  origin '<origin>' has been blocked: <reason>`
+  for the policy, `Failed to fetch '<url>': <error>` and
+  `WebSocket connection to '<url>' failed: <error>` for the rest (the error's
+  name, message, code and cause, e.g. `[ERR_ADDRESS_DENIED]` or
+  `NotCapable: Requires net access to …`). Without an `EmbedderWebOrigin` (Deno)
+  the old shapes stay: `TypeError: fetch failed` with
+  `cause.code === "ERR_ADDRESS_DENIED"`, `NotCapable` thrown, `ErrorEvent`s.
 
 ### Credentials: none yet
 
@@ -213,8 +234,9 @@ reads the same one.
   (and `signal` for a stream). `deno_websocket`'s own take request headers, a
   `Deno.HttpClient` and an undici dispatcher whose options turn certificate
   verification off; the bootstrap wraps the two constructors so that none of
-  that is passed on. A host outside `net_allow` is a `NotCapable` error thrown
-  by the constructor (a browser reports it as an `error` event).
+  that is passed on. A host outside `net_allow` fails the connection (an `error`
+  event, a rejected `opened`), as every connection failure does (see "What a
+  page learns when a request fails").
 - **WebRTC**: `RTCPeerConnection`, `RTCSessionDescription`, `RTCIceCandidate`,
   `RTCDataChannel`, `RTCCertificate`, the transports, senders, receivers and
   transceivers, their events, `RTCStatsReport`, `RTCEncodedAudioFrame` /
@@ -378,17 +400,19 @@ Not yet:
 `tests.rs` (Rust unit tests, each on a current-thread tokio runtime): DOM round
 trip and Rust-side visibility, the op allowlist and the disabled ops, no `Deno`
 / `require` / `process` and no `ext:` imports, fetch and WebSocket confinement
-(`ERR_ADDRESS_DENIED`, the permission error, `file:`, the browser's WebSocket
-constructor), the same-origin policy against three loopback servers (CORS with
-and without credentials, exposed headers, the preflight and its cache, `no-cors`
-and `same-origin`, redirects across origins, forbidden headers, `Origin` on
-requests and WebSocket handshakes, a page with an opaque origin), an
-`RTCPeerConnection` offer and WebRTC Identity's `NotSupportedError`,
-`OffscreenCanvas` without a GPU and `createImageBitmap()`, timers and the
-watchdog, click default actions and form submission, `DOMException`s, event
-propagation and lifecycle, `isTrusted` against forgery (own symbols,
-`defineProperty` on the event and the prototype, a class field, a subclass,
-`Reflect.construct`, `setPrototypeOf`, an heir, a `Proxy`, a structured clone, a
-second dispatch, a dispatch on the way, a replaced `dispatchEvent`), the
-descriptors and member lists of `Event` and `EventTarget`, uncaught errors, JSON
-evaluation with and without `await`, origin-keyed storage, the heap limit.
+(the opaque `Failed to fetch`, plain `error` event and `WebSocketError` a page
+gets for `ERR_ADDRESS_DENIED`, the permission error and `file:`, and the reason
+the host reads from the console; the browser's WebSocket constructor), the
+same-origin policy against three loopback servers (CORS with and without
+credentials, exposed headers, the preflight and its cache, `no-cors` and
+`same-origin`, redirects across origins, forbidden headers, `Origin` on requests
+and WebSocket handshakes, a page with an opaque origin), an `RTCPeerConnection`
+offer and WebRTC Identity's `NotSupportedError`, `OffscreenCanvas` without a GPU
+and `createImageBitmap()`, timers and the watchdog, click default actions and
+form submission, `DOMException`s, event propagation and lifecycle, `isTrusted`
+against forgery (own symbols, `defineProperty` on the event and the prototype, a
+class field, a subclass, `Reflect.construct`, `setPrototypeOf`, an heir, a
+`Proxy`, a structured clone, a second dispatch, a dispatch on the way, a
+replaced `dispatchEvent`), the descriptors and member lists of `Event` and
+`EventTarget`, uncaught errors, JSON evaluation with and without `await`,
+origin-keyed storage, the heap limit.

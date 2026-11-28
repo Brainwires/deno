@@ -9,6 +9,7 @@ const {
   op_fetch_web_failed,
   op_fetch_web_preflight,
   op_fetch_web_redirect,
+  op_fetch_web_report,
   op_fetch_web_request,
   op_fetch_web_response,
   op_pipe,
@@ -21,6 +22,7 @@ const {
   ArrayPrototypeIncludes,
   DateNow,
   Error,
+  ErrorPrototypeToString,
   ObjectPrototypeIsPrototypeOf,
   Promise,
   PromisePrototypeThen,
@@ -41,6 +43,9 @@ const {
 } = primordials;
 
 const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
+const { DOMExceptionPrototype } = core.loadExtScript(
+  "ext:deno_web/01_dom_exception.js",
+);
 const { byteLowerCase } = core.loadExtScript("ext:deno_web/00_infra.js");
 const {
   acquireReadableStreamDefaultReader,
@@ -480,6 +485,86 @@ function webRequestFailed(web) {
 }
 
 /**
+ * A network error whose reason the Rust side already reported to the
+ * embedder (`EmbedderWebOrigin`'s reporter): `fetch()` does not report it
+ * again.
+ * @param {string} reason
+ */
+function webBlocked(reason) {
+  const response = networkError(reason);
+  response.webReported = true;
+  return response;
+}
+
+/**
+ * What the embedder is told about an error a page does not see: its name
+ * and message, its code, and its cause's. Never throws (a request body's
+ * stream can error with anything the page made).
+ * @param {unknown} err
+ * @returns {string}
+ */
+function webErrorDetail(err) {
+  try {
+    if (typeof err !== "object" || err === null) return String(err);
+    let detail = ErrorPrototypeToString(err);
+    const code = err.code ?? err.cause_code;
+    if (typeof code === "string") detail += ` [${code}]`;
+    const cause = err.cause;
+    if (cause !== undefined && cause !== null) {
+      let causeDetail;
+      if (typeof cause === "object") {
+        causeDetail = ErrorPrototypeToString(cause);
+        if (typeof cause.code === "string") causeDetail += ` [${cause.code}]`;
+      } else {
+        causeDetail = String(cause);
+      }
+      detail += ` (cause: ${causeDetail})`;
+    }
+    return detail;
+  } catch {
+    return "unknown error";
+  }
+}
+
+/**
+ * Whether `err`, a rejection of `mainFetch`, is an abort: the signal's
+ * reason, or an `AbortError`.
+ * @param {unknown} err
+ * @param {AbortSignal} signal
+ */
+function webIsAbort(err, signal) {
+  if (signal.aborted && err === signal.reason) return true;
+  try {
+    return ObjectPrototypeIsPrototypeOf(DOMExceptionPrototype, err) &&
+      err.name === "AbortError";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Tells the embedder why a page's request to `url` failed (the page only
+ * gets `TypeError: Failed to fetch`, or a plain `error` event).
+ * @param {string} url
+ * @param {string} detail
+ */
+function webReportFailure(url, detail) {
+  op_fetch_web_report(url, detail);
+}
+
+/**
+ * The network error `response` of a page's request to `url`: the embedder
+ * learns its reason, unless the Rust side reported it already.
+ * @param {string} url
+ * @param {InnerResponse} response
+ */
+function webReportNetworkError(url, response) {
+  if (response.webReported !== true) {
+    webReportFailure(url, response.error ?? "network error");
+  }
+}
+
+/**
  * https://fetch.spec.whatwg.org/#concept-filtered-response-opaque and
  * https://fetch.spec.whatwg.org/#concept-filtered-response-opaque-redirect:
  * no status, no headers, no body. An opaque response has no URL either.
@@ -568,7 +653,7 @@ async function mainFetch(req, recursive, terminator, inspectorCtx = null) {
   if (webOriginMode()) {
     web = webRequestArgs(req);
     webPlan = op_fetch_web_request(web, req.headerList);
-    if (webPlan.error !== null) return networkError(webPlan.error);
+    if (webPlan.error !== null) return webBlocked(webPlan.error);
     web.tainting = req.webTainting = webPlan.tainting;
     web.referrer = req.referrer = webPlan.referrer;
     web.referrerPolicy = req.referrerPolicy = webPlan.referrerPolicy;
@@ -584,7 +669,7 @@ async function mainFetch(req, recursive, terminator, inspectorCtx = null) {
         core.tryClose(cancelRid);
       }
       if (terminator.aborted) return abortedNetworkError();
-      if (verdict.error !== null) return networkError(verdict.error);
+      if (verdict.error !== null) return webBlocked(verdict.error);
     }
   }
 
@@ -792,7 +877,7 @@ async function mainFetch(req, recursive, terminator, inspectorCtx = null) {
     const checked = op_fetch_web_response(web, resp.headers);
     if (checked.error !== null) {
       core.tryClose(resp.responseRid);
-      return networkError(checked.error);
+      return webBlocked(checked.error);
     }
     webHeaders = checked.headers;
   }
@@ -1003,7 +1088,7 @@ function httpRedirectFetch(request, response, terminator, inspectorCtx = null) {
       locationURL.href,
       response.headerList,
     );
-    if (redirect.error !== null) return networkError(redirect.error);
+    if (redirect.error !== null) return webBlocked(redirect.error);
     if (redirect.referrerPolicy !== "") {
       request.referrerPolicy = redirect.referrerPolicy;
     }
@@ -1157,12 +1242,16 @@ function fetch(input, init = undefined) {
             // 12.3.
             if (response.type === "error") {
               // denext: a web page learns nothing about why (the reason
-              // went to the embedder, `EmbedderWebOrigin`'s reporter)
-              const err = webOriginMode()
-                ? new TypeError("Failed to fetch")
-                : new TypeError(
+              // goes to the embedder, `EmbedderWebOrigin`'s reporter)
+              let err;
+              if (webOriginMode()) {
+                webReportNetworkError(request.currentUrl(), response);
+                err = new TypeError("Failed to fetch");
+              } else {
+                err = new TypeError(
                   "Fetch failed: " + (response.error ?? "unknown error"),
                 );
+              }
               reject(err);
               requestObject.signal[abortSignal.remove](onabort);
               return;
@@ -1178,6 +1267,17 @@ function fetch(input, init = undefined) {
           },
         ),
         (err) => {
+          // denext: in web-origin mode a request that failed (a transport
+          // error, the address deny list, a permission) rejects as a
+          // browser's does, with nothing of the reason, which goes to the
+          // embedder; an abort keeps its reason
+          if (
+            webOriginMode() && !locallyAborted &&
+            !webIsAbort(err, requestObject.signal)
+          ) {
+            webReportFailure(request.currentUrl(), webErrorDetail(err));
+            err = new TypeError("Failed to fetch");
+          }
           reject(err);
           requestObject.signal[abortSignal.remove](onabort);
         },
@@ -1360,6 +1460,9 @@ return {
   handleWasmStreaming,
   mainFetch,
   setNodeProxyRouter,
+  webErrorDetail,
   webOriginMode,
+  webReportFailure,
+  webReportNetworkError,
 };
 })();

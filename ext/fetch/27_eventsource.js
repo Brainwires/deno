@@ -41,7 +41,13 @@ const { TextDecoderStream } = core.loadExtScript(
 );
 const { getLocationHref } = core.loadExtScript("ext:deno_web/12_location.js");
 const { newInnerRequest } = core.loadExtScript("ext:deno_fetch/23_request.js");
-const { mainFetch, webOriginMode } = core.loadExtScript(
+const {
+  mainFetch,
+  webErrorDetail,
+  webOriginMode,
+  webReportFailure,
+  webReportNetworkError,
+} = core.loadExtScript(
   "ext:deno_fetch/26_fetch.js",
 );
 const {
@@ -273,7 +279,12 @@ class EventSource extends EventTarget {
     let res;
     try {
       res = await mainFetch(req, true, this.#abortController.signal);
-    } catch {
+    } catch (err) {
+      // denext: a web page's `error` event says nothing; the embedder
+      // learns why
+      if (web && !this.#abortController.signal.aborted) {
+        webReportFailure(req.currentUrl(), webErrorDetail(err));
+      }
       this.#reestablishConnection();
       return;
     }
@@ -283,6 +294,7 @@ class EventSource extends EventTarget {
       return;
     }
     if (res.type === "error") {
+      if (web) webReportNetworkError(req.currentUrl(), res);
       this.#reestablishConnection();
       return;
     }
@@ -381,8 +393,13 @@ class EventSource extends EventTarget {
           }
         }
       }
-    } catch {
+    } catch (err) {
       // The connection is reestablished below
+      // denext: a web page's `error` event says nothing; the embedder
+      // learns why
+      if (web && !this.#abortController.signal.aborted) {
+        webReportFailure(req.currentUrl(), webErrorDetail(err));
+      }
     }
 
     this.#reestablishConnection();

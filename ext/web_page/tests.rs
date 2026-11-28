@@ -302,39 +302,75 @@ async fn fetch_is_confined() {
   // list, which is checked where the connection is made.
   options.net_allow = vec!["127.0.0.1:2".to_string()];
   let mut page = PageRuntime::new(options).unwrap();
+  // Refused by the deny list, by the permissions, by the scheme: a page
+  // cannot tell one from the other (or from a host that is down), as in a
+  // browser. Why goes to the console, which only the host reads.
   run(
     &mut page,
-    r#"globalThis.denied = "pending";
+    r#"const shape = (e) => [
+        e instanceof TypeError, e.name, e.message, !Object.hasOwn(e, "cause"),
+      ];
+      globalThis.denied = "pending";
       fetch("http://127.0.0.1:2/").then(
         () => { denied = "resolved"; },
-        (e) => {
-          denied = [e instanceof TypeError, String(e.cause && e.cause.code)];
-          globalThis.deniedDetail = `${e.name}: ${e.message} / cause: ${e.cause}`;
-        },
+        (e) => { denied = shape(e); },
       );
       globalThis.notAllowed = "pending";
       fetch("http://not-allowed.example/").then(
         () => { notAllowed = "resolved"; },
-        (e) => { notAllowed = e.name; },
+        (e) => { notAllowed = shape(e); },
       );
       globalThis.fileScheme = "pending";
       fetch("file:///etc/hosts").then(
         () => { fileScheme = "resolved"; },
-        () => { fileScheme = "rejected"; },
-      );"#,
+        (e) => { fileScheme = shape(e); },
+      );
+      // What a browser throws (as a rejection) before anything is sent
+      // keeps its message, and an abort its reason.
+      globalThis.early = "pending";
+      Promise.allSettled([
+        fetch("http://[::1"),
+        fetch("http://127.0.0.1:2/", { method: "CONNECT" }),
+        fetch("http://127.0.0.1:2/", { signal: AbortSignal.abort() }),
+        fetch("http://127.0.0.1:2/", { signal: AbortSignal.abort("why") }),
+      ]).then((results) => {
+        early = results.map((r) => r.reason instanceof Error
+          ? [r.reason.name, r.reason.message === "Failed to fetch"]
+          : r.reason);
+      });"#,
   );
   assert_eq!(
     page.run_until_idle(Duration::from_secs(20)).await.unwrap(),
     Idle::Quiescent
   );
+  let opaque = json!([true, "TypeError", "Failed to fetch", true]);
+  assert_eq!(eval(&mut page, "denied"), opaque);
+  assert_eq!(eval(&mut page, "notAllowed"), opaque);
+  assert_eq!(eval(&mut page, "fileScheme"), opaque);
   assert_eq!(
-    eval(&mut page, "denied"),
-    json!([true, "ERR_ADDRESS_DENIED"]),
-    "{}",
-    eval(&mut page, "globalThis.deniedDetail ?? null")
+    eval(&mut page, "early"),
+    json!([
+      ["TypeError", false],
+      ["TypeError", false],
+      ["AbortError", false],
+      "why",
+    ])
   );
-  assert_eq!(eval(&mut page, "notAllowed"), json!("NotCapable"));
-  assert_eq!(eval(&mut page, "fileScheme"), json!("rejected"));
+  let console = console_text(&mut page);
+  assert!(
+    console.contains("Failed to fetch 'http://127.0.0.1:2/': ")
+      && console.contains("ERR_ADDRESS_DENIED"),
+    "{console}"
+  );
+  assert!(
+    console.contains("Failed to fetch 'http://not-allowed.example/': ")
+      && console.contains("NotCapable"),
+    "{console}"
+  );
+  assert!(
+    console.contains("Access to fetch at 'file:///etc/hosts'"),
+    "{console}"
+  );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -803,43 +839,80 @@ async fn websocket_is_confined() {
   // connector a WebSocket makes, as it does for fetch.
   options.net_allow = vec!["127.0.0.1:1".to_string()];
   let mut page = PageRuntime::new(options).unwrap();
+  // Refused by the deny list or by the permissions: a page cannot tell one
+  // from the other (or from a host that is down), as in a browser: a plain
+  // `error` event, then `close` 1006 without a reason; a `WebSocketError`
+  // with Chrome's message. Why goes to the console, which only the host
+  // reads.
   run(
     &mut page,
-    r#"globalThis.events = [];
-      {
-        const ws = new WebSocket("ws://127.0.0.1:1/");
-        ws.onerror = (e) => events.push([
+    r#"globalThis.events = { denied: [], notAllowed: [] };
+      for (const [name, url] of [
+        ["denied", "ws://127.0.0.1:1/"],
+        ["notAllowed", "ws://not-allowed.example/"],
+      ]) {
+        const ws = new WebSocket(url);
+        ws.onerror = (e) => events[name].push([
           "error",
-          e.error instanceof DOMException,
-          e.error.name,
-          String(e.error.cause && e.error.cause.code),
+          Object.getPrototypeOf(e) === Event.prototype,
+          "error" in e, "message" in e, e.isTrusted,
         ]);
-        ws.onclose = (e) => events.push(["close", e.code, ws.readyState]);
+        ws.onclose = (e) => events[name].push(
+          ["close", e.code, e.reason, e.wasClean, ws.readyState],
+        );
       }
-      globalThis.stream = "pending";
-      new WebSocketStream("ws://127.0.0.1:1/").opened.then(
-        () => { stream = "opened"; },
-        (e) => { stream = [e instanceof DOMException, String(e.cause && e.cause.code)]; },
-      );"#,
+      globalThis.streams = { denied: "pending", notAllowed: "pending" };
+      for (const [name, url] of [
+        ["denied", "ws://127.0.0.1:1/"],
+        ["notAllowed", "ws://not-allowed.example/"],
+      ]) {
+        const stream = new WebSocketStream(url);
+        stream.closed.catch(() => {});
+        stream.opened.then(
+          () => { streams[name] = "opened"; },
+          (e) => {
+            streams[name] = [
+              e instanceof WebSocketError, e.name, e.message,
+              !Object.hasOwn(e, "cause"), e.closeCode, e.reason,
+            ];
+          },
+        );
+      }"#,
   );
   assert_eq!(
     page.run_until_idle(Duration::from_secs(20)).await.unwrap(),
     Idle::Quiescent
   );
-  assert_eq!(
-    eval(&mut page, "events"),
-    json!([
-      ["error", true, "NetworkError", "ERR_ADDRESS_DENIED"],
-      ["close", 1006, 3]
-    ])
+  let failed = json!([
+    ["error", true, false, false, true],
+    ["close", 1006, "", false, 3]
+  ]);
+  assert_eq!(eval(&mut page, "events.denied"), failed);
+  assert_eq!(eval(&mut page, "events.notAllowed"), failed);
+  let rejected = json!([
+    true,
+    "WebSocketError",
+    "WebSocket closed before handshake complete.",
+    true,
+    null,
+    ""
+  ]);
+  assert_eq!(eval(&mut page, "streams.denied"), rejected);
+  assert_eq!(eval(&mut page, "streams.notAllowed"), rejected);
+  let console = console_text(&mut page);
+  assert!(
+    console.contains("WebSocket connection to 'ws://127.0.0.1:1/' failed: ")
+      && console.contains("ERR_ADDRESS_DENIED"),
+    "{console}"
   );
-  assert_eq!(
-    eval(&mut page, "stream"),
-    json!([true, "ERR_ADDRESS_DENIED"])
+  assert!(
+    console
+      .contains("WebSocket connection to 'ws://not-allowed.example/' failed: ")
+      && console.contains("NotCapable"),
+    "{console}"
   );
 
-  // A host outside `net_allow` is refused before anything connects, and the
-  // interface is the browser's: no request headers, no client, no
+  // The interface is the browser's: no request headers, no client, no
   // dispatcher (whose options would turn certificate checks off).
   assert_eq!(
     eval(
@@ -849,7 +922,6 @@ async fn websocket_is_confined() {
           try { f(); return "no error"; } catch (e) { return e.name; }
         };
         return [
-          caught(() => new WebSocket("ws://not-allowed.example/")),
           caught(() => new WebSocket("ws://127.0.0.1:1/", { headers: { "x-a": "b" } })),
           caught(() => new WebSocket("ws://127.0.0.1:1/", {
             dispatcher: {
@@ -866,7 +938,6 @@ async fn websocket_is_confined() {
       })()"#,
     ),
     json!([
-      "NotCapable",
       "TypeError",
       "TypeError",
       "SyntaxError",
@@ -1737,6 +1808,7 @@ async fn event_interfaces_look_like_a_browsers() {
   assert_eq!(eval(&mut page, "log"), json!([true, true, true]));
   assert!(console_text(&mut page).contains("Event"));
   assert!(page.take_uncaught_errors().is_empty());
+}
 
 // --- the same-origin policy of the page's requests ---------------------------
 //

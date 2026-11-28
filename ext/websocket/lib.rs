@@ -985,6 +985,24 @@ pub fn op_ws_get_buffered_amount(
     .get() as u32
 }
 
+/// denext: a page's connection failed (an embedder's web-origin mode,
+/// [`EmbedderWebOrigin`]): the page gets a plain `error` event, or a
+/// `WebSocketError` without detail, and the embedder is told why. Nothing
+/// happens without a web origin.
+#[op2(fast)]
+pub fn op_ws_web_report(
+  state: &mut OpState,
+  #[string] url: &str,
+  #[string] detail: &str,
+) {
+  if let Some(web) = EmbedderWebOrigin::from_state(state) {
+    web.report(
+      state,
+      &format!("WebSocket connection to '{url}' failed: {detail}"),
+    );
+  }
+}
+
 #[op2]
 pub async fn op_ws_send_ping(
   state: Rc<RefCell<OpState>>,
@@ -1172,6 +1190,7 @@ deno_core::extension!(
     op_ws_send_text_async,
     op_ws_send_ping,
     op_ws_get_buffered_amount,
+    op_ws_web_report,
   ],
   lazy_loaded_esm = ["01_websocket.js", "02_websocketstream.js"],
 );

@@ -13,6 +13,7 @@ import {
   op_ws_next_event,
   op_ws_send_binary_async,
   op_ws_send_text_async,
+  op_ws_web_report,
 } from "ext:core/ops";
 const {
   ArrayPrototypeJoin,
@@ -23,6 +24,7 @@ const {
   ObjectPrototypeIsPrototypeOf,
   PromisePrototypeCatch,
   PromisePrototypeThen,
+  PromiseReject,
   SafeSet,
   SetPrototypeGetSize,
   StringPrototypeEndsWith,
@@ -50,6 +52,9 @@ const {
   headerListFromHeaders,
   headersFromHeaderList,
 } = core.loadExtScript("ext:deno_fetch/20_headers.js");
+const { webErrorDetail, webOriginMode } = core.loadExtScript(
+  "ext:deno_fetch/26_fetch.js",
+);
 
 webidl.converters.WebSocketStreamOptions = webidl.createDictionaryConverter(
   "WebSocketStreamOptions",
@@ -102,6 +107,16 @@ const _closeSent = Symbol("[[closeSent]]");
 // `cause_code` of the op's error) has the code on its `cause`, where a
 // `fetch()` refused by a client's `denyAddresses` has it:
 // `error.cause.code === "ERR_ADDRESS_DENIED"`.
+// denext: in an embedder's web-origin mode a page's WebSocketStream fails
+// as Chrome's does: a `WebSocketError` with Chrome's message for the case,
+// and nothing of what went wrong, which goes to the embedder.
+const WEB_HANDSHAKE_FAILED = "WebSocket closed before handshake complete.";
+const WEB_NOT_CLEANLY_CLOSED = "WebSocket was not cleanly closed.";
+function webStreamFailed(stream, message, detail) {
+  op_ws_web_report(stream[_url], detail);
+  return new WebSocketError(message);
+}
+
 function setConnectErrorCause(error, opError) {
   const code = opError?.cause_code;
   if (typeof code !== "string") {
@@ -178,13 +193,26 @@ class WebSocketStream {
       fillHeaders(headers, options.headers);
     }
 
-    const cancelRid = op_ws_check_permission_and_cancel_handle(
-      "WebSocketStream.abort()",
-      this[_url],
-      true,
-    );
+    // denext: in web-origin mode a URL the permissions refuse fails the
+    // connection (below) instead of throwing, as any other failure does
+    let cancelRid;
+    let refused = null;
+    try {
+      cancelRid = op_ws_check_permission_and_cancel_handle(
+        "WebSocketStream.abort()",
+        this[_url],
+        true,
+      );
+    } catch (err) {
+      if (!webOriginMode()) throw err;
+      refused = err;
+    }
 
-    if (options.signal?.aborted) {
+    if (refused !== null && options.signal?.aborted) {
+      const err = options.signal.reason;
+      this[_opened].reject(err);
+      this[_closed].reject(err);
+    } else if (options.signal?.aborted) {
       core.close(cancelRid);
       const err = options.signal.reason;
       this[_opened].reject(err);
@@ -193,9 +221,9 @@ class WebSocketStream {
       const abort = () => {
         core.close(cancelRid);
       };
-      options.signal?.[add](abort);
+      if (refused === null) options.signal?.[add](abort);
       PromisePrototypeThen(
-        op_ws_create(
+        refused !== null ? PromiseReject(refused) : op_ws_create(
           "new WebSocketStream()",
           this[_url],
           options.protocols ? ArrayPrototypeJoin(options.protocols, ", ") : "",
@@ -295,7 +323,13 @@ class WebSocketStream {
                 }
                 case 3: {
                   /* error */
-                  const err = new WebSocketError(op_ws_get_error(this[_rid]));
+                  const err = webOriginMode()
+                    ? webStreamFailed(
+                      this,
+                      WEB_NOT_CLEANLY_CLOSED,
+                      op_ws_get_error(this[_rid]),
+                    )
+                    : new WebSocketError(op_ws_get_error(this[_rid]));
                   this[_closed].reject(err);
                   controller.error(err);
                   core.tryClose(this[_rid]);
@@ -331,7 +365,11 @@ class WebSocketStream {
                 }
 
                 const error = op_ws_get_error(this[_rid]);
-                this[_closed].reject(new WebSocketError(error));
+                this[_closed].reject(
+                  webOriginMode()
+                    ? webStreamFailed(this, WEB_NOT_CLEANLY_CLOSED, error)
+                    : new WebSocketError(error),
+                );
                 core.tryClose(this[_rid]);
               }
             };
@@ -396,6 +434,13 @@ class WebSocketStream {
           if (ObjectPrototypeIsPrototypeOf(core.InterruptedPrototype, err)) {
             // The signal was aborted.
             err = options.signal.reason;
+          } else if (webOriginMode()) {
+            if (cancelRid !== undefined) core.tryClose(cancelRid);
+            err = webStreamFailed(
+              this,
+              WEB_HANDSHAKE_FAILED,
+              webErrorDetail(err),
+            );
           } else {
             core.tryClose(cancelRid);
             const opError = err;
