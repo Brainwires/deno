@@ -104,6 +104,7 @@ deno_core::extension!(
     "01_events.js",
     "02_html.js",
     "03_window.js",
+    "04_hardening.js",
     "99_page_main.js",
   ],
   options = {

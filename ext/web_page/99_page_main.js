@@ -20,6 +20,7 @@ import * as dom from "ext:deno_web_page/00_dom.js";
 import * as uiEvents from "ext:deno_web_page/01_events.js";
 import * as html from "ext:deno_web_page/02_html.js";
 import * as windowObjects from "ext:deno_web_page/03_window.js";
+import "ext:deno_web_page/04_hardening.js";
 const {
   FunctionPrototypeCall,
   JSONStringify,

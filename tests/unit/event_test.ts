@@ -286,3 +286,30 @@ Deno.test(function messageEventSourceIsRetainedFromInit() {
   const e3 = new MessageEvent("message", {});
   assertEquals(e3.source, null);
 });
+
+// denext: an event's internal slots are private fields, not own symbol-keyed
+// properties a program could list and write (`isTrusted` among them).
+Deno.test(function eventStateIsNotInOwnProperties() {
+  const events = [
+    new Event("test"),
+    new CustomEvent("test", { detail: 1 }),
+    new ErrorEvent("error"),
+    new CloseEvent("close"),
+    new PromiseRejectionEvent("unhandledrejection", {
+      promise: Promise.resolve(),
+    }),
+  ];
+  for (const event of events) {
+    assertEquals(Reflect.ownKeys(event), []);
+    assertEquals(event.isTrusted, false);
+  }
+
+  const controller = new AbortController();
+  let abort: Event | undefined;
+  controller.signal.addEventListener("abort", (event) => {
+    abort = event;
+  });
+  controller.abort();
+  assertEquals(abort!.isTrusted, true);
+  assertEquals(Reflect.ownKeys(abort!), []);
+});

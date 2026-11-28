@@ -94,8 +94,7 @@ const {
 const webidl = core.loadExtScript("ext:deno_webidl/00_webidl.js");
 const { DOMException } = core.loadExtScript("ext:deno_web/01_dom_exception.js");
 const event = core.loadExtScript("ext:deno_web/02_event.js");
-const { Event, EventTarget, eventTargetData, reportException } = event;
-const EventPrototype = Event.prototype;
+const { EventTarget, getEventTargetData, reportException } = event;
 const removeEventListener = EventTarget.prototype.removeEventListener;
 
 // Relations of `op_web_page_node_relative` and well-known nodes of
@@ -857,23 +856,31 @@ function htmlLocalName(node) {
 // building puts a Window parent in the wrong branch (as a retargeted target
 // instead of a plain ancestor). So the DOM Standard's dispatch is written
 // out here, over `deno_web`'s own Event objects and listener lists. That
-// needs the Event's internal slots, which `02_event.js` keeps under
-// module-private symbols and hands to extension scripts as `eventSlots`.
+// needs the Event's internal slots and the listener lists, which
+// `02_event.js` keeps where no script reaches them (private fields, a weak
+// map) and hands to extension scripts as `eventInternals` and
+// `getEventTargetData()`.
 
-const kAttributes = event.eventSlots.attributes;
-const kCanceled = event.eventSlots.canceledFlag;
-const kStopPropagation = event.eventSlots.stopPropagationFlag;
-const kStopImmediatePropagation = event.eventSlots.stopImmediatePropagationFlag;
-const kInPassiveListener = event.eventSlots.inPassiveListener;
-const kDispatched = event.eventSlots.dispatched;
-const kPath = event.eventSlots.path;
+const {
+  isEvent,
+  getAttributes,
+  getCanceled,
+  getDispatched,
+  setDispatched,
+  setPath,
+  getStopPropagation,
+  setStopPropagation,
+  getStopImmediatePropagation,
+  setStopImmediatePropagation,
+  setInPassiveListener,
+} = event.eventInternals;
 
 const CAPTURING_PHASE = 1;
 const AT_TARGET = 2;
 const BUBBLING_PHASE = 3;
 
 function invokeListeners(item, ev, attributes, phase, capture) {
-  const listeners = item[eventTargetData]?.listeners;
+  const listeners = getEventTargetData(item)?.listeners;
   if (listeners === undefined) {
     return;
   }
@@ -904,7 +911,7 @@ function invokeListeners(item, ev, attributes, phase, capture) {
     }
     const passive = isObject && !!options.passive;
     if (passive) {
-      ev[kInPassiveListener] = true;
+      setInPassiveListener(ev, true);
     }
     try {
       if (typeof callback === "object") {
@@ -918,9 +925,9 @@ function invokeListeners(item, ev, attributes, phase, capture) {
       reportException(error);
     }
     if (passive) {
-      ev[kInPassiveListener] = false;
+      setInPassiveListener(ev, false);
     }
-    if (ev[kStopImmediatePropagation]) {
+    if (getStopImmediatePropagation(ev)) {
       break;
     }
   }
@@ -979,8 +986,8 @@ function syncHandlerAttribute(element, type) {
 
 /** https://dom.spec.whatwg.org/#concept-event-dispatch, without shadow trees. */
 function dispatchAlongTree(target, ev) {
-  const attributes = ev[kAttributes];
-  ev[kDispatched] = true;
+  const attributes = getAttributes(ev);
+  setDispatched(ev, true);
 
   const items = [target];
   let parent = relative(target, REL_PARENT);
@@ -1007,12 +1014,12 @@ function dispatchAlongTree(target, ev) {
       syncHandlerAttribute(items[i], attributes.type);
     }
   }
-  ev[kPath] = path;
+  setPath(ev, path);
   attributes.target = target;
 
   try {
     for (let i = items.length - 1; i >= 0; i--) {
-      if (ev[kStopPropagation]) {
+      if (getStopPropagation(ev)) {
         break;
       }
       invokeListeners(
@@ -1024,7 +1031,7 @@ function dispatchAlongTree(target, ev) {
       );
     }
     for (let i = 0; i < items.length; i++) {
-      if (ev[kStopPropagation] || (i > 0 && !attributes.bubbles)) {
+      if (getStopPropagation(ev) || (i > 0 && !attributes.bubbles)) {
         break;
       }
       invokeListeners(
@@ -1038,12 +1045,12 @@ function dispatchAlongTree(target, ev) {
   } finally {
     attributes.eventPhase = 0;
     attributes.currentTarget = null;
-    ev[kPath] = [];
-    ev[kDispatched] = false;
-    ev[kStopPropagation] = false;
-    ev[kStopImmediatePropagation] = false;
+    setPath(ev, []);
+    setDispatched(ev, false);
+    setStopPropagation(ev, false);
+    setStopImmediatePropagation(ev, false);
   }
-  return !ev[kCanceled];
+  return !getCanceled(ev);
 }
 
 /**
@@ -1052,7 +1059,7 @@ function dispatchAlongTree(target, ev) {
  */
 function dispatchNodeEvent(target, ev) {
   const activation =
-    clickActivation !== null && ev[kAttributes].type === "click"
+    clickActivation !== null && getAttributes(ev).type === "click"
       ? clickActivation.begin(target, ev)
       : null;
   let notCanceled;
@@ -1346,12 +1353,14 @@ class Node extends EventTarget {
       1,
       "Failed to execute 'dispatchEvent' on 'EventTarget'",
     );
-    if (!ObjectPrototypeIsPrototypeOf(EventPrototype, ev)) {
+    // The brand, not the prototype chain: a `Proxy` of an event, or an
+    // object that inherits from one, is not an event.
+    if (!isEvent(ev)) {
       throw new TypeError(
         "Failed to execute 'dispatchEvent' on 'EventTarget': parameter 1 is not of type 'Event'.",
       );
     }
-    if (ev[kDispatched]) {
+    if (getDispatched(ev)) {
       throw new DOMException(
         "The event is already being dispatched.",
         "InvalidStateError",

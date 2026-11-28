@@ -33,6 +33,7 @@ const {
   ReflectDefineProperty,
   SafeArrayIterator,
   SafeMap,
+  SafeWeakMap,
   String,
   StringPrototypeStartsWith,
   Symbol,
@@ -65,108 +66,166 @@ function saveGlobalThisReference(val) {
   globalThis_ = val;
 }
 
-// accessors for non runtime visible data
+// denext: an Event's internal slots are private fields of the class, and an
+// EventTarget's listeners are in module-private weak maps (further down).
+// They were own symbol-keyed properties, which any script could list with
+// `Object.getOwnPropertySymbols()` and write: `isTrusted`, the flags and the
+// listener lists could all be forged. The functions below are the only way
+// in; the class's static block fills them in.
 
-function getDispatched(event) {
-  return Boolean(event[_dispatched]);
+let isEvent;
+let getDispatched;
+let getPath;
+let getStopImmediatePropagation;
+let setCurrentTarget;
+let setIsTrusted;
+let setDispatched;
+let setEventPhase;
+let setInPassiveListener;
+let setPath;
+let setRelatedTarget;
+let setTarget;
+let setStopImmediatePropagation;
+let prepareScriptDispatch;
+let isTrusted;
+let eventInternals;
+
+// denext: off in Deno. An embedder that runs script it does not trust (the
+// page runtime, ext/web_page) turns it on before that script runs, with
+// `enableUnforgeableEvents()`; nothing turns it off. With it:
+// - `isTrusted` is what the DOM Standard says, [LegacyUnforgeable]: an own,
+//   non-configurable accessor of every event, so that no own property and no
+//   subclass can shadow it. (Deno keeps it on the prototype: defining it per
+//   event costs too much for a runtime whose scripts are trusted.)
+// - `dispatchEvent()` checks its argument and the dispatch flag first, and
+//   an event that was dispatched before is no longer trusted: a script
+//   cannot send a trusted event it received on a second trip.
+let unforgeableEvents = false;
+
+function enableUnforgeableEvents() {
+  unforgeableEvents = true;
 }
 
-function getPath(event) {
-  return event[_path] ?? [];
-}
-
-function getStopImmediatePropagation(event) {
-  return Boolean(event[_stopImmediatePropagationFlag]);
-}
-
-function setCurrentTarget(
-  event,
-  value,
-) {
-  event[_attributes].currentTarget = value;
-}
-
-function setIsTrusted(event, value) {
-  event[_isTrusted] = value;
-}
-
-function setDispatched(event, value) {
-  event[_dispatched] = value;
-}
-
-function setEventPhase(event, value) {
-  event[_attributes].eventPhase = value;
-}
-
-function setInPassiveListener(event, value) {
-  event[_inPassiveListener] = value;
-}
-
-function setPath(event, value) {
-  event[_path] = value;
-}
-
-function setRelatedTarget(
-  event,
-  value,
-) {
-  event[_attributes].relatedTarget = value;
-}
-
-function setTarget(event, value) {
-  event[_attributes].target = value;
-}
-
-function setStopImmediatePropagation(
-  event,
-  value,
-) {
-  event[_stopImmediatePropagationFlag] = value;
-}
-
-const isTrusted = ObjectGetOwnPropertyDescriptor({
-  get isTrusted() {
-    return this[_isTrusted];
-  },
-}, "isTrusted").get;
-
-const _attributes = Symbol("[[attributes]]");
-const _canceledFlag = Symbol("[[canceledFlag]]");
-const _stopPropagationFlag = Symbol("[[stopPropagationFlag]]");
-const _stopImmediatePropagationFlag = Symbol(
-  "[[stopImmediatePropagationFlag]]",
-);
-const _inPassiveListener = Symbol("[[inPassiveListener]]");
-const _dispatched = Symbol("[[dispatched]]");
-const _isTrusted = Symbol("[[isTrusted]]");
-const _path = Symbol("[[path]]");
-
-// denext: the keys of an Event's internal slots, for an embedder's extension
-// that dispatches events along a tree of its own (ext/web_page: the DOM
-// Standard's dispatch over nodes, which `dispatch()` below does not do).
-// Only this module's result carries them; nothing here uses the object.
-const eventSlots = ObjectFreeze({
+const isTrustedDescriptor = {
   __proto__: null,
-  attributes: _attributes,
-  canceledFlag: _canceledFlag,
-  stopPropagationFlag: _stopPropagationFlag,
-  stopImmediatePropagationFlag: _stopImmediatePropagationFlag,
-  inPassiveListener: _inPassiveListener,
-  dispatched: _dispatched,
-  path: _path,
-});
+  get: undefined,
+  set: undefined,
+  enumerable: true,
+  configurable: false,
+};
 
 const EMPTY_EVENT_INIT = ObjectFreeze(ObjectSetPrototypeOf({}, null));
 
 class Event {
+  #attributes;
+  #canceledFlag = false;
+  #stopPropagationFlag = false;
+  #stopImmediatePropagationFlag = false;
+  #inPassiveListener = false;
+  #dispatched = false;
+  // denext: whether a dispatch of the event has started before. Read by
+  // `prepareScriptDispatch()` only.
+  #dispatchedBefore = false;
+  #isTrusted = false;
+  #path = [];
+
+  static {
+    isEvent = (value) =>
+      typeof value === "object" && value !== null && #attributes in value;
+    getDispatched = (event) => event.#dispatched;
+    getPath = (event) => event.#path;
+    getStopImmediatePropagation = (event) =>
+      event.#stopImmediatePropagationFlag;
+    setCurrentTarget = (event, value) => {
+      event.#attributes.currentTarget = value;
+    };
+    setIsTrusted = (event, value) => {
+      event.#isTrusted = value;
+    };
+    setDispatched = (event, value) => {
+      event.#dispatched = value;
+      if (value) {
+        event.#dispatchedBefore = true;
+      }
+    };
+    setEventPhase = (event, value) => {
+      event.#attributes.eventPhase = value;
+    };
+    setInPassiveListener = (event, value) => {
+      event.#inPassiveListener = value;
+    };
+    setPath = (event, value) => {
+      event.#path = value;
+    };
+    setRelatedTarget = (event, value) => {
+      event.#attributes.relatedTarget = value;
+    };
+    setTarget = (event, value) => {
+      event.#attributes.target = value;
+    };
+    setStopImmediatePropagation = (event, value) => {
+      event.#stopImmediatePropagationFlag = value;
+    };
+
+    // The steps of `dispatchEvent()` before "dispatch", with
+    // `unforgeableEvents`: https://dom.spec.whatwg.org/#dom-eventtarget-dispatchevent
+    // The standard clears `isTrusted` there, always. The extensions dispatch
+    // their trusted events through `dispatchEvent()` too, so the first
+    // dispatch of an event keeps the flag and every later one clears it.
+    prepareScriptDispatch = (event) => {
+      if (event.#dispatched) {
+        throw new DOMException("Invalid event state", "InvalidStateError");
+      }
+      if (event.#dispatchedBefore) {
+        event.#isTrusted = false;
+      } else {
+        event.#dispatchedBefore = true;
+      }
+    };
+
+    isTrusted = ObjectGetOwnPropertyDescriptor({
+      get isTrusted() {
+        if (isEvent(this)) {
+          return this.#isTrusted;
+        }
+        if (unforgeableEvents) {
+          throw new TypeError("Illegal invocation");
+        }
+        return undefined;
+      },
+    }, "isTrusted").get;
+    isTrustedDescriptor.get = isTrusted;
+    ObjectFreeze(isTrustedDescriptor);
+
+    // denext: the slots an embedder's extension needs to dispatch events
+    // along a tree of its own (ext/web_page: the DOM Standard's dispatch over
+    // nodes, which `dispatch()` below does not do). Only this module's result
+    // carries them; nothing here uses the object.
+    eventInternals = ObjectFreeze({
+      __proto__: null,
+      isEvent,
+      /** The object behind `type`, `target`, `currentTarget`, `eventPhase`,
+       * `bubbles`, `cancelable`, `composed` and `timeStamp`. */
+      getAttributes: (event) => event.#attributes,
+      getCanceled: (event) => event.#canceledFlag,
+      getDispatched,
+      /** `true` also records that the event was dispatched once. */
+      setDispatched,
+      setPath,
+      getStopPropagation: (event) => event.#stopPropagationFlag,
+      setStopPropagation: (event, value) => {
+        event.#stopPropagationFlag = value;
+      },
+      getStopImmediatePropagation,
+      setStopImmediatePropagation,
+      setInPassiveListener,
+    });
+  }
+
   constructor(type, eventInitDict = EMPTY_EVENT_INIT) {
-    this[_canceledFlag] = false;
-    this[_stopPropagationFlag] = false;
-    this[_stopImmediatePropagationFlag] = false;
-    this[_inPassiveListener] = false;
-    this[_dispatched] = false;
-    this[_isTrusted] = false;
-    this[_path] = [];
+    if (unforgeableEvents) {
+      ObjectDefineProperty(this, "isTrusted", isTrustedDescriptor);
+    }
 
     webidl.requiredArguments(
       arguments.length,
@@ -179,7 +238,7 @@ class Event {
       "Argument 1",
     );
 
-    this[_attributes] = {
+    this.#attributes = {
       type,
       bubbles: !!eventInitDict.bubbles,
       cancelable: !!eventInitDict.cancelable,
@@ -195,7 +254,7 @@ class Event {
     return inspect(
       getCreateFilteredInspectProxy()({
         object: this,
-        evaluate: this[_attributes] !== undefined,
+        evaluate: isEvent(this),
         keys: EVENT_PROPS,
       }),
       inspectOptions,
@@ -203,11 +262,11 @@ class Event {
   }
 
   get type() {
-    return this[_attributes].type;
+    return this.#attributes.type;
   }
 
   get target() {
-    return this[_attributes].target;
+    return this.#attributes.target;
   }
 
   get srcElement() {
@@ -219,11 +278,11 @@ class Event {
   }
 
   get currentTarget() {
-    return this[_attributes].currentTarget;
+    return this.#attributes.currentTarget;
   }
 
   composedPath() {
-    const path = this[_path];
+    const path = this.#path;
     if (path.length === 0) {
       return [];
     }
@@ -344,58 +403,58 @@ class Event {
   }
 
   get eventPhase() {
-    return this[_attributes].eventPhase;
+    return this.#attributes.eventPhase;
   }
 
   stopPropagation() {
-    this[_stopPropagationFlag] = true;
+    this.#stopPropagationFlag = true;
   }
 
   get cancelBubble() {
-    return this[_stopPropagationFlag];
+    return this.#stopPropagationFlag;
   }
 
   set cancelBubble(value) {
-    this[_stopPropagationFlag] = webidl.converters.boolean(value);
+    this.#stopPropagationFlag = webidl.converters.boolean(value);
   }
 
   stopImmediatePropagation() {
-    this[_stopPropagationFlag] = true;
-    this[_stopImmediatePropagationFlag] = true;
+    this.#stopPropagationFlag = true;
+    this.#stopImmediatePropagationFlag = true;
   }
 
   get bubbles() {
-    return this[_attributes].bubbles;
+    return this.#attributes.bubbles;
   }
 
   get cancelable() {
-    return this[_attributes].cancelable;
+    return this.#attributes.cancelable;
   }
 
   get returnValue() {
-    return !this[_canceledFlag];
+    return !this.#canceledFlag;
   }
 
   set returnValue(value) {
     if (!webidl.converters.boolean(value)) {
-      if (this[_attributes].cancelable && !this[_inPassiveListener]) {
-        this[_canceledFlag] = true;
+      if (this.#attributes.cancelable && !this.#inPassiveListener) {
+        this.#canceledFlag = true;
       }
     }
   }
 
   preventDefault() {
-    if (this[_attributes].cancelable && !this[_inPassiveListener]) {
-      this[_canceledFlag] = true;
+    if (this.#attributes.cancelable && !this.#inPassiveListener) {
+      this.#canceledFlag = true;
     }
   }
 
   get defaultPrevented() {
-    return this[_canceledFlag];
+    return this.#canceledFlag;
   }
 
   get composed() {
-    return this[_attributes].composed;
+    return this.#attributes.composed;
   }
 
   get initialized() {
@@ -403,7 +462,7 @@ class Event {
   }
 
   get timeStamp() {
-    return this[_attributes].timeStamp;
+    return this.#attributes.timeStamp;
   }
 }
 
@@ -451,9 +510,13 @@ ObjectDefineProperty(EventPrototype, SymbolToStringTag, {
 
 // Not spec compliant. The spec defines it as [LegacyUnforgeable]
 // but doing so has a big performance hit
+// denext: configurable, so that an embedder that turned
+// `enableUnforgeableEvents()` on, where every event has the accessor itself,
+// can delete this one.
 ReflectDefineProperty(Event.prototype, "isTrusted", {
   __proto__: null,
   enumerable: true,
+  configurable: true,
   get: isTrusted,
 });
 
@@ -933,33 +996,43 @@ function retarget(a, b) {
 
 // Accessors for non-public data
 
-const eventTargetData = Symbol();
+// denext: an event target's data (its listener lists), by target. It was an
+// own symbol-keyed property of the target, which let any script read, reorder
+// and remove the listeners of another. Extension scripts that need it get it
+// with `getEventTargetData()`.
+const eventTargetData = new SafeWeakMap();
 const kResistStopImmediatePropagation = Symbol(
   "kResistStopImmediatePropagation",
 );
 
+/** The data of an event target, `undefined` until it has had a listener (or
+ * `setEventTargetData()`), and for anything that is not an object. */
+function getEventTargetData(target) {
+  return eventTargetData.get(target);
+}
+
 function setEventTargetData(target) {
-  target[eventTargetData] = getDefaultTargetData();
+  eventTargetData.set(target, getDefaultTargetData());
 }
 
 function getAssignedSlot(target) {
-  return Boolean(target?.[eventTargetData]?.assignedSlot);
+  return Boolean(getEventTargetData(target)?.assignedSlot);
 }
 
 function getHasActivationBehavior(target) {
-  return Boolean(target?.[eventTargetData]?.hasActivationBehavior);
+  return Boolean(getEventTargetData(target)?.hasActivationBehavior);
 }
 
 function getHost(target) {
-  return target?.[eventTargetData]?.host ?? null;
+  return getEventTargetData(target)?.host ?? null;
 }
 
 function getListeners(target) {
-  return target?.[eventTargetData]?.listeners ?? {};
+  return getEventTargetData(target)?.listeners ?? {};
 }
 
 function getMode(target) {
-  return target?.[eventTargetData]?.mode ?? null;
+  return getEventTargetData(target)?.mode ?? null;
 }
 
 function listenerCount(target, type) {
@@ -1034,9 +1107,10 @@ class EventTarget {
       return;
     }
 
-    let data = self[eventTargetData];
+    let data = eventTargetData.get(self);
     if (data === undefined) {
-      data = self[eventTargetData] = getDefaultTargetData();
+      data = getDefaultTargetData();
+      eventTargetData.set(self, data);
     }
     const { listeners } = data;
 
@@ -1095,7 +1169,7 @@ class EventTarget {
       "Failed to execute 'removeEventListener' on 'EventTarget'",
     );
 
-    const data = self[eventTargetData];
+    const data = eventTargetData.get(self);
     if (data === undefined || callback === null || !data.listeners[type]) {
       return;
     }
@@ -1130,6 +1204,16 @@ class EventTarget {
       1,
       "Failed to execute 'dispatchEvent' on 'EventTarget'",
     );
+    // denext: an event's slots are private fields, so what is not an Event
+    // is refused here, by name, instead of failing on a missing slot below.
+    if (!isEvent(event)) {
+      throw new TypeError(
+        "Failed to execute 'dispatchEvent' on 'EventTarget': parameter 1 is not of type 'Event'.",
+      );
+    }
+    if (unforgeableEvents) {
+      prepareScriptDispatch(event);
+    }
 
     // This is an optimization to avoid creating an event listener
     // on each startup.
@@ -1140,7 +1224,7 @@ class EventTarget {
       globalThis_[SymbolFor("Deno.isUnloadDispatched")] = true;
     }
 
-    const data = self[eventTargetData];
+    const data = eventTargetData.get(self);
     if (data === undefined || !data.listeners[event.type]) {
       setTarget(event, this);
       return true;
@@ -1228,7 +1312,7 @@ class ErrorEvent extends Event {
     return inspect(
       getCreateFilteredInspectProxy()({
         object: this,
-        evaluate: this[_attributes] !== undefined,
+        evaluate: isEvent(this),
         keys: [
           ...new SafeArrayIterator(EVENT_PROPS),
           "message",
@@ -1298,7 +1382,7 @@ class CloseEvent extends Event {
     return inspect(
       getCreateFilteredInspectProxy()({
         object: this,
-        evaluate: this[_attributes] !== undefined,
+        evaluate: isEvent(this),
         keys: [
           ...new SafeArrayIterator(EVENT_PROPS),
           "wasClean",
@@ -1462,7 +1546,7 @@ class MessageEvent extends Event {
     return inspect(
       getCreateFilteredInspectProxy()({
         object: this,
-        evaluate: this[_attributes] !== undefined,
+        evaluate: isEvent(this),
         keys: [
           ...new SafeArrayIterator(EVENT_PROPS),
           "data",
@@ -1506,7 +1590,7 @@ class CustomEvent extends Event {
     return inspect(
       getCreateFilteredInspectProxy()({
         object: this,
-        evaluate: this[_attributes] !== undefined,
+        evaluate: isEvent(this),
         keys: [
           ...new SafeArrayIterator(EVENT_PROPS),
           "detail",
@@ -1546,7 +1630,7 @@ class ProgressEvent extends Event {
     return inspect(
       getCreateFilteredInspectProxy()({
         object: this,
-        evaluate: this[_attributes] !== undefined,
+        evaluate: isEvent(this),
         keys: [
           ...new SafeArrayIterator(EVENT_PROPS),
           "lengthComputable",
@@ -1632,7 +1716,9 @@ defineEnumerableProps(PromiseRejectionEvent, [
   "reason",
 ]);
 
-const _eventHandlers = Symbol("eventHandlers");
+// denext: the event handlers (`on*`) of an event target, by target: a map of
+// event name to wrapped handler. It was an own symbol-keyed property.
+const eventHandlers = new SafeWeakMap();
 
 function makeWrappedHandler(handler, isSpecialErrorEventHandler) {
   function wrappedHandler(evt) {
@@ -1682,11 +1768,12 @@ function defineEventHandler(
   ObjectDefineProperty(emitter, `on${name}`, {
     __proto__: null,
     get() {
-      if (!this[_eventHandlers]) {
+      const handlers = eventHandlers.get(this);
+      if (handlers === undefined) {
         return null;
       }
 
-      return MapPrototypeGet(this[_eventHandlers], name)?.handler ?? null;
+      return MapPrototypeGet(handlers, name)?.handler ?? null;
     },
     set(value) {
       // All three Web IDL event handler types are nullable callback functions
@@ -1696,15 +1783,17 @@ function defineEventHandler(
         value = null;
       }
 
-      if (!this[_eventHandlers]) {
-        this[_eventHandlers] = new SafeMap();
+      let handlers = eventHandlers.get(this);
+      if (handlers === undefined) {
+        handlers = new SafeMap();
+        eventHandlers.set(this, handlers);
       }
-      let handlerWrapper = MapPrototypeGet(this[_eventHandlers], name);
+      let handlerWrapper = MapPrototypeGet(handlers, name);
       if (value === null) {
         // Deactivate the event handler by removing its listener, so that
         // setting it again appends a new listener at the end of the list.
         if (handlerWrapper) {
-          MapPrototypeDelete(this[_eventHandlers], name);
+          MapPrototypeDelete(handlers, name);
           this.removeEventListener(name, handlerWrapper);
         }
       } else if (handlerWrapper) {
@@ -1714,7 +1803,7 @@ function defineEventHandler(
           value,
           isSpecialErrorEventHandler,
         );
-        MapPrototypeSet(this[_eventHandlers], name, handlerWrapper);
+        MapPrototypeSet(handlers, name, handlerWrapper);
         this.addEventListener(name, handlerWrapper);
         init?.(this);
       }
@@ -1791,12 +1880,13 @@ return {
   CustomEvent,
   defineEventHandler,
   dispatch,
+  enableUnforgeableEvents,
   ErrorEvent,
   Event,
-  eventSlots,
-  eventTargetData,
+  eventInternals,
   EventTarget,
   EventTargetPrototype,
+  getEventTargetData,
   kResistStopImmediatePropagation,
   listenerCount,
   MessageEvent,

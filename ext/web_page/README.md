@@ -103,8 +103,9 @@ Page JavaScript is hostile. What contains it:
 How page JavaScript is kept from the ops (a):
 
 - Every op is imported by the extension's own modules. The bootstrap
-  (`99_page_main.js`) deletes `globalThis.Deno` and `globalThis.__bootstrap`
-  before it returns, and fails the runtime if they are still there.
+  (`99_page_main.js`, after `04_hardening.js`: see "Events a page cannot forge")
+  deletes `globalThis.Deno` and `globalThis.__bootstrap` before it returns, and
+  fails the runtime if they are still there.
 - `import("ext:…")` from a page is refused by deno_core once the extensions have
   loaded, and there is no module loader for anything else.
 - Every web global is installed eagerly, as a data property. No extension script
@@ -175,6 +176,46 @@ How page JavaScript is kept from the ops (a):
   (`26_fetch.js` wants `deno_telemetry`'s tracing hooks; the bootstrap gives it
   inert ones.) So a page has no `Worker`, `caches` or `navigator.gpu`.
 
+## Events a page cannot forge
+
+`isTrusted` is `true` for what the host does (`click`, `set_value`, the
+lifecycle events) and for what the web extensions dispatch (a `message` of a
+`WebSocket`, an `abort`), and a page script cannot make it `true` for an event
+of its own:
+
+- `deno_web` keeps an event's state (the trust, the flags, the phase, the
+  target, the path) in private fields of `Event`, and the listener lists and
+  `on…` handlers of a target in weak maps of its module. Nothing of it is a
+  property: `Object.getOwnPropertySymbols(event)` is empty, and a script can
+  neither read nor reorder the listeners of another.
+- `04_hardening.js` turns `02_event.js`'s `enableUnforgeableEvents()` on with
+  the bootstrap. From then on `isTrusted` is what the DOM Standard and Chrome
+  have ([LegacyUnforgeable]): an own accessor of every event, not configurable,
+  with no setter, the same getter for all. No own property, class field,
+  subclass getter or prototype can shadow it.
+- `dispatchEvent()` takes only an event (not a `Proxy` of one, nor an object
+  that inherits from one), refuses one that is being dispatched, and a script's
+  dispatch is untrusted: on a node always, and on any other target (the window,
+  a `WebSocket`, a new `EventTarget`) for every event that was dispatched
+  before. So a trusted event a listener received cannot be sent on a second
+  trip, and cannot be retargeted on its way.
+- The same module removes what `deno_web` has for Deno and a browser does not
+  (`Deno.inspect`'s hook on the event interfaces,
+  `EventTarget.prototype.getParent`, `Event.prototype.initialized`), makes the
+  members enumerable and the phase constants values. The page's console
+  therefore prints an event as a plain object.
+
+What is left: the web extensions dispatch their trusted events by calling the
+target's `dispatchEvent`, which a page can replace (on the object or on
+`EventTarget.prototype`). A page that does receives such an event before its
+first dispatch and can dispatch it once, still trusted, at a target that is not
+a node (the window included). It chooses neither the interface nor the type
+(`abort`, `message`, `open`, `close`, `error`, and the type of a server-sent
+event), and no node listener sees it trusted. No decision of the host rests on
+`isTrusted`: what a click does is the same for a script's click and the host's
+`click()`, and a label only passes the flag of its click on to the click it
+sends its control.
+
 ## Node handles
 
 The tree lives in Rust. A JavaScript wrapper holds only its node's id, the two
@@ -236,17 +277,16 @@ Not yet:
 - Event handler content attributes run without the HTML scope chain (`this` and
   `event` only). Form association by the `form` attribute works; `<base href>`
   is ignored.
-- Fingerprint surface is not Chrome's: `deno_web`'s `Event` and `EventTarget`
-  carry own symbol properties and a few non-standard members, unknown HTML
-  elements are plain `HTMLElement`s, `navigator` is minimal.
-- **`isTrusted` can be forged.** `deno_web` keeps an event's trust in an own
-  symbol property of the event (`Object.getOwnPropertySymbols(event)` finds it),
-  and `02_event.js` offers no other place for it: a page script can make its own
-  event read `isTrusted === true` to another script of the page. No decision of
-  the host rests on `isTrusted`: what a click does is the same for a script's
-  click and the host's `click()`, and a label only passes the flag of its click
-  on to the click it sends its control. Closing it takes a change to
-  `deno_web`'s `Event` (trust in a slot scripts cannot reach).
+- Fingerprint surface is not Chrome's. `Event`, `EventTarget` and `CustomEvent`
+  are (below), but: every `deno_web` object keeps its Web IDL brand, and most
+  keep their state, in own symbol properties (an `EventTarget` has the brand, an
+  `AbortSignal` and a `FileReader` more); the other interfaces still have
+  `Deno.inspect`'s hook on their prototypes (the `RTC…Event`s among them);
+  `MessageEvent`'s `data`, `origin`, `lastEventId` and `ports` are own data
+  properties; there is no `initEvent()`; `Node.prototype` has a `dispatchEvent`
+  of its own; a getter of an event called on something else throws V8's
+  private-member `TypeError`, not `Illegal invocation`; unknown HTML elements
+  are plain `HTMLElement`s; `navigator` is minimal.
 - No same-origin policy: `fetch()` and `WebSocket` do no CORS or origin check
   and send no cookies. The network boundary is `net_allow` and the deny list.
 - Dialogs have no user: `alert()` returns, `confirm()` is `false`, `prompt()` is
@@ -261,5 +301,9 @@ trip and Rust-side visibility, the op allowlist and the disabled ops, no `Deno`
 constructor), an `RTCPeerConnection` offer and WebRTC Identity's
 `NotSupportedError`, `OffscreenCanvas` without a GPU and `createImageBitmap()`,
 timers and the watchdog, click default actions and form submission,
-`DOMException`s, event propagation and lifecycle, uncaught errors, JSON
-evaluation with and without `await`, origin-keyed storage, the heap limit.
+`DOMException`s, event propagation and lifecycle, `isTrusted` against forgery
+(own symbols, `defineProperty` on the event and the prototype, a class field, a
+subclass, `Reflect.construct`, `setPrototypeOf`, an heir, a `Proxy`, a
+structured clone, a second dispatch, a dispatch on the way), the descriptors and
+member lists of `Event` and `EventTarget`, uncaught errors, JSON evaluation with
+and without `await`, origin-keyed storage, the heap limit.
