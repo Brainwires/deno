@@ -27,7 +27,11 @@ const { setLocationHref } = core.loadExtScript("ext:deno_web/12_location.js");
 const { structuredClone } = core.loadExtScript(
   "ext:deno_web/02_structured_clone.js",
 );
-const timers = core.loadExtScript("ext:deno_web/02_timers.js");
+// Called unbound: deno_web's timers refuse a `this` other than the global
+// ("Illegal invocation"), and a namespace object is one.
+const { setTimeout, clearTimeout } = core.loadExtScript(
+  "ext:deno_web/02_timers.js",
+);
 const { performance } = core.loadExtScript("ext:deno_web/15_performance.js");
 
 function illegalInvocation() {
@@ -284,11 +288,11 @@ function requestAnimationFrame(callback) {
       "Failed to execute 'requestAnimationFrame' on 'Window': parameter 1 is not of type 'Function'.",
     );
   }
-  return timers.setTimeout(() => callback(performance.now()), 16);
+  return setTimeout(() => callback(performance.now()), 16);
 }
 
 function cancelAnimationFrame(handle) {
-  timers.clearTimeout(handle);
+  clearTimeout(handle);
 }
 
 // Dialogs have no user to answer them: `alert` returns, `confirm` is

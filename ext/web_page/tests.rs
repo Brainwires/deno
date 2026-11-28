@@ -345,6 +345,8 @@ async fn timers_run_and_loops_can_be_stopped() {
     r#"globalThis.fired = [];
       setTimeout(() => fired.push("timeout"), 10);
       Promise.resolve().then(() => fired.push("microtask"));
+      requestAnimationFrame((time) => fired.push(`frame:${typeof time}`));
+      cancelAnimationFrame(requestAnimationFrame(() => fired.push("canceled")));
       fired.push("script");"#,
   );
   // Microtasks ran when the script ended; the timer needs the event loop.
@@ -355,7 +357,7 @@ async fn timers_run_and_loops_can_be_stopped() {
   );
   assert_eq!(
     eval(&mut page, "fired"),
-    json!(["script", "microtask", "timeout"])
+    json!(["script", "microtask", "timeout", "frame:number"])
   );
 
   // An interval never goes idle: the budget ends the wait.
