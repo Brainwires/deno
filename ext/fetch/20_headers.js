@@ -2,6 +2,7 @@
 
 (function () {
 const { core, primordials } = __bootstrap;
+const { op_fetch_web_header_blocked, op_fetch_web_mode } = core.ops;
 const {
   ArrayFrom,
   ArrayIsArray,
@@ -158,6 +159,57 @@ function checkHeaderNameForHttpTokenCodePoint(name) {
   return valid;
 }
 
+// denext: an embedder's web-origin mode (`cors.rs`). `undefined` until the
+// runtime was asked, then `false` in Deno and everywhere else no embedder
+// opted in: the guards of `Headers` (and the checks of `23_request.js` and
+// `26_fetch.js`) then cost one comparison.
+let webMode;
+
+/**
+ * Whether this runtime's fetch follows the Fetch Standard's origin rules:
+ * an embedder that runs web pages put a `deno_fetch::EmbedderWebOrigin` in
+ * the op state.
+ * @returns {boolean}
+ */
+function webOriginMode() {
+  if (webMode === undefined) {
+    webMode = op_fetch_web_mode !== undefined && op_fetch_web_mode() === true;
+  }
+  return webMode;
+}
+
+const WEB_HEADERS_APPEND = 0;
+const WEB_HEADERS_SET = 1;
+const WEB_HEADERS_DELETE = 2;
+
+/**
+ * In web-origin mode, whether `headers`'s guard makes it ignore an
+ * operation (https://fetch.spec.whatwg.org/#headers-validate and the
+ * "request-no-cors" steps of append, set and delete): a forbidden request
+ * header on a request's headers, a header that is not no-CORS-safelisted on
+ * a "no-cors" request's, `Set-Cookie` on a response's.
+ * @param {Headers} headers
+ * @param {string} name
+ * @param {string} value
+ * @param {number} operation
+ * @returns {boolean}
+ */
+function webHeaderBlocked(headers, name, value, operation) {
+  if (!webOriginMode()) return false;
+  const guard = headers[_guard];
+  if (
+    guard !== "request" && guard !== "request-no-cors" && guard !== "response"
+  ) {
+    return false;
+  }
+  if (guard === "request-no-cors" && operation === WEB_HEADERS_APPEND) {
+    // The value the header would have with this one appended.
+    const existing = getHeader(headerListFromHeaders(headers), name);
+    if (existing !== null) value = existing + "\x2C\x20" + value;
+  }
+  return op_fetch_web_header_blocked(guard, operation, name, value);
+}
+
 /**
  * https://fetch.spec.whatwg.org/#concept-headers-append
  * @param {Headers} headers
@@ -179,6 +231,13 @@ function appendHeader(headers, name, value) {
   // 3.
   if (headers[_guard] == "immutable") {
     throw new TypeError("Cannot change header: headers are immutable");
+  }
+  // denext: 4. to 6., the guards a web page's headers have
+  if (
+    webMode !== false &&
+    webHeaderBlocked(headers, name, value, WEB_HEADERS_APPEND)
+  ) {
+    return;
   }
 
   // 7.
@@ -466,6 +525,13 @@ class Headers {
     if (this[_guard] == "immutable") {
       throw new TypeError("Cannot change headers: headers are immutable");
     }
+    // denext: the guards a web page's headers have
+    if (
+      webMode !== false &&
+      webHeaderBlocked(this, name, "", WEB_HEADERS_DELETE)
+    ) {
+      return;
+    }
 
     const list = headerListFromHeaders(this);
     const lowerNames = ensureLowerNames(this);
@@ -597,6 +663,13 @@ class Headers {
 
     if (this[_guard] == "immutable") {
       throw new TypeError("Cannot change headers: headers are immutable");
+    }
+    // denext: the guards a web page's headers have
+    if (
+      webMode !== false &&
+      webHeaderBlocked(this, name, value, WEB_HEADERS_SET)
+    ) {
+      return;
     }
 
     const list = headerListFromHeaders(this);
@@ -787,5 +860,6 @@ return {
   headersFromHeaderList,
   headersFromHeaderListLazy,
   headersFromHeaderListLazyTarget,
+  webOriginMode,
 };
 })();

@@ -114,6 +114,7 @@ deno_core::extension!(
     client: deno_fetch::Client,
     deny_addresses: Option<Arc<AddressDenyList>>,
     ice: deno_webrtc::EmbedderIceOptions,
+    web_origin: deno_fetch::EmbedderWebOrigin,
   },
   // Takes the implementation of the ops a page must not have away
   // (`op_policy.rs`). It sees every op of the runtime, not only this
@@ -134,5 +135,11 @@ deno_core::extension!(
       state.put(EmbedderDenyList(list));
     }
     state.put(options.ice);
+    // The page's origin: with it in the state, `deno_fetch` follows the
+    // Fetch Standard's origin rules (request modes, forbidden headers,
+    // `Origin` and `Referer`, CORS and its preflight, response tainting)
+    // and `deno_websocket` sends the origin with its handshakes. The
+    // bootstrap fails the runtime if `fetch` is not in that mode.
+    state.put(options.web_origin);
   },
 );

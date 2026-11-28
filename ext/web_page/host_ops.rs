@@ -255,6 +255,14 @@ fn push_console(host: &mut PageHost, message: &str, level: ConsoleLevel) {
   host.console.push_back(ConsoleMessage { level, text });
 }
 
+/// Where `deno_fetch` reports a request the same-origin policy refused or a
+/// response it withheld (`deno_fetch::EmbedderWebOrigin`'s reporter): the
+/// page's console, as an error, which is where a browser writes it. The
+/// page only gets `TypeError: Failed to fetch`, and cannot read its console.
+pub fn report_blocked_request(state: &mut OpState, message: &str) {
+  push_console(state.borrow_mut::<PageHost>(), message, ConsoleLevel::Error);
+}
+
 /// What `op_print` is in a page runtime (`op_policy.rs`): deno_core's own
 /// writes to the process's stdout or stderr, this one to the page's console.
 /// It is not registered under its own name.

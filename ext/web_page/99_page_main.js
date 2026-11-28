@@ -119,6 +119,13 @@ const formData = core.loadExtScript("ext:deno_fetch/21_formdata.js");
 const request = core.loadExtScript("ext:deno_fetch/23_request.js");
 const response = core.loadExtScript("ext:deno_fetch/23_response.js");
 const fetch = core.loadExtScript("ext:deno_fetch/26_fetch.js");
+// The same-origin policy of the page's requests is `deno_fetch`'s
+// web-origin mode, which it enters when the op state has the page's origin
+// (`lib.rs` puts it there). Checked here, for every page: a fetch that
+// answered as Deno's does would hand a page every response it can reach.
+if (fetch.webOriginMode() !== true) {
+  throw new TypeError("deno_web_page: fetch is not in web-origin mode");
+}
 const eventSource = core.loadExtScript("ext:deno_fetch/27_eventsource.js");
 const webStorage = core.loadExtScript("ext:deno_webstorage/01_webstorage.js");
 const crypto = core.loadExtScript("ext:deno_crypto/00_crypto.js");
